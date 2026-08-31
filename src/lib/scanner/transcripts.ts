@@ -161,7 +161,11 @@ export function assignTranscriptPids(entries: FileEntry[]): void {
   }
   if (unheld.length === 0) return;
 
-  const procs = agentProcesses().filter((proc) => !claimed.has(proc.pid));
+  /* The process inventory is memoized across board polls. Revalidate each pid
+     before projecting it: a process can exit inside that memo's lifetime, and
+     an argv/session match from the stale row must never render `running`
+     (#1296). */
+  const procs = agentProcesses().filter((proc) => !claimed.has(proc.pid) && pidAlive(proc.pid));
 
   const bySession = new Map<string, AgentProcess[]>();
   for (const proc of procs) {

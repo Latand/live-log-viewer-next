@@ -1520,6 +1520,51 @@ test("SQLite adoption keeps structured-host writer epochs fenced across restarts
   )).toMatchObject({ status: "idle", claimOwner: null, structuredHost: { eventCursor: 5 } });
 });
 
+test("SQLite preserves the release hand-off epoch across Viewer processes", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-sqlite-release-handoff-"));
+  const filename = path.join(directory, "agent-registry.json");
+  const key = { engine: "codex" as const, sessionId: "sqlite-release-handoff" };
+  const engine = { pid: 52, startIdentity: "engine:52" };
+  const first = new AgentRegistry(filename, () => true, undefined, { sqliteMode: "sqlite" });
+  first.upsert({
+    key,
+    artifactPath: "/sessions/sqlite-release-handoff.jsonl",
+    cwd: "/repo",
+    accountId: "work",
+    status: "unhosted",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "stdio:released",
+      process: null,
+      eventCursor: 0,
+      protocolVersion: "1",
+      writerClaimEpoch: 0,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  const claim = first.claimStructuredHost(key, { pid: 51, startIdentity: "viewer:51" }, { allowUnhosted: true });
+  if (!claim?.structuredHost || !claim.claimOwner) throw new Error("expected the incumbent writer claim");
+  first.setStructuredHostClaimed(key, {
+    ...claim.structuredHost,
+    endpoint: "stdio:engine",
+    process: engine,
+  }, "live", claim.claimOwner, claim.claimEpoch);
+  expect(first.markStructuredHostHandoff(key, engine)).toBe(true);
+
+  const restarted = new AgentRegistry(filename, () => true, undefined, { sqliteMode: "sqlite" });
+  expect(restarted.readOnlySnapshot().entries["codex:sqlite-release-handoff"]).toMatchObject({
+    pendingAction: "handoff",
+    structuredHost: { process: engine, releaseHandoffClaimEpoch: claim.claimEpoch },
+  });
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
 test("production-sized SQLite registry bounds ten-lane writes, concurrent reads, and JSON rewrites", async () => {
   const PRODUCTION_BYTES = 14_660_822;
   async function measure(): Promise<{

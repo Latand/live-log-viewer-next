@@ -66,6 +66,9 @@ export interface HostProcessLivenessEvidence {
   /** CPU (user + system) this process has consumed since it launched, in ms.
       Null when the platform cannot report it — never read as zero. */
   cpuMs: number | null;
+  /** CPU consumed over a recent observation window whose transcript write clock
+      stayed unchanged. This separates one-time resume cost from current work. */
+  cpuProgress: { consumedMs: number; observedMs: number } | null;
   /** Wall clock of the process launch, derived from its start-time token. */
   launchedAt: number | null;
 }
@@ -99,6 +102,12 @@ export interface TurnLivenessDecision {
 /** A host younger than this has not had time to prove anything: a resume reads
     its transcript and starts its CLI before it writes a byte. */
 export const LIVENESS_OBSERVATION_WINDOW_MS = 90_000;
+
+/** Ordinary board polls establish recent CPU progress. The incident was
+    measured over 100 seconds; a 60-second floor detects the same flat process
+    within that observation while retaining several scheduler samples on the
+    normal ten-second cadence. */
+export const LIVENESS_CPU_PROGRESS_WINDOW_MS = 60_000;
 
 /** CPU per minute of life above which a host that has written nothing is still
     doing something. The severed specimen in #1281 had burned 4.7 s in 34
@@ -163,6 +172,13 @@ export interface HostProcessEvidenceDependencies {
   processCpuMs?: (pid: number) => number | null;
   now?: () => number;
   uptimeSeconds?: () => number;
+  observeCpuProgress?: (input: {
+    process: ProcessIdentity;
+    observedIdentity: string;
+    cpuMs: number;
+    transcriptLastWriteAt: number | null;
+    now: number;
+  }) => HostProcessLivenessEvidence["cpuProgress"];
 }
 
 /** Everything the kernel can say about the process a registry row claims. */
@@ -171,7 +187,7 @@ export function readHostProcessEvidence(
   dependencies: HostProcessEvidenceDependencies = {},
 ): HostProcessLivenessEvidence {
   if (!expected || !Number.isInteger(expected.pid) || expected.pid <= 0) {
-    return { expected: null, present: false, observedIdentity: null, cpuMs: null, launchedAt: null };
+    return { expected: null, present: false, observedIdentity: null, cpuMs: null, cpuProgress: null, launchedAt: null };
   }
   const pidAlive = dependencies.pidAlive ?? ((pid: number) => procBackend.pidAlive(pid));
   const identityOf = dependencies.processIdentity ?? ((pid: number) => procBackend.processIdentity(pid));
@@ -189,8 +205,71 @@ export function readHostProcessEvidence(
     present,
     observedIdentity,
     cpuMs: present ? cpuOf(expected.pid) : null,
+    cpuProgress: null,
     launchedAt,
   };
+}
+
+interface CpuObservation {
+  at: number;
+  cpuMs: number;
+  transcriptLastWriteAt: number | null;
+}
+
+type ProcessWithLivenessStore = NodeJS.Process & {
+  __llvTurnLivenessCpuObservations?: Map<string, CpuObservation[]>;
+};
+
+const CPU_OBSERVATION_PROCESS_CAP = 2_048;
+const CPU_OBSERVATION_SAMPLES_PER_PROCESS = 32;
+const CPU_OBSERVATION_MIN_SAMPLE_INTERVAL_MS = 5_000;
+
+function cpuObservationStore(): Map<string, CpuObservation[]> {
+  const shared = process as ProcessWithLivenessStore;
+  shared.__llvTurnLivenessCpuObservations ??= new Map();
+  return shared.__llvTurnLivenessCpuObservations;
+}
+
+/** Recent CPU movement for one identity while the transcript itself stayed
+    unchanged. Stored on the process object so separate Next server bundles in
+    the same Viewer process share one observation history. */
+export function observeHostCpuProgress(input: {
+  process: ProcessIdentity;
+  observedIdentity: string;
+  cpuMs: number;
+  transcriptLastWriteAt: number | null;
+  now: number;
+}): HostProcessLivenessEvidence["cpuProgress"] {
+  const key = `${input.process.pid}:${input.observedIdentity}`;
+  const store = cpuObservationStore();
+  let samples = store.get(key);
+  const previous = samples?.at(-1);
+  if (!samples
+    || !previous
+    || input.now < previous.at
+    || input.cpuMs < previous.cpuMs
+    || input.transcriptLastWriteAt !== previous.transcriptLastWriteAt) {
+    samples = [{ at: input.now, cpuMs: input.cpuMs, transcriptLastWriteAt: input.transcriptLastWriteAt }];
+    if (!store.has(key) && store.size >= CPU_OBSERVATION_PROCESS_CAP) {
+      const oldest = store.keys().next().value;
+      if (oldest !== undefined) store.delete(oldest);
+    }
+    store.set(key, samples);
+    return null;
+  }
+  if (input.now - previous.at >= CPU_OBSERVATION_MIN_SAMPLE_INTERVAL_MS) {
+    samples.push({ at: input.now, cpuMs: input.cpuMs, transcriptLastWriteAt: input.transcriptLastWriteAt });
+  }
+  while (samples.length > 2 && input.now - samples[1]!.at >= LIVENESS_CPU_PROGRESS_WINDOW_MS) samples.shift();
+  while (samples.length > CPU_OBSERVATION_SAMPLES_PER_PROCESS) samples.shift();
+  const baseline = samples[0]!;
+  const observedMs = input.now - baseline.at;
+  if (observedMs < LIVENESS_CPU_PROGRESS_WINDOW_MS) return null;
+  return { consumedMs: Math.max(0, input.cpuMs - baseline.cpuMs), observedMs };
+}
+
+export function resetHostCpuProgressForTests(): void {
+  delete (process as ProcessWithLivenessStore).__llvTurnLivenessCpuObservations;
 }
 
 type RecordLike = Record<string, unknown>;
@@ -398,6 +477,27 @@ export function decideTurnLiveness(evidence: TurnLivenessEvidence): TurnLiveness
      the top of this function answers before any of this runs. */
   const inherited = `it has written nothing since its own launch at ${when(host.launchedAt)};`
     + ` the transcript's last event is ${transcript.kind ?? "unreadable"} at ${when(transcript.lastEventAt)}, before that launch`;
+  const cpuProgress = host.cpuProgress;
+  if (cpuProgress !== null) {
+    const cpuPerMinute = cpuProgress.consumedMs / elapsedMinutes(cpuProgress.observedMs);
+    if (cpuPerMinute >= LIVENESS_WORKING_CPU_MS_PER_MINUTE) {
+      return {
+        ...context,
+        state: "working",
+        reason: `this host consumed ${Math.round(cpuProgress.consumedMs)}ms of CPU during the latest`
+          + ` ${Math.round(cpuProgress.observedMs / 1_000)}s with no transcript write`
+          + ` (${Math.round(cpuPerMinute)}ms per minute)`,
+        since: null,
+      };
+    }
+    return {
+      ...context,
+      state: "severed",
+      reason: `${inherited}, and it consumed only ${Math.round(cpuProgress.consumedMs)}ms of CPU during the latest`
+        + ` ${Math.round(cpuProgress.observedMs / 1_000)}s (${Math.round(cpuPerMinute)}ms per minute)`,
+      since: host.launchedAt,
+    };
+  }
   if (host.cpuMs !== null) {
     const cpuPerMinute = host.cpuMs / elapsedMinutes(ageMs);
     if (cpuPerMinute >= LIVENESS_WORKING_CPU_MS_PER_MINUTE) {
@@ -449,6 +549,14 @@ export async function readTurnLiveness(
   input: TurnLivenessInput,
   dependencies: TurnLivenessDependencies = {},
 ): Promise<TurnLivenessDecision> {
+  const evidence = await readTurnLivenessEvidence(input, dependencies);
+  return decideTurnLiveness(evidence);
+}
+
+export async function readTurnLivenessEvidence(
+  input: TurnLivenessInput,
+  dependencies: TurnLivenessDependencies = {},
+): Promise<TurnLivenessEvidence> {
   const now = (dependencies.now ?? Date.now)();
   /* Whatever this read says is the whole of the transcript evidence. A tail that
      could not be parsed leaves the turn `unknown`, and `unknown` is the answer —
@@ -461,12 +569,26 @@ export async function readTurnLiveness(
     input.engine,
     input.transcriptPath,
   );
-  return decideTurnLiveness({
+  const host = readHostProcessEvidence(input.process, dependencies);
+  if (host.expected
+    && host.present
+    && host.observedIdentity !== null
+    && host.observedIdentity === host.expected.startIdentity
+    && host.cpuMs !== null) {
+    host.cpuProgress = (dependencies.observeCpuProgress ?? observeHostCpuProgress)({
+      process: host.expected,
+      observedIdentity: host.observedIdentity,
+      cpuMs: host.cpuMs,
+      transcriptLastWriteAt: transcript.lastWriteAt,
+      now,
+    });
+  }
+  return {
     now,
     transcriptTail: transcript,
-    host: readHostProcessEvidence(input.process, dependencies),
+    host,
     delivery: { outstandingSince: input.deliveryOutstandingSince ?? null },
-  });
+  };
 }
 
 /** When a delivery started waiting on this conversation, from the durable
@@ -490,6 +612,7 @@ export interface ConversationTurnLiveness extends TurnLivenessDecision {
   key: SessionKey;
   transcriptPath: string;
   process: ProcessIdentity | null;
+  hostEvidence: HostProcessLivenessEvidence;
 }
 
 /**
@@ -510,16 +633,18 @@ export async function conversationTurnLiveness(
   const key = { engine: conversation.engine, sessionId: generation.id } as const;
   const entry = snapshot.entries[sessionKeyId(key)];
   if (!entry?.structuredHost) return null;
-  const decision = await readTurnLiveness({
+  const evidence = await readTurnLivenessEvidence({
     engine: conversation.engine,
     transcriptPath: generation.path,
     process: entry.structuredHost.process ?? null,
     deliveryOutstandingSince: outstandingDeliverySince(snapshot, conversation.id),
   }, dependencies);
+  const decision = decideTurnLiveness(evidence);
   return {
     ...decision,
     key,
     transcriptPath: generation.path,
     process: entry.structuredHost.process ?? null,
+    hostEvidence: evidence.host,
   };
 }

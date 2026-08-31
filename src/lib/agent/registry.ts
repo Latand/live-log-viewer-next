@@ -104,6 +104,9 @@ export interface StructuredHostColumns {
   activeTurnRef: string | null;
   pendingAttention: string[];
   activeFlags: string[];
+  /** Writer epoch that announced a release hand-off. Incumbent state writes at
+      this epoch retain the marker; only a later claimant can complete it. */
+  releaseHandoffClaimEpoch?: number;
 }
 
 const STRUCTURED_CLAIM_PREFIX = "structured-host:";
@@ -1316,6 +1319,9 @@ function normalizeStructuredHost(value: unknown): StructuredHostColumns | null {
     activeFlags: Array.isArray(host.activeFlags)
       ? host.activeFlags.filter((item): item is string => typeof item === "string")
       : [],
+    ...(Number.isSafeInteger(host.releaseHandoffClaimEpoch) && (host.releaseHandoffClaimEpoch ?? -1) >= 0
+      ? { releaseHandoffClaimEpoch: host.releaseHandoffClaimEpoch }
+      : {}),
   };
 }
 
@@ -5138,23 +5144,66 @@ export class AgentRegistry {
         || entry.claimOwner !== claimOwner
         || entry.claimEpoch !== claimEpoch
         || entry.structuredHost.writerClaimEpoch !== claimEpoch) return null;
-      const normalizedHost = normalizeStructuredHost(structuredHost);
+      let normalizedHost = normalizeStructuredHost(structuredHost);
+      const handoffClaimEpoch = entry.structuredHost.releaseHandoffClaimEpoch;
+      const completesHandoff = entry.pendingAction === "handoff"
+        && Boolean(normalizedHost?.process)
+        && handoffClaimEpoch !== undefined
+        && claimEpoch > handoffClaimEpoch;
+      if (normalizedHost && completesHandoff) {
+        const { releaseHandoffClaimEpoch: _completedHandoff, ...activeHost } = normalizedHost;
+        normalizedHost = activeHost;
+      } else if (normalizedHost && entry.pendingAction === "handoff" && handoffClaimEpoch !== undefined) {
+        normalizedHost = { ...normalizedHost, releaseHandoffClaimEpoch: handoffClaimEpoch };
+      }
       if (!releaseClaim
         && entry.status === status
+        && !completesHandoff
         && isDeepStrictEqual(normalizeStructuredHost(entry.structuredHost), normalizedHost)) return clone(entry);
       const replacement = {
         ...entry,
         structuredHost: normalizedHost,
         status,
+        ...(completesHandoff ? { pendingAction: null } : {}),
       };
       const changedHostPaths = activeHostPathsChangedByEntry(file, keyId, replacement);
       const readinessBefore = migrationReadinessSignature(file, key.engine, changedHostPaths);
       entry.structuredHost = replacement.structuredHost;
       entry.status = status;
+      entry.pendingAction = replacement.pendingAction;
       if (releaseClaim) entry.claimOwner = null;
       entry.updatedAt = now();
       advanceMigrationScopeRevision(file, key.engine, readinessBefore, changedHostPaths);
       return clone(entry);
+    });
+  }
+
+  /** Records a release handoff for one exact active engine. The process fence
+      prevents an old registration from appointing a replacement that took the
+      same session key concurrently. */
+  markStructuredHostHandoff(key: SessionKey, expected: Readonly<ProcessIdentity>): boolean {
+    return this.mutate((file) => {
+      const entry = file.entries[sessionKeyId(key)];
+      const structuredHost = entry?.structuredHost;
+      const current = structuredHost?.process;
+      if (!entry?.claimOwner || !structuredHost || !current || expected.startIdentity === null
+        || current.pid !== expected.pid
+        || current.startIdentity !== expected.startIdentity) return false;
+      const replacement = {
+        ...entry,
+        pendingAction: "handoff" as const,
+        structuredHost: {
+          ...structuredHost,
+          releaseHandoffClaimEpoch: entry.claimEpoch,
+        },
+      };
+      const changedHostPaths = activeHostPathsChangedByEntry(file, sessionKeyId(key), replacement);
+      const readinessBefore = migrationReadinessSignature(file, key.engine, changedHostPaths);
+      entry.pendingAction = replacement.pendingAction;
+      entry.structuredHost = replacement.structuredHost;
+      entry.updatedAt = now();
+      advanceMigrationScopeRevision(file, key.engine, readinessBefore, changedHostPaths);
+      return true;
     });
   }
 

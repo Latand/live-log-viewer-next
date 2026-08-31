@@ -2436,6 +2436,31 @@ test("a stage whose host is proven dead becomes retryable without closing the pi
   expect(loadPipelines()[0]!.state).not.toBe("needs_decision");
 });
 
+test("a stage stays non-retryable while automatic host retirement is unconfirmed (#1296)", async () => {
+  const h = harness();
+  await runningStructuredStage(h);
+  h.setConversationActive(false);
+  const unavailableSince = h.ports.now();
+  h.ports.conversationHostUnavailableSince = async () => unavailableSince;
+  h.ports.stopStageAgent = async () => ({
+    outcome: "unconfirmed",
+    operationId: "fixture-kill",
+    detail: "fixture termination remains in flight",
+  });
+  h.advanceWallClock(5 * 60_000);
+
+  await tickPipelines([], h.ports);
+
+  const current = loadPipelines()[0]!;
+  expect(current).toMatchObject({
+    state: "running",
+    stateDetail: "automatic recovery is waiting for the unavailable stage host to terminate",
+  });
+  expect(current.runs[0]!.attempts[0]).toMatchObject({ state: "running", completedAt: null });
+  const retry = await patchPipeline(current.id, { action: "retry-stage" }, h.ports);
+  expect(retry).toMatchObject({ error: "pipeline does not have a stage awaiting retry", status: 409 });
+});
+
 test("an exhausted false park ingests its live host's late verdict without a duplicate attempt (#1109)", async () => {
   const h = harness();
   await runningStructuredStage(h);
