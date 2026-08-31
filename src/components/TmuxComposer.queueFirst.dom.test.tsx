@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, test } from "bun:test";
 import { act } from "react";
 import { installActEnv } from "@/test-helpers/actEnv";
 import { Window } from "happy-dom";
@@ -6,6 +6,7 @@ import { createRoot, type Root } from "react-dom/client";
 
 import type { FileEntry } from "@/lib/types";
 import { setLocale } from "@/lib/i18n";
+import { setRuntimeUiEnabledForTests } from "@/hooks/runtimeBus";
 
 import { appendComposerDraft, TmuxComposer } from "./TmuxComposer";
 import { readOutbox, resetOutboxForTests } from "./conversation/outbox";
@@ -48,7 +49,12 @@ Object.assign(globalThis, {
 
 const realFetch = globalThis.fetch;
 
+beforeEach(() => {
+  setRuntimeUiEnabledForTests(false);
+});
+
 afterEach(() => {
+  setRuntimeUiEnabledForTests(null);
   setLocale("en");
   globalThis.fetch = realFetch;
   document.body.replaceChildren();

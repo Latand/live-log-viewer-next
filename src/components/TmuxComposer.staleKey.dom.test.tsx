@@ -11,7 +11,7 @@
  * ITS OWN text; a retry of a failed submission replays the original key and
  * bytes exactly; an edited resend is a new message under a new key.
  */
-import { afterAll, afterEach, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, expect, test } from "bun:test";
 import { act } from "react";
 import { installActEnv } from "@/test-helpers/actEnv";
 import { Window } from "happy-dom";
@@ -20,6 +20,7 @@ import { createRoot, type Root } from "react-dom/client";
 import type { RuntimeSessionView } from "@/hooks/useRuntime";
 import type { FileEntry } from "@/lib/types";
 import { setLocale } from "@/lib/i18n";
+import { installTmuxComposerRuntimeForTests, resetTmuxComposerRuntimeForTests } from "@/test-helpers/tmuxComposerRuntime";
 
 const dom = new Window();
 installActEnv();
@@ -64,34 +65,20 @@ const structuredView: RuntimeSessionView = {
   structuredControlsEnabled: true,
 } as unknown as RuntimeSessionView;
 
-const actualRuntimeHooks = await import("@/hooks/useRuntime");
-/* Capture the real implementations BEFORE mock.module rewires the registry
-   (live bindings), and delegate for every other conversation so this file's
-   structured view never leaks into later-loaded suites. */
-const realUseRuntimeSession = actualRuntimeHooks.useRuntimeSession;
-const realUseRuntimeReceiptsForArtifact = actualRuntimeHooks.useRuntimeReceiptsForArtifact;
-mock.module("@/hooks/useRuntime", () => ({
-  ...actualRuntimeHooks,
-  useRuntimeSession: (conversationId: string | null) => {
-    const real = realUseRuntimeSession(conversationId);
-    return conversationId === "conv-stale-key" ? structuredView : real;
-  },
-  useRuntimeReceiptsForArtifact: (path: string | null, conversationId?: string | null) => {
-    const real = realUseRuntimeReceiptsForArtifact(path, conversationId);
-    return path === "/codex-stale-key.jsonl" || conversationId === "conv-stale-key" ? [] : real;
-  },
-  refreshRuntime: () => Promise.resolve(true),
-}));
-afterAll(() => {
-  mock.module("@/hooks/useRuntime", () => actualRuntimeHooks);
-});
-
-const { TmuxComposer } = await import("./TmuxComposer");
-const { readOutbox, resetOutboxForTests, retryOutbox } = await import("./conversation/outbox");
+import { TmuxComposer } from "./TmuxComposer";
+import { readOutbox, resetOutboxForTests, retryOutbox } from "./conversation/outbox";
 
 const realFetch = globalThis.fetch;
 
+beforeEach(() => {
+  installTmuxComposerRuntimeForTests({
+    useRuntimeView: (candidate) => candidate.conversationId === "conv-stale-key" ? structuredView : null,
+    refreshRuntime: async () => true,
+  });
+});
+
 afterEach(() => {
+  resetTmuxComposerRuntimeForTests();
   setLocale("en");
   globalThis.fetch = realFetch;
   document.body.replaceChildren();

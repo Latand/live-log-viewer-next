@@ -2,6 +2,28 @@ export const COMPOSER_ADMISSION_DEADLINE_MS = 15_000;
 export const COMPOSER_RECEIPT_RECONCILIATION_MS = 30_000;
 export const COMPOSER_RECEIPT_POLL_INTERVAL_MS = 1_000;
 
+export interface ComposerAdmissionTiming {
+  admissionDeadlineMs: number;
+  receiptReconciliationMs: number;
+  receiptPollIntervalMs: number;
+}
+
+const PRODUCTION_TIMING: ComposerAdmissionTiming = {
+  admissionDeadlineMs: COMPOSER_ADMISSION_DEADLINE_MS,
+  receiptReconciliationMs: COMPOSER_RECEIPT_RECONCILIATION_MS,
+  receiptPollIntervalMs: COMPOSER_RECEIPT_POLL_INTERVAL_MS,
+};
+
+let testTiming: ComposerAdmissionTiming | null = null;
+
+export function composerAdmissionTiming(): ComposerAdmissionTiming {
+  return testTiming ?? PRODUCTION_TIMING;
+}
+
+export function setComposerAdmissionTimingForTests(timing: ComposerAdmissionTiming | null): void {
+  testTiming = timing;
+}
+
 export class ComposerAdmissionTimeoutError extends Error {
   constructor() {
     super("composer admission timed out");

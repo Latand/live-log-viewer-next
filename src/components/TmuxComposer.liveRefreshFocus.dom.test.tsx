@@ -29,13 +29,13 @@
  */
 import { afterAll, afterEach, beforeEach, expect, mock, test } from "bun:test";
 import { Window } from "happy-dom";
-import { useSyncExternalStore } from "react";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 
 import { emptyStore } from "@/components/runtime/runtimeModel";
 import type { BranchGroup } from "@/components/projectModel";
 import type { RuntimeSessionView } from "@/hooks/useRuntime";
+import { setRuntimeBusForTests, type RuntimeBus, type RuntimeBusState } from "@/hooks/runtimeBus";
 import { setLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
@@ -92,10 +92,22 @@ let mobileViewport = false;
 const structuredView: RuntimeSessionView = {
   session: {
     conversationId: "conv-refresh",
+    sessionKey: { engine: "codex", sessionId: "conv-refresh" },
     hostKind: "codex-app-server",
     host: "hosted",
+    turn: "idle",
+    provenance: "structured",
+    revision: 1,
+    attentionIds: [],
     capabilities: { imageInput: { supported: true }, runtimeSettings: { perTurnEffort: true, perTurnModel: true } },
     recentReceipts: [],
+    accountId: null,
+    parentConversationId: null,
+    flowId: null,
+    workflowId: null,
+    cwd: "/repo",
+    artifactPath: "/refresh.jsonl",
+    activeTurnId: null,
   },
   uiState: {},
   attentions: [],
@@ -104,33 +116,36 @@ const structuredView: RuntimeSessionView = {
   structuredControlsEnabled: true,
 } as unknown as RuntimeSessionView;
 
-const actualRuntimeHooks = await import("@/hooks/useRuntime");
 const actualLogTail = await import("@/hooks/useLogTail");
-const inertRuntime = { enabled: true, structuredHostsEnabled: true, connection: "live" as const, resyncedAt: null, store: emptyStore() };
-/* Stable references: an unstable [] / object returned per render would re-fire
-   every downstream effect keyed on it and spin the board into an infinite loop. */
-const inertBusState = { ...inertRuntime, lastEventAt: null };
-const EMPTY_RECEIPTS: never[] = [];
 const sessionListeners = new Set<() => void>();
-let currentSession: RuntimeSessionView | null = null;
+function stateFor(view: RuntimeSessionView | null): RuntimeBusState {
+  const store = emptyStore();
+  if (view) store.sessions[view.session.conversationId] = view.session;
+  return {
+    enabled: true,
+    structuredHostsEnabled: true,
+    connection: "live",
+    resyncedAt: null,
+    lastEventAt: null,
+    store,
+  };
+}
+let currentRuntimeState = stateFor(null);
+const testRuntimeBus: RuntimeBus = {
+  getState: () => currentRuntimeState,
+  subscribe: (listener) => {
+    sessionListeners.add(listener);
+    return () => sessionListeners.delete(listener);
+  },
+  subscribeFilesRevision: () => () => {},
+  start: () => {},
+  stop: () => {},
+  refresh: async () => true,
+};
 function publishSession(next: RuntimeSessionView | null): void {
-  currentSession = next;
+  currentRuntimeState = stateFor(next);
   for (const listener of sessionListeners) listener();
 }
-mock.module("@/hooks/useRuntime", () => ({
-  ...actualRuntimeHooks,
-  useRuntime: () => inertRuntime,
-  useRuntimeBusState: () => inertBusState,
-  useRuntimeFlow: () => null,
-  useRuntimeSession: (conversationId: string | null) =>
-    useSyncExternalStore(
-      (listener) => { sessionListeners.add(listener); return () => sessionListeners.delete(listener); },
-      () => (conversationId === "conv-refresh" ? currentSession : null),
-      () => null,
-    ),
-  useRuntimeSessionByArtifact: () => null,
-  useRuntimeReceiptsForArtifact: () => EMPTY_RECEIPTS,
-}));
 mock.module("@/hooks/useLogTail", () => ({
   useLogTail: () => ({
     lines: [], linesStart: 0, size: 0, loading: false, error: null, tickTime: null,
@@ -139,7 +154,6 @@ mock.module("@/hooks/useLogTail", () => ({
   }),
 }));
 afterAll(() => {
-  mock.module("@/hooks/useRuntime", () => actualRuntimeHooks);
   mock.module("@/hooks/useLogTail", () => actualLogTail);
 });
 
@@ -286,6 +300,7 @@ let host: HTMLElement;
 beforeEach(() => {
   setLocale("en");
   publishSession(null);
+  setRuntimeBusForTests(testRuntimeBus);
   host = document.createElement("div");
   document.body.append(host);
   root = createRoot(host);
@@ -293,6 +308,7 @@ beforeEach(() => {
 afterEach(() => {
   flushSync(() => root.unmount());
   publishSession(null);
+  setRuntimeBusForTests(null);
   resizeCallbacks.clear();
   sessionStorage.clear();
   localStorage.clear();

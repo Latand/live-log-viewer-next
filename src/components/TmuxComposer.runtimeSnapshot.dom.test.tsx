@@ -9,15 +9,19 @@
  * These tests drive the REAL composer form against a mocked wire and assert
  * the `/api/runtime/send` bodies that `sendRuntimeMessage` posts.
  */
-import { afterAll, afterEach, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, expect, test } from "bun:test";
 import { act } from "react";
 import { installActEnv } from "@/test-helpers/actEnv";
 import { Window } from "happy-dom";
 import { createRoot, type Root } from "react-dom/client";
 
-import type { RuntimeSessionView } from "@/hooks/useRuntime";
+import { useRuntimeReceiptsForArtifact, type RuntimeSessionView } from "@/hooks/useRuntime";
+import { setRuntimeUiEnabledForTests } from "@/hooks/runtimeBus";
 import type { FileEntry } from "@/lib/types";
 import { setLocale, translate } from "@/lib/i18n";
+import { attachModeFor, capabilitiesFor } from "./agentCapabilities";
+import { setTmuxComposerRuntimeDependenciesForTests } from "./tmuxComposerRuntime";
+import { useAgentCapabilities } from "./useAgentCapabilities";
 
 const dom = new Window();
 installActEnv();
@@ -75,41 +79,37 @@ const structuredView: RuntimeSessionView = {
   structuredControlsEnabled: true,
 } as unknown as RuntimeSessionView;
 
-const actualRuntimeHooks = await import("@/hooks/useRuntime");
-/* Capture the real implementations BEFORE mock.module rewires the registry:
-   the namespace's members are live bindings, so reading them after the mock
-   would resolve to the mock itself (infinite recursion). */
-const realUseRuntimeSession = actualRuntimeHooks.useRuntimeSession;
-const realUseRuntimeReceiptsForArtifact = actualRuntimeHooks.useRuntimeReceiptsForArtifact;
-/* bun's mock.module registry is global and the afterAll restore does NOT reach
-   test files loaded later, so an unconditional stub would leak this structured
-   view into every downstream pane test (it flipped 6 BranchPane surfaces to
-   "structured"). The mock therefore delegates to the REAL hooks for every
-   conversation except this file's own `conv-snapshot` — loaded after this
-   file, other suites observe real behavior. The real hook always runs first
-   so the hook order never varies across the branch. */
-mock.module("@/hooks/useRuntime", () => ({
-  ...actualRuntimeHooks,
-  useRuntimeSession: (conversationId: string | null) => {
-    const real = realUseRuntimeSession(conversationId);
-    return conversationId === "conv-snapshot" ? structuredView : real;
-  },
-  useRuntimeReceiptsForArtifact: (path: string | null, conversationId?: string | null) => {
-    const real = realUseRuntimeReceiptsForArtifact(path, conversationId);
-    return path === "/codex-snapshot.jsonl" || conversationId === "conv-snapshot" ? [] : real;
-  },
-}));
-afterAll(() => {
-  mock.module("@/hooks/useRuntime", () => actualRuntimeHooks);
-});
-
-const { TmuxComposer } = await import("./TmuxComposer");
-const { writeProfile } = await import("./runtimeProfile");
-const { readOutbox, resetOutboxForTests, retryOutbox } = await import("./conversation/outbox");
+import { TmuxComposer } from "./TmuxComposer";
+import { writeProfile } from "./runtimeProfile";
+import { readOutbox, resetOutboxForTests, retryOutbox } from "./conversation/outbox";
 
 const realFetch = globalThis.fetch;
 
+beforeEach(() => {
+  setRuntimeUiEnabledForTests(false);
+  setTmuxComposerRuntimeDependenciesForTests({
+    useAgentCapabilities: (candidate) => {
+      const real = useAgentCapabilities(candidate);
+      if (candidate.path !== "/codex-snapshot.jsonl" && candidate.conversationId !== "conv-snapshot") return real;
+      const options = { runtimeEnabled: true };
+      return {
+        caps: capabilitiesFor(candidate, structuredView, options),
+        runtime: structuredView,
+        structuredSession: structuredView,
+        runtimeEnabled: true,
+        attachMode: attachModeFor(candidate, structuredView, options),
+      };
+    },
+    useRuntimeReceiptsForArtifact: (path, conversationId) => {
+      const real = useRuntimeReceiptsForArtifact(path, conversationId);
+      return path === "/codex-snapshot.jsonl" || conversationId === "conv-snapshot" ? [] : real;
+    },
+  });
+});
+
 afterEach(() => {
+  setTmuxComposerRuntimeDependenciesForTests(null);
+  setRuntimeUiEnabledForTests(null);
   setLocale("en");
   structuredView.session.host = "hosted";
   globalThis.fetch = realFetch;

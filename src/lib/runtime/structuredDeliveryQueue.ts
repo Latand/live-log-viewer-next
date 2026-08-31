@@ -673,12 +673,6 @@ export class StructuredDeliveryQueue {
         await this.transitionUnlessSettled(effect.operationId, expired.status, { reason: expired.reason });
         continue;
       }
-      /* A blocked hostless control may produce no journal or host event of its
-         own. Keep one bounded retry alive so a later pass observes the deadline
-         even when the rest of the runtime stays completely quiet. */
-      if (isRuntimeControlEffect(effect) && controlSettlementDeadlineAt(durable.value) !== null) {
-        this.retrySoon();
-      }
       durableStatuses.set(effect.operationId, durable.value);
       openEffects.push(effect);
     }
@@ -718,7 +712,15 @@ export class StructuredDeliveryQueue {
         const result = isCompactEffect(effect)
           ? await this.drainCompact(effect)
           : await this.drainControl(effect);
-        if (result.blocked) return true;
+        if (result.blocked) {
+          /* A blocked hostless control may produce no journal or host event of
+             its own. Keep one bounded retry alive so a later pass observes the
+             deadline; a control settled in this pass schedules nothing. */
+          if (controlSettlementDeadlineAt(durableStatuses.get(effect.operationId) ?? null) !== null) {
+            this.retrySoon();
+          }
+          return true;
+        }
         if (result.terminated && effect.kind === "kill") {
           if (effect.sessionKey) {
             killedGenerations.add(`${effect.sessionKey.engine}:${effect.sessionKey.sessionId}`);

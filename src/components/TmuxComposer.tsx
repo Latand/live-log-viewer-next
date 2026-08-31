@@ -12,7 +12,7 @@ import { Badge, type BadgeTone } from "@/components/ui/Badge";
 import { useComposer } from "@/hooks/useComposer";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useCodexRealtime } from "@/hooks/useCodexRealtime";
-import { refreshRuntime, sendRuntimeMessage, useRuntimeReceiptsForArtifact, type RuntimeSessionView } from "@/hooks/useRuntime";
+import type { RuntimeSessionView } from "@/hooks/useRuntime";
 import type { SelectedContextRef } from "@/lib/selection/selectedContext";
 import { useViewerSelectedContext, viewerSelectedContext } from "@/lib/selection/viewerSelectedContext";
 import { useHostTarget } from "@/hooks/useHostTarget";
@@ -29,6 +29,7 @@ import { OutboxDispatcher } from "./conversation/OutboxDispatcher";
 import {
   adoptOutbox,
   cancelOutbox,
+  claimOutboxDispatch,
   enqueueOutbox,
   markOutboxResponded,
   outboxHistory,
@@ -45,10 +46,8 @@ import {
   type OutboxState,
 } from "./conversation/outbox";
 import {
-  COMPOSER_ADMISSION_DEADLINE_MS,
-  COMPOSER_RECEIPT_POLL_INTERVAL_MS,
-  COMPOSER_RECEIPT_RECONCILIATION_MS,
   ComposerAdmissionTimeoutError,
+  composerAdmissionTiming,
   reconcileComposerReceipt,
   withComposerAdmissionDeadline,
 } from "./composerAdmissionDeadline";
@@ -77,7 +76,7 @@ import {
   writeDismissedReceipts,
 } from "./runtime/deliveryState";
 import { mintIdempotencyKey, receiptIsAdmitted, receiptIsTerminal, type HostAxis, type TurnAxis } from "./runtime/runtimeModel";
-import { useAgentCapabilities } from "./useAgentCapabilities";
+import { tmuxComposerRuntimeDependencies } from "./tmuxComposerRuntime";
 import { VoiceConversationButton } from "./VoiceConversation";
 import { commitBridgeTurn, useBridgeTurnStartDrain } from "@/hooks/useBridgeReportRelay";
 import {
@@ -1189,6 +1188,8 @@ export function TmuxComposerCore({
   dockNode?: HTMLElement | null;
 }) {
   const { t } = useLocale();
+  const runtimeDependencies = tmuxComposerRuntimeDependencies();
+  const admissionTiming = composerAdmissionTiming();
   /* Draft text and delivery receipts key on the stable conversation identity,
      not the transcript path: a committed account migration gives the card a new
      path under the target account, and the draft/held receipts must ride along
@@ -1200,7 +1201,7 @@ export function TmuxComposerCore({
   // `caps` also carries the Send capability: a *hidden* Send (a gated
   // scanner-shaped subagent, a shell task) means this surface exposes no message
   // path at all, so the whole composer stands down below (finding 2).
-  const { caps, structuredSession } = useAgentCapabilities(file);
+  const { caps, structuredSession } = runtimeDependencies.useAgentCapabilities(file);
   const voiceEnabled = cardId.startsWith("conversation_")
     && structuredSession?.session.hostKind === "codex-app-server"
     && structuredSession.session.host === "hosted";
@@ -1357,7 +1358,7 @@ export function TmuxComposerCore({
   const runtimeSendSnapshots = useRef<Map<string, RuntimeProfile | undefined>>(new Map());
   /* Durable receipts for this session from the runtime bus (empty while the bus
      is disabled or the session is legacy/unhosted). */
-  const runtimeReceipts = useRuntimeReceiptsForArtifact(file.path, cardId);
+  const runtimeReceipts = runtimeDependencies.useRuntimeReceiptsForArtifact(file.path, cardId);
   const displayedRuntimeReceipts = mergeRuntimeReceipts(runtimeReceipts, immediateRuntimeReceipts);
   /* #691 §4 — THE RECEIPT-STREAM CONSUMER for parked bridge batches.
      A structured send can answer `pending` and settle minutes later on this stream,
@@ -1498,10 +1499,10 @@ export function TmuxComposerCore({
       read: () => displayedRuntimeReceiptsRef.current.find((receipt) =>
         receipt.idempotencyKey === clientMessageId
         && (receiptIsAdmitted(receipt.status) || receiptIsTerminal(receipt.status))) ?? null,
-      refresh: refreshRuntime,
+      refresh: runtimeDependencies.refreshRuntime,
       late: lateReceipt,
-      timeoutMs: COMPOSER_RECEIPT_RECONCILIATION_MS,
-      pollIntervalMs: COMPOSER_RECEIPT_POLL_INTERVAL_MS,
+      timeoutMs: admissionTiming.receiptReconciliationMs,
+      pollIntervalMs: admissionTiming.receiptPollIntervalMs,
       signal: controller.signal,
     }).then((receipt) => {
       /* An admitted or terminal receipt aborts through
@@ -1887,16 +1888,17 @@ export function TmuxComposerCore({
         outboxFiles.current.delete(outboxId);
       }
     };
-      const settleOutboxFromReceipt = (receipt: RuntimeReceipt) => {
+    const settleOutboxFromReceipt = (receipt: RuntimeReceipt) => {
       /* The late admission: a send that answered `pending` and settled on the receipt
          stream. This is the moment its bridge batch became durable. */
       if (receiptIsAdmitted(receipt.status)) commitBridgeFor(clientMessageId);
-      /* `queued` is the admitted-and-held state on the structured plane: the
-         server parked the message (the account-switch delivery fence). */
+      /* `queued` is durable admission at a turn boundary. It is a switch hold
+         only while the card's migration evidence says this delivery belongs to
+         a successor; an ordinary queued receipt must never requeue itself. */
       return settleOutbox(
         outboxStateForReceiptStatus(receipt.status),
         undefined,
-        receipt.status === "queued",
+        holdsDelivery && receipt.status === "queued",
         outboxAwaitsTurnBoundary(receipt.status),
       );
     };
@@ -2123,7 +2125,7 @@ export function TmuxComposerCore({
       admissionRequest = Promise.resolve(structuredSession
         ? !reachesWire
           ? { ok: false, structured: true, error: structuredImagesReason }
-          : sendRuntimeMessage({
+          : runtimeDependencies.sendRuntimeMessage({
               conversationId: structuredSession.session.conversationId,
               text: payloadText.trim(),
               images: sentImages.map((image) => ({ base64: image.base64, mime: image.mime })),
@@ -2169,7 +2171,7 @@ export function TmuxComposerCore({
             const body = await response.json() as ComposerSendResult;
             return { ...body, status: response.status, ok: response.ok && body.ok === true };
           }));
-      const json = await withComposerAdmissionDeadline(admissionRequest, COMPOSER_ADMISSION_DEADLINE_MS);
+      const json = await withComposerAdmissionDeadline(admissionRequest, admissionTiming.admissionDeadlineMs);
       /* #691 §4 — the bridge cursor moves only on DURABLE admission.
          `json.ok` is not that: a structured send answers ok with a receipt that may
          still be `pending`, which the server has not committed to holding. So the
@@ -2304,9 +2306,10 @@ export function TmuxComposerCore({
   /** Takes the oldest queued submission to the wire. Serial: the dispatcher
       never yields a second entry while this one is in flight. */
   const dispatchQueued = (entry: OutboxEntry) => {
-    updateOutbox(cardId, entry.id, { state: "delivering" });
-    outboxKeys.current.add(entry.id);
-    void send(entry.text, { clientMessageId: entry.id }, entry.id);
+    const claimed = claimOutboxDispatch(cardId, entry.id);
+    if (!claimed) return;
+    outboxKeys.current.add(claimed.id);
+    void send(claimed.text, { clientMessageId: claimed.id }, claimed.id);
   };
 
   const retryRuntimeReceipt = async (receipt: RuntimeReceipt) => {
@@ -2449,7 +2452,7 @@ export function TmuxComposerCore({
       /* Every blocked state keeps one recovery route (issue #499): Re-check
          forces a fresh runtime snapshot, which resolves an unresolved host,
          surfaces a recovered one, and reconciles a timed-out admission. */
-      onSendBlockedRecover={() => void refreshRuntime()}
+      onSendBlockedRecover={() => void runtimeDependencies.refreshRuntime()}
       receipts={
         displayedRuntimeReceipts.length
           ? <RuntimeComposerReceipts

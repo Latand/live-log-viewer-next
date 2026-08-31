@@ -1,4 +1,4 @@
-import { afterAll, beforeEach, expect, test } from "bun:test";
+import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
@@ -10,9 +10,12 @@ const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), "llv-accounts-route-test-"
 const OLD_STATE = process.env.LLV_STATE_DIR;
 const OLD_HOME = process.env.LLV_CODEX_HOME;
 const OLD_CLAUDE_HOME = process.env.LLV_CLAUDE_HOME;
-process.env.LLV_STATE_DIR = path.join(SANDBOX, "state");
-process.env.LLV_CODEX_HOME = path.join(SANDBOX, "legacy");
-process.env.LLV_CLAUDE_HOME = path.join(SANDBOX, "legacy-claude");
+
+beforeAll(() => {
+  process.env.LLV_STATE_DIR = path.join(SANDBOX, "state");
+  process.env.LLV_CODEX_HOME = path.join(SANDBOX, "legacy");
+  process.env.LLV_CLAUDE_HOME = path.join(SANDBOX, "legacy-claude");
+});
 
 const { GET } = await import("./route");
 const { POST } = await import("./codex/active/route");

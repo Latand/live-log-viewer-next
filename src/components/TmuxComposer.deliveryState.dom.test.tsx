@@ -6,17 +6,18 @@
  * lags), failures render once inline with Retry/Edit/Dismiss, and a dismissal
  * persists per conversation across a composer remount.
  */
-import { afterAll, afterEach, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, expect, test } from "bun:test";
 import { act, useSyncExternalStore } from "react";
 import { installActEnv } from "@/test-helpers/actEnv";
 import { Window } from "happy-dom";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 
-import { emptyStore, type RuntimeReceipt } from "@/components/runtime/runtimeModel";
+import type { RuntimeReceipt } from "@/components/runtime/runtimeModel";
 import type { RuntimeSessionView } from "@/hooks/useRuntime";
 import type { FileEntry } from "@/lib/types";
 import { setLocale, translate } from "@/lib/i18n";
+import { installTmuxComposerRuntimeForTests, resetTmuxComposerRuntimeForTests } from "@/test-helpers/tmuxComposerRuntime";
 
 const dom = new Window();
 installActEnv();
@@ -46,9 +47,7 @@ Object.assign(globalThis, {
 
 /* The durable receipt stream stands in for the runtime bus, exactly like the
    pendingImages harness: receipts arrive the way production delivers them. */
-const actualRuntimeHooks = await import("@/hooks/useRuntime");
 const receiptListeners = new Set<() => void>();
-const runtimeStore = emptyStore();
 let busReceipts: RuntimeReceipt[] = [];
 let runtimeView: RuntimeSessionView | null = null;
 function publishReceipts(next: RuntimeReceipt[]): void {
@@ -59,49 +58,40 @@ function publishRuntimeView(next: RuntimeSessionView | null): void {
   runtimeView = next;
   for (const listener of receiptListeners) listener();
 }
-mock.module("@/hooks/useRuntime", () => ({
-  ...actualRuntimeHooks,
-  useRuntime: () => ({
-    enabled: runtimeView !== null,
-    structuredHostsEnabled: runtimeView !== null,
-    connection: runtimeView ? "live" : "offline",
-    resyncedAt: null,
-    store: runtimeStore,
-  }),
-  useRuntimeSession: () => useSyncExternalStore(
-    (listener) => {
-      receiptListeners.add(listener);
-      return () => receiptListeners.delete(listener);
-    },
-    () => runtimeView,
-    () => runtimeView,
-  ),
-  useRuntimeSessionByArtifact: () => null,
-  useRuntimeReceiptsForArtifact: () => useSyncExternalStore(
-    (listener) => {
-      receiptListeners.add(listener);
-      return () => receiptListeners.delete(listener);
-    },
-    () => busReceipts,
-    () => busReceipts,
-  ),
-}));
-afterAll(() => {
-  mock.module("@/hooks/useRuntime", () => actualRuntimeHooks);
-});
-
-const {
+import {
   enqueueOutbox,
   publishTranscriptEchoes,
   readOutbox,
   resetOutboxForTests,
   updateOutbox,
-} = await import("./conversation/outbox");
-const { RuntimeComposerReceipts, TmuxComposer } = await import("./TmuxComposer");
+} from "./conversation/outbox";
+import { RuntimeComposerReceipts, TmuxComposer } from "./TmuxComposer";
 
 const realFetch = globalThis.fetch;
 
+beforeEach(() => {
+  installTmuxComposerRuntimeForTests({
+    useRuntimeView: () => useSyncExternalStore(
+      (listener) => {
+        receiptListeners.add(listener);
+        return () => receiptListeners.delete(listener);
+      },
+      () => runtimeView,
+      () => runtimeView,
+    ),
+    useRuntimeReceipts: () => useSyncExternalStore(
+      (listener) => {
+        receiptListeners.add(listener);
+        return () => receiptListeners.delete(listener);
+      },
+      () => busReceipts,
+      () => busReceipts,
+    ),
+  });
+});
+
 afterEach(() => {
+  resetTmuxComposerRuntimeForTests();
   setLocale("en");
   globalThis.fetch = realFetch;
   publishReceipts([]);

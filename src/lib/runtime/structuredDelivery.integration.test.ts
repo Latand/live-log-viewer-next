@@ -1213,6 +1213,10 @@ test("a kill cancels an automatic delivery retry and fails the send retryably", 
     });
 
     await kickStructuredDeliveryQueue();
+    /* The terminal transitions request one coalesced observation pass. Let that
+       immediate pass finish, then prove the cancelled one-second auto-retry
+       never wakes the queue again. */
+    await Bun.sleep(100);
     const effectBatchCallsAfterKill = effectBatchCalls;
     await Bun.sleep(1_100);
 
@@ -3142,7 +3146,7 @@ test("a stale synchronization-held steer fails safely across Codex and Claude re
   }
 });
 
-test("a migration-held delivery switches from the source host to the published Codex successor", async () => {
+test("a published Codex successor preserves its migration-held input as cancelled evidence", async () => {
   const sourceId = "11111111-1111-\x34111-8111-111111111111";
   const successorId = "22222222-2222-\x34222-8222-222222222222";
   const sourcePath = path.join(sandbox, `${sourceId}.jsonl`);
@@ -3285,19 +3289,19 @@ test("a migration-held delivery switches from the source host to the published C
 
   expect(order.slice(0, 3)).toEqual(["verify", "publish", "commit"]);
   expect(sourceLedger.writes).toEqual([]);
-  expect(successorLedger.writes).toMatchObject([{
-    id: held.command.operationId,
-    text: "continue on the successor",
-    expectedTurnId: null,
-  }]);
-  expect(registry.pendingDeliveries(conversation.id)).toEqual([]);
-  expect(journal.operationResult(held.command.operationId)?.receipt.status).toBe("delivered");
+  expect(successorLedger.writes).toEqual([]);
+  expect(registry.snapshot().heldDeliveries[held.id]).toMatchObject({
+    state: "failed",
+    text: "",
+    generationId: null,
+    error: expect.stringContaining("migration committed"),
+  });
 
   await bindStructuredDeliveryQueue([], { registry, client: null });
   journal.close();
 });
 
-test("a migration-held delivery switches from the source host to the published Claude successor", async () => {
+test("a published Claude successor preserves its migration-held input as cancelled evidence", async () => {
   const sourceId = "33333333-3333-\x34333-8333-333333333333";
   const successorId = "44444444-4444-\x34444-8444-444444444444";
   const accountRoot = path.join(sandbox, "claude-migration-accounts");
@@ -3492,13 +3496,13 @@ test("a migration-held delivery switches from the source host to the published C
 
   expect(publications).toBe(1);
   expect(sourceLedger.writes).toEqual([]);
-  expect(successorLedger.writes).toMatchObject([{
-    id: held.command.operationId,
-    text: "continue on the Claude successor",
-    expectedTurnId: null,
-  }]);
-  expect(registry.pendingDeliveries(conversation.id)).toEqual([]);
-  expect(journal.operationResult(held.command.operationId)?.receipt.status).toBe("delivered");
+  expect(successorLedger.writes).toEqual([]);
+  expect(registry.snapshot().heldDeliveries[held.id]).toMatchObject({
+    state: "failed",
+    text: "",
+    generationId: null,
+    error: expect.stringContaining("migration committed"),
+  });
 
   await bindStructuredDeliveryQueue([], { registry, client: null });
   journal.close();

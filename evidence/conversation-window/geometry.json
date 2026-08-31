@@ -2,7 +2,7 @@
   "queued-desktop": {
     "scrollWidth": 1280,
     "viewportWidth": 1280,
-    "feedHeight": 667.75,
+    "feedHeight": 665.75,
     "composerHeight": 99,
     "controlStrip": true,
     "mobileDetailsToggle": false,
@@ -13,7 +13,7 @@
   "pre-transcript-prompt-desktop": {
     "scrollWidth": 1280,
     "viewportWidth": 1280,
-    "feedHeight": 667.75,
+    "feedHeight": 665.75,
     "composerHeight": 99,
     "controlStrip": true,
     "mobileDetailsToggle": false,
@@ -24,7 +24,7 @@
   "delivering-desktop": {
     "scrollWidth": 1280,
     "viewportWidth": 1280,
-    "feedHeight": 667.75,
+    "feedHeight": 665.75,
     "composerHeight": 99,
     "controlStrip": true,
     "mobileDetailsToggle": false,
@@ -35,7 +35,7 @@
   "live-desktop": {
     "scrollWidth": 1280,
     "viewportWidth": 1280,
-    "feedHeight": 667.75,
+    "feedHeight": 665.75,
     "composerHeight": 99,
     "controlStrip": true,
     "mobileDetailsToggle": false,

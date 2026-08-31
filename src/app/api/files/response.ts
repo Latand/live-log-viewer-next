@@ -20,7 +20,6 @@ import { projectLaunchConversations } from "@/lib/agent/spawnProjection";
 import { conversationCatalogSnapshot } from "@/lib/scanner/conversationCatalog";
 import { pidAlive, readPpid } from "@/lib/scanner/process";
 import { repositoryForProjectRoot } from "@/lib/flows/git";
-import { loadFlows } from "@/lib/flows/store";
 import { reviewOutcomeFor } from "@/lib/flows/reviewOutcome";
 import { overlayPromptDisplayTitles, projectDisplayName } from "@/lib/displayNames";
 import { projectAliasSnapshot } from "@/lib/projects/aliases";
@@ -28,15 +27,10 @@ import { projectCurationSnapshot } from "@/lib/projects/curation";
 import { isCanonicalProjectId, isRepositoryProjectId, projectIdentityFromRepositoryRoot, UNRESOLVED_PROJECT, UNRESOLVED_PROJECT_NAME } from "@/lib/projects/identity";
 import { projectRestoredFlows } from "@/lib/flows/visibility";
 import { reconcileEmbeddedReviewFlows } from "@/lib/pipelines/engine";
-import { loadPipelinesForProjection } from "@/lib/pipelines/store";
 import type { Pipeline } from "@/lib/pipelines/types";
-import { filterPipelinesForFileScan } from "@/lib/pipelines/visibility";
 import { pathForPanePid, reconcileTasks } from "@/lib/tasks/reconcile";
-import { loadTasks } from "@/lib/tasks/store";
 import { projectSupersededTaskHandoffs } from "@/lib/tasks/supersedence";
 import { reportRunIdFromAttemptId, TELEGRAM_REPORT_PROJECT } from "@/lib/telegram/reportLineage";
-import { loadWorkflows } from "@/lib/workflows/store";
-import { filterWorkflowsForFileScan } from "@/lib/workflows/visibility";
 import { cachedLimitsProvenance } from "@/lib/limits";
 import { projectRateLimitReadModel } from "@/lib/rateLimit";
 import { readAuthorshipEvidence } from "@/lib/reaperAuthorship";
@@ -45,11 +39,11 @@ import { overlayLineageProjectAffinity } from "@/lib/session/projectAffinity";
 import { resolveProjectAttribution } from "@/lib/session/projectResolution";
 import { overlayRoleSessionTitles } from "@/lib/session/roleTitles";
 import { overlaySessionTitles, registryProjectionForSnapshot } from "@/lib/session/titleProjection";
-import { tmuxEndpointHealth } from "@/lib/tmux";
 import { claudeProjectRootFor, codexSessionRootFor } from "@/lib/scanner/roots";
 import { projectInfoFromCwd, projectRootForCwd } from "@/lib/scanner/describe";
 import { projectDirectoryFallbacks } from "@/lib/scanner/projectDirectories";
 import type { FilesResponse, ProjectCatalogEntry } from "@/lib/types";
+import { filesResponseDependencies } from "./dependencies";
 
 interface FilesRouteDependencies {
   listFilesWithProjectCatalog: (
@@ -231,6 +225,7 @@ export function consolidateProjectCatalogByRepository(
 }
 
 export async function buildFilesResponse(request: Request, dependencies: FilesRouteDependencies): Promise<NextResponse> {
+  const routeDependencies = filesResponseDependencies();
   const timings: string[] = [];
   let timingMark = performance.now();
   let traceMark = timingMark;
@@ -596,14 +591,14 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
      with no such lineage are untouched. */
   overlayLineageProjectAffinity(files);
   markTiming("files-project-affinity");
-  const storedFlows = loadFlows();
+  const storedFlows = routeDependencies.loadFlows();
   markTiming("files-flow-store");
   const flows = projectRestoredFlows(storedFlows, files, {
     pinnedPaths: visibilityPinnedPaths,
     memberships: registrySnapshot.memberships,
   });
   markTiming("files-flow-restore");
-  const storedTasks = loadTasks();
+  const storedTasks = routeDependencies.loadTasks();
   markTiming("files-task-store");
   /* Human-authorship pin for the board's worker-class auto-collapse (issue
      #112): the reaper's sticky evidence (PR #125) marks any transcript that
@@ -700,7 +695,7 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
       ? conversationLookup.canonicalConversationId(conversationId as `conversation_${string}`)
       : conversationId,
   );
-  let workflows = filterWorkflowsForFileScan(loadWorkflows(), files);
+  let workflows = routeDependencies.filterWorkflowsForFileScan(routeDependencies.loadWorkflows(), files);
   /* The pipelines store fails closed on malformed or future-schema state
      (both viewer instances share one config dir, so skew is a normal
      condition) — that must degrade to "pipelines unavailable", never take
@@ -713,9 +708,9 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
        an overlay against the same flow read above, so the deck and its parent
        share one request-level generation; the durable claim/sync persists on
        the controller reconcile pass instead of the request path. */
-    const loaded = loadPipelinesForProjection();
+    const loaded = routeDependencies.loadPipelinesForProjection();
     reconcileEmbeddedReviewFlows(loaded, storedFlows);
-    pipelines = filterPipelinesForFileScan(loaded, files, {
+    pipelines = routeDependencies.filterPipelinesForFileScan(loaded, files, {
       pinnedPaths: visibilityPinnedPaths,
       memberships: registrySnapshot.memberships,
     });
@@ -880,7 +875,7 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
     pipelines,
     workflows,
     tasks: tasks.tasks,
-    systemHealth: { tmux: tmuxEndpointHealth(), registry: registryHealth },
+    systemHealth: { tmux: routeDependencies.tmuxEndpointHealth(), registry: registryHealth },
     conversationAliases: registrySnapshot.conversationAliases,
     ...(Object.keys(launchProjection.routes).length ? { launchRoutes: launchProjection.routes } : {}),
     ...(pipelinesError ? { pipelinesError } : {}),

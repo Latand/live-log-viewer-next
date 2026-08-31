@@ -7,7 +7,7 @@
  * hosted codex-app-server session and a spy realtime client, in exactly that
  * clean state.
  */
-import { afterAll, afterEach, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, expect, test } from "bun:test";
 import { act } from "react";
 import { installActEnv } from "@/test-helpers/actEnv";
 import { Window } from "happy-dom";
@@ -15,6 +15,7 @@ import { createRoot, type Root } from "react-dom/client";
 
 import type { RuntimeSessionView } from "@/hooks/useRuntime";
 import type { FileEntry } from "@/lib/types";
+import { installTmuxComposerRuntimeForTests, resetTmuxComposerRuntimeForTests } from "@/test-helpers/tmuxComposerRuntime";
 
 const dom = new Window();
 installActEnv();
@@ -60,27 +61,7 @@ const structuredView: RuntimeSessionView = {
   structuredControlsEnabled: true,
 } as unknown as RuntimeSessionView;
 
-const actualRuntimeHooks = await import("@/hooks/useRuntime");
-const realUseRuntimeSession = actualRuntimeHooks.useRuntimeSession;
-const realUseRuntimeReceiptsForArtifact = actualRuntimeHooks.useRuntimeReceiptsForArtifact;
-/* Delegating mock (bun's registry is global): only this file's conversation sees
-   the structured view; every suite loaded later observes real behavior. */
-mock.module("@/hooks/useRuntime", () => ({
-  ...actualRuntimeHooks,
-  useRuntimeSession: (conversationId: string | null) => {
-    const real = realUseRuntimeSession(conversationId);
-    return conversationId === CONVERSATION ? structuredView : real;
-  },
-  useRuntimeReceiptsForArtifact: (path: string | null, conversationId?: string | null) => {
-    const real = realUseRuntimeReceiptsForArtifact(path, conversationId);
-    return path === "/voice-accept.jsonl" || conversationId === CONVERSATION ? [] : real;
-  },
-}));
-afterAll(() => {
-  mock.module("@/hooks/useRuntime", () => actualRuntimeHooks);
-});
-
-const { TmuxComposer } = await import("./TmuxComposer");
+import { TmuxComposer } from "./TmuxComposer";
 const { configureRealtimeClientForTests } = await import("@/hooks/useCodexRealtime");
 
 const realFetch = globalThis.fetch;
@@ -102,7 +83,14 @@ const spyClient = {
   realtimeSession: () => null,
 };
 
+beforeEach(() => {
+  installTmuxComposerRuntimeForTests({
+    useRuntimeView: (file) => file.conversationId === CONVERSATION ? structuredView : null,
+  });
+});
+
 afterEach(() => {
+  resetTmuxComposerRuntimeForTests();
   for (const root of roots) act(() => root.unmount());
   roots = [];
   configureRealtimeClientForTests(null);

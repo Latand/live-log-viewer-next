@@ -1,4 +1,4 @@
-import { afterAll, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, expect, test } from "bun:test";
 import { Window } from "happy-dom";
 import { useSyncExternalStore } from "react";
 import { flushSync } from "react-dom";
@@ -6,6 +6,8 @@ import { createRoot } from "react-dom/client";
 
 import type { RuntimeReceipt } from "@/components/runtime/runtimeModel";
 import type { FileEntry } from "@/lib/types";
+import { setRuntimeUiEnabledForTests } from "@/hooks/runtimeBus";
+import { setTmuxComposerRuntimeDependenciesForTests } from "./tmuxComposerRuntime";
 
 const dom = new Window();
 Object.assign(globalThis, {
@@ -36,31 +38,33 @@ Object.assign(globalThis, {
    test pushes the late `delivered` receipt the way production does — through
    the receipts hook — instead of smuggling it into a send response. The
    actual hooks are restored in afterAll (mock.module is process-global). */
-const actualRuntimeHooks = await import("@/hooks/useRuntime");
 const receiptListeners = new Set<() => void>();
 let busReceipts: RuntimeReceipt[] = [];
 function publishReceipts(next: RuntimeReceipt[]): void {
   busReceipts = next;
   for (const listener of receiptListeners) listener();
 }
-mock.module("@/hooks/useRuntime", () => ({
-  ...actualRuntimeHooks,
-  useRuntimeSession: () => null,
-  useRuntimeReceiptsForArtifact: () => useSyncExternalStore(
-    (listener) => {
-      receiptListeners.add(listener);
-      return () => receiptListeners.delete(listener);
-    },
-    () => busReceipts,
-    () => busReceipts,
-  ),
-}));
-afterAll(() => {
-  mock.module("@/hooks/useRuntime", () => actualRuntimeHooks);
+import { appendComposerDraft, TmuxComposer } from "./TmuxComposer";
+import { readOutbox, retryOutbox, resetOutboxForTests } from "./conversation/outbox";
+
+beforeEach(() => {
+  setRuntimeUiEnabledForTests(false);
+  setTmuxComposerRuntimeDependenciesForTests({
+    useRuntimeReceiptsForArtifact: () => useSyncExternalStore(
+      (listener) => {
+        receiptListeners.add(listener);
+        return () => receiptListeners.delete(listener);
+      },
+      () => busReceipts,
+      () => busReceipts,
+    ),
+  });
 });
 
-const { appendComposerDraft, TmuxComposer } = await import("./TmuxComposer");
-const { readOutbox, retryOutbox, resetOutboxForTests } = await import("./conversation/outbox");
+afterEach(() => {
+  setTmuxComposerRuntimeDependenciesForTests(null);
+  setRuntimeUiEnabledForTests(null);
+});
 
 test("queue-first: a lost image send keeps its own immutable snapshot through a retry until the late delivery settles it", async () => {
   const sentKeys: string[] = [];

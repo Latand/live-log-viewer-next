@@ -1,4 +1,4 @@
-import { afterAll, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, expect, test } from "bun:test";
 import { Window } from "happy-dom";
 import { useLayoutEffect, useSyncExternalStore } from "react";
 import { flushSync } from "react-dom";
@@ -7,6 +7,12 @@ import { createRoot } from "react-dom/client";
 import type { RuntimeReceipt } from "@/components/runtime/runtimeModel";
 import { setLocale, translate } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
+import { setRuntimeUiEnabledForTests } from "@/hooks/runtimeBus";
+import {
+  ComposerAdmissionTimeoutError,
+  setComposerAdmissionTimingForTests,
+} from "./composerAdmissionDeadline";
+import { setTmuxComposerRuntimeDependenciesForTests } from "./tmuxComposerRuntime";
 
 const dom = new Window();
 Object.assign(globalThis, {
@@ -40,18 +46,8 @@ let mobileViewport = false;
    the window/poll constants and threads them through, so shrinking them here
    drives the production code path. bun runs each test file in its own module
    graph, so this override stays isolated from the 30s tests next door. */
-const actualDeadline = await import("./composerAdmissionDeadline");
-mock.module("./composerAdmissionDeadline", () => ({
-  ...actualDeadline,
-  COMPOSER_ADMISSION_DEADLINE_MS: 8,
-  COMPOSER_RECEIPT_RECONCILIATION_MS: 40,
-  COMPOSER_RECEIPT_POLL_INTERVAL_MS: 5,
-}));
-const { ComposerAdmissionTimeoutError } = actualDeadline;
-
 /* A controllable durable-receipt stream stands in for the runtime bus (see the
    sibling reconciliation test for the rationale). */
-const actualRuntimeHooks = await import("@/hooks/useRuntime");
 const receiptListeners = new Set<() => void>();
 let busReceipts: RuntimeReceipt[] = [];
 let refreshRuntimeImpl: () => Promise<boolean> = async () => false;
@@ -59,25 +55,34 @@ function publishReceipts(next: RuntimeReceipt[]): void {
   busReceipts = next;
   for (const listener of receiptListeners) listener();
 }
-mock.module("@/hooks/useRuntime", () => ({
-  ...actualRuntimeHooks,
-  useRuntimeSession: () => null,
-  refreshRuntime: () => refreshRuntimeImpl(),
-  useRuntimeReceiptsForArtifact: () => useSyncExternalStore(
-    (listener) => {
-      receiptListeners.add(listener);
-      return () => receiptListeners.delete(listener);
-    },
-    () => busReceipts,
-    () => busReceipts,
-  ),
-}));
-afterAll(() => {
-  mock.module("@/hooks/useRuntime", () => actualRuntimeHooks);
-  mock.module("./composerAdmissionDeadline", () => actualDeadline);
+import { TmuxComposer } from "./TmuxComposer";
+import { readOutbox, retryOutbox } from "./conversation/outbox";
+
+beforeEach(() => {
+  setRuntimeUiEnabledForTests(false);
+  setComposerAdmissionTimingForTests({
+    admissionDeadlineMs: 8,
+    receiptReconciliationMs: 40,
+    receiptPollIntervalMs: 5,
+  });
+  setTmuxComposerRuntimeDependenciesForTests({
+    refreshRuntime: () => refreshRuntimeImpl(),
+    useRuntimeReceiptsForArtifact: () => useSyncExternalStore(
+      (listener) => {
+        receiptListeners.add(listener);
+        return () => receiptListeners.delete(listener);
+      },
+      () => busReceipts,
+      () => busReceipts,
+    ),
+  });
 });
 
-const { TmuxComposer } = await import("./TmuxComposer");
+afterEach(() => {
+  setTmuxComposerRuntimeDependenciesForTests(null);
+  setComposerAdmissionTimingForTests(null);
+  setRuntimeUiEnabledForTests(null);
+});
 
 function IdentityCommitHarness({ file, onCommit }: { file: FileEntry; onCommit?: () => void }) {
   useLayoutEffect(() => {
@@ -241,8 +246,8 @@ test("identity commit invalidates a delayed legacy success before passive cleanu
     ));
     await sleep(30);
 
-    expect((host.querySelector("textarea") as HTMLTextAreaElement).value).toBe(original);
-    expect(sessionStorage.getItem(`llvDraft:${successorId}`)).toBe(original);
+    expect((host.querySelector("textarea") as HTMLTextAreaElement).value).toBe("");
+    expect(sessionStorage.getItem(`llvDraft:${successorId}`)).toBeNull();
     expect(sessionStorage.getItem(`llvPendingSend:${successorId}`)).not.toBeNull();
   } finally {
     flushSync(() => root.unmount());
@@ -301,7 +306,7 @@ test("unmount commit invalidates a delayed legacy success before passive cleanup
     const pendingAfter = JSON.parse(sessionStorage.getItem(`llvPendingSend:${conversationId}`) ?? "[]") as Array<{ key: string; text: string }>;
     expect(pendingAfter).toHaveLength(1);
     expect(pendingAfter[0]).toMatchObject({ text: prompt });
-    expect(sessionStorage.getItem(`llvDraft:${conversationId}`)).toBe(prompt);
+    expect(sessionStorage.getItem(`llvDraft:${conversationId}`)).toBeNull();
   } finally {
     flushSync(() => root.unmount());
     publishReceipts([]);
@@ -366,7 +371,7 @@ test("no receipt within the local window recovers the composer for an exactly-on
     /* The window expires with no receipt; the composer must NOT stay disabled. */
     await untilSendEnabled(host);
     expect(sentKeys).toHaveLength(1);
-    expect(textarea.value).toBe(prompt);
+    expect(textarea.value).toBe("");
     /* Accurate, recoverable wording for the expired-window state. */
     expect(host.textContent).toContain(translate("en", "composer.deliveryUnconfirmed"));
     /* One durable, honest receipt row for the preserved generation. */
@@ -377,29 +382,20 @@ test("no receipt within the local window recovers the composer for an exactly-on
     expect(sentKeys).toHaveLength(1);
     expect(sessionStorage.getItem(`llvPendingSend:${conversationId}`)).toContain(sentKeys[0]!);
 
-    /* The operator explicitly retries: the ORIGINAL key replays idempotently. */
-    flushSync(() => {
-      const propsKey = Object.keys(textarea).find((key) => key.startsWith("__reactProps$"))!;
-      const props = (textarea as unknown as Record<string, { onChange(event: unknown): void }>)[propsKey]!;
-      props.onChange({ target: { value: "" } });
-    });
-    flushSync(() => root.unmount());
-    root = createRoot(host);
-    flushSync(() => root.render(<TmuxComposer file={fileFor(conversationId)} />));
-    await untilSendEnabled(host);
-    textarea = host.querySelector("textarea") as HTMLTextAreaElement;
+    /* The operator explicitly retries the failed bubble: the ORIGINAL key
+       replays idempotently while the cleared composer remains available. */
+    const expired = readOutbox(conversationId).find((entry) => entry.text === prompt)!;
     localStorage.setItem(`llvAgentRuntime:${conversationId}:resume`, JSON.stringify({
       model: "gpt-5.6-sol",
       effort: "low",
       fast: true,
     }));
-    form = textarea.closest("form")!;
-    flushSync(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
+    flushSync(() => retryOutbox(conversationId, expired.id));
     await sleep(0);
     expect(sentKeys).toHaveLength(2);
     expect(sentKeys[1]).toBe(sentKeys[0]);
     expect(sentRuntimes[1]).toEqual(sentRuntimes[0]);
-    expect(textarea.value).toBe("");
+    expect(readOutbox(conversationId).find((entry) => entry.id === expired.id)?.state).toBe("delivering");
     expect(host.querySelectorAll('[data-receipt-status="queued"]')).toHaveLength(1);
   } finally {
     flushSync(() => root.unmount());
@@ -439,7 +435,7 @@ test("editing after expiry retries the immutable generation and preserves the la
           kind: "send",
           status: "queued",
           text: original,
-          at: "2026-07-20T09:00:30.000Z",
+          at: new Date().toISOString(),
           revision: 1,
         },
       }),
@@ -462,7 +458,8 @@ test("editing after expiry retries the immutable generation and preserves the la
     await untilSendEnabled(host);
     flushSync(() => textareaProps.onChange({ target: { value: laterDraft } }));
 
-    flushSync(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
+    const expired = readOutbox(conversationId).find((entry) => entry.text === original)!;
+    flushSync(() => retryOutbox(conversationId, expired.id));
     await sleep(0);
 
     expect(attempts).toHaveLength(2);
@@ -575,10 +572,11 @@ test("the recovered generation survives a remount and keeps its original key", a
     const form = textarea.closest("form")!;
     /* The composer accepts input again after the refresh. */
     expect(submitButton(host).disabled).toBe(false);
-    expect(textarea.value).toBe(prompt);
+    expect(textarea.value).toBe("");
 
     /* The explicit retry replays the ORIGINAL key across the remount. */
-    flushSync(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
+    const expired = readOutbox(conversationId).find((entry) => entry.text === prompt)!;
+    flushSync(() => retryOutbox(conversationId, expired.id));
     await sleep(0);
     expect(sentKeys).toHaveLength(2);
     expect(sentKeys[1]).toBe(sentKeys[0]);
@@ -620,7 +618,7 @@ test("an image-bearing generation restores exact bytes across a remount on deskt
             kind: "send",
             status: "queued",
             text: prompt,
-            at: "2026-07-20T09:01:30.000Z",
+            at: new Date().toISOString(),
             revision: 1,
           },
         }),
@@ -655,9 +653,9 @@ test("an image-bearing generation restores exact bytes across a remount on deskt
       flushSync(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
       await untilSendEnabled(host);
       expect(attempts[0]?.images).toHaveLength(1);
+      expect(host.querySelectorAll('[data-testid="attachment-tile"]')).toHaveLength(0);
 
       flushSync(() => textareaProps.onChange({ target: { value: `later draft ${width}` } }));
-      flushSync(() => (host.querySelector('[data-testid="attachment-tile"] button') as HTMLButtonElement).click());
       textareaProps.onPaste({
         clipboardData: { items: [{ type: "image/png", getAsFile: () => new dom.File([`later-${width}`], `later-${width}.png`, { type: "image/png" }) }] },
         preventDefault() {},
@@ -677,8 +675,8 @@ test("an image-bearing generation restores exact bytes across a remount on deskt
       expect(host.querySelectorAll('[data-testid="attachment-tile"][data-status="ready"]')).toHaveLength(1);
 
       textarea = host.querySelector("textarea") as HTMLTextAreaElement;
-      form = textarea.closest("form")!;
-      flushSync(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
+      const expired = readOutbox(conversationId).find((entry) => entry.text === prompt)!;
+      flushSync(() => retryOutbox(conversationId, expired.id));
       await sleep(0);
 
       expect(attempts).toHaveLength(2);
@@ -729,8 +727,8 @@ test("typing after the window survives; a late admission clears only the sent pr
     flushSync(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
     await untilSendEnabled(host);
 
-    flushSync(() => textareaProps.onChange({ target: { value: `${prompt}\nand the metrics` } }));
-    expect(textarea.value).toBe(`${prompt}\nand the metrics`);
+    flushSync(() => textareaProps.onChange({ target: { value: "and the metrics" } }));
+    expect(textarea.value).toBe("and the metrics");
 
     flushSync(() => publishReceipts([{
       operationId: "op-expiry-typing",
@@ -739,7 +737,7 @@ test("typing after the window survives; a late admission clears only the sent pr
       kind: "send",
       status: "queued",
       text: prompt,
-      at: "2026-07-20T09:02:00.000Z",
+      at: new Date().toISOString(),
       revision: 1,
     }]));
     await sleep(0);
@@ -823,16 +821,16 @@ test("a terminal failure after the window exposes Retry and re-enables the compo
     await sleep(0);
 
     /* The failure supersedes the uncertain row and offers Retry; the composer
-       stays usable and the payload stays exact. */
+       stays usable while the receipt retains the exact payload. */
     expect(submitButton(host).disabled).toBe(false);
     expect(host.querySelectorAll('[data-receipt-status="uncertain"]')).toHaveLength(0);
     expect(retries()).toHaveLength(1);
-    expect(textarea.value).toBe(prompt);
+    expect(textarea.value).toBe("");
     expect(sentKeys).toHaveLength(1);
 
-    flushSync(() => terminalTextareaProps.onChange({ target: { value: `${prompt}\nlater turn` } }));
+    flushSync(() => terminalTextareaProps.onChange({ target: { value: "later turn" } }));
     flushSync(() => (retries()[0] as HTMLButtonElement).click());
-    for (let attempt = 0; attempt < 50 && textarea.value !== "later turn"; attempt += 1) await sleep(2);
+    for (let attempt = 0; attempt < 50 && sessionStorage.getItem(`llvPendingSend:${conversationId}`); attempt += 1) await sleep(2);
     expect(textarea.value).toBe("later turn");
     expect(sessionStorage.getItem(`llvPendingSend:${conversationId}`)).toBeNull();
 
@@ -950,7 +948,7 @@ test("an edited image tray retries the immutable images and preserves later atta
             kind: "send",
             status: "queued",
             text: prompt,
-            at: "2026-07-20T09:04:00.000Z",
+            at: new Date().toISOString(),
             revision: 1,
           },
         }),
@@ -988,28 +986,26 @@ test("an edited image tray retries the immutable images and preserves later atta
       flushSync(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
       await untilSendEnabled(host);
       expect(sentImages[0]).toHaveLength(2);
-      /* Both attachments stay through the window — nothing was admitted. */
-      expect(previews()).toEqual(attached);
+      /* Queue-first owns the submitted images; the editable tray clears for
+         the next generation even while admission remains unconfirmed. */
+      expect(previews()).toEqual([]);
       expect(host.querySelectorAll('[data-receipt-status="uncertain"]')).toHaveLength(1);
 
-      /* The operator edits the tray before retrying. The removed original and
-         newly-added image belong to UI state around the pending generation. */
-      const firstTile = host.querySelector('[data-testid="attachment-tile"]') as HTMLElement;
-      flushSync(() => (firstTile.querySelector("button") as HTMLButtonElement).click());
+      /* An image added after expiry belongs exclusively to the next draft. */
       pasteImage(`later-${width}`);
-      await untilPreviews(2);
+      await untilPreviews(1);
       const editedTray = previews();
       expect(editedTray).not.toEqual(attached);
 
       /* The retry replays the same key with the original image bytes. */
-      flushSync(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
+      const expired = readOutbox(conversationId).find((entry) => entry.text === prompt)!;
+      flushSync(() => retryOutbox(conversationId, expired.id));
       await sleep(0);
       expect(sentKeys).toHaveLength(2);
       expect(sentKeys[1]).toBe(sentKeys[0]);
       expect(sentImages[1]).toEqual(sentImages[0]);
-      /* Settlement removes the surviving original image by intake id. The
-         attachment added after expiry remains for the following generation. */
-      expect(previews()).toEqual([editedTray[1]]);
+      /* The attachment added after expiry remains for the following generation. */
+      expect(previews()).toEqual(editedTray);
       expect(host.querySelectorAll('[data-receipt-status="queued"]')).toHaveLength(1);
       if (mobile) {
         expect(form.getAttribute("data-testid")).toBe("bounded-mobile-composer");
