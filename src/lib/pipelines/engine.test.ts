@@ -86,6 +86,7 @@ test("a pipeline stage keeps its reserved account through a routing change befor
         access: "read-write",
         promptScaffold: "Builder guidance",
       },
+      runtimeProfile: { access: "read-write", sandbox: "full" },
       cwd,
       project: "repo-00000000000000000000000000000001",
       requestedAccountId: null,
@@ -171,6 +172,7 @@ test("a concurrent pipeline replay and its recovery projections withhold staged 
       access: "read-write" as const,
       promptScaffold: "Builder guidance",
     },
+    runtimeProfile: { access: "read-write", sandbox: "full" },
     cwd,
     project: "repo-00000000000000000000000000000001",
     requestedAccountId: null,
@@ -353,7 +355,7 @@ test("Claude pipeline roles keep autonomous tool access under read-only scope fe
     effort: "high",
     access: "read-only",
     promptScaffold: "Read-only architecture contract",
-  }, "restricted")).toBeNull();
+  }, "restricted")).toBe("auto");
   expect(pipelineClaudePermissionMode({
     roleId: "builder",
     engine: "claude",
@@ -549,26 +551,24 @@ async function create(ports: PipelinePorts, stages = RUN_STAGES as never) {
   return result.pipeline;
 }
 
-test("pipeline stage host access defaults to full and restriction is opt-in", async () => {
+test.each([
+  { access: "read-write", sandbox: "full" },
+  { access: "read-write", sandbox: "restricted" },
+  { access: "read-only", sandbox: "full" },
+  { access: "read-only", sandbox: "restricted" },
+] as const)("pipeline stage runtime profile preserves access=$access with sandbox=$sandbox", async ({ access, sandbox }) => {
   const h = harness();
   await create(h.ports, [
-    { id: "audit", kind: "run", role: { roleId: "architect" }, access: "read-only", prompt: "Audit", next: null },
+    { id: "audit", kind: "run", engine: "codex", access, sandbox, prompt: "Audit", next: null },
   ] as never);
   await tickPipelines([], h.ports);
   await tickPipelines([], h.ports);
 
-  expect(h.spawnInputs[0]).toMatchObject({ sandbox: "full" });
-  expect(h.spawnInputs[0]?.prompt).toContain("Host access: full");
-
-  const restricted = harness();
-  await create(restricted.ports, [
-    { id: "audit", kind: "run", role: { roleId: "architect" }, access: "read-only", sandbox: "restricted", prompt: "Audit", next: null },
-  ] as never);
-  await tickPipelines([], restricted.ports);
-  await tickPipelines([], restricted.ports);
-
-  expect(restricted.spawnInputs[0]).toMatchObject({ sandbox: "restricted" });
-  expect(restricted.spawnInputs[0]?.prompt).toContain("Host access: restricted");
+  expect(h.spawnInputs[0]).toMatchObject({
+    role: { access },
+    runtimeProfile: { access, sandbox },
+  });
+  expect(h.spawnInputs[0]?.prompt).toContain(`Host access: ${sandbox}`);
 });
 
 test("read-only stages preserve declared outputs and tell the agent their write boundary", async () => {

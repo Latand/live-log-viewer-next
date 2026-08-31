@@ -53,7 +53,7 @@ import { pipelineRepoPreflightError, pipelineRepoPreflightStatus, preflightPipel
 import { renderStagePrompt } from "./prompts";
 import { PIPELINE_ROLE_IDS, pipelineRoleLookup, resolvePipelineRole, validatePipelineRoleParams, type PipelineRoleLookup } from "./roles";
 import { normalizeStageOutputPath } from "./stageAccess";
-import { pipelineStageSandbox } from "./stageSandbox";
+import { pipelineStageRuntimeProfile, pipelineStageSandbox, type PipelineStageRuntimeProfile } from "./stageSandbox";
 import { pipelineValidationError, type PipelineValidationViolation } from "./validation";
 import { buildPipeline, findPipelineRecord, isEffectiveRole, loadPipelines, pipelineGraphError, pipelineIdentity, pipelineTaskLinkError, PipelineStoreError, withPipelineControllerMutation, withPipelineMutation } from "./store";
 import { ensurePipelineForTask, isTaskSpawnPipelineParams, type TaskPipelineSpawnParams, type TaskSpawnPipelineParams } from "./taskBinding";
@@ -144,9 +144,8 @@ export interface PipelinePorts {
   roleLookup?: PipelineRoleLookup | null;
   spawnAgent(input: {
     role: EffectivePipelineRole;
-    /** Tool/network boundary. Full host access is the pipeline default; the
-        restrictive engine sandbox is selected only by an explicit stage. */
-    sandbox?: PipelineSandbox;
+    /** Immutable repository-policy and tool-boundary pair for this attempt. */
+    runtimeProfile: PipelineStageRuntimeProfile;
     cwd: string;
     /** Project the launch belongs to; the account it may use is drawn from
         this project's allowed set and nothing wider (#1279). */
@@ -316,7 +315,8 @@ export function pipelineClaudePermissionMode(
   role: EffectivePipelineRole,
   sandbox: PipelineSandbox = "full",
 ): string | null {
-  return role.engine === "claude" && sandbox === "full" ? "bypassPermissions" : null;
+  if (role.engine !== "claude") return null;
+  return sandbox === "full" ? "bypassPermissions" : "auto";
 }
 
 function parentIdentity(parentPath: string | null): {
@@ -353,12 +353,16 @@ async function spawnPipelineAgent(
   }
   const account = resolution.account;
   const parent = parentIdentity(input.parentPath);
-  const sandbox = input.sandbox ?? "full";
-  const restricted = sandbox === "restricted";
+  const { access, sandbox } = input.runtimeProfile;
+  if (access !== input.role.access) {
+    throw new Error("pipeline stage runtime access does not match its effective role");
+  }
   const specBase = freshSpecFor(input.role.engine, input.cwd, {
     model: input.role.model,
     effort: input.role.effort,
-    readOnly: restricted,
+    /* Pipeline access is enforced at settlement. Passing it to the engine
+       would make the repository policy silently select the sandbox again. */
+    readOnly: false,
     permissionMode: pipelineClaudePermissionMode(input.role, sandbox),
     codexHome: input.role.engine === "codex" ? account.home : null,
     claudeConfigDir: input.role.engine === "claude" ? account.home : null,
@@ -367,6 +371,8 @@ async function spawnPipelineAgent(
   const launchProfile = emptyLaunchProfile({
     ...(specBase.launchProfile ?? {}),
     cwd: input.cwd,
+    readOnly: access === "read-only",
+    sandbox,
     parentConversationId: parent.conversationId,
     title: input.title,
   });
@@ -383,6 +389,7 @@ async function spawnPipelineAgent(
     engine: input.role.engine,
     model: input.role.model,
     effort: input.role.effort,
+    runtimeProfile: input.runtimeProfile,
     cwd: input.cwd,
     parentConversationId: parent.conversationId,
     ...(supersedes ? { supersedes } : {}),
@@ -1956,7 +1963,7 @@ async function tickRunStage(
       const priorAttempt = runFor(pipeline, stage.id)?.attempts.filter((candidate) => !candidate.historical).at(-2) ?? null;
       const spawnInput: Parameters<PipelinePorts["spawnAgent"]>[0] = {
         role: attempt.effectiveRole,
-        sandbox: pipelineStageSandbox(stage),
+        runtimeProfile: pipelineStageRuntimeProfile(stage),
         cwd: pipeline.worktreeDir,
         project: pipeline.project,
         requestedAccountId: stage.account ?? null,

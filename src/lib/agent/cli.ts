@@ -16,7 +16,7 @@ import { grantedMcpServers } from "./mcpAllowlist";
 import { grantedPlugins } from "./pluginAllowlist";
 import { normalizeClaudeLaunchModel } from "./models";
 import { applyClaudeSpawnPolicy, claudeSpawnPolicyPaths, VIEWER_SPAWN_CAPABILITY_ENV } from "./spawnPolicy";
-import type { LaunchProfile } from "@/lib/accounts/migration/contracts";
+import { explicitLaunchProfileSandbox, launchProfileEngineReadOnly, type LaunchProfile } from "@/lib/accounts/migration/contracts";
 
 export { ENGINE_EFFORTS, isEngineEffort } from "./efforts";
 
@@ -410,7 +410,7 @@ export function claudeSuccessorSpecFor(input: {
     "--permission-prompt-tool", "stdio",
   ];
   const permissionMode = effectiveClaudePermissionMode(input.profile);
-  if (input.profile.readOnly || permissionMode === "plan") {
+  if (launchProfileEngineReadOnly(input.profile) || permissionMode === "plan") {
     args.push("--permission-mode", "plan", "--disallowedTools", "Edit,Write,NotebookEdit");
   } else if (permissionMode !== "bypassPermissions") {
     if (permissionMode.length <= 64 && /^[a-zA-Z-]+$/.test(permissionMode)) {
@@ -419,6 +419,7 @@ export function claudeSuccessorSpecFor(input: {
   } else {
     args.push("--dangerously-skip-permissions");
   }
+  if (explicitLaunchProfileSandbox(input.profile) === "restricted") args.push("--restricted");
   const model = normalizeClaudeLaunchModel(input.profile.model);
   if (model) args.push("--model", model);
   if (input.profile.effort && /^[a-z]+$/.test(input.profile.effort)) args.push("--effort", input.profile.effort);

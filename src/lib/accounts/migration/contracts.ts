@@ -58,7 +58,12 @@ export interface LaunchProfile {
   effort: string | null;
   fast: boolean | null;
   permissionMode: string | null;
+  /** Legacy launches use this as their engine restriction. Pipeline launches
+      with an explicit sandbox use it as durable repository-policy metadata. */
   readOnly: boolean | null;
+  /** Explicit tool/network boundary. Null/absent preserves legacy readOnly
+      interpretation for durable generations created before the axis split. */
+  sandbox?: "full" | "restricted" | null;
   allowSubagents: boolean;
   mcpServers: string[];
   /** Codex plugins granted to this session (issue #687). Decided once, at
@@ -71,6 +76,25 @@ export interface LaunchProfile {
   role: "root" | "worker";
   goal: AgentGoal | null;
   plan: AgentPlan | null;
+}
+
+type DurableLaunchAccess = Pick<LaunchProfile, "readOnly" | "sandbox"> | null | undefined;
+
+export function explicitLaunchProfileSandbox(profile: DurableLaunchAccess): "full" | "restricted" | null {
+  return profile?.sandbox === "full" || profile?.sandbox === "restricted"
+    ? profile.sandbox
+    : null;
+}
+
+export function launchProfileEngineReadOnly(profile: DurableLaunchAccess): boolean {
+  return explicitLaunchProfileSandbox(profile) === null && profile?.readOnly === true;
+}
+
+export function launchProfileCodexSandbox(profile: DurableLaunchAccess): string | null {
+  const sandbox = explicitLaunchProfileSandbox(profile);
+  if (sandbox === "full") return "danger-full-access";
+  if (sandbox === "restricted") return "workspace-write";
+  return profile?.readOnly === true ? "read-only" : null;
 }
 
 export function emptyLaunchProfile(
@@ -87,6 +111,7 @@ export function emptyLaunchProfile(
     fast: null,
     permissionMode: null,
     readOnly: null,
+    sandbox: null,
     allowSubagents: false,
     title: null,
     project: null,
