@@ -4,7 +4,7 @@ import path from "node:path";
 import { accountManager } from "@/lib/accounts/manager";
 import { claudeSettingsPath } from "@/lib/accounts/claude";
 import { turnStateFromRecords } from "@/lib/accounts/migration/turnState";
-import type { ViewerConversationId } from "@/lib/accounts/migration/contracts";
+import { launchProfileEngineReadOnly, type ViewerConversationId } from "@/lib/accounts/migration/contracts";
 import { agentRegistry, type AgentRegistry, type AgentRegistryEntry, type ProcessIdentity, type RegistryFile } from "@/lib/agent/registry";
 import { effectiveClaudePermissionMode } from "@/lib/agent/cli";
 import { sessionKeyId, type SessionKey } from "@/lib/agent/sessionKey";
@@ -33,7 +33,7 @@ import {
 } from "./structuredDeliveryController";
 import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
 import { enqueueStructuredMessage } from "./structuredMessageDelivery";
-import { materializeStructuredHostAccess, recoverPendingStructuredSpawns } from "./structuredSpawn";
+import { materializeStructuredHostAccess, recoverPendingStructuredSpawns, structuredHostAccessPolicy } from "./structuredSpawn";
 import { conversationTurnLiveness, type TranscriptEventKind, type TurnLivenessDependencies } from "./liveness";
 import { markStructuredHostStartupProgress, type StructuredHostStartupPhase } from "./startupStatus";
 
@@ -819,7 +819,7 @@ export async function adoptStructuredHostsAtStartup(
       const owner = resolveCodexOwner(entry);
       const capability = registry.rotateSpawnCapabilityForPath(entry.artifactPath);
       const access = materializeStructuredHostAccess(
-        entry.launchProfile?.readOnly === true,
+        structuredHostAccessPolicy(entry.launchProfile),
         startupEnvironment,
         capability,
       );
@@ -858,7 +858,7 @@ export async function adoptStructuredHostsAtStartup(
       const capability = registry.rotateSpawnCapabilityForPath(entry.artifactPath);
       const env = withoutWakatimeCredential(owner?.env ?? startupEnvironment);
       const access = materializeStructuredHostAccess(
-        entry.launchProfile?.readOnly === true,
+        structuredHostAccessPolicy(entry.launchProfile),
         env,
         capability,
       );
@@ -872,7 +872,8 @@ export async function adoptStructuredHostsAtStartup(
         mcpStatePath: owner?.kind === "managed"
           ? path.join(owner.home, ".claude.json")
           : owner ? path.join(path.dirname(owner.home), ".claude.json") : undefined,
-        readOnly: entry.launchProfile?.readOnly === true,
+        readOnly: launchProfileEngineReadOnly(entry.launchProfile),
+        restricted: entry.launchProfile?.sandbox === "restricted",
         env: access.env,
         ...access.host,
         model: entry.launchProfile?.model ?? undefined,

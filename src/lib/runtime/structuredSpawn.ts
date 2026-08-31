@@ -6,7 +6,7 @@ import type { AccountContext } from "@/lib/accounts/contracts";
 import { accountManager } from "@/lib/accounts/manager";
 import { claudeSettingsPath } from "@/lib/accounts/claude";
 import { claudeValidityFromLimitRead } from "@/lib/accounts/spawnHealth";
-import type { LaunchProfile } from "@/lib/accounts/migration/contracts";
+import { explicitLaunchProfileSandbox, launchProfileEngineReadOnly, type LaunchProfile } from "@/lib/accounts/migration/contracts";
 import type { SpawnAccountAdmission } from "@/lib/agent/accountLiveness";
 import { effectiveClaudePermissionMode, type AgentEngine, type ResumeSpec } from "@/lib/agent/cli";
 import { identityMaterializationFence, type AgentRegistry, type AgentRegistryEntry, type ProcessIdentity, type RegistryFile, type SpawnReceipt, type StructuredHostColumns } from "@/lib/agent/registry";
@@ -97,16 +97,36 @@ export interface StructuredHostAccessMaterialization {
   cleanup(): void;
 }
 
+export type StructuredHostAccessPolicy = boolean | {
+  /** Carried with the sandbox so pipeline callers must name both axes. The
+      repository policy is enforced by pipeline settlement. */
+  readOnly: boolean;
+  sandbox: "full" | "restricted";
+};
+
+type DurableStructuredHostAccess = Pick<LaunchProfile, "readOnly" | "sandbox"> | null | undefined;
+
+/** New pipeline profiles persist both axes. Profiles created before that split
+    retain their legacy readOnly-to-sandbox behavior on adoption. */
+export function structuredHostAccessPolicy(profile: DurableStructuredHostAccess): StructuredHostAccessPolicy {
+  const sandbox = explicitLaunchProfileSandbox(profile);
+  return sandbox
+    ? { readOnly: profile?.readOnly === true, sandbox }
+    : profile?.readOnly === true;
+}
+
 function githubConfigDirectory(sourceEnv: NodeJS.ProcessEnv): string {
   if (sourceEnv.GH_CONFIG_DIR) return sourceEnv.GH_CONFIG_DIR;
   const home = sourceEnv.HOME || os.homedir();
   return path.join(sourceEnv.XDG_CONFIG_HOME || path.join(home, ".config"), "gh");
 }
 
-/** An explicitly restricted host keeps the checkout under Codex's read-only
-    profile while adding one private write root for temporary and test state. */
+/** Materialize the tool/network boundary. An explicit restricted pipeline
+    profile uses workspace-write for either repository policy; settlement owns
+    the read-only declared-output fence. A legacy boolean preserves the old
+    read-only host profile for non-pipeline callers and stored sessions. */
 export function materializeStructuredHostAccess(
-  restricted: boolean,
+  policy: StructuredHostAccessPolicy,
   sourceEnv: NodeJS.ProcessEnv,
   capability: string | null,
   scratchParent?: string,
@@ -115,6 +135,8 @@ export function materializeStructuredHostAccess(
     ...sourceEnv,
     ...(capability ? { LLV_SPAWN_CAPABILITY: capability } : {}),
   };
+  const explicitAxes = typeof policy !== "boolean";
+  const restricted = explicitAxes ? policy.sandbox === "restricted" : policy;
   if (!restricted) {
     return {
       env: baseEnv,
@@ -132,7 +154,12 @@ export function materializeStructuredHostAccess(
     fs.chmodSync(scratchDirectory, 0o700);
     const temporaryDirectory = path.join(scratchDirectory, "tmp");
     fs.mkdirSync(temporaryDirectory, { mode: 0o700 });
-    const permissionProfileConfig = `permissions.${READ_ONLY_STAGE_PERMISSION_PROFILE}={extends=":read-only",filesystem={${JSON.stringify(scratchDirectory)}="write"}}`;
+    const codex = explicitAxes
+      ? { sandbox: "workspace-write" }
+      : {
+          permissionProfile: READ_ONLY_STAGE_PERMISSION_PROFILE,
+          permissionProfileConfig: `permissions.${READ_ONLY_STAGE_PERMISSION_PROFILE}={extends=":read-only",filesystem={${JSON.stringify(scratchDirectory)}="write"}}`,
+        };
     const cleanup = () => fs.rmSync(scratchDirectory, { recursive: true, force: true });
     return {
       env: {
@@ -140,10 +167,7 @@ export function materializeStructuredHostAccess(
         TMPDIR: temporaryDirectory,
         GH_CONFIG_DIR: githubConfigDirectory(sourceEnv),
       },
-      codex: {
-        permissionProfile: READ_ONLY_STAGE_PERMISSION_PROFILE,
-        permissionProfileConfig,
-      },
+      codex,
       host: {
         forwardGitHubConfig: true,
         releaseCleanup: cleanup,
@@ -1391,7 +1415,7 @@ async function defaultStartHost(input: StructuredSpawnInput, capability: string)
     && (!Number.isSafeInteger(initialEventCursor) || initialEventCursor < 0)) {
     throw new Error("structured resume event cursor is invalid");
   }
-  const access = materializeStructuredHostAccess(profile.readOnly === true, input.account.env, capability);
+  const access = materializeStructuredHostAccess(structuredHostAccessPolicy(profile), input.account.env, capability);
   const env = access.env;
   if (input.engine === "codex") {
     const options = {
@@ -1426,7 +1450,8 @@ async function defaultStartHost(input: StructuredSpawnInput, capability: string)
     mcpStatePath: input.account.kind === "managed"
       ? path.join(input.account.home, ".claude.json")
       : path.join(path.dirname(input.account.home), ".claude.json"),
-    readOnly: profile.readOnly === true,
+    readOnly: launchProfileEngineReadOnly(profile),
+    restricted: profile.sandbox === "restricted",
     model: profile.model ?? undefined,
     effort: profile.effort ?? undefined,
     permissionMode: effectiveClaudePermissionMode(profile),

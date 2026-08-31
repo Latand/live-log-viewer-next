@@ -71,9 +71,11 @@ export type PipelineStageInput = {
   engine?: FlowEngine;
   model?: string | null;
   effort?: string | null;
+  /** Repository mutation policy, enforced when the stage settles. It does not
+      select the engine's tool/network sandbox. */
   access?: PipelineAccess;
-  /** Host/tool reach is independent from the mutation policy in `access`.
-      Omitted stages run with full host access; restriction is explicit. */
+  /** Tool/network boundary, independent from the repository policy in
+      `access`. Omitted stages run with full host access. */
   sandbox?: PipelineSandbox;
   /** Repository-relative files or directories a read-only stage may produce.
       The controller alone records these paths in Git. */

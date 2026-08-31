@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { isCanonicalBranchRef } from "@/lib/runtime/canonicalRevision";
-import { RuntimeHostUnavailableError, runtimeHostClient } from "@/lib/runtime/client";
+import { RuntimeHostUnavailableError, runtimeHostClient, runtimeHostRequestHealth } from "@/lib/runtime/client";
 import { DeploymentRuntimeUnavailableError, requestViewerDeployment } from "@/lib/runtime/deploymentRuntime";
 import { runtimeEventsRolledBack, RUNTIME_PLANE_ABSENT } from "@/lib/runtime/flags";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
@@ -39,10 +39,17 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   try {
     const ledger = (await client.snapshot()).deployments;
     const deployments = limit === null ? ledger : ledger.slice(-limit);
-    return NextResponse.json({ count: deployments.length, deployments });
+    return NextResponse.json({
+      count: deployments.length,
+      deployments,
+      runtimeHostRequests: runtimeHostRequestHealth(),
+    });
   } catch (error) {
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : "runtime host is unavailable" },
+      {
+        error: error instanceof Error ? error.message : "runtime host is unavailable",
+        runtimeHostRequests: runtimeHostRequestHealth(),
+      },
       { status: 503 },
     );
   }

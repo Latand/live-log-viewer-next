@@ -29,10 +29,15 @@ const dom = new HappyWindow({ width: 1280, height: 800 });
   dispatchEvent: () => false,
 });
 
+const resizeCallbacks = new Set<ResizeObserverCallback>();
+
 class TestResizeObserver {
+  constructor(private readonly callback: ResizeObserverCallback) {
+    resizeCallbacks.add(callback);
+  }
   observe() {}
   unobserve() {}
-  disconnect() {}
+  disconnect() { resizeCallbacks.delete(this.callback); }
 }
 
 Object.assign(globalThis, {
@@ -168,7 +173,11 @@ const file = {
   conversationId: CONVERSATION_ID,
 } as FileEntry;
 
-function render(follow: boolean): HTMLElement {
+function render(
+  follow: boolean,
+  setFollow: (value: boolean) => void = () => undefined,
+  feedFile: FileEntry = file,
+): HTMLElement {
   const host = dom.document.createElement("div");
   dom.document.body.append(host);
   const root = createRoot(host as unknown as HTMLElement);
@@ -176,18 +185,38 @@ function render(follow: boolean): HTMLElement {
   flushSync(() => {
     root.render(
       <LogFeed
-        file={file}
+        file={feedFile}
         showSvc={false}
         lineFilter=""
         onStatus={() => undefined}
         paused
         follow={follow}
-        setFollow={() => undefined}
+        setFollow={setFollow}
         compact
       />,
     );
   });
   return host as unknown as HTMLElement;
+}
+
+function setScrollerGeometry(element: HTMLElement, height: number, viewport: number, initialTop: number) {
+  let scrollHeight = height;
+  let top = initialTop;
+  Object.defineProperties(element, {
+    scrollHeight: { configurable: true, get: () => scrollHeight },
+    clientHeight: { configurable: true, get: () => viewport },
+    scrollTop: {
+      configurable: true,
+      get: () => top,
+      set: (value: number) => {
+        top = Math.max(0, Math.min(Number(value), scrollHeight - viewport));
+      },
+    },
+  });
+  return {
+    setHeight: (value: number) => { scrollHeight = value; },
+    setTop: (value: number) => { element.scrollTop = value; },
+  };
 }
 
 async function settle(host: HTMLElement, selector: string, timeoutMs = 4_000): Promise<void> {
@@ -224,4 +253,146 @@ test("with the magnet released the drafts pin above the composer instead of stay
      inline copy is gone rather than doubled. */
   expect(host.querySelector("[data-log-feed-scroller]")!.contains(row)).toBe(false);
   expect(host.querySelectorAll('[data-reply-suggestions="inline"]')).toHaveLength(0);
+});
+
+test("a floating pill row with no vertical range forwards vertical wheel movement to the feed", async () => {
+  const host = render(false);
+  await settle(host, '[data-reply-suggestions="floating"]');
+
+  const row = host.querySelector('[data-reply-suggestions="floating"]') as HTMLElement;
+  const scroller = host.querySelector("[data-log-feed-scroller]") as HTMLElement;
+  setScrollerGeometry(row, 40, 40, 0);
+  setScrollerGeometry(scroller, 1_000, 200, 600);
+
+  flushSync(() => {
+    row.dispatchEvent(new dom.WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: -120 }) as unknown as Event);
+  });
+
+  expect(scroller.scrollTop).toBe(480);
+
+  setScrollerGeometry(row, 100, 40, 20);
+  flushSync(() => {
+    row.dispatchEvent(new dom.WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: -20 }) as unknown as Event);
+  });
+  expect(scroller.scrollTop).toBe(480);
+});
+
+test("an upward wheel survives a concurrent glue and releases the scroll magnet on the first gesture", () => {
+  const originalNow = Date.now;
+  const fixedNow = originalNow();
+  Date.now = () => fixedNow;
+  try {
+    const followChanges: boolean[] = [];
+    const host = render(true, (value) => followChanges.push(value));
+    const scroller = host.querySelector("[data-log-feed-scroller]") as HTMLElement;
+    const geometry = setScrollerGeometry(scroller, 1_000, 200, 800);
+
+    flushSync(() => {
+      scroller.dispatchEvent(new dom.WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: -20 }) as unknown as Event);
+      geometry.setHeight(1_100);
+      for (const callback of resizeCallbacks) callback([], {} as ResizeObserver);
+      scroller.dispatchEvent(new dom.Event("scroll", { bubbles: true }) as unknown as Event);
+      geometry.setTop(880);
+      scroller.dispatchEvent(new dom.Event("scroll", { bubbles: true }) as unknown as Event);
+    });
+
+    expect(scroller.scrollTop).toBe(880);
+    expect(followChanges).toEqual([false]);
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("growth before an upward wheel survives resize glue and stays released through the next append", () => {
+  const originalNow = Date.now;
+  const fixedNow = originalNow();
+  Date.now = () => fixedNow;
+  try {
+    const followChanges: boolean[] = [];
+    const feedFile = {
+      ...file,
+      path: "/fixtures/claude/projects/-repo/seat-growth-before-input.jsonl",
+      name: "seat-growth-before-input.jsonl",
+      conversationId: "conversation_seat_growth_before_input",
+    };
+    const host = render(true, (value) => followChanges.push(value), feedFile);
+    const root = [...roots].at(-1)!;
+    const scroller = host.querySelector("[data-log-feed-scroller]") as HTMLElement;
+    const geometry = setScrollerGeometry(scroller, 1_000, 200, 800);
+
+    flushSync(() => {
+      geometry.setHeight(1_100);
+      scroller.dispatchEvent(new dom.WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: -120 }) as unknown as Event);
+      for (const callback of resizeCallbacks) callback([], {} as ResizeObserver);
+      scroller.dispatchEvent(new dom.Event("scroll", { bubbles: true }) as unknown as Event);
+      geometry.setTop(780);
+      scroller.dispatchEvent(new dom.Event("scroll", { bubbles: true }) as unknown as Event);
+    });
+
+    expect(scroller.scrollTop).toBe(780);
+    expect(followChanges).toEqual([false]);
+
+    tailState.lines = [
+      ...TRANSCRIPT,
+      JSON.stringify({
+        type: "assistant",
+        uuid: "uuid-after-release",
+        timestamp: AT(3),
+        message: { role: "assistant", content: [{ type: "text", text: "A later update arrived." }] },
+      }),
+    ];
+    geometry.setHeight(1_200);
+    flushSync(() => {
+      root.render(
+        <LogFeed
+          file={feedFile}
+          showSvc={false}
+          lineFilter=""
+          onStatus={() => undefined}
+          paused
+          follow={false}
+          setFollow={(value) => followChanges.push(value)}
+          compact
+        />,
+      );
+    });
+
+    expect(scroller.scrollTop).toBe(780);
+    expect(followChanges).toEqual([false]);
+  } finally {
+    tailState.lines = TRANSCRIPT;
+    Date.now = originalNow;
+  }
+});
+
+test("a wheel that cannot move the feed does not tag a later settling scroll as user initiated", () => {
+  const originalNow = Date.now;
+  const fixedNow = originalNow();
+  Date.now = () => fixedNow;
+  try {
+    const followChanges: boolean[] = [];
+    const host = render(
+      true,
+      (value) => followChanges.push(value),
+      {
+        ...file,
+        path: "/fixtures/claude/projects/-repo/seat-settling.jsonl",
+        name: "seat-settling.jsonl",
+        conversationId: "conversation_seat_settling",
+      },
+    );
+    const scroller = host.querySelector("[data-log-feed-scroller]") as HTMLElement;
+    const geometry = setScrollerGeometry(scroller, 1_000, 200, 800);
+
+    flushSync(() => {
+      scroller.dispatchEvent(new dom.WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: 120 }) as unknown as Event);
+      geometry.setTop(600);
+      scroller.dispatchEvent(new dom.Event("scroll", { bubbles: true }) as unknown as Event);
+    });
+
+    expect(scroller.scrollTop).toBe(800);
+    expect(followChanges).toEqual([]);
+  } finally {
+    Date.now = originalNow;
+  }
 });

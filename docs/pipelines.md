@@ -52,7 +52,7 @@ Pipelines run a user-defined chain of two to four agent stages in one dedicated 
 
 Stage ids use letters, numbers, `_`, and `-`. They must be unique. Each `next` value names the following array entry; the last stage ends with `null`. A review-loop requires an earlier run session.
 
-`access` controls repository and production mutation policy. It does not remove read tools, network access, SSH, GitHub CLI access, or worktree visibility. Every stage gets full host access by default. Set `"sandbox": "restricted"` on an individual stage to opt into the engine's restrictive sandbox.
+`access` controls repository mutation policy at settlement. It does not remove read tools, network access, SSH, GitHub CLI access, or worktree visibility. `sandbox` independently controls the engine's tool/network boundary. Every stage gets full host access by default; set `"sandbox": "restricted"` to keep the same repository policy inside the restrictive engine sandbox.
 
 A read-only `run` stage may declare repository-relative `outputs`, such as a report or design document. The agent may write those files and scratch space. The controller verifies that the stage created no commit and touched no undeclared worktree path, then records the declared outputs itself. Unsafe paths, traversal, globs, duplicates, and `.git` are rejected at creation. Review-loop findings continue to use the flow's existing artifact and cannot declare worktree outputs.
 

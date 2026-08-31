@@ -668,6 +668,9 @@ test("create_pipeline publishes the stage contract in its tool definition", asyn
     expect(tool?.description).toContain("must also pass `baseRef`");
     expect(tool?.description).toContain("always read-only");
     expect(tool?.description).toContain("Codex");
+    expect(tool?.description).toContain("access is the repository-mutation policy enforced at settlement");
+    expect(stage?.access?.description).toContain("does not select the sandbox");
+    expect(stage?.sandbox?.description).toContain("independent from access");
     expect(tool?.description).toContain("every violated constraint");
     expect(tool?.description).toContain("normalized to the shared Claude transcript store");
   });

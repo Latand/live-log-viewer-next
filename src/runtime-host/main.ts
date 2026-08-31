@@ -3,6 +3,7 @@ import { discardWakatimeEnvironmentCredential } from "@/lib/wakatime/credential"
 discardWakatimeEnvironmentCredential();
 
 const { stateDir, statePath } = await import("@/lib/configDir");
+const { agentRegistry } = await import("@/lib/agent/registry");
 const { procBackend } = await import("@/lib/proc");
 const { createServerRuntimeConsumers } = await import("@/lib/runtime/serverConsumers");
 const { requestPipelineTick } = await import("@/lib/pipelines/controllerSignal");
@@ -15,6 +16,12 @@ const { ViewerDeploymentCoordinator } = await import("./deployment");
 const { HostCommandViewerDeploymentAdapter } = await import("./deploymentAdapter");
 const { serveViewerDeploymentProxy } = await import("./deploymentProxy");
 const { ReceiptSweepReporter, receiptSweepDebugEnabled } = await import("./receiptSweep");
+const { registryConversationRetentionStates } = await import("./journalRetention");
+const {
+  inspectRuntimeJournalFreelist,
+  runtimeJournalVacuumDue,
+  spawnRuntimeJournalVacuum,
+} = await import("./journalVacuum");
 const {
   currentRuntimeHostGeneration,
   RUNTIME_HOST_CONTAINER_ENV,
@@ -54,7 +61,8 @@ await acquireRuntimeHostFence({
   container: process.env[RUNTIME_HOST_CONTAINER_ENV],
   report: (line) => console.error(line),
 });
-const journal = new RuntimeJournal(process.env.LLV_RUNTIME_JOURNAL || statePath("runtime-events.sqlite"));
+const journalFilename = process.env.LLV_RUNTIME_JOURNAL || statePath("runtime-events.sqlite");
+const journal = new RuntimeJournal(journalFilename);
 if (journal.isWritable()) journal.claimHostEpoch();
 const deploymentsEnabled = process.env.LLV_VIEWER_DEPLOYMENTS === "1";
 const deploymentAdapterPath = deploymentsEnabled
@@ -128,9 +136,48 @@ const receiptSweepTimer = journal.isWritable() ? setInterval(() => {
   }
 }, 10_000) : null;
 
+const JOURNAL_MAINTENANCE_INTERVAL_MS = 60_000;
+const JOURNAL_VACUUM_RETRY_MS = 60 * 60 * 1_000;
+let journalVacuumRunning = false;
+let lastJournalVacuumAttemptAt = 0;
+const journalMaintenanceTimer = journal.isWritable() ? setInterval(() => {
+  if (!journal.isWritable()) return;
+  try {
+    const registry = agentRegistry().readOnlySnapshot();
+    const effects = journal.settleStalePendingEffects(registryConversationRetentionStates(registry));
+    if (effects.settled > 0) {
+      console.error(`[runtime journal] stale effect sweep settled ${effects.settled} of ${effects.scanned} pending spawn/kill effects`);
+    }
+  } catch (error) {
+    console.error(`[runtime journal] stale effect sweep failed closed; next tick will retry: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  const now = Date.now();
+  if (journalVacuumRunning || now - lastJournalVacuumAttemptAt < JOURNAL_VACUUM_RETRY_MS) return;
+  try {
+    const before = inspectRuntimeJournalFreelist(journalFilename);
+    if (!runtimeJournalVacuumDue(before, now)) return;
+    journalVacuumRunning = true;
+    lastJournalVacuumAttemptAt = now;
+    void spawnRuntimeJournalVacuum(journalFilename)
+      .then(() => {
+        const after = inspectRuntimeJournalFreelist(journalFilename);
+        console.error(`[runtime journal] vacuum reclaimed ${Math.max(0, before.freelistPages - after.freelistPages)} pages; ${after.freelistPages} free pages remain`);
+      })
+      .catch((error: unknown) => {
+        console.error(`[runtime journal] vacuum failed; next hourly attempt may retry: ${error instanceof Error ? error.message : String(error)}`);
+      })
+      .finally(() => { journalVacuumRunning = false; });
+  } catch (error) {
+    lastJournalVacuumAttemptAt = now;
+    console.error(`[runtime journal] freelist inspection failed; next hourly attempt may retry: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}, JOURNAL_MAINTENANCE_INTERVAL_MS) : null;
+
 function stop(): void {
   if (legacyTimer) clearInterval(legacyTimer);
   if (receiptSweepTimer) clearInterval(receiptSweepTimer);
+  if (journalMaintenanceTimer) clearInterval(journalMaintenanceTimer);
   deploymentProxy?.close();
   server.close(() => {
     journal.close();
@@ -173,6 +220,7 @@ function handOffToStagedSuccessor(context: { deploymentId: string; revision: str
   console.error(`[runtime host] deployment ${context.deploymentId} staged successor ${context.successor.image} (${context.revision}); handing off this generation`);
   if (legacyTimer) clearInterval(legacyTimer);
   if (receiptSweepTimer) clearInterval(receiptSweepTimer);
+  if (journalMaintenanceTimer) clearInterval(journalMaintenanceTimer);
   deploymentProxy?.close();
   server.close(() => {
     journal.close();

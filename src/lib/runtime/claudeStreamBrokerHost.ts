@@ -207,6 +207,8 @@ export interface ClaudeStreamBrokerHostOptions {
   mcpServers?: string[];
   mcpStatePath?: string;
   readOnly?: boolean;
+  /** Confine tools and network to Claude's engine-owned restricted boundary. */
+  restricted?: boolean;
   binary?: string;
   model?: string;
   effort?: string;
@@ -693,6 +695,7 @@ export class ClaudeStreamBrokerHost implements EngineHost {
       "--include-partial-messages", "--replay-user-messages",
       "--permission-prompt-tool", "stdio",
       "--permission-mode", effectiveClaudePermissionMode(options),
+      ...(options.restricted ? ["--restricted"] : []),
     ];
     const disallowedTools = [
       ...(!options.allowSubagents ? NATIVE_MULTI_AGENT_TOOLS : []),
