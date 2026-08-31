@@ -43,3 +43,39 @@ export function chooseReseatTarget(
   return candidates.sort((left, right) =>
     right.remainingPercent - left.remainingPercent || left.accountId.localeCompare(right.accountId))[0] ?? null;
 }
+
+/** What #1279's binding decides for one reseat, before any migration starts. */
+export type ProjectReseatSelection =
+  | { kind: "target"; target: ReseatTarget }
+  /** No healthy successor, and no binding was involved — today's answer. */
+  | { kind: "none" }
+  /** The project is bound and none of the accounts it allows has headroom.
+      The caller REPORTS this; the idle account next door is not a candidate,
+      and reseating onto it is the boundary crossing the binding prevents. */
+  | { kind: "fenced"; allowedAccountIds: string[] };
+
+/**
+ * The same choice as `chooseReseatTarget`, fenced by the project's allowed set.
+ *
+ * `allowedAccountIds` null is a project with no binding, and takes the byte-
+ * identical path this has always taken. A bound project draws its successor
+ * from its allowed set only — which is what makes a reseat under rate-limit
+ * pressure obey the same rule a launch does, rather than being the one switch
+ * that could still cross the line.
+ */
+export function chooseProjectReseatTarget(
+  currentAccountId: string,
+  observations: readonly DurableQuotaObservation[],
+  accounts: readonly { id: string; label: string }[],
+  allowedAccountIds: readonly string[] | null,
+  now = Date.now(),
+): ProjectReseatSelection {
+  const candidates = allowedAccountIds === null
+    ? accounts
+    : accounts.filter((account) => allowedAccountIds.includes(account.id));
+  const target = chooseReseatTarget(currentAccountId, observations, candidates, now);
+  if (target) return { kind: "target", target };
+  return allowedAccountIds === null
+    ? { kind: "none" }
+    : { kind: "fenced", allowedAccountIds: [...allowedAccountIds] };
+}

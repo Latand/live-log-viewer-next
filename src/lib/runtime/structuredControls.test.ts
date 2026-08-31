@@ -3,17 +3,40 @@ import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 
-import { afterAll, expect, test } from "bun:test";
+import { afterAll, beforeEach, expect, test } from "bun:test";
 
 import { AgentRegistry } from "@/lib/agent/registry";
+import { accountProjectOverrides } from "@/lib/accounts/accountOverrides";
+import { bindAccountToProject } from "@/lib/accounts/projectBindings";
 import { procBackend } from "@/lib/proc";
+import { projectForCwd } from "@/lib/scanner/describe";
 
 import { RuntimeHostUnavailableError, type RuntimeHostClient } from "./client";
 import { dispatchStructuredControl } from "./structuredControls";
 import { beginLegacySpawnFixture } from "@/lib/agent/registryTestFixtures";
 
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-structured-controls-"));
-afterAll(() => fs.rmSync(sandbox, { recursive: true, force: true }));
+
+/* Every account switch below asks the account↔project binding record, which
+   lives in the state dir. Pointed at a scratch dir for this whole file, and
+   re-pointed before each test, so nothing here reads — or is decided by — the
+   operator's live state. */
+const STATE = path.join(sandbox, "state");
+const RECORD = path.join(STATE, "account-project-bindings.json");
+const ORIGINAL_STATE_DIR = process.env.LLV_STATE_DIR;
+process.env.LLV_STATE_DIR = STATE;
+
+beforeEach(() => {
+  process.env.LLV_STATE_DIR = STATE;
+  fs.rmSync(RECORD, { force: true });
+  fs.rmSync(path.join(STATE, "account-project-overrides.json"), { force: true });
+});
+
+afterAll(() => {
+  if (ORIGINAL_STATE_DIR === undefined) delete process.env.LLV_STATE_DIR;
+  else process.env.LLV_STATE_DIR = ORIGINAL_STATE_DIR;
+  fs.rmSync(sandbox, { recursive: true, force: true });
+});
 
 function structuredConversation(
   options: {
@@ -735,4 +758,262 @@ test("ordinary message routing remains outside the explicit-control module", asy
   const fixture = structuredConversation();
   expect(await dispatchStructuredControl({ path: fixture.path, conversationId: "", action: "" }, { registry: fixture.registry, enabled: () => true }))
     .toBeNull();
+});
+
+
+/* #1279 at the structured reconfigure seam. The account switch a structured
+   conversation takes is the path that PLACES its work on an account, and it
+   returned before the legacy path without consulting the binding at all.
+
+   What it owes the binding is ATTRIBUTION, not a veto: the pool is the default
+   the Viewer selects from on its own, and a deliberate switch — by the operator
+   or by an agent acting for them — is a control that reaches outside it and is
+   recorded when it does. Account ids here are invented; nothing names a real
+   account. */
+
+const ALLOWED_ACCOUNT = "codex-reserved";
+const OUTSIDE_ACCOUNT = "codex-outside";
+
+function recordingClient(commands: unknown[]): RuntimeHostClient {
+  return {
+    command: async (command: unknown) => {
+      commands.push(command);
+      return { operationId: "reconfigure-choice", receipt: { operationId: "reconfigure-choice", status: "queued" }, replayed: false };
+    },
+  } as unknown as RuntimeHostClient;
+}
+
+async function switchAccount(
+  fixture: { registry: AgentRegistry; path: string },
+  accountId: string,
+  commands: unknown[],
+  request: Partial<Parameters<typeof dispatchStructuredControl>[0]> = {},
+  dependencies: Parameters<typeof dispatchStructuredControl>[1] = {},
+) {
+  return dispatchStructuredControl({
+    path: fixture.path,
+    conversationId: "",
+    action: "reconfigure",
+    reconfiguration: { model: "gpt-5.6-sol", effort: "high", fast: true, accountId },
+    ...request,
+  }, {
+    registry: fixture.registry,
+    client: recordingClient(commands),
+    operationId: () => "reconfigure-choice",
+    accountExists: () => true,
+    enabled: () => true,
+    ...dependencies,
+  });
+}
+
+test("a deliberate switch outside the project's pool is carried out and attributed", async () => {
+  const fixture = structuredConversation();
+  const project = projectForCwd(sandbox);
+  expect(project).toBeTruthy();
+  expect(bindAccountToProject("codex", ALLOWED_ACCOUNT, project!).ok).toBe(true);
+
+  const commands: unknown[] = [];
+  const result = await switchAccount(fixture, OUTSIDE_ACCOUNT, commands);
+
+  /* The choice stands: the operator asked for this account by name. */
+  expect(result).toMatchObject({ status: 202, body: { ok: true, structured: true } });
+  expect(commands).toMatchObject([{ kind: "reconfigure", accountId: OUTSIDE_ACCOUNT }]);
+  /* And the answer says plainly that it went outside the pool. */
+  expect(result).toMatchObject({
+    body: {
+      accountOverride: {
+        outsidePool: true,
+        accountId: OUTSIDE_ACCOUNT,
+        project,
+        allowedAccountIds: [ALLOWED_ACCOUNT],
+        reason: "outside-pool",
+        actor: "operator",
+        recorded: true,
+      },
+    },
+  });
+  /* The durable record the project view renders: who, when, and what the pool
+     was at that moment. */
+  expect(accountProjectOverrides({ project, engine: "codex" })).toMatchObject([{
+    accountId: OUTSIDE_ACCOUNT,
+    actor: "operator",
+    actorConversationId: null,
+    conversationId: fixture.conversationId,
+    reason: "outside-pool",
+    via: "structured-reconfigure",
+    allowedAccountIds: [ALLOWED_ACCOUNT],
+  }]);
+});
+
+test("an agent's out-of-pool switch is recorded under the agent that made it", async () => {
+  const fixture = structuredConversation();
+  const project = projectForCwd(sandbox);
+  expect(bindAccountToProject("codex", ALLOWED_ACCOUNT, project!).ok).toBe(true);
+
+  const commands: unknown[] = [];
+  const result = await switchAccount(fixture, OUTSIDE_ACCOUNT, commands, {
+    actor: { kind: "agent", conversationId: "conversation_caller" },
+  });
+
+  expect(result).toMatchObject({ status: 202, body: { accountOverride: { actor: "agent" } } });
+  expect(commands).toHaveLength(1);
+  expect(accountProjectOverrides({ project })).toMatchObject([{
+    actor: "agent",
+    actorConversationId: "conversation_caller",
+  }]);
+});
+
+test("a switch inside the allowed set is unchanged, and attributes nothing", async () => {
+  const fixture = structuredConversation();
+  const project = projectForCwd(sandbox);
+  expect(bindAccountToProject("codex", ALLOWED_ACCOUNT, project!).ok).toBe(true);
+
+  const commands: unknown[] = [];
+  const result = await switchAccount(fixture, ALLOWED_ACCOUNT, commands);
+
+  expect(result).toMatchObject({ status: 202, body: { ok: true, structured: true, operationId: "reconfigure-choice" } });
+  expect((result as { body: Record<string, unknown> }).body).not.toHaveProperty("accountOverride");
+  expect(commands).toMatchObject([{ kind: "reconfigure", accountId: ALLOWED_ACCOUNT }]);
+  expect(accountProjectOverrides()).toEqual([]);
+});
+
+test("an unbound project switches exactly as it always did", async () => {
+  const fixture = structuredConversation();
+  expect(fs.existsSync(RECORD)).toBe(false);
+
+  const commands: unknown[] = [];
+  const result = await switchAccount(fixture, OUTSIDE_ACCOUNT, commands);
+
+  expect(result).toMatchObject({ status: 202, body: { ok: true, structured: true } });
+  expect((result as { body: Record<string, unknown> }).body).not.toHaveProperty("accountOverride");
+  expect(commands).toMatchObject([{ kind: "reconfigure", accountId: OUTSIDE_ACCOUNT }]);
+  expect(accountProjectOverrides()).toEqual([]);
+});
+
+test("a binding record this process cannot read does not veto a named choice, and is recorded as unreadable", async () => {
+  const fixture = structuredConversation();
+  fs.mkdirSync(STATE, { recursive: true });
+  fs.writeFileSync(RECORD, '{"schemaVersion":1,"bindings":[{"engine":"codex"', "utf8");
+
+  const commands: unknown[] = [];
+  const result = await switchAccount(fixture, OUTSIDE_ACCOUNT, commands);
+
+  /* A damaged file is not a decision anybody made: it fails closed for what the
+     Viewer picks on its own, and must not stand in for the operator's choice. */
+  expect(result).toMatchObject({
+    status: 202,
+    body: { accountOverride: { reason: "binding-unreadable", allowedAccountIds: null, recorded: true } },
+  });
+  expect(commands).toMatchObject([{ kind: "reconfigure", accountId: OUTSIDE_ACCOUNT }]);
+  expect(accountProjectOverrides()).toMatchObject([{ reason: "binding-unreadable", accountId: OUTSIDE_ACCOUNT }]);
+});
+
+test("the choice is classified against the conversation's durable project, not the caller's word for it", async () => {
+  const fixture = structuredConversation();
+  const asked: unknown[] = [];
+  const commands: unknown[] = [];
+
+  await switchAccount(fixture, OUTSIDE_ACCOUNT, commands, {}, {
+    attributeAccountChoice: (choice) => {
+      asked.push(choice);
+      return null;
+    },
+  });
+
+  expect(asked).toMatchObject([{
+    engine: "codex",
+    project: projectForCwd(sandbox),
+    accountId: OUTSIDE_ACCOUNT,
+    conversationId: fixture.conversationId,
+    via: "structured-reconfigure",
+  }]);
+});
+
+test("re-stating the account a conversation already runs on moves nothing, and records nothing", async () => {
+  const fixture = structuredConversation();
+  const project = projectForCwd(sandbox);
+  /* The account this fixture is already on, and one the project does not
+     allow: a reconfigure that repeats it is a model change, not a switch. */
+  expect(bindAccountToProject("codex", ALLOWED_ACCOUNT, project!).ok).toBe(true);
+
+  const commands: unknown[] = [];
+  const result = await switchAccount(fixture, "codex-subscription", commands);
+
+  expect(result).toMatchObject({ status: 202, body: { ok: true, structured: true } });
+  expect((result as { body: Record<string, unknown> }).body).not.toHaveProperty("accountOverride");
+  expect(accountProjectOverrides()).toEqual([]);
+});
+
+test("a reconfigure that names no account never consults the binding record", async () => {
+  const fixture = structuredConversation();
+  fs.mkdirSync(STATE, { recursive: true });
+  /* A record damaged badly enough that any read of it refuses: a model change
+     still behaves exactly as it does today, because it places this
+     conversation's work on no new account. */
+  fs.writeFileSync(RECORD, "{ not json", "utf8");
+
+  const commands: unknown[] = [];
+  const result = await dispatchStructuredControl({
+    path: fixture.path,
+    conversationId: "",
+    action: "reconfigure",
+    reconfiguration: { model: "gpt-5.6-sol", effort: "high", fast: true },
+  }, {
+    registry: fixture.registry,
+    client: recordingClient(commands),
+    operationId: () => "reconfigure-choice",
+    enabled: () => true,
+  });
+
+  expect(result).toMatchObject({ status: 202, body: { ok: true, structured: true } });
+  expect((result as { body: Record<string, unknown> }).body).not.toHaveProperty("accountOverride");
+  expect(commands).toMatchObject([{ kind: "reconfigure", model: "gpt-5.6-sol" }]);
+  expect(accountProjectOverrides()).toEqual([]);
+});
+
+test("a reconfigure the structured host refuses records nothing", async () => {
+  /* The record used to be appended before the command was ever sent, so a
+     reconfigure the host refused still left an out-of-pool switch on the
+     project view — one that never happened, in a journal that only appends. */
+  const fixture = structuredConversation();
+  const project = projectForCwd(sandbox);
+  expect(bindAccountToProject("codex", ALLOWED_ACCOUNT, project!).ok).toBe(true);
+
+  const result = await switchAccount(fixture, OUTSIDE_ACCOUNT, [], {}, {
+    client: {
+      command: async () => { throw new Error("the structured host refused the reconfigure"); },
+    } as unknown as RuntimeHostClient,
+  });
+
+  expect(result).toMatchObject({ status: 503 });
+  expect((result as { body: Record<string, unknown> }).body).not.toHaveProperty("accountOverride");
+  expect(accountProjectOverrides()).toEqual([]);
+});
+
+test("a socket that fails after the host took the reconfigure attributes the switch it accepted", async () => {
+  /* The other side of the same rule: the durable receipt says the command was
+     accepted, so this is a switch that happened and the record describes it. */
+  const fixture = structuredConversation();
+  const project = projectForCwd(sandbox);
+  expect(bindAccountToProject("codex", ALLOWED_ACCOUNT, project!).ok).toBe(true);
+
+  const result = await switchAccount(fixture, OUTSIDE_ACCOUNT, [], {}, {
+    client: {
+      command: async () => { throw new RuntimeHostUnavailableError("runtime host request timed out"); },
+      operationStatus: async (operationId: string) => ({
+        operationId,
+        receipt: { operationId, status: "queued", conversationId: fixture.conversationId },
+        replayed: true,
+      }),
+    } as unknown as RuntimeHostClient,
+  });
+
+  expect(result).toMatchObject({
+    status: 202,
+    body: { accountOverride: { outsidePool: true, accountId: OUTSIDE_ACCOUNT, recorded: true } },
+  });
+  expect(accountProjectOverrides({ project })).toMatchObject([{
+    accountId: OUTSIDE_ACCOUNT,
+    via: "structured-reconfigure",
+  }]);
 });

@@ -3,7 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { freshSpecFor, resumeSpecFor } from "@/lib/agent/cli";
-import { accountManager } from "@/lib/accounts/manager";
+import { accountManager, resolveResumeAccountId } from "@/lib/accounts/manager";
+import { projectAccountRefusalDetail } from "@/lib/accounts/projectBindings";
 import type { AccountContext } from "@/lib/accounts/contracts";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { deliverToTranscriptHost } from "@/lib/agent/transcriptHost";
@@ -442,9 +443,26 @@ export async function sendToImplementer(
      the stable client-message id above; legacy pane delivery has no comparable
      receipt, so an automatic replay could duplicate the findings. */
   if (overrides.requireIdempotentDelivery) throw new UnsafeInterruptedRelayRetryError();
+  /* #1279: the account this resume runs under. Recorded ownership is
+     CONTINUITY and asks neither the pool nor any quota — the session lives in
+     that home. With nothing recorded nobody has chosen, and omitting the id let
+     `claudeTranscriptOwnership` answer from the engine's ACTIVE account for a
+     transcript inside the SHARED store, where every account resolves to the
+     same root and the path names no owner (#935): a relay could hand a round's
+     verdict to the implementer under an account the flow's project never
+     allowed. That half is a pick, so it goes through the shared automatic
+     decision — this project's pool, then capacity — and a fenced pool or an
+     unreadable record refuses here, before the relay delivers anything. */
   const spec = resumeSpecFor(entry.root, entry.path, {
     model: entry.launchModel ?? entry.model,
     effort: entry.effort,
+    accountId: entry.engine === "claude" || entry.engine === "codex"
+      ? resolveResumeAccountId(
+        entry.engine,
+        registry.transcriptAccountId(entry.engine, entry.path),
+        flow.project,
+      )
+      : null,
     allowSubagents: agentRegistry().launchProfileForPath(entry.path)?.allowSubagents,
     mcpServers: agentRegistry().launchProfileForPath(entry.path)?.mcpServers,
     plugins: agentRegistry().launchProfileForPath(entry.path)?.plugins,
@@ -678,7 +696,21 @@ function settleReviewerSpawn(flow: Flow, round: Round, role: RoleConfig, account
 function prepareReviewerLaunch(flow: Flow, round: Round): PreparedReviewerLaunch {
   if (flow.reviewerMode === "pane") {
     const role = flow.roles.reviewer;
-    const account = accountManager.resolveSpawn(role.engine, round.accountId);
+    /* #1279: the flow's project fences this pick too. A round with no account
+       yet draws one from the project's pool, capacity-aware, exactly as the
+       headless path below does. A round that already has one is carrying the
+       account FROZEN at its start — `Round.accountId` exists so polling and
+       retry never silently adopt a different one — so it is passed as a pin,
+       and a frozen account the project forbids parks the flow with the reason
+       rather than being quietly re-seated mid-round. */
+    const resolution = accountManager.resolveProjectSpawn(role.engine, {
+      project: flow.project,
+      requestedId: round.accountId,
+    });
+    if (resolution.kind !== "available") {
+      throw new Error(projectAccountRefusalDetail(resolution, role.engine, flow.project));
+    }
+    const account = resolution.account;
     round.accountId = account.accountId;
     round.reviewerRole = { ...role };
     return { role, account };
@@ -687,7 +719,11 @@ function prepareReviewerLaunch(flow: Flow, round: Round): PreparedReviewerLaunch
     flow.roles.reviewer,
     flow.reviewerFallback,
     round.attemptedAccounts ?? [],
-    (engine, requestedId, excludedIds) => accountManager.resolveHeadlessSpawn(engine, requestedId, excludedIds),
+    /* The project is passed down so the automatic rate-limit switch draws from
+       the project's allowed set only. Every allowed account exhausted parks the
+       flow with `rateLimitStateDetail`, exactly as it already did — it just
+       can no longer reach an account the project forbids to avoid parking. */
+    (engine, requestedId, excludedIds) => accountManager.resolveHeadlessSpawn(engine, requestedId ?? null, excludedIds ?? [], flow.project),
   );
   if (decision.kind === "exhausted") throw new ReviewerAccountsExhaustedError(decision.resetsAt);
   if (decision.kind === "unavailable") throw new Error("no authenticated reviewer account is available");

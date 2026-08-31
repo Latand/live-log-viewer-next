@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from "node:child_process";
 import { createHash, type Hash } from "node:crypto";
+import fs from "node:fs";
 
 import { isKnownEffortTier } from "@/lib/agent/efforts";
 import type { ProcessIdentity } from "@/lib/agent/registry";
@@ -460,6 +461,95 @@ function resumedTurns(value: unknown): JsonObject[] {
   return Array.isArray(page?.data) ? page.data.map(record).filter((turn): turn is JsonObject => turn !== null) : [];
 }
 
+/** Codex 0.151+ deprecates `ThreadReadParams.includeTurns`: a paginated thread
+    refuses full-history hydration with "list_turns is not supported yet" and
+    expects `thread/turns/list` paging instead (#1332). */
+function hydrationUnsupported(reason: string): boolean {
+  return reason.startsWith("Codex app-server request failed:") && /not supported/i.test(reason);
+}
+
+/* The rollout is bounded before parsing so a very long thread cannot pull its
+   whole history into memory; the fallback consumers only need the window near
+   one end, and a partial leading line after the cut is skipped by JSON.parse. */
+const ROLLOUT_FALLBACK_READ_BYTES = 16 * 1024 * 1024;
+
+const ROLLOUT_TERMINAL_TURN_STATUS: Record<string, string> = {
+  turn_completed: "completed",
+  turn_complete: "completed",
+  turn_aborted: "interrupted",
+  turn_failed: "failed",
+};
+
+/** Turns reconstructed from the canonical rollout JSONL on disk. Codex 0.151
+    refuses full-history hydration on some threads and stubs the pagination
+    API it recommends instead ("list_turns is not supported yet"), so the
+    session store file is the one version-independent source of persisted
+    turns (#1332). Items are normalized to the wire shape the replay and
+    confirmation consumers expect (`clientId`, `userMessage`). */
+export function rolloutTurnsFromDisk(pathname: string | null | undefined): JsonObject[] {
+  if (!pathname) return [];
+  let raw: string;
+  try {
+    const stat = fs.statSync(pathname);
+    if (!stat.isFile()) return [];
+    if (stat.size > ROLLOUT_FALLBACK_READ_BYTES) {
+      const descriptor = fs.openSync(pathname, "r");
+      try {
+        const buffer = Buffer.alloc(ROLLOUT_FALLBACK_READ_BYTES);
+        const read = fs.readSync(descriptor, buffer, 0, buffer.length, stat.size - buffer.length);
+        raw = buffer.subarray(0, read).toString("utf8");
+      } finally {
+        fs.closeSync(descriptor);
+      }
+    } else {
+      raw = fs.readFileSync(pathname, "utf8");
+    }
+  } catch {
+    return [];
+  }
+  const order: string[] = [];
+  const turns = new Map<string, { id: string; status?: string; items: JsonObject[] }>();
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const payload = record(record(parsed)?.payload);
+    if (!payload) continue;
+    const payloadType = stringField(payload, "type");
+    const turnId = stringField(payload, "turn_id") ?? stringField(payload, "turnId");
+    if (!payloadType || !turnId) continue;
+    let turn = turns.get(turnId);
+    if (!turn) {
+      turn = { id: turnId, items: [] };
+      turns.set(turnId, turn);
+      order.push(turnId);
+    }
+    const terminal = ROLLOUT_TERMINAL_TURN_STATUS[payloadType];
+    if (terminal) {
+      turn.status = terminal;
+      continue;
+    }
+    if (payloadType !== "item_completed") continue;
+    const item = record(payload.item);
+    if (!item) continue;
+    const itemType = stringField(item, "type");
+    const clientId = stringField(item, "client_id") ?? stringField(item, "clientId");
+    turn.items.push({
+      ...item,
+      ...(itemType ? { type: itemType === "UserMessage" ? "userMessage" : itemType } : {}),
+      ...(clientId ? { clientId } : {}),
+    });
+  }
+  return order.map((id) => {
+    const turn = turns.get(id)!;
+    return { id: turn.id, status: turn.status ?? "inProgress", items: turn.items } as JsonObject;
+  });
+}
+
 function resumedActiveTurnId(value: unknown): string | null {
   const activeTurn = resumedTurns(value).findLast((turn) => stringField(turn, "status") === "inProgress");
   return activeTurn ? stringField(activeTurn, "id") : null;
@@ -825,7 +915,7 @@ export class CodexAppServerHost implements EngineHost {
         granted,
       );
       const result = threadId
-        ? await provisional.rpc("thread/resume", {
+        ? await provisional.resumeThreadTolerantly({
           threadId,
           ...(options.permissionProfile ? { permissions: options.permissionProfile } : {}),
           config,
@@ -1031,16 +1121,65 @@ export class CodexAppServerHost implements EngineHost {
     return this.awaitDeliveryConfirmation(entry, { outcome: "turn-started", turnId });
   }
 
+  /** Persisted-thread snapshot for materialization evidence: full-history
+      hydration first; a paginated thread that refuses it yields the same
+      evidence through a metadata-only read plus one ascending full-items
+      turns page (#1332). Every other error propagates unchanged so the
+      caller's evidence classification stays intact. */
+  /** thread/resume with the #1332 fallback: a paginated thread refuses
+      full-history resume, so retry with excludeTurns (metadata plus
+      live-resume state) and synthesize the persisted turns from the rollout
+      on disk — codex 0.151 stubs the pagination API its own deprecation
+      notice recommends, so the session store file is the only
+      version-independent source. */
+  private async resumeThreadTolerantly(params: Record<string, unknown>): Promise<unknown> {
+    try {
+      return await this.rpc("thread/resume", params);
+    } catch (error) {
+      if (!hydrationUnsupported(safeError(error))) throw error;
+      const resumed = await this.rpc("thread/resume", { ...params, excludeTurns: true });
+      const outer = record(resumed) ?? {};
+      const thread = record(outer.thread) ?? {};
+      const turns = rolloutTurnsFromDisk(stringField(thread, "path") ?? this.identity.path);
+      return { ...outer, thread: { ...thread, turns } };
+    }
+  }
+
+  /** Hydrated thread read with the #1332 fallback, returning the hydrated
+      response shape either way so every consumer of `thread.turns` keeps
+      working. On refusal the persisted turns come from the rollout on disk;
+      `window` bounds which end survives — "first" for materialization
+      evidence, "latest" for delivery confirmation; always oldest-first. */
+  private async readThreadWithTurns(window: "first" | "latest", timeoutMs?: number): Promise<unknown> {
+    try {
+      return await this.rpc("thread/read", {
+        threadId: this.identity.threadId,
+        includeTurns: true,
+      }, timeoutMs);
+    } catch (error) {
+      if (!hydrationUnsupported(safeError(error))) throw error;
+      const result = await this.rpc("thread/read", { threadId: this.identity.threadId }, timeoutMs);
+      const thread = record(record(result)?.thread) ?? {};
+      const persisted = rolloutTurnsFromDisk(stringField(thread, "path") ?? this.identity.path);
+      const turns = window === "first" ? persisted.slice(0, 64) : persisted.slice(-64);
+      return { thread: { ...thread, turns } };
+    }
+  }
+
   async sessionMaterializationEvidence(clientMessageId: string): Promise<SessionMaterializationEvidence> {
     let result: unknown;
     try {
-      result = await this.rpc("thread/read", {
-        threadId: this.identity.threadId,
-        includeTurns: true,
-      });
+      result = await this.readThreadWithTurns("first");
     } catch (error) {
       const reason = safeError(error);
       if (/not materialized yet/i.test(reason) && /before first user message/i.test(reason)) {
+        /* Codex 0.151 keeps giving this answer for threads whose rollout is
+           already on disk with the confirmed first message in it. The rollout
+           IS the session store, so it outranks the engine's claim (#1332). */
+        const persistedOnDisk = rolloutTurnsFromDisk(this.identity.path).some((turn) =>
+          Array.isArray(turn.items)
+          && turn.items.some((item) => stringField(item, "clientId") === clientMessageId));
+        if (persistedOnDisk) return { state: "materialized" };
         const confirmed = this.confirmedDeliveries.get(clientMessageId);
         const turnId = confirmed?.receipt.outcome !== "rejected"
           ? confirmed?.receipt.turnId ?? null
@@ -1089,9 +1228,14 @@ export class CodexAppServerHost implements EngineHost {
     if (!persistedIdentity.path || persistedIdentity.path !== this.identity.path) {
       return { state: "failed", reason: "Codex app-server did not confirm the canonical transcript path" };
     }
-    const persistedFirstMessage = resumedTurns(result).some((turn) =>
+    /* Codex 0.151 can answer the hydrated read successfully while omitting
+       `thread.turns` entirely, so an empty reply is not absence evidence —
+       the rollout on disk decides before absent is ever reported (#1332). */
+    const turnHoldsFirstMessage = (turn: JsonObject): boolean =>
       Array.isArray(turn.items)
-      && turn.items.some((item) => stringField(item, "clientId") === clientMessageId));
+      && turn.items.some((item) => stringField(item, "clientId") === clientMessageId);
+    const persistedFirstMessage = resumedTurns(result).some(turnHoldsFirstMessage)
+      || rolloutTurnsFromDisk(this.identity.path).some(turnHoldsFirstMessage);
     return persistedFirstMessage
       ? { state: "materialized" }
       : { state: "absent", reason: "Codex app-server did not read back the confirmed first message" };
@@ -1422,9 +1566,10 @@ export class CodexAppServerHost implements EngineHost {
 
   private async ensureCanonicalTranscriptPath(): Promise<void> {
     if (this.identity.path) return;
+    /* Metadata-only on purpose: this reader consumes nothing but the thread
+       identity and path, and hydration is refused on paginated threads (#1332). */
     const result = await this.rpc("thread/read", {
       threadId: this.identity.threadId,
-      includeTurns: true,
     });
     const recovered = threadFromResult(result, "thread/read");
     if (recovered.threadId !== this.identity.threadId) {
@@ -2214,7 +2359,7 @@ export class CodexAppServerHost implements EngineHost {
       const timeoutMs = this.activeTurnId
         ? this.requestTimeoutMs * ACTIVE_THREAD_READ_TIMEOUT_MULTIPLIER
         : this.requestTimeoutMs;
-      thread = await this.rpc("thread/read", { threadId: this.identity.threadId, includeTurns: true }, timeoutMs);
+      thread = await this.readThreadWithTurns("latest", timeoutMs);
     } catch (error) {
       const message = safeError(error);
       if (/not materialized yet/i.test(message) && /before first user message/i.test(message)) return null;

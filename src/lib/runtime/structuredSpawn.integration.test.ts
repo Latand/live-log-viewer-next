@@ -916,7 +916,7 @@ class RoundTripHost implements SpawnedStructuredHost {
     this.materializationFailure = options.materializationFailure ?? null;
   }
 
-  async sessionMaterializationEvidence(): Promise<
+  async sessionMaterializationEvidence(_clientMessageId: string): Promise<
     | { state: "materialized" }
     | { state: "absent"; reason: string }
     | { state: "unavailable"; reason: string }
@@ -1516,8 +1516,10 @@ test("a live Codex host whose transcript materializes after the former 30-second
   const host = new RoundTripHost("codex", artifactPath, id, { materializeTranscript: false });
   let now = 0;
   let evidenceChecks = 0;
-  host.sessionMaterializationEvidence = async () => {
+  const evidenceIds: string[] = [];
+  host.sessionMaterializationEvidence = async (clientMessageId: string) => {
     evidenceChecks += 1;
+    evidenceIds.push(clientMessageId);
     return evidenceChecks === 1
       ? { state: "absent", reason: "Codex app-server has not materialized the confirmed first message yet" }
       : { state: "materialized" };
@@ -1564,6 +1566,10 @@ test("a live Codex host whose transcript materializes after the former 30-second
 
     expect(now).toBeGreaterThan(INITIAL_MESSAGE_TIMEOUT_MS);
     expect(evidenceChecks).toBe(2);
+    /* Evidence hunts the id the engine wire carries — the operation id the
+       drain stamps on the spawn first message — never the held delivery's
+       clientMessageId (#1332). */
+    expect(evidenceIds[0]).toBe(`spawn_message_${begun.receipt.launchId}`);
     expect(response).toMatchObject({ state: "settled", path: artifactPath, initialMessage: "delivered" });
     expect(registry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({ state: "completed" });
     expect(host.releaseCount).toBe(0);

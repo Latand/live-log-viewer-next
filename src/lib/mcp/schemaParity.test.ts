@@ -638,7 +638,7 @@ test("create_pipeline publishes the stage contract in its tool definition", asyn
     const stage = stages?.items?.properties;
 
     expect(Object.keys(stage ?? {}).sort()).toEqual([
-      "access", "effort", "engine", "id", "kind", "model", "next", "onFail", "prompt", "role",
+      "access", "account", "effort", "engine", "id", "kind", "model", "next", "onFail", "prompt", "role",
     ]);
     expect(stage?.kind?.enum).toEqual(["run", "review-loop"]);
     expect(stage?.engine?.enum).toEqual(["claude", "codex"]);
@@ -652,6 +652,9 @@ test("create_pipeline publishes the stage contract in its tool definition", asyn
       ["onFail", "may not define one"],
       ["model", "inherit the role default"],
       ["access", "always read-only"],
+      /* #1279: the account a stage may name, and the refusal the project's
+         binding answers with when it names one the project does not allow. */
+      ["account", "project allows that account"],
     ] as const) {
       expect(stage?.[field]?.description).toContain(expected);
     }

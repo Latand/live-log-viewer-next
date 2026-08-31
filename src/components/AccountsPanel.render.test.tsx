@@ -314,3 +314,20 @@ test("uk-locale smoke: every new claude login key resolves and interpolates in U
   expect(translate("uk", "accounts.claudeLogin.announceCodeReady", { label: "Робочий" })).toContain("Робочий");
   expect(translate("uk", "accounts.claudeLogin.announceCodeReady", { label: "Робочий" })).not.toContain("{label}");
 });
+
+test("an account row names the projects it is bound to, and stays silent when it is bound to none (#1279)", () => {
+  const bound = render(base({
+    accounts: [
+      { id: "reserved", label: "Reserved", kind: "managed", authPresent: true, loginPending: false, loginState: "authenticated", deviceAuth: null,
+        projects: [{ project: "project-atlas", displayName: "Atlas" }] },
+      { id: "spare", label: "Spare", kind: "managed", authPresent: true, loginPending: false, loginState: "authenticated", deviceAuth: null },
+    ],
+    active: "reserved",
+  }));
+  expect(bound).toContain('data-account-projects="reserved"');
+  expect(bound).toContain("Atlas");
+  expect(bound).toContain(translate("en", "accounts.boundProjects"));
+  /* An account with no bindings is NOT restricted — a fenced-looking row there
+     would say the opposite of what the record means. */
+  expect(bound).not.toContain('data-account-projects="spare"');
+});

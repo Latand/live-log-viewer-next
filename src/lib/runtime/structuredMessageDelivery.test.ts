@@ -5,7 +5,8 @@ import path from "node:path";
 import { afterAll, expect, test } from "bun:test";
 
 import { AgentRegistry } from "@/lib/agent/registry";
-import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
+import { reconcileMigrations } from "@/lib/accounts/migration/coordinator";
+import { emptyLaunchProfile, type HeldDelivery } from "@/lib/accounts/migration/contracts";
 import type { RuntimeHostClient } from "./client";
 import type { RuntimeSnapshot } from "./contracts";
 import { MAX_STRUCTURED_IMAGE_ENCODED_BYTES, RuntimeImageStore, runtimeImageCapability } from "./runtimeImageStore";
@@ -1460,6 +1461,656 @@ test("dead structured composer send is durable before recovery and delivers afte
     spawned: true,
     outcome: "queued",
     receipt: { idempotencyKey: "recovered-message-one", status: "queued" },
+  });
+});
+
+test("a send resumes a reclaimed conversation after reserving the instruction and delivers it once", async () => {
+  const { registry, conversation } = registryWithConversation();
+  const generation = conversation.generations.at(-1)!;
+  registry.upsert({
+    key: { engine: conversation.engine, sessionId: generation.id },
+    artifactPath: generation.path,
+    cwd: generation.launchProfile.cwd,
+    accountId: generation.accountId,
+    launchProfile: generation.launchProfile,
+    status: "idle",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "stdio:released",
+      process: null,
+      eventCursor: 11,
+      protocolVersion: "v2",
+      writerClaimEpoch: 8,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 8,
+    claimOwner: "structured-host:stale-owner",
+    pendingAction: null,
+  });
+  let recovered = false;
+  let durableBeforeRecovery = false;
+  let recoveryCalls = 0;
+  let drainRequests = 0;
+  const commands: Array<{ operationId: string; idempotencyKey: string; text: string }> = [];
+  const client = {
+    snapshot: async () => recovered
+      ? snapshot(conversation.id)
+      : { ...snapshot(conversation.id), sessions: [] },
+    command: async (command: { operationId: string; idempotencyKey: string; text: string }) => {
+      commands.push(command);
+      return {
+        operationId: command.operationId,
+        replayed: false,
+        receipt: {
+          operationId: command.operationId,
+          idempotencyKey: command.idempotencyKey,
+          conversationId: conversation.id,
+          kind: "send" as const,
+          status: "delivered" as const,
+          queuePosition: null,
+          at: "2026-08-30T10:00:00.000Z",
+          revision: 1,
+        },
+      };
+    },
+    operationStatus: async (operationId: string) => ({
+      operationId,
+      replayed: false,
+      receipt: {
+        operationId,
+        idempotencyKey: "reclaimed-host-message",
+        conversationId: conversation.id,
+        kind: "send" as const,
+        status: "delivered" as const,
+        queuePosition: null,
+        at: "2026-08-30T10:00:01.000Z",
+        revision: 2,
+      },
+    }),
+  } as unknown as RuntimeHostClient;
+
+  const result = await enqueueStructuredMessage({
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId: "reclaimed-host-message",
+    text: "continue after the host was reclaimed",
+    hasImages: false,
+  }, {
+    enabled: () => true,
+    client: () => client,
+    registry: () => registry,
+    recover: async (_request, recoveryDependencies) => {
+      recoveryCalls += 1;
+      expect(recoveryDependencies?.requestDeliveryDrain).toBeUndefined();
+      durableBeforeRecovery = registry.pendingDeliveries(conversation.id).some((delivery) =>
+        delivery.clientMessageId === "reclaimed-host-message"
+          && delivery.text === "continue after the host was reclaimed");
+      recordStructuredOwner(registry, conversation);
+      recovered = true;
+      return { target: null, path: artifactPath, conversationId: conversation.id, spawned: true };
+    },
+    kick: () => { drainRequests += 1; },
+  });
+
+  expect(durableBeforeRecovery).toBe(true);
+  expect(recoveryCalls).toBe(1);
+  expect(drainRequests).toBe(1);
+  expect(commands).toHaveLength(0);
+  expect(result).toMatchObject({
+    ok: true,
+    structured: true,
+    outcome: "held",
+    spawned: true,
+  });
+
+  const reservation = registry.pendingDeliveries(conversation.id)
+    .find((delivery) => delivery.clientMessageId === "reclaimed-host-message")!;
+  const delivered = await deliverHeldStructuredMessage({
+    conversationId: conversation.id,
+    path: artifactPath,
+    deliveryId: reservation.command.operationId,
+    clientMessageId: "reclaimed-host-message",
+    text: "continue after the host was reclaimed",
+    command: reservation.command,
+  }, {
+    enabled: () => true,
+    client: () => client,
+    registry: () => registry,
+    kick: () => {},
+  });
+
+  expect(delivered).toBe("delivered");
+  expect(commands).toHaveLength(1);
+  expect(commands[0]).toMatchObject({
+    operationId: reservation.command.operationId,
+    idempotencyKey: "reclaimed-host-message",
+    text: "continue after the host was reclaimed",
+  });
+});
+
+test("a reclaimed admission survives the migration orphan sweep until recovery publishes its owner", async () => {
+  const { registry, conversation } = registryWithConversation();
+  let recovered = false;
+  const duringRecovery: {
+    state: HeldDelivery["state"] | null;
+    intent: HeldDelivery["recoveryIntent"];
+  } = { state: null, intent: null };
+  const commands: string[] = [];
+  const client = {
+    snapshot: async () => recovered
+      ? snapshot(conversation.id)
+      : { ...snapshot(conversation.id), sessions: [] },
+    command: async (command: { operationId: string; idempotencyKey: string }) => {
+      commands.push(command.idempotencyKey);
+      return {
+        operationId: command.operationId,
+        replayed: false,
+        receipt: {
+          operationId: command.operationId,
+          idempotencyKey: command.idempotencyKey,
+          conversationId: conversation.id,
+          kind: "send" as const,
+          status: "delivered" as const,
+          queuePosition: null,
+          at: "2026-08-31T10:00:00.000Z",
+          revision: 1,
+        },
+      };
+    },
+    operationStatus: async (operationId: string) => ({
+      operationId,
+      replayed: false,
+      receipt: {
+        operationId,
+        idempotencyKey: "reclaimed-orphan-sweep",
+        conversationId: conversation.id,
+        kind: "send" as const,
+        status: "delivered" as const,
+        queuePosition: null,
+        at: "2026-08-31T10:00:01.000Z",
+        revision: 2,
+      },
+    }),
+  } as unknown as RuntimeHostClient;
+  const delivery = {
+    async deliver({ delivery: held, path: heldPath, clientMessageId }: {
+      delivery: HeldDelivery;
+      path: string;
+      clientMessageId: string;
+    }) {
+      return await deliverHeldStructuredMessage({
+        conversationId: held.conversationId,
+        runtimeConversationId: held.runtimeConversationId,
+        path: heldPath,
+        deliveryId: held.id,
+        clientMessageId,
+        text: held.text,
+        command: held.command,
+      }, {
+        enabled: () => true,
+        client: () => client,
+        registry: () => registry,
+        kick: () => {},
+      }) ?? "delivery-uncertain";
+    },
+  };
+
+  const result = await enqueueStructuredMessage({
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId: "reclaimed-orphan-sweep",
+    text: "continue after recovery owns the conversation",
+    hasImages: false,
+  }, {
+    enabled: () => true,
+    client: () => client,
+    registry: () => registry,
+    requestMigrationTick: () => {},
+    recover: async () => {
+      const reconciling = new AgentRegistry(registry.filename);
+      await reconcileMigrations({} as never, delivery, reconciling);
+      duringRecovery.state = reconciling.pendingDeliveries(conversation.id)
+        .find((candidate) => candidate.clientMessageId === "reclaimed-orphan-sweep")?.state ?? null;
+      duringRecovery.intent = reconciling.pendingDeliveries(conversation.id)
+        .find((candidate) => candidate.clientMessageId === "reclaimed-orphan-sweep")?.recoveryIntent ?? null;
+      recordStructuredOwner(registry, conversation);
+      recovered = true;
+      return { target: null, path: artifactPath, conversationId: conversation.id, spawned: true };
+    },
+    kick: () => {},
+  });
+
+  expect(result).toMatchObject({ ok: true, outcome: "held", spawned: true });
+  expect(duringRecovery.state).toBe("assigned");
+  expect(duringRecovery.intent).toBe("reclaimed-host");
+  expect(commands).toEqual([]);
+
+  await reconcileMigrations({} as never, delivery, registry);
+
+  expect(commands).toEqual(["reclaimed-orphan-sweep"]);
+  expect(registry.pendingDeliveries(conversation.id)).toEqual([]);
+});
+
+test("the migration orphan sweep still terminalizes upgrade-era residue without recovery intent", async () => {
+  const { registry, conversation } = registryWithConversation();
+  const orphan = registry.holdDelivery(
+    conversation.id,
+    "upgrade residue with no live admission",
+    "upgrade-orphan-without-recovery",
+  );
+  let deliveryCalls = 0;
+
+  expect(orphan).toMatchObject({
+    state: "assigned",
+    attempts: 0,
+    recoveryIntent: null,
+  });
+
+  await reconcileMigrations({} as never, {
+    async deliver() {
+      deliveryCalls += 1;
+      return "delivered";
+    },
+  }, registry);
+
+  expect(deliveryCalls).toBe(0);
+  expect(registry.snapshot().heldDeliveries[orphan.id]).toMatchObject({
+    state: "failed",
+    attempts: 0,
+    generationId: null,
+    recoveryIntent: null,
+    error: expect.stringContaining("upgrade-era reservation has no durable owner evidence"),
+  });
+});
+
+test("a durable dead host resumes even while the runtime still projects it as unhosted", async () => {
+  const { registry, conversation } = registryWithConversation();
+  const generation = conversation.generations.at(-1)!;
+  registry.upsert({
+    key: { engine: conversation.engine, sessionId: generation.id },
+    artifactPath: generation.path,
+    cwd: generation.launchProfile.cwd,
+    accountId: generation.accountId,
+    launchProfile: generation.launchProfile,
+    status: "dead",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "stdio:released",
+      process: { pid: 4040, startIdentity: "departed-process" },
+      eventCursor: 12,
+      protocolVersion: "v2",
+      writerClaimEpoch: 8,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 8,
+    claimOwner: "structured-host:departed-owner",
+    pendingAction: null,
+  });
+  const projected = snapshot(conversation.id);
+  projected.sessions[0] = {
+    ...projected.sessions[0]!,
+    hostKind: "unhosted",
+    host: "unhosted",
+    provenance: "derived",
+  };
+  let recoveryCalls = 0;
+
+  const result = await enqueueStructuredMessage({
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId: "durable-dead-runtime-unhosted",
+    text: "resume from the durable conversation",
+  }, {
+    enabled: () => true,
+    client: () => ({ snapshot: async () => projected } as unknown as RuntimeHostClient),
+    registry: () => registry,
+    recover: async () => {
+      recoveryCalls += 1;
+      return { target: null, path: artifactPath, conversationId: conversation.id, spawned: true };
+    },
+    kick: () => {},
+  });
+
+  expect(recoveryCalls).toBe(1);
+  expect(result).toMatchObject({
+    ok: true,
+    structured: true,
+    outcome: "held",
+    spawned: true,
+  });
+  expect(registry.pendingDeliveries(conversation.id)).toMatchObject([{
+    clientMessageId: "durable-dead-runtime-unhosted",
+    text: "resume from the durable conversation",
+    attempts: 0,
+  }]);
+});
+
+test("a reclaimed send stays durably held while its accepted resume has no process", async () => {
+  const { registry, conversation } = registryWithConversation();
+  const generation = conversation.generations.at(-1)!;
+  registry.upsert({
+    key: { engine: conversation.engine, sessionId: generation.id },
+    artifactPath: generation.path,
+    cwd: generation.launchProfile.cwd,
+    accountId: generation.accountId,
+    launchProfile: generation.launchProfile,
+    status: "dead",
+    host: null,
+    structuredHost: null,
+    claimEpoch: 4,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  let recoveryCalls = 0;
+  let commands = 0;
+  let drainRequests = 0;
+  const client = {
+    snapshot: async () => ({ ...snapshot(conversation.id), sessions: [] }),
+    command: async () => {
+      commands += 1;
+      throw new Error("delivery reached a host with no recorded process");
+    },
+  } as unknown as RuntimeHostClient;
+
+  const result = await enqueueStructuredMessage({
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId: "resume-publication-window",
+    text: "wait for the claimed host, then continue",
+    hasImages: false,
+  }, {
+    enabled: () => true,
+    client: () => client,
+    registry: () => registry,
+    recover: async () => {
+      recoveryCalls += 1;
+      expect(registry.pendingDeliveries(conversation.id)).toMatchObject([{
+        clientMessageId: "resume-publication-window",
+        text: "wait for the claimed host, then continue",
+      }]);
+      registry.upsert({
+        key: { engine: conversation.engine, sessionId: generation.id },
+        artifactPath: generation.path,
+        cwd: generation.launchProfile.cwd,
+        accountId: generation.accountId,
+        launchProfile: generation.launchProfile,
+        status: "starting",
+        host: null,
+        structuredHost: {
+          kind: "codex-app-server",
+          endpoint: "stdio:publishing",
+          process: null,
+          eventCursor: 0,
+          protocolVersion: "v2",
+          writerClaimEpoch: 5,
+          activeTurnRef: null,
+          pendingAttention: [],
+          activeFlags: [],
+        },
+        claimEpoch: 5,
+        claimOwner: null,
+        pendingAction: "resume",
+      });
+      return { target: null, path: artifactPath, conversationId: conversation.id, spawned: true };
+    },
+    kick: () => { drainRequests += 1; },
+  });
+
+  expect(recoveryCalls).toBe(1);
+  expect(commands).toBe(0);
+  expect(drainRequests).toBe(1);
+  expect(result).toMatchObject({
+    ok: true,
+    structured: true,
+    outcome: "held",
+    spawned: true,
+  });
+  expect(registry.readOnlySnapshot().entries[`codex:${generation.id}`]).toMatchObject({
+    status: "starting",
+    pendingAction: "resume",
+    structuredHost: { process: null },
+  });
+  const reservation = registry.pendingDeliveries(conversation.id)
+    .find((delivery) => delivery.clientMessageId === "resume-publication-window")!;
+  let duplicateRecoveries = 0;
+  const drainOutcome = await deliverHeldStructuredMessage({
+    conversationId: conversation.id,
+    path: artifactPath,
+    deliveryId: reservation.command.operationId,
+    clientMessageId: "resume-publication-window",
+    text: "wait for the claimed host, then continue",
+    command: reservation.command,
+  }, {
+    enabled: () => true,
+    client: () => client,
+    registry: () => registry,
+    recover: async () => {
+      duplicateRecoveries += 1;
+      throw new Error("a publishing resume was started again");
+    },
+  });
+  expect(drainOutcome).toBe("held");
+  expect(duplicateRecoveries).toBe(0);
+});
+
+test("delivery failures name reclaimed recovery separately from host synchronization", async () => {
+  const missingSessions = {
+    snapshot: async () => ({ ...snapshot(), sessions: [] }),
+  } as unknown as RuntimeHostClient;
+
+  const reclaimedFixture = registryWithConversation();
+  const reclaimedGeneration = reclaimedFixture.conversation.generations.at(-1)!;
+  reclaimedFixture.registry.upsert({
+    key: { engine: "codex", sessionId: reclaimedGeneration.id },
+    artifactPath: reclaimedGeneration.path,
+    cwd: reclaimedGeneration.launchProfile.cwd,
+    accountId: reclaimedGeneration.accountId,
+    launchProfile: reclaimedGeneration.launchProfile,
+    status: "dead",
+    host: null,
+    structuredHost: null,
+    claimEpoch: 1,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  const reclaimed = await enqueueStructuredMessage({
+    path: artifactPath,
+    conversationId: reclaimedFixture.conversation.id,
+    clientMessageId: "reclaimed-error",
+    text: "continue after recovery",
+  }, {
+    enabled: () => true,
+    client: () => missingSessions,
+    registry: () => reclaimedFixture.registry,
+    recover: async () => null,
+  });
+  expect(reclaimed).toMatchObject({
+    ok: false,
+    status: 503,
+    error: "conversation host was reclaimed; automatic resume did not establish a deliverable host",
+  });
+
+  const synchronizingFixture = registryWithConversation();
+  const synchronizingGeneration = synchronizingFixture.conversation.generations.at(-1)!;
+  synchronizingFixture.registry.upsert({
+    key: { engine: "codex", sessionId: synchronizingGeneration.id },
+    artifactPath: synchronizingGeneration.path,
+    cwd: synchronizingGeneration.launchProfile.cwd,
+    accountId: synchronizingGeneration.accountId,
+    launchProfile: synchronizingGeneration.launchProfile,
+    status: "starting",
+    host: null,
+    structuredHost: null,
+    claimEpoch: 2,
+    claimOwner: null,
+    pendingAction: "resume",
+  });
+  const synchronizing = await enqueueStructuredMessage({
+    path: artifactPath,
+    conversationId: synchronizingFixture.conversation.id,
+    clientMessageId: "synchronizing-error",
+    text: "wait for publication",
+  }, {
+    enabled: () => true,
+    client: () => missingSessions,
+    registry: () => synchronizingFixture.registry,
+  });
+  expect(synchronizing).toMatchObject({
+    ok: false,
+    status: 503,
+    error: "conversation host ownership is synchronizing; no deliverable process is recorded yet",
+  });
+});
+
+test("a dead structured host names reclamation when its recovery fails", async () => {
+  const { registry, conversation } = registryWithConversation();
+  recordStructuredOwner(registry, conversation);
+  const projected = snapshot(conversation.id);
+  projected.sessions[0] = {
+    ...projected.sessions[0]!,
+    host: "dead",
+  };
+
+  const result = await enqueueStructuredMessage({
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId: "dead-host-recovery-error",
+    text: "continue after recovery",
+  }, {
+    enabled: () => true,
+    client: () => ({ snapshot: async () => projected } as unknown as RuntimeHostClient),
+    registry: () => registry,
+    recover: async () => { throw new Error("recovery process failed to publish"); },
+  });
+
+  expect(result).toMatchObject({
+    ok: false,
+    status: 503,
+    operationId: expect.any(String),
+    error: "conversation host was reclaimed; automatic resume did not establish a deliverable host: recovery process failed to publish",
+  });
+  expect(registry.pendingDeliveries(conversation.id)).toMatchObject([{
+    command: { operationId: expect.any(String) },
+    clientMessageId: "dead-host-recovery-error",
+    attempts: 0,
+  }]);
+});
+
+test("reclaimed-host recovery never repeats an instruction whose delivery fate is unknown", async () => {
+  const { registry, conversation } = registryWithConversation();
+  const generation = conversation.generations.at(-1)!;
+  registry.upsert({
+    key: { engine: "codex", sessionId: generation.id },
+    artifactPath: generation.path,
+    cwd: generation.launchProfile.cwd,
+    accountId: generation.accountId,
+    launchProfile: generation.launchProfile,
+    status: "idle",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "stdio:released",
+      process: null,
+      eventCursor: 4,
+      protocolVersion: "v2",
+      writerClaimEpoch: 6,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 6,
+    claimOwner: "structured-host:stale-owner",
+    pendingAction: null,
+  });
+  const reservation = registry.holdDelivery(
+    conversation.id,
+    "the instruction with an unknown fate",
+    "unknown-fate-message",
+  );
+  registry.beginDeliveryAttempt(reservation.id, generation.id);
+  let recoveryCalls = 0;
+
+  const result = await enqueueStructuredMessage({
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId: "unknown-fate-message",
+    text: "the instruction with an unknown fate",
+  }, {
+    enabled: () => true,
+    client: () => ({
+      snapshot: async () => ({ ...snapshot(conversation.id), sessions: [] }),
+      command: async () => { throw new Error("an uncertain instruction was repeated"); },
+    } as unknown as RuntimeHostClient),
+    registry: () => registry,
+    recover: async () => {
+      recoveryCalls += 1;
+      throw new Error("recovery must stay behind the uncertainty fence");
+    },
+  });
+
+  expect(recoveryCalls).toBe(0);
+  expect(result).toMatchObject({
+    ok: false,
+    status: 409,
+    operationId: reservation.command.operationId,
+    transportUncertain: true,
+    error: "delivery started; recovery requires an explicit outcome",
+  });
+});
+
+test("dead structured recovery stays behind an instruction whose delivery fate is unknown", async () => {
+  const { registry, conversation } = registryWithConversation();
+  recordStructuredOwner(registry, conversation);
+  const generation = conversation.generations.at(-1)!;
+  const reservation = registry.holdDelivery(
+    conversation.id,
+    "the instruction with an unknown structured fate",
+    "unknown-structured-fate-message",
+  );
+  registry.beginDeliveryAttempt(reservation.id, generation.id);
+  const projected = snapshot(conversation.id);
+  projected.sessions[0] = {
+    ...projected.sessions[0]!,
+    host: "dead",
+  };
+  let recoveryCalls = 0;
+  let commands = 0;
+
+  const result = await enqueueStructuredMessage({
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId: "unknown-structured-fate-message",
+    text: "the instruction with an unknown structured fate",
+  }, {
+    enabled: () => true,
+    client: () => ({
+      snapshot: async () => projected,
+      command: async () => {
+        commands += 1;
+        throw new Error("an uncertain instruction was repeated");
+      },
+    } as unknown as RuntimeHostClient),
+    registry: () => registry,
+    recover: async () => {
+      recoveryCalls += 1;
+      throw new Error("recovery must stay behind the uncertainty fence");
+    },
+  });
+
+  expect(recoveryCalls).toBe(0);
+  expect(commands).toBe(0);
+  expect(result).toMatchObject({
+    ok: false,
+    status: 409,
+    operationId: reservation.command.operationId,
+    transportUncertain: true,
+    error: "delivery started; recovery requires an explicit outcome",
   });
 });
 

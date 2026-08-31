@@ -3,6 +3,16 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { listClaudeAccounts } from "@/lib/accounts/claude";
+import { listCodexAccounts } from "@/lib/accounts/codex";
+import { projectEngineAccounts } from "@/lib/accounts/projectAccountsView";
+import {
+  accountProjectBindings,
+  bindAccountToProject,
+  projectsForAccount,
+  unbindAccountFromProject,
+  type BindingEngine,
+} from "@/lib/accounts/projectBindings";
 import { agentRegistry, readOnlyConversationLookupFromSnapshot } from "@/lib/agent/registry";
 import { ENGINE_MODELS, validateLaunchModel } from "@/lib/agent/models";
 import { procBackend } from "@/lib/proc";
@@ -32,6 +42,7 @@ import { applyBoardCommand } from "@/lib/board/command";
 import { boardFor } from "@/lib/board/store";
 import { MAX_BOARD_MUTATIONS_PER_REQUEST, MAX_BOARD_PATH_LIST_ITEMS } from "@/lib/board/validation";
 import { applyConversationAction } from "@/lib/conversation/actions";
+import { conversationDeliverabilityFromRecord } from "@/lib/conversation/deliverability";
 import { backoffDelayMs, DeadlineExceededError, deadlineSignal } from "@/lib/deadline";
 import { cancelRound, closeFlow, patchFlow } from "@/lib/flows/commands";
 import { getFlowsWithPresets } from "@/lib/flows/engine";
@@ -460,6 +471,15 @@ export interface ViewerMcpDomainDependencies {
       Null means the invariant "a registered session has a canonical project"
       is violated, and unscoped directive routing fails closed diagnostically. */
   callerProject?(): string | null;
+  /** The account↔project binding store (#1279). Optional so a partial harness
+      can exercise the tool with no state directory; production reads and
+      writes the durable record, and every answer is a read of it. */
+  readAccountProjectBindings?: typeof accountProjectBindings;
+  bindAccountToProject?: typeof bindAccountToProject;
+  unbindAccountFromProject?: typeof unbindAccountFromProject;
+  /** Accounts the catalog holds, per engine, so a binding can be answered with
+      labels and a caller can see what there is to bind. */
+  listBindableAccounts?(engine: BindingEngine): { accountId: string; label: string }[];
 }
 
 /**
@@ -1501,6 +1521,22 @@ async function getConversation(
   });
 }
 
+function conversationDeliverability(
+  args: McpToolArgs,
+  dependencies: Pick<ViewerMcpDomainDependencies, "registrySnapshot">,
+): McpToolPayload {
+  const conversationId = text(args.conversationId);
+  const transcriptPath = text(args.transcriptPath) || text(args.path);
+  if (!conversationId && !transcriptPath) {
+    throw new Error("conversationId or transcriptPath is required");
+  }
+  const result = conversationDeliverabilityFromRecord(dependencies.registrySnapshot(), {
+    conversationId,
+    transcriptPath,
+  });
+  return redactPayload({ ...result });
+}
+
 const CONVERSATION_MESSAGE_KINDS = ["message", "reasoning", "tool_call", "tool_result", "trace"] as const;
 const CONVERSATION_MESSAGE_ROLES = ["user", "assistant", "system", "tool"] as const;
 
@@ -2115,6 +2151,80 @@ function seatTickSettingsTool(args: McpToolArgs, dependencies: ViewerMcpDomainDe
        see what it is restoring before it restores it. */
     defaults: defaultSeatTickSettings(project),
     defaultWakeIntervalMinutes: Math.round(SEAT_TICK_WAKE_INTERVAL_MS / 60_000),
+  });
+}
+
+
+/**
+ * account_project_binding: list, add and remove the bindings that decide which
+ * accounts a project's work may run on (#1279).
+ *
+ * Two properties this tool is built around, both of them the operator's:
+ *
+ * - **The answer is always a read of the record.** An add or a remove returns
+ *   the bindings re-read from the file after the write, and the store refuses
+ *   to call a mutation `ok` when that read does not show it. The Viewer has
+ *   already shipped an action that answered `ok` and changed nothing; a caller
+ *   here never has to trust an echo to know what it did.
+ * - **A project nobody binds is untouched.** No row for an engine means every
+ *   account of that engine, which is the behaviour the Viewer has always had.
+ *   The `restricted` flag on each engine's block says which of the two a
+ *   project is in, so "allows everything" never reads like "allows nothing".
+ */
+function accountProjectBindingTool(args: McpToolArgs, dependencies: ViewerMcpDomainDependencies): McpToolPayload {
+  const action = text(args.action) || "list";
+  if (action !== "list" && action !== "add" && action !== "remove") {
+    throw new Error("action must be list, add or remove");
+  }
+  const read = dependencies.readAccountProjectBindings ?? accountProjectBindings;
+  const bind = dependencies.bindAccountToProject ?? bindAccountToProject;
+  const unbind = dependencies.unbindAccountFromProject ?? unbindAccountFromProject;
+  const accountsFor = dependencies.listBindableAccounts
+    ?? ((engine: BindingEngine) => (engine === "claude" ? listClaudeAccounts() : listCodexAccounts())
+      .map((account) => ({ accountId: account.id, label: account.label })));
+
+  const callerProject = dependencies.callerProject ? dependencies.callerProject() : productionCallerProject();
+  const requestedProject = text(args.project) || (action === "list" ? callerProject ?? "" : "");
+  const project = requestedProject ? canonicalOrchestratorProject(requestedProject) : null;
+
+  let changed = false;
+  if (action !== "list") {
+    if (!project) throw new Error("project is required to add or remove a binding");
+    const engine = text(args.engine);
+    if (engine !== "claude" && engine !== "codex") throw new Error("engine must be claude or codex");
+    const accountId = text(args.accountId);
+    if (!accountId) throw new Error("accountId is required to add or remove a binding");
+    const result = action === "add" ? bind(engine, accountId, project) : unbind(engine, accountId, project);
+    if (!result.ok) throw new Error(`${result.code}: ${result.message}`);
+    changed = result.changed;
+  }
+
+  /* Read AFTER the mutation, from the store, for both the record and the view
+     the fence will enforce — not from the mutation's own return value. */
+  const bindings = read();
+  const engines = ["claude", "codex"] as const;
+  return redactPayload({
+    action,
+    changed,
+    project,
+    callerProject: callerProject ? canonicalOrchestratorProject(callerProject) : null,
+    bindings,
+    ...(project
+      ? {
+          allowedFor: Object.fromEntries(engines.map((engine) => [
+            engine,
+            projectEngineAccounts(project, engine, accountsFor(engine), bindings, []),
+          ])),
+        }
+      : {}),
+    accounts: Object.fromEntries(engines.map((engine) => [
+      engine,
+      accountsFor(engine).map((account) => ({
+        ...account,
+        projects: projectsForAccount(engine, account.accountId, bindings),
+      })),
+    ])),
+    note: "a project with no binding for an engine allows every account of that engine, which is the behaviour it has always had",
   });
 }
 
@@ -3418,6 +3528,7 @@ export function viewerMcpBindings(
     list_conversations: (args, context) => listConversations(args, viewerControlForCall(controlDependencies, context)),
     search_transcripts: (args, context) => searchTranscripts(args, viewerControlForCall(controlDependencies, context)),
     get_conversation: (args, context) => getConversation(args, domainDependencies, context),
+    conversation_deliverability: (args) => Promise.resolve(conversationDeliverability(args, domainDependencies)),
     conversation_messages: (args, context) => conversationMessages(args, domainDependencies, context),
     deploy_exact_sha: (args, context) => deployExactSha(args, viewerControlForCall(controlDependencies, context), domainDependencies),
     get_pipeline: getPipeline,
@@ -3444,6 +3555,8 @@ export function viewerMcpBindings(
        throwing, and a synchronous throw out of a binding call is not the
        rejected promise every caller here handles. */
     seat_tick_settings: async (args) => seatTickSettingsTool(args, domainDependencies),
+    /* Same reason as above: this binding refuses by throwing. */
+    account_project_binding: async (args) => accountProjectBindingTool(args, domainDependencies),
     create_orchestrator: (args, context) => createOrchestrator(args, viewerControlForCall(controlDependencies, context)),
     send_message_to_orchestrator: (args, context) => sendMessageToOrchestrator(args, viewerControlForCall(controlDependencies, context), domainDependencies),
     rotate_orchestrator: (args, context) => rotateOrchestrator(args, viewerControlForCall(controlDependencies, context)),

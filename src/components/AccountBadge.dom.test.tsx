@@ -35,7 +35,13 @@ mock.module("@/hooks/useEngineAccounts", () => ({
     active: "source",
   }),
 }));
-mock.module("./tasks/taskToast", () => ({ pushTaskToast: () => {} }));
+/** Recorded, because the answer to an out-of-pool switch is a toast and nothing
+    else: it is the one place the operator learns the choice was recorded — or
+    that it was not. */
+const toasts: { kind: string; message: string }[] = [];
+mock.module("./tasks/taskToast", () => ({
+  pushTaskToast: (kind: string, message: string) => { toasts.push({ kind, message }); },
+}));
 
 const { AccountBadge } = await import("./AccountBadge");
 
@@ -77,6 +83,7 @@ afterEach(() => {
   document.body.replaceChildren();
   localStorage.clear();
   requests.length = 0;
+  toasts.length = 0;
   responseBody = {
     ok: true,
     operationId: "account-switch-one",
@@ -207,5 +214,74 @@ test("an account switch carries the latest conversation runtime profile", async 
     effort: "medium",
     fast: true,
   });
+  await act(async () => root.unmount());
+});
+
+/** Click "Target" on an open chip menu and let the answer settle. */
+async function switchToTarget(host: HTMLElement): Promise<void> {
+  await act(async () => {
+    host.querySelector<HTMLElement>("[data-conversation-account-chip]")!
+      .dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event);
+  });
+  const rows = [...document.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')];
+  await act(async () => {
+    rows[1]!.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+}
+
+test("an out-of-pool switch that was recorded says so", async () => {
+  responseBody = {
+    ok: true,
+    outcome: "pending",
+    accountOverride: { outsidePool: true, recorded: true },
+  };
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  await act(async () => { root.render(<AccountBadge engine="codex" accountId="source" file={file} />); });
+
+  await switchToTarget(host);
+
+  expect(toasts).toEqual([{ kind: "ok", message: expect.stringContaining("recorded as your choice") }]);
+  await act(async () => root.unmount());
+});
+
+test("an out-of-pool switch the journal could not record is not answered \"recorded\"", async () => {
+  /* The switch went through — a record that would not write is not a decision
+     anybody made — and this is the only surface that can tell the operator the
+     one thing the project's accounts will not show them afterwards. Answered
+     with the recorded wording, it said the opposite of what happened. */
+  responseBody = {
+    ok: true,
+    outcome: "pending",
+    accountOverride: { outsidePool: true, recorded: false, recordFailure: "the journal write failed" },
+  };
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  await act(async () => { root.render(<AccountBadge engine="codex" accountId="source" file={file} />); });
+
+  await switchToTarget(host);
+
+  expect(toasts).toHaveLength(1);
+  expect(toasts[0]!.kind).toBe("err");
+  expect(toasts[0]!.message).toContain("the record could not be written");
+  expect(toasts[0]!.message).not.toContain("recorded as your choice");
+  /* The switch itself still happened, so the badge is waiting on it. */
+  expect(host.textContent).toContain("Account switch pending");
+  await act(async () => root.unmount());
+});
+
+test("a switch inside the project's pool says nothing at all", async () => {
+  responseBody = { ok: true, outcome: "pending" };
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  await act(async () => { root.render(<AccountBadge engine="codex" accountId="source" file={file} />); });
+
+  await switchToTarget(host);
+
+  expect(toasts).toEqual([]);
   await act(async () => root.unmount());
 });

@@ -209,8 +209,23 @@ export function AccountBadge({
         operationId?: string;
         receipt?: { operationId: string; status: string };
         error?: string;
+        accountOverride?: { outsidePool?: boolean; recorded?: boolean };
       };
       if (!response.ok || !body.ok) throw new Error(body.error ?? t("accounts.switchFailed"));
+      /* #1279: the switch went through, and it went outside the accounts this
+         project's work is normally drawn from. Said at the moment of the
+         gesture, because the operator is entitled to make it and entitled to
+         know it was recorded as theirs — and, when the journal would not take
+         the record, entitled to know that the switch they just made is the one
+         thing the project view will not show them afterwards. */
+      if (body.accountOverride?.outsidePool) {
+        pushTaskToast(
+          body.accountOverride.recorded === false ? "err" : "ok",
+          t(body.accountOverride.recorded === false
+            ? "accounts.switchedOutsidePoolUnrecorded"
+            : "accounts.switchedOutsidePool"),
+        );
+      }
       if (targetAccountRef.current === targetId) {
         operationRef.current = body.operationId ?? body.receipt?.operationId ?? null;
       }

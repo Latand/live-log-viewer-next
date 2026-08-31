@@ -63,13 +63,16 @@ test("a pipeline stage keeps its reserved account through a routing change befor
   const registry = new AgentRegistry(path.join(process.env.LLV_STATE_DIR!, "pipeline-account-pin-registry.json"));
   const cwd = process.env.LLV_STATE_DIR!;
   setAgentRegistryForTests(registry);
-  const resolveSpawn = spyOn(accountManager, "resolveSpawn").mockImplementation(() => ({
-    engine: "codex",
-    accountId: "limited",
-    kind: "managed",
-    home: process.env.LLV_STATE_DIR!,
-    transcriptRoot: process.env.LLV_STATE_DIR!,
-    env: { NODE_ENV: "test" },
+  const resolveSpawn = spyOn(accountManager, "resolveProjectSpawn").mockImplementation(() => ({
+    kind: "available",
+    account: {
+      engine: "codex",
+      accountId: "limited",
+      kind: "managed",
+      home: process.env.LLV_STATE_DIR!,
+      transcriptRoot: process.env.LLV_STATE_DIR!,
+      env: { NODE_ENV: "test" },
+    },
   }));
   const reservations: Array<{ launchId: string; conversationId: string }> = [];
   try {
@@ -84,6 +87,8 @@ test("a pipeline stage keeps its reserved account through a routing change befor
         promptScaffold: "Builder guidance",
       },
       cwd,
+      project: "repo-00000000000000000000000000000001",
+      requestedAccountId: null,
       title: "Build scoped change · build",
       ["prompt"]: "Build the scoped change",
       parentPath: null,
@@ -162,6 +167,8 @@ test("a concurrent pipeline replay and its recovery projections withhold staged 
       promptScaffold: "Builder guidance",
     },
     cwd,
+    project: "repo-00000000000000000000000000000001",
+    requestedAccountId: null,
     title: "Build scoped change",
     "prompt": "Build the scoped change",
     parentPath: null,

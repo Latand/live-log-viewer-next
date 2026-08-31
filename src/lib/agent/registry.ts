@@ -7,6 +7,9 @@ import { statePath } from "@/lib/configDir";
 import { procBackend } from "@/lib/proc";
 import { durableSemanticTitle, SPAWN_TITLE_REQUIRED_ERROR } from "@/lib/title";
 import { withAccountMutationLock } from "@/lib/accounts/accountMutation";
+import { conversationProjectKey } from "@/lib/accounts/conversationProject";
+import { accountProjectBindings, projectAccountRefusalDetail } from "@/lib/accounts/projectBindings";
+import { admitAutomaticAccountTarget } from "@/lib/accounts/projectSelection";
 import {
   emptyLaunchProfile,
   normalizeProjectOwnership,
@@ -948,6 +951,66 @@ function conversationMigrationForIntent(
   };
 }
 
+/**
+ * #1279's eleventh automatic selector, and the one the inventory missed: a
+ * spawn that SETTLES while an engine-wide drain is running is enrolled into it
+ * at settlement.
+ *
+ * Nobody named an account for that enrollment. The spawn was reserved on its
+ * BIRTH account before the drain existed, and this is the machine deciding by
+ * itself that the settled conversation should follow the drain's target — so
+ * for an AUTOMATIC intent it is an automatic selection and asks exactly what
+ * every other one asks, through the same admission: this conversation's own
+ * project's pool, and whether the target has room in it. Without it a spawn
+ * reserved before the drain migrated project B onto a target only project A
+ * allows, and an exhausted target or an unreadable record passed the same
+ * point untouched.
+ *
+ * A MANUAL intent NAMED its target. That is a control, it is carried out, and
+ * it reads no bindings at all — enrollment there is unrestricted, exactly as
+ * it was.
+ *
+ * A refusal PARKS the caller at its current safe state. Settlement keeps the
+ * conversation on its birth account. Retry keeps the migration failed and
+ * carries the admission reason. No read failure escapes this function: the
+ * spawn has already happened, and evidence this process cannot turn into a pool
+ * must not be able to lose it. Every failure answers "not admitted", the same
+ * direction the fence fails everywhere else.
+ */
+type MigrationEnrollmentAdmission =
+  | { kind: "accepted" }
+  | { kind: "refused"; reason: string };
+
+function migrationEnrollmentAdmission(
+  file: RegistryFile,
+  conversation: RegistryConversation,
+  source: NativeGeneration,
+  intent: MigrationIntent,
+): MigrationEnrollmentAdmission {
+  if (intent.origin !== "auto") return { kind: "accepted" };
+  const project = conversationProjectKey(conversation.projectOwnership, source.launchProfile);
+  try {
+    const resolution = admitAutomaticAccountTarget({
+      project,
+      engine: conversation.engine,
+      targetId: intent.targetId,
+      observations: Object.values(file.quotaObservations[conversation.engine]),
+      bindings: accountProjectBindings(),
+    });
+    return resolution.kind === "available"
+      ? { kind: "accepted" }
+      : {
+          kind: "refused",
+          reason: projectAccountRefusalDetail(resolution, conversation.engine, project ?? ""),
+        };
+  } catch (error) {
+    return {
+      kind: "refused",
+      reason: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
 function queueAbandonedMigrationCleanup(
   file: RegistryFile,
   conversation: RegistryConversation,
@@ -1586,6 +1649,7 @@ function normalizeHeldDelivery(value: HeldDelivery): HeldDelivery {
       : [],
     command,
     requestDigest: typeof value.requestDigest === "string" ? value.requestDigest : legacyDigest,
+    recoveryIntent: value.recoveryIntent === "reclaimed-host" ? value.recoveryIntent : null,
     state,
     generationId: imagesCorrupt ? null : value.generationId ?? null,
     attempts: Number.isInteger(value.attempts) ? value.attempts : 0,
@@ -4588,30 +4652,26 @@ export class AgentRegistry {
     /* A spawn that began before an account switch remains attributable to its
        birth account. The already-active engine-wide migration intent still
        applies to the new conversation through the existing coordinator
-       contract; a conversation-scoped reseat moves only its own thread. */
+       contract — and through the SAME admission the drain itself uses, since
+       an automatic intent enrolling a conversation nobody named is the
+       eleventh automatic selection (#1279); a conversation-scoped reseat moves
+       only its own thread. The migration record is the shared construction, so
+       settlement cannot drift from the two paths that queue the same move. */
     const activeIntent = Object.values(file.migrationIntents).find((intent) =>
       intent.engine === conversation.engine
       && engineScopedIntent(intent)
       && migrationIntentCanEnroll(file, intent, Date.parse(createdAt)));
     const source = conversation.generations.at(-1);
-    if (activeIntent && !conversation.pinnedAccountId && source && source.accountId !== activeIntent.targetId && !conversation.migration) {
-      conversation.migration = {
-        intentId: activeIntent.id,
-        phase: migrationTurnIsBusy(file, conversation) ? "waiting-turn" : "requested",
-        targetId: activeIntent.targetId,
-        revision: activeIntent.revision,
-        error: null,
-        errorCode: null,
-        operationId: crypto.randomUUID(),
-        sourceGenerationId: source.id,
-        successorLaunchProfile: null,
-        providerReceipt: null,
-        pendingContinuityPaths: [],
-        boardProject: null,
-        boardOperationId: null,
-        boardPlacementProject: conversation.projectOwnership?.project ?? source.launchProfile.project,
-        updatedAt: createdAt,
-      };
+    if (activeIntent && !conversation.pinnedAccountId && source
+      && source.accountId !== activeIntent.targetId && !conversation.migration
+      && migrationEnrollmentAdmission(file, conversation, source, activeIntent).kind === "accepted") {
+      conversation.migration = conversationMigrationForIntent(
+        conversation,
+        source,
+        activeIntent,
+        migrationTurnIsBusy(file, conversation) ? "waiting-turn" : "requested",
+        createdAt,
+      );
     }
     conversation.updatedAt = createdAt;
     file.conversations[conversation.id] = conversation;
@@ -5914,6 +5974,20 @@ export class AgentRegistry {
     evidence?: MigrationIntent["evidence"];
     scope?: MigrationScope;
   }): MigrationIntent {
+    /* #1279. An AUTOMATIC engine-wide migration used to set one global target
+       and then queue every unpinned conversation without ever asking which
+       project each one belonged to. A target allowed for one project therefore
+       dragged another project's work onto an account its own pool forbids, and
+       a binding record nobody could read stopped none of it — the fence was
+       simply not on this path.
+       The pool is read HERE, before the transaction, so an unreadable record
+       refuses before the routing revision moves: the engine's default account
+       is what every later automatic pick starts from, and moving it on evidence
+       this process cannot read is the routing change the rule forbids.
+       A MANUAL migration names its target outright. It is a control, it is
+       carried out — outside the pool included — and an unreadable record does
+       not veto it, so it reads no bindings at all. */
+    const bindings = input.origin === "auto" ? accountProjectBindings() : null;
     return withAccountMutationLock(() => this.mutate((file) => {
       const repeated = Object.values(file.migrationIntents).find((intent) =>
         intent.engine === input.engine && intent.requestIds.includes(input.requestId));
@@ -5968,6 +6042,20 @@ export class AgentRegistry {
           }
           continue;
         }
+        /* The decision the engine-wide loop was missing, taken here at the
+           per-conversation boundary because that is the only place the project
+           is known: this conversation's own project's pool, and whether the
+           target has room in it. A conversation whose project forbids the
+           target, or whose target is out of capacity, is PARKED — left exactly
+           where it is running, on the account it is already on, while the rest
+           of the engine moves. */
+        if (bindings && admitAutomaticAccountTarget({
+          project: conversationProjectKey(conversation.projectOwnership, source.launchProfile),
+          engine: input.engine,
+          targetId: input.targetId,
+          observations: Object.values(file.quotaObservations[input.engine]),
+          bindings,
+        }).kind !== "available") continue;
         const readiness = migrationReadiness(file, conversation);
         if ((input.scope ?? "all") === "active" && readiness === "deferred") continue;
         scoped += 1;
@@ -5986,7 +6074,22 @@ export class AgentRegistry {
     }));
   }
 
+  /**
+   * The lazy half of the same automatic move (#1279): a send arrives, this
+   * conversation is still on the account it was launched on, the engine's
+   * routing has since moved, and the Viewer decides BY ITSELF that the work
+   * should follow. Nobody named this conversation and nobody named its project,
+   * so it is an automatic selection and obeys the automatic rule.
+   *
+   * Read the record before anything moves: an unreadable one throws, because
+   * "the boundary cannot be seen" must never arrive at this seam wearing the
+   * answer that means "there is none". Read and allowed, a target the project's
+   * pool forbids or that has a confirmed zero-capacity sample PARKS — the
+   * conversation is returned exactly as it stands and the send lands on the
+   * account it is already running on, which crosses nothing.
+   */
   requestConversationMigrationToActiveAccount(id: ViewerConversationId): RegistryConversation {
+    const bindings = accountProjectBindings();
     return this.mutate((file) => {
       const canonicalId = resolveConversationAlias(file, id);
       const conversation = file.conversations[canonicalId];
@@ -5996,6 +6099,13 @@ export class AgentRegistry {
       const source = conversation.generations.at(-1);
       if (!targetId || !source || source.accountId === null || source.accountId === targetId) return clone(conversation);
       if (conversation.migrationOptOut?.targetId === targetId) return clone(conversation);
+      if (admitAutomaticAccountTarget({
+        project: conversationProjectKey(conversation.projectOwnership, source.launchProfile),
+        engine: conversation.engine,
+        targetId,
+        observations: Object.values(file.quotaObservations[conversation.engine]),
+        bindings,
+      }).kind !== "available") return clone(conversation);
       /* A failed-recoverable migration stays parked (#708). Re-arming it from a
          lazy active-account request minted a fresh operation identity on every
          later touch of the conversation, and a fresh identity means a fresh
@@ -6311,12 +6421,19 @@ export class AgentRegistry {
       if (expectedRevision !== undefined && current.revision !== expectedRevision) throw new Error("migration revision is stale");
       const intent = file.migrationIntents[current.intentId];
       if (!intent || intent.state === "stopped") throw new Error("migration intent is inactive");
+      const source = conversation.generations.at(-1);
+      if (!source) throw new Error("conversation has no source generation");
+      const admission = migrationEnrollmentAdmission(file, conversation, source, intent);
+      if (admission.kind === "refused") {
+        const changedAt = now();
+        conversation.migration = { ...current, error: admission.reason, updatedAt: changedAt };
+        conversation.updatedAt = changedAt;
+        return clone(conversation);
+      }
       if (intent.state === "complete" && current.phase === "failed-recoverable") {
         intent.state = "draining";
         intent.updatedAt = now();
       }
-      const source = conversation.generations.at(-1);
-      if (!source) throw new Error("conversation has no source generation");
       conversation.migration = {
         ...current,
         phase: migrationTurnIsBusy(file, conversation) ? "waiting-turn" : "requested",
@@ -6542,6 +6659,7 @@ export class AgentRegistry {
     runtimeImages: readonly StructuredImageRef[] = [],
     contentDigest: string | null = null,
     commandInput: HeldDeliveryCommandInput = {},
+    admission: { recoveryIntent?: HeldDelivery["recoveryIntent"] } = {},
   ): HeldDelivery {
     if (payloadKind === "text" && !text) throw new Error("held delivery must contain at most 32000 characters");
     if (payloadKind === "runtime-images" && runtimeImages.length === 0) {
@@ -6549,6 +6667,7 @@ export class AgentRegistry {
     }
     /* One UTF-8 bound covers every payload kind, including image captions. */
     assertStructuredTextEnvelope(text);
+    const recoveryIntent = admission.recoveryIntent ?? null;
     return this.mutate((file) => {
       const inspection = inspectDeliveryReservation(
         file,
@@ -6579,6 +6698,7 @@ export class AgentRegistry {
         }
         delivery.deliveredAt = null;
         delivery.error = null;
+        if (recoveryIntent) delivery.recoveryIntent = recoveryIntent;
         if (migrationBlocksDelivery) {
           delivery.state = "held";
           delivery.generationId = null;
@@ -6626,6 +6746,7 @@ export class AgentRegistry {
         artifactPaths: [],
         command: canonicalHeldDeliveryCommand(commandInput, deliveryId),
         requestDigest,
+        recoveryIntent,
         state: "held",
         generationId: null,
         attempts: 0,
