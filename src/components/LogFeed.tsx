@@ -553,19 +553,20 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
      Keyed by the launch id under the stable conversation identity, so it is
      idempotent with the composer's own seed (no duplicate), survives a refresh,
      folds through transcript adoption, and retires on its transcript echo. */
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!memoryKey || !launch?.launchId || !launchOwnsThisPane) return;
     const promptText = launch.prompt ?? "";
     const promptImages = launch.promptImages ?? 0;
-    if (!promptText.trim() && !promptImages) return;
+    if (!promptText.trim() && !promptImages && !launch.promptEcho) return;
     seedLaunchOutbox(memoryKey, {
       id: launch.launchId,
       text: promptText,
       images: promptImages,
       at: launch.promptAt ?? Date.now(),
-      /* The canonical echo identity (issue #615): the bubble displays the raw
-         draft but retires on the delivered (possibly scaffolded) transcript
-         echo. Reconciled onto a composer-seeded bubble under the same id. */
+      /* The canonical echo identity (issue #615/#616): the bubble displays the
+         raw draft and retires on the delivered scaffolded transcript echo. An
+         adopted live fact can carry this identity after its display fields have
+         retired, reconciling the 202 seed before the browser paints. */
       ...(launch.promptEcho ? { echoText: launch.promptEcho } : {}),
       owner: launchOwner!,
       state: launchOutboxState(launch.initialMessage),

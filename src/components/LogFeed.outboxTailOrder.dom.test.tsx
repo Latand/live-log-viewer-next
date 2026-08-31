@@ -61,6 +61,7 @@ const fixtureLines = fs
   )
   .split("\n")
   .filter(Boolean);
+let tailLines = fixtureLines;
 
 const actualRuntimeHooks = await import("@/hooks/useRuntime");
 const actualLogTail = await import("@/hooks/useLogTail");
@@ -78,7 +79,7 @@ mock.module("@/hooks/useRuntime", () => ({
 mock.module("@/hooks/useLogTail", () => ({
   ...actualLogTail,
   useLogTail: () => ({
-    lines: fixtureLines,
+    lines: tailLines,
     linesStart: 0,
     size: 1,
     loading: false,
@@ -99,7 +100,7 @@ mock.module("@/hooks/useToolActivityCues", () => ({
 }));
 
 const { LogFeed } = await import("./LogFeed");
-const { enqueueOutbox, resetOutboxForTests, updateOutbox } = await import("./conversation/outbox");
+const { enqueueOutbox, readOutbox, resetOutboxForTests, seedLaunchOutbox, updateOutbox } = await import("./conversation/outbox");
 
 /* The newest fixture record: the agent's reply after the tool call. */
 const NEWEST_RECORD_AT = Date.parse("2026-08-06T13:44:33.481Z");
@@ -110,6 +111,7 @@ const roots = new Set<Root>();
 beforeEach(() => {
   Date.now = () => NOW;
   setLocale("en");
+  tailLines = fixtureLines;
   dom.sessionStorage.clear();
   resetOutboxForTests();
 });
@@ -146,7 +148,7 @@ const file: FileEntry = {
   conversationId: "conversation-tail-order",
 } as FileEntry;
 
-function render(): HTMLElement {
+function render(renderedFile: FileEntry = file): HTMLElement {
   const host = dom.document.createElement("div");
   dom.document.body.append(host);
   const root = createRoot(host as unknown as HTMLElement);
@@ -154,7 +156,7 @@ function render(): HTMLElement {
   flushSync(() => {
     root.render(
       <LogFeed
-        file={file}
+        file={renderedFile}
         showSvc={false}
         lineFilter=""
         onStatus={() => undefined}
@@ -208,4 +210,59 @@ test("a delivery newer than the whole transcript still renders its bubble at the
      position IS its chronological position. */
   const rows = [...host.querySelectorAll("[data-feed-kind], [data-outbox-entry]")];
   expect(rows.at(-1)?.getAttribute("data-outbox-entry")).toBe("delivered-after-reply");
+});
+
+test.each([
+  ["builder", "Ship the focused repair.", "You are a Builder in plain mode.\n\nShip the focused repair."],
+  ["reviewer", "Review the focused repair.", "You are a Reviewer.\nSafety fences:\n- stay in scope\n\nReview the focused repair."],
+])("issue 616: direct 202-to-live %s adoption renders only the scaffolded transcript echo", (_role, raw, scaffolded) => {
+  const conversationId = "conversation_direct_adoption";
+  const launchId = "launch_direct_adoption";
+  const transcriptAt = NEWEST_RECORD_AT;
+  tailLines = [JSON.stringify({
+    timestamp: new Date(transcriptAt).toISOString(),
+    type: "response_item",
+    payload: {
+      type: "message",
+      id: "message_direct_adoption",
+      role: "user",
+      content: [{ type: "input_text", text: scaffolded }],
+    },
+  })];
+
+  /* The accepted 202 seeded the raw operator draft and the provisional window
+     already attached its exact owner. The first files response is live, so no
+     intermediate placeholder poll supplied the role scaffold's echo identity. */
+  seedLaunchOutbox(conversationId, {
+    id: launchId,
+    text: raw,
+    images: 0,
+    at: transcriptAt - 1_000,
+    owner: { conversationId, generation: 1 },
+  });
+  const adoptedFile: FileEntry = {
+    ...file,
+    path: "/fixtures/direct-adoption.jsonl",
+    name: "direct-adoption.jsonl",
+    conversationId,
+    generation: 1,
+    launch: {
+      launchId,
+      clientAttemptId: null,
+      accountId: null,
+      conversationId,
+      generation: 1,
+      state: "recovered",
+      initialMessage: "delivered",
+      retrySafe: false,
+      error: null,
+      deliveredAt: transcriptAt - 500,
+      promptEcho: scaffolded,
+    },
+  };
+
+  const host = render(adoptedFile);
+  expect(host.querySelectorAll('[data-feed-kind="user"]')).toHaveLength(1);
+  expect(host.querySelector("[data-outbox-entry]") === null).toBe(true);
+  expect(readOutbox(conversationId)[0]).toMatchObject({ text: raw, echoText: scaffolded });
 });

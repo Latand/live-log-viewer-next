@@ -81,7 +81,10 @@ export interface StructuredSpawnCardState {
   /** The canonical text the transcript will echo for this launch (issue #615) —
       the delivered message, which for a role launch is the scaffold PLUS the raw
       draft. The optimistic bubble displays `prompt` (the raw draft) but retires on
-      THIS text, so a scaffolded role launch never lingers and never duplicates. */
+      THIS text, so a scaffolded role launch never lingers and never duplicates.
+      When it differs from `prompt`, it remains on adopted live facts after the
+      display fields retire, allowing a direct 202-to-live path to reconcile the
+      browser's raw seed (issue #616). */
   promptEcho?: string;
   /** When the launch's initial message actually reached the agent (ms, issue
       #648). A structured / MCP spawn journals its first user record with SDK /
