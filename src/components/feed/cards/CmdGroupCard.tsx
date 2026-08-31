@@ -5,6 +5,7 @@ import { useState } from "react";
 import { ChevronRight } from "../../icons";
 import { hhmm } from "../../utils";
 import { tr, type CmdGroupItem } from "../parse";
+import { elapsedDurationMs, formatDuration } from "../duration";
 import { coalesceFollowUps, groupNestedCalls } from "../toolBlocks";
 import { StatusIcon } from "./shared";
 import { PollRow, ToolBlockRow } from "./ToolCard";
@@ -52,6 +53,8 @@ export function CmdGroupCard({ item }: { item: CmdGroupItem }) {
   const t0 = hhmm(item.t0);
   const t1 = hhmm(item.t1);
   const range = t0 && t1 && t0 !== t1 ? `${t0}–${t1}` : t0 || t1;
+  const durationMs = elapsedDurationMs(item.t0, item.t1);
+  const duration = durationMs === null ? "" : formatDuration(durationMs);
   /* One ordered block per top-level call, with any trailing wait/stdin polls
      nested under the exec that owns them (issue #475). */
   const blocks = groupNestedCalls(item.calls);
@@ -87,7 +90,8 @@ export function CmdGroupCard({ item }: { item: CmdGroupItem }) {
             </span>
           ) : null}
         </span>
-        {range ? <span className="ml-auto shrink-0 text-caption tabular-nums text-muted">{range}</span> : null}
+        {duration ? <span className="shrink-0 text-caption tabular-nums text-muted">{duration}</span> : null}
+        {range ? <span className="shrink-0 text-caption tabular-nums text-muted">{range}</span> : null}
       </summary>
       {/* An ordered list of readable blocks. Each call renders inline via
           {@link ToolBlockRow} — its command and output are shown at once, with no

@@ -111,20 +111,20 @@ test("a single empty poll collapses and omits its empty body", () => {
   expect(out[0].kind).toBe("polls");
 });
 
-test("formatDuration scales from ms to seconds to minutes", () => {
+test("formatDuration uses milliseconds below one second and seconds above", () => {
   expect(formatDuration(240)).toBe("240ms");
   expect(formatDuration(2500)).toBe("2.5s");
   expect(formatDuration(45_000)).toBe("45s");
-  expect(formatDuration(62_000)).toBe("1m 2s");
+  expect(formatDuration(62_000)).toBe("62s");
   expect(formatDuration(-5)).toBe("");
 });
 
-test("formatDuration rounds total seconds before minute rollover", () => {
+test("formatDuration rounds long calls as seconds", () => {
   const coalesced = coalesceFollowUps([
     emptyPoll("p1", { durationMs: 59_750 }),
     emptyPoll("p2", { durationMs: 59_750 }),
   ]);
   if (coalesced[0]?.kind !== "polls") throw new Error("expected a polls run");
-  expect(formatDuration(coalesced[0].elapsedMs ?? 0)).toBe("2m 0s");
-  expect(formatDuration(179_500)).toBe("3m 0s");
+  expect(formatDuration(coalesced[0].elapsedMs ?? 0)).toBe("120s");
+  expect(formatDuration(179_500)).toBe("180s");
 });

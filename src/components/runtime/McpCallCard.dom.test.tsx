@@ -80,6 +80,7 @@ test("renders success and upgrades a disabled conversation chip when scanning ca
   const complete = toolEvent({
     status: "ok",
     statusLabel: "done",
+    endTs: "2026-07-19T10:00:00.750Z",
     mcp: {
       ...toolEvent().mcp!,
       result: {
@@ -99,6 +100,7 @@ test("renders success and upgrades a disabled conversation chip when scanning ca
   expect(ready?.getAttribute("href")).toBe("#c=conversation-431");
   expect(ready?.getAttribute("aria-disabled")).toBeNull();
   expect(container.textContent).toContain("Open agent");
+  expect(container.textContent).toContain("750ms");
 });
 
 test("uses the Viewer's scanner snapshot for production conversation links", () => {

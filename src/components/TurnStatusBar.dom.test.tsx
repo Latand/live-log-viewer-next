@@ -40,7 +40,7 @@ const render = (entry: StatusFile, container: HTMLElement) => {
   flushSync(() => root!.render(<TurnStatusBar file={entry} workingLabel="working…" workingIcon={Sparkle} />));
 };
 
-test("live open turn ticks the elapsed timer every second and freezes at terminal", () => {
+test("live open turn ticks the elapsed timer every second and unmounts at terminal", () => {
   const realSet = globalThis.setInterval;
   const realClear = globalThis.clearInterval;
   let tick: (() => void) | null = null;
@@ -61,27 +61,26 @@ test("live open turn ticks the elapsed timer every second and freezes at termina
     document.body.appendChild(container);
 
     // Prompt accepted at t0, agent working: the bottom slot carries the label
-    // and a named timer element seeded at 0:00.
+    // and a named timer element seeded at 0s.
     render(file({ startedAt: t0, endedAt: null }, "live"), container);
     const timer = () => container.querySelector('[role="timer"]');
     expect(container.querySelector('[data-turn-status="running"]')).not.toBeNull();
     expect(timer()?.getAttribute("aria-label")).toBe("elapsed work time");
-    expect(timer()?.textContent).toBe("0:00");
+    expect(timer()?.textContent).toBe("0s");
     expect(started).toBe(1);
 
     // 4 minutes 32 seconds into the turn (a long tool call in between — the
     // timer tracks the wall clock, not transcript writes).
     setSystemTime(new Date(t0 + (4 * 60 + 32) * 1000));
     flushSync(() => tick!());
-    expect(timer()?.textContent).toBe("4:32");
+    expect(timer()?.textContent).toBe("4m 32s");
 
-    // The turn ends: the timer unmounts (its interval cleared) and the frozen
-    // total spans initiating prompt → last activity, not the last action.
+    // The turn ends: the timer unmounts and its interval is cleared. The
+    // response row owns the completed total.
     render(file({ startedAt: t0, endedAt: t0 + 5 * 60 * 1000 }, "recent"), container);
     expect(timer()).toBeNull();
     expect(cleared).toContain(1);
-    const finished = container.querySelector('[data-turn-status="finished"]');
-    expect(finished?.textContent).toContain("Worked for 5m");
+    expect(container.querySelector('[data-turn-status="finished"]')).toBeNull();
     expect(container.querySelector('[data-turn-status="running"]')).toBeNull();
   } finally {
     globalThis.setInterval = realSet;
@@ -89,7 +88,7 @@ test("live open turn ticks the elapsed timer every second and freezes at termina
   }
 });
 
-test("a new prompt after a finished turn resets the timer to the new receipt", () => {
+test("a held delivery starts the timer at transcript receipt instead of composer send", () => {
   const realSet = globalThis.setInterval;
   let tick: (() => void) | null = null;
   // @ts-expect-error test double
@@ -98,36 +97,24 @@ test("a new prompt after a finished turn resets the timer to the new receipt", (
     return 1;
   };
   try {
-    const t0 = Date.parse("2026-07-18T10:00:00.000Z");
-    setSystemTime(new Date(t0));
+    const sentAt = Date.parse("2026-07-18T10:00:00.000Z");
+    const receivedAt = sentAt + 60_000;
+    setSystemTime(new Date(receivedAt));
     const container = document.createElement("div");
     document.body.appendChild(container);
-    render(file({ startedAt: t0 - 60 * 60 * 1000, endedAt: t0 - 30 * 60 * 1000 }, "idle"), container);
-    expect(container.querySelector('[data-turn-status="finished"]')).not.toBeNull();
 
-    // Second prompt lands at t0+10s and the scanner reopens the boundary: the
-    // timer restarts from the NEW receipt, not the previous turn's start.
-    const t1 = t0 + 10_000;
-    render(file({ startedAt: t1, endedAt: null }, "live"), container);
-    setSystemTime(new Date(t1 + 3000));
+    const laggedDelivery = {
+      sentAt,
+      file: file({ startedAt: receivedAt, endedAt: null }, "live"),
+    };
+    render(laggedDelivery.file, container);
+    setSystemTime(new Date(receivedAt + 3000));
     flushSync(() => tick!());
-    expect(container.querySelector('[role="timer"]')?.textContent).toBe("0:03");
+    expect(container.querySelector('[role="timer"]')?.textContent).toBe("3s");
+    expect(container.querySelector('[role="timer"]')?.textContent).not.toBe("1m 3s");
   } finally {
     globalThis.setInterval = realSet;
   }
-});
-
-test("finished caption's accessible output is the localized visible duration text", () => {
-  const t0 = Date.parse("2026-07-18T10:00:00.000Z");
-  const container = document.createElement("div");
-  document.body.appendChild(container);
-  render(file({ startedAt: t0, endedAt: t0 + (12 * 60 + 30) * 1000 }, "idle"), container);
-  const caption = container.querySelector('[data-turn-status="finished"] .tabular-nums');
-  expect(caption?.textContent).toBe("Worked for 12m 30s");
-  // The caption span is role-less: an aria-label there would override the
-  // visible localized caption for assistive tech, so it must carry none and
-  // expose the caption itself as its accessible output (issue #268 review).
-  expect(caption?.hasAttribute("aria-label")).toBe(false);
 });
 
 test("live agent with no known boundary keeps the working label without a timer", () => {

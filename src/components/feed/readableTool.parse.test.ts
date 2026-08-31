@@ -20,9 +20,10 @@ test("codex exec_command captures cwd, exit code, duration, and end time", () =>
   expect(event.command).toBe("make");
   expect(event.cwd).toBe("/workspace/build");
   expect(event.exitCode).toBe(0);
-  expect(event.durationMs).toBe(2500);
-  // endTs is the call start + duration, so it renders a real wall-clock span.
-  expect(event.endTs).toBe(new Date(Date.parse("2026-07-10T10:00:00Z") + 2500).toISOString());
+  expect(event.durationMs).toBe(3000);
+  // The transcript result record owns completion even when its wrapper reports
+  // a different wall time.
+  expect(event.endTs).toBe("2026-07-10T10:00:03Z");
 });
 
 test("an explicit stderr delimiter splits the stream out of stdout", () => {

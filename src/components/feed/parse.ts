@@ -14,11 +14,13 @@ import type { MandateDelivery, MessageOrigin } from "@/lib/runtime/messageOrigin
 import type { SelectedContextRef } from "@/lib/selection/selectedContext";
 import { isViewerMcpServer } from "@/lib/mcp/presentation";
 import type { FileEntry } from "@/lib/types";
+import { classifyTurnRecord } from "@/lib/turnRecords";
 import { parseScheduleWakeup, refineWakeupFromResult, type WakeupInfo } from "@/lib/wakeup";
 
 import type { GlyphName } from "../icons";
 import { hhmm } from "../utils";
 import { decodeTerminalText } from "./ansi";
+import { elapsedDurationMs, timestampMilliseconds } from "./duration";
 import { diffFromApplyPatch, diffFromCodexFileChange, normalizeEdit, type DiffModel, type FileDiff } from "./diff";
 import { familyOf, summarizeTool, type ArgChip, type FeedEngine, type ToolFamily } from "./tools";
 
@@ -256,6 +258,8 @@ export interface FeedEntry {
   anchorKey: string | null;
   key: string;
   item: Item;
+  /** Receipt-to-completion total attached to the response that closed a turn. */
+  responseDurationMs?: number;
 }
 
 export interface FeedSnapshot {
@@ -1115,6 +1119,7 @@ interface StoredEntry {
   /** Absolute index of the source line, for window-slide eviction. */
   src: number;
   item: Item;
+  responseDurationMs?: number;
 }
 
 interface CallRec {
@@ -1237,6 +1242,14 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
   let prevGroups = new Map<number, CmdGroupItem>();
   let snapshot: FeedSnapshot | null = null;
   let snapshotLive: boolean | null = null;
+  let turnStartedAt: number | null = null;
+  let turnStartedSrc: number | null = null;
+  let turnOpen = false;
+  let turnResponseSeq: number | null = null;
+  let turnFailed = false;
+  let failedResponseSeq: number | null = null;
+  let latestTurnTimestamp: number | null = null;
+  const completedTurnEvidence: Array<{ startedSrc: number; responseSeq: number }> = [];
 
   const entryIndex = (seq: number): number => (entries.length ? seq - entries[0].seq : -1);
 
@@ -1244,6 +1257,57 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     entries.push({ seq: pushSeq, bornSrc: curSrc, src: curSrc, item });
     snapshot = null;
     return pushSeq++;
+  };
+
+  const setResponseDuration = (seq: number, durationMs: number | undefined) => {
+    const idx = entryIndex(seq);
+    if (idx < 0 || idx >= entries.length) return;
+    const entry = entries[idx];
+    if (durationMs === undefined) {
+      if (entry.responseDurationMs === undefined) return;
+      const { responseDurationMs: _removed, ...rest } = entry;
+      entries[idx] = rest;
+    } else {
+      entries[idx] = { ...entry, responseDurationMs: durationMs };
+    }
+    snapshot = null;
+  };
+
+  const finishTurn = (failed: boolean) => {
+    if (turnOpen && turnStartedAt !== null && turnResponseSeq !== null) {
+      const endedAt = Math.max(latestTurnTimestamp ?? turnStartedAt, turnStartedAt);
+      setResponseDuration(turnResponseSeq, endedAt - turnStartedAt);
+      if (turnStartedSrc !== null) completedTurnEvidence.push({ startedSrc: turnStartedSrc, responseSeq: turnResponseSeq });
+      failedResponseSeq = failed ? turnResponseSeq : null;
+    } else {
+      failedResponseSeq = null;
+    }
+    turnOpen = false;
+    turnFailed = failed;
+  };
+
+  const beginTurn = (timestampMs: number | null) => {
+    if (!turnOpen || turnStartedAt === null) {
+      turnStartedAt = timestampMs;
+      turnStartedSrc = curSrc;
+      turnResponseSeq = null;
+      turnFailed = false;
+      failedResponseSeq = null;
+    }
+    turnOpen = true;
+  };
+
+  const recoverFailedTurn = () => {
+    if (!turnFailed) return;
+    if (failedResponseSeq !== null) {
+      setResponseDuration(failedResponseSeq, undefined);
+      const evidence = completedTurnEvidence.findLastIndex((turn) => turn.responseSeq === failedResponseSeq);
+      if (evidence >= 0) completedTurnEvidence.splice(evidence, 1);
+      turnResponseSeq = failedResponseSeq;
+    }
+    failedResponseSeq = null;
+    turnFailed = false;
+    turnOpen = true;
   };
 
   const pushBlobIfHuge = (text: string, sourceId?: string): boolean => {
@@ -1341,7 +1405,11 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
   ): { firstSeq: number; lastSeq: number } | null => {
     if (!text.trim()) return null;
     const firstSeq = pushSeq;
-    if (pushBlobIfHuge(text, sourceId)) return { firstSeq, lastSeq: pushSeq - 1 };
+    const remember = (emitted: { firstSeq: number; lastSeq: number }) => {
+      if (turnOpen) turnResponseSeq = emitted.lastSeq;
+      return emitted;
+    };
+    if (pushBlobIfHuge(text, sourceId)) return remember({ firstSeq, lastSeq: pushSeq - 1 });
     const engine = feedEngine(cfg.engine);
     if (pushStructured(ts, text, (segment) => push({
       kind: "prose",
@@ -1350,10 +1418,10 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       engine,
       ...(sourceId ? { sourceId } : {}),
     }), push, sourceId)) {
-      return { firstSeq, lastSeq: pushSeq - 1 };
+      return remember({ firstSeq, lastSeq: pushSeq - 1 });
     }
     push({ kind: "prose", ts, text, engine, ...(sourceId ? { sourceId } : {}) });
-    return { firstSeq, lastSeq: pushSeq - 1 };
+    return remember({ firstSeq, lastSeq: pushSeq - 1 });
   };
   const addCodexAssistant = (
     shape: CodexAssistantShape,
@@ -1547,7 +1615,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
   };
   /* Attaches a result copy-on-write: the record gets a fresh ToolEvent and the
      owning entry a fresh item, so exactly one row changes identity. */
-  const attach = (callRec: CallRec | undefined, output: string, errFlag?: boolean, rawSession?: string) => {
+  const attach = (callRec: CallRec | undefined, output: string, errFlag?: boolean, rawSession?: string, resultTs?: unknown) => {
     if (!callRec) return null;
     const code = output.match(/exited with code (\d+)/)?.[1];
     /* Codex interactive-shell wall time, read before the preamble is stripped, so
@@ -1600,14 +1668,21 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       stderr = combined.slice(-OUTPUT_ERR_MAX);
     }
     const exitCode = code !== undefined ? Number(code) : prev.exitCode;
-    const durationMs = wallSeconds !== undefined ? Math.round(Number(wallSeconds) * 1000) : prev.durationMs;
+    const transcriptDurationMs = elapsedDurationMs(prev.ts, resultTs) ?? undefined;
+    const wrapperDurationMs = wallSeconds !== undefined ? Math.round(Number(wallSeconds) * 1000) : undefined;
+    const durationMs = transcriptDurationMs ?? wrapperDurationMs ?? prev.durationMs;
     /* The exec that opened the session reports it in its result preamble; a
        follow-up already carries its session from its args, so keep that. */
     const detectedSession = prev.family === "shell" ? sessionIdentity(rawSession ?? output.match(SESSION_RESULT_RE)?.[1]) : undefined;
     const session = prev.session ?? detectedSession?.label;
     const sessionOwner = sessionOwnership.get(prev) ?? detectedSession?.owner;
-    const startMs = typeof prev.ts === "string" || typeof prev.ts === "number" ? Date.parse(String(prev.ts)) : NaN;
-    const endTs = durationMs !== undefined && Number.isFinite(startMs) ? new Date(startMs + durationMs).toISOString() : prev.endTs;
+    const startMs = timestampMilliseconds(prev.ts);
+    const resultMs = timestampMilliseconds(resultTs);
+    const endTs = resultMs !== null
+      ? resultTs
+      : durationMs !== undefined && startMs !== null
+        ? new Date(startMs + durationMs).toISOString()
+        : prev.endTs;
     /* A wakeup's result carries the RESOLVED schedule (issue #161): on success
        refine the fire time from it (it overrides the requested delay); on error
        the call is rejected — mark it failed so it never counts down and never
@@ -1661,7 +1736,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     if (wakeup && wakeup.failed) recomputeWakeupStates();
     return event;
   };
-  const addOutput = (callId: string | undefined, output: string, err?: boolean, rawSession?: string) => {
+  const addOutput = (callId: string | undefined, output: string, err?: boolean, rawSession?: string, resultTs?: unknown) => {
     if (!callId) return;
     const tseq = tmsgSeqs.get(callId);
     if (tseq !== undefined) {
@@ -1678,7 +1753,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       }
       return;
     }
-    const event = attach(calls.get(callId), output, err, rawSession);
+    const event = attach(calls.get(callId), output, err, rawSession, resultTs);
     if (!event && output && showSvc) push({ kind: "svc", text: "output: " + redactSecrets(output).slice(0, 200) });
   };
   const addSvc = (text: string) => {
@@ -1718,10 +1793,15 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
   const upsertCodexThreadTool = (event: ToolEvent): void => {
     const existing = calls.get(event.id);
     if (!existing) return void registerCall(event);
-    existing.event = event;
+    const next = {
+      ...event,
+      ts: existing.event.ts,
+      ...(event.status !== "run" ? { endTs: event.endTs ?? event.ts } : {}),
+    };
+    existing.event = next;
     const idx = entryIndex(existing.seq);
     if (idx >= 0 && entries[idx]?.item.kind === "tool") {
-      entries[idx] = { ...entries[idx], src: curSrc, item: event };
+      entries[idx] = { ...entries[idx], src: curSrc, item: next };
       snapshot = null;
     }
   };
@@ -1754,7 +1834,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       ...(opts.summary ? { summary: opts.summary } : {}),
     });
     upsertCodexThreadTool({ ...base, status, statusLabel: codexThreadStatusLabel(status) });
-    if (status !== "run") attach(calls.get(id), toolOutputText(opts.output), status === "err");
+    if (status !== "run") attach(calls.get(id), toolOutputText(opts.output), status === "err", undefined, opts.ts);
     const current = calls.get(id)?.event;
     if (!current) return;
     const durationMs = num(opts.item.durationMs);
@@ -1886,7 +1966,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       });
       const status = codexThreadToolStatus(item, lifecycle);
       upsertCodexThreadTool({ ...base, status, statusLabel: codexThreadStatusLabel(status) });
-      if (status !== "run") attach(calls.get(id), textPart(item.aggregatedOutput ?? item.aggregated_output ?? item.output), status === "err");
+      if (status !== "run") attach(calls.get(id), textPart(item.aggregatedOutput ?? item.aggregated_output ?? item.output), status === "err", undefined, ts);
       const current = calls.get(id)?.event;
       if (current) {
         const exitCode = num(item.exitCode ?? item.exit_code);
@@ -2119,7 +2199,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
         if (!mcp) return addSvc("mcp_tool_call_end");
         const parsed = codexMcpResult(p.result);
         const call = existing ?? registerCall(newToolEvent({ ts, id, tool: `mcp__${mcp.serverName}__${mcp.toolName}`, args: mcp.args, engine: "codex", mcp }));
-        attach(call, parsed.output, parsed.error);
+        attach(call, parsed.output, parsed.error, undefined, ts);
         if (call.event.mcp && parsed.result) {
           const event = { ...call.event, mcp: { ...call.event.mcp, result: boundedMcpRecord(parsed.result) } };
           call.event = event;
@@ -2191,7 +2271,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       if (p.type === "function_call_output") {
         const rawSession = toolOutputSession(p.output);
         const output = toolOutputText(p.output);
-        return addOutput(textPart(p.call_id), output, toolOutputFailed(output), rawSession);
+        return addOutput(textPart(p.call_id), output, toolOutputFailed(output), rawSession, ts);
       }
       /* Fresh rollouts wrap apply_patch as a "custom_tool_call": `input` is the
          raw patch text directly (unlike function_call, whose `arguments` is a
@@ -2208,7 +2288,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       if (p.type === "custom_tool_call_output") {
         const rawSession = toolOutputSession(p.output);
         const output = toolOutputText(p.output);
-        return addOutput(textPart(p.call_id), output, toolOutputFailed(output), rawSession);
+        return addOutput(textPart(p.call_id), output, toolOutputFailed(output), rawSession, ts);
       }
       if (p.type === "reasoning" || p.type === "agent_message") return addSvc(textPart(p.type));
       return addRecord(ts, textPart(p.type) || "item", p);
@@ -2264,7 +2344,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
               typeof part.content === "string"
                 ? part.content
                 : inner.filter((x) => x.type !== "image").map((x) => textPart(x.text)).join(" ");
-            addOutput(textPart(part.tool_use_id), contentText, part.is_error === true);
+            addOutput(textPart(part.tool_use_id), contentText, part.is_error === true, undefined, ts);
           }
         }
       }
@@ -2371,7 +2451,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
         .map((part) => (part.type === "toolResult" ? textPart(part.content) || textPart(part.text) : textPart(part.text)))
         .filter(Boolean)
         .join("\n");
-      return addOutput(callId, text, isError);
+      return addOutput(callId, text, isError, undefined, ts);
     }
     if (role !== "assistant") return void addSvc(role || tr("render.record"));
     /* A record a real provider served may announce a model switch; the
@@ -2459,7 +2539,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       /* A job log carries no stdout: attach only the status line. The absent
          output surfaces as the compact "no output captured" chip in the card,
          replacing the old apology paragraph (issue #9 §6). */
-      if (lastPlainCall) attach(lastPlainCall, rest, /^Command failed/.test(rest));
+      if (lastPlainCall) attach(lastPlainCall, rest, /^Command failed/.test(rest), undefined, ts);
       return;
     }
     if (/^Applying \d+ file/.test(rest)) {
@@ -2479,9 +2559,18 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       try {
         const obj = JSON.parse(line);
         if (obj && typeof obj === "object" && !Array.isArray(obj)) {
+          const tracksTurns = cfg.fmt === "claude" || cfg.fmt === "codex";
+          const facts = tracksTurns ? classifyTurnRecord(obj, cfg.fmt === "codex") : null;
+          if (facts) {
+            latestTurnTimestamp = facts.timestampMs ?? latestTurnTimestamp;
+            if (facts.starts) beginTurn(facts.timestampMs);
+            else if (facts.assistantRecord && !facts.fails && turnFailed) recoverFailedTurn();
+          }
           if (cfg.fmt === "claude") renderClaude(obj);
           else if (cfg.fmt === "openclaw") renderOpenclaw(obj);
           else renderCodex(obj);
+          if (facts?.fails) finishTurn(true);
+          else if (facts?.closes) finishTurn(false);
         } else addRecord(null, "malformed_record", { value: obj });
       } catch {
         addRecord(null, "malformed_record", { source: line });
@@ -2506,6 +2595,14 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     lastPlainCall = null;
     wakeupCalls.length = 0;
     prevGroups = new Map();
+    turnStartedAt = null;
+    turnStartedSrc = null;
+    turnOpen = false;
+    turnResponseSeq = null;
+    turnFailed = false;
+    failedResponseSeq = null;
+    latestTurnTimestamp = null;
+    completedTurnEvidence.length = 0;
     snapshot = null;
     /* pushSeq keeps counting across resets so React keys never collide. */
   };
@@ -2515,6 +2612,11 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       that cannot be resumed, so the caller re-parses the window whole. */
   const dropBefore = (start: number): boolean => {
     const crossedEchoSeam = entries.some((entry) => entry.bornSrc < start && entry.src >= start);
+    const crossedOpenTurn = turnOpen && turnStartedSrc !== null && turnStartedSrc < start;
+    const crossedCompletedTurn = completedTurnEvidence.some(({ startedSrc, responseSeq }) => {
+      const idx = entryIndex(responseSeq);
+      return startedSrc < start && idx >= 0 && entries[idx]?.src >= start;
+    });
     while (entries.length && entries[0].src < start) {
       const gone = entries.shift()!;
       snapshot = null;
@@ -2551,7 +2653,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       if (entryIndex(wakeupCalls[i].seq) < 0) { wakeupCalls.splice(i, 1); wakeupsEvicted = true; }
     }
     if (wakeupsEvicted) recomputeWakeupStates();
-    return crossedEchoSeam || openclawBoundaryEvicted || (plainBlock !== null && plainBlock.src < start);
+    return crossedEchoSeam || crossedOpenTurn || crossedCompletedTurn || openclawBoundaryEvicted || (plainBlock !== null && plainBlock.src < start);
   };
 
   /* Collapses a run of >=2 consecutive foldable tool entries into one cmd-group
@@ -2579,7 +2681,12 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     while (i < entries.length) {
       const head = entries[i];
       if (!foldableTool(head.item)) {
-        out.push({ anchorKey: anchorKey(head, "row"), key: String(head.seq), item: head.item });
+        out.push({
+          anchorKey: anchorKey(head, "row"),
+          key: String(head.seq),
+          item: head.item,
+          ...(head.responseDurationMs !== undefined ? { responseDurationMs: head.responseDurationMs } : {}),
+        });
         i += 1;
         continue;
       }
@@ -2610,18 +2717,26 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
           const byTool: Record<string, number> = {};
           let okCount = 0;
           let errCount = 0;
+          let groupEndedAt = grouped.at(-1)?.item.endTs ?? grouped.at(-1)?.item.ts;
+          let groupEndedAtMs = timestampMilliseconds(groupEndedAt);
           for (const entry of grouped) {
             const tool = toolBucket(entry.item);
             byTool[tool] = (byTool[tool] ?? 0) + 1;
             if (entry.item.status === "ok") okCount += 1;
             else if (entry.item.status === "err") errCount += 1;
+            const candidate = entry.item.endTs ?? entry.item.ts;
+            const candidateMs = timestampMilliseconds(candidate);
+            if (candidateMs !== null && (groupEndedAtMs === null || candidateMs > groupEndedAtMs)) {
+              groupEndedAt = candidate;
+              groupEndedAtMs = candidateMs;
+            }
           }
           group = {
             kind: "cmd-group",
             ids: grouped.map((entry) => entry.item.id),
             calls: grouped.map((entry) => entry.item),
             t0: grouped[0]?.item.ts,
-            t1: grouped.at(-1)?.item.ts,
+            t1: groupEndedAt,
             byTool,
             okCount,
             errCount,

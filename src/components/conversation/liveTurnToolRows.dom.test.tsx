@@ -60,7 +60,7 @@ test("tool rows interleave with prose in response order and carry the call's sta
       tool: { name: "Read", engine: "claude", status: "err", args: { file_path: "/repo/src/missing.ts" } },
     },
     {
-      itemId: "call_ls", text: "", phase: "awaiting-echo", startedAt: AT, completedAt: AT,
+      itemId: "call_ls", text: "", phase: "awaiting-echo", startedAt: AT, completedAt: "2026-08-23T08:30:01.750Z",
       tool: { name: "shell", engine: "codex", status: "ok", args: { cmd: "ls -la", workdir: "/repo" } },
     },
     { itemId: null, text: "Now the fix", phase: "streaming", startedAt: AT, completedAt: null },
@@ -87,6 +87,7 @@ test("tool rows interleave with prose in response order and carry the call's sta
   expect(settled.textContent).toContain("ls -la");
   expect(settled.textContent).not.toContain("executing");
   expect(settled.textContent).not.toContain("error");
+  expect(settled.textContent).toContain("750ms");
 
   /* Prose still streams with its caret at the very end of the turn. */
   expect(rows[4]!.textContent).toContain("Now the fix");

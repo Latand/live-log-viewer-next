@@ -35,8 +35,9 @@ function toolEvent(over: Partial<ToolEvent> = {}): ToolEvent {
 }
 
 test("a collapsed tool row renders its summary as a quiet line while body nodes stay lazily unmounted", () => {
-  const html = renderToStaticMarkup(<ToolCard event={toolEvent({ outputPreview: "total 8\nfile.ts" })} />);
+  const html = renderToStaticMarkup(<ToolCard event={toolEvent({ endTs: "2026-07-10T10:00:00.750Z", outputPreview: "total 8\nfile.ts" })} />);
   expect(html).toContain("ls -la");
+  expect(html).toContain("750ms");
   // Success is silence (§3.4): a collapsed ok row shows no status label.
   expect(html).not.toContain(">ok<");
   // The body (output pre, raw-record button) is not in the DOM until expanded.
@@ -163,6 +164,16 @@ test("a collapsed cmd-group defers all child rendering until it is expanded", ()
   expect(html).not.toContain("Read a.ts");
   expect(html).not.toContain("total 8");
   expect(html).not.toContain(en("tools.rawRecord"));
+});
+
+test("a collapsed action group renders its transcript start-to-completion duration", () => {
+  const item = cmdGroup([
+    toolEvent({ id: "a", ts: "2026-07-10T10:00:00.000Z" }),
+    toolEvent({ id: "b", ts: "2026-07-10T10:00:01.000Z", endTs: "2026-07-10T10:00:02.250Z" }),
+  ]);
+  item.t1 = item.calls.at(-1)?.endTs;
+  const html = renderToStaticMarkup(<CmdGroupCard item={item} />);
+  expect(html).toContain("2.3s");
 });
 
 test("a collapsed cmd-group does not mount a diff-backed child's diff body", () => {

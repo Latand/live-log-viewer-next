@@ -103,6 +103,78 @@ function itemsOfKind(feed: ReturnType<typeof buildFeed>, kind: Item["kind"]) {
 }
 
 describe("feed session parity with one-shot parse", () => {
+  test("a completed response keeps its receipt-to-completion total after the next turn starts", () => {
+    const session = createFeedSession({ engine: "claude", fmt: "claude", showSvc: false, lineFilter: "" });
+    const firstTurn = [
+      JSON.stringify({ type: "user", timestamp: "2026-08-31T10:01:00.000Z", message: { role: "user", content: "delivered after a hold" } }),
+      JSON.stringify({ type: "assistant", timestamp: "2026-08-31T10:05:32.000Z", message: { role: "assistant", stop_reason: "end_turn", content: [{ type: "text", text: "First response." }] } }),
+    ];
+
+    const completed = session.feed(firstTurn, 0, false);
+    const firstResponse = completed.items.find((entry) => entry.item.kind === "prose");
+    expect(firstResponse?.responseDurationMs).toBe(272_000);
+
+    const nextTurn = [
+      ...firstTurn,
+      JSON.stringify({ type: "user", timestamp: "2026-08-31T10:06:00.000Z", message: { role: "user", content: "continue" } }),
+      JSON.stringify({ type: "assistant", timestamp: "2026-08-31T10:06:01.000Z", message: { role: "assistant", stop_reason: null, content: [{ type: "text", text: "Working on it." }] } }),
+    ];
+    const later = session.feed(nextTurn, 0, true);
+    const retained = later.items.find((entry) => entry.item.kind === "prose" && entry.item.text === "First response.");
+    expect(retained?.responseDurationMs).toBe(272_000);
+  });
+
+  test("a Codex structured delivery keeps its receipt-to-completion total", () => {
+    const session = createFeedSession({ engine: "codex", fmt: "codex", showSvc: false, lineFilter: "" });
+    const lines = [
+      codexUserResponse("2026-08-31T10:01:00.000Z", [{ type: "input_text", text: `${CODEX_STRUCTURED_USER_MARKER}run the task` }]),
+      codexUserEvent("2026-08-31T10:01:00.000Z", `${CODEX_STRUCTURED_USER_MARKER}run the task`),
+      JSON.stringify({ type: "event_msg", timestamp: "2026-08-31T10:01:00.050Z", payload: { type: "task_started" } }),
+      codexAssistantResponse("2026-08-31T10:05:31.000Z", "Completed response."),
+      codexAssistantEvent("2026-08-31T10:05:31.000Z", "Completed response."),
+      JSON.stringify({ type: "event_msg", timestamp: "2026-08-31T10:05:32.000Z", payload: { type: "task_complete" } }),
+    ];
+    const response = session.feed(lines, 0, false).items.find((entry) => entry.item.kind === "prose");
+    expect(response?.responseDurationMs).toBe(272_000);
+  });
+
+  test("tool completion timestamps become the row duration", () => {
+    const lines = [
+      JSON.stringify({
+        type: "assistant",
+        timestamp: "2026-08-31T10:00:00.000Z",
+        message: { role: "assistant", content: [{ type: "tool_use", id: "tool-duration", name: "ToolSearch", input: { query: "duration" } }] },
+      }),
+      JSON.stringify({
+        type: "user",
+        timestamp: "2026-08-31T10:00:00.750Z",
+        message: { role: "user", content: [{ type: "tool_result", tool_use_id: "tool-duration", content: "found" }] },
+      }),
+    ];
+    const tool = buildFeed(claudeFile, lines, false, "").items.find((item) => item.kind === "tool");
+    if (tool?.kind !== "tool") throw new Error("expected tool row");
+    expect(tool.endTs).toBe("2026-08-31T10:00:00.750Z");
+    expect(tool.durationMs).toBe(750);
+  });
+
+  test("an action group ends at the latest parallel result", () => {
+    const lines = [
+      JSON.stringify({
+        type: "assistant",
+        timestamp: "2026-08-31T10:00:00.000Z",
+        message: { role: "assistant", content: [
+          { type: "tool_use", id: "parallel-a", name: "Bash", input: { command: "first" } },
+          { type: "tool_use", id: "parallel-b", name: "ToolSearch", input: { query: "second" } },
+        ] },
+      }),
+      JSON.stringify({ type: "user", timestamp: "2026-08-31T10:00:02.000Z", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "parallel-b", content: "second done" }] } }),
+      JSON.stringify({ type: "user", timestamp: "2026-08-31T10:00:05.000Z", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "parallel-a", content: "first done" }] } }),
+    ];
+    const group = buildFeed(claudeFile, lines, false, "").items.find((item) => item.kind === "cmd-group");
+    if (group?.kind !== "cmd-group") throw new Error("expected action group");
+    expect(group.t1).toBe("2026-08-31T10:00:05.000Z");
+  });
+
   test("keeps a Claude Bash command when the enclosing record carries Viewer MCP attribution", () => {
     const call = JSON.stringify({
       type: "assistant",
