@@ -4,6 +4,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
 import type { EngineAccountsState } from "@/hooks/useEngineAccounts";
+import { installActEnv } from "@/test-helpers/actEnv";
 
 import { EngineAccountSwitchControl } from "./EngineAccountSwitch";
 
@@ -19,7 +20,7 @@ Object.assign(globalThis, {
   PointerEvent: dom.PointerEvent,
   KeyboardEvent: dom.KeyboardEvent,
 });
-globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+installActEnv();
 
 const mounted: Array<{ root: Root; host: HTMLDivElement }> = [];
 afterEach(async () => {
@@ -120,5 +121,5 @@ test("the active account is collapsed at rest and the full switch flow opens on 
   const harbor = [...host.querySelectorAll("button")].find((button) => button.textContent?.includes("Harbor light"));
   expect(harbor).toBeTruthy();
   await act(async () => harbor!.click());
-  expect(selected).toBe("account-harbor");
+  expect(selected as unknown as string).toBe("account-harbor");
 });
