@@ -59,7 +59,7 @@ function resourceFileObservation(value: unknown): value is ResourceWorkerFileObs
 function structuredHostRecord(value: unknown): value is StructuredHostRecord {
   if (!record(value)) return false;
   const keys = [
-    "id", "engine", "sessionId", "pid", "startIdentity", "cwd", "path", "conversationId",
+    "id", "engine", "sessionId", "pid", "startIdentity", "bootEpoch", "cwd", "path", "conversationId",
     "title", "role", "model", "stage", "seat", "turnBusy", "owned",
   ];
   if (Object.keys(value).length !== keys.length || keys.some((key) => !Object.hasOwn(value, key))) return false;
@@ -68,6 +68,7 @@ function structuredHostRecord(value: unknown): value is StructuredHostRecord {
     && nullableString(value.sessionId)
     && Number.isSafeInteger(value.pid) && (value.pid as number) > 1
     && nullableString(value.startIdentity)
+    && nullableString(value.bootEpoch)
     && typeof value.cwd === "string"
     && nullableString(value.path)
     && nullableString(value.conversationId)

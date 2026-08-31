@@ -13,6 +13,7 @@ import {
   type OrchestratorSeat,
 } from "@/lib/orchestrator/seats";
 import { procBackend } from "@/lib/proc";
+import { captureProcessIdentity } from "@/lib/processIdentity";
 import { turnStateFromRecords } from "@/lib/scanner/activity";
 import { RuntimeJournal } from "@/runtime-host/journal";
 import { activateViewerRuntimeWhenCurrent, runStructuredHostStartup } from "@/lib/viewerInstrumentation";
@@ -1214,6 +1215,183 @@ test("SQLite startup releases a completed stage host claim with pending delivery
   expect(registry.pendingDeliveries(conversation.id)).toMatchObject([{ id: delivery.id, state: "assigned" }]);
 
   await bindStructuredDeliveryQueue([], { registry, client: null });
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test("startup adoption replaces an incumbent owner whose boot epoch is dead", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-dead-boot-owner-"));
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const sessionId = "aaaaaaaa-3333-0333-0333-aaaaaaaaaaaa";
+  addStructuredRestartConversation(registry, directory, {
+    sessionId,
+    status: "live",
+    turn: "busy",
+    activeTurnRef: "interrupted-turn",
+    transcriptRecords: openTurnRecords("codex"),
+    transcriptSuffix: "\n",
+  });
+  const key = { engine: "codex" as const, sessionId };
+  const stored = registry.readOnlySnapshot().entries[`codex:${sessionId}`]!;
+  const current = captureProcessIdentity(process.pid);
+  expect(current.startIdentity).not.toBeNull();
+  expect(current.bootEpoch).not.toBeNull();
+  const incumbent = { ...current, bootEpoch: `${current.bootEpoch}:earlier` };
+  registry.upsert({
+    key,
+    artifactPath: stored.artifactPath,
+    cwd: stored.cwd,
+    accountId: stored.accountId,
+    launchProfile: stored.launchProfile,
+    status: "live",
+    host: null,
+    structuredHost: {
+      ...stored.structuredHost!,
+      endpoint: "stdio:incumbent",
+      process: incumbent,
+    },
+    claimEpoch: stored.claimEpoch,
+    claimOwner: `structured-host:${JSON.stringify(incumbent)}`,
+    pendingAction: null,
+  });
+  const state = {
+    status: "idle" as const,
+    sessionKey: sessionId,
+    endpoint: "stdio:replacement",
+    pid: process.pid,
+    processStartIdentity: current.startIdentity,
+    eventCursor: 9,
+    protocolVersion: "test",
+    activeTurnRef: null,
+    pendingAttention: [],
+    activeFlags: [],
+    account: null,
+  };
+  const host = Object.assign(new FakeEngineHost(createFakeDeliveryLedger(), state), {
+    setWriterFence: () => {},
+    onStateChange: () => () => {},
+  });
+
+  const adopted = await adoptCodexRegistryHosts(
+    registry,
+    () => ({ cwd: directory }),
+    { ...process.env, LLV_STRUCTURED_HOSTS: "1" },
+    () => true,
+    undefined,
+    { adoptHost: async () => host as never },
+  );
+
+  expect(adopted).toMatchObject([{ key }]);
+  expect(registry.readOnlySnapshot().entries[`codex:${sessionId}`]).toMatchObject({
+    status: "idle",
+    structuredHost: { process: current },
+    claimOwner: `structured-host:${JSON.stringify(current)}`,
+  });
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test("startup durably drains held work addressed to a dead superseded session", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-drain-superseded-held-"));
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  const predecessor = addStructuredRestartConversation(registry, directory, {
+    sessionId: "aaaaaaaa-4444-0444-0444-aaaaaaaaaaaa",
+    status: "dead",
+    turn: "terminal",
+  }).conversation;
+  const successor = addStructuredRestartConversation(registry, directory, {
+    sessionId: "aaaaaaaa-5555-0555-0555-aaaaaaaaaaaa",
+    status: "dead",
+    turn: "terminal",
+  }).conversation;
+  const delivery = registry.holdDelivery(predecessor.id, "stale stage message", "superseded-held");
+  const beforeHold = registry.snapshot();
+  const held = structuredClone(beforeHold);
+  Object.assign(held.heldDeliveries[delivery.id]!, {
+    state: "held",
+    generationId: null,
+    assignedAt: null,
+  });
+  registry.restoreSnapshot(beforeHold, held);
+  registry.recordSupersedence(predecessor.id, successor.id, "stage-retry");
+  const beforeStartup = registry.snapshot();
+  expect(beforeStartup.heldDeliveries[delivery.id]).toMatchObject({ state: "held", error: null });
+
+  const dependencies: StructuredStartupDependencies = {
+    registry,
+    client,
+    refreshTranscriptState: async () => {},
+    adopt: async () => [],
+    adoptClaude: async () => [],
+  };
+  await adoptStructuredHostsAtStartup(dependencies);
+
+  const drained = registry.snapshot();
+  expect(drained.heldDeliveries[delivery.id]).toMatchObject({
+    state: "failed",
+    text: "",
+    generationId: null,
+    assignedAt: null,
+    error: "delivery expired because its superseded target session is dead",
+  });
+  expect(drained.deliveryOperationOwners[delivery.command.operationId]).toMatchObject({
+    terminalState: "failed",
+    terminalDisposition: "lost",
+    terminalReason: "delivery expired because its superseded target session is dead",
+    settledAt: expect.any(String),
+  });
+  const settled = JSON.stringify(drained.heldDeliveries[delivery.id]);
+
+  await adoptStructuredHostsAtStartup(dependencies);
+  expect(JSON.stringify(registry.snapshot().heldDeliveries[delivery.id])).toBe(settled);
+
+  await bindStructuredDeliveryQueue([], { registry, client: null });
+  journal.close();
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test("held work for a superseded session with a live verified process stays pending", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-keep-live-superseded-held-"));
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const predecessorSessionId = "aaaaaaaa-6666-0666-0666-aaaaaaaaaaaa";
+  const predecessor = addStructuredRestartConversation(registry, directory, {
+    sessionId: predecessorSessionId,
+    status: "idle",
+    turn: "terminal",
+  }).conversation;
+  const successor = addStructuredRestartConversation(registry, directory, {
+    sessionId: "aaaaaaaa-7777-0777-0777-aaaaaaaaaaaa",
+    status: "dead",
+    turn: "terminal",
+  }).conversation;
+  const identity = captureProcessIdentity(process.pid);
+  const stored = registry.readOnlySnapshot().entries[`codex:${predecessorSessionId}`]!;
+  registry.upsert({
+    key: stored.key,
+    artifactPath: stored.artifactPath,
+    cwd: stored.cwd,
+    accountId: stored.accountId,
+    launchProfile: stored.launchProfile,
+    status: "idle",
+    host: null,
+    structuredHost: { ...stored.structuredHost!, process: identity },
+    claimEpoch: stored.claimEpoch,
+    claimOwner: `structured-host:${JSON.stringify(identity)}`,
+    pendingAction: null,
+  });
+  const delivery = registry.holdDelivery(predecessor.id, "still owned", "live-superseded-held");
+  const beforeHold = registry.snapshot();
+  const held = structuredClone(beforeHold);
+  Object.assign(held.heldDeliveries[delivery.id]!, { state: "held", generationId: null, assignedAt: null });
+  registry.restoreSnapshot(beforeHold, held);
+  registry.recordSupersedence(predecessor.id, successor.id, "stage-retry");
+
+  expect(registry.drainDeadSupersededHeldDeliveries()).toEqual([]);
+  expect(registry.snapshot().heldDeliveries[delivery.id]).toMatchObject({
+    state: "held",
+    text: "still owned",
+    error: null,
+  });
   fs.rmSync(directory, { recursive: true, force: true });
 });
 

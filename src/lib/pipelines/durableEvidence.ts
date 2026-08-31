@@ -20,6 +20,9 @@ type RecordLike = Record<string, unknown>;
 export type StageTurnEvidence = {
   turn: "terminal" | "busy" | "unknown";
   message: { text: string; ts: number } | null;
+  /** Stable records read from the artifact. One launch record with no agent
+      message is the pre-registration death shape used by pipeline recovery. */
+  recordCount?: number;
   /** The provider's own end-of-turn notice, when the record that closed the
       turn is one: a session or model limit, an expired credential, a refusal —
       a message the CLI writes *instead of* the agent's answer, so the turn
@@ -108,6 +111,7 @@ export async function durableStageTurnEvidence(
   return {
     turn: turn.state === "terminal" ? "terminal" : turn.state === "busy" ? "busy" : "unknown",
     message,
+    recordCount: read.records.length,
     /* Gated on the same turn reading the rest of the engine trusts: a provider
        error the CLI may still retry inside an open turn keeps the busy
        projection (#516), and so never reads as the end of the turn here. */

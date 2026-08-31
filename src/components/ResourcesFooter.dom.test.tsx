@@ -180,6 +180,37 @@ test("kill idle skips the live host and the unticked orchestrator seat", async (
   ]);
 });
 
+test("kill idle reports every target outcome and summary counts", async () => {
+  globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body ?? "{}")) as { target?: string };
+    if (body.target === "structured:codex:gone") {
+      return Response.json({ ok: true, via: "already-exited", killed: 0 });
+    }
+    if (body.target === "structured:claude:refused") {
+      return Response.json({ error: "recorded process identity no longer matches" }, { status: 409 });
+    }
+    return Response.json({ ok: true, via: "process-group", killed: 2 });
+  }) as typeof fetch;
+  const view = mount([
+    host({ target: "structured:claude:killed", title: "Killed lane" }),
+    host({ target: "structured:codex:gone", engine: "codex", title: "Gone lane", ownership: "released" }),
+    host({ target: "structured:claude:refused", title: "Refused lane" }),
+  ]);
+
+  click(buttonLabelled(view, "Kill idle"));
+  for (let index = 0; index < 4; index += 1) await settle();
+
+  const summary = view.querySelector('[data-testid="bulk-kill-summary"]')?.textContent ?? "";
+  expect(summary).toContain("1 killed");
+  expect(summary).toContain("1 already gone");
+  expect(summary).toContain("1 refused");
+  expect([...view.querySelectorAll('[data-testid="bulk-kill-outcome"]')].map((row) => row.textContent)).toEqual([
+    expect.stringContaining("Killed lane · killed"),
+    expect.stringContaining("Gone lane · already gone"),
+    expect.stringContaining("Refused lane · refused: recorded process identity no longer matches"),
+  ]);
+});
+
 test("a scan-only host shows its unknown seat status and stays row-kill only", () => {
   const view = mount([host({
     target: "structured:pid:4100",

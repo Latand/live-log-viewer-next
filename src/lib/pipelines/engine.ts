@@ -187,6 +187,8 @@ export interface PipelinePorts {
       merge is a tidy close, not an unreadable worktree. */
   worktreePresent(dir: string): boolean;
   conversationAgentActive(conversationId: string): Promise<boolean | null>;
+  /** False means the durable registry has never registered this conversation. */
+  conversationRegistered?(conversationId: string): boolean;
   /** Null means hosted, a timestamp means dead/absent since then, and undefined
       means the registry cannot provide authoritative host evidence. */
   conversationHostUnavailableSince?(conversationId: string): Promise<string | null | undefined>;
@@ -771,6 +773,8 @@ export function defaultPipelinePorts(
       /* A hosted idle turn is an inter-turn state with unknown agent activity. */
       return null;
     },
+    conversationRegistered: (conversationId) => conversationId.startsWith("conversation_")
+      && Boolean(snapshot().conversations[conversationId as ViewerConversationId]),
     conversationHostUnavailableSince: async (conversationId) => {
       if (!conversationId.startsWith("conversation_")) return undefined;
       const current = snapshot();
@@ -863,6 +867,7 @@ const SPAWN_HANDSHAKE_RETRY_DELAY_MS = 1_000;
 const SPAWN_CONTROLLER_WAIT_BUDGET_MS = 30_000;
 const SPAWN_CONTROLLER_RETRY_MAX_MS = 8_000;
 const DEAD_RUNNING_ATTEMPT_GRACE_MS = 3 * 60_000;
+const UNREGISTERED_STAGE_HOST_DIED_REASON = "the stage host died before its session registered";
 /** Attempt states that end a round; a pending cursor over one of these queues a
     fresh attempt on the next tick (tickRunStage/tickReviewStage). */
 const TERMINAL_ATTEMPT_STATES = new Set<PipelineStageAttempt["state"]>(["passed", "failed", "needs_decision", "skipped"]);
@@ -1009,6 +1014,22 @@ function recordVerdictRecoveryMiss(
   attempt.error = null;
   pipeline.state = "running";
   pipeline.stateDetail = `re-evaluating terminal stage verdict (${checks}/${VERDICT_RECOVERY_MAX_CHECKS}): ${reason}`;
+}
+
+async function unregisteredStageHostDeathEvidence(
+  attempt: PipelineStageAttempt,
+  target: PipelineStageHostRef,
+  ports: PipelinePorts,
+  durable?: StageTurnEvidence | null,
+): Promise<string | null> {
+  if (target.paneId || !target.conversationId || !target.agentPath
+    || ports.conversationRegistered?.(target.conversationId) !== false) return null;
+  const evidence = durable === undefined
+    ? await ports.durableTurnEvidence(attempt.effectiveRole.engine, target.agentPath)
+    : durable;
+  return evidence?.recordCount === 1 && evidence.message === null
+    ? UNREGISTERED_STAGE_HOST_DIED_REASON
+    : null;
 }
 
 function park(pipeline: Pipeline, detail: string, attempt?: PipelineStageAttempt | null): void {
@@ -1943,6 +1964,18 @@ async function tickRunStage(
      scan projection transiently lost the transcript, or the host is already
      gone. A busy turn is mid-work: its messages are never verdict candidates. */
   const durable = await ports.durableTurnEvidence(attempt.effectiveRole.engine, attempt.agentPath);
+  const unregisteredHostDeath = await unregisteredStageHostDeathEvidence(attempt, {
+    stageId: stage.id,
+    attempt: attempt.n,
+    conversationId: attempt.conversationId,
+    agentPath: attempt.agentPath,
+    paneId: attempt.paneId,
+    ...(attempt.historical ? { adopted: true as const } : {}),
+  }, ports, durable);
+  if (unregisteredHostDeath && canSpendRecoveryCheck()) {
+    recordVerdictRecoveryMiss(pipeline, attempt, ports, unregisteredHostDeath, null);
+    return;
+  }
   const durableTerminal = durable?.turn === "terminal" && durable.message !== null && durable.message.ts > unixMs(attempt.startedAt);
   if (durable && durableTerminal) {
     const parsed = parsePipelineStageVerdict(durable.message!.text);
@@ -3480,6 +3513,8 @@ async function closeStopFailureEvidence(
   candidate: StageHostCandidate,
   ports: PipelinePorts,
 ): Promise<string | null> {
+  const unregisteredHostDeath = await unregisteredStageHostDeathEvidence(candidate.attempt, candidate.target, ports);
+  if (unregisteredHostDeath) return unregisteredHostDeath;
   try {
     if (!(await ports.stageHostResident(candidate.target))) return "the host registry entry is dead or absent";
   } catch {

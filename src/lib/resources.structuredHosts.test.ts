@@ -6,6 +6,7 @@ import path from "node:path";
 import { afterAll, afterEach, beforeEach, expect, test } from "bun:test";
 
 import { procBackend } from "@/lib/proc";
+import { systemBootEpoch } from "@/lib/processIdentity";
 import {
   readStructuredHostStamp,
   STRUCTURED_HOST_STAMP_ENV,
@@ -78,6 +79,7 @@ function record(over: Partial<StructuredHostRecord> = {}): StructuredHostRecord 
     turnBusy: false,
     owned: true,
     ...over,
+    bootEpoch: over.bootEpoch === undefined ? systemBootEpoch() : over.bootEpoch,
   };
 }
 
@@ -346,6 +348,7 @@ test("the kill allowlist holds exactly the listed hosts and a consumed target ca
     kind: "structured",
     pid: 5_000,
     startIdentity: "5000:start",
+    bootEpoch: systemBootEpoch(),
     engine: "codex",
     sessionId: "seat",
     conversationId: CONVERSATION,
@@ -396,6 +399,7 @@ test("the collector worker turns a host record into a listed row with kill autho
       sessionId: "worker-host",
       pid,
       startIdentity,
+      bootEpoch: systemBootEpoch(),
       cwd: workerHome,
       path: null,
       conversationId: null,
@@ -453,6 +457,7 @@ test("the collector worker turns a host record into a listed row with kill autho
     kind: "structured",
     pid,
     startIdentity,
+    bootEpoch: systemBootEpoch(),
     engine: "claude",
     sessionId: "worker-host",
     owned: false,

@@ -239,13 +239,26 @@ export function ResourcesFooter() {
     resolves the stable pane id recorded in the snapshot and verifies the pane
     pid before killing, so the kill survives window renumbering mid-bulk.
     Both sides refuse a target the last snapshot did not list.
-    Returns the error text, if any. */
+    Returns one explicit outcome for the row. */
+type KillSessionOutcome =
+  | { outcome: "killed" }
+  | { outcome: "already-gone" }
+  | { outcome: "refused"; reason: string };
+type BulkKillOutcome = KillSessionOutcome & { target: string; label: string };
+
+function bulkOutcomeText(item: BulkKillOutcome, t: ReturnType<typeof useLocale>["t"]): string {
+  if (item.outcome === "killed") return t("resources.bulkOutcomeKilled");
+  if (item.outcome === "already-gone") return t("resources.bulkOutcomeGone");
+  return t("resources.bulkOutcomeRefused", { reason: item.reason });
+}
+
 async function killSession(
   session: ResourceSession,
   gesture: { intent: "row" | "idle" | "all"; includeSeat: boolean; idleHours?: number },
-): Promise<string | null> {
-  const res = isStructuredHost(session)
-    ? await fetch("/api/runtime/hosts", {
+): Promise<KillSessionOutcome> {
+  try {
+    const res = isStructuredHost(session)
+      ? await fetch("/api/runtime/hosts", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -258,15 +271,18 @@ async function killSession(
           includeSeat: gesture.includeSeat,
           ...(gesture.intent === "idle" ? { idleHours: gesture.idleHours } : {}),
         }),
-      })
-    : await fetch("/api/tmux", {
+        })
+      : await fetch("/api/tmux", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ action: "kill-target", target: session.target }),
-      });
-  if (res.ok) return null;
-  const json = (await res.json().catch(() => ({}))) as { error?: string };
-  return json.error ?? String(res.status);
+        });
+    const json = (await res.json().catch(() => ({}))) as { error?: string; via?: string };
+    if (res.ok) return json.via === "already-exited" ? { outcome: "already-gone" } : { outcome: "killed" };
+    return { outcome: "refused", reason: json.error ?? String(res.status) };
+  } catch (error) {
+    return { outcome: "refused", reason: error instanceof Error ? error.message : String(error) };
+  }
 }
 
 /** The "Agent sessions" dialog. Exported for the DOM test, which drives the
@@ -293,6 +309,7 @@ export function CleanupPanel({
      included. Any other kill action disarms it, so a stray tap can't fire it. */
   const [killAllArmed, setKillAllArmed] = useState(false);
   const [killAllBusy, setKillAllBusy] = useState(false);
+  const [bulkOutcomes, setBulkOutcomes] = useState<BulkKillOutcome[] | null>(null);
   /* Orchestrator seats the operator ticked into the bulk kills. The server asks
      for the same opt-in per kill, so an untouched seat survives either way. */
   const [tickedSeats, setTickedSeats] = useState<Set<string>>(new Set());
@@ -307,12 +324,13 @@ export function CleanupPanel({
 
   const killOne = async (session: ResourceSession) => {
     setError(null);
+    setBulkOutcomes(null);
     setKillAllArmed(false);
     markBusy(session.target, true);
     try {
       /* A per-row kill is the explicit gesture the seat rule asks for. */
-      const failure = await killSession(session, { intent: "row", includeSeat: true });
-      if (failure) setError(failure);
+      const outcome = await killSession(session, { intent: "row", includeSeat: true });
+      if (outcome.outcome === "refused") setError(outcome.reason);
       await onRefresh();
     } finally {
       markBusy(session.target, false);
@@ -321,15 +339,17 @@ export function CleanupPanel({
   };
 
   const killEach = async (targets: ResourceSession[], intent: "idle" | "all", idleHours?: number) => {
+    const outcomes: NonNullable<typeof bulkOutcomes> = [];
     for (const session of targets) {
       markBusy(session.target, true);
-      const failure = await killSession(session, {
+      const outcome = await killSession(session, {
         intent,
         includeSeat: tickedSeats.has(session.target),
         ...(idleHours === undefined ? {} : { idleHours }),
       });
-      if (failure) setError(failure);
+      outcomes.push({ target: session.target, label: session.title ?? session.target, ...outcome });
     }
+    setBulkOutcomes(outcomes);
     await onRefresh();
   };
 
@@ -467,6 +487,26 @@ export function CleanupPanel({
         </button>
       </div>
       {error ? <div className="border-t border-border px-3 py-1.5 text-[11px] font-semibold text-danger">{error}</div> : null}
+      {bulkOutcomes ? (
+        <div className="border-t border-border px-3 py-2 text-[10.5px]">
+          <div className="font-semibold text-primary" data-testid="bulk-kill-summary">
+            {t("resources.bulkSummary", {
+              killed: bulkOutcomes.filter((item) => item.outcome === "killed").length,
+              gone: bulkOutcomes.filter((item) => item.outcome === "already-gone").length,
+              refused: bulkOutcomes.filter((item) => item.outcome === "refused").length,
+            })}
+          </div>
+          <ul className="mt-1 space-y-0.5 text-muted">
+            {bulkOutcomes.map((item) => (
+              <li key={item.target} data-testid="bulk-kill-outcome">
+                {item.label}
+                {" · "}
+                {bulkOutcomeText(item, t)}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -11,6 +11,7 @@ import type { ResumeSpec } from "@/lib/agent/cli";
 import { AgentRegistry } from "@/lib/agent/registry";
 import { spawnResponseForReceipt } from "@/lib/agent/spawnResponse";
 import { procBackend } from "@/lib/proc";
+import { systemBootEpoch } from "@/lib/processIdentity";
 import { resolveSpawnRole } from "@/lib/roles/registry";
 import { RuntimeJournal } from "@/runtime-host/journal";
 
@@ -1403,7 +1404,7 @@ test.each([
         targetRegistry.setStructuredHostClaimed(key, {
           kind: engine === "codex" ? "codex-app-server" : "claude-broker",
           endpoint: state.endpoint,
-          process: { pid: process.pid, startIdentity: "missing-transcript-host" },
+          process: { pid: process.pid, startIdentity: "missing-transcript-host", bootEpoch: systemBootEpoch() },
           eventCursor: state.eventCursor,
           protocolVersion: state.protocolVersion,
           writerClaimEpoch: claimEpoch,
@@ -1415,7 +1416,7 @@ test.each([
       },
       publishHost: async () => async () => {},
       deliverFirst: async () => {},
-      processIdentity: () => ({ pid: process.pid, startIdentity: "missing-transcript-host" }),
+      processIdentity: () => ({ pid: process.pid, startIdentity: "missing-transcript-host", bootEpoch: systemBootEpoch() }),
       durableSetupTimeoutMs: 60_000,
       sleep: async () => { sleepCalls += 1; },
     })).rejects.toThrow(expectedFailure);
@@ -1436,7 +1437,11 @@ test.each([
       return;
     }
 
-    const processIdentity = { pid: process.pid, startIdentity: "missing-transcript-host" };
+    const processIdentity = {
+      pid: process.pid,
+      startIdentity: "missing-transcript-host",
+      bootEpoch: systemBootEpoch(),
+    };
     expect(registry.snapshot().entries[`${engine}:${id}`]).toMatchObject({
       status: "idle",
       structuredHost: { process: processIdentity },
@@ -1462,6 +1467,7 @@ test.each([
       kind: "structured",
       pid: record.pid,
       startIdentity: record.startIdentity,
+      bootEpoch: record.bootEpoch,
       engine: record.engine,
       sessionId: record.sessionId,
       conversationId: record.conversationId,

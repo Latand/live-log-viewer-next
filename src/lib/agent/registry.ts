@@ -4,7 +4,12 @@ import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
 import { statePath } from "@/lib/configDir";
-import { procBackend } from "@/lib/proc";
+import {
+  captureProcessIdentity,
+  processIdentityMayOwn,
+  sameRecordedProcessIdentity,
+  type ProcessIdentity,
+} from "@/lib/processIdentity";
 import { durableSemanticTitle, SPAWN_TITLE_REQUIRED_ERROR } from "@/lib/title";
 import { withAccountMutationLock } from "@/lib/accounts/accountMutation";
 import { conversationProjectKey } from "@/lib/accounts/conversationProject";
@@ -79,10 +84,7 @@ import { assertStructuredTextEnvelope, parseStructuredImageRefs, structuredConte
 
 export type AgentHostStatus = "starting" | "live" | "idle" | "handoff" | "unhosted" | "dead";
 
-export interface ProcessIdentity {
-  pid: number;
-  startIdentity: string | null;
-}
+export type { ProcessIdentity } from "@/lib/processIdentity";
 
 export interface TmuxHostEvidence {
   kind: "tmux";
@@ -121,7 +123,11 @@ function structuredClaimIdentity(owner: string): ProcessIdentity | null {
   try {
     const identity = JSON.parse(owner.slice(STRUCTURED_CLAIM_PREFIX.length)) as Partial<ProcessIdentity>;
     return Number.isInteger(identity.pid) && identity.pid! > 0
-      ? { pid: identity.pid!, startIdentity: typeof identity.startIdentity === "string" ? identity.startIdentity : null }
+      ? {
+          pid: identity.pid!,
+          startIdentity: typeof identity.startIdentity === "string" ? identity.startIdentity : null,
+          ...(typeof identity.bootEpoch === "string" ? { bootEpoch: identity.bootEpoch } : {}),
+        }
       : null;
   } catch {
     return null;
@@ -1063,6 +1069,30 @@ function terminalizeHeldDelivery(
   syncDeliveryOperationOwnerState(file, delivery, uncertain ? "unverified" : "lost");
 }
 
+const DEAD_SUPERSEDED_DELIVERY_REASON = "delivery expired because its superseded target session is dead";
+
+function heldDeliveryTargetsDeadSupersededSession(
+  file: RegistryFile,
+  delivery: HeldDelivery,
+  ownerAlive: (owner: ProcessIdentity) => boolean,
+): boolean {
+  if (delivery.state !== "held") return false;
+  const conversation = file.conversations[resolveConversationAlias(file, delivery.conversationId)];
+  if (!conversation?.supersededBy) return false;
+  const generation = conversation.generations.at(-1);
+  if (!generation) return false;
+  const entry = file.entries[sessionKeyId({ engine: conversation.engine, sessionId: generation.id })];
+  if (!entry || entry.host) return false;
+  const processIdentity = entry.structuredHost?.process ?? null;
+  if (processIdentity && ownerAlive(processIdentity)) return false;
+  if (!processIdentity && entry.status !== "dead" && entry.status !== "unhosted") return false;
+  if (entry.claimOwner) {
+    const claimOwner = structuredClaimIdentity(entry.claimOwner);
+    if (!claimOwner || ownerAlive(claimOwner)) return false;
+  }
+  return true;
+}
+
 function terminalizeRolledBackMigrationDelivery(
   file: RegistryFile,
   deliveryId: string,
@@ -1230,11 +1260,6 @@ const LIVE_CHILD_RECEIPT_STATES = new Set<SpawnReceipt["state"]>([
 const LIVE_CHILD_HOST_STATES = new Set<AgentHostStatus>(["starting", "live", "idle", "handoff"]);
 export const SPAWN_STARTING_ADMISSION_LEASE_MS = 2 * 60_000;
 
-function processIdentityAlive(identity: ProcessIdentity): boolean {
-  return procBackend.pidAlive(identity.pid)
-    && (identity.startIdentity === null || procBackend.processIdentity(identity.pid) === identity.startIdentity);
-}
-
 function childEntries(
   file: RegistryFile,
   childConversationId: ViewerConversationId,
@@ -1266,7 +1291,7 @@ function liveViewerChildCount(file: RegistryFile, parentConversationId: ViewerCo
     const receipt = edge.evidence.launchId ? file.receipts[edge.evidence.launchId] : null;
     const entries = childEntries(file, childConversationId, edge, receipt);
     const processes = knownChildProcesses(receipt, entries);
-    if (processes.some(processIdentityAlive)) {
+    if (processes.some((identity) => processIdentityMayOwn(identity))) {
       liveChildren.add(childConversationId);
       continue;
     }
@@ -1306,7 +1331,11 @@ function normalizeStructuredHost(value: unknown): StructuredHostColumns | null {
   }
   const processIdentity = host.process && typeof host.process === "object"
     && typeof host.process.pid === "number"
-    ? { pid: host.process.pid, startIdentity: typeof host.process.startIdentity === "string" ? host.process.startIdentity : null }
+    ? {
+        pid: host.process.pid,
+        startIdentity: typeof host.process.startIdentity === "string" ? host.process.startIdentity : null,
+        ...(typeof host.process.bootEpoch === "string" ? { bootEpoch: host.process.bootEpoch } : {}),
+      }
     : null;
   return {
     kind: host.kind,
@@ -3177,8 +3206,7 @@ export class AgentRegistry {
 
   constructor(
     readonly filename = statePath("agent-registry.json"),
-    private readonly ownerAlive: (owner: ProcessIdentity) => boolean = (owner) =>
-      procBackend.pidAlive(owner.pid) && (owner.startIdentity === null || procBackend.processIdentity(owner.pid) === owner.startIdentity),
+    private readonly ownerAlive: (owner: ProcessIdentity) => boolean = processIdentityMayOwn,
     private readonly lockTiming: RegistryLockTiming = SYSTEM_LOCK_TIMING,
     storage: AgentRegistryStorageOptions = {},
   ) {
@@ -3421,7 +3449,7 @@ export class AgentRegistry {
   private compactAtStartup(): void {
     if (!fs.existsSync(this.filename)) return;
     const lock = `${this.filename}.write-lock`;
-    const claim = this.acquireLock(lock, { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) });
+    const claim = this.acquireLock(lock, captureProcessIdentity(process.pid));
     try {
       this.compactAtStartupLocked();
     } finally {
@@ -3453,7 +3481,7 @@ export class AgentRegistry {
 
   private synchronizeDualWriteStartup(beforeReplace: (() => void) | undefined): void {
     const lock = `${this.filename}.write-lock`;
-    const claim = this.acquireLock(lock, { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) });
+    const claim = this.acquireLock(lock, captureProcessIdentity(process.pid));
     try {
       const sqlite = this.sqliteStore!.snapshot();
       if (!fs.existsSync(this.filename)) writeAtomic(this.filename, sqlite.file, sqlite.revision);
@@ -3836,7 +3864,7 @@ export class AgentRegistry {
       return mutation.result;
     }
     const lock = `${this.filename}.write-lock`;
-    const claim = this.acquireLock(lock, { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) });
+    const claim = this.acquireLock(lock, captureProcessIdentity(process.pid));
     try {
       const sqlite = this.sqliteMode === "dual-write" ? this.sqliteStore!.snapshot() : null;
       if (sqlite) {
@@ -4160,7 +4188,7 @@ export class AgentRegistry {
         pendingOrchestratorSeatIdentity: null,
         transport: input.transport ?? null,
         admissionOwner: input.transport === "structured" || input.ownStartingActuation === true
-          ? { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) }
+          ? captureProcessIdentity(process.pid)
           : null,
         spawnCapabilityDigest: typeof input.spawnCapabilityDigest === "string" && /^[0-9a-f]{64}$/.test(input.spawnCapabilityDigest)
           ? input.spawnCapabilityDigest
@@ -4261,10 +4289,7 @@ export class AgentRegistry {
       if (receipt.admissionOwner && this.ownerAlive(receipt.admissionOwner)) {
         return { claimed: false, receipt: clone(receipt) };
       }
-      receipt.admissionOwner = {
-        pid: process.pid,
-        startIdentity: procBackend.processIdentity(process.pid),
-      };
+      receipt.admissionOwner = captureProcessIdentity(process.pid);
       return { claimed: true, receipt: clone(receipt) };
     });
   }
@@ -5054,7 +5079,7 @@ export class AgentRegistry {
       };
       /* A foreground launch can prove its transcript will never materialize
          while the host still refuses release. The receipt must settle so the
-         stage can retry, and the exact pid/start identity must remain listed
+         stage can retry, and the exact process identity must remain listed
          so the Viewer can finish the reap without an operator searching the
          process table. Only this launch's registered live host qualifies. */
       if (options.retainRegisteredHost === true
@@ -5155,8 +5180,7 @@ export class AgentRegistry {
       const entry = file.entries[keyId];
       if (!entry) return false;
       const current = entry.structuredHost?.process ?? null;
-      if (expected && current
-        && (current.pid !== expected.pid || current.startIdentity !== expected.startIdentity)) return false;
+      if (expected && current && !sameRecordedProcessIdentity(current, expected)) return false;
       const replacement = {
         ...entry,
         host: null,
@@ -5192,8 +5216,7 @@ export class AgentRegistry {
         || !conversation.generations.some((generation) => generation.id === key.sessionId)
         || !entry
         || (expected && (!structuredProcess
-          || structuredProcess.pid !== expected.process.pid
-          || structuredProcess.startIdentity !== expected.process.startIdentity
+          || !sameRecordedProcessIdentity(structuredProcess, expected.process)
           || entry.claimEpoch !== expected.claimEpoch
           || entry.structuredHost?.writerClaimEpoch !== expected.claimEpoch))
         || entry.host
@@ -5275,8 +5298,7 @@ export class AgentRegistry {
       const structuredHost = entry?.structuredHost;
       const current = structuredHost?.process;
       if (!entry?.claimOwner || !structuredHost || !current || expected.startIdentity === null
-        || current.pid !== expected.pid
-        || current.startIdentity !== expected.startIdentity) return false;
+        || !sameRecordedProcessIdentity(current, expected)) return false;
       const replacement = {
         ...entry,
         pendingAction: "handoff" as const,
@@ -6905,6 +6927,25 @@ export class AgentRegistry {
       if (delivery.state !== "delivered") terminalizeHeldDelivery(file, delivery, reason);
       return clone(delivery);
     });
+  }
+
+  /** Expires pending work whose target has two terminal proofs: a durable
+      supersedence edge and a registry process identity that is gone. Settlement
+      keeps the delivery operation queryable and removes it from startup's
+      pending-work set. */
+  drainDeadSupersededHeldDeliveries(): string[] {
+    const snapshot = this.readOnlySnapshot();
+    const candidates = Object.values(snapshot.heldDeliveries)
+      .filter((delivery) => heldDeliveryTargetsDeadSupersededSession(snapshot, delivery, this.ownerAlive))
+      .map((delivery) => delivery.id);
+    if (candidates.length === 0) return [];
+    return this.mutate((file) => candidates.flatMap((id) => {
+      const delivery = file.heldDeliveries[id];
+      if (!delivery || !heldDeliveryTargetsDeadSupersededSession(file, delivery, this.ownerAlive)) return [];
+      terminalizeHeldDelivery(file, delivery, DEAD_SUPERSEDED_DELIVERY_REASON);
+      compactDeliveryReservations(file, delivery.conversationId, this.now());
+      return [id];
+    }));
   }
 
   /** Atomically fences rollback ownership against the current reservation and

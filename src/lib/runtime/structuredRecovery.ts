@@ -7,7 +7,7 @@ import type { ResumeSpec } from "@/lib/agent/cli";
 import { agentRegistry, type AgentRegistry, type ProcessIdentity, type RegistryFile } from "@/lib/agent/registry";
 import { sessionKeyId, type SessionKey } from "@/lib/agent/sessionKey";
 import { cachedLimitsProvenance } from "@/lib/limits";
-import { procBackend } from "@/lib/proc";
+import { captureProcessIdentity, processIdentityMayOwn } from "@/lib/processIdentity";
 import { derivedSpawnTitle, durableSemanticTitle } from "@/lib/title";
 
 import { accountPark, type AccountPark } from "./accountPark";
@@ -57,7 +57,7 @@ export interface StructuredRecoveryDependencies {
   transport?: () => "tmux" | "structured";
   resolveAccount?: (engine: "claude" | "codex", accountId: string | null, project: string | null) => AccountContext;
   spawn?: typeof spawnStructuredConversation;
-  processIdentity?: () => { pid: number; startIdentity: string | null };
+  processIdentity?: () => ProcessIdentity;
   requestDeliveryDrain?: () => void;
   park?: StructuredHostParkResolver;
   ownership?: {
@@ -95,9 +95,7 @@ interface RecoveryCandidate {
 }
 
 export function structuredHostProcessAlive(identity: ProcessIdentity | null): boolean {
-  if (!identity || !Number.isInteger(identity.pid) || identity.pid <= 0) return false;
-  if (!procBackend.pidAlive(identity.pid)) return false;
-  return identity.startIdentity === null || procBackend.processIdentity(identity.pid) === identity.startIdentity;
+  return identity ? processIdentityMayOwn(identity) : false;
 }
 
 const recoveryStore = globalThis as typeof globalThis & {
@@ -215,10 +213,7 @@ async function recoverCandidate(
   const assertOwnership = async (): Promise<void> => {
     if (ownership && !await ownership.owns()) throw new StructuredRecoverySupersededError();
   };
-  const owner = (dependencies.processIdentity ?? (() => ({
-    pid: process.pid,
-    startIdentity: procBackend.processIdentity(process.pid),
-  })))();
+  const owner = (dependencies.processIdentity ?? (() => captureProcessIdentity(process.pid)))();
   return registry.withOperationLock(candidate.key, owner, async () => {
     await assertOwnership();
     const park = dependencies.park ?? defaultParkResolver;

@@ -20,6 +20,7 @@ import { en } from "@/lib/i18n/en";
 import { uk } from "@/lib/i18n/uk";
 import { fetchClaudeLimits } from "@/lib/limits";
 import { procBackend } from "@/lib/proc";
+import { captureProcessIdentity } from "@/lib/processIdentity";
 import { signalProcessGroup } from "@/lib/processGroup";
 import { hasUserAuthoredMessage } from "@/lib/session/reader";
 import { buildImagePayload, deleteInboxImages, spawnAgentWithPrompt } from "@/lib/tmux";
@@ -1041,7 +1042,7 @@ export interface StructuredSpawnDependencies {
     ownsOperation?: () => Promise<boolean>,
   ): Promise<() => Promise<void>>;
   deliverFirst?(input: StructuredSpawnInput, artifactPath: string): Promise<void | "held">;
-  processIdentity?(): { pid: number; startIdentity: string | null };
+  processIdentity?(): ProcessIdentity;
   durableSetupTimeoutMs?: number;
   now?(): number;
   sleep?(ms: number): Promise<void>;
@@ -1180,10 +1181,7 @@ export async function recoverPendingStructuredSpawns(
       if (identity) {
         const entry = registry.readOnlySnapshot().entries[sessionKeyId(identity.key)];
         if (entry?.structuredHost) {
-          claimed = registry.claimStructuredHost(identity.key, {
-            pid: process.pid,
-            startIdentity: procBackend.processIdentity(process.pid),
-          }, { allowUnhosted: true });
+          claimed = registry.claimStructuredHost(identity.key, captureProcessIdentity(process.pid), { allowUnhosted: true });
           if (!claimed?.claimOwner) {
             registry.failStructuredSpawn(receipt.launchId, reason);
             continue;
@@ -1225,10 +1223,7 @@ export async function recoverPendingStructuredSpawns(
       let recoveryClaim: AgentRegistryEntry | null = null;
       let releasedOwnedHost = false;
       if (entry?.structuredHost && !ownedByFailedOperation) {
-        recoveryClaim = registry.claimStructuredHost(receipt.key, {
-          pid: process.pid,
-          startIdentity: procBackend.processIdentity(process.pid),
-        }, { allowUnhosted: true });
+        recoveryClaim = registry.claimStructuredHost(receipt.key, captureProcessIdentity(process.pid), { allowUnhosted: true });
         if (!recoveryClaim?.claimOwner) {
           registry.failSpawn(
             receipt.launchId,
@@ -1241,10 +1236,7 @@ export async function recoverPendingStructuredSpawns(
         const releasedHost = await releaseStructuredDeliveryHost(receipt.key);
         releasedOwnedHost = ownedByFailedOperation && releasedHost;
         if (entry?.structuredHost && ownedByFailedOperation && !releasedHost) {
-          recoveryClaim = registry.claimStructuredHost(receipt.key, {
-            pid: process.pid,
-            startIdentity: procBackend.processIdentity(process.pid),
-          }, { allowUnhosted: true });
+          recoveryClaim = registry.claimStructuredHost(receipt.key, captureProcessIdentity(process.pid), { allowUnhosted: true });
           if (!recoveryClaim?.claimOwner) {
             throw new Error(`structured spawn failed host is still owned for ${receipt.launchId}`);
           }
@@ -1542,7 +1534,7 @@ export async function spawnStructuredConversation(
   const publishHost = dependencies.publishHost
     ?? ((key, host, ownsOperation) => publishStructuredDeliveryHost({ key, host }, ownsOperation));
   const deliverFirst = dependencies.deliverFirst ?? defaultDeliverFirst;
-  const processIdentity = dependencies.processIdentity ?? (() => ({ pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) }));
+  const processIdentity = dependencies.processIdentity ?? (() => captureProcessIdentity(process.pid));
   const now = dependencies.now ?? Date.now;
   const operationId = input.receipt.launchId;
   const resumeSessionId = structuredResumeSessionId(input);
