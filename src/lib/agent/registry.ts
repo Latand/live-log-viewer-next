@@ -2962,14 +2962,31 @@ export function normalizeRegistry(value: unknown, policy?: McpGrantPolicy): Regi
   }), policy);
 }
 
-function readFileWithPayload(filename: string, policy?: McpGrantPolicy): { file: RegistryFile; payload: string | null } {
+function sqliteRevisionFromParsed(value: unknown): number | null {
+  const revision = value && typeof value === "object"
+    ? (value as { _sqliteRevision?: unknown })._sqliteRevision
+    : undefined;
+  return Number.isSafeInteger(revision) && Number(revision) >= 0 ? Number(revision) : null;
+}
+
+function readFileWithPayload(
+  filename: string,
+  policy?: McpGrantPolicy,
+): { file: RegistryFile; payload: string | null; sqliteRevision: number | null } {
   try {
     const payload = fs.readFileSync(filename, "utf8");
+    const parsed = JSON.parse(payload);
     /* A whole file, so an entry no conversation owns is genuinely unowned and
        falls back to the baseline rather than keeping a claimed grant (#739). */
-    return { file: reboundAssembledMcpGrants(normalizeRegistry(JSON.parse(payload), policy), policy), payload };
+    return {
+      file: reboundAssembledMcpGrants(normalizeRegistry(parsed, policy), policy),
+      payload,
+      sqliteRevision: sqliteRevisionFromParsed(parsed),
+    };
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { file: clone(EMPTY), payload: null };
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return { file: clone(EMPTY), payload: null, sqliteRevision: null };
+    }
     if (error instanceof RegistryReadError) throw error;
     throw new RegistryReadError(`agent registry cannot be read: ${error instanceof Error ? error.message : String(error)}`);
   }
@@ -3114,8 +3131,7 @@ export function sqliteModeFromEnvironment(): AgentRegistrySqliteMode {
 
 function sqliteMirrorRevision(filename: string): number | null {
   try {
-    const revision = (JSON.parse(fs.readFileSync(filename, "utf8")) as { _sqliteRevision?: unknown })._sqliteRevision;
-    return Number.isInteger(revision) && Number(revision) >= 0 ? Number(revision) : null;
+    return sqliteRevisionFromParsed(JSON.parse(fs.readFileSync(filename, "utf8")));
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw error;
@@ -3296,7 +3312,7 @@ export class AgentRegistry {
   }
 
   private currentMirrorRevision(): number | null {
-    if (this.sqliteMode !== "read" && this.sqliteMode !== "sqlite") return null;
+    if (this.sqliteMode === "off") return null;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const before = registryFileSignature(this.filename);
       if (this.mirrorRevisionCache?.signature === before) return this.mirrorRevisionCache.revision;
@@ -3408,7 +3424,7 @@ export class AgentRegistry {
     }
   }
 
-  private compactAtStartupLocked(): void {
+  private compactAtStartupLocked(sqliteRevision?: number): void {
     let original: string;
     try {
       original = fs.readFileSync(this.filename, "utf8");
@@ -3427,7 +3443,7 @@ export class AgentRegistry {
       throw error;
     }
     compactDeliveryReservations(file, undefined, this.now());
-    if (serializeRegistry(file) !== original) writeAtomic(this.filename, file);
+    if (serializeRegistry(file, sqliteRevision) !== original) writeAtomic(this.filename, file, sqliteRevision);
   }
 
   private synchronizeDualWriteStartup(beforeReplace: (() => void) | undefined): void {
@@ -3435,7 +3451,7 @@ export class AgentRegistry {
     const claim = this.acquireLock(lock, { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) });
     try {
       const sqlite = this.sqliteStore!.snapshot();
-      if (!fs.existsSync(this.filename)) writeAtomic(this.filename, sqlite.file);
+      if (!fs.existsSync(this.filename)) writeAtomic(this.filename, sqlite.file, sqlite.revision);
       const mirrorRevision = sqliteMirrorRevision(this.filename);
       if (mirrorRevision !== null && mirrorRevision !== sqlite.revision) {
         throw new RegistryParityError(
@@ -3443,7 +3459,7 @@ export class AgentRegistry {
         );
       }
       this.assertSqliteParity(sqlite);
-      this.compactAtStartupLocked();
+      this.compactAtStartupLocked(sqlite.revision);
       const file = readFile(this.filename, this.mcpGrantPolicy);
       beforeReplace?.();
       const replacement = this.sqliteStore!.replace(file, sqlite.revision);
@@ -3453,6 +3469,7 @@ export class AgentRegistry {
           `agent registry SQLite revision changed during dual-write startup: expected ${sqlite.revision}, current ${replacement.revision}`,
         );
       }
+      writeAtomic(this.filename, replacement.file, replacement.revision);
       this.assertSqliteParity();
     } finally {
       this.releaseLock(claim);
@@ -3827,11 +3844,17 @@ export class AgentRegistry {
         this.assertSqliteParity(sqlite);
       }
       const original = readFileWithPayload(this.filename, this.mcpGrantPolicy);
+      const rollbackFile = sqlite && original.sqliteRevision !== sqlite.revision
+        ? clone(original.file)
+        : null;
       const file = original.file;
       const result = mutator(file);
-      const payload = serializeRegistry(file);
-      const changed = original.payload !== payload;
-      if (changed) writeAtomicPayload(this.filename, payload);
+      const currentPayload = serializeRegistry(file, sqlite?.revision);
+      const changed = original.payload !== currentPayload;
+      if (changed) {
+        const payload = serializeRegistry(file, sqlite ? sqlite.revision + 1 : undefined);
+        writeAtomicPayload(this.filename, payload);
+      }
       if (sqlite && !changed) this.assertSqliteParity();
       if (sqlite && changed) {
         let replacement: SqliteRegistryReplacement;
@@ -3841,8 +3864,8 @@ export class AgentRegistry {
         } catch (error) {
           const durableSqlite = this.sqliteStore!.snapshot();
           if (durableSqlite.revision === sqlite.revision) {
-            if (original.payload === null) writeAtomic(this.filename, original.file, sqlite.revision);
-            else writeAtomicPayload(this.filename, original.payload);
+            if (rollbackFile) writeAtomic(this.filename, rollbackFile, sqlite.revision);
+            else writeAtomicPayload(this.filename, original.payload!);
           } else {
             this.mirrorSqliteSnapshot(durableSqlite);
           }

@@ -324,6 +324,8 @@ for (const version of [1, 2]) {
 
     const first = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "dual-write" });
     expect(first.snapshot().autoBalance.claude.restartedAt).toBe(first.snapshot().autoBalance.codex.restartedAt);
+    expect((JSON.parse(fs.readFileSync(filename, "utf8")) as { _sqliteRevision?: number })._sqliteRevision)
+      .toBe(first.storageDiagnostics().revision!);
 
     const ready = path.join(directory, "restart.ready");
     const release = path.join(directory, "restart.release");
@@ -342,6 +344,23 @@ for (const version of [1, 2]) {
     expect(await new Response(restarted.stderr).text()).toBe("");
   });
 }
+
+test("dual-write startup recreates a missing JSON mirror with the authoritative revision", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-dual-missing-mirror-"));
+  const filename = path.join(directory, "agent-registry.json");
+  const first = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "dual-write" });
+  const receipt = beginTestSpawn(first, "/dual-missing-mirror");
+  const expected = first.snapshot();
+  fs.renameSync(filename, `${filename}.legacy-missing`);
+
+  const recovered = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "dual-write" });
+  const mirror = JSON.parse(fs.readFileSync(filename, "utf8")) as { _sqliteRevision?: number };
+
+  expect(recovered.snapshot()).toEqual(expected);
+  expect(recovered.snapshot().receipts[receipt.launchId]).toBeDefined();
+  expect(mirror._sqliteRevision).toBe(recovered.storageDiagnostics().revision!);
+  expect(recovered.storageDiagnostics().mirrorRevision).toBe(mirror._sqliteRevision!);
+});
 
 test("supersedence edges round-trip JSON ↔ SQLite with parity intact", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-sqlite-supersede-"));
@@ -421,6 +440,10 @@ test("dual-write keeps JSON authoritative and SQLite reads require parity", () =
   const sqliteFilename = path.join(directory, "agent-registry.sqlite");
   const dual = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "dual-write" });
   const receipt = beginTestSpawn(dual, "/parity");
+  const mirror = JSON.parse(fs.readFileSync(filename, "utf8")) as { _sqliteRevision?: number };
+
+  expect(mirror._sqliteRevision).toBe(dual.storageDiagnostics().revision!);
+  expect(dual.storageDiagnostics().mirrorRevision).toBe(mirror._sqliteRevision!);
 
   expect(new AgentRegistry(filename).snapshot().receipts[receipt.launchId]).toEqual(
     new AgentRegistry(filename, undefined, undefined, { sqliteMode: "read" }).snapshot().receipts[receipt.launchId],
@@ -775,6 +798,25 @@ test("dual-write leaves both backends unchanged after a no-op mutation", () => {
   db.close();
 });
 
+test("dual-write rollback restores a stamped current mirror after a replacement failure", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-dual-rollback-stamp-"));
+  const filename = path.join(directory, "agent-registry.json");
+  const dual = new AgentRegistry(filename, undefined, undefined, {
+    sqliteMode: "dual-write",
+    beforeDualWriteMutationReplace: () => { throw new Error("injected SQLite replacement failure"); },
+  });
+  const legacy = JSON.parse(fs.readFileSync(filename, "utf8")) as { _sqliteRevision?: number };
+  delete legacy._sqliteRevision;
+  fs.writeFileSync(filename, JSON.stringify(legacy));
+
+  expect(() => beginTestSpawn(dual, "/dual-rollback-stamp")).toThrow("injected SQLite replacement failure");
+
+  const mirror = JSON.parse(fs.readFileSync(filename, "utf8")) as { _sqliteRevision?: number };
+  expect(mirror._sqliteRevision).toBe(dual.storageDiagnostics().revision!);
+  expect(dual.storageDiagnostics().mirrorRevision).toBe(mirror._sqliteRevision!);
+  expect(dual.snapshot().receipts).toEqual({});
+});
+
 for (const sqliteMode of ["read", "sqlite"] as const) {
   test(`${sqliteMode} mode leaves the durable revision unchanged after a missing claim release`, () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), `llv-registry-${sqliteMode}-noop-`));
@@ -848,6 +890,8 @@ test("dual-write startup serializes SQLite replacement with a concurrent writer"
   const dual = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "dual-write" });
   expect(Object.values(dual.snapshot().conversations).some((conversation) =>
     conversation.generations.some((generation) => generation.path === "/sessions/concurrent-dual-writer.jsonl"))).toBeTrue();
+  expect((JSON.parse(fs.readFileSync(filename, "utf8")) as { _sqliteRevision?: number })._sqliteRevision)
+    .toBe(dual.storageDiagnostics().revision!);
 });
 
 for (const mode of ["read", "sqlite"] as const) {
@@ -930,6 +974,8 @@ test("dual-write mutation fails closed across a concurrent SQLite writer", async
   const recovered = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "read" });
   expect(recovered.conversationForPath("/sessions/sqlite.jsonl")).toBeDefined();
   expect(recovered.conversationForPath("/sessions/dual.jsonl")).toBeNull();
+  expect((JSON.parse(fs.readFileSync(filename, "utf8")) as { _sqliteRevision?: number })._sqliteRevision)
+    .toBe(recovered.storageDiagnostics().revision!);
   expect(new AgentRegistry(filename).snapshot()).toEqual(recovered.snapshot());
 });
 
@@ -1187,6 +1233,8 @@ test("dual-write release demotion leaves the authoritative JSON handoff untouche
   beginTestSpawn(successor, "/successor");
 
   expect(rollbackWrites).toBe(0);
+  expect((JSON.parse(fs.readFileSync(filename, "utf8")) as { _sqliteRevision?: number })._sqliteRevision)
+    .toBe(successor.storageDiagnostics().revision!);
   expect(new AgentRegistry(filename, undefined, undefined, { sqliteMode: "read" }).snapshot())
     .toEqual(successor.snapshot());
 });
