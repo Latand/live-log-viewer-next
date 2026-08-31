@@ -66,9 +66,9 @@ const FOCUS_CAP = typeof window !== "undefined" && window.matchMedia("(pointer: 
 
 const EMPTY_FEED: FeedSnapshot = { items: [], hiddenServiceCount: 0 };
 
-/** How long after a programmatic glue a not-at-bottom scroll event is treated
-    as layout settling (content-visibility estimates, pane resizes) and glued
-    again. User releases are real scrolls that arrive outside this window. */
+/** How long after a programmatic glue an untagged not-at-bottom scroll event
+    is treated as layout settling (content-visibility estimates, pane resizes)
+    and glued again. Input-tagged releases bypass this window. */
 const GLUE_SETTLE_MS = 300;
 
 /* Scroll state per stable conversation, surviving pane remounts and native
@@ -110,6 +110,12 @@ function viewportAnchor(scroller: HTMLElement, path: string): ViewportAnchor | n
 
 function rowForAnchor(scroller: HTMLElement, key: string): HTMLElement | null {
   return feedRows(scroller).find((row) => row.dataset.feedKey === key) ?? null;
+}
+
+function canScrollVertically(element: HTMLElement, deltaY: number): boolean {
+  if (deltaY < 0) return element.scrollTop > 0;
+  if (deltaY > 0) return element.scrollTop + element.clientHeight < element.scrollHeight;
+  return false;
 }
 
 /** Wall-clock read hoisted out of the component so the React Compiler's purity
@@ -244,6 +250,8 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
   const lastPrependRef = useRef(0);
   const pulseTimer = useRef<number | null>(null);
   const glueAtRef = useRef(0);
+  const scrollCauseRef = useRef<"programmatic" | "user" | null>(null);
+  const pillTouchRef = useRef<{ x: number; y: number } | null>(null);
   const restoreInitializedPathRef = useRef<string | null>(null);
   const pendingRestoreRef = useRef<PendingRestore | null>(null);
   const filePathRef = useRef(tailPath);
@@ -276,7 +284,8 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
   const glue = () => {
     const el = scroller.current;
     if (!el) return;
-    glueAtRef.current = Date.now();
+    scrollCauseRef.current = "programmatic";
+    glueAtRef.current = nowMs();
     el.scrollTop = el.scrollHeight;
   };
 
@@ -296,14 +305,16 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
       const row = rowForAnchor(el, anchor.key);
       if (row) {
         const currentOffset = row.getBoundingClientRect().top - el.getBoundingClientRect().top;
-        glueAtRef.current = Date.now();
+        scrollCauseRef.current = "programmatic";
+        glueAtRef.current = nowMs();
         el.scrollTop += currentOffset - anchor.offset;
         pending.applied = true;
         return true;
       }
     }
     const maxScroll = Math.max(0, el.scrollHeight - el.clientHeight);
-    glueAtRef.current = Date.now();
+    scrollCauseRef.current = "programmatic";
+    glueAtRef.current = nowMs();
     el.scrollTop = Math.max(0, maxScroll - pending.fromBottom);
     if (maxScroll < pending.fromBottom) return false;
     pending.applied = true;
@@ -676,11 +687,28 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
      collide at any pane width. (A right-anchored pill also sat over the tool
      rows' status column on the phone.) */
   const pillPos = "left-1/2 -translate-x-1/2";
+  const forwardPillVerticalDelta = (row: HTMLElement | null, deltaY: number): void => {
+    const el = scroller.current;
+    if (!el || !deltaY || (row && canScrollVertically(row, deltaY))) return;
+    scrollCauseRef.current = "user";
+    el.scrollTop += deltaY;
+  };
 
   return (
     <RawLineProvider value={getRawLine}>
     <MessageProvenanceProvider value={provenanceLookup}>
-    <div className="flex min-h-0 flex-1 flex-col">
+    <div
+      className="flex min-h-0 flex-1 flex-col"
+      onWheelCapture={(event) => {
+        if (event.deltaY) scrollCauseRef.current = "user";
+      }}
+      onTouchStartCapture={() => { scrollCauseRef.current = "user"; }}
+      onKeyDownCapture={(event) => {
+        if (["ArrowDown", "ArrowUp", "End", "Home", "PageDown", "PageUp", " ", "Spacebar"].includes(event.key)) {
+          scrollCauseRef.current = "user";
+        }
+      }}
+    >
     {/* The pill anchors to the scroller wrapper — NOT the pane column — so the
         pinned status bar below is structurally outside its overlay area. */}
     <div className="relative flex min-h-0 flex-1 flex-col">
@@ -708,9 +736,37 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
       ) : null}
       {/* #1202: with the latest turn off-screen the drafts follow the operator
           to the bottom of the pane — above the «back to live» chip, so the two
-          bottom controls never share a row. */}
+          bottom controls never share a row. Empty wrapper space targets the
+          feed; vertical pill gestures are forwarded because this overlay and
+          the feed scroller are siblings. */}
       {file && !magnet ? (
-        <div className="absolute inset-x-2 bottom-11 z-10 flex justify-center">
+        <div
+          className="pointer-events-none absolute inset-x-2 bottom-11 z-10 flex justify-center"
+          onWheel={(event) => {
+            const row = event.currentTarget.querySelector<HTMLElement>("[data-reply-suggestions]");
+            let scale = 1;
+            if (event.deltaMode === 1) scale = 16;
+            else if (event.deltaMode === 2) scale = scroller.current?.clientHeight ?? 1;
+            forwardPillVerticalDelta(row, event.deltaY * scale);
+          }}
+          onTouchStart={(event) => {
+            const touch = event.touches[0];
+            pillTouchRef.current = touch ? { x: touch.clientX, y: touch.clientY } : null;
+          }}
+          onTouchMove={(event) => {
+            const touch = event.touches[0];
+            const previous = pillTouchRef.current;
+            if (!touch || !previous) return;
+            const deltaX = previous.x - touch.clientX;
+            const deltaY = previous.y - touch.clientY;
+            pillTouchRef.current = { x: touch.clientX, y: touch.clientY };
+            if (Math.abs(deltaY) <= Math.abs(deltaX)) return;
+            const row = event.currentTarget.querySelector<HTMLElement>("[data-reply-suggestions]");
+            forwardPillVerticalDelta(row, deltaY);
+          }}
+          onTouchEnd={() => { pillTouchRef.current = null; }}
+          onTouchCancel={() => { pillTouchRef.current = null; }}
+        >
           <SuggestedReplies
             file={file}
             revision={suggestionsRevision}
@@ -731,19 +787,21 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
         className={compact ? "min-h-0 flex-1 overflow-y-auto py-3" : "min-h-0 flex-1 overflow-y-auto py-6"}
         onScroll={(event) => {
           const el = event.currentTarget;
+          const userInitiated = scrollCauseRef.current === "user";
+          scrollCauseRef.current = null;
           const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 50;
-          const settling = Date.now() - glueAtRef.current < GLUE_SETTLE_MS;
-          if (!settling) pendingRestoreRef.current = null;
+          const settling = nowMs() - glueAtRef.current < GLUE_SETTLE_MS;
+          if (!settling || userInitiated) pendingRestoreRef.current = null;
           if (atBottom && !magnetRef.current) setMagnet(true, true);
           else if (!atBottom && magnetRef.current) {
             /* Off-bottom right after a programmatic glue is layout settling
                (content-visibility estimates, pane resizes during a scheme
-               reshuffle) — hold the magnet and glue again. Real user releases
-               arrive outside the settle window. */
-            if (settling) glue();
+               reshuffle) — hold the magnet and glue again. A preceding input
+               event identifies an operator release inside the same window. */
+            if (settling && !userInitiated) glue();
             else setMagnet(false);
           }
-          if (memoryKey && file && !settling) {
+          if (memoryKey && file && (!settling || userInitiated)) {
             rememberScroll(memoryKey, {
               magnet: magnetRef.current,
               fromBottom: Math.max(0, el.scrollHeight - el.clientHeight - el.scrollTop),

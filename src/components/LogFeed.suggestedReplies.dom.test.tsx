@@ -168,7 +168,7 @@ const file = {
   conversationId: CONVERSATION_ID,
 } as FileEntry;
 
-function render(follow: boolean): HTMLElement {
+function render(follow: boolean, setFollow: (value: boolean) => void = () => undefined): HTMLElement {
   const host = dom.document.createElement("div");
   dom.document.body.append(host);
   const root = createRoot(host as unknown as HTMLElement);
@@ -182,12 +182,28 @@ function render(follow: boolean): HTMLElement {
         onStatus={() => undefined}
         paused
         follow={follow}
-        setFollow={() => undefined}
+        setFollow={setFollow}
         compact
       />,
     );
   });
   return host as unknown as HTMLElement;
+}
+
+function setScrollerGeometry(element: HTMLElement, height: number, viewport: number, initialTop: number) {
+  let top = initialTop;
+  Object.defineProperties(element, {
+    scrollHeight: { configurable: true, get: () => height },
+    clientHeight: { configurable: true, get: () => viewport },
+    scrollTop: {
+      configurable: true,
+      get: () => top,
+      set: (value: number) => {
+        top = Math.max(0, Math.min(Number(value), height - viewport));
+      },
+    },
+  });
+  return { setTop: (value: number) => { element.scrollTop = value; } };
 }
 
 async function settle(host: HTMLElement, selector: string, timeoutMs = 4_000): Promise<void> {
@@ -224,4 +240,49 @@ test("with the magnet released the drafts pin above the composer instead of stay
      inline copy is gone rather than doubled. */
   expect(host.querySelector("[data-log-feed-scroller]")!.contains(row)).toBe(false);
   expect(host.querySelectorAll('[data-reply-suggestions="inline"]')).toHaveLength(0);
+});
+
+test("a floating pill row with no vertical range forwards vertical wheel movement to the feed", async () => {
+  const host = render(false);
+  await settle(host, '[data-reply-suggestions="floating"]');
+
+  const row = host.querySelector('[data-reply-suggestions="floating"]') as HTMLElement;
+  const scroller = host.querySelector("[data-log-feed-scroller]") as HTMLElement;
+  setScrollerGeometry(row, 40, 40, 0);
+  setScrollerGeometry(scroller, 1_000, 200, 600);
+
+  flushSync(() => {
+    row.dispatchEvent(new dom.WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: -120 }) as unknown as Event);
+  });
+
+  expect(scroller.scrollTop).toBe(480);
+
+  setScrollerGeometry(row, 100, 40, 20);
+  flushSync(() => {
+    row.dispatchEvent(new dom.WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: -20 }) as unknown as Event);
+  });
+  expect(scroller.scrollTop).toBe(480);
+});
+
+test("a user wheel during the glue window releases the scroll magnet on the first gesture", () => {
+  const originalNow = Date.now;
+  const fixedNow = originalNow();
+  Date.now = () => fixedNow;
+  try {
+    const followChanges: boolean[] = [];
+    const host = render(true, (value) => followChanges.push(value));
+    const scroller = host.querySelector("[data-log-feed-scroller]") as HTMLElement;
+    const geometry = setScrollerGeometry(scroller, 1_000, 200, 800);
+
+    geometry.setTop(600);
+    flushSync(() => {
+      scroller.dispatchEvent(new dom.WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: -120 }) as unknown as Event);
+      scroller.dispatchEvent(new dom.Event("scroll", { bubbles: true }) as unknown as Event);
+    });
+
+    expect(scroller.scrollTop).toBe(600);
+    expect(followChanges).toEqual([false]);
+  } finally {
+    Date.now = originalNow;
+  }
 });
