@@ -300,6 +300,42 @@ test("a Codex turn refused for usage carries the provider's notice (#1141)", asy
   });
 });
 
+test("a Codex usage-limit terminal record carries its governing reset (#1371)", async () => {
+  const resetsAt = Math.floor(Date.parse("2026-09-07T10:05:00.000Z") / 1_000);
+  const file = writeTranscript("codex-usage-limit-reset.jsonl", [
+    { timestamp: "2026-08-31T10:00:00.000Z", payload: { type: "task_started" } },
+    {
+      timestamp: "2026-08-31T10:04:00.000Z",
+      payload: {
+        type: "token_count",
+        rate_limits: {
+          limit_id: "codex",
+          primary: { used_percent: 27, window_minutes: 10_080, resets_at: resetsAt },
+          secondary: null,
+          credits: { has_credits: true, balance: "0" },
+          plan_type: "pro",
+        },
+      },
+    },
+    {
+      timestamp: "2026-08-31T10:05:00.000Z",
+      payload: {
+        type: "task_complete",
+        message: "You've hit your usage limit. Try again after the weekly reset.",
+        codex_error_info: "usage_limit",
+      },
+    },
+  ]);
+
+  expect(await durableStageTurnEvidence("codex", file)).toMatchObject({
+    turn: "terminal",
+    terminalProviderMessage: {
+      text: "You've hit your usage limit. Try again after the weekly reset.",
+      usageLimit: { resetsAt },
+    },
+  });
+});
+
 test("a Codex turn that completed normally carries no provider notice (#1141)", async () => {
   const file = writeTranscript("codex-clean-complete.jsonl", [
     { timestamp: "2026-08-27T10:00:00.000Z", payload: { type: "task_started" } },

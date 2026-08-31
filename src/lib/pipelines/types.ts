@@ -144,6 +144,10 @@ export type PipelineStageAttempt = {
   sessionId: string | null;
   agentPath: string | null;
   paneId: string | null;
+  /** Account that owns this launch. Optional for records written before #1371. */
+  accountId?: string | null;
+  /** Usage-limited accounts excluded from this activation, with their resets. */
+  usageLimitedAccounts?: Array<{ accountId: string; resetsAt: number | null }>;
   flowId: string | null;
   /** Clean pipeline SHA expected when the first reviewer launches. */
   expectedReviewHeadSha?: string | null;
