@@ -105,6 +105,8 @@ export interface ProjectAccountSelectionInput {
   /** The engine's current routing choice, used only to order candidates. */
   preferredId?: string | null;
   excludedIds?: readonly string[];
+  /** Accounts this launch has terminal evidence are temporarily unavailable. */
+  unavailableIds?: readonly string[];
   /**
    * What an UNBOUND project does when nothing was named. The two launch paths
    * differ here and always have, so the binding must not quietly unify them:
@@ -139,12 +141,14 @@ export function selectProjectAccount(input: ProjectAccountSelectionInput): Proje
     return { kind: "not_allowed", accountId: requestedId, allowedAccountIds: allowed };
   }
   if (requestedId) return { kind: "available", accountId: requestedId };
-  if (allowed === null && (input.unbound ?? "engine-default") === "engine-default") {
+  const unavailable = new Set(input.unavailableIds ?? []);
+  if (allowed === null && unavailable.size === 0 && (input.unbound ?? "engine-default") === "engine-default") {
     return { kind: "available", accountId: input.preferredId?.trim() || null };
   }
-  const candidates = allowed === null
+  const permitted = allowed === null
     ? [...input.accounts]
     : input.accounts.filter((account) => allowed.includes(account.id));
+  const candidates = permitted.filter((account) => !unavailable.has(account.id));
   /* A preference outside the allowed set only orders candidates, so dropping it
      changes the order and never the set — the set is the fence. */
   const preferred = allowed === null || (input.preferredId && allowed.includes(input.preferredId))
@@ -158,7 +162,7 @@ export function selectProjectAccount(input: ProjectAccountSelectionInput): Proje
     input.now,
   );
   if (selected.kind === "available") return selected;
-  const consulted = allowed ?? candidates.map((account) => account.id);
+  const consulted = allowed ?? permitted.map((account) => account.id);
   return selected.kind === "exhausted"
     ? { kind: "exhausted", resetsAt: selected.resetsAt, allowedAccountIds: consulted }
     : { kind: "unavailable", allowedAccountIds: consulted };

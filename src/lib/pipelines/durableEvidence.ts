@@ -4,7 +4,7 @@ import { turnStateFromRecords } from "@/lib/accounts/migration/turnState";
 import type { FlowEngine } from "@/lib/flows/types";
 import { lastAssistantMessageFromRecords } from "@/lib/flows/findings";
 import { readStableTailRecords } from "@/lib/scanner/activity";
-import { recordValue, recordsValue, stringValue } from "@/lib/scanner/json";
+import { numberValue, recordValue, recordsValue, stringValue } from "@/lib/scanner/json";
 
 type RecordLike = Record<string, unknown>;
 
@@ -29,7 +29,12 @@ export type StageTurnEvidence = {
       ended with nothing to parse (#1141). Null whenever the turn ended on the
       agent's own message, and null while the turn is still open, so silence
       can never present as one. */
-  terminalProviderMessage?: { text: string; ts: number } | null;
+  terminalProviderMessage?: {
+    text: string;
+    ts: number;
+    /** Structured Codex usage-limit evidence from this same terminal turn. */
+    usageLimit?: { resetsAt: number | null };
+  } | null;
 };
 
 function recordTs(record: RecordLike, fallbackTs: number): number {
@@ -55,8 +60,50 @@ function codexTurnEndFailure(payload: RecordLike): string | null {
   return message ?? info;
 }
 
+function codexErrorInfo(payload: RecordLike): string | null {
+  return stringValue(payload.codex_error_info)
+    ?? stringValue(recordValue(payload.error)?.codex_error_info);
+}
+
+function isCodexUsageLimit(payload: RecordLike): boolean {
+  const info = codexErrorInfo(payload)?.toLowerCase();
+  return info === "usage_limit" || info === "usage_limit_exceeded";
+}
+
 const CODEX_TURN_END_TYPES = new Set(["task_complete", "turn_complete", "turn_completed", "turn_aborted"]);
 const CODEX_TURN_START_TYPES = new Set(["task_started", "turn_started", "user_message"]);
+
+/** Reset of the governing window in the quota event immediately preceding a
+    terminal usage-limit record. A windowless credits event says nothing about
+    the reset, so the scan continues to the latest event that carries windows. */
+function codexUsageLimitResetAt(records: RecordLike[], endIndex: number): number | null {
+  for (let index = endIndex - 1; index >= 0; index -= 1) {
+    const payload = recordValue(records[index]?.payload) ?? {};
+    const type = stringValue(payload.type) ?? "";
+    if (CODEX_TURN_START_TYPES.has(type)) return null;
+    const info = recordValue(payload.info);
+    const rateLimits = recordValue(payload.rate_limits) ?? recordValue(info?.rate_limits);
+    if (!rateLimits) continue;
+    const limitId = stringValue(rateLimits.limit_id);
+    if (limitId && limitId !== "codex") continue;
+    const windows = [recordValue(rateLimits.primary), recordValue(rateLimits.secondary)]
+      .filter((window): window is RecordLike => window !== null)
+      .flatMap((window) => {
+        const usedPercent = numberValue(window.used_percent);
+        if (usedPercent === null) return [];
+        return [{ usedPercent, resetsAt: numberValue(window.resets_at) }];
+      });
+    if (windows.length === 0) continue;
+    const governingPercent = Math.max(...windows.map((window) => window.usedPercent));
+    const governingResets = windows
+      .filter((window) => window.usedPercent === governingPercent)
+      .map((window) => window.resetsAt);
+    return governingResets.every((reset): reset is number => reset !== null)
+      ? Math.max(...governingResets)
+      : null;
+  }
+  return null;
+}
 
 /**
  * The notice the provider wrote when it ended the turn, read from the record
@@ -72,7 +119,7 @@ function terminalProviderMessageFromRecords(
   records: RecordLike[],
   codex: boolean,
   fallbackTs: number,
-): { text: string; ts: number } | null {
+): NonNullable<StageTurnEvidence["terminalProviderMessage"]> | null {
   for (let index = records.length - 1; index >= 0; index -= 1) {
     const record = records[index]!;
     if (codex) {
@@ -81,7 +128,15 @@ function terminalProviderMessageFromRecords(
       if (CODEX_TURN_START_TYPES.has(type)) return null;
       if (!CODEX_TURN_END_TYPES.has(type)) continue;
       const failure = codexTurnEndFailure(payload);
-      return failure ? { text: failure, ts: recordTs(record, fallbackTs) } : null;
+      return failure
+        ? {
+            text: failure,
+            ts: recordTs(record, fallbackTs),
+            ...(isCodexUsageLimit(payload)
+              ? { usageLimit: { resetsAt: codexUsageLimitResetAt(records, index) } }
+              : {}),
+          }
+        : null;
     }
     if (record.type === "user") return null;
     if (record.type !== "assistant") continue;

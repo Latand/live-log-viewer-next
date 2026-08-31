@@ -88,6 +88,9 @@ export type ProjectSpawnRequest = {
   preferredId?: string | null;
   /** Accounts already attempted for this launch, deprioritized as before. */
   excludedIds?: string[];
+  /** Accounts with terminal evidence that they cannot accept this launch.
+      Removed from automatic candidates; explicit named choices stay explicit. */
+  unavailableIds?: string[];
 };
 
 export interface AccountManager {

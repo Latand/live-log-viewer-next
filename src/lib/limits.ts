@@ -663,6 +663,10 @@ function readTail(file: string, bytes: number): string | null {
   }
 }
 
+function isCodexUsageLimitInfo(value: unknown): boolean {
+  return value === "usage_limit" || value === "usage_limit_exceeded";
+}
+
 function lastRateLimits(file: string): { data: EngineLimits | null; rejectedAt: number | null } {
   const text = readTail(file, TAIL_BYTES);
   if (!text) return { data: null, rejectedAt: null };
@@ -671,7 +675,7 @@ function lastRateLimits(file: string): { data: EngineLimits | null; rejectedAt: 
   let rejectedAt: number | null = null;
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i];
-    if (!line.includes('"rate_limits"') && !line.includes("usage_limit_exceeded")) continue;
+    if (!line.includes('"rate_limits"') && !line.includes('"usage_limit')) continue;
     try {
       const row = JSON.parse(line) as {
         timestamp?: unknown;
@@ -679,7 +683,7 @@ function lastRateLimits(file: string): { data: EngineLimits | null; rejectedAt: 
       };
       const ts = typeof row.timestamp === "string" ? Date.parse(row.timestamp) : NaN;
       const capturedAt = Number.isFinite(ts) ? ts / 1000 : null;
-      if (row.payload?.codex_error_info === "usage_limit_exceeded" || row.payload?.error?.codex_error_info === "usage_limit_exceeded") {
+      if (isCodexUsageLimitInfo(row.payload?.codex_error_info) || isCodexUsageLimitInfo(row.payload?.error?.codex_error_info)) {
         if (capturedAt !== null && (rejectedAt === null || capturedAt > rejectedAt)) rejectedAt = capturedAt;
         continue;
       }
