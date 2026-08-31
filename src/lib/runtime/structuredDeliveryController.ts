@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import { requestAccountMigrationTick } from "@/lib/accounts/migration/controllerSignal";
 import { agentRegistry, type AgentRegistry, type AgentRegistryEntry, type ProcessIdentity } from "@/lib/agent/registry";
 import { sessionKeyId, type SessionKey } from "@/lib/agent/sessionKey";
+import { BRANCH_SHARED_HOST_ERROR, branchSharesRootHost } from "@/lib/conversation/branchControl";
 
 import { isRuntimeHostTransportFailure, runtimeHostClient, type RuntimeHostClient } from "./client";
 import { runtimeSettingsCapability, type RuntimeEventInput, type RuntimeSession } from "./contracts";
@@ -18,6 +19,10 @@ import { setStructuredDeliveryKick } from "./structuredDeliverySignal";
 import { journalVerdict, sendIsSettled } from "./sendSettlement";
 import { runtimeImageCapability } from "./runtimeImageStore";
 import { STRUCTURED_IMAGE_CAPABILITY } from "./structuredContent";
+import {
+  markStructuredDeliveryControllerReady,
+  markStructuredDeliveryControllerUnavailable,
+} from "./startupStatus";
 
 type ObservableEngineHost = EngineHost & { onStateChange(listener: (state: HostState) => void): () => void };
 type IdentityBoundEngineHost = ObservableEngineHost & {
@@ -144,6 +149,7 @@ function retireStructuredDeliveryPublication(): void {
   state.terminateActiveHost = null;
   state.completeActive = null;
   setStructuredDeliveryKick(null);
+  markStructuredDeliveryControllerUnavailable();
 }
 
 function entryForHost(registry: AgentRegistry, adopted: StructuredDeliveryHost): AgentRegistryEntry | null {
@@ -486,6 +492,10 @@ export async function bindStructuredDeliveryQueue(
       const liveness = await conversationTurnLiveness(registry, conversationId, dependencies.liveness ?? {});
       return liveness?.state === "severed" ? liveness.reason : null;
     },
+    (conversationId) => conversationId.startsWith("conversation_")
+      && branchSharesRootHost(registry, registry.conversation(conversationId as `conversation_${string}`))
+      ? BRANCH_SHARED_HOST_ERROR
+      : null,
   );
   let drainTimer: ReturnType<typeof setTimeout> | null = null;
   let drainBackoffMs = DELIVERY_DRAIN_COALESCE_MS;
@@ -1027,6 +1037,7 @@ export async function bindStructuredDeliveryQueue(
      `state.activeQueue !== queue` and unwinds only its own timers, host
      subscriptions and event pumps — it cannot null the live publication. */
   retirePredecessor();
+  markStructuredDeliveryControllerReady();
   /* The carried-over hosts resolve from their seats already; this gives each one
      a registration in this generation. It runs whether or not startup work is
      deferred, because startup's own completion only covers the set it adopts,

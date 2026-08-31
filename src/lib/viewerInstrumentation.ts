@@ -3,6 +3,7 @@ import path from "node:path";
 import type { ChildProcess } from "node:child_process";
 
 import { statePath } from "@/lib/configDir";
+import { RuntimeHostUnavailableError } from "@/lib/runtime/client";
 import { structuredHostsEnabled } from "@/lib/runtime/flags";
 import {
   acknowledgeHotStateFence,
@@ -525,6 +526,110 @@ async function startWakatimeWorker(): Promise<void> {
   });
 }
 
+export type StructuredHostStartupErrorCategory =
+  | "runtime-host-unavailable"
+  | "timeout"
+  | "registry-contention"
+  | "transient-io"
+  | "instrumentation-order"
+  | "configuration"
+  | "data-corruption"
+  | "unknown-recoverable";
+
+export interface StructuredHostStartupErrorClassification {
+  disposition: "recoverable" | "terminal";
+  category: StructuredHostStartupErrorCategory;
+  action: string;
+}
+
+const TRANSIENT_IO_CODES = new Set([
+  "EAGAIN",
+  "EBUSY",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "EINTR",
+  "EIO",
+  "EMFILE",
+  "ENFILE",
+  "ENOENT",
+]);
+const DATA_CORRUPTION_CODES = new Set(["SQLITE_CORRUPT", "SQLITE_NOTADB"]);
+
+function startupErrorField(error: unknown, field: "code" | "name" | "message"): string {
+  if (typeof error !== "object" || error === null || !(field in error)) return "";
+  const value = error[field as keyof typeof error];
+  return typeof value === "string" ? value : "";
+}
+
+/** Known configuration and durable-data failures stop with repair guidance.
+    The fallback class stays recoverable so an unexpected dependency blip
+    cannot permanently remove delivery from a live Viewer process. */
+export function classifyStructuredHostStartupError(
+  error: unknown,
+): StructuredHostStartupErrorClassification {
+  const name = startupErrorField(error, "name");
+  const code = startupErrorField(error, "code");
+  const message = startupErrorField(error, "message");
+  if (error instanceof StructuredRuntimeRequirementError || name === "StructuredRuntimeRequirementError") {
+    return {
+      disposition: "terminal",
+      category: "configuration",
+      action: "Correct the structured-host configuration and restart the Viewer.",
+    };
+  }
+  if (name === "RegistryParityError"
+    || name === "RegistryBackendIdentityError"
+    || DATA_CORRUPTION_CODES.has(code)
+    || /corrupt .* SQLite row|SQLite row is malformed|schema is unsupported/i.test(message)) {
+    return {
+      disposition: "terminal",
+      category: "data-corruption",
+      action: "Repair or restore the reported state data, then restart the Viewer.",
+    };
+  }
+  if (code === "structured-delivery-controller-unavailable") {
+    return {
+      disposition: "recoverable",
+      category: "instrumentation-order",
+      action: "Retry after the process controller publication becomes visible.",
+    };
+  }
+  if (code === "ETIMEDOUT" || /\btimed out\b/i.test(message)) {
+    return {
+      disposition: "recoverable",
+      category: "timeout",
+      action: "Retry after the dependency response window.",
+    };
+  }
+  if (name === "FileTransactionBusyError") {
+    return {
+      disposition: "recoverable",
+      category: "registry-contention",
+      action: "Retry after the active registry transaction releases its lock.",
+    };
+  }
+  if (TRANSIENT_IO_CODES.has(code)) {
+    return {
+      disposition: "recoverable",
+      category: "transient-io",
+      action: "Retry after the local I/O dependency recovers.",
+    };
+  }
+  if (error instanceof RuntimeHostUnavailableError
+    || /^runtime host (?:is unavailable|request cancelled|response exceeds limit|returned invalid JSON|response id mismatch)$/i.test(message)) {
+    return {
+      disposition: "recoverable",
+      category: "runtime-host-unavailable",
+      action: "Retry after the runtime host becomes available.",
+    };
+  }
+  return {
+    disposition: "recoverable",
+    category: "unknown-recoverable",
+    action: "Retry with bounded backoff while the Viewer remains unavailable for structured delivery.",
+  };
+}
+
 export async function runStructuredHostStartup(
   adopt: () => Promise<unknown>,
   log: (...args: unknown[]) => void = console.error,
@@ -552,8 +657,12 @@ export async function runStructuredHostStartup(
       if (attempts > 1) log("[structured hosts] startup adoption recovered", { attempts });
     } catch (error) {
       markStructuredHostStartupFailed();
-      if (error instanceof StructuredRuntimeRequirementError) {
-        log("[structured hosts] startup adoption failed", error);
+      const classification = classifyStructuredHostStartupError(error);
+      if (classification.disposition === "terminal") {
+        log("[structured hosts] startup adoption failed", error, {
+          category: classification.category,
+          action: classification.action,
+        });
         rejectReady?.(error);
         throw error;
       }
@@ -572,8 +681,11 @@ export async function runStructuredHostStartup(
     }
   };
 
+  if (ready) {
+    await Promise.all([attempt(), ready]);
+    return;
+  }
   await attempt();
-  await ready;
 }
 
 export async function completeViewerRuntimeActivation(

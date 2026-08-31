@@ -1,4 +1,4 @@
-import type { SpawnReceipt } from "@/lib/agent/registry";
+import { identityMaterializationFence, type SpawnReceipt } from "@/lib/agent/registry";
 import type { SpawnAdmissionError, SpawnRejection, SpawnRejectionCode } from "@/lib/agent/spawnAdmission";
 
 /** HTTP shape of a typed terminal admission rejection (#393). The receipt is
@@ -77,7 +77,7 @@ export function spawnResponseForReceipt(
   const launched = (receipt.verifiedHost !== null || (options.structured === true && receipt.state === "completed"))
     && receipt.state !== "failed"
     && receipt.state !== "conflicted";
-  const publishedPath = structured && receipt.state !== "completed" ? null : path;
+  const publishedPath = identityMaterializationFence().allowsReceipt(receipt, { structured }) ? path : null;
   return {
     ok: true,
     target: receipt.pane?.paneId ?? receipt.target ?? null,

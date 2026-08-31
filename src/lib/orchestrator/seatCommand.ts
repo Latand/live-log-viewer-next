@@ -3,7 +3,7 @@ import fs from "node:fs";
 
 import { withAccountMutationLock } from "@/lib/accounts/accountMutation";
 import { validExplicitProject } from "@/lib/accounts/migration/contracts";
-import { agentRegistry } from "@/lib/agent/registry";
+import { agentRegistry, identityMaterializationFence } from "@/lib/agent/registry";
 import { ensureOperatorSpawnCapability } from "@/lib/agent/operatorCapability";
 import { defaultModelFor } from "@/lib/agent/models";
 import { internalServiceHeaders } from "@/lib/agent/operatorAuthority";
@@ -244,7 +244,8 @@ export const productionSeatCommandDependencies: SeatCommandDependencies = {
     /* The seat spawn path always sends the intent's clientRequestId as the
        spawn clientAttemptId, so the durable receipt is found by it even when
        the intent never recorded a launchId before its request died. */
-    const receipt = agentRegistry().spawnReceiptForClientAttempt(clientRequestId);
+    const registry = agentRegistry();
+    const receipt = registry.spawnReceiptForClientAttempt(clientRequestId);
     if (!receipt || (launchId && receipt.launchId !== launchId)) return { kind: "unknown" };
     if (receipt.rejection || receipt.state === "failed" || receipt.state === "conflicted") {
       return { kind: "failed", error: receipt.error ?? receipt.rejection?.guidance ?? `spawn receipt is terminally ${receipt.state}` };
@@ -254,7 +255,9 @@ export const productionSeatCommandDependencies: SeatCommandDependencies = {
     return {
       kind: "settled",
       conversationId: receipt.conversationId,
-      path: receipt.artifactLifecycle === "materialized" ? receipt.artifactPath : null,
+      path: identityMaterializationFence(registry.readOnlySnapshot()).allowsReceipt(receipt)
+        ? receipt.artifactPath
+        : null,
       launchId: receipt.launchId,
       engine: receipt.engine,
       model: receipt.launchProfile.model,

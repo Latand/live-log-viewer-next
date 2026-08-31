@@ -7,7 +7,7 @@ import { AccountProjectBindingsUnreadableError, allowedAccountIdsForProject, pro
 import { mirroredClaudeTranscriptPath } from "@/lib/accounts/claude";
 import { emptyLaunchProfile, type ViewerConversationId } from "@/lib/accounts/migration/contracts";
 import { freshSpecFor } from "@/lib/agent/cli";
-import { agentRegistry, type DurableMembershipInput, type TmuxHostEvidence } from "@/lib/agent/registry";
+import { agentRegistry, identityMaterializationFence, type DurableMembershipInput, type TmuxHostEvidence } from "@/lib/agent/registry";
 import { forEachCooperatively } from "@/lib/cooperative";
 import { transcriptAllowed } from "@/lib/agent/spawnParent";
 import { sessionKeyFromTranscript, sessionKeyId } from "@/lib/agent/sessionKey";
@@ -42,6 +42,8 @@ import {
   MAX_FAIL_EDGE_ROUNDS,
   MAX_PIPELINE_STAGES,
   MAX_SPEC_LENGTH,
+  MAX_STAGE_OUTPUTS,
+  MAX_STAGE_OUTPUT_PATH_LENGTH,
   MAX_STAGE_PROMPT_LENGTH,
   MAX_TASK_LENGTH,
   MIN_STARTED_PIPELINE_STAGES,
@@ -49,6 +51,8 @@ import {
 import { pipelineRepoPreflightError, pipelineRepoPreflightStatus, preflightPipelineRepo } from "./preflight";
 import { renderStagePrompt } from "./prompts";
 import { PIPELINE_ROLE_IDS, pipelineRoleLookup, resolvePipelineRole, validatePipelineRoleParams, type PipelineRoleLookup } from "./roles";
+import { normalizeStageOutputPath } from "./stageAccess";
+import { pipelineStageSandbox } from "./stageSandbox";
 import { pipelineValidationError, type PipelineValidationViolation } from "./validation";
 import { buildPipeline, findPipelineRecord, isEffectiveRole, loadPipelines, pipelineGraphError, pipelineIdentity, pipelineTaskLinkError, PipelineStoreError, withPipelineControllerMutation, withPipelineMutation } from "./store";
 import { ensurePipelineForTask, isTaskSpawnPipelineParams, type TaskPipelineSpawnParams, type TaskSpawnPipelineParams } from "./taskBinding";
@@ -60,6 +64,7 @@ import type {
   PipelineRoleId,
   PipelineRepoPreflight,
   PipelineRepoPreflightErrorCode,
+  PipelineSandbox,
   PipelineStage,
   PipelineStageInput,
   PipelineStageAttempt,
@@ -137,6 +142,9 @@ export interface PipelinePorts {
   roleLookup?: PipelineRoleLookup | null;
   spawnAgent(input: {
     role: EffectivePipelineRole;
+    /** Tool/network boundary. Full host access is the pipeline default; the
+        restrictive engine sandbox is selected only by an explicit stage. */
+    sandbox?: PipelineSandbox;
     cwd: string;
     /** Project the launch belongs to; the account it may use is drawn from
         this project's allowed set and nothing wider (#1279). */
@@ -285,12 +293,16 @@ function engineForTranscript(transcript: string): "claude" | "codex" | null {
 
 /**
  * Viewer-managed Claude stages run autonomously. Their role access remains a
- * product-scope contract, while the CLI permission mode must allow ordinary
+ * product-scope contract, while the default CLI permission mode allows ordinary
  * repository reads, GitHub inspection, screenshots, and verification commands
- * without an interactive permission wall.
+ * without an interactive permission wall. An explicit restricted sandbox uses
+ * Claude's ordinary restrictive mode.
  */
-export function pipelineClaudePermissionMode(role: EffectivePipelineRole): string | null {
-  return role.engine === "claude" ? "bypassPermissions" : null;
+export function pipelineClaudePermissionMode(
+  role: EffectivePipelineRole,
+  sandbox: PipelineSandbox = "full",
+): string | null {
+  return role.engine === "claude" && sandbox === "full" ? "bypassPermissions" : null;
 }
 
 function parentIdentity(parentPath: string | null): {
@@ -324,11 +336,13 @@ async function spawnPipelineAgent(
   }
   const account = resolution.account;
   const parent = parentIdentity(input.parentPath);
+  const sandbox = input.sandbox ?? "full";
+  const restricted = sandbox === "restricted";
   const specBase = freshSpecFor(input.role.engine, input.cwd, {
     model: input.role.model,
     effort: input.role.effort,
-    readOnly: input.role.access === "read-only",
-    permissionMode: pipelineClaudePermissionMode(input.role),
+    readOnly: restricted,
+    permissionMode: pipelineClaudePermissionMode(input.role, sandbox),
     codexHome: input.role.engine === "codex" ? account.home : null,
     claudeConfigDir: input.role.engine === "claude" ? account.home : null,
     claudeProjectsDir: input.role.engine === "claude" ? account.transcriptRoot : null,
@@ -390,7 +404,7 @@ async function spawnPipelineAgent(
   if (begun.kind === "conflict") throw new Error("pipeline spawn attempt conflicts with its original request");
   onReserved({ launchId: begun.receipt.launchId, conversationId: begun.receipt.conversationId });
   if (begun.kind === "replay") {
-    const identityPublished = begun.receipt.state === "completed";
+    const identityPublished = identityMaterializationFence(registry.readOnlySnapshot()).allowsReceipt(begun.receipt);
     return {
       launchId: begun.receipt.launchId,
       conversationId: begun.receipt.conversationId,
@@ -630,43 +644,15 @@ export function defaultPipelinePorts(
   const registry = agentRegistry();
   let registrySnapshot: ReturnType<typeof registry.readOnlySnapshot> | null = null;
   let adoptionCandidatesByPipeline: Map<string, PipelineAdoptionCandidate[]> | null = null;
-  let unpublishedStructuredPaths: Set<string> | null = null;
+  let materializationFence: ReturnType<typeof identityMaterializationFence> | null = null;
   let flowSnapshot: Flow[] | null = null;
   const snapshot = () => registrySnapshot ??= registry.readOnlySnapshot();
-  /* The registry needs staged key/path data to bind the host. Pipeline read
-     projections publish that identity only after finalization proves the
-     transcript exists, so recovery cannot copy a phantom path into an attempt. */
-  const structuredIdentityPublished = (
-    receipt: ReturnType<typeof snapshot>["receipts"][string],
-    current = snapshot(),
-  ): boolean => {
-    const structured = receipt.transport === "structured"
-      || (receipt.transport === null
-        && Boolean(receipt.key && current.entries[sessionKeyId(receipt.key)]?.structuredHost));
-    return !structured || receipt.state === "completed";
-  };
-  const unpublishedIdentityPaths = (
-    current = snapshot(),
-  ): Set<string> => unpublishedStructuredPaths ??= new Set(Object.values(current.receipts).flatMap((receipt) =>
-    receipt.artifactPath
-      && !structuredIdentityPublished(receipt, current)
-      /* A same-path resume stages ownership for an identity that was already
-         published by the source generation; it cannot make that path phantom. */
-      && !(receipt.purpose === "resume-successor" && receipt.resumeSourcePath === receipt.artifactPath)
-      ? [receipt.artifactPath]
-      : []));
-  const publishedPathForConversation = (conversationId: ViewerConversationId): string | null => {
-    const current = snapshot();
-    const conversation = current.conversations[conversationId];
-    if (!conversation) return null;
-    const unpublished = unpublishedIdentityPaths(current);
-    return conversation.generations.findLast((generation) => !unpublished.has(generation.path))?.path ?? null;
-  };
+  const identityFence = () => materializationFence ??= identityMaterializationFence(snapshot());
   const flows = () => flowSnapshot ??= loadFlows();
   const invalidateRegistryProjection = () => {
     registrySnapshot = null;
     adoptionCandidatesByPipeline = null;
-    unpublishedStructuredPaths = null;
+    materializationFence = null;
   };
   const adoptionCandidates = () => {
     if (adoptionCandidatesByPipeline) return adoptionCandidatesByPipeline;
@@ -682,7 +668,7 @@ export function defaultPipelinePorts(
         const receipt = receiptsByConversation.get(conversationId as ViewerConversationId) ?? null;
         const conversation = current.conversations[conversationId as ViewerConversationId] ?? null;
         const generation = conversation?.generations.at(-1) ?? null;
-        const receiptPublished = receipt ? structuredIdentityPublished(receipt, current) : false;
+        const receiptPublished = receipt ? identityFence().allowsReceipt(receipt) : false;
         let agentPath = generation?.path ?? null;
         let sessionId: string | null = null;
         if (receipt) {
@@ -744,7 +730,7 @@ export function defaultPipelinePorts(
       const current = snapshot();
       const receipt = current.receipts[launchId];
       if (!receipt) return null;
-      const identityPublished = structuredIdentityPublished(receipt, current);
+      const identityPublished = identityFence().allowsReceipt(receipt);
       return {
         state: receipt.state,
         launchId: receipt.launchId,
@@ -831,11 +817,11 @@ export function defaultPipelinePorts(
     headCwd: (transcriptPath) => headCwd(transcriptPath),
     lastMessage: lastAssistantMessage,
     pathForConversation: (conversationId) => conversationId.startsWith("conversation_")
-      ? publishedPathForConversation(conversationId as ViewerConversationId)
+      ? identityFence().pathForConversation(conversationId as ViewerConversationId)
       : null,
     sourcePathAllowed: transcriptAllowed,
     conversationIdForPath: (pathname) => {
-      if (unpublishedIdentityPaths().has(pathname)) return null;
+      if (!identityFence().allowsPath(pathname)) return null;
       for (const conversation of Object.values(snapshot().conversations)) {
         if (conversation.generations.some((generation) => generation.path === pathname)) return conversation.id;
       }
@@ -1606,7 +1592,8 @@ function commitPassedStage(
   ports: PipelinePorts,
 ): void {
   const allowCommit = stage.kind === "run" && attempt.effectiveRole.access === "read-write";
-  const result = commitPipelineStage(pipeline, stage.id, allowCommit, ports.exec);
+  const protectedHead = stage.kind === "run" && !allowCommit ? pipeline.lastPassedCommit : null;
+  const result = commitPipelineStage(pipeline, stage.id, allowCommit, ports.exec, stage.outputs, protectedHead);
   if (!result.ok) {
     park(pipeline, result.error, attempt);
     return;
@@ -1803,6 +1790,7 @@ async function tickRunStage(
       const priorAttempt = runFor(pipeline, stage.id)?.attempts.filter((candidate) => !candidate.historical).at(-2) ?? null;
       const spawnInput: Parameters<PipelinePorts["spawnAgent"]>[0] = {
         role: attempt.effectiveRole,
+        sandbox: pipelineStageSandbox(stage),
         cwd: pipeline.worktreeDir,
         project: pipeline.project,
         requestedAccountId: stage.account ?? null,
@@ -2283,6 +2271,7 @@ async function tickReviewStage(
       spec: pipeline.spec ?? pipeline.task,
       mode: "auto",
       reviewerMode: "headless",
+      reviewerSandbox: pipelineStageSandbox(stage),
       roundLimit: 5,
     }, entries);
     if (!created.flow) {
@@ -2927,12 +2916,14 @@ export async function tickPipelines(entries: FileEntry[], ports: PipelinePorts =
 /* #1026: the expected shape each stage constraint names, shared by the batched
    error response and the MCP tool schema's field descriptions so a caller reads
    the same contract whether it asks the schema or trips the validator. */
-const STAGE_OBJECT_SHAPE = "{id, kind, prompt, next, onFail?, role?, engine?/model?/effort?/access?/account? overrides}";
+const STAGE_OBJECT_SHAPE = "{id, kind, prompt, next, onFail?, role?, engine?/model?/effort?/access?/sandbox?/outputs?/account? overrides}";
 const STAGE_PROMPT_SHAPE = `non-empty string up to ${MAX_STAGE_PROMPT_LENGTH} characters`;
 const STAGE_ROLE_SHAPE = `{roleId: one of ${PIPELINE_ROLE_IDS.join(" | ")}, params?: {<key>: string | number}} — runtime overrides belong on the stage, not in role`;
 const STAGE_ROLE_ID_SHAPE = `one of ${PIPELINE_ROLE_IDS.join(" | ")}`;
 const STAGE_ROLE_PARAMS_SHAPE = "object of the role's declared parameters, values string or number";
 const STAGE_RUNTIME_SHAPE = "a role and stage-level engine/model/effort/access the role registry can resolve";
+const STAGE_SANDBOX_SHAPE = '"full" | "restricted" (default "full")';
+const STAGE_OUTPUTS_SHAPE = `array of 1–${MAX_STAGE_OUTPUTS} repository-relative paths, each at most ${MAX_STAGE_OUTPUT_PATH_LENGTH} characters`;
 const STAGE_NEXT_SHAPE = "id of another stage, or null to terminate the pass chain";
 const STAGE_ACCOUNT_SHAPE = "id of an account the pipeline's project allows, or null to let the project's own selection choose";
 const STAGE_ON_FAIL_SHAPE = `null, or {to: <existing stage id>, maxRounds?: 1–${MAX_FAIL_EDGE_ROUNDS}} — run stages only`;
@@ -3070,6 +3061,30 @@ function normalizeStages(
     if (stage.effort !== undefined && stage.effort !== null && typeof stage.effort !== "string") {
       violations.push({ field: at("effort"), message: `stage ${id} effort must be a string or null`, expected: "effort string supported by the stage engine, or null to inherit the role default" });
     }
+    if (stage.sandbox !== undefined && stage.sandbox !== "full" && stage.sandbox !== "restricted") {
+      violations.push({ field: at("sandbox"), message: `stage ${id} sandbox must be full or restricted`, expected: STAGE_SANDBOX_SHAPE });
+    }
+    const rawOutputs = (raw as { outputs?: unknown }).outputs;
+    let outputs: string[] | undefined;
+    if (rawOutputs !== undefined) {
+      if (stage.kind === "review-loop") {
+        violations.push({ field: at("outputs"), message: `review-loop stage ${id} cannot declare worktree outputs`, expected: "outputs belong to run stages" });
+      } else if (!Array.isArray(rawOutputs) || rawOutputs.length < 1 || rawOutputs.length > MAX_STAGE_OUTPUTS) {
+        violations.push({ field: at("outputs"), message: `stage ${id} outputs must contain 1–${MAX_STAGE_OUTPUTS} paths`, expected: STAGE_OUTPUTS_SHAPE });
+      } else {
+        outputs = [];
+        for (const [outputIndex, value] of rawOutputs.entries()) {
+          const output = normalizeStageOutputPath(value);
+          if (!output) {
+            violations.push({ field: `${at("outputs")}[${outputIndex}]`, message: `stage ${id} output must be a safe repository-relative path`, expected: STAGE_OUTPUTS_SHAPE });
+          } else if (outputs.includes(output)) {
+            violations.push({ field: `${at("outputs")}[${outputIndex}]`, message: `stage ${id} output paths must be unique`, expected: STAGE_OUTPUTS_SHAPE });
+          } else {
+            outputs.push(output);
+          }
+        }
+      }
+    }
     /* #1279: the stage may name the account it runs on. Shape is checked here;
        whether the project's binding ALLOWS that account is checked where the
        project is known — at create, at override, and again at the launch
@@ -3109,6 +3124,8 @@ function normalizeStages(
       ...(stage.model !== undefined ? { model: typeof stage.model === "string" ? stage.model.trim() || null : null } : {}),
       ...(stage.effort !== undefined ? { effort: typeof stage.effort === "string" ? stage.effort.trim() || null : null } : {}),
       ...(stage.access !== undefined ? { access: stage.access } : {}),
+      ...(stage.sandbox !== undefined ? { sandbox: stage.sandbox } : {}),
+      ...(outputs !== undefined ? { outputs } : {}),
       ...(stage.account !== undefined ? { account: typeof stage.account === "string" ? stage.account.trim() || null : null } : {}),
       prompt,
       next: stage.next ?? null,
@@ -3121,6 +3138,14 @@ function normalizeStages(
         field: at(field),
         message: "error" in resolved && resolved.error ? resolved.error : "invalid stage role",
         expected: field === "model" ? "model id from the selected engine's curated catalog" : STAGE_RUNTIME_SHAPE,
+      });
+      continue;
+    }
+    if (outputs !== undefined && resolved.role.access !== "read-only") {
+      violations.push({
+        field: at("outputs"),
+        message: `stage ${id} outputs require read-only access`,
+        expected: "outputs belong to read-only run stages",
       });
       continue;
     }
@@ -3148,6 +3173,8 @@ function draftStageInputs(stages: PipelineStage[]): PipelineStageInput[] {
     ...(stage.model !== undefined ? { model: stage.model } : {}),
     ...(stage.effort !== undefined ? { effort: stage.effort } : {}),
     ...(stage.access !== undefined ? { access: stage.access } : {}),
+    ...(stage.sandbox !== undefined ? { sandbox: stage.sandbox } : {}),
+    ...(stage.outputs !== undefined ? { outputs: [...stage.outputs] } : {}),
     ...(stage.account !== undefined ? { account: stage.account } : {}),
     "prompt": stage.prompt,
     next: stage.next ?? null,

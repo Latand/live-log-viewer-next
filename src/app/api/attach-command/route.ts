@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { resumeSpecFor, resumeSpecForSession, type AgentEngine } from "@/lib/agent/cli";
 import { attachTargetPath, resolveAttachCommand, resolveLaunchAttachCommand, type AttachCommand, type AttachResolution } from "@/lib/agent/attachCommand";
-import { agentRegistry } from "@/lib/agent/registry";
+import { agentRegistry, identityMaterializationFence } from "@/lib/agent/registry";
 import { deliveryFence } from "@/lib/accounts/migration/coordinator";
 import { accountIdFromPath } from "@/lib/accounts/badge";
 import { listClaudeAccounts } from "@/lib/accounts/claude";
@@ -52,17 +52,16 @@ function jsonFor(resolution: AttachResolution): NextResponse<AttachCommand | Api
 }
 
 /**
- * Resolve a `spawn:<launchId>` launch window (round-1 P1#6). The queued
- * placeholder's transcript path is synthetic — handing it to the filesystem-path
- * endpoint produced HTTP 400. Instead resolve the durable launch receipt: prefer
- * the materialized transcript once scanned, otherwise compose the resume command
- * from the receipt's recorded account home, cwd, and session id.
+ * Resolve a `spawn:<launchId>` launch window. The placeholder path is
+ * synthetic, so the durable receipt supplies the finalized identity while the
+ * scanner catches up.
  */
 function resolveLaunchPath(launchId: string, files: FileEntry[]): NextResponse<AttachCommand | ApiError> {
   const registry = agentRegistry();
   const snapshot = registry.readOnlySnapshot();
   const receipt = snapshot.receipts[launchId] ?? null;
   const conversation = receipt ? snapshot.conversations[receipt.conversationId] ?? null : null;
+  const materializationFence = identityMaterializationFence(snapshot);
   /* Migration fence: the same hold the transcript path honours. */
   if (conversation && deliveryFence(conversation) === "held") {
     return NextResponse.json(
@@ -82,13 +81,12 @@ function resolveLaunchPath(launchId: string, files: FileEntry[]): NextResponse<A
   return jsonFor(resolveLaunchAttachCommand({
     receipt: receipt
       ? {
-        engine: receipt.engine,
+        ...receipt,
         cwd: liveProfile?.cwd || receipt.cwd,
-        accountId: receipt.accountId,
-        key: receipt.key,
         launchProfile: liveProfile ?? receipt.launchProfile,
       }
       : null,
+    materializationFence,
     materializedPath,
     resolveByPath: (target) => resolveAttachCommand(target, {
       files,
@@ -119,13 +117,19 @@ export async function GET(req: NextRequest): Promise<NextResponse<AttachCommand 
   }
 
   try {
-    /* A launch window's path is the synthetic `spawn:<launchId>`, not a
-       filesystem path (round-1 P1#6): resolve it through the durable receipt /
-       conversation identity so the queued window's terminal control composes a
-       real command instead of 400-ing on `pathAllowed`. */
+    const registry = agentRegistry();
+    const materialization = identityMaterializationFence(registry.readOnlySnapshot());
+    /* A launch window uses the synthetic `spawn:<launchId>` path. Resolve it
+       through the durable receipt so provisional identity remains fenced. */
     if (path.startsWith("spawn:")) {
       const files = (await cachedFileScan()).snapshot.files;
       return resolveLaunchPath(path.slice("spawn:".length), files);
+    }
+    if (!materialization.allowsPath(path)) {
+      return NextResponse.json(
+        { error: "the attach command is not available until the transcript materializes" },
+        { status: 409, headers: { "Cache-Control": "no-store" } },
+      );
     }
     if (!pathAllowed(path)) {
       return NextResponse.json({ error: "a valid transcript path is required" }, { status: 400, headers: { "Cache-Control": "no-store" } });
@@ -148,7 +152,7 @@ export async function GET(req: NextRequest): Promise<NextResponse<AttachCommand 
     const targetPath = attachTargetPath(path, files);
     if (targetPath) fencePaths.add(targetPath);
     for (const candidate of fencePaths) {
-      const conversation = agentRegistry().conversationForPath(candidate);
+      const conversation = registry.conversationForPath(candidate);
       if (conversation && deliveryFence(conversation) === "held") {
         return NextResponse.json(
           { error: "account migration in progress — the attach command is available once it completes" },
@@ -161,7 +165,7 @@ export async function GET(req: NextRequest): Promise<NextResponse<AttachCommand 
       resumeSpecFor,
       accountIdForPath: registryFirstAccountIdForPath,
       accountLabelFor,
-      launchProfileForPath: (p) => agentRegistry().launchProfileForPath(p),
+      launchProfileForPath: (p) => registry.launchProfileForPath(p),
     });
     if (!resolution.ok) {
       return NextResponse.json({ error: resolution.error }, { status: resolution.status, headers: { "Cache-Control": "no-store" } });

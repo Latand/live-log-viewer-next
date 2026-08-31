@@ -43,6 +43,7 @@ test("durable implementer identity creates a flow without scanner or live-host e
     targetSha: "12AD73656844D3583D44AE718D003C7F2F2C6ACE",
     mode: "auto",
     reviewerMode: "headless",
+    reviewerSandbox: "restricted",
     roundLimit: 5,
   }, []);
 
@@ -53,6 +54,7 @@ test("durable implementer identity creates a flow without scanner or live-host e
     implementerConversationId: implementer.id,
     kickoffDelivery: null,
     targetSha: "12ad73656844d3583d44ae718d003c7f2f2c6ace",
+    reviewerSandbox: "restricted",
     state: "waiting_ready",
   });
 });

@@ -1280,16 +1280,10 @@ function ProjectDashboardView({
 
   /* The raw close, shared by an explicit user close and a history redo. */
   const applyClose = (path: string) => {
-    /* Closing a chat also puts out its host; fire-and-forget, since the node
-       disappears either way and a host that survived a failed request just
-       stays for the next close. Branch nodes are filtered server-side — they
-       share the root's host. */
-    void fetch("/api/tmux", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ action: "kill", path }),
-    }).catch(() => {});
-    /* One durable close, independent of the node's current render class: the
+    /* Card dismissal owns presentation only. Runtime termination stays on the
+       conversation's explicit process control: a child can share its root's
+       host, and a hidden root can still be running intentionally. One durable
+       close, independent of the node's current render class: the
        server reducer tombstones the path and strips manual/expanded membership,
        so a node closed while momentarily outside `autoPaths` no longer loses its
        tombstone and reappears (#60). The matching ephemeral jump target, if any,

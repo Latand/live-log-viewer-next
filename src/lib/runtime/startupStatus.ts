@@ -3,6 +3,7 @@ import { structuredHostsEnabled } from "./flags";
 const startupStore = process as typeof process & {
   __llvStructuredHostStartupFailed?: boolean;
   __llvStructuredHostStartupProgress?: StructuredHostStartupStatus;
+  __llvStructuredDeliveryControllerReady?: boolean;
 };
 
 export type StructuredHostStartupPhase =
@@ -72,6 +73,24 @@ export function markStructuredHostStartupReady(): void {
 
 export function didStructuredHostStartupFail(): boolean {
   return startupStore.__llvStructuredHostStartupFailed === true;
+}
+
+/** Kept beside startup status so the deployment capability has a tiny
+    process-shared answer and leaves the registry/controller graph unloaded.
+    The controller flips this only at its atomic publication boundary. */
+export function markStructuredDeliveryControllerReady(): void {
+  startupStore.__llvStructuredDeliveryControllerReady = true;
+}
+
+export function markStructuredDeliveryControllerUnavailable(): void {
+  startupStore.__llvStructuredDeliveryControllerReady = false;
+}
+
+export function structuredDeliveryControllerReadiness(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): "ready" | "unavailable" | null {
+  if (!structuredHostsEnabled(env)) return null;
+  return startupStore.__llvStructuredDeliveryControllerReady === true ? "ready" : "unavailable";
 }
 
 /** Truthful readiness axis for operator surfaces: "ready" only after startup
