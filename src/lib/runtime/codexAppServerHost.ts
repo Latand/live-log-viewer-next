@@ -1228,9 +1228,14 @@ export class CodexAppServerHost implements EngineHost {
     if (!persistedIdentity.path || persistedIdentity.path !== this.identity.path) {
       return { state: "failed", reason: "Codex app-server did not confirm the canonical transcript path" };
     }
-    const persistedFirstMessage = resumedTurns(result).some((turn) =>
+    /* Codex 0.151 can answer the hydrated read successfully while omitting
+       `thread.turns` entirely, so an empty reply is not absence evidence —
+       the rollout on disk decides before absent is ever reported (#1332). */
+    const turnHoldsFirstMessage = (turn: JsonObject): boolean =>
       Array.isArray(turn.items)
-      && turn.items.some((item) => stringField(item, "clientId") === clientMessageId));
+      && turn.items.some((item) => stringField(item, "clientId") === clientMessageId);
+    const persistedFirstMessage = resumedTurns(result).some(turnHoldsFirstMessage)
+      || rolloutTurnsFromDisk(this.identity.path).some(turnHoldsFirstMessage);
     return persistedFirstMessage
       ? { state: "materialized" }
       : { state: "absent", reason: "Codex app-server did not read back the confirmed first message" };
