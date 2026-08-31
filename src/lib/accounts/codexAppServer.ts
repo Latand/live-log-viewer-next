@@ -345,7 +345,9 @@ export class CodexAppServerClient {
   }
 
   async readThread(threadId: string): Promise<AppServerThreadRef> {
-    const response = await this.request("thread/read", { threadId, includeTurns: true });
+    /* Metadata-only on purpose: this reader consumes id and path, and turns
+       hydration is refused on codex 0.151+ paginated threads (#1332). */
+    const response = await this.request("thread/read", { threadId });
     const thread = isRecord(response) && isRecord(response.thread) ? response.thread : response;
     if (!isRecord(thread)) throw protocolError("thread/read response is malformed");
     return { id: requiredString(thread, "id", "thread/read"), path: typeof thread.path === "string" ? thread.path : null };
