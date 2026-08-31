@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, test } from "bun:test";
 import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
@@ -6,6 +6,7 @@ import path from "node:path";
 
 import { NextRequest } from "next/server";
 
+import { resetRuntimeHostRequestHealthForTests } from "@/lib/runtime/client";
 import { RUNTIME_PLANE_ABSENT } from "@/lib/runtime/flags";
 
 import { GET as GET_DEPLOYMENT } from "./[deploymentId]/route";
@@ -16,6 +17,20 @@ const originalRuntimeEvents = process.env.LLV_RUNTIME_EVENTS;
 const originalRuntimeSocket = process.env.LLV_RUNTIME_HOST_SOCKET;
 const sandboxes: string[] = [];
 const servers: net.Server[] = [];
+
+function runtimeHostRequestHealth() {
+  return {
+    samples: 1,
+    p95Ms: expect.any(Number),
+    maxMs: expect.any(Number),
+    timeouts: 0,
+    windowSize: 256,
+  };
+}
+
+beforeEach(() => {
+  resetRuntimeHostRequestHealthForTests();
+});
 
 afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
@@ -59,13 +74,17 @@ async function serveRuntime(
   return methods;
 }
 
-test("GET /api/runtime/deployments returns an honestly empty live ledger", async () => {
+test("GET /api/runtime/deployments returns an empty live ledger with runtime-host latency health", async () => {
   const methods = await serveRuntime({ deployments: [] });
 
   const response = await GET(new NextRequest("http://127.0.0.1/api/runtime/deployments"));
 
   expect(response.status).toBe(200);
-  expect(await response.json()).toEqual({ count: 0, deployments: [] });
+  expect(await response.json()).toEqual({
+    count: 0,
+    deployments: [],
+    runtimeHostRequests: runtimeHostRequestHealth(),
+  });
   expect(methods).toEqual(["snapshot"]);
 });
 
@@ -83,6 +102,7 @@ test("GET /api/runtime/deployments preserves limit ordering for a working host",
   expect(await response.json()).toEqual({
     count: 2,
     deployments: deployments.slice(-2),
+    runtimeHostRequests: runtimeHostRequestHealth(),
   });
 });
 
@@ -100,6 +120,7 @@ test("GET /api/runtime/deployments leaves an omitted limit unbounded for the jou
   expect(await response.json()).toEqual({
     count: deployments.length,
     deployments,
+    runtimeHostRequests: runtimeHostRequestHealth(),
   });
 });
 
@@ -210,10 +231,19 @@ test("runtime read routes keep a configured but unreachable plane distinct from 
     ),
   ]);
 
-  for (const response of responses) {
+  for (const [index, response] of responses.entries()) {
     expect(response.status).toBe(503);
     const body = await response.json() as Record<string, unknown>;
     expect(body.error).toBe("runtime host is unavailable");
     expect(body).not.toHaveProperty("code");
+    if (index === 0) {
+      expect(body.runtimeHostRequests).toMatchObject({
+        samples: expect.any(Number),
+        p95Ms: expect.any(Number),
+        maxMs: expect.any(Number),
+        timeouts: 0,
+        windowSize: 256,
+      });
+    }
   }
 });

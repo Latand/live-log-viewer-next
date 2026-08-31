@@ -93,6 +93,7 @@ import { readResources } from "@/lib/resources";
 import { adoptLiveRootSession, conversationRole, liveRootSession, type RootSessionSource } from "@/lib/root/adopt";
 import { listRoles, resolveSpawnRole } from "@/lib/roles/registry";
 import type { RoleDefinition, RoleParameter } from "@/lib/roles/types";
+import type { RuntimeHostRequestHealth } from "@/lib/runtime/client";
 import type { ViewerDeploymentStatus } from "@/lib/runtime/contracts";
 import { messageOriginRole, type MessageOrigin } from "@/lib/runtime/messageOrigin";
 import { ledgerDeployment, ledgerDeployments } from "@/lib/runtime/deploymentLedger";
@@ -293,10 +294,12 @@ async function getViewerControl(
     : {};
   if (!response.ok) {
     const error = text(result.error) || `Viewer control request failed with status ${response.status}`;
+    const requestHealth = runtimeHostRequestHealth(result.runtimeHostRequests);
     throw new McpToolRefusal(error, {
       error,
       status: response.status,
       ...(text(result.code) ? { code: text(result.code) } : {}),
+      ...(requestHealth ? { runtimeHostRequests: requestHealth } : {}),
     });
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
@@ -2537,7 +2540,34 @@ function isDeploymentStatus(value: unknown, expectedId?: string): value is Viewe
     && typeof deployment.phase === "string";
 }
 
-function deploymentList(result: Record<string, unknown>): ViewerDeploymentStatus[] {
+function runtimeHostRequestHealth(value: unknown): RuntimeHostRequestHealth | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const health = value as Record<string, unknown>;
+  const samples = health.samples;
+  const p95Ms = health.p95Ms;
+  const maxMs = health.maxMs;
+  const timeouts = health.timeouts;
+  const windowSize = health.windowSize;
+  if (!Number.isSafeInteger(samples) || (samples as number) < 0
+    || !Number.isFinite(p95Ms) || (p95Ms as number) < 0
+    || !Number.isFinite(maxMs) || (maxMs as number) < (p95Ms as number)
+    || !Number.isSafeInteger(timeouts) || (timeouts as number) < 0 || (timeouts as number) > (samples as number)
+    || !Number.isSafeInteger(windowSize) || (windowSize as number) < 1 || (samples as number) > (windowSize as number)) {
+    return null;
+  }
+  return {
+    samples: samples as number,
+    p95Ms: p95Ms as number,
+    maxMs: maxMs as number,
+    timeouts: timeouts as number,
+    windowSize: windowSize as number,
+  };
+}
+
+function deploymentList(result: Record<string, unknown>): {
+  deployments: ViewerDeploymentStatus[];
+  runtimeHostRequests?: RuntimeHostRequestHealth;
+} {
   if (
     !Array.isArray(result.deployments)
     || !result.deployments.every((deployment) => isDeploymentStatus(deployment))
@@ -2546,7 +2576,14 @@ function deploymentList(result: Record<string, unknown>): ViewerDeploymentStatus
   ) {
     throw new ViewerControlResponseError("Viewer control returned a malformed deployment list");
   }
-  return result.deployments;
+  const health = runtimeHostRequestHealth(result.runtimeHostRequests);
+  if (result.runtimeHostRequests !== undefined && !health) {
+    throw new ViewerControlResponseError("Viewer control returned malformed runtime-host request health");
+  }
+  return {
+    deployments: result.deployments,
+    ...(health ? { runtimeHostRequests: health } : {}),
+  };
 }
 
 async function deploymentStatus(
@@ -2601,8 +2638,12 @@ async function deploymentStatus(
       const deployments = fromLedger.value;
       return { count: deployments.length, deployments };
     });
-  const deployments = deploymentList(result);
-  return redactPayload({ count: deployments.length, deployments });
+  const { deployments, runtimeHostRequests } = deploymentList(result);
+  return redactPayload({
+    count: deployments.length,
+    deployments,
+    ...(runtimeHostRequests ? { runtimeHostRequests } : {}),
+  });
 }
 
 async function resources(args: McpToolArgs, dependencies: ViewerMcpDomainDependencies): Promise<McpToolPayload> {
