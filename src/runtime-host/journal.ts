@@ -54,6 +54,13 @@ export class RuntimeJournalFault extends Error {}
 export const RUNTIME_SNAPSHOT_INACTIVE_SESSION_LIMIT = 128;
 export const RUNTIME_SNAPSHOT_TERMINAL_DEPLOYMENT_LIMIT = 50;
 export const RUNTIME_SNAPSHOT_STALE_EDGE_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
+/** A spawn or kill may wait through a short host succession. After one hour,
+    an operation with no runtime host and no current live registry conversation
+    is orphaned work. The maintenance sweep terminalizes it so every effect
+    drain remains proportional to work that can still run. */
+export const RUNTIME_PENDING_EFFECT_STALE_MS = 60 * 60 * 1_000;
+
+export type RuntimeRegistryConversationRetentionState = "current" | "dead" | "superseded";
 
 type EventRow = {
   seq: number;
@@ -1104,6 +1111,56 @@ export class RuntimeJournal {
       if (Number.isSafeInteger(sequence) && sequence > cursor) cursor = sequence;
     }
     return cursor;
+  }
+
+  /** Settle only old spawn/kill work whose two liveness authorities agree it
+      has no owner: the journal has no hosted/recovering session and the durable
+      agent registry is absent, marks the host dead, or marks the conversation
+      superseded. Pending sends and interrupts retain their existing unknown-
+      fate rules. */
+  settleStalePendingEffects(
+    registryConversations: ReadonlyMap<string, RuntimeRegistryConversationRetentionState>,
+    horizonMs = RUNTIME_PENDING_EFFECT_STALE_MS,
+  ): { scanned: number; settled: number } {
+    this.assertHealthy();
+    const horizon = Math.max(1, horizonMs);
+    const rows = this.db.query<{
+      operation_id: string;
+      conversation_id: string;
+      receipt_json: string;
+    }, []>(`
+      SELECT operations.operation_id, operations.conversation_id, operations.receipt_json
+      FROM operations
+      JOIN outbox ON outbox.id = 'effect:' || operations.operation_id
+      WHERE outbox.state = 'pending'
+        AND outbox.kind IN ('runtime.spawn', 'runtime.kill')
+        AND json_extract(operations.receipt_json, '$.status') IN ('pending', 'queued')
+      ORDER BY operations.event_seq
+    `).all();
+    let settled = 0;
+    for (const row of rows) {
+      try {
+        const receipt = JSON.parse(row.receipt_json) as RuntimeOperationReceipt;
+        const admittedAt = Date.parse(receipt.admittedAt ?? receipt.at);
+        if (!Number.isFinite(admittedAt) || this.now() - admittedAt < horizon) continue;
+        const session = this.entity<RuntimeSession>("session", row.conversation_id);
+        if (session?.host === "hosted" || session?.host === "recovering") continue;
+        const registryState = registryConversations.get(row.conversation_id);
+        if (registryState === "current") continue;
+        const ageMinutes = Math.ceil(horizon / 60_000);
+        let reason = `stale: ${receipt.kind} target has no runtime host and no agent registry record after ${ageMinutes} minutes`;
+        if (registryState === "superseded") {
+          reason = `stale: ${receipt.kind} target has no runtime host and its registry conversation is superseded after ${ageMinutes} minutes`;
+        } else if (registryState === "dead") {
+          reason = `stale: ${receipt.kind} target has no runtime host and its registry host is dead after ${ageMinutes} minutes`;
+        }
+        this.transitionOperation(row.operation_id, "failed", { reason });
+        settled += 1;
+      } catch (error) {
+        console.error(`[runtime journal] stale effect ${row.operation_id} could not be settled: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    return { scanned: rows.length, settled };
   }
 
   effectBatch(limit = 100, kinds?: readonly string[], afterEventSeq = 0): Array<RuntimeEffect & { eventSeq: number }> {

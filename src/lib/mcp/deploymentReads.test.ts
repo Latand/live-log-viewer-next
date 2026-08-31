@@ -132,12 +132,13 @@ test("deployment_status reads the live plane through Viewer HTTP when the MCP en
     phase: "succeeded",
     revision: "a".repeat(40),
   };
+  const runtimeHostRequests = { samples: 8, p95Ms: 2750, maxMs: 3001, timeouts: 2, windowSize: 256 };
   const control: ViewerControlDependencies & {
     get(pathname: string): Promise<Record<string, unknown>>;
   } = {
     async get(pathname) {
       gets.push(pathname);
-      return { count: 1, deployments: [deployment] };
+      return { count: 1, deployments: [deployment], runtimeHostRequests };
     },
     async post() {
       throw new Error("unexpected control write");
@@ -158,6 +159,7 @@ test("deployment_status reads the live plane through Viewer HTTP when the MCP en
   expect(await bindings.deployment_status({ clientRequestId: "deployment-list-live" })).toEqual({
     count: 1,
     deployments: [deployment],
+    runtimeHostRequests,
   });
   expect(gets).toEqual(["/api/runtime/deployments?limit=25"]);
   expect(inProcessRuntimeReads).toBe(0);
