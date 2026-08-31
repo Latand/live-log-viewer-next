@@ -294,10 +294,12 @@ async function getViewerControl(
     : {};
   if (!response.ok) {
     const error = text(result.error) || `Viewer control request failed with status ${response.status}`;
+    const requestHealth = runtimeHostRequestHealth(result.runtimeHostRequests);
     throw new McpToolRefusal(error, {
       error,
       status: response.status,
       ...(text(result.code) ? { code: text(result.code) } : {}),
+      ...(requestHealth ? { runtimeHostRequests: requestHealth } : {}),
     });
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {

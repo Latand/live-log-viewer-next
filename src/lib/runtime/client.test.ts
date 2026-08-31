@@ -143,6 +143,37 @@ test("request latency health excludes the intentional wait long poll", async () 
   expect(runtimeHostRequestHealth().samples).toBe(0);
 });
 
+test("request latency health reports the nearest-rank p95 of the recent window", async () => {
+  resetRuntimeHostRequestHealthForTests();
+  const socketPath = serve((frame, socket) => {
+    const request = JSON.parse(frame) as { id: string };
+    socket.end(JSON.stringify({ id: request.id, ok: true, result: { reset: false, floorSeq: 0, events: [] } }) + "\n");
+  });
+  const client = new UnixRuntimeHostClient(socketPath, 5_000, 5_000, 5_000);
+  const durations = Array.from({ length: 20 }, (_, index) => index + 1);
+  let reading = 0;
+  const clock = spyOn(performance, "now").mockImplementation(() => {
+    const requestIndex = Math.floor(reading / 2);
+    const elapsed = reading % 2 === 0 ? 0 : durations[requestIndex] ?? durations.at(-1)!;
+    reading += 1;
+    return requestIndex * 100 + elapsed;
+  });
+  try {
+    for (let index = 0; index < durations.length; index += 1) await client.events(0);
+  } finally {
+    clock.mockRestore();
+  }
+
+  expect(reading).toBe(40);
+  expect(runtimeHostRequestHealth()).toEqual({
+    samples: 20,
+    p95Ms: 19,
+    maxMs: 20,
+    timeouts: 0,
+    windowSize: 256,
+  });
+});
+
 test("snapshot accepts an upgrade-sized frame from the previous runtime host", async () => {
   const padding = "x".repeat(9 * 1024 * 1024);
   const socketPath = serve((frame, socket) => {

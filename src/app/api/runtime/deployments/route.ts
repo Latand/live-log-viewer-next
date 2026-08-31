@@ -46,7 +46,10 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     });
   } catch (error) {
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : "runtime host is unavailable" },
+      {
+        error: error instanceof Error ? error.message : "runtime host is unavailable",
+        runtimeHostRequests: runtimeHostRequestHealth(),
+      },
       { status: 503 },
     );
   }

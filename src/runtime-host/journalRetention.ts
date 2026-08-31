@@ -1,3 +1,4 @@
+import type { SpawnReceipt } from "@/lib/agent/registry";
 import { sessionKeyId } from "@/lib/agent/sessionKey";
 
 import type { RuntimeRegistryConversationRetentionState } from "./journal";
@@ -10,7 +11,21 @@ interface RegistryRetentionSnapshot {
     supersededBy: unknown | null;
   }>;
   entries: Record<string, { status: string }>;
+  receipts: Record<string, { conversationId: string; state: SpawnReceipt["state"] }>;
   conversationAliases: Record<string, string>;
+}
+
+function canonicalConversationId(
+  conversationId: string,
+  aliases: Readonly<Record<string, string>>,
+): string {
+  const seen = new Set<string>();
+  let current = conversationId;
+  while (aliases[current] && !seen.has(current)) {
+    seen.add(current);
+    current = aliases[current]!;
+  }
+  return current;
 }
 
 export function registryConversationRetentionStates(
@@ -26,6 +41,15 @@ export function registryConversationRetentionStates(
     if (conversation.supersededBy) state = "superseded";
     else if (entry?.status === "dead" || entry?.status === "unhosted") state = "dead";
     states.set(conversation.id, state);
+  }
+  for (const receipt of Object.values(registry.receipts)) {
+    const conversationId = canonicalConversationId(receipt.conversationId, registry.conversationAliases);
+    const existing = states.get(conversationId);
+    if (existing === "superseded") continue;
+    const state: RuntimeRegistryConversationRetentionState = receipt.state === "failed" || receipt.state === "conflicted"
+      ? "dead"
+      : "current";
+    if (state === "current" || existing === undefined) states.set(conversationId, state);
   }
   for (const [alias, canonical] of Object.entries(registry.conversationAliases)) {
     const state = states.get(canonical);

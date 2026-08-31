@@ -231,10 +231,19 @@ test("runtime read routes keep a configured but unreachable plane distinct from 
     ),
   ]);
 
-  for (const response of responses) {
+  for (const [index, response] of responses.entries()) {
     expect(response.status).toBe(503);
     const body = await response.json() as Record<string, unknown>;
     expect(body.error).toBe("runtime host is unavailable");
     expect(body).not.toHaveProperty("code");
+    if (index === 0) {
+      expect(body.runtimeHostRequests).toMatchObject({
+        samples: expect.any(Number),
+        p95Ms: expect.any(Number),
+        maxMs: expect.any(Number),
+        timeouts: 0,
+        windowSize: 256,
+      });
+    }
   }
 });

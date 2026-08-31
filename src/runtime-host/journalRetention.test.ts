@@ -55,6 +55,10 @@ test("registry retention evidence distinguishes current, dead, superseded, and a
       "claude:session-dead": { status: "dead" },
       "codex:thread-old": { status: "idle" },
     },
+    receipts: {
+      launch_pending: { conversationId: "conversation_receipt_pending", state: "starting" },
+      launch_failed: { conversationId: "conversation_receipt_failed", state: "failed" },
+    },
     conversationAliases: { conversation_alias: "conversation_dead" },
   });
 
@@ -62,6 +66,8 @@ test("registry retention evidence distinguishes current, dead, superseded, and a
     conversation_current: "current",
     conversation_dead: "dead",
     conversation_superseded: "superseded",
+    conversation_receipt_pending: "current",
+    conversation_receipt_failed: "dead",
     conversation_alias: "dead",
   });
 });

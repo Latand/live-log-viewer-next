@@ -250,7 +250,10 @@ test("deployment_status exposes the absent-plane code and keeps an unreachable p
     port: 0,
     fetch() {
       if (runtimeUnavailable) {
-        return Response.json({ error: "runtime host is unavailable" }, { status: 503 });
+        return Response.json({
+          error: "runtime host is unavailable",
+          runtimeHostRequests: { samples: 8, p95Ms: 2750, maxMs: 3001, timeouts: 2, windowSize: 256 },
+        }, { status: 503 });
       }
       return Response.json(
         { error: "runtime events are disabled", code: RUNTIME_PLANE_ABSENT },
@@ -285,6 +288,7 @@ test("deployment_status exposes the absent-plane code and keeps an unreachable p
     details: {
       error: "runtime host is unavailable",
       status: 503,
+      runtimeHostRequests: { samples: 8, p95Ms: 2750, maxMs: 3001, timeouts: 2, windowSize: 256 },
     },
   });
   expect(unreachable).not.toHaveProperty("details.code");
