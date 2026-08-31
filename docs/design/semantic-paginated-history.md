@@ -16,7 +16,7 @@ Keep the existing byte stream as the live lane. `useLogTail`, `logBus`, `/api/lo
 
 Store bounded previews and render facts in SQLite. Store no canonical body copy. Expanding a card resolves its opaque `bodyRef`, reads the named source byte range from JSONL, applies the same normalization and redaction rules, and returns the full logical body.
 
-Use a dedicated disposable `semantic-history.sqlite` file. Extract shared Bun SQLite setup and private-permission handling from the transcript-search-specific code at `src/lib/search/transcriptSearch.ts:158-224`. History connections use WAL and `busy_timeout = 0`; a busy result leaves the event loop, joins existing work, or retries with bounded asynchronous backoff. Legacy search indexing can never hold the history request path behind its long write transaction. Phase 6 moves transcript search onto the semantic rows, then removes `transcript-search.sqlite` after parity is proved.
+Use a dedicated disposable `semantic-history.sqlite` file. Extract shared Bun SQLite setup and private-permission handling from the transcript-search-specific code at `src/lib/search/transcriptSearch.ts:158-234`. History connections use WAL and `busy_timeout = 0`; a busy result leaves the event loop, joins existing work, or retries with bounded asynchronous backoff. Legacy search indexing can never hold the history request path behind its long write transaction. Phase 6 moves transcript search onto the semantic rows, then removes `transcript-search.sqlite` after parity is proved.
 
 ## Current code facts
 
@@ -58,8 +58,6 @@ The external seam is a server-only module. Route code resolves HTTP parameters a
 interface SemanticHistoryIndex {
   page(query: HistoryPageQuery): Promise<HistoryPage>;
   body(ref: string): Promise<HistoryBody>;
-  classifyOwnership(query: OwnershipQuery): Promise<OwnershipResult>;
-  resolveCheckpoint(ref: string, facts: LeadingRecordFacts): Promise<CheckpointResolution>;
   catchUp(conversation: ConversationBinding): Promise<IndexProgress>;
 }
 ```
@@ -114,6 +112,7 @@ CREATE TABLE history_entries (
   source_line_number    INTEGER NOT NULL,
   source_part           INTEGER NOT NULL,
   entry_id              TEXT NOT NULL,
+  reconciliation_key    TEXT NOT NULL,
   turn_id               TEXT,
   item_id               TEXT,
   kind                  TEXT NOT NULL,
@@ -122,6 +121,7 @@ CREATE TABLE history_entries (
   byte_end              INTEGER NOT NULL,
   preview               TEXT NOT NULL,
   body_size             INTEGER NOT NULL,
+  body_digest           BLOB NOT NULL,
   summary_json          TEXT NOT NULL,
   settled               INTEGER NOT NULL CHECK(settled IN (0, 1)),
   revision              INTEGER NOT NULL DEFAULT 1,
@@ -132,10 +132,12 @@ CREATE TABLE history_entries (
   CHECK (source_line_number >= 0),
   CHECK (source_part >= 0),
   CHECK (length(CAST(entry_id AS BLOB)) <= 80),
+  CHECK (length(CAST(reconciliation_key AS BLOB)) <= 64),
   CHECK (item_id IS NULL OR length(CAST(item_id AS BLOB)) <= 64),
   CHECK (turn_id IS NULL OR length(CAST(turn_id AS BLOB)) <= 64),
   CHECK (byte_start >= 0 AND byte_end >= byte_start),
-  CHECK (body_size >= 0)
+  CHECK (body_size >= 0),
+  CHECK (length(body_digest) = 32)
 );
 
 CREATE INDEX history_entries_page
@@ -144,6 +146,8 @@ CREATE INDEX history_entries_turn
   ON history_entries(file_generation, turn_id, ordinal);
 CREATE INDEX history_entries_item
   ON history_entries(file_generation, item_id);
+CREATE INDEX history_entries_reconcile
+  ON history_entries(file_generation, reconciliation_key, ordinal);
 
 CREATE TABLE history_open_calls (
   file_generation       TEXT NOT NULL,
@@ -160,22 +164,9 @@ CREATE TABLE history_checkpoints (
   next_ordinal          INTEGER NOT NULL,
   continuity_root       BLOB NOT NULL,
   inline_state_json     TEXT NOT NULL,
-  checkpoint_ref        TEXT NOT NULL UNIQUE,
   PRIMARY KEY (file_generation, byte_offset),
   FOREIGN KEY (file_generation) REFERENCES history_files(file_generation) ON DELETE CASCADE,
   CHECK (length(CAST(inline_state_json AS BLOB)) <= 8192)
-);
-
-CREATE TABLE history_checkpoint_state (
-  checkpoint_ref        TEXT NOT NULL,
-  state_kind            TEXT NOT NULL,
-  state_key             TEXT NOT NULL,
-  source_byte_start     INTEGER,
-  source_byte_end       INTEGER,
-  state_json            TEXT NOT NULL,
-  PRIMARY KEY (checkpoint_ref, state_kind, state_key),
-  FOREIGN KEY (checkpoint_ref) REFERENCES history_checkpoints(checkpoint_ref) ON DELETE CASCADE,
-  CHECK (length(CAST(state_json AS BLOB)) <= 2048)
 );
 
 ```
@@ -188,11 +179,13 @@ Every native identity crosses one funnel: `identityKey(domain, raw) = base64url(
 
 `native_generation = -1` represents a legacy catalog entry with no projected native generation. This keeps the composite primary key total and deterministic.
 
-`source_generation` is the catalog's durable identity for the underlying JSONL lineage. It survives deletion or rebuilding of `semantic-history.sqlite` and rotates only when the catalog proves truncation, replacement, or rewrite. The existing conversation registry stores this small token beside the source binding, and `/api/files` includes it as `FileEntry.sourceGeneration` before `LogFeed` mounts `useLogTail`; JSONL content remains authoritative. `file_generation` is the disposable projection/cache epoch and rotates on projection rebuild even when `source_generation` stays fixed.
+`source_generation` is the catalog's durable identity for the underlying JSONL lineage. It survives deletion or rebuilding of `semantic-history.sqlite` and rotates only when the catalog proves truncation, replacement, or rewrite. The existing conversation registry stores this small token beside the source binding, and history responses carry it for page and cursor validation; JSONL content remains authoritative. `file_generation` is the disposable projection/cache epoch and rotates on projection rebuild even when `source_generation` stays fixed.
 
 `entry_id` is the stable feed identity. At first emission it uses a namespaced native item identity when that identity is available and unique. The fallback is a hash of conversation scope, native generation, source byte coordinate, raw-record digest, and `source_part`. A native identity learned from a later twin goes into `item_id` and does not rewrite `entry_id`. This preserves the current parser's first-entry key behavior and recreates the same identity after a clean projection rebuild. A command group's presentation identity uses the first member's `entry_id`. SQLite row ids and the random `file_generation` never participate.
 
-`preview` is valid UTF-8 capped at 512 bytes after redaction. `summary_json` contains kind-specific render facts and has an 8 KiB encoded ceiling. Lists inside it have their own item and string caps. The projector converts any excess to counts and truncation flags. `body_size` is the UTF-8 size of the full redacted logical body. The source body remains in JSONL.
+`reconciliation_key` is the same bounded join value on both sides of the handoff. A shared pure function returns native `identityKey` when present. Its fallback is `base64url(SHA-256("history-reconcile-v1", engine, semantic kind, canonical raw-record facts, source_part))`. The server projector and live `FeedSession` call that exact function before display filtering or localization. Ordered multiset consumption resolves repeated fallback keys one-for-one.
+
+`preview` is valid UTF-8 capped at 512 bytes after redaction. `summary_json` contains kind-specific render facts and has an 8 KiB encoded ceiling. Lists inside it have their own item and string caps. The projector converts any excess to counts and truncation flags. `body_size` is the UTF-8 size of the full redacted logical body. `body_digest` is SHA-256 of that complete redacted logical body and is computed while the projector already has the record. A later result that extends `byte_end` recomputes size and digest in the same transaction. The source body remains in JSONL.
 
 `parser_state_json`, `history_open_calls`, and periodic checkpoints persist the minimum state needed to resume after `indexed_through`: the current turn, pending Codex user representation, adjacent assistant dedupe fingerprint, trailing command run, compaction marker, and other engine state already held by `FeedSession`. Open call identities use their own table because correctness requires retaining every unresolved call.
 
@@ -241,6 +234,7 @@ GET /api/history?conversation=...&before=...&limit=150
 - `before` is absent for the newest page. Later calls send the previous response's `beforeCursor`.
 - `limit` defaults to 150 and is clamped to `1..150`.
 - `showSvc=1` includes service rows. Omission excludes them and reports their count in `hiddenServiceCount`. `LogFeed` passes its current `showSvc` value, and the flag belongs to the cursor scope.
+- `sinceRevision` is optional on newest-page refreshes and asks for bounded changed-entry and ownership metadata after the client's known projection revision.
 - The server also enforces a 64 KiB page budget over the UTF-8 JSON encoding of the `entries` array.
 
 The endpoint returns entries in chronological order. This lets the client prepend the returned array directly. The SQL query walks ordinals in descending order to apply the limits, then reverses the chosen rows before serialization.
@@ -249,6 +243,7 @@ The endpoint returns entries in chronological order. This lets the client prepen
 interface FeedEntrySummaryBase {
   id: string;
   anchorKey: string;
+  reconciliationKey: string;
   ordinal: number;
   sourceLineNumber: number;
   sourcePart: number;
@@ -289,7 +284,9 @@ interface HistoryPage {
   sourceGeneration: string;
   fileGeneration: string;
   projectionRevision: number;
-  validatedThroughRevision: number;
+  changedEntries: FeedEntrySummary[];
+  ownedItemKeys: string[];
+  changesCursor: string | null;
   queryScope: string;
   sourceSize: number;
   completeLineCount: number;
@@ -304,8 +301,8 @@ interface HistoryPage {
   hiddenServiceCount: number;
   activeWakeupItemId: string | null;
   wakeupRevision: number;
+  checkpointComplete: boolean;
   cacheable: boolean;
-  pageEtag: string;
   edge: PageEdgeState;
 }
 ```
@@ -318,11 +315,7 @@ The row and byte limits select the longest contiguous newest-to-oldest consumed 
 
 One request examines at most `HISTORY_SCAN_ROWS = 2000` indexed entries, and filtered rows count toward that scan budget. If the scan budget ends inside a filtered-only segment before another visible row, the server commits that segment, returns an empty `entries` array with an advancing `beforeCursor`, and leaves `hasMore: true`. The client automatically drains such empty progress pages one request at a time until it receives a visible row or reaches the start. Envelope rejection consumes only the filtered rows newer than the rejected visible candidate; that candidate remains next.
 
-`beforeCursor`, `hasMore`, `hiddenServiceCount`, `pageRange`, both visible edge states, `cacheable`, and `pageEtag` are computed only from the final committed prefix. The server performs no post-serialization row removal, so cursor rewind is unnecessary and an omitted visible row stays eligible for the next request.
-
-Ownership classification uses a separate `POST /api/history/ownership` response and never enters the page envelope or LRU. The request carries conversation plus at most 64 `identityKey` values, with a 64-byte UTF-8 cap per key and a 16 KiB request cap. The response does not echo ids. It returns one compact integer status per request position: `0` pending, `1` history, `2` unmatched. The status count must equal the id count, and the complete response stays below 1 KiB. `history` means `history_entries.item_id` or `history_open_calls` owns the call, including a settled call outside loaded pages. `unmatched` is returned only from a ready, caught-up projection; validating ids remain pending.
-
-The client sends one ownership batch at a time and immediately sends the next while ids remain beyond the cap. Status `0` stays in a pending set. Pending keys retry on the next ready newest-page revision and on an ownership backoff that starts at `OWNERSHIP_RETRY_MS = 500` and caps at 5 seconds while the pane is mounted. A ready caught-up ownership response must resolve every requested key to `1` or `2`. This drain continues without a source-size event. Page-cache lookup and cursor boundaries are independent of every ownership request.
+`beforeCursor`, `hasMore`, `hiddenServiceCount`, `pageRange`, both visible edge states, and `cacheable` are computed only from the final committed prefix. The server performs no post-serialization row removal, so cursor rewind is unnecessary and an omitted visible row stays eligible for the next request.
 
 `hasMore` is derived from the existence of an older ordinal in the verified projection. A projection in `validating`, `building`, or `invalid` state cannot produce a history page.
 
@@ -330,15 +323,9 @@ The client sends one ownership batch at a time and immediately sends the next wh
 
 `cacheable` is true only when every returned entry is settled and both page edges are closed. A wakeup entry settles when its own result is known; its requested schedule, resolved schedule, and failure fact are immutable page data. File-global `activeWakeupItemId` identifies the newest wakeup call that is not known failed, so a pending call is provisionally active exactly like the current parser. The renderer derives each cached wakeup's active or superseded state by comparing its `itemId` with that global identity. `wakeupRevision` advances when a call appears and whenever a result changes the selected identity; a failed newest call restores the prior non-failed id. The unconditional newest-page response carries both fields, so cached historical rows re-render without page refetch. Other older cacheable pages are immutable under append. Empty source ranges use `byteRange: null`; their semantic boundaries still produce a unique cache identity.
 
-Every loaded page with `cacheable: false` retains its original request cursor, `projectionRevision`, `validatedThroughRevision`, and `pageEtag`, regardless of its distance from the tail. The history controller refreshes the newest semantic page whenever `useLogTail.size` advances and on a mounted `HISTORY_REVALIDATE_MS = 5000` cadence independent of `/api/files` 304 publication. Returning a hidden tab to visible state triggers an immediate refresh. A projection actively validating its frozen epoch returns `history_validating`, and the controller keeps the bounded raw fallback plus retry backoff. A ready 200 response is caught up to its stable observed source revision. `caughtUp: true` can coexist with `indexedThroughByte` at the prior complete newline when one incomplete final record occupies the remaining bytes. The independent cadence observes completed background work and source-generation changes on static-size files, then clears stale page-cache keys before rebuilt pages install.
+The newest-page request carries `sinceRevision`. Its response includes bounded `changedEntries` and at most 96 `ownedItemKeys`, produced from the same SQLite read snapshot as `projectionRevision`. Changed entries share the 64 KiB entry budget; ownership keys are fixed `identityKey` values inside the 16 KiB metadata reservation. `changesCursor` drains additional changed rows and ownership keys through the same `/api/history` interface. A caught-up, fully drained response makes absence from `ownedItemKeys` authoritative for pending live result keys covered through that revision.
 
-A higher newest-page `projectionRevision` causes a conditional refetch of every loaded non-cacheable older page whose `validatedThroughRevision` is lower. The request sends its `pageEtag` and target revision. A 200 response updates the page and sets both revision fields to the checked global revision. A 304 response includes `X-History-Validated-Through-Revision`; the client advances `validatedThroughRevision` to that header while retaining the page content. A concurrent later commit has a larger revision and therefore schedules another check. A page enters the LRU after the response marks it cacheable. The loaded-page set is bounded; an evicted page is fetched from the index when the reader returns to it.
-
-The conditional route reads `fileGeneration`, global revision, page rows, edge state, and the prior ETag comparison inside one SQLite read transaction. It computes `pageEtag` and decides 200 or 304 from that single snapshot. The 304 acknowledgement header carries the revision read in the same transaction. A writer committing after that snapshot receives a larger revision and cannot be accidentally acknowledged by the earlier response.
-
-Revalidation can change serialized row sizes and therefore move the page's lower semantic boundary. When a replacement's `pageRange.nextBefore` differs from the prior value, the controller invalidates every loaded older descendant in that cursor chain. The next older fetch starts from the replacement's new `beforeCursor`. Stable entry ids and the existing viewport anchor preserve the reader's position while this older chain reloads. This rule prevents a late update from leaving a gap or duplicate at the following page seam.
-
-This revision flow covers long-distance joins. A tool call remains unsettled and keeps its page non-cacheable until its result arrives. A result hundreds of entries later increments both the tool entry revision and `projectionRevision`. Refreshing the newest page observes that revision even after the bounded live lane has evicted the call, then triggers the older page's conditional refetch.
+The client patches loaded pages by `entry_id`, updates live ownership claims, and advances its known revision only after every `changesCursor` segment is consumed. If a changed entry moves a page's byte-budget boundary, the controller invalidates that page's older descendants and resumes from its new `beforeCursor`. This single revision flow covers long-distance tool results, wakeup identity changes, and page-edge changes without auxiliary polling or RPC protocols. A page enters the LRU after the response marks it cacheable; an evicted page is fetched fresh when revisited.
 
 ### Errors
 
@@ -374,13 +361,13 @@ The cursor is exclusive. If an unfiltered page consumes ordinals 900 through 1,0
 
 ## Body on demand
 
-A summary with omitted content carries an opaque `bodyRef`. The token binds conversation scope, normalizer version, entry identity, `file_generation`, `byte_start`, `byte_end`, and the source digest. The UI requests:
+A summary with omitted content carries an opaque `bodyRef`. The token binds conversation scope, normalizer version, entry identity, `file_generation`, `byte_start`, `byte_end`, and stored `body_digest`. Page serialization mints it from SQLite without reading the source body. The UI requests:
 
 ```http
 GET /api/history/body?conversation=...&ref=...
 ```
 
-The server resolves the current source, validates the reference, reads exactly `[byte_start, byte_end)`, and projects only the requested semantic entry. It returns the complete redacted logical body and its UTF-8 byte size. The route never returns the surrounding raw JSONL records. A composite tool row can span from its call record through its result record; the projector selects the call arguments and result that belong to the requested item id.
+The server resolves the current source, validates the reference, reads exactly `[byte_start, byte_end)`, and projects only the requested semantic entry. It hashes the complete redacted logical body and requires equality with the token digest before returning the body and UTF-8 byte size. The route never returns the surrounding raw JSONL records. A composite tool row can span from its call record through its result record; the projector selects the call arguments and result that belong to the requested item id.
 
 Body reads do not populate the page cache. A small body cache may live inside the expanded card and is released when that card unmounts. The source range can be large for a long-running interleaved tool call. That cost occurs only after explicit expansion, and `bodySize` lets the UI disclose it before fetching.
 
@@ -390,9 +377,7 @@ A digest or generation mismatch returns `history_body_stale` and causes a page r
 
 `PageEdgeState` has two roles. Its visible-run fields describe the first and last semantic runs for page prepend: leading and trailing command-run identity, adjacent prose fingerprint, turn continuity, and whether either edge is open. Its versioned `afterCheckpoint` is the projector checkpoint immediately after every physical source line through the page's upper byte boundary, computed before `showSvc` or other display filtering.
 
-`afterCheckpoint` has at most 8 KiB of inline state plus opaque `checkpointRef`. Inline fields cover assistant representation shape and fingerprint, `codexCompacted`, OpenClaw provider/model baseline, current turn, trailing group, and bounded recent identities. Every unbounded family is row-oriented in `history_checkpoint_state`: one row per pending user fingerprint, wakeup entry reference, model boundary, or open ownership key. Each state row is capped at 2 KiB and stores identifiers, fingerprints, counters, or source ranges. An open multiline plain block stores its source byte range and digest, never its complete text.
-
-The fresh live parser accepts the inline seed only when checkpoint version and normalizer version match. If a leading live record needs an out-of-line family, the controller calls `SemanticHistoryIndex.resolveCheckpoint(checkpointRef, leadingRecordFacts)` through a bounded checkpoint-resolution request. The server returns only the matching transition facts; it reads a referenced plain-block range only when that transition actually closes the block. Resolution responses have a 16 KiB limit and the same generation binding as the page. `resultOwnership` remains the specialized call-id path.
+`afterCheckpoint` has at most 8 KiB of inline state. Inline fields cover assistant representation shape and fingerprint, `codexCompacted`, OpenClaw provider/model baseline, current turn, trailing group, and bounded recent identities. `checkpointComplete` is false when exact state would exceed that bound; the client keeps the existing live `FeedSession` behavior at that rare seam. Specialized out-of-line checkpoint resolution is deferred until measurements show the bounded inline state is insufficient.
 
 The normal history response reserves a 16 KiB fixed-metadata budget, including the at-most-8-KiB inline checkpoint, both edge states, cursors, scopes, generation data, and global wakeup fields. `entries` has its separate 64 KiB budget, producing an 80 KiB envelope ceiling. Every limit measures UTF-8 bytes, and construction rejects fixed metadata that exceeds its reservation. Page selection trials the fully encoded envelope as described above. The single-oversized-entry exception can exceed the entry portion for one row while fixed metadata remains within 16 KiB.
 
@@ -431,7 +416,7 @@ The live path stays exactly as it is. `readTailChunk`, `LogChunk`, logBus, SSE, 
 
 `FeedSession` already gives each retained entry a session-stable `key`, preserves that key when a later record updates the item, and allocates larger keys for appended entries. The parser adds one pure `reconciliationKey` to `FeedEntry`: native `identityKey` when available, or a domain-separated digest of engine, semantic kind, canonical raw-record facts, and per-record emission part. Identical fallback keys reconcile as an ordered multiset, newest first, so duplicate content consumes one durable twin per live row.
 
-When the first semantic page arrives, `LogFeed` captures the current `feed.items` keys as `bootstrapKeys` and the viewport anchor. Page summaries replace matching bootstrap rows under their existing presentation keys. Every unmatched bootstrap row becomes unloaded history and leaves the rendered live lane. The same `FeedSession` continues running; any later append receives a new key outside `bootstrapKeys` and renders in the live lane. A tool result or dedupe update that mutates an existing bootstrap key stays history-owned without resetting parser state.
+Immediately before the first history request starts, `LogFeed` captures the current `feed.items` keys as `bootstrapKeys`. Rows appended while the request is in flight receive new keys outside that frozen set. When the response arrives, page summaries reconcile against all current live rows by `reconciliationKey` and reuse a matched presentation key. Only unmatched keys from the request-start `bootstrapKeys` become unloaded history and leave the rendered live lane. Post-request rows stay live unless the returned page contains their durable twin. A tool result or dedupe update that mutates an existing bootstrap key stays history-owned without resetting parser state.
 
 Raw “show earlier” is disabled once semantic paging is available. Older pages prepend summaries directly into the history list and never enter `FeedSession`, so the backward-window reset at `src/components/feed/parse.ts:2382-2394` cannot run. If history is rebuilding, `LogFeed` keeps the existing bounded raw tail as provisional content until the first page arrives.
 
@@ -463,7 +448,7 @@ Exit proof: a collapsed large tool result contributes only bounded summary bytes
 
 - Add the bounded LRU keyed by file generation, query scope, semantic page boundaries, and byte range.
 - Add leading and trailing visible-run state for incremental prepend reconciliation and cache it beside the Phase 1 trailing checkpoint.
-- Add out-of-line checkpoint resolution, unmatched-result ownership classification, and revision-driven reconciliation for rare cross-window state.
+- Add `sinceRevision`, bounded `changedEntries`, and `ownedItemKeys` to the existing history response for cross-window reconciliation.
 - Publish `projectionRevision` and conditionally refetch every loaded non-cacheable page after semantic progress, including pages outside the bounded live window.
 - Reconcile only the added page and its adjoining edge. Remove the old raw-history prepend call from `LogFeed`.
 
@@ -539,29 +524,27 @@ The cumulative verification catalog below activates with the phase that owns eac
 - call and result pairing across a page edge;
 - command grouping and Codex prose dedupe across a page edge;
 - a pending user representation that completes on the next page;
-- many pending users and one open multiline plain block keeping inline `afterCheckpoint` at or below 8 KiB, resolving only matching out-of-line state, and keeping fixed metadata within 16 KiB;
+- many pending users and one open multiline plain block keeping inline `afterCheckpoint` at or below 8 KiB and setting `checkpointComplete: false` without changing the live session;
 - multibyte checkpoint text enforcing limits through `length(CAST(... AS BLOB))` and final UTF-8 response encoding staying within the 80 KiB envelope;
 - a turn larger than the row and byte budgets;
 - row and byte limits together, including the single-oversized-row progress case;
+- Phase 2 page serialization minting `bodyRef` from stored `body_digest` with zero body-range reads, plus a later tool result extending `byte_end` and updating the digest atomically;
 - two pages split between entries with the same source byte range receiving distinct cache identities;
 - `showSvc` variants with the same byte range receiving distinct cache identities;
-- cached invariant page data serving two disjoint ownership requests through separate 16 KiB responses with no page or cursor mutation;
-- a maximal 64-key ownership request respecting the 64-byte key and 16 KiB request caps while returning 64 ordered statuses below 1 KiB;
 - a visible row rejected after the byte budget remaining eligible on the next page while filtered service rows advance the cursor;
 - a retained visible row, an envelope-rejected visible row, and filtered rows on both sides committing one contiguous prefix and recomputing every derived page field from it;
 - over 2,000 filtered service rows before the next visible row producing bounded empty progress pages that the client drains to the visible row without gaps;
 - a raw tail containing over 150 bootstrap entries rendering only the newest semantic page plus later FeedSession keys after handoff;
+- rows appended after request-start `bootstrapKeys` are frozen remaining live when absent from the response and reconcile in place when the response contains their `reconciliationKey`;
 - a bootstrap item updated by a later tool result retaining its key and history ownership while a newly appended item receives a live key;
 - duplicate id-less bootstrap rows reconciling one-for-one through ordered `reconciliationKey` multiset consumption;
+- server projector and live parser fixtures producing byte-identical `reconciliationKey` values for native and fallback rows;
 - a cold rebuild exceeding the request deadline preserving the unchanged bounded raw tail until bootstrap-key handoff;
-- a call evicted from the live window and all loaded pages before its result arrives, with bounded `resultOwnership` classification suppressing the unmatched live service row;
-- over 64 hidden unmatched results draining through immediate bounded ownership follow-ups after writes have stopped;
-- a static source returning ownership status `0` during validation and resolving the same pending key to `history` or `unmatched` through bounded ownership backoff after ready;
-- a tool result over 150 semantic entries after its call incrementing `projectionRevision` and refreshing the loaded non-tail call page after live-window eviction;
+- a call evicted from the live window and loaded pages before its result arrives, with the next history response returning its key in `ownedItemKeys` and updated row in `changedEntries`;
+- over one delta budget of changed entries draining through `changesCursor` before the client advances its known revision;
+- a tool result over 150 semantic entries after its call incrementing `projectionRevision` and patching the loaded non-tail call page through `changedEntries`;
 - a settled cached wakeup page staying immutable while a newer pending call becomes provisionally active, its failure restores the prior id, and `wakeupRevision` advances at both transitions;
-- a distant row update leaving the newest page content unchanged while its unconditional 200 response carries the higher global revision and triggers the older-page refetch;
-- an unchanged older page returning 304 with `X-History-Validated-Through-Revision`, followed by a concurrent later revision scheduling another check;
-- a writer commit attempted between conditional ETag evaluation and response construction remaining outside the read transaction's acknowledged revision;
+- a distant row update leaving newest page entries unchanged while the same response carries the higher revision, changed row, and ownership key from one SQLite snapshot;
 - a late update that changes a page's byte-budget boundary invalidating and restarting its older cursor chain without gaps or duplicates;
 - index corruption producing a rebuilding response while the JSONL source remains intact;
 - deleting and rebuilding only the SQLite projection changing `fileGeneration` while preserving the unchanged live hook, tail cache, parser session, and viewport;
@@ -572,13 +555,13 @@ The cumulative verification catalog below activates with the phase that owns eac
 - compact panes mounting only their bounded latest turn set;
 - a search hit opening the semantic page that contains its ordinal.
 
-Instrumentation should report validation bytes, semantic-parse bytes, validation retries, records parsed, inserted rows, updated rows, projection revision, page rows, serialized page bytes, non-cacheable page revalidations, rebuild reason, and whether a page came from cache. These are diagnostic counters. They do not become authority for transcript completeness.
+Instrumentation should report validation bytes, semantic-parse bytes, validation retries, records parsed, inserted rows, updated rows, projection revision, delta rows, page rows, serialized page bytes, rebuild reason, and whether a page came from cache. These are diagnostic counters. They do not become authority for transcript completeness.
 
 ## Non-goals
 
 - Changing `useLogTail`, `TailSnapshot`, logBus, SSE, the polling fallback, `readTailChunk`, `LogChunk`, or `/api/log`.
 - Treating SQLite as a source of record, a recovery source, or evidence that missing JSONL content never existed.
-- Loading full bodies during page fetch.
+- Loading full bodies during page fetch in the Phase 2 end state. Phase 1's explicit `bodyMode: "inline"` is the temporary rollout exception.
 - Guaranteeing that one whole turn fits in one page.
 - Running virtualization before semantic paging and body removal bound browser data.
 - Changing transcript formats or asking engine writers to emit new records.
@@ -592,6 +575,7 @@ Instrumentation should report validation bytes, semantic-parse bytes, validation
 - Locale-specific indexed summaries. Locale-neutral facts keep one projection valid for every client.
 - User-configurable page-byte budgets. One server budget keeps memory and cursor behavior predictable.
 - Server-rendered feed cards or cached HTML. The existing `FeedItem` rendering seam remains useful.
+- Specialized ownership polling or out-of-line checkpoint-resolution endpoints. The history page revision delta is the single Phase 3 synchronization interface until measurements prove it insufficient.
 - A custom streaming JSON tokenizer for oversized records. Add it only if recorded peak RSS from the shared projector establishes a concrete server-memory problem.
 - Cross-conversation ranking, recommendations, or semantic embeddings. Phase 6 needs indexed text and an exact page-opening cursor.
 
