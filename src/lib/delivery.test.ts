@@ -8,6 +8,7 @@ import { AgentRegistry, setAgentRegistryForTests, type ConversationObservation, 
 import { emptyLaunchProfile } from "./accounts/migration/contracts";
 import { drainHeldDeliveries } from "./accounts/migration/coordinator";
 import { cleanupFailedImageDelivery, deliverConversationMessage, killConversation, migrationDeliveryOutcome, reconfigureConversation, resumeConversation, type DeliveryFailure } from "./delivery";
+import { defaultPipelinePorts } from "./pipelines/engine";
 import type { RuntimeHostClient } from "./runtime/client";
 import { heldDeliveryOccurrences } from "./runtime/deliveredMessageOccurrences";
 import { messageTextDigest } from "./runtime/messageTextDigest";
@@ -209,7 +210,7 @@ test.each(["codex", "claude"] as const)("%s send creates one structured successo
   const key = { engine, sessionId } as const;
   const registry = new AgentRegistry(path.join(SANDBOX, `${engine}-successor-registry.json`), undefined, undefined, { sqliteMode: "off" });
   setAgentRegistryForTests(registry);
-  fs.writeFileSync(pathname, `${JSON.stringify({ type: "session_meta" })}\n`);
+  fs.writeFileSync(pathname, "");
   const begun = registry.beginSpawnRequest({
     engine,
     cwd: SANDBOX,
@@ -278,7 +279,7 @@ test.each(["codex", "claude"] as const)("%s send creates one structured successo
         "transcript": pathname,
         launchProfile: profile,
       });
-      const successor = registry.settleSpawn(input.receipt.launchId, {
+      const successor = registry.stageStructuredSpawn(input.receipt.launchId, {
         key,
         artifactPath: pathname,
         cwd: SANDBOX,
@@ -299,9 +300,23 @@ test.each(["codex", "claude"] as const)("%s send creates one structured successo
         },
         claimEpoch: 2,
         claimOwner: `structured-host:${engine}-successor`,
-        pendingAction: null,
+        pendingAction: "spawn",
       });
-      if (successor.kind !== "settled") throw new Error("structured successor did not settle");
+      if (successor.kind !== "settled") throw new Error("structured successor did not stage");
+      expect(fs.readFileSync(pathname, "utf8")).toBe("");
+      expect(defaultPipelinePorts().spawnReceipt(input.receipt.launchId)).toMatchObject({
+        state: "path-pending",
+        sessionId: null,
+        "transcript": null,
+      });
+      fs.writeFileSync(pathname, `${JSON.stringify({ type: "session_meta", payload: { id: sessionId } })}\n`);
+      const finalized = registry.finalizeStructuredSpawn(input.receipt.launchId);
+      if (finalized.kind !== "settled") throw new Error("structured successor did not finalize");
+      expect(defaultPipelinePorts().spawnReceipt(input.receipt.launchId)).toMatchObject({
+        state: "completed",
+        sessionId,
+        "transcript": pathname,
+      });
       return {
         ok: true,
         target: null,
