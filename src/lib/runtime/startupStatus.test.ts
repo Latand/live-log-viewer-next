@@ -9,8 +9,13 @@ test("separate bundle module instances share structured startup status", async (
     expect(routeCopy.didStructuredHostStartupFail()).toBe(true);
     routeCopy.markStructuredHostStartupReady();
     expect(instrumentationCopy.didStructuredHostStartupFail()).toBe(false);
+    instrumentationCopy.markStructuredDeliveryControllerReady();
+    expect(routeCopy.structuredDeliveryControllerReadiness({ LLV_STRUCTURED_HOSTS: "1" })).toBe("ready");
+    routeCopy.markStructuredDeliveryControllerUnavailable();
+    expect(instrumentationCopy.structuredDeliveryControllerReadiness({ LLV_STRUCTURED_HOSTS: "1" })).toBe("unavailable");
   } finally {
     instrumentationCopy.markStructuredHostStartupReady();
+    instrumentationCopy.markStructuredDeliveryControllerUnavailable();
   }
 });
 
