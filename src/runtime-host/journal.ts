@@ -54,10 +54,10 @@ export class RuntimeJournalFault extends Error {}
 export const RUNTIME_SNAPSHOT_INACTIVE_SESSION_LIMIT = 128;
 export const RUNTIME_SNAPSHOT_TERMINAL_DEPLOYMENT_LIMIT = 50;
 export const RUNTIME_SNAPSHOT_STALE_EDGE_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
-/** A spawn or kill may wait through a short host succession. After one hour,
-    an operation with no runtime host and no current live registry conversation
-    is orphaned work. The maintenance sweep terminalizes it so every effect
-    drain remains proportional to work that can still run. */
+/** A spawn or kill may wait through a short host succession. After one
+    continuous hour with no runtime host and no current live registry
+    conversation, the maintenance sweep terminalizes the orphaned work so
+    every effect drain remains proportional to work that can still run. */
 export const RUNTIME_PENDING_EFFECT_STALE_MS = 60 * 60 * 1_000;
 
 export type RuntimeRegistryConversationRetentionState = "current" | "dead" | "superseded";
@@ -318,7 +318,7 @@ export class RuntimeJournal {
       CREATE TABLE IF NOT EXISTS operations (
         operation_id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, idempotency_key TEXT NOT NULL,
         request_hash TEXT NOT NULL, request_json TEXT NOT NULL,
-        receipt_json TEXT NOT NULL, event_seq INTEGER NOT NULL,
+        receipt_json TEXT NOT NULL, event_seq INTEGER NOT NULL, orphaned_since INTEGER,
         UNIQUE(conversation_id, idempotency_key)
       );
       CREATE TABLE IF NOT EXISTS consumer_checkpoints (
@@ -334,6 +334,7 @@ export class RuntimeJournal {
         ON viewer_deployments(active) WHERE active = 1;
     `);
     this.migrateOperationIdempotencyScope();
+    this.migrateOperationOrphanedSince();
     this.migrateLegacyEvents();
     this.migrateEntityUpdatedAt();
     for (const row of this.db.query<EventRow, []>("SELECT * FROM events WHERE producer_key IS NOT NULL").all()) {
@@ -1128,8 +1129,10 @@ export class RuntimeJournal {
       operation_id: string;
       conversation_id: string;
       receipt_json: string;
+      orphaned_since: number | null;
     }, []>(`
-      SELECT operations.operation_id, operations.conversation_id, operations.receipt_json
+      SELECT operations.operation_id, operations.conversation_id, operations.receipt_json,
+        operations.orphaned_since
       FROM operations
       JOIN outbox ON outbox.id = 'effect:' || operations.operation_id
       WHERE outbox.state = 'pending'
@@ -1138,15 +1141,25 @@ export class RuntimeJournal {
       ORDER BY operations.event_seq
     `).all();
     let settled = 0;
+    const sampledAt = this.now();
     for (const row of rows) {
       try {
         const receipt = JSON.parse(row.receipt_json) as RuntimeOperationReceipt;
-        const admittedAt = Date.parse(receipt.admittedAt ?? receipt.at);
-        if (!Number.isFinite(admittedAt) || this.now() - admittedAt < horizon) continue;
         const session = this.entity<RuntimeSession>("session", row.conversation_id);
-        if (session?.host === "hosted" || session?.host === "recovering") continue;
         const registryState = registryConversations.get(row.conversation_id);
-        if (registryState === "current") continue;
+        if (session?.host === "hosted" || session?.host === "recovering" || registryState === "current") {
+          if (row.orphaned_since !== null) {
+            this.db.query("UPDATE operations SET orphaned_since = NULL WHERE operation_id = ?")
+              .run(row.operation_id);
+          }
+          continue;
+        }
+        if (row.orphaned_since === null) {
+          this.db.query("UPDATE operations SET orphaned_since = ? WHERE operation_id = ?")
+            .run(sampledAt, row.operation_id);
+          continue;
+        }
+        if (sampledAt - row.orphaned_since < horizon) continue;
         const ageMinutes = Math.ceil(horizon / 60_000);
         let reason = `stale: ${receipt.kind} target has no runtime host and no agent registry record after ${ageMinutes} minutes`;
         if (registryState === "superseded") {
@@ -2215,7 +2228,7 @@ export class RuntimeJournal {
         CREATE TABLE IF NOT EXISTS operations (
           operation_id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, idempotency_key TEXT NOT NULL,
           request_hash TEXT NOT NULL, request_json TEXT NOT NULL,
-          receipt_json TEXT NOT NULL, event_seq INTEGER NOT NULL,
+          receipt_json TEXT NOT NULL, event_seq INTEGER NOT NULL, orphaned_since INTEGER,
           UNIQUE(conversation_id, idempotency_key)
         );
       `);
@@ -2253,6 +2266,11 @@ export class RuntimeJournal {
       try { this.db.exec("ROLLBACK"); } catch { /* transaction already closed */ }
       throw error;
     }
+  }
+
+  private migrateOperationOrphanedSince(): void {
+    const columns = new Set(this.db.query<{ name: string }, []>("PRAGMA table_info(operations)").all().map((row) => row.name));
+    if (!columns.has("orphaned_since")) this.db.exec("ALTER TABLE operations ADD COLUMN orphaned_since INTEGER");
   }
 
   private migrateLegacyEvents(): void {

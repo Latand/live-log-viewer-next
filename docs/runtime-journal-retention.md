@@ -22,15 +22,20 @@ including during quiet periods.
   outbox rows below the anchor, and unpinned operation rows below the anchor;
 - superseded engine cursors and producer receipts whose events fell below the
   anchor;
-- queued or pending `runtime.spawn` and `runtime.kill` effects admitted at
-  least 60 minutes earlier when the journal has no hosted or recovering session
-  and the agent registry has no current live conversation or launch receipt. A
-  pending launch receipt protects work before its conversation materializes. An
-  absent registry conversation, a terminal failed/conflicted launch receipt, a
-  superseded conversation, or a latest registry host marked `dead`/`unhosted`
-  satisfies the registry half of this rule. The sweep records a failed receipt
-  whose reason starts with `stale:` and completes its outbox row. Sends and
-  interrupts retain their unknown-fate settlement rules.
+- queued or pending `runtime.spawn` and `runtime.kill` effects after a persisted
+  orphan timer records at least 60 continuous minutes with no hosted or
+  recovering journal session and no current registry conversation. The first
+  absent sweep starts the timer; any later liveness evidence clears it. Alias
+  lookup resolves full chains, and cycles preserve pending work. An active
+  pre-materialization launch receipt protects work while its conversation is
+  forming. Completed receipts and materialized nonterminal receipts carry no
+  independent liveness authority. An absent registry conversation, a terminal
+  failed/conflicted launch receipt, a superseded conversation, or a latest
+  registry host marked `dead` satisfies the registry half of this rule. An
+  `unhosted` entry remains live authority because it is working or
+  mid-transition. The sweep records a failed receipt whose reason starts with
+  `stale:` and completes its outbox row. Sends and interrupts retain their
+  unknown-fate settlement rules.
 
 The orphan sweep runs every minute. Missing or unreadable registry evidence
 leaves work unchanged and retries on the next tick.

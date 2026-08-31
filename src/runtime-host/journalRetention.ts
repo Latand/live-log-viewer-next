@@ -11,17 +11,22 @@ interface RegistryRetentionSnapshot {
     supersededBy: unknown | null;
   }>;
   entries: Record<string, { status: string }>;
-  receipts: Record<string, { conversationId: string; state: SpawnReceipt["state"] }>;
+  receipts: Record<string, {
+    conversationId: string;
+    state: SpawnReceipt["state"];
+    artifactLifecycle: SpawnReceipt["artifactLifecycle"];
+  }>;
   conversationAliases: Record<string, string>;
 }
 
 function canonicalConversationId(
   conversationId: string,
   aliases: Readonly<Record<string, string>>,
-): string {
+): string | null {
   const seen = new Set<string>();
   let current = conversationId;
-  while (aliases[current] && !seen.has(current)) {
+  while (aliases[current]) {
+    if (seen.has(current)) return null;
     seen.add(current);
     current = aliases[current]!;
   }
@@ -39,19 +44,28 @@ export function registryConversationRetentionStates(
       : undefined;
     let state: RuntimeRegistryConversationRetentionState = "current";
     if (conversation.supersededBy) state = "superseded";
-    else if (entry?.status === "dead" || entry?.status === "unhosted") state = "dead";
+    else if (entry?.status === "dead") state = "dead";
     states.set(conversation.id, state);
   }
   for (const receipt of Object.values(registry.receipts)) {
     const conversationId = canonicalConversationId(receipt.conversationId, registry.conversationAliases);
+    if (conversationId === null) continue;
     const existing = states.get(conversationId);
     if (existing === "superseded") continue;
-    const state: RuntimeRegistryConversationRetentionState = receipt.state === "failed" || receipt.state === "conflicted"
+    const state: RuntimeRegistryConversationRetentionState | undefined = receipt.state === "failed" || receipt.state === "conflicted"
       ? "dead"
-      : "current";
+      : receipt.state !== "completed" && receipt.artifactLifecycle === "pending"
+        ? "current"
+        : undefined;
+    if (state === undefined) continue;
     if (state === "current" || existing === undefined) states.set(conversationId, state);
   }
-  for (const [alias, canonical] of Object.entries(registry.conversationAliases)) {
+  for (const alias of Object.keys(registry.conversationAliases)) {
+    const canonical = canonicalConversationId(alias, registry.conversationAliases);
+    if (canonical === null) {
+      states.set(alias, "current");
+      continue;
+    }
     const state = states.get(canonical);
     if (state) states.set(alias, state);
   }
