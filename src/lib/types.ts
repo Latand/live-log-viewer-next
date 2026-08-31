@@ -65,13 +65,10 @@ export interface StructuredSpawnCardState {
   initialMessage: "pending" | "queued" | "delivered" | "failed";
   retrySafe: boolean;
   error: string | null;
-  /** The initial launch prompt (issue #614), sourced from the queued initial
-      delivery so ANY surface — not only the browser that ran the composer —
-      renders it as the conversation's first user bubble while the transcript is
-      still absent. Present only while the delivery still carries its text (it is
-      cleared once delivered, by which point the transcript echoes it); the seed
-      it produces is keyed by {@link launchId}, so it survives a refresh and
-      transcript adoption and never duplicates the composer's own seed. */
+  /** The durable initial-launch display text (issue #614), projected so every
+      surface renders the first user bubble while the transcript is absent. The
+      seed is keyed by {@link launchId}, survives refresh, and retires when the
+      materialized live transcript is adopted. */
   prompt?: string;
   /** How many images rode with the launch prompt, for the bubble's count chip. */
   promptImages?: number;
@@ -84,7 +81,8 @@ export interface StructuredSpawnCardState {
       THIS text, so a scaffolded role launch never lingers and never duplicates.
       When it differs from `prompt`, it remains on adopted live facts after the
       display fields retire, allowing a direct 202-to-live path to reconcile the
-      browser's raw seed (issue #616). */
+      browser's raw seed (issue #616). Live adoption also retires image-only
+      launches with an empty echo (issue #617). */
   promptEcho?: string;
   /** When the launch's initial message actually reached the agent (ms, issue
       #648). A structured / MCP spawn journals its first user record with SDK /
