@@ -55,6 +55,13 @@ function tsOf(obj: Record<string, unknown>): string | null {
   return str(obj.timestamp) || str(obj.ts) || null;
 }
 
+function codexEnvelopeTs(payload: Record<string, unknown>): string | null {
+  const value = payload.started_at_ms ?? payload.completed_at_ms;
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
 function readJsonl(pathname: string, maxBytes = 8 * 1024 * 1024): Record<string, unknown>[] {
   let data: string;
   try {
@@ -211,6 +218,7 @@ const CODEX_THREAD_ITEM_TYPES = new Set([
   "enteredreviewmode",
   "exitedreviewmode",
   "contextcompaction",
+  "extension",
 ]);
 
 function codexThreadItemKind(value: unknown): string {
@@ -251,19 +259,36 @@ function codexThreadItemRecord(item: Record<string, unknown>, ts: string | null)
   const itemType = str(item.type) || "item";
   const kind = codexThreadItemKind(itemType);
   if (kind === "usermessage") return { kind: "message", role: "user", ts, text: textFromContent(item.content) };
-  if (kind === "agentmessage") return { kind: "message", role: "assistant", ts, phase: str(item.phase) || undefined, text: str(item.text) };
+  if (kind === "agentmessage") return { kind: "message", role: "assistant", ts, phase: str(item.phase) || undefined, text: textFromContent(item.content) || str(item.text) };
   if (kind === "reasoning") {
-    return { kind: "reasoning", role: "assistant", ts, text: [stringList(item.summary), stringList(item.content), str(item.text)].filter(Boolean).join("\n") };
+    return {
+      kind: "reasoning",
+      role: "assistant",
+      ts,
+      text: [stringList(item.summary), stringList(item.content), str(item.summary_text), str(item.raw_content), str(item.text)]
+        .filter((value, index, values) => Boolean(value.trim()) && values.indexOf(value) === index)
+        .join("\n"),
+    };
   }
   if (kind === "filechange") return { kind: "tool_call", role: "assistant", ts, name: itemType, text: codexFileChangeText(item.changes) || "File change" };
   if (kind === "commandexecution") {
-    return { kind: "tool_call", role: "assistant", ts, name: itemType, text: [str(item.command), str(item.aggregatedOutput), str(item.status)].filter(Boolean).join("\n") };
+    const command = Array.isArray(item.command)
+      ? item.command.filter((part): part is string => typeof part === "string").join(" ")
+      : str(item.command);
+    const output = [str(item.stdout), str(item.stderr), str(item.aggregatedOutput ?? item.aggregated_output)]
+      .filter((value, index, values) => Boolean(value) && values.indexOf(value) === index)
+      .join("\n");
+    return { kind: "tool_call", role: "assistant", ts, name: itemType, text: [command, output, str(item.status)].filter(Boolean).join("\n").slice(0, 2_000) };
   }
   if (kind === "functioncalloutput") return { kind: "tool_result", role: "tool", ts, name: itemType, text: textFromContent(item.output) || compactRecordText(item.output) || str(item.name) };
   if (["mcptoolcall", "dynamictoolcall", "collabagenttoolcall", "websearch", "imageview", "imagegeneration"].includes(kind)) {
     const identity = [str(item.server), str(item.namespace), str(item.tool), str(item.query), str(item.path)].filter(Boolean).join(" · ");
     const result = textFromContent(rec(item.result).content) || textFromContent(item.contentItems) || compactRecordText(item.contentItems) || compactRecordText(item.result);
     return { kind: "tool_call", role: "assistant", ts, name: itemType, text: [identity, result, str(item.status)].filter(Boolean).join("\n") || itemType };
+  }
+  if (kind === "extension") {
+    const identity = [str(item.kind), str(item.action), str(item.query)].filter(Boolean).join(" · ");
+    return { kind: "tool_call", role: "assistant", ts, name: itemType, text: [identity, compactRecordText(item.results)].filter(Boolean).join("\n") || itemType };
   }
   if (kind === "hookprompt") {
     return { kind: "trace", role: "system", ts, name: itemType, text: arr(item.fragments).map((fragment) => str(fragment.text)).filter(Boolean).join("\n") || "Hook prompt" };
@@ -281,8 +306,8 @@ function normalizeCodexLine(obj: Record<string, unknown>): NormalizedSessionLine
   const add = (record: SessionRecord, representation?: NormalizedSessionLine["representation"]): void => {
     records.push({ record, ...(representation ? { representation } : {}) });
   };
-  const ts = tsOf(obj);
   const payload = rec(obj.payload);
+  const ts = codexEnvelopeTs(payload) ?? tsOf(obj);
   const payloadType = str(payload.type);
   const nestedThreadItem = recordOrNull(payload.item);
   const lifecycle = codexThreadItemKind(payloadType);
@@ -351,7 +376,7 @@ function normalizeCodexLine(obj: Record<string, unknown>): NormalizedSessionLine
     add({ kind: "trace", role: "system", ts, name: payloadType, text: compactRecordText(payload.delta ?? payload.changes) || payloadType });
     return records;
   }
-  if (payloadType && payloadType !== "token_count") {
+  if (payloadType && !["token_count", "thread_settings_applied", "task_started"].includes(payloadType)) {
     add({ kind: "trace", role: "system", ts, name: payloadType, text: JSON.stringify(payload) });
   }
   return records;

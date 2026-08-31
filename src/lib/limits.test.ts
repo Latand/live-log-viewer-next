@@ -231,7 +231,7 @@ test("a provider-exhausted transcript window overrides a newer app-server probe"
   expect(result.data?.weekly?.resetsAt).toBe(resetsAt);
 });
 
-test("usage_limit_exceeded makes the matching transcript window authoritative immediately", async () => {
+test("a usage_limit terminal record makes the matching transcript window authoritative immediately (#1371)", async () => {
   const account = createManagedCodexAccount("Rejected reconciliation");
   const nowS = Math.floor(Date.now() / 1000);
   const resetsAt = nowS + 6 * 86_400;
@@ -244,7 +244,7 @@ test("usage_limit_exceeded makes the matching transcript window authoritative im
     }),
     JSON.stringify({
       timestamp: new Date((nowS - 60) * 1000).toISOString(),
-      payload: { type: "task_complete", error: { message: "You've hit your usage limit. Try again after reset.", codex_error_info: "usage_limit_exceeded" } },
+      payload: { type: "task_complete", message: "You've hit your usage limit. Try again after reset.", codex_error_info: "usage_limit" },
     }),
   ].join("\n") + "\n");
 

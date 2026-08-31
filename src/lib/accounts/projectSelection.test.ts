@@ -76,6 +76,36 @@ test("a bound project draws only from its allowed set, whatever the routing pref
   })).toEqual({ kind: "available", accountId: RESERVED });
 });
 
+test("a terminally limited account is removed while failover stays inside the project pool (#1371)", () => {
+  expect(selectProjectAccount({
+    project: ATLAS,
+    engine: "claude",
+    accounts: [...ACCOUNTS, { id: "acct-outside", authPresent: true }],
+    observations: [
+      observation(RESERVED, 5),
+      observation(SPARE, 20),
+      observation("acct-outside", 0),
+    ],
+    bindings: [binding(RESERVED), binding(SPARE)],
+    preferredId: RESERVED,
+    unavailableIds: [RESERVED],
+    now: NOW,
+  })).toEqual({ kind: "available", accountId: SPARE });
+});
+
+test("an unbound automatic retry excludes its limited account and remains capacity-aware (#1371)", () => {
+  expect(selectProjectAccount({
+    project: ATLAS,
+    engine: "claude",
+    accounts: ACCOUNTS,
+    observations: [observation(RESERVED, 5), observation(SPARE, 20)],
+    bindings: [],
+    preferredId: RESERVED,
+    unavailableIds: [RESERVED],
+    now: NOW,
+  })).toEqual({ kind: "available", accountId: SPARE });
+});
+
 test("a stage naming an account the project forbids is refused, never reseated", () => {
   expect(selectProjectAccount({
     project: ATLAS,

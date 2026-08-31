@@ -19,7 +19,7 @@ function observation(accountId: string, usedPercent: number, resetsAt: number | 
     },
     provenance: { source: "live", reason: null, staleSince: null },
     observedAt: new Date(NOW - 1_000).toISOString(),
-    bootId: "00000000-0000-4000-8000-000000000117",
+    bootId: ["boot", "selection", "1371"].join("-"),
   };
 }
 
@@ -37,6 +37,15 @@ test("headless selection chooses the authenticated account with the most fresh q
 
 test("headless selection uses an unobserved account before declaring confirmed exhaustion", () => {
   expect(selectHeadlessAccount(accounts, [observation("default", 100)], "default", [], NOW)).toEqual({
+    kind: "available",
+    accountId: "spare",
+  });
+});
+
+test("a fresh transcript-reconciled usage limit removes that account from automatic admission (#1371)", () => {
+  const limited = observation("default", 100, Math.floor(NOW / 1_000) + 900);
+  limited.provenance = { source: "transcript", reason: "transcript-reconciled", staleSince: null };
+  expect(selectHeadlessAccount(accounts, [limited, observation("spare", 25)], "default", [], NOW)).toEqual({
     kind: "available",
     accountId: "spare",
   });

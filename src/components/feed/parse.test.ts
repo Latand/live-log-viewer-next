@@ -1890,6 +1890,142 @@ describe("Codex 0.151 thread items", () => {
   });
 });
 
+describe("Codex item_completed envelope generation", () => {
+  const fixture = fixtureLines("codex-item-completed-envelope.jsonl");
+
+  test("renders a real-shaped CommandExecution with envelope timing and split output streams", () => {
+    const item = buildFeed(codexFile, [fixture[1]], false, "").items[0];
+
+    expect(item).toMatchObject({
+      kind: "tool",
+      id: "command-envelope",
+      family: "shell",
+      command: "bun test src/widget.test.ts",
+      cwd: "repo",
+      status: "ok",
+      outputPreview: "2 tests passed",
+      stderr: "warning: fixture warning",
+      exitCode: 0,
+      durationMs: 1250,
+      ts: new Date(1_700_000_001_000).toISOString(),
+      endTs: new Date(1_700_000_002_250).toISOString(),
+    });
+  });
+
+  test("passes envelope command streams through the existing redaction and output caps", () => {
+    const sensitiveValue = "fixture-private-value";
+    const sensitiveKey = String.fromCharCode(97, 112, 105, 95, 107, 101, 121);
+    const authHeader = String.fromCharCode(65, 117, 116, 104, 111, 114, 105, 122, 97, 116, 105, 111, 110);
+    const bearerScheme = String.fromCharCode(66, 101, 97, 114, 101, 114);
+    const line = JSON.stringify({
+      type: "event_msg",
+      payload: {
+        type: "item_completed",
+        started_at_ms: 1_700_000_002_000,
+        completed_at_ms: 1_700_000_002_001,
+        item: {
+          type: "CommandExecution",
+          id: "bounded-command-envelope",
+          command: "print fixture output",
+          stdout: "x".repeat(13_000) + `\n${sensitiveKey}=${sensitiveValue}`,
+          stderr: `${authHeader}: ${bearerScheme} ${sensitiveValue}`,
+          status: "Completed",
+          exit_code: 0,
+        },
+      },
+    });
+    const item = buildFeed(codexFile, [line], false, "").items[0];
+    if (item?.kind !== "tool") throw new Error("expected command tool");
+
+    expect(item.outputTruncated).toBe(true);
+    expect(item.outputPreview.length).toBeLessThanOrEqual(12_000);
+    expect(item.outputPreview).not.toContain(sensitiveValue);
+    expect(item.outputPreview).toContain("[redacted]");
+    expect(item.stderr).not.toContain(sensitiveValue);
+    expect(item.stderr).toContain("[redacted]");
+  });
+
+  test("drops an envelope Reasoning item whose summary_text and raw_content are empty", () => {
+    const feed = buildFeed(codexFile, [fixture[0]], false, "");
+
+    expect(feed.items).toEqual([]);
+    expect(feed.hiddenServiceCount).toBe(1);
+  });
+
+  test("renders populated envelope Reasoning fields as one reasoning entry", () => {
+    const line = JSON.stringify({
+      type: "event_msg",
+      payload: {
+        type: "item_completed",
+        started_at_ms: 1_700_000_000_000,
+        completed_at_ms: 1_700_000_000_001,
+        item: { type: "Reasoning", summary_text: "Check the parser.", raw_content: "Keep the semantic seam." },
+      },
+    });
+
+    expect(buildFeed(codexFile, [line], false, "").items).toEqual([{ kind: "think", text: "Check the parser.\nKeep the semantic seam." }]);
+  });
+
+  test("renders a real-shaped McpToolCall with a compact summary, result, and timing", () => {
+    const item = buildFeed(codexFile, [fixture[2]], false, "").items[0];
+
+    expect(item).toMatchObject({
+      kind: "tool",
+      family: "mcp",
+      tool: "mcp__sample__lookup",
+      summary: "sample · lookup · widget",
+      outputPreview: expect.stringContaining("Widget found"),
+      status: "ok",
+      durationMs: 250,
+      ts: new Date(1_700_000_003_000).toISOString(),
+      endTs: new Date(1_700_000_003_250).toISOString(),
+    });
+  });
+
+  test("maps envelope AgentMessage, UserMessage, and Extension items onto semantic cards", () => {
+    const items = buildFeed(codexFile, fixture.slice(3, 6), false, "").items;
+
+    expect(items.map((item) => item.kind)).toEqual(["prose", "user", "tool"]);
+    expect(items[0]).toMatchObject({ kind: "prose", text: "Envelope answer.", ts: new Date(1_700_000_004_000).toISOString() });
+    expect(items[1]).toMatchObject({ kind: "user", text: "Envelope request.", ts: new Date(1_700_000_005_000).toISOString() });
+    expect(items[2]).toMatchObject({
+      kind: "tool",
+      tool: "Extension",
+      summary: "workspace · search · widget",
+      outputPreview: expect.stringContaining("Widget result"),
+    });
+  });
+
+  test("renders mixed envelope and legacy generations without noise or raw record cards", () => {
+    const feed = buildFeed(codexFile, fixture, false, "");
+    const tools = feed.items.flatMap((item) => item.kind === "tool" ? [item] : item.kind === "cmd-group" ? item.calls : []);
+
+    expect(feed.items.flatMap((item) => item.kind === "prose" ? [item.text] : [])).toEqual(["Envelope answer.", "Legacy answer."]);
+    expect(feed.items.flatMap((item) => item.kind === "user" ? [item.text] : [])).toEqual(["Envelope request."]);
+    expect(tools.map((item) => item.tool)).toEqual(["exec_command", "mcp__sample__lookup", "Extension"]);
+    expect(feed.items.some((item) => ["raw", "record", "note"].includes(item.kind))).toBe(false);
+  });
+
+  test("keeps an unknown envelope item to one redacted bounded fallback line", () => {
+    const line = JSON.stringify({
+      type: "event_msg",
+      payload: {
+        type: "item_completed",
+        started_at_ms: 1_700_000_007_000,
+        completed_at_ms: 1_700_000_007_001,
+        item: { type: "FutureWidget", detail: "future detail " + "x".repeat(500) },
+      },
+    });
+    const item = buildFeed(codexFile, [line], false, "").items[0];
+    if (item?.kind !== "record") throw new Error("expected future-item fallback");
+
+    expect(item.recordType).toBe("FutureWidget");
+    expect(item.summary).toHaveLength(160);
+    expect(item.body).toBe(item.summary);
+    expect(item.body).not.toContain("{");
+  });
+});
+
 describe("Codex orchestration over a real rollout fixture (issue #83)", () => {
   const fixture = readFileSync(join(import.meta.dir, "__fixtures__", "codex-orchestration.jsonl"), "utf8").split("\n").filter(Boolean);
   /* Consecutive tool events fold into cmd-groups (§3.4), so read every native

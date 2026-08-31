@@ -473,6 +473,7 @@ interface CodexUserContent {
    render approved inline raster data as an image, and describe every other
    non-empty attachment without exposing its payload in the feed. */
 function normalizeCodexUserContent(content: unknown): CodexUserContent {
+  if (typeof content === "string") return { ...decodeCodexStructuredUserText(content), attachments: [] };
   const text: string[] = [];
   const attachments: Item[] = [];
   for (const part of arr(content)) {
@@ -1773,6 +1774,19 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     const safeType = redactTranscriptText(recordType).slice(0, ATTACHMENT_TYPE_MAX);
     push({ kind: "record", ts, recordType: safeType || tr("render.record"), summary: transcriptRecordSummary(value, detail.body), ...detail });
   };
+  const addThreadItemFallback = (ts: unknown, recordType: string, value: unknown) => {
+    const detail = transcriptRecordBody(value);
+    const summary = transcriptRecordSummary(value, detail.body);
+    const safeType = redactTranscriptText(recordType).slice(0, ATTACHMENT_TYPE_MAX);
+    push({
+      kind: "record",
+      ts,
+      recordType: safeType || tr("render.record"),
+      summary,
+      body: summary,
+      truncated: detail.truncated || detail.body !== summary,
+    });
+  };
   const codexThreadItemKind = (value: unknown): string => textPart(value).replace(/[_-]/g, "").toLowerCase();
   const codexThreadToolStatus = (item: Record<string, unknown>, lifecycle: string): ToolStatus => {
     const status = codexThreadItemKind(item.status);
@@ -1815,19 +1829,66 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     if (value === undefined || value === null) return "";
     return transcriptRecordBody(value).body.replace(/\s+/g, " ").trim().slice(0, 120);
   };
+  type CodexThreadTiming = { ts: unknown; endTs?: unknown; durationMs?: number };
+  const codexThreadTimestamp = (value: unknown): string | undefined => {
+    const milliseconds = num(value);
+    if (milliseconds === undefined) return undefined;
+    const date = new Date(milliseconds);
+    return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
+  };
+  const codexThreadTiming = (payload: Record<string, unknown>, fallback: unknown): CodexThreadTiming => {
+    const startMs = num(payload.started_at_ms);
+    const completedMs = num(payload.completed_at_ms);
+    const ts = codexThreadTimestamp(startMs) ?? fallback ?? codexThreadTimestamp(completedMs);
+    const endTs = codexThreadTimestamp(completedMs);
+    const durationMs = startMs !== undefined && completedMs !== undefined && completedMs >= startMs
+      ? completedMs - startMs
+      : undefined;
+    return {
+      ts,
+      ...(endTs !== undefined ? { endTs } : {}),
+      ...(durationMs !== undefined ? { durationMs } : {}),
+    };
+  };
+  const codexThreadDurationMs = (item: Record<string, unknown>, timing: CodexThreadTiming): number | undefined => {
+    const explicit = num(item.durationMs);
+    if (explicit !== undefined) return explicit;
+    const duration = rec(item.duration);
+    const seconds = num(duration.secs);
+    const nanos = num(duration.nanos);
+    if (seconds !== undefined || nanos !== undefined) {
+      return Math.round((seconds ?? 0) * 1_000 + (nanos ?? 0) / 1_000_000);
+    }
+    return timing.durationMs;
+  };
+  const codexCommandOutput = (item: Record<string, unknown>): string => {
+    const stdout = toolOutputText(item.stdout).trim();
+    const stderr = toolOutputText(item.stderr).trim();
+    const aggregate = toolOutputText(item.aggregatedOutput ?? item.aggregated_output ?? item.output).trim();
+    const combinedStreams = [stdout, stderr].filter(Boolean).join("\n");
+    let stdoutWithAggregate = stdout;
+    if (aggregate && aggregate !== stdout && aggregate !== stderr && aggregate !== combinedStreams) {
+      stdoutWithAggregate = [stdout, aggregate].filter(Boolean).join("\n");
+    } else if (!stdout && !stderr) {
+      stdoutWithAggregate = aggregate;
+    }
+    return stderr
+      ? [stdoutWithAggregate, "[stderr]", stderr].filter(Boolean).join("\n")
+      : stdoutWithAggregate;
+  };
   const emitCodexThreadTool = (opts: {
     item: Record<string, unknown>;
-    ts: unknown;
+    timing: CodexThreadTiming;
     lifecycle: string;
     tool: string;
     args?: Record<string, unknown>;
     summary?: string;
     output?: unknown;
   }): void => {
-    const id = textPart(opts.item.id) || "plain-" + pushSeq + "-" + String(opts.ts ?? "");
+    const id = textPart(opts.item.id) || "plain-" + pushSeq + "-" + String(opts.timing.ts ?? "");
     const status = codexThreadToolStatus(opts.item, opts.lifecycle);
     const base = newToolEvent({
-      ts: opts.ts,
+      ts: opts.timing.ts,
       id,
       tool: opts.tool,
       args: opts.args,
@@ -1835,27 +1896,30 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       ...(opts.summary ? { summary: opts.summary } : {}),
     });
     upsertCodexThreadTool({ ...base, status, statusLabel: codexThreadStatusLabel(status) });
-    if (status !== "run") attach(calls.get(id), toolOutputText(opts.output), status === "err", undefined, opts.ts);
+    if (status !== "run") {
+      attach(calls.get(id), toolOutputText(opts.output), status === "err", undefined, opts.timing.endTs ?? opts.timing.ts);
+    }
     const current = calls.get(id)?.event;
     if (!current) return;
-    const durationMs = num(opts.item.durationMs);
+    const durationMs = codexThreadDurationMs(opts.item, opts.timing);
     upsertCodexThreadTool({
       ...current,
       status,
       statusLabel: codexThreadStatusLabel(status),
       ...(durationMs !== undefined ? { durationMs } : {}),
+      ...(opts.timing.endTs !== undefined ? { endTs: opts.timing.endTs } : {}),
     });
   };
-  const renderCodexThreadItem = (item: Record<string, unknown>, ts: unknown, lifecycle: string): boolean => {
+  const renderCodexThreadItem = (item: Record<string, unknown>, timing: CodexThreadTiming, lifecycle: string): boolean => {
     const kind = codexThreadItemKind(item.type);
-    const id = textPart(item.id) || "plain-" + pushSeq + "-" + String(ts ?? "");
-    const toolKind = ["functioncalloutput", "commandexecution", "filechange", "mcptoolcall", "dynamictoolcall", "collabagenttoolcall", "websearch", "imageview", "imagegeneration"].includes(kind);
+    const id = textPart(item.id) || "plain-" + pushSeq + "-" + String(timing.ts ?? "");
+    const toolKind = ["functioncalloutput", "commandexecution", "filechange", "mcptoolcall", "dynamictoolcall", "collabagenttoolcall", "websearch", "imageview", "imagegeneration", "extension"].includes(kind);
     if (lifecycle === "itemdelta" || (lifecycle === "itemstarted" && !toolKind)) {
       addSvc(`${textPart(item.type) || "item"} ${lifecycle}`);
       return true;
     }
     if (kind === "usermessage") {
-      emitCodexUserContent(ts, normalizeCodexUserContent(item.content));
+      emitCodexUserContent(timing.ts, normalizeCodexUserContent(item.content));
       return true;
     }
     if (kind === "hookprompt") {
@@ -1864,12 +1928,13 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       return true;
     }
     if (kind === "agentmessage") {
-      addCodexAssistant("response-assistant", ts, textPart(item.text), id);
+      const text = normalizeCodexUserContent(item.content).text || textPart(item.text);
+      addCodexAssistant("response-assistant", timing.ts, text, id);
       return true;
     }
     if (kind === "functioncalloutput") {
       const name = [textPart(item.namespace), textPart(item.name)].filter(Boolean).join(" · ") || "function output";
-      emitCodexThreadTool({ item, ts, lifecycle, tool: textPart(item.name) || "functionCallOutput", summary: name, output: item.output });
+      emitCodexThreadTool({ item, timing, lifecycle, tool: textPart(item.name) || "functionCallOutput", summary: name, output: item.output });
       return true;
     }
     if (kind === "plan") {
@@ -1877,9 +1942,13 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       return true;
     }
     if (kind === "reasoning") {
+      const envelopeText = [textPart(item.summary_text), textPart(item.raw_content)]
+        .filter((part, index, parts) => Boolean(part.trim()) && parts.indexOf(part) === index)
+        .join("\n");
       const text = [...arr(item.summary), ...arr(item.content)].map((part) => textPart(part.text)).filter(Boolean).join("\n")
         || [...(Array.isArray(item.summary) ? item.summary : []), ...(Array.isArray(item.content) ? item.content : [])]
           .filter((part): part is string => typeof part === "string" && Boolean(part.trim())).join("\n")
+        || envelopeText
         || textPart(item.text);
       if (text) push({ kind: "think", text });
       else addSvc("reasoning");
@@ -1888,7 +1957,22 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     if (kind === "mcptoolcall") {
       const server = textPart(item.server) || "mcp";
       const tool = textPart(item.tool) || "tool";
-      emitCodexThreadTool({ item, ts, lifecycle, tool: `mcp__${server}__${tool}`, args: codexThreadArgs(item.arguments), output: item.error ?? item.result });
+      emitCodexThreadTool({ item, timing, lifecycle, tool: `mcp__${server}__${tool}`, args: codexThreadArgs(item.arguments), output: item.error ?? item.result });
+      return true;
+    }
+    if (kind === "extension") {
+      const extensionKind = textPart(item.kind) || codexThreadPreview(item.kind);
+      const action = textPart(item.action) || codexThreadPreview(item.action);
+      const query = textPart(item.query) || codexThreadPreview(item.query);
+      emitCodexThreadTool({
+        item,
+        timing,
+        lifecycle,
+        tool: "Extension",
+        args: { kind: item.kind, action: item.action, query: item.query },
+        summary: [extensionKind, action, query].filter(Boolean).join(" · ") || "Extension",
+        output: codexThreadPreview(item.results),
+      });
       return true;
     }
     if (kind === "dynamictoolcall") {
@@ -1898,7 +1982,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       const preview = codexThreadPreview(item.arguments);
       emitCodexThreadTool({
         item,
-        ts,
+        timing,
         lifecycle,
         tool,
         args,
@@ -1910,7 +1994,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     if (kind === "collabagenttoolcall") {
       const tool = textPart(item.tool) || "collabAgentToolCall";
       const args = { prompt: item.prompt, model: item.model, reasoningEffort: item.reasoningEffort };
-      emitCodexThreadTool({ item, ts, lifecycle, tool, args, summary: `Collab · ${tool}`, output: { status: item.status, agents: item.agentsStates } });
+      emitCodexThreadTool({ item, timing, lifecycle, tool, args, summary: `Collab · ${tool}`, output: { status: item.status, agents: item.agentsStates } });
       return true;
     }
     if (kind === "subagentactivity") {
@@ -1918,12 +2002,12 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       return true;
     }
     if (kind === "websearch") {
-      emitCodexThreadTool({ item, ts, lifecycle, tool: "WebSearch", args: { query: item.query }, output: { results: item.results } });
+      emitCodexThreadTool({ item, timing, lifecycle, tool: "WebSearch", args: { query: item.query }, output: { results: item.results } });
       return true;
     }
     if (kind === "imageview") {
       const path = textPart(item.path);
-      emitCodexThreadTool({ item, ts, lifecycle, tool: "imageView", args: { path }, summary: ["imageView", path].filter(Boolean).join(" · "), output: path });
+      emitCodexThreadTool({ item, timing, lifecycle, tool: "imageView", args: { path }, summary: ["imageView", path].filter(Boolean).join(" · "), output: path });
       return true;
     }
     if (kind === "sleep") {
@@ -1935,7 +2019,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       const preview = textPart(item.revisedPrompt) || textPart(item.result);
       emitCodexThreadTool({
         item,
-        ts,
+        timing,
         lifecycle,
         tool: "imageGeneration",
         args: preview ? { prompt: preview } : {},
@@ -1950,7 +2034,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       return true;
     }
     if (kind === "contextcompaction") {
-      addCompact(ts);
+      addCompact(timing.ts);
       return true;
     }
     if (kind === "commandexecution") {
@@ -1958,7 +2042,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
         ? item.command.filter((part): part is string => typeof part === "string").join(" ")
         : textPart(item.command);
       const base = newToolEvent({
-        ts,
+        ts: timing.ts,
         id,
         tool: "exec_command",
         args: { cmd: command, cwd: item.cwd },
@@ -1967,30 +2051,27 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       });
       const status = codexThreadToolStatus(item, lifecycle);
       upsertCodexThreadTool({ ...base, status, statusLabel: codexThreadStatusLabel(status) });
-      if (status !== "run") attach(calls.get(id), textPart(item.aggregatedOutput ?? item.aggregated_output ?? item.output), status === "err", undefined, ts);
+      if (status !== "run") {
+        attach(calls.get(id), codexCommandOutput(item), status === "err", undefined, timing.endTs ?? timing.ts);
+      }
       const current = calls.get(id)?.event;
       if (current) {
         const exitCode = num(item.exitCode ?? item.exit_code);
-        const duration = rec(item.duration);
-        const seconds = num(duration.secs);
-        const nanos = num(duration.nanos);
-        const rolloutDurationMs = seconds !== undefined || nanos !== undefined
-          ? Math.round((seconds ?? 0) * 1_000 + (nanos ?? 0) / 1_000_000)
-          : undefined;
-        const durationMs = num(item.durationMs) ?? rolloutDurationMs;
+        const durationMs = codexThreadDurationMs(item, timing);
         upsertCodexThreadTool({
           ...current,
           status,
           statusLabel: codexThreadStatusLabel(status),
           ...(exitCode !== undefined ? { exitCode } : {}),
           ...(durationMs !== undefined ? { durationMs } : {}),
+          ...(timing.endTs !== undefined ? { endTs: timing.endTs } : {}),
         });
       }
       return true;
     }
     if (kind !== "filechange") return false;
     const base = newToolEvent({
-      ts,
+      ts: timing.ts,
       id,
       tool: "apply_patch",
       args: {},
@@ -2174,14 +2255,15 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       const lifecycle = codexThreadItemKind(p.type);
       const threadItem = rec(p.item);
       if (["itemstarted", "itemcompleted", "itemdelta"].includes(lifecycle) && textPart(threadItem.type)) {
-        if (renderCodexThreadItem(threadItem, ts, lifecycle)) return;
+        const timing = codexThreadTiming(p, ts);
+        if (renderCodexThreadItem(threadItem, timing, lifecycle)) return;
         if (lifecycle !== "itemcompleted") return addSvc(`${textPart(threadItem.type)} ${lifecycle}`);
-        return addRecord(ts, textPart(threadItem.type), threadItem);
+        return addThreadItemFallback(timing.ts, textPart(threadItem.type), threadItem);
       }
       if (p.type === "agent_message" && p.message) {
         return addCodexAssistant("event-agent", ts, textPart(p.message));
       }
-      if (p.type === "task_started") return addNote(tr("render.taskStarted") + (ts ? " · " + hhmm(ts) : ""));
+      if (p.type === "task_started") return addSvc(textPart(p.type));
       if (p.type === "task_complete") return addNote(tr("render.taskComplete") + (ts ? " · " + hhmm(ts) : ""));
       if (p.type === "context_compacted") {
         if (codexCompacted) return void (codexCompacted = null);
@@ -2229,11 +2311,12 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       const nestedThreadItem = rec(p.item);
       if (textPart(nestedThreadItem.type)) {
         finalizePendingCodexUsers();
-        if (renderCodexThreadItem(nestedThreadItem, ts, "itemcompleted")) return;
-        return addRecord(ts, textPart(nestedThreadItem.type), nestedThreadItem);
+        const timing = codexThreadTiming(p, ts);
+        if (renderCodexThreadItem(nestedThreadItem, timing, "itemcompleted")) return;
+        return addThreadItemFallback(timing.ts, textPart(nestedThreadItem.type), nestedThreadItem);
       }
       const directItemType = textPart(p.type);
-      if (!directItemType.includes("_") && renderCodexThreadItem(p, ts, "itemcompleted")) return;
+      if (!directItemType.includes("_") && renderCodexThreadItem(p, codexThreadTiming(p, ts), "itemcompleted")) return;
       if (p.type === "message") {
         if (p.role === "user") return addCodexResponseUser(ts, p.content);
         finalizePendingCodexUsers();
