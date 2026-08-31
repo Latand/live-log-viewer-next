@@ -244,7 +244,7 @@ export function SuggestedReplies({ file, revision, items, outbox, floating = fal
          a horizontal page, and a long single row can still be swiped. */
       className={`flex min-w-0 flex-wrap items-center gap-1.5 overflow-x-auto ${
         floating
-          ? "rounded-surface border border-border bg-raised/95 p-1.5 shadow-2 backdrop-blur-sm"
+          ? "pointer-events-auto touch-pan-x overscroll-x-contain overscroll-y-none rounded-surface border border-border bg-raised/95 p-1.5 shadow-2 backdrop-blur-sm"
           : "mt-2"
       }`}
     >
