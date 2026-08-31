@@ -16,7 +16,7 @@ Keep the existing byte stream as the live lane. `useLogTail`, `logBus`, `/api/lo
 
 Store bounded previews and render facts in SQLite. Store no canonical body copy. Expanding a card resolves its opaque `bodyRef`, reads the named source byte range from JSONL, applies the same normalization and redaction rules, and returns the full logical body.
 
-Use a dedicated disposable `semantic-history.sqlite` file. Extract shared Bun SQLite setup and private-permission handling from the transcript-search-specific code at `src/lib/search/transcriptSearch.ts:158-224`. History connections use WAL and `busy_timeout = 0`; a busy result leaves the event loop, joins existing work, or retries with bounded asynchronous backoff. Legacy search indexing can never hold the history lease or request path behind its long write transaction. Phase 6 moves transcript search onto the semantic rows, then removes `transcript-search.sqlite` after parity is proved.
+Use a dedicated disposable `semantic-history.sqlite` file. Extract shared Bun SQLite setup and private-permission handling from the transcript-search-specific code at `src/lib/search/transcriptSearch.ts:158-224`. History connections use WAL and `busy_timeout = 0`; a busy result leaves the event loop, joins existing work, or retries with bounded asynchronous backoff. Legacy search indexing can never hold the history request path behind its long write transaction. Phase 6 moves transcript search onto the semantic rows, then removes `transcript-search.sqlite` after parity is proved.
 
 ## Current code facts
 
@@ -74,7 +74,7 @@ projectRecord(state, record, sourceSpan): ProjectionDelta
 
 `ProjectionDelta` may insert entries, update a prior entry, record hidden-service counts, and replace the persisted parser checkpoint. The projector emits locale-neutral facts such as `status: "running"` or `toolFamily: "shell"`. `FeedItem` continues to translate labels at render time. The live adapter can retain the current `Item` shape while using the same semantic decisions.
 
-No separate index daemon is required. The existing catalog refresh can enqueue catch-up work, and every history request calls `catchUp` before reading. One projection-scoped lease and fencing epoch select the worker across processes. Short compare-and-set transactions publish only the current lease owner's deltas.
+No separate index daemon is required. The existing catalog refresh can enqueue catch-up work, and every history request calls `catchUp` before reading. One process-local singleflight coalesces work; short compare-and-set transactions publish one current delta and discard duplicate work from another process.
 
 ## SQLite projection
 
@@ -85,6 +85,7 @@ CREATE TABLE history_files (
   conversation_id       TEXT NOT NULL,
   native_generation     INTEGER NOT NULL DEFAULT -1,
   transcript_path       TEXT NOT NULL,
+  source_generation     TEXT NOT NULL,
   file_generation       TEXT NOT NULL UNIQUE,
   engine                 TEXT NOT NULL,
   format                 TEXT NOT NULL,
@@ -101,9 +102,6 @@ CREATE TABLE history_files (
   normalizer_version     INTEGER NOT NULL,
   projection_revision    INTEGER NOT NULL,
   continuity_root        BLOB NOT NULL,
-  merkle_frontier_json   TEXT NOT NULL,
-  audit_next_chunk       INTEGER NOT NULL DEFAULT 0,
-  audit_cycle_end_chunk  INTEGER NOT NULL DEFAULT 0,
   parser_state_json      TEXT NOT NULL,
   state                  TEXT NOT NULL CHECK(state IN ('ready', 'validating', 'building', 'invalid')),
   updated_at_ms           INTEGER NOT NULL,
@@ -180,26 +178,6 @@ CREATE TABLE history_checkpoint_state (
   CHECK (length(CAST(state_json AS BLOB)) <= 2048)
 );
 
-CREATE TABLE history_source_chunks (
-  file_generation       TEXT NOT NULL,
-  byte_start            INTEGER NOT NULL,
-  byte_end              INTEGER NOT NULL,
-  digest                BLOB NOT NULL,
-  PRIMARY KEY (file_generation, byte_start),
-  FOREIGN KEY (file_generation) REFERENCES history_files(file_generation) ON DELETE CASCADE,
-  CHECK (byte_start >= 0 AND byte_end > byte_start)
-);
-
-CREATE TABLE history_index_jobs (
-  file_generation       TEXT PRIMARY KEY,
-  fencing_epoch         INTEGER NOT NULL,
-  expected_through      INTEGER NOT NULL,
-  observed_size         INTEGER NOT NULL,
-  observed_revision_json TEXT NOT NULL,
-  owner_id              TEXT NOT NULL,
-  lease_until_ms        INTEGER NOT NULL,
-  FOREIGN KEY (file_generation) REFERENCES history_files(file_generation) ON DELETE CASCADE
-);
 ```
 
 `ordinal` is the deterministic source-order position of one atomic semantic entry. `source_line_number` is the zero-based physical newline-delimited line number and counts blank lines even though they emit no semantic entry. One source line can emit several entries, so `source_part` records the projector's stable birth order within that line. Appends only allocate larger ordinals and line numbers. A later echo or tool result updates the entry while its birth line and part remain immutable.
@@ -210,29 +188,31 @@ Every native identity crosses one funnel: `identityKey(domain, raw) = base64url(
 
 `native_generation = -1` represents a legacy catalog entry with no projected native generation. This keeps the composite primary key total and deterministic.
 
+`source_generation` is the catalog's durable identity for the underlying JSONL lineage. It survives deletion or rebuilding of `semantic-history.sqlite` and rotates only when the catalog proves truncation, replacement, or rewrite. The existing conversation registry stores this small token beside the source binding, and `/api/files` includes it as `FileEntry.sourceGeneration` before `LogFeed` mounts `useLogTail`; JSONL content remains authoritative. `file_generation` is the disposable projection/cache epoch and rotates on projection rebuild even when `source_generation` stays fixed.
+
 `entry_id` is the stable feed identity. At first emission it uses a namespaced native item identity when that identity is available and unique. The fallback is a hash of conversation scope, native generation, source byte coordinate, raw-record digest, and `source_part`. A native identity learned from a later twin goes into `item_id` and does not rewrite `entry_id`. This preserves the current parser's first-entry key behavior and recreates the same identity after a clean projection rebuild. A command group's presentation identity uses the first member's `entry_id`. SQLite row ids and the random `file_generation` never participate.
 
 `preview` is valid UTF-8 capped at 512 bytes after redaction. `summary_json` contains kind-specific render facts and has an 8 KiB encoded ceiling. Lists inside it have their own item and string caps. The projector converts any excess to counts and truncation flags. `body_size` is the UTF-8 size of the full redacted logical body. The source body remains in JSONL.
 
 `parser_state_json`, `history_open_calls`, and periodic checkpoints persist the minimum state needed to resume after `indexed_through`: the current turn, pending Codex user representation, adjacent assistant dedupe fingerprint, trailing command run, compaction marker, and other engine state already held by `FeedSession`. Open call identities use their own table because correctness requires retaining every unresolved call.
 
-`continuity_root` is a deterministic Merkle root over fixed-size source chunks in `[0, indexed_through)`. Each leaf hashes its domain tag, byte start, byte length, and exact source bytes. Parent hashes preserve child order and covered length. A partial final chunk is a distinct length-bound leaf. `history_source_chunks` stores the leaves, and `merkle_frontier_json` stores the O(log chunks) frontier needed to extend the root during append. A projection rebuild recreates both from JSONL.
+`continuity_root` is a deterministic line-chain digest. Starting from a domain-separated seed, each complete physical line updates `root = SHA-256(root, lineByteLength, exactLineBytes)`. Appends extend it from the committed root using suffix lines, and a rebuild recreates it from JSONL. Cursor rebind recomputes the chain through the frozen `continuity_length`.
 
-A cursor freezes a source continuity identity containing the stable conversation scope, its `continuity_length`, and the Merkle root for exactly that prefix. Appending bytes after `continuity_length` leaves this identity unchanged. A truncation or rewrite anywhere inside the prefix changes it. This identity comes from source bytes and survives deletion of the SQLite projection. `file_generation` remains the cache epoch and can rotate during a projection-only rebuild.
+A cursor freezes a source continuity identity containing the stable conversation scope, its `continuity_length`, and the streaming SHA-256 digest for exactly that prefix. Appending bytes after `continuity_length` leaves this identity unchanged. A truncation or rewrite anywhere inside the prefix changes it. This identity comes from source bytes and survives deletion of the SQLite projection. `file_generation` remains the cache epoch and can rotate during a projection-only rebuild.
 
 ## Incremental indexing contract
 
 1. Resolve the conversation to its current transcript through the catalog and apply the same allowed-root and regular-file requirements used by `/api/log`.
 2. Resolve the catalog-bound pathname, open it with no symlink following, and take bigint descriptor stats. Device, inode, size, mtime, and nanosecond ctime form the observed source revision. Re-read the catalog binding and pathname identity before publication.
-3. Before suffix catch-up starts, set the projection to `validating` and acquire its single `history_index_jobs` row keyed only by `file_generation`. Expected offset and observed revision are mutable owner-CAS fields inside that row. Acquisition or lease takeover increments `fencing_epoch`. The owning process keeps one `globalThis` worker keyed by file generation; requests observing later offsets or sizes join it, update pending intent, and create no second job. Other requests attach abortable waiters or return `history_validating`; waiter cancellation never cancels the worker. The worker renews a short lease, and another process may recover it after expiry with a higher epoch.
-4. Validate the fixed overlap guard immediately before `indexed_through` and extend the stored Merkle frontier with new suffix chunks. Ordinary append catch-up trusts previously committed leaves. Full-prefix reads occur only during rebuild, cursor rebind, or the bounded rolling audit below.
+3. Before suffix catch-up starts, set the projection to `validating` and join one process-local singleflight keyed by `file_generation`. Requests in another process may duplicate bounded read work; only the short publication compare-and-set can win. A request waiter can time out without cancelling the shared in-process work.
+4. Validate the fixed overlap guard immediately before `indexed_through`, then extend `continuity_root` with complete suffix lines. Phase 1 trusts the previously committed prefix root during ordinary append catch-up.
 5. One semantic pass stops after the earlier of `INDEX_CATCH_UP_BYTES = MAX_CHUNK` (768 KiB), 2,000 complete source records, or the frozen observed size. Byte spans use the original bytes, so multibyte UTF-8 text cannot skew offsets. Later passes continue from the committed newline.
 6. If no newline appears within the byte budget, detached background work scans fixed-size buffers for the first newline and retains only `[recordStart, recordEnd)` plus its digest. After finding the newline, it invokes the shared full-record projector once as the single-oversized-record exception. The worker records peak RSS and record bytes for this path. The projection still stores only bounded preview, summary facts, body size, and source range; the full record is released after projection.
-7. Immediately before each commit, fstat the descriptor, stat the bound pathname, and re-read the catalog binding. Device and inode must match, size must remain at least the frozen observed size, and pathname plus binding must stay unchanged. A same-size mtime or ctime change, shrink, replacement, or binding change aborts. Growth beyond the frozen size is queued as pending intent for the next epoch and does not invalidate the already verified prefix or suffix range.
-8. Treat a failed suffix check, shrink, device or inode change, same-size ctime change, catalog-generation change, or audited chunk-digest mismatch as a replacement generation. Mark the old projection invalid, rotate `file_generation`, and rebuild from byte zero.
-9. Apply every `ProjectionDelta`, source-chunk update, Merkle frontier, and parser state in one short transaction. The transaction compare-and-sets `file_generation`, `fencing_epoch`, owner id, lease validity, and expected `indexed_through`; a failed CAS discards the worker result. Advance `indexed_through` only through the final complete newline committed in that transaction. Set `source_size` to the frozen observed size and `scan_through` to the byte reached by this pass. A pass or background range scan that reaches stable EOF with one incomplete final record sets `scan_through = source_size` and leaves `indexed_through` at the preceding newline. Increment `projection_revision` once when the transaction inserts or updates a semantic row or changes page-edge state exposed to clients.
+7. Immediately before each commit, fstat the descriptor, stat the bound pathname, and re-read the catalog binding. Device and inode must match, size must remain at least the frozen observed size, and pathname plus binding must stay unchanged. A same-size mtime or ctime change, shrink, replacement, or binding change aborts. Growth beyond the frozen size queues the next suffix epoch and does not invalidate the current append range.
+8. Treat a failed suffix check, shrink, device or inode change, same-size ctime change, or catalog-generation change as a replacement generation. Mark the old projection invalid, rotate both source and projection generations as appropriate, and rebuild from byte zero.
+9. Apply every `ProjectionDelta`, new continuity root, and parser state in one short transaction. The transaction compare-and-sets `file_generation` plus expected `indexed_through`; a failed CAS discards duplicate or stale work. Advance `indexed_through` only through the final complete newline committed in that transaction. Set `source_size` to the frozen observed size and `scan_through` to the byte reached by this pass. A pass or background range scan that reaches stable EOF with one incomplete final record sets `scan_through = source_size` and leaves `indexed_through` at the preceding newline. Increment `projection_revision` once when the transaction inserts or updates a semantic row or changes page-edge state exposed to clients.
 10. Keep `file_generation` unchanged after a validated append. Update earlier rows in place when a later source record settles a call, joins a duplicate representation, or completes another open semantic item. Increment the entry `revision`, extend `byte_end`, and mark the row settled when its edge state closes.
-11. Schedule another bounded pass while `scan_through < source_size`. A request joins through `HISTORY_REQUEST_JOIN_MS = 25`, then receives `history_validating`; no indexed rows are served from that generation until the full job reaches its frozen size and returns the state to `ready`. Growth observed after that frozen size immediately queues the next epoch; the ready page reports `caughtUp: false` against current source size while the provisional raw tail continues. A missing projection follows the same bounded build from byte zero and returns rebuilding.
+11. Schedule another bounded pass while `scan_through < source_size`. A request joins through `HISTORY_REQUEST_JOIN_MS = 25`, then receives `history_validating`; no indexed rows are served from that generation until the job reaches its frozen size and returns the state to `ready`. Growth beyond that size queues the next epoch, so active appenders still publish bounded semantic snapshots. A missing projection follows the same bounded build from byte zero and returns rebuilding.
 
 The common rebuild triggers are:
 
@@ -245,11 +225,9 @@ The common rebuild triggers are:
 
 A replacement or rewrite marks the old generation invalid, deletes its rows and checkpoints in one transaction, creates a new random `file_generation`, and starts at byte zero. Database corruption closes the database, removes the disposable database plus its WAL and shared-memory files, and rebuilds every projection from JSONL. No repair path copies rows out of a suspect projection.
 
-Ordinary append catch-up reads and parses only the suffix plus its fixed overlap guard. A same-inode rewrite earlier in the file combined with growth can remain undetected until its chunk reaches the rolling audit. This is an explicit limitation of uncoordinated file writers; the projection is invalidated and rebuilt as soon as the audit finds it. A future writer-coordinated append-continuity token can close the detection window without changing the page interface.
+Phase 1 trusts the committed line-chain root and suffix overlap for ordinary append growth. A hidden same-inode prefix rewrite combined with append can remain undetected until a later rebuild. This limitation is explicit; writer-coordinated continuity or measured audit hardening is deferred.
 
-Audits use a fixed `AUDIT_CHUNKS_PER_PASS = 4` budget. At cycle start, `audit_cycle_end_chunk` freezes the current chunk count. `audit_next_chunk` advances only through that fixed range; chunks appended during the cycle wait for the next one. Reaching the frozen end resets the pointer to zero and captures a new end count. Each catalog refresh that observes the conversation and each history request runs one pass. A cycle containing `N` chunks completes within `ceil(N / 4)` passes even while the file grows. A mismatch invalidates the projection before that request can return indexed rows. Detection remains conditional on the Viewer receiving refreshes or requests; the coverage bound applies once maintenance is running.
-
-SQLite remains disposable. Cursors bind their projection generation, body references validate their exact source range, and any observed inconsistency deletes the projection. Cursor rebinding after a generation mismatch requires the rebuilt chunk manifest to reproduce the cursor's complete source continuity identity.
+SQLite remains disposable. Cursors bind their projection generation, body references validate their exact source range, and any observed inconsistency deletes the projection. Cursor rebinding after a generation mismatch recomputes the frozen JSONL prefix digest and compares it with the cursor's source continuity identity.
 
 ## Page contract
 
@@ -296,6 +274,7 @@ interface HistoryPage {
   entries: FeedEntrySummary[];
   beforeCursor: string | null;
   hasMore: boolean;
+  sourceGeneration: string;
   fileGeneration: string;
   projectionRevision: number;
   validatedThroughRevision: number;
@@ -335,7 +314,7 @@ The client sends one ownership batch at a time and immediately sends the next wh
 
 `cacheable` is true only when every returned entry is settled and both page edges are closed. A wakeup entry settles when its own result is known; its requested schedule, resolved schedule, and failure fact are immutable page data. File-global `activeWakeupItemId` identifies the newest wakeup call that is not known failed, so a pending call is provisionally active exactly like the current parser. The renderer derives each cached wakeup's active or superseded state by comparing its `itemId` with that global identity. `wakeupRevision` advances when a call appears and whenever a result changes the selected identity; a failed newest call restores the prior non-failed id. The unconditional newest-page response carries both fields, so cached historical rows re-render without page refetch. Other older cacheable pages are immutable under append. Empty source ranges use `byteRange: null`; their semantic boundaries still produce a unique cache identity.
 
-Every loaded page with `cacheable: false` retains its original request cursor, `projectionRevision`, `validatedThroughRevision`, and `pageEtag`, regardless of its distance from the tail. The history controller refreshes the newest semantic page whenever `useLogTail.size` advances and on a mounted `HISTORY_REVALIDATE_MS = 5000` cadence independent of `/api/files` 304 publication. Returning a hidden tab to visible state triggers an immediate refresh. A projection actively validating its frozen epoch returns `history_validating`, and the controller keeps the bounded raw fallback plus retry backoff. Between epochs, a ready 200 response compares committed `scannedThroughByte` with current fstat `sourceSize`; growth queued for the next epoch produces `caughtUp: false`. The controller keeps provisional rows and retries. `caughtUp: true` can coexist with `indexedThroughByte` at the prior complete newline when one incomplete final record occupies the remaining bytes. The independent cadence observes completed background work and audit-driven generation changes on static-size files, then clears stale page-cache keys before rebuilt pages install.
+Every loaded page with `cacheable: false` retains its original request cursor, `projectionRevision`, `validatedThroughRevision`, and `pageEtag`, regardless of its distance from the tail. The history controller refreshes the newest semantic page whenever `useLogTail.size` advances and on a mounted `HISTORY_REVALIDATE_MS = 5000` cadence independent of `/api/files` 304 publication. Returning a hidden tab to visible state triggers an immediate refresh. A projection actively validating its frozen epoch returns `history_validating`, and the controller keeps the bounded raw fallback plus retry backoff. A ready 200 response is caught up to its stable observed source revision. `caughtUp: true` can coexist with `indexedThroughByte` at the prior complete newline when one incomplete final record occupies the remaining bytes. The independent cadence observes completed background work and source-generation changes on static-size files, then clears stale page-cache keys before rebuilt pages install.
 
 A higher newest-page `projectionRevision` causes a conditional refetch of every loaded non-cacheable older page whose `validatedThroughRevision` is lower. The request sends its `pageEtag` and target revision. A 200 response updates the page and sets both revision fields to the checked global revision. A 304 response includes `X-History-Validated-Through-Revision`; the client advances `validatedThroughRevision` to that header while retaining the page content. A concurrent later commit has a larger revision and therefore schedules another check. A page enters the LRU after the response marks it cacheable. The loaded-page set is bounded; an evicted page is fetched from the index when the reader returns to it.
 
@@ -362,9 +341,9 @@ This revision flow covers long-distance joins. A tool call remains unsettled and
 
 Ordering uses `ordinal`, never timestamp. Timestamps can be absent, duplicated, or out of source order. A cursor names the exclusive lower boundary after every row consumed for the current page. With service rows included, this normally equals the position of the oldest returned entry. With service rows omitted, it can equal a skipped service position below that entry.
 
-The opaque token carries a version, `fileGeneration`, `queryScope`, the normalizer version, the last consumed ordinal and `sourcePart`, the corresponding source coordinate, a local coordinate digest, and the complete source continuity identity frozen by the first page in this cursor epoch. Descendant cursors within that epoch inherit its `fileGeneration`, `continuity_length`, and root while the source appends. The server authenticates the canonical payload with HMAC-SHA-256 using a state-local mode-`0600` key; rotation of that key invalidates outstanding cursors. The token carries no path and no SQLite row id. The decoder limits token size, verifies the MAC before fields are trusted, validates every integer, and rejects a scope mismatch.
+The opaque token carries a version, `sourceGeneration`, `fileGeneration`, `queryScope`, the normalizer version, the last consumed ordinal and `sourcePart`, the corresponding source coordinate, a local coordinate digest, and the complete source continuity identity frozen by the first page in this cursor epoch. Descendant cursors within that epoch inherit both generations, `continuity_length`, and root while the source appends. The server authenticates the canonical payload with HMAC-SHA-256 using a state-local mode-`0600` key; rotation of that key invalidates outstanding cursors. The token carries no path and no SQLite row id. The decoder limits token size, verifies the MAC before fields are trusted, validates every integer, and rejects a scope mismatch.
 
-Validation compares the authenticated token's `fileGeneration` with the current projection. A match trusts the committed generation and performs the local coordinate check; it reads no chunk-manifest rows and hashes no Merkle path. A mismatch captures descriptor device and inode, pathname identity, catalog binding, and the token's frozen `continuity_length`, then verifies exactly `[0, continuity_length)` without a SQLite write transaction. It re-fstats the descriptor, pathname, and binding afterward. Device, inode, pathname, and binding must stay fixed; size may grow beyond `continuity_length`. The recomputed frozen-prefix root must remain identical, so concurrent appends cannot starve rebinding.
+Validation compares the authenticated token's `fileGeneration` with the current projection. A match trusts the committed generation and performs the local coordinate check; it performs no prefix hash. A mismatch captures descriptor device and inode, pathname identity, catalog binding, and the token's frozen `continuity_length`, then verifies exactly `[0, continuity_length)` without a SQLite write transaction. It re-fstats the descriptor, pathname, and binding afterward. Device, inode, pathname, and binding must stay fixed; size may grow beyond `continuity_length`. The recomputed frozen-prefix digest must remain identical, so concurrent appends cannot starve rebinding.
 
 Page selection then uses one SQLite read transaction. That snapshot reads the current ready generation, page rows, edge state, and revision together. The generation must remain the verified target, and the token's frozen-prefix root must match the source proof. Failure restarts or returns `history_cursor_stale`. Success forces a 200 response that starts a new cursor epoch: the returned cursor and every descendant token carry the generation read in that snapshot while retaining the original frozen `continuity_length` and root. A rotation committed after the read snapshot is handled on the next request.
 
@@ -372,7 +351,7 @@ Cursor behavior is:
 
 - Append stability: existing ordinals and source coordinates stay fixed. The frozen continuity prefix stays byte-identical under append, so an older-page cursor remains valid while the file grows.
 - Projection rebuild stability: a rebuild under the same normalizer deterministically recreates ordinals and the fixed-prefix continuity root. The server detects the cursor's old `fileGeneration` and rebinds it only after the complete prefix identity matches.
-- Rewrite safety: truncation, replacement, same-size ctime change, or an audited changed byte rotates the projection. An old cursor then passes through full-prefix verification. A failed prefix identity returns `history_cursor_stale`; a matching local coordinate digest cannot override it. Same-inode rewrite-plus-append carries the bounded audit detection window stated above.
+- Rewrite safety: truncation, replacement, or same-size ctime change rotates the source and projection generations. An old cursor then passes through full-prefix verification. A failed prefix identity returns `history_cursor_stale`; a matching local coordinate digest cannot override it. Hidden same-inode rewrite-plus-append follows the explicit Phase 1 limitation above.
 - Normalizer changes: a new normalizer version invalidates older tokens. A semantic rule change can alter entry counts, so automatic reinterpretation would risk gaps or duplicates.
 
 The cursor is exclusive. If an unfiltered page consumes ordinals 900 through 1,049, `beforeCursor` addresses ordinal 900 and the next query selects ordinals below 900. If visible ordinal 899 was inspected for size and rejected, it remains unconsumed and is the first eligible row on that next query. In a filtered query, a page can return through visible ordinal 900, consume hidden service ordinals 899 and 898, then reject visible ordinal 897 for size. That page's `beforeCursor` addresses ordinal 898, so the following query can return 897. If 897 alone exceeds 64 KiB, that following query returns and consumes it under the single-oversized-row exception. Every nonterminal response consumes at least one row, and no over-budget visible candidate is skipped.
@@ -434,9 +413,9 @@ When an older page is prepended, the client reconciles the two edge states and t
 
 `historyWatermark = indexedThroughByte` remains the server's body and cursor boundary. `readTailChunk` adds nullable `lastCompleteLineEnd`, computed from the last raw `0x0a` in its `Buffer` before UTF-8 decoding. All existing log transports carry that scalar beside the unchanged text and offsets. `useLogTail` stores it atomically with the line window and exposes it as read-only `completeRecordOffset`; bytes retained in `tailRef` do not advance it. This adds no fetch, decoding, cap, polling, or SSE scheduling behavior.
 
-`TailSnapshot` persists the full bounded reconciliation sidecar atomically with its lines: epoch start byte, last requested and acknowledged offsets, complete physical-line count, aligned physical ordinals, `completeRecordOffset`, partial start, and partial disposition. A legacy cache entry without this sidecar is unmappable; its provisional rows retire wholesale at handoff and cannot become the released viewport anchor. The next transport chunk starts a fresh mapped epoch.
+`TailSnapshot` persists `sourceGeneration` and the full bounded reconciliation sidecar atomically with its lines: epoch start byte, last requested and acknowledged offsets, complete physical-line count, aligned physical ordinals, `completeRecordOffset`, partial start, and partial disposition. The cache key is `[path, FileEntry.sourceGeneration]`, so synchronous hook initialization cannot restore a predecessor generation. A legacy cache entry without the token and sidecar is unmappable and ignored before render. The next transport chunk starts a fresh mapped epoch.
 
-The controller tracks the `fileGeneration` that owns this sidecar. A history response with a different generation calls additive `useLogTail.rebaseSourceGeneration()`: delete the path's tail cache, clear lines, `tailRef`, reconciliation metadata, and parser snapshot, reset the acknowledged offset to zero, advance the hook generation, and reconnect through the existing logBus for an immediate read. The rebuilt semantic page waits for that first new-generation chunk before handoff. This reset handles same-size rewrites and pathname replacements that produce no file-size event; no byte or partial record from the former source can enter the new live epoch.
+The hook subscription generation also captures its expected `sourceGeneration`; callbacks from a prior subscription are ignored. A different `fileGeneration` with the same source token invalidates only semantic page caches and leaves the live reader untouched. A history response with a newer `sourceGeneration` updates the binding and calls additive `useLogTail.rebaseSourceGeneration()`: delete the prior token's tail cache, clear lines, `tailRef`, reconciliation metadata, and parser snapshot, reset the acknowledged offset to zero, advance the hook generation, and reconnect through the existing logBus for an immediate read. The rebuilt semantic page waits for the first chunk accepted under that expected token before handoff. This reset handles same-size rewrites and pathname replacements that produce no file-size event; a projection-only rebuild causes no live jump.
 
 For reconciliation only, `useLogTail` captures the requested offset before each chunk. `chunk.start !== requestedOffset` starts a new `reconciliationEpoch`, clears `tailRef` and partial decoder ownership, and enters `discardUntilNewline`. Bytes through the next raw newline are discarded because their missing prefix makes the record unparseable; complete lines after that newline can enter the new epoch. The history controller drops provisional rows from earlier epochs with viewport compensation and never maps them into source coordinates.
 
@@ -480,14 +459,14 @@ The rollout order follows the originating priority exactly. Each phase has its o
 
 ### Phase 1: semantic history pages
 
-- Add the locale-neutral projector, schema, incremental indexer, cursor codec, and `GET /api/history`.
+- Add the locale-neutral projector, the minimal `history_files`/`history_entries`/checkpoint schema, process-local append checkpointing, cursor codec, and `GET /api/history`.
 - On initial open, request one newest page with `limit=150`; request no older raw chunks.
 - Keep `useLogTail` subscribed through the existing live path.
 - Add the `LogFeed` history controller, logical handoff fence, and semantic-entry merge. “Show earlier” consumes `beforeCursor`.
-- Persist and return the newest page's exact unfiltered `afterCheckpoint`, resolve any referenced leading state, and seed the post-fence live parser in Phase 1.
+- Persist and return the bounded inline newest-page `afterCheckpoint` and seed common post-fence live state. A checkpoint that needs out-of-line resolution keeps the provisional raw fallback until Phase 3 support is enabled.
 - Treat validation and rebuilding as explicit temporary states. Continue showing the bounded live lane.
 
-Exit proof: a normal initial open returns at most one semantic page, page walking has no gaps or repeats, append catch-up reads and parses only the suffix plus fixed overlap, bounded audits progress independently, and loading older history never calls `useLogTail.loadOlder()`. After handoff, every live parser input has a logical line index at or above `liveFenceLine`.
+Exit proof: a normal initial open returns at most one semantic page, page walking has no gaps or repeats, append catch-up reads and parses only the suffix plus fixed overlap, rebuilding deletes only disposable projection state, and loading older history never calls `useLogTail.loadOlder()`. After handoff, every live parser input has a logical line index at or above `liveFenceLine`.
 
 ### Phase 2: body on demand
 
@@ -501,6 +480,7 @@ Exit proof: a collapsed large tool result contributes only bounded summary bytes
 
 - Add the bounded LRU keyed by file generation, query scope, semantic page boundaries, and byte range.
 - Add leading and trailing visible-run state for incremental prepend reconciliation and cache it beside the Phase 1 trailing checkpoint.
+- Add out-of-line checkpoint resolution, unmatched-result ownership classification, and revision-driven reconciliation for rare cross-window state.
 - Publish `projectionRevision` and conditionally refetch every loaded non-cacheable page after semantic progress, including pages outside the bounded live window.
 - Reconcile only the added page and its adjoining edge. Remove the old raw-history prepend call from `LogFeed`.
 
@@ -535,13 +515,22 @@ Exit proof: selecting a search result reads one semantic page around the hit. Th
 
 All tests use an isolated state directory and synthetic transcripts. They never open the operator registry or runtime state.
 
-Required tests include:
+The Phase 1 blocking gate is intentionally small:
+
+- deterministic semantic rows from Claude and Codex fixtures;
+- bounded newest-page and backward-cursor walking with no gaps or repeats;
+- suffix append checkpointing plus truncation/replacement rebuild;
+- one initial semantic page replacing the bounded provisional tail without calling `useLogTail.loadOlder()`;
+- projection-only rebuild preserving `sourceGeneration` and live-tail state;
+- row, entry-byte, and fixed-metadata limits including one oversized row.
+
+The cumulative verification catalog below activates with the phase that owns each mechanism; it does not block the Phase 1 slice:
 
 - deterministic ordinals and entry ids across a projection rebuild;
 - over-limit native tool, response, turn, and wakeup ids producing the same fixed `identityKey` in SQLite, pages, live matching, ownership, and active-wakeup metadata;
 - cursor stability after append and after a clean rebuild;
 - a projection-rebuild cursor rebind completing while later bytes append beyond `continuity_length`, then minting the current-generation cursor without restart;
-- same-generation append followed by older cursor navigation whose authenticated generation-match path reads zero manifest rows and performs zero Merkle hash operations;
+- same-generation append followed by older cursor navigation whose authenticated generation-match path performs no prefix hash;
 - a cursor carrying its original `fileGeneration` and taking the full-prefix rebind path when the current projection generation differs;
 - a successful generation rebind minting the next cursor with the current `fileGeneration`, followed by a descendant page taking the generation-match path;
 - generation rotation between full-prefix verification and page selection causing the read-snapshot revision comparison to retry;
@@ -549,12 +538,11 @@ Required tests include:
 - stale-cursor rejection after truncation, replacement, earlier-byte rewrite, or normalizer-version change;
 - a same-size in-place rewrite with restored mtime changing ctime and forcing generation rotation before any page or cursor is served;
 - stale-cursor rejection when a projection rebuild follows a rewrite outside the cursor's local coordinate-digest range;
-- an earlier full chunk rewritten on the same inode while the prior suffix stays unchanged, followed by appended JSONL, entering the explicit detection window and rotating the generation when the bounded audit reaches it;
 - an atomic pathname replacement during suffix parsing causing the final identity check to abort publication;
 - an in-place truncate during suffix parsing causing final fstat to abort publication;
 - a same-size in-place rewrite during suffix parsing causing the final ctime check to abort publication;
-- growth from frozen size S to final size T committing through S, returning ready `caughtUp: false`, and queuing T for the next epoch;
-- continuous appends allowing each frozen validation epoch to commit while later bytes queue the next epoch, producing ready `caughtUp: false` snapshots without starvation and a final fence after writes stop;
+- growth from frozen size S to final size T committing through S, returning ready `caughtUp: false`, and queuing T for the next suffix epoch;
+- continuous appends allowing bounded frozen epochs to publish without starvation while the provisional raw tail covers bytes beyond the newest committed snapshot;
 - one slow catch-up returning `history_validating`, receiving no later writes, and still being observed as a new durable revision through the independent revalidation cadence;
 - a stopped incomplete final JSONL record producing `caughtUp: true` with `indexedThroughByte` at the preceding newline;
 - a large dormant backlog limiting one catch-up pass to 768 KiB or 2,000 complete records, returning `history_validating` within the join deadline while the client keeps its previously rendered snapshot or provisional fallback;
@@ -562,11 +550,7 @@ Required tests include:
 - an oversized tool-result record far above 768 KiB recording peak RSS and record bytes while emitting one bounded preview plus body reference through the shared projector;
 - an oversized incomplete record reaching EOF, clearing background activity with `scan_through = source_size`, then restarting from `indexed_through` after growth;
 - request abort after worker detachment removing only its waiter while oversized background range discovery still completes;
-- repeated timed-out requests joining one leased job, lease recovery after owner loss, and stale-generation completion failing the indexed-through CAS;
 - the legacy search database holding its long writer transaction while the isolated history route still returns within the join deadline, plus exhausted history lock retries returning typed 503 `history_busy` with no raw 500;
-- requests observing different offsets and source sizes while one projection job remains leased joining that job under one fencing epoch;
-- round-robin audit coverage reaching every chunk within `ceil(N / 4)` maintenance passes and invalidating before the detecting request returns rows;
-- a chunk rewritten just behind `audit_next_chunk` while over four chunks append per pass still being inspected in the next frozen audit cycle;
 - byte-accurate indexing across UTF-8 and read-buffer splits;
 - call and result pairing across a page edge;
 - command grouping and Codex prose dedupe across a page edge;
@@ -611,8 +595,9 @@ Required tests include:
 - a writer commit attempted between conditional ETag evaluation and response construction remaining outside the read transaction's acknowledged revision;
 - a late update that changes a page's byte-budget boundary invalidating and restarting its older cursor chain without gaps or duplicates;
 - index corruption producing a rebuilding response while the JSONL source remains intact;
-- a same-size audit-driven generation rotation reaching a mounted caught-up client through the independent history revalidation cadence even while `/api/files` returns 304;
-- a same-size generation rotation with changed newline layout clearing the tail cache, partial decoder, and reconciliation sidecar before a later append enters the new epoch;
+- deleting and rebuilding only the SQLite projection changing `fileGeneration` while preserving `sourceGeneration`, tail offsets, partial decoder, and viewport;
+- rewriting the source while the pane is unmounted, then remounting a warm tail snapshot with the old or absent `sourceGeneration` and resetting it before cached rows render;
+- a same-size `sourceGeneration` rotation with changed newline layout clearing the tail cache, partial decoder, and reconciliation sidecar before a later append enters the new epoch;
 - one live row replaced by one durable twin with the same DOM presentation key;
 - stable viewport offset during prepend and live-to-durable replacement;
 - one outbox retirement for one echo before and after replacement;
@@ -635,6 +620,8 @@ Instrumentation should report validation bytes, semantic-parse bytes, validation
 ## Deferred — not currently justified
 
 - A standalone indexing process. The existing Viewer process, SQLite transaction, and catalog-triggered catch-up provide the required ownership.
+- Persistent cross-process index leases and fencing epochs. Phase 1 uses process-local singleflight plus publication CAS; add durable leases only after duplicate-work measurements justify them.
+- A writer-coordinated append-continuity token or bounded rolling audit. Add one when production evidence shows the hidden rewrite-plus-append window must close; prefer the lower-cost mechanism supported by the writer/runtime path.
 - Locale-specific indexed summaries. Locale-neutral facts keep one projection valid for every client.
 - User-configurable page-byte budgets. One server budget keeps memory and cursor behavior predictable.
 - Server-rendered feed cards or cached HTML. The existing `FeedItem` rendering seam remains useful.
