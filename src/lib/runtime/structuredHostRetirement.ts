@@ -8,6 +8,7 @@ import { activeOrchestratorSeatsOrUnknown, revokedOrchestratorSeatConversationsO
 import { procBackend } from "@/lib/proc";
 import { descendantPids } from "@/lib/proc/memory";
 import type { ProcessMemory } from "@/lib/proc/types";
+import { processIdentityStatus, systemBootEpoch, type ProcessIdentityProbe } from "@/lib/processIdentity";
 import type { StructuredHostKillRef } from "@/lib/resources";
 import { RESOURCE_STRUCTURED_HOST_LIMIT } from "@/lib/types";
 
@@ -224,6 +225,8 @@ export interface StructuredHostRetirementSubject {
   transcriptFile: Determinable<{ mtimeMs: number } | null>;
   /** Undetermined when the kernel will not say what is on the pid now. */
   observedStartIdentity: Determinable<string>;
+  /** Undetermined when the kernel will not identify the current boot. */
+  observedBootEpoch: Determinable<string>;
 }
 
 export type StructuredHostRetirementVerdict =
@@ -270,6 +273,12 @@ function recordedStartIdentity(subject: StructuredHostRetirementSubject): Determ
   return subject.process.startIdentity === null
     ? undetermined(`the registry stored no kernel identity for pid ${subject.process.pid}`)
     : determined(subject.process.startIdentity);
+}
+
+function recordedBootEpoch(subject: StructuredHostRetirementSubject): Determinable<string> {
+  return typeof subject.process.bootEpoch === "string" && subject.process.bootEpoch
+    ? determined(subject.process.bootEpoch)
+    : undetermined(`the registry stored no boot epoch for pid ${subject.process.pid}`);
 }
 
 /**
@@ -377,10 +386,22 @@ const CLAUSE_CHECKS: Record<
   }),
 
   "process-identity": (subject) => {
-    const recorded = recordedStartIdentity(subject);
-    if (!recorded.determined) return recorded;
-    return mapDeterminable(subject.observedStartIdentity,
-      (observed) => (observed === recorded.value ? null : `pid ${subject.process.pid} is no longer the recorded host`));
+    const recordedStart = recordedStartIdentity(subject);
+    if (!recordedStart.determined) return recordedStart;
+    const recordedBoot = recordedBootEpoch(subject);
+    if (!recordedBoot.determined) return recordedBoot;
+    if (!subject.observedStartIdentity.determined) return subject.observedStartIdentity;
+    if (!subject.observedBootEpoch.determined) return subject.observedBootEpoch;
+    const observedStartIdentity = subject.observedStartIdentity.value;
+    const observedBootEpoch = subject.observedBootEpoch.value;
+    const probe: ProcessIdentityProbe = {
+      pidAlive: () => true,
+      processIdentity: () => observedStartIdentity,
+      bootEpoch: () => observedBootEpoch,
+    };
+    return processIdentityStatus(subject.process, probe) === "alive"
+      ? PASSES
+      : refuses(`pid ${subject.process.pid} is no longer the recorded host`);
   },
 };
 
@@ -521,6 +542,7 @@ export interface StructuredHostRetirementDependencies {
       unreadable path is undetermined. */
   transcriptStat?: (pathname: string) => Determinable<{ mtimeMs: number } | null>;
   processIdentity?: (pid: number) => Determinable<string>;
+  bootEpoch?: () => Determinable<string>;
   processMemory?: (pids: Iterable<number>) => Map<number, ProcessMemory>;
   ppidMap?: () => Map<number, number>;
   owned?: (key: SessionKey) => boolean;
@@ -873,6 +895,7 @@ interface RetirementReaders {
   realtimeBound: (conversationId: string) => Determinable<boolean>;
   transcriptStat: (pathname: string) => Determinable<{ mtimeMs: number } | null>;
   processIdentity: (pid: number) => Determinable<string>;
+  bootEpoch: () => Determinable<string>;
 }
 
 /** Candidate rows: registry-recorded structured hosts only. */
@@ -969,6 +992,7 @@ function retirementSubject(
       ? readers.transcriptStat(entry.artifactPath)
       : determined(null),
     observedStartIdentity: readers.processIdentity(hostProcess.pid),
+    observedBootEpoch: readers.bootEpoch(),
   };
 }
 
@@ -1049,6 +1073,10 @@ export async function runStructuredHostRetirementSweep(
       return identity === null
         ? undetermined(`no kernel identity can be observed for pid ${pid}`)
         : determined(identity);
+    }),
+    bootEpoch: dependencies.bootEpoch ?? (() => {
+      const epoch = systemBootEpoch();
+      return epoch === null ? undetermined("the kernel boot epoch could not be read") : determined(epoch);
     }),
   };
   const memoryOf = dependencies.processMemory ?? ((pids: Iterable<number>) => procBackend.processMemory(pids));
@@ -1163,6 +1191,7 @@ export async function runStructuredHostRetirementSweep(
       kind: "structured",
       pid: hostProcess.pid,
       startIdentity: verdict.startIdentity,
+      bootEpoch: hostProcess.bootEpoch ?? null,
       engine: subject.key.engine,
       sessionId: subject.key.sessionId,
       conversationId: subject.conversationId,

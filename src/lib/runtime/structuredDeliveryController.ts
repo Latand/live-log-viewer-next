@@ -4,6 +4,7 @@ import { requestAccountMigrationTick } from "@/lib/accounts/migration/controller
 import { agentRegistry, type AgentRegistry, type AgentRegistryEntry, type ProcessIdentity } from "@/lib/agent/registry";
 import { sessionKeyId, type SessionKey } from "@/lib/agent/sessionKey";
 import { BRANCH_SHARED_HOST_ERROR, branchSharesRootHost } from "@/lib/conversation/branchControl";
+import { captureProcessIdentity } from "@/lib/processIdentity";
 
 import { isRuntimeHostTransportFailure, runtimeHostClient, type RuntimeHostClient } from "./client";
 import { runtimeSettingsCapability, type RuntimeEventInput, type RuntimeSession } from "./contracts";
@@ -1110,10 +1111,10 @@ export async function releaseStructuredDeliveryHostsForDemotion(): Promise<void>
     if ((current.status !== "active" && current.status !== "attention")
       || current.pid === null
       || current.processStartIdentity === null) return;
-    if (!registry?.markStructuredHostHandoff(key, {
-      pid: current.pid,
-      startIdentity: current.processStartIdentity,
-    })) throw new Error(`structured host ${sessionKeyId(key)} changed before Viewer demotion`);
+    if (!registry?.markStructuredHostHandoff(
+      key,
+      captureProcessIdentity(current.pid, undefined, current.processStartIdentity),
+    )) throw new Error(`structured host ${sessionKeyId(key)} changed before Viewer demotion`);
   }));
   const outcomes = await Promise.allSettled(registrations.map(({ key }) => release(key)));
   const failures = outcomes.flatMap((outcome) => outcome.status === "rejected" ? [outcome.reason] : []);

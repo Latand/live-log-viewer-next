@@ -4,6 +4,7 @@ import { afterEach, expect, test } from "bun:test";
 import { NextRequest } from "next/server";
 
 import { procBackend } from "@/lib/proc";
+import { systemBootEpoch } from "@/lib/processIdentity";
 import { noteSessionTargets, resetResourcesForTests, type StructuredHostKillRef } from "@/lib/resources";
 
 import { POST } from "./route";
@@ -50,6 +51,7 @@ function ref(over: Partial<StructuredHostKillRef> & Pick<StructuredHostKillRef, 
     owned: false,
     lastActiveAt: null,
     ...over,
+    bootEpoch: over.bootEpoch === undefined ? systemBootEpoch() : over.bootEpoch,
   };
 }
 

@@ -3,7 +3,7 @@ import path from "node:path";
 
 import { AgentRegistry } from "@/lib/agent/registry";
 import { sessionKeyId, type SessionKey } from "@/lib/agent/sessionKey";
-import { procBackend } from "@/lib/proc";
+import { captureProcessIdentity } from "@/lib/processIdentity";
 import { RuntimeJournal } from "@/runtime-host/journal";
 import { activateViewerRuntimeWhenCurrent, completeViewerReleaseDemotion } from "@/lib/viewerInstrumentation";
 
@@ -47,14 +47,8 @@ const registry = new AgentRegistry(registryPath, undefined, undefined, { sqliteM
 const journal = new RuntimeJournal(journalPath, { structuredHosts: true });
 const client = runtimeClient(journal);
 const engineProcess = Bun.spawn({ cmd: ["/usr/bin/sleep", "60"], stdout: "ignore", stderr: "ignore" });
-const engineIdentity = {
-  pid: engineProcess.pid,
-  startIdentity: procBackend.processIdentity(engineProcess.pid),
-};
-const viewerIdentity = {
-  pid: process.pid,
-  startIdentity: procBackend.processIdentity(process.pid),
-};
+const engineIdentity = captureProcessIdentity(engineProcess.pid);
+const viewerIdentity = captureProcessIdentity(process.pid);
 const claimed = registry.claimStructuredHost(key, viewerIdentity, { allowUnhosted: true });
 if (!claimed?.structuredHost || !claimed.claimOwner) throw new Error("incumbent Viewer could not claim the fixture host");
 const hosted = registry.setStructuredHostClaimed(key, {

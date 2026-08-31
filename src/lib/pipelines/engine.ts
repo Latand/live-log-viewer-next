@@ -195,6 +195,8 @@ export interface PipelinePorts {
       merge is a tidy close, not an unreadable worktree. */
   worktreePresent(dir: string): boolean;
   conversationAgentActive(conversationId: string): Promise<boolean | null>;
+  /** False means the durable registry has never registered this conversation. */
+  conversationRegistered?(conversationId: string): boolean;
   /** Null means hosted, a timestamp means dead/absent since then, and undefined
       means the registry cannot provide authoritative host evidence. */
   conversationHostUnavailableSince?(conversationId: string): Promise<string | null | undefined>;
@@ -785,6 +787,8 @@ export function defaultPipelinePorts(
       /* A hosted idle turn is an inter-turn state with unknown agent activity. */
       return null;
     },
+    conversationRegistered: (conversationId) => conversationId.startsWith("conversation_")
+      && Boolean(snapshot().conversations[conversationId as ViewerConversationId]),
     conversationHostUnavailableSince: async (conversationId) => {
       if (!conversationId.startsWith("conversation_")) return undefined;
       const current = snapshot();
@@ -877,6 +881,7 @@ const SPAWN_HANDSHAKE_RETRY_DELAY_MS = 1_000;
 const SPAWN_CONTROLLER_WAIT_BUDGET_MS = 30_000;
 const SPAWN_CONTROLLER_RETRY_MAX_MS = 8_000;
 const DEAD_RUNNING_ATTEMPT_GRACE_MS = 3 * 60_000;
+const UNREGISTERED_STAGE_HOST_DIED_REASON = "the stage host died before its session registered";
 /** Attempt states that end a round; a pending cursor over one of these queues a
     fresh attempt on the next tick (tickRunStage/tickReviewStage). */
 const TERMINAL_ATTEMPT_STATES = new Set<PipelineStageAttempt["state"]>(["passed", "failed", "needs_decision", "skipped"]);
@@ -1023,6 +1028,22 @@ function recordVerdictRecoveryMiss(
   attempt.error = null;
   pipeline.state = "running";
   pipeline.stateDetail = `re-evaluating terminal stage verdict (${checks}/${VERDICT_RECOVERY_MAX_CHECKS}): ${reason}`;
+}
+
+async function unregisteredStageHostDeathEvidence(
+  attempt: PipelineStageAttempt,
+  target: PipelineStageHostRef,
+  ports: PipelinePorts,
+  durable?: StageTurnEvidence | null,
+): Promise<string | null> {
+  if (target.paneId || !target.conversationId || !target.agentPath
+    || ports.conversationRegistered?.(target.conversationId) !== false) return null;
+  const evidence = durable === undefined
+    ? await ports.durableTurnEvidence(attempt.effectiveRole.engine, target.agentPath)
+    : durable;
+  return evidence?.launchOnly === true && evidence.message === null
+    ? UNREGISTERED_STAGE_HOST_DIED_REASON
+    : null;
 }
 
 function park(pipeline: Pipeline, detail: string, attempt?: PipelineStageAttempt | null): void {
@@ -1917,11 +1938,10 @@ async function tickRunStage(
     && (spawnReceipt.state === "failed" || spawnReceipt.state === "conflicted")
     ? spawnReceipt.error ?? `stage spawn cannot recover from receipt state ${spawnReceipt.state}`
     : null;
-  /* A terminal spawn receipt is durable evidence; only an affirmatively
-     active agent outranks it. A runtime-host outage answers null, and that
-     unknown must not hide the real drain cause behind a later
-     transcript-unreadable park (#1314). */
-  if (!attempt.paneId && attempt.conversationId && structuredActive !== true && terminalSpawnFailure) {
+  /* A terminal spawn receipt is durable launch evidence. Runtime liveness can
+     lag behind receipt settlement or fail to answer, so it has no authority to
+     hide the recorded drain cause behind a later transcript park (#1326). */
+  if (terminalSpawnFailure) {
     park(pipeline, terminalSpawnFailure, attempt);
     return;
   }
@@ -1959,6 +1979,20 @@ async function tickRunStage(
      scan projection transiently lost the transcript, or the host is already
      gone. A busy turn is mid-work: its messages are never verdict candidates. */
   const durable = await ports.durableTurnEvidence(attempt.effectiveRole.engine, attempt.agentPath);
+  const unregisteredHostDeath = structuredActive === true
+    ? null
+    : await unregisteredStageHostDeathEvidence(attempt, {
+      stageId: stage.id,
+      attempt: attempt.n,
+      conversationId: attempt.conversationId,
+      agentPath: attempt.agentPath,
+      paneId: attempt.paneId,
+      ...(attempt.historical ? { adopted: true as const } : {}),
+    }, ports, durable);
+  if (unregisteredHostDeath && canSpendRecoveryCheck()) {
+    recordVerdictRecoveryMiss(pipeline, attempt, ports, unregisteredHostDeath, null);
+    return;
+  }
   const durableTerminal = durable?.turn === "terminal" && durable.message !== null && durable.message.ts > unixMs(attempt.startedAt);
   if (durable && durableTerminal) {
     const parsed = parsePipelineStageVerdict(durable.message!.text);
@@ -3521,11 +3555,13 @@ function providerNoticeSummary(text: string): string {
  * What a transcript can prove about an attempt whose host refused to stop — the
  * only thing standing between a superseded lane and the board it cannot leave.
  *
- * Two shapes count, and they are siblings. A completed turn carrying a valid
- * fenced verdict says the stage finished (#1047, #988). A turn the provider cut
- * off — a session or model limit, an expired credential — says the stage ended
- * without producing one (#1141): the message that ended it is right there in the
- * final record, so the attempt is terminal by evidence and retires as failed.
+ * Three shapes count. A missing host and missing conversation registration,
+ * paired with a complete launch-only transcript, say the host died before its
+ * session materialized (#1325). A completed turn carrying a valid fenced verdict
+ * says the stage finished (#1047, #988). A turn the provider cut off — a session
+ * or model limit, an expired credential — says the stage ended without producing
+ * one (#1141): the message that ended it is right there in the final record, so
+ * the attempt is terminal by evidence and retires as failed.
  *
  * Silence is neither. A transcript that simply stops mid-turn proves nothing
  * about a host that may still be working, so it falls through to null and keeps
@@ -3536,7 +3572,10 @@ async function closeStopFailureEvidence(
   ports: PipelinePorts,
 ): Promise<string | null> {
   try {
-    if (!(await ports.stageHostResident(candidate.target))) return "the host registry entry is dead or absent";
+    if (!(await ports.stageHostResident(candidate.target))) {
+      return await unregisteredStageHostDeathEvidence(candidate.attempt, candidate.target, ports)
+        ?? "the host registry entry is dead or absent";
+    }
   } catch {
     // An unreadable registry leaves the transcript as the remaining authority.
   }

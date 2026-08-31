@@ -2,9 +2,10 @@ import { spawn, type ChildProcess } from "node:child_process";
 
 import { afterEach, expect, test } from "bun:test";
 
-import type { RegistryFile } from "@/lib/agent/registry";
+import type { ProcessIdentity, RegistryFile } from "@/lib/agent/registry";
 import type { SessionKey } from "@/lib/agent/sessionKey";
 import { procBackend } from "@/lib/proc";
+import { systemBootEpoch } from "@/lib/processIdentity";
 import type { StructuredHostKillRef } from "@/lib/resources";
 
 import { readStructuredHostRecords, structuredHostKillRefusal, terminateStructuredHostTree } from "./structuredHostControl";
@@ -14,6 +15,7 @@ const CODEX_SESSION = ["029f4906", "3f67", "7b72", "9fbc", "9ec3b5ad1326"].join(
 const PANE_SESSION = ["039f4906", "3f67", "7b72", "9fbc", "9ec3b5ad1326"].join("-");
 const LANE_CONVERSATION = ["conversation", "9ec3b5ad1326be7f"].join("_");
 const SEAT_CONVERSATION = ["conversation", "9ec3b5ad1326bea1"].join("_");
+const BOOT_EPOCH = systemBootEpoch();
 
 function entry(over: Record<string, unknown>): Record<string, unknown> {
   return {
@@ -23,7 +25,7 @@ function entry(over: Record<string, unknown>): Record<string, unknown> {
     accountId: null,
     status: "live",
     host: null,
-    structuredHost: { kind: "claude-broker", endpoint: "stdio", process: { pid: 4_100, startIdentity: "4100:start" }, eventCursor: 3, protocolVersion: null, writerClaimEpoch: 1, activeTurnRef: null, pendingAttention: [], activeFlags: [] },
+    structuredHost: { kind: "claude-broker", endpoint: "stdio", process: { pid: 4_100, startIdentity: "4100:start", bootEpoch: BOOT_EPOCH }, eventCursor: 3, protocolVersion: null, writerClaimEpoch: 1, activeTurnRef: null, pendingAttention: [], activeFlags: [] },
     claimEpoch: 1,
     claimOwner: null,
     pendingAction: null,
@@ -95,6 +97,7 @@ function ref(over: Partial<StructuredHostKillRef> & Pick<StructuredHostKillRef, 
   return {
     kind: "structured",
     startIdentity: "0:unmatched",
+    bootEpoch: BOOT_EPOCH,
     engine: "claude",
     sessionId: null,
     conversationId: null,
@@ -125,7 +128,7 @@ test("the inventory carries role, model, stage and ownership for every structure
           key: { engine: "codex", sessionId: CODEX_SESSION },
           artifactPath: `/home/user/.codex/sessions/rollout-${CODEX_SESSION}.jsonl`,
           cwd: "/repo/seat",
-          structuredHost: { kind: "codex-app-server", endpoint: "stdio", process: { pid: 5_000, startIdentity: "5000:start" }, eventCursor: 1, protocolVersion: null, writerClaimEpoch: 1, activeTurnRef: "turn-1", pendingAttention: [], activeFlags: [] },
+          structuredHost: { kind: "codex-app-server", endpoint: "stdio", process: { pid: 5_000, startIdentity: "5000:start", bootEpoch: BOOT_EPOCH }, eventCursor: 1, protocolVersion: null, writerClaimEpoch: 1, activeTurnRef: "turn-1", pendingAttention: [], activeFlags: [] },
           updatedAt: "2026-08-26T08:30:00.000Z",
         }),
       },
@@ -163,6 +166,7 @@ test("the inventory carries role, model, stage and ownership for every structure
       sessionId: CLAUDE_SESSION,
       pid: 4_100,
       startIdentity: "4100:start",
+      bootEpoch: BOOT_EPOCH,
       cwd: "/repo/worktree",
       path: `/home/user/.claude/projects/-repo/${CLAUDE_SESSION}.jsonl`,
       conversationId: LANE_CONVERSATION,
@@ -180,6 +184,7 @@ test("the inventory carries role, model, stage and ownership for every structure
       sessionId: CODEX_SESSION,
       pid: 5_000,
       startIdentity: "5000:start",
+      bootEpoch: BOOT_EPOCH,
       cwd: "/repo/seat",
       path: `/home/user/.codex/sessions/rollout-${CODEX_SESSION}.jsonl`,
       conversationId: SEAT_CONVERSATION,
@@ -214,7 +219,7 @@ test("entries without a host process, and pane-hosted ones, stay out of the inve
 test("an owned host ends through the runtime, bound to the process it authorized", async () => {
   const tree = spawnFixtureTree();
   const retired: SessionKey[] = [];
-  const terminated: Array<{ key: SessionKey; expected: { pid: number; startIdentity: string | null } }> = [];
+  const terminated: Array<{ key: SessionKey; expected: ProcessIdentity }> = [];
 
   const outcome = await terminateStructuredHostTree(
     ref({ pid: tree.pid, startIdentity: tree.startIdentity, sessionId: CLAUDE_SESSION, owned: true }),
@@ -227,7 +232,7 @@ test("an owned host ends through the runtime, bound to the process it authorized
   expect(outcome).toMatchObject({ ok: true, via: "runtime" });
   expect(terminated).toEqual([{
     key: { engine: "claude", sessionId: CLAUDE_SESSION },
-    expected: { pid: tree.pid, startIdentity: tree.startIdentity },
+    expected: { pid: tree.pid, startIdentity: tree.startIdentity, bootEpoch: BOOT_EPOCH },
   }]);
   /* The runtime retired the row inside its own lifecycle; retiring it a
      second time here would be a second authority over one record. */
@@ -258,16 +263,14 @@ test("a runtime-confirmed exit receives no fallback group signal", async () => {
   expect(signals).toEqual([]);
 });
 
-test("a replacement host holding the seat is left to the runtime, and the row is retired on the killed pid", async () => {
+test("a disowned structured session with a live recorded process falls back to its process group (#1324)", async () => {
   const tree = spawnFixtureTree();
-  const retired: Array<{ key: SessionKey; expected: { pid: number; startIdentity: string | null } }> = [];
+  const retired: Array<{ key: SessionKey; expected: ProcessIdentity }> = [];
 
   const outcome = await terminateStructuredHostTree(
     ref({ pid: tree.pid, startIdentity: tree.startIdentity, sessionId: CLAUDE_SESSION, owned: true }),
     {
-      /* A successor claimed this session key since the snapshot: the runtime
-         refuses to end a host that is not the one the caller authorized, so
-         only the stale tree is taken down, by group. */
+      /* No current runtime host matches the recorded process. */
       terminateOwnedHost: async () => false,
       retireRegistryEntry: (key, expected) => { retired.push({ key, expected }); },
     },
@@ -276,7 +279,7 @@ test("a replacement host holding the seat is left to the runtime, and the row is
   expect(outcome).toMatchObject({ ok: true, via: "process-group" });
   expect(retired).toEqual([{
     key: { engine: "claude", sessionId: CLAUDE_SESSION },
-    expected: { pid: tree.pid, startIdentity: tree.startIdentity },
+    expected: { pid: tree.pid, startIdentity: tree.startIdentity, bootEpoch: BOOT_EPOCH },
   }]);
   expect(procBackend.pidAlive(tree.pid)).toBeFalse();
 });
@@ -310,6 +313,53 @@ test("the root identity is rechecked after the runtime handoff and before any si
   });
   expect(signals).toEqual([]);
   expect(procBackend.pidAlive(tree.pid)).toBeTrue();
+});
+
+test("a matching pid and start token from another boot receives no signal", async () => {
+  const signals: number[] = [];
+  const outcome = await terminateStructuredHostTree(
+    ref({ pid: 4_242, startIdentity: "4242:start", bootEpoch: "boot-earlier" }),
+    {
+      processIdentity: () => "4242:start",
+      bootEpoch: () => "boot-current",
+      pidAlive: () => true,
+      ppidMap: () => new Map(),
+      processGroupId: () => 4_242,
+      protectedPids: () => new Set(),
+      terminateOwnedHost: async () => false,
+      signal: (pid) => { signals.push(pid); },
+      deadlineMs: 0,
+    },
+  );
+
+  expect(outcome).toMatchObject({
+    ok: false,
+    status: 409,
+    stale: true,
+    error: "host has changed — refresh the resource list",
+  });
+  expect(signals).toEqual([]);
+});
+
+test("a kill without a recorded boot epoch is refused with the reason", async () => {
+  const signals: number[] = [];
+  const outcome = await terminateStructuredHostTree(
+    ref({ pid: 4_242, startIdentity: "4242:start", bootEpoch: null }),
+    {
+      processIdentity: () => "4242:start",
+      bootEpoch: () => "boot-current",
+      pidAlive: () => true,
+      protectedPids: () => new Set(),
+      signal: (pid) => { signals.push(pid); },
+    },
+  );
+
+  expect(outcome).toMatchObject({
+    ok: false,
+    status: 409,
+    error: "host boot epoch is unknown — refresh the resource list",
+  });
+  expect(signals).toEqual([]);
 });
 
 test("a descendant identity change refuses the group signal", async () => {

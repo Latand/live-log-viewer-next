@@ -2376,7 +2376,7 @@ test("a stage with an unwritten transcript parks on its first-message drain fail
   expect(parked.runs[0]!.attempts[0]!.error).toBe(reason);
 });
 
-test("a runtime-host outage does not hide a terminal spawn receipt's drain cause (#1314)", async () => {
+test("a runtime-host outage does not hide a terminal spawn receipt's drain cause (#1314, #1326)", async () => {
   const h = harness();
   await create(h.ports);
   await tickPipelines([], h.ports);
@@ -2409,6 +2409,151 @@ test("a runtime-host outage does not hide a terminal spawn receipt's drain cause
   const parked = loadPipelines()[0]!;
   expect(parked).toMatchObject({ state: "needs_decision", stateDetail: reason });
   expect(parked.runs[0]!.attempts[0]!.error).toBe(reason);
+});
+
+test("a terminal spawn receipt parks while runtime liveness still reports active (#1326)", async () => {
+  const h = harness();
+  await create(h.ports);
+  await tickPipelines([], h.ports);
+  h.ports.spawnAgent = async (_input, onReserved) => {
+    onReserved({ launchId: "launch-drain-stale-live", conversationId: "conversation_drain_stale_live" });
+    return {
+      launchId: "launch-drain-stale-live",
+      conversationId: "conversation_drain_stale_live",
+      sessionId: "session-drain-stale-live",
+      "transcript": "/codex/unwritten-stale-live-stage.jsonl",
+      paneId: null,
+    };
+  };
+  await tickPipelines([], h.ports);
+  h.setConversationActive(true);
+  const reason = "first message never drained: runtime host request timed out";
+  h.ports.spawnReceipt = () => ({
+    state: "failed",
+    launchId: "launch-drain-stale-live",
+    conversationId: "conversation_drain_stale_live",
+    sessionId: "session-drain-stale-live",
+    "transcript": "/codex/unwritten-stale-live-stage.jsonl",
+    paneId: null,
+    error: reason,
+  });
+
+  await tickPipelines([], h.ports);
+
+  const parked = loadPipelines()[0]!;
+  expect(parked).toMatchObject({ state: "needs_decision", stateDetail: reason });
+  expect(parked.runs[0]!.attempts[0]!.error).toBe(reason);
+});
+
+test("an unregistered stage with only its launch record parks and the lane closes (#1325)", async () => {
+  const h = harness();
+  const pipeline = await runningStructuredStage(h);
+  h.setConversationActive(null);
+  h.ports.conversationRegistered = () => false;
+  h.durableTurns.set("/codex/stage-1.jsonl", {
+    turn: "busy",
+    message: null,
+    launchOnly: true,
+  });
+
+  for (let check = 0; check < 3; check += 1) {
+    if (check > 0) h.advanceWallClock(30_000);
+    await tickPipelines([], h.ports);
+  }
+
+  const parked = loadPipelines()[0]!;
+  expect(parked).toMatchObject({
+    state: "needs_decision",
+    stateDetail: "stage verdict recovery exhausted after 3 checks: the stage host died before its session registered",
+  });
+  expect(parked.runs[0]!.attempts[0]).toMatchObject({
+    state: "needs_decision",
+    completedAt: expect.any(String),
+    verdictRecovery: { state: "exhausted", checks: 3 },
+  });
+
+  h.setHostsResident(false);
+  h.setStageHost("conversation_stage_1", {
+    outcome: "failed",
+    error: "structured runtime host is unavailable",
+  });
+  const closed = await patchPipeline(pipeline.id, { action: "close" }, h.ports);
+
+  expect(closed.error).toBeUndefined();
+  expect(closed.close?.stillRunning).toEqual([]);
+  expect(closed.close?.alreadyStopped).toMatchObject([{ stageId: "plan", attempt: 1 }]);
+  expect(closed.close?.notes).toMatchObject([{
+    stageId: "plan",
+    attempt: 1,
+    detail: expect.stringContaining("the stage host died before its session registered"),
+  }]);
+  expect(loadPipelines()[0]!.state).toBe("closed");
+});
+
+test("an unregistered launch-only stage with a resident host still refuses close (#1325)", async () => {
+  const h = harness();
+  const pipeline = await runningStructuredStage(h);
+  h.ports.conversationRegistered = () => false;
+  h.durableTurns.set("/codex/stage-1.jsonl", {
+    turn: "busy",
+    message: null,
+    launchOnly: true,
+  });
+  h.setHostsResident(true);
+  h.setStageHost("conversation_stage_1", {
+    outcome: "failed",
+    error: "structured runtime host is unavailable",
+  });
+
+  const refused = await patchPipeline(pipeline.id, { action: "close" }, h.ports);
+
+  expect(refused.status).toBe(409);
+  expect(refused.close?.stillRunning).toMatchObject([{ stageId: "plan", attempt: 1 }]);
+  expect(loadPipelines()[0]).toMatchObject({ state: "running", closedAt: null });
+});
+
+test("an unregistered stage with agent transcript progress keeps running (#1325)", async () => {
+  const h = harness();
+  await runningStructuredStage(h);
+  h.setConversationActive(null);
+  h.ports.conversationRegistered = () => false;
+  h.durableTurns.set("/codex/stage-1.jsonl", {
+    turn: "busy",
+    message: { text: "working through the stage", ts: 5_000_000 },
+    launchOnly: false,
+  });
+
+  for (let check = 0; check < 4; check += 1) {
+    if (check > 0) h.advanceWallClock(30_000);
+    await tickPipelines([], h.ports);
+  }
+
+  const current = loadPipelines()[0]!;
+  expect(current.state).toBe("running");
+  expect(current.runs[0]!.attempts[0]).toMatchObject({ state: "running", completedAt: null });
+  expect(current.runs[0]!.attempts[0]!.verdictRecovery).toBeUndefined();
+});
+
+test("an unregistered launch-only stage stays running with affirmative runtime activity (#1325)", async () => {
+  const h = harness();
+  await runningStructuredStage(h);
+  h.setConversationActive(true);
+  h.ports.conversationRegistered = () => false;
+  h.durableTurns.set("/codex/stage-1.jsonl", {
+    turn: "unknown",
+    message: null,
+    launchOnly: true,
+  });
+
+  for (let check = 0; check < 4; check += 1) {
+    if (check > 0) h.advanceWallClock(30_000);
+    await tickPipelines([], h.ports);
+  }
+
+  const current = loadPipelines()[0]!;
+  expect(current.state).toBe("running");
+  expect(current.runs[0]!.attempts[0]).toMatchObject({ state: "running", completedAt: null });
+  expect(current.runs[0]!.attempts[0]!.verdictRecovery).toBeUndefined();
 });
 
 test("a worker that dies after transcript discovery enters bounded verdict recovery", async () => {

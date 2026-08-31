@@ -9,7 +9,7 @@ import { agentRegistry, type AgentRegistry, type AgentRegistryEntry, type Proces
 import { effectiveClaudePermissionMode } from "@/lib/agent/cli";
 import { sessionKeyId, type SessionKey } from "@/lib/agent/sessionKey";
 import { activeOrchestratorSeats, type OrchestratorSeat } from "@/lib/orchestrator/seats";
-import { procBackend } from "@/lib/proc";
+import { processIdentityMayOwn } from "@/lib/processIdentity";
 import { assertDarwinStructuredRuntime } from "@/lib/proc/darwinIdentity";
 import { readStableTailRecords } from "@/lib/scanner/activity";
 import { withoutWakatimeCredential } from "@/lib/wakatime/credential";
@@ -346,11 +346,6 @@ function assertAdoptedHostsAreClaimed(
   );
 }
 
-function structuredHostProcessAlive(identity: ProcessIdentity): boolean {
-  return procBackend.pidAlive(identity.pid)
-    && (identity.startIdentity === null || procBackend.processIdentity(identity.pid) === identity.startIdentity);
-}
-
 /** Every row selected before adoption must end the pass with a host published
     by this Viewer or cease to be eligible. The durable target appoints the
     candidate before the incumbent's demotion poll releases its engines. A
@@ -369,7 +364,7 @@ function assertEligibleHostsResolved(
   adopted: readonly AdoptedStructuredHost[],
   productionAdopter: (key: SessionKey) => boolean,
   claimed: (key: SessionKey) => boolean = hasStructuredDeliveryHost,
-  processAlive: (identity: ProcessIdentity) => boolean = structuredHostProcessAlive,
+  processAlive: (identity: ProcessIdentity) => boolean = processIdentityMayOwn,
 ): void {
   const adoptedKeys = new Set(adopted.map((item) => sessionKeyId(item.key)));
   const unresolved = Object.values(registry.readOnlySnapshot().entries).filter((entry) =>
@@ -768,6 +763,7 @@ export async function adoptStructuredHostsAtStartup(
     orchestratorHostKeys,
   );
   rememberStructuredStartupRetry(nextAdoptedHosts, orchestratorRecoveries);
+  registry.drainDeadSupersededHeldDeliveries();
   /* Pending work makes a terminal conversation adoption-eligible. Clear any
      provably dead wrapper before that decision so its stale writer fence
      cannot block the startup recovery path. */

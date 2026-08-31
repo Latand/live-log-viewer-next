@@ -1,5 +1,6 @@
 import { procBackend } from "@/lib/proc";
 import type { ProcBackend } from "@/lib/proc";
+import { systemBootEpoch } from "@/lib/processIdentity";
 import crypto from "node:crypto";
 import { chmodSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
@@ -150,8 +151,8 @@ function captureSystemMemory(proc: Pick<ProcBackend, "systemMemory"> = procBacke
 
 /** What the kill path needs to take a snapshot row down safely, on whichever
     transport owns it: for a pane, the stable `%N` pane id to address and the
-    pane pid to verify it against; for a structured host, the pid and the start
-    identity observed with it. */
+    pane pid to verify it against; for a structured host, the pid, start
+    identity, and boot epoch observed with it. */
 export type KillTargetRef = TmuxAttachReference | StructuredHostKillRef;
 
 /**
@@ -168,6 +169,8 @@ export interface StructuredHostRecord {
   pid: number;
   /** Kernel start-time token captured with the pid; a recycled pid fails it. */
   startIdentity: string | null;
+  /** Kernel boot epoch captured with the process. */
+  bootEpoch: string | null;
   cwd: string;
   path: string | null;
   conversationId: string | null;
@@ -187,8 +190,7 @@ export interface StructuredHostRecord {
 
 /**
  * Server-held authority for one structured kill. It carries the process fence
- * (pid plus the start identity observed with it, never null — an unverifiable
- * process grants no authority at all) and everything the kill route needs to
+ * (pid, start identity, and boot epoch) and everything the kill route needs to
  * refuse a target on its own terms, so a client can never widen what a listed
  * row authorizes.
  */
@@ -199,6 +201,7 @@ export interface StructuredHostKillRef {
   kind: "structured";
   pid: number;
   startIdentity: string;
+  bootEpoch: string | null;
   engine: "claude" | "codex";
   sessionId: string | null;
   conversationId: string | null;
@@ -240,8 +243,8 @@ export function lastResourceBuildDiagnostic(): ResourceBuildDiagnostic | null {
  * keeps the stable pane id and pane pid it had in the snapshot: display
  * coordinates renumber as windows close (`renumber-windows on`), so the kill
  * must address the pane by id and verify the pid still matches. A structured
- * host keeps its pid and the start identity observed with it, so a recycled
- * pid fails the fence instead of taking down whatever inherited the number.
+ * host keeps its pid, start identity, and boot epoch, so a recycled identity
+ * fails the fence and protects the process that inherited the number.
  */
 export function noteSessionTargets(sessions: Iterable<{ target: string; ref: KillTargetRef }>): void {
   const map = new Map<string, KillTargetRef>();
@@ -331,6 +334,7 @@ export interface ResourceSnapshotDependencies {
   readFiles(fresh: boolean): Promise<ResourceFileObservation[]>;
   readHosts(fresh: boolean, entries: ResourceFileObservation[], ppids: Map<number, number>): Promise<TranscriptHostSnapshot>;
   proc: Pick<ProcBackend, "systemMemory" | "ppidMap" | "processMemory">;
+  bootEpoch?(): string | null;
   captureAttachReferences(refs: ReadonlyArray<Pick<TmuxAttachReference, "tmuxServerPid" | "paneId" | "panePid">>): Map<string, TmuxAttachReference>;
   /** Structured-host records the registry holds. The viewer reads them and
       hands them to the collector; nothing here ever opens the registry. */
@@ -435,6 +439,7 @@ async function structuredHostTrees(
 ): Promise<Array<{ record: StructuredHostRecord & { startIdentity: string }; tree: number[] }>> {
   const records = (await dependencies.readStructuredHosts?.(fresh)) ?? [];
   const identity = dependencies.processIdentity ?? ((pid: number) => procBackend.processIdentity(pid));
+  const currentBootEpoch = (dependencies.bootEpoch ?? systemBootEpoch)();
   const stampOf = dependencies.hostStamp ?? readStructuredHostStamp;
   const ourStamp = structuredHostStamp();
   const live: Array<StructuredHostRecord & { startIdentity: string }> = [];
@@ -448,6 +453,7 @@ async function structuredHostTrees(
     const observed = identity(record.pid);
     if (observed === null) continue;
     if (record.startIdentity !== null && record.startIdentity !== observed) continue;
+    if (record.bootEpoch !== null && currentBootEpoch !== null && record.bootEpoch !== currentBootEpoch) continue;
     claimed.add(record.pid);
     live.push({ ...record, startIdentity: observed });
     if (live.length >= RESOURCE_STRUCTURED_HOST_LIMIT) break;
@@ -473,6 +479,7 @@ async function structuredHostTrees(
       sessionId: null,
       pid: rootPid,
       startIdentity: observed,
+      bootEpoch: currentBootEpoch,
       cwd: candidate.cwd,
       path: null,
       conversationId: null,
@@ -616,6 +623,7 @@ export async function buildResourceSnapshot(
           kind: "structured",
           pid: record.pid,
           startIdentity: record.startIdentity,
+          bootEpoch: record.bootEpoch,
           engine: record.engine,
           sessionId: record.sessionId,
           conversationId: record.conversationId,
@@ -1122,7 +1130,7 @@ function validResourceTarget(value: unknown): value is { target: string; ref: Ki
 
 function validStructuredHostKillRef(value: unknown): value is StructuredHostKillRef {
   if (!record(value) || !exactKeys(value, [
-    "kind", "pid", "startIdentity", "engine", "sessionId", "conversationId", "seat", "turnBusy", "owned", "lastActiveAt",
+    "kind", "pid", "startIdentity", "bootEpoch", "engine", "sessionId", "conversationId", "seat", "turnBusy", "owned", "lastActiveAt",
   ])) return false;
   return value.kind === "structured"
     && Number.isSafeInteger(value.pid) && (value.pid as number) > 1
@@ -1130,6 +1138,7 @@ function validStructuredHostKillRef(value: unknown): value is StructuredHostKill
        the pid, and a null would hand the fence a pid the kernel may have
        recycled since (#1199). */
     && typeof value.startIdentity === "string" && value.startIdentity.length > 0
+    && nullableString(value.bootEpoch)
     && (value.engine === "claude" || value.engine === "codex")
     && nullableString(value.sessionId)
     && nullableString(value.conversationId)
@@ -1334,7 +1343,13 @@ async function collectResourcesInWorker(
     if (inputTimer) clearTimeout(inputTimer);
   });
   const hosts = await hostsTask;
-  const request = JSON.stringify({ type: "collect", fresh, files, hosts }) + "\n";
+  const request = JSON.stringify({
+    type: "collect",
+    fresh,
+    files,
+    identityEpoch: systemBootEpoch(),
+    hosts,
+  }) + "\n";
   const outputMaxBytes = limits.outputMaxBytes ?? RESOURCE_WORKER_OUTPUT_MAX_BYTES;
   if (Buffer.byteLength(request) > RESOURCE_WORKER_OUTPUT_MAX_BYTES) {
     throw new ResourceCollectorFailureError(

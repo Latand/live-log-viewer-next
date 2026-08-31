@@ -7,7 +7,12 @@ import type {
   StructuredHostColumns,
 } from "@/lib/agent/registry";
 import { sessionKeyId, type SessionKey } from "@/lib/agent/sessionKey";
-import { procBackend } from "@/lib/proc";
+import {
+  captureProcessIdentity,
+  processIdentityMayOwn,
+  processIdentityProvenDead,
+  processIdentityStatus,
+} from "@/lib/processIdentity";
 
 import { CodexAppServerHost, type CodexAppServerHostOptions } from "./codexAppServerHost";
 import { ClaudeStreamBrokerHost, type ClaudeStreamBrokerHostOptions } from "./claudeStreamBrokerHost";
@@ -44,7 +49,7 @@ export function codexHostColumns(state: HostState, writerClaimEpoch: number): St
   return {
     kind: "codex-app-server",
     endpoint: state.endpoint,
-    process: state.pid === null ? null : { pid: state.pid, startIdentity: state.processStartIdentity },
+    process: state.pid === null ? null : captureProcessIdentity(state.pid, undefined, state.processStartIdentity),
     eventCursor: state.eventCursor,
     protocolVersion: state.protocolVersion,
     writerClaimEpoch,
@@ -58,7 +63,7 @@ export function claudeHostColumns(state: HostState, writerClaimEpoch: number): S
   return {
     kind: "claude-broker",
     endpoint: state.endpoint,
-    process: state.pid === null ? null : { pid: state.pid, startIdentity: state.processStartIdentity },
+    process: state.pid === null ? null : captureProcessIdentity(state.pid, undefined, state.processStartIdentity),
     eventCursor: state.eventCursor,
     protocolVersion: state.protocolVersion,
     writerClaimEpoch,
@@ -302,19 +307,15 @@ function claimOwnerBlocksOrphanReap(claimOwner: string | null): boolean {
   try { identity = JSON.parse(claimOwner.slice(STRUCTURED_CLAIM_PREFIX.length)) as Partial<ProcessIdentity>; }
   catch { return true; }
   if (!Number.isInteger(identity.pid) || identity.pid! <= 0) return true;
-  const startIdentity = typeof identity.startIdentity === "string" ? identity.startIdentity : null;
-  return procBackend.pidAlive(identity.pid!)
-    && (startIdentity === null || procBackend.processIdentity(identity.pid!) === startIdentity);
-}
-
-function verifiedProcessAlive(processIdentity: ProcessIdentity): boolean {
-  return processIdentity.startIdentity !== null
-    && procBackend.processIdentity(processIdentity.pid) === processIdentity.startIdentity;
+  return processIdentityMayOwn({
+    pid: identity.pid!,
+    startIdentity: typeof identity.startIdentity === "string" ? identity.startIdentity : null,
+    ...(typeof identity.bootEpoch === "string" ? { bootEpoch: identity.bootEpoch } : {}),
+  });
 }
 
 /** Clears one structured ownership claim only when its recorded engine process
-    exists and the registry revalidates its PID plus start identity, when one
-    was captured, as gone. */
+    identity is provably gone. */
 export function reconcileDeadStructuredRegistryHost(
   registry: AgentRegistry,
   conversationId: RegistryConversation["id"],
@@ -350,17 +351,18 @@ export function reconcileDeadStructuredRegistryHosts(
 
 async function waitForVerifiedProcessExit(processIdentity: ProcessIdentity, timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
-  while (verifiedProcessAlive(processIdentity) && Date.now() < deadline) {
+  while (!processIdentityProvenDead(processIdentity) && Date.now() < deadline) {
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
   }
-  return !verifiedProcessAlive(processIdentity);
+  return processIdentityProvenDead(processIdentity);
 }
 
-/** Ends one process the registry recorded, fenced on its start identity: a pid
-    that has been reused since the row was written is somebody else's process
-    and is never signalled. */
+/** Ends one process the registry recorded, fenced on its full identity. A
+    recycled pid or boot epoch belongs to another process and receives no signal. */
 async function terminateVerifiedProcess(processIdentity: ProcessIdentity): Promise<boolean> {
-  if (processIdentity.pid === process.pid || !verifiedProcessAlive(processIdentity)) return false;
+  const status = processIdentityStatus(processIdentity);
+  if (status === "dead") return true;
+  if (processIdentity.pid === process.pid || status !== "alive") return false;
   try { process.kill(processIdentity.pid, "SIGTERM"); } catch { /* process exited */ }
   if (await waitForVerifiedProcessExit(processIdentity, ORPHAN_TERM_GRACE_MS)) return true;
   try { process.kill(processIdentity.pid, "SIGKILL"); } catch { /* process exited */ }
@@ -428,7 +430,7 @@ export async function demoteSkippedStructuredRegistryHosts(
     const conversation = registry.conversationForPath(entry.artifactPath);
     if (conversation
       && reconcileDeadStructuredRegistryHost(registry, conversation.id, entry.key)) continue;
-    const owner = { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) };
+    const owner = captureProcessIdentity(process.pid);
     try {
       await registry.withOperationLock(entry.key, owner, async () => {
         const current = registry.readOnlySnapshot().entries[sessionKeyId(entry.key)];
@@ -488,7 +490,7 @@ export async function adoptCodexRegistryHosts(
     && shouldAdopt(entry));
   const adopted: AdoptedCodexHost[] = [];
   for (const entry of rows) {
-    const owner = { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) };
+    const owner = captureProcessIdentity(process.pid);
     try {
       await registry.withOperationLock(entry.key, owner, async () => {
         const current = registry.readOnlySnapshot().entries[sessionKeyId(entry.key)];
@@ -574,7 +576,7 @@ export async function adoptClaudeRegistryHosts(
     && shouldAdopt(entry));
   const adopted: AdoptedClaudeHost[] = [];
   for (const entry of rows) {
-    const owner = { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) };
+    const owner = captureProcessIdentity(process.pid);
     try {
       await registry.withOperationLock(entry.key, owner, async () => {
         const eligible = registry.readOnlySnapshot().entries[sessionKeyId(entry.key)];

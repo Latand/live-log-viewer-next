@@ -11,6 +11,7 @@ import type { ResumeSpec } from "@/lib/agent/cli";
 import { AgentRegistry } from "@/lib/agent/registry";
 import { spawnResponseForReceipt } from "@/lib/agent/spawnResponse";
 import { procBackend } from "@/lib/proc";
+import { systemBootEpoch } from "@/lib/processIdentity";
 import { resolveSpawnRole } from "@/lib/roles/registry";
 import { RuntimeJournal } from "@/runtime-host/journal";
 
@@ -94,6 +95,49 @@ test("structured Claude receipts expose the effective permission mode", () => {
     state: "starting",
     effectivePermissionMode: "default",
   });
+});
+
+test("a structured admission owner keeps its boot identity across registry reopen", () => {
+  const filename = path.join(sandbox, `boot-aware-admission-owner-${crypto.randomUUID()}.json`);
+  const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+  const begun = beginLegacySpawnFixture(registry, {
+    engine: "codex",
+    cwd: "/repo",
+    transport: "structured",
+    launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+  });
+  if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
+  const owner = begun.receipt.admissionOwner;
+  expect(owner?.pid).toBe(process.pid);
+  expect(typeof owner?.startIdentity).toBe("string");
+  expect(owner?.bootEpoch).toBe(systemBootEpoch());
+
+  const reopened = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+  expect(reopened.snapshot().receipts[begun.receipt.launchId]!.admissionOwner)
+    .toEqual(owner);
+});
+
+test("another boot identity cannot release a structured admission owner", () => {
+  const filename = path.join(sandbox, `boot-aware-admission-release-${crypto.randomUUID()}.json`);
+  const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+  const begun = beginLegacySpawnFixture(registry, {
+    engine: "codex",
+    cwd: "/repo",
+    transport: "structured",
+    launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+  });
+  if (begun.kind !== "created" || !begun.receipt.admissionOwner) {
+    throw new Error("spawn admission owner was unavailable");
+  }
+  const owner = begun.receipt.admissionOwner;
+
+  const released = registry.releaseStartingStructuredSpawn(begun.receipt.launchId, {
+    ...owner,
+    bootEpoch: `${owner.bootEpoch}:different`,
+  });
+
+  expect(released.released).toBeFalse();
+  expect(released.receipt.admissionOwner).toEqual(owner);
 });
 
 test("fresh managed Claude structured spawns select the shared settings snapshot", () => {
@@ -1403,7 +1447,7 @@ test.each([
         targetRegistry.setStructuredHostClaimed(key, {
           kind: engine === "codex" ? "codex-app-server" : "claude-broker",
           endpoint: state.endpoint,
-          process: { pid: process.pid, startIdentity: "missing-transcript-host" },
+          process: { pid: process.pid, startIdentity: "missing-transcript-host", bootEpoch: systemBootEpoch() },
           eventCursor: state.eventCursor,
           protocolVersion: state.protocolVersion,
           writerClaimEpoch: claimEpoch,
@@ -1415,7 +1459,7 @@ test.each([
       },
       publishHost: async () => async () => {},
       deliverFirst: async () => {},
-      processIdentity: () => ({ pid: process.pid, startIdentity: "missing-transcript-host" }),
+      processIdentity: () => ({ pid: process.pid, startIdentity: "missing-transcript-host", bootEpoch: systemBootEpoch() }),
       durableSetupTimeoutMs: 60_000,
       sleep: async () => { sleepCalls += 1; },
     })).rejects.toThrow(expectedFailure);
@@ -1436,7 +1480,11 @@ test.each([
       return;
     }
 
-    const processIdentity = { pid: process.pid, startIdentity: "missing-transcript-host" };
+    const processIdentity = {
+      pid: process.pid,
+      startIdentity: "missing-transcript-host",
+      bootEpoch: systemBootEpoch(),
+    };
     expect(registry.snapshot().entries[`${engine}:${id}`]).toMatchObject({
       status: "idle",
       structuredHost: { process: processIdentity },
@@ -1462,6 +1510,7 @@ test.each([
       kind: "structured",
       pid: record.pid,
       startIdentity: record.startIdentity,
+      bootEpoch: record.bootEpoch,
       engine: record.engine,
       sessionId: record.sessionId,
       conversationId: record.conversationId,
