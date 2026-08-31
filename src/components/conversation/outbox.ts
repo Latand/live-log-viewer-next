@@ -670,7 +670,6 @@ export function seedLaunchOutbox(
     error?: string;
   },
 ): void {
-  if (!entry.text.trim() && !entry.images) return;
   const currentLaunch = readCurrentLaunch(cardId);
   if (currentLaunch?.id === entry.id) {
     const terminalReason = terminalReasonForLaunch(currentLaunch, Date.now());
@@ -722,6 +721,10 @@ export function seedLaunchOutbox(
     }
     return;
   }
+  /* An adopted live fact can carry only `echoText`: its display fields have
+     already retired because the transcript owns the visible row. Such a fact
+     may reconcile an existing raw 202 seed and must never create an empty row. */
+  if (!entry.text.trim() && !entry.images) return;
   /* Recurring LogFeed projections can outlive the recent queue entry. Durable
      retirement under this submission id keeps the compacted launch terminal
      across refresh and identity adoption. */
