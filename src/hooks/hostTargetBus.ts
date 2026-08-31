@@ -17,6 +17,33 @@ export interface HostTargetSubscriber {
   onTarget(result: HostTargetResult): void;
 }
 
+export type HostTargetFetcher = (
+  input: RequestInfo | URL,
+  init?: RequestInit,
+) => Promise<Response>;
+
+export interface HostTargetBusDependencies {
+  fetch: HostTargetFetcher;
+}
+
+const productionDependencies: HostTargetBusDependencies = {
+  fetch: (input, init) => globalThis.fetch(input, init),
+};
+let testDependencies: Partial<HostTargetBusDependencies> | null = null;
+
+function hostTargetBusDependencies(): HostTargetBusDependencies {
+  return testDependencies === null
+    ? productionDependencies
+    : { ...productionDependencies, ...testDependencies };
+}
+
+/** Lifecycle-scoped test seam. Tests install it in setup and clear it in cleanup. */
+export function setHostTargetBusDependenciesForTests(
+  dependencies: Partial<HostTargetBusDependencies> | null,
+): void {
+  testDependencies = dependencies;
+}
+
 const subs = new Set<HostTargetSubscriber>();
 let timer: ReturnType<typeof setInterval> | null = null;
 let inFlight = false;
@@ -45,7 +72,7 @@ async function tick(): Promise<void> {
         /* The legacy path, still mounted on the same handler as
            `/api/conversation-host/targets`. The URL moves with the call sites,
            not with this rename (#1301). */
-        const res = await fetch("/api/tmux/targets", {
+        const res = await hostTargetBusDependencies().fetch("/api/tmux/targets", {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ reqs }),

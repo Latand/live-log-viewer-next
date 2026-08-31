@@ -13,11 +13,11 @@ import { replaceConversationCatalog } from "@/lib/scanner/conversationCatalog";
 import { archivedTranscriptPaths } from "@/lib/scanner";
 import { globalCache } from "@/lib/scanner/caches";
 import { describe as describeTranscript, projectInfoFromCwd, projectRootForCwd } from "@/lib/scanner/describe";
-import { readStateCollectionRows } from "@/lib/state/sqliteStateStore";
+import { readStateCollectionRevision, readStateCollectionRows } from "@/lib/state/sqliteStateStore";
 import { writeSessionTitle } from "@/lib/session/titleStore";
 import type { FileEntry, ProjectCatalogEntry } from "@/lib/types";
 import type { Pipeline } from "@/lib/pipelines/types";
-import { savePipelines } from "@/lib/pipelines/store";
+import { buildPipeline, savePipelines } from "@/lib/pipelines/store";
 import { createFilesClientCache } from "@/hooks/useFiles";
 import { beginLegacySpawnFixture, beginLegacySpawnReceiptFixture, withLegacySpawnFixtureTitles } from "@/lib/agent/registryTestFixtures";
 import {
@@ -630,6 +630,25 @@ test("issue 798: a files GET reads the registry once, threads it to titles, and 
   const registry = agentRegistry();
   const conversation = registry.ensureConversation("codex", sessionPath, null);
   scannedFiles = [file(sessionPath)];
+  const pipeline = buildPipeline({
+    id: "read7980",
+    task: "read-only files projection",
+    project: "viewer",
+    repoDir: "/repo",
+    stages: [],
+    srcPath: null,
+    srcConversationId: null,
+    now: "2026-07-31T00:00:00.000Z",
+    state: "draft",
+  });
+  savePipelines([pipeline]);
+  pipelinesStore = () => readStateCollectionRows(path.join(stateDir, "state.sqlite"), "pipelines") ?? [];
+  pipelineVisibility = (pipelines) => pipelines;
+  const pipelineDatabase = path.join(stateDir, "state.sqlite");
+  const pipelinesBefore = readStateCollectionRows(pipelineDatabase, "pipelines");
+  const pipelineRevisionBefore = readStateCollectionRevision(pipelineDatabase, "pipelines");
+  expect(pipelinesBefore).toEqual([pipeline]);
+  expect(pipelineRevisionBefore).not.toBeNull();
   const target = registry as unknown as { readOnlySnapshot: AgentRegistry["readOnlySnapshot"] };
   const realReadOnlySnapshot = target.readOnlySnapshot.bind(registry);
   let registryReads = 0;
@@ -645,6 +664,10 @@ test("issue 798: a files GET reads the registry once, threads it to titles, and 
     /* The single read-only snapshot is threaded to every projection consumer
        (title overlay included); a second read here is the #798 regression. */
     expect(registryReads).toBe(1);
+    /* A files projection is read-only. Rows catch changed content; the SQLite
+       revision catches any committed pipeline-store mutation during GET. */
+    expect(readStateCollectionRows(pipelineDatabase, "pipelines")).toEqual(pipelinesBefore);
+    expect(readStateCollectionRevision(pipelineDatabase, "pipelines")).toBe(pipelineRevisionBefore);
   } finally {
     target.readOnlySnapshot = realReadOnlySnapshot;
   }
