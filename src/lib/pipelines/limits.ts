@@ -5,6 +5,8 @@
 export const MAX_TASK_LENGTH = 4_000;
 export const MAX_SPEC_LENGTH = 16_000;
 export const MAX_STAGE_PROMPT_LENGTH = 8_000;
+export const MAX_STAGE_OUTPUTS = 20;
+export const MAX_STAGE_OUTPUT_PATH_LENGTH = 240;
 export const MAX_ROLE_PARAM_TEXT_LENGTH = 2_000;
 
 /** Conversation-graph bounds (#353, schema v3): a pipeline holds 1–8 stages
