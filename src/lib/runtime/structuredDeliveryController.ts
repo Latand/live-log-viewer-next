@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import { requestAccountMigrationTick } from "@/lib/accounts/migration/controllerSignal";
 import { agentRegistry, type AgentRegistry, type AgentRegistryEntry, type ProcessIdentity } from "@/lib/agent/registry";
 import { sessionKeyId, type SessionKey } from "@/lib/agent/sessionKey";
+import { BRANCH_SHARED_HOST_ERROR, branchSharesRootHost } from "@/lib/conversation/branchControl";
 
 import { isRuntimeHostTransportFailure, runtimeHostClient, type RuntimeHostClient } from "./client";
 import { runtimeSettingsCapability, type RuntimeEventInput, type RuntimeSession } from "./contracts";
@@ -486,6 +487,10 @@ export async function bindStructuredDeliveryQueue(
       const liveness = await conversationTurnLiveness(registry, conversationId, dependencies.liveness ?? {});
       return liveness?.state === "severed" ? liveness.reason : null;
     },
+    (conversationId) => conversationId.startsWith("conversation_")
+      && branchSharesRootHost(registry, registry.conversation(conversationId as `conversation_${string}`))
+      ? BRANCH_SHARED_HOST_ERROR
+      : null,
   );
   let drainTimer: ReturnType<typeof setTimeout> | null = null;
   let drainBackoffMs = DELIVERY_DRAIN_COALESCE_MS;

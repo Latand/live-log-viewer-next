@@ -20,6 +20,14 @@ export interface StructuredDeliveryEffect {
 
 export type StructuredDeliveryTransition = "queued" | "delivering" | "applying" | "delivered" | "applied" | "answered" | "interrupted" | "failed" | "uncertain";
 
+interface StructuredOperationStatus {
+  status: string;
+  reason?: string | null;
+  /** Immutable admission time on current receipts; `at` supports older rows. */
+  admittedAt?: string;
+  at?: string;
+}
+
 export interface StructuredDeliveryQueuePort {
   effects(kinds?: readonly string[], afterEventSeq?: number): Promise<StructuredDeliveryEffect[]>;
   transition(
@@ -36,7 +44,7 @@ export interface StructuredDeliveryQueuePort {
       own state, read through the same type — and none of them may be converted
       into a definite answer when it fails. An unreadable fence is not an open
       one: it blocks this pass instead of authorising it (#1131). */
-  status?(operationId: string): Promise<{ status: string; reason?: string | null } | null>;
+  status?(operationId: string): Promise<StructuredOperationStatus | null>;
   /** Whether the durable DELIVERY RECORD has already ended this send (#1131).
       The journal cannot answer that during the outage in which it is written,
       which is exactly when it has to be honoured. */
@@ -53,9 +61,13 @@ export interface StructuredDeliveryQueuePort {
 
 export type StructuredHostResolver = (conversationId: string) => EngineHost | null;
 export type StructuredHostRecovery = (conversationId: string) => Promise<boolean>;
+export type StructuredKillRefusal = (conversationId: string) => string | null | Promise<string | null>;
 
 const STRUCTURED_DELIVERY_BATCH_SIZE = 100;
 const THREAD_READ_ATTEMPTS = 2;
+/** Controls carry no message reservation to settle them outside the journal,
+    so the queue itself gives every accepted control a terminal ceiling. */
+export const CONTROL_SETTLEMENT_WINDOW_MS = 2 * 60_000;
 const TERMINAL_DELIVERY_STATUSES = new Set([
   "turn-started",
   "steered",
@@ -164,6 +176,39 @@ function isCompactEffect(effect: DeliveryEffect): effect is CompactEffect {
 
 function isReconfigureEffect(effect: DeliveryEffect): effect is StructuredReconfigureEffect {
   return effect.kind === "reconfigure";
+}
+
+function isRuntimeControlEffect(
+  effect: DeliveryEffect,
+): effect is ControlEffect | CompactEffect | StructuredReconfigureEffect {
+  return isControlEffect(effect) || isReconfigureEffect(effect);
+}
+
+function controlSettlementDeadlineAt(receipt: StructuredOperationStatus | null): number | null {
+  if (!receipt) return null;
+  const admittedAt = Date.parse(receipt.admittedAt ?? receipt.at ?? "");
+  return Number.isFinite(admittedAt) ? admittedAt + CONTROL_SETTLEMENT_WINDOW_MS : null;
+}
+
+function expiredControlSettlement(
+  effect: ControlEffect | CompactEffect | StructuredReconfigureEffect,
+  receipt: StructuredOperationStatus | null,
+  now = Date.now(),
+): { status: "failed" | "uncertain"; reason: string } | null {
+  if (!receipt) return null;
+  const deadlineAt = controlSettlementDeadlineAt(receipt);
+  if (deadlineAt === null || now < deadlineAt) return null;
+  const action = effect.kind;
+  if (receipt.status === "delivering" || receipt.status === "applying") {
+    return {
+      status: "uncertain",
+      reason: `${action} control exceeded its 2-minute settlement deadline after actuation began; verify the conversation state before retrying`,
+    };
+  }
+  return {
+    status: "failed",
+    reason: `${action} control exceeded its 2-minute settlement deadline; retry from the current conversation state`,
+  };
 }
 
 function sendEffect(effect: StructuredDeliveryEffect): SendEffect | null {
@@ -462,6 +507,8 @@ export class StructuredDeliveryQueue {
         could not be made at all, which {@link readSeveredHostReason} keeps
         separate rather than letting it out as a thrown drain pass (#1131). */
     private readonly severedHostReason: (conversationId: string) => Promise<string | null> = async () => null,
+    /** Refuses historical branch kills during recovery before host resolution. */
+    private readonly killRefusal: StructuredKillRefusal = () => null,
   ) {}
 
   drain(): Promise<void> {
@@ -614,11 +661,24 @@ export class StructuredDeliveryQueue {
 
   private async drainTarget(effects: DeliveryEffect[]): Promise<boolean> {
     const openEffects: DeliveryEffect[] = [];
-    const durableStatuses = new Map<string, { status: string; reason?: string | null } | null>();
+    const durableStatuses = new Map<string, StructuredOperationStatus | null>();
     for (const effect of effects) {
       const durable = await this.readStatus(effect.operationId);
       if (!durable.readable) return this.fenceUnavailable();
       if (durable.value && TERMINAL_DELIVERY_STATUSES.has(durable.value.status)) continue;
+      const expired = isRuntimeControlEffect(effect)
+        ? expiredControlSettlement(effect, durable.value)
+        : null;
+      if (expired) {
+        await this.transitionUnlessSettled(effect.operationId, expired.status, { reason: expired.reason });
+        continue;
+      }
+      /* A blocked hostless control may produce no journal or host event of its
+         own. Keep one bounded retry alive so a later pass observes the deadline
+         even when the rest of the runtime stays completely quiet. */
+      if (isRuntimeControlEffect(effect) && controlSettlementDeadlineAt(durable.value) !== null) {
+        this.retrySoon();
+      }
       durableStatuses.set(effect.operationId, durable.value);
       openEffects.push(effect);
     }
@@ -1029,7 +1089,7 @@ export class StructuredDeliveryQueue {
    * an attempted read that threw is unreadable, and the callers above never let
    * one of those authorise anything.
    */
-  private readStatus(operationId: string): Promise<Evidence<{ status: string; reason?: string | null } | null>> {
+  private readStatus(operationId: string): Promise<Evidence<StructuredOperationStatus | null>> {
     const read = this.port.status?.bind(this.port);
     return readOptionalEvidence(read && (() => read(operationId)), null, "delivery journal status is unavailable");
   }
@@ -1235,8 +1295,13 @@ export class StructuredDeliveryQueue {
   }
 
   private async drainControl(effect: ControlEffect): Promise<ControlDrainResult> {
-    const host = this.resolveHost(effect.conversationId);
     if (effect.kind === "kill") {
+      const refusal = await this.killRefusal(effect.conversationId);
+      if (refusal) {
+        await this.transitionUnlessSettled(effect.operationId, "failed", { reason: refusal });
+        return { blocked: false, terminated: false };
+      }
+      const host = this.resolveHost(effect.conversationId);
       if (!effect.sessionKey) {
         await this.transitionUnlessSettled(effect.operationId, "failed", { reason: "structured host termination target is unavailable" });
         return { blocked: false, terminated: false };
@@ -1271,6 +1336,7 @@ export class StructuredDeliveryQueue {
         throw error;
       }
     }
+    const host = this.resolveHost(effect.conversationId);
     if (!host) {
       /* Holding the control was right while a host might still come back to
          answer it, and wrong once nothing can: the effect stays pending, the

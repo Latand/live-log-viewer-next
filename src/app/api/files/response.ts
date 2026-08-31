@@ -834,6 +834,7 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
   const registryHealth = {
     backendMode: registryDiagnostics.backendMode,
     revision: registryDiagnostics.revision,
+    mirrorRevision: registryDiagnostics.mirrorRevision,
     transactionCount: registryDiagnostics.transactionCount,
     writerWaitP95Ms: registryDiagnostics.writerWaitP95Ms,
     transactionP95Ms: registryDiagnostics.transactionP95Ms,

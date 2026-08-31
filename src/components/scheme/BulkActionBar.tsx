@@ -341,8 +341,8 @@ export const BulkActionBar = memo(function BulkActionBar({
               setConfirm("remove");
               return;
             }
-            /* Pure client removal (closeNode kills + hides); the emptied
-               selection prunes itself and the session ends with the cards. */
+            /* Presentation-only removal: each card is hidden durably while the
+               emptied selection prunes itself. Stop above owns host teardown. */
             for (const node of nodes) onRemove(node.file.path);
             setConfirm(null);
           }}
