@@ -72,6 +72,7 @@ import {
   type SqliteRegistryReplacement,
   type SqliteRegistrySnapshot,
 } from "./sqliteRegistryStore";
+import { identityMaterializationFence } from "./identityMaterialization";
 import type { ResumePaneRecord } from "@/lib/resumePanesFile";
 import { parseMessageOrigin } from "@/lib/runtime/messageOrigin";
 import { assertStructuredTextEnvelope, parseStructuredImageRefs, structuredContent, type StructuredImageRef } from "@/lib/runtime/structuredContent";
@@ -587,6 +588,8 @@ export interface ConversationLookup {
   canonicalConversationId(id: ViewerConversationId): ViewerConversationId;
   conversation(id: ViewerConversationId): RegistryConversation | null;
 }
+
+export { identityMaterializationFence } from "./identityMaterialization";
 
 type ConversationMigrationInput = Omit<ConversationMigration, "errorCode" | "operationId" | "sourceGenerationId" | "providerReceipt" | "pendingContinuityPaths" | "boardProject" | "boardOperationId" | "boardPlacementProject"> &
   Partial<Pick<ConversationMigration, "errorCode" | "operationId" | "sourceGenerationId" | "providerReceipt" | "pendingContinuityPaths" | "boardProject" | "boardOperationId" | "boardPlacementProject">>;
@@ -2217,10 +2220,11 @@ function resolveConversationAlias(file: Pick<RegistryFile, "conversationAliases"
 }
 
 export function snapshotSpawnsFromRegistry(
-  file: Pick<RegistryFile, "receipts" | "conversations" | "conversationAliases">,
+  file: Pick<RegistryFile, "receipts" | "entries" | "conversations" | "conversationAliases">,
   launchIds: readonly string[],
 ): SnapshotSpawnProjection {
   const projection: SnapshotSpawnProjection = {};
+  const materialization = identityMaterializationFence(file);
   for (const launchId of new Set(launchIds)) {
     const receipt = file.receipts[launchId];
     if (!receipt) continue;
@@ -2240,8 +2244,9 @@ export function snapshotSpawnsFromRegistry(
       engine: receipt.engine,
       cwd: receipt.cwd,
       createdAt: receipt.createdAt,
-      materializedPath: (conversationId ? file.conversations[conversationId] : undefined)?.generations.at(-1)?.path
-        ?? receipt.artifactPath,
+      materializedPath: materialization.allowsReceipt(receipt)
+        ? (conversationId ? materialization.pathForConversation(conversationId) : null) ?? receipt.artifactPath
+        : null,
     };
   }
   return projection;
