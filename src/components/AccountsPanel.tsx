@@ -89,6 +89,12 @@ function AccountLimitsDetail({ account, engine, quota, now }: { account: Account
   const sharedStaleAt = staleObserved.length > 1 && staleObserved.every((value) => value === staleObserved[0])
     ? staleObserved[0]
     : null;
+  const exhausted = windows.filter((row) => row.window.value.usedPercent >= 100);
+  const exhaustedResets = exhausted.map((row) => row.window.value.resetsAt);
+  const rateLimitedUntil = exhausted.length > 0
+    && exhaustedResets.every((reset): reset is number => reset !== null && reset > now)
+    ? Math.max(...exhaustedResets)
+    : null;
   const tint = engineTintOf(engine);
   return (
     <dl
@@ -106,6 +112,13 @@ function AccountLimitsDetail({ account, engine, quota, now }: { account: Account
           {sharedStaleAt !== null
             ? formatQuotaAsOf(sharedStaleAt) ?? t("accounts.limitsStale")
             : `${t("accounts.limitsChecked")} · ${formatCheckedClock(new Date(observedAt! * 1000).toISOString())}`}
+        </div>
+      ) : null}
+      {exhausted.length > 0 ? (
+        <div className="text-[10px] font-semibold text-danger">
+          {rateLimitedUntil === null
+            ? t("rateLimit.badge")
+            : t("rateLimit.badgeUntil", { time: formatResetClock(rateLimitedUntil, now) })}
         </div>
       ) : null}
       {windows.map(({ key, label, window }) => {

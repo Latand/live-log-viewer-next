@@ -2,9 +2,10 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
+import { listCodexAccounts } from "@/lib/accounts/codex";
 import { accountManager } from "@/lib/accounts/manager";
 import { AccountProjectBindingsUnreadableError, allowedAccountIdsForProject, projectAccountRefusalDetail } from "@/lib/accounts/projectBindings";
-import { mirroredClaudeTranscriptPath } from "@/lib/accounts/claude";
+import { listClaudeAccounts, mirroredClaudeTranscriptPath } from "@/lib/accounts/claude";
 import { emptyLaunchProfile, type ViewerConversationId } from "@/lib/accounts/migration/contracts";
 import { freshSpecFor } from "@/lib/agent/cli";
 import { agentRegistry, identityMaterializationFence, type DurableMembershipInput, type TmuxHostEvidence } from "@/lib/agent/registry";
@@ -52,7 +53,7 @@ import { pipelineRepoPreflightError, pipelineRepoPreflightStatus, preflightPipel
 import { renderStagePrompt } from "./prompts";
 import { PIPELINE_ROLE_IDS, pipelineRoleLookup, resolvePipelineRole, validatePipelineRoleParams, type PipelineRoleLookup } from "./roles";
 import { normalizeStageOutputPath } from "./stageAccess";
-import { pipelineStageSandbox } from "./stageSandbox";
+import { pipelineStageRuntimeProfile, pipelineStageSandbox, type PipelineStageRuntimeProfile } from "./stageSandbox";
 import { pipelineValidationError, type PipelineValidationViolation } from "./validation";
 import { buildPipeline, findPipelineRecord, isEffectiveRole, loadPipelines, pipelineGraphError, pipelineIdentity, pipelineTaskLinkError, PipelineStoreError, withPipelineControllerMutation, withPipelineMutation } from "./store";
 import { ensurePipelineForTask, isTaskSpawnPipelineParams, type TaskPipelineSpawnParams, type TaskSpawnPipelineParams } from "./taskBinding";
@@ -79,6 +80,7 @@ export type PipelineStageSpawn = {
   sessionId: string | null;
   "transcript": string | null;
   paneId: string | null;
+  accountId?: string | null;
 };
 
 /** Identity of the agent host a stage attempt owns, as a close reports it. */
@@ -130,7 +132,7 @@ export type PipelineCloseReport = {
   worktree: { dir: string; uncommitted: string[]; truncated: boolean; error?: string } | null;
 };
 
-export type PipelineStageLaunchReservation = Pick<PipelineStageSpawn, "launchId" | "conversationId">;
+export type PipelineStageLaunchReservation = Pick<PipelineStageSpawn, "launchId" | "conversationId" | "accountId">;
 export type PipelineSpawnReceipt = PipelineStageSpawn & {
   state: "starting" | "pane-bound" | "host-verified" | "prompt-delivered" | "path-pending" | "completed" | "failed" | "conflicted";
   error?: string | null;
@@ -142,15 +144,16 @@ export interface PipelinePorts {
   roleLookup?: PipelineRoleLookup | null;
   spawnAgent(input: {
     role: EffectivePipelineRole;
-    /** Tool/network boundary. Full host access is the pipeline default; the
-        restrictive engine sandbox is selected only by an explicit stage. */
-    sandbox?: PipelineSandbox;
+    /** Immutable repository-policy and tool-boundary pair for this attempt. */
+    runtimeProfile: PipelineStageRuntimeProfile;
     cwd: string;
     /** Project the launch belongs to; the account it may use is drawn from
         this project's allowed set and nothing wider (#1279). */
     project: string;
     /** The account the stage named, if it named one. */
     requestedAccountId: string | null;
+    /** Accounts proven unavailable by earlier attempts of this same activation. */
+    unavailableAccountIds?: string[];
     title: string;
     "prompt": string;
     parentPath: string | null;
@@ -222,6 +225,14 @@ export interface PipelinePorts {
   /** Accounts `project` allows for `engine`, or null when the project has no
       binding for it — which means every account, as it always did (#1279). */
   allowedAccountIds?(project: string, engine: FlowEngine): string[] | null;
+  /** Shared project account-selection seam used to decide a usage-limit retry. */
+  resolveProjectSpawn?(
+    engine: FlowEngine,
+    request: Parameters<typeof accountManager.resolveProjectSpawn>[1],
+  ): ReturnType<typeof accountManager.resolveProjectSpawn>;
+  /** Durable launch ownership fallback for attempts written before accountId. */
+  accountForTranscript?(engine: FlowEngine, transcriptPath: string): { accountId: string; label: string } | null;
+  accountLabel?(engine: FlowEngine, accountId: string): string;
   now(): string;
 }
 
@@ -304,7 +315,8 @@ export function pipelineClaudePermissionMode(
   role: EffectivePipelineRole,
   sandbox: PipelineSandbox = "full",
 ): string | null {
-  return role.engine === "claude" && sandbox === "full" ? "bypassPermissions" : null;
+  if (role.engine !== "claude") return null;
+  return sandbox === "full" ? "bypassPermissions" : "auto";
 }
 
 function parentIdentity(parentPath: string | null): {
@@ -332,18 +344,25 @@ async function spawnPipelineAgent(
   const resolution = accountManager.resolveProjectSpawn(input.role.engine, {
     project: input.project,
     requestedId: input.requestedAccountId,
+    ...(input.unavailableAccountIds?.length
+      ? { unavailableIds: input.unavailableAccountIds }
+      : {}),
   });
   if (resolution.kind !== "available") {
     throw new Error(projectAccountRefusalDetail(resolution, input.role.engine, input.project));
   }
   const account = resolution.account;
   const parent = parentIdentity(input.parentPath);
-  const sandbox = input.sandbox ?? "full";
-  const restricted = sandbox === "restricted";
+  const { access, sandbox } = input.runtimeProfile;
+  if (access !== input.role.access) {
+    throw new Error("pipeline stage runtime access does not match its effective role");
+  }
   const specBase = freshSpecFor(input.role.engine, input.cwd, {
     model: input.role.model,
     effort: input.role.effort,
-    readOnly: restricted,
+    /* Pipeline access is enforced at settlement. Passing it to the engine
+       would make the repository policy silently select the sandbox again. */
+    readOnly: false,
     permissionMode: pipelineClaudePermissionMode(input.role, sandbox),
     codexHome: input.role.engine === "codex" ? account.home : null,
     claudeConfigDir: input.role.engine === "claude" ? account.home : null,
@@ -352,6 +371,8 @@ async function spawnPipelineAgent(
   const launchProfile = emptyLaunchProfile({
     ...(specBase.launchProfile ?? {}),
     cwd: input.cwd,
+    readOnly: access === "read-only",
+    sandbox,
     parentConversationId: parent.conversationId,
     title: input.title,
   });
@@ -368,6 +389,7 @@ async function spawnPipelineAgent(
     engine: input.role.engine,
     model: input.role.model,
     effort: input.role.effort,
+    runtimeProfile: input.runtimeProfile,
     cwd: input.cwd,
     parentConversationId: parent.conversationId,
     ...(supersedes ? { supersedes } : {}),
@@ -404,7 +426,11 @@ async function spawnPipelineAgent(
     supersedesReason: "stage-retry",
   });
   if (begun.kind === "conflict") throw new Error("pipeline spawn attempt conflicts with its original request");
-  onReserved({ launchId: begun.receipt.launchId, conversationId: begun.receipt.conversationId });
+  onReserved({
+    launchId: begun.receipt.launchId,
+    conversationId: begun.receipt.conversationId,
+    accountId: begun.receipt.accountId ?? account.accountId,
+  });
   if (begun.kind === "replay") {
     const identityPublished = identityMaterializationFence(registry.readOnlySnapshot()).allowsReceipt(begun.receipt);
     return {
@@ -413,6 +439,7 @@ async function spawnPipelineAgent(
       sessionId: identityPublished ? begun.receipt.key?.sessionId ?? null : null,
       "transcript": identityPublished ? begun.receipt.artifactPath : null,
       paneId: begun.receipt.verifiedHost?.paneId ?? begun.receipt.pane?.paneId ?? null,
+      accountId: begun.receipt.accountId ?? account.accountId,
     };
   }
 
@@ -443,6 +470,7 @@ async function spawnPipelineAgent(
     sessionId: key?.sessionId ?? null,
     transcript,
     paneId: null,
+    accountId: begun.receipt.accountId ?? account.accountId,
   };
 }
 
@@ -710,6 +738,16 @@ export function defaultPipelinePorts(
     preflightRepo: preflightPipelineRepo,
     roleLookup: pipelineRoleLookup,
     allowedAccountIds: (project, engine) => allowedAccountIdsForProject(project, engine),
+    resolveProjectSpawn: (engine, request) => accountManager.resolveProjectSpawn(engine, request),
+    accountForTranscript: (engine, transcriptPath) => {
+      const owner = accountManager.resolveTranscriptOwner(engine, transcriptPath);
+      if (!owner) return null;
+      const account = (engine === "claude" ? listClaudeAccounts() : listCodexAccounts())
+        .find((candidate) => candidate.id === owner.accountId);
+      return { accountId: owner.accountId, label: account?.label ?? owner.accountId };
+    },
+    accountLabel: (engine, accountId) => (engine === "claude" ? listClaudeAccounts() : listCodexAccounts())
+      .find((candidate) => candidate.id === accountId)?.label ?? accountId,
     spawnAgent: async (input, onReserved) => {
       const result = await spawnPipelineAgent(input, onReserved);
       invalidateRegistryProjection();
@@ -740,6 +778,7 @@ export function defaultPipelinePorts(
         sessionId: identityPublished ? receipt.key?.sessionId ?? null : null,
         "transcript": identityPublished ? receipt.artifactPath : null,
         paneId: receipt.verifiedHost?.paneId ?? receipt.pane?.paneId ?? null,
+        accountId: receipt.accountId,
         error: receipt.error,
       };
     },
@@ -1054,6 +1093,86 @@ function park(pipeline: Pipeline, detail: string, attempt?: PipelineStageAttempt
   pipeline.stateDetail = detail;
 }
 
+function knownReset(...candidates: Array<number | null | undefined>): number | null {
+  const resets = candidates.filter((candidate): candidate is number =>
+    typeof candidate === "number" && Number.isSafeInteger(candidate) && candidate > 0);
+  return resets.length ? Math.min(...resets) : null;
+}
+
+function rateLimitParkDetail(resetsAt: number | null, accountLabel: string): string {
+  const reset = resetsAt === null ? "an unknown reset time" : new Date(resetsAt * 1_000).toISOString();
+  return `rate limited until ${reset}, account ${accountLabel}`;
+}
+
+/** Terminal usage-limit recovery reuses the ordinary attempt and account
+    selection seams. The failed attempt stays as evidence; an automatic retry
+    carries a durable exclusion into the next spawn, while a pin or exhausted
+    allowed set parks on the earliest reset the two sources can establish. */
+function recoverUsageLimitedAttempt(
+  pipeline: Pipeline,
+  stage: PipelineStage,
+  attempt: PipelineStageAttempt,
+  usageLimit: { resetsAt: number | null },
+  ports: PipelinePorts,
+): void {
+  const fromTranscript = attempt.agentPath
+    ? ports.accountForTranscript?.(attempt.effectiveRole.engine, attempt.agentPath) ?? null
+    : null;
+  const accountId = attempt.accountId?.trim()
+    || fromTranscript?.accountId
+    || stage.account?.trim()
+    || null;
+  let accountLabel = "unknown";
+  if (fromTranscript?.accountId === accountId) accountLabel = fromTranscript.label;
+  else if (accountId) accountLabel = ports.accountLabel?.(attempt.effectiveRole.engine, accountId) ?? accountId;
+  const terminalDetail = rateLimitParkDetail(knownReset(usageLimit.resetsAt), accountLabel);
+  attempt.state = "failed";
+  attempt.completedAt = ports.now();
+  attempt.error = terminalDetail;
+
+  if (stage.account || !accountId) {
+    park(pipeline, terminalDetail, attempt);
+    return;
+  }
+
+  const usageLimitedAccounts = [
+    ...(attempt.usageLimitedAccounts ?? []).filter((limited) => limited.accountId !== accountId),
+    { accountId, resetsAt: knownReset(usageLimit.resetsAt) },
+  ];
+  attempt.usageLimitedAccounts = usageLimitedAccounts;
+  const unavailableAccountIds = usageLimitedAccounts.map((limited) => limited.accountId);
+  let resolution: ReturnType<typeof accountManager.resolveProjectSpawn>;
+  try {
+    resolution = ports.resolveProjectSpawn?.(attempt.effectiveRole.engine, {
+      project: pipeline.project,
+      unavailableIds: unavailableAccountIds,
+    }) ?? accountManager.resolveProjectSpawn(attempt.effectiveRole.engine, {
+      project: pipeline.project,
+      unavailableIds: unavailableAccountIds,
+    });
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    park(pipeline, `${terminalDetail}; failover unavailable: ${reason}`, attempt);
+    return;
+  }
+
+  if (resolution.kind === "available" && resolution.account.accountId !== accountId) {
+    pipeline.state = "running";
+    pipeline.pausedState = null;
+    pipeline.stateDetail = terminalDetail;
+    setCursorState(pipeline, stage.id, "pending");
+    const retry = newAttempt(pipeline, stage);
+    if (retry) retry.usageLimitedAccounts = usageLimitedAccounts;
+    return;
+  }
+
+  const earliestReset = knownReset(
+    ...usageLimitedAccounts.map((limited) => limited.resetsAt),
+    resolution.kind === "exhausted" ? resolution.resetsAt : null,
+  );
+  park(pipeline, rateLimitParkDetail(earliestReset, accountLabel), attempt);
+}
+
 /** Moves the cursor's lifecycle state while preserving the durable relay record
     (#353): the persisted input/activatedBy of the current activation survive
     every pending → spawning → running → committing transition, so a crash at
@@ -1167,6 +1286,8 @@ function newAttempt(pipeline: Pipeline, stage: PipelineStage): PipelineStageAtte
     sessionId: null,
     agentPath: null,
     paneId: null,
+    accountId: null,
+    usageLimitedAccounts: [],
     flowId: null,
     expectedReviewHeadSha: null,
     reviewHeadSha: null,
@@ -1316,6 +1437,7 @@ async function reconcileHistoricalAttempts(pipeline: Pipeline, entries: FileEntr
             attempt.sessionId = receipt.sessionId;
             attempt.agentPath = receipt.transcript;
             attempt.paneId = receipt.paneId;
+            attempt.accountId = receipt.accountId ?? attempt.accountId ?? null;
             if (receipt.state === "failed" || receipt.state === "conflicted") {
               attempt.state = "failed";
               attempt.completedAt = ports.now();
@@ -1774,6 +1896,36 @@ async function tickRunStage(
     const activationNow = ports.now();
     /* A wait booked by an earlier tick is not due yet. */
     if (unixMs(attempt.controllerWait?.retryAfter ?? "") > unixMs(activationNow)) return;
+    const usageLimitedAccounts = attempt.usageLimitedAccounts ?? [];
+    if (usageLimitedAccounts.length > 0) {
+      const unavailableIds = usageLimitedAccounts.map((limited) => limited.accountId);
+      const latestLimited = usageLimitedAccounts.at(-1)!;
+      const accountLabel = ports.accountLabel?.(attempt.effectiveRole.engine, latestLimited.accountId) ?? latestLimited.accountId;
+      let resolution: ReturnType<typeof accountManager.resolveProjectSpawn>;
+      try {
+        resolution = ports.resolveProjectSpawn?.(attempt.effectiveRole.engine, {
+          project: pipeline.project,
+          unavailableIds,
+        }) ?? accountManager.resolveProjectSpawn(attempt.effectiveRole.engine, {
+          project: pipeline.project,
+          unavailableIds,
+        });
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        park(pipeline, `${rateLimitParkDetail(knownReset(...usageLimitedAccounts.map((limited) => limited.resetsAt)), accountLabel)}; failover unavailable: ${reason}`, attempt);
+        return;
+      }
+      if (resolution.kind !== "available" || unavailableIds.includes(resolution.account.accountId)) {
+        const resetsAt = knownReset(
+          ...usageLimitedAccounts.map((limited) => limited.resetsAt),
+          resolution.kind === "exhausted" ? resolution.resetsAt : null,
+        );
+        attempt.state = "failed";
+        attempt.completedAt = activationNow;
+        park(pipeline, rateLimitParkDetail(resetsAt, accountLabel), attempt);
+        return;
+      }
+    }
     /* A publication this process is merely between is transient. Waiting for it
        beats spawning into it: the failure lands deep in durable host setup
        (structuredSpawn's publishHost), so an attempt issued now burns a real
@@ -1811,10 +1963,11 @@ async function tickRunStage(
       const priorAttempt = runFor(pipeline, stage.id)?.attempts.filter((candidate) => !candidate.historical).at(-2) ?? null;
       const spawnInput: Parameters<PipelinePorts["spawnAgent"]>[0] = {
         role: attempt.effectiveRole,
-        sandbox: pipelineStageSandbox(stage),
+        runtimeProfile: pipelineStageRuntimeProfile(stage),
         cwd: pipeline.worktreeDir,
         project: pipeline.project,
         requestedAccountId: stage.account ?? null,
+        unavailableAccountIds: (attempt.usageLimitedAccounts ?? []).map((limited) => limited.accountId),
         title: pipelineStageTitle(pipeline.task, stage.id),
         prompt,
         parentPath: latestCompletedAgentPath(pipeline, stage.id),
@@ -1854,6 +2007,7 @@ async function tickRunStage(
           }, (reservation) => {
             attempt.launchId = reservation.launchId;
             attempt.conversationId = reservation.conversationId;
+            attempt.accountId = reservation.accountId ?? attempt.accountId ?? null;
             persist();
           });
           break;
@@ -1895,8 +2049,10 @@ async function tickRunStage(
       attempt.sessionId = spawned.sessionId;
       attempt.agentPath = spawned.transcript;
       attempt.paneId = spawned.paneId;
+      attempt.accountId = spawned.accountId ?? attempt.accountId ?? null;
       attempt.state = "running";
       setCursorState(pipeline, stage.id, "running");
+      if (pipeline.stateDetail?.startsWith("rate limited until ")) pipeline.stateDetail = null;
     } catch (error) {
       park(pipeline, error instanceof Error ? error.message : String(error), attempt);
     } finally {
@@ -1921,6 +2077,7 @@ async function tickRunStage(
       attempt.sessionId = receipt.sessionId;
       attempt.agentPath = receipt.transcript;
       attempt.paneId = receipt.paneId;
+      attempt.accountId = receipt.accountId ?? attempt.accountId ?? null;
       if (receipt.state === "failed" || receipt.state === "conflicted" || (receipt.state === "starting" && !receipt.paneId && !receipt.transcript)) {
         park(pipeline, receipt.error ?? `stage spawn cannot recover from receipt state ${receipt.state}`, attempt);
         return;
@@ -1991,6 +2148,15 @@ async function tickRunStage(
     }, ports, durable);
   if (unregisteredHostDeath && canSpendRecoveryCheck()) {
     recordVerdictRecoveryMiss(pipeline, attempt, ports, unregisteredHostDeath, null);
+    return;
+  }
+  const terminalProviderMessage = durable?.turn === "terminal" ? durable.terminalProviderMessage : null;
+  const terminalUsageLimit = terminalProviderMessage
+    && terminalProviderMessage.ts > unixMs(attempt.startedAt)
+    ? terminalProviderMessage.usageLimit ?? null
+    : null;
+  if (terminalUsageLimit) {
+    recoverUsageLimitedAttempt(pipeline, stage, attempt, terminalUsageLimit, ports);
     return;
   }
   const durableTerminal = durable?.turn === "terminal" && durable.message !== null && durable.message.ts > unixMs(attempt.startedAt);
@@ -2586,6 +2752,7 @@ function reconcileParkedStructuredSpawn(pipeline: Pipeline, ports: PipelinePorts
   attempt.sessionId = receipt.sessionId;
   attempt.agentPath = receipt.transcript;
   attempt.paneId = receipt.paneId;
+  attempt.accountId = receipt.accountId ?? attempt.accountId ?? null;
   attempt.state = "running";
   attempt.error = null;
   pipeline.state = "running";

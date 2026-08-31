@@ -17,9 +17,10 @@ import { CodexAppServerHost } from "@/lib/runtime/codexAppServerHost";
 import { StructuredHostAdoptionCleanupError } from "@/lib/runtime/engineHost";
 import { hasStructuredDeliveryHost, publishStructuredDeliveryHost, releaseStructuredDeliveryHost, requireStructuredDeliveryControllerPublication } from "@/lib/runtime/structuredDeliveryController";
 import { bindClaudeHostPersistence, bindCodexHostPersistence, structuredHostsEnabled } from "@/lib/runtime/registry";
+import { materializeStructuredHostAccess, structuredHostAccessPolicy } from "@/lib/runtime/structuredSpawn";
 import { cleanupTmuxHostIfMatches, forgetResumePaneIfMatches, spawnAgentWithPrompt, verifyTmuxHostEvidence, type TmuxHostCleanupResult } from "@/lib/tmux";
 
-import type { LaunchProfile, ProviderReceipt, SuccessorProviderPort } from "./contracts";
+import { launchProfileCodexSandbox, launchProfileEngineReadOnly, type LaunchProfile, type ProviderReceipt, type SuccessorProviderPort } from "./contracts";
 import { hashValidatedHistory, HistorySecurityError, MigrationTargetUnavailableError, safeCopyHistory, validateHistorySource } from "./safeHistoryCopy";
 
 interface StructuredHostPublicationInput {
@@ -273,6 +274,11 @@ async function publishCodexSuccessorHost(input: StructuredHostPublicationInput):
   let host: CodexAppServerHost | null = null;
   let stopPersistence = () => {};
   let unregister = async () => {};
+  const access = materializeStructuredHostAccess(
+    structuredHostAccessPolicy(input.profile),
+    input.target.env,
+    null,
+  );
   try {
     host = await CodexAppServerHost.adopt(input.receipt.nativeId, {
       cwd: input.profile.cwd,
@@ -280,10 +286,11 @@ async function publishCodexSuccessorHost(input: StructuredHostPublicationInput):
       fileAuthCredentials: input.target.kind === "managed",
       model: input.profile.model ?? undefined,
       effort: input.profile.effort ?? undefined,
-      sandbox: input.profile.readOnly ? "read-only" : undefined,
+      ...access.codex,
+      ...access.host,
       approvalPolicy,
       initialEventCursor: claimed.structuredHost?.eventCursor,
-      env: input.target.env,
+      env: access.env,
     });
     stopPersistence = await bindCodexHostPersistence(
       input.registry,
@@ -311,6 +318,7 @@ async function publishCodexSuccessorHost(input: StructuredHostPublicationInput):
     }
     await unregister();
     if (host) await host.release();
+    else access.cleanup();
     stopPersistence();
     input.registry.releaseStructuredHostClaim(key, claimed.claimOwner, claimed.claimEpoch);
     throw error;
@@ -372,20 +380,29 @@ async function publishClaudeSuccessorHost(
   let host: ClaudeStreamBrokerHost | null = null;
   let stopPersistence = () => {};
   let unregister = async () => {};
+  let access: ReturnType<typeof materializeStructuredHostAccess> | null = null;
   try {
     const tmuxHost = claudeTmuxHostFromReceipt(input.receipt);
     const cancelled = await input.cancelClaude(tmuxHost);
     if (!cleanupConfirmed(cancelled)) throw new Error("successor Claude host transition is still pending");
     await forgetResumePaneIfMatches(input.receipt.path, tmuxHost);
+    access = materializeStructuredHostAccess(
+      structuredHostAccessPolicy(input.profile),
+      input.target.env,
+      null,
+    );
     host = await ClaudeStreamBrokerHost.adopt(input.receipt.nativeId, {
       cwd: input.profile.cwd,
       claudeConfigDir: input.target.kind === "managed" ? input.target.home : undefined,
       claudeProjectsDir: input.target.transcriptRoot,
-      env: input.target.env,
+      env: access.env,
       model: input.profile.model ?? undefined,
       effort: input.profile.effort ?? undefined,
+      readOnly: launchProfileEngineReadOnly(input.profile),
+      restricted: input.profile.sandbox === "restricted",
       permissionMode: input.profile.permissionMode ?? undefined,
       initialEventCursor: claimed.structuredHost?.eventCursor,
+      ...access.host,
     });
     stopPersistence = await bindClaudeHostPersistence(
       input.registry,
@@ -413,6 +430,7 @@ async function publishClaudeSuccessorHost(
     }
     await unregister();
     if (host) await host.release();
+    else access?.cleanup();
     stopPersistence();
     input.registry.releaseStructuredHostClaim(key, claimed.claimOwner, claimed.claimEpoch);
     throw error;
@@ -1405,7 +1423,7 @@ export class RegisteredSuccessorProvider implements SuccessorProviderPort {
         effort: profile.effort,
         fast: profile.fast,
         approvalPolicy,
-        sandbox: profile.readOnly ? "read-only" : null,
+        sandbox: launchProfileCodexSandbox(profile),
       });
       if (resumed.id !== fork.id) throw new Error("target Codex resume returned another thread");
       if (profile.title) await targetClient.setThreadName(fork.id, profile.title);

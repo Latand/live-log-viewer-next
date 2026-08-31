@@ -847,6 +847,7 @@ function mergeResumeLaunchProfile(current: LaunchProfile, requested: LaunchProfi
     fast: requested.fast ?? current.fast,
     permissionMode: requested.permissionMode ?? current.permissionMode,
     readOnly: requested.readOnly ?? current.readOnly,
+    sandbox: requested.sandbox ?? current.sandbox ?? null,
     allowSubagents: current.allowSubagents || requested.allowSubagents,
     mcpServers: current.mcpServers,
     /* The plugin grant was decided at spawn from the session's origin; a
@@ -5722,6 +5723,7 @@ export class AgentRegistry {
           fast: generation.launchProfile.fast ?? observation.launchProfile.fast,
           permissionMode: generation.launchProfile.permissionMode ?? observation.launchProfile.permissionMode,
           readOnly: generation.launchProfile.readOnly ?? observation.launchProfile.readOnly,
+          sandbox: generation.launchProfile.sandbox ?? observation.launchProfile.sandbox ?? null,
           mcpServers: generation.launchProfile.mcpServers,
           title: durableSemanticTitle(generation.launchProfile.title) ?? durableSemanticTitle(observation.launchProfile.title),
           project: observation.launchProfile.project ?? generation.launchProfile.project,

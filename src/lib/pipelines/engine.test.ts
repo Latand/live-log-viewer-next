@@ -86,6 +86,7 @@ test("a pipeline stage keeps its reserved account through a routing change befor
         access: "read-write",
         promptScaffold: "Builder guidance",
       },
+      runtimeProfile: { access: "read-write", sandbox: "full" },
       cwd,
       project: "repo-00000000000000000000000000000001",
       requestedAccountId: null,
@@ -171,6 +172,7 @@ test("a concurrent pipeline replay and its recovery projections withhold staged 
       access: "read-write" as const,
       promptScaffold: "Builder guidance",
     },
+    runtimeProfile: { access: "read-write", sandbox: "full" },
     cwd,
     project: "repo-00000000000000000000000000000001",
     requestedAccountId: null,
@@ -353,7 +355,7 @@ test("Claude pipeline roles keep autonomous tool access under read-only scope fe
     effort: "high",
     access: "read-only",
     promptScaffold: "Read-only architecture contract",
-  }, "restricted")).toBeNull();
+  }, "restricted")).toBe("auto");
   expect(pipelineClaudePermissionMode({
     roleId: "builder",
     engine: "claude",
@@ -439,14 +441,15 @@ function harness() {
     claimSpawnRetry: () => "claimed",
     spawnAgent: async (input, onReserved) => {
       const { role, title, parentPath, clientAttemptId, membership, supersedes } = input;
+      const accountId = input.unavailableAccountIds?.includes(LIMITED_ACCOUNT) ? SPARE_ACCOUNT : LIMITED_ACCOUNT;
       spawn += 1;
       spawnInputs.push(structuredClone(input));
       spawnRoles.push(structuredClone(role));
       spawnTitles.push(title);
       calls.push(`spawn:${clientAttemptId}:parent=${parentPath ?? "root"}:supersedes=${supersedes ?? "none"}`);
       calls.push(`membership:${membership.kind}:${membership.containerId}:${membership.slot}:${membership.role}:${membership.stageOrder}:round=${membership.round}`);
-      onReserved({ launchId: `launch-${spawn}`, conversationId: `conversation_stage_${spawn}` });
-      return { launchId: `launch-${spawn}`, conversationId: `conversation_stage_${spawn}`, sessionId: `session-${spawn}`, transcript: `/codex/stage-${spawn}.jsonl`, paneId: `%${spawn}` };
+      onReserved({ launchId: `launch-${spawn}`, conversationId: `conversation_stage_${spawn}`, accountId });
+      return { launchId: `launch-${spawn}`, conversationId: `conversation_stage_${spawn}`, sessionId: `session-${spawn}`, transcript: `/codex/stage-${spawn}.jsonl`, paneId: `%${spawn}`, accountId };
     },
     paneAgentAlive: async () => paneAlive,
     stopStageAgent: async (target) => {
@@ -548,26 +551,24 @@ async function create(ports: PipelinePorts, stages = RUN_STAGES as never) {
   return result.pipeline;
 }
 
-test("pipeline stage host access defaults to full and restriction is opt-in", async () => {
+test.each([
+  { access: "read-write", sandbox: "full" },
+  { access: "read-write", sandbox: "restricted" },
+  { access: "read-only", sandbox: "full" },
+  { access: "read-only", sandbox: "restricted" },
+] as const)("pipeline stage runtime profile preserves access=$access with sandbox=$sandbox", async ({ access, sandbox }) => {
   const h = harness();
   await create(h.ports, [
-    { id: "audit", kind: "run", role: { roleId: "architect" }, access: "read-only", prompt: "Audit", next: null },
+    { id: "audit", kind: "run", engine: "codex", access, sandbox, prompt: "Audit", next: null },
   ] as never);
   await tickPipelines([], h.ports);
   await tickPipelines([], h.ports);
 
-  expect(h.spawnInputs[0]).toMatchObject({ sandbox: "full" });
-  expect(h.spawnInputs[0]?.prompt).toContain("Host access: full");
-
-  const restricted = harness();
-  await create(restricted.ports, [
-    { id: "audit", kind: "run", role: { roleId: "architect" }, access: "read-only", sandbox: "restricted", prompt: "Audit", next: null },
-  ] as never);
-  await tickPipelines([], restricted.ports);
-  await tickPipelines([], restricted.ports);
-
-  expect(restricted.spawnInputs[0]).toMatchObject({ sandbox: "restricted" });
-  expect(restricted.spawnInputs[0]?.prompt).toContain("Host access: restricted");
+  expect(h.spawnInputs[0]).toMatchObject({
+    role: { access },
+    runtimeProfile: { access, sandbox },
+  });
+  expect(h.spawnInputs[0]?.prompt).toContain(`Host access: ${sandbox}`);
 });
 
 test("read-only stages preserve declared outputs and tell the agent their write boundary", async () => {
@@ -6108,6 +6109,10 @@ test("close terminalizes host-unavailable attempts from durable evidence and rec
    reading at all and refused, parking the lane on the board forever. The
    fixtures below are written here, never lifted from a live transcript. */
 const PROVIDER_LIMIT_NOTICE = "You've hit your session limit. Try again once the window resets.";
+const LIMITED_ACCOUNT = ["account", "limited"].join("-");
+const SPARE_ACCOUNT = ["account", "spare"].join("-");
+const LIMITED_ACCOUNT_LABEL = "Limited seat";
+const SPARE_ACCOUNT_LABEL = "Spare seat";
 
 function stageTranscript(name: string, records: Record<string, unknown>[]): string {
   const file = path.join(process.env.LLV_STATE_DIR!, `${name}.jsonl`);
@@ -6133,6 +6138,33 @@ function limitInterruptedTranscript(name: string): string {
         model: "<synthetic>",
         stop_reason: "stop_sequence",
         content: [{ type: "text", text: PROVIDER_LIMIT_NOTICE }],
+      },
+    },
+  ]);
+}
+
+function codexUsageLimitTranscript(name: string, resetsAt: number): string {
+  return stageTranscript(name, [
+    { timestamp: "2026-08-31T10:00:00.000Z", payload: { type: "task_started" } },
+    {
+      timestamp: "2026-08-31T10:04:00.000Z",
+      payload: {
+        type: "token_count",
+        rate_limits: {
+          limit_id: "codex",
+          primary: { used_percent: 27, window_minutes: 10_080, resets_at: resetsAt },
+          secondary: null,
+          credits: { has_credits: true, balance: "0" },
+          plan_type: "pro",
+        },
+      },
+    },
+    {
+      timestamp: "2026-08-31T10:05:00.000Z",
+      payload: {
+        type: "task_complete",
+        message: "You've hit your usage limit. Try again after the weekly reset.",
+        codex_error_info: "usage_limit",
       },
     },
   ]);
@@ -6176,6 +6208,190 @@ function readFixtures(h: ReturnType<typeof harness>, fixtures: Record<string, st
     return fixture ? await durableStageTurnEvidence(engine, fixture) : null;
   };
 }
+
+function usageLimitPorts(
+  h: ReturnType<typeof harness>,
+  resolution: ReturnType<typeof accountManager.resolveProjectSpawn>,
+): void {
+  Object.assign(h.ports, {
+    accountForTranscript: (_engine: string, transcriptPath: string) => transcriptPath.includes("stage-2")
+      ? { accountId: SPARE_ACCOUNT, label: SPARE_ACCOUNT_LABEL }
+      : { accountId: LIMITED_ACCOUNT, label: LIMITED_ACCOUNT_LABEL },
+    accountLabel: (_engine: string, accountId: string) => accountId === SPARE_ACCOUNT ? SPARE_ACCOUNT_LABEL : LIMITED_ACCOUNT_LABEL,
+    resolveProjectSpawn: () => resolution,
+  });
+}
+
+const usageLimitStage = (account?: string) => [{
+  id: "build",
+  kind: "run" as const,
+  role: { roleId: "builder" as const },
+  engine: "codex" as const,
+  access: "read-write" as const,
+  ["prompt"]: "Recover the usage-limited attempt",
+  next: null,
+  ...(account ? { account } : {}),
+}];
+
+test("a usage-limit terminal transcript parks promptly with the earliest allowed reset (#1371)", async () => {
+  const h = harness();
+  const currentReset = Math.floor(Date.parse("2026-09-07T10:05:00.000Z") / 1_000);
+  const earlierReset = Math.floor(Date.parse("2026-09-02T10:05:00.000Z") / 1_000);
+  const pipeline = await create(h.ports, usageLimitStage() as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  readFixtures(h, { "/codex/stage-1.jsonl": codexUsageLimitTranscript("running-usage-limit", currentReset) });
+  usageLimitPorts(h, {
+    kind: "exhausted",
+    resetsAt: earlierReset,
+    allowedAccountIds: [LIMITED_ACCOUNT, SPARE_ACCOUNT],
+  });
+
+  await tickPipelines([], h.ports);
+
+  const parked = loadPipelines().find((candidate) => candidate.id === pipeline.id)!;
+  const detail = `rate limited until ${new Date(earlierReset * 1_000).toISOString()}, account ${LIMITED_ACCOUNT_LABEL}`;
+  expect(parked).toMatchObject({ state: "needs_decision", stateDetail: detail });
+  expect(parked.runs[0]!.attempts[0]).toMatchObject({ state: "failed", error: detail });
+});
+
+test("an unpinned usage-limited stage respawns on another allowed account (#1371)", async () => {
+  const h = harness();
+  const resetsAt = Math.floor(Date.parse("2026-09-07T10:05:00.000Z") / 1_000);
+  const pipeline = await create(h.ports, usageLimitStage() as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  readFixtures(h, { "/codex/stage-1.jsonl": codexUsageLimitTranscript("failover-usage-limit", resetsAt) });
+  usageLimitPorts(h, {
+    kind: "available",
+    account: {
+      engine: "codex",
+      accountId: SPARE_ACCOUNT,
+      kind: "managed",
+      home: process.env.LLV_STATE_DIR!,
+      transcriptRoot: process.env.LLV_STATE_DIR!,
+      env: { NODE_ENV: "test" },
+    },
+  });
+
+  await tickPipelines([], h.ports);
+  const retrying = loadPipelines().find((candidate) => candidate.id === pipeline.id)!;
+  expect(retrying.stateDetail).toContain(`rate limited until ${new Date(resetsAt * 1_000).toISOString()}, account ${LIMITED_ACCOUNT_LABEL}`);
+  expect(retrying.runs[0]!.attempts).toHaveLength(2);
+  expect(retrying.runs[0]!.attempts[0]).toMatchObject({ state: "failed" });
+  expect(retrying.runs[0]!.attempts[1]).toMatchObject({ state: "pending" });
+
+  await tickPipelines([], h.ports);
+
+  const failedOver = loadPipelines().find((candidate) => candidate.id === pipeline.id)!;
+  expect(h.spawnInputs[1]).toMatchObject({ requestedAccountId: null, unavailableAccountIds: [LIMITED_ACCOUNT] });
+  expect(failedOver.runs[0]!.attempts[1]).toMatchObject({ state: "running", accountId: SPARE_ACCOUNT });
+});
+
+test("a failover whose remaining capacity disappears parks with the limit detail (#1371)", async () => {
+  const h = harness();
+  const resetsAt = Math.floor(Date.parse("2026-09-07T10:05:00.000Z") / 1_000);
+  const pipeline = await create(h.ports, usageLimitStage() as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  readFixtures(h, { "/codex/stage-1.jsonl": codexUsageLimitTranscript("failover-capacity-race", resetsAt) });
+  usageLimitPorts(h, {
+    kind: "available",
+    account: {
+      engine: "codex",
+      accountId: SPARE_ACCOUNT,
+      kind: "managed",
+      home: process.env.LLV_STATE_DIR!,
+      transcriptRoot: process.env.LLV_STATE_DIR!,
+      env: { NODE_ENV: "test" },
+    },
+  });
+  await tickPipelines([], h.ports);
+  usageLimitPorts(h, {
+    kind: "exhausted",
+    resetsAt,
+    allowedAccountIds: [LIMITED_ACCOUNT, SPARE_ACCOUNT],
+  });
+
+  await tickPipelines([], h.ports);
+
+  const parked = loadPipelines().find((candidate) => candidate.id === pipeline.id)!;
+  expect(h.spawnInputs).toHaveLength(1);
+  expect(parked).toMatchObject({
+    state: "needs_decision",
+    stateDetail: `rate limited until ${new Date(resetsAt * 1_000).toISOString()}, account ${LIMITED_ACCOUNT_LABEL}`,
+  });
+});
+
+test("successive usage limits park on the earliest reset across failed-over accounts (#1371)", async () => {
+  const h = harness();
+  const firstReset = Math.floor(Date.parse("2026-09-02T10:05:00.000Z") / 1_000);
+  const secondReset = Math.floor(Date.parse("2026-09-07T10:05:00.000Z") / 1_000);
+  const pipeline = await create(h.ports, usageLimitStage() as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  readFixtures(h, { "/codex/stage-1.jsonl": codexUsageLimitTranscript("first-account-usage-limit", firstReset) });
+  usageLimitPorts(h, {
+    kind: "available",
+    account: {
+      engine: "codex",
+      accountId: SPARE_ACCOUNT,
+      kind: "managed",
+      home: process.env.LLV_STATE_DIR!,
+      transcriptRoot: process.env.LLV_STATE_DIR!,
+      env: { NODE_ENV: "test" },
+    },
+  });
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+
+  readFixtures(h, { "/codex/stage-2.jsonl": codexUsageLimitTranscript("second-account-usage-limit", secondReset) });
+  usageLimitPorts(h, {
+    kind: "unavailable",
+    allowedAccountIds: [LIMITED_ACCOUNT, SPARE_ACCOUNT],
+  });
+  await tickPipelines([], h.ports);
+
+  const parked = loadPipelines().find((candidate) => candidate.id === pipeline.id)!;
+  expect(parked).toMatchObject({
+    state: "needs_decision",
+    stateDetail: `rate limited until ${new Date(firstReset * 1_000).toISOString()}, account ${SPARE_ACCOUNT_LABEL}`,
+  });
+  expect(parked.runs[0]!.attempts[1]?.usageLimitedAccounts).toEqual([
+    { accountId: LIMITED_ACCOUNT, resetsAt: firstReset },
+    { accountId: SPARE_ACCOUNT, resetsAt: secondReset },
+  ]);
+});
+
+test("a pinned usage-limited stage parks on its account and names the reset (#1371)", async () => {
+  const h = harness();
+  const resetsAt = Math.floor(Date.parse("2026-09-07T10:05:00.000Z") / 1_000);
+  const pipeline = await create(h.ports, usageLimitStage(LIMITED_ACCOUNT) as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  readFixtures(h, { "/codex/stage-1.jsonl": codexUsageLimitTranscript("pinned-usage-limit", resetsAt) });
+  let selectionCalls = 0;
+  usageLimitPorts(h, {
+    kind: "available",
+    account: {
+      engine: "codex",
+      accountId: SPARE_ACCOUNT,
+      kind: "managed",
+      home: process.env.LLV_STATE_DIR!,
+      transcriptRoot: process.env.LLV_STATE_DIR!,
+      env: { NODE_ENV: "test" },
+    },
+  });
+  Object.assign(h.ports, { resolveProjectSpawn: () => { selectionCalls += 1; throw new Error("pinned failover must not select"); } });
+
+  await tickPipelines([], h.ports);
+
+  const parked = loadPipelines().find((candidate) => candidate.id === pipeline.id)!;
+  const detail = `rate limited until ${new Date(resetsAt * 1_000).toISOString()}, account ${LIMITED_ACCOUNT_LABEL}`;
+  expect(parked).toMatchObject({ state: "needs_decision", stateDetail: detail });
+  expect(parked.runs[0]!.attempts[0]).toMatchObject({ state: "failed", error: detail });
+  expect(selectionCalls).toBe(0);
+});
 
 test("close retires an attempt whose turn a provider limit cut off, naming the notice (#1141)", async () => {
   const h = harness();
