@@ -589,7 +589,7 @@ export interface ConversationLookup {
   conversation(id: ViewerConversationId): RegistryConversation | null;
 }
 
-export { identityMaterializationFence } from "./identityMaterialization";
+export { identityMaterializationFence, type IdentityMaterializationFence } from "./identityMaterialization";
 
 type ConversationMigrationInput = Omit<ConversationMigration, "errorCode" | "operationId" | "sourceGenerationId" | "providerReceipt" | "pendingContinuityPaths" | "boardProject" | "boardOperationId" | "boardPlacementProject"> &
   Partial<Pick<ConversationMigration, "errorCode" | "operationId" | "sourceGenerationId" | "providerReceipt" | "pendingContinuityPaths" | "boardProject" | "boardOperationId" | "boardPlacementProject">>;

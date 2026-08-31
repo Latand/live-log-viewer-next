@@ -7,6 +7,7 @@ import type { FileEntry } from "@/lib/types";
 import type { ResumeSpec } from "./cli";
 import { resumeSpecForSession } from "./cli";
 import { attachCommandFromSpec, attachTargetPath, resolveAttachCommand, resolveLaunchAttachCommand, type AttachResolverDeps, type LaunchAttachDeps } from "./attachCommand";
+import { identityMaterializationFence } from "./identityMaterialization";
 
 /* The codex resume command now enumerates MCP servers via `codex mcp list --json`
    (PR #610). Stub that binary so the pure P1#6 launch-attach composition below
@@ -166,6 +167,7 @@ function launchDeps(over: Partial<LaunchAttachDeps> = {}): LaunchAttachDeps {
       resumeSourcePath: null,
       artifactPath: "/repo/rollout.jsonl",
     },
+    materializationFence: identityMaterializationFence(),
     materializedPath: null,
     resolveByPath: () => ({ ok: false, error: "not scanned yet", status: 404 }),
     resumeSpecForSession,

@@ -13,7 +13,7 @@
  */
 
 import type { AgentEngine, ResumeSpec } from "./cli";
-import { identityMaterializationFence, type SpawnReceipt } from "./registry";
+import type { IdentityMaterializationFence, SpawnReceipt } from "./registry";
 import type { FileEntry } from "@/lib/types";
 
 /** Shell-quote a value for the one-line `cd '<cwd>' && …` copy. Kept local so
@@ -161,6 +161,7 @@ export interface LaunchAttachReceipt {
 
 export interface LaunchAttachDeps {
   receipt: LaunchAttachReceipt | null;
+  materializationFence: Pick<IdentityMaterializationFence, "allowsReceipt">;
   /** The conversation's transcript path when it is already in the scan. */
   materializedPath: string | null;
   resolveByPath: (path: string) => AttachResolution;
@@ -183,7 +184,7 @@ export interface LaunchAttachDeps {
 export function resolveLaunchAttachCommand(deps: LaunchAttachDeps): AttachResolution {
   const receipt = deps.receipt;
   if (!receipt) return { ok: false, error: "the launch is unknown to the viewer", status: 404 };
-  if (!identityMaterializationFence().allowsReceipt(receipt)) {
+  if (!deps.materializationFence.allowsReceipt(receipt)) {
     return { ok: false, error: "the attach command is not available until the transcript materializes", status: 409 };
   }
   if (deps.materializedPath) {

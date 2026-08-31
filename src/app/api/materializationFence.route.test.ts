@@ -39,7 +39,8 @@ mock.module("@/lib/scanner/scanCache", () => ({
 const { GET: getSession } = await import("@/app/api/session/route");
 const { GET: getAttachCommand } = await import("@/app/api/attach-command/route");
 
-const registry = new AgentRegistry(path.join(stateDir, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+const registryFilename = path.join(stateDir, "registry.json");
+const registry = new AgentRegistry(registryFilename, undefined, undefined, { sqliteMode: "off" });
 setAgentRegistryForTests(registry);
 
 afterAll(() => {
@@ -128,6 +129,21 @@ test("structured identity becomes externally resolvable only after readable fina
     const response = await getAttachCommand(request(url));
     expect(response.status).toBe(409);
     expect(await response.json()).toMatchObject({ error: expect.stringContaining("not available") });
+  }
+
+  const persisted = JSON.parse(fs.readFileSync(registryFilename, "utf8")) as {
+    receipts: Record<string, { transport: string | null }>;
+  };
+  persisted.receipts[begun.receipt.launchId]!.transport = null;
+  fs.writeFileSync(registryFilename, JSON.stringify(persisted));
+  const legacyRegistry = new AgentRegistry(registryFilename, undefined, undefined, { sqliteMode: "off" });
+  setAgentRegistryForTests(legacyRegistry);
+  try {
+    const response = await getAttachCommand(request(stagedAttachUrls[1]!));
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: expect.stringContaining("not available") });
+  } finally {
+    setAgentRegistryForTests(registry);
   }
 
   fs.mkdirSync(path.dirname(artifactPath), { recursive: true });

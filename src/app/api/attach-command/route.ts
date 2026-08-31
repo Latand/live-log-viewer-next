@@ -61,6 +61,7 @@ function resolveLaunchPath(launchId: string, files: FileEntry[]): NextResponse<A
   const snapshot = registry.readOnlySnapshot();
   const receipt = snapshot.receipts[launchId] ?? null;
   const conversation = receipt ? snapshot.conversations[receipt.conversationId] ?? null : null;
+  const materializationFence = identityMaterializationFence(snapshot);
   /* Migration fence: the same hold the transcript path honours. */
   if (conversation && deliveryFence(conversation) === "held") {
     return NextResponse.json(
@@ -85,6 +86,7 @@ function resolveLaunchPath(launchId: string, files: FileEntry[]): NextResponse<A
         launchProfile: liveProfile ?? receipt.launchProfile,
       }
       : null,
+    materializationFence,
     materializedPath,
     resolveByPath: (target) => resolveAttachCommand(target, {
       files,

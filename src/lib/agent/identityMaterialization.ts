@@ -11,6 +11,12 @@ export type IdentityMaterializationReceipt = Pick<
   "transport" | "state" | "key" | "artifactPath" | "purpose" | "resumeSourcePath"
 >;
 
+export interface IdentityMaterializationFence {
+  allowsReceipt: (receipt: IdentityMaterializationReceipt, options?: { structured?: boolean }) => boolean;
+  allowsPath: (artifactPath: string) => boolean;
+  pathForConversation: (conversationId: `conversation_${string}`) => string | null;
+}
+
 /**
  * The publication fence for a staged structured identity. The registry keeps
  * the future key and path while a host binds; external resolvers may use them
@@ -18,11 +24,7 @@ export type IdentityMaterializationReceipt = Pick<
  * the already-readable source generation resolvable while its replacement
  * receipt stays private.
  */
-export function identityMaterializationFence(snapshot?: IdentityMaterializationSnapshot): {
-  allowsReceipt: (receipt: IdentityMaterializationReceipt, options?: { structured?: boolean }) => boolean;
-  allowsPath: (artifactPath: string) => boolean;
-  pathForConversation: (conversationId: `conversation_${string}`) => string | null;
-} {
+export function identityMaterializationFence(snapshot?: IdentityMaterializationSnapshot): IdentityMaterializationFence {
   const allowsReceipt = (receipt: IdentityMaterializationReceipt, options: { structured?: boolean } = {}): boolean => {
     const structured = receipt.transport === "structured"
       || (receipt.transport === null
