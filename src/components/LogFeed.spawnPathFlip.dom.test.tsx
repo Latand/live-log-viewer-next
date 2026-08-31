@@ -163,11 +163,13 @@ mock.module("@/hooks/useToolActivityCues", () => ({
 const { LogFeed } = await import("./LogFeed");
 const { resetLogTailCacheForTests } = await import("@/hooks/useLogTail");
 const { resetCanonicalAssistantClaimsForTests } = await import("./conversation/liveTurnHandoff");
+const { readOutbox, resetOutboxForTests } = await import("./conversation/outbox");
 
 const roots = new Set<Root>();
 beforeEach(() => {
   setLocale("en");
   dom.sessionStorage.clear();
+  resetOutboxForTests();
   resetCanonicalAssistantClaimsForTests();
   resetLogTailCacheForTests();
   bus.events = [];
@@ -295,4 +297,68 @@ test("a placeholder whose host has not named an artifact yet reads nothing and s
     `subscribe:${ARTIFACT_PATH}`,
   ]);
   oneRendering(host);
+});
+
+test.each([
+  ["roleless", ""],
+  ["role", "You are a Builder in plain mode."],
+])("an image-only %s launch retires its launch-owned delivering bubble when the live transcript is adopted", async (kind, promptEcho) => {
+  session = { ...sessionBase, artifactPath: null, liveTurn: null, activeTurnId: null };
+  const launchId = `launch-image-only-${kind}`;
+  const spawn = {
+    launchId,
+    clientAttemptId: null,
+    accountId: null,
+    conversationId: CONVERSATION_ID,
+    generation: 1,
+    state: "queued" as const,
+    initialMessage: "queued" as const,
+    retrySafe: false,
+    error: null,
+    ["prompt"]: "",
+    promptImages: 1,
+    promptAt: Date.parse(AT(0)),
+    promptEcho,
+  };
+  const owner = { conversationId: CONVERSATION_ID, generation: 1 };
+  const preAdoption = { ...launchCard, generation: 1, spawn } as FileEntry;
+  const adopted = {
+    ...transcriptCard,
+    generation: 1,
+    launch: {
+      launchId,
+      clientAttemptId: null,
+      accountId: null,
+      conversationId: CONVERSATION_ID,
+      generation: 1,
+      state: "queued",
+      initialMessage: "queued",
+      retrySafe: false,
+      error: null,
+    },
+  } as FileEntry;
+
+  const { host, paint } = mount();
+  paint(preAdoption);
+  await settle();
+  expect(host.querySelector<HTMLElement>(`[data-outbox-entry="${launchId}"]`)?.dataset.outboxState)
+    .toBe("delivering");
+  expect(readOutbox(CONVERSATION_ID).find((entry) => entry.id === launchId)).toMatchObject({
+    text: "",
+    images: 1,
+    state: "delivering",
+    launchOwned: true,
+    owner,
+    ...(promptEcho ? { echoText: promptEcho } : {}),
+  });
+
+  paint(adopted);
+  await settle();
+  expect(Boolean(host.querySelector(`[data-outbox-entry="${launchId}"]`))).toBeFalse();
+  expect(readOutbox(CONVERSATION_ID).find((entry) => entry.id === launchId)).toMatchObject({
+    state: "delivering",
+    launchOwned: true,
+    adoptedAt: expect.any(Number),
+    owner,
+  });
 });

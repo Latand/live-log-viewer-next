@@ -164,19 +164,20 @@ function cardState(snapshot: RegistryFile, receipt: SpawnReceipt): StructuredSpa
   };
 }
 
-/** The launch facts INSIDE an adopted live conversation window (issue #615): the
-    transcript now renders the operator's message itself, so the launch stops
-    contributing a prompt bubble in the same response — only its transient status
-    chips remain. Strips every prompt-display field from the state. */
+/** The launch facts INSIDE an adopted live conversation window (issue #615/#616):
+    the transcript now renders the operator's message itself, so the launch stops
+    contributing a prompt bubble in the same response. The canonical echo identity
+    remains long enough for a browser-seeded raw role prompt to reconcile with that
+    transcript row on a direct 202-to-live adoption. */
 function launchFactsWithoutPrompt(spawn: StructuredSpawnCardState): StructuredSpawnCardState {
-  if (spawn.prompt === undefined && spawn.promptEcho === undefined && spawn.promptImages === undefined && spawn.promptAt === undefined) {
+  if (spawn.prompt === undefined && spawn.promptImages === undefined && spawn.promptAt === undefined) {
     return spawn;
   }
   const facts = { ...spawn };
+  if (facts.promptEcho === facts.prompt) delete facts.promptEcho;
   delete facts.prompt;
   delete facts.promptImages;
   delete facts.promptAt;
-  delete facts.promptEcho;
   return facts;
 }
 
