@@ -5,6 +5,7 @@ import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 
 import type { FileEntry } from "@/lib/types";
+import { lastTurnFromRecords } from "@/lib/scanner/turnDuration";
 
 import { TurnStatusBar } from "./TurnStatusBar";
 
@@ -105,8 +106,14 @@ test("a held delivery starts the timer at transcript receipt instead of composer
 
     const laggedDelivery = {
       sentAt,
-      file: file({ startedAt: receivedAt, endedAt: null }, "live"),
+      file: file(lastTurnFromRecords([{
+        type: "user",
+        timestamp: new Date(receivedAt).toISOString(),
+        message: { role: "user", content: "delivered after a hold" },
+      }], false), "live"),
     };
+    expect(laggedDelivery.file.lastTurn?.startedAt).toBe(receivedAt);
+    expect(laggedDelivery.file.lastTurn?.startedAt).not.toBe(laggedDelivery.sentAt);
     render(laggedDelivery.file, container);
     setSystemTime(new Date(receivedAt + 3000));
     flushSync(() => tick!());

@@ -96,7 +96,8 @@ export type ToolEvent = {
   cwd?: string;
   /** Numeric exit code recovered from a `exited with code N` result line. */
   exitCode?: number;
-  /** Wall-clock duration in ms, from a Codex `Wall time` preamble. */
+  /** Elapsed duration in ms. Transcript timestamps take precedence; legacy
+      Codex wrappers can supply a `Wall time` fallback. */
   durationMs?: number;
   /** Result timestamp, once the tool result attaches (end of the run). */
   endTs?: unknown;

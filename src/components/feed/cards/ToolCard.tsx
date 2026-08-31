@@ -193,7 +193,7 @@ export function ToolBlockRow({ event, index, nested = false }: { event: ToolEven
 
 /** One normalized tool event rendered as a quiet ToolLine (design doc §3.4):
     a borderless, tile-less single row — glyph + summary + (non-ok status) +
-    time — that reads as chrome between messages. The body mounts only after the
+    duration + time — that reads as chrome between messages. The body mounts only after the
     first expand into a sunken readable block (issue #475), keeping a long
     transcript's collapsed DOM small (issue #9 §7/§8) — the same lazy contract
     holds when the line renders inside a cmd-group. An error is never quiet: it
