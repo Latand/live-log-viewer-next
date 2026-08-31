@@ -3,6 +3,7 @@ import path from "node:path";
 import type { ChildProcess } from "node:child_process";
 
 import { statePath } from "@/lib/configDir";
+import { RuntimeHostUnavailableError } from "@/lib/runtime/client";
 import { structuredHostsEnabled } from "@/lib/runtime/flags";
 import {
   acknowledgeHotStateFence,
@@ -614,7 +615,8 @@ export function classifyStructuredHostStartupError(
       action: "Retry after the local I/O dependency recovers.",
     };
   }
-  if (/^runtime host (?:is unavailable|request cancelled|response exceeds limit|returned invalid JSON|response id mismatch)$/i.test(message)) {
+  if (error instanceof RuntimeHostUnavailableError
+    || /^runtime host (?:is unavailable|request cancelled|response exceeds limit|returned invalid JSON|response id mismatch)$/i.test(message)) {
     return {
       disposition: "recoverable",
       category: "runtime-host-unavailable",

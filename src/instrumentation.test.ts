@@ -687,7 +687,7 @@ test("controller startup classifies every recoverable incident class and termina
     code: "structured-delivery-controller-unavailable",
   });
   const cases: Array<[unknown, string]> = [
-    [new RuntimeHostUnavailableError("runtime host is unavailable"), "runtime-host-unavailable"],
+    [new RuntimeHostUnavailableError("runtime socket failed after host adoption"), "runtime-host-unavailable"],
     [new RuntimeHostUnavailableError("runtime host request timed out"), "timeout"],
     [registryContention, "registry-contention"],
     [transientIo, "transient-io"],
