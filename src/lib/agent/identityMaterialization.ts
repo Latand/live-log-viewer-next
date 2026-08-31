@@ -1,4 +1,4 @@
-import type { RegistryFile, SpawnReceipt } from "./registry";
+import type { AgentRegistryEntry, RegistryFile, SpawnReceipt } from "./registry";
 import { sessionKeyId } from "./sessionKey";
 
 type IdentityMaterializationSnapshot = Pick<
@@ -11,8 +11,13 @@ export type IdentityMaterializationReceipt = Pick<
   "transport" | "state" | "key" | "artifactPath" | "purpose" | "resumeSourcePath"
 >;
 
+type IdentityMaterializationOptions = {
+  structured?: boolean;
+  entry?: Pick<AgentRegistryEntry, "structuredHost" | "structuredHostOperationId">;
+};
+
 export interface IdentityMaterializationFence {
-  allowsReceipt: (receipt: IdentityMaterializationReceipt, options?: { structured?: boolean }) => boolean;
+  allowsReceipt: (receipt: IdentityMaterializationReceipt, options?: IdentityMaterializationOptions) => boolean;
   allowsPath: (artifactPath: string) => boolean;
   pathForConversation: (conversationId: `conversation_${string}`) => string | null;
 }
@@ -25,11 +30,13 @@ export interface IdentityMaterializationFence {
  * receipt stays private.
  */
 export function identityMaterializationFence(snapshot?: IdentityMaterializationSnapshot): IdentityMaterializationFence {
-  const allowsReceipt = (receipt: IdentityMaterializationReceipt, options: { structured?: boolean } = {}): boolean => {
+  const allowsReceipt = (receipt: IdentityMaterializationReceipt, options: IdentityMaterializationOptions = {}): boolean => {
+    const entry = options.entry ?? (receipt.key ? snapshot?.entries[sessionKeyId(receipt.key)] : undefined);
     const structured = receipt.transport === "structured"
       || (receipt.transport === null
         && (options.structured === true
-          || Boolean(receipt.key && snapshot?.entries[sessionKeyId(receipt.key)]?.structuredHost)));
+          || Boolean(entry?.structuredHost)
+          || typeof entry?.structuredHostOperationId === "string"));
     return !structured || receipt.state === "completed";
   };
   const withheldPaths = new Set<string>();

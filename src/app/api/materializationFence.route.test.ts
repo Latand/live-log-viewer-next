@@ -28,7 +28,7 @@ fs.writeFileSync(binary, "#!/bin/sh\nprintf '[{\"name\":\"viewer\"}]'\n");
 fs.chmodSync(binary, 0o755);
 
 const { emptyLaunchProfile } = await import("@/lib/accounts/migration/contracts");
-const { AgentRegistry, setAgentRegistryForTests } = await import("@/lib/agent/registry");
+const { AgentRegistry, identityMaterializationFence, setAgentRegistryForTests } = await import("@/lib/agent/registry");
 const { beginLegacySpawnFixture } = await import("@/lib/agent/registryTestFixtures");
 const realScanCache = await import("@/lib/scanner/scanCache");
 let scannedFiles: FileEntry[] = [];
@@ -187,5 +187,94 @@ test("structured identity becomes externally resolvable only after readable fina
     const response = await getAttachCommand(request(url));
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ engine: "codex", cwd });
+  }
+});
+
+test("failure cleanup keeps a transport-null structured identity private by conversation, path, and launch (#1329)", async () => {
+  scannedFiles = [];
+  const sessionId = crypto.randomUUID();
+  const artifactPath = path.join(
+    codexHome,
+    "sessions",
+    "2026",
+    "08",
+    `rollout-2026-08-31T01-00-00-${sessionId}.jsonl`,
+  );
+  const launchProfile = emptyLaunchProfile({ cwd, title: "Verify failed materialization fence" });
+  const begun = beginLegacySpawnFixture(registry, {
+    engine: "codex",
+    cwd,
+    transport: "structured",
+    accountId: "default",
+    launchProfile,
+  });
+  if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
+  const staged = registry.stageStructuredSpawn(begun.receipt.launchId, {
+    key: { engine: "codex", sessionId },
+    artifactPath,
+    cwd,
+    accountId: "default",
+    launchProfile,
+    status: "idle",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "stdio:failure-fixture",
+      process: { pid: process.pid, startIdentity: "failure-fixture-process" },
+      eventCursor: 0,
+      protocolVersion: "fixture-v1",
+      writerClaimEpoch: 1,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 1,
+    claimOwner: "structured-host:failure-fixture",
+    pendingAction: "spawn",
+  });
+  if (staged.kind !== "settled") throw new Error("spawn identity was unavailable");
+
+  const persisted = JSON.parse(fs.readFileSync(registryFilename, "utf8")) as {
+    receipts: Record<string, { transport: string | null }>;
+  };
+  persisted.receipts[begun.receipt.launchId]!.transport = null;
+  fs.writeFileSync(registryFilename, JSON.stringify(persisted));
+  const cleanupRegistry = new AgentRegistry(registryFilename, undefined, undefined, { sqliteMode: "off" });
+  expect(cleanupRegistry.failStructuredSpawn(begun.receipt.launchId, "transcript did not materialize")).toMatchObject({
+    claimed: true,
+    receipt: { state: "failed", transport: null },
+  });
+
+  const snapshot = cleanupRegistry.readOnlySnapshot();
+  const receipt = snapshot.receipts[begun.receipt.launchId]!;
+  const entry = snapshot.entries[`codex:${sessionId}`]!;
+  expect(entry).toMatchObject({
+    structuredHost: null,
+    structuredHostOperationId: begun.receipt.launchId,
+  });
+  const fence = identityMaterializationFence(snapshot);
+  expect(fence.allowsReceipt(receipt)).toBeFalse();
+  expect(fence.allowsPath(artifactPath)).toBeFalse();
+  expect(fence.pathForConversation(begun.receipt.conversationId)).toBeNull();
+
+  setAgentRegistryForTests(cleanupRegistry);
+  try {
+    const urls = [
+      `http://127.0.0.1:8898/api/session?conversationId=${encodeURIComponent(begun.receipt.conversationId)}`,
+      `http://127.0.0.1:8898/api/session?path=${encodeURIComponent(artifactPath)}`,
+      `http://127.0.0.1:8898/api/attach-command?path=${encodeURIComponent(artifactPath)}`,
+      `http://127.0.0.1:8898/api/attach-command?path=${encodeURIComponent(`spawn:${begun.receipt.launchId}`)}`,
+    ];
+    for (const [index, url] of urls.entries()) {
+      const response = index < 2
+        ? await getSession(request(url))
+        : await getAttachCommand(request(url));
+      expect(response.status).toBe(409);
+      const body = await response.json();
+      expect(body).toMatchObject({ error: expect.stringContaining("not available") });
+      if (index === 3) expect(body).not.toHaveProperty("command");
+    }
+  } finally {
+    setAgentRegistryForTests(registry);
   }
 });

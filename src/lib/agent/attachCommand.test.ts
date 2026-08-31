@@ -187,6 +187,15 @@ test("a queued launch with no transcript withholds its provisional resume identi
   }
 });
 
+test("a queued tmux launch composes from its durable receipt during scan lag", () => {
+  const receipt = launchDeps().receipt!;
+  const res = resolveLaunchAttachCommand(launchDeps({
+    receipt: { ...receipt, transport: "tmux", state: "path-pending" },
+  }));
+  expect(res.ok).toBeTrue();
+  if (res.ok) expect(res.value.command).toContain(`resume ${SESSION_ID}`);
+});
+
 test("a finalized launch composes from its durable receipt while the scanner catches up", () => {
   const res = resolveLaunchAttachCommand(launchDeps());
   expect(res.ok).toBe(true);

@@ -319,9 +319,7 @@ export class SqliteAgentRegistryStore {
         const entry = receipt.key && rawEntry !== undefined
           ? normalizeRow("entries", sessionKeyId(receipt.key), rawEntry)
           : undefined;
-        const identityPublished = identityMaterializationFence().allowsReceipt(receipt, {
-          structured: receipt.transport === null && Boolean(entry?.structuredHost),
-        });
+        const identityPublished = identityMaterializationFence().allowsReceipt(receipt, { entry });
         projection[launchId] = {
           launchId: receipt.launchId,
           state: receipt.state,
