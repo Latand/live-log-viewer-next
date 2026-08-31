@@ -202,6 +202,34 @@ test("read-only stage records a declared report without granting source commits"
   }
 });
 
+test("read-only stage records an ignored declared report", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "llv-pipeline-ignored-output-"));
+  try {
+    git(root, "init", "--initial-branch=main");
+    git(root, "config", "user.email", "pipeline-test");
+    git(root, "config", "user.name", "Pipeline Test");
+    git(root, "config", "commit.gpgSign", "false");
+    fs.writeFileSync(path.join(root, ".gitignore"), "reports/\n");
+    fs.writeFileSync(path.join(root, "source.ts"), "export const value = 1;\n");
+    git(root, "add", ".gitignore", "source.ts");
+    git(root, "commit", "-m", "initial");
+
+    const subject = pipeline();
+    subject.worktreeDir = root;
+    subject.lastPassedCommit = git(root, "rev-parse", "HEAD");
+    fs.mkdirSync(path.join(root, "reports"));
+    fs.writeFileSync(path.join(root, "reports", "audit.md"), "audited\n");
+
+    expect(git(root, "status", "--porcelain")).toBe("");
+    const result = commitPipelineStage(subject, "audit", false, realExec, ["reports/audit.md"]);
+    expect(result.ok).toBeTrue();
+    expect(result.ok && result.sha).not.toBe(subject.lastPassedCommit);
+    expect(git(root, "show", "HEAD:reports/audit.md")).toBe("audited");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("read-only stage refuses source edits beside a declared report", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "llv-pipeline-read-only-source-"));
   try {
