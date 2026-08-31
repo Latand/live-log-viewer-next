@@ -235,6 +235,7 @@ GET /api/history?conversation=...&before=...&limit=150
 - `limit` defaults to 150 and is clamped to `1..150`.
 - `showSvc=1` includes service rows. Omission excludes them and reports their count in `hiddenServiceCount`. `LogFeed` passes its current `showSvc` value, and the flag belongs to the cursor scope.
 - `sinceRevision` is optional on newest-page refreshes and asks for bounded changed-entry and ownership metadata after the client's known projection revision.
+- `rejectGeneration` is optional and valid only on a newest-page retry. `LogFeed` sends the opaque `fileGeneration` from a response whose ordered bootstrap overlap failed. If it still names the current projection, the index marks that generation invalid and rebuilds before serving another page. A stale value has no effect.
 - The server also enforces a 64 KiB page budget over the UTF-8 JSON encoding of the `entries` array.
 
 The endpoint returns entries in chronological order. This lets the client prepend the returned array directly. The SQL query walks ordinals in descending order to apply the limits, then reverses the chosen rows before serialization.
@@ -253,21 +254,12 @@ interface FeedEntrySummaryBase {
   timestamp: string | null;
   preview: string;
   bodySize: number;
+  bodyRef: string | null;
   byteRange: { start: number; end: number };
   summary: Record<string, unknown>;
 }
 
-type Phase1FeedEntrySummary = FeedEntrySummaryBase & {
-  inlineBody: { contentType: string; text: string } | null;
-  bodyRef: null;
-};
-
-type LazyFeedEntrySummary = FeedEntrySummaryBase & {
-  inlineBody?: never;
-  bodyRef: string | null;
-};
-
-type FeedEntrySummary = Phase1FeedEntrySummary | LazyFeedEntrySummary;
+type FeedEntrySummary = FeedEntrySummaryBase;
 
 interface SemanticPosition {
   ordinal: number;
@@ -277,7 +269,7 @@ interface SemanticPosition {
 type PageBoundary = SemanticPosition | { endAtByte: number };
 
 interface HistoryPage {
-  bodyMode: "inline" | "on-demand";
+  bodyMode: "preview" | "on-demand";
   entries: FeedEntrySummary[];
   beforeCursor: string | null;
   hasMore: boolean;
@@ -307,9 +299,9 @@ interface HistoryPage {
 }
 ```
 
-Phase 1 returns `bodyMode: "inline"`. For every selected row, the route reads its source range and includes the complete redacted logical body in `inlineBody`; cards expand from that field with no second request. `bodyRef` is `null`. Inline body bytes count toward the 64 KiB entries budget. If the first row's complete body exceeds that budget, the single-oversized-row exception returns it alone and advances the cursor, so Phase 1 remains usable at the known cost of one potentially large response.
+Phase 1 returns `bodyMode: "preview"` and `bodyRef: null`. Cards render the bounded preview; expansion is temporarily unavailable and says so directly. Page fetches never read full body ranges.
 
-Phase 2 changes the response version to `bodyMode: "on-demand"`: `inlineBody` disappears, `bodyRef` identifies omitted content, and the body route serves expansion. The semantic row, cursor, ordering, preview, and body-size fields stay unchanged across that transition.
+Phase 2 changes `bodyMode` to `"on-demand"`, mints `bodyRef` from the stored digest, and enables expansion through the body route. The semantic row, cursor, ordering, preview, and body-size fields stay unchanged across that transition.
 
 The row and byte limits select the longest contiguous newest-to-oldest consumed prefix. Filtered service rows accumulate in a pending segment. For each visible candidate, the server trials that candidate, constructs every derived page field, and UTF-8 encodes the complete envelope. A fitting trial commits its visible row and the newer pending filtered rows. A trial that exceeds the row, 64 KiB entries, or 80 KiB envelope limit commits the pending filtered segment, then stops with the visible candidate and every older row unconsumed. If the first visible candidate alone exceeds 64 KiB, the server consumes and returns that one row together with any newer filtered segment under the single-oversized-row exception while fixed metadata remains capped. At source start, a trailing filtered-only segment may commit by itself.
 
@@ -386,8 +378,9 @@ When an older page is prepended, the client reconciles the two edge states and t
 | Boundary case | Resolution |
 | --- | --- |
 | A JSONL record crosses indexer read buffers | Keep raw byte carry until a complete newline arrives. Commit no partial record. The live lane owns the unfinished tail. |
-| The bounded tail contains over 150 entries while the newest semantic page is capped at 150 | Capture every current feed key as bootstrap history, render matched summaries, and remove unmatched bootstrap rows. Older rows return only through `beforeCursor`. |
-| A released viewport anchor belongs to an unmatched bootstrap row | Freeze that one row and follow semantic cursors until ordered reconciliation finds its twin. Replace it under the same presentation key before retiring the bridge. |
+| The bounded tail contains over 150 entries while the newest semantic page is capped at 150 | Require the newest page to equal an exact ordered suffix of the request-start bootstrap. Replace that suffix and unload only the strictly older bootstrap prefix. Older rows return through `beforeCursor`. |
+| A newest-page projection omits a bootstrap row inside its claimed suffix | Keep the full raw lane and viewport anchor, reject that `fileGeneration`, and rebuild from JSONL. Absence from SQLite never removes the row. |
+| The viewport anchor belongs to the proven older bootstrap prefix | Keep that one row as a frozen bridge while cursors load its page. Replace it under the same presentation key before retiring the bridge. |
 | One source record emits several cards | Assign deterministic `source_part` values and consecutive ordinals. Every card keeps the same source range and a distinct `entry_id`. |
 | A tool call and result fall in different pages | Index the call once at its original ordinal. The result updates that row by `item_id`, extends its source range, settles it, and increments `projectionRevision`. The call's loaded page remains non-cacheable and is conditionally refetched after the newest page observes that revision. |
 | A bootstrap tool call settles after handoff | Its existing feed key remains bootstrap-owned. Patch a loaded summary in place or suppress the unloaded history-owned result. |
@@ -416,11 +409,13 @@ The live path stays exactly as it is. `readTailChunk`, `LogChunk`, logBus, SSE, 
 
 `FeedSession` already gives each retained entry a session-stable `key`, preserves that key when a later record updates the item, and allocates larger keys for appended entries. The parser adds one pure `reconciliationKey` to `FeedEntry`: native `identityKey` when available, or a domain-separated digest of engine, semantic kind, canonical raw-record facts, and per-record emission part. Identical fallback keys reconcile as an ordered multiset, newest first, so duplicate content consumes one durable twin per live row.
 
-Immediately before the first history request starts, `LogFeed` captures the current `feed.items` keys as `bootstrapKeys`. Rows appended while the request is in flight receive new keys outside that frozen set. When the response arrives, page summaries reconcile against all current live rows by `reconciliationKey` and reuse a matched presentation key. Only unmatched keys from the request-start `bootstrapKeys` become unloaded history and leave the rendered live lane. Post-request rows stay live unless the returned page contains their durable twin. A tool result or dedupe update that mutates an existing bootstrap key stays history-owned without resetting parser state.
+Immediately before the first history request starts, `LogFeed` captures the current `feed.items` as an ordered `bootstrap` snapshot containing each presentation key and `reconciliationKey`. Rows appended while the request is in flight receive keys outside that frozen snapshot. The handoff can retire bootstrap rows only after a caught-up newest page and the bootstrap share one exact ordered suffix, matched as a newest-first multiset. Returned summaries reuse the presentation keys in that overlap. Bootstrap rows strictly older than its oldest matched row are the proven prefix outside the returned page and become unloaded history.
+
+Any unmatched bootstrap row within or newer than the claimed overlap is a projection-coverage failure. The same applies when a caught-up page has no exact overlap with a nonempty bootstrap. `LogFeed` discards that page, keeps every bootstrap and post-request row on the raw lane, clears semantic cache entries for its `fileGeneration`, and retries the newest request with `rejectGeneration` set to that generation. The index invalidates and rebuilds the still-current rejected generation from JSONL. A response with `caughtUp: false` leaves the raw snapshot visible and waits for ordinary catch-up without rejecting the generation. Post-request rows stay live unless a returned page explicitly contains their durable twin. A tool result or dedupe update that mutates an existing bootstrap key stays raw until a later valid handoff and never resets parser state.
 
 Raw “show earlier” is disabled once semantic paging is available. Older pages prepend summaries directly into the history list and never enter `FeedSession`, so the backward-window reset at `src/components/feed/parse.ts:2382-2394` cannot run. If history is rebuilding, `LogFeed` keeps the existing bounded raw tail as provisional content until the first page arrives.
 
-A matched viewport row keeps its DOM key and pixel offset. An unmatched anchor row remains as one frozen bridge while `beforeCursor` pages load; ordered reconciliation replaces it when its summary appears, then retires the bridge. Runtime overlay claims and outbox echo observations consume the unified history-plus-live list exactly as they do today. Projection and source-generation changes invalidate semantic page caches only; the live hook follows its existing path-based lifecycle.
+A matched viewport row keeps its DOM key and pixel offset. An anchor in the proven older bootstrap prefix remains as one frozen bridge while `beforeCursor` pages load; ordered reconciliation replaces it when its summary appears, then retires the bridge. Runtime overlay claims and outbox echo observations consume the unified history-plus-live list exactly as they do today. Projection and source-generation changes invalidate semantic page caches only; the live hook follows its existing path-based lifecycle.
 
 ## Rollout
 
@@ -434,11 +429,11 @@ The rollout order follows the originating priority exactly. Each phase has its o
 - Add the `LogFeed` history controller, bootstrap-key handoff, and semantic-entry merge. “Show earlier” consumes `beforeCursor`.
 - Treat validation and rebuilding as explicit temporary states. Continue showing the bounded live lane.
 
-Exit proof: a normal initial open returns at most one semantic page, page walking has no gaps or repeats, append catch-up reads and parses only the suffix plus fixed overlap, rebuilding deletes only disposable projection state, and loading older history never calls `useLogTail.loadOlder()`. Existing bootstrap keys retire or reconcile; later FeedSession keys remain live.
+Exit proof: a normal initial open returns at most one semantic page, page walking has no gaps or repeats, append catch-up reads and parses only the suffix plus fixed overlap, rebuilding deletes only disposable projection state, and loading older history never calls `useLogTail.loadOlder()`. Matched bootstrap keys reconcile, only the proven older prefix retires, and later FeedSession keys remain live.
 
 ### Phase 2: body on demand
 
-- Switch `/api/history` from `bodyMode: "inline"` to `bodyMode: "on-demand"`, remove `inlineBody`, and mint `bodyRef` for omitted content.
+- Switch `/api/history` from `bodyMode: "preview"` to `bodyMode: "on-demand"`, mint `bodyRef` from the stored digest, and enable expansion for omitted content.
 - Add the body route and expansion states.
 - Keep raw source lookup for the bounded live lane until each live row receives its durable twin.
 
@@ -489,9 +484,10 @@ The Phase 1 blocking gate is intentionally small:
 - bounded newest-page and backward-cursor walking with no gaps or repeats;
 - suffix append checkpointing plus truncation/replacement rebuild;
 - one initial semantic page replacing the bounded provisional tail without calling `useLogTail.loadOlder()`;
+- an exact ordered bootstrap suffix allowing only its proven older prefix to unload, while a missing row inside the suffix keeps the raw lane visible and rejects that projection generation;
 - projection-only rebuild preserving `sourceGeneration` and live-tail state;
-- row, entry-byte, and fixed-metadata limits including one oversized row.
-- Phase 1 inline expansion returning the full redacted body, including a single body larger than 64 KiB returned alone with cursor progress.
+- row, entry-byte, and fixed-metadata limits including one oversized summary row;
+- Phase 1 returning only 512-byte previews with `bodyRef: null`, performing zero body-range reads, and presenting expansion as temporarily unavailable.
 
 The cumulative verification catalog below activates with the phase that owns each mechanism; it does not block the Phase 1 slice:
 
@@ -534,8 +530,10 @@ The cumulative verification catalog below activates with the phase that owns eac
 - a visible row rejected after the byte budget remaining eligible on the next page while filtered service rows advance the cursor;
 - a retained visible row, an envelope-rejected visible row, and filtered rows on both sides committing one contiguous prefix and recomputing every derived page field from it;
 - over 2,000 filtered service rows before the next visible row producing bounded empty progress pages that the client drains to the visible row without gaps;
-- a raw tail containing over 150 bootstrap entries rendering only the newest semantic page plus later FeedSession keys after handoff;
-- rows appended after request-start `bootstrapKeys` are frozen remaining live when absent from the response and reconcile in place when the response contains their `reconciliationKey`;
+- a raw tail containing over 150 bootstrap entries whose exact ordered suffix reconciles to the newest semantic page while only the proven older prefix unloads;
+- a valid-looking projection missing one row inside the reconciled suffix keeping the full raw lane and anchor visible, rejecting that `fileGeneration`, and rebuilding from JSONL;
+- no trustworthy bootstrap overlap keeping all raw rows visible and rebuilding the rejected projection;
+- rows appended after the request-start bootstrap snapshot remaining live when absent from the response and reconciling in place when the response contains their `reconciliationKey`;
 - a bootstrap item updated by a later tool result retaining its key and history ownership while a newly appended item receives a live key;
 - duplicate id-less bootstrap rows reconciling one-for-one through ordered `reconciliationKey` multiset consumption;
 - server projector and live parser fixtures producing byte-identical `reconciliationKey` values for native and fallback rows;
@@ -561,7 +559,7 @@ Instrumentation should report validation bytes, semantic-parse bytes, validation
 
 - Changing `useLogTail`, `TailSnapshot`, logBus, SSE, the polling fallback, `readTailChunk`, `LogChunk`, or `/api/log`.
 - Treating SQLite as a source of record, a recovery source, or evidence that missing JSONL content never existed.
-- Loading full bodies during page fetch in the Phase 2 end state. Phase 1's explicit `bodyMode: "inline"` is the temporary rollout exception.
+- Loading full bodies during page fetch.
 - Guaranteeing that one whole turn fits in one page.
 - Running virtualization before semantic paging and body removal bound browser data.
 - Changing transcript formats or asking engine writers to emit new records.
