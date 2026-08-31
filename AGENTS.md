@@ -56,6 +56,15 @@ checkout being present, and don't invent a second naming scheme.
 <!-- END:worktree-grouping -->
 
 <!-- BEGIN:live-state-and-publication -->
+# Local hooks mirror the publication gate
+
+Run `git config core.hooksPath .githooks` once per clone (worktrees inherit it
+from their parent repo's config). `pre-push` runs the real
+`privacy-publication-gate` (sub-second) from the merge base with commit
+checking, and warns when the branch is behind `origin/main` — the state in
+which the hosted gate flags main-only commits. `LLV_SKIP_HOOKS=1` skips it
+for a false positive.
+
 # Two ways to do real damage here (both happened, 2026-07-24)
 
 ## Never run this repo's suites against the operator's live state

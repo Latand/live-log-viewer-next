@@ -1280,16 +1280,10 @@ function ProjectDashboardView({
 
   /* The raw close, shared by an explicit user close and a history redo. */
   const applyClose = (path: string) => {
-    /* Closing a chat also puts out its host; fire-and-forget, since the node
-       disappears either way and a host that survived a failed request just
-       stays for the next close. Branch nodes are filtered server-side — they
-       share the root's host. */
-    void fetch("/api/tmux", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ action: "kill", path }),
-    }).catch(() => {});
-    /* One durable close, independent of the node's current render class: the
+    /* Card dismissal owns presentation only. Runtime termination stays on the
+       conversation's explicit process control: a child can share its root's
+       host, and a hidden root can still be running intentionally. One durable
+       close, independent of the node's current render class: the
        server reducer tombstones the path and strips manual/expanded membership,
        so a node closed while momentarily outside `autoPaths` no longer loses its
        tombstone and reappears (#60). The matching ephemeral jump target, if any,
@@ -1745,9 +1739,9 @@ function ProjectDashboardView({
             held its 45vw and pushed «More actions» off a 390px screen instead).
             Desktop keeps its natural width. */}
         <h1 className={`truncate text-[13.5px] font-bold ${isMobile ? "min-w-0 max-w-[45vw]" : ""}`} title={projectName}>{projectName}</h1>
-        {/* #1279's project side: which accounts this project may use and which
-            are carrying its work. Desktop only, and silent unless the project
-            is fenced or busy, so it costs the phone header no slot at all. */}
+        {/* The project account surface is one compact switch per relevant engine
+            (#1331). Pool/carrier detail opens on demand; the phone remains
+            unchanged, and quiet projects still spend no header slot. */}
         {!isMobile ? <ProjectAccounts project={project} /> : null}
         {/* Desktop only. On the phone the whole history island — undo and redo
             together — rides the «⋯» menu, which is how search bought its 44px

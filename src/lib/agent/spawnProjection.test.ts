@@ -717,7 +717,7 @@ test("issue 615 HIGH1: the launch prompt projects from the durable display paylo
     const scanLagFacts = scanLag.facts.get(artifactPath)!;
     expect(scanLagFacts).toMatchObject({ state: "recovered" });
     expect(scanLagFacts.prompt).toBeUndefined();
-    expect(scanLagFacts.promptEcho).toBeUndefined();
+    expect(scanLagFacts.promptEcho).toBe("scaffold\n\nLLV615_RAW_PROMPT");
     expect(scanLagFacts.promptImages).toBeUndefined();
     /* The delivered receipt time remains available after the readable transcript
        path takes over the window (issue #648). */
@@ -725,14 +725,14 @@ test("issue 615 HIGH1: the launch prompt projects from the durable display paylo
     expect(typeof deliveredAt).toBe("number");
     expect(Number.isFinite(deliveredAt)).toBe(true);
 
-    /* The response that ADOPTS the live transcript stops projecting the prompt —
-       the transcript now renders the message, so the facts carry no bubble. */
+    /* The response that ADOPTS the live transcript stops projecting fields that
+       can draw a prompt bubble. Its echo identity remains for reconciliation. */
     const adopted = projectLaunchConversations([scannedFile(artifactPath)], snapshot, createdMs + 21_000);
     expect(adopted.cards).toEqual([]);
     const facts = adopted.facts.get(artifactPath)!;
     expect(facts).toMatchObject({ state: "recovered" });
     expect(facts.prompt).toBeUndefined();
-    expect(facts.promptEcho).toBeUndefined();
+    expect(facts.promptEcho).toBe("scaffold\n\nLLV615_RAW_PROMPT");
     expect(facts.promptImages).toBeUndefined();
     /* The delivered receipt time survives prompt scrubbing: a materialized window
        whose echo never matches can still settle the launch bubble (issue #648). */
@@ -766,6 +766,56 @@ test("issue 615 HIGH1: the durable display payload survives restart and never le
     });
     if (other.kind !== "created") throw new Error("expected structured launch creation");
     expect(restarted.snapshot().receipts[other.receipt.launchId]?.launchDisplay).toBeNull();
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test.each([
+  ["builder", "Ship the focused repair.", "You are a Builder in plain mode.\n\nShip the focused repair."],
+  ["reviewer", "Review the focused repair.", "You are a Reviewer.\nSafety fences:\n- stay in scope\n\nReview the focused repair."],
+])("issue 616: a zero-intermediate-poll %s launch carries its canonical echo into direct live adoption", (_role, raw, scaffolded) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-616-direct-adoption-"));
+  const artifactPath = path.join(directory, `${SETTLED_SESSION_ID}.jsonl`);
+  try {
+    fs.writeFileSync(artifactPath, `${JSON.stringify({ type: "user", message: scaffolded })}\n`);
+    const registry = legacyRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
+    const begun = registry.beginSpawnRequest({
+      engine: "codex",
+      cwd: directory,
+      transport: "structured",
+      accountId: "work",
+      launchProfile: emptyLaunchProfile({ cwd: directory }),
+      launchDisplay: { prompt: raw, images: 0, echo: scaffolded },
+    });
+    if (begun.kind !== "created") throw new Error("expected structured launch creation");
+    registry.settleSpawn(begun.receipt.launchId, {
+      key: { engine: "codex", sessionId: SETTLED_SESSION_ID },
+      artifactPath,
+      cwd: directory,
+      accountId: "work",
+      launchProfile: emptyLaunchProfile({ cwd: directory }),
+      status: "idle",
+      host: null,
+      claimEpoch: 0,
+      claimOwner: null,
+      pendingAction: null,
+    });
+    observeArtifact(registry, artifactPath, directory);
+
+    /* The accepted 202 is followed by a first files response that already
+       carries the live transcript. No placeholder projection gets an earlier
+       chance to attach the scaffolded echo identity to the raw browser seed. */
+    const adopted = projectLaunchConversations(
+      [scannedFile(artifactPath)],
+      registry.snapshot(),
+      Date.parse(begun.receipt.createdAt) + 1_000,
+    );
+    const facts = adopted.facts.get(artifactPath)!;
+    expect(adopted.cards).toEqual([]);
+    expect(facts.prompt).toBeUndefined();
+    expect(facts.promptImages).toBeUndefined();
+    expect(facts.promptEcho).toBe(scaffolded);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
@@ -1225,7 +1275,7 @@ test("a rejected launch projects a terminal failed card with zero conversation a
 test("a pipeline stage placeholder carries durable spawn lineage without an operator handoff flag", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-pipeline-lineage-projection-"));
   try {
-    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
+    const registry = legacyRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
     const parentPath = path.join(directory, "parent.jsonl");
     const parent = registry.ensureConversation("codex", parentPath, "work");
     const begun = registry.beginSpawnRequest({
@@ -1266,7 +1316,7 @@ test("a pipeline stage placeholder carries durable spawn lineage without an oper
 test("an agent-authenticated child with launch display stays caller-owned", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-caller-owned-display-projection-"));
   try {
-    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
+    const registry = legacyRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
     const parentPath = path.join(directory, "parent.jsonl");
     const parent = registry.ensureConversation("codex", parentPath, "work");
     const begun = registry.beginSpawnRequest({
@@ -1299,7 +1349,7 @@ test("an agent-authenticated child with launch display stays caller-owned", () =
 test("an operator handoff placeholder keeps its provenance after later flow enrollment", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-enrolled-handoff-placeholder-"));
   try {
-    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
+    const registry = legacyRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
     const parentPath = path.join(directory, "parent.jsonl");
     const parent = registry.ensureConversation("codex", parentPath, "work");
     const begun = registry.beginSpawnRequest({
@@ -1343,7 +1393,7 @@ test("materialized handoffs and historical stages stay input-immutable", () => {
   const pipelineSessionId = "historical-pipeline-stage";
   const pipelineArtifactPath = path.join(directory, `${pipelineSessionId}.jsonl`);
   try {
-    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
+    const registry = legacyRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
     const parentPath = path.join(directory, "parent.jsonl");
     const parent = registry.ensureConversation("codex", parentPath, "work");
     const begun = registry.beginSpawnRequest({
