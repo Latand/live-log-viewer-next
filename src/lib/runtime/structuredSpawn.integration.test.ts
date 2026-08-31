@@ -97,6 +97,49 @@ test("structured Claude receipts expose the effective permission mode", () => {
   });
 });
 
+test("a structured admission owner keeps its boot identity across registry reopen", () => {
+  const filename = path.join(sandbox, `boot-aware-admission-owner-${crypto.randomUUID()}.json`);
+  const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+  const begun = beginLegacySpawnFixture(registry, {
+    engine: "codex",
+    cwd: "/repo",
+    transport: "structured",
+    launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+  });
+  if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
+  const owner = begun.receipt.admissionOwner;
+  expect(owner?.pid).toBe(process.pid);
+  expect(typeof owner?.startIdentity).toBe("string");
+  expect(owner?.bootEpoch).toBe(systemBootEpoch());
+
+  const reopened = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+  expect(reopened.snapshot().receipts[begun.receipt.launchId]!.admissionOwner)
+    .toEqual(owner);
+});
+
+test("another boot identity cannot release a structured admission owner", () => {
+  const filename = path.join(sandbox, `boot-aware-admission-release-${crypto.randomUUID()}.json`);
+  const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+  const begun = beginLegacySpawnFixture(registry, {
+    engine: "codex",
+    cwd: "/repo",
+    transport: "structured",
+    launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+  });
+  if (begun.kind !== "created" || !begun.receipt.admissionOwner) {
+    throw new Error("spawn admission owner was unavailable");
+  }
+  const owner = begun.receipt.admissionOwner;
+
+  const released = registry.releaseStartingStructuredSpawn(begun.receipt.launchId, {
+    ...owner,
+    bootEpoch: `${owner.bootEpoch}:different`,
+  });
+
+  expect(released.released).toBeFalse();
+  expect(released.receipt.admissionOwner).toEqual(owner);
+});
+
 test("fresh managed Claude structured spawns select the shared settings snapshot", () => {
   const managed = { kind: "managed" } as AccountContext;
   const legacy = { kind: "legacy" } as AccountContext;

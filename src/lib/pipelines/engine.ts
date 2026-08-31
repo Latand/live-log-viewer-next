@@ -3500,11 +3500,13 @@ function providerNoticeSummary(text: string): string {
  * What a transcript can prove about an attempt whose host refused to stop — the
  * only thing standing between a superseded lane and the board it cannot leave.
  *
- * Two shapes count, and they are siblings. A completed turn carrying a valid
- * fenced verdict says the stage finished (#1047, #988). A turn the provider cut
- * off — a session or model limit, an expired credential — says the stage ended
- * without producing one (#1141): the message that ended it is right there in the
- * final record, so the attempt is terminal by evidence and retires as failed.
+ * Three shapes count. A missing host and missing conversation registration,
+ * paired with a complete launch-only transcript, say the host died before its
+ * session materialized (#1325). A completed turn carrying a valid fenced verdict
+ * says the stage finished (#1047, #988). A turn the provider cut off — a session
+ * or model limit, an expired credential — says the stage ended without producing
+ * one (#1141): the message that ended it is right there in the final record, so
+ * the attempt is terminal by evidence and retires as failed.
  *
  * Silence is neither. A transcript that simply stops mid-turn proves nothing
  * about a host that may still be working, so it falls through to null and keeps
@@ -3514,10 +3516,11 @@ async function closeStopFailureEvidence(
   candidate: StageHostCandidate,
   ports: PipelinePorts,
 ): Promise<string | null> {
-  const unregisteredHostDeath = await unregisteredStageHostDeathEvidence(candidate.attempt, candidate.target, ports);
-  if (unregisteredHostDeath) return unregisteredHostDeath;
   try {
-    if (!(await ports.stageHostResident(candidate.target))) return "the host registry entry is dead or absent";
+    if (!(await ports.stageHostResident(candidate.target))) {
+      return await unregisteredStageHostDeathEvidence(candidate.attempt, candidate.target, ports)
+        ?? "the host registry entry is dead or absent";
+    }
   } catch {
     // An unreadable registry leaves the transcript as the remaining authority.
   }

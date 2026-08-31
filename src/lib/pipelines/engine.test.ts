@@ -2342,7 +2342,7 @@ test("an unregistered stage with only its launch record parks and the lane close
     verdictRecovery: { state: "exhausted", checks: 3 },
   });
 
-  h.setHostsResident(true);
+  h.setHostsResident(false);
   h.setStageHost("conversation_stage_1", {
     outcome: "failed",
     error: "structured runtime host is unavailable",
@@ -2358,6 +2358,28 @@ test("an unregistered stage with only its launch record parks and the lane close
     detail: expect.stringContaining("the stage host died before its session registered"),
   }]);
   expect(loadPipelines()[0]!.state).toBe("closed");
+});
+
+test("an unregistered launch-only stage with a resident host still refuses close (#1325)", async () => {
+  const h = harness();
+  const pipeline = await runningStructuredStage(h);
+  h.ports.conversationRegistered = () => false;
+  h.durableTurns.set("/codex/stage-1.jsonl", {
+    turn: "busy",
+    message: null,
+    launchOnly: true,
+  });
+  h.setHostsResident(true);
+  h.setStageHost("conversation_stage_1", {
+    outcome: "failed",
+    error: "structured runtime host is unavailable",
+  });
+
+  const refused = await patchPipeline(pipeline.id, { action: "close" }, h.ports);
+
+  expect(refused.status).toBe(409);
+  expect(refused.close?.stillRunning).toMatchObject([{ stageId: "plan", attempt: 1 }]);
+  expect(loadPipelines()[0]).toMatchObject({ state: "running", closedAt: null });
 });
 
 test("an unregistered stage with agent transcript progress keeps running (#1325)", async () => {

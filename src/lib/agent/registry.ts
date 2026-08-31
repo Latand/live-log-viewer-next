@@ -2779,6 +2779,7 @@ function normalizeReceipt(value: SpawnReceipt, policy?: McpGrantPolicy): SpawnRe
       ? {
           pid: value.admissionOwner.pid,
           startIdentity: typeof value.admissionOwner.startIdentity === "string" ? value.admissionOwner.startIdentity : null,
+          ...(typeof value.admissionOwner.bootEpoch === "string" ? { bootEpoch: value.admissionOwner.bootEpoch } : {}),
         }
       : null,
     spawnCapabilityDigest: typeof value.spawnCapabilityDigest === "string" && /^[0-9a-f]{64}$/.test(value.spawnCapabilityDigest)
@@ -4354,8 +4355,7 @@ export class AgentRegistry {
       if ((receipt.transport !== "structured" && receipt.transport !== "tmux")
         || (!unbound && !recoverableTmuxPane)
         || !receipt.admissionOwner
-        || receipt.admissionOwner.pid !== owner.pid
-        || receipt.admissionOwner.startIdentity !== owner.startIdentity) {
+        || !sameRecordedProcessIdentity(receipt.admissionOwner, owner)) {
         return { released: false, receipt: clone(receipt) };
       }
       receipt.admissionOwner = null;
@@ -4373,8 +4373,7 @@ export class AgentRegistry {
       if (!receipt) throw new Error("unknown spawn receipt");
       if (receipt.transport !== "structured" || receipt.state !== "starting" || receipt.key || receipt.pane
         || !receipt.admissionOwner
-        || receipt.admissionOwner.pid !== owner.pid
-        || receipt.admissionOwner.startIdentity !== owner.startIdentity) {
+        || !sameRecordedProcessIdentity(receipt.admissionOwner, owner)) {
         return { released: false, receipt: clone(receipt) };
       }
       receipt.admissionOwner = null;
@@ -4390,8 +4389,7 @@ export class AgentRegistry {
       if (!receipt) throw new Error("unknown spawn receipt");
       if (receipt.transport !== "structured"
         || !receipt.admissionOwner
-        || receipt.admissionOwner.pid !== owner.pid
-        || receipt.admissionOwner.startIdentity !== owner.startIdentity) {
+        || !sameRecordedProcessIdentity(receipt.admissionOwner, owner)) {
         return { released: false, receipt: clone(receipt) };
       }
       receipt.admissionOwner = null;
