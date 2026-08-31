@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import { parseStageVerdict, stageVerdictFrom } from "./verdict";
+import { parseStageVerdict, stageVerdictFrom, stageVerdictRejectionReason } from "./verdict";
 
 test("stage verdict guard accepts the bounded contract", () => {
   expect(stageVerdictFrom({ status: "pass", findings: ["verified"], confidence: 0.9 })).toEqual({
@@ -17,13 +17,43 @@ test("stage verdict guard rejects malformed and expanded shapes", () => {
   expect(stageVerdictFrom({ status: "fail", findings: Array.from({ length: 51 }, () => "x") })).toBeNull();
 });
 
-test("the final fenced JSON block is completion authority and preserves prose output", () => {
-  expect(parseStageVerdict("Implemented the seam.\n\n```json\n{\"status\":\"pass\",\"confidence\":1}\n```" )).toEqual({
+test("a fenced JSON verdict tolerates trailing citation text and preserves prose output", () => {
+  expect(parseStageVerdict("Implemented the seam.\n\n```json\n{\"status\":\"pass\",\"confidence\":1}\n```")).toEqual({
     verdict: { status: "pass", confidence: 1 },
     output: "Implemented the seam.",
   });
-  expect(parseStageVerdict("```json\n{\"status\":\"pass\"}\n```\ntrailing prose")).toBeNull();
+  expect(parseStageVerdict([
+    "```json",
+    '{"status":"pass","findings":[],"confidence":0.9}',
+    "```",
+    "<citation-block>",
+    "source: relevant context",
+    "</citation-block>",
+  ].join("\n"))).toEqual({
+    verdict: { status: "pass", findings: [], confidence: 0.9 },
+    output: "",
+  });
+});
+
+test("a final message without a fenced JSON verdict remains invalid", () => {
   expect(parseStageVerdict("VERDICT: pass")).toBeNull();
+  expect(stageVerdictRejectionReason("VERDICT: pass")).toBe(
+    "canonical completed assistant turn is missing a fenced JSON verdict",
+  );
+});
+
+test("the last well-formed fenced JSON verdict survives a trailing non-verdict fence", () => {
+  expect(parseStageVerdict([
+    "```json",
+    '{"status":"pass","confidence":0.8}',
+    "```",
+    "```json",
+    '{"source":"relevant context"}',
+    "```",
+  ].join("\n"))).toEqual({
+    verdict: { status: "pass", confidence: 0.8 },
+    output: "",
+  });
 });
 
 test("the fa6aa690 production shape accepts stage-specific completion metadata", () => {
@@ -61,6 +91,22 @@ test("a terminal REVIEW_READY marker after the fenced verdict remains canonical 
     verdict: { status: "pass", findings: [], confidence: 0.95 },
     output: "Implementation is ready for review.",
   });
+});
+
+test("conflicting fenced JSON verdicts remain invalid", () => {
+  const message = [
+    "```json",
+    '{"status":"pass","findings":[]}',
+    "```",
+    "```json",
+    '{"status":"fail","findings":["focused check failed"]}',
+    "```",
+  ].join("\n");
+
+  expect(parseStageVerdict(message)).toBeNull();
+  expect(stageVerdictRejectionReason(message)).toBe(
+    "canonical completed assistant turn has conflicting fenced JSON verdicts",
+  );
 });
 
 test("a pass verdict with findings returns an explicit contradiction", () => {

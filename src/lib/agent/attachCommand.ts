@@ -13,6 +13,7 @@
  */
 
 import type { AgentEngine, ResumeSpec } from "./cli";
+import type { IdentityMaterializationFence, SpawnReceipt } from "./registry";
 import type { FileEntry } from "@/lib/types";
 
 /** Shell-quote a value for the one-line `cd '<cwd>' && …` copy. Kept local so
@@ -144,23 +145,24 @@ export function resolveAttachCommand(path: string, deps: AttachResolverDeps): At
   };
 }
 
-/** The launch-receipt fields the terminal command is composed from (round-1
-    P1#6). Everything here is durable registry state, so a queued launch window —
-    whose transcript path is the synthetic `spawn:<launchId>` — still yields a
-    real working command from the recorded account home, cwd, and session id. */
+/** The launch-receipt fields needed to fence and compose a terminal command. */
 export interface LaunchAttachReceipt {
   engine: AgentEngine;
   cwd: string;
   accountId: string | null;
   key: { engine: AgentEngine; sessionId: string } | null;
   launchProfile: { model: string | null; effort: string | null; fast: boolean | null; allowSubagents?: boolean; mcpServers?: readonly string[] };
+  transport: SpawnReceipt["transport"];
+  state: SpawnReceipt["state"];
+  purpose: SpawnReceipt["purpose"];
+  resumeSourcePath: string | null;
+  artifactPath: string | null;
 }
 
 export interface LaunchAttachDeps {
   receipt: LaunchAttachReceipt | null;
-  /** The conversation's materialized transcript path, when it is already in the
-      scan — preferred, so a launch that has since materialized resolves through
-      the full path flow (subagent walk, cwd override). */
+  materializationFence: Pick<IdentityMaterializationFence, "allowsReceipt">;
+  /** The conversation's transcript path when it is already in the scan. */
   materializedPath: string | null;
   resolveByPath: (path: string) => AttachResolution;
   resumeSpecForSession: (
@@ -175,16 +177,16 @@ export interface LaunchAttachDeps {
 }
 
 /**
- * Resolve the terminal command for a `spawn:<launchId>` launch window (round-1
- * P1#6). Prefers the materialized transcript once it exists; before then it
- * composes the resume command directly from the durable receipt's recorded
- * account home, cwd, and session id — never handing the synthetic launch path to
- * a filesystem-path endpoint (the HTTP 400 the review flagged). Pure: all I/O is
- * injected.
+ * Resolve the terminal command for a `spawn:<launchId>` launch window. A
+ * provisional receipt stays unavailable; after finalization, the scanned path
+ * leads and durable receipt data covers scan lag. Pure: all I/O is injected.
  */
 export function resolveLaunchAttachCommand(deps: LaunchAttachDeps): AttachResolution {
   const receipt = deps.receipt;
   if (!receipt) return { ok: false, error: "the launch is unknown to the viewer", status: 404 };
+  if (!deps.materializationFence.allowsReceipt(receipt)) {
+    return { ok: false, error: "the attach command is not available until the transcript materializes", status: 409 };
+  }
   if (deps.materializedPath) {
     const byPath = deps.resolveByPath(deps.materializedPath);
     if (byPath.ok) return byPath;

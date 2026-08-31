@@ -7,7 +7,7 @@ import { AccountProjectBindingsUnreadableError, allowedAccountIdsForProject, pro
 import { mirroredClaudeTranscriptPath } from "@/lib/accounts/claude";
 import { emptyLaunchProfile, type ViewerConversationId } from "@/lib/accounts/migration/contracts";
 import { freshSpecFor } from "@/lib/agent/cli";
-import { agentRegistry, type DurableMembershipInput, type TmuxHostEvidence } from "@/lib/agent/registry";
+import { agentRegistry, identityMaterializationFence, type DurableMembershipInput, type TmuxHostEvidence } from "@/lib/agent/registry";
 import { forEachCooperatively } from "@/lib/cooperative";
 import { transcriptAllowed } from "@/lib/agent/spawnParent";
 import { sessionKeyFromTranscript, sessionKeyId } from "@/lib/agent/sessionKey";
@@ -404,7 +404,7 @@ async function spawnPipelineAgent(
   if (begun.kind === "conflict") throw new Error("pipeline spawn attempt conflicts with its original request");
   onReserved({ launchId: begun.receipt.launchId, conversationId: begun.receipt.conversationId });
   if (begun.kind === "replay") {
-    const identityPublished = begun.receipt.state === "completed";
+    const identityPublished = identityMaterializationFence(registry.readOnlySnapshot()).allowsReceipt(begun.receipt);
     return {
       launchId: begun.receipt.launchId,
       conversationId: begun.receipt.conversationId,
@@ -644,43 +644,15 @@ export function defaultPipelinePorts(
   const registry = agentRegistry();
   let registrySnapshot: ReturnType<typeof registry.readOnlySnapshot> | null = null;
   let adoptionCandidatesByPipeline: Map<string, PipelineAdoptionCandidate[]> | null = null;
-  let unpublishedStructuredPaths: Set<string> | null = null;
+  let materializationFence: ReturnType<typeof identityMaterializationFence> | null = null;
   let flowSnapshot: Flow[] | null = null;
   const snapshot = () => registrySnapshot ??= registry.readOnlySnapshot();
-  /* The registry needs staged key/path data to bind the host. Pipeline read
-     projections publish that identity only after finalization proves the
-     transcript exists, so recovery cannot copy a phantom path into an attempt. */
-  const structuredIdentityPublished = (
-    receipt: ReturnType<typeof snapshot>["receipts"][string],
-    current = snapshot(),
-  ): boolean => {
-    const structured = receipt.transport === "structured"
-      || (receipt.transport === null
-        && Boolean(receipt.key && current.entries[sessionKeyId(receipt.key)]?.structuredHost));
-    return !structured || receipt.state === "completed";
-  };
-  const unpublishedIdentityPaths = (
-    current = snapshot(),
-  ): Set<string> => unpublishedStructuredPaths ??= new Set(Object.values(current.receipts).flatMap((receipt) =>
-    receipt.artifactPath
-      && !structuredIdentityPublished(receipt, current)
-      /* A same-path resume stages ownership for an identity that was already
-         published by the source generation; it cannot make that path phantom. */
-      && !(receipt.purpose === "resume-successor" && receipt.resumeSourcePath === receipt.artifactPath)
-      ? [receipt.artifactPath]
-      : []));
-  const publishedPathForConversation = (conversationId: ViewerConversationId): string | null => {
-    const current = snapshot();
-    const conversation = current.conversations[conversationId];
-    if (!conversation) return null;
-    const unpublished = unpublishedIdentityPaths(current);
-    return conversation.generations.findLast((generation) => !unpublished.has(generation.path))?.path ?? null;
-  };
+  const identityFence = () => materializationFence ??= identityMaterializationFence(snapshot());
   const flows = () => flowSnapshot ??= loadFlows();
   const invalidateRegistryProjection = () => {
     registrySnapshot = null;
     adoptionCandidatesByPipeline = null;
-    unpublishedStructuredPaths = null;
+    materializationFence = null;
   };
   const adoptionCandidates = () => {
     if (adoptionCandidatesByPipeline) return adoptionCandidatesByPipeline;
@@ -696,7 +668,7 @@ export function defaultPipelinePorts(
         const receipt = receiptsByConversation.get(conversationId as ViewerConversationId) ?? null;
         const conversation = current.conversations[conversationId as ViewerConversationId] ?? null;
         const generation = conversation?.generations.at(-1) ?? null;
-        const receiptPublished = receipt ? structuredIdentityPublished(receipt, current) : false;
+        const receiptPublished = receipt ? identityFence().allowsReceipt(receipt) : false;
         let agentPath = generation?.path ?? null;
         let sessionId: string | null = null;
         if (receipt) {
@@ -758,7 +730,7 @@ export function defaultPipelinePorts(
       const current = snapshot();
       const receipt = current.receipts[launchId];
       if (!receipt) return null;
-      const identityPublished = structuredIdentityPublished(receipt, current);
+      const identityPublished = identityFence().allowsReceipt(receipt);
       return {
         state: receipt.state,
         launchId: receipt.launchId,
@@ -845,11 +817,11 @@ export function defaultPipelinePorts(
     headCwd: (transcriptPath) => headCwd(transcriptPath),
     lastMessage: lastAssistantMessage,
     pathForConversation: (conversationId) => conversationId.startsWith("conversation_")
-      ? publishedPathForConversation(conversationId as ViewerConversationId)
+      ? identityFence().pathForConversation(conversationId as ViewerConversationId)
       : null,
     sourcePathAllowed: transcriptAllowed,
     conversationIdForPath: (pathname) => {
-      if (unpublishedIdentityPaths().has(pathname)) return null;
+      if (!identityFence().allowsPath(pathname)) return null;
       for (const conversation of Object.values(snapshot().conversations)) {
         if (conversation.generations.some((generation) => generation.path === pathname)) return conversation.id;
       }

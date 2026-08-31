@@ -7,6 +7,7 @@ import type { FileEntry } from "@/lib/types";
 import type { ResumeSpec } from "./cli";
 import { resumeSpecForSession } from "./cli";
 import { attachCommandFromSpec, attachTargetPath, resolveAttachCommand, resolveLaunchAttachCommand, type AttachResolverDeps, type LaunchAttachDeps } from "./attachCommand";
+import { identityMaterializationFence } from "./identityMaterialization";
 
 /* The codex resume command now enumerates MCP servers via `codex mcp list --json`
    (PR #610). Stub that binary so the pure P1#6 launch-attach composition below
@@ -149,13 +150,7 @@ test("attachTargetPath resolves the path the composed command actually resumes (
   expect(attachTargetPath("/orphan.jsonl", [file({ path: "/orphan.jsonl", kind: "subagent", parent: "/gone.jsonl" })])).toBeNull();
 });
 
-/*
- * P1#6 (round-1 review): a queued launch window's path is the synthetic
- * `spawn:<launchId>`. Its "Open in terminal" must resolve through the durable
- * launch receipt — real account home, cwd, and session id — and compose a
- * working command, never hand the synthetic path to a filesystem endpoint (the
- * HTTP 400 the review flagged).
- */
+/* P1#6: `spawn:<launchId>` resolves through finalized durable receipt data. */
 const SESSION_ID = "00000000-0000-0000-0000-000000000001";
 
 function launchDeps(over: Partial<LaunchAttachDeps> = {}): LaunchAttachDeps {
@@ -166,7 +161,13 @@ function launchDeps(over: Partial<LaunchAttachDeps> = {}): LaunchAttachDeps {
       accountId: "work",
       key: { engine: "codex", sessionId: SESSION_ID },
       launchProfile: { model: "gpt-5.4", effort: "high", fast: null },
+      transport: "structured",
+      state: "completed",
+      purpose: "launch",
+      resumeSourcePath: null,
+      artifactPath: "/repo/rollout.jsonl",
     },
+    materializationFence: identityMaterializationFence(),
     materializedPath: null,
     resolveByPath: () => ({ ok: false, error: "not scanned yet", status: 404 }),
     resumeSpecForSession,
@@ -176,14 +177,32 @@ function launchDeps(over: Partial<LaunchAttachDeps> = {}): LaunchAttachDeps {
   };
 }
 
-test("P1#6: a queued launch (no transcript yet) composes a real resume command from its receipt — not a 400", () => {
+test("a queued launch with no transcript withholds its provisional resume identity (#1329)", () => {
+  const receipt = launchDeps().receipt!;
+  const res = resolveLaunchAttachCommand(launchDeps({ receipt: { ...receipt, state: "path-pending" } }));
+  expect(res.ok).toBe(false);
+  if (!res.ok) {
+    expect(res.status).toBe(409);
+    expect(res.error).toContain("not available");
+  }
+});
+
+test("a queued tmux launch composes from its durable receipt during scan lag", () => {
+  const receipt = launchDeps().receipt!;
+  const res = resolveLaunchAttachCommand(launchDeps({
+    receipt: { ...receipt, transport: "tmux", state: "path-pending" },
+  }));
+  expect(res.ok).toBeTrue();
+  if (res.ok) expect(res.value.command).toContain(`resume ${SESSION_ID}`);
+});
+
+test("a finalized launch composes from its durable receipt while the scanner catches up", () => {
   const res = resolveLaunchAttachCommand(launchDeps());
   expect(res.ok).toBe(true);
   if (res.ok) {
     expect(res.value.cwd).toBe(WORKTREE);
     expect(res.value.command).toContain(`resume ${SESSION_ID}`);
     expect(res.value.command).toContain("CODEX_HOME='/repo/.codex-home'");
-    /* The launch's recorded MCP allowlist is re-applied on resume (PR #610). */
     expect(res.value.command).toContain("'mcp_servers.viewer.enabled=true'");
     expect(res.value.fullCommand.startsWith(`cd '${WORKTREE}' && `)).toBe(true);
     expect(res.value.accountLabel).toBe("work · codex");
@@ -197,7 +216,8 @@ test("P1#6: a materialized transcript is preferred and resolved through the full
 });
 
 test("P1#6: a launch whose session has not bound yet is a clear 409, never a 400", () => {
-  const res = resolveLaunchAttachCommand(launchDeps({ receipt: { engine: "codex", cwd: "/repo/worktree", accountId: "work", key: null, launchProfile: { model: null, effort: null, fast: null } } }));
+  const receipt = launchDeps().receipt!;
+  const res = resolveLaunchAttachCommand(launchDeps({ receipt: { ...receipt, key: null } }));
   expect(res.ok).toBe(false);
   if (!res.ok) expect(res.status).toBe(409);
 });
