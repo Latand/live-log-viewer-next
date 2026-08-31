@@ -301,6 +301,8 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
     if (!el) return;
     markProgrammaticScroll();
     el.scrollTop = el.scrollHeight;
+    const pendingUser = scrollCauseRef.current;
+    if (pendingUser?.kind === "user") pendingUser.fromBottom = distanceFromBottom(el);
   };
 
   /* A released pane can mount before its full content has measurable height.

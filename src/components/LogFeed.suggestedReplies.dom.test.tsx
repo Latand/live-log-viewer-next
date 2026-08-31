@@ -303,6 +303,68 @@ test("an upward wheel survives a concurrent glue and releases the scroll magnet 
   }
 });
 
+test("growth before an upward wheel survives resize glue and stays released through the next append", () => {
+  const originalNow = Date.now;
+  const fixedNow = originalNow();
+  Date.now = () => fixedNow;
+  try {
+    const followChanges: boolean[] = [];
+    const feedFile = {
+      ...file,
+      path: "/fixtures/claude/projects/-repo/seat-growth-before-input.jsonl",
+      name: "seat-growth-before-input.jsonl",
+      conversationId: "conversation_seat_growth_before_input",
+    };
+    const host = render(true, (value) => followChanges.push(value), feedFile);
+    const root = [...roots].at(-1)!;
+    const scroller = host.querySelector("[data-log-feed-scroller]") as HTMLElement;
+    const geometry = setScrollerGeometry(scroller, 1_000, 200, 800);
+
+    flushSync(() => {
+      geometry.setHeight(1_100);
+      scroller.dispatchEvent(new dom.WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: -120 }) as unknown as Event);
+      for (const callback of resizeCallbacks) callback([], {} as ResizeObserver);
+      scroller.dispatchEvent(new dom.Event("scroll", { bubbles: true }) as unknown as Event);
+      geometry.setTop(780);
+      scroller.dispatchEvent(new dom.Event("scroll", { bubbles: true }) as unknown as Event);
+    });
+
+    expect(scroller.scrollTop).toBe(780);
+    expect(followChanges).toEqual([false]);
+
+    tailState.lines = [
+      ...TRANSCRIPT,
+      JSON.stringify({
+        type: "assistant",
+        uuid: "uuid-after-release",
+        timestamp: AT(3),
+        message: { role: "assistant", content: [{ type: "text", text: "A later update arrived." }] },
+      }),
+    ];
+    geometry.setHeight(1_200);
+    flushSync(() => {
+      root.render(
+        <LogFeed
+          file={feedFile}
+          showSvc={false}
+          lineFilter=""
+          onStatus={() => undefined}
+          paused
+          follow={false}
+          setFollow={(value) => followChanges.push(value)}
+          compact
+        />,
+      );
+    });
+
+    expect(scroller.scrollTop).toBe(780);
+    expect(followChanges).toEqual([false]);
+  } finally {
+    tailState.lines = TRANSCRIPT;
+    Date.now = originalNow;
+  }
+});
+
 test("a wheel that cannot move the feed does not tag a later settling scroll as user initiated", () => {
   const originalNow = Date.now;
   const fixedNow = originalNow();
