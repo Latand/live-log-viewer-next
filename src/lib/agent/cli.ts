@@ -503,13 +503,10 @@ export function resumeSpecFor(root: string, pathname: string, options: ResumeSpe
 
 /**
  * Compose the resume/attach command from an explicit engine + session id + cwd +
- * account home, without needing the transcript file to exist yet (round-1 P1#6).
+ * account home, without waiting for the transcript scanner (round-1 P1#6).
  * The transcript-path form {@link resumeSpecFor} delegates here after sniffing
- * the session id and home off the path; the launch-receipt form (a queued
- * `spawn:<launchId>` window whose transcript has not materialized) passes the
- * durable receipt's recorded session id, cwd, and account home directly, so
- * "Open in terminal" composes a real working command instead of 400-ing on a
- * synthetic path.
+ * the session id and home off the path; a finalized launch receipt can pass its
+ * recorded session id, cwd, and account home directly during scan lag.
  */
 export function resumeSpecForSession(
   engine: AgentEngine,

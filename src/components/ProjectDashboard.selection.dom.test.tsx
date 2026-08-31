@@ -60,6 +60,7 @@ const matchMediaFor = (query: string) => ({
 let projectCounter = 0;
 let PROJECT = "selection-contract-0";
 let boards: Record<string, BoardProjectStateV1> = {};
+let tmuxCalls: Array<Record<string, unknown>> = [];
 const emptyBoard = (): BoardProjectStateV1 => ({
   schemaVersion: 1,
   revision: 0,
@@ -101,6 +102,10 @@ const OVERRIDES: Record<string, unknown> = {
   fetch: (async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input);
     const method = (init?.method ?? "GET").toUpperCase();
+    if (url === "/api/tmux") {
+      tmuxCalls.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return { ok: true, status: 200, json: async () => ({ ok: true }), text: async () => "" };
+    }
     if (url.startsWith("/api/board")) {
       if (method === "GET") {
         const project = new URL(url, "http://x").searchParams.get("project")!;
@@ -150,6 +155,7 @@ beforeEach(() => {
   projectCounter += 1;
   PROJECT = `selection-contract-${projectCounter}`;
   boards = { [PROJECT]: seededBoard() };
+  tmuxCalls = [];
   resetSelectionSessionsForTest();
 });
 afterEach(() => {
@@ -183,8 +189,18 @@ const betaOf = () => file("/beta", "Beta", 1);
 const alpha = { path: "/alpha" };
 const beta = { path: "/beta" };
 
-function mount(files: FileEntry[] = [alphaOf(), betaOf()], manual?: string[]): HTMLElement {
-  if (manual) boards = { [PROJECT]: { ...seededBoard(), explicitManual: manual, prefs: { ...seededBoard().prefs, manual } } };
+function mount(files: FileEntry[] = [alphaOf(), betaOf()], manual?: string[], expanded: string[] = []): HTMLElement {
+  if (manual || expanded.length) {
+    const seed = seededBoard();
+    const nextManual = manual ?? seed.prefs.manual;
+    boards = {
+      [PROJECT]: {
+        ...seed,
+        explicitManual: nextManual,
+        prefs: { ...seed.prefs, manual: nextManual, expanded },
+      },
+    };
+  }
   const host = dom.document.createElement("div");
   dom.document.body.appendChild(host);
   const root = createRoot(host as unknown as Element);
@@ -281,6 +297,84 @@ test("a selected board card that the list has no row for is still published", as
   /* The leaf is in no list row, and is published anyway. */
   expect(slice().visiblePaths).not.toContain(leaf.path);
   expect(slice().selectedPaths).toEqual([leaf.path]);
+});
+
+test("closing a finished child card dismisses it without queueing a shared-host kill", async () => {
+  const parent = {
+    ...alphaOf(),
+    activity: "live" as const,
+    proc: "running" as const,
+    pid: 4101,
+  };
+  const child = {
+    ...file("/alpha-child", "Finished child", Date.now() / 1000),
+    parent: "/alpha",
+    spawnOrigin: "viewer" as const,
+    activity: "idle" as const,
+    proc: null,
+    pid: null,
+  };
+  const sibling = {
+    ...file("/alpha-sibling", "Sibling branch", Date.now() / 1000),
+    parent: "/alpha",
+    spawnOrigin: "viewer" as const,
+    activity: "recent" as const,
+  };
+  const host = mount([parent, child, sibling], [parent.path], [child.path, sibling.path]);
+  const childShown = await waitFor(() => host.querySelector(`[data-scheme-node="${child.path}"]`) !== null);
+  expect(childShown).toBe(true);
+  expect(host.querySelector(`[data-scheme-node="${sibling.path}"]`)).not.toBeNull();
+
+  const close = Array.from(host.querySelectorAll(`[data-scheme-node="${child.path}"] button`)).find(
+    (button) => (button.getAttribute("aria-label") ?? "").startsWith("Remove column"),
+  ) as HTMLButtonElement | undefined;
+  expect(close).toBeTruthy();
+  flushSync(() => close!.dispatchEvent(new dom.MouseEvent("click", { bubbles: true, cancelable: true }) as never));
+
+  expect(await waitFor(() => host.querySelector(`[data-scheme-node="${child.path}"]`) === null)).toBe(true);
+  await settle();
+  expect(host.querySelector(`[data-scheme-node="${parent.path}"]`)).not.toBeNull();
+  expect(host.querySelector(`[data-scheme-node="${sibling.path}"]`)).not.toBeNull();
+  expect(boards[PROJECT]!.prefs.hidden).toContain(child.path);
+  expect(tmuxCalls).toEqual([]);
+});
+
+test("closing a live shared-host child preserves its root and sibling branches", async () => {
+  const parent = {
+    ...alphaOf(),
+    activity: "live" as const,
+    proc: "running" as const,
+    pid: 4101,
+  };
+  const child = {
+    ...file("/alpha-live-child", "Live child", Date.now() / 1000),
+    parent: "/alpha",
+    spawnOrigin: "viewer" as const,
+    activity: "live" as const,
+    proc: "running" as const,
+    pid: 4101,
+  };
+  const sibling = {
+    ...file("/alpha-live-sibling", "Sibling branch", Date.now() / 1000),
+    parent: "/alpha",
+    spawnOrigin: "viewer" as const,
+    activity: "recent" as const,
+  };
+  const host = mount([parent, child, sibling], [parent.path], [child.path, sibling.path]);
+  expect(await waitFor(() => host.querySelector(`[data-scheme-node="${child.path}"]`) !== null)).toBe(true);
+
+  const close = Array.from(host.querySelectorAll(`[data-scheme-node="${child.path}"] button`)).find(
+    (button) => (button.getAttribute("aria-label") ?? "").startsWith("Remove column"),
+  ) as HTMLButtonElement | undefined;
+  expect(close).toBeTruthy();
+  flushSync(() => close!.dispatchEvent(new dom.MouseEvent("click", { bubbles: true, cancelable: true }) as never));
+
+  expect(await waitFor(() => host.querySelector(`[data-scheme-node="${child.path}"]`) === null)).toBe(true);
+  await settle();
+  expect(host.querySelector(`[data-scheme-node="${parent.path}"]`)).not.toBeNull();
+  expect(host.querySelector(`[data-scheme-node="${sibling.path}"]`)).not.toBeNull();
+  expect(boards[PROJECT]!.prefs.hidden).toContain(child.path);
+  expect(tmuxCalls).toEqual([]);
 });
 
 test("the list publishes a multi-card selection in its own row order", async () => {

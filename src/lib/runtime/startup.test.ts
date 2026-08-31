@@ -2205,6 +2205,75 @@ test.each(["codex", "claude"] as const)(
   },
 );
 
+test.each(["codex", "claude"] as const)(
+  "an eligible %s row with pending work and no live engine process completes the pass for on-demand hosting (#1364)",
+  async (engine) => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-abandoned-row-"));
+    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
+    const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
+    const client = runtimeJournalClient(journal);
+    const sessionId = engine === "codex"
+      ? "25300000-0000-0000-0000-000000000044"
+      : "25300000-0000-0000-0000-000000000045";
+    const { conversation } = addStructuredRestartConversation(registry, directory, {
+      engine,
+      sessionId,
+      status: "dead",
+      turn: "terminal",
+    });
+    const stored = registry.readOnlySnapshot().entries[`${engine}:${sessionId}`]!;
+    /* The production shape this guards: a session long dead, its endpoint
+       released, a held delivery keeping it adoption-eligible forever, and a
+       writer claim adoption cannot take. The claim owner here is this test
+       process, so the real adopter's claim is refused without launching
+       anything — the row ends the pass unresolved with no process to wait
+       for. Before the fix this failed the pass and startup replayed it every
+       minute without end. */
+    registry.upsert({
+      key: stored.key,
+      artifactPath: stored.artifactPath,
+      cwd: stored.cwd,
+      accountId: stored.accountId,
+      launchProfile: stored.launchProfile,
+      status: "dead",
+      host: stored.host,
+      structuredHost: {
+        ...stored.structuredHost!,
+        endpoint: "stdio:released",
+        process: null,
+      },
+      claimEpoch: stored.claimEpoch,
+      claimOwner: `structured-host:${JSON.stringify({
+        pid: process.pid,
+        startIdentity: procBackend.processIdentity(process.pid),
+      })}`,
+      pendingAction: stored.pendingAction,
+    });
+    const delivery = registry.holdDelivery(conversation.id, "deliver once something can host this again", "abandoned-row-pending");
+    const dependencies: StructuredStartupDependencies = {
+      registry,
+      client,
+      orchestratorSeats: () => [],
+      refreshTranscriptState: async () => {},
+      resolveCodexOwner: () => null,
+      resolveClaudeOwner: () => null,
+      ...(engine === "codex" ? { adoptClaude: async () => [] } : { adopt: async () => [] }),
+    };
+
+    try {
+      await adoptStructuredHostsAtStartup(dependencies);
+      expect(registry.readOnlySnapshot().entries[`${engine}:${sessionId}`]).toMatchObject({
+        structuredHost: { endpoint: "stdio:released", process: null },
+      });
+      expect(registry.pendingDeliveries(conversation.id).map((item) => item.id)).toContain(delivery.id);
+    } finally {
+      await bindStructuredDeliveryQueue([], { registry, client: null });
+      journal.close();
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  },
+);
+
 test("a seat whose row reads busy is owed no nudge when its transcript cannot be read", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-orchestrator-unreadable-"));
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));

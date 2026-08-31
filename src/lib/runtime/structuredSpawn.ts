@@ -9,7 +9,7 @@ import { claudeValidityFromLimitRead } from "@/lib/accounts/spawnHealth";
 import type { LaunchProfile } from "@/lib/accounts/migration/contracts";
 import type { SpawnAccountAdmission } from "@/lib/agent/accountLiveness";
 import { effectiveClaudePermissionMode, type AgentEngine, type ResumeSpec } from "@/lib/agent/cli";
-import type { AgentRegistry, AgentRegistryEntry, ProcessIdentity, RegistryFile, SpawnReceipt, StructuredHostColumns } from "@/lib/agent/registry";
+import { identityMaterializationFence, type AgentRegistry, type AgentRegistryEntry, type ProcessIdentity, type RegistryFile, type SpawnReceipt, type StructuredHostColumns } from "@/lib/agent/registry";
 import { sessionKey, sessionKeyId, type SessionKey } from "@/lib/agent/sessionKey";
 import type { SpawnResponse } from "@/lib/agent/spawnResponse";
 import { prepareManagedClaudeSpawnHome } from "@/lib/agent/spawnPolicy";
@@ -1654,6 +1654,9 @@ export async function spawnStructuredConversation(
       pendingAction: "spawn",
     });
     if (staged.kind === "conflict") throw new Error(`structured spawn registry conflict: ${staged.code}`);
+    const stagedPath = identityMaterializationFence().allowsReceipt(staged.receipt, { structured: true })
+      ? identity.path
+      : null;
     const claimed = adoptionClaim
       ? staged.entry
       : input.registry.claimStructuredHost(key, processIdentity(), { allowUnhosted: true });
@@ -1701,7 +1704,7 @@ export async function spawnStructuredConversation(
       return {
         ok: true,
         target: null,
-        path: null,
+        path: stagedPath,
         ...(input.engine === "claude"
           ? { effectivePermissionMode: input.spec.launchProfile?.permissionMode ?? "default" }
           : {}),
@@ -1723,7 +1726,7 @@ export async function spawnStructuredConversation(
       return {
         ok: true,
         target: null,
-        path: null,
+        path: stagedPath,
         ...(input.engine === "claude"
           ? { effectivePermissionMode: input.spec.launchProfile?.permissionMode ?? "default" }
           : {}),
@@ -1769,7 +1772,9 @@ export async function spawnStructuredConversation(
     return {
       ok: true,
       target: null,
-      path: identity.path,
+      path: identityMaterializationFence().allowsReceipt(settled.receipt, { structured: true })
+        ? identity.path
+        : null,
       ...(input.engine === "claude"
         ? { effectivePermissionMode: input.spec.launchProfile?.permissionMode ?? "default" }
         : {}),

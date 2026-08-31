@@ -27,6 +27,7 @@ import {
 import { orderedConversationTail } from "./conversation/tailOrder";
 import {
   publishTranscriptEchoes,
+  retireLaunchOutboxOnAdoption,
   seedLaunchOutbox,
   settleLaunchOutboxDelivered,
   settleLaunchOutboxFailed,
@@ -174,6 +175,17 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
       && paneLaunchOwner.conversationId === launchOwner.conversationId
       && paneLaunchOwner.generation === launchOwner.generation,
   );
+  /* A materialized `file.launch` is the server's live-adoption signal. Retire
+     the starting-window bubble at that hand-off even when an image-only launch
+     has no text echo and its delivery receipt still reads queued/delivering. */
+  useEffect(() => {
+    if (!memoryKey || !file?.launch || !launchOwnsThisPane || !launchOwner) return;
+    retireLaunchOutboxOnAdoption(memoryKey, {
+      id: file.launch.launchId,
+      adoptedAt: nowMs(),
+      owner: launchOwner,
+    });
+  }, [memoryKey, file?.launch?.launchId, launchOwner, launchOwnsThisPane]);
   /* Live streaming text: `delta` events from the structured host render the
      in-flight assistant reply immediately, ahead of the transcript flush. The
      host is resolved by conversation identity FIRST (round-1 P1#3): during
@@ -552,20 +564,22 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
      a fresh refresh) seeds the same launch-owned bubble the composer path seeds.
      Keyed by the launch id under the stable conversation identity, so it is
      idempotent with the composer's own seed (no duplicate), survives a refresh,
-     folds through transcript adoption, and retires on its transcript echo. */
-  useEffect(() => {
+     folds through transcript adoption, and retires on its transcript echo or
+     the live transcript's adoption. */
+  useLayoutEffect(() => {
     if (!memoryKey || !launch?.launchId || !launchOwnsThisPane) return;
     const promptText = launch.prompt ?? "";
     const promptImages = launch.promptImages ?? 0;
-    if (!promptText.trim() && !promptImages) return;
+    if (!promptText.trim() && !promptImages && !launch.promptEcho) return;
     seedLaunchOutbox(memoryKey, {
       id: launch.launchId,
       text: promptText,
       images: promptImages,
       at: launch.promptAt ?? Date.now(),
-      /* The canonical echo identity (issue #615): the bubble displays the raw
-         draft but retires on the delivered (possibly scaffolded) transcript
-         echo. Reconciled onto a composer-seeded bubble under the same id. */
+      /* The canonical echo identity (issue #615/#616): the bubble displays the
+         raw draft and retires on the delivered scaffolded transcript echo. An
+         adopted live fact can carry this identity after its display fields have
+         retired, reconciling the 202 seed before the browser paints. */
       ...(launch.promptEcho ? { echoText: launch.promptEcho } : {}),
       owner: launchOwner!,
       state: launchOutboxState(launch.initialMessage),
