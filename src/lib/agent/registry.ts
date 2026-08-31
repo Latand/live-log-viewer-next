@@ -3025,7 +3025,12 @@ function serializeRegistry(value: RegistryFile, sqliteRevision?: number): string
   return JSON.stringify(storage) + "\n";
 }
 
-function writeAtomicPayload(filename: string, payload: string): void {
+interface AtomicWriteHooks {
+  beforeRename?: () => void;
+  afterRename?: () => void;
+}
+
+function writeAtomicPayload(filename: string, payload: string, hooks?: AtomicWriteHooks): void {
   fs.mkdirSync(path.dirname(filename), { recursive: true, mode: 0o700 });
   const temp = `${filename}.${process.pid}.${crypto.randomUUID()}.tmp`;
   let fd: number | null = null;
@@ -3035,7 +3040,9 @@ function writeAtomicPayload(filename: string, payload: string): void {
     fs.fsyncSync(fd);
     fs.closeSync(fd);
     fd = null;
+    hooks?.beforeRename?.();
     fs.renameSync(temp, filename);
+    hooks?.afterRename?.();
     const dir = fs.openSync(path.dirname(filename), "r");
     try { fs.fsyncSync(dir); } finally { fs.closeSync(dir); }
   } finally {
@@ -3044,8 +3051,13 @@ function writeAtomicPayload(filename: string, payload: string): void {
   }
 }
 
-function writeAtomic(filename: string, value: RegistryFile, sqliteRevision?: number): void {
-  writeAtomicPayload(filename, serializeRegistry(value, sqliteRevision));
+function writeAtomic(
+  filename: string,
+  value: RegistryFile,
+  sqliteRevision?: number,
+  hooks?: AtomicWriteHooks,
+): void {
+  writeAtomicPayload(filename, serializeRegistry(value, sqliteRevision), hooks);
 }
 
 export type AgentRegistrySqliteMode = "off" | "dual-write" | "read" | "sqlite";
@@ -3069,6 +3081,8 @@ export interface AgentRegistryStorageOptions {
   onSqliteRevisionQuery?: () => void;
   beforeDualWriteStartupReplace?: () => void;
   beforeDualWriteMutationReplace?: () => void;
+  beforeMirrorRename?: () => void;
+  afterMirrorRename?: () => void;
   mirrorCheckpointMs?: number;
   now?: () => number;
   scheduleMirrorCheckpoint?: (callback: () => void, delayMs: number) => { unref?(): unknown };
@@ -3078,6 +3092,7 @@ export interface AgentRegistryStorageOptions {
 export interface AgentRegistryStorageDiagnostics {
   backendMode: AgentRegistrySqliteMode;
   revision: number | null;
+  mirrorRevision: number | null;
   transactionCount: number;
   writerRatePerSecond: number;
   writerWaitP95Ms: number | null;
@@ -3127,6 +3142,8 @@ export class AgentRegistry {
   private readonly now: () => number;
   private readonly scheduleMirrorCheckpoint: (callback: () => void, delayMs: number) => { unref?(): unknown };
   private readonly afterMirrorWrite: (() => void) | undefined;
+  private readonly mirrorWriteHooks: AtomicWriteHooks;
+  private mirrorRevisionCache: { signature: string; revision: number | null } | null = null;
   private mirrorCheckpointPending = false;
   private mirrorCheckpointFailures = 0;
   private lastMirrorAt: number | null = null;
@@ -3171,6 +3188,10 @@ export class AgentRegistry {
     this.scheduleMirrorCheckpoint = storage.scheduleMirrorCheckpoint
       ?? ((callback, delayMs) => setTimeout(callback, delayMs));
     this.afterMirrorWrite = storage.afterMirrorWrite;
+    this.mirrorWriteHooks = {
+      beforeRename: storage.beforeMirrorRename,
+      afterRename: storage.afterMirrorRename,
+    };
     this.beforeDualWriteMutationReplace = storage.beforeDualWriteMutationReplace;
     this.sqliteStore = this.sqliteMode === "off"
       ? null
@@ -3196,6 +3217,7 @@ export class AgentRegistry {
       this.synchronizeDualWriteStartup(storage.beforeDualWriteStartupReplace);
     }
     if (this.sqliteMode === "read" || this.sqliteMode === "sqlite") {
+      this.cleanupStaleTempFiles();
       const sqlite = this.sqliteStore!.snapshot();
       const mirrorRevision = sqliteMirrorRevision(this.filename);
       /* `read` is the parity burn-in, so a same-revision mismatch must stop
@@ -3206,7 +3228,10 @@ export class AgentRegistry {
         this.assertSqliteParity(sqlite);
       }
       if (mirrorRevision !== null && mirrorRevision > sqlite.revision) {
-        throw new RegistryParityError("agent registry JSON mirror revision is ahead of SQLite");
+        if (this.sqliteMode === "sqlite") this.fenceAheadMirror(mirrorRevision, sqlite.revision);
+        throw new RegistryParityError(
+          `agent registry JSON revision ${mirrorRevision} is ahead of SQLite revision ${sqlite.revision}`,
+        );
       }
       this.mirrorSqliteSnapshot(sqlite);
     }
@@ -3230,8 +3255,27 @@ export class AgentRegistry {
     }
   }
 
+  private fenceAheadMirror(mirrorRevision: number, sqliteRevision: number): void {
+    const conflictLabel = `sqlite-conflict-r${mirrorRevision}-over-r${sqliteRevision}`;
+    const conflict = `${this.filename}.${conflictLabel}`;
+    try {
+      fs.renameSync(this.filename, conflict);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    throw new RegistryParityError(
+      `agent registry JSON mirror revision ${mirrorRevision} is ahead of authoritative SQLite revision ${sqliteRevision}; `
+      + `conflicting mirror moved beside the registry as ${conflictLabel} and the next startup will rebuild from SQLite`,
+    );
+  }
+
   private mirrorSqliteSnapshot(initial: SqliteRegistrySnapshot): void {
-    writeAtomic(this.filename, initial.file, initial.revision);
+    writeAtomic(this.filename, initial.file, initial.revision, this.mirrorWriteHooks);
+    this.mirrorRevisionCache = {
+      signature: registryFileSignature(this.filename),
+      revision: initial.revision,
+    };
     this.afterMirrorWrite?.();
     const latestRevision = this.sqliteStore!.revision();
     this.lastMirrorAt = this.now();
@@ -3251,8 +3295,23 @@ export class AgentRegistry {
     return sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * 0.95) - 1)]!;
   }
 
+  private currentMirrorRevision(): number | null {
+    if (this.sqliteMode !== "read" && this.sqliteMode !== "sqlite") return null;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const before = registryFileSignature(this.filename);
+      if (this.mirrorRevisionCache?.signature === before) return this.mirrorRevisionCache.revision;
+      const revision = sqliteMirrorRevision(this.filename);
+      const after = registryFileSignature(this.filename);
+      if (before !== after) continue;
+      this.mirrorRevisionCache = { signature: after, revision };
+      return revision;
+    }
+    return sqliteMirrorRevision(this.filename);
+  }
+
   storageDiagnostics(): AgentRegistryStorageDiagnostics {
     const revision = this.sqliteStore?.revision() ?? null;
+    const mirrorRevision = this.currentMirrorRevision();
     if (revision !== null && this.lastMirroredRevision !== null && revision > this.lastMirroredRevision) {
       this.mirrorDirty = true;
     }
@@ -3265,6 +3324,7 @@ export class AgentRegistry {
     return {
       backendMode: this.sqliteMode,
       revision,
+      mirrorRevision,
       transactionCount: this.transactionCount,
       writerRatePerSecond: rollingTransactions / 60,
       writerWaitP95Ms: this.percentile(this.writerWaits),

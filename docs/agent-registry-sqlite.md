@@ -31,10 +31,10 @@ observed modes differ, so promotion cannot publish a split registry fleet.
 8. After that burn-in, restart every writer with `LLV_AGENT_REGISTRY_SQLITE=sqlite` to remove JSON rewrites from the operation path.
 9. Retain `agent-registry.json`, `agent-registry.sqlite`, and the SQLite WAL files throughout both burn-ins.
 
-`/api/files` reports the backend mode, revision, transaction count, transaction p95,
-writer-wait p95, rollback-mirror checkpoint timestamp, and dirty-checkpoint state under
-`systemHealth.registry`. The cached response exposes the stable mirror checkpoint
-timestamp and omits time-decaying writer rate; rollout probes derive both values at
+`/api/files` reports the backend mode, authoritative and JSON-mirror revisions,
+transaction count, transaction p95, writer-wait p95, rollback-mirror checkpoint
+timestamp, and dirty-checkpoint state under `systemHealth.registry`. The cached
+response exposes the stable mirror checkpoint timestamp and omits time-decaying writer rate; rollout probes derive both values at
 observation time. `/api/runtime/deployments/capabilities/v1` reports
 `registryBackendMode` from the registry instance opened by that Viewer process.
 A rollout probe must
