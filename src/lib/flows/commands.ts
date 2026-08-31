@@ -135,6 +135,9 @@ export async function createFlowFromRequest(req: CreateFlowRequest, entries: Fil
   if (!normalizedSpec.ok) {
     return { error: "spec must be a string", status: 400 };
   }
+  if (req.reviewerSandbox !== undefined && req.reviewerSandbox !== "full" && req.reviewerSandbox !== "restricted") {
+    return { error: "reviewerSandbox must be full or restricted", status: 400 };
+  }
   let targetSha: string | null = null;
   const headRef = req.headRef?.trim() ?? null;
   if (headRef && (!/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(headRef) || headRef.includes("..") || headRef.endsWith("/"))) {
@@ -218,6 +221,7 @@ export async function createFlowFromRequest(req: CreateFlowRequest, entries: Fil
     baseMode,
     mode: req.mode === "manual" ? "manual" : "auto",
     reviewerMode: req.reviewerMode === "pane" ? "pane" : "headless",
+    ...(req.reviewerSandbox === "restricted" ? { reviewerSandbox: "restricted" as const } : {}),
     roundLimit: Number.isInteger(req.roundLimit) && req.roundLimit > 0 ? Math.min(req.roundLimit, 50) : 5,
     state: "waiting_ready",
     pausedState: null,

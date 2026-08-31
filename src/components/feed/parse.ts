@@ -19,7 +19,7 @@ import { parseScheduleWakeup, refineWakeupFromResult, type WakeupInfo } from "@/
 import type { GlyphName } from "../icons";
 import { hhmm } from "../utils";
 import { decodeTerminalText } from "./ansi";
-import { diffFromApplyPatch, normalizeEdit, type DiffModel, type FileDiff } from "./diff";
+import { diffFromApplyPatch, diffFromCodexFileChange, normalizeEdit, type DiffModel, type FileDiff } from "./diff";
 import { familyOf, summarizeTool, type ArgChip, type FeedEngine, type ToolFamily } from "./tools";
 
 /* Feed labels resolve against the active locale at build/render time; a locale
@@ -181,6 +181,7 @@ export type TranscriptRecordItem = {
   kind: "record";
   ts: unknown;
   recordType: string;
+  summary: string;
   body: string;
   truncated: boolean;
 };
@@ -553,6 +554,7 @@ function toolOutputFailed(text: string): boolean {
 }
 
 const RECORD_FIELD_MAX = 4_000;
+const RECORD_SUMMARY_MAX = 160;
 const SENSITIVE_RECORD_KEY = /(?:api.?key|access.?token|refresh.?token|authorization|bearer|secret|password|passwd|pwd|token)/i;
 const SENSITIVE_RECORD_TEXT = /(?:api|token|authorization|bearer|secret|password|passwd|pwd)/i;
 const JSON_SECRET_VALUE = /("(?:api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|bearer|secret|password|passwd|pwd|token)"\s*:\s*")[^"]*/gi;
@@ -588,6 +590,15 @@ function transcriptRecordBody(value: unknown): { body: string; truncated: boolea
   ) ?? "{}";
   const bounded = debugRaw(serialized);
   return { body: bounded.raw, truncated: fieldTruncated || bounded.truncated };
+}
+
+function transcriptRecordSummary(value: unknown, body: string): string {
+  const record = rec(value);
+  const preferred = [record.summary, record.message, record.text, record.detail, record.name, record.query, record.path, record.status]
+    .find((candidate) => typeof candidate === "string" && candidate.trim());
+  const source = typeof preferred === "string" ? preferred : body;
+  const safe = redactTranscriptText(source).replace(/\s+/g, " ").trim();
+  return safe.length > RECORD_SUMMARY_MAX ? safe.slice(0, RECORD_SUMMARY_MAX - 1) + "…" : safe;
 }
 
 function boundedMcpRecord(value: unknown): Record<string, unknown> {
@@ -1684,7 +1695,234 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
   const addRecord = (ts: unknown, recordType: string, value: unknown) => {
     const detail = transcriptRecordBody(value);
     const safeType = redactTranscriptText(recordType).slice(0, ATTACHMENT_TYPE_MAX);
-    push({ kind: "record", ts, recordType: safeType || tr("render.record"), ...detail });
+    push({ kind: "record", ts, recordType: safeType || tr("render.record"), summary: transcriptRecordSummary(value, detail.body), ...detail });
+  };
+  const codexThreadItemKind = (value: unknown): string => textPart(value).replace(/[_-]/g, "").toLowerCase();
+  const codexThreadToolStatus = (item: Record<string, unknown>, lifecycle: string): ToolStatus => {
+    const status = codexThreadItemKind(item.status);
+    if (["failed", "declined", "interrupted", "error", "errored"].includes(status)
+      || item.error !== undefined && item.error !== null
+      || item.failure !== undefined && item.failure !== null
+      || item.success === false
+      || (num(item.exitCode ?? item.exit_code) ?? 0) !== 0) return "err";
+    if (["inprogress", "running", "pending"].includes(status)) return "run";
+    if (["completed", "complete", "success", "succeeded"].includes(status)) return "ok";
+    if (lifecycle === "itemcompleted") return "ok";
+    return "run";
+  };
+  const codexThreadStatusLabel = (status: ToolStatus): string => {
+    if (status === "ok") return "ok";
+    if (status === "err") return tr("render.error");
+    return tr("render.executing");
+  };
+  const upsertCodexThreadTool = (event: ToolEvent): void => {
+    const existing = calls.get(event.id);
+    if (!existing) return void registerCall(event);
+    existing.event = event;
+    const idx = entryIndex(existing.seq);
+    if (idx >= 0 && entries[idx]?.item.kind === "tool") {
+      entries[idx] = { ...entries[idx], src: curSrc, item: event };
+      snapshot = null;
+    }
+  };
+  const codexThreadArgs = (value: unknown): Record<string, unknown> => {
+    if (value && typeof value === "object" && !Array.isArray(value)) return value as Record<string, unknown>;
+    if (value === undefined || value === null) return {};
+    return { input: typeof value === "string" ? value : JSON.stringify(value) };
+  };
+  const codexThreadPreview = (value: unknown): string => {
+    if (value === undefined || value === null) return "";
+    return transcriptRecordBody(value).body.replace(/\s+/g, " ").trim().slice(0, 120);
+  };
+  const emitCodexThreadTool = (opts: {
+    item: Record<string, unknown>;
+    ts: unknown;
+    lifecycle: string;
+    tool: string;
+    args?: Record<string, unknown>;
+    summary?: string;
+    output?: unknown;
+  }): void => {
+    const id = textPart(opts.item.id) || "plain-" + pushSeq + "-" + String(opts.ts ?? "");
+    const status = codexThreadToolStatus(opts.item, opts.lifecycle);
+    const base = newToolEvent({
+      ts: opts.ts,
+      id,
+      tool: opts.tool,
+      args: opts.args,
+      engine: "codex",
+      ...(opts.summary ? { summary: opts.summary } : {}),
+    });
+    upsertCodexThreadTool({ ...base, status, statusLabel: codexThreadStatusLabel(status) });
+    if (status !== "run") attach(calls.get(id), toolOutputText(opts.output), status === "err");
+    const current = calls.get(id)?.event;
+    if (!current) return;
+    const durationMs = num(opts.item.durationMs);
+    upsertCodexThreadTool({
+      ...current,
+      status,
+      statusLabel: codexThreadStatusLabel(status),
+      ...(durationMs !== undefined ? { durationMs } : {}),
+    });
+  };
+  const renderCodexThreadItem = (item: Record<string, unknown>, ts: unknown, lifecycle: string): boolean => {
+    const kind = codexThreadItemKind(item.type);
+    const id = textPart(item.id) || "plain-" + pushSeq + "-" + String(ts ?? "");
+    const toolKind = ["functioncalloutput", "commandexecution", "filechange", "mcptoolcall", "dynamictoolcall", "collabagenttoolcall", "websearch", "imageview", "imagegeneration"].includes(kind);
+    if (lifecycle === "itemdelta" || (lifecycle === "itemstarted" && !toolKind)) {
+      addSvc(`${textPart(item.type) || "item"} ${lifecycle}`);
+      return true;
+    }
+    if (kind === "usermessage") {
+      emitCodexUserContent(ts, normalizeCodexUserContent(item.content));
+      return true;
+    }
+    if (kind === "hookprompt") {
+      const text = arr(item.fragments).map((fragment) => textPart(fragment.text)).filter(Boolean).join("\n");
+      addSysMsg(text || "Hook prompt", "Hook prompt");
+      return true;
+    }
+    if (kind === "agentmessage") {
+      addCodexAssistant("response-assistant", ts, textPart(item.text), id);
+      return true;
+    }
+    if (kind === "functioncalloutput") {
+      const name = [textPart(item.namespace), textPart(item.name)].filter(Boolean).join(" · ") || "function output";
+      emitCodexThreadTool({ item, ts, lifecycle, tool: textPart(item.name) || "functionCallOutput", summary: name, output: item.output });
+      return true;
+    }
+    if (kind === "plan") {
+      addNote(textPart(item.text) || "Plan updated");
+      return true;
+    }
+    if (kind === "reasoning") {
+      const text = [...arr(item.summary), ...arr(item.content)].map((part) => textPart(part.text)).filter(Boolean).join("\n")
+        || [...(Array.isArray(item.summary) ? item.summary : []), ...(Array.isArray(item.content) ? item.content : [])]
+          .filter((part): part is string => typeof part === "string" && Boolean(part.trim())).join("\n")
+        || textPart(item.text);
+      if (text) push({ kind: "think", text });
+      else addSvc("reasoning");
+      return true;
+    }
+    if (kind === "mcptoolcall") {
+      const server = textPart(item.server) || "mcp";
+      const tool = textPart(item.tool) || "tool";
+      emitCodexThreadTool({ item, ts, lifecycle, tool: `mcp__${server}__${tool}`, args: codexThreadArgs(item.arguments), output: item.error ?? item.result });
+      return true;
+    }
+    if (kind === "dynamictoolcall") {
+      const tool = textPart(item.tool) || "dynamicToolCall";
+      const namespace = textPart(item.namespace);
+      const args = codexThreadArgs(item.arguments);
+      const preview = codexThreadPreview(item.arguments);
+      emitCodexThreadTool({
+        item,
+        ts,
+        lifecycle,
+        tool,
+        args,
+        summary: [namespace, tool, preview].filter(Boolean).join(" · "),
+        output: item.contentItems,
+      });
+      return true;
+    }
+    if (kind === "collabagenttoolcall") {
+      const tool = textPart(item.tool) || "collabAgentToolCall";
+      const args = { prompt: item.prompt, model: item.model, reasoningEffort: item.reasoningEffort };
+      emitCodexThreadTool({ item, ts, lifecycle, tool, args, summary: `Collab · ${tool}`, output: { status: item.status, agents: item.agentsStates } });
+      return true;
+    }
+    if (kind === "subagentactivity") {
+      addNote(["Sub-agent", textPart(item.kind)].filter(Boolean).join(" · "));
+      return true;
+    }
+    if (kind === "websearch") {
+      emitCodexThreadTool({ item, ts, lifecycle, tool: "WebSearch", args: { query: item.query }, output: { results: item.results } });
+      return true;
+    }
+    if (kind === "imageview") {
+      const path = textPart(item.path);
+      emitCodexThreadTool({ item, ts, lifecycle, tool: "imageView", args: { path }, summary: ["imageView", path].filter(Boolean).join(" · "), output: path });
+      return true;
+    }
+    if (kind === "sleep") {
+      const durationMs = num(item.durationMs);
+      addNote(durationMs === undefined ? "Sleep" : `Sleep · ${durationMs} ms`);
+      return true;
+    }
+    if (kind === "imagegeneration") {
+      const preview = textPart(item.revisedPrompt) || textPart(item.result);
+      emitCodexThreadTool({
+        item,
+        ts,
+        lifecycle,
+        tool: "imageGeneration",
+        args: preview ? { prompt: preview } : {},
+        summary: preview ? `imageGeneration · ${preview}` : "imageGeneration",
+        output: item.failure ?? { result: item.result, savedPath: item.savedPath },
+      });
+      return true;
+    }
+    if (kind === "enteredreviewmode" || kind === "exitedreviewmode") {
+      const label = kind === "enteredreviewmode" ? "Entered review mode" : "Exited review mode";
+      addNote([label, textPart(item.review)].filter(Boolean).join(" · "));
+      return true;
+    }
+    if (kind === "contextcompaction") {
+      addCompact(ts);
+      return true;
+    }
+    if (kind === "commandexecution") {
+      const command = Array.isArray(item.command)
+        ? item.command.filter((part): part is string => typeof part === "string").join(" ")
+        : textPart(item.command);
+      const base = newToolEvent({
+        ts,
+        id,
+        tool: "exec_command",
+        args: { cmd: command, cwd: item.cwd },
+        engine: "codex",
+        command,
+      });
+      const status = codexThreadToolStatus(item, lifecycle);
+      upsertCodexThreadTool({ ...base, status, statusLabel: codexThreadStatusLabel(status) });
+      if (status !== "run") attach(calls.get(id), textPart(item.aggregatedOutput ?? item.aggregated_output ?? item.output), status === "err");
+      const current = calls.get(id)?.event;
+      if (current) {
+        const exitCode = num(item.exitCode ?? item.exit_code);
+        const duration = rec(item.duration);
+        const seconds = num(duration.secs);
+        const nanos = num(duration.nanos);
+        const rolloutDurationMs = seconds !== undefined || nanos !== undefined
+          ? Math.round((seconds ?? 0) * 1_000 + (nanos ?? 0) / 1_000_000)
+          : undefined;
+        const durationMs = num(item.durationMs) ?? rolloutDurationMs;
+        upsertCodexThreadTool({
+          ...current,
+          status,
+          statusLabel: codexThreadStatusLabel(status),
+          ...(exitCode !== undefined ? { exitCode } : {}),
+          ...(durationMs !== undefined ? { durationMs } : {}),
+        });
+      }
+      return true;
+    }
+    if (kind !== "filechange") return false;
+    const base = newToolEvent({
+      ts,
+      id,
+      tool: "apply_patch",
+      args: {},
+      engine: "codex",
+      diff: diffFromCodexFileChange(item.changes),
+    });
+    const status = codexThreadToolStatus(item, lifecycle);
+    upsertCodexThreadTool({
+      ...base,
+      status,
+      statusLabel: codexThreadStatusLabel(status),
+    });
+    return true;
   };
   /* Inbound teammate traffic arrives as user text wrapped in <teammate-message>;
      idle_notification JSON bodies collapse to a thin service-style row. */
@@ -1852,6 +2090,13 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     if (obj.type === "event_msg") {
       if (p.type === "user_message" && p.message) return addCodexEventUser(ts, textPart(p.message));
       finalizePendingCodexUsers();
+      const lifecycle = codexThreadItemKind(p.type);
+      const threadItem = rec(p.item);
+      if (["itemstarted", "itemcompleted", "itemdelta"].includes(lifecycle) && textPart(threadItem.type)) {
+        if (renderCodexThreadItem(threadItem, ts, lifecycle)) return;
+        if (lifecycle !== "itemcompleted") return addSvc(`${textPart(threadItem.type)} ${lifecycle}`);
+        return addRecord(ts, textPart(threadItem.type), threadItem);
+      }
       if (p.type === "agent_message" && p.message) {
         return addCodexAssistant("event-agent", ts, textPart(p.message));
       }
@@ -1884,12 +2129,30 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
         }
         return;
       }
-      if (["patch_apply_end", "sub_agent_activity", "thread_settings_applied", "token_count", "turn_aborted", "web_search_end"].includes(textPart(p.type))) {
+      if ([
+        "patch_apply_end",
+        "sub_agent_activity",
+        "thread_settings_applied",
+        "token_count",
+        "turn_aborted",
+        "web_search_end",
+        "command_execution_output_delta",
+        "file_change_output_delta",
+        "file_change_patch_updated",
+      ].includes(textPart(p.type))) {
         return addSvc(textPart(p.type));
       }
       return addRecord(ts, textPart(p.type) || "event", p);
     }
     if (obj.type === "response_item") {
+      const nestedThreadItem = rec(p.item);
+      if (textPart(nestedThreadItem.type)) {
+        finalizePendingCodexUsers();
+        if (renderCodexThreadItem(nestedThreadItem, ts, "itemcompleted")) return;
+        return addRecord(ts, textPart(nestedThreadItem.type), nestedThreadItem);
+      }
+      const directItemType = textPart(p.type);
+      if (!directItemType.includes("_") && renderCodexThreadItem(p, ts, "itemcompleted")) return;
       if (p.type === "message") {
         if (p.role === "user") return addCodexResponseUser(ts, p.content);
         finalizePendingCodexUsers();

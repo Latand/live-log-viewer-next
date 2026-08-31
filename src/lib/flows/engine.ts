@@ -749,9 +749,11 @@ async function launchReviewer(
   flow.state = "reviewing";
   flow.stateDetail = null;
   if (flow.reviewerMode === "pane") {
+    const restricted = flow.reviewerSandbox === "restricted";
     const spec = freshSpecFor(role.engine, flow.cwd, {
       model: role.model,
       effort: role.effort,
+      readOnly: restricted,
       codexHome: account.engine === "codex" ? account.home : null,
       claudeConfigDir: account.engine === "claude" ? account.home : null,
       claudeProjectsDir: account.engine === "claude" ? account.transcriptRoot : null,
@@ -798,6 +800,7 @@ async function launchReviewer(
     account.engine === "claude" ? { home: account.home, projectsDir: account.transcriptRoot, managed: account.kind === "managed" } : null,
     undefined,
     spawnCapability,
+    flow.reviewerSandbox === "restricted" ? "read-only" : "bypass",
   );
   recordHeadlessLaunch(round, launched);
   settleReviewerSpawn(flow, round, role, account.accountId);

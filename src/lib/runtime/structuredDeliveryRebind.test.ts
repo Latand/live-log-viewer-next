@@ -199,6 +199,32 @@ test("a process that never bound the delivery queue reports an unbound publicati
   expect(probe.stdout.toString().trim()).toBe("unbound");
 });
 
+test("separate Next bundle realms share one delivery controller lifecycle (#572)", async () => {
+  const { registry, directory, client, close } = fixture("bundle-realms");
+  const moduleCopy = (name: string) => `./structuredDeliveryController?${name}`;
+  const instrumentationRealm = await import(moduleCopy("issue-572-instrumentation"));
+  const routeRealm = await import(moduleCopy("issue-572-route"));
+  const { key } = seedConversation(registry, directory, "bundle-realm-session");
+  const host = structuredHost();
+
+  try {
+    expect(instrumentationRealm).not.toBe(routeRealm);
+    await instrumentationRealm.bindStructuredDeliveryQueue([], { registry, client });
+    expect(routeRealm.hasStructuredDeliveryController(registry)).toBe(true);
+
+    await routeRealm.publishStructuredDeliveryHost({ key, host });
+    expect(instrumentationRealm.hasStructuredDeliveryHost(key)).toBe(true);
+
+    /* Re-entering startup through the other compiled module replaces the
+       generation while preserving its one process-owned host lifecycle. */
+    await routeRealm.bindStructuredDeliveryQueue([], { registry, client });
+    expect(instrumentationRealm.hasStructuredDeliveryController(registry)).toBe(true);
+    expect(instrumentationRealm.hasStructuredDeliveryHost(key)).toBe(true);
+  } finally {
+    await close();
+  }
+});
+
 test("a spawn issued while the queue rebinds is published once the bind completes (#1191)", async () => {
   const { registry, journal, client, close } = fixture("rebind-window");
   await bindStructuredDeliveryQueue([], { registry, client });

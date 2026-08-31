@@ -200,6 +200,9 @@ export type Flow = {
   baseMode: "head" | "merge-base";
   mode: "auto" | "manual";
   reviewerMode: "headless" | "pane";
+  /** Pipeline-owned flows may opt their reviewer into the restrictive engine
+      sandbox. Omitted flows keep full host access. */
+  reviewerSandbox?: "full" | "restricted";
   roundLimit: number; // default 5; 0 = unlimited
   state: FlowState;
   pausedState?: FlowState | null;
@@ -251,6 +254,7 @@ export type CreateFlowRequest = {
   spec?: string;
   mode: "auto" | "manual";
   reviewerMode: "headless" | "pane";
+  reviewerSandbox?: "full" | "restricted";
   roundLimit: number;
 };
 

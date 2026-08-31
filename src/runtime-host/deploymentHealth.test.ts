@@ -1,10 +1,23 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { NextRequest } from "next/server";
 
+import { AgentRegistry } from "@/lib/agent/registry";
 import type { ViewerHealthEvidence, ViewerHealthProbeObservation } from "@/lib/runtime/contracts";
+import type { RuntimeHostClient } from "@/lib/runtime/client";
+import { bindStructuredDeliveryQueue } from "@/lib/runtime/structuredDeliveryController";
+import { HOT_STATE_BACKEND } from "@/lib/state/hotStateAuthority";
 import { proxy } from "@/proxy";
 import { GET as deploymentCapability } from "@/app/api/runtime/deployments/capabilities/v1/route";
-import { markStructuredHostStartupProgress, markStructuredHostStartupReady } from "@/lib/runtime/startupStatus";
+import {
+  markStructuredDeliveryControllerReady,
+  markStructuredDeliveryControllerUnavailable,
+  markStructuredHostStartupProgress,
+  markStructuredHostStartupReady,
+} from "@/lib/runtime/startupStatus";
+import { RuntimeJournal } from "@/runtime-host/journal";
 
 import {
   candidateLogExcerpt,
@@ -20,6 +33,7 @@ import {
 
 const originalToken = process.env.LLV_TOKEN;
 afterEach(() => {
+  markStructuredDeliveryControllerUnavailable();
   if (originalToken === undefined) delete process.env.LLV_TOKEN;
   else process.env.LLV_TOKEN = originalToken;
 });
@@ -35,6 +49,23 @@ function evidence(ok: boolean): ViewerHealthEvidence {
     assets: ok ? [{ path: "/_next/static/app.js", status: 200 }] : [],
     ok,
   };
+}
+
+function runtimeClient(journal: RuntimeJournal): RuntimeHostClient {
+  return {
+    snapshot: async () => journal.snapshot(),
+    events: async (after) => journal.replay(after),
+    waitEvents: async (after) => journal.replay(after),
+    append: async (event) => journal.append(event),
+    operation: async (event) => journal.append(event),
+    command: async (command) => journal.executeOperation(command),
+    operationStatus: async (operationId) => journal.operationResult(operationId),
+    retryOperation: async (operationId) => journal.retryOperation(operationId),
+    producerCursor: async (producerKind, eventKeyPrefix) => journal.producerCursor(producerKind, eventKeyPrefix),
+    effectBatch: async (kinds, afterEventSeq) => journal.effectBatch(100, kinds, afterEventSeq),
+    transitionOperation: async (operationId, status, details) =>
+      journal.transitionOperation(operationId, status, details),
+  } as RuntimeHostClient;
 }
 
 test("candidate readiness polls through delayed startup until routes and assets pass", async () => {
@@ -87,6 +118,7 @@ test("health request plan exercises remote authorization and rejection", () => {
 });
 
 test("deployment capability requires the candidate-owned versioned endpoint", async () => {
+  markStructuredDeliveryControllerReady();
   const response = deploymentCapability();
   const body = await response.text();
 
@@ -113,6 +145,7 @@ test("deployment capability requires the candidate-owned versioned endpoint", as
 
 test("deployment capability publishes bounded structured-host adoption progress", async () => {
   try {
+    markStructuredDeliveryControllerReady();
     markStructuredHostStartupProgress({
       phase: "adopting Claude hosts",
       completedHosts: 7,
@@ -139,6 +172,64 @@ test("deployment capability publishes bounded structured-host adoption progress"
     }))).toBeNull();
   } finally {
     markStructuredHostStartupReady();
+  }
+});
+
+test("issue 572: serving health follows the process delivery controller", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-controller-health-"));
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
+  const previousStateDirectory = process.env.LLV_STATE_DIR;
+  const previousPort = process.env.PORT;
+  try {
+    await bindStructuredDeliveryQueue([], { registry, client: null });
+    markStructuredHostStartupReady();
+
+    const absent = deploymentCapability();
+    expect(absent.status).toBe(503);
+    expect(await absent.json()).toMatchObject({
+      error: "structured delivery controller is unavailable",
+      structuredHostStartup: { state: "ready" },
+    });
+
+    await bindStructuredDeliveryQueue([], {
+      registry,
+      client: runtimeClient(journal),
+      deferStartupWork: true,
+    });
+    const recovered = deploymentCapability();
+    expect(recovered.status).toBe(200);
+    expect(await recovered.json()).toMatchObject({
+      capability: "viewer-deployments",
+      version: 1,
+      structuredDeliveryController: "ready",
+    });
+
+    await bindStructuredDeliveryQueue([], { registry, client: null });
+    expect(deploymentCapability().status).toBe(503);
+
+    process.env.LLV_STATE_DIR = directory;
+    process.env.PORT = "19002";
+    fs.writeFileSync(path.join(directory, "viewer-release.json"), JSON.stringify({
+      endpoint: "http://127.0.0.1:19001",
+      revision: "5".repeat(40),
+      hotStateBackend: HOT_STATE_BACKEND,
+    }));
+    const passiveCandidate = deploymentCapability();
+    expect(passiveCandidate.status).toBe(200);
+    expect(await passiveCandidate.json()).toMatchObject({
+      capability: "viewer-deployments",
+      structuredDeliveryController: "unavailable",
+    });
+  } finally {
+    if (previousStateDirectory === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousStateDirectory;
+    if (previousPort === undefined) delete process.env.PORT;
+    else process.env.PORT = previousPort;
+    await bindStructuredDeliveryQueue([], { registry, client: null });
+    markStructuredHostStartupReady();
+    journal.close();
+    fs.rmSync(directory, { recursive: true, force: true });
   }
 });
 

@@ -369,6 +369,24 @@ test("headless claude reviewer launches with approval-free tool access", () => {
   expect(built.args).not.toContain("--disallowedTools");
 });
 
+test("explicitly restricted Claude reviewer uses the restrictive permission mode", () => {
+  const built = reviewerCommand(
+    { engine: "claude", model: null, effort: null },
+    "review prompt",
+    "/out/review.md",
+    "/repo",
+    null,
+    null,
+    undefined,
+    { sandbox: "read-only" },
+  );
+
+  expect(built.args).toContain("--permission-mode");
+  expect(built.args).toContain("plan");
+  expect(built.args).toContain("--disallowedTools");
+  expect(built.args).not.toContain("--dangerously-skip-permissions");
+});
+
 test("headless managed Claude reviewer installs the native sub-agent deny profile and scrubs Viewer auth", () => {
   const home = path.join(process.env.LLV_STATE_DIR!, "headless-claude-account");
   fs.mkdirSync(home, { recursive: true });
