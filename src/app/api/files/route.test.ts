@@ -441,6 +441,28 @@ test("repeated files reads reuse the pure read snapshot and retain ETag behavior
   expect(first.headers.get("server-timing")).toMatch(/files-role-titles;dur=\d+(?:\.\d+)?/);
 });
 
+test("SQLite health exposes authoritative and mirror revisions without conditional-response churn", async () => {
+  scannedFiles = [];
+  const registry = new AgentRegistry(path.join(registryRoot, "sqlite-health.json"), undefined, undefined, {
+    sqliteMode: "sqlite",
+  });
+  setAgentRegistryForTests(registry);
+
+  const first = await GET(new Request("http://127.0.0.1/api/files"));
+  const body = await first.json() as {
+    systemHealth: { registry: { revision: number; mirrorRevision: number } };
+  };
+  const etag = first.headers.get("etag");
+  const second = await GET(new Request("http://127.0.0.1/api/files", {
+    headers: { "if-none-match": etag! },
+  }));
+
+  expect(body.systemHealth.registry.revision).toBe(registry.storageDiagnostics().revision!);
+  expect(body.systemHealth.registry.mirrorRevision).toBe(body.systemHealth.registry.revision);
+  expect(second.status).toBe(304);
+  expect(second.headers.get("x-llv-files-projection-cache")).toBe("hit");
+});
+
 test("a cross-process SQLite pipeline commit invalidates a warm files projection", async () => {
   scannedFiles = [];
   const real = realModules.get("@/lib/pipelines/store") as {

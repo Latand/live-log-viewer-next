@@ -11,6 +11,19 @@ function waitFor(pathname: string): void {
   while (!fs.existsSync(pathname)) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1);
 }
 
+if (action === "sqlite-mirror-crash") {
+  new AgentRegistry(filename, undefined, undefined, {
+    sqliteMode: "sqlite",
+    beforeMirrorRename: () => {
+      if (label === "before") process.exit(75);
+    },
+    afterMirrorRename: () => {
+      if (label === "after") process.exit(76);
+    },
+  });
+  process.exit(0);
+}
+
 if (action === "dual-startup") {
   new AgentRegistry(filename, undefined, undefined, {
     sqliteMode: "dual-write",

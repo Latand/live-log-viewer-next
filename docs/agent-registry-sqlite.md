@@ -3,7 +3,7 @@
 The registry supports four values for `LLV_AGENT_REGISTRY_SQLITE`:
 
 - `off` keeps `agent-registry.json` authoritative. This is the default.
-- `dual-write` reads JSON, writes JSON and SQLite under the existing JSON writer lock, and verifies parity after every mutation.
+- `dual-write` reads JSON, writes revision-stamped JSON and SQLite under the existing JSON writer lock, and verifies parity after every mutation.
 - `read` reads and transacts through `agent-registry.sqlite` in WAL mode, then refreshes `agent-registry.json` on a bounded five-second checkpoint cadence. Startup and release demotion write a revision-stamped checkpoint.
 - `sqlite` uses SQLite for reads and writes after the parity burn-in. It refreshes the JSON mirror at process start, repairs missing, malformed, stale, or torn mirror state from authoritative SQLite, and removes JSON serialization from registry operations. A mirror revision ahead of SQLite remains fenced because it can indicate durable-state rollback.
 
@@ -31,10 +31,10 @@ observed modes differ, so promotion cannot publish a split registry fleet.
 8. After that burn-in, restart every writer with `LLV_AGENT_REGISTRY_SQLITE=sqlite` to remove JSON rewrites from the operation path.
 9. Retain `agent-registry.json`, `agent-registry.sqlite`, and the SQLite WAL files throughout both burn-ins.
 
-`/api/files` reports the backend mode, revision, transaction count, transaction p95,
-writer-wait p95, rollback-mirror checkpoint timestamp, and dirty-checkpoint state under
-`systemHealth.registry`. The cached response exposes the stable mirror checkpoint
-timestamp and omits time-decaying writer rate; rollout probes derive both values at
+`/api/files` reports the backend mode, authoritative and JSON-mirror revisions,
+transaction count, transaction p95, writer-wait p95, rollback-mirror checkpoint
+timestamp, and dirty-checkpoint state under `systemHealth.registry`. The cached
+response exposes the stable mirror checkpoint timestamp and omits time-decaying writer rate; rollout probes derive both values at
 observation time. `/api/runtime/deployments/capabilities/v1` reports
 `registryBackendMode` from the registry instance opened by that Viewer process.
 A rollout probe must
