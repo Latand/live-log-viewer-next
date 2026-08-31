@@ -3756,6 +3756,7 @@ test("startup keeps a delivered spawn host dead while settling its receipt", asy
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-delivered-spawn-"));
   const sessionId = crypto.randomUUID();
   const artifactPath = path.join(directory, `${sessionId}.jsonl`);
+  fs.writeFileSync(artifactPath, `${JSON.stringify(openTurnRecords("codex")[0])}\n`);
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
   const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
   const client = runtimeClient(journal);
