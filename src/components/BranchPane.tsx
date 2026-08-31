@@ -222,6 +222,8 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
      conversation is never messaged through the legacy pane-bound delivery
      path (finding 1). */
   const { caps, runtime } = useAgentCapabilities(file);
+  /* `useAgentCapabilities` resolves the card once for every consumer below:
+     banner, strip, and composer must never tell three liveness stories. */
   const deadHost = caps.surface === "dead";
   /* A terminally superseded round (issue #383): the banner replaces recovery
      with navigation to the live successor, and the composer unmounts — the
