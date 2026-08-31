@@ -121,6 +121,8 @@ export type AccountOption = {
   kind?: "legacy" | "managed";
   authPresent: boolean;
   authHealth?: AccountAuthHealth;
+  /** Public subscription tier reported by the account read. */
+  plan?: string | null;
   loginPending: boolean;
   loginState: ManagedAttemptState | "idle" | "authenticated";
   attemptState?: ManagedAttemptState | null;
@@ -317,13 +319,15 @@ function accountResponse(body: unknown, engine: Engine): EngineResponse {
     // The phase is authoritative for pending state (C3): a nonterminal login
     // keeps the row pending even when the server's raw `loginPending` lags.
     const loginPending = login ? NONTERMINAL_CLAUDE_LOGIN_PHASES.has(login.phase) : account.loginPending === true;
-    const authState = typeof account.auth === "object" && account.auth !== null
-      ? (account.auth as { state?: unknown }).state
+    const auth = typeof account.auth === "object" && account.auth !== null
+      ? account.auth as { state?: unknown; plan?: unknown }
       : null;
+    const authState = auth?.state;
     const authHealth: AccountAuthHealth = authState === "authenticated" || authState === "signed_out" || authState === "unknown" || authState === "error"
       ? authState
       : account.authPresent ? "unknown" : "signed_out";
-    return { ...account, authHealth, login, loginPending, limits: parseAccountLimits(account.limits), projects: parseBoundProjects((raw as { projects?: unknown }).projects) };
+    const plan = typeof auth?.plan === "string" && auth.plan.trim() ? auth.plan : null;
+    return { ...account, authHealth, plan, login, loginPending, limits: parseAccountLimits(account.limits), projects: parseBoundProjects((raw as { projects?: unknown }).projects) };
   });
   return {
     active: section.active,
