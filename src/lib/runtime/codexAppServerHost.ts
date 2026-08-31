@@ -1173,6 +1173,13 @@ export class CodexAppServerHost implements EngineHost {
     } catch (error) {
       const reason = safeError(error);
       if (/not materialized yet/i.test(reason) && /before first user message/i.test(reason)) {
+        /* Codex 0.151 keeps giving this answer for threads whose rollout is
+           already on disk with the confirmed first message in it. The rollout
+           IS the session store, so it outranks the engine's claim (#1332). */
+        const persistedOnDisk = rolloutTurnsFromDisk(this.identity.path).some((turn) =>
+          Array.isArray(turn.items)
+          && turn.items.some((item) => stringField(item, "clientId") === clientMessageId));
+        if (persistedOnDisk) return { state: "materialized" };
         const confirmed = this.confirmedDeliveries.get(clientMessageId);
         const turnId = confirmed?.receipt.outcome !== "rejected"
           ? confirmed?.receipt.turnId ?? null
