@@ -339,6 +339,44 @@ test("closing a finished child card dismisses it without queueing a shared-host 
   expect(tmuxCalls).toEqual([]);
 });
 
+test("closing a live shared-host child preserves its root and sibling branches", async () => {
+  const parent = {
+    ...alphaOf(),
+    activity: "live" as const,
+    proc: "running" as const,
+    pid: 4101,
+  };
+  const child = {
+    ...file("/alpha-live-child", "Live child", Date.now() / 1000),
+    parent: "/alpha",
+    spawnOrigin: "viewer" as const,
+    activity: "live" as const,
+    proc: "running" as const,
+    pid: 4101,
+  };
+  const sibling = {
+    ...file("/alpha-live-sibling", "Sibling branch", Date.now() / 1000),
+    parent: "/alpha",
+    spawnOrigin: "viewer" as const,
+    activity: "recent" as const,
+  };
+  const host = mount([parent, child, sibling], [parent.path], [child.path, sibling.path]);
+  expect(await waitFor(() => host.querySelector(`[data-scheme-node="${child.path}"]`) !== null)).toBe(true);
+
+  const close = Array.from(host.querySelectorAll(`[data-scheme-node="${child.path}"] button`)).find(
+    (button) => (button.getAttribute("aria-label") ?? "").startsWith("Remove column"),
+  ) as HTMLButtonElement | undefined;
+  expect(close).toBeTruthy();
+  flushSync(() => close!.dispatchEvent(new dom.MouseEvent("click", { bubbles: true, cancelable: true }) as never));
+
+  expect(await waitFor(() => host.querySelector(`[data-scheme-node="${child.path}"]`) === null)).toBe(true);
+  await settle();
+  expect(host.querySelector(`[data-scheme-node="${parent.path}"]`)).not.toBeNull();
+  expect(host.querySelector(`[data-scheme-node="${sibling.path}"]`)).not.toBeNull();
+  expect(boards[PROJECT]!.prefs.hidden).toContain(child.path);
+  expect(tmuxCalls).toEqual([]);
+});
+
 test("the list publishes a multi-card selection in its own row order", async () => {
   const host = mount();
   expect(await waitFor(() => checkIn(host, "/beta") !== null)).toBe(true);

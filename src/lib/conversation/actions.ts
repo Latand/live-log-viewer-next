@@ -94,7 +94,7 @@ export async function applyConversationAction(
   const conversation = byId ?? byPath;
   const transcriptPath = byId?.generations.at(-1)?.path ?? request.transcriptPath;
 
-  if (request.action === "kill" && branchSharesRootHost(conversation)) {
+  if (request.action === "kill" && branchSharesRootHost(registry, conversation)) {
     return {
       status: 409,
       body: {

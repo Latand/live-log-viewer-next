@@ -488,7 +488,7 @@ export async function bindStructuredDeliveryQueue(
       return liveness?.state === "severed" ? liveness.reason : null;
     },
     (conversationId) => conversationId.startsWith("conversation_")
-      && branchSharesRootHost(registry.conversation(conversationId as `conversation_${string}`))
+      && branchSharesRootHost(registry, registry.conversation(conversationId as `conversation_${string}`))
       ? BRANCH_SHARED_HOST_ERROR
       : null,
   );

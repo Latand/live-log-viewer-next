@@ -33,6 +33,12 @@ test("a finished child kill settles as a typed branch result without entering ei
     registry: () => ({
       conversation: (id: string) => id === child.id ? child : root,
       conversationForPath: (pathname: string) => pathname === "/sessions/child.jsonl" ? child : root,
+      canonicalConversationId: (id: string) => id,
+      readOnlySnapshot: () => ({
+        lineageEdges: {
+          [child.id]: { source: "engine-native", parentConversationId: root.id },
+        },
+      }),
     } as never),
     structuredEnabled: () => true,
     dispatchStructuredControl: async () => {
@@ -69,6 +75,65 @@ test("a finished child kill settles as a typed branch result without entering ei
   });
   expect(structuredDispatches).toBe(0);
   expect(legacyKills).toBe(0);
+});
+
+test("a viewer-spawned child with its own host remains explicitly terminable", async () => {
+  const root = conversation("conversation_root", ["/sessions/root.jsonl"]);
+  const child = conversation("conversation_child", ["/sessions/child.jsonl"], root.id);
+  const controls: unknown[] = [];
+
+  const result = await applyConversationAction({
+    operationId: "child-owned-kill",
+    conversationId: child.id,
+    transcriptPath: "/sessions/child.jsonl",
+    action: "kill",
+  }, {
+    registry: () => ({
+      conversation: (id: string) => id === child.id ? child : root,
+      conversationForPath: (pathname: string) => pathname === "/sessions/child.jsonl" ? child : root,
+      canonicalConversationId: (id: string) => id,
+      readOnlySnapshot: () => ({
+        lineageEdges: {
+          [child.id]: { source: "viewer-spawn", parentConversationId: root.id },
+        },
+      }),
+    } as never),
+    structuredEnabled: () => true,
+    dispatchStructuredControl: async (request) => {
+      controls.push(request);
+      return {
+        status: 202,
+        body: {
+          ok: true,
+          structured: true,
+          target: child.id,
+          operationId: "child-owned-kill",
+          receipt: { operationId: "child-owned-kill", status: "queued" },
+        },
+      };
+    },
+    interruptConversation: async () => ({ ok: true, target: "%1" }),
+    killConversation: async () => ({ ok: true, target: "%1" }),
+    resumeConversation: async () => ({ ok: true, target: "%1" }),
+    compactConversation: async () => ({ ok: true, target: "%1" }),
+    answerDialogKey: async () => ({ ok: true, target: "%1" }),
+  });
+
+  expect(result).toMatchObject({
+    status: 202,
+    body: {
+      ok: true,
+      target: child.id,
+      operationId: "child-owned-kill",
+      receipt: { status: "queued" },
+    },
+  });
+  expect(controls).toEqual([{
+    path: "/sessions/child.jsonl",
+    conversationId: child.id,
+    action: "kill",
+    operationId: "child-owned-kill",
+  }]);
 });
 
 test("conversation actions reject a transcript path owned by another durable conversation", async () => {
