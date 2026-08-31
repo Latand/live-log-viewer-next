@@ -1463,6 +1463,152 @@ describe("Codex payload audit fixture", () => {
   });
 });
 
+describe("Codex 0.151 thread items", () => {
+  const fixture = fixtureLines("codex-thread-items-0.151.jsonl");
+
+  test("renders a PascalCase item_completed FileChange as the existing file-edit card", () => {
+    const item = buildFeed(codexFile, [fixture[0]], false, "").items[0];
+
+    expect(item).toMatchObject({
+      kind: "tool",
+      id: "file-change-pascal",
+      family: "edit",
+      status: "ok",
+      body: {
+        type: "diff",
+        files: [{
+          path: "src/widget.ts",
+          op: "update",
+          added: 1,
+          removed: 1,
+        }],
+      },
+    });
+  });
+
+  test("renders a camelCase paginated fileChange as the same file-edit card", () => {
+    const item = buildFeed(codexFile, [fixture[1]], false, "").items[0];
+
+    expect(item).toMatchObject({
+      kind: "tool",
+      id: "file-change-camel",
+      family: "edit",
+      status: "ok",
+      body: {
+        type: "diff",
+        files: [{
+          path: "src/new-widget.ts",
+          op: "add",
+          added: 1,
+          removed: 0,
+        }, {
+          path: "src/empty-widget.ts",
+          op: "add",
+          added: 0,
+          removed: 0,
+        }],
+      },
+    });
+  });
+
+  test("renders commandExecution as the existing shell command card", () => {
+    const item = buildFeed(codexFile, [fixture[2]], false, "").items[0];
+
+    expect(item).toMatchObject({
+      kind: "tool",
+      id: "command-camel",
+      family: "shell",
+      command: "bun test src/widget.test.ts",
+      cwd: "repo",
+      status: "ok",
+      outputPreview: "3 tests passed",
+      exitCode: 0,
+      durationMs: 1250,
+    });
+  });
+
+  test("keeps an in-progress paginated command in the running state", () => {
+    const line = JSON.stringify({
+      type: "response_item",
+      timestamp: "2026-08-31T10:00:20Z",
+      payload: { type: "commandExecution", id: "command-running", command: "bun test", cwd: "repo", status: "inProgress", commandActions: [] },
+    });
+    const item = buildFeed(codexFile, [line], false, "").items[0];
+
+    expect(item).toMatchObject({ kind: "tool", id: "command-running", status: "run", statusLabel: "executing…" });
+  });
+
+  test("maps every remaining 0.151 ThreadItem kind onto a semantic feed card", () => {
+    const expected: Item["kind"][] = [
+      "user",
+      "sysmsg",
+      "prose",
+      "tool",
+      "note",
+      "think",
+      "tool",
+      "tool",
+      "tool",
+      "note",
+      "tool",
+      "tool",
+      "note",
+      "tool",
+      "note",
+      "note",
+      "compact",
+    ];
+
+    expect(fixture.slice(3).map((line) => buildFeed(codexFile, [line], false, "").items[0]?.kind)).toEqual(expected);
+  });
+
+  test("summarizes an invented future item in one bounded fallback line", () => {
+    const line = JSON.stringify({
+      type: "event_msg",
+      timestamp: "2026-08-31T10:01:00Z",
+      payload: {
+        type: "item_completed",
+        item: { type: "FutureWidget", detail: "A future widget event " + "x".repeat(500) },
+      },
+    });
+    const item = buildFeed(codexFile, [line], false, "").items[0];
+    if (item?.kind !== "record") throw new Error("expected future-item fallback");
+
+    expect(item.recordType).toBe("FutureWidget");
+    expect(item.summary.startsWith("A future widget event ")).toBe(true);
+    expect(item.summary).toHaveLength(160);
+    expect(item.summary.endsWith("…")).toBe(true);
+  });
+
+  test("coalesces item_started and item_completed siblings onto one final card", () => {
+    const lines = [
+      JSON.stringify({ type: "event_msg", timestamp: "t1", payload: { type: "item_started", item: { type: "AgentMessage", id: "lifecycle-message", text: "Working…" } } }),
+      JSON.stringify({ type: "event_msg", timestamp: "t2", payload: { type: "item_completed", item: { type: "AgentMessage", id: "lifecycle-message", text: "Done." } } }),
+      JSON.stringify({ type: "event_msg", timestamp: "t3", payload: { type: "item_started", item: { type: "CommandExecution", id: "lifecycle-command", command: "bun test", cwd: "repo", status: "InProgress" } } }),
+      JSON.stringify({ type: "event_msg", timestamp: "t4", payload: { type: "item_completed", item: { type: "CommandExecution", id: "lifecycle-command", command: "bun test", cwd: "repo", status: "Completed", aggregatedOutput: "ok", exitCode: 0 } } }),
+    ];
+    const items = buildFeed(codexFile, lines, false, "").items;
+    const prose = items.filter((item) => item.kind === "prose");
+    const tools = items.flatMap((item) => item.kind === "tool" ? [item] : item.kind === "cmd-group" ? item.calls : []);
+
+    expect(prose).toHaveLength(1);
+    expect(prose[0]).toMatchObject({ kind: "prose", text: "Done.", ts: "t2" });
+    expect(tools).toHaveLength(1);
+    expect(tools[0]).toMatchObject({ id: "lifecycle-command", status: "ok", outputPreview: "ok" });
+  });
+
+  test("keeps command and file-change delta siblings off the raw-record path", () => {
+    const lines = [
+      JSON.stringify({ type: "event_msg", timestamp: "t1", payload: { type: "command_execution_output_delta", item_id: "command-item", delta: "partial output" } }),
+      JSON.stringify({ type: "event_msg", timestamp: "t2", payload: { type: "file_change_patch_updated", item_id: "file-item", changes: [] } }),
+    ];
+    const feed = buildFeed(codexFile, lines, false, "");
+
+    expect(feed.items.some((item) => item.kind === "record" || item.kind === "raw")).toBe(false);
+    expect(feed.hiddenServiceCount).toBe(2);
+  });
+});
+
 describe("Codex orchestration over a real rollout fixture (issue #83)", () => {
   const fixture = readFileSync(join(import.meta.dir, "__fixtures__", "codex-orchestration.jsonl"), "utf8").split("\n").filter(Boolean);
   /* Consecutive tool events fold into cmd-groups (§3.4), so read every native

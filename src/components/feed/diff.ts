@@ -139,6 +139,8 @@ function looksLikeBinary(text: string): boolean {
 interface RawFile {
   path: string;
   op: FileOp;
+  /** ThreadItem changes are meaningful even when an added file is empty. */
+  includeEmpty?: boolean;
   /** Raw (unredacted, uncapped) lines grouped by hunk. */
   hunks: { header?: string; lines: DiffLine[] }[];
   /** Original payload used only for the binary heuristic. */
@@ -150,6 +152,7 @@ function splitLines(text: string): string[] {
 }
 
 function fileHasContent(raw: RawFile): boolean {
+  if (raw.includeEmpty) return true;
   if (raw.op === "delete" || raw.op === "move") return true;
   return raw.hunks.some((hunk) => hunk.lines.length > 0);
 }
@@ -235,6 +238,10 @@ function str(value: unknown): string {
 
 function validPath(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value : null;
+}
+
+function record(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 
 /** Claude `Write`: the whole file is new, so every line is an addition. */
@@ -335,6 +342,51 @@ export function diffFromApplyPatch(patch: string): DiffModel {
   }
   for (const file of files) {
     file.content = file.hunks.flatMap((h) => h.lines.map((l) => l.text)).join("\n");
+  }
+  return finalize(files);
+}
+
+/** Codex 0.151 ThreadItem file changes. Rollouts carry a path-keyed map with
+    `type`/`unified_diff`; app-server pagination carries an array with
+    `path`/`kind`/`diff`. Both shapes enter the existing capped DiffModel so the
+    feed keeps one edit-card renderer and one redaction boundary. */
+export function diffFromCodexFileChange(changes: unknown): DiffModel {
+  const entries: Array<{ path: string; change: Record<string, unknown> }> = Array.isArray(changes)
+    ? changes.flatMap((value) => {
+        const change = record(value);
+        const path = validPath(change.path);
+        return path ? [{ path, change }] : [];
+      })
+    : Object.entries(record(changes)).flatMap(([path, value]) => path.trim() ? [{ path, change: record(value) }] : []);
+  const files: RawFile[] = [];
+  for (const { path: sourcePath, change } of entries) {
+    const kind = record(change.kind);
+    const changeType = str(kind.type ?? change.type).toLowerCase();
+    const movePath = validPath(kind.move_path ?? kind.movePath ?? change.move_path ?? change.movePath);
+    let op: FileOp = "update";
+    if (movePath) op = "move";
+    else if (changeType === "add" || changeType === "delete") op = changeType;
+    const path = movePath ?? sourcePath;
+    const content = str(change.diff ?? change.unified_diff ?? change.unifiedDiff);
+    const hunks: RawFile["hunks"] = [];
+    let hunk: RawFile["hunks"][number] | null = null;
+    const startHunk = (header?: string) => {
+      hunk = header ? { header, lines: [] } : { lines: [] };
+      hunks.push(hunk);
+    };
+    for (const line of content.split("\n")) {
+      const header = line.match(/^@@(.*)$/);
+      if (header) {
+        startHunk(header[1].trim());
+        continue;
+      }
+      if (/^(?:diff --git|index |--- |\+\+\+ |\\ No newline at end of file)/.test(line)) continue;
+      const marker = line[0];
+      if (marker !== "+" && marker !== "-" && marker !== " ") continue;
+      if (!hunk) startHunk();
+      hunk!.lines.push({ t: marker, text: line.slice(1) });
+    }
+    files.push({ path, op, hunks, content, includeEmpty: true });
   }
   return finalize(files);
 }
