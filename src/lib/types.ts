@@ -75,11 +75,14 @@ export interface StructuredSpawnCardState {
   /** Submission moment (ms) of the launch prompt — the receipt's creation time —
       so the seeded bubble orders ahead of any follow-up the operator queues. */
   promptAt?: number;
-  /** The canonical text the transcript can echo before adoption (issue #615) —
-      the delivered message, which for a role launch is the scaffold plus the raw
-      draft. The optimistic bubble displays `prompt` while this text owns its echo
-      occurrence; live adoption also retires image-only launches with an empty
-      echo. */
+  /** The canonical text the transcript will echo for this launch (issue #615) —
+      the delivered message, which for a role launch is the scaffold PLUS the raw
+      draft. The optimistic bubble displays `prompt` (the raw draft) but retires on
+      THIS text, so a scaffolded role launch never lingers and never duplicates.
+      When it differs from `prompt`, it remains on adopted live facts after the
+      display fields retire, allowing a direct 202-to-live path to reconcile the
+      browser's raw seed (issue #616). Live adoption also retires image-only
+      launches with an empty echo (issue #617). */
   promptEcho?: string;
   /** When the launch's initial message actually reached the agent (ms, issue
       #648). A structured / MCP spawn journals its first user record with SDK /
