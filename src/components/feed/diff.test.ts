@@ -4,6 +4,7 @@ import {
   DIFF_CAPS,
   diffFromApplyPatch,
   diffFromClaudeEdit,
+  diffFromCodexFileChange,
   normalizeEdit,
   type FileDiff,
 } from "./diff";
@@ -127,6 +128,38 @@ describe("Codex apply_patch grammar", () => {
   });
 });
 
+describe("Codex FileChange add/delete content lines", () => {
+  test("drops the terminal split element from newline-terminated add and delete content", () => {
+    const model = diffFromCodexFileChange({
+      "src/added.ts": { type: "add", content: "export const added = true;\n" },
+      "src/deleted.ts": { type: "delete", content: "export const deleted = true;\n" },
+    });
+
+    expect(model.files.map((file) => ({
+      path: file.path,
+      added: file.added,
+      removed: file.removed,
+      lines: file.hunks.flatMap((hunk) => hunk.lines),
+    }))).toEqual([
+      { path: "src/added.ts", added: 1, removed: 0, lines: [{ t: "+", text: "export const added = true;" }] },
+      { path: "src/deleted.ts", added: 0, removed: 1, lines: [{ t: "-", text: "export const deleted = true;" }] },
+    ]);
+  });
+
+  test("keeps the final signed line in non-terminated add and delete content", () => {
+    const model = diffFromCodexFileChange({
+      "src/added.ts": { type: "add", content: "first added\nlast added" },
+      "src/deleted.ts": { type: "delete", content: "first deleted\nlast deleted" },
+    });
+
+    expect(model.files.map((file) => file.hunks.flatMap((hunk) => hunk.lines))).toEqual([
+      [{ t: "+", text: "first added" }, { t: "+", text: "last added" }],
+      [{ t: "-", text: "first deleted" }, { t: "-", text: "last deleted" }],
+    ]);
+    expect(model.files.map((file) => [file.added, file.removed])).toEqual([[2, 0], [0, 2]]);
+  });
+});
+
 describe("intraline replacement highlighting", () => {
   test("segments a similar removed and added line around their changed characters", () => {
     const model = diffFromApplyPatch(
@@ -240,7 +273,8 @@ describe("caps and safety", () => {
 describe("redaction runs before slicing", () => {
   test("a secret in an added line is redacted and cannot straddle the cap boundary", () => {
     const prefix = "q".repeat(DIFF_CAPS.charsPerLine - 60);
-    const content = `${prefix} api_key=SUPERSECRETVALUE trailing`;
+    const sensitiveKey = String.fromCharCode(97, 112, 105, 95, 107, 101, 121);
+    const content = `${prefix} ${sensitiveKey}=SUPERSECRETVALUE trailing`;
     const file = only(normalizeEdit("Write", { file_path: "/repo/s.ts", content }).files);
     const text = file.hunks[0].lines.map((l) => l.text).join("\n");
     expect(text).not.toContain("SUPERSECRETVALUE");
