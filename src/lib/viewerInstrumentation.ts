@@ -681,8 +681,11 @@ export async function runStructuredHostStartup(
     }
   };
 
+  if (ready) {
+    await Promise.all([attempt(), ready]);
+    return;
+  }
   await attempt();
-  await ready;
 }
 
 export async function completeViewerRuntimeActivation(

@@ -948,6 +948,33 @@ test("structured-host startup applies bounded jitter to recoverable retries", as
   }
 });
 
+test("terminal structured-host startup reports one awaited failure with no process-level rejection", async () => {
+  const failure = new StructuredRuntimeRequirementError("structured hosts require Bun");
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown) => { unhandled.push(reason); };
+  process.on("unhandledRejection", onUnhandled);
+
+  try {
+    let actionable: unknown = null;
+    try {
+      await runStructuredHostStartup(
+        async () => { throw failure; },
+        () => undefined,
+        { waitUntilReady: true },
+      );
+    } catch (error) {
+      actionable = error;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(actionable).toBe(failure);
+    expect(unhandled).toEqual([]);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+    markStructuredHostStartupReady();
+  }
+});
+
 test("unsupported structured runtime aborts server startup", async () => {
   const failure = new StructuredRuntimeRequirementError("structured hosts require Bun");
   const logged: unknown[][] = [];
