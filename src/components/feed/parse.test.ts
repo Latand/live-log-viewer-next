@@ -1506,7 +1506,125 @@ describe("Codex 0.151 thread items", () => {
           op: "add",
           added: 0,
           removed: 0,
+          hunks: [],
         }],
+      },
+    });
+  });
+
+  test("renders real-shaped PascalCase add and delete content as signed diff lines", () => {
+    const lines = [
+      JSON.stringify({
+        type: "event_msg",
+        timestamp: "2026-08-31T10:00:20Z",
+        payload: {
+          type: "item_completed",
+          item: {
+            type: "FileChange",
+            id: "file-add-pascal",
+            status: "Completed",
+            changes: {
+              "src/new-widget.ts": {
+                type: "add",
+                content: "export const ready = true;\nexport const count = 1;",
+              },
+            },
+          },
+        },
+      }),
+      JSON.stringify({
+        type: "event_msg",
+        timestamp: "2026-08-31T10:00:21Z",
+        payload: {
+          type: "item_completed",
+          item: {
+            type: "FileChange",
+            id: "file-delete-pascal",
+            status: "Completed",
+            changes: {
+              "src/retired-widget.ts": {
+                type: "delete",
+                content: "export const retired = true;\nexport const legacy = true;",
+              },
+            },
+          },
+        },
+      }),
+    ];
+    const items = buildFeed(codexFile, lines, false, "").items;
+    const tools = items.flatMap((item) => item.kind === "tool" ? [item] : item.kind === "cmd-group" ? item.calls : []);
+
+    expect(tools).toHaveLength(2);
+    expect(tools[0]).toMatchObject({
+      kind: "tool",
+      id: "file-add-pascal",
+      family: "edit",
+      body: {
+        type: "diff",
+        files: [{
+          path: "src/new-widget.ts",
+          op: "add",
+          added: 2,
+          removed: 0,
+          hunks: [{
+            lines: [
+              { t: "+", text: "export const ready = true;" },
+              { t: "+", text: "export const count = 1;" },
+            ],
+          }],
+        }],
+      },
+    });
+    expect(tools[1]).toMatchObject({
+      kind: "tool",
+      id: "file-delete-pascal",
+      family: "edit",
+      body: {
+        type: "diff",
+        files: [{
+          path: "src/retired-widget.ts",
+          op: "delete",
+          added: 0,
+          removed: 2,
+          hunks: [{
+            lines: [
+              { t: "-", text: "export const retired = true;" },
+              { t: "-", text: "export const legacy = true;" },
+            ],
+          }],
+        }],
+      },
+    });
+  });
+
+  test("keeps PascalCase move changes on the diff-backed path", () => {
+    const line = JSON.stringify({
+      type: "event_msg",
+      timestamp: "2026-08-31T10:00:22Z",
+      payload: {
+        type: "item_completed",
+        item: {
+          type: "FileChange",
+          id: "file-move-pascal",
+          status: "Completed",
+          changes: {
+            "src/old-widget.ts": {
+              type: "update",
+              move_path: "src/new-widget.ts",
+              unified_diff: "@@ -1 +1 @@\n-old\n+new",
+            },
+          },
+        },
+      },
+    });
+    const item = buildFeed(codexFile, [line], false, "").items[0];
+
+    expect(item).toMatchObject({
+      kind: "tool",
+      id: "file-move-pascal",
+      body: {
+        type: "diff",
+        files: [{ path: "src/new-widget.ts", op: "move", added: 1, removed: 1 }],
       },
     });
   });
@@ -1517,6 +1635,57 @@ describe("Codex 0.151 thread items", () => {
     expect(item).toMatchObject({
       kind: "tool",
       id: "command-camel",
+      family: "shell",
+      command: "bun test src/widget.test.ts",
+      cwd: "repo",
+      status: "ok",
+      outputPreview: "3 tests passed",
+      exitCode: 0,
+      durationMs: 1250,
+    });
+  });
+
+  test("coalesces real-shaped PascalCase command lifecycle records into one shell card", () => {
+    const lines = [
+      JSON.stringify({
+        type: "event_msg",
+        timestamp: "2026-08-31T10:00:20Z",
+        payload: {
+          type: "item_started",
+          item: {
+            type: "CommandExecution",
+            id: "command-pascal",
+            command: ["bun", "test", "src/widget.test.ts"],
+            cwd: "repo",
+            status: "InProgress",
+          },
+        },
+      }),
+      JSON.stringify({
+        type: "event_msg",
+        timestamp: "2026-08-31T10:00:21Z",
+        payload: {
+          type: "item_completed",
+          item: {
+            type: "CommandExecution",
+            id: "command-pascal",
+            command: ["bun", "test", "src/widget.test.ts"],
+            cwd: "repo",
+            status: "Completed",
+            aggregated_output: "3 tests passed",
+            exit_code: 0,
+            duration: { secs: 1, nanos: 250_000_000 },
+          },
+        },
+      }),
+    ];
+    const items = buildFeed(codexFile, lines, false, "").items;
+    const tools = items.flatMap((item) => item.kind === "tool" ? [item] : item.kind === "cmd-group" ? item.calls : []);
+
+    expect(tools).toHaveLength(1);
+    expect(tools[0]).toMatchObject({
+      kind: "tool",
+      id: "command-pascal",
       family: "shell",
       command: "bun test src/widget.test.ts",
       cwd: "repo",

@@ -1704,7 +1704,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       || item.error !== undefined && item.error !== null
       || item.failure !== undefined && item.failure !== null
       || item.success === false
-      || (num(item.exitCode) ?? 0) !== 0) return "err";
+      || (num(item.exitCode ?? item.exit_code) ?? 0) !== 0) return "err";
     if (["inprogress", "running", "pending"].includes(status)) return "run";
     if (["completed", "complete", "success", "succeeded"].includes(status)) return "ok";
     if (lifecycle === "itemcompleted") return "ok";
@@ -1873,7 +1873,9 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       return true;
     }
     if (kind === "commandexecution") {
-      const command = textPart(item.command);
+      const command = Array.isArray(item.command)
+        ? item.command.filter((part): part is string => typeof part === "string").join(" ")
+        : textPart(item.command);
       const base = newToolEvent({
         ts,
         id,
@@ -1884,11 +1886,17 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       });
       const status = codexThreadToolStatus(item, lifecycle);
       upsertCodexThreadTool({ ...base, status, statusLabel: codexThreadStatusLabel(status) });
-      if (status !== "run") attach(calls.get(id), textPart(item.aggregatedOutput ?? item.output), status === "err");
+      if (status !== "run") attach(calls.get(id), textPart(item.aggregatedOutput ?? item.aggregated_output ?? item.output), status === "err");
       const current = calls.get(id)?.event;
       if (current) {
-        const exitCode = num(item.exitCode);
-        const durationMs = num(item.durationMs);
+        const exitCode = num(item.exitCode ?? item.exit_code);
+        const duration = rec(item.duration);
+        const seconds = num(duration.secs);
+        const nanos = num(duration.nanos);
+        const rolloutDurationMs = seconds !== undefined || nanos !== undefined
+          ? Math.round((seconds ?? 0) * 1_000 + (nanos ?? 0) / 1_000_000)
+          : undefined;
+        const durationMs = num(item.durationMs) ?? rolloutDurationMs;
         upsertCodexThreadTool({
           ...current,
           status,

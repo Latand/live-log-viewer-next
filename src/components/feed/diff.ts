@@ -347,7 +347,7 @@ export function diffFromApplyPatch(patch: string): DiffModel {
 }
 
 /** Codex 0.151 ThreadItem file changes. Rollouts carry a path-keyed map with
-    `type`/`unified_diff`; app-server pagination carries an array with
+    `type` plus `unified_diff`, or `content` for add/delete; pagination carries an array with
     `path`/`kind`/`diff`. Both shapes enter the existing capped DiffModel so the
     feed keeps one edit-card renderer and one redaction boundary. */
 export function diffFromCodexFileChange(changes: unknown): DiffModel {
@@ -367,14 +367,21 @@ export function diffFromCodexFileChange(changes: unknown): DiffModel {
     if (movePath) op = "move";
     else if (changeType === "add" || changeType === "delete") op = changeType;
     const path = movePath ?? sourcePath;
-    const content = str(change.diff ?? change.unified_diff ?? change.unifiedDiff);
+    const patch = str(change.diff ?? change.unified_diff ?? change.unifiedDiff);
+    const fileContent = str(change.content);
+    const content = patch || (op === "add" || op === "delete" ? fileContent : "");
     const hunks: RawFile["hunks"] = [];
     let hunk: RawFile["hunks"][number] | null = null;
     const startHunk = (header?: string) => {
       hunk = header ? { header, lines: [] } : { lines: [] };
       hunks.push(hunk);
     };
-    for (const line of content.split("\n")) {
+    if (!patch && (op === "add" || op === "delete")) {
+      const marker = op === "add" ? "+" : "-";
+      const lines = splitLines(fileContent).map((text): DiffLine => ({ t: marker, text }));
+      if (lines.length) hunks.push({ lines });
+    }
+    for (const line of patch.split("\n")) {
       const header = line.match(/^@@(.*)$/);
       if (header) {
         startHunk(header[1].trim());
