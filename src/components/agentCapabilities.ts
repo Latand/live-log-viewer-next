@@ -16,6 +16,8 @@ import type { RuntimeImageCapability } from "@/lib/runtime/structuredContent";
 import type { FileEntry } from "@/lib/types";
 import type { RuntimeSessionView } from "@/hooks/useRuntime";
 
+import { turnIsRunning } from "./turnDuration";
+
 /** The controls the strip (and the header kill) gate on. */
 export type ControlName = "stop" | "compact" | "runtime" | "kill" | "terminal" | "images" | "send";
 
@@ -219,7 +221,16 @@ export function surfaceFor(file: FileEntry, rv: RuntimeSessionView | null, opts:
   if (file.supersededBy) return "superseded";
   const host = resolveHost(rv, opts);
   if (host.kind === "structured") return "structured";
-  if (host.kind === "dead") return "dead";
+  if (host.kind === "dead") {
+    /* A dead runtime projection and a scanner-confirmed process with an open
+       turn disagree about the same card. Neither side may arm a destructive
+       control while that conflict is unresolved: Respawn could replace live
+       work, and legacy Stop/Kill could target a stale pid. The durable runtime
+       publisher normally collapses a live tmux host to `tmux-legacy`; this is
+       the fail-closed client seam for a stale snapshot during that hand-over. */
+    if (file.proc === "running" && turnIsRunning(file)) return "unresolved";
+    return "dead";
+  }
 
   // A Claude subagent's own proc/pid is null by scanner design (the root process
   // writes the child transcript), so its liveness is the ROOT host's, resolved

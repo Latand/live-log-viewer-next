@@ -141,7 +141,11 @@ function terminalRegisteredHost(
   if (!generation || generation.path !== pathname) return false;
   const entry = snapshot.entries[sessionKeyId({ engine, sessionId: generation.id })];
   return entry?.artifactPath === pathname
-    && (entry.status === "dead" || entry.status === "unhosted");
+    && (entry.status === "dead" || entry.status === "unhosted")
+    && entry.host === null
+    && (entry.structuredHost?.process ?? null) === null
+    && entry.claimOwner === null
+    && entry.pendingAction === null;
 }
 
 function hasActiveRegisteredHost(registry: AgentRegistry, pathname: string): boolean {

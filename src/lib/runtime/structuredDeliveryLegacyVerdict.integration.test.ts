@@ -104,7 +104,10 @@ test("legacy transport with a failed probe, live recorded host, and running turn
     client: runtimeJournalClient(journal),
   });
 
-  expect(journal.snapshot().sessions.find((session) => session.conversationId === conversation.id)).toMatchObject({
+  const sessions = journal.snapshot().sessions
+    .filter((session) => session.conversationId === conversation.id);
+  expect(sessions).toHaveLength(1);
+  expect(sessions[0]).toMatchObject({
     hostKind: "tmux-legacy",
     host: "hosted",
     turn: "running",

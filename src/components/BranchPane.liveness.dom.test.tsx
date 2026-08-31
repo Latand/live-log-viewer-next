@@ -6,7 +6,7 @@ import type { FileEntry } from "@/lib/types";
 
 const deadProbeView: RuntimeSessionView = {
   session: {
-    conversationId: "conversation-live-legacy",
+    conversationId: "conversation_live_legacy",
     sessionKey: { engine: "codex", sessionId: "legacy-session" },
     hostKind: "codex-app-server",
     host: "dead",
@@ -72,7 +72,7 @@ function liveLegacyFile(): FileEntry {
     activityReason: "jsonl_turn_open",
     proc: "running",
     pid: 203,
-    conversationId: "conversation-live-legacy",
+    conversationId: "conversation_live_legacy",
     lastTurn: { startedAt: Date.now() - 60_000, endedAt: null },
     model: "gpt",
     effort: "high",
@@ -87,5 +87,7 @@ test("a failed legacy pane-buffer probe over a live recorded host and running tu
 
   expect(html).toContain('data-card-status="running"');
   expect(html).not.toContain("data-dead-host-banner");
+  expect(html).not.toContain('data-strip-surface="dead"');
   expect(html).not.toContain("Respawn conversation");
+  expect(html).not.toContain("Drafted images will be sent after the host recovers");
 });

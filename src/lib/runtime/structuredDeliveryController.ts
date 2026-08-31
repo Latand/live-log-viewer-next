@@ -313,7 +313,7 @@ type RegistrySessionProjection = Pick<RuntimeSession,
 /** The one runtime projection a conversation's current durable registry row
     supports. A coexisting tmux host wins because it is also the transport
     deliverability resolves; structured columns may remain during succession
-    and describe an adapter, never a second card liveness verdict. */
+    as adapter metadata. The tmux host supplies the card's sole verdict. */
 function registrySessionProjection(
   registry: AgentRegistry,
   conversationId: string,
@@ -338,26 +338,19 @@ function registrySessionProjection(
     conversationId,
     sessionKey,
     hostKind,
-    host: structuredKind && entry?.status === "dead" ? "dead" : host,
+    host,
     turn,
     provenance,
     accountId: entry?.accountId ?? generation.accountId,
     parentConversationId: generation.launchProfile.parentConversationId ?? null,
     cwd: entry?.cwd ?? generation.launchProfile.cwd,
     artifactPath: generation.path,
-    capabilities: structuredKind
-      ? {
-          steer: structuredKind === "codex-app-server",
-          structuredAttention: true,
-          imageInput: runtimeImageCapability(sessionKey.engine, false),
-          runtimeSettings: runtimeSettingsCapability(sessionKey.engine),
-        }
-      : {
-          steer: false,
-          structuredAttention: false,
-          imageInput: runtimeImageCapability(sessionKey.engine, false),
-          runtimeSettings: runtimeSettingsCapability(sessionKey.engine),
-        },
+    capabilities: {
+      steer: structuredKind === "codex-app-server",
+      structuredAttention: structuredKind !== null,
+      imageInput: runtimeImageCapability(sessionKey.engine, false),
+      runtimeSettings: runtimeSettingsCapability(sessionKey.engine),
+    },
     activeTurnId: null,
     producerKind: structuredKind ?? "structured-delivery-controller",
     entryUpdatedAt: entry?.updatedAt ?? null,

@@ -74,7 +74,7 @@ function deadTurnEntry(pathname: string): FileEntry {
   } as FileEntry;
 }
 
-test("a switch hold over a provably dead post-migration turn resolves without hanging", async () => {
+async function heldDeadTurnFixture() {
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-dead-switch-turn-"));
   sandboxes.push(sandbox);
   const registry = new AgentRegistry(path.join(sandbox, "agent-registry.json"));
@@ -116,14 +116,47 @@ test("a switch hold over a provably dead post-migration turn resolves without ha
   });
   expect(registry.requestConversationReseat(conversation.id, "account-c").migration?.phase).toBe("waiting-turn");
 
+  return { registry, conversationId: conversation.id, generationId: generation.id, deadPath, finalPath, sandbox };
+}
+
+test("a switch hold over a provably dead post-migration turn resolves without hanging", async () => {
+  const { registry, conversationId, deadPath, finalPath } = await heldDeadTurnFixture();
+
   await reconcileMigrationInventory(registry, [deadTurnEntry(deadPath)]);
-  expect(registry.conversation(conversation.id)?.turn.state).toBe("idle");
+  expect(registry.conversation(conversationId)?.turn.state).toBe("idle");
 
   const resolved = await advanceConversationMigration(
-    conversation.id,
+    conversationId,
     registry,
     provider("live-successor", finalPath),
   );
   expect(resolved.migration?.phase).toBe("committed");
   expect(resolved.generations.at(-1)?.path).toBe(finalPath);
+});
+
+test("a terminal status with retained host evidence authorizes no switch release", async () => {
+  const { registry, conversationId, generationId, deadPath, sandbox } = await heldDeadTurnFixture();
+  const currentEntry = Object.values(registry.readOnlySnapshot().entries)
+    .find((entry) => entry.key.sessionId === generationId)!;
+  const { updatedAt: _updatedAt, ...entry } = currentEntry;
+  registry.upsert({
+    ...entry,
+    host: {
+      kind: "tmux",
+      endpoint: "tmux:contradictory",
+      server: { pid: 301, startIdentity: "server:301" },
+      paneId: "%30",
+      panePid: { pid: 302, startIdentity: "pane:302" },
+      windowName: "contradictory-host",
+      agent: { pid: 303, startIdentity: "agent:303" },
+      argv: ["codex", "resume", generationId],
+    },
+    cwd: sandbox,
+  });
+
+  await reconcileMigrationInventory(registry, [deadTurnEntry(deadPath)]);
+
+  const held = registry.conversation(conversationId)!;
+  expect(held.turn.state).toBe("busy");
+  expect(held.migration?.phase).toBe("waiting-turn");
 });
