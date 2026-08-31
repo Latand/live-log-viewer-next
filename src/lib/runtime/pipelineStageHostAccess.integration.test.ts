@@ -8,7 +8,7 @@ import { CodexAppServerHost } from "./codexAppServerHost";
 import { FileRuntimeEventStore } from "./eventStore";
 import { prepareCodexIntegrationTestHome } from "./integrationTestHome";
 import { materializeStructuredHostAccess } from "./structuredSpawn";
-import { pipelineStageSandbox } from "../pipelines/stageAccess";
+import { pipelineStageSandbox } from "../pipelines/stageSandbox";
 
 const codexBinary = process.env.LLV_CODEX_BINARY ?? "codex";
 const isolatedHome = prepareCodexIntegrationTestHome(codexBinary);

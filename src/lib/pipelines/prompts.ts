@@ -1,5 +1,5 @@
 import type { EffectivePipelineRole, Pipeline, PipelineStage } from "./types";
-import { pipelineStageSandbox } from "./stageAccess";
+import { pipelineStageSandbox } from "./stageSandbox";
 
 function replaceAll(source: string, token: string, value: string): string {
   return source.split(token).join(value);
