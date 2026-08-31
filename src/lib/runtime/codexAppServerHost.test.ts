@@ -1630,13 +1630,24 @@ describe("CodexAppServerHost", () => {
 
   test("delivery confirmation survives a paginated thread that refuses hydration (#1332)", async () => {
     const threadId = "paginated-confirmation-thread";
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-paginated-confirm-"));
+    const rollout = path.join(directory, `${threadId}.jsonl`);
+    fs.writeFileSync(rollout, `${JSON.stringify({
+      timestamp: "t1",
+      type: "event_msg",
+      payload: {
+        type: "item_completed",
+        turn_id: "persisted-turn",
+        item: { type: "UserMessage", id: "item-1", client_id: "operation-paginated-confirm", content: [{ type: "text", text: "hello" }] },
+      },
+    })}\n${JSON.stringify({
+      timestamp: "t2",
+      type: "event_msg",
+      payload: { type: "turn_completed", turn_id: "persisted-turn" },
+    })}\n`);
     const server = new FakeAppServer(threadId, threadId);
+    server.threadPath = rollout;
     server.hydratedReadError = "list_turns is not supported yet";
-    server.readTurns = [{
-      id: "persisted-turn",
-      status: "completed",
-      items: [{ type: "userMessage", clientId: "operation-paginated-confirm", content: [{ type: "text", text: "hello" }] }],
-    }];
     const host = await CodexAppServerHost.adopt(threadId, {
       cwd: "/repo",
       eventStore: new MemoryEventStore(),
@@ -1648,8 +1659,7 @@ describe("CodexAppServerHost", () => {
       turnId: "persisted-turn",
     });
     expect(server.requests.some((request) => request.method === "turn/start" || request.method === "turn/steer")).toBeFalse();
-    const turnsList = server.requests.findLast((request) => request.method === "thread/turns/list");
-    expect(turnsList?.params).toMatchObject({ sortDirection: "desc", itemsView: "full" });
+    expect(server.requests.some((request) => request.method === "thread/turns/list")).toBeFalse();
     expect((await host.health()).status).not.toBe("dead");
     await host.release();
   });
@@ -1966,8 +1976,11 @@ describe("CodexAppServerHost", () => {
     await host.release();
   });
 
-  test("a paginated thread that refuses hydration still proves materialization through turns/list (#1332)", async () => {
+  test("a paginated thread that refuses hydration still proves materialization from the rollout on disk (#1332)", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-paginated-evidence-"));
+    const rollout = path.join(directory, "paginated-evidence-thread.jsonl");
     const server = new FakeAppServer("paginated-evidence-thread");
+    server.threadPath = rollout;
     const host = await CodexAppServerHost.start({
       cwd: "/repo",
       eventStore: new MemoryEventStore(),
@@ -1979,23 +1992,29 @@ describe("CodexAppServerHost", () => {
       turnId: "turn-1",
     });
     server.hydratedReadError = "list_turns is not supported yet";
-    server.readTurns = [{
-      id: "turn-1",
-      status: "inProgress",
-      items: [{ type: "userMessage", clientId: "operation-paginated", content: [{ type: "text", text: "hello" }] }],
-    }];
+    fs.writeFileSync(rollout, `${JSON.stringify({
+      timestamp: "t1",
+      type: "event_msg",
+      payload: {
+        type: "item_completed",
+        turn_id: "turn-1",
+        item: { type: "UserMessage", id: "item-1", client_id: "operation-paginated", content: [{ type: "text", text: "hello" }] },
+      },
+    })}\n`);
     await expect(host.sessionMaterializationEvidence("operation-paginated")).resolves.toEqual({
       state: "materialized",
     });
-    const turnsList = server.requests.findLast((request) => request.method === "thread/turns/list");
-    expect(turnsList?.params).toMatchObject({ itemsView: "full", sortDirection: "asc" });
+    expect(server.requests.some((request) => request.method === "thread/turns/list")).toBeFalse();
     const fallbackRead = server.requests.findLast((request) => request.method === "thread/read");
     expect((fallbackRead?.params as { includeTurns?: boolean }).includeTurns).toBeUndefined();
     await host.release();
   });
 
-  test("the pagination fallback still reports an absent first message (#1332)", async () => {
+  test("the disk fallback still reports an absent first message (#1332)", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-paginated-absent-"));
+    const rollout = path.join(directory, "paginated-absent-thread.jsonl");
     const server = new FakeAppServer("paginated-absent-thread");
+    server.threadPath = rollout;
     const host = await CodexAppServerHost.start({
       cwd: "/repo",
       eventStore: new MemoryEventStore(),
@@ -2007,7 +2026,11 @@ describe("CodexAppServerHost", () => {
       turnId: "turn-1",
     });
     server.hydratedReadError = "list_turns is not supported yet";
-    server.readTurns = [{ id: "turn-1", status: "inProgress", items: [] }];
+    fs.writeFileSync(rollout, `${JSON.stringify({
+      timestamp: "t1",
+      type: "event_msg",
+      payload: { type: "item_completed", turn_id: "turn-1", item: { type: "AgentMessage", id: "item-2", text: "working" } },
+    })}\n`);
     await expect(host.sessionMaterializationEvidence("operation-paginated-absent")).resolves.toEqual({
       state: "absent",
       reason: "Codex app-server did not read back the confirmed first message",
@@ -2071,11 +2094,19 @@ describe("CodexAppServerHost", () => {
     const eventStore = new MemoryEventStore();
     eventStore.append("paginated-resume-thread", { kind: "turn-started", turnId: "crashed-turn", seq: 1 });
     const persistedItem = { type: "agentMessage", id: "response-item", text: "persisted response" };
-    const server = new FakeAppServer("paginated-resume-thread", "paginated-resume-thread", false, [{
-      id: "crashed-turn",
-      status: "completed",
-      items: [persistedItem],
-    }], { type: "idle" });
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-paginated-resume-"));
+    const rollout = path.join(directory, "paginated-resume-thread.jsonl");
+    fs.writeFileSync(rollout, `${JSON.stringify({
+      timestamp: "t1",
+      type: "event_msg",
+      payload: { type: "item_completed", turn_id: "crashed-turn", item: persistedItem },
+    })}\n${JSON.stringify({
+      timestamp: "t2",
+      type: "event_msg",
+      payload: { type: "turn_completed", turn_id: "crashed-turn" },
+    })}\n`);
+    const server = new FakeAppServer("paginated-resume-thread", "paginated-resume-thread", false, [], { type: "idle" });
+    server.threadPath = rollout;
     server.paginatedResume = true;
     const host = await CodexAppServerHost.adopt("paginated-resume-thread", {
       cwd: "/repo",
@@ -2100,8 +2131,7 @@ describe("CodexAppServerHost", () => {
     const resumes = server.requests.filter((request) => request.method === "thread/resume");
     expect(resumes.length).toBe(2);
     expect((resumes[1]!.params as { excludeTurns?: boolean }).excludeTurns).toBeTrue();
-    const turnsList = server.requests.findLast((request) => request.method === "thread/turns/list");
-    expect(turnsList?.params).toMatchObject({ sortDirection: "desc", itemsView: "full" });
+    expect(server.requests.some((request) => request.method === "thread/turns/list")).toBeFalse();
     expect(await host.health()).toMatchObject({ status: "idle", activeTurnRef: null });
     await host.release();
   });

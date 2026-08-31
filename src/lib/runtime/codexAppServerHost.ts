@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from "node:child_process";
 import { createHash, type Hash } from "node:crypto";
+import fs from "node:fs";
 
 import { isKnownEffortTier } from "@/lib/agent/efforts";
 import type { ProcessIdentity } from "@/lib/agent/registry";
@@ -467,9 +468,86 @@ function hydrationUnsupported(reason: string): boolean {
   return reason.startsWith("Codex app-server request failed:") && /not supported/i.test(reason);
 }
 
-function pagedTurns(value: unknown): JsonObject[] {
-  const outer = record(value);
-  return Array.isArray(outer?.data) ? outer.data.map(record).filter((turn): turn is JsonObject => turn !== null) : [];
+/* The rollout is bounded before parsing so a very long thread cannot pull its
+   whole history into memory; the fallback consumers only need the window near
+   one end, and a partial leading line after the cut is skipped by JSON.parse. */
+const ROLLOUT_FALLBACK_READ_BYTES = 16 * 1024 * 1024;
+
+const ROLLOUT_TERMINAL_TURN_STATUS: Record<string, string> = {
+  turn_completed: "completed",
+  turn_complete: "completed",
+  turn_aborted: "interrupted",
+  turn_failed: "failed",
+};
+
+/** Turns reconstructed from the canonical rollout JSONL on disk. Codex 0.151
+    refuses full-history hydration on some threads and stubs the pagination
+    API it recommends instead ("list_turns is not supported yet"), so the
+    session store file is the one version-independent source of persisted
+    turns (#1332). Items are normalized to the wire shape the replay and
+    confirmation consumers expect (`clientId`, `userMessage`). */
+export function rolloutTurnsFromDisk(pathname: string | null | undefined): JsonObject[] {
+  if (!pathname) return [];
+  let raw: string;
+  try {
+    const stat = fs.statSync(pathname);
+    if (!stat.isFile()) return [];
+    if (stat.size > ROLLOUT_FALLBACK_READ_BYTES) {
+      const descriptor = fs.openSync(pathname, "r");
+      try {
+        const buffer = Buffer.alloc(ROLLOUT_FALLBACK_READ_BYTES);
+        const read = fs.readSync(descriptor, buffer, 0, buffer.length, stat.size - buffer.length);
+        raw = buffer.subarray(0, read).toString("utf8");
+      } finally {
+        fs.closeSync(descriptor);
+      }
+    } else {
+      raw = fs.readFileSync(pathname, "utf8");
+    }
+  } catch {
+    return [];
+  }
+  const order: string[] = [];
+  const turns = new Map<string, { id: string; status?: string; items: JsonObject[] }>();
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const payload = record(record(parsed)?.payload);
+    if (!payload) continue;
+    const payloadType = stringField(payload, "type");
+    const turnId = stringField(payload, "turn_id") ?? stringField(payload, "turnId");
+    if (!payloadType || !turnId) continue;
+    let turn = turns.get(turnId);
+    if (!turn) {
+      turn = { id: turnId, items: [] };
+      turns.set(turnId, turn);
+      order.push(turnId);
+    }
+    const terminal = ROLLOUT_TERMINAL_TURN_STATUS[payloadType];
+    if (terminal) {
+      turn.status = terminal;
+      continue;
+    }
+    if (payloadType !== "item_completed") continue;
+    const item = record(payload.item);
+    if (!item) continue;
+    const itemType = stringField(item, "type");
+    const clientId = stringField(item, "client_id") ?? stringField(item, "clientId");
+    turn.items.push({
+      ...item,
+      ...(itemType ? { type: itemType === "UserMessage" ? "userMessage" : itemType } : {}),
+      ...(clientId ? { clientId } : {}),
+    });
+  }
+  return order.map((id) => {
+    const turn = turns.get(id)!;
+    return { id: turn.id, status: turn.status ?? "inProgress", items: turn.items } as JsonObject;
+  });
 }
 
 function resumedActiveTurnId(value: unknown): string | null {
@@ -1048,35 +1126,30 @@ export class CodexAppServerHost implements EngineHost {
       evidence through a metadata-only read plus one ascending full-items
       turns page (#1332). Every other error propagates unchanged so the
       caller's evidence classification stays intact. */
-  /** thread/resume with the #1332 pagination fallback: a paginated thread
-      refuses full-history resume, so retry with excludeTurns (metadata plus
-      live-resume state) and synthesize the latest turns page into the
-      hydrated response shape every replay consumer expects, oldest-first. */
+  /** thread/resume with the #1332 fallback: a paginated thread refuses
+      full-history resume, so retry with excludeTurns (metadata plus
+      live-resume state) and synthesize the persisted turns from the rollout
+      on disk — codex 0.151 stubs the pagination API its own deprecation
+      notice recommends, so the session store file is the only
+      version-independent source. */
   private async resumeThreadTolerantly(params: Record<string, unknown>): Promise<unknown> {
     try {
       return await this.rpc("thread/resume", params);
     } catch (error) {
       if (!hydrationUnsupported(safeError(error))) throw error;
       const resumed = await this.rpc("thread/resume", { ...params, excludeTurns: true });
-      const page = await this.rpc("thread/turns/list", {
-        threadId: params.threadId,
-        itemsView: "full",
-        sortDirection: "desc",
-        limit: 16,
-      });
-      const turns = pagedTurns(page);
-      turns.reverse();
       const outer = record(resumed) ?? {};
       const thread = record(outer.thread) ?? {};
+      const turns = rolloutTurnsFromDisk(stringField(thread, "path") ?? this.identity.path);
       return { ...outer, thread: { ...thread, turns } };
     }
   }
 
-  /** Hydrated thread read with the #1332 pagination fallback, returning the
-      hydrated response shape either way so every consumer of `thread.turns`
-      keeps working. `window` picks which end of a paginated thread the single
-      full-items page covers — "first" for materialization evidence, "latest"
-      for delivery confirmation; turns are always returned oldest-first. */
+  /** Hydrated thread read with the #1332 fallback, returning the hydrated
+      response shape either way so every consumer of `thread.turns` keeps
+      working. On refusal the persisted turns come from the rollout on disk;
+      `window` bounds which end survives — "first" for materialization
+      evidence, "latest" for delivery confirmation; always oldest-first. */
   private async readThreadWithTurns(window: "first" | "latest", timeoutMs?: number): Promise<unknown> {
     try {
       return await this.rpc("thread/read", {
@@ -1086,15 +1159,9 @@ export class CodexAppServerHost implements EngineHost {
     } catch (error) {
       if (!hydrationUnsupported(safeError(error))) throw error;
       const result = await this.rpc("thread/read", { threadId: this.identity.threadId }, timeoutMs);
-      const page = await this.rpc("thread/turns/list", {
-        threadId: this.identity.threadId,
-        itemsView: "full",
-        sortDirection: window === "first" ? "asc" : "desc",
-        limit: 16,
-      }, timeoutMs);
-      const turns = pagedTurns(page);
-      if (window === "latest") turns.reverse();
       const thread = record(record(result)?.thread) ?? {};
+      const persisted = rolloutTurnsFromDisk(stringField(thread, "path") ?? this.identity.path);
+      const turns = window === "first" ? persisted.slice(0, 64) : persisted.slice(-64);
       return { thread: { ...thread, turns } };
     }
   }
