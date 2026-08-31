@@ -117,6 +117,26 @@ describe("readSession", () => {
     expect([...result.tools, ...result.traces].some((item) => item.text.includes("unified_diff") || item.text.includes("item_completed"))).toBe(false);
   });
 
+  test("normalizes mixed item_completed envelope and legacy records without accounting noise", () => {
+    const fixture = path.join(import.meta.dir, "../../components/feed/fixtures/codex-item-completed-envelope.jsonl");
+    const result = readSession(fixture, "codex");
+
+    expect(result.messages.map((item) => item.text)).toEqual(["Envelope answer.", "Envelope request.", "Legacy answer."]);
+    expect(result.messages.map((item) => item.ts)).toEqual([
+      new Date(1_700_000_004_000).toISOString(),
+      new Date(1_700_000_005_000).toISOString(),
+      "2023-11-14T22:13:27.000Z",
+    ]);
+    expect(result.reasoning).toEqual([]);
+    expect(result.tools.map((item) => item.name)).toEqual(["CommandExecution", "McpToolCall", "Extension"]);
+    expect(result.tools[0]?.text).toContain("bun test src/widget.test.ts");
+    expect(result.tools[0]?.text).toContain("2 tests passed");
+    expect(result.tools[0]?.text).toContain("warning: fixture warning");
+    expect(result.tools[1]?.text).toContain("Widget found");
+    expect(result.tools[2]?.text).toContain("workspace · search · widget");
+    expect(result.traces).toEqual([]);
+  });
+
   test("reads modern Codex response-item text and stops authorship scanning at the first user record", () => {
     const pathname = path.join(SANDBOX, "codex-modern-input-text.jsonl");
     const firstRows = [

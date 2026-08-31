@@ -148,7 +148,10 @@ interface RawFile {
 }
 
 function splitLines(text: string): string[] {
-  return text.length ? text.split("\n") : [];
+  if (!text.length) return [];
+  const lines = text.split("\n");
+  if (lines.at(-1) === "") lines.pop();
+  return lines;
 }
 
 function fileHasContent(raw: RawFile): boolean {
