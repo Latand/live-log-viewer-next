@@ -11,7 +11,6 @@ const PROSE_VERDICT_STATUSES = {
   "NO FINDINGS": "pass",
 } as const satisfies Record<string, StageVerdict["status"]>;
 const PROSE_VERDICT_LINE_RE = /^\s*(?:VERDICT:\s*(APPROVE|REQUEST_CHANGES|COMMENT)|(NO FINDINGS))\s*$/i;
-const TERMINAL_HANDOFF_RE = /^REVIEW_READY(?::[^\r\n]*)?$/;
 
 type ProseVerdictMarker = keyof typeof PROSE_VERDICT_STATUSES;
 
@@ -80,25 +79,32 @@ type FinalVerdictCandidate = {
 
 function finalVerdictCandidate(text: string): FinalVerdictCandidate | { failureReason: string } {
   const matches = [...text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)];
-  const last = matches.at(-1);
-  if (!last || last.index === undefined) {
+  if (!matches.length) {
     return { failureReason: "canonical completed assistant turn is missing a fenced JSON verdict" };
   }
-  const suffix = text.slice(last.index + last[0].length).trim();
-  if (suffix && !TERMINAL_HANDOFF_RE.test(suffix)) {
-    return { failureReason: "canonical completed assistant turn has unsupported text after the final fenced JSON verdict" };
+
+  const candidates: FinalVerdictCandidate[] = [];
+  let lastFailureReason = "canonical completed assistant turn is missing a valid status, findings, or confidence field";
+  for (const match of matches) {
+    let raw: unknown;
+    try {
+      raw = JSON.parse(match[1] ?? "");
+    } catch {
+      lastFailureReason = "canonical completed assistant turn has malformed JSON in the final fenced verdict";
+      continue;
+    }
+    const verdict = completionVerdictFrom(raw);
+    if (!verdict) {
+      lastFailureReason = "canonical completed assistant turn is missing a valid status, findings, or confidence field";
+      continue;
+    }
+    candidates.push({ index: match.index, verdict });
   }
-  let raw: unknown;
-  try {
-    raw = JSON.parse(last[1] ?? "");
-  } catch {
-    return { failureReason: "canonical completed assistant turn has malformed JSON in the final fenced verdict" };
+  if (!candidates.length) return { failureReason: lastFailureReason };
+  if (new Set(candidates.map(({ verdict }) => verdict.status)).size > 1) {
+    return { failureReason: "canonical completed assistant turn has conflicting fenced JSON verdicts" };
   }
-  const verdict = completionVerdictFrom(raw);
-  if (!verdict) {
-    return { failureReason: "canonical completed assistant turn is missing a valid status, findings, or confidence field" };
-  }
-  return { index: last.index, verdict };
+  return candidates.at(-1)!;
 }
 
 export function stageVerdictRejectionReason(text: string): string {
@@ -110,7 +116,7 @@ export function stageVerdictRejectionReason(text: string): string {
     : "canonical completed assistant turn did not yield a valid final JSON verdict";
 }
 
-/** Completion authority is the final fenced JSON block in a completed turn. */
+/** Completion authority is the last well-formed fenced JSON verdict in a completed turn. */
 export function parseStageVerdict(text: string): ParsedStageVerdict | RejectedStageVerdict | null {
   const candidate = finalVerdictCandidate(text);
   if ("failureReason" in candidate) return null;
