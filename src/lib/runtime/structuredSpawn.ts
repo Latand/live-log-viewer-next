@@ -1741,10 +1741,15 @@ export async function spawnStructuredConversation(
         ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
       materializationPending = true;
       try {
+        /* The id the engine wire actually carries: the drain stamps the spawn
+           first message with the OPERATION id (`spawn_message_<launchId>`),
+           not the held delivery's `spawn_<launchId>` clientMessageId, and the
+           persisted rollout item echoes the wire id. Hunting the wrong id
+           left materialization pending forever (#1332). */
         await withinDurableSetup(waitForStructuredSessionMaterialization(
           host,
           identity.path,
-          `spawn_${input.receipt.launchId}`,
+          `spawn_message_${input.receipt.launchId}`,
           {
             now,
             sleep,

@@ -40,6 +40,7 @@ import { filterWorkflowsForFileScan } from "@/lib/workflows/visibility";
 import { cachedLimitsProvenance } from "@/lib/limits";
 import { projectRateLimitReadModel } from "@/lib/rateLimit";
 import { readAuthorshipEvidence } from "@/lib/reaperAuthorship";
+import { projectStructuredFileLiveness } from "@/lib/runtime/livenessProjection";
 import { overlayLineageProjectAffinity } from "@/lib/session/projectAffinity";
 import { resolveProjectAttribution } from "@/lib/session/projectResolution";
 import { overlayRoleSessionTitles } from "@/lib/session/roleTitles";
@@ -570,6 +571,8 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
       };
     }
   }
+  await projectStructuredFileLiveness(files, registry, registrySnapshot);
+  traceStep("file-turn-liveness");
   traceStep("file-registry-overlay");
   markTiming("files-registry");
   /* Custom session titles (issue #33) are the last word on `title`. The shared

@@ -40,6 +40,7 @@ afterAll(() => {
 
 const TOOL_CALL_AT = "2026-08-29T03:24:00.000Z";
 const TOOL_RESULT_AT = "2026-08-29T03:24:05.000Z";
+const MEASURED_AT = Date.parse("2026-08-30T03:00:00.000Z");
 
 const OPEN_TURN_TRANSCRIPT = [
   JSON.stringify({ type: "assistant", timestamp: TOOL_CALL_AT, message: { content: [{ type: "tool_use", id: "t1", name: "Bash" }] } }),
@@ -121,6 +122,28 @@ test("a stage host whose process is gone reports the moment it stopped, so the a
   const unavailableSince = await defaultPipelinePorts().conversationHostUnavailableSince!(conversationId);
 
   expect(unavailableSince).toBe(TOOL_RESULT_AT);
+});
+
+test("the measured CPU-flat host reports its unavailable-since clock through the shared liveness verdict", async () => {
+  const process = { pid: 71, startIdentity: "71:1000" };
+  const { conversationId } = stageConversation(
+    "cpu-flat",
+    process,
+    new Date(MEASURED_AT - 5 * 60_000),
+  );
+
+  const unavailableSince = await defaultPipelinePorts({
+    liveness: {
+      now: () => MEASURED_AT,
+      uptimeSeconds: () => 250,
+      pidAlive: () => true,
+      processIdentity: () => process.startIdentity,
+      processCpuMs: () => 1_700,
+      observeCpuProgress: () => ({ consumedMs: 200, observedMs: 100_000 }),
+    },
+  }).conversationHostUnavailableSince!(conversationId);
+
+  expect(unavailableSince).toBe(new Date(MEASURED_AT - 4 * 60_000).toISOString());
 });
 
 test("a stage host still writing to its transcript is not reported unavailable, however long the step takes", async () => {

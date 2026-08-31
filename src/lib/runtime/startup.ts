@@ -345,6 +345,33 @@ function assertAdoptedHostsAreClaimed(
   );
 }
 
+/** Every row selected before adoption must end the pass with a host published
+    by this Viewer or cease to be eligible. The durable target appoints the
+    candidate before the incumbent's demotion poll releases its engines. A
+    candidate that reaches adoption in that window sees the old live process
+    and must retry until demotion records and completes the handoff (#1296). */
+function assertEligibleHostsResolved(
+  registry: AgentRegistry,
+  shouldAdopt: StructuredHostAdoptionFilter,
+  adopted: readonly AdoptedStructuredHost[],
+  productionAdopter: (key: SessionKey) => boolean,
+  claimed: (key: SessionKey) => boolean = hasStructuredDeliveryHost,
+): void {
+  const adoptedKeys = new Set(adopted.map((item) => sessionKeyId(item.key)));
+  const unresolved = Object.values(registry.readOnlySnapshot().entries).filter((entry) =>
+    entry.structuredHost
+      && productionAdopter(entry.key)
+      && shouldAdopt(entry)
+      && !adoptedKeys.has(sessionKeyId(entry.key))
+      && !claimed(entry.key));
+  if (unresolved.length === 0) return;
+  const keys = unresolved.map((entry) => sessionKeyId(entry.key));
+  console.error("[structured hosts] eligible hosts remain owned by the incumbent Viewer; retrying startup", { keys });
+  throw new RuntimeHostUnavailableError(
+    `structured startup left ${keys.length} eligible host(s) owned by the incumbent Viewer: ${keys.join(", ")}`,
+  );
+}
+
 function interruptedCodexContinuationOperationId(sessionId: string, claimEpoch: number): string {
   return `${INTERRUPTED_CODEX_CONTINUATION_OPERATION_PREFIX}-${sessionId}-${claimEpoch}`;
 }
@@ -621,7 +648,8 @@ function structuredStartupAdoptionFilter(
     }
     const conversationId = registry.canonicalConversationId(conversation.id);
     const hasPendingWork = pendingDeliveryConversationIds.has(conversationId)
-      || signals.pendingOperationConversationIds.has(conversationId);
+      || signals.pendingOperationConversationIds.has(conversationId)
+      || entry.pendingAction === "handoff";
     if (hasPendingWork) return true;
     if (conversation.turn.state === "terminal") return false;
     /* Past this point the only thing left arguing for a launch is the turn the
@@ -842,6 +870,13 @@ export async function adoptStructuredHostsAtStartup(
   completedHosts = Math.max(completedHosts, codexCandidateCount + claudeCandidateCount);
   nextAdoptedHosts = retainAdoptedHosts(nextAdoptedHosts, claude);
   rememberStructuredStartupRetry(nextAdoptedHosts, orchestratorRecoveries);
+  assertEligibleHostsResolved(
+    registry,
+    shouldAdopt,
+    nextAdoptedHosts,
+    (key) => key.engine === "codex" ? dependencies.adopt === undefined : dependencies.adoptClaude === undefined,
+    dependencies.hostClaimed,
+  );
   reportProgress("reconciling structured hosts");
   orchestratorHostKeys = currentOrchestratorRestartRecoveryHostKeys(
     registry,
