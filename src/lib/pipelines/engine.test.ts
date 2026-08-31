@@ -148,6 +148,11 @@ test("a pipeline stage keeps its reserved account through a routing change befor
 test("a concurrent pipeline replay and its recovery projections withhold staged identity (#1123)", async () => {
   const registry = new AgentRegistry(path.join(process.env.LLV_STATE_DIR!, "pipeline-phantom-replay-registry.json"));
   const cwd = process.env.LLV_STATE_DIR!;
+  const previousCodexBinary = process.env.LLV_CODEX_BINARY;
+  const codexBinary = path.join(cwd, "codex-mcp-fixture");
+  fs.writeFileSync(codexBinary, "#!/bin/sh\nprintf '[{\"name\":\"viewer\"}]'\n");
+  fs.chmodSync(codexBinary, 0o755);
+  process.env.LLV_CODEX_BINARY = codexBinary;
   setAgentRegistryForTests(registry);
   const resolveSpawn = spyOn(accountManager, "resolveSpawn").mockImplementation(() => ({
     engine: "codex",
@@ -262,6 +267,8 @@ test("a concurrent pipeline replay and its recovery projections withhold staged 
       }),
     ]);
   } finally {
+    if (previousCodexBinary === undefined) delete process.env.LLV_CODEX_BINARY;
+    else process.env.LLV_CODEX_BINARY = previousCodexBinary;
     resolveSpawn.mockRestore();
     setAgentRegistryForTests(null);
   }

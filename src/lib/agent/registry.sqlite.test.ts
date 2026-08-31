@@ -111,6 +111,74 @@ test("a compact spawn lookup reads only requested receipts and their alias chain
   expect(snapshotLoads).toBe(0);
 });
 
+test("a compact spawn lookup withholds a transport-null structured failure after host cleanup (#1329)", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-sqlite-failed-materialization-"));
+  const filename = path.join(directory, "agent-registry.json");
+  try {
+    const seed = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+    const cwd = "/failed-materialization";
+    const launchProfile = emptyLaunchProfile({ cwd, title: "Verify failed materialization projection" });
+    const begun = seed.beginSpawnRequest({
+      engine: "codex",
+      cwd,
+      transport: "structured",
+      accountId: null,
+      launchProfile,
+    });
+    if (begun.kind !== "created") throw new Error("expected structured spawn creation");
+    const sessionId = "failed-materialization-session";
+    const artifactPath = "/sessions/failed-materialization.jsonl";
+    const staged = seed.stageStructuredSpawn(begun.receipt.launchId, {
+      key: { engine: "codex", sessionId },
+      artifactPath,
+      cwd,
+      accountId: null,
+      launchProfile,
+      status: "idle",
+      host: null,
+      structuredHost: {
+        kind: "codex-app-server",
+        endpoint: "stdio:failed-materialization",
+        process: { pid: process.pid, startIdentity: "failed-materialization-process" },
+        eventCursor: 0,
+        protocolVersion: "fixture-v1",
+        writerClaimEpoch: 1,
+        activeTurnRef: null,
+        pendingAttention: [],
+        activeFlags: [],
+      },
+      claimEpoch: 1,
+      claimOwner: "structured-host:failed-materialization",
+      pendingAction: "spawn",
+    });
+    if (staged.kind !== "settled") throw new Error("expected staged structured spawn");
+
+    const persisted = JSON.parse(fs.readFileSync(filename, "utf8")) as {
+      receipts: Record<string, { transport: string | null }>;
+    };
+    persisted.receipts[begun.receipt.launchId]!.transport = null;
+    fs.writeFileSync(filename, JSON.stringify(persisted));
+    const cleanupRegistry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+    cleanupRegistry.failStructuredSpawn(begun.receipt.launchId, "transcript did not materialize");
+    const initial = cleanupRegistry.snapshot();
+    expect(initial.entries[`codex:${sessionId}`]).toMatchObject({
+      structuredHost: null,
+      structuredHostOperationId: begun.receipt.launchId,
+    });
+
+    const store = new SqliteAgentRegistryStore(path.join(directory, "agent-registry.sqlite"), {
+      initialSnapshot: initial,
+      normalize: normalizeRegistry,
+    });
+    expect(store.snapshotSpawns([begun.receipt.launchId])[begun.receipt.launchId]).toMatchObject({
+      state: "failed",
+      materializedPath: null,
+    });
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("snapshot title lookup reads only named alias chains and conversations", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-sqlite-title-lookup-"));
   const filename = path.join(directory, "agent-registry.json");

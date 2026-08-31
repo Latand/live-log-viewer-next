@@ -9,7 +9,7 @@ import { claudeSettingsPath, isManagedClaudeHome, UnknownClaudeAccountError } fr
 import { accountManager, ProjectAccountRefusedError, resolveHealthySpawnAccount, type HealthySpawnAccountResolution } from "@/lib/accounts/manager";
 import { emptyLaunchProfile, validExplicitProject } from "@/lib/accounts/migration/contracts";
 import { freshSpecFor, type AgentEngine } from "@/lib/agent/cli";
-import { agentRegistry, SpawnChildLimitError, type SpawnRequest } from "@/lib/agent/registry";
+import { agentRegistry, identityMaterializationFence, SpawnChildLimitError, type SpawnRequest } from "@/lib/agent/registry";
 import { reasoningFromBody } from "@/lib/agent/efforts";
 import { grantedMcpServers, mcpServersForSession, normalizeSpawnMcpServers, SCHEDULED_REPORT_SESSION_CLASS, type McpSessionClass } from "@/lib/agent/mcpAllowlist";
 import { normalizeSpawnPlugins, pluginAllowlistForSession, SCHEDULED_REPORT_PLUGINS, sessionOriginFor } from "@/lib/agent/pluginAllowlist";
@@ -885,9 +885,7 @@ export async function executeSpawnRequest(
       });
     };
     if (begun.kind === "replay") {
-      const structured = queuedReceipt.transport === "structured"
-        || (queuedReceipt.transport === null
-          && Boolean(queuedReceipt.key && registry.readOnlySnapshot().entries[sessionKeyId(queuedReceipt.key)]?.structuredHost));
+      const structured = identityMaterializationFence(registry.readOnlySnapshot()).isStructured(queuedReceipt);
       let receipt = queuedReceipt;
       let initialMessage: SpawnResponse["initialMessage"] | undefined;
       const runtimeClient = structured ? dependencies.runtimeHostClient() : null;
@@ -915,7 +913,8 @@ export async function executeSpawnRequest(
           deferStructuredSpawn(receipt, runtimeClient, imageRefs);
         }
       }
-      if (receipt.state === "completed" && receipt.artifactPath) {
+      if (receipt.artifactPath
+        && identityMaterializationFence(registry.readOnlySnapshot()).allowsReceipt(receipt, { structured })) {
         await adoptMaterializedAttempt(receipt, receipt.artifactPath);
       }
       const response = spawnResponseForReceipt(receipt, receipt.artifactPath, {
