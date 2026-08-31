@@ -119,6 +119,9 @@ class FakeAppServer extends EventEmitter {
   autoCompleteUserMessage = true;
   readTurns: unknown[] | null = null;
   readError: string | null = null;
+  /* Rejects only hydrated reads (includeTurns), the way codex 0.151+ paginated
+     threads do; metadata-only reads and thread/turns/list keep answering. */
+  hydratedReadError: string | null = null;
   mcpServers: Record<string, unknown> = {
     playwright: { command: "npx", enabled: true },
     "telegram-readonly": { command: "uv", enabled: true },
@@ -228,12 +231,22 @@ class FakeAppServer extends EventEmitter {
     }
     if (method === "thread/read") {
       if (this.readError) return this.respondError(message.id, this.readError);
+      const hydrated = Boolean((message.params as { includeTurns?: boolean } | undefined)?.includeTurns);
+      if (hydrated && this.hydratedReadError) return this.respondError(message.id, this.hydratedReadError);
       return this.respond(message.id, {
         thread: {
           id: this.threadId,
           ...(!this.omitThreadReadPath ? { path: this.threadPath ?? `/sessions/${this.threadId}.jsonl` } : {}),
-          turns: this.readTurns ?? this.turns,
+          ...(hydrated ? { turns: this.readTurns ?? this.turns } : {}),
         },
+      });
+    }
+    if (method === "thread/turns/list") {
+      if (this.readError) return this.respondError(message.id, this.readError);
+      return this.respond(message.id, {
+        data: this.readTurns ?? this.turns,
+        nextCursor: null,
+        backwardsCursor: null,
       });
     }
     if (method === "turn/start") {
@@ -1914,6 +1927,55 @@ describe("CodexAppServerHost", () => {
     }];
     await expect(host.sessionMaterializationEvidence("operation-materialized")).resolves.toEqual({
       state: "materialized",
+    });
+    await host.release();
+  });
+
+  test("a paginated thread that refuses hydration still proves materialization through turns/list (#1332)", async () => {
+    const server = new FakeAppServer("paginated-evidence-thread");
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+    });
+
+    expect(await host.send({ id: "operation-paginated", text: "hello" })).toEqual({
+      outcome: "turn-started",
+      turnId: "turn-1",
+    });
+    server.hydratedReadError = "list_turns is not supported yet";
+    server.readTurns = [{
+      id: "turn-1",
+      status: "inProgress",
+      items: [{ type: "userMessage", clientId: "operation-paginated", content: [{ type: "text", text: "hello" }] }],
+    }];
+    await expect(host.sessionMaterializationEvidence("operation-paginated")).resolves.toEqual({
+      state: "materialized",
+    });
+    const turnsList = server.requests.findLast((request) => request.method === "thread/turns/list");
+    expect(turnsList?.params).toMatchObject({ itemsView: "full", sortDirection: "asc" });
+    const fallbackRead = server.requests.findLast((request) => request.method === "thread/read");
+    expect((fallbackRead?.params as { includeTurns?: boolean }).includeTurns).toBeUndefined();
+    await host.release();
+  });
+
+  test("the pagination fallback still reports an absent first message (#1332)", async () => {
+    const server = new FakeAppServer("paginated-absent-thread");
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+    });
+
+    expect(await host.send({ id: "operation-paginated-absent", text: "hello" })).toEqual({
+      outcome: "turn-started",
+      turnId: "turn-1",
+    });
+    server.hydratedReadError = "list_turns is not supported yet";
+    server.readTurns = [{ id: "turn-1", status: "inProgress", items: [] }];
+    await expect(host.sessionMaterializationEvidence("operation-paginated-absent")).resolves.toEqual({
+      state: "absent",
+      reason: "Codex app-server did not read back the confirmed first message",
     });
     await host.release();
   });
