@@ -71,6 +71,10 @@ const EMPTY_FEED: FeedSnapshot = { items: [], hiddenServiceCount: 0 };
     and glued again. Input-tagged releases bypass this window. */
 const GLUE_SETTLE_MS = 300;
 
+type ScrollCause =
+  | { kind: "programmatic" }
+  | { kind: "user"; scrollTop: number; direction: -1 | 1 | null };
+
 /* Scroll state per stable conversation, surviving pane remounts and native
    generation changes during account migration. */
 interface ViewportAnchor {
@@ -250,7 +254,7 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
   const lastPrependRef = useRef(0);
   const pulseTimer = useRef<number | null>(null);
   const glueAtRef = useRef(0);
-  const scrollCauseRef = useRef<"programmatic" | "user" | null>(null);
+  const scrollCauseRef = useRef<ScrollCause | null>(null);
   const pillTouchRef = useRef<{ x: number; y: number } | null>(null);
   const restoreInitializedPathRef = useRef<string | null>(null);
   const pendingRestoreRef = useRef<PendingRestore | null>(null);
@@ -284,7 +288,7 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
   const glue = () => {
     const el = scroller.current;
     if (!el) return;
-    scrollCauseRef.current = "programmatic";
+    scrollCauseRef.current = { kind: "programmatic" };
     glueAtRef.current = nowMs();
     el.scrollTop = el.scrollHeight;
   };
@@ -305,7 +309,7 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
       const row = rowForAnchor(el, anchor.key);
       if (row) {
         const currentOffset = row.getBoundingClientRect().top - el.getBoundingClientRect().top;
-        scrollCauseRef.current = "programmatic";
+        scrollCauseRef.current = { kind: "programmatic" };
         glueAtRef.current = nowMs();
         el.scrollTop += currentOffset - anchor.offset;
         pending.applied = true;
@@ -313,7 +317,7 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
       }
     }
     const maxScroll = Math.max(0, el.scrollHeight - el.clientHeight);
-    scrollCauseRef.current = "programmatic";
+    scrollCauseRef.current = { kind: "programmatic" };
     glueAtRef.current = nowMs();
     el.scrollTop = Math.max(0, maxScroll - pending.fromBottom);
     if (maxScroll < pending.fromBottom) return false;
@@ -687,28 +691,26 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
      collide at any pane width. (A right-anchored pill also sat over the tool
      rows' status column on the phone.) */
   const pillPos = "left-1/2 -translate-x-1/2";
+  const markUserScroll = (direction: number | null): void => {
+    const el = scroller.current;
+    if (!el) return;
+    scrollCauseRef.current = {
+      kind: "user",
+      scrollTop: el.scrollTop,
+      direction: direction === null || direction === 0 ? null : direction < 0 ? -1 : 1,
+    };
+  };
   const forwardPillVerticalDelta = (row: HTMLElement | null, deltaY: number): void => {
     const el = scroller.current;
     if (!el || !deltaY || (row && canScrollVertically(row, deltaY))) return;
-    scrollCauseRef.current = "user";
+    markUserScroll(deltaY);
     el.scrollTop += deltaY;
   };
 
   return (
     <RawLineProvider value={getRawLine}>
     <MessageProvenanceProvider value={provenanceLookup}>
-    <div
-      className="flex min-h-0 flex-1 flex-col"
-      onWheelCapture={(event) => {
-        if (event.deltaY) scrollCauseRef.current = "user";
-      }}
-      onTouchStartCapture={() => { scrollCauseRef.current = "user"; }}
-      onKeyDownCapture={(event) => {
-        if (["ArrowDown", "ArrowUp", "End", "Home", "PageDown", "PageUp", " ", "Spacebar"].includes(event.key)) {
-          scrollCauseRef.current = "user";
-        }
-      }}
-    >
+    <div className="flex min-h-0 flex-1 flex-col">
     {/* The pill anchors to the scroller wrapper — NOT the pane column — so the
         pinned status bar below is structurally outside its overlay area. */}
     <div className="relative flex min-h-0 flex-1 flex-col">
@@ -785,15 +787,29 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
         data-tail-lines-start={tail.linesStart}
         data-tail-line-count={tail.lines.length}
         className={compact ? "min-h-0 flex-1 overflow-y-auto py-3" : "min-h-0 flex-1 overflow-y-auto py-6"}
+        onWheelCapture={(event) => {
+          if (event.deltaY) markUserScroll(event.deltaY);
+        }}
+        onTouchStartCapture={() => { markUserScroll(null); }}
+        onKeyDownCapture={(event) => {
+          if (["ArrowUp", "Home", "PageUp"].includes(event.key)) markUserScroll(-1);
+          else if (["ArrowDown", "End", "PageDown"].includes(event.key)) markUserScroll(1);
+          else if ([" ", "Spacebar"].includes(event.key)) markUserScroll(event.shiftKey ? -1 : 1);
+        }}
         onScroll={(event) => {
           const el = event.currentTarget;
-          const userInitiated = scrollCauseRef.current === "user";
+          const cause = scrollCauseRef.current;
+          const userDelta = cause?.kind === "user" ? el.scrollTop - cause.scrollTop : 0;
+          const userInitiated = cause?.kind === "user"
+            && userDelta !== 0
+            && (cause.direction === null || Math.sign(userDelta) === cause.direction);
+          const userReleasedMagnet = userInitiated && userDelta < 0;
           scrollCauseRef.current = null;
           const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 50;
           const settling = nowMs() - glueAtRef.current < GLUE_SETTLE_MS;
           if (!settling || userInitiated) pendingRestoreRef.current = null;
-          if (atBottom && !magnetRef.current) setMagnet(true, true);
-          else if (!atBottom && magnetRef.current) {
+          if (atBottom && !magnetRef.current && !userReleasedMagnet) setMagnet(true, true);
+          else if ((userReleasedMagnet || !atBottom) && magnetRef.current) {
             /* Off-bottom right after a programmatic glue is layout settling
                (content-visibility estimates, pane resizes during a scheme
                reshuffle) — hold the magnet and glue again. A preceding input

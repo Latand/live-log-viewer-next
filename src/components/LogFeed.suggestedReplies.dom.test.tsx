@@ -168,7 +168,11 @@ const file = {
   conversationId: CONVERSATION_ID,
 } as FileEntry;
 
-function render(follow: boolean, setFollow: (value: boolean) => void = () => undefined): HTMLElement {
+function render(
+  follow: boolean,
+  setFollow: (value: boolean) => void = () => undefined,
+  feedFile: FileEntry = file,
+): HTMLElement {
   const host = dom.document.createElement("div");
   dom.document.body.append(host);
   const root = createRoot(host as unknown as HTMLElement);
@@ -176,7 +180,7 @@ function render(follow: boolean, setFollow: (value: boolean) => void = () => und
   flushSync(() => {
     root.render(
       <LogFeed
-        file={file}
+        file={feedFile}
         showSvc={false}
         lineFilter=""
         onStatus={() => undefined}
@@ -274,14 +278,46 @@ test("a user wheel during the glue window releases the scroll magnet on the firs
     const scroller = host.querySelector("[data-log-feed-scroller]") as HTMLElement;
     const geometry = setScrollerGeometry(scroller, 1_000, 200, 800);
 
-    geometry.setTop(600);
     flushSync(() => {
-      scroller.dispatchEvent(new dom.WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: -120 }) as unknown as Event);
+      scroller.dispatchEvent(new dom.WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: -20 }) as unknown as Event);
+      geometry.setTop(780);
       scroller.dispatchEvent(new dom.Event("scroll", { bubbles: true }) as unknown as Event);
     });
 
-    expect(scroller.scrollTop).toBe(600);
+    expect(scroller.scrollTop).toBe(780);
     expect(followChanges).toEqual([false]);
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("a wheel that cannot move the feed does not tag a later settling scroll as user initiated", () => {
+  const originalNow = Date.now;
+  const fixedNow = originalNow();
+  Date.now = () => fixedNow;
+  try {
+    const followChanges: boolean[] = [];
+    const host = render(
+      true,
+      (value) => followChanges.push(value),
+      {
+        ...file,
+        path: "/fixtures/claude/projects/-repo/seat-settling.jsonl",
+        name: "seat-settling.jsonl",
+        conversationId: "conversation_seat_settling",
+      },
+    );
+    const scroller = host.querySelector("[data-log-feed-scroller]") as HTMLElement;
+    const geometry = setScrollerGeometry(scroller, 1_000, 200, 800);
+
+    flushSync(() => {
+      scroller.dispatchEvent(new dom.WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: 120 }) as unknown as Event);
+      geometry.setTop(600);
+      scroller.dispatchEvent(new dom.Event("scroll", { bubbles: true }) as unknown as Event);
+    });
+
+    expect(scroller.scrollTop).toBe(800);
+    expect(followChanges).toEqual([]);
   } finally {
     Date.now = originalNow;
   }
