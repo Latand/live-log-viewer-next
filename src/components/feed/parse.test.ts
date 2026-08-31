@@ -1538,6 +1538,46 @@ describe("Codex 0.151 thread items", () => {
     expect(item).toMatchObject({ kind: "tool", id: "command-running", status: "run", statusLabel: "executing…" });
   });
 
+  test("marks a completed MCP item with an error payload as failed", () => {
+    const line = JSON.stringify({
+      type: "response_item",
+      timestamp: "2026-08-31T10:00:21Z",
+      payload: {
+        type: "mcpToolCall",
+        id: "mcp-failed",
+        server: "sample",
+        tool: "lookup",
+        arguments: { query: "widget" },
+        status: "completed",
+        error: { message: "Widget unavailable" },
+        result: null,
+      },
+    });
+    const item = buildFeed(codexFile, [line], false, "").items[0];
+
+    expect(item).toMatchObject({ kind: "tool", id: "mcp-failed", status: "err", outputPreview: expect.stringContaining("Widget unavailable") });
+  });
+
+  test("marks completed image generation with a failure payload as failed", () => {
+    const line = JSON.stringify({
+      type: "response_item",
+      timestamp: "2026-08-31T10:00:22Z",
+      payload: {
+        type: "imageGeneration",
+        id: "image-failed",
+        status: "completed",
+        result: "",
+        revisedPrompt: "A compact widget",
+        savedPath: null,
+        transparentBackground: false,
+        failure: "Content policy",
+      },
+    });
+    const item = buildFeed(codexFile, [line], false, "").items[0];
+
+    expect(item).toMatchObject({ kind: "tool", id: "image-failed", status: "err", outputPreview: "Content policy" });
+  });
+
   test("maps every remaining 0.151 ThreadItem kind onto a semantic feed card", () => {
     const expected: Item["kind"][] = [
       "user",

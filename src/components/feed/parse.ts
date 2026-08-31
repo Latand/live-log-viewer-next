@@ -1700,7 +1700,11 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
   const codexThreadItemKind = (value: unknown): string => textPart(value).replace(/[_-]/g, "").toLowerCase();
   const codexThreadToolStatus = (item: Record<string, unknown>, lifecycle: string): ToolStatus => {
     const status = codexThreadItemKind(item.status);
-    if (["failed", "declined", "interrupted", "error", "errored"].includes(status) || item.success === false || (num(item.exitCode) ?? 0) !== 0) return "err";
+    if (["failed", "declined", "interrupted", "error", "errored"].includes(status)
+      || item.error !== undefined && item.error !== null
+      || item.failure !== undefined && item.failure !== null
+      || item.success === false
+      || (num(item.exitCode) ?? 0) !== 0) return "err";
     if (["inprogress", "running", "pending"].includes(status)) return "run";
     if (["completed", "complete", "success", "succeeded"].includes(status)) return "ok";
     if (lifecycle === "itemcompleted") return "ok";
