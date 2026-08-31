@@ -55,7 +55,7 @@ afterAll(() => {
   mock.module("@/hooks/useLogTail", () => actualLogTail);
 });
 
-function liveLegacyFile(): FileEntry {
+function liveLegacyFile(overrides: Partial<FileEntry> = {}): FileEntry {
   return {
     path: "/conversations/live-legacy.jsonl",
     root: "codex-sessions",
@@ -79,6 +79,7 @@ function liveLegacyFile(): FileEntry {
     fast: false,
     pendingQuestion: null,
     waitingInput: null,
+    ...overrides,
   } as FileEntry;
 }
 
@@ -90,4 +91,14 @@ test("a failed legacy pane-buffer probe over a live recorded host and running tu
   expect(html).not.toContain('data-strip-surface="dead"');
   expect(html).not.toContain("Respawn conversation");
   expect(html).not.toContain("Drafted images will be sent after the host recovers");
+});
+
+test.each([
+  ["live host", { lastTurn: { startedAt: Date.now() - 60_000, endedAt: Date.now() - 1_000 } }],
+  ["open turn", { proc: null, pid: null }],
+] as const)("conflicting dead projection stays fail closed on %s evidence alone", (_evidence, overrides) => {
+  const html = renderToStaticMarkup(<BranchPane file={liveLegacyFile(overrides)} tasks={[]} isRoot />);
+
+  expect(html).not.toContain("data-dead-host-banner");
+  expect(html).not.toContain("Respawn conversation");
 });

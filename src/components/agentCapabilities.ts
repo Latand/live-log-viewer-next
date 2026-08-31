@@ -222,13 +222,13 @@ export function surfaceFor(file: FileEntry, rv: RuntimeSessionView | null, opts:
   const host = resolveHost(rv, opts);
   if (host.kind === "structured") return "structured";
   if (host.kind === "dead") {
-    /* A dead runtime projection and a scanner-confirmed process with an open
-       turn disagree about the same card. Neither side may arm a destructive
-       control while that conflict is unresolved: Respawn could replace live
-       work, and legacy Stop/Kill could target a stale pid. The durable runtime
-       publisher normally collapses a live tmux host to `tmux-legacy`; this is
-       the fail-closed client seam for a stale snapshot during that hand-over. */
-    if (file.proc === "running" && turnIsRunning(file)) return "unresolved";
+    /* A scanner-confirmed process or open turn conflicts with the dead runtime
+       projection. Neither side may arm a destructive control while that
+       conflict is unresolved: Respawn could replace live work, and legacy
+       Stop/Kill could target a stale pid. The durable runtime publisher
+       normally collapses a live tmux host to `tmux-legacy`; this is the
+       fail-closed client seam for a stale snapshot during that hand-over. */
+    if (file.proc === "running" || turnIsRunning(file)) return "unresolved";
     return "dead";
   }
 

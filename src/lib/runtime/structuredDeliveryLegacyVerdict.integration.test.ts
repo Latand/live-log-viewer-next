@@ -10,7 +10,7 @@ import { RuntimeJournal } from "@/runtime-host/journal";
 
 import type { RuntimeHostClient } from "./client";
 import { FakeEngineHost, createFakeDeliveryLedger } from "./fixtures/fakeEngineHost";
-import { bindStructuredDeliveryQueue } from "./structuredDeliveryController";
+import { bindStructuredDeliveryQueue, hasStructuredDeliveryHost } from "./structuredDeliveryController";
 
 const sandboxes: string[] = [];
 
@@ -96,7 +96,12 @@ test("legacy transport with a failed probe, live recorded host, and running turn
     pendingAttention: [],
     activeFlags: [],
     account: null,
-  }), { onStateChange: () => () => {} });
+  }), {
+    health: async () => {
+      throw new Error("no buffer viewer-legacy-probe");
+    },
+    onStateChange: () => () => {},
+  });
   const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
 
   await bindStructuredDeliveryQueue([{ key, host: failedProbe }], {
@@ -113,5 +118,6 @@ test("legacy transport with a failed probe, live recorded host, and running turn
     turn: "running",
     provenance: "derived",
   });
+  expect(hasStructuredDeliveryHost(key)).toBeFalse();
   journal.close();
 });

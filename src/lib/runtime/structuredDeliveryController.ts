@@ -805,6 +805,17 @@ export async function bindStructuredDeliveryQueue(
     if (ownsOperation && !await ownsOperation()) return async () => {};
     const key = sessionKeyId(item.key);
     const current = registrations.get(key);
+    const publicationEntry = entryForHost(registry, item);
+    /* A durable tmux host makes this adapter historical for the current
+       generation. Publish the legacy verdict without probing or registering
+       the adapter: an unreadable pane surface says nothing about host death,
+       and the structured queue must not route work through the stale adapter. */
+    if (publicationEntry?.host) {
+      const displaced = takeRegistration(key);
+      if (displaced) await detachRegistration(key, displaced);
+      await publishHostState(client, registry, item, null);
+      return async () => {};
+    }
     /* The same host under the same key either already holds a registration of
        this generation, with nothing left to do, or holds a carried-over seat
        this call is filling in. Any other host under that key is replaced. */
@@ -820,7 +831,6 @@ export async function bindStructuredDeliveryQueue(
     const initialState = await item.host.health();
     if (abandoned()) return async () => {};
     if (ownsOperation && !await ownsOperation()) return async () => {};
-    const publicationEntry = entryForHost(registry, item);
     const publicationConversationId = publicationEntry
       ? conversationIdForEntry(registry, publicationEntry)
       : null;
