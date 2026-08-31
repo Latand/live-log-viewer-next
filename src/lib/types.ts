@@ -65,23 +65,21 @@ export interface StructuredSpawnCardState {
   initialMessage: "pending" | "queued" | "delivered" | "failed";
   retrySafe: boolean;
   error: string | null;
-  /** The initial launch prompt (issue #614), sourced from the queued initial
-      delivery so ANY surface — not only the browser that ran the composer —
-      renders it as the conversation's first user bubble while the transcript is
-      still absent. Present only while the delivery still carries its text (it is
-      cleared once delivered, by which point the transcript echoes it); the seed
-      it produces is keyed by {@link launchId}, so it survives a refresh and
-      transcript adoption and never duplicates the composer's own seed. */
+  /** The durable initial-launch display text (issue #614), projected so every
+      surface renders the first user bubble while the transcript is absent. The
+      seed is keyed by {@link launchId}, survives refresh, and retires when the
+      materialized live transcript is adopted. */
   prompt?: string;
   /** How many images rode with the launch prompt, for the bubble's count chip. */
   promptImages?: number;
   /** Submission moment (ms) of the launch prompt — the receipt's creation time —
       so the seeded bubble orders ahead of any follow-up the operator queues. */
   promptAt?: number;
-  /** The canonical text the transcript will echo for this launch (issue #615) —
-      the delivered message, which for a role launch is the scaffold PLUS the raw
-      draft. The optimistic bubble displays `prompt` (the raw draft) but retires on
-      THIS text, so a scaffolded role launch never lingers and never duplicates. */
+  /** The canonical text the transcript can echo before adoption (issue #615) —
+      the delivered message, which for a role launch is the scaffold plus the raw
+      draft. The optimistic bubble displays `prompt` while this text owns its echo
+      occurrence; live adoption also retires image-only launches with an empty
+      echo. */
   promptEcho?: string;
   /** When the launch's initial message actually reached the agent (ms, issue
       #648). A structured / MCP spawn journals its first user record with SDK /

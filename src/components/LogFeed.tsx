@@ -27,6 +27,7 @@ import {
 import { orderedConversationTail } from "./conversation/tailOrder";
 import {
   publishTranscriptEchoes,
+  retireLaunchOutboxOnAdoption,
   seedLaunchOutbox,
   settleLaunchOutboxDelivered,
   settleLaunchOutboxFailed,
@@ -174,6 +175,17 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
       && paneLaunchOwner.conversationId === launchOwner.conversationId
       && paneLaunchOwner.generation === launchOwner.generation,
   );
+  /* A materialized `file.launch` is the server's live-adoption signal. Retire
+     the starting-window bubble at that hand-off even when an image-only launch
+     has no text echo and its delivery receipt still reads queued/delivering. */
+  useEffect(() => {
+    if (!memoryKey || !file?.launch || !launchOwnsThisPane || !launchOwner) return;
+    retireLaunchOutboxOnAdoption(memoryKey, {
+      id: file.launch.launchId,
+      adoptedAt: nowMs(),
+      owner: launchOwner,
+    });
+  }, [memoryKey, file?.launch?.launchId, launchOwner, launchOwnsThisPane]);
   /* Live streaming text: `delta` events from the structured host render the
      in-flight assistant reply immediately, ahead of the transcript flush. The
      host is resolved by conversation identity FIRST (round-1 P1#3): during
@@ -552,7 +564,7 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
      a fresh refresh) seeds the same launch-owned bubble the composer path seeds.
      Keyed by the launch id under the stable conversation identity, so it is
      idempotent with the composer's own seed (no duplicate), survives a refresh,
-     folds through transcript adoption, and retires on its transcript echo. */
+     and retires on its transcript echo or the live transcript's adoption. */
   useEffect(() => {
     if (!memoryKey || !launch?.launchId || !launchOwnsThisPane) return;
     const promptText = launch.prompt ?? "";

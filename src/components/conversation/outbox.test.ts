@@ -15,6 +15,7 @@ import {
   publishTranscriptEchoes,
   readOutbox,
   resetOutboxForTests,
+  retireLaunchOutboxOnAdoption,
   seedLaunchOutbox,
   settleLaunchOutboxDelivered,
   settleLaunchOutboxFailed,
@@ -1653,6 +1654,45 @@ describe("seedLaunchOutbox (P1#2)", () => {
     /* Transcript adoption: the flushed transcript echoes the prompt exactly once,
        which retires the launch-owned bubble — one window, zero duplicate. */
     expect(visibleOutbox(refreshed, echoes(identical), 5_000)).toEqual([]);
+  });
+
+  test("issue 617: live adoption hides a role launch while preserving its delayed scaffold echo for occurrence ordering", () => {
+    const scaffold = "You are a Builder in plain mode.";
+    const owner = { conversationId: "conversation_617", generation: 1 };
+    seedLaunchOutbox("conversation_617", {
+      id: "launch_617",
+      text: "",
+      images: 1,
+      at: 1_000,
+      echoText: scaffold,
+      owner,
+    });
+    retireLaunchOutboxOnAdoption("conversation_617", {
+      id: "launch_617",
+      adoptedAt: 2_000,
+      owner,
+    });
+    enqueueOutbox("conversation_617", {
+      id: "younger-identical",
+      text: scaffold,
+      images: 0,
+      at: 3_000,
+    });
+
+    publishTranscriptEchoes("conversation_617", [{
+      generation: "generation-live",
+      id: "launch-scaffold-row",
+      text: scaffold,
+    }]);
+
+    const queue = readOutbox("conversation_617");
+    expect(queue.find((entry) => entry.id === "launch_617")).toMatchObject({
+      state: "delivering",
+      adoptedAt: 2_000,
+      retiredEchoId: expect.any(String),
+    });
+    expect(visibleOutbox(queue, echoes(scaffold), 2_001, owner).map((entry) => entry.id))
+      .toEqual(["younger-identical"]);
   });
 });
 
