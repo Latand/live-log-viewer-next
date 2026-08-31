@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# The publication gate, before anything becomes public. One run per push
+# instead of per commit keeps the cost where the risk is.
+# Escape hatch: LLV_SKIP_HOOKS=1 git push ...
+set -euo pipefail
+[ "${LLV_SKIP_HOOKS:-0}" = "1" ] && exit 0
+git fetch origin main --quiet 2>/dev/null || true
+base=$(git merge-base HEAD origin/main 2>/dev/null || true)
+if [ -n "$base" ]; then
+  behind=$(git rev-list --count HEAD..origin/main 2>/dev/null || echo 0)
+  if [ "${behind:-0}" -gt 0 ]; then
+    echo "pre-push: this branch is ${behind} commit(s) behind origin/main — the hosted privacy gate scans a symmetric range and WILL flag main-only commits. Merge origin/main into this branch before pushing to spare a red CI run." >&2
+  fi
+  bun scripts/privacy-publication-gate.ts --base "$base" --check-commits || {
+    echo "pre-push: privacy publication gate failed; nothing was pushed." >&2
+    exit 1
+  }
+fi
+exit 0
