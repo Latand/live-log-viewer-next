@@ -1,6 +1,7 @@
 import type { FlowEngine, RoleConfig } from "@/lib/flows/types";
 
 export type PipelineAccess = "read-only" | "read-write";
+export type PipelineSandbox = "full" | "restricted";
 
 export type PipelineRepoPreflightErrorCode =
   | "missing"
@@ -71,6 +72,12 @@ export type PipelineStageInput = {
   model?: string | null;
   effort?: string | null;
   access?: PipelineAccess;
+  /** Host/tool reach is independent from the mutation policy in `access`.
+      Omitted stages run with full host access; restriction is explicit. */
+  sandbox?: PipelineSandbox;
+  /** Repository-relative files or directories a read-only stage may produce.
+      The controller alone records these paths in Git. */
+  outputs?: string[];
   /** The account this stage runs on (#1279). Omitted, the stage resolves its
       account the way every unattended launch does — inside whatever set the
       pipeline's project allows. Named, it is honored only when the project

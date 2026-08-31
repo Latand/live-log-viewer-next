@@ -102,10 +102,10 @@ function githubConfigDirectory(sourceEnv: NodeJS.ProcessEnv): string {
   return path.join(sourceEnv.XDG_CONFIG_HOME || path.join(home, ".config"), "gh");
 }
 
-/** A read-only stage keeps the checkout under Codex's read-only profile while
-    adding one private write root for temporary and test state. */
+/** An explicitly restricted host keeps the checkout under Codex's read-only
+    profile while adding one private write root for temporary and test state. */
 export function materializeStructuredHostAccess(
-  readOnly: boolean,
+  restricted: boolean,
   sourceEnv: NodeJS.ProcessEnv,
   capability: string | null,
   scratchParent?: string,
@@ -114,11 +114,11 @@ export function materializeStructuredHostAccess(
     ...sourceEnv,
     ...(capability ? { LLV_SPAWN_CAPABILITY: capability } : {}),
   };
-  if (!readOnly) {
+  if (!restricted) {
     return {
       env: baseEnv,
       codex: { sandbox: "danger-full-access" },
-      host: {},
+      host: { forwardGitHubConfig: true },
       scratchDirectory: null,
       cleanup: () => {},
     };

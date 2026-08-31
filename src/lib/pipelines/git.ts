@@ -1,6 +1,7 @@
 import type { ExecPort, ExecResult } from "@/lib/workflows/provision";
 
 import type { Pipeline } from "./types";
+import { pathIsDeclaredOutput } from "./stageAccess";
 
 export type PipelineGitResult = { ok: true; sha: string; baseBranch?: string } | { ok: false; error: string };
 export type PipelineBaseResult = { ok: true; baseBranch: string; baseRef: string } | { ok: false; error: string };
@@ -64,16 +65,44 @@ export function provisionPipelineWorktree(pipeline: Pipeline, exec: ExecPort): P
   return { ok: true, sha: pipeline.baseRef, baseBranch: pipeline.baseBranch };
 }
 
-export function commitPipelineStage(pipeline: Pipeline, stageId: string, allowCommit: boolean, exec: ExecPort): PipelineGitResult {
+function changedWorktreePaths(exec: ExecPort, cwd: string): { ok: true; paths: string[] } | { ok: false; error: string } {
+  const tracked = exec("git", ["diff", "--name-only", "--no-renames", "-z", "HEAD", "--"], cwd);
+  if (tracked.code !== 0) return failure("checking tracked stage output paths", tracked);
+  const untracked = exec("git", ["ls-files", "--others", "--exclude-standard", "-z", "--"], cwd);
+  if (untracked.code !== 0) return failure("checking untracked stage output paths", untracked);
+  const paths = `${tracked.stdout}\0${untracked.stdout}`.split("\0").filter(Boolean);
+  return { ok: true, paths: [...new Set(paths)] };
+}
+
+export function commitPipelineStage(
+  pipeline: Pipeline,
+  stageId: string,
+  allowCommit: boolean,
+  exec: ExecPort,
+  declaredOutputs: readonly string[] = [],
+  protectedHead: string | null = allowCommit ? null : pipeline.lastPassedCommit,
+): PipelineGitResult {
   const status = exec("git", ["status", "--porcelain"], pipeline.worktreeDir);
   if (status.code !== 0) return failure("checking the pipeline worktree", status);
-  if (status.stdout.trim()) {
-    if (!allowCommit) return { ok: false, error: `read-only stage ${stageId} modified the pipeline worktree` };
-    const add = exec("git", ["add", "-A"], pipeline.worktreeDir);
-    if (add.code !== 0) return failure("staging the passed stage", add);
-    const commit = exec("git", ["commit", "-m", `pipeline(${pipeline.id}): complete ${stageId}`], pipeline.worktreeDir);
-    if (commit.code !== 0) return failure("committing the passed stage", commit);
+  const initialHead = exec("git", ["rev-parse", "HEAD"], pipeline.worktreeDir);
+  if (initialHead.code !== 0 || !initialHead.stdout.trim()) return failure("recording the passed stage commit", initialHead);
+  if (protectedHead !== null && initialHead.stdout.trim() !== protectedHead) {
+    return { ok: false, error: `read-only stage ${stageId} created a commit` };
   }
+  if (!status.stdout.trim()) return { ok: true, sha: initialHead.stdout.trim() };
+  if (!allowCommit) {
+    if (declaredOutputs.length === 0) return { ok: false, error: `read-only stage ${stageId} modified the pipeline worktree` };
+    const changed = changedWorktreePaths(exec, pipeline.worktreeDir);
+    if (!changed.ok) return changed;
+    const refused = changed.paths.filter((candidate) => !pathIsDeclaredOutput(candidate, declaredOutputs));
+    if (refused.length > 0 || changed.paths.length === 0) {
+      return { ok: false, error: `read-only stage ${stageId} modified undeclared worktree paths` };
+    }
+  }
+  const add = exec("git", ["add", "-A", ...(allowCommit ? [] : ["--", ...declaredOutputs])], pipeline.worktreeDir);
+  if (add.code !== 0) return failure("staging the passed stage", add);
+  const commit = exec("git", ["commit", "-m", `pipeline(${pipeline.id}): complete ${stageId}`], pipeline.worktreeDir);
+  if (commit.code !== 0) return failure("committing the passed stage", commit);
   const head = exec("git", ["rev-parse", "HEAD"], pipeline.worktreeDir);
   if (head.code !== 0 || !head.stdout.trim()) return failure("recording the passed stage commit", head);
   return { ok: true, sha: head.stdout.trim() };

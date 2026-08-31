@@ -24,6 +24,7 @@ Pipelines run a user-defined chain of two to four agent stages in one dedicated 
       "model": "sonnet",
       "effort": "high",
       "access": "read-only",
+      "outputs": ["docs/design/pipeline-support.md"],
       "prompt": "Plan {{task}}. Use the pinned specification.",
       "next": "build"
     },
@@ -41,6 +42,7 @@ Pipelines run a user-defined chain of two to four agent stages in one dedicated 
       "role": { "roleId": "reviewer" },
       "effort": "xhigh",
       "access": "read-only",
+      "sandbox": "restricted",
       "prompt": "Review the full pinned task and acceptance criteria.",
       "next": null
     }
@@ -49,6 +51,10 @@ Pipelines run a user-defined chain of two to four agent stages in one dedicated 
 ```
 
 Stage ids use letters, numbers, `_`, and `-`. They must be unique. Each `next` value names the following array entry; the last stage ends with `null`. A review-loop requires an earlier run session.
+
+`access` controls repository and production mutation policy. It does not remove read tools, network access, SSH, GitHub CLI access, or worktree visibility. Every stage gets full host access by default. Set `"sandbox": "restricted"` on an individual stage to opt into the engine's restrictive sandbox.
+
+A read-only `run` stage may declare repository-relative `outputs`, such as a report or design document. The agent may write those files and scratch space. The controller verifies that the stage created no commit and touched no undeclared worktree path, then records the declared outputs itself. Unsafe paths, traversal, globs, duplicates, and `.git` are rejected at creation. Review-loop findings continue to use the flow's existing artifact and cannot declare worktree outputs.
 
 ### Role references and issue #35
 
@@ -74,7 +80,7 @@ A review-loop stage attaches the latest passed run session to a regular review F
 
 ## Worktree, lineage, and recovery
 
-Creation provisions a sibling worktree on `pipeline/<task-slug>-<id>`. Passed stages commit pending work and advance the saved `lastPassedCommit`. Retry closes an embedded flow, runs `git reset --hard <lastPassedCommit>` plus `git clean -fd` inside the pipeline-owned worktree, and appends a fresh attempt.
+Creation provisions a sibling worktree on `pipeline/<task-slug>-<id>`. Passed read-write stages commit pending work. Passed read-only stages may commit only controller-verified declared outputs. Both advance the saved `lastPassedCommit`. Retry closes an embedded flow, runs `git reset --hard <lastPassedCommit>` plus `git clean -fd` inside the pipeline-owned worktree, and appends a fresh attempt.
 
 The stage transcript artifact is the completion authority. When a durable read of the attempt's transcript shows a native terminal turn whose final assistant message ends with a valid fenced verdict, the attempt settles once: the controller records the verdict, commits any pending work, advances `lastPassedCommit` to the actual stage HEAD, and schedules the next stage — even when the runtime session ledger is still reporting the turn as running, the scanner projection has transiently lost the transcript, or the host is already gone. A transcript whose turn is still open is mid-work: its messages are never verdict candidates, so a recovered idle host cannot terminalize the attempt.
 

@@ -14,9 +14,15 @@ export function renderStagePrompt(
   body = replaceAll(body, "{{prev.output}}", previousOutput);
   let roleScaffold = role.promptScaffold ? replaceAll(role.promptScaffold, "{{task}}", pipeline.task) : null;
   if (roleScaffold) roleScaffold = replaceAll(roleScaffold, "{{prev.output}}", previousOutput);
+  const declaredOutputs = stage.outputs?.length ? stage.outputs.map((output) => `\`${output}\``).join(", ") : null;
   const access = role.access === "read-only"
-    ? "Access: read-only. Inspect and validate freely. Avoid edits, staging, commits, pushes, and other repository mutations."
+    ? declaredOutputs
+      ? `Access: read-only. Inspect and validate freely. You may write only these declared worktree outputs: ${declaredOutputs}. Do not commit, stage, push, edit any other repository path, or mutate production.`
+      : "Access: read-only. Inspect and validate freely. Do not edit, stage, commit, push, or otherwise mutate the repository or production."
     : "Access: read-write. Work only inside this pipeline's dedicated worktree and commit-ready scope.";
+  const hostAccess = stage.sandbox === "restricted"
+    ? "Host access: restricted. This stage runs inside the engine sandbox."
+    : "Host access: full. Network, SSH, GitHub CLI, and the pipeline worktree are available.";
   const roleContext = role.roleId
     ? [
         `Role preset: ${role.roleId} (${role.engine}${role.model ? `/${role.model}` : ""}${role.effort ? `, ${role.effort}` : ""}).`,
@@ -34,6 +40,7 @@ export function renderStagePrompt(
     "",
     ...roleContext,
     access,
+    hostAccess,
     "Pipeline nesting is forbidden. Never create or start another pipeline from this stage.",
     "",
     "Finish the completed turn with one fenced JSON object as the final block. This block is the only completion authority:",

@@ -638,7 +638,7 @@ test("create_pipeline publishes the stage contract in its tool definition", asyn
     const stage = stages?.items?.properties;
 
     expect(Object.keys(stage ?? {}).sort()).toEqual([
-      "access", "account", "effort", "engine", "id", "kind", "model", "next", "onFail", "prompt", "role",
+      "access", "account", "effort", "engine", "id", "kind", "model", "next", "onFail", "outputs", "prompt", "role", "sandbox",
     ]);
     expect(stage?.kind?.enum).toEqual(["run", "review-loop"]);
     expect(stage?.engine?.enum).toEqual(["claude", "codex"]);
@@ -652,6 +652,8 @@ test("create_pipeline publishes the stage contract in its tool definition", asyn
       ["onFail", "may not define one"],
       ["model", "inherit the role default"],
       ["access", "always read-only"],
+      ["sandbox", "Defaults to full host access"],
+      ["outputs", "controller records only these paths"],
       /* #1279: the account a stage may name, and the refusal the project's
          binding answers with when it names one the project does not allow. */
       ["account", "project allows that account"],
@@ -682,6 +684,7 @@ test("create_pipeline admits the stage shapes the engine accepts", () => {
       id: "review-1", kind: "review-loop", "prompt": "Review.", next: null,
       role: { roleId: "reviewer", params: { diffSource: "branch", rounds: 3 } },
       engine: "codex", model: null, effort: null, access: "read-only",
+      sandbox: "restricted", outputs: ["reports/review.md"],
     },
     { id: "build", kind: "run", "prompt": "Implement.", next: "review-1", onFail: { to: "build", maxRounds: 3 }, engine: "claude", model: "opus", effort: "high" },
     /* The engine trims before it checks, so padding it accepts must not be

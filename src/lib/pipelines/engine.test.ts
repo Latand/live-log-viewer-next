@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { Database } from "bun:sqlite";
 
-import type { Flow } from "@/lib/flows/types";
+import type { CreateFlowRequest, Flow } from "@/lib/flows/types";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
 import type { AgentRegistry as AgentRegistryType } from "@/lib/agent/registry";
@@ -340,6 +340,14 @@ test("Claude pipeline roles keep autonomous tool access under read-only scope fe
     promptScaffold: "Read-only architecture contract",
   })).toBe("bypassPermissions");
   expect(pipelineClaudePermissionMode({
+    roleId: "architect",
+    engine: "claude",
+    model: "fable",
+    effort: "high",
+    access: "read-only",
+    promptScaffold: "Read-only architecture contract",
+  }, "restricted")).toBeNull();
+  expect(pipelineClaudePermissionMode({
     roleId: "builder",
     engine: "claude",
     model: "fable",
@@ -368,10 +376,12 @@ function entry(pathname: string): FileEntry {
 function harness() {
   const calls: string[] = [];
   const spawnRoles: Array<Parameters<PipelinePorts["spawnAgent"]>[0]["role"]> = [];
+  const spawnInputs: Array<Parameters<PipelinePorts["spawnAgent"]>[0]> = [];
   const spawnTitles: string[] = [];
   const messages = new Map<string, { text: string; ts: number }>();
   const durableTurns = new Map<string, StageTurnEvidence>();
   const flows = new Map<string, Flow>();
+  const flowRequests: CreateFlowRequest[] = [];
   let spawn = 0;
   let clock = 1_000_000;
   let builderEffort = "medium";
@@ -420,8 +430,10 @@ function harness() {
     },
     spawnReceipt: () => null,
     claimSpawnRetry: () => "claimed",
-    spawnAgent: async ({ role, title, parentPath, clientAttemptId, membership, supersedes }, onReserved) => {
+    spawnAgent: async (input, onReserved) => {
+      const { role, title, parentPath, clientAttemptId, membership, supersedes } = input;
       spawn += 1;
+      spawnInputs.push(structuredClone(input));
       spawnRoles.push(structuredClone(role));
       spawnTitles.push(title);
       calls.push(`spawn:${clientAttemptId}:parent=${parentPath ?? "root"}:supersedes=${supersedes ?? "none"}`);
@@ -459,6 +471,7 @@ function harness() {
       : pathname.includes("stage-1") ? "conversation_stage_1" : pathname.includes("stage-2") ? "conversation_stage_2" : null,
     pipelineAdoptionCandidates: () => [],
     createFlow: async (req) => {
+      flowRequests.push(structuredClone(req));
       calls.push(`flow:${req.implementerPath}:${req.baseRef}:${req.targetSha}:${req.spec}`);
       const flow = { id: `flow-${flows.size + 1}`, implementerPath: req.implementerPath, baseRef: req.baseRef, headRef: req.headRef, targetSha: req.targetSha, state: "waiting_ready", rounds: [], createdAt: new Date(clock).toISOString(), closedAt: null } as unknown as Flow;
       flows.set(flow.id, flow);
@@ -503,6 +516,8 @@ function harness() {
     messages,
     durableTurns,
     flows,
+    flowRequests,
+    spawnInputs,
     spawnRoles,
     spawnTitles,
     finish,
@@ -525,6 +540,103 @@ async function create(ports: PipelinePorts, stages = RUN_STAGES as never) {
   if (!result.pipeline) throw new Error(result.error);
   return result.pipeline;
 }
+
+test("pipeline stage host access defaults to full and restriction is opt-in", async () => {
+  const h = harness();
+  await create(h.ports, [
+    { id: "audit", kind: "run", role: { roleId: "architect" }, access: "read-only", prompt: "Audit", next: null },
+  ] as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+
+  expect(h.spawnInputs[0]).toMatchObject({ sandbox: "full" });
+  expect(h.spawnInputs[0]?.prompt).toContain("Host access: full");
+
+  const restricted = harness();
+  await create(restricted.ports, [
+    { id: "audit", kind: "run", role: { roleId: "architect" }, access: "read-only", sandbox: "restricted", prompt: "Audit", next: null },
+  ] as never);
+  await tickPipelines([], restricted.ports);
+  await tickPipelines([], restricted.ports);
+
+  expect(restricted.spawnInputs[0]).toMatchObject({ sandbox: "restricted" });
+  expect(restricted.spawnInputs[0]?.prompt).toContain("Host access: restricted");
+});
+
+test("read-only stages preserve declared outputs and tell the agent their write boundary", async () => {
+  const h = harness();
+  const pipeline = await create(h.ports, [
+    {
+      id: "audit",
+      kind: "run",
+      role: { roleId: "architect" },
+      access: "read-only",
+      outputs: ["reports/audit.md"],
+      "prompt": "Audit",
+      next: null,
+    },
+  ] as never);
+
+  expect(pipeline.stages[0]?.outputs).toEqual(["reports/audit.md"]);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  expect(h.spawnInputs[0]?.prompt).toContain("reports/audit.md");
+  expect(h.spawnInputs[0]?.prompt).toContain("Do not commit");
+});
+
+test("declared outputs reject traversal, Git metadata, and duplicate normalized paths", async () => {
+  const h = harness();
+  savePipelines([]);
+  const result = await createPipelineFromRequest({
+    task: "Audit",
+    repoDir: "/repo",
+    src: "/codex/creator.jsonl",
+    stages: [{
+      id: "audit",
+      kind: "run",
+      access: "read-only",
+      outputs: ["../outside.md", ".git/config", "reports/*.md", "reports/audit.md", "reports/audit.md/"],
+      "prompt": "Audit",
+      next: null,
+    }],
+  }, h.ports);
+
+  expect(result.status).toBe(400);
+  expect(result.violations?.map((violation) => violation.field)).toEqual([
+    "stages[0].outputs[0]",
+    "stages[0].outputs[1]",
+    "stages[0].outputs[2]",
+    "stages[0].outputs[4]",
+  ]);
+
+  const reviewOutput = await createPipelineFromRequest({
+    task: "Review",
+    repoDir: "/repo",
+    src: "/codex/creator.jsonl",
+    stages: [
+      { id: "build", kind: "run", "prompt": "Build", next: "review" },
+      { id: "review", kind: "review-loop", outputs: ["reports/review.md"], "prompt": "Review", next: null },
+    ],
+  }, h.ports);
+  expect(reviewOutput.violations).toContainEqual(expect.objectContaining({
+    field: "stages[1].outputs",
+    message: "review-loop stage review cannot declare worktree outputs",
+  }));
+});
+
+test("review-loop sandbox restriction reaches its reviewer flow", async () => {
+  const h = harness();
+  await create(h.ports, [
+    { id: "build", kind: "run", access: "read-write", prompt: "Build", next: "review" },
+    { id: "review", kind: "review-loop", access: "read-only", sandbox: "restricted", prompt: "Review", next: null },
+  ] as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+  await tickPipelines([], h.ports);
+
+  expect(h.flowRequests[0]).toMatchObject({ reviewerSandbox: "restricted" });
+});
 
 async function exhaustVerdictRecovery(h: ReturnType<typeof harness>, entries: FileEntry[] = []): Promise<void> {
   h.advanceWallClock(30_000);
@@ -2744,7 +2856,10 @@ function pinStageHead(h: ReturnType<typeof harness>) {
 /** Provision + spawn the first stage, then strip its pane so the attempt is a
     structured host, and pin later HEAD reads to the stage's own commit. */
 async function runningStructuredStage(h: ReturnType<typeof harness>) {
-  const pipeline = await create(h.ports);
+  const pipeline = await create(h.ports, [
+    { id: "plan", kind: "run", role: { roleId: "builder" }, access: "read-write", prompt: "Plan {{task}}", next: "build" },
+    { id: "build", kind: "run", role: { roleId: "builder" }, engine: "codex", access: "read-write", prompt: "Build from {{prev.output}}", next: null },
+  ] as never);
   await tickPipelines([], h.ports);
   await tickPipelines([], h.ports);
   makeStructuredAttempt();
