@@ -7,7 +7,7 @@ import { activeCodexAccountId, listCodexAccounts, type CodexAccount } from "@/li
 import { managedCodexRuntime } from "@/lib/accounts/codexRuntime";
 import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
 import { logQuotaEvent } from "@/lib/events";
-import { fetchClaudeLimits, mapAppServerRateLimits, readCodexLimits } from "@/lib/limits";
+import { fetchClaudeLimits, readCodexLimits } from "@/lib/limits";
 
 import type { DurableQuotaObservation, MigrationEngine } from "./contracts";
 import type { QuotaObservation } from "./quotaPolicy";
@@ -45,13 +45,22 @@ const productionProbe: QuotaProbePort = {
     const candidate = account as CodexAccount;
     try {
       const probe = await managedCodexRuntime().probeQuota(candidate);
+      const limits = await readCodexLimits({
+        account: candidate,
+        liveReader: async () => probe.rateLimits,
+        now: () => now,
+      });
       return {
         engine,
         accountId: candidate.id,
         authenticated: probe.authenticated,
         authCheckedAt: now,
-        limits: mapAppServerRateLimits(probe.rateLimits, Math.floor(now / 1000)),
-        provenance: { source: "live", reason: probe.authenticated ? null : "unsupported-account-type", staleSince: null },
+        limits: limits.data,
+        provenance: {
+          source: limits.source,
+          reason: probe.authenticated ? limits.reason : "unsupported-account-type",
+          staleSince: null,
+        },
         observedAt: now,
         envelope: probe.envelope,
       };

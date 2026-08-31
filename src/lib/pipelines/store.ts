@@ -145,6 +145,19 @@ function isAttempt(value: unknown, index: number): boolean {
     isNullableString(attempt.sessionId) &&
     isNullableString(attempt.agentPath) &&
     isNullableString(attempt.paneId) &&
+    (attempt.accountId === undefined || isNullableString(attempt.accountId)) &&
+    (attempt.usageLimitedAccounts === undefined || (
+      Array.isArray(attempt.usageLimitedAccounts)
+      && attempt.usageLimitedAccounts.every((limited) => (
+        limited !== null
+        && typeof limited === "object"
+        && !Array.isArray(limited)
+        && typeof limited.accountId === "string"
+        && limited.accountId.length > 0
+        && (limited.resetsAt === null || (Number.isSafeInteger(limited.resetsAt) && limited.resetsAt >= 0))
+      ))
+      && new Set(attempt.usageLimitedAccounts.map((limited) => limited.accountId)).size === attempt.usageLimitedAccounts.length
+    )) &&
     isNullableString(attempt.flowId) &&
     (attempt.expectedReviewHeadSha === undefined || isNullableString(attempt.expectedReviewHeadSha)) &&
     (attempt.reviewHeadSha === undefined || isNullableString(attempt.reviewHeadSha)) &&
@@ -565,6 +578,9 @@ function reviveLoadedPipeline(pipeline: Pipeline): Pipeline {
             sessionId: attempt.sessionId ?? null,
             agentPath: attempt.agentPath ?? null,
             paneId: attempt.paneId ?? null,
+            ...(attempt.usageLimitedAccounts
+              ? { usageLimitedAccounts: attempt.usageLimitedAccounts.map((limited) => ({ ...limited })) }
+              : {}),
             flowId: attempt.flowId ?? null,
             expectedReviewHeadSha: attempt.expectedReviewHeadSha ?? null,
             reviewHeadSha: attempt.reviewHeadSha ?? null,

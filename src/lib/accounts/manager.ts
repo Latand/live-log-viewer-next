@@ -409,6 +409,7 @@ export const accountManager: AccountManager = {
          ORDERING, and neither one widens the candidate set. */
       preferredId: request.preferredId ?? agentRegistry().engineRouting(engine).activeAccountId,
       excludedIds: request.excludedIds ?? [],
+      unavailableIds: request.unavailableIds ?? [],
     });
     if (selected.kind !== "available") return selected;
     return { kind: "available", account: contextForSpawn(engine, selected.accountId ?? undefined) };

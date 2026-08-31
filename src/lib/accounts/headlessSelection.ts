@@ -16,7 +16,7 @@ type Capacity =
   | { kind: "unknown" };
 
 function capacity(observation: DurableQuotaObservation | undefined, now: number): Capacity {
-  if (!observation || observation.provenance.source !== "live") return { kind: "unknown" };
+  if (!observation) return { kind: "unknown" };
   const observedAt = Date.parse(observation.observedAt);
   const authCheckedAt = Date.parse(observation.authCheckedAt);
   if (!Number.isFinite(observedAt) || !Number.isFinite(authCheckedAt) || now < observedAt || now < authCheckedAt || now - observedAt > FRESH_QUOTA_MS || now - authCheckedAt > FRESH_QUOTA_MS) {
@@ -29,6 +29,12 @@ function capacity(observation: DurableQuotaObservation | undefined, now: number)
     return { kind: "unknown" };
   }
   const remaining = Math.min(...windows.map((window) => 100 - window.usedPercent));
+  /* Transcript reconciliation is authoritative only for terminal exhaustion.
+     Ordinary transcript percentages remain unknown for automatic admission;
+     a provider rejection at 100% can safely remove that account until reset. */
+  if (observation.provenance.source !== "live" && !(observation.provenance.source === "transcript" && remaining <= 0)) {
+    return { kind: "unknown" };
+  }
   if (remaining > 0) return { kind: "available", remaining };
   const exhaustedWindows = windows.filter((window) => window.usedPercent >= 100);
   const nowSeconds = Math.floor(now / 1_000);
