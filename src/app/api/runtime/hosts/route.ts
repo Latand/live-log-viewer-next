@@ -41,7 +41,7 @@ function killIntent(action: unknown, hours: unknown): StructuredHostKillIntent |
  * here and is refused, which is what keeps the operator's own shells, the
  * viewer, the runtime host and the account-migration workers out of reach — the
  * rail never lists them, so nothing can name them. A listed target still has to
- * pass the process fence (pid plus the start identity observed with it), and
+ * pass the process fence (pid, start identity, and boot epoch), and
  * the promises the gesture makes — a settled turn and a quiet transcript for
  * "kill idle", an untouched orchestrator seat for either bulk kill — are
  * re-read from the registry here rather than trusted from a snapshot that may

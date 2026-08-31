@@ -1,7 +1,12 @@
 import { expect, test } from "bun:test";
 
 import type { DeliveryReceipt, EngineHost, HostState, QueueEntry, RuntimeEvent } from "./engineHost";
-import { StructuredDeliveryQueue, type StructuredDeliveryQueuePort } from "./structuredDeliveryQueue";
+import {
+  CONTROL_SETTLEMENT_WINDOW_MS,
+  StructuredDeliveryQueue,
+  type StructuredDeliveryEffect,
+  type StructuredDeliveryQueuePort,
+} from "./structuredDeliveryQueue";
 import { STRUCTURED_IMAGE_CAPABILITY, structuredContentDigest, type StructuredImageRef } from "./structuredContent";
 
 /**
@@ -77,6 +82,202 @@ test("structured delivery preserves queue order within one conversation", async 
     ["op-two", "delivering"],
     ["op-two", "delivered"],
   ]);
+});
+
+test("one conversation transition failure does not stop another conversation in the same pass", async () => {
+  const sent: string[] = [];
+  let targetRetryRequests = 0;
+  const port: StructuredDeliveryQueuePort = {
+    effects: async () => [
+      {
+        id: "effect:op-failing",
+        kind: "runtime.send",
+        eventSeq: 1,
+        payload: { operationId: "op-failing", conversationId: "conversation-failing", text: "first", policy: "queue" },
+      },
+      {
+        id: "effect:op-delivered",
+        kind: "runtime.send",
+        eventSeq: 2,
+        payload: { operationId: "op-delivered", conversationId: "conversation-delivered", text: "second", policy: "queue" },
+      },
+    ],
+    transition: async (operationId, status) => {
+      if (operationId === "op-failing" && status === "delivering") {
+        throw new Error("transition unavailable");
+      }
+    },
+  };
+  const queue = new StructuredDeliveryQueue(port, () => host(async (entry) => {
+    sent.push(entry.id);
+    return { outcome: "turn-started", turnId: `turn-${entry.id}` };
+  }), undefined, () => {
+    targetRetryRequests += 1;
+  });
+
+  await queue.drain();
+
+  expect(sent).toEqual(["op-delivered"]);
+  expect(queue.lastTargetError("conversation-failing")).toBe("transition unavailable");
+  expect(targetRetryRequests).toBe(1);
+});
+
+test("an all-target failure is left to the pass-level retry path", async () => {
+  let targetRetryRequests = 0;
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => [{
+      id: "effect:op-failing",
+      kind: "runtime.send",
+      eventSeq: 1,
+      payload: { operationId: "op-failing", conversationId: "conversation-failing", text: "first", policy: "queue" },
+    }],
+    transition: async () => { throw new Error("transition unavailable"); },
+  }, () => host(async () => ({ outcome: "turn-started", turnId: "turn-unexpected" })), undefined, () => {
+    targetRetryRequests += 1;
+  });
+
+  await expect(queue.drain()).rejects.toThrow("structured delivery failed for every target: transition unavailable");
+
+  expect(targetRetryRequests).toBe(0);
+});
+
+test("one malformed effect transition failure does not stop another conversation", async () => {
+  const sent: string[] = [];
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => [
+      {
+        id: "effect:op-malformed",
+        kind: "runtime.send",
+        eventSeq: 1,
+        payload: {
+          operationId: "op-malformed",
+          conversationId: "conversation-malformed",
+          text: "malformed",
+          contentDigest: "invalid",
+        },
+      },
+      {
+        id: "effect:op-ready",
+        kind: "runtime.send",
+        eventSeq: 2,
+        payload: { operationId: "op-ready", conversationId: "conversation-ready", text: "ready", policy: "queue" },
+      },
+    ],
+    transition: async (operationId, status) => {
+      if (operationId === "op-malformed" && status === "failed") throw new Error("transition unavailable");
+    },
+  }, () => host(async (entry) => {
+    sent.push(entry.id);
+    return { outcome: "turn-started", turnId: "turn-ready" };
+  }));
+
+  await queue.drain();
+
+  expect(sent).toEqual(["op-ready"]);
+});
+
+test("a malformed effect blocks later delivery only within its conversation", async () => {
+  const sent: string[] = [];
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => [
+      {
+        id: "effect:op-malformed",
+        kind: "runtime.send",
+        eventSeq: 1,
+        payload: {
+          operationId: "op-malformed",
+          conversationId: "conversation-blocked",
+          text: "malformed",
+          contentDigest: "invalid",
+        },
+      },
+      {
+        id: "effect:op-blocked",
+        kind: "runtime.send",
+        eventSeq: 2,
+        payload: { operationId: "op-blocked", conversationId: "conversation-blocked", text: "blocked", policy: "queue" },
+      },
+      {
+        id: "effect:op-ready",
+        kind: "runtime.send",
+        eventSeq: 3,
+        payload: { operationId: "op-ready", conversationId: "conversation-ready", text: "ready", policy: "queue" },
+      },
+    ],
+    transition: async (operationId, status) => {
+      if (operationId === "op-malformed" && status === "failed") throw new Error("transition unavailable");
+    },
+  }, () => host(async (entry) => {
+    sent.push(entry.id);
+    return { outcome: "turn-started", turnId: "turn-ready" };
+  }));
+
+  await queue.drain();
+
+  expect(sent).toEqual(["op-ready"]);
+});
+
+test("an effect-page failure remains available to a queued conversation deadline", async () => {
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => { throw new Error("runtime host request timed out"); },
+    transition: async () => {},
+  }, () => null);
+
+  await expect(queue.drain()).rejects.toThrow("runtime host request timed out");
+
+  expect(queue.lastTargetError("conversation-pending")).toBe("runtime host request timed out");
+});
+
+test("an uncertain operation already held by a pass is skipped", async () => {
+  const transitions: string[] = [];
+  const sent: string[] = [];
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => [{
+      id: "effect:op-uncertain",
+      kind: "runtime.send",
+      eventSeq: 1,
+      payload: { operationId: "op-uncertain", conversationId: "conversation-one", text: "settled", policy: "queue" },
+    }],
+    status: async () => ({ status: "uncertain", reason: "delivery outcome is unverified" }),
+    transition: async (operationId) => {
+      transitions.push(operationId);
+      throw new Error("runtime operation transition is invalid");
+    },
+  }, () => host(async (entry) => {
+    sent.push(entry.id);
+    return { outcome: "turn-started", turnId: "turn-unexpected" };
+  }));
+
+  await queue.drain();
+
+  expect(transitions).toEqual([]);
+  expect(sent).toEqual([]);
+});
+
+test("a dead-host requeue refused after terminal settlement does not fail the pass", async () => {
+  let status = "queued";
+  let recoveries = 0;
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => [{
+      id: "effect:op-settled-during-pass",
+      kind: "runtime.send",
+      eventSeq: 1,
+      payload: { operationId: "op-settled-during-pass", conversationId: "conversation-one", text: "settled", policy: "queue" },
+    }],
+    status: async () => ({ status, reason: status === "uncertain" ? "delivery outcome is unverified" : null }),
+    transition: async (_operationId, next) => {
+      if (next !== "queued") return;
+      status = "uncertain";
+      throw new Error("runtime operation transition is invalid");
+    },
+  }, () => null, undefined, undefined, async () => {
+    recoveries += 1;
+    return false;
+  });
+
+  await queue.drain();
+
+  expect(recoveries).toBe(0);
 });
 
 test("a busy structured turn keeps reconfigure queued and applies it before later messages", async () => {
@@ -1560,6 +1761,223 @@ test("an absent-host kill retries after terminal projection fails", async () => 
     ["kill-retry", "delivering", undefined],
     ["kill-retry", "delivered", undefined],
   ]);
+});
+
+test("a queued hostless kill past its settlement deadline terminalizes with retry guidance", async () => {
+  const transitions: Array<[string, string, string | null | undefined]> = [];
+  let terminations = 0;
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => [{
+      id: "kill-deadline",
+      kind: "runtime.kill",
+      eventSeq: 1,
+      payload: {
+        operationId: "kill-deadline",
+        conversationId: "conversation-one",
+        sessionKey: { engine: "codex", sessionId: "thread-one" },
+      },
+    }],
+    status: async () => ({
+      status: "queued",
+      admittedAt: "2026-07-22T00:00:00.000Z",
+      at: "2026-07-22T00:00:00.000Z",
+    }),
+    transition: async (operationId, status, details) => {
+      transitions.push([operationId, status, details?.reason]);
+    },
+  }, () => null, async () => {
+    terminations += 1;
+    return false;
+  });
+
+  await queue.drain();
+
+  expect(terminations).toBe(0);
+  expect(transitions).toEqual([[
+    "kill-deadline",
+    "failed",
+    "kill control exceeded its 2-minute settlement deadline; retry from the current conversation state",
+  ]]);
+});
+
+test("every accepted runtime control shares the bounded terminal deadline", async () => {
+  const effects: StructuredDeliveryEffect[] = [
+    {
+      id: "answer-deadline",
+      kind: "runtime.answer",
+      eventSeq: 1,
+      payload: {
+        operationId: "answer-deadline",
+        conversationId: "conversation-answer",
+        attentionId: "attention-one",
+        resolution: { kind: "dismiss" },
+      },
+    },
+    {
+      id: "interrupt-deadline",
+      kind: "runtime.interrupt",
+      eventSeq: 2,
+      payload: { operationId: "interrupt-deadline", conversationId: "conversation-interrupt", turnId: "turn-one" },
+    },
+    {
+      id: "kill-deadline-all",
+      kind: "runtime.kill",
+      eventSeq: 3,
+      payload: {
+        operationId: "kill-deadline-all",
+        conversationId: "conversation-kill",
+        sessionKey: { engine: "codex", sessionId: "thread-one" },
+      },
+    },
+    {
+      id: "compact-deadline",
+      kind: "runtime.compact",
+      eventSeq: 4,
+      payload: {
+        operationId: "compact-deadline",
+        conversationId: "conversation-compact",
+        sessionKey: { engine: "claude", sessionId: "session-one" },
+      },
+    },
+    {
+      id: "reconfigure-deadline",
+      kind: "runtime.reconfigure",
+      eventSeq: 5,
+      payload: {
+        operationId: "reconfigure-deadline",
+        conversationId: "conversation-reconfigure",
+        sessionKey: { engine: "codex", sessionId: "thread-two" },
+        model: "gpt-5.6-sol",
+        effort: "high",
+        fast: false,
+      },
+    },
+  ];
+  const transitions: Array<[string, string, string | null | undefined]> = [];
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => effects,
+    status: async () => ({ status: "queued", admittedAt: "2026-07-22T00:00:00.000Z" }),
+    transition: async (operationId, status, details) => {
+      transitions.push([operationId, status, details?.reason]);
+    },
+  }, () => {
+    throw new Error("an expired control must settle before host resolution");
+  });
+
+  await queue.drain();
+
+  expect(transitions.sort(([left], [right]) => left.localeCompare(right))).toEqual([
+    ["answer-deadline", "failed", "answer control exceeded its 2-minute settlement deadline; retry from the current conversation state"],
+    ["compact-deadline", "failed", "compact control exceeded its 2-minute settlement deadline; retry from the current conversation state"],
+    ["interrupt-deadline", "failed", "interrupt control exceeded its 2-minute settlement deadline; retry from the current conversation state"],
+    ["kill-deadline-all", "failed", "kill control exceeded its 2-minute settlement deadline; retry from the current conversation state"],
+    ["reconfigure-deadline", "failed", "reconfigure control exceeded its 2-minute settlement deadline; retry from the current conversation state"],
+  ]);
+});
+
+test("restart recovery terminalizes a past-deadline issued kill without replaying it", async () => {
+  const transitions: Array<[string, string, string | null | undefined]> = [];
+  let terminations = 0;
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => [{
+      id: "kill-issued-before-restart",
+      kind: "runtime.kill",
+      eventSeq: 1,
+      payload: {
+        operationId: "kill-issued-before-restart",
+        conversationId: "conversation-one",
+        sessionKey: { engine: "codex", sessionId: "thread-one" },
+      },
+    }],
+    status: async () => ({
+      status: "delivering",
+      admittedAt: "2026-07-22T00:00:00.000Z",
+    }),
+    transition: async (operationId, status, details) => {
+      transitions.push([operationId, status, details?.reason]);
+    },
+  }, () => host(async () => ({ outcome: "turn-started", turnId: "unexpected" })), async () => {
+    terminations += 1;
+    return true;
+  });
+
+  await queue.drain();
+
+  expect(terminations).toBe(0);
+  expect(transitions).toEqual([[
+    "kill-issued-before-restart",
+    "uncertain",
+    "kill control exceeded its 2-minute settlement deadline after actuation began; verify the conversation state before retrying",
+  ]]);
+});
+
+test("restart recovery rejects a queued branch kill before resolving or terminating its shared host", async () => {
+  const reason = "branch conversations share their root runtime host; dismiss the branch card or terminate the root conversation explicitly";
+  const transitions: Array<[string, string, string | null | undefined]> = [];
+  let hostResolutions = 0;
+  let terminations = 0;
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => [{
+      id: "queued-branch-kill",
+      kind: "runtime.kill",
+      eventSeq: 1,
+      payload: {
+        operationId: "queued-branch-kill",
+        conversationId: "conversation-child",
+        sessionKey: { engine: "codex", sessionId: "thread-child" },
+      },
+    }],
+    status: async () => ({ status: "queued", admittedAt: new Date().toISOString() }),
+    transition: async (operationId, status, details) => {
+      transitions.push([operationId, status, details?.reason]);
+    },
+  }, () => {
+    hostResolutions += 1;
+    return host(async () => ({ outcome: "turn-started", turnId: "unexpected" }));
+  }, async () => {
+    terminations += 1;
+    return true;
+  }, undefined, undefined, undefined, undefined, () => reason);
+
+  await queue.drain();
+
+  expect(hostResolutions).toBe(0);
+  expect(terminations).toBe(0);
+  expect(transitions).toEqual([["queued-branch-kill", "failed", reason]]);
+});
+
+test("a queued hostless kill schedules a drain that will cross its settlement deadline", async () => {
+  let retries = 0;
+  let terminations = 0;
+  const transitions: string[] = [];
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => [{
+      id: "kill-awaiting-deadline",
+      kind: "runtime.kill",
+      eventSeq: 1,
+      payload: {
+        operationId: "kill-awaiting-deadline",
+        conversationId: "conversation-one",
+        sessionKey: { engine: "codex", sessionId: "thread-one" },
+      },
+    }],
+    status: async () => ({
+      status: "queued",
+      admittedAt: new Date(Date.now() - CONTROL_SETTLEMENT_WINDOW_MS + 30_000).toISOString(),
+    }),
+    transition: async (_operationId, status) => { transitions.push(status); },
+  }, () => null, async () => {
+    terminations += 1;
+    return false;
+  }, () => {
+    retries += 1;
+  });
+
+  await queue.drain();
+
+  expect(terminations).toBe(1);
+  expect(transitions).toEqual([]);
+  expect(retries).toBe(1);
 });
 
 test("an active-host kill retries after terminal projection fails", async () => {

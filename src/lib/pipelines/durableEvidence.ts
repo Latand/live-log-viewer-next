@@ -20,6 +20,9 @@ type RecordLike = Record<string, unknown>;
 export type StageTurnEvidence = {
   turn: "terminal" | "busy" | "unknown";
   message: { text: string; ts: number } | null;
+  /** The verified read covers the complete artifact and contains only Codex's
+      launch metadata record. */
+  launchOnly?: boolean;
   /** The provider's own end-of-turn notice, when the record that closed the
       turn is one: a session or model limit, an expired credential, a refusal —
       a message the CLI writes *instead of* the agent's answer, so the turn
@@ -108,6 +111,10 @@ export async function durableStageTurnEvidence(
   return {
     turn: turn.state === "terminal" ? "terminal" : turn.state === "busy" ? "busy" : "unknown",
     message,
+    launchOnly: codex
+      && !read.prefixTruncated
+      && read.records.length === 1
+      && read.records[0]?.type === "session_meta",
     /* Gated on the same turn reading the rest of the engine trusts: a provider
        error the CLI may still retry inside an open turn keeps the busy
        projection (#516), and so never reads as the end of the turn here. */

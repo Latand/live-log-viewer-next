@@ -4,7 +4,9 @@ import path from "node:path";
 
 import { freshSpecFor } from "@/lib/agent/cli";
 import { agentRegistry } from "@/lib/agent/registry";
+import type { ProjectSpawnResolution } from "@/lib/accounts/contracts";
 import { accountManager } from "@/lib/accounts/manager";
+import { projectAccountRefusalDetail } from "@/lib/accounts/projectBindings";
 import { resolveSpawnedTranscriptPath } from "@/lib/agent/spawnedTranscript";
 import { headCwd } from "@/lib/agent/transcript";
 import { closeFlow, createFlowFromRequest, patchFlow as patchReviewFlow } from "@/lib/flows/commands";
@@ -246,8 +248,32 @@ async function ensureStageAgent(
   persistCheckpoint: () => void,
 ): Promise<"spawning" | "waiting" | "ready"> {
   if (!run.startedAt) {
+    /* #1279: a workflow stage is a launch of the workflow's project's work, so
+       it draws its account from that project's allowed set like every other
+       one. An unbound project takes the branch this always took — the engine's
+       active account — and a bound project whose allowed accounts are all out
+       of capacity PARKS with the reason, rather than reaching for the idle
+       account it forbids. Resolved before `startedAt` is stamped so a parked
+       stage re-enters this branch cleanly once the operator answers. */
+    if (!run.accountId) {
+      /* A damaged binding record throws out of the resolution rather than
+         answering, and that refusal belongs to THIS stage: parked with the
+         reason, like every other one, instead of thrown into the tick that
+         drives every other workflow. */
+      let resolution: ProjectSpawnResolution;
+      try {
+        resolution = accountManager.resolveProjectSpawn(role.engine, { project: wf.project });
+      } catch (error) {
+        park(wf, error instanceof Error ? error.message : String(error));
+        return "waiting";
+      }
+      if (resolution.kind !== "available") {
+        park(wf, projectAccountRefusalDetail(resolution, role.engine, wf.project));
+        return "waiting";
+      }
+      run.accountId = resolution.account.accountId;
+    }
     run.startedAt = ports.now();
-    if (!run.accountId) run.accountId = accountManager.resolveSpawn(role.engine).accountId;
     spawnsThisProcess.add(spawnKey(wf, run));
     persistCheckpoint();
     try {

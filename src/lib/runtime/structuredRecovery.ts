@@ -1,12 +1,13 @@
 import type { AccountContext } from "@/lib/accounts/contracts";
-import { accountManager } from "@/lib/accounts/manager";
+import { conversationProjectKey } from "@/lib/accounts/conversationProject";
+import { resolveContinuityAccount } from "@/lib/accounts/manager";
 import { emptyLaunchProfile, type ViewerConversationId } from "@/lib/accounts/migration/contracts";
 import { requestAccountMigrationTick } from "@/lib/accounts/migration/controllerSignal";
 import type { ResumeSpec } from "@/lib/agent/cli";
 import { agentRegistry, type AgentRegistry, type ProcessIdentity, type RegistryFile } from "@/lib/agent/registry";
 import { sessionKeyId, type SessionKey } from "@/lib/agent/sessionKey";
 import { cachedLimitsProvenance } from "@/lib/limits";
-import { procBackend } from "@/lib/proc";
+import { captureProcessIdentity, processIdentityMayOwn } from "@/lib/processIdentity";
 import { derivedSpawnTitle, durableSemanticTitle } from "@/lib/title";
 
 import { accountPark, type AccountPark } from "./accountPark";
@@ -54,9 +55,9 @@ export interface StructuredRecoveryDependencies {
   registry?: AgentRegistry;
   client?: RuntimeHostClient | null;
   transport?: () => "tmux" | "structured";
-  resolveAccount?: (engine: "claude" | "codex", accountId: string | null) => AccountContext;
+  resolveAccount?: (engine: "claude" | "codex", accountId: string | null, project: string | null) => AccountContext;
   spawn?: typeof spawnStructuredConversation;
-  processIdentity?: () => { pid: number; startIdentity: string | null };
+  processIdentity?: () => ProcessIdentity;
   requestDeliveryDrain?: () => void;
   park?: StructuredHostParkResolver;
   ownership?: {
@@ -80,6 +81,9 @@ interface RecoveryCandidate {
   key: SessionKey;
   path: string;
   accountId: string | null;
+  /** The project this conversation's work belongs to, so a resume that has to
+      CHOOSE an account draws from that project's pool (#1279). */
+  project: string | null;
   parentConversationId: ViewerConversationId | null;
   spec: ResumeSpec;
   /** The registered host is process-alive, claim-owned and not terminal. */
@@ -91,9 +95,7 @@ interface RecoveryCandidate {
 }
 
 export function structuredHostProcessAlive(identity: ProcessIdentity | null): boolean {
-  if (!identity || !Number.isInteger(identity.pid) || identity.pid <= 0) return false;
-  if (!procBackend.pidAlive(identity.pid)) return false;
-  return identity.startIdentity === null || procBackend.processIdentity(identity.pid) === identity.startIdentity;
+  return identity ? processIdentityMayOwn(identity) : false;
 }
 
 const recoveryStore = globalThis as typeof globalThis & {
@@ -165,6 +167,13 @@ function candidateFor(
     key,
     path: generation.path,
     accountId: generation.accountId ?? entry?.accountId ?? null,
+    /* A getter, because deriving a project can read the disk and most calls
+       here never reach the account resolution — a live host is handed straight
+       back. The MERGED profile, not the generation's own: a conversation the
+       Viewer ADOPTED rather than spawned carries an empty generation profile,
+       and the registry entry's durable one, folded in above, is the only thing
+       left naming a project or a cwd to derive one from. */
+    get project() { return conversationProjectKey(conversation.projectOwnership, profile); },
     parentConversationId: parentConversationId === conversation.id ? null : parentConversationId,
     spec: {
       command: "",
@@ -204,10 +213,7 @@ async function recoverCandidate(
   const assertOwnership = async (): Promise<void> => {
     if (ownership && !await ownership.owns()) throw new StructuredRecoverySupersededError();
   };
-  const owner = (dependencies.processIdentity ?? (() => ({
-    pid: process.pid,
-    startIdentity: procBackend.processIdentity(process.pid),
-  })))();
+  const owner = (dependencies.processIdentity ?? (() => captureProcessIdentity(process.pid)))();
   return registry.withOperationLock(candidate.key, owner, async () => {
     await assertOwnership();
     const park = dependencies.park ?? defaultParkResolver;
@@ -236,7 +242,17 @@ async function recoverCandidate(
     }
     const client = dependencies.client === undefined ? runtimeHostClient() : dependencies.client;
     if (!client) throw new Error("structured recovery runtime host is unavailable");
-    const account = (dependencies.resolveAccount ?? accountManager.resolveSpawn)(current.engine, current.accountId);
+    /* #1279: a resume whose conversation RECORDS an account continues on it —
+       the session lives in that home and nothing is being chosen. A resume of a
+       conversation that records none was choosing one, silently, from engine
+       routing; that half now asks the project's pool and its capacity like
+       every other automatic pick, and refuses before the spawn reservation
+       exists when the binding record cannot be read. */
+    const account = (dependencies.resolveAccount ?? resolveContinuityAccount)(
+      current.engine,
+      current.accountId,
+      current.project,
+    );
     const begun = registry.beginSpawnRequest({
       engine: current.engine,
       cwd: current.spec.cwd,

@@ -51,6 +51,11 @@ export interface OutboxEntry {
   /** Assistant output began for the turn created by this submission. This is
       causal delivery proof and permanently retires the optimistic bubble. */
   responseStartedAt?: number;
+  /** The server attached this launch to its materialized live transcript. That
+      conversation replaces the optimistic launch bubble even when an image-only
+      prompt has no text echo to match. The entry stays in recent history so a
+      later text echo can still consume its exact occurrence. */
+  adoptedAt?: number;
   error?: string;
   /** The attachment bytes of this submission did not survive a page refresh
       (previews are memory-only). The entry is held back rather than delivered
@@ -59,8 +64,9 @@ export interface OutboxEntry {
   /** The initial launch prompt (issue #561/#569): the SPAWN delivers it, not the
       composer. It renders as the conversation's first optimistic user bubble but
       is never dispatched by the composer's queue and never blocks the serial
-      drain of the operator's follow-up messages. It retires on its transcript
-      echo like any other bubble. */
+      drain of the operator's follow-up messages. Live transcript adoption
+      retires it; an earlier transcript echo retires it through the ordinary
+      occurrence path. */
   launchOwned?: true;
   /** The canonical text this bubble's transcript echo will carry (issue #615),
       when it differs from the displayed {@link text}. A role launch DISPLAYS the
@@ -266,7 +272,7 @@ const OCCURRENCE_COMPLETED_LIMIT = ECHO_LEDGER_LIMIT;
 const occurrenceTombstones = new Map<string, readonly PersistedOccurrenceTombstone[]>();
 const EMPTY_OCCURRENCE_TOMBSTONES: readonly PersistedOccurrenceTombstone[] = [];
 
-type CurrentLaunchTerminalReason = "response-started" | "delivered-ttl";
+type CurrentLaunchTerminalReason = "live-adopted" | "response-started" | "delivered-ttl";
 
 interface PersistedCurrentLaunch {
   id: string;
@@ -339,7 +345,7 @@ function persistedQueue(cardId: string): readonly OutboxEntry[] {
       else delete counted.files;
       /* The initial launch prompt is owned by the spawn, not the composer: it
          survives a refresh exactly as it was (never re-dispatched, never
-         re-queued) and retires on its transcript echo. */
+         re-queued) until its transcript echo or live adoption retires it. */
       if (entry.launchOwned) return counted;
       const unsettled = entry.state === "delivering" || entry.state === "queued";
       /* A `delivering` entry recorded before a refresh has no owner in this
@@ -382,6 +388,7 @@ function isPersistedCurrentLaunch(value: unknown): value is PersistedCurrentLaun
     && (raw.retiredEchoId === undefined || typeof raw.retiredEchoId === "string")
     && (raw.retiredAt === undefined || typeof raw.retiredAt === "number")
     && (raw.terminalReason === undefined
+      || raw.terminalReason === "live-adopted"
       || raw.terminalReason === "response-started"
       || raw.terminalReason === "delivered-ttl");
 }
@@ -469,9 +476,16 @@ function terminalReasonForLaunch(
 function recordCurrentLaunchEntry(cardId: string, entry: OutboxEntry, nowMs = Date.now()): void {
   if (!entry.launchOwned) return;
   const settledAt = entry.settledAt ?? (entry.state === "delivered" ? entry.at : undefined);
-  const terminalReason = entry.responseStartedAt !== undefined
-    ? "response-started"
-    : terminalReasonForLaunch({ settledAt }, nowMs);
+  let terminalReason = terminalReasonForLaunch({ settledAt }, nowMs);
+  let retiredAt = terminalReason ? (settledAt ?? entry.at) + OUTBOX_DELIVERED_TTL_MS : undefined;
+  if (entry.responseStartedAt !== undefined) {
+    terminalReason = "response-started";
+    retiredAt = entry.responseStartedAt;
+  }
+  if (entry.adoptedAt !== undefined) {
+    terminalReason = "live-adopted";
+    retiredAt = entry.adoptedAt;
+  }
   const candidate = {
     id: entry.id,
     at: entry.at,
@@ -481,9 +495,7 @@ function recordCurrentLaunchEntry(cardId: string, entry: OutboxEntry, nowMs = Da
     recordCurrentLaunchRetirement(cardId, {
       ...candidate,
       terminalReason,
-      retiredAt: terminalReason === "response-started"
-        ? entry.responseStartedAt
-        : (settledAt ?? entry.at) + OUTBOX_DELIVERED_TTL_MS,
+      ...(retiredAt !== undefined ? { retiredAt } : {}),
     });
     return;
   }
@@ -589,7 +601,12 @@ function mergeOccurrenceTombstones(
 }
 
 function occurrenceTombstone(entry: OutboxEntry): PersistedOccurrenceTombstone | null {
-  if (entry.state !== "delivered" && entry.responseStartedAt === undefined && !entry.retiredEchoId) return null;
+  if (
+    entry.state !== "delivered"
+    && entry.responseStartedAt === undefined
+    && entry.adoptedAt === undefined
+    && !entry.retiredEchoId
+  ) return null;
   const key = echoKey(entry.echoText ?? entry.text);
   if (!key) return null;
   return {
@@ -670,7 +687,6 @@ export function seedLaunchOutbox(
     error?: string;
   },
 ): void {
-  if (!entry.text.trim() && !entry.images) return;
   const currentLaunch = readCurrentLaunch(cardId);
   if (currentLaunch?.id === entry.id) {
     const terminalReason = terminalReasonForLaunch(currentLaunch, Date.now());
@@ -722,6 +738,10 @@ export function seedLaunchOutbox(
     }
     return;
   }
+  /* An adopted live fact can carry only `echoText`: its display fields have
+     already retired because the transcript owns the visible row. Such a fact
+     may reconcile an existing raw 202 seed and must never create an empty row. */
+  if (!entry.text.trim() && !entry.images) return;
   /* Recurring LogFeed projections can outlive the recent queue entry. Durable
      retirement under this submission id keeps the compacted launch terminal
      across refresh and identity adoption. */
@@ -879,6 +899,37 @@ export function settleLaunchOutboxFailed(
   };
   recordCurrentLaunchEntry(cardId, updated);
   write(cardId, queue.map((item) => (item.id === launch.id ? updated : item)));
+}
+
+/** Retire the optimistic launch bubble when its live transcript is adopted.
+    Adoption is the causal hand-off from the starting window to the materialized
+    conversation, including image-only launches whose transcript has no text
+    echo. The terminal row stays in recent history to reserve any later matching
+    scaffold echo ahead of younger identical submissions. */
+export function retireLaunchOutboxOnAdoption(
+  cardId: string,
+  launch: { id: string; adoptedAt: number; owner: OutboxOwner },
+): void {
+  const current = readCurrentLaunch(cardId);
+  if (current && current.id !== launch.id) return;
+  const queue = readOutbox(cardId);
+  const existing = queue.find((item) => item.id === launch.id);
+  const at = current?.at ?? existing?.at ?? launch.adoptedAt;
+  if (!current?.retiredEchoId && !current?.terminalReason) {
+    recordCurrentLaunchRetirement(cardId, {
+      id: launch.id,
+      at,
+      terminalReason: "live-adopted",
+      retiredAt: launch.adoptedAt,
+    });
+  }
+  if (!existing || !existing.launchOwned) return;
+  const adopted: OutboxEntry = {
+    ...existing,
+    owner: launch.owner,
+    adoptedAt: existing.adoptedAt ?? launch.adoptedAt,
+  };
+  write(cardId, queue.map((item) => (item.id === launch.id ? adopted : item)));
 }
 
 /**
@@ -1310,6 +1361,7 @@ export function visibleOutbox(
       consumed.set(key, floor + 1);
       continue;
     }
+    if (entry.adoptedAt !== undefined) continue;
     if (entry.responseStartedAt !== undefined) continue;
     if (entry.state === "delivered") {
       const settledAt = entry.settledAt ?? entry.at;

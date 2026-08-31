@@ -4,6 +4,13 @@ import { agentRegistry, type ProcessIdentity, type RegistryFile } from "@/lib/ag
 import { sessionKeyId, type SessionKey } from "@/lib/agent/sessionKey";
 import { procBackend } from "@/lib/proc";
 import { descendantPids } from "@/lib/proc/memory";
+import {
+  captureProcessIdentity,
+  processIdentityStatus,
+  sameRecordedProcessIdentity,
+  systemBootEpoch,
+  type ProcessIdentityProbe,
+} from "@/lib/processIdentity";
 import { RESOURCE_STRUCTURED_HOST_LIMIT } from "@/lib/types";
 import type { StructuredHostKillRef, StructuredHostRecord } from "@/lib/resources";
 
@@ -51,6 +58,7 @@ export function readStructuredHostRecords(dependencies: {
       sessionId: entry.key.sessionId,
       pid: process.pid,
       startIdentity: process.startIdentity,
+      bootEpoch: process.bootEpoch ?? null,
       cwd: entry.cwd || generation?.launchProfile.cwd || "",
       path: entry.artifactPath || null,
       conversationId: conversation?.id ?? null,
@@ -102,11 +110,7 @@ function currentStructuredHostState(
   const file = (dependencies.snapshot ?? (() => agentRegistry().readOnlySnapshot()))();
   const entry = file.entries[sessionKeyId(key)] ?? null;
   const process = entry?.structuredHost?.process ?? null;
-  if (process === null
-    || process.pid !== expected.pid) return null;
-  const currentIdentity = process.startIdentity
-    ?? (dependencies.processIdentity ?? ((pid: number) => procBackend.processIdentity(pid)))(process.pid);
-  if (currentIdentity !== expected.startIdentity) return null;
+  if (process === null || !sameRecordedProcessIdentity(process, expected)) return null;
   const conversation = Object.values(file.conversations)
     .find((candidate) => candidate.generations.some((generation) => generation.id === key.sessionId)) ?? null;
   if (!entry && !conversation) return null;
@@ -148,7 +152,7 @@ export function structuredHostKillRefusal(
     ? null
     : currentStructuredHostState(
         { engine: ref.engine, sessionId: ref.sessionId },
-        { pid: ref.pid, startIdentity: ref.startIdentity },
+        { pid: ref.pid, startIdentity: ref.startIdentity, bootEpoch: ref.bootEpoch },
         dependencies,
       );
   /* A seat either side of the snapshot counts: one taken since collection is
@@ -203,6 +207,7 @@ export type StructuredHostTerminationOutcome =
 
 export interface StructuredHostTerminationDependencies {
   processIdentity?(pid: number): string | null;
+  bootEpoch?(): string | null;
   pidAlive?(pid: number): boolean;
   ppidMap?(): Map<number, number>;
   processGroupId?(pid: number): number | null;
@@ -271,6 +276,8 @@ export async function terminateStructuredHostTree(
 ): Promise<StructuredHostTerminationOutcome> {
   const identityOf = dependencies.processIdentity ?? ((pid: number) => procBackend.processIdentity(pid));
   const alive = dependencies.pidAlive ?? ((pid: number) => procBackend.pidAlive(pid));
+  const bootEpoch = dependencies.bootEpoch ?? systemBootEpoch;
+  const identityProbe: ProcessIdentityProbe = { processIdentity: identityOf, pidAlive: alive, bootEpoch };
   const ppids = dependencies.ppidMap ?? (() => procBackend.ppidMap());
   const groupOf = dependencies.processGroupId ?? linuxProcessGroupId;
   const signal = dependencies.signal ?? ((pid: number, value: NodeJS.Signals) => { process.kill(pid, value); });
@@ -286,20 +293,26 @@ export async function terminateStructuredHostTree(
   if (typeof ref.startIdentity !== "string" || ref.startIdentity.length === 0) {
     return { ok: false, status: 409, error: "host process identity is unknown — refresh the resource list", remaining: [] };
   }
+  if (typeof ref.bootEpoch !== "string" || ref.bootEpoch.length === 0) {
+    return { ok: false, status: 409, error: "host boot epoch is unknown — refresh the resource list", remaining: [] };
+  }
   if ((dependencies.protectedPids ?? ownAncestry)().has(pid)) {
     return { ok: false, status: 403, error: "this pid belongs to the viewer's own process chain", remaining: [] };
   }
   const key: SessionKey | null = ref.sessionId ? { engine: ref.engine, sessionId: ref.sessionId } : null;
-  const expected: ProcessIdentity = { pid, startIdentity: ref.startIdentity };
+  const expected: ProcessIdentity = { pid, startIdentity: ref.startIdentity, bootEpoch: ref.bootEpoch };
 
-  const observed = identityOf(pid);
-  if (observed === null && !alive(pid)) {
+  const initialStatus = processIdentityStatus(expected, identityProbe);
+  if (initialStatus === "dead" && !alive(pid)) {
     if (key) retire(key, expected);
     return { ok: true, via: "already-exited", pids: [] };
   }
+  if (initialStatus === "unverified") {
+    return { ok: false, status: 409, error: "host process identity cannot be verified — refresh the resource list", remaining: [] };
+  }
   /* The fence the whole endpoint rests on: this pid must still be the process
      the snapshot listed, or the kernel handed it to something else. */
-  if (observed !== ref.startIdentity) {
+  if (initialStatus === "dead") {
     return { ok: false, status: 409, error: "host has changed — refresh the resource list", remaining: [], stale: true };
   }
 
@@ -321,7 +334,7 @@ export async function terminateStructuredHostTree(
       }
     }
   }
-  const identities = new Map<number, string>();
+  const identities = new Map<number, ProcessIdentity>();
   for (const candidate of tree) {
     const candidateIdentity = identityOf(candidate);
     if (candidateIdentity !== null) {
@@ -334,7 +347,7 @@ export async function terminateStructuredHostTree(
           stale: true,
         };
       }
-      identities.set(candidate, candidateIdentity);
+      identities.set(candidate, captureProcessIdentity(candidate, identityProbe, candidateIdentity));
       continue;
     }
     if (alive(candidate)) {
@@ -348,14 +361,18 @@ export async function terminateStructuredHostTree(
   }
   const identityRefusal = (): Extract<StructuredHostTerminationOutcome, { ok: false }> | null => {
     for (const [candidate, expectedIdentity] of identities) {
-      const currentIdentity = identityOf(candidate);
-      if (currentIdentity === expectedIdentity || (currentIdentity === null && !alive(candidate))) continue;
+      const status = processIdentityStatus(expectedIdentity, identityProbe);
+      if (status === "alive" || (status === "dead" && !alive(candidate))) continue;
       return {
         ok: false,
         status: 409,
-        error: candidate === pid
-          ? "host process identity changed before signalling — refresh the resource list"
-          : `process ${candidate} identity changed before signalling — refresh the resource list`,
+        error: status === "unverified"
+          ? candidate === pid
+            ? "host process identity cannot be verified before signalling — refresh the resource list"
+            : `process ${candidate} identity cannot be verified before signalling — refresh the resource list`
+          : candidate === pid
+            ? "host process identity changed before signalling — refresh the resource list"
+            : `process ${candidate} identity changed before signalling — refresh the resource list`,
         remaining: [candidate],
         ...(candidate === pid ? { stale: true as const } : {}),
       };

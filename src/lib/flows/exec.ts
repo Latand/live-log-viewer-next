@@ -295,7 +295,9 @@ export function reviewerCommand(
     const args = [
       "-p",
       reviewRequest,
-      "--dangerously-skip-permissions",
+      ...(options.sandbox === "read-only"
+        ? ["--permission-mode", "plan", "--disallowedTools", "Edit,Write,NotebookEdit"]
+        : ["--dangerously-skip-permissions"]),
       "--session-id",
       sessionId,
     ];
@@ -418,6 +420,7 @@ export function startHeadlessReview(
   claudeAccount?: HeadlessClaudeAccount | null,
   runtime?: HeadlessReviewRuntime,
   spawnCapability?: string,
+  sandbox: "bypass" | "read-only" = "bypass",
 ): HeadlessReviewLaunch {
   const key = runKey(flowId, round);
   const idle: HeadlessReviewLaunch = { pid: null, identity: null, sessionId: null, reviewerPath: null };
@@ -425,7 +428,7 @@ export function startHeadlessReview(
   const outputPath = outputPathFor(flowId, round);
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
   clearHeadlessReviewArtifacts(flowId, round);
-  const built = reviewerCommand(role, reviewRequest, outputPath, cwd, codexAccount, claudeAccount, spawnCapability);
+  const built = reviewerCommand(role, reviewRequest, outputPath, cwd, codexAccount, claudeAccount, spawnCapability, { sandbox });
   let completionSignaled = false;
   const signalCompletion = () => {
     if (completionSignaled) return;

@@ -16,6 +16,41 @@ function writeTranscript(name: string, records: Record<string, unknown>[]): stri
 
 const PASS_TEXT = "done\n\n```json\n{\"status\":\"pass\"}\n```";
 
+test("a one-record Codex launch transcript reports no agent progress (#1325)", async () => {
+  const file = writeTranscript("codex-launch-only.jsonl", [
+    { type: "session_meta", timestamp: "2026-08-31T09:00:00.000Z", payload: { originator: "synthetic" } },
+  ]);
+
+  expect(await durableStageTurnEvidence("codex", file)).toMatchObject({
+    launchOnly: true,
+    message: null,
+  });
+});
+
+test("a one-record Codex user event reports transcript progress (#1325)", async () => {
+  const file = writeTranscript("codex-user-only.jsonl", [
+    { type: "event_msg", timestamp: "2026-08-31T09:00:01.000Z", payload: { type: "user_message", message: "begin" } },
+  ]);
+
+  expect(await durableStageTurnEvidence("codex", file)).toMatchObject({
+    launchOnly: false,
+  });
+});
+
+test("a truncated tail ending in session metadata does not grant launch-only evidence (#1325)", async () => {
+  const file = path.join(dir, "codex-truncated-before-session-meta.jsonl");
+  const earlierProgress = JSON.stringify({
+    type: "event_msg",
+    payload: { type: "agent_reasoning", text: "x".repeat(140_000) },
+  });
+  const replayedMetadata = JSON.stringify({ type: "session_meta", payload: { originator: "synthetic" } });
+  fs.writeFileSync(file, `${earlierProgress}\n${replayedMetadata}\n`, "utf8");
+
+  expect(await durableStageTurnEvidence("codex", file)).toMatchObject({
+    launchOnly: false,
+  });
+});
+
 test("a Claude end-turn transcript yields terminal evidence with its final message", async () => {
   const file = writeTranscript("claude-terminal.jsonl", [
     { type: "user", timestamp: "2026-07-18T10:00:00.000Z", message: { role: "user", content: "prompt" } },

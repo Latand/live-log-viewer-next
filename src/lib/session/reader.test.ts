@@ -79,10 +79,42 @@ describe("readSession", () => {
     const pathname = writeJsonl("codex-reasoning.jsonl", [
       { type: "event_msg", timestamp: "t1", payload: { type: "reasoning", text: "legacy reasoning" } },
       { type: "event_msg", timestamp: "t2", payload: { type: "agent_reasoning", text: "current reasoning" } },
+      { type: "response_item", timestamp: "t3", payload: { type: "reasoning", summary: [{ type: "summary_text", text: "response reasoning" }] } },
     ]);
     const result = readSession(pathname, "codex");
-    expect(result.reasoning.map((item) => item.text)).toEqual(["legacy reasoning", "current reasoning"]);
+    expect(result.reasoning.map((item) => item.text)).toEqual(["legacy reasoning", "current reasoning", "response reasoning"]);
     expect(result.traces).toEqual([]);
+  });
+
+  test("normalizes Codex 0.151 ThreadItems without serialized item traces", () => {
+    const fixture = path.join(import.meta.dir, "../../components/feed/fixtures/codex-thread-items-0.151.jsonl");
+    const result = readSession(fixture, "codex");
+
+    expect(result.messages.map((item) => item.text)).toEqual(["Check the widget.", "The widget is ready."]);
+    expect(result.reasoning.map((item) => item.text)).toEqual(["Need a focused check.\nInspect the parser seam."]);
+    expect(result.tools.map((item) => item.name)).toEqual([
+      "FileChange",
+      "fileChange",
+      "commandExecution",
+      "functionCallOutput",
+      "mcpToolCall",
+      "dynamicToolCall",
+      "collabAgentToolCall",
+      "webSearch",
+      "imageView",
+      "imageGeneration",
+    ]);
+    expect(result.traces.map((item) => item.name)).toEqual([
+      "hookPrompt",
+      "plan",
+      "subAgentActivity",
+      "sleep",
+      "enteredReviewMode",
+      "exitedReviewMode",
+      "contextCompaction",
+    ]);
+    expect(result.tools.find((item) => item.name === "dynamicToolCall")?.text).toContain("Result: 6");
+    expect([...result.tools, ...result.traces].some((item) => item.text.includes("unified_diff") || item.text.includes("item_completed"))).toBe(false);
   });
 
   test("reads modern Codex response-item text and stops authorship scanning at the first user record", () => {

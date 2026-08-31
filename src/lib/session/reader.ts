@@ -191,6 +191,91 @@ function codexMessageFromPayload(payload: Record<string, unknown>): { role: Sess
   return null;
 }
 
+const CODEX_THREAD_ITEM_TYPES = new Set([
+  "usermessage",
+  "hookprompt",
+  "agentmessage",
+  "functioncalloutput",
+  "plan",
+  "reasoning",
+  "commandexecution",
+  "filechange",
+  "mcptoolcall",
+  "dynamictoolcall",
+  "collabagenttoolcall",
+  "subagentactivity",
+  "websearch",
+  "imageview",
+  "sleep",
+  "imagegeneration",
+  "enteredreviewmode",
+  "exitedreviewmode",
+  "contextcompaction",
+]);
+
+function codexThreadItemKind(value: unknown): string {
+  return str(value).replace(/[_-]/g, "").toLowerCase();
+}
+
+function stringList(value: unknown): string {
+  if (!Array.isArray(value)) return "";
+  return value.map((item) => typeof item === "string" ? item : str(rec(item).text)).filter((item) => item.trim()).join("\n");
+}
+
+function compactRecordText(value: unknown, max = 2_000): string {
+  if (typeof value === "string") return value.replace(/\s+/g, " ").trim().slice(0, max);
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (Array.isArray(value)) return value.map((item) => compactRecordText(item, max)).filter(Boolean).join("\n").slice(0, max);
+  const record = rec(value);
+  const content = textFromContent(record.content);
+  if (content) return content.slice(0, max);
+  const preferred = [record.summary, record.message, record.text, record.detail, record.query, record.path, record.result, record.status]
+    .find((item) => typeof item === "string" && item.trim());
+  if (typeof preferred === "string") return preferred.replace(/\s+/g, " ").trim().slice(0, max);
+  return Object.keys(record).filter((key) => !["type", "id"].includes(key)).slice(0, 8).join(", ").slice(0, max);
+}
+
+function codexFileChangeText(changes: unknown): string {
+  if (Array.isArray(changes)) {
+    return changes.flatMap((value) => {
+      const change = rec(value);
+      const path = str(change.path);
+      const kind = str(rec(change.kind).type) || str(change.type) || "change";
+      return path ? [`${kind} ${path}`] : [];
+    }).join("\n");
+  }
+  return Object.entries(rec(changes)).map(([path, value]) => `${str(rec(value).type) || "change"} ${path}`).join("\n");
+}
+
+function codexThreadItemRecord(item: Record<string, unknown>, ts: string | null): SessionRecord {
+  const itemType = str(item.type) || "item";
+  const kind = codexThreadItemKind(itemType);
+  if (kind === "usermessage") return { kind: "message", role: "user", ts, text: textFromContent(item.content) };
+  if (kind === "agentmessage") return { kind: "message", role: "assistant", ts, phase: str(item.phase) || undefined, text: str(item.text) };
+  if (kind === "reasoning") {
+    return { kind: "reasoning", role: "assistant", ts, text: [stringList(item.summary), stringList(item.content), str(item.text)].filter(Boolean).join("\n") };
+  }
+  if (kind === "filechange") return { kind: "tool_call", role: "assistant", ts, name: itemType, text: codexFileChangeText(item.changes) || "File change" };
+  if (kind === "commandexecution") {
+    return { kind: "tool_call", role: "assistant", ts, name: itemType, text: [str(item.command), str(item.aggregatedOutput), str(item.status)].filter(Boolean).join("\n") };
+  }
+  if (kind === "functioncalloutput") return { kind: "tool_result", role: "tool", ts, name: itemType, text: textFromContent(item.output) || compactRecordText(item.output) || str(item.name) };
+  if (["mcptoolcall", "dynamictoolcall", "collabagenttoolcall", "websearch", "imageview", "imagegeneration"].includes(kind)) {
+    const identity = [str(item.server), str(item.namespace), str(item.tool), str(item.query), str(item.path)].filter(Boolean).join(" · ");
+    const result = textFromContent(rec(item.result).content) || textFromContent(item.contentItems) || compactRecordText(item.contentItems) || compactRecordText(item.result);
+    return { kind: "tool_call", role: "assistant", ts, name: itemType, text: [identity, result, str(item.status)].filter(Boolean).join("\n") || itemType };
+  }
+  if (kind === "hookprompt") {
+    return { kind: "trace", role: "system", ts, name: itemType, text: arr(item.fragments).map((fragment) => str(fragment.text)).filter(Boolean).join("\n") || "Hook prompt" };
+  }
+  if (kind === "plan") return { kind: "trace", role: "system", ts, name: itemType, text: str(item.text) || "Plan updated" };
+  if (kind === "subagentactivity") return { kind: "trace", role: "system", ts, name: itemType, text: str(item.kind) || "Sub-agent activity" };
+  if (kind === "sleep") return { kind: "trace", role: "system", ts, name: itemType, text: item.durationMs === undefined ? "Sleep" : `Sleep ${String(item.durationMs)} ms` };
+  if (kind === "enteredreviewmode" || kind === "exitedreviewmode") return { kind: "trace", role: "system", ts, name: itemType, text: str(item.review) || itemType };
+  if (kind === "contextcompaction") return { kind: "trace", role: "system", ts, name: itemType, text: "Context compacted" };
+  return { kind: "trace", role: "system", ts, name: itemType, text: compactRecordText(item) || itemType };
+}
+
 function normalizeCodexLine(obj: Record<string, unknown>): NormalizedSessionLine[] {
   const records: NormalizedSessionLine[] = [];
   const add = (record: SessionRecord, representation?: NormalizedSessionLine["representation"]): void => {
@@ -199,6 +284,21 @@ function normalizeCodexLine(obj: Record<string, unknown>): NormalizedSessionLine
   const ts = tsOf(obj);
   const payload = rec(obj.payload);
   const payloadType = str(payload.type);
+  const nestedThreadItem = recordOrNull(payload.item);
+  const lifecycle = codexThreadItemKind(payloadType);
+  const nestedItemType = str(nestedThreadItem?.type);
+  let threadItem: Record<string, unknown> | null = null;
+  if (nestedThreadItem && nestedItemType && !nestedItemType.includes("_")
+    && (obj.type === "response_item" || (obj.type === "event_msg" && ["itemstarted", "itemcompleted", "itemdelta"].includes(lifecycle)))) {
+    threadItem = nestedThreadItem;
+  } else if (obj.type === "response_item" && !payloadType.includes("_") && CODEX_THREAD_ITEM_TYPES.has(codexThreadItemKind(payloadType))) {
+    threadItem = payload;
+  }
+  if (threadItem) {
+    if (obj.type === "event_msg" && lifecycle !== "itemcompleted") return records;
+    add(codexThreadItemRecord(threadItem, ts), obj.type === "response_item" ? "response" : "event");
+    return records;
+  }
   const message = codexMessageFromPayload(payload);
   if (message) {
     add({
@@ -247,6 +347,10 @@ function normalizeCodexLine(obj: Record<string, unknown>): NormalizedSessionLine
   }
   /* token_count is a usage envelope emitted after nearly every step; it is
      accounting, not conversation content, so it never becomes a trace. */
+  if (["command_execution_output_delta", "file_change_output_delta", "file_change_patch_updated"].includes(payloadType)) {
+    add({ kind: "trace", role: "system", ts, name: payloadType, text: compactRecordText(payload.delta ?? payload.changes) || payloadType });
+    return records;
+  }
   if (payloadType && payloadType !== "token_count") {
     add({ kind: "trace", role: "system", ts, name: payloadType, text: JSON.stringify(payload) });
   }

@@ -3,6 +3,8 @@ import crypto from "node:crypto";
 import { requestAccountMigrationTick } from "@/lib/accounts/migration/controllerSignal";
 import { agentRegistry, type AgentRegistry, type AgentRegistryEntry, type ProcessIdentity } from "@/lib/agent/registry";
 import { sessionKeyId, type SessionKey } from "@/lib/agent/sessionKey";
+import { BRANCH_SHARED_HOST_ERROR, branchSharesRootHost } from "@/lib/conversation/branchControl";
+import { captureProcessIdentity } from "@/lib/processIdentity";
 
 import { isRuntimeHostTransportFailure, runtimeHostClient, type RuntimeHostClient } from "./client";
 import { runtimeSettingsCapability, type RuntimeEventInput, type RuntimeSession } from "./contracts";
@@ -18,6 +20,10 @@ import { setStructuredDeliveryKick } from "./structuredDeliverySignal";
 import { journalVerdict, sendIsSettled } from "./sendSettlement";
 import { runtimeImageCapability } from "./runtimeImageStore";
 import { STRUCTURED_IMAGE_CAPABILITY } from "./structuredContent";
+import {
+  markStructuredDeliveryControllerReady,
+  markStructuredDeliveryControllerUnavailable,
+} from "./startupStatus";
 
 type ObservableEngineHost = EngineHost & { onStateChange(listener: (state: HostState) => void): () => void };
 type IdentityBoundEngineHost = ObservableEngineHost & {
@@ -71,6 +77,7 @@ interface ControllerState {
   terminateActiveHost: ((key: SessionKey, expected?: Readonly<ProcessIdentity>) => Promise<boolean>) | null;
   completeActive: ((adopted: readonly StructuredDeliveryHost[]) => Promise<void>) | null;
   stopActive: () => void;
+  lastDrainError?: string | null;
   /* Distinguishes "this process hosts the controller and is between
      publications" from "this process never hosted one at all" (#1191). */
   everPublished?: boolean;
@@ -87,6 +94,7 @@ const state: ControllerState = controllerStore.__llvStructuredDeliveryController
   terminateActiveHost: null,
   completeActive: null,
   stopActive: () => {},
+  lastDrainError: null,
   everPublished: false,
 };
 
@@ -142,6 +150,7 @@ function retireStructuredDeliveryPublication(): void {
   state.terminateActiveHost = null;
   state.completeActive = null;
   setStructuredDeliveryKick(null);
+  markStructuredDeliveryControllerUnavailable();
 }
 
 function entryForHost(registry: AgentRegistry, adopted: StructuredDeliveryHost): AgentRegistryEntry | null {
@@ -484,6 +493,10 @@ export async function bindStructuredDeliveryQueue(
       const liveness = await conversationTurnLiveness(registry, conversationId, dependencies.liveness ?? {});
       return liveness?.state === "severed" ? liveness.reason : null;
     },
+    (conversationId) => conversationId.startsWith("conversation_")
+      && branchSharesRootHost(registry, registry.conversation(conversationId as `conversation_${string}`))
+      ? BRANCH_SHARED_HOST_ERROR
+      : null,
   );
   let drainTimer: ReturnType<typeof setTimeout> | null = null;
   let drainBackoffMs = DELIVERY_DRAIN_COALESCE_MS;
@@ -505,6 +518,10 @@ export async function bindStructuredDeliveryQueue(
       drainBackoffMs = DELIVERY_DRAIN_COALESCE_MS;
     } catch (error) {
       if (stopped) return;
+      if (state.activeQueue === queue) {
+        const message = error instanceof Error ? error.message : String(error);
+        state.lastDrainError = (message.trim() || "structured delivery drain failed").slice(0, 240);
+      }
       const retryMs = drainBackoffMs;
       const retryScheduled = scheduleDrain(retryMs);
       if (retryScheduled) {
@@ -1021,6 +1038,7 @@ export async function bindStructuredDeliveryQueue(
      `state.activeQueue !== queue` and unwinds only its own timers, host
      subscriptions and event pumps — it cannot null the live publication. */
   retirePredecessor();
+  markStructuredDeliveryControllerReady();
   /* The carried-over hosts resolve from their seats already; this gives each one
      a registration in this generation. It runs whether or not startup work is
      deferred, because startup's own completion only covers the set it adopts,
@@ -1050,6 +1068,10 @@ export function structuredDeliveryHostForConversation(conversationId: string): E
   return hostResolver(state.activeRegistry, state.activeHosts)(conversationId);
 }
 
+export function structuredDeliveryLastError(conversationId: string): string | null {
+  return state.activeQueue?.lastTargetError(conversationId) ?? state.lastDrainError ?? null;
+}
+
 export async function publishStructuredDeliveryHost(
   item: StructuredDeliveryHost,
   ownsOperation?: () => Promise<boolean>,
@@ -1070,6 +1092,35 @@ export async function republishStructuredDeliveryHost(key: SessionKey): Promise<
 
 export async function releaseStructuredDeliveryHost(key: SessionKey): Promise<boolean> {
   return await state.releaseActiveHost?.(key) ?? false;
+}
+
+/** Releases every engine host owned by this Viewer before release demotion.
+ *
+ * Structured engines run outside the Viewer container namespace, so exiting
+ * the Viewer does not end them. Release the process-scoped registrations while
+ * their transports and writer fences still exist; the promoted Viewer can then
+ * claim each durable row on its bounded startup retry. All releases begin in
+ * one turn so several slow engine shutdowns consume one grace window. */
+export async function releaseStructuredDeliveryHostsForDemotion(): Promise<void> {
+  const registrations = state.activeRegistrations?.() ?? [];
+  const release = state.releaseActiveHost;
+  if (!release || registrations.length === 0) return;
+  const registry = state.activeRegistry;
+  await Promise.all(registrations.map(async ({ key, host }) => {
+    const current = await host.health();
+    if ((current.status !== "active" && current.status !== "attention")
+      || current.pid === null
+      || current.processStartIdentity === null) return;
+    if (!registry?.markStructuredHostHandoff(
+      key,
+      captureProcessIdentity(current.pid, undefined, current.processStartIdentity),
+    )) throw new Error(`structured host ${sessionKeyId(key)} changed before Viewer demotion`);
+  }));
+  const outcomes = await Promise.allSettled(registrations.map(({ key }) => release(key)));
+  const failures = outcomes.flatMap((outcome) => outcome.status === "rejected" ? [outcome.reason] : []);
+  if (failures.length > 0) {
+    throw new AggregateError(failures, `failed to release ${failures.length} structured host(s) during Viewer demotion`);
+  }
 }
 
 /**

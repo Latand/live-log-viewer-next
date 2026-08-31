@@ -152,6 +152,7 @@ function isFlow(value: unknown): value is Flow {
     (flow.headRef === undefined || flow.headRef === null || typeof flow.headRef === "string") &&
     (flow.targetSha === undefined || flow.targetSha === null || typeof flow.targetSha === "string") &&
     (flow.spec === undefined || typeof flow.spec === "string") &&
+    (flow.reviewerSandbox === undefined || flow.reviewerSandbox === "full" || flow.reviewerSandbox === "restricted") &&
     (flow.hostClaim === undefined || flow.hostClaim === null || (
       SAFE_HOST_CLAIM_SESSION.test(flow.hostClaim.sessionKey)
       && SAFE_HOST_CLAIM_ACCOUNT.test(flow.hostClaim.accountRef)

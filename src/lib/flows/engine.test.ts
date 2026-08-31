@@ -2741,3 +2741,79 @@ test("a conversation with no structured host falls through to the legacy transcr
 
   expect(structuredAttempted).toBe(false);
 });
+
+/**
+ * #1279 at the reviewer seam. A review round's account is one the Viewer picks
+ * — the flow's own record names it, no operator gesture does — so the project's
+ * pool binds it, and the two failures below are the ones that must never end in
+ * a launch: an account the pool forbids, and a record that cannot say what the
+ * pool is. Account and project names are invented.
+ */
+function bindingRecordPath(): string {
+  return path.join(process.env.LLV_STATE_DIR!, "account-project-bindings.json");
+}
+
+function reviewerBindingFlow(id: string, accountId: string): Flow {
+  return raceFlow({
+    id,
+    project: "project-atlas",
+    implementerPath: `/${id}-implementer.jsonl`,
+    state: "spawning",
+    reviewerMode: "pane",
+    rounds: [{
+      n: 1, reviewerPath: null, reviewerRole: { engine: "codex", model: null, effort: "xhigh" },
+      accountId, attemptedAccounts: [], autoRetryCount: 0, sessionId: null,
+      reviewerPid: null, reviewerIdentity: null, reviewerPane: null, findingsPath: null,
+      triggeredBy: "button", readyNote: null, reviewHeadSha: null, verdict: null,
+      findingsCount: null, startedAt: "2026-08-30T00:00:00Z", spawnStartedAt: null,
+      relayStartedAt: null, relayDelivery: null, reviewedAt: null, terminalAt: null,
+      relayedAt: null, error: null,
+    }],
+  });
+}
+
+test("#1279: a reviewer account the project's pool forbids parks the flow instead of launching", async () => {
+  const flow = reviewerBindingFlow("flow-reviewer-forbidden", "acct-outsider");
+  saveFlows([flow]);
+  fs.writeFileSync(bindingRecordPath(), JSON.stringify({
+    schemaVersion: 1,
+    bindings: [{
+      engine: "codex",
+      accountId: "acct-reserved",
+      project: "project-atlas",
+      createdAt: "2026-08-30T00:00:00.000Z",
+    }],
+  }), "utf8");
+
+  try {
+    await tickFlows([{ path: flow.implementerPath } as FileEntry]);
+    const after = loadFlows().find((record) => record.id === flow.id)!;
+    expect(after.state).toBe("needs_decision");
+    /* The reason names the account, the project and the pool, so the operator
+       can act on it without opening the record. */
+    expect(after.stateDetail).toContain("acct-outsider");
+    expect(after.stateDetail).toContain("project-atlas");
+    expect(after.stateDetail).toContain("acct-reserved");
+    /* Nothing was launched: no pane handle, no spawn stamp. */
+    expect(after.rounds[0]!.spawnStartedAt ?? null).toBeNull();
+    expect(after.rounds[0]!.reviewerPane ?? null).toBeNull();
+  } finally {
+    fs.rmSync(bindingRecordPath(), { force: true });
+  }
+});
+
+test("#1279: a binding record the reviewer launch cannot read parks the flow rather than picking freely", async () => {
+  const flow = reviewerBindingFlow("flow-reviewer-unreadable", "default");
+  saveFlows([flow]);
+  fs.writeFileSync(bindingRecordPath(), '{"schemaVersion":1,"bindings":[{"engine":"codex"', "utf8");
+
+  try {
+    await tickFlows([{ path: flow.implementerPath } as FileEntry]);
+    const after = loadFlows().find((record) => record.id === flow.id)!;
+    expect(after.state).toBe("needs_decision");
+    expect(after.stateDetail).toContain("account-project-bindings.json");
+    expect(after.rounds[0]!.spawnStartedAt ?? null).toBeNull();
+  } finally {
+    fs.rmSync(bindingRecordPath(), { force: true });
+  }
+});

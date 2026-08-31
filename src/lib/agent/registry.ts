@@ -4,9 +4,17 @@ import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
 import { statePath } from "@/lib/configDir";
-import { procBackend } from "@/lib/proc";
+import {
+  captureProcessIdentity,
+  processIdentityMayOwn,
+  sameRecordedProcessIdentity,
+  type ProcessIdentity,
+} from "@/lib/processIdentity";
 import { durableSemanticTitle, SPAWN_TITLE_REQUIRED_ERROR } from "@/lib/title";
 import { withAccountMutationLock } from "@/lib/accounts/accountMutation";
+import { conversationProjectKey } from "@/lib/accounts/conversationProject";
+import { accountProjectBindings, projectAccountRefusalDetail } from "@/lib/accounts/projectBindings";
+import { admitAutomaticAccountTarget } from "@/lib/accounts/projectSelection";
 import {
   emptyLaunchProfile,
   normalizeProjectOwnership,
@@ -69,16 +77,14 @@ import {
   type SqliteRegistryReplacement,
   type SqliteRegistrySnapshot,
 } from "./sqliteRegistryStore";
+import { identityMaterializationFence } from "./identityMaterialization";
 import type { ResumePaneRecord } from "@/lib/resumePanesFile";
 import { parseMessageOrigin } from "@/lib/runtime/messageOrigin";
 import { assertStructuredTextEnvelope, parseStructuredImageRefs, structuredContent, type StructuredImageRef } from "@/lib/runtime/structuredContent";
 
 export type AgentHostStatus = "starting" | "live" | "idle" | "handoff" | "unhosted" | "dead";
 
-export interface ProcessIdentity {
-  pid: number;
-  startIdentity: string | null;
-}
+export type { ProcessIdentity } from "@/lib/processIdentity";
 
 export interface TmuxHostEvidence {
   kind: "tmux";
@@ -101,6 +107,9 @@ export interface StructuredHostColumns {
   activeTurnRef: string | null;
   pendingAttention: string[];
   activeFlags: string[];
+  /** Writer epoch that announced a release hand-off. Incumbent state writes at
+      this epoch retain the marker; only a later claimant can complete it. */
+  releaseHandoffClaimEpoch?: number;
 }
 
 const STRUCTURED_CLAIM_PREFIX = "structured-host:";
@@ -114,7 +123,11 @@ function structuredClaimIdentity(owner: string): ProcessIdentity | null {
   try {
     const identity = JSON.parse(owner.slice(STRUCTURED_CLAIM_PREFIX.length)) as Partial<ProcessIdentity>;
     return Number.isInteger(identity.pid) && identity.pid! > 0
-      ? { pid: identity.pid!, startIdentity: typeof identity.startIdentity === "string" ? identity.startIdentity : null }
+      ? {
+          pid: identity.pid!,
+          startIdentity: typeof identity.startIdentity === "string" ? identity.startIdentity : null,
+          ...(typeof identity.bootEpoch === "string" ? { bootEpoch: identity.bootEpoch } : {}),
+        }
       : null;
   } catch {
     return null;
@@ -582,6 +595,8 @@ export interface ConversationLookup {
   conversation(id: ViewerConversationId): RegistryConversation | null;
 }
 
+export { identityMaterializationFence, type IdentityMaterializationFence } from "./identityMaterialization";
+
 type ConversationMigrationInput = Omit<ConversationMigration, "errorCode" | "operationId" | "sourceGenerationId" | "providerReceipt" | "pendingContinuityPaths" | "boardProject" | "boardOperationId" | "boardPlacementProject"> &
   Partial<Pick<ConversationMigration, "errorCode" | "operationId" | "sourceGenerationId" | "providerReceipt" | "pendingContinuityPaths" | "boardProject" | "boardOperationId" | "boardPlacementProject">>;
 type SuccessorGenerationInput = Omit<NativeGeneration, "createdAt" | "archivedAt" | "launchProfile" | "historyHash" | "host"> &
@@ -945,6 +960,66 @@ function conversationMigrationForIntent(
   };
 }
 
+/**
+ * #1279's eleventh automatic selector, and the one the inventory missed: a
+ * spawn that SETTLES while an engine-wide drain is running is enrolled into it
+ * at settlement.
+ *
+ * Nobody named an account for that enrollment. The spawn was reserved on its
+ * BIRTH account before the drain existed, and this is the machine deciding by
+ * itself that the settled conversation should follow the drain's target — so
+ * for an AUTOMATIC intent it is an automatic selection and asks exactly what
+ * every other one asks, through the same admission: this conversation's own
+ * project's pool, and whether the target has room in it. Without it a spawn
+ * reserved before the drain migrated project B onto a target only project A
+ * allows, and an exhausted target or an unreadable record passed the same
+ * point untouched.
+ *
+ * A MANUAL intent NAMED its target. That is a control, it is carried out, and
+ * it reads no bindings at all — enrollment there is unrestricted, exactly as
+ * it was.
+ *
+ * A refusal PARKS the caller at its current safe state. Settlement keeps the
+ * conversation on its birth account. Retry keeps the migration failed and
+ * carries the admission reason. No read failure escapes this function: the
+ * spawn has already happened, and evidence this process cannot turn into a pool
+ * must not be able to lose it. Every failure answers "not admitted", the same
+ * direction the fence fails everywhere else.
+ */
+type MigrationEnrollmentAdmission =
+  | { kind: "accepted" }
+  | { kind: "refused"; reason: string };
+
+function migrationEnrollmentAdmission(
+  file: RegistryFile,
+  conversation: RegistryConversation,
+  source: NativeGeneration,
+  intent: MigrationIntent,
+): MigrationEnrollmentAdmission {
+  if (intent.origin !== "auto") return { kind: "accepted" };
+  const project = conversationProjectKey(conversation.projectOwnership, source.launchProfile);
+  try {
+    const resolution = admitAutomaticAccountTarget({
+      project,
+      engine: conversation.engine,
+      targetId: intent.targetId,
+      observations: Object.values(file.quotaObservations[conversation.engine]),
+      bindings: accountProjectBindings(),
+    });
+    return resolution.kind === "available"
+      ? { kind: "accepted" }
+      : {
+          kind: "refused",
+          reason: projectAccountRefusalDetail(resolution, conversation.engine, project ?? ""),
+        };
+  } catch (error) {
+    return {
+      kind: "refused",
+      reason: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
 function queueAbandonedMigrationCleanup(
   file: RegistryFile,
   conversation: RegistryConversation,
@@ -992,6 +1067,30 @@ function terminalizeHeldDelivery(
   delivery.error = terminalReason.slice(0, 240);
   failInitialSpawnReceiptForDelivery(file, delivery);
   syncDeliveryOperationOwnerState(file, delivery, uncertain ? "unverified" : "lost");
+}
+
+const DEAD_SUPERSEDED_DELIVERY_REASON = "delivery expired because its superseded target session is dead";
+
+function heldDeliveryTargetsDeadSupersededSession(
+  file: RegistryFile,
+  delivery: HeldDelivery,
+  ownerAlive: (owner: ProcessIdentity) => boolean,
+): boolean {
+  if (delivery.state !== "held") return false;
+  const conversation = file.conversations[resolveConversationAlias(file, delivery.conversationId)];
+  if (!conversation?.supersededBy) return false;
+  const generation = conversation.generations.at(-1);
+  if (!generation) return false;
+  const entry = file.entries[sessionKeyId({ engine: conversation.engine, sessionId: generation.id })];
+  if (!entry || entry.host) return false;
+  const processIdentity = entry.structuredHost?.process ?? null;
+  if (processIdentity && ownerAlive(processIdentity)) return false;
+  if (!processIdentity && entry.status !== "dead" && entry.status !== "unhosted") return false;
+  if (entry.claimOwner) {
+    const claimOwner = structuredClaimIdentity(entry.claimOwner);
+    if (!claimOwner || ownerAlive(claimOwner)) return false;
+  }
+  return true;
 }
 
 function terminalizeRolledBackMigrationDelivery(
@@ -1161,11 +1260,6 @@ const LIVE_CHILD_RECEIPT_STATES = new Set<SpawnReceipt["state"]>([
 const LIVE_CHILD_HOST_STATES = new Set<AgentHostStatus>(["starting", "live", "idle", "handoff"]);
 export const SPAWN_STARTING_ADMISSION_LEASE_MS = 2 * 60_000;
 
-function processIdentityAlive(identity: ProcessIdentity): boolean {
-  return procBackend.pidAlive(identity.pid)
-    && (identity.startIdentity === null || procBackend.processIdentity(identity.pid) === identity.startIdentity);
-}
-
 function childEntries(
   file: RegistryFile,
   childConversationId: ViewerConversationId,
@@ -1197,7 +1291,7 @@ function liveViewerChildCount(file: RegistryFile, parentConversationId: ViewerCo
     const receipt = edge.evidence.launchId ? file.receipts[edge.evidence.launchId] : null;
     const entries = childEntries(file, childConversationId, edge, receipt);
     const processes = knownChildProcesses(receipt, entries);
-    if (processes.some(processIdentityAlive)) {
+    if (processes.some((identity) => processIdentityMayOwn(identity))) {
       liveChildren.add(childConversationId);
       continue;
     }
@@ -1237,7 +1331,11 @@ function normalizeStructuredHost(value: unknown): StructuredHostColumns | null {
   }
   const processIdentity = host.process && typeof host.process === "object"
     && typeof host.process.pid === "number"
-    ? { pid: host.process.pid, startIdentity: typeof host.process.startIdentity === "string" ? host.process.startIdentity : null }
+    ? {
+        pid: host.process.pid,
+        startIdentity: typeof host.process.startIdentity === "string" ? host.process.startIdentity : null,
+        ...(typeof host.process.bootEpoch === "string" ? { bootEpoch: host.process.bootEpoch } : {}),
+      }
     : null;
   return {
     kind: host.kind,
@@ -1253,6 +1351,9 @@ function normalizeStructuredHost(value: unknown): StructuredHostColumns | null {
     activeFlags: Array.isArray(host.activeFlags)
       ? host.activeFlags.filter((item): item is string => typeof item === "string")
       : [],
+    ...(Number.isSafeInteger(host.releaseHandoffClaimEpoch) && (host.releaseHandoffClaimEpoch ?? -1) >= 0
+      ? { releaseHandoffClaimEpoch: host.releaseHandoffClaimEpoch }
+      : {}),
   };
 }
 
@@ -1580,6 +1681,7 @@ function normalizeHeldDelivery(value: HeldDelivery): HeldDelivery {
       : [],
     command,
     requestDigest: typeof value.requestDigest === "string" ? value.requestDigest : legacyDigest,
+    recoveryIntent: value.recoveryIntent === "reclaimed-host" ? value.recoveryIntent : null,
     state,
     generationId: imagesCorrupt ? null : value.generationId ?? null,
     attempts: Number.isInteger(value.attempts) ? value.attempts : 0,
@@ -2147,10 +2249,11 @@ function resolveConversationAlias(file: Pick<RegistryFile, "conversationAliases"
 }
 
 export function snapshotSpawnsFromRegistry(
-  file: Pick<RegistryFile, "receipts" | "conversations" | "conversationAliases">,
+  file: Pick<RegistryFile, "receipts" | "entries" | "conversations" | "conversationAliases">,
   launchIds: readonly string[],
 ): SnapshotSpawnProjection {
   const projection: SnapshotSpawnProjection = {};
+  const materialization = identityMaterializationFence(file);
   for (const launchId of new Set(launchIds)) {
     const receipt = file.receipts[launchId];
     if (!receipt) continue;
@@ -2170,8 +2273,9 @@ export function snapshotSpawnsFromRegistry(
       engine: receipt.engine,
       cwd: receipt.cwd,
       createdAt: receipt.createdAt,
-      materializedPath: (conversationId ? file.conversations[conversationId] : undefined)?.generations.at(-1)?.path
-        ?? receipt.artifactPath,
+      materializedPath: materialization.allowsReceipt(receipt)
+        ? (conversationId ? materialization.pathForConversation(conversationId) : null) ?? receipt.artifactPath
+        : null,
     };
   }
   return projection;
@@ -2675,6 +2779,7 @@ function normalizeReceipt(value: SpawnReceipt, policy?: McpGrantPolicy): SpawnRe
       ? {
           pid: value.admissionOwner.pid,
           startIdentity: typeof value.admissionOwner.startIdentity === "string" ? value.admissionOwner.startIdentity : null,
+          ...(typeof value.admissionOwner.bootEpoch === "string" ? { bootEpoch: value.admissionOwner.bootEpoch } : {}),
         }
       : null,
     spawnCapabilityDigest: typeof value.spawnCapabilityDigest === "string" && /^[0-9a-f]{64}$/.test(value.spawnCapabilityDigest)
@@ -2892,14 +2997,31 @@ export function normalizeRegistry(value: unknown, policy?: McpGrantPolicy): Regi
   }), policy);
 }
 
-function readFileWithPayload(filename: string, policy?: McpGrantPolicy): { file: RegistryFile; payload: string | null } {
+function sqliteRevisionFromParsed(value: unknown): number | null {
+  const revision = value && typeof value === "object"
+    ? (value as { _sqliteRevision?: unknown })._sqliteRevision
+    : undefined;
+  return Number.isSafeInteger(revision) && Number(revision) >= 0 ? Number(revision) : null;
+}
+
+function readFileWithPayload(
+  filename: string,
+  policy?: McpGrantPolicy,
+): { file: RegistryFile; payload: string | null; sqliteRevision: number | null } {
   try {
     const payload = fs.readFileSync(filename, "utf8");
+    const parsed = JSON.parse(payload);
     /* A whole file, so an entry no conversation owns is genuinely unowned and
        falls back to the baseline rather than keeping a claimed grant (#739). */
-    return { file: reboundAssembledMcpGrants(normalizeRegistry(JSON.parse(payload), policy), policy), payload };
+    return {
+      file: reboundAssembledMcpGrants(normalizeRegistry(parsed, policy), policy),
+      payload,
+      sqliteRevision: sqliteRevisionFromParsed(parsed),
+    };
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { file: clone(EMPTY), payload: null };
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return { file: clone(EMPTY), payload: null, sqliteRevision: null };
+    }
     if (error instanceof RegistryReadError) throw error;
     throw new RegistryReadError(`agent registry cannot be read: ${error instanceof Error ? error.message : String(error)}`);
   }
@@ -2955,7 +3077,12 @@ function serializeRegistry(value: RegistryFile, sqliteRevision?: number): string
   return JSON.stringify(storage) + "\n";
 }
 
-function writeAtomicPayload(filename: string, payload: string): void {
+interface AtomicWriteHooks {
+  beforeRename?: () => void;
+  afterRename?: () => void;
+}
+
+function writeAtomicPayload(filename: string, payload: string, hooks?: AtomicWriteHooks): void {
   fs.mkdirSync(path.dirname(filename), { recursive: true, mode: 0o700 });
   const temp = `${filename}.${process.pid}.${crypto.randomUUID()}.tmp`;
   let fd: number | null = null;
@@ -2965,7 +3092,9 @@ function writeAtomicPayload(filename: string, payload: string): void {
     fs.fsyncSync(fd);
     fs.closeSync(fd);
     fd = null;
+    hooks?.beforeRename?.();
     fs.renameSync(temp, filename);
+    hooks?.afterRename?.();
     const dir = fs.openSync(path.dirname(filename), "r");
     try { fs.fsyncSync(dir); } finally { fs.closeSync(dir); }
   } finally {
@@ -2974,8 +3103,13 @@ function writeAtomicPayload(filename: string, payload: string): void {
   }
 }
 
-function writeAtomic(filename: string, value: RegistryFile, sqliteRevision?: number): void {
-  writeAtomicPayload(filename, serializeRegistry(value, sqliteRevision));
+function writeAtomic(
+  filename: string,
+  value: RegistryFile,
+  sqliteRevision?: number,
+  hooks?: AtomicWriteHooks,
+): void {
+  writeAtomicPayload(filename, serializeRegistry(value, sqliteRevision), hooks);
 }
 
 export type AgentRegistrySqliteMode = "off" | "dual-write" | "read" | "sqlite";
@@ -2999,6 +3133,8 @@ export interface AgentRegistryStorageOptions {
   onSqliteRevisionQuery?: () => void;
   beforeDualWriteStartupReplace?: () => void;
   beforeDualWriteMutationReplace?: () => void;
+  beforeMirrorRename?: () => void;
+  afterMirrorRename?: () => void;
   mirrorCheckpointMs?: number;
   now?: () => number;
   scheduleMirrorCheckpoint?: (callback: () => void, delayMs: number) => { unref?(): unknown };
@@ -3008,6 +3144,7 @@ export interface AgentRegistryStorageOptions {
 export interface AgentRegistryStorageDiagnostics {
   backendMode: AgentRegistrySqliteMode;
   revision: number | null;
+  mirrorRevision: number | null;
   transactionCount: number;
   writerRatePerSecond: number;
   writerWaitP95Ms: number | null;
@@ -3029,8 +3166,7 @@ export function sqliteModeFromEnvironment(): AgentRegistrySqliteMode {
 
 function sqliteMirrorRevision(filename: string): number | null {
   try {
-    const revision = (JSON.parse(fs.readFileSync(filename, "utf8")) as { _sqliteRevision?: unknown })._sqliteRevision;
-    return Number.isInteger(revision) && Number(revision) >= 0 ? Number(revision) : null;
+    return sqliteRevisionFromParsed(JSON.parse(fs.readFileSync(filename, "utf8")));
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw error;
@@ -3057,6 +3193,8 @@ export class AgentRegistry {
   private readonly now: () => number;
   private readonly scheduleMirrorCheckpoint: (callback: () => void, delayMs: number) => { unref?(): unknown };
   private readonly afterMirrorWrite: (() => void) | undefined;
+  private readonly mirrorWriteHooks: AtomicWriteHooks;
+  private mirrorRevisionCache: { signature: string; revision: number | null } | null = null;
   private mirrorCheckpointPending = false;
   private mirrorCheckpointFailures = 0;
   private lastMirrorAt: number | null = null;
@@ -3069,8 +3207,7 @@ export class AgentRegistry {
 
   constructor(
     readonly filename = statePath("agent-registry.json"),
-    private readonly ownerAlive: (owner: ProcessIdentity) => boolean = (owner) =>
-      procBackend.pidAlive(owner.pid) && (owner.startIdentity === null || procBackend.processIdentity(owner.pid) === owner.startIdentity),
+    private readonly ownerAlive: (owner: ProcessIdentity) => boolean = processIdentityMayOwn,
     private readonly lockTiming: RegistryLockTiming = SYSTEM_LOCK_TIMING,
     storage: AgentRegistryStorageOptions = {},
   ) {
@@ -3101,6 +3238,10 @@ export class AgentRegistry {
     this.scheduleMirrorCheckpoint = storage.scheduleMirrorCheckpoint
       ?? ((callback, delayMs) => setTimeout(callback, delayMs));
     this.afterMirrorWrite = storage.afterMirrorWrite;
+    this.mirrorWriteHooks = {
+      beforeRename: storage.beforeMirrorRename,
+      afterRename: storage.afterMirrorRename,
+    };
     this.beforeDualWriteMutationReplace = storage.beforeDualWriteMutationReplace;
     this.sqliteStore = this.sqliteMode === "off"
       ? null
@@ -3126,6 +3267,7 @@ export class AgentRegistry {
       this.synchronizeDualWriteStartup(storage.beforeDualWriteStartupReplace);
     }
     if (this.sqliteMode === "read" || this.sqliteMode === "sqlite") {
+      this.cleanupStaleTempFiles();
       const sqlite = this.sqliteStore!.snapshot();
       const mirrorRevision = sqliteMirrorRevision(this.filename);
       /* `read` is the parity burn-in, so a same-revision mismatch must stop
@@ -3136,7 +3278,10 @@ export class AgentRegistry {
         this.assertSqliteParity(sqlite);
       }
       if (mirrorRevision !== null && mirrorRevision > sqlite.revision) {
-        throw new RegistryParityError("agent registry JSON mirror revision is ahead of SQLite");
+        if (this.sqliteMode === "sqlite") this.fenceAheadMirror(mirrorRevision, sqlite.revision);
+        throw new RegistryParityError(
+          `agent registry JSON revision ${mirrorRevision} is ahead of SQLite revision ${sqlite.revision}`,
+        );
       }
       this.mirrorSqliteSnapshot(sqlite);
     }
@@ -3160,8 +3305,27 @@ export class AgentRegistry {
     }
   }
 
+  private fenceAheadMirror(mirrorRevision: number, sqliteRevision: number): void {
+    const conflictLabel = `sqlite-conflict-r${mirrorRevision}-over-r${sqliteRevision}`;
+    const conflict = `${this.filename}.${conflictLabel}`;
+    try {
+      fs.renameSync(this.filename, conflict);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    throw new RegistryParityError(
+      `agent registry JSON mirror revision ${mirrorRevision} is ahead of authoritative SQLite revision ${sqliteRevision}; `
+      + `conflicting mirror moved beside the registry as ${conflictLabel} and the next startup will rebuild from SQLite`,
+    );
+  }
+
   private mirrorSqliteSnapshot(initial: SqliteRegistrySnapshot): void {
-    writeAtomic(this.filename, initial.file, initial.revision);
+    writeAtomic(this.filename, initial.file, initial.revision, this.mirrorWriteHooks);
+    this.mirrorRevisionCache = {
+      signature: registryFileSignature(this.filename),
+      revision: initial.revision,
+    };
     this.afterMirrorWrite?.();
     const latestRevision = this.sqliteStore!.revision();
     this.lastMirrorAt = this.now();
@@ -3181,8 +3345,23 @@ export class AgentRegistry {
     return sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * 0.95) - 1)]!;
   }
 
+  private currentMirrorRevision(): number | null {
+    if (this.sqliteMode === "off") return null;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const before = registryFileSignature(this.filename);
+      if (this.mirrorRevisionCache?.signature === before) return this.mirrorRevisionCache.revision;
+      const revision = sqliteMirrorRevision(this.filename);
+      const after = registryFileSignature(this.filename);
+      if (before !== after) continue;
+      this.mirrorRevisionCache = { signature: after, revision };
+      return revision;
+    }
+    return sqliteMirrorRevision(this.filename);
+  }
+
   storageDiagnostics(): AgentRegistryStorageDiagnostics {
     const revision = this.sqliteStore?.revision() ?? null;
+    const mirrorRevision = this.currentMirrorRevision();
     if (revision !== null && this.lastMirroredRevision !== null && revision > this.lastMirroredRevision) {
       this.mirrorDirty = true;
     }
@@ -3195,6 +3374,7 @@ export class AgentRegistry {
     return {
       backendMode: this.sqliteMode,
       revision,
+      mirrorRevision,
       transactionCount: this.transactionCount,
       writerRatePerSecond: rollingTransactions / 60,
       writerWaitP95Ms: this.percentile(this.writerWaits),
@@ -3270,7 +3450,7 @@ export class AgentRegistry {
   private compactAtStartup(): void {
     if (!fs.existsSync(this.filename)) return;
     const lock = `${this.filename}.write-lock`;
-    const claim = this.acquireLock(lock, { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) });
+    const claim = this.acquireLock(lock, captureProcessIdentity(process.pid));
     try {
       this.compactAtStartupLocked();
     } finally {
@@ -3278,7 +3458,7 @@ export class AgentRegistry {
     }
   }
 
-  private compactAtStartupLocked(): void {
+  private compactAtStartupLocked(sqliteRevision?: number): void {
     let original: string;
     try {
       original = fs.readFileSync(this.filename, "utf8");
@@ -3297,15 +3477,15 @@ export class AgentRegistry {
       throw error;
     }
     compactDeliveryReservations(file, undefined, this.now());
-    if (serializeRegistry(file) !== original) writeAtomic(this.filename, file);
+    if (serializeRegistry(file, sqliteRevision) !== original) writeAtomic(this.filename, file, sqliteRevision);
   }
 
   private synchronizeDualWriteStartup(beforeReplace: (() => void) | undefined): void {
     const lock = `${this.filename}.write-lock`;
-    const claim = this.acquireLock(lock, { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) });
+    const claim = this.acquireLock(lock, captureProcessIdentity(process.pid));
     try {
       const sqlite = this.sqliteStore!.snapshot();
-      if (!fs.existsSync(this.filename)) writeAtomic(this.filename, sqlite.file);
+      if (!fs.existsSync(this.filename)) writeAtomic(this.filename, sqlite.file, sqlite.revision);
       const mirrorRevision = sqliteMirrorRevision(this.filename);
       if (mirrorRevision !== null && mirrorRevision !== sqlite.revision) {
         throw new RegistryParityError(
@@ -3313,7 +3493,7 @@ export class AgentRegistry {
         );
       }
       this.assertSqliteParity(sqlite);
-      this.compactAtStartupLocked();
+      this.compactAtStartupLocked(sqlite.revision);
       const file = readFile(this.filename, this.mcpGrantPolicy);
       beforeReplace?.();
       const replacement = this.sqliteStore!.replace(file, sqlite.revision);
@@ -3323,6 +3503,7 @@ export class AgentRegistry {
           `agent registry SQLite revision changed during dual-write startup: expected ${sqlite.revision}, current ${replacement.revision}`,
         );
       }
+      writeAtomic(this.filename, replacement.file, replacement.revision);
       this.assertSqliteParity();
     } finally {
       this.releaseLock(claim);
@@ -3684,7 +3865,7 @@ export class AgentRegistry {
       return mutation.result;
     }
     const lock = `${this.filename}.write-lock`;
-    const claim = this.acquireLock(lock, { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) });
+    const claim = this.acquireLock(lock, captureProcessIdentity(process.pid));
     try {
       const sqlite = this.sqliteMode === "dual-write" ? this.sqliteStore!.snapshot() : null;
       if (sqlite) {
@@ -3697,11 +3878,17 @@ export class AgentRegistry {
         this.assertSqliteParity(sqlite);
       }
       const original = readFileWithPayload(this.filename, this.mcpGrantPolicy);
+      const rollbackFile = sqlite && original.sqliteRevision !== sqlite.revision
+        ? clone(original.file)
+        : null;
       const file = original.file;
       const result = mutator(file);
-      const payload = serializeRegistry(file);
-      const changed = original.payload !== payload;
-      if (changed) writeAtomicPayload(this.filename, payload);
+      const currentPayload = serializeRegistry(file, sqlite?.revision);
+      const changed = original.payload !== currentPayload;
+      if (changed) {
+        const payload = serializeRegistry(file, sqlite ? sqlite.revision + 1 : undefined);
+        writeAtomicPayload(this.filename, payload);
+      }
       if (sqlite && !changed) this.assertSqliteParity();
       if (sqlite && changed) {
         let replacement: SqliteRegistryReplacement;
@@ -3711,8 +3898,8 @@ export class AgentRegistry {
         } catch (error) {
           const durableSqlite = this.sqliteStore!.snapshot();
           if (durableSqlite.revision === sqlite.revision) {
-            if (original.payload === null) writeAtomic(this.filename, original.file, sqlite.revision);
-            else writeAtomicPayload(this.filename, original.payload);
+            if (rollbackFile) writeAtomic(this.filename, rollbackFile, sqlite.revision);
+            else writeAtomicPayload(this.filename, original.payload!);
           } else {
             this.mirrorSqliteSnapshot(durableSqlite);
           }
@@ -4002,7 +4189,7 @@ export class AgentRegistry {
         pendingOrchestratorSeatIdentity: null,
         transport: input.transport ?? null,
         admissionOwner: input.transport === "structured" || input.ownStartingActuation === true
-          ? { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) }
+          ? captureProcessIdentity(process.pid)
           : null,
         spawnCapabilityDigest: typeof input.spawnCapabilityDigest === "string" && /^[0-9a-f]{64}$/.test(input.spawnCapabilityDigest)
           ? input.spawnCapabilityDigest
@@ -4103,10 +4290,7 @@ export class AgentRegistry {
       if (receipt.admissionOwner && this.ownerAlive(receipt.admissionOwner)) {
         return { claimed: false, receipt: clone(receipt) };
       }
-      receipt.admissionOwner = {
-        pid: process.pid,
-        startIdentity: procBackend.processIdentity(process.pid),
-      };
+      receipt.admissionOwner = captureProcessIdentity(process.pid);
       return { claimed: true, receipt: clone(receipt) };
     });
   }
@@ -4171,8 +4355,7 @@ export class AgentRegistry {
       if ((receipt.transport !== "structured" && receipt.transport !== "tmux")
         || (!unbound && !recoverableTmuxPane)
         || !receipt.admissionOwner
-        || receipt.admissionOwner.pid !== owner.pid
-        || receipt.admissionOwner.startIdentity !== owner.startIdentity) {
+        || !sameRecordedProcessIdentity(receipt.admissionOwner, owner)) {
         return { released: false, receipt: clone(receipt) };
       }
       receipt.admissionOwner = null;
@@ -4190,8 +4373,7 @@ export class AgentRegistry {
       if (!receipt) throw new Error("unknown spawn receipt");
       if (receipt.transport !== "structured" || receipt.state !== "starting" || receipt.key || receipt.pane
         || !receipt.admissionOwner
-        || receipt.admissionOwner.pid !== owner.pid
-        || receipt.admissionOwner.startIdentity !== owner.startIdentity) {
+        || !sameRecordedProcessIdentity(receipt.admissionOwner, owner)) {
         return { released: false, receipt: clone(receipt) };
       }
       receipt.admissionOwner = null;
@@ -4207,8 +4389,7 @@ export class AgentRegistry {
       if (!receipt) throw new Error("unknown spawn receipt");
       if (receipt.transport !== "structured"
         || !receipt.admissionOwner
-        || receipt.admissionOwner.pid !== owner.pid
-        || receipt.admissionOwner.startIdentity !== owner.startIdentity) {
+        || !sameRecordedProcessIdentity(receipt.admissionOwner, owner)) {
         return { released: false, receipt: clone(receipt) };
       }
       receipt.admissionOwner = null;
@@ -4582,30 +4763,26 @@ export class AgentRegistry {
     /* A spawn that began before an account switch remains attributable to its
        birth account. The already-active engine-wide migration intent still
        applies to the new conversation through the existing coordinator
-       contract; a conversation-scoped reseat moves only its own thread. */
+       contract — and through the SAME admission the drain itself uses, since
+       an automatic intent enrolling a conversation nobody named is the
+       eleventh automatic selection (#1279); a conversation-scoped reseat moves
+       only its own thread. The migration record is the shared construction, so
+       settlement cannot drift from the two paths that queue the same move. */
     const activeIntent = Object.values(file.migrationIntents).find((intent) =>
       intent.engine === conversation.engine
       && engineScopedIntent(intent)
       && migrationIntentCanEnroll(file, intent, Date.parse(createdAt)));
     const source = conversation.generations.at(-1);
-    if (activeIntent && !conversation.pinnedAccountId && source && source.accountId !== activeIntent.targetId && !conversation.migration) {
-      conversation.migration = {
-        intentId: activeIntent.id,
-        phase: migrationTurnIsBusy(file, conversation) ? "waiting-turn" : "requested",
-        targetId: activeIntent.targetId,
-        revision: activeIntent.revision,
-        error: null,
-        errorCode: null,
-        operationId: crypto.randomUUID(),
-        sourceGenerationId: source.id,
-        successorLaunchProfile: null,
-        providerReceipt: null,
-        pendingContinuityPaths: [],
-        boardProject: null,
-        boardOperationId: null,
-        boardPlacementProject: conversation.projectOwnership?.project ?? source.launchProfile.project,
-        updatedAt: createdAt,
-      };
+    if (activeIntent && !conversation.pinnedAccountId && source
+      && source.accountId !== activeIntent.targetId && !conversation.migration
+      && migrationEnrollmentAdmission(file, conversation, source, activeIntent).kind === "accepted") {
+      conversation.migration = conversationMigrationForIntent(
+        conversation,
+        source,
+        activeIntent,
+        migrationTurnIsBusy(file, conversation) ? "waiting-turn" : "requested",
+        createdAt,
+      );
     }
     conversation.updatedAt = createdAt;
     file.conversations[conversation.id] = conversation;
@@ -4852,7 +5029,11 @@ export class AgentRegistry {
       launch still owns. External cleanup must act solely on this evidence: a
       completed receipt or a newer same-key operation wins the transaction and
       leaves its host untouched. */
-  failStructuredSpawn(launchId: string, error: string): StructuredSpawnFailureClaim {
+  failStructuredSpawn(
+    launchId: string,
+    error: string,
+    options: { retainRegisteredHost?: boolean } = {},
+  ): StructuredSpawnFailureClaim {
     return this.mutate((file) => {
       const receipt = file.receipts[launchId];
       if (!receipt) return { claimed: false, receipt: null, cleanup: null };
@@ -4894,6 +5075,18 @@ export class AgentRegistry {
         process: clone(entry.structuredHost?.process ?? null),
         releaseRegisteredHost,
       };
+      /* A foreground launch can prove its transcript will never materialize
+         while the host still refuses release. The receipt must settle so the
+         stage can retry, and the exact process identity must remain listed
+         so the Viewer can finish the reap without an operator searching the
+         process table. Only this launch's registered live host qualifies. */
+      if (options.retainRegisteredHost === true
+        && releaseRegisteredHost
+        && entry.structuredHost?.process) {
+        entry.pendingAction = null;
+        entry.updatedAt = now();
+        return { claimed: true, receipt: clone(receipt), cleanup };
+      }
       const preservesResumeCursor = receipt.purpose === "resume-successor"
         && receipt.resumeSourcePath === receipt.artifactPath
         && (entry.structuredHost?.eventCursor ?? 0) > 0;
@@ -4985,8 +5178,7 @@ export class AgentRegistry {
       const entry = file.entries[keyId];
       if (!entry) return false;
       const current = entry.structuredHost?.process ?? null;
-      if (expected && current
-        && (current.pid !== expected.pid || current.startIdentity !== expected.startIdentity)) return false;
+      if (expected && current && !sameRecordedProcessIdentity(current, expected)) return false;
       const replacement = {
         ...entry,
         host: null,
@@ -5022,8 +5214,7 @@ export class AgentRegistry {
         || !conversation.generations.some((generation) => generation.id === key.sessionId)
         || !entry
         || (expected && (!structuredProcess
-          || structuredProcess.pid !== expected.process.pid
-          || structuredProcess.startIdentity !== expected.process.startIdentity
+          || !sameRecordedProcessIdentity(structuredProcess, expected.process)
           || entry.claimEpoch !== expected.claimEpoch
           || entry.structuredHost?.writerClaimEpoch !== expected.claimEpoch))
         || entry.host
@@ -5062,23 +5253,65 @@ export class AgentRegistry {
         || entry.claimOwner !== claimOwner
         || entry.claimEpoch !== claimEpoch
         || entry.structuredHost.writerClaimEpoch !== claimEpoch) return null;
-      const normalizedHost = normalizeStructuredHost(structuredHost);
+      let normalizedHost = normalizeStructuredHost(structuredHost);
+      const handoffClaimEpoch = entry.structuredHost.releaseHandoffClaimEpoch;
+      const completesHandoff = entry.pendingAction === "handoff"
+        && Boolean(normalizedHost?.process)
+        && handoffClaimEpoch !== undefined
+        && claimEpoch > handoffClaimEpoch;
+      if (normalizedHost && completesHandoff) {
+        const { releaseHandoffClaimEpoch: _completedHandoff, ...activeHost } = normalizedHost;
+        normalizedHost = activeHost;
+      } else if (normalizedHost && entry.pendingAction === "handoff" && handoffClaimEpoch !== undefined) {
+        normalizedHost = { ...normalizedHost, releaseHandoffClaimEpoch: handoffClaimEpoch };
+      }
       if (!releaseClaim
         && entry.status === status
+        && !completesHandoff
         && isDeepStrictEqual(normalizeStructuredHost(entry.structuredHost), normalizedHost)) return clone(entry);
       const replacement = {
         ...entry,
         structuredHost: normalizedHost,
         status,
+        ...(completesHandoff ? { pendingAction: null } : {}),
       };
       const changedHostPaths = activeHostPathsChangedByEntry(file, keyId, replacement);
       const readinessBefore = migrationReadinessSignature(file, key.engine, changedHostPaths);
       entry.structuredHost = replacement.structuredHost;
       entry.status = status;
+      entry.pendingAction = replacement.pendingAction;
       if (releaseClaim) entry.claimOwner = null;
       entry.updatedAt = now();
       advanceMigrationScopeRevision(file, key.engine, readinessBefore, changedHostPaths);
       return clone(entry);
+    });
+  }
+
+  /** Records a release handoff for one exact active engine. The process fence
+      prevents an old registration from appointing a replacement that took the
+      same session key concurrently. */
+  markStructuredHostHandoff(key: SessionKey, expected: Readonly<ProcessIdentity>): boolean {
+    return this.mutate((file) => {
+      const entry = file.entries[sessionKeyId(key)];
+      const structuredHost = entry?.structuredHost;
+      const current = structuredHost?.process;
+      if (!entry?.claimOwner || !structuredHost || !current || expected.startIdentity === null
+        || !sameRecordedProcessIdentity(current, expected)) return false;
+      const replacement = {
+        ...entry,
+        pendingAction: "handoff" as const,
+        structuredHost: {
+          ...structuredHost,
+          releaseHandoffClaimEpoch: entry.claimEpoch,
+        },
+      };
+      const changedHostPaths = activeHostPathsChangedByEntry(file, sessionKeyId(key), replacement);
+      const readinessBefore = migrationReadinessSignature(file, key.engine, changedHostPaths);
+      entry.pendingAction = replacement.pendingAction;
+      entry.structuredHost = replacement.structuredHost;
+      entry.updatedAt = now();
+      advanceMigrationScopeRevision(file, key.engine, readinessBefore, changedHostPaths);
+      return true;
     });
   }
 
@@ -5849,6 +6082,20 @@ export class AgentRegistry {
     evidence?: MigrationIntent["evidence"];
     scope?: MigrationScope;
   }): MigrationIntent {
+    /* #1279. An AUTOMATIC engine-wide migration used to set one global target
+       and then queue every unpinned conversation without ever asking which
+       project each one belonged to. A target allowed for one project therefore
+       dragged another project's work onto an account its own pool forbids, and
+       a binding record nobody could read stopped none of it — the fence was
+       simply not on this path.
+       The pool is read HERE, before the transaction, so an unreadable record
+       refuses before the routing revision moves: the engine's default account
+       is what every later automatic pick starts from, and moving it on evidence
+       this process cannot read is the routing change the rule forbids.
+       A MANUAL migration names its target outright. It is a control, it is
+       carried out — outside the pool included — and an unreadable record does
+       not veto it, so it reads no bindings at all. */
+    const bindings = input.origin === "auto" ? accountProjectBindings() : null;
     return withAccountMutationLock(() => this.mutate((file) => {
       const repeated = Object.values(file.migrationIntents).find((intent) =>
         intent.engine === input.engine && intent.requestIds.includes(input.requestId));
@@ -5903,6 +6150,20 @@ export class AgentRegistry {
           }
           continue;
         }
+        /* The decision the engine-wide loop was missing, taken here at the
+           per-conversation boundary because that is the only place the project
+           is known: this conversation's own project's pool, and whether the
+           target has room in it. A conversation whose project forbids the
+           target, or whose target is out of capacity, is PARKED — left exactly
+           where it is running, on the account it is already on, while the rest
+           of the engine moves. */
+        if (bindings && admitAutomaticAccountTarget({
+          project: conversationProjectKey(conversation.projectOwnership, source.launchProfile),
+          engine: input.engine,
+          targetId: input.targetId,
+          observations: Object.values(file.quotaObservations[input.engine]),
+          bindings,
+        }).kind !== "available") continue;
         const readiness = migrationReadiness(file, conversation);
         if ((input.scope ?? "all") === "active" && readiness === "deferred") continue;
         scoped += 1;
@@ -5921,7 +6182,22 @@ export class AgentRegistry {
     }));
   }
 
+  /**
+   * The lazy half of the same automatic move (#1279): a send arrives, this
+   * conversation is still on the account it was launched on, the engine's
+   * routing has since moved, and the Viewer decides BY ITSELF that the work
+   * should follow. Nobody named this conversation and nobody named its project,
+   * so it is an automatic selection and obeys the automatic rule.
+   *
+   * Read the record before anything moves: an unreadable one throws, because
+   * "the boundary cannot be seen" must never arrive at this seam wearing the
+   * answer that means "there is none". Read and allowed, a target the project's
+   * pool forbids or that has a confirmed zero-capacity sample PARKS — the
+   * conversation is returned exactly as it stands and the send lands on the
+   * account it is already running on, which crosses nothing.
+   */
   requestConversationMigrationToActiveAccount(id: ViewerConversationId): RegistryConversation {
+    const bindings = accountProjectBindings();
     return this.mutate((file) => {
       const canonicalId = resolveConversationAlias(file, id);
       const conversation = file.conversations[canonicalId];
@@ -5931,6 +6207,13 @@ export class AgentRegistry {
       const source = conversation.generations.at(-1);
       if (!targetId || !source || source.accountId === null || source.accountId === targetId) return clone(conversation);
       if (conversation.migrationOptOut?.targetId === targetId) return clone(conversation);
+      if (admitAutomaticAccountTarget({
+        project: conversationProjectKey(conversation.projectOwnership, source.launchProfile),
+        engine: conversation.engine,
+        targetId,
+        observations: Object.values(file.quotaObservations[conversation.engine]),
+        bindings,
+      }).kind !== "available") return clone(conversation);
       /* A failed-recoverable migration stays parked (#708). Re-arming it from a
          lazy active-account request minted a fresh operation identity on every
          later touch of the conversation, and a fresh identity means a fresh
@@ -6246,12 +6529,19 @@ export class AgentRegistry {
       if (expectedRevision !== undefined && current.revision !== expectedRevision) throw new Error("migration revision is stale");
       const intent = file.migrationIntents[current.intentId];
       if (!intent || intent.state === "stopped") throw new Error("migration intent is inactive");
+      const source = conversation.generations.at(-1);
+      if (!source) throw new Error("conversation has no source generation");
+      const admission = migrationEnrollmentAdmission(file, conversation, source, intent);
+      if (admission.kind === "refused") {
+        const changedAt = now();
+        conversation.migration = { ...current, error: admission.reason, updatedAt: changedAt };
+        conversation.updatedAt = changedAt;
+        return clone(conversation);
+      }
       if (intent.state === "complete" && current.phase === "failed-recoverable") {
         intent.state = "draining";
         intent.updatedAt = now();
       }
-      const source = conversation.generations.at(-1);
-      if (!source) throw new Error("conversation has no source generation");
       conversation.migration = {
         ...current,
         phase: migrationTurnIsBusy(file, conversation) ? "waiting-turn" : "requested",
@@ -6477,6 +6767,7 @@ export class AgentRegistry {
     runtimeImages: readonly StructuredImageRef[] = [],
     contentDigest: string | null = null,
     commandInput: HeldDeliveryCommandInput = {},
+    admission: { recoveryIntent?: HeldDelivery["recoveryIntent"] } = {},
   ): HeldDelivery {
     if (payloadKind === "text" && !text) throw new Error("held delivery must contain at most 32000 characters");
     if (payloadKind === "runtime-images" && runtimeImages.length === 0) {
@@ -6484,6 +6775,7 @@ export class AgentRegistry {
     }
     /* One UTF-8 bound covers every payload kind, including image captions. */
     assertStructuredTextEnvelope(text);
+    const recoveryIntent = admission.recoveryIntent ?? null;
     return this.mutate((file) => {
       const inspection = inspectDeliveryReservation(
         file,
@@ -6514,6 +6806,7 @@ export class AgentRegistry {
         }
         delivery.deliveredAt = null;
         delivery.error = null;
+        if (recoveryIntent) delivery.recoveryIntent = recoveryIntent;
         if (migrationBlocksDelivery) {
           delivery.state = "held";
           delivery.generationId = null;
@@ -6561,6 +6854,7 @@ export class AgentRegistry {
         artifactPaths: [],
         command: canonicalHeldDeliveryCommand(commandInput, deliveryId),
         requestDigest,
+        recoveryIntent,
         state: "held",
         generationId: null,
         attempts: 0,
@@ -6631,6 +6925,25 @@ export class AgentRegistry {
       if (delivery.state !== "delivered") terminalizeHeldDelivery(file, delivery, reason);
       return clone(delivery);
     });
+  }
+
+  /** Expires pending work whose target has two terminal proofs: a durable
+      supersedence edge and a registry process identity that is gone. Settlement
+      keeps the delivery operation queryable and removes it from startup's
+      pending-work set. */
+  drainDeadSupersededHeldDeliveries(): string[] {
+    const snapshot = this.readOnlySnapshot();
+    const candidates = Object.values(snapshot.heldDeliveries)
+      .filter((delivery) => heldDeliveryTargetsDeadSupersededSession(snapshot, delivery, this.ownerAlive))
+      .map((delivery) => delivery.id);
+    if (candidates.length === 0) return [];
+    return this.mutate((file) => candidates.flatMap((id) => {
+      const delivery = file.heldDeliveries[id];
+      if (!delivery || !heldDeliveryTargetsDeadSupersededSession(file, delivery, this.ownerAlive)) return [];
+      terminalizeHeldDelivery(file, delivery, DEAD_SUPERSEDED_DELIVERY_REASON);
+      compactDeliveryReservations(file, delivery.conversationId, this.now());
+      return [id];
+    }));
   }
 
   /** Atomically fences rollback ownership against the current reservation and

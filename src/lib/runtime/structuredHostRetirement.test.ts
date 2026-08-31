@@ -12,6 +12,7 @@ import { claudeTranscriptPath } from "@/lib/agent/transcript";
 import { statePath } from "@/lib/configDir";
 import { procBackend } from "@/lib/proc";
 import { descendantPids } from "@/lib/proc/memory";
+import { systemBootEpoch } from "@/lib/processIdentity";
 import type { StructuredHostKillRef } from "@/lib/resources";
 
 import { ClaudeStreamBrokerHost, type ClaudeDeliveryLedger } from "./claudeStreamBrokerHost";
@@ -48,6 +49,7 @@ const IDLE_MS = 6 * 3_600_000;
 const TRANSCRIPT = `/home/user/.claude/projects/-repo/${SESSION}.jsonl`;
 const HOST_PID = 4_100;
 const HOST_IDENTITY = "4100:118820";
+const BOOT_EPOCH = systemBootEpoch();
 
 function entry(over: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -60,7 +62,7 @@ function entry(over: Record<string, unknown> = {}): Record<string, unknown> {
     structuredHost: {
       kind: "claude-broker",
       endpoint: "stdio",
-      process: { pid: HOST_PID, startIdentity: HOST_IDENTITY },
+      process: { pid: HOST_PID, startIdentity: HOST_IDENTITY, bootEpoch: BOOT_EPOCH },
       eventCursor: 12,
       protocolVersion: null,
       writerClaimEpoch: 1,
@@ -639,7 +641,7 @@ test("a qualifying host is retired with its whole tree, including a child in its
     snapshot: () => snapshot({
       entries: {
         [`claude:${SESSION}`]: entry({
-          structuredHost: { ...(entry().structuredHost as object), process: { pid: tree.pid, startIdentity: tree.startIdentity } },
+          structuredHost: { ...(entry().structuredHost as object), process: { pid: tree.pid, startIdentity: tree.startIdentity, bootEpoch: BOOT_EPOCH } },
         }),
       },
     }),
@@ -677,7 +679,7 @@ test("a retired conversation keeps everything a resume needs", async () => {
     entries: {
       [`claude:${SESSION}`]: entry({
         artifactPath: transcript,
-        structuredHost: { ...(entry().structuredHost as object), process: { pid: tree.pid, startIdentity: tree.startIdentity } },
+        structuredHost: { ...(entry().structuredHost as object), process: { pid: tree.pid, startIdentity: tree.startIdentity, bootEpoch: BOOT_EPOCH } },
       }),
     },
   });
@@ -760,7 +762,7 @@ test("an identity that changes after the predicate passed is refused at the sign
     snapshot: () => snapshot({
       entries: {
         [`claude:${SESSION}`]: entry({
-          structuredHost: { ...(entry().structuredHost as object), process: { pid: tree.pid, startIdentity: tree.startIdentity } },
+          structuredHost: { ...(entry().structuredHost as object), process: { pid: tree.pid, startIdentity: tree.startIdentity, bootEpoch: BOOT_EPOCH } },
         }),
       },
     }),
@@ -923,7 +925,7 @@ function qualifiedSubject(): StructuredHostRetirementSubject {
     stage: null,
     cwd: "/repo/worktree",
     transcriptPath: TRANSCRIPT,
-    process: { pid: HOST_PID, startIdentity: HOST_IDENTITY },
+    process: { pid: HOST_PID, startIdentity: HOST_IDENTITY, bootEpoch: BOOT_EPOCH },
     status: "idle",
     activeTurnRef: null,
     turnBusy: determined(false),
@@ -939,8 +941,23 @@ function qualifiedSubject(): StructuredHostRetirementSubject {
     seat: determined("none"),
     transcriptFile: determined({ mtimeMs: NOW - 24 * 3_600_000 }),
     observedStartIdentity: determined(HOST_IDENTITY),
+    observedBootEpoch: determined(BOOT_EPOCH!),
   };
 }
+
+test("a host recorded under another boot fails the shared process-identity clause", () => {
+  const subject = {
+    ...qualifiedSubject(),
+    process: { pid: HOST_PID, startIdentity: HOST_IDENTITY, bootEpoch: "boot-earlier" },
+    observedBootEpoch: determined("boot-current"),
+  } as StructuredHostRetirementSubject;
+
+  expect(structuredHostRetirementVerdict(subject, { now: NOW, idleMs: IDLE_MS })).toMatchObject({
+    retire: false,
+    clause: "process-identity",
+    reason: expect.stringContaining("no longer the recorded host"),
+  });
+});
 
 function isDeterminable(value: unknown): boolean {
   return typeof value === "object" && value !== null && "determined" in value;
@@ -961,7 +978,7 @@ test("no input the predicate reads can be undetermined and still retire", () => 
     .map(([field]) => field);
   /* Everything a reader off the machine answers: seat, turn, queue, ledger,
      realtime, transcript, kernel identity. */
-  expect(fields.length).toBe(7);
+  expect(fields.length).toBe(8);
 
   for (const field of fields) {
     const subject = { ...qualifiedSubject(), [field]: undetermined(`${field} could not be read`) };
@@ -1101,7 +1118,7 @@ test("a retired conversation still opens and resumes from its transcript", async
         [`claude:${SESSION}`]: entry({
           artifactPath: transcript,
           cwd,
-          structuredHost: { ...(entry().structuredHost as object), process: { pid: tree.pid, startIdentity: tree.startIdentity } },
+          structuredHost: { ...(entry().structuredHost as object), process: { pid: tree.pid, startIdentity: tree.startIdentity, bootEpoch: BOOT_EPOCH } },
         }),
       },
     }),

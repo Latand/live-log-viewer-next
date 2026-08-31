@@ -1,6 +1,7 @@
 import type { FlowEngine, RoleConfig } from "@/lib/flows/types";
 
 export type PipelineAccess = "read-only" | "read-write";
+export type PipelineSandbox = "full" | "restricted";
 
 export type PipelineRepoPreflightErrorCode =
   | "missing"
@@ -71,6 +72,17 @@ export type PipelineStageInput = {
   model?: string | null;
   effort?: string | null;
   access?: PipelineAccess;
+  /** Host/tool reach is independent from the mutation policy in `access`.
+      Omitted stages run with full host access; restriction is explicit. */
+  sandbox?: PipelineSandbox;
+  /** Repository-relative files or directories a read-only stage may produce.
+      The controller alone records these paths in Git. */
+  outputs?: string[];
+  /** The account this stage runs on (#1279). Omitted, the stage resolves its
+      account the way every unattended launch does — inside whatever set the
+      pipeline's project allows. Named, it is honored only when the project
+      allows it; otherwise the stage is refused, never quietly reseated. */
+  account?: string | null;
   "prompt": string;
   /** Pass edge: the stage activated when this one passes. Schema v3 allows any
       stage id (direct links, merges), constrained to an acyclic pass graph. */
@@ -209,18 +221,21 @@ export type PipelineCreationIntent = {
   launchId: string;
 };
 
-/** Durable receipt of the terminal-settlement host reap (#574). Completion
-    sweeps the pipeline's finished stage hosts in bounded rounds; persisting the
-    round count and the settlement is what keeps the sweep from re-killing the
-    same survivor on every tick forever, across process restarts included. */
+/** Durable receipt of finished-attempt host reaping (#574, #1123). Each stage
+    attempt is settled independently, so an idle host can be retired while the
+    rest of its pipeline runs or waits for a decision. */
 export type PipelineTerminalReap = {
-  /** Sweeps that dispatched at least one kill, or were cut off by the budget. */
+  /** Sweeps in the current unsettled batch that dispatched at least one kill,
+      or were cut off by the budget. Reset when a later attempt becomes eligible. */
   rounds: number;
-  /** Hosts whose termination this reap evidenced, across all rounds. */
+  /** Hosts whose termination this reap evidenced, across all batches. */
   stopped: number;
   lastAt: string;
-  /** Set once no finished host remains resident, or the round ceiling is
-      reached — survivors then live on as unconfirmed hosts. Never re-entered. */
+  /** Stage-attempt keys already proved absent, stopped, or handed to the idle
+      lifecycle after the runtime reported a later active turn. */
+  settledAttempts: string[];
+  /** Set once the current batch has no unfinished host, or the round ceiling is
+      reached. A later finished attempt opens a new batch. */
   settledAt: string | null;
 };
 
@@ -346,6 +361,10 @@ export type PatchPipelineRequest = {
   /** for override-stage: the not-yet-started run stage's access. Review-loop
       stages stay read-only (the resolver rejects read-write there). */
   access?: PipelineAccess;
+  /** for override-stage: the account the stage runs on (#1279); `null` clears
+      the pin back to the project's ordinary selection. Refused when the
+      project's binding does not allow the named account. */
+  account?: string | null;
   prompt?: string;
   task?: string;
   spec?: string;

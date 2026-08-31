@@ -5,7 +5,9 @@ import { isDeepStrictEqual } from "node:util";
 import type { Database as BunDatabase } from "bun:sqlite";
 
 import { reboundAssembledMcpGrants, rowClaimsBeyondBaselineGrant, type McpGrantPolicy } from "./mcpAllowlist";
+import { identityMaterializationFence } from "./identityMaterialization";
 import type { RegistryFile, SnapshotSpawnProjection, SnapshotTitleConversationProjection } from "./registry";
+import { sessionKeyId } from "./sessionKey";
 
 /** The collections the MCP grant decision reads and writes. Touching any one of
     them requires the decision to have run over ALL of them, because an entry or
@@ -278,7 +280,7 @@ export class SqliteAgentRegistryStore {
         this.onRowPayloadRead?.(collection, stored ? 1 : 0);
         return stored ? this.parseRow(collection, key, stored.value_json, true) : undefined;
       };
-      const normalizeRow = <Collection extends "receipts" | "conversations">(
+      const normalizeRow = <Collection extends "receipts" | "conversations" | "entries">(
         collection: Collection,
         key: string,
         value: unknown,
@@ -308,6 +310,16 @@ export class SqliteAgentRegistryStore {
         const conversation = rawConversation === undefined
           ? undefined
           : normalizeRow("conversations", conversationId, rawConversation);
+        const needsLegacyTransportEvidence = receipt.state !== "completed"
+          && receipt.transport === null
+          && receipt.key !== null;
+        const rawEntry = needsLegacyTransportEvidence && receipt.key
+          ? readRow("entries", sessionKeyId(receipt.key))
+          : undefined;
+        const entry = receipt.key && rawEntry !== undefined
+          ? normalizeRow("entries", sessionKeyId(receipt.key), rawEntry)
+          : undefined;
+        const identityPublished = identityMaterializationFence().allowsReceipt(receipt, { entry });
         projection[launchId] = {
           launchId: receipt.launchId,
           state: receipt.state,
@@ -315,7 +327,9 @@ export class SqliteAgentRegistryStore {
           engine: receipt.engine,
           cwd: receipt.cwd,
           createdAt: receipt.createdAt,
-          materializedPath: conversation?.generations.at(-1)?.path ?? receipt.artifactPath,
+          materializedPath: identityPublished
+            ? conversation?.generations.at(-1)?.path ?? receipt.artifactPath
+            : null,
         };
       }
       this.db.exec("COMMIT");

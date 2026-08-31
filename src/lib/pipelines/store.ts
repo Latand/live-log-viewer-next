@@ -10,7 +10,8 @@ import { MAX_SCAFFOLD_LENGTH } from "@/lib/roles/store";
 import { initializeStateCollections, SqliteStateCollection, type StateCollectionSeed } from "@/lib/state/sqliteStateStore";
 import type { BoardTask } from "@/lib/tasks/types";
 
-import { MAX_FAIL_EDGE_ROUNDS, MAX_PIPELINE_STAGES } from "./limits";
+import { MAX_FAIL_EDGE_ROUNDS, MAX_PIPELINE_STAGES, MAX_STAGE_OUTPUTS } from "./limits";
+import { normalizeStageOutputPath } from "./stageAccess";
 import type { EffectivePipelineRole, Pipeline, PipelineCreationIntent, PipelineEdgeActivation, PipelineStage, PipelineTerminalReap, PipelineUnconfirmedHost } from "./types";
 import { stageVerdictFrom } from "./verdict";
 
@@ -204,6 +205,8 @@ function isTerminalReap(value: unknown): value is PipelineTerminalReap {
   return Number.isInteger(reap.rounds) && (reap.rounds as number) >= 0
     && Number.isInteger(reap.stopped) && (reap.stopped as number) >= 0
     && typeof reap.lastAt === "string"
+    && (reap.settledAttempts === undefined
+      || (Array.isArray(reap.settledAttempts) && reap.settledAttempts.every((key) => typeof key === "string")))
     && isNullableString(reap.settledAt);
 }
 
@@ -222,10 +225,18 @@ function isStage(value: unknown): value is PipelineStage {
     (stage.model === undefined || stage.model === null || typeof stage.model === "string") &&
     (stage.effort === undefined || stage.effort === null || typeof stage.effort === "string") &&
     (stage.access === undefined || stage.access === "read-only" || stage.access === "read-write") &&
+    (stage.sandbox === undefined || stage.sandbox === "full" || stage.sandbox === "restricted") &&
+    (stage.outputs === undefined || (
+      stage.kind === "run" &&
+      Array.isArray(stage.outputs) &&
+      stage.outputs.length > 0 && stage.outputs.length <= MAX_STAGE_OUTPUTS &&
+      stage.outputs.every((output, index) => normalizeStageOutputPath(output) === output && stage.outputs!.indexOf(output) === index)
+    )) &&
     isEffectiveRole(stage.effectiveRole)
   )) return false;
   const effective = stage.effectiveRole;
   const referencedRoleId = role === undefined ? null : (role as { roleId: EffectivePipelineRole["roleId"] }).roleId;
+  if (stage.outputs !== undefined && effective.access !== "read-only") return false;
   if (effective.roleId !== referencedRoleId) return false;
   if (stage.kind === "review-loop" && effective.access !== "read-only") return false;
   if (stage.engine !== undefined && stage.engine !== effective.engine) return false;
@@ -511,6 +522,12 @@ export function planPipelineStateMigration(): {
     run, attempt, cursor rows), so cached records stay pristine while callers
     receive independently mutable structures. Deep config leaves are shared. */
 function reviveLoadedPipeline(pipeline: Pipeline): Pipeline {
+  const settledAttempts = pipeline.terminalReap?.settledAttempts
+    ?? (pipeline.terminalReap?.settledAt
+      ? pipeline.runs.flatMap((run) => run.attempts
+          .filter((attempt) => Boolean(attempt.verdict || attempt.completedAt))
+          .map((attempt) => `${run.stageId}:${attempt.n}`))
+      : []);
   return {
     ...pipeline,
     project: canonicalProject(pipeline.project),
@@ -530,7 +547,9 @@ function reviveLoadedPipeline(pipeline: Pipeline): Pipeline {
     unconfirmedHosts: pipeline.unconfirmedHosts?.length
       ? pipeline.unconfirmedHosts.map((host) => ({ ...host }))
       : undefined,
-    terminalReap: pipeline.terminalReap ? { ...pipeline.terminalReap } : undefined,
+    terminalReap: pipeline.terminalReap
+      ? { ...pipeline.terminalReap, settledAttempts: [...settledAttempts] }
+      : undefined,
     restored: undefined,
     stages: pipeline.stages.map((stage) => ({ ...stage, onFail: stage.onFail ?? null })),
     cursor: pipeline.cursor

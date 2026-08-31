@@ -315,6 +315,9 @@ export interface HeldDelivery {
   artifactPaths: string[];
   command: HeldDeliveryCommand;
   requestDigest: string | null;
+  /** Durable evidence that this reservation admitted a reclaimed-host resume
+      before its runtime owner was published. */
+  recoveryIntent?: "reclaimed-host" | null;
   state: "held" | "assigned" | "delivered" | "failed" | "delivery-uncertain";
   generationId: string | null;
   attempts: number;

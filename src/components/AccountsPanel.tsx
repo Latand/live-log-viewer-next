@@ -171,7 +171,8 @@ function AuthIdentity({ account }: { account: AccountOption }) {
   const tone = health === "authenticated" ? "success" : health === "signed_out" || health === "error" ? "danger" : "neutral";
   return (
     <span className="flex min-w-0 items-center gap-1 text-[9.5px] font-medium text-muted">
-      <code className="truncate font-mono">{account.id}</code>
+      <code className="truncate font-mono" title={account.id}>{account.id}</code>
+      {account.plan ? <Badge tone="neutral" className="px-1.5 py-0 text-[9px]">{account.plan}</Badge> : null}
       <Badge tone={tone} className="px-1.5 py-0 text-[9px]">{t(AUTH_HEALTH_KEY[health])}</Badge>
     </span>
   );
@@ -216,12 +217,13 @@ function AccountRow({ account, engine, quota, activeId, onSelect, onRemove, onCo
           style={{ backgroundColor: isActive ? tint.color : "transparent", boxShadow: isActive ? "none" : "inset 0 0 0 1.5px var(--color-border)" }}
         />
         <span className="min-w-0 flex-1">
-          <span className={`block truncate text-[13px] leading-tight ${isActive ? "font-bold text-primary" : "font-semibold"}`}>{account.label}</span>
+          <span className={`block break-words text-[13px] leading-tight ${isActive ? "font-bold text-primary" : "font-semibold"}`}>{account.label}</span>
           <AuthIdentity account={account} />
         </span>
         <CapacityChip quota={quota} engine={engine} />
         <StateChip state={state} />
       </button>
+      <BoundProjects account={account} />
       {children}
       {state === "pending" && account.deviceAuth ? (
         <div className="flex items-center gap-2 px-3.5 pb-1.5 text-[10px] text-muted">
@@ -281,6 +283,104 @@ function AccountRow({ account, engine, quota, activeId, onSelect, onRemove, onCo
           )
         ) : null}
       </div>
+    </div>
+  );
+}
+
+export type ProjectAccountContext = {
+  project: string;
+  restricted: boolean;
+  allowed: { accountId: string; label: string }[];
+  carrying: { accountId: string; label: string }[];
+  outsidePool: { accountId: string; label: string; at: string; actor: "operator" | "agent" }[];
+};
+
+/** Project pool detail formerly painted as one chip per account in the primary
+    toolbar. It now lives inside the engine panel, where full labels and the
+    reason each account is present remain available without consuming the row. */
+function ProjectAccountDetail({ context }: { context: ProjectAccountContext }) {
+  const { t } = useLocale();
+  const carrying = new Set(context.carrying.map((account) => account.accountId));
+  const chosen = new Map(context.outsidePool.map((account) => [account.accountId, account] as const));
+  const extra = [...context.carrying, ...context.outsidePool]
+    .filter((account, index, list) => list.findIndex((item) => item.accountId === account.accountId) === index);
+  const rows = context.restricted
+    ? [...context.allowed, ...extra.filter((account) => !context.allowed.some((item) => item.accountId === account.accountId))]
+    : extra;
+
+  return (
+    <section data-project-account-detail={context.project} className="border-b border-border bg-canvas/55 px-3.5 py-2.5">
+      <div className="mb-1.5 flex items-center gap-2 text-[10px] font-semibold text-muted">
+        <span>{t("projectAccounts.label")}</span>
+        {!context.restricted ? (
+          <span className="rounded-full border border-border bg-card px-1.5 py-0.5 text-secondary">
+            {t("projectAccounts.any")}
+          </span>
+        ) : null}
+      </div>
+      {rows.length ? (
+        <div className="flex flex-wrap items-center gap-1.5">
+          {rows.map((account) => {
+            const choice = chosen.get(account.accountId);
+            return (
+              <span
+                key={account.accountId}
+                title={choice
+                  ? t(choice.actor === "agent" ? "projectAccounts.chosenByAgent" : "projectAccounts.chosenByOperator", {
+                      label: account.label,
+                      at: choice.at,
+                    })
+                  : carrying.has(account.accountId)
+                    ? t("projectAccounts.carryingAria", { label: account.label })
+                    : account.accountId}
+                {...(carrying.has(account.accountId) ? { "data-project-account-carrying": account.accountId } : {})}
+                {...(choice ? { "data-project-account-outside-pool": account.accountId } : {})}
+                className={`max-w-full break-words rounded-full border px-2 py-0.5 text-[10px] font-semibold ${
+                  choice
+                    ? "border-warning/45 bg-warning-soft text-warning"
+                    : carrying.has(account.accountId)
+                      ? "border-accent/45 bg-accent/10 text-primary"
+                      : "border-border bg-card text-secondary"
+                }`}
+              >
+                {account.label}
+                {carrying.has(account.accountId) ? ` · ${t("projectAccounts.carrying")}` : ""}
+                {choice ? ` · ${t("projectAccounts.outsidePool")}` : ""}
+              </span>
+            );
+          })}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+/**
+ * The accounts side of #1279's relation: the projects this account is bound to.
+ *
+ * Nothing renders when there are none, and that reads correctly: a binding
+ * fences the PROJECT, not the account, so an account with no bindings is not
+ * restricted — every project that has not bound anything may still use it.
+ */
+function BoundProjects({ account }: { account: AccountOption }) {
+  const { t } = useLocale();
+  const projects = account.projects ?? [];
+  if (!projects.length) return null;
+  return (
+    <div
+      data-account-projects={account.id}
+      className="flex flex-wrap items-center gap-1 px-3.5 pb-0.5 pl-[30px] text-[10px]"
+    >
+      <span className="font-semibold text-muted">{t("accounts.boundProjects")}</span>
+      {projects.map((entry) => (
+        <span
+          key={entry.project}
+          title={entry.project}
+          className="max-w-[160px] truncate rounded-full border border-border bg-canvas px-1.5 py-0.5 font-semibold text-secondary"
+        >
+          {entry.displayName}
+        </span>
+      ))}
     </div>
   );
 }
@@ -497,6 +597,7 @@ export function AccountsPanel({
   placement = "footer",
   focusAccountId = null,
   quotaOverride,
+  projectContext,
 }: {
   state: EngineAccountsState;
   onClose: () => void;
@@ -505,6 +606,7 @@ export function AccountsPanel({
       (issue #229 — a header account badge steers here). */
   focusAccountId?: string | null;
   quotaOverride?: { accountId: string; quota: ReconciledQuota; now: number };
+  projectContext?: ProjectAccountContext;
 }) {
   const { t } = useLocale();
   const { accounts, active, status, notice, mutation, engine } = state;
@@ -587,6 +689,8 @@ export function AccountsPanel({
         </header>
 
         <p className="sr-only" role="status" aria-live="polite">{announcement}</p>
+
+        {projectContext ? <ProjectAccountDetail context={projectContext} /> : null}
 
         {mutation ? (
           <div role="status" aria-live="polite" className="flex items-center gap-2 border-b border-border bg-accent/5 px-3 py-2 text-[11px] font-semibold text-primary">

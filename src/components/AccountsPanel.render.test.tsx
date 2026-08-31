@@ -4,14 +4,14 @@ import { renderToStaticMarkup } from "react-dom/server";
 import type { ClaudeLoginView, EngineAccountsState } from "@/hooks/useEngineAccounts";
 import { translate } from "@/lib/i18n";
 
-import { AccountsPanel } from "./AccountsPanel";
+import { AccountsPanel, type ProjectAccountContext } from "./AccountsPanel";
 
 const base = (over: Partial<EngineAccountsState> = {}): EngineAccountsState => ({
   engine: "codex",
   accounts: [
     // Each capacity chip is reconciled from the account's own windows, so the
     // fixture carries the windows the chip percentages come from.
-    { id: "main", label: "Main", kind: "legacy", authPresent: true, loginPending: false, loginState: "authenticated", deviceAuth: null,
+    { id: "main", label: "Main", kind: "legacy", authPresent: true, plan: "Team", loginPending: false, loginState: "authenticated", deviceAuth: null,
       limits: { freshness: "fresh", session: { usedPercent: 88, resetsAt: null, windowMinutes: 300 }, weekly: null } },
     { id: "work", label: "Work", kind: "managed", authPresent: true, loginPending: false, loginState: "authenticated", deviceAuth: null,
       limits: { freshness: "stale", session: null, weekly: { usedPercent: 36, resetsAt: null, windowMinutes: 10_080 } } },
@@ -37,8 +37,8 @@ const base = (over: Partial<EngineAccountsState> = {}): EngineAccountsState => (
   ...over,
 });
 
-const render = (state: EngineAccountsState, placement?: "footer" | "header") =>
-  renderToStaticMarkup(<AccountsPanel state={state} onClose={() => {}} placement={placement} />);
+const render = (state: EngineAccountsState, placement?: "footer" | "header", projectContext?: ProjectAccountContext) =>
+  renderToStaticMarkup(<AccountsPanel state={state} onClose={() => {}} placement={placement} projectContext={projectContext} />);
 
 test("titles the panel per engine and keeps the mobile-only backdrop before the dialog", () => {
   expect(render(base())).toContain("Codex accounts");
@@ -72,7 +72,29 @@ test("renders a capacity chip per account and dims the stale one", () => {
   const html = render(base());
   expect(html).toContain("12%");
   expect(html).toContain("64%");
+  expect(html).toContain("Team");
   expect(html).toContain("opacity-55"); // the stale Work chip
+});
+
+test("the expanded toolbar panel retains project pool, carrier, and outside-pool detail", () => {
+  const projectContext: ProjectAccountContext = {
+    project: "project-atlas",
+    restricted: true,
+    allowed: [
+      { accountId: "account-north", label: "North star" },
+      { accountId: "account-harbor", label: "Harbor light" },
+    ],
+    carrying: [{ accountId: "account-harbor", label: "Harbor light" }],
+    outsidePool: [{ accountId: "account-south", label: "South ridge", at: "2026-08-30T09:00:00.000Z", actor: "operator" }],
+  };
+  const html = render(base(), "header", projectContext);
+  expect(html).toContain('data-project-account-detail="project-atlas"');
+  expect(html).toContain("North star");
+  expect(html).toContain('data-project-account-carrying="account-harbor"');
+  expect(html).toContain("Harbor light · carrying");
+  expect(html).toContain('data-project-account-outside-pool="account-south"');
+  expect(html).toContain("South ridge · outside the pool");
+  expect(html).not.toContain("truncate rounded-full");
 });
 
 test("shows account ids and auth health when labels collide", () => {
@@ -313,4 +335,21 @@ test("uk-locale smoke: every new claude login key resolves and interpolates in U
   expect(translate("uk", "accounts.claudeLogin.err.generic")).toBe("Не вдалося почати вхід. Спробуй ще раз.");
   expect(translate("uk", "accounts.claudeLogin.announceCodeReady", { label: "Робочий" })).toContain("Робочий");
   expect(translate("uk", "accounts.claudeLogin.announceCodeReady", { label: "Робочий" })).not.toContain("{label}");
+});
+
+test("an account row names the projects it is bound to, and stays silent when it is bound to none (#1279)", () => {
+  const bound = render(base({
+    accounts: [
+      { id: "reserved", label: "Reserved", kind: "managed", authPresent: true, loginPending: false, loginState: "authenticated", deviceAuth: null,
+        projects: [{ project: "project-atlas", displayName: "Atlas" }] },
+      { id: "spare", label: "Spare", kind: "managed", authPresent: true, loginPending: false, loginState: "authenticated", deviceAuth: null },
+    ],
+    active: "reserved",
+  }));
+  expect(bound).toContain('data-account-projects="reserved"');
+  expect(bound).toContain("Atlas");
+  expect(bound).toContain(translate("en", "accounts.boundProjects"));
+  /* An account with no bindings is NOT restricted — a fenced-looking row there
+     would say the opposite of what the record means. */
+  expect(bound).not.toContain('data-account-projects="spare"');
 });

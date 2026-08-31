@@ -10,7 +10,8 @@ export function RecordCard({ item }: { item: TranscriptRecordItem }) {
       <summary className="flex cursor-pointer list-none items-center gap-2 rounded-control py-0.5 text-label text-muted hover:bg-sunken [@media(pointer:coarse)]:min-h-11 [&::-webkit-details-marker]:hidden">
         <ChevronRight className="h-3.5 w-3.5 shrink-0 transition-transform group-open/record:rotate-90" aria-hidden />
         <span className="shrink-0 text-secondary">{tr("render.transcriptRecord")}</span>
-        <span className="min-w-0 truncate rounded-md bg-sunken px-1.5 py-0.5 font-mono text-caption text-primary">{item.recordType}</span>
+        <span className="max-w-[40%] shrink-0 truncate rounded-md bg-sunken px-1.5 py-0.5 font-mono text-caption text-primary">{item.recordType}</span>
+        {item.summary ? <span className="min-w-0 flex-1 truncate text-secondary">{item.summary}</span> : null}
         {time ? <span className="ml-auto shrink-0 tabular-nums">{time}</span> : null}
       </summary>
       <div className="mb-1 mt-1">

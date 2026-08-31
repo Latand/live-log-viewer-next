@@ -23,6 +23,8 @@ type ResourceWorkerRequest = {
   type: "collect";
   fresh: boolean;
   files: ResourceWorkerFileObservation[];
+  /** Process-identity epoch of the Viewer that observed the host PIDs. */
+  identityEpoch: string | null;
   /** Structured-host records the viewer read out of the registry for us. The
       worker runs contained and opens no registry of its own. */
   hosts: StructuredHostRecord[];
@@ -59,7 +61,7 @@ function resourceFileObservation(value: unknown): value is ResourceWorkerFileObs
 function structuredHostRecord(value: unknown): value is StructuredHostRecord {
   if (!record(value)) return false;
   const keys = [
-    "id", "engine", "sessionId", "pid", "startIdentity", "cwd", "path", "conversationId",
+    "id", "engine", "sessionId", "pid", "startIdentity", "bootEpoch", "cwd", "path", "conversationId",
     "title", "role", "model", "stage", "seat", "turnBusy", "owned",
   ];
   if (Object.keys(value).length !== keys.length || keys.some((key) => !Object.hasOwn(value, key))) return false;
@@ -68,6 +70,7 @@ function structuredHostRecord(value: unknown): value is StructuredHostRecord {
     && nullableString(value.sessionId)
     && Number.isSafeInteger(value.pid) && (value.pid as number) > 1
     && nullableString(value.startIdentity)
+    && nullableString(value.bootEpoch)
     && typeof value.cwd === "string"
     && nullableString(value.path)
     && nullableString(value.conversationId)
@@ -82,9 +85,10 @@ function structuredHostRecord(value: unknown): value is StructuredHostRecord {
 
 function resourceWorkerRequest(value: unknown): ResourceWorkerRequest | null {
   if (!record(value)
-    || Object.keys(value).length !== 4
+    || Object.keys(value).length !== 5
     || value.type !== "collect"
     || typeof value.fresh !== "boolean"
+    || !nullableString(value.identityEpoch)
     || !Array.isArray(value.files)
     || value.files.length > 10_000
     || !value.files.every(resourceFileObservation)
@@ -123,6 +127,7 @@ async function collect(message: unknown): Promise<void> {
       listAgentProcesses: agentProcesses,
       directoryExists: (directory) => existsSync(directory),
       processIdentity: procBackend.processIdentity,
+      bootEpoch: () => request.identityEpoch,
       hostStamp: readStructuredHostStamp,
     });
     const diagnostic = lastResourceBuildDiagnostic();

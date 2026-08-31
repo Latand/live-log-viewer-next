@@ -17,6 +17,8 @@ import {
   DEFAULT_FAIL_EDGE_ROUNDS,
   MAX_FAIL_EDGE_ROUNDS,
   MAX_PIPELINE_STAGES,
+  MAX_STAGE_OUTPUTS,
+  MAX_STAGE_OUTPUT_PATH_LENGTH,
   MAX_STAGE_PROMPT_LENGTH,
   MIN_STARTED_PIPELINE_STAGES,
 } from "@/lib/pipelines/limits";
@@ -48,6 +50,7 @@ export const MCP_TOOL_NAMES = [
   "list_conversations",
   "search_transcripts",
   "get_conversation",
+  "conversation_deliverability",
   "conversation_messages",
   "deploy_exact_sha",
   "get_pipeline",
@@ -74,6 +77,7 @@ export const MCP_TOOL_NAMES = [
   "send_message_to_orchestrator",
   "rotate_orchestrator",
   "seat_tick_settings",
+  "account_project_binding",
 ] as const;
 
 export type McpToolName = typeof MCP_TOOL_NAMES[number];
@@ -122,6 +126,10 @@ const MUTATING_MCP_TOOL_NAMES = new Set<McpToolName>([
      outlive this process either way: a replayed clientRequestId must answer
      with what the first call recorded. */
   "seat_tick_settings",
+  /* Writes the durable account↔project bindings when it carries a change
+     (#1279), and the record it answers with outlives this process either way:
+     a replayed clientRequestId must answer with what the first call recorded. */
+  "account_project_binding",
 ]);
 
 /**
@@ -1651,7 +1659,8 @@ const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
   spawn_agent: "Create a Viewer-managed agent conversation and return its durable conversation and launch ids.",
   send_message: [
     "Deliver a message to a Viewer conversation through its registered runtime host.",
-    "The answer reports acceptance, not arrival: `outcome` is `queued` or `delivering` until the delivery record settles, and `settled` says which. Hold `operationId` and ask `message_receipt` what became of it — never treat `queued` as a terminal answer, and never re-send an unsettled operation, because a send whose fate is unknown can be delivered twice.",
+    "A reclaimed conversation host is resumed after the instruction is durably reserved, and the delivery queue keeps that single operation through publication.",
+    "The answer reports acceptance. `outcome` is `held`, `queued` or `delivering` until the delivery record settles, and `settled` says whether arrival is established. Hold `operationId` and ask `message_receipt` what became of it — never treat an unsettled outcome as terminal, and never re-send an unsettled operation, because a send whose fate is unknown can be delivered twice.",
   ].join(" "),
   message_receipt: [
     "Answer what became of one accepted send, by the `operationId` `send_message` returned.",
@@ -1665,7 +1674,8 @@ const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
     "Create a Viewer pipeline through the pipeline engine: a stage graph of agent conversations run in one worktree.",
     "Stages are a graph, not a list: each stage names its pass successor with `next` (a stage id, or null to end the chain), and a run stage may name a fail successor with `onFail`. `next` defaults to null, so a plan whose stages never set it is a set of disconnected stages, not a chain.",
     "A review-loop stage reviews the session of the run stage that reaches it, so it must be pass-reachable from a run stage through `next` edges — array order alone reaches nothing. review-loop stages are always read-only, may not define `onFail`, and take their engine/model/effort from their role (the registry reviewer preset runs on Codex) unless the stage overrides them.",
-    "Runtime overrides (engine, model, effort, access) belong on the stage; `role` carries only `roleId` and its `params`.",
+    "Runtime overrides (engine, model, effort, access) belong on the stage; `role` carries only `roleId` and its `params`. Host access defaults to full independently of access; set sandbox to restricted only when the stage must run inside the engine sandbox.",
+    "A read-only stage may name repository-relative outputs. It can write those paths, while the controller refuses undeclared worktree changes and agent-created commits and records only the declared outputs.",
     "autoStart:false creates a draft the operator starts from the board; a draft that pins `baseBranch` must also pass `baseRef` (a draft is not provisioned, so the caller resolves the SHA).",
     "`src` is the creator's transcript path: a native ~/.claude/projects path is normalized to the shared Claude transcript store when the mirrored file exists there.",
     "An invalid call is answered once with every violated constraint, each naming its field and expected shape.",
@@ -1675,6 +1685,7 @@ const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
   list_conversations: "List scanned Viewer conversations with durable ids and transcript paths.",
   search_transcripts: "Search indexed user and assistant message bodies across every scanned transcript store. Returns match snippets with speaker, timestamp, transcript path and byte offset; project is optional, and empty pages include corpus statistics. Queries never read transcript files.",
   get_conversation: "Read a conversation summary and its recent messages and tools. With tailLines, conversationId or selectedContext uses the bounded identity path, while transcriptPath uses the validated pinned reader; both return a bounded raw tail without a corpus scan. For normalized, filtered, paged messages use conversation_messages.",
+  conversation_deliverability: "Read whether one conversation currently has a deliverable host from the durable registry record. An accepted resume stays synchronizing until the current generation records a claimed process; reclaimed, synchronizing, superseded, and unknown are distinct conditions.",
   conversation_messages: "Read one conversation newest-first as engine-normalized records; Claude and Codex return the same shape, while hook attachments and usage envelopes are omitted. Identity accepts conversationId, transcriptPath, or selectedContext and resolves through the same bounded paths as get_conversation. kinds is a non-empty subset of message | reasoning | tool_call | tool_result | trace (default message). roles is a non-empty subset of user | assistant | system | tool (default all). since is an inclusive ISO timestamp lower bound. limit clamps to 1..200 (default 20); maxChars clamps to 1..16000 (default 4000), and truncated marks cut text after secret redaction. Records are newest-first. Pass the opaque cursor unchanged with a fresh clientRequestId for each next-older page while hasMore is true; cursors are bound to the transcript and filters. A normal empty page returns records: []. File work is bounded by the page, so a 100 MB rollout is never parsed in full.",
   deploy_exact_sha: "Deploy one full commit SHA. The designated orchestrator decides when to deploy and calls this directly; authority is the server-attributed designated seat, and nobody asks the operator for a confirmation, a phrase, or a SHA. Idempotent by clientRequestId; deployments serialize at the runtime host.",
   get_pipeline: "Read one pipeline by durable id.",
@@ -1716,6 +1727,12 @@ const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
     "A `reason` in your own words is required whenever the settings leave the default, and it is what the board card shows: a tick that has gone quiet with nothing saying why cannot be told apart from a tick that broke. Restoring the default needs no reason.",
     "`monitorPrompt` is your own additional prompt for this project's monitor, in your own words: it is appended to every later scheduler-fired wake beside the reasons and items the tick derives, never replacing them or the contract. Send a new `monitorPrompt` to replace it and `monitorPrompt: null` to clear it, and read the record back rather than trusting the echo. It is bounded and redacted before it is stored, like the reason. It changes what a wake says and never whether or when one is sent, so a prompt on its own needs no reason and leaves the project on the default tick — and `untilMinutes` expires the on/off and cadence setting, not the prompt.",
     "A project nobody has configured runs on the defaults, which are exactly the behaviour the tick has always had.",
+  ].join(" "),
+  account_project_binding: [
+    "List, add and remove the bindings that decide which accounts a project's work may run on. `action` is list (the default), add or remove; add and remove need `engine`, `accountId` and `project`.",
+    "Every answer is a READ of the record: an add or a remove returns the bindings re-read from the store after the write, and a mutation the re-read does not show is refused rather than reported ok. Do not trust an echo — read `bindings` back.",
+    "A project with no binding for an engine allows every account of that engine, which is exactly the behaviour it has always had; `restricted: false` on an engine's block says so. Binding a project to a subset fences every selection for its work, including the automatic switch under rate-limit pressure: when every allowed account is out of capacity that is reported and the work parks, and an account outside the set is never chosen.",
+    "`project` defaults to your own on a list, and is required to add or remove.",
   ].join(" "),
   rotate_orchestrator: "Explicitly hand a project's orchestrator seat to a fresh successor: bounded handoff (predecessor transcript reference, open tasks, optional notes), atomic designation switch, manager-authority-only revocation of the predecessor, bidirectional lineage. Never triggered automatically.",
 };
@@ -1802,7 +1819,13 @@ const pipelineStageSchema = z.object({
   effort: z.string().nullable().optional()
     .describe("Stage-level effort override, or null to inherit the role default. Must be an effort the stage engine supports."),
   access: z.enum(["read-only", "read-write"]).optional()
-    .describe("Stage-level access override. A review-loop stage is always read-only."),
+    .describe("Repository/production mutation policy. A review-loop stage is always read-only. This does not remove network, SSH, gh, or read tools."),
+  sandbox: z.enum(["full", "restricted"]).optional()
+    .describe("Tool/network boundary. Defaults to full host access. restricted explicitly enables the engine sandbox for this stage."),
+  outputs: z.array(z.string().min(1).max(MAX_STAGE_OUTPUT_PATH_LENGTH)).min(1).max(MAX_STAGE_OUTPUTS).optional()
+    .describe("Repository-relative files or directories a run stage may produce. For read-only run stages, the controller records only these paths and refuses every other worktree change or agent-created commit. Review-loop stages cannot declare outputs."),
+  account: z.string().nullable().optional()
+    .describe("Account this stage runs on (#1279), or null to let the project's own selection choose. Honored only when the pipeline's project allows that account; an account outside the project's allowed set is refused with the allowed ones named. A project with no binding allows every account."),
 }).passthrough();
 
 /* #1016: the typed target contract, published rather than guessed. `target` was
@@ -1964,6 +1987,11 @@ export const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
     selectedContext: selectedContextSchema,
     tailLines: boundedNumericInput("get_conversation", "tailLines")
       .describe("Read this many trailing transcript lines instead of the scanned summary. Use conversationId or selectedContext for the bounded identity path, or transcriptPath for the validated pinned reader; all alternatives keep answering while corpus scans are degraded."),
+  }).passthrough(),
+  conversation_deliverability: z.object({
+    clientRequestId: clientRequestIdSchema,
+    conversationId: z.string().min(1).optional(),
+    transcriptPath: z.string().min(1).optional(),
   }).passthrough(),
   conversation_messages: z.object({
     clientRequestId: clientRequestIdSchema,
@@ -2181,6 +2209,17 @@ export const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
     model: z.string().optional(),
     effort: z.string().optional().describe("Reasoning effort for the successor; round-trips into its spawn like create_orchestrator's."),
     accountId: z.string().optional(),
+  }).passthrough(),
+  account_project_binding: z.object({
+    clientRequestId: clientRequestIdSchema,
+    action: z.enum(["list", "add", "remove"]).optional()
+      .describe("list (default) reads the record; add and remove change it and answer with the record read back."),
+    engine: z.enum(["claude", "codex"]).optional()
+      .describe("Engine the account belongs to. Required to add or remove."),
+    accountId: z.string().trim().min(1).optional()
+      .describe("Account to allow on, or stop allowing on, the project. Required to add or remove."),
+    project: z.string().trim().min(1).optional()
+      .describe("Project whose allowed set to read or change. Defaults to your own on a list; required to add or remove."),
   }).passthrough(),
   seat_tick_settings: z.object({
     clientRequestId: clientRequestIdSchema,

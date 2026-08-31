@@ -3,10 +3,11 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { accountManager } from "@/lib/accounts/manager";
+import { AccountProjectBindingsUnreadableError, allowedAccountIdsForProject, projectAccountRefusalDetail } from "@/lib/accounts/projectBindings";
 import { mirroredClaudeTranscriptPath } from "@/lib/accounts/claude";
 import { emptyLaunchProfile, type ViewerConversationId } from "@/lib/accounts/migration/contracts";
 import { freshSpecFor } from "@/lib/agent/cli";
-import { agentRegistry, type DurableMembershipInput, type TmuxHostEvidence } from "@/lib/agent/registry";
+import { agentRegistry, identityMaterializationFence, type DurableMembershipInput, type TmuxHostEvidence } from "@/lib/agent/registry";
 import { forEachCooperatively } from "@/lib/cooperative";
 import { transcriptAllowed } from "@/lib/agent/spawnParent";
 import { sessionKeyFromTranscript, sessionKeyId } from "@/lib/agent/sessionKey";
@@ -14,11 +15,11 @@ import { headCwd } from "@/lib/agent/transcript";
 import { MAX_FLOW_NOTE_LENGTH, closeFlow, createFlowFromRequest, isRecoverableLegacyRelayFailurePause, patchFlow } from "@/lib/flows/commands";
 import { lastAssistantMessage, readFindingsFile } from "@/lib/flows/findings";
 import { loadFlows } from "@/lib/flows/store";
-import type { CreateFlowRequest, Flow, RoleConfig } from "@/lib/flows/types";
+import type { CreateFlowRequest, Flow, FlowEngine, RoleConfig } from "@/lib/flows/types";
 import { OPERATOR_PAUSE_RESUME_ACTOR, pauseResumeDetail, type PauseResumeActor } from "@/lib/pauseResumeActor";
 import { isRuntimeHostTransportFailure, runtimeHostClient, type RuntimeHostClient } from "@/lib/runtime/client";
 import { structuredHostsEnabled, supervisedRuntimeHostUnavailableReason } from "@/lib/runtime/flags";
-import { conversationTurnLiveness } from "@/lib/runtime/liveness";
+import { conversationTurnLiveness, type TurnLivenessDependencies } from "@/lib/runtime/liveness";
 import { structuredDeliveryPublicationState } from "@/lib/runtime/structuredDeliveryController";
 import { redactBounded } from "@/lib/monitor/redact";
 import { parseReview, type ReviewFinding } from "@/lib/review";
@@ -41,6 +42,8 @@ import {
   MAX_FAIL_EDGE_ROUNDS,
   MAX_PIPELINE_STAGES,
   MAX_SPEC_LENGTH,
+  MAX_STAGE_OUTPUTS,
+  MAX_STAGE_OUTPUT_PATH_LENGTH,
   MAX_STAGE_PROMPT_LENGTH,
   MAX_TASK_LENGTH,
   MIN_STARTED_PIPELINE_STAGES,
@@ -48,6 +51,8 @@ import {
 import { pipelineRepoPreflightError, pipelineRepoPreflightStatus, preflightPipelineRepo } from "./preflight";
 import { renderStagePrompt } from "./prompts";
 import { PIPELINE_ROLE_IDS, pipelineRoleLookup, resolvePipelineRole, validatePipelineRoleParams, type PipelineRoleLookup } from "./roles";
+import { normalizeStageOutputPath } from "./stageAccess";
+import { pipelineStageSandbox } from "./stageSandbox";
 import { pipelineValidationError, type PipelineValidationViolation } from "./validation";
 import { buildPipeline, findPipelineRecord, isEffectiveRole, loadPipelines, pipelineGraphError, pipelineIdentity, pipelineTaskLinkError, PipelineStoreError, withPipelineControllerMutation, withPipelineMutation } from "./store";
 import { ensurePipelineForTask, isTaskSpawnPipelineParams, type TaskPipelineSpawnParams, type TaskSpawnPipelineParams } from "./taskBinding";
@@ -59,6 +64,7 @@ import type {
   PipelineRoleId,
   PipelineRepoPreflight,
   PipelineRepoPreflightErrorCode,
+  PipelineSandbox,
   PipelineStage,
   PipelineStageInput,
   PipelineStageAttempt,
@@ -127,6 +133,7 @@ export type PipelineCloseReport = {
 export type PipelineStageLaunchReservation = Pick<PipelineStageSpawn, "launchId" | "conversationId">;
 export type PipelineSpawnReceipt = PipelineStageSpawn & {
   state: "starting" | "pane-bound" | "host-verified" | "prompt-delivered" | "path-pending" | "completed" | "failed" | "conflicted";
+  error?: string | null;
 };
 
 export interface PipelinePorts {
@@ -135,7 +142,15 @@ export interface PipelinePorts {
   roleLookup?: PipelineRoleLookup | null;
   spawnAgent(input: {
     role: EffectivePipelineRole;
+    /** Tool/network boundary. Full host access is the pipeline default; the
+        restrictive engine sandbox is selected only by an explicit stage. */
+    sandbox?: PipelineSandbox;
     cwd: string;
+    /** Project the launch belongs to; the account it may use is drawn from
+        this project's allowed set and nothing wider (#1279). */
+    project: string;
+    /** The account the stage named, if it named one. */
+    requestedAccountId: string | null;
     title: string;
     "prompt": string;
     parentPath: string | null;
@@ -180,6 +195,8 @@ export interface PipelinePorts {
       merge is a tidy close, not an unreadable worktree. */
   worktreePresent(dir: string): boolean;
   conversationAgentActive(conversationId: string): Promise<boolean | null>;
+  /** False means the durable registry has never registered this conversation. */
+  conversationRegistered?(conversationId: string): boolean;
   /** Null means hosted, a timestamp means dead/absent since then, and undefined
       means the registry cannot provide authoritative host evidence. */
   conversationHostUnavailableSince?(conversationId: string): Promise<string | null | undefined>;
@@ -202,7 +219,72 @@ export interface PipelinePorts {
   getFlow(id: string): Flow | null;
   findFlow(implementerPath: string, implementerConversationId: string | null, baseRef: string, targetSha: string): Flow | null;
   projectForCwd(cwd: string): string | null;
+  /** Accounts `project` allows for `engine`, or null when the project has no
+      binding for it — which means every account, as it always did (#1279). */
+  allowedAccountIds?(project: string, engine: FlowEngine): string[] | null;
   now(): string;
+}
+
+/** A refusal a caller returns verbatim, or null when the stages are acceptable. */
+type StageAccountRefusal = {
+  error: string;
+  status: number;
+  violations?: PipelineValidationViolation[];
+};
+
+/**
+ * The pool that governs `project`'s launches, or a refusal when the record that
+ * defines it cannot be read.
+ *
+ * The read throws so no caller can mistake a damaged record for an unbound
+ * project. Here that has to become an ANSWER: a well-formed request against a
+ * record that needs the operator is a conflict, and the same conflict — same
+ * wording, same status — the launch, the reseat and the binding route all give,
+ * so one repair clears every one of them. Left to propagate it is a 500 on a
+ * request nothing is wrong with.
+ */
+function stageAccountPool(
+  ports: PipelinePorts,
+  project: string,
+  engine: FlowEngine,
+): { pool: string[] | null } | { refusal: StageAccountRefusal } {
+  try {
+    return { pool: ports.allowedAccountIds?.(project, engine) ?? null };
+  } catch (error) {
+    if (!(error instanceof AccountProjectBindingsUnreadableError)) throw error;
+    return { refusal: { error: error.message, status: 409 } };
+  }
+}
+
+/** Create/override-time reading of #1279's rule, over stages already
+    normalized. The launch re-reads it at the seam; this is what keeps a plan
+    that could never run from being stored in the first place. */
+function stageAccountRefusal(
+  stages: readonly PipelineStage[],
+  project: string,
+  ports: PipelinePorts,
+): StageAccountRefusal | null {
+  if (!ports.allowedAccountIds) return null;
+  const violations: PipelineValidationViolation[] = [];
+  for (const [index, stage] of stages.entries()) {
+    const requested = stage.account?.trim();
+    if (!requested) continue;
+    const engine = stage.effectiveRole.engine;
+    const read = stageAccountPool(ports, project, engine);
+    if ("refusal" in read) return read.refusal;
+    const allowed = read.pool;
+    if (allowed === null || allowed.includes(requested)) continue;
+    violations.push({
+      field: `stages[${index}].account`,
+      message: allowed.length
+        ? `stage ${stage.id} names ${engine} account ${requested}, which project ${project} does not allow (allowed: ${allowed.join(", ")})`
+        : `stage ${stage.id} names ${engine} account ${requested}, and project ${project} allows no ${engine} account`,
+      expected: STAGE_ACCOUNT_SHAPE,
+    });
+  }
+  return violations.length
+    ? { error: pipelineValidationError(violations), violations, status: 400 }
+    : null;
 }
 
 function engineForTranscript(transcript: string): "claude" | "codex" | null {
@@ -213,12 +295,16 @@ function engineForTranscript(transcript: string): "claude" | "codex" | null {
 
 /**
  * Viewer-managed Claude stages run autonomously. Their role access remains a
- * product-scope contract, while the CLI permission mode must allow ordinary
+ * product-scope contract, while the default CLI permission mode allows ordinary
  * repository reads, GitHub inspection, screenshots, and verification commands
- * without an interactive permission wall.
+ * without an interactive permission wall. An explicit restricted sandbox uses
+ * Claude's ordinary restrictive mode.
  */
-export function pipelineClaudePermissionMode(role: EffectivePipelineRole): string | null {
-  return role.engine === "claude" ? "bypassPermissions" : null;
+export function pipelineClaudePermissionMode(
+  role: EffectivePipelineRole,
+  sandbox: PipelineSandbox = "full",
+): string | null {
+  return role.engine === "claude" && sandbox === "full" ? "bypassPermissions" : null;
 }
 
 function parentIdentity(parentPath: string | null): {
@@ -237,13 +323,28 @@ async function spawnPipelineAgent(
   input: Parameters<PipelinePorts["spawnAgent"]>[0],
   onReserved: (reservation: PipelineStageLaunchReservation) => void,
 ): Promise<PipelineStageSpawn> {
-  const account = accountManager.resolveSpawn(input.role.engine);
+  /* #1279's seam. An unbound project takes the same branch it always took —
+     the active account — so nothing changes for a project nobody configured.
+     A bound one draws from its allowed set only: a stage naming an account
+     outside it is refused, and an allowed set with no capacity left is
+     REPORTED. Neither case falls back onto an account the project forbids;
+     the throw parks the stage with the reason on the record. */
+  const resolution = accountManager.resolveProjectSpawn(input.role.engine, {
+    project: input.project,
+    requestedId: input.requestedAccountId,
+  });
+  if (resolution.kind !== "available") {
+    throw new Error(projectAccountRefusalDetail(resolution, input.role.engine, input.project));
+  }
+  const account = resolution.account;
   const parent = parentIdentity(input.parentPath);
+  const sandbox = input.sandbox ?? "full";
+  const restricted = sandbox === "restricted";
   const specBase = freshSpecFor(input.role.engine, input.cwd, {
     model: input.role.model,
     effort: input.role.effort,
-    readOnly: input.role.access === "read-only",
-    permissionMode: pipelineClaudePermissionMode(input.role),
+    readOnly: restricted,
+    permissionMode: pipelineClaudePermissionMode(input.role, sandbox),
     codexHome: input.role.engine === "codex" ? account.home : null,
     claudeConfigDir: input.role.engine === "claude" ? account.home : null,
     claudeProjectsDir: input.role.engine === "claude" ? account.transcriptRoot : null,
@@ -305,13 +406,12 @@ async function spawnPipelineAgent(
   if (begun.kind === "conflict") throw new Error("pipeline spawn attempt conflicts with its original request");
   onReserved({ launchId: begun.receipt.launchId, conversationId: begun.receipt.conversationId });
   if (begun.kind === "replay") {
-    const conversation = registry.conversation(begun.receipt.conversationId);
-    const transcript = begun.receipt.artifactPath ?? conversation?.generations.at(-1)?.path ?? null;
+    const identityPublished = identityMaterializationFence(registry.readOnlySnapshot()).allowsReceipt(begun.receipt);
     return {
       launchId: begun.receipt.launchId,
       conversationId: begun.receipt.conversationId,
-      sessionId: begun.receipt.key?.sessionId ?? null,
-      transcript,
+      sessionId: identityPublished ? begun.receipt.key?.sessionId ?? null : null,
+      "transcript": identityPublished ? begun.receipt.artifactPath : null,
       paneId: begun.receipt.verifiedHost?.paneId ?? begun.receipt.pane?.paneId ?? null,
     };
   }
@@ -360,6 +460,11 @@ const KILL_REFUSED_STATES = new Set(["failed", "rejected"]);
 
 export type StageStopProbes = {
   client?: RuntimeHostClient | null;
+  action?: (request: {
+    conversationId: string;
+    transcriptPath: string;
+    action: "kill";
+  }) => Promise<{ status: number; body: unknown }>;
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
   budgetMs?: number;
@@ -487,8 +592,11 @@ export async function stopPipelineStageAgent(
     if (!probe || !probe.resident()) return { outcome: "not-running" };
     const { conversationId, transcriptPath, resident } = probe;
 
-    const { applyConversationAction } = await import("@/lib/conversation/actions");
-    const result = await applyConversationAction({ conversationId, transcriptPath, action: "kill" });
+    const applyAction = probes.action ?? (async (request) => {
+      const { applyConversationAction } = await import("@/lib/conversation/actions");
+      return applyConversationAction(request);
+    });
+    const result = await applyAction({ conversationId, transcriptPath, action: "kill" });
     const body = result.body as { ok?: boolean; error?: string; operationId?: string; receipt?: { status?: string } };
     if (result.status >= 400 || body.ok !== true) {
       return { outcome: "failed", error: body.error ?? `stage host kill was refused with status ${result.status}` };
@@ -531,17 +639,22 @@ export async function stopPipelineStageAgent(
   }
 }
 
-export function defaultPipelinePorts(): PipelinePorts {
+export function defaultPipelinePorts(
+  dependencies: { liveness?: TurnLivenessDependencies } = {},
+): PipelinePorts {
   let runtimeSnapshot: ReturnType<NonNullable<ReturnType<typeof runtimeHostClient>>["snapshot"]> | null = null;
   const registry = agentRegistry();
   let registrySnapshot: ReturnType<typeof registry.readOnlySnapshot> | null = null;
   let adoptionCandidatesByPipeline: Map<string, PipelineAdoptionCandidate[]> | null = null;
+  let materializationFence: ReturnType<typeof identityMaterializationFence> | null = null;
   let flowSnapshot: Flow[] | null = null;
   const snapshot = () => registrySnapshot ??= registry.readOnlySnapshot();
+  const identityFence = () => materializationFence ??= identityMaterializationFence(snapshot());
   const flows = () => flowSnapshot ??= loadFlows();
   const invalidateRegistryProjection = () => {
     registrySnapshot = null;
     adoptionCandidatesByPipeline = null;
+    materializationFence = null;
   };
   const adoptionCandidates = () => {
     if (adoptionCandidatesByPipeline) return adoptionCandidatesByPipeline;
@@ -557,7 +670,13 @@ export function defaultPipelinePorts(): PipelinePorts {
         const receipt = receiptsByConversation.get(conversationId as ViewerConversationId) ?? null;
         const conversation = current.conversations[conversationId as ViewerConversationId] ?? null;
         const generation = conversation?.generations.at(-1) ?? null;
-        const agentPath = receipt?.artifactPath ?? generation?.path ?? null;
+        const receiptPublished = receipt ? identityFence().allowsReceipt(receipt) : false;
+        let agentPath = generation?.path ?? null;
+        let sessionId: string | null = null;
+        if (receipt) {
+          agentPath = receiptPublished ? receipt.artifactPath : null;
+          sessionId = receiptPublished ? receipt.key?.sessionId ?? null : null;
+        }
         if (!agentPath) continue;
         const runtime = membership.runtime ?? (receipt ? {
           engine: receipt.engine,
@@ -574,7 +693,7 @@ export function defaultPipelinePorts(): PipelinePorts {
           sourceConversationId: membership.parentConversationId,
           launchId: receipt?.launchId ?? null,
           conversationId,
-          sessionId: receipt?.key?.sessionId ?? null,
+          sessionId,
           agentPath,
           paneId: receipt?.verifiedHost?.paneId ?? receipt?.pane?.paneId ?? null,
           startedAt: receipt?.createdAt ?? membership.createdAt,
@@ -590,6 +709,7 @@ export function defaultPipelinePorts(): PipelinePorts {
     exec: realExec,
     preflightRepo: preflightPipelineRepo,
     roleLookup: pipelineRoleLookup,
+    allowedAccountIds: (project, engine) => allowedAccountIdsForProject(project, engine),
     spawnAgent: async (input, onReserved) => {
       const result = await spawnPipelineAgent(input, onReserved);
       invalidateRegistryProjection();
@@ -609,15 +729,18 @@ export function defaultPipelinePorts(): PipelinePorts {
       timer.unref?.();
     },
     spawnReceipt: (launchId) => {
-      const receipt = snapshot().receipts[launchId];
+      const current = snapshot();
+      const receipt = current.receipts[launchId];
       if (!receipt) return null;
+      const identityPublished = identityFence().allowsReceipt(receipt);
       return {
         state: receipt.state,
         launchId: receipt.launchId,
         conversationId: receipt.conversationId,
-        sessionId: receipt.key?.sessionId ?? null,
-        "transcript": receipt.artifactPath,
+        sessionId: identityPublished ? receipt.key?.sessionId ?? null : null,
+        "transcript": identityPublished ? receipt.artifactPath : null,
         paneId: receipt.verifiedHost?.paneId ?? receipt.pane?.paneId ?? null,
+        error: receipt.error,
       };
     },
     claimSpawnRetry: (launchId, claimId) => {
@@ -664,6 +787,8 @@ export function defaultPipelinePorts(): PipelinePorts {
       /* A hosted idle turn is an inter-turn state with unknown agent activity. */
       return null;
     },
+    conversationRegistered: (conversationId) => conversationId.startsWith("conversation_")
+      && Boolean(snapshot().conversations[conversationId as ViewerConversationId]),
     conversationHostUnavailableSince: async (conversationId) => {
       if (!conversationId.startsWith("conversation_")) return undefined;
       const current = snapshot();
@@ -683,7 +808,10 @@ export function defaultPipelinePorts(): PipelinePorts {
          evidence decides instead — and only `severed` counts, so a host writing
          to its transcript or burning CPU keeps the attempt alive however long
          its current step takes. */
-      const liveness = await conversationTurnLiveness(registry, conversation.id, { snapshot: current });
+      const liveness = await conversationTurnLiveness(registry, conversation.id, {
+        ...dependencies.liveness,
+        snapshot: current,
+      });
       return liveness?.state === "severed" && liveness.since !== null
         ? new Date(liveness.since).toISOString()
         : null;
@@ -693,10 +821,11 @@ export function defaultPipelinePorts(): PipelinePorts {
     headCwd: (transcriptPath) => headCwd(transcriptPath),
     lastMessage: lastAssistantMessage,
     pathForConversation: (conversationId) => conversationId.startsWith("conversation_")
-      ? snapshot().conversations[conversationId as ViewerConversationId]?.generations.at(-1)?.path ?? null
+      ? identityFence().pathForConversation(conversationId as ViewerConversationId)
       : null,
     sourcePathAllowed: transcriptAllowed,
     conversationIdForPath: (pathname) => {
+      if (!identityFence().allowsPath(pathname)) return null;
       for (const conversation of Object.values(snapshot().conversations)) {
         if (conversation.generations.some((generation) => generation.path === pathname)) return conversation.id;
       }
@@ -752,6 +881,7 @@ const SPAWN_HANDSHAKE_RETRY_DELAY_MS = 1_000;
 const SPAWN_CONTROLLER_WAIT_BUDGET_MS = 30_000;
 const SPAWN_CONTROLLER_RETRY_MAX_MS = 8_000;
 const DEAD_RUNNING_ATTEMPT_GRACE_MS = 3 * 60_000;
+const UNREGISTERED_STAGE_HOST_DIED_REASON = "the stage host died before its session registered";
 /** Attempt states that end a round; a pending cursor over one of these queues a
     fresh attempt on the next tick (tickRunStage/tickReviewStage). */
 const TERMINAL_ATTEMPT_STATES = new Set<PipelineStageAttempt["state"]>(["passed", "failed", "needs_decision", "skipped"]);
@@ -898,6 +1028,22 @@ function recordVerdictRecoveryMiss(
   attempt.error = null;
   pipeline.state = "running";
   pipeline.stateDetail = `re-evaluating terminal stage verdict (${checks}/${VERDICT_RECOVERY_MAX_CHECKS}): ${reason}`;
+}
+
+async function unregisteredStageHostDeathEvidence(
+  attempt: PipelineStageAttempt,
+  target: PipelineStageHostRef,
+  ports: PipelinePorts,
+  durable?: StageTurnEvidence | null,
+): Promise<string | null> {
+  if (target.paneId || !target.conversationId || !target.agentPath
+    || ports.conversationRegistered?.(target.conversationId) !== false) return null;
+  const evidence = durable === undefined
+    ? await ports.durableTurnEvidence(attempt.effectiveRole.engine, target.agentPath)
+    : durable;
+  return evidence?.launchOnly === true && evidence.message === null
+    ? UNREGISTERED_STAGE_HOST_DIED_REASON
+    : null;
 }
 
 function park(pipeline: Pipeline, detail: string, attempt?: PipelineStageAttempt | null): void {
@@ -1467,7 +1613,8 @@ function commitPassedStage(
   ports: PipelinePorts,
 ): void {
   const allowCommit = stage.kind === "run" && attempt.effectiveRole.access === "read-write";
-  const result = commitPipelineStage(pipeline, stage.id, allowCommit, ports.exec);
+  const protectedHead = stage.kind === "run" && !allowCommit ? pipeline.lastPassedCommit : null;
+  const result = commitPipelineStage(pipeline, stage.id, allowCommit, ports.exec, stage.outputs, protectedHead);
   if (!result.ok) {
     park(pipeline, result.error, attempt);
     return;
@@ -1664,7 +1811,10 @@ async function tickRunStage(
       const priorAttempt = runFor(pipeline, stage.id)?.attempts.filter((candidate) => !candidate.historical).at(-2) ?? null;
       const spawnInput: Parameters<PipelinePorts["spawnAgent"]>[0] = {
         role: attempt.effectiveRole,
+        sandbox: pipelineStageSandbox(stage),
         cwd: pipeline.worktreeDir,
+        project: pipeline.project,
+        requestedAccountId: stage.account ?? null,
         title: pipelineStageTitle(pipeline.task, stage.id),
         prompt,
         parentPath: latestCompletedAgentPath(pipeline, stage.id),
@@ -1772,7 +1922,7 @@ async function tickRunStage(
       attempt.agentPath = receipt.transcript;
       attempt.paneId = receipt.paneId;
       if (receipt.state === "failed" || receipt.state === "conflicted" || (receipt.state === "starting" && !receipt.paneId && !receipt.transcript)) {
-        park(pipeline, `stage spawn cannot recover from receipt state ${receipt.state}`, attempt);
+        park(pipeline, receipt.error ?? `stage spawn cannot recover from receipt state ${receipt.state}`, attempt);
         return;
       }
     }
@@ -1783,8 +1933,22 @@ async function tickRunStage(
   const structuredActive = !attempt.paneId && attempt.conversationId
     ? await ports.conversationAgentActive(attempt.conversationId)
     : null;
+  const spawnReceipt = attempt.launchId ? ports.spawnReceipt(attempt.launchId) : null;
+  const terminalSpawnFailure = spawnReceipt
+    && (spawnReceipt.state === "failed" || spawnReceipt.state === "conflicted")
+    ? spawnReceipt.error ?? `stage spawn cannot recover from receipt state ${spawnReceipt.state}`
+    : null;
+  /* A terminal spawn receipt is durable launch evidence. Runtime liveness can
+     lag behind receipt settlement or fail to answer, so it has no authority to
+     hide the recorded drain cause behind a later transcript park (#1326). */
+  if (terminalSpawnFailure) {
+    park(pipeline, terminalSpawnFailure, attempt);
+    return;
+  }
   if (!attempt.agentPath) {
-    if (structuredActive === false) park(pipeline, "structured stage ended before its session was discovered", attempt);
+    if (structuredActive === false) {
+      park(pipeline, "structured stage ended before its session was discovered", attempt);
+    }
     else if (attempt.paneId && !(await ports.paneAgentAlive(attempt.paneId))) park(pipeline, "stage agent exited before its session was discovered", attempt);
     return;
   }
@@ -1815,6 +1979,20 @@ async function tickRunStage(
      scan projection transiently lost the transcript, or the host is already
      gone. A busy turn is mid-work: its messages are never verdict candidates. */
   const durable = await ports.durableTurnEvidence(attempt.effectiveRole.engine, attempt.agentPath);
+  const unregisteredHostDeath = structuredActive === true
+    ? null
+    : await unregisteredStageHostDeathEvidence(attempt, {
+      stageId: stage.id,
+      attempt: attempt.n,
+      conversationId: attempt.conversationId,
+      agentPath: attempt.agentPath,
+      paneId: attempt.paneId,
+      ...(attempt.historical ? { adopted: true as const } : {}),
+    }, ports, durable);
+  if (unregisteredHostDeath && canSpendRecoveryCheck()) {
+    recordVerdictRecoveryMiss(pipeline, attempt, ports, unregisteredHostDeath, null);
+    return;
+  }
   const durableTerminal = durable?.turn === "terminal" && durable.message !== null && durable.message.ts > unixMs(attempt.startedAt);
   if (durable && durableTerminal) {
     const parsed = parsePipelineStageVerdict(durable.message!.text);
@@ -1836,6 +2014,26 @@ async function tickRunStage(
     }
   }
   if (hostUnavailablePastGrace) {
+    /* A CPU-flat structured process is still a real process. Retire it through
+       the same identity-fenced control path as an operator kill before making
+       the attempt retryable; otherwise pane-less retry admission can launch a
+       replacement while the recorded engine still exists (#1296). */
+    const stopped = await ports.stopStageAgent({
+      stageId: stage.id,
+      attempt: attempt.n,
+      conversationId: attempt.conversationId,
+      agentPath: attempt.agentPath,
+      paneId: attempt.paneId,
+      ...(attempt.historical ? { adopted: true as const } : {}),
+    });
+    if (stopped.outcome === "failed" || stopped.outcome === "unconfirmed") {
+      pipeline.stateDetail = stopped.outcome === "failed"
+        ? `automatic recovery could not retire the unavailable stage host: ${stopped.error}`
+        : "automatic recovery is waiting for the unavailable stage host to terminate";
+      ports.scheduleTick?.(1_000);
+      return;
+    }
+    pipeline.stateDetail = null;
     attempt.state = "failed";
     attempt.completedAt = ports.now();
     attempt.error = HISTORICAL_MISSING_STAGE_VERDICT;
@@ -2107,6 +2305,7 @@ async function tickReviewStage(
       spec: pipeline.spec ?? pipeline.task,
       mode: "auto",
       reviewerMode: "headless",
+      reviewerSandbox: pipelineStageSandbox(stage),
       roundLimit: 5,
     }, entries);
     if (!created.flow) {
@@ -2574,41 +2773,60 @@ async function reconcileUnconfirmedHosts(pipeline: Pipeline, ports: PipelinePort
     inside the pipelines transaction, so a slow host defers the rest of its
     pipeline's candidates to the next tick instead of stalling every mutation. */
 const TERMINAL_REAP_BUDGET_MS = 5_000;
-/** Sweeps one pipeline's terminal reap may spend before surfacing survivors. */
+/** Sweeps one finished-attempt batch may spend before surfacing survivors. */
 const TERMINAL_REAP_MAX_ROUNDS = 5;
 
 /**
- * Reaps a completed pipeline's finished stage hosts (#574).
+ * Reaps finished stage hosts as soon as their attempt is terminal (#574, #1123).
  *
- * advancePipeline marks the pipeline completed the moment its last stage
- * passes, but nothing stopped the hosts its stages left behind: every finished
- * builder kept an idle resume process resident on a paid quota, and a machine
- * running many pipelines accumulated hundreds of them. A close tears hosts
- * down (#670); completion now does the same, through the identical
- * identity-verified control path, with `closed` staying the close action's job
- * so an operator's acknowledge decision is never overridden by a later sweep.
+ * A stage may finish long before the pipeline: on a pass edge, a bounded repair
+ * loop, or a parked decision. Waiting for whole-pipeline completion left each
+ * finished host resident. The reap therefore follows attempt evidence through
+ * the same identity-verified control path while `closed` stays the explicit
+ * close action's job.
  *
  * Only hosts whose attempt finished its turn (a verdict or a completion stamp)
  * are candidates, and the runtime gets the last word: a conversation it
  * reports actively running is preserved, as are the pipeline's creator
- * conversation and transcript. The sweep is bounded twice — a per-sweep budget
- * so the transaction cannot stall behind slow kills, and a durable round
- * ceiling so a host that will not die becomes a visible unconfirmed host
- * (retired by reconcileUnconfirmedHosts once it is demonstrably gone) instead
- * of receiving a kill on every tick forever.
+ * conversation and transcript. Settled attempt keys make this incremental: a
+ * later terminal round opens another bounded batch without re-killing an older
+ * host. The per-sweep budget protects the transaction, and the durable round
+ * ceiling turns a survivor into a visible unconfirmed host.
  */
 async function reconcileTerminalStageHosts(pipeline: Pipeline, ports: PipelinePorts): Promise<boolean> {
-  if (pipeline.state !== "completed" || pipeline.terminalReap?.settledAt) return false;
-  const reap: PipelineTerminalReap = pipeline.terminalReap
-    ?? { rounds: 0, stopped: 0, lastAt: ports.now(), settledAt: null };
-  const deadline = ports.monotonicNow() + TERMINAL_REAP_BUDGET_MS;
+  if (!["running", "needs_decision", "paused", "completed"].includes(pipeline.state)) return false;
+  const settledAttempts = new Set(pipeline.terminalReap?.settledAttempts ?? []);
+  const unconfirmedAttempts = new Set((pipeline.unconfirmedHosts ?? [])
+    .map((host) => `${host.stageId}:${host.attempt}`));
+  const prior = pipeline.terminalReap;
   const candidates = launchedStageHosts(pipeline).filter(({ target, turnSettled }) => turnSettled
     && !(target.conversationId && target.conversationId === pipeline.srcConversationId)
-    && !(target.agentPath && target.agentPath === pipeline.srcPath));
+    && !(target.agentPath && target.agentPath === pipeline.srcPath)
+    && !settledAttempts.has(`${target.stageId}:${target.attempt}`)
+    && !unconfirmedAttempts.has(`${target.stageId}:${target.attempt}`));
+  if (candidates.length === 0) {
+    if (pipeline.state !== "completed" || prior?.settledAt) return false;
+    const settledAt = ports.now();
+    pipeline.terminalReap = prior
+      ? { ...prior, lastAt: settledAt, settledAttempts: [...settledAttempts], settledAt }
+      : { rounds: 0, stopped: 0, lastAt: settledAt, settledAttempts: [], settledAt };
+    return true;
+  }
+
+  const reap: PipelineTerminalReap = prior
+    ? {
+        ...prior,
+        rounds: prior.settledAt ? 0 : prior.rounds,
+        settledAttempts: [...settledAttempts],
+        settledAt: null,
+      }
+    : { rounds: 0, stopped: 0, lastAt: ports.now(), settledAttempts: [], settledAt: null };
+  const deadline = ports.monotonicNow() + TERMINAL_REAP_BUDGET_MS;
   const survivors: Array<PipelineStageHostRef & { operationId: string | null; detail: string }> = [];
   let attempted = false;
   let deferred = false;
   for (const [index, { target }] of candidates.entries()) {
+    const attemptKey = `${target.stageId}:${target.attempt}`;
     if (ports.monotonicNow() >= deadline) {
       deferred = true;
       /* Normally the next sweep picks these up; recorded here so that a reap
@@ -2623,18 +2841,28 @@ async function reconcileTerminalStageHosts(pipeline: Pipeline, ports: PipelinePo
       }
       break;
     }
-    if (!(await ports.stageHostResident(target))) continue;
+    if (!(await ports.stageHostResident(target))) {
+      settledAttempts.add(attemptKey);
+      continue;
+    }
     /* The attempt's own evidence says its turn ended, but a host the runtime
        still reports mid-turn (an adopted helper on a fresh turn) is live work,
        so it stays; the idle-TTL reaper owns it from here. */
-    if (target.conversationId && await ports.conversationAgentActive(target.conversationId) === true) continue;
+    if (target.conversationId && await ports.conversationAgentActive(target.conversationId) === true) {
+      settledAttempts.add(attemptKey);
+      continue;
+    }
     attempted = true;
     const result = await ports.stopStageAgent(target);
-    if (result.outcome === "stopped") reap.stopped += 1;
+    if (result.outcome === "stopped") {
+      reap.stopped += 1;
+      settledAttempts.add(attemptKey);
+    }
     else if (result.outcome === "unconfirmed") survivors.push({ ...target, operationId: result.operationId, detail: result.detail });
     else if (result.outcome === "failed") survivors.push({ ...target, operationId: null, detail: result.error });
   }
   reap.lastAt = ports.now();
+  reap.settledAttempts = [...settledAttempts];
   if (attempted || deferred) reap.rounds += 1;
   const clean = !deferred && survivors.length === 0;
   if (clean || reap.rounds >= TERMINAL_REAP_MAX_ROUNDS) {
@@ -2722,13 +2950,16 @@ export async function tickPipelines(entries: FileEntry[], ports: PipelinePorts =
 /* #1026: the expected shape each stage constraint names, shared by the batched
    error response and the MCP tool schema's field descriptions so a caller reads
    the same contract whether it asks the schema or trips the validator. */
-const STAGE_OBJECT_SHAPE = "{id, kind, prompt, next, onFail?, role?, engine?/model?/effort?/access? overrides}";
+const STAGE_OBJECT_SHAPE = "{id, kind, prompt, next, onFail?, role?, engine?/model?/effort?/access?/sandbox?/outputs?/account? overrides}";
 const STAGE_PROMPT_SHAPE = `non-empty string up to ${MAX_STAGE_PROMPT_LENGTH} characters`;
 const STAGE_ROLE_SHAPE = `{roleId: one of ${PIPELINE_ROLE_IDS.join(" | ")}, params?: {<key>: string | number}} — runtime overrides belong on the stage, not in role`;
 const STAGE_ROLE_ID_SHAPE = `one of ${PIPELINE_ROLE_IDS.join(" | ")}`;
 const STAGE_ROLE_PARAMS_SHAPE = "object of the role's declared parameters, values string or number";
 const STAGE_RUNTIME_SHAPE = "a role and stage-level engine/model/effort/access the role registry can resolve";
+const STAGE_SANDBOX_SHAPE = '"full" | "restricted" (default "full")';
+const STAGE_OUTPUTS_SHAPE = `array of 1–${MAX_STAGE_OUTPUTS} repository-relative paths, each at most ${MAX_STAGE_OUTPUT_PATH_LENGTH} characters`;
 const STAGE_NEXT_SHAPE = "id of another stage, or null to terminate the pass chain";
+const STAGE_ACCOUNT_SHAPE = "id of an account the pipeline's project allows, or null to let the project's own selection choose";
 const STAGE_ON_FAIL_SHAPE = `null, or {to: <existing stage id>, maxRounds?: 1–${MAX_FAIL_EDGE_ROUNDS}} — run stages only`;
 const STAGE_GRAPH_SHAPE = "acyclic next chains over existing stage ids, with every review-loop reachable from a run stage";
 
@@ -2864,6 +3095,37 @@ function normalizeStages(
     if (stage.effort !== undefined && stage.effort !== null && typeof stage.effort !== "string") {
       violations.push({ field: at("effort"), message: `stage ${id} effort must be a string or null`, expected: "effort string supported by the stage engine, or null to inherit the role default" });
     }
+    if (stage.sandbox !== undefined && stage.sandbox !== "full" && stage.sandbox !== "restricted") {
+      violations.push({ field: at("sandbox"), message: `stage ${id} sandbox must be full or restricted`, expected: STAGE_SANDBOX_SHAPE });
+    }
+    const rawOutputs = (raw as { outputs?: unknown }).outputs;
+    let outputs: string[] | undefined;
+    if (rawOutputs !== undefined) {
+      if (stage.kind === "review-loop") {
+        violations.push({ field: at("outputs"), message: `review-loop stage ${id} cannot declare worktree outputs`, expected: "outputs belong to run stages" });
+      } else if (!Array.isArray(rawOutputs) || rawOutputs.length < 1 || rawOutputs.length > MAX_STAGE_OUTPUTS) {
+        violations.push({ field: at("outputs"), message: `stage ${id} outputs must contain 1–${MAX_STAGE_OUTPUTS} paths`, expected: STAGE_OUTPUTS_SHAPE });
+      } else {
+        outputs = [];
+        for (const [outputIndex, value] of rawOutputs.entries()) {
+          const output = normalizeStageOutputPath(value);
+          if (!output) {
+            violations.push({ field: `${at("outputs")}[${outputIndex}]`, message: `stage ${id} output must be a safe repository-relative path`, expected: STAGE_OUTPUTS_SHAPE });
+          } else if (outputs.includes(output)) {
+            violations.push({ field: `${at("outputs")}[${outputIndex}]`, message: `stage ${id} output paths must be unique`, expected: STAGE_OUTPUTS_SHAPE });
+          } else {
+            outputs.push(output);
+          }
+        }
+      }
+    }
+    /* #1279: the stage may name the account it runs on. Shape is checked here;
+       whether the project's binding ALLOWS that account is checked where the
+       project is known — at create, at override, and again at the launch
+       itself, which is the seam that actually decides. */
+    if (stage.account !== undefined && stage.account !== null && typeof stage.account !== "string") {
+      violations.push({ field: at("account"), message: `stage ${id} account must be an account id string or null`, expected: STAGE_ACCOUNT_SHAPE });
+    }
     const nextValid = stage.next === undefined || stage.next === null || typeof stage.next === "string";
     if (!nextValid) {
       violations.push({ field: at("next"), message: `stage ${id} next must be a stage id or null`, expected: STAGE_NEXT_SHAPE });
@@ -2896,6 +3158,9 @@ function normalizeStages(
       ...(stage.model !== undefined ? { model: typeof stage.model === "string" ? stage.model.trim() || null : null } : {}),
       ...(stage.effort !== undefined ? { effort: typeof stage.effort === "string" ? stage.effort.trim() || null : null } : {}),
       ...(stage.access !== undefined ? { access: stage.access } : {}),
+      ...(stage.sandbox !== undefined ? { sandbox: stage.sandbox } : {}),
+      ...(outputs !== undefined ? { outputs } : {}),
+      ...(stage.account !== undefined ? { account: typeof stage.account === "string" ? stage.account.trim() || null : null } : {}),
       prompt,
       next: stage.next ?? null,
       onFail: onFailEdge,
@@ -2907,6 +3172,14 @@ function normalizeStages(
         field: at(field),
         message: "error" in resolved && resolved.error ? resolved.error : "invalid stage role",
         expected: field === "model" ? "model id from the selected engine's curated catalog" : STAGE_RUNTIME_SHAPE,
+      });
+      continue;
+    }
+    if (outputs !== undefined && resolved.role.access !== "read-only") {
+      violations.push({
+        field: at("outputs"),
+        message: `stage ${id} outputs require read-only access`,
+        expected: "outputs belong to read-only run stages",
       });
       continue;
     }
@@ -2934,6 +3207,9 @@ function draftStageInputs(stages: PipelineStage[]): PipelineStageInput[] {
     ...(stage.model !== undefined ? { model: stage.model } : {}),
     ...(stage.effort !== undefined ? { effort: stage.effort } : {}),
     ...(stage.access !== undefined ? { access: stage.access } : {}),
+    ...(stage.sandbox !== undefined ? { sandbox: stage.sandbox } : {}),
+    ...(stage.outputs !== undefined ? { outputs: [...stage.outputs] } : {}),
+    ...(stage.account !== undefined ? { account: stage.account } : {}),
     "prompt": stage.prompt,
     next: stage.next ?? null,
     onFail: stage.onFail ?? null,
@@ -3161,6 +3437,12 @@ export async function createPipelineFromRequest(
   const admission = ports.preflightRepo(requestedRepoDir);
   if (!admission.ok) return preflightFailure(admission);
   const repoDir = admission.repoDir;
+  /* The project is resolved here rather than at buildPipeline so #1279's rule
+     can be read before anything is stored: a stage naming an account the
+     project does not allow is refused at create, not discovered at launch. */
+  const project = ports.projectForCwd(repoDir) ?? path.basename(repoDir);
+  const accountRefusal = stageAccountRefusal(normalized.stages, project, ports);
+  if (accountRefusal) return accountRefusal;
   const base = req.autoStart === false && !explicitBaseRef
     ? null
     : resolvePipelineBase(repoDir, { baseBranch: req.baseBranch, baseRef: explicitBaseRef }, ports.exec);
@@ -3171,7 +3453,7 @@ export async function createPipelineFromRequest(
     taskIds,
     ...(taskSpawn ? { creationIntent: { kind: "task-spawn" as const, taskId: taskSpawn.task.id, launchId: taskSpawn.params.launchId } } : {}),
     ...(spec ? { spec } : {}),
-    project: ports.projectForCwd(repoDir) ?? path.basename(repoDir),
+    project,
     repoDir,
     stages: normalized.stages,
     srcPath: creator.lineage.srcPath,
@@ -3273,11 +3555,13 @@ function providerNoticeSummary(text: string): string {
  * What a transcript can prove about an attempt whose host refused to stop — the
  * only thing standing between a superseded lane and the board it cannot leave.
  *
- * Two shapes count, and they are siblings. A completed turn carrying a valid
- * fenced verdict says the stage finished (#1047, #988). A turn the provider cut
- * off — a session or model limit, an expired credential — says the stage ended
- * without producing one (#1141): the message that ended it is right there in the
- * final record, so the attempt is terminal by evidence and retires as failed.
+ * Three shapes count. A missing host and missing conversation registration,
+ * paired with a complete launch-only transcript, say the host died before its
+ * session materialized (#1325). A completed turn carrying a valid fenced verdict
+ * says the stage finished (#1047, #988). A turn the provider cut off — a session
+ * or model limit, an expired credential — says the stage ended without producing
+ * one (#1141): the message that ended it is right there in the final record, so
+ * the attempt is terminal by evidence and retires as failed.
  *
  * Silence is neither. A transcript that simply stops mid-turn proves nothing
  * about a host that may still be working, so it falls through to null and keeps
@@ -3288,7 +3572,10 @@ async function closeStopFailureEvidence(
   ports: PipelinePorts,
 ): Promise<string | null> {
   try {
-    if (!(await ports.stageHostResident(candidate.target))) return "the host registry entry is dead or absent";
+    if (!(await ports.stageHostResident(candidate.target))) {
+      return await unregisteredStageHostDeathEvidence(candidate.attempt, candidate.target, ports)
+        ?? "the host registry entry is dead or absent";
+    }
   } catch {
     // An unreadable registry leaves the transcript as the remaining authority.
   }
@@ -3532,6 +3819,17 @@ export async function patchPipeline(
         const taskLinkError = pipelineTaskLinkError({ project }, pipeline.taskIds, loadTasks(), { allowMissing: true });
         if (taskLinkError) return { error: taskLinkError, status: 400 };
       }
+      /* #1279: the allowed set travels with the PROJECT, not with the plan, so
+         a move re-reads the binding exactly as create does. A pin that was
+         legal where the draft was written can be illegal where it lands, and
+         refusing here is what keeps the create-time reading true of every
+         stored draft — the alternative is a draft the launch can only ever
+         park, discovered later. Read before any field is assigned, so a
+         refusal leaves the draft where it was rather than half-moved. */
+      if (project !== pipeline.project) {
+        const movedAccountRefusal = stageAccountRefusal(pipeline.stages, project, ports);
+        if (movedAccountRefusal) return movedAccountRefusal;
+      }
       pipeline.task = task;
       if (spec) pipeline.spec = spec;
       else delete pipeline.spec;
@@ -3565,6 +3863,12 @@ export async function patchPipeline(
       if (predecessor) predecessor.next = inserted.id;
       const replaced = replaceDraftStages(pipeline, inputs, ports.roleLookup);
       if (replaced.error) return { error: replaced.error, status: 400, ...(replaced.violations ? { violations: replaced.violations } : {}) };
+      /* #1279: read after normalization, because the stage's engine — and so
+         which allowed set applies — is what role resolution just settled. The
+         early return leaves the transaction unpersisted, as every other
+         post-mutation refusal in this function does. */
+      const addedAccountRefusal = stageAccountRefusal(pipeline.stages, pipeline.project, ports);
+      if (addedAccountRefusal) return addedAccountRefusal;
     } else if (req.action === "remove-stage") {
       if (pipeline.state !== "draft") return { error: "pipeline is not a draft", status: 409 };
       /* A draft can be emptied entirely on the canvas (#136); the 2-stage floor is
@@ -3817,7 +4121,7 @@ export async function patchPipeline(
       const run = pipeline.runs.find((item) => item.stageId === target.id);
       if (run && run.attempts.length > 0) return { error: "stage has already started", status: 409 };
       const changesRoleOrRuntime = req.role !== undefined || req.engine !== undefined || req.model !== undefined || req.effort !== undefined;
-      if (!changesRoleOrRuntime && req.prompt === undefined) return { error: "override-stage needs at least one field to change", status: 400 };
+      if (!changesRoleOrRuntime && req.prompt === undefined && req.account === undefined) return { error: "override-stage needs at least one field to change", status: 400 };
       /* Validate the runtime types up front: resolvePipelineRole treats a
          non-string, non-null model/effort as absent and silently uses the
          fallback, so a raw `model: 123` / `effort: false` would 200 with the old
@@ -3888,6 +4192,31 @@ export async function patchPipeline(
            later balloon a run prompt / park review-loop delivery. */
         if (prompt.length > MAX_STAGE_PROMPT_LENGTH) return { error: `stage prompt exceeds ${MAX_STAGE_PROMPT_LENGTH} characters`, status: 400 };
         target.prompt = prompt;
+      }
+
+      /* #1279: the account pin is applied last, so it is checked against the
+         engine this override just settled on rather than the stage's previous
+         one. `null` clears the pin; a named account the project does not allow
+         is refused here for the same reason the launch refuses it. */
+      if (req.account !== undefined) {
+        if (req.account !== null && typeof req.account !== "string") return { error: "account must be an account id string or null", status: 400 };
+        const requested = typeof req.account === "string" ? req.account.trim() : "";
+        if (!requested) delete target.account;
+        else {
+          const engine = target.effectiveRole.engine;
+          const read = stageAccountPool(ports, pipeline.project, engine);
+          if ("refusal" in read) return read.refusal;
+          const allowed = read.pool;
+          if (allowed !== null && !allowed.includes(requested)) {
+            return {
+              error: allowed.length
+                ? `${engine} account ${requested} is not allowed on project ${pipeline.project} (allowed: ${allowed.join(", ")})`
+                : `project ${pipeline.project} allows no ${engine} account`,
+              status: 409,
+            };
+          }
+          target.account = requested;
+        }
       }
     } else if (req.action === "delete") {
       if (pipeline.state !== "draft") return { error: "only draft pipelines can be deleted", status: 409 };

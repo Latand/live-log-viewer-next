@@ -5,10 +5,11 @@ import { accountManager } from "@/lib/accounts/manager";
 import { claudeSettingsPath } from "@/lib/accounts/claude";
 import { turnStateFromRecords } from "@/lib/accounts/migration/turnState";
 import type { ViewerConversationId } from "@/lib/accounts/migration/contracts";
-import { agentRegistry, type AgentRegistry, type AgentRegistryEntry, type RegistryFile } from "@/lib/agent/registry";
+import { agentRegistry, type AgentRegistry, type AgentRegistryEntry, type ProcessIdentity, type RegistryFile } from "@/lib/agent/registry";
 import { effectiveClaudePermissionMode } from "@/lib/agent/cli";
 import { sessionKeyId, type SessionKey } from "@/lib/agent/sessionKey";
 import { activeOrchestratorSeats, type OrchestratorSeat } from "@/lib/orchestrator/seats";
+import { processIdentityMayOwn } from "@/lib/processIdentity";
 import { assertDarwinStructuredRuntime } from "@/lib/proc/darwinIdentity";
 import { readStableTailRecords } from "@/lib/scanner/activity";
 import { withoutWakatimeCredential } from "@/lib/wakatime/credential";
@@ -345,6 +346,52 @@ function assertAdoptedHostsAreClaimed(
   );
 }
 
+/** Every row selected before adoption must end the pass with a host published
+    by this Viewer or cease to be eligible. The durable target appoints the
+    candidate before the incumbent's demotion poll releases its engines. A
+    candidate that reaches adoption in that window sees the old live process
+    and must retry until demotion records and completes the handoff (#1296).
+
+    Only a live recorded engine process argues that window is open. A row whose
+    process is gone or already released has nothing left to hand over — its
+    adoption attempt ran this pass and produced nothing, and rows with
+    permanently pending work (a held delivery for a dead session) stay in that
+    shape forever. Failing the pass for them replays full startup every minute
+    without end (#1364); their work waits for on-demand hosting instead. */
+function assertEligibleHostsResolved(
+  registry: AgentRegistry,
+  shouldAdopt: StructuredHostAdoptionFilter,
+  adopted: readonly AdoptedStructuredHost[],
+  productionAdopter: (key: SessionKey) => boolean,
+  claimed: (key: SessionKey) => boolean = hasStructuredDeliveryHost,
+  processAlive: (identity: ProcessIdentity) => boolean = processIdentityMayOwn,
+): void {
+  const adoptedKeys = new Set(adopted.map((item) => sessionKeyId(item.key)));
+  const unresolved = Object.values(registry.readOnlySnapshot().entries).filter((entry) =>
+    entry.structuredHost
+      && productionAdopter(entry.key)
+      && shouldAdopt(entry)
+      && !adoptedKeys.has(sessionKeyId(entry.key))
+      && !claimed(entry.key));
+  if (unresolved.length === 0) return;
+  const contested = unresolved.filter((entry) => {
+    const process = entry.structuredHost?.process;
+    return Boolean(process && processAlive(process));
+  });
+  const abandoned = unresolved.filter((entry) => !contested.includes(entry));
+  if (abandoned.length > 0) {
+    console.error("[structured hosts] eligible hosts have no live engine process to hand over; leaving them to on-demand hosting", {
+      keys: abandoned.map((entry) => sessionKeyId(entry.key)),
+    });
+  }
+  if (contested.length === 0) return;
+  const keys = contested.map((entry) => sessionKeyId(entry.key));
+  console.error("[structured hosts] eligible hosts remain owned by the incumbent Viewer; retrying startup", { keys });
+  throw new RuntimeHostUnavailableError(
+    `structured startup left ${keys.length} eligible host(s) owned by the incumbent Viewer: ${keys.join(", ")}`,
+  );
+}
+
 function interruptedCodexContinuationOperationId(sessionId: string, claimEpoch: number): string {
   return `${INTERRUPTED_CODEX_CONTINUATION_OPERATION_PREFIX}-${sessionId}-${claimEpoch}`;
 }
@@ -621,7 +668,8 @@ function structuredStartupAdoptionFilter(
     }
     const conversationId = registry.canonicalConversationId(conversation.id);
     const hasPendingWork = pendingDeliveryConversationIds.has(conversationId)
-      || signals.pendingOperationConversationIds.has(conversationId);
+      || signals.pendingOperationConversationIds.has(conversationId)
+      || entry.pendingAction === "handoff";
     if (hasPendingWork) return true;
     if (conversation.turn.state === "terminal") return false;
     /* Past this point the only thing left arguing for a launch is the turn the
@@ -715,6 +763,7 @@ export async function adoptStructuredHostsAtStartup(
     orchestratorHostKeys,
   );
   rememberStructuredStartupRetry(nextAdoptedHosts, orchestratorRecoveries);
+  registry.drainDeadSupersededHeldDeliveries();
   /* Pending work makes a terminal conversation adoption-eligible. Clear any
      provably dead wrapper before that decision so its stale writer fence
      cannot block the startup recovery path. */
@@ -842,6 +891,13 @@ export async function adoptStructuredHostsAtStartup(
   completedHosts = Math.max(completedHosts, codexCandidateCount + claudeCandidateCount);
   nextAdoptedHosts = retainAdoptedHosts(nextAdoptedHosts, claude);
   rememberStructuredStartupRetry(nextAdoptedHosts, orchestratorRecoveries);
+  assertEligibleHostsResolved(
+    registry,
+    shouldAdopt,
+    nextAdoptedHosts,
+    (key) => key.engine === "codex" ? dependencies.adopt === undefined : dependencies.adoptClaude === undefined,
+    dependencies.hostClaimed,
+  );
   reportProgress("reconciling structured hosts");
   orchestratorHostKeys = currentOrchestratorRestartRecoveryHostKeys(
     registry,

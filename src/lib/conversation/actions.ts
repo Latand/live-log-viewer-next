@@ -1,4 +1,5 @@
 import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
+import { BRANCH_SHARED_HOST_CODE, BRANCH_SHARED_HOST_ERROR, branchSharesRootHost } from "@/lib/conversation/branchControl";
 import {
   answerDialogKey,
   compactConversation,
@@ -28,6 +29,7 @@ type ConversationActionBody =
   | Omit<Extract<DeliveryOutcome, { ok: false }>, "status">
   | { ok: true; structured: true; target: string; outcome: "delivered" | "resumed"; spawned?: boolean }
   | { ok: true; structured: true; target: string; operationId: string; receipt: { operationId: string; status: string } }
+  | { ok: false; outcome: "failed"; code: typeof BRANCH_SHARED_HOST_CODE; error: string }
   | { error: string };
 
 export type ConversationActionResult = { status: number; body: ConversationActionBody };
@@ -91,6 +93,18 @@ export async function applyConversationAction(
   }
   const conversation = byId ?? byPath;
   const transcriptPath = byId?.generations.at(-1)?.path ?? request.transcriptPath;
+
+  if (request.action === "kill" && branchSharesRootHost(registry, conversation)) {
+    return {
+      status: 409,
+      body: {
+        ok: false,
+        outcome: "failed",
+        code: BRANCH_SHARED_HOST_CODE,
+        error: BRANCH_SHARED_HOST_ERROR,
+      },
+    };
+  }
 
   if (dependencies.structuredEnabled()) {
     const structured = await dependencies.dispatchStructuredControl({
