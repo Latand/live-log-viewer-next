@@ -17,7 +17,7 @@
  * and redelivers under its ORIGINAL idempotency key. On the next snapshot, not
  * only on the event that was missed.
  */
-import { afterAll, afterEach, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, expect, test } from "bun:test";
 import { act } from "react";
 import { installActEnv } from "@/test-helpers/actEnv";
 import { Window } from "happy-dom";
@@ -25,6 +25,7 @@ import { createRoot, type Root } from "react-dom/client";
 
 import type { ConversationMigration, FileEntry } from "@/lib/types";
 import { setLocale } from "@/lib/i18n";
+import { setRuntimeUiEnabledForTests } from "@/hooks/runtimeBus";
 
 const dom = new Window();
 installActEnv();
@@ -54,31 +55,17 @@ Object.assign(globalThis, {
 
 /* The legacy pane route is the subject: `file.proc` is the host authority and
    the composer sends through /api/tmux. The runtime plane stays OFF. */
-const actualRuntimeHooks = await import("@/hooks/useRuntime");
-mock.module("@/hooks/useRuntime", () => ({
-  ...actualRuntimeHooks,
-  useRuntime: () => ({
-    enabled: false,
-    structuredHostsEnabled: false,
-    connection: "offline",
-    resyncedAt: null,
-    store: {},
-  }),
-  useRuntimeEnabled: () => false,
-  useRuntimeSession: () => null,
-  useRuntimeSessionByArtifact: () => null,
-  useRuntimeReceiptsForArtifact: () => [],
-}));
-afterAll(() => {
-  mock.module("@/hooks/useRuntime", () => actualRuntimeHooks);
-});
-
-const { TmuxComposer } = await import("./TmuxComposer");
-const { enqueueOutbox, readOutbox, resetOutboxForTests } = await import("./conversation/outbox");
+import { TmuxComposer } from "./TmuxComposer";
+import { enqueueOutbox, readOutbox, resetOutboxForTests } from "./conversation/outbox";
 
 const realFetch = globalThis.fetch;
 
+beforeEach(() => {
+  setRuntimeUiEnabledForTests(false);
+});
+
 afterEach(() => {
+  setRuntimeUiEnabledForTests(null);
   setLocale("en");
   globalThis.fetch = realFetch;
   document.body.replaceChildren();

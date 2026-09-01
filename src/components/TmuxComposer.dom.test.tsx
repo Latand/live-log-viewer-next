@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, test } from "bun:test";
 import { act } from "react";
 import { installActEnv } from "@/test-helpers/actEnv";
 import { Window } from "happy-dom";
@@ -8,6 +8,7 @@ import { createRoot, type Root } from "react-dom/client";
 import type { RuntimeReceipt } from "@/components/runtime/runtimeModel";
 import type { FileEntry } from "@/lib/types";
 import { setLocale, translate } from "@/lib/i18n";
+import { setRuntimeUiEnabledForTests } from "@/hooks/runtimeBus";
 
 import { appendComposerDraft, mergeRuntimeReceipts, RuntimeComposerReceipts, TmuxComposer } from "./TmuxComposer";
 import { enqueueOutbox, nextDispatch, readOutbox, resetOutboxForTests, retryOutbox, updateOutbox } from "./conversation/outbox";
@@ -63,7 +64,12 @@ function Receipts(props: React.ComponentProps<typeof RuntimeComposerReceipts>) {
 
 const realFetch = globalThis.fetch;
 
+beforeEach(() => {
+  setRuntimeUiEnabledForTests(false);
+});
+
 afterEach(() => {
+  setRuntimeUiEnabledForTests(null);
   setLocale("en");
   globalThis.fetch = realFetch;
   document.body.replaceChildren();
@@ -337,7 +343,7 @@ test("multiple delivery attempts collapse into one bounded accessible receipt st
   expect(details.querySelectorAll("[data-receipt-message]")).toHaveLength(1);
   expect(details.querySelector("[data-receipt-attempt-count]")?.textContent).toContain("×3");
   expect(details.querySelector("[data-receipt-history]")?.textContent)
-    .toBe(`${translate("uk", "receipt.human.verbatim", { reason: "stale-turn" })} ×2`);
+    .toBe(`${translate("uk", "receipt.human.staleKey")} ×2`);
   expect(details.querySelector('[data-optimistic-message="true"]')?.textContent).toContain(text);
   expect(details.querySelectorAll("button")).toHaveLength(0);
 
@@ -1142,7 +1148,7 @@ test("queue-first: retrying a failed bubble replays the same key and settles on 
     sentKeys.push(body.clientMessageId);
     if (sentKeys.length === 1) {
       /* The server accepted and delivers, yet the response is lost: a hard
-         failure without a receipt keeps the draft for the retry. */
+         failure without a receipt keeps the outbox generation for retry. */
       return { ok: false, status: 503, json: async () => ({ ok: false, error: "runtime host request timed out" }) } as Response;
     }
     /* The retry replays the same key; the conflict carries the original
@@ -1322,7 +1328,7 @@ async function runTimeoutThenQueuedAdmission(locale: "en" | "uk", viewportWidth:
     sentKeys.push(body.clientMessageId);
     if (sentKeys.length === 1) {
       /* The runtime host request timed out; the server can only attest an
-         uncertain receipt — nothing durable yet, the draft must stay. */
+         uncertain receipt — nothing durable yet, so the outbox generation stays. */
       return {
         ok: false,
         status: 503,
@@ -1338,7 +1344,7 @@ async function runTimeoutThenQueuedAdmission(locale: "en" | "uk", viewportWidth:
             status: "uncertain",
             reason: "runtime host request timed out",
             text: prompt,
-            at: "2026-07-18T00:00:00.000Z",
+            at: new Date().toISOString(),
             revision: 1,
           },
         }),
@@ -1359,7 +1365,7 @@ async function runTimeoutThenQueuedAdmission(locale: "en" | "uk", viewportWidth:
           kind: "send",
           status: "queued",
           text: prompt,
-          at: "2026-07-18T00:00:02.000Z",
+          at: new Date().toISOString(),
           revision: 2,
         },
       }),
@@ -1426,8 +1432,11 @@ async function runTimeoutThenQueuedAdmission(locale: "en" | "uk", viewportWidth:
     expect(summary.textContent).toContain(translate(locale, "runtime.receipt.summary", { count: 1 }));
     expect(summary.querySelector("[data-receipt-preview]")?.textContent).toBe(prompt);
     expect(summary.querySelector("[data-receipt-pending-count] [data-receipt-count-value]")?.textContent).toBe("1");
-    expect(host.querySelector('[data-receipt-status="queued"]')?.textContent)
-      .toBe(translate(locale, "runtime.receipt.queued"));
+    const queued = host.querySelector('[data-receipt-status="queued"]');
+    expect(queued?.getAttribute("data-receipt-wait")).toBe("awaiting-handover");
+    expect(queued?.textContent).toContain(translate(locale, "runtime.receipt.awaitingHandoverFor", {
+      waited: translate(locale, "runtime.receipt.waitedSec", { n: 1 }),
+    }));
     expect(host.querySelector('[data-optimistic-message="true"]')?.textContent).toContain(prompt);
     const status = host.querySelector("[data-runtime-receipt-status]")!;
     expect(status.getAttribute("role")).toBe("status");

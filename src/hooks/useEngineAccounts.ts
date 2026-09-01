@@ -280,6 +280,7 @@ export interface EngineAccountsState extends EngineAccountsSnapshot {
 }
 
 type Fetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+const currentGlobalFetch: Fetcher = (input, init) => globalThis.fetch(input, init);
 
 export interface EngineAccountsStoreOptions {
   fetcher?: Fetcher;
@@ -383,7 +384,7 @@ function failureDetailOf(body: unknown): string | undefined {
     so a mounted Switchboard, footer, and Accounts panel can never diverge. */
 export function createEngineAccountsStore(
   engine: Engine,
-  { fetcher = globalThis.fetch.bind(globalThis), timeoutMs = 10_000 }: EngineAccountsStoreOptions = {},
+  { fetcher = currentGlobalFetch, timeoutMs = 10_000 }: EngineAccountsStoreOptions = {},
 ): EngineAccountsStore {
   const activeUrl = `/api/accounts/${engine}/active`;
   const addUrl = `/api/accounts/${engine}`;

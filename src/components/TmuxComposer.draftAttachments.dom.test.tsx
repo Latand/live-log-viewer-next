@@ -14,7 +14,7 @@
  * TmuxComposer.deadRecovery.dom.test.tsx. Every fixture is an invented name and
  * invented bytes.
  */
-import { afterAll, afterEach, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, expect, test } from "bun:test";
 import { act } from "react";
 import { installActEnv } from "@/test-helpers/actEnv";
 import { Window } from "happy-dom";
@@ -24,6 +24,7 @@ import { createRoot, type Root } from "react-dom/client";
 import type { RuntimeSessionView } from "@/hooks/useRuntime";
 import type { FileEntry } from "@/lib/types";
 import { setLocale, translate } from "@/lib/i18n";
+import { installTmuxComposerRuntimeForTests, resetTmuxComposerRuntimeForTests } from "@/test-helpers/tmuxComposerRuntime";
 
 const dom = new Window();
 installActEnv();
@@ -107,37 +108,20 @@ function structuredView(conversationId: string): RuntimeSessionView {
 
 const VIEWS: Record<string, RuntimeSessionView> = { [CONVERSATION_ID]: structuredView(CONVERSATION_ID) };
 
-const actualRuntimeHooks = await import("@/hooks/useRuntime");
-const realUseRuntime = actualRuntimeHooks.useRuntime;
-const realUseRuntimeSession = actualRuntimeHooks.useRuntimeSession;
-const realUseRuntimeReceiptsForArtifact = actualRuntimeHooks.useRuntimeReceiptsForArtifact;
-let runtimePlaneAuthoritative = true;
-mock.module("@/hooks/useRuntime", () => ({
-  ...actualRuntimeHooks,
-  useRuntime: () => {
-    const real = realUseRuntime();
-    return runtimePlaneAuthoritative ? { ...real, enabled: true } : real;
-  },
-  useRuntimeSession: (conversationId: string | null) => {
-    const real = realUseRuntimeSession(conversationId);
-    return (conversationId && VIEWS[conversationId]) || real;
-  },
-  useRuntimeReceiptsForArtifact: (path: string | null, conversationId?: string | null) => {
-    const real = realUseRuntimeReceiptsForArtifact(path, conversationId);
-    return conversationId && VIEWS[conversationId] ? [] : real;
-  },
-  refreshRuntime: () => Promise.resolve(true),
-}));
-afterAll(() => {
-  runtimePlaneAuthoritative = false;
-  mock.module("@/hooks/useRuntime", () => actualRuntimeHooks);
-});
-
-const { TmuxComposer } = await import("./TmuxComposer");
+import { TmuxComposer } from "./TmuxComposer";
 
 const realFetch = globalThis.fetch;
 
+beforeEach(() => {
+  installTmuxComposerRuntimeForTests({
+    useRuntimeView: (file) => file.conversationId ? VIEWS[file.conversationId] ?? null : null,
+    runtimeEnabled: true,
+    refreshRuntime: async () => true,
+  });
+});
+
 afterEach(() => {
+  resetTmuxComposerRuntimeForTests();
   setLocale("en");
   globalThis.fetch = realFetch;
   QueuedReader.queue = [];

@@ -4,6 +4,7 @@ import { Window } from "happy-dom";
 import {
   adoptOutbox,
   cancelOutbox,
+  claimOutboxDispatch,
   enqueueOutbox,
   markOutboxResponded,
   nextDispatch,
@@ -76,6 +77,24 @@ test("the dispatcher is serial: one delivering entry at a time, oldest first", (
 
   updateOutbox("conv", "k1", { state: "delivered", settledAt: Date.now() });
   expect(nextDispatch(readOutbox("conv"))?.id).toBe("k2");
+});
+
+test("a queued id can be claimed once per durable requeue", () => {
+  submit("conv", "k1", "one");
+  submit("conv", "k2", "two");
+
+  const firstClaim = claimOutboxDispatch("conv", "k1");
+  const firstClaimIdentity = firstClaim && { id: firstClaim.id, state: firstClaim.state };
+  expect(firstClaimIdentity).toEqual({ id: "k1", state: "delivering" });
+  expect(claimOutboxDispatch("conv", "k1")).toBeNull();
+  expect(claimOutboxDispatch("conv", "k2")).toBeNull();
+
+  updateOutbox("conv", "k1", { state: "failed" });
+  updateOutbox("conv", "k1", { state: "queued" });
+  const retryClaim = claimOutboxDispatch("conv", "k1");
+  const retryClaimIdentity = retryClaim && { id: retryClaim.id, state: retryClaim.state };
+  expect(retryClaimIdentity).toEqual({ id: "k1", state: "delivering" });
+  expect(claimOutboxDispatch("conv", "k1")).toBeNull();
 });
 
 test("cancel removes a queued or failed message but the model never removes a delivering one", () => {

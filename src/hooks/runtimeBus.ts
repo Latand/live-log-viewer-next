@@ -529,7 +529,10 @@ export function createRuntimeBus(deps: RuntimeBusDeps): RuntimeBus {
  * is inlined at build time and cannot know. The bus resolves that at runtime and
  * goes inert on a plane-absent deployment (see `markPlaneAbsent`).
  */
+let runtimeUiTestOverride: boolean | null = null;
+
 export function isRuntimeUiEnabled(): boolean {
+  if (runtimeUiTestOverride !== null) return runtimeUiTestOverride;
   // The literal member expression is what Next inlines at build time; keep it.
   if (!rolledBack(process.env.NEXT_PUBLIC_RUNTIME_UI)) return true;
   if (typeof window === "undefined") return false;
@@ -558,4 +561,23 @@ function browserDeps(): RuntimeBusDeps {
 export function getRuntimeBus(): RuntimeBus {
   if (!singleton) singleton = createRuntimeBus(browserDeps());
   return singleton;
+}
+
+/** Stop every timer/transport owned by the browser singleton and forget it. */
+export function resetRuntimeBusForTests(): void {
+  singleton?.stop();
+  singleton = null;
+}
+
+/** Lifecycle-scoped switch for DOM tests that intentionally exercise legacy UI. */
+export function setRuntimeUiEnabledForTests(enabled: boolean | null): void {
+  resetRuntimeBusForTests();
+  runtimeUiTestOverride = enabled;
+}
+
+/** Install one lifecycle-owned bus so component tests exercise the real hooks. */
+export function setRuntimeBusForTests(bus: RuntimeBus | null): void {
+  resetRuntimeBusForTests();
+  singleton = bus;
+  runtimeUiTestOverride = bus === null ? null : true;
 }

@@ -4,7 +4,6 @@ import { ArrowDownToLine, CornerDownRight, type LucideIcon, Wrench } from "lucid
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { ArrowDown, ChevronUp, Sparkle } from "@/components/icons";
-import { useLogTail } from "@/hooks/useLogTail";
 import { useRuntimeSessionForConversation } from "@/hooks/useRuntime";
 import { useToolActivityCues } from "@/hooks/useToolActivityCues";
 import { accountIdFromPath } from "@/lib/accounts/badge";
@@ -47,6 +46,7 @@ import { speakableAnswer } from "./feed/speakableAnswer";
 import { isSubagent } from "./projectModel";
 import { TaskHeader } from "./TaskHeader";
 import { TurnStatusBar } from "./TurnStatusBar";
+import { logFeedDependencies } from "./logFeedDependencies";
 
 /** Items rendered initially and added per «show earlier» step. */
 const RENDER_STEP = 1500;
@@ -243,7 +243,11 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
   const tailPath = tailFile?.path ?? null;
   /* Released reader must never lose lines above the viewport: the tail cap
      applies only while the magnet holds the bottom in view anyway. */
-  const tail = useLogTail(tailFile, paused, magnet ? (compact ? TAIL_CAP : FOCUS_CAP) : 0);
+  const tail = logFeedDependencies().useLogTail(
+    tailFile,
+    paused,
+    magnet ? (compact ? TAIL_CAP : FOCUS_CAP) : 0,
+  );
   const scroller = useRef<HTMLDivElement | null>(null);
   const content = useRef<HTMLDivElement | null>(null);
   const anchorRef = useRef<{ top: number; height: number } | null>(null);

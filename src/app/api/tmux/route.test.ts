@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { afterAll, expect, mock, test } from "bun:test";
+import { afterAll, beforeAll, expect, test } from "bun:test";
 
 import { NextRequest } from "next/server";
 
@@ -16,13 +16,8 @@ const previousStateDir = process.env.LLV_STATE_DIR;
 const previousHome = process.env.HOME;
 const previousXdgConfig = process.env.XDG_CONFIG_HOME;
 const PATHNAME = path.join(routeCodexHome, "sessions", "rollout-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326.jsonl");
-fs.mkdirSync(path.dirname(PATHNAME), { recursive: true });
-fs.writeFileSync(PATHNAME, "{}\n");
-process.env.LLV_CODEX_HOME = routeCodexHome;
-process.env.LLV_STATE_DIR = path.join(routeCodexHome, "state");
-process.env.HOME = routeCodexHome;
-process.env.XDG_CONFIG_HOME = path.join(routeCodexHome, "config");
 afterAll(() => {
+  setConversationHostDependenciesForTests(null);
   if (previousHome === undefined) delete process.env.HOME;
   else process.env.HOME = previousHome;
   if (previousXdgConfig === undefined) delete process.env.XDG_CONFIG_HOME;
@@ -32,8 +27,9 @@ afterAll(() => {
   if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
   else process.env.LLV_STATE_DIR = previousStateDir;
   fs.rmSync(routeCodexHome, { recursive: true, force: true });
-  mock.module("@/lib/resources", () => realResources);
 });
+
+import { setConversationHostDependenciesForTests } from "@/app/api/conversation-host/dependencies";
 
 let transcriptReads = 0;
 let lastTranscriptReadFresh: boolean | undefined;
@@ -106,122 +102,84 @@ const snapshot = {
 
 let completedFiles: Array<Record<string, unknown>> = [{ path: PATHNAME }];
 
-mock.module("@/lib/agent/transcriptHost", () => ({
-  canonicalTranscriptTarget: (observed: typeof snapshot, pathname: string) => observed.canonicalFor(pathname)?.display ?? null,
-  deliverToTranscriptHost: async () => ({ kind: "unavailable" }),
-  readTranscriptHosts: async (fresh?: boolean, files?: unknown) => {
-    transcriptReads += 1;
-    lastTranscriptReadFresh = fresh;
-    lastTranscriptReadFiles = files;
-    return snapshot;
-  },
-}));
-mock.module("@/lib/scanner/scanCache", () => ({
-  completedFileScan: async () => {
-    completedScanReads += 1;
-    return { snapshot: { files: completedFiles } };
-  },
-}));
-mock.module("@/lib/runtime/structuredControls", () => ({
-  dispatchStructuredControl: async (request: Record<string, unknown>) => {
-    structuredControlCalls += 1;
-    structuredControlRequest = request;
-    return structuredControlResult;
-  },
-}));
-mock.module("@/lib/runtime/structuredMessageDelivery", () => ({
-  enqueueStructuredMessage: async (request: Record<string, unknown>) => {
-    structuredMessageCalls += 1;
-    structuredMessageRequest = request;
-    return structuredMessageResult;
-  },
-}));
-mock.module("@/lib/wakatime/operatorActivity", () => ({
-  recordDirectOperatorWakatimeActivity: (request: Record<string, unknown>) => {
-    if (!operatorActivityEnabled) return null;
-    operatorActivityRequests.push(request);
-    return {
-      key: "a".repeat(64),
-      engine: "codex",
-      project: "fixture",
-      atMs: Date.now(),
-    };
-  },
-}));
-mock.module("@/lib/delivery", () => ({
-  answerDialogKey: async () => ({ ok: true, target: "" }),
-  compactConversation: async () => ({ ok: true, target: "" }),
-  deliverConversationMessage: (message: unknown) => delivery(message),
-  interruptConversation: async () => {
-    interruptCalls += 1;
-    return { ok: true, target: "" };
-  },
-  killConversation: async () => {
-    killCalls += 1;
-    return killOutcome;
-  },
-  livePaneTarget: async () => null,
-  reconfigureConversation: async () => ({ ok: true, outcome: "reconfigured", target: "agents:4.0" }),
-  resumeConversation: async () => ({ ok: true, target: "" }),
-}));
-mock.module("@/lib/conversation/actions", () => ({
-  CONVERSATION_ACTIONS: ["interrupt", "kill", "resume", "compact", "dialog-key"],
-  applyConversationAction: async (request: Record<string, unknown>) => {
-    if (process.env.LLV_STRUCTURED_HOSTS === "1") {
+beforeAll(() => {
+  fs.mkdirSync(path.dirname(PATHNAME), { recursive: true });
+  fs.writeFileSync(PATHNAME, "{}\n");
+  process.env.LLV_CODEX_HOME = routeCodexHome;
+  process.env.LLV_STATE_DIR = path.join(routeCodexHome, "state");
+  process.env.HOME = routeCodexHome;
+  process.env.XDG_CONFIG_HOME = path.join(routeCodexHome, "config");
+  setConversationHostDependenciesForTests({
+    canonicalTranscriptTarget: (observed, pathname) => observed.canonicalFor(pathname)?.display ?? null,
+    readTranscriptHosts: async (fresh, files) => {
+      transcriptReads += 1;
+      lastTranscriptReadFresh = fresh;
+      lastTranscriptReadFiles = files;
+      return snapshot as never;
+    },
+    completedFileScan: async () => {
+      completedScanReads += 1;
+      return { snapshot: { files: completedFiles } } as never;
+    },
+    dispatchStructuredControl: async (request) => {
       structuredControlCalls += 1;
-      structuredControlRequest = request;
-      if (structuredControlResult) return structuredControlResult;
-    }
-    if (request.action === "interrupt") {
-      interruptCalls += 1;
+      structuredControlRequest = { ...request };
+      return structuredControlResult;
+    },
+    enqueueStructuredMessage: async (request) => {
+      structuredMessageCalls += 1;
+      structuredMessageRequest = { ...request };
+      return structuredMessageResult as never;
+    },
+    recordDirectOperatorWakatimeActivity: (request) => {
+      if (!operatorActivityEnabled) return null;
+      operatorActivityRequests.push({ ...request });
+      return { key: "a".repeat(64), engine: "codex", project: "fixture", atMs: Date.now() };
+    },
+    deliverConversationMessage: (message: unknown) => delivery(message),
+    reconfigureConversation: async () => ({ ok: true, outcome: "reconfigured", target: "agents:4.0" }),
+    conversationActions: ["interrupt", "kill", "resume", "compact", "dialog-key"],
+    applyConversationAction: async (request) => {
+      if (process.env.LLV_STRUCTURED_HOSTS === "1") {
+        structuredControlCalls += 1;
+        structuredControlRequest = { ...request };
+        if (structuredControlResult) return structuredControlResult;
+      }
+      if (request.action === "interrupt") {
+        interruptCalls += 1;
+        return { status: 200, body: { ok: true, target: "" } };
+      }
+      if (request.action === "kill") {
+        killCalls += 1;
+        if (killOutcome.ok && !killOutcome.target) {
+          return { status: 409, body: { ok: false, outcome: "failed", error: "kill resolved no registered pane" } };
+        }
+        if (!killOutcome.ok) {
+          const { status, ...body } = killOutcome;
+          return { status, body };
+        }
+        return { status: 200, body: killOutcome };
+      }
       return { status: 200, body: { ok: true, target: "" } };
-    }
-    if (request.action === "kill") {
-      killCalls += 1;
-      if (killOutcome.ok && !killOutcome.target) {
-        return { status: 409, body: { ok: false, outcome: "failed", error: "kill resolved no registered pane" } };
-      }
-      if (!killOutcome.ok) {
-        const { status, ...body } = killOutcome;
-        return { status, body };
-      }
-      return { status: 200, body: killOutcome };
-    }
-    return { status: 200, body: { ok: true, target: "" } };
-  },
-}));
-mock.module("@/lib/resources", () => ({
-  ...realResources,
-  allowedKillTarget: (target: string) => target === "agents:9.0"
-    ? resourceTarget
-    : realResources.allowedKillTarget(target),
-  consumeKillTarget: (target: string) => {
-    if (target !== "agents:9.0") realResources.consumeKillTarget(target);
-  },
-}));
-mock.module("@/lib/tmux", () => ({
-  captureTmuxAttachReference: (value: Record<string, unknown>) => ({ ...value, tmuxServerStartIdentity: "900:one", paneStartIdentity: "100:one" }),
-  buildImagePayload: () => ({ payload: "", imagePaths: ["/viewer/inbox/img-one.png"] }),
-  collectImagePayloads: () => ({ images: collectedImages, error: null }),
-  deleteInboxImages: (paths: string[]) => { deletedImagePaths.push(paths); },
-  killPane: async () => {},
-  paneScreen: async () => "",
-  panePidOf: async () => null,
-  resolveRequestedTmuxTarget: async (pid: number | null, files?: unknown) => {
-    pidResolutionFiles = files;
-    return pid === null ? null : pidTargets.get(pid) ?? null;
-  },
-  resolveTarget: async (pid: number) => pidTargets.get(pid) ?? null,
-  knownLivePids: async () => new Set<number>(),
-  panePidMap: async () => new Map<number, string>(),
-  paneInfo: async () => null,
-  targetForKnownPid: async (pid: number) => pidTargets.get(pid) ?? null,
-  verifyTmuxHostEvidence: async () => true,
-  resolveTmuxAttach: async () => attachResolution,
-  spawnAgentWithPrompt: async () => ({ paneId: "%91", display: "agents:worker.0" }),
-  spawnCommandWindow: async () => ({ paneId: "%90", display: "agents:view.0" }),
-  tmuxEndpointDescriptor: () => endpoint,
-}));
+    },
+    allowedKillTarget: (target: string) => target === "agents:9.0"
+      ? resourceTarget as never
+      : realResources.allowedKillTarget(target),
+    consumeKillTarget: (target: string) => {
+      if (target !== "agents:9.0") realResources.consumeKillTarget(target);
+    },
+    captureTmuxAttachReference: (value: Record<string, unknown>) => ({ ...value, tmuxServerStartIdentity: "900:one", paneStartIdentity: "100:one" }) as never,
+    collectImagePayloads: () => ({ images: collectedImages, error: null }),
+    killPane: async () => {},
+    panePidOf: async () => null,
+    resolveRequestedTmuxTarget: async (pid: number | null, files?: unknown) => {
+      pidResolutionFiles = files;
+      return pid === null ? null : pidTargets.get(pid) ?? null;
+    },
+    resolveTmuxAttach: async () => attachResolution as never,
+    tmuxEndpointDescriptor: () => endpoint,
+  });
+});
 
 const { GET, POST } = await import("./route");
 

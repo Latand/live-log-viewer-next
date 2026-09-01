@@ -1,4 +1,4 @@
-import { afterAll, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, expect, test } from "bun:test";
 import { Window } from "happy-dom";
 import { useSyncExternalStore } from "react";
 import { flushSync } from "react-dom";
@@ -7,6 +7,7 @@ import { createRoot } from "react-dom/client";
 import type { RuntimeReceipt } from "@/components/runtime/runtimeModel";
 import { setLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
+import { installTmuxComposerRuntimeForTests, resetTmuxComposerRuntimeForTests } from "@/test-helpers/tmuxComposerRuntime";
 
 const dom = new Window();
 Object.assign(globalThis, {
@@ -37,57 +38,41 @@ let mobileViewport = false;
 
 /* The durable receipt stream, controllable per test exactly like production
    pushes bus updates into a typing user's composer. */
-const actualRuntimeHooks = await import("@/hooks/useRuntime");
-/* Capture the REAL implementations before mock.module rewires the registry (the
-   namespace members are live bindings; reading them after would resolve to the
-   mock). */
-const realUseRuntimeSession = actualRuntimeHooks.useRuntimeSession;
-const realUseRuntimeReceiptsForArtifact = actualRuntimeHooks.useRuntimeReceiptsForArtifact;
 const receiptListeners = new Set<() => void>();
 let busReceipts: RuntimeReceipt[] = [];
 function publishReceipts(next: RuntimeReceipt[]): void {
   busReceipts = next;
   for (const listener of receiptListeners) listener();
 }
-/* bun's mock.module registry is process-global and the afterAll restore does NOT
-   reach test files loaded later, so the reactive receipt stub must DELEGATE to
-   the real hook for every conversation except this file's own — otherwise the
-   stub (which calls a different hook sequence than the real function) leaks into
-   a later-loaded pane test and changes TmuxComposer's hook order mid-mount,
-   corrupting React's per-process state. The delegation matches the pattern in
-   TmuxComposer.runtimeSnapshot.dom.test.tsx. */
 const FOCUS_OWNED: ReadonlySet<string> = new Set([
   "conv-focus-poll", "conv-migrate", "conv-canonical", "conv-provisional", "conversation_bus-session",
   "/focus-poll.jsonl", "/predecessor.jsonl", "/successor.jsonl", "/adopt.jsonl",
 ]);
 const focusOwns = (path: string | null, conversationId?: string | null) =>
   (path != null && FOCUS_OWNED.has(path)) || (conversationId != null && FOCUS_OWNED.has(conversationId));
-mock.module("@/hooks/useRuntime", () => ({
-  ...actualRuntimeHooks,
-  useRuntimeSession: (conversationId: string | null) =>
-    focusOwns(null, conversationId) ? null : realUseRuntimeSession(conversationId),
-  useRuntimeReceiptsForArtifact: (path: string | null, conversationId?: string | null) => {
-    // A non-owned conversation delegates to the REAL hook, so a leaked mock is
-    // byte-identical to unmocked for any other suite's composer (no hook drift).
-    if (!focusOwns(path, conversationId)) return realUseRuntimeReceiptsForArtifact(path, conversationId);
-    // path/cid is stable per component instance, so this branch is stable across
-    // that instance's renders — the accepted pattern from runtimeSnapshot.
-    // eslint-disable-next-line react-hooks/rules-of-hooks
-    return useSyncExternalStore(
+import { TmuxComposer } from "./TmuxComposer";
+
+beforeEach(() => {
+  installTmuxComposerRuntimeForTests({
+    useRuntimeView: () => null,
+    runtimeEnabled: false,
+    useRuntimeReceipts: (path, conversationId) => focusOwns(path, conversationId)
+      ? useSyncExternalStore(
       (listener) => {
         receiptListeners.add(listener);
         return () => receiptListeners.delete(listener);
       },
       () => busReceipts,
       () => busReceipts,
-    );
-  },
-}));
-afterAll(() => {
-  mock.module("@/hooks/useRuntime", () => actualRuntimeHooks);
+    )
+      : [],
+  });
 });
 
-const { TmuxComposer } = await import("./TmuxComposer");
+afterEach(() => {
+  resetTmuxComposerRuntimeForTests();
+  publishReceipts([]);
+});
 
 globalThis.fetch = (async (input) => {
   if (String(input) === "/api/tmux/targets") {

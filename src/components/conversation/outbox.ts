@@ -1399,6 +1399,17 @@ export function nextDispatch(queue: readonly OutboxEntry[]): OutboxEntry | null 
   return queue.find((entry) => entry.state === "queued") ?? null;
 }
 
+/** Atomically claim one queued entry before any asynchronous wire work starts. */
+export function claimOutboxDispatch(cardId: string, id: string): OutboxEntry | null {
+  const queue = readOutbox(cardId);
+  if (queue.some((entry) => entry.state === "delivering" && !entry.launchOwned)) return null;
+  const entry = queue.find((candidate) => candidate.id === id);
+  if (!entry || entry.state !== "queued") return null;
+  const claimed: OutboxEntry = { ...entry, state: "delivering" };
+  write(cardId, queue.map((candidate) => candidate.id === id ? claimed : candidate));
+  return claimed;
+}
+
 function subscribe(listener: () => void): () => void {
   listeners.add(listener);
   return () => {

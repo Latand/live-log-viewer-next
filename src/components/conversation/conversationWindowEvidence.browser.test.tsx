@@ -6,9 +6,12 @@ import path from "node:path";
 import { Window } from "happy-dom";
 import { createRoot } from "react-dom/client";
 import { chromium, type Browser } from "playwright-core";
+import postcss from "postcss";
+import tailwindcss from "@tailwindcss/postcss";
 
 import type { FileEntry, StructuredSpawnCardState } from "@/lib/types";
 import { setLocale } from "@/lib/i18n";
+import { setRuntimeUiEnabledForTests } from "@/hooks/runtimeBus";
 
 import { BranchPane } from "@/components/BranchPane";
 import { enqueueOutbox, resetOutboxForTests, updateOutbox } from "./outbox";
@@ -28,12 +31,12 @@ import { enqueueOutbox, resetOutboxForTests, updateOutbox } from "./outbox";
  */
 
 const EVIDENCE_DIR = path.join(process.cwd(), "evidence", "conversation-window");
-const CSS_DIR = path.join(process.cwd(), ".next", "static", "css");
 
-/** The compiled production Tailwind CSS emitted by `next build`. */
-function productionCss(): string {
-  const files = fs.existsSync(CSS_DIR) ? fs.readdirSync(CSS_DIR).filter((name) => name.endsWith(".css")) : [];
-  return files.map((name) => fs.readFileSync(path.join(CSS_DIR, name), "utf8")).join("\n");
+/** Compile the production stylesheet from current source, independent of prior build artifacts. */
+async function productionCss(): Promise<string> {
+  const sourcePath = path.join(process.cwd(), "src", "app", "globals.css");
+  const source = fs.readFileSync(sourcePath, "utf8");
+  return (await postcss([tailwindcss()]).process(source, { from: sourcePath })).css;
 }
 
 const dom = new Window({ url: "http://localhost/" });
@@ -67,11 +70,13 @@ Object.assign(globalThis, {
 
 let browser: Browser;
 beforeEach(() => {
+  setRuntimeUiEnabledForTests(false);
   dom.sessionStorage.clear();
   resetOutboxForTests();
   setLocale("en");
 });
 afterEach(() => {
+  setRuntimeUiEnabledForTests(null);
   document.body.replaceChildren();
   mobile = false;
 });
@@ -101,12 +106,14 @@ function baseFile(over: Partial<FileEntry>): FileEntry {
     pendingQuestion: null,
     waitingInput: null,
     conversationId: CONV,
+    generation: 1,
     ...over,
   } as FileEntry;
 }
 
 const QUEUED_LAUNCH: StructuredSpawnCardState = {
   launchId: "launch_evidence", clientAttemptId: null, accountId: "work",
+  conversationId: CONV, generation: 1,
   state: "queued", initialMessage: "queued", retrySafe: false, error: null,
 };
 const DELIVERED_LAUNCH: StructuredSpawnCardState = { ...QUEUED_LAUNCH, state: "live-late-success", initialMessage: "delivered" };
@@ -152,7 +159,7 @@ async function renderWindow(node: React.ReactElement): Promise<string> {
   return html;
 }
 
-const CSS = productionCss();
+const CSS = await productionCss();
 
 function pageHtml(inner: string, width: number): string {
   /* A fixed-height flex host so the feed/composer flex-1 budget is measurable,

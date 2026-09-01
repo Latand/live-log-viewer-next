@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterAll, expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, test } from "bun:test";
 import { NextRequest } from "next/server";
 
 import { createSpawnAttempt, spawnRequestBody } from "@/components/draftSpawn";
@@ -24,7 +24,10 @@ import { POST } from "./route";
 
 const previousStateDir = process.env.LLV_STATE_DIR;
 const routeSandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-spawn-route-tests-"));
-process.env.LLV_STATE_DIR = path.join(routeSandbox, "state");
+
+beforeAll(() => {
+  process.env.LLV_STATE_DIR = path.join(routeSandbox, "state");
+});
 
 afterAll(() => {
   if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;

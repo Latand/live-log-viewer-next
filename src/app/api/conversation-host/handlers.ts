@@ -23,39 +23,24 @@
  */
 import { NextRequest, NextResponse } from "next/server";
 
-import {
-  deliverConversationMessage,
-  reconfigureConversation,
-  type DeliveryOutcome,
-} from "@/lib/delivery";
+import type { DeliveryOutcome } from "@/lib/delivery";
 import { structuredHostsEnabled } from "@/lib/runtime/flags";
-import { applyConversationAction, CONVERSATION_ACTIONS } from "@/lib/conversation/actions";
-import { canonicalTranscriptTarget, readTranscriptHosts } from "@/lib/agent/transcriptHost";
 import type { AccountChoiceActor } from "@/lib/accounts/accountOverrides";
 import { callerConversationId, directOperatorActivityAuthority } from "@/lib/agent/operatorAuthority";
 import { reconfigurationFromBody } from "@/lib/agent/reconfigure";
 import { listFiles } from "@/lib/scanner";
-import { completedFileScan } from "@/lib/scanner/scanCache";
 import { pathAllowed } from "@/lib/scanner/roots";
-import { allowedKillTarget, consumeKillTarget } from "@/lib/resources";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { retireReplySuggestionsOnOperatorMessage } from "@/lib/suggestions/store";
 import { parseMessageOrigin } from "@/lib/runtime/messageOrigin";
 import { materializeStructuredTerminal } from "@/lib/runtime/structuredTerminal";
-import { dispatchStructuredControl } from "@/lib/runtime/structuredControls";
-import {
-  captureTmuxAttachReference,
-  collectImagePayloads,
-  killPane,
-  panePidOf,
-  resolveRequestedTmuxTarget,
-  resolveTmuxAttach,
-  tmuxEndpointDescriptor,
-} from "@/lib/tmux";
 import { attachmentsAreOrphaned, structuredAttachmentOutcome, type AttachmentDeliveryOutcome } from "@/lib/attachmentRetention";
 import type { InboxFileAdmissionResult } from "@/lib/inboxFiles";
 import type { ApiError, FileEntry } from "@/lib/types";
-import { recordDirectOperatorWakatimeActivity } from "@/lib/wakatime/operatorActivity";
+import {
+  conversationHostDependencies,
+  type ConversationHostDependencies,
+} from "./dependencies";
 
 interface TargetResponse {
   target: string | null;
@@ -86,9 +71,9 @@ interface SendResponse {
   receipt?: { operationId: string; status: string };
 }
 
-async function currentTranscriptHosts(files?: FileEntry[]) {
-  const entries = files ?? (await completedFileScan()).snapshot.files;
-  return readTranscriptHosts(true, entries);
+async function currentTranscriptHosts(dependencies: ConversationHostDependencies, files?: FileEntry[]) {
+  const entries = files ?? (await dependencies.completedFileScan()).snapshot.files;
+  return dependencies.readTranscriptHosts(true, entries);
 }
 
 function respond(outcome: DeliveryOutcome): NextResponse<SendResponse | ApiError | { ok: false; outcome: "failed"; error: string }> {
@@ -99,15 +84,19 @@ function respond(outcome: DeliveryOutcome): NextResponse<SendResponse | ApiError
   return NextResponse.json(outcome);
 }
 
-async function targetForRequest(pid: number | null, filePath: string): Promise<string | null> {
-  const files = (await completedFileScan()).snapshot.files;
+async function targetForRequest(
+  dependencies: ConversationHostDependencies,
+  pid: number | null,
+  filePath: string,
+): Promise<string | null> {
+  const files = (await dependencies.completedFileScan()).snapshot.files;
   if (filePath && pathAllowed(filePath)) {
     /* A transcript path names the conversation being addressed. Its canonical
        host therefore wins over a client-side pid that may have exited and
        been recycled for another session between scanner polls. */
-    return canonicalTranscriptTarget(await currentTranscriptHosts(files), filePath);
+    return dependencies.canonicalTranscriptTarget(await currentTranscriptHosts(dependencies, files), filePath);
   }
-  return pid === null ? null : resolveRequestedTmuxTarget(pid, files);
+  return pid === null ? null : dependencies.resolveRequestedTmuxTarget(pid, files);
 }
 
 class OperatorActivityTargetConflictError extends Error {}
@@ -140,13 +129,14 @@ interface AuthorizedOperatorAction {
 }
 
 async function recordAuthorizedOperatorActivity(
+  dependencies: ConversationHostDependencies,
   req: NextRequest,
   target: { pid: number; hasPid: boolean; filePath: string; conversationId: string },
   identity: { idempotencyKey?: string },
 ): Promise<AuthorizedOperatorAction> {
   if (!directOperatorActivityAuthority(req).ok) return { byOperator: false, conversationId: target.conversationId };
-  const fallbackEntry = operatorFallbackEntry((await completedFileScan()).snapshot.files, target);
-  recordDirectOperatorWakatimeActivity({
+  const fallbackEntry = operatorFallbackEntry((await dependencies.completedFileScan()).snapshot.files, target);
+  dependencies.recordDirectOperatorWakatimeActivity({
     ...(target.conversationId ? { conversationId: target.conversationId } : {}),
     ...(target.filePath ? { path: target.filePath } : {}),
     ...identity,
@@ -160,6 +150,7 @@ function attachJson(body: AttachResponse | AttachError, status = 200): NextRespo
 }
 
 export async function conversationHostGET(req: NextRequest): Promise<NextResponse<TargetResponse | ApiError | AttachResponse | AttachError>> {
+  const dependencies = conversationHostDependencies();
   const rejection = rejectCrossOrigin(req);
   if (rejection) return rejection;
   const pidRaw = req.nextUrl.searchParams.get("pid");
@@ -172,15 +163,15 @@ export async function conversationHostGET(req: NextRequest): Promise<NextRespons
     let reference;
     if (filePath) {
       if (!pathAllowed(filePath)) return attachJson({ error: "invalid transcript path", reason: "tmux-unavailable" }, 400);
-      const host = (await currentTranscriptHosts()).canonicalFor(filePath);
+      const host = (await currentTranscriptHosts(dependencies)).canonicalFor(filePath);
       if (host === null) return attachJson({ error: "unknown transcript host", reason: "tmux-unavailable" }, 400);
-      reference = captureTmuxAttachReference(host);
+      reference = dependencies.captureTmuxAttachReference(host);
     } else {
-      const host = allowedKillTarget(resourceTarget);
+      const host = dependencies.allowedKillTarget(resourceTarget);
       if (host === null) return attachJson({ error: "unknown resource target", reason: "tmux-unavailable" }, 400);
       reference = host;
     }
-    const resolution = await resolveTmuxAttach(reference, tmuxEndpointDescriptor());
+    const resolution = await dependencies.resolveTmuxAttach(reference, dependencies.tmuxEndpointDescriptor());
     if (!resolution.ok) {
       if (resolution.reason === "stale-pane") {
         return attachJson({ reason: resolution.reason, error: "This pane changed or closed. Refresh and try again." }, 409);
@@ -205,13 +196,14 @@ export async function conversationHostGET(req: NextRequest): Promise<NextRespons
     return NextResponse.json({ error: "pid or path is required" }, { status: 400 });
   }
   try {
-    return NextResponse.json({ target: await targetForRequest(hasPid ? pid : null, filePath) });
+    return NextResponse.json({ target: await targetForRequest(dependencies, hasPid ? pid : null, filePath) });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 409 });
   }
 }
 
 export async function conversationHostPOST(req: NextRequest): Promise<NextResponse<SendResponse | ApiError>> {
+  const dependencies = conversationHostDependencies();
   const rejection = rejectCrossOrigin(req);
   if (rejection) return rejection;
 
@@ -251,17 +243,17 @@ export async function conversationHostPOST(req: NextRequest): Promise<NextRespon
      than the one the panel showed. */
   if (body.action === "kill-target") {
     const target = typeof body.target === "string" ? body.target : "";
-    const ref = allowedKillTarget(target);
+    const ref = dependencies.allowedKillTarget(target);
     if (ref === null) {
       return NextResponse.json({ error: "unknown target — refresh the resource list" }, { status: 400 });
     }
-    if ((await panePidOf(ref.paneId)) !== ref.panePid) {
-      consumeKillTarget(target);
+    if ((await dependencies.panePidOf(ref.paneId)) !== ref.panePid) {
+      dependencies.consumeKillTarget(target);
       return NextResponse.json({ error: "pane has changed — refresh the resource list" }, { status: 409 });
     }
     try {
-      await killPane(ref.paneId);
-      consumeKillTarget(target);
+      await dependencies.killPane(ref.paneId);
+      dependencies.consumeKillTarget(target);
       return NextResponse.json({ ok: true, target });
     } catch (error) {
       return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
@@ -289,12 +281,13 @@ export async function conversationHostPOST(req: NextRequest): Promise<NextRespon
   }
 
   const explicitAction = typeof body.action === "string" ? body.action : "";
-  if ((CONVERSATION_ACTIONS as readonly string[]).includes(explicitAction)) {
+  if (dependencies.conversationActions.includes(explicitAction)) {
     if (explicitAction === "dialog-key") {
       const clientMessageId = typeof body.clientMessageId === "string" ? body.clientMessageId.trim().slice(0, 128) : "";
       const target = { pid, hasPid, filePath, conversationId };
       try {
         await recordAuthorizedOperatorActivity(
+          dependencies,
           req,
           target,
           clientMessageId ? { idempotencyKey: clientMessageId } : {},
@@ -306,7 +299,7 @@ export async function conversationHostPOST(req: NextRequest): Promise<NextRespon
         return NextResponse.json({ error: "direct operator activity could not be recorded" }, { status: 503 });
       }
     }
-    const result = await applyConversationAction({
+    const result = await dependencies.applyConversationAction({
       conversationId,
       transcriptPath: filePath,
       action: explicitAction,
@@ -330,7 +323,7 @@ export async function conversationHostPOST(req: NextRequest): Promise<NextRespon
   const caller = callerConversationId(req);
   const actor: AccountChoiceActor = caller ? { kind: "agent", conversationId: caller } : { kind: "operator" };
   const structuredControl = explicitAction === "reconfigure" && structuredHostsEnabled()
-    ? await dispatchStructuredControl({
+    ? await dependencies.dispatchStructuredControl({
         path: filePath,
         conversationId,
         action: explicitAction,
@@ -353,11 +346,11 @@ export async function conversationHostPOST(req: NextRequest): Promise<NextRespon
     }
     const parsed = reconfigurationFromBody(file.engine, body);
     if (!parsed.value) return NextResponse.json({ error: parsed.error ?? "invalid configuration" }, { status: 400 });
-    return respond(await reconfigureConversation(filePath, parsed.value, { actor }));
+    return respond(await dependencies.reconfigureConversation(filePath, parsed.value, { actor }));
   }
 
   const text = typeof body.text === "string" ? body.text : "";
-  const { images, error: imageError } = collectImagePayloads(body);
+  const { images, error: imageError } = dependencies.collectImagePayloads(body);
   if (imageError) {
     return NextResponse.json({ error: imageError.error }, { status: imageError.status });
   }
@@ -390,6 +383,7 @@ export async function conversationHostPOST(req: NextRequest): Promise<NextRespon
   let operatorAction: AuthorizedOperatorAction;
   try {
     operatorAction = await recordAuthorizedOperatorActivity(
+      dependencies,
       req,
       operatorTarget,
       clientMessageId ? { idempotencyKey: clientMessageId } : {},
@@ -444,8 +438,7 @@ export async function conversationHostPOST(req: NextRequest): Promise<NextRespon
   const attachmentField = () => (filePaths.length ? { filePaths } : {});
 
   if (structuredHostsEnabled()) {
-    const { enqueueStructuredMessage } = await import("@/lib/runtime/structuredMessageDelivery");
-    const structured = await enqueueStructuredMessage({
+    const structured = await dependencies.enqueueStructuredMessage({
       path: filePath,
       ...(conversationId ? { conversationId } : {}),
       ...(typeof body.clientMessageId === "string" ? { clientMessageId: body.clientMessageId.slice(0, 128) } : {}),
@@ -460,7 +453,7 @@ export async function conversationHostPOST(req: NextRequest): Promise<NextRespon
     }
   }
 
-  const outcome = await deliverConversationMessage({
+  const outcome = await dependencies.deliverConversationMessage({
     pid: hasPid ? pid : null,
     path: filePath,
     ...(conversationId ? { conversationId } : {}),

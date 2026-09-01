@@ -673,12 +673,6 @@ export class StructuredDeliveryQueue {
         await this.transitionUnlessSettled(effect.operationId, expired.status, { reason: expired.reason });
         continue;
       }
-      /* A blocked hostless control may produce no journal or host event of its
-         own. Keep one bounded retry alive so a later pass observes the deadline
-         even when the rest of the runtime stays completely quiet. */
-      if (isRuntimeControlEffect(effect) && controlSettlementDeadlineAt(durable.value) !== null) {
-        this.retrySoon();
-      }
       durableStatuses.set(effect.operationId, durable.value);
       openEffects.push(effect);
     }
@@ -711,14 +705,20 @@ export class StructuredDeliveryQueue {
           continue;
         }
         const blocked = await this.drainReconfigure(effect);
-        if (blocked) return true;
+        if (blocked) {
+          this.scheduleControlSettlementCheck(durableStatuses.get(effect.operationId) ?? null);
+          return true;
+        }
         continue;
       }
       if (isControlEffect(effect)) {
         const result = isCompactEffect(effect)
           ? await this.drainCompact(effect)
           : await this.drainControl(effect);
-        if (result.blocked) return true;
+        if (result.blocked) {
+          this.scheduleControlSettlementCheck(durableStatuses.get(effect.operationId) ?? null);
+          return true;
+        }
         if (result.terminated && effect.kind === "kill") {
           if (effect.sessionKey) {
             killedGenerations.add(`${effect.sessionKey.engine}:${effect.sessionKey.sessionId}`);
@@ -1154,6 +1154,13 @@ export class StructuredDeliveryQueue {
       () => this.severedHostReason(conversationId),
       "structured host liveness evidence is unavailable",
     );
+  }
+
+  /** A blocked control may produce no journal or host event of its own. Keep
+      one bounded retry alive so a later pass observes its settlement deadline;
+      a control settled in this pass never reaches this helper. */
+  private scheduleControlSettlementCheck(receipt: StructuredOperationStatus | null): void {
+    if (controlSettlementDeadlineAt(receipt) !== null) this.retrySoon();
   }
 
   /**

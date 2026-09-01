@@ -36,6 +36,35 @@ export interface AgentCapabilities {
   attachMode: AttachMode;
 }
 
+export function agentCapabilitiesFromViews(
+  file: FileEntry,
+  runtime: RuntimeSessionView | null,
+  rootView: RuntimeSessionView | null,
+  runtimeEnabled: boolean,
+): AgentCapabilities {
+  const isClaudeSubagent = file.root === "claude-projects" && file.kind === "subagent";
+  const opts: HostOptions = {
+    runtimeEnabled,
+    ...(runtimeEnabled && isClaudeSubagent ? { root: rootHostFrom(rootView) } : {}),
+  };
+  const caps = capabilitiesFor(file, runtime, opts);
+  /* Every consumer gets the same card verdict. A contradictory stale runtime
+     view is classified as unresolved above, so it cannot keep routing the
+     composer through dead-host recovery after the pane banner stood down. */
+  const structuredSession = caps.surface === "structured" || caps.surface === "dead"
+    ? structuredSessionOf(runtime)
+    : caps.surface === "structured-subagent"
+      ? rootView
+      : null;
+  return {
+    caps,
+    runtime,
+    structuredSession,
+    runtimeEnabled,
+    attachMode: attachModeFor(file, runtime, opts),
+  };
+}
+
 /**
  * The single client entry point for the §4 capability matrix. It resolves the
  * inputs the pure matrix needs beyond the FileEntry: whether the runtime plane
@@ -53,23 +82,11 @@ export function useAgentCapabilities(file: FileEntry): AgentCapabilities {
   const runtime = useRuntimeSession(cardId);
   // A Claude subagent relays through its root; resolve the root host from the
   // runtime store by matching the root transcript path (the child's `parent`).
-  const isClaudeSubagent = file.root === "claude-projects" && file.kind === "subagent";
-  const rootView = useRuntimeSessionByArtifact(isClaudeSubagent ? file.parent : null);
+  const rootView = useRuntimeSessionByArtifact(
+    file.root === "claude-projects" && file.kind === "subagent" ? file.parent : null,
+  );
   // Root host only matters when the runtime plane is authoritative. With the
   // plane off (pure-legacy mode) there is no store to read, so `file.proc` drives
   // subagent classification exactly as before.
-  const opts: HostOptions = {
-    runtimeEnabled: enabled,
-    ...(enabled && isClaudeSubagent ? { root: rootHostFrom(rootView) } : {}),
-  };
-  const caps = capabilitiesFor(file, runtime, opts);
-  /* Every consumer gets the same card verdict. A contradictory stale runtime
-     view is classified as unresolved above, so it cannot keep routing the
-     composer through dead-host recovery after the pane banner stood down. */
-  const structuredSession = caps.surface === "structured" || caps.surface === "dead"
-    ? structuredSessionOf(runtime)
-    : caps.surface === "structured-subagent"
-      ? rootView
-      : null;
-  return { caps, runtime, structuredSession, runtimeEnabled: enabled, attachMode: attachModeFor(file, runtime, opts) };
+  return agentCapabilitiesFromViews(file, runtime, rootView, enabled);
 }

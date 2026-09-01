@@ -1,4 +1,4 @@
-import { afterAll, afterEach, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, expect, test } from "bun:test";
 import { Window } from "happy-dom";
 import { useSyncExternalStore } from "react";
 import { flushSync } from "react-dom";
@@ -7,8 +7,10 @@ import { createRoot } from "react-dom/client";
 import type { RuntimeReceipt } from "@/components/runtime/runtimeModel";
 import { setLocale, translate } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
+import { setRuntimeUiEnabledForTests } from "@/hooks/runtimeBus";
 
 import { ComposerAdmissionTimeoutError } from "./composerAdmissionDeadline";
+import { setTmuxComposerRuntimeDependenciesForTests } from "./tmuxComposerRuntime";
 
 const dom = new Window();
 Object.assign(globalThis, {
@@ -39,9 +41,7 @@ let mobileViewport = false;
 /* A controllable durable-receipt stream stands in for the runtime bus: the
    tests push admission receipts the way production does — through the
    receipts hook — while the send response is still in flight or after a
-   remount. The actual hooks are restored in afterAll (mock.module is
-   process-global). */
-const actualRuntimeHooks = await import("@/hooks/useRuntime");
+   remount. The lifecycle-owned composer seam is cleared after every case. */
 const receiptListeners = new Set<() => void>();
 let busReceipts: RuntimeReceipt[] = [];
 let refreshRuntimeImpl: () => Promise<boolean> = async () => false;
@@ -49,27 +49,27 @@ function publishReceipts(next: RuntimeReceipt[]): void {
   busReceipts = next;
   for (const listener of receiptListeners) listener();
 }
-mock.module("@/hooks/useRuntime", () => ({
-  ...actualRuntimeHooks,
-  useRuntimeSession: () => null,
-  refreshRuntime: () => refreshRuntimeImpl(),
-  useRuntimeReceiptsForArtifact: () => useSyncExternalStore(
-    (listener) => {
-      receiptListeners.add(listener);
-      return () => receiptListeners.delete(listener);
-    },
-    () => busReceipts,
-    () => busReceipts,
-  ),
-}));
-afterAll(() => {
-  mock.module("@/hooks/useRuntime", () => actualRuntimeHooks);
+import { appendComposerDraft, TmuxComposer } from "./TmuxComposer";
+import { readOutbox, resetOutboxForTests } from "./conversation/outbox";
+
+beforeEach(() => {
+  setRuntimeUiEnabledForTests(false);
+  setTmuxComposerRuntimeDependenciesForTests({
+    refreshRuntime: () => refreshRuntimeImpl(),
+    useRuntimeReceiptsForArtifact: () => useSyncExternalStore(
+      (listener) => {
+        receiptListeners.add(listener);
+        return () => receiptListeners.delete(listener);
+      },
+      () => busReceipts,
+      () => busReceipts,
+    ),
+  });
 });
 
-const { appendComposerDraft, TmuxComposer } = await import("./TmuxComposer");
-const { readOutbox, resetOutboxForTests } = await import("./conversation/outbox");
-
 afterEach(() => {
+  setTmuxComposerRuntimeDependenciesForTests(null);
+  setRuntimeUiEnabledForTests(null);
   resetOutboxForTests();
 });
 
@@ -283,7 +283,7 @@ test("a queued admission after remount still clears the persisted generation exa
       kind: "send",
       status: "queued",
       text: prompt,
-      at: "2026-07-18T00:00:05.000Z",
+      at: new Date().toISOString(),
       revision: 1,
     }]);
     root = createRoot(host);
@@ -298,8 +298,11 @@ test("a queued admission after remount still clears the persisted generation exa
     expect(sessionStorage.getItem(`llvPendingSend:${conversationId}`)).toBe(null);
     expect(outboxOf(conversationId).find((e) => e.text === prompt)?.state).toBe("delivering");
     /* The receipt stack keeps the truthful queued record with the payload. */
-    expect(host.querySelector('[data-receipt-status="queued"]')?.textContent)
-      .toBe(translate("en", "runtime.receipt.queued"));
+    const queued = host.querySelector('[data-receipt-status="queued"]');
+    expect(queued?.getAttribute("data-receipt-wait")).toBe("awaiting-handover");
+    expect(queued?.textContent).toContain(translate("en", "runtime.receipt.awaitingHandoverFor", {
+      waited: translate("en", "runtime.receipt.waitedSec", { n: 1 }),
+    }));
     expect(host.querySelector("[data-receipt-preview]")?.textContent).toBe(prompt);
   } finally {
     flushSync(() => root.unmount());

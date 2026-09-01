@@ -10,7 +10,7 @@
  * 2. The badge in the composer names the same card the request names, so what
  *    the operator sees before sending is what they sent.
  */
-import { afterAll, afterEach, beforeEach, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, expect, test } from "bun:test";
 import { act } from "react";
 import { installActEnv } from "@/test-helpers/actEnv";
 import { Window } from "happy-dom";
@@ -19,6 +19,7 @@ import { createRoot, type Root } from "react-dom/client";
 import type { RuntimeSessionView } from "@/hooks/useRuntime";
 import type { SelectedContextRef } from "@/lib/selection/selectedContext";
 import type { FileEntry } from "@/lib/types";
+import { installTmuxComposerRuntimeForTests, resetTmuxComposerRuntimeForTests } from "@/test-helpers/tmuxComposerRuntime";
 
 const dom = new Window();
 installActEnv();
@@ -70,21 +71,7 @@ function structuredView(conversationId: string): RuntimeSessionView {
   } as unknown as RuntimeSessionView;
 }
 
-const actualRuntimeHooks = await import("@/hooks/useRuntime");
-const realUseRuntimeSession = actualRuntimeHooks.useRuntimeSession;
-const realUseRuntimeReceiptsForArtifact = actualRuntimeHooks.useRuntimeReceiptsForArtifact;
-mock.module("@/hooks/useRuntime", () => ({
-  ...actualRuntimeHooks,
-  useRuntimeSession: (conversationId: string | null) =>
-    conversationId === COMPOSING ? structuredView(conversationId) : realUseRuntimeSession(conversationId),
-  useRuntimeReceiptsForArtifact: (path: string | null, conversationId?: string | null) =>
-    conversationId === COMPOSING ? [] : realUseRuntimeReceiptsForArtifact(path, conversationId),
-}));
-afterAll(() => {
-  mock.module("@/hooks/useRuntime", () => actualRuntimeHooks);
-});
-
-const { appendComposerDraft, TmuxComposer } = await import("./TmuxComposer");
+import { appendComposerDraft, TmuxComposer } from "./TmuxComposer";
 const { resetOutboxForTests } = await import("./conversation/outbox");
 const { resetManagerIdentityForTest } = await import("./voice/managerIdentity");
 const { viewBus } = await import("@/hooks/viewPresenceBus");
@@ -128,6 +115,9 @@ function selectCard(path: string): void {
 }
 
 beforeEach(() => {
+  installTmuxComposerRuntimeForTests({
+    useRuntimeView: (file) => file.conversationId === COMPOSING ? structuredView(COMPOSING) : null,
+  });
   sent = [];
   duringSend = null;
   resetManagerIdentityForTest();
@@ -142,6 +132,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  resetTmuxComposerRuntimeForTests();
   for (const root of roots) await act(async () => root.unmount());
   roots = [];
   globalThis.fetch = realFetch;

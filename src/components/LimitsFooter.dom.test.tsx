@@ -47,8 +47,8 @@ const accounts = {
   claude: { active: "claude-a", accounts: [] },
 };
 
-// Bound before the component is imported so the singleton account stores read
-// this stub rather than the real endpoints.
+// The singleton account stores resolve the active global fetch at request time,
+// so this lifecycle-owned stub remains valid regardless of import order.
 globalThis.fetch = (async (input: RequestInfo | URL) => {
   const url = String(input);
   if (url === "/api/limits") return limitsUnavailable ? new Response(null, { status: 503 }) : Response.json(limits);

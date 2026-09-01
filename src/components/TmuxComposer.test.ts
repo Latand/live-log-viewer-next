@@ -240,6 +240,7 @@ test("the production runtime receipt list exposes recovery actions for failures"
         at: "2026-07-13T00:00:00.000Z",
         revision: 3,
       }],
+      nowMs: Date.parse("2026-07-13T00:00:01.000Z"),
       onRetry: () => {},
       onEdit: () => {},
     }),
@@ -264,6 +265,7 @@ test("a queued structured send renders as a quiet optimistic user message", () =
         at: "2026-07-13T00:00:00.000Z",
         revision: 1,
       }],
+      nowMs: Date.parse("2026-07-13T00:00:01.000Z"),
       onRetry: () => {},
       onEdit: () => {},
     }),
@@ -271,7 +273,8 @@ test("a queued structured send renders as a quiet optimistic user message", () =
 
   expect(html).toContain('data-optimistic-message="true"');
   expect(html).toContain("keep going");
-  expect(html).toContain("animate-pulse");
+  expect(html).toContain('data-receipt-wait="awaiting-handover"');
+  expect(html).not.toContain("animate-pulse");
   expect(html).not.toContain("Queued for durable delivery");
 });
 
@@ -289,12 +292,13 @@ test("an optimistic automatic retry shows human busy feedback", () => {
         at: "2026-07-13T00:00:00.000Z",
         revision: 3,
       }],
+      nowMs: Date.parse("2026-07-13T00:00:01.000Z"),
       onRetry: () => {},
       onEdit: () => {},
     }),
   );
 
-  expect(html).toContain("animate-pulse");
+  expect(html).toContain("animate-spin");
   expect(html).toContain("agent is busy");
   expect(translate("en", "runtime.receipt.busyRetry")).toBe("Couldn’t deliver — agent is busy, we’ll retry");
   expect(translate("uk", "runtime.receipt.busyRetry")).toBe("Не вдалося доставити — агент зайнятий, повторимо");
