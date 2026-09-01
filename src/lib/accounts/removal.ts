@@ -51,7 +51,7 @@ export function accountHomeExistsForRemoval(home: string): boolean {
 }
 
 const HISTORY_DIRECTORY_ROOTS: Record<ManagedAccountEngine, ReadonlySet<string>> = {
-  claude: new Set(["projects", "file-history", "session-env", "shell-snapshots", "todos"]),
+  claude: new Set(["projects", "file-history", "session-env", "shell-snapshots", "todos", "debug", "backups", "paste-cache"]),
   codex: new Set(["sessions", "archived_sessions", "log", "shell_snapshots"]),
 };
 const OWNED_REGULAR_FILES: Record<ManagedAccountEngine, ReadonlySet<string>> = {
@@ -63,7 +63,7 @@ const OWNED_SYMLINKS: Record<ManagedAccountEngine, ReadonlySet<string>> = {
   codex: new Set(["skills", "prompts", "config.toml", "AGENTS.md", "memories", "rules", path.join("plugins", "cache")]),
 };
 const OWNED_DIRECTORY_ROOTS: Record<ManagedAccountEngine, ReadonlySet<string>> = {
-  claude: new Set(["cache", "debug", "backups", "paste-cache", "plugins"]),
+  claude: new Set(["cache", "plugins"]),
   codex: new Set([".tmp", "mcp-oauth", path.join("plugins", "data")]),
 };
 const SAFE_ACCOUNT_ID = /^[a-z0-9][a-z0-9-]{0,31}$/;

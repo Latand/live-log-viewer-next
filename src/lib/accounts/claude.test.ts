@@ -10,6 +10,7 @@ process.env.LLV_STATE_DIR = path.join(SANDBOX, "state");
 process.env.LLV_CLAUDE_HOME = path.join(SANDBOX, "legacy-claude");
 
 const mod = await import("./claude");
+const { AccountHistoryInventoryBlockedError } = await import("./removal");
 const { agentRegistry } = await import("@/lib/agent/registry");
 const { beginLegacySpawnFixture } = await import("@/lib/agent/registryTestFixtures");
 
@@ -125,6 +126,54 @@ test("a fully-owned home deletes cleanly while retaining its transcripts and rem
   expect(fs.existsSync(transcript)).toBe(true);
   expect(mod.createManagedClaudeAccount("Retire me").id).not.toBe(account.id);
 });
+
+test("Claude per-session debug logs block account deletion and name the exact history path", () => {
+  const account = mod.createManagedClaudeAccount("Debug history");
+  const relative = path.join("debug", "12345678-90ab-cdef-1234-567890abcdef.txt");
+  const artifact = path.join(account.home, relative);
+  fs.mkdirSync(path.dirname(artifact), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(artifact, "session activity\n", { mode: 0o600 });
+
+  let caught: unknown;
+  try { mod.removeManagedClaudeAccount(account.id); }
+  catch (error) { caught = error; }
+
+  expect(caught).toBeInstanceOf(AccountHistoryInventoryBlockedError);
+  expect((caught as InstanceType<typeof AccountHistoryInventoryBlockedError>).report.artifacts).toContainEqual({
+    path: relative,
+    classification: "history",
+    history: true,
+  });
+  expect(fs.readFileSync(artifact, "utf8")).toBe("session activity\n");
+  expect(fs.existsSync(account.home)).toBe(true);
+  expect(mod.listClaudeAccounts().map((candidate) => candidate.id)).toContain(account.id);
+});
+
+for (const [label, relative, contents] of [
+  ["paste cache", path.join("paste-cache", "12345678-90ab-cdef-1234-567890abcdef.txt"), "pasted user text\n"],
+  ["config backup", path.join("backups", ".claude.json.backup.1234567890"), "{\"projects\":{\"/repo\":{}}}\n"],
+] as const) {
+  test(`Claude ${label} artifacts block account deletion as history`, () => {
+    const account = mod.createManagedClaudeAccount(`History ${label}`);
+    const artifact = path.join(account.home, relative);
+    fs.mkdirSync(path.dirname(artifact), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(artifact, contents, { mode: 0o600 });
+
+    let caught: unknown;
+    try { mod.removeManagedClaudeAccount(account.id); }
+    catch (error) { caught = error; }
+
+    expect(caught).toBeInstanceOf(AccountHistoryInventoryBlockedError);
+    expect((caught as InstanceType<typeof AccountHistoryInventoryBlockedError>).report.artifacts).toContainEqual({
+      path: relative,
+      classification: "history",
+      history: true,
+    });
+    expect(fs.readFileSync(artifact, "utf8")).toBe(contents);
+    expect(fs.existsSync(account.home)).toBe(true);
+    expect(mod.listClaudeAccounts().map((candidate) => candidate.id)).toContain(account.id);
+  });
+}
 
 test("sidecar cleanup does not follow a symlink outside the accounts root", () => {
   const account = mod.createManagedClaudeAccount("Linked sidecar");
