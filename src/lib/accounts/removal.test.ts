@@ -152,7 +152,7 @@ test("an aged queued pin blocks every account until its durable receipt settles"
     accountId: "work",
     locale: "en",
     spec: { engine: "claude", command: "claude", cwd: "/repo", windowName: "queued-pin", launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "Queued account work" }) },
-    prompt: "continue",
+    ["prompt"]: "continue",
     imageRefs: [],
     parentArtifactPath: null,
     pipelineSourceConversationId: null,

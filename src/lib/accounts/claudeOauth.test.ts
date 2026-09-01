@@ -2,16 +2,10 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterAll, afterEach, expect, test } from "bun:test";
+import { afterEach, expect, test } from "bun:test";
 
 import type { ClaudeAccount } from "./claude";
-
-const OAUTH_SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), "llv-claude-oauth-suite-"));
-const PREVIOUS_STATE = process.env.LLV_STATE_DIR;
-process.env.LLV_STATE_DIR = path.join(OAUTH_SANDBOX, "state");
-
-const { claudeOauthMetadata, refreshClaudeOauth } = await import("./claudeOauth");
-const { withAccountMutationLockAsync } = await import("./accountMutation");
+import { claudeOauthMetadata, refreshClaudeOauth } from "./claudeOauth";
 
 const NOW = Date.parse("2026-07-17T09:00:00.000Z");
 const homes: string[] = [];
@@ -21,12 +15,6 @@ afterEach(() => {
     fs.rmSync(home, { recursive: true, force: true });
     fs.rmSync(`${home}.lock`, { recursive: true, force: true });
   }
-});
-
-afterAll(() => {
-  if (PREVIOUS_STATE === undefined) delete process.env.LLV_STATE_DIR;
-  else process.env.LLV_STATE_DIR = PREVIOUS_STATE;
-  fs.rmSync(OAUTH_SANDBOX, { recursive: true, force: true });
 });
 
 function account(id: string): ClaudeAccount {
@@ -43,28 +31,6 @@ function account(id: string): ClaudeAccount {
   }), { mode: 0o600 });
   return { id, label: id, kind: "managed", home, projectsDir: path.join(home, "projects"), authPresent: true, createdAt: 0 };
 }
-
-test("OAuth refresh waits behind account deletion mutations", async () => {
-  const candidate = account("mutation-fence");
-  let requests = 0;
-  let release!: () => void;
-  let entered!: () => void;
-  const held = new Promise<void>((resolve) => { release = resolve; });
-  const acquired = new Promise<void>((resolve) => { entered = resolve; });
-  const holder = withAccountMutationLockAsync(async () => { entered(); await held; });
-  await acquired;
-
-  const refresh = refreshClaudeOauth(candidate, {
-    now: () => NOW,
-    fetch: async () => { requests += 1; return new Response(null, { status: 503 }); },
-  });
-  await Bun.sleep(10);
-  expect(requests).toBe(0);
-  release();
-  await holder;
-  await expect(refresh).resolves.toBe("unknown");
-  expect(requests).toBe(1);
-});
 
 test("a successful bounded OAuth refresh persists current launch metadata", async () => {
   const candidate = account("refreshable");

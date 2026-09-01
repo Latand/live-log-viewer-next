@@ -6,6 +6,7 @@ import { LIMITS_REAUTH_REQUIRED_REASON, type EngineLimits } from "@/lib/types";
 
 import type { ClaudeAccount } from "./claude";
 import { claudeOauthMetadata, refreshClaudeOauth } from "./claudeOauth";
+import { withAccountMutationLockAsync } from "./accountMutation";
 
 export type ClaudeValidityProbeResult = SpawnAccountAdmission;
 
@@ -118,26 +119,28 @@ async function liveValidityProbe(account: ClaudeAccount): Promise<ClaudeValidity
 }
 
 async function refreshValidityProbe(account: ClaudeAccount): Promise<ClaudeValidityProbeResult> {
-  const refreshed = await refreshClaudeOauth(account);
-  if (refreshed === "invalid") {
-    return classifySpawnAccountAdmission({
-      enabled: true,
-      authentication: "failed",
-      limits: "unknown",
-      stale: false,
-      retryAt: null,
-    });
-  }
-  if (refreshed === "unknown") {
-    return classifySpawnAccountAdmission({
-      enabled: true,
-      authentication: "unknown",
-      limits: "unknown",
-      stale: true,
-      retryAt: null,
-    });
-  }
-  return await liveValidityProbe(account);
+  return await withAccountMutationLockAsync(async () => {
+    const refreshed = await refreshClaudeOauth(account);
+    if (refreshed === "invalid") {
+      return classifySpawnAccountAdmission({
+        enabled: true,
+        authentication: "failed",
+        limits: "unknown",
+        stale: false,
+        retryAt: null,
+      });
+    }
+    if (refreshed === "unknown") {
+      return classifySpawnAccountAdmission({
+        enabled: true,
+        authentication: "unknown",
+        limits: "unknown",
+        stale: true,
+        retryAt: null,
+      });
+    }
+    return await liveValidityProbe(account);
+  });
 }
 
 const productionDependencies: ClaudeSpawnHealthDependencies = {
