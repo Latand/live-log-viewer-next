@@ -36,7 +36,8 @@ test("role registry exposes the frozen eight role ids and campaign-ready orchest
     completionPolicy: "released",
   });
   expect(orchestrator.ok && orchestrator.value.config).toEqual({ engine: "claude", model: "opus", effort: "high" });
-  expect(orchestrator.ok && orchestrator.value.prompt).toContain(`http://127.0.0.1:${process.env.PORT?.trim() || "8898"}`);
+  expect(orchestrator.ok && orchestrator.value.prompt).toContain("Viewer MCP tools");
+  expect(orchestrator.ok && orchestrator.value.prompt).not.toMatch(/(?:https?:\/\/)?(?:127\.0\.0\.1|localhost|\[::1\]):\d+/);
   expect(orchestrator.ok && orchestrator.value.prompt).toContain("Repository: Latand/live-log-viewer-next");
   expect(orchestrator.ok && orchestrator.value.prompt).toContain("Issue query: is:open");
   expect(orchestrator.ok && orchestrator.value.prompt).toContain("Urgent list: #35");

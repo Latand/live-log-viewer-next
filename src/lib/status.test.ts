@@ -36,6 +36,32 @@ test("informational lines above a ready composer do not hide late launch readine
   expect(screenAtIdleComposer(claude)).toBe(true);
 });
 
+test("the Codex composer stays launch-ready beneath usage and unrecognized bullet notices", () => {
+  for (const notice of [
+    "• You have 1 usage limit reset available. Run /usage to use one.",
+    "• A future Codex informational notice the Viewer does not recognize",
+    "You've hit your usage limit. Try again at 7:55 PM.",
+  ]) {
+    expect(screenAtIdleComposer([
+      notice,
+      "",
+      "› Ask Codex to do anything",
+      "  …",
+    ].join("\n"))).toBe(true);
+  }
+});
+
+test("an interaction below the composer still vetoes launch readiness", () => {
+  expect(screenAtIdleComposer([
+    "› Ask Codex to do anything",
+    "",
+    "Do you want to proceed?",
+    "  1. Yes",
+    "  2. No",
+    "  Enter to select",
+  ].join("\n"))).toBe(false);
+});
+
 test("quiet streamed output without a composer never reads as at-composer", () => {
   expect(screenAtIdleComposer(QUIET_OUTPUT)).toBe(false);
 });

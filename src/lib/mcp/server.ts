@@ -2272,12 +2272,16 @@ export function createViewerMcpServer(service: McpToolService): McpServer {
 
 export async function startViewerMcpServer(): Promise<void> {
   const { admittedMcpHealthProbe, MCP_HEALTH_PROBE_CAPABILITY_ENV } = await import("./healthProbeAdmission");
-  const { viewerMcpBindings, viewerMcpToolPolicy } = await import("./bindings");
+  const {
+    productionViewerControlDependencies,
+    viewerMcpBindings,
+    viewerMcpToolPolicy,
+  } = await import("./bindings");
   const healthProbeCapability = process.env[MCP_HEALTH_PROBE_CAPABILITY_ENV];
   delete process.env[MCP_HEALTH_PROBE_CAPABILITY_ENV];
   const hostHealthProbe = await admittedMcpHealthProbe(healthProbeCapability);
   const service = createMcpToolService(
-    viewerMcpBindings(),
+    viewerMcpBindings(undefined, productionViewerControlDependencies(hostHealthProbe)),
     new SqliteMcpReceiptStore(statePath("mcp-receipts.sqlite"), {
       legacyFilePath: statePath("mcp-receipts.json"),
     }),

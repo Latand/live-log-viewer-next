@@ -7,6 +7,7 @@ import { afterAll, expect, test } from "bun:test";
 import { AgentRegistry } from "@/lib/agent/registry";
 import { reconcileMigrations } from "@/lib/accounts/migration/coordinator";
 import { emptyLaunchProfile, type HeldDelivery } from "@/lib/accounts/migration/contracts";
+import { conversationDeliverabilityFromRecord } from "@/lib/conversation/deliverability";
 import type { RuntimeHostClient } from "./client";
 import type { RuntimeSnapshot } from "./contracts";
 import { MAX_STRUCTURED_IMAGE_ENCODED_BYTES, RuntimeImageStore, runtimeImageCapability } from "./runtimeImageStore";
@@ -1138,7 +1139,7 @@ test("legacy synchronization rejects structured command semantics before fallbac
   expect(registry.pendingDeliveries(conversation.id)).toEqual([]);
 });
 
-test("conflicting persisted ownership stays fenced during runtime client absence", async () => {
+test("a durable legacy host wins over retained structured adapter metadata during runtime client absence", async () => {
   const { registry, conversation } = registryWithConversation();
   recordLegacyOwner(registry, conversation);
   const generation = conversation.generations.at(-1)!;
@@ -1166,7 +1167,57 @@ test("conflicting persisted ownership stays fenced during runtime client absence
     registry: () => registry,
   });
 
-  expect(result).toMatchObject({ ok: false, structured: true, outcome: "failed", status: 503 });
+  expect(result).toBeNull();
+  expect(registry.pendingDeliveries(conversation.id)).toEqual([]);
+});
+
+test("a live legacy record outranks a stale structured projection for the send immediately after resume", async () => {
+  const { registry, conversation } = registryWithConversation();
+  recordLegacyOwner(registry, conversation);
+  const generation = conversation.generations.at(-1)!;
+  registry.setStructuredHost({ engine: conversation.engine, sessionId: generation.id }, {
+    kind: "codex-app-server",
+    endpoint: "stdio:stale-after-resume",
+    process: null,
+    eventCursor: 9,
+    protocolVersion: "v2",
+    writerClaimEpoch: 2,
+    activeTurnRef: null,
+    pendingAttention: [],
+    activeFlags: [],
+  });
+  const staleRuntime = snapshot(conversation.id);
+  staleRuntime.sessions[0] = { ...staleRuntime.sessions[0]!, host: "unhosted" };
+  let recoveryCalls = 0;
+
+  expect(conversationDeliverabilityFromRecord(registry.readOnlySnapshot(), {
+    conversationId: conversation.id,
+  })).toMatchObject({
+    deliverable: true,
+    condition: "deliverable",
+    transport: "legacy",
+    hostStatus: "idle",
+  });
+
+  const result = await enqueueStructuredMessage({
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId: "send-immediately-after-legacy-resume",
+    text: "deliver through the host the resume just settled",
+    hasImages: false,
+  }, {
+    enabled: () => true,
+    client: () => ({ snapshot: async () => staleRuntime }) as unknown as RuntimeHostClient,
+    registry: () => registry,
+    republish: async () => false,
+    recover: async () => {
+      recoveryCalls += 1;
+      return null;
+    },
+  });
+
+  expect(result).toBeNull();
+  expect(recoveryCalls).toBe(0);
   expect(registry.pendingDeliveries(conversation.id)).toEqual([]);
 });
 
