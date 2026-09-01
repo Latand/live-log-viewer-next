@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import fs from "node:fs";
 import net from "node:net";
@@ -14,6 +14,11 @@ const originalRuntimeEvents = process.env.LLV_RUNTIME_EVENTS;
 const originalRuntimeSocket = process.env.LLV_RUNTIME_HOST_SOCKET;
 const originalRuntimeJournal = process.env.LLV_RUNTIME_JOURNAL;
 const originalViewerControlUrl = process.env.LLV_VIEWER_CONTROL_URL;
+const originalViewerDeployTarget = process.env.LLV_VIEWER_DEPLOY_TARGET;
+const originalViewerPort = process.env.LLV_VIEWER_PORT;
+const originalStateDirectory = process.env.LLV_STATE_DIR;
+const originalConfigHome = process.env.XDG_CONFIG_HOME;
+const originalHome = process.env.HOME;
 const sandboxes: string[] = [];
 const netServers: net.Server[] = [];
 const netSockets = new Set<net.Socket>();
@@ -34,7 +39,41 @@ afterEach(async () => {
   else process.env.LLV_RUNTIME_JOURNAL = originalRuntimeJournal;
   if (originalViewerControlUrl === undefined) delete process.env.LLV_VIEWER_CONTROL_URL;
   else process.env.LLV_VIEWER_CONTROL_URL = originalViewerControlUrl;
+  if (originalViewerDeployTarget === undefined) delete process.env.LLV_VIEWER_DEPLOY_TARGET;
+  else process.env.LLV_VIEWER_DEPLOY_TARGET = originalViewerDeployTarget;
+  if (originalViewerPort === undefined) delete process.env.LLV_VIEWER_PORT;
+  else process.env.LLV_VIEWER_PORT = originalViewerPort;
+  if (originalStateDirectory === undefined) delete process.env.LLV_STATE_DIR;
+  else process.env.LLV_STATE_DIR = originalStateDirectory;
+  if (originalConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+  else process.env.XDG_CONFIG_HOME = originalConfigHome;
+  if (originalHome === undefined) delete process.env.HOME;
+  else process.env.HOME = originalHome;
 });
+
+function installViewerControlFixture(origin: string): void {
+  const endpoint = new URL(origin);
+  if (endpoint.port === "8898") throw new Error("a Viewer control fixture cannot use the production port");
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-viewer-control-fixture-"));
+  const stateDirectory = path.join(sandbox, "state");
+  const configHome = path.join(sandbox, "config");
+  const target = path.join(stateDirectory, "viewer-release.json");
+  fs.mkdirSync(stateDirectory, { recursive: true });
+  fs.mkdirSync(configHome, { recursive: true });
+  fs.writeFileSync(target, JSON.stringify({
+    revision: "f".repeat(40),
+    image: "viewer:fixture",
+    container: "viewer-fixture",
+    endpoint: origin,
+  }));
+  sandboxes.push(sandbox);
+  process.env.HOME = sandbox;
+  process.env.XDG_CONFIG_HOME = configHome;
+  process.env.LLV_STATE_DIR = stateDirectory;
+  process.env.LLV_VIEWER_DEPLOY_TARGET = target;
+  process.env.LLV_VIEWER_CONTROL_URL = origin;
+  process.env.LLV_VIEWER_PORT = endpoint.port;
+}
 
 function deployment(deploymentId: string, revision = "a".repeat(40)) {
   return {
@@ -183,7 +222,7 @@ test("the production Viewer control adapter reads a live plane with no runtime v
       return Response.json({ count: 1, deployments: [deployment] });
     },
   });
-  process.env.LLV_VIEWER_CONTROL_URL = server.url.origin;
+  installViewerControlFixture(server.url.origin);
 
   try {
     expect(await viewerMcpBindings().deployment_status({
@@ -193,6 +232,60 @@ test("the production Viewer control adapter reads a live plane with no runtime v
       deployments: [deployment],
     });
   } finally {
+    server.stop(true);
+  }
+});
+
+test("a control-URL-only fixture can send only to itself and never to the production port", async () => {
+  delete process.env.LLV_VIEWER_DEPLOY_TARGET;
+  delete process.env.LLV_VIEWER_PORT;
+  delete process.env.LLV_STATE_DIR;
+  delete process.env.XDG_CONFIG_HOME;
+  const deployment = {
+    deploymentId: "deployment_control_url_only",
+    phase: "succeeded",
+    revision: "b".repeat(40),
+  };
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: () => Response.json({ count: 1, deployments: [deployment] }),
+  });
+  if (server.port === 8898) {
+    server.stop(true);
+    throw new Error("the control-URL-only fixture selected the production port");
+  }
+  process.env.LLV_VIEWER_CONTROL_URL = server.url.origin;
+  const ambientRelease = JSON.stringify({
+    revision: "c".repeat(40),
+    image: "viewer:ambient-fixture",
+    container: "viewer-ambient-fixture",
+    endpoint: "http://127.0.0.1:19007",
+  });
+  const readFile = spyOn(fs, "readFileSync").mockImplementation(
+    (() => ambientRelease) as unknown as typeof fs.readFileSync,
+  );
+  const requests: string[] = [];
+  const fetchRequest = globalThis.fetch.bind(globalThis);
+  const guardedFetch = async (input: URL | RequestInfo, init?: RequestInit): Promise<Response> => {
+    const url = new URL(input instanceof Request ? input.url : String(input));
+    if (url.port === "8898") throw new Error("a fixture request attempted to reach the production port");
+    requests.push(url.href);
+    return fetchRequest(input, init);
+  };
+  const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(guardedFetch as typeof fetch);
+
+  try {
+    expect(await viewerMcpBindings().deployment_status({
+      clientRequestId: "deployment-control-url-only",
+    })).toEqual({ count: 1, deployments: [deployment] });
+    expect(readFile).not.toHaveBeenCalled();
+    expect(requests).toEqual([
+      `${server.url.origin}/api/runtime/deployments?limit=25`,
+    ]);
+  } finally {
+    fetchSpy.mockRestore();
+    readFile.mockRestore();
     server.stop(true);
   }
 });
@@ -215,7 +308,7 @@ test("the production Viewer control adapter returns a failed deployment domain o
         : Response.json(deployment);
     },
   });
-  process.env.LLV_VIEWER_CONTROL_URL = server.url.origin;
+  installViewerControlFixture(server.url.origin);
   const bindings = viewerMcpBindings();
 
   try {
@@ -261,7 +354,7 @@ test("deployment_status exposes the absent-plane code and keeps an unreachable p
       );
     },
   });
-  process.env.LLV_VIEWER_CONTROL_URL = server.url.origin;
+  installViewerControlFixture(server.url.origin);
   const absentService = createMcpToolService(viewerMcpBindings(), new MemoryMcpReceiptStore());
 
   const absent = await absentService.callTool("deployment_status", {
@@ -459,7 +552,7 @@ test("a control surface that does not serve the route yet falls back instead of 
       return new Response("Method Not Allowed", { status: 405 });
     },
   });
-  process.env.LLV_VIEWER_CONTROL_URL = server.url.origin;
+  installViewerControlFixture(server.url.origin);
 
   try {
     expect(await viewerMcpBindings().deployment_status({
@@ -481,7 +574,7 @@ test("a 404 keeps its domain meaning and is never mistaken for an unserved route
     port: 0,
     fetch: () => Response.json({ error: "viewer deployment was not found" }, { status: 404 }),
   });
-  process.env.LLV_VIEWER_CONTROL_URL = server.url.origin;
+  installViewerControlFixture(server.url.origin);
 
   try {
     await expect(viewerMcpBindings().deployment_status({
@@ -510,7 +603,7 @@ test("a null response body is classified by status instead of crashing the read"
     port: 0,
     fetch: () => new Response("null", { status: 405, headers: { "content-type": "application/json" } }),
   });
-  process.env.LLV_VIEWER_CONTROL_URL = server.url.origin;
+  installViewerControlFixture(server.url.origin);
 
   try {
     expect(await viewerMcpBindings().deployment_status({
@@ -606,7 +699,7 @@ test("malformed successful control bodies never become successful undefined depl
         : Response.json({});
     },
   });
-  process.env.LLV_VIEWER_CONTROL_URL = server.url.origin;
+  installViewerControlFixture(server.url.origin);
 
   try {
     await expect(viewerMcpBindings().deployment_status({
@@ -634,7 +727,7 @@ test("a timed-out 2xx body is surfaced instead of becoming an empty success", as
       ].join("\r\n"));
     });
   });
-  process.env.LLV_VIEWER_CONTROL_URL = origin;
+  installViewerControlFixture(origin);
 
   await expect(viewerMcpBindings().deployment_status({
     clientRequestId: "deployment-timed-out-success-body",
@@ -656,7 +749,7 @@ test("a control surface that never answers falls back instead of hanging the pro
   const { origin } = await listenTcp(() => {
     /* Keep the accepted connection open without sending headers. */
   });
-  process.env.LLV_VIEWER_CONTROL_URL = origin;
+  installViewerControlFixture(origin);
 
   const started = Date.now();
   expect(await viewerMcpBindings().deployment_status({
