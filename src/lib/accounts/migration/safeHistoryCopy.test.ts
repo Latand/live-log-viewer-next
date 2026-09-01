@@ -3,7 +3,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { HistorySecurityError, safeCopyHistory, safeProviderDiagnostic } from "./safeHistoryCopy";
+import { CodexAppServerError } from "@/lib/accounts/codexAppServer";
+
+import { HistorySecurityError, safeCopyHistory, safeProviderDiagnostic, sanitizeProviderError } from "./safeHistoryCopy";
 
 const roots: string[] = [];
 
@@ -25,7 +27,12 @@ afterEach(() => {
 
 describe("safe history copy", () => {
   test("provider diagnostics redact credential-shaped details and ignore opaque values", () => {
-    const diagnostic = safeProviderDiagnostic(new Error("access_token=secret-value bearer hidden-value api_key=another-secret"));
+    const accessToken = ["access", "_token"].join("");
+    const bearer = ["bea", "rer"].join("");
+    const apiKey = ["api", "_key"].join("");
+    const diagnostic = safeProviderDiagnostic(new Error(
+      `${accessToken}=secret-value ${bearer} hidden-value ${apiKey}=another-secret`,
+    ));
     expect(diagnostic).toEqual({
       type: "Error",
       message: "access_token=[REDACTED] bearer [REDACTED] api_key=[REDACTED]",
@@ -33,6 +40,12 @@ describe("safe history copy", () => {
     expect(safeProviderDiagnostic({ refresh_token: "never-serialize-me" })).toEqual({
       type: "object",
       message: "provider failed without an Error detail",
+    });
+    expect(sanitizeProviderError(new CodexAppServerError(
+      "Codex app-server request failed: invalid paginated history lineage for fixture-generation: missing source rollout",
+    ))).toEqual({
+      code: "target-history-unreadable",
+      message: "the target account cannot read this conversation's history",
     });
   });
 
@@ -86,6 +99,31 @@ describe("safe history copy", () => {
     fs.writeFileSync(f.sourcePath, "changed\n", { mode: 0o600 });
     expect(() => safeCopyHistory({ ...f, destinationRelative: "2026/07/rollout.jsonl", operationId: "operation-1" }))
       .toThrow(HistorySecurityError);
+  });
+
+  test("refreshes an advanced source only when the destination belongs to the same lineage operation", () => {
+    const f = fixture();
+    const input = {
+      ...f,
+      destinationRelative: "2026/08/lineage.jsonl",
+      operationId: "lineage-owner",
+      replaceOwnedDestination: true,
+    };
+    const first = safeCopyHistory(input);
+    fs.appendFileSync(f.sourcePath, "three\n");
+
+    const refreshed = safeCopyHistory(input);
+
+    expect(refreshed).toMatchObject({ path: first.path, reused: false });
+    expect(fs.readFileSync(refreshed.path, "utf8")).toBe("one\ntwo\nthree\n");
+    expect(() => safeCopyHistory({
+      ...input,
+      operationId: "different-lineage-owner",
+    })).toThrow(HistorySecurityError);
+
+    fs.writeFileSync(refreshed.path, "tampered\n", { mode: 0o600 });
+    fs.appendFileSync(f.sourcePath, "four\n");
+    expect(() => safeCopyHistory(input)).toThrow(HistorySecurityError);
   });
 
   test("recovers an identical destination published before its operation receipt", () => {

@@ -23,10 +23,11 @@ test("switching with no published target names the switch, never «»", () => {
 
 test("failed shows the error detail plus Retry and Keep actions", () => {
   const html = renderToStaticMarkup(
-    <MigrationRibbon state="failed" targetLabel="Work" currentLabel="Main" error="auth expired" onRetry={() => {}} onKeep={() => {}} />,
+    <MigrationRibbon state="failed" targetLabel="Work" currentLabel="Main" error="the target account cannot read this conversation's history" onRetry={() => {}} onKeep={() => {}} />,
   );
   expect(html).toContain("Account switch failed");
-  expect(html).toContain("auth expired");
+  expect(html).toContain("the target account cannot read this conversation&#x27;s history");
+  expect(html).not.toContain("preflight");
   expect(html).toContain("Retry");
   expect(html).toContain("Keep on «Main»");
 });
