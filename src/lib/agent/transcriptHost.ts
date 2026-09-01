@@ -14,6 +14,7 @@ import {
   panePidOf,
   paneInfo,
   paneLaunchId,
+  operatorSafeTmuxDeliveryError,
   rememberResumePane,
   resumePaneRecords,
   sendText,
@@ -346,7 +347,13 @@ function isDescendantOf(pid: number, ancestor: number, parentPid: (pid: number) 
 
 function failure(error: unknown, status = 500, actuation?: "started"): HostDeliveryOutcome {
   const resolvedStatus = error instanceof TranscriptHostConflictError ? 409 : status;
-  return { ok: false, outcome: "failed", error: error instanceof Error ? error.message : String(error), status: resolvedStatus, ...(actuation ? { actuation } : {}) };
+  return {
+    ok: false,
+    outcome: "failed",
+    error: operatorSafeTmuxDeliveryError(error, actuation === "started"),
+    status: resolvedStatus,
+    ...(actuation ? { actuation } : {}),
+  };
 }
 
 export function createTranscriptHostObserver(dependencies: TranscriptHostObservationDependencies) {
@@ -481,14 +488,27 @@ export function createTranscriptHostResolver(
 
     const prepared = dependencies.beginResume?.(input.entry, input.spec) ?? null;
     const resumeSpec = prepared?.spec ?? input.spec;
-    const spawned = await dependencies.spawn(resumeSpec, "", prepared?.receipt);
-    await dependencies.remember(input.entry.path, resumeSpec, spawned);
+    let spawnFailure: unknown = null;
+    try {
+      const spawned = await dependencies.spawn(resumeSpec, "", prepared?.receipt);
+      await dependencies.remember(input.entry.path, resumeSpec, spawned);
+    } catch (error) {
+      /* Read the host once more before answering a launch error. A CLI can
+         reach its live composer while a presentation-sensitive detector times
+         out; observation both identifies that pane and settles its durable
+         receipt. The record then decides the resume and every immediate send. */
+      spawnFailure = error;
+    }
     snapshot = await observe(true);
-    if (snapshot.observation === "failure") throw new Error(`tmux pane observation failed: ${snapshot.observationError}`);
+    if (snapshot.observation === "failure") {
+      if (spawnFailure) throw spawnFailure;
+      throw new Error(`tmux pane observation failed: ${snapshot.observationError}`);
+    }
     const resumedConflict = conflictForPath(snapshot, input.entry.path, conversationIdForPath);
     if (resumedConflict) throw new TranscriptHostConflictError(resumedConflict);
     host = snapshot.canonicalFor(input.entry.path);
     if (!host || !(await revalidate(host, input.entry))) {
+      if (spawnFailure) throw spawnFailure;
       throw new Error("resumed agent host could not be identified safely");
     }
     return { host, resumed: true };
