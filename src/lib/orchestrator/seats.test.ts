@@ -82,12 +82,48 @@ test("replacement revokes the predecessor in the same write and bumps the epoch"
       revokedAt: AT,
       /* Bidirectional lineage: the revocation names its successor… */
       successorConversationId: "conversation_b",
+      /* Nothing named an actor for this designation, so provenance stays
+         unknown; the operator is never assumed (#1402). */
+      triggeredBy: null,
     });
     expect(swapped.seat.seatEpoch).toBe(2);
     /* …and the successor seat names its predecessor. */
     expect(swapped.seat.predecessorConversationId).toBe("conversation_a");
   }
   expect(orchestratorSeatFor("proj-a").active?.conversationId).toBe("conversation_b");
+});
+
+test("#1402: a designation's trigger survives the file — on the seat it created and on the seat it ended", () => {
+  const trigger = { kind: "agent" as const, conversationId: "conversation_a", seatEpoch: 1 };
+  beginOrchestratorSeatIntent({ project: "proj-a", mandate: "first", clientRequestId: "req_0000001", mode: "spawn", now: AT });
+  completeOrchestratorSeatIntent({ project: "proj-a", clientRequestId: "req_0000001", conversationId: "conversation_a", path: null, now: AT });
+
+  /* The seat rotating ITSELF: the actor is written on the intent, before the
+     successor exists, and read back off disk by every later reader. */
+  beginOrchestratorSeatIntent({
+    project: "proj-a",
+    mandate: "second",
+    clientRequestId: "req_0000002",
+    mode: "spawn",
+    triggeredBy: trigger,
+    now: AT,
+  });
+  expect(orchestratorSeatFor("proj-a").pending?.triggeredBy).toEqual(trigger);
+
+  completeOrchestratorSeatIntent({ project: "proj-a", clientRequestId: "req_0000002", conversationId: "conversation_b", path: null, now: AT });
+  expect(orchestratorSeatFor("proj-a").active?.triggeredBy).toEqual(trigger);
+  expect(orchestratorRevocations()).toEqual([expect.objectContaining({
+    conversationId: "conversation_a",
+    successorConversationId: "conversation_b",
+    triggeredBy: trigger,
+  })]);
+
+  /* Provenance is unknown or it is absent — never half-written. */
+  const raw = JSON.parse(fs.readFileSync(path.join(sandbox, "orchestrator-seats.json"), "utf8")) as Record<string, unknown>;
+  const seats = raw.seats as Record<string, Record<string, unknown>>;
+  seats["proj-a"]!.triggeredBy = { kind: "impostor", conversationId: "conversation_z" };
+  fs.writeFileSync(path.join(sandbox, "orchestrator-seats.json"), JSON.stringify(raw), "utf8");
+  expect(orchestratorSeatFor("proj-a").active?.triggeredBy).toBeNull();
 });
 
 test("editing the mandate for the SAME conversation revokes nothing", () => {
