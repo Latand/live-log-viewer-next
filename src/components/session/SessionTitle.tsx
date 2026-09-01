@@ -269,13 +269,33 @@ export function SessionTitle({ file, displayMax = 90, titleClassName = "", class
   };
 
   const stop = (event: React.PointerEvent) => event.stopPropagation();
+  /* The phone's pane header is also its swipe handle (`MobileFocusView` steps
+     to the next conversation on a horizontal drag across it). A drag INSIDE
+     the editor is the operator moving through a long title, so it stays here
+     — the same isolation the metadata row gives its own horizontal scroll. */
+  const stopTouch = (event: React.TouchEvent) => event.stopPropagation();
 
   if (editing) {
     return (
       <span
         ref={editorRef}
-        className={`inline-flex min-w-0 flex-1 items-center gap-1 ${className}`}
+        data-session-title-editor={isMobile ? "mobile" : "inline"}
+        className={
+          isMobile
+            /* Issue #1348: on the phone the editor TAKES THE HEADER ROW OVER
+               instead of joining it. That row is a single non-wrapping flex line
+               already holding seven fixed 44px controls (status, kill, details,
+               favourite, delete, close, and this pencil), and an inline editor
+               added three more; at 390px the `min-w-0 flex-1` input was the only
+               shrinkable cell and shrank to nothing — an edit field with no
+               visible text, caret included. Laid over the row, edge to edge,
+               the field owns the width and the controls come back on close. */
+            ? `absolute inset-x-0 top-0 z-20 flex items-center gap-1 bg-card px-2 py-1 ${className}`
+            : `inline-flex min-w-0 flex-1 items-center gap-1 ${className}`
+        }
         onPointerDown={stop}
+        onTouchStart={stopTouch}
+        onTouchEnd={stopTouch}
         onBlur={onEditorBlur}
       >
         <input
@@ -283,8 +303,21 @@ export function SessionTitle({ file, displayMax = 90, titleClassName = "", class
           type="text"
           value={value}
           maxLength={120}
-          className="min-w-0 flex-1 rounded-[6px] border border-accent/50 bg-canvas px-1.5 py-0.5 text-[12px] font-semibold text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          className={
+            isMobile
+              /* 16px, not 12px: iOS Safari zooms the page on focusing any smaller
+                 field, which pans the caret out of the visible viewport. The
+                 face is spelled out from the role tokens — surface, ink AND
+                 caret — so it reads the same in the light and dark themes. */
+              ? "h-11 min-w-0 flex-1 rounded-control border border-accent/50 bg-canvas px-3 text-[16px] font-medium text-primary caret-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              : "min-w-0 flex-1 rounded-[6px] border border-accent/50 bg-canvas px-1.5 py-0.5 text-[12px] font-semibold text-primary caret-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          }
           aria-label={t("rename.inputAria")}
+          autoComplete="off"
+          autoCorrect="off"
+          autoCapitalize="off"
+          spellCheck={false}
+          enterKeyHint="done"
           onChange={(event) => setValue(event.target.value)}
           onKeyDown={onKeyDown}
         />
