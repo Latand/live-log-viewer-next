@@ -48,8 +48,14 @@ export function agentCapabilitiesFromViews(
     ...(runtimeEnabled && isClaudeSubagent ? { root: rootHostFrom(rootView) } : {}),
   };
   const caps = capabilitiesFor(file, runtime, opts);
-  const structuredSession = structuredSessionOf(runtime)
-    ?? (caps.surface === "structured-subagent" ? rootView : null);
+  /* Every consumer gets the same card verdict. A contradictory stale runtime
+     view is classified as unresolved above, so it cannot keep routing the
+     composer through dead-host recovery after the pane banner stood down. */
+  const structuredSession = caps.surface === "structured" || caps.surface === "dead"
+    ? structuredSessionOf(runtime)
+    : caps.surface === "structured-subagent"
+      ? rootView
+      : null;
   return {
     caps,
     runtime,

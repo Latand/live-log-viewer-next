@@ -14,6 +14,7 @@ import { GET as deploymentCapability } from "@/app/api/runtime/deployments/capab
 import {
   markStructuredDeliveryControllerReady,
   markStructuredDeliveryControllerUnavailable,
+  markStructuredHostStartupFailed,
   markStructuredHostStartupProgress,
   markStructuredHostStartupReady,
 } from "@/lib/runtime/startupStatus";
@@ -170,6 +171,34 @@ test("deployment capability publishes bounded structured-host adoption progress"
         totalHosts: 19,
       },
     }))).toBeNull();
+  } finally {
+    markStructuredHostStartupReady();
+  }
+});
+
+test("issue 1268: a failed structured-host adoption pass makes the serving Viewer unhealthy", async () => {
+  try {
+    markStructuredDeliveryControllerReady();
+    markStructuredHostStartupProgress({
+      phase: "adopting Claude hosts",
+      completedHosts: 7,
+      totalHosts: 19,
+    });
+    markStructuredHostStartupFailed();
+
+    const response = deploymentCapability();
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({
+      error: "structured host startup adoption is retrying after a failed pass",
+      structuredDeliveryController: "ready",
+      structuredHostStartup: {
+        state: "failed",
+        phase: "adopting Claude hosts",
+        completedHosts: 7,
+        totalHosts: 19,
+      },
+    });
   } finally {
     markStructuredHostStartupReady();
   }

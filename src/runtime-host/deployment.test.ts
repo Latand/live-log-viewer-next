@@ -10,6 +10,8 @@ import type {
   ViewerMcpRuntimePublicationEvidence,
   ViewerMcpRuntimeReconciliation,
   ViewerReleaseIdentity,
+  ViewerRuntimeHostHandoffEvidence,
+  ViewerRuntimeHostStartupPhase,
 } from "@/lib/runtime/contracts";
 import { runtimeHostClient, UnixRuntimeHostClient } from "@/lib/runtime/client";
 
@@ -68,11 +70,41 @@ class FakeDeploymentAdapter implements ViewerDeploymentAdapter {
   candidateHealth = healthy("http://127.0.0.1/candidate");
   promotedHealth = healthy("http://127.0.0.1:8898");
   stageHostFailure: Error | null = null;
+  verifyHostFailure: Error | null = null;
   promoteFailure: Error | null = null;
   hotStateHandOver: string | null = null;
   calls: string[] = [];
 
   async reconcile(): Promise<void> { this.calls.push("reconcile"); }
+  async verifyRuntimeHostSuccessor(candidate: ViewerReleaseIdentity): Promise<ViewerRuntimeHostHandoffEvidence> {
+    this.calls.push(`verify-host-successor:${candidate.image}:${candidate.revision}`);
+    if (this.verifyHostFailure) throw this.verifyHostFailure;
+    const generation = {
+      image: candidate.image,
+      revision: candidate.revision,
+      container: `runtime-host-${candidate.revision.slice(0, 12)}`,
+    };
+    const identity = { generation, pid: 4242, startIdentity: "4242:successor", hostEpoch: 7 };
+    const phases: ViewerRuntimeHostStartupPhase[] = [
+      "fence-waiting",
+      "fence-acquired",
+      "journal-open",
+      "handoff-cleanup-complete",
+      "consumers-recovered",
+      "socket-listening",
+      "ready",
+    ];
+    return {
+      ...identity,
+      phases: phases.map((phase, index) => ({ ...identity, phase, recordedAt: `2026-08-31T14:00:0${index}.000Z` })),
+      probe: {
+        checkedAt: "2026-08-31T14:00:08.000Z",
+        requestId: "runtime-host-health-probe",
+        responseId: "runtime-host-health-probe",
+        elapsedMs: 12,
+      },
+    };
+  }
   async stageRuntimeHostSuccessor(candidate: ViewerReleaseIdentity): Promise<void> {
     this.calls.push(`stage-host-successor:${candidate.image}:${candidate.revision}`);
     if (this.stageHostFailure) throw this.stageHostFailure;
@@ -158,6 +190,21 @@ class FakeDeploymentAdapter implements ViewerDeploymentAdapter {
   }
   async retire(candidate: ViewerReleaseIdentity): Promise<void> { this.calls.push(`retire:${candidate.container}`); }
   async retainOnly(releases: ViewerReleaseIdentity[]): Promise<void> { this.calls.push(`retain-only:${releases.map((item) => item.container).join(",")}`); }
+}
+
+async function recoverHostHandoffAsSuccessor(
+  store: RuntimeJournal,
+  adapter: FakeDeploymentAdapter,
+  deploymentId: string,
+  candidate: ViewerReleaseIdentity,
+  owner: { pid: number; startIdentity: string },
+) {
+  const successor = new ViewerDeploymentCoordinator(store, adapter, owner, {
+    ownerAlive: () => false,
+    hostGeneration: () => ({ image: candidate.image, revision: candidate.revision }),
+  });
+  await successor.recover();
+  return successor.waitForDeployment(deploymentId);
 }
 
 /* These cover admission, idempotency, ownership and health. Deploy authority
@@ -411,7 +458,7 @@ test("a post-promotion failure restores the previous healthy release", async () 
    deployed. /app is not live-mounted, so a same-image restart would boot the
    identical stale generation — the exact-SHA contract must instead stage the
    freshly built candidate image as the successor runtime-host generation. */
-test("issue 518: a succeeded exact-SHA deployment stages the candidate image as the runtime-host successor", async () => {
+test("issue 1268: the predecessor leaves success non-terminal until the staged runtime-host successor takes over", async () => {
   const store = journal("host-successor");
   const adapter = new FakeDeploymentAdapter();
   const handoffs: Array<Record<string, unknown>> = [];
@@ -430,28 +477,82 @@ test("issue 518: a succeeded exact-SHA deployment stages the candidate image as 
   if (receipt.state !== "accepted") throw new Error("deployment was not accepted");
   await coordinator.waitForDeployment(receipt.deploymentId);
 
-  const status = store.viewerDeployment(receipt.deploymentId);
-  expect(status).toMatchObject({ phase: "succeeded", terminal: true });
+  const handedOff = store.viewerDeployment(receipt.deploymentId);
+  expect(handedOff).toMatchObject({ phase: "host-handoff", terminal: false });
   /* The staged runtime-host generation IS the deployed candidate: its image
      and revision equal the promoted exact SHA, so the next host boot cannot
      resurrect the stale image. */
   expect(adapter.calls.filter((call) => call.startsWith("stage-host-successor:")))
-    .toEqual([`stage-host-successor:${status?.candidate?.image}:${"b".repeat(40)}`]);
+    .toEqual([`stage-host-successor:${handedOff?.candidate?.image}:${"b".repeat(40)}`]);
   /* Durable ordering: the successor staging lands before the handoff signal,
-     and the handoff follows the terminal blue-green success, so the promoted
-     Viewer is healthy and the queue state durable before any host replacement. */
+     while terminal success remains unavailable to the predecessor. */
   expect(handoffs).toEqual([{
     deploymentId: receipt.deploymentId,
     revision: "b".repeat(40),
-    successor: status?.candidate,
+    successor: handedOff?.candidate,
     previous: { image: "agent-log-viewer:node22", revision: null },
-    terminalAtHandoff: true,
+    terminalAtHandoff: false,
     stagedBeforeHandoff: true,
   }]);
   /* The handoff never tears down promoted releases: engine hosts owned by
      Viewer processes keep running through the runtime-host replacement. */
   expect(adapter.calls.filter((call) => call.startsWith("rollback:"))).toEqual([]);
   expect(adapter.calls.filter((call) => call.startsWith("retire:"))).toEqual([]);
+
+  const successor = new ViewerDeploymentCoordinator(
+    store,
+    adapter,
+    { pid: 11, startIdentity: "11:2" },
+    {
+      ownerAlive: () => false,
+      hostGeneration: () => ({ image: handedOff?.candidate?.image ?? null, revision: handedOff?.candidate?.revision ?? null }),
+    },
+  );
+  await successor.recover();
+  const completed = await successor.waitForDeployment(receipt.deploymentId);
+
+  expect(completed).toMatchObject({
+    phase: "succeeded",
+    terminal: true,
+    owner: { pid: 11, startIdentity: "11:2" },
+    runtimeHostHandoff: {
+      generation: {
+        image: handedOff?.candidate?.image,
+        revision: handedOff?.candidate?.revision,
+      },
+      phases: [{ phase: "fence-waiting" }, { phase: "fence-acquired" }, { phase: "journal-open" },
+        { phase: "handoff-cleanup-complete" }, { phase: "consumers-recovered" }, { phase: "socket-listening" },
+        { phase: "ready" }],
+      probe: { requestId: "runtime-host-health-probe", responseId: "runtime-host-health-probe" },
+    },
+  });
+  expect(adapter.calls).toContain(
+    `verify-host-successor:${handedOff?.candidate?.image}:${handedOff?.candidate?.revision}`,
+  );
+  store.close();
+});
+
+test("issue 1268: terminal success requires runtime-host hand-off evidence even when generation tracking is unavailable", async () => {
+  const store = journal("host-successor-proof-required");
+  const adapter = new FakeDeploymentAdapter();
+  adapter.verifyHostFailure = new Error("runtime-host startup evidence is unavailable");
+  const coordinator = new ViewerDeploymentCoordinator(store, adapter, { pid: 10, startIdentity: "10:1" });
+
+  const receipt = await coordinator.requestViewerDeployment({
+    idempotencyKey: "deploy-host-successor-proof-required",
+    revision: "b".repeat(40),
+  });
+  if (receipt.state !== "accepted") throw new Error("deployment was not accepted");
+  await coordinator.waitForDeployment(receipt.deploymentId);
+
+  expect(store.viewerDeployment(receipt.deploymentId)).toMatchObject({
+    phase: "host-handoff",
+    terminal: false,
+    error: "runtime-host startup evidence is unavailable",
+  });
+  expect(adapter.calls).toContain(
+    `verify-host-successor:${store.viewerDeployment(receipt.deploymentId)?.candidate?.image}:${"b".repeat(40)}`,
+  );
   store.close();
 });
 
@@ -588,10 +689,26 @@ test("issue 521 review: consecutive same-revision deployments stage each distinc
 
   const first = await coordinator.requestViewerDeployment({ idempotencyKey: "same-revision-one", revision: candidateRevision });
   if (first.state !== "accepted") throw new Error("first deployment was not accepted");
-  const firstStatus = await coordinator.waitForDeployment(first.deploymentId);
+  const firstHandoff = await coordinator.waitForDeployment(first.deploymentId);
+  if (!firstHandoff?.candidate) throw new Error("first handoff candidate is missing");
+  const firstStatus = await recoverHostHandoffAsSuccessor(
+    store,
+    adapter,
+    first.deploymentId,
+    firstHandoff.candidate,
+    { pid: 11, startIdentity: "11:first" },
+  );
   const second = await coordinator.requestViewerDeployment({ idempotencyKey: "same-revision-two", revision: candidateRevision });
   if (second.state !== "accepted") throw new Error("second deployment was not accepted");
-  const secondStatus = await coordinator.waitForDeployment(second.deploymentId);
+  const secondHandoff = await coordinator.waitForDeployment(second.deploymentId);
+  if (!secondHandoff?.candidate) throw new Error("second handoff candidate is missing");
+  const secondStatus = await recoverHostHandoffAsSuccessor(
+    store,
+    adapter,
+    second.deploymentId,
+    secondHandoff.candidate,
+    { pid: 12, startIdentity: "12:second" },
+  );
 
   expect(firstStatus?.candidate?.image).not.toBe(secondStatus?.candidate?.image);
   expect(adapter.calls.filter((call) => call.startsWith("stage-host-successor:"))).toEqual([
@@ -631,7 +748,15 @@ test("issue 518: failed successor staging never hands the host back to the stale
     revision: "b".repeat(40),
   });
   expect(replay).toMatchObject({ state: "accepted", replayed: true, deploymentId: receipt.deploymentId });
-  await coordinator.waitForDeployment(receipt.deploymentId);
+  const handedOff = await coordinator.waitForDeployment(receipt.deploymentId);
+  if (!handedOff?.candidate) throw new Error("handoff candidate is missing");
+  await recoverHostHandoffAsSuccessor(
+    store,
+    adapter,
+    receipt.deploymentId,
+    handedOff.candidate,
+    { pid: 11, startIdentity: "11:recovery" },
+  );
 
   expect(store.viewerDeployment(receipt.deploymentId)).toMatchObject({ phase: "succeeded", terminal: true, error: null });
   expect(adapter.calls.filter((call) => call.startsWith("build:"))).toEqual(buildCalls);
@@ -739,12 +864,20 @@ test("issue 518: restart recovery resumes a durable host-handoff phase", async (
   );
 
   await coordinator.recover();
-  const status = await coordinator.waitForDeployment(receipt.deploymentId);
+  const handedOff = await coordinator.waitForDeployment(receipt.deploymentId);
+  if (!handedOff?.candidate) throw new Error("handoff candidate is missing");
+  const status = await recoverHostHandoffAsSuccessor(
+    afterRestart,
+    adapter,
+    receipt.deploymentId,
+    handedOff.candidate,
+    { pid: 93, startIdentity: "93:successor" },
+  );
 
   expect(status).toMatchObject({
     phase: "succeeded",
     terminal: true,
-    owner: { pid: 92, startIdentity: "92:new" },
+    owner: { pid: 93, startIdentity: "93:successor" },
   });
   expect(adapter.calls.filter((call) => call.startsWith("build:"))).toEqual([]);
   expect(adapter.calls.filter((call) => call.startsWith("promote:"))).toEqual([]);

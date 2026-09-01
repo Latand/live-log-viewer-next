@@ -6,6 +6,7 @@ import { RuntimeJournal } from "./journal";
 import type { ViewerDeploymentCoordinator } from "./deployment";
 import type { McpHealthProbeAdmissions } from "./mcpHealthProbeAdmission";
 import { PreserializedJson } from "./preserializedJson";
+import type { RuntimeHostReadyEvidence } from "./runtimeHostStartup";
 
 export { RuntimeHostFence } from "./runtimeHostFence";
 
@@ -20,6 +21,7 @@ export class RuntimeHost {
     private readonly structuredHosts = structuredHostsEnabled(),
     private readonly signalFlowPipelineProgress?: () => void,
     private readonly mcpHealthProbeAdmissions?: McpHealthProbeAdmissions,
+    private readonly runtimeHostHealth?: () => RuntimeHostReadyEvidence,
   ) {}
 
   async recoverConsumers(): Promise<number> {
@@ -80,7 +82,10 @@ export class RuntimeHost {
   async handle(request: RuntimeSocketRequest, options: { signal?: AbortSignal } = {}): Promise<RuntimeSocketResponse> {
     try {
       let result: unknown;
-      if (request.method === "snapshot") result = new PreserializedJson(this.journal.snapshotJson());
+      if (request.method === "runtime-host-health") {
+        if (!this.runtimeHostHealth) throw new Error("runtime-host startup evidence is unavailable");
+        result = this.runtimeHostHealth();
+      } else if (request.method === "snapshot") result = new PreserializedJson(this.journal.snapshotJson());
       else if (request.method === "events") result = this.journal.replay(Number(request.params?.after ?? 0));
       else if (request.method === "wait") result = await this.journal.waitForEvents(
         Number(request.params?.after ?? 0),

@@ -4,14 +4,20 @@ import os from "node:os";
 import path from "node:path";
 
 import {
+  clearRuntimeHostHandoffIntentIfMatches,
+  clearRuntimeHostRollbackIntent,
   clearRuntimeHostHandoffIntent,
   currentRuntimeHostGeneration,
   readRuntimeHostHandoffIntent,
   readRuntimeHostRelease,
+  readRuntimeHostRollbackIntent,
+  readRuntimeHostRollbackTarget,
   RUNTIME_HOST_CONTAINER_ENV,
   RUNTIME_HOST_IMAGE_ENV,
   RUNTIME_HOST_REVISION_ENV,
   writeRuntimeHostHandoffIntent,
+  writeRuntimeHostRollbackIntent,
+  writeRuntimeHostRollbackTarget,
   type RuntimeHostHandoffIntent,
   type RuntimeHostReleaseRecord,
 } from "./hostRelease";
@@ -54,6 +60,81 @@ test("issue 521: the handoff intent round-trips durably and clears idempotently"
     expect(readRuntimeHostHandoffIntent(filename)).toBeNull();
     clearRuntimeHostHandoffIntent(filename);
     expect(readRuntimeHostHandoffIntent(filename)).toBeNull();
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("issue 1270: rollback target and intent survive the requesting executor", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-rollback-intent-"));
+  try {
+    const targetFile = path.join(dir, "runtime-host-rollback-target.json");
+    const intentFile = path.join(dir, "runtime-host-rollback-intent.json");
+    const previous = { ...record, image: "agent-log-viewer:previous", revision: "a".repeat(40), container: "runtime-host-previous" };
+    const target = {
+      version: 1 as const,
+      active: record,
+      previous,
+      predecessorId: "retained-predecessor-id",
+      recordedAt: "2026-08-31T14:00:10.000Z",
+    };
+    const intent = { ...target, phase: "requested" as const, requestedAt: "2026-08-31T14:00:20.000Z" };
+
+    writeRuntimeHostRollbackTarget(target, targetFile);
+    writeRuntimeHostRollbackIntent(intent, intentFile);
+
+    expect(readRuntimeHostRollbackTarget(targetFile)).toEqual(target);
+    expect(readRuntimeHostRollbackIntent(intentFile)).toEqual(intent);
+    clearRuntimeHostRollbackIntent(intentFile);
+    expect(readRuntimeHostRollbackIntent(intentFile)).toBeNull();
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("issue 1270: rollback cleanup clears only its exact durable handoff intent", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-rollback-handoff-clear-"));
+  try {
+    const filename = path.join(dir, "runtime-host-handoff-intent.json");
+    const previous = {
+      ...record,
+      image: "agent-log-viewer:previous",
+      revision: "a".repeat(40),
+      container: "runtime-host-previous",
+    };
+    const expected: RuntimeHostHandoffIntent = {
+      revision: record.revision,
+      image: record.image,
+      successorContainer: record.container,
+      predecessorId: "retained-predecessor-id",
+      previousRelease: previous,
+      successorRelease: record,
+      recordedAt: "2026-08-31T14:00:10.000Z",
+    };
+    const later: RuntimeHostHandoffIntent = {
+      ...expected,
+      revision: "c".repeat(40),
+      image: "agent-log-viewer:later",
+      successorContainer: "runtime-host-later",
+      successorRelease: {
+        ...record,
+        revision: "c".repeat(40),
+        image: "agent-log-viewer:later",
+        container: "runtime-host-later",
+      },
+      recordedAt: "2026-08-31T14:01:00.000Z",
+    };
+
+    writeRuntimeHostHandoffIntent(expected, filename);
+    expect(() => writeRuntimeHostHandoffIntent(later, filename))
+      .toThrow("runtime-host handoff intent is already owned by another generation");
+    expect(readRuntimeHostHandoffIntent(filename)).toEqual(expected);
+    expect(clearRuntimeHostHandoffIntentIfMatches(expected, filename)).toBe(true);
+    expect(readRuntimeHostHandoffIntent(filename)).toBeNull();
+
+    writeRuntimeHostHandoffIntent(later, filename);
+    expect(clearRuntimeHostHandoffIntentIfMatches(expected, filename)).toBe(false);
+    expect(readRuntimeHostHandoffIntent(filename)).toEqual(later);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

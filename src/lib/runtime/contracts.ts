@@ -577,6 +577,48 @@ export interface ViewerRuntimeHostHealthEvidence {
   log?: string[];
 }
 
+export interface RuntimeHostGenerationIdentity {
+  image: string;
+  revision: string;
+  container: string;
+}
+
+export type ViewerRuntimeHostStartupPhase =
+  | "fence-waiting"
+  | "fence-acquired"
+  | "journal-open"
+  | "handoff-cleanup-complete"
+  | "consumers-recovered"
+  | "socket-listening"
+  | "ready";
+
+export interface ViewerRuntimeHostStartupPhaseEvidence {
+  phase: ViewerRuntimeHostStartupPhase;
+  recordedAt: string;
+  generation: RuntimeHostGenerationIdentity;
+  pid: number;
+  startIdentity: string;
+  hostEpoch: number;
+}
+
+export interface ViewerRuntimeHostProbeReceipt {
+  checkedAt: string;
+  requestId: string;
+  responseId: string;
+  elapsedMs: number;
+}
+
+/** Success evidence written only by the generation that took the singleton
+    fence and answered an external framed request with its exact identity. */
+export interface ViewerRuntimeHostHandoffEvidence {
+  generation: RuntimeHostGenerationIdentity;
+  pid: number;
+  startIdentity: string;
+  hostEpoch: number;
+  phases: ViewerRuntimeHostStartupPhaseEvidence[];
+  probe: ViewerRuntimeHostProbeReceipt;
+}
+
 export type ViewerHealthProbeName = "root" | "authenticated" | "unauthorized" | "capability";
 
 /** One readiness request, kept with what the gate asked for. A failed candidate
@@ -643,6 +685,7 @@ export interface ViewerDeploymentStatus {
   previous: ViewerReleaseIdentity | null;
   mcpRuntime: ViewerDeploymentMcpRuntimeStatus;
   health: ViewerHealthEvidence[];
+  runtimeHostHandoff?: ViewerRuntimeHostHandoffEvidence;
   error: string | null;
   owner: ViewerDeploymentOwner;
   createdAt: string;
@@ -671,7 +714,7 @@ export interface RuntimeReplay {
 
 export interface RuntimeSocketRequest {
   id: string;
-  method: "snapshot" | "events" | "wait" | "append" | "operation" | "command" | "operation-status" | "operation-retry" | "effect-batch" | "operation-transition" | "producer-cursor" | "viewer-deployment-request" | "viewer-deployment-read" | "mcp-health-probe-admission";
+  method: "runtime-host-health" | "snapshot" | "events" | "wait" | "append" | "operation" | "command" | "operation-status" | "operation-retry" | "effect-batch" | "operation-transition" | "producer-cursor" | "viewer-deployment-request" | "viewer-deployment-read" | "mcp-health-probe-admission";
   params?: Record<string, unknown>;
 }
 

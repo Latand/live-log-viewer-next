@@ -14,6 +14,7 @@ import type {
   ViewerMcpRuntimePublicationEvidence,
   ViewerMcpRuntimeReconciliation,
   ViewerReleaseIdentity,
+  ViewerRuntimeHostHandoffEvidence,
 } from "@/lib/runtime/contracts";
 import { RuntimeIdempotencyConflictError } from "@/lib/runtime/contracts";
 
@@ -43,6 +44,9 @@ export interface ViewerDeploymentAdapter {
       stops the predecessor and never signals Viewer containers or engine
       hosts — the predecessor's own graceful exit afterwards is the handoff. */
   stageRuntimeHostSuccessor(candidate: ViewerReleaseIdentity): Promise<void>;
+  /** Runs outside the runtime-host process and returns the successor's
+      durable startup phases plus a matching framed-protocol response. */
+  verifyRuntimeHostSuccessor(candidate: ViewerReleaseIdentity): Promise<ViewerRuntimeHostHandoffEvidence>;
   reconcile(): Promise<void>;
   resolveRevision(revision: string): Promise<string>;
   buildCandidate(deploymentId: string, revision: string): Promise<ViewerReleaseIdentity>;
@@ -72,8 +76,9 @@ export interface ViewerDeploymentCoordinatorOptions {
       successor process can execute the deployed revision. */
   hostGeneration?: () => RuntimeHostGeneration;
   /** Observes a staged successor handoff. Invoked only after the terminal
-      succeeded deployment AND after the successor staging is durable — never
-      as a same-image self-restart, which would boot the stale image again. */
+      successor staging is durable, while the deployment remains active in
+      `host-handoff`. The successor generation owns terminal success after it
+      has acquired the fence and proved that it is serving. */
   onHostHandoff?: (context: RuntimeHostHandoffContext) => void;
   /** #1216: the deployment's own narration. Three deployments in a row left
       no trace of whether a runtime-host successor was even attempted, because
@@ -250,8 +255,8 @@ export class ViewerDeploymentCoordinator {
       After the blue-green promotion is healthy, a generation
       mismatch stages the freshly built candidate image as the successor
       runtime-host release. The deployment remains active in its durable
-      host-handoff phase until staging succeeds. Only then does it become
-      terminal and signal the predecessor to release the singleton fence. */
+      host-handoff phase through predecessor exit. The successor writes
+      terminal success after acquiring the fence and proving readiness. */
   private async stageDriftedHostSuccessor(status: ViewerDeploymentStatus): Promise<RuntimeHostHandoffContext | null> {
     const trace = (line: string) => this.log(`[viewer deployment] ${status.deploymentId} host-handoff ${line}`);
     if (!this.hostGeneration || !status.candidate) {
@@ -378,12 +383,27 @@ export class ViewerDeploymentCoordinator {
         if (status.phase === "host-handoff") {
           if (!status.candidate) throw new Error("candidate identity is missing");
           const handoff = await this.stageDriftedHostSuccessor(status);
+          if (handoff) {
+            /* #1268: this process is the predecessor. Its callback drains the
+               listener, releases the singleton fence and exits, so any
+               terminal write here necessarily precedes the hand-over it
+               claims. Leave the durable phase active for the successor's
+               coordinator recovery; only a generation that matches the
+               candidate can reach the success write below. */
+            this.onHostHandoff?.(handoff);
+            return;
+          }
+          /* The adapter's framed probe is the completion authority. A local
+             generation hint decides whether this process must stage and
+             release a successor. Completion still requires durable startup
+             evidence from the generation that actually owns the listener. */
+          const runtimeHostHandoff = await this.adapter.verifyRuntimeHostSuccessor(status.candidate);
           status = this.journal.updateViewerDeployment(status.deploymentId, {
             error: null,
             phase: "succeeded",
             terminal: true,
+            runtimeHostHandoff,
           });
-          if (handoff) this.onHostHandoff?.(handoff);
           continue;
         }
         if (status.phase === "rolling-back") {

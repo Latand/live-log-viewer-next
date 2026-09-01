@@ -86,6 +86,7 @@ test("issue 1216: the plan names the one container a hand-over stops before anyt
      left to inference. */
   expect(rendered).toContain("every live agent session, pipeline, and orchestrator they own");
   expect(rendered).toContain(`${stableEndpoint} is unserved between the predecessor exit and the successor acquiring the singleton fence`);
+  expect(rendered).toContain("a managed predecessor remains stopped as the direct rollback target after the successor proves serving readiness");
 });
 
 /* The runbook invites the operator to stage now and hand over later, so the

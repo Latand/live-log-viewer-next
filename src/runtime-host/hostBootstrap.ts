@@ -137,7 +137,7 @@ export function renderRuntimeHostBootstrapPlan(plan: RuntimeHostBootstrapPlan): 
     bullet([
       `${plan.stableEndpoint} is unserved between the predecessor exit and the successor acquiring the singleton fence`,
       `this run waits up to ${fenceSeconds}s for that fence and names what it saw if it never arrives`,
-      "the successor removes the stopped predecessor container once it owns the fence",
+      "a managed predecessor remains stopped as the direct rollback target after the successor proves serving readiness",
     ]),
   ].join("\n");
 }

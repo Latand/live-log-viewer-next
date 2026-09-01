@@ -99,14 +99,23 @@ function currentPaneWall(entry: FileEntry): boolean {
     exits before appending the terminal lifecycle record. After the scanner's
     three-minute stalled threshold, absent process and host evidence makes the
     composer safe to resume through a successor. */
-function deadStalledTurn(entry: FileEntry, existing: RegistryConversation | null, hasActiveRegisteredHost: boolean): boolean {
+function deadStalledTurn(
+  entry: FileEntry,
+  existing: RegistryConversation | null,
+  hasActiveRegisteredHost: boolean,
+  hasTerminalRegisteredHost: boolean,
+): boolean {
   const generation = existing?.generations.at(-1);
   return entry.activity === "stalled"
     && entry.activityReason === "jsonl_turn_stalled"
     && entry.proc !== "running"
     && entry.pid === null
     && generation?.path === entry.path
-    && generation.host === null
+    /* A successor generation keeps the provider host that created it as
+       historical provenance. That birth record does not keep a later dead
+       process alive. For such generations, a current dead/unhosted registry
+       row is the durable release evidence; an absent row remains unknown. */
+    && (generation.host === null || hasTerminalRegisteredHost)
     && !hasActiveRegisteredHost;
 }
 
@@ -119,6 +128,24 @@ function activeRegisteredHostPaths(snapshot: ReturnType<AgentRegistry["readOnlyS
       && ["starting", "live", "idle", "handoff"].includes(entry.status)
       && (entry.host !== null || entry.structuredHost !== null))
     .map((entry) => entry.artifactPath!));
+}
+
+/** Whether this exact current generation has a terminal durable host row. */
+function terminalRegisteredHost(
+  snapshot: ReturnType<AgentRegistry["readOnlySnapshot"]>,
+  engine: MigrationEngine,
+  conversation: RegistryConversation | null,
+  pathname: string,
+): boolean {
+  const generation = conversation?.generations.at(-1);
+  if (!generation || generation.path !== pathname) return false;
+  const entry = snapshot.entries[sessionKeyId({ engine, sessionId: generation.id })];
+  return entry?.artifactPath === pathname
+    && (entry.status === "dead" || entry.status === "unhosted")
+    && entry.host === null
+    && (entry.structuredHost?.process ?? null) === null
+    && entry.claimOwner === null
+    && entry.pendingAction === null;
 }
 
 function hasActiveRegisteredHost(registry: AgentRegistry, pathname: string): boolean {
@@ -180,7 +207,7 @@ function projectedInventoryTurn(
   entry: FileEntry,
   parsed: ConversationObservation["turn"] | null,
   existing: RegistryConversation | null,
-  hasActiveRegisteredHost: boolean,
+  releasedDeadTurn: boolean,
 ): ConversationObservation["turn"] {
   if (!parsed) {
     if (existing && (existing.turn.state === "busy" || existing.turn.state === "unknown")) {
@@ -193,7 +220,7 @@ function projectedInventoryTurn(
   if (parsed.state === "busy" && activityComplete && (
     entry.activityReason === "pane_at_composer"
     || currentPaneWall(entry)
-    || deadStalledTurn(entry, existing, hasActiveRegisteredHost)
+    || releasedDeadTurn
   )) {
     return { state: "idle", source: "empty", terminalAt: null };
   }
@@ -243,7 +270,12 @@ async function inventory(files: FileEntry[], registry: AgentRegistry): Promise<C
     const observedTurn = transcriptTurnResult(entry.path, entry.size, mtimeMs, engine);
     const hostedPath = hostedPaths.has(entry.path);
     const parsed = observedTurn.complete ? hostFencedTurn(observedTurn, hostedPath) : null;
-    const releasedDeadTurn = deadStalledTurn(entry, existing, hostedPath);
+    const releasedDeadTurn = deadStalledTurn(
+      entry,
+      existing,
+      hostedPath,
+      terminalRegisteredHost(snapshot, engine, existing, entry.path),
+    );
     if (observedTurn.complete && entry.derivationComplete !== false && (
       entry.activityReason === "pane_at_composer"
       || currentPaneWall(entry)
@@ -251,7 +283,7 @@ async function inventory(files: FileEntry[], registry: AgentRegistry): Promise<C
     )) {
       recordTranscriptComposerRelease(entry.path, entry.size, mtimeMs, engine);
     }
-    const turn = projectedInventoryTurn(entry, parsed, existing, hostedPath);
+    const turn = projectedInventoryTurn(entry, parsed, existing, releasedDeadTurn);
     const currentProfile = launchProfileByPath.get(entry.path)
       ?? existing?.generations.find((generation) => generation.path === entry.path)?.launchProfile;
     const transcriptIdentity = { size: entry.size, mtimeMs };

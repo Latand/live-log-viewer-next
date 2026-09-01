@@ -296,17 +296,100 @@ async function reconcileTerminalDeliveries(
   if (isCurrent()) flushOutcomes();
 }
 
+type RegistrySessionProjection = Pick<RuntimeSession,
+  | "conversationId"
+  | "sessionKey"
+  | "hostKind"
+  | "host"
+  | "turn"
+  | "provenance"
+  | "accountId"
+  | "parentConversationId"
+  | "cwd"
+  | "artifactPath"
+  | "capabilities"
+  | "activeTurnId"> & { producerKind: string; entryUpdatedAt: string | null };
+
+/** The one runtime projection a conversation's current durable registry row
+    supports. A coexisting tmux host wins because it is also the transport
+    deliverability resolves; structured columns may remain during succession
+    as adapter metadata. The tmux host supplies the card's sole verdict. */
+function registrySessionProjection(
+  registry: AgentRegistry,
+  conversationId: string,
+): RegistrySessionProjection | null {
+  if (!conversationId.startsWith("conversation_")) return null;
+  const conversation = registry.conversation(conversationId as `conversation_${string}`);
+  const generation = conversation?.generations.at(-1);
+  if (!conversation || !generation) return null;
+  const sessionKey = { engine: conversation.engine, sessionId: generation.id } as const;
+  const entry = registry.readOnlySnapshot().entries[sessionKeyId(sessionKey)] ?? null;
+  const legacy = entry?.host?.kind === "tmux";
+  const host = entry?.status === "dead"
+    ? "dead"
+    : legacy && entry?.status !== "unhosted"
+      ? "hosted"
+      : "unhosted";
+  const turn = entry?.status === "live" ? "running" : entry?.status === "idle" ? "idle" : "unknown";
+  const structuredKind = legacy ? null : entry?.structuredHost?.kind ?? null;
+  const hostKind = legacy ? "tmux-legacy" : structuredKind ?? "unhosted";
+  const provenance = structuredKind ? "structured" : "derived";
+  return {
+    conversationId,
+    sessionKey,
+    hostKind,
+    host,
+    turn,
+    provenance,
+    accountId: entry?.accountId ?? generation.accountId,
+    parentConversationId: generation.launchProfile.parentConversationId ?? null,
+    cwd: entry?.cwd ?? generation.launchProfile.cwd,
+    artifactPath: generation.path,
+    capabilities: {
+      steer: structuredKind === "codex-app-server",
+      structuredAttention: structuredKind !== null,
+      imageInput: runtimeImageCapability(sessionKey.engine, false),
+      runtimeSettings: runtimeSettingsCapability(sessionKey.engine),
+    },
+    activeTurnId: null,
+    producerKind: structuredKind ?? "structured-delivery-controller",
+    entryUpdatedAt: entry?.updatedAt ?? null,
+  };
+}
+
 async function publishHostState(
   client: RuntimeHostClient,
   registry: AgentRegistry,
   adopted: StructuredDeliveryHost,
-  state: HostState,
+  state: HostState | null,
   projectionKey?: string,
 ): Promise<void> {
   const entry = entryForHost(registry, adopted);
   if (!entry) return;
   const conversationId = conversationIdForEntry(registry, entry);
   if (!conversationId) return;
+  /* A generation can temporarily retain a structured adapter beside its
+     current tmux host during recovery or rollback. Delivery resolves that
+     durable row through the legacy host; its structured probe therefore has
+     no authority to publish a second liveness verdict for the same card. A
+     failed probe is environmental evidence about that adapter only. */
+  if (entry.host) {
+    const projection = registrySessionProjection(registry, conversationId);
+    if (!projection) return;
+    if (projection.turn === "idle" && pendingAccountSwitch(registry, conversationId)) requestAccountMigrationTick();
+    const { producerKind, entryUpdatedAt, ...payload } = projection;
+    await publishStructuredHostProjection(client, {
+      scope: { type: "session", id: conversationId },
+      kind: "session-status",
+      producer: {
+        kind: producerKind,
+        eventKey: `legacy-host:${sessionKeyId(entry.key)}:${entryUpdatedAt ?? "unknown"}`,
+      },
+      payload,
+    });
+    return;
+  }
+  if (!state) return;
   const host = state.status === "dead" ? "dead" : state.status === "unhosted" ? "unhosted" : "hosted";
   const turn = state.activeTurnRef ? "running" : "idle";
   /* A host with no active turn is the turn-end evidence a pending account
@@ -568,6 +651,20 @@ export async function bindStructuredDeliveryQueue(
     const generation = conversation?.generations.at(-1);
     if (!conversation || !generation) return unclaimed;
     if (sessionKeyId({ engine: conversation.engine, sessionId: generation.id }) !== sessionKeyId(registration.key)) return unclaimed;
+    /* A current legacy host already answers the card's liveness. Publish it
+       directly; reading the coexisting structured adapter can only add a
+       failure about a transport the conversation is not using. */
+    if (entry.host) {
+      projectionRevision += 1;
+      await publishHostState(
+        client,
+        registry,
+        registration,
+        null,
+        `projection:${projectionEpoch}:${projectionRevision}`,
+      );
+      return { conversationId, published: true };
+    }
     /* The host's own state, kept as evidence like every other read in this
        path (#1131). Letting it throw was a conversion of the worst shape: the
        exception answered for the WHOLE loop below, so ONE host that could not
@@ -610,69 +707,30 @@ export async function bindStructuredDeliveryQueue(
     conversationId: string,
     current?: RuntimeSession,
   ): Promise<void> => {
-    const conversation = registry.conversation(conversationId as `conversation_${string}`);
-    const generation = conversation?.generations.at(-1);
-    if (!conversation || !generation) return;
-    const key = { engine: conversation.engine, sessionId: generation.id } as const;
-    const entry = registry.readOnlySnapshot().entries[sessionKeyId(key)] ?? null;
-    const legacy = entry?.host?.kind === "tmux";
-    const host = entry?.status === "dead"
-      ? "dead"
-      : legacy && entry?.status !== "unhosted"
-        ? "hosted"
-        : "unhosted";
-    const turn = entry?.status === "live" ? "running" : entry?.status === "idle" ? "idle" : "unknown";
-    const hostKind = entry?.structuredHost?.kind ?? (legacy ? "tmux-legacy" : "unhosted");
-    const provenance = entry?.structuredHost ? "structured" : "derived";
-    const accountId = entry?.accountId ?? generation.accountId;
-    const parentConversationId = generation.launchProfile.parentConversationId ?? null;
-    const cwd = entry?.cwd ?? generation.launchProfile.cwd;
+    const projection = registrySessionProjection(registry, conversationId);
+    if (!projection) return;
+    const { producerKind, entryUpdatedAt: _entryUpdatedAt, ...payload } = projection;
     if (current
-      && current.sessionKey.engine === key.engine
-      && current.sessionKey.sessionId === key.sessionId
-      && current.hostKind === hostKind
-      && current.host === (entry?.structuredHost && entry.status === "dead" ? "dead" : host)
-      && current.turn === turn
-      && current.provenance === provenance
-      && current.accountId === accountId
-      && current.parentConversationId === parentConversationId
-      && current.cwd === cwd
-      && current.artifactPath === generation.path
+      && current.sessionKey.engine === payload.sessionKey.engine
+      && current.sessionKey.sessionId === payload.sessionKey.sessionId
+      && current.hostKind === payload.hostKind
+      && current.host === payload.host
+      && current.turn === payload.turn
+      && current.provenance === payload.provenance
+      && current.accountId === payload.accountId
+      && current.parentConversationId === payload.parentConversationId
+      && current.cwd === payload.cwd
+      && current.artifactPath === payload.artifactPath
       && current.activeTurnId === null) return;
     projectionRevision += 1;
     await client.append({
       scope: { type: "session", id: conversationId },
       kind: "session-status",
       producer: {
-        kind: entry?.structuredHost?.kind ?? "structured-delivery-controller",
+        kind: producerKind,
         eventKey: `projection:${projectionEpoch}:${projectionRevision}`,
       },
-      payload: {
-        conversationId,
-        sessionKey: key,
-        hostKind,
-        host: entry?.structuredHost && entry.status === "dead" ? "dead" : host,
-        turn,
-        provenance,
-        accountId,
-        parentConversationId,
-        cwd,
-        artifactPath: generation.path,
-        capabilities: entry?.structuredHost
-          ? {
-              steer: entry.structuredHost.kind === "codex-app-server",
-              structuredAttention: true,
-              imageInput: runtimeImageCapability(key.engine, false),
-              runtimeSettings: runtimeSettingsCapability(key.engine),
-            }
-          : {
-              steer: false,
-              structuredAttention: false,
-              imageInput: runtimeImageCapability(key.engine, false),
-              runtimeSettings: runtimeSettingsCapability(key.engine),
-            },
-        activeTurnId: null,
-      },
+      payload,
     });
   };
   const refreshCurrentProjection = async (conversationId: string | null): Promise<void> => {
@@ -747,6 +805,17 @@ export async function bindStructuredDeliveryQueue(
     if (ownsOperation && !await ownsOperation()) return async () => {};
     const key = sessionKeyId(item.key);
     const current = registrations.get(key);
+    const publicationEntry = entryForHost(registry, item);
+    /* A durable tmux host makes this adapter historical for the current
+       generation. Publish the legacy verdict without probing or registering
+       the adapter: an unreadable pane surface says nothing about host death,
+       and the structured queue must not route work through the stale adapter. */
+    if (publicationEntry?.host) {
+      const displaced = takeRegistration(key);
+      if (displaced) await detachRegistration(key, displaced);
+      await publishHostState(client, registry, item, null);
+      return async () => {};
+    }
     /* The same host under the same key either already holds a registration of
        this generation, with nothing left to do, or holds a carried-over seat
        this call is filling in. Any other host under that key is replaced. */
@@ -762,7 +831,6 @@ export async function bindStructuredDeliveryQueue(
     const initialState = await item.host.health();
     if (abandoned()) return async () => {};
     if (ownsOperation && !await ownsOperation()) return async () => {};
-    const publicationEntry = entryForHost(registry, item);
     const publicationConversationId = publicationEntry
       ? conversationIdForEntry(registry, publicationEntry)
       : null;

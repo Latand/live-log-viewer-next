@@ -35,6 +35,7 @@ import {
   sendInterrupt,
   sendKeys,
   sendText,
+  operatorSafeTmuxDeliveryError,
   TmuxDeliveryUncertainError,
   withPaneLock,
   type InboxImagePayload,
@@ -259,7 +260,9 @@ function failure(error: unknown, status = 500, actuation?: "started"): DeliveryF
   return {
     ok: false,
     outcome: "failed",
-    error: error instanceof Error ? error.message : String(error),
+    /* Transport diagnostics stay separate from liveness and internal tmux
+       correlation ids never become operator-facing receipt text. */
+    error: operatorSafeTmuxDeliveryError(error, actuation === "started"),
     status,
     ...(actuation ? { actuation } : {}),
   };

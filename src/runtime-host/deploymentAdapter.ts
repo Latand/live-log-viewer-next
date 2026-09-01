@@ -15,21 +15,25 @@ import type {
   ViewerMcpRuntimePublicationEvidence,
   ViewerMcpRuntimeReconciliation,
   ViewerReleaseIdentity,
+  ViewerRuntimeHostHandoffEvidence,
   ViewerRuntimeHostHealthEvidence,
   ViewerRuntimeHostProbeEvidence,
 } from "@/lib/runtime/contracts";
 import { withoutWakatimeCredential } from "@/lib/wakatime/credential";
 
 import type { ViewerDeploymentAdapter } from "./deployment";
+import { candidateLogExcerpt } from "./deploymentHealth";
 import { PROMOTE_ACTION_TIMEOUT_MS } from "./deploymentHotState";
 import type { McpHealthProbeAdmissions } from "./mcpHealthProbeAdmission";
 import {
   createMcpHealthProbeAdmissionChannel,
   serveMcpHealthProbeAdmissionChannel,
 } from "./mcpHealthProbeAdmissionChannel";
+import { runtimeHostSuccessorName } from "./hostSuccessor";
+import { parseRuntimeHostHandoffEvidence } from "./runtimeHostStartup";
 
 type CommandRunner = (action: string, input: Record<string, unknown>) => Promise<unknown>;
-type AdapterAction = "resolve-revision" | "build-candidate" | "start-candidate" | "current-release" | "current-mcp-runtime" | "reconcile-mcp-runtime" | "verify-candidate" | "promote" | "verify-promoted" | "rollback" | "retire" | "retain-only" | "stage-host-successor" | "complete-host-handoff";
+type AdapterAction = "resolve-revision" | "build-candidate" | "start-candidate" | "current-release" | "current-mcp-runtime" | "reconcile-mcp-runtime" | "verify-candidate" | "promote" | "verify-promoted" | "rollback" | "retire" | "retain-only" | "stage-host-successor" | "verify-host-successor" | "complete-host-handoff";
 
 const ACTION_TIMEOUTS: Record<AdapterAction, number> = {
   "resolve-revision": 110_000,
@@ -51,6 +55,7 @@ const ACTION_TIMEOUTS: Record<AdapterAction, number> = {
   retire: 60_000,
   "retain-only": 60_000,
   "stage-host-successor": 60_000,
+  "verify-host-successor": 5_000,
   "complete-host-handoff": 60_000,
 };
 
@@ -402,6 +407,9 @@ function runtimeHostEvidence(value: unknown): ViewerRuntimeHostHealthEvidence {
     || (item.log !== undefined && (!Array.isArray(item.log) || item.log.some((line) => typeof line !== "string")))) {
     throw new Error("deployment adapter returned invalid runtime-host health evidence");
   }
+  const log = item.log === undefined
+    ? undefined
+    : candidateLogExcerpt((item.log as string[]).join("\n"));
   return {
     checkedAt: item.checkedAt,
     runtime: item.runtime,
@@ -414,7 +422,7 @@ function runtimeHostEvidence(value: unknown): ViewerRuntimeHostHealthEvidence {
     socket: runtimeHostProbeCounts(item.socket),
     ok: item.ok,
     ...(typeof item.detail === "string" ? { detail: item.detail } : {}),
-    ...(item.log === undefined ? {} : { log: item.log as string[] }),
+    ...(log === undefined ? {} : { log }),
   };
 }
 
@@ -643,6 +651,18 @@ export class HostCommandViewerDeploymentAdapter implements ViewerDeploymentAdapt
 
   async stageRuntimeHostSuccessor(candidate: ViewerReleaseIdentity): Promise<void> {
     await this.run("stage-host-successor", { candidate });
+  }
+
+  async verifyRuntimeHostSuccessor(candidate: ViewerReleaseIdentity): Promise<ViewerRuntimeHostHandoffEvidence> {
+    const expected = {
+      image: candidate.image,
+      revision: candidate.revision,
+      container: runtimeHostSuccessorName(candidate.revision, candidate.image),
+    };
+    return parseRuntimeHostHandoffEvidence(
+      await this.run("verify-host-successor", { candidate }),
+      expected,
+    );
   }
 
   async completeRuntimeHostHandoff(generation: { image: string; revision: string; container: string }): Promise<void> {

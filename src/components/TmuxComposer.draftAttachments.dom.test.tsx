@@ -88,7 +88,7 @@ function structuredView(conversationId: string): RuntimeSessionView {
       parentConversationId: null,
       flowId: null,
       workflowId: null,
-      cwd: "/home/user/projects/viewer",
+      cwd: "viewer",
       artifactPath: null,
       capabilities: {
         steer: true,
@@ -130,7 +130,7 @@ afterEach(() => {
   sessionStorage.clear();
 });
 
-function viewerFile(): FileEntry {
+function genuinelyDeadViewerFile(): FileEntry {
   return {
     path: "/codex-viewer-1224.jsonl",
     root: "codex-sessions",
@@ -144,8 +144,9 @@ function viewerFile(): FileEntry {
     mtime: 1,
     size: 1,
     activity: "idle",
-    proc: "running",
+    proc: null,
     pid: null,
+    lastTurn: { startedAt: 1_000, endedAt: 2_000 },
     conversationId: CONVERSATION_ID,
     spawnOrigin: "viewer",
     model: "gpt-5.6-sol",
@@ -169,7 +170,7 @@ async function renderComposer(): Promise<{ host: HTMLElement; root: Root }> {
   document.body.append(host);
   const root = createRoot(host);
   await act(async () => {
-    root.render(<TmuxComposer file={viewerFile()} deadHost />);
+    root.render(<TmuxComposer file={genuinelyDeadViewerFile()} deadHost />);
     await new Promise((r) => setTimeout(r, 0));
   });
   return { host, root };

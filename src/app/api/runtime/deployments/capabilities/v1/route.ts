@@ -59,6 +59,17 @@ export function GET(): Response {
       { status: 503, headers: { "cache-control": "no-store" } },
     );
   }
+  if (startup.servesTraffic && structuredHostStartup?.state === "failed") {
+    return Response.json(
+      {
+        error: "structured host startup adoption is retrying after a failed pass",
+        releaseReady: startup.releaseReady,
+        structuredDeliveryController,
+        structuredHostStartup,
+      },
+      { status: 503, headers: { "cache-control": "no-store" } },
+    );
+  }
   return Response.json(
     {
       capability: "viewer-deployments",
