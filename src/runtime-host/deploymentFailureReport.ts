@@ -41,6 +41,29 @@ export function deploymentFailureReport(status: unknown): string[] {
       lines.push(`  mcp ${failure.tool} refused${failure.code ? ` (${failure.code})` : ""}: ${failure.error}`);
     }
   }
+  const runtimeHost = last.runtimeHost;
+  if (runtimeHost) {
+    const succession = runtimeHost.succession;
+    lines.push(
+      `  runtime host: ${runtimeHost.runtime}; succession ${succession.completed ? "completed" : "incomplete"}`
+      + `; predecessor ready ${succession.predecessorReadyMs} ms`
+      + `; successor took over ${succession.successorTookOverMs} ms`
+      + `${runtimeHost.detail ? ` - ${runtimeHost.detail}` : ""}`,
+    );
+    lines.push(
+      `  runtime host listener: ${runtimeHost.listener.answered} of ${runtimeHost.listener.polls} answered`
+      + ` over ${runtimeHost.listener.windowMs} ms; ${runtimeHost.listener.abandoned} callers abandoned`,
+    );
+    lines.push(
+      `  runtime host socket: ${runtimeHost.socket.answered} of ${runtimeHost.socket.polls} answered`
+      + `; ${runtimeHost.socket.abandoned} callers abandoned`,
+    );
+    const runtimeLog = runtimeHost.log ?? [];
+    if (runtimeLog.length > 0) {
+      lines.push(`runtime host output (last ${runtimeLog.length} lines):`);
+      for (const line of runtimeLog) lines.push(`  ${line}`);
+    }
+  }
   const log = last.containerLog ?? [];
   if (log.length > 0) {
     lines.push(`candidate output (last ${log.length} lines):`);

@@ -50,12 +50,20 @@ import {
   clearRuntimeHostHandoffIntent,
   readRuntimeHostHandoffIntent,
   readRuntimeHostRelease,
+  readRuntimeHostRollbackTarget,
   runtimeHostHandoffIntentFile,
   runtimeHostReleaseFile,
+  runtimeHostRollbackTargetFile,
   writeRuntimeHostHandoffIntent,
   writeRuntimeHostRelease,
+  writeRuntimeHostRollbackTarget,
 } from "../src/runtime-host/hostRelease";
-import { completeRuntimeHostHandoff, stageRuntimeHostSuccessorContainer } from "../src/runtime-host/hostSuccessor";
+import {
+  completeRuntimeHostHandoff,
+  runtimeHostSuccessorName,
+  stageRuntimeHostSuccessorContainer,
+} from "../src/runtime-host/hostSuccessor";
+import { probeRuntimeHostSuccessor } from "../src/runtime-host/runtimeHostStartup";
 import {
   awaitHotStateActivation,
   awaitIncumbentHotStateRelease,
@@ -1274,11 +1282,21 @@ async function main(): Promise<unknown> {
     await stageRuntimeHostSuccessor(candidate, (phase) => reportAdapterPhase(action, phase));
     return {};
   }
+  if (action === "verify-host-successor") {
+    const candidate = release(input.candidate);
+    return probeRuntimeHostSuccessor(runtimeSocket, {
+      image: candidate.image,
+      revision: candidate.revision,
+      container: runtimeHostSuccessorName(candidate.revision, candidate.image),
+    });
+  }
   if (action === "complete-host-handoff") {
     const generation = runtimeHostGeneration(input.generation);
     await completeRuntimeHostHandoff(generation, {
       docker: (argv) => command(["docker", ...argv]),
       readHandoffIntent: () => readRuntimeHostHandoffIntent(runtimeHostHandoffIntentFile()),
+      readRollbackTarget: () => readRuntimeHostRollbackTarget(runtimeHostRollbackTargetFile()),
+      writeRollbackTarget: (target) => writeRuntimeHostRollbackTarget(target, runtimeHostRollbackTargetFile()),
       clearHandoffIntent: () => clearRuntimeHostHandoffIntent(runtimeHostHandoffIntentFile()),
     });
     return {};

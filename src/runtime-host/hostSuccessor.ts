@@ -12,6 +12,7 @@ import {
   RUNTIME_HOST_REVISION_ENV,
   type RuntimeHostHandoffIntent,
   type RuntimeHostReleaseRecord,
+  type RuntimeHostRollbackTarget,
 } from "./hostRelease";
 
 export { RUNTIME_HOST_FENCE_PARK_ENV, RUNTIME_HOST_FENCE_WAIT_ENV };
@@ -44,6 +45,10 @@ export interface RuntimeHostSuccessorPorts {
   readHandoffIntent(): RuntimeHostHandoffIntent | null;
   writeHandoffIntent(intent: RuntimeHostHandoffIntent): void;
   clearHandoffIntent(): void;
+  /** Used after this same port set is handed to successor cleanup. Staging
+      itself does not publish a rollback target. */
+  readRollbackTarget?(): RuntimeHostRollbackTarget | null;
+  writeRollbackTarget?(target: RuntimeHostRollbackTarget): void;
   /** The singleton fence owner (host pid — the runtime-host service runs with
       pid: host), or null when unreadable. */
   fenceOwnerPid(): number | null;
@@ -58,6 +63,8 @@ export interface RuntimeHostSuccessorPorts {
 export interface RuntimeHostHandoffCleanupPorts {
   docker(argv: string[]): Promise<string>;
   readHandoffIntent(): RuntimeHostHandoffIntent | null;
+  readRollbackTarget?(): RuntimeHostRollbackTarget | null;
+  writeRollbackTarget?(target: RuntimeHostRollbackTarget): void;
   clearHandoffIntent(): void;
 }
 
@@ -109,11 +116,29 @@ export async function completeRuntimeHostHandoff(
   if (intent.predecessorId === generation.container || intent.predecessorId === successorId) {
     throw new Error("runtime-host handoff predecessor matches the active successor");
   }
-  try {
-    await ports.docker(["container", "rm", "-f", intent.predecessorId]);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "";
-    if (!/No such container|No such object/i.test(message)) throw error;
+  if (intent.previousRelease && intent.successorRelease) {
+    if (!ports.writeRollbackTarget) throw new Error("runtime-host rollback target store is unavailable");
+    const existing = ports.readRollbackTarget?.();
+    if (existing && existing.predecessorId !== intent.predecessorId) {
+      try { await ports.docker(["container", "rm", "-f", existing.predecessorId]); }
+      catch (error) {
+        const message = error instanceof Error ? error.message : "";
+        if (!/No such container|No such object/i.test(message)) throw error;
+      }
+    }
+    ports.writeRollbackTarget({
+      version: 1,
+      active: intent.successorRelease,
+      previous: intent.previousRelease,
+      predecessorId: intent.predecessorId,
+      recordedAt: intent.recordedAt,
+    });
+  } else {
+    try { await ports.docker(["container", "rm", "-f", intent.predecessorId]); }
+    catch (error) {
+      const message = error instanceof Error ? error.message : "";
+      if (!/No such container|No such object/i.test(message)) throw error;
+    }
   }
   ports.clearHandoffIntent();
   return true;
@@ -212,6 +237,13 @@ function successorRunArgs(
     /* dockerd owns the restart policy: the successor waits for the singleton
        fence and survives every client-process death, including this one. */
     "--restart", "unless-stopped",
+    /* #1268: dockerd runs this outside the runtime-host Bun process every ten
+       seconds. Three missed, generation-matched framed responses make the
+       container unhealthy even when its process still reports running. */
+    "--health-cmd", "bun-container run scripts/runtime-host-healthcheck.ts",
+    "--health-interval", "10s",
+    "--health-timeout", "3s",
+    "--health-retries", "3",
     "--label", `${RUNTIME_HOST_SUCCESSOR_LABEL}=1`,
     "--label", `${RUNTIME_HOST_PREDECESSOR_LABEL}=${predecessor.id}`,
     "--label", `dev.live-log-viewer.revision=${candidate.revision}`,
@@ -449,7 +481,8 @@ function publishReleaseOnce(name: string, candidate: ViewerReleaseIdentity, port
     7. the durable release record binds the successor image, revision, and
        container identity after every prerequisite is complete — exactly once;
     8. after the predecessor exits and the successor acquires the fence, the
-       successor removes the recorded predecessor and clears the intent.
+       successor retains one managed predecessor as the direct rollback target,
+       prunes the older target, and clears the handoff intent.
     A failure leaves the predecessor serving and the staging operation
     retryable from its durable deployment phase. */
 export async function stageRuntimeHostSuccessorContainer(
@@ -490,6 +523,7 @@ export async function stageRuntimeHostSuccessorContainer(
   const predecessor = await findPredecessor(ports);
   if (!predecessor) throw new Error("runtime-host predecessor container is unavailable for successor staging");
   let predecessorId = predecessor.id;
+  const previousRelease = ports.readRelease();
   try {
     phase("creating the runtime-host successor container");
     await ports.docker(successorRunArgs(name, candidate, predecessor, options));
@@ -511,12 +545,17 @@ export async function stageRuntimeHostSuccessorContainer(
   }
   await observeStableSuccessor(name, candidate, ports, options);
   phase("recording the runtime-host handoff intent");
+  const recordedAt = (ports.now ?? (() => new Date().toISOString()))();
   ports.writeHandoffIntent({
     revision: candidate.revision,
     image: candidate.image,
     successorContainer: name,
     predecessorId,
-    recordedAt: (ports.now ?? (() => new Date().toISOString()))(),
+    ...(previousRelease ? {
+      previousRelease,
+      successorRelease: { ...candidate, container: name, stagedAt: recordedAt },
+    } : {}),
+    recordedAt,
   });
   phase("disabling the runtime-host predecessor restart policy");
   await disablePredecessorRestart(predecessorId, ports);

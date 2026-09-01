@@ -122,8 +122,8 @@ makes a wedged hand-over visible.
 `--hand-over` performs the staging and then stops the predecessor runtime-host
 container so the successor acquires the fence. `127.0.0.1:8898` is unserved for
 the length of that exit; the run waits for the fence and names what it saw if
-it never arrives. The successor removes the stopped predecessor once it owns
-the fence.
+it never arrives. A managed predecessor remains stopped as the bounded rollback
+target after the successor proves its startup and framed serving evidence.
 
 After a host-only bootstrap the runtime host runs a newer revision than the
 published Viewer release, so its boot-time MCP reconcile logs

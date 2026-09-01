@@ -61,13 +61,15 @@ export interface RuntimeHostRehearsalRunOptions {
   holdWindowMs?: number;
 }
 
-function rehearsalEnvironment(options: RuntimeHostRehearsalRunOptions, role: "predecessor" | "successor"): NodeJS.ProcessEnv {
-  return {
+export function runtimeHostRehearsalEnvironment(
+  options: RuntimeHostRehearsalRunOptions,
+  role: "predecessor" | "successor",
+): Record<string, string | undefined> {
+  const environment: Record<string, string | undefined> = {
     PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
     // The environment is built rather than inherited, so the rehearsal cannot
     // pick up a live socket, journal or state dir from whoever started it.
     // The image pins production, and the host under test must see the same.
-    NODE_ENV: process.env.NODE_ENV ?? "production",
     HOME: options.stateDir,
     XDG_CONFIG_HOME: path.join(options.stateDir, "config"),
     TMPDIR: path.join(options.stateDir, "tmp"),
@@ -86,12 +88,14 @@ function rehearsalEnvironment(options: RuntimeHostRehearsalRunOptions, role: "pr
     [RUNTIME_HOST_CONTAINER_ENV]: `rehearsal-${role}`,
     ...(role === "successor" ? { [RUNTIME_HOST_FENCE_WAIT_ENV]: String(REHEARSAL_FENCE_WAIT_MS) } : {}),
   };
+  Reflect.deleteProperty(environment, "NODE_ENV");
+  return environment;
 }
 
 function startGeneration(options: RuntimeHostRehearsalRunOptions, role: "predecessor" | "successor"): RuntimeHostRehearsalGeneration {
   const child: ChildProcess = spawn(options.runtimeBin, ["run", "src/runtime-host/main.ts"], {
     cwd: options.root,
-    env: rehearsalEnvironment(options, role),
+    env: runtimeHostRehearsalEnvironment(options, role) as NodeJS.ProcessEnv,
     stdio: ["ignore", "pipe", "pipe"],
   });
   const lines: string[] = [];

@@ -45,10 +45,52 @@ reconciles that exact process group before replaying a journaled phase after a
 restart.
 
 The serving candidate remains running after promotion. The immediate rollback
-container stays stopped with its image, Compose snapshot, and reserved port
-preserved. Rollback starts that container, passes its direct health gate, and
-then atomically changes the stable target. This keeps rollback durable without
-duplicating Viewer scanner memory and CPU between releases.
+Viewer container stays stopped with its image, Compose snapshot, and reserved
+port preserved. Rollback starts that container, passes its direct health gate,
+and then atomically changes the stable target. This keeps rollback durable
+without duplicating Viewer scanner memory and CPU between releases.
+
+Runtime-host hand-over has its own completion gate. The predecessor leaves the
+deployment active in `host-handoff` after it stages the successor and releases
+the singleton fence. The successor records fence acquisition, journal open,
+handoff cleanup, consumer recovery, socket listening, and ready phases with its
+generation, PID start identity, host epoch, and timestamps. A separate framed
+socket probe must receive a matching response from that generation within three
+seconds before the successor writes terminal `succeeded`. Dockerd repeats the
+same generation-aware probe every ten seconds and marks the container unhealthy
+after three consecutive misses.
+
+The previous managed runtime-host generation stays stopped as the durable
+rollback target. A later successful hand-over replaces that target and removes
+the older retained generation, so retention remains bounded to one.
+
+### Runtime-host rollback when its listener is failing
+
+The rollback route reads durable files and talks to dockerd directly. It does
+not submit a deployment through the runtime-host listener.
+
+Render the recovery plan first:
+
+```bash
+bun scripts/rollback-runtime-host.ts
+```
+
+The plan names the failed generation and the retained predecessor. Execute it
+only after checking those identities:
+
+```bash
+bun scripts/rollback-runtime-host.ts --execute
+```
+
+The ordered recovery is durable across executor death:
+
+1. Write the rollback intent and repoint the release record to the retained generation.
+2. Enable and start the retained container under dockerd.
+3. On boot, that retained generation reads the intent, disables the failed generation's restart policy, and stops it.
+4. The retained generation acquires the singleton fence, removes the failed container, and clears the intent.
+
+Viewer release containers and their structured or engine hosts remain running
+through this runtime-host-only recovery.
 
 The adapter protocol invokes one fixed executable with one action argument and
 sends one JSON object on stdin. Every action must be idempotent because restart
@@ -69,6 +111,9 @@ recovery can replay it.
 | `rollback` | `{ "previous": ViewerReleaseIdentity, "candidate": ViewerReleaseIdentity }` |
 | `retire` | `{ "release": ViewerReleaseIdentity }` |
 | `retain-only` | `{ "releases": ViewerReleaseIdentity[] }` |
+| `stage-host-successor` | `{ "candidate": ViewerReleaseIdentity }` |
+| `verify-host-successor` | `{ "candidate": ViewerReleaseIdentity }` |
+| `complete-host-handoff` | `{ "generation": { "image": string, "revision": string, "container": string } }` |
 
 `retire` removes the supplied failed or superseded release container and may
 remove its unused image. `retain-only` preserves the supplied serving and

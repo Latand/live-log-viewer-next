@@ -138,3 +138,37 @@ test("a refused MCP read is printed with the reason the candidate's own runtime 
     + " Module not found ~/release/fileScanner.worker.ts",
   );
 });
+
+test("issue 1272: a runtime-host gate refusal renders all of its durable evidence", () => {
+  const report = deploymentFailureReport(status([{
+    checkedAt: "2026-08-28T18:11:40.000Z",
+    endpoint: CANDIDATE,
+    processReady: true,
+    rootStatus: 200,
+    authenticatedStatus: 200,
+    unauthorizedStatus: 403,
+    assets: [{ path: "/_next/static/chunks/main.js", status: 200 }],
+    runtimeHost: {
+      checkedAt: "2026-08-28T18:12:31.000Z",
+      runtime: "bun 1.4.0",
+      succession: { predecessorReadyMs: 1_390, successorTookOverMs: 0, completed: false },
+      listener: { windowMs: 15_000, polls: 24, answered: 12, abandoned: 12 },
+      socket: { polls: 6, answered: 3, abandoned: 3 },
+      ok: false,
+      detail: "the stable listener stopped answering 6.0s into the hold window",
+      log: ["error: write EPIPE", "at failWrite (node:net)"],
+    },
+    ok: false,
+    detail: "candidate runtime-host gate failed",
+  }]));
+
+  expect(report).toContain(
+    "  runtime host: bun 1.4.0; succession incomplete; predecessor ready 1390 ms; successor took over 0 ms"
+    + " - the stable listener stopped answering 6.0s into the hold window",
+  );
+  expect(report).toContain("  runtime host listener: 12 of 24 answered over 15000 ms; 12 callers abandoned");
+  expect(report).toContain("  runtime host socket: 3 of 6 answered; 3 callers abandoned");
+  expect(report).toContain("runtime host output (last 2 lines):");
+  expect(report).toContain("  error: write EPIPE");
+  expect(report).toContain("  at failWrite (node:net)");
+});
