@@ -48,6 +48,10 @@ function state(currentLogin: ClaudeLoginView, over: Partial<EngineAccountsState>
     remove: async () => true,
     cleanupOrphans: async () => true,
     copyTerminalCommand: async () => true,
+    refreshLimits: async () => true,
+    useResetCredit: async () => true,
+    limitsBusy: null,
+    limitsVersion: 0,
     ...over,
   };
 }
@@ -415,4 +419,80 @@ test("stale quota windows without timestamps retain a visible last-known label",
   mounted.push(view);
 
   expect(view.host.querySelector('[aria-label="Quota windows for Acc"]')?.textContent).toContain("Last known values");
+});
+
+// ── Issues #1418 / #1373 — the two card actions fire on click, no confirm ─────
+
+const codexCard = (over: Record<string, unknown> = {}) => ({
+  id: "account-a", label: "Account A", kind: "managed" as const, authPresent: true, authHealth: "authenticated" as const, plan: "pro",
+  loginPending: false, loginState: "authenticated" as const, deviceAuth: null, login: null,
+  limits: { freshness: "fresh" as const, session: null, weekly: { usedPercent: 100, resetsAt: Math.floor(Date.now() / 1000) + 5 * 86_400, windowMinutes: 10_080 }, checkedAt: new Date(Date.now() - 60_000).toISOString() },
+  resetCredits: { availableCount: 1, expiresAt: null },
+  ...over,
+});
+
+test("Refresh re-reads that account's limits on click, with no confirmation step (#1418)", async () => {
+  const refreshed: string[] = [];
+  const view = await mount(state(login({ phase: "authenticated" }), {
+    engine: "codex",
+    accounts: [codexCard()],
+    refreshLimits: async (id) => { refreshed.push(id); return true; },
+  }));
+  mounted.push(view);
+  const refresh = view.host.querySelector<HTMLButtonElement>('button[data-account-refresh-limits="account-a"]')!;
+  expect(refresh.disabled).toBeFalse();
+  flushSync(() => { refresh.click(); });
+  await Promise.resolve();
+  expect(refreshed).toEqual(["account-a"]);
+  expect(view.host.textContent).not.toContain("Confirm");
+});
+
+test("Use one reset fires on the first click and the card shows the new window once the store answers (#1373)", async () => {
+  const redeemed: string[] = [];
+  const initial = state(login({ phase: "authenticated" }), {
+    engine: "codex",
+    accounts: [codexCard()],
+    useResetCredit: async (id) => { redeemed.push(id); return true; },
+  });
+  const view = await mount(initial);
+  mounted.push(view);
+  const block = () => view.host.querySelector('[data-account-limits="account-a"]')!;
+  expect(block().textContent).toContain("0%");
+  expect(block().textContent).toContain("1 reset available");
+  const use = view.host.querySelector<HTMLButtonElement>('button[data-account-use-reset="account-a"]')!;
+  expect(use.disabled).toBeFalse();
+  flushSync(() => { use.click(); });
+  await Promise.resolve();
+  expect(redeemed).toEqual(["account-a"]);
+  expect(view.host.textContent).not.toContain("Confirm");
+
+  // The store answers with the new window: zero used, a later reset, no credit left.
+  const later = Math.floor(Date.now() / 1000) + 7 * 86_400;
+  await view.rerender(state(login({ phase: "authenticated" }), {
+    engine: "codex",
+    accounts: [codexCard({
+      limits: { freshness: "fresh", session: null, weekly: { usedPercent: 0, resetsAt: later, windowMinutes: 10_080 }, checkedAt: new Date().toISOString() },
+      resetCredits: { availableCount: 0, expiresAt: null },
+    })],
+    useResetCredit: initial.useResetCredit,
+  }));
+  expect(block().textContent).toContain("100%");
+  expect(block().textContent).toContain("No resets available");
+  expect(block().textContent).not.toContain("rate-limited");
+  expect(view.host.querySelector<HTMLButtonElement>('button[data-account-use-reset="account-a"]')!.disabled).toBeTrue();
+});
+
+test("an action in flight marks its button busy and holds the other action until it settles (#1418)", async () => {
+  const view = await mount(state(login({ phase: "authenticated" }), {
+    engine: "codex",
+    accounts: [codexCard()],
+    limitsBusy: { accountId: "account-a", operation: "resetCredit" },
+  }));
+  mounted.push(view);
+  const use = view.host.querySelector<HTMLButtonElement>('button[data-account-use-reset="account-a"]')!;
+  const refresh = view.host.querySelector<HTMLButtonElement>('button[data-account-refresh-limits="account-a"]')!;
+  expect(use.getAttribute("aria-busy")).toBe("true");
+  expect(use.disabled).toBeTrue();
+  expect(refresh.disabled).toBeTrue();
+  expect(refresh.getAttribute("aria-busy")).toBeNull();
 });

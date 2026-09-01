@@ -10,12 +10,14 @@ import {
   type AccountAuthHealth,
   type AccountOption,
   type EngineAccountsState,
+  type LimitsAction,
 } from "@/hooks/useEngineAccounts";
+import { claudeTierDisplayName } from "@/lib/agent/models";
 import { type TFunction, useLocale } from "@/lib/i18n";
 import { handleOverlayEscape } from "@/lib/overlay";
 import { effectiveQuota, quotaReadingFromAccountLimits, reconcileQuotaReadings, type ReconciledQuota } from "@/lib/rateLimit";
 
-import { Loader2, SquareTerminal, Trash2, X } from "./icons";
+import { Loader2, RotateCw, SquareTerminal, Trash2, X, Zap } from "./icons";
 import { Badge } from "./ui/Badge";
 import { formatCheckedClock, formatQuotaAsOf, formatResetClock, formatResetEta, windowLabel } from "./rateLimit";
 import { engineTintOf } from "./utils";
@@ -51,7 +53,9 @@ function CapacityChip({ quota, engine }: { quota: ReconciledQuota; engine: "clau
   const effective = effectiveQuota(quota);
   if (!effective) return null;
   const tint = engineTintOf(engine);
-  const window = t(effective.window === "weekly" ? "limits.windowWeekly" : "limits.windowSession");
+  const window = effective.window === "flagship"
+    ? t("limits.windowFlagship", { tier: claudeTierDisplayName(quota.flagship?.value.tier ?? "") })
+    : t(effective.window === "weekly" ? "limits.windowWeekly" : "limits.windowSession");
   const stale = effective.stale;
   const color = capacityColor(effective.percent, tint.color);
   return (
@@ -65,55 +69,104 @@ function CapacityChip({ quota, engine }: { quota: ReconciledQuota; engine: "clau
   );
 }
 
-/** Per-account quota detail (issue #40): each window (5h session / weekly)
-    renders as a labeled meter — remaining capacity as a filled track on the
-    limits color ramp — plus the numeric % left and reset time, so the switch
-    decision reads at a glance. The collapsed {@link CapacityChip} is the
-    min-window summary of this. Renders nothing when no live/stale read exists;
-    a stale read is dimmed and labeled. Time formatting is shared with the
-    limits footer so both read identically. */
-function AccountLimitsDetail({ account, engine, quota, now }: { account: AccountOption; engine: "claude" | "codex"; quota: ReconciledQuota; now: number }) {
+/** One recipe for the two per-card limits actions (#1418, #1373): quiet ghost
+    buttons inside the limits block, 44px tall on touch, compact on desktop. */
+const LIMITS_ACTION_CLASS = "inline-flex min-h-[44px] shrink-0 items-center gap-1 rounded-[6px] px-1.5 py-0.5 text-[10px] font-semibold text-secondary hover:bg-canvas hover:text-primary disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-[24px]";
+
+/**
+ * Per-account limits block (issues #40, #1418, #1373, #1358). One place on the
+ * card says how much is left and lets the operator act on it:
+ *
+ *   Checked · 14:32                                    ↻ Refresh
+ *   rate-limited until 6 Sep 10:48
+ *   Week         ▓▓░░░░░░   0% left · reset in 5d · 6 Sep 10:48
+ *   Opus · Week  ▓▓▓▓▓░░░  62% left · reset in 3d · …      (flagship tier, when reported)
+ *   1 reset available · expires 21 Sep 10:48           ⚡ Use one reset   (Codex only)
+ *
+ * Refresh re-reads that account's live limits now; Use one reset redeems one
+ * usage-limit reset credit. Both fire on click — there is no confirmation step
+ * anywhere on the card — and the card takes the reading the route answers
+ * with. Each window renders as a labelled meter on the limits color ramp plus
+ * the numeric % left and the reset time; the collapsed {@link CapacityChip} is
+ * the min-window summary of this. A stale read is dimmed and captioned, and
+ * the check time renders for fresh reads too, so the operator always sees when
+ * the numbers were taken. Time formatting is shared with the limits footer.
+ */
+function AccountLimitsBlock({ account, engine, quota, now, busy, disabled, wideLabels, onRefresh, onUseReset }: {
+  account: AccountOption;
+  engine: "claude" | "codex";
+  quota: ReconciledQuota;
+  now: number;
+  busy: LimitsAction["operation"] | null;
+  disabled: boolean;
+  /** True when any card in the dialog carries a flagship row: every card then
+      uses the wider label column, so the meters line up down the whole list. */
+  wideLabels: boolean;
+  onRefresh: () => void;
+  onUseReset: () => void;
+}) {
   const { t } = useLocale();
-  const windows = [
+  const rows = [
     { key: "session", label: windowLabel(t, "session", quota.session?.value.windowMinutes), window: quota.session },
     { key: "weekly", label: windowLabel(t, "weekly", quota.weekly?.value.windowMinutes), window: quota.weekly },
+    // The flagship tier's own week (#1358), named by the provider's tier; the
+    // row exists only when the account reports a distinct bucket.
+    { key: "flagship", label: quota.flagship ? t("limits.tierWeek", { tier: claudeTierDisplayName(quota.flagship.value.tier) }) : "", window: quota.flagship },
   ].filter((row): row is { key: string; label: string; window: NonNullable<typeof row.window> } => row.window != null);
-  if (windows.length === 0) return null;
-  const stale = windows.some((row) => row.window.stale);
-  const observed = windows.map((row) => row.window.observedAt).filter((value): value is number => value !== null);
+  const stale = rows.some((row) => row.window.stale);
+  const observed = rows.map((row) => row.window.observedAt).filter((value): value is number => value !== null);
   const observedAt = observed.length ? Math.min(...observed) : null;
-  const staleObserved = windows
+  const staleObserved = rows
     .filter((row) => row.window.stale)
     .map((row) => row.window.observedAt)
     .filter((value): value is number => value !== null);
   const sharedStaleAt = staleObserved.length > 1 && staleObserved.every((value) => value === staleObserved[0])
     ? staleObserved[0]
     : null;
-  const exhausted = windows.filter((row) => row.window.value.usedPercent >= 100);
+  const exhausted = rows.filter((row) => row.window.value.usedPercent >= 100);
   const exhaustedResets = exhausted.map((row) => row.window.value.resetsAt);
   const rateLimitedUntil = exhausted.length > 0
     && exhaustedResets.every((reset): reset is number => reset !== null && reset > now)
     ? Math.max(...exhaustedResets)
     : null;
   const tint = engineTintOf(engine);
+  // Freshness is a visible, screen-reader-readable line — not opacity or a
+  // title tooltip alone (touch has no hover, and `title` AT support is
+  // spotty), so historical numbers never read as current.
+  const caption = sharedStaleAt !== null
+    ? formatQuotaAsOf(sharedStaleAt) ?? t("accounts.limitsStale")
+    : !stale && observedAt !== null
+      ? `${t("accounts.limitsChecked")} · ${formatCheckedClock(new Date(observedAt * 1000).toISOString())}`
+      : rows.length === 0 ? t("limits.noDataYet") : null;
+  const resets = engine === "codex" ? account.resetCredits ?? null : null;
+  const canRedeem = resets !== null && resets.availableCount > 0;
+  const refreshing = busy === "refreshLimits";
+  const redeeming = busy === "resetCredit";
+  const labelWidth = wideLabels ? "w-[72px]" : "w-8";
   return (
     <dl
+      data-account-limits={account.id}
       aria-label={t("accounts.limitsAria", { label: account.label })}
       title={stale ? t("accounts.limitsStaleTip") : undefined}
-      className={`flex flex-col gap-1 px-3.5 pb-1 pl-[30px] ${stale ? "opacity-70" : ""}`}
+      className="flex flex-col gap-1 px-3.5 pb-1 pl-[30px]"
     >
-      {/* Freshness is a visible, screen-reader-readable line — not opacity or a
-          title tooltip alone (touch has no hover, and `title` AT support is
-          spotty), so historical numbers never read as current. The check time
-          renders for fresh reads too — the panel always says when the numbers
-          were last observed. */}
-      {sharedStaleAt !== null || (!stale && observedAt !== null) ? (
-        <div className="text-[9.5px] font-semibold text-secondary">
-          {sharedStaleAt !== null
-            ? formatQuotaAsOf(sharedStaleAt) ?? t("accounts.limitsStale")
-            : `${t("accounts.limitsChecked")} · ${formatCheckedClock(new Date(observedAt! * 1000).toISOString())}`}
-        </div>
-      ) : null}
+      <div className="flex items-center gap-2">
+        <span className="min-w-0 flex-1 truncate text-[9.5px] font-semibold text-secondary">{caption}</span>
+        <button
+          type="button"
+          data-account-refresh-limits={account.id}
+          aria-label={t("accounts.refreshLimitsAria", { label: account.label })}
+          aria-busy={refreshing || undefined}
+          disabled={disabled || busy !== null}
+          onClick={onRefresh}
+          className={LIMITS_ACTION_CLASS}
+        >
+          {refreshing
+            ? <Loader2 className="h-3 w-3 animate-spin motion-reduce:animate-none text-accent" aria-hidden />
+            : <RotateCw className="h-3 w-3 text-muted" aria-hidden />}
+          {t("accounts.refreshLimits")}
+        </button>
+      </div>
       {exhausted.length > 0 ? (
         <div className="text-[10px] font-semibold text-danger">
           {rateLimitedUntil === null
@@ -121,31 +174,65 @@ function AccountLimitsDetail({ account, engine, quota, now }: { account: Account
             : t("rateLimit.badgeUntil", { time: formatResetClock(rateLimitedUntil, now) })}
         </div>
       ) : null}
-      {windows.map(({ key, label, window }) => {
-        const w = window.value;
-        const left = Math.max(0, Math.min(100, 100 - w.usedPercent));
-        const color = capacityColor(left, tint.color);
-        const groupedStaleHint = sharedStaleAt !== null && window.observedAt === sharedStaleAt;
-        const staleHint = window.stale && !groupedStaleHint
-          ? formatQuotaAsOf(window.observedAt) ?? t("accounts.limitsStale")
-          : null;
-        return (
-          <div key={key} className="flex items-center gap-2 text-[10px] leading-snug text-muted">
-            <dt className="w-8 shrink-0 font-semibold">{label}</dt>
-            <dd className="flex min-w-0 flex-1 items-center gap-2">
-              <span aria-hidden className="h-1.5 w-16 shrink-0 overflow-hidden rounded-full bg-sunken sm:w-20">
-                <span className="block h-full rounded-full" style={{ width: `${left}%`, backgroundColor: color }} />
-              </span>
-              <span className="font-bold tabular-nums text-primary">{Math.round(left)}%</span>
-              <span>{t("limits.left")}</span>
-              {w.resetsAt ? (
-                <span className="truncate">· {t("limits.reset", { eta: formatResetEta(w.resetsAt, now), at: formatResetClock(w.resetsAt, now) })}</span>
-              ) : null}
-              {staleHint ? <span className="truncate">{w.resetsAt ? "· " : ""}{staleHint}</span> : null}
-            </dd>
-          </div>
-        );
-      })}
+      {rows.length > 0 ? (
+        <div className={`flex flex-col gap-1 ${stale ? "opacity-70" : ""}`}>
+          {rows.map(({ key, label, window }) => {
+            const w = window.value;
+            const left = Math.max(0, Math.min(100, 100 - w.usedPercent));
+            const color = capacityColor(left, tint.color);
+            const groupedStaleHint = sharedStaleAt !== null && window.observedAt === sharedStaleAt;
+            const staleHint = window.stale && !groupedStaleHint
+              ? formatQuotaAsOf(window.observedAt) ?? t("accounts.limitsStale")
+              : null;
+            return (
+              <div key={key} data-limit-row={key} className="flex items-center gap-2 text-[10px] leading-snug text-muted">
+                <dt className={`${labelWidth} shrink-0 font-semibold`}>{label}</dt>
+                <dd className="flex min-w-0 flex-1 items-center gap-2">
+                  <span aria-hidden className="h-1.5 w-16 shrink-0 overflow-hidden rounded-full bg-sunken sm:w-20">
+                    <span className="block h-full rounded-full" style={{ width: `${left}%`, backgroundColor: color }} />
+                  </span>
+                  <span className="font-bold tabular-nums text-primary">{Math.round(left)}%</span>
+                  <span>{t("limits.left")}</span>
+                  {w.resetsAt ? (
+                    <span className="truncate">· {t("limits.reset", { eta: formatResetEta(w.resetsAt, now), at: formatResetClock(w.resetsAt, now) })}</span>
+                  ) : null}
+                  {staleHint ? <span className="truncate">{w.resetsAt ? "· " : ""}{staleHint}</span> : null}
+                </dd>
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
+      {engine === "codex" ? (
+        // Reset credits live beside the limit state they remedy (#1373), so an
+        // exhausted account and its way out read in one place.
+        <div data-account-reset-credits={account.id} className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] text-muted">
+          <span className={`min-w-0 flex-1 ${canRedeem ? "font-semibold text-primary" : ""}`}>
+            {resets === null
+              ? t("accounts.resetsUnknown")
+              : resets.availableCount === 0
+                ? t("accounts.resetsNone")
+                : t("accounts.resetsAvailable", { count: resets.availableCount })}
+            {resets !== null && resets.availableCount > 0 && resets.expiresAt !== null
+              ? ` · ${t("accounts.resetsExpire", { at: formatResetClock(resets.expiresAt, now) })}`
+              : null}
+          </span>
+          <button
+            type="button"
+            data-account-use-reset={account.id}
+            aria-label={t("accounts.useResetAria", { label: account.label })}
+            aria-busy={redeeming || undefined}
+            disabled={disabled || busy !== null || !canRedeem}
+            onClick={onUseReset}
+            className={`${LIMITS_ACTION_CLASS} ${canRedeem ? "border border-accent/40 bg-canvas text-accent hover:text-accent" : ""}`}
+          >
+            {redeeming
+              ? <Loader2 className="h-3 w-3 animate-spin motion-reduce:animate-none text-accent" aria-hidden />
+              : <Zap className="h-3 w-3" aria-hidden />}
+            {t("accounts.useReset")}
+          </button>
+        </div>
+      ) : null}
     </dl>
   );
 }
@@ -236,7 +323,6 @@ function AccountRow({ account, engine, quota, activeId, onSelect, onRemove, onCo
         <CapacityChip quota={quota} engine={engine} />
         <StateChip state={state} />
       </button>
-      <BoundProjects account={account} />
       {children}
       {state === "pending" && account.deviceAuth ? (
         <div className="flex items-center gap-2 px-3.5 pb-1.5 text-[10px] text-muted">
@@ -365,36 +451,6 @@ function ProjectAccountDetail({ context }: { context: ProjectAccountContext }) {
         </div>
       ) : null}
     </section>
-  );
-}
-
-/**
- * The accounts side of #1279's relation: the projects this account is bound to.
- *
- * Nothing renders when there are none, and that reads correctly: a binding
- * fences the PROJECT, not the account, so an account with no bindings is not
- * restricted — every project that has not bound anything may still use it.
- */
-function BoundProjects({ account }: { account: AccountOption }) {
-  const { t } = useLocale();
-  const projects = account.projects ?? [];
-  if (!projects.length) return null;
-  return (
-    <div
-      data-account-projects={account.id}
-      className="flex flex-wrap items-center gap-1 px-3.5 pb-0.5 pl-[30px] text-[10px]"
-    >
-      <span className="font-semibold text-muted">{t("accounts.boundProjects")}</span>
-      {projects.map((entry) => (
-        <span
-          key={entry.project}
-          title={entry.project}
-          className="max-w-[160px] truncate rounded-full border border-border bg-canvas px-1.5 py-0.5 font-semibold text-secondary"
-        >
-          {entry.displayName}
-        </span>
-      ))}
-    </div>
   );
 }
 
@@ -587,6 +643,8 @@ function operationText(operation: AccountOperation, t: TFunction): string {
     case "login": return t("accounts.operation.login");
     case "remove": return t("accounts.operation.remove");
     case "terminal": return t("accounts.operation.terminal");
+    case "refreshLimits": return t("accounts.operation.refreshLimits");
+    case "resetCredit": return t("accounts.operation.resetCredit");
   }
 }
 
@@ -665,6 +723,14 @@ export function AccountsPanel({
     if (created) setLabel("");
   };
 
+  const rows = accounts.map((account) => ({
+    account,
+    quota: quotaOverride?.accountId === active && account.id === active ? quotaOverride.quota : accountQuota(account, quotaNow),
+  }));
+  // One label column for the whole list (#1358): a flagship row's longer label
+  // widens every card's column, so the meters stay aligned from card to card.
+  const wideLabels = rows.some(({ quota }) => quota.flagship !== null);
+
   return (
     <>
       {/* Mobile-only backdrop that absorbs the outside tap so it closes only the
@@ -715,13 +781,27 @@ export function AccountsPanel({
             <div className="max-h-[min(420px,60vh)] divide-y divide-border/40 overflow-y-auto">
               {status === "loading" ? <div className="px-3.5 py-2 text-[11px] text-muted">{t("accounts.loading")}</div> : null}
               {status === "error" && accounts.length === 0 ? <div className="px-3.5 py-2 text-[11px] text-muted">{t("accounts.noAccounts")}</div> : null}
-              {accounts.map((account) => {
-                const quota = quotaOverride?.accountId === active && account.id === active
-                  ? quotaOverride.quota
-                  : accountQuota(account, quotaNow);
+              {rows.map(({ account, quota }) => {
+                // The limits block belongs to every account that can be read
+                // (credentials present) and to any account that still carries a
+                // last-known reading; a fresh managed account awaiting sign-in
+                // shows neither numbers nor actions.
+                const showLimits = account.authPresent || Boolean(quota.session || quota.weekly || quota.flagship);
                 return (
                   <AccountRow key={account.id} account={account} engine={engine} quota={quota} activeId={active} disabled={mutation !== null} focused={account.id === focusAccountId} onSelect={() => void onSelect(account.id)} onRemove={() => void state.remove(account.id)} onCopyCommand={() => void state.copyTerminalCommand(account.id)}>
-                    <AccountLimitsDetail account={account} engine={engine} quota={quota} now={quotaNow} />
+                    {showLimits ? (
+                      <AccountLimitsBlock
+                        account={account}
+                        engine={engine}
+                        quota={quota}
+                        now={quotaNow}
+                        busy={state.limitsBusy?.accountId === account.id ? state.limitsBusy.operation : null}
+                        disabled={mutation !== null || !account.authPresent}
+                        wideLabels={wideLabels}
+                        onRefresh={() => void state.refreshLimits(account.id)}
+                        onUseReset={() => void state.useResetCredit(account.id)}
+                      />
+                    ) : null}
                     {engine === "claude" ? <ClaudeLoginRow key={account.login?.operationId ?? account.id} account={account} state={state} loginBusy={loginBusy} /> : null}
                   </AccountRow>
                 );

@@ -1395,3 +1395,51 @@ test("a transcript left with only windowless events reports no snapshot rather t
   expect(result.data).toBeNull();
   expect(result.source).toBe("unavailable");
 });
+
+test("the Claude usage payload's flagship tier bucket becomes the flagship window, named by the provider's tier (#1358)", async () => {
+  const realFetch = globalThis.fetch;
+  let payload: Record<string, unknown> = {
+    five_hour: { utilization: 12, resets_at: "2026-09-01T14:00:00.000Z" },
+    seven_day: { utilization: 40, resets_at: "2026-09-05T08:00:00.000Z" },
+    seven_day_opus: { utilization: 63, resets_at: "2026-09-05T08:00:00.000Z" },
+    seven_day_sonnet: { utilization: 5, resets_at: "2026-09-05T08:00:00.000Z" },
+    seven_day_oauth_apps: { utilization: 1 },
+    seven_day_overage_included: false,
+  };
+  globalThis.fetch = (async () => Response.json(payload)) as unknown as typeof fetch;
+  try {
+    const credentials = path.join(process.env.LLV_CLAUDE_HOME!, ".credentials.json");
+    const withBucket = await fetchClaudeLimits(credentials);
+    expect(withBucket.source).toBe("live");
+    expect(withBucket.data?.flagship).toEqual({ usedPercent: 63, resetsAt: Math.round(Date.parse("2026-09-05T08:00:00.000Z") / 1000), windowMinutes: 10_080, tier: "opus" });
+    expect(withBucket.data?.weekly).toMatchObject({ usedPercent: 40 });
+    // The provider sends the key as null when the account has no distinct
+    // flagship bucket (observed on a live payload): the field is null and
+    // nothing renders. A lower tier's bucket never becomes the flagship row.
+    payload = { five_hour: { utilization: 12 }, seven_day: { utilization: 40 }, seven_day_opus: null, seven_day_sonnet: { utilization: 5 } };
+    const without = await fetchClaudeLimits(credentials);
+    expect(without.data?.flagship).toBeNull();
+    expect(without.data?.weekly).toMatchObject({ usedPercent: 40 });
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("forgetting one account's cached limits sends the next read back to the provider (#1418)", async () => {
+  resetLimitsCache();
+  const { forgetCachedLimits } = await import("./limits");
+  const account = createManagedCodexAccount("Forgettable");
+  setActiveCodexAccount(account.id);
+  let reads = 0;
+  const reader = async () => { reads += 1; return { primary: { usedPercent: 12, resetsAt: 100, windowDurationMins: 10_080 }, secondary: null, planType: "pro" }; };
+  await readLimits({ codexLiveReader: reader });
+  await readLimits({ codexLiveReader: reader });
+  expect(reads).toBe(1); // the second read is served from the 30-second cache
+  forgetCachedLimits("codex", account.id);
+  const cacheFile = path.join(process.env.LLV_STATE_DIR!, "limits-cache.json");
+  const disk = JSON.parse(fs.readFileSync(cacheFile, "utf8")) as { engines: { codex: Record<string, unknown> } };
+  expect(disk.engines.codex[account.id]).toBeUndefined();
+  await readLimits({ codexLiveReader: reader });
+  expect(reads).toBe(2);
+  resetLimitsCache();
+});
