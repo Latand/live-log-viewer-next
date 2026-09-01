@@ -425,11 +425,14 @@ export class ViewerDeploymentCoordinator {
       const message = safeError(error);
       const latest = this.journal.viewerDeployment(status.deploymentId) ?? status;
       if (latest.phase === "host-handoff") {
-        this.log(`[viewer deployment] ${latest.deploymentId} host-handoff failed and stays retryable: ${message}`);
+        /* The Viewer has already published, so this failure records the split
+           loudly and releases deployment admission. Retaining an active row
+           here cannot repair the handoff and blocks every later deployment. */
+        this.log(`[viewer deployment] ${latest.deploymentId} host-handoff failed: ${message}`);
         this.journal.updateViewerDeployment(latest.deploymentId, {
           error: message,
-          phase: "host-handoff",
-          terminal: false,
+          phase: "failed",
+          terminal: true,
         });
         return;
       }
