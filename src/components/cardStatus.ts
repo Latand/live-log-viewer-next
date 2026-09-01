@@ -4,12 +4,15 @@ import type { FileEntry } from "@/lib/types";
 
 import { attentionId } from "./attention";
 import { turnIsRunning } from "./turnDuration";
+import { workingSince } from "./workingSince";
 
 /**
  * The one operator-facing textual status of a board card (issue #961).
  *
  * A pure projection over the authorities the board already trusts — it owns no
- * state and invents no lifecycle. Each word names the authority it reads:
+ * state and invents no lifecycle; the one thing it remembers, through
+ * {@link workingSince}, is the elapsed anchor it already showed, so the run
+ * time never runs backwards. Each word names the authority it reads:
  *
  * 1. `needs-you` — the attention queue ({@link attentionId}), the same identity
  *    every badge/toast/push surface derives from. Frozen semantics.
@@ -17,8 +20,9 @@ import { turnIsRunning } from "./turnDuration";
  *    {@link activeCardMigration} exactly like the composer's held ribbon and the
  *    outgoing message bubbles, with the registry's unsettled count.
  * 3. `running` — the open-turn condition the pinned working spinner paints from
- *    ({@link turnIsRunning}), plus the elapsed run time when the turn boundary
- *    is known.
+ *    ({@link turnIsRunning}), plus the elapsed run time from the anchor that
+ *    spinner's timer uses ({@link workingSince}): the open transcript turn, or
+ *    the launch admission while the starting window has no turn yet (#1397).
  * 4. `queued` — a scheduled self-wake still in the future (the wakeup authority
  *    behind the ⏰ chip).
  *
@@ -38,7 +42,7 @@ export function cardStatus(file: FileEntry, nowMs: number = Date.now()): CardSta
   const held = migration?.heldDeliveries ?? 0;
   if (held > 0) return { kind: "held", count: held };
   if (turnIsRunning(file)) {
-    const startedAt = file.lastTurn && file.lastTurn.endedAt === null ? file.lastTurn.startedAt : null;
+    const startedAt = workingSince(file);
     return {
       kind: "running",
       elapsedSeconds: startedAt === null ? null : Math.max(0, (nowMs - startedAt) / 1000),

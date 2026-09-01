@@ -1135,6 +1135,10 @@ interface PendingCodexUser {
   text: string;
   entrySeqs: number[];
   structured: boolean;
+  /** A later record of the same text at the same instant already replaced
+      this row like for like (#1398): the message is real whatever its text
+      looks like, and any further echo folds into the same row. */
+  echoed?: boolean;
 }
 
 type CodexAssistantShape = "event-agent" | "response-assistant";
@@ -1220,9 +1224,11 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
      slides out of the window the state clears, matching what a re-parse of
      the shortened window would know. */
   let codexAssistantRecord: CodexAssistantRecord | null = null;
-  /* A composer turn is recorded as a user response item immediately followed
-     by its user_message event. The event owns the logical turn, while this
-     provisional record keeps a live tail visible until its echo arrives. */
+  /* A user turn is recorded as a user response item immediately followed by
+     its echo — the legacy user_message event, or since Codex 0.151 the thread
+     lifecycle's item_completed UserMessage envelope (#1398). The echo owns the
+     logical turn, while this provisional record keeps a live tail visible until
+     it arrives and absorbs every further echo of the same message. */
   let pendingCodexUsers: PendingCodexUser[] = [];
   let codexCompacted: { src: number } | null = null;
   /* The provider·model pair the last real OpenClaw assistant record ran on,
@@ -1940,7 +1946,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       return true;
     }
     if (kind === "usermessage") {
-      emitCodexUserContent(timing.ts, normalizeCodexUserContent(item.content));
+      addCodexUserRecord(timing.ts, normalizeCodexUserContent(item.content));
       return true;
     }
     if (kind === "hookprompt") {
@@ -2189,10 +2195,12 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     const pendingUsers = pendingCodexUsers;
     pendingCodexUsers = pendingUsers.filter((pending) => pending.structured);
     for (const pending of pendingUsers) {
-      /* App-server structured input may persist without a user_message echo.
-         Its transcript marker preserves the declared user role while later
-         records arrive. Recognized harness envelopes move to the system lane. */
-      if (pending.structured) continue;
+      /* App-server structured input may persist without an echo. Its
+         transcript marker preserves the declared user role while later
+         records arrive, and an echoed row is a real message whatever its text
+         looks like (#1398). Recognized harness envelopes that nothing echoed
+         move to the system lane. */
+      if (pending.structured || pending.echoed) continue;
       if (!isCodexHarnessUserText(pending.text)) continue;
       let converted = false;
       for (const seq of pending.entrySeqs) {
@@ -2213,26 +2221,17 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       }
     }
   };
-  const addCodexResponseUser = (ts: unknown, content: unknown) => {
-    const normalized = normalizeCodexUserContent(content);
-    const pending = emitCodexUserContent(ts, normalized);
-    if (!pending.entrySeqs.length && !pending.text) addSvc("message user");
-    pendingCodexUsers.push(pending);
-  };
-  const addCodexEventUser = (ts: unknown, text: string) => {
-    const decoded = decodeCodexStructuredUserText(text);
-    const pendingIndex = pendingCodexUsers.findIndex((pending) => sameCodexTextAtTime(pending.ts, pending.text, ts, decoded.text));
-    if (pendingIndex < 0) {
-      emitCodexUserContent(ts, { ...decoded, attachments: [] });
-      return;
-    }
-    const [pending] = pendingCodexUsers.splice(pendingIndex, 1);
-    if (!pending) return;
+  /* One user message can reach the rollout as several records (#1398): the
+     persisted user item, the legacy user_message event, and since Codex 0.151
+     the thread lifecycle's item_completed UserMessage envelope — the last two
+     carry the same text within milliseconds of the first. The first sighting
+     renders the row; every later record of the same text at the same instant
+     is its ECHO and replaces that row LIKE FOR LIKE: an internal relay stays
+     the relay card (with the echo's timestamp), a user text stays the bubble —
+     the echo must never re-author the message, and never opens a second row. */
+  const reconcileCodexUserEcho = (pending: PendingCodexUser, ts: unknown, decoded: CodexUserContent) => {
     const { cleaned, images } = extractInboxImages(decoded.text);
     if (cleaned) {
-      /* The echo replaces its provisional row LIKE FOR LIKE: an internal relay
-         stays the relay card (with the echo's timestamp), a user text stays
-         the bubble — the echo must never re-author the message. */
       const internal = decoded.origin?.kind === "agent";
       const echoItem: Item = internal
         ? internalRelayItem(ts, cleaned, decoded.origin!)
@@ -2249,9 +2248,28 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
         pending.entrySeqs.push(push(echoItem));
       }
     }
-    for (const image of images) pending.entrySeqs.push(push({ kind: "inbox-image", name: image.name, path: image.path }));
+    /* The provisional row already showed the message's inbox images; an echo
+       repeats the same references and must not paint them again. */
+    const illustrated = pending.entrySeqs.some((seq) => {
+      const idx = entryIndex(seq);
+      return idx >= 0 && entries[idx]?.item.kind === "inbox-image";
+    });
+    if (!illustrated) {
+      for (const image of images) pending.entrySeqs.push(push({ kind: "inbox-image", name: image.name, path: image.path }));
+    }
     updateCodexPendingSource(pending, curSrc);
+    pending.echoed = true;
   };
+  const addCodexUserRecord = (ts: unknown, content: CodexUserContent) => {
+    const pending = pendingCodexUsers.find((candidate) => sameCodexTextAtTime(candidate.ts, candidate.text, ts, content.text));
+    if (pending) return reconcileCodexUserEcho(pending, ts, content);
+    const emitted = emitCodexUserContent(ts, content);
+    if (!emitted.entrySeqs.length && !emitted.text) addSvc("message user");
+    pendingCodexUsers.push(emitted);
+  };
+  const addCodexResponseUser = (ts: unknown, content: unknown) => addCodexUserRecord(ts, normalizeCodexUserContent(content));
+  const addCodexEventUser = (ts: unknown, text: string) =>
+    addCodexUserRecord(ts, { ...decodeCodexStructuredUserText(text), attachments: [] });
   const addCompact = (ts: unknown, meta?: { trigger?: string; preTokens?: number }) => {
     push({ kind: "compact", ts, trigger: meta?.trigger, preTokens: meta?.preTokens });
   };
@@ -2274,9 +2292,17 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     const ts = obj.timestamp;
     if (obj.type === "event_msg") {
       if (p.type === "user_message" && p.message) return addCodexEventUser(ts, textPart(p.message));
-      finalizePendingCodexUsers();
       const lifecycle = codexThreadItemKind(p.type);
       const threadItem = rec(p.item);
+      /* The thread lifecycle's own records of a user message (#1398) are
+         handled like the user_message event — before the provisional rows are
+         finalized — so the completed envelope reconciles with the row already
+         on screen and opens no second one. */
+      if (codexThreadItemKind(threadItem.type) === "usermessage" && (lifecycle === "itemcompleted" || lifecycle === "itemstarted")) {
+        if (lifecycle === "itemstarted") return addSvc(`${textPart(threadItem.type)} ${lifecycle}`);
+        return addCodexUserRecord(codexThreadTiming(p, ts).ts, normalizeCodexUserContent(threadItem.content));
+      }
+      finalizePendingCodexUsers();
       if (["itemstarted", "itemcompleted", "itemdelta"].includes(lifecycle) && textPart(threadItem.type)) {
         const timing = codexThreadTiming(p, ts);
         if (renderCodexThreadItem(threadItem, timing, lifecycle, "event-agent")) return;

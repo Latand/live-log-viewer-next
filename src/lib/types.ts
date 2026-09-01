@@ -75,6 +75,12 @@ export interface StructuredSpawnCardState {
   /** Submission moment (ms) of the launch prompt — the receipt's creation time —
       so the seeded bubble orders ahead of any follow-up the operator queues. */
   promptAt?: number;
+  /** The launch admission instant (ms) — the receipt's creation time, the
+      earliest durable timestamp of the starting window's pending work (issue
+      #1397). Unlike {@link promptAt} it needs no prompt to exist and survives
+      the live-transcript adoption, so "working…" is timed from it before any
+      transcript turn exists. */
+  admittedAt?: number;
   /** The canonical text the transcript will echo for this launch (issue #615) —
       the delivered message, which for a role launch is the scaffold PLUS the raw
       draft. The optimistic bubble displays `prompt` (the raw draft) but retires on

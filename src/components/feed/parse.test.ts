@@ -2255,3 +2255,107 @@ test("ordinary user text is never mistaken for a voice turn", () => {
   expect(parseRealtimeDelegation("Talk about <realtime_delegation> in the docs")).toBeNull();
   expect(parseRealtimeDelegation("<realtime_conversation>\nRealtime conversation started.\n")).toBeNull();
 });
+
+describe("issue 1398: one Codex user message reaches the rollout as several records and renders once", () => {
+  /* Codex 0.151 journals every user message twice, three milliseconds apart:
+     the persisted input item (`response_item` / `message` role user) and the
+     thread lifecycle's `item_completed` envelope carrying the same text as a
+     `UserMessage` item. The operator saw a pipeline stage's INTERNAL prompt
+     twice in its starting window — one bubble per record, identical text,
+     identical timestamp to the second. Every later record of the same text at
+     the same instant is an ECHO of the first, exactly like the legacy
+     `user_message` event: it replaces the provisional row like for like. */
+  const PROMPT = "You are the Builder.\n\nPinned task: the starting window renders the stage prompt exactly once.";
+  const INTERNAL = "<!-- llv:structured-user origin=agent sender=builder -->\n" + PROMPT;
+  const persistedUserItem = (timestamp: string, text: string) =>
+    JSON.stringify({
+      type: "response_item",
+      timestamp,
+      payload: { type: "message", id: "item_user_1398", role: "user", content: [{ type: "input_text", text }] },
+    });
+  const userItemCompleted = (timestamp: string, text: string) =>
+    JSON.stringify({
+      type: "event_msg",
+      timestamp,
+      payload: {
+        type: "item_completed",
+        thread_id: "thread_1398",
+        turn_id: "turn_1398",
+        item: {
+          type: "UserMessage",
+          id: "item_user_1398",
+          client_id: "spawn_message_launch_1398",
+          content: [{ type: "text", text, text_elements: [] }],
+        },
+        started_at_ms: Date.parse(timestamp),
+        completed_at_ms: Date.parse(timestamp),
+      },
+    });
+  const tmsgRows = (feed: ReturnType<typeof buildFeed>) => itemsOfKind(feed, "tmsg");
+  const userRows = (feed: ReturnType<typeof buildFeed>) => itemsOfKind(feed, "user");
+
+  test("a stage's INTERNAL prompt is one relay card, one-shot and fed incrementally", () => {
+    const lines = [
+      persistedUserItem("2026-09-01T09:00:08.277Z", INTERNAL),
+      userItemCompleted("2026-09-01T09:00:08.453Z", INTERNAL),
+    ];
+    const oneShot = buildFeed(codexFile, lines, false, "");
+    expect(userRows(oneShot)).toHaveLength(0);
+    expect(tmsgRows(oneShot)).toHaveLength(1);
+    expect(tmsgRows(oneShot)[0]).toMatchObject({ kind: "tmsg", dir: "in", internal: true, peer: "builder", text: PROMPT });
+
+    /* The live tail sees the persisted item on one tick and its echo on the
+       next: the echo must fold into the row already on screen. */
+    const session = createFeedSession({ engine: "codex", fmt: "codex", showSvc: false, lineFilter: "" });
+    const provisional = session.feed(lines.slice(0, 1), 0, true);
+    expect(provisional.items.filter((entry) => entry.item.kind === "tmsg")).toHaveLength(1);
+    const echoed = session.feed(lines, 0, true);
+    expect(echoed.items.filter((entry) => entry.item.kind === "tmsg")).toHaveLength(1);
+    expect(echoed.items.filter((entry) => entry.item.kind === "user")).toHaveLength(0);
+  });
+
+  test("an operator's own message keeps one bubble", () => {
+    const feed = buildFeed(codexFile, [
+      persistedUserItem("2026-09-01T09:00:08.277Z", PROMPT),
+      userItemCompleted("2026-09-01T09:00:08.453Z", PROMPT),
+    ], false, "");
+    expect(userRows(feed)).toHaveLength(1);
+    expect(tmsgRows(feed)).toHaveLength(0);
+    expect(userRows(feed)[0]).toMatchObject({ kind: "user", text: PROMPT });
+  });
+
+  test("a window that opens on the echo alone still shows the message once", () => {
+    const feed = buildFeed(codexFile, [userItemCompleted("2026-09-01T09:00:08.453Z", INTERNAL)], false, "");
+    expect(tmsgRows(feed)).toHaveLength(1);
+    expect(userRows(feed)).toHaveLength(0);
+  });
+
+  test("the legacy user_message event after the lifecycle echo is absorbed as well", () => {
+    const feed = buildFeed(codexFile, [
+      persistedUserItem("2026-09-01T09:00:08.277Z", INTERNAL),
+      userItemCompleted("2026-09-01T09:00:08.453Z", INTERNAL),
+      codexUserEvent("2026-09-01T09:00:08.460Z", INTERNAL),
+    ], false, "");
+    expect(tmsgRows(feed)).toHaveLength(1);
+    expect(userRows(feed)).toHaveLength(0);
+  });
+
+  test("the lifecycle echo ahead of the persisted item is still one row", () => {
+    const feed = buildFeed(codexFile, [
+      userItemCompleted("2026-09-01T09:00:08.453Z", PROMPT),
+      persistedUserItem("2026-09-01T09:00:08.455Z", PROMPT),
+    ], false, "");
+    expect(userRows(feed)).toHaveLength(1);
+    expect(tmsgRows(feed)).toHaveLength(0);
+  });
+
+  test("two different messages stay two rows", () => {
+    const feed = buildFeed(codexFile, [
+      persistedUserItem("2026-09-01T09:00:08.277Z", PROMPT),
+      userItemCompleted("2026-09-01T09:00:08.453Z", PROMPT),
+      persistedUserItem("2026-09-01T09:01:00.000Z", "A second question."),
+      userItemCompleted("2026-09-01T09:01:00.002Z", "A second question."),
+    ], false, "");
+    expect(userRows(feed).map((item) => (item as { text: string }).text)).toEqual([PROMPT, "A second question."]);
+  });
+});

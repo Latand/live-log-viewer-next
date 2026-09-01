@@ -28,6 +28,10 @@ export class BoundedLru<Value> {
     }
   }
 
+  delete(key: string): void {
+    this.values.delete(key);
+  }
+
   clear(): void {
     this.values.clear();
   }

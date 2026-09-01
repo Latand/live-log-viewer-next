@@ -7,6 +7,7 @@ import { useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
 import { clockDuration, humanizeDuration, turnIsRunning } from "./turnDuration";
+import { workingSince, type WorkingSinceFile } from "./workingSince";
 
 /** Live elapsed readout for the current turn, ticking once a second. The value
     derives from `startedAt` against the wall clock on every tick, so a new
@@ -27,7 +28,7 @@ function ElapsedTimer({ startedAt, label, human = false }: { startedAt: number; 
 }
 
 interface Props {
-  file: Pick<FileEntry, "lastTurn" | "activity">
+  file: WorkingSinceFile
     & Partial<Pick<FileEntry, "mtime" | "pendingQuestion" | "waitingInput" | "rateLimit">>;
   workingLabel: string;
   workingIcon: LucideIcon;
@@ -49,7 +50,9 @@ function waitingStartedAt(file: Props["file"]): number | null {
  * axis. It shows an open turn or an operator wait:
  *
  *  - running («працює · 4 хв 32 с»): the agent is live and the turn is open;
- *    the working label carries a 1 Hz wall-clock timer from receipt to now.
+ *    the working label carries a 1 Hz wall-clock timer from receipt to now —
+ *    from the launch admission while the starting window has no transcript
+ *    turn yet, and never later than what it already counted from (#1397).
  *  - waiting: the agent is blocked on operator input and keeps that wait's
  *    existing clock display.
  *
@@ -62,9 +65,12 @@ function waitingStartedAt(file: Props["file"]): number | null {
  */
 export function TurnStatusBar({ file, workingLabel, workingIcon: Icon, compact = false }: Props) {
   const { t } = useLocale();
-  const turn = file.lastTurn ?? null;
   const waiting = Boolean(file.pendingQuestion || file.rateLimit || file.waitingInput);
   const running = turnIsRunning(file);
+  /* The instant the running work is measured from (#1397): the transcript
+     turn when it exists, the launch admission before it, and never later than
+     what this window already counted from. */
+  const since = workingSince(file);
   const pad = compact ? "px-3 py-1" : "px-6 py-1.5";
 
   if (waiting) {
@@ -105,10 +111,10 @@ export function TurnStatusBar({ file, workingLabel, workingIcon: Icon, compact =
         </span>
         <Icon className="h-3.5 w-3.5 shrink-0" aria-hidden />
         <span className="min-w-0 truncate">{workingLabel}</span>
-        {turn ? (
+        {since !== null ? (
           <>
             <span aria-hidden>·</span>
-            <ElapsedTimer startedAt={turn.startedAt} label={t("turn.timer")} human />
+            <ElapsedTimer startedAt={since} label={t("turn.timer")} human />
           </>
         ) : null}
       </div>

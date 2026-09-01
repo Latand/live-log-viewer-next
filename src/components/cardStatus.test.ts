@@ -1,8 +1,9 @@
-import { expect, test } from "bun:test";
+import { afterEach, expect, test } from "bun:test";
 
 import type { ConversationMigration, FileEntry } from "@/lib/types";
 
 import { cardStatus } from "./cardStatus";
+import { resetWorkingSinceForTests } from "./workingSince";
 
 /**
  * Issue #961: the shared status projection is pure and its mixed-state
@@ -13,6 +14,8 @@ import { cardStatus } from "./cardStatus";
 
 const NOW_MS = 1_700_000_000_000;
 const NOW_S = NOW_MS / 1000;
+
+afterEach(() => resetWorkingSinceForTests());
 
 function file(overrides: Partial<FileEntry> = {}): FileEntry {
   return {
@@ -108,4 +111,50 @@ test("running requires the open-turn condition; elapsed is null without a turn b
 test("queued follows the wakeup authority and clears once the fire time passes", () => {
   expect(cardStatus(file({ pendingWakeup: futureWakeup }), NOW_MS)).toEqual({ kind: "queued" });
   expect(cardStatus(file({ pendingWakeup: { fireAt: NOW_MS - 1_000, reason: "done" } }), NOW_MS)).toBeNull();
+});
+
+test("issue 1397: the WORKING badge times the starting window from the launch admission and never runs backwards", () => {
+  const admittedAt = NOW_MS - 45_000;
+  const recordAt = admittedAt + 8_000;
+  const conversationId = "conversation_1397";
+  const spawn: NonNullable<FileEntry["spawn"]> = {
+    launchId: "launch_1397",
+    clientAttemptId: null,
+    accountId: null,
+    conversationId,
+    generation: 1,
+    state: "reconciling",
+    initialMessage: "queued",
+    retrySafe: false,
+    error: null,
+    admittedAt,
+  };
+  /* Reconciling, first message queued, no transcript turn: the badge still
+     carries a duration, counted from the admission. */
+  const starting = file({ path: "spawn:launch_1397", conversationId, activity: "live", spawn });
+  expect(cardStatus(starting, NOW_MS)).toEqual({ kind: "running", elapsedSeconds: 45 });
+
+  /* The first record lands eight seconds after admission and opens the turn:
+     the badge keeps counting from the admission; 52 would be the record's own count. */
+  const adopted = file({
+    path: "/sessions/launch-1397.jsonl",
+    conversationId,
+    activity: "live",
+    lastTurn: { startedAt: recordAt, endedAt: null },
+    launch: { ...spawn, state: "recovered", initialMessage: "delivered", deliveredAt: recordAt },
+  });
+  expect(cardStatus(adopted, NOW_MS + 15_000)).toEqual({ kind: "running", elapsedSeconds: 60 });
+
+  /* Chips retired on the first assistant message, same open turn. */
+  const answered = file({ path: "/sessions/launch-1397.jsonl", conversationId, activity: "live", lastTurn: { startedAt: recordAt, endedAt: null } });
+  expect(cardStatus(answered, NOW_MS + 25_000)).toEqual({ kind: "running", elapsedSeconds: 70 });
+
+  /* The turn ends and a later one opens: new work, its own start. */
+  expect(cardStatus(file({ path: "/sessions/launch-1397.jsonl", conversationId, activity: "recent", lastTurn: { startedAt: recordAt, endedAt: NOW_MS + 100_000 } }), NOW_MS + 100_000)).toBeNull();
+  const nextTurn = file({ path: "/sessions/launch-1397.jsonl", conversationId, activity: "live", lastTurn: { startedAt: NOW_MS + 300_000, endedAt: null } });
+  expect(cardStatus(nextTurn, NOW_MS + 305_000)).toEqual({ kind: "running", elapsedSeconds: 5 });
+
+  /* A window that never saw the starting window reads the transcript anchor. */
+  resetWorkingSinceForTests();
+  expect(cardStatus(adopted, NOW_MS + 15_000)).toEqual({ kind: "running", elapsedSeconds: 52 });
 });
