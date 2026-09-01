@@ -13,7 +13,7 @@ test("headless Codex threads allow only the registered Viewer MCP server", () =>
     },
   })).toEqual({
     mcp_servers: {
-      viewer: { enabled: true, default_tools_approval_mode: "approve" },
+      viewer: { command: "agent-log-viewer-mcp", enabled: true, default_tools_approval_mode: "approve" },
       docs: { enabled: false },
     },
     features: { plugins: false, apps: false, multi_agent: false, realtime_conversation: true },
@@ -116,4 +116,47 @@ test("a Codex thread approves Viewer and retains optional server approval policy
       "telegram-readonly": { enabled: false, default_tools_approval_mode: "prompt" },
     },
   });
+});
+
+test("a replayed Viewer entry drops the unset fields config/read reports as null (#1410)", () => {
+  /* Codex answers config/read with every optional field present, using null
+     for the ones nobody configured. Replaying those nulls back made Codex
+     refuse the launch outright ("invalid type: string ``, expected f64"), so
+     no session could start. */
+  const thread = headlessCodexThreadConfig({
+    config: {
+      mcp_servers: {
+        viewer: {
+          command: "bun",
+          args: ["/opt/viewer/bin/mcp-server.mjs"],
+          environment_id: "local",
+          enabled: true,
+          tool_timeout_sec: null,
+          startup_timeout_sec: null,
+        },
+      },
+    },
+  }) as { mcp_servers: Record<string, Record<string, unknown>> };
+
+  expect(thread.mcp_servers.viewer).toEqual({
+    command: "bun",
+    args: ["/opt/viewer/bin/mcp-server.mjs"],
+    environment_id: "local",
+    enabled: true,
+    default_tools_approval_mode: "approve",
+  });
+  expect("tool_timeout_sec" in thread.mcp_servers.viewer).toBe(false);
+  expect("startup_timeout_sec" in thread.mcp_servers.viewer).toBe(false);
+});
+
+test("a replayed Viewer entry keeps a timeout the operator actually set (#1410)", () => {
+  const thread = headlessCodexThreadConfig({
+    config: {
+      mcp_servers: {
+        viewer: { command: "bun", args: ["/opt/viewer/bin/mcp-server.mjs"], tool_timeout_sec: 120 },
+      },
+    },
+  }) as { mcp_servers: Record<string, Record<string, unknown>> };
+
+  expect(thread.mcp_servers.viewer.tool_timeout_sec).toBe(120);
 });

@@ -222,11 +222,17 @@ describe("ClaudeStreamBrokerHost", () => {
       },
     }));
     const child = new FakeClaude(new RecordingDeliveryLedger());
-    const captured: { args?: string[] } = {};
+    const captured: { args?: string[]; options?: SpawnOptionsWithoutStdio } = {};
     const host = await ClaudeStreamBrokerHost.start({
       cwd: "/repo",
       claudeConfigDir: home,
       mcpServers: ["viewer", "agent-browser"],
+      env: {
+        NODE_ENV: "test",
+        LLV_STATE_DIR: "fixture-state",
+        LLV_VIEWER_DEPLOY_TARGET: "fixture-target",
+        LLV_VIEWER_PORT: "8898",
+      },
       eventStore: new MemoryEventStore(),
       readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
       readTranscript: () => [],
@@ -234,6 +240,11 @@ describe("ClaudeStreamBrokerHost", () => {
     });
 
     expect(captured.args).toContain("--strict-mcp-config");
+    expect(captured.options?.env).toMatchObject({
+      LLV_STATE_DIR: "fixture-state",
+      LLV_VIEWER_DEPLOY_TARGET: "fixture-target",
+      LLV_VIEWER_PORT: "8898",
+    });
     expect(captured.args).not.toContain("--safe-mode");
     const mcpConfigPath = captured.args![captured.args!.indexOf("--mcp-config") + 1]!;
     const mcpConfig = JSON.parse(fs.readFileSync(mcpConfigPath, "utf8")) as { mcpServers: Record<string, unknown> };
@@ -1520,8 +1531,15 @@ describe("ClaudeStreamBrokerHost", () => {
     }
   });
 
-  test("boot adoption resumes claimed Claude rows and persists broker columns", async () => {
+  test("boot re-host resumes Claude with a relaunched Viewer MCP connector (#1346)", async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-claude-adoption-"));
+    const accountHome = path.join(directory, "claude-home");
+    fs.mkdirSync(accountHome, { recursive: true });
+    fs.writeFileSync(path.join(accountHome, ".claude.json"), JSON.stringify({
+      mcpServers: {
+        viewer: { type: "stdio", command: "bun", args: ["bin/mcp-server.mjs"] },
+      },
+    }));
     const registryPath = path.join(directory, "agent-registry.json");
     const registry = new AgentRegistry(registryPath);
     const sessionId = "adopted-claude-session";
@@ -1549,11 +1567,20 @@ describe("ClaudeStreamBrokerHost", () => {
     });
     const ledger = new RecordingDeliveryLedger();
     const child = new FakeClaude(ledger);
-    const captured: { args?: string[] } = {};
+    const captured: { args?: string[]; options?: SpawnOptionsWithoutStdio } = {};
     const adopted = await adoptClaudeRegistryHosts(
       registry,
       () => ({
         cwd: "/repo",
+        claudeConfigDir: accountHome,
+        mcpStatePath: path.join(accountHome, ".claude.json"),
+        mcpServers: ["viewer"],
+        env: {
+          NODE_ENV: "test",
+          LLV_STATE_DIR: "fixture-state",
+          LLV_VIEWER_DEPLOY_TARGET: "fixture-target",
+          LLV_VIEWER_PORT: "8898",
+        },
         deliveryLedger: ledger,
         eventStore: new MemoryEventStore(),
         readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max", version: "2.1.197" }),
@@ -1564,6 +1591,17 @@ describe("ClaudeStreamBrokerHost", () => {
     );
     expect(adopted).toHaveLength(1);
     expect(captured.args).toContain("--resume");
+    const mcpConfigPath = captured.args![captured.args!.indexOf("--mcp-config") + 1]!;
+    expect(JSON.parse(fs.readFileSync(mcpConfigPath, "utf8"))).toEqual({
+      mcpServers: {
+        viewer: { type: "stdio", command: "bun", args: ["bin/mcp-server.mjs"] },
+      },
+    });
+    expect(captured.options?.env).toMatchObject({
+      LLV_STATE_DIR: "fixture-state",
+      LLV_VIEWER_DEPLOY_TARGET: "fixture-target",
+      LLV_VIEWER_PORT: "8898",
+    });
     expect(registry.snapshot().entries[`claude:${sessionId}`]).toMatchObject({
       status: "idle",
       claimEpoch: 3,
@@ -1584,11 +1622,20 @@ describe("ClaudeStreamBrokerHost", () => {
 
     const restartedRegistry = new AgentRegistry(registryPath);
     const replacement = new FakeClaude(ledger);
-    const restartCaptured: { args?: string[] } = {};
+    const restartCaptured: { args?: string[]; options?: SpawnOptionsWithoutStdio } = {};
     const restarted = await adoptClaudeRegistryHosts(
       restartedRegistry,
       () => ({
         cwd: "/repo",
+        claudeConfigDir: accountHome,
+        mcpStatePath: path.join(accountHome, ".claude.json"),
+        mcpServers: ["viewer"],
+        env: {
+          NODE_ENV: "test",
+          LLV_STATE_DIR: "fixture-state",
+          LLV_VIEWER_DEPLOY_TARGET: "fixture-target",
+          LLV_VIEWER_PORT: "8898",
+        },
         deliveryLedger: ledger,
         eventStore: new MemoryEventStore(),
         readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max", version: "2.1.197" }),
@@ -1599,6 +1646,12 @@ describe("ClaudeStreamBrokerHost", () => {
     );
     expect(restarted).toHaveLength(1);
     expect(restartCaptured.args).toContain("--resume");
+    const restartMcpConfigPath = restartCaptured.args![restartCaptured.args!.indexOf("--mcp-config") + 1]!;
+    expect(JSON.parse(fs.readFileSync(restartMcpConfigPath, "utf8"))).toEqual({
+      mcpServers: {
+        viewer: { type: "stdio", command: "bun", args: ["bin/mcp-server.mjs"] },
+      },
+    });
     expect(restartedRegistry.snapshot().entries[`claude:${sessionId}`]).toMatchObject({
       status: "idle",
       host: null,

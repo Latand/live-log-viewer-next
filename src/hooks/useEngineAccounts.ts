@@ -707,14 +707,15 @@ export function createEngineAccountsStore(
         if (!response.ok) {
           const body = await response.json().catch(() => null) as { code?: unknown; blockers?: unknown } | null;
           const blocked = body?.code === "account_removal_blocked";
-          const historyBlocked = blocked && Array.isArray(body?.blockers) && body.blockers.includes("current_conversations");
+          const historyBlocked = blocked && Array.isArray(body?.blockers)
+            && (body.blockers.includes("current_conversations") || body.blockers.includes("filesystem_history"));
           patchSnapshot({
             notice: {
               kind: "error",
               operation: "remove",
               messageKey: historyBlocked ? "accounts.removeHistoryBlocked" : blocked ? "accounts.removeBlocked" : "accounts.removeFailed",
               target: label,
-              action: blocked && !historyBlocked ? { type: "retry", kind: "forceRemove", accountId } : null,
+              action: null,
             },
           });
           await refresh();

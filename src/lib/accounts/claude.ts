@@ -5,6 +5,7 @@ import path from "node:path";
 import { stateDir, statePath } from "@/lib/configDir";
 import { withoutWakatimeCredential } from "@/lib/wakatime/credential";
 import { withAccountMutationLock } from "./accountMutation";
+import { AccountHistoryInventoryBlockedError, accountHistoryInventory, accountHomeExistsForRemoval, accountRemovalBlockers, cleanupAccountProviderSidecars, discardStagedAccountHome, releaseStagedAccountHome, removeHistoryFreeAccountHome, rollbackStagedAccountHome, scrubAccountHomeToRetainedHistory, stageAccountHomeCleanup, verifyStagedAccountHome, type AccountHistoryInventoryReport, type AccountOrphanCleanupReport, type StagedAccountHomeCleanup } from "./removal";
 
 const ACCOUNT_ID = /^[a-z0-9][a-z0-9-]{0,31}$/;
 const DEFAULT_ID = "default";
@@ -300,30 +301,28 @@ export function createManagedClaudeAccount(label: string): ClaudeAccount {
       for (const name of CAPABILITY_DIRS) { const source = path.join(shared, name); if (fs.existsSync(source)) fs.symlinkSync(source, path.join(home, name)); }
       fs.mkdirSync(path.join(home, "projects"), { mode: 0o700 });
       const stored: StoredAccount = { id, label: clean, kind: "managed", createdAt: Date.now() }; write({ ...registry, accounts: [...registry.accounts, stored] }); return account(stored);
-    } catch (error) { if (made) fs.rmSync(home, { recursive: true, force: true }); throw error; }
+    } catch (error) {
+      if (made) {
+        try {
+          if (!removeHistoryFreeAccountHome("claude", id, home)) console.warn("[claude accounts] failed-account home cleanup is incomplete");
+        } catch (cleanupError) {
+          console.warn("[claude accounts] preserving failed-account home after history cleanup refusal");
+          if (cleanupError instanceof AccountHistoryInventoryBlockedError) throw cleanupError;
+        }
+      }
+      throw error;
+    }
   });
 }
 
-/** True when the home still holds transcripts worth retaining past removal. */
-function hasRetainableTranscripts(home: string): boolean {
-  try { return fs.readdirSync(path.join(home, "projects")).length > 0; } catch { return false; }
+function historyFitsRetainedProjects(report: AccountHistoryInventoryReport): boolean {
+  return report.artifacts.filter((artifact) => artifact.history).every((artifact) => artifact.path.startsWith(`projects${path.sep}`));
 }
 
-/** Strips a managed home down to its `projects` tree, leaving no credential,
- *  runtime state, or capability link behind. Symlinked capability directories
- *  are unlinked, never followed. Reports what survived so a partial failure
- *  can be retried by orphan cleanup. */
-function stripHomeToTranscripts(home: string): { stripped: string[]; complete: boolean } {
-  let entries: fs.Dirent[];
-  try { entries = fs.readdirSync(home, { withFileTypes: true }); } catch { return { stripped: [], complete: false }; }
-  const stripped: string[] = [];
-  let complete = true;
-  for (const entry of entries) {
-    if (entry.name === "projects") continue;
-    try { fs.rmSync(path.join(home, entry.name), { recursive: true, force: true }); stripped.push(entry.name); }
-    catch { complete = false; }
-  }
-  return { stripped, complete };
+const CLAUDE_SIDECAR_SUFFIXES = [".lock"] as const;
+
+function cleanupClaudeSidecars(id: string): boolean {
+  return cleanupAccountProviderSidecars(claudeAccountsRoot(), id, CLAUDE_SIDECAR_SUFFIXES).unresolved.length > 0;
 }
 
 /**
@@ -344,27 +343,71 @@ export function removeManagedClaudeAccount(id: string): { cleanupPending: boolea
   return withRegistryLock(() => {
     cached = null; const registry = mutable(); const existing = registry.accounts.find((item) => item.id === id); if (!existing) throw new UnknownClaudeAccountError(id);
     const home = managedHome(id);
-    const exists = fs.existsSync(home);
+    const exists = accountHomeExistsForRemoval(home);
     if (exists && !managedClaudeHomeIsSafe(id, true)) throw new UnsafeClaudeHomeError();
-    const retain = exists && hasRetainableTranscripts(home);
+    const history = exists ? accountHistoryInventory("claude", id, home) : null;
+    if (history && !historyFitsRetainedProjects(history)) {
+      throw new AccountHistoryInventoryBlockedError({ ...history, error: { path: ".", message: "history falls outside the retained projects archive" } });
+    }
+    const retain = history?.artifacts.some((artifact) => artifact.history) ?? false;
+    const staged: StagedAccountHomeCleanup | null = exists
+      ? stageAccountHomeCleanup("claude", id, home, retain ? "projects" : null)
+      : null;
     const retired = registry.retired.filter((item) => item.id !== id);
-    write({
-      ...registry,
-      active: registry.active === id ? DEFAULT_ID : registry.active,
-      accounts: registry.accounts.filter((item) => item.id !== id),
-      retired: retain ? [...retired, { id, label: existing.label, retiredAt: Date.now() }] : retired,
-    });
-    if (!exists) return { cleanupPending: false };
-    if (retain) return { cleanupPending: !stripHomeToTranscripts(home).complete };
-    try { fs.rmSync(home, { recursive: true, force: true }); } catch { return { cleanupPending: true }; }
-    return { cleanupPending: false };
+    try {
+      write({
+        ...registry,
+        active: registry.active === id ? DEFAULT_ID : registry.active,
+        accounts: registry.accounts.filter((item) => item.id !== id),
+        retired: [...retired, { id, label: existing.label, retiredAt: Date.now() }],
+      });
+    } catch (error) {
+      if (staged) rollbackStagedAccountHome(staged);
+      throw error;
+    }
+    let cleanupPending = false;
+    if (staged) {
+      try { verifyStagedAccountHome("claude", id, staged); }
+      catch (error) {
+        try { write(registry); }
+        finally { rollbackStagedAccountHome(staged); }
+        throw error;
+      }
+      let discarded = false;
+      try { discarded = discardStagedAccountHome("claude", id, staged); }
+      catch (error) {
+        if (error instanceof AccountHistoryInventoryBlockedError) {
+          try { write(registry); }
+          finally { rollbackStagedAccountHome(staged); }
+          throw error;
+        }
+        /* The staged tree remains recoverable. */
+      }
+      if (discarded) {
+        releaseStagedAccountHome(staged);
+        if (!retain) {
+          try { fs.rmdirSync(home); }
+          catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") cleanupPending = true; }
+        }
+      } else {
+        cleanupPending = true;
+        try {
+          rollbackStagedAccountHome(staged);
+        } catch { console.warn("[claude accounts] staged home cleanup requires manual recovery"); }
+      }
+    }
+    if (!retain) {
+      try { if (accountHomeExistsForRemoval(home)) cleanupPending = true; }
+      catch { cleanupPending = true; }
+    }
+    return { cleanupPending: cleanupClaudeSidecars(id) || cleanupPending };
   });
 }
 
 /** Removes failed-login homes that have no registry owner. Only safe direct
  *  children qualify. Retired archives are never deleted — their transcripts are
  *  the point — but a strip left incomplete by an earlier removal is retried. */
-export function cleanupOrphanedClaudeHomes(): { removed: string[]; unresolved: string[] } {
+export function cleanupOrphanedClaudeHomes(): AccountOrphanCleanupReport {
   return withRegistryLock(() => {
     cached = null;
     const registry = mutable();
@@ -375,19 +418,81 @@ export function cleanupOrphanedClaudeHomes(): { removed: string[]; unresolved: s
     catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return { removed: [], unresolved: [] }; throw error; }
     const removed: string[] = [];
     const unresolved: string[] = [];
+    const historyReports: Record<string, AccountHistoryInventoryReport> = {};
+    const cleanupSidecar = (accountId: string): void => {
+      const sidecars = cleanupAccountProviderSidecars(claudeAccountsRoot(), accountId, CLAUDE_SIDECAR_SUFFIXES);
+      for (const name of sidecars.removed) if (!removed.includes(name) && !unresolved.includes(name)) removed.push(name);
+      for (const name of sidecars.unresolved) {
+        const removedIndex = removed.indexOf(name);
+        if (removedIndex >= 0) removed.splice(removedIndex, 1);
+        if (!unresolved.includes(name)) unresolved.push(name);
+      }
+    };
     for (const entry of entries) {
-      if (registered.has(entry.name)) continue;
-      if (!entry.isDirectory() || !managedClaudeHomeIsSafe(entry.name, true)) { unresolved.push(entry.name); continue; }
-      if (retired.has(entry.name)) {
-        const strip = stripHomeToTranscripts(managedHome(entry.name));
-        if (!strip.complete) unresolved.push(entry.name);
-        else if (strip.stripped.length > 0) removed.push(entry.name);
+      if (entry.name.endsWith(".lock")) {
+        const accountId = entry.name.slice(0, -".lock".length);
+        if (!ACCOUNT_ID.test(accountId) || accountId === DEFAULT_ID) { unresolved.push(entry.name); continue; }
+        if (registered.has(accountId)) continue;
+        if (accountRemovalBlockers("claude", accountId).length > 0) { unresolved.push(entry.name); continue; }
+        cleanupSidecar(accountId);
         continue;
       }
-      try { fs.rmSync(managedHome(entry.name), { recursive: true, force: true }); removed.push(entry.name); }
-      catch { unresolved.push(entry.name); }
+      if (registered.has(entry.name)) continue;
+      if (accountRemovalBlockers("claude", entry.name).length > 0) { unresolved.push(entry.name); continue; }
+      if (!entry.isDirectory() || !managedClaudeHomeIsSafe(entry.name, true)) { unresolved.push(entry.name); continue; }
+      let history: AccountHistoryInventoryReport;
+      try { history = accountHistoryInventory("claude", entry.name, managedHome(entry.name)); }
+      catch (error) {
+        if (error instanceof AccountHistoryInventoryBlockedError) historyReports[entry.name] = error.report;
+        unresolved.push(entry.name); continue;
+      }
+      if (retired.has(entry.name)) {
+        if (!history.artifacts.some((artifact) => artifact.history)) {
+          try {
+            if (removeHistoryFreeAccountHome("claude", entry.name, managedHome(entry.name))) removed.push(entry.name);
+            else unresolved.push(entry.name);
+          } catch (error) {
+            if (error instanceof AccountHistoryInventoryBlockedError) historyReports[entry.name] = error.report;
+            unresolved.push(entry.name);
+          }
+          continue;
+        }
+        if (!historyFitsRetainedProjects(history)) { historyReports[entry.name] = history; unresolved.push(entry.name); continue; }
+        try {
+          const scrub = scrubAccountHomeToRetainedHistory("claude", entry.name, managedHome(entry.name), "projects");
+          if (!scrub.complete) unresolved.push(entry.name);
+          else if (scrub.changed) removed.push(entry.name);
+        } catch (error) {
+          if (error instanceof AccountHistoryInventoryBlockedError) historyReports[entry.name] = error.report;
+          unresolved.push(entry.name);
+        }
+        continue;
+      }
+      if (history.artifacts.some((artifact) => artifact.history)) { historyReports[entry.name] = history; unresolved.push(entry.name); continue; }
+      try {
+        if (removeHistoryFreeAccountHome("claude", entry.name, managedHome(entry.name))) removed.push(entry.name);
+        else unresolved.push(entry.name);
+      }
+      catch (error) {
+        if (error instanceof AccountHistoryInventoryBlockedError) historyReports[entry.name] = error.report;
+        unresolved.push(entry.name);
+      }
     }
-    return { removed: removed.sort(), unresolved: unresolved.sort() };
+    for (const entry of fs.readdirSync(claudeAccountsRoot(), { withFileTypes: true })) {
+      if (!entry.name.endsWith(".lock")) continue;
+      const accountId = entry.name.slice(0, -".lock".length);
+      if (!ACCOUNT_ID.test(accountId) || accountId === DEFAULT_ID) {
+        if (!unresolved.includes(entry.name)) unresolved.push(entry.name);
+        continue;
+      }
+      if (!registered.has(accountId) && accountRemovalBlockers("claude", accountId).length === 0) cleanupSidecar(accountId);
+      else if (!registered.has(accountId) && !unresolved.includes(entry.name)) unresolved.push(entry.name);
+    }
+    return {
+      removed: removed.sort(),
+      unresolved: unresolved.sort(),
+      ...(Object.keys(historyReports).length > 0 ? { history: historyReports } : {}),
+    };
   });
 }
 

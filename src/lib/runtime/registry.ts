@@ -516,12 +516,15 @@ export async function adoptCodexRegistryHosts(
           return;
         }
         try {
-          const adoptHost = dependencies.adoptHost
-            ?? ((sessionId: string, options: CodexAppServerHostOptions) => CodexAppServerHost.adopt(sessionId, options));
-          const host = await adoptHost(entry.key.sessionId, {
+          const options = {
             ...optionsFor(claimed),
             initialEventCursor: claimed.structuredHost.eventCursor,
-          });
+          };
+          /* The production static method calls `this.open`; keep its class
+             receiver instead of extracting it into an unbound function. */
+          const host = dependencies.adoptHost
+            ? await dependencies.adoptHost(entry.key.sessionId, options)
+            : await CodexAppServerHost.adopt(entry.key.sessionId, options);
           await bindCodexHostPersistence(registry, entry.key, host, claimed.claimOwner!, claimed.claimEpoch);
           adopted.push({ key: entry.key, host });
         } catch (error) {
@@ -604,12 +607,14 @@ export async function adoptClaudeRegistryHosts(
           return;
         }
         try {
-          const adoptHost = dependencies.adoptHost
-            ?? ((sessionId: string, options: ClaudeStreamBrokerHostOptions) => ClaudeStreamBrokerHost.adopt(sessionId, options));
-          const host = await adoptHost(entry.key.sessionId, {
+          const options = {
             ...optionsFor(claimed),
             initialEventCursor: claimed.structuredHost.eventCursor,
-          });
+          };
+          /* Claude adoption has the same receiver-bound static open seam. */
+          const host = dependencies.adoptHost
+            ? await dependencies.adoptHost(entry.key.sessionId, options)
+            : await ClaudeStreamBrokerHost.adopt(entry.key.sessionId, options);
           await bindClaudeHostPersistence(registry, entry.key, host, claimed.claimOwner!, claimed.claimEpoch);
           adopted.push({ key: entry.key, host });
         } catch (error) {

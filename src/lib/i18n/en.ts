@@ -251,7 +251,7 @@ export const en = {
   "accounts.removeConfirmCta": "Confirm",
   "accounts.removeConfirmCancel": "Cancel",
   "accounts.removeBlocked": "{label} still has an active session or sign-in.",
-  "accounts.removeHistoryBlocked": "{label} still runs live conversations. Wait for them to finish, then remove it.",
+  "accounts.removeHistoryBlocked": "{label} has protected conversation history or active conversations. Resolve the reported history and wait for active conversations before removal.",
   "accounts.removeFailed": "Could not remove this account.",
   "accounts.cleanupPending": "{label} was removed. Its local data still needs cleanup.",
   "accounts.cleanupManual": "Some local account data failed safety checks. Inspect and remove it manually.",

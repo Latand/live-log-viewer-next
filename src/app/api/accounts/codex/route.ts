@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { CorruptCodexAccountsError, InvalidAccountLabelError, UnknownAccountError, UnsafeCodexHomeError, cleanupOrphanedCodexHomes, codexAccountsMutationLocked, createManagedCodexAccount, listCodexAccounts, removeManagedCodexAccount, setCodexAccountLoginPane } from "@/lib/accounts/codex";
 import { managedCodexRuntime } from "@/lib/accounts/codexRuntime";
-import { accountRemovalBlockers } from "@/lib/accounts/removal";
+import { AccountHistoryInventoryBlockedError, accountRemovalBlockers } from "@/lib/accounts/removal";
 import { requestAccountMigrationTick } from "@/lib/accounts/migration/controllerSignal";
 import { withAccountMutationLockAsync } from "@/lib/accounts/accountMutation";
 import { agentRegistry } from "@/lib/agent/registry";
@@ -44,6 +44,9 @@ export async function POST(req: NextRequest) {
       });
     });
   } catch (error) {
+    if (error instanceof AccountHistoryInventoryBlockedError) {
+      return NextResponse.json({ error: "Codex account history inventory blocked cleanup", code: "account_removal_blocked", blockers: ["filesystem_history"], history: error.report }, { status: 409 });
+    }
     const status = error instanceof InvalidAccountLabelError || error instanceof CorruptCodexAccountsError || error instanceof UnknownAccountError ? 400 : 500;
     return NextResponse.json({ error: error instanceof Error ? error.message : "could not create account" }, { status });
   }
@@ -75,7 +78,7 @@ export async function DELETE(req: NextRequest) {
         ...accountRemovalBlockers("codex", account.id),
         ...(login.attemptState === "pending" || account.loginPane !== null ? ["login_pending"] : []),
       ];
-      if (blockers.includes("current_conversations") || blockers.length && body.force !== true) {
+      if (blockers.length > 0) {
         return NextResponse.json({ error: "Codex account has active sessions, conversations, or sign-in", code: "account_removal_blocked", blockers }, { status: 409 });
       }
       const registry = agentRegistry();
@@ -94,6 +97,14 @@ export async function DELETE(req: NextRequest) {
           throw error;
         }
       } catch (error) {
+        if (error instanceof AccountHistoryInventoryBlockedError) {
+          return NextResponse.json({
+            error: "Codex account history inventory blocked removal",
+            code: "account_removal_blocked",
+            blockers: ["filesystem_history"],
+            history: error.report,
+          }, { status: 409 });
+        }
         if (error instanceof UnknownAccountError) return NextResponse.json({ error: "Codex account is unavailable", code: "unknown_account" }, { status: 404 });
         if (error instanceof CorruptCodexAccountsError) return NextResponse.json({ error: "Codex accounts require registry repair", code: "accounts_locked" }, { status: 409 });
         if (error instanceof UnsafeCodexHomeError) return NextResponse.json({ error: "Codex account home failed safety checks", code: "unsafe_home" }, { status: 409 });

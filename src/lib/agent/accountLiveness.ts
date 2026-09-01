@@ -108,7 +108,9 @@ export function livenessProbe(options: AccountLivenessOptions = {}): LivenessPro
 export function identityAlive(identity: ProcessIdentity | null | undefined, probe: LivenessProbe): boolean {
   if (!identity || !Number.isInteger(identity.pid) || identity.pid <= 0) return false;
   if (!probe.pidAlive(identity.pid)) return false;
-  return identity.startIdentity === null || probe.processIdentity(identity.pid) === identity.startIdentity;
+  if (identity.startIdentity === null) return true;
+  const current = probe.processIdentity(identity.pid);
+  return current === null || current === identity.startIdentity;
 }
 
 function withinGrace(timestamp: string | null | undefined, probe: LivenessProbe): boolean {
@@ -232,7 +234,8 @@ export function accountHasLiveSessions(
     if (entryIsLive(entry, probe)) return true;
   }
   for (const receipt of Object.values(file.receipts)) {
-    if (receipt.engine !== engine || !owned(receipt.accountId)) continue;
+    if (receipt.engine !== engine || !owned(receipt.accountId) && receipt.accountPin !== true) continue;
+    if (receipt.accountPin === true && OPEN_RECEIPT_STATES.has(receipt.state)) return true;
     if (receiptIsLive(file, receipt, probe)) return true;
   }
   return false;

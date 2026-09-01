@@ -5,6 +5,7 @@ import path from "node:path";
 import { stateDir, statePath } from "@/lib/configDir";
 import { isShellCommand } from "@/lib/status";
 import { withAccountMutationLock } from "./accountMutation";
+import { AccountHistoryInventoryBlockedError, accountHistoryInventory, accountHomeExistsForRemoval, accountRemovalBlockers, discardStagedAccountHome, releaseStagedAccountHome, removeHistoryFreeAccountHome, rollbackStagedAccountHome, scrubAccountHomeToRetainedHistory, stageAccountHomeCleanup, verifyStagedAccountHome, type AccountHistoryInventoryReport, type AccountOrphanCleanupReport, type StagedAccountHomeCleanup } from "./removal";
 
 const ACCOUNT_ID = /^[a-z0-9][a-z0-9-]{0,31}$/;
 const DEFAULT_ID = "default";
@@ -423,31 +424,21 @@ export function createManagedCodexAccount(label: string): CodexAccount {
       writeRegistry({ ...registry, accounts: [...registry.accounts, stored] });
       return asAccount(stored);
     } catch (error) {
-      if (createdHome) fs.rmSync(home, { recursive: true, force: true });
+      if (createdHome) {
+        try {
+          if (!removeHistoryFreeAccountHome("codex", id, home)) console.warn("[codex accounts] failed-account home cleanup is incomplete");
+        } catch (cleanupError) {
+          console.warn("[codex accounts] preserving failed-account home after history cleanup refusal");
+          if (cleanupError instanceof AccountHistoryInventoryBlockedError) throw cleanupError;
+        }
+      }
       throw error;
     }
   });
 }
 
-/** True when the home still holds sessions worth retaining past removal. */
-function hasRetainableSessions(home: string): boolean {
-  try { return fs.readdirSync(path.join(home, "sessions")).length > 0; } catch { return false; }
-}
-
-/** Strips a managed home down to its `sessions` tree, leaving no credential,
- *  runtime state, or overlay link behind. Symlinked overlays are unlinked,
- *  never followed. Reports what survived so a partial failure can be retried. */
-function stripHomeToSessions(home: string): { stripped: string[]; complete: boolean } {
-  let entries: fs.Dirent[];
-  try { entries = fs.readdirSync(home, { withFileTypes: true }); } catch { return { stripped: [], complete: false }; }
-  const stripped: string[] = [];
-  let complete = true;
-  for (const entry of entries) {
-    if (entry.name === "sessions") continue;
-    try { fs.rmSync(path.join(home, entry.name), { recursive: true, force: true }); stripped.push(entry.name); }
-    catch { complete = false; }
-  }
-  return { stripped, complete };
+function historyFitsRetainedSessions(report: AccountHistoryInventoryReport): boolean {
+  return report.artifacts.filter((artifact) => artifact.history).every((artifact) => artifact.path.startsWith(`sessions${path.sep}`));
 }
 
 /**
@@ -464,27 +455,71 @@ export function removeManagedCodexAccount(id: string): { cleanupPending: boolean
     const existing = registry.accounts.find((account) => account.id === id);
     if (!existing) throw new UnknownAccountError(id);
     const home = managedHome(id);
-    const exists = fs.existsSync(home);
+    const exists = accountHomeExistsForRemoval(home);
     if (exists && !managedHomeIsSafe(id, true)) throw new UnsafeCodexHomeError();
-    const retain = exists && hasRetainableSessions(home);
+    const history = exists ? accountHistoryInventory("codex", id, home) : null;
+    if (history && !historyFitsRetainedSessions(history)) {
+      throw new AccountHistoryInventoryBlockedError({ ...history, error: { path: ".", message: "history falls outside the retained sessions archive" } });
+    }
+    const retain = history?.artifacts.some((artifact) => artifact.history) ?? false;
+    const staged: StagedAccountHomeCleanup | null = exists
+      ? stageAccountHomeCleanup("codex", id, home, retain ? "sessions" : null)
+      : null;
     const retired = registry.retired.filter((account) => account.id !== id);
-    writeRegistry({
-      ...registry,
-      active: registry.active === id ? DEFAULT_ID : registry.active,
-      accounts: registry.accounts.filter((account) => account.id !== id),
-      retired: retain ? [...retired, { id, label: existing.label, retiredAt: Date.now() }] : retired,
-    });
-    if (!exists) return { cleanupPending: false };
-    if (retain) return { cleanupPending: !stripHomeToSessions(home).complete };
-    try { fs.rmSync(home, { recursive: true, force: true }); } catch { return { cleanupPending: true }; }
-    return { cleanupPending: false };
+    try {
+      writeRegistry({
+        ...registry,
+        active: registry.active === id ? DEFAULT_ID : registry.active,
+        accounts: registry.accounts.filter((account) => account.id !== id),
+        retired: [...retired, { id, label: existing.label, retiredAt: Date.now() }],
+      });
+    } catch (error) {
+      if (staged) rollbackStagedAccountHome(staged);
+      throw error;
+    }
+    let cleanupPending = false;
+    if (staged) {
+      try { verifyStagedAccountHome("codex", id, staged); }
+      catch (error) {
+        try { writeRegistry(registry); }
+        finally { rollbackStagedAccountHome(staged); }
+        throw error;
+      }
+      let discarded = false;
+      try { discarded = discardStagedAccountHome("codex", id, staged); }
+      catch (error) {
+        if (error instanceof AccountHistoryInventoryBlockedError) {
+          try { writeRegistry(registry); }
+          finally { rollbackStagedAccountHome(staged); }
+          throw error;
+        }
+        /* The staged tree remains recoverable. */
+      }
+      if (discarded) {
+        releaseStagedAccountHome(staged);
+        if (!retain) {
+          try { fs.rmdirSync(home); }
+          catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") cleanupPending = true; }
+        }
+      } else {
+        cleanupPending = true;
+        try {
+          rollbackStagedAccountHome(staged);
+        } catch { console.warn("[codex accounts] staged home cleanup requires manual recovery"); }
+      }
+    }
+    if (!retain) {
+      try { if (accountHomeExistsForRemoval(home)) cleanupPending = true; }
+      catch { cleanupPending = true; }
+    }
+    return { cleanupPending };
   });
 }
 
 /** Removes failed-login homes that have no registry owner. Only safe direct
  *  children qualify. Retired archives are never deleted — their sessions are
  *  the point — but a strip left incomplete by an earlier removal is retried. */
-export function cleanupOrphanedCodexHomes(): { removed: string[]; unresolved: string[] } {
+export function cleanupOrphanedCodexHomes(): AccountOrphanCleanupReport {
   return withRegistryLock(() => {
     cached = null;
     const registry = mutableRegistry();
@@ -495,19 +530,54 @@ export function cleanupOrphanedCodexHomes(): { removed: string[]; unresolved: st
     catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return { removed: [], unresolved: [] }; throw error; }
     const removed: string[] = [];
     const unresolved: string[] = [];
+    const historyReports: Record<string, AccountHistoryInventoryReport> = {};
     for (const entry of entries) {
       if (registered.has(entry.name)) continue;
+      if (accountRemovalBlockers("codex", entry.name).length > 0) { unresolved.push(entry.name); continue; }
       if (!entry.isDirectory() || !managedHomeIsSafe(entry.name, true)) { unresolved.push(entry.name); continue; }
+      let history: AccountHistoryInventoryReport;
+      try { history = accountHistoryInventory("codex", entry.name, managedHome(entry.name)); }
+      catch (error) {
+        if (error instanceof AccountHistoryInventoryBlockedError) historyReports[entry.name] = error.report;
+        unresolved.push(entry.name); continue;
+      }
       if (retired.has(entry.name)) {
-        const strip = stripHomeToSessions(managedHome(entry.name));
-        if (!strip.complete) unresolved.push(entry.name);
-        else if (strip.stripped.length > 0) removed.push(entry.name);
+        if (!history.artifacts.some((artifact) => artifact.history)) {
+          try {
+            if (removeHistoryFreeAccountHome("codex", entry.name, managedHome(entry.name))) removed.push(entry.name);
+            else unresolved.push(entry.name);
+          } catch (error) {
+            if (error instanceof AccountHistoryInventoryBlockedError) historyReports[entry.name] = error.report;
+            unresolved.push(entry.name);
+          }
+          continue;
+        }
+        if (!historyFitsRetainedSessions(history)) { historyReports[entry.name] = history; unresolved.push(entry.name); continue; }
+        try {
+          const scrub = scrubAccountHomeToRetainedHistory("codex", entry.name, managedHome(entry.name), "sessions");
+          if (!scrub.complete) unresolved.push(entry.name);
+          else if (scrub.changed) removed.push(entry.name);
+        } catch (error) {
+          if (error instanceof AccountHistoryInventoryBlockedError) historyReports[entry.name] = error.report;
+          unresolved.push(entry.name);
+        }
         continue;
       }
-      try { fs.rmSync(managedHome(entry.name), { recursive: true, force: true }); removed.push(entry.name); }
-      catch { unresolved.push(entry.name); }
+      if (history.artifacts.some((artifact) => artifact.history)) { historyReports[entry.name] = history; unresolved.push(entry.name); continue; }
+      try {
+        if (removeHistoryFreeAccountHome("codex", entry.name, managedHome(entry.name))) removed.push(entry.name);
+        else unresolved.push(entry.name);
+      }
+      catch (error) {
+        if (error instanceof AccountHistoryInventoryBlockedError) historyReports[entry.name] = error.report;
+        unresolved.push(entry.name);
+      }
     }
-    return { removed: removed.sort(), unresolved: unresolved.sort() };
+    return {
+      removed: removed.sort(),
+      unresolved: unresolved.sort(),
+      ...(Object.keys(historyReports).length > 0 ? { history: historyReports } : {}),
+    };
   });
 }
 

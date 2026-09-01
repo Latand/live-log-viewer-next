@@ -3,12 +3,24 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { expect, test } from "bun:test";
+import { afterAll, expect, test } from "bun:test";
 
 import type { CodexAccount } from "./codex";
-import { CodexAppServerClient } from "./codexAppServer";
-import { ManagedCodexRuntime } from "./codexRuntime";
-import { withAccountMutationLockAsync } from "./accountMutation";
+import type { CodexAppServerClient as CodexAppServerClientType } from "./codexAppServer";
+
+const RUNTIME_SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), "llv-codex-runtime-suite-"));
+const PREVIOUS_STATE = process.env.LLV_STATE_DIR;
+process.env.LLV_STATE_DIR = path.join(RUNTIME_SANDBOX, "state");
+
+const { CodexAppServerClient } = await import("./codexAppServer");
+const { ManagedCodexRuntime } = await import("./codexRuntime");
+const { withAccountMutationLockAsync } = await import("./accountMutation");
+
+afterAll(() => {
+  if (PREVIOUS_STATE === undefined) delete process.env.LLV_STATE_DIR;
+  else process.env.LLV_STATE_DIR = PREVIOUS_STATE;
+  fs.rmSync(RUNTIME_SANDBOX, { recursive: true, force: true });
+});
 
 class FakeChild extends EventEmitter {
   readonly stdin = { write: (line: string) => { this.onWrite(JSON.parse(line) as Record<string, unknown>); return true; }, end: () => undefined };
@@ -39,6 +51,67 @@ class FakeChild extends EventEmitter {
 function account(id: string, home: string): CodexAccount {
   return { id, label: id, kind: "managed", home, sessionsDir: home + "/sessions", authPresent: false, loginPane: null, createdAt: 0 };
 }
+
+test("Codex provider probes wait behind account deletion mutations", async () => {
+  const children: FakeChild[] = [];
+  const runtime = new ManagedCodexRuntime({
+    startClient: async (home) => {
+      const child = new FakeChild();
+      child.authenticated = true;
+      children.push(child);
+      return CodexAppServerClient.start({ home, spawn: () => child as never });
+    },
+  });
+  let release!: () => void;
+  let entered!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const acquired = new Promise<void>((resolve) => { entered = resolve; });
+  const holder = withAccountMutationLockAsync(async () => { entered(); await held; });
+  await acquired;
+
+  const probe = runtime.readRateLimits(account("fenced", "/accounts/fenced"));
+  await Bun.sleep(10);
+  expect(children).toHaveLength(0);
+  release();
+  await holder;
+  await expect(probe).resolves.toMatchObject({ primary: { usedPercent: 7 } });
+  expect(children).toHaveLength(1);
+});
+
+test("provider probes re-resolve a waiting account after deletion wins the fence", async () => {
+  const stateFile = path.join(process.env.LLV_STATE_DIR!, "codex-accounts.json");
+  const home = path.join(path.dirname(process.env.LLV_STATE_DIR!), "accounts", "codex", "stale");
+  fs.mkdirSync(home, { recursive: true, mode: 0o700 });
+  fs.chmodSync(home, 0o700);
+  const activeRegistry = { version: 1, active: "default", accounts: [{ id: "stale", label: "Stale", kind: "managed", createdAt: 1, loginPane: null }], retired: [] };
+  const retiredRegistry = { version: 1, active: "default", accounts: [], retired: [{ id: "stale", label: "Stale", retiredAt: 2 }] };
+  fs.mkdirSync(path.dirname(stateFile), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(stateFile, JSON.stringify(activeRegistry), { mode: 0o600 });
+  let starts = 0;
+  const runtime = new ManagedCodexRuntime({ startClient: async () => { starts += 1; throw new Error("must stay fenced"); } });
+  const stale = account("stale", home);
+  let release!: () => void;
+  let entered!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const acquired = new Promise<void>((resolve) => { entered = resolve; });
+  const holder = withAccountMutationLockAsync(async () => {
+    entered();
+    await held;
+    fs.writeFileSync(stateFile, JSON.stringify(retiredRegistry), { mode: 0o600 });
+  });
+  await acquired;
+
+  const quota = runtime.probeQuota(stale).then(() => null, (error: unknown) => error);
+  await Bun.sleep(10);
+  expect(starts).toBe(0);
+  release();
+  await holder;
+  expect(await quota).toBeInstanceOf(Error);
+  await expect(runtime.loginSnapshot(stale)).rejects.toThrow("unknown Codex account: stale");
+  expect(starts).toBe(0);
+  fs.rmSync(stateFile, { force: true });
+  fs.rmSync(path.join(path.dirname(process.env.LLV_STATE_DIR!), "accounts"), { recursive: true, force: true });
+});
 
 test("managed login keeps one per-home child until completion and returns only challenge metadata", async () => {
   const children: FakeChild[] = [];
@@ -162,8 +235,8 @@ test("cancellation and independent homes never share a managed app-server child"
 });
 
 test("cancellation waits for an in-flight client startup to be reaped", async () => {
-  let release!: (client: CodexAppServerClient) => void;
-  const starting = new Promise<CodexAppServerClient>((resolve) => { release = resolve; });
+  let release!: (client: CodexAppServerClientType) => void;
+  const starting = new Promise<CodexAppServerClientType>((resolve) => { release = resolve; });
   const child = new FakeChild();
   const runtime = new ManagedCodexRuntime({ startClient: () => starting });
   const work = account("starting", "/accounts/starting");
@@ -232,13 +305,13 @@ test("restart reconstruction marks a pending child stale and retry owns a fresh 
 });
 
 test("concurrent starts reserve one canonical-home supervisor before awaiting startup", async () => {
-  let resolveStart: ((client: CodexAppServerClient) => void) | null = null;
+  let resolveStart: ((client: CodexAppServerClientType) => void) | null = null;
   let starts = 0;
   const child = new FakeChild();
   const runtime = new ManagedCodexRuntime({
     startClient: async () => {
       starts += 1;
-      return new Promise<CodexAppServerClient>((resolve) => { resolveStart = resolve; });
+      return new Promise<CodexAppServerClientType>((resolve) => { resolveStart = resolve; });
     },
   });
   const work = account("work", "/accounts/work");
