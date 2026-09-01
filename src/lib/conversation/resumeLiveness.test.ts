@@ -143,7 +143,8 @@ test("a detector timeout after starting a legacy host settles resume, immediate 
     },
     remember: async () => { remembered += 1; },
     deliver: async (paneId, text) => {
-      if (text) delivered.push(`${paneId}:${text}`);
+      if (!text) throw new Error("no buffer viewer-1788299999999-481516");
+      delivered.push(`${paneId}:${text}`);
     },
     reconcile: (hosts) => reconcileObservedTranscriptHosts(hosts, { registry, evidenceForHost: evidence }),
   });
@@ -162,7 +163,9 @@ test("a detector timeout after starting a legacy host settles resume, immediate 
 
   expect(resumed).toMatchObject({ ok: true, outcome: "resumed", spawned: true });
   expect(remembered).toBe(0);
-  expect(conversationDeliverabilityFromRecord(registry.readOnlySnapshot(), {
+  const settled = registry.readOnlySnapshot();
+  expect(settled.receipts[launchId!]).toMatchObject({ state: "completed", error: null });
+  expect(conversationDeliverabilityFromRecord(settled, {
     conversationId: conversation.id,
   })).toMatchObject({
     deliverable: true,

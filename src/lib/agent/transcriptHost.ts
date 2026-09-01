@@ -550,7 +550,12 @@ export function createTranscriptHostResolver(
           }
         }
         try {
-          await dependencies.deliver(decision.host.paneId, input.payload);
+          /* Resume-only calls carry no message. Once observation has reconciled
+             the host, an empty tmux paste can add only a transport failure (and
+             was the source of the raw `no buffer` response over a live host). */
+          if (input.payload !== "") {
+            await dependencies.deliver(decision.host.paneId, input.payload);
+          }
           try {
             await dependencies.confirmAlive?.(decision.host);
           } catch (error) {
