@@ -289,13 +289,13 @@ export function launchPromptLanded(engine: "claude" | "codex", screen: string, p
 }
 
 /**
- * Positive idle-composer detection: the composer prompt is drawn, the ready
- * hints are on the status bar, and no busy/interrupt hint remains. A quiet
- * screen that merely lacks a menu (a long-running command, streamed output)
- * matches none of this and must never read as "parked at the prompt".
+ * Positive idle-composer detection: the bottom-most composer prompt is drawn
+ * and no busy/interrupt hint remains below it. Footer hints carry presentation
+ * only; Codex may replace them with informational notices.
+ * A quiet screen that merely lacks a menu (a long-running command, streamed
+ * output) still has no prompt and must never read as "parked at the prompt".
  */
 export function screenAtIdleComposer(screen: string): boolean {
-  if (screenWaitsForInput(screen)) return false;
   const lines = screen.split("\n");
   let composerIdx = -1;
   for (let index = lines.length - 1; index >= 0; index -= 1) {
@@ -305,8 +305,10 @@ export function screenAtIdleComposer(screen: string): boolean {
     }
   }
   if (composerIdx === -1) return false;
+  const interactionRegion = lines.slice(composerIdx).join("\n");
+  if (screenWaitsForInput(interactionRegion)) return false;
   const statusRegion = lines.slice(composerIdx + 1).join("\n");
-  return READY_MARKERS.test(statusRegion) && !BUSY_MARKERS.test(statusRegion);
+  return !BUSY_MARKERS.test(statusRegion);
 }
 
 /** Short readable tail of a captured screen, for error messages and logs. */
