@@ -207,6 +207,10 @@ export interface SafeHistoryCopyInput {
       when its content still hashes equal to the source, so this widens *who*
       may have written the receipt, never *what* counts as a valid copy. */
   priorOperationIds?: readonly string[];
+  /** Replace a changed destination only when its private receipt proves this
+      same durable operation owns it. Used for an append-only lineage rollout
+      whose target-account copy must advance before a later resume retry. */
+  replaceOwnedDestination?: boolean;
   maxBytes?: number;
   afterDestinationPublished?(): void;
 }
@@ -272,6 +276,7 @@ export function safeCopyHistory(input: SafeHistoryCopyInput): SafeHistoryCopyRes
   const parent = ensureDirectoryTree(input.targetRoot, path.dirname(relative));
   const destination = path.join(parent, path.basename(relative));
   const receiptPath = `${destination}.llv-receipt.json`;
+  let replaceIdentity: fs.Stats | null = null;
   if (fs.existsSync(destination)) {
     if (!fs.existsSync(receiptPath)) removeInterruptedPublishLinks(destination);
     const receipt = readReceipt(receiptPath);
@@ -279,7 +284,9 @@ export function safeCopyHistory(input: SafeHistoryCopyInput): SafeHistoryCopyRes
     const original = hashFile(source.sourcePath, maxBytes, source);
     const receiptOwnerRecognised = receipt !== null
       && (receipt.operationId === input.operationId || (input.priorOperationIds ?? []).includes(receipt.operationId));
-    if (receiptOwnerRecognised && receipt.hash === existing.hash && receipt.size === existing.size
+    const receiptMatchesExisting = receiptOwnerRecognised
+      && receipt.hash === existing.hash && receipt.size === existing.size;
+    if (receiptMatchesExisting
       && original.hash === existing.hash && original.size === existing.size) {
       /* Taking over an earlier attempt's copy re-stamps the receipt, so the
          handover happens once and every later check sees this operation. */
@@ -288,13 +295,24 @@ export function safeCopyHistory(input: SafeHistoryCopyInput): SafeHistoryCopyRes
       }
       return { path: destination, ...existing, reused: true };
     }
+    if (input.replaceOwnedDestination && receiptOwnerRecognised) {
+      /* A crash after the atomic destination rename can leave the prior receipt
+         beside the new complete bytes. If those bytes already equal the pinned
+         source, finish the receipt instead of copying them again. */
+      if (original.hash === existing.hash && original.size === existing.size) {
+        writeReceipt(receiptPath, { operationId: input.operationId, hash: existing.hash, size: existing.size });
+        return { path: destination, ...existing, reused: true };
+      }
+      if (!receiptMatchesExisting) throw new HistorySecurityError("history-collision");
+      replaceIdentity = fs.lstatSync(destination);
+    }
     if (!fs.existsSync(receiptPath) && original.hash === existing.hash && original.size === existing.size) {
       writeReceipt(receiptPath, { operationId: input.operationId, hash: existing.hash, size: existing.size });
       return { path: destination, ...existing, reused: true };
     }
-    throw new HistorySecurityError("history-collision");
+    if (!replaceIdentity) throw new HistorySecurityError("history-collision");
   }
-  if (fs.existsSync(receiptPath)) throw new HistorySecurityError("history-collision");
+  if (!replaceIdentity && fs.existsSync(receiptPath)) throw new HistorySecurityError("history-collision");
 
   const temp = path.join(parent, `.${path.basename(destination)}.${process.pid}.${crypto.randomUUID()}.tmp`);
   const sourceFd = fs.openSync(source.sourcePath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
@@ -324,10 +342,21 @@ export function safeCopyHistory(input: SafeHistoryCopyInput): SafeHistoryCopyRes
     targetFd = null;
     const rootReal = fs.realpathSync(input.targetRoot);
     if (!contained(rootReal, fs.realpathSync(parent))) throw new HistorySecurityError("unsafe-root");
-    try { fs.linkSync(temp, destination); }
-    catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new HistorySecurityError("history-collision");
-      throw error;
+    if (replaceIdentity) {
+      const current = fs.lstatSync(destination);
+      if (!current.isFile() || current.isSymbolicLink() || current.nlink !== 1
+        || current.dev !== replaceIdentity.dev || current.ino !== replaceIdentity.ino
+        || current.size !== replaceIdentity.size || current.mtimeMs !== replaceIdentity.mtimeMs
+        || current.ctimeMs !== replaceIdentity.ctimeMs) {
+        throw new HistorySecurityError("history-collision");
+      }
+      fs.renameSync(temp, destination);
+    } else {
+      try { fs.linkSync(temp, destination); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new HistorySecurityError("history-collision");
+        throw error;
+      }
     }
     fs.rmSync(temp, { force: true });
     const publishedDirectory = fs.openSync(parent, "r");
@@ -347,6 +376,15 @@ export function safeCopyHistory(input: SafeHistoryCopyInput): SafeHistoryCopyRes
 
 /** Public failures remain stable and exclude paths, CLI output, and secrets. */
 export function sanitizeProviderError(error: unknown): { code: string; message: string } {
+  if (error instanceof Error
+    && error.name === "CodexAppServerError"
+    && error.message.includes("invalid paginated history lineage")
+    && error.message.includes("missing source rollout")) {
+    return {
+      code: "target-history-unreadable",
+      message: "the target account cannot read this conversation's history",
+    };
+  }
   if (error instanceof HistorySecurityError) {
     const messages: Record<HistorySecurityCode, string> = {
       "unsafe-root": "account history root failed safety checks",

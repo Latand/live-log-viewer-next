@@ -89,6 +89,17 @@ function candidateUuid(operationId: string): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
+function codexLineageCopyOperationId(sourceRoot: string, targetRoot: string, sourceNativeId: string): string {
+  return `codex-lineage-${crypto.createHash("sha256")
+    .update("codex-lineage-copy-v1\0")
+    .update(sourceRoot)
+    .update("\0")
+    .update(targetRoot)
+    .update("\0")
+    .update(sourceNativeId)
+    .digest("hex")}`;
+}
+
 function assertRegisteredRoots(source: AccountContext | null, target: AccountContext, sourcePath: string): AccountContext {
   if (!source || source.engine !== target.engine) throw new Error("source account ownership is unavailable");
   validateHistorySource(sourcePath, source.transcriptRoot);
@@ -1396,6 +1407,23 @@ export class RegisteredSuccessorProvider implements SuccessorProviderPort {
     const sourceFork = adopted.path;
     recordContinuityPath(sourceFork);
     for (const superseded of supersededForks) recordContinuityPath(superseded.path);
+    /* Paginated Codex forks retain `forked_from_id` and resolve their earlier
+       turns from the parent rollout inside the app-server's own session root.
+       A target-account app-server cannot follow that lineage back into the
+       source account. Publish the identity-checked parent beside the fork
+       before the target client starts, so an unreadable lineage fails while
+       the incumbent host still owns the conversation. */
+    const sourceRelative = path.relative(source.transcriptRoot, sourcePath);
+    assertLeaseOwned();
+    const stagedSource = safeCopyHistory({
+      sourcePath,
+      sourceRoot: source.transcriptRoot,
+      targetRoot: target.transcriptRoot,
+      destinationRelative: sourceRelative,
+      operationId: codexLineageCopyOperationId(journal.sourceRoot, journal.targetRoot, sourceNativeId),
+      replaceOwnedDestination: true,
+    });
+    recordContinuityPath(stagedSource.path);
     const relative = path.relative(source.transcriptRoot, sourceFork);
     assertLeaseOwned();
     const copied = safeCopyHistory({
@@ -1435,7 +1463,7 @@ export class RegisteredSuccessorProvider implements SuccessorProviderPort {
       operationId,
       nativeId: fork.id,
       path: copied.path,
-      continuityPaths: [sourceFork, copied.path],
+      continuityPaths: [sourceFork, stagedSource.path, copied.path],
       historyHash: copied.hash,
       host: { kind: "codex-app-server", identity: fork.id, epoch: 1, verifiedAt: this.dependencies.now() },
     };

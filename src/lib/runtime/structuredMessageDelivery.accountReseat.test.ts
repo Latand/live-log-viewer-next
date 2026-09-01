@@ -151,7 +151,7 @@ test("a pinned first prompt bypasses selected-account migration and terminal del
     transport: "structured",
     accountId: "pinned",
     accountPin: true,
-    launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "Pinned first prompt fixture" }),
   });
   if (begun.kind !== "created") throw new Error("expected pinned launch receipt");
   const staged = registry.stageStructuredSpawn(begun.receipt.launchId, {
@@ -238,7 +238,7 @@ test("simultaneous pinned first prompts deliver independently after the selected
       transport: "structured",
       accountId,
       accountPin: true,
-      launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+      launchProfile: emptyLaunchProfile({ cwd: "/repo", title: `Pinned ${sessionId}` }),
     });
     if (receipt.kind !== "created") throw new Error("expected a pinned launch receipt");
     const path = `/sessions/${sessionId}.jsonl`;
@@ -956,7 +956,7 @@ test("a fresh empty-turn prompt on a draining source account becomes cancelled e
   }]);
 });
 
-test("a post-rollback stale busy owner remains cancelled after its host returns", async () => {
+test("a post-rollback held delivery re-arms when the restored source host returns", async () => {
   const { registry, conversation } = registryWithConversation("seat-source", "codex", "busy");
   recordStructuredOwner(registry, conversation);
   registry.setEngineRouting("codex", "seat-active");
@@ -974,23 +974,23 @@ test("a post-rollback stale busy owner remains cancelled after its host returns"
   expect(admitted).toMatchObject({ ok: true, outcome: "held" });
   registry.rollbackConversationMigration(conversation.id, registry.conversation(conversation.id)!.migration!.revision);
 
-  let oldPromptDeliveries = 0;
+  const restoredDeliveries: string[] = [];
   const port = {
-    async deliver() {
-      oldPromptDeliveries += 1;
+    async deliver({ delivery }: { delivery: { text: string } }) {
+      restoredDeliveries.push(delivery.text);
       return "delivered" as const;
     },
   };
   await drainHeldDeliveries(conversation.id, port, registry);
   await drainHeldDeliveries(conversation.id, port, registry);
 
-  expect(oldPromptDeliveries).toBe(0);
+  expect(restoredDeliveries).toEqual(["continue after the orphaned turn"]);
   expect(Object.values(registry.snapshot().heldDeliveries)).toMatchObject([{
     clientMessageId: "stale-busy-post-rollback",
-    state: "failed",
+    state: "delivered",
     text: "",
-    attempts: 0,
-    error: expect.stringContaining("migration was rolled back"),
+    attempts: 1,
+    error: null,
   }]);
 });
 
