@@ -628,3 +628,69 @@ test("a readable record still carries each account's bound projects, and says no
   expect(body.claude.accounts.find((row) => row.id === claude.id)?.projects)
     .toEqual([{ project: "project-atlas", displayName: "project-atlas" }]);
 });
+
+test("accounts GET projects each account's reset credits and flagship weekly from the durable observation (#1373, #1358)", async () => {
+  const codex = createManagedCodexAccount("Credited");
+  authenticateCodex(codex);
+  const claude = createManagedClaudeAccount("Flagship");
+  authenticateClaude(claude);
+  const observedAt = new Date().toISOString();
+  const nowS = Math.floor(Date.now() / 1000);
+  agentRegistry().recordQuotaEvaluation({
+    engine: "codex",
+    observations: [{
+      engine: "codex",
+      accountId: codex.id,
+      authenticated: true,
+      authCheckedAt: observedAt,
+      limits: { session: null, weekly: { usedPercent: 100, resetsAt: nowS + 5 * 86_400, windowMinutes: 10_080 }, plan: "pro", capturedAt: nowS },
+      provenance: { source: "live", reason: null, staleSince: null },
+      observedAt,
+      bootId: "route-test",
+      resetCredits: { availableCount: 1, expiresAt: nowS + 20 * 86_400 },
+    }],
+    signature: null,
+    bootId: "route-test",
+    now: observedAt,
+    minimumGapMs: 60_000,
+  });
+  agentRegistry().recordQuotaEvaluation({
+    engine: "claude",
+    observations: [{
+      engine: "claude",
+      accountId: claude.id,
+      authenticated: true,
+      authCheckedAt: observedAt,
+      limits: {
+        session: { usedPercent: 12, resetsAt: nowS + 3_600, windowMinutes: 300 },
+        weekly: { usedPercent: 40, resetsAt: nowS + 4 * 86_400, windowMinutes: 10_080 },
+        flagship: { usedPercent: 63, resetsAt: nowS + 4 * 86_400, windowMinutes: 10_080, tier: "opus" },
+        plan: "max",
+        capturedAt: null,
+      },
+      provenance: { source: "live", reason: null, staleSince: null },
+      observedAt,
+      bootId: "route-test",
+    }],
+    signature: null,
+    bootId: "route-test",
+    now: observedAt,
+    minimumGapMs: 60_000,
+  });
+
+  const body = await (await GET()).json() as {
+    codex: { accounts: { id: string; resetCredits: unknown; limits: { flagship: unknown } }[] };
+    claude: { accounts: { id: string; resetCredits: unknown; limits: { flagship: unknown }; effective: { percent: number; window: string } | null }[] };
+  };
+  const credited = body.codex.accounts.find((item) => item.id === codex.id)!;
+  expect(credited.resetCredits).toEqual({ availableCount: 1, expiresAt: nowS + 20 * 86_400 });
+  expect(credited.limits.flagship).toBeNull();
+  const flagship = body.claude.accounts.find((item) => item.id === claude.id)!;
+  expect(flagship.limits.flagship).toEqual({ usedPercent: 63, resetsAt: nowS + 4 * 86_400, windowMinutes: 10_080, tier: "opus" });
+  // The tighter flagship week binds the account's effective remaining.
+  expect(flagship.effective).toMatchObject({ percent: 37, window: "flagship" });
+  expect(flagship.resetCredits).toBeNull();
+  // An account never read carries "not checked yet", never a zero.
+  const unread = body.codex.accounts.find((item) => item.id === "default")!;
+  expect(unread.resetCredits).toBeNull();
+});

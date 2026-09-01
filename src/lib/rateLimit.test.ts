@@ -713,3 +713,48 @@ test("a pane signal wins and receives the structured reset time", () => {
     resetAt: RESET,
   });
 });
+
+test("the flagship weekly reconciles as its own window and binds the effective quota when tighter (#1358)", () => {
+  const flagship = (usedPercent: number) => ({ usedPercent, resetsAt: RESET + 86_400, windowMinutes: 10_080, tier: "opus" });
+  const reconciled = reconcileQuotaReadings(
+    { limits: { ...quota(30, 1_000), flagship: flagship(50) }, observedAt: 1_000, stale: false, source: "live" },
+    { limits: { ...quota(30, 2_000), flagship: flagship(80) }, observedAt: 2_000, stale: false, source: "account" },
+    2_100,
+  );
+  expect(reconciled.flagship).toMatchObject({ value: { usedPercent: 80, tier: "opus" }, observedAt: 2_000, source: "account" });
+  expect(quotaAsEngineLimits(reconciled)?.flagship).toMatchObject({ usedPercent: 80, tier: "opus", observedAt: 2_000 });
+  const { effectiveQuota } = require("./rateLimit") as typeof import("./rateLimit");
+  expect(effectiveQuota(reconciled)).toMatchObject({ window: "flagship", percent: 20 });
+  // A comfortable flagship bucket leaves the general week in charge.
+  const comfortable = reconcileQuotaReadings(
+    { limits: { ...quota(60, 2_000), flagship: flagship(10) }, observedAt: 2_000, stale: false, source: "live" },
+    null,
+    2_100,
+  );
+  expect(effectiveQuota(comfortable)).toMatchObject({ window: "weekly", percent: 40 });
+  // No bucket on either reading: nothing is invented.
+  const none = reconcileQuotaReadings({ limits: quota(60, 2_000), observedAt: 2_000, stale: false, source: "live" }, null, 2_100);
+  expect(none.flagship).toBeNull();
+  expect(quotaAsEngineLimits(none)?.flagship).toBeNull();
+});
+
+test("an exhausted flagship weekly walls the account under the weekly horizon (#1358)", () => {
+  const observedAt = new Date(NOW - 60_000).toISOString();
+  const state = rateLimitFromQuotaObservation({
+    engine: "claude",
+    accountId: "account-a",
+    authenticated: true,
+    authCheckedAt: observedAt,
+    limits: {
+      session: { usedPercent: 10, resetsAt: RESET, windowMinutes: 300 },
+      weekly: { usedPercent: 20, resetsAt: RESET + 86_400, windowMinutes: 10_080 },
+      flagship: { usedPercent: 100, resetsAt: RESET + 172_800, windowMinutes: 10_080, tier: "opus" },
+      plan: "max",
+      capturedAt: Math.floor(NOW / 1000),
+    },
+    provenance: { source: "live", reason: null, staleSince: null },
+    observedAt,
+    bootId: "test",
+  }, NOW);
+  expect(state).toEqual({ source: "account", accountId: "account-a", window: "weekly", resetAt: RESET + 172_800 });
+});

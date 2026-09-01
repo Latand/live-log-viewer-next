@@ -143,7 +143,7 @@ test("out-of-order responses stay attached to their request ids", async () => {
   const account = client.readAccount();
   const limits = client.readRateLimits();
   await expect(account).resolves.toEqual({ account: null, requiresOpenaiAuth: true });
-  await expect(limits).resolves.toEqual({ rateLimits: { primary: { usedPercent: 12, resetsAt: 42, windowDurationMins: null }, secondary: null, planType: null } });
+  await expect(limits).resolves.toEqual({ rateLimits: { primary: { usedPercent: 12, resetsAt: 42, windowDurationMins: null }, secondary: null, planType: null }, resetCredits: null });
   expect(child.writes.map((line) => JSON.parse(line)).find((message) => message.method === "account/rateLimits/read")).toEqual({ jsonrpc: "2.0", id: pending.limits, method: "account/rateLimits/read" });
   client.close();
 });
@@ -485,4 +485,71 @@ test("unexpected leader exit still cleans its detached process group", async () 
     { pid: -4242, signal: "SIGKILL" },
   ]);
   expect(child.signals).toEqual([]);
+});
+
+test("account/rateLimits/read carries the reset-credit summary when the app-server sends one (#1373)", async () => {
+  const { start } = clientWith((fake, message) => {
+    if (message.method === "initialize") fake.respond(requestId(message), {});
+    if (message.method === "account/rateLimits/read") {
+      fake.respond(requestId(message), {
+        rateLimits: { primary: { usedPercent: 100, windowDurationMins: 10_080, resetsAt: 1_788_768_514 }, secondary: null, planType: "pro" },
+        rateLimitsByLimitId: { codex: { primary: { usedPercent: 100 } } },
+        rateLimitResetCredits: {
+          availableCount: 1,
+          credits: [
+            { id: "credit-one", resetType: "codexRateLimits", status: "available", grantedAt: 1_787_357_295, expiresAt: 1_789_949_295, title: "Full reset", description: "one free reset" },
+            { id: "credit-two", resetType: "mystery", status: "later", grantedAt: 1_787_357_296, expiresAt: null },
+            { notACredit: true },
+          ],
+        },
+      });
+    }
+  });
+  const client = await start();
+  await expect(client.readRateLimits()).resolves.toEqual({
+    rateLimits: { primary: { usedPercent: 100, resetsAt: 1_788_768_514, windowDurationMins: 10_080 }, secondary: null, planType: "pro" },
+    resetCredits: {
+      availableCount: 1,
+      credits: [
+        { id: "credit-one", resetType: "codexRateLimits", status: "available", grantedAt: 1_787_357_295, expiresAt: 1_789_949_295, title: "Full reset", description: "one free reset" },
+        { id: "credit-two", resetType: "mystery", status: "unknown", grantedAt: 1_787_357_296, expiresAt: null, title: null, description: null },
+      ],
+    },
+  });
+  client.close();
+});
+
+test("a count-only or malformed reset-credit summary degrades to count-only or null, never a throw", async () => {
+  let shape: unknown = { availableCount: 2, credits: null };
+  const { start } = clientWith((fake, message) => {
+    if (message.method === "initialize") fake.respond(requestId(message), {});
+    if (message.method === "account/rateLimits/read") fake.respond(requestId(message), { rateLimits: { primary: { usedPercent: 5 } }, rateLimitResetCredits: shape });
+  });
+  const client = await start();
+  await expect(client.readRateLimits()).resolves.toMatchObject({ resetCredits: { availableCount: 2, credits: null } });
+  shape = { availableCount: -1 };
+  await expect(client.readRateLimits()).resolves.toMatchObject({ resetCredits: null });
+  shape = "nope";
+  await expect(client.readRateLimits()).resolves.toMatchObject({ resetCredits: null });
+  client.close();
+});
+
+test("consuming a reset credit sends the idempotency key and returns the backend's outcome (#1373)", async () => {
+  const sent: Record<string, unknown>[] = [];
+  let outcome: unknown = "reset";
+  const { start } = clientWith((fake, message) => {
+    if (message.method === "initialize") fake.respond(requestId(message), {});
+    if (message.method === "account/rateLimitResetCredit/consume") {
+      sent.push(message.params as Record<string, unknown>);
+      fake.respond(requestId(message), { outcome });
+    }
+  });
+  const client = await start();
+  await expect(client.consumeRateLimitResetCredit({ idempotencyKey: "attempt-one" })).resolves.toBe("reset");
+  expect(sent[0]).toEqual({ idempotencyKey: "attempt-one" });
+  outcome = "noCredit";
+  await expect(client.consumeRateLimitResetCredit({ idempotencyKey: "attempt-two", creditId: "credit-one" })).resolves.toBe("noCredit");
+  expect(sent[1]).toEqual({ idempotencyKey: "attempt-two", creditId: "credit-one" });
+  outcome = "surprise";
+  await expect(client.consumeRateLimitResetCredit({ idempotencyKey: "attempt-three" })).rejects.toThrow("rateLimitResetCredit/consume response is malformed");
 });

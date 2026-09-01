@@ -260,3 +260,39 @@ test("a failed home records a closed code while the controller sweeps later home
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("the controller records the probe's reset credits and carries them through a failed tick (#1373)", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "llv-quota-reset-credits-"));
+  try {
+    const registry = new AgentRegistry(path.join(root, "registry.json"));
+    const account: CodexAccount = { id: "credited", label: "Account A", kind: "managed", home: "/homes/credited", sessionsDir: "/homes/credited/sessions", authPresent: true, loginPane: null, createdAt: 1 };
+    let fail = false;
+    const controller = new QuotaController(registry, {
+      list: () => [account],
+      active: () => account.id,
+      async probe(engine, candidate, now) {
+        if (fail) throw new Error("offline");
+        return {
+          engine,
+          accountId: candidate.id,
+          authenticated: true,
+          authCheckedAt: now,
+          limits: { session: null, weekly: { usedPercent: 100, resetsAt: Math.floor(now / 1000) + 86_400, windowMinutes: 10_080 }, plan: "pro", capturedAt: Math.floor(now / 1000) },
+          provenance: { source: "live", reason: null, staleSince: null },
+          observedAt: now,
+          resetCredits: { availableCount: 1, expiresAt: Math.floor(now / 1000) + 20 * 86_400 },
+        };
+      },
+    }, "boot-reset-credits");
+    await controller.tick("codex");
+    expect(registry.quotaObservations("codex")[0]).toMatchObject({ accountId: "credited", resetCredits: { availableCount: 1 } });
+
+    fail = true;
+    await controller.tick("codex");
+    const carried = registry.quotaObservations("codex")[0]!;
+    expect(carried.provenance.source).toBe("cache");
+    expect(carried.resetCredits).toMatchObject({ availableCount: 1 });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

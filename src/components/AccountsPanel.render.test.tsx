@@ -35,6 +35,10 @@ const base = (over: Partial<EngineAccountsState> = {}): EngineAccountsState => (
   remove: async () => true,
   cleanupOrphans: async () => true,
   copyTerminalCommand: async () => true,
+  refreshLimits: async () => true,
+  useResetCredit: async () => true,
+  limitsBusy: null,
+  limitsVersion: 0,
   ...over,
 });
 
@@ -176,8 +180,10 @@ test("a weekly-only account labels its one window by the horizon it carries", ()
     active: "main",
   }));
   const detail = html.match(/<dl[^>]*Quota windows[^>]*>[\s\S]*?<\/dl>/)?.[0] ?? "";
-  expect(detail).toContain(translate("en", "limits.week"));
-  expect(detail).not.toContain(translate("en", "limits.5h"));
+  // Row labels are the <dt> texts; the block's action icons carry path data
+  // and button copy that a whole-markup substring check would trip over.
+  const labels = [...detail.matchAll(/<dt[^>]*>([^<]*)<\/dt>/g)].map((match) => match[1]);
+  expect(labels).toEqual([translate("en", "limits.week")]);
   expect(detail).toContain("85%"); // weekly remaining (100 - 15)
 });
 
@@ -198,7 +204,8 @@ test("a weekly-horizon window in the session field is labelled by its horizon, n
   const detail = html.match(/<dl[^>]*Quota windows[^>]*>[\s\S]*?<\/dl>/)?.[0] ?? "";
   expect(detail).not.toBe("");
   expect(detail).toContain(`<dt class="w-8 shrink-0 font-semibold">${translate("en", "limits.week")}</dt>`);
-  expect(detail).not.toContain(translate("en", "limits.5h"));
+  const labels = [...detail.matchAll(/<dt[^>]*>([^<]*)<\/dt>/g)].map((match) => match[1]);
+  expect(labels).not.toContain(translate("en", "limits.5h"));
   expect(detail).toContain("85%"); // 100 - 15, under the weekly label
 });
 
@@ -219,7 +226,7 @@ test("dims and labels a stale account limits read and omits a missing reset time
   expect(detail).toContain("opacity-70"); // values stay legible; text carries the meaning
   expect(html).toContain('title="Last known values — not a live read"');
   expect(detail).toContain("80%"); // 100 − 20 with no reset line
-  expect(detail).not.toContain("reset"); // resetsAt null → no reset text
+  expect(detail).not.toMatch(/reset (in|now)/); // resetsAt null → no reset-time text
 });
 
 test("automatic transcript migration controls stay outside the account panel", () => {
@@ -364,7 +371,10 @@ test("uk-locale smoke: every new claude login key resolves and interpolates in U
   expect(translate("uk", "accounts.claudeLogin.announceCodeReady", { label: "Робочий" })).not.toContain("{label}");
 });
 
-test("an account row names the projects it is bound to, and stays silent when it is bound to none (#1279)", () => {
+test("a bound account carries no 'Bound to' chip in the dialog; the binding itself still travels (#1418)", () => {
+  /* #1418: the chip carried nothing the operator acts on from this dialog.
+     Project binding stays configurable where it lives; the card no longer
+     spends a row on it, whether or not the account is bound. */
   const bound = render(base({
     accounts: [
       { id: "reserved", label: "Reserved", kind: "managed", authPresent: true, loginPending: false, loginState: "authenticated", deviceAuth: null,
@@ -373,10 +383,140 @@ test("an account row names the projects it is bound to, and stays silent when it
     ],
     active: "reserved",
   }));
-  expect(bound).toContain('data-account-projects="reserved"');
-  expect(bound).toContain("Atlas");
-  expect(bound).toContain(translate("en", "accounts.boundProjects"));
-  /* An account with no bindings is NOT restricted — a fenced-looking row there
-     would say the opposite of what the record means. */
-  expect(bound).not.toContain('data-account-projects="spare"');
+  expect(bound).not.toContain("data-account-projects");
+  expect(bound).not.toContain("Bound to");
+  expect(bound).not.toContain("Atlas");
+  expect(bound).toContain("Reserved");
+});
+
+// ── Issues #1418 / #1373 / #1358 — the quiet card, reset credits, flagship row ─
+
+const nowS = () => Math.floor(Date.now() / 1000);
+
+test("the card is the quiet form: identity, status, one limits block with both actions, then the footer (#1418)", () => {
+  const now = nowS();
+  const resetsAt = now + 5 * 86_400;
+  const html = render(base({
+    accounts: [{
+      id: "account-a", label: "Account A", kind: "managed", authPresent: true, authHealth: "authenticated", plan: "pro",
+      loginPending: false, loginState: "authenticated", deviceAuth: null,
+      limits: { freshness: "fresh", session: null, weekly: { usedPercent: 100, resetsAt, windowMinutes: 10_080 }, checkedAt: new Date((now - 60) * 1000).toISOString() },
+      resetCredits: { availableCount: 1, expiresAt: now + 20 * 86_400 },
+      projects: [{ project: "project-atlas", displayName: "Atlas" }],
+    }],
+    active: "account-a",
+  }));
+  const at = (needle: string) => {
+    const index = html.indexOf(needle);
+    expect(index, needle).toBeGreaterThanOrEqual(0);
+    return index;
+  };
+  // Identity line, then the limits block (check time, actions, windows), then the footer.
+  expect(at(">Account A<")).toBeLessThan(at('data-account-limits="account-a"'));
+  expect(at(translate("en", "accounts.limitsChecked"))).toBeLessThan(at('data-account-refresh-limits="account-a"'));
+  expect(at('data-account-refresh-limits="account-a"')).toBeLessThan(at('data-limit-row="weekly"'));
+  expect(at('data-limit-row="weekly"')).toBeLessThan(at('data-account-use-reset="account-a"'));
+  expect(at('data-account-use-reset="account-a"')).toBeLessThan(at(translate("en", "accounts.copyCli")));
+  expect(at(translate("en", "accounts.copyCli"))).toBeLessThan(at('aria-label="Remove Account A"'));
+  // The exhausted state and its remedy read together.
+  expect(html).toContain(translate("en", "rateLimit.badgeUntil", { time: formatResetClock(resetsAt, now) }));
+  expect(html).toContain("1 reset available");
+  expect(html).toContain(translate("en", "accounts.resetsExpire", { at: formatResetClock(now + 20 * 86_400, now) }));
+  // No chip, and no confirmation copy anywhere near the two actions.
+  expect(html).not.toContain("Bound to");
+  expect(html).not.toContain("data-account-projects");
+  expect(html).not.toContain(translate("en", "accounts.removeConfirmCta"));
+  expect(html).toContain('aria-label="Re-read limits for Account A"');
+  expect(html).toContain('aria-label="Use one usage-limit reset on Account A"');
+});
+
+function useResetButton(html: string, id: string): string {
+  return html.match(new RegExp(`<button[^>]*data-account-use-reset="${id}"[^>]*>`))?.[0] ?? "";
+}
+
+test("the reset-credit line reads the count, none, or not-checked-yet, and the redeem control follows it (#1373)", () => {
+  const row = (id: string, resetCredits: { availableCount: number; expiresAt: number | null } | null) => ({
+    id, label: id, kind: "managed" as const, authPresent: true, loginPending: false, loginState: "authenticated" as const, deviceAuth: null,
+    limits: { freshness: "fresh" as const, session: null, weekly: { usedPercent: 100, resetsAt: nowS() + 86_400, windowMinutes: 10_080 } },
+    resetCredits,
+  });
+  const html = render(base({
+    accounts: [row("one-credit", { availableCount: 1, expiresAt: null }), row("three-credits", { availableCount: 3, expiresAt: null }), row("spent", { availableCount: 0, expiresAt: null }), row("unread", null)],
+    active: "one-credit",
+  }));
+  expect(html).toContain("1 reset available");
+  expect(html).toContain("3 resets available");
+  expect(html).toContain(translate("en", "accounts.resetsNone"));
+  expect(html).toContain(translate("en", "accounts.resetsUnknown"));
+  expect(useResetButton(html, "one-credit")).not.toContain('disabled=""');
+  expect(useResetButton(html, "three-credits")).not.toContain('disabled=""');
+  expect(useResetButton(html, "spent")).toContain('disabled=""');
+  expect(useResetButton(html, "unread")).toContain('disabled=""');
+});
+
+test("Claude cards carry the refresh action but no reset-credit line; a signed-out account gets neither (#1418)", () => {
+  const html = render(base({
+    engine: "claude",
+    accounts: [
+      { id: "signed-in", label: "Signed in", kind: "managed", authPresent: true, authHealth: "authenticated", loginPending: false, loginState: "authenticated", deviceAuth: null,
+        limits: { freshness: "fresh", session: { usedPercent: 10, resetsAt: null, windowMinutes: 300 }, weekly: null } },
+      { id: "signed-out", label: "Signed out", kind: "managed", authPresent: false, authHealth: "signed_out", loginPending: false, loginState: "idle", deviceAuth: null },
+    ],
+    active: "signed-in",
+  }));
+  expect(html).toContain('data-account-refresh-limits="signed-in"');
+  expect(html).not.toContain("data-account-use-reset");
+  expect(html).not.toContain("data-account-reset-credits");
+  expect(html).not.toContain('data-account-limits="signed-out"');
+});
+
+const claudeLimits = (flagship: number | null) => ({
+  freshness: "fresh" as const,
+  session: { usedPercent: 12, resetsAt: nowS() + 3_600, windowMinutes: 300 },
+  weekly: { usedPercent: 40, resetsAt: nowS() + 4 * 86_400, windowMinutes: 10_080 },
+  ...(flagship === null ? {} : { flagship: { usedPercent: flagship, resetsAt: nowS() + 4 * 86_400, windowMinutes: 10_080, tier: "opus" } }),
+  checkedAt: new Date().toISOString(),
+});
+const claudeAccount = (flagship: number | null) => base({
+  engine: "claude",
+  accounts: [{ id: "account-a", label: "Account A", kind: "managed", authPresent: true, authHealth: "authenticated", plan: "max", loginPending: false, loginState: "authenticated", deviceAuth: null, limits: claudeLimits(flagship) }],
+  active: "account-a",
+});
+
+test("no flagship bucket: two rows, no placeholder (#1358)", () => {
+  const html = render(claudeAccount(null));
+  expect(html).toContain('data-limit-row="session"');
+  expect(html).toContain('data-limit-row="weekly"');
+  expect(html).not.toContain('data-limit-row="flagship"');
+  expect(html).not.toContain("Opus · Week");
+  expect(html).toContain('title="weekly window binds"'); // 60% left on the week binds
+  expect(html).toContain(">60%<");
+});
+
+test("a healthy flagship bucket renders as its own row named by the tier, and the general week still binds (#1358)", () => {
+  const html = render(claudeAccount(10));
+  const row = html.match(/<div[^>]*data-limit-row="flagship"[^>]*>[\s\S]*?<\/dd><\/div>/)?.[0] ?? "";
+  expect(row).not.toBe("");
+  expect(row).toContain(translate("en", "limits.tierWeek", { tier: "Opus" }));
+  expect(row).toContain(">90%<");
+  expect(row).toContain(translate("en", "limits.left"));
+  expect(row).toContain("reset");
+  expect(html).toContain('title="weekly window binds"');
+  expect(html).toContain(">60%<");
+});
+
+test("a flagship bucket tighter than the general week binds the capacity chip (#1358)", () => {
+  const html = render(claudeAccount(80));
+  expect(html).toContain(translate("en", "limits.tierWeek", { tier: "Opus" }));
+  expect(html).toContain(`title="${translate("en", "accounts.effectiveTip", { window: translate("en", "limits.windowFlagship", { tier: "Opus" }) })}"`);
+  expect(html).toContain(">20%<");
+});
+
+test("uk-locale smoke: the new card strings resolve and interpolate", () => {
+  expect(translate("uk", "accounts.resetsAvailable", { count: 1 })).toBe("1 скид доступний");
+  expect(translate("uk", "accounts.resetsAvailable", { count: 3 })).toBe("3 скиди доступні");
+  expect(translate("uk", "accounts.resetsAvailable", { count: 5 })).toBe("5 скидів доступно");
+  expect(translate("uk", "accounts.useResetAria", { label: "Робочий" })).toContain("Робочий");
+  expect(translate("uk", "accounts.refreshLimitsAria", { label: "Робочий" })).not.toContain("{label}");
+  expect(translate("uk", "limits.tierWeek", { tier: "Opus" })).toBe("Opus · Тиждень");
 });

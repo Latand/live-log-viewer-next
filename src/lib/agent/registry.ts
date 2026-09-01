@@ -6778,6 +6778,17 @@ export class AgentRegistry {
     return clone(Object.values(this.readOnlySnapshot().quotaObservations[engine]));
   }
 
+  /** Records one account's live reading outside the controller's evaluation
+      cycle — an operator's per-account re-read (#1418) or the reading taken
+      after a redeemed reset credit (#1373). Only that account's observation
+      changes: the auto-balance sustain window and policy revision are the
+      controller's, and an operator looking at one card must not reset them. */
+  recordQuotaObservation(observation: DurableQuotaObservation): void {
+    this.mutate((file) => {
+      file.quotaObservations[observation.engine][observation.accountId] = clone(observation);
+    });
+  }
+
   recordQuotaEvaluation(input: {
     engine: Extract<AgentEngine, "claude" | "codex">;
     observations: DurableQuotaObservation[];

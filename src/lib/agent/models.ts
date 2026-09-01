@@ -78,6 +78,31 @@ export function normalizeClaudeLaunchModel(value: string | null | undefined): Cl
   return null;
 }
 
+/** Claude launch families the provider meters on the flagship tier's own
+    weekly window (issue #1358). Opus and Fable both belong there: the bucket
+    Anthropic reports as `seven_day_opus` is the top-tier weekly, and a Fable
+    spawn is gated by it even when the general week is comfortable. */
+const CLAUDE_FLAGSHIP_FAMILIES: ReadonlySet<ClaudeLaunchModel> = new Set(["fable", "opus"]);
+
+/** Whether a Claude spawn of `model` draws on the flagship weekly window. An
+    unknown or absent model resolves to the launch default, which is flagship
+    class, so "no model chosen" is gated conservatively. */
+export function claudeModelGatedByFlagshipWeekly(model: string | null | undefined): boolean {
+  const family = normalizeClaudeLaunchModel(model);
+  if (family === null) return true;
+  return CLAUDE_FLAGSHIP_FAMILIES.has(family);
+}
+
+const CLAUDE_TIER_DISPLAY: Record<string, string> = { fable: "Fable", mythos: "Mythos", opus: "Opus", sonnet: "Sonnet", haiku: "Haiku" };
+
+/** Display name of a provider tier bucket (`opus` → "Opus"); unknown tiers
+    are capitalised as spelled so a new bucket still reads as a name. */
+export function claudeTierDisplayName(tier: string): string {
+  const key = tier.trim().toLowerCase();
+  if (CLAUDE_TIER_DISPLAY[key]) return CLAUDE_TIER_DISPLAY[key];
+  return key ? key.charAt(0).toUpperCase() + key.slice(1) : tier;
+}
+
 /** True when a model id is a valid codex launch model: a `gpt-*` id, printable
     and within the CLI length bound. Shared by the API's pipeline validator and
     the builder's client-side pre-check so a valid-looking submission never 400s

@@ -4,7 +4,7 @@ import { grantedPlugins } from "@/lib/agent/pluginAllowlist";
 import type { MessageOrigin } from "@/lib/runtime/messageOrigin";
 import type { StructuredImageRef } from "@/lib/runtime/structuredContent";
 import { derivedSpawnTitle, durableSemanticTitle } from "@/lib/title";
-import type { AgentGoal, AgentPlan, EngineLimits, LimitsProvenance } from "@/lib/types";
+import type { AgentGoal, AgentPlan, EngineLimits, LimitsProvenance, QuotaWindowKey } from "@/lib/types";
 
 export type MigrationEngine = Extract<AgentEngine, "claude" | "codex">;
 export type ViewerConversationId = `conversation_${string}`;
@@ -240,10 +240,10 @@ export function sameProviderReceiptOutcome(left: ProviderReceipt, right: Provide
 export interface MigrationEvidence {
   sourceId: string;
   sourcePercent: number;
-  sourceWindow: "session" | "weekly";
+  sourceWindow: QuotaWindowKey;
   targetId: string;
   targetPercent: number;
-  targetWindow: "session" | "weekly";
+  targetWindow: QuotaWindowKey;
   observedAt: string;
 }
 
@@ -278,7 +278,7 @@ export interface AutoBalancePolicy {
     fromPercent: number | null;
     toId: string | null;
     toPercent: number | null;
-    window: "session" | "weekly" | null;
+    window: QuotaWindowKey | null;
     detail: string | null;
   } | null;
   lastTrigger: MigrationEvidence | null;
@@ -302,6 +302,10 @@ export interface DurableQuotaObservation {
   provenance: LimitsProvenance;
   observedAt: string;
   bootId: string;
+  /** Usage-limit reset credits the account held at `observedAt` (issue #1373,
+      Codex only). Absent on records written before the field existed and null
+      when the probe carried no summary; both read as "not checked yet". */
+  resetCredits?: { availableCount: number; expiresAt: number | null } | null;
 }
 
 export interface HeldDeliveryCommand {

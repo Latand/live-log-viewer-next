@@ -78,6 +78,10 @@ function accountState(select: EngineAccountsState["select"]): EngineAccountsStat
     remove: async () => true,
     cleanupOrphans: async () => true,
     copyTerminalCommand: async () => true,
+    refreshLimits: async () => true,
+    useResetCredit: async () => true,
+    limitsBusy: null,
+    limitsVersion: 0,
   };
 }
 

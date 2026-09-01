@@ -230,7 +230,22 @@ export const en = {
   "accounts.operation.terminal": "Preparing the account command…",
   "accounts.terminalCopied": "Command copied for {label}",
   "accounts.terminalFailed": "Could not prepare the command for {label}",
-  "accounts.boundProjects": "Bound to",
+  // Per-card limits actions (#1418) and usage-limit reset credits (#1373)
+  "accounts.refreshLimits": "Refresh",
+  "accounts.refreshLimitsAria": "Re-read limits for {label}",
+  "accounts.limitsRefreshFailed": "Could not re-read limits for {label}",
+  "accounts.operation.refreshLimits": "Re-reading limits…",
+  "accounts.operation.resetCredit": "Using a reset…",
+  "accounts.resetsAvailable": { one: "{count} reset available", other: "{count} resets available" },
+  "accounts.resetsNone": "No resets available",
+  "accounts.resetsUnknown": "Resets not checked yet",
+  "accounts.resetsExpire": "expires {at}",
+  "accounts.useReset": "Use one reset",
+  "accounts.useResetAria": "Use one usage-limit reset on {label}",
+  "accounts.resetUsed": "Reset used on {label} — the new window is shown",
+  "accounts.resetNone": "{label} has no resets available",
+  "accounts.resetNothing": "Nothing to reset on {label} — no window is exhausted",
+  "accounts.resetFailed": "Could not use a reset on {label}",
   "projectAccounts.label": "Accounts",
   "projectAccounts.any": "any account",
   "projectAccounts.carrying": "carrying",
@@ -333,6 +348,9 @@ export const en = {
   "autobalance.override": "Auto balance suggested «{to}»; your choice takes over.",
   "limits.windowSession": "5h window",
   "limits.windowWeekly": "weekly window",
+  // The flagship tier's own weekly window (#1358), named by the provider's tier.
+  "limits.windowFlagship": "{tier} weekly window",
+  "limits.tierWeek": "{tier} · Week",
 
   // SwitchCard
   "switchCard.openColumn": "Open {title} as a column",

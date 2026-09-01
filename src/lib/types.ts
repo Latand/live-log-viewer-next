@@ -596,10 +596,26 @@ export interface LimitWindow {
   windowMinutes?: number | null;
 }
 
+/** A weekly window the provider meters separately for one model tier (issue
+    #1358): Anthropic's OAuth usage payload carries the flagship tier's own
+    seven-day bucket beside the general week. `tier` is the bucket's tier name
+    as the provider spelled it (`opus` for `seven_day_opus`), so the label the
+    row carries is the provider's, never a guess. */
+export interface TierLimitWindow extends LimitWindow {
+  tier: string;
+}
+
+/** The quota window that bound an effective-remaining minimum. `flagship` is
+    the model-tier weekly of {@link EngineLimits.flagship}. */
+export type QuotaWindowKey = "session" | "weekly" | "flagship";
+
 /** Plan rate limits of one engine, returned by GET /api/limits. */
 export interface EngineLimits {
   session: LimitWindow | null;
   weekly: LimitWindow | null;
+  /** The flagship model tier's own weekly window when the account reports one
+      (issue #1358); absent or null when the provider meters no distinct tier. */
+  flagship?: TierLimitWindow | null;
   plan: string | null;
   /** Unix seconds of the oldest selected window observation. Null means the
       provider supplied no observation clock. */

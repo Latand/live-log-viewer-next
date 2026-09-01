@@ -5,18 +5,72 @@ import { activeClaudeAccountId, listClaudeAccounts, type ClaudeAccount } from "@
 import { realClaudeLoginPorts } from "@/lib/accounts/claudeLogin";
 import { withAccountMutationLockAsync } from "@/lib/accounts/accountMutation";
 import { activeCodexAccountId, listCodexAccounts, type CodexAccount } from "@/lib/accounts/codex";
-import { managedCodexRuntime } from "@/lib/accounts/codexRuntime";
+import { managedCodexRuntime, type CodexQuotaProbe } from "@/lib/accounts/codexRuntime";
+import type { AppServerResetCredits } from "@/lib/accounts/codexAppServer";
 import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
 import { logQuotaEvent } from "@/lib/events";
 import { fetchClaudeLimits, readCodexLimits } from "@/lib/limits";
 
 import type { DurableQuotaObservation, MigrationEngine } from "./contracts";
-import type { QuotaObservation } from "./quotaPolicy";
+import type { QuotaObservation, QuotaResetCredits } from "./quotaPolicy";
 
 export interface QuotaProbePort {
   list(engine: MigrationEngine): Array<ClaudeAccount | CodexAccount>;
   active(engine: MigrationEngine): string;
   probe(engine: MigrationEngine, account: ClaudeAccount | CodexAccount, now: number): Promise<QuotaObservation>;
+}
+
+/** The durable projection of a reset-credit summary (issue #1373): the count
+    and the soonest expiry among the available credits. Opaque credit ids stop
+    here. */
+export function quotaResetCreditsFrom(summary: AppServerResetCredits | null): QuotaResetCredits | null {
+  if (!summary) return null;
+  const expiries = (summary.credits ?? [])
+    .filter((credit) => credit.status === "available" && credit.expiresAt !== null)
+    .map((credit) => credit.expiresAt as number);
+  return { availableCount: summary.availableCount, expiresAt: expiries.length ? Math.min(...expiries) : null };
+}
+
+/** One Codex app-server probe reconciled into the observation the registry
+    keeps. Shared by the periodic controller tick, the operator's per-account
+    re-read (#1418) and the post-redemption re-read (#1373), so every path
+    records a reading of the same shape and provenance. */
+export async function codexObservationFromProbe(account: CodexAccount, probe: CodexQuotaProbe, now: number): Promise<QuotaObservation> {
+  const limits = await readCodexLimits({
+    account,
+    liveReader: async () => probe.rateLimits,
+    now: () => now,
+  });
+  return {
+    engine: "codex",
+    accountId: account.id,
+    authenticated: probe.authenticated,
+    authCheckedAt: now,
+    limits: limits.data,
+    provenance: {
+      source: limits.source,
+      reason: probe.authenticated ? limits.reason : "unsupported-account-type",
+      staleSince: null,
+    },
+    observedAt: now,
+    envelope: probe.envelope,
+    resetCredits: quotaResetCreditsFrom(probe.resetCredits),
+  };
+}
+
+/** The registry's record of one observation. */
+export function durableQuotaObservation(observation: QuotaObservation, bootId: string): DurableQuotaObservation {
+  return {
+    engine: observation.engine,
+    accountId: observation.accountId,
+    authenticated: observation.authenticated,
+    authCheckedAt: new Date(observation.authCheckedAt ?? observation.observedAt).toISOString(),
+    limits: observation.limits,
+    provenance: observation.provenance,
+    observedAt: new Date(observation.observedAt).toISOString(),
+    bootId,
+    resetCredits: observation.resetCredits ?? null,
+  };
 }
 
 const productionProbe: QuotaProbePort = {
@@ -46,25 +100,7 @@ const productionProbe: QuotaProbePort = {
     const candidate = account as CodexAccount;
     try {
       const probe = await managedCodexRuntime().probeQuota(candidate);
-      const limits = await readCodexLimits({
-        account: candidate,
-        liveReader: async () => probe.rateLimits,
-        now: () => now,
-      });
-      return {
-        engine,
-        accountId: candidate.id,
-        authenticated: probe.authenticated,
-        authCheckedAt: now,
-        limits: limits.data,
-        provenance: {
-          source: limits.source,
-          reason: probe.authenticated ? limits.reason : "unsupported-account-type",
-          staleSince: null,
-        },
-        observedAt: now,
-        envelope: probe.envelope,
-      };
+      return await codexObservationFromProbe(candidate, probe, now);
     } catch (error) {
       // The reader owns redacted server-local detail and returns a closed code
       // suitable for the durable quota registry.
@@ -86,12 +122,16 @@ const productionProbe: QuotaProbePort = {
   },
 };
 
+/** The live provider probe, exported so an operator-triggered re-read
+    (issue #1418) goes through exactly the reader the controller uses. */
+export const liveQuotaProbe: QuotaProbePort = productionProbe;
+
 /* One hung provider (e.g. a wedged Codex app-server) must not delay or blank
    the other accounts' readings: every account is probed concurrently and a
    probe that outlives this deadline is treated as failed for this tick. */
-const PROBE_TIMEOUT_MS = 15_000;
+export const PROBE_TIMEOUT_MS = 15_000;
 
-function probeTimeout(timeoutMs: number): Promise<never> {
+export function probeTimeout(timeoutMs: number): Promise<never> {
   return new Promise((_, reject) => {
     const timer = setTimeout(() => reject(new Error("quota-probe-timeout")), timeoutMs);
     timer.unref?.();
@@ -128,6 +168,7 @@ export class QuotaController {
         },
         observedAt: Date.parse(previous.observedAt) || now,
         envelope: null,
+        resetCredits: previous.resetCredits ?? null,
       };
     }
     return {
@@ -177,16 +218,7 @@ export class QuotaController {
         reasonCode: observation.provenance.reason,
       });
     });
-    const recorded: DurableQuotaObservation[] = observations.map((observation) => ({
-      engine,
-      accountId: observation.accountId,
-      authenticated: observation.authenticated,
-      authCheckedAt: new Date(observation.authCheckedAt ?? observation.observedAt).toISOString(),
-      limits: observation.limits,
-      provenance: observation.provenance,
-      observedAt: new Date(observation.observedAt).toISOString(),
-      bootId: this.bootId,
-    }));
+    const recorded: DurableQuotaObservation[] = observations.map((observation) => durableQuotaObservation({ ...observation, engine }, this.bootId));
     this.registry.recordQuotaEvaluation({
       engine,
       observations: recorded,

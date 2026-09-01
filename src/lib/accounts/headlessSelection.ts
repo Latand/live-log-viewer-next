@@ -24,7 +24,9 @@ function capacity(observation: DurableQuotaObservation | undefined, now: number)
   }
   if (!observation.authenticated) return { kind: "unavailable" };
   if (!observation.limits) return { kind: "unknown" };
-  const windows = [observation.limits.session, observation.limits.weekly].filter((window) => window !== null);
+  /* The flagship weekly (issue #1358) gates an unattended spawn like the
+     general week does: the headless launch default is a flagship model. */
+  const windows = [observation.limits.session, observation.limits.weekly, observation.limits.flagship ?? null].filter((window) => window !== null);
   if (!windows.length || windows.some((window) => !Number.isFinite(window.usedPercent) || window.usedPercent < 0 || window.usedPercent > 100 || (window.resetsAt !== null && (!Number.isSafeInteger(window.resetsAt) || window.resetsAt < 0)))) {
     return { kind: "unknown" };
   }
