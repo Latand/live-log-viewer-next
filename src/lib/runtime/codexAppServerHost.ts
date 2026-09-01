@@ -11,11 +11,7 @@ import { STRUCTURED_HOST_STAMP_ENV, structuredHostStamp } from "@/lib/scanner/pr
 import { headlessCodexThreadConfig } from "@/lib/codexHeadlessConfig";
 import { grantedPluginServerNames, grantedPlugins } from "@/lib/agent/pluginAllowlist";
 import { hardenedRedact } from "@/lib/view/compactText";
-import {
-  codexStructuredUserDeliveryDedup,
-  decodeCodexStructuredUserText,
-  encodeCodexStructuredUserText,
-} from "./codexStructuredUserText";
+import { decodeCodexStructuredUserText, encodeCodexStructuredUserText } from "./codexStructuredUserText";
 import { CodexReplayFrameReducer, ReplayFrameOverflowError, sanitizeCodexImageFrame, shrinkReducedReplayFrame, type ImageSink, type ReplayFrameBudgets } from "./codexImageFrames";
 import { MAX_STRUCTURED_IMAGE_ENCODED_BYTES, runtimeImageStore } from "./runtimeImageStore";
 import { STRUCTURED_IMAGE_CAPABILITY, type StructuredImageRef } from "./structuredContent";
@@ -496,6 +492,10 @@ const ROLLOUT_TERMINAL_TURN_STATUS: Record<string, string> = {
    (observed 2026-08-31: 380% CPU, data routes timing out). One entry per
    rollout, invalidated by size+mtime, bounds that to one parse per change. */
 const ROLLOUT_TURNS_CACHE_LIMIT = 32;
+
+function codexDeliveryDedup(operationId: string): string {
+  return createHash("sha256").update(operationId).digest("hex");
+}
 interface RolloutStructuredUserDelivery {
   text: string | null;
   contentDigest: string | null;
@@ -655,7 +655,7 @@ function rolloutConfirmedDelivery(
     throw new Error("Codex recipient transcript is unavailable for delivery deduplication");
   }
   const delivery = rollout.structuredUserDeliveries
-    .get(codexStructuredUserDeliveryDedup(entry.id));
+    .get(codexDeliveryDedup(entry.id));
   if (!delivery) return null;
   const payloadMatches = delivery.contentDigest
     ? delivery.contentDigest === entry.contentDigest
@@ -1192,7 +1192,7 @@ export class CodexAppServerHost implements EngineHost {
           /* #1117: authorship lands on the same record, so the feed can tell
              the operator's bubble from an inter-agent relay without a join. */
           normalized.origin,
-          normalized.id,
+          codexDeliveryDedup(normalized.id),
         ),
       },
     ];

@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -21,6 +22,10 @@ import { STRUCTURED_IMAGE_CAPABILITY, structuredContent, type StructuredImageRef
 import { materializeStructuredHostAccess, READ_ONLY_STAGE_PERMISSION_PROFILE } from "./structuredSpawn";
 import type { RuntimeVoiceDelivery } from "./voiceDelivery";
 import { DEFAULT_VOICE_PERSONA, VOICE_PERSONA_FILE, legacyVoicePersonaBootstrapItemId, voicePersona } from "./voicePersona";
+
+function deliveryDedup(operationId: string): string {
+  return createHash("sha256").update(operationId).digest("hex");
+}
 
 class MemoryEventStore implements RuntimeEventStore {
   private readonly events = new Map<string, RuntimeEvent[]>();
@@ -1214,7 +1219,7 @@ describe("CodexAppServerHost", () => {
     expect(server.requests.find((request) => request.method === "turn/start")?.params).toMatchObject({
       input: [
         { type: "localImage", path: `/runtime-images/${first.sha256}` },
-        { type: "text", text: encodeCodexStructuredUserText("inspect", firstContent.contentDigest, null, null, "image-start") },
+        { type: "text", text: encodeCodexStructuredUserText("inspect", firstContent.contentDigest, null, null, deliveryDedup("image-start")) },
       ],
       clientUserMessageId: "image-start",
     });
@@ -1228,7 +1233,7 @@ describe("CodexAppServerHost", () => {
       expectedTurnId: "turn-1",
       input: [
         { type: "localImage", path: `/runtime-images/${second.sha256}` },
-        { type: "text", text: encodeCodexStructuredUserText("", secondContent.contentDigest, null, null, "image-steer") },
+        { type: "text", text: encodeCodexStructuredUserText("", secondContent.contentDigest, null, null, deliveryDedup("image-steer")) },
       ],
       clientUserMessageId: "image-steer",
     });
@@ -1377,7 +1382,7 @@ describe("CodexAppServerHost", () => {
     expect(steer.params).toMatchObject({
       expectedTurnId: "turn-1",
       clientUserMessageId: "delivery-two",
-      input: [{ type: "text", text: encodeCodexStructuredUserText("steer", undefined, null, null, "delivery-two") }],
+      input: [{ type: "text", text: encodeCodexStructuredUserText("steer", undefined, null, null, deliveryDedup("delivery-two")) }],
     });
 
     server.request("approval-1", "item/commandExecution/requestApproval", { command: "touch allowed" });

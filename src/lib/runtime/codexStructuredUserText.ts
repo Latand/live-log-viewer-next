@@ -1,5 +1,3 @@
-import { createHash } from "node:crypto";
-
 import {
   decodeSelectedContextRef,
   encodeSelectedContextRef,
@@ -50,16 +48,12 @@ export interface DecodedCodexStructuredUserText {
   deliveryDedup?: string;
 }
 
-export function codexStructuredUserDeliveryDedup(operationId: string): string {
-  return createHash("sha256").update(operationId).digest("hex");
-}
-
 export function encodeCodexStructuredUserText(
   text: string,
   contentDigest?: string,
   selectedContext?: SelectedContextRef | null,
   origin?: MessageOrigin | null,
-  deliveryOperationId?: string | null,
+  deliveryDedup?: string | null,
 ): string {
   const attributes: string[] = [];
   if (contentDigest) attributes.push(`sha256=${contentDigest}`);
@@ -69,9 +63,7 @@ export function encodeCodexStructuredUserText(
     const role = messageOriginRole(origin.role);
     if (role) attributes.push(`sender=${role}`);
   }
-  if (deliveryOperationId) {
-    attributes.push(`dedup=${codexStructuredUserDeliveryDedup(deliveryOperationId)}`);
-  }
+  if (deliveryDedup && SHA256.test(deliveryDedup)) attributes.push(`dedup=${deliveryDedup}`);
   if (attributes.length === 0) return STRUCTURED_USER_MARKER + text;
   return `<!-- llv:structured-user ${attributes.join(" ")} -->\n${text}`;
 }

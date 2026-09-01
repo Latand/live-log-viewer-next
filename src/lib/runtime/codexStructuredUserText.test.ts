@@ -1,12 +1,9 @@
 import { expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 
 import { captureSelectedContext, type SelectedContextRef } from "@/lib/selection/selectedContext";
 
-import {
-  codexStructuredUserDeliveryDedup,
-  decodeCodexStructuredUserText,
-  encodeCodexStructuredUserText,
-} from "./codexStructuredUserText";
+import { decodeCodexStructuredUserText, encodeCodexStructuredUserText } from "./codexStructuredUserText";
 
 /**
  * The canonical structured-user record's marker line (#844 §persistence). The
@@ -53,13 +50,14 @@ test("the digest form written before this field still decodes", () => {
 
 test("a delivery operation persists as a hashed recipient dedup identity (#1366)", () => {
   const operationId = "operation-recipient-dedup";
+  const deliveryDedup = createHash("sha256").update(operationId).digest("hex");
   const decoded = decodeCodexStructuredUserText(
-    encodeCodexStructuredUserText("Deliver once.", undefined, null, null, operationId),
+    encodeCodexStructuredUserText("Deliver once.", undefined, null, null, deliveryDedup),
   );
   expect(decoded).toMatchObject({
     text: "Deliver once.",
     structured: true,
-    deliveryDedup: codexStructuredUserDeliveryDedup(operationId),
+    deliveryDedup,
   });
   expect(JSON.stringify(decoded)).not.toContain(operationId);
 });
