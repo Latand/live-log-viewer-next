@@ -8,14 +8,14 @@ import { agentRegistry } from "@/lib/agent/registry";
 export type { ManagedAccountEngine };
 export type AccountRemovalBlocker = "live_sessions" | "current_conversations";
 
-export interface AccountHistoryArtifact {
-  path: string;
-  ownership: "owned" | "unowned";
-}
+export type AccountInventoryArtifact =
+  | { path: string; classification: "owned"; history: boolean }
+  | { path: string; classification: "history"; history: true }
+  | { path: string; classification: "unknown"; history: false };
 
 export interface AccountHistoryInventoryReport {
   home: string;
-  artifacts: AccountHistoryArtifact[];
+  artifacts: AccountInventoryArtifact[];
   error?: { path: string; message: string };
 }
 
@@ -50,9 +50,21 @@ export function accountHomeExistsForRemoval(home: string): boolean {
   }
 }
 
-const HISTORY_ROOTS: Record<ManagedAccountEngine, ReadonlySet<string>> = {
-  claude: new Set(["projects", "history.jsonl", "file-history", "session-env", "shell-snapshots", "todos"]),
-  codex: new Set(["sessions", "archived_sessions", "history.jsonl", "shell_snapshots"]),
+const HISTORY_DIRECTORY_ROOTS: Record<ManagedAccountEngine, ReadonlySet<string>> = {
+  claude: new Set(["projects", "file-history", "session-env", "shell-snapshots", "todos"]),
+  codex: new Set(["sessions", "archived_sessions", "log", "shell_snapshots"]),
+};
+const OWNED_REGULAR_FILES: Record<ManagedAccountEngine, ReadonlySet<string>> = {
+  claude: new Set([".credentials.json", ".claude.json"]),
+  codex: new Set(["auth.json"]),
+};
+const OWNED_SYMLINKS: Record<ManagedAccountEngine, ReadonlySet<string>> = {
+  claude: new Set(["skills", "commands", "agents"]),
+  codex: new Set(["skills", "prompts", "config.toml", "AGENTS.md", "memories", "rules", path.join("plugins", "cache")]),
+};
+const OWNED_DIRECTORY_ROOTS: Record<ManagedAccountEngine, ReadonlySet<string>> = {
+  claude: new Set(["cache", "debug", "backups", "paste-cache", "plugins"]),
+  codex: new Set([".tmp", "mcp-oauth", path.join("plugins", "data")]),
 };
 const SAFE_ACCOUNT_ID = /^[a-z0-9][a-z0-9-]{0,31}$/;
 
@@ -77,7 +89,55 @@ function registryHistoryPaths(engine: ManagedAccountEngine, accountId: string): 
 
 function isHistoryPath(engine: ManagedAccountEngine, relative: string): boolean {
   const topLevel = relative.split(path.sep)[0]!;
-  return HISTORY_ROOTS[engine].has(topLevel) || path.basename(relative).endsWith(".jsonl");
+  const basename = path.basename(relative);
+  return HISTORY_DIRECTORY_ROOTS[engine].has(topLevel)
+    || topLevel === "history.jsonl"
+    || basename.endsWith(".jsonl")
+    || engine === "codex" && /\.sqlite3?(?:-(?:shm|wal))?$/.test(basename);
+}
+
+function atOrBelow(relative: string, root: string): boolean {
+  return relative === root || relative.startsWith(`${root}${path.sep}`);
+}
+
+function isOwnedDirectoryPath(engine: ManagedAccountEngine, relative: string): boolean {
+  for (const root of OWNED_DIRECTORY_ROOTS[engine]) if (atOrBelow(relative, root)) return true;
+  return false;
+}
+
+function isHistoryDirectoryPath(engine: ManagedAccountEngine, relative: string): boolean {
+  for (const root of HISTORY_DIRECTORY_ROOTS[engine]) if (atOrBelow(relative, root)) return true;
+  return false;
+}
+
+function classifyArtifact(
+  engine: ManagedAccountEngine,
+  relative: string,
+  absolute: string,
+  stat: fs.Stats,
+  ownedPaths: ReadonlySet<string>,
+): AccountInventoryArtifact {
+  const history = isHistoryPath(engine, relative);
+  if (stat.isSymbolicLink()) {
+    if (OWNED_SYMLINKS[engine].has(relative)) return { path: relative, classification: "owned", history: false };
+    if (history) return { path: relative, classification: "history", history: true };
+    return { path: relative, classification: "unknown", history: false };
+  }
+  if (stat.isDirectory()) {
+    const ownedContainer = isHistoryDirectoryPath(engine, relative)
+      || isOwnedDirectoryPath(engine, relative)
+      || engine === "codex" && relative === "plugins";
+    if (ownedContainer) return { path: relative, classification: "owned", history: false };
+    return { path: relative, classification: "unknown", history: false };
+  }
+  if (stat.isFile() && ownedPaths.has(path.resolve(absolute))) {
+    return { path: relative, classification: "owned", history: true };
+  }
+  if (history) return { path: relative, classification: "history", history: true };
+  if (stat.isFile() && (OWNED_REGULAR_FILES[engine].has(relative) || isOwnedDirectoryPath(engine, relative))) {
+    return { path: relative, classification: "owned", history: false };
+  }
+  return { path: relative, classification: "unknown", history: false };
 }
 
 function errorMessage(error: unknown): string {
@@ -101,9 +161,11 @@ function mountedPaths(): ReadonlySet<string> {
 }
 
 /**
- * Inventories history below an already-validated managed home without crossing
- * a symlink or filesystem boundary. Every discovered artifact needs exact
- * durable path ownership from a generation assigned to the account.
+ * Classifies every entry below an already-validated managed home without
+ * crossing a symlink or filesystem boundary. Exact provider state and regular
+ * files named by the account's registry history are owned. Known unowned
+ * history, unknown entries, and incomplete traversal all block deletion with
+ * the paths that caused the refusal.
  */
 export function accountHistoryInventory(
   engine: ManagedAccountEngine,
@@ -111,7 +173,7 @@ export function accountHistoryInventory(
   home: string,
 ): AccountHistoryInventoryReport {
   const resolvedHome = path.resolve(home);
-  const artifacts: AccountHistoryArtifact[] = [];
+  const artifacts: AccountInventoryArtifact[] = [];
   let failingPath = ".";
   try {
     const homeStat = fs.lstatSync(resolvedHome);
@@ -121,33 +183,27 @@ export function accountHistoryInventory(
     const mounts = mountedPaths();
     if (mounts.has(resolvedHome)) throw new Error("managed account home is an external mount");
     const ownedPaths = registryHistoryPaths(engine, accountId);
-    const visit = (directory: string, relativeDirectory: string, insideHistoryRoot: boolean): void => {
+    const visit = (directory: string, relativeDirectory: string): void => {
       failingPath = relativeDirectory || ".";
       for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
         const pathname = path.join(directory, entry.name);
         const relative = relativeDirectory ? path.join(relativeDirectory, entry.name) : entry.name;
         failingPath = relative;
-        const isHistory = insideHistoryRoot || isHistoryPath(engine, relative);
         const stat = fs.lstatSync(pathname);
         if (mounts.has(path.resolve(pathname))) throw new Error(`history inventory reached an external mount at ${relative}`);
         if (stat.dev !== homeStat.dev) throw new Error(`history inventory crossed a filesystem boundary at ${relative}`);
         if (stat.uid !== expectedUid || !stat.isSymbolicLink() && (stat.mode & 0o022) !== 0) {
           throw new Error(`history inventory found unsafe ownership or permissions at ${relative}`);
         }
-        if (stat.isSymbolicLink()) {
-          if (isHistory) artifacts.push({ path: relative, ownership: "unowned" });
-          continue;
-        }
+        artifacts.push(classifyArtifact(engine, relative, pathname, stat, ownedPaths));
+        if (stat.isSymbolicLink()) continue;
         if (stat.isDirectory()) {
-          visit(pathname, relative, isHistory);
+          visit(pathname, relative);
           continue;
-        }
-        if (isHistory) {
-          artifacts.push({ path: relative, ownership: stat.isFile() && ownedPaths.has(path.resolve(pathname)) ? "owned" : "unowned" });
         }
       }
     };
-    visit(resolvedHome, "", false);
+    visit(resolvedHome, "");
   } catch (error) {
     throw new AccountHistoryInventoryBlockedError({
       home: resolvedHome,
@@ -156,7 +212,7 @@ export function accountHistoryInventory(
     });
   }
   const report = { home: resolvedHome, artifacts: artifacts.sort((left, right) => left.path.localeCompare(right.path)) };
-  if (report.artifacts.some((artifact) => artifact.ownership === "unowned")) {
+  if (report.artifacts.some((artifact) => artifact.classification !== "owned")) {
     throw new AccountHistoryInventoryBlockedError(report);
   }
   return report;
@@ -166,7 +222,11 @@ function blockedInventory(report: AccountHistoryInventoryReport, path: string, m
   return new AccountHistoryInventoryBlockedError({ ...report, error: { path, message } });
 }
 
-function validatedHomeRemovalContext(home: string): { root: string; stat: fs.Stats; uid: number; mounts: ReadonlySet<string> } {
+function validatedHomeRemovalContext(
+  engine: ManagedAccountEngine,
+  accountId: string,
+  home: string,
+): { root: string; stat: fs.Stats; uid: number; mounts: ReadonlySet<string>; ownedPaths: ReadonlySet<string> } {
   const root = path.resolve(home);
   const stat = fs.lstatSync(root);
   const uid = process.getuid?.() ?? stat.uid;
@@ -175,7 +235,7 @@ function validatedHomeRemovalContext(home: string): { root: string; stat: fs.Sta
   }
   const mounts = mountedPaths();
   if (mounts.has(root)) throw new Error("managed account home is an external mount");
-  return { root, stat, uid, mounts };
+  return { root, stat, uid, mounts, ownedPaths: registryHistoryPaths(engine, accountId) };
 }
 
 type TreeRemovalResult = { complete: boolean; changed: boolean };
@@ -240,8 +300,12 @@ function removeNonHistoryTree(
         const current = accountHistoryInventory(engine, accountId, home);
         throw blockedInventory(current, relative, "account-home entry failed removal safety checks");
       }
+      const artifact = classifyArtifact(engine, relative, path.join(context.root, relative), stat, context.ownedPaths);
+      if (artifact.classification !== "owned" || artifact.history) {
+        const current = accountHistoryInventory(engine, accountId, home);
+        throw blockedInventory(current, relative, "account-home entry is outside deletion ownership");
+      }
       if (stat.isSymbolicLink()) {
-        if (isHistoryPath(engine, relative)) throw new AccountHistoryInventoryBlockedError(accountHistoryInventory(engine, accountId, home));
         try { fs.rmSync(pathname, { force: true }); changed = true; }
         catch { complete = false; }
         continue;
@@ -253,14 +317,13 @@ function removeNonHistoryTree(
         try { fs.rmdirSync(pathname); changed = true; }
         catch (error) {
           const current = accountHistoryInventory(engine, accountId, home);
-          if (current.artifacts.some((artifact) => artifact.path === relative || artifact.path.startsWith(`${relative}${path.sep}`))) {
+          if (current.artifacts.some((artifact) => artifact.history && (artifact.path === relative || artifact.path.startsWith(`${relative}${path.sep}`)))) {
             throw blockedInventory(current, relative, "history appeared during account-home removal");
           }
           if ((error as NodeJS.ErrnoException).code !== "ENOENT") complete = false;
         }
         continue;
       }
-      if (isHistoryPath(engine, relative)) throw new AccountHistoryInventoryBlockedError(accountHistoryInventory(engine, accountId, home));
       try { fs.rmSync(pathname, { force: true }); changed = true; }
       catch { complete = false; }
     }
@@ -273,17 +336,17 @@ function removeNonHistoryTree(
 /** Deletes a history-free home without a recursive filesystem operation. */
 export function removeHistoryFreeAccountHome(engine: ManagedAccountEngine, accountId: string, home: string): boolean {
   const initial = accountHistoryInventory(engine, accountId, home);
-  if (initial.artifacts.length > 0) throw new AccountHistoryInventoryBlockedError(initial);
+  if (initial.artifacts.some((artifact) => artifact.history)) throw new AccountHistoryInventoryBlockedError(initial);
   if (process.platform !== "linux") return false;
   let context: ReturnType<typeof validatedHomeRemovalContext>;
-  try { context = validatedHomeRemovalContext(home); }
+  try { context = validatedHomeRemovalContext(engine, accountId, home); }
   catch (error) { throw blockedInventory(initial, ".", errorMessage(error)); }
   const removal = removeNonHistoryTree(engine, accountId, home, context, context.root, "", context.stat, null);
   try { fs.rmdirSync(context.root); }
   catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
       const current = accountHistoryInventory(engine, accountId, home);
-      if (current.artifacts.length > 0) throw blockedInventory(current, ".", "history appeared during account-home removal");
+      if (current.artifacts.some((artifact) => artifact.history)) throw blockedInventory(current, ".", "history appeared during account-home removal");
       return false;
     }
   }
@@ -300,12 +363,12 @@ export function scrubAccountHomeToRetainedHistory(
 ): TreeRemovalResult {
   const initial = accountHistoryInventory(engine, accountId, home);
   let context: ReturnType<typeof validatedHomeRemovalContext>;
-  try { context = validatedHomeRemovalContext(home); }
+  try { context = validatedHomeRemovalContext(engine, accountId, home); }
   catch (error) { throw blockedInventory(initial, ".", errorMessage(error)); }
   const removal = removeNonHistoryTree(engine, accountId, home, context, context.root, "", context.stat, retainedName);
   const current = accountHistoryInventory(engine, accountId, home);
-  const before = initial.artifacts.map((artifact) => `${artifact.path}:${artifact.ownership}`).sort();
-  const after = current.artifacts.map((artifact) => `${artifact.path}:${artifact.ownership}`).sort();
+  const before = initial.artifacts.filter((artifact) => artifact.history).map((artifact) => `${artifact.path}:${artifact.classification}`).sort();
+  const after = current.artifacts.filter((artifact) => artifact.history).map((artifact) => `${artifact.path}:${artifact.classification}`).sort();
   if (before.length !== after.length || before.some((value, index) => value !== after[index])) {
     throw blockedInventory(current, retainedName, "history changed during account-home cleanup");
   }
@@ -322,8 +385,8 @@ export interface StagedAccountHomeCleanup {
 }
 
 function sameHistoryInventory(left: AccountHistoryInventoryReport, right: AccountHistoryInventoryReport): boolean {
-  const leftArtifacts = left.artifacts.map((artifact) => `${artifact.path}:${artifact.ownership}`).sort();
-  const rightArtifacts = right.artifacts.map((artifact) => `${artifact.path}:${artifact.ownership}`).sort();
+  const leftArtifacts = left.artifacts.filter((artifact) => artifact.history).map((artifact) => `${artifact.path}:${artifact.classification}`).sort();
+  const rightArtifacts = right.artifacts.filter((artifact) => artifact.history).map((artifact) => `${artifact.path}:${artifact.classification}`).sort();
   return leftArtifacts.length === rightArtifacts.length
     && leftArtifacts.every((value, index) => value === rightArtifacts[index]);
 }
@@ -383,7 +446,7 @@ export function verifyStagedAccountHome(engine: ManagedAccountEngine, accountId:
     throw blockedInventory(current, ".", "history changed during account-registry commit");
   }
   const staged = accountHistoryInventory(engine, accountId, cleanup.stagingHome);
-  if (staged.artifacts.length > 0) {
+  if (staged.artifacts.some((artifact) => artifact.history)) {
     throw blockedInventory(staged, ".", "history appeared in staged account data during account-registry commit");
   }
 }
@@ -403,7 +466,7 @@ export function stageAccountHomeCleanup(
   let context: ReturnType<typeof validatedHomeRemovalContext>;
   let stagingHome: string;
   try {
-    context = validatedHomeRemovalContext(home);
+    context = validatedHomeRemovalContext(engine, accountId, home);
     stagingHome = path.join(path.dirname(context.root), `.${path.basename(context.root)}.removal-${process.pid}-${crypto.randomUUID()}`);
     fs.mkdirSync(stagingHome, { mode: 0o700 });
   } catch (error) {

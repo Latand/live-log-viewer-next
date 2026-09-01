@@ -508,7 +508,11 @@ test("orphan cleanup preserves a safe-looking home with unowned history", () => 
     history: {
       "history-orphan": {
         home: orphan,
-        artifacts: [{ path: path.relative(orphan, transcript), ownership: "unowned" }],
+        artifacts: expect.arrayContaining([{
+          path: path.relative(orphan, transcript),
+          classification: "history",
+          history: true,
+        }]),
       },
     },
   });

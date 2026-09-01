@@ -12,7 +12,7 @@ const { AgentRegistry, setAgentRegistryForTests } = await import("@/lib/agent/re
 const { emptyLaunchProfile } = await import("@/lib/accounts/migration/contracts");
 type ViewerConversationId = import("@/lib/accounts/migration/contracts").ViewerConversationId;
 const { procBackend } = await import("@/lib/proc");
-const { accountRemovalBlockers, cleanupAccountProviderSidecars, removeHistoryFreeAccountHome } = await import("./removal");
+const { AccountHistoryInventoryBlockedError, accountRemovalBlockers, cleanupAccountProviderSidecars, removeHistoryFreeAccountHome } = await import("./removal");
 const { terminalizeStaleUndeliverableHeldDeliveries } = await import("@/lib/reaperRuntime");
 
 type Registry = InstanceType<typeof AgentRegistry>;
@@ -39,6 +39,145 @@ function registry(): Registry {
   setAgentRegistryForTests(store);
   return store;
 }
+
+test("Codex log artifacts block deletion and name the history path", () => {
+  const home = path.join(sandbox, "codex-log-home");
+  const relative = path.join("log", "codex-tui.log");
+  const artifact = path.join(home, relative);
+  fs.mkdirSync(path.dirname(artifact), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(artifact, "session log\n", { mode: 0o600 });
+
+  let caught: unknown;
+  try { removeHistoryFreeAccountHome("codex", "work", home); }
+  catch (error) { caught = error; }
+
+  expect(caught).toBeInstanceOf(AccountHistoryInventoryBlockedError);
+  expect((caught as InstanceType<typeof AccountHistoryInventoryBlockedError>).report.artifacts).toContainEqual({
+    path: relative,
+    classification: "history",
+    history: true,
+  });
+  expect(fs.readFileSync(artifact, "utf8")).toBe("session log\n");
+});
+
+test("Codex SQLite session data blocks deletion and names the database path", () => {
+  const home = path.join(sandbox, "codex-sqlite-home");
+  const relative = "state_5.sqlite";
+  const artifact = path.join(home, relative);
+  fs.mkdirSync(home, { mode: 0o700 });
+  fs.writeFileSync(artifact, "sqlite session data", { mode: 0o600 });
+
+  let caught: unknown;
+  try { removeHistoryFreeAccountHome("codex", "work", home); }
+  catch (error) { caught = error; }
+
+  expect(caught).toBeInstanceOf(AccountHistoryInventoryBlockedError);
+  expect((caught as InstanceType<typeof AccountHistoryInventoryBlockedError>).report.artifacts).toContainEqual({
+    path: relative,
+    classification: "history",
+    history: true,
+  });
+  expect(fs.readFileSync(artifact, "utf8")).toBe("sqlite session data");
+});
+
+test("an unclassified account-home file blocks deletion and names the unknown path", () => {
+  const home = path.join(sandbox, "unknown-artifact-home");
+  const relative = "future-provider-state.bin";
+  const artifact = path.join(home, relative);
+  fs.mkdirSync(home, { mode: 0o700 });
+  fs.writeFileSync(artifact, "unrecognized state", { mode: 0o600 });
+
+  let caught: unknown;
+  try { removeHistoryFreeAccountHome("codex", "work", home); }
+  catch (error) { caught = error; }
+
+  expect(caught).toBeInstanceOf(AccountHistoryInventoryBlockedError);
+  expect((caught as InstanceType<typeof AccountHistoryInventoryBlockedError>).report.artifacts).toContainEqual({
+    path: relative,
+    classification: "unknown",
+    history: false,
+  });
+  expect(fs.readFileSync(artifact, "utf8")).toBe("unrecognized state");
+});
+
+test("an unknown file appearing after preflight blocks anchored removal", () => {
+  const home = path.join(sandbox, "late-unknown-home");
+  const relative = "late-unknown.bin";
+  const artifact = path.join(home, relative);
+  fs.mkdirSync(home, { mode: 0o700 });
+  const originalOpen = fs.openSync;
+  let injected = false;
+  fs.openSync = ((target: fs.PathLike, flags: fs.OpenMode, mode?: fs.Mode) => {
+    if (!injected && path.resolve(String(target)) === path.resolve(home)) {
+      injected = true;
+      fs.writeFileSync(artifact, "late state", { mode: 0o600 });
+    }
+    return originalOpen(target, flags, mode);
+  }) as typeof fs.openSync;
+
+  let caught: unknown;
+  try { removeHistoryFreeAccountHome("codex", "work", home); }
+  catch (error) { caught = error; }
+  finally { fs.openSync = originalOpen; }
+
+  expect(caught).toBeInstanceOf(AccountHistoryInventoryBlockedError);
+  expect((caught as InstanceType<typeof AccountHistoryInventoryBlockedError>).report.artifacts).toContainEqual({
+    path: relative,
+    classification: "unknown",
+    history: false,
+  });
+  expect(fs.readFileSync(artifact, "utf8")).toBe("late state");
+});
+
+test("an incomplete directory inventory blocks deletion and names the unreadable path", () => {
+  const home = path.join(sandbox, "unreadable-inventory-home");
+  const relative = "unreadable-directory";
+  const unreadable = path.join(home, relative);
+  fs.mkdirSync(unreadable, { recursive: true, mode: 0o700 });
+  const originalRead = fs.readdirSync;
+  fs.readdirSync = ((target: fs.PathLike, options?: unknown) => {
+    if (path.resolve(String(target)) === path.resolve(unreadable)) {
+      throw Object.assign(new Error("directory inventory denied"), { code: "EACCES" });
+    }
+    return originalRead(target, options as never);
+  }) as typeof fs.readdirSync;
+
+  let caught: unknown;
+  try { removeHistoryFreeAccountHome("codex", "work", home); }
+  catch (error) { caught = error; }
+  finally { fs.readdirSync = originalRead; }
+
+  expect(caught).toBeInstanceOf(AccountHistoryInventoryBlockedError);
+  expect((caught as InstanceType<typeof AccountHistoryInventoryBlockedError>).report.error).toEqual({
+    path: relative,
+    message: "directory inventory denied",
+  });
+  expect(fs.existsSync(unreadable)).toBe(true);
+});
+
+test("a fully-owned home and provider sidecar delete without following an outside symlink", () => {
+  const root = path.join(sandbox, "fully-owned-accounts");
+  const home = path.join(root, "work");
+  const sidecar = path.join(root, "work.lock");
+  const outside = path.join(sandbox, "owned-capability-target");
+  const sentinel = path.join(outside, "keep.txt");
+  fs.mkdirSync(path.join(home, "projects"), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(home, ".credentials.json"), "{}", { mode: 0o600 });
+  fs.mkdirSync(outside, { mode: 0o700 });
+  fs.writeFileSync(sentinel, "keep", { mode: 0o600 });
+  fs.symlinkSync(outside, path.join(home, "skills"));
+  fs.mkdirSync(sidecar, { mode: 0o700 });
+  fs.writeFileSync(path.join(sidecar, "provider.lock"), "owned", { mode: 0o600 });
+
+  expect(removeHistoryFreeAccountHome("claude", "work", home)).toBe(true);
+  expect(cleanupAccountProviderSidecars(root, "work", [".lock"])).toEqual({
+    removed: ["work.lock"],
+    unresolved: [],
+  });
+  expect(fs.existsSync(home)).toBe(false);
+  expect(fs.existsSync(sidecar)).toBe(false);
+  expect(fs.readFileSync(sentinel, "utf8")).toBe("keep");
+});
 
 test("platforms without fd anchoring leave homes and sidecars pending", () => {
   const home = path.join(sandbox, "non-linux-home");

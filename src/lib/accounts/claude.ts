@@ -316,7 +316,7 @@ export function createManagedClaudeAccount(label: string): ClaudeAccount {
 }
 
 function historyFitsRetainedProjects(report: AccountHistoryInventoryReport): boolean {
-  return report.artifacts.every((artifact) => artifact.path.startsWith(`projects${path.sep}`));
+  return report.artifacts.filter((artifact) => artifact.history).every((artifact) => artifact.path.startsWith(`projects${path.sep}`));
 }
 
 const CLAUDE_SIDECAR_SUFFIXES = [".lock"] as const;
@@ -349,7 +349,7 @@ export function removeManagedClaudeAccount(id: string): { cleanupPending: boolea
     if (history && !historyFitsRetainedProjects(history)) {
       throw new AccountHistoryInventoryBlockedError({ ...history, error: { path: ".", message: "history falls outside the retained projects archive" } });
     }
-    const retain = (history?.artifacts.length ?? 0) > 0;
+    const retain = history?.artifacts.some((artifact) => artifact.history) ?? false;
     const staged: StagedAccountHomeCleanup | null = exists
       ? stageAccountHomeCleanup("claude", id, home, retain ? "projects" : null)
       : null;
@@ -447,7 +447,7 @@ export function cleanupOrphanedClaudeHomes(): AccountOrphanCleanupReport {
         unresolved.push(entry.name); continue;
       }
       if (retired.has(entry.name)) {
-        if (history.artifacts.length === 0) {
+        if (!history.artifacts.some((artifact) => artifact.history)) {
           try {
             if (removeHistoryFreeAccountHome("claude", entry.name, managedHome(entry.name))) removed.push(entry.name);
             else unresolved.push(entry.name);
@@ -468,7 +468,7 @@ export function cleanupOrphanedClaudeHomes(): AccountOrphanCleanupReport {
         }
         continue;
       }
-      if (history.artifacts.length > 0) { historyReports[entry.name] = history; unresolved.push(entry.name); continue; }
+      if (history.artifacts.some((artifact) => artifact.history)) { historyReports[entry.name] = history; unresolved.push(entry.name); continue; }
       try {
         if (removeHistoryFreeAccountHome("claude", entry.name, managedHome(entry.name))) removed.push(entry.name);
         else unresolved.push(entry.name);

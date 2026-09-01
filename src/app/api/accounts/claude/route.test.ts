@@ -322,7 +322,11 @@ test("an unowned transcript in the managed home blocks removal and is named in t
     blockers: ["filesystem_history"],
     history: {
       home: account.home,
-      artifacts: [{ path: path.relative(account.home, transcript), ownership: "unowned" }],
+      artifacts: expect.arrayContaining([{
+        path: path.relative(account.home, transcript),
+        classification: "history",
+        history: true,
+      }]),
     },
   }));
   expect(fs.readFileSync(transcript, "utf8")).toBe("{}\n");
@@ -351,7 +355,7 @@ test("a failed filesystem inventory blocks managed-home removal", async () => {
       blockers: ["filesystem_history"],
       history: {
         home: account.home,
-        artifacts: [],
+        artifacts: [{ path: "projects", classification: "owned", history: false }],
         error: { path: "projects", message: "inventory unreadable" },
       },
     }));

@@ -188,7 +188,11 @@ test("an unowned Codex session blocks managed-home removal", async () => {
     blockers: ["filesystem_history"],
     history: {
       home: account.home,
-      artifacts: [{ path: path.relative(account.home, session), ownership: "unowned" }],
+      artifacts: expect.arrayContaining([{
+        path: path.relative(account.home, session),
+        classification: "history",
+        history: true,
+      }]),
     },
   }));
   expect(fs.readFileSync(session, "utf8")).toBe("{}\n");

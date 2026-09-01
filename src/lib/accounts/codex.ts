@@ -438,7 +438,7 @@ export function createManagedCodexAccount(label: string): CodexAccount {
 }
 
 function historyFitsRetainedSessions(report: AccountHistoryInventoryReport): boolean {
-  return report.artifacts.every((artifact) => artifact.path.startsWith(`sessions${path.sep}`));
+  return report.artifacts.filter((artifact) => artifact.history).every((artifact) => artifact.path.startsWith(`sessions${path.sep}`));
 }
 
 /**
@@ -461,7 +461,7 @@ export function removeManagedCodexAccount(id: string): { cleanupPending: boolean
     if (history && !historyFitsRetainedSessions(history)) {
       throw new AccountHistoryInventoryBlockedError({ ...history, error: { path: ".", message: "history falls outside the retained sessions archive" } });
     }
-    const retain = (history?.artifacts.length ?? 0) > 0;
+    const retain = history?.artifacts.some((artifact) => artifact.history) ?? false;
     const staged: StagedAccountHomeCleanup | null = exists
       ? stageAccountHomeCleanup("codex", id, home, retain ? "sessions" : null)
       : null;
@@ -542,7 +542,7 @@ export function cleanupOrphanedCodexHomes(): AccountOrphanCleanupReport {
         unresolved.push(entry.name); continue;
       }
       if (retired.has(entry.name)) {
-        if (history.artifacts.length === 0) {
+        if (!history.artifacts.some((artifact) => artifact.history)) {
           try {
             if (removeHistoryFreeAccountHome("codex", entry.name, managedHome(entry.name))) removed.push(entry.name);
             else unresolved.push(entry.name);
@@ -563,7 +563,7 @@ export function cleanupOrphanedCodexHomes(): AccountOrphanCleanupReport {
         }
         continue;
       }
-      if (history.artifacts.length > 0) { historyReports[entry.name] = history; unresolved.push(entry.name); continue; }
+      if (history.artifacts.some((artifact) => artifact.history)) { historyReports[entry.name] = history; unresolved.push(entry.name); continue; }
       try {
         if (removeHistoryFreeAccountHome("codex", entry.name, managedHome(entry.name))) removed.push(entry.name);
         else unresolved.push(entry.name);
