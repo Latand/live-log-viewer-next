@@ -73,5 +73,15 @@
     "id": "GHSA-rgw5-rvv9-x895",
     "reason": "Current lockfile advisory is tracked for dependency upgrade.",
     "expires": "2026-09-24"
+  },
+  {
+    "id": "GHSA-c83g-rgw3-j3cx",
+    "reason": "Browserslist unbounded memory growth; dev-only transitive dependency via eslint-config-next. Tracked for dependency upgrade.",
+    "expires": "2026-09-24"
+  },
+  {
+    "id": "GHSA-73wf-gq98-2v4g",
+    "reason": "Browserslist untrusted custom-stats crash; dev-only transitive dependency via eslint-config-next. Tracked for dependency upgrade.",
+    "expires": "2026-09-24"
   }
 ]
