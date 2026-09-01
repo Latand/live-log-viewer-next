@@ -866,6 +866,77 @@ test("unknown Claude transcript model omits the successor override", async () =>
   expect(command).not.toContain("--model");
 });
 
+test("Codex cross-account successor stages the source rollout before resuming paginated history", async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-provider-codex-paginated-lineage-"));
+  roots.push(base);
+  const source = accountRoot("codex", base, "origin");
+  const target = accountRoot("codex", base, "successor");
+  const sourceId = "11111111-1111-\x34111-8111-111111111111";
+  const forkId = "22222222-2222-\x34222-8222-222222222222";
+  const relativeSourcePath = path.join("2026", "08", "31", `rollout-${sourceId}.jsonl`);
+  const sourcePath = path.join(source.transcriptRoot, relativeSourcePath);
+  const forkPath = path.join(source.transcriptRoot, "2026", "08", "31", `rollout-${forkId}.jsonl`);
+  const stagedSourcePath = path.join(target.transcriptRoot, relativeSourcePath);
+  const fullSourceHistory = codexSessionMeta(sourceId)
+    + JSON.stringify({ type: "response_item", payload: { type: "message", role: "user", content: "first turn" } }) + "\n"
+    + JSON.stringify({ type: "response_item", payload: { type: "message", role: "assistant", content: "full answer" } }) + "\n";
+  fs.mkdirSync(path.dirname(sourcePath), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(sourcePath, fullSourceHistory, { mode: 0o600 });
+  const continuityPaths: string[] = [];
+  let historySeenBySuccessor: string | null = null;
+  const client = (home: string) => ({
+    async readAccount() { return { account: { type: "chatgpt" }, requiresOpenaiAuth: true }; },
+    async forkThread() {
+      fs.writeFileSync(forkPath, codexSessionMeta(forkId, sourceId), { mode: 0o600 });
+      return { id: forkId, path: forkPath };
+    },
+    async resumeThread(id: string, options: { path: string }) {
+      if (home !== target.home) throw new Error("source account unexpectedly resumed the successor");
+      if (!fs.existsSync(stagedSourcePath)) {
+        throw new Error(`invalid paginated history lineage for ${id}: missing source rollout`);
+      }
+      historySeenBySuccessor = fs.readFileSync(stagedSourcePath, "utf8");
+      expect(fs.readFileSync(options.path, "utf8")).toContain(`\"forked_from_id\":\"${sourceId}\"`);
+      return { id, path: options.path };
+    },
+    async readThread(id: string) { return { id, path: null }; },
+    async setThreadName() {},
+    async setThreadGoal() {},
+    close() {},
+  }) as unknown as CodexAppServerClient;
+  const provider = new RegisteredSuccessorProvider({
+    accounts: { resolveSpawn: () => target, resolveTranscriptOwner: () => source },
+    startCodex: async (home) => client(home),
+    claudeStatus: async () => ({ loggedIn: false }),
+    spawnClaude: async () => { throw new Error("unexpected Claude spawn"); },
+    journalRoot: path.join(base, "migration-journal"),
+    now: () => "2026-08-31T20:13:00.000Z",
+  });
+
+  const receipt = await provider.create({
+    engine: "codex",
+    operationId: "cross-account-paginated-lineage",
+    conversationId: "conversation_paginated_lineage",
+    targetAccountId: target.accountId,
+    source: {
+      id: sourceId,
+      path: sourcePath,
+      accountId: source.accountId,
+      launchProfile: migrationSuccessorLaunchProfile(emptyLaunchProfile({ cwd: base, title: "History fixture" })),
+      historyHash: null,
+      host: null,
+      createdAt: "2026-08-31T19:00:00.000Z",
+      archivedAt: null,
+    },
+    recordContinuityPath(pathname) { continuityPaths.push(pathname); },
+  });
+
+  expect(historySeenBySuccessor as string | null).toBe(fullSourceHistory);
+  expect(fs.readFileSync(stagedSourcePath, "utf8")).toBe(fullSourceHistory);
+  expect(receipt.continuityPaths).toEqual([forkPath, stagedSourcePath, receipt.path]);
+  expect(continuityPaths).toEqual(receipt.continuityPaths);
+});
+
 test("Codex successor provider accepts authenticated ChatGPT account responses and standard 0755 roots", async () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-provider-codex-"));
   roots.push(base);
@@ -913,14 +984,15 @@ test("Codex successor provider accepts authenticated ChatGPT account responses a
     recordContinuityPath(pathname: string) { recorded.push(pathname); },
   } as Parameters<SuccessorProviderPort["create"]>[0] & { recordContinuityPath(pathname: string): void };
   await expect(provider.create(input)).rejects.toThrow("target Codex account is not authenticated");
+  const stagedSourcePath = path.join(target.transcriptRoot, "2026", "07", "10", `rollout-${sourceId}.jsonl`);
   const failedTargetCopy = path.join(target.transcriptRoot, "2026", "07", "10", `rollout-${forkId}.jsonl`);
-  expect(recorded).toEqual([forkPath, failedTargetCopy]);
+  expect(recorded).toEqual([forkPath, stagedSourcePath, failedTargetCopy]);
 
   targetAuthenticated = true;
   const receipt = await provider.create(input);
   expect(receipt.nativeId).toBe(forkId);
   expect(receipt.path.startsWith(target.transcriptRoot + path.sep)).toBeTrue();
-  expect(receipt.continuityPaths).toEqual([forkPath, receipt.path]);
+  expect(receipt.continuityPaths).toEqual([forkPath, stagedSourcePath, receipt.path]);
   expect(fs.readFileSync(receipt.path, "utf8")).toContain("session_meta");
   expect(calls).toContain("source:fork");
   expect(calls).toContain("target:resume");
@@ -1306,7 +1378,7 @@ test("Codex successor provider reuses one published copy after a crash", async (
   expect(receipt.path).toBe(copiedPath);
   expect(fs.statSync(receipt.path).ino).toBe(published.ino);
   expect(fs.readdirSync(source.transcriptRoot).filter((name) => name.endsWith(".jsonl"))).toHaveLength(2);
-  expect(fs.readdirSync(target.transcriptRoot).filter((name) => name.endsWith(".jsonl"))).toHaveLength(1);
+  expect(fs.readdirSync(target.transcriptRoot).filter((name) => name.endsWith(".jsonl"))).toHaveLength(2);
   expect(Object.values(registry.snapshot().conversations)).toHaveLength(1);
 });
 

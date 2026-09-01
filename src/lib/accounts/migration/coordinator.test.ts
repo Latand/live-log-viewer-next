@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { CodexAppServerError } from "@/lib/accounts/codexAppServer";
 import { AgentRegistry, MigrationRevisionError, type ConversationObservation } from "@/lib/agent/registry";
 import { boardFor, mutateBoard, setBoardFileForTests } from "@/lib/board/store";
 import { terminalizeStaleUndeliverableHeldDeliveries } from "@/lib/reaperRuntime";
@@ -2617,19 +2618,53 @@ describe("durable account migration coordinator", () => {
       snapshot.heldDeliveries[id]?.error?.startsWith(MIGRATION_DELIVERY_CANCELLATION_PREFIX))).toBeTrue();
   });
 
-  test("rollback terminalizes held delivery on the source generation", async () => {
+  test("successor start failure rollback re-arms held delivery on the restored source host", async () => {
     const store = registry();
-    store.reconcileConversations([observation("/source.jsonl", "a", "idle")]);
-    const conversation = store.conversationForPath("/source.jsonl")!;
-    store.commitMigrationIntent({ engine: "codex", targetId: "b", origin: "manual", requestId: "rollback", expectedRevision: store.engineRouting("codex").revision });
-    store.holdDelivery(conversation.id, "safe retry", "client-rollback");
-    const revision = store.conversation(conversation.id)!.migration!.revision;
-    store.rollbackConversationMigration(conversation.id, revision);
-    expect(store.pendingDeliveries(conversation.id)[0]).toMatchObject({
-      state: "failed",
-      generationId: null,
+    store.reconcileConversations([observation("/restored-source.jsonl", "origin", "idle")]);
+    const conversation = store.conversationForPath("/restored-source.jsonl")!;
+    const sourceGeneration = conversation.generations.at(-1)!;
+    store.commitMigrationIntent({
+      engine: "codex",
+      targetId: "successor",
+      origin: "manual",
+      requestId: "rollback-with-held-delivery",
+      expectedRevision: store.engineRouting("codex").revision,
+    });
+    const held = store.holdDelivery(conversation.id, "deliver after rollback", "client-rollback");
+    const failed = await advanceConversationMigration(conversation.id, store, {
+      virtualSource: true,
+      async create() { throw new Error("successor fixture failed to start"); },
+      async verify() { throw new Error("verification must not run"); },
+    });
+    expect(failed.migration?.phase).toBe("failed-recoverable");
+
+    store.rollbackConversationMigration(conversation.id, failed.migration!.revision);
+    const restarted = new AgentRegistry(store.filename);
+    expect(restarted.pendingDeliveries(conversation.id)[0]).toMatchObject({
+      state: "assigned",
+      generationId: sourceGeneration.id,
       attempts: 0,
-      error: expect.stringContaining("migration was rolled back"),
+      error: null,
+    });
+    expect(terminalizeStaleUndeliverableHeldDeliveries(restarted)).toEqual([]);
+
+    const delivered: Array<{ clientMessageId: string; path: string; text: string }> = [];
+    await reconcileMigrations(provider([]), {
+      async deliver({ clientMessageId, path, delivery }) {
+        delivered.push({ clientMessageId, path, text: delivery.text });
+        return "delivered";
+      },
+    }, restarted);
+
+    expect(delivered).toEqual([{
+      clientMessageId: "client-rollback",
+      path: sourceGeneration.path,
+      text: "deliver after rollback",
+    }]);
+    expect(restarted.snapshot().heldDeliveries[held.id]).toMatchObject({
+      state: "delivered",
+      attempts: 1,
+      error: null,
     });
   });
 
@@ -3744,6 +3779,37 @@ describe("durable account migration coordinator", () => {
     });
     expect(JSON.stringify(failed.migration)).not.toContain("durability check failed");
     expect(cleaned).toEqual(["failed-successor"]);
+  });
+
+  test("a missing paginated source rollout reports the target history mechanism", async () => {
+    const store = registry();
+    store.reconcileConversations([observation("/history-source.jsonl", "origin", "idle")]);
+    const conversation = store.conversationForPath("/history-source.jsonl")!;
+    store.commitMigrationIntent({
+      engine: "codex",
+      targetId: "successor",
+      origin: "manual",
+      requestId: "history-unreadable",
+      expectedRevision: store.engineRouting("codex").revision,
+    });
+    const failingProvider: SuccessorProviderPort = {
+      virtualSource: true,
+      async create() {
+        throw new CodexAppServerError(
+          "Codex app-server request failed: invalid paginated history lineage for fixture-generation: missing source rollout",
+        );
+      },
+      async verify() { throw new Error("verification must not run"); },
+    };
+
+    const failed = await advanceConversationMigration(conversation.id, store, failingProvider);
+
+    expect(failed.migration).toMatchObject({
+      phase: "failed-recoverable",
+      errorCode: "target-history-unreadable",
+      error: "the target account cannot read this conversation's history",
+    });
+    expect(failed.migration?.error).not.toContain("preflight");
   });
 
   test("a current pane wall releases a mid-turn reseat on the next inventory pass", async () => {

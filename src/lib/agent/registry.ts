@@ -1051,6 +1051,32 @@ function terminalizeCancelledMigrationDeliveries(
   }
 }
 
+/** Restores deliveries that migration fenced before actuation to the source
+    generation. A delivery whose outcome is uncertain keeps the cancellation
+    path: replaying it could duplicate a message the predecessor already saw. */
+function rearmRolledBackMigrationDeliveries(
+  file: RegistryFile,
+  conversation: RegistryConversation,
+  assignedAt: string,
+): void {
+  const current = conversation.generations.at(-1);
+  for (const delivery of Object.values(file.heldDeliveries)) {
+    if (delivery.conversationId !== conversation.id
+      || delivery.state === "delivered"
+      || delivery.state === "failed") continue;
+    if (!current || delivery.state === "delivery-uncertain") {
+      terminalizeHeldDelivery(file, delivery, ROLLED_BACK_MIGRATION_DELIVERY_REASON);
+      continue;
+    }
+    delivery.state = "assigned";
+    delivery.generationId = current.id;
+    delivery.assignedAt = assignedAt;
+    delivery.deliveredAt = null;
+    delivery.error = null;
+    syncDeliveryOperationOwnerState(file, delivery);
+  }
+}
+
 function terminalizeHeldDelivery(
   file: RegistryFile,
   delivery: HeldDelivery,
@@ -7288,7 +7314,7 @@ export class AgentRegistry {
           updatedAt: rolledAt,
         };
       }
-      terminalizeCancelledMigrationDeliveries(file, conversation, ROLLED_BACK_MIGRATION_DELIVERY_REASON);
+      rearmRolledBackMigrationDeliveries(file, conversation, rolledAt);
       conversation.migration = { ...conversation.migration, phase: "rolled-back", error: null, errorCode: null, updatedAt: rolledAt };
       conversation.updatedAt = rolledAt;
       advanceMigrationScopeRevision(file, conversation.engine, signature, paths);
