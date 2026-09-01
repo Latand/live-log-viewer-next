@@ -1,19 +1,8 @@
 import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
 
 const DEFAULT_VIEWER_CONTROL_URL = "http://127.0.0.1:8898";
 
 type ControlEnvironment = Readonly<Record<string, string | undefined>>;
-
-function releaseTargetPath(env: ControlEnvironment): string {
-  const configured = env.LLV_VIEWER_DEPLOY_TARGET?.trim();
-  if (configured) return configured;
-  const stateDirectory = env.LLV_STATE_DIR?.trim();
-  if (stateDirectory) return path.join(stateDirectory, "viewer-release.json");
-  const configRoot = env.XDG_CONFIG_HOME?.trim() || path.join(os.homedir(), ".config");
-  return path.join(configRoot, "agent-log-viewer", "state", "viewer-release.json");
-}
 
 function loopbackOrigin(value: unknown): string | null {
   if (typeof value !== "string" || !value.trim()) return null;
@@ -29,9 +18,11 @@ function loopbackOrigin(value: unknown): string | null {
 }
 
 function currentReleaseOrigin(env: ControlEnvironment): string | null {
+  const targetPath = env.LLV_VIEWER_DEPLOY_TARGET?.trim();
+  if (!targetPath) return null;
   let raw: string;
   try {
-    raw = fs.readFileSync(releaseTargetPath(env), "utf8");
+    raw = fs.readFileSync(targetPath, "utf8");
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw new Error("Viewer release target could not be read", { cause: error });
@@ -64,8 +55,9 @@ function stableControlOrigin(env: ControlEnvironment): string {
 
 /**
  * Resolve the control origin for each tool call. Deployment health probes keep
- * their exact active-release endpoint. A durable client carrying any older
- * launch URL resolves through the runtime host's stable listener (#1354).
+ * their exact active-release endpoint. A durable client carrying an explicit
+ * release target and stable port resolves an older launch URL through the
+ * runtime host's stable listener (#1354).
  */
 export function viewerControlOrigin(
   env: ControlEnvironment = process.env,
@@ -78,6 +70,10 @@ export function viewerControlOrigin(
      the explicit candidate endpoint instead of being redirected to the stable
      listener and grading the incumbent on the candidate's behalf. */
   if (pinConfiguredEndpoint) return configured;
+  /* Redirecting a retired launch URL requires the complete release contract.
+     A partial environment stays pinned to its explicit endpoint and
+     cannot consult the operator's implicit state path or default port. */
+  if (!env.LLV_VIEWER_DEPLOY_TARGET?.trim() || !env.LLV_VIEWER_PORT?.trim()) return configured;
   const currentRelease = currentReleaseOrigin(env);
   if (!currentRelease) return configured;
   if (loopbackOrigin(configured) === currentRelease) return currentRelease;
