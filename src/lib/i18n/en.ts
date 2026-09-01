@@ -491,6 +491,8 @@ export const en = {
   "receipt.human.compactSentUnobserved": "sent — the Viewer couldn’t confirm the compaction finished",
   "receipt.human.compactDeclined": "sent — the agent finished /compact without compacting",
   "receipt.human.verbatim": "not delivered: {reason}",
+  "receipt.cause.hostUnavailable": "runtime host unavailable",
+  "receipt.cause.timedOut": "request timed out",
 
   // DraftAgentPane
   "spawnCard.starting": "Launch admitted. Starting the agent.",

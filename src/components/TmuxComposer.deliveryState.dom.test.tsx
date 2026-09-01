@@ -400,8 +400,9 @@ test("visual acceptance: the delivery surfaces hold at desktop and 390px in both
       const stack = host.querySelector("[data-runtime-receipt-stack]") as HTMLElement;
       const row = stack.querySelector("[data-receipt-message]")!.parentElement as HTMLElement;
       expect(row.className).toContain("flex-wrap");
-      const preview = stack.querySelector("[data-receipt-preview]") as HTMLElement;
-      expect(preview.className).toContain("truncate");
+      /* #1362: the collapsed face is the compact notice; its cause truncates. */
+      const cause = stack.querySelector("[data-delivery-notice-cause]") as HTMLElement;
+      expect(cause.className).toContain("truncate");
       const dismiss = stack.querySelector("[data-receipt-dismiss]") as HTMLElement;
       expect(dismiss.className).toContain("min-h-11");
       expect(dismiss.className).toContain("min-w-11");
