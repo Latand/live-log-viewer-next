@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import type { CodexAccount } from "./codex";
+import { listCodexAccounts, UnknownAccountError, type CodexAccount } from "./codex";
 import { AccountMutationBusyError, withAccountMutationLock, withAccountMutationLockAsync } from "./accountMutation";
 import { statePath } from "../configDir";
 import {
@@ -72,6 +72,19 @@ interface ActiveAttempt extends PersistedAttempt {
 function canonicalHome(home: string): string {
   const resolved = path.resolve(home);
   try { return fs.realpathSync(resolved); } catch { return resolved; }
+}
+
+function currentCodexAccount(account: CodexAccount): CodexAccount {
+  try { fs.lstatSync(statePath("codex-accounts.json")); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return account;
+    throw error;
+  }
+  const current = listCodexAccounts().find((candidate) => candidate.id === account.id);
+  if (!current || current.kind !== account.kind || canonicalHome(current.home) !== canonicalHome(account.home)) {
+    throw new UnknownAccountError(account.id);
+  }
+  return current;
 }
 
 function safeStoredAttempt(value: unknown): value is PersistedAttempt {
@@ -232,6 +245,10 @@ export class ManagedCodexRuntime {
   }
 
   async loginSnapshot(account: CodexAccount): Promise<ManagedLoginSnapshot> {
+    return await withAccountMutationLockAsync(async () => this.loginSnapshotLocked(currentCodexAccount(account)));
+  }
+
+  private async loginSnapshotLocked(account: CodexAccount): Promise<ManagedLoginSnapshot> {
     if (account.kind !== "managed") return { state: account.authPresent ? "authenticated" : "idle", attemptState: null, deviceAuth: null };
     const home = canonicalHome(account.home);
     const active = this.active.get(home);
@@ -301,6 +318,10 @@ export class ManagedCodexRuntime {
 
   /** Performs the two read-only account calls on one app-server client. */
   async probeQuota(account: CodexAccount): Promise<CodexQuotaProbe> {
+    return await withAccountMutationLockAsync(async () => this.probeQuotaLocked(currentCodexAccount(account)));
+  }
+
+  private async probeQuotaLocked(account: CodexAccount): Promise<CodexQuotaProbe> {
     const active = this.active.get(canonicalHome(account.home));
     if (active?.client) return this.probeQuotaFrom(active.client);
     const client = await this.startClient(account.home);
