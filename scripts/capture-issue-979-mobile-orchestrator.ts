@@ -20,6 +20,12 @@
  * Every shot also CHECKS what it is showing: the row keeps its 44px target and
  * sits left of the first conversation chip, the phone never grows a horizontal
  * scrollbar (#353), and the sheet's confirm control stays inside the viewport.
+ *
+ * Issue #1347 adds the seat's CONTROLS to the same run: a live row's second
+ * target (the controls entry point, measured like the row's own), the sheet it
+ * opens with Rotate inside the viewport, and the rotate draft — which carries
+ * the mandate textarea, so it is measured with the keyboard open exactly as
+ * the create draft is.
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
@@ -165,9 +171,11 @@ async function checkPhoneGeometry(page: Page, state: string): Promise<{ row: num
   const geometry = await page.evaluate(() => {
     const row = document.querySelector("[data-orchestrator-row]");
     const button = document.querySelector("[data-orchestrator-row-open]");
+    const controls = document.querySelector("[data-orchestrator-row-controls]");
     const chip = document.querySelector(".overflow-x-auto button");
     const rowRect = row?.getBoundingClientRect();
     const chipRect = chip?.getBoundingClientRect();
+    const controlsRect = controls?.getBoundingClientRect();
     const stripRect = row?.parentElement?.getBoundingClientRect();
     return {
       row: rowRect ? Math.round(rowRect.height) : 0,
@@ -176,11 +184,22 @@ async function checkPhoneGeometry(page: Page, state: string): Promise<{ row: num
       chipLeft: chipRect ? Math.round(chipRect.left) : Number.POSITIVE_INFINITY,
       strip: stripRect ? Math.round(stripRect.height) : 0,
       button: button ? Math.round(button.getBoundingClientRect().height) : 0,
+      controls: controlsRect ? { height: Math.round(controlsRect.height), width: Math.round(controlsRect.width), left: Math.round(controlsRect.left), right: Math.round(controlsRect.right) } : null,
       scrollWidth: document.documentElement.scrollWidth,
       innerWidth: window.innerWidth,
     };
   });
   if (geometry.button < 44) throw new Error(`${state}: the row's tap target is ${geometry.button}px, under the 44px floor`);
+  /* The seat's controls (#1347): a live row's second target is held to the
+     same bar as its first — a phone target, inside the viewport, in the pinned
+     slot ahead of the scrolling chips. */
+  if (geometry.controls) {
+    if (geometry.controls.height < 44 || geometry.controls.width < 44) {
+      throw new Error(`${state}: the controls entry point is ${geometry.controls.width}×${geometry.controls.height}px, under the 44px floor`);
+    }
+    if (geometry.controls.right > geometry.innerWidth) throw new Error(`${state}: the controls entry point ends at ${geometry.controls.right}px, past the ${geometry.innerWidth}px viewport`);
+    if (geometry.controls.left >= geometry.chipLeft) throw new Error(`${state}: the controls entry point starts at ${geometry.controls.left}px, not before the first chip at ${geometry.chipLeft}px`);
+  }
   /* «Before the first chip» means nothing without a chip to be before: a strip
      that rendered none would otherwise pass this check by default. */
   if (geometry.chips === 0) throw new Error(`${state}: the strip drew no conversation chips, so the pin's position proves nothing`);
@@ -195,6 +214,29 @@ async function checkPhoneGeometry(page: Page, state: string): Promise<{ row: num
      sideways — only the chip strip inside it does. */
   if (geometry.scrollWidth > geometry.innerWidth) throw new Error(`${state}: the document scrolls to ${geometry.scrollWidth}px at ${geometry.innerWidth}px`);
   return { row: geometry.row, strip: geometry.strip, button: geometry.button };
+}
+
+/** Rotate on the live sheet (#1347): a phone target, inside the viewport. */
+async function checkRotateReach(page: Page, state: string): Promise<void> {
+  const reach = await page.evaluate(() => {
+    const rotate = document.querySelector("[data-orchestrator-rotate]");
+    const rect = rotate?.getBoundingClientRect();
+    return {
+      present: Boolean(rotate),
+      height: rect ? Math.round(rect.height) : 0,
+      right: rect ? Math.round(rect.right) : 0,
+      bottom: rect ? Math.round(rect.bottom) : 0,
+      viewportWidth: window.innerWidth,
+      viewportHeight: window.innerHeight,
+      identity: Boolean(document.querySelector("[data-orchestrator-incumbent]")),
+    };
+  });
+  if (!reach.present) throw new Error(`${state}: the live sheet offers no Rotate control`);
+  if (!reach.identity) throw new Error(`${state}: the live sheet does not name the incumbent`);
+  if (reach.height < 44) throw new Error(`${state}: Rotate is ${reach.height}px tall`);
+  if (reach.right > reach.viewportWidth || reach.bottom > reach.viewportHeight) {
+    throw new Error(`${state}: Rotate ends at ${reach.right}×${reach.bottom}px, outside the ${reach.viewportWidth}×${reach.viewportHeight}px viewport`);
+  }
 }
 
 async function checkSheetReach(page: Page, state: string): Promise<void> {
@@ -319,7 +361,17 @@ async function main(): Promise<void> {
     const hosted = { proc: "running", pid: 4_979 };
     const overLimit = { ctx: { usedTokens: 142_000, windowTokens: 200_000, pct: 71, source: "transcript", confidence: "reported", observedAt: "2100-01-02T11:59:00.000Z" } };
     const failedIntent = { clientRequestId: "seatreq-000003", mode: "spawn", launchId: null, error: "orchestrator cwd could not be resolved — pass cwd explicitly or set LLV_ORCHESTRATOR_CWD" };
-    const states: { id: string; answer: SeatAnswer; patch?: Record<string, unknown>; open?: "row" | "marker"; edit?: boolean }[] = [
+    /* `GET /api/orchestrator/seat/status` for the live states: the incumbent
+       the sheet names and the rotate draft prefills from (#1347). */
+    const incumbent = {
+      project: "atlas", designated: true, conversationId: "conversation_atlas_orchestrator", predecessorConversationId: "conversation_atlas_predecessor",
+      engine: "claude", model: "opus", effort: "high", accountId: null, cwd: REPO_DIR, transcriptPath,
+      liveness: { lifecycle: "running", hostState: "alive", silentForMs: 0 },
+      context: { tokens: 24_000, limit: 100_000, percent: 24, estimated: false, basis: "provider-reported usage" },
+      transcriptFacts: { bytes: 4_096, messageCount: 12, toolCount: 3, compactionCount: 0 },
+      rotation: { recommended: false, level: "none", reasons: [], thresholdUnknown: false },
+    };
+    const states: { id: string; answer: SeatAnswer; patch?: Record<string, unknown>; open?: "row" | "marker" | "controls"; edit?: boolean; rotate?: boolean }[] = [
       { id: "row-draft", answer: { seat: null, pending: null, exists: true } },
       { id: "sheet-draft", answer: { seat: null, pending: null, exists: true }, open: "row" },
       { id: "sheet-draft-edited", answer: { seat: null, pending: null, exists: true }, open: "row", edit: true },
@@ -335,6 +387,9 @@ async function main(): Promise<void> {
       { id: "row-intent-error", answer: { seat: null, pending: seat(transcriptPath, { conversationId: null, state: "pending", activatedAt: null, intent: failedIntent }), exists: true } },
       { id: "sheet-intent-error", answer: { seat: null, pending: seat(transcriptPath, { conversationId: null, state: "pending", activatedAt: null, intent: failedIntent }), exists: true }, open: "row" },
       { id: "row-live", answer: { seat: seat(transcriptPath), pending: null, exists: true }, patch: hosted },
+      /* #1347: the seat's controls, from the row's second target. */
+      { id: "sheet-live-controls", answer: { seat: seat(transcriptPath), pending: null, exists: true }, patch: hosted, open: "controls" },
+      { id: "sheet-rotate", answer: { seat: seat(transcriptPath), pending: null, exists: true }, patch: hosted, open: "controls", rotate: true },
       { id: "row-live-resumable", answer: { seat: seat(transcriptPath), pending: null, exists: true } },
       { id: "row-live-rotation", answer: { seat: seat(transcriptPath), pending: null, exists: true }, patch: { ...hosted, ...overLimit } },
       {
@@ -364,6 +419,8 @@ async function main(): Promise<void> {
         const page: Page = await context.newPage();
         await page.route("**/api/orchestrator/seat*", (route) =>
           route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(state.answer) }));
+        await page.route("**/api/orchestrator/seat/status*", (route) =>
+          route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(incumbent) }));
         if (state.patch) {
           const patch = state.patch;
           await page.route("**/api/files*", async (route) => {
@@ -380,8 +437,22 @@ async function main(): Promise<void> {
         const rowState = await page.getAttribute("[data-orchestrator-row]", "data-orchestrator-row-state");
         const geometry = await checkPhoneGeometry(page, `${state.id}/${scheme}`);
         if (state.open) {
-          await page.click(state.open === "marker" ? "[data-orchestrator-row-transition-open]" : "[data-orchestrator-row-open]");
+          await page.click(
+            state.open === "marker"
+              ? "[data-orchestrator-row-transition-open]"
+              : state.open === "controls"
+                ? "[data-orchestrator-row-controls]"
+                : "[data-orchestrator-row-open]",
+          );
           await page.waitForSelector('[data-testid="mobile-orchestrator-sheet"]', { timeout: 10_000 });
+          if (state.open === "controls") {
+            await page.waitForSelector("[data-orchestrator-rotate]", { timeout: 10_000 });
+            await checkRotateReach(page, `${state.id}/${scheme}`);
+          }
+          if (state.rotate) {
+            await page.click("[data-orchestrator-rotate]");
+            await page.waitForSelector('[data-orchestrator-draft="rotate"]', { timeout: 10_000 });
+          }
           if (state.edit) {
             await page.fill("[data-orchestrator-mandate]", "You are the Atlas orchestrator.\n\nYou own this board and you talk to me here, directly, whenever you have something worth saying.\n\n## What you do\n- one lane per issue, one owner per file\n- a fresh reviewer every round\n- merge only on APPROVE with green gates\n- never deploy red");
           }

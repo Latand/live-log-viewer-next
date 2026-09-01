@@ -72,10 +72,13 @@ function quietBannerCount(file: FileEntry): number {
       project="atlas"
       projectName="Atlas"
       state={state}
+      status={{ seat, pending: null, exists: true, viewerMcpRegistered: false }}
       file={file}
+      incumbent={null}
       pendingMandate=""
       viewerMcpRegistered={false}
       submitting={false}
+      rotate={{ open: false, seat: null, vacated: false, opening: false, submitting: false, failure: null, onOpen: () => undefined, onCancel: () => undefined, onConfirm: () => undefined }}
       onConfirm={() => undefined}
       onRecheck={() => undefined}
       onOpenConversation={() => undefined}

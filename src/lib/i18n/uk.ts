@@ -1937,6 +1937,10 @@ export const uk: Record<keyof typeof en, Message> = {
   "orchMobile.liveTitle": "Оркестратор цього проєкту",
   "orchMobile.liveHint": "Він відповідає у власній розмові. Відкрийте її — і ви в ній, разом із полем вводу.",
   "orchMobile.open": "Відкрити розмову",
+  "orchMobile.controlsAria": "Керування оркестратором: заміна, модель, акаунт і мандат",
+  "orchMobile.rotateOpening": "Читаю поточні налаштування місця…",
+  "orchMobile.mandateView": "Мандат v{version} — правила, за якими він працює",
+  "orchMobile.mandateViewCustom": "Мандат — власні правила, за якими він працює",
 
   "branch.live": "працює",
   "branch.waiting": "закінчив хід — чекає відповіді",
