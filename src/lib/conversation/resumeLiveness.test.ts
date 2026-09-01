@@ -4,6 +4,7 @@ import path from "node:path";
 
 import { afterEach, expect, test } from "bun:test";
 
+import { listCodexAccounts } from "@/lib/accounts/codex";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import {
   AgentRegistry,
@@ -18,6 +19,7 @@ import {
   type TranscriptHost,
 } from "@/lib/agent/transcriptHost";
 import type { ResumeSpec } from "@/lib/agent/cli";
+import { statePath } from "@/lib/configDir";
 import { conversationDeliverabilityFromRecord } from "./deliverability";
 import { deliverConversationMessage, resumeConversation } from "@/lib/delivery";
 import type { AgentProcess } from "@/lib/scanner/process";
@@ -28,9 +30,17 @@ const SESSION_ID = "00000000-0000-0000-0000-000000000000";
 const TRANSCRIPT_PATH = `/fixtures/codex/rollout-2026-09-01T10-00-00-${SESSION_ID}.jsonl`;
 
 const sandboxes: string[] = [];
+const previousAccountEnvironment = {
+  stateDir: process.env.LLV_STATE_DIR,
+  codexHome: process.env.LLV_CODEX_HOME,
+};
 
 afterEach(() => {
   setAgentRegistryForTests(null);
+  if (previousAccountEnvironment.stateDir === undefined) delete process.env.LLV_STATE_DIR;
+  else process.env.LLV_STATE_DIR = previousAccountEnvironment.stateDir;
+  if (previousAccountEnvironment.codexHome === undefined) delete process.env.LLV_CODEX_HOME;
+  else process.env.LLV_CODEX_HOME = previousAccountEnvironment.codexHome;
   for (const sandbox of sandboxes.splice(0)) fs.rmSync(sandbox, { recursive: true, force: true });
 });
 
@@ -83,6 +93,26 @@ function evidence(host: TranscriptHost): TmuxHostEvidence {
 test("a detector timeout after starting a legacy host settles resume, immediate send, and deliverability from one live record", async () => {
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-resume-liveness-"));
   sandboxes.push(sandbox);
+  const accountStateDir = path.join(sandbox, "account-state");
+  const codexHome = path.join(sandbox, "codex-home");
+  process.env.LLV_STATE_DIR = accountStateDir;
+  process.env.LLV_CODEX_HOME = codexHome;
+
+  const accountReadPaths = [
+    statePath("codex-accounts.json"),
+    statePath("account-project-bindings.json"),
+    ...listCodexAccounts().map((account) => path.join(account.home, "auth.json")),
+  ];
+  expect(accountReadPaths).toEqual([
+    path.join(accountStateDir, "codex-accounts.json"),
+    path.join(accountStateDir, "account-project-bindings.json"),
+    path.join(codexHome, "auth.json"),
+  ]);
+  expect(accountReadPaths.every((pathname) => {
+    const relative = path.relative(sandbox, pathname);
+    return relative !== "" && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+  })).toBe(true);
+
   const registry = new AgentRegistry(path.join(sandbox, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
   setAgentRegistryForTests(registry);
   registry.reconcileConversations([{
