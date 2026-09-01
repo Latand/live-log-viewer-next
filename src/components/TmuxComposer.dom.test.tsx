@@ -237,8 +237,11 @@ test("repeated identical attempts share one grouped row with counts and final st
   ));
 
   const summary = host.querySelector("summary")!;
-  expect(summary.textContent).toContain("Спроб доставки: 3");
-  expect(summary.textContent).toContain("проблем: 3");
+  /* #1362: settled failures read as one compact notice — status word, terse
+     cause, attempt counter — never as a count of pills. */
+  expect(summary.querySelector("[data-delivery-notice-cause]")?.textContent)
+    .toBe(`${translate("uk", "composer.receiptFailed")} — ${translate("uk", "receipt.human.deadHost")}`);
+  expect(summary.querySelector("[data-delivery-notice-count]")?.textContent).toContain("×3");
 
   // One logical send consumes one row: the text appears once with an attempt
   // count and the final state, never once per attempt.
@@ -671,7 +674,11 @@ test("expanded active attempts retain localized lifecycle status and aggregate c
 
     const summary = host.querySelector("summary")!;
     expect(summary.textContent).toContain(translate(locale, "runtime.receipt.pendingCount", { count: 4 }));
-    expect(summary.textContent).toContain(translate(locale, "runtime.receipt.problemCount", { count: 1 }));
+    /* #1362: the settled failure IS the notice beside the pending count — the
+       red issue badge no longer counts it a second time. */
+    expect(summary.querySelector("[data-delivery-notice-cause]")?.textContent)
+      .toBe(`${translate(locale, "composer.receiptFailed")} — ${translate(locale, "receipt.human.deadHost")}`);
+    expect(summary.querySelector("[data-receipt-problem-count]")).toBeNull();
     const details = host.querySelector("[data-runtime-receipt-details]")!;
     expect(details.querySelector('[data-receipt-status="pending"]')?.textContent)
       .toBe(translate(locale, "runtime.receipt.pending"));
