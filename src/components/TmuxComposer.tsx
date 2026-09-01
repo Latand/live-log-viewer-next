@@ -317,6 +317,10 @@ export function RuntimeComposerReceipts({
     && typeof receipt.text === "string"
     && receipt.text.length > 0
     && receipt.text.length < 240;
+  const retryFailed = (receipt: RuntimeReceipt) => onRetry(
+    receipt,
+    receipt.resend === "verify-first" ? "uncertain" : undefined,
+  );
   /* Measured from the receipt's own IMMUTABLE admission stamp, never from
      `at`: the queue bounces a parked send `delivering`→`queued` on every
      auto-retry and `at` moves with it, which both under-reports the wait and
@@ -468,7 +472,7 @@ export function RuntimeComposerReceipts({
                         wait={wait}
                         actionsDisabled={actionsDisabled}
                         onRetry={failed
-                          ? () => onRetry(receipt)
+                          ? () => retryFailed(receipt)
                           : exitable
                             ? () => onRetry(receipt, "uncertain")
                             : undefined}
@@ -566,7 +570,7 @@ export function RuntimeComposerReceipts({
             <ReceiptChip
               receipt={receipt}
               actionsDisabled={actionsDisabled}
-              onRetry={isMessage(receipt) && failed ? () => onRetry(receipt) : undefined}
+              onRetry={isMessage(receipt) && failed ? () => retryFailed(receipt) : undefined}
               onEdit={editable(receipt) ? () => onEdit(receipt) : undefined}
             />
             {onDismiss && deliveryProblem(receipt.status) ? (

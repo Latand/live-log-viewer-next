@@ -188,6 +188,9 @@ export interface RuntimeOperationReceipt {
       long has this message been waiting". Absent on receipts written before
       this field existed; readers fall back to `at`. */
   admittedAt?: string;
+  /** Retry guidance from the durable delivery settlement. `verify-first`
+      selects the explicit same-identity retry path for an unknown fate. */
+  resend?: "not-needed" | "safe" | "verify-first";
   revision: number;
 }
 export type RuntimeReceipt = RuntimeOperationReceipt;

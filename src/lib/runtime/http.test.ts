@@ -835,7 +835,11 @@ test("a terminalized unverified receipt still retries under its original identit
   } as RuntimeHostClient;
   const retry = () => handleRuntimeRetry(new NextRequest(
     `http://127.0.0.1/api/runtime/operations/${operationId}`,
-    { method: "POST", headers: { host: "127.0.0.1" } },
+    {
+      method: "POST",
+      headers: { host: "127.0.0.1", "content-type": "application/json" },
+      body: JSON.stringify({ action: "retry-uncertain" }),
+    },
   ), operationId, {
     enabled: () => true,
     client: () => client,

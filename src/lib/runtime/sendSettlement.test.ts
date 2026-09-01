@@ -34,6 +34,7 @@ const {
   SEND_UNRECORDED_REASON,
   SEND_UNVERIFIED_REASON,
   resolveSendReceipt,
+  runtimeReceiptForSend,
   sendIsSettled,
   sendReceiptFor,
 } = await import("./sendSettlement");
@@ -967,6 +968,132 @@ test("a retry's own operation id is answerable, settles at its own deadline, and
   }
 });
 
+test("a migration-cancelled held send admits the one-tap retry its receipt offers", async () => {
+  const active = fixture("migration-cancelled-retry");
+  try {
+    const migration = active.registry.requestConversationReseat(active.conversationId, "successor-account").migration!;
+    const operationId = "operation-migration-cancelled-retry";
+    const idempotencyKey = "migration-cancelled-retry-key";
+    const text = "deliver after choosing another account";
+    const held = active.registry.holdDelivery(
+      active.conversationId,
+      text,
+      idempotencyKey,
+      "text",
+      [],
+      null,
+      { operationId, kind: "send", policy: "queue" },
+    );
+    expect(held).toMatchObject({ state: "held", attempts: 0 });
+    active.journal.executeOperation({
+      kind: "send",
+      operationId,
+      conversationId: active.conversationId,
+      idempotencyKey,
+      text,
+      policy: "queue",
+    });
+
+    active.registry.setMigrationIntentState(migration.intentId, "stopped");
+    expect(receiptOf(active, operationId)).toMatchObject({
+      state: "failed",
+      reason: expect.stringContaining("migration was stopped"),
+      resend: "safe",
+    });
+    expect(active.journal.operationResult(operationId)?.receipt.status).toBe("queued");
+
+    let kicks = 0;
+    setAgentRegistryForTests(active.registry);
+    const response = await handleRuntimeRetry(
+      new NextRequest(`http://127.0.0.1/api/runtime/operations/${operationId}`, {
+        method: "POST",
+        headers: { host: "127.0.0.1", "content-type": "application/json" },
+      }),
+      operationId,
+      {
+        enabled: () => true,
+        client: () => active.client,
+        recover: async () => ({
+          target: null,
+          path: active.transcriptPath,
+          conversationId: active.conversationId,
+          spawned: false,
+        }),
+        kick: () => { kicks += 1; },
+      },
+    );
+
+    expect(response.status).toBe(202);
+    expect(await response.json()).toMatchObject({ receipt: { status: "queued" } });
+    expect(kicks).toBe(1);
+  } finally {
+    setAgentRegistryForTests(null);
+    active.close();
+  }
+});
+
+test("an unverified delivery record needs an explicit same-identity retry before rearming the queued journal", async () => {
+  const active = fixture("unverified-migration-retry");
+  try {
+    const { operationId, deliveryId } = acceptSend(active, {
+      clientMessageId: "unverified-migration-retry-key",
+      text: "do not duplicate this instruction",
+    });
+    active.registry.recordDeliveryOutcome(
+      deliveryId,
+      "failed",
+      "a prior delivery attempt may have arrived",
+      "unverified",
+    );
+    const unverified = receiptOf(active, operationId);
+    expect(unverified).toMatchObject({ state: "failed", resend: "verify-first" });
+    expect(runtimeReceiptForSend(unverified!)).toMatchObject({ status: "failed", resend: "verify-first" });
+
+    const response = await handleRuntimeRetry(
+      new NextRequest(`http://127.0.0.1/api/runtime/operations/${operationId}`, {
+        method: "POST",
+        headers: { host: "127.0.0.1", "content-type": "application/json" },
+      }),
+      operationId,
+      {
+        enabled: () => true,
+        client: () => active.client,
+        registry: () => active.registry,
+        kick: () => { throw new Error("unverified retry must not kick delivery"); },
+      },
+    );
+
+    expect(response.status).toBe(409);
+    expect(active.journal.operationResult(operationId)?.receipt.status).toBe("queued");
+
+    let kicks = 0;
+    const explicit = await handleRuntimeRetry(
+      new NextRequest(`http://127.0.0.1/api/runtime/operations/${operationId}`, {
+        method: "POST",
+        headers: { host: "127.0.0.1", "content-type": "application/json" },
+        body: JSON.stringify({ action: "retry-uncertain" }),
+      }),
+      operationId,
+      {
+        enabled: () => true,
+        client: () => active.client,
+        registry: () => active.registry,
+        kick: () => { kicks += 1; },
+      },
+    );
+    expect(explicit.status).toBe(202);
+    expect(await explicit.json()).toMatchObject({ operationId, receipt: { operationId, status: "queued" } });
+    expect(active.registry.readOnlySnapshot().heldDeliveries[deliveryId]).toMatchObject({
+      state: "delivery-uncertain",
+      attempts: 2,
+      command: { operationId },
+    });
+    expect(kicks).toBe(1);
+  } finally {
+    active.close();
+  }
+});
+
 test("a legacy send with no journal record settles unverified rather than provably lost", async () => {
   /* The legacy delivery path writes to a transcript host and creates no runtime
      operation at all, so the journal can never say what became of it. A missing
@@ -1080,7 +1207,7 @@ test("compaction retires the reservation and keeps what it proved about the send
      unverified failure came back `resend: "safe"`, and a fenced one lost the
      evidence that earned it. Both directions are pinned here, because a record
      that cannot tell them apart is the duplicate hazard either way. */
-  let clock = Date.parse("2026-08-30T10:00:00.000Z");
+  let clock = Date.now();
   const active = fixture("compacted", { now: () => clock });
   try {
     const unverified = acceptSend(active, { clientMessageId: "compacted-uncertain-key", operationId: "op_compacted_uncertain" });

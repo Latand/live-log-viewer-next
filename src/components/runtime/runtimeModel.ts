@@ -223,6 +223,8 @@ export interface RuntimeReceipt {
       how long a parked message has been waiting. Absent on receipts written
       before the field existed — readers fall back to `at`. */
   admittedAt?: string;
+  /** Durable settlement guidance for choosing the retry identity. */
+  resend?: "not-needed" | "safe" | "verify-first";
   revision: number;
 }
 

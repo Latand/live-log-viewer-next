@@ -332,6 +332,7 @@ export function runtimeReceiptForSend(receipt: SendReceipt): RuntimeOperationRec
     reason: receipt.reason,
     at: receipt.settledAt ?? receipt.acceptedAt ?? new Date(0).toISOString(),
     ...(receipt.acceptedAt ? { admittedAt: receipt.acceptedAt } : {}),
+    ...(receipt.resend ? { resend: receipt.resend } : {}),
     revision: 1,
   };
 }

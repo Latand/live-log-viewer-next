@@ -145,6 +145,17 @@ test("a discarded delivery stays visibly terminal and offers no retry", () => {
   expect(html).not.toContain(translate("en", "runtime.receipt.retry"));
 });
 
+test("a cancelled held delivery names the cancellation and offers one-tap resend", () => {
+  const reason = "delivery cancelled because its owning account migration was stopped; send again to authorize a fresh delivery";
+  const html = renderToStaticMarkup(
+    <ReceiptChip receipt={receipt({ status: "failed", reason })} onRetry={() => {}} />,
+  );
+
+  expect(html).toContain(translate("en", "receipt.human.verbatim", { reason }));
+  expect(html).toContain(`<button type="button"`);
+  expect(html).toContain(translate("en", "runtime.receipt.retry"));
+});
+
 /* ------------------------------ AttentionCard ------------------------------ */
 
 function attention(overrides: Partial<RuntimeAttention>): RuntimeAttention {

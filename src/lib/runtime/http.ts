@@ -596,7 +596,7 @@ export async function handleRuntimeRetry(
       "runtime operation status is unavailable",
     );
     if (!status.readable) return NextResponse.json({ error: status.reason, retryable: true }, { status: 503 });
-    const previous = status.value;
+    let previous = status.value;
     if (!previous) return NextResponse.json({ error: "operation not found" }, { status: 404 });
     if (previous.receipt.kind !== "send" && previous.receipt.kind !== "steer") {
       return NextResponse.json({ error: "runtime operation does not support retry" }, { status: 409 });
@@ -604,26 +604,24 @@ export async function handleRuntimeRetry(
     const registry = (dependencies.registry ?? agentRegistry)();
     const deliverySnapshot = registry.readOnlySnapshot();
     const deliveryRecord = sendReceiptFor(deliverySnapshot, previous.operationId);
-    const deliveryOwner = deliverySnapshot.deliveryOperationOwners[previous.operationId];
-    const liveReservation = deliveryOwner
-      ? deliverySnapshot.heldDeliveries[deliveryOwner.deliveryId]
-      : Object.values(deliverySnapshot.heldDeliveries)
-        .find((candidate) => candidate.command.operationId === previous.operationId);
-    const sameIdentityRetryInProgress = Boolean(liveReservation
-      && liveReservation.command.operationId === previous.operationId
-      && (liveReservation.state === "held"
-        || liveReservation.state === "assigned"
-        || liveReservation.state === "delivery-uncertain"));
+    if (previous.operationId === operationId
+      && previous.receipt.status !== "failed"
+      && previous.receipt.status !== "rejected"
+      && deliveryRecord?.state === "failed"
+      && deliveryRecord.resend === "safe") {
+      /* A migration can cancel a held, never-actuated reservation while its
+         journal operation still reads queued. The durable record proves a
+         resend is safe, so fence the stale journal operation before asking it
+         to mint the fresh attempt. Unknown-fate deliveries never enter here. */
+      previous = await client.transitionOperation(operationId, "failed", { reason: deliveryRecord.reason });
+    }
     if (deliveryRecord?.reason === SEND_DISCARDED_REASON) {
       return NextResponse.json({ error: "discarded runtime operations cannot retry" }, { status: 409 });
     }
-    /* A receipt query can settle `delivery-uncertain` as a terminal failed row
-       before the operator clicks Retry. Its duplicate-risk bit is the durable
-       proof that this still needs the same-identity path; routing it through
-       the ordinary failed retry would mint the replacement #1226 forbids. */
-    if (action === "retry-uncertain"
-      || deliveryRecord?.duplicateRisk === true
-      || sameIdentityRetryInProgress) {
+    /* Only the composer's explicit unknown-fate action authorizes this path.
+       Durable ambiguity identifies which identity must be preserved; it cannot
+       act as retry authority by itself. */
+    if (action === "retry-uncertain") {
       if (previous.operationId !== operationId) {
         return NextResponse.json({ error: "uncertain retry must target its original operation" }, { status: 409 });
       }

@@ -259,6 +259,7 @@ test("account reconfigure stays pending until the durable successor commits", as
 
 test("account reconfigure restores the admitted profile after a pending attempt later fails", async () => {
   const target = fixture();
+  let releases = 0;
   const request = effect({
     conversationId: target.conversationId,
     accountId: "target",
@@ -269,6 +270,7 @@ test("account reconfigure restores the admitted profile after a pending attempt 
     validateAccount: async () => {},
     resolveAccount: () => ({}) as never,
     migrate: async () => target.registry.conversation(target.conversationId)!,
+    releaseHost: async () => { releases += 1; return true; },
   });
   expect(pending).toBe("pending");
   expect(target.registry.conversation(target.conversationId)?.generations.at(-1)?.launchProfile).toMatchObject({
@@ -285,7 +287,9 @@ test("account reconfigure restores the admitted profile after a pending attempt 
       ...target.registry.conversation(target.conversationId)!,
       migration: { phase: "failed-recoverable", error: "successor authentication expired" },
     }) as never,
+    releaseHost: async () => { releases += 1; return true; },
   })).rejects.toThrow("successor authentication expired");
+  expect(releases).toBe(0);
   expect(target.registry.conversation(target.conversationId)?.generations.at(-1)?.launchProfile).toMatchObject({
     model: "gpt-5.5",
     effort: "medium",

@@ -227,6 +227,27 @@ test("#1213 a delivery unconfirmed past the bound is terminal and explains itsel
   view.cleanup();
 });
 
+test("#1226 a settled unknown-fate receipt keeps the explicit same-identity retry action", () => {
+  const actions: string[] = [];
+  const view = mount(
+    <RuntimeComposerReceipts
+      receipts={[receipt({
+        status: "failed",
+        reason: "delivery outcome is unverified",
+        resend: "verify-first",
+      })]}
+      onRetry={(_receipt, mode) => actions.push(`retry:${mode}`)}
+      onEdit={noop}
+    />,
+  );
+  const details = open(view.host);
+  const retry = [...details.querySelectorAll("button")]
+    .find((button) => button.textContent === t("runtime.receipt.retry")) as HTMLButtonElement;
+  retry.click();
+  expect(actions).toEqual(["retry:uncertain"]);
+  view.cleanup();
+});
+
 test("#1213 the collapsed summary already reads differently for a delivery that is not coming", () => {
   /* Collapsed is the default, and it is the surface the operator photographed:
      the same warning badge and the same spinner for a message arriving in two
