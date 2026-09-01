@@ -1180,6 +1180,87 @@ test("a terminal structured send retries from its full journaled request", () =>
   journal.close();
 });
 
+test("an explicit uncertain retry re-arms the same durable operation once (#1226)", () => {
+  const dir = sandbox("structured-delivery-uncertain-retry");
+  const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { structuredHosts: true });
+  journal.append({
+    scope: runtimeScope("session", "conv-uncertain-retry"),
+    kind: "session-status",
+    payload: {
+      conversationId: "conv-uncertain-retry",
+      sessionKey: { engine: "codex", sessionId: "thread-uncertain-retry" },
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "idle",
+      provenance: "structured",
+      capabilities: { steer: true, structuredAttention: true },
+    },
+  });
+  journal.executeOperation({
+    kind: "send",
+    operationId: "op-uncertain-retry",
+    idempotencyKey: "key-uncertain-retry",
+    conversationId: "conv-uncertain-retry",
+    text: "deliver under one identity",
+    policy: "queue",
+  });
+  journal.transitionOperation("op-uncertain-retry", "delivering");
+  journal.transitionOperation("op-uncertain-retry", "uncertain", { reason: "confirmation timed out" });
+
+  const retried = journal.retryOperation("op-uncertain-retry");
+  const replayed = journal.retryOperation("op-uncertain-retry");
+  expect(retried).toMatchObject({
+    operationId: "op-uncertain-retry",
+    replayed: false,
+    receipt: { operationId: "op-uncertain-retry", idempotencyKey: "key-uncertain-retry", status: "queued" },
+  });
+  expect(replayed).toMatchObject({ operationId: "op-uncertain-retry", replayed: true });
+  expect(journal.effectBatch()).toEqual([
+    expect.objectContaining({
+      id: "effect:op-uncertain-retry",
+      payload: expect.objectContaining({ operationId: "op-uncertain-retry", idempotencyKey: "key-uncertain-retry" }),
+    }),
+  ]);
+  journal.close();
+});
+
+test("a discard fence cannot overwrite a hand-over that began after its read (#1226)", () => {
+  const dir = sandbox("structured-delivery-discard-fence");
+  const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { structuredHosts: true });
+  journal.append({
+    scope: runtimeScope("session", "conv-discard-fence"),
+    kind: "session-status",
+    payload: {
+      conversationId: "conv-discard-fence",
+      sessionKey: { engine: "codex", sessionId: "thread-discard-fence" },
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "idle",
+      provenance: "structured",
+      capabilities: { steer: true, structuredAttention: true },
+    },
+  });
+  journal.executeOperation({
+    kind: "send",
+    operationId: "op-discard-fence",
+    idempotencyKey: "key-discard-fence",
+    conversationId: "conv-discard-fence",
+    text: "do not retire a live hand-over",
+    policy: "queue",
+  });
+  journal.transitionOperation("op-discard-fence", "delivering");
+
+  expect(() => journal.transitionOperation(
+    "op-discard-fence",
+    "failed",
+    { reason: "delivery-discarded" },
+    { fromStatuses: ["pending", "queued"] },
+  )).toThrow("runtime operation moved before its transition");
+  expect(journal.operationResult("op-discard-fence")?.receipt.status).toBe("delivering");
+  expect(journal.effectBatch()).toHaveLength(1);
+  journal.close();
+});
+
 test("terminal delivery retry on a replacement host mints one fresh operation", () => {
   const dir = sandbox("fresh-terminal-retry");
   const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { structuredHosts: true });
@@ -2619,6 +2700,13 @@ test("structured queue controls cross the local runtime socket", async () => {
   expect(await client.effectBatch(undefined, initialEffects[0]!.eventSeq)).toEqual([]);
   await expect(client.effectBatch(undefined, -1)).rejects.toThrow("runtime effect cursor is invalid");
   expect((await client.transitionOperation("op-socket-queue", "delivering")).receipt.status).toBe("delivering");
+  await expect(client.transitionOperation(
+    "op-socket-queue",
+    "failed",
+    { reason: "delivery-discarded" },
+    { fromStatuses: ["pending", "queued"] },
+  )).rejects.toThrow("runtime operation moved before its transition");
+  expect((await client.operationStatus("op-socket-queue"))?.receipt.status).toBe("delivering");
   expect((await client.transitionOperation("op-socket-queue", "failed", { reason: "write failed" })).receipt.status).toBe("failed");
   expect(await client.effectBatch()).toEqual([]);
   expect((await client.retryOperation("op-socket-queue")).receipt.status).toBe("queued");

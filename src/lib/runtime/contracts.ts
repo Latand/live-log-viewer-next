@@ -44,20 +44,11 @@ export interface RuntimeSessionAxes {
 export type RuntimeAttentionKind = "approval" | "permission" | "question" | "waiting_heuristic";
 export type RuntimeAttentionState = "open" | "resolving" | "resolved" | "expired-confirmed" | "cancelled" | "resolution-unknown";
 export type RuntimeOperationKind = "send" | "steer" | "interrupt" | "answer" | "kill" | "spawn" | "reconfigure" | "compact";
-export type RuntimeReceiptStatus =
-  | "pending"
-  | "delivering"
-  | "applying"
-  | "turn-started"
-  | "steered"
-  | "queued"
-  | "delivered"
-  | "applied"
-  | "interrupted"
-  | "answered"
-  | "rejected"
-  | "failed"
-  | "uncertain";
+export const RUNTIME_RECEIPT_STATUSES = [
+  "pending", "delivering", "applying", "turn-started", "steered", "queued",
+  "delivered", "applied", "interrupted", "answered", "rejected", "failed", "uncertain",
+] as const;
+export type RuntimeReceiptStatus = (typeof RUNTIME_RECEIPT_STATUSES)[number];
 export type OperationKind = RuntimeOperationKind;
 export type ReceiptStatus = RuntimeReceiptStatus;
 
@@ -200,6 +191,11 @@ export interface RuntimeOperationReceipt {
   revision: number;
 }
 export type RuntimeReceipt = RuntimeOperationReceipt;
+
+export interface RuntimeTransitionOptions {
+  /** Compare-and-set fence evaluated inside the journal write transaction. */
+  fromStatuses?: readonly RuntimeReceiptStatus[];
+}
 
 export function runtimePresentationReceipt(receipt: RuntimeOperationReceipt): RuntimeOperationReceipt {
   if (!receipt.presentationOperationId || receipt.presentationRevision === undefined) return receipt;

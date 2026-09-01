@@ -11,7 +11,11 @@ import { STRUCTURED_HOST_STAMP_ENV, structuredHostStamp } from "@/lib/scanner/pr
 import { headlessCodexThreadConfig } from "@/lib/codexHeadlessConfig";
 import { grantedPluginServerNames, grantedPlugins } from "@/lib/agent/pluginAllowlist";
 import { hardenedRedact } from "@/lib/view/compactText";
-import { decodeCodexStructuredUserText, encodeCodexStructuredUserText } from "./codexStructuredUserText";
+import {
+  codexStructuredUserDeliveryDedup,
+  decodeCodexStructuredUserText,
+  encodeCodexStructuredUserText,
+} from "./codexStructuredUserText";
 import { CodexReplayFrameReducer, ReplayFrameOverflowError, sanitizeCodexImageFrame, shrinkReducedReplayFrame, type ImageSink, type ReplayFrameBudgets } from "./codexImageFrames";
 import { MAX_STRUCTURED_IMAGE_ENCODED_BYTES, runtimeImageStore } from "./runtimeImageStore";
 import { STRUCTURED_IMAGE_CAPABILITY, type StructuredImageRef } from "./structuredContent";
@@ -492,10 +496,54 @@ const ROLLOUT_TERMINAL_TURN_STATUS: Record<string, string> = {
    (observed 2026-08-31: 380% CPU, data routes timing out). One entry per
    rollout, invalidated by size+mtime, bounds that to one parse per change. */
 const ROLLOUT_TURNS_CACHE_LIMIT = 32;
-const rolloutTurnsCache = new Map<string, { size: number; mtimeMs: number; turns: JsonObject[] }>();
+interface RolloutStructuredUserDelivery {
+  text: string | null;
+  contentDigest: string | null;
+}
 
-export function rolloutTurnsFromDisk(pathname: string | null | undefined): JsonObject[] {
-  if (!pathname) return [];
+interface RolloutTurnsCacheEntry {
+  size: number;
+  mtimeMs: number;
+  turns: JsonObject[];
+  structuredUserDeliveries: Map<string, RolloutStructuredUserDelivery>;
+  readState: "readable" | "absent" | "unavailable";
+}
+
+const rolloutTurnsCache = new Map<string, RolloutTurnsCacheEntry>();
+
+function rememberRolloutStructuredUser(
+  deliveries: Map<string, RolloutStructuredUserDelivery>,
+  wireText: string,
+): void {
+  const decoded = decodeCodexStructuredUserText(wireText);
+  if (!decoded.deliveryDedup) return;
+  const current = deliveries.get(decoded.deliveryDedup);
+  const observed = { text: decoded.text, contentDigest: decoded.contentDigest };
+  if (!current) {
+    deliveries.set(decoded.deliveryDedup, observed);
+    return;
+  }
+  if (current.text !== observed.text || current.contentDigest !== observed.contentDigest) {
+    deliveries.set(decoded.deliveryDedup, { text: null, contentDigest: null });
+  }
+}
+
+const EMPTY_ROLLOUT_CACHE_ENTRY: RolloutTurnsCacheEntry = {
+  size: 0,
+  mtimeMs: 0,
+  turns: [],
+  structuredUserDeliveries: new Map(),
+  readState: "absent",
+};
+
+const UNAVAILABLE_ROLLOUT_CACHE_ENTRY: RolloutTurnsCacheEntry = {
+  ...EMPTY_ROLLOUT_CACHE_ENTRY,
+  structuredUserDeliveries: new Map(),
+  readState: "unavailable",
+};
+
+function rolloutCacheEntryFromDisk(pathname: string | null | undefined): RolloutTurnsCacheEntry {
+  if (!pathname) return EMPTY_ROLLOUT_CACHE_ENTRY;
   let raw: string;
   let statSize = 0;
   let statMtimeMs = 0;
@@ -503,13 +551,13 @@ export function rolloutTurnsFromDisk(pathname: string | null | undefined): JsonO
     const stat = fs.statSync(pathname);
     statSize = stat.size;
     statMtimeMs = stat.mtimeMs;
-    if (!stat.isFile()) return [];
+    if (!stat.isFile()) return UNAVAILABLE_ROLLOUT_CACHE_ENTRY;
     const cached = rolloutTurnsCache.get(pathname);
     if (cached && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) {
       /* Refresh recency so hot rollouts survive the LRU trim. */
       rolloutTurnsCache.delete(pathname);
       rolloutTurnsCache.set(pathname, cached);
-      return [...cached.turns];
+      return cached;
     }
     if (stat.size > ROLLOUT_FALLBACK_READ_BYTES) {
       const descriptor = fs.openSync(pathname, "r");
@@ -523,11 +571,14 @@ export function rolloutTurnsFromDisk(pathname: string | null | undefined): JsonO
     } else {
       raw = fs.readFileSync(pathname, "utf8");
     }
-  } catch {
-    return [];
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT"
+      ? EMPTY_ROLLOUT_CACHE_ENTRY
+      : UNAVAILABLE_ROLLOUT_CACHE_ENTRY;
   }
   const order: string[] = [];
   const turns = new Map<string, { id: string; status?: string; items: JsonObject[] }>();
+  const structuredUserDeliveries = new Map<string, RolloutStructuredUserDelivery>();
   for (const line of raw.split("\n")) {
     if (!line.trim()) continue;
     let parsed: unknown;
@@ -539,6 +590,10 @@ export function rolloutTurnsFromDisk(pathname: string | null | undefined): JsonO
     const payload = record(record(parsed)?.payload);
     if (!payload) continue;
     const payloadType = stringField(payload, "type");
+    if (payloadType === "user_message") {
+      const message = stringField(payload, "message");
+      if (message !== null) rememberRolloutStructuredUser(structuredUserDeliveries, message);
+    }
     const turnId = stringField(payload, "turn_id") ?? stringField(payload, "turnId");
     if (!payloadType || !turnId) continue;
     let turn = turns.get(turnId);
@@ -557,6 +612,10 @@ export function rolloutTurnsFromDisk(pathname: string | null | undefined): JsonO
     if (!item) continue;
     const itemType = stringField(item, "type");
     const clientId = stringField(item, "client_id") ?? stringField(item, "clientId");
+    const wireText = userMessageText(item);
+    if ((itemType === "UserMessage" || itemType === "userMessage") && wireText !== null) {
+      rememberRolloutStructuredUser(structuredUserDeliveries, wireText);
+    }
     turn.items.push({
       ...item,
       ...(itemType ? { type: itemType === "UserMessage" ? "userMessage" : itemType } : {}),
@@ -567,13 +626,45 @@ export function rolloutTurnsFromDisk(pathname: string | null | undefined): JsonO
     const turn = turns.get(id)!;
     return { id: turn.id, status: turn.status ?? "inProgress", items: turn.items } as JsonObject;
   });
-  rolloutTurnsCache.set(pathname, { size: statSize, mtimeMs: statMtimeMs, turns: result });
+  const cached: RolloutTurnsCacheEntry = {
+    size: statSize,
+    mtimeMs: statMtimeMs,
+    turns: result,
+    structuredUserDeliveries,
+    readState: "readable",
+  };
+  rolloutTurnsCache.set(pathname, cached);
   while (rolloutTurnsCache.size > ROLLOUT_TURNS_CACHE_LIMIT) {
     const oldest = rolloutTurnsCache.keys().next().value;
     if (oldest === undefined) break;
     rolloutTurnsCache.delete(oldest);
   }
-  return [...result];
+  return cached;
+}
+
+export function rolloutTurnsFromDisk(pathname: string | null | undefined): JsonObject[] {
+  return [...rolloutCacheEntryFromDisk(pathname).turns];
+}
+
+function rolloutConfirmedDelivery(
+  pathname: string | null | undefined,
+  entry: QueueEntry,
+): DeliveryReceipt | null {
+  const rollout = rolloutCacheEntryFromDisk(pathname);
+  if (rollout.readState === "unavailable") {
+    throw new Error("Codex recipient transcript is unavailable for delivery deduplication");
+  }
+  const delivery = rollout.structuredUserDeliveries
+    .get(codexStructuredUserDeliveryDedup(entry.id));
+  if (!delivery) return null;
+  const payloadMatches = delivery.contentDigest
+    ? delivery.contentDigest === entry.contentDigest
+    : delivery.text === (entry.text ?? entry.content?.text ?? "");
+  if (!payloadMatches) throw new Error("Codex queue entry id belongs to a different payload");
+  /* The legacy `event_msg/user_message` record carries no turn id. Its durable
+     dedup identity is enough to prove the recipient already owns this message;
+     the operation id is a stable historical turn reference for the receipt. */
+  return { outcome: "turn-started", turnId: entry.id };
 }
 
 function resumedActiveTurnId(value: unknown): string | null {
@@ -1101,6 +1192,7 @@ export class CodexAppServerHost implements EngineHost {
           /* #1117: authorship lands on the same record, so the feed can tell
              the operator's bubble from an inter-agent relay without a join. */
           normalized.origin,
+          normalized.id,
         ),
       },
     ];
@@ -2380,6 +2472,8 @@ export class CodexAppServerHost implements EngineHost {
   private async confirmedDelivery(entry: QueueEntry): Promise<DeliveryReceipt | null> {
     const known = this.confirmedDeliveries.get(entry.id);
     if (known) return this.confirmedReceipt(entry, known);
+    const persisted = rolloutConfirmedDelivery(this.identity.path, entry);
+    if (persisted) return persisted;
     let thread: unknown;
     try {
       const timeoutMs = this.activeTurnId

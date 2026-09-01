@@ -793,6 +793,7 @@ export const RECEIPT_REASON_KEYS: Record<string, MessageKey> = {
   "turn-active": "receipt.human.turnActive",
   "busy-turn": "receipt.human.turnActive",
   "no-active-turn": "receipt.human.noTurn",
+  "delivery-discarded": "receipt.human.discarded",
   /* #862 compact refusals. `stale-generation` is the same class of fact as a
      stale delivery key: the operator was pointing at a generation that is no
      longer the live one. */

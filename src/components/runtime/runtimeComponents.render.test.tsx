@@ -134,6 +134,17 @@ test("failed receipt prints an unknown reason verbatim behind a 'not delivered:'
   expect(html).toContain(translate("en", "receipt.human.verbatim", { reason: "quota-exceeded" }));
 });
 
+test("a discarded delivery stays visibly terminal and offers no retry", () => {
+  const html = renderToStaticMarkup(
+    <ReceiptChip
+      receipt={receipt({ status: "failed", reason: "delivery-discarded" })}
+      onRetry={() => { throw new Error("discarded receipt exposed retry"); }}
+    />,
+  );
+  expect(html).toContain(translate("en", "receipt.human.discarded"));
+  expect(html).not.toContain(translate("en", "runtime.receipt.retry"));
+});
+
 /* ------------------------------ AttentionCard ------------------------------ */
 
 function attention(overrides: Partial<RuntimeAttention>): RuntimeAttention {

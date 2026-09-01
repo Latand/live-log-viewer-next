@@ -45,8 +45,10 @@ export interface ReceiptChipProps {
       Absent for a settled receipt, whose own status carries the meaning. */
   wait?: DeliveryWait | null;
   actionsDisabled?: boolean;
-  /** Retry reuses the same idempotency key — never a second send. */
+  /** Retry preserves the delivery's durable dedup identity. */
   onRetry?: () => void;
+  /** Terminalize an unconfirmed delivery and retire its durable effect. */
+  onDiscard?: () => void;
   /** Edit-and-resend mints a fresh key. */
   onEdit?: () => void;
 }
@@ -54,16 +56,17 @@ export interface ReceiptChipProps {
 /**
  * Inline command receipt shown on the message it belongs to. Durable and
  * journaled, so it survives a reload. `rejected`/`failed` expose the reason
- * verbatim and are announced politely; both offer Retry (same key) and Edit
- * (new key).
+ * verbatim and are announced politely. Recoverable failures offer Retry and
+ * Edit; an operator-discarded receipt stays terminal.
  */
-export function ReceiptChip({ receipt, wait = null, actionsDisabled = false, onRetry, onEdit }: ReceiptChipProps) {
+export function ReceiptChip({ receipt, wait = null, actionsDisabled = false, onRetry, onEdit, onDiscard }: ReceiptChipProps) {
   const { t } = useLocale();
   const failed = receipt.status === "rejected" || receipt.status === "failed";
   /* Issue #1213: a delivery unconfirmed past the bound is terminal here even
      though the receipt is not — the composer stops claiming it is moving and
      says it did not arrive, instead of spinning with no end. */
   const uncertain = wait?.phase === "uncertain";
+  const discarded = receipt.reason === "delivery-discarded";
   /* Nothing is moving in any of these: the message is parked behind a turn,
      parked with nothing to hand it to, parked for a reason this surface cannot
      name, or never confirmed as accepted at all. */
@@ -88,14 +91,26 @@ export function ReceiptChip({ receipt, wait = null, actionsDisabled = false, onR
         {parked ? <Clock3 className="mr-1 h-3 w-3" aria-hidden /> : null}
         {waitText ?? runtimeReceiptStatusText(t, receipt)}
       </Badge>
-      {failed && onRetry ? (
+      {(failed || uncertain) && !discarded && onRetry ? (
         <button
           type="button"
+          {...(uncertain ? { "data-receipt-uncertain-retry": "true" } : {})}
           disabled={actionsDisabled}
           className="min-h-11 rounded-full border border-border bg-canvas px-3 py-0.5 text-muted hover:border-accent/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-50 sm:min-h-0 sm:px-2"
           onClick={onRetry}
         >
           {t("runtime.receipt.retry")}
+        </button>
+      ) : null}
+      {uncertain && onDiscard ? (
+        <button
+          type="button"
+          data-receipt-discard
+          disabled={actionsDisabled}
+          className="min-h-11 rounded-full border border-border bg-canvas px-3 py-0.5 text-muted hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-50 sm:min-h-0 sm:px-2"
+          onClick={onDiscard}
+        >
+          {t("runtime.receipt.discard")}
         </button>
       ) : null}
       {failed && onEdit ? (

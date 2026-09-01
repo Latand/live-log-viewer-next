@@ -28,6 +28,7 @@ import {
   type RuntimeRetryOptions,
   type RuntimeSession,
   type RuntimeSnapshot,
+  type RuntimeTransitionOptions,
   type ViewerDeploymentOwner,
   type ViewerDeploymentReceipt,
   type ViewerDeploymentStatus,
@@ -496,6 +497,7 @@ export class RuntimeJournal {
     operationId: string,
     status: Exclude<RuntimeReceiptStatus, "pending">,
     details: Partial<Pick<RuntimeOperationReceipt, "turnId" | "queuePosition" | "reason">> = {},
+    options: RuntimeTransitionOptions = {},
   ): RuntimeOperationResult {
     this.assertHealthy();
     this.db.exec("BEGIN IMMEDIATE");
@@ -503,6 +505,9 @@ export class RuntimeJournal {
       const row = this.db.query<{ request_json: string; receipt_json: string }, [string]>("SELECT request_json, receipt_json FROM operations WHERE operation_id = ?").get(operationId);
       if (!row) throw new Error("runtime operation is unknown");
       const previous = JSON.parse(row.receipt_json) as RuntimeOperationReceipt;
+      if (options.fromStatuses && !options.fromStatuses.includes(previous.status)) {
+        throw new Error("runtime operation moved before its transition");
+      }
       if (previous.status === status) {
         this.db.exec("COMMIT");
         return { operationId, receipt: previous, replayed: true };
@@ -669,8 +674,17 @@ export class RuntimeJournal {
       if (!row) throw new Error("runtime operation is unknown");
       const previous = JSON.parse(row.receipt_json) as RuntimeOperationReceipt;
       const command = JSON.parse(row.request_json) as RuntimeOperationCommand;
-      if (previous.status !== "failed") throw new Error("only failed runtime operations can retry");
       if (command.kind !== "send" && command.kind !== "steer") throw new Error("runtime operation does not support retry");
+      /* An explicit unknown-fate retry keeps the SAME operation and effect id
+         (#1226). Replaying the HTTP action after its response was lost finds
+         the already re-armed row and returns it without another transition. */
+      if (previous.status === "pending" || previous.status === "queued") {
+        this.db.exec("COMMIT");
+        return { operationId, receipt: previous, replayed: true };
+      }
+      if (previous.status !== "failed" && previous.status !== "uncertain") {
+        throw new Error("only failed or uncertain runtime operations can retry in place");
+      }
       const next: RuntimeOperationReceipt = {
         ...previous,
         status: "queued",

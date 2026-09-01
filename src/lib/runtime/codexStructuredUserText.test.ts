@@ -2,7 +2,11 @@ import { expect, test } from "bun:test";
 
 import { captureSelectedContext, type SelectedContextRef } from "@/lib/selection/selectedContext";
 
-import { decodeCodexStructuredUserText, encodeCodexStructuredUserText } from "./codexStructuredUserText";
+import {
+  codexStructuredUserDeliveryDedup,
+  decodeCodexStructuredUserText,
+  encodeCodexStructuredUserText,
+} from "./codexStructuredUserText";
 
 /**
  * The canonical structured-user record's marker line (#844 §persistence). The
@@ -45,6 +49,19 @@ test("the digest form written before this field still decodes", () => {
     selectedContext: null,
     origin: null,
   });
+});
+
+test("a delivery operation persists as a hashed recipient dedup identity (#1366)", () => {
+  const operationId = "operation-recipient-dedup";
+  const decoded = decodeCodexStructuredUserText(
+    encodeCodexStructuredUserText("Deliver once.", undefined, null, null, operationId),
+  );
+  expect(decoded).toMatchObject({
+    text: "Deliver once.",
+    structured: true,
+    deliveryDedup: codexStructuredUserDeliveryDedup(operationId),
+  });
+  expect(JSON.stringify(decoded)).not.toContain(operationId);
 });
 
 test("unstructured text is untouched", () => {
