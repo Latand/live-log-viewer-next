@@ -453,6 +453,8 @@ export async function handleRuntimeDiscard(
       return NextResponse.json({ error: "runtime operation does not support discard" }, { status: 409 });
     }
     const registry = (dependencies.registry ?? agentRegistry)();
+    const presentationOperationId = operation.receipt.presentationOperationId ?? operation.operationId;
+    const deliveryRecord = sendReceiptFor(registry.readOnlySnapshot(), presentationOperationId);
     const settleDelivered = () => {
       if (operation.receipt.conversationId.startsWith("conversation_")) {
         registry.recordDeliveryOutcomeForOperation(
@@ -483,7 +485,7 @@ export async function handleRuntimeDiscard(
           { reason: SEND_DISCARDED_REASON },
           { fromStatuses: DISCARDABLE_RECEIPT_STATUSES },
         );
-        disposition = "lost";
+        if (deliveryRecord?.duplicateRisk !== true) disposition = "lost";
       } catch (error) {
         const moved = await client.operationStatus(operation.operationId);
         if (!moved) throw error;
@@ -502,17 +504,16 @@ export async function handleRuntimeDiscard(
         }
       }
     } else if (operation.receipt.status !== "uncertain"
-      && !(operation.receipt.status === "failed" && operation.receipt.reason === SEND_DISCARDED_REASON)) {
+      && !(operation.receipt.status === "failed" && operation.receipt.reason === SEND_DISCARDED_REASON)
+      && !(deliveryRecord?.state === "failed" && deliveryRecord.duplicateRisk)) {
       return NextResponse.json({ error: "delivery outcome is already resolved" }, { status: 409 });
     }
-    const presentationOperationId = operation.receipt.presentationOperationId ?? operation.operationId;
     if (!operation.receipt.conversationId.startsWith("conversation_")) {
       return NextResponse.json({ error: "runtime operation has no delivery reservation" }, { status: 409 });
     }
-    registry.recordDeliveryOutcomeForOperation(
+    registry.discardDeliveryForOperation(
       operation.receipt.conversationId as `conversation_${string}`,
       presentationOperationId,
-      "failed",
       SEND_DISCARDED_REASON,
       disposition,
     );

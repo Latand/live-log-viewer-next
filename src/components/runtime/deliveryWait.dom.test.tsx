@@ -238,13 +238,16 @@ test("#1226 a settled unknown-fate receipt keeps the explicit same-identity retr
       })]}
       onRetry={(_receipt, mode) => actions.push(`retry:${mode}`)}
       onEdit={noop}
+      onDiscard={() => actions.push("discard")}
     />,
   );
   const details = open(view.host);
   const retry = [...details.querySelectorAll("button")]
     .find((button) => button.textContent === t("runtime.receipt.retry")) as HTMLButtonElement;
+  const discard = details.querySelector("[data-receipt-discard]") as HTMLButtonElement;
   retry.click();
-  expect(actions).toEqual(["retry:uncertain"]);
+  discard.click();
+  expect(actions).toEqual(["retry:uncertain", "discard"]);
   view.cleanup();
 });
 

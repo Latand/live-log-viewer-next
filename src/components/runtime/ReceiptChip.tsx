@@ -102,7 +102,7 @@ export function ReceiptChip({ receipt, wait = null, actionsDisabled = false, onR
           {t("runtime.receipt.retry")}
         </button>
       ) : null}
-      {uncertain && onDiscard ? (
+      {onDiscard ? (
         <button
           type="button"
           data-receipt-discard

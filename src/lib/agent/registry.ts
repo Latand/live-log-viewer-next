@@ -1724,9 +1724,12 @@ function terminalDeliveryState(
   return delivery?.state === "delivered" || delivery?.state === "failed" ? delivery.state : null;
 }
 
-function migrationDeliveryCancellationIsAbsorbing(delivery: HeldDelivery): boolean {
+const OPERATOR_DISCARDED_DELIVERY_REASON = "delivery-discarded";
+
+function terminalDeliveryFailureIsAbsorbing(delivery: HeldDelivery): boolean {
   return delivery.state === "failed"
-    && delivery.error?.startsWith(MIGRATION_DELIVERY_CANCELLATION_PREFIX) === true;
+    && (delivery.error === OPERATOR_DISCARDED_DELIVERY_REASON
+      || delivery.error?.startsWith(MIGRATION_DELIVERY_CANCELLATION_PREFIX) === true);
 }
 
 /**
@@ -7186,7 +7189,7 @@ export class AgentRegistry {
     return this.mutate((file) => {
       const delivery = file.heldDeliveries[id];
       if (!delivery) throw new Error("held delivery is unknown");
-      if (delivery.state === "delivered" || migrationDeliveryCancellationIsAbsorbing(delivery)) {
+      if (delivery.state === "delivered" || terminalDeliveryFailureIsAbsorbing(delivery)) {
         return clone(delivery);
       }
       const conversation = file.conversations[resolveConversationAlias(file, delivery.conversationId)];
@@ -7248,7 +7251,7 @@ export class AgentRegistry {
         if (!delivery || delivery.state === "delivered") return delivery ? clone(delivery) : null;
         const retryRecovered = delivery.state === "failed"
           && outcome.state === "delivered"
-          && !migrationDeliveryCancellationIsAbsorbing(delivery);
+          && !terminalDeliveryFailureIsAbsorbing(delivery);
         if (delivery.state !== "delivery-uncertain" && !retryRecovered) return null;
         const conversation = file.conversations[canonicalId];
         const paths = new Set([conversation?.generations.at(-1)?.path].filter((pathname): pathname is string => Boolean(pathname)));
@@ -7316,6 +7319,51 @@ export class AgentRegistry {
       if (delivery.state !== "delivery-uncertain" && !unverifiedFailure) return clone(delivery);
       if (unverifiedFailure) delivery.state = "delivery-uncertain";
       return clone(placeDeliveryForRetryInFile(file, delivery, true));
+    });
+  }
+
+  /** Terminalizes the reservation after the runtime journal has fenced its
+      operation. This includes a never-actuated hold and an unverified failure
+      the operator explicitly chose to discard. */
+  discardDeliveryForOperation(
+    conversationId: ViewerConversationId,
+    operationId: string,
+    reason: string,
+    disposition: Extract<DeliveryTerminalDisposition, "lost" | "unverified">,
+  ): HeldDelivery | null {
+    return this.mutate((file) => {
+      const canonicalId = resolveConversationAlias(file, conversationId);
+      const owner = file.deliveryOperationOwners[operationId];
+      const delivery = owner
+        ? file.heldDeliveries[owner.deliveryId]
+        : Object.values(file.heldDeliveries).find((candidate) =>
+          candidate.command.operationId === operationId
+          && resolveConversationAlias(file, candidate.conversationId) === canonicalId);
+      if (!delivery
+        || delivery.command.operationId !== operationId
+        || resolveConversationAlias(file, delivery.conversationId) !== canonicalId) return null;
+      if (delivery.state === "delivered") return clone(delivery);
+      const discardable = delivery.state === "held"
+        || delivery.state === "assigned"
+        || delivery.state === "delivery-uncertain"
+        || (delivery.state === "failed"
+          && (delivery.error === reason || owner?.terminalDisposition === "unverified"));
+      if (!discardable) return null;
+      const conversation = file.conversations[canonicalId];
+      const paths = new Set([conversation?.generations.at(-1)?.path]
+        .filter((pathname): pathname is string => Boolean(pathname)));
+      const signature = conversation ? migrationReadinessSignature(file, conversation.engine, paths) : "";
+      delivery.state = "failed";
+      delivery.text = "";
+      delivery.generationId = null;
+      delivery.assignedAt = null;
+      delivery.deliveredAt = null;
+      delivery.error = reason.slice(0, 240);
+      failInitialSpawnReceiptForDelivery(file, delivery);
+      syncDeliveryOperationOwnerState(file, delivery, disposition);
+      if (conversation) advanceMigrationScopeRevision(file, conversation.engine, signature, paths);
+      compactDeliveryReservations(file, delivery.conversationId, this.now());
+      return clone(delivery);
     });
   }
 

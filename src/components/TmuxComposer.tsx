@@ -435,6 +435,9 @@ export function RuntimeComposerReceipts({
                 const uncertain = wait?.phase === "uncertain";
                 const serverBacked = !receipt.operationId.startsWith(UNCONFIRMED_RECEIPT_PREFIX);
                 const exitable = uncertain && serverBacked;
+                const discardable = serverBacked
+                  && receipt.reason !== "delivery-discarded"
+                  && (exitable || (failed && receipt.resend === "verify-first"));
                 const retryingBusy = pending
                   && !uncertain
                   && typeof receipt.reason === "string"
@@ -477,7 +480,7 @@ export function RuntimeComposerReceipts({
                             ? () => onRetry(receipt, "uncertain")
                             : undefined}
                         onEdit={editable(receipt) ? () => onEdit(receipt) : undefined}
-                        onDiscard={exitable && onDiscard ? () => onDiscard(receipt) : undefined}
+                        onDiscard={discardable && onDiscard ? () => onDiscard(receipt) : undefined}
                       />
                       {/* A settled problem is dismissible (issue #264 rule 3):
                           the dismissal records every settled attempt of the

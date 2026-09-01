@@ -915,9 +915,9 @@ test("discard terminalizes the visible receipt and fences every later delivery (
     transitionOperation: async (...args: Parameters<RuntimeHostClient["transitionOperation"]>) =>
       journal.transitionOperation(...args),
   } as RuntimeHostClient;
-  const recordOutcome = registry.recordDeliveryOutcomeForOperation.bind(registry);
+  const recordOutcome = registry.discardDeliveryForOperation.bind(registry);
   let outcomeWrites = 0;
-  registry.recordDeliveryOutcomeForOperation = (...args) => {
+  registry.discardDeliveryForOperation = (...args) => {
     outcomeWrites += 1;
     return outcomeWrites === 1 ? null : recordOutcome(...args);
   };
@@ -955,6 +955,10 @@ test("discard terminalizes the visible receipt and fences every later delivery (
     state: "failed",
     error: "delivery-discarded",
   });
+  expect(registry.recordDeliveryOutcome(held.id, "delivered")).toMatchObject({
+    state: "failed",
+    error: "delivery-discarded",
+  });
   expect(sendIsSettled(registry.readOnlySnapshot(), operationId)).toBeTrue();
   expect(journal.effectBatch()).toEqual([]);
   expect(outcomeWrites).toBe(2);
@@ -980,6 +984,78 @@ test("discard terminalizes the visible receipt and fences every later delivery (
     settled: (id) => sendIsSettled(registry.readOnlySnapshot(), id),
   }, () => new FakeEngineHost(ledger)).drain();
   expect(ledger.writes).toEqual([]);
+
+  journal.close();
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test("discard settles an unactuated held reservation after fencing its journal operation (#1226)", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-held-discard-"));
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const conversation = registry.ensureConversation("codex", path.join(directory, "recipient.jsonl"), "default");
+  registry.requestConversationReseat(conversation.id, "successor-account");
+  const operationId = "operation-held-discard";
+  const held = registry.holdDelivery(
+    conversation.id,
+    "discard before migration completes",
+    "message-held-discard",
+    "text",
+    [],
+    null,
+    { operationId, kind: "send", policy: "queue" },
+  );
+  expect(held).toMatchObject({ state: "held", attempts: 0, command: { operationId } });
+
+  const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
+  journal.append({
+    scope: { type: "session", id: conversation.id },
+    kind: "session-status",
+    payload: {
+      conversationId: conversation.id,
+      sessionKey: { engine: "codex", sessionId: "held-discard-thread" },
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "idle",
+      provenance: "structured",
+      capabilities: { steer: true, structuredAttention: true },
+    },
+  });
+  journal.executeOperation({
+    kind: "send",
+    operationId,
+    idempotencyKey: "message-held-discard",
+    conversationId: conversation.id,
+    text: "discard before migration completes",
+    policy: "queue",
+  });
+  const client = {
+    operationStatus: async (id: string, options?: { currentRetryLeaf?: boolean }) => options?.currentRetryLeaf
+      ? journal.currentRetryResult(id)
+      : journal.operationResult(id),
+    transitionOperation: async (...args: Parameters<RuntimeHostClient["transitionOperation"]>) =>
+      journal.transitionOperation(...args),
+  } as RuntimeHostClient;
+
+  const response = await handleRuntimeDiscard(new NextRequest(
+    `http://127.0.0.1/api/runtime/operations/${operationId}`,
+    { method: "DELETE", headers: { host: "127.0.0.1" } },
+  ), operationId, {
+    enabled: () => true,
+    client: () => client,
+    registry: () => registry,
+    kick: () => { throw new Error("discard must not wake delivery"); },
+  });
+
+  expect(response.status).toBe(200);
+  expect(registry.readOnlySnapshot().heldDeliveries[held.id]).toMatchObject({
+    state: "failed",
+    error: "delivery-discarded",
+  });
+  expect(journal.operationResult(operationId)?.receipt).toMatchObject({
+    status: "failed",
+    reason: "delivery-discarded",
+  });
+  expect(journal.effectBatch()).toEqual([]);
 
   journal.close();
   fs.rmSync(directory, { recursive: true, force: true });
