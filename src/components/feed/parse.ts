@@ -240,7 +240,7 @@ export type Item =
   | TranscriptRecordItem
   | Tmsg
   | { kind: "tnote"; text: string }
-  | { kind: "think"; text: string }
+  | { kind: "think"; text: string; sourceId?: string }
   | { kind: "image"; media: string; data: string; w?: number; h?: number; bytes?: number }
   | { kind: "inbox-image"; name: string; path: string }
   | { kind: "blob"; bytes: number; text: string; sourceId?: string }
@@ -1144,6 +1144,7 @@ interface CodexAssistantRecord {
   text: string;
   ts: unknown;
   src: number;
+  sourceId?: string;
   firstSeq: number;
   lastSeq: number;
 }
@@ -1429,12 +1430,18 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
   ) => {
     const normalizedText = text.trim();
     const candidate = codexAssistantRecord;
+    const sameSource = Boolean(sourceId && candidate?.sourceId === sourceId);
+    const sameSourcePrefix = Boolean(
+      sameSource && candidate && (normalizedText.startsWith(candidate.text) || candidate.text.startsWith(normalizedText)),
+    );
     if (
       candidate &&
       candidate.shape !== shape &&
       candidate.src === curSrc - 1 &&
-      candidate.text === normalizedText &&
-      sameCodexTextAtTime(candidate.ts, candidate.text, ts, normalizedText)
+      (sameSourcePrefix || (
+        candidate.text === normalizedText &&
+        sameCodexTextAtTime(candidate.ts, candidate.text, ts, normalizedText)
+      ))
     ) {
       const eventTimestamp = shape === "event-agent" ? ts : candidate.shape === "event-agent" ? candidate.ts : ts;
       for (let seq = candidate.firstSeq; seq <= candidate.lastSeq; seq += 1) {
@@ -1454,13 +1461,20 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
                 : item,
         };
       }
+      /* Current envelopes can finish with the visible answer while the adjacent
+         response mirror appends a structured citation block under the same id.
+         Keep the envelope's chronological slot and add only that suffix. */
+      if (sameSource && normalizedText.startsWith(candidate.text)) {
+        const suffix = normalizedText.slice(candidate.text.length).trim();
+        if (suffix) addProse(ts, suffix, sourceId);
+      }
       codexAssistantRecord = null;
       snapshot = null;
       return;
     }
     const emitted = addProse(ts, text, sourceId);
     codexAssistantRecord = emitted
-      ? { shape, text: normalizedText, ts, src: curSrc, firstSeq: emitted.firstSeq, lastSeq: emitted.lastSeq }
+      ? { shape, text: normalizedText, ts, src: curSrc, ...(sourceId ? { sourceId } : {}), firstSeq: emitted.firstSeq, lastSeq: emitted.lastSeq }
       : null;
   };
   /* One redaction/cap funnel for every tool event: the summary and chips are
@@ -1765,6 +1779,12 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
   const addNote = (text: string) => {
     push({ kind: "note", text });
   };
+  const addThink = (text: string, sourceId?: string) => {
+    const normalized = text.trim();
+    if (!normalized) return false;
+    push({ kind: "think", text: normalized, ...(sourceId ? { sourceId } : {}) });
+    return true;
+  };
   const addRecord = (ts: unknown, recordType: string, value: unknown) => {
     const detail = transcriptRecordBody(value);
     const safeType = redactTranscriptText(recordType).slice(0, ATTACHMENT_TYPE_MAX);
@@ -1906,7 +1926,12 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       ...(opts.timing.endTs !== undefined ? { endTs: opts.timing.endTs } : {}),
     });
   };
-  const renderCodexThreadItem = (item: Record<string, unknown>, timing: CodexThreadTiming, lifecycle: string): boolean => {
+  const renderCodexThreadItem = (
+    item: Record<string, unknown>,
+    timing: CodexThreadTiming,
+    lifecycle: string,
+    assistantShape: CodexAssistantShape,
+  ): boolean => {
     const kind = codexThreadItemKind(item.type);
     const id = textPart(item.id) || "plain-" + pushSeq + "-" + String(timing.ts ?? "");
     const toolKind = ["functioncalloutput", "commandexecution", "filechange", "mcptoolcall", "dynamictoolcall", "collabagenttoolcall", "websearch", "imageview", "imagegeneration", "extension"].includes(kind);
@@ -1925,7 +1950,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     }
     if (kind === "agentmessage") {
       const text = normalizeCodexUserContent(item.content).text || textPart(item.text);
-      addCodexAssistant("response-assistant", timing.ts, text, id);
+      addCodexAssistant(assistantShape, timing.ts, text, id);
       return true;
     }
     if (kind === "functioncalloutput") {
@@ -1946,8 +1971,10 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
           .filter((part): part is string => typeof part === "string" && Boolean(part.trim())).join("\n")
         || envelopeText
         || textPart(item.text);
-      if (text) push({ kind: "think", text });
-      else addSvc("reasoning");
+      const sourceId = textPart(item.id) || undefined;
+      const settled = addThink(text, sourceId)
+        || Boolean(assistantShape === "event-agent" && sourceId && addThink(tr("render.reasoning"), sourceId));
+      if (!settled) addSvc("reasoning");
       return true;
     }
     if (kind === "mcptoolcall") {
@@ -2252,7 +2279,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       const threadItem = rec(p.item);
       if (["itemstarted", "itemcompleted", "itemdelta"].includes(lifecycle) && textPart(threadItem.type)) {
         const timing = codexThreadTiming(p, ts);
-        if (renderCodexThreadItem(threadItem, timing, lifecycle)) return;
+        if (renderCodexThreadItem(threadItem, timing, lifecycle, "event-agent")) return;
         if (lifecycle !== "itemcompleted") return addSvc(`${textPart(threadItem.type)} ${lifecycle}`);
         return addThreadItemFallback(timing.ts, textPart(threadItem.type), threadItem);
       }
@@ -2308,11 +2335,11 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       if (textPart(nestedThreadItem.type)) {
         finalizePendingCodexUsers();
         const timing = codexThreadTiming(p, ts);
-        if (renderCodexThreadItem(nestedThreadItem, timing, "itemcompleted")) return;
+        if (renderCodexThreadItem(nestedThreadItem, timing, "itemcompleted", "response-assistant")) return;
         return addThreadItemFallback(timing.ts, textPart(nestedThreadItem.type), nestedThreadItem);
       }
       const directItemType = textPart(p.type);
-      if (!directItemType.includes("_") && renderCodexThreadItem(p, codexThreadTiming(p, ts), "itemcompleted")) return;
+      if (!directItemType.includes("_") && renderCodexThreadItem(p, codexThreadTiming(p, ts), "itemcompleted", "response-assistant")) return;
       if (p.type === "message") {
         if (p.role === "user") return addCodexResponseUser(ts, p.content);
         finalizePendingCodexUsers();
@@ -2733,9 +2760,10 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
 
   /* Collapses a run of >=2 consecutive foldable tool entries into one cmd-group
      item so a long unbroken tool series reads as a single summary line. Every
-     tool event folds (Read/Bash/Edit/diff-bodied/orchestration alike); a "think"
-     item inside a run is absorbed without breaking it (it carries no signal once
-     the run it annotates is folded), while prose/user/tmsg/review/image break it.
+     tool event folds (Read/Bash/Edit/diff-bodied/orchestration alike). A durable,
+     source-identified reasoning row breaks the run so its chronological position
+     remains visible when a live turn settles; legacy anonymous thinking keeps
+     its established absorbed behavior. Every other non-tool row breaks the run.
      The live trailing run folds whole — the in-flight (`run`) calls included —
      into one aggregate marked `active`, which the card renders expanded so every
      command and output shows immediately (issue #475). An interior or settled
@@ -2770,7 +2798,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       while (j < entries.length) {
         const cur = entries[j];
         if (foldableTool(cur.item)) toolEntries.push({ idx: j, seq: cur.seq, item: cur.item });
-        else if (cur.item.kind !== "think") break;
+        else if (cur.item.kind !== "think" || cur.item.sourceId) break;
         j += 1;
       }
       /* The whole run folds into one aggregate. When it is the live trailing
