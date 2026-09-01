@@ -659,10 +659,16 @@ export class HostCommandViewerDeploymentAdapter implements ViewerDeploymentAdapt
       revision: candidate.revision,
       container: runtimeHostSuccessorName(candidate.revision, candidate.image),
     };
-    return parseRuntimeHostHandoffEvidence(
+    const handoff = parseRuntimeHostHandoffEvidence(
       await this.run("verify-host-successor", { candidate }),
       expected,
     );
+    /* The successor also performs this cleanup during boot. Repeating the
+       idempotent action after its framed readiness proof closes the durable
+       contract: a handoff cannot settle successfully while its intent still
+       owns the next deployment. */
+    await this.completeRuntimeHostHandoff(expected);
+    return handoff;
   }
 
   async completeRuntimeHostHandoff(generation: { image: string; revision: string; container: string }): Promise<void> {
