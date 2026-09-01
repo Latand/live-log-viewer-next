@@ -1995,6 +1995,10 @@ export const en = {
   "orchMobile.liveTitle": "This project's orchestrator",
   "orchMobile.liveHint": "It answers in its own conversation. Opening it lands there, with the composer.",
   "orchMobile.open": "Open the conversation",
+  "orchMobile.controlsAria": "Orchestrator controls: rotate, model, account and mandate",
+  "orchMobile.rotateOpening": "Reading the current seat settings…",
+  "orchMobile.mandateView": "Mandate v{version} — the rules it runs under",
+  "orchMobile.mandateViewCustom": "Mandate — the custom rules it runs under",
 
   // BranchPane
   "branch.live": "working",
