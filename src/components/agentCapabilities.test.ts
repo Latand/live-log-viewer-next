@@ -24,6 +24,27 @@ function file(overrides: Partial<FileEntry> = {}): FileEntry {
   } as FileEntry;
 }
 
+/** A host whose scanner process and transcript turn are both terminal. */
+function genuinelyDeadFile(overrides: Partial<FileEntry> = {}): FileEntry {
+  return file({
+    proc: null,
+    pid: null,
+    activity: "idle",
+    lastTurn: { startedAt: 1_000, endedAt: 2_000 },
+    ...overrides,
+  });
+}
+
+/** A dead runtime projection contradicted by a scanner-confirmed process. */
+function conflictingLiveProcessFile(): FileEntry {
+  return genuinelyDeadFile({ proc: "running", pid: 203 });
+}
+
+/** A dead runtime projection contradicted by an open transcript turn. */
+function conflictingOpenTurnFile(): FileEntry {
+  return genuinelyDeadFile({ activity: "live", lastTurn: { startedAt: 3_000, endedAt: null } });
+}
+
 /** The negotiated per-session image capability object, as the host advertises it. */
 function imageCap(supported: boolean): RuntimeImageCapability {
   return {
@@ -96,7 +117,7 @@ const note = (name: ControlName, f: FileEntry, view: RuntimeSessionView | null) 
 test("surfaceFor prioritizes shell, then dead, then structured, then running", () => {
   expect(surfaceFor(file({ engine: "shell", proc: "running" }), rv("codex-app-server", "hosted"))).toBe<StripSurface>("shell");
   // dead wins over structured even when the host kind is structured
-  expect(surfaceFor(file({ proc: "running" }), rv("claude-broker", "dead"))).toBe<StripSurface>("dead");
+  expect(surfaceFor(genuinelyDeadFile(), rv("claude-broker", "dead"))).toBe<StripSurface>("dead");
   expect(surfaceFor(file({ proc: "running" }), rv("codex-app-server", "hosted"))).toBe<StripSurface>("structured");
   expect(surfaceFor(file({ proc: "running", parent: null }), null)).toBe<StripSurface>("live-root");
   expect(surfaceFor(file({ proc: "running", parent: "/root.jsonl" }), null)).toBe<StripSurface>("live-subagent");
@@ -106,7 +127,7 @@ test("surfaceFor prioritizes shell, then dead, then structured, then running", (
 });
 
 test("an unhosted axis is treated as dead recovery", () => {
-  expect(surfaceFor(file({ proc: "running" }), rv("claude-broker", "unhosted"))).toBe<StripSurface>("dead");
+  expect(surfaceFor(genuinelyDeadFile(), rv("claude-broker", "unhosted"))).toBe<StripSurface>("dead");
 });
 
 /* --------------------- superseded rounds (issue #383) --------------------- */
@@ -150,6 +171,12 @@ test("a running conversation with no runtime session under the plane is unresolv
   expect(caps.controls.send.state === "disabled" && caps.controls.send.reason).toBe("strip.resolving");
   // and the strip itself renders nothing
   expect(stripHasVisibleControls(caps)).toBe(false);
+
+  // A dead projection remains unresolved while either affirmative live axis
+  // contradicts it. Recovery stays fenced until the authorities converge.
+  const deadView = rv("claude-broker", "dead");
+  expect(surfaceFor(conflictingLiveProcessFile(), deadView, { runtimeEnabled: true })).toBe<StripSurface>("unresolved");
+  expect(surfaceFor(conflictingOpenTurnFile(), deadView, { runtimeEnabled: true })).toBe<StripSurface>("unresolved");
 });
 
 test("affirmative legacy-tmux evidence resolves a running pane to live-root even under the plane", () => {
@@ -158,7 +185,7 @@ test("affirmative legacy-tmux evidence resolves a running pane to live-root even
 
 test("hydrated structured and dead hosts resolve to their rows under the plane", () => {
   expect(surfaceFor(file({ proc: "running" }), rv("codex-app-server", "hosted"), { runtimeEnabled: true })).toBe<StripSurface>("structured");
-  expect(surfaceFor(file({ proc: "running" }), rv("claude-broker", "dead"), { runtimeEnabled: true })).toBe<StripSurface>("dead");
+  expect(surfaceFor(genuinelyDeadFile(), rv("claude-broker", "dead"), { runtimeEnabled: true })).toBe<StripSurface>("dead");
 });
 
 test("a finished (proc-null) conversation stays resume under the plane — not unresolved", () => {
@@ -318,7 +345,7 @@ test("resume: runtime picks the on-resume profile, stop/compact/kill hidden", ()
 });
 
 test("dead structured host keeps durable text send available and disables images until recovery", () => {
-  const f = file({ proc: "running" });
+  const f = genuinelyDeadFile();
   const view = rv("claude-broker", "dead");
   expect(state("terminal", f, view)).toBe("enabled");
   expect(state("send", f, view)).toBe("enabled");
