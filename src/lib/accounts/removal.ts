@@ -101,6 +101,7 @@ function atOrBelow(relative: string, root: string): boolean {
 }
 
 function isOwnedDirectoryPath(engine: ManagedAccountEngine, relative: string): boolean {
+  if (engine === "claude" && atOrBelow(relative, path.join("plugins", "data"))) return false;
   for (const root of OWNED_DIRECTORY_ROOTS[engine]) if (atOrBelow(relative, root)) return true;
   return false;
 }

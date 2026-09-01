@@ -175,6 +175,28 @@ for (const [label, relative, contents] of [
   });
 }
 
+test("Claude persistent plugin data blocks account deletion as unknown", () => {
+  const account = mod.createManagedClaudeAccount("Plugin data");
+  const relative = path.join("plugins", "data", "example-plugin", "session-notes.txt");
+  const artifact = path.join(account.home, relative);
+  fs.mkdirSync(path.dirname(artifact), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(artifact, "plugin-owned session notes\n", { mode: 0o600 });
+
+  let caught: unknown;
+  try { mod.removeManagedClaudeAccount(account.id); }
+  catch (error) { caught = error; }
+
+  expect(caught).toBeInstanceOf(AccountHistoryInventoryBlockedError);
+  expect((caught as InstanceType<typeof AccountHistoryInventoryBlockedError>).report.artifacts).toContainEqual({
+    path: relative,
+    classification: "unknown",
+    history: false,
+  });
+  expect(fs.readFileSync(artifact, "utf8")).toBe("plugin-owned session notes\n");
+  expect(fs.existsSync(account.home)).toBe(true);
+  expect(mod.listClaudeAccounts().map((candidate) => candidate.id)).toContain(account.id);
+});
+
 test("sidecar cleanup does not follow a symlink outside the accounts root", () => {
   const account = mod.createManagedClaudeAccount("Linked sidecar");
   const sidecar = `${account.home}.lock`;
