@@ -533,6 +533,8 @@ export const uk: Record<keyof typeof en, Message> = {
   "receipt.human.compactSentUnobserved": "надіслано — Viewer не зміг підтвердити завершення стискання",
   "receipt.human.compactDeclined": "надіслано — агент завершив /compact, нічого не стиснувши",
   "receipt.human.verbatim": "не доставлено: {reason}",
+  "receipt.cause.hostUnavailable": "runtime host недоступний",
+  "receipt.cause.timedOut": "запит перевищив час очікування",
 
   "draft.readPrompt": "Прочитай розмову агента у файлі {src} і продовж роботу звідти: ",
   "draft.needDir": "вкажи робочу директорію",
@@ -1955,6 +1957,10 @@ export const uk: Record<keyof typeof en, Message> = {
   "orchMobile.liveTitle": "Оркестратор цього проєкту",
   "orchMobile.liveHint": "Він відповідає у власній розмові. Відкрийте її — і ви в ній, разом із полем вводу.",
   "orchMobile.open": "Відкрити розмову",
+  "orchMobile.controlsAria": "Керування оркестратором: заміна, модель, акаунт і мандат",
+  "orchMobile.rotateOpening": "Читаю поточні налаштування місця…",
+  "orchMobile.mandateView": "Мандат v{version} — правила, за якими він працює",
+  "orchMobile.mandateViewCustom": "Мандат — власні правила, за якими він працює",
 
   "branch.live": "працює",
   "branch.waiting": "закінчив хід — чекає відповіді",

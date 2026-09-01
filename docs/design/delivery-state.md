@@ -53,3 +53,37 @@ quiet.
 
 Both locales (EN/UK), desktop and 390 px: identical anatomy; the failure row's
 action chips wrap under the message text at 390 px as before.
+
+## The failure notice (issue #1362)
+
+The problem class no longer renders one pill per attempt. While a settled
+message failure is showing, the disclosure's summary line **is** the notice:
+
+```
+▸ ⊘ not delivered — runtime host unavailable  ×3            ↻  ✕
+```
+
+- **Collapse.** Identical consecutive failures fold into one notice with an
+  attempt counter: the newest visible settled failure plus every consecutive
+  earlier one with the same cause (`deliveryNoticeRun`). Three retries of one
+  message are one notice, ×3. A textless message failure (no echo to group by)
+  joins the run and shares one history row per cause. An older failure with a
+  different cause waits in the history until the run in front of it is
+  dismissed, then surfaces as the next notice.
+- **At rest.** Status glyph + `not delivered — <terse cause>` on one
+  truncating line, the counter as plain muted text (never a badge). A known
+  reason code is its human sentence; a verbatim sentence takes its terse form
+  from `describeReceiptFailure` (`receipt.cause.*`), else its first clause. The
+  whole sentence rides on hover.
+- **Expand.** The full first sentence and the remediation after its semicolon
+  render once at the top of the history, then the per-message rows as before
+  (Retry / Edit & resend / Discard / Dismiss per row, ×N and superseded
+  history). The notice is the accordion's disclosure, not a copy of it.
+- **Subordinate but clearly an error.** A 2px danger edge, the glyph and the
+  status word carry the role (design §3.7: role in the edge, never a full
+  wash); fill and type are the composer's own sunken caption. Both themes read
+  through the same role tokens.
+- **Actions.** Quiet icon-buttons in the row: same-key Retry for a confirmed
+  failure of a message (never for a rejection or a discard), and Dismiss, which
+  clears the whole group — every settled attempt the counter counted.
+  44px hit areas on touch, inside the same 44px line.
