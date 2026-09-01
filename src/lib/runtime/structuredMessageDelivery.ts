@@ -224,12 +224,23 @@ function persistedCurrentOwner(
     : registry.conversationForPath(request.path);
   const generation = conversation?.generations.at(-1);
   if (!conversation || !generation) return null;
-  const entry = registry.readOnlySnapshot().entries[`${conversation.engine}:${generation.id}`];
+  const snapshot = registry.readOnlySnapshot();
+  const entry = snapshot.entries[`${conversation.engine}:${generation.id}`];
   if (!entry || entry.artifactPath !== generation.path) return null;
-  const structured = entry.structuredHost !== null && entry.structuredHost !== undefined;
-  const legacy = entry.host !== null;
-  if (structured === legacy) return null;
-  return { kind: structured ? "structured" : "legacy", conversation };
+  const deliverability = conversationDeliverabilityFromRecord(snapshot, {
+    conversationId: conversation.id,
+    transcriptPath: generation.path,
+  });
+  /* A current legacy host wins over retained structured adapter metadata, the
+     same verdict conversation_deliverability exposes. This keeps a stale
+     runtime projection from recovering over the pane resume just settled. */
+  if (deliverability.deliverable && deliverability.transport === "legacy") {
+    return { kind: "legacy", conversation };
+  }
+  if (entry.host === null && entry.structuredHost !== null && entry.structuredHost !== undefined) {
+    return { kind: "structured", conversation };
+  }
+  return null;
 }
 
 function heldOutcomeDuringRuntimeSynchronization(
@@ -665,6 +676,10 @@ export async function enqueueStructuredMessage(
   }
   const rawImages = imageAdmission.images;
   const registry = (dependencies.registry ?? agentRegistry)();
+  const durableOwner = persistedCurrentOwner(request, registry);
+  if (durableOwner?.kind === "legacy") {
+    return requiresStructuredCommand(request) ? legacyCommandUnavailable() : null;
+  }
   const client = (dependencies.client ?? runtimeHostClient)();
   if (!client) {
     return holdDuringRuntimeSynchronization(
