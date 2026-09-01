@@ -258,12 +258,17 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
   const [pulse, setPulse] = useState(false);
   const [endedQuestion, setEndedQuestion] = useState<string | null>(null);
   const hadQuestionRef = useRef(false);
+  /* Synchronous per-transcript follow authority: an upward input closes this
+     latch before a tail render can run with stale `magnet` state. While this
+     transcript stays selected, only an operator bottom return or an explicit
+     follow control writes it true again. */
   const magnetRef = useRef(magnet);
   const lastLenRef = useRef(0);
   const lastPrependRef = useRef(0);
   const pulseTimer = useRef<number | null>(null);
   const glueAtRef = useRef(0);
   const scrollCauseRef = useRef<ScrollCause | null>(null);
+  const feedTouchRef = useRef<{ x: number; y: number } | null>(null);
   const pillTouchRef = useRef<{ x: number; y: number } | null>(null);
   const restoreInitializedPathRef = useRef<string | null>(null);
   const pendingRestoreRef = useRef<PendingRestore | null>(null);
@@ -303,7 +308,7 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
      treats near-in-time off-bottom positions as layout still settling. */
   const glue = () => {
     const el = scroller.current;
-    if (!el) return;
+    if (!el || !magnetRef.current) return;
     markProgrammaticScroll();
     el.scrollTop = el.scrollHeight;
     const pendingUser = scrollCauseRef.current;
@@ -527,8 +532,8 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
         : { icon: Sparkle, label: t("feed.working") };
 
   const jumpToTail = () => {
-    glue();
     setMagnet(true, true);
+    glue();
   };
 
   const transcriptGeneration = tailPath;
@@ -714,6 +719,7 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
       fromBottom: distanceFromBottom(el),
       direction: direction === null || direction === 0 ? null : direction < 0 ? -1 : 1,
     };
+    if (direction !== null && direction < 0 && magnetRef.current) setMagnet(false);
   };
   const forwardPillVerticalDelta = (row: HTMLElement | null, deltaY: number): void => {
     const el = scroller.current;
@@ -805,7 +811,22 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
         onWheelCapture={(event) => {
           if (event.deltaY) markUserScroll(event.deltaY);
         }}
-        onTouchStartCapture={() => { markUserScroll(null); }}
+        onTouchStartCapture={(event) => {
+          const touch = event.touches[0];
+          feedTouchRef.current = touch ? { x: touch.clientX, y: touch.clientY } : null;
+          markUserScroll(null);
+        }}
+        onTouchMoveCapture={(event) => {
+          const touch = event.touches[0];
+          const previous = feedTouchRef.current;
+          if (!touch || !previous) return;
+          const deltaX = previous.x - touch.clientX;
+          const deltaY = previous.y - touch.clientY;
+          feedTouchRef.current = { x: touch.clientX, y: touch.clientY };
+          if (Math.abs(deltaY) > Math.abs(deltaX)) markUserScroll(deltaY);
+        }}
+        onTouchEndCapture={() => { feedTouchRef.current = null; }}
+        onTouchCancelCapture={() => { feedTouchRef.current = null; }}
         onKeyDownCapture={(event) => {
           if (["ArrowUp", "Home", "PageUp"].includes(event.key)) markUserScroll(-1);
           else if (["ArrowDown", "End", "PageDown"].includes(event.key)) markUserScroll(1);
@@ -821,13 +842,14 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
             && userDelta !== 0
             && (cause.direction === null || Math.sign(userDelta) === -cause.direction);
           const userReleasedMagnet = userInitiated && userDelta > 0;
+          const userReturnedToBottom = atBottom && userInitiated && userDelta < 0;
           /* A concurrent glue can emit its own scroll at the bottom before the
              wheel's upward scroll. Keep a zero-movement user tag for that next
              event; an opposite movement proves the tag did not cause it. */
           if (cause?.kind !== "user" || userDelta !== 0) scrollCauseRef.current = null;
           const settling = nowMs() - glueAtRef.current < GLUE_SETTLE_MS;
           if (!settling || userInitiated) pendingRestoreRef.current = null;
-          if (atBottom && !magnetRef.current && !userReleasedMagnet) setMagnet(true, true);
+          if (userReturnedToBottom && !magnetRef.current) setMagnet(true, true);
           else if ((userReleasedMagnet || !atBottom) && magnetRef.current) {
             /* Off-bottom right after a programmatic glue is layout settling
                (content-visibility estimates, pane resizes during a scheme
