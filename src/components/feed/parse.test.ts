@@ -1961,11 +1961,11 @@ describe("Codex item_completed envelope generation", () => {
     expect(item.stderr).toContain("[redacted]");
   });
 
-  test("drops an envelope Reasoning item whose summary_text and raw_content are empty", () => {
+  test("collapses an identified envelope Reasoning item whose text fields are empty", () => {
     const feed = buildFeed(codexFile, [fixture[0]], false, "");
 
-    expect(feed.items).toEqual([]);
-    expect(feed.hiddenServiceCount).toBe(1);
+    expect(feed.items).toEqual([{ kind: "think", text: "agent reasoning", sourceId: "reasoning-envelope" }]);
+    expect(feed.hiddenServiceCount).toBe(0);
   });
 
   test("renders populated envelope Reasoning fields as one reasoning entry", () => {
