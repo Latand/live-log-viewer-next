@@ -303,6 +303,7 @@ interface FakeHostState {
   deliverError: unknown | null;
   spawnCalls: number;
   failSpawn: boolean;
+  spawnError: unknown | null;
   panePidOverride: number | null;
   serverPid: number | null;
   paneObservation: "available" | "no-server" | "failure";
@@ -337,6 +338,7 @@ function fakeHost(
     deliverError: null,
     spawnCalls: 0,
     failSpawn: false,
+    spawnError: null,
     panePidOverride: null,
     serverPid: 900,
     paneObservation: "available",
@@ -395,6 +397,7 @@ function fakeHost(
     spawn: async (resumeSpec: ResumeSpec, payload: string): Promise<SpawnedPane> => {
       state.spawnCalls += 1;
       state.spawnSpecs.push({ spec: resumeSpec, payload });
+      if (state.spawnError) throw state.spawnError;
       if (state.failSpawn) throw new Error("tmux resume failed");
       await Promise.resolve();
       const panePid = 300;
@@ -804,6 +807,22 @@ describe("transcript host resolver", () => {
       target: "agents:5.0",
     });
     expect(state.spawnCalls).toBe(2);
+  });
+
+  test("sanitizes a legacy resume pane-buffer failure before it reaches the caller", async () => {
+    const { resolver, state } = fakeHost(false);
+    const raw = "no buffer viewer-1788299999999-481516";
+    state.spawnError = new Error(raw);
+
+    const outcome = await resolver.deliverToTranscriptHost({ entry: state.entry, spec, payload: "" });
+
+    expect(outcome).toEqual({
+      ok: false,
+      outcome: "failed",
+      error: "Pane buffer unreadable — message was not sent.",
+      status: 500,
+    });
+    expect(JSON.stringify(outcome)).not.toContain(raw);
   });
 
   test("reports post-paste delivery ambiguity without retyping the payload", async () => {
