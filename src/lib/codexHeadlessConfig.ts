@@ -9,6 +9,17 @@ function record(value: unknown): JsonObject | null {
   return value && typeof value === "object" && !Array.isArray(value) ? value as JsonObject : null;
 }
 
+/** `config/read` reports every optional field of a server, using null for the
+    ones nobody set — `tool_timeout_sec: null` for a server that never declared
+    one. Codex will not accept those nulls back as input: replaying the entry
+    verbatim makes it reject the whole launch with "invalid type: string ``,
+    expected f64" and no session starts at all (#1410). Only fields carrying a
+    real value are replayed; an absent field stays absent, which is what the
+    operator's configuration said in the first place. */
+function withoutUnsetFields(server: JsonObject): JsonObject {
+  return Object.fromEntries(Object.entries(server).filter(([, value]) => value !== null && value !== undefined));
+}
+
 /** Per-plugin thread table for a granted session: every plugin Codex knows
  *  about, with only the granted names enabled. Codex 0.145 accepts this table
  *  on `thread/start` but resolves plugins from the global config instead, so it
@@ -58,7 +69,7 @@ export function headlessCodexThreadConfig(
         /* A replacement app-server must receive the launch definition again.
            Its predecessor owned the stdio child, so an enable flag alone
            leaves a resumed thread with no connector process to call (#1346). */
-        ...(name === "viewer" ? server as JsonObject : {}),
+        ...(name === "viewer" ? withoutUnsetFields(server as JsonObject) : {}),
         enabled: enabled.has(name),
         ...(approval ? { default_tools_approval_mode: approval } : {}),
       }];
