@@ -4,7 +4,7 @@ import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, useSy
 import { createPortal } from "react-dom";
 
 import { ArrowRight, ArrowUpToLine, Check, ChevronRight, Loader2, Play, X } from "@/components/icons";
-import { RotateCcw } from "lucide-react";
+import { CircleAlert, RotateCcw } from "lucide-react";
 
 import type { TFunction } from "@/lib/i18n";
 
@@ -75,6 +75,7 @@ import {
   withDismissedReceipts,
   writeDismissedReceipts,
 } from "./runtime/deliveryState";
+import { deliveryNoticeRun, describeReceiptFailure, failureCauseKey } from "./runtime/deliveryNotice";
 import { mintIdempotencyKey, receiptIsAdmitted, receiptIsTerminal, type HostAxis, type TurnAxis } from "./runtime/runtimeModel";
 import { tmuxComposerRuntimeDependencies } from "./tmuxComposerRuntime";
 import { VoiceConversationButton } from "./VoiceConversation";
@@ -343,6 +344,42 @@ export function RuntimeComposerReceipts({
     return [...counts].map(([label, count]) => (count > 1 ? `${label} ×${count}` : label));
   };
   const standaloneReceipts = visibleStandaloneReceipts(receipts, dismissed);
+  /* #1362: a message receipt with no text echo used to render one standalone
+     pill per attempt — three retries, three full-width pills, each carrying
+     the whole sentence. Settled message failures belong to the notice and the
+     history under it now; only still-moving and non-message operations keep a
+     standalone chip. Textless failures with one cause share one history row. */
+  const textlessProblems = standaloneReceipts
+    .filter((receipt) => isMessage(receipt) && deliveryProblem(receipt.status))
+    .sort((left, right) => Date.parse(right.at) - Date.parse(left.at));
+  const standaloneChips = standaloneReceipts.filter((receipt) => !textlessProblems.includes(receipt));
+  const textlessRows = textlessProblems.reduce<RuntimeReceipt[][]>((rows, receipt) => {
+    const last = rows[rows.length - 1];
+    if (last && failureCauseKey(last[0]!.reason) === failureCauseKey(receipt.reason)) last.push(receipt);
+    else rows.push([receipt]);
+    return rows;
+  }, []);
+  /* The one compact notice (issue #1362) stands in for the summary line while
+     a settled failure is showing: identical consecutive failures fold into it
+     behind an attempt counter, the row names a terse cause, and the full
+     sentence with its remediation waits behind expand/hover. The per-message
+     history below keeps the detail — the notice is its disclosure, not a copy. */
+  const notice = deliveryNoticeRun(attemptGroups, textlessProblems);
+  const noticeFailure = notice ? describeReceiptFailure(t, notice.current.reason) : null;
+  const noticeLine = notice
+    ? noticeFailure?.cause
+      ? `${t("composer.receiptFailed")} — ${noticeFailure.cause}`
+      : t("composer.receiptFailed")
+    : null;
+  const noticeAttemptLabel = notice && notice.attempts.length > 1
+    ? t("runtime.receipt.attemptCount", { count: notice.attempts.length })
+    : null;
+  /* Same rule as the row: a same-key retry exists for a confirmed failure of a
+     message, never for a rejection (Edit mints the new key there) or a discard. */
+  const noticeRetryable = Boolean(notice
+    && notice.current.status === "failed"
+    && isMessage(notice.current)
+    && notice.current.reason !== "delivery-discarded");
   /* Collapsed is the default state, and it is what the operator photographed:
      a warning badge counting an attempt that was never coming. A row that went
      terminally uncertain counts as a PROBLEM here, so the summary reads
@@ -355,41 +392,87 @@ export function RuntimeComposerReceipts({
     !receiptIsTerminal(receipt.status) && !uncertainOperationIds.has(receipt.operationId));
   const problemReceipts = [
     ...visibleAttempts.filter((receipt) => deliveryProblem(receipt.status)),
+    ...textlessProblems,
     ...uncertainCurrent,
   ];
+  /* The notice already IS the settled-failure indicator, so beside it the red
+     count badge speaks only for deliveries that went terminally uncertain. */
+  const problemBadgeCount = notice ? uncertainCurrent.length : problemReceipts.length;
   const busyRetry = pendingReceipts.some((receipt) => typeof receipt.reason === "string" && RECOVERABLE_BUSY_RETRY_REASONS.has(receipt.reason));
   const receiptSummaryLabel = t("runtime.receipt.summary", { count: visibleAttempts.length });
   const disclosureLabel = t(detailsOpen ? "runtime.receipt.hideDetails" : "runtime.receipt.showDetails");
+  const summaryAriaLabel = noticeLine
+    ? `${disclosureLabel}. ${noticeLine}${noticeAttemptLabel ? `. ${noticeAttemptLabel}` : ""}`
+    : `${disclosureLabel}. ${receiptSummaryLabel}`;
+  /* On a phone the notice's actions keep the 44px hit area in a 32px box (the
+     composer's own icon-button pattern: the hit extends through `before:`),
+     so the terse cause keeps its width beside them at 390px. */
+  const noticeActionClass = "relative inline-flex h-11 w-8 shrink-0 items-center justify-center rounded-control text-muted before:absolute before:inset-y-0 before:-inset-x-1.5 before:content-[''] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-50 sm:h-6 sm:w-6 sm:before:hidden";
 
   return (
     <>
-      {visibleAttempts.length ? (
+      {visibleAttempts.length || textlessRows.length ? (
         <>
           {/* `open` is controlled: the details element can unmount while all
               message receipts are resolved and remount for the next attempt,
               and the disclosure label must keep matching the real element. */}
           <details
-            className="group w-full min-w-0 rounded-control border border-border bg-sunken/55 text-caption text-secondary"
+            /* Failure reads through a 2px danger edge, the glyph and the label
+               only (design §3.7: role in the edge, never a full wash) — an
+               annotation under the composer, subordinate to it in both themes. */
+            className={`group w-full min-w-0 rounded-control border border-border ${
+              notice ? "border-l-2 border-l-danger " : ""
+            }bg-sunken/55 text-caption text-secondary`}
             data-runtime-receipt-stack
+            {...(notice ? { "data-delivery-notice": "" } : {})}
             open={detailsOpen}
             onToggle={(event) => setDetailsOpen(event.currentTarget.open)}
           >
             <summary
               aria-describedby={statusId}
-              aria-label={`${disclosureLabel}. ${receiptSummaryLabel}`}
-              className="flex min-h-11 max-h-11 cursor-pointer list-none items-center gap-1 overflow-hidden rounded-control px-1.5 py-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 [&::-webkit-details-marker]:hidden"
+              aria-label={summaryAriaLabel}
+              /* The notice row drops the vertical padding so its 44px touch
+                 actions fit inside the same 44px line the summary always had. */
+              className={`flex min-h-11 max-h-11 cursor-pointer list-none items-center overflow-hidden rounded-control px-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 [&::-webkit-details-marker]:hidden ${
+                notice ? "gap-1 sm:gap-1.5" : "gap-1 py-1"
+              }`}
             >
               <ChevronRight className="h-3 w-3 shrink-0 text-muted transition-transform duration-150 group-open:rotate-90 motion-reduce:transition-none" aria-hidden />
-              <span className="shrink-0 font-semibold text-primary">
-                {receiptSummaryLabel}
-              </span>
-              <span
-                className="min-w-[3rem] flex-1 truncate text-right text-muted"
-                data-receipt-preview
-                title={visibleAttempts[0]!.text ?? undefined}
-              >
-                {visibleAttempts[0]!.text}
-              </span>
+              {notice ? (
+                <>
+                  <CircleAlert className="h-3 w-3 shrink-0 text-danger" aria-hidden />
+                  {/* At rest: status word + terse cause on one truncating line;
+                      the whole sentence rides on hover. */}
+                  <span
+                    className="min-w-0 flex-1 truncate"
+                    data-delivery-notice-cause
+                    title={noticeFailure?.full ?? undefined}
+                  >
+                    <span className="font-semibold text-danger">{t("composer.receiptFailed")}</span>
+                    {noticeFailure?.cause ? <span className="text-secondary">{` — ${noticeFailure.cause}`}</span> : null}
+                  </span>
+                  {/* Counters are plain muted text, never badges (design rule 5). */}
+                  {noticeAttemptLabel ? (
+                    <span className="shrink-0 tabular-nums text-muted" data-delivery-notice-count title={noticeAttemptLabel}>
+                      <span aria-hidden>×{notice.attempts.length}</span>
+                      <span className="sr-only">{noticeAttemptLabel}</span>
+                    </span>
+                  ) : null}
+                </>
+              ) : (
+                <>
+                  <span className="shrink-0 font-semibold text-primary">
+                    {receiptSummaryLabel}
+                  </span>
+                  <span
+                    className="min-w-[3rem] flex-1 truncate text-right text-muted"
+                    data-receipt-preview
+                    title={visibleAttempts[0]!.text ?? undefined}
+                  >
+                    {visibleAttempts[0]!.text}
+                  </span>
+                </>
+              )}
               <span className="flex shrink-0 items-center gap-1" data-receipt-counts>
                 {pendingReceipts.length ? (
                   <Badge
@@ -408,24 +491,84 @@ export function RuntimeComposerReceipts({
                     <span aria-hidden data-receipt-count-value>{pendingReceipts.length}</span>
                   </Badge>
                 ) : null}
-                {problemReceipts.length ? (
+                {problemBadgeCount ? (
                   <Badge
                     tone="danger"
                     data-receipt-problem-count
-                    aria-label={t("runtime.receipt.problemCount", { count: problemReceipts.length })}
-                    title={t("runtime.receipt.problemCount", { count: problemReceipts.length })}
+                    aria-label={t("runtime.receipt.problemCount", { count: problemBadgeCount })}
+                    title={t("runtime.receipt.problemCount", { count: problemBadgeCount })}
                   >
                     <span aria-hidden>!</span>
-                    <span className="sr-only">{t("runtime.receipt.problemCount", { count: problemReceipts.length })}</span>
-                    <span aria-hidden data-receipt-count-value>{problemReceipts.length}</span>
+                    <span className="sr-only">{t("runtime.receipt.problemCount", { count: problemBadgeCount })}</span>
+                    <span aria-hidden data-receipt-count-value>{problemBadgeCount}</span>
                   </Badge>
                 ) : null}
               </span>
+              {/* The notice's own actions, quiet icon-buttons (design §3.5:
+                  failed = danger + retry icon-button). A button carries its own
+                  activation, so a click here never toggles the disclosure; the
+                  explicit preventDefault says so in DOMs that toggle on bubble. */}
+              {notice && (noticeRetryable || onDismiss) ? (
+                <span className="-mr-1 flex shrink-0 items-center sm:mr-0" data-delivery-notice-actions>
+                  {noticeRetryable ? (
+                    <button
+                      type="button"
+                      data-delivery-notice-retry
+                      aria-label={t("runtime.receipt.retry")}
+                      title={t("runtime.receipt.retry")}
+                      disabled={actionsDisabled}
+                      className={`${noticeActionClass} hover:text-accent`}
+                      onClick={(event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        retryFailed(notice.current);
+                      }}
+                    >
+                      <RotateCcw className="h-3 w-3" aria-hidden />
+                    </button>
+                  ) : null}
+                  {/* Dismissing the notice clears its whole group: every settled
+                      attempt it counted (issue #264 rule 3 — a still-moving
+                      attempt is never hidden). */}
+                  {onDismiss ? (
+                    <button
+                      type="button"
+                      data-delivery-notice-dismiss
+                      aria-label={t("runtime.receipt.dismiss")}
+                      title={t("runtime.receipt.dismiss")}
+                      className={`${noticeActionClass} hover:text-danger`}
+                      onClick={(event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        onDismiss(notice.dismissIds);
+                      }}
+                    >
+                      <X className="h-3 w-3" aria-hidden />
+                    </button>
+                  ) : null}
+                </span>
+              ) : null}
             </summary>
             <div
               className="max-h-36 space-y-1 overflow-y-auto border-t border-border/70 p-1.5"
               data-runtime-receipt-details
             >
+              {/* What expanding reveals (issue #1362): the full sentence and the
+                  remediation after it, once for the run — never once per
+                  attempt. Wraps rather than truncates: this is where the
+                  operator reads what to do. */}
+              {notice && noticeFailure?.detail ? (
+                <div className="rounded-control bg-card/70 px-2 py-1 text-secondary" data-delivery-notice-detail>
+                  <p className="whitespace-pre-wrap break-words" data-delivery-notice-sentence>
+                    {noticeFailure.detail.sentence}
+                  </p>
+                  {noticeFailure.detail.remediation ? (
+                    <p className="whitespace-pre-wrap break-words text-muted" data-delivery-notice-remediation>
+                      {noticeFailure.detail.remediation}
+                    </p>
+                  ) : null}
+                </div>
+              ) : null}
               {attemptGroups.map((group) => {
                 const receipt = group.current;
                 const history = supersededStatusLabels(group.attempts);
@@ -541,6 +684,48 @@ export function RuntimeComposerReceipts({
                   </div>
                 );
               })}
+              {/* Textless message failures (no echo to group by): one history
+                  row per consecutive cause, counted, with the same chip and
+                  dismissal the standalone pills used to carry. */}
+              {textlessRows.map((bucket) => {
+                const receipt = bucket[0]!;
+                return (
+                  <div
+                    key={receipt.operationId}
+                    className="flex min-w-0 flex-wrap items-center justify-end gap-1.5 rounded-control bg-card/70 px-2 py-1"
+                    data-receipt-standalone-row
+                  >
+                    {bucket.length > 1 ? (
+                      <Badge
+                        tone="neutral"
+                        data-receipt-attempt-count
+                        aria-label={t("runtime.receipt.attemptCount", { count: bucket.length })}
+                        title={t("runtime.receipt.attemptCount", { count: bucket.length })}
+                      >
+                        <span aria-hidden>×{bucket.length}</span>
+                        <span className="sr-only">{t("runtime.receipt.attemptCount", { count: bucket.length })}</span>
+                      </Badge>
+                    ) : null}
+                    <ReceiptChip
+                      receipt={receipt}
+                      actionsDisabled={actionsDisabled}
+                      onRetry={receipt.status === "failed" ? () => retryFailed(receipt) : undefined}
+                    />
+                    {onDismiss ? (
+                      <button
+                        type="button"
+                        aria-label={t("runtime.receipt.dismiss")}
+                        title={t("runtime.receipt.dismiss")}
+                        data-receipt-dismiss
+                        className="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded text-muted hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0 sm:min-w-0 sm:px-0.5"
+                        onClick={() => onDismiss(bucket.map((attempt) => attempt.operationId))}
+                      >
+                        <X className="h-3 w-3" aria-hidden />
+                      </button>
+                    ) : null}
+                  </div>
+                );
+              })}
             </div>
           </details>
           <span
@@ -554,19 +739,22 @@ export function RuntimeComposerReceipts({
               pending: t("runtime.receipt.statusPending", { count: pendingReceipts.length }),
               problems: t("runtime.receipt.statusProblems", { count: problemReceipts.length }),
             })}
-            {` ${attemptGroups
-              .map((group) => {
+            {` ${[
+              ...attemptGroups.map((group) => {
                 const wait = waitFor(group);
                 const current = (wait && deliveryWaitText(t, wait, group.current.queuePosition))
                   ?? runtimeReceiptStatusText(t, group.current);
                 return [current, ...supersededStatusLabels(group.attempts)].join(" · ");
-              })
-              .join(". ")}.`}
+              }),
+              ...textlessRows.map((bucket) => (bucket.length > 1
+                ? `${runtimeReceiptStatusText(t, bucket[0]!)} ×${bucket.length}`
+                : runtimeReceiptStatusText(t, bucket[0]!))),
+            ].join(". ")}.`}
             {busyRetry ? ` ${t("runtime.receipt.busyRetry")}` : null}
           </span>
         </>
       ) : null}
-      {standaloneReceipts.map((receipt) => {
+      {standaloneChips.map((receipt) => {
         const failed = receipt.status === "failed";
         return (
           <span key={receipt.operationId} className="inline-flex items-center gap-1">

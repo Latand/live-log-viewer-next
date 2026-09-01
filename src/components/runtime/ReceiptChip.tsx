@@ -5,16 +5,28 @@ import { Clock3 } from "lucide-react";
 import { Badge, type BadgeTone } from "@/components/ui/Badge";
 import { useLocale, type TFunction } from "@/lib/i18n";
 
+import { describeReceiptFailure } from "./deliveryNotice";
 import { deliveryWaitText, type DeliveryWait } from "./deliveryWait";
 import { humanReceiptReasonKey, receiptIsTerminal, type ReceiptStatus, type RuntimeReceipt } from "./runtimeModel";
 
 /** Human sentence for a rejected/failed reason: a mapped sentence for a known
-    code, else the sanitized reason printed verbatim behind a "not delivered:"
-    prefix — never the raw `rejected: dead-host` stream (design §7). */
+    code, else the sanitized reason's terse cause behind a "not delivered:"
+    prefix — never the raw `rejected: dead-host` stream (design §7), and never
+    the whole sentence with its remediation in a chip (#1362): that lives in
+    the notice's expanded detail and on hover ({@link humanReasonFull}). */
 export function humanReason(t: TFunction, reason: string | null | undefined): string {
   const key = humanReceiptReasonKey(reason);
   if (key) return t(key);
-  return reason ? t("receipt.human.verbatim", { reason }) : t("composer.receiptFailed");
+  const { cause } = describeReceiptFailure(t, reason);
+  return cause ? t("receipt.human.verbatim", { reason: cause }) : t("composer.receiptFailed");
+}
+
+/** The whole sentence {@link humanReason} shortened, for hover — or null when
+    nothing was shortened. */
+export function humanReasonFull(t: TFunction, reason: string | null | undefined): string | null {
+  if (humanReceiptReasonKey(reason)) return null;
+  const { cause, full } = describeReceiptFailure(t, reason);
+  return full && full !== cause ? t("receipt.human.verbatim", { reason: full }) : null;
 }
 
 /** Badge tone per receipt status. Text carries the meaning; color reinforces. */
@@ -76,20 +88,28 @@ export function ReceiptChip({ receipt, wait = null, actionsDisabled = false, onR
     || wait?.phase === "awaiting-handover"
     || wait?.phase === "unconfirmed-admission";
   const waitText = wait ? deliveryWaitText(t, wait, receipt.queuePosition) : null;
+  const label = waitText ?? runtimeReceiptStatusText(t, receipt);
+  const fullLabel = failed ? humanReasonFull(t, receipt.reason) : null;
   return (
-    <span className="inline-flex flex-wrap items-center gap-1.5 text-[11px] font-semibold" data-operation={receipt.operationId}>
+    <span className="inline-flex min-w-0 max-w-full flex-wrap items-center gap-1.5 text-[11px] font-semibold" data-operation={receipt.operationId}>
+      {/* A failure chip says the terse cause (#1362) and can still run long
+          on a phone: it shrinks to its line and ends in an ellipsis instead of
+          clipping mid-word, and the whole sentence rides on hover. Moving
+          states keep their fixed chip. */}
       <Badge
         tone={uncertain || wait?.phase === "awaiting-host"
           ? "danger"
           : parked
             ? "warning"
             : tone(receipt.status)}
+        shrinkable={failed}
+        {...(failed ? { title: fullLabel ?? label } : {})}
         data-receipt-status={receipt.status}
         {...(wait ? { "data-receipt-wait": wait.phase } : {})}
         {...(failed || uncertain ? { role: "status", "aria-live": "polite" as const } : {})}
       >
         {parked ? <Clock3 className="mr-1 h-3 w-3" aria-hidden /> : null}
-        {waitText ?? runtimeReceiptStatusText(t, receipt)}
+        {failed ? <span className="min-w-0 truncate">{label}</span> : label}
       </Badge>
       {(failed || uncertain) && !discarded && onRetry ? (
         <button
