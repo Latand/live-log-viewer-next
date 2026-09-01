@@ -205,8 +205,9 @@ async function requestViewerControl(
   pathname: string,
   init: RequestInit,
   context: McpToolCallContext = {},
+  pinConfiguredEndpoint = false,
 ): Promise<{ response: Response; parsed: unknown; unreadable: boolean }> {
-  const baseUrl = viewerControlOrigin();
+  const baseUrl = viewerControlOrigin(process.env, pinConfiguredEndpoint);
   const now = Date.now();
   const deadlineAt = context.deadlineAt;
   const retryable = deadlineAt !== undefined;
@@ -275,12 +276,13 @@ async function requestViewerControl(
 async function getViewerControl(
   pathname: string,
   context: McpToolCallContext = {},
+  pinConfiguredEndpoint = false,
 ): Promise<Record<string, unknown>> {
   const { response, parsed: controlPayload, unreadable } = await requestViewerControl(pathname, {
     headers: {
       accept: "application/json",
     },
-  }, context);
+  }, context, pinConfiguredEndpoint);
   /* A body of literal `null` is valid JSON, so `.catch` never fires and every
      later `result.x` throws a TypeError before the status can be classified —
      which is how a 405 from a revision that does not serve the route arrived as
@@ -320,6 +322,7 @@ async function postViewerControl(
   body: Record<string, unknown>,
   headers: Record<string, string> = {},
   context: McpToolCallContext = {},
+  pinConfiguredEndpoint = false,
 ): Promise<Record<string, unknown>> {
   /* Every control mutation carries its endpoint's idempotency identity
      (clientAttemptId, clientMessageId or clientRequestId). Repeating the same
@@ -331,7 +334,7 @@ async function postViewerControl(
       ...headers,
     },
     body: JSON.stringify(body),
-  }, context);
+  }, context, pinConfiguredEndpoint);
   /* A body of literal `null` is valid JSON, so `.catch` never fires and every
      later `result.x` throws a TypeError before the status can be classified —
      which is how a 405 from a revision that does not serve the route arrived as
@@ -365,10 +368,20 @@ async function postViewerControl(
   return result;
 }
 
-const productionViewerControlDependencies: ViewerControlDependencies = {
-  get: getViewerControl,
-  post: postViewerControl,
-};
+export function productionViewerControlDependencies(
+  pinConfiguredEndpoint = false,
+): ViewerControlDependencies {
+  return {
+    get: (pathname, context) => getViewerControl(pathname, context, pinConfiguredEndpoint),
+    post: (pathname, body, headers, context) => postViewerControl(
+      pathname,
+      body,
+      headers,
+      context,
+      pinConfiguredEndpoint,
+    ),
+  };
+}
 
 function readViewerControl(
   control: ViewerControlDependencies,
@@ -3556,7 +3569,7 @@ export function viewerMcpToolPolicy(
 
 export function viewerMcpBindings(
   linkTaskDependencies: LinkTaskToPipelineDependencies = productionLinkTaskDependencies,
-  controlDependencies: ViewerControlDependencies = productionViewerControlDependencies,
+  controlDependencies: ViewerControlDependencies = productionViewerControlDependencies(),
   domainDependencies: ViewerMcpDomainDependencies = productionDomainDependencies,
 ): McpToolBindings {
   return {

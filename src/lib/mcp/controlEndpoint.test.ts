@@ -30,16 +30,16 @@ test("a durable client carrying a retired launch URL resolves the stable Viewer 
   }
 });
 
-test("a candidate health probe keeps the exact endpoint named by the active release", () => {
+test("an admitted candidate health probe keeps its exact endpoint before promotion", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-control-candidate-"));
   try {
     const endpoint = "http://127.0.0.1:19002";
-    const target = releaseTarget(directory, endpoint);
+    const target = releaseTarget(directory, "http://127.0.0.1:18002");
     expect(viewerControlOrigin({
       LLV_VIEWER_CONTROL_URL: endpoint,
       LLV_VIEWER_DEPLOY_TARGET: target,
       LLV_VIEWER_PORT: "8898",
-    })).toBe(endpoint);
+    }, true)).toBe(endpoint);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }

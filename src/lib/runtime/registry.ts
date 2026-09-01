@@ -520,6 +520,8 @@ export async function adoptCodexRegistryHosts(
             ...optionsFor(claimed),
             initialEventCursor: claimed.structuredHost.eventCursor,
           };
+          /* The production static method calls `this.open`; keep its class
+             receiver instead of extracting it into an unbound function. */
           const host = dependencies.adoptHost
             ? await dependencies.adoptHost(entry.key.sessionId, options)
             : await CodexAppServerHost.adopt(entry.key.sessionId, options);
@@ -609,6 +611,7 @@ export async function adoptClaudeRegistryHosts(
             ...optionsFor(claimed),
             initialEventCursor: claimed.structuredHost.eventCursor,
           };
+          /* Claude adoption has the same receiver-bound static open seam. */
           const host = dependencies.adoptHost
             ? await dependencies.adoptHost(entry.key.sessionId, options)
             : await ClaudeStreamBrokerHost.adopt(entry.key.sessionId, options);

@@ -67,9 +67,17 @@ function stableControlOrigin(env: ControlEnvironment): string {
  * their exact active-release endpoint. A durable client carrying any older
  * launch URL resolves through the runtime host's stable listener (#1354).
  */
-export function viewerControlOrigin(env: ControlEnvironment = process.env): string {
+export function viewerControlOrigin(
+  env: ControlEnvironment = process.env,
+  pinConfiguredEndpoint = false,
+): string {
   const configured = env.LLV_VIEWER_CONTROL_URL?.trim();
   if (!configured) return stableControlOrigin(env);
+  /* Candidate health runs before promotion, while the durable release target
+     still names the incumbent. Its runtime-host-admitted caller must exercise
+     the explicit candidate endpoint instead of being redirected to the stable
+     listener and grading the incumbent on the candidate's behalf. */
+  if (pinConfiguredEndpoint) return configured;
   const currentRelease = currentReleaseOrigin(env);
   if (!currentRelease) return configured;
   if (loopbackOrigin(configured) === currentRelease) return currentRelease;
