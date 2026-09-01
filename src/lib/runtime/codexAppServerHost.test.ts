@@ -1762,6 +1762,54 @@ describe("CodexAppServerHost", () => {
     await host.release();
   });
 
+  test("a Codex re-host reconstructs the full Viewer stdio MCP connector", async () => {
+    const server = new FakeAppServer("viewer-rehost-thread");
+    const captured: { options?: SpawnOptionsWithoutStdio } = {};
+    server.mcpServers = {
+      viewer: {
+        command: "bun",
+        args: ["bin/mcp-server.mjs"],
+        env: { LLV_STATE_DIR: "fixture-state" },
+        enabled: true,
+        default_tools_approval_mode: "prompt",
+      },
+      unrelated: { command: "unrelated-mcp", enabled: true },
+    };
+    const host = await CodexAppServerHost.adopt("viewer-rehost-thread", {
+      cwd: "/repo",
+      mcpServers: ["viewer"],
+      env: {
+        NODE_ENV: "test",
+        LLV_STATE_DIR: "fixture-state",
+        LLV_VIEWER_DEPLOY_TARGET: "fixture-target",
+        LLV_VIEWER_PORT: "8898",
+      },
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server, captured),
+    });
+
+    expect(captured.options?.env).toMatchObject({
+      LLV_STATE_DIR: "fixture-state",
+      LLV_VIEWER_DEPLOY_TARGET: "fixture-target",
+      LLV_VIEWER_PORT: "8898",
+    });
+    expect(server.requests.find((request) => request.method === "thread/resume")?.params).toMatchObject({
+      config: {
+        mcp_servers: {
+          viewer: {
+            command: "bun",
+            args: ["bin/mcp-server.mjs"],
+            env: { LLV_STATE_DIR: "fixture-state" },
+            enabled: true,
+            default_tools_approval_mode: "approve",
+          },
+          unrelated: { enabled: false },
+        },
+      },
+    });
+    await host.release();
+  });
+
   test("rejects a resume response for a different durable thread", async () => {
     const server = new FakeAppServer("server-default", "different-thread");
     const eventStore = new MemoryEventStore();
@@ -3799,7 +3847,7 @@ describe("CodexAppServerHost", () => {
     )).rejects.toThrow("structured hosts are disabled");
   });
 
-  test("boot adoption resumes every flagged Codex registry row", async () => {
+  test("boot re-host resumes Codex and reconstructs its Viewer MCP connector (#1346)", async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-structured-adoption-"));
     const registryPath = path.join(directory, "agent-registry.json");
     const registry = new AgentRegistry(registryPath);
@@ -3841,7 +3889,17 @@ describe("CodexAppServerHost", () => {
       { NODE_ENV: "test", LLV_STRUCTURED_HOSTS: "1" },
     );
     expect(adopted).toHaveLength(1);
-    expect(server.requests.some((request) => request.method === "thread/resume")).toBeTrue();
+    expect(server.requests.find((request) => request.method === "thread/resume")?.params).toMatchObject({
+      config: {
+        mcp_servers: {
+          viewer: {
+            command: "bun",
+            args: [expect.stringContaining("bin/mcp-server.mjs")],
+            enabled: true,
+          },
+        },
+      },
+    });
     expect(registry.snapshot().entries["codex:adopted-thread"]?.structuredHost).toMatchObject({
       eventCursor: 13,
       writerClaimEpoch: 4,

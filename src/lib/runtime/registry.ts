@@ -516,10 +516,13 @@ export async function adoptCodexRegistryHosts(
           return;
         }
         try {
-          const host = await (dependencies.adoptHost ?? CodexAppServerHost.adopt)(entry.key.sessionId, {
+          const options = {
             ...optionsFor(claimed),
             initialEventCursor: claimed.structuredHost.eventCursor,
-          });
+          };
+          const host = dependencies.adoptHost
+            ? await dependencies.adoptHost(entry.key.sessionId, options)
+            : await CodexAppServerHost.adopt(entry.key.sessionId, options);
           await bindCodexHostPersistence(registry, entry.key, host, claimed.claimOwner!, claimed.claimEpoch);
           adopted.push({ key: entry.key, host });
         } catch (error) {
@@ -602,10 +605,13 @@ export async function adoptClaudeRegistryHosts(
           return;
         }
         try {
-          const host = await (dependencies.adoptHost ?? ClaudeStreamBrokerHost.adopt)(entry.key.sessionId, {
+          const options = {
             ...optionsFor(claimed),
             initialEventCursor: claimed.structuredHost.eventCursor,
-          });
+          };
+          const host = dependencies.adoptHost
+            ? await dependencies.adoptHost(entry.key.sessionId, options)
+            : await ClaudeStreamBrokerHost.adopt(entry.key.sessionId, options);
           await bindClaudeHostPersistence(registry, entry.key, host, claimed.claimOwner!, claimed.claimEpoch);
           adopted.push({ key: entry.key, host });
         } catch (error) {

@@ -177,3 +177,54 @@ test("an already-running packaged MCP channel retries through a same-port Viewer
     fs.rmSync(sandbox, { recursive: true, force: true });
   }
 }, 20_000);
+
+test("a packaged MCP tool falls back from a retired launch port to the stable Viewer resolver", async () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-dead-launch-port-"));
+  const retiredViewer = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: () => spawnResult("retired"),
+  });
+  const retiredOrigin = retiredViewer.url.origin;
+  await retiredViewer.stop(true);
+  let stableRequests = 0;
+  const stableViewer = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: () => {
+      stableRequests += 1;
+      return spawnResult("stable_resolver");
+    },
+  });
+  const targetFile = path.join(sandbox, "viewer-release.json");
+  fs.writeFileSync(targetFile, JSON.stringify({
+    revision: "a".repeat(40),
+    image: "viewer:fixture",
+    container: "viewer-fixture",
+    endpoint: stableViewer.url.origin,
+  }));
+  const environment = Object.fromEntries(Object.entries(process.env)
+    .filter((entry): entry is [string, string] => typeof entry[1] === "string"));
+  environment.LLV_STATE_DIR = sandbox;
+  environment.LLV_VIEWER_DEPLOY_TARGET = targetFile;
+  environment.LLV_VIEWER_CONTROL_URL = retiredOrigin;
+  environment.LLV_VIEWER_PORT = String(stableViewer.port);
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [path.join(process.cwd(), "bin", "mcp-server.mjs")],
+    cwd: process.cwd(),
+    env: environment,
+    stderr: "pipe",
+  });
+  const client = new Client({ name: "viewer-dead-launch-port", version: "1.0.0" });
+  try {
+    await client.connect(transport);
+    expect((await callSpawn(client, "dead-launch-port-fallback")).structuredContent)
+      .toMatchObject({ ok: true, conversationId: "conversation_stable_resolver" });
+    expect(stableRequests).toBe(1);
+  } finally {
+    await client.close().catch(() => {});
+    await stableViewer.stop(true);
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+}, 12_000);

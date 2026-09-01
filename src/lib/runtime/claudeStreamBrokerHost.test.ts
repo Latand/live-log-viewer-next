@@ -10,6 +10,7 @@ import { describe, expect, spyOn, test } from "bun:test";
 
 import { AgentRegistry } from "@/lib/agent/registry";
 import { procBackend } from "@/lib/proc";
+import { systemBootEpoch } from "@/lib/processIdentity";
 import { STRUCTURED_HOST_STAMP_ENV, structuredHostStamp } from "@/lib/scanner/process";
 import { saveTelegramSession, TELEGRAM_CONNECTOR_TOKEN_ENV } from "@/lib/telegram/sessionStore";
 
@@ -221,11 +222,17 @@ describe("ClaudeStreamBrokerHost", () => {
       },
     }));
     const child = new FakeClaude(new RecordingDeliveryLedger());
-    const captured: { args?: string[] } = {};
+    const captured: { args?: string[]; options?: SpawnOptionsWithoutStdio } = {};
     const host = await ClaudeStreamBrokerHost.start({
       cwd: "/repo",
       claudeConfigDir: home,
       mcpServers: ["viewer", "agent-browser"],
+      env: {
+        NODE_ENV: "test",
+        LLV_STATE_DIR: "fixture-state",
+        LLV_VIEWER_DEPLOY_TARGET: "fixture-target",
+        LLV_VIEWER_PORT: "8898",
+      },
       eventStore: new MemoryEventStore(),
       readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
       readTranscript: () => [],
@@ -233,6 +240,11 @@ describe("ClaudeStreamBrokerHost", () => {
     });
 
     expect(captured.args).toContain("--strict-mcp-config");
+    expect(captured.options?.env).toMatchObject({
+      LLV_STATE_DIR: "fixture-state",
+      LLV_VIEWER_DEPLOY_TARGET: "fixture-target",
+      LLV_VIEWER_PORT: "8898",
+    });
     expect(captured.args).not.toContain("--safe-mode");
     const mcpConfigPath = captured.args![captured.args!.indexOf("--mcp-config") + 1]!;
     const mcpConfig = JSON.parse(fs.readFileSync(mcpConfigPath, "utf8")) as { mcpServers: Record<string, unknown> };
@@ -1703,7 +1715,7 @@ describe("ClaudeStreamBrokerHost", () => {
       structuredHost: {
         kind: "claude-broker",
         endpoint: `stdio:${orphan.pid}`,
-        process: { pid: orphan.pid, startIdentity },
+        process: { pid: orphan.pid, startIdentity, bootEpoch: systemBootEpoch() },
         eventCursor: 2,
         protocolVersion: "2.1.197",
         writerClaimEpoch: 1,
@@ -1777,7 +1789,7 @@ describe("ClaudeStreamBrokerHost", () => {
       structuredHost: {
         kind: "claude-broker",
         endpoint: `stdio:${orphan.pid}`,
-        process: { pid: orphan.pid, startIdentity },
+        process: { pid: orphan.pid, startIdentity, bootEpoch: systemBootEpoch() },
         eventCursor: 2,
         protocolVersion: "2.1.197",
         writerClaimEpoch: 1,
