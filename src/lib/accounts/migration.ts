@@ -40,8 +40,13 @@ export type MigrationOrigin = "manual" | "auto";
 /** Conversation scope selected when committing an account routing change. */
 export type AccountMigrationScope = "active" | "all";
 
-/** Quota window that bound the effective-remaining minimum. */
-export type QuotaWindow = "session" | "weekly";
+/** Quota window that bound the effective-remaining minimum. `flagship` is the
+    model-tier weekly of issue #1358. */
+export type QuotaWindow = "session" | "weekly" | "flagship";
+
+function parseQuotaWindow(value: unknown): QuotaWindow | null {
+  return value === "weekly" || value === "session" || value === "flagship" ? value : null;
+}
 
 // ── UI-facing DTOs (what the Accounts panel binds to) ─────────────────────────
 
@@ -346,7 +351,7 @@ function parseCounts(raw: unknown): MigrationCounts {
 function parseReason(raw: unknown): MigrationReason | null {
   const record = asRecord(raw);
   if (!record) return null;
-  const window = record.window === "weekly" ? "weekly" : record.window === "session" ? "session" : null;
+  const window = parseQuotaWindow(record.window);
   if (!window) return null;
   return { window, fromPercent: num(record.fromPercent), toPercent: num(record.toPercent) };
 }
@@ -382,7 +387,7 @@ function parseOutcome(raw: unknown): AutoBalanceOutcome | null {
   const at = str(record.at);
   if (!at) return null;
   const kind = record.kind === "failed" ? "failed" : record.kind === "skipped" ? "skipped" : "switched";
-  const window = record.window === "weekly" ? "weekly" : record.window === "session" ? "session" : null;
+  const window = parseQuotaWindow(record.window);
   return {
     at,
     kind,

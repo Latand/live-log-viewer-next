@@ -3,7 +3,7 @@ import { effectiveRemaining } from "@/lib/accounts/migration/quotaPolicy";
 import type { Flow, FlowBlock } from "@/lib/flows/types";
 import { SESSION_WINDOW_MINUTES, WEEKLY_WINDOW_MINUTES } from "@/lib/limitWindows";
 import { providerThrottleState, type ProviderThrottleState } from "@/lib/limitsThrottle";
-import type { Engine, EngineLimits, FileEntry, LimitsProvenance, LimitWindow, LimitWindowSource, RateLimitState } from "@/lib/types";
+import type { Engine, EngineLimits, FileEntry, LimitsProvenance, LimitWindow, LimitWindowSource, QuotaWindowKey, RateLimitState, TierLimitWindow } from "@/lib/types";
 
 type HostedEngine = Extract<Engine, "claude" | "codex">;
 
@@ -31,9 +31,17 @@ export interface ReconciledQuotaWindow {
   source: QuotaReadingSource;
 }
 
+/** The flagship tier's weekly window after reconciliation (issue #1358): a
+    weekly-horizon window that also names the tier it meters. */
+export interface ReconciledTierWindow extends ReconciledQuotaWindow {
+  value: TierLimitWindow;
+}
+
 export interface ReconciledQuota {
   session: ReconciledQuotaWindow | null;
   weekly: ReconciledQuotaWindow | null;
+  /** Null when neither reading carries a distinct flagship bucket. */
+  flagship: ReconciledTierWindow | null;
   plan: string | null;
 }
 
@@ -41,6 +49,7 @@ export interface AccountQuotaLimits {
   freshness: "fresh" | "stale";
   session: LimitWindow | null;
   weekly: LimitWindow | null;
+  flagship?: TierLimitWindow | null;
   checkedAt?: string | null;
 }
 
@@ -49,7 +58,7 @@ export function quotaReadingFromAccountLimits(limits: AccountQuotaLimits | null 
   const parsed = limits.checkedAt ? Date.parse(limits.checkedAt) / 1000 : NaN;
   const observedAt = Number.isFinite(parsed) ? parsed : null;
   return {
-    limits: { session: limits.session, weekly: limits.weekly, plan: null, capturedAt: observedAt },
+    limits: { session: limits.session, weekly: limits.weekly, flagship: limits.flagship ?? null, plan: null, capturedAt: observedAt },
     observedAt,
     stale: limits.freshness === "stale",
     source: "account",
@@ -72,7 +81,7 @@ export function quotaReadingFromEngineLimits(
   };
 }
 
-function reconciledWindow(reading: QuotaReading, key: "session" | "weekly", now: number): ReconciledQuotaWindow | null {
+function reconciledWindow(reading: QuotaReading, key: QuotaWindowKey, now: number): ReconciledQuotaWindow | null {
   const value = reading.limits?.[key];
   if (!value) return null;
   const observedAt = value.observedAt ?? reading.observedAt;
@@ -123,14 +132,21 @@ function newerWindow(left: ReconciledQuotaWindow | null, right: ReconciledQuotaW
 export function reconcileQuotaReadings(left: QuotaReading | null, right: QuotaReading | null, now: number): ReconciledQuota {
   const session = newerWindow(left ? reconciledWindow(left, "session", now) : null, right ? reconciledWindow(right, "session", now) : null, "session", now);
   const weekly = newerWindow(left ? reconciledWindow(left, "weekly", now) : null, right ? reconciledWindow(right, "weekly", now) : null, "weekly", now);
+  /* The flagship bucket is a weekly-horizon window with a tier name on it, so
+     it reconciles by the weekly rule; the winner keeps its own tier. */
+  const flagship = newerWindow(left ? reconciledWindow(left, "flagship", now) : null, right ? reconciledWindow(right, "flagship", now) : null, "weekly", now) as ReconciledTierWindow | null;
   const readings = [left, right]
     .filter((reading): reading is QuotaReading => Boolean(reading?.limits?.plan))
     .sort((a, b) => (b.observedAt ?? Number.NEGATIVE_INFINITY) - (a.observedAt ?? Number.NEGATIVE_INFINITY));
-  return { session, weekly, plan: readings[0]?.limits?.plan ?? null };
+  return { session, weekly, flagship: flagship && typeof flagship.value.tier === "string" ? flagship : null, plan: readings[0]?.limits?.plan ?? null };
 }
 
-export function effectiveQuota(quota: ReconciledQuota): (ReconciledQuotaWindow & { window: "session" | "weekly"; percent: number }) | null {
-  const windows = (["session", "weekly"] as const).flatMap((window) => {
+/** The window with the least headroom among those that gate the next spawn.
+    The flagship weekly counts (issue #1358): the launch default is a flagship
+    model, so it binds this account whenever it is tighter than the general
+    week. Ties resolve by key name so the chip is deterministic. */
+export function effectiveQuota(quota: ReconciledQuota): (ReconciledQuotaWindow & { window: QuotaWindowKey; percent: number }) | null {
+  const windows = (["session", "weekly", "flagship"] as const).flatMap((window) => {
     const value = quota[window];
     return value ? [{ ...value, window, percent: Math.max(0, Math.min(100, 100 - value.value.usedPercent)) }] : [];
   });
@@ -138,19 +154,20 @@ export function effectiveQuota(quota: ReconciledQuota): (ReconciledQuotaWindow &
 }
 
 export function quotaAsEngineLimits(quota: ReconciledQuota): EngineLimits | null {
-  if (!quota.session && !quota.weekly) return null;
-  const observed = [quota.session?.observedAt, quota.weekly?.observedAt]
+  if (!quota.session && !quota.weekly && !quota.flagship) return null;
+  const observed = [quota.session?.observedAt, quota.weekly?.observedAt, quota.flagship?.observedAt]
     .filter((value): value is number => value !== null && value !== undefined);
   return {
     session: quota.session ? { ...quota.session.value, observedAt: quota.session.observedAt, source: quota.session.source } : null,
     weekly: quota.weekly ? { ...quota.weekly.value, observedAt: quota.weekly.observedAt, source: quota.weekly.source } : null,
+    flagship: quota.flagship ? { ...quota.flagship.value, observedAt: quota.flagship.observedAt, source: quota.flagship.source } : null,
     plan: quota.plan,
     capturedAt: observed.length ? Math.min(...observed) : null,
   };
 }
 
 export function quotaUsesSource(quota: ReconciledQuota, source: QuotaReadingSource): boolean {
-  return quota.session?.source === source || quota.weekly?.source === source;
+  return quota.session?.source === source || quota.weekly?.source === source || quota.flagship?.source === source;
 }
 
 export interface RateLimitProjectionSnapshot {
@@ -185,8 +202,12 @@ export function rateLimitFromQuotaObservation(
   }, now);
   if (remaining?.percent !== 0 || !observation.limits) return null;
 
-  const exhausted = (["session", "weekly"] as const).flatMap((window) => {
-    const value = observation.limits?.[window];
+  /* The flagship weekly (issue #1358) walls a flagship spawn exactly like the
+     general week does; the read model's window vocabulary stays two-valued,
+     so it reports under `weekly`, the horizon it has. */
+  const exhausted = (["session", "weekly", "flagship"] as const).flatMap((key) => {
+    const value = observation.limits?.[key];
+    const window = key === "flagship" ? "weekly" as const : key;
     return value && value.usedPercent >= 100 ? [{ window, resetAt: value.resetsAt }] : [];
   });
   if (!exhausted.length) return null;

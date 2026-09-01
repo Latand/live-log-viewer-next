@@ -387,3 +387,84 @@ test("legacy Main and managed homes use the read-only account-plus-limits probe"
     expect(child.methods).not.toContain("account/login/cancel");
   }
 });
+
+/* Issue #1373: the redemption sequence on one app-server client. The child is
+   scripted per read so the window and the credit count move across the calls. */
+class RedeemChild extends FakeChild {
+  reads = 0;
+  consumeOutcome: string = "reset";
+  available: number | null = 1;
+  override onWrite(message: Record<string, unknown>): void {
+    if (message.method === "account/rateLimits/read") {
+      this.methods.push(message.method);
+      this.reads += 1;
+      const redeemed = this.reads > 1 && this.consumeOutcome === "reset";
+      this.respond(message.id as number, {
+        rateLimits: { primary: { usedPercent: redeemed ? 0 : 100, windowDurationMins: 10_080, resetsAt: redeemed ? 1_788_900_000 : 1_788_768_514 }, secondary: null, planType: "pro" },
+        ...(this.available === null ? {} : { rateLimitResetCredits: { availableCount: redeemed ? this.available - 1 : this.available, credits: null } }),
+      });
+      return;
+    }
+    if (message.method === "account/rateLimitResetCredit/consume") {
+      this.methods.push(message.method);
+      this.respond(message.id as number, { outcome: this.consumeOutcome });
+      return;
+    }
+    super.onWrite(message);
+  }
+}
+
+test("a quota probe carries the reset-credit summary beside the limits (#1373)", async () => {
+  const child = new RedeemChild();
+  child.authenticated = true;
+  const runtime = new ManagedCodexRuntime({ startClient: async (home) => CodexAppServerClient.start({ home, spawn: () => child as never }) });
+  const probe = await runtime.probeQuota(account("credited", "/accounts/credited"));
+  expect(probe.resetCredits).toEqual({ availableCount: 1, credits: null });
+  expect(probe.rateLimits.primary).toMatchObject({ usedPercent: 100 });
+  expect(child.methods).not.toContain("account/rateLimitResetCredit/consume");
+});
+
+test("redeeming a reset credit reads, consumes once with the caller's key, and re-reads on one client (#1373)", async () => {
+  const children: RedeemChild[] = [];
+  const runtime = new ManagedCodexRuntime({ startClient: async (home) => {
+    const child = new RedeemChild();
+    child.authenticated = true;
+    children.push(child);
+    return CodexAppServerClient.start({ home, spawn: () => child as never });
+  } });
+  const redemption = await runtime.redeemResetCredit(account("credited", "/accounts/credited"), "attempt-one");
+  expect(redemption.outcome).toBe("reset");
+  expect(redemption.refusedLocally).toBeFalse();
+  expect(redemption.before.rateLimits.primary).toMatchObject({ usedPercent: 100, resetsAt: 1_788_768_514 });
+  expect(redemption.after.rateLimits.primary).toMatchObject({ usedPercent: 0, resetsAt: 1_788_900_000 });
+  expect(redemption.after.resetCredits).toEqual({ availableCount: 0, credits: null });
+  expect(children).toHaveLength(1);
+  expect(children[0]!.methods).toEqual([
+    "initialize", "initialized",
+    "account/read", "account/rateLimits/read",
+    "account/rateLimitResetCredit/consume",
+    "account/read", "account/rateLimits/read",
+  ]);
+});
+
+test("a pre-read that shows no credit refuses locally and sends no consume (#1373)", async () => {
+  const child = new RedeemChild();
+  child.authenticated = true;
+  child.available = 0;
+  const runtime = new ManagedCodexRuntime({ startClient: async (home) => CodexAppServerClient.start({ home, spawn: () => child as never }) });
+  const redemption = await runtime.redeemResetCredit(account("spent", "/accounts/spent"), "attempt-two");
+  expect(redemption).toMatchObject({ outcome: "noCredit", refusedLocally: true });
+  expect(redemption.after).toBe(redemption.before);
+  expect(child.methods).not.toContain("account/rateLimitResetCredit/consume");
+});
+
+test("an unknown credit count is not a refusal: the backend answers, and its answer is kept (#1373)", async () => {
+  const child = new RedeemChild();
+  child.authenticated = true;
+  child.available = null;
+  child.consumeOutcome = "noCredit";
+  const runtime = new ManagedCodexRuntime({ startClient: async (home) => CodexAppServerClient.start({ home, spawn: () => child as never }) });
+  const redemption = await runtime.redeemResetCredit(account("unknown-count", "/accounts/unknown-count"), "attempt-three");
+  expect(redemption).toMatchObject({ outcome: "noCredit", refusedLocally: false });
+  expect(child.methods.filter((method) => method === "account/rateLimitResetCredit/consume")).toHaveLength(1);
+});

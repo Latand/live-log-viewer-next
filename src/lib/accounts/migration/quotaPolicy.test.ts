@@ -61,3 +61,40 @@ describe("quota migration policy", () => {
     }
   });
 });
+
+describe("flagship weekly gating (#1358)", () => {
+  const claude = (session: number, weekly: number, flagship: number | null) => ({
+    engine: "claude" as MigrationEngine,
+    accountId: "a",
+    authenticated: true,
+    limits: {
+      session: { usedPercent: session, resetsAt: null },
+      weekly: { usedPercent: weekly, resetsAt: null },
+      flagship: flagship === null ? null : { usedPercent: flagship, resetsAt: null, windowMinutes: 10_080, tier: "opus" },
+      plan: "max",
+      capturedAt: Math.floor(now / 1000),
+    },
+    provenance: { source: "live" as const, reason: null, staleSince: null },
+    observedAt: now,
+  });
+
+  test("a tighter flagship weekly binds the minimum for a flagship spawn, and for no stated model", () => {
+    expect(effectiveRemaining(claude(20, 40, 90), now)).toEqual({ percent: 10, window: "flagship" });
+    expect(effectiveRemaining(claude(20, 40, 90), now, { model: "fable" })).toEqual({ percent: 10, window: "flagship" });
+    expect(effectiveRemaining(claude(20, 40, 90), now, { model: "claude-opus-5" })).toEqual({ percent: 10, window: "flagship" });
+  });
+
+  test("a lower-tier spawn is gated by the general windows only", () => {
+    expect(effectiveRemaining(claude(20, 40, 90), now, { model: "sonnet" })).toEqual({ percent: 60, window: "weekly" });
+  });
+
+  test("a comfortable flagship weekly never lifts the minimum, and an absent bucket changes nothing", () => {
+    expect(effectiveRemaining(claude(20, 40, 5), now)).toEqual({ percent: 60, window: "weekly" });
+    expect(effectiveRemaining(claude(20, 40, null), now)).toEqual({ percent: 60, window: "weekly" });
+  });
+
+  test("codex observations ignore any flagship field", () => {
+    const codex = { ...claude(20, 40, 90), engine: "codex" as MigrationEngine };
+    expect(effectiveRemaining(codex, now)).toEqual({ percent: 60, window: "weekly" });
+  });
+});

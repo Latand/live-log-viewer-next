@@ -69,9 +69,38 @@ export interface AppServerRateLimits {
   planType: string | null;
 }
 
+export type AppServerResetCreditStatus = "available" | "redeeming" | "redeemed" | "unknown";
+
+/** One usage-limit reset credit as `account/rateLimits/read` reports it
+    (codex-cli 0.151.0, `rateLimitResetCredits.credits[]`). Timestamps are Unix
+    seconds. The opaque backend `id` stays inside the server process. */
+export interface AppServerResetCredit {
+  id: string;
+  status: AppServerResetCreditStatus;
+  resetType: string;
+  grantedAt: number;
+  expiresAt: number | null;
+  title: string | null;
+  description: string | null;
+}
+
+/** `rateLimitResetCredits` summary: `credits` is null when the backend gave
+    only the count, and may be capped below `availableCount`. */
+export interface AppServerResetCredits {
+  availableCount: number;
+  credits: AppServerResetCredit[] | null;
+}
+
 export interface AppServerRateLimitsRead {
   rateLimits: AppServerRateLimits;
+  /** Null when the app-server sent no summary (older codex, or a backend that
+      omitted it); never a throw, so limits keep reading without it. */
+  resetCredits: AppServerResetCredits | null;
 }
+
+/** Outcomes of `account/rateLimitResetCredit/consume` (codex-cli 0.151.0). */
+export type AppServerResetCreditOutcome = "reset" | "nothingToReset" | "noCredit" | "alreadyRedeemed";
+const RESET_CREDIT_OUTCOMES: ReadonlySet<string> = new Set<AppServerResetCreditOutcome>(["reset", "nothingToReset", "noCredit", "alreadyRedeemed"]);
 
 export interface AppServerThreadRef {
   id: string;
@@ -168,6 +197,26 @@ function optionalWindow(value: unknown, method: string): AppServerRateLimitWindo
     resetsAt: typeof resetsAt === "number" ? resetsAt : null,
     windowDurationMins: typeof windowDurationMins === "number" ? windowDurationMins : null,
   };
+}
+
+function optionalResetCredits(value: unknown): AppServerResetCredits | null {
+  if (!isRecord(value) || typeof value.availableCount !== "number" || !Number.isInteger(value.availableCount) || value.availableCount < 0) return null;
+  const credits = Array.isArray(value.credits)
+    ? value.credits.flatMap((item): AppServerResetCredit[] => {
+        if (!isRecord(item) || typeof item.id !== "string" || typeof item.grantedAt !== "number") return [];
+        const status = item.status === "available" || item.status === "redeeming" || item.status === "redeemed" ? item.status : "unknown";
+        return [{
+          id: item.id,
+          status,
+          resetType: typeof item.resetType === "string" ? item.resetType : "unknown",
+          grantedAt: item.grantedAt,
+          expiresAt: typeof item.expiresAt === "number" ? item.expiresAt : null,
+          title: typeof item.title === "string" ? item.title : null,
+          description: typeof item.description === "string" ? item.description : null,
+        }];
+      })
+    : null;
+  return { availableCount: value.availableCount, credits };
 }
 
 interface PendingRequest {
@@ -299,7 +348,23 @@ export class CodexAppServerClient {
         secondary: optionalWindow(snapshot.secondary, "account/rateLimits/read"),
         planType: typeof snapshot.planType === "string" ? snapshot.planType : null,
       },
+      resetCredits: optionalResetCredits(response.rateLimitResetCredits),
     };
+  }
+
+  /** Redeems one usage-limit reset credit (issue #1373) — the spend the Codex
+      TUI performs from `/usage`. The app-server carries the account's own
+      stored token to the backend; the Viewer never handles it. Same
+      `idempotencyKey` on a retry means the same logical attempt. */
+  async consumeRateLimitResetCredit(params: { idempotencyKey: string; creditId?: string | null }): Promise<AppServerResetCreditOutcome> {
+    const response = await this.request("account/rateLimitResetCredit/consume", {
+      idempotencyKey: params.idempotencyKey,
+      ...(params.creditId ? { creditId: params.creditId } : {}),
+    });
+    if (!isRecord(response) || typeof response.outcome !== "string" || !RESET_CREDIT_OUTCOMES.has(response.outcome)) {
+      throw protocolError("account/rateLimitResetCredit/consume response is malformed");
+    }
+    return response.outcome as AppServerResetCreditOutcome;
   }
 
   async forkThread(threadId: string): Promise<AppServerThreadRef> {
