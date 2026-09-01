@@ -485,6 +485,34 @@ function publishReleaseOnce(name: string, candidate: ViewerReleaseIdentity, port
        prunes the older target, and clears the handoff intent.
     A failure leaves the predecessor serving and the staging operation
     retryable from its durable deployment phase. */
+/** Whether the handoff an intent describes has already finished, judged only
+    from its own recorded identity: the successor it names is running, on the
+    image it names. That pair is the evidence cleanup would have seen before
+    clearing the file itself, so treating it as complete adds no new trust.
+    Every other shape — missing container, exited, restarting, or running a
+    different image — answers false and keeps the intent's claim. */
+async function recordedHandoffAlreadyCompleted(
+  intent: RuntimeHostHandoffIntent,
+  ports: Pick<RuntimeHostSuccessorPorts, "docker">,
+): Promise<boolean> {
+  let raw: string;
+  try {
+    raw = await ports.docker(["container", "inspect", intent.successorContainer]);
+  } catch {
+    return false;
+  }
+  let container: Record<string, unknown>;
+  try {
+    container = ((JSON.parse(raw) as Array<Record<string, unknown>>)[0] ?? {}) as Record<string, unknown>;
+  } catch {
+    return false;
+  }
+  const state = (container.State ?? {}) as Record<string, unknown>;
+  if (state.Running !== true || state.Restarting === true) return false;
+  const config = (container.Config ?? {}) as Record<string, unknown>;
+  return config.Image === intent.image;
+}
+
 export async function stageRuntimeHostSuccessorContainer(
   candidate: ViewerReleaseIdentity,
   runtimeHostImageTag: string,
@@ -499,7 +527,23 @@ export async function stageRuntimeHostSuccessorContainer(
     && intent.image === candidate.image
     && intent.successorContainer === name;
   if (intent && !exactIntent) {
-    throw new Error("runtime-host handoff intent is owned by another generation");
+    /* A completed handoff can still leave its intent behind: cleanup only
+       clears the file when it runs from the matching successor generation, so
+       any deployment that never reached that step abandons one. The next
+       deployment then read a foreign intent and refused forever — the promote
+       wedged at host-handoff, its record stayed active, and every later deploy
+       was answered `busy` while the host sat a revision behind (#1412).
+       An abandoned intent is recognised by its own successor already running
+       that exact image: the handoff it describes is finished, so the file is
+       history and is cleared here rather than blocking a new generation.
+       Anything less than a running successor on the recorded image is left
+       untouched and still refuses — an intent whose handoff did NOT complete
+       must keep its claim, since clearing that one would strand a predecessor. */
+    if (!await recordedHandoffAlreadyCompleted(intent, ports)) {
+      throw new Error("runtime-host handoff intent is owned by another generation");
+    }
+    phase(`clearing an abandoned handoff intent for ${intent.revision}: its successor is already serving`);
+    ports.clearHandoffIntent();
   }
   phase("tagging the runtime-host successor image");
   await ports.docker(["image", "inspect", candidate.image]);
