@@ -179,6 +179,10 @@ function harness(overrides: {
   updateFailure?: Error;
   startFailure?: Error;
   predecessorInspect?: string;
+  /** Containers outside this deployment's own predecessor/successor pair,
+      keyed by name — used to describe the successor an ABANDONED handoff
+      intent names, which belongs to an earlier generation entirely (#1412). */
+  foreignContainers?: Record<string, string>;
   wait?: (milliseconds: number) => Promise<void>;
 } = {}): Harness {
   const calls: string[][] = [];
@@ -224,6 +228,9 @@ function harness(overrides: {
       if (argv[0] === "container" && argv[1] === "ls") return "abc123\n";
       if (argv[0] === "container" && argv[1] === "inspect" && argv[2] === "abc123") {
         return overrides.predecessorInspect ?? predecessorInspect;
+      }
+      if (argv[0] === "container" && argv[1] === "inspect" && overrides.foreignContainers?.[argv[2]] !== undefined) {
+        return overrides.foreignContainers[argv[2]];
       }
       if (argv[0] === "container" && argv[1] === "start" && overrides.startFailure) throw overrides.startFailure;
       if (argv[0] === "run") {
@@ -838,8 +845,12 @@ test("issue 521 review: a foreign durable intent blocks staging before Docker mu
   await expect(stageRuntimeHostSuccessorContainer(candidate, "agent-log-viewer:node22", ports))
     .rejects.toThrow("runtime-host handoff intent is owned by another generation");
 
-  expect(calls).toEqual([]);
-  expect(events).toEqual([]);
+  /* Staging now reads the recorded successor before refusing, so it can tell an
+     abandoned intent from a live claim (#1412). That read is the only Docker
+     call allowed here; the point of this case is still that nothing MUTATES
+     before the refusal, and that the foreign intent survives untouched. */
+  expect(calls).toEqual([["container", "inspect", existingIntent.successorContainer]]);
+  expect(events).toEqual([`docker:container inspect ${existingIntent.successorContainer}`]);
   expect(records).toEqual([]);
   expect(intents).toEqual([]);
   expect(JSON.stringify(storedIntent())).toBe(originalBytes);
@@ -1061,4 +1072,69 @@ test("issue 1216: an unheld fence names no predecessor at all", async () => {
   const harnessed = harness({ fenceOwnerPid: null });
 
   expect(await findRuntimeHostPredecessor(harnessed.ports)).toBeNull();
+});
+
+test("#1412: an intent abandoned by a completed handoff is cleared and no longer wedges the next deployment", async () => {
+  /* The incident: cleanup clears the intent only from the matching successor
+     generation, so a deployment that never reached that step left one behind.
+     Every later promote then read a foreign intent, refused, and wedged at
+     host-handoff while the host stayed a revision back. The abandoned intent
+     names a successor that is already running on the recorded image — proof
+     its own handoff finished. */
+  const abandoned: RuntimeHostHandoffIntent = {
+    revision: "earlier-revision",
+    image: candidate.image,
+    successorContainer: "llv-runtime-host-earlier-generation",
+    predecessorId: "earlier-predecessor",
+    recordedAt: "2026-07-21T08:00:00.000Z",
+  };
+  const earlierImage = "agent-log-viewer:deploy-earlier-generation";
+  const { ports, storedIntent, phases } = harness({
+    handoffIntent: { ...abandoned, image: earlierImage },
+    foreignContainers: {
+      [abandoned.successorContainer]: JSON.stringify([{
+        Id: "ear11e5gen",
+        State: { Status: "running", Running: true, Restarting: false },
+        Config: { Image: earlierImage },
+      }]),
+    },
+  });
+
+  const staged = await stageRuntimeHostSuccessorContainer(candidate, "agent-log-viewer:node22", ports);
+
+  expect(staged.successorContainer).toBe(runtimeHostSuccessorName(candidate.revision, candidate.image));
+  expect(storedIntent()?.revision).toBe(candidate.revision);
+  expect(phases.some((phase) => phase.includes("abandoned handoff intent"))).toBe(true);
+});
+
+test("#1412: an intent whose successor is not running keeps its claim and still refuses", async () => {
+  /* The dangerous inverse. Clearing an intent whose handoff did NOT complete
+     would strand its predecessor, which is worse than the wedge being fixed
+     here, so anything short of a running successor on the recorded image must
+     still refuse. */
+  const live: RuntimeHostHandoffIntent = {
+    revision: "earlier-revision",
+    image: candidate.image,
+    successorContainer: "llv-runtime-host-earlier-generation",
+    predecessorId: "earlier-predecessor",
+    recordedAt: "2026-07-21T08:00:00.000Z",
+  };
+  const originalBytes = JSON.stringify({ ...live, image: "agent-log-viewer:deploy-earlier-generation" });
+  const earlierImage = "agent-log-viewer:deploy-earlier-generation";
+  const { ports, storedIntent, records } = harness({
+    handoffIntent: { ...live, image: earlierImage },
+    foreignContainers: {
+      [live.successorContainer]: JSON.stringify([{
+        Id: "ear11e5gen",
+        State: { Status: "exited", Running: false, Restarting: false },
+        Config: { Image: earlierImage },
+      }]),
+    },
+  });
+
+  await expect(stageRuntimeHostSuccessorContainer(candidate, "agent-log-viewer:node22", ports))
+    .rejects.toThrow("runtime-host handoff intent is owned by another generation");
+
+  expect(JSON.stringify(storedIntent())).toBe(originalBytes);
+  expect(records).toEqual([]);
 });
