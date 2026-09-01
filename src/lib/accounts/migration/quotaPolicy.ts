@@ -1,4 +1,5 @@
-import type { EngineLimits, LimitsProvenance } from "@/lib/types";
+import { claudeModelGatedByFlagshipWeekly } from "@/lib/agent/models";
+import type { EngineLimits, LimitsProvenance, QuotaWindowKey } from "@/lib/types";
 
 import type { AutoBalancePolicy, MigrationEvidence, MigrationEngine } from "./contracts";
 
@@ -9,6 +10,14 @@ export const AUTO_BALANCE_RETURN_ERC = 35;
 export const AUTO_BALANCE_SAMPLE_GAP_MS = 60 * 1000;
 export const AUTO_BALANCE_FRESH_MS = 5 * 60 * 1000;
 
+/** Usage-limit reset credits an account holds (issue #1373), as the Codex
+    app-server reports them beside the rate limits. `expiresAt` is the soonest
+    expiry among the available credits, Unix seconds, or null when none expires. */
+export interface QuotaResetCredits {
+  availableCount: number;
+  expiresAt: number | null;
+}
+
 export interface QuotaObservation {
   engine: MigrationEngine;
   accountId: string;
@@ -18,22 +27,38 @@ export interface QuotaObservation {
   observedAt: number;
   authCheckedAt?: number;
   envelope?: "headerless" | "jsonrpc-2.0" | null;
+  /** Codex only; null when the probe carried no reset-credit summary. */
+  resetCredits?: QuotaResetCredits | null;
 }
 
 export interface EffectiveRemaining {
   percent: number;
-  window: "session" | "weekly";
+  window: QuotaWindowKey;
 }
 
-export function effectiveRemaining(observation: QuotaObservation, now = Date.now()): EffectiveRemaining | null {
+export interface EffectiveRemainingOptions {
+  /** The model the next spawn would use. The flagship weekly (issue #1358)
+      gates the minimum only when that model draws on it; an unstated model
+      resolves to the launch default, which does. */
+  model?: string | null;
+}
+
+/** The windows that gate the account's next spawn: the session and general
+    weekly always, plus the flagship weekly when the chosen model is on that tier. */
+export function gatingWindowKeys(engine: MigrationEngine, model?: string | null): readonly QuotaWindowKey[] {
+  if (engine === "claude" && claudeModelGatedByFlagshipWeekly(model)) return ["session", "weekly", "flagship"];
+  return ["session", "weekly"];
+}
+
+export function effectiveRemaining(observation: QuotaObservation, now = Date.now(), options: EffectiveRemainingOptions = {}): EffectiveRemaining | null {
   if (!Number.isFinite(now) || !Number.isFinite(observation.observedAt) ||
     (observation.authCheckedAt !== undefined && !Number.isFinite(observation.authCheckedAt))) return null;
   const age = now - observation.observedAt;
   const authAge = now - (observation.authCheckedAt ?? observation.observedAt);
   if (!observation.authenticated || observation.provenance.source !== "live" || age < 0 || authAge < 0 || age > AUTO_BALANCE_FRESH_MS || authAge > AUTO_BALANCE_FRESH_MS || !observation.limits) return null;
-  const reportedWindows = (["session", "weekly"] as const)
+  const reportedWindows = gatingWindowKeys(observation.engine, options.model)
     .map((window) => ({ window, value: observation.limits?.[window] }))
-    .filter((entry): entry is { window: "session" | "weekly"; value: NonNullable<EngineLimits["session"]> } => entry.value !== null && entry.value !== undefined);
+    .filter((entry): entry is { window: QuotaWindowKey; value: NonNullable<EngineLimits["session"]> } => entry.value !== null && entry.value !== undefined);
   if (reportedWindows.some(({ value }) => !Number.isFinite(value.usedPercent) || value.usedPercent < 0 || value.usedPercent > 100 ||
     (value.resetsAt !== null && (!Number.isSafeInteger(value.resetsAt) || value.resetsAt < 0)))) return null;
   const windows = reportedWindows;

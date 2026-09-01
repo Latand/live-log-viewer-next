@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { accountEntryPointVisible, type Engine, useEngineAccounts } from "@/hooks/useEngineAccounts";
 import { consumePendingAccountPanel, onAccountPanelRequest } from "@/lib/accounts/openPanel";
+import { claudeTierDisplayName } from "@/lib/agent/models";
 import { type Locale, translate, useLocale } from "@/lib/i18n";
 import { effectiveQuota, LIMITS_FRESHNESS_S, quotaAsEngineLimits, quotaReadingFromAccountLimits, quotaReadingFromEngineLimits, reconcileQuotaReadings } from "@/lib/rateLimit";
 import { LIMITS_RATE_LIMITED_REASON, LIMITS_REAUTH_REQUIRED_REASON, type EngineLimits, type LimitsPayload, type LimitsProvenance, type LimitWindow } from "@/lib/types";
@@ -268,6 +269,17 @@ function EngineLimitsBlock({
     onSwitched();
   }, [accounts.identityVersion, onSwitched]);
 
+  // A per-card re-read or a redeemed reset credit (#1418, #1373) produced a
+  // newer reading than this block's own payload; the route dropped the
+  // server-side cache for that account, so one reload brings the footer level
+  // with the card instead of waiting out the poll.
+  const limitsVersion = useRef(accounts.limitsVersion);
+  useEffect(() => {
+    if (limitsVersion.current === accounts.limitsVersion) return;
+    limitsVersion.current = accounts.limitsVersion;
+    onSwitched();
+  }, [accounts.limitsVersion, onSwitched]);
+
   if (!accountEntryPointVisible(Boolean(limits), accounts.status)) return null;
 
   const tint = engineTintOf(engine);
@@ -280,12 +292,12 @@ function EngineLimitsBlock({
     now,
   );
   const accountLimits = quotaAsEngineLimits(quota);
-  const hasWindows = Boolean(accountLimits && (accountLimits.session || accountLimits.weekly));
+  const hasWindows = Boolean(accountLimits && (accountLimits.session || accountLimits.weekly || accountLimits.flagship));
   const stale = accountLimits?.capturedAt && now - accountLimits.capturedAt > LIMITS_FRESHNESS_S ? fmtAge(accountLimits.capturedAt) : null;
   const activeLabel = activeAccount?.label ?? t("accounts.trigger");
   const effective = effectiveQuota(quota);
   const effectiveStaleHint = fmtQuotaStaleHint(Boolean(effective?.stale), effective?.observedAt ?? null, locale);
-  const anyStale = Boolean(quota.session?.stale || quota.weekly?.stale);
+  const anyStale = Boolean(quota.session?.stale || quota.weekly?.stale || quota.flagship?.stale);
   const draining = accounts.migration?.state === "draining";
   const failureReason = fmtLimitsFailureReason(provenance, locale);
   const visibleFailureReason = accounts.status === "loading" || identityPending ? null : failureReason;
@@ -345,6 +357,11 @@ function EngineLimitsBlock({
           >
             <LimitRow label={windowLabel(t, "session", accountLimits!.session?.windowMinutes)} window={accountLimits!.session} engineColor={tint.color} now={now} staleHint={fmtQuotaStaleHint(Boolean(quota.session?.stale), quota.session?.observedAt ?? null, locale)} />
             <LimitRow label={windowLabel(t, "weekly", accountLimits!.weekly?.windowMinutes)} window={accountLimits!.weekly} engineColor={tint.color} now={now} staleHint={fmtQuotaStaleHint(Boolean(quota.weekly?.stale), quota.weekly?.observedAt ?? null, locale)} />
+            {/* The flagship tier's own weekly (#1358): rendered only when the
+                account reports a distinct bucket, named by the provider's tier. */}
+            {accountLimits!.flagship ? (
+              <LimitRow label={t("limits.tierWeek", { tier: claudeTierDisplayName(accountLimits!.flagship.tier) })} window={accountLimits!.flagship} engineColor={tint.color} now={now} staleHint={fmtQuotaStaleHint(Boolean(quota.flagship?.stale), quota.flagship?.observedAt ?? null, locale)} />
+            ) : null}
           </button>
         ) : visibleFailureReason ? null : (
           <div className="px-3.5 pb-3 pt-0.5 text-[10px] text-muted">{accounts.status === "loading" || identityPending ? t("limits.accountLoading") : t("limits.noDataYet")}</div>

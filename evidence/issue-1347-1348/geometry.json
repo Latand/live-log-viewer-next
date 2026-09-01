@@ -1,0 +1,376 @@
+{
+  "viewport": {
+    "width": 390,
+    "height": 844
+  },
+  "rename-editor": [
+    {
+      "scheme": "light",
+      "viewportWidth": 390,
+      "scrollWidth": 390,
+      "paneHeaderScrollWidth": 376,
+      "paneHeaderClientWidth": 376,
+      "editor": {
+        "label": "",
+        "left": 7,
+        "right": 383,
+        "top": 58,
+        "bottom": 110,
+        "width": 376,
+        "height": 52
+      },
+      "input": {
+        "label": "Session title",
+        "left": 15,
+        "right": 279,
+        "top": 62,
+        "bottom": 106,
+        "width": 264,
+        "height": 44
+      },
+      "inputValueLength": 115,
+      "inputScrollWidth": 852,
+      "inputClientWidth": 262,
+      "fontSizePx": 16,
+      "color": "rgb(28, 28, 34)",
+      "background": "rgb(243, 243, 246)",
+      "caretColor": "rgb(90, 81, 224)",
+      "controls": [
+        {
+          "label": "Save name",
+          "left": 283,
+          "right": 327,
+          "top": 62,
+          "bottom": 106,
+          "width": 44,
+          "height": 44
+        },
+        {
+          "label": "Cancel",
+          "left": 331,
+          "right": 375,
+          "top": 62,
+          "bottom": 106,
+          "width": 44,
+          "height": 44
+        }
+      ],
+      "contrast": 15.309473498862143
+    },
+    {
+      "scheme": "dark",
+      "viewportWidth": 390,
+      "scrollWidth": 390,
+      "paneHeaderScrollWidth": 376,
+      "paneHeaderClientWidth": 376,
+      "editor": {
+        "label": "",
+        "left": 7,
+        "right": 383,
+        "top": 58,
+        "bottom": 110,
+        "width": 376,
+        "height": 52
+      },
+      "input": {
+        "label": "Session title",
+        "left": 15,
+        "right": 279,
+        "top": 62,
+        "bottom": 106,
+        "width": 264,
+        "height": 44
+      },
+      "inputValueLength": 115,
+      "inputScrollWidth": 852,
+      "inputClientWidth": 262,
+      "fontSizePx": 16,
+      "color": "rgb(232, 232, 236)",
+      "background": "rgb(16, 16, 20)",
+      "caretColor": "rgb(143, 136, 255)",
+      "controls": [
+        {
+          "label": "Save name",
+          "left": 283,
+          "right": 327,
+          "top": 62,
+          "bottom": 106,
+          "width": 44,
+          "height": 44
+        },
+        {
+          "label": "Cancel",
+          "left": 331,
+          "right": 375,
+          "top": 62,
+          "bottom": 106,
+          "width": 44,
+          "height": 44
+        }
+      ],
+      "contrast": 15.534497752306052
+    }
+  ],
+  "orchestrator-controls": {
+    "row": [
+      {
+        "scheme": "light",
+        "scrollWidth": 390,
+        "stripHeight": 53,
+        "rowOpen": {
+          "label": "Orchestrator opus — live. Opens its conversation.",
+          "left": 6,
+          "right": 86.359375,
+          "top": 4,
+          "bottom": 48,
+          "width": 80.359375,
+          "height": 44
+        },
+        "rowControls": {
+          "label": "Orchestrator controls: rotate, model, account and mandate",
+          "left": 90.359375,
+          "right": 134.359375,
+          "top": 4,
+          "bottom": 48,
+          "width": 44,
+          "height": 44
+        },
+        "firstChipLeft": 149.359375,
+        "sheet": null,
+        "rotateDraft": null
+      },
+      {
+        "scheme": "dark",
+        "scrollWidth": 390,
+        "stripHeight": 53,
+        "rowOpen": {
+          "label": "Orchestrator opus — live. Opens its conversation.",
+          "left": 6,
+          "right": 86.359375,
+          "top": 4,
+          "bottom": 48,
+          "width": 80.359375,
+          "height": 44
+        },
+        "rowControls": {
+          "label": "Orchestrator controls: rotate, model, account and mandate",
+          "left": 90.359375,
+          "right": 134.359375,
+          "top": 4,
+          "bottom": 48,
+          "width": 44,
+          "height": 44
+        },
+        "firstChipLeft": 149.359375,
+        "sheet": null,
+        "rotateDraft": null
+      }
+    ],
+    "sheet": [
+      {
+        "scheme": "light",
+        "scrollWidth": 390,
+        "stripHeight": 53,
+        "rowOpen": {
+          "label": "Orchestrator opus — live. Opens its conversation.",
+          "left": 6,
+          "right": 86.359375,
+          "top": 4,
+          "bottom": 48,
+          "width": 80.359375,
+          "height": 44
+        },
+        "rowControls": {
+          "label": "Orchestrator controls: rotate, model, account and mandate",
+          "left": 90.359375,
+          "right": 134.359375,
+          "top": 4,
+          "bottom": 48,
+          "width": 44,
+          "height": 44
+        },
+        "firstChipLeft": 149.359375,
+        "sheet": {
+          "rotate": {
+            "label": "Rotate",
+            "left": 12,
+            "right": 378,
+            "top": 229.5,
+            "bottom": 273.5,
+            "width": 366,
+            "height": 44
+          },
+          "identityText": "Claudeopus · highspare24%Replaced an earlier orchestrator",
+          "contextPercent": "24",
+          "predecessor": true,
+          "mandateView": true
+        },
+        "rotateDraft": null
+      },
+      {
+        "scheme": "dark",
+        "scrollWidth": 390,
+        "stripHeight": 53,
+        "rowOpen": {
+          "label": "Orchestrator opus — live. Opens its conversation.",
+          "left": 6,
+          "right": 86.359375,
+          "top": 4,
+          "bottom": 48,
+          "width": 80.359375,
+          "height": 44
+        },
+        "rowControls": {
+          "label": "Orchestrator controls: rotate, model, account and mandate",
+          "left": 90.359375,
+          "right": 134.359375,
+          "top": 4,
+          "bottom": 48,
+          "width": 44,
+          "height": 44
+        },
+        "firstChipLeft": 149.359375,
+        "sheet": {
+          "rotate": {
+            "label": "Rotate",
+            "left": 12,
+            "right": 378,
+            "top": 229.5,
+            "bottom": 273.5,
+            "width": 366,
+            "height": 44
+          },
+          "identityText": "Claudeopus · highspare24%Replaced an earlier orchestrator",
+          "contextPercent": "24",
+          "predecessor": true,
+          "mandateView": true
+        },
+        "rotateDraft": null
+      }
+    ],
+    "rotate": [
+      {
+        "scheme": "light",
+        "scrollWidth": 390,
+        "stripHeight": 53,
+        "rowOpen": {
+          "label": "Orchestrator opus — live. Opens its conversation.",
+          "left": 6,
+          "right": 86.359375,
+          "top": 4,
+          "bottom": 48,
+          "width": 80.359375,
+          "height": 44
+        },
+        "rowControls": {
+          "label": "Orchestrator controls: rotate, model, account and mandate",
+          "left": 90.359375,
+          "right": 134.359375,
+          "top": 4,
+          "bottom": 48,
+          "width": 44,
+          "height": 44
+        },
+        "firstChipLeft": 149.359375,
+        "sheet": {
+          "rotate": null,
+          "identityText": "",
+          "contextPercent": null,
+          "predecessor": false,
+          "mandateView": false
+        },
+        "rotateDraft": {
+          "confirm": {
+            "label": "Rotate orchestrator",
+            "left": 119.953125,
+            "right": 378,
+            "top": 790,
+            "bottom": 834,
+            "width": 258.046875,
+            "height": 44
+          },
+          "cancel": {
+            "label": "Keep this one",
+            "left": 12,
+            "right": 111.953125,
+            "top": 790,
+            "bottom": 834,
+            "width": 99.953125,
+            "height": 44
+          },
+          "mandate": {
+            "label": "You run the Atlas board. Talk to me here",
+            "left": 12,
+            "right": 378,
+            "top": 505,
+            "bottom": 748,
+            "width": 366,
+            "height": 243
+          },
+          "scrollerBottom": 779
+        }
+      },
+      {
+        "scheme": "dark",
+        "scrollWidth": 390,
+        "stripHeight": 53,
+        "rowOpen": {
+          "label": "Orchestrator opus — live. Opens its conversation.",
+          "left": 6,
+          "right": 86.359375,
+          "top": 4,
+          "bottom": 48,
+          "width": 80.359375,
+          "height": 44
+        },
+        "rowControls": {
+          "label": "Orchestrator controls: rotate, model, account and mandate",
+          "left": 90.359375,
+          "right": 134.359375,
+          "top": 4,
+          "bottom": 48,
+          "width": 44,
+          "height": 44
+        },
+        "firstChipLeft": 149.359375,
+        "sheet": {
+          "rotate": null,
+          "identityText": "",
+          "contextPercent": null,
+          "predecessor": false,
+          "mandateView": false
+        },
+        "rotateDraft": {
+          "confirm": {
+            "label": "Rotate orchestrator",
+            "left": 119.953125,
+            "right": 378,
+            "top": 790,
+            "bottom": 834,
+            "width": 258.046875,
+            "height": 44
+          },
+          "cancel": {
+            "label": "Keep this one",
+            "left": 12,
+            "right": 111.953125,
+            "top": 790,
+            "bottom": 834,
+            "width": 99.953125,
+            "height": 44
+          },
+          "mandate": {
+            "label": "You run the Atlas board. Talk to me here",
+            "left": 12,
+            "right": 378,
+            "top": 505,
+            "bottom": 748,
+            "width": 366,
+            "height": 243
+          },
+          "scrollerBottom": 779
+        }
+      }
+    ]
+  }
+}

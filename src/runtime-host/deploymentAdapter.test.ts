@@ -13,7 +13,8 @@ import type {
 import { HostCommandViewerDeploymentAdapter } from "./deploymentAdapter";
 import { promotedViewerReadinessPhase } from "./deploymentHealth";
 import { PROMOTE_ACTION_TIMEOUT_MS } from "./deploymentHotState";
-import { runtimeHostSuccessorName } from "./hostSuccessor";
+import type { RuntimeHostHandoffIntent } from "./hostRelease";
+import { completeRuntimeHostHandoff, runtimeHostSuccessorName } from "./hostSuccessor";
 
 const sandboxes: string[] = [];
 afterEach(() => {
@@ -142,11 +143,51 @@ test("host adapter exposes fixed actions and carries structured release data", a
   await adapter.completeRuntimeHostHandoff({ image: candidate.image, revision: candidate.revision, container: "runtime-host-successor" });
 
   expect(calls.map((call) => call.action)).toEqual([
-    "resolve-revision", "build-candidate", "start-candidate", "verify-candidate", "current-mcp-runtime", "reconcile-mcp-runtime", "promote", "verify-promoted", "rollback", "stage-host-successor", "verify-host-successor", "complete-host-handoff",
+    "resolve-revision", "build-candidate", "start-candidate", "verify-candidate", "current-mcp-runtime", "reconcile-mcp-runtime", "promote", "verify-promoted", "rollback", "stage-host-successor", "verify-host-successor", "complete-host-handoff", "complete-host-handoff",
   ]);
   expect(calls[1]?.input).toEqual({ deploymentId: "deploy-1", revision: "a".repeat(40) });
+  expect(calls[11]?.input).toEqual({ generation: hostGeneration });
   expect(calls.at(-1)?.input).toEqual({ generation: { image: candidate.image, revision: candidate.revision, container: "runtime-host-successor" } });
   expect(calls.every((call) => !Object.hasOwn(call.input, "command") && !Object.hasOwn(call.input, "args"))).toBe(true);
+});
+
+/* #1412: the adapter repeats `complete-host-handoff` after the successor's
+   framed readiness proof, and the successor already ran the same cleanup at
+   boot. That repeat is only safe while the second run for one generation is
+   inert — it must clear nothing twice and reach Docker no second time. */
+test("issue 1412: a second completion of one handoff generation touches nothing", async () => {
+  const revision = "a".repeat(40);
+  const image = `agent-log-viewer:deploy-${revision}-cafe`;
+  const generation = { image, revision, container: runtimeHostSuccessorName(revision, image) };
+  let intent: RuntimeHostHandoffIntent | null = {
+    revision,
+    image,
+    successorContainer: generation.container,
+    predecessorId: "predecessor-of-the-completed-handoff",
+    recordedAt: "2026-09-01T08:00:00.000Z",
+  };
+  const clears: number[] = [];
+  const calls: string[][] = [];
+  const ports = {
+    docker: async (argv: string[]) => {
+      calls.push(argv);
+      return argv[1] === "inspect" ? JSON.stringify([{ Id: "successor-id" }]) : "";
+    },
+    readHandoffIntent: () => intent,
+    clearHandoffIntent: () => { clears.push(calls.length); intent = null; },
+  };
+
+  /* The successor's own boot-time cleanup. */
+  expect(await completeRuntimeHostHandoff(generation, ports)).toBe(true);
+  expect(intent).toBeNull();
+  const bootCalls = [...calls];
+  expect(bootCalls).toContainEqual(["container", "rm", "-f", "predecessor-of-the-completed-handoff"]);
+
+  /* The repeat the adapter issues once `verify-host-successor` has proved the
+     successor's readiness. */
+  expect(await completeRuntimeHostHandoff(generation, ports)).toBe(false);
+  expect(calls).toEqual(bootCalls);
+  expect(clears).toHaveLength(1);
 });
 
 /* A diagnosis the gate collected is worth nothing if it stops at this boundary

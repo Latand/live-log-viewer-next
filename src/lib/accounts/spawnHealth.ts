@@ -85,7 +85,7 @@ export function claudeValidityFromLimitRead(
       ? "authenticated" as const
       : "unknown" as const;
   const windows = result.data
-    ? [result.data.session, result.data.weekly].filter((window) => window !== null)
+    ? [result.data.session, result.data.weekly, result.data.flagship ?? null].filter((window) => window !== null)
     : [];
   const exhausted = windows.filter((window) => Number.isFinite(window.usedPercent) && window.usedPercent >= 100);
   const limits = exhausted.length > 0

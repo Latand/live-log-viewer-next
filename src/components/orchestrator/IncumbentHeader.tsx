@@ -115,8 +115,10 @@ export function IncumbentHeader({
 }
 
 /** The board's own context read, in the status route's shape — what the header
-    shows until the slower status poll answers with the server's reading. */
-function boardContext(file: FileEntry | null): IncumbentContext | null {
+    shows until the slower status poll answers with the server's reading.
+    Exported for the phone's seat identity (issue #1347), which reads the same
+    fallback so both surfaces show one number for one seat. */
+export function boardContext(file: FileEntry | null): IncumbentContext | null {
   const ctx = file?.ctx;
   if (!ctx) return null;
   return {
@@ -135,8 +137,11 @@ function boardContext(file: FileEntry | null): IncumbentContext | null {
  *
  * An inferred number is marked «~» and says why in its own tooltip — a guess
  * must never be readable as a provider-reported count.
+ *
+ * Exported for the phone's orchestrator sheet (issue #1347): the meter is the
+ * same reading on both surfaces, so it is the same component.
  */
-function ContextMeter({ context }: { context: IncumbentContext | null }) {
+export function ContextMeter({ context }: { context: IncumbentContext | null }) {
   const { t } = useLocale();
   if (!context || context.tokens === null) return null;
   const { percent, estimated } = context;

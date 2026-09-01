@@ -11,7 +11,7 @@ import { WINDOW_SECONDS, clampPercent, mergeSamples, type WindowKey } from "@/li
 import { relabelCachedWindows, routeWindowsByHorizon, SESSION_WINDOW_MINUTES, WEEKLY_WINDOW_MINUTES } from "@/lib/limitWindows";
 import { historySamples, historySince, recordLimitSample, RETENTION_S } from "@/lib/limitsHistoryStore";
 import { quotaAsEngineLimits, quotaUsesSource, reconcileQuotaReadings } from "@/lib/rateLimit";
-import { LIMITS_RATE_LIMITED_REASON, LIMITS_REAUTH_REQUIRED_REASON, type BurndownPayload, type BurndownSeries, type EngineBurndown, type EngineLimits, type LimitSample, type LimitsPayload, type LimitsProvenance, type LimitWindow } from "./types";
+import { LIMITS_RATE_LIMITED_REASON, LIMITS_REAUTH_REQUIRED_REASON, type BurndownPayload, type BurndownSeries, type EngineBurndown, type EngineLimits, type LimitSample, type LimitsPayload, type LimitsProvenance, type LimitWindow, type TierLimitWindow } from "./types";
 
 /** Resolved at call time (not module load) so LLV_STATE_DIR set after this
     module is first evaluated — e.g. in tests importing it statically — still
@@ -167,6 +167,17 @@ function writeDiskCache(value: LimitsCache): void {
 
 function lastCache(engine: EngineName, accountId: string): EngineCacheEntry | null {
   return cache().engines[engine][accountId] ?? null;
+}
+
+/** Drop one account's short-lived cache entry so the next `/api/limits` read
+    goes to the provider. An operator-triggered re-read or a redeemed reset
+    credit (issues #1418, #1373) has just produced a newer truth than the
+    30-second cache holds; serving the cache would show the old window. */
+export function forgetCachedLimits(engine: EngineName, accountId: string): void {
+  const entries = cache().engines[engine];
+  if (!(accountId in entries)) return;
+  delete entries[accountId];
+  writeDiskCache(cache());
 }
 
 /** Read-only account provenance for lifecycle/card projections. This never
@@ -382,10 +393,11 @@ export async function fetchClaudeLimits(
     if (res.status === 429) return { data: null, reason: LIMITS_RATE_LIMITED_REASON, source: "unavailable", retryAt: retryAfterAt(res.headers.get("retry-after"), clock()) };
     if (res.status === 401) return { data: null, reason: LIMITS_REAUTH_REQUIRED_REASON, source: "unavailable" };
     if (!res.ok) return { data: null, reason: `oauth usage status ${res.status}`, source: "unavailable" };
-    const json = (await res.json()) as { five_hour?: OauthWindow; seven_day?: OauthWindow };
-    const data = {
+    const json = (await res.json()) as { five_hour?: OauthWindow; seven_day?: OauthWindow } & Record<string, unknown>;
+    const data: EngineLimits = {
       session: oauthWindow(json.five_hour, SESSION_WINDOW_MINUTES),
       weekly: oauthWindow(json.seven_day, WEEKLY_WINDOW_MINUTES),
+      flagship: oauthFlagshipWindow(json),
       plan,
       capturedAt: null,
     };
@@ -412,6 +424,19 @@ function oauthWindow(w: OauthWindow | undefined, windowMinutes: number): LimitWi
   if (!w || typeof w.utilization !== "number") return null;
   const resets = typeof w.resets_at === "string" ? Date.parse(w.resets_at) : NaN;
   return { usedPercent: w.utilization, resetsAt: Number.isFinite(resets) ? Math.round(resets / 1000) : null, windowMinutes };
+}
+
+/** The flagship tier's own weekly bucket beside `seven_day` (issue #1358).
+    The usage endpoint meters the top tier as `seven_day_opus` — the only
+    flagship bucket the Claude CLI itself reads. `seven_day_sonnet` is a lower
+    tier's bucket and `seven_day_oauth_apps` / `seven_day_overage_included` are
+    not tier windows at all, so none of them can become the flagship row. */
+const OAUTH_FLAGSHIP_BUCKET = "seven_day_opus";
+
+function oauthFlagshipWindow(json: Record<string, unknown>): TierLimitWindow | null {
+  const value = json[OAUTH_FLAGSHIP_BUCKET];
+  const window = oauthWindow(value && typeof value === "object" ? value as OauthWindow : undefined, WEEKLY_WINDOW_MINUTES);
+  return window ? { ...window, tier: OAUTH_FLAGSHIP_BUCKET.slice("seven_day_".length) } : null;
 }
 
 /* -------------------------------- Codex -------------------------------- */
@@ -465,8 +490,20 @@ export async function readCodexLimits(options: {
     // One validated projection, onto the candidate the rejection is about: the
     // transcript snapshot when it covers the rejection, otherwise the live
     // window a newer rejection belongs to.
-    const projected = (transcript.data ? rejectionReading(transcript.data, transcript.rejectedAt) : null)
-      ?? rejectionReading(live, transcript.rejectedAt);
+    const transcriptProjection = transcript.data ? rejectionReading(transcript.data, transcript.rejectedAt) : null;
+    const transcriptReset = transcriptProjection && transcript.data
+      ? governingWindow(transcript.data)?.value.resetsAt
+      : null;
+    const liveReset = governingWindow(live)?.value.resetsAt;
+    // When the rejection predates its transcript reset, a strictly later live
+    // reset proves the provider opened a successor cycle and retired it.
+    const projected = typeof transcript.rejectedAt === "number"
+      && typeof transcriptReset === "number"
+      && transcript.rejectedAt < transcriptReset
+      && typeof liveReset === "number"
+      && liveReset > transcriptReset
+      ? null
+      : transcriptProjection ?? rejectionReading(live, transcript.rejectedAt);
     const transcriptLimits = projected ?? transcript.data;
     if (!transcriptLimits) return { data: live, reason: null, source: "live" };
     const reconcile = (limits: EngineLimits) => reconcileQuotaReadings(

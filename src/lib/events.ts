@@ -23,7 +23,9 @@ export type ViewerEventAction =
   | "answer"
   | "flow"
   | "quota"
-  | "account-migration";
+  | "account-migration"
+  /** An operator redeemed (or was refused) a usage-limit reset credit (#1373). */
+  | "reset-credit";
 
 export interface ViewerEventFields {
   /** tmux target the action addressed, when known. */
@@ -66,7 +68,10 @@ export function logQuotaEvent(fields: {
   accountId: string;
   accountKind: "legacy" | "managed";
   envelope?: "headerless" | "jsonrpc-2.0" | null;
-  probePhase: "account-rate-limits";
+  /** Which reader produced the observation: the controller's periodic probe,
+      an operator's per-account re-read (#1418), or the re-read after a
+      redeemed reset credit (#1373). */
+  probePhase: "account-rate-limits" | "operator-refresh" | "reset-credit-redeem";
   provenance: "live" | "transcript" | "cache" | "unavailable";
   reasonCode: string | null;
 }): void {

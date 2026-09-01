@@ -1934,6 +1934,10 @@ function derivedRequestId(base: string, suffix: string): string {
  * the launch environment; presenting it is how an agent names itself, and the
  * routes' `requireOperatorAuthority` refuses a self-named caller. An operator
  * lane (no capability in the environment) forwards nothing and passes.
+ *
+ * ROTATION is the exception, and the same header is what makes it work (#1402):
+ * the rotation route reads this name to ATTRIBUTE the rotation, so the seat the
+ * operator told to rotate performs it here and the shell fallback is gone.
  */
 function callerCapabilityHeaders(): Record<string, string> {
   const capability = process.env[VIEWER_SPAWN_CAPABILITY_ENV]?.trim() ?? "";
@@ -1973,6 +1977,9 @@ async function getOrchestrator(args: McpToolArgs, dependencies: ViewerMcpDomainD
       conversationId: revocation.conversationId,
       seatEpoch: revocation.seatEpoch,
       revokedAt: revocation.revokedAt,
+      /* Who ordered the rotation that ended this seat, when the record carries
+         it; null on designations made before rotation was attributed (#1402). */
+      triggeredBy: revocation.triggeredBy ?? null,
       successorConversationId: revocation.successorConversationId ?? null,
     })),
   };
@@ -2328,7 +2335,12 @@ async function sendMessageToOrchestrator(
 }
 
 /** rotate_orchestrator: explicit handoff to a successor. Never called by any
-    heuristic — see the rotation command's contract. */
+    heuristic — see the rotation command's contract.
+
+    Authority is the ROUTE's (#1402), and there is no copy of it here: this posts
+    the calling session's own capability like every other control call, and the
+    rotation route admits that caller and names it. What comes back includes that
+    name, so the caller reads the attribution its rotation was recorded under. */
 async function rotateOrchestrator(args: McpToolArgs, control: ViewerControlDependencies): Promise<McpToolPayload> {
   const project = canonicalOrchestratorProject(required(args, "project"));
   const result = await control.post("/api/orchestrator/rotate", {
@@ -2342,6 +2354,9 @@ async function rotateOrchestrator(args: McpToolArgs, control: ViewerControlDepen
     transcriptPath: result.path ?? null,
     seat: result.seat ?? null,
     rotatedFrom: result.rotatedFrom ?? null,
+    /* Actor kind, triggering conversation and its seat epoch: who this rotation
+       is recorded against. */
+    triggeredBy: result.triggeredBy ?? null,
     /* Whether the prior handoffs were summarized or kept verbatim, and why. */
     handoff: result.handoff ?? null,
     replayed: result.replayed === true,

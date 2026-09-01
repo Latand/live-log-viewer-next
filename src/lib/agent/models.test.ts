@@ -8,8 +8,7 @@ import {
   ENGINE_MODELS,
   modelFromBody,
   normalizeClaudeLaunchModel,
-  validateLaunchModel,
-} from "./models";
+  validateLaunchModel, claudeModelGatedByFlagshipWeekly, claudeTierDisplayName } from "./models";
 
 test("the model catalog exposes Opus 5 as the Claude default", () => {
   expect(ENGINE_MODELS.claude[0]).toEqual({ id: "opus", label: "Opus 5", shortLabel: "Opus 5", use: "review" });
@@ -52,4 +51,24 @@ test("unknown or unsafe Claude transcript model ids omit the launch override", (
   expect(normalizeClaudeLaunchModel("claude-opus\n--dangerously-skip-permissions")).toBeNull();
   expect(normalizeClaudeLaunchModel(" ")).toBeNull();
   expect(normalizeClaudeLaunchModel(null)).toBeNull();
+});
+
+test("flagship-class Claude models draw on the flagship weekly; lower tiers and Codex do not (#1358)", () => {
+  // The launch default is flagship class, so an unstated model is gated too.
+  expect(claudeModelGatedByFlagshipWeekly(null)).toBeTrue();
+  expect(claudeModelGatedByFlagshipWeekly(undefined)).toBeTrue();
+  expect(claudeModelGatedByFlagshipWeekly("fable")).toBeTrue();
+  expect(claudeModelGatedByFlagshipWeekly("claude-fable-5-1")).toBeTrue();
+  expect(claudeModelGatedByFlagshipWeekly("opus")).toBeTrue();
+  expect(claudeModelGatedByFlagshipWeekly("claude-opus-5")).toBeTrue();
+  expect(claudeModelGatedByFlagshipWeekly("sonnet")).toBeFalse();
+  expect(claudeModelGatedByFlagshipWeekly("claude-haiku-4-5-20251001")).toBeFalse();
+});
+
+test("a provider tier bucket names its row by the tier, capitalised when unknown", () => {
+  expect(claudeTierDisplayName("opus")).toBe("Opus");
+  expect(claudeTierDisplayName("fable")).toBe("Fable");
+  expect(claudeTierDisplayName("mythos")).toBe("Mythos");
+  expect(claudeTierDisplayName("sonnet")).toBe("Sonnet");
+  expect(claudeTierDisplayName("nova")).toBe("Nova");
 });

@@ -1,12 +1,13 @@
 import type { DurableQuotaObservation } from "@/lib/accounts/migration/contracts";
 import { AUTO_BALANCE_THRESHOLD, effectiveRemaining } from "@/lib/accounts/migration/quotaPolicy";
+import type { QuotaWindowKey } from "@/lib/types";
 
 /** A healthy successor account for a one-click reseat (issue #97). */
 export interface ReseatTarget {
   accountId: string;
   label: string;
   remainingPercent: number;
-  window: "session" | "weekly";
+  window: QuotaWindowKey;
 }
 
 /**
