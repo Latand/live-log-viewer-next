@@ -91,7 +91,7 @@ test("managed account creation returns an app-server challenge without the tmux 
   expect(source).not.toContain("spawnCommandWindow");
 });
 
-test("managed Codex removal requires force during device login and cancels the login child", async () => {
+test("managed Codex removal cannot bypass device login with force", async () => {
   const children: FakeChild[] = [];
   setManagedCodexRuntimeForTests(new ManagedCodexRuntime({
     startClient: async (home) => {
@@ -114,8 +114,9 @@ test("managed Codex removal requires force during device login and cancels the l
   const forced = await remove(new NextRequest("http://127.0.0.1/api/accounts/codex", {
     method: "DELETE", headers: { host: "127.0.0.1", "content-type": "application/json" }, body: JSON.stringify({ id: account.id, force: true }),
   }));
-  expect(forced.status).toBe(200);
-  expect(children[0]?.kills).toBeGreaterThan(0);
+  expect(forced.status).toBe(409);
+  await expect(forced.json()).resolves.toEqual(expect.objectContaining({ code: "account_removal_blocked", blockers: ["login_pending"] }));
+  expect(children[0]?.kills).toBe(0);
 });
 
 test("managed Codex removal retires routing and migration intents targeting the account", async () => {
@@ -141,11 +142,11 @@ test("managed Codex removal retires routing and migration intents targeting the 
 
 test("managed Codex removal reports pending cleanup when local data survives", async () => {
   const account = createManagedCodexAccount("Cleanup pending");
-  const originalRm = fs.rmSync;
-  fs.rmSync = ((target: fs.PathLike, options?: fs.RmDirOptions) => {
+  const originalRmdir = fs.rmdirSync;
+  fs.rmdirSync = ((target: fs.PathLike) => {
     if (path.resolve(String(target)) === path.resolve(account.home)) throw Object.assign(new Error("denied"), { code: "EACCES" });
-    return originalRm(target, options);
-  }) as typeof fs.rmSync;
+    return originalRmdir(target);
+  }) as typeof fs.rmdirSync;
   try {
     const response = await remove(new NextRequest("http://127.0.0.1/api/accounts/codex", {
       method: "DELETE", headers: { host: "127.0.0.1", "content-type": "application/json" }, body: JSON.stringify({ id: account.id }),
@@ -153,7 +154,7 @@ test("managed Codex removal reports pending cleanup when local data survives", a
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({ removed: { id: account.id }, cleanupPending: true });
   } finally {
-    fs.rmSync = originalRm;
+    fs.rmdirSync = originalRmdir;
   }
 });
 
@@ -169,6 +170,28 @@ test("managed Codex removal stays blocked while a live conversation depends on t
 
   expect(response.status).toBe(409);
   await expect(response.json()).resolves.toEqual(expect.objectContaining({ blockers: ["current_conversations"] }));
+});
+
+test("an unowned Codex session blocks managed-home removal", async () => {
+  const account = createManagedCodexAccount("Unowned session");
+  const session = path.join(account.sessionsDir, "2026", "09", "01", "rollout-unowned.jsonl");
+  fs.mkdirSync(path.dirname(session), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(session, "{}\n", { mode: 0o600 });
+
+  const response = await remove(new NextRequest("http://127.0.0.1/api/accounts/codex", {
+    method: "DELETE", headers: { host: "127.0.0.1", "content-type": "application/json" }, body: JSON.stringify({ id: account.id, force: true }),
+  }));
+
+  expect(response.status).toBe(409);
+  await expect(response.json()).resolves.toEqual(expect.objectContaining({
+    code: "account_removal_blocked",
+    blockers: ["filesystem_history"],
+    history: {
+      home: account.home,
+      artifacts: [{ path: path.relative(account.home, session), ownership: "unowned" }],
+    },
+  }));
+  expect(fs.readFileSync(session, "utf8")).toBe("{}\n");
 });
 
 test("managed Codex removal proceeds over dead history and keeps its sessions readable (issue #643)", async () => {

@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { CorruptClaudeAccountsError, InvalidClaudeAccountLabelError, UnknownClaudeAccountError, UnsafeClaudeHomeError, cleanupOrphanedClaudeHomes, claudeAccountsMutationLocked, createManagedClaudeAccount, listClaudeAccounts, removeManagedClaudeAccount } from "@/lib/accounts/claude";
 import { claudeLoginSupervisor, LIVE_CLAUDE_LOGIN_PHASES } from "@/lib/accounts/claudeLogin";
-import { accountRemovalBlockers } from "@/lib/accounts/removal";
+import { AccountHistoryInventoryBlockedError, accountRemovalBlockers } from "@/lib/accounts/removal";
 import { requestAccountMigrationTick } from "@/lib/accounts/migration/controllerSignal";
 import { withAccountMutationLockAsync } from "@/lib/accounts/accountMutation";
 import { agentRegistry } from "@/lib/agent/registry";
@@ -59,10 +59,17 @@ export async function POST(req: NextRequest) {
         }
         return accountResponse(account, login);
       } catch (error) {
-        if (accountId) removeManagedClaudeAccount(accountId);
+        let caught: unknown = error;
+        if (accountId) {
+          try { removeManagedClaudeAccount(accountId); }
+          catch (cleanupError) { caught = cleanupError; }
+        }
         if (reserved) claudeLoginSupervisor.abandon(reserved);
-        if (error instanceof InvalidClaudeAccountLabelError || error instanceof CorruptClaudeAccountsError) return failure(400, "invalid_account", "Claude account could not be created");
-        if (error instanceof Error && error.message === "a Claude login operation is already running") return failure(409, "login_busy", "A Claude login operation is already running");
+        if (caught instanceof AccountHistoryInventoryBlockedError) {
+          return NextResponse.json({ error: "Claude account history inventory blocked cleanup", code: "account_removal_blocked", blockers: ["filesystem_history"], history: caught.report }, { status: 409 });
+        }
+        if (caught instanceof InvalidClaudeAccountLabelError || caught instanceof CorruptClaudeAccountsError) return failure(400, "invalid_account", "Claude account could not be created");
+        if (caught instanceof Error && caught.message === "a Claude login operation is already running") return failure(409, "login_busy", "A Claude login operation is already running");
         return failure(503, "login_unavailable", "Claude login is temporarily unavailable");
       }
     });
@@ -96,7 +103,7 @@ export async function DELETE(req: NextRequest) {
         ...accountRemovalBlockers("claude", account.id),
         ...(login && LIVE_CLAUDE_LOGIN_PHASES.has(login.phase) ? ["login_pending"] : []),
       ];
-      if (blockers.includes("current_conversations") || blockers.length && body.force !== true) {
+      if (blockers.length > 0) {
         return NextResponse.json({ error: "Claude account has active sessions, conversations, or sign-in", code: "account_removal_blocked", blockers }, { status: 409 });
       }
       const registry = agentRegistry();
@@ -114,6 +121,14 @@ export async function DELETE(req: NextRequest) {
           throw error;
         }
       } catch (error) {
+        if (error instanceof AccountHistoryInventoryBlockedError) {
+          return NextResponse.json({
+            error: "Claude account history inventory blocked removal",
+            code: "account_removal_blocked",
+            blockers: ["filesystem_history"],
+            history: error.report,
+          }, { status: 409 });
+        }
         if (error instanceof UnknownClaudeAccountError) return failure(404, "unknown_account", "Claude account is unavailable");
         if (error instanceof CorruptClaudeAccountsError) return failure(409, "accounts_locked", "Claude accounts require registry repair");
         if (error instanceof UnsafeClaudeHomeError) return failure(409, "unsafe_home", "Claude account home failed safety checks");

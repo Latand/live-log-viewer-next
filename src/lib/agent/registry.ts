@@ -4037,12 +4037,23 @@ export class AgentRegistry {
       terminal rejection receipt when the initiating origin is a denied role
       or the child would exceed the nesting-depth ceiling. */
   beginSpawnRequest(input: SpawnRequest): SpawnBeginResult {
-    const result = this.mutate((file) => this.beginSpawnRequestInFile(file, input));
-    if (result.kind === "rejected") throw new SpawnAdmissionError(result.receipt, result.receipt.rejection!);
-    if (result.kind === "replay" && result.receipt.rejection) {
-      throw new SpawnAdmissionError(result.receipt, result.receipt.rejection);
-    }
-    return result;
+    return withAccountMutationLock(() => {
+      if ((input.engine === "claude" || input.engine === "codex") && input.accountId && input.accountId !== "default") {
+        const filename = statePath(`${input.engine}-accounts.json`);
+        try {
+          const value = JSON.parse(fs.readFileSync(filename, "utf8")) as { retired?: Array<{ id?: unknown }> };
+          if (value.retired?.some((account) => account.id === input.accountId)) throw new Error(`${input.engine} account is retired`);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        }
+      }
+      const result = this.mutate((file) => this.beginSpawnRequestInFile(file, input));
+      if (result.kind === "rejected") throw new SpawnAdmissionError(result.receipt, result.receipt.rejection!);
+      if (result.kind === "replay" && result.receipt.rejection) {
+        throw new SpawnAdmissionError(result.receipt, result.receipt.rejection);
+      }
+      return result;
+    });
   }
 
   private beginSpawnRequestInFile(

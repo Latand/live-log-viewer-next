@@ -11,6 +11,7 @@ process.env.LLV_STATE_DIR = path.join(SANDBOX, "state");
 process.env.LLV_CODEX_HOME = path.join(SANDBOX, "legacy-codex");
 
 const { CorruptCodexAccountsError, LOGIN_STARTUP_GRACE_MS, activeCodexAccountId, cleanupOrphanedCodexHomes, codexAccountsRoot, codexLoginPaneStatus, codexSessionRoots, createManagedCodexAccount, listCodexAccounts, removeManagedCodexAccount, setActiveCodexAccount } = await import("./codex");
+const { agentRegistry } = await import("@/lib/agent/registry");
 
 beforeEach(() => {
   fs.rmSync(process.env.LLV_STATE_DIR!, { recursive: true, force: true });
@@ -110,6 +111,7 @@ test("removing an account with history retains its sessions in place and scrubs 
   const session = path.join(account.sessionsDir, "2026", "07", "24", "rollout-2026-07-24T00-00-00-12345678-1234-1234-1234-123456789abc.jsonl");
   fs.mkdirSync(path.dirname(session), { recursive: true, mode: 0o700 });
   fs.writeFileSync(session, "{}\n", { mode: 0o600 });
+  agentRegistry().ensureConversation("codex", session, account.id);
   fs.writeFileSync(path.join(account.home, "auth.json"), "{}", { mode: 0o600 });
 
   const removal = removeManagedCodexAccount(account.id);
@@ -126,16 +128,16 @@ test("removing an account with history retains its sessions in place and scrubs 
 
 test("a home deletion failure leaves a removable Codex orphan after logical removal", () => {
   const account = createManagedCodexAccount("Retry removal");
-  const originalRm = fs.rmSync;
-  fs.rmSync = ((target: fs.PathLike, options?: fs.RmDirOptions) => {
-    if (String(target).includes(account.id)) throw Object.assign(new Error("denied"), { code: "EACCES" });
-    return originalRm(target, options);
-  }) as typeof fs.rmSync;
+  const originalRmdir = fs.rmdirSync;
+  fs.rmdirSync = ((target: fs.PathLike) => {
+    if (path.resolve(String(target)) === path.resolve(account.home)) throw Object.assign(new Error("denied"), { code: "EACCES" });
+    return originalRmdir(target);
+  }) as typeof fs.rmdirSync;
   let removal: { cleanupPending: boolean } | undefined;
   try {
     removal = removeManagedCodexAccount(account.id);
   } finally {
-    fs.rmSync = originalRm;
+    fs.rmdirSync = originalRmdir;
   }
 
   expect(removal).toEqual({ cleanupPending: true });

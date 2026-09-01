@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import type { ClaudeAccount } from "./claude";
+import { withAccountMutationLockAsync } from "./accountMutation";
 
 const CLAUDE_OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token";
 const APPROVED_CUSTOM_OAUTH_ORIGINS = new Set([
@@ -161,13 +162,15 @@ export async function refreshClaudeOauth(
   account: ClaudeAccount,
   dependencies: ClaudeOauthRefreshDependencies = productionDependencies,
 ): Promise<ClaudeOauthRefreshResult> {
-  const release = await acquireRefreshLocks(account, dependencies.lockWaitMs ?? REFRESH_LOCK_WAIT_MS);
-  if (!release) return "unknown";
-  try {
-    return await refreshClaudeOauthLocked(account, dependencies);
-  } finally {
-    release();
-  }
+  return await withAccountMutationLockAsync(async () => {
+    const release = await acquireRefreshLocks(account, dependencies.lockWaitMs ?? REFRESH_LOCK_WAIT_MS);
+    if (!release) return "unknown";
+    try {
+      return await refreshClaudeOauthLocked(account, dependencies);
+    } finally {
+      release();
+    }
+  });
 }
 
 async function refreshClaudeOauthLocked(

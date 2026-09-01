@@ -252,7 +252,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "accounts.removeConfirmCta": "Підтвердити",
   "accounts.removeConfirmCancel": "Скасувати",
   "accounts.removeBlocked": "Для {label} ще є активна сесія або вхід.",
-  "accounts.removeHistoryBlocked": "{label} має активні розмови. Дочекайтеся їх завершення, а потім видаліть акаунт.",
+  "accounts.removeHistoryBlocked": "{label} має захищену історію або активні розмови. Опрацюйте виявлену історію та дочекайтеся завершення активних розмов перед видаленням.",
   "accounts.removeFailed": "Не вдалося видалити цей акаунт.",
   "accounts.cleanupPending": "{label} видалено. Локальні дані ще потрібно очистити.",
   "accounts.cleanupManual": "Частина локальних даних акаунта не пройшла перевірку безпеки. Перевірте й видаліть її вручну.",

@@ -12,7 +12,7 @@ const { AgentRegistry, setAgentRegistryForTests } = await import("@/lib/agent/re
 const { emptyLaunchProfile } = await import("@/lib/accounts/migration/contracts");
 type ViewerConversationId = import("@/lib/accounts/migration/contracts").ViewerConversationId;
 const { procBackend } = await import("@/lib/proc");
-const { accountRemovalBlockers } = await import("./removal");
+const { accountRemovalBlockers, cleanupAccountProviderSidecars, removeHistoryFreeAccountHome } = await import("./removal");
 const { terminalizeStaleUndeliverableHeldDeliveries } = await import("@/lib/reaperRuntime");
 
 type Registry = InstanceType<typeof AgentRegistry>;
@@ -39,6 +39,53 @@ function registry(): Registry {
   setAgentRegistryForTests(store);
   return store;
 }
+
+test("platforms without fd anchoring leave homes and sidecars pending", () => {
+  const home = path.join(sandbox, "non-linux-home");
+  const root = path.join(sandbox, "non-linux-accounts");
+  const sidecar = path.join(root, "work.lock");
+  fs.mkdirSync(home, { mode: 0o700 });
+  fs.mkdirSync(sidecar, { recursive: true, mode: 0o700 });
+  const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+  Object.defineProperty(process, "platform", { ...platform, value: "darwin" });
+  try {
+    expect(removeHistoryFreeAccountHome("claude", "work", home)).toBe(false);
+    expect(cleanupAccountProviderSidecars(root, "work", [".lock"])).toEqual({ removed: [], unresolved: ["work.lock"] });
+  } finally {
+    Object.defineProperty(process, "platform", platform);
+  }
+  expect(fs.existsSync(home)).toBe(true);
+  expect(fs.existsSync(sidecar)).toBe(true);
+});
+
+test("sidecar cleanup stays anchored when the account root becomes an outside symlink", () => {
+  const root = path.join(sandbox, "anchored-sidecars");
+  const movedRoot = `${root}-moved`;
+  const sidecar = path.join(root, "work.lock");
+  const outside = path.join(sandbox, "outside-sidecars");
+  const outsideSidecar = path.join(outside, "work.lock");
+  const marker = path.join(outsideSidecar, "keep.txt");
+  fs.mkdirSync(sidecar, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(outsideSidecar, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(marker, "keep", { mode: 0o600 });
+  const originalLstat = fs.lstatSync;
+  let swapped = false;
+  fs.lstatSync = ((target: fs.PathLike, options?: unknown) => {
+    if (!swapped && String(target).startsWith("/proc/self/fd/") && path.basename(String(target)) === "work.lock") {
+      swapped = true;
+      fs.renameSync(root, movedRoot);
+      fs.symlinkSync(outside, root);
+    }
+    return originalLstat(target, options as never);
+  }) as typeof fs.lstatSync;
+
+  let result;
+  try { result = cleanupAccountProviderSidecars(root, "work", [".lock"]); }
+  finally { fs.lstatSync = originalLstat; }
+
+  expect(result).toEqual({ removed: ["work.lock"], unresolved: [] });
+  expect(fs.readFileSync(marker, "utf8")).toBe("keep");
+});
 
 function liveTmuxHost(pid = process.pid) {
   return {
@@ -88,6 +135,34 @@ test("an unresolved live launch blocks removal of every managed account for its 
   expect(accountRemovalBlockers("claude", "work")).toEqual([]);
 });
 
+test("an aged queued pin blocks every account until its durable receipt settles", () => {
+  const store = registry();
+  const begun = beginLegacySpawnFixture(store, {
+    engine: "claude",
+    cwd: "/repo",
+    transport: "structured",
+    accountId: "work",
+    accountPin: true,
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "Queued account work" }),
+  });
+  if (begun.kind !== "created") throw new Error("expected queued receipt");
+  store.queuePinnedSpawn(begun.receipt.launchId, {
+    version: 1,
+    retryAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1_000).toISOString(),
+    accountId: "work",
+    locale: "en",
+    spec: { engine: "claude", command: "claude", cwd: "/repo", windowName: "queued-pin", launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "Queued account work" }) },
+    prompt: "continue",
+    imageRefs: [],
+    parentArtifactPath: null,
+    pipelineSourceConversationId: null,
+  }, "queued for account capacity");
+  store.releaseStartingStructuredSpawn(begun.receipt.launchId, begun.receipt.admissionOwner!);
+
+  expect(accountRemovalBlockers("claude", "work", DAYS_LATER)).toEqual(["live_sessions"]);
+  expect(accountRemovalBlockers("claude", "other", DAYS_LATER)).toEqual(["live_sessions"]);
+});
+
 test("dead history plus stale starting entries and receipts no longer block removal (issue #643)", () => {
   const store = registry();
   // Production shape: ~dozens of historical conversations whose latest generation
@@ -126,6 +201,27 @@ test("a registered host with a live process still blocks removal", () => {
   });
 
   expect(accountRemovalBlockers("claude", "work", DAYS_LATER)).toEqual(["live_sessions", "current_conversations"]);
+});
+
+test("a live pid with unreadable start identity remains a deletion blocker", () => {
+  const store = registry();
+  const artifactPath = "/accounts/claude/work/projects/-repo/identity-unknown.jsonl";
+  deadConversation(store, artifactPath, "work");
+  const host = liveTmuxHost(DEAD_PID);
+  host.agent.startIdentity = "recorded-agent";
+  host.panePid.startIdentity = "recorded-pane";
+  store.upsert({
+    key: { engine: "claude", sessionId: "77777777-7777-7777-7777-777777777777" },
+    artifactPath,
+    cwd: "/repo", accountId: "work", status: "live", host,
+    claimEpoch: 0, claimOwner: null, pendingAction: null,
+  });
+
+  expect(accountRemovalBlockers("claude", "work", {
+    now: DAYS_LATER.now,
+    pidAlive: () => true,
+    processIdentity: () => null,
+  })).toEqual(["live_sessions", "current_conversations"]);
 });
 
 test("an undelivered held delivery keeps its conversation current", () => {

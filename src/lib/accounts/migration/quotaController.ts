@@ -3,6 +3,7 @@ import path from "node:path";
 
 import { activeClaudeAccountId, listClaudeAccounts, type ClaudeAccount } from "@/lib/accounts/claude";
 import { realClaudeLoginPorts } from "@/lib/accounts/claudeLogin";
+import { withAccountMutationLockAsync } from "@/lib/accounts/accountMutation";
 import { activeCodexAccountId, listCodexAccounts, type CodexAccount } from "@/lib/accounts/codex";
 import { managedCodexRuntime } from "@/lib/accounts/codexRuntime";
 import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
@@ -142,6 +143,10 @@ export class QuotaController {
   }
 
   async tick(engine: MigrationEngine): Promise<void> {
+    await withAccountMutationLockAsync(async () => this.tickLocked(engine));
+  }
+
+  private async tickLocked(engine: MigrationEngine): Promise<void> {
     const now = this.now();
     const accounts = this.probe.list(engine);
     const observations = await Promise.all(accounts.map(async (account) => {
