@@ -11,11 +11,11 @@ import { messageOriginRole, type MessageOrigin } from "./messageOrigin";
  *
  * It is one HTML comment on the record's first line, carrying named attributes:
  * `sha256` (the structured content digest, when images make the echo lossy),
- * `ctx` (the selected-card reference, #844), and since #1117 `origin`
- * (`operator` | `agent`) with an optional
- * `sender` role token. All attributes are optional and independent, and every
- * older form — bare marker, marker with only a digest — decodes byte-identically
- * to what it always did. Transcripts are not migrated.
+ * `ctx` (the selected-card reference, #844), `origin` (`operator` | `agent`)
+ * with an optional `sender` role token, and `dedup` (the hashed durable
+ * delivery operation, #1366). All attributes are optional and independent.
+ * Every older form — bare marker, marker with only a digest — decodes
+ * byte-identically to what it always did. Transcripts are not migrated.
  *
  * Attributes are `name=value` whose values may hold anything but a space and a
  * `>`, so the marker cannot be broken open by its own payload and stays on one
@@ -42,6 +42,10 @@ export interface DecodedCodexStructuredUserText {
       the attribute or the value did not validate — the feed then keeps its
       current rendering rather than guessing. */
   origin: MessageOrigin | null;
+  /** Hashed durable operation identity used only for recipient-side replay
+      convergence. Optional so every pre-#1366 transcript keeps its exact
+      decoded shape. */
+  deliveryDedup?: string;
 }
 
 export function encodeCodexStructuredUserText(
@@ -49,6 +53,7 @@ export function encodeCodexStructuredUserText(
   contentDigest?: string,
   selectedContext?: SelectedContextRef | null,
   origin?: MessageOrigin | null,
+  deliveryDedup?: string | null,
 ): string {
   const attributes: string[] = [];
   if (contentDigest) attributes.push(`sha256=${contentDigest}`);
@@ -58,6 +63,7 @@ export function encodeCodexStructuredUserText(
     const role = messageOriginRole(origin.role);
     if (role) attributes.push(`sender=${role}`);
   }
+  if (deliveryDedup && SHA256.test(deliveryDedup)) attributes.push(`dedup=${deliveryDedup}`);
   if (attributes.length === 0) return STRUCTURED_USER_MARKER + text;
   return `<!-- llv:structured-user ${attributes.join(" ")} -->\n${text}`;
 }
@@ -69,11 +75,13 @@ export function decodeCodexStructuredUserText(value: string): DecodedCodexStruct
     let selectedContext: SelectedContextRef | null = null;
     let originKind: MessageOrigin["kind"] | null = null;
     let senderRole: string | undefined;
+    let deliveryDedup: string | undefined;
     for (const [, name, attribute] of marker[1]!.matchAll(ATTRIBUTE)) {
       if (name === "sha256" && SHA256.test(attribute!)) contentDigest = attribute!;
       if (name === "ctx") selectedContext = decodeSelectedContextRef(attribute!);
       if (name === "origin" && (attribute === "operator" || attribute === "agent")) originKind = attribute;
       if (name === "sender") senderRole = messageOriginRole(attribute);
+      if (name === "dedup" && SHA256.test(attribute!)) deliveryDedup = attribute!;
     }
     const origin: MessageOrigin | null = originKind
       ? { kind: originKind, ...(originKind === "agent" && senderRole ? { role: senderRole } : {}) }
@@ -84,6 +92,7 @@ export function decodeCodexStructuredUserText(value: string): DecodedCodexStruct
       contentDigest,
       selectedContext,
       origin,
+      ...(deliveryDedup ? { deliveryDedup } : {}),
     };
   }
   if (!value.startsWith(STRUCTURED_USER_MARKER)) {

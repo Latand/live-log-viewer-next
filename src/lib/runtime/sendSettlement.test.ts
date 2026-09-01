@@ -34,6 +34,7 @@ const {
   SEND_UNRECORDED_REASON,
   SEND_UNVERIFIED_REASON,
   resolveSendReceipt,
+  runtimeReceiptForSend,
   sendIsSettled,
   sendReceiptFor,
 } = await import("./sendSettlement");
@@ -72,6 +73,7 @@ function runtimeClient(journal: RuntimeJournal): RuntimeHostClient {
     command: async (command) => journal.executeOperation(command),
     operationStatus: async (operationId: string, options?: { currentRetryLeaf?: boolean }) =>
       (options?.currentRetryLeaf ? journal.currentRetryResult(operationId) : journal.operationResult(operationId)),
+    claimDeliveryAction: async (operationId, action) => journal.claimDeliveryAction(operationId, action),
     producerCursor: async (producerKind: string, eventKeyPrefix: string) =>
       journal.producerCursor(producerKind, eventKeyPrefix),
     effectBatch: async (kinds, afterEventSeq) => journal.effectBatch(100, kinds, afterEventSeq),
@@ -1031,7 +1033,7 @@ test("a migration-cancelled held send admits the one-tap retry its receipt offer
   }
 });
 
-test("an unverified delivery record cannot authorize the queued journal retry", async () => {
+test("an unverified delivery record needs an explicit same-identity retry before rearming the queued journal", async () => {
   const active = fixture("unverified-migration-retry");
   try {
     const { operationId, deliveryId } = acceptSend(active, {
@@ -1044,7 +1046,9 @@ test("an unverified delivery record cannot authorize the queued journal retry", 
       "a prior delivery attempt may have arrived",
       "unverified",
     );
-    expect(receiptOf(active, operationId)).toMatchObject({ state: "failed", resend: "verify-first" });
+    const unverified = receiptOf(active, operationId);
+    expect(unverified).toMatchObject({ state: "failed", resend: "verify-first" });
+    expect(runtimeReceiptForSend(unverified!)).toMatchObject({ status: "failed", resend: "verify-first" });
 
     const response = await handleRuntimeRetry(
       new NextRequest(`http://127.0.0.1/api/runtime/operations/${operationId}`, {
@@ -1062,6 +1066,30 @@ test("an unverified delivery record cannot authorize the queued journal retry", 
 
     expect(response.status).toBe(409);
     expect(active.journal.operationResult(operationId)?.receipt.status).toBe("queued");
+
+    let kicks = 0;
+    const explicit = await handleRuntimeRetry(
+      new NextRequest(`http://127.0.0.1/api/runtime/operations/${operationId}`, {
+        method: "POST",
+        headers: { host: "127.0.0.1", "content-type": "application/json" },
+        body: JSON.stringify({ action: "retry-uncertain" }),
+      }),
+      operationId,
+      {
+        enabled: () => true,
+        client: () => active.client,
+        registry: () => active.registry,
+        kick: () => { kicks += 1; },
+      },
+    );
+    expect(explicit.status).toBe(202);
+    expect(await explicit.json()).toMatchObject({ operationId, receipt: { operationId, status: "queued" } });
+    expect(active.registry.readOnlySnapshot().heldDeliveries[deliveryId]).toMatchObject({
+      state: "delivery-uncertain",
+      attempts: 2,
+      command: { operationId },
+    });
+    expect(kicks).toBe(1);
   } finally {
     active.close();
   }

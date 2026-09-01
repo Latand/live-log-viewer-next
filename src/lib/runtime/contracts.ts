@@ -44,20 +44,13 @@ export interface RuntimeSessionAxes {
 export type RuntimeAttentionKind = "approval" | "permission" | "question" | "waiting_heuristic";
 export type RuntimeAttentionState = "open" | "resolving" | "resolved" | "expired-confirmed" | "cancelled" | "resolution-unknown";
 export type RuntimeOperationKind = "send" | "steer" | "interrupt" | "answer" | "kill" | "spawn" | "reconfigure" | "compact";
-export type RuntimeReceiptStatus =
-  | "pending"
-  | "delivering"
-  | "applying"
-  | "turn-started"
-  | "steered"
-  | "queued"
-  | "delivered"
-  | "applied"
-  | "interrupted"
-  | "answered"
-  | "rejected"
-  | "failed"
-  | "uncertain";
+export const RUNTIME_RECEIPT_STATUSES = [
+  "pending", "delivering", "applying", "turn-started", "steered", "queued",
+  "delivered", "applied", "interrupted", "answered", "rejected", "failed", "uncertain",
+] as const;
+export type RuntimeReceiptStatus = (typeof RUNTIME_RECEIPT_STATUSES)[number];
+/** Absorbing terminal reason written when the operator discards a send. */
+export const RUNTIME_DELIVERY_DISCARDED_REASON = "delivery-discarded";
 export type OperationKind = RuntimeOperationKind;
 export type ReceiptStatus = RuntimeReceiptStatus;
 
@@ -197,9 +190,17 @@ export interface RuntimeOperationReceipt {
       long has this message been waiting". Absent on receipts written before
       this field existed; readers fall back to `at`. */
   admittedAt?: string;
+  /** Retry guidance from the durable delivery settlement. `verify-first`
+      selects the explicit same-identity retry path for an unknown fate. */
+  resend?: "not-needed" | "safe" | "verify-first";
   revision: number;
 }
 export type RuntimeReceipt = RuntimeOperationReceipt;
+
+export interface RuntimeTransitionOptions {
+  /** Compare-and-set fence evaluated inside the journal write transaction. */
+  fromStatuses?: readonly RuntimeReceiptStatus[];
+}
 
 export function runtimePresentationReceipt(receipt: RuntimeOperationReceipt): RuntimeOperationReceipt {
   if (!receipt.presentationOperationId || receipt.presentationRevision === undefined) return receipt;
@@ -382,6 +383,14 @@ export interface RuntimeOperationResult {
 
 export interface RuntimeRetryOptions {
   requireHostedConversationId?: string;
+}
+
+export type RuntimeDeliveryAction = "discard" | "retry";
+
+export interface RuntimeDeliveryActionClaim {
+  operationId: string;
+  winner: RuntimeDeliveryAction;
+  replayed: boolean;
 }
 
 export class RuntimeIdempotencyConflictError extends Error {
@@ -714,7 +723,7 @@ export interface RuntimeReplay {
 
 export interface RuntimeSocketRequest {
   id: string;
-  method: "runtime-host-health" | "snapshot" | "events" | "wait" | "append" | "operation" | "command" | "operation-status" | "operation-retry" | "effect-batch" | "operation-transition" | "producer-cursor" | "viewer-deployment-request" | "viewer-deployment-read" | "mcp-health-probe-admission";
+  method: "runtime-host-health" | "snapshot" | "events" | "wait" | "append" | "operation" | "command" | "operation-status" | "operation-delivery-action" | "operation-retry" | "effect-batch" | "operation-transition" | "producer-cursor" | "viewer-deployment-request" | "viewer-deployment-read" | "mcp-health-probe-admission";
   params?: Record<string, unknown>;
 }
 

@@ -65,13 +65,13 @@ export type DeliveryWaitCause = "turn" | "host" | "unknown";
  * in flight.
  *
  * Strictly above the longest observed SUCCESSFUL wait — 21 min is the outlier in
- * #1213's own table, and it arrived — because the terminal row tells the
- * operator nothing will retry this and to send it again themselves. Crossing the
- * bound while the operation is still parked and still drainable would turn that
- * sentence into an instruction to double-deliver by hand. Bounded all the same,
- * because past this line is exactly the state nothing else owns.
+ * #1213's own table, and it arrived. Past the bound the operator gets the
+ * explicit same-identity Retry and terminal Discard controls.
  */
 export const DELIVERY_UNCERTAIN_MS = 30 * 60_000;
+/** Ordinary long-turn latency stays on the card. Past five minutes the durable
+    owed-message record also enters the operator attention queue. */
+export const DELIVERY_WAIT_ATTENTION_MS = 5 * 60_000;
 
 export interface DeliveryWait {
   phase: DeliveryWaitPhase;
@@ -210,8 +210,7 @@ export function deliveryWaitText(
  * Why a message that never arrived never arrived — the sentence under the
  * terminal row. The cause survives from the wait it came out of: a turn that
  * never ended and a host that never came back are different facts, and the
- * operator decides differently on each. Each one ends by telling them the only
- * thing that will move the message now: sending it again themselves.
+ * operator decides differently on each.
  */
 export function deliveryUncertainWhy(t: TFunction, wait: DeliveryWait): string {
   if (wait.cause === "host") return t("runtime.receipt.unconfirmedWhyHost");

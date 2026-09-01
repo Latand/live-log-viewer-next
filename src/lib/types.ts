@@ -330,6 +330,8 @@ export interface FileEntry {
   /** Live per-session migration annotation while an intent drains. Absent for
       every session not currently migrating. */
   migration?: ConversationMigration;
+  /** Oldest durable message this live conversation still owes the operator. */
+  stuckDelivery?: StuckDelivery;
   /** Durable launch projection shown before its transcript enters the scan. */
   spawn?: StructuredSpawnCardState;
   /** Transient launch/delivery facts of the launch that CREATED this live
@@ -337,6 +339,13 @@ export interface FileEntry {
       once its transcript exists — it folds into this conversation's own window
       as compact status chips, and drops off once it stops being news. */
   launch?: StructuredSpawnCardState;
+}
+
+export interface StuckDelivery {
+  /** Immutable reservation admission time. */
+  since: string;
+  attempts: number;
+  state: "held" | "assigned" | "delivery-uncertain";
 }
 
 /** Per-session migration annotation carried on a {@link FileEntry} while an

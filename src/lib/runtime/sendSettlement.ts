@@ -9,7 +9,11 @@ import { sessionKeyId } from "@/lib/agent/sessionKey";
 import type { HeldDelivery, ViewerConversationId } from "@/lib/accounts/migration/contracts";
 
 import { runtimeHostClient, type RuntimeHostClient } from "./client";
-import type { RuntimeOperationReceipt, RuntimeReceiptStatus } from "./contracts";
+import {
+  RUNTIME_DELIVERY_DISCARDED_REASON,
+  type RuntimeOperationReceipt,
+  type RuntimeReceiptStatus,
+} from "./contracts";
 import { readEvidence, unreadableEvidence } from "./evidence";
 
 /**
@@ -88,6 +92,9 @@ export const SEND_LOST_REASON =
   "accepted for delivery but never executed; the delivery journal has fenced it, so it cannot arrive and may be sent again";
 export const SEND_UNVERIFIED_REASON =
   "delivery was started and never settled; whether it reached the recipient is unknown, so sending it again may deliver it twice";
+/** Operator-authored terminal state. The journal and registry both retain this
+    token so a partial cross-store write converges back to the visible discard. */
+export const SEND_DISCARDED_REASON = RUNTIME_DELIVERY_DISCARDED_REASON;
 /** No journal operation was ever found for this send — the legacy delivery path
     never creates one, and a record can also be pruned. Non-execution is
     unproven either way, so it settles like any other unverified send. */
@@ -329,6 +336,7 @@ export function runtimeReceiptForSend(receipt: SendReceipt): RuntimeOperationRec
     reason: receipt.reason,
     at: receipt.settledAt ?? receipt.acceptedAt ?? new Date(0).toISOString(),
     ...(receipt.acceptedAt ? { admittedAt: receipt.acceptedAt } : {}),
+    ...(receipt.resend ? { resend: receipt.resend } : {}),
     revision: 1,
   };
 }
@@ -360,19 +368,27 @@ export interface JournalVerdict {
  * never reached the engine, and `uncertain` wherever it may have — the delivery
  * queue keeps that distinction exact, which is what lets a fenced send be
  * called safe without guessing. An open or missing status is not a verdict and
- * returns null; the caller decides what to do about it.
+ * returns null; the caller decides what to do about it. A failed receipt whose
+ * reason records the operator's Discard keeps that visible terminal reason.
  *
  * The receipt query and the controller's startup reconciliation both read the
  * journal for the same question, so they read it through this — one classifier,
  * rather than two that can drift into disagreeing about what a status proves.
  */
-export function journalVerdict(status: RuntimeReceiptStatus | null): JournalVerdict | null {
+export function journalVerdict(
+  status: RuntimeReceiptStatus | null,
+  reason: string | null | undefined = null,
+): JournalVerdict | null {
   if (status === null) return null;
   if (DELIVERED_RECEIPT_STATUSES.has(status)) {
     return { state: "delivered", disposition: "delivered", reason: null };
   }
   if (status === "failed" || status === "rejected") {
-    return { state: "failed", disposition: "lost", reason: SEND_LOST_REASON };
+    return {
+      state: "failed",
+      disposition: "lost",
+      reason: reason === SEND_DISCARDED_REASON ? SEND_DISCARDED_REASON : SEND_LOST_REASON,
+    };
   }
   if (status === "uncertain") {
     return { state: "failed", disposition: "unverified", reason: SEND_UNVERIFIED_REASON };
@@ -532,8 +548,9 @@ export async function resolveSendReceipt(
       "runtime host is unavailable",
     )
     : unreadableEvidence("runtime host socket is unavailable");
-  const status = journal.readable ? journal.value?.receipt.status ?? null : null;
-  const verdict = journalVerdict(status);
+  const receipt = journal.readable ? journal.value?.receipt ?? null : null;
+  const status = receipt?.status ?? null;
+  const verdict = journalVerdict(status, receipt?.reason);
   if (verdict) return settleProjection(registry, operationId, projected, verdict);
 
   const file = registry.readOnlySnapshot();
