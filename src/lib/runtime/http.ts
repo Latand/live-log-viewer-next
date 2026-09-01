@@ -15,7 +15,7 @@ import { parseRuntimeCommand } from "./commands";
 import { runtimePresentationReceipt, type RuntimeOperationKind } from "./contracts";
 import { runtimeEventsEnabled, runtimeEventsRolledBack, structuredHostsEnabled, RUNTIME_PLANE_ABSENT } from "./flags";
 import { readEvidence, type Evidence } from "./evidence";
-import { journalVerdict, resolveSendReceipt, runtimeReceiptForSend, type SendReceipt } from "./sendSettlement";
+import { journalVerdict, resolveSendReceipt, runtimeReceiptForSend, sendReceiptFor, type SendReceipt } from "./sendSettlement";
 import { republishStructuredDeliveryHost } from "./structuredDeliveryController";
 import { recoverDeadStructuredConversation } from "./structuredRecovery";
 import { enqueueStructuredMessage } from "./structuredMessageDelivery";
@@ -475,10 +475,26 @@ export async function handleRuntimeRetry(
       "runtime operation status is unavailable",
     );
     if (!status.readable) return NextResponse.json({ error: status.reason, retryable: true }, { status: 503 });
-    const previous = status.value;
+    let previous = status.value;
     if (!previous) return NextResponse.json({ error: "operation not found" }, { status: 404 });
     if (previous.receipt.kind !== "send" && previous.receipt.kind !== "steer") {
       return NextResponse.json({ error: "runtime operation does not support retry" }, { status: 409 });
+    }
+    if (previous.operationId === operationId
+      && previous.receipt.status !== "failed"
+      && previous.receipt.status !== "rejected") {
+      /* A migration can cancel a held, never-actuated reservation while its
+         journal operation still reads queued. The receipt card is projected
+         from the durable reservation and offers Retry because that record
+         proves `resend: safe`; fence the stale journal operation before asking
+         it to mint the fresh attempt. Unverified failures never enter here. */
+      const durable = await readEvidence(
+        () => sendReceiptFor((dependencies.registry ?? agentRegistry)().readOnlySnapshot(), operationId),
+        "delivery record is unavailable",
+      );
+      if (durable.readable && durable.value?.state === "failed" && durable.value.resend === "safe") {
+        previous = await client.transitionOperation(operationId, "failed", { reason: durable.value.reason });
+      }
     }
     if (previous.receipt.status !== "failed" && previous.receipt.status !== "rejected") {
       if (previous.operationId !== operationId) {
