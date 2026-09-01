@@ -58,8 +58,8 @@ function controlStub(responses: Record<string, Record<string, unknown>> = {}) {
     route makes first, without reaching a real spawn.
 
     The rotation route is deliberately NOT on that gate (#1402): it runs the
-    rotation authority contract, which names the caller instead of refusing it,
-    and the rotations it admits are recorded with that name. */
+    rotation authority contract, which admits the caller and names it, and the
+    rotations it admits are recorded under that name. */
 function gatedControlStub() {
   const designations: string[] = [];
   const rotations: (string | null)[] = [];
@@ -368,9 +368,9 @@ test("REGRESSION (#1402): the same non-operator caller ROTATES, and the rotation
     }) as Record<string, unknown>;
 
     /* The tool forwarded the caller's own capability, exactly as it does for
-       create — and rotation reads that name to attribute rather than to
-       refuse. See src/lib/orchestrator/rotationAuthority.test.ts for the same
-       call carried end to end into the durable seat record. */
+       create — and rotation reads that name to attribute the rotation. See
+       src/lib/orchestrator/rotationAuthority.test.ts for the same call carried
+       end to end into the durable seat record. */
     expect(rotations).toEqual(["conversation_worker"]);
     expect(result.triggeredBy).toMatchObject({ kind: "agent", conversationId: "conversation_worker" });
   } finally {

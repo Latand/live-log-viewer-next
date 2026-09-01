@@ -149,7 +149,9 @@ reaches one reaches the other. What replaces a prohibition is a name. Every
 rotation records who triggered it — operator or agent, the triggering
 conversation, and the seat epoch it held — on the successor's designation and
 on the predecessor's revocation, so the lineage `get_orchestrator` reports
-carries both which seat replaced which and on whose word.
+carries both which seat replaced which and on whose word. Retrying the same
+idempotency key replays that record verbatim, so the name it answers with is
+always the one the rotation was recorded under, whoever sends the retry.
 
 The mandate itself lands in the feed as a single folded **Mandate** card with
 the delivery's line count, and a rotation handoff as its second section — so an

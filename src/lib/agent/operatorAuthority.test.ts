@@ -149,14 +149,14 @@ test("REGRESSION (#1402): rotation NAMES every caller and refuses none — the a
   const workerCapability = crypto.randomBytes(32).toString("base64url");
   setCallerConversationResolverForTests(() => "conversation_worker");
 
-  /* The self-named agent: refused every operator-only action, and named — not
-     refused — for rotation. There is no other answer this function can give. */
+  /* The self-named agent: refused for every operator-only action, and named
+     for rotation. There is no other answer this function can give. */
   const agent = request({ ...BROWSER, [VIEWER_SPAWN_CAPABILITY_HEADER]: workerCapability });
   expect(requireOperatorAuthority(agent).ok).toBe(false);
   expect(rotationActor(agent)).toEqual({ kind: "agent", conversationId: "conversation_worker" });
 
-  /* The operator's own tab names no conversation, and is labelled as itself
-     rather than left anonymous. */
+  /* The operator's own tab names no conversation, and carries the `operator`
+     label to say so. */
   setCallerConversationResolverForTests(() => null);
   expect(rotationActor(request(BROWSER))).toEqual({ kind: "operator", conversationId: null });
   /* A background lane's marker classifies activity and has never been an actor

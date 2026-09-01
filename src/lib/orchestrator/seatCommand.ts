@@ -166,8 +166,8 @@ async function postSpawnInProcess(body: Record<string, unknown>): Promise<{ stat
      refusing an agent, the rotation route by naming one (#1402) — so this
      presents the operator spawn capability either way, the same lane the MCP
      server's spawn_agent uses. Who triggered the designation travels on the
-     seat record, not on this spawn. Only `headers` and `json` are read by the
-     spawn command. */
+     seat record; this spawn carries none of it. Only `headers` and `json` are
+     read by the spawn command. */
   const request = {
     headers: new Headers({
       host: "127.0.0.1",
@@ -792,7 +792,7 @@ export async function executeOrchestratorRotation(
   /* WHO ordered this rotation. Never a refusal — rotation bans nobody — and
      never read off `rawBody`, so nothing a caller writes can claim to be
      someone else. Null is an in-process caller that named nobody, and records
-     unknown provenance rather than crediting the operator with it. */
+     unknown provenance; the operator is never credited by default. */
   actor: ViewerActor | null = null,
 ): Promise<SeatCommandResult> {
   const triggeredBy = actor ? rotationTrigger(actor) : null;
@@ -895,13 +895,35 @@ export async function executeOrchestratorRotation(
     body: {
       ...outcome.body,
       rotatedFrom,
-      /* Who ordered it, on the answer as well as on the durable record: the
-         caller that just rotated a seat reads back the attribution it was
-         recorded under rather than having to trust that one was written. */
-      triggeredBy,
+      /* Who ordered it, on the answer as well as on the durable record, so the
+         caller reads back the attribution its rotation was recorded under. */
+      triggeredBy: attributedTrigger(outcome.body, triggeredBy),
       ...(composed.handoff ? { handoff: composed.handoff } : {}),
     },
   };
+}
+
+/**
+ * THE ANSWER REPORTS WHAT THE RECORD HOLDS (#1402).
+ *
+ * Every outcome that reached a seat carries that seat, and the seat's own
+ * `triggeredBy` was written by the request that created the intent. So an
+ * idempotent replay — a lost response retried, whichever actor holds the key —
+ * answers with the actor that ORDERED the rotation. The replaying caller's own
+ * identity is a fact about the retry, and writing it over the attribution would
+ * make the answer contradict the durable record it is reporting.
+ *
+ * When no seat was reached, the request was refused before anything was
+ * recorded; there the answer names the actor that asked, and there is no record
+ * for it to disagree with.
+ */
+function attributedTrigger(
+  body: Record<string, unknown>,
+  requested: OrchestratorSeatTrigger | null,
+): OrchestratorSeatTrigger | null {
+  const seat = body.seat;
+  if (!seat || typeof seat !== "object" || Array.isArray(seat)) return requested;
+  return (seat as OrchestratorSeat).triggeredBy ?? null;
 }
 
 type RotationMandate =

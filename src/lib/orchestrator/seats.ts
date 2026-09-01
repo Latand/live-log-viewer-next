@@ -56,12 +56,12 @@ export interface OrchestratorSeatIntent {
  * actor kind the request presented, the conversation that named itself (null for
  * the operator's own browser, which names none), and the seat epoch that caller
  * held at the time when it was itself a designated seat — which is how a seat
- * that rotated ITSELF is legible as exactly that, rather than as an anonymous
- * successor appearing beside a revoked predecessor.
+ * that rotated ITSELF is legible as exactly that. The bare lineage shows only an
+ * anonymous successor standing beside a revoked predecessor.
  *
  * Absent on every designation made before this existed, and on paths that never
- * carry an actor; a reader must treat it as unknown provenance, never as "the
- * operator did it".
+ * carry an actor. A reader must treat that absence as unknown provenance; "the
+ * operator did it" is never a safe reading of it.
  */
 export interface OrchestratorSeatTrigger {
   kind: "operator" | "agent";
@@ -160,7 +160,7 @@ function atomicWriteJson(filePath: string, value: unknown): void {
 }
 
 /** A trigger survives the round trip only when it is fully formed; a half-written
-    one is dropped rather than reported as partial provenance. */
+    one is dropped, so partial provenance is never reported. */
 function normalizeSeatTrigger(value: unknown): OrchestratorSeatTrigger | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const trigger = value as Partial<OrchestratorSeatTrigger>;
@@ -394,8 +394,8 @@ function readOrchestratorSeatMigrationEvidence(): OrchestratorSeatMigrationEvide
       seatEpoch: revocation.seatEpoch,
       revokedAt: revocation.revokedAt,
       successorConversationId: revocation.successorConversationId ?? null,
-      /* Carried, not dropped: this reader's whole point is that a rewrite
-         publishes nothing less than it read. */
+      /* Carried through the migration: this reader's whole point is that a
+         rewrite publishes everything it read. */
       triggeredBy: normalizeSeatTrigger(revocation.triggeredBy),
     });
   }

@@ -82,8 +82,8 @@ test("replacement revokes the predecessor in the same write and bumps the epoch"
       revokedAt: AT,
       /* Bidirectional lineage: the revocation names its successor… */
       successorConversationId: "conversation_b",
-      /* Nothing named an actor for this designation, so provenance is unknown
-         rather than assumed to be the operator (#1402). */
+      /* Nothing named an actor for this designation, so provenance stays
+         unknown; the operator is never assumed (#1402). */
       triggeredBy: null,
     });
     expect(swapped.seat.seatEpoch).toBe(2);

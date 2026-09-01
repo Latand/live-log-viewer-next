@@ -1936,9 +1936,8 @@ function derivedRequestId(base: string, suffix: string): string {
  * lane (no capability in the environment) forwards nothing and passes.
  *
  * ROTATION is the exception, and the same header is what makes it work (#1402):
- * the rotation route reads this name to ATTRIBUTE the rotation rather than to
- * refuse it, so the seat the operator told to rotate can do it here instead of
- * falling back to a shell.
+ * the rotation route reads this name to ATTRIBUTE the rotation, so the seat the
+ * operator told to rotate performs it here and the shell fallback is gone.
  */
 function callerCapabilityHeaders(): Record<string, string> {
   const capability = process.env[VIEWER_SPAWN_CAPABILITY_ENV]?.trim() ?? "";
@@ -2340,9 +2339,8 @@ async function sendMessageToOrchestrator(
 
     Authority is the ROUTE's (#1402), and there is no copy of it here: this posts
     the calling session's own capability like every other control call, and the
-    rotation route names the caller instead of refusing it. What comes back
-    includes that name, so the caller reads the attribution its rotation was
-    recorded under. */
+    rotation route admits that caller and names it. What comes back includes that
+    name, so the caller reads the attribution its rotation was recorded under. */
 async function rotateOrchestrator(args: McpToolArgs, control: ViewerControlDependencies): Promise<McpToolPayload> {
   const project = canonicalOrchestratorProject(required(args, "project"));
   const result = await control.post("/api/orchestrator/rotate", {

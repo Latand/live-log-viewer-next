@@ -21,9 +21,9 @@ import { GET as seatGet, POST as seatPost } from "./route";
  * The binding half — that the MCP tools actually forward that capability — is
  * proven in `src/lib/mcp/orchestratorTools.test.ts`.
  *
- * ROTATION is the deliberate exception (#1402), and it is asserted here at the
- * route rather than assumed: the identical request that the seat route refuses
- * as an agent reaches the rotation command, which answers on its own terms.
+ * ROTATION is the deliberate exception (#1402), and the route itself is what
+ * proves it here: the identical request that the seat route refuses as an agent
+ * reaches the rotation command, which answers on its own terms.
  * The accepted end-to-end rotation, with the caller attributed, lives in
  * `src/lib/orchestrator/rotationAuthority.test.ts` — this file must not run a
  * real spawn.
@@ -81,7 +81,7 @@ test("a capability-presenting agent is refused DESIGNATION at the seat route, an
   expect(pending).toBeNull();
 });
 
-test("REGRESSION (#1402): the same agent request is ADMITTED by the rotation route, which answers about the seat and not about the caller", async () => {
+test("REGRESSION (#1402): the same agent request is ADMITTED by the rotation route, which answers about the seat whoever asked", async () => {
   const rotate = await rotatePost(agentRequest("/api/orchestrator/rotate", {
     project: "proj-a",
     clientRequestId: "req_00000002",

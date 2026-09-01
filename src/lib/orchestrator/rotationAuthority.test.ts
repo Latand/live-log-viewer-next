@@ -184,8 +184,8 @@ test("REGRESSION (#1402): the designated seat rotates ITSELF through rotate_orch
   expect(spawns).toHaveLength(1);
   expect(result.conversationId).toBe(SUCCESSOR_ID);
   expect(result.rotatedFrom).toMatchObject({ conversationId: SEAT_ID });
-  /* Attribution, on the answer: the caller reads back who it was recorded as
-     rather than trusting that anything was recorded. */
+  /* Attribution, on the answer: the caller reads back the name its rotation was
+     recorded under, so it never has to trust that one was written. */
   expect(result.triggeredBy).toEqual({ kind: "agent", conversationId: SEAT_ID, seatEpoch: 1 });
 
   /* ...and on the durable record, both halves of the lineage. */
@@ -220,6 +220,53 @@ test("REGRESSION (#1402): a conversation holding no seat rotates too — no role
     conversationId: BYSTANDER_ID,
     seatEpoch: null,
   });
+});
+
+test("REGRESSION (#1402): an idempotent replay by a DIFFERENT actor answers with the actor that ORDERED the rotation", async () => {
+  seatSeeded();
+  callerIs(SEAT_ID);
+  const { deps, spawns } = dependencies();
+  const ordered: OrchestratorSeatTrigger = { kind: "agent", conversationId: SEAT_ID, seatEpoch: 1 };
+  const key = "rotate-replay-1";
+
+  const first = await tools(routeBackedControl(deps).control).rotate_orchestrator({
+    clientRequestId: key,
+    project: "proj-a",
+  }) as Record<string, unknown>;
+  expect(first.triggeredBy).toEqual(ordered);
+  expect(spawns).toHaveLength(1);
+
+  /* A different conversation now retries the SAME idempotency key — a lost
+     response replayed by whoever was handed the key. The rotation is finished
+     and durable; this request performs nothing. */
+  callerIs(BYSTANDER_ID);
+
+  const routeReplay = await routeAnswer(headersFor("seat"), { clientRequestId: key, project: "proj-a" }, deps);
+  expect(routeReplay.status).toBe(200);
+  expect(routeReplay.body.replayed).toBe(true);
+  /* The answer reports what the record holds: the seat that ordered it. The
+     replaying caller's own identity describes the retry and is never written
+     over the attribution. */
+  expect(routeReplay.body.triggeredBy).toEqual(ordered);
+
+  const toolReplay = await tools(routeBackedControl(deps).control).rotate_orchestrator({
+    clientRequestId: key,
+    project: "proj-a",
+  }) as Record<string, unknown>;
+  expect(toolReplay.replayed).toBe(true);
+  expect(toolReplay.triggeredBy).toEqual(ordered);
+
+  /* One rotation happened, and the durable record still names its author on
+     both halves of the lineage. */
+  expect(spawns).toHaveLength(1);
+  const active = orchestratorSeatFor("proj-a").active;
+  expect(active?.conversationId).toBe(SUCCESSOR_ID);
+  expect(active?.triggeredBy).toEqual(ordered);
+  expect(orchestratorRevocations()).toEqual([expect.objectContaining({
+    conversationId: SEAT_ID,
+    successorConversationId: SUCCESSOR_ID,
+    triggeredBy: ordered,
+  })]);
 });
 
 test("REGRESSION (#1402): the operator-only rule still refuses this exact request — and rotation no longer asks it", async () => {
@@ -271,7 +318,7 @@ test("the route and the MCP tool answer the same for the same actor: ACCEPTED, w
       expect(answer.triggeredBy).toEqual(expected);
       expect(orchestratorSeatFor("proj-a").active?.triggeredBy).toEqual(expected);
       if (surface === "tool") {
-        /* The tool reached the route rather than deciding anything itself. */
+        /* The tool decided nothing itself; it reached the route. */
         expect(posted.map((call) => call.pathname)).toEqual(["/api/orchestrator/rotate"]);
       }
     }

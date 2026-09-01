@@ -163,13 +163,13 @@ export interface ViewerActor {
  * holds". So the surface agents are told to prefer was the one surface that could
  * not do it, and the shell fallback was the only working path.
  *
- * Nobody ever configured that ban, and the operator's rule is that controls are
- * CAPABILITY, not prohibition: their word is the trigger, and whoever acts on it
- * must be able to execute through the first-class tool. So rotation asks who the
- * caller is and never whether they may — this function BANS NOBODY and cannot
- * refuse. Its answer is attribution: the rotation record carries the actor kind and
- * the triggering conversation, so a rotation nobody can be stopped from performing
- * is still a rotation everybody can see the author of.
+ * Nobody ever configured that ban. The operator's rule is that a control is a
+ * CAPABILITY: their word is the trigger, and whoever acts on it must be able to
+ * execute through the first-class tool. So rotation asks only who the caller is —
+ * this function BANS NOBODY and cannot refuse. Its answer is attribution: the
+ * rotation record carries the actor kind and the triggering conversation, so a
+ * rotation nobody can be stopped from performing is still a rotation everybody can
+ * see the author of.
  *
  * The perimeter is unchanged and is not this function's job: `rejectCrossOrigin`
  * runs first in the route, exactly as it does for every other authority decision
