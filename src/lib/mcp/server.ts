@@ -1734,7 +1734,7 @@ const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
     "A project with no binding for an engine allows every account of that engine, which is exactly the behaviour it has always had; `restricted: false` on an engine's block says so. Binding a project to a subset fences every selection for its work, including the automatic switch under rate-limit pressure: when every allowed account is out of capacity that is reported and the work parks, and an account outside the set is never chosen.",
     "`project` defaults to your own on a list, and is required to add or remove.",
   ].join(" "),
-  rotate_orchestrator: "Explicitly hand a project's orchestrator seat to a fresh successor: bounded handoff (predecessor transcript reference, open tasks, optional notes), atomic designation switch, manager-authority-only revocation of the predecessor, bidirectional lineage. Never triggered automatically.",
+  rotate_orchestrator: "Explicitly hand a project's orchestrator seat to a fresh successor: bounded handoff (predecessor transcript reference, open tasks, optional notes), atomic designation switch, manager-authority-only revocation of the predecessor, bidirectional lineage. Callable from any session, including the seat rotating itself; the answer and the durable record both name who triggered it. Never triggered automatically.",
 };
 
 const clientRequestIdSchema = z.string().min(1).describe("Stable idempotency key for this logical call.");

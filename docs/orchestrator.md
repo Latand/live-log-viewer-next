@@ -141,6 +141,18 @@ moves. Both cards stay linked, and the successor's header links back.
 Nothing rotates by itself. Crossing the threshold changes what the dock says
 and nothing else.
 
+The dock button is one way in; `rotate_orchestrator` is another. It performs
+the same rotation from any session — including the seat rotating itself, when
+you say so from a phone and the dock is out of reach — because the tool and
+`POST /api/orchestrator/rotate` share one authority contract: whatever actor
+reaches one reaches the other. What replaces a prohibition is a name. Every
+rotation records who triggered it — operator or agent, the triggering
+conversation, and the seat epoch it held — on the successor's designation and
+on the predecessor's revocation, so the lineage `get_orchestrator` reports
+carries both which seat replaced which and on whose word. Retrying the same
+idempotency key replays that record verbatim, so the name it answers with is
+always the one the rotation was recorded under, whoever sends the retry.
+
 The mandate itself lands in the feed as a single folded **Mandate** card with
 the delivery's line count, and a rotation handoff as its second section — so an
 8 KB first message stays one row you can open when you want it.

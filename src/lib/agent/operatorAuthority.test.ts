@@ -11,6 +11,7 @@ import {
   directOperatorActivityAuthority,
   internalServiceHeaders,
   requireOperatorAuthority,
+  rotationActor,
   setCallerConversationResolverForTests,
   voiceTransportOperator,
 } from "./operatorAuthority";
@@ -138,6 +139,30 @@ test("direct activity accepts a browser and rejects server-authenticated backgro
        the product's existing operator-authority contract. */
     expect(requireOperatorAuthority(serviceRequest).ok).toBe(true);
   }
+});
+
+/* --------------------------------------------------------------------------- *
+ * Rotation asks the same question and answers it with a NAME (#1402).
+ * --------------------------------------------------------------------------- */
+
+test("REGRESSION (#1402): rotation NAMES every caller and refuses none — the agent it used to reject included", () => {
+  const workerCapability = crypto.randomBytes(32).toString("base64url");
+  setCallerConversationResolverForTests(() => "conversation_worker");
+
+  /* The self-named agent: refused for every operator-only action, and named
+     for rotation. There is no other answer this function can give. */
+  const agent = request({ ...BROWSER, [VIEWER_SPAWN_CAPABILITY_HEADER]: workerCapability });
+  expect(requireOperatorAuthority(agent).ok).toBe(false);
+  expect(rotationActor(agent)).toEqual({ kind: "agent", conversationId: "conversation_worker" });
+
+  /* The operator's own tab names no conversation, and carries the `operator`
+     label to say so. */
+  setCallerConversationResolverForTests(() => null);
+  expect(rotationActor(request(BROWSER))).toEqual({ kind: "operator", conversationId: null });
+  /* A background lane's marker classifies activity and has never been an actor
+     rule; rotation reads the same thing here as it does without it. */
+  expect(rotationActor(request({ ...BROWSER, ...internalServiceHeaders("mcp") })))
+    .toEqual({ kind: "operator", conversationId: null });
 });
 
 test("an invalid internal-service claim cannot impersonate authenticated background provenance", () => {
