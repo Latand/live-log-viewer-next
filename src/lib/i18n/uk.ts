@@ -515,6 +515,8 @@ export const uk: Record<keyof typeof en, Message> = {
   "receipt.human.compactSentUnobserved": "надіслано — Viewer не зміг підтвердити завершення стискання",
   "receipt.human.compactDeclined": "надіслано — агент завершив /compact, нічого не стиснувши",
   "receipt.human.verbatim": "не доставлено: {reason}",
+  "receipt.cause.hostUnavailable": "runtime host недоступний",
+  "receipt.cause.timedOut": "запит перевищив час очікування",
 
   "draft.readPrompt": "Прочитай розмову агента у файлі {src} і продовж роботу звідти: ",
   "draft.needDir": "вкажи робочу директорію",
