@@ -751,9 +751,28 @@ const HANDOFF_NOTES_CAP = 2_000;
 export function handleOrchestratorRotationRequest(
   request: Pick<NextRequest, "headers">,
   rawBody: Record<string, unknown>,
-  dependencies: SeatCommandDependencies = productionSeatCommandDependencies,
+  dependencies: SeatCommandDependencies = activeSeatCommandDependencies(),
 ): Promise<SeatCommandResult> {
   return executeOrchestratorRotation(rawBody, dependencies, rotationActor(request));
+}
+
+let seatCommandDependenciesForTests: SeatCommandDependencies | null = null;
+
+/**
+ * Tests only; `null` restores the production seams. Seamed here rather than in
+ * the route, because a route module may export only route fields.
+ *
+ * `POST /api/orchestrator/rotate` is the surface the rotation contract is about
+ * (#1402), so the regression drives the exported route itself over loopback —
+ * and a route takes no dependency argument. This is how that run reaches a
+ * rotation without spawning a process or delivering to a live host.
+ */
+export function setSeatCommandDependenciesForTests(dependencies: SeatCommandDependencies | null): void {
+  seatCommandDependenciesForTests = dependencies;
+}
+
+function activeSeatCommandDependencies(): SeatCommandDependencies {
+  return seatCommandDependenciesForTests ?? productionSeatCommandDependencies;
 }
 
 /** The caller's own seat epoch, when the caller IS a designated seat — which is
