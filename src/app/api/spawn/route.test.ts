@@ -2829,7 +2829,7 @@ test("structured replay keeps its admitted account after routing changes", async
     routedAccountId = "account-b";
 
     const replay = await POST.withDependencies(request(), dependencies);
-    expect(accountResolutions).toEqual(["healthy:account-a", "exact:account-a"]);
+    expect(accountResolutions).toEqual(["healthy:account-a", "exact:account-a", "exact:account-a"]);
     expect(replay.status).toBe(202);
     expect(await replay.json()).toMatchObject({
       launchId: admittedBody.launchId,

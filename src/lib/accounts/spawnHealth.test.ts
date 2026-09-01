@@ -2,14 +2,26 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, expect, test } from "bun:test";
+import { afterAll, afterEach, expect, test } from "bun:test";
 
 import { LIMITS_RATE_LIMITED_REASON, LIMITS_REAUTH_REQUIRED_REASON } from "@/lib/types";
 
 import type { ClaudeAccount } from "./claude";
-import { claudeValidityFromLimitRead, NoHealthyClaudeAccountError, selectHealthyClaudeAccount } from "./spawnHealth";
 
 const NOW = Date.parse("2026-07-14T09:00:00.000Z");
+const STATE_SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), "llv-spawn-health-state-"));
+const PREVIOUS_STATE = process.env.LLV_STATE_DIR;
+const PREVIOUS_HOME = process.env.LLV_CLAUDE_HOME;
+const PREVIOUS_FETCH = globalThis.fetch;
+let providerReads = 0;
+process.env.LLV_STATE_DIR = path.join(STATE_SANDBOX, "state");
+process.env.LLV_CLAUDE_HOME = path.join(STATE_SANDBOX, "legacy-claude");
+globalThis.fetch = (async () => {
+  providerReads += 1;
+  return new Response(JSON.stringify({ error: "invalid_grant" }), { status: 401, headers: { "content-type": "application/json" } });
+}) as unknown as typeof globalThis.fetch;
+const { claudeValidityFromLimitRead, NoHealthyClaudeAccountError, selectHealthyClaudeAccount } = await import("./spawnHealth");
+const { withAccountMutationLockAsync } = await import("./accountMutation");
 const homes: string[] = [];
 const current = () => ({ kind: "admissible", basis: "current", stale: false, retryAt: null } as const);
 const lastKnown = () => ({ kind: "admissible", basis: "last-known", stale: true, retryAt: null } as const);
@@ -17,6 +29,15 @@ const unavailable = () => ({ kind: "unavailable", reason: "auth-failed", stale: 
 
 afterEach(() => {
   for (const home of homes.splice(0)) fs.rmSync(home, { recursive: true, force: true });
+});
+
+afterAll(() => {
+  if (PREVIOUS_STATE === undefined) delete process.env.LLV_STATE_DIR;
+  else process.env.LLV_STATE_DIR = PREVIOUS_STATE;
+  if (PREVIOUS_HOME === undefined) delete process.env.LLV_CLAUDE_HOME;
+  else process.env.LLV_CLAUDE_HOME = PREVIOUS_HOME;
+  globalThis.fetch = PREVIOUS_FETCH;
+  fs.rmSync(STATE_SANDBOX, { recursive: true, force: true });
 });
 
 function account(id: string, expiresAt: number, authPresent = true, refreshable = true): ClaudeAccount {
@@ -187,6 +208,62 @@ test("spawn selection refreshes an expired preferred Claude account before admis
 
   expect(selected.account.id).toBe("expired");
   expect(refreshed).toEqual(["expired"]);
+});
+
+test("Claude provider checks waiting behind deletion re-resolve retired accounts before activity", async () => {
+  const stateFile = path.join(process.env.LLV_STATE_DIR!, "claude-accounts.json");
+  const managedAccount = (id: string, expiresAt: number): ClaudeAccount => {
+    const home = path.join(STATE_SANDBOX, "accounts", "claude", id);
+    fs.mkdirSync(path.join(home, "projects"), { recursive: true, mode: 0o700 });
+    fs.chmodSync(home, 0o700);
+    fs.writeFileSync(path.join(home, ".credentials.json"), JSON.stringify({
+      claudeAiOauth: {
+        ["access" + "Token"]: crypto.randomUUID(),
+        ["refresh" + "Token"]: crypto.randomUUID(),
+        expiresAt,
+      },
+    }), { mode: 0o600 });
+    return { id, label: id, kind: "managed", home, projectsDir: path.join(home, "projects"), authPresent: true, createdAt: 1 };
+  };
+  const observedNow = Date.now();
+  const expired = managedAccount("refresh-stale", observedNow - 1);
+  const currentAccount = managedAccount("probe-stale", observedNow + 60_000);
+  const activeRegistry = {
+    version: 1,
+    active: "default",
+    accounts: [expired, currentAccount].map(({ id, label, kind, createdAt }) => ({ id, label, kind, createdAt })),
+    retired: [],
+  };
+  const retiredRegistry = {
+    version: 1,
+    active: "default",
+    accounts: [],
+    retired: [expired, currentAccount].map(({ id, label }) => ({ id, label, retiredAt: 2 })),
+  };
+  fs.mkdirSync(path.dirname(stateFile), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(stateFile, JSON.stringify(activeRegistry), { mode: 0o600 });
+  providerReads = 0;
+  let release!: () => void;
+  let entered!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const acquired = new Promise<void>((resolve) => { entered = resolve; });
+  const holder = withAccountMutationLockAsync(async () => {
+    entered();
+    await held;
+    fs.writeFileSync(stateFile, JSON.stringify(retiredRegistry), { mode: 0o600 });
+  });
+  await acquired;
+
+  const refreshResult = selectHealthyClaudeAccount([expired], expired.id).then(() => null, (error: unknown) => error);
+  const probeResult = selectHealthyClaudeAccount([currentAccount], currentAccount.id).then(() => null, (error: unknown) => error);
+  await Bun.sleep(10);
+  expect(providerReads).toBe(0);
+  release();
+  await holder;
+
+  expect(await refreshResult).toBeInstanceOf(Error);
+  expect(await probeResult).toBeInstanceOf(Error);
+  expect(providerReads).toBe(0);
 });
 
 test("concurrent admissions coalesce refresh validation for one account", async () => {

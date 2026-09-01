@@ -305,8 +305,8 @@ async function controllerSelectionRace(): Promise<void> {
       const { AgentRegistry } = await import(${JSON.stringify(registryPath)});
       const { syncCompatibilityRouting } = await import(${JSON.stringify(controllerPath)});
       const registry = new AgentRegistry();
-      const snapshot = registry.snapshot.bind(registry);
-      registry.snapshot = () => {
+      const snapshot = registry.readOnlySnapshot.bind(registry);
+      registry.readOnlySnapshot = () => {
         const value = snapshot();
         fs.writeFileSync(${JSON.stringify(readyPath)}, "ready");
         while (!fs.existsSync(${JSON.stringify(releasePath)})) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);

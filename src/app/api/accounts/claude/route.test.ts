@@ -13,7 +13,8 @@ process.env.LLV_STATE_DIR = path.join(sandbox, "state");
 process.env.LLV_CLAUDE_HOME = path.join(sandbox, "legacy");
 
 const { ClaudeLoginSupervisor, setClaudeLoginSupervisorForTests } = await import("@/lib/accounts/claudeLogin");
-const { claudeProjectRoots, claudeRegistryPath, createManagedClaudeAccount } = await import("@/lib/accounts/claude");
+const { claudeProjectRoots, claudeRegistryPath, createManagedClaudeAccount, listClaudeAccounts } = await import("@/lib/accounts/claude");
+const { beginLegacySpawnFixture } = await import("@/lib/agent/registryTestFixtures");
 const { agentRegistry } = await import("@/lib/agent/registry");
 const { DELETE: remove, POST } = await import("./route");
 const { DELETE } = await import("./login/[operationId]/route");
@@ -186,7 +187,7 @@ test("the authorization code is accepted through stdin and never appears in the 
   expect(JSON.stringify(submittedBody)).not.toContain(code);
 });
 
-test("managed Claude removal requires force during login and cancels the operation before removing credentials", async () => {
+test("managed Claude removal cannot bypass a live login with force", async () => {
   const created = await POST(new NextRequest("http://127.0.0.1/api/accounts/claude", {
     method: "POST",
     headers: { host: "127.0.0.1", "content-type": "application/json" },
@@ -207,17 +208,17 @@ test("managed Claude removal requires force during login and cancels the operati
     headers: { host: "127.0.0.1", "content-type": "application/json" },
     body: JSON.stringify({ id: account.id, force: true }),
   }));
-  expect(forced.status).toBe(200);
-  await expect(forced.json()).resolves.toEqual({ removed: { id: account.id }, cleanupPending: false });
+  expect(forced.status).toBe(409);
+  await expect(forced.json()).resolves.toEqual(expect.objectContaining({ code: "account_removal_blocked", blockers: ["login_pending"] }));
 });
 
 test("managed Claude removal reports pending cleanup when local data survives", async () => {
   const account = createManagedClaudeAccount("Cleanup pending");
-  const originalRm = fs.rmSync;
-  fs.rmSync = ((target: fs.PathLike, options?: fs.RmDirOptions) => {
+  const originalRmdir = fs.rmdirSync;
+  fs.rmdirSync = ((target: fs.PathLike) => {
     if (path.resolve(String(target)) === path.resolve(account.home)) throw Object.assign(new Error("denied"), { code: "EACCES" });
-    return originalRm(target, options);
-  }) as typeof fs.rmSync;
+    return originalRmdir(target);
+  }) as typeof fs.rmdirSync;
   try {
     const response = await remove(new NextRequest("http://127.0.0.1/api/accounts/claude", {
       method: "DELETE", headers: { host: "127.0.0.1", "content-type": "application/json" }, body: JSON.stringify({ id: account.id }),
@@ -225,7 +226,7 @@ test("managed Claude removal reports pending cleanup when local data survives", 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({ removed: { id: account.id }, cleanupPending: true });
   } finally {
-    fs.rmSync = originalRm;
+    fs.rmdirSync = originalRmdir;
   }
 });
 
@@ -289,6 +290,80 @@ test("managed Claude removal stays blocked while a live conversation depends on 
 
   expect(response.status).toBe(409);
   await expect(response.json()).resolves.toEqual(expect.objectContaining({ blockers: ["current_conversations"] }));
+});
+
+test("force cannot bypass an in-flight spawn assigned to the account", async () => {
+  const account = createManagedClaudeAccount("In-flight spawn");
+  beginLegacySpawnFixture(agentRegistry(), { engine: "claude", cwd: "/repo", accountId: account.id });
+
+  const response = await remove(new NextRequest("http://127.0.0.1/api/accounts/claude", {
+    method: "DELETE", headers: { host: "127.0.0.1", "content-type": "application/json" }, body: JSON.stringify({ id: account.id, force: true }),
+  }));
+
+  expect(response.status).toBe(409);
+  await expect(response.json()).resolves.toEqual(expect.objectContaining({ blockers: ["live_sessions"] }));
+  expect(fs.existsSync(account.home)).toBe(true);
+  expect(listClaudeAccounts().map((candidate) => candidate.id)).toContain(account.id);
+});
+
+test("an unowned transcript in the managed home blocks removal and is named in the refusal", async () => {
+  const account = createManagedClaudeAccount("Unowned history");
+  const transcript = path.join(account.projectsDir, "-repo", "unowned.jsonl");
+  fs.mkdirSync(path.dirname(transcript), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(transcript, "{}\n", { mode: 0o600 });
+
+  const response = await remove(new NextRequest("http://127.0.0.1/api/accounts/claude", {
+    method: "DELETE", headers: { host: "127.0.0.1", "content-type": "application/json" }, body: JSON.stringify({ id: account.id, force: true }),
+  }));
+
+  expect(response.status).toBe(409);
+  await expect(response.json()).resolves.toEqual(expect.objectContaining({
+    code: "account_removal_blocked",
+    blockers: ["filesystem_history"],
+    history: {
+      home: account.home,
+      artifacts: expect.arrayContaining([{
+        path: path.relative(account.home, transcript),
+        classification: "history",
+        history: true,
+      }]),
+    },
+  }));
+  expect(fs.readFileSync(transcript, "utf8")).toBe("{}\n");
+  expect(listClaudeAccounts().map((candidate) => candidate.id)).toContain(account.id);
+});
+
+test("a failed filesystem inventory blocks managed-home removal", async () => {
+  const account = createManagedClaudeAccount("Unreadable history");
+  const unreadable = path.join(account.home, "projects");
+  const originalRead = fs.readdirSync;
+  fs.readdirSync = ((target: fs.PathLike, options?: unknown) => {
+    if (path.resolve(String(target)) === path.resolve(unreadable)) {
+      throw Object.assign(new Error("inventory unreadable"), { code: "EACCES" });
+    }
+    return originalRead(target, options as never);
+  }) as typeof fs.readdirSync;
+
+  try {
+    const response = await remove(new NextRequest("http://127.0.0.1/api/accounts/claude", {
+      method: "DELETE", headers: { host: "127.0.0.1", "content-type": "application/json" }, body: JSON.stringify({ id: account.id, force: true }),
+    }));
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual(expect.objectContaining({
+      code: "account_removal_blocked",
+      blockers: ["filesystem_history"],
+      history: {
+        home: account.home,
+        artifacts: [{ path: "projects", classification: "owned", history: false }],
+        error: { path: "projects", message: "inventory unreadable" },
+      },
+    }));
+    expect(fs.existsSync(account.home)).toBe(true);
+    expect(listClaudeAccounts().map((candidate) => candidate.id)).toContain(account.id);
+  } finally {
+    fs.readdirSync = originalRead;
+  }
 });
 
 test("managed Claude removal proceeds over dead history and keeps its transcripts readable (issue #643)", async () => {

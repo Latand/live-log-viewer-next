@@ -6,6 +6,7 @@ import { after, NextRequest, NextResponse } from "next/server";
 
 import { UnknownAccountError } from "@/lib/accounts/codex";
 import { claudeSettingsPath, isManagedClaudeHome, UnknownClaudeAccountError } from "@/lib/accounts/claude";
+import { withAccountMutationLockAsync } from "@/lib/accounts/accountMutation";
 import { accountManager, ProjectAccountRefusedError, resolveHealthySpawnAccount, type HealthySpawnAccountResolution } from "@/lib/accounts/manager";
 import { emptyLaunchProfile, validExplicitProject } from "@/lib/accounts/migration/contracts";
 import { freshSpecFor, type AgentEngine } from "@/lib/agent/cli";
@@ -731,12 +732,20 @@ export async function executeSpawnRequest(
     const receiptAccountId = pinFallback && typeof body.accountId === "string"
       ? body.accountId
       : account.accountId;
-    const begun = registry.beginSpawnRequest(canonicalSpawnRequest(
-      receiptAccountId,
-      spec.launchProfile,
-      digest,
-      existingAttempt?.accountPin ?? (body.accountId !== undefined),
-    ));
+    const begun = await withAccountMutationLockAsync(async () => {
+      if (!existingAttempt) {
+        const current = dependencies.resolveSpawnAccount(engine, account.accountId);
+        if (current.accountId !== account.accountId || current.kind !== account.kind) {
+          throw new Error("spawn account changed during admission");
+        }
+      }
+      return registry.beginSpawnRequest(canonicalSpawnRequest(
+        receiptAccountId,
+        spec.launchProfile,
+        digest,
+        existingAttempt?.accountPin ?? (body.accountId !== undefined),
+      ));
+    });
     if (begun.kind === "conflict") return NextResponse.json({ error: "spawn attempt conflicts with its original request" }, { status: 409 });
     if (begun.kind === "created") launchId = begun.receipt.launchId;
     let queuedReceipt = begun.receipt;
