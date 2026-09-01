@@ -3,11 +3,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
-import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from "node:child_process";
+import { spawn, type ChildProcessWithoutNullStreams, type SpawnOptionsWithoutStdio } from "node:child_process";
 import { describe, expect, spyOn, test } from "bun:test";
 
 import { AgentRegistry } from "@/lib/agent/registry";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
+import { procBackend } from "@/lib/proc";
 import { STRUCTURED_HOST_STAMP_ENV, structuredHostStamp } from "@/lib/scanner/process";
 import { saveTelegramSession, TELEGRAM_CONNECTOR_TOKEN_ENV } from "@/lib/telegram/sessionStore";
 
@@ -388,6 +389,14 @@ function fakeSpawn(server: FakeAppServer, captured?: { args?: string[]; options?
     }
     return server as unknown as ChildProcessWithoutNullStreams;
   };
+}
+
+async function waitForCondition(predicate: () => boolean | Promise<boolean>, message: string): Promise<void> {
+  for (let attempt = 0; attempt < 500; attempt += 1) {
+    if (await predicate()) return;
+    await Bun.sleep(10);
+  }
+  throw new Error(message);
 }
 
 const ownedFakeProcess = {
@@ -1757,6 +1766,54 @@ describe("CodexAppServerHost", () => {
         },
         features: { apps: false, plugins: false },
         include_apps_instructions: false,
+      },
+    });
+    await host.release();
+  });
+
+  test("a Codex re-host reconstructs the full Viewer stdio MCP connector", async () => {
+    const server = new FakeAppServer("viewer-rehost-thread");
+    const captured: { options?: SpawnOptionsWithoutStdio } = {};
+    server.mcpServers = {
+      viewer: {
+        command: "bun",
+        args: ["bin/mcp-server.mjs"],
+        env: { LLV_STATE_DIR: "fixture-state" },
+        enabled: true,
+        default_tools_approval_mode: "prompt",
+      },
+      unrelated: { command: "unrelated-mcp", enabled: true },
+    };
+    const host = await CodexAppServerHost.adopt("viewer-rehost-thread", {
+      cwd: "/repo",
+      mcpServers: ["viewer"],
+      env: {
+        NODE_ENV: "test",
+        LLV_STATE_DIR: "fixture-state",
+        LLV_VIEWER_DEPLOY_TARGET: "fixture-target",
+        LLV_VIEWER_PORT: "8898",
+      },
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server, captured),
+    });
+
+    expect(captured.options?.env).toMatchObject({
+      LLV_STATE_DIR: "fixture-state",
+      LLV_VIEWER_DEPLOY_TARGET: "fixture-target",
+      LLV_VIEWER_PORT: "8898",
+    });
+    expect(server.requests.find((request) => request.method === "thread/resume")?.params).toMatchObject({
+      config: {
+        mcp_servers: {
+          viewer: {
+            command: "bun",
+            args: ["bin/mcp-server.mjs"],
+            env: { LLV_STATE_DIR: "fixture-state" },
+            enabled: true,
+            default_tools_approval_mode: "approve",
+          },
+          unrelated: { enabled: false },
+        },
       },
     });
     await host.release();
@@ -3799,7 +3856,7 @@ describe("CodexAppServerHost", () => {
     )).rejects.toThrow("structured hosts are disabled");
   });
 
-  test("boot adoption resumes every flagged Codex registry row", async () => {
+  test("boot re-host resumes Codex and reconstructs its Viewer MCP connector (#1346)", async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-structured-adoption-"));
     const registryPath = path.join(directory, "agent-registry.json");
     const registry = new AgentRegistry(registryPath);
@@ -3841,7 +3898,17 @@ describe("CodexAppServerHost", () => {
       { NODE_ENV: "test", LLV_STRUCTURED_HOSTS: "1" },
     );
     expect(adopted).toHaveLength(1);
-    expect(server.requests.some((request) => request.method === "thread/resume")).toBeTrue();
+    expect(server.requests.find((request) => request.method === "thread/resume")?.params).toMatchObject({
+      config: {
+        mcp_servers: {
+          viewer: {
+            command: "bun",
+            args: [expect.stringContaining("bin/mcp-server.mjs")],
+            enabled: true,
+          },
+        },
+      },
+    });
     expect(registry.snapshot().entries["codex:adopted-thread"]?.structuredHost).toMatchObject({
       eventCursor: 13,
       writerClaimEpoch: 4,
@@ -3888,6 +3955,226 @@ describe("CodexAppServerHost", () => {
     });
     await releasedRows[0]!.host.release();
   });
+
+  test("a severed seat re-hosts in a distinct process with a discoverable working Viewer MCP", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-seat-successor-process-"));
+    const home = path.join(directory, "home");
+    const configHome = path.join(directory, "config");
+    const stateDirectory = path.join(directory, "state");
+    const tempDirectory = path.join(directory, "tmp");
+    const targetPath = path.join(stateDirectory, "viewer-release.json");
+    const transcriptPath = path.join(directory, "seat-successor.jsonl");
+    const registryPath = path.join(directory, "agent-registry.json");
+    const eventsPath = path.join(directory, "events");
+    const mcpProofPath = path.join(directory, "viewer-mcp-proof.json");
+    const incumbentReadyPath = path.join(directory, "incumbent-ready.json");
+    const successorReadyPath = path.join(directory, "successor-ready.json");
+    for (const pathname of [home, configHome, stateDirectory, tempDirectory]) {
+      fs.mkdirSync(pathname, { recursive: true, mode: 0o700 });
+    }
+    fs.writeFileSync(transcriptPath, "");
+    const deployment = {
+      deploymentId: "deployment_seat_successor",
+      phase: "succeeded",
+      revision: "e".repeat(40),
+    };
+    let controlRequests = 0;
+    const control = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        controlRequests += 1;
+        const url = new URL(request.url);
+        expect(url.pathname).toBe("/api/runtime/deployments");
+        expect(url.searchParams.get("limit")).toBe("25");
+        return Response.json({ count: 1, deployments: [deployment] });
+      },
+    });
+    if (control.port === 8898) {
+      control.stop(true);
+      throw new Error("the seat-successor fixture selected the production port");
+    }
+    fs.writeFileSync(targetPath, JSON.stringify({
+      revision: "e".repeat(40),
+      image: "viewer:fixture",
+      container: "viewer-fixture",
+      endpoint: control.url.origin,
+    }));
+    const environment: NodeJS.ProcessEnv = {
+      NODE_ENV: "test",
+      PATH: process.env.PATH,
+      HOME: home,
+      XDG_CONFIG_HOME: configHome,
+      XDG_CACHE_HOME: path.join(directory, "cache"),
+      XDG_DATA_HOME: path.join(directory, "data"),
+      XDG_STATE_HOME: path.join(directory, "xdg-state"),
+      TMPDIR: tempDirectory,
+      LLV_STATE_DIR: stateDirectory,
+      LLV_VIEWER_DEPLOY_TARGET: targetPath,
+      LLV_VIEWER_PORT: String(control.port),
+    };
+    const hostFixture = path.join(import.meta.dir, "fixtures", "seatSuccessorHost.ts");
+    type FixtureIdentity = { pid: number; startIdentity: string };
+    type FixtureReady = {
+      mode: "incumbent" | "successor";
+      sessionId: string;
+      viewer: FixtureIdentity;
+      engine: FixtureIdentity;
+      eventCursor: number;
+      activeTurnRef: string | null;
+      proof?: {
+        enginePid: number;
+        toolNames?: string[];
+        structuredContent?: unknown;
+        error?: string;
+      };
+    };
+    type FixtureFailure = { mode?: "incumbent" | "successor"; error: string };
+    type FixtureHostProcess = ChildProcessWithoutNullStreams & { pid: number };
+    const launchHost = (mode: "incumbent" | "successor", readyPath: string): FixtureHostProcess => {
+      const child = spawn(process.execPath,
+        [hostFixture, mode, registryPath, eventsPath, transcriptPath, mcpProofPath, readyPath], {
+          cwd: process.cwd(),
+          env: environment,
+          detached: true,
+          stdio: ["pipe", "pipe", "pipe"],
+        });
+      if (!child.pid) {
+        child.kill("SIGKILL");
+        throw new Error("fixture host process has no pid");
+      }
+      return child as FixtureHostProcess;
+    };
+    const diagnostics = new Map<number, string>();
+    const observeDiagnostics = (child: FixtureHostProcess) => {
+      diagnostics.set(child.pid, "");
+      child.stdout.resume();
+      child.stderr.on("data", (chunk) => {
+        diagnostics.set(child.pid, `${diagnostics.get(child.pid) ?? ""}${String(chunk)}`.slice(-4_000));
+      });
+    };
+    const readReady = async (filename: string, child: FixtureHostProcess): Promise<FixtureReady> => {
+      await waitForCondition(
+        () => fs.existsSync(filename) || child.exitCode !== null || child.signalCode !== null,
+        `fixture host ${child.pid} produced no ready evidence: ${diagnostics.get(child.pid) ?? ""}`,
+      );
+      if (!fs.existsSync(filename)) {
+        throw new Error(`fixture host ${child.pid} exited before readiness: ${diagnostics.get(child.pid) ?? ""}`);
+      }
+      const result = JSON.parse(fs.readFileSync(filename, "utf8")) as FixtureReady | FixtureFailure;
+      if ("error" in result) throw new Error(`fixture host ${child.pid} failed: ${result.error}`);
+      return result;
+    };
+    const waitForChildExit = async (child: FixtureHostProcess, timeoutMs: number): Promise<boolean> => {
+      if (child.exitCode !== null || child.signalCode !== null) return true;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        return await Promise.race([
+          new Promise<true>((resolve) => child.once("exit", () => resolve(true))),
+          new Promise<false>((resolve) => { timer = setTimeout(() => resolve(false), timeoutMs); }),
+        ]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    };
+    const killExactEngine = async (identity: FixtureIdentity): Promise<void> => {
+      if (procBackend.processIdentity(identity.pid) === identity.startIdentity) {
+        try { process.kill(identity.pid, "SIGKILL"); } catch { /* fixture engine already exited */ }
+      }
+      await waitForCondition(
+        () => procBackend.processIdentity(identity.pid) !== identity.startIdentity,
+        `fixture engine ${identity.pid} survived termination`,
+      );
+    };
+    const stopHost = async (
+      child: FixtureHostProcess | null,
+      engine: FixtureIdentity | null,
+    ): Promise<void> => {
+      if (child && child.exitCode === null && child.signalCode === null) {
+        child.kill("SIGTERM");
+        if (!await waitForChildExit(child, 1_000)) {
+          child.kill("SIGKILL");
+          await waitForChildExit(child, 1_000);
+        }
+      }
+      if (engine) await killExactEngine(engine);
+    };
+    let incumbent: FixtureHostProcess | null = null;
+    let successor: FixtureHostProcess | null = null;
+    let incumbentEngine: FixtureIdentity | null = null;
+    let successorEngine: FixtureIdentity | null = null;
+    try {
+      incumbent = launchHost("incumbent", incumbentReadyPath);
+      observeDiagnostics(incumbent);
+      const incumbentReady = await readReady(incumbentReadyPath, incumbent);
+      incumbentEngine = incumbentReady.engine;
+      expect(incumbentReady.mode).toBe("incumbent");
+      expect(incumbentReady.viewer.pid).toBe(incumbent.pid);
+      expect(incumbentReady.viewer.pid).not.toBe(process.pid);
+      expect(incumbentReady.engine.pid).not.toBe(incumbentReady.viewer.pid);
+      expect(incumbentReady.activeTurnRef).toBe("turn-1");
+
+      incumbent.kill("SIGKILL");
+      await waitForChildExit(incumbent, 1_000);
+      await killExactEngine(incumbentReady.engine);
+      const strandedRegistry = new AgentRegistry(registryPath).snapshot();
+      expect(strandedRegistry.entries[`codex:${incumbentReady.sessionId}`]).toMatchObject({
+        status: "live",
+        claimOwner: expect.any(String),
+        structuredHost: {
+          process: { pid: incumbentReady.engine.pid },
+          activeTurnRef: "turn-1",
+        },
+      });
+
+      successor = launchHost("successor", successorReadyPath);
+      observeDiagnostics(successor);
+      const successorReady = await readReady(successorReadyPath, successor);
+      successorEngine = successorReady.engine;
+      expect(successorReady.mode).toBe("successor");
+      expect(successorReady.sessionId).toBe(incumbentReady.sessionId);
+      expect(successorReady.viewer.pid).toBe(successor.pid);
+      expect(successorReady.viewer.pid).not.toBe(incumbentReady.viewer.pid);
+      expect(successorReady.engine.pid).not.toBe(incumbentReady.engine.pid);
+      expect(successorReady.engine.pid).not.toBe(successorReady.viewer.pid);
+      expect(successorReady.proof).not.toHaveProperty("error");
+      expect(successorReady.proof?.enginePid).toBe(successorReady.engine.pid);
+      expect(successorReady.proof?.toolNames).toContain("deployment_status");
+      expect(successorReady.proof?.structuredContent).toMatchObject({
+        ok: true,
+        toolName: "deployment_status",
+        count: 1,
+        deployments: [deployment],
+      });
+      expect(controlRequests).toBe(1);
+      const events = new FileRuntimeEventStore(eventsPath).load(successorReady.sessionId);
+      expect(events).toContainEqual(expect.objectContaining({
+        kind: "item",
+        phase: "completed",
+        item: expect.objectContaining({
+          type: "mcpToolCall",
+          server: "viewer",
+          tool: "deployment_status",
+          status: "completed",
+        }),
+      }));
+      expect(events).toContainEqual(expect.objectContaining({ kind: "turn-ended", status: "completed" }));
+      expect(new AgentRegistry(registryPath).snapshot().entries[`codex:${successorReady.sessionId}`])
+        .toMatchObject({
+          status: "idle",
+          claimOwner: expect.any(String),
+          structuredHost: {
+            process: { pid: successorReady.engine.pid },
+            activeTurnRef: null,
+          },
+        });
+    } finally {
+      await stopHost(successor, successorEngine);
+      await stopHost(incumbent, incumbentEngine);
+      control.stop(true);
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  }, 30_000);
 
   test("boot adoption starts only Codex rows admitted by its candidate filter", async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-filtered-structured-adoption-"));

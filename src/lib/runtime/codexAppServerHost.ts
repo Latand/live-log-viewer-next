@@ -250,6 +250,11 @@ const CHILD_ENV_ALLOWLIST = [
   "SSL_CERT_FILE",
   "SSL_CERT_DIR",
   "LLV_SPAWN_CAPABILITY",
+  /* The re-hosted Viewer MCP launcher resolves the current release and the
+     runtime host's stable listener from these non-secret inputs. */
+  "LLV_STATE_DIR",
+  "LLV_VIEWER_DEPLOY_TARGET",
+  "LLV_VIEWER_PORT",
 ] as const;
 /**
  * Desktop-session variables forwarded ONLY to a host that holds a plugin grant
