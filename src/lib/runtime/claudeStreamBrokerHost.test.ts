@@ -9,6 +9,7 @@ import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from "n
 import { describe, expect, spyOn, test } from "bun:test";
 
 import { AgentRegistry } from "@/lib/agent/registry";
+import { captureProcessIdentity } from "@/lib/processIdentity";
 import { procBackend } from "@/lib/proc";
 import { STRUCTURED_HOST_STAMP_ENV, structuredHostStamp } from "@/lib/scanner/process";
 import { saveTelegramSession, TELEGRAM_CONNECTOR_TOKEN_ENV } from "@/lib/telegram/sessionStore";
@@ -1693,6 +1694,7 @@ describe("ClaudeStreamBrokerHost", () => {
       await orphanExit;
       throw new Error("orphan test process identity is unavailable");
     }
+    const orphanIdentity = captureProcessIdentity(orphan.pid, undefined, startIdentity);
     registry.upsert({
       key: { engine: "claude", sessionId },
       artifactPath: `/sessions/${sessionId}.jsonl`,
@@ -1703,7 +1705,7 @@ describe("ClaudeStreamBrokerHost", () => {
       structuredHost: {
         kind: "claude-broker",
         endpoint: `stdio:${orphan.pid}`,
-        process: { pid: orphan.pid, startIdentity },
+        process: orphanIdentity,
         eventCursor: 2,
         protocolVersion: "2.1.197",
         writerClaimEpoch: 1,
@@ -1767,6 +1769,7 @@ describe("ClaudeStreamBrokerHost", () => {
       await orphanExit;
       throw new Error("orphan test process identity is unavailable");
     }
+    const orphanIdentity = captureProcessIdentity(orphan.pid, undefined, startIdentity);
     registry.upsert({
       key: { engine: "claude", sessionId },
       artifactPath: `/sessions/${sessionId}.jsonl`,
@@ -1777,7 +1780,7 @@ describe("ClaudeStreamBrokerHost", () => {
       structuredHost: {
         kind: "claude-broker",
         endpoint: `stdio:${orphan.pid}`,
-        process: { pid: orphan.pid, startIdentity },
+        process: orphanIdentity,
         eventCursor: 2,
         protocolVersion: "2.1.197",
         writerClaimEpoch: 1,

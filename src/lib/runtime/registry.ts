@@ -516,7 +516,9 @@ export async function adoptCodexRegistryHosts(
           return;
         }
         try {
-          const host = await (dependencies.adoptHost ?? CodexAppServerHost.adopt)(entry.key.sessionId, {
+          const adoptHost = dependencies.adoptHost
+            ?? ((sessionId: string, options: CodexAppServerHostOptions) => CodexAppServerHost.adopt(sessionId, options));
+          const host = await adoptHost(entry.key.sessionId, {
             ...optionsFor(claimed),
             initialEventCursor: claimed.structuredHost.eventCursor,
           });
@@ -602,7 +604,9 @@ export async function adoptClaudeRegistryHosts(
           return;
         }
         try {
-          const host = await (dependencies.adoptHost ?? ClaudeStreamBrokerHost.adopt)(entry.key.sessionId, {
+          const adoptHost = dependencies.adoptHost
+            ?? ((sessionId: string, options: ClaudeStreamBrokerHostOptions) => ClaudeStreamBrokerHost.adopt(sessionId, options));
+          const host = await adoptHost(entry.key.sessionId, {
             ...optionsFor(claimed),
             initialEventCursor: claimed.structuredHost.eventCursor,
           });
