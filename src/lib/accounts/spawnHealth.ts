@@ -4,7 +4,7 @@ import { classifySpawnAccountAdmission, type SpawnAccountAdmission } from "@/lib
 import { fetchClaudeLimits } from "@/lib/limits";
 import { LIMITS_REAUTH_REQUIRED_REASON, type EngineLimits } from "@/lib/types";
 
-import type { ClaudeAccount } from "./claude";
+import { listClaudeAccounts, UnknownClaudeAccountError, type ClaudeAccount } from "./claude";
 import { claudeOauthMetadata, refreshClaudeOauth } from "./claudeOauth";
 import { withAccountMutationLockAsync } from "./accountMutation";
 
@@ -39,13 +39,16 @@ function refreshSingleFlight(
   if (existing) return existing;
   const pending = Promise.resolve()
     .then(() => refresh(account))
-    .catch(() => classifySpawnAccountAdmission({
-      enabled: true,
-      authentication: "unknown",
-      limits: "unknown",
-      stale: true,
-      retryAt: null,
-    }))
+    .catch((error: unknown) => {
+      if (error instanceof UnknownClaudeAccountError) throw error;
+      return classifySpawnAccountAdmission({
+        enabled: true,
+        authentication: "unknown",
+        limits: "unknown",
+        stale: true,
+        retryAt: null,
+      });
+    })
     .finally(() => {
       if (inflight.get(key) === pending) inflight.delete(key);
     });
@@ -118,9 +121,25 @@ async function liveValidityProbe(account: ClaudeAccount): Promise<ClaudeValidity
   return claudeValidityFromLimitRead(result);
 }
 
+function currentClaudeAccount(account: ClaudeAccount): ClaudeAccount {
+  const current = listClaudeAccounts().find((candidate) => candidate.id === account.id);
+  if (!current || current.kind !== account.kind || path.resolve(current.home) !== path.resolve(account.home)) {
+    throw new UnknownClaudeAccountError(account.id);
+  }
+  return current;
+}
+
+async function fencedLiveValidityProbe(account: ClaudeAccount): Promise<ClaudeValidityProbeResult> {
+  return await withAccountMutationLockAsync(async () => {
+    const current = currentClaudeAccount(account);
+    return await liveValidityProbe(current);
+  });
+}
+
 async function refreshValidityProbe(account: ClaudeAccount): Promise<ClaudeValidityProbeResult> {
   return await withAccountMutationLockAsync(async () => {
-    const refreshed = await refreshClaudeOauth(account);
+    const current = currentClaudeAccount(account);
+    const refreshed = await refreshClaudeOauth(current);
     if (refreshed === "invalid") {
       return classifySpawnAccountAdmission({
         enabled: true,
@@ -139,13 +158,13 @@ async function refreshValidityProbe(account: ClaudeAccount): Promise<ClaudeValid
         retryAt: null,
       });
     }
-    return await liveValidityProbe(account);
+    return await liveValidityProbe(current);
   });
 }
 
 const productionDependencies: ClaudeSpawnHealthDependencies = {
   now: Date.now,
-  probe: liveValidityProbe,
+  probe: fencedLiveValidityProbe,
   refresh: refreshValidityProbe,
 };
 
