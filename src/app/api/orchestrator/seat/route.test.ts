@@ -15,11 +15,18 @@ import { POST as rotatePost } from "../rotate/route";
 import { GET as seatGet, POST as seatPost } from "./route";
 
 /*
- * BLOCKING 1 (#758 review), the route half: the designation surface refuses a
+ * BLOCKING 1 (#758 review), the route half: the DESIGNATION surface refuses a
  * caller that names itself as an agent conversation via the forwarded launch
  * capability, before the body is read and before anything durable changes.
  * The binding half — that the MCP tools actually forward that capability — is
  * proven in `src/lib/mcp/orchestratorTools.test.ts`.
+ *
+ * ROTATION is the deliberate exception (#1402), and it is asserted here at the
+ * route rather than assumed: the identical request that the seat route refuses
+ * as an agent reaches the rotation command, which answers on its own terms.
+ * The accepted end-to-end rotation, with the caller attributed, lives in
+ * `src/lib/orchestrator/rotationAuthority.test.ts` — this file must not run a
+ * real spawn.
  */
 
 let sandbox = "";
@@ -60,19 +67,30 @@ function agentRequest(pathname: string, body: unknown): NextRequest {
   });
 }
 
-test("a capability-presenting agent is refused designation at both routes, and no seat state changes", async () => {
+test("a capability-presenting agent is refused DESIGNATION at the seat route, and no seat state changes", async () => {
   const seat = await seatPost(agentRequest("/api/orchestrator/seat", {
     project: "proj-a",
     mandate: "mine now",
     clientRequestId: "req_00000001",
   }));
   expect(seat.status).toBe(403);
+  expect(await seat.json()).toMatchObject({ error: expect.stringContaining("an agent may not perform it") });
 
+  const { active, pending } = orchestratorSeatFor("proj-a");
+  expect(active).toBeNull();
+  expect(pending).toBeNull();
+});
+
+test("REGRESSION (#1402): the same agent request is ADMITTED by the rotation route, which answers about the seat and not about the caller", async () => {
   const rotate = await rotatePost(agentRequest("/api/orchestrator/rotate", {
     project: "proj-a",
     clientRequestId: "req_00000002",
   }));
-  expect(rotate.status).toBe(403);
+
+  /* Not 403 and not the operator-only sentence: nothing is designated for this
+     project, so the rotation command's own refusal is what comes back. */
+  expect(rotate.status).toBe(409);
+  expect(await rotate.json()).toMatchObject({ code: "no_incumbent" });
 
   const { active, pending } = orchestratorSeatFor("proj-a");
   expect(active).toBeNull();

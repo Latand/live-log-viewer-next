@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { agentRegistry } from "@/lib/agent/registry";
-import { requireOperatorAuthority, setCallerConversationResolverForTests } from "@/lib/agent/operatorAuthority";
+import { requireOperatorAuthority, rotationActor, setCallerConversationResolverForTests } from "@/lib/agent/operatorAuthority";
 import { ORCHESTRATOR_PROMPT_VERSION, ORCHESTRATOR_SYSTEM_PROMPT } from "@/lib/orchestrator/prompt";
 import { beginOrchestratorSeatIntent, completeOrchestratorSeatIntent, orchestratorSeatFor } from "@/lib/orchestrator/seats";
 import { persistProjectAliases } from "@/lib/projects/aliases";
@@ -53,15 +53,31 @@ function controlStub(responses: Record<string, Record<string, unknown>> = {}) {
   return { posts, control };
 }
 
-/** A control plane whose DESIGNATION endpoints run the REAL operator gate
+/** A control plane whose DESIGNATION endpoint runs the REAL operator gate
     against exactly the headers the binding forwarded — the same check the seat
-    and rotation routes make first, without reaching a real spawn. */
+    route makes first, without reaching a real spawn.
+
+    The rotation route is deliberately NOT on that gate (#1402): it runs the
+    rotation authority contract, which names the caller instead of refusing it,
+    and the rotations it admits are recorded with that name. */
 function gatedControlStub() {
   const designations: string[] = [];
+  const rotations: (string | null)[] = [];
   const control: ViewerControlDependencies = {
     post: async (pathname, _body, headers) => {
-      if (pathname === "/api/orchestrator/seat" || pathname === "/api/orchestrator/rotate") {
-        const operator = requireOperatorAuthority({ headers: new Headers(headers ?? {}) });
+      const request = { headers: new Headers(headers ?? {}) };
+      if (pathname === "/api/orchestrator/rotate") {
+        const actor = rotationActor(request);
+        rotations.push(actor.conversationId);
+        return {
+          ok: true,
+          conversationId: SEATED_ID,
+          seat: { conversationId: SEATED_ID },
+          triggeredBy: { kind: actor.kind, conversationId: actor.conversationId, seatEpoch: null },
+        };
+      }
+      if (pathname === "/api/orchestrator/seat") {
+        const operator = requireOperatorAuthority(request);
         if (!operator.ok) throw new Error(operator.error);
         designations.push(pathname);
         return { ok: true, conversationId: SEATED_ID, seat: { conversationId: SEATED_ID } };
@@ -69,7 +85,7 @@ function gatedControlStub() {
       return { ok: true, outcome: "delivered" };
     },
   };
-  return { designations, control };
+  return { designations, rotations, control };
 }
 
 function bindingsWith(control: ViewerControlDependencies) {
@@ -157,6 +173,9 @@ test("get_orchestrator surfaces bidirectional predecessor lineage after a replac
     seatEpoch: 1,
     revokedAt: AT,
     successorConversationId: SEATED_ID,
+    /* This replacement was seeded directly on the store, so it carries no
+       actor; a rotation through either surface names one (#1402). */
+    triggeredBy: null,
   }]);
 });
 
@@ -314,27 +333,46 @@ function restoreCapabilityCaller(): void {
   setCallerConversationResolverForTests(null);
 }
 
-test("a NON-OPERATOR caller cannot designate itself or anyone: create, rotate and send's create branch are refused by the real operator gate, writing nothing — while the tools stay callable", async () => {
+test("a NON-OPERATOR caller cannot DESIGNATE itself or anyone: create and send's create branch are refused by the real operator gate, writing nothing", async () => {
   asCapabilityCaller();
   try {
     const { designations, control } = gatedControlStub();
     const tools = bindingsWith(control);
 
-    /* All three designation paths run — the tools are ON the surface for this
-       session (axis 1) — and every one is refused by the gate that reads the
+    /* Both designation paths run — the tools are ON the surface for this
+       session (axis 1) — and both are refused by the gate that reads the
        forwarded conversation capability, before anything durable changes. */
     await expect(tools.create_orchestrator({
       clientRequestId: "create-x",
       project: "proj-a",
       conversationId: "conversation_worker",
     })).rejects.toThrow();
-    await expect(tools.rotate_orchestrator({ clientRequestId: "rotate-x", project: "proj-a" })).rejects.toThrow();
     await expect(tools.send_message_to_orchestrator({ clientRequestId: "send-x", project: "proj-a", text: "hi" })).rejects.toThrow();
 
     expect(designations).toEqual([]);
     const { active, pending } = orchestratorSeatFor("proj-a");
     expect(active).toBeNull();
     expect(pending).toBeNull();
+  } finally {
+    restoreCapabilityCaller();
+  }
+});
+
+test("REGRESSION (#1402): the same non-operator caller ROTATES, and the rotation is attributed to it", async () => {
+  asCapabilityCaller();
+  try {
+    const { rotations, control } = gatedControlStub();
+    const result = await bindingsWith(control).rotate_orchestrator({
+      clientRequestId: "rotate-x",
+      project: "proj-a",
+    }) as Record<string, unknown>;
+
+    /* The tool forwarded the caller's own capability, exactly as it does for
+       create — and rotation reads that name to attribute rather than to
+       refuse. See src/lib/orchestrator/rotationAuthority.test.ts for the same
+       call carried end to end into the durable seat record. */
+    expect(rotations).toEqual(["conversation_worker"]);
+    expect(result.triggeredBy).toMatchObject({ kind: "agent", conversationId: "conversation_worker" });
   } finally {
     restoreCapabilityCaller();
   }

@@ -82,6 +82,8 @@ export function callerConversationId(request: Pick<NextRequest, "headers">): str
  *   act and does not follow transport rules.
  * - AGENTS. A caller presenting a conversation capability is refused every
  *   operator-only action, including designation, whatever role it holds.
+ *   ROTATION IS NOT ONE OF THEM (#1402): see `rotationActor` below, which asks
+ *   the same question and answers it with a NAME. It has no refusal to give.
  *
  * Residual, stated plainly rather than papered over: a local process running as
  * the operator's uid can send the same same-origin-shaped request the browser
@@ -137,6 +139,46 @@ function internalServiceClaim(request: Pick<NextRequest, "headers">): "absent" |
 export function directOperatorActivityAuthority(request: Pick<NextRequest, "headers">): OperatorAuthority {
   if (internalServiceClaim(request) === "valid") return SERVICE_REFUSED;
   return requireOperatorAuthority(request);
+}
+
+/** Who a request says it is. `operator` is the local browser — anything that
+    named no conversation; `agent` is a caller that named itself with the
+    conversation capability the registry issued it. */
+export type ViewerActorKind = "operator" | "agent";
+
+export interface ViewerActor {
+  kind: ViewerActorKind;
+  /** The conversation the caller named itself with; null for the operator. */
+  conversationId: string | null;
+}
+
+/**
+ * ROTATION AUTHORITY — the one contract, shared by both rotation surfaces (#1402).
+ *
+ * `POST /api/orchestrator/rotate` and the `rotate_orchestrator` MCP tool used to
+ * disagree about the same actor: the route accepted the local caller and performed
+ * the rotation, while the tool — which reaches the rotation only through that
+ * route, forwarding the calling session's own conversation capability — was refused
+ * by `requireOperatorAuthority` as "an agent may not perform it, whatever role it
+ * holds". So the surface agents are told to prefer was the one surface that could
+ * not do it, and the shell fallback was the only working path.
+ *
+ * Nobody ever configured that ban, and the operator's rule is that controls are
+ * CAPABILITY, not prohibition: their word is the trigger, and whoever acts on it
+ * must be able to execute through the first-class tool. So rotation asks who the
+ * caller is and never whether they may — this function BANS NOBODY and cannot
+ * refuse. Its answer is attribution: the rotation record carries the actor kind and
+ * the triggering conversation, so a rotation nobody can be stopped from performing
+ * is still a rotation everybody can see the author of.
+ *
+ * The perimeter is unchanged and is not this function's job: `rejectCrossOrigin`
+ * runs first in the route, exactly as it does for every other authority decision
+ * here. Because the tool holds no second copy of the rule — it posts to the route
+ * and inherits whatever the route decides — the two surfaces cannot drift again.
+ */
+export function rotationActor(request: Pick<NextRequest, "headers">): ViewerActor {
+  const conversationId = callerConversationId(request);
+  return conversationId ? { kind: "agent", conversationId } : { kind: "operator", conversationId: null };
 }
 
 /**

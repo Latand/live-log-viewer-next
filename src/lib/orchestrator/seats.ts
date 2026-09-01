@@ -49,6 +49,26 @@ export interface OrchestratorSeatIntent {
   error: string | null;
 }
 
+/**
+ * WHO triggered the designation this seat came from (#1402).
+ *
+ * Rotation refuses nobody, so this is what answers for it: the record names the
+ * actor kind the request presented, the conversation that named itself (null for
+ * the operator's own browser, which names none), and the seat epoch that caller
+ * held at the time when it was itself a designated seat — which is how a seat
+ * that rotated ITSELF is legible as exactly that, rather than as an anonymous
+ * successor appearing beside a revoked predecessor.
+ *
+ * Absent on every designation made before this existed, and on paths that never
+ * carry an actor; a reader must treat it as unknown provenance, never as "the
+ * operator did it".
+ */
+export interface OrchestratorSeatTrigger {
+  kind: "operator" | "agent";
+  conversationId: string | null;
+  seatEpoch: number | null;
+}
+
 export interface OrchestratorSeat {
   project: string;
   /** Monotonic designation epoch; strictly increases across the whole file. */
@@ -71,6 +91,8 @@ export interface OrchestratorSeat {
       matching revocation carries `successorConversationId`, so the link is
       bidirectional and both cards stay navigable. */
   predecessorConversationId: string | null;
+  /** Who triggered this designation, when the request named an actor. */
+  triggeredBy?: OrchestratorSeatTrigger | null;
   state: "pending" | "active";
   intent: OrchestratorSeatIntent;
   designatedAt: string;
@@ -101,6 +123,9 @@ export interface OrchestratorRevocation {
   revokedAt: string;
   /** The seat that replaced it — the other half of the rotation lineage. */
   successorConversationId?: string | null;
+  /** Who triggered the rotation that ended this seat (#1402), copied from the
+      successor's intent so the lineage entry answers "who did this" on its own. */
+  triggeredBy?: OrchestratorSeatTrigger | null;
 }
 
 interface OrchestratorSeatFile {
@@ -134,6 +159,19 @@ function atomicWriteJson(filePath: string, value: unknown): void {
   fs.renameSync(temp, filePath);
 }
 
+/** A trigger survives the round trip only when it is fully formed; a half-written
+    one is dropped rather than reported as partial provenance. */
+function normalizeSeatTrigger(value: unknown): OrchestratorSeatTrigger | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const trigger = value as Partial<OrchestratorSeatTrigger>;
+  if (trigger.kind !== "operator" && trigger.kind !== "agent") return null;
+  const conversationId = typeof trigger.conversationId === "string" && trigger.conversationId ? trigger.conversationId : null;
+  const seatEpoch = typeof trigger.seatEpoch === "number" && Number.isInteger(trigger.seatEpoch) && trigger.seatEpoch >= 1
+    ? trigger.seatEpoch
+    : null;
+  return { kind: trigger.kind, conversationId, seatEpoch };
+}
+
 function normalizeSeat(value: unknown): OrchestratorSeat | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const seat = value as Partial<OrchestratorSeat>;
@@ -164,6 +202,7 @@ function normalizeSeat(value: unknown): OrchestratorSeat | null {
     mandate: seat.mandate,
     promptVersion: typeof seat.promptVersion === "number" && Number.isInteger(seat.promptVersion) ? seat.promptVersion : null,
     predecessorConversationId: typeof seat.predecessorConversationId === "string" ? seat.predecessorConversationId : null,
+    triggeredBy: normalizeSeatTrigger(seat.triggeredBy),
     state: seat.state,
     intent: {
       clientRequestId: intent.clientRequestId,
@@ -229,6 +268,7 @@ function readOrchestratorSeatFileOrNull(): OrchestratorSeatFile | null {
           seatEpoch: revocation.seatEpoch,
           revokedAt: revocation.revokedAt,
           successorConversationId: typeof revocation.successorConversationId === "string" ? revocation.successorConversationId : null,
+          triggeredBy: normalizeSeatTrigger(revocation.triggeredBy),
         });
       }
     }
@@ -354,6 +394,9 @@ function readOrchestratorSeatMigrationEvidence(): OrchestratorSeatMigrationEvide
       seatEpoch: revocation.seatEpoch,
       revokedAt: revocation.revokedAt,
       successorConversationId: revocation.successorConversationId ?? null,
+      /* Carried, not dropped: this reader's whole point is that a rewrite
+         publishes nothing less than it read. */
+      triggeredBy: normalizeSeatTrigger(revocation.triggeredBy),
     });
   }
   for (const candidate of arrayEvidence(raw.history, "history")) {
@@ -426,6 +469,9 @@ export function beginOrchestratorSeatIntent(input: {
   engine?: string | null;
   model?: string | null;
   promptVersion?: number | null;
+  /** Who triggered this designation, resolved from the request by the caller —
+      never read off a caller-supplied body, so attribution cannot be dictated. */
+  triggeredBy?: OrchestratorSeatTrigger | null;
   now?: string;
 }): BeginSeatIntentResult {
   return withAccountMutationLock(() => {
@@ -475,6 +521,7 @@ export function beginOrchestratorSeatIntent(input: {
       mandate: input.mandate,
       promptVersion: input.promptVersion ?? null,
       predecessorConversationId: null,
+      triggeredBy: input.triggeredBy ?? null,
       state: "pending",
       intent: { clientRequestId: input.clientRequestId, mode: input.mode, launchId: null, error: null },
       designatedAt: input.now ?? new Date().toISOString(),
@@ -529,6 +576,12 @@ export function completeOrchestratorSeatIntent(input: {
         /* Bidirectional lineage: the revocation names its successor, the
            successor seat names its predecessor, and both cards stay navigable. */
         successorConversationId: input.conversationId,
+        /* ...and WHO ended this seat (#1402), carried from the pending intent
+           that the triggering request wrote it on. Reading it off the intent is
+           what keeps the answer truthful for a rotation that settles long after
+           its request returned — an accepted spawn activates from the
+           reconciler, which has no request to ask. */
+        triggeredBy: pending.triggeredBy ?? null,
       };
       file.revocations.push(revoked);
     }

@@ -6,7 +6,7 @@ import { validExplicitProject } from "@/lib/accounts/migration/contracts";
 import { agentRegistry, identityMaterializationFence } from "@/lib/agent/registry";
 import { ensureOperatorSpawnCapability } from "@/lib/agent/operatorCapability";
 import { defaultModelFor } from "@/lib/agent/models";
-import { internalServiceHeaders } from "@/lib/agent/operatorAuthority";
+import { internalServiceHeaders, rotationActor, type ViewerActor } from "@/lib/agent/operatorAuthority";
 import { VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/spawnPolicy";
 import { deliverConversationMessage } from "@/lib/delivery";
 import { structuredHostsEnabled } from "@/lib/runtime/flags";
@@ -31,6 +31,7 @@ import {
 } from "./handoffDigest";
 import { orchestratorMandateForDelivery } from "./prompt";
 import {
+  activeOrchestratorSeats,
   beginOrchestratorSeatIntent,
   completeOrchestratorSeatIntent,
   failOrchestratorSeatIntent,
@@ -38,6 +39,7 @@ import {
   orchestratorSeatFor,
   repairOrchestratorSeatRuntimeIdentity,
   type OrchestratorSeat,
+  type OrchestratorSeatTrigger,
 } from "./seats";
 
 /* The one confirm behind the board draft's Orchestrator role: DESIGNATE this
@@ -159,10 +161,13 @@ function resolveOrchestratorCwd(project: string, requested: unknown): string | n
 
 async function postSpawnInProcess(body: Record<string, unknown>): Promise<{ status: number; body: Record<string, unknown> }> {
   const { executeSpawnRequest } = await import("@/lib/agent/spawnCommand");
-  /* An in-process call on the operator's behalf: the seat route has already
-     verified same-origin operator authority, so this presents the operator
-     spawn capability — the same lane the MCP server's spawn_agent uses. Only
-     `headers` and `json` are read by the spawn command. */
+  /* An in-process call the VIEWER makes, on its own authority: the designation
+     surfaces have already made their authority decision — the seat route by
+     refusing an agent, the rotation route by naming one (#1402) — so this
+     presents the operator spawn capability either way, the same lane the MCP
+     server's spawn_agent uses. Who triggered the designation travels on the
+     seat record, not on this spawn. Only `headers` and `json` are read by the
+     spawn command. */
   const request = {
     headers: new Headers({
       host: "127.0.0.1",
@@ -450,6 +455,10 @@ function reconcilePendingSeatIntent(project: string, dependencies: SeatCommandDe
 export async function executeOrchestratorSeatRequest(
   rawBody: Record<string, unknown>,
   dependencies: SeatCommandDependencies = productionSeatCommandDependencies,
+  /* Who triggered this designation, resolved from the REQUEST by the caller.
+     Deliberately not a `rawBody` field: the body is caller-supplied JSON, and
+     attribution that a caller can write is not attribution. */
+  triggeredBy: OrchestratorSeatTrigger | null = null,
 ): Promise<SeatCommandResult> {
   const namedProject = typeof rawBody.project === "string" ? validExplicitProject(rawBody.project) : null;
   if (!namedProject) return { status: 400, body: { error: "project must be a valid project key" } };
@@ -523,6 +532,7 @@ export async function executeOrchestratorSeatRequest(
       engine: target.engine ?? null,
       model: target.model ?? null,
       promptVersion,
+      triggeredBy,
       now: dependencies.now(),
     });
     if (begun.kind === "completed") {
@@ -623,6 +633,7 @@ export async function executeOrchestratorSeatRequest(
     engine: resolvedRuntime.value.config.engine,
     model: resolvedRuntime.value.config.model,
     promptVersion,
+    triggeredBy,
     now: dependencies.now(),
   });
   if (begun.kind === "completed") {
@@ -725,6 +736,36 @@ const HANDOFF_TASK_TEXT_CAP = 140;
 const HANDOFF_NOTES_CAP = 2_000;
 
 /**
+ * THE shared entry point for `POST /api/orchestrator/rotate` (#1402).
+ *
+ * The route is a Next module and may export only route fields, so the two steps
+ * that decide a rotation live here instead: resolve WHO is asking with the one
+ * rotation authority contract, and rotate. The `rotate_orchestrator` MCP tool
+ * posts to that route and holds no copy of either step, so the tool's answer is
+ * the route's answer by construction — for the actor it accepts and for every
+ * refusal the rotation itself makes.
+ *
+ * Cross-origin rejection stays in the route, ahead of this: it is the perimeter,
+ * and it is the only thing here that turns a caller away.
+ */
+export function handleOrchestratorRotationRequest(
+  request: Pick<NextRequest, "headers">,
+  rawBody: Record<string, unknown>,
+  dependencies: SeatCommandDependencies = productionSeatCommandDependencies,
+): Promise<SeatCommandResult> {
+  return executeOrchestratorRotation(rawBody, dependencies, rotationActor(request));
+}
+
+/** The caller's own seat epoch, when the caller IS a designated seat — which is
+    what tells a self-rotation apart from a rotation ordered from elsewhere. */
+function rotationTrigger(actor: ViewerActor): OrchestratorSeatTrigger {
+  const seat = actor.conversationId
+    ? activeOrchestratorSeats().find((candidate) => candidate.conversationId === actor.conversationId)
+    : undefined;
+  return { kind: actor.kind, conversationId: actor.conversationId, seatEpoch: seat?.seatEpoch ?? null };
+}
+
+/**
  * Rotation (two-axis contract): hand the seat to a fresh successor.
  *
  * The handoff is BOUNDED and durable-state-based: the successor's launch
@@ -748,7 +789,13 @@ const HANDOFF_NOTES_CAP = 2_000;
 export async function executeOrchestratorRotation(
   rawBody: Record<string, unknown>,
   dependencies: SeatCommandDependencies = productionSeatCommandDependencies,
+  /* WHO ordered this rotation. Never a refusal — rotation bans nobody — and
+     never read off `rawBody`, so nothing a caller writes can claim to be
+     someone else. Null is an in-process caller that named nobody, and records
+     unknown provenance rather than crediting the operator with it. */
+  actor: ViewerActor | null = null,
 ): Promise<SeatCommandResult> {
+  const triggeredBy = actor ? rotationTrigger(actor) : null;
   const namedProject = typeof rawBody.project === "string" ? validExplicitProject(rawBody.project) : null;
   if (!namedProject) return { status: 400, body: { error: "project must be a valid project key" } };
   const project = canonicalOrchestratorProject(namedProject);
@@ -812,9 +859,9 @@ export async function executeOrchestratorRotation(
   const current = orchestratorSeatFor(project).active;
   if (!current || current.conversationId !== incumbent.conversationId || current.seatEpoch !== incumbent.seatEpoch) {
     const conflict = incumbentChangedResult(project, incumbent.seatEpoch, current);
-    return { status: conflict.status, body: { ...conflict.body, rotatedFrom } };
+    return { status: conflict.status, body: { ...conflict.body, rotatedFrom, triggeredBy } };
   }
-  if (composed.kind === "too_large") return { status: 413, body: { ...composed.body, rotatedFrom } };
+  if (composed.kind === "too_large") return { status: 413, body: { ...composed.body, rotatedFrom, triggeredBy } };
 
   const outcome = await executeOrchestratorSeatRequest({
     project,
@@ -842,12 +889,16 @@ export async function executeOrchestratorRotation(
         ? { cwd: predecessor.cwd }
         : {}),
     ...(rawBody.accountId !== undefined ? { accountId: rawBody.accountId } : {}),
-  }, dependencies);
+  }, dependencies, triggeredBy);
   return {
     status: outcome.status,
     body: {
       ...outcome.body,
       rotatedFrom,
+      /* Who ordered it, on the answer as well as on the durable record: the
+         caller that just rotated a seat reads back the attribution it was
+         recorded under rather than having to trust that one was written. */
+      triggeredBy,
       ...(composed.handoff ? { handoff: composed.handoff } : {}),
     },
   };
