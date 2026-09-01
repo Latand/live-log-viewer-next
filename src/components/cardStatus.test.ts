@@ -134,20 +134,29 @@ test("issue 1397: the WORKING badge times the starting window from the launch ad
   const starting = file({ path: "spawn:launch_1397", conversationId, activity: "live", spawn });
   expect(cardStatus(starting, NOW_MS)).toEqual({ kind: "running", elapsedSeconds: 45 });
 
-  /* The first record lands eight seconds after admission and opens the turn:
-     the badge keeps counting from the admission; 52 would be the record's own count. */
-  const adopted = file({
+  /* The first record lands eight seconds after admission and opens the turn,
+     and the agent answers within the same poll: the scanned row that replaces
+     the placeholder in ONE render already carries the assistant evidence and
+     no launch facts at all (the projection retired the chips on it). The badge
+     keeps counting from the admission; 52 would be the record's own count. */
+  const answered = file({
     path: "/sessions/launch-1397.jsonl",
     conversationId,
     activity: "live",
     lastTurn: { startedAt: recordAt, endedAt: null },
+    lastAssistantMessageAt: recordAt + 6_000,
+  });
+  expect(cardStatus(answered, NOW_MS + 15_000)).toEqual({ kind: "running", elapsedSeconds: 60 });
+  expect(cardStatus(answered, NOW_MS + 25_000)).toEqual({ kind: "running", elapsedSeconds: 70 });
+
+  /* A poll that still carries the launch facts on the same open turn is the
+     same work: still the admission. */
+  const adopted = file({
+    ...answered,
+    lastAssistantMessageAt: null,
     launch: { ...spawn, state: "recovered", initialMessage: "delivered", deliveredAt: recordAt },
   });
-  expect(cardStatus(adopted, NOW_MS + 15_000)).toEqual({ kind: "running", elapsedSeconds: 60 });
-
-  /* Chips retired on the first assistant message, same open turn. */
-  const answered = file({ path: "/sessions/launch-1397.jsonl", conversationId, activity: "live", lastTurn: { startedAt: recordAt, endedAt: null } });
-  expect(cardStatus(answered, NOW_MS + 25_000)).toEqual({ kind: "running", elapsedSeconds: 70 });
+  expect(cardStatus(adopted, NOW_MS + 30_000)).toEqual({ kind: "running", elapsedSeconds: 75 });
 
   /* The turn ends and a later one opens: new work, its own start. */
   expect(cardStatus(file({ path: "/sessions/launch-1397.jsonl", conversationId, activity: "recent", lastTurn: { startedAt: recordAt, endedAt: NOW_MS + 100_000 } }), NOW_MS + 100_000)).toBeNull();
@@ -156,5 +165,5 @@ test("issue 1397: the WORKING badge times the starting window from the launch ad
 
   /* A window that never saw the starting window reads the transcript anchor. */
   resetWorkingSinceForTests();
-  expect(cardStatus(adopted, NOW_MS + 15_000)).toEqual({ kind: "running", elapsedSeconds: 52 });
+  expect(cardStatus(answered, NOW_MS + 15_000)).toEqual({ kind: "running", elapsedSeconds: 52 });
 });

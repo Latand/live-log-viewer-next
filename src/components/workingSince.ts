@@ -23,10 +23,11 @@ import { turnIsRunning } from "./turnDuration";
  * It must not: a window remembers the anchor it already counted from, per
  * conversation, for as long as the same work is pending — through the record
  * landing, the board flipping the placeholder to the scanned row, and the
- * launch chips retiring on the first assistant message — and the display only
- * ever moves earlier. A finished turn forgets it; the next turn is new work and
- * counts from its own start. A fresh window that never saw the starting window
- * simply counts from the transcript anchor.
+ * launch chips retiring on the first assistant message, which commonly all
+ * arrive in the one poll — and the display only ever moves earlier. A finished
+ * turn forgets it; the next turn is new work and counts from its own start. A
+ * fresh window that never saw the starting window simply counts from the
+ * transcript anchor.
  */
 export type WorkingSinceFile = Pick<FileEntry, "lastTurn" | "activity">
   & Partial<Pick<FileEntry, "path" | "conversationId" | "spawn" | "launch">>;
@@ -60,13 +61,18 @@ export function workingSince(file: WorkingSinceFile): number | null {
   const launch = file.spawn ?? file.launch ?? null;
   const observed = turnStartedAt ?? earliest([launch?.admittedAt, launch?.promptAt, launch?.deliveredAt]);
   const remembered = key ? anchors.get(key) : undefined;
-  const samePendingWork = remembered !== undefined && (
-    remembered.turnStartedAt === turnStartedAt
-    /* The transcript anchor appeared for work this window was already timing:
-       the launch still rides the window unanswered, so the turn that opened is
-       the launch's own first turn. */
-    || (remembered.turnStartedAt === null && launch !== null)
-  );
+  /* The same pending work: the same open transcript turn, or the first turn
+     to open after a starting window this window was already timing. A memory
+     bound to no turn can only have come from a launch anchor, so the turn that
+     opens on it is that launch's own first turn — whether or not the launch
+     facts still ride the row. They usually do not: the projection retires
+     them the moment the agent's first visible reply lands, and in real
+     rollouts that reply follows the first record inside the same board poll,
+     so the first scanned row a window sees carries the transcript turn and no
+     launch at all. A finished turn already forgot the memory, so a later turn
+     never inherits it. */
+  const samePendingWork = remembered !== undefined
+    && (remembered.turnStartedAt === turnStartedAt || remembered.turnStartedAt === null);
   const since = samePendingWork ? earliest([observed, remembered.since]) : observed;
   if (since === null) {
     if (key) anchors.delete(key);

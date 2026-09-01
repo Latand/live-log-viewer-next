@@ -31,7 +31,7 @@ afterEach(() => {
 });
 
 type StatusFile = Pick<FileEntry, "lastTurn" | "activity" | "mtime" | "pendingQuestion" | "waitingInput" | "rateLimit">
-  & Partial<Pick<FileEntry, "path" | "conversationId" | "spawn" | "launch">>;
+  & Partial<Pick<FileEntry, "path" | "conversationId" | "spawn" | "launch" | "lastAssistantMessageAt">>;
 
 const file = (
   lastTurn: FileEntry["lastTurn"],
@@ -236,22 +236,29 @@ test("issue 1397: the starting window times working… from the launch admission
     expect(container.querySelector('[data-turn-status="running"]')?.textContent).toContain("working…");
     expect(timer()?.textContent).toBe("45s");
 
-    /* The record lands and the board flips to the scanned row whose open turn
-       starts at the record: the counter keeps counting from the admission. */
+    /* The record lands, the agent answers within the same poll, and the board
+       flips the placeholder to the scanned row in ONE render: its open turn
+       starts at the record, it carries the assistant evidence, and the
+       projection has already retired the launch facts on it. The counter keeps
+       counting from the admission — never the record's own 52s. */
     setSystemTime(new Date(admittedAt + 60_000));
     render({
       ...file({ startedAt: recordAt, endedAt: null }, "live"),
       path: "/sessions/launch-1397.jsonl",
       conversationId,
-      launch: { ...spawn, state: "recovered", initialMessage: "delivered", deliveredAt: recordAt },
+      lastAssistantMessageAt: recordAt + 6_000,
     }, container);
     flushSync(() => tick!());
     expect(timer()?.textContent).toBe("1m");
 
-    /* The launch chips retire on the first assistant message, same open turn:
-       still the admission, no jump. */
+    /* Ticking on, same open turn: still the admission, no jump. */
     setSystemTime(new Date(admittedAt + 70_000));
-    render({ ...file({ startedAt: recordAt, endedAt: null }, "live"), path: "/sessions/launch-1397.jsonl", conversationId }, container);
+    render({
+      ...file({ startedAt: recordAt, endedAt: null }, "live"),
+      path: "/sessions/launch-1397.jsonl",
+      conversationId,
+      lastAssistantMessageAt: recordAt + 6_000,
+    }, container);
     flushSync(() => tick!());
     expect(timer()?.textContent).toBe("1m 10s");
 
@@ -262,6 +269,64 @@ test("issue 1397: the starting window times working… from the launch admission
     setSystemTime(new Date(admittedAt + 305_000));
     render({ ...file({ startedAt: admittedAt + 300_000, endedAt: null }, "live"), path: "/sessions/launch-1397.jsonl", conversationId }, container);
     expect(timer()?.textContent).toBe("5s");
+  } finally {
+    globalThis.setInterval = realSet;
+  }
+});
+
+test("issue 1397: a poll that still carries the launch chips on the open turn is the same work", () => {
+  const realSet = globalThis.setInterval;
+  let tick: (() => void) | null = null;
+  // @ts-expect-error test double
+  globalThis.setInterval = (fn: () => void) => {
+    tick = fn;
+    return 1;
+  };
+  try {
+    const admittedAt = Date.parse("2026-09-01T09:00:00.000Z");
+    const recordAt = admittedAt + 8_000;
+    const conversationId = "conversation_1397_chips";
+    const spawn: NonNullable<FileEntry["spawn"]> = {
+      launchId: "launch_1397_chips",
+      clientAttemptId: null,
+      accountId: null,
+      conversationId,
+      generation: 1,
+      state: "reconciling",
+      initialMessage: "queued",
+      retrySafe: false,
+      error: null,
+      admittedAt,
+    };
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const timer = () => container.querySelector('[data-turn-status="running"] [role="timer"]');
+    setSystemTime(new Date(admittedAt + 45_000));
+    render({ ...file(null, "live"), path: "spawn:launch_1397_chips", conversationId, spawn }, container);
+    expect(timer()?.textContent).toBe("45s");
+
+    /* The board caught the scanned row before the agent answered: the launch
+       still rides it as chips. */
+    setSystemTime(new Date(admittedAt + 60_000));
+    render({
+      ...file({ startedAt: recordAt, endedAt: null }, "live"),
+      path: "/sessions/launch-1397-chips.jsonl",
+      conversationId,
+      launch: { ...spawn, state: "recovered", initialMessage: "delivered", deliveredAt: recordAt },
+    }, container);
+    flushSync(() => tick!());
+    expect(timer()?.textContent).toBe("1m");
+
+    /* Then the chips retire on the first assistant message, same open turn. */
+    setSystemTime(new Date(admittedAt + 70_000));
+    render({
+      ...file({ startedAt: recordAt, endedAt: null }, "live"),
+      path: "/sessions/launch-1397-chips.jsonl",
+      conversationId,
+      lastAssistantMessageAt: recordAt + 15_000,
+    }, container);
+    flushSync(() => tick!());
+    expect(timer()?.textContent).toBe("1m 10s");
   } finally {
     globalThis.setInterval = realSet;
   }

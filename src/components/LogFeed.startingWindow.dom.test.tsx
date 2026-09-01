@@ -110,6 +110,11 @@ const RECORD_AT = T0 + 8_000;
 const PROMPT = "You are the Builder.\n\nPinned task: the starting window renders the stage prompt exactly once.";
 const INTERNAL = "<!-- llv:structured-user origin=agent sender=builder -->\n" + PROMPT;
 
+/* The agent's first visible reply, six seconds after the prompt landed: the
+   scanner's assistant evidence, on which the projection retires the launch
+   facts while the turn is still open. */
+const ANSWER_AT = RECORD_AT + 6_000;
+
 /* The rollout journals the stage prompt twice: the persisted user item and
    the 0.151 thread lifecycle's item_completed echo of the very same item. */
 const transcriptRecords = [
@@ -134,6 +139,14 @@ const transcriptRecords = [
       started_at_ms: RECORD_AT + 176,
       completed_at_ms: RECORD_AT + 176,
     },
+  }),
+];
+const answeredRecords = [
+  ...transcriptRecords,
+  JSON.stringify({
+    timestamp: new Date(ANSWER_AT).toISOString(),
+    type: "response_item",
+    payload: { type: "message", id: "item_assistant_starting_window", role: "assistant", phase: "commentary", content: [{ type: "output_text", text: "Reading the pipeline spec first." }] },
   }),
 ];
 
@@ -220,8 +233,28 @@ function placeholder(conversationId: string, launchId: string): FileEntry {
   } as FileEntry;
 }
 
-/** The scanned transcript row that adopts the launch: the first user record
-    opened a turn, the delivery receipt settled, the launch rides as chips. */
+/** The scanned transcript row the board most often shows first (the agent's
+    first reply follows the first record within one poll): the first user
+    record opened a turn, the assistant evidence is on the row, and the
+    projection has already retired every launch fact from it — no chips, no
+    admission instant, only the transcript. */
+function answered(conversationId: string, launchId: string): FileEntry {
+  const { spawn: _spawn, ...rest } = placeholder(conversationId, launchId);
+  return {
+    ...rest,
+    path: `/sessions/${launchId}.jsonl`,
+    name: `${launchId}.jsonl`,
+    mtime: ANSWER_AT / 1000,
+    size: 3,
+    activityReason: "jsonl_turn_open",
+    lastTurn: { startedAt: RECORD_AT, endedAt: null },
+    lastAssistantMessageAt: ANSWER_AT,
+  } as FileEntry;
+}
+
+/** The scanned transcript row caught before the agent answered: the first
+    user record opened a turn, the delivery receipt settled, the launch still
+    rides as chips. */
 function adopted(conversationId: string, launchId: string): FileEntry {
   const { spawn: _spawn, ...rest } = placeholder(conversationId, launchId);
   return {
@@ -335,6 +368,13 @@ test("issue 1398: the stage's INTERNAL prompt renders exactly once before and af
   rerender(root, adopted(conversationId, launchId));
   expect(host.querySelectorAll('[data-feed-kind="tmsg"]')).toHaveLength(1);
   expect(promptRenderings(host)).toBe(1);
+
+  /* The agent answers and the launch facts retire from the row: still one. */
+  tailLines = answeredRecords;
+  now = T0 + 70_000;
+  rerender(root, answered(conversationId, launchId));
+  expect(host.querySelectorAll('[data-feed-kind="tmsg"]')).toHaveLength(1);
+  expect(promptRenderings(host)).toBe(1);
 });
 
 test("issue 1397: working… carries the elapsed time from the launch admission and never runs backwards", () => {
@@ -351,12 +391,16 @@ test("issue 1397: working… carries the elapsed time from the launch admission 
   expect(headerBadge(host)).toContain("working");
   expect(headerBadge(host)).toContain("45s");
 
-  /* The first transcript record lands eight seconds after the admission and
-     the board flips to the scanned row whose open turn starts THERE: the
-     counter keeps counting from the admission. */
-  tailLines = transcriptRecords;
+  /* The first transcript record lands eight seconds after the admission, the
+     agent answers within the same poll, and the board flips the placeholder
+     to the scanned row in ONE render: its open turn starts at the record, it
+     carries the assistant evidence, and the projection has already retired
+     every launch fact from it. The counter keeps counting from the admission
+     — never the record's own 52s. */
+  tailLines = answeredRecords;
   now = T0 + 60_000;
-  rerender(root, adopted(conversationId, launchId));
+  rerender(root, answered(conversationId, launchId));
+  expect(host.querySelector("[data-launch-chips]")).toBeNull();
   expect(footerTimer(host)).toBe("1m");
   expect(footerTimer(host)).not.toBe("52s");
   expect(headerBadge(host)).toContain("1m");
@@ -364,7 +408,33 @@ test("issue 1397: working… carries the elapsed time from the launch admission 
 
   /* Ticking on, still from the admission. */
   now = T0 + 61_000;
-  rerender(root, adopted(conversationId, launchId));
+  rerender(root, answered(conversationId, launchId));
   expect(footerTimer(host)).toBe("1m 1s");
   expect(headerBadge(host)).toContain("1m 1s");
+});
+
+test("issue 1397: a poll that still carries the launch chips on the open turn is the same work, and its retirement is no jump either", () => {
+  const conversationId = "conversation_elapsed_chips";
+  const launchId = "launch_elapsed_chips";
+  now = T0 + 45_000;
+  const { host, root } = render(placeholder(conversationId, launchId));
+  expect(footerTimer(host)).toBe("45s");
+  expect(headerBadge(host)).toContain("45s");
+
+  /* The board caught the scanned row before the agent answered: the launch
+     still rides it as chips, the open turn starts at the record. */
+  tailLines = transcriptRecords;
+  now = T0 + 53_000;
+  rerender(root, adopted(conversationId, launchId));
+  expect(host.querySelector("[data-launch-chips]")).not.toBeNull();
+  expect(footerTimer(host)).toBe("53s");
+  expect(headerBadge(host)).toContain("53s");
+
+  /* The agent answers and the chips retire, same open turn: still the admission. */
+  tailLines = answeredRecords;
+  now = T0 + 60_000;
+  rerender(root, answered(conversationId, launchId));
+  expect(host.querySelector("[data-launch-chips]")).toBeNull();
+  expect(footerTimer(host)).toBe("1m");
+  expect(headerBadge(host)).toContain("1m");
 });
