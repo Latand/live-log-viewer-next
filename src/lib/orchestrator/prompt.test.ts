@@ -88,8 +88,49 @@ test("bridge reports survive as the second channel, for the operator away from t
 
 /* Seats record the mandate version they were spawned on; `get_orchestrator` reports
    this constant as defaultPromptVersion, so an older seat reads as stale without a diff. */
-test("the default mandate is at version 12", () => {
-  expect(ORCHESTRATOR_PROMPT_VERSION).toBe(12);
+test("the default mandate is at version 13", () => {
+  expect(ORCHESTRATOR_PROMPT_VERSION).toBe(13);
+});
+
+/* #1428 v13 — agents kept re-solving what an earlier conversation had already
+   solved. The index over every message of every transcript existed, and no
+   prompt told a seat to look. The mandate now says when to search, how many
+   phrasings, in which scope order, how to read a hit, and what to do with an
+   old answer. */
+test("the mandate tells the seat to search prior conversations before deciding", () => {
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("## Search prior conversations before deciding");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("search_transcripts");
+  /* Both triggers: the start of real work, and any problem that appears later. */
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("start of any non-trivial task");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("whenever a problem, failure or unknown appears");
+  /* Several phrasings, and named ones — one query on the error text misses the
+     conversation that called the same thing by its subsystem. */
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("3 to 5");
+  for (const phrasing of ["the error text", "the subsystem", "the symptom", "the file or tool"]) {
+    expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain(phrasing);
+  }
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("scoped to the project first, then unscoped");
+  /* A snippet is not a reading: the surrounding turns come through conversation_messages. */
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("conversation_messages");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("transcript path and byte offset");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("before choosing an approach");
+  /* The result is written down either way, so a reader of the plan knows the
+     search happened. */
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("title and date");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("nothing relevant existed");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("current main");
+});
+
+/* The acceptance shape in #1428: a seat handed a problem searches before it
+   composes a pipeline. The mandate is read top to bottom, so the search section
+   precedes the section that starts work by default. */
+test("the search-first section precedes the start-by-default pipeline contract", () => {
+  const search = ORCHESTRATOR_SYSTEM_PROMPT.indexOf("## Search prior conversations before deciding");
+  const start = ORCHESTRATOR_SYSTEM_PROMPT.indexOf("## Start-by-default pipeline contract");
+  expect(search).toBeGreaterThan(-1);
+  expect(start).toBeGreaterThan(search);
+  /* Searching changes what the seat looks at, never whether work starts. */
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("put the work in motion without a confirmation step or draft");
 });
 
 /* #1301 — the fences list the viewer surfaces a seat may use, and a seat that
