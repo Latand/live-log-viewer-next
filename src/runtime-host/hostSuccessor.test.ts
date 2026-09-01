@@ -154,6 +154,34 @@ const predecessorInspect = JSON.stringify([{
   },
 }]);
 
+function completedSuccessorInspection(
+  intent: RuntimeHostHandoffIntent,
+  healthStatus: "healthy" | "unhealthy" = "healthy",
+): string {
+  return JSON.stringify([{
+    Id: "completed-successor-id",
+    RestartCount: 0,
+    State: {
+      Status: "running",
+      Running: true,
+      Restarting: false,
+      Health: { Status: healthStatus },
+    },
+    Config: {
+      Image: intent.image,
+      Labels: {
+        [RUNTIME_HOST_SUCCESSOR_LABEL]: "1",
+        "dev.live-log-viewer.revision": intent.revision,
+      },
+      Env: [
+        `${RUNTIME_HOST_IMAGE_ENV}=${intent.image}`,
+        `${RUNTIME_HOST_REVISION_ENV}=${intent.revision}`,
+        `${RUNTIME_HOST_CONTAINER_ENV}=${intent.successorContainer}`,
+      ],
+    },
+  }]);
+}
+
 interface Harness {
   ports: RuntimeHostSuccessorPorts;
   calls: string[][];
@@ -167,6 +195,7 @@ interface Harness {
 function harness(overrides: {
   fenceOwnerPid?: number | null;
   handoffIntent?: RuntimeHostHandoffIntent;
+  completedHandoffIntentInspection?: string;
   runFailure?: Error;
   runConflict?: boolean;
   readIntentFailure?: Error;
@@ -224,6 +253,12 @@ function harness(overrides: {
       if (argv[0] === "container" && argv[1] === "ls") return "abc123\n";
       if (argv[0] === "container" && argv[1] === "inspect" && argv[2] === "abc123") {
         return overrides.predecessorInspect ?? predecessorInspect;
+      }
+      if (argv[0] === "container"
+        && argv[1] === "inspect"
+        && argv[2] === overrides.handoffIntent?.successorContainer
+        && overrides.completedHandoffIntentInspection) {
+        return overrides.completedHandoffIntentInspection;
       }
       if (argv[0] === "container" && argv[1] === "start" && overrides.startFailure) throw overrides.startFailure;
       if (argv[0] === "run") {
@@ -833,16 +868,68 @@ test("issue 521 review: a foreign durable intent blocks staging before Docker mu
     recordedAt: "2026-07-21T08:00:00.000Z",
   };
   const originalBytes = JSON.stringify(existingIntent);
-  const { ports, calls, events, records, intents, storedIntent } = harness({ handoffIntent: existingIntent });
+  const { ports, calls, events, records, intents, storedIntent } = harness({
+    handoffIntent: existingIntent,
+    completedHandoffIntentInspection: completedSuccessorInspection(existingIntent, "unhealthy"),
+  });
 
   await expect(stageRuntimeHostSuccessorContainer(candidate, "agent-log-viewer:node22", ports))
     .rejects.toThrow("runtime-host handoff intent is owned by another generation");
 
-  expect(calls).toEqual([]);
-  expect(events).toEqual([]);
+  expect(calls).toEqual([["container", "inspect", existingIntent.successorContainer]]);
+  expect(events).toEqual([`docker:container inspect ${existingIntent.successorContainer}`]);
   expect(records).toEqual([]);
   expect(intents).toEqual([]);
   expect(JSON.stringify(storedIntent())).toBe(originalBytes);
+});
+
+test("issue 1412: an intent left by a completed handoff does not block the next deployment", async () => {
+  const completedIntent: RuntimeHostHandoffIntent = {
+    revision: "a".repeat(40),
+    image: `agent-log-viewer:deploy-${"a".repeat(40)}-cafe`,
+    successorContainer: "llv-runtime-host-completed-successor",
+    predecessorId: "completed-predecessor",
+    recordedAt: "2026-09-01T08:00:00.000Z",
+  };
+  const { ports, calls, events, records, storedIntent } = harness({
+    handoffIntent: completedIntent,
+    completedHandoffIntentInspection: completedSuccessorInspection(completedIntent),
+  });
+
+  const staged = await stageRuntimeHostSuccessorContainer(candidate, "agent-log-viewer:node22", ports);
+
+  expect(staged.successorContainer).toBe(runtimeHostSuccessorName(candidate.revision, candidate.image));
+  expect(calls[0]).toEqual(["container", "inspect", completedIntent.successorContainer]);
+  expect(events.indexOf("clear-handoff-intent")).toBeLessThan(events.indexOf("write-handoff-intent"));
+  expect(storedIntent()).toMatchObject({
+    revision: candidate.revision,
+    image: candidate.image,
+    successorContainer: staged.successorContainer,
+  });
+  expect(records).toHaveLength(1);
+});
+
+test("issue 1412: an exact-match intent still resumes without fence-owner predecessor discovery", async () => {
+  const successorContainer = runtimeHostSuccessorName(candidate.revision, candidate.image);
+  const exactIntent: RuntimeHostHandoffIntent = {
+    revision: candidate.revision,
+    image: candidate.image,
+    successorContainer,
+    predecessorId: "abc123",
+    recordedAt: "2026-09-01T08:00:00.000Z",
+  };
+  const originalBytes = JSON.stringify(exactIntent);
+  const { ports, calls, events, records, storedIntent } = harness({ handoffIntent: exactIntent });
+
+  const staged = await stageRuntimeHostSuccessorContainer(candidate, "agent-log-viewer:node22", ports);
+
+  expect(staged).toEqual({ successorContainer });
+  expect(calls.some((argv) => argv[0] === "container" && argv[1] === "ls")).toBe(false);
+  expect(calls.some((argv) => argv[0] === "run")).toBe(false);
+  expect(calls).toContainEqual(["container", "start", successorContainer]);
+  expect(events).not.toContain("clear-handoff-intent");
+  expect(JSON.stringify(storedIntent())).toBe(originalBytes);
+  expect(records).toHaveLength(1);
 });
 
 test("issue 521 review: reboot recovery before durable intent retains the original predecessor", async () => {

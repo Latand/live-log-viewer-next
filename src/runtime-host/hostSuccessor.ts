@@ -74,6 +74,8 @@ export interface RuntimeHostGenerationIdentity {
   container: string;
 }
 
+type RuntimeHostSuccessorGeneration = Pick<ViewerReleaseIdentity, "image" | "revision">;
+
 /** How the staged successor waits for the singleton fence at boot (#1216).
     `handoff-budget` is the #518 deployment case: the predecessor has been
     asked to exit, so a bound on the wait is the detector for a hand-over that
@@ -292,7 +294,7 @@ function successorStartIdentity(raw: string): SuccessorStartIdentity {
 function successorMatchesGeneration(
   raw: string,
   name: string,
-  candidate: ViewerReleaseIdentity,
+  candidate: RuntimeHostSuccessorGeneration,
   options: RuntimeHostSuccessorOptions,
 ): boolean {
   const inspected = JSON.parse(raw) as Array<Record<string, unknown>>;
@@ -327,7 +329,7 @@ function encodedPredecessorId(raw: string, successorName: string): string | null
 function successorIsReady(
   raw: string,
   name: string,
-  candidate: ViewerReleaseIdentity,
+  candidate: RuntimeHostSuccessorGeneration,
   options: RuntimeHostSuccessorOptions,
 ): boolean {
   const inspected = JSON.parse(raw) as Array<Record<string, unknown>>;
@@ -336,6 +338,37 @@ function successorIsReady(
     && state.Status === "running"
     && state.Running === true
     && state.Restarting !== true;
+}
+
+/** A foreign intent can be retired only with generation-matched health proof
+    from its named successor. The container health check performs a framed
+    runtime-host probe for that generation, so `healthy` also proves the
+    successor acquired the singleton fence and is serving. */
+function successorCompletedHandoff(raw: string, intent: RuntimeHostHandoffIntent): boolean {
+  const inspected = JSON.parse(raw) as Array<Record<string, unknown>>;
+  const state = (inspected[0]?.State ?? {}) as Record<string, unknown>;
+  const health = (state.Health ?? {}) as Record<string, unknown>;
+  return successorIsReady(raw, intent.successorContainer, intent, {})
+    && health.Status === "healthy";
+}
+
+async function clearCompletedHandoffIntent(
+  intent: RuntimeHostHandoffIntent,
+  ports: RuntimeHostSuccessorPorts,
+): Promise<boolean> {
+  let inspection: string;
+  try {
+    inspection = await ports.docker(["container", "inspect", intent.successorContainer]);
+  } catch {
+    return false;
+  }
+  try {
+    if (!successorCompletedHandoff(inspection, intent)) return false;
+  } catch {
+    return false;
+  }
+  ports.clearHandoffIntent();
+  return true;
 }
 
 /** What the stability gate actually saw, appended to every gate failure so a
@@ -499,7 +532,11 @@ export async function stageRuntimeHostSuccessorContainer(
     && intent.image === candidate.image
     && intent.successorContainer === name;
   if (intent && !exactIntent) {
-    throw new Error("runtime-host handoff intent is owned by another generation");
+    phase("checking whether the recorded runtime-host handoff already completed");
+    if (!await clearCompletedHandoffIntent(intent, ports)) {
+      throw new Error("runtime-host handoff intent is owned by another generation");
+    }
+    phase("cleared the completed runtime-host handoff intent");
   }
   phase("tagging the runtime-host successor image");
   await ports.docker(["image", "inspect", candidate.image]);
