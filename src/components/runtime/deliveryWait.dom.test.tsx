@@ -192,13 +192,15 @@ test("#1213 an admitted message waiting for a turn boundary says so, with the el
 });
 
 test("#1213 a delivery unconfirmed past the bound is terminal and explains itself", () => {
+  const actions: string[] = [];
   const view = mount(
     <RuntimeComposerReceipts
       receipts={[receipt({ status: "queued" })]}
       nowMs={at(PAST_BOUND_MS)}
       session={BUSY}
-      onRetry={noop}
+      onRetry={(_receipt, mode) => actions.push(`retry:${mode}`)}
       onEdit={noop}
+      onDiscard={() => actions.push("discard")}
     />,
   );
   const details = open(view.host);
@@ -215,10 +217,37 @@ test("#1213 a delivery unconfirmed past the bound is terminal and explains itsel
   /* Nothing on this row implies the message is still moving. */
   expect(details.querySelector(".animate-pulse")).toBeNull();
   expect(details.querySelector(".animate-spin")).toBeNull();
-  /* And it offers no control of its own: the only exit that could act on the
-     parked operation abandoned it and minted a replacement, which is how the
-     same message reaches the agent twice. */
-  expect(buttonLabels(details)).not.toContain(t("runtime.receipt.retry"));
+  const retry = details.querySelector("[data-receipt-uncertain-retry]") as HTMLButtonElement;
+  const discard = details.querySelector("[data-receipt-discard]") as HTMLButtonElement;
+  expect(buttonLabels(details)).toContain(t("runtime.receipt.retry"));
+  expect(buttonLabels(details)).toContain(t("runtime.receipt.discard"));
+  retry.click();
+  discard.click();
+  expect(actions).toEqual(["retry:uncertain", "discard"]);
+  view.cleanup();
+});
+
+test("#1226 a settled unknown-fate receipt keeps the explicit same-identity retry action", () => {
+  const actions: string[] = [];
+  const view = mount(
+    <RuntimeComposerReceipts
+      receipts={[receipt({
+        status: "failed",
+        reason: "delivery outcome is unverified",
+        resend: "verify-first",
+      })]}
+      onRetry={(_receipt, mode) => actions.push(`retry:${mode}`)}
+      onEdit={noop}
+      onDiscard={() => actions.push("discard")}
+    />,
+  );
+  const details = open(view.host);
+  const retry = [...details.querySelectorAll("button")]
+    .find((button) => button.textContent === t("runtime.receipt.retry")) as HTMLButtonElement;
+  const discard = details.querySelector("[data-receipt-discard]") as HTMLButtonElement;
+  retry.click();
+  discard.click();
+  expect(actions).toEqual(["retry:uncertain", "discard"]);
   view.cleanup();
 });
 

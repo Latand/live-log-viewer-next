@@ -6,12 +6,15 @@ import { Database } from "bun:sqlite";
 
 import {
   RUNTIME_SCHEMA_VERSION,
+  RUNTIME_DELIVERY_DISCARDED_REASON,
   assertRuntimeEvent,
   normalizeRuntimeEventInput,
   parseRuntimeScope,
   runtimePresentationReceipt,
   runtimeScopeKey,
   type RuntimeAttention,
+  type RuntimeDeliveryAction,
+  type RuntimeDeliveryActionClaim,
   type RuntimeEdge,
   type RuntimeEffect,
   type RuntimeEvent,
@@ -28,6 +31,7 @@ import {
   type RuntimeRetryOptions,
   type RuntimeSession,
   type RuntimeSnapshot,
+  type RuntimeTransitionOptions,
   type ViewerDeploymentOwner,
   type ViewerDeploymentReceipt,
   type ViewerDeploymentStatus,
@@ -321,6 +325,11 @@ export class RuntimeJournal {
         receipt_json TEXT NOT NULL, event_seq INTEGER NOT NULL, orphaned_since INTEGER,
         UNIQUE(conversation_id, idempotency_key)
       );
+      CREATE TABLE IF NOT EXISTS delivery_operation_actions (
+        operation_id TEXT PRIMARY KEY,
+        winner TEXT NOT NULL CHECK(winner IN ('discard', 'retry')),
+        claimed_at INTEGER NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS consumer_checkpoints (
         event_id TEXT NOT NULL, consumer TEXT NOT NULL, completed_at INTEGER NOT NULL,
         PRIMARY KEY(event_id, consumer)
@@ -458,6 +467,87 @@ export class RuntimeJournal {
     return row ? { operationId: row.operation_id, receipt: JSON.parse(row.receipt_json) as RuntimeOperationReceipt, replayed: false } : null;
   }
 
+  /** The journal owns operation identity, so this is the single durable
+      arbitration point shared by HTTP actions and low-level journal retries.
+      A repeated winner is an idempotent replay; the opposite action reads the
+      recorded winner and must stop before touching the registry or outbox. */
+  claimDeliveryAction(operationId: string, action: RuntimeDeliveryAction): RuntimeDeliveryActionClaim {
+    this.assertHealthy();
+    if (!this.structuredHosts) throw new Error("structured hosts are disabled");
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.db.query<{ request_json: string; receipt_json: string }, [string]>(
+        "SELECT request_json, receipt_json FROM operations WHERE operation_id = ?",
+      ).get(operationId);
+      if (!row) throw new Error("runtime operation is unknown");
+      const command = JSON.parse(row.request_json) as RuntimeOperationCommand;
+      const receipt = JSON.parse(row.receipt_json) as RuntimeOperationReceipt;
+      if (command.kind !== "send" && command.kind !== "steer") {
+        throw new Error(`runtime operation does not support ${action}`);
+      }
+      const recorded = this.recordedDeliveryActionInTransaction(operationId, receipt);
+      if (recorded) {
+        this.db.exec("COMMIT");
+        return recorded;
+      }
+      const actionStatuses: readonly RuntimeReceiptStatus[] = action === "retry"
+        ? ["pending", "queued", "failed", "uncertain", "rejected"]
+        : ["pending", "queued", "failed", "uncertain"];
+      if (!actionStatuses.includes(receipt.status)) {
+        throw new Error(`runtime delivery cannot ${action} after its outcome is resolved`);
+      }
+      const claimed = this.acquireDeliveryActionInTransaction(operationId, action, receipt);
+      this.db.exec("COMMIT");
+      return claimed;
+    } catch (error) {
+      try { this.db.exec("ROLLBACK"); } catch { /* transaction already closed */ }
+      throw error;
+    }
+  }
+
+  private recordedDeliveryActionInTransaction(
+    operationId: string,
+    receipt: RuntimeOperationReceipt,
+  ): RuntimeDeliveryActionClaim | null {
+    const row = this.db.query<{ winner: RuntimeDeliveryAction }, [string]>(
+      "SELECT winner FROM delivery_operation_actions WHERE operation_id = ?",
+    ).get(operationId);
+    if (row) return { operationId, winner: row.winner, replayed: true };
+    /* Existing databases can already contain the absorbing discarded receipt
+       from the earlier fix. Materialize its winner lazily so the new fence is
+       durable before any low-level retry is answered. */
+    if (receipt.status === "failed" && receipt.reason === RUNTIME_DELIVERY_DISCARDED_REASON) {
+      this.db.query(
+        "INSERT INTO delivery_operation_actions(operation_id, winner, claimed_at) VALUES (?, 'discard', ?)",
+      ).run(operationId, this.now());
+      return { operationId, winner: "discard", replayed: true };
+    }
+    return null;
+  }
+
+  private acquireDeliveryActionInTransaction(
+    operationId: string,
+    action: RuntimeDeliveryAction,
+    receipt: RuntimeOperationReceipt,
+  ): RuntimeDeliveryActionClaim {
+    const recorded = this.recordedDeliveryActionInTransaction(operationId, receipt);
+    if (recorded) return recorded;
+    this.db.query(
+      "INSERT INTO delivery_operation_actions(operation_id, winner, claimed_at) VALUES (?, ?, ?)",
+    ).run(operationId, action, this.now());
+    return { operationId, winner: action, replayed: false };
+  }
+
+  private deliveryActionConflict(
+    winner: RuntimeDeliveryAction,
+    attempted: RuntimeDeliveryAction,
+  ): Error {
+    const legacyDetail = winner === "discard" && attempted === "retry"
+      ? "; discarded runtime operations cannot retry"
+      : "";
+    return new Error(`runtime delivery ${winner} already won; ${attempted} refused${legacyDetail}`);
+  }
+
   currentRetryResult(operationId: string): RuntimeOperationResult | null {
     this.assertHealthy();
     const rows = this.db.query<{ operation_id: string; receipt_json: string }, []>(
@@ -496,6 +586,7 @@ export class RuntimeJournal {
     operationId: string,
     status: Exclude<RuntimeReceiptStatus, "pending">,
     details: Partial<Pick<RuntimeOperationReceipt, "turnId" | "queuePosition" | "reason">> = {},
+    options: RuntimeTransitionOptions = {},
   ): RuntimeOperationResult {
     this.assertHealthy();
     this.db.exec("BEGIN IMMEDIATE");
@@ -503,19 +594,43 @@ export class RuntimeJournal {
       const row = this.db.query<{ request_json: string; receipt_json: string }, [string]>("SELECT request_json, receipt_json FROM operations WHERE operation_id = ?").get(operationId);
       if (!row) throw new Error("runtime operation is unknown");
       const previous = JSON.parse(row.receipt_json) as RuntimeOperationReceipt;
-      if (previous.status === status) {
-        this.db.exec("COMMIT");
-        return { operationId, receipt: previous, replayed: true };
-      }
       const command = JSON.parse(row.request_json) as RuntimeOperationCommand;
+      const discarding = (command.kind === "send" || command.kind === "steer")
+        && status === "failed"
+        && details.reason === RUNTIME_DELIVERY_DISCARDED_REASON;
+      if (discarding) {
+        const recorded = this.recordedDeliveryActionInTransaction(operationId, previous);
+        if (recorded?.winner === "retry") throw this.deliveryActionConflict("retry", "discard");
+        if (options.fromStatuses && !options.fromStatuses.includes(previous.status)) {
+          throw new Error("runtime operation moved before its transition");
+        }
+        const discardable = previous.status === "pending"
+          || previous.status === "queued"
+          || previous.status === "failed"
+          || previous.status === "uncertain";
+        if (!discardable) throw new Error("runtime delivery cannot discard after its outcome is resolved");
+        this.acquireDeliveryActionInTransaction(operationId, "discard", previous);
+        if (previous.status === "failed" && previous.reason === RUNTIME_DELIVERY_DISCARDED_REASON) {
+          this.db.exec("COMMIT");
+          return { operationId, receipt: previous, replayed: true };
+        }
+      } else {
+        if (options.fromStatuses && !options.fromStatuses.includes(previous.status)) {
+          throw new Error("runtime operation moved before its transition");
+        }
+        if (previous.status === status) {
+          this.db.exec("COMMIT");
+          return { operationId, receipt: previous, replayed: true };
+        }
+      }
       const queueing = status === "queued"
         && (previous.status === "delivering" || previous.status === "applying"
           || (this.structuredHosts && previous.status === "pending"));
       const beginning = (previous.status === "pending" || previous.status === "queued")
         && (status === "delivering" || (command.kind === "reconfigure" && status === "applying"));
-      const completing = (previous.status === "pending" || previous.status === "queued"
+      const completing = discarding || ((previous.status === "pending" || previous.status === "queued"
         || previous.status === "delivering" || previous.status === "applying")
-        && status !== "delivering" && status !== "applying" && status !== "queued";
+        && status !== "delivering" && status !== "applying" && status !== "queued");
       if (!queueing && !beginning && !completing) throw new Error("runtime operation transition is invalid");
       if ((status === "applying" || status === "applied") && command.kind !== "reconfigure") {
         throw new Error("runtime operation transition is invalid");
@@ -606,6 +721,10 @@ export class RuntimeJournal {
       ).get(operationId);
       if (!row) throw new Error("runtime operation is unknown");
       const previous = JSON.parse(row.receipt_json) as RuntimeOperationReceipt;
+      if (previous.status === "failed" && previous.reason === RUNTIME_DELIVERY_DISCARDED_REASON) {
+        const recorded = this.claimDeliveryAction(operationId, "retry");
+        throw this.deliveryActionConflict(recorded.winner, "retry");
+      }
       const command = JSON.parse(row.request_json) as RuntimeOperationCommand;
       if (previous.status !== "failed" && previous.status !== "rejected") {
         throw new Error("only terminal failed runtime operations can start a new attempt");
@@ -625,6 +744,8 @@ export class RuntimeJournal {
         if (retryRequestHash(replacementCommand) !== retryRequestHash(command)) {
           throw new RuntimeIdempotencyConflictError("terminal retry operation already belongs to another request");
         }
+        const recorded = this.claimDeliveryAction(operationId, "retry");
+        if (recorded.winner !== "retry") throw this.deliveryActionConflict(recorded.winner, "retry");
         return {
           operationId: replacementOperationId,
           receipt: JSON.parse(replacement.receipt_json) as RuntimeOperationReceipt,
@@ -659,6 +780,8 @@ export class RuntimeJournal {
             throw new Error("structured recovery ownership changed before retry admission");
           }
         }
+        const claimed = this.acquireDeliveryActionInTransaction(operationId, "retry", currentReceipt);
+        if (claimed.winner !== "retry") throw this.deliveryActionConflict(claimed.winner, "retry");
       });
     }
     this.db.exec("BEGIN IMMEDIATE");
@@ -669,8 +792,24 @@ export class RuntimeJournal {
       if (!row) throw new Error("runtime operation is unknown");
       const previous = JSON.parse(row.receipt_json) as RuntimeOperationReceipt;
       const command = JSON.parse(row.request_json) as RuntimeOperationCommand;
-      if (previous.status !== "failed") throw new Error("only failed runtime operations can retry");
       if (command.kind !== "send" && command.kind !== "steer") throw new Error("runtime operation does not support retry");
+      const recorded = this.recordedDeliveryActionInTransaction(operationId, previous);
+      if (recorded?.winner === "discard") throw this.deliveryActionConflict("discard", "retry");
+      /* An explicit unknown-fate retry keeps the SAME operation and effect id
+         (#1226). Replaying the HTTP action after its response was lost finds
+         the already re-armed row and returns it without another transition. */
+      if (previous.status !== "pending"
+        && previous.status !== "queued"
+        && previous.status !== "failed"
+        && previous.status !== "uncertain") {
+        throw new Error("only failed or uncertain runtime operations can retry in place");
+      }
+      const claimed = recorded ?? this.acquireDeliveryActionInTransaction(operationId, "retry", previous);
+      if (claimed.winner !== "retry") throw this.deliveryActionConflict(claimed.winner, "retry");
+      if (previous.status === "pending" || previous.status === "queued") {
+        this.db.exec("COMMIT");
+        return { operationId, receipt: previous, replayed: true };
+      }
       const next: RuntimeOperationReceipt = {
         ...previous,
         status: "queued",
@@ -1220,6 +1359,7 @@ export class RuntimeJournal {
       this.db.exec("DELETE FROM consumer_checkpoints WHERE NOT EXISTS (SELECT 1 FROM events WHERE events.event_id = consumer_checkpoints.event_id)");
       this.db.query("DELETE FROM outbox WHERE state = 'completed' AND event_seq <= ?").run(anchor.seq);
       this.db.query("DELETE FROM operations WHERE event_seq <= ? AND operation_id NOT IN (SELECT substr(id, 8) FROM outbox WHERE state = 'pending' AND id LIKE 'effect:%')").run(anchor.seq);
+      this.db.exec("DELETE FROM delivery_operation_actions WHERE operation_id NOT IN (SELECT operation_id FROM operations)");
       this.db.query("DELETE FROM entities WHERE kind = 'operation' AND checkpoint_seq <= ?").run(anchor.seq);
       this.metaSet("anchor_seq", String(anchor.seq));
       this.metaSet("anchor_hash", anchor.hash);
@@ -2191,7 +2331,7 @@ export class RuntimeJournal {
 
   private verify(): void {
     try {
-      for (const table of ["journal_meta", "events", "scope_revisions", "projections", "entities", "outbox", "operations", "consumer_checkpoints", "viewer_deployments"]) {
+      for (const table of ["journal_meta", "events", "scope_revisions", "projections", "entities", "outbox", "operations", "delivery_operation_actions", "consumer_checkpoints", "viewer_deployments"]) {
         const check = this.db.query<{ quick_check: string }, []>(`PRAGMA quick_check(${table})`).get();
         if (check?.quick_check !== "ok") throw new RuntimeJournalFault(`runtime journal SQLite check failed: ${table}`);
       }

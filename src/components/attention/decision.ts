@@ -3,7 +3,7 @@ import { rateLimitText } from "@/components/rateLimit";
 import type { Locale, TFunction } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
-import { attentionId, openBridgeAsk } from "../attention";
+import { attentionId, blockingStuckDelivery, openBridgeAsk, stalledAttention } from "../attention";
 
 /**
  * The ONE line every attention surface shows for a waiting agent (issue #1167).
@@ -81,6 +81,8 @@ function decisionText(t: TFunction, locale: Locale, file: FileEntry, now: number
   }
   if (file.rateLimit) return rateLimitText(t, locale, file.rateLimit);
   if (file.waitingInput) return t("attention.decisionPermission");
+  if (blockingStuckDelivery(file, now) !== null) return t("attention.decisionDelivery");
+  if (stalledAttention(file, now)) return t("status.stalled");
   return t("status.stalled");
 }
 

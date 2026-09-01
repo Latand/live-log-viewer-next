@@ -42,7 +42,7 @@ import { overlaySessionTitles, registryProjectionForSnapshot } from "@/lib/sessi
 import { claudeProjectRootFor, codexSessionRootFor } from "@/lib/scanner/roots";
 import { projectInfoFromCwd, projectRootForCwd } from "@/lib/scanner/describe";
 import { projectDirectoryFallbacks } from "@/lib/scanner/projectDirectories";
-import type { FilesResponse, ProjectCatalogEntry } from "@/lib/types";
+import type { FilesResponse, ProjectCatalogEntry, StuckDelivery } from "@/lib/types";
 import { filesResponseDependencies } from "./dependencies";
 
 interface FilesRouteDependencies {
@@ -390,6 +390,18 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
     }
     return round;
   };
+  const owedDeliveries = new Map<string, StuckDelivery>();
+  for (const delivery of Object.values(registrySnapshot.heldDeliveries)) {
+    if (delivery.state !== "held" && delivery.state !== "assigned" && delivery.state !== "delivery-uncertain") continue;
+    const conversationId = conversationLookup.canonicalConversationId(delivery.conversationId);
+    const current = owedDeliveries.get(conversationId);
+    if (current && current.since <= delivery.createdAt) continue;
+    owedDeliveries.set(conversationId, {
+      since: delivery.createdAt,
+      attempts: delivery.attempts,
+      state: delivery.state,
+    });
+  }
   for (const file of files) {
     if (file.engine !== "claude" && file.engine !== "codex") continue;
     if (file.spawn) continue;
@@ -548,6 +560,13 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
           file.parentRemoved = { conversationId: canonicalParentId, path: parentPath };
         }
       }
+    }
+    /* The reservation follows the logical message across explicit retry, so
+       the live card keeps the same attention identity and admission clock.
+       Historical/superseded generations never raise the entry. */
+    if (latest?.path === file.path && !conversation.supersededBy) {
+      const owed = owedDeliveries.get(conversation.id);
+      if (owed) file.stuckDelivery = owed;
     }
     if (conversation.migration && conversation.migration.phase !== "committed") {
       const intent = registrySnapshot.migrationIntents[conversation.migration.intentId];

@@ -223,6 +223,8 @@ export interface RuntimeReceipt {
       how long a parked message has been waiting. Absent on receipts written
       before the field existed — readers fall back to `at`. */
   admittedAt?: string;
+  /** Durable settlement guidance for choosing the retry identity. */
+  resend?: "not-needed" | "safe" | "verify-first";
   revision: number;
 }
 
@@ -793,6 +795,7 @@ export const RECEIPT_REASON_KEYS: Record<string, MessageKey> = {
   "turn-active": "receipt.human.turnActive",
   "busy-turn": "receipt.human.turnActive",
   "no-active-turn": "receipt.human.noTurn",
+  "delivery-discarded": "receipt.human.discarded",
   /* #862 compact refusals. `stale-generation` is the same class of fact as a
      stale delivery key: the operator was pointing at a generation that is no
      longer the live one. */

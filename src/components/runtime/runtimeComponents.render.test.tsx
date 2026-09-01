@@ -134,6 +134,19 @@ test("failed receipt prints an unknown reason verbatim behind a 'not delivered:'
   expect(html).toContain(translate("en", "receipt.human.verbatim", { reason: "quota-exceeded" }));
 });
 
+test("a discarded delivery stays visibly terminal and offers no resend controls", () => {
+  const html = renderToStaticMarkup(
+    <ReceiptChip
+      receipt={receipt({ status: "failed", reason: "delivery-discarded" })}
+      onRetry={() => { throw new Error("discarded receipt exposed retry"); }}
+      onEdit={() => { throw new Error("discarded receipt exposed edit-and-resend"); }}
+    />,
+  );
+  expect(html).toContain(translate("en", "receipt.human.discarded"));
+  expect(html).not.toContain(translate("en", "runtime.receipt.retry"));
+  expect(html).not.toContain("resend");
+});
+
 test("a cancelled held delivery names the cancellation and offers one-tap resend", () => {
   const reason = "delivery cancelled because its owning account migration was stopped; send again to authorize a fresh delivery";
   const html = renderToStaticMarkup(

@@ -252,7 +252,7 @@ async function reconcileTerminalDeliveries(
            and `uncertain` — the send was handed to the engine and never
            answered for — is the one whose disposition stops a later receipt
            from calling a resend safe (#1131). */
-        const verdict = journalVerdict(result.receipt.status);
+        const verdict = journalVerdict(result.receipt.status, result.receipt.reason);
         if (!verdict) return null;
         const receiptConversationId = result.receipt.conversationId;
         if (!receiptConversationId.startsWith("conversation_")

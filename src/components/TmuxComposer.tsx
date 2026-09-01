@@ -265,6 +265,7 @@ export function RuntimeComposerReceipts({
   onRetry,
   onEdit,
   onDismiss,
+  onDiscard,
 }: {
   receipts: RuntimeReceipt[];
   actionsDisabled?: boolean;
@@ -280,10 +281,11 @@ export function RuntimeComposerReceipts({
       reason cannot answer that, and guessing prints a false explanation under a
       message that never arrived. */
   session?: { host: HostAxis; turn: TurnAxis } | null;
-  onRetry: (receipt: RuntimeReceipt) => void;
+  onRetry: (receipt: RuntimeReceipt, mode?: "uncertain") => void;
   onEdit: (receipt: RuntimeReceipt) => void;
   /** Persists a dismissal — receives every settled operation id of the row. */
   onDismiss?: (operationIds: string[]) => void;
+  onDiscard?: (receipt: RuntimeReceipt) => void;
 }) {
   const { t } = useLocale();
   const statusId = useId();
@@ -315,13 +317,16 @@ export function RuntimeComposerReceipts({
     && typeof receipt.text === "string"
     && receipt.text.length > 0
     && receipt.text.length < 240;
+  const retryFailed = (receipt: RuntimeReceipt) => onRetry(
+    receipt,
+    receipt.resend === "verify-first" ? "uncertain" : undefined,
+  );
   /* Measured from the receipt's own IMMUTABLE admission stamp, never from
      `at`: the queue bounces a parked send `delivering`→`queued` on every
      auto-retry and `at` moves with it, which both under-reports the wait and
-     keeps it from ever crossing the uncertain bound. An auto-retry is a
-     transition of the same operation, so one stamp still covers the whole wait;
-     a retry the OPERATOR pressed mints a new operation and starts a new one,
-     which is what they asked for. */
+     keeps it from ever crossing the uncertain bound. Automatic and explicit
+     unknown-fate retries keep the same operation, so one stamp covers the
+     whole time this logical message is owed. */
   const waitFor = (group: DeliveryAttemptGroup): DeliveryWait | null => deliveryWaitFor({
     status: group.current.status,
     host: session?.host ?? null,
@@ -428,6 +433,11 @@ export function RuntimeComposerReceipts({
                 const pending = !receiptIsTerminal(receipt.status);
                 const wait = waitFor(group);
                 const uncertain = wait?.phase === "uncertain";
+                const serverBacked = !receipt.operationId.startsWith(UNCONFIRMED_RECEIPT_PREFIX);
+                const exitable = uncertain && serverBacked;
+                const discardable = serverBacked
+                  && receipt.reason !== "delivery-discarded"
+                  && (exitable || (failed && receipt.resend === "verify-first"));
                 const retryingBusy = pending
                   && !uncertain
                   && typeof receipt.reason === "string"
@@ -464,8 +474,13 @@ export function RuntimeComposerReceipts({
                         receipt={receipt}
                         wait={wait}
                         actionsDisabled={actionsDisabled}
-                        onRetry={failed ? () => onRetry(receipt) : undefined}
+                        onRetry={failed
+                          ? () => retryFailed(receipt)
+                          : exitable
+                            ? () => onRetry(receipt, "uncertain")
+                            : undefined}
                         onEdit={editable(receipt) ? () => onEdit(receipt) : undefined}
+                        onDiscard={discardable && onDiscard ? () => onDiscard(receipt) : undefined}
                       />
                       {/* A settled problem is dismissible (issue #264 rule 3):
                           the dismissal records every settled attempt of the
@@ -503,9 +518,9 @@ export function RuntimeComposerReceipts({
                       ) : null}
                     </div>
                     {/* Why it is not coming, in one sentence (issue #1213).
-                        Wraps rather than truncates: this is the only place the
-                        operator learns the message was parked, and the only
-                        thing that will move it now is sending it again. */}
+                        Wraps rather than truncates: this is where the operator
+                        learns why the message was parked before choosing its
+                        same-identity retry or terminal discard. */}
                     {uncertain ? (
                       <span
                         className="min-w-0 max-w-full text-right text-caption text-muted"
@@ -558,7 +573,7 @@ export function RuntimeComposerReceipts({
             <ReceiptChip
               receipt={receipt}
               actionsDisabled={actionsDisabled}
-              onRetry={isMessage(receipt) && failed ? () => onRetry(receipt) : undefined}
+              onRetry={isMessage(receipt) && failed ? () => retryFailed(receipt) : undefined}
               onEdit={editable(receipt) ? () => onEdit(receipt) : undefined}
             />
             {onDismiss && deliveryProblem(receipt.status) ? (
@@ -2312,21 +2327,50 @@ export function TmuxComposerCore({
     void send(claimed.text, { clientMessageId: claimed.id }, claimed.id);
   };
 
-  const retryRuntimeReceipt = async (receipt: RuntimeReceipt) => {
+  const rememberRuntimeReceipt = (receipt: RuntimeReceipt) => {
+    setImmediateRuntimeReceipts((current) => [
+      receipt,
+      ...current.filter((candidate) => candidate.operationId !== receipt.operationId),
+    ].slice(0, 8));
+  };
+
+  const retryRuntimeReceipt = async (receipt: RuntimeReceipt, mode?: "uncertain") => {
     if (busy || voiceSending) return;
     setBusy(true);
     setStatus(null);
     try {
-      const response = await fetch(`/api/runtime/operations/${encodeURIComponent(receipt.operationId)}`, { method: "POST" });
+      const response = await fetch(`/api/runtime/operations/${encodeURIComponent(receipt.operationId)}`, mode === "uncertain"
+        ? {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ action: "retry-uncertain" }),
+          }
+        : { method: "POST" });
       const body = (await response.json().catch(() => ({}))) as { receipt?: RuntimeReceipt; error?: string };
+      if (body.receipt) rememberRuntimeReceipt(body.receipt);
       if (!response.ok || !body.receipt) {
         setStatus({ kind: "err", text: body.error ?? t("common.failedSend") });
         return;
       }
-      setImmediateRuntimeReceipts((current) => [
-        body.receipt!,
-        ...current.filter((candidate) => candidate.operationId !== body.receipt!.operationId),
-      ].slice(0, 8));
+    } catch {
+      setStatus({ kind: "err", text: t("common.serverUnavailable") });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const discardRuntimeReceipt = async (receipt: RuntimeReceipt) => {
+    if (busy || voiceSending) return;
+    setBusy(true);
+    setStatus(null);
+    try {
+      const response = await fetch(`/api/runtime/operations/${encodeURIComponent(receipt.operationId)}`, { method: "DELETE" });
+      const body = (await response.json().catch(() => ({}))) as { receipt?: RuntimeReceipt; error?: string };
+      if (body.receipt) rememberRuntimeReceipt(body.receipt);
+      if (!response.ok || !body.receipt) {
+        setStatus({ kind: "err", text: body.error ?? t("common.failedSend") });
+        return;
+      }
     } catch {
       setStatus({ kind: "err", text: t("common.serverUnavailable") });
     } finally {
@@ -2462,9 +2506,10 @@ export function TmuxComposerCore({
               session={structuredSession
                 ? { host: structuredSession.session.host, turn: structuredSession.session.turn }
                 : null}
-              onRetry={(receipt) => void retryRuntimeReceipt(receipt)}
+              onRetry={(receipt, mode) => void retryRuntimeReceipt(receipt, mode)}
               onEdit={editRuntimeReceipt}
               onDismiss={dismissReceipts}
+              onDiscard={(receipt) => void discardRuntimeReceipt(receipt)}
             />
           : undefined
       }

@@ -1,5 +1,6 @@
 import { BRIDGE_ASK_TTL_SECONDS } from "@/lib/bridge/types";
 import type { BridgeAsk, FileEntry } from "@/lib/types";
+import { DELIVERY_WAIT_ATTENTION_MS } from "@/components/runtime/deliveryWait";
 
 import { projectKey } from "./projectModel";
 
@@ -56,6 +57,20 @@ function isoSeconds(iso: string): number | null {
   return Number.isFinite(ms) ? ms / 1000 : null;
 }
 
+export function blockingStuckDelivery(file: FileEntry, now: number): number | null {
+  const delivery = file.stuckDelivery;
+  if (!delivery) return null;
+  const since = isoSeconds(delivery.since);
+  if (since === null) return null;
+  return now - since >= DELIVERY_WAIT_ATTENTION_MS / 1000 ? since : null;
+}
+
+export function stalledAttention(file: FileEntry, now: number): boolean {
+  return file.activity === "stalled"
+    && file.proc === "running"
+    && now - file.mtime <= STALLED_ATTENTION_TTL;
+}
+
 /**
  * The orchestrator's open ask, or null once the clock has retired it (#1168).
  *
@@ -89,6 +104,8 @@ export function attentionExpiries(files: readonly FileEntry[]): number[] {
     if (file.activity === "stalled") expiries.push(file.mtime + STALLED_ATTENTION_TTL);
     const at = file.bridgeAsk ? isoSeconds(file.bridgeAsk.at) : null;
     if (at !== null) expiries.push(at + BRIDGE_ASK_TTL_SECONDS);
+    const deliverySince = file.stuckDelivery ? isoSeconds(file.stuckDelivery.since) : null;
+    if (deliverySince !== null) expiries.push(deliverySince + DELIVERY_WAIT_ATTENTION_MS / 1000);
   }
   return expiries;
 }
@@ -96,10 +113,10 @@ export function attentionExpiries(files: readonly FileEntry[]): number[] {
 /**
  * The shared attention identity of a file, by signal precedence:
  * an orchestrator's open bridge ask wins, then a structured question, a
- * rate-limit wall, the screen-scrape fallback, and the stalled state. The id
- * doubles as the dedupe key of the toast and push pipelines, so the formats
- * here must stay byte-identical to the historical inline derivations
- * (`push-sent.json` entries survive the refactor).
+ * rate-limit wall, the screen-scrape fallback, an owed message delivery, and
+ * the stalled state. The id doubles as the dedupe key of the toast and push
+ * pipelines, so the older formats here stay byte-identical to the historical
+ * inline derivations (`push-sent.json` entries survive the refactor).
  */
 export function attentionId(file: FileEntry, now: number = Date.now() / 1000): string | null {
   /* First, and above the file's own signals (issue #1168). A bridge ask is the
@@ -118,7 +135,9 @@ export function attentionId(file: FileEntry, now: number = Date.now() / 1000): s
   /* The stalled tier needs a live process behind the transcript: an open turn
      whose agent already exited is an abandoned session, not a pending
      permission prompt — only someone still at the terminal can wait on you. */
-  if (file.activity === "stalled" && file.proc === "running" && now - file.mtime <= STALLED_ATTENTION_TTL) {
+  const deliverySince = blockingStuckDelivery(file, now);
+  if (deliverySince !== null) return `${file.path}:delivery:${Math.floor(deliverySince)}`;
+  if (stalledAttention(file, now)) {
     return `${file.path}:stalled:${Math.floor(file.mtime)}`;
   }
   return null;
@@ -141,7 +160,9 @@ export function buildAttentionQueue(
     const id = attentionId(file, now);
     if (id === null) continue;
     const ask = openBridgeAsk(file, now);
+    const stuckDelivery = blockingStuckDelivery(file, now);
     const tier: AttentionTier = ask || file.pendingQuestion || file.rateLimit || file.waitingInput
+      || stuckDelivery !== null
       ? "blocked"
       : "stalled";
     /* `openBridgeAsk` already refused an unparseable time, so an ask always
@@ -155,7 +176,7 @@ export function buildAttentionQueue(
           ? file.mtime
           : file.waitingInput
             ? file.waitingInput.since
-            : file.mtime;
+            : stuckDelivery ?? file.mtime;
     items.push({ id, file, project: projectKey(file), tier, since });
   }
   return items.sort(

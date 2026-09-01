@@ -15,7 +15,7 @@ import { parseRuntimeCommand } from "./commands";
 import { runtimePresentationReceipt, type RuntimeOperationKind } from "./contracts";
 import { runtimeEventsEnabled, runtimeEventsRolledBack, structuredHostsEnabled, RUNTIME_PLANE_ABSENT } from "./flags";
 import { readEvidence, type Evidence } from "./evidence";
-import { journalVerdict, resolveSendReceipt, runtimeReceiptForSend, sendReceiptFor, type SendReceipt } from "./sendSettlement";
+import { journalVerdict, resolveSendReceipt, runtimeReceiptForSend, SEND_DISCARDED_REASON, sendReceiptFor, type SendReceipt } from "./sendSettlement";
 import { republishStructuredDeliveryHost } from "./structuredDeliveryController";
 import { recoverDeadStructuredConversation } from "./structuredRecovery";
 import { enqueueStructuredMessage } from "./structuredMessageDelivery";
@@ -91,6 +91,7 @@ function terminalRetryIdempotencyKey(operationId: string): string {
  * second one, and it persists the row this one could not.
  */
 const RETRY_RECORD_UNAVAILABLE = "retry attempt could not be recorded durably";
+const DISCARDABLE_RECEIPT_STATUSES = ["pending", "queued"] as const;
 
 function retryRecordUnavailable(recorded: Evidence<boolean>): NextResponse {
   return NextResponse.json({
@@ -398,7 +399,7 @@ export async function handleRuntimeOperationQuery(
          record is projected from it, so the two cannot disagree about it. An
          open one can, which is exactly the case the unreadable record has to
          stop. */
-      if (result && (settlement.readable || journalVerdict(result.receipt.status))) {
+      if (result && (settlement.readable || journalVerdict(result.receipt.status, result.receipt.reason))) {
         return NextResponse.json({
           operationId: result.operationId,
           receipt: result.receipt,
@@ -427,6 +428,132 @@ export async function handleRuntimeOperationQuery(
   return NextResponse.json({ error: "operation not found" }, { status: 404 });
 }
 
+export async function handleRuntimeDiscard(
+  request: NextRequest,
+  operationId: string,
+  dependencies: RuntimeRetryHttpDependencies = DEFAULT_RETRY_DEPENDENCIES,
+): Promise<NextResponse> {
+  const rejection = rejectCrossOrigin(request);
+  if (rejection) return rejection;
+  if (!dependencies.enabled()) return NextResponse.json({ error: "structured hosts are disabled" }, { status: 503 });
+  if (!operationId || operationId.includes(":") || /\s/.test(operationId)) {
+    return NextResponse.json({ error: "operationId is invalid" }, { status: 400 });
+  }
+  const client = dependencies.client();
+  if (!client) return NextResponse.json({ error: "runtime host socket is unavailable" }, { status: 503 });
+  try {
+    const current = await readEvidence(
+      () => client.operationStatus(operationId, { currentRetryLeaf: true }),
+      "runtime operation status is unavailable",
+    );
+    if (!current.readable) return NextResponse.json({ error: current.reason, retryable: true }, { status: 503 });
+    if (!current.value) return NextResponse.json({ error: "operation not found" }, { status: 404 });
+    let operation = current.value;
+    if (operation.receipt.kind !== "send" && operation.receipt.kind !== "steer") {
+      return NextResponse.json({ error: "runtime operation does not support discard" }, { status: 409 });
+    }
+    if (!operation.receipt.conversationId.startsWith("conversation_")) {
+      return NextResponse.json({ error: "runtime operation has no delivery reservation" }, { status: 409 });
+    }
+    const registry = (dependencies.registry ?? agentRegistry)();
+    const presentationOperationId = operation.receipt.presentationOperationId ?? operation.operationId;
+    const deliveryRecord = sendReceiptFor(registry.readOnlySnapshot(), presentationOperationId);
+    const settleDelivered = () => {
+      if (operation.receipt.conversationId.startsWith("conversation_")) {
+        registry.recordDeliveryOutcomeForOperation(
+          operation.receipt.conversationId as `conversation_${string}`,
+          operation.receipt.presentationOperationId ?? operation.operationId,
+          "delivered",
+        );
+      }
+      return NextResponse.json({
+        operationId: operation.operationId,
+        receipt: runtimePresentationReceipt(operation.receipt),
+      });
+    };
+    if (journalVerdict(operation.receipt.status, operation.receipt.reason)?.state === "delivered") return settleDelivered();
+    if (operation.receipt.status === "delivering" || operation.receipt.status === "applying") {
+      return NextResponse.json({
+        error: "runtime delivery is being handed over to the agent",
+        operationId: operation.operationId,
+        receipt: runtimePresentationReceipt(operation.receipt),
+      }, { status: 409 });
+    }
+    let disposition: "lost" | "unverified" = "unverified";
+    if (operation.receipt.status === "pending" || operation.receipt.status === "queued") {
+      try {
+        operation = await client.transitionOperation(
+          operation.operationId,
+          "failed",
+          { reason: SEND_DISCARDED_REASON },
+          { fromStatuses: DISCARDABLE_RECEIPT_STATUSES },
+        );
+        if (deliveryRecord?.duplicateRisk !== true) disposition = "lost";
+      } catch (error) {
+        if (error instanceof Error && /runtime delivery (?:discard|retry) already won/.test(error.message)) {
+          throw error;
+        }
+        const moved = await client.operationStatus(operation.operationId);
+        if (!moved) throw error;
+        operation = moved;
+        if (journalVerdict(operation.receipt.status, operation.receipt.reason)?.state === "delivered") return settleDelivered();
+        if (operation.receipt.status === "delivering" || operation.receipt.status === "applying") {
+          return NextResponse.json({
+            error: "runtime delivery is being handed over to the agent",
+            operationId: operation.operationId,
+            receipt: runtimePresentationReceipt(operation.receipt),
+          }, { status: 409 });
+        }
+        if (operation.receipt.status !== "uncertain"
+          && !(operation.receipt.status === "failed" && operation.receipt.reason === SEND_DISCARDED_REASON)) {
+          throw error;
+        }
+      }
+    } else if (operation.receipt.status !== "uncertain"
+      && !(operation.receipt.status === "failed" && operation.receipt.reason === SEND_DISCARDED_REASON)
+      && !(deliveryRecord?.state === "failed" && deliveryRecord.duplicateRisk)) {
+      return NextResponse.json({ error: "delivery outcome is already resolved" }, { status: 409 });
+    } else {
+      const claim = await client.claimDeliveryAction(operation.operationId, "discard");
+      if (claim.winner !== "discard") {
+        return NextResponse.json({
+          error: `runtime delivery ${claim.winner} already won; discard refused`,
+        }, { status: 409 });
+      }
+    }
+    registry.discardDeliveryForOperation(
+      operation.receipt.conversationId as `conversation_${string}`,
+      presentationOperationId,
+      SEND_DISCARDED_REASON,
+      disposition,
+    );
+    const settled = sendReceiptFor(registry.readOnlySnapshot(), presentationOperationId);
+    if (!settled || settled.state !== "failed" || settled.reason !== SEND_DISCARDED_REASON) {
+      return NextResponse.json({
+        error: "delivery discard could not be recorded durably",
+        retryable: true,
+      }, { status: 503 });
+    }
+    const receipt = runtimeReceiptForSend(settled);
+    return NextResponse.json({
+      operationId: presentationOperationId,
+      receipt: {
+        ...receipt,
+        ...(operation.receipt.text ? { text: operation.receipt.text } : {}),
+      },
+      send: settled,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "runtime operation discard failed";
+    const status = /unknown/.test(message)
+      ? 404
+      : /runtime delivery (?:discard|retry) already won|cannot discard after|moved before its transition/.test(message)
+        ? 409
+        : 503;
+    return NextResponse.json({ error: message }, { status });
+  }
+}
+
 export async function handleRuntimeRetry(
   request: NextRequest,
   operationId: string,
@@ -442,15 +569,16 @@ export async function handleRuntimeRetry(
   if (!client) return NextResponse.json({ error: "runtime host socket is unavailable" }, { status: 503 });
   try {
     let nextIdempotencyKey: string | undefined;
+    let action: "retry-uncertain" | undefined;
     const rawBody = await request.text();
     if (rawBody.trim()) {
-      let value: { idempotencyKey?: unknown };
+      let value: { idempotencyKey?: unknown; action?: unknown };
       try {
         const parsed = JSON.parse(rawBody) as unknown;
         if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
           return NextResponse.json({ error: "invalid JSON" }, { status: 400 });
         }
-        value = parsed as { idempotencyKey?: unknown };
+        value = parsed as { idempotencyKey?: unknown; action?: unknown };
       } catch {
         return NextResponse.json({ error: "invalid JSON" }, { status: 400 });
       }
@@ -462,6 +590,15 @@ export async function handleRuntimeRetry(
           return NextResponse.json({ error: "idempotencyKey is invalid" }, { status: 400 });
         }
         nextIdempotencyKey = value.idempotencyKey;
+      }
+      if (value.action !== undefined) {
+        if (value.action !== "retry-uncertain") {
+          return NextResponse.json({ error: "runtime retry action is invalid" }, { status: 400 });
+        }
+        action = value.action;
+      }
+      if (action && nextIdempotencyKey) {
+        return NextResponse.json({ error: "uncertain retry keeps the original idempotency key" }, { status: 400 });
       }
     }
     const recordRetryAttempt = dependencies.recordRetryAttempt ?? recordDeliveryRetryAttempt;
@@ -480,21 +617,89 @@ export async function handleRuntimeRetry(
     if (previous.receipt.kind !== "send" && previous.receipt.kind !== "steer") {
       return NextResponse.json({ error: "runtime operation does not support retry" }, { status: 409 });
     }
+    if (previous.receipt.status === "failed" && previous.receipt.reason === SEND_DISCARDED_REASON) {
+      const claim = await client.claimDeliveryAction(previous.operationId, "retry");
+      return NextResponse.json({
+        error: `runtime delivery ${claim.winner} already won; retry refused`,
+      }, { status: 409 });
+    }
+    const registry = (dependencies.registry ?? agentRegistry)();
+    const deliverySnapshot = registry.readOnlySnapshot();
+    const deliveryRecord = sendReceiptFor(deliverySnapshot, previous.operationId);
     if (previous.operationId === operationId
       && previous.receipt.status !== "failed"
-      && previous.receipt.status !== "rejected") {
+      && previous.receipt.status !== "rejected"
+      && deliveryRecord?.state === "failed"
+      && deliveryRecord.resend === "safe") {
       /* A migration can cancel a held, never-actuated reservation while its
-         journal operation still reads queued. The receipt card is projected
-         from the durable reservation and offers Retry because that record
-         proves `resend: safe`; fence the stale journal operation before asking
-         it to mint the fresh attempt. Unverified failures never enter here. */
-      const durable = await readEvidence(
-        () => sendReceiptFor((dependencies.registry ?? agentRegistry)().readOnlySnapshot(), operationId),
-        "delivery record is unavailable",
-      );
-      if (durable.readable && durable.value?.state === "failed" && durable.value.resend === "safe") {
-        previous = await client.transitionOperation(operationId, "failed", { reason: durable.value.reason });
+         journal operation still reads queued. The durable record proves a
+         resend is safe, so fence the stale journal operation before asking it
+         to mint the fresh attempt. Unknown-fate deliveries never enter here. */
+      previous = await client.transitionOperation(operationId, "failed", { reason: deliveryRecord.reason });
+    }
+    if (deliveryRecord?.reason === SEND_DISCARDED_REASON) {
+      return NextResponse.json({ error: "discarded runtime operations cannot retry" }, { status: 409 });
+    }
+    /* Only the composer's explicit unknown-fate action authorizes this path.
+       Durable ambiguity identifies which identity must be preserved; it cannot
+       act as retry authority by itself. */
+    if (action === "retry-uncertain") {
+      if (previous.operationId !== operationId) {
+        return NextResponse.json({ error: "uncertain retry must target its original operation" }, { status: 409 });
       }
+      if (previous.receipt.status === "delivering" || previous.receipt.status === "applying") {
+        return NextResponse.json({
+          error: "runtime delivery is being handed over to the agent",
+          operationId,
+          receipt: runtimePresentationReceipt(previous.receipt),
+        }, { status: 409 });
+      }
+      if (!deliveryRecord) {
+        return NextResponse.json({ error: "runtime operation has no delivery reservation" }, { status: 409 });
+      }
+      if (deliveryRecord.state === "delivered"
+        || (deliveryRecord.state === "failed" && deliveryRecord.resend !== "verify-first")) {
+        return NextResponse.json({
+          operationId,
+          receipt: runtimeReceiptForSend(deliveryRecord),
+          send: deliveryRecord,
+        });
+      }
+      const claim = await client.claimDeliveryAction(operationId, "retry");
+      if (claim.winner !== "retry") {
+        return NextResponse.json({
+          error: `runtime delivery ${claim.winner} already won; retry refused`,
+        }, { status: 409 });
+      }
+      const reservation = registry.retryUncertainDeliveryForOperation(operationId);
+      if (!reservation) {
+        return NextResponse.json({ error: "runtime operation has no delivery reservation" }, { status: 409 });
+      }
+      if (reservation.state === "delivered" || reservation.state === "failed") {
+        const settled = sendReceiptFor(registry.readOnlySnapshot(), operationId);
+        if (settled) {
+          return NextResponse.json({ operationId, receipt: runtimeReceiptForSend(settled), send: settled });
+        }
+        return NextResponse.json({ error: "delivery outcome is already resolved" }, { status: 409 });
+      }
+      if (reservation.state === "assigned" && reservation.generationId) {
+        const claimed = registry.beginDeliveryAttempt(reservation.id, reservation.generationId);
+        if (!claimed) {
+          return NextResponse.json({
+            error: "delivery reservation ownership changed before retry admission",
+            retryable: true,
+          }, { status: 503 });
+        }
+      }
+      let result = previous;
+      if (previous.receipt.status !== "pending" && previous.receipt.status !== "queued") {
+        result = await client.retryOperation(operationId);
+      }
+      dependencies.kick();
+      return NextResponse.json({
+        operationId,
+        receipt: runtimePresentationReceipt(result.receipt),
+      }, { status: 202 });
     }
     if (previous.receipt.status !== "failed" && previous.receipt.status !== "rejected") {
       if (previous.operationId !== operationId) {
@@ -588,7 +793,7 @@ export async function handleRuntimeRetry(
     let status = 503;
     if (error instanceof RuntimeHostUnavailableError && error.code === "idempotency-conflict") status = 409;
     else if (/unknown/.test(message)) status = 404;
-    else if (/only failed|terminal failed|fresh idempotency|does not support/.test(message)) status = 409;
+    else if (/only failed|terminal failed|fresh idempotency|does not support|runtime delivery (?:discard|retry) already won/.test(message)) status = 409;
     const retryable = message === "structured recovery ownership changed before retry admission";
     return NextResponse.json({ error: message, ...(retryable ? { retryable: true } : {}) }, { status });
   }

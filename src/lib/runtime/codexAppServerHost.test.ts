@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -22,6 +23,10 @@ import { STRUCTURED_IMAGE_CAPABILITY, structuredContent, type StructuredImageRef
 import { materializeStructuredHostAccess, READ_ONLY_STAGE_PERMISSION_PROFILE } from "./structuredSpawn";
 import type { RuntimeVoiceDelivery } from "./voiceDelivery";
 import { DEFAULT_VOICE_PERSONA, VOICE_PERSONA_FILE, legacyVoicePersonaBootstrapItemId, voicePersona } from "./voicePersona";
+
+function deliveryDedup(operationId: string): string {
+  return createHash("sha256").update(operationId).digest("hex");
+}
 
 class MemoryEventStore implements RuntimeEventStore {
   private readonly events = new Map<string, RuntimeEvent[]>();
@@ -118,6 +123,10 @@ class FakeAppServer extends EventEmitter {
   readonly signals: NodeJS.Signals[] = [];
   autoResolveServerRequests = true;
   autoCompleteUserMessage = true;
+  /** Persist the recipient-side user record while withholding the app-server
+      confirmation, reproducing a successful delivery whose confirmation is
+      lost during a host respawn. */
+  persistUserMessages = false;
   readTurns: unknown[] | null = null;
   readError: string | null = null;
   /* Rejects only hydrated reads (includeTurns), the way codex 0.151+ paginated
@@ -266,12 +275,14 @@ class FakeAppServer extends EventEmitter {
       }
       this.respond(message.id, { turn: { id: turnId } });
       this.notify("turn/started", { threadId: this.threadId, turn: { id: turnId } });
+      this.persistUserMessage(message);
       this.completeUserMessage(message, turnId);
       return;
     }
     if (method === "turn/steer") {
       const turnId = (message.params as { expectedTurnId: string }).expectedTurnId;
       this.respond(message.id, { turnId });
+      this.persistUserMessage(message);
       this.completeUserMessage(message, turnId);
       return;
     }
@@ -378,6 +389,22 @@ class FakeAppServer extends EventEmitter {
       turnId,
       item: { type: "userMessage", clientId: params.clientUserMessageId, content: params.input },
     });
+  }
+
+  private persistUserMessage(message: Record<string, unknown>): void {
+    if (!this.persistUserMessages || !this.threadPath) return;
+    const input = (message.params as { input?: unknown } | undefined)?.input;
+    if (!Array.isArray(input)) return;
+    const text = input.flatMap((part) => {
+      if (!part || typeof part !== "object" || Array.isArray(part)) return [];
+      const value = part as Record<string, unknown>;
+      return value.type === "text" && typeof value.text === "string" ? [value.text] : [];
+    }).join("");
+    fs.appendFileSync(this.threadPath, `${JSON.stringify({
+      timestamp: "2026-09-01T10:00:00.000Z",
+      type: "event_msg",
+      payload: { type: "user_message", message: text },
+    })}\n`);
   }
 }
 
@@ -1201,7 +1228,7 @@ describe("CodexAppServerHost", () => {
     expect(server.requests.find((request) => request.method === "turn/start")?.params).toMatchObject({
       input: [
         { type: "localImage", path: `/runtime-images/${first.sha256}` },
-        { type: "text", text: `<!-- llv:structured-user sha256=${firstContent.contentDigest} -->\ninspect` },
+        { type: "text", text: encodeCodexStructuredUserText("inspect", firstContent.contentDigest, null, null, deliveryDedup("image-start")) },
       ],
       clientUserMessageId: "image-start",
     });
@@ -1215,7 +1242,7 @@ describe("CodexAppServerHost", () => {
       expectedTurnId: "turn-1",
       input: [
         { type: "localImage", path: `/runtime-images/${second.sha256}` },
-        { type: "text", text: `<!-- llv:structured-user sha256=${secondContent.contentDigest} -->\n` },
+        { type: "text", text: encodeCodexStructuredUserText("", secondContent.contentDigest, null, null, deliveryDedup("image-steer")) },
       ],
       clientUserMessageId: "image-steer",
     });
@@ -1364,7 +1391,7 @@ describe("CodexAppServerHost", () => {
     expect(steer.params).toMatchObject({
       expectedTurnId: "turn-1",
       clientUserMessageId: "delivery-two",
-      input: [{ type: "text", text: "<!-- llv:structured-user -->\nsteer" }],
+      input: [{ type: "text", text: encodeCodexStructuredUserText("steer", undefined, null, null, deliveryDedup("delivery-two")) }],
     });
 
     server.request("approval-1", "item/commandExecution/requestApproval", { command: "touch allowed" });
@@ -1881,6 +1908,144 @@ describe("CodexAppServerHost", () => {
     });
     expect(server.requests.some((request) => request.method === "turn/start" || request.method === "turn/steer")).toBeFalse();
     await host.release();
+  });
+
+  test("delivery success with a lost confirmation and repeated respawns writes one recipient user record (#1366)", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-recipient-dedup-"));
+    const transcriptPath = path.join(directory, "delivery-thread.jsonl");
+    fs.writeFileSync(transcriptPath, "");
+    const entry = { id: "operation-recipient-dedup", text: "apply the approved change" };
+    const servers: FakeAppServer[] = [];
+    let confirmationTimeouts = 0;
+    const deliver = async (start: boolean): Promise<void> => {
+      const server = new FakeAppServer("delivery-thread", "delivery-thread");
+      server.threadPath = transcriptPath;
+      server.persistUserMessages = true;
+      server.autoCompleteUserMessage = false;
+      servers.push(server);
+      const options = {
+        cwd: "/repo",
+        eventStore: new MemoryEventStore(),
+        spawnProcess: fakeSpawn(server),
+        deliveryConfirmationTimeoutMs: 5,
+        shutdownGraceMs: 1,
+      };
+      const host = start
+        ? await CodexAppServerHost.start(options)
+        : await CodexAppServerHost.adopt("delivery-thread", options);
+      try {
+        await host.send(entry);
+      } catch (error) {
+        expect(String(error)).toContain("delivery confirmation timed out");
+        confirmationTimeouts += 1;
+      } finally {
+        await host.release();
+      }
+    };
+
+    try {
+      await deliver(true);
+      for (let retry = 0; retry < 3; retry += 1) await deliver(false);
+      const userRecords = fs.readFileSync(transcriptPath, "utf8").trim().split("\n")
+        .map((line) => JSON.parse(line) as { payload?: { type?: string } })
+        .filter((record) => record.payload?.type === "user_message");
+      expect(userRecords).toHaveLength(1);
+      expect(confirmationTimeouts).toBe(1);
+      expect(servers.flatMap((server) => server.requests)
+        .filter((request) => request.method === "turn/start" || request.method === "turn/steer"))
+        .toHaveLength(1);
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("an unreadable recipient transcript cannot authorize a redelivery (#1366)", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-recipient-dedup-unreadable-"));
+    const transcriptPath = path.join(directory, "delivery-thread.jsonl");
+    fs.symlinkSync(path.basename(transcriptPath), transcriptPath);
+    const server = new FakeAppServer("delivery-thread");
+    server.threadPath = transcriptPath;
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+    });
+    try {
+      await expect(host.send({ id: "operation-unreadable-dedup", text: "deliver once" }))
+        .rejects.toThrow("recipient transcript is unavailable for delivery deduplication");
+      expect(server.requests.some((request) => request.method === "turn/start" || request.method === "turn/steer"))
+        .toBeFalse();
+    } finally {
+      await host.release();
+      fs.unlinkSync(transcriptPath);
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("a malformed recipient dedup record cannot authorize a redelivery (#1366)", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-recipient-dedup-malformed-"));
+    const transcriptPath = path.join(directory, "delivery-thread.jsonl");
+    const operationId = "operation-malformed-dedup";
+    fs.writeFileSync(
+      transcriptPath,
+      `{"payload":{"type":"user_message","message":"<!-- llv:structured-user dedup=${deliveryDedup(operationId)} -->\\n`,
+    );
+    const server = new FakeAppServer("delivery-thread");
+    server.threadPath = transcriptPath;
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+    });
+    try {
+      await expect(host.send({ id: operationId, text: "deliver once" }))
+        .rejects.toThrow("recipient transcript is unavailable for delivery deduplication");
+      expect(server.requests.some((request) => request.method === "turn/start" || request.method === "turn/steer"))
+        .toBeFalse();
+    } finally {
+      await host.release();
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("recipient dedup finds a delivered operation before the bounded turn tail (#1366)", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-recipient-dedup-prefix-"));
+    const transcriptPath = path.join(directory, "delivery-thread.jsonl");
+    const operationId = "operation-before-rollout-tail";
+    const text = "already delivered before a large transcript tail";
+    const delivered = JSON.stringify({
+      timestamp: "t1",
+      type: "event_msg",
+      payload: {
+        type: "user_message",
+        message: encodeCodexStructuredUserText(text, undefined, null, null, deliveryDedup(operationId)),
+      },
+    });
+    const filler = JSON.stringify({
+      timestamp: "t2",
+      type: "event_msg",
+      payload: { type: "agent_message", message: "x".repeat(16 * 1024 * 1024 + 1024) },
+    });
+    fs.writeFileSync(transcriptPath, `${delivered}\n${filler}\n`);
+    const server = new FakeAppServer("delivery-thread", "delivery-thread");
+    server.threadPath = transcriptPath;
+    server.hydratedReadError = "list_turns is not supported yet";
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+    });
+    try {
+      expect(await host.send({ id: operationId, text })).toEqual({
+        outcome: "turn-started",
+        turnId: operationId,
+      });
+      expect(server.requests.some((request) => request.method === "turn/start" || request.method === "turn/steer"))
+        .toBeFalse();
+    } finally {
+      await host.release();
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   test("keeps a send pending until the matching user item is persisted", async () => {

@@ -1724,9 +1724,12 @@ function terminalDeliveryState(
   return delivery?.state === "delivered" || delivery?.state === "failed" ? delivery.state : null;
 }
 
-function migrationDeliveryCancellationIsAbsorbing(delivery: HeldDelivery): boolean {
+const OPERATOR_DISCARDED_DELIVERY_REASON = "delivery-discarded";
+
+function terminalDeliveryFailureIsAbsorbing(delivery: HeldDelivery): boolean {
   return delivery.state === "failed"
-    && delivery.error?.startsWith(MIGRATION_DELIVERY_CANCELLATION_PREFIX) === true;
+    && (delivery.error === OPERATOR_DISCARDED_DELIVERY_REASON
+      || delivery.error?.startsWith(MIGRATION_DELIVERY_CANCELLATION_PREFIX) === true);
 }
 
 /**
@@ -1756,6 +1759,54 @@ function syncDeliveryOperationOwnerState(
     : disposition ?? owner.terminalDisposition ?? null;
   owner.terminalReason = delivery.error ?? owner.terminalReason ?? null;
   owner.settledAt = delivery.deliveredAt ?? owner.settledAt ?? now();
+}
+
+function placeDeliveryForRetryInFile(
+  file: RegistryFile,
+  delivery: HeldDelivery,
+  allowUncertain: boolean,
+): HeldDelivery {
+  if (delivery.state === "delivered") return delivery;
+  if (delivery.state === "delivery-uncertain" && !allowUncertain) {
+    throw new Error("uncertain delivery requires an explicit client retry");
+  }
+  if (allowUncertain && delivery.state !== "delivery-uncertain") {
+    throw new Error("delivery outcome is already resolved");
+  }
+  const conversation = file.conversations[resolveConversationAlias(file, delivery.conversationId)];
+  const paths = new Set([conversation?.generations.at(-1)?.path]
+    .filter((pathname): pathname is string => Boolean(pathname)));
+  const signature = conversation ? migrationReadinessSignature(file, conversation.engine, paths) : "";
+  const migrationBlocksDelivery = conversation?.migration
+    && ["waiting-turn", "requested", "preparing", "successor-starting", "verifying"]
+      .includes(conversation.migration.phase);
+  if (migrationBlocksDelivery) {
+    delivery.state = "held";
+    delivery.generationId = null;
+    delivery.assignedAt = null;
+    delivery.deliveredAt = null;
+    delivery.error = null;
+    syncDeliveryOperationOwnerState(file, delivery);
+    advanceMigrationScopeRevision(file, conversation.engine, signature, paths);
+    return delivery;
+  }
+  const current = conversation?.generations.at(-1);
+  if (!current) {
+    delivery.state = "failed";
+    delivery.deliveredAt = null;
+    delivery.error = "delivery target is unavailable and remains recoverable";
+    syncDeliveryOperationOwnerState(file, delivery);
+    if (conversation) advanceMigrationScopeRevision(file, conversation.engine, signature, paths);
+    return delivery;
+  }
+  delivery.state = "assigned";
+  delivery.generationId = current.id;
+  delivery.assignedAt = now();
+  delivery.deliveredAt = null;
+  delivery.error = null;
+  syncDeliveryOperationOwnerState(file, delivery);
+  advanceMigrationScopeRevision(file, conversation.engine, signature, paths);
+  return delivery;
 }
 
 /** Strict initial-message ownership. The idempotency key, operation id, and
@@ -7149,7 +7200,7 @@ export class AgentRegistry {
     return this.mutate((file) => {
       const delivery = file.heldDeliveries[id];
       if (!delivery) throw new Error("held delivery is unknown");
-      if (delivery.state === "delivered" || migrationDeliveryCancellationIsAbsorbing(delivery)) {
+      if (delivery.state === "delivered" || terminalDeliveryFailureIsAbsorbing(delivery)) {
         return clone(delivery);
       }
       const conversation = file.conversations[resolveConversationAlias(file, delivery.conversationId)];
@@ -7211,7 +7262,7 @@ export class AgentRegistry {
         if (!delivery || delivery.state === "delivered") return delivery ? clone(delivery) : null;
         const retryRecovered = delivery.state === "failed"
           && outcome.state === "delivered"
-          && !migrationDeliveryCancellationIsAbsorbing(delivery);
+          && !terminalDeliveryFailureIsAbsorbing(delivery);
         if (delivery.state !== "delivery-uncertain" && !retryRecovered) return null;
         const conversation = file.conversations[canonicalId];
         const paths = new Set([conversation?.generations.at(-1)?.path].filter((pathname): pathname is string => Boolean(pathname)));
@@ -7258,6 +7309,75 @@ export class AgentRegistry {
     return this.placeDeliveryForRetry(id, true);
   }
 
+  /** Re-arms the reservation owned by one unknown-fate operation (#1226).
+      The operation, client message id, delivery id, and admission clock stay
+      unchanged, so engine dedup and the operator-attention projection keep one
+      identity across a lost HTTP response or repeated click. */
+  retryUncertainDeliveryForOperation(operationId: string): HeldDelivery | null {
+    return this.mutate((file) => {
+      const owner = file.deliveryOperationOwners[operationId];
+      const delivery = owner
+        ? file.heldDeliveries[owner.deliveryId]
+        : Object.values(file.heldDeliveries).find((candidate) => candidate.command.operationId === operationId);
+      if (!delivery || delivery.command.operationId !== operationId) return null;
+      /* Network replay after the first mutation converges on the same parked or
+         assigned reservation. A terminal unverified settlement is the same
+         unknown-fate message after its receipt deadline; it may re-arm only
+         under this unchanged identity. Delivered, discarded, and proven-lost
+         outcomes remain terminal. */
+      const unverifiedFailure = delivery.state === "failed"
+        && owner?.terminalDisposition === "unverified";
+      if (delivery.state !== "delivery-uncertain" && !unverifiedFailure) return clone(delivery);
+      if (unverifiedFailure) delivery.state = "delivery-uncertain";
+      return clone(placeDeliveryForRetryInFile(file, delivery, true));
+    });
+  }
+
+  /** Terminalizes the reservation after the runtime journal has fenced its
+      operation. This includes a never-actuated hold and an unverified failure
+      the operator explicitly chose to discard. */
+  discardDeliveryForOperation(
+    conversationId: ViewerConversationId,
+    operationId: string,
+    reason: string,
+    disposition: Extract<DeliveryTerminalDisposition, "lost" | "unverified">,
+  ): HeldDelivery | null {
+    return this.mutate((file) => {
+      const canonicalId = resolveConversationAlias(file, conversationId);
+      const owner = file.deliveryOperationOwners[operationId];
+      const delivery = owner
+        ? file.heldDeliveries[owner.deliveryId]
+        : Object.values(file.heldDeliveries).find((candidate) =>
+          candidate.command.operationId === operationId
+          && resolveConversationAlias(file, candidate.conversationId) === canonicalId);
+      if (!delivery
+        || delivery.command.operationId !== operationId
+        || resolveConversationAlias(file, delivery.conversationId) !== canonicalId) return null;
+      if (delivery.state === "delivered") return clone(delivery);
+      const discardable = delivery.state === "held"
+        || delivery.state === "assigned"
+        || delivery.state === "delivery-uncertain"
+        || (delivery.state === "failed"
+          && (delivery.error === reason || owner?.terminalDisposition === "unverified"));
+      if (!discardable) return null;
+      const conversation = file.conversations[canonicalId];
+      const paths = new Set([conversation?.generations.at(-1)?.path]
+        .filter((pathname): pathname is string => Boolean(pathname)));
+      const signature = conversation ? migrationReadinessSignature(file, conversation.engine, paths) : "";
+      delivery.state = "failed";
+      delivery.text = "";
+      delivery.generationId = null;
+      delivery.assignedAt = null;
+      delivery.deliveredAt = null;
+      delivery.error = reason.slice(0, 240);
+      failInitialSpawnReceiptForDelivery(file, delivery);
+      syncDeliveryOperationOwnerState(file, delivery, disposition);
+      if (conversation) advanceMigrationScopeRevision(file, conversation.engine, signature, paths);
+      compactDeliveryReservations(file, delivery.conversationId, this.now());
+      return clone(delivery);
+    });
+  }
+
   requeueUnactuatedDelivery(id: string): HeldDelivery {
     return this.placeDeliveryForRetry(id, true);
   }
@@ -7266,45 +7386,7 @@ export class AgentRegistry {
     return this.mutate((file) => {
       const delivery = file.heldDeliveries[id];
       if (!delivery) throw new Error("held delivery is unknown");
-      if (delivery.state === "delivered") return clone(delivery);
-      if (delivery.state === "delivery-uncertain" && !allowUncertain) {
-        throw new Error("uncertain delivery requires an explicit client retry");
-      }
-      if (allowUncertain && delivery.state !== "delivery-uncertain") {
-        throw new Error("delivery outcome is already resolved");
-      }
-      const conversation = file.conversations[resolveConversationAlias(file, delivery.conversationId)];
-      const paths = new Set([conversation?.generations.at(-1)?.path].filter((pathname): pathname is string => Boolean(pathname)));
-      const signature = conversation ? migrationReadinessSignature(file, conversation.engine, paths) : "";
-      const migrationBlocksDelivery = conversation?.migration
-        && ["waiting-turn", "requested", "preparing", "successor-starting", "verifying"].includes(conversation.migration.phase);
-      if (migrationBlocksDelivery) {
-        delivery.state = "held";
-        delivery.generationId = null;
-        delivery.assignedAt = null;
-        delivery.deliveredAt = null;
-        delivery.error = null;
-        syncDeliveryOperationOwnerState(file, delivery);
-        if (conversation) advanceMigrationScopeRevision(file, conversation.engine, signature, paths);
-        return clone(delivery);
-      }
-      const current = conversation?.generations.at(-1);
-      if (!current) {
-        delivery.state = "failed";
-        delivery.deliveredAt = null;
-        delivery.error = "delivery target is unavailable and remains recoverable";
-        syncDeliveryOperationOwnerState(file, delivery);
-        if (conversation) advanceMigrationScopeRevision(file, conversation.engine, signature, paths);
-        return clone(delivery);
-      }
-      delivery.state = "assigned";
-      delivery.generationId = current.id;
-      delivery.assignedAt = now();
-      delivery.deliveredAt = null;
-      delivery.error = null;
-      syncDeliveryOperationOwnerState(file, delivery);
-      if (conversation) advanceMigrationScopeRevision(file, conversation.engine, signature, paths);
-      return clone(delivery);
+      return clone(placeDeliveryForRetryInFile(file, delivery, allowUncertain));
     });
   }
 

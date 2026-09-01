@@ -532,7 +532,7 @@ test("issue 1268: the predecessor leaves success non-terminal until the staged r
   store.close();
 });
 
-test("issue 1268: terminal success requires runtime-host hand-off evidence even when generation tracking is unavailable", async () => {
+test("issue 1412: a failed runtime-host handoff settles terminal and clears deployment admission", async () => {
   const store = journal("host-successor-proof-required");
   const adapter = new FakeDeploymentAdapter();
   adapter.verifyHostFailure = new Error("runtime-host startup evidence is unavailable");
@@ -546,13 +546,20 @@ test("issue 1268: terminal success requires runtime-host hand-off evidence even 
   await coordinator.waitForDeployment(receipt.deploymentId);
 
   expect(store.viewerDeployment(receipt.deploymentId)).toMatchObject({
-    phase: "host-handoff",
-    terminal: false,
+    phase: "failed",
+    terminal: true,
     error: "runtime-host startup evidence is unavailable",
   });
+  expect(store.activeViewerDeployment()).toBeNull();
   expect(adapter.calls).toContain(
     `verify-host-successor:${store.viewerDeployment(receipt.deploymentId)?.candidate?.image}:${"b".repeat(40)}`,
   );
+  const next = await coordinator.requestViewerDeployment({
+    idempotencyKey: "deploy-after-host-successor-proof-failure",
+    revision: "c".repeat(40),
+  });
+  expect(next).toMatchObject({ state: "accepted", replayed: false, revision: "c".repeat(40) });
+  if (next.state === "accepted") await coordinator.waitForDeployment(next.deploymentId);
   store.close();
 });
 
@@ -620,10 +627,7 @@ test("issue 1216: the host-handoff step narrates the decision it made", async ()
   store.close();
 });
 
-/* A staging failure parks the deployment in a retryable `host-handoff` phase
-   and returns normally, so nothing printed it: the host stayed on the old
-   generation with no line in the log to say so. */
-test("issue 1216: a failed successor staging is printed, not only journalled", async () => {
+test("issue 1412: a promote whose successor staging fails is terminal and logged", async () => {
   const store = journal("host-handoff-failure-log");
   const adapter = new FakeDeploymentAdapter();
   adapter.stageHostFailure = new Error("runtime-host predecessor container is unavailable for successor staging");
@@ -637,9 +641,18 @@ test("issue 1216: a failed successor staging is printed, not only journalled", a
   if (receipt.state !== "accepted") throw new Error("deployment was not accepted");
   await coordinator.waitForDeployment(receipt.deploymentId);
 
-  expect(store.viewerDeployment(receipt.deploymentId)).toMatchObject({ phase: "host-handoff", terminal: false });
+  const status = store.viewerDeployment(receipt.deploymentId);
+  expect(status).toMatchObject({
+    phase: "failed",
+    terminal: true,
+    error: "runtime-host predecessor container is unavailable for successor staging",
+  });
+  if (!status?.candidate) throw new Error("published Viewer candidate is missing");
+  expect(adapter.current).toEqual(status.candidate);
+  expect(adapter.calls.findIndex((call) => call.startsWith("promote:")))
+    .toBeLessThan(adapter.calls.findIndex((call) => call.startsWith("stage-host-successor:")));
   expect(lines).toContain(
-    `[viewer deployment] ${receipt.deploymentId} host-handoff failed and stays retryable: runtime-host predecessor container is unavailable for successor staging`,
+    `[viewer deployment] ${receipt.deploymentId} host-handoff failed: runtime-host predecessor container is unavailable for successor staging`,
   );
   store.close();
 });
@@ -718,7 +731,7 @@ test("issue 521 review: consecutive same-revision deployments stage each distinc
   store.close();
 });
 
-test("issue 518: failed successor staging never hands the host back to the stale image", async () => {
+test("issue 1412: terminal successor staging failure cannot replay into hidden success", async () => {
   const store = journal("host-staging-failed");
   const adapter = new FakeDeploymentAdapter();
   adapter.stageHostFailure = new Error("docker tag failed");
@@ -732,36 +745,29 @@ test("issue 518: failed successor staging never hands the host back to the stale
   if (receipt.state !== "accepted") throw new Error("deployment was not accepted");
   await coordinator.waitForDeployment(receipt.deploymentId);
 
-  /* The healthy Viewer remains promoted while the deployment stays in its
-     durable retry phase. A replay resumes successor staging from that phase
-     without rebuilding or promoting another candidate. */
-  expect(store.viewerDeployment(receipt.deploymentId)).toMatchObject({
-    phase: "host-handoff",
-    terminal: false,
+  const failed = store.viewerDeployment(receipt.deploymentId);
+  expect(failed).toMatchObject({
+    phase: "failed",
+    terminal: true,
     error: "docker tag failed",
   });
+  if (!failed?.candidate) throw new Error("published Viewer candidate is missing");
+  expect(adapter.current).toEqual(failed.candidate);
   expect(handoffs).toEqual([]);
   const buildCalls = adapter.calls.filter((call) => call.startsWith("build:"));
+  const stageCalls = adapter.calls.filter((call) => call.startsWith("stage-host-successor:"));
   adapter.stageHostFailure = null;
   const replay = await coordinator.requestViewerDeployment({
     idempotencyKey: "deploy-host-staging-failed",
     revision: "b".repeat(40),
   });
   expect(replay).toMatchObject({ state: "accepted", replayed: true, deploymentId: receipt.deploymentId });
-  const handedOff = await coordinator.waitForDeployment(receipt.deploymentId);
-  if (!handedOff?.candidate) throw new Error("handoff candidate is missing");
-  await recoverHostHandoffAsSuccessor(
-    store,
-    adapter,
-    receipt.deploymentId,
-    handedOff.candidate,
-    { pid: 11, startIdentity: "11:recovery" },
-  );
+  await coordinator.waitForDeployment(receipt.deploymentId);
 
-  expect(store.viewerDeployment(receipt.deploymentId)).toMatchObject({ phase: "succeeded", terminal: true, error: null });
+  expect(store.viewerDeployment(receipt.deploymentId)).toEqual(failed);
   expect(adapter.calls.filter((call) => call.startsWith("build:"))).toEqual(buildCalls);
-  expect(adapter.calls.filter((call) => call.startsWith("stage-host-successor:"))).toHaveLength(2);
-  expect(handoffs).toEqual([receipt.deploymentId]);
+  expect(adapter.calls.filter((call) => call.startsWith("stage-host-successor:"))).toEqual(stageCalls);
+  expect(handoffs).toEqual([]);
   store.close();
 });
 

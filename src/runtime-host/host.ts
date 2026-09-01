@@ -1,4 +1,4 @@
-import { RuntimeIdempotencyConflictError, type RuntimeEvent, type RuntimeEventInput, type RuntimeOperationCommand, type RuntimeReceiptStatus, type RuntimeSocketRequest, type RuntimeSocketResponse } from "@/lib/runtime/contracts";
+import { RUNTIME_RECEIPT_STATUSES, RuntimeIdempotencyConflictError, type RuntimeEvent, type RuntimeEventInput, type RuntimeOperationCommand, type RuntimeReceiptStatus, type RuntimeSocketRequest, type RuntimeSocketResponse } from "@/lib/runtime/contracts";
 import { structuredHostsEnabled } from "@/lib/runtime/flags";
 import { consumeRuntimeEvent, type RuntimeConsumerPorts } from "@/lib/runtime/consumers";
 
@@ -117,6 +117,15 @@ export class RuntimeHost {
         result = currentRetryLeaf
           ? this.journal.currentRetryResult(String(request.params?.operationId ?? ""))
           : this.journal.operationResult(String(request.params?.operationId ?? ""));
+      } else if (request.method === "operation-delivery-action") {
+        const action = request.params?.action;
+        if (action !== "discard" && action !== "retry") {
+          throw new Error("runtime delivery action is invalid");
+        }
+        result = this.journal.claimDeliveryAction(
+          String(request.params?.operationId ?? ""),
+          action,
+        );
       } else if (request.method === "operation-retry") {
         if (!this.structuredHosts) throw new Error("structured hosts are disabled");
         const nextIdempotencyKey = request.params?.nextIdempotencyKey;
@@ -169,10 +178,17 @@ export class RuntimeHost {
           throw new Error("runtime operation transition status is invalid");
         }
         const details = request.params?.details;
+        const fromStatuses = request.params?.fromStatuses;
+        if (fromStatuses !== undefined && (!Array.isArray(fromStatuses)
+          || fromStatuses.some((candidate) => typeof candidate !== "string"
+            || !RUNTIME_RECEIPT_STATUSES.includes(candidate as RuntimeReceiptStatus)))) {
+          throw new Error("runtime operation transition fence is invalid");
+        }
         result = this.journal.transitionOperation(
           String(request.params?.operationId ?? ""),
           status as Exclude<RuntimeReceiptStatus, "pending">,
           details && typeof details === "object" ? details as { turnId?: string | null; queuePosition?: number | null; reason?: string | null } : {},
+          fromStatuses ? { fromStatuses: fromStatuses as RuntimeReceiptStatus[] } : {},
         );
       } else if (request.method === "viewer-deployment-request") {
         if (!this.deployments) throw new Error("viewer deployments are disabled");
