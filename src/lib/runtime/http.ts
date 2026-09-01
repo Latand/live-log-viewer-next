@@ -452,6 +452,9 @@ export async function handleRuntimeDiscard(
     if (operation.receipt.kind !== "send" && operation.receipt.kind !== "steer") {
       return NextResponse.json({ error: "runtime operation does not support discard" }, { status: 409 });
     }
+    if (!operation.receipt.conversationId.startsWith("conversation_")) {
+      return NextResponse.json({ error: "runtime operation has no delivery reservation" }, { status: 409 });
+    }
     const registry = (dependencies.registry ?? agentRegistry)();
     const presentationOperationId = operation.receipt.presentationOperationId ?? operation.operationId;
     const deliveryRecord = sendReceiptFor(registry.readOnlySnapshot(), presentationOperationId);
@@ -487,6 +490,9 @@ export async function handleRuntimeDiscard(
         );
         if (deliveryRecord?.duplicateRisk !== true) disposition = "lost";
       } catch (error) {
+        if (error instanceof Error && /runtime delivery (?:discard|retry) already won/.test(error.message)) {
+          throw error;
+        }
         const moved = await client.operationStatus(operation.operationId);
         if (!moved) throw error;
         operation = moved;
@@ -507,9 +513,13 @@ export async function handleRuntimeDiscard(
       && !(operation.receipt.status === "failed" && operation.receipt.reason === SEND_DISCARDED_REASON)
       && !(deliveryRecord?.state === "failed" && deliveryRecord.duplicateRisk)) {
       return NextResponse.json({ error: "delivery outcome is already resolved" }, { status: 409 });
-    }
-    if (!operation.receipt.conversationId.startsWith("conversation_")) {
-      return NextResponse.json({ error: "runtime operation has no delivery reservation" }, { status: 409 });
+    } else {
+      const claim = await client.claimDeliveryAction(operation.operationId, "discard");
+      if (claim.winner !== "discard") {
+        return NextResponse.json({
+          error: `runtime delivery ${claim.winner} already won; discard refused`,
+        }, { status: 409 });
+      }
     }
     registry.discardDeliveryForOperation(
       operation.receipt.conversationId as `conversation_${string}`,
@@ -535,7 +545,12 @@ export async function handleRuntimeDiscard(
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "runtime operation discard failed";
-    return NextResponse.json({ error: message }, { status: /unknown/.test(message) ? 404 : 503 });
+    const status = /unknown/.test(message)
+      ? 404
+      : /runtime delivery (?:discard|retry) already won|cannot discard after|moved before its transition/.test(message)
+        ? 409
+        : 503;
+    return NextResponse.json({ error: message }, { status });
   }
 }
 
@@ -603,7 +618,10 @@ export async function handleRuntimeRetry(
       return NextResponse.json({ error: "runtime operation does not support retry" }, { status: 409 });
     }
     if (previous.receipt.status === "failed" && previous.receipt.reason === SEND_DISCARDED_REASON) {
-      return NextResponse.json({ error: "discarded runtime operations cannot retry" }, { status: 409 });
+      const claim = await client.claimDeliveryAction(previous.operationId, "retry");
+      return NextResponse.json({
+        error: `runtime delivery ${claim.winner} already won; retry refused`,
+      }, { status: 409 });
     }
     const registry = (dependencies.registry ?? agentRegistry)();
     const deliverySnapshot = registry.readOnlySnapshot();
@@ -634,6 +652,23 @@ export async function handleRuntimeRetry(
           error: "runtime delivery is being handed over to the agent",
           operationId,
           receipt: runtimePresentationReceipt(previous.receipt),
+        }, { status: 409 });
+      }
+      if (!deliveryRecord) {
+        return NextResponse.json({ error: "runtime operation has no delivery reservation" }, { status: 409 });
+      }
+      if (deliveryRecord.state === "delivered"
+        || (deliveryRecord.state === "failed" && deliveryRecord.resend !== "verify-first")) {
+        return NextResponse.json({
+          operationId,
+          receipt: runtimeReceiptForSend(deliveryRecord),
+          send: deliveryRecord,
+        });
+      }
+      const claim = await client.claimDeliveryAction(operationId, "retry");
+      if (claim.winner !== "retry") {
+        return NextResponse.json({
+          error: `runtime delivery ${claim.winner} already won; retry refused`,
         }, { status: 409 });
       }
       const reservation = registry.retryUncertainDeliveryForOperation(operationId);
@@ -758,7 +793,7 @@ export async function handleRuntimeRetry(
     let status = 503;
     if (error instanceof RuntimeHostUnavailableError && error.code === "idempotency-conflict") status = 409;
     else if (/unknown/.test(message)) status = 404;
-    else if (/only failed|terminal failed|fresh idempotency|does not support/.test(message)) status = 409;
+    else if (/only failed|terminal failed|fresh idempotency|does not support|runtime delivery (?:discard|retry) already won/.test(message)) status = 409;
     const retryable = message === "structured recovery ownership changed before retry admission";
     return NextResponse.json({ error: message, ...(retryable ? { retryable: true } : {}) }, { status });
   }

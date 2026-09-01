@@ -736,6 +736,8 @@ test("composer retry after delivery-uncertain re-arms one operation and cannot d
     operationStatus: async (id: string, options?: { currentRetryLeaf?: boolean }) => options?.currentRetryLeaf
       ? journal.currentRetryResult(id)
       : journal.operationResult(id),
+    claimDeliveryAction: async (...args: Parameters<RuntimeHostClient["claimDeliveryAction"]>) =>
+      journal.claimDeliveryAction(...args),
     retryOperation: async (...args: Parameters<RuntimeHostClient["retryOperation"]>) => journal.retryOperation(...args),
   } as RuntimeHostClient;
   let kicks = 0;
@@ -777,6 +779,236 @@ test("composer retry after delivery-uncertain re-arms one operation and cannot d
   }, () => host).drain();
   expect(ledger.writes).toHaveLength(1);
   expect(journal.operationResult(operationId)?.receipt.status).toBe("delivered");
+
+  journal.close();
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test("a concurrent retry winner refuses the discard that read stale uncertain state (#1366 #1226)", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-delivery-action-retry-wins-"));
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const conversation = registry.ensureConversation("codex", path.join(directory, "recipient.jsonl"), "default");
+  const operationId = ["operation", "action", "retry-wins"].join("-");
+  const messageId = ["message", "action", "retry-wins"].join("-");
+  const text = "deliver once after the retry decision";
+  const reservation = registry.holdDelivery(
+    conversation.id,
+    text,
+    messageId,
+    "text",
+    [],
+    null,
+    { operationId, kind: "send", policy: "queue" },
+  );
+  registry.beginDeliveryAttempt(reservation.id, reservation.generationId!);
+
+  const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
+  journal.append({
+    scope: { type: "session", id: conversation.id },
+    kind: "session-status",
+    payload: {
+      conversationId: conversation.id,
+      sessionKey: { engine: "codex", sessionId: "delivery-action-retry-wins" },
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "idle",
+      provenance: "structured",
+      capabilities: { steer: true, structuredAttention: true },
+    },
+  });
+  journal.executeOperation({
+    kind: "send",
+    operationId,
+    idempotencyKey: messageId,
+    conversationId: conversation.id,
+    text,
+    policy: "queue",
+  });
+  journal.transitionOperation(operationId, "delivering");
+  journal.transitionOperation(operationId, "uncertain", { reason: "confirmation timed out" });
+
+  let releaseDiscardRead!: () => void;
+  const discardReadMayReturn = new Promise<void>((resolve) => { releaseDiscardRead = resolve; });
+  let markDiscardRead!: () => void;
+  const discardRead = new Promise<void>((resolve) => { markDiscardRead = resolve; });
+  let statusReads = 0;
+  const client = {
+    operationStatus: async (id: string, options?: { currentRetryLeaf?: boolean }) => {
+      const result = options?.currentRetryLeaf
+        ? journal.currentRetryResult(id)
+        : journal.operationResult(id);
+      statusReads += 1;
+      if (statusReads === 1) {
+        markDiscardRead();
+        await discardReadMayReturn;
+      }
+      return result;
+    },
+    retryOperation: async (...args: Parameters<RuntimeHostClient["retryOperation"]>) =>
+      journal.retryOperation(...args),
+    claimDeliveryAction: async (...args: Parameters<RuntimeHostClient["claimDeliveryAction"]>) =>
+      journal.claimDeliveryAction(...args),
+    transitionOperation: async (...args: Parameters<RuntimeHostClient["transitionOperation"]>) =>
+      journal.transitionOperation(...args),
+  } as RuntimeHostClient;
+  const ledger = createFakeDeliveryLedger();
+  const queue = new StructuredDeliveryQueue({
+    effects: async (kinds, afterEventSeq) => journal.effectBatch(100, kinds, afterEventSeq),
+    transition: async (id, status, details) => { journal.transitionOperation(id, status, details); },
+    status: async (id) => journal.operationResult(id)?.receipt ?? null,
+    settled: () => false,
+  }, () => new FakeEngineHost(ledger));
+  let drain = Promise.resolve();
+
+  const discard = handleRuntimeDiscard(new NextRequest(
+    `http://127.0.0.1/api/runtime/operations/${operationId}`,
+    { method: "DELETE", headers: { host: "127.0.0.1" } },
+  ), operationId, {
+    enabled: () => true,
+    client: () => client,
+    registry: () => registry,
+    kick: () => { throw new Error("discard must not wake delivery"); },
+  });
+  await discardRead;
+
+  const retry = await handleRuntimeRetry(new NextRequest(
+    `http://127.0.0.1/api/runtime/operations/${operationId}`,
+    {
+      method: "POST",
+      headers: { host: "127.0.0.1", "content-type": "application/json" },
+      body: JSON.stringify({ action: "retry-uncertain" }),
+    },
+  ), operationId, {
+    enabled: () => true,
+    client: () => client,
+    registry: () => registry,
+    kick: () => { drain = queue.drain(); },
+  });
+  await drain;
+  releaseDiscardRead();
+  const refusedDiscard = await discard;
+
+  expect(retry.status).toBe(202);
+  expect(refusedDiscard.status).toBe(409);
+  expect(await refusedDiscard.json()).toMatchObject({ error: expect.stringMatching(/retry.*won/i) });
+  expect(ledger.writes).toHaveLength(1);
+  expect(journal.operationResult(operationId)?.receipt.status).toBe("delivered");
+
+  journal.close();
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test("a retry reaching actuation while discard is mid-settlement names the durable discard winner (#1366 #1226)", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-delivery-action-discard-wins-"));
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const conversation = registry.ensureConversation("codex", path.join(directory, "recipient.jsonl"), "default");
+  const operationId = ["operation", "action", "discard-wins"].join("-");
+  const messageId = ["message", "action", "discard-wins"].join("-");
+  const text = "discard before this can reach the recipient";
+  const reservation = registry.holdDelivery(
+    conversation.id,
+    text,
+    messageId,
+    "text",
+    [],
+    null,
+    { operationId, kind: "send", policy: "queue" },
+  );
+  registry.beginDeliveryAttempt(reservation.id, reservation.generationId!);
+
+  const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
+  journal.append({
+    scope: { type: "session", id: conversation.id },
+    kind: "session-status",
+    payload: {
+      conversationId: conversation.id,
+      sessionKey: { engine: "codex", sessionId: "delivery-action-discard-wins" },
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "idle",
+      provenance: "structured",
+      capabilities: { steer: true, structuredAttention: true },
+    },
+  });
+  journal.executeOperation({
+    kind: "send",
+    operationId,
+    idempotencyKey: messageId,
+    conversationId: conversation.id,
+    text,
+    policy: "queue",
+  });
+  journal.transitionOperation(operationId, "delivering");
+  journal.transitionOperation(operationId, "uncertain", { reason: "confirmation timed out" });
+
+  let releaseDiscardClaim!: () => void;
+  const discardClaimMayReturn = new Promise<void>((resolve) => { releaseDiscardClaim = resolve; });
+  let markDiscardClaimed!: () => void;
+  const discardClaimed = new Promise<void>((resolve) => { markDiscardClaimed = resolve; });
+  const actionClaims: string[] = [];
+  const client = {
+    operationStatus: async (id: string, options?: { currentRetryLeaf?: boolean }) => options?.currentRetryLeaf
+      ? journal.currentRetryResult(id)
+      : journal.operationResult(id),
+    claimDeliveryAction: async (...args: Parameters<RuntimeHostClient["claimDeliveryAction"]>) => {
+      actionClaims.push(args[1]);
+      const claim = journal.claimDeliveryAction(...args);
+      if (args[1] === "discard") {
+        markDiscardClaimed();
+        await discardClaimMayReturn;
+      }
+      return claim;
+    },
+    retryOperation: async (...args: Parameters<RuntimeHostClient["retryOperation"]>) =>
+      journal.retryOperation(...args),
+    transitionOperation: async (...args: Parameters<RuntimeHostClient["transitionOperation"]>) =>
+      journal.transitionOperation(...args),
+  } as RuntimeHostClient;
+
+  const discard = handleRuntimeDiscard(new NextRequest(
+    `http://127.0.0.1/api/runtime/operations/${operationId}`,
+    { method: "DELETE", headers: { host: "127.0.0.1" } },
+  ), operationId, {
+    enabled: () => true,
+    client: () => client,
+    registry: () => registry,
+    kick: () => { throw new Error("discard must not wake delivery"); },
+  });
+  await discardClaimed;
+
+  const refusedRetry = await handleRuntimeRetry(new NextRequest(
+    `http://127.0.0.1/api/runtime/operations/${operationId}`,
+    {
+      method: "POST",
+      headers: { host: "127.0.0.1", "content-type": "application/json" },
+      body: JSON.stringify({ action: "retry-uncertain" }),
+    },
+  ), operationId, {
+    enabled: () => true,
+    client: () => client,
+    registry: () => registry,
+    kick: () => { throw new Error("losing retry must not wake delivery"); },
+  });
+  releaseDiscardClaim();
+  const completedDiscard = await discard;
+
+  const ledger = createFakeDeliveryLedger();
+  await new StructuredDeliveryQueue({
+    effects: async (kinds, afterEventSeq) => journal.effectBatch(100, kinds, afterEventSeq),
+    transition: async (id, status, details) => { journal.transitionOperation(id, status, details); },
+    status: async (id) => journal.operationResult(id)?.receipt ?? null,
+    settled: (id) => sendIsSettled(registry.readOnlySnapshot(), id),
+  }, () => new FakeEngineHost(ledger)).drain();
+
+  expect(actionClaims).toEqual(["discard", "retry"]);
+  expect(completedDiscard.status).toBe(200);
+  expect(refusedRetry.status).toBe(409);
+  expect(await refusedRetry.json()).toMatchObject({ error: expect.stringMatching(/discard.*won/i) });
+  expect(registry.readOnlySnapshot().heldDeliveries[reservation.id]).toMatchObject({
+    state: "failed",
+    error: "delivery-discarded",
+  });
+  expect(ledger.writes).toEqual([]);
 
   journal.close();
   fs.rmSync(directory, { recursive: true, force: true });
@@ -827,6 +1059,8 @@ test("a terminalized unverified receipt still retries under its original identit
     operationStatus: async (id: string, options?: { currentRetryLeaf?: boolean }) => options?.currentRetryLeaf
       ? journal.currentRetryResult(id)
       : journal.operationResult(id),
+    claimDeliveryAction: async (...args: Parameters<RuntimeHostClient["claimDeliveryAction"]>) =>
+      journal.claimDeliveryAction(...args),
     retryOperation: async (...args: Parameters<RuntimeHostClient["retryOperation"]>) => {
       retryCalls += 1;
       if (retryCalls === 1) throw new Error("runtime host response was lost");
@@ -912,6 +1146,8 @@ test("discard terminalizes the visible receipt and fences every later delivery (
     operationStatus: async (id: string, options?: { currentRetryLeaf?: boolean }) => options?.currentRetryLeaf
       ? journal.currentRetryResult(id)
       : journal.operationResult(id),
+    claimDeliveryAction: async (...args: Parameters<RuntimeHostClient["claimDeliveryAction"]>) =>
+      journal.claimDeliveryAction(...args),
     retryOperation: async (...args: Parameters<RuntimeHostClient["retryOperation"]>) =>
       journal.retryOperation(...args),
     transitionOperation: async (...args: Parameters<RuntimeHostClient["transitionOperation"]>) =>

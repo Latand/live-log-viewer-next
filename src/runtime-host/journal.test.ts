@@ -1300,6 +1300,70 @@ test("a discarded send cannot be re-armed under either retry mode (#1226)", () =
   journal.close();
 });
 
+test("the delivery action winner survives a journal restart and fences low-level opposite actions (#1366 #1226)", () => {
+  const dir = sandbox("delivery-action-winner-restart");
+  const filename = path.join(dir, "events.sqlite");
+  const conversationId = ["conv", "delivery", "action", "restart"].join("-");
+  const discardOperationId = ["operation", "durable", "discard-winner"].join("-");
+  const retryOperationId = ["operation", "durable", "retry-winner"].join("-");
+  const journal = new RuntimeJournal(filename, { structuredHosts: true });
+  journal.append({
+    scope: runtimeScope("session", conversationId),
+    kind: "session-status",
+    payload: {
+      conversationId,
+      sessionKey: { engine: "codex", sessionId: "delivery-action-restart" },
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "idle",
+      provenance: "structured",
+      capabilities: { steer: true, structuredAttention: true },
+    },
+  });
+  for (const [operationId, idempotencyKey] of [
+    [discardOperationId, ["message", "durable", "discard-winner"].join("-")],
+    [retryOperationId, ["message", "durable", "retry-winner"].join("-")],
+  ] as const) {
+    journal.executeOperation({
+      kind: "send",
+      operationId,
+      idempotencyKey,
+      conversationId,
+      text: `settle ${operationId} once`,
+      policy: "queue",
+    });
+    journal.transitionOperation(operationId, "delivering");
+    journal.transitionOperation(operationId, "uncertain", { reason: "confirmation timed out" });
+  }
+  expect(journal.claimDeliveryAction(discardOperationId, "discard")).toMatchObject({
+    winner: "discard",
+    replayed: false,
+  });
+  expect(journal.claimDeliveryAction(retryOperationId, "retry")).toMatchObject({
+    winner: "retry",
+    replayed: false,
+  });
+  journal.close();
+
+  const reopened = new RuntimeJournal(filename, { structuredHosts: true });
+  expect(reopened.claimDeliveryAction(discardOperationId, "retry")).toMatchObject({
+    winner: "discard",
+    replayed: true,
+  });
+  expect(reopened.claimDeliveryAction(retryOperationId, "discard")).toMatchObject({
+    winner: "retry",
+    replayed: true,
+  });
+  expect(() => reopened.retryOperation(discardOperationId)).toThrow(/discard.*won/i);
+  expect(() => reopened.transitionOperation(
+    retryOperationId,
+    "failed",
+    { reason: "delivery-discarded" },
+    { fromStatuses: ["uncertain"] },
+  )).toThrow(/retry.*won/i);
+  reopened.close();
+});
+
 test("terminal delivery retry on a replacement host mints one fresh operation", () => {
   const dir = sandbox("fresh-terminal-retry");
   const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { structuredHosts: true });
@@ -2748,6 +2812,14 @@ test("structured queue controls cross the local runtime socket", async () => {
   expect((await client.operationStatus("op-socket-queue"))?.receipt.status).toBe("delivering");
   expect((await client.transitionOperation("op-socket-queue", "failed", { reason: "write failed" })).receipt.status).toBe("failed");
   expect(await client.effectBatch()).toEqual([]);
+  expect(await client.claimDeliveryAction("op-socket-queue", "retry")).toMatchObject({
+    winner: "retry",
+    replayed: false,
+  });
+  expect(await client.claimDeliveryAction("op-socket-queue", "discard")).toMatchObject({
+    winner: "retry",
+    replayed: true,
+  });
   expect((await client.retryOperation("op-socket-queue")).receipt.status).toBe("queued");
   expect(await client.effectBatch(["runtime.send", "runtime.steer"])).toHaveLength(1);
   expect((await client.transitionOperation("op-socket-queue", "delivering")).receipt.status).toBe("delivering");

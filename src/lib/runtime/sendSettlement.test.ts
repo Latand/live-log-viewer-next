@@ -73,6 +73,7 @@ function runtimeClient(journal: RuntimeJournal): RuntimeHostClient {
     command: async (command) => journal.executeOperation(command),
     operationStatus: async (operationId: string, options?: { currentRetryLeaf?: boolean }) =>
       (options?.currentRetryLeaf ? journal.currentRetryResult(operationId) : journal.operationResult(operationId)),
+    claimDeliveryAction: async (operationId, action) => journal.claimDeliveryAction(operationId, action),
     producerCursor: async (producerKind: string, eventKeyPrefix: string) =>
       journal.producerCursor(producerKind, eventKeyPrefix),
     effectBatch: async (kinds, afterEventSeq) => journal.effectBatch(100, kinds, afterEventSeq),

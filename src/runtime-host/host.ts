@@ -117,6 +117,15 @@ export class RuntimeHost {
         result = currentRetryLeaf
           ? this.journal.currentRetryResult(String(request.params?.operationId ?? ""))
           : this.journal.operationResult(String(request.params?.operationId ?? ""));
+      } else if (request.method === "operation-delivery-action") {
+        const action = request.params?.action;
+        if (action !== "discard" && action !== "retry") {
+          throw new Error("runtime delivery action is invalid");
+        }
+        result = this.journal.claimDeliveryAction(
+          String(request.params?.operationId ?? ""),
+          action,
+        );
       } else if (request.method === "operation-retry") {
         if (!this.structuredHosts) throw new Error("structured hosts are disabled");
         const nextIdempotencyKey = request.params?.nextIdempotencyKey;
