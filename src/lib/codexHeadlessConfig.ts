@@ -55,7 +55,10 @@ export function headlessCodexThreadConfig(
           ? configuredApproval
           : null;
       return [name, {
-        ...(name === "viewer" && viewerMissing ? server as JsonObject : {}),
+        /* A replacement app-server must receive the launch definition again.
+           Its predecessor owned the stdio child, so an enable flag alone
+           leaves a resumed thread with no connector process to call (#1346). */
+        ...(name === "viewer" ? server as JsonObject : {}),
         enabled: enabled.has(name),
         ...(approval ? { default_tools_approval_mode: approval } : {}),
       }];

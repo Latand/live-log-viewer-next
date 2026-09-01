@@ -13,7 +13,7 @@ test("headless Codex threads allow only the registered Viewer MCP server", () =>
     },
   })).toEqual({
     mcp_servers: {
-      viewer: { enabled: true, default_tools_approval_mode: "approve" },
+      viewer: { command: "agent-log-viewer-mcp", enabled: true, default_tools_approval_mode: "approve" },
       docs: { enabled: false },
     },
     features: { plugins: false, apps: false, multi_agent: false, realtime_conversation: true },
