@@ -465,8 +465,20 @@ export async function readCodexLimits(options: {
     // One validated projection, onto the candidate the rejection is about: the
     // transcript snapshot when it covers the rejection, otherwise the live
     // window a newer rejection belongs to.
-    const projected = (transcript.data ? rejectionReading(transcript.data, transcript.rejectedAt) : null)
-      ?? rejectionReading(live, transcript.rejectedAt);
+    const transcriptProjection = transcript.data ? rejectionReading(transcript.data, transcript.rejectedAt) : null;
+    const transcriptReset = transcriptProjection && transcript.data
+      ? governingWindow(transcript.data)?.value.resetsAt
+      : null;
+    const liveReset = governingWindow(live)?.value.resetsAt;
+    // When the rejection predates its transcript reset, a strictly later live
+    // reset proves the provider opened a successor cycle and retired it.
+    const projected = typeof transcript.rejectedAt === "number"
+      && typeof transcriptReset === "number"
+      && transcript.rejectedAt < transcriptReset
+      && typeof liveReset === "number"
+      && liveReset > transcriptReset
+      ? null
+      : transcriptProjection ?? rejectionReading(live, transcript.rejectedAt);
     const transcriptLimits = projected ?? transcript.data;
     if (!transcriptLimits) return { data: live, reason: null, source: "live" };
     const reconcile = (limits: EngineLimits) => reconcileQuotaReadings(

@@ -26,6 +26,7 @@ const {
   readLimits,
 } = await import("./limits");
 const { recordLimitSample } = await import("@/lib/limitsHistoryStore");
+const { selectHeadlessAccount } = await import("@/lib/accounts/headlessSelection");
 
 afterAll(() => {
   if (OLD_STATE === undefined) delete process.env.LLV_STATE_DIR;
@@ -251,13 +252,65 @@ test("a usage_limit terminal record makes the matching transcript window authori
   const result = await readCodexLimits({
     account,
     liveReader: async () => ({
-      primary: { usedPercent: 21, resetsAt, windowDurationMins: 10_080 },
+      primary: { usedPercent: 0, resetsAt, windowDurationMins: 10_080 },
       secondary: null,
       planType: "prolite",
     }),
   });
 
   expect(result.data?.weekly).toMatchObject({ usedPercent: 100, resetsAt, observedAt: nowS - 60 });
+  expect(result.source).toBe("transcript");
+});
+
+test("a redeemed reset makes the later live window authoritative and keeps the account admissible (#1406)", async () => {
+  const account = createManagedCodexAccount("Redeemed weekly reset");
+  const now = Date.parse("2026-09-01T09:00:00.000Z");
+  const transcriptReset = Date.parse("2026-09-07T02:36:00.000Z") / 1000;
+  const liveReset = Date.parse("2026-09-08T08:48:00.000Z") / 1000;
+  const session = path.join(account.sessionsDir, "2026", "09", "01", "redeemed-reset.jsonl");
+  fs.mkdirSync(path.dirname(session), { recursive: true });
+  fs.writeFileSync(session, [
+    JSON.stringify({
+      timestamp: "2026-09-01T02:35:00.000Z",
+      payload: { type: "token_count", rate_limits: { limit_id: "codex", primary: { used_percent: 90, window_minutes: 10_080, resets_at: transcriptReset }, secondary: null, plan_type: "prolite" } },
+    }),
+    JSON.stringify({
+      timestamp: "2026-09-01T02:36:00.000Z",
+      payload: { type: "task_complete", codex_error_info: "usage_limit_exceeded" },
+    }),
+  ].join("\n") + "\n");
+
+  const result = await readCodexLimits({
+    account,
+    now: () => now,
+    liveReader: async () => ({
+      primary: { usedPercent: 0, resetsAt: liveReset, windowDurationMins: 10_080 },
+      secondary: null,
+      planType: "prolite",
+    }),
+  });
+
+  expect(result).toMatchObject({
+    source: "live",
+    reason: null,
+    data: { weekly: { usedPercent: 0, resetsAt: liveReset } },
+  });
+  expect(selectHeadlessAccount(
+    [{ id: "account-a", authPresent: true }],
+    [{
+      engine: "codex",
+      accountId: "account-a",
+      authenticated: true,
+      authCheckedAt: new Date(now).toISOString(),
+      limits: result.data,
+      provenance: { source: result.source, reason: result.reason, staleSince: null },
+      observedAt: new Date(now).toISOString(),
+      bootId: "boot-selection-1406",
+    }],
+    "account-a",
+    [],
+    now,
+  )).toEqual({ kind: "available", accountId: "account-a" });
 });
 
 test("usage_limit_exceeded clears an already-expired quota reset", async () => {
