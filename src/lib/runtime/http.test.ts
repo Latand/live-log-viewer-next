@@ -912,6 +912,8 @@ test("discard terminalizes the visible receipt and fences every later delivery (
     operationStatus: async (id: string, options?: { currentRetryLeaf?: boolean }) => options?.currentRetryLeaf
       ? journal.currentRetryResult(id)
       : journal.operationResult(id),
+    retryOperation: async (...args: Parameters<RuntimeHostClient["retryOperation"]>) =>
+      journal.retryOperation(...args),
     transitionOperation: async (...args: Parameters<RuntimeHostClient["transitionOperation"]>) =>
       journal.transitionOperation(...args),
   } as RuntimeHostClient;
@@ -937,10 +939,32 @@ test("discard terminalizes the visible receipt and fences every later delivery (
     status: "failed",
     reason: "delivery-discarded",
   });
+  let retryKicks = 0;
+  const refusedDuringPartialSettlement = await handleRuntimeRetry(new NextRequest(
+    `http://127.0.0.1/api/runtime/operations/${operationId}`,
+    {
+      method: "POST",
+      headers: { host: "127.0.0.1", "content-type": "application/json" },
+      body: JSON.stringify({ action: "retry-uncertain" }),
+    },
+  ), operationId, {
+    enabled: () => true,
+    client: () => client,
+    registry: () => registry,
+    kick: () => { retryKicks += 1; },
+  });
+  expect(refusedDuringPartialSettlement.status).toBe(409);
+  expect(journal.operationResult(operationId)?.receipt).toMatchObject({
+    status: "failed",
+    reason: "delivery-discarded",
+  });
+  expect(journal.effectBatch()).toEqual([]);
+  expect(retryKicks).toBe(0);
   expect(await resolveSendReceipt(operationId, { registry, client })).toMatchObject({
     state: "failed",
     reason: "delivery-discarded",
   });
+
   const response = await discard();
   expect(response.status).toBe(200);
   const body = await response.json() as { receipt: { status: string; reason?: string | null; text?: string | null } };
@@ -974,8 +998,8 @@ test("discard terminalizes the visible receipt and fences every later delivery (
   });
   expect(refusedRetry.status).toBe(409);
 
-  /* Even a stale low-level re-arm is fenced by the durable discard record. */
-  journal.retryOperation(operationId);
+  /* Discard is absorbing in the journal too, including callers below HTTP. */
+  expect(() => journal.retryOperation(operationId)).toThrow("discarded runtime operations cannot retry");
   const ledger = createFakeDeliveryLedger();
   await new StructuredDeliveryQueue({
     effects: async (kinds, afterEventSeq) => journal.effectBatch(100, kinds, afterEventSeq),

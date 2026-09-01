@@ -92,6 +92,19 @@ test("a retried message that parks again keeps its attention entry and clock (#1
       file,
       admittedSeconds + 10 * 60,
     )).toBe("message delivery");
+
+    /* A long blocked turn also looks generically stalled. The message's
+       explicit Retry/Discard decision stays the attention owner. */
+    file.activity = "stalled";
+    file.mtime = admittedSeconds + 9 * 60;
+    expect(attentionId(file, admittedSeconds + 10 * 60))
+      .toBe(`${transcriptPath}:delivery:${Math.floor(admittedSeconds)}`);
+    expect(decisionLine(
+      (key, params) => translate("en", key, params),
+      "en",
+      file,
+      admittedSeconds + 10 * 60,
+    )).toBe("message delivery");
   } finally {
     setAgentRegistryForTests(null);
     if (previousState === undefined) delete process.env.LLV_STATE_DIR;

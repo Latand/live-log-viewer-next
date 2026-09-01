@@ -6,6 +6,7 @@ import { Database } from "bun:sqlite";
 
 import {
   RUNTIME_SCHEMA_VERSION,
+  RUNTIME_DELIVERY_DISCARDED_REASON,
   assertRuntimeEvent,
   normalizeRuntimeEventInput,
   parseRuntimeScope,
@@ -611,6 +612,9 @@ export class RuntimeJournal {
       ).get(operationId);
       if (!row) throw new Error("runtime operation is unknown");
       const previous = JSON.parse(row.receipt_json) as RuntimeOperationReceipt;
+      if (previous.status === "failed" && previous.reason === RUNTIME_DELIVERY_DISCARDED_REASON) {
+        throw new Error("discarded runtime operations cannot retry");
+      }
       const command = JSON.parse(row.request_json) as RuntimeOperationCommand;
       if (previous.status !== "failed" && previous.status !== "rejected") {
         throw new Error("only terminal failed runtime operations can start a new attempt");
@@ -673,6 +677,9 @@ export class RuntimeJournal {
       ).get(operationId);
       if (!row) throw new Error("runtime operation is unknown");
       const previous = JSON.parse(row.receipt_json) as RuntimeOperationReceipt;
+      if (previous.status === "failed" && previous.reason === RUNTIME_DELIVERY_DISCARDED_REASON) {
+        throw new Error("discarded runtime operations cannot retry");
+      }
       const command = JSON.parse(row.request_json) as RuntimeOperationCommand;
       if (command.kind !== "send" && command.kind !== "steer") throw new Error("runtime operation does not support retry");
       /* An explicit unknown-fate retry keeps the SAME operation and effect id

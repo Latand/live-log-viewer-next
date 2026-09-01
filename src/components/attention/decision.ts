@@ -81,8 +81,8 @@ function decisionText(t: TFunction, locale: Locale, file: FileEntry, now: number
   }
   if (file.rateLimit) return rateLimitText(t, locale, file.rateLimit);
   if (file.waitingInput) return t("attention.decisionPermission");
-  if (stalledAttention(file, now)) return t("status.stalled");
   if (blockingStuckDelivery(file, now) !== null) return t("attention.decisionDelivery");
+  if (stalledAttention(file, now)) return t("status.stalled");
   return t("status.stalled");
 }
 

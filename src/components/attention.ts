@@ -113,10 +113,10 @@ export function attentionExpiries(files: readonly FileEntry[]): number[] {
 /**
  * The shared attention identity of a file, by signal precedence:
  * an orchestrator's open bridge ask wins, then a structured question, a
- * rate-limit wall, the screen-scrape fallback, and the stalled state. The id
- * doubles as the dedupe key of the toast and push pipelines, so the formats
- * here must stay byte-identical to the historical inline derivations
- * (`push-sent.json` entries survive the refactor).
+ * rate-limit wall, the screen-scrape fallback, an owed message delivery, and
+ * the stalled state. The id doubles as the dedupe key of the toast and push
+ * pipelines, so the older formats here stay byte-identical to the historical
+ * inline derivations (`push-sent.json` entries survive the refactor).
  */
 export function attentionId(file: FileEntry, now: number = Date.now() / 1000): string | null {
   /* First, and above the file's own signals (issue #1168). A bridge ask is the
@@ -135,11 +135,11 @@ export function attentionId(file: FileEntry, now: number = Date.now() / 1000): s
   /* The stalled tier needs a live process behind the transcript: an open turn
      whose agent already exited is an abandoned session, not a pending
      permission prompt — only someone still at the terminal can wait on you. */
+  const deliverySince = blockingStuckDelivery(file, now);
+  if (deliverySince !== null) return `${file.path}:delivery:${Math.floor(deliverySince)}`;
   if (stalledAttention(file, now)) {
     return `${file.path}:stalled:${Math.floor(file.mtime)}`;
   }
-  const deliverySince = blockingStuckDelivery(file, now);
-  if (deliverySince !== null) return `${file.path}:delivery:${Math.floor(deliverySince)}`;
   return null;
 }
 
@@ -160,7 +160,7 @@ export function buildAttentionQueue(
     const id = attentionId(file, now);
     if (id === null) continue;
     const ask = openBridgeAsk(file, now);
-    const stuckDelivery = stalledAttention(file, now) ? null : blockingStuckDelivery(file, now);
+    const stuckDelivery = blockingStuckDelivery(file, now);
     const tier: AttentionTier = ask || file.pendingQuestion || file.rateLimit || file.waitingInput
       || stuckDelivery !== null
       ? "blocked"

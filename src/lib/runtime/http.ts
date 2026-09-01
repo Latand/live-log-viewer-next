@@ -602,6 +602,9 @@ export async function handleRuntimeRetry(
     if (previous.receipt.kind !== "send" && previous.receipt.kind !== "steer") {
       return NextResponse.json({ error: "runtime operation does not support retry" }, { status: 409 });
     }
+    if (previous.receipt.status === "failed" && previous.receipt.reason === SEND_DISCARDED_REASON) {
+      return NextResponse.json({ error: "discarded runtime operations cannot retry" }, { status: 409 });
+    }
     const registry = (dependencies.registry ?? agentRegistry)();
     const deliverySnapshot = registry.readOnlySnapshot();
     const deliveryRecord = sendReceiptFor(deliverySnapshot, previous.operationId);

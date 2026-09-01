@@ -9,7 +9,11 @@ import { sessionKeyId } from "@/lib/agent/sessionKey";
 import type { HeldDelivery, ViewerConversationId } from "@/lib/accounts/migration/contracts";
 
 import { runtimeHostClient, type RuntimeHostClient } from "./client";
-import type { RuntimeOperationReceipt, RuntimeReceiptStatus } from "./contracts";
+import {
+  RUNTIME_DELIVERY_DISCARDED_REASON,
+  type RuntimeOperationReceipt,
+  type RuntimeReceiptStatus,
+} from "./contracts";
 import { readEvidence, unreadableEvidence } from "./evidence";
 
 /**
@@ -90,7 +94,7 @@ export const SEND_UNVERIFIED_REASON =
   "delivery was started and never settled; whether it reached the recipient is unknown, so sending it again may deliver it twice";
 /** Operator-authored terminal state. The journal and registry both retain this
     token so a partial cross-store write converges back to the visible discard. */
-export const SEND_DISCARDED_REASON = "delivery-discarded";
+export const SEND_DISCARDED_REASON = RUNTIME_DELIVERY_DISCARDED_REASON;
 /** No journal operation was ever found for this send — the legacy delivery path
     never creates one, and a record can also be pruned. Non-execution is
     unproven either way, so it settles like any other unverified send. */

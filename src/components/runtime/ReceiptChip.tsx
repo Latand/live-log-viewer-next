@@ -113,7 +113,7 @@ export function ReceiptChip({ receipt, wait = null, actionsDisabled = false, onR
           {t("runtime.receipt.discard")}
         </button>
       ) : null}
-      {failed && onEdit ? (
+      {failed && !discarded && onEdit ? (
         <button
           type="button"
           disabled={actionsDisabled}

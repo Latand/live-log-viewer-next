@@ -1925,6 +1925,72 @@ describe("CodexAppServerHost", () => {
     }
   });
 
+  test("a malformed recipient dedup record cannot authorize a redelivery (#1366)", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-recipient-dedup-malformed-"));
+    const transcriptPath = path.join(directory, "delivery-thread.jsonl");
+    const operationId = "operation-malformed-dedup";
+    fs.writeFileSync(
+      transcriptPath,
+      `{"payload":{"type":"user_message","message":"<!-- llv:structured-user dedup=${deliveryDedup(operationId)} -->\\n`,
+    );
+    const server = new FakeAppServer("delivery-thread");
+    server.threadPath = transcriptPath;
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+    });
+    try {
+      await expect(host.send({ id: operationId, text: "deliver once" }))
+        .rejects.toThrow("recipient transcript is unavailable for delivery deduplication");
+      expect(server.requests.some((request) => request.method === "turn/start" || request.method === "turn/steer"))
+        .toBeFalse();
+    } finally {
+      await host.release();
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("recipient dedup finds a delivered operation before the bounded turn tail (#1366)", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-recipient-dedup-prefix-"));
+    const transcriptPath = path.join(directory, "delivery-thread.jsonl");
+    const operationId = "operation-before-rollout-tail";
+    const text = "already delivered before a large transcript tail";
+    const delivered = JSON.stringify({
+      timestamp: "t1",
+      type: "event_msg",
+      payload: {
+        type: "user_message",
+        message: encodeCodexStructuredUserText(text, undefined, null, null, deliveryDedup(operationId)),
+      },
+    });
+    const filler = JSON.stringify({
+      timestamp: "t2",
+      type: "event_msg",
+      payload: { type: "agent_message", message: "x".repeat(16 * 1024 * 1024 + 1024) },
+    });
+    fs.writeFileSync(transcriptPath, `${delivered}\n${filler}\n`);
+    const server = new FakeAppServer("delivery-thread", "delivery-thread");
+    server.threadPath = transcriptPath;
+    server.hydratedReadError = "list_turns is not supported yet";
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+    });
+    try {
+      expect(await host.send({ id: operationId, text })).toEqual({
+        outcome: "turn-started",
+        turnId: operationId,
+      });
+      expect(server.requests.some((request) => request.method === "turn/start" || request.method === "turn/steer"))
+        .toBeFalse();
+    } finally {
+      await host.release();
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   test("keeps a send pending until the matching user item is persisted", async () => {
     const server = new FakeAppServer("confirm-after-rpc");
     server.autoCompleteUserMessage = false;

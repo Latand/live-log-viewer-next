@@ -1261,6 +1261,45 @@ test("a discard fence cannot overwrite a hand-over that began after its read (#1
   journal.close();
 });
 
+test("a discarded send cannot be re-armed under either retry mode (#1226)", () => {
+  const dir = sandbox("structured-delivery-discard-absorbing");
+  const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { structuredHosts: true });
+  journal.append({
+    scope: runtimeScope("session", "conv-discard-absorbing"),
+    kind: "session-status",
+    payload: {
+      conversationId: "conv-discard-absorbing",
+      sessionKey: { engine: "codex", sessionId: "thread-discard-absorbing" },
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "idle",
+      provenance: "structured",
+      capabilities: { steer: true, structuredAttention: true },
+    },
+  });
+  journal.executeOperation({
+    kind: "send",
+    operationId: "op-discard-absorbing",
+    idempotencyKey: "key-discard-absorbing",
+    conversationId: "conv-discard-absorbing",
+    text: "discard permanently",
+    policy: "queue",
+  });
+  journal.transitionOperation(
+    "op-discard-absorbing",
+    "failed",
+    { reason: "delivery-discarded" },
+    { fromStatuses: ["pending", "queued"] },
+  );
+
+  expect(() => journal.retryOperation("op-discard-absorbing"))
+    .toThrow("discarded runtime operations cannot retry");
+  expect(() => journal.retryOperation("op-discard-absorbing", "fresh-after-discard"))
+    .toThrow("discarded runtime operations cannot retry");
+  expect(journal.effectBatch()).toEqual([]);
+  journal.close();
+});
+
 test("terminal delivery retry on a replacement host mints one fresh operation", () => {
   const dir = sandbox("fresh-terminal-retry");
   const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { structuredHosts: true });

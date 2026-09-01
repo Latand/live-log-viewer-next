@@ -492,24 +492,38 @@ const ROLLOUT_TERMINAL_TURN_STATUS: Record<string, string> = {
    (observed 2026-08-31: 380% CPU, data routes timing out). One entry per
    rollout, invalidated by size+mtime, bounds that to one parse per change. */
 const ROLLOUT_TURNS_CACHE_LIMIT = 32;
+const ROLLOUT_DELIVERY_SCAN_CHUNK_BYTES = 1024 * 1024;
+const STRUCTURED_USER_MARKER_FRAGMENT = Buffer.from("llv:structured-user");
 
 function codexDeliveryDedup(operationId: string): string {
   return createHash("sha256").update(operationId).digest("hex");
 }
-interface RolloutStructuredUserDelivery {
-  text: string | null;
-  contentDigest: string | null;
-}
+type RolloutStructuredUserDelivery =
+  | { payloadKind: "text" | "content"; payloadDigest: string }
+  | { payloadKind: "conflict"; payloadDigest: null };
 
 interface RolloutTurnsCacheEntry {
   size: number;
   mtimeMs: number;
+  fileIdentity: string | null;
   turns: JsonObject[];
   structuredUserDeliveries: Map<string, RolloutStructuredUserDelivery>;
   readState: "readable" | "absent" | "unavailable";
 }
 
+interface RolloutDeliveryIndexEntry {
+  size: number;
+  mtimeMs: number;
+  fileIdentity: string | null;
+  /** Start of the only incomplete JSONL record, or EOF after a newline. */
+  scanOffset: number;
+  deliveries: Map<string, RolloutStructuredUserDelivery>;
+  readState: "readable" | "absent" | "unavailable";
+}
+
 const rolloutTurnsCache = new Map<string, RolloutTurnsCacheEntry>();
+const rolloutDeliveryIndexCache = new Map<string, RolloutDeliveryIndexEntry>();
+const rolloutDeliveryIndexRuns = new Map<string, Promise<RolloutDeliveryIndexEntry>>();
 
 function rememberRolloutStructuredUser(
   deliveries: Map<string, RolloutStructuredUserDelivery>,
@@ -518,19 +532,154 @@ function rememberRolloutStructuredUser(
   const decoded = decodeCodexStructuredUserText(wireText);
   if (!decoded.deliveryDedup) return;
   const current = deliveries.get(decoded.deliveryDedup);
-  const observed = { text: decoded.text, contentDigest: decoded.contentDigest };
+  const observed: RolloutStructuredUserDelivery = decoded.contentDigest
+    ? { payloadKind: "content", payloadDigest: decoded.contentDigest }
+    : { payloadKind: "text", payloadDigest: createHash("sha256").update(decoded.text).digest("hex") };
   if (!current) {
     deliveries.set(decoded.deliveryDedup, observed);
     return;
   }
-  if (current.text !== observed.text || current.contentDigest !== observed.contentDigest) {
-    deliveries.set(decoded.deliveryDedup, { text: null, contentDigest: null });
+  if (current.payloadKind !== observed.payloadKind || current.payloadDigest !== observed.payloadDigest) {
+    deliveries.set(decoded.deliveryDedup, { payloadKind: "conflict", payloadDigest: null });
+  }
+}
+
+function rememberRolloutStructuredUsersFromRecord(
+  deliveries: Map<string, RolloutStructuredUserDelivery>,
+  value: unknown,
+): void {
+  const payload = record(record(value)?.payload);
+  if (!payload) return;
+  const payloadType = stringField(payload, "type");
+  if (payloadType === "user_message") {
+    const message = stringField(payload, "message");
+    if (message !== null) rememberRolloutStructuredUser(deliveries, message);
+  }
+  if (payloadType !== "item_completed") return;
+  const item = record(payload.item);
+  if (!item) return;
+  const itemType = stringField(item, "type");
+  const wireText = userMessageText(item);
+  if ((itemType === "UserMessage" || itemType === "userMessage") && wireText !== null) {
+    rememberRolloutStructuredUser(deliveries, wireText);
+  }
+}
+
+function rememberRolloutStructuredUsersFromLine(
+  deliveries: Map<string, RolloutStructuredUserDelivery>,
+  line: Buffer,
+): void {
+  /* Most rollout records carry no structured user marker. Checking the bytes
+     first keeps a large tool/result record out of JSON.parse and out of a
+     second string allocation while the recipient index walks old history. */
+  if (line.indexOf(STRUCTURED_USER_MARKER_FRAGMENT) < 0) return;
+  try {
+    rememberRolloutStructuredUsersFromRecord(deliveries, JSON.parse(line.toString("utf8")));
+  } catch (error) {
+    /* The candidate line may be the record that already owns this operation.
+       Unreadable evidence cannot authorize another recipient write. */
+    throw new Error("Codex recipient transcript contains a malformed structured-user record", { cause: error });
+  }
+}
+
+async function scanRolloutStructuredUserDeliveries(
+  pathname: string,
+  size: number,
+  fileIdentity: string,
+  previous: RolloutDeliveryIndexEntry | undefined,
+): Promise<{ deliveries: Map<string, RolloutStructuredUserDelivery>; offset: number }> {
+  const extendsPrevious = previous?.readState === "readable"
+    && previous.fileIdentity === fileIdentity
+    && size > previous.size
+    && previous.scanOffset <= previous.size;
+  const start = extendsPrevious ? previous.scanOffset : 0;
+  const deliveries = extendsPrevious
+    ? new Map(previous.deliveries)
+    : new Map<string, RolloutStructuredUserDelivery>();
+  const descriptor = await fs.promises.open(pathname, "r");
+  let position = start;
+  let completedOffset = start;
+  let lineChunks: Buffer[] = [];
+  let lineBytes = 0;
+  let markerTail = Buffer.alloc(0);
+  let lineContainsMarker = false;
+  let skippingOversizedLine = false;
+  const observeMarker = (chunk: Buffer) => {
+    if (lineContainsMarker || chunk.length === 0) return;
+    const probe = markerTail.length > 0 ? Buffer.concat([markerTail, chunk]) : chunk;
+    lineContainsMarker = probe.indexOf(STRUCTURED_USER_MARKER_FRAGMENT) >= 0;
+    const tailBytes = Math.min(STRUCTURED_USER_MARKER_FRAGMENT.length - 1, probe.length);
+    markerTail = Buffer.from(probe.subarray(probe.length - tailBytes));
+  };
+  const resetLine = () => {
+    lineChunks = [];
+    lineBytes = 0;
+    markerTail = Buffer.alloc(0);
+    lineContainsMarker = false;
+    skippingOversizedLine = false;
+  };
+  try {
+    while (position < size) {
+      const buffer = Buffer.allocUnsafe(Math.min(ROLLOUT_DELIVERY_SCAN_CHUNK_BYTES, size - position));
+      const { bytesRead: read } = await descriptor.read(buffer, 0, buffer.length, position);
+      if (read === 0) throw new Error("Codex recipient transcript changed during delivery deduplication");
+      let cursor = 0;
+      while (cursor < read) {
+        const newline = buffer.indexOf(0x0a, cursor);
+        const end = newline < 0 || newline >= read ? read : newline;
+        if (end > cursor) {
+          const chunk = buffer.subarray(cursor, end);
+          observeMarker(chunk);
+          if (skippingOversizedLine && lineContainsMarker) {
+            throw new Error("Codex recipient transcript contains an oversized structured-user record");
+          }
+          if (!skippingOversizedLine) {
+            lineChunks.push(chunk);
+            lineBytes += chunk.length;
+            if (lineBytes > MAX_LINE_BYTES) {
+              if (lineContainsMarker) {
+                throw new Error("Codex recipient transcript contains an oversized structured-user record");
+              }
+              /* Old tool/result rows may exceed the app-server frame budget.
+                 They cannot carry a dedup marker seen nowhere on the line, so
+                 retain only the marker overlap until its newline. */
+              lineChunks = [];
+              lineBytes = 0;
+              skippingOversizedLine = true;
+            }
+          }
+        }
+        if (newline < 0 || newline >= read) break;
+        if (!skippingOversizedLine) {
+          const line = lineChunks.length === 1
+            ? lineChunks[0]!
+            : Buffer.concat(lineChunks, lineBytes);
+          rememberRolloutStructuredUsersFromLine(deliveries, line);
+        }
+        completedOffset = position + newline + 1;
+        resetLine();
+        cursor = newline + 1;
+      }
+      position += read;
+    }
+    /* A valid last record need not end in a newline. Keep its start as the
+       incremental offset so an append that completes a torn record replays it. */
+    if (!skippingOversizedLine && lineBytes > 0) {
+      const line = lineChunks.length === 1
+        ? lineChunks[0]!
+        : Buffer.concat(lineChunks, lineBytes);
+      rememberRolloutStructuredUsersFromLine(deliveries, line);
+    }
+    return { deliveries, offset: completedOffset };
+  } finally {
+    await descriptor.close();
   }
 }
 
 const EMPTY_ROLLOUT_CACHE_ENTRY: RolloutTurnsCacheEntry = {
   size: 0,
   mtimeMs: 0,
+  fileIdentity: null,
   turns: [],
   structuredUserDeliveries: new Map(),
   readState: "absent",
@@ -542,18 +691,39 @@ const UNAVAILABLE_ROLLOUT_CACHE_ENTRY: RolloutTurnsCacheEntry = {
   readState: "unavailable",
 };
 
+const EMPTY_ROLLOUT_DELIVERY_INDEX: RolloutDeliveryIndexEntry = {
+  size: 0,
+  mtimeMs: 0,
+  fileIdentity: null,
+  scanOffset: 0,
+  deliveries: new Map(),
+  readState: "absent",
+};
+
+const UNAVAILABLE_ROLLOUT_DELIVERY_INDEX: RolloutDeliveryIndexEntry = {
+  ...EMPTY_ROLLOUT_DELIVERY_INDEX,
+  deliveries: new Map(),
+  readState: "unavailable",
+};
+
 function rolloutCacheEntryFromDisk(pathname: string | null | undefined): RolloutTurnsCacheEntry {
   if (!pathname) return EMPTY_ROLLOUT_CACHE_ENTRY;
   let raw: string;
   let statSize = 0;
   let statMtimeMs = 0;
+  let fileIdentity: string | null = null;
+  const structuredUserDeliveries = new Map<string, RolloutStructuredUserDelivery>();
   try {
     const stat = fs.statSync(pathname);
     statSize = stat.size;
     statMtimeMs = stat.mtimeMs;
+    fileIdentity = rolloutFileIdentity(stat);
     if (!stat.isFile()) return UNAVAILABLE_ROLLOUT_CACHE_ENTRY;
     const cached = rolloutTurnsCache.get(pathname);
-    if (cached && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) {
+    if (cached
+      && cached.size === stat.size
+      && cached.mtimeMs === stat.mtimeMs
+      && cached.fileIdentity === fileIdentity) {
       /* Refresh recency so hot rollouts survive the LRU trim. */
       rolloutTurnsCache.delete(pathname);
       rolloutTurnsCache.set(pathname, cached);
@@ -578,22 +748,21 @@ function rolloutCacheEntryFromDisk(pathname: string | null | undefined): Rollout
   }
   const order: string[] = [];
   const turns = new Map<string, { id: string; status?: string; items: JsonObject[] }>();
-  const structuredUserDeliveries = new Map<string, RolloutStructuredUserDelivery>();
   for (const line of raw.split("\n")) {
     if (!line.trim()) continue;
     let parsed: unknown;
     try {
       parsed = JSON.parse(line);
     } catch {
+      if (line.includes(STRUCTURED_USER_MARKER_FRAGMENT.toString("utf8"))) {
+        return UNAVAILABLE_ROLLOUT_CACHE_ENTRY;
+      }
       continue;
     }
     const payload = record(record(parsed)?.payload);
     if (!payload) continue;
+    rememberRolloutStructuredUsersFromRecord(structuredUserDeliveries, parsed);
     const payloadType = stringField(payload, "type");
-    if (payloadType === "user_message") {
-      const message = stringField(payload, "message");
-      if (message !== null) rememberRolloutStructuredUser(structuredUserDeliveries, message);
-    }
     const turnId = stringField(payload, "turn_id") ?? stringField(payload, "turnId");
     if (!payloadType || !turnId) continue;
     let turn = turns.get(turnId);
@@ -612,10 +781,6 @@ function rolloutCacheEntryFromDisk(pathname: string | null | undefined): Rollout
     if (!item) continue;
     const itemType = stringField(item, "type");
     const clientId = stringField(item, "client_id") ?? stringField(item, "clientId");
-    const wireText = userMessageText(item);
-    if ((itemType === "UserMessage" || itemType === "userMessage") && wireText !== null) {
-      rememberRolloutStructuredUser(structuredUserDeliveries, wireText);
-    }
     turn.items.push({
       ...item,
       ...(itemType ? { type: itemType === "UserMessage" ? "userMessage" : itemType } : {}),
@@ -629,6 +794,7 @@ function rolloutCacheEntryFromDisk(pathname: string | null | undefined): Rollout
   const cached: RolloutTurnsCacheEntry = {
     size: statSize,
     mtimeMs: statMtimeMs,
+    fileIdentity,
     turns: result,
     structuredUserDeliveries,
     readState: "readable",
@@ -646,25 +812,124 @@ export function rolloutTurnsFromDisk(pathname: string | null | undefined): JsonO
   return [...rolloutCacheEntryFromDisk(pathname).turns];
 }
 
-function rolloutConfirmedDelivery(
-  pathname: string | null | undefined,
-  entry: QueueEntry,
-): DeliveryReceipt | null {
-  const rollout = rolloutCacheEntryFromDisk(pathname);
-  if (rollout.readState === "unavailable") {
-    throw new Error("Codex recipient transcript is unavailable for delivery deduplication");
+function rememberRolloutDeliveryIndex(pathname: string, entry: RolloutDeliveryIndexEntry): RolloutDeliveryIndexEntry {
+  rolloutDeliveryIndexCache.delete(pathname);
+  rolloutDeliveryIndexCache.set(pathname, entry);
+  while (rolloutDeliveryIndexCache.size > ROLLOUT_TURNS_CACHE_LIMIT) {
+    const oldest = rolloutDeliveryIndexCache.keys().next().value;
+    if (oldest === undefined) break;
+    rolloutDeliveryIndexCache.delete(oldest);
   }
-  const delivery = rollout.structuredUserDeliveries
-    .get(codexDeliveryDedup(entry.id));
+  return entry;
+}
+
+function sameRolloutFile(
+  stat: fs.Stats,
+  entry: Pick<RolloutDeliveryIndexEntry, "size" | "mtimeMs" | "fileIdentity">,
+): boolean {
+  return stat.size === entry.size
+    && stat.mtimeMs === entry.mtimeMs
+    && rolloutFileIdentity(stat) === entry.fileIdentity;
+}
+
+function rolloutFileIdentity(stat: fs.Stats): string {
+  return `${stat.dev}:${stat.ino}:${stat.birthtimeMs}`;
+}
+
+async function refreshRolloutDeliveryIndex(pathname: string): Promise<RolloutDeliveryIndexEntry> {
+  let previous = rolloutDeliveryIndexCache.get(pathname);
+  try {
+    /* A live rollout may append while its historical prefix is being indexed.
+       Converge across bounded snapshots; continuous change stays unavailable
+       and therefore cannot authorize a second recipient write. */
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const before = await fs.promises.stat(pathname);
+      if (!before.isFile()) return UNAVAILABLE_ROLLOUT_DELIVERY_INDEX;
+      if (previous && sameRolloutFile(before, previous)) {
+        return rememberRolloutDeliveryIndex(pathname, previous);
+      }
+      const fileIdentity = rolloutFileIdentity(before);
+      const scanned = await scanRolloutStructuredUserDeliveries(
+        pathname,
+        before.size,
+        fileIdentity,
+        previous,
+      );
+      const next: RolloutDeliveryIndexEntry = {
+        size: before.size,
+        mtimeMs: before.mtimeMs,
+        fileIdentity,
+        scanOffset: scanned.offset,
+        deliveries: scanned.deliveries,
+        readState: "readable",
+      };
+      const after = await fs.promises.stat(pathname);
+      if (sameRolloutFile(after, next)) return rememberRolloutDeliveryIndex(pathname, next);
+      previous = next;
+    }
+    return UNAVAILABLE_ROLLOUT_DELIVERY_INDEX;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT"
+      ? EMPTY_ROLLOUT_DELIVERY_INDEX
+      : UNAVAILABLE_ROLLOUT_DELIVERY_INDEX;
+  }
+}
+
+async function rolloutDeliveryIndexFromDisk(
+  pathname: string | null | undefined,
+): Promise<RolloutDeliveryIndexEntry> {
+  if (!pathname) return EMPTY_ROLLOUT_DELIVERY_INDEX;
+  const active = rolloutDeliveryIndexRuns.get(pathname);
+  if (active) {
+    await active;
+    return rolloutDeliveryIndexFromDisk(pathname);
+  }
+  const run = refreshRolloutDeliveryIndex(pathname).finally(() => {
+    rolloutDeliveryIndexRuns.delete(pathname);
+  });
+  rolloutDeliveryIndexRuns.set(pathname, run);
+  return run;
+}
+
+function rolloutDeliveryReceipt(
+  entry: QueueEntry,
+  delivery: RolloutStructuredUserDelivery | undefined,
+): DeliveryReceipt | null {
   if (!delivery) return null;
-  const payloadMatches = delivery.contentDigest
-    ? delivery.contentDigest === entry.contentDigest
-    : delivery.text === (entry.text ?? entry.content?.text ?? "");
+  let payloadMatches = false;
+  if (delivery.payloadKind === "content") {
+    payloadMatches = delivery.payloadDigest === entry.contentDigest;
+  } else if (delivery.payloadKind === "text") {
+    payloadMatches = delivery.payloadDigest === createHash("sha256")
+      .update(entry.text ?? entry.content?.text ?? "")
+      .digest("hex");
+  }
   if (!payloadMatches) throw new Error("Codex queue entry id belongs to a different payload");
   /* The legacy `event_msg/user_message` record carries no turn id. Its durable
      dedup identity is enough to prove the recipient already owns this message;
      the operation id is a stable historical turn reference for the receipt. */
   return { outcome: "turn-started", turnId: entry.id };
+}
+
+function rolloutConfirmedDelivery(
+  pathname: string | null | undefined,
+  entry: QueueEntry,
+): DeliveryReceipt | null | Promise<DeliveryReceipt | null> {
+  const rollout = rolloutCacheEntryFromDisk(pathname);
+  if (rollout.readState === "unavailable") {
+    throw new Error("Codex recipient transcript is unavailable for delivery deduplication");
+  }
+  const dedup = codexDeliveryDedup(entry.id);
+  const delivery = rollout.structuredUserDeliveries.get(dedup);
+  if (delivery || rollout.size <= ROLLOUT_FALLBACK_READ_BYTES) {
+    return rolloutDeliveryReceipt(entry, delivery);
+  }
+  return rolloutDeliveryIndexFromDisk(pathname).then((index) => {
+    if (index.readState === "unavailable") {
+      throw new Error("Codex recipient transcript is unavailable for delivery deduplication");
+    }
+    return rolloutDeliveryReceipt(entry, index.deliveries.get(dedup));
+  });
 }
 
 function resumedActiveTurnId(value: unknown): string | null {
@@ -2472,7 +2737,8 @@ export class CodexAppServerHost implements EngineHost {
   private async confirmedDelivery(entry: QueueEntry): Promise<DeliveryReceipt | null> {
     const known = this.confirmedDeliveries.get(entry.id);
     if (known) return this.confirmedReceipt(entry, known);
-    const persisted = rolloutConfirmedDelivery(this.identity.path, entry);
+    const persistedRead = rolloutConfirmedDelivery(this.identity.path, entry);
+    const persisted = persistedRead instanceof Promise ? await persistedRead : persistedRead;
     if (persisted) return persisted;
     let thread: unknown;
     try {

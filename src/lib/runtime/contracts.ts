@@ -49,6 +49,8 @@ export const RUNTIME_RECEIPT_STATUSES = [
   "delivered", "applied", "interrupted", "answered", "rejected", "failed", "uncertain",
 ] as const;
 export type RuntimeReceiptStatus = (typeof RUNTIME_RECEIPT_STATUSES)[number];
+/** Absorbing terminal reason written when the operator discards a send. */
+export const RUNTIME_DELIVERY_DISCARDED_REASON = "delivery-discarded";
 export type OperationKind = RuntimeOperationKind;
 export type ReceiptStatus = RuntimeReceiptStatus;
 
