@@ -52,6 +52,7 @@ Object.assign(globalThis, {
   Event: dom.Event,
   CustomEvent: dom.CustomEvent,
   MouseEvent: dom.MouseEvent,
+  PointerEvent: dom.PointerEvent,
   KeyboardEvent: dom.KeyboardEvent,
   sessionStorage: dom.sessionStorage,
   localStorage: dom.localStorage,
@@ -258,6 +259,34 @@ function touchEvent(type: "touchstart" | "touchmove" | "touchend", clientY?: num
   return event as unknown as Event;
 }
 
+function pointerEvent(type: "pointerdown" | "pointerup", clientX: number): Event {
+  return new dom.PointerEvent(type, {
+    bubbles: true,
+    button: 0,
+    clientX,
+    clientY: 100,
+    pointerType: "mouse",
+  }) as unknown as Event;
+}
+
+function setScrollerPointerGeometry(element: HTMLElement, contentWidth: number, totalWidth: number): void {
+  Object.defineProperties(element, {
+    clientLeft: { configurable: true, value: 0 },
+    clientWidth: { configurable: true, value: contentWidth },
+  });
+  element.getBoundingClientRect = () => ({
+    x: 0,
+    y: 0,
+    left: 0,
+    top: 0,
+    right: totalWidth,
+    bottom: element.clientHeight,
+    width: totalWidth,
+    height: element.clientHeight,
+    toJSON: () => ({}),
+  });
+}
+
 async function settle(host: HTMLElement, selector: string, timeoutMs = 4_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline && !host.querySelector(selector)) {
@@ -456,6 +485,74 @@ test("follow stays disarmed across further arrivals and resizes until the operat
   } finally {
     tailState.lines = TRANSCRIPT;
   }
+});
+
+test("a pointer-driven scrollbar return to bottom re-arms follow without authorizing content clicks", () => {
+  const followChanges: boolean[] = [];
+  const host = render(true, (value) => followChanges.push(value), conversationFile("scrollbar-return"));
+  const scroller = host.querySelector("[data-log-feed-scroller]") as HTMLElement;
+  const geometry = setScrollerGeometry(scroller, 1_000, 200, 800);
+  setScrollerPointerGeometry(scroller, 300, 320);
+
+  flushSync(() => {
+    scroller.dispatchEvent(new dom.WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: -200 }) as unknown as Event);
+    geometry.setTop(600);
+    scroller.dispatchEvent(new dom.Event("scroll", { bubbles: true }) as unknown as Event);
+  });
+  expect(followChanges).toEqual([false]);
+
+  flushSync(() => {
+    scroller.dispatchEvent(pointerEvent("pointerdown", 100));
+    geometry.setTop(800);
+    scroller.dispatchEvent(new dom.Event("scroll", { bubbles: true }) as unknown as Event);
+    scroller.dispatchEvent(pointerEvent("pointerup", 100));
+  });
+  expect(followChanges).toEqual([false]);
+
+  flushSync(() => {
+    geometry.setTop(600);
+    scroller.dispatchEvent(new dom.Event("scroll", { bubbles: true }) as unknown as Event);
+    scroller.dispatchEvent(pointerEvent("pointerdown", 310));
+    geometry.setTop(700);
+    scroller.dispatchEvent(new dom.Event("scroll", { bubbles: true }) as unknown as Event);
+  });
+  expect(followChanges).toEqual([false]);
+
+  flushSync(() => {
+    geometry.setTop(800);
+    scroller.dispatchEvent(new dom.Event("scroll", { bubbles: true }) as unknown as Event);
+    scroller.dispatchEvent(pointerEvent("pointerup", 310));
+  });
+  expect(followChanges).toEqual([false, true]);
+});
+
+test("an ended scrollbar gesture cannot authorize a later uncaused bottom-reaching scroll", () => {
+  const followChanges: boolean[] = [];
+  const host = render(true, (value) => followChanges.push(value), conversationFile("programmatic-bottom"));
+  const scroller = host.querySelector("[data-log-feed-scroller]") as HTMLElement;
+  const geometry = setScrollerGeometry(scroller, 1_000, 200, 800);
+  setScrollerPointerGeometry(scroller, 300, 320);
+
+  flushSync(() => {
+    scroller.dispatchEvent(new dom.WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: -200 }) as unknown as Event);
+    geometry.setTop(600);
+    scroller.dispatchEvent(new dom.Event("scroll", { bubbles: true }) as unknown as Event);
+  });
+  expect(followChanges).toEqual([false]);
+
+  flushSync(() => {
+    scroller.dispatchEvent(pointerEvent("pointerdown", 310));
+    geometry.setTop(700);
+    scroller.dispatchEvent(new dom.Event("scroll", { bubbles: true }) as unknown as Event);
+    scroller.dispatchEvent(pointerEvent("pointerup", 310));
+  });
+  expect(followChanges).toEqual([false]);
+
+  flushSync(() => {
+    geometry.setTop(800);
+    scroller.dispatchEvent(new dom.Event("scroll", { bubbles: true }) as unknown as Event);
+  });
+  expect(followChanges).toEqual([false]);
 });
 
 test("the jump-to-latest control clears the durable disarm and restores live-tail follow", async () => {

@@ -123,6 +123,14 @@ function canScrollVertically(element: HTMLElement, deltaY: number): boolean {
   return false;
 }
 
+function pointerHitsVerticalScrollbar(element: HTMLElement, clientX: number): boolean {
+  if (element.scrollHeight <= element.clientHeight) return false;
+  const bounds = element.getBoundingClientRect();
+  const contentLeft = bounds.left + element.clientLeft;
+  const contentRight = contentLeft + element.clientWidth;
+  return clientX < contentLeft || clientX >= contentRight;
+}
+
 function distanceFromBottom(element: HTMLElement): number {
   return Math.max(0, element.scrollHeight - element.clientHeight - element.scrollTop);
 }
@@ -268,6 +276,9 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
   const pulseTimer = useRef<number | null>(null);
   const glueAtRef = useRef(0);
   const scrollCauseRef = useRef<ScrollCause | null>(null);
+  /* One scrollbar press can drive many scroll events. Its moving baseline
+     lives through the gesture; a stamped programmatic cause still wins. */
+  const scrollbarPointerRef = useRef<{ fromBottom: number } | null>(null);
   const feedTouchRef = useRef<{ x: number; y: number } | null>(null);
   const pillTouchRef = useRef<{ x: number; y: number } | null>(null);
   const restoreInitializedPathRef = useRef<string | null>(null);
@@ -377,6 +388,17 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
     },
     [],
   );
+  useEffect(() => {
+    function releaseScrollbarPointer(): void { scrollbarPointerRef.current = null; }
+    window.addEventListener("pointerup", releaseScrollbarPointer, true);
+    window.addEventListener("pointercancel", releaseScrollbarPointer, true);
+    window.addEventListener("blur", releaseScrollbarPointer);
+    return () => {
+      window.removeEventListener("pointerup", releaseScrollbarPointer, true);
+      window.removeEventListener("pointercancel", releaseScrollbarPointer, true);
+      window.removeEventListener("blur", releaseScrollbarPointer);
+    };
+  }, []);
   useEffect(() => {
     hadQuestionRef.current = false;
     queueMicrotask(() => setEndedQuestion(null));
@@ -811,6 +833,12 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
         onWheelCapture={(event) => {
           if (event.deltaY) markUserScroll(event.deltaY);
         }}
+        onPointerDownCapture={(event) => {
+          if (event.button === 0 && pointerHitsVerticalScrollbar(event.currentTarget, event.clientX)) {
+            scrollbarPointerRef.current = { fromBottom: distanceFromBottom(event.currentTarget) };
+            scrollCauseRef.current = null;
+          }
+        }}
         onTouchStartCapture={(event) => {
           const touch = event.touches[0];
           feedTouchRef.current = touch ? { x: touch.clientX, y: touch.clientY } : null;
@@ -836,7 +864,11 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
           const el = event.currentTarget;
           const fromBottom = distanceFromBottom(el);
           const atBottom = fromBottom <= 50;
-          const cause = scrollCauseRef.current;
+          const pendingCause = scrollCauseRef.current;
+          const scrollbarPointer = scrollbarPointerRef.current;
+          const cause: ScrollCause | null = scrollbarPointer && pendingCause?.kind !== "programmatic"
+            ? { kind: "user", fromBottom: scrollbarPointer.fromBottom, direction: null }
+            : pendingCause;
           const userDelta = cause?.kind === "user" ? fromBottom - cause.fromBottom : 0;
           const userInitiated = cause?.kind === "user"
             && userDelta !== 0
@@ -845,8 +877,10 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
           const userReturnedToBottom = atBottom && userInitiated && userDelta < 0;
           /* A concurrent glue can emit its own scroll at the bottom before the
              wheel's upward scroll. Keep a zero-movement user tag for that next
-             event; an opposite movement proves the tag did not cause it. */
-          if (cause?.kind !== "user" || userDelta !== 0) scrollCauseRef.current = null;
+             event; an opposite movement proves the tag did not cause it. A
+             scrollbar press keeps its separate moving baseline until release. */
+          if (scrollbarPointer) scrollbarPointer.fromBottom = fromBottom;
+          if (scrollbarPointer || cause?.kind !== "user" || userDelta !== 0) scrollCauseRef.current = null;
           const settling = nowMs() - glueAtRef.current < GLUE_SETTLE_MS;
           if (!settling || userInitiated) pendingRestoreRef.current = null;
           if (userReturnedToBottom && !magnetRef.current) setMagnet(true, true);
