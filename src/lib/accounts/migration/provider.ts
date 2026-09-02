@@ -7,9 +7,11 @@ import type { AccountContext, AccountManager } from "@/lib/accounts/contracts";
 import { CodexAppServerClient, CodexAppServerError } from "@/lib/accounts/codexAppServer";
 import { sharedClaudeProjectsRoot } from "@/lib/accounts/claude";
 import { realClaudeLoginPorts } from "@/lib/accounts/claudeLogin";
-import { claudeSuccessorSpecFor } from "@/lib/agent/cli";
-import { agentRegistry, type AgentRegistry, type SpawnReceipt, type TmuxHostEvidence } from "@/lib/agent/registry";
+import { resumeCwd } from "@/lib/agent/cli";
+import { normalizeClaudeLaunchModel } from "@/lib/agent/models";
+import { agentRegistry, type AgentRegistry, type TmuxHostEvidence } from "@/lib/agent/registry";
 import { sessionKey, sessionKeyId } from "@/lib/agent/sessionKey";
+import { claudeTranscriptPath } from "@/lib/agent/transcript";
 import { statePath } from "@/lib/configDir";
 import { procBackend } from "@/lib/proc";
 import { ClaudeStreamBrokerHost } from "@/lib/runtime/claudeStreamBrokerHost";
@@ -18,10 +20,10 @@ import { StructuredHostAdoptionCleanupError } from "@/lib/runtime/engineHost";
 import { hasStructuredDeliveryHost, publishStructuredDeliveryHost, releaseStructuredDeliveryHost, requireStructuredDeliveryControllerPublication } from "@/lib/runtime/structuredDeliveryController";
 import { bindClaudeHostPersistence, bindCodexHostPersistence, structuredHostsEnabled } from "@/lib/runtime/registry";
 import { materializeStructuredHostAccess, structuredHostAccessPolicy } from "@/lib/runtime/structuredSpawn";
-import { cleanupTmuxHostIfMatches, forgetResumePaneIfMatches, spawnAgentWithPrompt, verifyTmuxHostEvidence, type TmuxHostCleanupResult } from "@/lib/tmux";
+import { cleanupTmuxHostIfMatches, forgetResumePaneIfMatches, verifyTmuxHostEvidence, type TmuxHostCleanupResult } from "@/lib/tmux";
 
 import { launchProfileCodexSandbox, launchProfileEngineReadOnly, type LaunchProfile, type ProviderReceipt, type SuccessorProviderPort } from "./contracts";
-import { hashValidatedHistory, HistorySecurityError, MigrationTargetUnavailableError, safeCopyHistory, validateHistorySource } from "./safeHistoryCopy";
+import { forkClaudeHistory, hashValidatedHistory, HistorySecurityError, MigrationTargetUnavailableError, safeCopyHistory, validateHistorySource } from "./safeHistoryCopy";
 
 interface StructuredHostPublicationInput {
   receipt: ProviderReceipt;
@@ -35,13 +37,14 @@ export interface ProviderDependencies {
   accounts: Pick<AccountManager, "resolveSpawn" | "resolveTranscriptOwner">;
   startCodex(home: string): Promise<CodexAppServerClient>;
   claudeStatus(home: string): Promise<{ loggedIn: boolean }>;
-  spawnClaude(spec: ReturnType<typeof claudeSuccessorSpecFor>, receipt: SpawnReceipt): Promise<{ paneId: string; panePid?: number; host?: TmuxHostEvidence }>;
+  /** Liveness and cancellation of a legacy tmux-launched successor. A receipt
+      persisted before viewer-written forks still names such a pane. */
   verifyClaudeHost?(host: TmuxHostEvidence): Promise<boolean>;
   cancelClaude?(host: TmuxHostEvidence): Promise<boolean | TmuxHostCleanupResult>;
   registry?: AgentRegistry;
   claudeJournalRoot?: string;
-  afterClaudeSpawned?(): void;
-  afterClaudeReceiptCreated?(): void;
+  /** Test seam: runs after the fork is durable and before its receipt returns. */
+  afterClaudeForked?(): void;
   journalRoot?: string;
   afterCodexForkCreated?(): void;
   afterCodexForkReturned?(): void;
@@ -70,7 +73,6 @@ const defaultDependencies: ProviderDependencies = {
   accounts: accountManager,
   startCodex: (home) => CodexAppServerClient.start({ home }),
   claudeStatus: (home) => realClaudeLoginPorts.status(home),
-  spawnClaude: (spec, receipt) => spawnAgentWithPrompt(spec, "", receipt),
   verifyClaudeHost: (host) => verifyTmuxHostEvidence(host),
   cancelClaude: (host) => cleanupTmuxHostIfMatches(host),
   now: () => new Date().toISOString(),
@@ -393,10 +395,12 @@ async function publishClaudeSuccessorHost(
   let unregister = async () => {};
   let access: ReturnType<typeof materializeStructuredHostAccess> | null = null;
   try {
-    const tmuxHost = claudeTmuxHostFromReceipt(input.receipt);
-    const cancelled = await input.cancelClaude(tmuxHost);
-    if (!cleanupConfirmed(cancelled)) throw new Error("successor Claude host transition is still pending");
-    await forgetResumePaneIfMatches(input.receipt.path, tmuxHost);
+    if (input.receipt.host.kind !== "claude-fork") {
+      const tmuxHost = claudeTmuxHostFromReceipt(input.receipt);
+      const cancelled = await input.cancelClaude(tmuxHost);
+      if (!cleanupConfirmed(cancelled)) throw new Error("successor Claude host transition is still pending");
+      await forgetResumePaneIfMatches(input.receipt.path, tmuxHost);
+    }
     access = materializeStructuredHostAccess(
       structuredHostAccessPolicy(input.profile),
       input.target.env,
@@ -407,7 +411,10 @@ async function publishClaudeSuccessorHost(
       claudeConfigDir: input.target.kind === "managed" ? input.target.home : undefined,
       claudeProjectsDir: input.target.transcriptRoot,
       env: access.env,
-      model: input.profile.model ?? undefined,
+      /* Transcripts keep dated provider ids the CLI may refuse as a launch
+         argument; the launcher that used to project them is gone, so the
+         projection happens here. Unknown ids omit --model. */
+      model: normalizeClaudeLaunchModel(input.profile.model) ?? undefined,
       effort: input.profile.effort ?? undefined,
       readOnly: launchProfileEngineReadOnly(input.profile),
       restricted: input.profile.sandbox === "restricted",
@@ -1027,6 +1034,9 @@ export class RegisteredSuccessorProvider implements SuccessorProviderPort {
       const status = await this.dependencies.claudeStatus(target.home);
       if (!status.loggedIn) throw new MigrationTargetUnavailableError("not-authenticated", "target Claude account is not authenticated");
       assertClaudeTranscript(receipt, target);
+      /* A viewer-written fork had no launch to outlive: the durable transcript
+         is its verification, and the broker host is published from it next. */
+      if (receipt.host.kind === "claude-fork") return;
       const host = claudeTmuxHostFromReceipt(receipt);
       const registry = this.dependencies.registry ?? agentRegistry();
       const tmuxLive = host.windowName === "claude-migration-successor"
@@ -1121,11 +1131,10 @@ export class RegisteredSuccessorProvider implements SuccessorProviderPort {
     }
     const key = receipt.host.kind === "codex-app-server"
       ? sessionKey("codex", receipt.nativeId)
-      : receipt.host.kind === "claude-stream"
+      : receipt.host.kind === "claude-stream" || receipt.host.kind === "claude-fork"
         ? sessionKey("claude", receipt.nativeId)
         : null;
     if (key && await releaseStructuredDeliveryHost(key)) return;
-    if (receipt.host.kind === "codex-app-server") return;
     if (receipt.host.kind !== "claude-stream") return;
     const host = claudeTmuxHostFromReceipt(receipt);
     const cancelled = await this.dependencies.cancelClaude?.(host);
@@ -1143,9 +1152,9 @@ export class RegisteredSuccessorProvider implements SuccessorProviderPort {
     recordContinuityPath: (pathname: string) => void,
   ): Promise<ProviderReceipt> {
     const journalRoot = this.dependencies.claudeJournalRoot ?? statePath("migration-provider-claude-operations");
+    void conversationId;
     return withCodexOperationLease(journalRoot, operationId, (assertLeaseOwned) => this.createClaudeLocked(
       operationId,
-      conversationId,
       sourcePath,
       profile,
       source,
@@ -1157,7 +1166,6 @@ export class RegisteredSuccessorProvider implements SuccessorProviderPort {
 
   private async createClaudeLocked(
     operationId: string,
-    conversationId: Parameters<SuccessorProviderPort["create"]>[0]["conversationId"],
     sourcePath: string,
     profile: LaunchProfile,
     source: AccountContext,
@@ -1169,98 +1177,34 @@ export class RegisteredSuccessorProvider implements SuccessorProviderPort {
     if (!status.loggedIn) throw new MigrationTargetUnavailableError("not-authenticated", "target Claude account is not authenticated");
     const history = hashValidatedHistory(sourcePath, source.transcriptRoot);
     const nativeId = candidateUuid(operationId);
-    const spec = claudeSuccessorSpecFor({ sourcePath, candidateId: nativeId, targetHome: target.home, targetProjectsDir: target.transcriptRoot, profile });
-    const successorPath = spec.transcript ?? path.join(target.transcriptRoot, `${nativeId}.jsonl`);
-    const registry = this.dependencies.registry ?? agentRegistry();
-    const recordContinuityOrCancel = async (launchId: string, host: TmuxHostEvidence): Promise<void> => {
-      try {
-        recordContinuityPath(successorPath);
-      } catch (error) {
-        registry.preserveSpawnArtifactOwnership(launchId, "migration continuity persistence failed");
-        try {
-          const cleanup = await this.dependencies.cancelClaude?.(host);
-          if (cleanupConfirmed(cleanup)) await forgetResumePaneIfMatches(successorPath, host);
-        } catch { /* durable artifact ownership remains available to inventory recovery */ }
-        throw error;
-      }
-    };
-    const requestDigest = crypto.createHash("sha256").update(JSON.stringify({ operationId, conversationId, target: target.accountId, nativeId })).digest("hex");
-    const begun = registry.beginSpawnRequest({
-      engine: "claude",
-      cwd: profile.cwd,
-      launchProfile: profile,
-      clientAttemptId: `migration-successor:${operationId}`,
-      requestDigest,
-      accountId: target.accountId,
-      conversationId,
-      purpose: "migration-successor",
-      origin: { kind: "successor" },
-      expectedArtifactPath: successorPath,
-    });
-    if (begun.kind === "conflict") throw new Error("successor Claude operation receipt conflicts");
-    const spawnReceipt = begun.receipt;
-    if (begun.kind === "replay") {
-      if (spawnReceipt.state === "failed" || spawnReceipt.state === "conflicted") {
-        throw new Error("successor Claude operation receipt is terminal");
-      }
-      const host = spawnReceipt.verifiedHost;
-      if (host) {
-        if (!await this.dependencies.verifyClaudeHost?.(host)) {
-          throw new Error("successor Claude operation has no recoverable live host");
-        }
-        await recordContinuityOrCancel(spawnReceipt.launchId, host);
-        return {
-          operationId,
-          nativeId,
-          path: successorPath,
-          continuityPaths: [successorPath],
-          historyHash: history.hash,
-          host: { kind: "claude-stream", identity: `${host.paneId}:${host.panePid.pid}`, epoch: 1, verifiedAt: this.dependencies.now(), tmuxHost: host },
-        };
-      }
-      if (spawnReceipt.state !== "starting" || spawnReceipt.pane || fs.existsSync(successorPath)) throw new SuccessorPendingError();
-    } else {
-      this.dependencies.afterClaudeReceiptCreated?.();
-    }
+    const successorPath = claudeTranscriptPath(profile.cwd || resumeCwd(sourcePath), nativeId, target.transcriptRoot);
     assertLeaseOwned();
-    let pane: Awaited<ReturnType<ProviderDependencies["spawnClaude"]>>;
-    try {
-      pane = await this.dependencies.spawnClaude(spec, spawnReceipt);
-    } catch (error) {
-      registry.failSpawn(spawnReceipt.launchId, error instanceof Error ? error.message : String(error));
-      throw error;
-    }
-    if (!pane.host || pane.panePid === undefined || pane.host.paneId !== pane.paneId || pane.host.panePid.pid !== pane.panePid) {
-      registry.failSpawn(spawnReceipt.launchId, "successor Claude host evidence is unavailable");
-      throw new Error("successor Claude host evidence is unavailable");
-    }
-    const fenceReceipt = async (receipt: SpawnReceipt): Promise<void> => {
-      if (receipt.state !== "failed" && receipt.state !== "conflicted") return;
-      try { await this.dependencies.cancelClaude?.(pane.host!); } catch { /* terminal receipt fencing keeps cleanup best effort */ }
-      throw new Error("successor Claude operation receipt became terminal");
-    };
-    const bound = registry.bindSpawnPane(spawnReceipt.launchId, {
-      endpoint: pane.host.endpoint,
-      server: pane.host.server,
-      paneId: pane.host.paneId,
-      panePid: pane.host.panePid,
-      target: pane.host.paneId,
+    /* The continuity record precedes the file on purpose: from the moment the
+       fork exists the scanner must already know which conversation owns it, so
+       no tick can seat it as a lookalike of its own (issue #889). */
+    recordContinuityPath(successorPath);
+    /* The CLI's own `--fork-session` needs a prompt to write anything, and a
+       successor has no prompt to give — the operator's message is held for
+       after the commit. The viewer writes the fork itself and the broker host
+       resumes it under the target account (issue #889). */
+    forkClaudeHistory({
+      sourcePath,
+      sourceRoot: source.transcriptRoot,
+      targetRoot: target.transcriptRoot,
+      destination: successorPath,
+      sourceSessionId: path.basename(sourcePath, ".jsonl"),
+      sessionId: nativeId,
+      operationId,
     });
-    await fenceReceipt(bound);
-    const verified = registry.markSpawnHostVerified(spawnReceipt.launchId, pane.host);
-    await fenceReceipt(verified);
-    const delivered = registry.markSpawnPromptDelivered(spawnReceipt.launchId);
-    await fenceReceipt(delivered);
-    await recordContinuityOrCancel(spawnReceipt.launchId, pane.host);
     assertLeaseOwned();
-    this.dependencies.afterClaudeSpawned?.();
+    this.dependencies.afterClaudeForked?.();
     return {
       operationId,
       nativeId,
       path: successorPath,
       continuityPaths: [successorPath],
       historyHash: history.hash,
-      host: { kind: "claude-stream", identity: `${pane.paneId}:${pane.panePid}`, epoch: 1, verifiedAt: this.dependencies.now(), tmuxHost: pane.host },
+      host: { kind: "claude-fork", identity: nativeId, epoch: 1, verifiedAt: this.dependencies.now() },
     };
   }
 

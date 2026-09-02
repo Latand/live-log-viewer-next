@@ -111,7 +111,6 @@ test("Codex successor host publication is single-owner and cleanup releases that
     accounts: { resolveSpawn: () => target, resolveTranscriptOwner: () => source },
     startCodex: async () => { throw new Error("unexpected Codex client"); },
     claudeStatus: async () => ({ loggedIn: true }),
-    spawnClaude: async () => { throw new Error("unexpected Claude spawn"); },
     publishCodexHost: async () => {
       publications += 1;
       await Promise.resolve();
@@ -157,7 +156,6 @@ test("Claude successor cleanup releases its published broker owner", async () =>
     accounts: { resolveSpawn: () => target, resolveTranscriptOwner: () => source },
     startCodex: async () => { throw new Error("unexpected Codex client"); },
     claudeStatus: async () => ({ loggedIn: true }),
-    spawnClaude: async () => { throw new Error("unexpected Claude spawn"); },
     cancelClaude: async () => { legacyCancellations += 1; return true; },
     publishClaudeHost: async () => {
       publications += 1;
@@ -242,7 +240,6 @@ test("Claude publication waits for controller startup before replacing its verif
     accounts: { resolveSpawn: () => target, resolveTranscriptOwner: () => source },
     startCodex: async () => { throw new Error("unexpected Codex client"); },
     claudeStatus: async () => ({ loggedIn: true }),
-    spawnClaude: async () => { throw new Error("unexpected Claude spawn"); },
     verifyClaudeHost: async () => tmuxLive,
     cancelClaude: async () => {
       if (!tmuxLive) return "absent";
@@ -331,7 +328,6 @@ test("a fenced Claude publication keeps receipt cleanup available", async () => 
     accounts: { resolveSpawn: () => target, resolveTranscriptOwner: () => source },
     startCodex: async () => { throw new Error("unexpected Codex client"); },
     claudeStatus: async () => ({ loggedIn: true }),
-    spawnClaude: async () => { throw new Error("unexpected Claude spawn"); },
     cancelClaude: async (host) => { cancelled.push(host.paneId); return true; },
     publishClaudeHost: async (input) => {
       if (input.ownsOperation && !await input.ownsOperation()) return async () => {};
@@ -371,134 +367,119 @@ test("a fenced Claude publication keeps receipt cleanup available", async () => 
   expect(cancelled).toEqual(["%46"]);
 });
 
-test("Claude successor provider uses registered homes and shared model normalization", async () => {
-  const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-provider-claude-"));
-  roots.push(base);
+const FORK_SOURCE_ID = "019f423a-d6e9-\x34903-b597-3e676b6ff3d4";
+const FORK_OPERATION_ID = "7d1c2b3a-4e5f-\x34a6b-8c7d-9e0f1a2b3c4d";
+
+function claudeForkFixture(base: string) {
   const source = accountRoot("claude", base, "source");
   const target = accountRoot("claude", base, "target");
-  const sourcePath = path.join(source.transcriptRoot, "-repo", "019f423a-d6e9-\x37903-b597-3e676b6ff3d4.jsonl");
+  const sourcePath = path.join(source.transcriptRoot, "-repo", `${FORK_SOURCE_ID}.jsonl`);
   fs.mkdirSync(path.dirname(sourcePath), { recursive: true, mode: 0o700 });
-  fs.writeFileSync(sourcePath, "{}\n", { mode: 0o600 });
-  let command = "";
-  let launchTitle: string | null = null;
-  const registry = new AgentRegistry(path.join(base, "provider-registry.json"));
-  const dependencies: ProviderDependencies = {
-    accounts: {
-      resolveSpawn: () => target,
-      resolveTranscriptOwner: () => source,
-    },
-    startCodex: async () => { throw new Error("unexpected Codex client"); },
-    claudeStatus: async () => ({ loggedIn: true }),
-    spawnClaude: async (spec) => {
-      command = spec.command;
-      launchTitle = spec.launchProfile?.title ?? null;
-      fs.mkdirSync(path.dirname(spec.transcript!), { recursive: true, mode: 0o700 });
-      fs.writeFileSync(spec.transcript!, JSON.stringify({ sessionId: path.basename(spec.transcript!, ".jsonl") }) + "\n", { mode: 0o600 });
-      return { paneId: "%9", panePid: 99, host: claudeHost("%9", 99) };
-    },
-    verifyClaudeHost: async () => true,
-    registry,
-    claudeJournalRoot: path.join(base, "claude-operations"),
-    now: () => "2026-07-10T12:00:00.000Z",
-  };
-  const provider = new RegisteredSuccessorProvider(dependencies);
+  const quoted = `"sessionId":"${FORK_SOURCE_ID}"`;
+  fs.writeFileSync(sourcePath, [
+    JSON.stringify({ type: "user", sessionId: FORK_SOURCE_ID, cwd: "/repo", message: { role: "user", content: "Привіт, почнімо ✅" } }),
+    JSON.stringify({ type: "summary", leafUuid: "leaf", summary: "carries no session field" }),
+    JSON.stringify({ type: "assistant", sessionId: FORK_SOURCE_ID, message: { role: "assistant", content: [{ type: "text", text: `a quoted ${quoted} inside a value` }] } }),
+  ].join("\n") + "\n", { mode: 0o600 });
   const sourceGeneration: NativeGeneration = {
-    id: "019f423a-d6e9-\x37903-b597-3e676b6ff3d4",
+    id: FORK_SOURCE_ID,
     path: sourcePath,
     accountId: "source",
-    launchProfile: migrationSuccessorLaunchProfile(emptyLaunchProfile({
-      cwd: "/repo",
-      model: "claude-fable-20260701",
-      effort: "high",
-      title: "Claude session",
-      goal: { objective: "Migrate issue #913 identity", status: "active", tokensUsed: null, timeUsedSeconds: null },
-    })),
+    launchProfile: migrationSuccessorLaunchProfile(emptyLaunchProfile({ cwd: "/repo", model: "fable", title: "Claude session" })),
     historyHash: null,
     host: null,
     createdAt: "2026-07-10T11:00:00.000Z",
     archivedAt: null,
   };
-  const receipt = await provider.create({ engine: "claude", operationId: "019f423a-d6e9-\x34903-8597-3e676b6ff3d4", conversationId: "conversation_test", source: sourceGeneration, targetAccountId: "target", recordContinuityPath() {} });
-  expect(command).toContain("CLAUDE_CONFIG_DIR=");
-  expect(command).toContain("--model' 'fable'");
-  expect(command).not.toContain("claude-fable-");
-  expect(command).toContain("--effort' 'high'");
-  expect(launchTitle as string | null).toBe("migration successor · Migrate issue 913 identity");
-  expect(receipt.path.startsWith(target.transcriptRoot + path.sep)).toBeTrue();
-  expect(Object.values(registry.snapshot().receipts)).toContainEqual(expect.objectContaining({
-    launchProfile: expect.objectContaining({ title: "migration successor · Migrate issue 913 identity" }),
-  }));
-  await expect(provider.verify(receipt, { engine: "claude", targetAccountId: "target", launchProfile: sourceGeneration.launchProfile })).resolves.toBeUndefined();
-});
-
-test("Claude successor verification rejects a missing durable transcript", async () => {
-  const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-provider-claude-missing-"));
-  roots.push(base);
-  const source = accountRoot("claude", base, "source");
-  const target = accountRoot("claude", base, "target");
-  const sourcePath = path.join(source.transcriptRoot, "source.jsonl");
-  fs.writeFileSync(sourcePath, "{}\n", { mode: 0o600 });
-  const provider = new RegisteredSuccessorProvider({
+  const dependencies = {
     accounts: { resolveSpawn: () => target, resolveTranscriptOwner: () => source },
     startCodex: async () => { throw new Error("unexpected Codex client"); },
     claudeStatus: async () => ({ loggedIn: true }),
-    spawnClaude: async () => ({ paneId: "%11", panePid: 111, host: claudeHost("%11", 111) }),
     registry: new AgentRegistry(path.join(base, "provider-registry.json")),
     claudeJournalRoot: path.join(base, "claude-operations"),
     now: () => "2026-07-10T12:00:00.000Z",
-  });
-  const receipt = await provider.create({
-    engine: "claude",
-    operationId: "019f423a-d6e9-\x34903-8597-3e676b6ff3d4",
-    conversationId: "conversation_test",
+  } satisfies ProviderDependencies;
+  const input = {
+    engine: "claude" as const,
+    operationId: FORK_OPERATION_ID,
+    conversationId: "conversation_fork_test" as const,
     targetAccountId: "target",
-    source: { id: "source", path: sourcePath, accountId: "source", launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "Migrate provider fixture" }), historyHash: null, host: null, createdAt: "now", archivedAt: null },
+    source: sourceGeneration,
     recordContinuityPath() {},
-  });
+  };
+  const successorPath = path.join(target.transcriptRoot, "-repo", `${FORK_OPERATION_ID}.jsonl`);
+  return { source, target, sourcePath, sourceGeneration, dependencies, input, successorPath };
+}
 
-  await expect(provider.verify(receipt, { engine: "claude", targetAccountId: "target", launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "Migrate provider fixture" }) }))
+test("Claude successor is a fork the viewer writes into the target root, with no launch", async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-provider-claude-fork-"));
+  roots.push(base);
+  const fixture = claudeForkFixture(base);
+  const recorded: string[] = [];
+  const provider = new RegisteredSuccessorProvider(fixture.dependencies);
+
+  const receipt = await provider.create({ ...fixture.input, recordContinuityPath(pathname) { recorded.push(pathname); } });
+
+  expect(receipt).toEqual({
+    operationId: FORK_OPERATION_ID,
+    nativeId: FORK_OPERATION_ID,
+    path: fixture.successorPath,
+    continuityPaths: [fixture.successorPath],
+    historyHash: expect.any(String),
+    host: { kind: "claude-fork", identity: FORK_OPERATION_ID, epoch: 1, verifiedAt: "2026-07-10T12:00:00.000Z" },
+  });
+  expect(recorded).toEqual([fixture.successorPath]);
+  const forked = fs.readFileSync(fixture.successorPath, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
+  expect(forked.map((record) => record.sessionId)).toEqual([FORK_OPERATION_ID, undefined, FORK_OPERATION_ID]);
+  expect((forked[0]!.message as { content: string }).content).toBe("Привіт, почнімо ✅");
+  /* A mention inside a value is text, not identity: it stays as written. */
+  expect(JSON.stringify(forked[2])).toContain(FORK_SOURCE_ID);
+  expect(fs.statSync(fixture.successorPath).mode & 0o777).toBe(0o600);
+  expect(Object.values(fixture.dependencies.registry.snapshot().receipts)).toHaveLength(0);
+  await expect(provider.verify(receipt, { engine: "claude", targetAccountId: "target", launchProfile: fixture.sourceGeneration.launchProfile }))
+    .resolves.toBeUndefined();
+});
+
+test("Claude successor verification rejects a fork that is no longer durable", async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-provider-claude-fork-missing-"));
+  roots.push(base);
+  const fixture = claudeForkFixture(base);
+  const provider = new RegisteredSuccessorProvider(fixture.dependencies);
+  const receipt = await provider.create(fixture.input);
+  fs.rmSync(receipt.path);
+
+  await expect(provider.verify(receipt, { engine: "claude", targetAccountId: "target", launchProfile: fixture.sourceGeneration.launchProfile }))
     .rejects.toThrow("durable");
 });
 
-test("Claude agent exit fails full host verification and leaves the persisted receipt immutable", async () => {
-  const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-provider-claude-host-failure-"));
+test("a legacy tmux successor receipt still verifies pane liveness", async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-provider-claude-legacy-pane-"));
   roots.push(base);
   const source = accountRoot("claude", base, "source");
   const target = accountRoot("claude", base, "target");
-  const sourcePath = path.join(source.transcriptRoot, "source.jsonl");
-  fs.writeFileSync(sourcePath, "{}\n", { mode: 0o600 });
   let verifiedHost: TmuxHostEvidence | null = null;
   const provider = new RegisteredSuccessorProvider({
     accounts: { resolveSpawn: () => target, resolveTranscriptOwner: () => source },
     startCodex: async () => { throw new Error("unexpected Codex client"); },
     claudeStatus: async () => ({ loggedIn: true }),
-    spawnClaude: async (spec) => {
-      fs.mkdirSync(path.dirname(spec.transcript!), { recursive: true, mode: 0o700 });
-      fs.writeFileSync(spec.transcript!, JSON.stringify({ sessionId: path.basename(spec.transcript!, ".jsonl") }) + "\n", { mode: 0o600 });
-      return { paneId: "%12", panePid: 1212, host: claudeHost("%12", 1212) };
-    },
     verifyClaudeHost: async (host) => { verifiedHost = host; return false; },
     registry: new AgentRegistry(path.join(base, "provider-registry.json")),
-    claudeJournalRoot: path.join(base, "claude-operations"),
     now: () => "2026-07-10T12:00:00.000Z",
   });
-  const receipt = await provider.create({
-    engine: "claude",
-    operationId: "claude-host-failure",
-    conversationId: "conversation_claude_host_failure",
-    targetAccountId: "target",
-    source: { id: "source", path: sourcePath, accountId: "source", launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "Migrate provider fixture" }), historyHash: null, host: null, createdAt: "now", archivedAt: null },
-    recordContinuityPath() {},
-  });
-  const persisted = structuredClone(receipt);
+  const transcript = path.join(target.transcriptRoot, "legacy-pane.jsonl");
+  fs.writeFileSync(transcript, JSON.stringify({ sessionId: "legacy-pane" }) + "\n", { mode: 0o600 });
+  const receipt: ProviderReceipt = {
+    operationId: "legacy-pane",
+    nativeId: "legacy-pane",
+    path: transcript,
+    continuityPaths: [],
+    historyHash: "history",
+    host: { kind: "claude-stream", identity: "%12:1212", epoch: 1, verifiedAt: "2026-07-10T12:00:00.000Z", tmuxHost: claudeHost("%12", 1212) },
+  };
 
-  await expect(provider.verify(receipt, {
-    engine: "claude",
-    targetAccountId: "target",
-    launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "Migrate provider fixture" }),
-  })).rejects.toThrow("host is not live");
-  expect(receipt).toEqual(persisted);
-  expect(verifiedHost).toMatchObject({ paneId: "%12", panePid: { pid: 1212 }, agent: { pid: 11212 } });
+  await expect(provider.verify(receipt, { engine: "claude", targetAccountId: "target", launchProfile: emptyLaunchProfile({ cwd: "/repo" }) }))
+    .rejects.toThrow("host is not live");
+  expect(verifiedHost).toMatchObject({ paneId: "%12", panePid: { pid: 1212 } });
 });
 
 test("Claude cleanup cancels only the pane PID recorded by the losing receipt", async () => {
@@ -512,7 +493,6 @@ test("Claude cleanup cancels only the pane PID recorded by the losing receipt", 
     accounts: { resolveSpawn: () => target, resolveTranscriptOwner: () => source },
     startCodex: async () => { throw new Error("unexpected Codex client"); },
     claudeStatus: async () => ({ loggedIn: true }),
-    spawnClaude: async () => ({ paneId: "%7", panePid: 77, host: claudeHost("%7", 77) }),
     cancelClaude: async (host) => {
       if (observedPid !== host.panePid.pid) return false;
       cancelled.push([host.paneId, host.panePid.pid]);
@@ -554,7 +534,6 @@ test("Claude cleanup cancels only the pane PID recorded by the losing receipt", 
     accounts: { resolveSpawn: () => target, resolveTranscriptOwner: () => source },
     startCodex: async () => { throw new Error("unexpected Codex client"); },
     claudeStatus: async () => ({ loggedIn: true }),
-    spawnClaude: async () => ({ paneId: "%7", panePid: 77, host: claudeHost("%7", 77) }),
     now: () => "2026-07-10T12:00:00.000Z",
   });
   await expect(providerWithoutCleanup.cleanup(receipt)).rejects.toThrow("cleanup is still pending");
@@ -563,7 +542,6 @@ test("Claude cleanup cancels only the pane PID recorded by the losing receipt", 
     accounts: { resolveSpawn: () => target, resolveTranscriptOwner: () => source },
     startCodex: async () => { throw new Error("unexpected Codex client"); },
     claudeStatus: async () => ({ loggedIn: true }),
-    spawnClaude: async () => ({ paneId: "%7", panePid: 77, host: claudeHost("%7", 77) }),
     cancelClaude: async () => "absent",
     now: () => "2026-07-10T12:00:00.000Z",
   });
@@ -573,297 +551,70 @@ test("Claude cleanup cancels only the pane PID recorded by the losing receipt", 
     accounts: { resolveSpawn: () => target, resolveTranscriptOwner: () => source },
     startCodex: async () => { throw new Error("unexpected Codex client"); },
     claudeStatus: async () => ({ loggedIn: true }),
-    spawnClaude: async () => ({ paneId: "%7", panePid: 77, host: claudeHost("%7", 77) }),
     cancelClaude: async () => "unverifiable",
     now: () => "2026-07-10T12:00:00.000Z",
   });
   await expect(unverifiableProvider.cleanup(receipt)).rejects.toThrow("cleanup is still pending");
 });
 
-test("concurrent Claude creates reuse one durable migration spawn receipt", async () => {
-  const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-provider-claude-concurrent-"));
+test("concurrent Claude creates publish one fork and return one receipt", async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-provider-claude-fork-concurrent-"));
   roots.push(base);
-  const source = accountRoot("claude", base, "source");
-  const target = accountRoot("claude", base, "target");
-  const sourcePath = path.join(source.transcriptRoot, "source.jsonl");
-  fs.writeFileSync(sourcePath, "{}\n", { mode: 0o600 });
-  const registry = new AgentRegistry(path.join(base, "provider-registry.json"));
-  const conversation = registry.ensureConversation("claude", sourcePath, "source");
-  let spawns = 0;
-  const provider = new RegisteredSuccessorProvider({
-    accounts: { resolveSpawn: () => target, resolveTranscriptOwner: () => source },
-    startCodex: async () => { throw new Error("unexpected Codex client"); },
-    claudeStatus: async () => ({ loggedIn: true }),
-    spawnClaude: async (spec) => {
-      spawns += 1;
-      fs.mkdirSync(path.dirname(spec.transcript!), { recursive: true, mode: 0o700 });
-      fs.writeFileSync(spec.transcript!, JSON.stringify({ sessionId: path.basename(spec.transcript!, ".jsonl") }) + "\n", { mode: 0o600 });
-      return { paneId: "%21", panePid: 2121, host: claudeHost("%21", 2121) };
-    },
-    verifyClaudeHost: async () => true,
-    registry,
-    claudeJournalRoot: path.join(base, "claude-operations"),
-    now: () => "2026-07-10T12:00:00.000Z",
-  });
-  const input = {
-    engine: "claude" as const,
-    operationId: "claude-concurrent-operation",
-    conversationId: conversation.id,
-    targetAccountId: "target",
-    source: titledProviderSource(conversation.generations[0]!),
-    recordContinuityPath() {},
-  };
+  const fixture = claudeForkFixture(base);
+  const provider = new RegisteredSuccessorProvider(fixture.dependencies);
 
-  const receipts = await Promise.all([provider.create(input), provider.create(input)]);
+  const receipts = await Promise.all([provider.create(fixture.input), provider.create(fixture.input)]);
 
-  expect(spawns).toBe(1);
   expect(receipts[0]).toEqual(receipts[1]);
-  const launchReceipts = Object.values(registry.snapshot().receipts);
-  expect(launchReceipts).toHaveLength(1);
-  expect(launchReceipts[0]).toMatchObject({ conversationId: conversation.id, purpose: "migration-successor" });
+  expect(fs.readdirSync(path.dirname(fixture.successorPath)).sort()).toEqual([
+    `${FORK_OPERATION_ID}.jsonl`,
+    `${FORK_OPERATION_ID}.jsonl.llv-receipt.json`,
+  ]);
+  expect(Object.values(fixture.dependencies.registry.snapshot().receipts)).toHaveLength(0);
 });
 
-test("Claude create cancels the live host when continuity persistence fails", async () => {
-  const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-provider-claude-continuity-failure-"));
+test("Claude create writes no fork when continuity persistence fails", async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-provider-claude-fork-continuity-failure-"));
   roots.push(base);
-  const source = accountRoot("claude", base, "source");
-  const target = accountRoot("claude", base, "target");
-  const sourcePath = path.join(source.transcriptRoot, "source.jsonl");
-  fs.writeFileSync(sourcePath, "{}\n", { mode: 0o600 });
-  const registry = new AgentRegistry(path.join(base, "provider-registry.json"));
-  const conversation = registry.ensureConversation("claude", sourcePath, "source");
-  const cancelled: string[] = [];
-  const provider = new RegisteredSuccessorProvider({
-    accounts: { resolveSpawn: () => target, resolveTranscriptOwner: () => source },
-    startCodex: async () => { throw new Error("unexpected Codex client"); },
-    claudeStatus: async () => ({ loggedIn: true }),
-    spawnClaude: async (spec) => {
-      fs.mkdirSync(path.dirname(spec.transcript!), { recursive: true, mode: 0o700 });
-      fs.writeFileSync(spec.transcript!, JSON.stringify({ sessionId: path.basename(spec.transcript!, ".jsonl") }) + "\n", { mode: 0o600 });
-      return { paneId: "%25", panePid: 2525, host: claudeHost("%25", 2525) };
-    },
-    cancelClaude: async (host) => { cancelled.push(host.paneId); return true; },
-    registry,
-    claudeJournalRoot: path.join(base, "claude-operations"),
-    now: () => "2026-07-10T12:00:00.000Z",
-  });
+  const fixture = claudeForkFixture(base);
 
-  await expect(provider.create({
-    engine: "claude",
-    operationId: "claude-continuity-failure",
-    conversationId: conversation.id,
-    targetAccountId: "target",
-    source: titledProviderSource(conversation.generations[0]!),
+  await expect(new RegisteredSuccessorProvider(fixture.dependencies).create({
+    ...fixture.input,
     recordContinuityPath() { throw new Error("registry unavailable"); },
   })).rejects.toThrow("registry unavailable");
 
-  expect(cancelled).toEqual(["%25"]);
-  const spawnReceipt = Object.values(registry.snapshot().receipts)[0]!;
-  expect(spawnReceipt).toMatchObject({ state: "path-pending", error: "migration continuity persistence failed" });
-  registry.reconcileConversations([{
-    engine: "claude",
-    path: spawnReceipt.artifactPath!,
-    accountId: "target",
-    launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "Migrate provider fixture" }),
-    turn: { state: "idle", source: "empty", terminalAt: null },
-    observedAt: "2026-07-10T12:01:00.000Z",
-  }]);
-  expect(registry.conversationForPath(spawnReceipt.artifactPath!)?.id).toBe(conversation.id);
-  expect(Object.values(registry.snapshot().conversations)).toHaveLength(1);
+  expect(fs.existsSync(path.dirname(fixture.successorPath))).toBeFalse();
 });
 
-test("Claude replay cancels its verified host when continuity persistence fails", async () => {
-  const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-provider-claude-replay-continuity-failure-"));
+test("Claude replay after a crash between the fork and its receipt reuses the fork", async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-provider-claude-fork-replay-"));
   roots.push(base);
-  const source = accountRoot("claude", base, "source");
-  const target = accountRoot("claude", base, "target");
-  const sourcePath = path.join(source.transcriptRoot, "source.jsonl");
-  fs.writeFileSync(sourcePath, "{}\n", { mode: 0o600 });
-  const registry = new AgentRegistry(path.join(base, "provider-registry.json"));
-  const conversation = registry.ensureConversation("claude", sourcePath, "source");
-  const cancelled: string[] = [];
-  const dependencies = {
-    accounts: { resolveSpawn: () => target, resolveTranscriptOwner: () => source },
-    startCodex: async () => { throw new Error("unexpected Codex client"); },
-    claudeStatus: async () => ({ loggedIn: true }),
-    spawnClaude: async () => ({ paneId: "%26", panePid: 2626, host: claudeHost("%26", 2626) }),
-    verifyClaudeHost: async () => true,
-    cancelClaude: async (host: TmuxHostEvidence) => { cancelled.push(host.paneId); return true; },
-    registry,
-    claudeJournalRoot: path.join(base, "claude-operations"),
-    now: () => "2026-07-10T12:00:00.000Z",
-  } satisfies ProviderDependencies;
-  const input = {
-    engine: "claude" as const,
-    operationId: "claude-replay-continuity-failure",
-    conversationId: conversation.id,
-    targetAccountId: "target",
-    source: titledProviderSource(conversation.generations[0]!),
-    recordContinuityPath() {},
-  };
-  await new RegisteredSuccessorProvider(dependencies).create(input);
-
-  await expect(new RegisteredSuccessorProvider(dependencies).create({
-    ...input,
-    recordContinuityPath() { throw new Error("registry unavailable on replay"); },
-  })).rejects.toThrow("registry unavailable on replay");
-
-  expect(cancelled).toEqual(["%26"]);
-  expect(Object.values(registry.snapshot().receipts)[0]).toMatchObject({ state: "path-pending", error: "migration continuity persistence failed" });
-});
-
-test("Claude replay resumes a pane-free birth receipt and fences terminal spawn state", async () => {
-  const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-provider-claude-receipt-recovery-"));
-  roots.push(base);
-  const source = accountRoot("claude", base, "source");
-  const target = accountRoot("claude", base, "target");
-  const sourcePath = path.join(source.transcriptRoot, "source.jsonl");
-  fs.writeFileSync(sourcePath, "{}\n", { mode: 0o600 });
-  const registry = new AgentRegistry(path.join(base, "provider-registry.json"));
-  const conversation = registry.ensureConversation("claude", sourcePath, "source");
-  let spawns = 0;
-  let forceTerminal = false;
-  const cancelled: string[] = [];
-  const dependencies = {
-    accounts: { resolveSpawn: () => target, resolveTranscriptOwner: () => source },
-    startCodex: async () => { throw new Error("unexpected Codex client"); },
-    claudeStatus: async () => ({ loggedIn: true }),
-    spawnClaude: async (spec: ReturnType<typeof import("@/lib/agent/cli").claudeSuccessorSpecFor>, launch: import("@/lib/agent/registry").SpawnReceipt) => {
-      spawns += 1;
-      fs.mkdirSync(path.dirname(spec.transcript!), { recursive: true, mode: 0o700 });
-      fs.writeFileSync(spec.transcript!, JSON.stringify({ sessionId: path.basename(spec.transcript!, ".jsonl") }) + "\n", { mode: 0o600 });
-      if (forceTerminal) registry.invalidateSpawnHost(launch.launchId, "forced terminal receipt");
-      return { paneId: "%23", panePid: 2323, host: claudeHost("%23", 2323) };
-    },
-    verifyClaudeHost: async () => true,
-    cancelClaude: async (host: TmuxHostEvidence) => { cancelled.push(host.paneId); return true; },
-    registry,
-    claudeJournalRoot: path.join(base, "claude-operations"),
-    now: () => "2026-07-10T12:00:00.000Z",
-  } satisfies ProviderDependencies;
-  const input = {
-    engine: "claude" as const,
-    operationId: "claude-pane-free-retry",
-    conversationId: conversation.id,
-    targetAccountId: "target",
-    source: titledProviderSource(conversation.generations[0]!),
-    recordContinuityPath() {},
-  };
+  const fixture = claudeForkFixture(base);
 
   await expect(new RegisteredSuccessorProvider({
-    ...dependencies,
-    afterClaudeReceiptCreated() { throw new Error("simulated crash after receipt birth"); },
-  }).create(input)).rejects.toThrow("simulated crash after receipt birth");
-  expect(spawns).toBe(0);
-  await expect(new RegisteredSuccessorProvider(dependencies).create(input)).resolves.toMatchObject({ host: { identity: "%23:2323" } });
-  expect(spawns).toBe(1);
+    ...fixture.dependencies,
+    afterClaudeForked() { throw new Error("simulated crash after fork"); },
+  }).create(fixture.input)).rejects.toThrow("simulated crash after fork");
+  const written = fs.statSync(fixture.successorPath);
 
-  forceTerminal = true;
-  const recorded: string[] = [];
-  await expect(new RegisteredSuccessorProvider(dependencies).create({
-    ...input,
-    operationId: "claude-terminal-fence",
-    recordContinuityPath(pathname) { recorded.push(pathname); },
-  })).rejects.toThrow("became terminal");
-  expect(recorded).toEqual([]);
-  expect(cancelled).toEqual(["%23"]);
+  const receipt = await new RegisteredSuccessorProvider(fixture.dependencies).create(fixture.input);
+
+  expect(receipt.path).toBe(fixture.successorPath);
+  const reused = fs.statSync(fixture.successorPath);
+  expect([reused.ino, reused.mtimeMs, reused.size]).toEqual([written.ino, written.mtimeMs, written.size]);
 });
 
-test("Claude crash recovery reuses the exact host and observer settlement keeps one owner", async () => {
-  const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-provider-claude-crash-recovery-"));
+test("Claude fork receipt cleanup owns no pane", async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-provider-claude-fork-cleanup-"));
   roots.push(base);
-  const source = accountRoot("claude", base, "source");
-  const target = accountRoot("claude", base, "target");
-  const sourcePath = path.join(source.transcriptRoot, "source.jsonl");
-  fs.writeFileSync(sourcePath, "{}\n", { mode: 0o600 });
-  const registry = new AgentRegistry(path.join(base, "provider-registry.json"));
-  const conversation = registry.ensureConversation("claude", sourcePath, "source");
-  let spawns = 0;
-  const dependencies = {
-    accounts: { resolveSpawn: () => target, resolveTranscriptOwner: () => source },
-    startCodex: async () => { throw new Error("unexpected Codex client"); },
-    claudeStatus: async () => ({ loggedIn: true }),
-    spawnClaude: async (spec: ReturnType<typeof import("@/lib/agent/cli").claudeSuccessorSpecFor>) => {
-      spawns += 1;
-      fs.mkdirSync(path.dirname(spec.transcript!), { recursive: true, mode: 0o700 });
-      fs.writeFileSync(spec.transcript!, JSON.stringify({ sessionId: path.basename(spec.transcript!, ".jsonl") }) + "\n", { mode: 0o600 });
-      return { paneId: "%22", panePid: 2222, host: claudeHost("%22", 2222) };
-    },
-    verifyClaudeHost: async () => true,
-    registry,
-    claudeJournalRoot: path.join(base, "claude-operations"),
-    now: () => "2026-07-10T12:00:00.000Z",
-  } satisfies ProviderDependencies;
-  const input = {
-    engine: "claude" as const,
-    operationId: "claude-crash-operation",
-    conversationId: conversation.id,
-    targetAccountId: "target",
-    source: titledProviderSource(conversation.generations[0]!),
-    recordContinuityPath() {},
-  };
-
-  await expect(new RegisteredSuccessorProvider({
-    ...dependencies,
-    afterClaudeSpawned() { throw new Error("simulated crash after Claude spawn"); },
-  }).create(input)).rejects.toThrow("simulated crash after Claude spawn");
-  const launchBeforeRecovery = Object.values(registry.snapshot().receipts)[0]!;
-  registry.reconcileConversations([{
-    engine: "claude",
-    path: launchBeforeRecovery.artifactPath!,
-    accountId: "target",
-    launchProfile: emptyLaunchProfile({ cwd: "/repo", project: "repo" }),
-    turn: { state: "idle", source: "empty", terminalAt: null },
-    observedAt: "2026-07-10T12:01:00.000Z",
-  }]);
-  expect(Object.values(registry.snapshot().conversations)).toHaveLength(1);
-  expect(registry.conversationForPath(launchBeforeRecovery.artifactPath!)?.id).toBe(conversation.id);
-  const receipt = await new RegisteredSuccessorProvider(dependencies).create(input);
-  const launch = Object.values(registry.snapshot().receipts)[0]!;
-  const settled = registry.settleSpawn(launch.launchId, {
-    key: { engine: "claude", sessionId: receipt.nativeId },
-    artifactPath: receipt.path,
-    cwd: launch.cwd,
-    accountId: "target",
-    status: "live",
-    host: receipt.host.tmuxHost!,
-    claimEpoch: 0,
-    claimOwner: null,
-    pendingAction: null,
-  });
-
-  expect(spawns).toBe(1);
-  expect(settled).toMatchObject({ kind: "settled", conversation: { id: conversation.id } });
-  expect(Object.values(registry.snapshot().conversations)).toHaveLength(1);
-  expect(registry.conversation(conversation.id)?.generations.map((generation) => generation.path)).toEqual([sourcePath]);
-});
-
-test("unknown Claude transcript model omits the successor override", async () => {
-  const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-provider-unknown-"));
-  roots.push(base);
-  const source = accountRoot("claude", base, "source");
-  const target = accountRoot("claude", base, "target");
-  const sourcePath = path.join(source.transcriptRoot, "source.jsonl");
-  fs.writeFileSync(sourcePath, "{}\n", { mode: 0o600 });
-  let command = "";
+  const fixture = claudeForkFixture(base);
   const provider = new RegisteredSuccessorProvider({
-    accounts: { resolveSpawn: () => target, resolveTranscriptOwner: () => source },
-    startCodex: async () => { throw new Error("unexpected Codex client"); },
-    claudeStatus: async () => ({ loggedIn: true }),
-    spawnClaude: async (spec) => { command = spec.command; return { paneId: "%10", panePid: 110, host: claudeHost("%10", 110) }; },
-    registry: new AgentRegistry(path.join(base, "provider-registry.json")),
-    claudeJournalRoot: path.join(base, "claude-operations"),
-    now: () => "2026-07-10T12:00:00.000Z",
+    ...fixture.dependencies,
+    cancelClaude: async () => { throw new Error("a fork has no pane to cancel"); },
   });
-  await provider.create({
-    engine: "claude",
-    operationId: "019f423a-d6e9-\x34903-8597-3e676b6ff3d4",
-    conversationId: "conversation_test",
-    targetAccountId: "target",
-    source: { id: "native", path: sourcePath, accountId: "source", launchProfile: emptyLaunchProfile({ cwd: "/repo", model: "mythos-1", title: "Migrate unknown Claude model" }), historyHash: null, host: null, createdAt: "now", archivedAt: null },
-    recordContinuityPath() {},
-  });
-  expect(command).not.toContain("--model");
+  const receipt = await provider.create(fixture.input);
+
+  await expect(provider.cleanup(receipt)).resolves.toBeUndefined();
 });
 
 test("Codex cross-account successor stages the source rollout before resuming paginated history", async () => {
@@ -908,7 +659,6 @@ test("Codex cross-account successor stages the source rollout before resuming pa
     accounts: { resolveSpawn: () => target, resolveTranscriptOwner: () => source },
     startCodex: async (home) => client(home),
     claudeStatus: async () => ({ loggedIn: false }),
-    spawnClaude: async () => { throw new Error("unexpected Claude spawn"); },
     journalRoot: path.join(base, "migration-journal"),
     now: () => "2026-08-31T20:13:00.000Z",
   });
@@ -970,7 +720,6 @@ test("Codex successor provider accepts authenticated ChatGPT account responses a
     accounts: { resolveSpawn: () => target, resolveTranscriptOwner: () => source },
     startCodex: async (home) => client(home),
     claudeStatus: async () => ({ loggedIn: false }),
-    spawnClaude: async () => { throw new Error("unexpected Claude spawn"); },
     now: () => "2026-07-10T12:00:00.000Z",
   });
   const profile = migrationSuccessorLaunchProfile(emptyLaunchProfile({ cwd: "/repo", model: "gpt-5.6-terra", effort: "high", fast: true, permissionMode: "never", readOnly: true, title: "Codex", goal: { objective: "Ship", status: "active", tokensUsed: null, timeUsedSeconds: null } }));
@@ -1035,7 +784,6 @@ test("a definite Codex fork rejection can retry the same operation", async () =>
   const provider = new RegisteredSuccessorProvider({
     accounts: { resolveSpawn: () => target, resolveTranscriptOwner: () => source },
     startCodex: async () => client(), claudeStatus: async () => ({ loggedIn: false }),
-    spawnClaude: async () => { throw new Error("unexpected Claude spawn"); },
     now: () => "2026-07-10T12:00:00.000Z", journalRoot: path.join(base, "journal"),
   });
   const input = { engine: "codex" as const, operationId: "definite-fork-retry", conversationId: "conversation_definite" as const, targetAccountId: "target", source: { id: sourceId, path: sourcePath, accountId: "source", launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "Migrate provider fixture" }), historyHash: null, host: null, createdAt: "now", archivedAt: null }, recordContinuityPath() {} };
@@ -1074,7 +822,6 @@ test("concurrent Codex creates publish one successor for the same operation", as
     accounts: { resolveSpawn: () => target, resolveTranscriptOwner: () => source },
     startCodex: async () => client(),
     claudeStatus: async () => ({ loggedIn: false }),
-    spawnClaude: async () => { throw new Error("unexpected Claude spawn"); },
     journalRoot,
     now: () => "2026-07-10T12:00:00.000Z",
   });
@@ -1121,7 +868,6 @@ test("a fresh 51-conversation Codex drain skips recovery history scans", async (
     accounts: { resolveSpawn: () => target, resolveTranscriptOwner: () => source },
     startCodex: async () => client(),
     claudeStatus: async () => ({ loggedIn: false }),
-    spawnClaude: async () => { throw new Error("unexpected Claude spawn"); },
     journalRoot: path.join(base, "provider-journal"),
     scanCodexForkArtifacts() { scanCalls += 1; return []; },
     now: () => "2026-07-10T12:00:00.000Z",
@@ -1170,7 +916,6 @@ test("first Codex operation fsyncs every newly created journal directory entry",
     accounts: { resolveSpawn: () => target, resolveTranscriptOwner: () => source },
     startCodex: async () => client(),
     claudeStatus: async () => ({ loggedIn: false }),
-    spawnClaude: async () => { throw new Error("unexpected Claude spawn"); },
     journalRoot,
     now: () => "2026-07-10T12:00:00.000Z",
   });
@@ -1230,7 +975,6 @@ test("Codex successor provider recovers a validated fork created before exact re
     accounts: { resolveSpawn: () => target, resolveTranscriptOwner: () => source },
     startCodex: async () => client(),
     claudeStatus: async () => ({ loggedIn: false }),
-    spawnClaude: async () => { throw new Error("unexpected Claude spawn"); },
     now: () => "2026-07-10T12:00:00.000Z",
     journalRoot,
     scanCodexForkArtifacts: () => [
@@ -1322,7 +1066,6 @@ test("Codex successor provider reuses one published copy after a crash", async (
     accounts: { resolveSpawn: () => target, resolveTranscriptOwner: () => source },
     startCodex: async () => client(),
     claudeStatus: async () => ({ loggedIn: false }),
-    spawnClaude: async () => { throw new Error("unexpected Claude spawn"); },
     now: () => "2026-07-10T12:00:00.000Z",
     journalRoot,
   } as ProviderDependencies & { journalRoot: string; afterCodexCopyPublished?: () => void };
@@ -1401,7 +1144,6 @@ test("Codex successor provider rejects an unregistered fork path before recordin
     accounts: { resolveSpawn: () => target, resolveTranscriptOwner: () => source },
     startCodex: async () => client,
     claudeStatus: async () => ({ loggedIn: false }),
-    spawnClaude: async () => { throw new Error("unexpected Claude spawn"); },
     now: () => "2026-07-10T12:00:00.000Z",
   });
   const recorded: string[] = [];
@@ -1450,7 +1192,6 @@ test("a retry under a fresh operation identity recovers the fork the failed atte
     accounts: { resolveSpawn: () => target, resolveTranscriptOwner: () => source },
     startCodex: async (home) => client(home),
     claudeStatus: async () => ({ loggedIn: false }),
-    spawnClaude: async () => { throw new Error("unexpected Claude spawn"); },
     journalRoot,
     now: () => "2026-07-10T12:00:00.000Z",
   });
@@ -1529,7 +1270,6 @@ test("orphan forks whose provenance died with their journals are re-forked once 
     accounts: { resolveSpawn: () => target, resolveTranscriptOwner: () => source },
     startCodex: async () => client(),
     claudeStatus: async () => ({ loggedIn: false }),
-    spawnClaude: async () => { throw new Error("unexpected Claude spawn"); },
     journalRoot,
     now: () => "2026-07-10T12:00:00.000Z",
   });
@@ -1629,7 +1369,6 @@ test("orphan forks recorded by journals that predate conversation identity are s
     accounts: { resolveSpawn: () => target, resolveTranscriptOwner: () => source },
     startCodex: async () => client(),
     claudeStatus: async () => ({ loggedIn: false }),
-    spawnClaude: async () => { throw new Error("unexpected Claude spawn"); },
     journalRoot,
     now: () => "2026-07-10T12:00:00.000Z",
   });
@@ -1696,7 +1435,6 @@ test("two forks inside one operation's own window resolve to the newest", async 
     accounts: { resolveSpawn: () => target, resolveTranscriptOwner: () => source },
     startCodex: async () => client(),
     claudeStatus: async () => ({ loggedIn: false }),
-    spawnClaude: async () => { throw new Error("unexpected Claude spawn"); },
     journalRoot,
     now: () => "2026-07-10T12:00:00.000Z",
   } as ProviderDependencies & { journalRoot: string };
@@ -1752,7 +1490,6 @@ test("an explicit retry reauthorizes one fork after an unknown outcome produced 
     accounts: { resolveSpawn: () => target, resolveTranscriptOwner: () => source },
     startCodex: async () => client(),
     claudeStatus: async () => ({ loggedIn: false }),
-    spawnClaude: async () => { throw new Error("unexpected Claude spawn"); },
     journalRoot,
     now: () => "2026-07-10T12:00:00.000Z",
   } as ProviderDependencies & { journalRoot: string };
@@ -1820,7 +1557,6 @@ test("a late artifact from the first uncertain attempt is adopted after an opera
     accounts: { resolveSpawn: () => target, resolveTranscriptOwner: () => source },
     startCodex: async () => client(),
     claudeStatus: async () => ({ loggedIn: false }),
-    spawnClaude: async () => { throw new Error("unexpected Claude spawn"); },
     journalRoot,
     now: () => "2026-07-10T12:00:00.000Z",
   } as ProviderDependencies & { journalRoot: string };
@@ -1923,7 +1659,6 @@ test("a retry re-forks when the source gained turns while the migration was park
     accounts: { resolveSpawn: () => target, resolveTranscriptOwner: () => source },
     startCodex: async (home) => client(home),
     claudeStatus: async () => ({ loggedIn: false }),
-    spawnClaude: async () => { throw new Error("unexpected Claude spawn"); },
     journalRoot,
     now: () => "2026-07-10T12:00:00.000Z",
   });

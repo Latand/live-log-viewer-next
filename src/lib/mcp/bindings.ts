@@ -2160,6 +2160,11 @@ function seatTickSettingsTool(args: McpToolArgs, dependencies: ViewerMcpDomainDe
     callerProject: own,
     scope: own === project ? "own-project" : "other-project",
     settings,
+    /* The stored note in full and its length (#1450), so a seat can check what
+       persisted against what it sent without reading the file. The wake shows
+       only a marked preview of a long note; this is the whole of it. */
+    monitorPrompt: settings.monitorPrompt,
+    monitorPromptLength: settings.monitorPrompt?.length ?? 0,
     effective: {
       enabled: effective.enabled,
       wakeIntervalMinutes: Math.round(effective.wakeIntervalMs / 60_000),

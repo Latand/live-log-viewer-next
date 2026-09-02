@@ -168,7 +168,6 @@ function cleanupOnlyProvider(): RegisteredSuccessorProvider {
     },
     startCodex: async () => { throw new Error("unexpected Codex client"); },
     claudeStatus: async () => { throw new Error("unexpected Claude status"); },
-    spawnClaude: async () => { throw new Error("unexpected Claude spawn"); },
     now: () => "2026-07-13T12:01:00.000Z",
   });
 }
@@ -3440,7 +3439,6 @@ test("a published Claude successor preserves its migration-held reservation as c
     },
     startCodex: async () => { throw new Error("unexpected Codex client"); },
     claudeStatus: async () => ({ loggedIn: true }),
-    spawnClaude: async () => { throw new Error("unexpected Claude spawn"); },
     verifyClaudeHost: async () => true,
     publishClaudeHost: async () => {
       publications += 1;
