@@ -8,6 +8,7 @@ import { getLocale, setLocale, translate } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
 import { ProjectRail } from "./ProjectRail";
+import { MOBILE_LAYOUT_QUERY, mobileLayoutViewport } from "@/lib/attention/eligibility";
 
 /* Presentation names on the rail (issue #345): the leading-dash canonical key
    `-agents-tools-live-log-viewer-next` must render as `live-log-viewer-next`
@@ -16,12 +17,12 @@ import { ProjectRail } from "./ProjectRail";
 
 const dom = new Window({ url: "http://localhost/" });
 
-/* The rail's breakpoint is `(max-width: 767px)` through useIsMobile; useFlip
+/* The rail's breakpoint is the shared `MOBILE_LAYOUT_QUERY` through useIsMobile; useFlip
    reads the bare `matchMedia` global for reduced-motion. One switchable stub
    serves both. */
 let viewportWidth = 1280;
 const matchMediaStub = (query: string) => ({
-  matches: query.includes("max-width") && viewportWidth <= 767,
+  matches: query === MOBILE_LAYOUT_QUERY && mobileLayoutViewport({ width: viewportWidth, height: 844 }),
   media: String(query),
   onchange: null,
   addEventListener() {},

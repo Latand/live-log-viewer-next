@@ -11,6 +11,7 @@ import { CodeBlock } from "./markdown";
 import type { ToolEvent } from "./parse";
 import { ToolBody } from "./cards/ToolCard";
 import { OutputPreview } from "./cards/OutputPreview";
+import { MOBILE_LAYOUT_QUERY } from "@/lib/attention/eligibility";
 
 /*
  * Issue #698 — the resolved geometry of a feed action control, measured against
@@ -18,9 +19,9 @@ import { OutputPreview } from "./cards/OutputPreview";
  *
  * The defect this file exists for: the control's size and the body's gutter were
  * gated by two different predicates. `CopyButton` sized its 44px tap target from
- * `useIsMobile()` — the `(max-width: 767px)` VIEWPORT query — while
+ * `useIsMobile()` — the shared VIEWPORT query (`MOBILE_LAYOUT_QUERY`) — while
  * `ACTION_GUTTER` reserves its wide gutter from the `(pointer: coarse)` POINTER
- * query. A fine pointer under 768px (a desktop window dragged narrow, a
+ * query. A fine pointer in a phone-sized window (a desktop window dragged narrow, a
  * split-screen pane, responsive-design mode without touch emulation) satisfied
  * one and not the other, so a 44px control stood in a 28px gutter and covered
  * 22px of the message body.
@@ -46,7 +47,7 @@ let narrowViewport = false;
 let coarsePointer = false;
 
 const normalize = (query: string) => String(query).replace(/\s+/g, "");
-const VIEWPORT_QUERY = normalize("(max-width: 767px)");
+const VIEWPORT_QUERY = normalize(MOBILE_LAYOUT_QUERY);
 const POINTER_QUERY = normalize("(pointer: coarse)");
 
 /** The single oracle for "does this query match right now" — consulted both by

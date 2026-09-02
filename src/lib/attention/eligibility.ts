@@ -17,13 +17,24 @@ import type { StoredViewSession, ViewFreshness, ViewMode } from "@/lib/view/type
  * having this module read a clock or the filesystem.
  */
 
-/** The narrowest layout that still mounts the attention host with a device id.
-    `useIsMobile` renders the phone layout strictly below this. */
-export const ATTENTION_MIN_BOARD_WIDTH = 768;
+/** The smallest viewport that still renders the desktop shell — and so mounts
+    the attention host with a device id. The phone layout renders whenever
+    EITHER axis is under it (docs/design/mobile-v2/README.md §5: the desktop
+    needs both width and height, so an 844 × 390 landscape phone gets the
+    shell, and a wide window squashed under 600 px tall does too). */
+export const ATTENTION_MIN_BOARD_WIDTH = 640;
+export const ATTENTION_MIN_BOARD_HEIGHT = 600;
+
+/** Whether a viewport of this size renders the phone layout. `useIsMobile`
+    watches the media-query form of this same test. */
+export function mobileLayoutViewport(viewport: { width: number; height: number }): boolean {
+  return viewport.width < ATTENTION_MIN_BOARD_WIDTH || viewport.height < ATTENTION_MIN_BOARD_HEIGHT;
+}
 
 /** The media query the shell's mobile switch watches — derived from the same
-    number the selection predicate enforces, so the two are one fact. */
-export const MOBILE_LAYOUT_QUERY = `(max-width: ${ATTENTION_MIN_BOARD_WIDTH - 1}px)`;
+    two numbers the selection predicate enforces, so the two are one fact. The
+    comma is a media-query-list OR: the phone layout when either axis is short. */
+export const MOBILE_LAYOUT_QUERY = `(max-width: ${ATTENTION_MIN_BOARD_WIDTH - 1}px), (max-height: ${ATTENTION_MIN_BOARD_HEIGHT - 1}px)`;
 
 /**
  * Modes a desktop can actually BE moved in.
@@ -47,7 +58,7 @@ export const FOLLOWABLE_MODES: ReadonlySet<ViewMode> = new Set<ViewMode>([
     heartbeat. */
 export type AttentionPresenceFacts = Pick<StoredViewSession, "visibility" | "mode"> & {
   device: { kind: StoredViewSession["device"]["kind"] };
-  viewport: { width: number };
+  viewport: { width: number; height: number };
   freshness: ViewFreshness;
 };
 
@@ -58,14 +69,15 @@ export type AttentionPresenceFacts = Pick<StoredViewSession, "visibility" | "mod
  *   follows one, and a stale one may be a laptop that was shut hours ago.
  * - NOT A PHONE. Mobile is chat-only by design: it withholds its device id, so
  *   it can neither report the offer nor move its board.
- * - WIDE ENOUGH TO HOST. A desktop window narrowed under the phone breakpoint
- *   renders the mobile layout, whose host is disabled — its heartbeat still
- *   says `desktop`, so the width is the only fact that tells it apart.
+ * - WIDE AND TALL ENOUGH TO HOST. A desktop window narrowed or squashed under
+ *   the phone breakpoint renders the mobile layout, whose host is disabled —
+ *   its heartbeat still says `desktop`, so the viewport is the only fact that
+ *   tells it apart.
  * - IN A MODE A BOARD CAN BE MOUNTED IN.
  */
 export function attentionCapablePresence(facts: AttentionPresenceFacts): boolean {
   if (facts.device.kind === "mobile") return false;
   if (!FOLLOWABLE_MODES.has(facts.mode)) return false;
   if (facts.visibility !== "visible" || facts.freshness !== "active") return false;
-  return facts.viewport.width >= ATTENTION_MIN_BOARD_WIDTH;
+  return !mobileLayoutViewport(facts.viewport);
 }

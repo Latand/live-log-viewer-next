@@ -233,10 +233,13 @@ test("the 390px draft working-directory picker keeps a 44px touch target", async
   try {
     roots.push(mount(<ProjectDashboard {...dashboardProps(project)} />));
 
-    const create = dom.document.querySelector('button[aria-haspopup="menu"]') as unknown as HTMLButtonElement | null;
-    create?.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event);
-    expect(await waitFor(() => dom.document.querySelector('[role="menuitem"]') !== null)).toBe(true);
-    const agent = dom.document.querySelector('[role="menuitem"]') as unknown as HTMLButtonElement | null;
+    /* The phone's create actions are rows in the board menu behind the bar's
+       ⋯ (mobile v2 lane 1); «New agent» is the first row. */
+    const more = dom.document.querySelector('[data-mobile2-open="menu"]') as unknown as HTMLButtonElement | null;
+    more?.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event);
+    expect(await waitFor(() => dom.document.querySelector('[data-mobile2-menu-row="new-agent"]') !== null)).toBe(true);
+    const agent = dom.document.querySelector('[data-mobile2-menu-row="new-agent"]') as unknown as HTMLButtonElement | null;
+    expect(agent?.getAttribute("role")).toBe("menuitem");
     agent?.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event);
     expect(await waitFor(() => dom.document.querySelector(AGENT_PANE) !== null)).toBe(true);
     expect(dom.innerWidth).toBe(390);
@@ -522,11 +525,11 @@ test("a cold dashboard cannot create an agent draft before project metadata hydr
   try {
     roots.push(mount(<ProjectDashboard {...dashboardProps(project)} loaded={false} />));
 
-    expect(await waitFor(() => dom.document.querySelector('button[aria-haspopup="menu"]') !== null)).toBe(true);
-    const create = dom.document.querySelector('button[aria-haspopup="menu"]') as unknown as HTMLButtonElement;
-    create.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event);
-    expect(await waitFor(() => dom.document.querySelector('[role="menuitem"]') !== null)).toBe(true);
-    const agent = dom.document.querySelector('[role="menuitem"]') as unknown as HTMLButtonElement | null;
+    expect(await waitFor(() => dom.document.querySelector('[data-mobile2-open="menu"]') !== null)).toBe(true);
+    const more = dom.document.querySelector('[data-mobile2-open="menu"]') as unknown as HTMLButtonElement;
+    more.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event);
+    expect(await waitFor(() => dom.document.querySelector('[data-mobile2-menu-row="new-agent"]') !== null)).toBe(true);
+    const agent = dom.document.querySelector('[data-mobile2-menu-row="new-agent"]') as unknown as HTMLButtonElement | null;
     expect(agent?.disabled).toBe(true);
     agent?.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event);
     expect(dom.sessionStorage.getItem(draftsKey(project))).toBeNull();

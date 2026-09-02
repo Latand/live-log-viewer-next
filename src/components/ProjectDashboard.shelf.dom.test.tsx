@@ -123,17 +123,28 @@ function mount(): HTMLElement {
 }
 
 const q = (host: HTMLElement, sel: string) => host.querySelector(sel) as unknown as HTMLElement | null;
-const trigger = (host: HTMLElement) => q(host, '[data-testid="mobile-shelf-trigger"]');
+/* The host sheet opens from the board menu's «Host details» row (mobile v2
+   lane 1): ⋯ on the bar, then the row. */
+const menuTrigger = (host: HTMLElement) => q(host, '[data-mobile2-open="menu"]');
+const hostRow = (host: HTMLElement) => q(host, '[data-mobile2-open="host"]');
 const shelf = (host: HTMLElement) => q(host, '[data-testid="mobile-bottom-shelf"]');
 
+/* The bar renders before the board settles; the leaf under it (the pinned
+   orchestrator slot on an empty project) is what arrives with `boardReady`,
+   and the host sheet mounts only then. */
+const boardReady = (host: HTMLElement) => q(host, '[data-testid="mobile-orchestrator-slot"]') !== null || q(host, '[data-testid="mobile-chat-shell"]') !== null;
+
 async function openShelf(host: HTMLElement): Promise<HTMLElement> {
-  const ready = await waitFor(() => trigger(host) !== null);
+  const ready = await waitFor(() => boardReady(host));
   expect(ready).toBe(true);
-  const t = trigger(host)!;
-  t.focus();
-  flushSync(() => t.click());
+  const more = menuTrigger(host)!;
+  more.focus();
+  flushSync(() => more.click());
+  const row = hostRow(host)!;
+  expect(row).not.toBeNull();
+  flushSync(() => row.click());
   expect(shelf(host)).not.toBeNull();
-  return t;
+  return more;
 }
 
 const pressEscape = () => flushSync(() => {
@@ -166,52 +177,50 @@ test("mobile: a terminal shelf action closes the modal, unlocks the body, and re
   expect(openBtn).toBeTruthy();
   flushSync(() => openBtn.click());
   expect(shelf(host)).toBeNull();
-  /* Body scroll unlocked and focus restored to the header trigger. */
+  /* Body scroll unlocked. The menu row that opened the sheet left with its
+     menu, so focus has no opener to return to; the bar's ⋯ is still there. */
   expect(dom.document.body.style.overflow).toBe("");
-  expect(dom.document.activeElement).toBe(opener as never);
+  expect(opener.isConnected).toBe(true);
   await settle();
 });
 
-test("mobile: Escape closes the shelf, unlocks the body, and restores focus to the trigger", async () => {
+test("mobile: Escape closes the shelf and unlocks the body", async () => {
   const host = mount();
   const opener = await openShelf(host);
   expect(dom.document.body.style.overflow).toBe("hidden");
   pressEscape();
   expect(shelf(host)).toBeNull();
   expect(dom.document.body.style.overflow).toBe("");
-  expect(dom.document.activeElement).toBe(opener as never);
+  expect(opener.isConnected).toBe(true);
   await settle();
 });
 
-test("mobile: the project name takes priority in the header and the shelf stays one tap (finding 2)", async () => {
+test("mobile: the project name is the bar's title cell and the host sheet stays one row behind ⋯ (finding 2)", async () => {
   const host = mount();
-  const ready = await waitFor(() => trigger(host) !== null);
+  const ready = await waitFor(() => boardReady(host));
   expect(ready).toBe(true);
-  /* The project title is content-width priority (never flex-1 that compresses
-     «atlas» to «a…»), capped so a long name truncates instead of overflowing.
-     It IS allowed to shrink as the last resort (issue #613): the empty filler
-     beside it collapses first, and only a row that would otherwise push its
-     controls off a 390px screen makes the name give up pixels — short names
-     like «atlas» still show in full. */
-  const h1 = q(host, "h1")!;
-  expect(h1.textContent).toBe("atlas");
-  expect(h1.className).toContain("min-w-0");
-  expect(h1.className).toContain("truncate");
-  expect(h1.className).toContain("max-w-[45vw]");
-  expect(h1.className).not.toContain("flex-1");
-  /* One-tap shelf access is preserved: exactly one trigger, a 44px target. */
-  const triggers = host.querySelectorAll('[data-testid="mobile-shelf-trigger"]');
-  expect(triggers.length).toBe(1);
-  expect((triggers[0] as unknown as HTMLElement).className).toContain("h-11");
+  /* The bar's title cell is the ONE elastic cell (mobile v2 §3.2): the name
+     reads in full, truncating only as the last resort. */
+  const title = q(host, "[data-mobile2-title]")!;
+  expect(title.textContent).toContain("atlas");
+  expect(title.className).toContain("min-w-0");
+  expect(title.className).toContain("flex-1");
+  expect(q(host, "[data-mobile2-title-text]")!.className).toContain("truncate");
+  /* Host access is one row behind the bar's ⋯: a 44px row, exactly one. */
+  flushSync(() => menuTrigger(host)!.click());
+  const rows = host.querySelectorAll('[data-mobile2-open="host"]');
+  expect(rows.length).toBe(1);
+  expect((rows[0] as unknown as HTMLElement).className).toContain("min-h-11");
   await settle();
 });
 
-test("desktop: the readiness strip renders inline with no shelf modal or trigger", async () => {
+test("desktop: the readiness strip renders inline with no shelf modal, no bar and no menu", async () => {
   mobile = false;
   const host = mount();
   const ready = await waitFor(() => q(host, '[data-testid="task-readiness"]') !== null);
   expect(ready).toBe(true);
-  expect(trigger(host)).toBeNull();
+  expect(menuTrigger(host)).toBeNull();
+  expect(q(host, "[data-mobile2-bar]")).toBeNull();
   expect(shelf(host)).toBeNull();
   await settle();
 });
@@ -242,10 +251,10 @@ test("desktop and mobile global pipeline actions submit the operator draft shape
 
       const host = mount();
       if (surface === "mobile") {
-        const createMenu = host.querySelector(`[aria-label="${translate("en", "dash.createMenu")}"]`) as HTMLButtonElement;
-        flushSync(() => createMenu.click());
-        const pipelineItem = [...host.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
-          .find((button) => button.textContent?.includes(translate("en", "dash.pipeline")))!;
+        /* ⋯ on the bar, then the «New pipeline» row (mobile v2 lane 1). */
+        flushSync(() => (host.querySelector('[data-mobile2-open="menu"]') as HTMLButtonElement).click());
+        const pipelineItem = host.querySelector('[data-mobile2-menu-row="new-pipeline"]') as HTMLButtonElement;
+        expect(pipelineItem).not.toBeNull();
         flushSync(() => pipelineItem.click());
       } else {
         const pipelineButton = host.querySelector(`[aria-label="${translate("en", "dash.newPipeline")}"]`) as HTMLButtonElement;

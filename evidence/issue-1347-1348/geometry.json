@@ -299,13 +299,13 @@
             "height": 44
           },
           "mandate": {
-            "label": "You run the Atlas board. Talk to me here",
+            "label": "You are the viewer's built-in Manager (i",
             "left": 12,
             "right": 378,
-            "top": 505,
-            "bottom": 748,
+            "top": 629,
+            "bottom": 789,
             "width": 366,
-            "height": 243
+            "height": 160
           },
           "scrollerBottom": 779
         }
@@ -360,13 +360,13 @@
             "height": 44
           },
           "mandate": {
-            "label": "You run the Atlas board. Talk to me here",
+            "label": "You are the viewer's built-in Manager (i",
             "left": 12,
             "right": 378,
-            "top": 505,
-            "bottom": 748,
+            "top": 629,
+            "bottom": 789,
             "width": 366,
-            "height": 243
+            "height": 160
           },
           "scrollerBottom": 779
         }

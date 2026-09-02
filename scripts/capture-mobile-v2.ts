@@ -59,6 +59,9 @@
  * run exits non-zero only when the harness itself failed (no build, no
  * browser, a page that never rendered a shell). `--strict` turns every red into
  * a failure; later lanes turn it on once their frames are green.
+ * Integration-gated (mobile v2 lane 1, #1439): `board` and `board-degraded` mount
+ * the shell but still hold lane 3/4/5 controls (focus view, question card,
+ * composer), so their strict `hit` gate is deferred until those lanes land.
  *
  * ── Output ───────────────────────────────────────────────────────────────────
  * One fresh capture-owned directory per run under the temp root

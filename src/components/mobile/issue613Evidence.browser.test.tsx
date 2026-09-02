@@ -18,21 +18,15 @@ import type { BoardTask } from "@/lib/tasks/types";
  * create and «more» menus) pushed the document to 422px — a 32px horizontal
  * page scroll, with the «More actions» trigger hanging off the right edge.
  *
- * It also holds the budget for everything added since. Fitting is necessary but
- * not sufficient: a row can fit at 390px and still be useless, because the ONE
- * elastic cell absorbs every overrun. Global search as a SIXTH 44px target
- * measured here at a 25px project name — «l…» — so this now asserts a readable
- * floor for that cell, and search's slot came from folding undo into the «⋯»
- * menu (issue #1054 review).
- *
- * The header now fits BY CONSTRUCTION: every always-mounted control is a fixed
- * 44px target, the ONE elastic cell is the project name (the filler beside it is
- * an empty spacer that collapses to nothing first, and the attention pill holds
- * its own width), and the scheme/list switch is one tap inside the «more» menu
- * instead of a 94px inline segmented pair. The budget itself is documented at
- * the header in ProjectDashboard.tsx. This renders the REAL ProjectDashboard
- * with a populated board and measures the production CSS in Chromium, exactly as
- * the issue's repro did.
+ * Mobile v2 lane 1 (issue #1439) replaced that row with the shell's bar: the
+ * project name is the ONE elastic cell and at most three 44px targets follow
+ * it (the attention badge, search, ⋯), everything else a row in the board
+ * menu sheet. The budget it holds is the design's (README §3.2): the title
+ * cell keeps at least 190px at 390 with every target present. This renders the
+ * REAL ProjectDashboard with a populated board and measures the production CSS
+ * in Chromium, exactly as the issue's repro did; `MobileShell.titleCellWidth`
+ * is the same arithmetic, and `scripts/capture-mobile-v2.ts` gates the same
+ * number on every phone frame.
  */
 
 const actualRuntimeHooks = await import("@/hooks/useRuntime");
@@ -133,34 +127,24 @@ const task: BoardTask = {
   createdAt: "2026-07-25T00:00:00.000Z", updatedAt: "2026-07-25T00:00:00.000Z",
 } as unknown as BoardTask;
 
-const ATTENTION_LABEL = translate("en", "attention.badge", { count: 3 });
-/* The production attention badge as Viewer renders it on the phone: a bounded
-   «⚠ N» pill whose button opens the queue. It is an action, so it must survive
-   a full header at 390px. */
-const attentionBadge = (
-  <div className="pointer-events-auto relative">
-    <div className="flex items-center overflow-hidden rounded-full border border-warning/45 bg-warning-soft shadow-1">
-      <button type="button" className="inline-flex min-h-11 items-center px-3.5 text-[12px] font-bold text-warning" aria-label={ATTENTION_LABEL}>
-        <span className="inline-flex items-center gap-1">
-          <span className="inline-block h-3 w-3" aria-hidden />3
-        </span>
-      </button>
-    </div>
-  </div>
-);
+const ATTENTION_LABEL = translate("en", "mobile2.bar.attention", { count: 3 });
+
+const { ProjectDashboard } = await import("@/components/ProjectDashboard");
+const { TITLE_MIN_PX } = await import("@/components/mobile/MobileShell");
+type MobileShellHost = NonNullable<React.ComponentProps<typeof ProjectDashboard>["mobileShell"]>;
+/* The shell's host as Viewer wires it on the phone: three items need the
+   operator, so the bar carries the badge — the one target that is not 44 wide. */
+const mobileShell: MobileShellHost = { attentionCount: 3, arrival: null, renderSheet: () => null };
 
 const dashboardProps = () => ({
   files: [conversation], flows: [], pipelines: [], workflows: [], tasks: [task],
   project: PROJECT, loaded: true, openNonce: 0, archived: false,
-  /* Both view faces available → the scheme/list switch is offered. */
+  /* Both view faces available → the board's two faces are offered in the menu. */
   catalogKnown: true, catalogConversationCount: 1,
   projectCwd: "/repo", onArchive: () => {}, onUnarchive: () => {},
-  onMenu: () => {},
   onOpenSearch: () => {},
-  attention: attentionBadge,
+  mobileShell,
 });
-
-const { ProjectDashboard } = await import("@/components/ProjectDashboard");
 
 beforeEach(() => {
   dom.sessionStorage.clear();
@@ -207,6 +191,8 @@ interface Geometry {
   controls: Box[];
   titleText: string;
   titleWidth: number;
+  /* The board menu sheet's rows, when it is open. */
+  menuControls: Box[];
   /* The focused conversation's own header (BranchPane) inside the same phone. */
   paneControls: Box[];
   paneHeaderScrollWidth: number;
@@ -235,9 +221,9 @@ async function measure(inner: string, key: string): Promise<Geometry> {
       }
       return boxes;
     };
-    const header = document.querySelector("[data-testid='mobile-project-header']") as HTMLElement | null;
+    const header = document.querySelector("[data-mobile2-bar]") as HTMLElement | null;
     const paneHeader = document.querySelector("[data-testid='mobile-focused-pane'] header") as HTMLElement | null;
-    const title = header?.querySelector("h1") as HTMLElement | null;
+    const title = header?.querySelector("[data-mobile2-title]") as HTMLElement | null;
     return {
       scrollWidth: document.documentElement.scrollWidth,
       bodyScrollWidth: document.body.scrollWidth,
@@ -245,6 +231,7 @@ async function measure(inner: string, key: string): Promise<Geometry> {
       headerScrollWidth: header?.scrollWidth ?? -1,
       headerClientWidth: header?.clientWidth ?? -1,
       controls: collect(header),
+      menuControls: collect(document.querySelector("[data-mobile2-sheet='menu']")),
       titleText: title?.textContent ?? "",
       titleWidth: title?.getBoundingClientRect().width ?? -1,
       paneControls: collect(paneHeader),
@@ -264,9 +251,7 @@ async function renderDashboard(openMoreMenu: boolean): Promise<string> {
   await act(async () => { root.render(<ProjectDashboard {...dashboardProps()} />); });
   await settle();
   if (openMoreMenu) {
-    const trigger = host.querySelector(
-      `[data-testid="mobile-project-header"] button[aria-label="${translate("en", "dash.moreMenu")}"]`,
-    ) as unknown as HTMLButtonElement | null;
+    const trigger = host.querySelector('[data-mobile2-open="menu"]') as unknown as HTMLButtonElement | null;
     expect(trigger).not.toBeNull();
     await act(async () => { trigger!.click(); });
     await settle();
@@ -277,7 +262,7 @@ async function renderDashboard(openMoreMenu: boolean): Promise<string> {
   return html;
 }
 
-test("issue 613: the populated phone header fits a 390px viewport with every control reachable", async () => {
+test("issue 613: the populated phone bar fits a 390px viewport with every control reachable and a 190px title cell", async () => {
   expect(CSS.length).toBeGreaterThan(10_000);
   fs.mkdirSync(EVIDENCE_DIR, { recursive: true });
   browser = await chromium.launch({ executablePath: chromium.executablePath() });
@@ -292,8 +277,8 @@ test("issue 613: the populated phone header fits a 390px viewport with every con
      hides behind an invisible edge. */
   expect(closed.headerScrollWidth).toBeLessThanOrEqual(closed.headerClientWidth);
 
-  /* Every control the row still owns is inside the viewport at a 44px target. */
-  expect(closed.controls.length).toBeGreaterThanOrEqual(6);
+  /* Every control the bar owns is inside the viewport at a 44px target. */
+  expect(closed.controls.length).toBe(4);
   for (const control of closed.controls) {
     expect(control.left).toBeGreaterThanOrEqual(0);
     expect(control.right).toBeLessThanOrEqual(390);
@@ -301,24 +286,18 @@ test("issue 613: the populated phone header fits a 390px viewport with every con
     expect(control.width).toBeGreaterThanOrEqual(44);
   }
   const labels = closed.controls.map((control) => control.label);
-  for (const key of ["dash.openProjects", "search.openMobile", "dash.hiddenShelf", "dash.createMenu", "dash.moreMenu"] as const) {
-    expect(labels.some((label) => label.startsWith(translate("en", key).slice(0, 12)))).toBe(true);
+  /* The title cell, then the three targets in the design's order. */
+  expect(labels[0]).toBe(translate("en", "mobile2.bar.switchProject"));
+  expect(labels.slice(1)).toEqual([ATTENTION_LABEL, translate("en", "mobile2.bar.search"), translate("en", "mobile2.bar.more")]);
+  /* Nothing from the old five-target row rides the bar. */
+  for (const key of ["dash.openProjects", "dash.hiddenShelf", "dash.createMenu", "board.undo"] as const) {
+    expect(labels.some((label) => label.startsWith(translate("en", key).slice(0, 12)))).toBe(false);
   }
-  /* Five targets, not six: undo folded into the «⋯» menu when search arrived. */
-  expect(closed.controls.filter((control) => control.label !== ATTENTION_LABEL)).toHaveLength(5);
-  expect(labels.some((label) => label.startsWith(translate("en", "board.undo").slice(0, 12)))).toBe(false);
-  /* The attention-queue badge is an action, so a full row must not squeeze it
-     out of existence — it is no longer elastic (before #613 it rode the
-     flex-1 filler and collapsed to zero px here). */
-  expect(labels).toContain(ATTENTION_LABEL);
 
-  /* The long project name truncates instead of pushing the row wide — and is
-     still READABLE while doing it. The budget's own arithmetic leaves it ~73px
-     on a fully populated 390px row; a sixth 44px target cut that to 25px, which
-     renders as a single letter and an ellipsis. 60px is the floor that keeps a
-     name a name. */
+  /* The long project name truncates inside the ONE elastic cell instead of
+     pushing the row wide — and the cell keeps the design's 190px budget. */
   expect(closed.titleText.length).toBeGreaterThan(0);
-  expect(closed.titleWidth).toBeGreaterThanOrEqual(60);
+  expect(closed.titleWidth).toBeGreaterThanOrEqual(TITLE_MIN_PX);
 
   /* The focused conversation's own header sits in the same 390px: its long
      title truncates and every pane control (rename, details, favorite, delete,
@@ -332,16 +311,17 @@ test("issue 613: the populated phone header fits a 390px viewport with every con
   }
   expect(closed.paneTitleText.length).toBeGreaterThan(0);
 
-  /* Nothing was dropped: the scheme/list switch moved into the «more» menu and
-     both faces are one tap away there, still inside the viewport. */
+  /* Nothing was dropped: the board's two faces, undo, accounts and the host
+     sheet are rows in the menu sheet, each a 44px row inside the viewport. */
   const opened = await measure(await renderDashboard(true), "header-390-more-open");
-  const openLabels = opened.controls.map((control) => control.label);
-  expect(openLabels).toContain(translate("en", "dash.viewSchemeMenu"));
-  expect(openLabels).toContain(translate("en", "dash.viewListMenu"));
-  /* And neither is board undo: it is one tap away in the same menu. */
+  const openLabels = opened.menuControls.map((control) => control.label);
+  expect(openLabels).toContain(translate("en", "mobile2.menu.board"));
+  expect(openLabels.some((label) => label.startsWith(translate("en", "mobile2.menu.catalog")))).toBe(true);
   expect(openLabels).toContain(translate("en", "board.undo"));
+  expect(openLabels).toContain(translate("en", "mobile2.menu.accounts"));
+  expect(openLabels.some((label) => label.startsWith(translate("en", "mobile2.menu.host")))).toBe(true);
   expect(opened.scrollWidth).toBeLessThanOrEqual(390);
-  for (const control of opened.controls) {
+  for (const control of opened.menuControls) {
     expect(control.left).toBeGreaterThanOrEqual(0);
     expect(control.right).toBeLessThanOrEqual(390);
     expect(control.height).toBeGreaterThanOrEqual(44);

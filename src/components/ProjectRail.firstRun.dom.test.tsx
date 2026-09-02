@@ -1,6 +1,6 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterAll, afterEach, expect, test } from "bun:test";
 import { Window } from "happy-dom";
-import { act, useState } from "react";
+import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
 import type { CreateProjectOutcome } from "@/hooks/useProjectCuration";
@@ -8,6 +8,12 @@ import { setLocale, translate } from "@/lib/i18n";
 import { en } from "@/lib/i18n/en";
 import type { FileEntry } from "@/lib/types";
 
+import { setRuntimeUiEnabledForTests } from "@/hooks/runtimeBus";
+import { MOBILE_LAYOUT_QUERY, mobileLayoutViewport } from "@/lib/attention/eligibility";
+
+import { getMobileNav } from "./mobile/mobileNav";
+import { MobileProjectSheet } from "./mobile/MobileProjectSheet";
+import type { MobileShellHost } from "./mobile/MobileShell";
 import { OverviewBoard } from "./OverviewBoard";
 import { CREATE_PROJECT_FORM_EVENT, ProjectRail } from "./ProjectRail";
 
@@ -28,7 +34,7 @@ const dom = new Window({ url: "http://localhost/" });
 
 let viewportWidth = 1280;
 const matchMediaStub = (query: string) => ({
-  matches: query.includes("max-width") && viewportWidth <= 767,
+  matches: query === MOBILE_LAYOUT_QUERY && mobileLayoutViewport({ width: viewportWidth, height: 844 }),
   media: String(query),
   onchange: null,
   addEventListener() {},
@@ -92,6 +98,10 @@ function fileEntry(overrides: Partial<FileEntry> = {}): FileEntry {
 }
 
 const createProject = async (): Promise<CreateProjectOutcome> => ({ ok: true, project: "atlas" });
+
+/* The phone shell reads the runtime bus for its banner slot; keep it inert. */
+setRuntimeUiEnabledForTests(false);
+afterAll(() => setRuntimeUiEnabledForTests(null));
 
 let root: Root | null = null;
 function unmount() {
@@ -219,57 +229,58 @@ test("the first-run overview's own button opens the form on the rail beside it",
 });
 
 test("on a phone one tap on the overview's button reaches the open form", () => {
-  /* Exactly how Viewer mounts these two on a phone: the rail does not exist
-     until the drawer opens, so the tap has nothing to dispatch into — the rail
-     it summons has to arrive with the form already open. */
+  /* Exactly how Viewer mounts these on a phone (mobile v2 lane 1): the rail
+     is gone; the overview's shell opens the project switcher sheet the Viewer
+     renders, and that sheet arrives with its create form already open on a
+     first run. */
   viewportWidth = 390;
   const container = dom.document.createElement("div");
   dom.document.body.appendChild(container);
   root = createRoot(container as unknown as Element);
-  function MobileShell() {
-    const [drawerOpen, setDrawerOpen] = useState(false);
-    return (
-      <>
-        <OverviewBoard
-          files={[]}
-          projectCatalog={[]}
-          pipelines={[]}
-          workflows={[]}
-          archivedProjects={new Set()}
-          now={2_000}
-          onSelectProject={() => {}}
-          onSelectFile={() => {}}
-          onMenu={() => setDrawerOpen(true)}
-        />
-        {drawerOpen ? (
-          <ProjectRail
-            files={[]}
-            projectCatalog={[]}
-            pipelines={[]}
-            workflows={[]}
-            archivedProjects={new Set()}
-            selected="__overview__"
-            loaded
-            now={2_000}
-            onSelect={() => {}}
-            onCreateProject={createProject}
-          />
-        ) : null}
-      </>
-    );
-  }
-  act(() => root!.render(<MobileShell />));
-  const host = container as unknown as HTMLElement;
-  expect(form(host)).toBeNull();
+  const host: MobileShellHost = {
+    attentionCount: 0,
+    arrival: null,
+    renderSheet: (name, close) => name === "projects" ? (
+      <MobileProjectSheet
+        files={[]}
+        projectCatalog={[]}
+        pipelines={[]}
+        workflows={[]}
+        archivedProjects={new Set()}
+        selected="__overview__"
+        loaded
+        now={2_000}
+        onSelect={() => {}}
+        onCreateProject={createProject}
+        onClose={close}
+      />
+    ) : null,
+  };
+  act(() => root!.render(
+    <OverviewBoard
+      files={[]}
+      projectCatalog={[]}
+      pipelines={[]}
+      workflows={[]}
+      archivedProjects={new Set()}
+      now={2_000}
+      onSelectProject={() => {}}
+      onSelectFile={() => {}}
+      mobileShell={host}
+    />,
+  ));
+  const page = container as unknown as HTMLElement;
+  expect(page.querySelector("[data-mobile2-project-form]")).toBeNull();
 
-  click(host.querySelector('[data-testid="overview-create-project"]') as unknown as HTMLElement);
+  click(page.querySelector('[data-testid="overview-create-project"]') as unknown as HTMLElement);
 
-  /* One tap: the drawer's rail is mounted AND its create form is on screen. */
-  expect(create(host)).not.toBeNull();
-  expect(form(host)).not.toBeNull();
-  /* The labelled button still owns it — a second tap collapses the form. */
-  click(create(host)!);
-  expect(form(host)).toBeNull();
+  /* One tap: the sheet is open AND its create form is on screen. */
+  expect(page.querySelector('[data-mobile2-sheet="projects"]')).not.toBeNull();
+  expect(page.querySelector("[data-mobile2-project-form]")).not.toBeNull();
+  /* The labelled row still owns it — a second tap collapses the form. */
+  click(page.querySelector('[data-mobile2-project-create="open"]') as unknown as HTMLElement);
+  expect(page.querySelector("[data-mobile2-project-form]")).toBeNull();
+  act(() => getMobileNav().home());
 });
 
 test("a desktop rail does not open the form until it is asked", () => {
