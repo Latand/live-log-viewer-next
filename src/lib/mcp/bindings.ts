@@ -74,7 +74,7 @@ import {
 import { SEAT_TICK_WAKE_INTERVAL_MS } from "@/lib/monitor/seatTick";
 import { authorizedManagerSeats, type ManagerAuthoritySources } from "@/lib/orchestrator/authority";
 import { activeOrchestratorSeats, canonicalOrchestratorProject, orchestratorRevocations, orchestratorSeatFor, type OrchestratorSeat } from "@/lib/orchestrator/seats";
-import { ORCHESTRATOR_PROMPT_VERSION, ORCHESTRATOR_SYSTEM_PROMPT } from "@/lib/orchestrator/prompt";
+import { ORCHESTRATOR_PROMPT_VERSION, ORCHESTRATOR_SYSTEM_PROMPT, orchestratorMandateStale } from "@/lib/orchestrator/prompt";
 import { contextReading, readOrchestratorTranscriptFacts, rotationRecommendation } from "@/lib/orchestrator/health";
 import { contextWindowPolicyFor } from "@/lib/orchestrator/contextPolicy";
 import { createPipelineFromRequest, getPipeline as getPipelineRecord, getPipelines, patchPipeline } from "@/lib/pipelines/engine";
@@ -2348,10 +2348,21 @@ async function sendMessageToOrchestrator(
     name, so the caller reads the attribution its rotation was recorded under. */
 async function rotateOrchestrator(args: McpToolArgs, control: ViewerControlDependencies): Promise<McpToolPayload> {
   const project = canonicalOrchestratorProject(required(args, "project"));
+  const fields = allowedSeatFields(args, ["mandate", "handoffNotes", "cwd", "engine", "model", "effort", "accountId"]);
+  /* #1452: with no mandate named, the successor gets the CURRENT default
+     whenever the incumbent's stored mandate is based on an older version. The
+     route's own default is the incumbent's text, which is how a v3 seat rotated
+     v3 into every successor. `keepIncumbentMandate: true` is the explicit way
+     to carry that text forward; a seat on the current version, or on bespoke
+     (unversioned) rules, keeps its own text as before. */
+  if (fields.mandate === undefined && args.keepIncumbentMandate !== true) {
+    const incumbent = orchestratorSeatFor(project).active;
+    if (incumbent && orchestratorMandateStale(incumbent.promptVersion)) fields.mandate = ORCHESTRATOR_SYSTEM_PROMPT;
+  }
   const result = await control.post("/api/orchestrator/rotate", {
     project,
     clientRequestId: spawnAttemptId(requestId(args)),
-    ...allowedSeatFields(args, ["mandate", "handoffNotes", "cwd", "engine", "model", "effort", "accountId"]),
+    ...fields,
   }, callerCapabilityHeaders());
   return redactPayload({
     project,

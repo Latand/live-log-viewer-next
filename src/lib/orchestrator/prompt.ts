@@ -43,6 +43,13 @@ export const ORCHESTRATOR_SPAWN_CONFIG = {
     without diffing prompts. */
 export const ORCHESTRATOR_PROMPT_VERSION = 13;
 
+/** Whether a seat's recorded mandate version is behind the current default —
+    the one question rotation, the seat card and `rotate_orchestrator` ask
+    (#1452). A bespoke mandate claims no version and is never stale. */
+export function orchestratorMandateStale(promptVersion: number | null | undefined): promptVersion is number {
+  return typeof promptVersion === "number" && promptVersion < ORCHESTRATOR_PROMPT_VERSION;
+}
+
 /** Appended to bespoke and stale mandates at delivery time; the current
     versioned default already contains it. */
 export const ORCHESTRATOR_INITIAL_STATUS_DIRECTIVE = `## Initial visible status

@@ -2202,7 +2202,8 @@ export const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
   rotate_orchestrator: z.object({
     clientRequestId: clientRequestIdSchema,
     project: z.string().min(1).describe("Project whose orchestrator seat rotates to a fresh successor."),
-    mandate: z.string().optional().describe("Successor mandate; defaults to the incumbent's current mandate."),
+    mandate: z.string().optional().describe("Successor mandate. Omitted: the incumbent's own mandate when it is based on the current default version or is bespoke; the current built-in default when the incumbent's is based on an older version (get_orchestrator reports both versions)."),
+    keepIncumbentMandate: z.boolean().optional().describe("Carry the incumbent's mandate forward even when it is based on an older default version. Ignored when mandate is given."),
     handoffNotes: z.string().optional().describe("Bounded free-text handoff notes appended for the successor."),
     cwd: z.string().optional(),
     engine: z.enum(["claude", "codex"]).optional(),

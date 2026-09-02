@@ -17,6 +17,7 @@ import {
   ORCHESTRATOR_PROMPT_VERSION,
   ORCHESTRATOR_SPAWN_CONFIG,
   ORCHESTRATOR_SYSTEM_PROMPT,
+  orchestratorMandateStale,
 } from "@/lib/orchestrator/prompt";
 import type { OrchestratorSeat } from "@/lib/orchestrator/seats";
 import type { FileEntry } from "@/lib/types";
@@ -28,8 +29,10 @@ import { OrchestratorConversation } from "./OrchestratorConversation";
 import {
   deriveOrchestratorPanelState,
   deriveRotateDraftState,
+  mandateSummaryOf,
   orchestratorQuietBannerEligible,
   resolveSeatFile,
+  rotateMandateBase,
   SEAT_BIND_TIMEOUT_MS,
   seatBadgeOf,
   seatBindPending,
@@ -436,6 +439,7 @@ export function OrchestratorPanel({
             file={file}
             catalog={catalog}
             predecessorConversationId={state.seat.predecessorConversationId}
+            promptVersion={state.seat.promptVersion}
             rotating={rotating}
             opening={rotateOpening}
             onRotate={() => void openRotate(state.conversationId)}
@@ -517,7 +521,6 @@ export function OrchestratorPanel({
           state={state}
           mandate={mandate}
           edited={mandate !== ORCHESTRATOR_SYSTEM_PROMPT}
-          baseVersion={ORCHESTRATOR_PROMPT_VERSION}
           formError={formError}
           submitting={create.submitting}
           projectName={projectName}
@@ -572,7 +575,17 @@ function RotateDraft({
 }) {
   const { t } = useLocale();
   const [formError, setFormError] = useState<string | null>(null);
-  const [mandate, setMandateState] = useState(() => readField("Rotate", project, "mandate") || seat.mandate);
+  /* The text starts from the CURRENT default when the incumbent's mandate is
+     based on an older version (#1452) — a seat created under v3 used to rotate
+     «you do not talk to the user» into every successor, headed as the built-in
+     rules. The incumbent's own text is one press away (`onKeepIncumbent`); a
+     seat on the current version, or on bespoke rules, keeps its text. */
+  const base = rotateMandateBase(seat);
+  const [mandate, setMandateState] = useState(() => readField("Rotate", project, "mandate") || base);
+  const setMandate = (value: string) => {
+    setMandateState(value);
+    writeField("Rotate", project, "mandate", value === base ? "" : value);
+  };
   /* «Prefilled» in the operator's words: what the incumbent is ACTUALLY running
      on, read through the launch module's own storage seam rather than by forking
      it. Only the initializers call `read`, so switching engine here is never
@@ -626,22 +639,17 @@ function RotateDraft({
       mode="rotate"
       state={state}
       mandate={mandate}
-      edited={mandate !== seat.mandate}
-      baseVersion={seat.promptVersion}
+      edited={mandate !== base}
+      incumbent={seat}
       formError={formError}
       submitting={flow.submitting}
       projectName={projectName}
       cwd={cwd}
       launch={launch}
       viewerMcpRegistered={status?.viewerMcpRegistered === true}
-      onMandate={(value) => {
-        setMandateState(value);
-        writeField("Rotate", project, "mandate", value === seat.mandate ? "" : value);
-      }}
-      onRestore={() => {
-        setMandateState(seat.mandate);
-        writeField("Rotate", project, "mandate", "");
-      }}
+      onMandate={setMandate}
+      onRestore={() => setMandate(base)}
+      onKeepIncumbent={() => setMandate(seat.mandate)}
       onConfirm={confirm}
       onCancel={onCancel}
     />
@@ -660,7 +668,7 @@ function OrchestratorDraft({
   state,
   mandate,
   edited,
-  baseVersion,
+  incumbent = null,
   formError,
   submitting,
   projectName,
@@ -669,17 +677,19 @@ function OrchestratorDraft({
   viewerMcpRegistered,
   onMandate,
   onRestore,
+  onKeepIncumbent,
   onConfirm,
   onCancel,
 }: {
   mode: "create" | "rotate";
   state: Extract<OrchestratorPanelState, { kind: "draft" } | { kind: "intent-error" }>;
   mandate: string;
+  /** The text differs from what the draft started with — the built-in default,
+      or the incumbent's text for a rotation on the current version. */
   edited: boolean;
-  /** The version of the mandate this draft STARTED from — the built-in prompt's
-      for a create, the incumbent's for a rotation. Only meaningful while the
-      text is untouched; an edited mandate is bespoke and claims no version. */
-  baseVersion: number | null;
+  /** The seat a rotation replaces: what its mandate is based on decides the
+      summary line, and whether its text is offered as the alternative. */
+  incumbent?: Pick<OrchestratorSeat, "mandate" | "promptVersion"> | null;
   formError: string | null;
   submitting: boolean;
   projectName: string;
@@ -688,12 +698,19 @@ function OrchestratorDraft({
   viewerMcpRegistered: boolean;
   onMandate: (value: string) => void;
   onRestore: () => void;
+  onKeepIncumbent?: () => void;
   onConfirm: () => void;
   onCancel?: () => void;
 }) {
   const { t } = useLocale();
   const errored = state.kind === "intent-error";
   const rotate = mode === "rotate";
+  /* A stale incumbent (#1452): the draft started from the current default, so
+     the incumbent's own text is offered explicitly, for as long as the text in
+     the box is not already it. */
+  const staleVersion = incumbent && orchestratorMandateStale(incumbent.promptVersion) ? incumbent.promptVersion : null;
+  const keepOffered = staleVersion !== null && incumbent !== null && mandate !== incumbent.mandate && onKeepIncumbent !== undefined;
+  const summary = mandateSummaryOf(mandate, incumbent);
   /* The rules are collapsed by default: they are the part an operator rarely
      changes, and 58 lines of them ahead of the pickers is what made this draft
      unreadable (#1163).
@@ -713,9 +730,6 @@ function OrchestratorDraft({
   useEffect(() => {
     if (errored && rules.current) rules.current.open = true;
   }, [errored]);
-  /* Only untouched text is a version of anything; an edited mandate is the
-     operator's own and says so instead of claiming a version it isn't. */
-  const version = edited ? null : baseVersion;
   return (
     <form
       className="flex min-h-0 flex-1 flex-col"
@@ -788,6 +802,27 @@ function OrchestratorDraft({
           <AgentLaunchControls draft={launch} disabled={submitting} stacked />
         </div>
 
+        {/* Said above the folded rules, where it is read: the incumbent's
+            mandate is behind the default, and its text is the one alternative
+            the operator may want (#1452). */}
+        {keepOffered ? (
+          <p
+            className="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 rounded-control border border-warning/45 bg-warning-soft px-3 py-2 text-ui leading-4 text-secondary"
+            data-orchestrator-mandate-stale={String(staleVersion)}
+          >
+            <span>{t("orchPanel.rotateStaleMandate", { version: staleVersion, current: ORCHESTRATOR_PROMPT_VERSION })}</span>
+            <button
+              type="button"
+              data-orchestrator-keep-incumbent
+              onClick={onKeepIncumbent}
+              disabled={submitting}
+              className="inline-flex items-center gap-1 rounded-control border border-border bg-canvas px-2 py-0.5 text-caption font-semibold text-secondary hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
+            >
+              {t("orchPanel.keepIncumbentMandate", { version: staleVersion })}
+            </button>
+          </p>
+        ) : null}
+
         {/* Collapsed, the rules are one line the operator can ignore; open, they
             are the same textarea they have always been. Confirm posts what this
             field holds either way — the disclosure hides the text, it never
@@ -798,7 +833,7 @@ function OrchestratorDraft({
           data-orchestrator-mandate-details
         >
           <summary className="min-h-7 cursor-pointer select-none list-item px-3 py-1.5 text-label font-semibold text-secondary marker:text-muted hover:text-primary">
-            {version === null ? t("orchPanel.mandateSummaryCustom") : t("orchPanel.mandateSummary", { version })}
+            {t(summary.key, summary.params)} {t("orchPanel.mandateEdit")}
           </summary>
           <div className="flex flex-col gap-1 border-t border-border px-3 py-2">
             <div className="flex min-h-6 items-center gap-2">
@@ -809,7 +844,7 @@ function OrchestratorDraft({
                   disabled={submitting}
                   className="inline-flex items-center gap-1 rounded-control border border-border bg-canvas px-2 py-0.5 text-caption font-semibold text-muted hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
                 >
-                  <RotateCcw className="h-3 w-3" aria-hidden /> {t(rotate ? "orchPanel.restoreIncumbent" : "orchPanel.restoreDefault")}
+                  <RotateCcw className="h-3 w-3" aria-hidden /> {t(rotate && staleVersion === null ? "orchPanel.restoreIncumbent" : "orchPanel.restoreDefault")}
                 </button>
               ) : null}
               <span className="ml-auto shrink-0 text-caption text-muted">{t("orchPanel.mandateSent")}</span>

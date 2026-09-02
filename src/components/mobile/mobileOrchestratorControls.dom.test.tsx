@@ -4,6 +4,7 @@ import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 
 import { emptyStore } from "@/components/runtime/runtimeModel";
+import { ORCHESTRATOR_PROMPT_VERSION, ORCHESTRATOR_SYSTEM_PROMPT } from "@/lib/orchestrator/prompt";
 import type { FileEntry } from "@/lib/types";
 
 /*
@@ -290,7 +291,8 @@ test("the controls sheet names the incumbent the way the desktop header does, sh
   const mandateView = panel.querySelector("[data-orchestrator-mandate-view]") as HTMLElement | null;
   expect(mandateView).not.toBeNull();
   expect(mandateView!.textContent).toContain("You run the Atlas board.");
-  expect(mandateView!.textContent).toContain("v3");
+  /* Based on v3, and behind: the card says both, as the desktop row does (#1452). */
+  expect(mandateView!.textContent).toContain(`Mandate v3, default v${ORCHESTRATOR_PROMPT_VERSION}`);
 
   /* Rotate: a labelled 44px control, and only a control — nothing rotates
      until the draft it opens is confirmed. */
@@ -313,9 +315,21 @@ test("Rotate opens the seat's configuration prefilled from the incumbent, and th
   expect(panel.getAttribute("data-orchestrator-sheet-mode")).toBe("rotate");
   const draft = panel.querySelector('[data-orchestrator-draft="rotate"]');
   expect(draft).not.toBeNull();
-  /* The incumbent's own mandate, editable; the server composes the handoff. */
+  /* The seat is based on v3, so the box starts from the CURRENT default and
+     says so; the incumbent's own text is one 44px tap away (#1452). The
+     server composes the handoff either way. */
   const mandate = panel.querySelector("[data-orchestrator-mandate]") as HTMLTextAreaElement;
+  expect(mandate.value).toBe(ORCHESTRATOR_SYSTEM_PROMPT);
+  expect(panel.querySelector("[data-orchestrator-mandate-kind]")!.textContent).toBe(`Built-in default mandate v${ORCHESTRATOR_PROMPT_VERSION}`);
+  expect(panel.querySelector("[data-orchestrator-mandate-stale]")!.textContent).toContain(`based on v3; the current default is v${ORCHESTRATOR_PROMPT_VERSION}`);
+  const keep = panel.querySelector("[data-orchestrator-keep-incumbent]") as HTMLButtonElement;
+  expect(keep.className).toContain("min-h-11");
+  flushSync(() => keep.click());
+  await settle(root, view(files), 2);
   expect(mandate.value).toBe("You run the Atlas board.");
+  expect(panel.querySelector("[data-orchestrator-mandate-kind]")!.textContent)
+    .toBe(`Incumbent's mandate (based on v3; current default is v${ORCHESTRATOR_PROMPT_VERSION})`);
+  expect(panel.querySelector("[data-orchestrator-keep-incumbent]")).toBeNull();
   expect(panel.textContent).toContain("Replace this project's orchestrator");
   /* The shared launch module: engine radios, the account the incumbent runs
      under, and the 44px floor applied from outside it. */
@@ -460,7 +474,26 @@ test("a seat whose transcript is not in view still reaches Rotate from the sheet
   expect(rotateButton(host)).not.toBeNull();
   await openRotate(host, root, files);
   expect(sheet(host)!.querySelector('[data-orchestrator-draft="rotate"]')).not.toBeNull();
-  expect((sheet(host)!.querySelector("[data-orchestrator-mandate]") as HTMLTextAreaElement).value).toBe("You run the Atlas board.");
+  /* A v3 seat, so the draft starts from the current default (#1452). */
+  expect((sheet(host)!.querySelector("[data-orchestrator-mandate]") as HTMLTextAreaElement).value).toBe(ORCHESTRATOR_SYSTEM_PROMPT);
+});
+
+test("Rotate over a seat on the CURRENT default keeps the incumbent's text and offers nothing to keep (#1452)", async () => {
+  seatAnswer = { seat: seat({ mandate: "You run the Atlas board, my way.", promptVersion: ORCHESTRATOR_PROMPT_VERSION }), pending: null, exists: true };
+  const files = [conversation({}), orchestrator];
+  const { host, root } = await mount(files);
+  await openControls(host, root, files);
+  const mandateView = sheet(host)!.querySelector("[data-orchestrator-mandate-view]") as HTMLElement;
+  expect(mandateView.textContent).toContain(`Mandate v${ORCHESTRATOR_PROMPT_VERSION} —`);
+  expect(mandateView.textContent).not.toContain("default v");
+  await openRotate(host, root, files);
+
+  const panel = sheet(host)!;
+  expect((panel.querySelector("[data-orchestrator-mandate]") as HTMLTextAreaElement).value).toBe("You run the Atlas board, my way.");
+  expect(panel.querySelector("[data-orchestrator-mandate-kind]")!.textContent)
+    .toBe(`Incumbent's mandate (based on v${ORCHESTRATOR_PROMPT_VERSION}, the current default)`);
+  expect(panel.querySelector("[data-orchestrator-mandate-stale]")).toBeNull();
+  expect(panel.querySelector("[data-orchestrator-keep-incumbent]")).toBeNull();
 });
 
 /* A minimal visualViewport stand-in — happy-dom has none, and the keyboard is
