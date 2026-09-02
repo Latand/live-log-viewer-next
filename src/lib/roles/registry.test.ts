@@ -101,6 +101,22 @@ test("resolved prompts carry role safety fences and reject cross-engine inherite
   });
 });
 
+/* #1428 — pipeline stages inherit the role scaffold, so one sentence here reaches
+   every builder, reviewer and architect stage without each spec restating it. */
+test("builder, reviewer and architect scaffolds send the seat to search prior conversations first", () => {
+  const resolved = [
+    resolveRole("builder", { mode: "plain" }),
+    resolveRole("reviewer", { diffSource: "origin/main...HEAD", lens: "all" }),
+    resolveRole("architect", { mode: "design" }),
+  ];
+  for (const role of resolved) {
+    if (!role.ok) throw new Error(role.error);
+    expect(role.value.prompt).toContain("search_transcripts");
+    expect(role.value.prompt).toContain("conversation_messages");
+    expect(role.value.prompt).toContain("solved before");
+  }
+});
+
 test("deployer requires confirmation while explicit spawn fields can override its profile", () => {
   const unresolved = resolveRole("deployer", { sha: "abc123" });
   expect(unresolved.ok && unresolved.value.requiresDeploymentConfirmation).toBe(true);

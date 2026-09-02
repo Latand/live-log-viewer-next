@@ -22,7 +22,10 @@
  * the moment a seat still holding a schedule of its own drops it. v12 (#1301)
  * names the delivery endpoint in the fences for what it does: the seat's own
  * surface list said `tmux`, and a seat that repeats that word sends whoever
- * reads its report looking for a server this machine does not run. */
+ * reads its report looking for a server this machine does not run. v13 (#1428)
+ * sends the seat to prior conversations first: the Viewer indexes every message
+ * of every transcript, and seats kept re-solving what an earlier one had
+ * already solved because nothing they read told them to look. */
 
 /** Initial draft values. The operator may choose any engine, model, account, and
     effort the shared launch controls support before creating the project seat. */
@@ -38,7 +41,7 @@ export const ORCHESTRATOR_SPAWN_CONFIG = {
     `ORCHESTRATOR_SYSTEM_PROMPT`: seats record the version their mandate was
     based on, and `get_orchestrator` reports it so a stale incumbent is visible
     without diffing prompts. */
-export const ORCHESTRATOR_PROMPT_VERSION = 12;
+export const ORCHESTRATOR_PROMPT_VERSION = 13;
 
 /** Appended to bespoke and stale mandates at delivery time; the current
     versioned default already contains it. */
@@ -109,6 +112,9 @@ Call suggest_replies after EVERY message of yours that asks the operator somethi
 They render as pills under your message and land in their composer on a tap, editable before sending — the viewer never sends one, so a draft is an offer and never a decision, and never a substitute for asking clearly in the message itself. The newest set replaces your previous one for that conversation, and their next message clears it: offer a fresh set with each new ask, and never re-offer drafts to something they already answered. A message that asks nothing needs no drafts.
 
 ${ORCHESTRATOR_VIEWER_CLOCK_DIRECTIVE}
+
+## Search prior conversations before deciding
+Much of what you will meet has been met before, and the Viewer indexes every user and assistant message of every conversation on this machine, across both engines and all accounts. At the start of any non-trivial task, and whenever a problem, failure or unknown appears, run several search_transcripts queries — 3 to 5, in different phrasings: the error text, the subsystem, the symptom, the file or tool involved — scoped to the project first, then unscoped. A snippet is only a pointer: open the hit through conversation_messages at its transcript path (its timestamp as since; the transcript path and byte offset pin the exact line) and read the turns around it before choosing an approach. Cite what you found, by conversation title and date, in the plan or spec you hand on, or state that nothing relevant existed. Check an old answer against current main before you build on it; the code has usually moved since.
 
 ## Conveyor rules
 Drive every accepted piece of work through: GitHub issue -> worktree lane -> implementer agent -> review flow -> merge bar -> batched deploy -> cleanup.

@@ -383,6 +383,11 @@ test("search_transcripts publishes its body-query, project, cursor, and bounded 
     const tool = listed.tools.find((candidate) => candidate.name === "search_transcripts");
 
     expect(tool?.description).toContain("message bodies");
+    /* #1428 — the description names the use case and the read that follows a
+       hit, so a seat discovers the pairing from the tool list alone. */
+    expect(tool?.description).toContain("has this been solved before?");
+    expect(tool?.description).toContain("conversation_messages");
+    expect(tool?.description).toContain("byteOffset");
     expect(tool?.inputSchema.required).toEqual(expect.arrayContaining(["clientRequestId", "query"]));
     expect(Object.keys(tool?.inputSchema.properties ?? {})).toEqual(expect.arrayContaining([
       "clientRequestId",
