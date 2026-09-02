@@ -164,6 +164,14 @@ test("a refused kill says so on the row and shows no receipt", async () => {
   expect(q(root, '[data-mobile2-host-task="/repo/next-dev.log"]')!.textContent).toContain("process already gone");
 });
 
+test("with nothing hidden there is no Hidden block, rather than a row reading zero", () => {
+  const root = mount({ hiddenCount: 0 });
+  const sheet = q(root, '[data-mobile2-sheet="host"]')!;
+  expect(q(root, "[data-mobile2-host-catalog]")).toBeNull();
+  expect(sheet.textContent).not.toContain(translate("en", "mobile2.host.hidden"));
+  expect(sheet.textContent).not.toContain(translate("en", "mobile2.host.quiet", { count: 0 }));
+});
+
 test("with no background process the sheet says so instead of an empty section", () => {
   const root = mount({ tasks: [] });
   expect(q(root, "[data-mobile2-host-task]")).toBeNull();

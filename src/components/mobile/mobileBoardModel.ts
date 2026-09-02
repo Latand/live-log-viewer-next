@@ -4,7 +4,7 @@ import type { Pipeline } from "@/lib/pipelines/types";
 import { cleanTitle } from "@/lib/title";
 import type { FileEntry } from "@/lib/types";
 
-import { attentionId, blockingStuckDelivery, openBridgeAsk, stalledAttention } from "../attention";
+import { attentionId, blockingStuckDelivery, buildAttentionQueue, openBridgeAsk, stalledAttention } from "../attention";
 import { isAuxTask, isChildConversation, isConversation, isSubagent, projectKey } from "../projectModel";
 import { turnIsRunning } from "../turnDuration";
 import { workingSince } from "../workingSince";
@@ -175,6 +175,10 @@ export interface MobileBoardPipelineRow {
   total: number;
   /** The cursor stage's name, as the pipeline declares it. */
   stageName: string;
+  /** The stage's last round returned a `fail` verdict — the reason most of
+      these rows are in the queue at all, and the one outcome word the badge
+      («needs a decision») does not already say. */
+  stageFailed: boolean;
   /** Findings the failing round reported, when the verdict carried any. */
   findings: number | null;
   /** Seconds since the pipeline stopped and asked for the operator. */
@@ -232,6 +236,7 @@ function pipelineRow(pipeline: Pipeline, now: number): MobileBoardPipelineRow {
     stage: index >= 0 ? index + 1 : pipeline.stages.length,
     total: pipeline.stages.length,
     stageName: stage?.id ?? "",
+    stageFailed: last?.verdict?.status === "fail",
     findings,
     seconds: at === null ? null : Math.max(0, now - at),
   };
@@ -289,14 +294,27 @@ export function buildMobileBoard({
     });
   }
 
-  /* Oldest signal first in the queue (the attention queue's own order); the
-     other two sections read newest first, like every recency list here. */
+  /* The queue reads in the attention queue's OWN order — the hard-blocked
+     segment first, the stalled tail after it, oldest signal first inside each
+     — because §4.6 makes the rows, the bar's badge and the sheet's «Next ›»
+     one queue: an order of our own here would walk the operator through the
+     same items in a different sequence. `buildAttentionQueue` is the authority
+     that decides it, so it is asked rather than imitated. Anything it does not
+     rank (nothing today: every «needs» state carries an `attentionId`) falls
+     to the end, oldest first. The other two sections read newest first, like
+     every recency list here. */
+  const rank = new Map<string, number>();
+  buildAttentionQueue([...files], now, project).forEach((item, index) => {
+    if (!rank.has(item.file.path)) rank.set(item.file.path, index);
+  });
   const byWait = (a: MobileBoardConversation, b: MobileBoardConversation) =>
     (b.state.seconds ?? 0) - (a.state.seconds ?? 0) || a.path.localeCompare(b.path);
+  const byQueue = (a: MobileBoardConversation, b: MobileBoardConversation) =>
+    (rank.get(a.path) ?? Number.MAX_SAFE_INTEGER) - (rank.get(b.path) ?? Number.MAX_SAFE_INTEGER) || byWait(a, b);
   const byFreshness = (a: MobileBoardConversation, b: MobileBoardConversation) =>
     b.file.mtime - a.file.mtime || a.path.localeCompare(b.path);
 
-  const needsConversations = rows.filter((row) => row.state.section === "needs").sort(byWait);
+  const needsConversations = rows.filter((row) => row.state.section === "needs").sort(byQueue);
   const working = rows.filter((row) => row.state.section === "working").sort(byFreshness);
   const recentRows = rows.filter((row) => row.state.section === "recent").sort(byFreshness);
 

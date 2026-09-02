@@ -177,7 +177,10 @@ const PHRASE_TONE: Record<MobileRowState["key"], string> = {
 function PipelineNeedsRow({ row, onOpen }: { row: MobileBoardPipelineRow; onOpen?: (pipeline: Pipeline) => void }) {
   const { t } = useLocale();
   const meta = [
-    t("mobile2.board.pipelineStage", { stage: row.stage, total: row.total, name: row.stageName }),
+    /* `stage k/n · <stage> · <state>` (README §4.1, §4.7). The state word is
+       the failing round's — «needs a decision» is already the badge, so saying
+       it twice would leave the row without the fact that put it here. */
+    t(row.stageFailed ? "mobile2.board.pipelineStageFailed" : "mobile2.board.pipelineStage", { stage: row.stage, total: row.total, name: row.stageName }),
     row.findings ? t("mobile2.board.pipelineFindings", { count: row.findings }) : null,
   ].filter(Boolean).join(" · ");
   const Tag = onOpen ? "button" : "div";

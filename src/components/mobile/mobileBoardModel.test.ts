@@ -154,6 +154,25 @@ test("the sections group by state, the seat is never a row, and Recent is capped
   expect(model.recentTotal).toBe(4);
 });
 
+test("the queue reads in the attention queue's own order, not merely oldest first", () => {
+  /* README §4.6: the rows, the bar's badge and the sheet's «Next ›» are one
+     queue, so the board cannot invent a second order. `buildAttentionQueue`
+     ranks the hard-blocked segment ahead of the stalled tail and sorts by age
+     only inside each — here the stalled row is by far the oldest signal and
+     still reads second. */
+  const asked = question({ path: "/p/ask.jsonl", title: "Implement the export endpoint" });
+  const stalled = working({ path: "/p/stalled.jsonl", title: "Fix the flaky reseat test", activity: "stalled", mtime: NOW - 5_400 });
+  const older = question({ path: "/p/plan.jsonl", title: "Migrate accounts to the new binding" }, "plan");
+  older.pendingQuestion!.askedAt = new Date((NOW - 1_500) * 1_000).toISOString();
+
+  const model = buildMobileBoard({ files: [asked, stalled, older], pipelines: [], project: PROJECT, now: NOW });
+  expect(model.needsYou.map((item) => (item.kind === "conversation" ? item.path : item.id)))
+    .toEqual(["/p/plan.jsonl", "/p/ask.jsonl", "/p/stalled.jsonl"]);
+  /* The stalled row is the oldest of the three, so an age-only order would
+     have led with it. */
+  expect(mobileRowState(stalled, NOW).seconds).toBeGreaterThan(mobileRowState(older, NOW).seconds ?? 0);
+});
+
 test("a closed card and an archived conversation leave the board; a crowned one wears its mark", () => {
   const files = [
     working({ path: "/p/run.jsonl" }),
@@ -200,12 +219,25 @@ test("a pipeline waiting on a decision is a queue row beside the conversations, 
   expect(model.needsYou).toHaveLength(2);
   const row = model.needsYou.find((item) => item.kind === "pipeline");
   expect(row).toBeDefined();
-  expect(row).toMatchObject({ id: "pipeline_atlas_p2", task: "Fast conversation switching", stage: 3, total: 3, stageName: "review", findings: 2 });
+  /* `stage k/n · <stage> · <state>`: the failing round is what put the row in
+     the queue, and the badge's «needs a decision» does not say it. */
+  expect(row).toMatchObject({ id: "pipeline_atlas_p2", task: "Fast conversation switching", stage: 3, total: 3, stageName: "review", stageFailed: true, findings: 2 });
   expect(Math.round((row as { seconds: number }).seconds)).toBe(3_600);
   /* One count for the bar's badge and the queue's rows: conversations first,
      pipelines after, both reachable from the same list. */
   expect(model.attentionCount).toBe(model.needsYou.length);
   expect(model.pipelines).toEqual({ total: 2, active: 1, needsDecision: 1, completed: 0 });
+
+  /* A round that asked for the operator rather than failing says nothing extra:
+     the badge already carries that word. */
+  const asking = pipeline({
+    id: "pipeline_atlas_p4",
+    state: "needs_decision",
+    cursor: { stageId: "review", state: "reviewing", input: null, activatedBy: null },
+    runs: [{ stageId: "review", attempts: [{ n: 1, state: "needs_decision", verdict: { status: "needs_decision", findings: [] }, completedAt: new Date((NOW - 600) * 1_000).toISOString() }] }] as unknown as Pipeline["runs"],
+  });
+  const undecided = buildMobileBoard({ files: [], pipelines: [asking], project: PROJECT, now: NOW });
+  expect(undecided.needsYou[0]).toMatchObject({ kind: "pipeline", stageFailed: false, findings: 0 });
 });
 
 test("the pipelines summary rises above Working while a pipeline is active, and sinks below it when none is", () => {

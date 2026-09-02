@@ -2369,6 +2369,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "mobile2.board.pipelinesNeedYou": "{count} потребує вас",
   "mobile2.board.pipelinesDone": "{count} завершені",
   "mobile2.board.pipelineStage": "етап {stage}/{total} · {name}",
+  "mobile2.board.pipelineStageFailed": "етап {stage}/{total} · {name} — збій",
   "mobile2.board.pipelineFindings": { one: "{count} зауваження", few: "{count} зауваження", many: "{count} зауважень", other: "{count} зауважень" },
   "mobile2.board.killed": "зупинено · повідомлення в черзі",
   "mobile2.board.stalled": "завис · {age}",

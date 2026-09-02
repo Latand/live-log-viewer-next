@@ -151,7 +151,10 @@ export function MobileHostSheet({
       ) : (
         <div className="px-4 py-3 text-center text-ui text-muted">{t("mobile2.host.noBackground")}</div>
       )}
-      {onOpenCatalog ? (
+      {/* Only when something is actually hidden: «0 quiet conversations» is a
+          row that answers a question nobody asked, and the board's own «All
+          conversations · n ›» is the way to the catalog either way. */}
+      {onOpenCatalog && hiddenCount > 0 ? (
         <>
           <MobileSheetSection>{t("mobile2.host.hidden")}</MobileSheetSection>
           <button

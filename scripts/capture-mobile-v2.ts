@@ -526,6 +526,18 @@ function statePatch(state: ConversationState, entry: Entry, pid: number): Record
   }
 }
 
+/* What each working agent says it is doing right now — its own plan step, which
+   is what a working row's meta line reads (README §4.1: the now-fragment). The
+   board reads `plan.current` and nothing else, so without a plan every working
+   row would render the state phrase alone and the frame would be evidence of a
+   missing fixture rather than of the line. Invented steps over invented work. */
+const NOW_STEPS: Record<string, string> = {
+  orch: "list_conversations",
+  c1: "Edit cardStatus.ts",
+  c5: "Bash bun test reseat.test.ts",
+  c9: "Read README.md",
+};
+
 /** The host sheet's background processes: invented commands, invented PIDs. */
 const BACKGROUND_TASKS = [
   { file: "next-dev.log", desc: "next dev · port 8899" },
@@ -669,6 +681,10 @@ function patchFiles(body: { files?: Entry[]; pipelines?: unknown[] }, a: Answers
     if (state) {
       if (a.scenario.arrival && key === "c6" && !a.arrived) Object.assign(entry, statePatch("working", entry, pid));
       else Object.assign(entry, statePatch(state, entry, pid));
+    }
+    const step = NOW_STEPS[key];
+    if (step && entry.proc === "running") {
+      entry.plan = { steps: [{ text: step, status: "in_progress" }], done: 1, total: 3, current: step, updatedAt: new Date(CAPTURE_MS - 40_000).toISOString() };
     }
     if (key === "orch") entry.ctx = { usedTokens: 24_000, windowTokens: 100_000, pct: 24, source: "transcript", confidence: "reported", observedAt: "2100-01-02T14:00:00.000Z" };
     if (key === "c1") entry.ctx = { usedTokens: 142_000, windowTokens: 200_000, pct: 71, source: "transcript", confidence: "reported", observedAt: "2100-01-02T14:00:00.000Z" };

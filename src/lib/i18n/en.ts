@@ -2442,6 +2442,7 @@ export const en = {
   "mobile2.board.pipelinesNeedYou": "{count} needs you",
   "mobile2.board.pipelinesDone": "{count} done",
   "mobile2.board.pipelineStage": "stage {stage}/{total} · {name}",
+  "mobile2.board.pipelineStageFailed": "stage {stage}/{total} · {name} failed",
   "mobile2.board.pipelineFindings": { one: "{count} finding", other: "{count} findings" },
   "mobile2.board.killed": "killed · messages queue",
   "mobile2.board.stalled": "stalled · {age}",

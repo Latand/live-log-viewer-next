@@ -1665,7 +1665,14 @@ function ProjectDashboardView({
   /* The badge counts the queue rows the operator can reach from here: the
      Viewer's conversation queue, plus this project's pipelines waiting on a
      decision — they are queue items like any other (README §4.6), and nothing
-     else on the phone counted them. */
+     else on the phone counted them.
+     One seam stays open on purpose: the conversation half is the Viewer's
+     GLOBAL queue, which is exactly what the sheet this badge opens lists, so
+     the two agree — but on a home with a second busy project it counts rows
+     the board below does not show. Scoping it to the project here would make
+     the badge disagree with its own sheet instead; the queue and the sheet are
+     lane 8's (`attentionQueue.ts`), and the scope is one decision to make in
+     that one place, for both surfaces at once. */
   const mobileShellHost = mobileShell && mobileBoardModel
     ? { ...mobileShell, attentionCount: mobileShell.attentionCount + (mobileBoardModel.pipelines?.needsDecision ?? 0) }
     : mobileShell;
