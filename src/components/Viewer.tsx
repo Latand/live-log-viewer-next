@@ -507,18 +507,22 @@ export function Viewer() {
      and from its own pinned request) must FAIL VISIBLY: sitting silently on the
      default view read as "the page just reloads and nothing opens". Same
      bounded deadline the Back/Forward replay uses; the countdown starts only
-     once a certified payload exists, and a resolution clearing `pendingHash`
-     cancels it. The popstate path arms its own identity-checked timer — for a
-     replayed entry both reach the same notice. */
+     once a payload certified for the pinned request scope exists, and a
+     resolution clearing `pendingHash` cancels it. The last-known stand-in
+     another scope lends while the pinned fetch is in flight (#1432) carries
+     `loaded` and says nothing about the target, so it must not start the
+     clock: a pinned fetch slower than the deadline would otherwise be reported
+     stale before it could answer. The popstate path arms its own
+     identity-checked timer — for a replayed entry both reach the same notice. */
   useEffect(() => {
-    if (!pendingHash || !loaded) return;
+    if (!pendingHash || !loaded || !scopeCertified) return;
     const timer = window.setTimeout(() => {
       setPendingHash(null);
       dispatchCatalogPin({ kind: "release" });
       setStaleFocusNotice(true);
     }, STALE_FOCUS_REPLAY_MS);
     return () => window.clearTimeout(timer);
-  }, [pendingHash, loaded]);
+  }, [pendingHash, loaded, scopeCertified]);
 
   const releaseCatalogFile = useCallback((path: string) => {
     dispatchCatalogPin({ kind: "release", path });

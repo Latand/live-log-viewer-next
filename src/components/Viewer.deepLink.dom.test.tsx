@@ -206,12 +206,15 @@ afterEach(() => {
 /** `/api/files` serves `filesByPin` keyed by the request's `path` param
     (`""` = the unpinned global scope); `/api/board` is a real in-memory board
     so the focus request can actually place its card. Everything else 404s. */
-function stubFetch(filesByPin: (pin: string) => FileEntry[]) {
+function stubFetch(filesByPin: (pin: string) => FileEntry[], delayByPin?: (pin: string) => number) {
   globalThis.fetch = mock(async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input);
     requestLog.push(url);
     if (url.startsWith("/api/files")) {
       const pin = new URL(url, "http://localhost").searchParams.get("path") ?? "";
+      /* A per-scope delay models a pinned fetch slower than the global one. */
+      const delay = delayByPin?.(pin) ?? 0;
+      if (delay > 0) await Bun.sleep(delay);
       return new Response(
         JSON.stringify({ files: filesByPin(pin), projectCatalog }),
         { headers: { "content-type": "application/json" } },
@@ -466,6 +469,41 @@ test("#c= whose row arrives only via the pinned fetch keeps its pin after resolv
   expect(host.querySelector(`[data-scheme-node="${TARGET_PATH}"]`)).not.toBeNull();
   await expectNavigationQuiescence();
 });
+
+/** Mirrors `STALE_FOCUS_REPLAY_MS` in Viewer.tsx. */
+const STALE_DEADLINE_MS = 8_000;
+
+test("the not-found deadline waits for the pinned scope's own payload; a stand-in from another scope does not start it", async () => {
+  /* A warm tab: the global scope has already answered when the hash changes
+     (a pasted link, the palette, Back/Forward), so the pinned scope is served
+     by the last-known stand-in at once (#1432). The pinned fetch, the only one
+     that can carry the target, outlasts the deadline. The stand-in carries
+     `loaded` and says nothing about the target, so it must not start the
+     clock: with the clock started on it, a slow pinned fetch was reported
+     stale before it could answer, and the row it finally carried was dropped. */
+  stubFetch(
+    (pin) => (pin === CONVERSATION_ID || pin === TARGET_PATH ? [otherRow, targetRow] : [otherRow]),
+    (pin) => (pin === CONVERSATION_ID ? STALE_DEADLINE_MS + 600 : 0),
+  );
+  const filesRequests = () => requestLog.filter((url) => url.startsWith("/api/files"));
+
+  const host = await mountViewer();
+  expect(filesRequests().some((url) => !url.includes("path="))).toBe(true);
+
+  await act(async () => { dom.location.hash = `#c=${encodeURIComponent(CONVERSATION_ID)}`; });
+  expect(await waitFor(() => filesRequests().some((url) => url.includes("path=")))).toBe(true);
+
+  /* Past the deadline as measured from the stand-in: no notice, still pending. */
+  await act(async () => { await Bun.sleep(STALE_DEADLINE_MS + 300); });
+  expect(host.querySelector("[data-stale-focus-notice]")).toBeNull();
+  expect(host.querySelector(`[data-scheme-node="${TARGET_PATH}"]`)).toBeNull();
+
+  /* The pinned payload lands and the link resolves. */
+  expect(await waitFor(() => host.querySelector(`[data-scheme-node="${TARGET_PATH}"]`) !== null, 3_000)).toBe(true);
+  expect(dom.localStorage.getItem("llvProject")).toBe(TARGET_PROJECT);
+  expect(host.querySelector("[data-stale-focus-notice]")).toBeNull();
+  await expectNavigationQuiescence();
+}, 20_000);
 
 test("legacy #f= to an archived predecessor transcript opens it the same way", async () => {
   dom.location.hash = `#f=${encodeURIComponent(TARGET_PATH)}`;
