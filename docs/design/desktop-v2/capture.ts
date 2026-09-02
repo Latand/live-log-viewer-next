@@ -53,6 +53,22 @@
  *   - the findings title reads «attempt n · round k of m · j findings» (F18);
  *   - every task card carries a worker, a pipeline or an assign row (F3).
  *
+ * A second pass over the rendered frames found four defects every gate above
+ * was blind to, so each is a gate of its own now:
+ *
+ *   - no thread chip clips its identity or its state: a card that ellipses to
+ *     «r…» has spent its width saying nothing (F3);
+ *   - no meta fragment overflows its own box: a squeezed «nowrap» fragment
+ *     paints across the next one's separator dot, and the line reads
+ *     «working 4:02Read src/lib/pipelin…»; and none is cut by its nearest
+ *     clipping ancestor, which is what took the «1» off a node's «applies from
+ *     attempt 1». A fragment may shrink only if it can wrap;
+ *   - the stage editor keeps a body of at least 300 px with its footer inside
+ *     the viewport: at 1280 the record left it 142 px for 790 px of controls,
+ *     which is F9's squeeze one axis over;
+ *   - every compact account row carries its meter, which is the half of F2's
+ *     acceptance that names the editor's and the composer's pickers.
+ *
  * After the matrix, headless flows click through the design: the column's
  * arrow keys and Enter, the focus model and the Escape bridge, the single-key
  * map (n N / o i k m a p c [ ? and 1–9), the after-start pipeline editing
@@ -315,6 +331,12 @@ async function structure(page: Page, width: number, screen: Screen): Promise<str
       if (meters !== rows.length * 2) bad.push(`${rows.length} account rows carry ${meters} meters, expected ${rows.length * 2}`);
       for (const r of rows) if (!(r as HTMLElement).dataset.go?.startsWith("#/accounts/")) bad.push(`an account row is not a target`);
     }
+    /* F2 is «every account, a bar», not «every account on one screen»: the
+       stage editor's picker and the composer's are where an account is chosen,
+       and a bar is what the choice is made on. */
+    for (const r of app.querySelectorAll(".arow.compact")) {
+      if (!r.querySelector(".meter")) bad.push(`the account row «${txt(r).slice(0, 24)}» shows no usage bar`);
+    }
 
     /* F19: no request payloads, no zoom tools, no empty minimap. */
     const stageText = txt(app.querySelector(".stage"));
@@ -354,6 +376,45 @@ async function structure(page: Page, width: number, screen: Screen): Promise<str
       if (rot && rot.classList.contains("primary")) bad.push("Rotate is still the primary button on the seat");
     }
 
+    /* The meta grammar holds only if every fragment fits the box it was given:
+       a squeezed nowrap fragment overflows and paints over the next one's
+       separator, and the line reads «working 4:02Read src/lib/pipelin…». .rest
+       is the one fragment allowed to give way, by clipping. */
+    const clipRight = (el: Element): number => {
+      let node = el.parentElement; let edge = Infinity;
+      while (node) {
+        const o = getComputedStyle(node).overflowX;
+        if (o === "hidden" || o === "auto" || o === "scroll") edge = Math.min(edge, node.getBoundingClientRect().right);
+        node = node.parentElement;
+      }
+      return edge;
+    };
+    for (const line of app.querySelectorAll(".meta")) {
+      for (const frag of line.children) {
+        if (frag.classList.contains("rest")) continue;
+        const box = frag.getBoundingClientRect();
+        if (!box.width) continue;
+        const range = document.createRange(); range.selectNodeContents(frag);
+        const text = range.getBoundingClientRect();
+        if (text.width > box.width + 1) bad.push(`the meta fragment «${txt(frag).slice(0, 20)}» overflows its box by ${Math.round(text.width - box.width)} px`);
+        /* A fragment wider than its box paints over the next one's dot; a
+           fragment past the nearest clipping ancestor is simply cut, and the
+           part that goes is the tail — the number the phrase exists to name. */
+        if (box.right > clipRight(frag) + 1) bad.push(`the meta fragment «${txt(frag).slice(0, 24)}» is cut by ${Math.round(box.right - clipRight(frag))} px`);
+      }
+    }
+
+    /* F9: the editor's footer stays put and its body stays usable. A pane that
+       shows two of nine groups through a 142 px slot is the squeeze the
+       critique measured, moved from the width to the height. */
+    const ebody = app.querySelector(".editor .ebody") as HTMLElement | null;
+    if (ebody) {
+      if (ebody.clientHeight < 300) bad.push(`the editor body is ${ebody.clientHeight} px tall for ${ebody.scrollHeight} px of controls`);
+      const foot = app.querySelector(".editor .foot") as HTMLElement | null;
+      if (!foot) bad.push("the editor has no pinned footer");
+      else if (foot.getBoundingClientRect().bottom > window.innerHeight + 1) bad.push("the editor's footer is below the viewport");
+    }
+
     /* F18: one vocabulary — attempt is a run, round is a traversal. */
     const findings = txt(app.querySelector(".findings h3"));
     if (findings && !/attempt \d+ · round \d+ of \d+ · \d+ findings/.test(findings)) bad.push(`the findings title reads «${findings}»`);
@@ -361,6 +422,16 @@ async function structure(page: Page, width: number, screen: Screen): Promise<str
     /* F3: a kanban card is one thread, and its columns scroll down, not sideways. */
     for (const card of app.querySelectorAll(".kcard")) {
       if (!card.querySelector(".kchips .kchip")) bad.push(`the task card «${txt(card).slice(0, 30)}» carries no worker, pipeline or assign row`);
+    }
+    /* F3, second half: the thread has to be readable. A chip that ellipses its
+       state to «r…» or «needs a d…» has spent the card's whole width saying
+       nothing, and the state is the reason the operator looks at the card. */
+    for (const chip of app.querySelectorAll(".kchip")) {
+      for (const sel of [".who", ".st"]) {
+        const el = chip.querySelector(sel) as HTMLElement | null;
+        if (!el) continue;
+        if (el.scrollWidth > el.clientWidth + 1) bad.push(`a card chip clips «${txt(el)}» into ${el.clientWidth} px (needs ${el.scrollWidth})`);
+      }
     }
     void id;
     return bad;

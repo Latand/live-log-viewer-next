@@ -471,10 +471,17 @@
   function editorShell(title, badgeHtml, closeGo, body, foot) {
     return `<div class="editor" data-editor="${esc(title.key)}"><h3>${I(title.icon, "sm")}${esc(title.text)}${badgeHtml}<button class="iconbtn" data-go="${closeGo}" aria-label="Close the editor">${I("x")}</button></h3><div class="ebody">${body}</div><div class="foot">${foot}</div></div>`;
   }
+  /* Wherever an account is listed it carries its bar: the operator picks an
+     account by what is left in it, and «38% left» as prose is a number to
+     compare in the head instead of a length to compare with the eye. */
+  const useCell = (low) => low === null
+    ? `<span class="use"><span class="meter empty"><i></i></span><span class="pct tn">—</span></span>`
+    : `<span class="use">${meter(low, `${low}% left`)}<span class="pct tn ${meterCls(low)}">${low}% left</span></span>`;
+  const lowestWindow = (a) => (a.windows.length ? Math.min(...a.windows.map((w) => w.left)) : null);
   function accountRows(engine, chosen, act) {
     return `<div class="accrows">${F.accounts[engine].map((a) => {
-      const low = a.windows.length ? Math.min(...a.windows.map((w) => w.left)) : null;
-      return `<button class="arow compact ${chosen === a.id ? "on" : ""}" data-act="${a.auth === "Authenticated" ? `${act}:${a.id}` : `signIn:${engine}:${a.id}`}"><span class="dot ${a.auth === "Authenticated" ? "ok" : ""}"></span><span class="t">${esc(a.label)}<small>${esc(a.plan)}${low !== null ? ` · ${low}% left` : ""}</small></span>${a.auth === "Authenticated" ? (chosen === a.id ? badge("chosen", "acc") : badge("ready", "ok")) : `<span class="signin">sign in →</span>`}</button>`;
+      const low = lowestWindow(a);
+      return `<button class="arow compact ${chosen === a.id ? "on" : ""}" data-act="${a.auth === "Authenticated" ? `${act}:${a.id}` : `signIn:${engine}:${a.id}`}"><span class="dot ${a.auth === "Authenticated" ? "ok" : ""}"></span><span class="t">${esc(a.label)}<small>${esc(a.plan)}</small></span>${useCell(a.auth === "Authenticated" ? low : null)}${a.auth === "Authenticated" ? (chosen === a.id ? badge("chosen", "acc") : badge("ready", "ok")) : `<span class="signin">sign in →</span>`}</button>`;
     }).join("")}</div>`;
   }
   function stageEditor(p, s) {
@@ -803,9 +810,9 @@
     if (c && h.endsWith("/model")) {
       const nx = S.next[c.id] || { model: c.model, effort: c.effort, account: c.account }; const b = stateBits(c);
       const acct = `<div class="mgrp">Account</div>${F.accounts[c.engine].map((a) => {
-        const low = a.windows.length ? Math.min(...a.windows.map((w) => w.left)) : null;
+        const low = lowestWindow(a);
         if (a.active && b.key === "limit") return `<div class="mrow"><span class="dot warn"></span><span class="l">${esc(a.label)}<small>limit · resets ${esc(c.limitReset || "16:40")}</small></span>${badge("limit", "warn")}</div>`;
-        return `<button class="arow compact" data-act="${a.auth === "Authenticated" ? `md:${c.id}:account:${a.id}` : `signIn:${c.engine}:${a.id}`}"><span class="dot ${a.auth === "Authenticated" ? "ok" : ""}"></span><span class="t">${esc(a.label)}<small>${esc(a.plan)}</small></span>${a.auth === "Authenticated" ? (low !== null ? `<span class="pct tn ${meterCls(low)}">${low}% left</span>` : badge("ready", "ok")) : `<span class="signin">sign in →</span>`}</button>`;
+        return `<button class="arow compact ${nx.account === a.label ? "on" : ""}" data-act="${a.auth === "Authenticated" ? `md:${c.id}:account:${a.id}` : `signIn:${c.engine}:${a.id}`}"><span class="dot ${a.auth === "Authenticated" ? "ok" : ""}"></span><span class="t">${esc(a.label)}<small>${esc(a.plan)}</small></span>${useCell(a.auth === "Authenticated" ? low : null)}${a.auth === "Authenticated" ? (nx.account === a.label ? badge("chosen", "acc") : badge("ready", "ok")) : `<span class="signin">sign in →</span>`}</button>`;
       }).join("")}<div class="msep"></div>`;
       return popShell(`<div class="mgrp">Applies to your next message · ${esc(nx.model)} · ${esc(nx.effort)}</div>${acct}<div class="mgrp">Model</div>${MODELS[c.engine].map((m) => `<button class="mrow ${nx.model === m ? "on" : ""}" data-act="md:${c.id}:model:${m}">${mark(c.engine)}<span class="l">${esc(m)}</span>${nx.model === m ? I("check") : ""}</button>`).join("")}<div class="mgrp">Reasoning</div>${EFFORTS.map((e) => `<button class="mrow ${nx.effort === e ? "on" : ""}" data-act="md:${c.id}:effort:${e}">${I("zap")}<span class="l">${esc(e)}</span>${nx.effort === e ? I("check") : ""}</button>`).join("")}`, `bottom:70px;left:calc(var(--rail) + var(--col) + 24px)`, "Next message");
     }

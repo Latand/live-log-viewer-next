@@ -191,7 +191,11 @@ ul { margin: 0; padding-left: 18px; }
 /* Meta grammar: fragments in a fixed order, separated by space and a hairline
    dot at reduced opacity, never by a typed middle dot. */
 .meta { display: flex; align-items: center; gap: 0; min-width: 0; font-size: var(--text-label); color: var(--color-muted); }
-.meta > * { display: inline-flex; align-items: center; gap: 4px; min-width: 0; white-space: nowrap; }
+/* Only .rest absorbs the shrink. Left shrinkable, a nowrap fragment is squeezed
+   narrower than its own text, overflows its box and paints across the next
+   fragment's separator — «working 4:02Read src/lib/pipelin…» with the dot
+   underneath the green. One fragment gives way, and it is the one built to. */
+.meta > * { display: inline-flex; align-items: center; gap: 4px; min-width: 0; white-space: nowrap; flex: 0 0 auto; }
 .meta > .rest { overflow: hidden; text-overflow: ellipsis; display: block; flex: 0 1 auto; }
 .meta > * + *::before { content: ""; width: 3px; height: 3px; border-radius: 50%; background: currentColor; opacity: 0.45; margin: 0 7px; flex: 0 0 auto; }
 .meta > .rest::before { display: inline-block; vertical-align: middle; }
@@ -385,8 +389,13 @@ ul { margin: 0; padding-left: 18px; }
 .chat-head .tt { flex: 1; min-width: 0; }
 .chat-head .tt .sub { margin-top: 4px; }
 .members { display: flex; align-items: center; gap: 6px; padding: 0 18px 6px; font-size: var(--text-label); color: var(--color-muted); min-height: 28px; overflow: hidden; }
-.feed { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; padding: 8px 18px 12px; }
-.feed .inner { max-width: 880px; margin: 0 auto; display: flex; flex-direction: column; gap: 12px; }
+/* The feed is anchored to the composer, not to the top of the sheet: a lane
+   with one message left 600 px of void above the box the operator types in,
+   and the newest line is the one they are reading. `margin-top: auto` on the
+   first child only spends free space — once the feed overflows it does
+   nothing and the transcript scrolls from the top as before. */
+.feed { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; padding: 8px 18px 12px; display: flex; flex-direction: column; }
+.feed .inner { max-width: 880px; width: 100%; margin: auto auto 0; display: flex; flex-direction: column; gap: 12px; }
 .mu { display: flex; justify-content: flex-end; }
 .mu .bubble { max-width: 72%; background: var(--color-user); border-radius: var(--radius-surface); padding: 10px 14px; font-size: var(--text-title); line-height: 1.45; white-space: pre-wrap; }
 .ma { display: flex; flex-direction: column; }
@@ -471,6 +480,11 @@ ul { margin: 0; padding-left: 18px; }
 .ladder { display: none; flex-wrap: wrap; gap: 4px; }
 #app[data-w="1280"] .pipe-grid:not(.noed) .graph, #app[data-w="1280"] .pipe-grid:not(.noed) .graph-note { display: none; }
 #app[data-w="1280"] .pipe-grid:not(.noed) .ladder { display: flex; }
+/* At 1280 the editor stacks under the record instead of sitting beside it, and
+   the record left it a 142 px slot for 790 px of controls — F9's squeeze, one
+   level down. While the editor is open the ladder is the record the operator
+   needs; the linked task and the change log come back when it closes. */
+#app[data-w="1280"] .pipe-grid:not(.noed) > div > .panel { display: none; }
 .ladder button { display: inline-flex; align-items: center; gap: 6px; min-height: var(--hit); padding: 0 10px; border-radius: var(--radius-control); background: var(--surface-card); font-size: var(--text-ui); font-weight: 600; color: var(--color-secondary); }
 .ladder button.on { box-shadow: 0 0 0 1px var(--color-accent); color: var(--color-primary); }
 .ladder button .k { color: var(--color-muted); font-variant-numeric: tabular-nums; font-weight: 400; }
@@ -498,7 +512,11 @@ ul { margin: 0; padding-left: 18px; }
 .node .l1 .role { font-size: var(--text-body); font-weight: 600; text-transform: capitalize; flex: 1; min-width: 0; }
 .node .l1 .role small { font-weight: 400; color: var(--color-muted); text-transform: none; margin-left: 6px; }
 .node .l2 { flex-wrap: wrap; row-gap: 2px; }
-.node .l2 .pend { color: var(--color-accent); font-weight: 600; }
+/* The one fragment long enough to outrun a node at 1440 with the editor open,
+   and the part that got cut was the attempt number it exists to name. It may
+   shrink because it may wrap: a fragment that reflows is safe to squeeze,
+   which a `nowrap` one never is — that one just paints over its neighbour. */
+.node .l2 .pend { color: var(--color-accent); font-weight: 600; white-space: normal; flex: 0 1 auto; min-width: 0; }
 .node .natt { display: flex; flex-direction: column; padding: 0 6px 6px; }
 .node .att { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 8px; min-height: var(--hit); padding: 0 6px; border-radius: var(--radius-control); font-size: var(--text-ui); color: var(--color-secondary); width: 100%; }
 .node .att:hover { background: var(--surface-sunken); }
@@ -572,16 +590,20 @@ ul { margin: 0; padding-left: 18px; }
 .kcard .khead .t small { font-weight: 400; color: var(--color-muted); margin-left: 6px; font-variant-numeric: tabular-nums; }
 .kcard .khead .badge { margin-top: 1px; }
 .kcard .kchips { display: flex; flex-direction: column; gap: 2px; padding: 0 4px 6px; }
-.kchip { display: grid; grid-template-columns: 15px minmax(0, 1fr) auto; column-gap: 7px; row-gap: 1px; align-items: center; min-height: var(--hit); padding: 4px 8px; border-radius: var(--radius-control); font-size: var(--text-ui); color: var(--color-secondary); min-width: 0; width: 100%; }
-.kchip > .mark, .kchip > .i { grid-column: 1; grid-row: 1 / span 2; align-self: center; }
-.kchip .who { grid-column: 2 / -1; grid-row: 1; overflow: hidden; text-overflow: ellipsis; }
-.kchip .st { grid-column: 2; grid-row: 2; }
-.kchip .mini { grid-column: 3; grid-row: 2; justify-self: end; }
+/* Three stacked rows, and the state and the ladder each own the chip's whole
+   width: a task column is 150 px, and sharing one row between the phrase and
+   the pips left the phrase «r…». The phrase wraps rather than ellipsing —
+   a second 14 px line costs the card nothing and keeps every word. */
+.kchip { display: grid; grid-template-columns: 15px minmax(0, 1fr); column-gap: 7px; row-gap: 2px; align-items: center; min-height: var(--hit); padding: 5px 8px; border-radius: var(--radius-control); font-size: var(--text-ui); color: var(--color-secondary); min-width: 0; width: 100%; }
+.kchip > .mark, .kchip > .i { grid-column: 1; grid-row: 1; align-self: center; }
+.kchip .who { grid-column: 2; grid-row: 1; overflow: hidden; text-overflow: ellipsis; }
+.kchip .st { grid-column: 1 / -1; grid-row: 2; }
+.kchip .mini { grid-column: 1 / -1; grid-row: 3; justify-self: start; }
 .kchip .assign { grid-column: 1 / -1; grid-row: 1 / span 2; line-height: 1.35; }
 .kchip:hover { background: var(--surface-sunken); }
 .kchip .mark { width: 15px; height: 15px; }
 .kchip .who { font-weight: 600; color: var(--color-primary); white-space: nowrap; }
-.kchip .st { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.kchip .st { white-space: normal; overflow-wrap: anywhere; line-height: 1.3; min-width: 0; }
 .kchip .st.warn { color: var(--color-warning); font-weight: 600; }
 .kchip .st.ok { color: var(--color-success); }
 .kchip .st.dng { color: var(--color-danger); font-weight: 600; }
@@ -681,7 +703,12 @@ ul { margin: 0; padding-left: 18px; }
 .arow .wins .pct.dng { color: var(--color-danger); }
 .arow .wins .none { grid-column: 1 / -1; color: var(--color-muted); }
 .arow .signin { color: var(--color-accent); font-weight: 600; font-size: var(--text-ui); }
-.arow.compact { grid-template-columns: 14px minmax(0, 1fr) auto; min-height: var(--hit); }
+.arow.compact { grid-template-columns: 14px minmax(0, 1fr) 124px auto; min-height: var(--hit); }
+.arow .use { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.arow .use .meter { flex: 1 1 auto; min-width: 40px; }
+.arow .use .pct { font-size: var(--text-label); white-space: nowrap; font-variant-numeric: tabular-nums; color: var(--color-secondary); font-weight: 600; }
+.arow .use .pct.warn { color: var(--color-warning); }
+.arow .use .pct.dng { color: var(--color-danger); }
 .arow.add { grid-template-columns: 18px minmax(0, 1fr); min-height: var(--hit); color: var(--color-secondary); font-weight: 600; }
 .acc-detail { flex: 1; min-height: 0; overflow: auto; padding: 4px 14px 14px; display: grid; grid-template-columns: minmax(0, 3fr) minmax(280px, 2fr); gap: 12px; align-content: start; }
 #app[data-w="1280"] .acc-detail { grid-template-columns: minmax(0, 1fr); }
