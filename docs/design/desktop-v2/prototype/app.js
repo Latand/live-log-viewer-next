@@ -1,1166 +1,1299 @@
-/* desktop-v2 prototype (issue #1453) — vanilla JS, no build step.
-
-   One frame: rail (projects) · column (the project's triage list, the seat
-   first) · stage (one primary surface: the board, a conversation, a pipeline,
-   the seat, accounts, the map, the overview) · an optional pinned pane at
-   ≥ 1600 px · a status bar (runtime, accounts, hosts). Dialogs and popovers
-   open over the stage and never create history; stage routes push. Every
-   action acts on the click and answers with a receipt that carries the
-   inverse action. The keyboard map is single keys while nothing is being
-   typed (the product's own convention: n, N, /), so a power user never leaves
-   the home row; Escape is the bridge out of any text field back to the
-   column, which is where the single keys live.
-
-   The shapes are docs/design/desktop-v2/README.md; the vocabulary and the
-   state precedence are the mobile-v2 ones (docs/design/mobile-v2/README.md).
-   Rework round 1 applies docs/design/desktop-v2/critique.md: the stage graph
-   (F1), the accounts rows and the per-account detail (F2), the kanban thread
-   (F3), the landing stage that does work (F4), the focus model (F5), one
-   derived count (F6), no id twice in the column (F7), sticky sections (F8),
-   the editor's sticky footer (F9), attempt history (F10), the map as groups
-   that auto-arrange and honour a pin (F11 and operator item 5), and the cheap
-   ones F12–F20. */
+/* desktop-v2 prototype (issue #1453, rewrite) — the yard.
+   No framework. One state object, one render, a camera that never re-renders.
+   Read docs/design/desktop-v2/README.md for what each surface is. */
 (function () {
   "use strict";
-
-  const F = window.FIXTURE;
-  const SCREENS = window.SCREENS || [];
+  const F0 = window.FIXTURE;
   const $app = document.getElementById("app");
-  const root = document.documentElement;
-  const params = new URLSearchParams(location.search);
-  const scenario = params.get("scenario");
-  if (scenario && window.SCENARIOS && window.SCENARIOS[scenario]) window.SCENARIOS[scenario](F);
+  const $bench = document.getElementById("bench");
+  const $frame = document.getElementById("frame");
 
-  /* ── icons (24 × 24, stroke) ───────────────────────────────────────────── */
+  /* ── query, scheme, scenario ─────────────────────────────────────────── */
+  const Q = new URLSearchParams(location.search);
+  const scheme = Q.get("scheme") || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+  document.documentElement.dataset.theme = scheme;
+  const FRAME_W = Number(Q.get("w") || 1440);
+  const FRAME_H = { 1280: 800, 1440: 900, 1920: 1080 }[FRAME_W] || 900;
+  const scenario = Q.get("scenario") || "";
+  const F = JSON.parse(JSON.stringify(F0));
+  if (scenario && F0.scenarios[scenario]) F0.scenarios[scenario](F);
+
+  /* ── state ────────────────────────────────────────────────────────────── */
+  const S = {
+    project: F.project,
+    rail: Q.get("rail") === "1" ? 1 : 0,
+    pins: Object.assign({}, F.pins || {}),
+    selected: Q.get("select") || null,
+    lift: Q.get("lift") || null,
+    tray: Q.get("tray") === "1",
+    killed: new Set(F.killed || []),
+    answered: {},
+    seen: new Set(),
+    dismissed: false,
+    receipt: null,
+    drafts: {},
+    settings: {},
+    editing: null,
+    cams: {},
+    focusKey: null,
+    trigger: null,
+    arrival: F.arrival || null,
+  };
+  const NEEDS = new Set(["waiting", "stalled", "limit", "held", "killed"]);
+
+  /* ── helpers ──────────────────────────────────────────────────────────── */
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const conv = (id) => F.conversations.find((c) => c.id === id);
+  const pipe = (id) => F.pipelines.find((p) => p.id === id);
+  const task = (id) => F.tasks.find((t) => t.id === id);
+  const project = (id) => F.projects.find((p) => p.id === id);
+  const projectName = (id) => (project(id) || { name: id }).name;
+  const hueOf = (id) => { let h = 0; for (const ch of String(id)) h = (h * 31 + ch.charCodeAt(0)) % 360; return (h * 7 + 20) % 360; };
+  const hhmm = (mins) => { const m = ((Math.round(mins) % 1440) + 1440) % 1440; return `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`; };
+
   const ICONS = {
     chevL: '<path d="m15 18-6-6 6-6"/>', chevR: '<path d="m9 18 6-6-6-6"/>', chevD: '<path d="m6 9 6 6 6-6"/>',
     more: '<circle cx="5" cy="12" r="1.3" fill="currentColor"/><circle cx="12" cy="12" r="1.3" fill="currentColor"/><circle cx="19" cy="12" r="1.3" fill="currentColor"/>',
     search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
-    alert: '<path d="M12 3 2 20h20L12 3z"/><path d="M12 10v4"/><path d="M12 17h.01"/>',
-    bot: '<rect x="4" y="9" width="16" height="11" rx="2"/><path d="M12 9V5"/><path d="M9 14h.01M15 14h.01"/><path d="M2 14h2M20 14h2"/>',
-    sliders: '<path d="M4 7h9M17 7h3M4 12h3M11 12h9M4 17h11M19 17h1"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="17" r="2"/>',
-    plus: '<path d="M12 5v14M5 12h14"/>', mic: '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3"/>',
-    arrowUp: '<path d="M12 19V5"/><path d="m5 12 7-7 7 7"/>', arrowR: '<path d="M5 12h14"/><path d="m12 5 7 7-7 7"/>',
-    square: '<rect x="6" y="6" width="12" height="12" rx="2"/>', x: '<path d="M18 6 6 18M6 6l12 12"/>',
-    rotate: '<path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 4v5h-5"/>', check: '<path d="m5 12 5 5L20 7"/>',
-    crown: '<path d="m3 8 4.5 4L12 5l4.5 7L21 8l-2 11H5L3 8z"/>', layers: '<path d="m12 3 9 5-9 5-9-5 9-5z"/><path d="m3 13 9 5 9-5"/>',
-    list: '<path d="M9 6h12M9 12h12M9 18h12"/><path d="M4 6h.01M4 12h.01M4 18h.01"/>',
-    map: '<path d="M3 6l6-2 6 2 6-2v14l-6 2-6-2-6 2V6z"/><path d="M9 4v14M15 6v14"/>',
-    board: '<rect x="3" y="4" width="5" height="16" rx="1"/><rect x="10" y="4" width="5" height="11" rx="1"/><rect x="17" y="4" width="4" height="14" rx="1"/>',
+    plus: '<path d="M12 5v14M5 12h14"/>', minus: '<path d="M5 12h14"/>',
+    fit: '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>',
+    target: '<circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2" fill="currentColor"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/>',
+    mic: '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3"/>',
+    clip: '<path d="m20 11-8.5 8.5a5 5 0 0 1-7-7L13 4a3.5 3.5 0 0 1 5 5l-8.5 8.5a2 2 0 0 1-3-3L15 6"/>',
+    arrowUp: '<path d="M12 19V5"/><path d="m5 12 7-7 7 7"/>', square: '<rect x="6" y="6" width="12" height="12" rx="2"/>',
+    x: '<path d="M18 6 6 18M6 6l12 12"/>', rotate: '<path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 4v5h-5"/>',
+    check: '<path d="m5 12 5 5L20 7"/>', crown: '<path d="m3 8 4.5 4L12 5l4.5 7L21 8l-2 11H5L3 8z"/>',
+    layers: '<path d="m12 3 9 5-9 5-9-5 9-5z"/><path d="m3 13 9 5 9-5"/>', grid: '<rect x="4" y="4" width="7" height="7" rx="1"/><rect x="13" y="4" width="7" height="7" rx="1"/><rect x="4" y="13" width="7" height="7" rx="1"/><rect x="13" y="13" width="7" height="7" rx="1"/>',
     sparkle: '<path d="M12 3l2.2 5.8L20 11l-5.8 2.2L12 19l-2.2-5.8L4 11l5.8-2.2L12 3z"/>',
     command: '<path d="M15 6a3 3 0 1 1 3 3h-3V6zM9 6a3 3 0 1 0-3 3h3V6zM15 18a3 3 0 1 0 3-3h-3v3zM9 18a3 3 0 1 1-3-3h3v3z"/><path d="M9 9h6v6H9z"/>',
-    terminal: '<path d="m5 7 5 5-5 5"/><path d="M12 17h7"/>', pencil: '<path d="M4 20h4L19 9l-4-4L4 16v4z"/><path d="m13 7 4 4"/>',
-    open: '<path d="M14 5h5v5"/><path d="M19 5l-9 9"/><path d="M19 13v6H5V5h6"/>', folder: '<path d="M3 6h6l2 2h10v11H3V6z"/>',
-    zap: '<path d="M13 2 4 14h7l-1 8 9-12h-7l1-8z"/>', person: '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>',
+    zap: '<path d="M13 2 4 14h7l-1 8 9-12h-7l1-8z"/>', pin: '<path d="M9 3h6l-1 6 3 3v2H7v-2l3-3-1-6z"/><path d="M12 14v7"/>',
     pause: '<path d="M8 5v14M16 5v14"/>', play: '<path d="M7 4v16l13-8L7 4z"/>', skip: '<path d="M5 5v14l9-7-9-7z"/><path d="M19 5v14"/>',
-    branch: '<circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="8" r="2"/><path d="M6 7v10"/><path d="M18 10a6 6 0 0 1-6 6H6"/>',
-    swap: '<path d="M8 3 4 7l4 4"/><path d="M4 7h16"/><path d="m16 21 4-4-4-4"/><path d="M20 17H4"/>',
-    info: '<circle cx="12" cy="12" r="9"/><path d="M12 8h.01"/><path d="M12 12v4"/>',
+    bot: '<rect x="4" y="9" width="16" height="11" rx="2"/><path d="M12 9V5"/><path d="M9 14h.01M15 14h.01"/><path d="M2 14h2M20 14h2"/>',
     tool: '<path d="M14.5 4.5a5 5 0 0 0-6 6.3L3 16.3V21h4.7l5.5-5.5a5 5 0 0 0 6.3-6l-3 3-3-1-1-3 3-3z"/>',
-    compress: '<path d="M4 14h5v5M20 10h-5V5M9 14l-5 5M15 10l5-5"/>', archive: '<rect x="3" y="4" width="18" height="4" rx="1"/><path d="M5 8v12h14V8"/><path d="M10 12h4"/>',
-    bell: '<path d="M6 9a6 6 0 0 1 12 0v5l2 3H4l2-3V9z"/><path d="M10 20a2 2 0 0 0 4 0"/>',
-    refresh: '<path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 4v5h-5"/>',
-    grid: '<rect x="4" y="4" width="7" height="7" rx="1"/><rect x="13" y="4" width="7" height="7" rx="1"/><rect x="4" y="13" width="7" height="7" rx="1"/><rect x="13" y="13" width="7" height="7" rx="1"/>',
-    wifiOff: '<path d="M2 8.8a15 15 0 0 1 20 0"/><path d="M5 12.5a10 10 0 0 1 8.5-2.8"/><path d="M8.5 16a5 5 0 0 1 4-1.3"/><path d="M12 20h.01"/><path d="m3 3 18 18"/>',
-    pin: '<path d="M12 17v5"/><path d="M8 3h8l-1 7 3 3H6l3-3-1-7z"/>', panel: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/>',
-    keyboard: '<rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M7 14h10"/>',
-    trash: '<path d="M4 7h16"/><path d="M9 7V4h6v3"/><path d="M6 7l1 13h10l1-13"/>', paper: '<path d="M21 3 3 10l7 3 3 7 8-17z"/>',
-    flag: '<path d="M5 21V4h12l-2 4 2 4H5"/>', plusCircle: '<circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/>',
-    clip: '<path d="m16 6-7.5 7.5a2 2 0 0 0 3 3L19 9a4 4 0 0 0-6-6L5.5 10.5a6 6 0 0 0 8.5 8.5L20 13"/>',
-    undo: '<path d="M9 14 4 9l5-5"/><path d="M4 9h11a5 5 0 0 1 0 10h-3"/>',
-    gauge: '<path d="M4 18a8 8 0 1 1 16 0"/><path d="m12 14 4-4"/>',
-    clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+    open: '<path d="M14 5h5v5"/><path d="M19 5l-9 9"/><path d="M19 13v6H5V5h6"/>', undo: '<path d="M9 14 4 9l5-5"/><path d="M4 9h11a5 5 0 0 1 0 10h-3"/>',
+    sidebar: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/>', inbox: '<path d="M3 13h5l2 3h4l2-3h5"/><path d="M5 5h14l2 8v6H3v-6l2-8z"/>',
+    swap: '<path d="M8 3 4 7l4 4"/><path d="M4 7h16"/><path d="m16 21 4-4-4-4"/><path d="M20 17H4"/>', refresh: '<path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 4v5h-5"/>',
+    terminal: '<path d="m5 7 5 5-5 5"/><path d="M12 17h7"/>', compress: '<path d="M4 14h5v5M20 10h-5V5M9 14l-5 5M15 10l5-5"/>',
+    person: '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>', alert: '<path d="M12 3 2 20h20L12 3z"/><path d="M12 10v4"/><path d="M12 17h.01"/>',
+    archive: '<rect x="3" y="4" width="18" height="4" rx="1"/><path d="M5 8v12h14V8"/><path d="M10 12h4"/>', key: '<path d="M7 14a4 4 0 1 1 4-4l9-9"/><path d="m17 4 3 3"/><path d="m14 7 3 3"/>',
   };
-  const I = (name, cls) => `<svg class="i ${cls || ""}" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name] || ""}</svg>`;
-  const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-  const paras = (text) => String(text).split(/\n\n+/).map((p) => {
-    const lines = p.split("\n");
-    if (lines.every((l) => l.startsWith("- "))) return `<ul>${lines.map((l) => `<li>${esc(l.slice(2))}</li>`).join("")}</ul>`;
-    return `<p>${esc(p)}</p>`;
-  }).join("");
-  const mark = (engine, cls) => `<svg class="mark ${engine} ${cls || ""}" viewBox="0 0 24 24" aria-hidden="true">${engine === "codex" ? ICONS.command : ICONS.sparkle}</svg>`;
+  const I = (name, cls) => `<svg class="ic ${cls || ""}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name]}</svg>`;
+  const mark = (engine, cls) => `<span class="mark ${engine} ${cls || ""}">${I(engine === "codex" ? "command" : "sparkle")}</span>`;
+  const badge = (text, tone) => `<span class="badge ${tone || ""}">${esc(text)}</span>`;
+  const meter = (left, extra) => `<span class="meter ${left <= 10 ? "low" : left <= 30 ? "warn" : ""} ${extra || ""}"><i style="width:${clamp(left, 0, 100)}%"></i></span>`;
+  const keycap = (n) => (n ? `<kbd class="keycap">${n}</kbd>` : "");
 
-  /* ── state ─────────────────────────────────────────────────────────────── */
-  const S = {
-    project: F.project, view: null, rail: null, pin: F.pin || null,
-    crowned: new Set(["c1"]), killed: new Set(), closed: new Set(), seen: new Set(), collapsed: new Set(), recentAll: false,
-    drafts: {}, next: {}, sound: true, toast: null, toastTimer: null, arrival: null, arrivalTimer: null, arrivalDismissed: false, ticked: false,
-    hl: -1, filter: "", search: "", searchScope: "mine", answers: {}, editorDraft: null, archivedProjects: new Set(), deletedProjects: new Set(),
-    pickedOption: {}, trigger: null, cycle: -1, openNodes: new Set(), openRounds: new Set(), openGroups: new Set(),
-    pins: Object.assign({}, F.pins || {}), drag: null, taskStatus: {}, newRows: new Set(),
-  };
-  const P = (id) => F.projects.find((p) => p.id === id);
-  const conv = (id) => F.conversations.find((c) => c.id === id);
-  const pipe = (id) => F.pipelines.find((p) => p.id === id);
-  const width = () => Number($app.dataset.w || 1440);
-  const canPin = () => width() >= 1600;
-  const seatConv = () => F.conversations.find((c) => c.seat && c.project === S.project);
-  /* F17: under 1440 the rail starts collapsed to its 64 px icon strip, so the
-     column keeps the width the crowded board needs. `[` expands it. */
-  const railOpen = () => (S.rail === null ? width() >= 1440 : S.rail);
-
-  /* ── state precedence — one place, used by every surface ──────────────── */
+  /* One state function, the mobile-v2 one: one word per conversation, one
+     precedence: killed > stalled > limit > held > waiting > working > returned > done. */
   function stateBits(c) {
-    if (S.killed.has(c.id) || c.state === "killed") return { key: "killed", tone: "dng", dot: "dng", phrase: "killed · messages queue", badge: null };
-    if (c.state === "stalled") return { key: "stalled", tone: "dng", dot: "dng", phrase: `stalled · ${c.stalledFor || "14 min"}`, badge: "stalled", edge: "dng" };
-    if (c.state === "limit") return { key: "limit", tone: "warn", dot: "warn", phrase: `limit · ${c.account || "Main"} resets ${c.limitReset || "16:40"}`, badge: "limit", edge: "warn" };
-    if (c.state === "held") return { key: "held", tone: "warn", dot: "warn", phrase: `held · ${c.heldCount || 2} messages queue`, badge: null };
-    if (c.state === "waiting" && !S.answers[c.id]) return { key: "waiting", tone: "warn", dot: "warn", phrase: c.plan ? `plan approval · ${c.waitedFor}` : `a question · ${c.waitedFor}`, badge: c.plan ? "plan approval" : "a question", edge: "warn" };
-    if (c.state === "working" || (c.state === "waiting" && S.answers[c.id])) return { key: "working", tone: "ok", dot: "ok", phrase: `working ${c.elapsed || "0:12"}`, badge: null };
-    if (c.state === "returned") return { key: "returned", tone: "acc", dot: "acc", phrase: `finished the turn · ${c.age}`, badge: null };
-    return { key: "done", tone: "neu", dot: "", phrase: `done · ${c.age}`, badge: null };
+    if (S.killed.has(c.id)) return { key: "killed", dot: "stall", phrase: "killed · messages queue", badge: "killed", tone: "b-danger", edge: "stall" };
+    if (c.stalled) return { key: "stalled", dot: "stall", phrase: `stalled · ${c.stalled}`, badge: "stalled", tone: "b-danger", edge: "stall" };
+    if (c.limit) return { key: "limit", dot: "wait", phrase: `limit · ${c.limit.account} resets ${c.limit.resets}`, badge: "limit", tone: "b-warning", edge: "wait" };
+    if (c.held) return { key: "held", dot: "wait", phrase: `held · ${c.held} messages queue`, badge: "held", tone: "b-warning", edge: "wait" };
+    if (c.state === "waiting" && !S.answered[c.id]) return { key: "waiting", dot: "wait", phrase: `${c.decision} · ${c.since}`, badge: c.decision, tone: "b-warning", edge: "wait" };
+    if (c.state === "working" || S.answered[c.id]) return { key: "working", dot: "live", phrase: `working ${c.elapsed || "0:12"}`, tone: "b-success" };
+    if (c.state === "returned") return { key: "returned", dot: "acc", phrase: `finished the turn · ${c.age}`, tone: "" };
+    return { key: "done", dot: "", phrase: `done · ${c.age || ""}`.replace(/ · $/, ""), tone: "" };
+  }
+  const shortTool = (name) => name.split(" ").map((w) => (w.includes("/") ? w.split("/").pop() : w)).join(" ").replace(/^viewer · /, "");
+  function nowFragment(c) {
+    if (c.tool && stateBits(c).key === "working") return shortTool(c.tool);
+    const last = [...(c.feed || [])].reverse().find((i) => i.kind === "agent");
+    return last ? last.text.split("\n")[0].slice(0, 70) : "";
   }
   const pipeBits = (p) => ({
-    running: { tone: "acc", phrase: "running", badge: "running", cls: "acc" },
-    needs_decision: { tone: "warn", phrase: "needs a decision", badge: "needs a decision", cls: "warn" },
-    paused: { tone: "neu", phrase: "paused", badge: "paused", cls: "" },
-    draft: { tone: "neu", phrase: "draft", badge: "draft", cls: "" },
-    completed: { tone: "ok", phrase: "completed", badge: "completed", cls: "ok" },
-    closed: { tone: "neu", phrase: "archived", badge: "archived", cls: "" },
-  })[p.state];
-  const stageOf = (p) => p.stages.find((s) => s.id === p.cursor.stageId) || p.stages[0];
-  const stageIndex = (p, s) => p.stages.indexOf(s) + 1;
+    running: { phrase: "running", tone: "b-accent" }, needs_decision: { phrase: "needs a decision", tone: "b-warning" }, draft: { phrase: "draft", tone: "" },
+    completed: { phrase: "completed", tone: "b-success" }, paused: { phrase: "paused", tone: "" }, provisioning: { phrase: "starting", tone: "b-accent" },
+  })[p.state] || { phrase: p.state, tone: "" };
+  const stageIndex = (p, id) => p.stages.findIndex((s) => s.id === id) + 1;
   const lastAttempt = (s) => s.attempts[s.attempts.length - 1] || null;
-  const nowFragment = (c) => c.tool ? c.tool : (c.feed || []).slice().reverse().find((m) => m.kind === "agent")?.text.split("\n")[0].slice(0, 60) || "";
-  const projectName = (id) => (P(id) || { name: id }).name;
-  const arrivedYet = (c) => !c.arrivesLater || Boolean(S.arrival && S.arrival.id === c.id);
-  const inScope = (c) => !S.closed.has(c.id) && !c.child && arrivedYet(c) && (S.project === "all" ? !S.deletedProjects.has(c.project) : c.project === S.project);
-  const scopedPipes = () => F.pipelines.filter((p) => (S.project === "all" ? !S.deletedProjects.has(p.project) : p.project === S.project) && p.state !== "closed");
-  const taskStatus = (t) => S.taskStatus[t.id] || t.status;
-  const scopedTasks = () => (S.project === "all" ? F.tasks : F.tasks.filter((t) => {
-    const c = t.worker ? conv(t.worker) : null; const p = t.pipeline ? pipe(t.pipeline) : null;
-    return (c ? c.project : p ? p.project : "atlas") === S.project;
-  }));
+  const roundsUsed = (p, s) => p.stages.filter((x) => x.onFail && x.onFail.to === s.id).reduce((n, x) => n + x.attempts.filter((a) => a.state === "failed").length, 0);
 
-  /* The queue: Needs you holds both kinds, in the column's order. */
-  function attention() {
-    const items = [];
-    for (const c of F.conversations) { if (!inScope(c) || c.seat) continue; const b = stateBits(c); if (b.edge) items.push({ kind: "conv", id: c.id, go: `#/chat/${c.id}`, title: c.title, project: c.project, sub: b.phrase, badge: b.badge, tone: b.edge }); }
-    for (const p of scopedPipes()) if (p.state === "needs_decision") { const s = stageOf(p); items.push({ kind: "pipe", id: p.id, go: `#/pipeline/${p.id}`, title: p.task, project: p.project, sub: `stage ${stageIndex(p, s)}/${p.stages.length} · ${s.id} failed · ${p.findings.length} findings`, badge: "needs a decision", tone: "warn" }); }
-    return items;
+  /* ── routing ──────────────────────────────────────────────────────────── */
+  const DIALOGS = ["search", "create", "menu", "host", "rotate", "keys", "settings"];
+  const hashOf = () => location.hash || "#/board";
+  function route() {
+    const parts = hashOf().replace(/^#\//, "").split("/");
+    const last = parts[parts.length - 1];
+    const dialog = DIALOGS.includes(last) && parts.length > 1 ? last : null;
+    if (dialog) parts.pop();
+    const [screen, a, b] = parts;
+    if (screen === "chat") return { screen: "chat", id: a, dialog, base: `#/chat/${a}` };
+    if (screen === "accounts") return { screen: "accounts", engine: a, id: b, dialog, base: a ? `#/accounts/${a}/${b}` : "#/accounts" };
+    if (screen === "overview") return { screen: "field", dialog, base: "#/overview" };
+    return { screen: "board", dialog, base: "#/board" };
   }
-  const inProject = (id) => { const keep = S.project; S.project = id; const out = { need: attention(), work: working(), pipes: scopedPipes().filter((p) => p.state !== "completed" && p.state !== "closed") }; S.project = keep; return out; };
-  const attentionAll = () => { const keep = S.project; S.project = "all"; const a = attention(); S.project = keep; return a; };
-  function working() { return F.conversations.filter((c) => inScope(c) && !c.seat && ["working", "held"].includes(stateBits(c).key)); }
-  /* F6: one function, used by the rail row, the column header and the
-     overview card, so the three can never print different numbers. The seat
-     is not counted as working — the seat card shows itself. */
-  function counts(id) { const { need, work, pipes } = inProject(id); return { needs: need.length, working: work.length, pipelines: pipes.length }; }
-  /* F8: one line at every width. Under 1920 the pipelines count drops — the
-     Pipelines section header carries it, and the two numbers that matter stay
-     the ones the rail row and the overview card print (F6). */
-  const countPhrase = (c, w) => `<b>${c.needs}</b> need you${w <= 1280 ? "" : ` · ${c.working} working`}`;
-
-  /* ── route ─────────────────────────────────────────────────────────────── */
-  const hashOf = () => (location.hash || "#/board").split("?")[0];
-  const segs = () => hashOf().slice(2).split("/").filter(Boolean);
-  const DIALOG_TAIL = /\/(menu|model|details|create|search|host|keys|new-agent|new-pipeline|rotate|switch|task)$/;
-  const isDialog = (h) => DIALOG_TAIL.test(h) || /\/add\/\d+$/.test(h);
-  function go(h, opts) {
-    const cur = hashOf();
-    if (h === cur) { render(); return; }
-    const dialog = isDialog(h);
-    if (dialog) { S.trigger = opts?.trigger || null; history.replaceState({ d: 1 }, "", h); }
-    else if (opts?.replace || isDialog(cur)) history.replaceState({}, "", h);
-    else history.pushState({}, "", h);
-    render();
+  function go(hash, replace) {
+    if (replace) { history.replaceState(null, "", hash); render(); }
+    else location.hash = hash;
   }
-  window.addEventListener("popstate", () => render());
-  const closeDialog = () => { const h = hashOf(); const base = h.replace(DIALOG_TAIL, "").replace(/\/add\/\d+$/, ""); history.replaceState({}, "", base || "#/board"); render(); refocusTrigger(); };
-  function refocusTrigger() { if (!S.trigger) return; const el = $app.querySelector(`[data-go="${S.trigger}"], [data-act="${S.trigger}"]`); if (el) el.focus(); S.trigger = null; }
-
-  /* ── receipts ──────────────────────────────────────────────────────────── */
-  function toast(msg, sub, undo) {
-    clearTimeout(S.toastTimer);
-    S.toast = { msg, sub, undo };
-    S.toastTimer = setTimeout(() => { S.toast = null; render(); }, 4000);
-    render();
-  }
-  const toastHtml = () => S.toast ? `<div class="receipt" role="status"><span class="msg">${esc(S.toast.msg)}${S.toast.sub ? `<small>${esc(S.toast.sub)}</small>` : ""}</span>${S.toast.undo ? `<button class="btn link" data-act="undo">${esc(S.toast.undo.label)}</button>` : ""}</div>` : "";
-
-  /* ── shared pieces ─────────────────────────────────────────────────────── */
-  const badge = (text, cls) => text ? `<span class="badge ${cls || ""}">${esc(text)}</span>` : "";
-  const meterCls = (left) => left <= 10 ? "dng" : left <= 30 ? "warn" : "";
-  const meter = (left, label) => `<span class="meter ${meterCls(left)}" title="${esc(label || "")}"><i style="width:${Math.max(2, left)}%"></i></span>`;
-  const projectChip = (id) => S.project === "all" ? `<span class="pj">${esc(projectName(id))}</span>` : "";
-  const VERDICT = { passed: "ok", failed: "fail", running: "run", skipped: "skip", pending: "" };
-  /* Verdict pips: one per attempt, coloured by how that attempt ended. */
-  const attemptPips = (s) => s.attempts.length ? `<span class="pips" aria-label="${s.attempts.length} attempt${s.attempts.length > 1 ? "s" : ""}">${s.attempts.map((a) => `<i class="${VERDICT[a.state] || ""}"></i>`).join("")}</span>` : "";
-  /* Round pips: the fail-edge budget, filled for every round already spent. */
-  const roundsUsed = (p, s) => s.onFail ? Math.max(0, s.attempts.filter((a) => a.state === "failed").length) : 0;
-  const roundPips = (used, max) => `<span class="pips">${Array.from({ length: max }, (_, i) => `<i class="round ${i < used ? "used" : ""}"></i>`).join("")}</span>`;
-
-  function convRow(c, opts) {
-    const b = stateBits(c);
-    const cur = hashOf() === `#/chat/${c.id}` || (hashOf() === "#/seat" && c.seat);
-    const meta = b.key === "working"
-      ? `<span class="st ok">${esc(b.phrase)}</span>${nowFragment(c) ? `<span class="rest">${esc(nowFragment(c))}</span>` : ""}`
-      : `<span class="st ${b.tone === "neu" ? "" : b.tone}">${esc(b.key === "waiting" ? `waiting ${c.waitedFor}` : b.phrase)}</span>`;
-    const stage = c.pipeline ? `<span>stage ${c.pipeline.k}/${c.pipeline.n}</span>` : "";
-    return `<button class="row ${b.edge ? `wait ${b.edge === "dng" ? "dng" : ""}` : ""} ${cur ? "on" : ""} ${opts?.quiet ? "quiet" : ""} ${S.newRows.has(c.id) ? "new" : ""}" data-go="#/chat/${c.id}" data-row aria-current="${cur ? "true" : "false"}">
-      <span class="dot ${b.dot} ${b.key === "working" && cur ? "pulse" : ""}"></span>
-      <span style="min-width:0"><span class="t ${b.edge ? "two" : "trunc"}">${esc(c.title)}</span><span class="m meta">${meta}<span>${mark(c.engine)}${esc(c.model)}</span>${stage}</span></span>
-      <span class="r">${projectChip(c.project)}${b.badge ? badge(b.badge, b.edge === "dng" ? "dng" : "warn") : (S.crowned.has(c.id) ? `<svg class="i crown" viewBox="0 0 24 24" aria-hidden="true">${ICONS.crown}</svg>` : I("chevR"))}</span>
-    </button>`;
-  }
-  /* F7: a pipeline row folds its live attempt underneath as a child row, so
-     the record and the conversation doing its work read as one thread here
-     too — and neither is listed twice anywhere in the column. */
-  function attemptChildRow(p, rendered) {
-    const s = stageOf(p); const a = lastAttempt(s); const c = a && a.conv ? conv(a.conv) : null;
-    if (!c || S.closed.has(c.id)) return "";
-    if (rendered) { if (rendered.has(c.id)) return ""; rendered.add(c.id); }
-    const b = stateBits(c); const cur = hashOf() === `#/chat/${c.id}`;
-    return `<button class="row child ${cur ? "on" : ""}" data-go="#/chat/${c.id}" data-row data-child="${p.id}" aria-current="${cur ? "true" : "false"}">
-      <span class="tie" aria-hidden="true"></span>
-      <span style="min-width:0"><span class="t trunc">${stageIndex(p, s)}/${p.stages.length} ${esc(s.id)} · ${esc(s.role)}</span><span class="m meta"><span class="st ${b.tone === "neu" ? "" : b.tone}">${esc(b.key === "waiting" ? `a question · ${c.waitedFor}` : b.phrase)}</span><span>${mark(c.engine)}${esc(c.model)}</span></span></span>
-      <span class="r">${I("chevR")}</span></button>`;
-  }
-  function pipeRow(p, rendered, opts) {
-    const b = pipeBits(p); const s = stageOf(p); const cur = hashOf().startsWith(`#/pipeline/${p.id}`);
-    const need = p.state === "needs_decision";
-    const row = `<button class="row ${need ? "wait" : ""} ${cur ? "on" : ""}" data-go="#/pipeline/${p.id}" data-row aria-current="${cur ? "true" : "false"}">
-      <span class="dot ${b.cls === "acc" ? "acc" : b.cls === "ok" ? "ok" : ""} ${p.state === "running" && cur ? "pulse" : ""}"></span>
-      <span style="min-width:0"><span class="t ${need ? "two" : "trunc"}">${esc(p.task)}</span><span class="m meta"><span>${p.state === "draft" ? `${p.stages.length} stages · not started` : `stage ${stageIndex(p, s)}/${p.stages.length} · ${esc(s.id)}`}</span>${need ? `<span>${p.findings.length} findings</span>` : p.state === "running" ? `<span class="st acc">${esc(b.phrase)} ${esc(p.started)}</span>` : ""}${p.stages.some((x) => x.pendingEdit) ? `<span class="st acc">edit pending</span>` : ""}</span></span>
-      <span class="r">${projectChip(p.project)}${need ? badge("needs a decision", "warn") : badge(b.badge, b.cls)}</span>
-    </button>`;
-    return row + (opts?.noChild ? "" : attemptChildRow(p, rendered));
+  function closeDialog() {
+    const r = route();
+    S.focusKey = S.trigger; S.trigger = null;
+    go(r.base, true);
   }
 
-  /* ── rail ──────────────────────────────────────────────────────────────── */
-  function rail() {
-    const q = S.projFilter || "";
-    const rows = F.projects.filter((p) => !p.archived && !S.archivedProjects.has(p.id) && !S.deletedProjects.has(p.id) && (!q || p.name.includes(q)));
-    const crowned = rows.filter((p) => p.crowned); const rest = rows.filter((p) => !p.crowned);
-    const archived = F.projects.filter((p) => (p.archived || S.archivedProjects.has(p.id)) && !S.deletedProjects.has(p.id));
-    const prow = (p) => { const n = counts(p.id); return `<button class="prow ${S.project === p.id ? "on" : ""} ${n.needs + n.working === 0 ? "quiet" : ""}" data-go="#/board" data-project="${p.id}" title="${esc(p.name)}">
-        <span class="ini">${esc(p.name.slice(0, 2))}${n.needs ? `<b>${n.needs}</b>` : ""}</span>
-        <span class="dot ${n.needs ? "warn" : n.working ? "ok" : ""}"></span>
-        <span class="n"><span class="trunc">${esc(p.name)}</span><small class="${S.ticked && p.id === S.project ? "tick" : ""}">${n.needs ? `<b>${n.needs} need you</b> · ` : ""}${n.working ? `${n.working} working` : `quiet · ${esc(p.age)}`}</small></span>
-        <span class="cnt">${p.crowned ? `<svg class="i sm crown" viewBox="0 0 24 24" aria-hidden="true">${ICONS.crown}</svg>` : ""}${n.needs ? badge(String(n.needs), "warn") : ""}</span>
-      </button>`; };
+  /* ── clusters ─────────────────────────────────────────────────────────── */
+  const NW = 200, NH = 88, GAP = 22, HEAD = 44, PAD = 14, MINH = 160, GX = 36, GY = 36;
+  const SEAT_W = PAD * 2 + NW + GAP + 120, TILE_MIN_W = 392, ROOT_W = TILE_MIN_W - PAD * 2, DESK_H = HEAD + PAD * 2 + NH;
+  /* The yard's gaps between wells (the block bodies carry their own padding). */
+  const YX = 22, YY = 22;
+  /* The floor is the zoom at which the shortest tile (160 world px) is 44 px on screen. */
+  const MIN_Z = 0.275, MAX_Z = 2;
+
+  /* Every conversation of the project lands in exactly one cluster, and every
+     cluster knows which cluster spawned it (`parentCluster`): a lane the seat
+     spawned that no pipeline and no task claims is a cluster of its own and
+     carries "seat"; a pipeline the seat opened carries "seat" too. That
+     relation is what the yard is laid out around and what the tethers draw. */
+  function clustersOf(projectId) {
+    const convs = F.conversations.filter((c) => c.project === projectId);
+    const byId = new Map(convs.map((c) => [c.id, c]));
+    const kids = (id) => convs.filter((c) => c.parent === id);
+    const claimed = new Set();
+    const list = [];
+    const nodeOf = (c, depth, parent) => ({ id: c.id, conv: c, depth, parent });
+    /* The unclaimed descendants of a conversation: rows by depth, each one
+       remembering its real parent. */
+    const subtree = (c, depth) => { const out = []; for (const k of kids(c.id)) { if (claimed.has(k.id)) continue; claimed.add(k.id); out.push(nodeOf(k, depth, c.id)); out.push(...subtree(k, depth + 1)); } return out; };
+    const seat = F.seats[projectId];
+    const seatConv = seat ? byId.get(seat.conv) : null;
+    if (seatConv) { claimed.add(seatConv.id); list.push({ id: "seat", kind: "seat", title: "Orchestrator", seat, nodes: [nodeOf(seatConv, 0, null)], root: seatConv, parentCluster: null }); }
+    for (const p of F.pipelines.filter((p) => p.project === projectId)) {
+      for (const st of p.stages) for (const a of st.attempts) if (a.conv && byId.has(a.conv)) claimed.add(a.conv);
+      const stations = p.stages.map((st, i) => { const a = lastAttempt(st); const c = a && a.conv ? byId.get(a.conv) : null; return { id: `${p.id}:${st.id}`, stage: st, index: i, attempt: a, conv: c || null, depth: 0, parent: null }; });
+      const children = [];
+      for (const st of p.stages) for (const a of st.attempts) if (a.conv && byId.has(a.conv)) children.push(...subtree(byId.get(a.conv), 1));
+      /* Older attempts' conversations belong to the record without being a
+         station: the inspector lists them per attempt with `open ›`. */
+      const held = p.stages.flatMap((st) => st.attempts.slice(0, -1).map((a) => a.conv && byId.get(a.conv)).filter(Boolean));
+      list.push({ id: p.id, kind: "pipeline", pipe: p, task: p.taskId ? task(p.taskId) : null, title: p.task, nodes: [...stations, ...children], held, parentCluster: p.by === "seat" && seatConv ? "seat" : null });
+    }
+    for (const t of F.tasks.filter((t) => t.project === projectId && t.worker && !t.pipeline)) {
+      const c = byId.get(t.worker);
+      if (!c || claimed.has(c.id)) continue;
+      claimed.add(c.id);
+      list.push({ id: `t:${t.id}`, kind: "thread", task: t, title: c.title, root: c, nodes: [nodeOf(c, 0, null), ...subtree(c, 1)] });
+    }
+    /* A root is an unclaimed conversation whose parent is absent or is held
+       by a cluster that did not take it (the seat takes only itself). */
+    for (const c of convs) {
+      if (claimed.has(c.id)) continue;
+      if (c.parent && byId.has(c.parent) && !claimed.has(c.parent)) continue;
+      claimed.add(c.id);
+      list.push({ id: `c:${c.id}`, kind: "tree", title: c.title, root: c, nodes: [nodeOf(c, 0, null), ...subtree(c, 1)] });
+    }
+    const holder = new Map();
+    for (const cl of list) { for (const n of cl.nodes) if (n.conv) holder.set(n.conv.id, cl.id); for (const c of cl.held || []) holder.set(c.id, cl.id); }
+    for (const cl of list) if (cl.kind === "thread" || cl.kind === "tree") cl.parentCluster = cl.root.parent ? holder.get(cl.root.parent) || null : null;
+    for (const cl of list) decorate(cl);
+    list.sort((a, b) => (a.kind === "seat" ? -1 : b.kind === "seat" ? 1 : a.rank - b.rank));
+    let n = 0;
+    for (const cl of list) if (cl.kind !== "seat" && n < 9) cl.key = ++n;
+    return list;
+  }
+  function decorate(cl) {
+    const convs = cl.nodes.map((n) => n.conv).filter(Boolean);
+    const bits = convs.map(stateBits);
+    cl.needs = bits.some((b) => NEEDS.has(b.key)) || (cl.kind === "pipeline" && cl.pipe.state === "needs_decision");
+    cl.running = bits.some((b) => b.key === "working") || (cl.kind === "pipeline" && (cl.pipe.state === "running" || cl.pipe.state === "provisioning"));
+    cl.returned = bits.some((b) => b.key === "returned");
+    cl.hue = cl.kind === "seat" ? 248 : hueOf(cl.id);
+    if (cl.kind === "pipeline") {
+      const p = cl.pipe; const pb = pipeBits(p);
+      cl.quiet = ["draft", "completed", "closed", "paused"].includes(p.state);
+      cl.phrase = cl.quiet ? pb.phrase : `${stageIndex(p, p.stage)}/${p.stages.length} ${p.stage} · ${pb.phrase}`;
+      cl.badge = cl.needs ? { text: "needs a decision", tone: "b-warning" } : cl.quiet ? { text: pb.phrase, tone: pb.tone } : { text: `${stageIndex(p, p.stage)}/${p.stages.length} ${p.stage}`, tone: "b-accent" };
+    } else {
+      const rb = stateBits(cl.root);
+      cl.quiet = !cl.needs && !cl.running && !cl.returned;
+      cl.phrase = rb.phrase;
+      const needy = bits.find((b) => NEEDS.has(b.key));
+      cl.badge = needy ? { text: needy.badge, tone: needy.tone } : cl.running ? { text: "working", tone: "b-success" } : cl.returned ? { text: "finished the turn", tone: "b-accent" } : { text: "done", tone: "" };
+    }
+    cl.rank = cl.needs ? 0 : cl.running ? 1 : cl.returned ? 2 : 3;
+    const sz = sizeOf(cl); cl.w = sz.w; cl.h = sz.h; cl.compact = Boolean(sz.compact);
+    cl.live = liveLine(cl);
+  }
+  /* The tile's live line: what the cluster is doing right now, in one phrase. */
+  function liveLine(cl) {
+    if (cl.kind === "pipeline") {
+      const p = cl.pipe;
+      const cur = cl.nodes.find((n) => n.stage && n.stage.id === p.stage);
+      if (p.state === "needs_decision" && cur) { const a = [...cur.stage.attempts].reverse().find((x) => x.findings); return a ? `${cur.stage.role} · ${a.findings.length} findings${cur.stage.onFail ? ` · round ${cur.stage.attempts.filter((x) => x.state === "failed").length} of ${cur.stage.onFail.maxRounds}` : ""}` : "parked for your decision"; }
+      if (cl.quiet) return p.log.length ? p.log[0][4] : `${p.stages.length} stages · rev ${p.revision}`;
+      const c = cur && cur.conv; const st = c ? stateBits(c) : null;
+      if (st && st.key === "working") return `${cur.stage.role} working ${c.elapsed} · ${nowFragment(c)}`;
+      if (st) return `${cur.stage.role} · ${st.phrase}`;
+      return `${cur ? cur.stage.role : "stage"} · ${cur && cur.attempt ? cur.attempt.state : "starting"}`;
+    }
+    const c = cl.root; const st = stateBits(c);
+    if (cl.kind === "seat") return `${st.key === "working" ? nowFragment(c) || "thinking" : st.phrase} · context ${cl.seat.ctx.left}% left`;
+    if (st.key === "waiting" && c.question) return c.question.title;
+    if (st.key === "working") return nowFragment(c) || "thinking";
+    if (st.key === "limit") return `${c.model} · ${c.effort} · waits for the reset`;
+    return nowFragment(c) || `${c.model} · ${c.effort}`;
+  }
+  /* Rows by depth: the stations (or the root) on row 0, every descendant one
+     row under its real parent and never left of it. The fail loops of a
+     pipeline take their lanes right under the station row, so a child row
+     starts below them. */
+  function layoutNodes(cl) {
+    const loops = cl.kind === "pipeline" ? cl.pipe.stages.filter((st) => st.onFail).length : 0;
+    cl.loopH = loops ? 14 + loops * 18 : 0;
+    const rowY = (d) => HEAD + PAD + d * (NH + GAP) + (d > 0 ? cl.loopH : 0);
+    const nextX = []; const xOf = new Map();
+    let right = 0, depth = 0;
+    for (const n of cl.nodes) {
+      const d = n.depth || 0;
+      n.w = (cl.kind === "thread" || cl.kind === "tree") && d === 0 ? ROOT_W : NW;
+      let x = PAD;
+      if (cl.kind === "pipeline" && d === 0) x = PAD + n.index * (NW + GAP);
+      else if (d > 0) x = Math.max(n.parent && xOf.has(n.parent) ? xOf.get(n.parent) : PAD, nextX[d] || PAD);
+      n.rx = x; n.ry = rowY(d);
+      if (n.conv) xOf.set(n.conv.id, x);
+      nextX[d] = x + n.w + GAP; right = Math.max(right, x + n.w); depth = Math.max(depth, d);
+    }
+    return { w: right + PAD, h: rowY(depth) + NH + (depth ? 0 : cl.loopH) + PAD };
+  }
+  function sizeOf(cl) {
+    const l = layoutNodes(cl);
+    cl.bodyW = cl.kind === "seat" ? SEAT_W : l.w; cl.bodyH = l.h;
+    if (cl.kind === "seat") return { w: SEAT_W, h: l.h };
+    if (cl.kind === "pipeline" && cl.quiet) return { w: 320, h: MINH, compact: true };
+    return { w: Math.max(cl.kind === "pipeline" ? 0 : TILE_MIN_W, l.w), h: l.h };
+  }
+  /* The auto layout. The seat is the hub at the origin; the clusters it
+     spawned pack in rings around it in rank order, clockwise from twelve — a
+     radial first fit with no physics: for each cluster, the first free place
+     on the tightest ring, then pulled straight toward the hub until it
+     touches something. Clusters with no seat lineage pack as a second group
+     beside the hub, into free rectangles, top-left first. A pinned cluster
+     keeps the place the operator put it and is an obstacle to both; nothing
+     else is ever moved for them. Deterministic: same data, same picture. */
+  const rectOf = (c) => ({ x: c.x, y: c.y, w: c.w, h: c.h });
+  const apart = (r, p) => !(r.x < p.x + p.w + YX && p.x < r.x + r.w + YX && r.y < p.y + p.h + YY && p.y < r.y + r.h + YY);
+  const RING_STEP = 16;
+  function radialFit(c, hub, theta, ax, free, r0) {
+    for (let r = r0; r < 20000; r += RING_STEP) {
+      const n = Math.max(12, Math.round((2 * Math.PI * r) / RING_STEP));
+      for (let i = 0; i < n; i++) {
+        const t = theta + (i / n) * 2 * Math.PI;
+        const at = (rr) => ({ x: hub.x + rr * ax * Math.cos(t) - c.w / 2, y: hub.y + rr * Math.sin(t) - c.h / 2, w: c.w, h: c.h });
+        let rect = at(r);
+        if (!free(rect)) continue;
+        for (let rr = r - 6; rr > 0; rr -= 6) { const cand = at(rr); if (!free(cand)) break; rect = cand; }
+        return { rect, t, r };
+      }
+    }
+    return { rect: { x: hub.x - c.w / 2, y: hub.y - c.h / 2, w: c.w, h: c.h }, t: theta, r: r0 };
+  }
+  function layoutYard(clusters, pins, aspect, desk) {
+    const placed = [];
+    for (const c of clusters) { c.pinned = Boolean(pins[c.id]); if (c.pinned) { c.x = pins[c.id].x; c.y = pins[c.id].y; placed.push(rectOf(c)); } }
+    const free = (r) => placed.every((p) => apart(r, p));
+    const seat = clusters.find((c) => c.kind === "seat");
+    const ax = 1;
+    if (seat && !seat.pinned) {
+      let r = { x: -seat.w / 2, y: -seat.h / 2, w: seat.w, h: seat.h };
+      if (!free(r)) r = radialFit(seat, { x: 0, y: 0 }, -Math.PI / 2, ax, free, 24).rect;
+      seat.x = Math.round(r.x); seat.y = Math.round(r.y); placed.push(rectOf(seat));
+    }
+    if (!seat && desk) placed.push(desk);
+    const hub = seat ? { x: seat.x + seat.w / 2, y: seat.y + seat.h / 2 } : { x: 0, y: 0 };
+    const owned = clusters.filter((c) => seat && c !== seat && c.parentCluster === "seat");
+    let theta = -Math.PI / 2;
+    for (const c of owned) {
+      if (c.pinned) continue;
+      const hit = radialFit(c, hub, theta, ax, free, Math.max(24, seat ? Math.min(seat.w, seat.h) / 2 : 0));
+      c.x = Math.round(hit.rect.x); c.y = Math.round(hit.rect.y); placed.push(rectOf(c));
+      theta = hit.t + RING_STEP / Math.max(hit.r, RING_STEP);
+    }
+    const others = clusters.filter((c) => c !== seat && !owned.includes(c) && !c.pinned);
+    if (others.length) {
+      /* The second group sits beside the band (never beside a pin that
+         happens to stick out) and takes the width that brings the whole
+         yard to the viewport's aspect. */
+      const bandRects = [...(seat && !seat.pinned ? [rectOf(seat)] : []), ...(!seat && desk ? [desk] : []), ...owned.filter((c) => !c.pinned).map(rectOf)];
+      const band = bbox(bandRects.length ? bandRects : [{ x: 0, y: 0, w: 0, h: 0 }]);
+      const area = others.reduce((sum, c) => sum + (c.w + YX) * (c.h + YY), 0);
+      const widest = Math.max(...others.map((c) => c.w));
+      const width = Math.max(widest, owned.length ? Math.max(aspect * band.h - band.w - 2 * YX, Math.sqrt(area / 1.6)) : Math.sqrt(area * aspect) - band.w);
+      const est = area / width;
+      packFree(others, placed, { x: band.x + band.w + 2 * YX, y: Math.max(band.y, Math.round(hub.y - est / 2)), w: width, h: 1e7 });
+    }
+    return hub;
+  }
+  /* Free-rectangle packing (the maximal-rectangles rule): the free list starts
+     as the region, every placed or pinned rect is cut out of it, each item
+     takes the top-most, then left-most free rectangle it fits. */
+  function packFree(items, placed, region) {
+    let free = [region];
+    const contains = (b, a) => b.x <= a.x && b.y <= a.y && b.x + b.w >= a.x + a.w && b.y + b.h >= a.y + a.h;
+    const cut = (r) => {
+      const R = { x: r.x - YX, y: r.y - YY, w: r.w + 2 * YX, h: r.h + 2 * YY };
+      const out = [];
+      for (const f of free) {
+        if (!(R.x < f.x + f.w && f.x < R.x + R.w && R.y < f.y + f.h && f.y < R.y + R.h)) { out.push(f); continue; }
+        if (R.x > f.x) out.push({ x: f.x, y: f.y, w: R.x - f.x, h: f.h });
+        if (R.x + R.w < f.x + f.w) out.push({ x: R.x + R.w, y: f.y, w: f.x + f.w - R.x - R.w, h: f.h });
+        if (R.y > f.y) out.push({ x: f.x, y: f.y, w: f.w, h: R.y - f.y });
+        if (R.y + R.h < f.y + f.h) out.push({ x: f.x, y: R.y + R.h, w: f.w, h: f.y + f.h - R.y - R.h });
+      }
+      free = out.filter((a, i) => a.w > 0 && a.h > 0 && !out.some((b, j) => j !== i && contains(b, a) && (j < i || !contains(a, b))));
+    };
+    for (const r of placed) cut(r);
+    for (const c of items) {
+      const fits = free.filter((f) => f.w >= c.w && f.h >= c.h).sort((a, b) => a.y - b.y || a.x - b.x);
+      const f = fits[0] || { x: region.x, y: Math.max(region.y, ...placed.map((r) => r.y + r.h + YY)) };
+      c.x = Math.round(f.x); c.y = Math.round(f.y);
+      const r = rectOf(c); placed.push(r); cut(r);
+    }
+  }
+  function bbox(rects) {
+    if (!rects.length) return { x: 0, y: 0, w: 800, h: 500 };
+    const x1 = Math.min(...rects.map((r) => r.x)), y1 = Math.min(...rects.map((r) => r.y));
+    const x2 = Math.max(...rects.map((r) => r.x + r.w)), y2 = Math.max(...rects.map((r) => r.y + r.h));
+    return { x: x1, y: y1, w: x2 - x1, h: y2 - y1 };
+  }
+
+  /* Current board model (rebuilt on every render that shows a board). */
+  let M = { clusters: [], world: { x: 0, y: 0, w: 1, h: 1 }, backlog: [], regions: null, hub: { x: 0, y: 0 }, desk: null };
+  const margin = (b) => ({ x: b.x - 80, y: b.y - 80, w: b.w + 160, h: b.h + 160 });
+  function buildModel(screen) {
+    const aspect = boardAspect();
+    if (screen === "field") {
+      const regions = F.projects.filter((p) => !p.archived).map((p) => {
+        const clusters = clustersOf(p.id);
+        const hub = layoutYard(clusters, {}, 1.4, null);
+        const b = bbox(clusters);
+        for (const c of clusters) { c.x += PAD - b.x; c.y += HEAD + PAD - b.y; c.key = null; }
+        return { id: p.id, project: p, clusters, hub: { x: hub.x + PAD - b.x, y: hub.y + HEAD + PAD - b.y }, w: Math.max(420, b.w + 2 * PAD), h: b.h + HEAD + 2 * PAD, needs: clusters.filter((c) => c.needs).length, working: counts(p.id).working };
+      });
+      regions.sort((a, b) => (b.needs - a.needs) || (b.working - a.working));
+      const area = regions.reduce((sum, r) => sum + (r.w + YX) * (r.h + YY), 0);
+      packFree(regions, [], { x: 0, y: 0, w: Math.max(Math.max(...regions.map((r) => r.w)) + (regions.length > 1 ? 420 + YX : 0), Math.sqrt(area * aspect) * 1.05), h: 1e7 });
+      const world = bbox(regions);
+      M = { clusters: regions.flatMap((r) => r.clusters.map((c) => ({ ...c, x: c.x + r.x, y: c.y + r.y, region: r.id }))), regions, world: margin(world), backlog: [], hub: null, desk: null };
+      return;
+    }
+    const clusters = clustersOf(S.project);
+    const desk = F.seats[S.project] ? null : { x: -SEAT_W / 2, y: -DESK_H / 2, w: SEAT_W, h: DESK_H };
+    const hub = layoutYard(clusters, S.pins, aspect, desk);
+    const world = bbox(desk ? [...clusters, desk] : clusters);
+    const backlog = F.tasks.filter((t) => t.project === S.project && !t.worker && !t.pipeline && t.status !== "done");
+    M = { clusters, world: margin(world), backlog, regions: null, hub, desk };
+  }
+  const clusterById = (id) => M.clusters.find((c) => c.id === id);
+  const clusterOfConv = (id) => M.clusters.find((c) => c.nodes.some((n) => n.conv && n.conv.id === id) || (c.held || []).some((h) => h.id === id));
+  function counts(projectId) {
+    const convs = F.conversations.filter((c) => c.project === projectId && !c.seat);
+    const bits = convs.map(stateBits);
+    const pipes = F.pipelines.filter((p) => p.project === projectId);
+    return {
+      needs: bits.filter((b) => NEEDS.has(b.key)).length + pipes.filter((p) => p.state === "needs_decision").length,
+      working: bits.filter((b) => b.key === "working").length,
+      pipelines: pipes.filter((p) => ["running", "needs_decision", "provisioning", "paused"].includes(p.state)).length,
+    };
+  }
+  /* Everything that needs the operator, in yard order: what n / N walk. */
+  function needsQueue(projectId) {
+    const out = [];
+    for (const cl of clustersOf(projectId)) {
+      if (!cl.needs) continue;
+      if (cl.kind === "pipeline" && cl.pipe.state === "needs_decision") out.push({ cluster: cl.id, kind: "pipeline" });
+      for (const n of cl.nodes) if (n.conv && NEEDS.has(stateBits(n.conv).key)) out.push({ cluster: cl.id, kind: "conv", conv: n.conv.id });
+    }
+    return out;
+  }
+
+  /* ── camera ───────────────────────────────────────────────────────────── */
+  const cam = { x: 0, y: 0, z: 0.5 };
+  let altitude = "yard";
+  function boardEl() { return $app.querySelector("[data-board]"); }
+  function boardSize() { const b = boardEl(); return b ? { w: b.clientWidth, h: b.clientHeight } : { w: FRAME_W - 56, h: FRAME_H - 88 }; }
+  /* The packer's aspect is the frame's, never the live board's: a receipt row
+     or an open inspector must not re-pack the yard under the operator. */
+  function boardAspect() { const side = FRAME_W >= 1400 ? 372 : 312; const rail = S.rail ? 224 : 56; return (FRAME_W - rail - side) / Math.max(1, FRAME_H - 48 - 44); }
+  function fitRect(r, pad, zmax, animate) {
+    const { w, h } = boardSize();
+    const z = clamp(Math.min((w - pad * 2) / r.w, (h - pad * 2) / r.h), MIN_Z, zmax);
+    setCam((w - r.w * z) / 2 - r.x * z, (h - r.h * z) / 2 - r.y * z, z, animate);
+  }
+  function fitAll(animate) { fitRect(M.world, 8, 1, animate); }
+  function fitNeeds(animate) { const rs = M.clusters.filter((c) => c.needs); if (!rs.length) return fitAll(animate); fitRect(bbox(rs), 60, 0.9, animate); }
+  /* Fit one cluster at block altitude with the slack of the viewport given to
+     the side that faces the hub, so the descent keeps a neighbour in view. */
+  function fitCluster(id, animate) {
+    const c = clusterById(id); if (!c) return;
+    const { w, h } = boardSize(); const pad = 40;
+    const z = clamp(Math.min((w - pad * 2) / c.w, (h - pad * 2) / c.h), MIN_Z, 1.1);
+    const region = c.region ? M.regions.find((r) => r.id === c.region) : null;
+    const hub = region ? { x: region.x + region.hub.x, y: region.y + region.hub.y } : M.hub || { x: c.x + c.w / 2, y: c.y + c.h / 2 };
+    const cx = c.x + c.w / 2, cy = c.y + c.h / 2;
+    let dx = hub.x - cx, dy = hub.y - cy; const len = Math.hypot(dx, dy) || 1; dx /= len; dy /= len;
+    const sx = Math.max(0, (w / z - c.w) / 2 - pad / z), sy = Math.max(0, (h / z - c.h) / 2 - pad / z);
+    const vx = cx + dx * sx, vy = cy + dy * sy;
+    setCam(w / 2 - vx * z, h / 2 - vy * z, z, animate);
+  }
+  function centerOn(wx, wy, z, animate) { const { w, h } = boardSize(); setCam(w / 2 - wx * z, h / 2 - wy * z, z, animate); }
+  function setCam(x, y, z, animate) {
+    cam.x = x; cam.y = y; cam.z = clamp(z, MIN_Z, MAX_Z);
+    const world = $app.querySelector(".world");
+    if (world) world.style.transition = animate && !matchMedia("(prefers-reduced-motion: reduce)").matches ? "transform 360ms cubic-bezier(.2,0,0,1)" : "none";
+    applyCamera();
+  }
+  /* The camera writes exactly four things and never re-renders: the world's
+     transform, the grid's tile, the altitude attribute and the map's frame. */
+  function applyCamera() {
+    const board = boardEl(); if (!board) return;
+    const world = board.querySelector(".world");
+    world.style.transform = `translate(${cam.x}px, ${cam.y}px) scale(${cam.z})`;
+    world.style.setProperty("--inv", String(clamp(1 / cam.z, 1, 2.8)));
+    const far = cam.z < 0.45 ? "1" : "0";
+    if (board.dataset.far !== far) board.dataset.far = far;
+    let tile = 24 * cam.z; while (tile < 18) tile *= 2;
+    const grid = board.querySelector(".grid");
+    grid.style.backgroundSize = `${tile}px ${tile}px`;
+    grid.style.backgroundPosition = `${((cam.x % tile) + tile) % tile}px ${((cam.y % tile) + tile) % tile}px`;
+    const next = altitude === "yard" ? (cam.z > 0.9 ? "block" : "yard") : (cam.z < 0.8 ? "yard" : "block");
+    if (next !== altitude) { altitude = next; board.dataset.altitude = altitude; }
+    const label = $app.querySelector("[data-altitude-label]");
+    if (label) label.textContent = `${route().screen === "field" ? "Field" : altitude === "yard" ? "Yard" : "Block"} · ${Math.round(cam.z * 100)}%`;
+    drawMinimapViewport();
+    if (route().screen === "board") S.cams[S.project] = { ...cam };
+  }
+  function worldToScreen(x, y) { return { x: x * cam.z + cam.x, y: y * cam.z + cam.y }; }
+  function screenToWorld(x, y) { return { x: (x - cam.x) / cam.z, y: (y - cam.y) / cam.z }; }
+
+  /* ── board interaction ────────────────────────────────────────────────── */
+  let suppressClick = false;
+  function mountBoard() {
+    const board = boardEl(); if (!board) return;
+    board.dataset.altitude = altitude;
+    let drag = null;
+    board.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0) return;
+      const head = e.target.closest(".cl-head, .tile");
+      const clEl = e.target.closest(".cluster");
+      if (head && clEl && route().screen === "board") {
+        const c = clusterById(clEl.dataset.cluster); if (!c) return;
+        drag = { kind: "cluster", id: c.id, sx: e.clientX, sy: e.clientY, ox: c.x, oy: c.y, el: clEl, moved: false };
+        board.setPointerCapture(e.pointerId); e.preventDefault(); return;
+      }
+      if (e.target.closest(".node, .lifted, [data-act], [data-go]")) return;
+      drag = { kind: "pan", sx: e.clientX, sy: e.clientY, ox: cam.x, oy: cam.y, moved: false };
+      board.setPointerCapture(e.pointerId);
+    });
+    board.addEventListener("pointermove", (e) => {
+      if (!drag) return;
+      const dx = e.clientX - drag.sx, dy = e.clientY - drag.sy;
+      if (Math.abs(dx) + Math.abs(dy) > 3) drag.moved = true;
+      if (drag.kind === "pan") { setCam(drag.ox + dx, drag.oy + dy, cam.z, false); board.classList.add("panning"); }
+      else { const nx = drag.ox + dx / cam.z, ny = drag.oy + dy / cam.z; drag.el.style.left = `${nx}px`; drag.el.style.top = `${ny}px`; drag.nx = nx; drag.ny = ny; }
+    });
+    const end = (e) => {
+      if (!drag) return;
+      board.classList.remove("panning");
+      const d = drag; drag = null;
+      if (d.kind === "cluster" && d.moved) {
+        suppressClick = true; setTimeout(() => { suppressClick = false; }, 0);
+        S.pins[d.id] = { x: Math.round(d.nx), y: Math.round(d.ny) };
+        const c = clusterById(d.id);
+        receipt(`${c.title} pinned where you put it`, "Release", () => { delete S.pins[d.id]; render(); });
+        render();
+      }
+      void e;
+    };
+    board.addEventListener("pointerup", end);
+    board.addEventListener("pointercancel", end);
+    board.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      const k = e.deltaMode === 1 ? 16 : 1;
+      if (e.ctrlKey || e.metaKey) {
+        const r = board.getBoundingClientRect();
+        zoomAt(Math.exp(-e.deltaY * k * 0.0025), e.clientX - r.left, e.clientY - r.top);
+      } else setCam(cam.x - e.deltaX * k, cam.y - e.deltaY * k, cam.z, false);
+    }, { passive: false });
+    board.addEventListener("dblclick", (e) => {
+      const node = e.target.closest(".node[data-conv]");
+      const clEl = e.target.closest(".cluster");
+      if (node) { lift(node.dataset.conv); return; }
+      if (clEl) { fitCluster(clEl.dataset.cluster, true); return; }
+      if (!e.target.closest(".minimap, .zoomctl, .tray, .desk")) fitAll(true);
+    });
+    const mm = $app.querySelector(".minimap");
+    if (mm) {
+      const jump = (e) => { const r = mm.getBoundingClientRect(); const vb = mm.viewBox.baseVal; const wx = vb.x + ((e.clientX - r.left) / r.width) * vb.width; const wy = vb.y + ((e.clientY - r.top) / r.height) * vb.height; centerOn(wx, wy, cam.z, true); };
+      mm.addEventListener("pointerdown", (e) => { e.stopPropagation(); jump(e); });
+      mm.addEventListener("keydown", (e) => { if (e.key === "Enter") fitAll(true); });
+    }
+  }
+  function zoomAt(factor, sx, sy) {
+    const z = clamp(cam.z * factor, MIN_Z, MAX_Z);
+    const w = screenToWorld(sx, sy);
+    setCam(sx - w.x * z, sy - w.y * z, z, false);
+  }
+  function zoomCenter(factor) { const { w, h } = boardSize(); zoomAt(factor, w / 2, h / 2); }
+
+  /* ── the map and the tethers ──────────────────────────────────────────── */
+  /* The straight run from the seat's edge to a spawned cluster's edge. */
+  function tether(a, b) {
+    const ax = a.x + a.w / 2, ay = a.y + a.h / 2, bx = b.x + b.w / 2, by = b.y + b.h / 2;
+    const exit = (r, x0, y0, x1, y1) => { const dx = x1 - x0, dy = y1 - y0; let t = 1; if (dx > 0) t = Math.min(t, (r.x + r.w - x0) / dx); else if (dx < 0) t = Math.min(t, (r.x - x0) / dx); if (dy > 0) t = Math.min(t, (r.y + r.h - y0) / dy); else if (dy < 0) t = Math.min(t, (r.y - y0) / dy); return t; };
+    const t1 = exit(a, ax, ay, bx, by), t2 = 1 - exit(b, bx, by, ax, ay);
+    if (t2 <= t1) return null;
+    return { x1: ax + (bx - ax) * t1, y1: ay + (by - ay) * t1, x2: ax + (bx - ax) * t2, y2: ay + (by - ay) * t2 };
+  }
+  function tethers() {
+    const out = [];
+    for (const c of M.clusters) {
+      if (c.parentCluster !== "seat") continue;
+      const seat = M.clusters.find((x) => x.kind === "seat" && (x.region || null) === (c.region || null));
+      const seg = seat && tether(seat, c);
+      if (seg) out.push({ ...seg, id: c.id, needs: c.needs });
+    }
+    return out;
+  }
+  const f1 = (v) => v.toFixed(1);
+  function tethersHtml() {
+    const W = M.world;
+    return `<svg class="tethers" aria-hidden="true" style="left:${W.x}px;top:${W.y}px;width:${W.w}px;height:${W.h}px" viewBox="${W.x} ${W.y} ${W.w} ${W.h}">${tethers().map((t) => `<line class="run ${t.needs ? "needs" : ""}" data-tether="${t.id}" x1="${f1(t.x1)}" y1="${f1(t.y1)}" x2="${f1(t.x2)}" y2="${f1(t.y2)}"/><line class="end" x1="${f1(t.x2)}" y1="${f1(t.y2)}" x2="${f1(t.x2)}" y2="${f1(t.y2)}"/>`).join("")}</svg>`;
+  }
+  function minimapHtml() {
+    const W = M.world;
+    const runs = tethers().map((t) => `<line class="mm-run" x1="${f1(t.x1)}" y1="${f1(t.y1)}" x2="${f1(t.x2)}" y2="${f1(t.y2)}"/>`).join("");
+    const rects = M.clusters.map((c) => `<rect x="${c.x}" y="${c.y}" width="${c.w}" height="${c.h}" rx="18" class="${c.needs ? "mm-needs" : ""}" ${c.needs ? "" : `style="fill:hsl(${c.hue} 55% 55% / ${c.quiet ? 0.35 : 0.7})"`} />`).join("");
+    const regions = (M.regions || []).map((r) => `<rect x="${r.x}" y="${r.y}" width="${r.w}" height="${r.h}" rx="24" class="mm-region" />`).join("");
+    const desk = M.desk ? `<rect class="mm-desk" x="${M.desk.x}" y="${M.desk.y}" width="${M.desk.w}" height="${M.desk.h}" rx="18"/>` : "";
+    return `<svg class="minimap" role="button" tabindex="0" aria-label="Map of the yard · click to jump, Enter to fit everything" viewBox="${W.x} ${W.y} ${W.w} ${W.h}" preserveAspectRatio="xMidYMid meet" data-minimap><rect class="mm-bg" x="${W.x}" y="${W.y}" width="${W.w}" height="${W.h}" rx="40"/>${regions}${desk}${runs}${rects}<rect class="mm-view" data-mm-view x="0" y="0" width="10" height="10" rx="12"/></svg>`;
+  }
+  function drawMinimapViewport() {
+    const v = $app.querySelector("[data-mm-view]"); if (!v) return;
+    const { w, h } = boardSize(); const tl = screenToWorld(0, 0);
+    v.setAttribute("x", tl.x); v.setAttribute("y", tl.y); v.setAttribute("width", w / cam.z); v.setAttribute("height", h / cam.z);
+  }
+
+  /* ── rendering: the frame ─────────────────────────────────────────────── */
+  function render() {
+    const r = route();
+    document.body.dataset.scheme = scheme;
+    if (r.screen === "board" || r.screen === "field") buildModel(r.screen);
+    const stage = r.screen === "chat" ? chatStage(r) : r.screen === "accounts" ? accountsStage(r) : boardStage(r);
+    $app.dataset.rail = String(S.rail);
+    $app.dataset.screen = r.screen;
+    /* Receipts live in the bar (or the chat's header row) and banners in the
+       side column, so the canvas never resizes under the operator. */
+    $app.innerHTML = `${rail(r)}<div class="main">${bar(r)}${r.screen === "board" || r.screen === "field" ? "" : banner(r)}<div class="stagewrap">${stage}</div>${statusBar()}</div>${dialogHtml(r)}`;
+    $app.dataset.dialog = r.dialog || "";
+    if (r.screen === "board" || r.screen === "field") {
+      mountBoard();
+      const saved = S.cams[S.project];
+      const zoomTo = Q.get("zoom");
+      if (r.screen === "field") fitAll(false);
+      else if (S.lift && !S.liftPlaced) { const c = conv(S.lift); const cl = clusterOfConv(S.lift); const n = cl && nodeRect(cl, cl.nodes.find((x) => x.conv && x.conv.id === S.lift)); if (n) { S.liftPlaced = true; centerOn(n.x + 320, n.y + 250, Math.max(1, cam.z), false); } else fitAll(false); void c; }
+      else if (zoomTo && !S.zoomApplied) { S.zoomApplied = true; fitCluster(zoomTo.replace(/^block:/, ""), false); }
+      else if (S.pendingFit) { const id = S.pendingFit; S.pendingFit = null; fitCluster(id, false); }
+      else if (saved && !S.lift) { cam.x = saved.x; cam.y = saved.y; cam.z = saved.z; applyCamera(); }
+      else fitAll(false);
+      mountInspector();
+    }
+    mountChat(r);
+    restoreFocus(r);
+    $app.dataset.ready = "1";
+  }
+
+  function rail(r) {
+    const rows = F.projects.filter((p) => !p.archived).map((p) => {
+      const n = counts(p.id);
+      const on = r.screen !== "field" && p.id === S.project;
+      const initials = p.name.split(/[-\s]/).map((w) => w[0]).join("").slice(0, 2).toUpperCase();
+      return `<button class="prow ${on ? "on" : ""}" data-project="${p.id}" data-act="project:${p.id}" aria-current="${on ? "page" : "false"}" aria-label="${esc(p.name)} · ${n.needs} need you · ${n.working} working">
+        <span class="ini">${esc(initials)}${n.needs ? `<b>${n.needs}</b>` : ""}</span>
+        <span class="pname"><span class="t">${esc(p.name)}${p.crowned ? I("crown", "crownmark") : ""}</span><span class="m">${n.needs ? `${n.needs} need you` : n.working ? `${n.working} working` : "quiet"}</span></span>
+      </button>`;
+    }).join("");
+    const total = F.projects.filter((p) => !p.archived).reduce((s, p) => s + counts(p.id).needs, 0);
     return `<aside class="rail">
-      <div class="rail-head"><span class="app">Agent Log Viewer</span><button class="iconbtn" data-act="rail" aria-label="${railOpen() ? "Collapse the project rail" : "Expand the project rail"}" title="${railOpen() ? "Collapse" : "Expand"} ([)">${I(railOpen() ? "chevL" : "chevR")}</button></div>
-      <div class="rail-search"><input class="field" placeholder="Filter projects…" value="${esc(q)}" data-act="projFilter" aria-label="Filter projects"></div>
-      <nav class="rail-list" aria-label="Projects">
-        <button class="prow ${S.project === "all" ? "on" : ""}" data-go="#/overview"><span class="ini">All</span>${I("grid")}<span class="n">Overview<small>${attentionAll().length} need you across ${F.projects.filter((p) => !p.archived).length} projects</small></span></button>
-        ${crowned.length ? `<h2>Crowned</h2>${crowned.map(prow).join("")}` : ""}
-        <h2>Projects</h2>${rest.map(prow).join("")}
-        ${archived.length ? `<button class="sec-h" data-act="toggle:archive" aria-expanded="${S.collapsed.has("archive") ? "false" : "true"}"><span>Archive</span><span class="c">· ${archived.length}</span>${I("chevD")}</button>${S.collapsed.has("archive") ? "" : archived.map((p) => `<button class="prow quiet" data-go="#/board" data-project="${p.id}"><span class="ini">${esc(p.name.slice(0, 2))}</span><span class="dot"></span><span class="n"><span class="trunc">${esc(p.name)}</span><small>archived · ${esc(p.age)}</small></span></button>`).join("")}` : ""}
-      </nav>
-      <div class="rail-foot"><button class="btn quiet" data-act="createProject" style="width:100%;justify-content:flex-start">${I("plus")}<span>Create project</span></button></div>
+      <button class="prow home ${r.screen === "field" ? "on" : ""}" data-go="#/overview" aria-label="Overview · ${total} need you across every project"><span class="ini">${I("grid")}${total ? `<b>${total}</b>` : ""}</span><span class="pname"><span class="t">Overview</span><span class="m">${total} need you</span></span></button>
+      <div class="rail-list">${rows}</div>
+      <button class="prow add" data-go="${r.base}/create" aria-label="Create"><span class="ini">${I("plus")}</span><span class="pname"><span class="t">Create</span></span></button>
+      <button class="prow tog" data-act="rail" aria-label="${S.rail ? "Collapse the rail ([)" : "Expand the rail ([)"}"><span class="ini">${I("sidebar")}</span><span class="pname"><span class="t">Collapse</span></span></button>
     </aside>`;
   }
 
-  /* ── column ────────────────────────────────────────────────────────────── */
-  function seatCard() {
-    if (S.project === "all") return "";
-    const c = seatConv();
-    /* The filter narrows the whole column, the seat included. */
-    const q = S.filter.trim().toLowerCase();
-    if (q && !"orchestrator".includes(q) && !(c && c.title.toLowerCase().includes(q))) return "";
-    if (F.seat.state === "none" || !c) return `<div class="seat none" data-seat="none"><button class="main" data-go="#/seat/rotate" data-create><span class="l1">${I("bot")}<span class="t">No orchestrator</span></span><span class="l2 create">Create an orchestrator ›</span></button><span></span></div>`;
-    const b = stateBits(c);
-    return `<div class="seat" data-seat="live"><button class="main" data-go="#/chat/orch"><span class="l1">${I("bot")}<span class="t">Orchestrator</span>${badge(b.phrase, b.tone === "neu" ? "" : b.tone)}</span><span class="l2"><span class="trunc">${esc(nowFragment(c))}</span></span><span class="l2">${meter(F.seat.ctx.left, `${F.seat.ctx.left}% left of ${F.seat.ctx.window}`)}<span class="tn">${F.seat.ctx.left}% left</span></span></button><button class="iconbtn cog" data-go="#/seat" aria-label="Orchestrator seat: status, mandate, rotate" title="Seat (o)">${I("sliders")}</button></div>`;
-  }
-  function section(key, label, rowsHtml, count, extra) {
-    if (!count && key !== "needs") return "";
-    const open = !S.collapsed.has(key);
-    return `<section class="sec" data-sec="${key}"><button class="sec-h" data-act="toggle:${key}" aria-expanded="${open}"><span>${label}</span><span class="c">· ${count}</span>${I("chevD")}</button>${open ? rowsHtml + (extra || "") : ""}</section>`;
-  }
-  function column() {
-    const q = S.filter.trim().toLowerCase();
-    const match = (t) => !q || t.toLowerCase().includes(q);
-    const need = attention().filter((a) => match(a.title));
-    const pipes = scopedPipes().filter((p) => match(p.task));
-    const parked = new Set(need.filter((a) => a.kind === "pipe").map((a) => a.id));
-    const active = pipes.filter((p) => p.state !== "completed" && !parked.has(p.id));
-    const completed = pipes.filter((p) => p.state === "completed" && !parked.has(p.id));
-    /* F7: every id renders once, in the column's order — Needs you wins, then
-       the pipelines with their live attempt folded under them, then Working,
-       then Recent. */
-    const rendered = new Set();
-    const needRows = need.map((a) => { rendered.add(a.id); return a.kind === "conv" ? convRow(conv(a.id)) : pipeRow(pipe(a.id), rendered); }).join("")
-      || `<div class="quietline">Nothing needs you.</div>`;
-    const activeRows = active.map((p) => { rendered.add(p.id); return pipeRow(p, rendered); }).join("");
-    const completedRows = completed.map((p) => { rendered.add(p.id); return pipeRow(p, rendered, { noChild: true }); }).join("");
-    const convs = F.conversations.filter((c) => inScope(c) && !c.seat && match(c.title) && !rendered.has(c.id));
-    const work = convs.filter((c) => ["working", "held"].includes(stateBits(c).key));
-    const recent = convs.filter((c) => ["returned", "done", "killed"].includes(stateBits(c).key));
-    /* F8: on a column longer than one screen Recent starts folded, so every
-       section header is reachable without scrolling past the queue. */
-    if (need.length + active.length + work.length > 12 && !S.recentTouched) S.collapsed.add("recent");
-    const recentRows = (S.recentAll || q ? recent : recent.slice(0, 5)).map((c) => convRow(c, { quiet: true })).join("");
-    const more = !S.recentAll && !q && recent.length > 5 ? `<button class="more" data-act="recentAll">All conversations · ${recent.length} ${I("chevR", "sm")}</button>` : "";
-    const title = S.project === "all" ? "All projects" : projectName(S.project);
-    const n = S.project === "all" ? { needs: need.length, working: work.length, pipelines: active.length } : counts(S.project);
-    const view = effectiveView();
-    const seg = (id, icon, label) => `<button class="${view === id ? "on" : ""}" data-act="view:${id}" aria-pressed="${view === id}" title="${label}" aria-label="${label}">${I(icon, "sm")}</button>`;
-    return `<section class="col" aria-label="Board">
-      <div class="col-head"><h1><span class="trunc">${esc(title)}</span><small class="${S.ticked ? "tick" : ""}">${countPhrase(n, width())}</small></h1>
-        <div class="seg" role="group" aria-label="View">${seg("kanban", "board", "Board (k)")}${seg("list", "list", "List")}${seg("map", "map", "Map (m)")}</div>
-        <button class="iconbtn" data-go="#/board/create" aria-label="Create: conversation, task, pipeline" title="Create (c)">${I("plus")}</button>
-        <button class="iconbtn" data-go="#/board/menu" aria-label="More" title="More">${I("more")}</button></div>
-      <div class="col-filter"><input class="field" placeholder="Filter · ↑ ↓ Enter" value="${esc(S.filter)}" data-act="filter" data-focus="filter" aria-label="Filter conversations and pipelines"></div>
-      <div class="col-body">
-        ${seatCard()}
-        ${section("needs", "Needs you", needRows, need.length)}
-        ${section("pipelines", "Pipelines", activeRows, active.length, completed.length ? `<button class="more quiet" data-act="toggle:completed">${S.collapsed.has("completed") ? "Show" : "Hide"} ${completed.length} completed</button>${S.collapsed.has("completed") ? "" : completedRows}` : "")}
-        ${section("working", "Working", work.map((c) => convRow(c)).join(""), work.length)}
-        ${section("recent", "Recent", recentRows, recent.length, more)}
+  function bar(r) {
+    if (r.screen === "chat") return "";
+    const rc = S.receipt ? receiptHtml() : "";
+    if (r.screen === "accounts") return `<header class="bar"><div class="bar-title"><span class="t display">Accounts &amp; limits</span><span class="meta"><span>every account, both windows</span><span>open a row for its burn rate, when it runs out and what stops</span></span></div>${rc}<div class="bar-actions">${barActions(r)}</div></header>`;
+    const field = r.screen === "field";
+    const n = field ? F.projects.filter((p) => !p.archived).reduce((sum, p) => { const c = counts(p.id); sum.needs += c.needs; sum.working += c.working; sum.pipelines += c.pipelines; return sum; }, { needs: 0, working: 0, pipelines: 0 }) : counts(S.project);
+    return `<header class="bar">
+      <div class="bar-title"><span class="t display">${field ? "Every project" : esc(projectName(S.project))}</span><span class="meta"><span class="${n.needs ? "warn" : ""}">${n.needs} need you</span><span>${n.working} working</span><span>${n.pipelines} pipelines</span>${Object.keys(S.pins).length && !field ? `<span>${Object.keys(S.pins).length} pinned</span>` : ""}</span></div>
+      <div class="zoomctl" role="group" aria-label="Camera">
+        <button class="ib" data-act="zoomOut" aria-label="Zoom out (−)">${I("minus")}</button>
+        <button class="alt" data-act="fitAll" data-altitude-label aria-label="Altitude and zoom · click to fit everything (f)">Yard · 50%</button>
+        <button class="ib" data-act="zoomIn" aria-label="Zoom in (+)">${I("plus")}</button>
+        <button class="ib" data-act="fitNeeds" aria-label="Fit what needs you (0)">${I("target")}</button>
       </div>
-    </section>`;
+      ${rc}
+      <div class="bar-actions">${Object.keys(S.pins).length && !field ? `<button class="btn quiet" data-act="unpinAll">${I("undo")}Release all</button>` : ""}${barActions(r)}</div>
+    </header>`;
+  }
+  const barActions = (r) => `<button class="ib" data-go="${r.base}/search" aria-label="Find my messages (/)">${I("search")}</button><button class="ib" data-go="${r.base}/create" aria-label="Create (c)">${I("plus")}</button><button class="ib" data-go="${r.base}/menu" aria-label="Board menu">${I("more")}</button>`;
+
+  function banner(r) {
+    if (F.runtime === "offline") return `<div class="banner info"><b>Offline · reconnecting</b><span>Showing the last state received · ${esc(F.host.lastSeen)}</span></div>`;
+    if (F.runtime === "degraded") return `<div class="banner info"><b>Runtime degraded · polling</b><span>Updates arrive every 10 s</span></div>`;
+    if (!S.arrival || S.dismissed) return "";
+    const c = conv(S.arrival.conv); if (!c || c.project === S.project && r.screen === "board") return "";
+    const st = stateBits(c);
+    return `<div class="banner"><button class="open" data-act="arrive:${c.id}"><b>Needs you · ${esc(st.badge)} · ${esc(projectName(c.project))}</b><span>${esc(c.title)}</span></button><button class="ib" data-act="dismissBanner" aria-label="Dismiss">${I("x")}</button></div>`;
+  }
+  function receipt(text, inverseLabel, inverse) {
+    S.receipt = { text, inverseLabel, inverse };
+    clearTimeout(S.receiptTimer);
+    S.receiptTimer = setTimeout(() => { S.receipt = null; render(); }, 4000);
+  }
+  const receiptHtml = () => `<div class="receipt" role="status"><span>${esc(S.receipt.text)}</span>${S.receipt.inverseLabel ? `<button class="link" data-act="receiptInverse">${esc(S.receipt.inverseLabel)}</button>` : ""}</div>`;
+
+  function statusBar() {
+    const rt = F.runtime;
+    const acc = (engine) => { const a = F.accounts[engine].find((x) => x.active); const w = a && a.windows.length ? a.windows.reduce((m, x) => (x.left < m.left ? x : m)) : null; return `<button class="schip" data-go="#/accounts/${engine}/${a.id}" aria-label="${engine === "claude" ? "Claude" : "Codex"} · ${esc(a.label)} · ${w ? `${w.left}% left of the ${w.label} window` : "no windows"}">${mark(engine)}<span>${esc(a.label)}</span>${w ? `${meter(w.left, "mini")}<span class="tn ${w.left <= 30 ? "warn" : ""}">${w.left}%</span>` : ""}</button>`; };
+    return `<footer class="status">
+      <button class="schip" data-go="${route().base}/host" aria-label="Runtime ${rt} · ${F.host.tasks.length} background tasks · Host details"><span class="dot ${rt === "connected" ? "live" : rt === "degraded" ? "wait" : "stall"}"></span><span>${rt}</span><span class="sep">·</span><span>${F.host.tasks.length} tasks</span></button>
+      <span class="grow"></span>
+      ${acc("claude")}${acc("codex")}
+      <button class="schip" data-go="${route().base}/keys" aria-label="Keyboard map (?)"><kbd class="keycap">?</kbd><span>keys</span></button>
+    </footer>`;
   }
 
-  /* ── stage: banner ─────────────────────────────────────────────────────── */
-  function banner() {
-    if (F.runtime === "offline") return `<div class="banner info" data-banner="offline">${I("wifiOff")}<span class="txt"><b>Offline · reconnecting</b>Showing the last state received · 14:02</span></div>`;
-    if (F.runtime === "degraded") return `<div class="banner info" data-banner="degraded">${I("info")}<span class="txt"><b>Runtime degraded · polling</b>Updates arrive every 10 s</span></div>`;
-    /* F20: an arrival in the CURRENT project is never a banner — it is a new
-       row with its edge, and one tick of the counts. */
-    if (S.arrival && !S.arrivalDismissed && !S.seen.has(S.arrival.id) && conv(S.arrival.id) && conv(S.arrival.id).project !== S.project && hashOf() !== `#/chat/${S.arrival.id}`) {
-      const c = conv(S.arrival.id); const b = stateBits(c);
-      return `<div class="banner" data-banner="arrival">${I("alert")}<button class="open" data-act="openArrival"><b>Needs you · ${esc(b.badge || "a question")} · ${esc(projectName(c.project))}</b><span class="trunc">${esc(c.title)}</span></button><button class="iconbtn" data-act="dismissArrival" aria-label="Dismiss">${I("x")}</button></div>`;
-    }
-    return "";
+  /* ── the board ────────────────────────────────────────────────────────── */
+  function boardStage(r) {
+    const field = r.screen === "field";
+    const worldHtml = `${tethersHtml()}${field ? M.regions.map(regionHtml).join("") : `${M.desk ? deskHtml() : ""}${M.clusters.map((c) => clusterHtml(c)).join("")}`}`;
+    const insp = !field && S.selected && clusterById(S.selected) ? inspectorHtml(clusterById(S.selected)) : "";
+    return `<div class="boardrow">
+      <div class="board ${S.lift ? "has-lift" : ""}" data-board tabindex="0" aria-label="${field ? "The field: every project" : `The yard: ${esc(projectName(S.project))}`}" data-altitude="${altitude}">
+        <div class="grid" aria-hidden="true"></div>
+        <div class="world ${S.lift ? "receded" : ""}">${worldHtml}${M.clusters.length || M.desk ? "" : `<div class="yard-empty">Nothing is running in this project.</div>`}</div>
+      </div>
+      <aside class="side">
+        ${banner(r)}
+        <div class="mapbox">${minimapHtml()}</div>
+        ${insp ? `<div class="inspector" data-inspector>${insp}</div>` : `<div class="apron">${field ? fieldApron() : trayHtml()}</div>`}
+      </aside>
+    </div>`;
   }
-
-  /* ── stage: conversation ───────────────────────────────────────────────── */
-  function feedHtml(c) {
-    const out = [];
-    for (const m of c.feed || []) {
-      if (m.kind === "user") out.push(`<div class="mu"><div class="bubble">${esc(m.text)}</div></div>`);
-      else if (m.kind === "agent") out.push(`<div class="ma"><button class="mh" data-act="msg" aria-label="Message actions: copy, read aloud">${mark(c.engine)}<span>${esc(c.model)}</span><span class="ts tn">${esc(m.ts)}</span></button><div class="txt">${paras(m.text)}</div></div>`);
-      else if (m.kind === "tool") out.push(`<button class="run" data-act="msg">${I(m.status === "running" ? "refresh" : "tool")}<span class="trunc">${esc(m.tool)}</span>${m.status === "running" ? `<span class="badge ok">running</span>` : ""}${m.link ? `<span class="badge acc">open ›</span>` : ""}<span class="ts tn">${esc(m.dur)}${m.ts ? ` · ${esc(m.ts)}` : ""}</span></button>`);
-      else if (m.kind === "run") out.push(`<button class="run" data-act="msg">${I("chevR")}<span>${m.items.reduce((n, i) => n + i.n, 0)} actions · ${m.items.map((i) => `${esc(i.tool)} ×${i.n}`).join(" · ")}</span><span class="ts tn">${esc(m.ts)}</span></button>`);
-      else if (m.kind === "runfail") out.push(`<div class="runx">${m.items.map((i) => `<div class="li ${i.status === "fail" ? "fail" : i.status === "running" ? "live" : ""}">${I(i.status === "fail" ? "x" : i.status === "running" ? "refresh" : "tool")}<span>${esc(i.tool)} ${esc(i.detail)}</span>${i.status === "fail" ? `<span class="badge dng">exit 1</span>` : ""}<span class="ts tn">${esc(i.ts)} ${esc(i.dur)}</span></div>${i.error ? `<div class="err">${esc(i.error)}</div>` : ""}`).join("")}</div>`);
-    }
-    if (c.question) {
-      const a = S.answers[c.id];
-      if (a) out.push(`<div class="mu"><div class="bubble">${esc(a)}</div></div><button class="qf" data-act="toggleQ:${c.id}">${I("chevR")}<span>question · answered ${esc(F.now)}</span></button>${S.pickedOption[c.id + ":open"] ? questionCard(c, true) : ""}`);
-      else out.push(questionCard(c, false));
-    }
-    return out.join("");
+  function regionHtml(rg) {
+    const n = counts(rg.id);
+    return `<div class="region" style="left:${rg.x}px;top:${rg.y}px;width:${rg.w}px;height:${rg.h}px">
+      <div class="rg-head"><span class="t">${esc(rg.project.name)}</span><span class="m ${n.needs ? "warn" : ""}">${n.needs ? `${n.needs} need you` : `${n.working} working`}</span></div>
+      ${rg.clusters.map((c) => clusterHtml(c, true)).join("")}
+    </div>`;
   }
-  /* F5: the options carry their number, because 1–9 pick them from the home
-     row while the card is open. */
-  function questionCard(c, quiet) {
-    const q = c.question; const picked = S.answers[c.id];
-    return `<div class="q ${quiet ? "quiet" : ""}" data-question="${c.id}"><div class="qh">${I("alert", "sm")}Needs you · ${esc(c.waitedFor)}</div><div class="qt">${esc(q.text)}</div>${q.options.map((o, i) => `<button class="opt ${picked === o.label ? "on" : ""}" data-act="${quiet ? "noop" : `answer:${c.id}:${i}`}" data-opt="${i}"><span class="rad"></span><span class="k kbd">${i + 1}</span><span><b>${esc(o.label)}</b>${o.hint ? `<small>${esc(o.hint)}</small>` : ""}</span></button>`).join("")}${quiet ? "" : `<div class="own">Or type your own answer below — it is sent as the reply.</div>`}</div>`;
+  /* The empty desk: no orchestrator holds the origin, so the slot invites. */
+  function deskHtml() {
+    const d = M.desk;
+    return `<button class="desk" data-go="#/board/rotate" style="left:${d.x}px;top:${d.y}px;width:${d.w}px;height:${d.h}px" aria-label="No orchestrator · seat one (o)"><span class="t">No orchestrator</span><span class="m">Seat one · o</span></button>`;
   }
-  function composer(c, focusPrefix) {
-    const b = stateBits(c); const draft = S.drafts[c.id] || ""; const nx = S.next[c.id] || { model: c.model, effort: c.effort, account: c.account };
-    const fp = focusPrefix || "";
-    let slot;
-    if (F.runtime === "offline") slot = `<button class="send queue" data-act="queue:${c.id}" data-focus="${fp}send"><span class="cap">Queue</span></button>`;
-    else if (b.key === "killed") slot = `<button class="send respawn" data-act="respawn:${c.id}" data-focus="${fp}send"><span class="cap">${I("refresh", "sm")}Respawn</span></button>`;
-    else if (b.key === "working" && !draft) slot = `<button class="send stop" data-act="stop:${c.id}" data-focus="${fp}send" aria-label="Stop the agent"><span class="cap">${I("square", "sm")}Stop</span></button>`;
-    else slot = `<button class="send ${draft ? "" : "off"}" data-act="send:${c.id}" data-focus="${fp}send" aria-label="Send"><span class="cap">${I("arrowUp", "sm")}</span></button>`;
-    /* F15: the hint lives in the placeholder, not as a permanent row. */
-    const placeholder = b.key === "killed" ? "killed · text queues until a respawn" : b.key === "held" ? "held · text you send queues" : F.runtime === "offline" ? "offline · held until reconnected" : c.question && !S.answers[c.id] ? "Your own answer… · Enter sends" : c.seat ? "Tell the orchestrator… · Enter sends" : "Message the agent… · Enter sends";
-    const chipText = b.key === "limit" ? `${nx.model} · ${c.account} at limit` : `${nx.model} · ${nx.effort}`;
-    return `<div class="box"><textarea data-focus="${fp}field" placeholder="${esc(placeholder)}" aria-label="Message" rows="2">${esc(draft)}</textarea>
-      <div class="tools"><button class="chipbtn" data-go="#/chat/${c.id}/model" data-focus="${fp}chip" aria-label="Next message: model, reasoning, account"><span class="chip ${b.key === "limit" ? "warn" : ""}">${mark(c.engine)}${esc(chipText)}${I("chevD", "sm")}</span></button>
-      <button class="iconbtn" data-act="attach" data-focus="${fp}attach" aria-label="Attach files or images">${I("clip")}</button><button class="iconbtn" data-act="dictate" data-focus="${fp}mic" aria-label="Dictate">${I("mic")}</button>
-      <span class="sp"></span>${slot}</div></div>`;
+  function nodeRect(cl, n) { return { x: cl.x + n.rx, y: cl.y + n.ry, w: n.w || NW, h: NH }; }
+  const parentNode = (cl, n) => cl.nodes.find((x) => x.conv && x.conv.id === n.parent);
+  function clusterHtml(cl, tileOnly) {
+    const sel = S.selected === cl.id;
+    const issue = cl.kind === "pipeline" && cl.pipe.issue ? `<em>#${cl.pipe.issue}</em> ` : "";
+    const head = `<div class="cl-head" title="drag to pin">${keycap(cl.key)}<span class="t">${issue}${esc(cl.title)}</span>${badge(cl.badge.text, cl.badge.tone)}${cl.pinned ? `<span class="pinmark" title="pinned">${I("pin")}pinned</span>` : ""}</div>`;
+    const loop = cl.kind === "pipeline" ? loopGeom(cl.pipe).find((l) => l.used) : null;
+    const tile = `<button class="tile" data-act="inspect:${cl.id}" aria-label="${esc(cl.title)} · ${esc(cl.phrase)}"><span class="tt">${issue}${esc(cl.title)}</span><span class="trow"><span class="tm">${esc(cl.phrase)}${loop ? ` · ↺ ${loop.used}/${loop.s.onFail.maxRounds}` : ""}</span>${cl.pinned ? `<span class="tpin" title="pinned">${I("pin")}</span>` : ""}${keycap(cl.key)}</span><span class="tl">${esc(cl.live)}</span>${silHtml(cl)}</button>`;
+    let body = "";
+    if (!tileOnly && !cl.compact) body = cl.kind === "pipeline" ? pipelineBody(cl) : treeBody(cl);
+    else if (!tileOnly) body = `<div class="cl-body compact"><span class="meta"><span>${esc(cl.phrase)}</span>${cl.kind === "pipeline" ? `<span>${cl.pipe.stages.length} stages</span>` : ""}</span></div>`;
+    return `<div class="cluster k-${cl.kind} ${cl.w < 400 ? "sm" : ""} ${cl.needs ? "needs" : ""} ${sel ? "selected" : ""} ${cl.pinned ? "pinned" : ""} ${cl.compact ? "compact" : ""} ${cl.parentCluster === "seat" ? "owned" : ""} ${S.lift && cl.nodes.some((n) => n.conv && n.conv.id === S.lift) ? "has-lift" : ""}" data-cluster="${cl.id}" style="--hue:${cl.hue};left:${cl.x}px;top:${cl.y}px;width:${cl.w}px;height:${cl.h}px">${head}${body}${tile}</div>`;
   }
-  function chatHead(c, pinned) {
-    const b = stateBits(c);
-    const p = c.pipeline ? pipe(c.pipeline.id) : null;
-    const task = F.tasks.find((t) => t.worker === c.id);
-    const stage = p ? `<span>stage ${c.pipeline.k}/${c.pipeline.n}</span>` : "";
-    return `<div class="chat-head"><span class="dot ${b.dot} ${b.key === "working" ? "pulse" : ""}"></span><div class="tt"><div class="t trunc">${esc(c.title)}</div><div class="sub meta"><span class="st ${b.tone === "neu" ? "" : b.tone}">${esc(b.phrase)}</span><span>${mark(c.engine)}${esc(c.model)}</span><span>${esc(c.effort)}</span>${stage}${task ? `<span>task · ${esc(task.title)}</span>` : ""}${c.worktree ? `<span class="mono">${esc(c.worktree)}</span>` : ""}</div></div>
-      ${pinned ? `<button class="iconbtn" data-go="#/chat/${c.id}/menu" aria-label="Conversation actions" title="More">${I("more")}</button><button class="iconbtn" data-act="unpin" aria-label="Unpin">${I("x")}</button>` : `${canPin() && !S.pin ? `<button class="iconbtn" data-act="pin:${c.id}" aria-label="Pin beside" title="Pin beside">${I("panel")}</button>` : ""}${c.seat ? `<button class="iconbtn ${hashOf() === "#/seat" ? "on" : ""}" data-go="#/seat" aria-label="Orchestrator seat" title="Seat">${I("sliders")}</button>` : ""}<button class="iconbtn" data-go="#/chat/${c.id}/menu" aria-label="Conversation actions" title="More">${I("more")}</button>`}</div>`;
+  /* The tile's silhouette: the block's nodes as ghosts in their true places
+     with their state, the current station outlined, the pass edges and the
+     fail loops as hairlines, the seat's context meter. Inert, and it scales
+     with the world, so descending to block only sharpens the same picture. */
+  function silHtml(cl) {
+    const bw = cl.bodyW, bh = cl.bodyH - HEAD;
+    const y = (v) => v - HEAD;
+    const pct = (v, of) => `${((v / of) * 100).toFixed(2)}%`;
+    const box = (x, yy, w, h) => `left:${pct(x, bw)};top:${pct(yy, bh)};width:${pct(w, bw)};height:${pct(h, bh)}`;
+    const stations = cl.nodes.filter((n) => n.stage);
+    const ghosts = cl.nodes.map((n) => {
+      const c = n.conv; const st = c ? stateBits(c) : null; const a = n.stage ? n.attempt : null;
+      const tone = st ? st.dot || "done" : a ? ({ passed: "passed", failed: "failed", running: "live", skipped: "done" })[a.state] || "none" : "none";
+      const cur = Boolean(n.stage) && n.stage.id === cl.pipe.stage && !cl.quiet;
+      return `<i class="gh ${tone} ${cur ? "cur" : ""}" style="${box(n.rx, y(n.ry), n.w || NW, NH)}"><b class="gd"></b></i>`;
+    }).join("");
+    const pass = stations.slice(0, -1).map((n, i) => `<line class="ed ${n.attempt && n.attempt.state === "passed" ? "on" : ""}" x1="${n.rx + NW}" y1="${y(n.ry) + NH / 2}" x2="${stations[i + 1].rx}" y2="${y(n.ry) + NH / 2}"/>`).join("");
+    const kids = cl.nodes.filter((n) => n.depth).map((n) => { const pn = parentNode(cl, n); return pn ? `<path class="ed" d="${childEdgeD(pn, n, -HEAD)}"/>` : ""; }).join("");
+    const loops = cl.kind === "pipeline" ? loopGeom(cl.pipe).map((l) => `<path class="lp ${l.used ? "used" : ""}" d="${loopD(l, -HEAD)}"/>`).join("") : "";
+    const meterG = cl.kind === "seat" ? `<i class="gm" style="${box(PAD + NW + GAP, y(HEAD + PAD) + NH / 2 - 5, 100, 10)}"><b class="${cl.seat.ctx.left <= 10 ? "low" : cl.seat.ctx.left <= 30 ? "warn" : ""}" style="width:${cl.seat.ctx.left}%"></b></i>` : "";
+    return `<span class="sil" aria-hidden="true"><svg class="sil-lines" viewBox="0 0 ${bw} ${bh}" preserveAspectRatio="none">${pass}${kids}${loops}</svg>${ghosts}${meterG}</span>`;
   }
-  function chatView(c, opts) {
-    const pinned = opts?.pinned; const fp = pinned ? "pin-" : "";
-    const members = c.children && c.children.length ? `<div class="members">${I("branch", "sm")}<span>${c.children.length} members ·</span>${c.children.map((k) => `<span class="badge ${k.state === "working" ? "ok" : ""}">${esc(k.title)}</span>`).join("")}</div>` : "";
-    const chips = c.question && !S.answers[c.id] && !pinned ? `<div class="chips">${c.question.chips.map((t) => `<button data-act="answerText:${c.id}:${esc(t)}"><span class="chip">${esc(t)}</span></button>`).join("")}</div>` : "";
-    return `<div class="chat" data-conv="${c.id}">${chatHead(c, pinned)}${opts?.seatPanel ? seatPanel() : ""}${members}<div class="feed"><div class="inner">${feedHtml(c)}</div></div>${chips}${pinned ? "" : toastHtml()}${composer(c, fp)}</div>`;
-  }
-  /* F13: three faded lines of the mandate with an inline Edit; Rotate is the
-     secondary action beside it, never the primary button on the screen. */
-  function seatPanel() {
-    const s = F.seat; const c = seatConv();
-    const rot = s.ctx.left <= 30 ? `<div class="warnline">${I("alert", "sm")} Rotation recommended · ${s.ctx.left}% of the window left</div>` : "";
-    return `<div class="seatpanel" data-seatpanel><div class="id">${mark(s.engine, "fill")}<span class="t">${esc(s.model)} · ${esc(s.effort)}<small>${esc(s.account)} · ${esc(s.plan)} · holding the seat for ${esc(s.since)}${s.predecessor ? " · predecessor" : ""}</small></span></div>
-      <div class="ctx">${meter(s.ctx.left)}<span class="tn">${s.ctx.left}% left of ${esc(s.ctx.window)}</span>${s.predecessor ? `<button class="btn link" data-act="predecessor">Predecessor · open ›</button>` : ""}</div>
-      <div class="mand"><div class="mh"><span>Mandate v${s.mandateVersion}</span><button class="btn link" data-go="#/seat/rotate">Edit ›</button></div><div class="txt three">${esc(s.mandate)}</div></div>${rot}
-      <div class="sbtns"><button class="btn" data-go="#/seat/rotate">${I("pencil", "sm")}Edit the mandate</button><button class="btn" data-go="#/seat/rotate" data-orchestrator-rotate>${I("rotate", "sm")}Rotate</button><span class="muted" style="font-size:var(--text-label);max-width:190px;line-height:1.35">Changing the mandate, model or account means a successor.</span></div></div>`;
-  }
-
-  /* ── stage: the pipeline graph — the one memorable element ─────────────── */
-  const ROLES = ["architect", "builder", "reviewer", "auditor"]; const MODELS = { claude: ["Opus", "Sonnet", "Haiku"], codex: ["gpt-5.6", "gpt-5.5"] }; const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
-
-  /* One stage node: role as the title, the engine mark, model · reasoning,
-     access, verdict pips, and its attempts as an expandable list (F1, F10). */
-  function stageNode(p, s, i, row, sel) {
-    const cur = p.cursor.stageId === s.id && p.state !== "draft" && p.state !== "completed";
-    const on = sel === s.id;
-    const open = S.openNodes.has(`${p.id}:${s.id}`) || on;
-    const last = lastAttempt(s);
-    const att = last ? `${s.attempts.length} attempt${s.attempts.length > 1 ? "s" : ""} · ${last.state}` : "not started";
-    const rounds = s.onFail ? `<span>${roundsUsed(p, s)} of ${s.onFail.maxRounds} rounds</span>` : "";
-    const attempts = open && s.attempts.length ? `<div class="natt">${s.attempts.map((a) => `<button class="att" data-go="${a.conv ? `#/chat/${a.conv}` : `#/pipeline/${p.id}/stage/${s.id}`}" data-attempt="${s.id}:${a.n}"><span class="a">attempt ${a.n}</span><span class="meta"><span class="st ${a.state === "passed" ? "ok" : a.state === "failed" ? "dng" : a.state === "running" ? "acc" : ""}">${esc(a.state)}</span>${a.head ? `<span class="sha mono">${esc(a.head)}</span>` : ""}${a.findings && a.findings.length ? `<span>${a.findings.length} findings</span>` : ""}</span>${a.conv ? `<span class="open">open ›</span>` : badge("no conversation")}</button>`).join("")}</div>` : "";
-    return `<div class="node ${cur ? "cur" : ""} ${on ? "on" : ""}" data-node="${s.id}" style="grid-row:${row}">
-      <button class="nhead" data-go="#/pipeline/${p.id}/stage/${s.id}" data-stage="${s.id}" aria-expanded="${open}">
-        <span class="l1"><span class="k tn">${i + 1}/${p.stages.length}</span><span class="role">${esc(s.role)}<small>${esc(s.id)}</small></span>${attemptPips(s)}${last ? badge(last.state, ({ passed: "ok", failed: "dng", running: "acc", skipped: "" })[last.state] || "") : badge("not started")}</span>
-        <span class="l2 meta"><span>${mark(s.engine)}${esc(s.model)}</span><span>${esc(s.effort)}</span><span>${esc(s.access)}</span><span>${esc(att)}</span>${rounds}${s.pendingEdit ? `<span class="pend">edit pending · applies from attempt ${s.attempts.length + 1}</span>` : ""}${s.notes && s.notes.length ? `<span class="pend">${s.notes.length} note${s.notes.length > 1 ? "" : ""} for the next attempt</span>` : ""}</span>
-      </button>${attempts}</div>`;
-  }
-  /* The spine segment beside one row: a 2 px track, and on a node row the
-     station whose fill is that stage's last verdict. */
-  function laneHtml(row, opts) {
-    const st = opts.station ? `<span class="station ${opts.station} ${opts.cur ? "cur" : ""}"></span>` : "";
-    return `<div class="lane" style="grid-row:${row}"><span class="track ${opts.track || ""}"></span>${st}</div>`;
-  }
-  function graph(p, sel) {
-    const rows = [];
-    const n = p.stages.length;
-    const nodeRow = (i) => i * 2 + 1;
-    const seamRow = (i) => i * 2 + 2;
-    p.stages.forEach((s, i) => {
-      const last = lastAttempt(s);
-      const reached = s.attempts.length > 0;
-      const station = last ? VERDICT[last.state] || "" : "";
-      const cur = p.cursor.stageId === s.id && p.state !== "draft";
-      rows.push(laneHtml(nodeRow(i), { station, cur, track: reached ? "on" : "dash" }));
-      rows.push(stageNode(p, s, i, nodeRow(i), sel));
-      const nextStage = s.next ? p.stages.find((x) => x.id === s.next) : null;
-      const nextIndex = nextStage ? p.stages.indexOf(nextStage) : -1;
-      const passLabel = !s.next ? "end of the pipeline" : nextIndex === i + 1 ? `pass → ${s.next}` : `pass → ${s.next} ${nextIndex < i ? "↑" : "↓"}`;
-      rows.push(laneHtml(seamRow(i), { track: reached && nextStage && nextStage.attempts.length ? "on" : "dash" }));
-      rows.push(`<div class="seam" style="grid-row:${seamRow(i)}"><span class="elabel ${reached ? "on" : ""}">${esc(passLabel)}</span><button class="iconbtn addstage" data-go="#/pipeline/${p.id}/add/${i + 1}" aria-label="Add a stage after ${esc(s.id)}" title="Add a stage here">${I("plusCircle", "sm")}</button></div>`);
+  /* Fail loops: each one takes a lane under the station row, from the failing
+     station back to its target, labelled at the source end. */
+  function loopGeom(p) {
+    let k = 0; const out = [];
+    p.stages.forEach((st, i) => {
+      if (!st.onFail) return;
+      const j = p.stages.findIndex((x) => x.id === st.onFail.to);
+      const used = st.attempts.filter((a) => a.state === "failed").length;
+      const lane = k++;
+      out.push({ s: st, used, x1: PAD + i * (NW + GAP) + NW / 2 + lane * 10, x2: PAD + j * (NW + GAP) + NW / 2 - lane * 10, y0: HEAD + PAD + NH, y1: HEAD + PAD + NH + 14 + lane * 18 });
     });
-    /* Fail edges as real loops in the right gutter, with the round budget on
-       the loop itself. `up` puts the arrowhead at the top when the target is
-       above the source. */
-    p.stages.forEach((s, i) => {
-      if (!s.onFail) return;
-      const target = p.stages.find((x) => x.id === s.onFail.to);
-      if (!target) return;
-      const j = p.stages.indexOf(target);
-      const from = nodeRow(i); const to = nodeRow(j);
-      const used = roundsUsed(p, s);
-      const idle = used === 0;
-      const a = Math.min(from, to); const b = Math.max(from, to);
-      rows.push(`<div class="loop ${idle ? "idle" : ""} ${to < from ? "up" : ""} " style="grid-row:${a} / ${b + 1}" aria-hidden="true"><span class="ll">↺ ${esc(s.onFail.to)}${roundPips(used, s.onFail.maxRounds)}</span></div>`);
-    });
-    const note = `<div class="graph-note">The line is the pass path; a loop is a fail edge with its round budget.</div>`;
-    return `<div class="graph" data-graph="${p.id}" style="grid-template-rows:repeat(${n * 2}, auto)">${rows.join("")}</div>${note}`;
+    return out;
   }
-  /* At 1280 with the editor open the graph folds to a one-line ladder above
-     it, so the edited stage is never off-screen (F1, F9). */
-  function ladder(p, sel) {
-    return `<div class="ladder" aria-label="Stages">${p.stages.map((s, i) => {
-      const last = lastAttempt(s);
-      return `<button class="${sel === s.id ? "on" : ""}" data-go="#/pipeline/${p.id}/stage/${s.id}"><span class="k">${i + 1}/${p.stages.length}</span>${esc(s.id)}${last ? `<span class="pips"><i class="${VERDICT[last.state] || ""}"></i></span>` : ""}</button>`;
-    }).join("")}</div>`;
+  const loopD = (l, dy) => `M ${l.x1} ${l.y0 + dy} v ${l.y1 - l.y0 - 8} q 0 8 -8 8 H ${l.x2 + 8} q -8 0 -8 -8 v -${l.y1 - l.y0 - 12}`;
+  const loopHead = (l, dy) => `M ${l.x2 - 5} ${l.y0 + dy + 10} L ${l.x2} ${l.y0 + dy + 3} L ${l.x2 + 5} ${l.y0 + dy + 10} z`;
+  const childEdgeD = (pn, n, dy) => { const x1 = pn.rx + (pn.w || NW) / 2, y1 = pn.ry + NH + dy, x2 = n.rx + (n.w || NW) / 2, y2 = n.ry + dy; return `M ${x1} ${y1} C ${x1} ${y1 + 12}, ${x2} ${y2 - 12}, ${x2} ${y2}`; };
+  function pipelineBody(cl) {
+    const p = cl.pipe;
+    const stations = cl.nodes.filter((n) => n.stage);
+    const nodes = stations.map((n, i) => {
+      const st0 = n.stage; const a = n.attempt; const c = n.conv;
+      const st = c ? stateBits(c) : null;
+      const cur = st0.id === p.stage;
+      const ring = a ? a.state : "none";
+      const phrase = c ? st.phrase : a ? a.state : "not started";
+      const pips = st0.attempts.map((x) => `<i class="pip ${x.state}"></i>`).join("");
+      const lifted = Boolean(c) && S.lift === c.id;
+      const act = lifted ? `data-conv="${c.id}"` : c ? `data-act="open:${c.id}" data-conv="${c.id}"` : `data-act="inspect:${cl.id}"`;
+      const edge = i < stations.length - 1 ? `<span class="edge ${a && a.state === "passed" ? "on" : ""}" style="left:${n.rx + NW}px;top:${n.ry + NH / 2 - 1}px"></span>` : "";
+      const tag = lifted ? "div" : "button";
+      return `<${tag} class="node station ${cur ? "cur" : ""} ${st ? st.edge || "" : ""} ${lifted ? "lifted" : ""}" ${act} style="left:${n.rx}px;top:${n.ry}px" aria-label="${esc(st0.role)} · ${esc(st0.id)} · ${esc(phrase)}">
+        <span class="row1"><i class="ring ${ring}"></i><span class="role">${esc(st0.role)}</span><span class="sid">${esc(st0.id)}</span>${pips ? `<span class="pips">${pips}</span>` : ""}</span>
+        <span class="row2">${mark(st0.engine)}<span class="tn">${esc(st0.model)} · ${esc(st0.effort)}</span><span class="sep">·</span><span class="${st ? "" : "muted"}">${esc(st0.access)}</span></span>
+        <span class="row3 ${st && st.tone ? st.tone.replace("b-", "t-") : ""}">${esc(c ? (st.key === "working" ? `working ${c.elapsed} · ${nowFragment(c)}` : st.phrase) : phrase)}</span>
+        ${lifted ? liftPane(c) : ""}
+      </${tag}>${edge}`;
+    }).join("");
+    const kids = cl.nodes.filter((n) => !n.stage);
+    const loops = loopGeom(p).map((l) => `<g class="loop ${l.used ? "used" : ""}"><path d="${loopD(l, 0)}"/><path class="head" d="${loopHead(l, 0)}"/><text x="${l.x1 - 10}" y="${l.y1 - 4}" text-anchor="end">↺ ${esc(l.s.onFail.to)} · ${"●".repeat(l.used)}${"○".repeat(Math.max(0, l.s.onFail.maxRounds - l.used))} · ${l.used} of ${l.s.onFail.maxRounds} rounds</text></g>`).join("");
+    const edges = kids.map((n) => { const pn = parentNode(cl, n); return pn ? `<path d="${childEdgeD(pn, n, 0)}"/>` : ""; }).join("");
+    const tag = cl.task && cl.task.title !== p.task ? `<span class="tasktag" style="left:${PAD}px;top:${HEAD - 12}px">${cl.task.issue ? `#${cl.task.issue}` : "task"} · ${esc(cl.task.title)}</span>` : "";
+    return `<div class="cl-body"><svg class="spine" width="${cl.w}" height="${cl.h}" aria-hidden="true">${loops}${edges}</svg>${nodes}${kids.map((n) => convNode(n)).join("")}${tag}</div>`;
+  }
+  function convNode(n) {
+    const c = n.conv; const st = stateBits(c);
+    const lifted = S.lift === c.id; const tag = lifted ? "div" : "button";
+    return `<${tag} class="node ${st.edge || ""} ${n.depth ? "child" : "root"} ${lifted ? "lifted" : ""}" ${lifted ? "" : `data-act="open:${c.id}"`} data-conv="${c.id}" style="left:${n.rx}px;top:${n.ry}px;width:${n.w || NW}px" aria-label="${esc(c.title)} · ${esc(st.phrase)}">
+        <span class="row1"><i class="dot ${st.dot}"></i><span class="title">${esc(c.title)}</span></span>
+        <span class="row2">${mark(c.engine)}<span class="tn">${esc(c.model)} · ${esc(c.effort)}</span></span>
+        <span class="row3 ${st.tone ? st.tone.replace("b-", "t-") : ""}">${esc(st.key === "working" ? `working ${c.elapsed} · ${nowFragment(c)}` : st.phrase)}</span>
+        ${lifted ? liftPane(c) : ""}
+      </${tag}>`;
+  }
+  function treeBody(cl) {
+    const nodes = cl.nodes.map((n) => convNode(n)).join("");
+    const edges = cl.nodes.filter((n) => n.depth).map((n) => { const pn = parentNode(cl, n); return pn ? `<path d="${childEdgeD(pn, n, 0)}"/>` : ""; }).join("");
+    const extra = cl.kind === "seat" ? `<div class="seatside" style="left:${PAD + NW + GAP}px;top:${HEAD + PAD}px"><span class="tn">context</span>${meter(cl.seat.ctx.left)}<span class="tn">${cl.seat.ctx.left}% left</span><span class="tn muted">${esc(cl.seat.account)} · ${esc(cl.seat.model)} · ${esc(cl.seat.effort)}</span></div>` : "";
+    const tag = cl.task ? `<span class="tasktag" style="left:${PAD}px;top:${HEAD - 12}px">${cl.task.issue ? `#${cl.task.issue}` : "task"} · ${esc(cl.task.title)}</span>` : "";
+    return `<div class="cl-body"><svg class="spine" width="${cl.w}" height="${cl.h}" aria-hidden="true">${edges}</svg>${nodes}${extra}${tag}</div>`;
+  }
+  /* The lift: the node's live pane, in place, with the feed's tail and the
+     same composer the chat stage has. */
+  function liftPane(c) {
+    const st = stateBits(c);
+    const feed = (c.feed || []).slice(-5).map(feedItem).join("");
+    const q = c.question && st.key === "waiting" ? questionCard(c) : "";
+    return `<div class="lift" data-lift="${c.id}" data-lift-scope data-focus="lift" tabindex="0" aria-label="${esc(c.title)} · lifted · Enter opens, Esc lowers, i types">
+      <div class="lhead"><i class="dot ${st.dot}"></i>${st.badge ? badge(st.badge, st.tone) : ""}<span class="t">${esc(c.title)}</span><span class="meta"><span>${mark(c.engine)}${esc(c.model)} · ${esc(c.effort)}</span></span><button class="ib" data-go="#/chat/${c.id}" aria-label="Open the conversation (Enter)">${I("open")}</button><button class="ib" data-act="unlift" aria-label="Lower (Esc)">${I("x")}</button></div>
+      <div class="lfeed">${feed}${q}</div>
+      ${composer(c, false)}
+    </div>`;
+  }
+  /* The apron under the map: the backlog (tasks with no worker), folded to
+     its count until opened; each row has Assign. */
+  function trayHtml() {
+    const n = M.backlog.length;
+    const q = needsQueue(S.project);
+    const needs = q.length ? `<h3>Needs you <span class="c">· ${q.length} · n walks them</span></h3><div class="qlist">${q.map((it) => { const cl = clusterById(it.cluster); const c = it.kind === "conv" ? conv(it.conv) : null; const st = c ? stateBits(c) : null; return `<button class="irow ${st ? st.edge || "" : "wait"}" data-act="${it.kind === "conv" ? `open:${it.conv}` : `inspect:${it.cluster}`}"><i class="dot ${st ? st.dot : "wait"}"></i><span class="main"><span class="t">${esc(c ? c.title : cl.title)}</span><span class="m"><span class="${st ? st.tone.replace("b-", "t-") : "t-warning"}">${esc(st ? st.phrase : cl.phrase)}</span><span class="sep">·</span>${c ? `${mark(c.engine)}<span>${esc(c.model)}</span>` : `<span>${cl.pipe.issue ? `#${cl.pipe.issue}` : "pipeline"}</span>`}</span></span>${keycap(cl && cl.key)}</button>`; }).join("")}</div>` : "";
+    if (!n) return needs;
+    const head = `<button class="tray-head" data-act="tray" aria-expanded="${S.tray}" aria-label="${S.tray ? "Fold" : "Open"} the backlog · ${n} tasks without a worker">${I("inbox")}<span>Backlog · ${n} without a worker</span>${I("chevD", S.tray ? "up" : "")}</button>`;
+    const rows = S.tray ? `<div class="tray-rows">${M.backlog.map((t) => `<div class="tchip"><span class="t">${t.issue ? `<em>#${t.issue}</em> ` : ""}${esc(t.title)}</span><button class="btn small" data-act="assign:${t.id}">${I("plus", "sm")}Assign</button></div>`).join("")}</div>` : "";
+    return `${needs}<div class="tray">${head}${rows}</div>`;
+  }
+  function fieldApron() {
+    const rows = F.projects.filter((p) => !p.archived).map((p) => { const n = counts(p.id); return `<button class="irow" data-act="project:${p.id}"><span class="main"><span class="t">${esc(p.name)}${p.crowned ? I("crown", "crownmark") : ""}</span><span class="m"><span class="${n.needs ? "t-warning" : ""}">${n.needs} need you</span><span class="sep">·</span><span>${n.working} working</span></span></span>${I("chevR", "chev")}</button>`; }).join("");
+    return `<h3>Projects <span class="c">· ${F.projects.filter((p) => !p.archived).length}</span></h3><div class="qlist">${rows}</div>`;
   }
 
-  function segHtml(name, options, value, act) { return `<div class="seg" role="group" aria-label="${esc(name)}">${options.map((o) => `<button class="${o === value ? "on" : ""}" data-act="${act}:${esc(o)}" aria-pressed="${o === value}">${esc(o)}</button>`).join("")}</div>`; }
-  const selHtml = (name, opts, value, act, allowNone) => `<select class="field" data-act="${act}" aria-label="${esc(name)}">${allowNone ? `<option value="" ${value ? "" : "selected"}>none</option>` : ""}${opts.map((o) => `<option ${o === value ? "selected" : ""}>${esc(o)}</option>`).join("")}</select>`;
-
-  /* F9: the editor is a bounded pane with its own scroller and a footer that
-     is always on screen — Save, Restart and Cancel never fall below the fold,
-     and the graph beside it never disappears. */
-  const egrp = (key, label, inner) => {
-    const open = S.openGroups.has(key);
-    return `<div class="edetails"><button class="esum" data-act="egrp:${esc(key)}" aria-expanded="${open}">${esc(label)}${I("chevD", "sm")}</button>${open ? `<div class="egrp">${inner()}</div>` : ""}</div>`;
-  };
-  function editorShell(title, badgeHtml, closeGo, body, foot) {
-    return `<div class="editor" data-editor="${esc(title.key)}"><h3>${I(title.icon, "sm")}${esc(title.text)}${badgeHtml}<button class="iconbtn" data-go="${closeGo}" aria-label="Close the editor">${I("x")}</button></h3><div class="ebody">${body}</div><div class="foot">${foot}</div></div>`;
+  /* ── the inspector ────────────────────────────────────────────────────── */
+  function inspectorHtml(cl) {
+    const close = `<button class="ib" data-act="deselect" aria-label="Close the inspector (Esc)">${I("x")}</button>`;
+    if (cl.kind === "pipeline") return pipelineInspector(cl, close);
+    if (cl.kind === "seat") {
+      const s = cl.seat; const c = cl.root; const st = stateBits(c);
+      return `<div class="insp-head">${keycap(cl.key)}<span class="t">Orchestrator</span>${badge(st.key === "working" ? `working ${c.elapsed}` : st.phrase, st.tone)}${close}</div>
+      <div class="insp-body">
+        <div class="idrow">${mark(s.engine, "fill")}<span><b>${esc(s.model)} · ${esc(s.effort)}</b><small>${esc(s.account)} · ${esc(s.plan)} · holding the seat for ${esc(s.since)}${s.predecessor ? " · predecessor" : ""}</small></span></div>
+        <div class="mrow"><span class="tn">context</span>${meter(s.ctx.left)}<span class="tn">${s.ctx.left}% left of ${esc(s.ctx.window)}</span></div>
+        <p class="mandate">${esc(s.mandate)}</p>
+        <div class="actions"><button class="btn primary" data-go="#/chat/${c.id}">${I("open", "sm")}Open the conversation</button><button class="btn" data-go="#/board/rotate">${I("rotate", "sm")}Rotate</button></div>
+      </div>`;
+    }
+    const rows = cl.nodes.map((n) => { const c = n.conv; const st = stateBits(c); return `<button class="irow ${st.edge || ""}" data-go="#/chat/${c.id}"><i class="dot ${st.dot}"></i><span class="main"><span class="t">${esc(c.title)}</span><span class="m"><span class="${st.tone ? st.tone.replace("b-", "t-") : ""}">${esc(st.phrase)}</span><span class="sep">·</span>${mark(c.engine)}<span>${esc(c.model)} · ${esc(c.effort)}</span></span></span>${I("chevR", "chev")}</button>`; }).join("");
+    const root = cl.root; const st = stateBits(root);
+    return `<div class="insp-head">${keycap(cl.key)}<span class="t">${esc(cl.title)}</span>${badge(cl.badge.text, cl.badge.tone)}${close}</div>
+    <div class="insp-body">
+      ${cl.task ? `<div class="tagrow"><span class="tasktag inline">${cl.task.issue ? `#${cl.task.issue}` : "task"} · ${esc(cl.task.title)}</span><span class="tn muted">task · ${esc(cl.task.status)}</span></div>` : ""}
+      <h3>Conversations <span class="c">· ${cl.nodes.length}</span></h3>${rows}
+      <div class="actions"><button class="btn primary" data-go="#/chat/${root.id}">${I("open", "sm")}Open</button><button class="btn" data-act="lift:${root.id}">Lift here</button>${st.key === "killed" ? `<button class="btn" data-act="respawn:${root.id}">Respawn</button>` : `<button class="btn quiet" data-act="kill:${root.id}">Kill</button>`}${cl.pinned ? `<button class="btn quiet" data-act="unpin:${cl.id}">${I("undo", "sm")}Release</button>` : ""}</div>
+    </div>`;
   }
-  /* Wherever an account is listed it carries its bar: the operator picks an
-     account by what is left in it, and «38% left» as prose is a number to
-     compare in the head instead of a length to compare with the eye. */
-  const useCell = (low) => low === null
-    ? `<span class="use"><span class="meter empty"><i></i></span><span class="pct tn">—</span></span>`
-    : `<span class="use">${meter(low, `${low}% left`)}<span class="pct tn ${meterCls(low)}">${low}% left</span></span>`;
-  const lowestWindow = (a) => (a.windows.length ? Math.min(...a.windows.map((w) => w.left)) : null);
-  function accountRows(engine, chosen, act) {
-    return `<div class="accrows">${F.accounts[engine].map((a) => {
-      const low = lowestWindow(a);
-      return `<button class="arow compact ${chosen === a.id ? "on" : ""}" data-act="${a.auth === "Authenticated" ? `${act}:${a.id}` : `signIn:${engine}:${a.id}`}"><span class="dot ${a.auth === "Authenticated" ? "ok" : ""}"></span><span class="t">${esc(a.label)}<small>${esc(a.plan)}</small></span>${useCell(a.auth === "Authenticated" ? low : null)}${a.auth === "Authenticated" ? (chosen === a.id ? badge("chosen", "acc") : badge("ready", "ok")) : `<span class="signin">sign in →</span>`}</button>`;
-    }).join("")}</div>`;
+  function pipelineInspector(cl, close) {
+    const p = cl.pipe; const pb = pipeBits(p);
+    const stations = p.stages.map((s, i) => {
+      const a = lastAttempt(s); const cur = s.id === p.stage && !cl.quiet;
+      const loopIn = p.stages.filter((x) => x.onFail && x.onFail.to === s.id);
+      const attempts = s.attempts.map((x) => `<span class="att"><i class="pip ${x.state}"></i>attempt ${x.n} · ${esc(x.state)}${x.sha ? ` · <code>${esc(x.sha)}</code>` : ""}${x.findings ? ` · ${x.findings.length} findings` : ""}${x.conv ? `<button class="link" data-go="#/chat/${x.conv}">open ›</button>` : ""}</span>`).join("");
+      const editing = S.editing === `${p.id}:${s.id}`;
+      return `<div class="stn ${cur ? "cur" : ""} ${a ? a.state : "none"}" data-stage="${s.id}">
+        <i class="ring ${a ? a.state : "none"}"></i>
+        <div class="stn-main">
+          <div class="l1"><b class="role">${esc(s.role)}</b><span class="sid">${esc(s.id)}</span>${cur ? badge("current", "b-accent") : ""}${loopIn.map((x) => `<span class="loopin">↺ from ${esc(x.id)} · ${"●".repeat(x.attempts.filter((y) => y.state === "failed").length)}${"○".repeat(Math.max(0, x.onFail.maxRounds - x.attempts.filter((y) => y.state === "failed").length))} · ${x.attempts.filter((y) => y.state === "failed").length} of ${x.onFail.maxRounds} rounds</span>`).join("")}</div>
+          <div class="l2 meta"><span>${mark(s.engine)}${esc(s.model)} · ${esc(s.effort)}</span><span>${esc(s.access)}</span>${s.onFail ? `<span class="warn">on fail ↺ ${esc(s.onFail.to)} · ${s.onFail.maxRounds} rounds</span>` : ""}</div>
+          ${attempts ? `<div class="atts">${attempts}</div>` : `<div class="atts muted">not started</div>`}
+          ${editing ? stageEditor(p, s) : `<button class="link" data-act="edit:${p.id}:${s.id}">edit stage ›</button>`}
+        </div>
+      </div>${i < p.stages.length - 1 ? `<div class="stn-link ${a && a.state === "passed" ? "on" : ""}"></div>` : ""}`;
+    }).join("");
+    const cur = p.stages.find((s) => s.id === p.stage);
+    const failed = cur && [...cur.attempts].reverse().find((a) => a.state === "failed" && a.findings);
+    const findings = p.state === "needs_decision" && failed ? `<div class="findings"><h3>${esc(cur.role)} · attempt ${failed.n}${cur.onFail ? ` · round ${cur.attempts.filter((a) => a.state === "failed").length} of ${cur.onFail.maxRounds}` : ""} · ${failed.findings.length} findings</h3><ol>${failed.findings.map((f) => `<li>${esc(f)}</li>`).join("")}</ol>
+      <textarea class="field" data-focus="answer" rows="2" placeholder="Answer the reviewer, then retry the stage…" aria-label="Your answer"></textarea>
+      <div class="actions"><button class="btn primary" data-act="answer:${p.id}">Answer and retry</button><button class="btn" data-act="skip:${p.id}">Skip stage</button></div></div>` : "";
+    const actions = p.state === "draft" ? `<button class="btn primary" data-act="start:${p.id}">${I("play", "sm")}Start</button>` : p.state === "completed" ? `<button class="btn" data-act="rerun:${p.id}">${I("rotate", "sm")}Re-run</button>` : `${p.state === "paused" ? `<button class="btn" data-act="resume:${p.id}">${I("play", "sm")}Resume</button>` : `<button class="btn" data-act="pause:${p.id}">${I("pause", "sm")}Pause</button>`}<button class="btn quiet" data-act="archive:${p.id}">${I("archive", "sm")}Archive</button>`;
+    return `<div class="insp-head">${keycap(cl.key)}<span class="t">${p.issue ? `<em>#${p.issue}</em> ` : ""}${esc(p.task)}</span>${badge(pb.phrase, pb.tone)}${close}</div>
+    <div class="insp-body">
+      <div class="meta wrap"><span>${esc(pb.phrase)} · since ${esc(p.since)}</span><span>rev ${p.revision}</span><span><code>${esc(p.branch)}</code></span>${cl.task ? `<span class="tasktag inline">${cl.task.issue ? `#${cl.task.issue}` : "task"} · ${esc(cl.task.status)}</span>` : ""}</div>
+      ${findings}
+      <h3>Stages <span class="c">· ${p.stages.length}</span></h3>
+      <div class="graph">${stations}</div>
+      <div class="actions">${actions}${cl.pinned ? `<button class="btn quiet" data-act="unpin:${cl.id}">${I("undo", "sm")}Release</button>` : ""}</div>
+      ${p.log.length ? `<h3>Changes</h3><div class="log">${p.log.map((l) => `<div class="lrow"><b>${esc(l[0])}</b><span>${esc(l[1])}</span><span>${esc(l[2])}</span><span class="muted">${esc(l[3])}</span><span class="rest">${esc(l[4])}</span></div>`).join("")}</div>` : ""}
+    </div>`;
   }
+  const seg = (name, options, value, act) => `<div class="seg" role="radiogroup" aria-label="${esc(name)}">${options.map((o) => `<button role="radio" aria-checked="${o === value}" class="${o === value ? "on" : ""}" data-act="${act}:${o}">${esc(o)}</button>`).join("")}</div>`;
   function stageEditor(p, s) {
-    const d = S.editorDraft && S.editorDraft.stage === s.id && S.editorDraft.pipeline === p.id ? S.editorDraft : (S.editorDraft = { pipeline: p.id, stage: s.id, role: s.role, engine: s.engine, model: s.model, effort: s.effort, access: s.access, sandbox: s.sandbox, outputs: s.outputs.join(", "), account: "cl-main", prompt: s.prompt, passTo: s.next || "", failTo: s.onFail ? s.onFail.to : "", maxRounds: s.onFail ? s.onFail.maxRounds : 3, note: "", rerunFrom: "worktree", stopCurrent: false });
-    const running = s.attempts.some((a) => a.state === "running" || a.state === "pending");
-    const nextAttempt = s.attempts.length + 1;
-    const others = p.stages.filter((x) => x.id !== s.id).map((x) => x.id);
-    const closed = p.state === "closed";
-    const body = `
-      <div class="rowf"><label>Role ${segHtml("Role", ROLES, d.role, "ed:role")}</label><label>Engine ${segHtml("Engine", ["claude", "codex"], d.engine, "ed:engine")}</label></div>
-      <div class="rowf"><label>Model ${segHtml("Model", MODELS[d.engine], d.model, "ed:model")}</label><label>Reasoning ${segHtml("Reasoning", EFFORTS, d.effort, "ed:effort")}</label></div>
-      <div class="rowf"><label>Access ${segHtml("Access", ["read-write", "read-only"], d.access, "ed:access")}</label><label>Sandbox ${segHtml("Sandbox", ["full", "restricted"], d.sandbox, "ed:sandbox")}</label></div>
-      ${d.access === "read-only" ? `<label>Declared outputs <input class="field mono" value="${esc(d.outputs)}" data-act="ed:outputs" placeholder="paths this stage may write"></label>` : ""}
-      <label>Account</label>${accountRows(d.engine, d.account, "ed:account")}
-      <label>Prompt <textarea class="field" data-act="ed:prompt">${esc(d.prompt)}</textarea></label>
-      ${egrp(`${p.id}:${s.id}:edges`, "Edges", () => `<div class="rowf"><span class="muted" style="width:44px">pass →</span>${selHtml("Pass edge", others, d.passTo, "ed:passTo", true)}</div><div class="rowf"><span class="muted" style="width:44px">fail ↺</span>${selHtml("Fail edge", others, d.failTo, "ed:failTo", true)}<input class="field num tn" type="number" min="0" max="20" value="${d.maxRounds}" data-act="ed:maxRounds" aria-label="Max rounds"></div><div class="note">Round budgets derive from activation records; lowering below the used count parks the next fail verdict. A traversed edge may still be rewired.</div><div class="btns"><button class="btn" data-act="pa:setEdge:${p.id}:${s.id}" ${closed ? "disabled" : ""}>Save edges</button></div>`)}
-      ${egrp(`${p.id}:${s.id}:note`, `Note for attempt ${nextAttempt}`, () => `<textarea class="field" style="min-height:56px" data-act="ed:note" placeholder="Rendered into the prompt of attempt ${nextAttempt} as a titled block">${esc(d.note)}</textarea><div class="btns"><button class="btn" data-act="pa:note:${p.id}:${s.id}" ${closed ? "disabled" : ""}>Add note</button></div>`)}
-      ${egrp(`${p.id}:${s.id}:rerun`, "Re-run this stage", () => `<div class="rowf">${segHtml("From", ["worktree", "last-passed", "checkpoint"], d.rerunFrom, "ed:rerunFrom")}</div>${d.rerunFrom === "checkpoint" ? selHtml("Checkpoint", p.checkpoints.map((c) => c.name), p.checkpoints[0]?.name, "ed:checkpoint") : ""}${running ? `<button class="check" data-act="ed:stopCurrent:toggle" aria-pressed="${d.stopCurrent ? "true" : "false"}"><span class="bx">${d.stopCurrent ? I("check", "sm") : ""}</span>Stop attempt ${s.attempts.length} first</button>` : ""}<div class="note ${running && !d.stopCurrent ? "warn" : ""}">${running && !d.stopCurrent ? `Refused while attempt ${s.attempts.length} is unsettled — tick «Stop attempt first» to re-run now.` : p.state === "completed" ? "Reopens the completed pipeline at this stage." : `Creates attempt ${nextAttempt} from the ${d.rerunFrom === "worktree" ? "current worktree, no reset" : d.rerunFrom === "last-passed" ? "last passed commit (resets the worktree)" : "named checkpoint (resets the worktree)"}.`}</div><div class="btns"><button class="btn ${running && !d.stopCurrent ? "" : "primary"}" data-act="pa:rerun:${p.id}:${s.id}" ${closed || (running && !d.stopCurrent) ? "disabled" : ""}>Re-run · attempt ${nextAttempt}</button></div>`)}
-      ${egrp(`${p.id}:${s.id}:remove`, "Remove this stage", () => s.attempts.length ? `<div class="note">This stage has attempts, so it stays as history. Route around it with the edges above.</div>` : `<div class="btns"><button class="btn danger" data-act="pa:removeStage:${p.id}:${s.id}">Remove stage</button></div>`)}`;
-    const note = closed ? "Archived pipelines are read-only; restore it to edit."
-      : running ? `Attempt ${s.attempts.length} runs with its own copy of this definition. Save applies from attempt ${nextAttempt}; Restart stops attempt ${s.attempts.length} and starts ${nextAttempt} from the current worktree.`
-      : p.state === "completed" ? "The pipeline is completed. Save the edit first, then re-run this stage to reopen it: the new attempt binds the saved definition."
-      : `Applies from attempt ${nextAttempt} — the next time this stage runs.`;
-    const foot = `<button class="btn primary" data-act="pa:editStage:${p.id}:${s.id}" ${closed ? "disabled" : ""}>Save · from attempt ${nextAttempt}</button>${running ? `<button class="btn danger" data-act="pa:editRestart:${p.id}:${s.id}">Restart now</button>` : ""}<button class="btn quiet" data-go="#/pipeline/${p.id}">Cancel</button><span class="note">${esc(note)}</span>`;
-    return editorShell({ key: s.id, icon: "pencil", text: `Stage ${stageIndex(p, s)}/${p.stages.length} · ${s.id}` }, badge(running ? `attempt ${s.attempts.length} running` : s.attempts.length ? `${s.attempts.length} attempts` : "not started", running ? "acc" : ""), `#/pipeline/${p.id}`, body, foot);
+    const key = `${p.id}:${s.id}`; const d = S.editDraft || { ...s };
+    return `<div class="editor" data-editor>
+      <label>Role</label>${seg("Role", ["Architect", "Builder", "Verifier", "Reviewer", "Deployer"], d.role, `ed:role`)}
+      <label>Engine</label>${seg("Engine", ["claude", "codex"], d.engine, `ed:engine`)}
+      <label>Model</label>${seg("Model", d.engine === "codex" ? ["gpt-5.6", "gpt-5.5"] : ["Opus", "Sonnet", "Haiku"], d.model, `ed:model`)}
+      <label>Reasoning</label>${seg("Reasoning", ["low", "medium", "high", "xhigh", "max"], d.effort, `ed:effort`)}
+      <label>Access</label>${seg("Access", ["read-only", "read-write"], d.access, `ed:access`)}
+      <label>Prompt</label><textarea class="field" rows="3" data-focus="prompt" aria-label="Stage prompt">{{prev.output}}\n\nPinned task: ${esc(p.task)}</textarea>
+      <div class="actions"><button class="btn primary" data-act="save:${key}">Save · applies from the next attempt</button>${s.attempts.some((a) => a.state === "running") ? `<button class="btn" data-act="restart:${key}">Restart the stage now</button>` : ""}<button class="btn quiet" data-act="cancelEdit">Cancel</button></div>
+    </div>`;
   }
-  function addStageEditor(p, index) {
-    const d = S.editorDraft && S.editorDraft.add === index && S.editorDraft.pipeline === p.id ? S.editorDraft : (S.editorDraft = { pipeline: p.id, add: index, id: "", role: "builder", engine: "codex", model: "gpt-5.6", effort: "high", access: "read-write", sandbox: "full", prompt: "" });
-    const after = p.stages[index - 1]; const before = p.stages[index];
-    const body = `
-      <label>Stage id <input class="field mono" value="${esc(d.id)}" data-act="ed:id" placeholder="e.g. verify-2" data-autofocus></label>
-      <div class="rowf"><label>Role ${segHtml("Role", ROLES, d.role, "ed:role")}</label><label>Engine ${segHtml("Engine", ["claude", "codex"], d.engine, "ed:engine")}</label></div>
-      <div class="rowf"><label>Model ${segHtml("Model", MODELS[d.engine], d.model, "ed:model")}</label></div>
-      <label>Reasoning ${segHtml("Reasoning", EFFORTS, d.effort, "ed:effort")}</label>
-      <label>Prompt <textarea class="field" data-act="ed:prompt">${esc(d.prompt)}</textarea></label>`;
-    const note = after ? `Inserted at its seam: ${after.id} → new stage → ${before ? before.id : "end"}.${p.state !== "draft" && index <= p.stages.indexOf(stageOf(p)) ? " It sits before the cursor, so it is history-only until an edge or a re-run reaches it." : ""}` : "Becomes the first stage.";
-    const foot = `<button class="btn primary" data-act="pa:addStage:${p.id}:${index}">Add stage</button><button class="btn quiet" data-go="#/pipeline/${p.id}">Cancel</button><span class="note">${esc(note)}</span>`;
-    return editorShell({ key: "add", icon: "plusCircle", text: `Add a stage ${after ? `after ${after.id}` : "first"}` }, "", `#/pipeline/${p.id}`, body, foot);
-  }
+  function mountInspector() { /* nothing to bind: delegation handles it */ }
 
-  /* ── stage: one pipeline ───────────────────────────────────────────────── */
-  function pipeView(p, selStage, addIndex) {
-    const b = pipeBits(p); const s = stageOf(p); const need = p.state === "needs_decision";
-    const used = roundsUsed(p, s);
-    /* F18: «attempt» is one run of a stage, «round» one traversal of a fail
-       edge. F10: earlier rounds fold open in place. */
-    const earlier = s.attempts.slice(0, -1).filter((a) => a.findings && a.findings.length);
-    const findings = need ? `<div class="panel findings" data-findings><h3>${esc(s.role.charAt(0).toUpperCase() + s.role.slice(1))} · attempt ${s.attempts.length}${s.onFail ? ` · round ${used} of ${s.onFail.maxRounds}` : ""} · ${p.findings.length} findings <span class="c">· stage ${stageIndex(p, s)}/${p.stages.length} · ${esc(s.id)}</span></h3><ol>${p.findings.map((f) => `<li>${esc(f)}</li>`).join("")}</ol>${earlier.length ? earlier.map((a) => `<details ${S.openRounds.has(`${p.id}:${a.n}`) ? "open" : ""}><summary data-act="round:${p.id}:${a.n}">${I("chevR", "sm")}round ${a.n} · ${a.findings.length} findings ›</summary><ol>${a.findings.map((f) => `<li>${esc(f)}</li>`).join("")}</ol></details>`).join("") : ""}<div class="answer"><input class="field" placeholder="Answer for the next attempt (sent as a note with the question)…" data-act="answerField" data-focus="answer" aria-label="Answer"><button class="btn primary" data-act="pa:answer:${p.id}">Answer</button></div></div>` : "";
-    const waiting = p.waiting ? `<div class="panel" style="border-left:3px solid var(--color-info)"><h3>Waiting · ${esc(p.waiting.kind)} since ${esc(p.waiting.since)}</h3></div>` : "";
-    const act = (id, label, icon, cls) => `<button class="btn ${cls || ""}" data-act="pa:${id}:${p.id}">${icon ? I(icon, "sm") : ""}${label}</button>`;
-    let actions = "";
-    if (p.state === "draft") actions = act("start", "Start pipeline", "play", "primary") + act("discard", "Discard draft", "trash", "danger");
-    else if (need) actions = act("retry", "Retry stage", "refresh", "primary") + act("skip", "Skip stage", "skip") + act("pause", "Pause", "pause") + act("archive", "Archive", "archive");
-    else if (p.state === "paused") actions = act("resume", "Resume", "play", "primary") + act("archive", "Archive", "archive");
-    else if (p.state === "running") actions = act("pause", "Pause", "pause") + act("checkpoint", "Checkpoint", "flag") + act("archive", "Archive", "archive");
-    else if (p.state === "completed") actions = act("rerunLast", "Re-run the last stage", "refresh", "primary") + act("archive", "Archive", "archive");
-    else if (p.state === "closed") actions = act("restore", "Restore", "undo", "primary");
-    const sub = p.state === "draft"
-      ? `<span>${p.stages.length} stages</span><span>not started</span>`
-      : `<span class="st ${b.cls}">${esc(b.phrase)}</span><span>stage ${stageIndex(p, s)}/${p.stages.length}</span><span>started ${esc(p.started)}</span><span class="mono">${esc(p.branch || "")}</span><span>rev ${p.revision}</span>${p.lastEdit ? `<span class="rest">last edit by ${esc(p.lastEdit.actor)} ${esc(p.lastEdit.at)} ago</span>` : ""}`;
-    const editor = selStage ? stageEditor(p, selStage) : addIndex !== undefined ? addStageEditor(p, addIndex) : "";
-    const log = p.mutations.length ? `<div class="panel log"><details ${selStage ? "" : "open"}><summary>${I("chevD", "sm")}Changes <span class="c">· ${p.mutations.length} · every mutation is attributed and revision-stamped</span></summary>${p.mutations.slice().reverse().map((m, i) => `<div class="mrow ${i === 0 ? "newest" : ""}"><span class="badge">rev ${m.revision}</span><span class="l"><b>${esc(m.action)}</b>${m.stage ? ` · ${esc(m.stage)}` : ""}${m.detail ? ` · ${esc(m.detail)}` : ""}<small>${esc(m.actor)} · ${esc(m.at)} · ${esc(m.effect)}</small></span></div>`).join("")}</details></div>` : "";
-    /* F3: the linked task is the thread card, not a bare list row. */
-    const tasks = F.tasks.filter((t) => t.pipeline === p.id);
-    const threads = tasks.length ? `<div class="panel"><h3>Linked tasks <span class="c">· ${tasks.length}</span></h3><div class="thread-card">${tasks.map((t) => kanbanCard(t, { flat: true })).join("")}</div></div>` : "";
-    return `<div class="chat" data-pipeline="${p.id}"><div class="shead"><span class="dot ${b.cls === "acc" ? "acc pulse" : b.cls === "ok" ? "ok" : need ? "warn" : ""}"></span><div class="tt"><div class="t display trunc">${esc(p.task)}</div><div class="sub meta">${sub}</div></div>${need ? badge("needs a decision", "warn") : badge(b.badge, b.cls)}<button class="iconbtn" data-go="#/pipelines" aria-label="All pipelines" title="Pipelines (p)">${I("layers")}</button></div>
-      <div class="sbody split">${findings}${waiting}
-        <div class="actions">${actions}</div>
-        <div class="pipe-grid ${editor ? "" : "noed"}"><div>${ladder(p, selStage ? selStage.id : null)}${graph(p, selStage ? selStage.id : null)}${toastHtml()}${threads}${log}</div>${editor}</div>
-      </div></div>`;
+  /* ── the chat stage ───────────────────────────────────────────────────── */
+  function chatStage(r) {
+    const c = conv(r.id);
+    if (!c) return `<div class="chat"><div class="yard-empty">No such conversation.</div></div>`;
+    const st = stateBits(c);
+    const cl = clustersOf(c.project).find((x) => x.nodes.some((n) => n.conv && n.conv.id === c.id) || (x.held || []).some((h) => h.id === c.id));
+    const pos = cl && c.pipeline ? `${stageIndex(pipe(c.pipeline.id), c.pipeline.stage)}/${pipe(c.pipeline.id).stages.length} ${c.pipeline.stage}` : "";
+    const siblings = cl ? cl.nodes.map((n) => n.conv).filter(Boolean) : [c];
+    const i = siblings.findIndex((x) => x.id === c.id);
+    const prev = siblings[i - 1], next = siblings[i + 1];
+    const seat = c.seat ? F.seats[c.project] : null;
+    return `<div class="chat" data-conversation="${c.id}">
+      <header class="chead">
+        <button class="ib" data-act="backToYard:${c.id}" aria-label="Back to the yard (Esc)">${I("chevL")}</button>
+        <i class="dot ${st.dot}"></i>${st.badge ? badge(st.badge, st.tone) : ""}
+        <span class="t" title="${esc(c.title)}">${esc(c.title)}</span>
+        ${S.receipt ? receiptHtml() : `<span class="meta"><span>${mark(c.engine)}${esc(c.model)} · ${esc(c.effort)}</span><span class="${st.tone ? st.tone.replace("b-", "t-") : ""}">${esc(st.key === "working" ? `working ${c.elapsed}` : st.phrase)}</span>${pos ? `<span>stage ${esc(pos)}</span>` : ""}${cl && cl.kind !== "tree" && cl.kind !== "seat" ? `<span>${esc(cl.kind === "pipeline" ? `#${cl.pipe.issue} ${cl.title}` : cl.title)}</span>` : ""}</span>`}
+        <span class="sib"><button class="ib" data-go="${prev ? `#/chat/${prev.id}` : ""}" ${prev ? "" : "disabled"} aria-label="Previous in this cluster">${I("chevL")}</button><span class="tn">${i + 1}/${siblings.length}</span><button class="ib" data-go="${next ? `#/chat/${next.id}` : ""}" ${next ? "" : "disabled"} aria-label="Next in this cluster">${I("chevR")}</button></span>
+        <button class="ib" data-go="#/chat/${c.id}/menu" aria-label="Conversation menu">${I("more")}</button>
+      </header>
+      ${seat ? `<div class="seatpanel">${mark(seat.engine, "fill")}<span class="main"><b>${esc(seat.model)} · ${esc(seat.effort)} · ${esc(seat.account)}</b><small>holding the seat for ${esc(seat.since)} · context ${seat.ctx.left}% left of ${esc(seat.ctx.window)}</small></span>${meter(seat.ctx.left, "mini")}<button class="btn quiet" data-go="#/board/rotate">${I("rotate", "sm")}Rotate</button></div>` : ""}
+      <div class="feed" data-feed>${(c.feed || []).map(feedItem).join("")}${c.question && st.key === "waiting" ? questionCard(c) : ""}${st.key === "working" ? `<div class="working"><i class="dot live"></i>working · ${esc(c.elapsed)}${c.tool ? ` · ${esc(shortTool(c.tool))}` : ""}</div>` : st.key === "returned" ? `<div class="working muted">finished the turn · ${esc(c.age)}</div>` : ""}</div>
+      ${composer(c, false)}
+    </div>`;
   }
-  function pipelinesList() {
-    const ps = scopedPipes().concat(F.pipelines.filter((p) => p.state === "closed" && (S.project === "all" || p.project === S.project)));
-    const grp = (label, items) => items.length ? `<div class="panel"><h3>${label} <span class="c">· ${items.length}</span></h3><div class="plist">${items.map((p) => pipeRow(p, null, { noChild: true })).join("")}</div></div>` : "";
-    return `<div class="chat"><div class="shead"><div class="tt"><div class="t display">Pipelines</div><div class="sub meta"><span>${ps.length} in ${S.project === "all" ? "all projects" : esc(projectName(S.project))}</span></div></div><button class="btn" data-go="#/board/new-pipeline">${I("plus", "sm")}New pipeline</button></div><div class="sbody">${grp("Needs you", ps.filter((p) => p.state === "needs_decision"))}${grp("Active", ps.filter((p) => ["running", "paused"].includes(p.state)))}${grp("Drafts", ps.filter((p) => p.state === "draft"))}${grp("Completed", ps.filter((p) => p.state === "completed"))}${grp("Archived", ps.filter((p) => p.state === "closed"))}${toastHtml()}</div></div>`;
+  function feedItem(it) {
+    if (it.kind === "user") return `<div class="msg user"><div class="bubble">${esc(it.text)}</div><span class="at tn">${esc(it.at)}</span></div>`;
+    if (it.kind === "tool") return `<div class="toolline ${it.status}">${I("tool", "sm")}<span class="tn">${esc(it.tool)}</span>${it.out ? `<span class="muted">· ${esc(it.out)}</span>` : ""}<span class="grow"></span><span class="tn muted">${it.status === "running" ? "running…" : "done"} · ${esc(it.at)}</span></div>`;
+    return `<div class="msg agent"><span class="avatar">${I("sparkle")}</span><div class="body"><span class="at tn">${esc(it.at)}</span><p>${esc(it.text).replace(/\n/g, "<br>")}</p></div></div>`;
   }
-
-  /* ── stage: the kanban — one card is one thread ────────────────────────── */
-  const KCOLS = [["now", "Now"], ["review", "In review"], ["blocked", "Blocked"], ["planned", "Planned"], ["done", "Done"]];
-  function kanbanCard(t, opts) {
-    const c = t.worker ? conv(t.worker) : null;
-    const p = t.pipeline ? pipe(t.pipeline) : null;
-    const cb = c ? stateBits(c) : null;
-    const needs = Boolean((cb && cb.edge) || (p && p.state === "needs_decision"));
-    const on = c ? hashOf() === `#/chat/${c.id}` : p ? hashOf() === `#/pipeline/${p.id}` : false;
-    const chips = [];
-    if (c) chips.push(`<button class="kchip" data-go="#/chat/${c.id}" data-worker="${c.id}">${mark(c.engine)}<span class="who">${esc(c.model)}</span><span class="st ${cb.tone === "neu" ? "" : cb.tone}">${esc(cb.key === "waiting" ? `a question · ${c.waitedFor}` : cb.phrase)}</span></button>`);
-    if (t.seat) chips.push(`<button class="kchip" data-go="#/seat">${I("bot", "sm")}<span class="who">Orchestrator</span><span class="st">holds this one</span></button>`);
-    if (p) {
-      const s = stageOf(p);
-      const mini = `<span class="mini" aria-hidden="true">${p.stages.map((x) => { const l = lastAttempt(x); return `<i class="${l ? VERDICT[l.state] || "" : ""}"></i>`; }).join("")}</span>`;
-      chips.push(`<button class="kchip" data-go="#/pipeline/${p.id}" data-pipe="${p.id}">${I("layers", "sm")}<span class="who">${stageIndex(p, s)}/${p.stages.length} ${esc(s.id)}</span><span class="st ${p.state === "needs_decision" ? "warn" : "acc"}">${esc(pipeBits(p).phrase)}</span>${mini}</button>`);
+  function questionCard(c) {
+    const q = c.question;
+    return `<div class="qcard"><div class="qh">${badge(c.decision || "a question", "b-warning")}<b>${esc(q.title)}</b></div>
+      ${q.options.map((o, i) => `<button class="opt" data-act="answer-conv:${c.id}:${i}" data-focus="opt${i}"><kbd class="keycap">${i + 1}</kbd><span><b>${esc(o[0])}</b><small>${esc(o[1])}</small></span></button>`).join("")}
+      <div class="own"><input class="field" data-focus="own" placeholder="Your own answer…" aria-label="Your own answer" /><button class="btn primary" data-act="answer-conv:${c.id}:own">Send</button></div></div>`;
+  }
+  /* One box: the field on top, the tools row inside it, the send slot that is
+     Stop while working, Queue offline, Respawn when killed. */
+  function composer(c, inLift) {
+    const st = stateBits(c);
+    const set = S.settings[c.id] || { model: c.model, effort: c.effort, fast: false };
+    const slot = st.key === "killed" ? { act: `respawn:${c.id}`, label: "Respawn", icon: "rotate", cls: "resp" } : F.runtime === "offline" ? { act: `send:${c.id}`, label: "Queue", icon: "arrowUp", cls: "queue" } : st.key === "working" && !(S.drafts[c.id] || "").trim() ? { act: `stop:${c.id}`, label: "Stop", icon: "square", cls: "stop" } : { act: `send:${c.id}`, label: "Send", icon: "arrowUp", cls: "send" };
+    const limit = st.key === "limit";
+    const tag = "div";
+    const rt = route();
+    const sheet = !inLift && rt.screen === "chat" && rt.dialog === "settings" && rt.id === c.id ? settingsSheet(c) : "";
+    return `<${tag} class="composer ${inLift ? "in-lift" : ""}">${sheet}<${tag} class="box">
+      <textarea class="ta" data-focus="field" data-conv="${c.id}" rows="1" placeholder="${limit ? "This account is at its limit · pick another in the chip" : "Message the agent · Enter sends, Shift+Enter breaks"}" aria-label="Message the agent">${esc(S.drafts[c.id] || "")}</textarea>
+      <${tag} class="tools">
+        <button class="chip ${limit ? "warn" : ""}" data-go="#/chat/${c.id}/settings" data-focus="chip" aria-haspopup="dialog" aria-label="Next message settings · ${esc(set.model)} · ${esc(set.effort)}">${I("zap", "sm")}<span>${esc(set.model)} · ${esc(set.effort)}${set.fast ? " · fast" : ""}${limit ? ` · ${esc(c.limit.account)} at limit` : ""}</span>${I("chevD", "sm")}</button>
+        <button class="ib" data-focus="attach" data-act="attach" aria-label="Attach an image">${I("clip")}</button>
+        <button class="ib" data-focus="mic" data-act="mic" aria-label="Dictate">${I("mic")}</button>
+        <span class="grow"></span>
+        <button class="slot ${slot.cls}" data-focus="send" data-act="${slot.act}" aria-label="${slot.label}">${I(slot.icon)}<span>${slot.label}</span></button>
+      </${tag}>
+    </${tag}></${tag}>`;
+  }
+  function settingsSheet(c) {
+    const set = S.settings[c.id] || (S.settings[c.id] = { model: c.model, effort: c.effort, fast: false, account: F.accounts[c.engine].find((a) => a.active).id });
+    const models = c.engine === "codex" ? ["gpt-5.6", "gpt-5.5"] : ["Opus", "Sonnet", "Haiku"];
+    const efforts = c.engine === "codex" ? ["low", "medium", "high", "xhigh"] : ["low", "medium", "high", "xhigh", "max"];
+    const accounts = F.accounts[c.engine].map((a) => { const w = a.windows.length ? a.windows.reduce((m, x) => (x.left < m.left ? x : m)) : null; const on = set.account === a.id; const signedIn = a.auth === "Authenticated"; return `<button class="arow compact ${on ? "on" : ""}" role="radio" aria-checked="${on}" data-act="${signedIn ? `set:${c.id}:account:${a.id}` : `signin:${c.engine}:${a.id}`}"><span class="t">${esc(a.label)}<small>${esc(a.plan)}</small></span>${signedIn && w ? `${meter(w.left)}<span class="pct tn ${w.left <= 30 ? "warn" : ""}">${w.left}% left · ${esc(w.label)}</span>` : `<span class="meter empty"><i></i></span><span class="signin">sign in ›</span>`}${on ? I("check", "sm") : ""}</button>`; }).join("");
+    return `<div class="settings" data-dialog role="dialog" aria-label="Next message settings">
+      <div class="srow"><label>Model</label>${seg("Model", models, set.model, `set:${c.id}:model`)}</div>
+      <div class="srow"><label>Reasoning</label>${seg("Reasoning", efforts, set.effort, `set:${c.id}:effort`)}</div>
+      ${c.engine === "codex" ? `<div class="srow"><label>Speed</label>${seg("Speed", ["standard", "fast"], set.fast ? "fast" : "standard", `set:${c.id}:speed`)}</div>` : ""}
+      <div class="srow col"><label>Account</label><div class="alist" role="radiogroup" aria-label="Account">${accounts}</div></div>
+      <div class="srow"><label>Session</label><div class="sess"><button class="btn quiet" data-act="compact:${c.id}">${I("compress", "sm")}Compact context</button><button class="btn quiet" data-act="copyResume:${c.id}">${I("terminal", "sm")}Copy resume command</button><button class="btn quiet" data-act="recheck">${I("refresh", "sm")}Re-check host</button></div></div>
+      <div class="shint tn muted">Applies to the next message · Esc or a click outside closes</div>
+    </div>`;
+  }
+  function mountChat(r) {
+    if (r.screen !== "chat" && !S.lift) return;
+    const feed = $app.querySelector("[data-feed], .lfeed");
+    if (feed) feed.scrollTop = feed.scrollHeight;
+    for (const ta of $app.querySelectorAll("textarea.ta")) {
+      const grow = () => { ta.style.height = "auto"; ta.style.height = `${Math.min(160, ta.scrollHeight)}px`; };
+      grow();
+      ta.addEventListener("input", () => { S.drafts[ta.dataset.conv] = ta.value; grow(); const slot = ta.closest(".box").querySelector(".slot"); const c = conv(ta.dataset.conv); if (slot && stateBits(c).key === "working" && F.runtime !== "offline") { const typing = ta.value.trim().length > 0; slot.className = `slot ${typing ? "send" : "stop"}`; slot.dataset.act = typing ? `send:${c.id}` : `stop:${c.id}`; slot.setAttribute("aria-label", typing ? "Send" : "Stop"); slot.innerHTML = `${I(typing ? "arrowUp" : "square")}<span>${typing ? "Send" : "Stop"}</span>`; } });
+      ta.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); act(`send:${ta.dataset.conv}`); } });
     }
-    if (!chips.length) chips.push(`<button class="kchip" data-go="#/board/create"><span class="assign">＋ Assign a worker or a pipeline</span></button>`);
-    return `<div class="kcard ${needs ? "need" : ""} ${on ? "on" : ""}" data-task="${t.id}" data-card>
-      <button class="khead" data-go="${c ? `#/chat/${c.id}` : p ? `#/pipeline/${p.id}` : "#/board/task"}" data-drag="${t.id}"><span class="t">${esc(t.title)}${t.issue ? `<small>#${t.issue}</small>` : ""}</span>${needs ? badge("needs you", "warn") : ""}</button>
-      <div class="kchips">${chips.join("")}</div>${opts?.flat ? "" : ""}</div>`;
-  }
-  function kanban() {
-    const tasks = scopedTasks();
-    const cols = KCOLS.map(([id, label]) => {
-      const items = tasks.filter((t) => taskStatus(t) === id);
-      return `<section class="kcol ${S.drag && S.drag.over === id ? "over" : ""}" data-col="${id}" aria-label="${label}"><div class="kh"><span class="label">${label}</span><span class="c tn">· ${items.length}</span></div><div class="kl">${items.map((t) => kanbanCard(t)).join("") || `<div class="kempty">Nothing here. Drag a card in, or press c to create one.</div>`}</div></section>`;
-    }).join("");
-    return `<div class="chat"><div class="shead"><div class="tt"><div class="t display">Board · ${esc(projectName(S.project === "all" ? "atlas" : S.project))}</div><div class="sub meta"><span>${tasks.length} tasks</span><span>${tasks.filter((t) => t.worker).length} with a worker</span><span>${tasks.filter((t) => t.pipeline).length} in a pipeline</span><span>${tasks.filter((t) => { const c = t.worker ? conv(t.worker) : null; const p = t.pipeline ? pipe(t.pipeline) : null; return (c && stateBits(c).edge) || (p && p.state === "needs_decision"); }).length} need you</span></div></div><button class="btn" data-act="newTask">${I("plus", "sm")}New task</button></div>${toastHtml()}<div class="kanban" data-kanban>${cols}</div></div>`;
   }
 
-  /* ── stage: the map — groups auto-arrange, a moved group is honoured ───── */
-  function mapNode(p, s, i) {
-    const last = lastAttempt(s);
-    const c = last && last.conv ? conv(last.conv) : null;
-    const cur = p.cursor.stageId === s.id && p.state !== "draft";
-    const verdict = last && last.state === "failed" && last.findings ? `<span class="verdict">${last.findings.length} findings</span>` : "";
-    const loop = s.onFail ? `<span class="ret">↺ ${esc(s.onFail.to)}${roundPips(roundsUsed(p, s), s.onFail.maxRounds)}</span>` : "";
-    return `<button class="mnode ${cur ? "cur" : ""}" data-go="${c ? `#/chat/${c.id}` : `#/pipeline/${p.id}/stage/${s.id}`}" data-mnode="${s.id}"><span class="station ${last ? VERDICT[last.state] || "" : ""}"></span><span class="k tn">${i + 1}/${p.stages.length}</span><span class="role">${esc(s.role)}</span>${mark(s.engine)}<span>${esc(s.model)}</span>${verdict}${loop}</button>`;
-  }
-  function mapTile(c) {
-    const b = stateBits(c);
-    return `<button class="mtile ${b.edge ? `wait ${b.edge === "dng" ? "dng" : ""}` : ""} ${hashOf() === `#/chat/${c.id}` ? "on" : ""}" data-go="#/chat/${c.id}"><span class="t two">${esc(c.title)}</span><span class="m meta"><span class="st ${b.tone === "neu" ? "" : b.tone}">${esc(b.phrase)}</span><span>${mark(c.engine)}${esc(c.model)}</span></span></button>`;
-  }
-  function mapView() {
-    const pipes = scopedPipes().filter((p) => p.state !== "completed" && p.state !== "draft");
-    const inPipe = new Set(); pipes.forEach((p) => p.stages.forEach((s) => s.attempts.forEach((a) => a.conv && inPipe.add(a.conv))));
-    const pinned = (id) => Boolean(S.pins[id]);
-    const groups = pipes.map((p) => {
-      const started = p.stages.filter((s) => s.attempts.length);
-      const rest = p.stages.filter((s) => !s.attempts.length);
-      const spine = started.map((s) => {
-        const i = p.stages.indexOf(s);
-        const reached = p.stages[i + 1] && p.stages[i + 1].attempts.length;
-        return `<div class="mst ${reached ? "on" : "dash"}" data-mst="${s.id}">${mapNode(p, s, i)}</div>`;
-      }).join("");
-      /* F11: stages that have not started collapse into one ladder tile. */
-      const folded = rest.length ? `<div class="mst dash"><button class="folded" data-go="#/pipeline/${p.id}"><span>${rest.map((s) => `${stageIndex(p, s)}/${p.stages.length} ${s.id}`).join(" · ")}</span><span class="c">· not started</span></button></div>` : "";
-      const need = p.state === "needs_decision";
-      return `<div class="mapitem ${pinned(p.id) ? "pinned" : ""}" data-item="${p.id}"><div class="grp ${need ? "need" : ""}" data-group="${p.id}">
-        <div class="gh" data-drag="${p.id}"><button class="gt" data-go="#/pipeline/${p.id}">${I("layers", "sm")}<span class="t">${esc(p.task)}</span><span class="k">${stageIndex(p, stageOf(p))}/${p.stages.length} · ${esc(pipeBits(p).phrase)}</span></button>${need ? badge("needs a decision", "warn") : ""}${pinned(p.id) ? `<button class="iconbtn pinmark" data-act="unpinItem:${p.id}" aria-label="Release ${esc(p.task)} back to the auto layout" title="Pinned · release to auto">${I("pin")}</button>` : ""}</div>
-        <div class="hspine">${spine}${folded}</div></div></div>`;
-    }).join("");
-    const loose = F.conversations.filter((c) => inScope(c) && !inPipe.has(c.id) && !c.seat && ["working", "waiting", "held", "stalled", "limit", "returned"].includes(stateBits(c).key));
-    const band = loose.length ? `<div class="mapitem" data-item="loose"><div class="band"><div class="gh"><span class="label">Loose conversations</span><span class="c tn muted">· ${loose.length}</span></div><div class="tiles">${loose.map(mapTile).join("")}</div></div></div>` : "";
-    const anyPin = Object.keys(S.pins).length;
-    return `<div class="chat"><div class="shead"><div class="tt"><div class="t display">Map · ${esc(projectName(S.project === "all" ? "atlas" : S.project))}</div><div class="sub meta"><span>${pipes.length} pipelines</span><span>${loose.length} loose conversations</span><span>${anyPin ? `${anyPin} pinned · the rest flows around them` : "arranged for you · drag a group to pin it"}</span></div></div>${anyPin ? `<button class="btn" data-act="unpinAll">${I("undo", "sm")}Release all to auto</button>` : ""}</div>${toastHtml()}<div class="map" data-map><div class="world">${groups}${band}${pipes.length + loose.length ? "" : `<div class="map-empty">Nothing is running in this project.</div>`}</div></div></div>`;
-  }
-  /* The auto layout: full-width bands top to bottom; a pinned group keeps the
-     place the operator put it and the flow opens around it. Measured after
-     render because the groups size themselves to their content. */
-  function layoutMap() {
-    const map = $app.querySelector(".map"); if (!map) return;
-    const world = map.querySelector(".world");
-    const items = [...world.querySelectorAll(".mapitem")];
-    const PAD = 14, GAP = 12;
-    const inner = Math.max(240, map.clientWidth - PAD * 2);
-    for (const el of items) {
-      const pin = S.pins[el.dataset.item];
-      const x = pin ? Math.max(PAD, Math.min(pin.x, PAD + inner - 260)) : PAD;
-      el.style.left = `${x}px`; el.style.width = `${PAD + inner - x}px`;
-      if (pin) el.style.top = `${Math.max(PAD, pin.y)}px`;
-    }
-    const bands = items.filter((el) => S.pins[el.dataset.item]).map((el) => ({ top: el.offsetTop, bottom: el.offsetTop + el.offsetHeight })).sort((a, b) => a.top - b.top);
-    let y = PAD;
-    for (const el of items) {
-      if (S.pins[el.dataset.item]) continue;
-      const h = el.offsetHeight;
-      let top = y;
-      for (const b of bands) if (top < b.bottom + GAP && b.top < top + h + GAP) top = b.bottom + GAP;
-      el.style.top = `${top}px`;
-      y = top + h + GAP;
-    }
-    world.style.height = `${Math.max(y, ...bands.map((b) => b.bottom + GAP), map.clientHeight)}px`;
-  }
-
-  /* ── stage: accounts, and one account in detail ────────────────────────── */
+  /* ── the accounts stage ───────────────────────────────────────────────── */
   const clockOf = (s) => { const m = /(\d{1,2}):(\d{2})/.exec(s || ""); return m ? Number(m[1]) * 60 + Number(m[2]) : null; };
-  const hhmm = (mins) => { const m = ((Math.round(mins) % 1440) + 1440) % 1440; return `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`; };
   function paceOf(w) {
-    const spent = 100 - w.left;
-    const rate = w.elapsed > 0 ? spent / w.elapsed : 0;
+    const spent = 100 - w.left; const rate = w.elapsed > 0 ? spent / w.elapsed : 0;
     const idealLeft = Math.max(0, 100 * (1 - w.elapsed / w.hours));
-    const hoursLeft = rate > 0 ? w.left / rate : Infinity;
-    const windowLeft = w.hours - w.elapsed;
-    return { rate, idealLeft, ahead: w.left >= idealLeft, hoursLeft, windowLeft, lasts: hoursLeft >= windowLeft };
+    const hoursLeft = rate > 0 ? w.left / rate : Infinity; const windowLeft = w.hours - w.elapsed;
+    return { rate, idealLeft, ahead: w.left >= idealLeft, hoursLeft, windowLeft, lasts: hoursLeft >= windowLeft, runsOut: rate > 0 && hoursLeft < windowLeft ? hhmm(F.nowMinutes + hoursLeft * 60) : null };
   }
   function chart(w) {
-    const L = 34, R = 452, T = 12, B = 156;
-    const x = (h) => L + (R - L) * Math.min(1, h / w.hours);
-    const y = (v) => B - (B - T) * (v / 100);
+    const L = 36, R = 456, T = 14, B = 150;
+    const x = (h) => L + (R - L) * Math.min(1, h / w.hours); const y = (v) => B - (B - T) * (v / 100);
     const pace = paceOf(w);
-    const actual = w.series.map(([h, v]) => `${x(h)} ${y(v)}`).join(" L ");
-    const lastPt = w.series[w.series.length - 1];
+    const actual = w.series.map(([h, v]) => `${x(h).toFixed(1)} ${y(v).toFixed(1)}`).join(" L ");
+    const last = w.series[w.series.length - 1];
     const outH = pace.lasts ? w.hours : w.elapsed + pace.hoursLeft;
-    const proj = `M ${x(lastPt[0])} ${y(lastPt[1])} L ${x(outH)} ${y(pace.lasts ? Math.max(0, w.left - pace.rate * pace.windowLeft) : 0)}`;
-    const cls = w.left <= 30 ? "warn" : "";
-    return `<svg class="chart" viewBox="0 0 460 180" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Remaining percentage across the ${esc(w.label)} window: ${w.left}% left, ${pace.ahead ? "ahead of" : "behind"} the ideal pace">
-      ${[0, 50, 100].map((v) => `<line class="grid" x1="${L}" y1="${y(v)}" x2="${R}" y2="${y(v)}"/><text x="${L - 6}" y="${y(v) + 3}" text-anchor="end">${v}</text>`).join("")}
+    const outV = pace.lasts ? Math.max(0, w.left - pace.rate * pace.windowLeft) : 0;
+    const cls = w.left <= 10 ? "low" : w.left <= 30 ? "warn" : "";
+    return `<svg class="chart" viewBox="0 0 470 176" role="img" aria-label="${w.left}% left of the ${esc(w.label)} window, ${pace.ahead ? "ahead of" : "behind"} the ideal pace">
+      ${[0, 50, 100].map((v) => `<line class="gl" x1="${L}" y1="${y(v)}" x2="${R}" y2="${y(v)}"/><text class="ax" x="${L - 6}" y="${y(v) + 3}" text-anchor="end">${v}</text>`).join("")}
+      <rect class="burn" x="${x(outH)}" y="${T}" width="${Math.max(0, R - x(outH))}" height="${B - T}"/>
       <path class="ideal" d="M ${x(0)} ${y(100)} L ${x(w.hours)} ${y(0)}"/>
-      <path class="proj" d="${proj}"/>
+      <path class="proj ${cls}" d="M ${x(last[0])} ${y(last[1])} L ${x(outH)} ${y(outV)}"/>
       <path class="actual ${cls}" d="M ${actual}"/>
-      <circle class="pt ${cls}" cx="${x(lastPt[0])}" cy="${y(lastPt[1])}" r="4"/>
-      <text class="tip" x="${Math.min(R - 40, x(lastPt[0]) + 8)}" y="${y(lastPt[1]) - 8}">${w.left}% left</text>
-      <text class="lbl" x="${L}" y="174">window opens</text>
-      <text class="lbl" x="${R}" y="174" text-anchor="end">${esc(w.reset.replace("resets ", ""))}</text>
-      <text x="${x(w.hours * 0.62)}" y="${y(38) + 14}" text-anchor="middle">ideal pace</text>
+      <circle class="pt ${cls}" cx="${x(last[0])}" cy="${y(last[1])}" r="4"/>
+      <line class="now" x1="${x(w.elapsed)}" y1="${T}" x2="${x(w.elapsed)}" y2="${B}"/>
+      <text class="lbl" x="${x(w.elapsed) + 4}" y="${T + 10}">now</text>
+      <text class="lbl" x="${L}" y="170">window opened</text><text class="lbl" x="${R}" y="170" text-anchor="end">${esc(w.reset)}</text>
     </svg>`;
   }
-  function accountRow(engine, a) {
-    const active = a.active;
+  /* Today by hour, folded under the pace: bars with the day's average as a rule. */
+  function hoursHtml(a) {
+    if (!a.hourly || !a.hourly.length) return `<div class="quietline">Nothing spent today.</div>`;
+    const W = 300, H = 84, L = 26, B = 66, T = 10; const n = a.hourly.length;
+    const max = Math.max(1, ...a.hourly.map(([, v]) => v)); const avg = a.hourly.reduce((sum, [, v]) => sum + v, 0) / n;
+    const slot = (W - L - 8) / n; const bw = Math.min(28, slot - 6);
+    const x = (i) => L + 4 + i * slot; const y = (v) => B - (B - T) * (v / max);
+    return `<svg class="hchart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Today by hour · average ${avg.toFixed(1)} points an hour">
+      <text class="ax" x="${L - 4}" y="${T + 4}" text-anchor="end">${max}</text><text class="ax" x="${L - 4}" y="${B}" text-anchor="end">0</text>
+      ${a.hourly.map(([h, v], i) => `<rect class="hb" x="${x(i)}" y="${y(v)}" width="${bw}" height="${B - y(v)}" rx="3"/><text class="ax" x="${x(i) + bw / 2}" y="${H - 4}" text-anchor="middle">${esc(h)}</text>`).join("")}
+      <line class="avg" x1="${L}" y1="${y(avg).toFixed(1)}" x2="${W - 4}" y2="${y(avg).toFixed(1)}"/><text class="lbl" x="${W - 4}" y="${(y(avg) - 4).toFixed(1)}" text-anchor="end">avg ${avg.toFixed(1)} an hour</text>
+    </svg>`;
+  }
+  /* What runs on an account now: the seat first with its context meter, then
+     every live conversation bound to it. The half of the page that says what
+     stops when the window runs out. */
+  const liveConvs = (accountId) => F.conversations.filter((c) => c.account === accountId && stateBits(c).key !== "done");
+  function usingHtml(a) {
+    const rows = liveConvs(a.id).sort((p, q) => (q.seat ? 1 : 0) - (p.seat ? 1 : 0));
+    const row = (c) => { const st = stateBits(c); const seat = c.seat ? F.seats[c.project] : null; return `<button class="irow ${st.edge || ""}" data-go="#/chat/${c.id}"><i class="dot ${st.dot}"></i><span class="main"><span class="t">${esc(c.title)}</span><span class="m"><span class="${st.tone ? st.tone.replace("b-", "t-") : ""}">${esc(st.key === "working" ? `working ${c.elapsed}` : st.phrase)}</span><span class="sep">·</span><span>${esc(projectName(c.project))}</span>${seat ? `<span class="sep">·</span><span class="tn">context ${seat.ctx.left}%</span>${meter(seat.ctx.left, "mini")}` : ""}</span></span><span class="link">open ›</span></button>`; };
+    return `<div class="panel" data-using><h3>Using this account <span class="c">· ${rows.length ? `${rows.length} conversation${rows.length === 1 ? "" : "s"} · what stops when it runs out` : "nothing runs on it now"}</span></h3>${rows.length ? `<div class="qlist">${rows.map(row).join("")}</div>` : ""}</div>`;
+  }
+  function accountRow(engine, a, cur) {
     const signedIn = a.auth === "Authenticated";
     const wins = signedIn && a.windows.length
-      ? a.windows.map((w) => `<span class="tn">${esc(w.label)}</span>${meter(w.left, `${w.left}% left`)}<span class="pct tn ${meterCls(w.left)}">${w.left}% left</span>`).join("")
-        + `<span class="meta" style="grid-column:1/-1">${a.windows.map((w) => `<span>${esc(w.label)} ${esc(w.reset.replace("resets ", "resets "))}</span>`).join("")}</span>`
-      : `<span class="tn">5 h</span><span class="meter empty"><i></i></span><span class="pct tn">—</span><span class="tn">Week</span><span class="meter empty"><i></i></span><span class="pct tn">—</span><span class="meta" style="grid-column:1/-1"><span>no windows until this account is signed in</span></span>`;
-    const cur = hashOf() === `#/accounts/${engine}/${a.id}`;
-    return `<button class="arow ${cur ? "on" : ""}" data-go="#/accounts/${engine}/${a.id}" data-row data-account="${a.id}" aria-current="${cur ? "true" : "false"}">
-      <span class="dot ${signedIn ? (active ? "acc" : "ok") : ""}"></span>
-      <span class="t">${esc(a.label)}<small>${esc(a.plan)}${a.checked ? ` · checked ${esc(a.checked)}` : ""}</small></span>
+      ? a.windows.map((w) => `<span class="win"><span class="tn wl">${esc(w.label)}</span>${meter(w.left)}<span class="pct tn ${w.left <= 30 ? "warn" : ""}">${w.left}% left</span><span class="tn muted">${esc(w.reset)}</span></span>`).join("")
+      : `<span class="win"><span class="tn wl">5 h</span><span class="meter empty"><i></i></span><span class="pct tn">—</span><span class="tn muted"></span></span><span class="win"><span class="tn wl">Week</span><span class="meter empty"><i></i></span><span class="pct tn">—</span><span class="tn muted"></span></span>`;
+    return `<button class="arow ${cur ? "on" : ""} ${a.active ? "active" : ""}" data-go="#/accounts/${engine}/${a.id}" data-account="${a.id}" aria-current="${cur ? "true" : "false"}">
+      ${mark(engine, "fill")}<span class="t">${esc(a.label)}<small>${esc(a.plan)}${a.checked ? ` · checked ${esc(a.checked)}` : ""}</small></span>
       <span class="wins">${wins}</span>
-      ${signedIn ? badge(active ? "active" : "ready", active ? "acc" : "ok") : `<span class="signin">sign in →</span>`}</button>`;
+      ${signedIn ? badge(a.active ? "active" : "ready", a.active ? "b-accent" : "b-success") : `<span class="signin">sign in ›</span>`}</button>`;
   }
-  function accountsView() {
-    const eng = (engine, list) => `<div class="eng"><h2>${mark(engine, "fill")}${engine === "claude" ? "Claude" : "Codex"} accounts<span class="c">${list.length} accounts · ${list.filter((a) => a.auth === "Authenticated").length} signed in</span></h2>${list.map((a) => accountRow(engine, a)).join("")}<button class="arow add" data-act="addAccount:${engine}">${I("plus", "sm")}<span>Add a ${engine === "claude" ? "Claude" : "Codex"} account</span></button></div>`;
-    return `<div class="chat"><div class="shead"><div class="tt"><div class="t display">Accounts &amp; limits</div><div class="sub meta"><span>every account, both windows</span><span>meters fill with what remains</span><span>open a row for its burn rate and when it runs out</span></div></div></div><div class="acc-body">${eng("claude", F.accounts.claude)}${eng("codex", F.accounts.codex)}</div>${toastHtml()}</div>`;
+  function accountsStage(r) {
+    const engine = r.engine || "claude";
+    const id = r.id || F.accounts[engine].find((a) => a.active).id;
+    const eng = (e, list) => {
+      const signed = list.filter((a) => a.auth === "Authenticated" && a.windows.length);
+      const best = signed.length ? signed.reduce((m, a) => (a.windows[0].left > m.windows[0].left ? a : m)) : null;
+      const nextReset = signed.map((a) => a.windows[0]).sort((p, q) => (clockOf(p.reset) || 9e9) - (clockOf(q.reset) || 9e9))[0];
+      return `<section class="eng"><h2>${mark(e, "fill")}${e === "claude" ? "Claude" : "Codex"}<span class="c">${list.length} accounts · ${signed.length} signed in</span>${best ? `<span class="best">best now · <b>${esc(best.label)}</b> ${best.windows[0].left}% left${nextReset ? ` · next reset ${esc(nextReset.reset.replace("resets ", ""))}` : ""}</span>` : ""}</h2>${list.map((a) => accountRow(e, a, r.engine === e && r.id === a.id)).join("")}<button class="arow add" data-act="addAccount:${e}">${I("plus", "sm")}<span>Add a ${e === "claude" ? "Claude" : "Codex"} account</span></button></section>`;
+    };
+    return `<div class="accounts"><div class="acc-list">${eng("claude", F.accounts.claude)}${eng("codex", F.accounts.codex)}</div><div class="acc-detail">${accountDetail(engine, id)}</div></div>`;
   }
   function accountDetail(engine, id) {
-    const a = F.accounts[engine].find((x) => x.id === id);
-    if (!a) return emptyStage();
+    const a = F.accounts[engine].find((x) => x.id === id); if (!a) return "";
     const signedIn = a.auth === "Authenticated" && a.windows.length;
-    const w = signedIn ? a.windows[0] : null;
-    const pace = w ? paceOf(w) : null;
-    const resetAt = w ? clockOf(w.reset) : null;
-    const runsOut = pace && resetAt !== null && !pace.lasts ? hhmm(resetAt - (pace.windowLeft - pace.hoursLeft) * 60) : null;
-    const big = signedIn ? `<div class="bigwin">${a.windows.map((x) => `<div class="w"><div class="n"><b class="tn ${meterCls(x.left)}">${x.left}%</b><span>left of the ${esc(x.label)} window</span></div>${meter(x.left)}<small>${esc(x.reset)}</small></div>`).join("")}</div>` : `<div class="quietline">This account is not signed in, so it reports no windows. Sign in to see its consumption.</div>`;
-    const hourly = a.hourly && a.hourly.length ? `<div class="hours">${a.hourly.map(([h, v]) => `<span class="h"><b class="tn">${v}</b><i style="height:${Math.max(2, v * 5)}%"></i>${esc(h)}</span>`).join("")}</div>` : `<div class="quietline">Nothing spent today.</div>`;
-    const actions = `<div class="actions">${a.active ? "" : signedIn ? `<button class="btn primary" data-act="switch:${engine}:${a.id}">${I("swap", "sm")}Switch to this account</button>` : `<button class="btn primary" data-act="signIn:${engine}:${a.id}">Sign in</button>`}${signedIn ? `<button class="btn" data-act="useReset:${engine}:${a.id}">Use one reset</button><button class="btn" data-act="refresh:${engine}">${I("refresh", "sm")}Refresh</button>` : ""}<button class="btn quiet" data-go="#/accounts">${I("chevL", "sm")}All accounts</button></div>`;
-    return `<div class="chat"><div class="shead"><button class="iconbtn" data-go="#/accounts" aria-label="All accounts" title="All accounts (Esc)">${I("chevL")}</button>${mark(engine, "fill")}<div class="tt"><div class="t display">${esc(a.label)}</div><div class="sub meta"><span>${engine === "claude" ? "Claude" : "Codex"}</span><span>${esc(a.plan)}</span>${a.checked ? `<span>checked ${esc(a.checked)}</span>` : ""}</div></div>${badge(a.active ? "active" : signedIn ? "ready" : "sign in", a.active ? "acc" : signedIn ? "ok" : "warn")}</div>
-      <div class="acc-detail">
-        <div class="panel wide"><h3>Windows</h3>${big}</div>
-        ${signedIn ? `<div class="panel"><h3>Burndown <span class="c">· ${esc(w.label)} window · ideal pace against what is left</span></h3>${chart(w)}</div>
-        <div class="panel"><h3>Pace</h3><div class="pace"><span class="big ${pace.ahead ? "ok" : "warn"}">burning at ${pace.rate.toFixed(1)} % per hour</span><small>${pace.ahead ? "ahead of pace — spending slower than the window refills" : "behind pace — spending faster than the window refills"} · ideal would leave ${Math.round(pace.idealLeft)}% by now</small><span class="big ${pace.lasts ? "" : "warn"}">${pace.lasts ? "lasts to the reset" : `runs out at ${runsOut || `${pace.hoursLeft.toFixed(1)} h from now`} at this pace`}</span><small>${esc(w.reset)} · ${pace.windowLeft.toFixed(1)} h of window left</small></div></div>` : ""}
-        <div class="panel wide"><h3>Today by hour <span class="c">· percentage points spent</span></h3>${hourly}</div>
-        <div class="panel wide">${actions}</div>
-      </div>${toastHtml()}</div>`;
+    const w = signedIn ? a.windows[0] : null; const pace = w ? paceOf(w) : null;
+    const big = signedIn ? `<div class="bigwin">${a.windows.map((x) => { const p = paceOf(x); return `<div class="w"><div class="n"><b class="tn ${x.left <= 10 ? "low" : x.left <= 30 ? "warn" : ""}">${x.left}%</b><span>left of the ${esc(x.label)} window</span></div>${meter(x.left)}<small class="meta"><span>${esc(x.reset)}</span><span>${p.windowLeft.toFixed(1)} h of window left</span></small></div>`; }).join("")}</div>` : `<div class="quietline">This account is signed out, so it reports no windows. Sign in to read its consumption.</div>`;
+    const actions = `<div class="actions">${a.active ? "" : signedIn ? `<button class="btn primary" data-act="switch:${engine}:${a.id}">${I("swap", "sm")}Switch to this account</button>` : `<button class="btn primary" data-act="signin:${engine}:${a.id}">${I("key", "sm")}Sign in</button>`}${signedIn ? `${engine === "codex" ? `<button class="btn" data-act="useReset:${engine}:${a.id}" ${a.resets && a.resets.available ? "" : "disabled"}>${I("zap", "sm")}Use one reset${a.resets && a.resets.available ? ` · ${a.resets.available} left` : " · none"}</button>` : ""}<button class="btn" data-act="refresh:${engine}">${I("refresh", "sm")}Refresh</button>` : ""}</div>`;
+    return `<div class="dhead">${mark(engine, "fill")}<div class="tt"><div class="t display">${esc(a.label)}</div><div class="meta"><span>${engine === "claude" ? "Claude" : "Codex"}</span><span>${esc(a.plan)}</span>${a.checked ? `<span>checked ${esc(a.checked)}</span>` : ""}</div></div>${badge(a.active ? "active" : signedIn ? "ready" : "signed out", a.active ? "b-accent" : signedIn ? "b-success" : "b-warning")}</div>
+      ${big}
+      ${signedIn ? `<div class="two">
+        <div class="panel">${a.windows.map((x) => `<h3>Burndown <span class="c">· ${esc(x.label)} window · ideal pace against what is left</span></h3>${chart(x)}`).join("")}</div>
+        <div><div class="panel"><h3>Pace <span class="c">· ${esc(w.label)} window</span></h3><div class="pace"><span class="big ${pace.ahead ? "ok" : "warn"}">burning ${pace.rate.toFixed(1)}% an hour</span><small>${pace.ahead ? "ahead of pace · spending slower than the window refills" : "behind pace · spending faster than the window refills"} · even pace would leave ${Math.round(pace.idealLeft)}% by now</small><span class="big ${pace.lasts ? "" : "warn"}">${pace.lasts ? "lasts to the reset" : `runs out at ${esc(pace.runsOut)} · ${(pace.windowLeft - pace.hoursLeft).toFixed(1)} h before the reset`}</span><small>${esc(w.reset)} · ${pace.windowLeft.toFixed(1)} h of window left</small></div>
+        <h3>Today by hour <span class="c">· percentage points spent</span></h3>${hoursHtml(a)}</div></div>
+      </div>${usingHtml(a)}` : ""}
+      ${actions}`;
   }
 
-  /* ── stage: overview ───────────────────────────────────────────────────── */
-  function overview() {
-    const live = F.projects.filter((p) => !p.archived && !S.archivedProjects.has(p.id) && !S.deletedProjects.has(p.id));
-    const withCounts = live.map((p) => ({ p, n: counts(p.id) }));
-    const active = withCounts.filter((x) => x.n.needs + x.n.working + x.n.pipelines > 0);
-    const quiet = withCounts.filter((x) => x.n.needs + x.n.working + x.n.pipelines === 0);
-    const order = { stalled: 0, limit: 1, waiting: 2, held: 3, working: 4, returned: 5, killed: 6, done: 7 };
-    const keep = S.project; S.project = "all";
-    const cards = active.map(({ p, n }) => {
-      const convs = F.conversations.filter((c) => c.project === p.id && !c.seat && !c.child && !S.closed.has(c.id) && arrivedYet(c));
-      const rows = convs.slice().sort((a, b) => order[stateBits(a).key] - order[stateBits(b).key]).slice(0, 8);
-      return `<div class="pc"><button class="ph" data-go="#/board" data-project="${p.id}"><span class="dot ${n.needs ? "warn" : n.working ? "ok" : ""}"></span><span class="t trunc">${esc(p.name)}</span>${p.crowned ? `<svg class="i sm crown" viewBox="0 0 24 24" aria-hidden="true">${ICONS.crown}</svg>` : ""}<span class="cnt">${n.needs ? `<b>${n.needs} need you</b>` : ""}<span>${n.working} working</span><span>${n.pipelines} pipeline${n.pipelines === 1 ? "" : "s"}</span></span>${I("chevR")}</button>${rows.map((c) => convRow(c).replace('data-go="#/chat/', `data-project="${p.id}" data-go="#/chat/`)).join("")}${convs.length > 8 ? `<div class="quietline">${convs.length - 8} more</div>` : ""}</div>`;
-    }).join("");
-    /* F14: quiet projects are one strip of chips, not eight tall cards. */
-    const strip = quiet.length ? `<div class="quietstrip"><span class="lbl">Quiet · ${quiet.length}</span>${quiet.map(({ p }) => `<button class="qchip" data-go="#/board" data-project="${p.id}"><span class="chip">${esc(p.name)}<small>${esc(p.age)}</small></span></button>`).join("")}</div>` : "";
-    S.project = keep;
-    return `<div class="ov">${cards ? `<div class="ov-grid">${cards}</div>` : `<div class="quietline">No project has anything running.</div>`}${strip}${toastHtml()}</div>`;
-  }
-
-  /* ── stage: the landing surface ────────────────────────────────────────── */
-  const projectTasks = () => scopedTasks();
-  function effectiveView() {
-    if (S.view) return S.view;
-    return projectTasks().length ? "kanban" : "list";
-  }
-  /* F4: the landing stage does work — the kanban when the project has tasks,
-     else the first thing that needs the operator, else the seat. */
-  function landing() {
-    if (S.project === "all") return overview();
-    if (effectiveView() === "map") return mapView();
-    if (effectiveView() === "kanban" && projectTasks().length) return kanban();
-    const a = attention();
-    if (a.length) { const it = a[0]; return it.kind === "conv" ? chatView(conv(it.id)) : pipeView(pipe(it.id)); }
-    const sc = seatConv();
-    if (sc) return chatView(sc);
-    const any = F.conversations.find((c) => inScope(c) && !c.seat);
-    if (any) return chatView(any);
-    return emptyStage();
-  }
-  function emptyStage() {
-    return `<div class="emptystage"><h2>Nothing here yet</h2><p>Create a conversation, a task or a pipeline with ＋, or pick a project on the left.</p><button class="btn primary" data-go="#/board/create">${I("plus", "sm")}Create</button>${toastHtml()}</div>`;
-  }
-
-  /* ── dialogs ───────────────────────────────────────────────────────────── */
-  const mrow = (icon, label, go, opts) => `<button class="mrow ${opts?.cls || ""}" ${go.startsWith("#") ? `data-go="${go}"` : `data-act="${go}"`} ${opts?.checked !== undefined ? `role="menuitemcheckbox" aria-checked="${opts.checked}"` : ""}>${I(icon)}<span class="l">${esc(label)}${opts?.sub ? `<small>${esc(opts.sub)}</small>` : ""}</span>${opts?.right ? `<span class="r">${opts.right}</span>` : ""}${opts?.kbd ? `<span class="kbd">${esc(opts.kbd)}</span>` : ""}</button>`;
-  function dialogShell(title, body, opts) {
-    return `<div class="scrim ${opts?.clear ? "clear" : ""}" data-scrim><div class="dialog ${opts?.wide ? "wide" : ""} ${opts?.cls || ""}" role="dialog" aria-modal="true" aria-label="${esc(title)}" data-dialog><div class="dh"><h2>${esc(title)}${opts?.sub ? `<small>${esc(opts.sub)}</small>` : ""}</h2>${opts?.head || ""}<button class="iconbtn" data-act="close" aria-label="Close">${I("x")}</button></div>${body}${opts?.foot ? `<div class="df">${S.toast ? toastHtml() : ""}${opts.foot}</div>` : ""}</div></div>`;
-  }
-  function popShell(body, style, label) { return `<div class="scrim clear" data-scrim><div class="pop" role="dialog" aria-label="${esc(label || "Menu")}" style="${style}" data-dialog>${body}</div></div>`; }
-  function dialogs() {
-    const h = hashOf(); const s = segs();
-    const c = s[0] === "chat" ? conv(s[1]) : null;
-    if (h === "#/board/create") return popShell(`${mrow("plus", "New conversation", "#/board/new-agent", { sub: "engine, model, reasoning, account, prompt", kbd: "c" })}${mrow("flag", "New task", "newTask")}${mrow("layers", "New pipeline", "#/board/new-pipeline", { sub: "from a template or a blank graph" })}${F.seat.state === "none" ? mrow("bot", "Create an orchestrator", "#/seat/rotate") : ""}`, `top:52px;left:calc(var(--rail) + var(--col) - 96px)`, "Create");
-    if (h === "#/board/menu") return popShell(`${mrow("board", "Board", "#/kanban", { kbd: "k" })}${mrow("layers", "Pipelines", "#/pipelines", { kbd: "p" })}${mrow("map", "Map", "#/map", { kbd: "m" })}${mrow("list", "All conversations", "recentAll", { sub: `${F.conversations.filter(inScope).length} in this project` })}${mrow("person", "Accounts & limits", "#/accounts", { kbd: "a" })}${mrow("terminal", "Host details", "#/board/host", { right: F.runtime !== "connected" ? badge(F.runtime, F.runtime === "offline" ? "dng" : "info") : "", sub: `${F.hosts.length} background tasks` })}${mrow("keyboard", "Keyboard shortcuts", "#/board/keys", { kbd: "?" })}${mrow("bell", "Sound", "sound", { checked: S.sound })}<div class="msep"></div>${mrow("archive", "Archive project", "archiveProject", { sub: "moves it to the rail's Archive · Restore in the receipt" })}${mrow("trash", "Delete project", "deleteProject", { cls: "dng", sub: "acts now · Restore in the receipt for 4 s" })}`, `top:52px;left:calc(var(--rail) + var(--col) - 48px)`, "Board menu");
-    if (h === "#/board/host") return dialogShell("Host details", `<div class="db"><div class="mrow" style="min-height:40px"><span class="dot ${F.runtime === "connected" ? "ok" : F.runtime === "degraded" ? "warn" : "dng"}"></span><span class="l">Runtime · ${F.runtime === "connected" ? "connected · updates stream" : F.runtime === "degraded" ? "degraded · polling every 10 s" : "offline · reconnecting"}</span></div><div class="mgrp">Background tasks · ${F.hosts.length}</div>${F.hosts.map((x) => `<div class="hostrow"><span class="n">${esc(x.name)}<small>pid <span class="mono">${x.pid}</span> · ${esc(x.mem)} · ${esc(x.since)}</small></span><button class="btn danger" data-act="killHost:${x.pid}">Kill</button></div>`).join("")}<div class="mgrp">Hidden · ${S.closed.size} closed conversations</div>${S.closed.size ? [...S.closed].map((id) => `<div class="hostrow"><span class="n">${esc(conv(id)?.title || id)}</span><button class="btn" data-act="reopen:${id}">Reopen</button></div>`).join("") : ""}</div>`, { sub: "the runtime, background tasks, hidden conversations", foot: `<button class="btn" data-act="close">Close</button>` });
-    if (h === "#/board/keys") return dialogShell("Keyboard shortcuts", `<div class="keys-grid">${[["n", "next decision"], ["N", "previous decision"], ["o", "orchestrator"], ["/", "find my messages"], ["k", "board"], ["m", "map ⇄ list"], ["a", "accounts & limits"], ["p", "pipelines"], ["c", "create"], ["i", "type to the agent"], ["[", "collapse the rail"], ["↑ ↓", "move in the column"], ["Enter", "open the highlighted row or stage"], ["1 – 9", "pick a question option"], ["Esc", "leave the field · back to the column"], ["?", "this list"], ["Enter", "send (in the composer)"], ["Shift+Enter", "newline (in the composer)"]].map(([k, l]) => `<div class="kr"><span class="kbd">${esc(k)}</span><span>${esc(l)}</span></div>`).join("")}</div>`, { sub: "single keys while nothing is being typed", foot: `<button class="btn" data-act="close">Close</button>` });
-    if (h === "#/board/task") return dialogShell("New task", `<div class="db form"><label>Title <input class="field" data-act="nt:title" data-autofocus placeholder="What has to be done?"></label><label>Status ${segHtml("Status", KCOLS.map((k) => k[0]), "planned", "nt:status")}</label><div class="hint">A task becomes a thread when you give it a worker or a pipeline; both chips appear on its card.</div></div>`, { foot: `<button class="btn" data-act="close">Cancel</button><button class="btn primary" data-act="newTask">Create task</button>` });
-    if (h === "#/board/search") {
-      const q = S.search.trim().toLowerCase();
-      const hits = []; for (const cv of F.conversations) for (const m of cv.feed || []) { if (S.searchScope === "mine" && m.kind !== "user") continue; if (m.kind !== "user" && m.kind !== "agent") continue; if (q && !m.text.toLowerCase().includes(q)) continue; hits.push({ cv, m }); }
-      const hl = (t) => q ? esc(t).replace(new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "ig"), (x) => `<mark>${x}</mark>`) : esc(t);
-      /* F12: two lines — title with its meta right-aligned, then the snippet
-         truncated on its own line, so nothing paints over the meta column. */
-      return dialogShell("Find my messages", `<div class="db form" style="padding-bottom:0"><div class="rowf" style="display:flex;gap:6px"><input class="field" style="flex:1" value="${esc(S.search)}" data-act="search" data-autofocus placeholder="Search everything you've sent…" aria-label="Search"><div class="seg"><button class="${S.searchScope === "mine" ? "on" : ""}" data-act="scope:mine" aria-pressed="${S.searchScope === "mine"}">My messages</button><button class="${S.searchScope === "all" ? "on" : ""}" data-act="scope:all" aria-pressed="${S.searchScope === "all"}">Everything</button></div></div><div class="hint">${q ? `${hits.length} results · ranked in memory · ↑ ↓ to move · Enter opens the conversation at the message` : "Every project, engine and account. Results open in the conversation with the composer."}</div></div><div class="db search-rows">${hits.slice(0, 8).map(({ cv, m }) => `<button class="srow" data-go="#/chat/${cv.id}" data-project="${cv.project}"><span class="st">${esc(cv.title)}</span><span class="sm"><span class="pj">${esc(projectName(cv.project))}</span>${mark(cv.engine)}<span class="tn">${esc(m.ts || "")}</span></span><span class="snip">${hl(m.text.split("\n")[0])}</span></button>`).join("")}${q && !hits.length ? `<div class="hint" style="padding:12px">Nothing found for «${esc(S.search)}»</div>` : ""}</div>`, { wide: true });
+  /* ── dialogs ──────────────────────────────────────────────────────────── */
+  function dialogHtml(r) {
+    if (!r.dialog) return "";
+    const d = r.dialog;
+    if (d === "settings") return ""; /* the composer renders the sheet, anchored to its chip; no scrim */
+    const wrap = (title, body, cls) => `<div class="scrim" data-act="closeDialog"></div><div class="dialog ${cls || ""}" data-dialog role="dialog" aria-label="${esc(title)}"><div class="dhd"><span class="t display">${esc(title)}</span><button class="ib" data-act="closeDialog" aria-label="Close (Esc)">${I("x")}</button></div><div class="dbd">${body}</div></div>`;
+    if (d === "search") {
+      const q = (S.search || "").toLowerCase();
+      const hits = F.conversations.flatMap((c) => (c.feed || []).filter((it) => it.kind !== "tool" && (!q || it.text.toLowerCase().includes(q))).map((it) => ({ c, it }))).slice(0, 8);
+      return wrap("Find my messages", `<input class="field big" data-focus="search" placeholder="Search every message…" aria-label="Search" value="${esc(S.search || "")}" data-search /><div class="seg small" role="radiogroup" aria-label="Scope"><button role="radio" aria-checked="true" class="on">Everything</button><button role="radio" aria-checked="false">My messages</button><button role="radio" aria-checked="false">This project</button></div><div class="results">${hits.map(({ c, it }) => `<button class="mrow" data-go="#/chat/${c.id}"><span class="l1"><span class="t">${esc(c.title)}</span><span class="meta"><span>${esc(projectName(c.project))}</span><span>${esc(it.at)}</span></span></span><span class="snip">${esc(it.text.split("\n")[0])}</span></button>`).join("")}</div>`, "wide");
     }
-    if (h === "#/board/new-agent") {
-      const d = S.newAgent || (S.newAgent = { engine: "claude", model: "Opus", effort: "high", account: "cl-main", cwd: "~/Projects/atlas", prompt: "" });
-      return dialogShell("New conversation", `<div class="db form"><div class="rowf"><label>Engine ${segHtml("Engine", ["claude", "codex"], d.engine, "na:engine")}</label><label>Model ${segHtml("Model", MODELS[d.engine], d.model, "na:model")}</label></div><label>Reasoning ${segHtml("Reasoning", EFFORTS, d.effort, "na:effort")}</label><label>Account</label>${accountRows(d.engine, d.account, "na:account")}<label>Directory <input class="field mono" value="${esc(d.cwd)}" data-act="na:cwd"></label><label>First message <textarea class="field" data-act="na:prompt" data-autofocus placeholder="What should the agent do?">${esc(d.prompt)}</textarea></label></div>`, { sub: `in ${projectName(S.project === "all" ? "atlas" : S.project)}`, foot: `<button class="btn" data-act="close">Cancel</button><button class="btn primary" data-act="startAgent">Start conversation</button>` });
-    }
-    if (h === "#/board/new-pipeline") return dialogShell("New pipeline", `<div class="db form"><label>Repository <input class="field mono" value="~/Projects/${esc(S.project === "all" ? "atlas" : S.project)}" data-act="np:repo"></label><div class="hint">Repository ready · the pipeline gets its own worktree and branch.</div><div class="tpl">${[["Plan → Build → Review", ["architect", "builder", "reviewer ↺"]], ["Build → Review", ["builder", "reviewer ↺"]], ["Build → Verify", ["builder", "verifier"]], ["Blank graph", []]].map(([t, roles], i) => `<button data-act="np:template:${i}" ${i === 0 ? "data-autofocus" : ""}><b>${esc(t)}</b>${roles.length ? `<span class="flow">${roles.map((r) => badge(r, r.includes("↺") ? "acc" : "")).join(I("arrowR", "sm"))}</span>` : `<span class="hint">Start empty and assemble the stages by hand.</span>`}</button>`).join("")}</div></div>`, { sub: "a draft lands on the board; edit stages before or after start" });
-    if (h === "#/seat/rotate") {
-      const create = F.seat.state === "none"; const d = S.rotate || (S.rotate = { engine: F.seat.engine, model: F.seat.model, effort: F.seat.effort, account: "cl-main", mandate: F.seat.mandate });
-      return dialogShell(create ? "Create an orchestrator" : "Rotate the orchestrator", `<div class="db form"><div class="hint">${create ? "The orchestrator runs this board and talks to you here. It starts with the mandate below." : "A successor takes the seat with the mandate below; the current orchestrator hands over its context and stops."}</div><div class="rowf"><label>Engine ${segHtml("Engine", ["claude", "codex"], d.engine, "ro:engine")}</label><label>Model ${segHtml("Model", MODELS[d.engine], d.model, "ro:model")}</label></div><label>Reasoning ${segHtml("Reasoning", EFFORTS, d.effort, "ro:effort")}</label><label>Account</label>${accountRows(d.engine, d.account, "ro:account")}<label>Mandate <textarea class="field" data-act="ro:mandate" data-autofocus data-orchestrator-mandate>${esc(d.mandate)}</textarea></label></div>`, { foot: `<button class="btn" data-act="close">Cancel</button><button class="btn primary" data-act="${create ? "createSeat" : "rotateSeat"}" data-orchestrator-primary>${create ? "Create orchestrator" : "Rotate orchestrator"}</button>` });
-    }
-    if (c && h.endsWith("/menu")) {
-      const b = stateBits(c); const p = c.pipeline ? pipe(c.pipeline.id) : null; const task = F.tasks.find((t) => t.worker === c.id);
-      const first = (c.seat ? mrow("bot", "Orchestrator seat", "#/seat", { sub: "status · context · mandate · rotate" }) : "")
-        + (p ? mrow("layers", `Pipeline · ${p.task}`, `#/pipeline/${p.id}`, { sub: `stage ${c.pipeline.k}/${c.pipeline.n} · ${c.pipeline.stage} · ${pipeBits(p).phrase}` }) : "")
-        + (task ? mrow("flag", `Task · ${task.title}`, "#/kanban", { sub: `${KCOLS.find((k) => k[0] === taskStatus(task))[1]} on the board` }) : "");
-      return popShell(`${first}${first ? '<div class="msep"></div>' : ""}${canPin() ? mrow("panel", S.pin === c.id ? "Unpin" : "Pin beside", S.pin === c.id ? "unpin" : `pin:${c.id}`) : ""}${mrow("pencil", "Rename", `rename:${c.id}`)}${mrow("crown", S.crowned.has(c.id) ? "Remove crown" : "Crown", `crown:${c.id}`)}${mrow("swap", "Hand off", `handoff:${c.id}`, { sub: "start a successor with this context" })}${mrow("compress", "Compact context", `compact:${c.id}`, { right: `${100 - (c.ctx || 0)}% left` })}${mrow("info", "Details & host", `#/chat/${c.id}/details`)}${mrow("terminal", "Open in terminal", `terminal:${c.id}`)}<div class="msep"></div>${mrow("x", "Close card", `close:${c.id}`, { sub: "Reopen in the receipt" })}${mrow("square", "Kill agent", `kill:${c.id}`, { cls: "dng", sub: b.key === "working" ? "running now" : b.key === "stalled" ? "stalled" : "not running" })}`, `top:52px;right:8px`, "Conversation actions");
-    }
-    if (c && h.endsWith("/model")) {
-      const nx = S.next[c.id] || { model: c.model, effort: c.effort, account: c.account }; const b = stateBits(c);
-      const acct = `<div class="mgrp">Account</div>${F.accounts[c.engine].map((a) => {
-        const low = lowestWindow(a);
-        if (a.active && b.key === "limit") return `<div class="mrow"><span class="dot warn"></span><span class="l">${esc(a.label)}<small>limit · resets ${esc(c.limitReset || "16:40")}</small></span>${badge("limit", "warn")}</div>`;
-        return `<button class="arow compact ${nx.account === a.label ? "on" : ""}" data-act="${a.auth === "Authenticated" ? `md:${c.id}:account:${a.id}` : `signIn:${c.engine}:${a.id}`}"><span class="dot ${a.auth === "Authenticated" ? "ok" : ""}"></span><span class="t">${esc(a.label)}<small>${esc(a.plan)}</small></span>${useCell(a.auth === "Authenticated" ? low : null)}${a.auth === "Authenticated" ? (nx.account === a.label ? badge("chosen", "acc") : badge("ready", "ok")) : `<span class="signin">sign in →</span>`}</button>`;
-      }).join("")}<div class="msep"></div>`;
-      return popShell(`<div class="mgrp">Applies to your next message · ${esc(nx.model)} · ${esc(nx.effort)}</div>${acct}<div class="mgrp">Model</div>${MODELS[c.engine].map((m) => `<button class="mrow ${nx.model === m ? "on" : ""}" data-act="md:${c.id}:model:${m}">${mark(c.engine)}<span class="l">${esc(m)}</span>${nx.model === m ? I("check") : ""}</button>`).join("")}<div class="mgrp">Reasoning</div>${EFFORTS.map((e) => `<button class="mrow ${nx.effort === e ? "on" : ""}" data-act="md:${c.id}:effort:${e}">${I("zap")}<span class="l">${esc(e)}</span>${nx.effort === e ? I("check") : ""}</button>`).join("")}`, `bottom:70px;left:calc(var(--rail) + var(--col) + 24px)`, "Next message");
-    }
-    if (c && h.endsWith("/details")) {
-      const p = c.pipeline ? pipe(c.pipeline.id) : null;
-      return dialogShell("Details & host", `<div class="db"><div class="mgrp">This conversation</div><dl class="details-grid"><dt>Account</dt><dd>${esc(c.account)} · ${esc(c.engine === "claude" ? "Claude" : "Codex")}</dd><dt>Context</dt><dd style="display:flex;align-items:center;gap:8px">${meter(100 - (c.ctx || 0))}<span class="tn">${100 - (c.ctx || 0)}% left</span></dd><dt>Worktree</dt><dd class="mono">${esc(c.worktree || "—")}</dd><dt>Pipeline</dt><dd>${p ? `${esc(p.task)} · stage ${c.pipeline.k}/${c.pipeline.n}` : "—"}</dd><dt>Members</dt><dd>${c.children ? c.children.map((k) => `${esc(k.title)} · ${esc(k.state)}`).join("<br>") : "—"}</dd></dl><div class="mgrp">Host</div><div class="mrow" style="min-height:40px"><span class="dot ${F.runtime === "connected" ? "ok" : "warn"}"></span><span class="l">Runtime · ${esc(F.runtime)}</span></div>${F.hosts.map((x) => `<div class="hostrow"><span class="n">${esc(x.name)}<small>pid <span class="mono">${x.pid}</span> · ${esc(x.mem)}</small></span><button class="btn danger" data-act="killHost:${x.pid}">Kill</button></div>`).join("")}</div>`, { sub: c.title, foot: `<button class="btn" data-act="close">Close</button>` });
-    }
+    if (d === "create") return wrap("Create", `<div class="rows"><button class="drow" data-act="createConv"><span class="ico">${I("bot")}</span><span><b>Conversation</b><small>Spawn an agent in ${esc(projectName(S.project))}</small></span></button><button class="drow" data-act="createTask"><span class="ico">${I("inbox")}</span><span><b>Task</b><small>A card in the backlog until a worker takes it</small></span></button><button class="drow" data-act="createPipeline"><span class="ico">${I("layers")}</span><span><b>Pipeline</b><small>From a template: build → verify → review</small></span></button>${F.seats[S.project] ? "" : `<button class="drow" data-go="#/board/rotate"><span class="ico">${I("person")}</span><span><b>Orchestrator</b><small>Seat one for this project</small></span></button>`}</div>`);
+    if (d === "menu") return wrap(r.screen === "chat" ? "Conversation" : "Board", r.screen === "chat" ? `<div class="rows">${conv(r.id).pipeline ? `<button class="drow" data-act="inspectFromChat:${conv(r.id).pipeline.id}"><span class="ico">${I("layers")}</span><span><b>Pipeline · ${esc(pipe(conv(r.id).pipeline.id).task)}</b><small>stage ${esc(conv(r.id).pipeline.stage)}</small></span></button>` : ""}<button class="drow" data-act="lift:${r.id}"><span class="ico">${I("target")}</span><span><b>Show on the yard</b><small>Lift this node in its cluster</small></span></button><button class="drow" data-act="rename:${r.id}"><span class="ico">${I("tool")}</span><span><b>Rename</b></span></button><button class="drow" data-act="handoff:${r.id}"><span class="ico">${I("swap")}</span><span><b>Hand off</b><small>Continue in a fresh conversation</small></span></button><button class="drow" data-act="kill:${r.id}"><span class="ico">${I("x")}</span><span><b>Kill the agent</b><small>Respawn stays in the receipt</small></span></button></div>` : `<div class="rows"><button class="drow" data-act="tray"><span class="ico">${I("inbox")}</span><span><b>Backlog</b><small>${M.backlog.length} tasks without a worker</small></span></button><button class="drow" data-go="#/accounts"><span class="ico">${I("person")}</span><span><b>Accounts &amp; limits</b></span></button><button class="drow" data-go="${r.base}/host"><span class="ico">${I("terminal")}</span><span><b>Host details</b><small>${F.runtime} · ${F.host.tasks.length} background tasks</small></span></button><button class="drow" data-act="unpinAll"><span class="ico">${I("undo")}</span><span><b>Release all to auto</b><small>${Object.keys(S.pins).length} pinned</small></span></button><button class="drow" data-act="archiveProject"><span class="ico">${I("archive")}</span><span><b>Archive project</b></span></button></div>`);
+    if (d === "host") return wrap("Host details", `<div class="hrow"><span class="dot ${F.runtime === "connected" ? "live" : "wait"}"></span><b>${esc(F.runtime)}</b><span class="muted">· ${F.runtime === "connected" ? "updates stream" : "polling every 10 s"} · last seen ${esc(F.host.lastSeen)}</span></div><h3>Background tasks</h3>${F.host.tasks.map((t) => `<div class="hrow"><span class="t">${esc(t.name)}</span><code>${t.pid}</code><span class="muted">${esc(t.mem)} · ${esc(t.age)}</span><span class="grow"></span><button class="btn quiet" data-act="killTask:${t.pid}">Kill</button></div>`).join("")}<h3>Hidden conversations</h3>${F.host.hidden.map((h) => `<div class="hrow"><span class="t">${esc(h.title)}</span><span class="grow"></span><button class="btn quiet" data-act="reopen:${h.id}">Reopen</button></div>`).join("")}`);
+    if (d === "rotate") { const s = F.seats[S.project] || { engine: "claude", model: "Opus", effort: "high", account: "Main", mandate: "" }; const d2 = S.rotate || (S.rotate = { engine: s.engine, model: s.model, effort: s.effort, account: s.account }); return wrap(F.seats[S.project] ? "Rotate the orchestrator" : "Create an orchestrator", `<div class="srow"><label>Engine</label>${seg("Engine", ["claude", "codex"], d2.engine, "rot:engine")}</div><div class="srow"><label>Model</label>${seg("Model", d2.engine === "codex" ? ["gpt-5.6", "gpt-5.5"] : ["Opus", "Sonnet"], d2.model, "rot:model")}</div><div class="srow"><label>Reasoning</label>${seg("Reasoning", ["low", "medium", "high", "xhigh", "max"], d2.effort, "rot:effort")}</div><div class="srow col"><label>Account</label><div class="alist">${F.accounts[d2.engine].map((a) => { const w = a.windows[0]; const on = d2.account === a.label; return `<button class="arow compact ${on ? "on" : ""}" role="radio" aria-checked="${on}" data-act="rot:account:${a.label}"><span class="t">${esc(a.label)}<small>${esc(a.plan)}</small></span>${w ? `${meter(w.left)}<span class="pct tn">${w.left}% left</span>` : `<span class="meter empty"><i></i></span><span class="signin">sign in ›</span>`}</button>`; }).join("")}</div></div><label class="lbl">Mandate</label><textarea class="field" rows="4" data-focus="mandate" aria-label="Mandate">${esc(s.mandate || "You are the orchestrator of this project.")}</textarea><p class="muted small">A new mandate, model or account means a successor: the current seat hands over its context and retires.</p><div class="actions"><button class="btn primary" data-act="rotateNow">${I("rotate", "sm")}${F.seats[S.project] ? "Rotate now" : "Create the orchestrator"}</button><button class="btn quiet" data-act="closeDialog">Cancel</button></div>`); }
+    if (d === "keys") return wrap("Keyboard", `<table class="keys">${[["n · N", "next · previous thing that needs you (the camera follows)"], ["1 – 9", "jump to the cluster with that keycap"], ["f", "fit everything"], ["0", "fit what needs you"], ["+ · −", "zoom (Ctrl+wheel or pinch on the canvas)"], ["↑ ↓ ← →", "move the selection between clusters"], ["Enter", "lift the selected cluster's live node · again opens the conversation"], ["Esc", "lower the lift · close the inspector · close a dialog"], ["t", "backlog tray"], ["o", "the orchestrator's conversation"], ["a", "accounts & limits"], ["/", "find my messages"], ["[", "expand · collapse the rail"], ["c", "create"], ["?", "this list"]].map(([k, v]) => `<tr><td><kbd class="keycap">${esc(k)}</kbd></td><td>${esc(v)}</td></tr>`).join("")}</table>`);
     return "";
   }
 
-  /* ── stage router ──────────────────────────────────────────────────────── */
-  function stage() {
-    const s = segs();
-    if (s[0] === "overview") return overview();
-    if (s[0] === "kanban" || s[0] === "tasks") return kanban();
-    if (s[0] === "map") return mapView();
-    if (s[0] === "chat") { const c = conv(s[1]); return c ? chatView(c) : landing(); }
-    if (s[0] === "seat") { const c = seatConv(); return c ? chatView(c, { seatPanel: true }) : landing(); }
-    if (s[0] === "pipelines") return pipelinesList();
-    if (s[0] === "pipeline") { const p = pipe(s[1]); if (!p) return landing(); return pipeView(p, s[2] === "stage" ? p.stages.find((x) => x.id === s[3]) : null, s[2] === "add" ? Number(s[3]) : undefined); }
-    if (s[0] === "accounts") return s[1] && s[2] ? accountDetail(s[1], s[2]) : accountsView();
-    return landing();
-  }
-  function statusBar() {
-    const rt = F.runtime; const cl = F.accounts.claude.find((a) => a.active); const cx = F.accounts.codex.find((a) => a.active);
-    const low = (a) => a && a.windows.length ? Math.min(...a.windows.map((w) => w.left)) : null;
-    const acc = (engine, a) => { const l = low(a); return `<button class="sbtn" data-go="${a ? `#/accounts/${engine}/${a.id}` : "#/accounts"}" aria-label="${engine} account ${a ? a.label : ""}"><span class="sb ${l !== null && l <= 10 ? "dng" : l !== null && l <= 30 ? "warn" : ""}">${mark(engine)}${a ? `${esc(a.label)} · <span class="tn">${l}% left</span>` : "no account"}</span></button>`; };
-    return `<div class="statusbar"><button class="sbtn" data-go="#/board/host" aria-label="Runtime ${rt}"><span class="sb ${rt === "offline" ? "dng" : rt === "degraded" ? "warn" : ""}"><span class="dot ${rt === "connected" ? "ok" : rt === "degraded" ? "warn" : "dng"}"></span>${rt === "connected" ? "connected" : rt === "degraded" ? "degraded · polling" : "offline · reconnecting"}</span></button><button class="sbtn" data-go="#/board/host" aria-label="Background tasks"><span class="sb">${I("terminal", "sm")}${F.hosts.length} background tasks</span></button><span class="sp"></span>${acc("claude", cl)}${acc("codex", cx)}<button class="sbtn" data-go="#/board/keys" aria-label="Keyboard shortcuts"><span class="sb"><span class="kbd">?</span> shortcuts</span></button></div>`;
+  /* ── actions ──────────────────────────────────────────────────────────── */
+  function act(spec, el) {
+    const [name, ...rest] = spec.split(":");
+    const arg = rest.join(":");
+    const projectOf = (c) => c.project;
+    switch (name) {
+      case "rail": S.rail = S.rail ? 0 : 1; S.focusKey = "act:rail"; render(); break;
+      case "project": S.project = arg; S.selected = null; S.lift = null; S.liftPlaced = false; go("#/board"); if (hashOf() === "#/board") render(); break;
+      case "zoomIn": zoomCenter(1.25); break;
+      case "zoomOut": zoomCenter(0.8); break;
+      case "fitAll": fitAll(true); break;
+      case "fitNeeds": fitNeeds(true); break;
+      case "inspect": {
+        if (route().screen === "field") { const reg = (M.regions || []).find((r) => r.clusters.some((c) => c.id === arg)); if (reg) { S.project = reg.id; S.selected = arg; S.lift = null; S.pendingFit = arg; go("#/board"); } break; }
+        S.selected = arg; S.focusKey = `cluster:${arg}`; render(); fitCluster(arg, true); break;
+      }
+      case "jump": S.selected = arg; render(); fitCluster(arg, true); break;
+      case "deselect": S.selected = null; S.editing = null; S.focusKey = "board"; render(); break;
+      case "open": { const c = conv(arg); if (S.lift === arg) { go(`#/chat/${arg}`); break; } S.lift = arg; S.liftPlaced = false; S.selected = (clusterOfConv(arg) || {}).id || S.selected; render(); break; }
+      case "lift": { S.lift = arg; S.liftPlaced = false; const cl = clusterOfConv(arg); if (cl) S.selected = cl.id; if (route().screen !== "board") { go("#/board"); if (hashOf() === "#/board") render(); } else render(); break; }
+      case "unlift": S.lift = null; S.liftPlaced = false; S.focusKey = "board"; render(); break;
+      case "backToYard": { const c = conv(arg); if (c && c.project !== S.project) S.project = c.project; if (c) { S.lift = c.id; S.liftPlaced = false; const cl = clustersOf(c.project).find((x) => x.nodes.some((n) => n.conv && n.conv.id === c.id)); S.selected = cl ? cl.id : S.selected; } go("#/board"); break; }
+      case "tray": S.tray = !S.tray; S.focusKey = "act:tray"; render(); break;
+      case "unpin": delete S.pins[arg]; receipt("Released to the auto layout", null); render(); break;
+      case "unpinAll": S.pins = {}; receipt("Everything flows again", null); if (route().dialog) closeDialog(); else render(); break;
+      case "dismissBanner": S.dismissed = true; render(); break;
+      case "arrive": { const c = conv(arg); S.seen.add(arg); S.project = projectOf(c); go(`#/chat/${arg}`); break; }
+      case "receiptInverse": { const r = S.receipt; S.receipt = null; if (r && r.inverse) r.inverse(); else render(); break; }
+      case "closeDialog": closeDialog(); break;
+      case "assign": { const t = task(arg); const c = { id: `w-${t.id}`, project: t.project, title: t.title, engine: "codex", model: "gpt-5.6", effort: "high", state: "working", elapsed: "0:03", tool: "reading the task", feed: [{ kind: "user", at: F.now, text: t.title }] }; F.conversations.push(c); t.worker = c.id; t.status = "assigned"; receipt(`A worker took «${t.title}»`, "Undo", () => { delete t.worker; t.status = "inbox"; F.conversations.splice(F.conversations.indexOf(c), 1); render(); }); render(); break; }
+      case "send": { const c = conv(arg); const text = (S.drafts[c.id] || "").trim(); if (!text) break; c.feed.push({ kind: "user", at: F.now, text }); S.drafts[c.id] = ""; if (F.runtime === "offline") { c.held = "1"; receipt("Queued · sends when the host is back", null); } else { c.state = "working"; c.elapsed = "0:01"; c.tool = "thinking"; delete c.stalled; if (c.question) S.answered[c.id] = true; } render(); break; }
+      case "stop": { const c = conv(arg); c.state = "returned"; c.age = "now"; delete c.elapsed; receipt("Interrupted · the agent finished its turn", null); render(); break; }
+      case "kill": { const c = conv(arg); S.killed.add(arg); if (route().dialog) closeDialog(); receipt(`Killed «${c.title}»`, "Respawn", () => { S.killed.delete(arg); render(); }); render(); break; }
+      case "respawn": S.killed.delete(arg); receipt("Respawned · the queue drains", null); render(); break;
+      case "answer-conv": { const [id, which] = arg.split(":"); const c = conv(id); const text = which === "own" ? ($app.querySelector('[data-focus="own"]') || {}).value || "" : c.question.options[Number(which)][0]; if (!text.trim()) break; c.feed.push({ kind: "user", at: F.now, text }); S.answered[id] = true; c.state = "working"; c.elapsed = "0:01"; c.tool = "applying the answer"; render(); break; }
+      case "attach": receipt("Attach: the picker opens here", null); render(); break;
+      case "mic": receipt("Dictation starts here", null); render(); break;
+      case "set": { const [id, key, ...v] = arg.split(":"); const val = v.join(":"); const s = S.settings[id]; if (key === "speed") s.fast = val === "fast"; else s[key] = val; S.focusKey = `act:${spec}`; render(); break; }
+      case "signin": { closeDialog(); receipt(`Sign in to ${arg.split(":")[1]} · the device flow opens`, null); render(); break; }
+      case "compact": closeDialog(); receipt("Compacting the context", null); render(); break;
+      case "copyResume": closeDialog(); receipt("Resume command copied", null); render(); break;
+      case "recheck": closeDialog(); receipt("Host re-checked · connected", null); render(); break;
+      case "edit": { S.editing = arg; const [pid, sid] = arg.split(":"); const s = pipe(pid).stages.find((x) => x.id === sid); S.editDraft = { ...s }; S.focusKey = "focus:prompt"; render(); break; }
+      case "ed": { const [key, ...v] = arg.split(":"); S.editDraft[key] = v.join(":"); if (key === "engine") S.editDraft.model = S.editDraft.engine === "codex" ? "gpt-5.6" : "Opus"; S.focusKey = `act:${spec}`; render(); break; }
+      case "save": { const [pid, sid] = arg.split(":"); const p = pipe(pid); const s = p.stages.find((x) => x.id === sid); Object.assign(s, S.editDraft); p.revision += 1; p.log.unshift([`rev ${p.revision}`, "edit-stage", sid, "operator", "applies from the next attempt"]); S.editing = null; receipt(`Stage ${sid} saved · applies from the next attempt`, "Undo", () => { p.revision -= 1; p.log.shift(); render(); }); render(); break; }
+      case "restart": { const [pid, sid] = arg.split(":"); const p = pipe(pid); const s = p.stages.find((x) => x.id === sid); Object.assign(s, S.editDraft); const a = lastAttempt(s); if (a) a.state = "passed"; s.attempts.push({ n: s.attempts.length + 1, state: "running", conv: null, sha: a ? a.sha : "" }); p.revision += 1; S.editing = null; receipt(`Stage ${sid} restarted as attempt ${s.attempts.length}`, null); render(); break; }
+      case "cancelEdit": S.editing = null; render(); break;
+      case "answer": { const p = pipe(arg); const s = p.stages.find((x) => x.id === p.stage); const text = ($app.querySelector('[data-focus="answer"]') || {}).value || ""; p.state = "running"; p.log.unshift([`rev ${++p.revision}`, "answer", s.id, "operator", text ? `«${text.slice(0, 40)}»` : "retry"]); const f = p.stages.find((x) => x.id === (s.onFail ? s.onFail.to : s.id)); p.stage = f.id; f.attempts.push({ n: f.attempts.length + 1, state: "running", conv: null, sha: "" }); receipt(`Answered · ${f.id} runs again`, "Undo", () => { p.state = "needs_decision"; p.stage = s.id; f.attempts.pop(); p.log.shift(); p.revision -= 1; render(); }); render(); break; }
+      case "skip": { const p = pipe(arg); const s = p.stages.find((x) => x.id === p.stage); const a = lastAttempt(s); if (a) a.state = "skipped"; const i = p.stages.indexOf(s); const n = p.stages[i + 1]; if (n) { p.stage = n.id; p.state = "running"; n.attempts.push({ n: n.attempts.length + 1, state: "running", conv: null, sha: "" }); } else p.state = "completed"; receipt(`Skipped ${s.id}`, "Retry stage", () => { if (a) a.state = "failed"; if (n) n.attempts.pop(); p.stage = s.id; p.state = "needs_decision"; render(); }); render(); break; }
+      case "pause": { const p = pipe(arg); p.pausedState = p.state; p.state = "paused"; receipt("Paused · nothing new spawns", "Resume", () => { p.state = p.pausedState; render(); }); render(); break; }
+      case "resume": { const p = pipe(arg); p.state = p.pausedState || "running"; receipt("Resumed", null); render(); break; }
+      case "archive": { const p = pipe(arg); const was = p.state; p.state = "closed"; F.pipelines.splice(F.pipelines.indexOf(p), 1); S.selected = null; receipt(`Archived «${p.task}»`, "Restore", () => { p.state = was; F.pipelines.push(p); render(); }); render(); break; }
+      case "start": { const p = pipe(arg); p.state = "running"; p.stage = p.stages[0].id; p.stages[0].attempts.push({ n: 1, state: "running", conv: null, sha: "" }); receipt("Started · attempt 1 spawns", "Pause", () => { p.state = "paused"; render(); }); render(); break; }
+      case "rerun": { const p = pipe(arg); p.state = "running"; p.stage = p.stages[0].id; p.stages[0].attempts.push({ n: p.stages[0].attempts.length + 1, state: "running", conv: null, sha: "" }); receipt("Re-running from the first stage", null); render(); break; }
+      case "switch": { const [engine, id] = arg.split(":"); const prev = F.accounts[engine].find((a) => a.active); const moved = liveConvs(prev.id); F.accounts[engine].forEach((a) => { a.active = a.id === id; }); for (const c of moved) c.account = id; receipt(`Switched to ${F.accounts[engine].find((a) => a.id === id).label} · ${moved.length} conversation${moved.length === 1 ? "" : "s"} move from ${prev.label}`, "Switch back", () => { F.accounts[engine].forEach((a) => { a.active = a.id === prev.id; }); for (const c of moved) c.account = prev.id; render(); }); render(); break; }
+      case "useReset": { const [engine, id] = arg.split(":"); const a = F.accounts[engine].find((x) => x.id === id); a.resets.available -= 1; a.windows[0].left = 100; a.windows[0].elapsed = 0; a.windows[0].series = [[0, 100]]; receipt("Reset used · the 5 h window is full", null); render(); break; }
+      case "refresh": receipt("Limits refreshed", null); render(); break;
+      case "addAccount": receipt("A new account starts with the device sign-in", null); render(); break;
+      case "createConv": closeDialog(); receipt("A new conversation opens in the yard", null); render(); break;
+      case "createTask": { closeDialog(); F.tasks.push({ id: `n${Date.now() % 10000}`, project: S.project, title: "New task", issue: null, status: "inbox" }); S.tray = true; receipt("Task added to the backlog", null); render(); break; }
+      case "createPipeline": closeDialog(); receipt("Pick a template · the draft lands in the yard", null); render(); break;
+      case "inspectFromChat": { const c = pipe(arg); S.project = c.project; S.selected = arg; S.lift = null; go("#/board"); break; }
+      case "rename": closeDialog(); receipt("Rename: the title becomes a field", null); render(); break;
+      case "handoff": closeDialog(); receipt("Hand-off draft created", "Undo", () => render()); render(); break;
+      case "rot": { const [key, ...v] = arg.split(":"); S.rotate[key] = v.join(":"); if (key === "engine") S.rotate.model = S.rotate.engine === "codex" ? "gpt-5.6" : "Opus"; S.focusKey = `act:${spec}`; render(); break; }
+      case "rotateNow": { const r = S.rotate; const s = F.seats[S.project] || (F.seats[S.project] = { conv: "seat-new", ctx: { left: 100, window: "100k" }, since: "now", plan: "Max plan" }); Object.assign(s, { engine: r.engine, model: r.model, effort: r.effort, account: r.account, state: "live", predecessor: true, since: "now" }); if (!conv(s.conv)) F.conversations.push({ id: s.conv, project: S.project, seat: true, title: `${projectName(S.project)} orchestrator`, engine: r.engine, model: r.model, effort: r.effort, state: "working", elapsed: "0:02", feed: [{ kind: "agent", at: F.now, text: "Ready. Reading the mandate." }] }); closeDialog(); receipt("Successor seated · the predecessor hands over", null); go(`#/chat/${s.conv}`); break; }
+      case "archiveProject": closeDialog(); receipt(`Archived ${projectName(S.project)}`, "Restore", () => render()); render(); break;
+      case "killTask": closeDialog(); receipt(`Killed ${arg}`, "Respawn", () => render()); render(); break;
+      case "reopen": closeDialog(); receipt("Reopened in the yard", null); render(); break;
+      default: break;
+    }
+    void el;
   }
 
-  /* ── render, and the focus model (F5) ──────────────────────────────────── */
-  const sel = (v) => `"${String(v).replace(/["\\]/g, "\\$&")}"`;
-  function focusKey(el) {
-    if (!el || el === document.body || !$app.contains(el)) return null;
-    if (el.dataset.focus) return `[data-focus=${sel(el.dataset.focus)}]`;
-    if (el.dataset.act) return `[data-act=${sel(el.dataset.act)}]`;
-    if (el.dataset.go) return `[data-go=${sel(el.dataset.go)}]`;
-    return null;
-  }
-  /* Opening a stage moves focus to the one thing the operator came to do. */
-  function stageFocus() {
-    const st = $app.querySelector(".stage"); if (!st) return null;
-    const q = st.querySelector(".q:not(.quiet) .opt");
-    if (q) return q;
-    const answer = st.querySelector('[data-focus="answer"]');
-    if (answer) return answer;
-    const editor = st.querySelector(".editor");
-    if (editor) return editor.querySelector("[data-autofocus]") || editor.querySelector(".ebody button, .ebody input, .ebody textarea, .ebody select");
-    const field = st.querySelector('[data-focus="field"]');
-    if (field) return field;
-    return st.querySelector(".node .nhead, .kcard .khead, .arow, [data-row], .grp .gt, .mtile, .ph, .emptystage .btn, .btn");
-  }
-  function columnRows() { return [...$app.querySelectorAll(".col-body [data-row], .col-body .seat .main")]; }
-  function escapeToColumn() {
-    const rows = columnRows();
-    const cur = rows.find((r) => r.classList.contains("on")) || rows[0] || $app.querySelector('[data-focus="filter"]');
-    if (cur) { cur.focus(); cur.scrollIntoView({ block: "nearest" }); }
-  }
-  let lastHash = "";
-  function render() {
-    const was = document.activeElement;
-    const wasKey = focusKey(was);
-    const wasSel = was && (was.tagName === "INPUT" || was.tagName === "TEXTAREA") ? [was.selectionStart, was.selectionEnd] : null;
-    const h = hashOf(); const s = segs();
-    if (s[0] === "overview") S.project = "all";
-    else if (S.project === "all" && s[0] !== "overview") { const c = s[0] === "chat" ? conv(s[1]) : null; const p = s[0] === "pipeline" ? pipe(s[1]) : null; if (c && !c.seat) S.project = c.project; else if (p) S.project = p.project; }
-    if (s[0] === "map") S.view = "map";
-    if (s[0] === "kanban" || s[0] === "tasks") S.view = "kanban";
-    if (s[0] === "chat" && conv(s[1])) S.seen.add(s[1]);
-    if (s[0] !== "pipeline") S.editorDraft = null;
-    $app.dataset.rail = railOpen() ? "1" : "0";
-    $app.dataset.pin = S.pin && canPin() ? "1" : "0";
-    const pinConv = S.pin && canPin() ? conv(S.pin) : null;
-    $app.innerHTML = `${rail()}${column()}<main class="stage" aria-label="Stage">${banner()}${stage()}</main>${pinConv ? `<aside class="pin" aria-label="Pinned conversation">${chatView(pinConv, { pinned: true })}</aside>` : ""}${statusBar()}${dialogs()}`;
-    const screen = SCREENS.find((x) => x.hash === location.hash || x.hash.split("?")[0] === h);
-    $app.dataset.screen = screen ? screen.id : h;
-    $app.dataset.view = effectiveView();
-    $app.dataset.ready = "1";
-    layoutMap();
-    const dlg = $app.querySelector("[data-dialog]");
-    if (h !== lastHash) {
-      lastHash = h;
-      const feed = $app.querySelector(".stage .feed"); if (feed) feed.scrollTop = feed.scrollHeight;
-      if (dlg) { const first = dlg.querySelector("[data-autofocus]") || dlg.querySelector("button, input, textarea, select"); if (first) first.focus(); }
-      else { const t = stageFocus(); if (t) t.focus(); }
-    } else {
-      /* Every re-render restores the element the operator was on, by identity
-         rather than by position, so acting never drops focus to the body. */
-      const back = wasKey && $app.querySelector(wasKey);
-      if (back) { back.focus(); if (wasSel && "setSelectionRange" in back) try { back.setSelectionRange(wasSel[0], wasSel[1]); } catch { /* not a text field any more */ } }
-      else if (dlg) { const first = dlg.querySelector("[data-autofocus]") || dlg.querySelector("button, input, textarea, select"); if (first && !dlg.contains(document.activeElement)) first.focus(); }
-      else if (document.activeElement === document.body) { const t = stageFocus(); if (t) t.focus(); }
-    }
-    const bench = document.getElementById("bench-screens"); if (bench && !bench.childElementCount) bench.innerHTML = SCREENS.map((x) => `<a href="?${x.scenario ? `scenario=${x.scenario}&` : ""}w=${width()}${params.get("scheme") ? `&scheme=${params.get("scheme")}` : ""}${x.hash}" ${x.id === $app.dataset.screen ? 'class="on"' : ""}>${esc(x.id)}</a>`).join("");
-    if (S.arrival === null && F.arrival && !S.arrivalTimer) {
-      S.arrivalTimer = setTimeout(() => {
-        S.arrival = { id: F.arrival.id };
-        const c = conv(F.arrival.id);
-        /* F20: in the current project the arrival is a new row with its edge
-           and one tick of the counts — never a banner, never a toast. */
-        if (c && c.project === S.project) { S.newRows.add(c.id); S.ticked = true; setTimeout(() => { S.ticked = false; S.newRows.delete(c.id); render(); }, 1200); }
-        render();
-        setTimeout(() => { S.arrivalDismissed = true; render(); }, 6000);
-      }, F.arrival.after || 400);
-    }
-  }
-
-  /* ── acts ──────────────────────────────────────────────────────────────── */
-  function attempt(p, s, state) { const n = s.attempts.length + 1; s.attempts.push({ n, state, conv: null, head: "worktree" }); return n; }
-  function mutate(p, action, stageId, effect, detail) { p.revision += 1; p.mutations.push({ seq: p.mutations.length + 1, at: F.now, actor: "operator", action, stage: stageId, effect, revision: p.revision, detail }); p.lastEdit = { actor: "operator", at: "now", action: `${action}${stageId ? ` · ${stageId}` : ""}` }; }
-  function pipelineAct(kind, pid, sid) {
-    const p = pipe(pid); if (!p) return; const s = sid ? p.stages.find((x) => x.id === sid) : null; const d = S.editorDraft || {};
-    /* F19: the receipt names the revision the record moved to; the request
-       payload that carried it is the API contract, not product copy. */
-    const rev = () => `rev ${p.revision}`;
-    if (kind === "start") { p.state = "running"; p.started = "now"; p.branch = `pipeline/${p.id}`; attempt(p, p.stages[0], "running"); p.cursor = { stageId: p.stages[0].id, attempt: 1 }; mutate(p, "start", null, "applied"); toast("Pipeline started", `attempt 1 of ${p.stages[0].id} · ${rev()}`, { label: "Pause", act: `pa:pause:${pid}` }); }
-    else if (kind === "discard") { p.state = "closed"; toast("Draft discarded", null, { label: "Restore", act: `pa:restore:${pid}` }); go("#/pipelines", { replace: true }); }
-    else if (kind === "retry") { const cur = stageOf(p); attempt(p, cur, "running"); p.state = "running"; p.findings = []; mutate(p, "rerun-stage", cur.id, "applied", "from last-passed"); toast(`Attempt ${cur.attempts.length} of ${cur.id} started`, `from the last passed commit · ${rev()}`, { label: "Pause", act: `pa:pause:${pid}` }); }
-    else if (kind === "skip") { const cur = stageOf(p); const i = p.stages.indexOf(cur); const nx = p.stages.find((x) => x.id === cur.next) || p.stages[i + 1]; cur.attempts.push({ n: cur.attempts.length + 1, state: "skipped", conv: null, head: null }); if (nx) { p.cursor = { stageId: nx.id, attempt: 1 }; attempt(p, nx, "running"); p.state = "running"; } else p.state = "completed"; p.findings = []; mutate(p, "skip-stage", cur.id, "applied", "no worktree reset"); toast(`Skipped ${cur.id}`, nx ? `${nx.id} started · ${rev()}` : `pipeline completed · ${rev()}`, { label: "Retry stage", act: `pa:retryStage:${pid}:${cur.id}` }); }
-    else if (kind === "retryStage") { const cur = s; cur.attempts.pop(); const nxt = p.stages.find((x) => x.id === cur.next); if (nxt && nxt.attempts.length) nxt.attempts.pop(); p.cursor = { stageId: cur.id, attempt: cur.attempts.length + 1 }; attempt(p, cur, "running"); p.state = "running"; mutate(p, "rerun-stage", cur.id, "applied", "undo skip"); toast(`Attempt ${cur.attempts.length} of ${cur.id} started`, rev()); }
-    else if (kind === "pause") { p.pausedFrom = p.state; p.state = "paused"; mutate(p, "pause", null, "applied"); toast("Paused", "a parked stage stays visible while paused", { label: "Resume", act: `pa:resume:${pid}` }); }
-    else if (kind === "resume") { p.state = p.pausedFrom || "running"; mutate(p, "resume", null, "applied"); toast("Resumed", rev()); }
-    else if (kind === "archive") { p.prevState = p.state; p.state = "closed"; mutate(p, "close", null, "applied"); toast("Archived", "hosts stopped · worktree kept", { label: "Restore", act: `pa:restore:${pid}` }); }
-    else if (kind === "restore") { p.state = p.prevState || (p.mutations.length ? "running" : "draft"); toast("Restored", rev()); }
-    else if (kind === "checkpoint") { const name = `checkpoint-${p.checkpoints.length + 1}`; p.checkpoints.push({ name, sha: "f00d1e", at: F.now }); mutate(p, "checkpoint", stageOf(p).id, "applied", name); toast(`Checkpoint ${name}`, `worktree committed · ${rev()}`); }
-    else if (kind === "answer") { const field = $app.querySelector('[data-act="answerField"]'); const text = field ? field.value.trim() : ""; const cur = stageOf(p); const n = attempt(p, cur, "running"); p.state = "running"; p.findings = []; mutate(p, "answer", cur.id, "applied", text ? text.slice(0, 40) : "(empty)"); toast(`Answered · attempt ${n} of ${cur.id} started`, `the question and your answer travel as a note · ${rev()}`, { label: "Pause", act: `pa:pause:${pid}` }); }
-    else if (kind === "editStage" || kind === "editRestart") {
-      const running = s.attempts.some((a) => a.state === "running" || a.state === "pending");
-      Object.assign(s, { role: d.role, engine: d.engine, model: d.model, effort: d.effort, access: d.access, sandbox: d.sandbox, outputs: d.outputs ? d.outputs.split(",").map((x) => x.trim()).filter(Boolean) : [], prompt: d.prompt });
-      if (kind === "editRestart" && running) { const last = s.attempts[s.attempts.length - 1]; last.state = "failed"; last.stopped = true; const n = attempt(p, s, "running"); s.pendingEdit = null; mutate(p, "edit-stage", s.id, "restarted-attempt", `restart: attempt ${last.n} stopped, ${n} started`); toast(`Saved and restarted · attempt ${n} of ${s.id}`, `attempt ${last.n} stopped · ${rev()}`); }
-      else if (running) { s.pendingEdit = { fromRevision: p.revision + 1, appliesFrom: s.attempts.length + 1 }; mutate(p, "edit-stage", s.id, "pending-next-attempt", `applies from attempt ${s.attempts.length + 1}`); toast(`Saved · applies from attempt ${s.attempts.length + 1} of ${s.id}`, `attempt ${s.attempts.length} keeps its own definition · ${rev()}`); }
-      else { mutate(p, "edit-stage", s.id, "applied", `applies from attempt ${s.attempts.length + 1}`); toast(`Saved · ${s.id}`, `applies from attempt ${s.attempts.length + 1} · ${rev()}`); }
-    }
-    else if (kind === "setEdge") { s.next = d.passTo || null; s.onFail = d.failTo ? { to: d.failTo, maxRounds: Number(d.maxRounds) || 0 } : null; mutate(p, "set-edge", s.id, "applied", `pass → ${s.next || "end"} · fail ↺ ${s.onFail ? `${s.onFail.to} ×${s.onFail.maxRounds}` : "none"}`); toast(`Edges saved · ${s.id}`, `applies at the next verdict · ${rev()}`); }
-    else if (kind === "note") { const t = (d.note || "").trim(); if (!t) { toast("Write the note first"); return; } s.notes = s.notes || []; if (s.notes.length >= 10) { toast("Ten notes are pending on this stage", "the next attempt takes them; add more after it binds"); return; } s.notes.push({ seq: s.notes.length + 1, text: t }); d.note = ""; mutate(p, "note", s.id, "applied", `applies from attempt ${s.attempts.length + 1}`); toast(`Note added · attempt ${s.attempts.length + 1} of ${s.id} takes it`, rev()); }
-    else if (kind === "rerun") { const running = s.attempts.some((a) => a.state === "running" || a.state === "pending"); if (running && !d.stopCurrent) { toast("Refused: an attempt is unsettled", `attempt ${s.attempts.length} of ${s.id} is running`); return; } if (running) { const last = s.attempts[s.attempts.length - 1]; last.state = "failed"; last.stopped = true; } const n = attempt(p, s, "running"); p.cursor = { stageId: s.id, attempt: n }; p.state = "running"; p.findings = []; s.pendingEdit = null; mutate(p, "rerun-stage", s.id, running ? "restarted-attempt" : "applied", `from ${d.rerunFrom}${running ? " · stopCurrent" : ""}`); toast(`Attempt ${n} of ${s.id} started`, `from ${d.rerunFrom}${running ? " · stopCurrent" : ""} · ${rev()}`, { label: "Pause", act: `pa:pause:${pid}` }); }
-    else if (kind === "rerunLast") { const last = p.stages[p.stages.length - 1]; const n = attempt(p, last, "running"); p.cursor = { stageId: last.id, attempt: n }; p.state = "running"; mutate(p, "rerun-stage", last.id, "applied", "reopened a completed pipeline"); toast(`Reopened · attempt ${n} of ${last.id} started`, rev()); }
-    else if (kind === "removeStage") { if (s.attempts.length) return; const i = p.stages.indexOf(s); p.stages.splice(i, 1); for (const x of p.stages) { if (x.next === s.id) x.next = p.stages[i] ? p.stages[i].id : null; if (x.onFail && x.onFail.to === s.id) x.onFail = null; } mutate(p, "remove-stage", s.id, "applied"); toast(`Removed ${s.id}`, rev(), { label: "Undo", act: `pa:restoreStage:${pid}:${i}` }); S.removed = { stage: s, index: i }; go(`#/pipeline/${pid}`, { replace: true }); }
-    else if (kind === "restoreStage") { if (!S.removed) return; p.stages.splice(S.removed.index, 0, S.removed.stage); mutate(p, "add-stage", S.removed.stage.id, "applied", "undo remove"); S.removed = null; toast("Stage restored", rev()); }
-    else if (kind === "addStage") { const index = Number(sid); const id = (d.id || "").trim() || `stage-${p.stages.length + 1}`; if (p.stages.some((x) => x.id === id)) { toast("A stage with that id exists"); return; } const prev = p.stages[index - 1]; const nxt = p.stages[index]; const st = { id, role: d.role, engine: d.engine, model: d.model, effort: d.effort, access: d.access, sandbox: d.sandbox, outputs: [], next: nxt ? nxt.id : null, onFail: null, attempts: [], prompt: d.prompt || "{{prev.output}}" }; p.stages.splice(index, 0, st); if (prev) prev.next = id; mutate(p, "add-stage", id, "applied", `at ${index}`); S.editorDraft = null; toast(`Added ${id}`, `inserted at its seam · ${rev()}`, { label: "Undo", act: `pa:removeStage:${pid}:${id}` }); go(`#/pipeline/${pid}/stage/${id}`, { replace: true }); return; }
-    render();
-  }
-
-  function act(name, el) {
-    const [kind, a, b, c] = name.split(":");
-    if (kind === "close" && !a) return closeDialog();
-    if (kind === "undo") { const u = S.toast && S.toast.undo; S.toast = null; if (u) return act(u.act, el); return render(); }
-    if (kind === "rail") { S.rail = !railOpen(); return render(); }
-    if (kind === "view") { S.view = a; if (a === "map") return go("#/map"); if (a === "kanban") return go("#/kanban"); return go("#/board", { replace: /^#\/(map|kanban|tasks)/.test(hashOf()) }); }
-    if (kind === "toggle") { if (a === "recent") S.recentTouched = true; if (S.collapsed.has(a)) S.collapsed.delete(a); else S.collapsed.add(a); return render(); }
-    if (kind === "recentAll") { S.recentAll = true; if (isDialog(hashOf())) return closeDialog(); return render(); }
-    if (kind === "sound") { S.sound = !S.sound; return render(); }
-    if (kind === "egrp") { const k = name.slice(5); if (S.openGroups.has(k)) S.openGroups.delete(k); else S.openGroups.add(k); return render(); }
-    if (kind === "round") { const k = `${a}:${b}`; if (S.openRounds.has(k)) S.openRounds.delete(k); else S.openRounds.add(k); return render(); }
-    if (kind === "node") { const k = `${a}:${b}`; if (S.openNodes.has(k)) S.openNodes.delete(k); else S.openNodes.add(k); return render(); }
-    if (kind === "msg") return toast("Copied the message", "Read aloud is the other action here");
-    if (kind === "attach") return toast("Attach files or images", "opens the file picker");
-    if (kind === "dictate") return toast("Dictation started", "speak, then send", { label: "Stop", act: "noop" });
-    if (kind === "noop") return render();
-    if (kind === "send") { const cv = conv(a); const t = (S.drafts[a] || "").trim(); if (!t) return; cv.feed.push({ kind: "user", ts: F.now, text: t }); if (cv.question && !S.answers[a]) S.answers[a] = t; S.drafts[a] = ""; if (cv.state !== "working") { cv.state = "working"; cv.elapsed = "0:03"; cv.tool = undefined; } toast("Sent", `${cv.title} · ${F.now}`); return; }
-    if (kind === "stop") { const cv = conv(a); cv.state = "returned"; cv.age = "now"; toast("Stopped the agent", "the turn ended; text you send starts a new one", { label: "Resume", act: `resume:${a}` }); return; }
-    if (kind === "resume") { conv(a).state = "working"; return render(); }
-    if (kind === "queue") { const cv = conv(a); const t = (S.drafts[a] || "").trim(); if (!t) return; cv.feed.push({ kind: "user", ts: F.now, text: t }); S.drafts[a] = ""; toast("Held until reconnected", "delivered in order when the runtime returns"); return; }
-    if (kind === "respawn") { S.killed.delete(a); const cv = conv(a); cv.state = "working"; toast("Respawned", "queued messages deliver in order"); return; }
-    if (kind === "kill") { S.killed.add(a); if (isDialog(hashOf())) closeDialog(); toast("Killed the agent", "text you send queues until a respawn", { label: "Respawn", act: `respawn:${a}` }); return; }
-    if (kind === "close") { S.closed.add(a); closeDialog(); go("#/board", { replace: true }); toast("Closed the card", "it stays in Host details › Hidden", { label: "Reopen", act: `reopen:${a}` }); return; }
-    if (kind === "reopen") { S.closed.delete(a); toast("Reopened"); return go(`#/chat/${a}`, { replace: true }); }
-    if (kind === "crown") { if (S.crowned.has(a)) S.crowned.delete(a); else S.crowned.add(a); closeDialog(); toast(S.crowned.has(a) ? "Crowned" : "Crown removed"); return; }
-    if (kind === "rename") { closeDialog(); toast("Rename", "the title cell becomes editable in place"); return; }
-    if (kind === "handoff") { closeDialog(); const cv = conv(a); const nc = { id: `h-${a}`, project: cv.project, title: `${cv.title} · handoff`, engine: cv.engine, model: cv.model, effort: cv.effort, account: cv.account, state: "working", elapsed: "0:02", age: "now", ctx: 4, feed: [{ kind: "user", ts: F.now, text: `Continue from the handoff of «${cv.title}».` }] }; F.conversations.push(nc); toast("Handed off", "a successor started with this context", { label: "Open successor", act: `open:${nc.id}` }); return; }
-    if (kind === "open") return go(`#/chat/${a}`);
-    if (kind === "compact") { closeDialog(); const cv = conv(a); cv.ctx = Math.max(2, Math.round((cv.ctx || 0) / 3)); toast("Compacted the context", `${100 - cv.ctx}% left`); return; }
-    if (kind === "terminal") { closeDialog(); toast("Opened in the terminal", "attach command copied"); return; }
-    if (kind === "pin") { S.pin = a; closeDialog(); toast("Pinned beside", "the pane stays while you move around", { label: "Unpin", act: "unpin" }); return; }
-    if (kind === "unpin") { S.pin = null; if (isDialog(hashOf())) closeDialog(); return render(); }
-    /* Operator item 5: a moved group is honoured; releasing it returns to the
-       arrangement the system makes. */
-    if (kind === "unpinItem") { delete S.pins[a]; toast("Released to the auto layout", "the map arranges it again"); return; }
-    if (kind === "unpinAll") { S.pins = {}; toast("Everything released", "the map arranges all of it"); return; }
-    if (kind === "answer") { const cv = conv(a); const o = cv.question.options[Number(b)]; S.answers[a] = o.label; cv.state = "working"; cv.elapsed = "0:02"; toast("Answered", `${o.label} · ${F.now}`); return; }
-    if (kind === "answerText") { const cv = conv(a); const t = name.slice(name.indexOf(":", name.indexOf(":") + 1) + 1); S.answers[a] = t; cv.state = "working"; cv.elapsed = "0:02"; toast("Answered", `${t} · ${F.now}`); return; }
-    if (kind === "toggleQ") { const k = a + ":open"; S.pickedOption[k] = !S.pickedOption[k]; return render(); }
-    if (kind === "md") { const nx = S.next[a] || (S.next[a] = { model: conv(a).model, effort: conv(a).effort, account: conv(a).account }); if (b === "account") { const acc = F.accounts[conv(a).engine].find((x) => x.id === c); nx.account = acc.label; conv(a).state = "working"; conv(a).account = acc.label; closeDialog(); toast(`Next message launches on ${acc.label}`, "the limit on Main stays until it resets", { label: "Switch back", act: `md:${a}:back:0` }); return; } if (b === "back") { conv(a).state = "limit"; return render(); } nx[b] = b === "speed" ? Number(c) : c; closeDialog(); return; }
-    if (kind === "switch") { const list = F.accounts[a]; const prev = list.find((x) => x.active); list.forEach((x) => { x.active = x.id === b; }); toast(`Future launches use ${list.find((x) => x.active).label}`, "running conversations keep their account", { label: "Switch back", act: `switch:${a}:${prev.id}` }); return; }
-    if (kind === "signIn") { toast("Device sign-in opened", "the account becomes active only after it returns"); return; }
-    if (kind === "refresh") { toast("Refreshed", `checked ${F.now}`); return; }
-    if (kind === "useReset") { const acc = b ? F.accounts[a].find((x) => x.id === b) : F.accounts[a].find((x) => x.active); if (!acc || !acc.windows.length) return; const w = acc.windows[0]; w.left = 100; w.elapsed = 0; w.series = [[0, 100]]; toast("Used one reset", `the ${w.label} window is full again`); return; }
-    if (kind === "addAccount") { toast("Add an account", "opens the device sign-in"); return; }
-    if (kind === "killHost") { const i = F.hosts.findIndex((x) => x.pid === Number(a)); const h = F.hosts[i]; if (i >= 0) F.hosts.splice(i, 1); toast(`Killed ${h ? h.name : a}`, `pid ${a}`); return; }
-    if (kind === "archiveProject") { closeDialog(); const p = S.project; S.archivedProjects.add(p); go("#/overview", { replace: true }); toast(`Archived ${projectName(p)}`, "it stays in the rail's Archive", { label: "Restore", act: `restoreProject:${p}` }); return; }
-    if (kind === "restoreProject") { S.archivedProjects.delete(a); S.deletedProjects.delete(a); toast(`Restored ${projectName(a)}`); return; }
-    if (kind === "deleteProject") { closeDialog(); const p = S.project; S.deletedProjects.add(p); go("#/overview", { replace: true }); toast(`Deleted ${projectName(p)}`, "conversations stay on disk for 4 s of regret", { label: "Restore", act: `restoreProject:${p}` }); return; }
-    if (kind === "createProject") { toast("Create project", "name and root directory, then it appears in the rail"); return; }
-    if (kind === "newTask") { const d = S.newTask || {}; const t = { id: `t${F.tasks.length + 1}`, title: (d.title || "New task").trim() || "New task", status: d.status || "planned" }; F.tasks.unshift(t); S.newTask = null; if (isDialog(hashOf())) closeDialog(); S.view = "kanban"; go("#/kanban", { replace: true }); toast("Task created", "give it a worker or a pipeline and the card becomes a thread"); return; }
-    if (kind === "moveTask") { const t = F.tasks.find((x) => x.id === a); if (!t) return; const from = taskStatus(t); if (from === b) return render(); S.taskStatus[t.id] = b; toast(`Moved to ${KCOLS.find((k) => k[0] === b)[1]}`, `${t.title}`, { label: "Undo", act: `moveTask:${a}:${from}` }); return; }
-    if (kind === "openArrival") { const id = S.arrival.id; S.seen.add(id); S.arrival = null; return go(`#/chat/${id}`); }
-    if (kind === "dismissArrival") { S.arrivalDismissed = true; return render(); }
-    if (kind === "predecessor") { toast("Predecessor", "opens the previous seat's conversation"); return; }
-    if (kind === "rotateSeat" || kind === "createSeat") { const d = S.rotate; F.seat.state = "live"; F.seat.engine = d.engine; F.seat.model = d.model; F.seat.effort = d.effort; F.seat.mandate = d.mandate; F.seat.mandateVersion += 1; F.seat.since = "now"; F.seat.ctx = { left: 100, window: "100k" }; F.seat.predecessor = kind === "rotateSeat"; let sc = seatConv(); if (!sc) { sc = { id: "orch", project: S.project === "all" ? "atlas" : S.project, title: `Orchestrator · ${projectName(S.project === "all" ? "atlas" : S.project)}`, engine: d.engine, model: d.model, effort: d.effort, account: "Main", state: "working", elapsed: "0:01", age: "now", seat: true, ctx: 0, feed: [] }; F.conversations.unshift(sc); } else { sc.engine = d.engine; sc.model = d.model; sc.effort = d.effort; sc.feed.push({ kind: "agent", ts: F.now, text: `Seat taken. Mandate v${F.seat.mandateVersion} loaded; predecessor context handed over.` }); } S.rotate = null; go("#/seat", { replace: true }); toast(kind === "rotateSeat" ? "Rotated the orchestrator" : "Created the orchestrator", `${d.model} · ${d.effort} · mandate v${F.seat.mandateVersion}`); return; }
-    if (kind === "startAgent") { const d = S.newAgent; const nc = { id: `n${F.conversations.length}`, project: S.project === "all" ? "atlas" : S.project, title: (d.prompt || "New conversation").split("\n")[0].slice(0, 60) || "New conversation", engine: d.engine, model: d.model, effort: d.effort, account: F.accounts[d.engine].find((x) => x.id === d.account)?.label || "Main", state: "working", elapsed: "0:01", age: "now", ctx: 1, feed: d.prompt ? [{ kind: "user", ts: F.now, text: d.prompt }] : [] }; F.conversations.push(nc); S.newAgent = null; go(`#/chat/${nc.id}`, { replace: true }); toast("Conversation started", `${nc.model} · ${nc.effort} · ${nc.account}`, { label: "Kill", act: `kill:${nc.id}` }); return; }
-    if (kind === "np") { if (a === "template") { const t = Number(b); const tpl = [["plan", "build", "review"], ["build", "review"], ["build", "verify"], []][t]; const roles = { plan: "architect", build: "builder", review: "reviewer", verify: "builder" }; const id = `np${F.pipelines.length}`; const stages = tpl.map((sid, i) => ({ id: sid, role: roles[sid], engine: sid === "review" || sid === "plan" ? "claude" : "codex", model: sid === "review" || sid === "plan" ? "Opus" : "gpt-5.6", effort: sid === "review" ? "xhigh" : "high", access: sid === "review" || sid === "plan" ? "read-only" : "read-write", sandbox: sid === "review" ? "restricted" : "full", outputs: [], next: tpl[i + 1] || null, onFail: sid === "review" ? { to: "build", maxRounds: 3 } : null, attempts: [], prompt: "{{task}}" })); F.pipelines.push({ id, project: S.project === "all" ? "atlas" : S.project, task: "New pipeline · name the task", state: "draft", revision: 0, started: null, branch: null, lastEdit: null, cursor: { stageId: stages[0]?.id || "", attempt: 0 }, stages, findings: [], notes: [], checkpoints: [], mutations: [], waiting: null }); go(`#/pipeline/${id}`, { replace: true }); toast("Draft pipeline created", "edit the stages, then Start"); } return; }
-    if (kind === "pa") return pipelineAct(a, b, c);
-    if (kind === "na" || kind === "ro" || kind === "ed" || kind === "nt") {
-      const target = kind === "na" ? (S.newAgent || (S.newAgent = {})) : kind === "ro" ? (S.rotate || (S.rotate = {})) : kind === "nt" ? (S.newTask || (S.newTask = {})) : (S.editorDraft || (S.editorDraft = {}));
-      const key = a; let value = name.slice(kind.length + a.length + 2);
-      if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT")) value = el.value;
-      target[key] = value === "toggle" ? !target[key] : value;
-      if (key === "engine") { target.model = MODELS[value][0]; target.account = F.accounts[value].find((x) => x.auth === "Authenticated").id; }
-      if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA") && el.type !== "checkbox") return;
-      return render();
-    }
-  }
-
-  /* ── events ────────────────────────────────────────────────────────────── */
+  /* ── input ────────────────────────────────────────────────────────────── */
   $app.addEventListener("click", (e) => {
-    /* The click that ends a drag is not a click on the thing dragged. */
-    if (S.dragMoved) { e.preventDefault(); return; }
-    const t = e.target.closest("[data-go], [data-act], [data-scrim]");
-    if (!t) return;
-    if (t.hasAttribute("data-scrim") && t === e.target) { closeDialog(); return; }
-    if (t.dataset.go) {
+    if (suppressClick) { e.preventDefault(); return; }
+    const goEl = e.target.closest("[data-go]");
+    const r0 = route();
+    if (r0.dialog === "settings" && !e.target.closest(".settings") && !e.target.closest('[data-focus="chip"]')) closeDialog();
+    if (goEl && goEl.dataset.go) {
       e.preventDefault();
-      if (t.dataset.project) { S.project = t.dataset.project; S.view = null; }
-      const goTo = t.dataset.go;
-      if (goTo === "#/board" && S.project === "all") { S.project = t.dataset.project || "atlas"; }
-      if (isDialog(hashOf()) && !isDialog(goTo)) history.replaceState({}, "", goTo);
-      go(goTo, { trigger: goTo });
+      const hash = goEl.dataset.go;
+      const isDialog = DIALOGS.some((d) => hash.endsWith(`/${d}`));
+      if (isDialog && r0.dialog && hash.endsWith(`/${r0.dialog}`)) { closeDialog(); return; }
+      if (isDialog) { S.trigger = keyOf(goEl); go(hash, true); }
+      else { if (goEl.closest("[data-dialog]")) closeDialogSilently(); go(hash); }
       return;
     }
-    if (t.dataset.act) { e.preventDefault(); act(t.dataset.act, t); }
+    const actEl = e.target.closest("[data-act]");
+    if (actEl) { e.preventDefault(); act(actEl.dataset.act, actEl); }
   });
-  /* Dragging: a kanban card between columns, a map group to a place of its
-     own. Mouse events, not the HTML5 drag API, so the same gesture works for
-     the operator and for the headless run that proves it. */
-  document.addEventListener("mousedown", (e) => {
-    const handle = e.target.closest("[data-drag]"); if (!handle || e.button !== 0) return;
-    const card = handle.closest("[data-card]"); const item = handle.closest(".mapitem");
-    if (!card && !item) return;
-    const box = (item || card).getBoundingClientRect();
-    S.drag = { id: handle.dataset.drag, kind: card ? "task" : "map", el: item || card, dx: e.clientX - box.left, dy: e.clientY - box.top, over: null, moved: false };
-    if (item) item.classList.add("dragging");
-  });
-  document.addEventListener("mousemove", (e) => {
-    const d = S.drag; if (!d) return;
-    if (!d.moved) { if (Math.abs(e.movementX) + Math.abs(e.movementY) === 0) return; d.moved = true; }
-    if (d.kind === "map") {
-      const world = $app.querySelector(".world"); if (!world) return;
-      const wr = world.getBoundingClientRect();
-      d.el.style.left = `${Math.max(0, e.clientX - wr.left - d.dx)}px`;
-      d.el.style.top = `${Math.max(0, e.clientY - wr.top - d.dy)}px`;
-    } else {
-      const col = document.elementFromPoint(e.clientX, e.clientY)?.closest("[data-col]");
-      const next = col ? col.dataset.col : null;
-      if (next !== d.over) { d.over = next; for (const k of $app.querySelectorAll("[data-col]")) k.classList.toggle("over", k.dataset.col === next); }
-    }
-  });
-  document.addEventListener("mouseup", () => {
-    const d = S.drag; if (!d) return; S.drag = null;
-    if (!d.moved) { d.el.classList.remove("dragging"); return; }
-    S.dragMoved = true;
-    setTimeout(() => { S.dragMoved = false; }, 0);
-    if (d.kind === "map") {
-      const world = $app.querySelector(".world"); const wr = world.getBoundingClientRect(); const er = d.el.getBoundingClientRect();
-      S.pins[d.id] = { x: Math.round(er.left - wr.left), y: Math.round(er.top - wr.top) };
-      d.el.classList.remove("dragging");
-      const p = pipe(d.id);
-      toast("Pinned where you put it", `${p ? p.task : d.id} · the rest flows around it`, { label: "Release", act: `unpinItem:${d.id}` });
-    } else if (d.over) act(`moveTask:${d.id}:${d.over}`);
-    else render();
-  });
-  $app.addEventListener("input", (e) => {
-    const t = e.target; if (!t.dataset) return;
-    if (t.dataset.act === "filter") { S.filter = t.value; S.hl = -1; return render(); }
-    if (t.dataset.act === "projFilter") { S.projFilter = t.value; return render(); }
-    if (t.dataset.act === "search") { S.search = t.value; return render(); }
-    if (t.dataset.focus === "field" || t.dataset.focus === "pin-field") { const cv = $app.querySelector(t.dataset.focus === "field" ? ".stage .chat" : ".pin .chat"); const id = cv && cv.dataset.conv; if (!id) return; const was = Boolean(S.drafts[id]); S.drafts[id] = t.value; if (was !== Boolean(t.value)) render(); return; }
-    if (t.dataset.act && /^(na|ro|ed|nt):/.test(t.dataset.act)) act(t.dataset.act, t);
-  });
-  $app.addEventListener("change", (e) => { const t = e.target; if (t.dataset && t.dataset.act && /^(na|ro|ed|nt):/.test(t.dataset.act) && (t.tagName === "SELECT" || t.type === "checkbox")) act(t.dataset.act, t); });
+  $app.addEventListener("input", (e) => { if (e.target.matches("[data-search]")) { S.search = e.target.value; const res = $app.querySelector(".results"); if (res) { const tmp = document.createElement("div"); tmp.innerHTML = dialogHtml(route()); res.innerHTML = tmp.querySelector(".results").innerHTML; } } });
+  function closeDialogSilently() { history.replaceState(null, "", route().base); }
+  const keyOf = (el) => el.dataset.go ? `go:${el.dataset.go}` : el.dataset.act ? `act:${el.dataset.act}` : el.dataset.focus ? `focus:${el.dataset.focus}` : el.dataset.cluster ? `cluster:${el.dataset.cluster}` : null;
 
-  const typing = (el) => el && (["INPUT", "TEXTAREA", "SELECT"].includes(el.tagName) || el.isContentEditable);
-  document.addEventListener("keydown", (e) => {
-    root.classList.add("kb");
-    const dlg = $app.querySelector("[data-dialog]");
-    const s = segs();
+  const typing = () => { const a = document.activeElement; return a && (a.tagName === "INPUT" || a.tagName === "TEXTAREA" || a.tagName === "SELECT"); };
+  window.addEventListener("keydown", (e) => {
+    const r = route();
     if (e.key === "Escape") {
-      if (dlg) { e.preventDefault(); closeDialog(); return; }
-      /* Escape from an account detail returns to the accounts stage with the
-         focus on the row that opened it. */
-      if (s[0] === "accounts" && s[1] && s[2]) { e.preventDefault(); const back = `#/accounts/${s[1]}/${s[2]}`; go("#/accounts", { replace: true }); const row = $app.querySelector(`[data-go="${back}"]`); if (row) { row.focus(); row.scrollIntoView({ block: "nearest" }); } return; }
-      if (typing(e.target) && e.target.dataset.act === "filter" && S.filter) { e.preventDefault(); S.filter = ""; render(); escapeToColumn(); return; }
-      /* Escape is the bridge: from any field or control inside the stage back
-         to the column's current row, where the single keys live. */
-      if (typing(e.target) || e.target.closest(".stage, .pin")) { e.preventDefault(); escapeToColumn(); return; }
+      if (r.dialog) { e.preventDefault(); closeDialog(); return; }
+      if (typing() && r.screen === "chat") { e.preventDefault(); act(`backToYard:${r.id}`); return; }
+      if (typing()) { e.preventDefault(); document.activeElement.blur(); S.focusKey = "board"; restoreFocus(r); return; }
+      if (r.screen === "chat") { e.preventDefault(); act(`backToYard:${r.id}`); return; }
+      if (S.lift) { e.preventDefault(); act("unlift"); return; }
+      if (S.editing) { e.preventDefault(); act("cancelEdit"); return; }
+      if (S.selected) { e.preventDefault(); act("deselect"); return; }
       return;
     }
-    if (dlg && e.key === "Tab") {
-      const f = [...dlg.querySelectorAll("button, input, textarea, select, [tabindex]")].filter((x) => !x.disabled && x.offsetParent !== null);
-      if (!f.length) return; const i = f.indexOf(document.activeElement);
-      if (e.shiftKey && (i <= 0)) { e.preventDefault(); f[f.length - 1].focus(); } else if (!e.shiftKey && i === f.length - 1) { e.preventDefault(); f[0].focus(); }
+    if (typing() || r.dialog) {
+      if (r.dialog) trapTab(e);
       return;
     }
-    if (dlg && (e.key === "ArrowDown" || e.key === "ArrowUp") && hashOf() === "#/board/search") { e.preventDefault(); const rows = [...dlg.querySelectorAll(".search-rows .srow")]; const i = rows.indexOf(document.activeElement); const n = e.key === "ArrowDown" ? Math.min(rows.length - 1, i + 1) : Math.max(0, i - 1); rows[n]?.focus(); return; }
-    if (typing(e.target)) {
-      if (e.target.dataset.focus === "field" || e.target.dataset.focus === "pin-field") { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); const slot = $app.querySelector(`[data-focus="${e.target.dataset.focus === "field" ? "send" : "pin-send"}"]`); if (slot && !slot.classList.contains("stop")) act(slot.dataset.act, slot); } return; }
-      if (e.target.dataset.act === "filter") { const rows = columnRows(); if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); S.hl = e.key === "ArrowDown" ? Math.min(rows.length - 1, S.hl + 1) : Math.max(0, S.hl - 1); rows.forEach((r, i) => r.classList.toggle("on", i === S.hl)); rows[S.hl]?.scrollIntoView({ block: "nearest" }); } else if (e.key === "Enter") { e.preventDefault(); const r = rows[S.hl >= 0 ? S.hl : 0]; if (r) r.click(); } return; }
+    const k = e.key;
+    if (k === "n" || k === "N") { e.preventDefault(); walkNeeds(k === "n" ? 1 : -1); return; }
+    if (/^[1-9]$/.test(k) && r.screen === "board") { const cl = M.clusters.find((c) => c.key === Number(k)); if (cl) { e.preventDefault(); act(`inspect:${cl.id}`); } return; }
+    if (k === "f") { e.preventDefault(); fitAll(true); return; }
+    if (k === "0") { e.preventDefault(); fitNeeds(true); return; }
+    if (k === "+" || k === "=") { e.preventDefault(); zoomCenter(1.25); return; }
+    if (k === "-") { e.preventDefault(); zoomCenter(0.8); return; }
+    if (k === "t" && r.screen === "board") { e.preventDefault(); act("tray"); return; }
+    if (k === "i") { const f = $app.querySelector('.lift [data-focus="field"], .chat [data-focus="field"]'); if (f) { e.preventDefault(); f.focus(); } return; }
+    if (k === "o") { e.preventDefault(); const s = F.seats[S.project]; if (s) go(`#/chat/${s.conv}`); else go("#/board/rotate", true); return; }
+    if (k === "a") { e.preventDefault(); go("#/accounts"); return; }
+    if (k === "/") { e.preventDefault(); S.trigger = null; go(`${r.base}/search`, true); return; }
+    if (k === "?") { e.preventDefault(); go(`${r.base}/keys`, true); return; }
+    if (k === "[") { e.preventDefault(); act("rail"); return; }
+    if (k === "c") { e.preventDefault(); go(`${r.base}/create`, true); return; }
+    if (k === "Enter" && r.screen === "board") {
+      e.preventDefault();
+      if (S.lift) { go(`#/chat/${S.lift}`); return; }
+      const cl = S.selected ? clusterById(S.selected) : null;
+      if (cl) { const n = cl.nodes.find((x) => x.conv && NEEDS.has(stateBits(x.conv).key)) || cl.nodes.find((x) => x.conv); if (n) act(`open:${n.conv.id}`); }
       return;
     }
-    if (e.metaKey || e.ctrlKey || e.altKey) return;
-    /* 1–9 pick a question option while its card is open. */
-    if (/^[1-9]$/.test(e.key)) { const opt = $app.querySelector(`.stage .q:not(.quiet) .opt[data-opt="${Number(e.key) - 1}"]`); if (opt) { e.preventDefault(); opt.click(); return; } }
-    const rows = columnRows();
-    if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); const i = rows.indexOf(document.activeElement); const n = e.key === "ArrowDown" ? Math.min(rows.length - 1, i + 1) : Math.max(0, i - 1); rows[n]?.focus(); rows[n]?.scrollIntoView({ block: "nearest" }); return; }
-    if (e.key === "Enter" && rows.includes(document.activeElement)) { e.preventDefault(); document.activeElement.click(); return; }
-    if (e.key === "n" || e.key === "N") { const a = S.project === "all" ? attentionAll() : attention(); if (!a.length) return; e.preventDefault(); const cur = a.findIndex((x) => x.go === hashOf()); S.cycle = cur >= 0 ? cur : S.cycle; S.cycle = ((S.cycle + (e.key === "n" ? 1 : -1)) + a.length) % a.length; const item = a[S.cycle]; if (S.project === "all" && item.project) S.project = item.project; go(item.go); return; }
-    if (e.key === "/") { e.preventDefault(); go("#/board/search", { trigger: "#/board/search" }); return; }
-    if (e.key === "o") { e.preventDefault(); const sc = seatConv(); go(sc ? "#/chat/orch" : "#/seat/rotate"); return; }
-    if (e.key === "i") { const f = $app.querySelector('.stage [data-focus="field"]'); if (f) { e.preventDefault(); f.focus(); } return; }
-    if (e.key === "k") { e.preventDefault(); act("view:kanban"); return; }
-    if (e.key === "m") { e.preventDefault(); act(effectiveView() === "map" ? "view:list" : "view:map"); return; }
-    if (e.key === "a") { e.preventDefault(); go("#/accounts"); return; }
-    if (e.key === "p") { e.preventDefault(); go("#/pipelines"); return; }
-    if (e.key === "t") { e.preventDefault(); act("view:kanban"); return; }
-    if (e.key === "c") { e.preventDefault(); go("#/board/create", { trigger: "#/board/create" }); return; }
-    if (e.key === "[") { e.preventDefault(); act("rail"); return; }
-    if (e.key === "?") { e.preventDefault(); go("#/board/keys", { trigger: "#/board/keys" }); return; }
+    if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(k) && r.screen === "board") { e.preventDefault(); moveSelection(k); }
   });
-
-  /* ── bench and boot ────────────────────────────────────────────────────── */
-  const W = { 1280: [1280, 800], 1440: [1440, 900], 1920: [1920, 1080] };
-  function applyFrame() {
-    const requested = params.get("w");
-    const fill = !params.get("bench") && (innerWidth <= 1921 && innerHeight <= 1081);
-    let w = requested && W[requested] ? Number(requested) : (fill ? (innerWidth >= 1900 ? 1920 : innerWidth >= 1400 ? 1440 : 1280) : 1440);
-    if (fill) { document.body.classList.add("fill"); root.style.setProperty("--frame-w", "100vw"); root.style.setProperty("--frame-h", "100vh"); if (requested && W[requested]) w = Number(requested); }
-    else { root.style.setProperty("--frame-w", `${W[w][0]}px`); root.style.setProperty("--frame-h", `${W[w][1]}px`); }
-    $app.dataset.w = String(w);
-    const sel2 = document.getElementById("bench-w"); if (sel2) sel2.value = String(w);
+  function trapTab(e) {
+    if (e.key !== "Tab") return;
+    const d = $app.querySelector("[data-dialog]"); if (!d) return;
+    const f = [...d.querySelectorAll("button, input, textarea, select, a[href], [tabindex='0']")].filter((x) => !x.disabled && x.offsetParent !== null);
+    if (!f.length) return;
+    const i = f.indexOf(document.activeElement);
+    if (e.shiftKey && (i <= 0)) { e.preventDefault(); f[f.length - 1].focus(); }
+    else if (!e.shiftKey && (i === -1 || i === f.length - 1)) { e.preventDefault(); f[0].focus(); }
   }
-  const scheme = params.get("scheme"); if (scheme === "dark" || scheme === "light") root.dataset.theme = scheme;
-  const sSel = document.getElementById("bench-scheme"); if (sSel) { sSel.value = scheme || ""; sSel.onchange = () => { params.set("scheme", sSel.value); if (!sSel.value) params.delete("scheme"); location.search = params.toString(); }; }
-  const wSel = document.getElementById("bench-w"); if (wSel) wSel.onchange = () => { params.set("w", wSel.value); location.search = params.toString(); };
-  const scSel = document.getElementById("bench-scenario"); if (scSel) { scSel.value = scenario || ""; scSel.onchange = () => { if (scSel.value) params.set("scenario", scSel.value); else params.delete("scenario"); location.search = params.toString(); }; }
-  applyFrame();
-  if (params.get("rail") === "0") S.rail = false;
-  if (params.get("rail") === "1") S.rail = true;
-  if (!location.hash) history.replaceState({}, "", "#/board");
+  function walkNeeds(dir) {
+    const q = needsQueue(S.project);
+    if (!q.length) return;
+    let i = q.findIndex((x) => (x.kind === "conv" ? x.conv === S.lift : x.cluster === S.selected && !S.lift));
+    i = (i + dir + q.length) % q.length;
+    const it = q[i];
+    if (route().screen !== "board") { go("#/board"); }
+    if (it.kind === "conv") act(`open:${it.conv}`); else act(`inspect:${it.cluster}`);
+  }
+  function moveSelection(key) {
+    const cur = S.selected ? clusterById(S.selected) : null;
+    if (!cur) { const first = M.clusters[0]; if (first) act(`inspect:${first.id}`); return; }
+    const cx = cur.x + cur.w / 2, cy = cur.y + cur.h / 2;
+    const dir = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }[key];
+    let best = null, bestD = Infinity;
+    for (const c of M.clusters) {
+      if (c === cur) continue;
+      const dx = c.x + c.w / 2 - cx, dy = c.y + c.h / 2 - cy;
+      const along = dx * dir[0] + dy * dir[1]; if (along <= 0) continue;
+      const across = Math.abs(dx * dir[1]) + Math.abs(dy * dir[0]);
+      const d = along + across * 2.5;
+      if (d < bestD) { bestD = d; best = c; }
+    }
+    if (best) act(`inspect:${best.id}`);
+  }
+
+  /* Where the focus lands after a render: a stage's primary target, a dialog's
+     first control, or the element identified by S.focusKey. Never the body. */
+  function restoreFocus(r) {
+    const key = S.focusKey; S.focusKey = null;
+    const byKey = (k) => {
+      if (!k) return null;
+      if (k === "board") return $app.querySelector("[data-board]");
+      const [kind, ...rest] = k.split(":"); const v = rest.join(":");
+      if (kind === "go") return $app.querySelector(`[data-go="${CSS.escape(v)}"]`);
+      if (kind === "act") return $app.querySelector(`[data-act="${CSS.escape(v)}"]`);
+      if (kind === "focus") return $app.querySelector(`[data-focus="${CSS.escape(v)}"]`);
+      if (kind === "cluster") return $app.querySelector(`.cluster[data-cluster="${CSS.escape(v)}"] .tile`);
+      return null;
+    };
+    let el = byKey(key);
+    if (!el && r.dialog) { const d = $app.querySelector("[data-dialog]"); el = d && (d.querySelector("[data-focus]") || d.querySelector("button, input, textarea")); }
+    if (!el && r.screen === "chat") el = $app.querySelector('.qcard [data-focus="opt0"]') || $app.querySelector('[data-focus="field"]');
+    if (!el && r.screen === "accounts") el = $app.querySelector(".arow.on") || $app.querySelector(".arow");
+    if (!el && S.lift) el = $app.querySelector('.lift .qcard [data-focus="opt0"]') || $app.querySelector('.lift[data-focus="lift"]');
+    if (!el && S.selected) el = $app.querySelector('.inspector [data-focus="answer"]') || $app.querySelector(".inspector .ib");
+    if (!el) el = $app.querySelector("[data-board]") || $app.querySelector("button");
+    if (el) el.focus({ preventScroll: true });
+  }
+
+  /* ── the bench ────────────────────────────────────────────────────────── */
+  function layoutBench() {
+    const big = innerWidth > FRAME_W + 40 && innerHeight > FRAME_H + 120;
+    $bench.hidden = !big;
+    $frame.style.width = big ? `${FRAME_W}px` : "100vw";
+    $frame.style.height = big ? `${FRAME_H}px` : "100vh";
+    document.body.classList.toggle("bench", big);
+    if (big && !$bench.innerHTML) {
+      const link = (s) => { const u = new URL(location.href); u.search = `?scheme=${scheme}&w=${FRAME_W}${s.scenario ? `&scenario=${s.scenario}` : ""}${s.query ? `&${s.query}` : ""}`; u.hash = s.hash; return `<a href="${u.toString()}" ${s.w && !s.w.includes(String(FRAME_W)) ? 'class="dim"' : ""}>${esc(s.id)}</a>`; };
+      const opt = (k, v, cur) => { const u = new URL(location.href); u.searchParams.set(k, v); return `<a href="${u.toString()}" class="${String(cur) === String(v) ? "on" : ""}">${esc(v)}</a>`; };
+      $bench.innerHTML = `<div class="bl"><b>desktop v2 · the yard</b> ${[1280, 1440, 1920].map((w) => opt("w", w, FRAME_W)).join("")} · ${["dark", "light"].map((s) => opt("scheme", s, scheme)).join("")} · <span class="muted">scenario: ${esc(scenario || "none")}</span></div><div class="bl links">${window.SCREENS.map(link).join("")}</div>`;
+    }
+  }
+  window.addEventListener("resize", () => { layoutBench(); if (boardEl()) applyCamera(); });
+  window.addEventListener("hashchange", () => { S.zoomApplied = true; render(); });
+  window.__proto = { counts, clustersOf, needsQueue, stateBits, NEEDS, cam, S, F, fitCluster, fitAll, layoutYard, packFree, model: () => M };
+  layoutBench();
   render();
-  addEventListener("resize", () => { applyFrame(); layoutMap(); });
-  window.__proto = { S, F, render, go, act, attention, counts, layoutMap };
 })();

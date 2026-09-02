@@ -1,27 +1,19 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light dark">
-  <title>Agent Log Viewer · desktop v2 prototype (issue #1453)</title>
-  <link rel="stylesheet" href="styles.css">
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Desktop v2 — the yard (issue #1453, rewrite)</title>
+<link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <!-- The bench renders only when the viewport is larger than the chosen
-       frame: frame width, colour scheme and one link per screen. When the
-       viewport IS the frame (the capture script, or a real window of that
-       size) the app fills it and the bench disappears. -->
-  <div id="bench">
-    <strong>desktop v2 · #1453</strong>
-    <label>Width <select id="bench-w"><option value="1280">1280 × 800</option><option value="1440" selected>1440 × 900</option><option value="1920">1920 × 1080</option></select></label>
-    <label>Scheme <select id="bench-scheme"><option value="">system</option><option value="light">light</option><option value="dark">dark</option></select></label>
-    <label>Scenario <select id="bench-scenario"><option value="">default</option><option value="noseat">no seat</option><option value="degraded">degraded</option><option value="offline">offline</option><option value="held">held</option><option value="limit">limit</option><option value="stalled">stalled</option><option value="killed">killed</option><option value="arrival">arrival</option><option value="crowded">crowded</option><option value="split">split</option></select></label>
-    <nav id="bench-screens" aria-label="Screens"></nav>
-  </div>
-  <div id="frame"><div id="app" data-screen=""></div></div>
-  <script src="fixture.js"></script>
-  <script src="screens.js"></script>
-  <script src="app.js"></script>
+<!-- The bench shows only when the window is larger than the chosen frame:
+     width, scheme, scenario and one link per key screen. Inside a frame-sized
+     window (or with device emulation) the app fills the viewport. -->
+<div id="bench" hidden></div>
+<div id="frame"><div id="app" data-ready="0"></div></div>
+<script src="fixture.js"></script>
+<script src="screens.js"></script>
+<script src="app.js"></script>
 </body>
 </html>
