@@ -4,6 +4,7 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 
 import { en } from "@/lib/i18n/en";
+import { MOBILE_LAYOUT_QUERY } from "@/lib/attention/eligibility";
 
 /*
  * Issue #696, review finding 1 — the whole path, end to end.
@@ -51,7 +52,7 @@ Object.assign(globalThis, {
    is what makes this defect invisible: the shell swaps the rail for a drawer,
    leaving the dashboard as the only surface on screen. */
 const matchMedia = (query: string) => ({
-  matches: phoneWidth && query.includes("max-width: 767px"),
+  matches: phoneWidth && query === MOBILE_LAYOUT_QUERY,
   media: query,
   onchange: null,
   addListener: () => {},

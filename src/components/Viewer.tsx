@@ -1,6 +1,6 @@
 "use client";
 
-import { Crown, X } from "lucide-react";
+import { ChevronRight, Crown, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 
 import { formatConversationHash, isArchivedPredecessor, parseConversationHash, resolveConversationTarget, withoutArchivedPredecessors, type ConversationHash } from "@/lib/accounts/identity";
@@ -34,6 +34,10 @@ import { focusHandoffBus } from "./attention/focusHandoffBus";
 import { ConnectionPill } from "./ConnectionPill";
 import { resolveFavoriteRows, type FavoriteRow } from "./favorites/favoriteRows";
 import { KeepAwakeProvider } from "./KeepAwakeControl";
+import { getMobileNav } from "./mobile/mobileNav";
+import { MobileProjectSheet } from "./mobile/MobileProjectSheet";
+import { MobileSheet, MobileSheetRow, MobileSheetSection } from "./mobile/MobileSheet";
+import type { MobileShellHost } from "./mobile/MobileShell";
 import { OrchestratorDock, dockOpenFor, rememberDockOpen } from "./orchestrator/OrchestratorDock";
 import { OverviewBoard } from "./OverviewBoard";
 import { GlobalSearch, transcriptFocusHash } from "./search/GlobalSearch";
@@ -109,7 +113,7 @@ const STALE_FOCUS_REPLAY_MS = 8_000;
 const UNKNOWN_FRAGMENT_NOTICE_MS = 6_000;
 
 export function Viewer() {
-  const { t } = useLocale();
+  const { t, locale } = useLocale();
   /* There is no operator credential to claim: same-origin IS the operator (see
      `operatorAuthority`), and no key, secret, cookie or paste exists anywhere in
      this app. This only erases what earlier rounds left on disk — a stored bearer,
@@ -194,7 +198,6 @@ export function Viewer() {
     [projectCatalog],
   );
   const isMobile = useIsMobile();
-  const [drawerOpen, setDrawerOpen] = useState(false);
   /* The per-project orchestrator dock (PRD #976 slice A). Its open state is the
      operator's and belongs to the PROJECT (#1149), exactly as the dock's width
      does (#1011): the server render and the first client render agree on
@@ -376,7 +379,8 @@ export function Viewer() {
     dispatchCatalogPin({ kind: "release" });
     setFocusRequest(null);
     localStorage.setItem(PROJECT_KEY, nextProject);
-    setDrawerOpen(false);
+    /* The phone shell lands on the board with no sheet open (mobile v2 §3.3). */
+    getMobileNav().home();
   }, []);
 
   const selectProject = useCallback((nextProject: string) => {
@@ -404,21 +408,13 @@ export function Viewer() {
     viewBus.reportSlice(OVERVIEW_SLICE);
   }, [project]);
 
-  useEffect(() => {
-    if (!drawerOpen) return;
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setDrawerOpen(false);
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [drawerOpen]);
-
-  // A tapped account badge (issue #229) opens the accounts surface. On mobile
-  // the limits footer lives inside the project drawer, so the drawer must open
-  // first; its per-engine block then claims the retained request on mount.
+  /* A tapped account badge (issue #229) opens the accounts surface. On the
+     phone the limits blocks live on the shell's Accounts & limits screen
+     (mobile v2 lane 1), so the request pushes that screen first; its
+     per-engine block then claims the retained request on mount. */
   useEffect(() => {
     if (!isMobile) return;
-    return onAccountPanelRequest(() => setDrawerOpen(true));
+    return onAccountPanelRequest(() => getMobileNav().push({ kind: "accounts" }));
   }, [isMobile]);
 
   /* A file open (overview card, deep link) becomes a column of its project.
@@ -447,7 +443,7 @@ export function Viewer() {
     dispatchCatalogPin({ kind: hydrated ? "resolve" : "open", path: file.path, conversationId: file.conversationId });
     setProject(key);
     localStorage.setItem(PROJECT_KEY, key);
-    setDrawerOpen(false);
+    getMobileNav().home();
     setOpenNonce((value) => value + 1);
     focusNonceRef.current += 1;
     setFocusRequest({ path: file.path, nonce: focusNonceRef.current, catalog: true });
@@ -626,6 +622,9 @@ export function Viewer() {
        unresolved deep-link intent; a stale pin must never re-steal focus when
        its target shows up in a later poll. */
     setPendingHash(null);
+    /* On the phone a focus is a board landing: the shell drops whatever screen
+       or sheet was open over it (mobile v2 §3.3). */
+    getMobileNav().home();
     /* Every route through here is a deliberate focus (attention jump, crown
        favorite, N-cycle, an accepted handoff's `openPath`): record it. A path
        with no scanned entry still navigates, it just leaves no history. */
@@ -919,22 +918,107 @@ export function Viewer() {
     </div>
   );
 
+  /* The phone shell's host (mobile v2 lane 1): the queue count for the bar's
+     badge, the arrival for the banner slot (below the runtime states, which
+     outrank it), the search palette, and the two sheets the Viewer owns — the
+     project switcher the title cell opens (it replaced the drawer and the
+     hamburger) and the Needs-you queue the badge opens over whichever screen
+     is showing. Memoized because ProjectDashboard is memo'd and a fresh object
+     per render would re-render it on every poll. */
+  const mobileShell = useMemo<MobileShellHost | null>(() => {
+    if (!isMobile) return null;
+    return {
+      attentionCount: queue.length,
+      arrival: toastFile ? (
+        <AttentionToast
+          file={toastFile}
+          mobile
+          onOpen={() => {
+            openFile(toastFile);
+            setToastPath(null);
+          }}
+          onDismiss={() => setToastPath(null)}
+        />
+      ) : null,
+      renderSheet: (name, close) => {
+        if (name === "projects") {
+          return (
+            <MobileProjectSheet
+              files={files}
+              projectCatalog={projectCatalog}
+              projectDisplayNames={projectDisplayNames}
+              pipelines={pipelines}
+              workflows={workflows}
+              archivedProjects={archivedProjects}
+              crownedProjects={crownedProjects}
+              selected={project}
+              now={clock}
+              loaded={loaded}
+              catalogFailures={catalogFailures}
+              onSelect={selectProject}
+              onCreateProject={createProject}
+              onClose={close}
+            />
+          );
+        }
+        if (name === "attention") {
+          const title = queue.length ? `${t("mobile2.attention.title")} · ${queue.length}` : t("mobile2.attention.title");
+          return (
+            <MobileSheet
+              name="attention"
+              title={title}
+              onClose={close}
+              extra={queue.length > 1 ? (
+                <button
+                  type="button"
+                  data-attention-next
+                  className="inline-flex min-h-11 shrink-0 items-center gap-0.5 rounded-[8px] px-2 text-ui font-semibold text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                  aria-label={t("attention.nextHint")}
+                  onClick={() => advanceGlobalAttention(1)}
+                >
+                  {t("mobile2.attention.next")}
+                  <ChevronRight className="h-4 w-4" aria-hidden />
+                </button>
+              ) : null}
+            >
+              {favoriteRows.length ? (
+                <>
+                  <MobileSheetSection>{t("favorites.sectionTitle")}</MobileSheetSection>
+                  {favoriteRows.map((row) => (
+                    <MobileSheetRow
+                      key={row.id}
+                      icon={<Crown className="h-[18px] w-[18px] fill-crown text-crown" aria-hidden />}
+                      label={cleanTitle(row.file.title, 90)}
+                      onSelect={() => openFavorite(row)}
+                    />
+                  ))}
+                </>
+              ) : null}
+              <MobileSheetSection count={queue.length}>{t("attention.popoverTitle")}</MobileSheetSection>
+              {queue.length ? (
+                <div className="px-1.5">
+                  {queue.map((item) => (
+                    <AttentionQueueRow key={item.id} item={item} onOpen={() => jumpToItem(item)} />
+                  ))}
+                </div>
+              ) : (
+                <div className="px-4 py-4 text-center text-ui text-muted">{t("mobile2.attention.empty")}</div>
+              )}
+            </MobileSheet>
+          );
+        }
+        return null;
+      },
+    };
+    /* `t` is a fresh closure per render; `locale` is what changes its answers. */
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isMobile, queue, toastFile, openFile, files, projectCatalog, projectDisplayNames, pipelines, workflows, archivedProjects, crownedProjects, project, clock, loaded, catalogFailures, selectProject, createProject, favoriteRows, openFavorite, jumpToItem, advanceGlobalAttention, locale]);
+
   const shell = (
     <div className="flex h-full">
       {isMobile ? null : (
         <ProjectRail files={files} projectCatalog={projectCatalog} projectDisplayNames={projectDisplayNames} pipelines={pipelines} workflows={workflows} archivedProjects={archivedProjects} crownedProjects={crownedProjects} selected={project} now={clock} loaded={loaded} catalogFailures={catalogFailures} onSelect={selectProject} onToggleCrown={toggleCrown} onCreateProject={createProject} />
       )}
-      {isMobile && drawerOpen ? (
-        <div className="fixed inset-0 z-50 flex">
-          <ProjectRail files={files} projectCatalog={projectCatalog} projectDisplayNames={projectDisplayNames} pipelines={pipelines} workflows={workflows} archivedProjects={archivedProjects} crownedProjects={crownedProjects} selected={project} now={clock} loaded={loaded} catalogFailures={catalogFailures} onSelect={selectProject} onToggleCrown={toggleCrown} onCreateProject={createProject} />
-          <button
-            type="button"
-            className="min-w-0 flex-1 bg-primary/35"
-            aria-label={t("viewer.closeProjects")}
-            onClick={() => setDrawerOpen(false)}
-          />
-        </div>
-      ) : null}
       {/* PUSHED INTO the layout, never over it (PRD #976 decision 1): the dock
           is a flex sibling between the rail and the board, so the board keeps
           the rest of the row instead of being covered. Desktop only — the phone
@@ -973,21 +1057,6 @@ export function Viewer() {
             ) : null}
           </div>
         )}
-        {/* Mobile (finding 3): the agent-waiting notification docks as an in-flow
-            banner above the board instead of a fixed overlay, so it reserves its
-            own space and never covers the toolbar. Its open target and 44px close
-            are both full tap-height. */}
-        {isMobile && toastFile ? (
-          <AttentionToast
-            file={toastFile}
-            mobile
-            onOpen={() => {
-              openFile(toastFile);
-              setToastPath(null);
-            }}
-            onDismiss={() => setToastPath(null)}
-          />
-        ) : null}
         {project === OVERVIEW ? (
           <OverviewBoard
             files={files}
@@ -1000,9 +1069,8 @@ export function Viewer() {
             catalogFailures={catalogFailures}
             onSelectProject={selectProject}
             onSelectFile={openFile}
-            onMenu={isMobile ? () => setDrawerOpen(true) : undefined}
             onOpenSearch={openSearch}
-            attention={isMobile ? attentionBadge : undefined}
+            mobileShell={mobileShell}
           />
         ) : (
           <ProjectDashboard
@@ -1028,9 +1096,8 @@ export function Viewer() {
             catalogConversationCount={catalogConversationCounts.get(project) ?? 0}
             onArchive={archiveProject}
             onUnarchive={unarchiveProject}
-            onMenu={isMobile ? () => setDrawerOpen(true) : undefined}
             onOpenSearch={openSearch}
-            attention={isMobile ? attentionBadge : undefined}
+            mobileShell={mobileShell}
             orchestratorPanelOpen={orchestratorOpen}
             onToggleOrchestratorPanel={isMobile ? undefined : toggleOrchestrator}
             onUserNavigate={cancelPendingIntent}

@@ -8,6 +8,7 @@ import { uk } from "@/lib/i18n/uk";
 import type { FileEntry } from "@/lib/types";
 
 import { QuestionCard, isQuestionDismissed, questionDismissKey, rememberQuestionDismissed } from "./QuestionCard";
+import { MOBILE_LAYOUT_QUERY } from "@/lib/attention/eligibility";
 
 /*
  * Issue #765, explicit-dismiss half (the automatic half shipped in #775): a
@@ -23,7 +24,7 @@ let narrowViewport = false;
 
 const dom = new Window({ url: "http://localhost/" });
 const matchMediaStub = (query: string) => ({
-  matches: narrowViewport && String(query).replace(/\s+/g, "") === "(max-width:767px)",
+  matches: narrowViewport && String(query) === MOBILE_LAYOUT_QUERY,
   media: String(query),
   onchange: null,
   addEventListener() {},

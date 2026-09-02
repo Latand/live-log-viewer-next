@@ -28,6 +28,7 @@ import { applyBoardMutations, type BoardMutationV1 } from "@/lib/board/mutations
 import { en } from "@/lib/i18n/en";
 import type { FileEntry, LogChunk } from "@/lib/types";
 import type { BoardProjectStateV1 } from "@/lib/view/types";
+import { MOBILE_LAYOUT_QUERY } from "@/lib/attention/eligibility";
 
 installActEnv();
 /* Before react-dom loads: the renderer reads the DevTools hook once. */
@@ -36,7 +37,7 @@ const probe = installRenderProbe();
 const dom = new Window({ url: "http://localhost/" });
 let mobile = false;
 const matchMedia = (query: string) => ({
-  matches: mobile && (String(query).includes("max-width: 767px") || String(query).includes("pointer: coarse")),
+  matches: mobile && (String(query) === MOBILE_LAYOUT_QUERY || String(query).includes("pointer: coarse")),
   media: String(query),
   onchange: null,
   addListener() {},
@@ -754,20 +755,23 @@ test("phone: the header swipe hops panes with the same cached paint", async () =
   expect(rowsOnScreen.virtualMs).toBe(0);
 });
 
-test("phone: switching project through the drawer paints the revisited board from cache", async () => {
+test("phone: switching project through the project sheet paints the revisited board from cache", async () => {
   mobile = true;
   const host = await mountViewer("alpha");
   await until(() => focusedPane(host) !== null && tailLines(focusedPane(host)) > 0);
-  const openDrawer = () => host.querySelector(`button[aria-label="${en["dash.openProjects"]}"]`) as HTMLButtonElement;
+  /* The bar's title cell is the project switcher (mobile v2 lane 1): it opens
+     the project sheet over the board, and a row replaces the board. */
+  const openProjects = () => host.querySelector(`[data-mobile2-open="projects"]`) as HTMLButtonElement;
+  const projectRow = (project: string) => host.querySelector(`[data-mobile2-project="${project}"]`) as HTMLButtonElement;
 
-  await click(openDrawer());
-  await click(railButton(host, "beta")!);
+  await click(openProjects());
+  await click(projectRow("beta"));
   await until(() => focusedPane(host) !== null && focusedTitle(host).includes("Beta") && tailLines(focusedPane(host)) > 0);
 
   beginStep();
   let sawSkeleton = false;
-  await click(openDrawer());
-  await click(railButton(host, "alpha")!);
+  await click(openProjects());
+  await click(projectRow("alpha"));
   const paint = await until(() => {
     sawSkeleton ||= skeleton(host);
     return focusedPane(host) !== null && !focusedTitle(host).includes("Beta") && feedRows(host, SHORT.path) + feedRows(host, LONG.path) + feedRows(host, TOOLS.path) > 0;

@@ -1,6 +1,6 @@
 "use client";
 
-import { Bot, Layers, List, ListTodo, Menu, MessageSquarePlus, MoreHorizontal, Network, Plus, Redo2, Search, Undo2 } from "lucide-react";
+import { Archive, Bot, Info, LayoutGrid, List, ListTodo, ListTree, MessageSquarePlus, Network, Redo2, Search, Undo2, UserRound } from "lucide-react";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 
 import { useBoardActionHistory } from "@/hooks/useBoardActionHistory";
@@ -53,6 +53,12 @@ import { TaskPanel } from "./tasks/TaskPanel";
 import { pushTaskToast, TaskToastHost } from "./tasks/taskToast";
 import { MobileFocusView } from "./mobile/MobileFocusView";
 import { MobileOrchestratorRow } from "./mobile/MobileOrchestratorRow";
+import { MobileMenuSheet, type MobileMenuEntry } from "./mobile/MobileMenuSheet";
+import { showReceipt } from "./mobile/MobileReceipt";
+import { MobileAccountsScreen, MobileBarTitle, MobileShell, type MobileShellHost } from "./mobile/MobileShell";
+import { topScreen, useMobileNav, useMobileNavStore, type MobileSheetName } from "./mobile/mobileNav";
+import { TaskSheet, type TaskSheetView } from "./tasks/TaskSheet";
+import { Badge } from "@/components/ui/Badge";
 import { canHandoff, HandoffHandle } from "./HandoffHandle";
 import { SchemeBoard } from "./scheme/SchemeBoard";
 import { CatalogFailureNotice } from "./CatalogFailureNotice";
@@ -63,6 +69,7 @@ import {
   buildBranchGroups,
   collapsedTrees,
   isChildConversation,
+  OVERVIEW,
   projectDraftWorkingDirectory,
   projectKey,
   type ProjectView,
@@ -136,14 +143,13 @@ interface Props {
   catalogConversationCount: number;
   onArchive: (project: string) => void;
   onUnarchive: (project: string) => void;
-  /** Mobile shell: the rail hides behind a drawer, this opens it. */
-  onMenu?: () => void;
+  /** The phone shell's host (mobile v2 lane 1): the queue count for the bar's
+      badge, the arrival for the banner slot, the search palette and the sheets
+      the Viewer owns. Absent on the desktop. */
+  mobileShell?: MobileShellHost | null;
   /** Opens the global message search (issue #1054) — the same affordance the
       overview header carries, so the search is one target away from anywhere. */
   onOpenSearch?: () => void;
-  /** Mobile shell: the attention badge lives in the header row instead of the
-      fixed corner, so it never covers the header's own controls. */
-  attention?: React.ReactNode;
   /** Desktop shell: the per-project orchestrator dock's toggle (PRD #976
       decision 6). The dock itself is pushed into the Viewer layout beside the
       board, so the header only owns the switch; absent (phone, or no shell
@@ -260,60 +266,6 @@ function ProjectViewTabs({
   );
 }
 
-/** A tap-triggered popover anchored to its trigger button — the phone toolbar
-    folds its secondary and create actions into these so the row never overflows
-    (finding 1). Closes on outside-tap or Escape. */
-function HeaderMenu({
-  triggerLabel,
-  icon,
-  children,
-}: {
-  triggerLabel: string;
-  icon: React.ReactNode;
-  children: (close: () => void) => React.ReactNode;
-}) {
-  const [open, setOpen] = useState(false);
-  const rootRef = useRef<HTMLDivElement | null>(null);
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (event: PointerEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
-    };
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
-    };
-    window.addEventListener("pointerdown", onDown);
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("pointerdown", onDown);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
-  return (
-    <div ref={rootRef} className="relative shrink-0">
-      <button
-        type="button"
-        aria-haspopup="menu"
-        aria-expanded={open}
-        aria-label={triggerLabel}
-        title={triggerLabel}
-        onClick={() => setOpen((value) => !value)}
-        className="flex h-11 w-11 items-center justify-center rounded-[8px] border border-border bg-card text-primary shadow-1 hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-      >
-        {icon}
-      </button>
-      {open ? (
-        <div
-          role="menu"
-          className="absolute right-0 top-[calc(100%+6px)] z-50 flex w-[210px] max-w-[calc(100vw-1.5rem)] flex-col gap-0.5 rounded-[12px] border border-border bg-card p-1.5 shadow-2"
-        >
-          {children(() => setOpen(false))}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
 /**
  * The empty project's next step (issue #1162).
  *
@@ -378,27 +330,6 @@ function EmptyProjectLeaf({
   );
 }
 
-/** One 44px-tall row inside a HeaderMenu popover. Passing `checked` turns the
-    row into a radio option (the folded scheme/list switch, issue #613) so the
-    face currently shown is announced instead of merely tinted. */
-function HeaderMenuItem({ icon, label, onSelect, disabled = false, checked }: { icon: React.ReactNode; label: string; onSelect: () => void; disabled?: boolean; checked?: boolean }) {
-  return (
-    <button
-      type="button"
-      role={checked === undefined ? "menuitem" : "menuitemradio"}
-      aria-checked={checked}
-      onClick={onSelect}
-      disabled={disabled}
-      className={`flex min-h-11 w-full items-center gap-2 rounded-[9px] px-2.5 text-left text-[13px] font-semibold hover:bg-canvas focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-45 ${
-        checked ? "bg-accent/10 text-accent" : "text-primary"
-      }`}
-    >
-      <span className="flex h-5 w-5 shrink-0 items-center justify-center text-accent">{icon}</span>
-      {label}
-    </button>
-  );
-}
-
 function ProjectDashboardView({
   files,
   flows: rawFlows,
@@ -422,9 +353,8 @@ function ProjectDashboardView({
   catalogConversationCount,
   onArchive,
   onUnarchive,
-  onMenu,
+  mobileShell = null,
   onOpenSearch,
-  attention,
   orchestratorPanelOpen = false,
   onToggleOrchestratorPanel,
   onUserNavigate,
@@ -433,6 +363,16 @@ function ProjectDashboardView({
 }: Props) {
   const { t } = useLocale();
   const isMobile = useIsMobile();
+  /* The phone's navigation (mobile v2 lane 1): which screen is on top and which
+     sheet is open. The host sheet — the handoff, the docked background tasks
+     and the hidden strips — opens from the board menu's «Host details» row and
+     is one of those sheets. Inert on the desktop. */
+  const mobileNav = useMobileNavStore();
+  const mobileNavState = useMobileNav();
+  /* The runtime word for the menu's «Host details» row (README §4.1): a badge
+     only while the plane is not connected. One projection, so a bus frame
+     never re-renders the board. */
+  const mobileRuntime = useRuntimeSelector((state) => (state.enabled ? state.connection : "live"), "live");
   const projectName = projectDisplayName(
     project,
     providedProjectName ?? projectCatalogEntries.find((entry) => entry.project === project)?.displayName,
@@ -519,15 +459,12 @@ function ProjectDashboardView({
      footer shelf can dock that pane's handoff control on its single row (issue
      #177 item 5). */
   const [mobileActiveFile, setMobileActiveFile] = useState<FileEntry | null>(null);
-  /* Chat-first (issue #419 reopened): on the phone the handoff/hidden/readiness
-     shelf reserves ZERO bottom rows — a compact header trigger opens it as an
-     overlay sheet instead, so the focused chat keeps its viewport budget. */
-  const [shelfOpen, setShelfOpen] = useState(false);
   /* Desktop `+ Task`: bump drops the inline sticky composer in a free slot on
      the board (pinned near the button). */
   const [newTaskNonce, setNewTaskNonce] = useState(0);
-  /* Mobile `+ Task`: bump opens the TaskSheet's create view. */
-  const [taskSheetNonce, setTaskSheetNonce] = useState(0);
+  /* The phone's task sheet, opened from the board menu: «New task» in its
+     create view, «Tasks» as the list (mobile v2 lane 1). */
+  const [mobileTaskSheet, setMobileTaskSheet] = useState<TaskSheetView | null>(null);
   /* Place-on-map: the unplaced task whose next board click pins it. */
   const [placeTask, setPlaceTask] = useState<BoardTask | null>(null);
   /* Template-first pipeline entry (#196, #388): `+ Пайплайн` opens repository
@@ -1183,10 +1120,11 @@ function ProjectDashboardView({
     onUserNavigate?.();
     setNewTaskNonce((n) => n + 1);
   };
-  /* Mobile `+ Task`: open the full-screen sheet's create view. */
-  const addTaskMobile = () => {
+  /* The phone's task sheet: «New task» opens the create view, «Tasks» the list. */
+  const openMobileTasks = (view: TaskSheetView) => {
     onUserNavigate?.();
-    setTaskSheetNonce((n) => n + 1);
+    mobileNav.closeSheet();
+    setMobileTaskSheet(view);
   };
   /* `place on map`: close the panel focus into board placement mode; the next
      canvas click pins the card exactly where clicked (identity unchanged). */
@@ -1717,72 +1655,139 @@ function ProjectDashboardView({
     viewBus.reportSlice({ mode, focusedPath: null, selectedPaths: selectionInOrder(order, board.selection, { includeUnordered: true }), visiblePaths, camera: null });
   }, [projectView, schemeAvailable, listAvailable, historyRows, isMobile, boardWindowSignature, board.selection]);
 
-  /* Shelf totals for the phone header trigger (issue #419 reopened). The full
-     strips live in the overlay the trigger opens; here we only need the count
-     and whether the focused conversation can be handed off, so the trigger can
-     decide to appear and badge itself without building the strips twice. */
-  const shelfHiddenTotal =
-    workerStacks.reduce((sum, stack) => sum + stack.items.length, 0) + launchHistory.length + projectTasks.length + (!hasArchiveNodes ? residual.length : 0);
+  /* The focused conversation's handoff control docks in the host sheet (issue
+     #177 item 5), so the sheet needs to know whether there is one. */
   const shelfHandoffFile = isMobile && projectView === "scheme" && mobileActiveFile && canHandoff(mobileActiveFile) ? mobileActiveFile : null;
-  const shelfHasContent = isMobile && boardReady && (shelfHiddenTotal > 0 || Boolean(shelfHandoffFile));
+
+  const pipelinesAlert = pipelinesError ? (
+    <div className="shrink-0 border-b border-border bg-warning-soft px-3 py-1.5 text-[11.5px] text-warning" role="alert">
+      {t("dash.pipelinesUnavailable")}
+    </div>
+  ) : null;
+  /* Parentless background processes dock as colored strips at the top of the
+     desktop canvas; on the phone they are host detail and live in the host
+     sheet (mobile v2 lane 1), never as always-on rows under the bar. */
+  const dockedTaskStrips = dockedTasks.map((task) => (
+    <div
+      key={task.path}
+      className={`border-l-4 ${task.activity === "live" ? "border-l-success bg-success-soft" : "border-l-muted"}`}
+    >
+      <TaskStrip file={task} />
+    </div>
+  ));
+
+  /* The board menu (README §3.1, §4.1): every former header control as a
+     labelled 44 px row, create actions first, the danger-free Archive last. No
+     row asks for confirmation; Archive answers with a receipt carrying Restore. */
+  const openTasks = projectTasks.filter((task) => task.status !== "done").length;
+  const archiveAllowed = (projectFiles.length > 0 || catalogKnown) && !projectFiles.some((file) => file.proc === "running" || file.activity === "live");
+  const mobileMenuEntries = (): MobileMenuEntry[] => {
+    const entries: MobileMenuEntry[] = [
+      { kind: "row", key: "new-agent", icon: <MessageSquarePlus className="h-[18px] w-[18px]" aria-hidden />, label: t("mobile2.menu.newAgent"), disabled: !loaded, onSelect: () => { mobileNav.closeSheet(); addDraft(); } },
+      { kind: "row", key: "new-task", icon: <ListTodo className="h-[18px] w-[18px]" aria-hidden />, label: t("mobile2.menu.newTask"), onSelect: () => openMobileTasks("new") },
+      { kind: "row", key: "new-pipeline", icon: <ListTree className="h-[18px] w-[18px]" aria-hidden />, label: t("mobile2.menu.newPipeline"), onSelect: () => { mobileNav.closeSheet(); setTemplatePickerOpen(true); } },
+      { kind: "divider", key: "d1" },
+      { kind: "row", key: "tasks", icon: <ListTodo className="h-[18px] w-[18px]" aria-hidden />, label: t("mobile2.menu.tasks"), trailing: openTasks ? t("mobile2.menu.tasksOpen", { count: openTasks }) : undefined, onSelect: () => openMobileTasks("list") },
+    ];
+    if (viewToggle) {
+      /* The board's two faces (issue #613) stay one tap away here, as radio
+         rows: the picture's «All conversations» is the catalog list, and the
+         board face is the way back from it. */
+      entries.push(
+        { kind: "row", key: "view-board", icon: <Network className="h-[18px] w-[18px]" aria-hidden />, label: t("mobile2.menu.board"), checked: projectView === "scheme", onSelect: () => { mobileNav.closeSheet(); chooseEmptyView("scheme"); } },
+        { kind: "row", key: "view-catalog", icon: <LayoutGrid className="h-[18px] w-[18px]" aria-hidden />, label: t("mobile2.menu.catalog"), trailing: t("mobile2.menu.catalogCount", { count: catalogConversationCount }), checked: projectView === "list", onSelect: () => { mobileNav.closeSheet(); chooseEmptyView("list"); } },
+      );
+    }
+    entries.push(
+      { kind: "row", key: "accounts", icon: <UserRound className="h-[18px] w-[18px]" aria-hidden />, label: t("mobile2.menu.accounts"), go: "accounts", onSelect: () => mobileNav.push({ kind: "accounts" }) },
+      {
+        kind: "row",
+        key: "host",
+        icon: <Info className="h-[18px] w-[18px]" aria-hidden />,
+        label: t("mobile2.menu.host"),
+        opens: "host",
+        trailing: (
+          <>
+            {mobileRuntime !== "live" ? <Badge tone={mobileRuntime === "offline" ? "danger" : "warning"} data-connection={mobileRuntime}>{t(`runtime.${mobileRuntime}`)}</Badge> : null}
+            {t("mobile2.menu.hostTasks", { count: dockedTasks.length })}
+          </>
+        ),
+        onSelect: () => mobileNav.openSheet("host"),
+      },
+      { kind: "divider", key: "d2" },
+    );
+    if (history.canUndo || history.canRedo) {
+      /* Board history stays here until the receipts of later lanes carry the
+         inverse of a close on the phone (issue #184, #1054 review). */
+      if (history.canUndo) entries.push({ kind: "row", key: "undo", icon: <Undo2 className="h-[18px] w-[18px]" aria-hidden />, label: t("board.undo"), onSelect: () => { mobileNav.closeSheet(); onUndo(); } });
+      if (history.canRedo) entries.push({ kind: "row", key: "redo", icon: <Redo2 className="h-[18px] w-[18px]" aria-hidden />, label: t("board.redo"), onSelect: () => { mobileNav.closeSheet(); onRedo(); } });
+      entries.push({ kind: "divider", key: "d3" });
+    }
+    entries.push(
+      {
+        kind: "custom",
+        key: "sound",
+        node: (
+          <div className="flex min-h-11 items-center gap-2 px-4">
+            <span className="min-w-0 flex-1 text-body font-semibold text-primary">{t("mobile2.menu.sound")}</span>
+            <SoundToggle />
+          </div>
+        ),
+      },
+      /* «Keep screen awake» (issue #712) reads the Viewer-level controller that
+         outlives this sheet; it renders nothing without one. */
+      { kind: "custom", key: "awake", node: <div className="px-2.5"><KeepAwakeMenuRow /></div> },
+    );
+    if (archived) {
+      entries.push({ kind: "divider", key: "d4" }, {
+        kind: "row",
+        key: "unarchive",
+        icon: <ArchiveRestore className="h-[18px] w-[18px]" aria-hidden />,
+        label: t("mobile2.menu.unarchive"),
+        onSelect: () => {
+          mobileNav.closeSheet();
+          onUnarchive(project);
+          showReceipt(t("mobile2.menu.unarchived"));
+        },
+      });
+    } else if (archiveAllowed) {
+      entries.push({ kind: "divider", key: "d4" }, {
+        kind: "row",
+        key: "archive",
+        icon: <Archive className="h-[18px] w-[18px]" aria-hidden />,
+        label: t("mobile2.menu.archive"),
+        onSelect: () => {
+          /* Acts on the tap (README Q4); the receipt's Restore is the safety
+             net, and the board goes to the overview as the desktop button does. */
+          mobileNav.closeSheet();
+          onArchive(project);
+          showReceipt(t("mobile2.menu.archived"), { kind: "restore", run: () => onUnarchive(project) });
+          window.location.hash = "#p=" + encodeURIComponent(OVERVIEW);
+        },
+      });
+    }
+    return entries;
+  };
+  const renderMobileSheet = (name: MobileSheetName, close: () => void) => {
+    if (name === "menu") return <MobileMenuSheet title={projectName} entries={mobileMenuEntries()} onClose={close} />;
+    /* «host» is the bottom shelf below, mounted outside the shell. */
+    if (name === "host") return null;
+    return mobileShell?.renderSheet(name, close) ?? null;
+  };
 
   return (
     <FavoritesProvider value={favoritesApi}>
     <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
-      {/* The phone header fits 390px BY CONSTRUCTION (issue #613, where it
-          measured 422px and hung «More actions» off the screen). Its budget: at
-          most FIVE fixed 44px targets (projects, search, shelf, create, more)
-          plus the bounded attention pill — ~326px with the gaps and padding —
-          and the project name as the ONE elastic cell, which truncates into
-          whatever is left. 390px is the narrowest viewport this layout supports
-          — a fully populated row leaves the name ~73px there, ~43px at 360px, a
-          sliver at 320px, and at 280px the fixed targets alone overflow the row
-          by ~29px. That collapse below 390px is a documented limit, not a
-          defect: a narrower phone would need a further fold into the «⋯» menu.
-          Any control added later either fits the budget as a 44px target or
-          folds into that menu, the way the scheme/list switch did — and the way
-          «Keep screen awake» does (issue #712).
-          Global search (issue #1054) is the fifth target, and it kept the count
-          at five by folding the one it displaced: undo joined the redo already
-          in the «⋯» menu. It rode the row as a SIXTH target for one round and
-          the measured cost was exact — the project name fell to 25px, an
-          unreadable stub, which is why the count is a budget and not a habit.
-          issue613Evidence.browser.test.tsx now measures that name width. */}
-      <div
-        data-testid={isMobile ? "mobile-project-header" : undefined}
-        className={
-          isMobile
-            ? "flex min-h-[52px] min-w-0 shrink-0 items-center gap-1 border-b border-border bg-card px-2 py-1.5"
-            : "flex h-10 shrink-0 items-center gap-2.5 border-b border-border bg-card px-4"
-        }
-      >
-        {onMenu ? (
-          <button
-            type="button"
-            className={`flex shrink-0 items-center justify-center rounded-[8px] border border-border bg-canvas text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
-              isMobile ? "h-11 w-11" : "-ml-1.5 h-7 w-7"
-            }`}
-            aria-label={t("dash.openProjects")}
-            onClick={onMenu}
-          >
-            <Menu className={isMobile ? "h-5 w-5" : "h-4 w-4"} aria-hidden />
-          </button>
-        ) : null}
-        {/* The project name takes priority on the phone (issue #419 finding 2):
-            short names like «atlas» never compress to «a…», and it is capped at
-            45vw so a very long one truncates. It is also the ONLY cell that
-            gives width back when the row runs out (issue #613 — as `shrink-0` it
-            held its 45vw and pushed «More actions» off a 390px screen instead).
-            Desktop keeps its natural width. */}
-        <h1 className={`truncate text-[13.5px] font-bold ${isMobile ? "min-w-0 max-w-[45vw]" : ""}`} title={projectName}>{projectName}</h1>
-        {/* The project account surface is one compact switch per relevant engine
-            (#1331). Pool/carrier detail opens on demand; the phone remains
-            unchanged, and quiet projects still spend no header slot. */}
-        {!isMobile ? <ProjectAccounts project={project} /> : null}
-        {/* Desktop only. On the phone the whole history island — undo and redo
-            together — rides the «⋯» menu, which is how search bought its 44px
-            slot without breaking the budget above (issue #1054 review). */}
-        {!isMobile ? (
+      {isMobile ? null : (
+        /* The desktop header row. The phone renders the shell's bar instead
+           (mobile v2 lane 1): one 52 px bar with the project name as the title
+           cell and at most three 44 px targets, everything else behind ⋯. */
+        <div className="flex h-10 shrink-0 items-center gap-2.5 border-b border-border bg-card px-4">
+          <h1 className="truncate text-[13.5px] font-bold" title={projectName}>{projectName}</h1>
+          {/* The project account surface is one compact switch per relevant engine
+              (#1331). Pool/carrier detail opens on demand, and quiet projects still
+              spend no header slot. */}
+          <ProjectAccounts project={project} />
           <BoardHistoryControls
             canUndo={history.canUndo}
             canRedo={history.canRedo}
@@ -1791,144 +1796,6 @@ function ProjectDashboardView({
             onUndo={onUndo}
             onRedo={onRedo}
           />
-        ) : null}
-        {isMobile ? (
-          <>
-            {/* Toolbar folds to a single row (findings 1, 7): all create actions
-                collapse into one `+` menu and the secondary project actions into
-                a `⋯` menu — every control is a 44px hit target. The scheme/list
-                switch used to sit here as a 94px segmented pair; at 390px it is
-                one tap inside the `⋯` menu instead (issue #613). */}
-            {/* Empty filler: absorbs whatever slack the row has so the control
-                cluster stays right-aligned while the project name keeps its
-                natural width (issue #419 finding 2). It collapses to nothing
-                first, before the name starts truncating. */}
-            <span aria-hidden className="min-w-0 flex-1" />
-            {/* Global message search (issue #1054). It spends one of the
-                header's 44px slots rather than folding into «⋯», because the
-                requirement it serves is speed — the operator types and gets
-                their own message back. */}
-            {onOpenSearch ? (
-              <button
-                type="button"
-                data-testid="dash-search"
-                aria-label={t("search.openMobile")}
-                onClick={onOpenSearch}
-                className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-[8px] border border-border bg-canvas text-muted hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-              >
-                <Search className="h-5 w-5" aria-hidden />
-              </button>
-            ) : null}
-            {/* The attention queue badge is an ACTION (it opens the queue), not
-                decoration, so it holds its own bounded pill width — riding the
-                elastic filler squeezed it to zero px at 390px, which hid it
-                (issue #613). */}
-            {attention ? <span className="flex shrink-0 items-center">{attention}</span> : null}
-            {/* Handoff/hidden/readiness access as a compact header trigger (issue
-                #419 reopened) — the focused chat below reserves no bottom row for
-                it; a tap opens the overlay sheet. */}
-            {shelfHasContent ? (
-              <button
-                type="button"
-                data-testid="mobile-shelf-trigger"
-                aria-haspopup="dialog"
-                aria-expanded={shelfOpen}
-                aria-label={t("dash.hiddenShelf")}
-                onClick={() => setShelfOpen(true)}
-                className="relative inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-[8px] border border-border bg-canvas text-muted hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-              >
-                <Layers className="h-4 w-4" aria-hidden />
-                {shelfHiddenTotal > 0 ? (
-                  <span className="absolute -right-0.5 -top-0.5 rounded-full bg-accent/10 px-1 text-[10px] font-bold tabular-nums text-accent">{shelfHiddenTotal}</span>
-                ) : null}
-              </button>
-            ) : null}
-            <HeaderMenu triggerLabel={t("dash.createMenu")} icon={<Plus className="h-5 w-5" aria-hidden />}>
-              {(close) => (
-                <>
-                  <HeaderMenuItem icon={<MessageSquarePlus className="h-4 w-4" aria-hidden />} label={t("dash.agent")} disabled={!loaded} onSelect={() => { close(); addDraft(); }} />
-                  <HeaderMenuItem icon={<ListTodo className="h-4 w-4" aria-hidden />} label={t("dash.task")} onSelect={() => { close(); addTaskMobile(); }} />
-                  <HeaderMenuItem icon={<span className="text-[15px] font-bold leading-none">≡</span>} label={t("dash.pipeline")} onSelect={() => { close(); setTemplatePickerOpen(true); }} />
-                </>
-              )}
-            </HeaderMenu>
-            <HeaderMenu triggerLabel={t("dash.moreMenu")} icon={<MoreHorizontal className="h-5 w-5" aria-hidden />}>
-              {(close) => (
-                <>
-                  {/* The scheme/list switch (issue #613). Inline it cost 94px of
-                      a 390px row and pushed this very trigger off screen; here
-                      both faces stay one tap away and the current one is
-                      announced as the checked radio option. */}
-                  {viewToggle ? (
-                    <>
-                      <div role="group" aria-label={t("dash.viewMenuGroup")} className="flex flex-col gap-0.5">
-                        <HeaderMenuItem
-                          icon={<Network className="h-4 w-4" aria-hidden />}
-                          label={t("dash.viewSchemeMenu")}
-                          checked={projectView === "scheme"}
-                          onSelect={() => { close(); chooseEmptyView("scheme"); }}
-                        />
-                        <HeaderMenuItem
-                          icon={<List className="h-4 w-4" aria-hidden />}
-                          label={t("dash.viewListMenu")}
-                          checked={projectView === "list"}
-                          onSelect={() => { close(); chooseEmptyView("list"); }}
-                        />
-                      </div>
-                      <span aria-hidden className="my-0.5 h-px shrink-0 bg-border" />
-                    </>
-                  ) : null}
-                  {/* Board history lives here on the phone, both directions
-                      together. Undo held a 44px slot in the row until the global
-                      search button needed one (issue #1054 review): the row's
-                      budget is five targets, and the rule the header comment
-                      states is that a later control either fits it or folds into
-                      this menu. Undo folded — it is the corrective half of a
-                      gesture the operator just made, one tap away here beside
-                      the redo that already lived in this menu, while search is
-                      the surface the operator reaches for cold. Each item shows
-                      only while that direction is possible. */}
-                  {history.canUndo || history.canRedo ? (
-                    <>
-                      <div role="group" aria-label={t("board.historyGroup")} className="flex flex-col gap-0.5">
-                        {history.canUndo ? (
-                          <HeaderMenuItem icon={<Undo2 className="h-4 w-4" aria-hidden />} label={t("board.undo")} onSelect={() => { close(); onUndo(); }} />
-                        ) : null}
-                        {history.canRedo ? (
-                          <HeaderMenuItem icon={<Redo2 className="h-4 w-4" aria-hidden />} label={t("board.redo")} onSelect={() => { close(); onRedo(); }} />
-                        ) : null}
-                      </div>
-                      <span aria-hidden className="my-0.5 h-px shrink-0 bg-border" />
-                    </>
-                  ) : null}
-                  <div className="flex min-h-11 items-center gap-2 px-1.5"><span className="text-[13px] font-semibold text-primary">{t("dash.soundMenu")}</span><SoundToggle /></div>
-                  {/* Device-local comfort settings sit together here. «Keep
-                      screen awake» (issue #712) folds into this menu for the
-                      same reason the scheme/list switch did: the 390px header
-                      row has no width for a sixth 44px target, and the focused
-                      conversation below must not lose height to a setting the
-                      operator touches once. Renders nothing without the
-                      Viewer-level provider that owns the sentinel. */}
-                  <KeepAwakeMenuRow />
-                  <div className="flex min-h-11 items-center px-1.5">
-                    {archived ? (
-                      <button
-                        type="button"
-                        className="inline-flex min-h-11 shrink-0 items-center gap-1.5 rounded-full border border-border bg-canvas px-3 text-[13px] font-semibold text-muted hover:border-accent/40 hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-                        onClick={() => onUnarchive(project)}
-                      >
-                        <ArchiveRestore className="h-4 w-4" aria-hidden /> {t("dash.unarchive")}
-                      </button>
-                    ) : (
-                      <ArchiveProjectButton files={projectFiles} allowEmpty={catalogKnown} onArchive={() => onArchive(project)} />
-                    )}
-                  </div>
-                  <div className="flex min-h-11 items-center px-1.5"><DeleteProjectButton project={project} files={projectFiles} available={catalogKnown} /></div>
-                </>
-              )}
-            </HeaderMenu>
-          </>
-        ) : (
           <>
             {/* Issue #696: the header borrows the affirmative idle line only
                 when the catalog is actually known. Under a failing fetch it
@@ -1997,8 +1864,8 @@ function ProjectDashboardView({
               <span className="text-[13px] leading-none text-accent">+</span> {t("dash.pipeline")}
             </button>
           </>
-        )}
-      </div>
+        </div>
+      )}
 
       {templatePickerOpen ? (
         <PipelineTemplatePicker
@@ -2012,89 +1879,89 @@ function ProjectDashboardView({
         />
       ) : null}
 
-      {pipelinesError ? (
-        <div className="shrink-0 border-b border-border bg-warning-soft px-3 py-1.5 text-[11.5px] text-warning" role="alert">
-          {t("dash.pipelinesUnavailable")}
-        </div>
-      ) : null}
+      {isMobile ? null : pipelinesAlert}
 
-      {boardReady && dockedTasks.length ? (
-        <div className="shrink-0 border-b border-border bg-sunken">
-          {dockedTasks.map((task) => (
-            <div
-              key={task.path}
-              className={`border-l-4 ${task.activity === "live" ? "border-l-success bg-success-soft" : "border-l-muted"}`}
-            >
-              <TaskStrip file={task} />
-            </div>
-          ))}
-        </div>
+      {!isMobile && boardReady && dockedTasks.length ? (
+        <div className="shrink-0 border-b border-border bg-sunken">{dockedTaskStrips}</div>
       ) : null}
 
       {isMobile ? (
-        <>
-          {/* The phone shell is two nav rows at most: header + the focus-view
-              strip (finding 7). The scheme/list switch is not one of them — it
-              is one tap inside the header's «⋯» menu (issue #613). */}
-          {!boardReady ? (
-            catalogFailures > 0 ? <CatalogFailureNotice failures={catalogFailures} className="mt-[12vh]" /> : <SchemeSkeleton />
-          ) : projectView === "scheme" && schemeAvailable ? (
-            <MobileFocusView
-              project={project}
-              projectName={projectName}
-              groups={layoutGroups}
-              manual={layoutManual}
-              files={files}
-              flows={flows}
-              reviewGroups={directReviewGroups}
-              pipelines={pipelines}
-              surfacePipelines={activePipelines}
-              workerStacks={workerStacks}
-              tasks={hasNodes ? boardTasks : EMPTY_TASKS}
-              sheetTasks={projectTasks}
-              drafts={layoutDrafts}
-              favorites={favoriteIdSet}
-              isolatedManualPaths={isolatedCompactHistoryPaths}
-              loaded={loaded}
-              focus={highlight}
-              onSelect={openSwitchboardFile}
-              onClose={closeNode}
-              onDraftClose={removeDraft}
-              onDraftSpawned={draftSpawned}
-              onConversationOpened={markPathSeen}
-              onActiveChange={setMobileActiveFile}
-              taskSheetNonce={taskSheetNonce}
-              trayApi={trayApi}
-            />
-          ) : (
-            /* The phone has THREE leaves and the pin belongs in all of them
-               (PRD #976 decision 5). The focus view carries it inside its own
-               strip; the catalog list and the empty project get the same row,
-               from the same seat projection, in the same kind of slot — its own
-               strip above the leaf, outside whatever the leaf scrolls. So the
-               catalog's ordering, its search box, and a project with nothing in
-               it yet all keep the orchestrator first and reachable, and an
-               operator who lives in Список is not the one operator who cannot
-               create one. Exactly one row exists at a time: this branch and the
-               focus view above it are alternatives. */
-            <>
-              <div className="flex shrink-0 items-stretch border-b border-border bg-card" data-testid="mobile-orchestrator-slot">
-                <MobileOrchestratorRow
+        /* The phone (mobile v2 lane 1): the shell's bar, banner slot and
+           receipt around the leaf. The strip inside the focus view stays
+           until lane 3 folds it into the bar's title cell. */
+        topScreen(mobileNavState).kind === "accounts" ? (
+          <MobileAccountsScreen host={mobileShell} renderSheet={renderMobileSheet} />
+        ) : (
+          <MobileShell
+            screen="board"
+            title={<MobileBarTitle>{projectName}</MobileBarTitle>}
+            titleLabel={t("mobile2.bar.switchProject")}
+            titleOpens={mobileShell ? "projects" : undefined}
+            host={mobileShell}
+            onOpenSearch={onOpenSearch}
+            searchTestId="dash-search"
+            renderSheet={renderMobileSheet}
+          >
+            {pipelinesAlert}
+              {!boardReady ? (
+                catalogFailures > 0 ? <CatalogFailureNotice failures={catalogFailures} className="mt-[12vh]" /> : <SchemeSkeleton />
+              ) : projectView === "scheme" && schemeAvailable ? (
+                <MobileFocusView
                   project={project}
                   projectName={projectName}
+                  groups={layoutGroups}
+                  manual={layoutManual}
                   files={files}
-                  onOpenConversation={openFullCatalogFile}
+                  flows={flows}
+                  reviewGroups={directReviewGroups}
+                  pipelines={pipelines}
+                  surfacePipelines={activePipelines}
+                  workerStacks={workerStacks}
+                  tasks={hasNodes ? boardTasks : EMPTY_TASKS}
+                  sheetTasks={projectTasks}
+                  drafts={layoutDrafts}
+                  favorites={favoriteIdSet}
+                  isolatedManualPaths={isolatedCompactHistoryPaths}
+                  loaded={loaded}
+                  focus={highlight}
+                  onSelect={openSwitchboardFile}
+                  onClose={closeNode}
+                  onDraftClose={removeDraft}
+                  onDraftSpawned={draftSpawned}
+                  onConversationOpened={markPathSeen}
+                  onActiveChange={setMobileActiveFile}
+                  trayApi={trayApi}
                 />
-                <span aria-hidden className="min-w-0 flex-1" />
-              </div>
-              {listAvailable ? (
-                <ConversationList project={project} enabled={loaded && projectView === "list"} onOpen={openFullCatalogFile} />
               ) : (
-                <EmptyProjectLeaf projectName={projectName} />
+                /* The phone has THREE leaves and the pin belongs in all of them
+                   (PRD #976 decision 5). The focus view carries it inside its own
+                   strip; the catalog list and the empty project get the same row,
+                   from the same seat projection, in the same kind of slot — its own
+                   strip above the leaf, outside whatever the leaf scrolls. So the
+                   catalog's ordering, its search box, and a project with nothing in
+                   it yet all keep the orchestrator first and reachable, and an
+                   operator who lives in Список is not the one operator who cannot
+                   create one. Exactly one row exists at a time: this branch and the
+                   focus view above it are alternatives. */
+                <>
+                  <div className="flex shrink-0 items-stretch border-b border-border bg-card" data-testid="mobile-orchestrator-slot">
+                    <MobileOrchestratorRow
+                      project={project}
+                      projectName={projectName}
+                      files={files}
+                      onOpenConversation={openFullCatalogFile}
+                    />
+                    <span aria-hidden className="min-w-0 flex-1" />
+                  </div>
+                  {listAvailable ? (
+                    <ConversationList project={project} enabled={loaded && projectView === "list"} onOpen={openFullCatalogFile} />
+                  ) : (
+                    <EmptyProjectLeaf projectName={projectName} />
+                  )}
+                </>
               )}
-            </>
-          )}
-        </>
+          </MobileShell>
+        )
       ) : (
         <div className="flex min-h-0 min-w-0 flex-1">
           <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
@@ -2203,6 +2070,10 @@ function ProjectDashboardView({
           lines to REAL flows itself. */}
       {!isMobile && boardReady ? <Switchboard files={files} flows={deckFlows} project={project} loaded={loaded} catalogFailures={catalogFailures} onOpenFile={openSwitchboardFile} onOpenCatalogFile={openFullCatalogFile} /> : null}
 
+      {isMobile && mobileTaskSheet ? (
+        <TaskSheet project={project} projectName={projectName} tasks={projectTasks} files={files} initialView={mobileTaskSheet} onClose={() => setMobileTaskSheet(null)} />
+      ) : null}
+
       {/* Worker-class cards that have auto-collapsed fold into one stack per
       origin — flow / pipeline / spawner (issue #112, #136) — instead of
       vanishing to the switchboard. The quiet `residual` strip is derived from `sceneFiles`,
@@ -2228,7 +2099,7 @@ function ProjectDashboardView({
            no modal, so the callbacks pass through untouched. Internal disclosure
            toggles live inside the strips' own state and are never wrapped. */
         const closeShelfThen = <A extends unknown[]>(fn: (...args: A) => void) =>
-          isMobile ? (...args: A) => { setShelfOpen(false); fn(...args); } : fn;
+          isMobile ? (...args: A) => { mobileNav.closeSheet(); fn(...args); } : fn;
         const strips = (
           <>
             <TaskReadinessStrip
@@ -2260,9 +2131,13 @@ function ProjectDashboardView({
         /* Chat-first (issue #419 reopened): the phone shelf reserves no bottom
            row — it opens as an overlay sheet from the header trigger, folding the
            handoff plus both hidden strips behind one compact disclosure. */
-        const leading = shelfHandoffFile ? <HandoffHandle file={shelfHandoffFile} onHandoff={() => { setShelfOpen(false); addHandoffDraft(shelfHandoffFile); }} inline /> : null;
+        const leading = shelfHandoffFile ? <HandoffHandle file={shelfHandoffFile} onHandoff={() => { mobileNav.closeSheet(); addHandoffDraft(shelfHandoffFile); }} inline /> : null;
+        /* The host sheet (mobile v2 lane 1): opened from the board menu's «Host
+           details» row as the navigation store's «host» sheet; the docked
+           background tasks lead it as host data. */
         return (
-          <MobileBottomShelf open={shelfOpen} onClose={() => setShelfOpen(false)} total={workerTotal + quietTotal} leading={leading}>
+          <MobileBottomShelf open={mobileNavState.sheet === "host"} onClose={mobileNav.closeSheet} total={workerTotal + quietTotal + dockedTasks.length} leading={leading}>
+            {dockedTaskStrips.length ? <div className="border-b border-border bg-sunken" data-mobile2-host-tasks>{dockedTaskStrips}</div> : null}
             {strips}
           </MobileBottomShelf>
         );

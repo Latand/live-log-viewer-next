@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterAll, afterEach, expect, test } from "bun:test";
 import { Window } from "happy-dom";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
@@ -8,6 +8,10 @@ import { en } from "@/lib/i18n/en";
 import { uk } from "@/lib/i18n/uk";
 import type { FileEntry } from "@/lib/types";
 
+import { setRuntimeUiEnabledForTests } from "@/hooks/runtimeBus";
+import { MOBILE_LAYOUT_QUERY, mobileLayoutViewport } from "@/lib/attention/eligibility";
+
+import { getMobileNav } from "./mobile/mobileNav";
 import { OverviewBoard } from "./OverviewBoard";
 import { CREATE_PROJECT_FORM_EVENT } from "./ProjectRail";
 
@@ -24,7 +28,7 @@ const dom = new Window({ url: "http://localhost/" });
 
 let viewportWidth = 1280;
 const matchMediaStub = (query: string) => ({
-  matches: query.includes("max-width") && viewportWidth <= 767,
+  matches: query === MOBILE_LAYOUT_QUERY && mobileLayoutViewport({ width: viewportWidth, height: 844 }),
   media: String(query),
   onchange: null,
   addEventListener() {},
@@ -72,6 +76,9 @@ function fileEntry(overrides: Partial<FileEntry> = {}): FileEntry {
   } as FileEntry;
 }
 
+/* The phone shell reads the runtime bus for its banner slot; keep it inert. */
+setRuntimeUiEnabledForTests(false);
+
 let root: Root | null = null;
 afterEach(() => {
   if (root) flushSync(() => root?.unmount());
@@ -80,6 +87,7 @@ afterEach(() => {
   setLocale("en");
   viewportWidth = 1280;
 });
+afterAll(() => setRuntimeUiEnabledForTests(null));
 
 function renderBoard(extra: Partial<React.ComponentProps<typeof OverviewBoard>> = {}): HTMLElement {
   const container = dom.document.createElement("div");
@@ -143,20 +151,33 @@ test("the create button asks the mounted rail to open the form it already owns",
   expect(requests).toEqual(["open"]);
 });
 
-test("on a phone the same button opens the drawer the rail and its form live in", () => {
+test("on a phone the same button opens the project switcher sheet, where the create form lives", () => {
   viewportWidth = 390;
-  const opened: string[] = [];
   const requests: string[] = [];
   const listener = () => requests.push("open");
   dom.addEventListener(CREATE_PROJECT_FORM_EVENT, listener);
-  const host = renderBoard({ onMenu: () => opened.push("drawer") });
+  const opened: string[] = [];
+  const host = renderBoard({
+    mobileShell: {
+      attentionCount: 0,
+      arrival: null,
+      renderSheet: (name) => {
+        opened.push(name);
+        return <div data-testid="projects-sheet-stub" />;
+      },
+    },
+  });
   flushSync(() => createButton(host)!.dispatchEvent(click()));
   dom.removeEventListener(CREATE_PROJECT_FORM_EVENT, listener);
-  expect(opened).toEqual(["drawer"]);
-  /* No request fires into a rail that has not mounted yet — nothing would hear
-     it. The rail the drawer mounts opens the same form itself, so the tap still
-     lands on it; ProjectRail.firstRun.dom.test.tsx proves both ends together. */
+  /* The sheet the Viewer owns opens over the board (mobile v2 lane 1); on a
+     first run it arrives with its create form open — MobileProjectSheet's own
+     rule, proven in ProjectRail.firstRun.dom.test.tsx. */
+  expect(opened).toEqual(["projects"]);
+  expect(host.querySelector('[data-testid="projects-sheet-stub"]')).not.toBeNull();
+  /* No request fires into a rail that is not mounted on a phone — nothing
+     would hear it. */
   expect(requests).toEqual([]);
+  getMobileNav().home();
 });
 
 test("a board with projects on it renders cards, never the first-run panel", () => {

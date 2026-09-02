@@ -28,6 +28,7 @@ import type { FileEntry, StructuredSpawnCardState } from "@/lib/types";
 import { installActEnv } from "@/test-helpers/actEnv";
 
 import { resetCanonicalAssistantClaimsForTests } from "./liveTurnHandoff";
+import { MOBILE_LAYOUT_QUERY } from "@/lib/attention/eligibility";
 import {
   adoptOutbox,
   enqueueOutbox,
@@ -374,7 +375,7 @@ Object.assign(globalThis, {
   cancelAnimationFrame: dom.cancelAnimationFrame.bind(dom),
 });
 (dom as unknown as { matchMedia(query: string): unknown }).matchMedia = (query: string) => ({
-  matches: query.includes("max-width: 767px") || query.includes("pointer: coarse")
+  matches: query === MOBILE_LAYOUT_QUERY || query.includes("pointer: coarse")
     ? mobile
     : false,
   media: query,
