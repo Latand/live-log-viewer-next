@@ -199,7 +199,7 @@ test("narrow scheme node (360px): the in-node pane keeps the bars in-flow with n
   expect(header.className).toContain("reasoning-host");
 });
 
-test("390px MobileFocusView: reasoning telemetry is the merged chip inside the scrollable meta row, never a bar overlay", () => {
+test("390px MobileFocusView: reasoning telemetry is the merged model · reasoning text in the bar's meta line, never an overlay", () => {
   mobile = true;
   Object.defineProperty(dom, "innerWidth", { configurable: true, value: 390 });
   const entry = fableRoot();
@@ -225,34 +225,21 @@ test("390px MobileFocusView: reasoning telemetry is the merged chip inside the s
     ),
   );
 
-  // Chat-first default (issue #419 reopened): the conversation details — model/
-  // reasoning included — fold behind the mobile-details disclosure, so the merged
-  // «model · reasoning» chip reserves ZERO height until the operator opens it.
-  expect([...host.querySelectorAll<HTMLElement>("span")].filter((el) => el.textContent === "fable-5 · low").length).toBe(0);
-  const detailsToggle = host.querySelector('[data-testid="mobile-details-toggle"]') as HTMLButtonElement;
-  expect(detailsToggle).not.toBeNull();
-  expect(detailsToggle.getAttribute("aria-expanded")).toBe("false");
-  flushSync(() => detailsToggle.click());
-  expect(detailsToggle.getAttribute("aria-expanded")).toBe("true");
-
-  // Opened, the phone slot is the merged «model · reasoning» chip (issue #241) —
-  // the vertical bars never render, so no bar can overlay the 390px header
-  expect(host.querySelector("[data-effort-pills]")).toBeNull();
+  /* Mobile v2 lane 3: the phone's model · reasoning identity is the bar's meta
+     line under the conversation title — the pane header it used to fold behind
+     does not exist any more. It renders ONCE, in flow, and the vertical effort
+     bars never render, so nothing can overlay the 390 px bar. */
   const chips = [...host.querySelectorAll<HTMLElement>("span")].filter((el) => el.textContent === "fable-5 · low");
-  expect(chips.length).toBeGreaterThan(0);
+  expect(chips.length).toBe(1);
   const chip = chips[0]!;
-  expect(chip.className).toContain("shrink-0");
+  expect(host.querySelector("[data-effort-pills]")).toBeNull();
+  expect(chip.closest("[data-mobile2-chat-title]")).not.toBeNull();
+  expect(chip.closest("[data-mobile2-bar]")).not.toBeNull();
   expect(chip.className).not.toContain("absolute");
-  // the chip rides the horizontally scrolling meta row — clipped chips scroll
-  // into view instead of stacking
-  const scroller = chip.closest(".overflow-x-auto") as HTMLElement;
-  expect(scroller).not.toBeNull();
-  expect(scroller.className).toContain("flex-nowrap");
-  // nothing in the focused header paints an inv-z scale overlay
-  const header = chip.closest("header") as HTMLElement;
-  expect(header).not.toBeNull();
-  for (const el of header.querySelectorAll<HTMLElement>("*")) {
+  const bar = chip.closest("[data-mobile2-bar]") as HTMLElement;
+  for (const el of bar.querySelectorAll<HTMLElement>("*")) {
     expect(el.getAttribute("style") ?? "").not.toContain("scale(");
+    expect(el.getAttribute("style") ?? "").not.toContain("--inv-z");
   }
 });
 
@@ -313,28 +300,19 @@ test("SwitchCard fallback badge: with model unknown, the engine chip still carri
   expect(badge.getAttribute("title")).toBe("Reasoning effort: low");
 });
 
-test("pane fallback badge: with model unknown, desktop and mobile engine chips carry the effort tooltip", () => {
+test("pane fallback badge: with model unknown, the desktop engine chip carries the effort tooltip", () => {
   const entry = fableRoot({ model: null });
-  for (const asMobile of [false, true]) {
-    mobile = asMobile;
-    const { host, root } = mount();
-    flushSync(() => root.render(<BranchPane file={entry} tasks={[]} isRoot />));
-    // Mobile folds the conversation details behind the disclosure (issue #419
-    // reopened): the fallback engine badge is absent until it opens, so the
-    // collapsed default reserves zero height; desktop keeps it inline.
-    if (asMobile) {
-      expect([...host.querySelectorAll<HTMLElement>("span")].some((el) => el.textContent?.trim() === "Claude")).toBe(false);
-      const toggle = host.querySelector('[data-testid="mobile-details-toggle"]') as HTMLButtonElement;
-      expect(toggle).not.toBeNull();
-      flushSync(() => toggle.click());
-    }
-    const badge = [...host.querySelectorAll<HTMLElement>("span")].find((el) => el.textContent?.trim() === "Claude") as HTMLElement;
-    expect(badge).not.toBeNull();
-    expect(badge.getAttribute("title")).toBe("Reasoning effort: low");
-    flushSync(() => root.unmount());
-    roots.delete(root);
-    dom.document.body.replaceChildren();
-  }
+  /* The phone has no pane header at all (mobile v2 lane 3): its fallback badge
+     is the bar's meta line, covered by the MobileFocusView test above. */
+  mobile = false;
+  const { host, root } = mount();
+  flushSync(() => root.render(<BranchPane file={entry} tasks={[]} isRoot />));
+  const badge = [...host.querySelectorAll<HTMLElement>("span")].find((el) => el.textContent?.trim() === "Claude") as HTMLElement;
+  expect(badge).not.toBeNull();
+  expect(badge.getAttribute("title")).toBe("Reasoning effort: low");
+  flushSync(() => root.unmount());
+  roots.delete(root);
+  dom.document.body.replaceChildren();
 });
 
 test("globals.css defines the reasoning-host container and the 260px collapse for the slot", () => {

@@ -394,7 +394,7 @@ test("the list publishes a multi-card selection in its own row order", async () 
   expect(slice().selectedPaths).toEqual(listOrder);
 });
 
-test("the phone's focus and map modes publish the selection the desktop board made", async () => {
+test("the phone's focus mode publishes the selection the desktop board made", async () => {
   const desktop = mount();
   expect(await waitFor(() => checkIn(desktop, "/beta") !== null)).toBe(true);
   await settle();
@@ -417,17 +417,13 @@ test("the phone's focus and map modes publish the selection the desktop board ma
      the phone view owned the slice. */
   expect(slice().selectedPaths).toEqual(["/beta"]);
 
-  /* The phone's OTHER mode: the map reports the whole board in its own layout
-     order — and the same selection. */
-  const mapButton = Array.from(phone.querySelectorAll("button")).find(
+  /* Mobile v2 lane 3: the phone has ONE mode. The map-lite projection is cut
+     from the conversation screen (README §6), so the focused conversation is
+     the whole of what the phone reports as visible. */
+  expect(slice().visiblePaths).toEqual([slice().focusedPath!]);
+  expect(Array.from(phone.querySelectorAll("button")).some(
     (button) => (button.getAttribute("aria-label") ?? "") === "Open the project map",
-  ) as HTMLButtonElement | undefined;
-  expect(mapButton).toBeTruthy();
-  flushSync(() => mapButton!.dispatchEvent(new dom.MouseEvent("click", { bubbles: true, cancelable: true }) as never));
-  expect(await waitFor(() => slice().mode === "mobile-map")).toBe(true);
-  await settle();
-  expect(slice().selectedPaths).toEqual(["/beta"]);
-  expect(slice().visiblePaths).toEqual(["/alpha", "/beta"]);
+  )).toBe(false);
 });
 
 /** Re-render the same dashboard root with a different scan. */

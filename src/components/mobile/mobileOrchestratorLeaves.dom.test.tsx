@@ -264,13 +264,16 @@ test("a project with nothing in it still offers the create row — the leaf wher
   expect(String(seatPosts[0]!.clientRequestId)).toMatch(/^[A-Za-z0-9_-]{8,128}$/);
 });
 
-test("the focus view leaf still owns its own single pin — the leaves never double-mount it", async () => {
+test("the conversation leaf mounts no pin at all — never a second one beside the shell's own bar", async () => {
   const files = [conversation({ activity: "live", proc: "running", pid: 42 })];
   const host = mount({ files, catalogKnown: true, catalogConversationCount: 1 });
   expect(await waitFor(() => host.querySelector('[data-testid="mobile-chat-shell"]') !== null)).toBe(true);
 
-  expect(rows(host)).toHaveLength(1);
-  /* Inside the focus view's strip, and NOT in the dashboard's own slot. */
+  /* Mobile v2 lane 3: the conversation screen has no strip, so the pin that
+     used to ride it is gone from this leaf — the seat is reached from the
+     switcher's first section, and lane 6 gives it the board's seat card. What
+     must never happen is TWO pins, so the dashboard's own slot stays absent
+     here as well. */
+  expect(rows(host)).toHaveLength(0);
   expect(slot(host)).toBeNull();
-  expect(row(host).closest('[data-testid="mobile-chat-shell"]')).not.toBeNull();
 });

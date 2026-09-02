@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeEach, expect, mock, test } from "bun:test";
 import { Window as HappyWindow } from "happy-dom";
+import { useState } from "react";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 
@@ -58,6 +59,7 @@ mock.module("@/hooks/useLogTail", () => ({
 }));
 
 const { MobileFocusView } = await import("./MobileFocusView");
+const { MobileOrchestratorRow } = await import("./MobileOrchestratorRow");
 const { resetOrchestratorSeatCacheForTests } = await import("../orchestrator/useOrchestratorSeat");
 
 interface SeatAnswer { seat: unknown; pending: unknown; exists: boolean }
@@ -131,25 +133,43 @@ const seat = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
-const view = (files: FileEntry[]) => (
-  <MobileFocusView
-    project="atlas"
-    projectName="atlas"
-    groups={[]}
-    manual={files}
-    files={files}
-    flows={[]}
-    pipelines={[]}
-    tasks={[]}
-    drafts={[]}
-    loaded
-    focus={null}
-    onSelect={() => undefined}
-    onClose={() => undefined}
-    onDraftClose={() => undefined}
-    onDraftSpawned={() => undefined}
-  />
-);
+/*
+ * The phone leaf that hosts the pinned row. Mobile v2 lane 3 folded the
+ * conversation strip into the shell bar's title cell, so the row no longer
+ * rides inside `MobileFocusView`: it sits in its own slot beside the leaf,
+ * exactly as `ProjectDashboard` mounts it for the catalog and empty-project
+ * leaves, and a tap on it pins the conversation the focus view shows. Lane 6
+ * moves it onto the board's seat card; every claim below is about the row.
+ */
+function Leaf({ files }: { files: FileEntry[] }) {
+  const [focus, setFocus] = useState<string | null>(null);
+  return (
+    <>
+      <div data-testid="mobile-orchestrator-slot">
+        <MobileOrchestratorRow project="atlas" projectName="atlas" files={files} onOpenConversation={(file) => setFocus(file.path)} />
+      </div>
+      <MobileFocusView
+        project="atlas"
+        projectName="atlas"
+        groups={[]}
+        manual={files}
+        files={files}
+        flows={[]}
+        pipelines={[]}
+        tasks={[]}
+        drafts={[]}
+        loaded
+        focus={focus}
+        onSelect={(file) => setFocus(file.path)}
+        onClose={() => undefined}
+        onDraftClose={() => undefined}
+        onDraftSpawned={() => undefined}
+      />
+    </>
+  );
+}
+
+const view = (files: FileEntry[]) => <Leaf files={files} />;
 
 /** Let the seat read (and anything it schedules) land, then re-render. */
 async function settle(root: Root, element: React.ReactElement, rounds = 4): Promise<void> {
@@ -195,24 +215,20 @@ const sheet = (host: HTMLElement) => host.querySelector('[data-testid="mobile-or
 /* Only the seat route: the mounted pane posts its own tmux target reads. */
 const seatPosts = () => requests.filter((request) => request.method === "POST" && request.url === "/api/orchestrator/seat");
 
-test("the row is pinned first in the conversation strip, outside the scroller that could carry it off screen", async () => {
+test("the row is pinned in its own slot, ahead of the leaf and outside anything that scrolls", async () => {
   const { host } = await mount([conversation({}), orchestrator]);
   const pinned = row(host);
   expect(pinned).not.toBeNull();
   expect(pinned.getAttribute("data-orchestrator-row-state")).toBe("draft");
   expect(openButton(host).textContent).toContain("Create orchestrator");
 
-  /* First in the strip row, and before every conversation chip in document
-     order — the whole point of the pin. */
-  const strip = pinned.parentElement!;
-  expect(strip.firstElementChild).toBe(pinned);
-  const chips = [...strip.querySelectorAll(".overflow-x-auto button")];
-  expect(chips.length).toBeGreaterThan(0);
-  for (const chip of chips) {
-    expect(pinned.compareDocumentPosition(chip) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-  }
-  /* Not INSIDE the horizontal scroller: a pinned row that scrolls away with the
-     chips is not pinned. */
+  /* Before the leaf in document order — the whole point of the pin. Mobile v2
+     lane 3 removed the conversation chips it used to lead; what it must still
+     lead is whatever the leaf renders under it. */
+  const leaf = host.querySelector('[data-testid="mobile-chat-shell"]')!;
+  expect(pinned.compareDocumentPosition(leaf) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  /* Not INSIDE a horizontal scroller: a pinned row that scrolls away is not
+     pinned. */
   expect(pinned.closest(".overflow-x-auto")).toBeNull();
   /* Phone tap target. */
   expect(openButton(host).className).toContain("h-11");

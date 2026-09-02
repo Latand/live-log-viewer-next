@@ -1886,11 +1886,45 @@ function ProjectDashboardView({
       ) : null}
 
       {isMobile ? (
-        /* The phone (mobile v2 lane 1): the shell's bar, banner slot and
-           receipt around the leaf. The strip inside the focus view stays
-           until lane 3 folds it into the bar's title cell. */
+        /* The phone: the shell's bar, banner slot and receipt around the leaf
+           (mobile v2 lane 1). With a conversation on screen the leaf IS the
+           conversation screen and owns the shell itself (lane 3) — its bar
+           carries the title cell and meta line, its `⋯` the conversation's
+           rows — so the board's own bar renders only when the leaf is not a
+           conversation. Lane 2 gives the board list its own screen here. */
         topScreen(mobileNavState).kind === "accounts" ? (
           <MobileAccountsScreen host={mobileShell} renderSheet={renderMobileSheet} />
+        ) : boardReady && projectView === "scheme" && schemeAvailable ? (
+          <MobileFocusView
+            project={project}
+            projectName={projectName}
+            groups={layoutGroups}
+            manual={layoutManual}
+            files={files}
+            flows={flows}
+            reviewGroups={directReviewGroups}
+            pipelines={pipelines}
+            surfacePipelines={activePipelines}
+            workerStacks={workerStacks}
+            tasks={hasNodes ? boardTasks : EMPTY_TASKS}
+            sheetTasks={projectTasks}
+            drafts={layoutDrafts}
+            favorites={favoriteIdSet}
+            isolatedManualPaths={isolatedCompactHistoryPaths}
+            loaded={loaded}
+            focus={highlight}
+            onSelect={openSwitchboardFile}
+            onClose={closeNode}
+            onDraftClose={removeDraft}
+            onDraftSpawned={draftSpawned}
+            onConversationOpened={markPathSeen}
+            onActiveChange={setMobileActiveFile}
+            shellHost={mobileShell}
+            renderBoardSheet={renderMobileSheet}
+            onOpenSearch={onOpenSearch}
+            hostTaskCount={dockedTasks.length}
+            alert={pipelinesAlert}
+          />
         ) : (
           <MobileShell
             screen="board"
@@ -1903,63 +1937,30 @@ function ProjectDashboardView({
             renderSheet={renderMobileSheet}
           >
             {pipelinesAlert}
-              {!boardReady ? (
-                catalogFailures > 0 ? <CatalogFailureNotice failures={catalogFailures} className="mt-[12vh]" /> : <SchemeSkeleton />
-              ) : projectView === "scheme" && schemeAvailable ? (
-                <MobileFocusView
-                  project={project}
-                  projectName={projectName}
-                  groups={layoutGroups}
-                  manual={layoutManual}
-                  files={files}
-                  flows={flows}
-                  reviewGroups={directReviewGroups}
-                  pipelines={pipelines}
-                  surfacePipelines={activePipelines}
-                  workerStacks={workerStacks}
-                  tasks={hasNodes ? boardTasks : EMPTY_TASKS}
-                  sheetTasks={projectTasks}
-                  drafts={layoutDrafts}
-                  favorites={favoriteIdSet}
-                  isolatedManualPaths={isolatedCompactHistoryPaths}
-                  loaded={loaded}
-                  focus={highlight}
-                  onSelect={openSwitchboardFile}
-                  onClose={closeNode}
-                  onDraftClose={removeDraft}
-                  onDraftSpawned={draftSpawned}
-                  onConversationOpened={markPathSeen}
-                  onActiveChange={setMobileActiveFile}
-                  trayApi={trayApi}
-                />
-              ) : (
-                /* The phone has THREE leaves and the pin belongs in all of them
-                   (PRD #976 decision 5). The focus view carries it inside its own
-                   strip; the catalog list and the empty project get the same row,
-                   from the same seat projection, in the same kind of slot — its own
-                   strip above the leaf, outside whatever the leaf scrolls. So the
-                   catalog's ordering, its search box, and a project with nothing in
-                   it yet all keep the orchestrator first and reachable, and an
-                   operator who lives in Список is not the one operator who cannot
-                   create one. Exactly one row exists at a time: this branch and the
-                   focus view above it are alternatives. */
-                <>
-                  <div className="flex shrink-0 items-stretch border-b border-border bg-card" data-testid="mobile-orchestrator-slot">
-                    <MobileOrchestratorRow
-                      project={project}
-                      projectName={projectName}
-                      files={files}
-                      onOpenConversation={openFullCatalogFile}
-                    />
-                    <span aria-hidden className="min-w-0 flex-1" />
-                  </div>
-                  {listAvailable ? (
-                    <ConversationList project={project} enabled={loaded && projectView === "list"} onOpen={openFullCatalogFile} />
-                  ) : (
-                    <EmptyProjectLeaf projectName={projectName} />
-                  )}
-                </>
-              )}
+            {!boardReady ? (
+              catalogFailures > 0 ? <CatalogFailureNotice failures={catalogFailures} className="mt-[12vh]" /> : <SchemeSkeleton />
+            ) : (
+              /* The phone's other leaves (PRD #976 decision 5): the catalog
+                 list and the empty project keep the orchestrator pinned above
+                 whatever the leaf scrolls, so an operator who lives in Список
+                 is not the one operator who cannot create one. */
+              <>
+                <div className="flex shrink-0 items-stretch border-b border-border bg-card" data-testid="mobile-orchestrator-slot">
+                  <MobileOrchestratorRow
+                    project={project}
+                    projectName={projectName}
+                    files={files}
+                    onOpenConversation={openFullCatalogFile}
+                  />
+                  <span aria-hidden className="min-w-0 flex-1" />
+                </div>
+                {listAvailable ? (
+                  <ConversationList project={project} enabled={loaded && projectView === "list"} onOpen={openFullCatalogFile} />
+                ) : (
+                  <EmptyProjectLeaf projectName={projectName} />
+                )}
+              </>
+            )}
           </MobileShell>
         )
       ) : (

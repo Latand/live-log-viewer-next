@@ -144,10 +144,6 @@ const conversation = {
   renamable: true, conversationId: "conversation_613mobile", pendingQuestion: null, waitingInput: null,
 } as unknown as FileEntry;
 
-/* The same conversation after its turn: recent, so the board keeps its card,
-   and not live, so the project may be archived (the desktop button's rule). */
-const settled = { ...conversation, activity: "recent", proc: null, mtime: Math.floor(Date.now() / 1000) } as unknown as FileEntry;
-
 /* A parentless background process: on the desktop it docks as a strip under
    the header; on the phone it is host detail. */
 const backgroundTask = {
@@ -181,8 +177,13 @@ const host: MobileShellHost = {
   },
 };
 
+/* The BOARD leaf is what this file is about, so the default fixture has no
+   conversation card: with one, the phone's leaf is the conversation screen and
+   it owns the bar and the `⋯` (mobile v2 lane 3). The tests that need a card
+   pass one and reach the project menu through `openMenu`, which follows the
+   conversation menu's «Project · …» row. */
 const dashboardProps = (over: Partial<React.ComponentProps<typeof ProjectDashboard>> = {}) => ({
-  files: [conversation], flows: [], pipelines: [], workflows: [], tasks: [task],
+  files: [], flows: [], pipelines: [], workflows: [], tasks: [task],
   project: PROJECT, loaded: true, openNonce: 0, archived: false,
   catalogKnown: true, catalogConversationCount: 1,
   projectCwd: "/repo", onArchive: (project: string) => { archived.push(project); }, onUnarchive: (project: string) => { unarchived.push(project); },
@@ -231,7 +232,16 @@ const click = (el: HTMLElement | null) => { expect(el).not.toBeNull(); flushSync
    scheme face, the pinned orchestrator slot on the list and empty leaves. */
 const boardReady = (root: HTMLElement) => q(root, '[data-testid="mobile-chat-shell"]') !== null || q(root, '[data-testid="mobile-orchestrator-slot"]') !== null;
 const chatShell = (root: HTMLElement) => q(root, '[data-testid="mobile-chat-shell"]') !== null;
-const openMenu = async (root: HTMLElement) => { click(q(root, '[data-mobile2-open="menu"]')); await settle(); expect(q(root, '[data-mobile2-sheet="menu"]')).not.toBeNull(); };
+const openMenu = async (root: HTMLElement) => {
+  click(q(root, '[data-mobile2-open="menu"]'));
+  await settle();
+  expect(q(root, '[data-mobile2-sheet="menu"]')).not.toBeNull();
+  /* On a conversation the `⋯` opens that conversation's menu; the project's own
+     rows are one row down until lane 2 gives the board its own screen. */
+  const project = q(root, '[data-mobile2-menu-row="project"]');
+  if (project) { click(project); await settle(); }
+  expect(q(root, '[data-mobile2-sheet="menu"]')).not.toBeNull();
+};
 
 test("the phone board mounts the shell: one bar, the title cell as the switcher, three 44 px targets, and no five-target header", async () => {
   const root = mount();
@@ -277,7 +287,7 @@ test("the title cell opens the project switcher the Viewer renders, over the boa
 });
 
 test("no docked task rows on the phone: a background process is host data in the host sheet behind ⋯ › Host details", async () => {
-  const root = mount({ files: [conversation, backgroundTask] });
+  const root = mount({ files: [backgroundTask] });
   expect(await waitFor(() => boardReady(root))).toBe(true);
   const strip = (scope: HTMLElement | null) => Array.from(scope?.querySelectorAll("button") ?? []).find((el) => label(el).includes("background task")) ?? null;
   expect(strip(q(root, '[data-mobile2-screen="board"]'))).toBeNull();
@@ -297,7 +307,7 @@ test("no docked task rows on the phone: a background process is host data in the
 });
 
 test("⋯ opens the board menu over the board with every former header control as a row, in the design's order", async () => {
-  const root = mount({ files: [settled] });
+  const root = mount({ files: [] });
   expect(await waitFor(() => boardReady(root))).toBe(true);
   await openMenu(root);
   expect(boardReady(root)).toBe(true);
@@ -314,7 +324,7 @@ test("⋯ opens the board menu over the board with every former header control a
 });
 
 test("both board faces stay one tap away inside the menu, announced as radio rows, and still switch the board", async () => {
-  const root = mount();
+  const root = mount({ files: [conversation] });
   expect(await waitFor(() => chatShell(root))).toBe(true);
   await openMenu(root);
   const options = Array.from(root.querySelectorAll('[role="menuitemradio"]'));
@@ -364,7 +374,7 @@ test("Accounts & limits pushes the shell's accounts screen; ‹ returns to the b
 });
 
 test("Archive project acts on the tap and answers with a receipt whose Restore unarchives", async () => {
-  const root = mount({ files: [settled] });
+  const root = mount({ files: [] });
   expect(await waitFor(() => boardReady(root))).toBe(true);
   await openMenu(root);
   click(q(root, '[data-mobile2-menu-row="archive"]'));

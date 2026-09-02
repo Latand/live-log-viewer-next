@@ -15,9 +15,13 @@ import type { FileEntry } from "@/lib/types";
  * phone had no equivalent — a chip tap only moved the pinned pane — so a held
  * card could not be released from a phone at all.
  *
- * This asserts the two halves of that contract on the real component: an
- * explicit chip tap reports the open, and a header swipe to the next pane does
- * not. Passing a card is not reading it, which is the entire point of the hold.
+ * Mobile v2 lane 3 replaced the chip strip with the bar's title cell: the
+ * explicit gesture is now a SWITCHER ROW, and the passive one is the bar swipe
+ * that walks the same list. This asserts both halves of that contract on the
+ * real component: a switcher row reports the open, a swipe to the next sibling
+ * does not. Passing a card is not reading it, which is the whole point of the
+ * hold — and the swipe never walks Recent at all (README §3.3), so a finished
+ * outcome cannot even be swiped past.
  */
 
 const actualRuntimeHooks = await import("@/hooks/useRuntime");
@@ -99,34 +103,35 @@ function entry(over: Partial<FileEntry> & Pick<FileEntry, "path" | "title">): Fi
   } as FileEntry;
 }
 
-/* The lane that finished: quiet, nothing pending — a `done` pane, so the
-   attention fallback focuses the live one instead and this card's chip is the
-   inactive one a thumb reaches for. */
+/* The lane that finished: quiet, nothing pending — a `done` pane, so it lands
+   in the switcher's Recent section, which the swipe never walks. */
 const held = entry({ path: "/held.jsonl", title: "Finished lane outcome", conversationId: "conv-held" });
-const live = entry({ path: "/live.jsonl", title: "Still working", conversationId: "conv-live", activity: "live", mtime: 2_000 });
+const live = entry({ path: "/live.jsonl", title: "Still working", conversationId: "conv-live", activity: "live", mtime: 3_000 });
+const other = entry({ path: "/other.jsonl", title: "Also working", conversationId: "conv-other", activity: "live", mtime: 2_000 });
 
-/* The pane header carries MobileFocusView's swipe handle. A mostly-horizontal
-   drag past the threshold steps to the neighbouring pane. */
-function swipe(header: HTMLElement, dx: number) {
+/* The bar and the dock are the swipe zone (README §3.3). A mostly-horizontal
+   drag past the threshold steps to the neighbouring conversation. */
+function swipe(zone: HTMLElement, dx: number) {
   const start = new dom.Event("touchstart", { bubbles: true });
   Object.assign(start, { touches: [{ clientX: 300, clientY: 200 }] });
   const end = new dom.Event("touchend", { bubbles: true });
   Object.assign(end, { touches: [], changedTouches: [{ clientX: 300 + dx, clientY: 200 }] });
-  flushSync(() => { header.dispatchEvent(start as unknown as Event); });
-  flushSync(() => { header.dispatchEvent(end as unknown as Event); });
+  flushSync(() => { zone.dispatchEvent(start as unknown as Event); });
+  flushSync(() => { zone.dispatchEvent(end as unknown as Event); });
 }
 
-const paneTitle = () => dom.document.querySelector('[data-testid="mobile-focused-pane"] header')?.textContent ?? "";
+const bar = () => dom.document.querySelector("[data-mobile2-bar]") as unknown as HTMLElement;
+const barTitle = () => dom.document.querySelector("[data-mobile2-title-text]")?.textContent ?? "";
 
-test("a chip tap opens the conversation and reports it seen; a swipe past it does not (#1244)", async () => {
+test("a switcher row opens the conversation and reports it seen; a bar swipe past a sibling does not (#1244)", async () => {
   const opened: string[] = [];
   roots.push(
     mount(
       <MobileFocusView
         project="demo"
         groups={[]}
-        manual={[live, held]}
-        files={[live, held]}
+        manual={[live, other, held]}
+        files={[live, other, held]}
         flows={[]}
         pipelines={[]}
         tasks={[]}
@@ -143,29 +148,36 @@ test("a chip tap opens the conversation and reports it seen; a swipe past it doe
   );
   await settle();
 
-  /* The live pane wins the attention fallback, so the held card is on screen as
-     a chip only. Sitting there reports nothing: passive presence is not an act. */
-  expect(paneTitle()).toContain("Still working");
+  /* The live pane wins the attention fallback. Sitting there reports nothing:
+     passive presence is not an act. */
+  expect(barTitle()).toContain("Still working");
   expect(opened).toEqual([]);
 
-  /* A header swipe hops to the next pane. It changes what is focused WITHOUT
-     reporting an open — swiping past a held card must not release its hold. */
-  const header = dom.document.querySelector('[data-testid="mobile-focused-pane"] header') as unknown as HTMLElement | null;
-  expect(header).not.toBeNull();
-  swipe(header!, -120);
+  /* A bar swipe hops to the next sibling. It changes what is focused WITHOUT
+     reporting an open — swiping past a card must not release a hold. */
+  swipe(bar(), -120);
   await settle();
-  expect(paneTitle()).toContain("Finished lane outcome");
+  expect(barTitle()).toContain("Also working");
   expect(opened).toEqual([]);
 
-  /* The explicit gesture: tapping the chip. Same act as clicking the card on the
-     desktop board, so it reports the same open. */
-  swipe(dom.document.querySelector('[data-testid="mobile-focused-pane"] header') as unknown as HTMLElement, 120);
+  /* And the swipe never reaches the finished lane at all: Recent is not in the
+     swipe's order, so the end of the list bumps instead of walking on. */
+  swipe(bar(), -120);
   await settle();
-  expect(paneTitle()).toContain("Still working");
-  const chip = dom.document.querySelector('button[title="Finished lane outcome"]') as HTMLButtonElement | null;
-  expect(chip).not.toBeNull();
-  flushSync(() => chip!.click());
+  expect(barTitle()).toContain("Also working");
+  expect(dom.document.querySelector("[data-mobile2-title]")?.getAttribute("data-mobile2-bump")).toBe("right");
+  expect(opened).toEqual([]);
+
+  /* The explicit gesture: the title cell opens the switcher, and its row is the
+     same act as clicking the card on the desktop board. */
+  const cell = dom.document.querySelector('[data-mobile2-open="switch"]') as unknown as HTMLButtonElement;
+  expect(cell).not.toBeNull();
+  flushSync(() => cell.click());
   await settle();
-  expect(paneTitle()).toContain("Finished lane outcome");
+  const row = dom.document.querySelector('[data-mobile2-sheet="switch"] [data-mobile2-conversation="conv-held"]') as unknown as HTMLButtonElement;
+  expect(row).not.toBeNull();
+  flushSync(() => row.click());
+  await settle();
+  expect(barTitle()).toContain("Finished lane outcome");
   expect(opened).toEqual(["/held.jsonl"]);
 });
