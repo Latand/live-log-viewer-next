@@ -128,6 +128,13 @@ const task: BoardTask = {
 } as unknown as BoardTask;
 
 const ATTENTION_LABEL = translate("en", "mobile2.bar.attention", { count: 3 });
+/* What the board leaf under that bar must carry at minimum: the live
+   conversation as a Working row, and «All conversations · n» closing the
+   list. The seat card sits above them and adds its own. */
+const BOARD_ROWS = 2;
+/* The title too long for the header this test was written about, now a row
+   title (`cleanTitle` drops the issue number's #). */
+const ROW_TITLE = "keep the conversation header inside a 390px viewport";
 
 const { ProjectDashboard } = await import("@/components/ProjectDashboard");
 const { TITLE_MIN_PX } = await import("@/components/mobile/MobileShell");
@@ -193,11 +200,13 @@ interface Geometry {
   titleWidth: number;
   /* The board menu sheet's rows, when it is open. */
   menuControls: Box[];
-  /* The focused conversation's own header (BranchPane) inside the same phone. */
-  paneControls: Box[];
-  paneHeaderScrollWidth: number;
-  paneHeaderClientWidth: number;
-  paneTitleText: string;
+  /* The board leaf's own rows (mobile v2 lane 2) inside the same phone. */
+  rows: Box[];
+  boardScrollWidth: number;
+  boardClientWidth: number;
+  rowTitles: string[];
+  /* Whether a conversation pane is what the phone opened on. */
+  focusedPane: boolean;
 }
 
 const VIEWPORT = { width: 390, height: 844 };
@@ -222,7 +231,7 @@ async function measure(inner: string, key: string): Promise<Geometry> {
       return boxes;
     };
     const header = document.querySelector("[data-mobile2-bar]") as HTMLElement | null;
-    const paneHeader = document.querySelector("[data-testid='mobile-focused-pane'] header") as HTMLElement | null;
+    const board = document.querySelector("[data-mobile2-board]") as HTMLElement | null;
     const title = header?.querySelector("[data-mobile2-title]") as HTMLElement | null;
     return {
       scrollWidth: document.documentElement.scrollWidth,
@@ -234,10 +243,11 @@ async function measure(inner: string, key: string): Promise<Geometry> {
       menuControls: collect(document.querySelector("[data-mobile2-sheet='menu']")),
       titleText: title?.textContent ?? "",
       titleWidth: title?.getBoundingClientRect().width ?? -1,
-      paneControls: collect(paneHeader),
-      paneHeaderScrollWidth: paneHeader?.scrollWidth ?? -1,
-      paneHeaderClientWidth: paneHeader?.clientWidth ?? -1,
-      paneTitleText: (paneHeader?.querySelector("[role='button']") as HTMLElement | null)?.textContent ?? "",
+      rows: collect(board),
+      boardScrollWidth: board?.scrollWidth ?? -1,
+      boardClientWidth: board?.clientWidth ?? -1,
+      rowTitles: Array.from(board?.querySelectorAll("[data-mobile2-row]") ?? []).map((row) => (row.textContent ?? "").trim()),
+      focusedPane: document.querySelector("[data-testid='mobile-focused-pane']") !== null,
     } as Geometry;
   });
   await page.close();
@@ -299,17 +309,25 @@ test("issue 613: the populated phone bar fits a 390px viewport with every contro
   expect(closed.titleText.length).toBeGreaterThan(0);
   expect(closed.titleWidth).toBeGreaterThanOrEqual(TITLE_MIN_PX);
 
-  /* The focused conversation's own header sits in the same 390px: its long
-     title truncates and every pane control (rename, details, favorite, delete,
-     close) stays on screen at a 44px target rather than behind the clip. */
-  expect(closed.paneControls.length).toBeGreaterThanOrEqual(5);
-  expect(closed.paneHeaderScrollWidth).toBeLessThanOrEqual(closed.paneHeaderClientWidth);
-  for (const control of closed.paneControls) {
+  /* Under this bar the phone opens on the BOARD, not on a conversation
+     (mobile v2 lane 2, README §3.3): the conversation header this block used
+     to measure — five controls crowded into the same 390px — is gone, and the
+     conversation it belonged to is a screen pushed over the list. So the same
+     three rules are measured on what the phone actually shows: nothing
+     clipped, every target 44px, nothing past the edge. */
+  expect(closed.focusedPane).toBe(false);
+  expect(closed.boardClientWidth).toBe(390);
+  expect(closed.boardScrollWidth).toBeLessThanOrEqual(closed.boardClientWidth);
+  expect(closed.rows.length).toBeGreaterThanOrEqual(BOARD_ROWS);
+  for (const control of closed.rows) {
     expect(control.left).toBeGreaterThanOrEqual(0);
     expect(control.right).toBeLessThanOrEqual(390);
     expect(control.height).toBeGreaterThanOrEqual(44);
   }
-  expect(closed.paneTitleText.length).toBeGreaterThan(0);
+  /* The long title the old pane header could not hold is a row title now: it
+     is on the list whole and truncates inside its own row rather than
+     widening the list around it. */
+  expect(closed.rowTitles.some((title) => title.includes(ROW_TITLE))).toBe(true);
 
   /* Nothing was dropped: the board's two faces, undo, accounts and the host
      sheet are rows in the menu sheet, each a 44px row inside the viewport. */

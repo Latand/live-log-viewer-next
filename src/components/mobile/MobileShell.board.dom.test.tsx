@@ -227,10 +227,11 @@ function mount(over: Partial<React.ComponentProps<typeof ProjectDashboard>> = {}
 const q = (root: HTMLElement, selector: string) => root.querySelector(selector) as unknown as HTMLElement | null;
 const label = (el: Element) => el.getAttribute("aria-label") ?? el.textContent?.trim() ?? "";
 const click = (el: HTMLElement | null) => { expect(el).not.toBeNull(); flushSync(() => el!.click()); };
-/* The leaf under the bar arrives with `boardReady`: the focus view on the
-   scheme face, the pinned orchestrator slot on the list and empty leaves. */
-const boardReady = (root: HTMLElement) => q(root, '[data-testid="mobile-chat-shell"]') !== null || q(root, '[data-testid="mobile-orchestrator-slot"]') !== null;
-const chatShell = (root: HTMLElement) => q(root, '[data-testid="mobile-chat-shell"]') !== null;
+/* The leaf under the bar arrives with `boardReady`: the board list on the
+   scheme face (mobile v2 lane 2), the pinned orchestrator slot on the list and
+   empty leaves. */
+const boardReady = (root: HTMLElement) => q(root, "[data-mobile2-board]") !== null || q(root, '[data-testid="mobile-orchestrator-slot"]') !== null;
+const boardList = (root: HTMLElement) => q(root, "[data-mobile2-board]") !== null;
 const openMenu = async (root: HTMLElement) => { click(q(root, '[data-mobile2-open="menu"]')); await settle(); expect(q(root, '[data-mobile2-sheet="menu"]')).not.toBeNull(); };
 
 test("the phone board mounts the shell: one bar, the title cell as the switcher, three 44 px targets, and no five-target header", async () => {
@@ -286,14 +287,15 @@ test("no docked task rows on the phone: a background process is host data in the
   expect(hostRow.textContent).toContain(translate("en", "mobile2.menu.host"));
   expect(hostRow.textContent).toContain(translate("en", "mobile2.menu.hostTasks", { count: 1 }));
   click(hostRow);
-  const shelf = q(root, '[data-testid="mobile-bottom-shelf"]')!;
+  await settle();
+  const shelf = q(root, '[data-mobile2-sheet="host"]')!;
   expect(shelf).not.toBeNull();
   expect(q(root, '[data-mobile2-sheet="menu"]')).toBeNull();
-  const docked = q(root, "[data-mobile2-host-tasks]")!;
+  const docked = q(root, '[data-mobile2-host-task="/repo/worktrees/mobile-shell/next-dev.log"]')!;
   expect(docked).not.toBeNull();
   expect(shelf.contains(docked as never)).toBe(true);
-  expect(strip(docked)).not.toBeNull();
-  expect(strip(docked)!.textContent).toContain("next dev · port 8899");
+  expect(docked.textContent).toContain("next dev · port 8899");
+  expect(q(root, '[data-mobile2-kill="/repo/worktrees/mobile-shell/next-dev.log"]')).not.toBeNull();
 });
 
 test("⋯ opens the board menu over the board with every former header control as a row, in the design's order", async () => {
@@ -315,7 +317,7 @@ test("⋯ opens the board menu over the board with every former header control a
 
 test("both board faces stay one tap away inside the menu, announced as radio rows, and still switch the board", async () => {
   const root = mount();
-  expect(await waitFor(() => chatShell(root))).toBe(true);
+  expect(await waitFor(() => boardList(root))).toBe(true);
   await openMenu(root);
   const options = Array.from(root.querySelectorAll('[role="menuitemradio"]'));
   const rowLabel = (el: Element) => el.querySelector(".truncate")?.textContent ?? "";
@@ -325,7 +327,7 @@ test("both board faces stay one tap away inside the menu, announced as radio row
   click(options[1] as unknown as HTMLElement);
   await settle();
   expect(q(root, '[data-mobile2-sheet="menu"]')).toBeNull();
-  expect(await waitFor(() => !chatShell(root))).toBe(true);
+  expect(await waitFor(() => !boardList(root))).toBe(true);
   await openMenu(root);
   const reopened = Array.from(root.querySelectorAll('[role="menuitemradio"]'));
   expect(reopened[1]!.getAttribute("aria-checked")).toBe("true");

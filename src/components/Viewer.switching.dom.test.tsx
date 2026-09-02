@@ -119,6 +119,7 @@ const { resetLogTailCacheForTests } = await import("@/hooks/useLogTail");
 const { resetFeedSessionPoolForTests } = await import("./feed/sessionPool");
 const { resetPendingOpensForTest, resetSelectionSessionsForTest } = await import("@/hooks/useBoardState");
 const { OPEN_KEY } = await import("./orchestrator/OrchestratorDock");
+const { getMobileNav } = await import("./mobile/mobileNav");
 
 /* ── corpus ─────────────────────────────────────────────────────────────── */
 
@@ -154,8 +155,14 @@ function appendRecord(path: string, project: string): void {
   transcripts.set(path, (transcripts.get(path) ?? "") + appendedLine(project, 5_000 + appended, String(appended)) + "\n");
 }
 
+/** Extra payload the badge test seeds: rows that need the operator, in both
+    projects, and this project's pipelines. Reset before every test. */
+let waiting: FileEntry[] = [];
+let pipelines: unknown[] = [];
+
 function allFiles(): FileEntry[] {
   return [
+    ...waiting,
     fileEntryFor(SHORT),
     /* The long conversation continues the short one: its card carries the
        lineage chip, which is one of the `#c=` deep links the addendum names. */
@@ -202,7 +209,7 @@ globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) =>
   if (url.startsWith("/api/files")) {
     const pin = new URL(url, "http://localhost").searchParams.get("path") ?? "";
     const files = pin === GAMMA.conversationId || pin === GAMMA.path ? [...allFiles(), fileEntryFor(GAMMA)] : allFiles();
-    return delayed(Response.json({ files, projectCatalog, flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: { tmux: { status: "healthy" } } }));
+    return delayed(Response.json({ files, projectCatalog, flows: [], pipelines, workflows: [], tasks: [], systemHealth: { tmux: { status: "healthy" } } }));
   }
   if (url.startsWith("/api/board")) {
     if (method === "GET") {
@@ -373,6 +380,8 @@ beforeEach(() => {
   jest.useFakeTimers();
   mobile = false;
   seedTranscripts();
+  waiting = [];
+  pipelines = [];
   appended = 0;
   requests.length = 0;
   FakeEventSource.open = [];
@@ -385,6 +394,10 @@ beforeEach(() => {
   dom.sessionStorage.clear();
   dom.location.hash = "";
   document.body.replaceChildren();
+  /* The phone shell's navigation store is one per tab and outlives a mount
+     (mobile v2 lane 1), so a test that left a conversation screen on the stack
+     would hand the next mount that screen instead of the board. */
+  getMobileNav().home();
   resetFilesClientCacheForTests();
   resetLogTailCacheForTests();
   resetFeedSessionPoolForTests();
@@ -666,10 +679,31 @@ test("desktop: a cold deep link from the URL still resolves a beyond-cap convers
 
 /* ── phone (390px) ──────────────────────────────────────────────────────── */
 
+/*
+ * The phone's switching gesture is the BOARD (mobile v2 lane 2, README §4.1,
+ * §3.3): the leaf with no conversation on top of the navigation stack is the
+ * triage list, a row opens its conversation over it, and ‹ pops back onto the
+ * list that is still there underneath. The retired shape — a focused pane the
+ * viewport opens on, with a scrolling chip strip for switching — is what these
+ * three tests used to drive; what they measure is unchanged and is the point:
+ * a REVISIT paints from cache, in the same synchronous flush as the gesture,
+ * with no skeleton, no refetch and no dashboard remount.
+ */
 const focusedPane = (host: HTMLElement) => host.querySelector('[data-testid="mobile-focused-pane"]');
 const focusedTitle = (host: HTMLElement) => focusedPane(host)?.querySelector("header")?.textContent ?? "";
 const chipFor = (host: HTMLElement, title: string) => host.querySelector(`button[title="${title}"]`) as HTMLButtonElement | null;
 const chipActive = (host: HTMLElement, title: string) => chipFor(host, title)?.className.includes("border-accent/60") ?? false;
+/** The board leaf, and one of its conversation rows. */
+const onBoard = (host: HTMLElement) => host.querySelector("[data-mobile2-board]") !== null;
+const boardRow = (host: HTMLElement, path: string) =>
+  host.querySelector(`[data-mobile2-row="conversation"][data-mobile2-path="${path}"]`) as HTMLButtonElement | null;
+/** The bar's ‹: the same pop the platform back gesture performs. */
+async function popToBoard(host: HTMLElement): Promise<void> {
+  await click(host.querySelector("[data-mobile2-back]")!);
+  await until(() => onBoard(host));
+}
+/** How many times the client has asked for the file list so far. */
+const fileRequests = () => requests.filter((url) => url.startsWith("/api/files")).length;
 
 function swipe(header: HTMLElement, dx: number): void {
   const start = { clientX: 200, clientY: 40 };
@@ -678,42 +712,62 @@ function swipe(header: HTMLElement, dx: number): void {
   dispatch(header, new dom.TouchEvent("touchend", { bubbles: true, changedTouches: [end] } as never));
 }
 
-test("phone: A → B → A shows A's previous rows synchronously, then the fresh tail lands without a flash", async () => {
+test("phone: A → B → A through the board shows A's previous rows synchronously, then the fresh tail lands without a flash", async () => {
   mobile = true;
   const host = await mountViewer("alpha");
-  const firstPane = await until(() => focusedPane(host) !== null && tailLines(focusedPane(host)) > 0);
-  const firstTitle = focusedTitle(host);
-  record("phone", `mount → focused pane (${firstTitle.includes("Tool") ? "tool-heavy" : firstTitle.includes("Long") ? "long" : "short"}) painted (cold)`, firstPane);
+  /* The phone opens on the BOARD, not on a conversation: the leaf is the
+     triage list, and every row on it is the open gesture. */
+  const boardPaint = await until(() => onBoard(host) && boardRow(host, SHORT.path) !== null && boardRow(host, LONG.path) !== null);
+  record("phone", "mount → board rows painted (cold)", boardPaint, `/api/files requests ${fileRequests()}`);
+  expect(focusedPane(host)).toBeNull();
 
-  /* A: the short conversation. Cold unless the first pane already was it. */
+  /* A: the short conversation, cold. */
   beginStep();
-  await click(chipFor(host, SHORT.title)!);
-  const aChip = await until(() => chipActive(host, SHORT.title));
+  await click(boardRow(host, SHORT.path)!);
   const aRows = await until(() => focusedTitle(host).includes(SHORT.title) && tailLines(focusedPane(host)) === SHORT.lines.length);
-  record("phone", "tap chip A (cold) → chip highlighted", aChip);
-  record("phone", "tap chip A (cold) → A rows painted", { virtualMs: aChip.virtualMs + aRows.virtualMs, workMs: aRows.workMs }, `LogFeed renders ${probe.renders("LogFeed")}`);
+  record("phone", "board row A (cold) → A rows painted", aRows, `LogFeed renders ${probe.renders("LogFeed")}`);
 
-  /* B: the long conversation, cold. */
+  /* ‹ back onto the board — which is still there, underneath — and into B, cold. */
   beginStep();
-  await click(chipFor(host, LONG.title)!);
-  const bChip = await until(() => chipActive(host, LONG.title));
+  await popToBoard(host);
+  await click(boardRow(host, LONG.path)!);
   const bRows = await until(() => focusedTitle(host).includes(LONG.title) && tailLines(focusedPane(host)) === LONG.lines.length);
-  record("phone", "tap chip B (cold, long) → chip highlighted", bChip);
-  record("phone", "tap chip B (cold, long) → B rows painted", { virtualMs: bChip.virtualMs + bRows.virtualMs, workMs: bRows.workMs }, `LogFeed renders ${probe.renders("LogFeed")}`);
+  record("phone", "‹ board → row B (cold, long) → B rows painted", bRows, `LogFeed renders ${probe.renders("LogFeed")}`);
 
-  /* Back to A: cached. The rows must be there in the same flush as the tap. */
+  /* Back to A the same way: cached. The rows must be there in the same flush
+     as the tap — no skeleton between them, and nothing re-fetched. */
+  await popToBoard(host);
+  const filesBefore = fileRequests();
   beginStep();
-  await click(chipFor(host, SHORT.title)!);
-  const backChip = await until(() => chipActive(host, SHORT.title));
-  const cachedRows = await until(() => focusedTitle(host).includes(SHORT.title) && feedRows(host, SHORT.path) > 0);
+  let sawSkeleton = false;
+  await click(boardRow(host, SHORT.path)!);
+  const cachedRows = await until(() => {
+    sawSkeleton ||= skeleton(host);
+    return focusedTitle(host).includes(SHORT.title) && feedRows(host, SHORT.path) > 0;
+  });
   const cached = probe.snapshot();
-  record("phone", "tap chip A again (cached) → chip highlighted", backChip);
-  record("phone", "tap chip A again (cached) → A's previous rows on screen", { virtualMs: backChip.virtualMs + cachedRows.virtualMs, workMs: cachedRows.workMs }, `LogFeed renders ${cached.renders.LogFeed ?? 0}; MobileFocusView mounts +${cached.mounts.MobileFocusView ?? 0}; dashboard mounts +${cached.mounts.ProjectDashboardView ?? 0}`);
-  expect(backChip.virtualMs).toBe(0);
+  record("phone", "board row A again (cached) → A's previous rows on screen", cachedRows,
+    `skeleton ${sawSkeleton ? "shown" : "never"}; LogFeed renders ${cached.renders.LogFeed ?? 0}; dashboard mounts +${cached.mounts.ProjectDashboardView ?? 0}; BranchPane mounts ${cached.mounts.BranchPane ?? 0}; /api/files requests +${fileRequests() - filesBefore}`);
   expect(cachedRows.virtualMs).toBe(0);
+  expect(sawSkeleton).toBe(false);
+  /* The board is the leaf, so the conversation screen mounts over it — but the
+     dashboard around both never does, and the transcript is not re-read: the
+     cached tail paints in the first commit of the new pane. */
   expect(cached.mounts.ProjectDashboardView ?? 0).toBe(0);
-  expect(cached.mounts.MobileFocusView ?? 0).toBe(0);
+  expect(fileRequests() - filesBefore).toBe(0);
   expect(feedRows(host, SHORT.path)).toBeGreaterThan(0);
+  expect(tailLines(focusedPane(host))).toBe(SHORT.lines.length);
+  /* Exactly one pane: the row that was tapped, not a wrong first guess torn
+     down a frame later. */
+  expect(cached.mounts.BranchPane ?? 0).toBe(1);
+
+  /* Let the harness's own late navigation land before measuring the tail.
+     `recordFocusNavigation` writes the conversation's `#c=` entry with
+     pushState, which fires no hashchange in a browser; happy-dom fires one
+     anyway, on a window timer, and the Viewer resolves it as a deep link and
+     lands again. Draining it here keeps the artifact out of the measurement
+     below instead of letting it read as churn the product has. */
+  await advance(60);
 
   /* The tail moves: the new record appends; the rows already on screen keep
      their DOM nodes (no flash, no remount). */
@@ -725,20 +779,20 @@ test("phone: A → B → A shows A's previous rows synchronously, then the fresh
   const fresh = await until(() => feedRows(host, SHORT.path) > rowsBefore);
   record("phone", "fresh tail record → appended to A", fresh, `first row node preserved ${focusedPane(host)!.querySelector("[data-feed-key]") === firstRow ? "yes" : "no"}`);
   expect(focusedPane(host)!.querySelector("[data-feed-key]")).toBe(firstRow);
+  expect(probe.snapshot().mounts.BranchPane ?? 0).toBe(0);
   expect(fresh.virtualMs).toBeLessThanOrEqual(PROMPT_RECONNECT_MS + RTT_MS + 5);
 });
 
 test("phone: the header swipe hops panes with the same cached paint", async () => {
   mobile = true;
   const host = await mountViewer("alpha");
-  await until(() => focusedPane(host) !== null && tailLines(focusedPane(host)) > 0);
-  /* Visit both neighbours once so their feeds are cached. */
-  await click(chipFor(host, SHORT.title)!);
-  await until(() => focusedTitle(host).includes(SHORT.title) && tailLines(focusedPane(host)) > 0);
-  await click(chipFor(host, LONG.title)!);
-  await until(() => focusedTitle(host).includes(LONG.title) && tailLines(focusedPane(host)) > 0);
-  await click(chipFor(host, TOOLS.title)!);
-  await until(() => focusedTitle(host).includes(TOOLS.title) && tailLines(focusedPane(host)) > 0);
+  await until(() => onBoard(host) && boardRow(host, SHORT.path) !== null);
+  /* Visit each conversation from the board once, so its feed is cached. */
+  for (const entry of [SHORT, LONG, TOOLS]) {
+    await click(boardRow(host, entry.path)!);
+    await until(() => focusedTitle(host).includes(entry.title) && tailLines(focusedPane(host)) > 0);
+    if (entry !== TOOLS) await popToBoard(host);
+  }
   /* Strip order is layout order; a swipe hops to the neighbour. */
   const chips = Array.from(host.querySelectorAll('button[title]')).map((button) => button.getAttribute("title") ?? "").filter((title) => [SHORT.title, LONG.title, TOOLS.title].includes(title));
   const index = chips.indexOf(TOOLS.title);
@@ -753,20 +807,34 @@ test("phone: the header swipe hops panes with the same cached paint", async () =
   record("phone", "header swipe → neighbour rows (cached) on screen", { virtualMs: hop.virtualMs + rowsOnScreen.virtualMs, workMs: rowsOnScreen.workMs }, `LogFeed renders ${probe.renders("LogFeed")}`);
   expect(hop.virtualMs).toBe(0);
   expect(rowsOnScreen.virtualMs).toBe(0);
+  /* A sibling hop stays on the conversation screen: it replaces what that one
+     screen shows and never drops the operator back onto the board. */
+  expect(onBoard(host)).toBe(false);
+  expect(probe.snapshot().mounts.MobileFocusView ?? 0).toBe(0);
 });
 
 test("phone: switching project through the project sheet paints the revisited board from cache", async () => {
   mobile = true;
   const host = await mountViewer("alpha");
-  await until(() => focusedPane(host) !== null && tailLines(focusedPane(host)) > 0);
+  await until(() => onBoard(host) && boardRow(host, SHORT.path) !== null);
   /* The bar's title cell is the project switcher (mobile v2 lane 1): it opens
      the project sheet over the board, and a row replaces the board. */
   const openProjects = () => host.querySelector(`[data-mobile2-open="projects"]`) as HTMLButtonElement;
   const projectRow = (project: string) => host.querySelector(`[data-mobile2-project="${project}"]`) as HTMLButtonElement;
 
+  /* Read one of alpha's conversations before leaving, so the revisit can be
+     asked for both caches: the board's rows and that conversation's feed. */
+  await click(boardRow(host, SHORT.path)!);
+  await until(() => focusedTitle(host).includes(SHORT.title) && tailLines(focusedPane(host)) > 0);
+  await popToBoard(host);
+
   await click(openProjects());
   await click(projectRow("beta"));
-  await until(() => focusedPane(host) !== null && focusedTitle(host).includes("Beta") && tailLines(focusedPane(host)) > 0);
+  await until(() => onBoard(host) && boardRow(host, BETA_A.path) !== null);
+  /* A project switch lands on the new project's board, never on a conversation
+     of the one just left. */
+  expect(focusedPane(host)).toBeNull();
+  expect(boardRow(host, SHORT.path)).toBeNull();
 
   beginStep();
   let sawSkeleton = false;
@@ -774,14 +842,76 @@ test("phone: switching project through the project sheet paints the revisited bo
   await click(projectRow("alpha"));
   const paint = await until(() => {
     sawSkeleton ||= skeleton(host);
-    return focusedPane(host) !== null && !focusedTitle(host).includes("Beta") && feedRows(host, SHORT.path) + feedRows(host, LONG.path) + feedRows(host, TOOLS.path) > 0;
+    return onBoard(host) && boardRow(host, SHORT.path) !== null && boardRow(host, LONG.path) !== null && boardRow(host, TOOLS.path) !== null;
   });
   const after = probe.snapshot();
-  record("phone", "drawer project switch (revisit) → focused pane painted from cache", paint, `skeleton ${sawSkeleton ? "shown" : "never"}; dashboard mounts +${after.mounts.ProjectDashboardView ?? 0}; MobileFocusView mounts +${after.mounts.MobileFocusView ?? 0}; BranchPane mounts ${after.mounts.BranchPane ?? 0}`);
+  record("phone", "project switch (revisit) → board rows painted from cache", paint,
+    `skeleton ${sawSkeleton ? "shown" : "never"}; dashboard mounts +${after.mounts.ProjectDashboardView ?? 0}; MobileBoard mounts ${after.mounts.MobileBoard ?? 0}; BranchPane mounts ${after.mounts.BranchPane ?? 0}`);
   expect(sawSkeleton).toBe(false);
   expect(paint.virtualMs).toBe(0);
   expect(after.mounts.ProjectDashboardView ?? 0).toBe(0);
-  /* Exactly one pane mounts: the remembered focus, not a wrong first guess
+  /* The revisited board is a list, not a world: no conversation pane is
+     mounted behind it. */
+  expect(after.mounts.BranchPane ?? 0).toBe(0);
+
+  /* And the feed cache survived the round trip too: the row the operator read
+     before leaving paints its previous rows in the same flush as the tap. */
+  const filesBefore = fileRequests();
+  beginStep();
+  await click(boardRow(host, SHORT.path)!);
+  const cached = await until(() => focusedTitle(host).includes(SHORT.title) && feedRows(host, SHORT.path) > 0);
+  record("phone", "project switch (revisit) → row A's rows (cached) on screen", cached,
+    `BranchPane mounts ${probe.snapshot().mounts.BranchPane ?? 0}; /api/files requests +${fileRequests() - filesBefore}`);
+  expect(cached.virtualMs).toBe(0);
+  expect(fileRequests() - filesBefore).toBe(0);
+  /* Exactly one pane mounts: the row that was tapped, not a wrong first guess
      that is torn down a frame later. */
-  expect(after.mounts.BranchPane ?? 0).toBe(1);
+  expect(probe.snapshot().mounts.BranchPane ?? 0).toBe(1);
+});
+
+test("phone: the bar's badge counts THIS project's queue and its pipelines, not the other project's", async () => {
+  /* The bar's badge, the sheet it opens and that sheet's «Next ›» are one
+     list (mobile v2 §4.1, §4.6), and the board under the bar shows one
+     project — so the list is the project's. Counting every project's rows made
+     the badge promise items the screen it sits on could not reach: a home with
+     a second busy project read «⚠ 2» over a board with one queued row.
+     A pipeline waiting on a decision is a queue item like any other, and it is
+     counted from the same answer that puts it on the board below. */
+  mobile = true;
+  const asked = { since: 4_102_487_400, screenTail: "", target: "", menu: null };
+  waiting = [
+    fileEntryFor(SHORT, { path: "/sessions/alpha/waiting.jsonl", conversationId: "conv-alpha-waiting", title: "Alpha needs a decision", waitingInput: asked }),
+    fileEntryFor(BETA_A, { path: "/sessions/beta/waiting.jsonl", conversationId: "conv-beta-waiting", title: "Beta needs a decision", waitingInput: asked }),
+  ];
+  pipelines = [{
+    id: "pipeline_alpha_lane", task: "Rebuild the board status projection", taskIds: [], project: "alpha",
+    repoDir: "/repos/alpha", worktreeDir: "/repos/alpha-lane", branch: "lane", baseBranch: "main", baseRef: "main",
+    lastPassedCommit: "", stages: [{ id: "implement", kind: "run" }, { id: "review", kind: "review-loop" }],
+    runs: [{ stageId: "review", attempts: [{ n: 2, state: "failed", verdict: { status: "fail", findings: ["one"] }, completedAt: "2100-01-01T00:00:00.000Z" }] }],
+    cursor: { stageId: "review", state: "reviewing", input: null, activatedBy: null },
+    state: "needs_decision", pausedState: null, stateDetail: null, srcPath: null, srcConversationId: null,
+    createdAt: "2100-01-01T00:00:00.000Z", closedAt: null,
+  }];
+
+  const host = await mountViewer("alpha");
+  await until(() => onBoard(host) && boardRow(host, "/sessions/alpha/waiting.jsonl") !== null);
+  const badge = () => host.querySelector("[data-mobile2-attention-count]");
+  await until(() => badge() !== null);
+
+  /* One queued conversation in this project and one pipeline: two, and the
+     other project's queued row is not one of them. */
+  expect(badge()!.getAttribute("data-mobile2-attention-count")).toBe("2");
+  const queuedRows = Array.from(host.querySelectorAll('[data-mobile2-board] [data-mobile2-row]'))
+    .filter((row) => ["waiting", "needs_decision"].includes(row.getAttribute("data-mobile2-state") ?? ""));
+  expect(queuedRows).toHaveLength(2);
+  expect(host.querySelector('[data-mobile2-path="/sessions/beta/waiting.jsonl"]')).toBeNull();
+
+  /* The sheet the badge opens lists exactly those two, in the same words. */
+  await click(badge()!);
+  const sheet = host.querySelector('[data-mobile2-sheet="attention"]')!;
+  expect(sheet).not.toBeNull();
+  expect(sheet.textContent).toContain("Alpha needs a decision");
+  expect(sheet.textContent).toContain("Rebuild the board status projection");
+  expect(sheet.textContent).not.toContain("Beta needs a decision");
+  expect(sheet.querySelectorAll('[data-mobile2-row="pipeline"]')).toHaveLength(1);
 });

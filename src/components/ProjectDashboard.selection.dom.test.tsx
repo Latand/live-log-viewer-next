@@ -418,7 +418,13 @@ test("the phone's focus and map modes publish the selection the desktop board ma
   expect(slice().selectedPaths).toEqual(["/beta"]);
 
   /* The phone's OTHER mode: the map reports the whole board in its own layout
-     order — and the same selection. */
+     order — and the same selection. It lives inside a focused conversation
+     (mobile v2 lane 2 made the board the phone's first leaf), so the operator
+     opens a row to reach it. */
+  const row = phone.querySelector('[data-mobile2-row="conversation"]') as unknown as HTMLElement | null;
+  expect(row).not.toBeNull();
+  flushSync(() => row!.click());
+  await settle();
   const mapButton = Array.from(phone.querySelectorAll("button")).find(
     (button) => (button.getAttribute("aria-label") ?? "") === "Open the project map",
   ) as HTMLButtonElement | undefined;
