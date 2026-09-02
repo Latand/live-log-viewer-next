@@ -1065,6 +1065,17 @@ export function useBoardState(project: string | null): BoardState {
   const [bound, setBound] = useState<{ project: string | null; snapshot: BoardSnapshot }>(
     () => ({ project, snapshot: initialBoardSnapshot(project) }),
   );
+  /* A project switch re-tags DURING the render that changes `project` (#1432):
+     the session cache already holds the settled arrangement of every project
+     this tab visited, so a revisit paints its board in the same frame as the
+     rail click — no skeleton, no unmount of every card, no re-parse of every
+     feed. A project this tab has not loaded yet still starts unavailable and
+     holds the skeleton until its first GET lands, exactly as before; the
+     effect below then binds the store and replaces this first snapshot with
+     the live one. React allows this set-state-in-render for the component's
+     own state, and it costs one synchronous re-render before any child sees
+     the stale tag. */
+  if (bound.project !== project) setBound({ project, snapshot: initialBoardSnapshot(project) });
 
   useEffect(() => {
     if (typeof window === "undefined" || project === null) {

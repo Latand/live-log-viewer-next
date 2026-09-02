@@ -35,7 +35,7 @@ import { claimedReviewerDescendantPaths, foldClaimedReviewers, isActiveFlow, res
 import { compactPipelineArtifactPaths, compactPipelineLayoutFlows, createDraftPipeline, excludeCompactPipelineArtifacts, patchPipeline, pipelineFullPanePaths, pipelinesForProject, replaceCompactPipelineEphemeral, resolvePipelineMemberPaths, type PipelineTemplate } from "./pipelines/pipelineModel";
 import { PipelineTemplatePicker } from "./pipelines/PipelineTemplatePicker";
 import { buildSchemeLayout } from "./scheme/layout";
-import { buildSubagentTrays } from "./scheme/subagentTray";
+import { buildSubagentTrays, subagentTraySignature } from "./scheme/subagentTray";
 import type { SubagentTrayApi } from "./scheme/SubagentTrayView";
 import { conversationIdentity, formatConversationHash } from "@/lib/accounts/identity";
 import { recordFocusNavigation } from "@/lib/navigation/focusHistory";
@@ -86,6 +86,11 @@ const HIGHLIGHT_MS = 1800;
     minutes wide, so both the millisecond and the seconds clock tick here. */
 const BOARD_CLOCK_MS = 30_000;
 const ACTIVE_DELIVERY_RECEIPTS = new Set(["pending", "delivering", "applying", "queued", "uncertain"]);
+/* Stable empties for the layout inputs: a fresh `[]` per render re-lays-out
+   the board (#1432). */
+const EMPTY_MANUAL: FileEntry[] = [];
+const EMPTY_DRAFTS: string[] = [];
+const EMPTY_TASKS: BoardTask[] = [];
 
 interface Props {
   files: FileEntry[];
@@ -623,9 +628,15 @@ function ProjectDashboardView({
         else setDraftCwd(id, initialDraftCwd);
       }
     }
+    /* Identity-preserving (#1432): this effect re-runs on every same-project
+       open (`openNonce`), and a fresh array or set for unchanged content
+       re-laid-out the whole board through the drafts input. */
     /* eslint-disable-next-line react-hooks/set-state-in-effect */
-    setDrafts(restored);
-    setPendingRestoredHandoffs(new Set(unresolved.map(({ id }) => id)));
+    setDrafts((prev) => (prev.length === restored.length && prev.every((id, index) => id === restored[index]) ? prev : restored));
+    setPendingRestoredHandoffs((prev) => {
+      const next = new Set(unresolved.map(({ id }) => id));
+      return prev.size === next.size && [...next].every((id) => prev.has(id)) ? prev : next;
+    });
     const resolveSourceCwd = (id: string, sourcePath: string, attempt = 0) => {
       void fetch("/api/spawn?project=" + encodeURIComponent(project) + "&src=" + encodeURIComponent(sourcePath))
         .then(async (response) => {
@@ -867,6 +878,7 @@ function ProjectDashboardView({
     () => buildBranchGroups(sceneFiles, project, { expandedConversationPaths: expandedConversations, keepExpandedPaths, now: nowSeconds }),
     [sceneFiles, project, expandedConversations, keepExpandedPaths, nowSeconds],
   );
+  const engineProjectionRef = useRef<{ signature: string; projection: ReturnType<typeof buildSubagentTrays> } | null>(null);
   const engineProjection = useMemo(() => {
     const hiddenPaths = new Set(prefs.hidden);
     const placedPaths = new Set<string>(prefs.manual);
@@ -884,7 +896,7 @@ function ProjectDashboardView({
     /* Existing surfaces keep authority: a claimed pipeline artifact, a folded
        worker, or launch history is never re-owned by the tray projection. */
     const claimedPaths = new Set<string>([...compactPipelinePaths, ...collapsedPaths, ...launchHistoryPaths]);
-    return buildSubagentTrays({
+    const next = buildSubagentTrays({
       entries: files,
       foldedEngineChildIds: new Set(board.prefs.foldedEngineChildIds ?? []),
       expandedTrayParentIds: new Set(board.prefs.expandedEngineTrayParentIds ?? []),
@@ -894,6 +906,13 @@ function ProjectDashboardView({
       hostEligibleParentIds,
       now: nowSeconds,
     });
+    /* Value-stable (#1432): the projection reaches every card through the
+       tray API, so an equal projection keeps its earlier identity. */
+    const signature = subagentTraySignature(next);
+    const previous = engineProjectionRef.current;
+    if (previous && previous.signature === signature) return previous.projection;
+    engineProjectionRef.current = { signature, projection: next };
+    return next;
   }, [baseGroups, prefs.hidden, prefs.manual, board.prefs.foldedEngineChildIds, board.prefs.expandedEngineTrayParentIds, filesByPath, project, files, compactPipelinePaths, collapsedPaths, launchHistoryPaths, pinnedPaths, nowSeconds]);
   const groups = useMemo(
     () => (engineProjection.promotedPaths.size || engineProjection.foldedPaths.size
@@ -1454,15 +1473,21 @@ function ProjectDashboardView({
     pendingFocusRef.current = path;
     setEphemeral((prev) => (prev.includes(path) ? prev : [...prev, path]));
   };
+  /* The tray API reaches every card through NodesLayer's props, so its
+     identity must move only when the PROJECTION moves (#1432). `board` is
+     rebuilt on every render (its setters delegate to the shared store) and
+     `openTrayMember` closes over the latest files, so both are read through a
+     ref the handlers dereference at call time. */
+  const trayHandlersRef = useRef({ board, openTrayMember });
+  trayHandlersRef.current = { board, openTrayMember };
   const trayApi = useMemo<SubagentTrayApi>(() => ({
     trays: engineProjection.traysByParent,
     foldedChildPaths: engineProjection.foldedPaths,
-    onToggleExpanded: (parentId, expanded) => board.setEngineTrayExpanded(parentId, expanded),
-    onOpenMember: openTrayMember,
-    onUnfold: (id, path) => board.setEngineChildFold(id, path, false),
-    onFoldChild: (id, path) => board.setEngineChildFold(id, path, true),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [engineProjection, board]);
+    onToggleExpanded: (parentId, expanded) => trayHandlersRef.current.board.setEngineTrayExpanded(parentId, expanded),
+    onOpenMember: (path) => trayHandlersRef.current.openTrayMember(path),
+    onUnfold: (id, path) => trayHandlersRef.current.board.setEngineChildFold(id, path, false),
+    onFoldChild: (id, path) => trayHandlersRef.current.board.setEngineChildFold(id, path, true),
+  }), [engineProjection]);
   const openFullCatalogFile = onOpenCatalogFile ?? openSwitchboardFile;
 
   /* Expand a terminal direct review group back onto the board (#289 + #325):
@@ -1528,17 +1553,21 @@ function ProjectDashboardView({
     statusBits.push(t("dash.quietTrees", { count: cards.length }));
   }
 
-  const visibleGroups = groups
+  /* Memoised (#1432): these arrays are SchemeBoard's layout inputs. Rebuilt
+     inline they took a fresh identity on every dashboard render — a highlight,
+     a clock tick — and every one of those re-laid-out the whole board and
+     re-rendered every card. */
+  const visibleGroups = useMemo(() => groups
     .map((group) => ({ ...group, columns: group.columns.filter((column) => !hiddenSet.has(column.file.path)) }))
-    .filter((group) => group.columns.length);
+    .filter((group) => group.columns.length), [groups, hiddenSet]);
   /* Parentless background processes dock as colored strips at the top of the
      canvas instead of hanging as lone stub nodes in the middle of it. */
-  const dockedTasks = visibleGroups.filter((group) => group.orphanTask).map((group) => group.columns[0]!.file);
-  const schemeGroups = visibleGroups.filter((group) => !group.orphanTask);
+  const dockedTasks = useMemo(() => visibleGroups.filter((group) => group.orphanTask).map((group) => group.columns[0]!.file), [visibleGroups]);
+  const schemeGroups = useMemo(() => visibleGroups.filter((group) => !group.orphanTask), [visibleGroups]);
   /* Active pipelines keep the scheme available before the first transcript;
      SchemeBoard anchors their world-space PipelineGroups beside linked tasks. */
   const activePipelines = useMemo(() => pipelinesForProject(pipelines, project, files), [pipelines, project, files]);
-  const visibleDrafts = drafts.filter((id) => !pendingRestoredHandoffs.has(id));
+  const visibleDrafts = useMemo(() => drafts.filter((id) => !pendingRestoredHandoffs.has(id)), [drafts, pendingRestoredHandoffs]);
   const hasNodes =
     schemeGroups.length > 0 || schemeManual.length > 0 || visibleDrafts.length > 0 || projectTasks.length > 0 || activePipelines.length > 0;
   /* Scheme-visible project files, freshest first. They gate live activity for
@@ -1577,15 +1606,22 @@ function ProjectDashboardView({
      exists only for an implementer placed as a board node — the same layout the
      scheme draws. Derive availability from that layout's nodes, so a scanned but
      unplaced (hidden/tombstoned) implementer disables the action (#93 finding). */
-  const pipelineLayout = buildSchemeLayout(hasNodes ? schemeGroups : archiveGroups, hasNodes ? schemeManual : [], files, compactLayoutFlows, hasNodes ? visibleDrafts : [], pipelines, [], new Set(), isolatedCompactHistoryPaths, [], new Set(), { now: nowSeconds });
+  const layoutGroups = hasNodes ? schemeGroups : archiveGroups;
+  const layoutManual = hasNodes ? schemeManual : EMPTY_MANUAL;
+  const layoutDrafts = hasNodes ? visibleDrafts : EMPTY_DRAFTS;
+  const pipelineLayout = useMemo(
+    () => buildSchemeLayout(layoutGroups, layoutManual, files, compactLayoutFlows, layoutDrafts, pipelines, [], new Set(), isolatedCompactHistoryPaths, [], new Set(), { now: nowSeconds }),
+    [layoutGroups, layoutManual, files, compactLayoutFlows, layoutDrafts, pipelines, isolatedCompactHistoryPaths, nowSeconds],
+  );
   /* Worker rows the scheme still draws in a retained form — an active flow's
      reviewer round deck keeps its finished rounds as deck tabs. Those are
      re-admitted here so a folded reviewer is never listed twice (its deck AND a
-     worker stack). Derived inline (like pipelineLayout above) so the React
-     Compiler owns the caching — a manual useMemo over the non-memoized
-     pipelineLayout can't be preserved. */
-  const deckReviewerPaths = new Set<string>();
-  for (const deck of pipelineLayout.decks) for (const round of deck.rounds) if (round.file) deckReviewerPaths.add(round.file.path);
+     worker stack). */
+  const deckReviewerPaths = useMemo(() => {
+    const paths = new Set<string>();
+    for (const deck of pipelineLayout.decks) for (const round of deck.rounds) if (round.file) paths.add(round.file.path);
+    return paths;
+  }, [pipelineLayout]);
   /* The board's placed conversation windows, in layout order — the fallback the
      non-scheme publisher below reports as visible when the history list has no
      rows of its own (#771 requirement a). Carried as a newline-joined signature
@@ -1598,10 +1634,10 @@ function ProjectDashboardView({
      exclude set: a closed worker is a tombstone — it must not resurface as a
      stack member (its manual/expanded pin was dropped on close, so it would
      otherwise re-qualify as a plain collapse candidate). */
-  const workerStacks = groupWorkerStacks(collapsibleWorkers, deckFlows, new Set([...deckReviewerPaths, ...hiddenSet, ...launchHistoryPaths, ...compactPipelinePaths]), {
+  const workerStacks = useMemo(() => groupWorkerStacks(collapsibleWorkers, deckFlows, new Set([...deckReviewerPaths, ...hiddenSet, ...launchHistoryPaths, ...compactPipelinePaths]), {
     pipelineIdOf,
     originOf: spawnerRootOf,
-  });
+  }), [collapsibleWorkers, deckFlows, deckReviewerPaths, hiddenSet, launchHistoryPaths, compactPipelinePaths, pipelineIdOf, spawnerRootOf]);
   const listAvailable = catalogKnown || historyRows.length > 0;
   /* A landing from the resolver outranks the saved preference for as long as it
      stands (see `openedConversation`). It cannot conjure a surface that has
@@ -2006,17 +2042,17 @@ function ProjectDashboardView({
             <MobileFocusView
               project={project}
               projectName={projectName}
-              groups={hasNodes ? schemeGroups : archiveGroups}
-              manual={hasNodes ? schemeManual : []}
+              groups={layoutGroups}
+              manual={layoutManual}
               files={files}
               flows={flows}
               reviewGroups={directReviewGroups}
               pipelines={pipelines}
               surfacePipelines={activePipelines}
               workerStacks={workerStacks}
-              tasks={hasNodes ? boardTasks : []}
+              tasks={hasNodes ? boardTasks : EMPTY_TASKS}
               sheetTasks={projectTasks}
-              drafts={hasNodes ? visibleDrafts : []}
+              drafts={layoutDrafts}
               favorites={favoriteIdSet}
               isolatedManualPaths={isolatedCompactHistoryPaths}
               loaded={loaded}
@@ -2070,18 +2106,18 @@ function ProjectDashboardView({
             ) : projectView === "scheme" && schemeAvailable ? (
               <SchemeBoard
                 project={project}
-                groups={hasNodes ? schemeGroups : archiveGroups}
-                manual={hasNodes ? schemeManual : []}
+                groups={layoutGroups}
+                manual={layoutManual}
                 files={files}
                 flows={flows}
                 reviewGroups={directReviewGroups}
                 pipelines={pipelines}
                 surfacePipelines={activePipelines}
                 now={nowSeconds}
-                tasks={hasNodes ? boardTasks : []}
+                tasks={hasNodes ? boardTasks : EMPTY_TASKS}
                 allTasks={projectTasks}
                 workerStacks={workerStacks}
-                drafts={hasNodes ? visibleDrafts : []}
+                drafts={layoutDrafts}
                 favorites={favoriteIdSet}
                 isolatedManualPaths={isolatedCompactHistoryPaths}
                 focus={highlight}
