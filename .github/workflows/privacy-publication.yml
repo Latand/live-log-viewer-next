@@ -51,10 +51,20 @@ jobs:
         working-directory: trusted
         run: bun install --frozen-lockfile
 
+      # A stalled apt mirror hung this step for 20+ minutes three times on
+      # 2026-09-02 (#1456): fail fast with a hard timeout and one retry.
       - name: Install media inspection tools
+        timeout-minutes: 4
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes ffmpeg tesseract-ocr tesseract-ocr-eng tesseract-ocr-ukr
+          APT_OPTS='-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30'
+          for attempt in 1 2; do
+            if sudo apt-get $APT_OPTS update \
+              && sudo apt-get $APT_OPTS install --yes ffmpeg tesseract-ocr tesseract-ocr-eng tesseract-ocr-ukr; then
+              exit 0
+            fi
+            echo "apt install attempt $attempt failed"
+          done
+          exit 1
 
       - name: Verify privacy gate behavior
         working-directory: trusted
