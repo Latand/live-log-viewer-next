@@ -46,10 +46,10 @@
   "queued-mobile-390": {
     "scrollWidth": 390,
     "viewportWidth": 390,
-    "feedHeight": 653,
+    "feedHeight": 706,
     "composerHeight": 105,
     "controlStrip": false,
-    "mobileDetailsToggle": true,
+    "mobileDetailsToggle": false,
     "textarea": true,
     "launchChips": true,
     "outbox": false
@@ -57,10 +57,10 @@
   "pre-transcript-prompt-mobile-390": {
     "scrollWidth": 390,
     "viewportWidth": 390,
-    "feedHeight": 653,
+    "feedHeight": 706,
     "composerHeight": 105,
     "controlStrip": false,
-    "mobileDetailsToggle": true,
+    "mobileDetailsToggle": false,
     "textarea": true,
     "launchChips": true,
     "outbox": true
@@ -68,10 +68,10 @@
   "delivering-mobile-390": {
     "scrollWidth": 390,
     "viewportWidth": 390,
-    "feedHeight": 653,
+    "feedHeight": 706,
     "composerHeight": 105,
     "controlStrip": false,
-    "mobileDetailsToggle": true,
+    "mobileDetailsToggle": false,
     "textarea": true,
     "launchChips": true,
     "outbox": true
@@ -79,10 +79,10 @@
   "live-mobile-390": {
     "scrollWidth": 390,
     "viewportWidth": 390,
-    "feedHeight": 653,
+    "feedHeight": 706,
     "composerHeight": 105,
     "controlStrip": false,
-    "mobileDetailsToggle": true,
+    "mobileDetailsToggle": false,
     "textarea": true,
     "launchChips": true,
     "outbox": false
