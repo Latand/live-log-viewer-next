@@ -135,12 +135,33 @@ export function planAgentChimes(
  * deep-link request can hydrate an entry this tab has never observed; that
  * entry seeds the retained history silently. Previously tracked conversations
  * still announce a real lifecycle transition during the same request.
+ *
+ * `certified` is the payload's own claim to `scope`. A scope still loading is
+ * answered by the last certified representation re-labelled for it (#1432);
+ * that stand-in holds nothing this tab has not already scanned, and scanning
+ * it under the pending scope would make that scope the baseline, so the
+ * pinned answer's hydrated rows would ring as transitions. An uncertified
+ * payload is therefore a no-op: the baseline stays with the scope that
+ * actually produced it, `null` when nothing certified has been scanned yet.
  */
 export function planScopedAgentChimes(
   files: readonly FileEntry[],
   previous: ScopedChimePlan | null,
   scope: string,
-): ScopedChimePlan {
+): ScopedChimePlan;
+export function planScopedAgentChimes(
+  files: readonly FileEntry[],
+  previous: ScopedChimePlan | null,
+  scope: string,
+  certified: boolean,
+): ScopedChimePlan | null;
+export function planScopedAgentChimes(
+  files: readonly FileEntry[],
+  previous: ScopedChimePlan | null,
+  scope: string,
+  certified = true,
+): ScopedChimePlan | null {
+  if (!certified) return previous;
   const plan = planAgentChimes(
     files,
     previous?.tracked ?? null,
@@ -165,17 +186,21 @@ export function planScopedAgentChimes(
  * happened BECAUSE the transcript changed, so its mtime names that transition
  * and stays the same value across every refetch and re-render that observes it —
  * where a call-time timestamp would make each observation look like a new event.
+ *
+ * `certified` says whether `files` is the answer of a request for `scope` or a
+ * stand-in served while that request is still loading (#1432); a stand-in is
+ * not scanned, see {@link planScopedAgentChimes}.
  */
-export function useAgentChimes(files: FileEntry[], scope: string | null) {
+export function useAgentChimes(files: FileEntry[], scope: string | null, certified = true) {
   const historyRef = useRef<ScopedChimePlan | null>(null);
 
   useEffect(() => unlockAudioOnGesture(), []);
 
   useEffect(() => {
     if (!files.length || !scope) return;
-    const plan = planScopedAgentChimes(files, historyRef.current, scope);
+    const plan = planScopedAgentChimes(files, historyRef.current, scope, certified);
     historyRef.current = plan;
-    if (!plan.chimes.length) return;
+    if (!plan?.chimes.length) return;
     const changedAt = new Map(files.map((file) => [conversationIdentity(file), file.mtime]));
     plan.chimes.forEach((planned, voice) => {
       const cue = CUE_OF_LIFECYCLE[planned.kind];
@@ -186,5 +211,5 @@ export function useAgentChimes(files: FileEntry[], scope: string | null) {
         delayMs: voice * STAGGER_MS,
       });
     });
-  }, [files, scope]);
+  }, [files, scope, certified]);
 }

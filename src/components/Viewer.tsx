@@ -183,7 +183,10 @@ export function Viewer() {
   /* This tab's optimistic flow closes apply before anything renders: the X
      on a flow strip clears the reviewer side of the scheme instantly. */
   const flows = useEffectiveFlows(polledFlows);
-  useAgentChimes(files, requestScope);
+  /* A stand-in served for a scope still loading (#1432) is not scanned for
+     chimes: it is the last certified payload under a new label, and scanning
+     it would let the pinned answer's hydrated rows ring instead of seeding. */
+  useAgentChimes(files, requestScope, scopeCertified);
   const { archivedProjects, archiveProject, unarchiveProject } = useArchivedProjects(files, projectAliases);
   const catalogProjects = useMemo(() => new Set(projectCatalog.map((entry) => entry.project)), [projectCatalog]);
   const catalogConversationCounts = useMemo(
