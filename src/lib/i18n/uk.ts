@@ -2398,4 +2398,9 @@ export const uk: Record<keyof typeof en, Message> = {
   "mobile2.host.hidden": "Приховані",
   "mobile2.host.quiet": { one: "{count} тиха розмова", few: "{count} тихі розмови", many: "{count} тихих розмов", other: "{count} тихих розмов" },
   "mobile2.host.catalog": "каталог",
+  "mobile2.host.connected": "з’єднано",
+  "mobile2.host.degraded": "з перебоями",
+  "mobile2.host.offline": "офлайн",
+  "mobile2.board.tellOrchestrator": "Скажіть оркестратору…",
+  "mobile2.board.tellOrchestratorLabel": "Скажіть оркестратору, що треба зробити",
 };

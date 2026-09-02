@@ -123,6 +123,16 @@ test("the sheet names the runtime, its background processes and their PIDs", () 
   expect(closed).toBe(1);
 });
 
+test("the runtime badge speaks the phone's vocabulary: connected, never the desktop's «live»", () => {
+  /* README §4.1 and §10 P2-11: the phone fixed one runtime vocabulary —
+     connected / degraded / offline — and «live» is not a word in it. */
+  const connected = q(mount({ runtime: "live" }), '[data-connection="live"]')!;
+  expect(connected.textContent).toBe(translate("en", "mobile2.host.connected"));
+  expect(connected.textContent).not.toBe(translate("en", "runtime.live"));
+  expect(q(mount({ runtime: "offline" }), '[data-connection="offline"]')!.textContent)
+    .toBe(translate("en", "mobile2.host.offline"));
+});
+
 test("Kill acts on the tap that names it — no arm step — and answers with a receipt", async () => {
   const root = mount();
   const kill = q(root, '[data-mobile2-kill="/repo/next-dev.log"]')!;

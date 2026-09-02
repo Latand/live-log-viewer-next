@@ -2471,4 +2471,9 @@ export const en = {
   "mobile2.host.hidden": "Hidden",
   "mobile2.host.quiet": { one: "{count} quiet conversation", other: "{count} quiet conversations" },
   "mobile2.host.catalog": "catalog",
+  "mobile2.host.connected": "connected",
+  "mobile2.host.degraded": "degraded",
+  "mobile2.host.offline": "offline",
+  "mobile2.board.tellOrchestrator": "Tell the orchestrator…",
+  "mobile2.board.tellOrchestratorLabel": "Tell the orchestrator what should get done",
 } satisfies Dictionary;

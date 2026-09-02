@@ -45,6 +45,7 @@ const { ProjectDashboard } = await import("@/components/ProjectDashboard");
 const { MobileSheet } = await import("@/components/mobile/MobileSheet");
 const { getMobileNav, topScreen } = await import("@/components/mobile/mobileNav");
 const { receipts } = await import("@/components/mobile/MobileReceipt");
+const { resetOrchestratorSeatCacheForTests } = await import("@/components/orchestrator/useOrchestratorSeat");
 type MobileShellHost = NonNullable<React.ComponentProps<typeof ProjectDashboard>["mobileShell"]>;
 
 const dom = new Window({ url: "http://localhost/", width: 390, height: 844 });
@@ -102,13 +103,17 @@ const OVERRIDES: Record<string, unknown> = {
       return jsonResponse({ board: boardState() });
     }
     if (url.startsWith("/api/conversations")) return jsonResponse({ items: [], nextCursor: null });
-    /* No orchestrator seat in this project: the board's seat slot invites one
-       and no row is filtered out of the sections. */
-    if (url.startsWith("/api/orchestrator/seat")) return jsonResponse({ seat: null, pending: null, exists: true });
+    /* No orchestrator seat in this project by default: the board's seat slot
+       invites one and no row is filtered out of the sections. A test that needs
+       the footer seats one first. */
+    if (url.startsWith("/api/orchestrator/seat")) return jsonResponse({ seat: seatAnswer, pending: null, exists: true });
     if (url.startsWith("/api/limits")) return { ok: false, status: 503, json: async () => ({}), text: async () => "" };
     return jsonResponse({});
   }) as unknown as typeof fetch,
 };
+/** The project's seat, as `/api/orchestrator/seat` answers it; null by default. */
+let seatAnswer: Record<string, unknown> | null = null;
+
 const HAS: Record<string, boolean> = {};
 const SAVED: Record<string, unknown> = {};
 
@@ -226,6 +231,10 @@ beforeEach(() => {
   dom.location.hash = "#p=" + encodeURIComponent(PROJECT);
   getMobileNav().home();
   receipts.dismiss();
+  seatAnswer = null;
+  /* The seat read is cached per project for the whole module (#1149), so a
+     test that seats one has to start from an unanswered cache. */
+  resetOrchestratorSeatCacheForTests();
 });
 afterEach(async () => { for (const root of roots) flushSync(() => root.unmount()); roots = []; receipts.dismiss(); await settle(); });
 
@@ -320,4 +329,33 @@ test("opening a board row stamps the card seen (#1244) and pushes the conversati
   click(q(root, "[data-mobile2-back]"));
   await settle();
   expect(await waitFor(() => board(root) !== null)).toBe(true);
+});
+
+test("the board's footer lands the operator in the orchestrator's conversation, and shows only with a seat", async () => {
+  /* README §4.1 and §7 Q2: one 44 px target, one tap to the orchestrator. It
+     never sends from the board — the reply is written in the conversation. */
+  const root = mount();
+  expect(await waitFor(() => board(root) !== null)).toBe(true);
+  expect(q(root, "[data-mobile2-board-dock]")).toBeNull();
+
+  seatAnswer = {
+    project: PROJECT, seatEpoch: 1, conversationId: "conversation_atlas_orchestrator", path: running.path,
+    mandate: "Run the atlas board.", state: "active", designatedAt: "2100-01-02T13:00:00.000Z",
+    intent: { clientRequestId: "seat-atlas-1", mode: "existing", launchId: null, error: null },
+  };
+  resetOrchestratorSeatCacheForTests();
+  const seated = mount();
+  expect(await waitFor(() => q(seated, "[data-mobile2-board-dock]") !== null)).toBe(true);
+  const dock = q(seated, "[data-mobile2-board-dock]")!;
+  expect(dock.textContent).toContain(translate("en", "mobile2.board.tellOrchestrator"));
+  expect(dock.getAttribute("aria-label")).toBe(translate("en", "mobile2.board.tellOrchestratorLabel"));
+  expect(dock.className).toContain("min-h-11");
+  /* The seat is the card above the sections, never a row inside them. */
+  expect(all(seated, '[data-mobile2-row="conversation"]').map((row) => row.getAttribute("data-mobile2-path")))
+    .not.toContain(running.path);
+
+  click(dock);
+  await settle();
+  expect(opened).toEqual([running.path]);
+  expect(topScreen(getMobileNav().getState())).toEqual({ kind: "chat", id: running.path });
 });

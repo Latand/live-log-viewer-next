@@ -526,6 +526,12 @@ function statePatch(state: ConversationState, entry: Entry, pid: number): Record
   }
 }
 
+/** The host sheet's background processes: invented commands, invented PIDs. */
+const BACKGROUND_TASKS = [
+  { file: "next-dev.log", desc: "next dev · port 8899" },
+  { file: "bun-test.log", desc: "bun test src/lib/board" },
+];
+
 const BASE_STATES: Record<string, ConversationState> = {
   orch: "working", c1: "working", c2: "waiting-question", c6: "waiting-plan", c5: "working", c9: "working", c3: "returned", c8: "returned", c4: "done",
 };
@@ -667,6 +673,19 @@ function patchFiles(body: { files?: Entry[]; pipelines?: unknown[] }, a: Answers
     if (key === "orch") entry.ctx = { usedTokens: 24_000, windowTokens: 100_000, pct: 24, source: "transcript", confidence: "reported", observedAt: "2100-01-02T14:00:00.000Z" };
     if (key === "c1") entry.ctx = { usedTokens: 142_000, windowTokens: 200_000, pct: 71, source: "transcript", confidence: "reported", observedAt: "2100-01-02T14:00:00.000Z" };
     keep.push(entry);
+  }
+  /* The parentless background processes the host sheet lists with their PIDs
+     and Kill (README §2 rule 5). They are the one thing the sheet exists for,
+     so the fixture has to carry them: a shell task is never a board row on the
+     phone, and without one `board-host` would be evidence of an empty state.
+     Invented names and PIDs; nothing here points at a real process. */
+  for (const [i, task] of BACKGROUND_TASKS.entries()) {
+    keep.push({
+      path: path.posix.join(a.repoDir, task.file), root: "claude-tasks", name: task.file, project: a.discovered.projectId,
+      title: task.desc, cmdDesc: task.desc, engine: "shell", kind: "background", fmt: "plain", parent: null,
+      mtime: CAPTURE_S - (i + 1) * 240, size: 512, activity: "live", proc: "running", pid: 41_820 + i * 85,
+      model: null, pendingQuestion: null, waitingInput: null,
+    } as unknown as Entry);
   }
   body.files = keep;
   body.pipelines = pipelinesAnswer(a);

@@ -51,7 +51,7 @@ import { clearWorkflowDraftStorage } from "./workflows/WorkflowDraftPane";
 import { dropLegacyWorkflowDrafts, isWorkflowDraftId } from "./workflows/workflowModel";
 import { TaskPanel } from "./tasks/TaskPanel";
 import { pushTaskToast, TaskToastHost } from "./tasks/taskToast";
-import { MobileBoard, mobileBoardOf } from "./mobile/MobileBoard";
+import { MobileBoard, MobileBoardDock, mobileBoardOf } from "./mobile/MobileBoard";
 import { MobileFocusView } from "./mobile/MobileFocusView";
 import { MobileHostSheet } from "./mobile/MobileHostSheet";
 import { MobileOrchestratorRow } from "./mobile/MobileOrchestratorRow";
@@ -1645,11 +1645,17 @@ function ProjectDashboardView({
     now: nowSeconds,
   };
   const mobileBoardModel = isMobile ? mobileBoardOf(mobileBoardProps) : null;
+  /* The phone's board is the leaf when the scheme is this project's view and no
+     conversation sits on top of the stack; the footer and the presence slice
+     both hang off that one answer. */
+  const mobileBoardLeaf = isMobile && projectView === "scheme" && schemeAvailable && mobileConversationKey === null;
+  /* The seat's own transcript, for the footer that opens it. */
+  const seatFile = seatPath ? files.find((file) => file.path === seatPath) ?? null : null;
   /* Which conversations the phone board is showing, in the order it shows them,
      as a signature so the presence effect below compares BY VALUE — a fresh
      array every render would re-report the same view on every poll. Null
      whenever the board is not the leaf. */
-  const mobileBoardSignature = mobileBoardModel && mobileConversationKey === null && projectView === "scheme" && schemeAvailable
+  const mobileBoardSignature = mobileBoardModel && mobileBoardLeaf
     ? [
       ...mobileBoardModel.needsYou.flatMap((item) => (item.kind === "conversation" ? [item.path] : [])),
       ...mobileBoardModel.working.map((row) => row.path),
@@ -2037,11 +2043,16 @@ function ProjectDashboardView({
             onOpenSearch={onOpenSearch}
             searchTestId="dash-search"
             renderSheet={renderMobileSheet}
+            /* The board's footer (README §4.1): one tap into the orchestrator's
+               conversation, where the operator writes. It belongs to the board
+               leaf only, and only while there is a seat to talk to — the
+               invitation the absent seat shows is the seat card's to define. */
+            dock={mobileBoardLeaf && boardReady && seatFile ? <MobileBoardDock onTell={() => openBoardRow(seatFile)} /> : undefined}
           >
             {pipelinesAlert}
               {!boardReady ? (
                 catalogFailures > 0 ? <CatalogFailureNotice failures={catalogFailures} className="mt-[12vh]" /> : <SchemeSkeleton />
-              ) : projectView === "scheme" && schemeAvailable && mobileConversationKey === null ? (
+              ) : mobileBoardLeaf ? (
                 <MobileBoard
                   {...mobileBoardProps}
                   catalogCount={catalogConversationCount}

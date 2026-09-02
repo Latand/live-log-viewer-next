@@ -22,6 +22,17 @@ import { showReceipt } from "./MobileReceipt";
  * carries none; a failure says so on the row instead of pretending.
  */
 
+/* The runtime row reads «connected · updates stream», «degraded · polling
+   every 10 s» or «offline · reconnecting» (README §4.1). The badge is the
+   phone's own word for the state, not the desktop's `runtime.*` label: the
+   design fixed one runtime vocabulary — connected / degraded / offline — and
+   the desktop's «live» is not in it (README §10, P2-11). */
+const RUNTIME_BADGE: Record<ConnectionState, MessageKey> = {
+  live: "mobile2.host.connected",
+  reconnecting: "mobile2.host.offline",
+  degraded: "mobile2.host.degraded",
+  offline: "mobile2.host.offline",
+};
 /** What the runtime row says beside its badge. */
 const RUNTIME_WORD: Record<ConnectionState, MessageKey> = {
   live: "mobile2.host.runtimeLive",
@@ -130,7 +141,7 @@ export function MobileHostSheet({
       {leading ? <div className="px-4 pb-1">{leading}</div> : null}
       <Row label={t("mobile2.host.runtime")}>
         <span className={`inline-flex h-5 shrink-0 items-center rounded-full px-[7px] text-caption font-semibold leading-none ${RUNTIME_TONE[runtime]}`} data-connection={runtime}>
-          {t(`runtime.${runtime}`)}
+          {t(RUNTIME_BADGE[runtime])}
         </span>
         <span className="truncate">{t(RUNTIME_WORD[runtime])}</span>
       </Row>

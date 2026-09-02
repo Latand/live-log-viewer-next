@@ -1,6 +1,7 @@
 "use client";
 
-import { ChevronRight, Command, Crown, MessageCircle, Sparkle } from "@/components/icons";
+import { ChevronRight, Command, Crown, MessageCircle, Mic, Sparkle } from "@/components/icons";
+import { Bot } from "lucide-react";
 import { useLocale, type TFunction } from "@/lib/i18n";
 import type { Pipeline } from "@/lib/pipelines/types";
 import type { FileEntry } from "@/lib/types";
@@ -280,6 +281,38 @@ export function mobileBoardOf(props: MobileBoardData): MobileBoardModel {
     crowned: props.crowned,
     now: props.now,
   });
+}
+
+/**
+ * The board's footer (README §4.1, §7 Q2): one 44 px target that lands the
+ * operator in the orchestrator's conversation with something to say. It never
+ * sends from the board — the reply is written in the conversation — so the mark
+ * and the mic are one button's parts, not controls of their own.
+ *
+ * Rendered only when the seat is live; the no-seat invitation ("Create an
+ * orchestrator to talk to…") belongs to the seat card lane, which owns what the
+ * absent seat looks like everywhere else too.
+ */
+export function MobileBoardDock({ onTell }: { onTell: () => void }) {
+  const { t } = useLocale();
+  return (
+    <button
+      type="button"
+      data-mobile2-board-dock
+      data-mobile2-go="chat"
+      aria-label={t("mobile2.board.tellOrchestratorLabel")}
+      className="flex min-h-11 w-full items-center gap-2 rounded-full border border-border bg-sunken pl-2 pr-1.5 text-left text-body text-muted active:bg-card focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/40"
+      onClick={onTell}
+    >
+      <span aria-hidden className="grid h-7 w-7 shrink-0 place-items-center rounded-full bg-accent-soft text-accent">
+        <Bot className="h-[15px] w-[15px]" />
+      </span>
+      <span className="min-w-0 flex-1 truncate">{t("mobile2.board.tellOrchestrator")}</span>
+      <span aria-hidden className="grid h-8 w-8 shrink-0 place-items-center text-secondary">
+        <Mic className="h-[17px] w-[17px]" />
+      </span>
+    </button>
+  );
 }
 
 export function MobileBoard(props: MobileBoardProps) {
