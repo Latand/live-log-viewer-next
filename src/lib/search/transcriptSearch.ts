@@ -89,17 +89,39 @@ type FileIdentityRow = {
   engine: string;
 };
 
-type SearchRow = {
-  snippet: string;
-  speaker: TranscriptSpeaker;
-  duplicate_count: number;
-  timestamp: number | null;
-  transcript_path: string;
-  byte_offset: number;
-  line_number: number;
+/** One matched message as the ranking pass reads it: `values()` tuples,
+    because a common word matches a third of the corpus and the objects would
+    cost more than the query. */
+type HitRow = [
+  id: number,
+  score: number,
+  speaker: TranscriptSpeaker,
+  bodyHash: string,
+  timestamp: number | null,
+  transcriptPath: string,
+];
+
+type TranscriptFileRow = {
   project: string;
   engine: "claude" | "codex";
+  mtime_ms: number;
 };
+
+interface RankedHit {
+  id: number;
+  score: number;
+  speaker: TranscriptSpeaker;
+  timestamp: number | null;
+  transcriptPath: string;
+  mtimeMs: number;
+}
+
+/** One result row: the newest occurrence of a body, and how many the index
+    holds for that speaker. */
+interface CollapsedHit {
+  newest: RankedHit;
+  duplicateCount: number;
+}
 
 function sqliteDatabase(): typeof import("bun:sqlite").Database {
   const sqlite = process.getBuiltinModule?.("bun:sqlite") as typeof import("bun:sqlite") | undefined;
@@ -517,16 +539,123 @@ function decodeCursor(value: string | null | undefined, scope: string): number {
 }
 
 function corpusStats(db: Database): TranscriptCorpusStats {
-  const conversations = db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM transcript_files").get()?.count ?? 0;
-  const messages = db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM transcript_messages").get()?.count ?? 0;
+  /* Every transcript's `messages_count` is committed with its rows, so one
+     pass over the files table answers exactly what `COUNT(*)` over the message
+     table did — minus the ~12 ms that walk cost every search, one-hit searches
+     included. */
+  const row = db.query<{ conversations: number; messages: number | null }, []>(
+    "SELECT COUNT(*) AS conversations, SUM(messages_count) AS messages FROM transcript_files",
+  ).get();
   return {
-    conversationsIndexed: conversations,
-    messagesIndexed: messages,
+    conversationsIndexed: row?.conversations ?? 0,
+    messagesIndexed: row?.messages ?? 0,
     fieldsSearched: TRANSCRIPT_SEARCH_FIELDS,
     tokenizer: TRANSCRIPT_SEARCH_TOKENIZER,
   };
 }
 
+/* Past this many distinct transcripts, reading the whole files table once
+   (thousands of short rows) is cheaper than one keyed lookup per path. */
+const TRANSCRIPT_FILE_LOOKUP_CAP = 512;
+
+function transcriptFiles(db: Database, paths: ReadonlySet<string>): Map<string, TranscriptFileRow> {
+  const files = new Map<string, TranscriptFileRow>();
+  if (!paths.size) return files;
+  if (paths.size <= TRANSCRIPT_FILE_LOOKUP_CAP) {
+    const lookup = db.query<TranscriptFileRow, [string]>(
+      "SELECT project, engine, mtime_ms FROM transcript_files WHERE path = ?",
+    );
+    for (const pathname of paths) {
+      const file = lookup.get(pathname);
+      if (file) files.set(pathname, file);
+    }
+    return files;
+  }
+  const rows = db.query("SELECT path, project, engine, mtime_ms FROM transcript_files").values() as Array<
+    [string, string, "claude" | "codex", number]
+  >;
+  for (const [pathname, project, engine, mtime_ms] of rows) {
+    if (paths.has(pathname)) files.set(pathname, { project, engine, mtime_ms });
+  }
+  return files;
+}
+
+/* Newest transcript generation first, then newest message, then highest id.
+   This order picks which occurrence represents a replayed body (a resumed
+   rollout retains the original message timestamp, so the transcript mtime is
+   what identifies the newest generation) and breaks ties between equal bm25
+   scores. */
+function newerFirst(a: RankedHit, b: RankedHit): number {
+  return b.mtimeMs - a.mtimeMs
+    || (b.timestamp ?? 0) - (a.timestamp ?? 0)
+    || b.id - a.id;
+}
+
+/* bm25 is negative and lower is better, so ascending score is best first. */
+function bestFirst(a: CollapsedHit, b: CollapsedHit): number {
+  return a.newest.score - b.newest.score || newerFirst(a.newest, b.newest);
+}
+
+function pageItems(
+  db: Database,
+  query: string,
+  page: readonly CollapsedHit[],
+  files: ReadonlyMap<string, TranscriptFileRow>,
+): TranscriptSearchItem[] {
+  if (!page.length) return [];
+  const ids = page.map((group) => group.newest.id);
+  /* `+rowid` keeps FTS5 from turning the id list into one doclist seek per row,
+     which on a common term costs ~14 ms EACH; an ordinary match scan filtered
+     in place is a fraction of that, and `snippet` runs only for the rows that
+     pass the filter. */
+  const snippets = new Map<number, string>();
+  const snippetRows = db.query(`
+    SELECT rowid, snippet(transcript_messages_fts, 0, '${SNIPPET_MATCH_OPEN}', '${SNIPPET_MATCH_CLOSE}', '…', 24)
+    FROM transcript_messages_fts
+    WHERE transcript_messages_fts MATCH ? AND +rowid IN (${ids.map(() => "?").join(", ")})
+  `).values(query, ...ids) as Array<[number, string]>;
+  for (const [id, snippet] of snippetRows) snippets.set(id, snippet);
+  const location = db.query<{ byte_offset: number; line_number: number }, [number]>(
+    "SELECT byte_offset, line_number FROM transcript_messages WHERE id = ?",
+  );
+  return page.map(({ newest, duplicateCount }) => {
+    const where = location.get(newest.id);
+    const file = files.get(newest.transcriptPath);
+    if (!where || !file) throw new Error("transcript search page row vanished within its read snapshot");
+    return {
+      snippet: snippets.get(newest.id) ?? "",
+      speaker: newest.speaker,
+      duplicateCount,
+      timestamp: newest.timestamp,
+      transcriptPath: newest.transcriptPath,
+      byteOffset: where.byte_offset,
+      lineNumber: where.line_number,
+      project: file.project,
+      engine: file.engine,
+    };
+  });
+}
+
+/**
+ * Ranking happens here rather than in SQL, and on purpose (#1429).
+ *
+ * The previous shape — a window function over the joined match set to collapse
+ * duplicates, a second `COUNT(*)` over the same join for the total, and a
+ * re-scan of the match set to attach snippets — cost, on a 250k-message index,
+ * 1.5 s for a word in a third of the messages and 0.4 s for the operator's own
+ * messages alone, most of it in one place: the join to `transcript_files` by
+ * path, ~5 µs for every one of a hundred thousand matched rows, paid twice.
+ *
+ * Now one match scan reads the six columns ranking needs; the files a page can
+ * name are read once; duplicate collapsing, the total and the page order are
+ * computed in memory in exactly the order the SQL used (bm25, then newest
+ * transcript, newest message, highest id); and snippets are cut for the page's
+ * rows only. Same rows, same order, same snippets, same totals — pinned by the
+ * differential test against the old SQL — at roughly a third of the time.
+ *
+ * All of it runs inside one read transaction, so the passes see one snapshot
+ * even while the background indexer commits between them.
+ */
 export function searchTranscripts(options: {
   query: string;
   project?: string;
@@ -537,88 +666,52 @@ export function searchTranscripts(options: {
 }): TranscriptSearchResult {
   const db = openQueryDatabase();
   try {
-    const query = ftsQuery(options.query);
-    const stats = corpusStats(db);
-    if (!query) return { items: [], nextCursor: null, total: 0, stats };
-    const limit = Math.max(1, Math.min(100, Math.floor(options.limit ?? 20)));
-    const scope = cursorScope(query, options.project, options.speaker);
-    const offset = decodeCursor(options.cursor, scope);
-    /* Filter clause and bindings are built from one list so the two queries
-       below can never disagree about parameter order. */
-    const filters: Array<{ clause: string; binding: string }> = [];
-    if (options.project) filters.push({ clause: " AND f.project = ?", binding: options.project });
-    if (options.speaker) filters.push({ clause: " AND m.speaker = ?", binding: options.speaker });
-    const where = filters.map((filter) => filter.clause).join("");
-    const bindings = [query, ...filters.map((filter) => filter.binding)];
-    const total = (db.query(`
-      SELECT COUNT(*) AS count
-      FROM (
-        SELECT m.speaker, m.body_hash
+    db.exec("BEGIN");
+    try {
+      const query = ftsQuery(options.query);
+      const stats = corpusStats(db);
+      if (!query) return { items: [], nextCursor: null, total: 0, stats };
+      const limit = Math.max(1, Math.min(100, Math.floor(options.limit ?? 20)));
+      const scope = cursorScope(query, options.project, options.speaker);
+      const offset = decodeCursor(options.cursor, scope);
+      const hits = db.query(`
+        SELECT transcript_messages_fts.rowid, bm25(transcript_messages_fts), m.speaker, m.body_hash, m.timestamp, m.transcript_path
         FROM transcript_messages_fts
         JOIN transcript_messages AS m ON m.id = transcript_messages_fts.rowid
-        JOIN transcript_files AS f ON f.path = m.transcript_path
-        WHERE transcript_messages_fts MATCH ?${where}
-        GROUP BY m.speaker, m.body_hash
-      ) AS collapsed
-    `).get(...bindings) as { count: number } | null)?.count ?? 0;
-    const rows = db.query(`
-      WITH ranked AS (
-        SELECT
-          m.id,
-          m.speaker,
-          m.timestamp,
-          m.transcript_path,
-          m.byte_offset,
-          m.line_number,
-          f.project,
-          f.engine,
-          f.mtime_ms,
-          COUNT(*) OVER (PARTITION BY m.speaker, m.body_hash) AS duplicate_count,
-          ROW_NUMBER() OVER (
-            PARTITION BY m.speaker, m.body_hash
-            /* Replayed records retain their original message timestamp. The
-               transcript mtime identifies the newest rollout generation. */
-            ORDER BY f.mtime_ms DESC, COALESCE(m.timestamp, 0) DESC, m.id DESC
-          ) AS duplicate_rank
-        FROM transcript_messages_fts
-        JOIN transcript_messages AS m ON m.id = transcript_messages_fts.rowid
-        JOIN transcript_files AS f ON f.path = m.transcript_path
-        WHERE transcript_messages_fts MATCH ?${where}
-      )
-      SELECT
-        snippet(transcript_messages_fts, 0, '${SNIPPET_MATCH_OPEN}', '${SNIPPET_MATCH_CLOSE}', '…', 24) AS snippet,
-        ranked.speaker,
-        ranked.duplicate_count,
-        ranked.timestamp,
-        ranked.transcript_path,
-        ranked.byte_offset,
-        ranked.line_number,
-        ranked.project,
-        ranked.engine
-      FROM ranked
-      JOIN transcript_messages_fts ON transcript_messages_fts.rowid = ranked.id
-      WHERE ranked.duplicate_rank = 1 AND transcript_messages_fts MATCH ?
-      ORDER BY bm25(transcript_messages_fts), ranked.mtime_ms DESC,
-        COALESCE(ranked.timestamp, 0) DESC, ranked.id DESC
-      LIMIT ? OFFSET ?
-    `).all(...bindings, query, limit, offset) as SearchRow[];
-    const nextOffset = offset + rows.length;
-    return {
-      items: rows.map((row) => ({
-        snippet: row.snippet,
-        speaker: row.speaker,
-        duplicateCount: row.duplicate_count,
-        timestamp: row.timestamp,
-        transcriptPath: row.transcript_path,
-        byteOffset: row.byte_offset,
-        lineNumber: row.line_number,
-        project: row.project,
-        engine: row.engine,
-      })),
-      nextCursor: nextOffset < total ? encodeCursor(nextOffset, scope) : null,
-      total,
-      stats,
-    };
+        WHERE transcript_messages_fts MATCH ?${options.speaker ? " AND m.speaker = ?" : ""}
+      `).values(...(options.speaker ? [query, options.speaker] : [query])) as HitRow[];
+      const paths = new Set<string>();
+      for (const hit of hits) paths.add(hit[5]);
+      const files = transcriptFiles(db, paths);
+      const groups = new Map<string, CollapsedHit>();
+      for (const [id, score, speaker, bodyHash, timestamp, transcriptPath] of hits) {
+        const file = files.get(transcriptPath);
+        /* A message whose transcript row is gone, or outside the requested
+           project, is not a result — the inner join used to drop it. */
+        if (!file || (options.project && file.project !== options.project)) continue;
+        const hit: RankedHit = { id, score, speaker, timestamp, transcriptPath, mtimeMs: file.mtime_ms };
+        const key = `${speaker}\0${bodyHash}`;
+        const group = groups.get(key);
+        if (!group) {
+          groups.set(key, { newest: hit, duplicateCount: 1 });
+          continue;
+        }
+        group.duplicateCount += 1;
+        if (newerFirst(hit, group.newest) < 0) group.newest = hit;
+      }
+      const ranked = [...groups.values()].sort(bestFirst);
+      const total = ranked.length;
+      const items = pageItems(db, query, ranked.slice(offset, offset + limit), files);
+      const nextOffset = offset + items.length;
+      return {
+        items,
+        nextCursor: nextOffset < total ? encodeCursor(nextOffset, scope) : null,
+        total,
+        stats,
+      };
+    } finally {
+      db.exec("COMMIT");
+    }
   } finally {
     db.close();
   }

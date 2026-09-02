@@ -5,12 +5,13 @@ import os from "node:os";
 import path from "node:path";
 
 import { statePath } from "@/lib/configDir";
-import { snippetSegments } from "./snippet";
+import { SNIPPET_MATCH_CLOSE, SNIPPET_MATCH_OPEN, snippetSegments } from "./snippet";
 import {
   indexTranscriptSources,
   InvalidTranscriptSearchCursorError,
   searchTranscripts,
   type TranscriptIndexSource,
+  type TranscriptSearchItem,
 } from "./transcriptSearch";
 
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-transcript-search-"));
@@ -533,4 +534,198 @@ test("snippets mark matched terms with sentinels a message body cannot contain",
   expect(snippet).toContain("rows[0]");
   expect(snippetSegments(snippet).filter((segment) => segment.match))
     .toEqual([{ text: "cobalt", match: true }]);
+});
+
+/* The SQL `searchTranscripts` ran before #1429 — two queries over the joined
+   match set, window functions for the duplicate collapse — kept here verbatim
+   as the oracle for the in-memory ranking that replaced it: same rows, same
+   order, same snippets, same duplicate counts, same totals. */
+function legacySearch(
+  db: Database,
+  rawQuery: string,
+  speaker?: "user" | "assistant",
+  project?: string,
+): { total: number; items: Omit<TranscriptSearchItem, never>[] } {
+  const query = rawQuery.trim().split(/\s+/).filter(Boolean)
+    .map((term) => `"${term.replaceAll('"', '""')}"`).join(" AND ");
+  const filters: Array<{ clause: string; binding: string }> = [];
+  if (project) filters.push({ clause: " AND f.project = ?", binding: project });
+  if (speaker) filters.push({ clause: " AND m.speaker = ?", binding: speaker });
+  const where = filters.map((filter) => filter.clause).join("");
+  const bindings = [query, ...filters.map((filter) => filter.binding)];
+  const total = (db.query(`
+    SELECT COUNT(*) AS count
+    FROM (
+      SELECT m.speaker, m.body_hash
+      FROM transcript_messages_fts
+      JOIN transcript_messages AS m ON m.id = transcript_messages_fts.rowid
+      JOIN transcript_files AS f ON f.path = m.transcript_path
+      WHERE transcript_messages_fts MATCH ?${where}
+      GROUP BY m.speaker, m.body_hash
+    ) AS collapsed
+  `).get(...bindings) as { count: number }).count;
+  const rows = db.query(`
+    WITH ranked AS (
+      SELECT
+        m.id, m.speaker, m.timestamp, m.transcript_path, m.byte_offset, m.line_number, f.project, f.engine, f.mtime_ms,
+        COUNT(*) OVER (PARTITION BY m.speaker, m.body_hash) AS duplicate_count,
+        ROW_NUMBER() OVER (
+          PARTITION BY m.speaker, m.body_hash
+          ORDER BY f.mtime_ms DESC, COALESCE(m.timestamp, 0) DESC, m.id DESC
+        ) AS duplicate_rank
+      FROM transcript_messages_fts
+      JOIN transcript_messages AS m ON m.id = transcript_messages_fts.rowid
+      JOIN transcript_files AS f ON f.path = m.transcript_path
+      WHERE transcript_messages_fts MATCH ?${where}
+    )
+    SELECT
+      snippet(transcript_messages_fts, 0, '${SNIPPET_MATCH_OPEN}', '${SNIPPET_MATCH_CLOSE}', '…', 24) AS snippet,
+      ranked.speaker, ranked.duplicate_count, ranked.timestamp, ranked.transcript_path,
+      ranked.byte_offset, ranked.line_number, ranked.project, ranked.engine
+    FROM ranked
+    JOIN transcript_messages_fts ON transcript_messages_fts.rowid = ranked.id
+    WHERE ranked.duplicate_rank = 1 AND transcript_messages_fts MATCH ?
+    ORDER BY bm25(transcript_messages_fts), ranked.mtime_ms DESC,
+      COALESCE(ranked.timestamp, 0) DESC, ranked.id DESC
+    LIMIT ? OFFSET ?
+  `).all(...bindings, query, 10_000, 0) as Array<{
+    snippet: string;
+    speaker: "user" | "assistant";
+    duplicate_count: number;
+    timestamp: number | null;
+    transcript_path: string;
+    byte_offset: number;
+    line_number: number;
+    project: string;
+    engine: "claude" | "codex";
+  }>;
+  return {
+    total,
+    items: rows.map((row) => ({
+      snippet: row.snippet,
+      speaker: row.speaker,
+      duplicateCount: row.duplicate_count,
+      timestamp: row.timestamp,
+      transcriptPath: row.transcript_path,
+      byteOffset: row.byte_offset,
+      lineNumber: row.line_number,
+      project: row.project,
+      engine: row.engine,
+    })),
+  };
+}
+
+function everyPage(query: string, speaker: "user" | "assistant" | undefined, project: string | undefined, limit: number) {
+  const items: TranscriptSearchItem[] = [];
+  let cursor: string | null = null;
+  let total = 0;
+  let pages = 0;
+  do {
+    const page = searchTranscripts({ query, speaker, project, limit, cursor });
+    items.push(...page.items);
+    total = page.total;
+    cursor = page.nextCursor;
+    pages += 1;
+    if (pages > 500) throw new Error("pagination did not terminate");
+  } while (cursor);
+  return { items, total };
+}
+
+test("ranks, collapses and pages exactly as the SQL it replaced", async () => {
+  /* A seeded corpus dense in the ways that exercise every tie-break: an
+     eight-word vocabulary so scores collide, bodies repeated across files with
+     whitespace variants so groups span transcripts, five distinct mtimes
+     shared by many files, some records without timestamps. */
+  let seed = 1_429;
+  const random = () => {
+    seed = (seed + 0x6d2b79f5) >>> 0;
+    let t = seed;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  const words = ["cobalt", "marigold", "saffron", "report", "ledger", "totals", "weekly", "draft"];
+  const pool: string[] = [];
+  const sources: TranscriptIndexSource[] = [];
+  for (let file = 0; file < 24; file += 1) {
+    const engine = file % 2 ? "codex" : "claude";
+    const lines: string[] = [];
+    for (let index = 0; index < 4 + (file % 9); index += 1) {
+      let body: string;
+      if (pool.length && random() < 0.35) {
+        body = pool[Math.floor(random() * pool.length)]!.replace(" ", random() < 0.5 ? "  " : "\n");
+      } else {
+        body = Array.from({ length: 1 + Math.floor(random() * 6) }, () => words[Math.floor(random() * words.length)]!).join(" ");
+        pool.push(body);
+      }
+      const speaker = index % 3 === 0 ? "user" : "assistant";
+      const timestamp = random() < 0.15
+        ? undefined
+        : new Date(Date.UTC(2026, 7, 20, 0, 0, Math.floor(random() * 3_600))).toISOString();
+      lines.push(JSON.stringify(engine === "claude"
+        ? { type: speaker, ...(timestamp ? { timestamp } : {}), message: { content: body } }
+        : {
+          type: "event_msg",
+          ...(timestamp ? { timestamp } : {}),
+          payload: { type: speaker === "user" ? "user_message" : "agent_message", message: body },
+        }));
+    }
+    const pathname = path.join(sandbox, `differential-${file}.jsonl`);
+    fs.writeFileSync(pathname, lines.join("\n") + "\n");
+    sources.push({ ...source(pathname, engine, `project-${file % 3}`), mtimeMs: 1_000 + (file % 5) * 1_000 });
+  }
+  await indexTranscriptSources(sources, { complete: true });
+
+  const db = new Database(statePath("transcript-search.sqlite"), { readonly: true, strict: true });
+  try {
+    let compared = 0;
+    let collapsed = 0;
+    for (const query of ["cobalt", "cobalt report", "ledger", "weekly totals draft"]) {
+      for (const speaker of [undefined, "user", "assistant"] as const) {
+        for (const project of [undefined, "project-1"]) {
+          const expected = legacySearch(db, query, speaker, project);
+          const actual = everyPage(query, speaker, project, 3);
+          expect(actual.total).toBe(expected.total);
+          expect(actual.items).toEqual(expected.items);
+          compared += expected.items.length;
+          collapsed += expected.items.filter((item) => item.duplicateCount > 1).length;
+        }
+      }
+    }
+    /* The pin only means something if the corpus produced the cases. */
+    expect(compared).toBeGreaterThan(100);
+    expect(collapsed).toBeGreaterThan(10);
+  } finally {
+    db.close();
+  }
+});
+
+test("equal scores order by newest transcript, then newest message, then highest id", async () => {
+  /* Two-token bodies with one hit each score identically under bm25, so only
+     the tie-break decides the order. */
+  const older = path.join(sandbox, "tie-older.jsonl");
+  const newer = path.join(sandbox, "tie-newer.jsonl");
+  fs.writeFileSync(older, JSON.stringify({
+    type: "user",
+    timestamp: "2026-08-20T10:00:00.000Z",
+    message: { content: "cobalt gamma" },
+  }) + "\n");
+  fs.writeFileSync(newer, [
+    JSON.stringify({ type: "user", timestamp: "2026-08-20T08:00:00.000Z", message: { content: "cobalt alpha" } }),
+    JSON.stringify({ type: "user", timestamp: "2026-08-20T09:00:00.000Z", message: { content: "cobalt beta" } }),
+    JSON.stringify({ type: "user", timestamp: "2026-08-20T09:00:00.000Z", message: { content: "cobalt delta" } }),
+  ].join("\n") + "\n");
+  await indexTranscriptSources([
+    { ...source(older, "claude", "ties"), mtimeMs: 1_000 },
+    { ...source(newer, "claude", "ties"), mtimeMs: 3_000 },
+  ], { complete: true });
+
+  const items = searchTranscripts({ query: "cobalt" }).items;
+
+  expect(items.map((item) => [path.basename(item.transcriptPath), item.lineNumber])).toEqual([
+    ["tie-newer.jsonl", 3],
+    ["tie-newer.jsonl", 2],
+    ["tie-newer.jsonl", 1],
+    ["tie-older.jsonl", 1],
+  ]);
 });
