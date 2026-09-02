@@ -169,7 +169,6 @@ test("a direct review group rides the phone switcher as a round deck with access
         reviewGroups={reviewGroups}
         pipelines={[]}
         surfacePipelines={[]}
-        workerStacks={[]}
         tasks={[]}
         drafts={[]}
         loaded
@@ -242,7 +241,6 @@ test("a terminal direct group rides the phone as a tappable collapsed verdict ch
         reviewGroups={reviewGroups}
         pipelines={[]}
         surfacePipelines={[]}
-        workerStacks={[]}
         tasks={[]}
         drafts={[]}
         loaded
@@ -332,7 +330,7 @@ test("an active pipeline-owned review keeps prior same-round bindings in the com
   roots.push(mount(
     <MobileFocusView
       project="demo" groups={[group]} manual={[]} files={[builder, priorReviewer, reviewer]} flows={[flow]} pipelines={[pipeline]}
-      surfacePipelines={[pipeline]} workerStacks={[]} tasks={[]} drafts={[]} loaded focus={null}
+      surfacePipelines={[pipeline]} tasks={[]} drafts={[]} loaded focus={null}
       onSelect={(file) => { selected.path = file.path; }} onClose={() => {}} onDraftClose={() => {}} onDraftSpawned={() => {}}
     />,
   ));
@@ -389,7 +387,7 @@ test("an active retry opens prior transcript history from the mobile pipeline ra
   roots.push(mount(
     <MobileFocusView
       project="demo" groups={[group]} manual={[]} files={[prior, current]} flows={[]} pipelines={[pipeline]}
-      surfacePipelines={[pipeline]} workerStacks={[]} tasks={[]} drafts={[]} loaded focus={null}
+      surfacePipelines={[pipeline]} tasks={[]} drafts={[]} loaded focus={null}
       onSelect={(file) => { selected.path = file.path; }} onClose={() => {}} onDraftClose={() => {}} onDraftSpawned={() => {}}
     />,
   ));
@@ -433,7 +431,7 @@ test("a focused deck keeps the switcher on the bar and the swipe that walks it (
   roots.push(mount(
     <MobileFocusView
       project="demo" groups={[group]} manual={[]} files={files} flows={[]} reviewGroups={reviewGroups}
-      pipelines={[]} surfacePipelines={[]} workerStacks={[]} tasks={[]} drafts={[]} loaded focus={null}
+      pipelines={[]} surfacePipelines={[]} tasks={[]} drafts={[]} loaded focus={null}
       onSelect={() => {}} onClose={() => {}} onDraftClose={() => {}} onDraftSpawned={() => {}}
     />,
   ));

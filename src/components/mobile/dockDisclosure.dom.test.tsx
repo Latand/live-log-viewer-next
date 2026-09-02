@@ -7,7 +7,6 @@ import { emptyStore } from "@/components/runtime/runtimeModel";
 import type { BranchGroup } from "@/components/projectModel";
 import type { FileEntry } from "@/lib/types";
 import type { Pipeline } from "@/lib/pipelines/types";
-import type { WorkerStack } from "@/components/scheme/workerCollapse";
 
 /*
  * Issue #156 — the focused conversation must stay the dominant mobile surface.
@@ -108,7 +107,7 @@ function entry(overrides: Partial<FileEntry> & { path: string }): FileEntry {
   };
 }
 
-function view(groups: BranchGroup[], files: FileEntry[], stacks: WorkerStack[] = []) {
+function view(groups: BranchGroup[], files: FileEntry[]) {
   return (
     <MobileFocusView
       project="demo"
@@ -118,7 +117,6 @@ function view(groups: BranchGroup[], files: FileEntry[], stacks: WorkerStack[] =
       flows={[]}
       pipelines={[pipeline]}
       surfacePipelines={[pipeline]}
-      workerStacks={stacks}
       tasks={[]}
       drafts={[]}
       loaded

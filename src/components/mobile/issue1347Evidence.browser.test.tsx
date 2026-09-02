@@ -38,9 +38,10 @@ import type { FileEntry } from "@/lib/types";
  * rotate draft's two footer actions likewise, and the row keeps the height the
  * chat-first budget reserves for it. Lane 3 took the row off the conversation
  * screen with the rest of the strip — the phone pins the seat above its board
- * leaves (`mobile-orchestrator-slot`) — so the row is measured in that slot,
- * which is the markup `ProjectDashboard` wraps it in. The keyboard-open case is
- * a live measurement and lives in `scripts/capture-issue-979-mobile-orchestrator.ts`.
+ * leaves (`mobile-orchestrator-slot`) — so the row is measured where it now
+ * lives, inside the REAL `ProjectDashboard` board leaf rather than in markup
+ * copied out of it. The keyboard-open case is a live measurement and lives in
+ * `scripts/capture-issue-979-mobile-orchestrator.ts`.
  *
  * Every measurement is written to `evidence/issue-1347-1348/geometry.json`;
  * the frames and HTML beside it are regenerated on demand and not committed.
@@ -139,7 +140,7 @@ globalThis.fetch = (async (input: RequestInfo | URL) => {
 }) as typeof fetch;
 
 const { MobileFocusView } = await import("./MobileFocusView");
-const { MobileOrchestratorRow } = await import("./MobileOrchestratorRow");
+const { ProjectDashboard } = await import("@/components/ProjectDashboard");
 const { resetOrchestratorSeatCacheForTests } = await import("../orchestrator/useOrchestratorSeat");
 const { resetOrchestratorIncumbentCacheForTests } = await import("../orchestrator/useOrchestratorIncumbent");
 
@@ -161,6 +162,29 @@ function conversation(over: Partial<FileEntry>): FileEntry {
 }
 const focused = conversation({ path: "/repo/atlas/focused.jsonl", name: "focused.jsonl", conversationId: "conversation_focused", title: LONG_TITLE, mtime: 200 });
 const orchestrator = conversation({ path: "/repo/atlas/orchestrator.jsonl", name: "orchestrator.jsonl", conversationId: "conversation_orchestrator", title: "Run the Atlas board", model: "opus", mtime: 10 });
+
+/* The phone as the Viewer wires it (`issue613Evidence` mounts the same shape):
+   the board leaf is what `ProjectDashboard` renders with no conversation on the
+   navigation stack, and the seat slot is inside it. */
+const dashboardProps = (files: FileEntry[]) => ({
+  files,
+  flows: [],
+  pipelines: [],
+  workflows: [],
+  tasks: [],
+  project: "atlas",
+  projectName: "atlas",
+  projectCwd: "/repo/atlas",
+  loaded: true,
+  openNonce: 0,
+  archived: false,
+  catalogKnown: true,
+  catalogConversationCount: files.length,
+  onArchive: () => undefined,
+  onUnarchive: () => undefined,
+  onOpenSearch: () => undefined,
+  mobileShell: { attentionCount: 0, arrival: null, renderSheet: () => null },
+});
 
 const view = (files: FileEntry[], focus: string) => (
   <MobileFocusView
@@ -349,22 +373,22 @@ async function renderFocusView(files: FileEntry[], focus: string, drive: (host: 
   return html;
 }
 
-/* The seat's pinned row, in the slot `ProjectDashboard` gives it above the
-   phone's board leaves — the markup is copied from that call site so the
-   geometry measured here is the geometry the phone renders. */
-async function renderOrchestratorRow(files: FileEntry[], drive: (host: HTMLElement) => Promise<void>): Promise<string> {
+/* The seat's pinned row where the phone actually puts it: the slot the BOARD
+   LEAF gives it, rendered by the real `ProjectDashboard` on a real phone
+   viewport. This used to render markup hand-copied from that call site, and
+   the copy had drifted onto the catalog leaf's fallback slot — a different
+   wrapper, a different width — so the geometry was the test measuring itself
+   rather than the screen an operator opens. Nothing about the row is
+   constructed here now; the product mounts it, and the drive below reaches it
+   the way a finger does. */
+async function renderBoardSeat(files: FileEntry[], drive: (host: HTMLElement) => Promise<void>): Promise<string> {
   const host = document.createElement("div");
   document.body.append(host);
   const root = createRoot(host);
-  await act(async () => {
-    root.render(
-      <div className="flex shrink-0 items-stretch border-b border-border bg-card" data-testid="mobile-orchestrator-slot">
-        <MobileOrchestratorRow project="atlas" projectName="atlas" files={files} onOpenConversation={() => undefined} />
-        <span aria-hidden className="min-w-0 flex-1" />
-      </div>,
-    );
-  });
+  await act(async () => { root.render(<ProjectDashboard {...dashboardProps(files)} />); });
   await settle();
+  /* The row is the product's, in the product's slot, on the board leaf. */
+  expect(host.querySelector("[data-testid='mobile-orchestrator-slot'] [data-orchestrator-row]")).not.toBeNull();
   await drive(host as unknown as HTMLElement);
   await settle();
   const html = host.innerHTML;
@@ -428,14 +452,14 @@ test("issues 1347 + 1348: the phone's rename editor and orchestrator controls me
 
   /* ---- #1347: the pinned row's entry point, the sheet, the rotate draft --- */
   const files = [conversation({}), orchestrator];
-  const rowHtml = await renderOrchestratorRow(files, async (host) => {
+  const rowHtml = await renderBoardSeat(files, async (host) => {
     expect(host.querySelector("[data-orchestrator-row]")?.getAttribute("data-orchestrator-row-state")).toBe("live");
   });
-  const sheetHtml = await renderOrchestratorRow(files, async (host) => {
+  const sheetHtml = await renderBoardSeat(files, async (host) => {
     await click(host, "[data-orchestrator-row-controls]");
     expect(host.querySelector("[data-orchestrator-rotate]")).not.toBeNull();
   });
-  const rotateHtml = await renderOrchestratorRow(files, async (host) => {
+  const rotateHtml = await renderBoardSeat(files, async (host) => {
     await click(host, "[data-orchestrator-row-controls]");
     await click(host, "[data-orchestrator-rotate]");
     await settle(4);

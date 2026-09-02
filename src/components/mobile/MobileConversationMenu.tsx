@@ -30,8 +30,10 @@ import { chatStateBits, type StagePosition } from "./mobileChatState";
  * card, and Kill agent in danger colour with a hint saying what it will stop.
  *
  * No row asks for confirmation (§2 rule 9, Q4). Close answers with a receipt
- * carrying Reopen; Kill answers with a receipt naming what it stopped —
- * Respawn is the composer's send slot, which lane 5 owns.
+ * carrying Reopen; Kill answers with a receipt naming what it stopped once the
+ * host has ACCEPTED it — a refusal answers on the sheet, which stays open so
+ * the escalation it unlocked is one tap away. Respawn is the composer's send
+ * slot, which lane 5 owns.
  *
  * The actions themselves are not reimplemented here: Stop, Compact, Re-check
  * and Open in terminal come from `useAgentControlActions`, and Kill from
@@ -107,6 +109,23 @@ export function MobileConversationMenu({
   const act = (run: () => void) => () => {
     onClose();
     run();
+  };
+  /* A row that TALKS TO A HOST answers with what actually came back. Closing
+     the sheet first threw the answer away: the status line below is inside
+     this sheet, and `useProcessKill`'s state unmounts with it — so a refused
+     SIGTERM still rendered «Killed …» and dropped the SIGKILL that same
+     refusal had just unlocked. Now the request is awaited with the sheet
+     open, and only a request the host ACCEPTED closes it and shows the
+     receipt; a refusal or a dead transport leaves the sheet standing with the
+     failure on it. The tap is still the whole gesture — nothing here asks for
+     confirmation (§2 rule 9, Q4), and nothing here is asked twice: every one
+     of these rows is disabled while its request is in flight. */
+  const answered = (run: () => Promise<boolean>, accepted: () => void) => () => {
+    void run().then((ok) => {
+      if (!ok) return;
+      onClose();
+      accepted();
+    });
   };
   const showPipelineRow = Boolean(onOpenPipeline) && (stage !== null || pipelineCount > 0);
   return (
@@ -213,7 +232,10 @@ export function MobileConversationMenu({
               label={t("mobile2.chat.menuStop")}
               disabled={controls.stop.state === "disabled" || actions.stopBusy}
               trailing={controls.stop.state === "disabled" ? t(controls.stop.reason) : undefined}
-              onSelect={act(actions.stop)}
+              /* Stop and Compact answer on the status line below, which is
+                 why it lives in this sheet: the sheet stays open until the
+                 interrupt — or the refusal — is back from the host. */
+              onSelect={actions.stop}
               attrs={{ "data-mobile2-menu-row": "stop" }}
             />
           )}
@@ -223,7 +245,7 @@ export function MobileConversationMenu({
               label={t("mobile2.chat.menuCompact")}
               disabled={controls.compact.state === "disabled" || actions.compactBusy}
               trailing={ctxLeft !== null ? t("mobile2.meter.left", { left: ctxLeft }) : controls.compact.state === "disabled" ? t(controls.compact.reason) : undefined}
-              onSelect={act(() => actions.compact({ immediate: true }))}
+              onSelect={() => actions.compact({ immediate: true })}
               attrs={{ "data-mobile2-menu-row": "compact" }}
             />
           )}
@@ -273,7 +295,13 @@ export function MobileConversationMenu({
             />
           ) : null}
           {actions.status ? (
-            <span role="status" className="px-4 pb-1 text-label font-semibold text-secondary">{actions.status.text}</span>
+            <span
+              role="status"
+              data-mobile2-menu-status={actions.status.kind}
+              className={`px-4 pb-1 text-label font-semibold ${actions.status.kind === "err" ? "text-danger" : "text-secondary"}`}
+            >
+              {actions.status.text}
+            </span>
           ) : null}
           <MobileSheetDivider />
           {onCloseCard ? (
@@ -295,15 +323,21 @@ export function MobileConversationMenu({
               label={t("mobile2.chat.menuKill")}
               danger
               disabled={kill.state === "disabled" || kill.busy}
-              trailing={kill.state === "disabled" ? kill.reason : killHint}
-              onSelect={act(() => {
-                kill.kill();
-                showReceipt(t("mobile2.chat.killed", { title }));
-              })}
+              /* A SIGTERM the host refused unlocks the escalation, and the row
+                 names it — the same word the desktop's armed button flips to —
+                 instead of repeating the hint of an attempt that has already
+                 failed. */
+              trailing={kill.state === "disabled" ? kill.reason : kill.force ? "SIGKILL" : killHint}
+              onSelect={answered(kill.kill, () => showReceipt(t("mobile2.chat.killed", { title })))}
               testId="mobile-menu-kill"
               attrs={{ "data-mobile2-menu-row": "kill" }}
             />
           )}
+          {/* Only a kill that was NOT accepted is still on screen to say so:
+              an accepted one has closed this sheet for its receipt. */}
+          {kill.message ? (
+            <span role="status" data-mobile2-kill-status className="px-4 pb-1 text-label font-semibold text-danger">{kill.message}</span>
+          ) : null}
         </div>
       </MobileSheet>
       {actions.attachOpen ? <AttachTerminalDialog file={file} mode={actions.attachMode} onClose={actions.closeAttach} /> : null}

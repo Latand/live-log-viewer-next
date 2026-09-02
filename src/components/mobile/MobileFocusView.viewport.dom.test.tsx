@@ -106,7 +106,7 @@ function view() {
   return (
     <MobileFocusView
       project="demo" groups={[group]} manual={[]} files={[conversation]} flows={[]}
-      pipelines={pipelines} surfacePipelines={pipelines} workerStacks={[{ key: "stack::pipe:p-run", kind: "pipeline", id: "p-run", items: [] }]} tasks={[]} drafts={[]}
+      pipelines={pipelines} surfacePipelines={pipelines} tasks={[]} drafts={[]}
       loaded focus={null} onSelect={() => {}} onClose={() => {}} onDraftClose={() => {}} onDraftSpawned={() => {}}
     />
   );

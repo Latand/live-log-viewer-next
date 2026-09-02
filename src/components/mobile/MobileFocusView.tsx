@@ -115,7 +115,12 @@ interface Props {
   pipelines: Pipeline[];
   /** Active project pipelines consumed directly by the mobile pipeline dock. */
   surfacePipelines?: Pipeline[];
-  /** Collapsed worker stacks (issue #136); kept for the layout's own use. */
+  /** Accepted and IGNORED. Nothing on this screen reads collapsed worker
+      stacks any more — issue #136's layout use is gone and `buildSchemeLayout`
+      never sees them — so the declaration survives for exactly one reason: the
+      board's call site (`ProjectDashboard.tsx`, lane 2's file) still passes
+      them, and an unknown JSX attribute is a type error there. Delete that one
+      line and this goes with it. */
   workerStacks?: WorkerStack[];
   /** Board-mounted tasks. */
   tasks: BoardTask[];
