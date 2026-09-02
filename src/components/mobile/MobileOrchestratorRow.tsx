@@ -26,7 +26,7 @@ import {
   type SeatSubmitFailure,
 } from "../orchestrator/seatState";
 import { useOrchestratorIncumbent } from "../orchestrator/useOrchestratorIncumbent";
-import { useOrchestratorSeat } from "../orchestrator/useOrchestratorSeat";
+import { useOrchestratorSeat, type OrchestratorSeatRead } from "../orchestrator/useOrchestratorSeat";
 import { useSeatConfirm } from "../orchestrator/useSeatConfirm";
 import { useSeatSurface } from "../orchestrator/useSeatSurface";
 import { MobileOrchestratorSheet, type SeatConfirmPayload, type SeatRotateFlow } from "./MobileOrchestratorSheet";
@@ -93,18 +93,27 @@ export function MobileOrchestratorRow({
   project,
   projectName,
   files,
+  seat,
   onOpenConversation,
 }: {
   project: string;
   projectName: string;
   files: readonly FileEntry[];
+  /** The parent's seat read, when it already has one. The phone board above
+      this row must know which transcript holds the seat (the seat is the card,
+      never also a row in the list), and that read is a 6 s poll — a second
+      instance for the same key doubles every phone's seat traffic for one
+      answer. Given a read, this row starts none of its own: the hook called
+      with a null project issues no request and sets no interval. */
+  seat?: OrchestratorSeatRead;
   /** Pins the seat's conversation as the focused pane — the standard mobile
       conversation surface, composer included. */
   onOpenConversation: (file: FileEntry) => void;
 }) {
   const { t } = useLocale();
   const projectCwd = useMemo(() => draftWorkingDirectory(files, project), [files, project]);
-  const { status, failed, refresh } = useOrchestratorSeat(project, projectCwd || undefined);
+  const ownSeat = useOrchestratorSeat(seat ? null : project, projectCwd || undefined);
+  const { status, failed, refresh } = seat ?? ownSeat;
   const [submitting, setSubmitting] = useState(false);
   /* The guard is SYNCHRONOUS: two taps in one event batch both read the same
      render's `submitting`, so a state flag alone lets the second through. The

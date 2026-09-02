@@ -34,6 +34,8 @@ import { focusHandoffBus } from "./attention/focusHandoffBus";
 import { ConnectionPill } from "./ConnectionPill";
 import { resolveFavoriteRows, type FavoriteRow } from "./favorites/favoriteRows";
 import { KeepAwakeProvider } from "./KeepAwakeControl";
+import { MobilePipelineQueueRow } from "./mobile/MobileBoard";
+import { needsDecisionPipelineRows } from "./mobile/mobileBoardModel";
 import { getMobileNav } from "./mobile/mobileNav";
 import { MobileProjectSheet } from "./mobile/MobileProjectSheet";
 import { MobileSheet, MobileSheetRow, MobileSheetSection } from "./mobile/MobileSheet";
@@ -755,6 +757,24 @@ export function Viewer() {
     [queue, project],
   );
 
+  /* The phone's ONE queue (mobile v2 §4.1, §4.6): the bar's badge counts it,
+     the sheet the badge opens lists it, and that sheet's «Next ›» walks it.
+     It is SCOPED to the project behind the badge — the board under the bar
+     shows one project, so counting every project's rows made the badge promise
+     items that screen could not reach. The all-projects screen has no project
+     behind the badge, so there the list stays the whole queue.
+
+     Pipelines waiting on a decision are queue items like any other (§4.6), and
+     they come from the same pure answer the board's Needs-you section renders
+     (`needsDecisionPipelineRows`), so the count, the sheet and the rows under
+     it cannot disagree. */
+  const shellQueue = project === OVERVIEW ? queue : projectQueue;
+  const shellPipelineRows = useMemo(
+    () => (project === OVERVIEW || !isMobile ? [] : needsDecisionPipelineRows(pipelines, project, clock)),
+    [pipelines, project, clock, isMobile],
+  );
+  const shellQueueCount = shellQueue.length + shellPipelineRows.length;
+
   useEffect(() => {
     /* N and F are desktop keys (D4/D6): the phone layout renders without the
        scheme dimming channel, and a hardware keyboard there must never drive
@@ -817,6 +837,21 @@ export function Viewer() {
       requestFocus(next.file.path);
     },
     [queue, project, applyProject, requestFocus],
+  );
+
+  /* The phone sheet's «Next ›» walks the list that sheet is showing — the
+     scoped one — so the count in its header, the rows under it and the button
+     that steps through them are one thing. The cycle pointer is the same one
+     the desktop's island and the N key move, so a phone and a desktop tab
+     never fight over where the operator is. */
+  const advanceShellAttention = useCallback(
+    (dir: 1 | -1) => {
+      const next = advanceAttentionCycle(cycleRef, shellQueue, dir);
+      if (!next) return;
+      if (next.project !== project) applyProject(next.project);
+      requestFocus(next.file.path);
+    },
+    [shellQueue, project, applyProject, requestFocus],
   );
 
   /* A crowned row in the popover focuses its conversation, switching project
@@ -929,7 +964,7 @@ export function Viewer() {
   const mobileShell = useMemo<MobileShellHost | null>(() => {
     if (!isMobile) return null;
     return {
-      attentionCount: queue.length,
+      attentionCount: shellQueueCount,
       arrival: toastFile ? (
         <AttentionToast
           file={toastFile}
@@ -963,19 +998,19 @@ export function Viewer() {
           );
         }
         if (name === "attention") {
-          const title = queue.length ? `${t("mobile2.attention.title")} · ${queue.length}` : t("mobile2.attention.title");
+          const title = shellQueueCount ? `${t("mobile2.attention.title")} · ${shellQueueCount}` : t("mobile2.attention.title");
           return (
             <MobileSheet
               name="attention"
               title={title}
               onClose={close}
-              extra={queue.length > 1 ? (
+              extra={shellQueue.length > 1 ? (
                 <button
                   type="button"
                   data-attention-next
                   className="inline-flex min-h-11 shrink-0 items-center gap-0.5 rounded-[8px] px-2 text-ui font-semibold text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                   aria-label={t("attention.nextHint")}
-                  onClick={() => advanceGlobalAttention(1)}
+                  onClick={() => advanceShellAttention(1)}
                 >
                   {t("mobile2.attention.next")}
                   <ChevronRight className="h-4 w-4" aria-hidden />
@@ -995,11 +1030,17 @@ export function Viewer() {
                   ))}
                 </>
               ) : null}
-              <MobileSheetSection count={queue.length}>{t("attention.popoverTitle")}</MobileSheetSection>
-              {queue.length ? (
-                <div className="px-1.5">
-                  {queue.map((item) => (
+              <MobileSheetSection count={shellQueueCount}>{t("attention.popoverTitle")}</MobileSheetSection>
+              {shellQueueCount ? (
+                <div className="flex flex-col gap-1.5 px-1.5">
+                  {shellQueue.map((item) => (
                     <AttentionQueueRow key={item.id} item={item} onOpen={() => jumpToItem(item)} />
+                  ))}
+                  {/* The board's own row, so the two entries to one queue read
+                      the same words. It carries no destination until lane 7
+                      builds the pipeline screen — here as there. */}
+                  {shellPipelineRows.map((row) => (
+                    <MobilePipelineQueueRow key={row.id} row={row} />
                   ))}
                 </div>
               ) : (
@@ -1013,7 +1054,7 @@ export function Viewer() {
     };
     /* `t` is a fresh closure per render; `locale` is what changes its answers. */
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isMobile, queue, toastFile, openFile, files, projectCatalog, projectDisplayNames, pipelines, workflows, archivedProjects, crownedProjects, project, clock, loaded, catalogFailures, selectProject, createProject, favoriteRows, openFavorite, jumpToItem, advanceGlobalAttention, locale]);
+  }, [isMobile, shellQueue, shellQueueCount, shellPipelineRows, toastFile, openFile, files, projectCatalog, projectDisplayNames, pipelines, workflows, archivedProjects, crownedProjects, project, clock, loaded, catalogFailures, selectProject, createProject, favoriteRows, openFavorite, jumpToItem, advanceShellAttention, locale]);
 
   const shell = (
     <div className="flex h-full">

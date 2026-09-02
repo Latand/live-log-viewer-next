@@ -38,46 +38,36 @@
     "menuControls": [],
     "titleText": "live-log-viewer-next-mobile",
     "titleWidth": 236.09375,
-    "paneControls": [
+    "rows": [
       {
-        "label": "Rename “Builder · keep the conversation header inside a 390px viewp…”",
-        "left": 125,
-        "right": 169,
-        "width": 44,
+        "label": "Create this project's orchestrator",
+        "left": 18,
+        "right": 158.21875,
+        "width": 140.21875,
         "height": 44
       },
       {
-        "label": "Show conversation details",
-        "left": 181,
-        "right": 225,
-        "width": 44,
-        "height": 44
+        "label": "Open Builder · keep the conversation header inside a 390px viewport (613)",
+        "left": 12,
+        "right": 378,
+        "width": 366,
+        "height": 56
       },
       {
-        "label": "Mark as favorite",
-        "left": 231,
-        "right": 275,
-        "width": 44,
-        "height": 44
-      },
-      {
-        "label": "Delete the conversation from disk",
-        "left": 281,
-        "right": 325,
-        "width": 44,
-        "height": 44
-      },
-      {
-        "label": "Remove column Builder · keep the conversation header inside a 390px viewp…",
-        "left": 331,
-        "right": 375,
-        "width": 44,
-        "height": 44
+        "label": "All conversations1 in the catalog",
+        "left": 12,
+        "right": 378,
+        "width": 366,
+        "height": 56
       }
     ],
-    "paneHeaderScrollWidth": 376,
-    "paneHeaderClientWidth": 376,
-    "paneTitleText": "Builder · keep the conversation header inside a 390px viewport (613)"
+    "boardScrollWidth": 390,
+    "boardClientWidth": 390,
+    "rowTitles": [
+      "Builder · keep the conversation header inside a 390px viewport (613)working·claude-opus-4-8",
+      "All conversations1 in the catalog"
+    ],
+    "focusedPane": false
   },
   "header-390-more-open": {
     "scrollWidth": 390,
@@ -203,45 +193,35 @@
     ],
     "titleText": "live-log-viewer-next-mobile",
     "titleWidth": 236.09375,
-    "paneControls": [
+    "rows": [
       {
-        "label": "Rename “Builder · keep the conversation header inside a 390px viewp…”",
-        "left": 125,
-        "right": 169,
-        "width": 44,
+        "label": "Create this project's orchestrator",
+        "left": 18,
+        "right": 158.21875,
+        "width": 140.21875,
         "height": 44
       },
       {
-        "label": "Show conversation details",
-        "left": 181,
-        "right": 225,
-        "width": 44,
-        "height": 44
+        "label": "Open Builder · keep the conversation header inside a 390px viewport (613)",
+        "left": 12,
+        "right": 378,
+        "width": 366,
+        "height": 56
       },
       {
-        "label": "Mark as favorite",
-        "left": 231,
-        "right": 275,
-        "width": 44,
-        "height": 44
-      },
-      {
-        "label": "Delete the conversation from disk",
-        "left": 281,
-        "right": 325,
-        "width": 44,
-        "height": 44
-      },
-      {
-        "label": "Remove column Builder · keep the conversation header inside a 390px viewp…",
-        "left": 331,
-        "right": 375,
-        "width": 44,
-        "height": 44
+        "label": "All conversations1 in the catalog",
+        "left": 12,
+        "right": 378,
+        "width": 366,
+        "height": 56
       }
     ],
-    "paneHeaderScrollWidth": 376,
-    "paneHeaderClientWidth": 376,
-    "paneTitleText": "Builder · keep the conversation header inside a 390px viewport (613)"
+    "boardScrollWidth": 390,
+    "boardClientWidth": 390,
+    "rowTitles": [
+      "Builder · keep the conversation header inside a 390px viewport (613)working·claude-opus-4-8",
+      "All conversations1 in the catalog"
+    ],
+    "focusedPane": false
   }
 }

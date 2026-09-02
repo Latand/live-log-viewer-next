@@ -84,5 +84,8 @@
   "license": "MIT",
   "patchedDependencies": {
     "next@16.3.2": "patches/next-16.3.2.patch"
+  },
+  "overrides": {
+    "fast-uri": "^3.1.6"
   }
 }
