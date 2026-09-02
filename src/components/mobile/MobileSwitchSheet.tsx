@@ -7,6 +7,7 @@ import type { FileEntry } from "@/lib/types";
 
 import { conversationIdentity } from "@/lib/accounts/identity";
 import { cleanTitle, engineBadge } from "../utils";
+import { ChatEngineMark } from "./chatEngineMark";
 import { MobileSheet, MobileSheetSection } from "./MobileSheet";
 import { CHAT_TONE_DOT, CHAT_TONE_TEXT, chatState, chatStateBits, type ChatStateKey } from "./mobileChatState";
 
@@ -144,6 +145,7 @@ function SwitchRow({ t, entry, current, nowMs, onPick }: { t: TFunction; entry: 
             <>
               <span className={`shrink-0 ${CHAT_TONE_TEXT[bits.tone]}`}>{bits.phrase}</span>
               <span aria-hidden className="text-muted">·</span>
+              {entry.file ? <ChatEngineMark file={entry.file} /> : null}
               <span className="min-w-0 truncate">{entry.file?.model ?? badge?.label}</span>
             </>
           ) : (

@@ -1923,6 +1923,7 @@ function ProjectDashboardView({
             renderBoardSheet={renderMobileSheet}
             onOpenSearch={onOpenSearch}
             hostTaskCount={dockedTasks.length}
+            onHandoff={addHandoffDraft}
             alert={pipelinesAlert}
           />
         ) : (

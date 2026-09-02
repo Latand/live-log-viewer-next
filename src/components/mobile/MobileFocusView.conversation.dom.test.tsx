@@ -156,6 +156,9 @@ const pipeline = {
   createdAt: "2026-09-01T00:00:00Z", closedAt: null,
 } as unknown as Pipeline;
 
+/** Hand-off drafts the screen asked the board for, by conversation path. */
+const handoffs: string[] = [];
+
 function mount(nav: MobileNav, files: FileEntry[], focus: string | null, pipelines: Pipeline[] = []): void {
   const host = dom.document.createElement("div");
   dom.document.body.appendChild(host);
@@ -176,6 +179,7 @@ function mount(nav: MobileNav, files: FileEntry[], focus: string | null, pipelin
         drafts={[]}
         loaded
         focus={focus}
+        onHandoff={(file) => handoffs.push(file.path)}
         onSelect={() => {}}
         onClose={() => {}}
         onDraftClose={() => {}}
@@ -218,6 +222,13 @@ test("the bar carries the title on one line and a meta line under it, with `stag
   expect(model.textContent).toContain("high");
   expect(model.className).toContain("min-w-0");
   expect(dom.document.querySelector("[data-mobile2-chat-stage]")?.textContent).toBe("stage 2/2");
+  /* The engine rides the line as a MARK, never as a word (§3.2): spelling it
+     out is what made the strip read "Claude · Claude · Claude", and the model
+     beside it already carries the identity the operator reads. */
+  const mark = state.parentElement!.querySelector("[data-mobile2-engine]");
+  expect(mark?.getAttribute("data-mobile2-engine")).toBe("claude");
+  expect(mark!.getAttribute("aria-hidden")).toBe("true");
+  expect(dom.document.querySelector("[data-mobile2-chat-title]")?.textContent).not.toContain("Claude");
 });
 
 test("offline is screen-level: the meta line says so instead of the last state, and drops the identity", async () => {
@@ -284,6 +295,12 @@ test("the title cell is the switcher, its sections are the board's, and a row RE
   /* The current one is checked, and only it. */
   const current = [...sheet.querySelectorAll("[data-mobile2-conversation]")].filter((row) => row.getAttribute("aria-current") === "true");
   expect(current.map((row) => row.getAttribute("data-mobile2-conversation"))).toEqual(["conv-implement"]);
+  /* Every row identifies its engine the way the bar does — a mark beside the
+     model, never the engine's word, which is what the chip strip spent its
+     width on. */
+  const rows = [...sheet.querySelectorAll("[data-mobile2-conversation]")];
+  expect(rows.every((row) => row.querySelector('[data-mobile2-engine="claude"]') !== null)).toBe(true);
+  expect(rows.every((row) => !(row.textContent ?? "").includes("Claude"))).toBe(true);
 
   const depthBefore = model.depth();
   const row = sheet.querySelector('[data-mobile2-conversation="conv-export"]') as unknown as HTMLButtonElement;
@@ -392,4 +409,34 @@ test("a stage conversation reaches its own pipeline from the menu's first row (P
      identity action in the menu. */
   const rows = [...dom.document.querySelectorAll("[data-mobile2-menu-row]")].map((node) => node.getAttribute("data-mobile2-menu-row"));
   expect(rows[0]).toBe("pipeline");
+});
+
+test("Hand off is a labelled row in the menu, between Crown and Compact context", async () => {
+  const { host } = browser();
+  const nav = createMobileNav(host);
+  detach = nav.attach();
+  handoffs.length = 0;
+  mount(nav, [stageConversation], stageConversation.path, [pipeline]);
+  await settle();
+
+  const more = dom.document.querySelector('[data-mobile2-open="menu"]') as unknown as HTMLButtonElement;
+  flushSync(() => more.click());
+  await settle();
+  /* §4.2's order for the identity group: Rename · Crown · Hand off, then the
+     host rows. Crown needs a favorites host this mount has none of, so the
+     row it follows here is Rename. The control the phone used to reach only
+     through the folded bottom shelf is a row with a word on it, like every
+     other former header control (2026-08 audit finding 18). */
+  const rows = [...dom.document.querySelectorAll("[data-mobile2-menu-row]")].map((node) => node.getAttribute("data-mobile2-menu-row"));
+  expect(rows.indexOf("handoff")).toBe(rows.indexOf("rename") + 1);
+  expect(rows.indexOf("handoff")).toBeLessThan(rows.indexOf("host"));
+
+  const row = dom.document.querySelector('[data-mobile2-menu-row="handoff"]') as unknown as HTMLElement;
+  expect(row.textContent).toContain("Hand off");
+  /* It acts on the tap and takes the sheet with it: the draft lands under the
+     conversation, so nothing is left covering it (§2 rule 9). */
+  flushSync(() => (row as HTMLButtonElement).click());
+  await settle();
+  expect(handoffs).toEqual([stageConversation.path]);
+  expect(dom.document.querySelector('[data-mobile2-sheet="menu"]')).toBeNull();
 });

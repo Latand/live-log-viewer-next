@@ -1,12 +1,13 @@
 "use client";
 
-import { Boxes, ChevronRight, CornerDownRight, Crown, FoldVertical, Info, ListTree, PencilLine, RotateCw, Search, Square, SquareTerminal, X } from "lucide-react";
+import { ArrowRightLeft, Boxes, ChevronRight, CornerDownRight, Crown, FoldVertical, Info, ListTree, PencilLine, RotateCw, Search, Square, SquareTerminal, X } from "lucide-react";
 
 import { useLocale } from "@/lib/i18n";
 import { cleanTitle } from "@/lib/title";
 import type { FileEntry } from "@/lib/types";
 
 import { AttachTerminalDialog } from "../AttachTerminalDialog";
+import { canHandoff } from "../HandoffHandle";
 import { useAgentControlActions } from "../AgentControlStrip";
 import { useProcessKill } from "../TaskHeader";
 import { effortTitle, engineBadge } from "../utils";
@@ -44,6 +45,7 @@ export function MobileConversationMenu({
   onOpenPipeline,
   onRename,
   onToggleCrown,
+  onHandoff,
   onOpenHost,
   onOpenSearch,
   onOpenProjectMenu,
@@ -64,6 +66,9 @@ export function MobileConversationMenu({
   onOpenPipeline?: () => void;
   onRename: () => void;
   onToggleCrown?: () => void;
+  /** Drops a draft that continues this conversation (§4.2 «Hand off»). The
+      board owns the draft, so the row only asks for it. */
+  onHandoff?: () => void;
   onOpenHost: () => void;
   /** The search palette (#1054): a bar target on the board, a row here (§3.1). */
   onOpenSearch?: () => void;
@@ -150,6 +155,14 @@ export function MobileConversationMenu({
               label={crowned ? t("mobile2.chat.menuUncrown") : t("mobile2.chat.menuCrown")}
               onSelect={act(onToggleCrown)}
               attrs={{ "data-mobile2-menu-row": "crown" }}
+            />
+          ) : null}
+          {onHandoff && canHandoff(file) ? (
+            <MobileSheetRow
+              icon={<ArrowRightLeft className="h-[18px] w-[18px]" aria-hidden />}
+              label={t("mobile2.chat.menuHandoff")}
+              onSelect={act(onHandoff)}
+              attrs={{ "data-mobile2-menu-row": "handoff" }}
             />
           ) : null}
           {/* The supersedence chain (#383). On the desktop it is a chip in the

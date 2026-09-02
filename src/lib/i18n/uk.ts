@@ -2381,6 +2381,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "mobile2.chat.menuPipelineMeta": "етап {k}/{n} · {stage} · {state}",
   "mobile2.chat.menuRename": "Перейменувати",
   "mobile2.chat.menuCrown": "Закріпити короною",
+  "mobile2.chat.menuHandoff": "Передати новому агенту",
   "mobile2.chat.menuUncrown": "Зняти корону",
   "mobile2.chat.menuStop": "Зупинити агента",
   "mobile2.chat.menuRecheck": "Перевірити хост",

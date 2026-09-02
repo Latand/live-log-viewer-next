@@ -2456,6 +2456,7 @@ export const en = {
   "mobile2.chat.menuPipelineMeta": "stage {k}/{n} · {stage} · {state}",
   "mobile2.chat.menuRename": "Rename",
   "mobile2.chat.menuCrown": "Crown",
+  "mobile2.chat.menuHandoff": "Hand off to a new agent",
   "mobile2.chat.menuUncrown": "Remove crown",
   "mobile2.chat.menuStop": "Stop the agent",
   "mobile2.chat.menuRecheck": "Re-check the host",

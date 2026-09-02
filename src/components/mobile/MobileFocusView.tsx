@@ -22,6 +22,7 @@ import { isWorkflowDraftId } from "@/components/workflows/workflowModel";
 import { WorkflowDraftPane } from "@/components/workflows/WorkflowDraftPane";
 import { RoundDeck } from "@/components/flows/RoundDeck";
 import { MIN_TRANSCRIPT_SHARE } from "./chatBudget";
+import { ChatEngineMark } from "./chatEngineMark";
 import { paneState, type PaneState } from "@/components/paneState";
 import type { BranchGroup } from "@/components/projectModel";
 import { draftWorkingDirectory } from "@/components/projectModel";
@@ -148,6 +149,9 @@ interface Props {
   onOpenSearch?: () => void;
   /** Background tasks behind «Details & host», as the menu row's count. */
   hostTaskCount?: number;
+  /** Drops a draft that continues a conversation, for the menu's «Hand off»
+      row (§4.2). The board owns the draft, so the screen only asks for it. */
+  onHandoff?: (file: FileEntry) => void;
   /** In-flow alert the project board renders above the leaf. */
   alert?: React.ReactNode;
 }
@@ -180,7 +184,7 @@ export function pipelinesToDock(pipelines: readonly Pipeline[], memberfulGroupId
  * not loaded — the same shell renders the board leaf, which lane 2 fills with
  * the board list.
  */
-export function MobileFocusView({ project, projectName, groups, manual, files, flows, reviewGroups = [], pipelines, surfacePipelines = [], tasks, sheetTasks, drafts, favorites, isolatedManualPaths = EMPTY_PATHS, loaded, focus, onSelect, onClose, onDraftClose, onDraftSpawned, onConversationOpened, onActiveChange, shellHost = null, renderBoardSheet, onOpenSearch, hostTaskCount = 0, alert }: Props) {
+export function MobileFocusView({ project, projectName, groups, manual, files, flows, reviewGroups = [], pipelines, surfacePipelines = [], tasks, sheetTasks, drafts, favorites, isolatedManualPaths = EMPTY_PATHS, loaded, focus, onSelect, onClose, onDraftClose, onDraftSpawned, onConversationOpened, onActiveChange, shellHost = null, renderBoardSheet, onOpenSearch, hostTaskCount = 0, onHandoff, alert }: Props) {
   const { t } = useLocale();
   /* The project-scoped board store, read here for the ONE canonical selection
      (#771). Same store the desktop board and the dashboard bind — stores are
@@ -501,6 +505,7 @@ export function MobileFocusView({ project, projectName, groups, manual, files, f
           onOpenPipeline={dockedPipelines.length ? () => setPipelineSheetOpen(true) : undefined}
           onRename={() => setRenameToken((token) => token + 1)}
           onToggleCrown={favoritesApi ? () => favoritesApi.toggle(conversationIdentity(activeFile)) : undefined}
+          onHandoff={onHandoff ? () => onHandoff(activeFile) : undefined}
           onOpenHost={() => nav.openSheet("host")}
           onOpenSearch={onOpenSearch}
           onOpenProjectMenu={renderBoardSheet ? () => setMenuFace("board") : undefined}
@@ -709,6 +714,7 @@ export function ChatBarTitle({ file, offline, stage, bump, renamed = null }: { f
         {offline ? null : (
           <>
             <span aria-hidden className="shrink-0 text-muted">·</span>
+            <ChatEngineMark file={file} />
             <span className="min-w-0 truncate" title={effortTitle(file)}>{model}</span>
             {stage?.current ? (
               <>
