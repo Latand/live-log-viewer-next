@@ -11,17 +11,22 @@ import type { FileEntry } from "@/lib/types";
  * `MobileFocusView` → `BranchPane` → `SessionTitle` at 390×844.
  *
  * The operator tapped the pencil and got a field with no visible text. The
- * pane header at that width is a single flex row already carrying the status
+ * pane header at that width was a single flex row already carrying the status
  * dot, the status word, the kill control, the details toggle, the favourite
  * crown, delete and close — every one a fixed 44px target — and the inline
  * editor then joined that row with THREE more 44px targets of its own, so the
  * `min-w-0 flex-1` input was the only thing left to give and gave everything:
  * zero width, text and caret included. On top of that the input was set in
  * 12px type, which iOS Safari answers by zooming the page on focus, panning the
- * caret out of view. This file pins the phone's rename render path: the editor
- * takes the header row over instead of sharing it, the field is set in a size
- * the phone will not zoom, its face is spelled out for both themes, and a drag
- * inside it moves the text rather than the conversation.
+ * caret out of view.
+ *
+ * Mobile v2 lane 3 removed that pane header entirely. Rename is a labelled row
+ * in the conversation's `⋯` menu and it edits the BAR's title cell in place
+ * (README §4.2): the editor lays over the 52 px bar edge to edge, and the cell
+ * under it follows the optimistic rename at once. This file still pins the
+ * render path #1348 fixed — the field is legible, set in a size the phone will
+ * not zoom, its face spelled out for both themes — and a drag inside it moves
+ * the text rather than the conversation.
  */
 
 const dom = new HappyWindow({ innerWidth: 390, innerHeight: 844 });
@@ -152,10 +157,19 @@ async function mount(files: FileEntry[]): Promise<{ host: HTMLElement; root: Roo
   return { host: host as unknown as HTMLElement, root };
 }
 
-const paneHeader = (host: HTMLElement) => host.querySelector('[data-testid="mobile-focused-pane"] header') as HTMLElement;
-const pencil = (host: HTMLElement) => paneHeader(host).querySelector('button[aria-label^="Rename"]') as HTMLButtonElement;
-const editor = (host: HTMLElement) => paneHeader(host).querySelector("[data-session-title-editor]") as HTMLElement | null;
-const input = (host: HTMLElement) => paneHeader(host).querySelector('input[aria-label="Session title"]') as HTMLInputElement | null;
+const renameSlot = (host: HTMLElement) => host.querySelector('[data-testid="mobile-rename-slot"]') as HTMLElement | null;
+const barTitle = (host: HTMLElement) => host.querySelector("[data-mobile2-title-text]")?.textContent ?? "";
+/** Rename is a labelled row in the `⋯` menu now, not an icon in a header. */
+function openRename(host: HTMLElement): void {
+  const more = host.querySelector('[data-mobile2-open="menu"]') as HTMLButtonElement;
+  flushSync(() => more.click());
+  const row = host.querySelector('[data-testid="mobile-menu-rename"]') as HTMLButtonElement;
+  expect(row).not.toBeNull();
+  expect(row.className).toContain("min-h-11");
+  flushSync(() => row.click());
+}
+const editor = (host: HTMLElement) => (renameSlot(host)?.querySelector("[data-session-title-editor]") ?? null) as HTMLElement | null;
+const input = (host: HTMLElement) => (renameSlot(host)?.querySelector('input[aria-label="Session title"]') ?? null) as HTMLInputElement | null;
 const focusedPath = (host: HTMLElement) =>
   host.querySelector('[data-testid="mobile-focused-pane"] [data-link-path]')?.getAttribute("data-link-path") ?? null;
 
@@ -176,14 +190,14 @@ function drag(target: Element, from: number, to: number): void {
   });
 }
 
-test("the phone's rename editor shows the current title in a field that takes the header row over, set in a size the phone will not zoom", async () => {
+test("the phone's rename editor shows the current title in a field that takes the bar over, set in a size the phone will not zoom", async () => {
   const files = [neighbour, focused];
   const { host, root } = await mount(files);
   expect(focusedPath(host)).toBe("/focused.jsonl");
-  /* The phone's always-visible launcher (#33 mobile variant). */
-  expect(pencil(host).className).toContain("h-11");
+  /* Nothing is renamed until the menu row asks: no editor sits on the bar. */
+  expect(renameSlot(host)).toBeNull();
 
-  flushSync(() => pencil(host).click());
+  openRename(host);
   await settle(root, view(files), 1);
 
   /* The current title is IN the field, whole, and preselected. */
@@ -193,9 +207,9 @@ test("the phone's rename editor shows the current title in a field that takes th
   expect(field!.getAttribute("type")).toBe("text");
   expect(dom.document.activeElement).toBe(field as unknown as typeof dom.document.activeElement);
 
-  /* The editor is not one more cell in the crowded identity row: it lays over
-     that row edge to edge, so the seven fixed 44px controls beside the title
-     cannot squeeze the field to nothing. */
+  /* The editor is not one more cell in a crowded row: it lays over the bar
+     edge to edge, so no fixed 44px control beside the title can squeeze the
+     field to nothing. */
   const box = editor(host);
   expect(box).not.toBeNull();
   expect(box!.getAttribute("data-session-title-editor")).toBe("mobile");
@@ -203,6 +217,7 @@ test("the phone's rename editor shows the current title in a field that takes th
   expect(box!.className).toContain("inset-x-0");
   expect(box!.className).toContain("top-0");
   expect(box!.className).not.toContain("flex-1");
+  expect(renameSlot(host)!.className).toContain("inset-x-0");
 
   /* The field itself: a 44px row, 16px type (iOS zooms anything smaller on
      focus, which pans the caret off screen), and a face spelled out for both
@@ -226,12 +241,12 @@ test("the phone's rename editor shows the current title in a field that takes th
 test("a drag inside the rename field scrolls the title, never the conversation under it", async () => {
   const files = [neighbour, focused];
   const { host, root } = await mount(files);
-  flushSync(() => pencil(host).click());
+  openRename(host);
   await settle(root, view(files), 1);
   const field = input(host)!;
 
-  /* The pane header is the phone's swipe handle: a leftward drag on it steps to
-     the next conversation. The same drag inside the editor is the operator
+  /* The bar is the phone's swipe zone: a leftward drag across it steps to the
+     next conversation. The same drag inside the editor over it is the operator
      moving through a long title, so it must stay in the field. */
   drag(field, 300, 100);
   await settle(root, view(files), 1);
@@ -240,10 +255,11 @@ test("a drag inside the rename field scrolls the title, never the conversation u
   expect(input(host)!.value).toBe(LONG_TITLE);
 });
 
-test("Enter saves what was typed and the phone header shows the new name", async () => {
+test("Enter saves what was typed and the bar's title cell shows the new name", async () => {
   const files = [neighbour, focused];
   const { host, root } = await mount(files);
-  flushSync(() => pencil(host).click());
+  expect(barTitle(host)).toContain(LONG_TITLE.slice(0, 20));
+  openRename(host);
   await settle(root, view(files), 1);
   const field = input(host)!;
   flushSync(() => typeInto(field, "Phone rename"));
@@ -254,5 +270,7 @@ test("Enter saves what was typed and the phone header shows the new name", async
   expect(saves).toHaveLength(1);
   expect(saves[0]!.body).toMatchObject({ path: "/focused.jsonl", title: "Phone rename" });
   expect(input(host)).toBeNull();
-  expect(paneHeader(host).textContent).toContain("Phone rename");
+  /* The cell under the editor followed the optimistic rename, so the operator
+     sees the name they typed without waiting for the next scan. */
+  expect(barTitle(host)).toBe("Phone rename");
 });

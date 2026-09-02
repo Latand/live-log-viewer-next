@@ -124,18 +124,19 @@ test("a focused superseded round shows the banner with 44px actions and mounts n
   expect(host.querySelector("[data-dead-host-banner]")).toBeNull();
 });
 
-test("the focused successor keeps its composer and wears the truncating lineage chip at 390px", async () => {
+test("the focused successor keeps its composer and reaches its predecessor from the menu at 390px", async () => {
   const host = await renderFocus([superseded, successor], "/round-2.jsonl");
-  /* Chat-first (issue #419): the lineage chip rides the metadata row, folded by
-     default behind the conversation-details disclosure. Reveal it, then assert. */
-  const details = host.querySelector('[data-testid="mobile-details-toggle"]') as HTMLButtonElement;
-  expect(details).not.toBeNull();
-  flushSync(() => details.click());
-  const chip = host.querySelector("[data-continues-chip]");
-  expect(chip).not.toBeNull();
-  expect(chip?.getAttribute("href")).toBe("#c=conversation_round_1");
-  // The chip lives inside the horizontally scrolling meta row and truncates
-  // instead of overlapping the top strip (#345 class).
-  expect((chip as HTMLElement).className).toContain("truncate");
+  /* Mobile v2 lane 3: the phone has no pane header, so the #383 lineage chip is
+     a labelled row in the conversation's `\u22ef` menu instead — same durable
+     `#c=` destination, reachable by touch rather than by a 9.5 px chip. */
+  expect(host.querySelector("[data-continues-chip]")).toBeNull();
+  const more = host.querySelector('[data-mobile2-open="menu"]') as HTMLButtonElement;
+  expect(more).not.toBeNull();
+  flushSync(() => more.click());
+  const row = host.querySelector('[data-testid="mobile-menu-predecessor"]') as HTMLElement | null;
+  expect(row).not.toBeNull();
+  expect(row!.getAttribute("data-continues-conversation")).toBe("conversation_round_1");
+  expect(row!.className).toContain("min-h-11");
+  expect(row!.textContent).toContain("round 2");
   expect(host.querySelector("textarea")).not.toBeNull();
 });

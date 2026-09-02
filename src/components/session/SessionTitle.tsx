@@ -45,6 +45,11 @@ interface SessionTitleProps {
       broadcast would also open the node's still-mounted board pane and its blur
       would persist an unintended rename. */
   autoEditToken?: number;
+  /** The effective title, reported whenever it changes here — the optimistic
+      one included. The phone's bar title cell reads it (mobile v2 lane 3): the
+      editor lays over the bar rather than inside it, so without this the bar
+      would keep the old name until the next scan poll landed. */
+  onTitleChange?: (title: string) => void;
 }
 
 /**
@@ -55,7 +60,7 @@ interface SessionTitleProps {
  * auto-derived title. Saves are optimistic: a revision conflict adopts the
  * server record and retries once, a network failure reverts and offers retry.
  */
-export function SessionTitle({ file, displayMax = 90, titleClassName = "", className = "", alwaysVisible = false, autoEditToken }: SessionTitleProps) {
+export function SessionTitle({ file, displayMax = 90, titleClassName = "", className = "", alwaysVisible = false, autoEditToken, onTitleChange }: SessionTitleProps) {
   const { t } = useLocale();
   const isMobile = useIsMobile();
   const [editing, setEditing] = useState(false);
@@ -121,6 +126,15 @@ export function SessionTitle({ file, displayMax = 90, titleClassName = "", class
   const hasOverride = opt ? opt.title !== null : file.autoTitle !== undefined;
   const effectiveTitle = opt ? (opt.title ?? autoTitle) : file.title;
   const baseRevision = opt ? opt.revision : file.titleRevision ?? 0;
+
+  /* Report the effective title out, so a surface that draws it elsewhere (the
+     phone's bar title cell) follows an optimistic rename immediately. */
+  const reportedTitle = useRef<string | null>(null);
+  useEffect(() => {
+    if (!onTitleChange || reportedTitle.current === effectiveTitle) return;
+    reportedTitle.current = effectiveTitle;
+    onTitleChange(effectiveTitle);
+  }, [effectiveTitle, onTitleChange]);
 
   useEffect(() => {
     if (editing) {

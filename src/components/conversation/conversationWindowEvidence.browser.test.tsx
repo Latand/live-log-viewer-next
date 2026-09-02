@@ -243,10 +243,13 @@ test("browser-rendered conversation-window evidence: geometry, overflow, and lif
       /* Lifecycle continuity: the SAME shell/feed/composer in every state. */
       expect(geometry.feedHeight).toBeGreaterThan(0);
       expect(geometry.textarea).toBe(true);
-      /* The single control surface is present as one window's controls: inline
-         on desktop, folded behind the disclosure on the 390px chat-first
-         layout. */
-      expect(viewport.mobile ? geometry.mobileDetailsToggle : geometry.controlStrip).toBe(true);
+      /* The single control surface: inline on desktop. On the phone the window
+         carries NONE of it (mobile v2 lane 3, #1439) — the identity moved into
+         the shell bar's title cell and every control became a labelled row in
+         the conversation's `⋯` menu, so the pane spends no height on chrome and
+         the disclosure that used to fold it is gone with the header. */
+      expect(geometry.controlStrip).toBe(!viewport.mobile);
+      expect(geometry.mobileDetailsToggle).toBe(false);
       /* The transcript owns the majority of the window — the feed dominates the
          composer (its ≥60% viewport-budget intent, issue #419). */
       expect(geometry.feedHeight).toBeGreaterThan(geometry.composerHeight);
@@ -269,7 +272,7 @@ test("browser-rendered conversation-window evidence: geometry, overflow, and lif
   /* Every capture shares the same shell/feed/composer geometry signature. */
   for (const [key, g] of Object.entries(manifest)) {
     const isMobile = key.endsWith("mobile-390");
-    expect(g.feedHeight > 0 && g.textarea && (isMobile ? g.mobileDetailsToggle : g.controlStrip)).toBe(true);
+    expect(g.feedHeight > 0 && g.textarea && (isMobile ? !g.controlStrip && !g.mobileDetailsToggle : g.controlStrip)).toBe(true);
     expect(g.scrollWidth).toBeLessThanOrEqual(g.viewportWidth + 1);
   }
 }, 120_000);

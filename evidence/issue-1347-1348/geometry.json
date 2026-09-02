@@ -8,29 +8,29 @@
       "scheme": "light",
       "viewportWidth": 390,
       "scrollWidth": 390,
-      "paneHeaderScrollWidth": 376,
-      "paneHeaderClientWidth": 376,
+      "barScrollWidth": 390,
+      "barClientWidth": 390,
       "editor": {
         "label": "",
-        "left": 7,
-        "right": 383,
-        "top": 58,
-        "bottom": 110,
-        "width": 376,
+        "left": 0,
+        "right": 390,
+        "top": 0,
+        "bottom": 52,
+        "width": 390,
         "height": 52
       },
       "input": {
         "label": "Session title",
-        "left": 15,
-        "right": 279,
-        "top": 62,
-        "bottom": 106,
-        "width": 264,
+        "left": 8,
+        "right": 286,
+        "top": 4,
+        "bottom": 48,
+        "width": 278,
         "height": 44
       },
       "inputValueLength": 115,
       "inputScrollWidth": 852,
-      "inputClientWidth": 262,
+      "inputClientWidth": 276,
       "fontSizePx": 16,
       "color": "rgb(28, 28, 34)",
       "background": "rgb(243, 243, 246)",
@@ -38,19 +38,19 @@
       "controls": [
         {
           "label": "Save name",
-          "left": 283,
-          "right": 327,
-          "top": 62,
-          "bottom": 106,
+          "left": 290,
+          "right": 334,
+          "top": 4,
+          "bottom": 48,
           "width": 44,
           "height": 44
         },
         {
           "label": "Cancel",
-          "left": 331,
-          "right": 375,
-          "top": 62,
-          "bottom": 106,
+          "left": 338,
+          "right": 382,
+          "top": 4,
+          "bottom": 48,
           "width": 44,
           "height": 44
         }
@@ -61,29 +61,29 @@
       "scheme": "dark",
       "viewportWidth": 390,
       "scrollWidth": 390,
-      "paneHeaderScrollWidth": 376,
-      "paneHeaderClientWidth": 376,
+      "barScrollWidth": 390,
+      "barClientWidth": 390,
       "editor": {
         "label": "",
-        "left": 7,
-        "right": 383,
-        "top": 58,
-        "bottom": 110,
-        "width": 376,
+        "left": 0,
+        "right": 390,
+        "top": 0,
+        "bottom": 52,
+        "width": 390,
         "height": 52
       },
       "input": {
         "label": "Session title",
-        "left": 15,
-        "right": 279,
-        "top": 62,
-        "bottom": 106,
-        "width": 264,
+        "left": 8,
+        "right": 286,
+        "top": 4,
+        "bottom": 48,
+        "width": 278,
         "height": 44
       },
       "inputValueLength": 115,
       "inputScrollWidth": 852,
-      "inputClientWidth": 262,
+      "inputClientWidth": 276,
       "fontSizePx": 16,
       "color": "rgb(232, 232, 236)",
       "background": "rgb(16, 16, 20)",
@@ -91,19 +91,19 @@
       "controls": [
         {
           "label": "Save name",
-          "left": 283,
-          "right": 327,
-          "top": 62,
-          "bottom": 106,
+          "left": 290,
+          "right": 334,
+          "top": 4,
+          "bottom": 48,
           "width": 44,
           "height": 44
         },
         {
           "label": "Cancel",
-          "left": 331,
-          "right": 375,
-          "top": 62,
-          "bottom": 106,
+          "left": 338,
+          "right": 382,
+          "top": 4,
+          "bottom": 48,
           "width": 44,
           "height": 44
         }
@@ -116,13 +116,13 @@
       {
         "scheme": "light",
         "scrollWidth": 390,
-        "stripHeight": 53,
+        "stripHeight": 45,
         "rowOpen": {
           "label": "Orchestrator opus — live. Opens its conversation.",
           "left": 6,
           "right": 86.359375,
-          "top": 4,
-          "bottom": 48,
+          "top": 0,
+          "bottom": 44,
           "width": 80.359375,
           "height": 44
         },
@@ -130,25 +130,24 @@
           "label": "Orchestrator controls: rotate, model, account and mandate",
           "left": 90.359375,
           "right": 134.359375,
-          "top": 4,
-          "bottom": 48,
+          "top": 0,
+          "bottom": 44,
           "width": 44,
           "height": 44
         },
-        "firstChipLeft": 149.359375,
         "sheet": null,
         "rotateDraft": null
       },
       {
         "scheme": "dark",
         "scrollWidth": 390,
-        "stripHeight": 53,
+        "stripHeight": 45,
         "rowOpen": {
           "label": "Orchestrator opus — live. Opens its conversation.",
           "left": 6,
           "right": 86.359375,
-          "top": 4,
-          "bottom": 48,
+          "top": 0,
+          "bottom": 44,
           "width": 80.359375,
           "height": 44
         },
@@ -156,12 +155,11 @@
           "label": "Orchestrator controls: rotate, model, account and mandate",
           "left": 90.359375,
           "right": 134.359375,
-          "top": 4,
-          "bottom": 48,
+          "top": 0,
+          "bottom": 44,
           "width": 44,
           "height": 44
         },
-        "firstChipLeft": 149.359375,
         "sheet": null,
         "rotateDraft": null
       }
@@ -170,13 +168,13 @@
       {
         "scheme": "light",
         "scrollWidth": 390,
-        "stripHeight": 53,
+        "stripHeight": 45,
         "rowOpen": {
           "label": "Orchestrator opus — live. Opens its conversation.",
           "left": 6,
           "right": 86.359375,
-          "top": 4,
-          "bottom": 48,
+          "top": 0,
+          "bottom": 44,
           "width": 80.359375,
           "height": 44
         },
@@ -184,12 +182,11 @@
           "label": "Orchestrator controls: rotate, model, account and mandate",
           "left": 90.359375,
           "right": 134.359375,
-          "top": 4,
-          "bottom": 48,
+          "top": 0,
+          "bottom": 44,
           "width": 44,
           "height": 44
         },
-        "firstChipLeft": 149.359375,
         "sheet": {
           "rotate": {
             "label": "Rotate",
@@ -210,13 +207,13 @@
       {
         "scheme": "dark",
         "scrollWidth": 390,
-        "stripHeight": 53,
+        "stripHeight": 45,
         "rowOpen": {
           "label": "Orchestrator opus — live. Opens its conversation.",
           "left": 6,
           "right": 86.359375,
-          "top": 4,
-          "bottom": 48,
+          "top": 0,
+          "bottom": 44,
           "width": 80.359375,
           "height": 44
         },
@@ -224,12 +221,11 @@
           "label": "Orchestrator controls: rotate, model, account and mandate",
           "left": 90.359375,
           "right": 134.359375,
-          "top": 4,
-          "bottom": 48,
+          "top": 0,
+          "bottom": 44,
           "width": 44,
           "height": 44
         },
-        "firstChipLeft": 149.359375,
         "sheet": {
           "rotate": {
             "label": "Rotate",
@@ -252,13 +248,13 @@
       {
         "scheme": "light",
         "scrollWidth": 390,
-        "stripHeight": 53,
+        "stripHeight": 45,
         "rowOpen": {
           "label": "Orchestrator opus — live. Opens its conversation.",
           "left": 6,
           "right": 86.359375,
-          "top": 4,
-          "bottom": 48,
+          "top": 0,
+          "bottom": 44,
           "width": 80.359375,
           "height": 44
         },
@@ -266,12 +262,11 @@
           "label": "Orchestrator controls: rotate, model, account and mandate",
           "left": 90.359375,
           "right": 134.359375,
-          "top": 4,
-          "bottom": 48,
+          "top": 0,
+          "bottom": 44,
           "width": 44,
           "height": 44
         },
-        "firstChipLeft": 149.359375,
         "sheet": {
           "rotate": null,
           "identityText": "",
@@ -313,13 +308,13 @@
       {
         "scheme": "dark",
         "scrollWidth": 390,
-        "stripHeight": 53,
+        "stripHeight": 45,
         "rowOpen": {
           "label": "Orchestrator opus — live. Opens its conversation.",
           "left": 6,
           "right": 86.359375,
-          "top": 4,
-          "bottom": 48,
+          "top": 0,
+          "bottom": 44,
           "width": 80.359375,
           "height": 44
         },
@@ -327,12 +322,11 @@
           "label": "Orchestrator controls: rotate, model, account and mandate",
           "left": 90.359375,
           "right": 134.359375,
-          "top": 4,
-          "bottom": 48,
+          "top": 0,
+          "bottom": 44,
           "width": 44,
           "height": 44
         },
-        "firstChipLeft": 149.359375,
         "sheet": {
           "rotate": null,
           "identityText": "",

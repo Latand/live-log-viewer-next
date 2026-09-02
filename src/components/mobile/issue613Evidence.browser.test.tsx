@@ -54,6 +54,8 @@ function productionCss(): string {
   return files.map((name) => fs.readFileSync(path.join(CSS_DIR, name), "utf8")).join("\n");
 }
 
+const jsonResponse = (body: unknown) => ({ ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) });
+
 const dom = new Window({ url: "http://localhost/" });
 installActEnv();
 /* The phone face: useIsMobile reads window.matchMedia off the dom itself. */
@@ -82,10 +84,23 @@ Object.assign(globalThis, {
   IntersectionObserver: class { observe() {} unobserve() {} disconnect() {} takeRecords() { return []; } },
   requestAnimationFrame: (cb: (t: number) => void) => setTimeout(() => cb(0), 0) as unknown as number,
   cancelAnimationFrame: (id: number) => clearTimeout(id),
-  fetch: (async (input: string | URL | Request) => {
+  fetch: (async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input);
-    const body = url.startsWith("/api/conversations") ? { items: [], nextCursor: null } : {};
-    return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) };
+    /* A tiny in-memory board API. Opening a board row PLACES the conversation,
+       which writes through /api/board; the store folds the answer in and needs
+       a real `{ board }` envelope whose revision MOVES, or it re-sends the same
+       intent forever. */
+    /* The durable board is UNAVAILABLE here: this test measures geometry, not
+       persistence, and a write it cannot honour must fail cleanly rather than
+       answer with a board that does not carry the intent — which the store
+       would re-send forever. Placement is optimistic, so the conversation the
+       row opens is on screen either way. */
+    if (url.startsWith("/api/board")) {
+      if (init?.method && init.method !== "GET") return { ok: false, status: 503, json: async () => ({}), text: async () => "{}" };
+      return jsonResponse({});
+    }
+    if (url.startsWith("/api/conversations")) return jsonResponse({ items: [], nextCursor: null });
+    return jsonResponse({});
   }) as unknown as typeof fetch,
 });
 (dom.HTMLElement.prototype as unknown as { scrollIntoView: () => void }).scrollIntoView = () => {};
@@ -207,6 +222,8 @@ interface Geometry {
   rowTitles: string[];
   /* Whether a conversation pane is what the phone opened on. */
   focusedPane: boolean;
+  /* Controls inside the focused pane's own header row, if it still had one. */
+  paneControls: Box[];
 }
 
 const VIEWPORT = { width: 390, height: 844 };
@@ -248,19 +265,33 @@ async function measure(inner: string, key: string): Promise<Geometry> {
       boardClientWidth: board?.clientWidth ?? -1,
       rowTitles: Array.from(board?.querySelectorAll("[data-mobile2-row]") ?? []).map((row) => (row.textContent ?? "").trim()),
       focusedPane: document.querySelector("[data-testid='mobile-focused-pane']") !== null,
+      paneControls: collect(document.querySelector("[data-testid='mobile-focused-pane'] header")),
     } as Geometry;
   });
   await page.close();
   return geometry;
 }
 
-async function renderDashboard(openMoreMenu: boolean): Promise<string> {
+/** What the phone is showing when the snapshot is taken: the board leaf, the
+    conversation screen a board row pushes (mobile v2 lane 3), and either of
+    them with the `⋯` sheet open over it. */
+type Face = "board" | "board-menu" | "chat";
+
+async function renderDashboard(face: Face): Promise<string> {
   const host = document.createElement("div");
   document.body.append(host);
   const root = createRoot(host);
   await act(async () => { root.render(<ProjectDashboard {...dashboardProps()} />); });
   await settle();
-  if (openMoreMenu) {
+  if (face === "chat") {
+    /* The board row is the phone's open gesture: it pushes the conversation
+       screen, whose bar is the one this issue was written about. */
+    const row = host.querySelector('[data-mobile2-row="conversation"]') as unknown as HTMLButtonElement | null;
+    expect(row).not.toBeNull();
+    await act(async () => { row!.click(); });
+    await settle();
+  }
+  if (face === "board-menu") {
     const trigger = host.querySelector('[data-mobile2-open="menu"]') as unknown as HTMLButtonElement | null;
     expect(trigger).not.toBeNull();
     await act(async () => { trigger!.click(); });
@@ -277,7 +308,7 @@ test("issue 613: the populated phone bar fits a 390px viewport with every contro
   fs.mkdirSync(EVIDENCE_DIR, { recursive: true });
   browser = await chromium.launch({ executablePath: chromium.executablePath() });
 
-  const closed = await measure(await renderDashboard(false), "header-390");
+  const closed = await measure(await renderDashboard("board"), "header-390");
 
   /* The acceptance measurement from the issue: no page-level horizontal scroll. */
   expect(closed.viewportWidth).toBe(390);
@@ -287,7 +318,10 @@ test("issue 613: the populated phone bar fits a 390px viewport with every contro
      hides behind an invisible edge. */
   expect(closed.headerScrollWidth).toBeLessThanOrEqual(closed.headerClientWidth);
 
-  /* Every control the bar owns is inside the viewport at a 44px target. */
+  /* Every control the bar owns is inside the viewport at a 44px target. The
+     phone opens on the BOARD (mobile v2 lane 2), so this is the board bar's
+     set: the title cell is the project switcher, then the badge, search and
+     `⋯` (README §3.2). */
   expect(closed.controls.length).toBe(4);
   for (const control of closed.controls) {
     expect(control.left).toBeGreaterThanOrEqual(0);
@@ -296,7 +330,7 @@ test("issue 613: the populated phone bar fits a 390px viewport with every contro
     expect(control.width).toBeGreaterThanOrEqual(44);
   }
   const labels = closed.controls.map((control) => control.label);
-  /* The title cell, then the three targets in the design's order. */
+  /* The title cell, then the targets in the design's order. */
   expect(labels[0]).toBe(translate("en", "mobile2.bar.switchProject"));
   expect(labels.slice(1)).toEqual([ATTENTION_LABEL, translate("en", "mobile2.bar.search"), translate("en", "mobile2.bar.more")]);
   /* Nothing from the old five-target row rides the bar. */
@@ -331,7 +365,7 @@ test("issue 613: the populated phone bar fits a 390px viewport with every contro
 
   /* Nothing was dropped: the board's two faces, undo, accounts and the host
      sheet are rows in the menu sheet, each a 44px row inside the viewport. */
-  const opened = await measure(await renderDashboard(true), "header-390-more-open");
+  const opened = await measure(await renderDashboard("board-menu"), "header-390-more-open");
   const openLabels = opened.menuControls.map((control) => control.label);
   expect(openLabels).toContain(translate("en", "mobile2.menu.board"));
   expect(openLabels.some((label) => label.startsWith(translate("en", "mobile2.menu.catalog")))).toBe(true);
@@ -345,8 +379,41 @@ test("issue 613: the populated phone bar fits a 390px viewport with every contro
     expect(control.height).toBeGreaterThanOrEqual(44);
   }
 
+  /* Measured LAST: the conversation is a screen PUSHED on the shell's stack,
+     which lives on the window and outlives one React root, so a board face read
+     after it would be read through that push.
+     The conversation screen (mobile v2 lane 3) is what a row pushes, and its
+     bar is the one the issue's screenshot showed crowded: five 44px controls
+     and four characters of title. It now carries ‹, the title cell — which IS
+     the switcher and holds the whole long title with its state meta line — the
+     badge and `⋯`. Search is a `⋯` row here rather than a target of its own
+     (README §3.1), and the cell keeps the same 190px budget with ‹ present. */
+  const chat = await measure(await renderDashboard("chat"), "chat-390");
+  expect(chat.focusedPane).toBe(true);
+  expect(chat.scrollWidth).toBeLessThanOrEqual(390);
+  expect(chat.headerScrollWidth).toBeLessThanOrEqual(chat.headerClientWidth);
+  expect(chat.controls.length).toBe(4);
+  for (const control of chat.controls) {
+    expect(control.left).toBeGreaterThanOrEqual(0);
+    expect(control.right).toBeLessThanOrEqual(390);
+    expect(control.height).toBeGreaterThanOrEqual(44);
+    expect(control.width).toBeGreaterThanOrEqual(44);
+  }
+  const chatLabels = chat.controls.map((control) => control.label);
+  expect(chatLabels[0]).toBe(translate("en", "mobile2.bar.back"));
+  expect(chatLabels[1]).toBe(translate("en", "mobile2.chat.switcher"));
+  expect(chatLabels.slice(2)).toEqual([ATTENTION_LABEL, translate("en", "mobile2.bar.more")]);
+  expect(chatLabels).not.toContain(translate("en", "mobile2.bar.search"));
+  expect(chat.titleText).toContain(ROW_TITLE);
+  expect(chat.titleWidth).toBeGreaterThanOrEqual(TITLE_MIN_PX);
+  /* And the pane under it renders no header of its own: the bar's title cell
+     is the conversation's only name on this screen (§3.4 spends 0px there). */
+  expect(chat.paneControls.length).toBe(0);
+
   fs.writeFileSync(
     path.join(EVIDENCE_DIR, "geometry.json"),
-    JSON.stringify({ "header-390": closed, "header-390-more-open": opened }, null, 2),
+    JSON.stringify({ "header-390": closed, "chat-390": chat, "header-390-more-open": opened }, null, 2),
   );
-});
+/* Three real Chromium pages, each with the production stylesheet: well past
+   bun's 5 s default. */
+}, 120_000);
