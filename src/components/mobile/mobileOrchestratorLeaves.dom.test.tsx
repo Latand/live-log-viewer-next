@@ -152,7 +152,7 @@ const dashboardProps = (over: Partial<DashboardProps> = {}): DashboardProps => (
   files: [], flows: [], pipelines: [], workflows: [], tasks: [],
   project: PROJECT, loaded: true, openNonce: 0, archived: false,
   catalogKnown: false, catalogConversationCount: 0,
-  projectCwd: "/repo/atlas", onArchive: () => {}, onUnarchive: () => {}, onMenu: () => {},
+  projectCwd: "/repo/atlas", onArchive: () => {}, onUnarchive: () => {},
   ...over,
 });
 

@@ -10,6 +10,7 @@ import { uk } from "@/lib/i18n/uk";
 import { AttentionCard } from "./AttentionCard";
 import { attentionDismissKey, isAttentionDismissed, rememberAttentionDismissed } from "./ConversationAttention";
 import type { RuntimeAttention } from "./runtimeModel";
+import { MOBILE_LAYOUT_QUERY } from "@/lib/attention/eligibility";
 
 /*
  * Issue #765, structured half: a question raised through the runtime plane
@@ -25,7 +26,7 @@ let narrowViewport = false;
 
 const dom = new Window({ url: "http://localhost/" });
 const matchMediaStub = (query: string) => ({
-  matches: narrowViewport && String(query).replace(/\s+/g, "") === "(max-width:767px)",
+  matches: narrowViewport && String(query) === MOBILE_LAYOUT_QUERY,
   media: String(query),
   onchange: null,
   addEventListener() {},

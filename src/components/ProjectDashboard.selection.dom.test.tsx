@@ -16,6 +16,7 @@ import { emptyStore } from "@/components/runtime/runtimeModel";
 import { applyBoardMutations, type BoardMutationV1 } from "@/lib/board/mutations";
 import type { FileEntry } from "@/lib/types";
 import type { BoardProjectStateV1 } from "@/lib/view/types";
+import { MOBILE_LAYOUT_QUERY } from "@/lib/attention/eligibility";
 
 const actualRuntimeHooks = await import("@/hooks/useRuntime");
 const actualConversationCatalogHooks = await import("@/hooks/useConversationCatalog");
@@ -42,7 +43,7 @@ const G = globalThis as Record<string, unknown>;
    board and by the phone's focus view, so the tests flip this between mounts. */
 let mobile = false;
 const matchMediaFor = (query: string) => ({
-  matches: mobile && String(query).includes("max-width: 767px"),
+  matches: mobile && String(query) === MOBILE_LAYOUT_QUERY,
   media: String(query),
   onchange: null,
   addEventListener() {},

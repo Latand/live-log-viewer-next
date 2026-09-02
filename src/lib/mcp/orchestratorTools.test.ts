@@ -37,8 +37,8 @@ afterEach(() => {
 const AT = "2026-07-29T00:00:00.000Z";
 const SEATED_ID = "conversation_66666666-6666-4666-8666-666666666666";
 
-function seatActive(project: string, conversationId: string, transcriptPath: string | null): void {
-  beginOrchestratorSeatIntent({ project, mandate: "own the board", clientRequestId: "seed_0000001", mode: "spawn", now: AT });
+function seatActive(project: string, conversationId: string, transcriptPath: string | null, promptVersion: number | null = null): void {
+  beginOrchestratorSeatIntent({ project, mandate: "own the board", clientRequestId: "seed_0000001", mode: "spawn", promptVersion, now: AT });
   completeOrchestratorSeatIntent({ project, clientRequestId: "seed_0000001", conversationId, path: transcriptPath, now: AT });
 }
 
@@ -409,6 +409,44 @@ test("the adoption target reaches the authorized seat route while prompt provena
   const rotate = posts.find((post) => post.pathname === "/api/orchestrator/rotate");
   expect(rotate!.body).not.toHaveProperty("conversationId");
   expect(rotate!.body).not.toHaveProperty("promptVersion");
+});
+
+/* #1452: the route's own default is the incumbent's text, which is how a seat
+   created under mandate v3 («you do not talk to the user») rotated v3 into
+   every successor. The tool decides the default from the incumbent's recorded
+   version, and the incumbent's text stays one explicit argument away. */
+test("rotate_orchestrator over a STALE seat sends the current default mandate (#1452)", async () => {
+  seatActive("proj-a", SEATED_ID, null, 3);
+  const { posts, control } = controlStub({ "/api/orchestrator/rotate": { ok: true } });
+  await bindingsWith(control).rotate_orchestrator({ clientRequestId: "rotate-stale", project: "proj-a" });
+  expect(posts).toHaveLength(1);
+  expect(posts[0]!.body.mandate).toBe(ORCHESTRATOR_SYSTEM_PROMPT);
+  expect(posts[0]!.body).not.toHaveProperty("keepIncumbentMandate");
+});
+
+test("rotate_orchestrator over a seat on the current default names no mandate, so the route keeps the incumbent's (#1452)", async () => {
+  seatActive("proj-a", SEATED_ID, null, ORCHESTRATOR_PROMPT_VERSION);
+  const { posts, control } = controlStub({ "/api/orchestrator/rotate": { ok: true } });
+  await bindingsWith(control).rotate_orchestrator({ clientRequestId: "rotate-current", project: "proj-a" });
+  expect(posts[0]!.body).not.toHaveProperty("mandate");
+});
+
+test("rotate_orchestrator over bespoke (unversioned) rules keeps them — they claim no version and are never stale (#1452)", async () => {
+  seatActive("proj-a", SEATED_ID, null, null);
+  const { posts, control } = controlStub({ "/api/orchestrator/rotate": { ok: true } });
+  await bindingsWith(control).rotate_orchestrator({ clientRequestId: "rotate-bespoke", project: "proj-a" });
+  expect(posts[0]!.body).not.toHaveProperty("mandate");
+});
+
+test("keepIncumbentMandate carries a STALE incumbent's text forward explicitly, and an explicit mandate wins over both (#1452)", async () => {
+  seatActive("proj-a", SEATED_ID, null, 3);
+  const { posts, control } = controlStub({ "/api/orchestrator/rotate": { ok: true } });
+  await bindingsWith(control).rotate_orchestrator({ clientRequestId: "rotate-keep", project: "proj-a", keepIncumbentMandate: true });
+  expect(posts[0]!.body).not.toHaveProperty("mandate");
+  expect(posts[0]!.body).not.toHaveProperty("keepIncumbentMandate");
+
+  await bindingsWith(control).rotate_orchestrator({ clientRequestId: "rotate-named", project: "proj-a", mandate: "run it my way" });
+  expect(posts[1]!.body.mandate).toBe("run it my way");
 });
 
 test("rotate_orchestrator forwards the requested effort to the rotation route so it reaches the successor spawn", async () => {

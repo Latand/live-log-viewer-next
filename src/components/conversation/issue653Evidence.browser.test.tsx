@@ -12,6 +12,7 @@ import { setLocale } from "@/lib/i18n";
 
 import { BranchPane } from "@/components/BranchPane";
 import { resetOutboxForTests } from "./outbox";
+import { MOBILE_LAYOUT_QUERY } from "@/lib/attention/eligibility";
 
 /**
  * Browser-rendered evidence for issue #653 (defect 1): a launch bubble keyed to a
@@ -55,7 +56,7 @@ Object.assign(globalThis, {
   cancelAnimationFrame: dom.cancelAnimationFrame.bind(dom),
 });
 (dom as unknown as { matchMedia(q: string): unknown }).matchMedia = (q: string) => ({
-  matches: q.includes("max-width: 767px") ? mobile : q.includes("pointer: coarse") ? mobile : false,
+  matches: q === MOBILE_LAYOUT_QUERY ? mobile : q.includes("pointer: coarse") ? mobile : false,
   media: q,
   addEventListener() {},
   removeEventListener() {},

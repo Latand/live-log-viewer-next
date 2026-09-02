@@ -229,7 +229,7 @@ test("mandate delivery keys off directive content and appends it exactly once", 
 
 /* #1245 — the handover has to reach the seat that is actually holding a
    schedule, and that seat is precisely the one NOT carrying the current
-   default: a rotation hands the successor the incumbent's mandate and version,
+   default: a rotation may keep the incumbent's mandate and version (#1452),
    and a bespoke mandate never had the paragraph at all. A paragraph that lived
    only inside the versioned default would change the clock's owner without
    telling either of them. */

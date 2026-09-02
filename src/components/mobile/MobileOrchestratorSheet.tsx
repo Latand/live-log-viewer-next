@@ -16,7 +16,7 @@ import { Badge } from "@/components/ui/Badge";
 import { useKeyboardInset } from "@/hooks/useComposer";
 import { engineBadgeFor } from "@/components/utils";
 import { useLocale, type MessageKey } from "@/lib/i18n";
-import { ORCHESTRATOR_SPAWN_CONFIG, ORCHESTRATOR_SYSTEM_PROMPT } from "@/lib/orchestrator/prompt";
+import { ORCHESTRATOR_PROMPT_VERSION, ORCHESTRATOR_SPAWN_CONFIG, ORCHESTRATOR_SYSTEM_PROMPT, orchestratorMandateStale } from "@/lib/orchestrator/prompt";
 import type { OrchestratorSeat } from "@/lib/orchestrator/seats";
 import type { FileEntry } from "@/lib/types";
 
@@ -24,7 +24,9 @@ import { boardContext, ContextMeter } from "../orchestrator/IncumbentHeader";
 import type { OrchestratorIncumbent } from "../orchestrator/incumbent";
 import {
   deriveRotateDraftState,
+  mandateSummaryOf,
   orchestratorQuietBannerEligible,
+  rotateMandateBase,
   type OrchestratorPanelState,
   type OrchestratorSeatStatus,
   type RotationHint,
@@ -352,6 +354,7 @@ export function MobileOrchestratorSheet({
                     value={mandate}
                     disabled={submitting}
                     edited={mandate !== ORCHESTRATOR_SYSTEM_PROMPT}
+                    caption={mandateSummaryOf(mandate, null)}
                     restoreKey="orchPanel.restoreDefault"
                     onChange={setMandate}
                     onRestore={() => setMandate(ORCHESTRATOR_SYSTEM_PROMPT)}
@@ -428,7 +431,17 @@ function RotateDraft({
 }) {
   const { t } = useLocale();
   const [formError, setFormError] = useState<string | null>(null);
-  const [mandate, setMandateState] = useState(() => readSeatFlowField("Rotate", project, "mandate") || seat.mandate);
+  /* The text starts from the CURRENT default when the incumbent's mandate is
+     based on an older version (#1452), the same rule the dock's draft applies;
+     the incumbent's own text is one tap away, and a seat on the current
+     version, or on bespoke rules, keeps its text. */
+  const base = rotateMandateBase(seat);
+  const staleVersion = orchestratorMandateStale(seat.promptVersion) ? seat.promptVersion : null;
+  const [mandate, setMandateState] = useState(() => readSeatFlowField("Rotate", project, "mandate") || base);
+  const setMandate = (value: string) => {
+    setMandateState(value);
+    writeSeatFlowField("Rotate", project, "mandate", value === base ? "" : value);
+  };
   /* «Prefilled» in the operator's words: what the incumbent is ACTUALLY running
      on, read through the launch module's own storage seam rather than by forking
      it. Only the initializers call `read`, so switching engine here is never
@@ -508,16 +521,14 @@ function RotateDraft({
           id="mobile-orchestrator-rotate-mandate"
           value={mandate}
           disabled={submitting}
-          edited={mandate !== seat.mandate}
-          restoreKey="orchPanel.restoreIncumbent"
-          onChange={(value) => {
-            setMandateState(value);
-            writeSeatFlowField("Rotate", project, "mandate", value === seat.mandate ? "" : value);
-          }}
-          onRestore={() => {
-            setMandateState(seat.mandate);
-            writeSeatFlowField("Rotate", project, "mandate", "");
-          }}
+          edited={mandate !== base}
+          caption={mandateSummaryOf(mandate, seat)}
+          keepIncumbent={staleVersion !== null && mandate !== seat.mandate
+            ? { version: staleVersion, onKeep: () => setMandate(seat.mandate) }
+            : null}
+          restoreKey={staleVersion === null ? "orchPanel.restoreIncumbent" : "orchPanel.restoreDefault"}
+          onChange={setMandate}
+          onRestore={() => setMandate(base)}
           cwdLine={cwd ? t("orchPanel.cwdInherited", { cwd }) : null}
         />
       </div>
@@ -574,6 +585,8 @@ function MandateField({
   value,
   disabled,
   edited,
+  caption,
+  keepIncumbent = null,
   restoreKey,
   onChange,
   onRestore,
@@ -583,6 +596,12 @@ function MandateField({
   value: string;
   disabled: boolean;
   edited: boolean;
+  /** What the text IS — the built-in default, the incumbent's, or the
+      operator's own — the same line the dock folds its rules behind. */
+  caption: ReturnType<typeof mandateSummaryOf>;
+  /** A rotation over a stale incumbent (#1452): its version, and the tap that
+      puts its own text back in the box. Null when there is nothing to offer. */
+  keepIncumbent?: { version: number; onKeep: () => void } | null;
   restoreKey: MessageKey;
   onChange: (value: string) => void;
   onRestore: () => void;
@@ -621,6 +640,24 @@ function MandateField({
         ) : null}
         <span className="ml-auto shrink-0 text-caption text-muted">{t("orchPanel.mandateSent")}</span>
       </div>
+      <p data-orchestrator-mandate-kind className="text-caption leading-4 text-muted">{t(caption.key, caption.params)}</p>
+      {keepIncumbent ? (
+        <div
+          className="flex flex-col gap-1.5 rounded-control border border-warning/45 bg-warning-soft px-3 py-2 text-ui leading-4 text-secondary"
+          data-orchestrator-mandate-stale={String(keepIncumbent.version)}
+        >
+          <span>{t("orchPanel.rotateStaleMandate", { version: keepIncumbent.version, current: ORCHESTRATOR_PROMPT_VERSION })}</span>
+          <button
+            type="button"
+            data-orchestrator-keep-incumbent
+            onClick={keepIncumbent.onKeep}
+            disabled={disabled}
+            className="inline-flex min-h-11 items-center justify-center gap-1 self-start rounded-control border border-border bg-card px-3 text-caption font-semibold text-secondary hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
+          >
+            {t("orchPanel.keepIncumbentMandate", { version: keepIncumbent.version })}
+          </button>
+        </div>
+      ) : null}
       <textarea
         id={id}
         data-orchestrator-mandate
@@ -789,7 +826,11 @@ function MandateView({ seat }: { seat: OrchestratorSeat }) {
   return (
     <details data-orchestrator-mandate-view className="shrink-0 rounded-control border border-border bg-card/60">
       <summary className="min-h-11 cursor-pointer select-none list-item px-3 py-2.5 text-label font-semibold text-secondary marker:text-muted hover:text-primary">
-        {seat.promptVersion === null ? t("orchMobile.mandateViewCustom") : t("orchMobile.mandateView", { version: seat.promptVersion })}
+        {seat.promptVersion === null
+          ? t("orchMobile.mandateViewCustom")
+          : orchestratorMandateStale(seat.promptVersion)
+            ? t("orchMobile.mandateViewStale", { version: seat.promptVersion, current: ORCHESTRATOR_PROMPT_VERSION })
+            : t("orchMobile.mandateView", { version: seat.promptVersion })}
       </summary>
       <pre className="max-h-56 overflow-y-auto whitespace-pre-wrap break-words border-t border-border px-3 py-2 font-sans text-ui leading-5 text-secondary">
         {seat.mandate}

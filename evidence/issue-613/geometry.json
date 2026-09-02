@@ -7,50 +7,37 @@
     "headerClientWidth": 390,
     "controls": [
       {
-        "label": "Open project list",
-        "left": 8,
-        "right": 52,
-        "width": 44,
+        "label": "Switch project",
+        "left": 4,
+        "right": 240.09375,
+        "width": 236.09375,
         "height": 44
       },
       {
-        "label": "Search your messages",
-        "left": 137.09375,
-        "right": 181.09375,
-        "width": 44,
+        "label": "3 need you",
+        "left": 242.09375,
+        "right": 294,
+        "width": 51.90625,
         "height": 44
       },
       {
-        "label": "3 waiting",
-        "left": 186.09375,
-        "right": 237,
-        "width": 50.90625,
-        "height": 44
-      },
-      {
-        "label": "Hidden",
-        "left": 242,
-        "right": 286,
-        "width": 44,
-        "height": 44
-      },
-      {
-        "label": "Create",
-        "left": 290,
-        "right": 334,
+        "label": "Find your messages",
+        "left": 296,
+        "right": 340,
         "width": 44,
         "height": 44
       },
       {
         "label": "More actions",
-        "left": 338,
-        "right": 382,
+        "left": 342,
+        "right": 386,
         "width": 44,
         "height": 44
       }
     ],
+    "menuControls": [],
     "titleText": "live-log-viewer-next-mobile",
-    "titleWidth": 73.09375,
+    "titleWidth": 236.09375,
     "paneControls": [
       {
         "label": "Rename “Builder · keep the conversation header inside a 390px viewp…”",
@@ -100,85 +87,122 @@
     "headerClientWidth": 390,
     "controls": [
       {
-        "label": "Open project list",
-        "left": 8,
-        "right": 52,
-        "width": 44,
+        "label": "Switch project",
+        "left": 4,
+        "right": 240.09375,
+        "width": 236.09375,
         "height": 44
       },
       {
-        "label": "Search your messages",
-        "left": 137.09375,
-        "right": 181.09375,
-        "width": 44,
+        "label": "3 need you",
+        "left": 242.09375,
+        "right": 294,
+        "width": 51.90625,
         "height": 44
       },
       {
-        "label": "3 waiting",
-        "left": 186.09375,
-        "right": 237,
-        "width": 50.90625,
-        "height": 44
-      },
-      {
-        "label": "Hidden",
-        "left": 242,
-        "right": 286,
-        "width": 44,
-        "height": 44
-      },
-      {
-        "label": "Create",
-        "left": 290,
-        "right": 334,
+        "label": "Find your messages",
+        "left": 296,
+        "right": 340,
         "width": 44,
         "height": 44
       },
       {
         "label": "More actions",
-        "left": 338,
-        "right": 382,
+        "left": 342,
+        "right": 386,
+        "width": 44,
+        "height": 44
+      }
+    ],
+    "menuControls": [
+      {
+        "label": "Close",
+        "left": 342,
+        "right": 386,
         "width": 44,
         "height": 44
       },
       {
-        "label": "View: scheme",
-        "left": 179,
-        "right": 375,
-        "width": 196,
+        "label": "New agent",
+        "left": 0,
+        "right": 390,
+        "width": 390,
         "height": 44
       },
       {
-        "label": "View: conversations",
-        "left": 179,
-        "right": 375,
-        "width": 196,
+        "label": "New task",
+        "left": 0,
+        "right": 390,
+        "width": 390,
+        "height": 44
+      },
+      {
+        "label": "New pipeline",
+        "left": 0,
+        "right": 390,
+        "width": 390,
+        "height": 44
+      },
+      {
+        "label": "Tasks1 open",
+        "left": 0,
+        "right": 390,
+        "width": 390,
+        "height": 44
+      },
+      {
+        "label": "Board",
+        "left": 0,
+        "right": 390,
+        "width": 390,
+        "height": 44
+      },
+      {
+        "label": "All conversationscatalog · 1",
+        "left": 0,
+        "right": 390,
+        "width": 390,
+        "height": 44
+      },
+      {
+        "label": "Accounts & limits",
+        "left": 0,
+        "right": 390,
+        "width": 390,
+        "height": 44
+      },
+      {
+        "label": "Host detailsreconnecting0 tasks",
+        "left": 0,
+        "right": 390,
+        "width": 390,
         "height": 44
       },
       {
         "label": "Undo",
-        "left": 179,
-        "right": 375,
-        "width": 196,
+        "left": 0,
+        "right": 390,
+        "width": 390,
         "height": 44
       },
       {
         "label": "Mute sound notifications",
-        "left": 277,
-        "right": 321,
+        "left": 282,
+        "right": 326,
         "width": 44,
         "height": 44
       },
       {
         "label": "Sound levels",
-        "left": 325,
-        "right": 369,
+        "left": 330,
+        "right": 374,
         "width": 44,
         "height": 44
       }
     ],
     "titleText": "live-log-viewer-next-mobile",
-    "titleWidth": 73.09375,
+    "titleWidth": 236.09375,
     "paneControls": [
       {
         "label": "Rename “Builder · keep the conversation header inside a 390px viewp…”",
