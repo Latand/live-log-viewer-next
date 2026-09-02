@@ -4,7 +4,7 @@ import { statePath } from "@/lib/configDir";
 import { writeJsonDurably } from "@/lib/state/durableJson";
 import { withFileTransactionSync } from "@/lib/state/fileTransaction";
 
-import { redactBounded } from "./redact";
+import { redactBounded, redactMonitorText } from "./redact";
 
 /**
  * Per-project seat tick settings (issue #1275).
@@ -48,14 +48,17 @@ export const SEAT_TICK_SETTINGS_SCHEMA_VERSION = 1;
 const REASON_LIMIT = 500;
 
 /**
- * Bound on the agent-authored monitor prompt (#1280).
+ * Bound on the agent-authored monitor prompt (#1280, widened by #1450).
  *
- * Wider than a reason, because a prompt is an instruction rather than a label,
- * and far short of the wake's own 4,000-character bound so that whatever a seat
- * writes here can never crowd out the reasons, the items and the contract the
- * wake exists to carry.
+ * Wide enough to hold a working state note — a lane list, the traps, the next
+ * step — because that is what an orchestrator seat actually writes here. A
+ * prompt over the limit is REFUSED by {@link applySeatTickSettingsChange},
+ * never cut: the first version of this cap sliced silently at a thousand
+ * characters and a seat lost the tail of every note for hours without one
+ * reply saying so. The wake keeps its own 4,000-character bound and shows a
+ * marked preview of a long note; the full text is always the record.
  */
-export const SEAT_TICK_PROMPT_LIMIT = 1_000;
+export const SEAT_TICK_PROMPT_LIMIT = 16_000;
 
 /**
  * Ceiling on an explicit wake interval, in minutes: one year.
@@ -198,6 +201,9 @@ function normalizeRow(project: string, value: unknown): SeatTickSettings {
     enabled: raw.enabled !== false,
     wakeIntervalMinutes: normalizeInterval(raw.wakeIntervalMinutes),
     reason: typeof raw.reason === "string" && raw.reason.trim() ? raw.reason.slice(0, REASON_LIMIT) : null,
+    /* A stored value over the limit is clamped here, not refused: a file
+       written under a wider or older rule still has to load. Refusing is the
+       writer's job, above, where the caller is there to hear it. */
     monitorPrompt: typeof raw.monitorPrompt === "string" && raw.monitorPrompt.trim()
       ? raw.monitorPrompt.slice(0, SEAT_TICK_PROMPT_LIMIT)
       : null,
@@ -377,15 +383,22 @@ export function applySeatTickSettingsChange(
   }
 
   /* Set, replaced and cleared exactly the way the reason is, through this one
-     surface. It is stored redacted and bounded rather than refused when it runs
-     long, so a caller is never turned away for a sentence too many — what it
-     wrote back is what the record returns. */
+     surface. Unlike the reason it is refused, not clamped, when it runs long
+     (#1450): a state note whose tail is dropped silently is a note the seat
+     believes it still has. The error names the limit and the given length so
+     the writer can shorten it; nothing is stored on a refusal. */
   let monitorPrompt = current.monitorPrompt ?? null;
   if (Object.hasOwn(change, "monitorPrompt")) {
     const raw = change.monitorPrompt;
     if (raw === null) monitorPrompt = null;
     else if (typeof raw !== "string") return { ok: false, error: "monitorPrompt must be a string, or null to clear it" };
-    else monitorPrompt = redactBounded(raw, SEAT_TICK_PROMPT_LIMIT) || null;
+    else {
+      const redacted = redactMonitorText(raw).trim();
+      if (raw.length > SEAT_TICK_PROMPT_LIMIT || redacted.length > SEAT_TICK_PROMPT_LIMIT) {
+        return { ok: false, error: `monitorPrompt is ${raw.length} characters; the limit is ${SEAT_TICK_PROMPT_LIMIT}. Nothing was stored — shorten the note and send it again` };
+      }
+      monitorPrompt = redacted || null;
+    }
   }
 
   const next: SeatTickSettings = {

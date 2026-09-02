@@ -217,9 +217,36 @@ test("a prompt is redacted and bounded before it is stored anywhere", () => {
   expect(leaky.monitorPrompt).toContain("read the notes at");
   expect(leaky.monitorPrompt).not.toContain("someone");
 
-  const long = settingsOf(change(defaultSeatTickSettings(PROJECT), { monitorPrompt: "w".repeat(SEAT_TICK_PROMPT_LIMIT + 500) }));
-  expect(long.monitorPrompt!.length).toBe(SEAT_TICK_PROMPT_LIMIT);
-  expect(long.monitorPrompt!.endsWith("…")).toBe(true);
+  /* A note that fills the whole allowance is stored whole: the first cap cut
+     silently at a thousand characters and a seat lost the tail of every state
+     note it wrote (#1450). */
+  const full = settingsOf(change(defaultSeatTickSettings(PROJECT), { monitorPrompt: "w".repeat(SEAT_TICK_PROMPT_LIMIT) }));
+  expect(full.monitorPrompt).toHaveLength(SEAT_TICK_PROMPT_LIMIT);
+  expect(full.monitorPrompt!.endsWith("…")).toBe(false);
+});
+
+test("a prompt over the limit is refused with the limit and its own length, and nothing is stored (#1450)", () => {
+  const kept = settingsOf(change(defaultSeatTickSettings(PROJECT), { monitorPrompt: "the note that stands" }));
+  expect(SEAT_TICK_PROMPT_LIMIT).toBe(16_000);
+  const result = change(kept, { monitorPrompt: "w".repeat(SEAT_TICK_PROMPT_LIMIT + 500) });
+  expect(result).toEqual({
+    ok: false,
+    error: `monitorPrompt is ${SEAT_TICK_PROMPT_LIMIT + 500} characters; the limit is ${SEAT_TICK_PROMPT_LIMIT}. Nothing was stored — shorten the note and send it again`,
+  });
+  /* The refusal is a refusal of the whole change: the record it was applied to
+     is untouched, there is no truncated version of the note anywhere. */
+  expect(kept.monitorPrompt).toBe("the note that stands");
+});
+
+test("an over-long prompt already on disk still loads, clamped, so an old file never stops a check (#1450)", () => {
+  const file = settingsFile();
+  fs.writeFileSync(file, JSON.stringify({
+    version: 1,
+    projects: { [PROJECT]: { ...defaultSeatTickSettings(PROJECT), monitorPrompt: "n".repeat(SEAT_TICK_PROMPT_LIMIT + 5), updatedAt: new Date(NOW).toISOString() } },
+  }));
+  const loaded = readSeatTickSettings(PROJECT, file);
+  expect(loaded.monitorPrompt).toHaveLength(SEAT_TICK_PROMPT_LIMIT);
+  expect(loaded.updatedAt).toBe(new Date(NOW).toISOString());
 });
 
 test("the prompt is untouched by the settings around it: quieting, restoring, and the expiry", () => {

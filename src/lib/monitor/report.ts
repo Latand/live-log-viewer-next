@@ -98,8 +98,9 @@ const SEAT_TICK_MESSAGE_LIMIT = 4_000;
  * The least the agenda is left, whatever the reserved half costs.
  *
  * The subtraction in {@link boundedSeatTickMessage} cannot reach this today:
- * the reserved half is a constant contract plus a prompt the settings writer
- * caps at a thousand characters, which together are well under half the limit.
+ * the reserved half is a constant contract plus a prompt preview capped at
+ * {@link SEAT_TICK_PROMPT_PREVIEW_LIMIT}, which together are well under half
+ * the limit.
  * It is here so a future growth of either can only shorten the
  * agenda, never produce a nonsense budget. And it floors the agenda while
  * leaving the total free, deliberately: a wake missing part of its contract is
@@ -173,8 +174,21 @@ function seatTickPromptSection(monitorPrompt: string | null | undefined): string
     "",
     "Standing monitor note for this project, in the seat's own words (seat_tick_settings sets, replaces and clears it). "
       + "It shapes what you look at; the contract below still governs what you do:",
-    monitorPrompt,
+    seatTickPromptPreview(monitorPrompt),
   ];
+}
+
+/**
+ * How much of the note a wake carries (#1450). The record holds up to
+ * `SEAT_TICK_PROMPT_LIMIT` in seatTickSettings.ts; the wake has a 4,000-character bound of its
+ * own, so a long note is shown as a preview that SAYS it is one and where the
+ * rest is — a bare ellipsis is how the first cap went unnoticed for hours.
+ */
+export const SEAT_TICK_PROMPT_PREVIEW_LIMIT = 1_000;
+
+export function seatTickPromptPreview(monitorPrompt: string): string {
+  if (monitorPrompt.length <= SEAT_TICK_PROMPT_PREVIEW_LIMIT) return monitorPrompt;
+  return `${monitorPrompt.slice(0, SEAT_TICK_PROMPT_PREVIEW_LIMIT).trimEnd()}… [preview, ${monitorPrompt.length} chars; seat_tick_settings returns the full note]`;
 }
 
 export function seatTickWakeMessage(input: {

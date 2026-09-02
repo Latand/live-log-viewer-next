@@ -23,6 +23,7 @@ import { productionLivenessSources } from "@/lib/lifecycle/liveness";
 import { refreshLifecycleJournal } from "@/lib/lifecycle/projector";
 
 import { defaultMcpSpawnRoleParams, viewerMcpBindings } from "./bindings";
+import { SEAT_TICK_PROMPT_LIMIT } from "@/lib/monitor/seatTickSettings";
 import {
   createMcpToolService,
   MemoryMcpReceiptStore,
@@ -2487,6 +2488,10 @@ test("seat_tick_settings sets, replaces and clears the monitor prompt, and the r
   });
   expect(set).toMatchObject({
     changed: true,
+    /* The stored note in full and its length ride the reply (#1450), so a seat
+       can check what persisted against what it sent. */
+    monitorPrompt: "before the items, check whether last night's digest actually sent",
+    monitorPromptLength: "before the items, check whether last night's digest actually sent".length,
     effective: { monitorPrompt: "before the items, check whether last night's digest actually sent" },
   });
 
@@ -2503,6 +2508,14 @@ test("seat_tick_settings sets, replaces and clears the monitor prompt, and the r
     .toMatchObject({ changed: false, effective: { monitorPrompt: "the digest is fixed; watch the review rounds instead" } });
 
   await bindings.seat_tick_settings({ clientRequestId: "tick-prompt-clear", monitorPrompt: null });
+  expect(store.get("viewer")).toMatchObject({ monitorPrompt: null });
+  expect(await bindings.seat_tick_settings({ clientRequestId: "tick-prompt-read-len" }))
+    .toMatchObject({ monitorPrompt: null, monitorPromptLength: 0 });
+
+  /* Over the limit the write is refused out loud, with nothing stored (#1450). */
+  const longNote = "n".repeat(SEAT_TICK_PROMPT_LIMIT + 1);
+  await expect(bindings.seat_tick_settings({ clientRequestId: "tick-prompt-long", monitorPrompt: longNote }))
+    .rejects.toThrow(`monitorPrompt is ${SEAT_TICK_PROMPT_LIMIT + 1} characters; the limit is ${SEAT_TICK_PROMPT_LIMIT}`);
   expect(store.get("viewer")).toMatchObject({ monitorPrompt: null });
   expect(await bindings.seat_tick_settings({ clientRequestId: "tick-prompt-read-3" }))
     .toMatchObject({ changed: false, effective: { monitorPrompt: null } });
