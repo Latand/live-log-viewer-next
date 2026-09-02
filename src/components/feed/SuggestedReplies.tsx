@@ -17,7 +17,7 @@ import { enqueueOutbox, type OutboxEntry } from "../conversation/outbox";
 import { mintIdempotencyKey } from "../runtime/runtimeModel";
 import { appendComposerDraft } from "../TmuxComposer";
 import type { FeedEntry } from "./parse";
-import { answerPendingQuestionWithText } from "./QuestionCard";
+import { answerPendingQuestionWithText, subscribeQuestionAnswers } from "./QuestionCard";
 
 /**
  * The manager's reply drafts, as pills the operator answers with (#1202).
@@ -40,7 +40,10 @@ import { answerPendingQuestionWithText } from "./QuestionCard";
  * question card's own seam, so the card folds and the reply is the user's
  * bubble; otherwise the text enters the conversation's outbox — the same
  * write-ahead queue the composer's send button feeds — and the mounted
- * composer dispatches it. The chips retire the moment one is tapped.
+ * composer dispatches it. The chips retire the moment one is tapped, and the
+ * moment the pending question is answered any other way (an option row, a
+ * typed answer): a chip left live under an answered question would re-post
+ * the reply and be refused.
  */
 
 export interface SuggestedRepliesProps {
@@ -243,6 +246,20 @@ export function SuggestedReplies({ file, revision, items, outbox, floating = fal
     if (!answered || !set || !conversationId) return;
     if (cache.get(conversationId)?.setId === set.setId) cache.set(conversationId, null);
   }, [answered, set, conversationId]);
+
+  /* The phone's chips answer the pending question, so they go the instant it
+     is answered from anywhere — the card's option rows, its own field, or
+     another chip — ahead of the transcript echo. */
+  const pendingToolUseId = file.pendingQuestion?.toolUseId ?? null;
+  const setId = set?.setId ?? null;
+  useEffect(() => {
+    if (!isMobile || !pendingToolUseId || !setId) return;
+    return subscribeQuestionAnswers((event) => {
+      if (!event.ok || event.toolUseId !== pendingToolUseId) return;
+      setSentSetId(setId);
+      if (conversationId && cache.get(conversationId)?.setId === setId) cache.set(conversationId, null);
+    });
+  }, [isMobile, pendingToolUseId, setId, conversationId]);
 
   if (!set || answered || sentSetId === set.setId) return null;
   const cardId = conversationIdentity(file);

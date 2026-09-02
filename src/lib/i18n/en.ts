@@ -2361,5 +2361,4 @@ export const en = {
   "mobile2.feed.runFailed": { one: "{count} actions, {failed} failed — expands in place", other: "{count} actions, {failed} failed — expands in place" },
   "mobile2.feed.runFold": "{count} actions — expands in place",
   "mobile2.feed.ownAnswerHint": "Or type your own answer — it is sent as the reply.",
-  "mobile2.feed.replySent": "Reply sent",
 } satisfies Dictionary;

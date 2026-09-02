@@ -10,7 +10,7 @@ import { tr, type CmdGroupItem, type ToolEvent } from "../parse";
 import { elapsedDurationMs, formatDuration } from "../duration";
 import { coalesceFollowUps, groupNestedCalls } from "../toolBlocks";
 import { StatusIcon } from "./shared";
-import { MobileRunRow, PollRow, ToolBlockRow, ToolLine } from "./ToolCard";
+import { MobileRunRow, PollRow, ToolBlockRow, ToolLine, isPendingQuestionCall, mobileClock } from "./ToolCard";
 
 /* The ordered list of readable blocks an opened run shows — one per top-level
    call, wait/stdin follow-ups nested under the exec that owns them (issue
@@ -71,6 +71,9 @@ function MobileCmdGroup({ item }: { item: CmdGroupItem }) {
   const last = calls[calls.length - 1];
   const trailingRun = last && last.status === "run" ? last : null;
   const done = trailingRun ? calls.slice(0, -1) : calls;
+  /* A run that ends in the pending question shows no line for it: the
+     question card under the feed is that line. */
+  const trailingLine = trailingRun && !isPendingQuestionCall(trailingRun) ? trailingRun : null;
   if (item.hasErr) {
     return (
       <div data-mobile-run="failed" className="my-1.5 w-full rounded-control border border-border bg-sunken px-2 py-0.5">
@@ -91,8 +94,8 @@ function MobileCmdGroup({ item }: { item: CmdGroupItem }) {
   }
   const first = done[0];
   const lastDone = done[done.length - 1];
-  const t0 = hhmm(first?.ts);
-  const t1 = hhmm(lastDone?.endTs ?? lastDone?.ts);
+  const t0 = mobileClock(first?.ts);
+  const t1 = mobileClock(lastDone?.endTs ?? lastDone?.ts);
   const range = t0 && t1 && t0 !== t1 ? `${t0}–${t1}` : t0 || t1;
   const tools = mobileToolSummary(done);
   return (
@@ -127,7 +130,7 @@ function MobileCmdGroup({ item }: { item: CmdGroupItem }) {
       ) : first ? (
         <ToolLine event={first} />
       ) : null}
-      {trailingRun ? <ToolLine event={trailingRun} /> : null}
+      {trailingLine ? <ToolLine event={trailingLine} /> : null}
     </div>
   );
 }

@@ -50,6 +50,7 @@ Object.assign(globalThis, {
 });
 
 const { SuggestedReplies } = await import("./SuggestedReplies");
+const { QuestionCard } = await import("./QuestionCard");
 const { readOutbox, resetOutboxForTests } = await import("../conversation/outbox");
 
 const SET_AT = "2026-09-02T13:55:00.000Z";
@@ -183,6 +184,29 @@ test("phone: with a pane-backed question pending a chip answers it and the row r
   expect(readOutbox("conv_answer")).toHaveLength(0);
   expect(sessionStorage.getItem("llvDraft:conv_answer")).toBeNull();
   expect(host.querySelector("[data-reply-suggestions]")).toBeNull();
+});
+
+test("phone: answering the question from the card retires the chips, so no chip can re-post", async () => {
+  narrowViewport = true;
+  const entry = file("conv_card_answer", pendingQuestion("lanes:2.0"));
+  const host = mount(
+    <>
+      <QuestionCard file={entry} />
+      <SuggestedReplies file={entry} revision="1" />
+    </>,
+  );
+  await settle(host, "[data-reply-suggestion]", drafts.length);
+  expect(host.querySelector("[data-mobile-chips]")).toBeTruthy();
+  /* The card's own option row, inside the card — the chip carries the same label. */
+  const option = [...host.querySelector("#question")!.querySelectorAll("button")].find((b) => (b.textContent ?? "").includes("NDJSON"))!;
+  flushSync(() => { option.click(); });
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  expect(requests.filter((entry) => entry.url === "/api/answer")).toHaveLength(1);
+  expect(host.querySelector('[data-mobile-question="answered"]')).toBeTruthy();
+  /* The chips went with the answer: nothing left to tap, nothing to re-post. */
+  expect(host.querySelector("[data-reply-suggestions]")).toBeNull();
+  expect(host.querySelectorAll("[data-reply-suggestion]")).toHaveLength(0);
+  expect(readOutbox("conv_card_answer")).toHaveLength(0);
 });
 
 test("phone: a question with no pane cannot take the chip, so the chip sends as a message", async () => {

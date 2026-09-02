@@ -86,7 +86,7 @@ export function deliveryErrorKey(status: number, body: { noPane?: boolean; deliv
  * shared parent that owns the question.
  */
 export type QuestionAnswerEvent =
-  | { toolUseId: string; ok: true; text: string; answer: string; at: number }
+  | { toolUseId: string; ok: true; text: string; answer: string; at: number; picks?: Record<number, number[]> | null }
   | { toolUseId: string; ok: false; text: string; key: MessageKey; superseded?: string };
 
 const answerListeners = new Set<(event: QuestionAnswerEvent) => void>();
@@ -132,6 +132,10 @@ function answeredClock(locale: Locale, at: number): string {
   return new Date(at).toLocaleTimeString(locale === "uk" ? "uk-UA" : "en-US", { hour12: false, hour: "2-digit", minute: "2-digit" });
 }
 
+/* Mobile v2 (#1439, lane 4): the picks an answer carried, shown marked in the
+   folded card's expansion. `null` for a typed answer or a chip. */
+type Picks = Record<number, number[]> | null;
+
 function labelFor(question: PendingQuestionItem, value: number): string {
   return question.options[value]?.label ?? String(value + 1);
 }
@@ -159,7 +163,7 @@ export function QuestionCard({ file }: { file: FileEntry }) {
   /* Mobile v2 (#1439, lane 4): when the reply went and which picks it
      carried, for the folded `question · answered` line and its expansion. */
   const [answeredAt, setAnsweredAt] = useState<number | null>(null);
-  const [answeredPicks, setAnsweredPicks] = useState<Record<number, number[]> | null>(null);
+  const [answeredPicks, setAnsweredPicks] = useState<Picks>(null);
   const [foldOpen, setFoldOpen] = useState(false);
   const pendingToolUseId = pending?.toolUseId ?? null;
   useEffect(() => {
@@ -170,7 +174,7 @@ export function QuestionCard({ file }: { file: FileEntry }) {
         setState("answered");
         setMessage(event.answer);
         setAnsweredAt(event.at);
-        setAnsweredPicks(null);
+        setAnsweredPicks(event.picks ?? null);
         setFailedAnswers(null);
         return;
       }
@@ -361,10 +365,15 @@ export function QuestionCard({ file }: { file: FileEntry }) {
         setFailedAnswers(selection);
         return;
       }
+      const at = Date.now();
       setState("answered");
       setMessage(json.answer ?? optimistic);
-      setAnsweredAt(Date.now());
+      setAnsweredAt(at);
       setAnsweredPicks(selection);
+      /* The card's own answer goes out on the same seam a chip's does, so the
+         suggested-reply row retires with it (mobile v2, #1439 lane 4): a chip
+         left live under an answered question would re-post and get a 409. */
+      announceQuestionAnswer({ toolUseId: pending.toolUseId, ok: true, text: optimistic, answer: json.answer ?? optimistic, at, picks: selection });
     } catch {
       setState("failed");
       setMessage(t("common.serverUnavailable"));
@@ -482,6 +491,54 @@ export function QuestionCard({ file }: { file: FileEntry }) {
     return (
       <div id="question" className="my-4 rounded-[8px] border border-border bg-sunken px-4 py-3 text-[13px] font-semibold text-muted">
         {t("question.answeredElsewhere", { text: message })}
+      </div>
+    );
+  }
+
+  if (pending && !hasPane && isMobile) {
+    /* Mobile v2 (#1439, lane 4; README §4.3, audit finding 6): the question
+       with no pane to answer through keeps the phone card's shape — "Needs
+       you" header, the question at 15 px / 600, the options as inert rows —
+       and states the transport as a caption under it, never as the headline;
+       the one control is a 44 px "Open session". */
+    const askedAtSeconds = Math.floor(Date.parse(pending.askedAt) / 1000);
+    const since = Number.isFinite(askedAtSeconds) ? elapsed(t, askedAtSeconds) : "";
+    return (
+      <div id="question" data-mobile-question="unreachable" className="mt-3 rounded-surface border border-warning/45 bg-warning-soft px-3 pb-2.5 pt-1">
+        <div className="flex min-h-11 items-center gap-1.5 text-label font-bold text-warning">
+          <TriangleAlert className="h-3.5 w-3.5 shrink-0" aria-hidden />
+          <span className="min-w-0 truncate">{since ? `${t("mobile2.feed.needsYou")} · ${since}` : t("mobile2.feed.needsYou")}</span>
+          {dismissButton}
+        </div>
+        {pending.kind === "plan" ? (
+          <pre className="max-h-[420px] overflow-auto whitespace-pre-wrap break-words rounded-control border border-border bg-card px-3 py-2 text-[13px]">
+            {pending.plan}
+          </pre>
+        ) : (
+          pending.questions?.map((question, qIndex) => (
+            <section key={qIndex} className="mt-2 first:mt-0">
+              {question.header ? <div className="text-label font-semibold text-muted">{question.header}</div> : null}
+              <p className="mb-1 text-title font-semibold text-primary">{question.question}</p>
+              {question.options.map((option, index) => (
+                <div key={index} className="mt-1.5 flex min-h-11 items-center gap-2.5 rounded-control border border-border bg-card px-3 py-1.5 text-title text-secondary">
+                  <i aria-hidden className="h-4 w-4 shrink-0 rounded-full border-[1.5px] border-border" />
+                  <span className="min-w-0">{option.label}</span>
+                </div>
+              ))}
+            </section>
+          ))
+        )}
+        <p role="note" data-question-transport="unavailable" className="mt-2 text-label text-muted">{t("question.noPane")}</p>
+        <button
+          type="button"
+          data-question-open-session
+          className="mt-2 inline-flex min-h-11 w-full items-center justify-center rounded-control bg-accent px-3 text-title font-semibold text-white disabled:opacity-60"
+          disabled={resuming}
+          onClick={resume}
+        >
+          {t("question.openSession")}
+        </button>
+        {message ? <div className="mt-2 text-label font-semibold text-muted">{message}</div> : null}
       </div>
     );
   }
@@ -616,6 +673,9 @@ export function QuestionCard({ file }: { file: FileEntry }) {
                 })}
               </section>
             ))}
+            {questionCount <= 1 ? (
+              <p data-question-own-answer-hint className="mt-2 text-label text-muted">{t("mobile2.feed.ownAnswerHint")}</p>
+            ) : null}
             {questionCount <= 1 ? (
               <div className="mt-2 flex gap-1.5">
                 <input

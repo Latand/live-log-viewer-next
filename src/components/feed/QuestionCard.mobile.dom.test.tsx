@@ -8,7 +8,7 @@ import { en } from "@/lib/i18n/en";
 import { translate } from "@/lib/i18n";
 import type { FileEntry, PendingQuestion } from "@/lib/types";
 
-import { QuestionCard, answerPendingQuestionWithText } from "./QuestionCard";
+import { QuestionCard, answerPendingQuestionWithText, subscribeQuestionAnswers, type QuestionAnswerEvent } from "./QuestionCard";
 
 /*
  * Mobile v2 (#1439, lane 4; README §4.3): on the phone the question card is
@@ -159,8 +159,14 @@ test("phone: the card leads with the question, 44 px option rows and a 16 px own
     expect(classOf(option)).toContain("text-title");
     expect(option.querySelector("i")).toBeTruthy();
   }
-  /* The own-answer field: 44 px, 16 px type so iOS never zooms, a 44 px send. */
+  /* Under the options, the approved card's one muted line (README §4.3),
+     then the own-answer field: 44 px, 16 px type so iOS never zooms, a 44 px
+     send. */
+  const hint = card.querySelector("[data-question-own-answer-hint]")!;
+  expect(hint.textContent).toBe(en["mobile2.feed.ownAnswerHint"]);
+  expect(options[2]!.compareDocumentPosition(hint) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   const input = card.querySelector("input")!;
+  expect(hint.compareDocumentPosition(input) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   expect(classOf(input)).toContain("min-h-11");
   expect(classOf(input)).toContain("text-[16px]");
   expect(input.getAttribute("placeholder")).toBe(en["question.ownAnswer"]);
@@ -212,6 +218,26 @@ test("phone: an option sends on tap, the reply is the user bubble, the card fold
 
   click(fold);
   expect(answered.querySelector("[data-question-fold-body]")).toBeNull();
+});
+
+test("phone: an option answer goes out on the chip seam with its picks, so the chip row can retire", async () => {
+  narrowViewport = true;
+  const heard: QuestionAnswerEvent[] = [];
+  const unsubscribe = subscribeQuestionAnswers((event) => { heard.push(event); });
+  try {
+    const host = mount(<QuestionCard file={questionFile()} />);
+    click([...host.querySelectorAll("button")].find((b) => (b.textContent ?? "").includes(OPTIONS[1]!))!);
+    await tick();
+    expect(heard).toHaveLength(1);
+    expect(heard[0]).toMatchObject({ toolUseId: "toolu_export_format", ok: true, text: OPTIONS[1], picks: { 0: [1] } });
+    /* The card heard its own announcement and still marks the pick. */
+    click(host.querySelector("[data-question-fold]")!);
+    const chosen = host.querySelectorAll('[data-choice-state="selected"]');
+    expect(chosen).toHaveLength(1);
+    expect(chosen[0]!.textContent).toBe(OPTIONS[1]);
+  } finally {
+    unsubscribe();
+  }
 });
 
 test("phone: a typed own answer sends and becomes the bubble", async () => {
@@ -278,10 +304,26 @@ test("phone: without a pane the transport state is a caption under the question,
   const file = questionFile();
   file.pendingQuestion!.paneTarget = null;
   const host = mount(<QuestionCard file={file} />);
-  const note = host.querySelector('[data-question-transport="unavailable"]')!;
+  const card = host.querySelector('[data-mobile-question="unreachable"]')!;
+  expect(card).toBeTruthy();
+  /* The phone card's own shape: "Needs you" header, no waiting pill. */
+  expect(card.textContent).toContain(en["mobile2.feed.needsYou"]);
+  expect(card.textContent).not.toContain(en["question.waiting"]);
+  expect(classOf(card)).toContain("bg-warning-soft");
+  const question = [...card.querySelectorAll("p")].find((el) => el.textContent === "Which format should the export endpoint default to?")!;
+  expect(classOf(question)).toContain("text-title");
+  /* The options are shown to read, none of them a control. */
+  expect(OPTIONS.every((label) => (card.textContent ?? "").includes(label))).toBe(true);
+  expect([...card.querySelectorAll("button")].filter((b) => OPTIONS.some((label) => (b.textContent ?? "").includes(label)))).toHaveLength(0);
+  const note = card.querySelector('[data-question-transport="unavailable"]')!;
   expect(note.textContent).toBe(en["question.noPane"]);
-  const question = [...host.querySelectorAll("*")].find((el) => el.textContent === "Which format should the export endpoint default to?")!;
   expect(question.compareDocumentPosition(note) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  /* The one control is a 44 px "Open session" under the caption. */
+  const open = card.querySelector("[data-question-open-session]")!;
+  expect(open.textContent).toBe(en["question.openSession"]);
+  expect(classOf(open)).toContain("min-h-11");
+  expect(note.compareDocumentPosition(open) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(classOf(card.querySelector(`button[aria-label="${en["question.dismiss"]}"]`))).toContain("h-11 w-11");
 });
 
 test("desktop: the card keeps its waiting chip, numbered options and green answered band", async () => {

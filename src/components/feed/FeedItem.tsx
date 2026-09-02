@@ -24,7 +24,7 @@ import { ProtocolMessageBody, parseProtocolPayload } from "./cards/ProtocolMessa
 import { ReviewCard } from "./cards/ReviewCard";
 import { RecordCard } from "./cards/RecordCard";
 import { SysMsgCard } from "./cards/SysMsgCard";
-import { ToolCard } from "./cards/ToolCard";
+import { ToolCard, mobileClock } from "./cards/ToolCard";
 import { WakeupCard } from "./cards/WakeupCard";
 import { SpeakButton } from "./SpeakButton";
 import { McpCallCard } from "../runtime/McpCallCard";
@@ -126,7 +126,7 @@ export const FeedItem = memo(function FeedItem({ item: sourceItem, speakText }: 
          starts under it at 15 px. The wrapper carries no vertical margin and
          nothing negative: the header's own height is the gap above the
          message, so it can never overlap the text. */
-      const time = hhmm(item.ts);
+      const time = mobileClock(item.ts);
       return (
         <div className="group/msg" data-mobile-message="agent">
           <div data-mobile-message-header className="flex h-11 w-full items-center gap-1.5 text-label text-muted">

@@ -143,7 +143,9 @@ test("phone: the message header is a 44 px target above the prose, never over it
   const glyph = header.querySelector("svg");
   expect(classOf(glyph)).toContain("h-4");
   expect(header.textContent).toContain("Claude");
+  /* The phone's clock is HH:MM (README §5): no seconds anywhere on the line. */
   expect(header.textContent).toContain("13:43");
+  expect(header.textContent).not.toMatch(/\d{2}:\d{2}:\d{2}/);
   /* The message actions live in the header row: the copy control is there,
      and the read-aloud control shares the same cluster once the speech
      backend reports itself (it renders nothing without one, as here). */
@@ -167,7 +169,7 @@ test("phone: a lone tool call is one 44 px line with no chrome indent, and says 
   const host = mount(
     <>
       <FeedItem item={tool()} />
-      <FeedItem item={tool({ id: "call-2", status: "run", statusLabel: "running", summary: "bun test src/lib/accounts" })} />
+      <FeedItem item={tool({ id: "call-2", status: "run", statusLabel: "executing…", summary: "bun test src/lib/accounts" })} />
     </>,
   );
   const lines = host.querySelectorAll("[data-mobile-tool-line]");
@@ -175,8 +177,29 @@ test("phone: a lone tool call is one 44 px line with no chrome indent, and says 
   for (const line of lines) expect(classOf(line)).toContain("min-h-11");
   for (const details of host.querySelectorAll("details")) expect(classOf(details)).not.toContain("ml-9");
   expect(lines[0]!.getAttribute("data-mobile-tool-line")).toBe("done");
+  /* HH:MM, never seconds, on the phone's line. */
+  expect(lines[0]!.textContent).toContain("13:57");
+  expect(lines[0]!.textContent).not.toMatch(/\d{2}:\d{2}:\d{2}/);
   expect(lines[1]!.getAttribute("data-mobile-tool-line")).toBe("running");
   expect(lines[1]!.textContent).toContain(tr("mobile2.feed.running", { summary: "bun test src/lib/accounts" }));
+  /* One spinner and one state word: the status chip ("executing…" with its
+     own spinner) stays off the phone's running line. */
+  expect(lines[1]!.querySelectorAll(".animate-spin")).toHaveLength(1);
+  expect(lines[1]!.textContent).not.toContain("executing…");
+});
+
+test("phone: the running question tool renders no line, the card under it is that line; the desktop keeps it", () => {
+  const asking = () => tool({ id: "call-q", tool: "AskUserQuestion", family: "other", icon: "note", status: "run", statusLabel: "running", summary: "Which format should the export endpoint default to?" });
+  narrowViewport = true;
+  const phone = mount(<FeedItem item={asking()} />);
+  expect(phone.querySelector("details")).toBeNull();
+  expect(phone.textContent).toBe("");
+  flushSync(() => root!.unmount());
+  root = null;
+  narrowViewport = false;
+  const desktop = mount(<FeedItem item={asking()} />);
+  expect(desktop.querySelector("details")).toBeTruthy();
+  expect(desktop.textContent).toContain("Which format");
 });
 
 test("phone: internal relay cards drop the avatar-column indent too", () => {

@@ -102,7 +102,9 @@ test("phone: a clean run of two folds to one 44 px line with counts and a time r
   expect(classOf(fold)).toContain("w-full");
   expect(fold.textContent).toContain(en("render.actions", { count: 2 }));
   expect(fold.textContent).toContain("Bash ×2");
-  expect(fold.textContent).toMatch(/10:00:00–10:00:0[0-9]/);
+  /* HH:MM (README §5): the two calls share a minute, so one clock, no seconds. */
+  expect(fold.textContent).toMatch(/10:00$/);
+  expect(fold.textContent).not.toMatch(/\d{2}:\d{2}:\d{2}/);
   /* Folded: no readable block, no per-call lines, no desktop details. */
   expect(fold.getAttribute("aria-expanded")).toBe("false");
   expect(host.querySelector("ol")).toBeNull();
@@ -148,6 +150,19 @@ test("phone: the running tool stays its own last line under the folded settled c
   expect(host.querySelector("ol")).toBeNull();
 });
 
+test("phone: a run ending in the pending question shows the settled calls only — the question card is that line", () => {
+  narrowViewport = true;
+  const item = runningGroup();
+  item.calls[2] = toolEvent({ id: "r-q", tool: "AskUserQuestion", family: "other", icon: "note", summary: "Which format should the export endpoint default to?", status: "run", statusLabel: "running", ts: "2026-07-10T10:00:02Z" });
+  item.byTool = { Read: 2, AskUserQuestion: 1 };
+  const host = mount(<CmdGroupCard item={item} />);
+  const fold = host.querySelector("[data-mobile-run-fold]")!;
+  expect(fold.textContent).toContain(en("render.actions", { count: 2 }));
+  expect(host.querySelector("[data-mobile-tool-line]")).toBeNull();
+  expect(host.textContent).not.toContain("AskUserQuestion");
+  expect(host.textContent).not.toContain("Which format");
+});
+
 test("phone: a run with a failure is one sunken block of 36 px items with the detail under the failure", () => {
   narrowViewport = true;
   const host = mount(<CmdGroupCard item={activeFailureGroup()} />);
@@ -165,6 +180,7 @@ test("phone: a run with a failure is one sunken block of 36 px items with the de
   expect(rows[1]!.getAttribute("data-mobile-run-row")).toBe("failed");
   expect(classOf(rows[1])).toContain("text-danger");
   expect(rows[1]!.textContent).toContain("exit 3");
+  for (const row of rows) expect(row.textContent).not.toMatch(/\d{2}:\d{2}:\d{2}/);
   /* The detail sits under the failed row: the first lines of what it said. */
   const detail = block.querySelector("[data-mobile-run-detail]")!;
   expect(detail).toBeTruthy();

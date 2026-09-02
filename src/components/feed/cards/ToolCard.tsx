@@ -3,6 +3,7 @@
 import { useState } from "react";
 
 import { useIsMobile } from "@/hooks/useIsMobile";
+import { getLocale } from "@/lib/i18n";
 
 import { GlyphIcon, Loader2 } from "../../icons";
 import { hhmm } from "../../utils";
@@ -18,6 +19,25 @@ import { StatusIcon } from "./shared";
 
 function statusClass(status: ToolEvent["status"]): string {
   return status === "ok" ? "text-success" : status === "err" ? "text-danger" : "text-muted";
+}
+
+/* Mobile v2 (#1439, lane 4; README §5): every time on the phone is HH:MM.
+   Seconds are what crowded the summary out of a 390 px tool line, and the
+   prototype's headers, folds and rows never show them. The desktop keeps the
+   shared `hhmm`. */
+export function mobileClock(ts: unknown): string {
+  if (typeof ts !== "string" && typeof ts !== "number") return "";
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleTimeString(getLocale() === "uk" ? "uk-UA" : "en-US", { hour12: false, hour: "2-digit", minute: "2-digit" });
+}
+
+/* The calls whose running state IS the pending question. The question card
+   under the feed already says it, so the phone renders no "running
+   AskUserQuestion…" line above the card (prototype frame `chat-waiting`). */
+const QUESTION_TOOLS = new Set(["AskUserQuestion", "ExitPlanMode"]);
+export function isPendingQuestionCall(event: ToolEvent): boolean {
+  return event.status === "run" && QUESTION_TOOLS.has(event.tool);
 }
 
 export function ToolChips({ chips }: { chips: ArgChip[] }) {
@@ -221,7 +241,7 @@ export function ToolLine({
 }) {
   const [mounted, setMounted] = useState(event.open);
   const isMobile = useIsMobile();
-  const time = hhmm(event.ts);
+  const time = isMobile ? mobileClock(event.ts) : hhmm(event.ts);
   const durationMs = toolDurationMs(event);
   const duration = durationMs === undefined ? "" : formatDuration(durationMs);
   const isErr = event.status === "err";
@@ -254,7 +274,10 @@ export function ToolLine({
         <span className={`min-w-0 flex-1 truncate ${isErr ? "font-semibold" : "text-secondary"}`} title={event.summary}>
           {isMobile && running ? tr("mobile2.feed.running", { summary: event.summary }) : event.summary}
         </span>
-        {event.status !== "ok" ? (
+        {/* On the phone a running line already said "running …" with its
+            spinner, so the status chip (a second spinner, "executing…") stays
+            off it; the duration is the trailing word. */}
+        {event.status !== "ok" && !(isMobile && running) ? (
           <span className={`inline-flex shrink-0 items-center gap-1 text-caption font-semibold ${statusClass(event.status)}`}>
             <StatusIcon status={event.status} className="h-3 w-3" />
             {event.statusLabel}
@@ -273,6 +296,7 @@ export function ToolLine({
     with (mobile v2, #1439), so the line runs edge to edge. */
 export function ToolCard({ event }: { event: ToolEvent }) {
   const isMobile = useIsMobile();
+  if (isMobile && isPendingQuestionCall(event)) return null;
   return <ToolLine event={event} className={isMobile ? "" : "ml-9"} />;
 }
 
@@ -297,7 +321,7 @@ export function mobileFailureDetail(event: ToolEvent): string {
 export function MobileRunRow({ event }: { event: ToolEvent }) {
   const isErr = event.status === "err";
   const running = event.status === "run";
-  const time = hhmm(event.ts);
+  const time = mobileClock(event.ts);
   const durationMs = toolDurationMs(event);
   const duration = durationMs === undefined ? "" : formatDuration(durationMs);
   const exit = exitLabel(event);
