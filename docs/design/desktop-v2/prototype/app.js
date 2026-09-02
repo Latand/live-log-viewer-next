@@ -312,16 +312,16 @@
     }
     const others = clusters.filter((c) => c !== seat && !owned.includes(c) && !c.pinned);
     if (others.length) {
-      /* The second group sits beside the ring (never beside a pin that
+      /* The second group sits beside the band (never beside a pin that
          happens to stick out) and takes the width that brings the whole
          yard to the viewport's aspect. */
-      const ringRects = [...(seat && !seat.pinned ? [rectOf(seat)] : []), ...(!seat && desk ? [desk] : []), ...owned.filter((c) => !c.pinned).map(rectOf)];
-      const ring = bbox(ringRects.length ? ringRects : [{ x: 0, y: 0, w: 0, h: 0 }]);
+      const bandRects = [...(seat && !seat.pinned ? [rectOf(seat)] : []), ...(!seat && desk ? [desk] : []), ...owned.filter((c) => !c.pinned).map(rectOf)];
+      const band = bbox(bandRects.length ? bandRects : [{ x: 0, y: 0, w: 0, h: 0 }]);
       const area = others.reduce((sum, c) => sum + (c.w + YX) * (c.h + YY), 0);
       const widest = Math.max(...others.map((c) => c.w));
-      const width = Math.max(widest, owned.length ? Math.max(aspect * ring.h - ring.w - 2 * YX, Math.sqrt(area / 1.6)) : Math.sqrt(area * aspect) - ring.w);
+      const width = Math.max(widest, owned.length ? Math.max(aspect * band.h - band.w - 2 * YX, Math.sqrt(area / 1.6)) : Math.sqrt(area * aspect) - band.w);
       const est = area / width;
-      packFree(others, placed, { x: ring.x + ring.w + 2 * YX, y: Math.max(ring.y, Math.round(hub.y - est / 2)), w: width, h: 1e7 });
+      packFree(others, placed, { x: band.x + band.w + 2 * YX, y: Math.max(band.y, Math.round(hub.y - est / 2)), w: width, h: 1e7 });
     }
     return hub;
   }
