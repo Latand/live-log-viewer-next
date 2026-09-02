@@ -317,6 +317,18 @@ window.FIXTURE = {
           { label: "Opus · Week", left: 71, reset: "reset in 3d · 5 Sep 10:48" },
         ],
       },
+      {
+        id: "cl-lab",
+        label: "Lab",
+        plan: "Pro plan",
+        active: false,
+        auth: "Authenticated",
+        checked: "14:20",
+        windows: [
+          { label: "5h", left: 88, reset: "reset in 4h · 18:05" },
+          { label: "Week", left: 64, reset: "reset in 6d · 8 Sep 09:00" },
+        ],
+      },
       { id: "cl-second", label: "Second", plan: "Pro plan", active: false, auth: "needs sign-in" },
     ],
     codex: [

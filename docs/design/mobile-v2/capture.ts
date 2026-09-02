@@ -27,8 +27,10 @@
  *
  * After the matrix, a set of headless flows checks the navigation contract
  * (P1-1), the receipt anatomy (P2-6), the composer slot (P1-4), the answer
- * path (P2-7), the sign-in row (P2-8), the sheet drag and Next (P3-9), and the
- * vocabulary (P2-11). The prototype is static — no server, no build step —
+ * path (P2-7), the sign-in row (P2-8), the sheet drag and Next (P3-9), the
+ * vocabulary (P2-11), and from the verify round: the limit sheet's sign-in
+ * row, the keyboard frame's one-tap send and the arrival banner's seen stamp.
+ * The prototype is static — no server, no build step —
  * so the page is opened from a file: URL; the screen list is the same
  * screens.js the page uses.
  */
@@ -315,10 +317,32 @@ async function flows(browser: Browser): Promise<void> {
     await expect(off.banner.startsWith("Offline") && off.meta.includes("offline") && off.slot === "Queue", `offline renders ${JSON.stringify(off)}`);
     await at("#/chat/c1", "arrival");
     await expect(await page.evaluate(() => Boolean(document.querySelector("#phone .banner:not(.info)"))), "an arrival shows no banner over the conversation");
+    /* Verify round: the banner's body opens the decision and stamps it seen,
+       so coming back does not announce it again. */
+    await page.click("#phone .banner .open");
+    await expect((await hash(page)) === "#/chat/c6" && !(await page.evaluate(() => document.querySelector("#phone .banner"))), `the banner body landed on ${await hash(page)} with a banner still showing`);
+    await page.click('#phone .bar [data-act="back"]');
+    await page.waitForTimeout(60);
+    await expect((await hash(page)) === "#/chat/c1" && !(await page.evaluate(() => document.querySelector("#phone .banner"))), "a seen decision was announced again after ‹");
     await at("#/board", "arrival");
     await expect(await page.evaluate(() => !document.querySelector("#phone .banner")), "the board shows an arrival banner");
+    /* Verify round: in the limit sheet a not-signed-in account opens the
+       device sign-in and the limit stays; an authenticated one takes over. */
+    await at("#/chat/c1/model", "limit");
+    await page.click('#phone .sheet [data-act="signIn:claude:cl-second"]');
+    const lim = await page.evaluate(() => ({ toast: document.querySelector("#phone .toast")?.textContent ?? "", chip: document.querySelector("#phone .box .chip")?.textContent?.trim() ?? "", sheet: Boolean(document.querySelector("#phone .sheet")), md: document.querySelector('#phone .sheet [data-act="md:c1:account:cl-second"]') !== null }));
+    await expect(lim.toast.includes("sign-in") && lim.chip.includes("Main at limit") && lim.sheet && !lim.md, `the limit sheet's sign-in row gave ${JSON.stringify(lim)}`);
+    gate("flow/limit-signin", await measure(page), { scheme: "dark", keyboard: false, height: 844, width: 390 });
+    await page.click('#phone .sheet [data-act="md:c1:account:cl-lab"]');
+    const took = await page.evaluate(() => ({ toast: document.querySelector("#phone .toast")?.textContent ?? "", chip: document.querySelector("#phone .box .chip")?.textContent?.trim() ?? "", hash: location.hash }));
+    await expect(took.toast.includes("Lab") && took.chip.startsWith("Opus · high") && took.hash === "#/chat/c1", `choosing the ready account gave ${JSON.stringify(took)}`);
+    /* Verify round: the keyboard frame's prefilled reply sends on one tap. */
+    await at("#/chat/c2/kb");
+    await page.click("#phone .box .sendbtn");
+    const kbSent = await page.evaluate(() => { const b = [...document.querySelectorAll("#phone .mu .bubble")]; return { last: b[b.length - 1]?.textContent ?? "", folded: Boolean(document.querySelector("#phone .qf")), hash: location.hash }; });
+    await expect(kbSent.last === "Both, by header — and add a test for each format." && kbSent.folded && kbSent.hash === "#/chat/c2", `send from the keyboard frame gave ${JSON.stringify(kbSent)}`);
     await expect(errors.length === 0, `console errors: ${errors.join(" | ")}`);
-    console.log("flows: navigation, receipts, composer slot, answer path, sign-in, states — green");
+    console.log("flows: navigation, receipts, composer slot, answer path, sign-in, states, limit sheet, keyboard send, seen stamp — green");
   } finally {
     await context.close();
   }

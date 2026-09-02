@@ -221,7 +221,7 @@
     const rt = runtime();
     if (rt === "offline") return `<div class="banner info"><div class="open"><b>Offline · reconnecting</b><span>Showing the last state received · ${F.host.lastSeen}</span></div></div>`;
     if (rt === "degraded") return `<div class="banner info"><div class="open"><b>Runtime degraded · polling</b><span>Updates arrive every 10 s</span></div></div>`;
-    if (p.screen === "board" || !S.arrival) return "";
+    if (p.screen === "board" || !S.arrival || S.seen.has(S.arrival.conv)) return "";
     const c = conv(S.arrival.conv);
     if (!c || !NEEDS.has(stateBits(c).key) || (p.screen === "chat" && p.id === c.id)) return "";
     const st = stateBits(c);
@@ -424,7 +424,10 @@
     const waiting = c.state === "waiting" && !S.answered[c.id] && !killed;
     const isWorking = st.key === "working";
     const chips = c.suggested && waiting ? `<div class="chips">${c.suggested.map((s, i) => `<button data-act="chip:${c.id}:${i}"><span>${esc(s)}</span></button>`).join("")}</div>` : "";
-    const draft = S.drafts[c.id] !== undefined ? S.drafts[c.id] : kb ? (waiting ? "Both, by header — and add a test for each format." : "") : "";
+    /* The keyboard frame opens with a reply already typed; it is seeded into
+       the draft store so the send control acts on it (verify round). */
+    if (kb && waiting && S.drafts[c.id] === undefined) S.drafts[c.id] = "Both, by header — and add a test for each format.";
+    const draft = S.drafts[c.id] || "";
     const m = modelFor(c);
     const placeholder = killed ? "killed · text queues until a respawn"
       : st.key === "held" ? "held · text you send queues"
@@ -456,6 +459,9 @@
   function Chat(p) {
     const c = conv(p.id);
     if (!c) return Board(p);
+    /* Opening a conversation is the "seen" gesture (#1244): a decision the
+       operator has looked at is not announced in the banner again. */
+    S.seen.add(c.id);
     const kb = p.kb;
     const st = stateBits(c);
     const m = modelFor(c);
@@ -729,9 +735,15 @@
   function modelSheet(c, closeGo) {
     const m = modelFor(c);
     const rows = (name, options, current) => options.map((o) => `<button class="mrow ${o === current ? "sel" : ""}" data-act="md:${c.id}:${name}:${esc(o)}"><span>${esc(o)}</span><span class="r">${o === current ? I("check", "check") : ""}</span></button>`).join("");
+    /* Verify round (P2-8 again): only an authenticated account can become the
+       launch target; one that is not signed in carries the Accounts screen's
+       `sign in →` and opens the device sign-in, leaving the limit in place. */
     const accounts = c.limit ? `<div class="sh">Account</div>${F.accounts[c.engine].map((a) => {
       const blocked = a.label === c.limit.account;
-      return `<button class="mrow ${blocked ? "" : ""}" data-act="${blocked ? "noop" : `md:${c.id}:account:${a.id}`}">${mark(c.engine)}<span>${esc(a.label)}</span><span class="r">${blocked ? `<span class="badge b-warning">limit · resets ${esc(c.limit.resets)}</span>` : esc(a.auth === "Authenticated" ? "ready" : a.auth)}</span></button>`;
+      const authed = a.auth === "Authenticated";
+      const actName = blocked ? "noop" : authed ? `md:${c.id}:account:${a.id}` : `signIn:${c.engine}:${a.id}`;
+      const trailing = blocked ? `<span class="badge b-warning">limit · resets ${esc(c.limit.resets)}</span>` : authed ? "ready" : `<span class="signin">sign in ${I("arrowR")}</span>`;
+      return `<button class="mrow" data-act="${actName}"${authed ? "" : ` aria-label="Sign in to ${esc(a.label)}"`}>${mark(c.engine)}<span>${esc(a.label)}</span><span class="r">${trailing}</span></button>`;
     }).join("")}` : "";
     const body = `
       <div class="note">Applies to your next message: <b>${esc(m.model)} · ${esc(m.effort)}</b></div>
