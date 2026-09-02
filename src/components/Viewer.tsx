@@ -920,11 +920,12 @@ export function Viewer() {
 
   /* The phone shell's host (mobile v2 lane 1): the queue count for the bar's
      badge, the arrival for the banner slot (below the runtime states, which
-     outrank it), the search palette, and the two sheets the Viewer owns — the
-     project switcher the title cell opens (it replaced the drawer and the
-     hamburger) and the Needs-you queue the badge opens over whichever screen
-     is showing. Memoized because ProjectDashboard is memo'd and a fresh object
-     per render would re-render it on every poll. */
+     outrank it, and dropped on the board, where the queue is the first section
+     and the badge carries the count), the search palette, and the two sheets
+     the Viewer owns — the project switcher the title cell opens (it replaced
+     the drawer and the hamburger) and the Needs-you queue the badge opens over
+     whichever screen is showing. Memoized because ProjectDashboard is memo'd
+     and a fresh object per render would re-render it on every poll. */
   const mobileShell = useMemo<MobileShellHost | null>(() => {
     if (!isMobile) return null;
     return {

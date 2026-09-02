@@ -177,14 +177,37 @@ test("the badge is hidden at zero, and a screen without search keeps two targets
   expect(bar.querySelectorAll("button").length).toBe(3);
 });
 
-test("the banner slot: offline outranks degraded outranks an arrival; nothing while the runtime UI is off", () => {
-  expect(bannerKind(true, "offline", true)).toBe("offline");
-  expect(bannerKind(true, "degraded", true)).toBe("degraded");
-  expect(bannerKind(true, "live", true)).toBe("arrival");
-  expect(bannerKind(true, "reconnecting", false)).toBeNull();
-  expect(bannerKind(false, "offline", false)).toBeNull();
-  const { root, rerender } = mount(shellHost({ arrival: <div data-testid="arrival">Needs you · plan approval</div> }));
-  expect(q(root, '[data-mobile2-banner-kind="arrival"]')).not.toBeNull();
+test("the banner slot: offline outranks degraded outranks an arrival; the board never shows an arrival; nothing while the runtime UI is off", () => {
+  expect(bannerKind(true, "offline", true, "chat")).toBe("offline");
+  expect(bannerKind(true, "degraded", true, "chat")).toBe("degraded");
+  expect(bannerKind(true, "live", true, "chat")).toBe("arrival");
+  expect(bannerKind(true, "live", true, "accounts")).toBe("arrival");
+  expect(bannerKind(true, "reconnecting", false, "chat")).toBeNull();
+  expect(bannerKind(false, "offline", false, "chat")).toBeNull();
+  /* README §2 rule 3: the queue is the board's first section, so the board
+     drops the arrival kind and keeps the runtime kinds. */
+  expect(bannerKind(true, "live", true, "board")).toBeNull();
+  expect(bannerKind(false, "live", true, "board")).toBeNull();
+  expect(bannerKind(true, "degraded", true, "board")).toBe("degraded");
+  expect(bannerKind(true, "offline", true, "board")).toBe("offline");
+
+  const { root, nav, b, rerender } = mount(shellHost({ arrival: <div data-testid="arrival">Needs you · plan approval</div> }));
+  /* A queued arrival with a live runtime: the board renders no banner at all,
+     and the ⚠ badge carries the count. */
+  expect(q(root, '[data-mobile2-screen="board"]')).not.toBeNull();
+  expect(q(root, "[data-mobile2-banner]")).toBeNull();
+  expect(q(root, '[data-testid="arrival"]')).toBeNull();
+  const badge = q(root, '[data-mobile2-open="attention"]')!;
+  expect(badge).not.toBeNull();
+  expect(badge.getAttribute("data-mobile2-attention-count")).toBe("3");
+  /* Every other screen shows the arrival in the slot, under the bar. */
+  flushSync(() => nav.push({ kind: "accounts" }));
+  expect(q(root, '[data-mobile2-screen="accounts"]')).not.toBeNull();
+  const arrival = q(root, '[data-mobile2-banner-kind="arrival"]')!;
+  expect(arrival).not.toBeNull();
+  expect(q(root, '[data-testid="arrival"]')).not.toBeNull();
+  expect(q(root, "[data-mobile2-bar]")!.compareDocumentPosition(arrival as never) & dom.Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  /* The runtime states outrank it, and they show on every screen, the board included. */
   runtime = { ...runtime, enabled: true, connection: "degraded" };
   rerender();
   const degraded = q(root, "[data-mobile2-banner]")!;
@@ -192,6 +215,9 @@ test("the banner slot: offline outranks degraded outranks an arrival; nothing wh
   expect(degraded.getAttribute("data-connection")).toBe("degraded");
   expect(degraded.textContent).toContain(translate("en", "mobile2.banner.degradedTitle"));
   expect(q(root, '[data-testid="arrival"]')).toBeNull();
+  flushSync(() => b.back());
+  expect(q(root, '[data-mobile2-screen="board"]')).not.toBeNull();
+  expect(q(root, "[data-mobile2-banner]")!.getAttribute("data-mobile2-banner-kind")).toBe("degraded");
   runtime = { ...runtime, connection: "offline", lastEventAt: Date.UTC(2100, 0, 2, 14, 2) };
   rerender();
   const offline = q(root, "[data-mobile2-banner]")!;
@@ -201,8 +227,11 @@ test("the banner slot: offline outranks degraded outranks an arrival; nothing wh
   /* The slot is in flow under the bar: not a control, never over one. */
   expect(offline.querySelectorAll("button").length).toBe(0);
   expect(q(root, "[data-mobile2-bar]")!.compareDocumentPosition(offline as never) & dom.Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  /* Runtime UI off: the board stays bare, a pushed screen gets the arrival back. */
   runtime = { ...runtime, enabled: false };
   rerender();
+  expect(q(root, "[data-mobile2-banner]")).toBeNull();
+  flushSync(() => nav.push({ kind: "accounts" }));
   expect(q(root, '[data-mobile2-banner-kind="arrival"]')).not.toBeNull();
 });
 

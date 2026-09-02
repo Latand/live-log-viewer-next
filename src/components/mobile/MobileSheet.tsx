@@ -27,6 +27,21 @@ import type { MobileSheetName } from "./mobileNav";
 /** A drag of the handle past this many pixels closes the sheet. */
 export const SHEET_CLOSE_DRAG_PX = 80;
 
+/** Controls a drag must never start from: a pointer that lands on one is a
+    tap on it. */
+const HEADER_CONTROL = "button, a[href], input, select, textarea, [role='button']";
+
+/** True when the pointer landed on a control inside `within` (the header's ×,
+    an `extra` control such as the queue's Next ›). Capturing that pointer for
+    a drag would make Chromium retarget the tap's click to the capturing
+    header, and the control would never fire. */
+function isControlTarget(target: EventTarget | null, within: HTMLElement): boolean {
+  const element = target as Element | null;
+  if (!element || typeof element.closest !== "function") return false;
+  const control = element.closest(HEADER_CONTROL);
+  return control !== null && control !== within && within.contains(control);
+}
+
 const CLOSE_BUTTON = "flex h-11 w-11 shrink-0 items-center justify-center rounded-[8px] text-secondary active:bg-sunken focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40";
 
 export function MobileSheet({
@@ -58,6 +73,9 @@ export function MobileSheet({
 
   const onPointerDown = (event: ReactPointerEvent<HTMLElement>) => {
     if (full) return;
+    /* Only the grab handle and the header's title text start a drag; a
+       pointer on the × or another header control is that control's tap. */
+    if (isControlTarget(event.target, event.currentTarget)) return;
     drag.current = { y: event.clientY, dy: 0 };
     const sheet = sheetRef.current;
     if (sheet) sheet.style.transition = "none";

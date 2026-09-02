@@ -54,11 +54,14 @@ export function titleCellWidth(viewport: number, targets: BarTargets): number {
 export type BannerKind = "offline" | "degraded" | "arrival";
 
 /** One banner slot, one thing at a time: offline, then runtime degraded, then
-    a decision that arrived while the operator reads something else. */
-export function bannerKind(enabled: boolean, connection: ConnectionState, hasArrival: boolean): BannerKind | null {
+    a decision that arrived while the operator reads something else. The board
+    never shows an arrival (README §2 rule 3, §4.6): its queue is the first
+    section and the bar's badge carries the count, so on the board the slot
+    holds runtime states only. */
+export function bannerKind(enabled: boolean, connection: ConnectionState, hasArrival: boolean, screen: MobileScreenKind): BannerKind | null {
   if (enabled && connection === "offline") return "offline";
   if (enabled && connection === "degraded") return "degraded";
-  return hasArrival ? "arrival" : null;
+  return hasArrival && screen !== "board" ? "arrival" : null;
 }
 
 /** What the Viewer plumbs into every shell screen: the queue count for the
@@ -85,11 +88,12 @@ function formatClock(at: number, locale: string): string {
 }
 
 /** The banner slot directly under the bar. It reserves its height in flow so
-    it never covers a control; the board shows runtime states only. */
-export function MobileBannerSlot({ arrival }: { arrival: ReactNode }) {
+    it never covers a control. The screen decides what the slot may carry:
+    the board drops the arrival kind (`bannerKind`). */
+export function MobileBannerSlot({ screen, arrival }: { screen: MobileScreenKind; arrival: ReactNode }) {
   const { t, locale } = useLocale();
   const { enabled, connection, lastEventAt } = useRuntimeBusState();
-  const kind = bannerKind(enabled, connection, arrival !== null && arrival !== undefined);
+  const kind = bannerKind(enabled, connection, arrival !== null && arrival !== undefined, screen);
   if (!kind) return null;
   if (kind === "arrival") {
     return (
@@ -243,7 +247,7 @@ export function MobileShell({
           </button>
         ) : null}
       </header>
-      <MobileBannerSlot arrival={host?.arrival ?? null} />
+      <MobileBannerSlot screen={screen} arrival={host?.arrival ?? null} />
       <div data-mobile2-body className="flex min-h-0 min-w-0 flex-1 flex-col">
         {children}
       </div>
