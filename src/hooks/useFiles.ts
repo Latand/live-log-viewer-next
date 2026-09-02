@@ -52,6 +52,13 @@ export interface FilesData {
   /** `spawn:<launchId>` → canonical conversation id (issue #569). */
   launchRoutes: Record<string, string>;
   loaded: boolean;
+  /** The rows above were fetched for exactly `requestScope`. False while a
+      newly requested scope — a deep-link pin — is still loading and the
+      freshest certified representation of another scope stands in for it
+      (#1432): the board keeps painting what it has instead of a placeholder,
+      and only a certified payload may make scope-specific claims such as
+      "the pinned transcript is not in the feed". */
+  scopeCertified: boolean;
   /** Consecutive `/api/files` failures since the last success (issue #696).
       Non-zero means everything above is unconfirmed: an empty catalog is a
       failed fetch, and the UI must say so instead of presenting the affirmative
@@ -60,7 +67,7 @@ export interface FilesData {
 }
 
 const HEALTHY_SYSTEM = { tmux: { status: "healthy" as const } };
-const EMPTY: FilesData = { files: [], pinOverlayPaths: [], requestScope: null, projectCatalog: [], projectAliases: {}, projectDisplayNames: {}, crownedProjects: [], projectCwds: {}, flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: HEALTHY_SYSTEM, conversationAliases: {}, launchRoutes: {}, loaded: false, catalogFailures: 0 };
+const EMPTY: FilesData = { files: [], pinOverlayPaths: [], requestScope: null, projectCatalog: [], projectAliases: {}, projectDisplayNames: {}, crownedProjects: [], projectCwds: {}, flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: HEALTHY_SYSTEM, conversationAliases: {}, launchRoutes: {}, loaded: false, scopeCertified: false, catalogFailures: 0 };
 
 export function filesApiUrl(_project?: string | null, pinnedPath?: string | null): string {
   const params: string[] = [];
@@ -133,7 +140,7 @@ function patchRows<T>(previous: readonly T[], incoming: readonly T[], keyOf: (va
 
 function parsedFilesData(parsed: FilesResponse | FileEntry[], requestScope: string): FilesData {
   if (Array.isArray(parsed)) {
-    return { files: parsed, pinOverlayPaths: [], requestScope, projectCatalog: [], projectAliases: {}, projectDisplayNames: {}, crownedProjects: [], projectCwds: {}, flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: HEALTHY_SYSTEM, conversationAliases: {}, launchRoutes: {}, loaded: true, catalogFailures: 0 };
+    return { files: parsed, pinOverlayPaths: [], requestScope, projectCatalog: [], projectAliases: {}, projectDisplayNames: {}, crownedProjects: [], projectCwds: {}, flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: HEALTHY_SYSTEM, conversationAliases: {}, launchRoutes: {}, loaded: true, scopeCertified: true, catalogFailures: 0 };
   }
   return {
     files: parsed.files ?? [],
@@ -153,6 +160,7 @@ function parsedFilesData(parsed: FilesResponse | FileEntry[], requestScope: stri
     conversationAliases: parsed.conversationAliases ?? {},
     launchRoutes: parsed.launchRoutes ?? {},
     loaded: true,
+    scopeCertified: true,
     catalogFailures: 0,
   };
 }
@@ -244,10 +252,11 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
     return composed;
   };
 
-  const withPipelineOverlays = (data: FilesData): FilesData => ({
-    ...data,
-    pipelines: pipelinesWithOverlays(data.pipelines),
-  });
+  const withPipelineOverlays = (data: FilesData): FilesData => (pipelineOverlays.size
+    ? { ...data, pipelines: pipelinesWithOverlays(data.pipelines) }
+    /* No overlay: the representation itself is the answer, identity intact,
+       so a consumer reading an unchanged scope sees an unchanged object. */
+    : data);
 
   const withSpawnedOverlays = (data: FilesData): FilesData => {
     if (!spawnedOverlays.size) return data;
@@ -269,9 +278,32 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
     }
   };
 
+  /* A scope with no representation yet — a deep-link pin that was just
+     requested — is answered with the freshest certified snapshot of ANY scope,
+     re-labelled for the requested URL and marked uncertified (#1432). Before
+     this the answer was the empty placeholder: every `#c=` open blanked the
+     files feed, dropped the board to its skeleton and rebuilt every card, twice
+     (once for the id pin, once for the path pin), before the pinned fetch even
+     landed. Memoised on the snapshot so an unchanged stand-in keeps its
+     identity across renders. */
+  let standIn: { source: FilesData; requestScope: string; data: FilesData } | null = null;
+  const standInFor = (requestScope: string): FilesData => {
+    if (standIn && standIn.source === snapshot && standIn.requestScope === requestScope) return standIn.data;
+    /* The global representation is the natural stand-in. Failing that, the
+       snapshot minus the rows only ITS pin admitted: a pin-only row belongs to
+       the request that asked for it and must never leak into another scope. */
+    const base = representations.get(filesApiUrl())?.data ?? snapshot;
+    const pinOnly = new Set(base.pinOverlayPaths);
+    const files = pinOnly.size ? base.files.filter((file) => !pinOnly.has(file.path)) : base.files;
+    standIn = { source: snapshot, requestScope, data: { ...base, files, pinOverlayPaths: [], requestScope, scopeCertified: false } };
+    return standIn.data;
+  };
+
   const exactScopeRepresentation = (requestScope: string): FilesData => {
     const representation = representations.get(requestScope)?.data
-      ?? (snapshot.requestScope === requestScope ? snapshot : { ...EMPTY, requestScope });
+      ?? (snapshot.requestScope === requestScope
+        ? snapshot
+        : snapshot.loaded ? standInFor(requestScope) : { ...EMPTY, requestScope });
     return withCatalogFailures(withPipelineOverlays(withSpawnedOverlays(representation)));
   };
 
