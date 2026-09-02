@@ -392,61 +392,6 @@ export function freshSpecFor(engine: AgentEngine, cwd: string, options: FreshSpe
   };
 }
 
-export function claudeSuccessorSpecFor(input: {
-  sourcePath: string;
-  candidateId: string;
-  targetHome: string;
-  targetProjectsDir: string;
-  profile: LaunchProfile;
-}): ResumeSpec {
-  if (!/^[0-9a-f-]{36}$/.test(input.candidateId)) throw new Error("candidate session id is invalid");
-  const args = [
-    resolveBinary("claude"),
-    "-p",
-    "--input-format", "stream-json",
-    "--output-format", "stream-json",
-    "--verbose",
-    "--replay-user-messages",
-    "--permission-prompt-tool", "stdio",
-  ];
-  const permissionMode = effectiveClaudePermissionMode(input.profile);
-  if (launchProfileEngineReadOnly(input.profile) || permissionMode === "plan") {
-    args.push("--permission-mode", "plan", "--disallowedTools", "Edit,Write,NotebookEdit");
-  } else if (permissionMode !== "bypassPermissions") {
-    if (permissionMode.length <= 64 && /^[a-zA-Z-]+$/.test(permissionMode)) {
-      args.push("--permission-mode", permissionMode);
-    }
-  } else {
-    args.push("--dangerously-skip-permissions");
-  }
-  if (explicitLaunchProfileSandbox(input.profile) === "restricted") args.push("--restricted");
-  const model = normalizeClaudeLaunchModel(input.profile.model);
-  if (model) args.push("--model", model);
-  if (input.profile.effort && /^[a-z]+$/.test(input.profile.effort)) args.push("--effort", input.profile.effort);
-  args.push("--resume", input.sourcePath, "--fork-session", "--session-id", input.candidateId);
-  const cwd = input.profile.cwd || resumeCwd(input.sourcePath);
-  const policy = applyClaudeSpawnPolicy(input.targetHome, {
-    allowSubagents: input.profile.allowSubagents,
-    baseSettingsPath: isManagedClaudeHome(input.targetHome) ? claudeSettingsPath() : null,
-    profileId: input.candidateId,
-    cwd,
-    mcpServers: input.profile.mcpServers,
-    mcpStatePath: isManagedClaudeHome(input.targetHome)
-      ? path.join(input.targetHome, ".claude.json")
-      : path.join(path.dirname(input.targetHome), ".claude.json"),
-  });
-  pushClaudePolicyArgs(args, policy);
-  return {
-    command: telegramScopedCommand(`${claudeEnvPrefix(input.targetHome, input.profile.mcpServers)} ${args.map(shellQuote).join(" ")}`, input.profile.mcpServers),
-    cwd,
-    windowName: "claude-migration-successor",
-    engine: "claude",
-    ["transcript"]: claudeTranscriptPath(input.profile.cwd || resumeCwd(input.sourcePath), input.candidateId, input.targetProjectsDir),
-    printMode: true,
-    launchProfile: { ...input.profile, model, permissionMode },
-  };
-}
-
 /** Whether a transcript can be reopened, and — when it cannot — which single
     condition refused it. A caller that only needs the command uses
     {@link resumeSpecFor}; a caller that has to tell the operator why nothing
@@ -594,6 +539,6 @@ function emptyLaunchProfileForResume(cwd: string, model: string | null, effort: 
 
 /** A resume window must land in a directory that still exists; the home
     directory is the safe fallback when the transcript's cwd is gone. */
-function resumeCwd(pathname: string): string {
+export function resumeCwd(pathname: string): string {
   return headCwd(pathname, { maxLines: 30, requireDir: true }) ?? os.homedir();
 }
