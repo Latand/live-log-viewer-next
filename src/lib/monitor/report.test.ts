@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 
 import { seatTickProposalRef } from "./cards";
-import { SEAT_TICK_CONTRACT, seatTickProposalMessage, seatTickWakeMessage } from "./report";
+import { SEAT_TICK_CONTRACT, SEAT_TICK_PROMPT_PREVIEW_LIMIT, seatTickProposalMessage, seatTickWakeMessage } from "./report";
 
 /**
  * The seat tick's two briefs (#1245), rendered by the module that already
@@ -255,4 +255,22 @@ test("a long issue list cannot cost the proposal its ref line, its prompt or its
   expect(text).toContain(`monitor-ref: ${seatTickProposalRef("20693")}`);
   expect(text).toContain(MAX_PROMPT);
   for (const clause of SEAT_TICK_CONTRACT) expect(text).toContain(clause);
+});
+
+test("a note longer than the wake can carry is shown as a preview that says so and where the rest is (#1450)", () => {
+  const note = "lane a: waiting on review; lane b: building; trap: never restart the host mid-deploy. ".repeat(60);
+  expect(note.length).toBeGreaterThan(SEAT_TICK_PROMPT_PREVIEW_LIMIT);
+  for (const text of [
+    seatTickWakeMessage(fullAgenda(note)),
+    seatTickProposalMessage({ project: PROJECT, issues: [], signals: [], items: 5, slot: "20693", monitorPrompt: note }),
+  ]) {
+    expect(text.length).toBeLessThanOrEqual(4_000);
+    expect(text).toContain(note.slice(0, SEAT_TICK_PROMPT_PREVIEW_LIMIT).trimEnd());
+    /* Never a bare ellipsis: the marker carries the full length and names the
+       tool that returns the whole note. */
+    expect(text).toContain(`… [preview, ${note.length} chars; seat_tick_settings returns the full note]`);
+    for (const clause of SEAT_TICK_CONTRACT) expect(text).toContain(clause);
+  }
+  /* A note within the preview bound is carried whole, with no marker. */
+  expect(seatTickWakeMessage(fullAgenda("short note"))).not.toContain("[preview,");
 });
