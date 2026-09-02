@@ -75,20 +75,24 @@ function MobileCmdGroup({ item }: { item: CmdGroupItem }) {
      question card under the feed is that line. */
   const trailingLine = trailingRun && !isPendingQuestionCall(trailingRun) ? trailingRun : null;
   if (item.hasErr) {
+    /* The same rule as the clean run: a failed run that ends in the pending
+       question lists the settled calls only. The question card under the
+       block is that line, so the block neither shows nor counts it. */
+    const shown = calls.filter((call) => !isPendingQuestionCall(call));
     return (
       <div data-mobile-run="failed" className="my-1.5 w-full rounded-control border border-border bg-sunken px-2 py-0.5">
         <button
           type="button"
           aria-expanded={open}
-          aria-label={tr("mobile2.feed.runFailed", { count: calls.length, failed: item.errCount })}
+          aria-label={tr("mobile2.feed.runFailed", { count: shown.length, failed: item.errCount })}
           className="block w-full text-left"
           onClick={() => setOpen((current) => !current)}
         >
-          {calls.map((call, index) => (
+          {shown.map((call, index) => (
             <MobileRunRow key={`${call.id}:${index}`} event={call} />
           ))}
         </button>
-        {open ? <ReadableBlocks calls={calls} /> : null}
+        {open ? <ReadableBlocks calls={shown} /> : null}
       </div>
     );
   }

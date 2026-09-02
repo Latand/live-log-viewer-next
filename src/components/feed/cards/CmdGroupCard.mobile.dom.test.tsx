@@ -6,7 +6,7 @@ import { createRoot, type Root } from "react-dom/client";
 
 import { translate } from "@/lib/i18n";
 
-import { activeFailureGroup, execSuccess, settledGroup, toolEvent } from "../__fixtures__/readableTools";
+import { activeFailureGroup, execFailure, execSuccess, settledGroup, toolEvent } from "../__fixtures__/readableTools";
 import type { CmdGroupItem, ToolEvent } from "../parse";
 import { CmdGroupCard } from "./CmdGroupCard";
 
@@ -225,4 +225,38 @@ test("desktop: the aggregate keeps its details/summary form and none of the phon
   expect(host.querySelector("[data-mobile-tool-line]")).toBeNull();
   /* A live aggregate is still forced open on the desktop (issue #475). */
   expect(host.querySelectorAll("ol")).toHaveLength(2);
+});
+
+test("phone: a failed run ending in the pending question lists the settled calls only; the desktop block keeps the question", () => {
+  narrowViewport = true;
+  const question = toolEvent({ id: "gf-q", tool: "AskUserQuestion", family: "other", icon: "note", summary: "Which format should the export endpoint default to?", status: "run", statusLabel: "running", ts: "2026-07-10T10:00:02Z" });
+  const group = () => activeFailureGroup({ calls: [{ ...execSuccess, id: "gf-1" }, { ...execFailure, id: "gf-2" }, question], byTool: { Bash: 2, AskUserQuestion: 1 } });
+  const host = mount(<CmdGroupCard item={group()} />);
+  const block = host.querySelector('[data-mobile-run="failed"]')!;
+  expect(block).toBeTruthy();
+  /* One row per settled call, none for the question: the card under the
+     block is that line. */
+  const rows = block.querySelectorAll("[data-mobile-run-row]");
+  expect(rows).toHaveLength(2);
+  expect(rows[0]!.getAttribute("data-mobile-run-row")).toBe("done");
+  expect(rows[1]!.getAttribute("data-mobile-run-row")).toBe("failed");
+  expect(block.querySelector('[data-mobile-run-row="running"]')).toBeNull();
+  expect(host.textContent).not.toContain("Which format");
+  expect(host.textContent).not.toContain("AskUserQuestion");
+  expect(host.textContent).not.toContain(en("mobile2.feed.running", { summary: "Which format should the export endpoint default to?" }));
+  /* The count is the settled calls. */
+  const target = block.querySelector("button")!;
+  expect(target.getAttribute("aria-label")).toBe(en("mobile2.feed.runFailed", { count: 2, failed: 1 }));
+  /* Expanded, the readable blocks are the settled calls too. */
+  click(target);
+  expect(block.querySelectorAll("ol > li")).toHaveLength(2);
+  expect(host.textContent).not.toContain("Which format");
+  flushSync(() => root!.unmount());
+  root = null;
+  /* The desktop aggregate is untouched: every call, the question included. */
+  narrowViewport = false;
+  const desktop = mount(<CmdGroupCard item={group()} />);
+  expect(desktop.querySelectorAll("ol > li")).toHaveLength(3);
+  expect(desktop.textContent).toContain("Which format");
+  expect(desktop.querySelector("summary")!.textContent).toContain(en("render.actions", { count: 3 }));
 });

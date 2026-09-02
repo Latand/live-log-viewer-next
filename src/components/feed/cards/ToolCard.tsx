@@ -241,6 +241,13 @@ export function ToolLine({
 }) {
   const [mounted, setMounted] = useState(event.open);
   const isMobile = useIsMobile();
+  /* Mobile v2 (#1439, lane 4; README §2.6): on the phone a tool line is one
+     quiet closed line whatever the parser decided — an edit's diff (#90) or a
+     failure's output opens by default only on the desktop. The operator's tap
+     is what opens it, and the body is mounted only while it is open, so a
+     phone transcript never carries a diff it did not ask for. */
+  const [phoneOpen, setPhoneOpen] = useState(false);
+  const open = isMobile ? phoneOpen : event.open;
   const time = isMobile ? mobileClock(event.ts) : hhmm(event.ts);
   const durationMs = toolDurationMs(event);
   const duration = durationMs === undefined ? "" : formatDuration(durationMs);
@@ -249,9 +256,11 @@ export function ToolLine({
   return (
     <details
       className={`group/tool ${className}`}
-      open={event.open}
+      open={open}
       onToggle={(e) => {
-        if (e.currentTarget.open) setMounted(true);
+        const next = e.currentTarget.open;
+        if (isMobile) setPhoneOpen(next);
+        if (next) setMounted(true);
       }}
     >
       {/* Mobile v2 (#1439, lane 4): one quiet 44 px line, the running tool
@@ -286,7 +295,7 @@ export function ToolLine({
         {duration ? <span className="shrink-0 text-caption tabular-nums text-muted">{duration}</span> : null}
         {showTime && time ? <span className="shrink-0 text-caption tabular-nums text-muted">{time}</span> : null}
       </summary>
-      {mounted ? <ToolBody event={event} /> : null}
+      {(isMobile ? phoneOpen : mounted) ? <ToolBody event={event} /> : null}
     </details>
   );
 }
