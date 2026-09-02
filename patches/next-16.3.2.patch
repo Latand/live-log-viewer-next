@@ -1,0 +1,26 @@
+diff --git a/dist/build/webpack/plugins/flight-manifest-plugin.js b/dist/build/webpack/plugins/flight-manifest-plugin.js
+index 3d300cb1f91c4e894e81708f95b5170d7bcc82bc..3652d4834a2476cb2b1bec1ce6a8f87e5c15b8a9 100644
+--- a/dist/build/webpack/plugins/flight-manifest-plugin.js
++++ b/dist/build/webpack/plugins/flight-manifest-plugin.js
+@@ -353,7 +353,7 @@ class ClientReferenceManifestPlugin {
+                                 if (((_connection_module = connection.module) == null ? void 0 : _connection_module.constructor.name) === 'ConcatenatedModule') {
+                                     const concatenatedMod = connection.module;
+                                     const concatenatedModId = compilation.chunkGraph.getModuleId(concatenatedMod);
+-                                    if (concatenatedModId) {
++                                    if (concatenatedModId !== null) {
+                                         recordModule(concatenatedModId, clientEntryMod);
+                                     }
+                                 }
+diff --git a/dist/esm/build/webpack/plugins/flight-manifest-plugin.js b/dist/esm/build/webpack/plugins/flight-manifest-plugin.js
+index d944daa1dc6c9b25c63af8f247b63dd5aaaad6e3..69fa7618537af4498192685521ebb84a61c5d978 100644
+--- a/dist/esm/build/webpack/plugins/flight-manifest-plugin.js
++++ b/dist/esm/build/webpack/plugins/flight-manifest-plugin.js
+@@ -304,7 +304,7 @@ export class ClientReferenceManifestPlugin {
+                                 if (((_connection_module = connection.module) == null ? void 0 : _connection_module.constructor.name) === 'ConcatenatedModule') {
+                                     const concatenatedMod = connection.module;
+                                     const concatenatedModId = compilation.chunkGraph.getModuleId(concatenatedMod);
+-                                    if (concatenatedModId) {
++                                    if (concatenatedModId !== null) {
+                                         recordModule(concatenatedModId, clientEntryMod);
+                                     }
+                                 }
