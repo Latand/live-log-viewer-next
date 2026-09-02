@@ -1,12 +1,12 @@
 "use client";
 
-import { Check, Loader2, Pause, RotateCw, Send, X } from "lucide-react";
-import { useMemo, useState } from "react";
+import { Check, ChevronDown, ChevronRight, Loader2, Pause, RotateCw, Send, TriangleAlert, X } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
 
 import { useIsMobile } from "@/hooks/useIsMobile";
 
-import { type MessageKey, type TFunction, useLocale } from "@/lib/i18n";
-import type { FileEntry, PendingQuestionItem } from "@/lib/types";
+import { type Locale, type MessageKey, type TFunction, useLocale } from "@/lib/i18n";
+import type { FileEntry, PendingQuestion, PendingQuestionItem } from "@/lib/types";
 
 type CardState = "pending" | "delivering" | "answered" | "superseded" | "failed";
 
@@ -77,6 +77,61 @@ export function deliveryErrorKey(status: number, body: { noPane?: boolean; deliv
   return "common.failedSend";
 }
 
+/*
+ * Mobile v2 (#1439, lane 4): a suggested-reply chip answers the pending
+ * question on tap, from outside this card. The chip posts through this seam
+ * and the mounted card hears the outcome, so the card folds (or shows the
+ * failure with its retry) exactly as if one of its own options had been
+ * tapped. Module-level because the chip row and the card are siblings with no
+ * shared parent that owns the question.
+ */
+export type QuestionAnswerEvent =
+  | { toolUseId: string; ok: true; text: string; answer: string; at: number }
+  | { toolUseId: string; ok: false; text: string; key: MessageKey; superseded?: string };
+
+const answerListeners = new Set<(event: QuestionAnswerEvent) => void>();
+
+export function subscribeQuestionAnswers(listener: (event: QuestionAnswerEvent) => void): () => void {
+  answerListeners.add(listener);
+  return () => {
+    answerListeners.delete(listener);
+  };
+}
+
+function announceQuestionAnswer(event: QuestionAnswerEvent): void {
+  for (const listener of [...answerListeners]) listener(event);
+}
+
+/** Sends `text` as the reply to `pending` and tells every mounted card. */
+export async function answerPendingQuestionWithText(pending: PendingQuestion, text: string): Promise<QuestionAnswerEvent> {
+  const toolUseId = pending.toolUseId;
+  let event: QuestionAnswerEvent;
+  try {
+    const res = await fetch("/api/answer", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ transcriptPath: pending.transcriptPath, toolUseId, kind: pending.kind, text }),
+    });
+    const json = (await res.json()) as { ok?: boolean; answer?: string; superseded?: boolean; noPane?: boolean; delivered?: boolean };
+    if (!res.ok || !json.ok) {
+      event = res.status === 409 && (json.superseded || json.answer)
+        ? { toolUseId, ok: false, text, key: "question.alreadyAnswered", superseded: json.answer ?? "" }
+        : { toolUseId, ok: false, text, key: deliveryErrorKey(res.status, json) };
+    } else {
+      event = { toolUseId, ok: true, text, answer: json.answer ?? text, at: Date.now() };
+    }
+  } catch {
+    event = { toolUseId, ok: false, text, key: "common.serverUnavailable" };
+  }
+  announceQuestionAnswer(event);
+  return event;
+}
+
+/* The phone's answered fold shows the minute the reply went, HH:MM. */
+function answeredClock(locale: Locale, at: number): string {
+  return new Date(at).toLocaleTimeString(locale === "uk" ? "uk-UA" : "en-US", { hour12: false, hour: "2-digit", minute: "2-digit" });
+}
+
 function labelFor(question: PendingQuestionItem, value: number): string {
   return question.options[value]?.label ?? String(value + 1);
 }
@@ -89,7 +144,7 @@ function elapsed(t: TFunction, since: number): string {
 }
 
 export function QuestionCard({ file }: { file: FileEntry }) {
-  const { t } = useLocale();
+  const { t, locale } = useLocale();
   const isMobile = useIsMobile();
   /* Phone transcript question actions meet the 44px minimum. */
   const mob = isMobile ? "min-h-11" : "";
@@ -101,6 +156,35 @@ export function QuestionCard({ file }: { file: FileEntry }) {
   const [comment, setComment] = useState("");
   const [resuming, setResuming] = useState(false);
   const [attempt, setAttempt] = useState<Attempt | null>(null);
+  /* Mobile v2 (#1439, lane 4): when the reply went and which picks it
+     carried, for the folded `question · answered` line and its expansion. */
+  const [answeredAt, setAnsweredAt] = useState<number | null>(null);
+  const [answeredPicks, setAnsweredPicks] = useState<Record<number, number[]> | null>(null);
+  const [foldOpen, setFoldOpen] = useState(false);
+  const pendingToolUseId = pending?.toolUseId ?? null;
+  useEffect(() => {
+    if (!pendingToolUseId) return;
+    return subscribeQuestionAnswers((event) => {
+      if (event.toolUseId !== pendingToolUseId) return;
+      if (event.ok) {
+        setState("answered");
+        setMessage(event.answer);
+        setAnsweredAt(event.at);
+        setAnsweredPicks(null);
+        setFailedAnswers(null);
+        return;
+      }
+      if (event.superseded !== undefined) {
+        setState("superseded");
+        setMessage(event.superseded || t("question.alreadyAnswered"));
+        return;
+      }
+      setState("failed");
+      setMessage(t(event.key));
+      setAttempt({ payload: { text: event.text }, optimistic: event.text, selection: null });
+      setFailedAnswers(null);
+    });
+  }, [pendingToolUseId, t]);
   /* Issue #697: the picks that a failed submit carried. They stay on screen in
      a failed treatment — deleting them lost work the failure never invalidated
      (a multi-question form is several decisions), and leaving them looking
@@ -279,6 +363,8 @@ export function QuestionCard({ file }: { file: FileEntry }) {
       }
       setState("answered");
       setMessage(json.answer ?? optimistic);
+      setAnsweredAt(Date.now());
+      setAnsweredPicks(selection);
     } catch {
       setState("failed");
       setMessage(t("common.serverUnavailable"));
@@ -331,6 +417,60 @@ export function QuestionCard({ file }: { file: FileEntry }) {
   };
 
   const disabled = state === "delivering" || !hasPane;
+  if (state === "answered" && isMobile) {
+    /* Mobile v2 (#1439, lane 4; README §4.3): the reply is the user's bubble,
+       and the card folds to one quiet 44 px line that expands to the original
+       question with the chosen option marked. */
+    const replyText = message || selectedLabel;
+    const time = answeredClock(locale, answeredAt ?? Date.now());
+    const picks = answeredPicks ?? answers;
+    return (
+      <div id="question" data-mobile-question="answered">
+        <div className="mt-3 flex justify-end">
+          <div data-question-reply className="max-w-[86%] whitespace-pre-wrap break-words rounded-surface bg-user px-3 py-[9px] text-title leading-[1.45]">
+            {replyText}
+          </div>
+        </div>
+        <button
+          type="button"
+          data-question-fold
+          aria-expanded={foldOpen}
+          aria-label={t("mobile2.feed.answeredFoldToggle")}
+          className="flex min-h-11 w-full items-center gap-1.5 px-0.5 text-left text-ui text-muted"
+          onClick={() => setFoldOpen((current) => !current)}
+        >
+          {foldOpen ? <ChevronDown className="h-3.5 w-3.5 shrink-0" aria-hidden /> : <ChevronRight className="h-3.5 w-3.5 shrink-0" aria-hidden />}
+          <span className="min-w-0 flex-1 truncate text-secondary">{t("mobile2.feed.answeredFold", { time })}</span>
+        </button>
+        {foldOpen ? (
+          <div data-question-fold-body className="mb-1 rounded-surface border border-border bg-sunken px-3 py-2.5">
+            {pending.kind === "plan" ? (
+              <pre className="max-h-[320px] overflow-auto whitespace-pre-wrap break-words text-[13px] text-secondary">{pending.plan}</pre>
+            ) : (
+              pending.questions?.map((question, qIndex) => (
+                <section key={qIndex} className="mt-2 first:mt-0">
+                  <p className="text-title font-semibold text-secondary">{question.question}</p>
+                  {question.options.map((option, index) => {
+                    const chosen = (picks[qIndex] ?? []).includes(index);
+                    return (
+                      <div
+                        key={index}
+                        data-choice-state={chosen ? "selected" : undefined}
+                        className={`mt-1.5 flex min-h-11 items-center gap-2.5 rounded-control border bg-card px-3 py-1.5 text-title ${chosen ? "border-accent" : "border-border"}`}
+                      >
+                        <i aria-hidden className={`h-4 w-4 shrink-0 rounded-full border-[1.5px] ${chosen ? "border-accent bg-accent shadow-[inset_0_0_0_3px_var(--surface-card)]" : "border-border"}`} />
+                        <span className="min-w-0">{option.label}</span>
+                      </div>
+                    );
+                  })}
+                </section>
+              ))
+            )}
+          </div>
+        ) : null}
+      </div>
+    );
+  }
   if (state === "answered") {
     return (
       <div id="question" className="my-4 rounded-[8px] border border-success/25 bg-success-soft px-4 py-3 text-[13px] font-semibold text-success">
@@ -370,6 +510,139 @@ export function QuestionCard({ file }: { file: FileEntry }) {
           {t("question.openSession")}
         </button>
         {message ? <div className="mt-2 text-[12px] font-semibold text-muted">{message}</div> : null}
+      </div>
+    );
+  }
+
+  if (isMobile) {
+    /* Mobile v2 (#1439, lane 4; README §4.3): warning-soft card with a 45%
+       warning border, headed `⚠ Needs you · <since>`, the question at 15 px /
+       600, each option a 44 px card row with a radio mark that SENDS on tap,
+       and the operator's own answer as a 44 px field. Transport, when it
+       matters, is the caption under the card, never the headline. */
+    const askedAtSeconds = Math.floor(Date.parse(pending.askedAt) / 1000);
+    const since = Number.isFinite(askedAtSeconds) ? elapsed(t, askedAtSeconds) : "";
+    const status = (
+      <>
+        {state === "delivering" ? (
+          <div className="mt-2 inline-flex min-h-11 items-center gap-1.5 text-ui font-semibold text-muted">
+            <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden /> {t("common.sending")}
+          </div>
+        ) : null}
+        {state === "failed" ? (
+          <div role="alert" className="mt-2 flex flex-wrap items-center gap-2 rounded-control border border-danger/30 bg-danger-soft px-2.5 py-2">
+            <span className="text-ui font-bold text-danger">{t("question.deliveryFailed")}</span>
+            <span className="min-w-0 text-ui font-semibold text-danger">{message}</span>
+            {attempt ? (
+              <button
+                type="button"
+                className="ml-auto inline-flex min-h-11 items-center gap-1.5 rounded-control border border-border bg-card px-3 text-ui font-bold text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
+                disabled={!hasPane}
+                onClick={() => void submit(attempt.payload, attempt.optimistic, attempt.selection)}
+              >
+                <RotateCw className="h-3.5 w-3.5" aria-hidden /> {t("question.retryAnswer")}
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+      </>
+    );
+    return (
+      <div id="question" data-mobile-question="pending" className="mt-3 rounded-surface border border-warning/45 bg-warning-soft px-3 pb-2.5 pt-1">
+        <div className="flex min-h-11 items-center gap-1.5 text-label font-bold text-warning">
+          <TriangleAlert className="h-3.5 w-3.5 shrink-0" aria-hidden />
+          <span className="min-w-0 truncate">{since ? `${t("mobile2.feed.needsYou")} · ${since}` : t("mobile2.feed.needsYou")}</span>
+          {dismissButton}
+        </div>
+        {pending.kind === "plan" ? (
+          <>
+            <pre className="max-h-[420px] overflow-auto whitespace-pre-wrap break-words rounded-control border border-border bg-card px-3 py-2 text-[13px]">
+              {pending.plan}
+            </pre>
+            <textarea
+              className="mt-2 min-h-20 w-full resize-y rounded-control border border-border bg-card px-3 py-2 text-[16px] outline-none focus-visible:ring-2 focus-visible:ring-accent/35"
+              placeholder={t("question.rejectComment")}
+              value={comment}
+              onChange={(event) => setComment(event.target.value)}
+            />
+            <div className="mt-2 flex gap-2">
+              <button className="inline-flex min-h-11 flex-1 items-center justify-center gap-1.5 rounded-control bg-success px-3 text-title font-semibold text-white disabled:opacity-60" disabled={disabled} onClick={() => submit({ approve: true }, t("question.approved"))}>
+                <Check className="h-4 w-4" aria-hidden /> {t("question.approve")}
+              </button>
+              <button className="inline-flex min-h-11 flex-1 items-center justify-center gap-1.5 rounded-control bg-danger px-3 text-title font-semibold text-white disabled:opacity-60" disabled={disabled} onClick={() => submit({ approve: false, text: comment }, t("question.rejected"))}>
+                <X className="h-4 w-4" aria-hidden /> {t("question.reject")}
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+            {pending.questions?.map((question, qIndex) => (
+              <section key={qIndex} className="mt-2 first:mt-0">
+                {question.header ? <div className="text-label font-semibold text-muted">{question.header}</div> : null}
+                <p className="mb-1 text-title font-semibold text-primary">{question.question}</p>
+                {question.options.map((option, index) => {
+                  const selected = (answers[qIndex] ?? []).includes(index);
+                  const failed = choiceFailed(qIndex, index);
+                  return (
+                    <button
+                      key={index}
+                      type="button"
+                      data-choice-state={failed ? "failed" : selected ? "selected" : undefined}
+                      className={`mt-1.5 flex min-h-11 w-full items-center gap-2.5 rounded-control border bg-card px-3 py-1.5 text-left text-title focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/35 disabled:opacity-60 ${
+                        failed ? "border-danger/45" : selected ? "border-accent" : "border-border"
+                      }`}
+                      disabled={disabled}
+                      onClick={() => {
+                        const nextAnswers = { ...answers, [qIndex]: [index] };
+                        setChoice(qIndex, index, question.multiSelect);
+                        if (!question.multiSelect && questionCount === 1) void submit({ answers: packedAnswers(nextAnswers) }, option.label, nextAnswers);
+                      }}
+                    >
+                      <i
+                        aria-hidden
+                        className={`h-4 w-4 shrink-0 rounded-full border-[1.5px] ${
+                          failed ? "border-danger" : selected ? "border-accent bg-accent shadow-[inset_0_0_0_3px_var(--surface-card)]" : "border-border"
+                        }`}
+                      />
+                      <span className="min-w-0">
+                        <span className="block">
+                          {option.label}
+                          {failed ? <span className="ml-1.5 text-ui font-semibold text-danger">· {t("question.failedChoice")}</span> : null}
+                        </span>
+                        {option.description ? <span className="block text-ui text-muted">{option.description}</span> : null}
+                      </span>
+                    </button>
+                  );
+                })}
+              </section>
+            ))}
+            {questionCount <= 1 ? (
+              <div className="mt-2 flex gap-1.5">
+                <input
+                  className="min-h-11 min-w-0 flex-1 rounded-control border border-border bg-card px-3 text-[16px] outline-none focus-visible:ring-2 focus-visible:ring-accent/35"
+                  placeholder={t("question.ownAnswer")}
+                  value={text}
+                  onChange={(event) => setText(event.target.value)}
+                />
+                <button
+                  type="button"
+                  aria-label={t("common.send")}
+                  className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-control bg-accent text-white disabled:opacity-60"
+                  disabled={disabled || !text.trim()}
+                  onClick={() => submit({ text }, text)}
+                >
+                  <Send className="h-4 w-4" aria-hidden />
+                </button>
+              </div>
+            ) : null}
+            {needsExplicitSubmit ? (
+              <button className="mt-2 inline-flex min-h-11 w-full items-center justify-center gap-1.5 rounded-control bg-accent px-3 text-title font-semibold text-white disabled:opacity-60" disabled={disabled || !allAnswered} onClick={() => submit({ answers: packedAnswers() }, selectedLabel, answers)}>
+                <Send className="h-4 w-4" aria-hidden /> {t("common.send")}
+              </button>
+            ) : null}
+          </>
+        )}
+        {status}
       </div>
     );
   }

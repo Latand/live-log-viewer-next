@@ -2,6 +2,7 @@
 
 import { memo } from "react";
 
+import { useIsMobile } from "@/hooks/useIsMobile";
 import type { MandateDelivery } from "@/lib/runtime/messageOrigin";
 
 import { Brain, ChevronUp, Command, Check, Mail, MessageCircle, Mic, Sparkle, X } from "../icons";
@@ -86,13 +87,26 @@ function internalCard(ts: unknown, text: string, senderRole: string | undefined)
   };
 }
 
+/* Mobile v2 (#1439, lane 4): the engine mark is the only avatar left on the
+   phone — a 16 px glyph in secondary colour beside the engine's name in the
+   message header (README §5). Proper nouns, so no locale entry. */
+const ENGINE_LABEL: Record<"codex" | "claude" | "openclaw", string> = {
+  claude: "Claude",
+  codex: "Codex",
+  openclaw: "OpenClaw",
+};
+
 /* Memoized: feed items are immutable after buildFeed, so a pane re-render
    (poll tick, camera state, files refresh) skips re-parsing markdown for
    every message that did not change. The provenance lookup arrives by context,
    so a resolved map re-renders exactly the memoized consumers. */
 export const FeedItem = memo(function FeedItem({ item: sourceItem, speakText }: { item: Item; speakText?: string }) {
   const provenance = useMessageProvenance();
+  const isMobile = useIsMobile();
   const item = resolveDeliveredItem(sourceItem, provenance);
+  /* Mobile v2 (#1439, lane 4): no avatar column on the phone, so nothing lines
+     up with one — the `ml-9` chrome indent goes with it. */
+  const indent = isMobile ? "" : "ml-9 ";
   if (item.kind === "image") return <ImageCard media={item.media} data={item.data} w={item.w} h={item.h} bytes={item.bytes} />;
   if (item.kind === "inbox-image") return <InboxImageCard name={item.name} path={item.path} />;
   if (item.kind === "blob") return <BlobCard bytes={item.bytes} text={item.text} />;
@@ -105,6 +119,31 @@ export const FeedItem = memo(function FeedItem({ item: sourceItem, speakText }: 
   if (item.kind === "prose") {
     const cls = item.engine === "codex" ? "bg-codex" : item.engine === "openclaw" ? "bg-openclaw" : "bg-claude";
     const AvatarIcon = item.engine === "codex" ? Command : item.engine === "openclaw" ? MessageCircle : Sparkle;
+    if (isMobile) {
+      /* Mobile v2 (#1439, lane 4; README §2.6, §4.2): content gets the width.
+         No avatar column; the header is one 44 px row — engine glyph, engine
+         name, time, then the read-aloud and copy targets — and the prose
+         starts under it at 15 px. The wrapper carries no vertical margin and
+         nothing negative: the header's own height is the gap above the
+         message, so it can never overlap the text. */
+      const time = hhmm(item.ts);
+      return (
+        <div className="group/msg" data-mobile-message="agent">
+          <div data-mobile-message-header className="flex h-11 w-full items-center gap-1.5 text-label text-muted">
+            <AvatarIcon className="h-4 w-4 shrink-0 text-secondary" aria-hidden />
+            <span className="font-semibold text-secondary">{ENGINE_LABEL[item.engine]}</span>
+            <span className="ml-auto flex shrink-0 items-center gap-1">
+              {time ? <span className="tabular-nums">{time}</span> : null}
+              {speakText ? <SpeakButton text={speakText} /> : null}
+              <CopyButton text={item.text} label={tr("feed.copyMd")} className={MESSAGE_ACTION} />
+            </span>
+          </div>
+          <div className="w-full whitespace-pre-wrap break-words text-title leading-[1.45]" data-tts-message={`${item.engine}:${item.ts}`}>
+            <div className="contents" data-tts-body>{mdBlocks(item.text)}</div>
+          </div>
+        </div>
+      );
+    }
     return (
       <div className="group/msg my-3 flex gap-2.5">
         <div className={`mt-1 flex h-6.5 w-6.5 shrink-0 items-center justify-center rounded-full text-white ${cls}`}>
@@ -149,7 +188,7 @@ export const FeedItem = memo(function FeedItem({ item: sourceItem, speakText }: 
           label={tr("feed.copyMd")}
           className={`mt-2 ${MESSAGE_ACTION}`}
         />
-        <div className="max-w-[75%] rounded-surface bg-user px-4 py-2.5">
+        <div className={isMobile ? "max-w-[86%] rounded-surface bg-user px-3 py-[9px] text-title leading-[1.45]" : "max-w-[75%] rounded-surface bg-user px-4 py-2.5"}>
           <span className="mb-1 flex items-center gap-1 text-caption uppercase tracking-wide text-muted">
             <Mic className="h-3 w-3" aria-hidden />
             {tr("feed.voiceTurn")}
@@ -172,13 +211,15 @@ export const FeedItem = memo(function FeedItem({ item: sourceItem, speakText }: 
   if (item.kind === "user") {
     const long = item.text.length > 500;
     return (
-      <div className="group/msg my-3 flex items-start justify-end gap-1.5">
+      <div className="group/msg my-3 flex items-start justify-end gap-1.5" data-mobile-message={isMobile ? "user" : undefined}>
         <CopyButton
           text={item.text}
           label={tr("feed.copyMd")}
           className={`mt-2 ${MESSAGE_ACTION}`}
         />
-        <div className="max-w-[75%] whitespace-pre-wrap break-words rounded-surface bg-user px-4 py-2.5">
+        {/* Mobile v2 (#1439, lane 4): the user keeps the bubble, at 86% and
+            15 px on the phone (README §2.6). */}
+        <div className={isMobile ? "max-w-[86%] whitespace-pre-wrap break-words rounded-surface bg-user px-3 py-[9px] text-title leading-[1.45]" : "max-w-[75%] whitespace-pre-wrap break-words rounded-surface bg-user px-4 py-2.5"}>
           {/* #844: what this turn pointed at, from the reference persisted on
               the record itself — the same badge the composer showed before the
               operator sent it, so the two can be compared at a glance. */}
@@ -212,7 +253,7 @@ export const FeedItem = memo(function FeedItem({ item: sourceItem, speakText }: 
     const protocol = parseProtocolPayload(item.text);
     const long = item.text.length > 420 || item.text.split("\n").length > 6;
     return (
-      <div className="my-3 ml-9 overflow-hidden rounded-surface border border-accent/25 bg-accent-soft shadow-1">
+      <div className={`my-3 ${indent}overflow-hidden rounded-surface border border-accent/25 bg-accent-soft shadow-1`}>
         <div className="flex items-center gap-2 px-3.5 pt-2">
           <span className="flex h-6.5 w-6.5 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-accent">
             <Mail className="h-3.5 w-3.5" aria-hidden />
@@ -267,7 +308,7 @@ export const FeedItem = memo(function FeedItem({ item: sourceItem, speakText }: 
   }
   if (item.kind === "tnote") {
     return (
-      <div className="my-0.5 ml-9 flex items-center gap-1.5 text-label text-muted">
+      <div className={`my-0.5 ${indent}flex items-center gap-1.5 text-label text-muted`}>
         <Mail className="h-3 w-3 shrink-0" aria-hidden />
         {item.text}
       </div>
@@ -276,7 +317,7 @@ export const FeedItem = memo(function FeedItem({ item: sourceItem, speakText }: 
   if (item.kind === "think") {
     const long = item.text.length > 150;
     return (
-      <details className="my-0.5 ml-9 text-label italic text-muted">
+      <details className={`my-0.5 ${indent}text-label italic text-muted`}>
         <summary className={`flex list-none items-center gap-1.5 truncate ${long ? "cursor-pointer [@media(pointer:coarse)]:min-h-11" : ""}`} title={tr("render.reasoning")}>
           <Brain className="h-3.5 w-3.5 shrink-0" aria-hidden />
           <span className="truncate">

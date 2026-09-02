@@ -2281,4 +2281,15 @@ export const uk: Record<keyof typeof en, Message> = {
 
   "attention.return": "Назад, де ви були",
   "attention.returnLine": "Повернутися туди, де ви були",
+
+  /* Стрічка mobile v2 (#1439, лінія 4): заголовок повідомлення на телефоні,
+     серії інструментів і картка запитання. Лише дописування, ключі mobile2.feed.* */
+  "mobile2.feed.needsYou": "Потрібні ви",
+  "mobile2.feed.answeredFold": "запитання · відповідено {time}",
+  "mobile2.feed.answeredFoldToggle": "Показати або сховати відповідене запитання",
+  "mobile2.feed.running": "виконується {summary}…",
+  "mobile2.feed.runFailed": { one: "{count} дія, невдалих: {failed} — розгортається на місці", few: "{count} дії, невдалих: {failed} — розгортається на місці", many: "{count} дій, невдалих: {failed} — розгортається на місці", other: "{count} дій, невдалих: {failed} — розгортається на місці" },
+  "mobile2.feed.runFold": "{count} дій — розгортається на місці",
+  "mobile2.feed.ownAnswerHint": "Або наберіть свою відповідь — вона піде як відповідь.",
+  "mobile2.feed.replySent": "Відповідь надіслано",
 };
