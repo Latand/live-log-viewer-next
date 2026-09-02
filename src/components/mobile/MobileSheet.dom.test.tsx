@@ -150,18 +150,31 @@ test("a pointer that lands on the × or another header control is that control's
     const header = host.querySelector("[data-mobile2-sheet-header]") as unknown as HTMLElement;
     const close = host.querySelector("[data-mobile2-close]") as unknown as HTMLElement;
     const next = host.querySelector('[data-testid="next"]') as unknown as HTMLElement;
-    for (const control of [close, next]) {
-      flushSync(() => control.dispatchEvent(pointer("pointerdown", 300)));
-      flushSync(() => header.dispatchEvent(pointer("pointermove", 360)));
-      expect(dialog.style.transform).toBe("");
-      flushSync(() => header.dispatchEvent(pointer("pointerup", 360)));
-    }
-    expect(captures).toEqual([]);
+    /* Each control in the browser's own order: pointerdown on it, a move well
+       past the 80 px close threshold, pointerup, then the click. A drag that
+       leaked out of the control would take the transition, follow the finger
+       and close the sheet before the click ever ran. */
+    const far = 300 + SHEET_CLOSE_DRAG_PX + 40;
+    flushSync(() => next.dispatchEvent(pointer("pointerdown", 300)));
+    expect(dialog.style.transition).toBe("");
+    flushSync(() => header.dispatchEvent(pointer("pointermove", far)));
+    expect(dialog.style.transform).toBe("");
+    flushSync(() => header.dispatchEvent(pointer("pointerup", far)));
     expect(closes).toBe(0);
+    expect(nexts).toBe(0);
     flushSync(() => next.click());
     expect(nexts).toBe(1);
+    expect(closes).toBe(0);
+    flushSync(() => close.dispatchEvent(pointer("pointerdown", 300)));
+    expect(dialog.style.transition).toBe("");
+    flushSync(() => header.dispatchEvent(pointer("pointermove", far)));
+    expect(dialog.style.transform).toBe("");
+    flushSync(() => header.dispatchEvent(pointer("pointerup", far)));
+    /* The × closes on its own click, never on the pointer that preceded it. */
+    expect(closes).toBe(0);
     flushSync(() => close.click());
     expect(closes).toBe(1);
+    expect(captures).toEqual([]);
     /* The title text and the handle still start one, and capture it. */
     const title = header.querySelector("h2") as unknown as HTMLElement;
     flushSync(() => title.dispatchEvent(pointer("pointerdown", 300)));

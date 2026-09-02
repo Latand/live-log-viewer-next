@@ -233,6 +233,12 @@ test("the banner slot: offline outranks degraded outranks an arrival; the board 
   expect(q(root, "[data-mobile2-banner]")).toBeNull();
   flushSync(() => nav.push({ kind: "accounts" }));
   expect(q(root, '[data-mobile2-banner-kind="arrival"]')).not.toBeNull();
+  /* And popping back onto the board drops it again: the suppression follows
+     the screen the shell is on, not the render the arrival arrived in. */
+  flushSync(() => b.back());
+  expect(q(root, '[data-mobile2-screen="board"]')).not.toBeNull();
+  expect(q(root, "[data-mobile2-banner]")).toBeNull();
+  expect(q(root, '[data-testid="arrival"]')).toBeNull();
 });
 
 test("⋯ opens the board menu over the current screen with no history entry; × closes back onto it with its scroll kept", () => {
