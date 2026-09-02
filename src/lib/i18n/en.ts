@@ -2360,4 +2360,14 @@ export const en = {
 
   "attention.return": "Back to where you were",
   "attention.returnLine": "Go back to where you were",
+
+  /* Mobile v2 feed (#1439, lane 4): the phone's message header, tool runs
+     and question card. Append-only, keys prefixed mobile2.feed.* */
+  "mobile2.feed.needsYou": "Needs you",
+  "mobile2.feed.answeredFold": "question · answered {time}",
+  "mobile2.feed.answeredFoldToggle": "Show or hide the answered question",
+  "mobile2.feed.running": "running {summary}…",
+  "mobile2.feed.runFailed": { one: "{count} actions, {failed} failed — expands in place", other: "{count} actions, {failed} failed — expands in place" },
+  "mobile2.feed.runFold": "{count} actions — expands in place",
+  "mobile2.feed.ownAnswerHint": "Or type your own answer — it is sent as the reply.",
 } satisfies Dictionary;

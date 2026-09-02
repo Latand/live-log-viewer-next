@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 
+import { useIsMobile } from "@/hooks/useIsMobile";
 import { conversationIdentity } from "@/lib/accounts/identity";
 import { useLocale } from "@/lib/i18n";
 import {
@@ -12,9 +13,11 @@ import {
 } from "@/lib/suggestions/types";
 import type { FileEntry } from "@/lib/types";
 
-import type { OutboxEntry } from "../conversation/outbox";
+import { enqueueOutbox, type OutboxEntry } from "../conversation/outbox";
+import { mintIdempotencyKey } from "../runtime/runtimeModel";
 import { appendComposerDraft } from "../TmuxComposer";
 import type { FeedEntry } from "./parse";
+import { answerPendingQuestionWithText, subscribeQuestionAnswers } from "./QuestionCard";
 
 /**
  * The manager's reply drafts, as pills the operator answers with (#1202).
@@ -31,6 +34,16 @@ import type { FeedEntry } from "./parse";
  * for — so the text lands in the field the operator is looking at, focused,
  * caret at the end, joined to whatever they had already typed. It is never
  * sent: the operator reads it, edits it if they want, and presses send.
+ *
+ * On the phone (mobile v2, #1439 lane 4; README §4.3) a chip SENDS on tap: a
+ * pane-backed pending question takes the chip's text as its reply through the
+ * question card's own seam, so the card folds and the reply is the user's
+ * bubble; otherwise the text enters the conversation's outbox — the same
+ * write-ahead queue the composer's send button feeds — and the mounted
+ * composer dispatches it. The chips retire the moment one is tapped, and the
+ * moment the pending question is answered any other way (an option row, a
+ * typed answer): a chip left live under an answered question would re-post
+ * the reply and be refused.
  */
 
 export interface SuggestedRepliesProps {
@@ -213,8 +226,12 @@ function useReplySuggestions(conversationId: string | null, revision: string): R
 
 export function SuggestedReplies({ file, revision, items, outbox, floating = false }: SuggestedRepliesProps) {
   const { t } = useLocale();
+  const isMobile = useIsMobile();
   const conversationId = file.conversationId ?? null;
   const set = useReplySuggestions(conversationId, revision);
+  /* The set a phone chip already sent from: gone the instant it was tapped,
+     ahead of any echo or outbox read. */
+  const [sentSetId, setSentSetId] = useState<string | null>(null);
   const answeredAt = latestOperatorMessageAt(items, outbox);
   const offeredAt = set ? Date.parse(set.at) : Number.NaN;
   const answered = Boolean(set) && Number.isFinite(offeredAt) && answeredAt !== null && answeredAt > offeredAt;
@@ -230,8 +247,64 @@ export function SuggestedReplies({ file, revision, items, outbox, floating = fal
     if (cache.get(conversationId)?.setId === set.setId) cache.set(conversationId, null);
   }, [answered, set, conversationId]);
 
-  if (!set || answered) return null;
+  /* The phone's chips answer the pending question, so they go the instant it
+     is answered from anywhere — the card's option rows, its own field, or
+     another chip — ahead of the transcript echo. */
+  const pendingToolUseId = file.pendingQuestion?.toolUseId ?? null;
+  const setId = set?.setId ?? null;
+  useEffect(() => {
+    if (!isMobile || !pendingToolUseId || !setId) return;
+    return subscribeQuestionAnswers((event) => {
+      if (!event.ok || event.toolUseId !== pendingToolUseId) return;
+      setSentSetId(setId);
+      if (conversationId && cache.get(conversationId)?.setId === setId) cache.set(conversationId, null);
+    });
+  }, [isMobile, pendingToolUseId, setId, conversationId]);
+
+  if (!set || answered || sentSetId === set.setId) return null;
   const cardId = conversationIdentity(file);
+  const sendFromPhone = (text: string) => {
+    const pending = file.pendingQuestion;
+    if (pending && pending.kind === "question" && pending.paneTarget !== null) {
+      void answerPendingQuestionWithText(pending, text);
+    } else {
+      enqueueOutbox(cardId, { id: mintIdempotencyKey(), text, images: 0, at: Date.now() });
+    }
+    setSentSetId(set.setId);
+    if (conversationId && cache.get(conversationId)?.setId === set.setId) cache.set(conversationId, null);
+  };
+  if (isMobile) {
+    /* Mobile v2 (#1439, lane 4; README §4.3): 32 px chips inside 44 px
+       targets, one swipeable row directly above the composer box. */
+    return (
+      <div
+        data-reply-suggestions={floating ? "floating" : "inline"}
+        data-mobile-chips
+        role="group"
+        aria-label={t("composer.suggestedReplies")}
+        className={`flex min-w-0 items-center gap-1.5 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden ${
+          floating
+            ? "pointer-events-auto touch-pan-x overscroll-x-contain overscroll-y-none rounded-surface border border-border bg-raised/95 px-1.5 shadow-2 backdrop-blur-sm"
+            : "mt-1"
+        }`}
+      >
+        {set.replies.map((reply, index) => (
+          <button
+            key={`${set.setId}:${index}`}
+            type="button"
+            data-reply-suggestion
+            title={reply.text}
+            onClick={() => sendFromPhone(reply.text)}
+            className="inline-flex h-11 shrink-0 items-center px-px focus-visible:outline-none"
+          >
+            <span className="inline-flex h-8 max-w-[70vw] items-center truncate whitespace-nowrap rounded-full border border-border bg-card px-3 text-ui font-semibold text-secondary">
+              {reply.label}
+            </span>
+          </button>
+        ))}
+      </div>
+    );
+  }
   return (
     <div
       /* The placement is part of the contract, not decoration: the drafts are
