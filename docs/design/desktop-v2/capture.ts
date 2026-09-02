@@ -39,19 +39,30 @@
  *   - at yard altitude the block content is hidden and every tile is one
  *     control; at block altitude every node is one control;
  *   - the corner map draws one rect per cluster and a viewport frame;
- *   - clusters that need the operator sort first (their keycaps are 1..k).
+ *   - clusters that need the operator sort first (their keycaps are 1..k);
+ *   - every conversation of the project is in exactly one cluster, and the
+ *     bar's counts equal what the yard shows (the lineage gate);
+ *   - at yard altitude every tile carries its title, phrase, live line and a
+ *     silhouette with one ghost per node, the drawn content covers at least
+ *     70 % of the tile, and no title is truncated;
+ *   - the block view of a cluster keeps a neighbour in the frame;
+ *   - the settings sheet sits on its chip (left edges within 8 px, no scrim).
  *
  * After the matrix, headless flows click through the design: pan by drag is
  * transform-only (a MutationObserver sees no DOM change while panning — the
  * "no reflow" promise), Ctrl+wheel zooms and the altitude flips with
  * hysteresis, a keycap glides the camera onto its cluster, n / N walk the
  * queue, Enter lifts and Esc lowers, a drag pins a cluster and the packer
- * flows around it and Release restores the auto layout, the inspector's
- * answer / skip / pause / archive / edit-stage actions land with their inverse
- * in a receipt, the chat's settings sheet is one level with every group
- * visible and Esc returns focus to the chip, the send slot flips between Stop
- * and Send, the question card answers on click, and every account row opens
- * a detail with the chart and the pace line.
+ * flows around it (the fit-all zoom moves by less than 10 %, the board's rect
+ * does not move under the receipt) and Release restores the auto layout, the
+ * inspector's answer / skip / pause / archive / edit-stage actions land with
+ * their inverse in a receipt, a banner from another project sits beside the
+ * canvas, a three-level lineage renders three rows with edges from the real
+ * parents, the chat's settings sheet is one level with every group visible
+ * and Esc returns focus to the chip, the send slot flips between Stop and
+ * Send, the question card answers on click, every account row opens a detail
+ * with the chart, the pace line and the conversations using it, and Esc from
+ * a chat returns to the yard with that node lifted.
  */
 import fs from "node:fs";
 import { createRequire } from "node:module";
@@ -95,9 +106,16 @@ interface Geometry {
   scrollers: { name: string; scrollWidth: number; clientWidth: number }[];
   canvas: string; benchShown: boolean; dialog: boolean; controls: Control[]; receipt: Rect | null; activeIsBody: boolean;
   caps: string[]; banned: string[]; altitude: string | null;
-  clusters: { id: string; x: number; y: number; w: number; h: number; needs: boolean; key: number | null; pinned: boolean }[];
+  clusters: { id: string; x: number; y: number; w: number; h: number; needs: boolean; key: number | null; pinned: boolean; nodes: number }[];
   tilesVisible: number; nodesVisible: number; mmRects: number; mmView: boolean;
+  coverage: { missing: string[]; extra: string[]; dup: string[]; bar: Counts; yard: Counts; text: string } | null;
+  tiles: { id: string; fill: number; title: string; phrase: string; live: string; ghosts: number; truncated: boolean }[];
+  sheet: { sheetLeft: number; chipLeft: number; scrim: boolean } | null;
+  visibleClusters: number;
 }
+interface Counts { needs: number; working: number; pipelines: number }
+interface ProtoModel { clusters: { id: string; kind: string; x: number; y: number; w: number; h: number; needs: boolean; key?: number; pinned?: boolean; nodes: { conv: { id: string; seat?: boolean } | null }[]; held?: { id: string }[]; pipe?: { state: string } }[]; regions: unknown[] | null }
+interface Proto { model: () => ProtoModel; F: { conversations: { id: string; project: string }[] }; S: { project: string }; counts: (p: string) => Counts; stateBits: (c: unknown) => { key: string }; NEEDS: Set<string> }
 
 function urlFor(screen: Screen, scheme: string, width: number): string {
   return `${pathToFileURL(INDEX).href}?scheme=${scheme}&w=${width}${screen.scenario ? `&scenario=${screen.scenario}` : ""}${screen.query ? `&${screen.query}` : ""}${screen.hash}`;
@@ -145,17 +163,48 @@ async function measure(page: Page): Promise<Geometry> {
     const caps = [...new Set((text.match(/\b[A-Z]{4,}\b/g) ?? []).filter((w) => !["JSON", "APPROVE", "PID", "HEAD", "README", "CSV", "TTL", "API", "SHA", "URL", "HTML", "MCP", "CLI", "RAM"].includes(w)))];
     const bannedHits = banned.filter((b) => text.includes(b));
     const board = app.querySelector("[data-board]");
-    const proto = (window as unknown as { __proto: { model: () => { clusters: { id: string; x: number; y: number; w: number; h: number; needs: boolean; key?: number; pinned?: boolean }[] } } }).__proto;
-    const model = board ? proto.model() : { clusters: [] };
+    const proto = (window as unknown as { __proto: Proto }).__proto;
+    const model: ProtoModel = board ? proto.model() : { clusters: [], regions: null };
+    /* The lineage gate: every conversation of the project in exactly one
+       cluster, and the bar's counts equal to what the yard carries. */
+    let coverage: Geometry["coverage"] = null;
+    if (board && !model.regions) {
+      const all = proto.F.conversations.filter((c) => c.project === proto.S.project).map((c) => c.id);
+      const seen = new Set<string>(); const dup: string[] = [];
+      for (const c of model.clusters) for (const id of [...c.nodes.filter((n) => n.conv).map((n) => n.conv!.id), ...(c.held ?? []).map((h) => h.id)]) { if (seen.has(id)) dup.push(id); seen.add(id); }
+      const yard = { needs: 0, working: 0, pipelines: 0 };
+      for (const c of model.clusters) {
+        if (c.kind === "pipeline" && c.pipe) { if (c.pipe.state === "needs_decision") yard.needs += 1; if (["running", "needs_decision", "provisioning", "paused"].includes(c.pipe.state)) yard.pipelines += 1; }
+        for (const n of c.nodes) { if (!n.conv || n.conv.seat) continue; const k = proto.stateBits(n.conv).key; if (proto.NEEDS.has(k)) yard.needs += 1; if (k === "working") yard.working += 1; }
+      }
+      coverage = { missing: all.filter((id) => !seen.has(id)), extra: [...seen].filter((id) => !all.includes(id)), dup, bar: proto.counts(proto.S.project), yard, text: app.querySelector(".bar-title .meta")?.textContent ?? "" };
+    }
+    const altitudeNow = board ? (board as HTMLElement).dataset.altitude : null;
+    const tiles: Geometry["tiles"] = altitudeNow === "yard" ? [...app.querySelectorAll(".cluster .tile")].filter(visible).map((t) => {
+      const tr = t.getBoundingClientRect();
+      /* Drawn content = the bounding box of the text rows and the silhouette's
+         marks, clipped to the tile (the critique measured the text's bbox the
+         same way). */
+      const drawn = [...[".tt", ".trow", ".tl"].map((sel) => t.querySelector(sel)).filter(Boolean), ...t.querySelectorAll(".sil .gh, .sil .gm, .sil-lines .lp")].map((el) => el!.getBoundingClientRect()).filter((r) => r.width > 0 && r.height > 0);
+      const x1 = Math.max(tr.left, Math.min(...drawn.map((r) => r.left))), y1 = Math.max(tr.top, Math.min(...drawn.map((r) => r.top))), x2 = Math.min(tr.right, Math.max(...drawn.map((r) => r.right))), y2 = Math.min(tr.bottom, Math.max(...drawn.map((r) => r.bottom)));
+      const drawnArea = drawn.length ? Math.max(0, x2 - x1) * Math.max(0, y2 - y1) : 0;
+      const tt = t.querySelector(".tt") as HTMLElement | null;
+      return { id: (t.closest(".cluster") as HTMLElement).dataset.cluster!, fill: drawnArea / (tr.width * tr.height), title: tt?.textContent?.trim() ?? "", phrase: t.querySelector(".tm")?.textContent?.trim() ?? "", live: t.querySelector(".tl")?.textContent?.trim() ?? "", ghosts: t.querySelectorAll(".sil .gh").length, truncated: Boolean(tt && tt.scrollHeight - tt.clientHeight > parseFloat(getComputedStyle(tt).lineHeight) / 2) };
+    }) : [];
+    const sheetEl = app.querySelector(".settings"); const chipEl = app.querySelector('[data-focus="chip"]');
+    const sheet = sheetEl && chipEl ? { sheetLeft: sheetEl.getBoundingClientRect().left, chipLeft: chipEl.getBoundingClientRect().left, scrim: Boolean(app.querySelector(".scrim")) } : null;
+    const br = board ? board.getBoundingClientRect() : null;
+    const visibleClusters = br ? [...app.querySelectorAll(".cluster")].filter((el) => { const r = el.getBoundingClientRect(); return r.right > br.left && r.left < br.right && r.bottom > br.top && r.top < br.bottom; }).length : 0;
     return {
       scrollers, canvas: getComputedStyle(app).backgroundColor, benchShown: Boolean(bench && !bench.hidden), dialog: Boolean(dialog), controls,
       receipt: rr ? { x: rr.left, y: rr.top, w: rr.width, h: rr.height } : null,
       activeIsBody: !document.activeElement || document.activeElement === document.body, caps, banned: bannedHits,
       altitude: board ? (board as HTMLElement).dataset.altitude ?? null : null,
-      clusters: model.clusters.map((c) => ({ id: c.id, x: c.x, y: c.y, w: c.w, h: c.h, needs: c.needs, key: c.key ?? null, pinned: Boolean(c.pinned) })),
+      clusters: model.clusters.map((c) => ({ id: c.id, x: c.x, y: c.y, w: c.w, h: c.h, needs: c.needs, key: c.key ?? null, pinned: Boolean(c.pinned), nodes: c.nodes.length })),
+      coverage, tiles, sheet, visibleClusters,
       tilesVisible: [...app.querySelectorAll(".cluster .tile")].filter((el) => getComputedStyle(el).display !== "none").length,
       nodesVisible: [...app.querySelectorAll(".cluster .node")].filter((el) => getComputedStyle(el).display !== "none" && getComputedStyle(el.parentElement!).visibility !== "hidden").length,
-      mmRects: app.querySelectorAll(".minimap rect:not(.mm-bg):not(.mm-view):not(.mm-region)").length, mmView: Boolean(app.querySelector("[data-mm-view]")),
+      mmRects: app.querySelectorAll(".minimap rect:not(.mm-bg):not(.mm-view):not(.mm-region):not(.mm-desk)").length, mmView: Boolean(app.querySelector("[data-mm-view]")),
     };
   }, { hit: HIT_PX, banned: BANNED });
 }
@@ -187,7 +236,29 @@ function gate(label: string, g: Geometry, scheme: "dark" | "light", screen: Scre
     const keyed = g.clusters.filter((c) => c.key !== null).sort((a, b) => a.key! - b.key!);
     let seenNonNeed = false;
     for (const c of keyed) { if (!c.needs) seenNonNeed = true; else if (seenNonNeed) throw new Error(`${label}: cluster ${c.id} needs you but is keyed after a cluster that does not`); }
-    if (screen.scenario === "pinned") { const p = g.clusters.find((c) => c.id === "p2"); if (!p || !p.pinned || p.x !== 1460 || p.y !== 520) throw new Error(`${label}: the pinned cluster did not keep its place (${JSON.stringify(p)})`); }
+    if (screen.scenario === "pinned") { const p = g.clusters.find((c) => c.id === "p2"); if (!p || !p.pinned || p.x !== 240 || p.y !== -60) throw new Error(`${label}: the pinned cluster did not keep its place (${JSON.stringify(p)})`); }
+    if (g.coverage) {
+      const c = g.coverage;
+      if (c.missing.length || c.extra.length || c.dup.length) throw new Error(`${label}: lineage — conversations in no cluster [${c.missing.join(",")}], in a cluster but not the project [${c.extra.join(",")}], in two clusters [${c.dup.join(",")}]`);
+      for (const k of ["needs", "working", "pipelines"] as const) if (c.bar[k] !== c.yard[k]) throw new Error(`${label}: the bar says ${c.bar[k]} ${k}, the yard carries ${c.yard[k]}`);
+      if (!c.text.includes(`${c.bar.needs} need you`) || !c.text.includes(`${c.bar.working} working`)) throw new Error(`${label}: the bar prints «${c.text}» for ${JSON.stringify(c.bar)}`);
+    }
+    if (g.altitude === "yard") {
+      const byId = new Map(g.clusters.map((c) => [c.id, c]));
+      for (const t of g.tiles) {
+        if (t.fill < 0.7) throw new Error(`${label}: tile ${t.id} draws ${Math.round(t.fill * 100)} % of its rect (title, phrase, live line and silhouette)`);
+        if (!t.title || !t.phrase || !t.live) throw new Error(`${label}: tile ${t.id} lacks a title, phrase or live line (${JSON.stringify([t.title, t.phrase, t.live])})`);
+        const cl = byId.get(t.id);
+        if (cl && t.ghosts !== cl.nodes) throw new Error(`${label}: tile ${t.id} shows ${t.ghosts} ghost(s) for ${cl.nodes} node(s)`);
+        if (t.truncated) throw new Error(`${label}: tile ${t.id} truncates its title «${t.title}»`);
+      }
+    }
+    if (screen.id === "yard-block" && g.visibleClusters < 2) throw new Error(`${label}: the block view frames ${g.visibleClusters} cluster(s); a neighbour should be in view`);
+  }
+  if (screen.id === "chat-settings") {
+    if (!g.sheet) throw new Error(`${label}: no settings sheet or chip to anchor it`);
+    if (Math.abs(g.sheet.sheetLeft - g.sheet.chipLeft) > 8) throw new Error(`${label}: the sheet's left edge is ${Math.round(g.sheet.sheetLeft - g.sheet.chipLeft)} px from the chip's`);
+    if (g.sheet.scrim) throw new Error(`${label}: the sheet dims the feed with a scrim`);
   }
 }
 
@@ -236,7 +307,9 @@ async function flows(browser: Browser): Promise<void> {
   const page = await ctx.newPage();
   const errors: string[] = [];
   page.on("pageerror", (e) => errors.push(e.message));
-  const goto = (screen: Screen | string, query = "") => open(page, typeof screen === "string" ? { id: "x", hash: screen, title: "", query } : screen, "dark", 1440);
+  const goto = (screen: Screen | string, query = "", scenario?: string) => open(page, typeof screen === "string" ? { id: "x", hash: screen, title: "", query, scenario } : screen, "dark", 1440);
+  const boardRect = () => page.evaluate(() => { const r = document.querySelector("[data-board]")!.getBoundingClientRect(); return [r.left, r.top, r.width, r.height].join(","); });
+  const fitZoom = async () => { await page.evaluate(() => (window as unknown as { __proto: { fitAll: (a: boolean) => void } }).__proto.fitAll(false)); return (await cam(page)).z; };
   const step = async (name: string, fn: () => Promise<void>) => { try { await fn(); console.log(`  ✓ ${name}`); } catch (e) { fail(new Error(`${name}: ${(e as Error).message}`)); } };
 
   await goto("#/board");
@@ -247,12 +320,11 @@ async function flows(browser: Browser): Promise<void> {
       const world = board.querySelector(".world")!;
       let count = 0;
       /* Allowed while panning: the world's transform, the grid's background
-         offset, the board's own class, the corner map's viewport frame and the
-         bar's beacons. Anything else — a node, a cluster, a tile — is a reflow. */
+         offset, the board's own class and the corner map's viewport frame.
+         Anything else — a node, a cluster, a tile, a tether — is a reflow. */
       const allowed = (m: MutationRecord) => {
         const t = m.target as Element;
-        if (m.type === "attributes" && (t === world || t.classList?.contains("grid") || t === board || t.hasAttribute?.("data-mm-view"))) return true;
-        return Boolean(t.closest?.(".beacons"));
+        return m.type === "attributes" && (t === world || t.classList?.contains("grid") || t === board || t.hasAttribute?.("data-mm-view"));
       };
       const mo = new MutationObserver((ms) => { for (const m of ms) if (!allowed(m)) count += 1; });
       mo.observe(board, { subtree: true, childList: true, attributes: true, characterData: true });
@@ -294,9 +366,12 @@ async function flows(browser: Browser): Promise<void> {
     const keyed = await page.evaluate(() => (window as unknown as { __proto: { model: () => { clusters: { id: string; key?: number; x: number; y: number; w: number; h: number }[] } } }).__proto.model().clusters.find((c) => c.key === 2));
     await expect(selected === keyed!.id, `selected ${selected}, keycap 2 is ${keyed!.id}`);
     await expect(Boolean(await page.$("[data-inspector]")), "the inspector did not open");
-    const c = await cam(page); const cx = (keyed!.x + keyed!.w / 2) * c.z + c.x; const cy = (keyed!.y + keyed!.h / 2) * c.z + c.y;
+    const c = await cam(page); const x1 = keyed!.x * c.z + c.x, y1 = keyed!.y * c.z + c.y, x2 = (keyed!.x + keyed!.w) * c.z + c.x, y2 = (keyed!.y + keyed!.h) * c.z + c.y;
     const b = (await page.locator("[data-board]").boundingBox())!;
-    await expect(Math.abs(cx - b.width / 2) < 40 && Math.abs(cy - b.height / 2) < 40, `the camera centre is ${Math.round(cx)},${Math.round(cy)} of ${b.width}×${b.height}`);
+    await expect(x1 >= 0 && y1 >= 0 && x2 <= b.width && y2 <= b.height, `the cluster spans ${Math.round(x1)},${Math.round(y1)}–${Math.round(x2)},${Math.round(y2)} of ${b.width}×${b.height}`);
+    await expect((await altitude(page)) === "block", `the glide landed at ${await altitude(page)} altitude`);
+    const inView = await page.evaluate(() => { const br = document.querySelector("[data-board]")!.getBoundingClientRect(); return [...document.querySelectorAll(".cluster")].filter((el) => { const r = el.getBoundingClientRect(); return r.right > br.left && r.left < br.right && r.bottom > br.top && r.top < br.bottom; }).length; });
+    await expect(inView >= 2, `the block view frames ${inView} cluster(s); a neighbour should be in view`);
   });
   await step("n / N walk what needs you across clusters and conversations", async () => {
     await page.focus("[data-board]");
@@ -330,8 +405,9 @@ async function flows(browser: Browser): Promise<void> {
     await expect(!(await page.$(".lift")), "Esc did not lower the lift");
     await expect((await active(page)).includes("<board>"), `after Esc the focus is ${await active(page)}`);
   });
-  await step("a drag pins a cluster, the packer flows around it, Release restores the auto layout", async () => {
+  await step("a drag pins a cluster, the packer flows around it, the canvas holds still, Release restores the auto layout", async () => {
     await goto("#/board");
+    const rect0 = await boardRect(); const z0 = await fitZoom();
     const before = await page.evaluate(() => (window as unknown as { __proto: { model: () => { clusters: { id: string; x: number; y: number }[] } } }).__proto.model().clusters.map((c) => [c.id, c.x, c.y]));
     const target = await page.evaluate(() => { const c = (window as unknown as { __proto: { model: () => { clusters: { id: string; kind: string; x: number; y: number; w: number }[] } } }).__proto.model().clusters.find((x) => x.kind === "pipeline")!; return c; });
     await page.evaluate((id) => (window as unknown as { __proto: { fitCluster: (id: string, a: boolean) => void } }).__proto.fitCluster(id, false), target.id);
@@ -348,7 +424,12 @@ async function flows(browser: Browser): Promise<void> {
     const clusters = await page.evaluate(() => (window as unknown as { __proto: { model: () => { clusters: { id: string; x: number; y: number; w: number; h: number; pinned: boolean }[] } } }).__proto.model().clusters);
     for (let i = 0; i < clusters.length; i++) for (let j = i + 1; j < clusters.length; j++) { const a = clusters[i], b = clusters[j]; await expect(!(a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h), `${a.id} and ${b.id} overlap after the pin`); }
     await expect(Boolean(await page.$(".receipt")), "no receipt after the pin");
+    await expect(Boolean(await page.$(".bar .receipt")), "the receipt is not in the bar");
+    await expect((await boardRect()) === rect0, `the board's rect moved under the receipt (${rect0} → ${await boardRect()})`);
     await expect(Boolean(await page.$(`.cluster[data-cluster="${target.id}"].pinned .pinmark`)), "no pin mark on the header");
+    await expect(Boolean(await page.$(`.cluster[data-cluster="${target.id}"].pinned .tile .tpin`)), "no pin glyph on the tile");
+    const z1 = await fitZoom();
+    await expect(Math.abs(z1 - z0) / z0 < 0.1, `the pin moved the fit-all zoom from ${z0.toFixed(3)} to ${z1.toFixed(3)}`);
     await page.click(".receipt .link");
     await page.waitForTimeout(80);
     const restored = await page.evaluate(() => (window as unknown as { __proto: { model: () => { clusters: { id: string; x: number; y: number }[] } } }).__proto.model().clusters.map((c) => [c.id, c.x, c.y]));
@@ -358,8 +439,10 @@ async function flows(browser: Browser): Promise<void> {
     await goto("#/board", "select=p2");
     await expect(Boolean(await page.$('.inspector [data-focus="answer"]')), "a parked pipeline shows no answer field");
     await page.fill('.inspector [data-focus="answer"]', "Keep restored pipelines out of the sweep.");
+    const rectA = await boardRect();
     await page.click('[data-act="answer:p2"]');
     await page.waitForTimeout(60);
+    await expect((await boardRect()) === rectA, "the board's rect moved under the Answer receipt");
     const st = await page.evaluate(() => (window as unknown as { __proto: { F: { pipelines: { id: string; state: string; stage: string }[] } } }).__proto.F.pipelines.find((p) => p.id === "p2"));
     await expect(st!.state === "running" && st!.stage === "build", `after Answer the record is ${st!.state} at ${st!.stage}`);
     await expect((await page.textContent(".receipt"))!.includes("Undo"), "no Undo in the receipt");
@@ -383,6 +466,26 @@ async function flows(browser: Browser): Promise<void> {
     await page.click(".receipt .link");
     await expect(Boolean(await page.$('.cluster[data-cluster="p2"]')), "Restore did not bring the cluster back");
   });
+  await step("a banner from another project sits beside the canvas and the canvas holds still", async () => {
+    await goto("#/board", "", "arrival");
+    const r0 = await boardRect();
+    await expect(Boolean(await page.$(".side .banner")), "the arrival banner is not in the side column");
+    await expect(!(await page.$(".main > .banner")), "a banner sits above the canvas");
+    await page.click('[data-act="dismissBanner"]');
+    await page.waitForTimeout(60);
+    await expect(!(await page.$(".banner")), "Dismiss left the banner up");
+    await expect((await boardRect()) === r0, "the board's rect changed with the banner");
+  });
+  await step("a three-level lineage renders three rows with edges from the real parents", async () => {
+    await goto("#/board");
+    const t = await page.evaluate(() => { const m = (window as unknown as { __proto: { model: () => { clusters: { id: string; nodes: { id: string; depth: number; parent: string | null; rx: number; ry: number; w: number }[] }[] } } }).__proto.model(); const cl = m.clusters.find((c) => c.id === "t:t9")!; const paths = [...document.querySelectorAll('.cluster[data-cluster="t:t9"] .spine path')].map((p) => p.getAttribute("d")!); return { nodes: cl.nodes, paths }; });
+    const depths = new Set(t.nodes.map((n) => n.depth));
+    await expect(depths.has(0) && depths.has(1) && depths.has(2), `depths are ${[...depths].join(",")}`);
+    const c6 = t.nodes.find((n) => n.id === "c6")!, c6a = t.nodes.find((n) => n.id === "c6a")!;
+    await expect(c6a.parent === "c6" && c6a.ry > c6.ry && c6a.rx >= c6.rx, `the grandchild sits at ${c6a.rx},${c6a.ry} under ${c6.rx},${c6.ry} with parent ${c6a.parent}`);
+    await expect(t.paths.length === t.nodes.length - 1, `${t.paths.length} edges for ${t.nodes.length} nodes`);
+    await expect(t.paths.some((d) => d.startsWith(`M ${c6.rx + c6.w / 2} ${c6.ry + 88} `)), `no edge starts at c6's foot: ${t.paths.join(" | ")}`);
+  });
   await step("the backlog tray assigns a worker and the new thread joins the yard", async () => {
     await goto("#/board", "tray=1");
     const n0 = (await page.evaluate(() => (window as unknown as { __proto: { model: () => { clusters: unknown[] } } }).__proto.model().clusters.length));
@@ -403,12 +506,19 @@ async function flows(browser: Browser): Promise<void> {
     await expect(groups >= 5, `only ${groups} groups visible (model, reasoning, speed, account, session)`);
     await expect(!(await page.$(".settings [aria-haspopup]")), "the sheet has a submenu");
     await expect(await activeInDialog(page), "the sheet did not take focus");
+    await expect(!(await page.$(".scrim")), "the sheet dims the feed");
     await page.click('[data-act="set:c1:effort:xhigh"]');
     await page.waitForTimeout(40);
     await expect(Boolean(await page.$(".settings[data-dialog]")), "picking a value closed the sheet");
     await page.keyboard.press("Escape");
     await expect((await active(page)).includes("[chip]"), `focus after Esc is ${await active(page)}`);
     await expect((await page.textContent('[data-focus="chip"]'))!.includes("xhigh"), "the chip does not show the new reasoning");
+    await page.click('[data-focus="chip"]');
+    await page.waitForTimeout(40);
+    await expect(Boolean(await page.$(".settings[data-dialog]")), "the chip did not reopen the sheet");
+    await page.mouse.click(700, 200);
+    await page.waitForTimeout(40);
+    await expect(!(await page.$(".settings[data-dialog]")), "a click outside did not close the sheet");
   });
   await step("the send slot flips: Stop while working and empty, Send when typing, the message lands", async () => {
     await goto("#/chat/c1");
@@ -443,10 +553,23 @@ async function flows(browser: Browser): Promise<void> {
       const quiet = await page.evaluate(() => Boolean(document.querySelector(".acc-detail .quietline")));
       await expect(signedIn || quiet, `${id}: neither a chart nor the signed-out line`);
       if (signedIn) await expect((await page.textContent(".acc-detail .pace"))!.includes("an hour"), `${id}: no burn rate`);
+      const charts = await page.evaluate(() => document.querySelectorAll(".acc-detail .chart").length);
+      if (signedIn) await expect(charts === 2, `${id}: ${charts} burndown chart(s), expected one per window`);
+      const using = Boolean(await page.$(".acc-detail [data-using]"));
+      await expect(using === signedIn, `${id}: the Using-this-account section is ${using ? "present" : "absent"} on a ${signedIn ? "signed-in" : "signed-out"} account`);
     }
+    await page.click('.arow[data-account="cx-team"]');
+    const usingRows = await page.evaluate(() => [...document.querySelectorAll(".acc-detail [data-using] .irow")].map((el) => el.textContent!.trim().slice(0, 40)));
+    await expect(usingRows.length >= 2, `Team lists ${usingRows.length} conversation(s) using it`);
+    await page.click(".acc-detail [data-using] .irow");
+    await page.waitForTimeout(60);
+    await expect((await hash(page)).startsWith("#/chat/"), `the using row opened ${await hash(page)}`);
+    await goto("#/accounts");
     await page.click('.arow[data-account="cl-lab"]');
     await page.click('[data-act="switch:claude:cl-lab"]');
     await expect((await page.textContent(".receipt"))!.includes("Switch back"), "no Switch back in the receipt");
+    await expect(/\d+ conversations? move/.test((await page.textContent(".receipt"))!), "the Switch receipt does not say how many conversations move");
+    await expect(Boolean(await page.$(".bar .receipt")), "the receipt is not in the bar");
     await page.click(".receipt .link");
     const active_ = await page.evaluate(() => (window as unknown as { __proto: { F: { accounts: { claude: { id: string; active: boolean }[] } } } }).__proto.F.accounts.claude.find((a) => a.active)!.id);
     await expect(active_ === "cl-main", `after Switch back the active account is ${active_}`);
@@ -464,8 +587,11 @@ async function flows(browser: Browser): Promise<void> {
   await step("a chat's Esc returns to the yard with the node lifted where it lives", async () => {
     await goto("#/chat/c1");
     await page.keyboard.press("Escape");
-    await page.waitForTimeout(60);
+    await page.waitForTimeout(120);
     await expect((await hash(page)) === "#/board", `Esc went to ${await hash(page)}`);
+    const lift = await page.evaluate(() => (window as unknown as { __proto: { S: { lift: string | null } } }).__proto.S.lift);
+    await expect(lift === "c1", `the lift is ${lift}`);
+    await expect(Boolean(await page.$('.lift[data-lift="c1"]')), "the node is not lifted on the yard");
   });
   await step("the page logged no error", async () => { await expect(errors.length === 0, errors.join(" | ")); });
   await ctx.close();
