@@ -29,7 +29,7 @@ import {
   type HandoffDigestRequest,
   type HandoffParts,
 } from "./handoffDigest";
-import { orchestratorMandateForDelivery } from "./prompt";
+import { ORCHESTRATOR_PROMPT_VERSION, ORCHESTRATOR_SYSTEM_PROMPT, orchestratorMandateForDelivery } from "./prompt";
 import {
   activeOrchestratorSeats,
   beginOrchestratorSeatIntent,
@@ -849,13 +849,18 @@ export async function executeOrchestratorRotation(
     notes: notes || null,
   };
 
+  /* The successor's core mandate is whatever the caller sent, else the
+     incumbent's. The recorded version follows the TEXT (#1452): a rotation
+     onto the built-in default is the current version whatever the incumbent
+     ran on — otherwise a v3 seat rotated onto v13 text would still read v3. */
+  const base = text(rawBody.mandate) || incumbent.mandate;
   /* Awaited ONLY when there is something to summarize. A rotation with nothing
      to compact must reach its durable `begin` with no await point, which is
      what serializes it against a concurrent designation for the same project. */
   const composition = composeRotationMandate({
     project,
     clientRequestId,
-    base: text(rawBody.mandate) || incumbent.mandate,
+    base,
     handoff,
     predecessor: predecessor ? { path: predecessor.path, engine: predecessor.engine } : null,
     roleParams: rawBody.roleParams,
@@ -893,7 +898,7 @@ export async function executeOrchestratorRotation(
        BEFORE the seat request's own reconciliation; this is what that request
        re-checks after it, which is the last read before the durable begin. */
     expectedIncumbentSeatEpoch: incumbent.seatEpoch,
-    promptVersion: incumbent.promptVersion,
+    promptVersion: base === ORCHESTRATOR_SYSTEM_PROMPT ? ORCHESTRATOR_PROMPT_VERSION : incumbent.promptVersion,
     ...(rawBody.engine !== undefined ? { engine: rawBody.engine } : {}),
     ...(rawBody.model !== undefined ? { model: rawBody.model } : {}),
     ...(rawBody.effort !== undefined ? { effort: rawBody.effort } : {}),

@@ -1624,6 +1624,8 @@ describe("MCP tool service", () => {
          silently boots at the default reasoning level. */
       const rotateOrchestratorSchema = listed.tools.find((tool) => tool.name === "rotate_orchestrator")?.inputSchema;
       expect(rotateOrchestratorSchema?.properties).toHaveProperty("effort");
+      /* #1452: the incumbent's stale mandate is carried forward only on request. */
+      expect(rotateOrchestratorSchema?.properties).toHaveProperty("keepIncumbentMandate");
       const deploySchema = listed.tools.find((tool) => tool.name === "deploy_exact_sha")?.inputSchema;
       /* #795: the deploy carries WHAT ships and nothing that claims authority —
          no confirmation flag, no bridge reference, no nonce. */

@@ -677,6 +677,55 @@ test("rotation composes a bounded handoff, switches designation atomically, and 
   expect(retiredHosts).toEqual([]);
 });
 
+/* #1452: the recorded version follows the TEXT. A stale seat rotated onto the
+   built-in default is on the current version; a rotation that names no
+   mandate keeps the incumbent's text AND version — the current-default
+   choice belongs to the callers (the dock, the sheet, `rotate_orchestrator`). */
+test("a rotation onto the built-in default records the CURRENT version, whatever the incumbent ran on", async () => {
+  const seeded = dependencies();
+  await executeOrchestratorSeatRequest({
+    ...spawnRequest("req_00000031"),
+    mandate: "v3 rules: you do not talk to the user",
+    promptVersion: 3,
+  }, seeded.deps);
+  expect(orchestratorSeatFor("proj-a").active?.promptVersion).toBe(3);
+
+  const successor = "conversation_66666666-6666-4666-8666-666666666666";
+  const { deps } = dependencies({
+    spawn: async () => ({ status: 200, body: { ok: true, conversationId: successor, path: "/tmp/successor-default.jsonl" } }),
+  });
+  const result = await executeOrchestratorRotation({
+    project: "proj-a",
+    clientRequestId: "req_00000032",
+    mandate: ORCHESTRATOR_SYSTEM_PROMPT,
+  }, deps);
+
+  expect(result.status).toBe(200);
+  const active = orchestratorSeatFor("proj-a").active;
+  expect(active).toMatchObject({ conversationId: successor, promptVersion: ORCHESTRATOR_PROMPT_VERSION });
+  expect(active?.mandate).toStartWith(ORCHESTRATOR_SYSTEM_PROMPT);
+});
+
+test("a rotation that names no mandate keeps the incumbent's text and version", async () => {
+  const seeded = dependencies();
+  await executeOrchestratorSeatRequest({
+    ...spawnRequest("req_00000033"),
+    mandate: "v3 rules: you do not talk to the user",
+    promptVersion: 3,
+  }, seeded.deps);
+
+  const successor = "conversation_66666666-6666-4666-8666-666666666666";
+  const { deps } = dependencies({
+    spawn: async () => ({ status: 200, body: { ok: true, conversationId: successor, path: "/tmp/successor-kept.jsonl" } }),
+  });
+  const result = await executeOrchestratorRotation({ project: "proj-a", clientRequestId: "req_00000034" }, deps);
+
+  expect(result.status).toBe(200);
+  const active = orchestratorSeatFor("proj-a").active;
+  expect(active).toMatchObject({ conversationId: successor, promptVersion: 3 });
+  expect(active?.mandate).toStartWith("v3 rules: you do not talk to the user");
+});
+
 test("a current-version rotation override receives one directive while its stored mandate stays raw", async () => {
   const seeded = dependencies();
   await executeOrchestratorSeatRequest({
