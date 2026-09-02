@@ -58,7 +58,7 @@ import { MobileOrchestratorRow } from "./mobile/MobileOrchestratorRow";
 import { MobileMenuSheet, type MobileMenuEntry } from "./mobile/MobileMenuSheet";
 import { showReceipt } from "./mobile/MobileReceipt";
 import { MobileAccountsScreen, MobileBarTitle, MobileShell, type MobileShellHost } from "./mobile/MobileShell";
-import { topScreen, useMobileNav, useMobileNavStore, type MobileSheetName } from "./mobile/mobileNav";
+import { sameScreen, topScreen, useMobileNav, useMobileNavStore, type MobileSheetName } from "./mobile/mobileNav";
 import { TaskSheet, type TaskSheetView } from "./tasks/TaskSheet";
 import { Badge } from "@/components/ui/Badge";
 import { canHandoff, HandoffHandle } from "./HandoffHandle";
@@ -378,11 +378,17 @@ function ProjectDashboardView({
   const mobileRuntime = useRuntimeSelector((state) => (state.enabled ? state.connection : "live"), "live");
   /* The phone board's seat (mobile v2 lane 2): the seat conversation is the
      card above the sections, never a row inside them, so the list has to know
-     which transcript holds it. Read through the same cached hook the pinned
-     row reads, with the same project and cwd, so the answer is already in hand;
-     null on the desktop, which has no board list to keep the seat out of. */
+     which transcript holds it.
+     ONE read per phone, and only while the board is the leaf. The seat card
+     renders from this same answer (`seat={seatRead}` below) instead of polling
+     the route a second time for it, and a focused conversation — where the
+     board is not mounted and the strip's own row is doing the reading — starts
+     nothing here. The hook's answers are cached per project and cwd, so
+     coming back to the board paints the last one and revalidates behind it.
+     Null on the desktop, which has no board list to keep the seat out of. */
   const projectDraftCwd = useMemo(() => draftWorkingDirectory(files, project), [files, project]);
-  const seatRead = useOrchestratorSeat(isMobile ? project : null, projectDraftCwd || undefined);
+  const boardIsMobileLeaf = isMobile && topScreen(mobileNavState).kind !== "chat";
+  const seatRead = useOrchestratorSeat(boardIsMobileLeaf ? project : null, projectDraftCwd || undefined);
   const seatPath = seatRead.status?.seat?.path ?? null;
   const projectName = projectDisplayName(
     project,
@@ -985,14 +991,48 @@ function ProjectDashboardView({
   );
   const treeGroups = groups.filter((group) => !group.orphanTask).length;
 
+  /* The conversation a back gesture just dismissed.
+
+     Every deliberate focus also writes the Viewer's own typed history entry
+     (#866), so a conversation opened on the phone owns TWO entries: that focus
+     entry and the screen pushed over it. ‹ pops the screen and lands on the
+     focus entry, and landing on it REPLAYS the focus — which, taken as a fresh
+     open, pushed the operator straight back into the conversation they had
+     just left, with no way out of it. A pop is the operator leaving: the
+     replay of the entry that same open wrote is not a new gesture. Every other
+     transition — a sheet, a switch, a push, a tap on a row — clears this, so
+     deliberately re-opening that same conversation still works. */
+  const dismissedChatRef = useRef<string | null>(null);
+  useEffect(() => {
+    let previous = topScreen(mobileNav.getState());
+    /* Store subscription, not an effect on the rendered state: it runs inside
+       the traversal itself, before the replayed focus reaches this component. */
+    return mobileNav.subscribe(() => {
+      const state = mobileNav.getState();
+      const top = topScreen(state);
+      if (state.motion !== "pop") dismissedChatRef.current = null;
+      else if (previous.kind === "chat" && !sameScreen(previous, top)) dismissedChatRef.current = previous.id;
+      previous = top;
+    });
+  }, [mobileNav]);
+
   /* On the phone a conversation is a SCREEN (mobile v2 §3.3): every deliberate
      focus — a board row, an attention jump, a deep link, a spawned draft —
      pushes it over the board, which stays where it was underneath, so ‹ and the
      platform back land on the list the operator came from. A repeat focus of
-     the conversation already on top is not a second entry. */
+     the conversation already on top is not a second entry, and neither is the
+     replay of a conversation the operator has just backed out of. */
   const showMobileConversation = (key: string) => {
     const top = topScreen(mobileNav.getState());
     if (top.kind === "chat" && top.id === key) return;
+    /* The pop's own replay, and only it: the entry is CONSUMED here, so the
+       one focus the traversal replays is swallowed and a later deliberate open
+       of that same conversation — an arrival banner, an attention jump — still
+       lands. */
+    if (dismissedChatRef.current === key) {
+      dismissedChatRef.current = null;
+      return;
+    }
     mobileNav.push({ kind: "chat", id: key });
   };
 
@@ -1452,16 +1492,20 @@ function ProjectDashboardView({
   }), [engineProjection]);
   const openFullCatalogFile = onOpenCatalogFile ?? openSwitchboardFile;
   /* A board row is the phone's OPEN gesture (#1244): it stamps the card seen —
-     a finished lane holds its outcome until the operator has read it — and
-     opens the conversation through the resolver, so a row beyond the scheme
-     window keeps its pin. The push is stated here rather than left to
-     `flashNode`: the row is the gesture, and it must land on the conversation
-     whether or not the resolver has a card to glide to yet. */
+     a finished lane holds its outcome until the operator has read it — places
+     the row's node the way every switchboard open does, so the conversation
+     screen has something to show, and pushes that screen.
+     It is the BOARD's own open, not the catalog resolver's: a row on this list
+     is a file the scan already carries, never a beyond-cap pin, and the
+     resolver's landing resets the shell to the board (`nav.home()`, which
+     predates the conversation screen) — so routing a row through it collapsed
+     the screen this gesture had just pushed and re-pushed it from an effect,
+     mounting the conversation twice with a frame of board between them. */
   const openBoardRow = (file: FileEntry) => {
-    markConversationSeen(file);
-    /* The resolver's open first — it lands the project and pins the path, and
-       a phone landing resets the stack — then the screen it landed on. */
-    openFullCatalogFile(file);
+    /* A tap on a row is a new gesture whatever came before it, including a
+       back out of this very conversation. */
+    dismissedChatRef.current = null;
+    openSwitchboardFile(file);
     showMobileConversation(file.path);
   };
 
@@ -1662,20 +1706,11 @@ function ProjectDashboardView({
       ...mobileBoardModel.recent.map((row) => row.path),
     ].join("\n")
     : null;
-  /* The badge counts the queue rows the operator can reach from here: the
-     Viewer's conversation queue, plus this project's pipelines waiting on a
-     decision — they are queue items like any other (README §4.6), and nothing
-     else on the phone counted them.
-     One seam stays open on purpose: the conversation half is the Viewer's
-     GLOBAL queue, which is exactly what the sheet this badge opens lists, so
-     the two agree — but on a home with a second busy project it counts rows
-     the board below does not show. Scoping it to the project here would make
-     the badge disagree with its own sheet instead; the queue and the sheet are
-     lane 8's (`attentionQueue.ts`), and the scope is one decision to make in
-     that one place, for both surfaces at once. */
-  const mobileShellHost = mobileShell && mobileBoardModel
-    ? { ...mobileShell, attentionCount: mobileShell.attentionCount + (mobileBoardModel.pipelines?.needsDecision ?? 0) }
-    : mobileShell;
+  /* The bar's badge is NOT composed here. The Viewer scopes the phone's queue
+     to the project behind the badge and counts this project's pipelines
+     waiting on a decision in it (README §4.1, §4.6), from the same pure answer
+     `buildMobileBoard` gives the Needs-you section below — so the badge, the
+     sheet it opens and these rows are one list, counted once. */
 
   /* Presence context: which project is open and how its durable board is
      syncing. Reported here so every leaf's slice merges under it. */
@@ -2035,7 +2070,7 @@ function ProjectDashboardView({
            conversation is on top of the navigation stack. The strip inside the
            focus view stays until lane 3 folds it into the bar's title cell. */
         mobileTop.kind === "accounts" ? (
-          <MobileAccountsScreen host={mobileShellHost} renderSheet={renderMobileSheet} />
+          <MobileAccountsScreen host={mobileShell} renderSheet={renderMobileSheet} />
         ) : (
           <MobileShell
             screen="board"
@@ -2046,7 +2081,7 @@ function ProjectDashboardView({
             title={<MobileBarTitle>{projectName}</MobileBarTitle>}
             titleLabel={t("mobile2.bar.switchProject")}
             titleOpens={mobileShell ? "projects" : undefined}
-            host={mobileShellHost}
+            host={mobileShell}
             onOpenSearch={onOpenSearch}
             searchTestId="dash-search"
             renderSheet={renderMobileSheet}
@@ -2069,6 +2104,11 @@ function ProjectDashboardView({
                         project={project}
                         projectName={projectName}
                         files={files}
+                        /* One seat read for the phone: the board needs it to
+                           keep the seat out of the list, and the card renders
+                           from the same answer instead of polling for it a
+                           second time. */
+                        seat={seatRead}
                         onOpenConversation={openBoardRow}
                       />
                       <span aria-hidden className="min-w-0 flex-1" />
@@ -2095,7 +2135,13 @@ function ProjectDashboardView({
                   favorites={favoriteIdSet}
                   isolatedManualPaths={isolatedCompactHistoryPaths}
                   loaded={loaded}
-                  focus={highlight ?? mobileConversationKey}
+                  /* The SCREEN is the truth on the phone (mobile v2 §3.3):
+                     the conversation on top of the stack is the one this
+                     screen is, and it outranks the board's own highlight —
+                     which still names the previously focused card for the
+                     frame in which the new screen mounts, and painted that
+                     other conversation's pane before replacing it. */
+                  focus={mobileConversationKey ?? highlight}
                   onSelect={openSwitchboardFile}
                   onClose={closeNode}
                   onDraftClose={removeDraft}

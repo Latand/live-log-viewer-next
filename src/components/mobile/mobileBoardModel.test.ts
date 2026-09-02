@@ -102,6 +102,15 @@ test("the precedence is one order, and a lower signal never outranks a higher on
   expect(mobileRowState(stalledAndWaiting, NOW).key).toBe("stalled");
   expect(mobileRowState({ ...stalledAndWaiting, proc: "killed" } as FileEntry, NOW).key).toBe("killed");
   expect(mobileRowState(question({ ...base, rateLimit: { source: "account", accountId: null, window: "session", resetAt: NOW + 600 } }), NOW).key).toBe("limit");
+  /* The wall carries BOTH halves of what the row must say — which account, and
+     when it reopens — so «Main resets 16:40» is rendered from the read, never
+     re-derived from somewhere else (README §4.2). */
+  const walled = mobileRowState(question({ ...base, rateLimit: { source: "account", accountId: "main", window: "session", resetAt: NOW + 600 } }), NOW);
+  expect(walled).toMatchObject({ key: "limit", account: "main", resetAt: NOW + 600, badge: "limit", edge: "warning" });
+  /* A read that names no account and no reset still says «limit» and nothing
+     it does not know. */
+  expect(mobileRowState(question({ ...base, rateLimit: { source: "pane", accountId: null, window: null, resetAt: null } }), NOW))
+    .toMatchObject({ key: "limit", account: null, resetAt: null });
   const held = question({
     ...base,
     migration: { intentId: "i1", trigger: "manual", phase: "switching", targetAccountId: "other", heldDeliveries: 2, failure: null },
@@ -221,7 +230,12 @@ test("a pipeline waiting on a decision is a queue row beside the conversations, 
   expect(row).toBeDefined();
   /* `stage k/n · <stage> · <state>`: the failing round is what put the row in
      the queue, and the badge's «needs a decision» does not say it. */
-  expect(row).toMatchObject({ id: "pipeline_atlas_p2", task: "Fast conversation switching", stage: 3, total: 3, stageName: "review", stageFailed: true, findings: 2 });
+  /* Read before the matcher below: `toMatchObject` rewrites the fields it
+     matched on the received object. The stage travels as the pipeline declared
+     it, so the row can name it in the operator's words (`stageChipLabel`)
+     instead of printing an id. */
+  expect((row as { stageRef: { id: string } | null }).stageRef?.id).toBe("review");
+  expect(row).toMatchObject({ id: "pipeline_atlas_p2", task: "Fast conversation switching", stage: 3, total: 3, stageFailed: true, findings: 2 });
   expect(Math.round((row as { seconds: number }).seconds)).toBe(3_600);
   /* One count for the bar's badge and the queue's rows: conversations first,
      pipelines after, both reachable from the same list. */

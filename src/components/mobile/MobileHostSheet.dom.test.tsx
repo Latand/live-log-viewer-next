@@ -140,18 +140,58 @@ test("Kill acts on the tap that names it — no arm step — and answers with a 
   expect(kill.className).toContain("min-h-11");
 
   click(kill);
-  /* One tap, one request: nothing asked a second question first. */
+  /* One tap, one request: nothing asked a second question first. The first
+     signal is the polite one. */
   expect(posts).toHaveLength(1);
   expect(posts[0]!.url).toBe("/api/proc");
-  expect(posts[0]!.body).toEqual({ path: "/repo/next-dev.log" });
+  expect(posts[0]!.body).toEqual({ path: "/repo/next-dev.log", force: false });
   await settle();
   expect(killed).toEqual(["/repo/next-dev.log"]);
 
   const receipt = q(root, "[data-mobile2-receipt]")!;
   expect(receipt).not.toBeNull();
-  expect(receipt.textContent).toContain(translate("en", "mobile2.host.killed", { pid: 41_822 }));
+  expect(receipt.textContent).toContain(translate("en", "mobile2.host.killed", { signal: "SIGTERM", pid: 41_822 }));
   /* SIGTERM has no inverse, so the receipt offers none. */
   expect(q(root, "[data-mobile2-receipt-undo]")).toBeNull();
+});
+
+test("a second tap escalates to SIGKILL, and says so before it is tapped", async () => {
+  /* The control this replaced (`ProcessStatusControls`) escalated, and the
+     process that ignores SIGTERM is exactly the one an operator taps twice. A
+     repeat that re-sends the same signal is a control that cannot finish its
+     own job. */
+  const root = mount();
+  click(q(root, '[data-mobile2-kill="/repo/next-dev.log"]'));
+  await settle();
+  expect(posts[0]!.body).toEqual({ path: "/repo/next-dev.log", force: false });
+
+  const again = q(root, '[data-mobile2-kill="/repo/next-dev.log"]')!;
+  /* The button names the signal the next tap will send, before it is sent. */
+  expect(again.getAttribute("data-mobile2-kill-signal")).toBe("SIGKILL");
+  expect(again.textContent).toContain("SIGKILL");
+  expect(again.getAttribute("aria-label")).toBe(translate("en", "mobile2.host.forceKillTask", { title: "next dev · port 8899" }));
+
+  click(again);
+  await settle();
+  expect(posts).toHaveLength(2);
+  expect(posts[1]!.body).toEqual({ path: "/repo/next-dev.log", force: true });
+  expect(q(root, "[data-mobile2-receipt]")!.textContent)
+    .toContain(translate("en", "mobile2.host.killed", { signal: "SIGKILL", pid: 41_822 }));
+});
+
+test("a refused kill escalates too: the retry the operator is offered is a stronger one", async () => {
+  killAnswer = { ok: false, status: 409, body: { ok: false, error: "process already gone" } };
+  const root = mount();
+  click(q(root, '[data-mobile2-kill="/repo/next-dev.log"]'));
+  await settle();
+  const again = q(root, '[data-mobile2-kill="/repo/next-dev.log"]')!;
+  expect(again.getAttribute("data-mobile2-kill-signal")).toBe("SIGKILL");
+  click(again);
+  await settle();
+  expect(posts.map((post) => post.body)).toEqual([
+    { path: "/repo/next-dev.log", force: false },
+    { path: "/repo/next-dev.log", force: true },
+  ]);
 });
 
 test("a refused kill says so on the row and shows no receipt", async () => {

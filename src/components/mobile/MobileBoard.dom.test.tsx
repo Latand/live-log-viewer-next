@@ -46,6 +46,8 @@ const { MobileSheet } = await import("@/components/mobile/MobileSheet");
 const { getMobileNav, topScreen } = await import("@/components/mobile/mobileNav");
 const { receipts } = await import("@/components/mobile/MobileReceipt");
 const { resetOrchestratorSeatCacheForTests } = await import("@/components/orchestrator/useOrchestratorSeat");
+const { buildMobileBoard, needsDecisionPipelineRows } = await import("@/components/mobile/mobileBoardModel");
+const { formatResetClock } = await import("@/components/rateLimit");
 type MobileShellHost = NonNullable<React.ComponentProps<typeof ProjectDashboard>["mobileShell"]>;
 
 const dom = new Window({ url: "http://localhost/", width: 390, height: 844 });
@@ -106,13 +108,18 @@ const OVERRIDES: Record<string, unknown> = {
     /* No orchestrator seat in this project by default: the board's seat slot
        invites one and no row is filtered out of the sections. A test that needs
        the footer seats one first. */
-    if (url.startsWith("/api/orchestrator/seat")) return jsonResponse({ seat: seatAnswer, pending: null, exists: true });
+    if (url.startsWith("/api/orchestrator/seat")) {
+      seatReads += 1;
+      return jsonResponse({ seat: seatAnswer, pending: null, exists: true });
+    }
     if (url.startsWith("/api/limits")) return { ok: false, status: 503, json: async () => ({}), text: async () => "" };
     return jsonResponse({});
   }) as unknown as typeof fetch,
 };
 /** The project's seat, as `/api/orchestrator/seat` answers it; null by default. */
 let seatAnswer: Record<string, unknown> | null = null;
+/** How many times this phone has asked for it. */
+let seatReads = 0;
 
 const HAS: Record<string, boolean> = {};
 const SAVED: Record<string, unknown> = {};
@@ -170,6 +177,14 @@ const running = file({
 } as unknown as Partial<FileEntry> & { path: string });
 
 const finished = file({ path: "/repo/done.jsonl", title: "Tail: pipeline archive TTL", activity: "recent", mtime: NOW - 900 });
+
+/* A conversation stopped at its account's wall, with both halves of what
+   the row must say: which account, and when the window reopens. */
+const RESET_AT = NOW + 1_800;
+const limited = file({
+  path: "/repo/limit.jsonl", title: "Draft the release notes", activity: "idle", mtime: NOW - 240,
+  rateLimit: { source: "account", accountId: "Main", window: "session", resetAt: RESET_AT },
+} as unknown as Partial<FileEntry> & { path: string });
 
 /* A parentless background process: host data, never a board row. */
 const backgroundTask = file({
@@ -232,6 +247,7 @@ beforeEach(() => {
   getMobileNav().home();
   receipts.dismiss();
   seatAnswer = null;
+  seatReads = 0;
   /* The seat read is cached per project for the whole module (#1149), so a
      test that seats one has to start from an unanswered cache. */
   resetOrchestratorSeatCacheForTests();
@@ -272,6 +288,24 @@ test("with no conversation focused the phone leaf is the board: the seat first, 
   expect(rows[0]!.textContent).toContain(translate("en", "mobile2.board.badgeQuestion"));
   expect(rows[1]!.textContent).toContain("Fast conversation switching");
   expect(rows[1]!.textContent).toContain(translate("en", "mobile2.board.badgeDecision"));
+  /* «stage 2/2 · review loop failed · 2 findings»: the stage in the product's
+     own word for it, never the raw stage id. */
+  expect(rows[1]!.textContent).toContain(translate("en", "mobile2.board.pipelineStageFailed", {
+    stage: 2, total: 2, name: translate("en", "pipelineStrip.reviewStage"),
+  }));
+  expect(rows[1]!.textContent).toContain(translate("en", "mobile2.board.pipelineFindings", { count: 2 }));
+  expect(rows[1]!.textContent).not.toContain("review failed");
+  /* Every row keeps its 8 px dot column — hidden on an edged row rather than
+     dropped — so an edged title and an unedged one start on the same line
+     (the prototype's `.row.wait .dot { visibility: hidden }`). */
+  for (const row of [rows[0]!, rows[1]!, rows[3]!]) {
+    const dot = row.querySelector("span[aria-hidden]") as unknown as HTMLElement;
+    expect(dot.className).toContain("h-2");
+    expect(dot.className).toContain("w-2");
+  }
+  expect((rows[0]!.querySelector("span[aria-hidden]") as unknown as HTMLElement).className).toContain("invisible");
+  expect((rows[1]!.querySelector("span[aria-hidden]") as unknown as HTMLElement).className).toContain("invisible");
+  expect((rows[3]!.querySelector("span[aria-hidden]") as unknown as HTMLElement).className).not.toContain("invisible");
   expect(rows[3]!.textContent).toContain("Add the held precedence");
   expect(rows[5]!.textContent).toContain(translate("en", "mobile2.board.catalogCount", { count: 12 }));
 });
@@ -294,16 +328,30 @@ test("the board has no Host section: background processes are rows in the host s
   expect(sheet.textContent).toContain(translate("en", "mobile2.host.pid", { pid: 41_822 }));
 });
 
-test("the bar's badge counts the Needs-you rows: the conversations queued and the pipelines waiting on a decision", async () => {
-  const root = mount({ pipelines: [decisionPipeline, runningPipeline] });
+test("the Needs-you rows the bar's badge counts are the conversations queued and the pipelines waiting on a decision", async () => {
+  const root = mount({ pipelines: [decisionPipeline, runningPipeline], mobileShell: host(2) });
   expect(await waitFor(() => board(root) !== null)).toBe(true);
   const rows = all(root, "[data-mobile2-row]").filter((row) => ["conversation", "pipeline"].includes(row.getAttribute("data-mobile2-row") ?? ""));
   const queued = rows.filter((row) => row.closest("[data-mobile2-board]") && ["waiting", "needs_decision", "stalled", "limit"].includes(row.getAttribute("data-mobile2-state") ?? ""));
   expect(queued).toHaveLength(2);
+  /* The count is not this leaf's arithmetic: the badge, the queue sheet and
+     its «Next ›» read ONE list, scoped to the project behind the badge, and
+     the Viewer composes it from the same pure answer that put these rows on
+     the board (`Viewer.switching.dom.test.tsx` proves the scoping over two
+     projects). What this asserts is that the answer under the rows and the
+     number over them are the same number. */
+  const model = buildMobileBoard({
+    files: [asking, running, finished],
+    pipelines: [decisionPipeline, runningPipeline],
+    project: PROJECT,
+    now: NOW,
+  });
+  expect(model.attentionCount).toBe(queued.length);
+  expect(needsDecisionPipelineRows([decisionPipeline, runningPipeline], PROJECT, NOW)).toHaveLength(1);
   const badge = q(root, "[data-mobile2-attention-count]")!;
   expect(badge).not.toBeNull();
-  expect(badge.getAttribute("data-mobile2-attention-count")).toBe("2");
-  expect(badge.getAttribute("aria-label")).toBe(translate("en", "mobile2.bar.attention", { count: 2 }));
+  expect(badge.getAttribute("data-mobile2-attention-count")).toBe(String(model.attentionCount));
+  expect(badge.getAttribute("aria-label")).toBe(translate("en", "mobile2.bar.attention", { count: model.attentionCount }));
 });
 
 test("opening a board row stamps the card seen (#1244) and pushes the conversation over the board", async () => {
@@ -316,19 +364,35 @@ test("opening a board row stamps the card seen (#1244) and pushes the conversati
   click(row);
   await settle();
 
-  /* The open gesture: the durable acknowledgement, the resolver's open, and
-     the conversation screen on top of the board. */
+  /* The open gesture: the durable acknowledgement, the conversation screen on
+     top of the board, and that conversation under it. */
   const seen = mutations.filter((mutation) => mutation.kind === "mark-seen");
   expect(seen).toHaveLength(1);
   expect(String(seen[0]!.id)).toContain("conversation_/repo/done.jsonl");
-  expect(opened).toEqual([finished.path]);
   expect(topScreen(getMobileNav().getState())).toEqual({ kind: "chat", id: finished.path });
   expect(await waitFor(() => board(root) === null)).toBe(true);
+  expect(q(root, '[data-testid="mobile-focused-pane"]')?.textContent).toContain(finished.title);
+  /* The row places its node itself and does NOT go through the catalog
+     resolver. That resolver lands by resetting the shell to the board
+     (`nav.home()`, which predates the conversation screen), so routing a row
+     through it collapsed the screen this very gesture had just pushed and
+     re-pushed it from an effect — the conversation mounted twice with a frame
+     of board between. Nothing on this list needs what the resolver adds: a
+     board row is a file the scan already carries, never a beyond-cap pin. */
+  expect(opened).toEqual([]);
 
-  /* ‹ pops back to the list the operator came from. */
+  /* ‹ pops back to the list the operator came from, and stays there. (What
+     the pop replays is the Viewer's own focus entry, so the replay itself is
+     driven — and its red proved — in `Viewer.switching.dom.test.tsx`.) */
   click(q(root, "[data-mobile2-back]"));
   await settle();
   expect(await waitFor(() => board(root) !== null)).toBe(true);
+  expect(topScreen(getMobileNav().getState())).toEqual({ kind: "board" });
+
+  /* Backing out is not a lock: the same row opens again. */
+  click(all(root, '[data-mobile2-row="conversation"]').find((el) => el.getAttribute("data-mobile2-path") === finished.path)!);
+  await settle();
+  expect(topScreen(getMobileNav().getState())).toEqual({ kind: "chat", id: finished.path });
 });
 
 test("the board's footer lands the operator in the orchestrator's conversation, and shows only with a seat", async () => {
@@ -356,6 +420,52 @@ test("the board's footer lands the operator in the orchestrator's conversation, 
 
   click(dock);
   await settle();
-  expect(opened).toEqual([running.path]);
   expect(topScreen(getMobileNav().getState())).toEqual({ kind: "chat", id: running.path });
+  expect(q(seated, '[data-testid="mobile-focused-pane"]')?.textContent).toContain(running.title);
+  /* Same open as a row's, and the same reason it is not the resolver's. */
+  expect(opened).toEqual([]);
+});
+
+test("a row at its account's limit says which account and when the window reopens", async () => {
+  /* README §4.1: the state phrase is what the operator is waiting on, and for
+     a wall that is the clock — «Main resets 16:40». The read carries both
+     halves; a row that only said «at the account limit» made the operator open
+     the conversation to find out when to come back. */
+  const root = mount({ files: [asking, running, finished, limited] });
+  expect(await waitFor(() => board(root) !== null)).toBe(true);
+  const row = all(root, '[data-mobile2-row="conversation"]').find((el) => el.getAttribute("data-mobile2-path") === limited.path)!;
+  expect(row).toBeDefined();
+  /* A wall needs the operator, so the row is in the queue, edged and badged. */
+  expect(row.getAttribute("data-mobile2-state")).toBe("limit");
+  expect(row.textContent).toContain(translate("en", "mobile2.board.badgeLimit"));
+  expect(q(row, "[data-mobile2-phrase]")!.textContent).toBe(translate("en", "mobile2.board.limitAccountResets", {
+    account: "Main", time: formatResetClock(RESET_AT, NOW),
+  }));
+});
+
+test("the phone reads the seat ONCE: the board keeps it out of the list and the card renders from the same answer", async () => {
+  /* Both readers need the same fact — the board, to keep the seat out of the
+     sections; the card, to show its state — and the read is a 6 s poll, so a
+     second instance for the same key doubled every phone's seat traffic to
+     answer one question. */
+  seatAnswer = {
+    project: PROJECT, seatEpoch: 1, conversationId: "conversation_atlas_orchestrator", path: running.path,
+    mandate: "Run the atlas board.", state: "active", designatedAt: "2100-01-02T13:00:00.000Z",
+    intent: { clientRequestId: "seat-atlas-1", mode: "existing", launchId: null, error: null },
+  };
+  resetOrchestratorSeatCacheForTests();
+  seatReads = 0;
+  const root = mount();
+  expect(await waitFor(() => q(root, "[data-mobile2-board-dock]") !== null)).toBe(true);
+
+  /* The board has the answer: the seat's conversation is the card, not a row. */
+  expect(all(root, '[data-mobile2-row="conversation"]').map((el) => el.getAttribute("data-mobile2-path")))
+    .not.toContain(running.path);
+  /* And so does the card. */
+  /* And so does the card: it is seated — the invitation is gone — from the
+     same answer, without a read of its own. */
+  const card = q(root, '[data-testid="mobile-orchestrator-slot"] [data-orchestrator-row]')!;
+  expect(card.getAttribute("data-orchestrator-row-state")).toBe("live");
+  expect(card.getAttribute("data-orchestrator-row-tap")).toBe("conversation");
+  expect(seatReads).toBe(1);
 });

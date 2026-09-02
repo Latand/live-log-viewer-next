@@ -20,6 +20,13 @@ import { showReceipt } from "./MobileReceipt";
  * anywhere on the phone) and answers with a receipt. A killed background
  * process has no inverse — nothing can un-send SIGTERM — so the receipt
  * carries none; a failure says so on the row instead of pretending.
+ *
+ * It also keeps the ESCALATION of the control it replaced
+ * (`ProcessStatusControls`, the strip that used to dock above the board): the
+ * first tap sends SIGTERM, and once a process has been signalled and is still
+ * on this list — because the term did not land, or because it was refused —
+ * the next tap sends SIGKILL and the button says so. Without it a process that
+ * ignores SIGTERM can only be re-asked, politely, forever.
  */
 
 /* The runtime row reads «connected · updates stream», «degraded · polling
@@ -61,8 +68,12 @@ function BackgroundTask({ file, onKilled }: { file: FileEntry; onKilled?: (path:
   const { t } = useLocale();
   const [killing, setKilling] = useState(false);
   const [error, setError] = useState("");
+  /* Set the moment a signal has been asked for, whatever the answer: the row
+     is still here, so the next tap is the operator saying it did not work. */
+  const [force, setForce] = useState(false);
   const title = cleanTitle(file.cmdDesc || file.title, 80);
   const live = file.activity === "live" || file.proc === "running";
+  const signal = force ? "SIGKILL" : "SIGTERM";
   const kill = async () => {
     setKilling(true);
     setError("");
@@ -70,16 +81,18 @@ function BackgroundTask({ file, onKilled }: { file: FileEntry; onKilled?: (path:
       const response = await fetch("/api/proc", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ path: file.path }),
+        body: JSON.stringify({ path: file.path, force }),
       });
       const body = (await response.json()) as { ok?: boolean; pid?: number; error?: string };
+      setForce(true);
       if (!response.ok || !body.ok) {
         setError(body.error ?? t("task.stopFailed"));
         return;
       }
-      showReceipt(t("mobile2.host.killed", { pid: body.pid ?? file.pid ?? "" }));
+      showReceipt(t("mobile2.host.killed", { signal, pid: body.pid ?? file.pid ?? "" }));
       onKilled?.(file.path);
     } catch {
+      setForce(true);
       setError(t("common.serverUnavailable"));
     } finally {
       setKilling(false);
@@ -98,12 +111,13 @@ function BackgroundTask({ file, onKilled }: { file: FileEntry; onKilled?: (path:
         <button
           type="button"
           data-mobile2-kill={file.path}
+          data-mobile2-kill-signal={signal}
           disabled={killing}
-          aria-label={t("mobile2.host.killTask", { title })}
+          aria-label={force ? t("mobile2.host.forceKillTask", { title }) : t("mobile2.host.killTask", { title })}
           className="-mr-2.5 inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-[8px] px-2.5 text-ui font-semibold text-danger disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger/40"
           onClick={() => void kill()}
         >
-          {t("task.kill")}
+          {force ? "SIGKILL" : t("task.kill")}
         </button>
       )}
     </div>

@@ -5,6 +5,8 @@ import { Bot } from "lucide-react";
 import { useLocale, type TFunction } from "@/lib/i18n";
 import type { Pipeline } from "@/lib/pipelines/types";
 import type { FileEntry } from "@/lib/types";
+import { stageChipLabel } from "../pipelines/pipelineModel";
+import { formatResetClock } from "../rateLimit";
 import { clockDuration, humanizeDuration } from "../turnDuration";
 
 import {
@@ -79,16 +81,26 @@ function Badge({ tone, children }: { tone: "warning" | "danger"; children: React
   );
 }
 
-/** The state phrase of a row, in the operator's words. It never truncates. */
-export function statePhrase(t: TFunction, state: MobileRowState): string {
+/** The state phrase of a row, in the operator's words. It never truncates.
+    `now` dates the limit's reset — today's shows the hour, a later one the day
+    with it — so the row reads «Main resets 16:40» (README §4.2). */
+export function statePhrase(t: TFunction, state: MobileRowState, now: number): string {
   const seconds = state.seconds ?? 0;
   switch (state.key) {
     case "killed":
       return t("mobile2.board.killed");
     case "stalled":
       return t("mobile2.board.stalled", { age: humanizeDuration(seconds) });
-    case "limit":
-      return t("mobile2.board.limit");
+    case "limit": {
+      /* The wall the operator is actually waiting on is WHEN it lifts, and on
+         which account. A read that names neither still says the row is at a
+         limit — the badge beside it says «limit» either way. */
+      if (state.resetAt === null) return state.account ? t("mobile2.board.limitAccount", { account: state.account }) : t("mobile2.board.limit");
+      const resets = formatResetClock(state.resetAt, now);
+      return state.account
+        ? t("mobile2.board.limitAccountResets", { account: state.account, time: resets })
+        : t("mobile2.board.limitResets", { time: resets });
+    }
     case "held":
       return t("mobile2.board.held", { count: state.held });
     case "waiting":
@@ -111,7 +123,7 @@ const BADGE_LABEL = {
   limit: "mobile2.board.badgeLimit",
 } as const;
 
-function ConversationRow({ row, quiet, onOpen }: { row: MobileBoardConversation; quiet?: boolean; onOpen: (file: FileEntry) => void }) {
+function ConversationRow({ row, quiet, now, onOpen }: { row: MobileBoardConversation; quiet?: boolean; now: number; onOpen: (file: FileEntry) => void }) {
   const { t } = useLocale();
   const { state } = row;
   const edge = state.edge ? EDGE[state.edge] : "";
@@ -126,14 +138,21 @@ function ConversationRow({ row, quiet, onOpen }: { row: MobileBoardConversation;
       className={`${CARD} min-h-14 ${quiet ? "bg-quiet shadow-none ring-1 ring-inset ring-border" : ""} ${edge}`}
       onClick={() => onOpen(row.file)}
     >
-      {state.edge ? null : <span aria-hidden className={`h-2 w-2 shrink-0 rounded-full ${DOT[state.dot]} ${state.key === "working" ? "motion-safe:animate-pulse" : ""}`} />}
+      {/* On an edged row the edge IS the state mark, so the dot stops being a
+          third coloured element — but it keeps its 8 px of the row, or the
+          titles of an edged and an unedged row would not line up (the
+          prototype's `.row.wait .dot { visibility: hidden }`). */}
+      <span
+        aria-hidden
+        className={`h-2 w-2 shrink-0 rounded-full ${state.edge ? "invisible" : DOT[state.dot]} ${state.key === "working" ? "motion-safe:animate-pulse" : ""}`}
+      />
       <span className="flex min-w-0 flex-1 flex-col gap-0.5">
         <span className={`flex items-center gap-1.5 text-body font-semibold leading-[1.25] ${quiet ? "text-secondary" : "text-primary"}`}>
           <span className={state.edge ? "min-w-0 line-clamp-2" : "min-w-0 truncate"}>{row.title}</span>
           {row.crowned ? <Crown className="h-3.5 w-3.5 shrink-0 fill-crown text-crown" aria-hidden /> : null}
         </span>
         <span className="flex items-center gap-[5px] overflow-hidden text-label tabular-nums text-muted">
-          <span data-mobile2-phrase className={`shrink-0 ${state.badge ? "" : PHRASE_TONE[state.key]}`}>{statePhrase(t, state)}</span>
+          <span data-mobile2-phrase className={`shrink-0 ${state.badge ? "" : PHRASE_TONE[state.key]}`}>{statePhrase(t, state, now)}</span>
           {row.now ? (
             <>
               <span aria-hidden className="shrink-0 opacity-60">·</span>
@@ -171,16 +190,27 @@ const PHRASE_TONE: Record<MobileRowState["key"], string> = {
   done: "",
 };
 
-/** A pipeline in `needs_decision` is a queue row like any other (README §4.1).
-    Its destination is the pipeline screen, which lane 7 brings; until then the
-    row states the decision without pretending to be a door. */
-function PipelineNeedsRow({ row, onOpen }: { row: MobileBoardPipelineRow; onOpen?: (pipeline: Pipeline) => void }) {
+/**
+ * A pipeline in `needs_decision` is a queue row like any other (README §4.1),
+ * on the board and in the queue sheet the badge opens — the same component, so
+ * the two entries cannot describe the same pipeline differently.
+ *
+ * Its destination is the pipeline screen, which lane 7 brings. Until that
+ * screen exists there is nowhere to go, so the row is a statement and NOT a
+ * control: rendering a button that answers a tap with nothing is worse than
+ * rendering none. Lane 7 passes `onOpen` and the same row becomes the door.
+ */
+export function MobilePipelineQueueRow({ row, onOpen }: { row: MobileBoardPipelineRow; onOpen?: (pipeline: Pipeline) => void }) {
   const { t } = useLocale();
+  /* The stage in the operator's words — the role's name, «review loop» for a
+     loop — never the raw stage id, and lowercased inside the sentence the way
+     the prototype writes it: «stage 3/5 · review failed · 2 findings». */
+  const stageName = row.stageRef ? stageChipLabel(t, row.stageRef).toLocaleLowerCase() : "";
   const meta = [
     /* `stage k/n · <stage> · <state>` (README §4.1, §4.7). The state word is
        the failing round's — «needs a decision» is already the badge, so saying
        it twice would leave the row without the fact that put it here. */
-    t(row.stageFailed ? "mobile2.board.pipelineStageFailed" : "mobile2.board.pipelineStage", { stage: row.stage, total: row.total, name: row.stageName }),
+    t(row.stageFailed ? "mobile2.board.pipelineStageFailed" : "mobile2.board.pipelineStage", { stage: row.stage, total: row.total, name: stageName }),
     row.findings ? t("mobile2.board.pipelineFindings", { count: row.findings }) : null,
   ].filter(Boolean).join(" · ");
   const Tag = onOpen ? "button" : "div";
@@ -193,6 +223,9 @@ function PipelineNeedsRow({ row, onOpen }: { row: MobileBoardPipelineRow; onOpen
       data-mobile2-state="needs_decision"
       className={`${CARD} min-h-14 ${EDGE.warning}`}
     >
+      {/* The hidden dot keeps this row's title on the same line as every other
+          row's (the prototype's `.row.wait .dot`). */}
+      <span aria-hidden className="invisible h-2 w-2 shrink-0 rounded-full" />
       <span className="flex min-w-0 flex-1 flex-col gap-0.5">
         <span className="flex items-center gap-1.5 text-body font-semibold leading-[1.25] text-primary">
           <span className="min-w-0 line-clamp-2">{row.task}</span>
@@ -322,6 +355,7 @@ export function MobileBoard(props: MobileBoardProps) {
   const { t } = useLocale();
   const { seat, onOpenConversation, onOpenPipeline, onOpenPipelines, onOpenCatalog, catalogCount } = props;
   const model = mobileBoardOf(props);
+  const now = props.now ?? Date.now() / 1000;
   const pipelinesRow = model.pipelines ? <PipelinesRow model={model} onOpen={onOpenPipelines} /> : null;
   const stack = (children: React.ReactNode) => <div className="flex flex-col gap-1.5 px-3">{children}</div>;
   return (
@@ -337,9 +371,12 @@ export function MobileBoard(props: MobileBoardProps) {
         <>
           <Section label={t("mobile2.board.needsYou")} count={model.needsYou.length} id="needs" />
           {stack(model.needsYou.map((item) => (item.kind === "conversation" ? (
-            <ConversationRow key={item.path} row={item} onOpen={onOpenConversation} />
+            <ConversationRow key={item.path} row={item} now={now} onOpen={onOpenConversation} />
           ) : (
-            <PipelineNeedsRow key={item.id} row={item} onOpen={(pipeline) => onOpenPipeline?.(pipeline)} />
+            /* `onOpenPipeline` passes THROUGH: undefined means no pipeline
+               screen exists yet, and the row renders as a statement rather
+               than as a button that swallows the tap. */
+            <MobilePipelineQueueRow key={item.id} row={item} onOpen={onOpenPipeline} />
           ))))}
         </>
       ) : null}
@@ -353,7 +390,7 @@ export function MobileBoard(props: MobileBoardProps) {
 
       <Section label={t("mobile2.board.working")} count={model.working.length} id="working" />
       {stack(model.working.length
-        ? model.working.map((row) => <ConversationRow key={row.path} row={row} onOpen={onOpenConversation} />)
+        ? model.working.map((row) => <ConversationRow key={row.path} row={row} now={now} onOpen={onOpenConversation} />)
         : <div className="p-4 text-center text-ui text-muted">{t("mobile2.board.nothingRunning")}</div>)}
 
       {!model.pipelinesFirst && pipelinesRow ? (
@@ -366,7 +403,7 @@ export function MobileBoard(props: MobileBoardProps) {
       <Section label={t("mobile2.board.recent")} count={model.recentTotal} id="recent" />
       {stack(
         <>
-          {model.recent.map((row) => <ConversationRow key={row.path} row={row} quiet onOpen={onOpenConversation} />)}
+          {model.recent.map((row) => <ConversationRow key={row.path} row={row} quiet now={now} onOpen={onOpenConversation} />)}
           {onOpenCatalog ? (
             <button
               type="button"

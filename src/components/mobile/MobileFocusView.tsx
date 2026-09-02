@@ -170,9 +170,14 @@ export function MobileFocusView({ project, projectName, groups, manual, files, f
      re-reads that project's remembered focus DURING the render that changes
      `project` (#1432): the old effect-based reset painted the previous
      project's pin (or the attention fallback) for one frame, mounted that
-     pane's feed, then tore it down for the remembered one. */
-  const [focusState, setFocusState] = useState<{ project: string; key: string | null }>(() => ({ project, key: rememberedFocus(project) }));
-  if (focusState.project !== project) setFocusState({ project, key: rememberedFocus(project) });
+     pane's feed, then tore it down for the remembered one.
+     The focus the parent NAMES outranks the remembered one at mount, for the
+     same reason: on the phone this view is mounted by an open (mobile v2 lane
+     2 pushes it as the conversation screen), so the remembered pin is the
+     conversation the operator just left, and starting there painted and
+     mounted that other conversation's feed for a frame. */
+  const [focusState, setFocusState] = useState<{ project: string; key: string | null }>(() => ({ project, key: focus ?? rememberedFocus(project) }));
+  if (focusState.project !== project) setFocusState({ project, key: focus ?? rememberedFocus(project) });
   const focusPath = focusState.key;
   const setFocusPath = useCallback((key: string | null) => setFocusState((prev) => (prev.key === key ? prev : { project: prev.project, key })), []);
   const [mapOpen, setMapOpen] = useState(false);

@@ -1,6 +1,6 @@
 import { accountIdFromPath } from "@/lib/accounts/badge";
 import { activeCardMigration } from "@/lib/accounts/migration";
-import type { Pipeline } from "@/lib/pipelines/types";
+import type { Pipeline, PipelineStage } from "@/lib/pipelines/types";
 import { cleanTitle } from "@/lib/title";
 import type { FileEntry } from "@/lib/types";
 
@@ -68,6 +68,9 @@ export interface MobileRowState {
   held: number;
   /** Epoch seconds the blocked account's window reopens, when the engine says. */
   resetAt: number | null;
+  /** The account the wall belongs to, when the read names one; the limit row
+      reads «Main resets 16:40» (README §4.2), so both halves travel together. */
+  account: string | null;
 }
 
 const NEEDS: ReadonlySet<MobileRowStateKey> = new Set(["stalled", "limit", "waiting"]);
@@ -121,6 +124,7 @@ export function mobileRowState(file: FileEntry, now: number = Date.now() / 1000)
     seconds: null,
     held: 0,
     resetAt: null,
+    account: null,
     ...over,
   });
   if (file.proc === "killed") return bits({ key: "killed", dot: "danger", seconds: Math.max(0, now - file.mtime) });
@@ -128,7 +132,15 @@ export function mobileRowState(file: FileEntry, now: number = Date.now() / 1000)
     return bits({ key: "stalled", dot: "danger", edge: "danger", badge: "stalled", seconds: Math.max(0, now - file.mtime) });
   }
   if (file.rateLimit) {
-    return bits({ key: "limit", dot: "warning", edge: "warning", badge: "limit", resetAt: file.rateLimit.resetAt ?? null, seconds: Math.max(0, now - file.mtime) });
+    return bits({
+      key: "limit",
+      dot: "warning",
+      edge: "warning",
+      badge: "limit",
+      resetAt: file.rateLimit.resetAt ?? null,
+      account: file.rateLimit.accountId ?? null,
+      seconds: Math.max(0, now - file.mtime),
+    });
   }
   const held = heldDeliveries(file);
   if (held > 0) return bits({ key: "held", dot: "warning", held });
@@ -173,8 +185,11 @@ export interface MobileBoardPipelineRow {
   /** 1-based position of the cursor stage, and how many stages there are. */
   stage: number;
   total: number;
-  /** The cursor stage's name, as the pipeline declares it. */
-  stageName: string;
+  /** The cursor stage as the pipeline declares it. The row says the stage in
+      the operator's words, and the one derivation for that (`stageChipLabel`:
+      the role's name, «review loop» for a loop, the id for a role-less stage)
+      is i18n-bound, so the stage travels and the component names it. */
+  stageRef: PipelineStage | null;
   /** The stage's last round returned a `fail` verdict — the reason most of
       these rows are in the queue at all, and the one outcome word the badge
       («needs a decision») does not already say. */
@@ -235,11 +250,29 @@ function pipelineRow(pipeline: Pipeline, now: number): MobileBoardPipelineRow {
     task: cleanTitle(pipeline.task, 90),
     stage: index >= 0 ? index + 1 : pipeline.stages.length,
     total: pipeline.stages.length,
-    stageName: stage?.id ?? "",
+    stageRef: stage ?? null,
     stageFailed: last?.verdict?.status === "fail",
     findings,
     seconds: at === null ? null : Math.max(0, now - at),
   };
+}
+
+/**
+ * The pipelines of one project that are waiting on the operator, as queue rows.
+ *
+ * Exported because the badge, the queue sheet and the board's Needs-you section
+ * are one list (README §4.1, §4.6): the bar reads this to count, the sheet
+ * reads it to list, and the board reads it through `buildMobileBoard`. Three
+ * readers, one answer.
+ */
+export function needsDecisionPipelineRows(
+  pipelines: readonly Pipeline[],
+  project: string,
+  now: number = Date.now() / 1000,
+): MobileBoardPipelineRow[] {
+  return boardPipelines(pipelines)
+    .filter((pipeline) => pipeline.project === project && pipeline.state === "needs_decision")
+    .map((pipeline) => pipelineRow(pipeline, now));
 }
 
 /** A conversation the phone board may list: no background task, no subagent
@@ -319,13 +352,13 @@ export function buildMobileBoard({
   const recentRows = rows.filter((row) => row.state.section === "recent").sort(byFreshness);
 
   const live = boardPipelines(pipelines).filter((pipeline) => pipeline.project === project);
-  const needsPipelines = live.filter((pipeline) => pipeline.state === "needs_decision");
+  const needsPipelines = needsDecisionPipelineRows(pipelines, project, now);
   const active = live.filter((pipeline) => ACTIVE_PIPELINE_STATES.has(pipeline.state));
   const completed = live.filter((pipeline) => pipeline.state === "completed");
 
   const needsYou: MobileNeedsYouItem[] = [
     ...needsConversations.map((row) => ({ kind: "conversation" as const, ...row })),
-    ...needsPipelines.map((pipeline) => ({ kind: "pipeline" as const, ...pipelineRow(pipeline, now) })),
+    ...needsPipelines.map((row) => ({ kind: "pipeline" as const, ...row })),
   ];
 
   return {
