@@ -178,3 +178,32 @@ test("full-cap tail churn: a recently seen identity survives eviction and stays 
   );
   expect(p4.chimes).toEqual([]);
 });
+
+/* #1432: a request scope with no representation yet (a `#c=` pin this tab has
+   never fetched) is answered by the last certified representation re-labelled
+   for that scope and marked uncertified. That stand-in carries nothing the tab
+   has not already scanned, so it must not be scanned under the pending scope:
+   doing so made the pinned scope the baseline, and the pinned answer's
+   hydrated rows then rang as transitions instead of seeding silently. */
+test("a stand-in for a scope still loading is not scanned, so the pinned answer still seeds silently", () => {
+  const global = "/api/files";
+  const pinned = "/api/files?pin=%2Fdeep";
+  const feed = [live("/a"), waiting("/b")];
+  const seed = planScopedAgentChimes(feed, null, global);
+  const standIn = planScopedAgentChimes(feed, seed, pinned, false);
+  expect(standIn).toBe(seed);
+  /* The pinned answer hydrates a conversation that finished long ago. */
+  const answered = planScopedAgentChimes([...feed, waiting("/deep")], standIn, pinned);
+  expect(answered.chimes).toEqual([]);
+  /* A real transition landing in that same answer is still audible. */
+  const transition = planScopedAgentChimes([waiting("/a"), waiting("/b"), waiting("/deep")], standIn, pinned);
+  expect(transition.chimes).toEqual([{ kind: "question", id: "/a" }]);
+});
+
+test("a stand-in before any certified scan leaves the baseline unseeded", () => {
+  const pinned = "/api/files?pin=%2Fb";
+  const none = planScopedAgentChimes([waiting("/b")], null, pinned, false);
+  expect(none).toBeNull();
+  const first = planScopedAgentChimes([waiting("/b")], none, pinned);
+  expect(first.chimes).toEqual([]);
+});

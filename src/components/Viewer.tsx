@@ -125,7 +125,7 @@ export function Viewer() {
   const [project, setProject] = useState<string>(OVERVIEW);
   const [pendingHash, setPendingHash] = useState<ConversationHash | null>(null);
   const [catalogPin, dispatchCatalogPin] = useReducer(reduceCatalogPin, null);
-  const { files: allFiles, requestScope, projectCatalog: polledProjectCatalog, projectAliases, projectDisplayNames: polledProjectDisplayNames, crownedProjects: serverCrownedProjects, projectCwds, flows: polledFlows, pipelines, pipelinesError, workflows, tasks, conversationAliases, launchRoutes, loaded, catalogFailures } = useFiles(null, filesRequestPin(pendingHash, catalogPin?.path ?? null));
+  const { files: allFiles, requestScope, projectCatalog: polledProjectCatalog, projectAliases, projectDisplayNames: polledProjectDisplayNames, crownedProjects: serverCrownedProjects, projectCwds, flows: polledFlows, pipelines, pipelinesError, workflows, tasks, conversationAliases, launchRoutes, loaded, scopeCertified, catalogFailures } = useFiles(null, filesRequestPin(pendingHash, catalogPin?.path ?? null));
   /* Crown/create curation (server-durable): the optimistic client seam plus
      the overlay entries for projects created before the next catalog poll. */
   const { crownedProjects, toggleCrown, createProject, createdCatalog } = useProjectCuration(serverCrownedProjects, polledProjectCatalog);
@@ -183,7 +183,10 @@ export function Viewer() {
   /* This tab's optimistic flow closes apply before anything renders: the X
      on a flow strip clears the reviewer side of the scheme instantly. */
   const flows = useEffectiveFlows(polledFlows);
-  useAgentChimes(files, requestScope);
+  /* A stand-in served for a scope still loading (#1432) is not scanned for
+     chimes: it is the last certified payload under a new label, and scanning
+     it would let the pinned answer's hydrated rows ring instead of seeding. */
+  useAgentChimes(files, requestScope, scopeCertified);
   const { archivedProjects, archiveProject, unarchiveProject } = useArchivedProjects(files, projectAliases);
   const catalogProjects = useMemo(() => new Set(projectCatalog.map((entry) => entry.project)), [projectCatalog]);
   const catalogConversationCounts = useMemo(
@@ -222,6 +225,12 @@ export function Viewer() {
   /* The jump channel into the board: nonce so repeated jumps to the same node
      re-flash (D9); consumed by ProjectDashboard's pendingFocusRef path. */
   const [focusRequest, setFocusRequest] = useState<{ path: string; nonce: number; catalog: boolean } | null>(null);
+  /* Monotonic across the whole session, never derived from the previous
+     request: a project switch clears the request to null, and a nonce read
+     back from `null` restarted at 1 — the value the board's edge gate had
+     already consumed for the last focus in the previous project — so the
+     first cross-project open after any focus moved nothing (#1432). */
+  const focusNonceRef = useRef(0);
   /* Placement without navigation — see `placePath` below. Its own state and its
      own nonce, so a place and a focus can never consume each other's edge. */
   const [placeRequest, setPlaceRequest] = useState<{ path: string; nonce: number } | null>(null);
@@ -440,7 +449,8 @@ export function Viewer() {
     localStorage.setItem(PROJECT_KEY, key);
     setDrawerOpen(false);
     setOpenNonce((value) => value + 1);
-    setFocusRequest((previous) => ({ path: file.path, nonce: (previous?.nonce ?? 0) + 1, catalog: true }));
+    focusNonceRef.current += 1;
+    setFocusRequest({ path: file.path, nonce: focusNonceRef.current, catalog: true });
     /* A hydrated open is the RESOLVER arriving (deep link, hashchange,
        popstate replay): it re-types the entry the tab is standing on and never
        pushes, so initial restoration adds no duplicate and a replay cannot
@@ -500,18 +510,22 @@ export function Viewer() {
      and from its own pinned request) must FAIL VISIBLY: sitting silently on the
      default view read as "the page just reloads and nothing opens". Same
      bounded deadline the Back/Forward replay uses; the countdown starts only
-     once a certified payload exists, and a resolution clearing `pendingHash`
-     cancels it. The popstate path arms its own identity-checked timer — for a
-     replayed entry both reach the same notice. */
+     once a payload certified for the pinned request scope exists, and a
+     resolution clearing `pendingHash` cancels it. The last-known stand-in
+     another scope lends while the pinned fetch is in flight (#1432) carries
+     `loaded` and says nothing about the target, so it must not start the
+     clock: a pinned fetch slower than the deadline would otherwise be reported
+     stale before it could answer. The popstate path arms its own
+     identity-checked timer — for a replayed entry both reach the same notice. */
   useEffect(() => {
-    if (!pendingHash || !loaded) return;
+    if (!pendingHash || !loaded || !scopeCertified) return;
     const timer = window.setTimeout(() => {
       setPendingHash(null);
       dispatchCatalogPin({ kind: "release" });
       setStaleFocusNotice(true);
     }, STALE_FOCUS_REPLAY_MS);
     return () => window.clearTimeout(timer);
-  }, [pendingHash, loaded]);
+  }, [pendingHash, loaded, scopeCertified]);
 
   const releaseCatalogFile = useCallback((path: string) => {
     dispatchCatalogPin({ kind: "release", path });
@@ -521,12 +535,13 @@ export function Viewer() {
 
   useEffect(() => {
     if (!catalogPin?.hydrated || pendingHash) return;
-    /* A scope transition (the pin just moved to a new request URL) serves the
-       EMPTY placeholder until its own fetch lands. That placeholder is not
-       evidence the transcript disappeared — releasing the hydrated pin on it
-       dropped every freshly resolved beyond-cap deep link right after it
-       opened. Only a certified payload may retire the pin. */
-    if (!loaded) return;
+    /* A scope transition (the pin just moved to a new request URL) is served
+       by the previous scope's rows until its own fetch lands (#1432). That
+       stand-in is not evidence the transcript disappeared — releasing the
+       hydrated pin on it dropped every freshly resolved beyond-cap deep link
+       right after it opened. Only a payload certified for THIS scope may
+       retire the pin. */
+    if (!loaded || !scopeCertified) return;
     const currentPath = catalogPin.conversationId
       ? files.find((file) => file.conversationId === catalogPin.conversationId)?.path
       : undefined;
@@ -536,7 +551,7 @@ export function Viewer() {
       pending: false,
       currentPath,
     });
-  }, [catalogPin, pendingHash, allFiles, files, loaded]);
+  }, [catalogPin, pendingHash, allFiles, files, loaded, scopeCertified]);
 
   /* The one queue every counter shows: badge, popover and the tab title all
      read the same list, stalled tail included (D10). The clock advances at the
@@ -616,8 +631,54 @@ export function Viewer() {
        with no scanned entry still navigates, it just leaves no history. */
     const file = filesRef.current.find((entry) => entry.path === path);
     if (file) recordFocusNavigation(file, projectKey(file));
-    setFocusRequest((prev) => ({ path, nonce: (prev?.nonce ?? 0) + 1, catalog: false }));
+    focusNonceRef.current += 1;
+    setFocusRequest({ path, nonce: focusNonceRef.current, catalog: false });
   }, []);
+
+  /* In-app conversation links (#1432 addendum): «Open conversation» chips on
+     MCP call cards, «Open it on the board» in the orchestrator panel, the
+     lineage chip on a card, a report row — every one is an `#c=` / `#f=`
+     anchor. Left to the browser, the click became a hash navigation and the
+     resolver's pinned round trip, which blanked and rebuilt the board. A
+     target the tab already knows is opened here instead, in the same tick as
+     the click, through the SAME hand-off an accepted `request_attention`
+     handoff and an attention jump use: switch the project only when the
+     target lives elsewhere, then `requestFocus` — the card materializes on
+     the board it is already showing, the camera glides, the ring lands, and
+     the typed history entry is PUSHED (the URL still carries the link for
+     reload and share). No hash navigation, no pinned refetch, no remount of
+     the dashboard or the orchestrator panel. A target the current payload
+     cannot name — beyond the capped feed, or not scanned yet — falls through
+     to the browser, and the cold resolver path handles it exactly as before. */
+  const openLinkedFile = useCallback((file: FileEntry) => {
+    const key = projectKey(file);
+    if (key !== project) applyProject(key);
+    requestFocus(file.path);
+  }, [project, applyProject, requestFocus]);
+  const linkResolveRef = useRef({ allFiles, conversationAliases, launchRoutes });
+  useEffect(() => {
+    linkResolveRef.current = { allFiles, conversationAliases, launchRoutes };
+  }, [allFiles, conversationAliases, launchRoutes]);
+  useEffect(() => {
+    const onClick = (event: MouseEvent) => {
+      if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      const target = event.target as Element | null;
+      const anchor = target && typeof target.closest === "function" ? target.closest("a[href]") : null;
+      if (!anchor) return;
+      const href = anchor.getAttribute("href") ?? "";
+      if (!/^#(?:c|f)=./.test(href)) return;
+      const windowTarget = anchor.getAttribute("target");
+      if (windowTarget && windowTarget !== "_self") return;
+      const intent = parseConversationHash(href);
+      const known = linkResolveRef.current;
+      const hit = resolveConversationTarget(known.allFiles, intent, known.conversationAliases, known.launchRoutes);
+      if (!hit) return;
+      event.preventDefault();
+      openLinkedFile(hit);
+    };
+    document.addEventListener("click", onClick, true);
+    return () => document.removeEventListener("click", onClick, true);
+  }, [openLinkedFile]);
 
   /* Reveal a card without going to it. `requestFocus` above both materializes
      the node and arms the board's glide; a focus handoff wants only the first,
