@@ -600,6 +600,7 @@ test("issue 614: a transcript-less launch projects the queued prompt as the firs
       expect(projection.cards[0]!.spawn).toMatchObject({
         state: "queued",
         initialMessage: "queued",
+        admittedAt: createdMs,
         promptImages: 0,
         promptAt: createdMs, prompt: "LLV614_CANONICAL_PROBE_20260723",
       });
@@ -651,7 +652,10 @@ test("issues 614 and 1108: a readable transcript omitted by a scoped scan keeps 
        there is exactly one card — never a duplicate. */
     const adopted = projectLaunchConversations([scannedFile(artifactPath)], snapshot, createdMs + 20_000);
     expect(adopted.cards).toEqual([]);
-    expect(adopted.facts.get(artifactPath)).toMatchObject({ state: "recovered", initialMessage: "delivered" });
+    /* The admission instant survives adoption (issue #1397): the prompt fields
+       retire with the placeholder, the anchor "working…" counts from does not. */
+    expect(adopted.facts.get(artifactPath)).toMatchObject({ state: "recovered", initialMessage: "delivered", admittedAt: createdMs });
+    expect(adopted.facts.get(artifactPath)?.prompt).toBeUndefined();
 
     /* Aged past the pre-adoption grace with the transcript still outside the
        scoped scan: it folds into history rather than resurrecting a phantom. */

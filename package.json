@@ -81,5 +81,8 @@
     "type": "git",
     "url": "git+https://github.com/Latand/live-log-viewer-next.git"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "patchedDependencies": {
+    "next@16.3.2": "patches/next-16.3.2.patch"
+  }
 }

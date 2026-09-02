@@ -5,6 +5,9 @@ WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1
 RUN npm install -g bun@1.4.0
 COPY package.json bun.lock ./
+# Vendored dependency patches (`patchedDependencies` in package.json). The
+# install fails when a patch file the lockfile names is absent.
+COPY patches ./patches
 RUN bun install --frozen-lockfile
 
 FROM node:22.16.0-bookworm-slim AS build

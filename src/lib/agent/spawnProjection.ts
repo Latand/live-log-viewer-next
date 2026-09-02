@@ -142,6 +142,9 @@ function cardState(snapshot: RegistryFile, receipt: SpawnReceipt): StructuredSpa
   const deliveredAt = delivered
     ? (Date.parse(delivery?.deliveredAt ?? "") || Date.parse(receipt.createdAt) || undefined)
     : undefined;
+  /* The admission instant rides every state and survives adoption (issue
+     #1397): it is what "working…" counts from while no transcript turn exists. */
+  const admittedAt = Date.parse(receipt.createdAt);
   return {
     launchId: receipt.launchId,
     clientAttemptId: receipt.clientAttemptId,
@@ -153,6 +156,7 @@ function cardState(snapshot: RegistryFile, receipt: SpawnReceipt): StructuredSpa
     initialMessage,
     retrySafe: receipt.state === "failed",
     error: receipt.error,
+    ...(Number.isFinite(admittedAt) ? { admittedAt } : {}),
     ...(deliveredAt !== undefined ? { deliveredAt } : {}),
     ...(launchPrompt
       ? {
