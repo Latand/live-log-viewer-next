@@ -130,8 +130,14 @@ recorded compactions, a transcript past 8 MB, and a host that is gone each add
 a reason of their own.
 
 Press **Rotate**, and the draft opens prefilled with the incumbent's own
-parameters. The successor receives the mandate plus a handoff the server
-composes: the predecessor's identity and exact `conversation_messages` call,
+parameters. The mandate box starts from the current built-in default when the
+incumbent's mandate is based on an older version, and the summary line says
+so — **Keep the incumbent's mandate** carries its text forward instead. A seat
+already on the current version, or on your own rules, keeps its text. The seat
+row flags a stale seat the same way (`mandate v3, default v13`), and
+`rotate_orchestrator` defaults identically, with `keepIncumbentMandate: true`
+as the explicit carry-forward. The successor receives the mandate plus a
+handoff the server composes: the predecessor's identity and exact `conversation_messages` call,
 the project's open board tasks, your notes, and one compact **Rotation history**
 section standing in for every earlier handoff — so a seat that has rotated a
 dozen times costs exactly what a fresh one costs. The predecessor keeps its

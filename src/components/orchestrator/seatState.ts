@@ -1,4 +1,6 @@
 import { currentConversationFile } from "@/lib/accounts/identity";
+import type { MessageKey } from "@/lib/i18n";
+import { ORCHESTRATOR_PROMPT_VERSION, ORCHESTRATOR_SYSTEM_PROMPT, orchestratorMandateStale } from "@/lib/orchestrator/prompt";
 import type { OrchestratorSeat } from "@/lib/orchestrator/seats";
 import type { FileEntry } from "@/lib/types";
 
@@ -114,6 +116,34 @@ export interface RotationHint {
 /** `ROTATION_THRESHOLD_FRACTION` (`@/lib/orchestrator/contextPolicy`) as a
     percentage — the same line the server's recommendation draws. */
 export const ROTATION_CONTEXT_PERCENT = 50;
+
+/** What a rotate draft starts from (#1452): the CURRENT built-in default when
+    the incumbent's mandate is based on an older version, the incumbent's own
+    text otherwise — including bespoke rules, which claim no version. The
+    incumbent's text is never lost: the draft offers it as an explicit choice. */
+export function rotateMandateBase(seat: Pick<OrchestratorSeat, "mandate" | "promptVersion">): string {
+  return orchestratorMandateStale(seat.promptVersion) ? ORCHESTRATOR_SYSTEM_PROMPT : seat.mandate;
+}
+
+/** What the mandate text in a draft IS (#1452): the built-in default, the
+    incumbent's own text — on the current version, on an older one, or
+    bespoke — or the operator's edit. One rule for the dock's summary line and
+    the phone's caption, so both name the text rather than a version it isn't. */
+export function mandateSummaryOf(
+  mandate: string,
+  incumbent: Pick<OrchestratorSeat, "mandate" | "promptVersion"> | null,
+): { key: MessageKey; params: Record<string, number> } {
+  const current = ORCHESTRATOR_PROMPT_VERSION;
+  if (mandate === ORCHESTRATOR_SYSTEM_PROMPT) return { key: "orchPanel.mandateSummary", params: { version: current } };
+  if (incumbent && mandate === incumbent.mandate) {
+    const version = incumbent.promptVersion;
+    if (version === null) return { key: "orchPanel.mandateSummaryIncumbentCustom", params: {} };
+    return orchestratorMandateStale(version)
+      ? { key: "orchPanel.mandateSummaryIncumbentStale", params: { version, current } }
+      : { key: "orchPanel.mandateSummaryIncumbent", params: { version, current } };
+  }
+  return { key: "orchPanel.mandateSummaryCustom", params: {} };
+}
 
 /**
  * What the operator can do with the seat's conversation RIGHT NOW, projected
