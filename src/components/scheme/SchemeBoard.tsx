@@ -36,6 +36,8 @@ import { resolveExpandedNode } from "./expandedNode";
 import { autoEditTokenFor, clearStaleRename, requestRename, titleUnderRename, type RenameRequest } from "./renameRequest";
 import { currentWorkRect, currentWorkRects, rectUnion } from "./currentWork";
 import { buildSchemeLayout } from "./layout";
+import type { SchemeLayout } from "./layout";
+import { reconcileLayoutNodes } from "./layoutIdentity";
 import { Minimap, stackDotsFor, type StackDot } from "./Minimap";
 import { boardClusters, chipObstacleRects, screenKeepoutObstacles } from "./offscreenClusters";
 import type { WorkerStack } from "./workerCollapse";
@@ -311,10 +313,17 @@ export function SchemeBoard({
      encloses them plus the planned-stage placeholders — and the pipeline's linked
      task cards (#531), so the pipeline reads as a single region — never a
      detached control card with a duplicate stage graph. */
-  const layout = useMemo(
-    () => buildSchemeLayout(groups, manual, files, layoutFlows, drafts, pipelines, surfacePipelines, favorites, isolatedManualPaths, boardTasks, textExpandedIds, { now }),
-    [groups, manual, files, layoutFlows, drafts, pipelines, surfacePipelines, favorites, isolatedManualPaths, boardTasks, textExpandedIds, now],
-  );
+  /* Node identities carry over from the previous layout wherever the node
+     is unchanged (#1432), so a relayout that moved nothing re-renders no card. */
+  const previousLayoutRef = useRef<SchemeLayout | null>(null);
+  const layout = useMemo(() => {
+    const built = reconcileLayoutNodes(
+      previousLayoutRef.current,
+      buildSchemeLayout(groups, manual, files, layoutFlows, drafts, pipelines, surfacePipelines, favorites, isolatedManualPaths, boardTasks, textExpandedIds, { now }),
+    );
+    previousLayoutRef.current = built;
+    return built;
+  }, [groups, manual, files, layoutFlows, drafts, pipelines, surfacePipelines, favorites, isolatedManualPaths, boardTasks, textExpandedIds, now]);
 
   /* NO PRUNING HERE (#771). The selection outlives this view, so dropping a path
      because THIS layout does not place it would delete the operator's selection

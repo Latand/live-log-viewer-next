@@ -51,6 +51,15 @@ import { MobileMapLite } from "./MobileMapLite";
 export { MobilePipelineDock } from "./MobilePipelineDock";
 
 const focusKey = (project: string) => "llvFocus:" + project;
+/** The pane this tab last pinned in `project`, or null (also on the server). */
+function rememberedFocus(project: string): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return sessionStorage.getItem(focusKey(project));
+  } catch {
+    return null;
+  }
+}
 
 /* Attention-first default: the conversation whose move it is beats a running
    one, freshness breaks ties inside a class. */
@@ -157,7 +166,15 @@ export function MobileFocusView({ project, projectName, groups, manual, files, f
      browser has no reason to touch the window scroll at all. Zero whenever
      the layout viewport already matches the visible one. */
   const kbInset = useKeyboardInset();
-  const [focusPath, setFocusPath] = useState<string | null>(null);
+  /* The pinned pane, tagged with the project it belongs to. A project switch
+     re-reads that project's remembered focus DURING the render that changes
+     `project` (#1432): the old effect-based reset painted the previous
+     project's pin (or the attention fallback) for one frame, mounted that
+     pane's feed, then tore it down for the remembered one. */
+  const [focusState, setFocusState] = useState<{ project: string; key: string | null }>(() => ({ project, key: rememberedFocus(project) }));
+  if (focusState.project !== project) setFocusState({ project, key: rememberedFocus(project) });
+  const focusPath = focusState.key;
+  const setFocusPath = useCallback((key: string | null) => setFocusState((prev) => (prev.key === key ? prev : { project: prev.project, key })), []);
   const [mapOpen, setMapOpen] = useState(false);
   const [pipelineSheetOpen, setPipelineSheetOpen] = useState(false);
   const [mapFrame, setMapFrame] = useState<"all" | "current">("all");
@@ -250,7 +267,6 @@ export function MobileFocusView({ project, projectName, groups, manual, files, f
 
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
-    setFocusPath(sessionStorage.getItem(focusKey(project)));
     setMapOpen(false);
   }, [project]);
 

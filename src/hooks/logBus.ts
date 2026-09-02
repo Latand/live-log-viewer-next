@@ -5,7 +5,17 @@ import type { LogChunk } from "@/lib/types";
 
 const POLL_MS = 1200;
 const MAX_REQS = 64;
+/* Subscription churn (panes scrolling in and out of view, a board relayout)
+   coalesces into one stream reconnect on the long window. A subscriber
+   arriving on a SETTLED stream — nothing reconnected for a full window — is
+   the operator switching conversations (#1432): its pane is on screen now,
+   blank or showing cached rows, and every millisecond before the stream
+   carries it is a pane that is not live. That first arrival reconnects on
+   the short window; anything arriving while a reconnect is still fresh
+   coalesces on the long one, so churn can never exceed one prompt reconnect
+   per long window. */
 const RECONNECT_DEBOUNCE_MS = 300;
+const PROMPT_RECONNECT_DEBOUNCE_MS = 40;
 const SSE_RETRY_MS = 60_000;
 
 export type LogBusResult = LogChunk | { error: string } | { transportError: true };
@@ -22,6 +32,10 @@ const subs = new Set<LogSubscriber>();
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 let sseRetryTimer: ReturnType<typeof setTimeout> | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+/** When the pending reconnect fires; a shorter request moves it earlier. */
+let reconnectDueAt = Number.POSITIVE_INFINITY;
+/** When the stream last (re)connected — what "settled" is measured from. */
+let streamStartedAt = Number.NEGATIVE_INFINITY;
 let source: EventSource | null = null;
 let inFlight = false;
 let kickPending = false;
@@ -51,6 +65,8 @@ function stopAllTransports(): void {
   stopPolling();
   sseRetryTimer = clearTimer(sseRetryTimer, clearTimeout);
   reconnectTimer = clearTimer(reconnectTimer, clearTimeout);
+  reconnectDueAt = Number.POSITIVE_INFINITY;
+  streamStartedAt = Number.NEGATIVE_INFINITY;
   usingFallback = false;
   inFlight = false;
   kickPending = false;
@@ -147,8 +163,10 @@ function startSse(): void {
   usingFallback = false;
   stopPolling();
   sseRetryTimer = clearTimer(sseRetryTimer, clearTimeout);
+  reconnectDueAt = Number.POSITIVE_INFINITY;
   closeSource();
 
+  streamStartedAt = Date.now();
   const generation = sseGeneration;
   const active = [...subs];
   const reqs = active.map((sub, i) => ({ id: String(i), path: sub.path, offset: sub.getOffset() }));
@@ -181,8 +199,16 @@ function scheduleSseReconnect(delay = RECONNECT_DEBOUNCE_MS): void {
     kickPoll();
     return;
   }
+  const dueAt = Date.now() + delay;
+  /* A pending reconnect that already fires no later than this request keeps
+     its slot: a burst of subscribers still produces exactly one connection. */
+  if (reconnectTimer !== null && reconnectDueAt <= dueAt) return;
   reconnectTimer = clearTimer(reconnectTimer, clearTimeout);
-  reconnectTimer = setTimeout(startSse, delay);
+  reconnectDueAt = dueAt;
+  reconnectTimer = setTimeout(() => {
+    reconnectDueAt = Number.POSITIVE_INFINITY;
+    startSse();
+  }, delay);
 }
 
 export function subscribeLog(sub: LogSubscriber): () => void {
@@ -191,7 +217,8 @@ export function subscribeLog(sub: LogSubscriber): () => void {
     if (pollTimer === null) pollTimer = setInterval(() => void pollTick(), POLL_MS);
     kickPoll();
   } else {
-    scheduleSseReconnect();
+    const settled = Date.now() - streamStartedAt >= RECONNECT_DEBOUNCE_MS;
+    scheduleSseReconnect(settled ? PROMPT_RECONNECT_DEBOUNCE_MS : RECONNECT_DEBOUNCE_MS);
   }
   return () => {
     subs.delete(sub);
