@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { TranscriptSearchRow } from "@/app/api/search/transcripts/route";
 import type { TranscriptCorpusStats, TranscriptSpeaker } from "@/lib/search/transcriptSearch";
@@ -170,18 +170,51 @@ export function useTranscriptSearch({
   const [moreRequest, setMoreRequest] = useState<MoreRequest | null>(null);
   const [retryNonce, setRetryNonce] = useState(0);
 
+  /* First pages go out one at a time, and the newest question takes the next
+     turn. Aborting the fetch on every refinement looked responsive but changed
+     nothing where the time is spent: `searchTranscripts` is synchronous on the
+     Viewer's only thread, so an abandoned request still ran to completion
+     there and every later one queued behind it (#1429) — a common word typed
+     in two pauses stacked its two queries in front of the answer the operator
+     was waiting for, and stalled the board's own polls with them. Waiting for
+     the in-flight answer costs nothing (it was going to be computed anyway),
+     every intermediate question is dropped for free, and the answer that does
+     arrive holds on screen as the stale rows the design already shows. */
+  const inFlight = useRef<AbortController | null>(null);
+  const asked = useRef<{ key: string; nonce: number } | null>(null);
+  const [turn, setTurn] = useState(0);
   useEffect(() => {
-    if (!active) return;
+    if (!active) {
+      asked.current = null;
+      return;
+    }
+    if (inFlight.current) return;
+    if (asked.current?.key === requestKey && asked.current.nonce === retryNonce) return;
     const controller = new AbortController();
-    void fetchTranscriptSearchPage(request.query, request.speaker, null, controller.signal)
-      .then((page) => setSettled({ key: requestKey, speaker: request.speaker, page, error: false }))
+    const key = requestKey;
+    const speaker = request.speaker;
+    inFlight.current = controller;
+    asked.current = { key, nonce: retryNonce };
+    void fetchTranscriptSearchPage(request.query, speaker, null, controller.signal)
+      .then((page) => setSettled({ key, speaker, page, error: false }))
       .catch((cause: unknown) => {
         if ((cause as { name?: string }).name !== "AbortError") {
-          setSettled({ key: requestKey, speaker: request.speaker, page: EMPTY_PAGE, error: true });
+          setSettled({ key, speaker, page: EMPTY_PAGE, error: true });
         }
+      })
+      .finally(() => {
+        if (inFlight.current !== controller) return;
+        inFlight.current = null;
+        /* An aborted answer is no answer: forget the question was asked, so a
+           hook that is still mounted (StrictMode's rehearsal unmount) asks it
+           again. Then re-run with whatever the debounce settled on meanwhile:
+           the latest question, or nothing new. */
+        if (controller.signal.aborted) asked.current = null;
+        setTurn((value) => value + 1);
       });
-    return () => controller.abort();
-  }, [active, request.query, request.speaker, requestKey, retryNonce]);
+  }, [active, request.query, request.speaker, requestKey, retryNonce, turn]);
+  /* The one abort left: the palette closing mid-answer. */
+  useEffect(() => () => inFlight.current?.abort(), []);
 
   useEffect(() => {
     if (!moreRequest || moreRequest.key !== requestKey) return;
