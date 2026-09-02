@@ -102,6 +102,33 @@ function itemsOfKind(feed: ReturnType<typeof buildFeed>, kind: Item["kind"]) {
   return feed.items.filter((item) => item.kind === kind);
 }
 
+describe("feed session reuse across panes (#1432)", () => {
+  const record = (text: string, index: number) =>
+    JSON.stringify({ type: "assistant", uuid: `row-${index}`, timestamp: "2026-08-31T10:00:00.000Z", message: { role: "assistant", content: [{ type: "text", text }] } });
+
+  test("a window of the same length with different bytes is re-parsed, never served from the stale snapshot", () => {
+    /* A pooled session outlives its pane and can meet the same path rewritten
+       in place — the same line count, other content. Same start, same end. */
+    const session = createFeedSession({ engine: "claude", fmt: "claude", showSvc: false, lineFilter: "" });
+    const first = session.feed([record("First mandate accepted.", 1)], 0, false);
+    expect(first.items.map((entry) => (entry.item as { text?: string }).text)).toEqual(["First mandate accepted."]);
+
+    const rewritten = session.feed([record("Second mandate accepted.", 2)], 0, false);
+    expect(rewritten.items.map((entry) => (entry.item as { text?: string }).text)).toEqual(["Second mandate accepted."]);
+  });
+
+  test("an unchanged window keeps its snapshot identity and appended lines parse incrementally", () => {
+    const session = createFeedSession({ engine: "claude", fmt: "claude", showSvc: false, lineFilter: "" });
+    const lines = [record("one", 1), record("two", 2)];
+    const first = session.feed(lines, 0, false);
+    expect(session.feed(lines, 0, false)).toBe(first);
+    const grown = session.feed([...lines, record("three", 3)], 0, false);
+    expect(grown.items.map((entry) => (entry.item as { text?: string }).text)).toEqual(["one", "two", "three"]);
+    /* Rows already parsed keep their identity: the memoised feed items skip. */
+    expect(grown.items[0]!.item).toBe(first.items[0]!.item);
+  });
+});
+
 describe("feed session parity with one-shot parse", () => {
   test("a completed response keeps its receipt-to-completion total after the next turn starts", () => {
     const session = createFeedSession({ engine: "claude", fmt: "claude", showSvc: false, lineFilter: "" });

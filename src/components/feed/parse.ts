@@ -1220,6 +1220,8 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
   /** Window start of the previous feed — a start that moved backwards means
       prepended history, which a sequential parser cannot resume across. */
   let lastStart = -Infinity;
+  /** The last line consumed, so a rewritten window of equal length is caught. */
+  let lastConsumedLine: string | undefined;
   /* Dedup/marker state remembers the source line it came from: when that line
      slides out of the window the state clears, matching what a re-parse of
      the shortened window would know. */
@@ -2894,6 +2896,14 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       reset();
       consumedEnd = start;
     }
+    /* Same window, different bytes: a session that outlives its pane (#1432,
+       `feed/sessionPool`) can meet a transcript rewritten in place at the same
+       line count. The last consumed line is the cheapest witness; when it no
+       longer matches, nothing consumed can be trusted. */
+    if (consumedEnd > start && lines[consumedEnd - start - 1] !== lastConsumedLine) {
+      reset();
+      consumedEnd = start;
+    }
     lastStart = start;
     if (dropBefore(start)) {
       reset();
@@ -2903,6 +2913,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       curSrc = start + i;
       consume(lines[i]);
     }
+    if (lines.length) lastConsumedLine = lines[lines.length - 1]!;
     consumedEnd = end;
     if (!snapshot || snapshotLive !== isLive) {
       snapshot = buildSnapshot(isLive);
