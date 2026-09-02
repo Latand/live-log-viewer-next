@@ -34,6 +34,7 @@ import { MobilePipelineDockSheet } from "./MobilePipelineDockSheet";
 import { conversationIdentity } from "@/lib/accounts/identity";
 import { useFavorites } from "@/components/favorites/FavoritesContext";
 import { useOrchestratorSeat } from "@/components/orchestrator/useOrchestratorSeat";
+import { useSeatPanel } from "@/components/orchestrator/useSeatPanel";
 import { SessionTitle } from "@/components/session/SessionTitle";
 import { focusHandoffBus } from "@/components/attention/focusHandoffBus";
 import { deckKey } from "@/components/scheme/agentLinks";
@@ -42,8 +43,11 @@ import { buildSchemeLayout } from "@/components/scheme/layout";
 import { SubagentBadges } from "@/components/scheme/SubagentBadges";
 import type { WorkerStack } from "@/components/scheme/workerCollapse";
 
+import { WakeupChip, wakeupChipKey } from "@/components/WakeupChip";
+
 import { MobileBarTitle, MobileShell, type MobileShellHost, type SheetRenderer } from "./MobileShell";
 import { MobileConversationMenu } from "./MobileConversationMenu";
+import { MobileOrchestratorSheet } from "./MobileOrchestratorSheet";
 import { MobileSwitchSheet, switchList, swipeTarget, type SwitchCandidate, type SwitchEntry } from "./MobileSwitchSheet";
 import { CHAT_TONE_DOT, CHAT_TONE_TEXT, chatStateBits, stagePosition, type StagePosition } from "./mobileChatState";
 import { topScreen, useMobileNav, useMobileNavStore } from "./mobileNav";
@@ -380,7 +384,8 @@ export function MobileFocusView({ project, projectName, groups, manual, files, f
 
   /* ── The switcher, and the swipe that walks it ─────────────────────────── */
   const projectCwd = useMemo(() => draftWorkingDirectory(files, project), [files, project]);
-  const { status: seatStatus } = useOrchestratorSeat(project, projectCwd || undefined);
+  const seatRead = useOrchestratorSeat(project, projectCwd || undefined);
+  const seatStatus = seatRead.status;
   const seatConversationId = seatStatus?.exists ? seatStatus.seat?.conversationId ?? null : null;
   const seatKey = useMemo(() => {
     if (!seatConversationId) return null;
@@ -426,6 +431,36 @@ export function MobileFocusView({ project, projectName, groups, manual, files, f
     if (topScreen(navState).kind === "chat") nav.replace({ kind: "chat", id: entry.id });
   }, [openEntry, setFocusPath, nav, navState]);
 
+  /* Which switcher row is on screen — a conversation, a review-round deck or a
+     draft. EVERY leaf the switcher can reach is one of these, so the bar's
+     title cell, the swipe and the screen's identity are driven from HERE and
+     not from `activeFile`: a deck or a draft has no transcript, and reading
+     the cell off the file made those two leaves dead ends that showed the
+     project's name and could not be left by the gesture that reached them. */
+  const activeEntry = useMemo(
+    () => switchEntries.find((entry) => entry.key === resolvedKey) ?? null,
+    [switchEntries, resolvedKey],
+  );
+
+  /* The seat sheet over this conversation (§4.2, §4.5): the `⋯`'s first-group
+     «Orchestrator seat» row is the phone's only route to the seat's status,
+     mandate and rotation now that the pinned row went with the strip. */
+  const [seatSheetOpen, setSeatSheetOpen] = useState(false);
+  const [seatHandoff, setSeatHandoff] = useState(false);
+  const holdsSeat = resolvedKey !== null && seatKey !== null && resolvedKey === seatKey;
+  const seatPanel = useSeatPanel({ project, files, seat: seatRead, holdsSeat, open: seatSheetOpen });
+  /* A rotation confirmed from here lands in the SUCCESSOR: the incumbent stays
+     live under the draft for as long as the rotation takes, so the phone waits
+     for the seat read to name a conversation other than this one — and for the
+     files feed to actually carry it, since pinning a key the layout has not
+     got yet would land nowhere. */
+  useEffect(() => {
+    if (!seatHandoff || !seatKey || seatKey === resolvedKey || !byKey.has(seatKey)) return;
+    setSeatSheetOpen(false);
+    setSeatHandoff(false);
+    setFocusPath(seatKey);
+  }, [seatHandoff, seatKey, resolvedKey, byKey, setFocusPath]);
+
   const [bumpPulse, setBumpPulse] = useState<{ side: "left" | "right"; id: number } | null>(null);
 
   const swipe = useCallback((dx: number) => {
@@ -466,7 +501,7 @@ export function MobileFocusView({ project, projectName, groups, manual, files, f
     const start = swipeRef.current;
     swipeRef.current = null;
     const touch = event.changedTouches[0];
-    if (!start || !touch || !activeFile || navState.sheet) return;
+    if (!start || !touch || !activeEntry || navState.sheet) return;
     const dx = touch.clientX - start.x;
     const dy = touch.clientY - start.y;
     if (Math.abs(dx) < SWIPE_MIN_X || Math.abs(dx) < Math.abs(dy) * 2) return;
@@ -483,6 +518,11 @@ export function MobileFocusView({ project, projectName, groups, manual, files, f
       bump={bumpPulse?.side ?? null}
       renamed={renamed && renamed.path === activeFile.path ? renamed.title : null}
     />
+  ) : activeEntry ? (
+    /* A deck or a draft names itself exactly as its switcher row does, so the
+       cell the operator taps to leave says the same thing as the row that
+       brought them here. */
+    <EntryBarTitle entry={activeEntry} offline={offline} bump={bumpPulse?.side ?? null} />
   ) : (
     <MobileBarTitle>{displayName}</MobileBarTitle>
   );
@@ -515,6 +555,7 @@ export function MobileFocusView({ project, projectName, groups, manual, files, f
           crowned={Boolean(favoritesApi?.has(conversationIdentity(activeFile)))}
           hostTaskCount={hostTaskCount}
           pipelineCount={dockedPipelines.length}
+          onOpenSeat={seatPanel ? () => setSeatSheetOpen(true) : undefined}
           onOpenPipeline={dockedPipelines.length ? () => setPipelineSheetOpen(true) : undefined}
           onRename={() => setRenameToken((token) => token + 1)}
           onToggleCrown={favoritesApi ? () => favoritesApi.toggle(conversationIdentity(activeFile)) : undefined}
@@ -635,14 +676,14 @@ export function MobileFocusView({ project, projectName, groups, manual, files, f
       style={kbInset > 0 ? { paddingBottom: kbInset } : undefined}
     >
       <MobileShell
-        screen={activeFile ? "chat" : "board"}
-        screenId={activeFile ? conversationIdentity(activeFile) : undefined}
+        screen={activeEntry ? "chat" : "board"}
+        screenId={activeEntry?.id}
         title={title}
-        titleLabel={activeFile ? t("mobile2.chat.switcher") : t("mobile2.bar.switchProject")}
-        titleOpens={activeFile ? "switch" : shellHost ? "projects" : undefined}
+        titleLabel={activeEntry ? t("mobile2.chat.switcher") : t("mobile2.bar.switchProject")}
+        titleOpens={activeEntry ? "switch" : shellHost ? "projects" : undefined}
         back={canLeave}
         host={shellHost}
-        onOpenSearch={activeFile ? undefined : onOpenSearch}
+        onOpenSearch={activeEntry ? undefined : onOpenSearch}
         searchTestId="dash-search"
         renderSheet={renderSheet}
       >
@@ -667,6 +708,34 @@ export function MobileFocusView({ project, projectName, groups, manual, files, f
             onTitleChange={(next) => setRenamed({ path: activeFile.path, title: next })}
           />
         </div>
+      ) : null}
+
+      {/* The seat sheet (§4.5), over this conversation. It is the SAME sheet the
+          board's seat card opens — one seat surface, never a second one — fed
+          by `useSeatPanel`, which answers only for a live seat this
+          conversation holds. */}
+      {seatSheetOpen && seatPanel ? (
+        <MobileOrchestratorSheet
+          project={project}
+          projectName={displayName}
+          projectCwd={projectCwd || undefined}
+          state={seatPanel.state}
+          status={seatPanel.status}
+          file={seatPanel.file}
+          incumbent={seatPanel.incumbent}
+          pendingMandate={seatPanel.pendingMandate}
+          viewerMcpRegistered={seatPanel.viewerMcpRegistered}
+          submitting={false}
+          rotate={{ ...seatPanel.rotate, onConfirm: (input) => { setSeatHandoff(true); seatPanel.rotate.onConfirm(input); } }}
+          /* Create and resume belong to the surface that exists without a seat
+             conversation; over a LIVE seat the sheet's primary action is «Open
+             conversation», so this confirm has no control that can call it. */
+          onConfirm={() => undefined}
+          onRecheck={seatPanel.onRecheck}
+          /* Already in it: the sheet was opened FROM the seat's conversation. */
+          onOpenConversation={() => setSeatSheetOpen(false)}
+          onClose={() => setSeatSheetOpen(false)}
+        />
       ) : null}
 
       {pipelineSheetOpen && dockedPipelines.length ? (
@@ -737,6 +806,58 @@ export function ChatBarTitle({ file, offline, stage, bump, renamed = null }: { f
             ) : null}
           </>
         )}
+        {/* The pending self-wake (#165). Its standing contract is that it shows
+            on EVERY surface, the phone included, because a conversation that
+            reads as idle is actually sleeping until a known time — and the
+            phone's pane header, which used to carry it, is gone. It rides the
+            state line rather than a row of its own, so it costs the transcript
+            nothing, and it is passive here: the cell around it is already the
+            switcher's button, and a button inside a button is not a control
+            anyone can reach. */}
+        {file.pendingWakeup ? (
+          <WakeupChip key={wakeupChipKey(file.pendingWakeup)} wakeup={file.pendingWakeup} interactive={false} className="ml-0.5" />
+        ) : null}
+      </span>
+    </span>
+  );
+}
+
+/**
+ * The bar's title cell for the two leaves that carry no transcript: a
+ * review-round deck and a not-yet-spawned draft (README §3.2).
+ *
+ * It says exactly what the switcher row for the same key says — the deck names
+ * the work it reviews and takes its state from its newest round, the draft says
+ * it has not been sent — so the cell an operator taps to LEAVE names the same
+ * thing as the row that brought them here. Without it these two leaves showed
+ * the project's name and opened the project switcher, which is a different
+ * screen's cell on this one's bar.
+ */
+export function EntryBarTitle({ entry, offline, bump }: { entry: SwitchEntry; offline: boolean; bump: "left" | "right" | null }) {
+  const { t } = useLocale();
+  const bits = entry.file ? chatStateBits(t, entry.file, { offline }) : null;
+  return (
+    <span
+      data-mobile2-chat-title
+      data-mobile2-entry={entry.section}
+      className={`flex min-w-0 flex-1 flex-col justify-center transition-transform duration-[200ms] ease-[cubic-bezier(0.2,0,0,1)] motion-reduce:transition-none ${
+        bump === "right" ? "-translate-x-3" : bump === "left" ? "translate-x-3" : ""
+      }`}
+    >
+      <span data-mobile2-title-text className="min-w-0 truncate text-title font-semibold leading-tight text-primary">
+        {entry.label}
+      </span>
+      <span className="flex min-w-0 items-center gap-1 text-label font-medium leading-tight text-secondary">
+        <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${bits ? CHAT_TONE_DOT[bits.tone] : "bg-strong"}`} aria-hidden />
+        {bits ? (
+          <span data-mobile2-chat-state className={`shrink-0 whitespace-nowrap ${CHAT_TONE_TEXT[bits.tone]}`}>{bits.phrase}</span>
+        ) : (
+          <span data-mobile2-chat-state className="min-w-0 truncate">{entry.meta}</span>
+        )}
+        {/* The same standing contract as the conversation's own cell (#165). */}
+        {entry.file?.pendingWakeup ? (
+          <WakeupChip key={wakeupChipKey(entry.file.pendingWakeup)} wakeup={entry.file.pendingWakeup} interactive={false} className="ml-0.5" />
+        ) : null}
       </span>
     </span>
   );

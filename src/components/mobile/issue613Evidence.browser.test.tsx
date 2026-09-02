@@ -277,8 +277,11 @@ test("issue 613: the populated phone bar fits a 390px viewport with every contro
      hides behind an invisible edge. */
   expect(closed.headerScrollWidth).toBeLessThanOrEqual(closed.headerClientWidth);
 
-  /* Every control the bar owns is inside the viewport at a 44px target. */
-  expect(closed.controls.length).toBe(4);
+  /* Every control the bar owns is inside the viewport at a 44px target. The
+     populated project lands on its conversation, so this is the CONVERSATION
+     bar's set: the title cell is the switcher and search is a `⋯` row rather
+     than a target of its own (README §3.1), leaving the badge and `⋯`. */
+  expect(closed.controls.length).toBe(3);
   for (const control of closed.controls) {
     expect(control.left).toBeGreaterThanOrEqual(0);
     expect(control.right).toBeLessThanOrEqual(390);
@@ -286,9 +289,11 @@ test("issue 613: the populated phone bar fits a 390px viewport with every contro
     expect(control.width).toBeGreaterThanOrEqual(44);
   }
   const labels = closed.controls.map((control) => control.label);
-  /* The title cell, then the three targets in the design's order. */
-  expect(labels[0]).toBe(translate("en", "mobile2.bar.switchProject"));
-  expect(labels.slice(1)).toEqual([ATTENTION_LABEL, translate("en", "mobile2.bar.search"), translate("en", "mobile2.bar.more")]);
+  /* The title cell, then the targets in the design's order. */
+  expect(labels[0]).toBe(translate("en", "mobile2.chat.switcher"));
+  expect(labels.slice(1)).toEqual([ATTENTION_LABEL, translate("en", "mobile2.bar.more")]);
+  /* Search did not vanish with the target: it is one row inside the `⋯`. */
+  expect(labels).not.toContain(translate("en", "mobile2.bar.search"));
   /* Nothing from the old five-target row rides the bar. */
   for (const key of ["dash.openProjects", "dash.hiddenShelf", "dash.createMenu", "board.undo"] as const) {
     expect(labels.some((label) => label.startsWith(translate("en", key).slice(0, 12)))).toBe(false);

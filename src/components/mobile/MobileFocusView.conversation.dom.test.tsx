@@ -47,6 +47,8 @@ mock.module("@/hooks/useLogTail", () => ({
 }));
 
 const { MobileFocusView, BUMP_MS } = await import("./MobileFocusView");
+const { resetOrchestratorSeatCacheForTests } = await import("../orchestrator/useOrchestratorSeat");
+const { resetOrchestratorIncumbentCacheForTests } = await import("../orchestrator/useOrchestratorIncumbent");
 import type { MobileNav, MobileNavHost } from "./mobileNav";
 
 const { MobileNavContext, createMobileNav, topScreen } = await import("./mobileNav");
@@ -71,7 +73,20 @@ const OVERRIDES: Record<string, unknown> = {
   cancelAnimationFrame: (id: number) => clearTimeout(id),
   ResizeObserver: class { observe() {} unobserve() {} disconnect() {} },
   IntersectionObserver: class { observe() {} unobserve() {} disconnect() {} takeRecords() { return []; } },
+  /* Every route the screen reads answers empty; the seat tests below swap
+     `seatBody` for a project that has one. */
+  fetch: (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    const body = url.startsWith("/api/orchestrator/seat/status") ? incumbentBody
+      : url.startsWith("/api/orchestrator/seat") ? seatBody
+        : {};
+    return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) };
+  }) as unknown as typeof fetch,
 };
+/** The project's seat, as `GET /api/orchestrator/seat` answers it. */
+let seatBody: unknown = { seat: null, pending: null, exists: false };
+/** Its slower status read, for the sheet's identity block. */
+let incumbentBody: unknown = {};
 const HAS: Record<string, boolean> = {};
 const SAVED: Record<string, unknown> = {};
 const settle = async () => { await new Promise((r) => setTimeout(r, 0)); await new Promise((r) => setTimeout(r, 0)); };
@@ -89,7 +104,14 @@ afterAll(async () => {
 
 let roots: Root[] = [];
 let detach: (() => void) | null = null;
-beforeEach(() => { dom.document.body.replaceChildren(); roots = []; });
+beforeEach(() => {
+  dom.document.body.replaceChildren();
+  roots = [];
+  seatBody = { seat: null, pending: null, exists: false };
+  incumbentBody = {};
+  resetOrchestratorSeatCacheForTests();
+  resetOrchestratorIncumbentCacheForTests();
+});
 afterEach(async () => {
   for (const r of roots) flushSync(() => r.unmount());
   roots = [];
@@ -447,4 +469,136 @@ test("Hand off is a labelled row in the menu, between Crown and Compact context"
   await settle();
   expect(handoffs).toEqual([stageConversation.path]);
   expect(dom.document.querySelector('[data-mobile2-sheet="menu"]')).toBeNull();
+});
+
+test("a focused draft keeps the switcher on the bar and names itself there", async () => {
+  /* Every switcher row is a place the screen can BE, drafts included — the
+     lane's own «Hand off to a new agent» row lands on one directly. Reading
+     the bar's cell off the focused file (which a draft has none of) put the
+     project's name on the bar and swapped the switcher for the project sheet,
+     so the leaf the operator had just been handed could not be left. */
+  const { host } = browser();
+  const nav = createMobileNav(host);
+  detach = nav.attach();
+  const dom_host = dom.document.createElement("div");
+  dom.document.body.appendChild(dom_host);
+  const root = createRoot(dom_host as unknown as Element);
+  roots.push(root);
+  flushSync(() => root.render(
+    <MobileNavContext.Provider value={nav}>
+      <MobileFocusView
+        project="demo" projectName="atlas" groups={[]} manual={[stageConversation]} files={[stageConversation]}
+        flows={[]} pipelines={[]} surfacePipelines={[]} tasks={[]} drafts={["d1"]} loaded
+        focus="draft::d1" onSelect={() => {}} onClose={() => {}} onDraftClose={() => {}} onDraftSpawned={() => {}}
+      />
+    </MobileNavContext.Provider>,
+  ));
+  await settle();
+
+  expect(dom.document.querySelector('[data-mobile2-open="switch"]')).not.toBeNull();
+  expect(dom.document.querySelector('[data-mobile2-open="projects"]')).toBeNull();
+  expect(barTitle()).toBe("New agent");
+  expect(metaState()).toBe("draft · not sent yet");
+  expect(dom.document.querySelector("[data-mobile2-screen]")?.getAttribute("data-mobile2-screen")).toBe("chat");
+});
+
+test("a pending self-wake shows on the phone, on the bar's state line (#165)", async () => {
+  /* #165's contract is that a scheduled wake shows on EVERY surface, the phone
+     included: a conversation that reads as idle is asleep until a known time.
+     The pane header that used to carry the chip is gone, so it rides the one
+     line the phone states this conversation on — costing the transcript
+     nothing, and never a row of its own. */
+  const sleeping = entry({
+    path: "/sleeping.jsonl",
+    title: "Watch the deploy",
+    conversationId: "conv-sleeping",
+    mtime: 9_500,
+    pendingWakeup: { fireAt: Date.now() + 12 * 60_000, reason: "check the rollout" },
+  });
+  const { host } = browser();
+  const nav = createMobileNav(host);
+  detach = nav.attach();
+  mount(nav, [sleeping], sleeping.path);
+  await settle();
+
+  const chip = dom.document.querySelector("[data-mobile2-chat-title] [data-wakeup]") as unknown as HTMLElement | null;
+  expect(chip).not.toBeNull();
+  expect(chip!.textContent).toContain("12 min");
+  /* Passive: the cell around it is already the switcher's button, and a
+     control inside a control is one nobody can reach. */
+  expect(chip!.tagName).toBe("SPAN");
+  expect(dom.document.querySelector("[data-mobile2-chat-title] button")).toBeNull();
+});
+
+test("the seat's own conversation reaches the seat from the menu's first row (§4.2)", async () => {
+  /* §4.2 gives the `⋯` two first-group rows, and this is the one that applies
+     on the seat's conversation. It is also the only route the seat has left on
+     this screen: the pinned row that carried the ⚙ went with the strip. */
+  const seatFile = entry({
+    path: "/orchestrator.jsonl",
+    title: "Run the demo board",
+    conversationId: "conv-seat",
+    activity: "live",
+    mtime: 9_900,
+  });
+  seatBody = {
+    seat: {
+      project: "demo", seatEpoch: 3, conversationId: "conv-seat", path: seatFile.path,
+      mandate: "Run the demo board and tell me what needs me.", promptVersion: 3,
+      predecessorConversationId: null, state: "active",
+      intent: { clientRequestId: "seat-req-1", mode: "spawn", launchId: null, error: null },
+      designatedAt: "2026-09-01T10:00:00.000Z", activatedAt: "2026-09-01T10:00:02.000Z",
+    },
+    pending: null,
+    exists: true,
+  };
+  const { host } = browser();
+  const nav = createMobileNav(host);
+  detach = nav.attach();
+  mount(nav, [seatFile, sibling], seatFile.path);
+  await settle();
+  await settle();
+
+  const more = dom.document.querySelector('[data-mobile2-open="menu"]') as unknown as HTMLButtonElement;
+  flushSync(() => more.click());
+  await settle();
+  const rows = [...dom.document.querySelectorAll("[data-mobile2-menu-row]")].map((node) => node.getAttribute("data-mobile2-menu-row"));
+  expect(rows[0]).toBe("seat");
+  const row = dom.document.querySelector('[data-testid="mobile-menu-seat"]') as unknown as HTMLButtonElement;
+  expect(row.textContent).toContain("Orchestrator seat");
+
+  /* One tap opens the seat sheet — the same one the board's card opens — with
+     the mandate and Rotate on it, and takes the menu with it. */
+  flushSync(() => row.click());
+  await settle();
+  await settle();
+  expect(dom.document.querySelector('[data-mobile2-sheet="menu"]')).toBeNull();
+  const sheet = dom.document.querySelector('[data-testid="mobile-orchestrator-sheet"]') as unknown as HTMLElement;
+  expect(sheet).not.toBeNull();
+  expect(sheet.querySelector("[data-orchestrator-rotate]")).not.toBeNull();
+  expect(sheet.querySelector("[data-orchestrator-mandate-view]")).not.toBeNull();
+});
+
+test("a conversation that does not hold the seat has no seat row", async () => {
+  seatBody = {
+    seat: {
+      project: "demo", seatEpoch: 3, conversationId: "conv-seat", path: "/orchestrator.jsonl",
+      mandate: "Run the demo board.", promptVersion: 3, predecessorConversationId: null, state: "active",
+      intent: { clientRequestId: "seat-req-1", mode: "spawn", launchId: null, error: null },
+      designatedAt: "2026-09-01T10:00:00.000Z", activatedAt: "2026-09-01T10:00:02.000Z",
+    },
+    pending: null,
+    exists: true,
+  };
+  const { host } = browser();
+  const nav = createMobileNav(host);
+  detach = nav.attach();
+  mount(nav, [sibling], sibling.path);
+  await settle();
+  await settle();
+
+  const more = dom.document.querySelector('[data-mobile2-open="menu"]') as unknown as HTMLButtonElement;
+  flushSync(() => more.click());
+  await settle();
+  expect(dom.document.querySelector('[data-testid="mobile-menu-seat"]')).toBeNull();
 });

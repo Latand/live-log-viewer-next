@@ -2480,4 +2480,5 @@ export const en = {
   "mobile2.chat.draft": "New agent",
   "mobile2.chat.draftMeta": "draft · not sent yet",
   "mobile2.chat.menuPredecessor": "Predecessor · round {round}",
+  "mobile2.chat.menuSeat": "Orchestrator seat",
 } satisfies Dictionary;

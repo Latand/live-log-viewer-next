@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowRightLeft, Boxes, ChevronRight, CornerDownRight, Crown, FoldVertical, Info, ListTree, PencilLine, RotateCw, Search, Square, SquareTerminal, X } from "lucide-react";
+import { ArrowRightLeft, Bot, Boxes, ChevronRight, CornerDownRight, Crown, FoldVertical, Info, ListTree, PencilLine, RotateCw, Search, Square, SquareTerminal, X } from "lucide-react";
 
 import { useLocale } from "@/lib/i18n";
 import { cleanTitle } from "@/lib/title";
@@ -22,11 +22,12 @@ import { chatStateBits, type StagePosition } from "./mobileChatState";
  * It holds every former pane-header control as a LABELLED row — the 2026-08
  * audit's finding 18 is that an icon-only control has no touch route to its
  * meaning, and the phone's answer is that every control is a row in a sheet or
- * one of the bar's four icons. The pipeline row comes first when the
- * conversation is a stage (P2-9: a stage conversation could not reach its own
- * pipeline at all), then the identity actions, then a separator, then the two
- * destructive rows: Close card, and Kill agent in danger colour with a hint
- * saying what it will stop.
+ * one of the bar's four icons. The first group holds the two rows that name
+ * something OTHER than this conversation, when they apply (§4.2): «Orchestrator
+ * seat» on the seat's own conversation, and the pipeline row on a stage (P2-9:
+ * a stage conversation could not reach its own pipeline at all). Then the
+ * identity actions, then a separator, then the two destructive rows: Close
+ * card, and Kill agent in danger colour with a hint saying what it will stop.
  *
  * No row asks for confirmation (§2 rule 9, Q4). Close answers with a receipt
  * carrying Reopen; Kill answers with a receipt naming what it stopped —
@@ -42,6 +43,7 @@ export function MobileConversationMenu({
   pipelineCount = 0,
   crowned,
   hostTaskCount,
+  onOpenSeat,
   onOpenPipeline,
   onRename,
   onToggleCrown,
@@ -63,6 +65,11 @@ export function MobileConversationMenu({
   crowned: boolean;
   /** Background tasks behind «Details & host», as the row's trailing count. */
   hostTaskCount: number;
+  /** Opens the seat sheet over this screen (§4.5). Present only on the
+      conversation that HOLDS the project's orchestrator seat, which is the
+      only place §4.2 puts this row — and, with the pinned row gone from the
+      conversation screen, the only route the seat has left here. */
+  onOpenSeat?: () => void;
   onOpenPipeline?: () => void;
   onRename: () => void;
   onToggleCrown?: () => void;
@@ -100,6 +107,7 @@ export function MobileConversationMenu({
     onClose();
     run();
   };
+  const showPipelineRow = Boolean(onOpenPipeline) && (stage !== null || pipelineCount > 0);
   return (
     <>
       <MobileSheet name="menu" title={title} onClose={onClose}>
@@ -117,30 +125,44 @@ export function MobileConversationMenu({
           {ctxLeft === null ? null : <MobileMeter left={ctxLeft} label={t("mobile2.meter.left", { left: ctxLeft })} className="ml-auto w-16 shrink-0" />}
         </div>
         <div role="menu" aria-label={title} className="flex flex-col">
-          {/* The pipeline row comes FIRST (P2-9): a stage conversation could
-              not reach its own pipeline at all before. When the conversation is
-              not a stage, the same first slot carries the board's active
-              pipelines, so the plan a phone operator came for never becomes
-              unreachable while the pipelines screen (lane 7) is still to come. */}
-          {onOpenPipeline && (stage || pipelineCount > 0) ? (
-            <>
-              <MobileSheetRow
-                icon={<ListTree className="h-[18px] w-[18px]" aria-hidden />}
-                label={stage ? (
-                  <span className="flex min-w-0 flex-col">
-                    <span className="min-w-0 truncate">{t("mobile2.chat.menuPipeline", { task: cleanTitle(stage.pipeline.task, 60) })}</span>
-                    <span className="min-w-0 truncate text-label font-medium text-secondary">
-                      {t("mobile2.chat.menuPipelineMeta", { k: stage.k, n: stage.n, stage: stage.stage.id, state: t(`pipelineChipState.${stage.state}`) })}
-                    </span>
-                  </span>
-                ) : t("mobile2.chat.menuPipelines", { count: pipelineCount })}
-                onSelect={act(onOpenPipeline)}
-                testId="mobile-menu-pipeline"
-                attrs={{ "data-mobile2-menu-row": "pipeline" }}
-              />
-              <MobileSheetDivider />
-            </>
+          {/* The seat row (§4.2, §4.5): the seat's own conversation is where an
+              operator asks what the orchestrator is holding, and the phone's
+              pinned row — which used to carry the ⚙ — is gone with the strip,
+              so this row is the whole route to the seat's status, mandate and
+              rotation from here. */}
+          {onOpenSeat ? (
+            <MobileSheetRow
+              icon={<Bot className="h-[18px] w-[18px]" aria-hidden />}
+              label={t("mobile2.chat.menuSeat")}
+              trailing={<ChevronRight className="h-4 w-4" aria-hidden />}
+              onSelect={act(onOpenSeat)}
+              testId="mobile-menu-seat"
+              attrs={{ "data-mobile2-menu-row": "seat" }}
+            />
           ) : null}
+          {/* The pipeline row is the first group's other member (P2-9): a stage
+              conversation could not reach its own pipeline at all before. When
+              the conversation is not a stage, the same slot carries the board's
+              active pipelines, so the plan a phone operator came for never
+              becomes unreachable while the pipelines screen (lane 7) is still
+              to come. */}
+          {showPipelineRow && onOpenPipeline ? (
+            <MobileSheetRow
+              icon={<ListTree className="h-[18px] w-[18px]" aria-hidden />}
+              label={stage ? (
+                <span className="flex min-w-0 flex-col">
+                  <span className="min-w-0 truncate">{t("mobile2.chat.menuPipeline", { task: cleanTitle(stage.pipeline.task, 60) })}</span>
+                  <span className="min-w-0 truncate text-label font-medium text-secondary">
+                    {t("mobile2.chat.menuPipelineMeta", { k: stage.k, n: stage.n, stage: stage.stage.id, state: t(`pipelineChipState.${stage.state}`) })}
+                  </span>
+                </span>
+              ) : t("mobile2.chat.menuPipelines", { count: pipelineCount })}
+              onSelect={act(onOpenPipeline)}
+              testId="mobile-menu-pipeline"
+              attrs={{ "data-mobile2-menu-row": "pipeline" }}
+            />
+          ) : null}
+          {onOpenSeat || showPipelineRow ? <MobileSheetDivider /> : null}
           <MobileSheetRow
             icon={<PencilLine className="h-[18px] w-[18px]" aria-hidden />}
             label={t("mobile2.chat.menuRename")}

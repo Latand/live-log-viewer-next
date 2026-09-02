@@ -2405,4 +2405,5 @@ export const uk: Record<keyof typeof en, Message> = {
   "mobile2.chat.draft": "Новий агент",
   "mobile2.chat.draftMeta": "чернетка · ще не надіслано",
   "mobile2.chat.menuPredecessor": "Попередник · раунд {round}",
+  "mobile2.chat.menuSeat": "Місце оркестратора",
 };

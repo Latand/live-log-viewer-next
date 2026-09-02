@@ -21,16 +21,26 @@ import type { FileEntry } from "@/lib/types";
  * #1348 — the rename editor. The operator tapped the pencil and got a field
  * with no visible text. Happy-dom does no layout, so the claim that the field
  * now has real width, real ink and a real caret is settled here: the REAL
- * `MobileFocusView` is rendered into the phone's header, the editor is opened,
- * and Chromium measures the input's box, its computed colour against its
- * surface, its caret colour and its font size — and that a long title scrolls
- * INSIDE the field rather than pushing the row wide.
+ * `MobileFocusView` is rendered, rename is opened THROUGH THE PRODUCT'S OWN
+ * ROUTE, and Chromium measures the input's box, its computed colour against
+ * its surface, its caret colour and its font size — and that a long title
+ * scrolls INSIDE the field rather than pushing the row wide.
  *
- * #1347 — the orchestrator controls. The pinned row's new entry point and the
+ * That route moved with mobile v2 lane 3 (README §4.2): the phone's pane header
+ * is gone, so rename is a labelled row in the conversation's `⋯` and its editor
+ * lays over the shell BAR (`[data-testid="mobile-rename-slot"]`) instead of
+ * inside a pane header. The measurement is the same one, taken where the field
+ * now lives; `SessionTitle.mobile.dom.test.tsx` pins the route, this pins the
+ * geometry.
+ *
+ * #1347 — the orchestrator controls. The pinned row's entry point and the
  * sheet's Rotate control are measured as 44px targets inside the viewport, the
- * rotate draft's two footer actions likewise, and the strip row keeps the height
- * the chat-first budget reserves for it. The keyboard-open case is a live
- * measurement and lives in `scripts/capture-issue-979-mobile-orchestrator.ts`.
+ * rotate draft's two footer actions likewise, and the row keeps the height the
+ * chat-first budget reserves for it. Lane 3 took the row off the conversation
+ * screen with the rest of the strip — the phone pins the seat above its board
+ * leaves (`mobile-orchestrator-slot`) — so the row is measured in that slot,
+ * which is the markup `ProjectDashboard` wraps it in. The keyboard-open case is
+ * a live measurement and lives in `scripts/capture-issue-979-mobile-orchestrator.ts`.
  *
  * Every measurement is written to `evidence/issue-1347-1348/geometry.json`;
  * the frames and HTML beside it are regenerated on demand and not committed.
@@ -129,6 +139,7 @@ globalThis.fetch = (async (input: RequestInfo | URL) => {
 }) as typeof fetch;
 
 const { MobileFocusView } = await import("./MobileFocusView");
+const { MobileOrchestratorRow } = await import("./MobileOrchestratorRow");
 const { resetOrchestratorSeatCacheForTests } = await import("../orchestrator/useOrchestratorSeat");
 const { resetOrchestratorIncumbentCacheForTests } = await import("../orchestrator/useOrchestratorIncumbent");
 
@@ -208,8 +219,9 @@ interface EditorGeometry {
   scheme: "light" | "dark";
   viewportWidth: number;
   scrollWidth: number;
-  paneHeaderScrollWidth: number;
-  paneHeaderClientWidth: number;
+  /* The row the editor lays over: the shell bar, since lane 3 (§3.4). */
+  barScrollWidth: number;
+  barClientWidth: number;
   editor: Box | null;
   input: Box | null;
   inputValueLength: number;
@@ -228,7 +240,6 @@ interface ControlsGeometry {
   stripHeight: number;
   rowOpen: Box | null;
   rowControls: Box | null;
-  firstChipLeft: number;
   sheet: { rotate: Box | null; identityText: string; contextPercent: string | null; predecessor: boolean; mandateView: boolean } | null;
   rotateDraft: { confirm: Box | null; cancel: Box | null; mandate: Box | null; scrollerBottom: number } | null;
 }
@@ -263,9 +274,9 @@ const BOX = `(el) => { const r = el.getBoundingClientRect(); return { label: el.
 async function measureEditor(page: import("playwright-core").Page, scheme: "light" | "dark", title: string): Promise<EditorGeometry> {
   const raw = await page.evaluate(({ boxSource, value }) => {
     const box = new Function("return " + boxSource)() as (el: Element) => Box;
-    const header = document.querySelector("[data-testid='mobile-focused-pane'] header") as HTMLElement | null;
-    const editor = document.querySelector("[data-session-title-editor]") as HTMLElement | null;
-    const input = document.querySelector("input[aria-label='Session title']") as HTMLInputElement | null;
+    const bar = document.querySelector("[data-mobile2-bar]") as HTMLElement | null;
+    const editor = document.querySelector("[data-testid='mobile-rename-slot'] [data-session-title-editor]") as HTMLElement | null;
+    const input = editor?.querySelector("input[aria-label='Session title']") as HTMLInputElement | null;
     /* React writes the value as a property, which the static markup does not
        carry: put the title back so the field measures what the phone shows. */
     if (input) input.value = value;
@@ -275,8 +286,8 @@ async function measureEditor(page: import("playwright-core").Page, scheme: "ligh
     return {
       viewportWidth: window.innerWidth,
       scrollWidth: document.documentElement.scrollWidth,
-      paneHeaderScrollWidth: header?.scrollWidth ?? -1,
-      paneHeaderClientWidth: header?.clientWidth ?? -1,
+      barScrollWidth: bar?.scrollWidth ?? -1,
+      barClientWidth: bar?.clientWidth ?? -1,
       editor: editor ? box(editor) : null,
       input: input ? box(input) : null,
       inputValueLength: input?.value.length ?? 0,
@@ -298,7 +309,6 @@ async function measureControls(page: import("playwright-core").Page, scheme: "li
     const row = document.querySelector("[data-orchestrator-row]");
     const open = document.querySelector("[data-orchestrator-row-open]");
     const controls = document.querySelector("[data-orchestrator-row-controls]");
-    const chip = document.querySelector(".overflow-x-auto button");
     const sheet = document.querySelector("[data-testid='mobile-orchestrator-sheet']");
     const rotate = sheet?.querySelector("[data-orchestrator-rotate]") ?? null;
     const draft = sheet?.querySelector("[data-orchestrator-draft='rotate']") ?? null;
@@ -307,7 +317,6 @@ async function measureControls(page: import("playwright-core").Page, scheme: "li
       stripHeight: row?.parentElement ? Math.round(row.parentElement.getBoundingClientRect().height) : -1,
       rowOpen: open ? box(open) : null,
       rowControls: controls ? box(controls) : null,
-      firstChipLeft: chip ? chip.getBoundingClientRect().left : Number.POSITIVE_INFINITY,
       sheet: sheet ? {
         rotate: rotate ? box(rotate) : null,
         identityText: sheet.querySelector("[data-orchestrator-incumbent]")?.textContent ?? "",
@@ -340,6 +349,30 @@ async function renderFocusView(files: FileEntry[], focus: string, drive: (host: 
   return html;
 }
 
+/* The seat's pinned row, in the slot `ProjectDashboard` gives it above the
+   phone's board leaves — the markup is copied from that call site so the
+   geometry measured here is the geometry the phone renders. */
+async function renderOrchestratorRow(files: FileEntry[], drive: (host: HTMLElement) => Promise<void>): Promise<string> {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  await act(async () => {
+    root.render(
+      <div className="flex shrink-0 items-stretch border-b border-border bg-card" data-testid="mobile-orchestrator-slot">
+        <MobileOrchestratorRow project="atlas" projectName="atlas" files={files} onOpenConversation={() => undefined} />
+        <span aria-hidden className="min-w-0 flex-1" />
+      </div>,
+    );
+  });
+  await settle();
+  await drive(host as unknown as HTMLElement);
+  await settle();
+  const html = host.innerHTML;
+  await act(async () => root.unmount());
+  host.remove();
+  return html;
+}
+
 const click = async (host: HTMLElement, selector: string) => {
   const target = host.querySelector(selector) as HTMLButtonElement | null;
   expect(target, selector).not.toBeNull();
@@ -352,18 +385,22 @@ test("issues 1347 + 1348: the phone's rename editor and orchestrator controls me
   fs.mkdirSync(EVIDENCE_DIR, { recursive: true });
   browser = await chromium.launch({ executablePath: chromium.executablePath() });
 
-  /* ---- #1348: the rename editor over the focused pane's header ---------- */
+  /* ---- #1348: the rename editor over the shell bar --------------------- */
   const editorHtml = await renderFocusView([conversation({}), focused, orchestrator], focused.path, async (host) => {
-    await click(host, "[data-testid='mobile-focused-pane'] header button[aria-label^='Rename']");
-    expect(host.querySelector("input[aria-label='Session title']")).not.toBeNull();
+    /* The product's own route since lane 3: `⋯`, then the Rename row. */
+    await click(host, "[data-mobile2-open='menu']");
+    await click(host, "[data-testid='mobile-menu-rename']");
+    expect(host.querySelector("[data-testid='mobile-rename-slot'] input[aria-label='Session title']")).not.toBeNull();
   });
   const editors: EditorGeometry[] = [];
   for (const scheme of ["light", "dark"] as const) {
     const geometry = await withPage(editorHtml, "rename-editor", scheme, (page) => measureEditor(page, scheme, LONG_TITLE));
     editors.push(geometry);
-    /* The page never scrolls sideways, and the header row is not clipped. */
+    /* The page never scrolls sideways, and the row the editor lays over — the
+       shell bar — is not clipped underneath it. */
     expect(geometry.scrollWidth).toBeLessThanOrEqual(390);
-    expect(geometry.paneHeaderScrollWidth).toBeLessThanOrEqual(geometry.paneHeaderClientWidth);
+    expect(geometry.barClientWidth).toBeGreaterThan(0);
+    expect(geometry.barScrollWidth).toBeLessThanOrEqual(geometry.barClientWidth);
     /* The field has REAL width — the whole complaint — inside the viewport,
        and a long title scrolls within it instead of widening the row. */
     expect(geometry.input).not.toBeNull();
@@ -391,14 +428,14 @@ test("issues 1347 + 1348: the phone's rename editor and orchestrator controls me
 
   /* ---- #1347: the pinned row's entry point, the sheet, the rotate draft --- */
   const files = [conversation({}), orchestrator];
-  const rowHtml = await renderFocusView(files, "/repo/atlas/other.jsonl", async (host) => {
+  const rowHtml = await renderOrchestratorRow(files, async (host) => {
     expect(host.querySelector("[data-orchestrator-row]")?.getAttribute("data-orchestrator-row-state")).toBe("live");
   });
-  const sheetHtml = await renderFocusView(files, "/repo/atlas/other.jsonl", async (host) => {
+  const sheetHtml = await renderOrchestratorRow(files, async (host) => {
     await click(host, "[data-orchestrator-row-controls]");
     expect(host.querySelector("[data-orchestrator-rotate]")).not.toBeNull();
   });
-  const rotateHtml = await renderFocusView(files, "/repo/atlas/other.jsonl", async (host) => {
+  const rotateHtml = await renderOrchestratorRow(files, async (host) => {
     await click(host, "[data-orchestrator-row-controls]");
     await click(host, "[data-orchestrator-rotate]");
     await settle(4);
@@ -410,17 +447,17 @@ test("issues 1347 + 1348: the phone's rename editor and orchestrator controls me
     const row = await withPage(rowHtml, "orchestrator-row", scheme, (page) => measureControls(page, scheme));
     controls.row!.push(row);
     expect(row.scrollWidth).toBeLessThanOrEqual(390);
-    /* The entry point: a 44px target on the row, inside the viewport, ahead
-       of the first conversation chip — in the pinned slot, not the scroller. */
+    /* The entry point: a 44px target on the row, inside the viewport, right
+       after the chip that opens the seat's conversation. */
     expect(row.rowControls).not.toBeNull();
     expect(row.rowControls!.width).toBeGreaterThanOrEqual(44);
     expect(row.rowControls!.height).toBeGreaterThanOrEqual(44);
     expect(row.rowControls!.left).toBeGreaterThanOrEqual(0);
     expect(row.rowControls!.right).toBeLessThanOrEqual(390);
-    expect(row.rowControls!.left).toBeLessThan(row.firstChipLeft);
     expect(row.rowOpen!.right).toBeLessThanOrEqual(row.rowControls!.left + 1);
-    /* The chat-first budget (#419): the pin still rides the strip row within
-       the height the transcript's share is computed against. */
+    /* The chat-first budget (#419): the pin costs no more than the row the
+       retired chip strip was budgeted at, so the leaf under it keeps its
+       share of the viewport. */
     expect(row.stripHeight).toBeLessThanOrEqual(PERSISTENT_CHROME.focusStrip);
 
     const sheet = await withPage(sheetHtml, "orchestrator-sheet-live", scheme, (page) => measureControls(page, scheme));

@@ -410,3 +410,55 @@ test("an active retry opens prior transcript history from the mobile pipeline ra
   flushSync(() => priorTranscript!.click());
   expect(selected.path).toBe(prior.path);
 });
+
+test("a focused deck keeps the switcher on the bar and the swipe that walks it (#1439 lane 3)", async () => {
+  /* Mobile v2 lane 3: the bar's title cell IS the switcher, and a deck is one
+     of the rows it lists. Reading that cell off the focused FILE — which a deck
+     has none of — turned every deck into a dead end: the cell showed the
+     project's name, opened the project switcher, and the swipe refused to
+     move, so the gesture that reached the deck could not leave it. */
+  const builder = entry({ path: "/builder", title: "Builder session", conversationId: "conversation-builder", activity: "live", mtime: 9_000 });
+  const reviewer = entry({
+    path: "/reviewer-1",
+    parent: "/builder",
+    conversationId: "conversation-r1",
+    mtime: 2_000,
+    activity: "live",
+    durableLineage: { kind: "review", role: "reviewer", parentConversationId: "conversation-builder", reviewsConversationId: "conversation-builder", memberships: [] },
+  });
+  const files = [builder, reviewer];
+  const reviewGroups = directReviewFlows({ files, flows: [], tasks: [] });
+  const group: BranchGroup = { key: builder.path, columns: [{ file: builder, tasks: [] }], returnable: [], finished: [], smt: builder.mtime, orphanTask: false };
+
+  roots.push(mount(
+    <MobileFocusView
+      project="demo" groups={[group]} manual={[]} files={files} flows={[]} reviewGroups={reviewGroups}
+      pipelines={[]} surfacePipelines={[]} workerStacks={[]} tasks={[]} drafts={[]} loaded focus={null}
+      onSelect={() => {}} onClose={() => {}} onDraftClose={() => {}} onDraftSpawned={() => {}}
+    />,
+  ));
+  await settle();
+
+  openDeck();
+  await settle();
+
+  /* The cell is still the switcher, and it names the deck exactly as the row
+     that opened it does. */
+  const cell = dom.document.querySelector('[data-mobile2-open="switch"]') as unknown as HTMLButtonElement | null;
+  expect(cell).not.toBeNull();
+  expect(dom.document.querySelector("[data-mobile2-title-text]")?.textContent).toContain("Review · Builder session");
+  /* And the screen is a conversation screen, not the board underneath it. */
+  expect(dom.document.querySelector("[data-mobile2-screen]")?.getAttribute("data-mobile2-screen")).toBe("chat");
+
+  /* The swipe walks the same order: one step back leaves the deck for the work
+     it reviews instead of doing nothing at all. */
+  const bar = dom.document.querySelector("[data-mobile2-bar]") as unknown as HTMLElement;
+  const start = new dom.Event("touchstart", { bubbles: true });
+  Object.assign(start, { touches: [{ clientX: 200, clientY: 20 }] });
+  const end = new dom.Event("touchend", { bubbles: true });
+  Object.assign(end, { touches: [], changedTouches: [{ clientX: 320, clientY: 22 }] });
+  flushSync(() => { bar.dispatchEvent(start as unknown as Event); });
+  flushSync(() => { bar.dispatchEvent(end as unknown as Event); });
+  await settle();
+  expect(dom.document.querySelector("[data-mobile2-title-text]")?.textContent).toBe("Builder session");
+});

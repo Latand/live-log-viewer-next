@@ -51,7 +51,10 @@ export interface ProcessKill {
   force: boolean;
   /** The outcome line the caller shows: a signal receipt, or a failure. */
   message: string;
-  kill: () => void;
+  /** Fires the kill and answers whether the request was ACCEPTED. A caller
+      that armed the action first keeps it armed on false, so the escalation
+      the failure just unlocked is the next press rather than a re-arm. */
+  kill: () => Promise<boolean>;
 }
 
 export function useProcessKill(file: FileEntry): ProcessKill {
@@ -61,7 +64,7 @@ export function useProcessKill(file: FileEntry): ProcessKill {
   const [forceNext, setForceNext] = useState(false);
   const { caps, structuredSession } = useAgentCapabilities(file);
   const killCap = caps.controls.kill;
-  const kill = useCallback(async () => {
+  const kill = useCallback(async (): Promise<boolean> => {
     setKilling(true);
     setMessage("");
     try {
@@ -69,14 +72,16 @@ export function useProcessKill(file: FileEntry): ProcessKill {
       if (!result.ok) {
         setMessage(result.error ?? t("task.stopFailed"));
         if (!result.structured) setForceNext(true);
-        return;
+        return false;
       }
       setMessage(result.structured
         ? t("task.killRequested")
         : t("task.signalSent", { signal: forceNext ? "SIGKILL" : "SIGTERM", pid: result.pid ?? "" }));
+      return true;
     } catch {
       setMessage(t("common.serverUnavailable"));
       setForceNext(true);
+      return false;
     } finally {
       setKilling(false);
     }
@@ -87,7 +92,7 @@ export function useProcessKill(file: FileEntry): ProcessKill {
     busy: killing,
     force: forceNext,
     message,
-    kill: () => void kill(),
+    kill,
   };
 }
 
@@ -144,9 +149,12 @@ export function ProcessStatusControls({
   }, [confirming]);
 
   const chip = <ProcessStatusChip file={file} />;
-  const act = () => {
-    setConfirming(false);
-    kill.kill();
+  /* The armed row survives a REFUSED kill (#699/#700): a SIGTERM that failed
+     is exactly when the operator wants the next press, and `useProcessKill`
+     has already flipped the button's word to SIGKILL. Only an accepted request
+     collapses the row. The phone never arms, so this is desktop-only. */
+  const act = async () => {
+    if (await kill.kill()) setConfirming(false);
   };
   /* What the destructive action will stop, by name (issue #700). */
   const killTargetName = cleanTitle(file.title, 48) || t("task.confirmKillUntitled");
