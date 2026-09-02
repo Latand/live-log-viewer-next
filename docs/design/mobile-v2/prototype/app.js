@@ -793,28 +793,21 @@
     const anim = ["push", "pop", "switch"].includes(lastNav) ? lastNav : "";
     $phone.className = out.kb ? "kbopen" : "";
     $phone.dataset.screen = out.screen;
-    $phone.innerHTML = `<div class="screen ${anim}">${out.html}${sheetFor(p)}${S.toast && !p.sheet ? toastHtml("float") : ""}</div>`;
+    $phone.innerHTML = `<div class="screen ${anim}">${out.html}${sheetFor(p)}</div>`;
     const scroller = $phone.querySelector(".body");
+    /* The receipt takes its own height in flow between the body and the dock
+       (the slot a sheet's receipt takes above its footer), so the body shrinks
+       and no control can sit beneath it (P2-6, verify round 3). */
+    const receipt = S.toast && !p.sheet && scroller;
+    if (receipt) scroller.insertAdjacentHTML("afterend", toastHtml("flow"));
     if (scroller) {
       const isFeed = scroller.classList.contains("feed");
       const remembered = scrollMemo[p.base];
       if ((lastNav === "sheet" || lastNav === "pop") && remembered !== undefined) scroller.scrollTop = remembered;
       else if (isFeed) scroller.scrollTop = scroller.scrollHeight;
       else if (lastNav === "act" && remembered !== undefined) scroller.scrollTop = remembered;
-    }
-    /* The receipt sits on the dock's top edge; the scroller gets padding so no
-       control ends up under it (P2-6). */
-    const t = $phone.querySelector(".toast.float");
-    if (t) {
-      const dock = $phone.querySelector(".dock");
-      const ph = $phone.getBoundingClientRect();
-      const safe = parseFloat(getComputedStyle($phone).getPropertyValue("--safe-b")) || 0;
-      const bottom = dock ? ph.bottom - dock.getBoundingClientRect().top + 8 : safe + 8;
-      t.style.bottom = `${bottom}px`;
-      if (scroller) {
-        scroller.style.paddingBottom = `${t.offsetHeight + 16}px`;
-        if (scroller.classList.contains("feed")) scroller.scrollTop = scroller.scrollHeight;
-      }
+      /* A feed keeps its last message in view when the receipt shortens it. */
+      if (receipt && isFeed) scroller.scrollTop = scroller.scrollHeight;
     }
     if (out.kb) {
       const ta = $phone.querySelector(".box textarea");

@@ -341,8 +341,39 @@ async function flows(browser: Browser): Promise<void> {
     await page.click("#phone .box .sendbtn");
     const kbSent = await page.evaluate(() => { const b = [...document.querySelectorAll("#phone .mu .bubble")]; return { last: b[b.length - 1]?.textContent ?? "", folded: Boolean(document.querySelector("#phone .qf")), hash: location.hash }; });
     await expect(kbSent.last === "Both, by header — and add a test for each format." && kbSent.folded && kbSent.hash === "#/chat/c2", `send from the keyboard frame gave ${JSON.stringify(kbSent)}`);
+    /* Verify round 3 (P2-6): the receipts on the list screens take their own
+       height in flow, so none intersects a control — Close card → board,
+       Archive project → board, Use one reset and Refresh on Accounts, at both
+       portrait frames. */
+    for (const frame of FRAMES) {
+      await page.setViewportSize({ width: frame.width, height: frame.height });
+      const receiptGate = async (label: string, after: string) => {
+        await page.waitForTimeout(30);
+        const geometry = await measure(page);
+        await expect(Boolean(geometry.toast), `${after} produced no receipt (${frame.name})`);
+        gate(`flow/${label}/${frame.name}`, geometry, { scheme: "dark", keyboard: false, height: frame.height, width: frame.width });
+      };
+      await at("#/board");
+      const opened = await page.evaluate(() => (document.querySelector('#phone .body .row[data-go^="#/chat/"]') as HTMLElement).dataset.go!);
+      await page.click(`#phone .body .row[data-go="${opened}"]`);
+      await page.click(`#phone .bar [data-go="${opened}/menu"]`);
+      await page.click(`#phone .sheet [data-act="close:${opened.slice("#/chat/".length)}"]`);
+      await page.waitForTimeout(60);
+      await expect((await hash(page)) === "#/board" && !(await hasSheet(page)), `Close card landed on ${await hash(page)} (${frame.name})`);
+      await receiptGate("close-receipt", "Close card");
+      await at("#/board/menu");
+      await page.click('#phone .sheet [data-act="archiveProject"]');
+      await expect((await hash(page)) === "#/board" && !(await hasSheet(page)), `Archive project landed on ${await hash(page)} (${frame.name})`);
+      await receiptGate("archive-project-receipt", "Archive project");
+      await at("#/accounts");
+      await page.click('#phone [data-act^="useReset:"]');
+      await receiptGate("use-reset-receipt", "Use one reset");
+      await page.click('#phone [data-act^="refresh:"]');
+      await receiptGate("refresh-receipt", "Refresh");
+    }
+    await page.setViewportSize({ width: 390, height: 844 });
     await expect(errors.length === 0, `console errors: ${errors.join(" | ")}`);
-    console.log("flows: navigation, receipts, composer slot, answer path, sign-in, states, limit sheet, keyboard send, seen stamp — green");
+    console.log("flows: navigation, receipts (conversation, board, accounts), composer slot, answer path, sign-in, states, limit sheet, keyboard send, seen stamp — green");
   } finally {
     await context.close();
   }

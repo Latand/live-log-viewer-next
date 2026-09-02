@@ -488,10 +488,12 @@ svg.chev.i { width: 18px; height: 18px; }
 .acct .signin { margin-left: auto; color: var(--color-accent); font-size: var(--text-label); font-weight: 600; display: inline-flex; align-items: center; gap: 3px; flex: none; padding-right: 4px; }
 .acct .signin svg.i { width: 14px; height: 14px; }
 
-/* ── receipts (r1 P2-6): above the dock, never over a control, with the
-      inverse action when one exists ─────────────────────────────────────── */
+/* ── receipts (r1 P2-6, verify round 3): in flow between the body and the
+      dock, so the body shrinks and nothing sits beneath; the inverse action
+      when one exists ────────────────────────────────────────────────────── */
 .toast { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 4px 0 12px; border-radius: var(--radius-surface); background: var(--surface-raised); box-shadow: inset 3px 0 0 var(--color-success), var(--shadow-2); font-size: var(--text-ui); font-weight: 600; }
-.toast.float { position: absolute; left: 12px; right: 12px; z-index: 70; }
+.toast.flow { flex: none; margin: 6px 12px; }
+.toast.flow:last-child { margin-bottom: calc(6px + var(--safe-b)); }
 .toast.inflow { margin: 6px 16px 0; flex: none; box-shadow: inset 3px 0 0 var(--color-success), 0 0 0 1px var(--border-default); }
 .toast > svg.i { width: 16px; height: 16px; color: var(--color-success); }
 .toast .tx { flex: 1; min-width: 0; }
