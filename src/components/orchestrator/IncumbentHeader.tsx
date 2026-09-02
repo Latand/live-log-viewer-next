@@ -5,6 +5,7 @@ import { CornerDownRight, LoaderCircle, RefreshCw } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
 import { engineBadgeFor } from "@/components/utils";
 import { useLocale } from "@/lib/i18n";
+import { ORCHESTRATOR_PROMPT_VERSION, orchestratorMandateStale } from "@/lib/orchestrator/prompt";
 import type { FileEntry } from "@/lib/types";
 
 import type { LaunchAccountCatalog } from "@/components/draft/AgentLaunchControls";
@@ -30,12 +31,17 @@ export function IncumbentHeader({
   file,
   catalog,
   predecessorConversationId,
+  promptVersion,
   rotating,
   opening,
   onRotate,
 }: {
   /** The status read, once it has answered. */
   incumbent: OrchestratorIncumbent | null;
+  /** The default version the seat's mandate is based on, null for bespoke
+      rules. Shown only when it is behind the current default (#1452), the
+      same reading `get_orchestrator` gives an agent. */
+  promptVersion: number | null;
   /** The seat conversation as the board knows it — engine, model and context
       are on the card already, so the row is populated on the first paint
       instead of waiting out the slower status poll. */
@@ -85,6 +91,15 @@ export function IncumbentHeader({
           </Badge>
         ) : null}
         <ContextMeter context={context} />
+        {orchestratorMandateStale(promptVersion) ? (
+          <span
+            data-orchestrator-mandate-version={String(promptVersion)}
+            className="shrink-0 text-caption font-semibold text-warning"
+            title={t("orchPanel.mandateStaleTitle", { version: promptVersion, current: ORCHESTRATOR_PROMPT_VERSION })}
+          >
+            {t("orchPanel.mandateStale", { version: promptVersion, current: ORCHESTRATOR_PROMPT_VERSION })}
+          </span>
+        ) : null}
         <button
           type="button"
           data-orchestrator-rotate

@@ -499,7 +499,7 @@ test("the draft opens on the plain intro with the built-in rules COLLAPSED — a
   expect(confirmButton(host).disabled).toBe(false);
 
   expect(mandateRules(host).hasAttribute("open")).toBe(false);
-  expect(rulesSummary(host)).toBe(`Mandate v${ORCHESTRATOR_PROMPT_VERSION} — built-in operating rules (edit)`);
+  expect(rulesSummary(host)).toBe(`Built-in default mandate v${ORCHESTRATOR_PROMPT_VERSION} (edit)`);
 
   /* Folded away and delivered verbatim: the disclosure hides the text, it never
      edits it (PRD #976 decision 3). */
@@ -1036,9 +1036,11 @@ test("a durable terminal error releases the key, so the corrected mandate is the
 const rotateButton = (host: HTMLElement) => host.querySelector("[data-orchestrator-rotate]") as HTMLButtonElement;
 const incumbentRow = (host: HTMLElement) => host.querySelector("[data-orchestrator-incumbent]") as HTMLElement | null;
 
-/** Mount on a live incumbent whose status read has already answered. */
-async function mountLive(status: Record<string, unknown> = incumbent()): Promise<HTMLElement> {
-  seatStatus = { seat: activeSeat(), pending: null, exists: true };
+/** Mount on a live incumbent whose status read has already answered. The
+    default seat is based on mandate v3 — a stale one, as every long-lived
+    project's is (#1452). */
+async function mountLive(status: Record<string, unknown> = incumbent(), seat: Record<string, unknown> = activeSeat()): Promise<HTMLElement> {
+  seatStatus = { seat, pending: null, exists: true };
   incumbentStatus = status;
   const host = mount([{ ...orchestratorFile, proc: "running", pid: 4_242 } as FileEntry]);
   await settle();
@@ -1088,22 +1090,30 @@ test("an estimated context number is marked as one — a guess never reads as a 
   expect(incumbentRow(host)!.textContent).toContain("~53%");
 });
 
-test("Rotate opens the SAME draft, prefilled from the incumbent, over the conversation it replaces", async () => {
+test("Rotate over a STALE seat opens the SAME draft on the CURRENT default mandate, names it, and keeps the incumbent's text one press away (#1452)", async () => {
   const host = await mountLive();
+
+  /* The seat card already says the seat is behind, in the reading
+     `get_orchestrator` gives an agent. */
+  const flag = incumbentRow(host)!.querySelector("[data-orchestrator-mandate-version]");
+  expect(flag?.getAttribute("data-orchestrator-mandate-version")).toBe("3");
+  expect(incumbentRow(host)!.textContent).toContain(`mandate v3, default v${ORCHESTRATOR_PROMPT_VERSION}`);
 
   flushSync(() => rotateButton(host).click());
   await settle();
 
   expect(host.querySelector("[data-orchestrator-panel]")?.getAttribute("data-orchestrator-mode")).toBe("rotate");
   expect(host.querySelector('[data-orchestrator-draft="rotate"]')).not.toBeNull();
-  /* The incumbent's own mandate, editable — the handoff is the server's job. */
+  /* v3 said «you do not talk to the user»; a successor never inherits an older
+     default by default. The heading names what the text IS. */
   const mandate = host.querySelector("[data-orchestrator-mandate]") as HTMLTextAreaElement;
-  expect(mandate.value).toBe("run it");
-  /* A rotation is not an introduction: this operator already has one running,
-     and the rules behind the summary are ITS mandate's version, not the
-     built-in prompt's (#1163). */
+  expect(mandate.value).toBe(ORCHESTRATOR_SYSTEM_PROMPT);
+  expect(rulesSummary(host)).toBe(`Built-in default mandate v${ORCHESTRATOR_PROMPT_VERSION} (edit)`);
+  const stale = host.querySelector("[data-orchestrator-mandate-stale]") as HTMLElement;
+  expect(stale.getAttribute("data-orchestrator-mandate-stale")).toBe("3");
+  expect(stale.textContent).toContain(`based on v3; the current default is v${ORCHESTRATOR_PROMPT_VERSION}`);
+  /* A rotation is not an introduction: this operator already has one running (#1163). */
   expect(host.querySelector("[data-orchestrator-intro]")).toBeNull();
-  expect(rulesSummary(host)).toBe("Mandate v3 — built-in operating rules (edit)");
   expect(host.textContent).not.toContain("Handoff from your predecessor");
   /* The account picker opens on the account the incumbent is running under. */
   const account = host.querySelector('select[aria-label*="Claude"]') as HTMLSelectElement;
@@ -1114,9 +1124,47 @@ test("Rotate opens the SAME draft, prefilled from the incumbent, over the conver
   expect(panelState(host)).toBe("live");
   expect(incumbentRow(host)).not.toBeNull();
 
+  /* The explicit choice: the incumbent's own text, headed as exactly that. */
+  flushSync(() => (host.querySelector("[data-orchestrator-keep-incumbent]") as HTMLButtonElement).click());
+  await settle();
+  expect(mandate.value).toBe("run it");
+  expect(rulesSummary(host)).toBe(`Incumbent's mandate (based on v3; current default is v${ORCHESTRATOR_PROMPT_VERSION}) (edit)`);
+  expect(host.querySelector("[data-orchestrator-keep-incumbent]")).toBeNull();
+  /* ...and it is what the rotation posts. */
+  flushSync(() => confirmButton(host).click());
+  await settle();
+  expect(rotatePosts).toHaveLength(1);
+  expect(rotatePosts[0]!.mandate).toBe("run it");
+});
+
+test("Rotate over a seat on the CURRENT default keeps the incumbent's text, headed as the incumbent's — an operator's edit survives", async () => {
+  const host = await mountLive(incumbent(), activeSeat({ mandate: "run it, my way", promptVersion: ORCHESTRATOR_PROMPT_VERSION }));
+  expect(incumbentRow(host)!.querySelector("[data-orchestrator-mandate-version]")).toBeNull();
+
+  flushSync(() => rotateButton(host).click());
+  await settle();
+
+  const mandate = host.querySelector("[data-orchestrator-mandate]") as HTMLTextAreaElement;
+  expect(mandate.value).toBe("run it, my way");
+  expect(rulesSummary(host)).toBe(`Incumbent's mandate (based on v${ORCHESTRATOR_PROMPT_VERSION}, the current default) (edit)`);
+  expect(host.querySelector("[data-orchestrator-mandate-stale]")).toBeNull();
+  expect(host.querySelector("[data-orchestrator-keep-incumbent]")).toBeNull();
+
   flushSync(() => (host.querySelector("[data-orchestrator-rotate-cancel]") as HTMLButtonElement).click());
   await settle();
   expect(host.querySelector('[data-orchestrator-conversation="conversation_orch"]')).not.toBeNull();
+});
+
+test("Rotate over bespoke rules (no version) keeps them — they claim no version and are never stale", async () => {
+  const host = await mountLive(incumbent(), activeSeat({ mandate: "my own rules", promptVersion: null }));
+  expect(incumbentRow(host)!.querySelector("[data-orchestrator-mandate-version]")).toBeNull();
+
+  flushSync(() => rotateButton(host).click());
+  await settle();
+
+  expect((host.querySelector("[data-orchestrator-mandate]") as HTMLTextAreaElement).value).toBe("my own rules");
+  expect(rulesSummary(host)).toBe("Incumbent's mandate — its own operating rules (edit)");
+  expect(host.querySelector("[data-orchestrator-keep-incumbent]")).toBeNull();
 });
 
 test("confirming a rotation posts to the ROTATE route, and never composes the handoff itself", async () => {
