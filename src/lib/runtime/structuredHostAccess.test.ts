@@ -10,7 +10,6 @@ import {
   launchProfileEngineReadOnly,
 } from "@/lib/accounts/migration/contracts";
 import { reconcileMigrationInventory } from "@/lib/accounts/migration/coordinator";
-import { claudeSuccessorSpecFor } from "@/lib/agent/cli";
 import { AgentRegistry } from "@/lib/agent/registry";
 import type { FileEntry } from "@/lib/types";
 
@@ -160,36 +159,3 @@ test("inventory preserves both access axes from a pending structured launch rece
   }
 });
 
-test.each([
-  { readOnly: false, sandbox: "full", permissionMode: "bypassPermissions" },
-  { readOnly: false, sandbox: "restricted", permissionMode: "auto" },
-  { readOnly: true, sandbox: "full", permissionMode: "bypassPermissions" },
-  { readOnly: true, sandbox: "restricted", permissionMode: "auto" },
-] as const)(
-  "Claude successor keeps repository readOnly=$readOnly independent from sandbox=$sandbox",
-  ({ readOnly, sandbox, permissionMode }) => {
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-claude-stage-access-"));
-    try {
-      const targetHome = path.join(directory, "claude");
-      const targetProjectsDir = path.join(targetHome, "projects");
-      fs.mkdirSync(targetProjectsDir, { recursive: true, mode: 0o700 });
-      const spec = claudeSuccessorSpecFor({
-        sourcePath: path.join(directory, "source.jsonl"),
-        candidateId: crypto.randomUUID(),
-        targetHome,
-        targetProjectsDir,
-        profile: emptyLaunchProfile({ cwd: directory, readOnly, sandbox, permissionMode }),
-      });
-      if (sandbox === "restricted") {
-        expect(spec.command).toContain("'--permission-mode' 'auto'");
-        expect(spec.command).toContain("'--restricted'");
-      } else {
-        expect(spec.command).toContain("'--dangerously-skip-permissions'");
-        expect(spec.command).not.toContain("'--restricted'");
-      }
-      expect(spec.command).not.toContain("Edit,Write,NotebookEdit");
-    } finally {
-      fs.rmSync(directory, { recursive: true, force: true });
-    }
-  },
-);

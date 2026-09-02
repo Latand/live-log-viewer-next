@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 
 import { redactAppServerDetail } from "../codexAppServerProtocol";
 
@@ -369,6 +370,152 @@ export function safeCopyHistory(input: SafeHistoryCopyInput): SafeHistoryCopyRes
     return { path: destination, hash, size: total, reused: false };
   } finally {
     fs.closeSync(sourceFd);
+    if (targetFd !== null) fs.closeSync(targetFd);
+    fs.rmSync(temp, { force: true });
+  }
+}
+
+export interface ForkClaudeHistoryInput {
+  sourcePath: string;
+  sourceRoot: string;
+  targetRoot: string;
+  /** Absolute successor transcript path; must resolve under `targetRoot`. */
+  destination: string;
+  sourceSessionId: string;
+  sessionId: string;
+  operationId: string;
+  maxBytes?: number;
+  /** Read size per step. Tests shrink it to force a multi-byte character across a boundary. */
+  chunkBytes?: number;
+}
+
+export interface ForkClaudeHistoryResult {
+  path: string;
+  hash: string;
+  size: number;
+  reused: boolean;
+  /** Top-level `sessionId` fields renamed; zero on a reused fork. */
+  rewritten: number;
+}
+
+const CLAUDE_SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/**
+ * Writes a Claude session fork the way the CLI's `--fork-session` would have:
+ * the source transcript line for line, with every top-level `sessionId`
+ * renamed to the successor id. `claude --resume <successor>` under the target
+ * account then loads the whole conversation on its own — no launch, no prompt,
+ * no CLI turn (issue #889). Idempotent per operation: a fork this operation
+ * already published is adopted by its receipt, or by matching bytes when the
+ * crash landed between the publish and the receipt.
+ */
+export function forkClaudeHistory(input: ForkClaudeHistoryInput): ForkClaudeHistoryResult {
+  if (!CLAUDE_SESSION_ID.test(input.sourceSessionId) || !CLAUDE_SESSION_ID.test(input.sessionId)
+    || input.sourceSessionId === input.sessionId) {
+    throw new HistorySecurityError("history-integrity");
+  }
+  const maxBytes = input.maxBytes ?? DEFAULT_HISTORY_LIMIT;
+  const source = validateHistorySource(input.sourcePath, input.sourceRoot, maxBytes);
+  const relative = safeRelative(path.relative(path.resolve(input.targetRoot), path.resolve(input.destination)));
+  const parent = ensureDirectoryTree(input.targetRoot, path.dirname(relative));
+  const destination = path.join(parent, path.basename(relative));
+  const receiptPath = `${destination}.llv-receipt.json`;
+  const pattern = new RegExp(`"sessionId"(\\s*:\\s*)"${input.sourceSessionId}"`, "g");
+
+  /* One pass over the source: rewrites lines into `targetFd`, or only measures
+     what the rewrite would produce when `targetFd` is null. */
+  const rewrite = (targetFd: number | null): { hash: string; size: number; rewritten: number } => {
+    const sourceFd = fs.openSync(source.sourcePath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+    try {
+      const opened = fs.fstatSync(sourceFd);
+      if (opened.dev !== source.device || opened.ino !== source.inode || opened.size !== source.size) throw new HistorySecurityError("unsafe-source");
+      const digest = crypto.createHash("sha256");
+      const decoder = new StringDecoder("utf8");
+      const buffer = Buffer.allocUnsafe(Math.max(1, input.chunkBytes ?? 1024 * 1024));
+      let pending = "";
+      let read = 0;
+      let size = 0;
+      let rewritten = 0;
+      const emit = (text: string): void => {
+        if (!text) return;
+        const bytes = Buffer.from(text, "utf8");
+        digest.update(bytes);
+        size += bytes.length;
+        if (targetFd === null) return;
+        let offset = 0;
+        while (offset < bytes.length) offset += fs.writeSync(targetFd, bytes, offset, bytes.length - offset);
+      };
+      const rewriteLine = (line: string): string => {
+        if (!line.includes('"sessionId"')) return line;
+        return line.replace(pattern, (_match, separator: string) => {
+          rewritten += 1;
+          return `"sessionId"${separator}"${input.sessionId}"`;
+        });
+      };
+      for (;;) {
+        const count = fs.readSync(sourceFd, buffer, 0, buffer.length, null);
+        if (count === 0) break;
+        read += count;
+        if (read > maxBytes) throw new HistorySecurityError("history-too-large");
+        pending += decoder.write(buffer.subarray(0, count));
+        let start = 0;
+        let newline = pending.indexOf("\n");
+        let out = "";
+        while (newline !== -1) {
+          out += rewriteLine(pending.slice(start, newline)) + "\n";
+          start = newline + 1;
+          newline = pending.indexOf("\n", start);
+        }
+        pending = pending.slice(start);
+        emit(out);
+      }
+      pending += decoder.end();
+      emit(rewriteLine(pending));
+      if (read !== source.size) throw new HistorySecurityError("history-integrity");
+      if (rewritten === 0) throw new HistorySecurityError("history-integrity");
+      if (!sameIdentity(fs.fstatSync(sourceFd), source)) throw new HistorySecurityError("history-integrity");
+      return { hash: digest.digest("hex"), size, rewritten };
+    } finally {
+      fs.closeSync(sourceFd);
+    }
+  };
+
+  if (fs.existsSync(destination) || fs.existsSync(receiptPath)) {
+    const receipt = readReceipt(receiptPath);
+    const existing = hashFile(destination, maxBytes, undefined, true);
+    if (receipt) {
+      if (receipt.operationId !== input.operationId || receipt.hash !== existing.hash || receipt.size !== existing.size) {
+        throw new HistorySecurityError("history-collision");
+      }
+      return { path: destination, ...existing, reused: true, rewritten: 0 };
+    }
+    const expected = rewrite(null);
+    if (expected.hash !== existing.hash || expected.size !== existing.size) throw new HistorySecurityError("history-collision");
+    writeReceipt(receiptPath, { operationId: input.operationId, hash: existing.hash, size: existing.size });
+    return { path: destination, ...existing, reused: true, rewritten: 0 };
+  }
+
+  const temp = path.join(parent, `.${path.basename(destination)}.${process.pid}.${crypto.randomUUID()}.tmp`);
+  let targetFd: number | null = null;
+  try {
+    targetFd = fs.openSync(temp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW ?? 0), 0o600);
+    const written = rewrite(targetFd);
+    fs.fchmodSync(targetFd, 0o600);
+    fs.fsyncSync(targetFd);
+    fs.closeSync(targetFd);
+    targetFd = null;
+    if (!contained(fs.realpathSync(input.targetRoot), fs.realpathSync(parent))) throw new HistorySecurityError("unsafe-root");
+    try { fs.linkSync(temp, destination); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new HistorySecurityError("history-collision");
+      throw error;
+    }
+    fs.rmSync(temp, { force: true });
+    const published = fs.openSync(parent, "r");
+    try { fs.fsyncSync(published); } finally { fs.closeSync(published); }
+    writeReceipt(receiptPath, { operationId: input.operationId, hash: written.hash, size: written.size });
+    return { path: destination, hash: written.hash, size: written.size, reused: false, rewritten: written.rewritten };
+  } finally {
     if (targetFd !== null) fs.closeSync(targetFd);
     fs.rmSync(temp, { force: true });
   }
