@@ -127,12 +127,14 @@ const q = (host: HTMLElement, sel: string) => host.querySelector(sel) as unknown
    lane 1): ⋯ on the bar, then the row. */
 const menuTrigger = (host: HTMLElement) => q(host, '[data-mobile2-open="menu"]');
 const hostRow = (host: HTMLElement) => q(host, '[data-mobile2-open="host"]');
-const shelf = (host: HTMLElement) => q(host, '[data-testid="mobile-bottom-shelf"]');
+/* The host sheet itself (mobile v2 lane 2): the shelf modal it replaced kept
+   the same modal semantics — body lock, focus return, Escape. */
+const shelf = (host: HTMLElement) => q(host, '[data-mobile2-sheet="host"]');
 
 /* The bar renders before the board settles; the leaf under it (the pinned
    orchestrator slot on an empty project) is what arrives with `boardReady`,
    and the host sheet mounts only then. */
-const boardReady = (host: HTMLElement) => q(host, '[data-testid="mobile-orchestrator-slot"]') !== null || q(host, '[data-testid="mobile-chat-shell"]') !== null;
+const boardReady = (host: HTMLElement) => q(host, '[data-testid="mobile-orchestrator-slot"]') !== null || q(host, "[data-mobile2-board]") !== null;
 
 async function openShelf(host: HTMLElement): Promise<HTMLElement> {
   const ready = await waitFor(() => boardReady(host));

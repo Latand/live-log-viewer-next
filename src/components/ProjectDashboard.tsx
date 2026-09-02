@@ -27,6 +27,7 @@ import { TaskStrip } from "./BranchPane";
 import { ConversationList } from "./ConversationList";
 import { clearDraftStorage, draftCwd, draftParentConversationId, draftSrc, resolveSystemDraftCwd, setDraftCwd, setDraftSrc, setDraftText } from "./DraftAgentPane";
 import { OrchestratorPanelToggle } from "./orchestrator/OrchestratorPanelToggle";
+import { useOrchestratorSeat } from "./orchestrator/useOrchestratorSeat";
 import { planBoardConvergence, planClose } from "./projectBoardMutations";
 import { reviewerCloseMutations } from "./reviewerAutoClose";
 import { directReviewFlows, isDirectReviewFlow } from "./flows/directReviewGroups";
@@ -46,12 +47,13 @@ import { isPlacedTask } from "./scheme/taskGeometry";
 import { loadExpandedTasks, partitionTaskStacks, persistExpandedTasks } from "./scheme/taskStacks";
 import { TaskReadinessStrip } from "./TaskReadinessStrip";
 import { WorkerStacks } from "./WorkerStacks";
-import { MobileBottomShelf } from "./MobileBottomShelf";
 import { clearWorkflowDraftStorage } from "./workflows/WorkflowDraftPane";
 import { dropLegacyWorkflowDrafts, isWorkflowDraftId } from "./workflows/workflowModel";
 import { TaskPanel } from "./tasks/TaskPanel";
 import { pushTaskToast, TaskToastHost } from "./tasks/taskToast";
+import { MobileBoard, mobileBoardOf } from "./mobile/MobileBoard";
 import { MobileFocusView } from "./mobile/MobileFocusView";
+import { MobileHostSheet } from "./mobile/MobileHostSheet";
 import { MobileOrchestratorRow } from "./mobile/MobileOrchestratorRow";
 import { MobileMenuSheet, type MobileMenuEntry } from "./mobile/MobileMenuSheet";
 import { showReceipt } from "./mobile/MobileReceipt";
@@ -68,6 +70,7 @@ import {
   buildArchiveBranchGroups,
   buildBranchGroups,
   collapsedTrees,
+  draftWorkingDirectory,
   isChildConversation,
   OVERVIEW,
   projectDraftWorkingDirectory,
@@ -373,6 +376,14 @@ function ProjectDashboardView({
      only while the plane is not connected. One projection, so a bus frame
      never re-renders the board. */
   const mobileRuntime = useRuntimeSelector((state) => (state.enabled ? state.connection : "live"), "live");
+  /* The phone board's seat (mobile v2 lane 2): the seat conversation is the
+     card above the sections, never a row inside them, so the list has to know
+     which transcript holds it. Read through the same cached hook the pinned
+     row reads, with the same project and cwd, so the answer is already in hand;
+     null on the desktop, which has no board list to keep the seat out of. */
+  const projectDraftCwd = useMemo(() => draftWorkingDirectory(files, project), [files, project]);
+  const seatRead = useOrchestratorSeat(isMobile ? project : null, projectDraftCwd || undefined);
+  const seatPath = seatRead.status?.seat?.path ?? null;
   const projectName = projectDisplayName(
     project,
     providedProjectName ?? projectCatalogEntries.find((entry) => entry.project === project)?.displayName,
@@ -974,9 +985,22 @@ function ProjectDashboardView({
   );
   const treeGroups = groups.filter((group) => !group.orphanTask).length;
 
+  /* On the phone a conversation is a SCREEN (mobile v2 §3.3): every deliberate
+     focus — a board row, an attention jump, a deep link, a spawned draft —
+     pushes it over the board, which stays where it was underneath, so ‹ and the
+     platform back land on the list the operator came from. A repeat focus of
+     the conversation already on top is not a second entry. */
+  const showMobileConversation = (key: string) => {
+    const top = topScreen(mobileNav.getState());
+    if (top.kind === "chat" && top.id === key) return;
+    mobileNav.push({ kind: "chat", id: key });
+  };
+
   /* The highlight drives the scheme: the camera glides to the node and rings it. */
   const flashNode = (path: string) => {
     onUserNavigate?.();
+    /* A task card is a board object, not a conversation screen. */
+    if (isMobile && !path.startsWith("task::")) showMobileConversation(path);
     setHighlight(path);
     /* A focused task card stays full-size while it is the focus target. */
     setFocusedTaskId(path.startsWith("task::") ? path.slice("task::".length) : null);
@@ -1427,6 +1451,19 @@ function ProjectDashboardView({
     onFoldChild: (id, path) => trayHandlersRef.current.board.setEngineChildFold(id, path, true),
   }), [engineProjection]);
   const openFullCatalogFile = onOpenCatalogFile ?? openSwitchboardFile;
+  /* A board row is the phone's OPEN gesture (#1244): it stamps the card seen —
+     a finished lane holds its outcome until the operator has read it — and
+     opens the conversation through the resolver, so a row beyond the scheme
+     window keeps its pin. The push is stated here rather than left to
+     `flashNode`: the row is the gesture, and it must land on the conversation
+     whether or not the resolver has a card to glide to yet. */
+  const openBoardRow = (file: FileEntry) => {
+    markConversationSeen(file);
+    /* The resolver's open first — it lands the project and pins the path, and
+       a phone landing resets the stack — then the screen it landed on. */
+    openFullCatalogFile(file);
+    showMobileConversation(file.path);
+  };
 
   /* Expand a terminal direct review group back onto the board (#289 + #325):
      record the durable disclosure override as EXPANDED (so the deck
@@ -1591,6 +1628,42 @@ function ProjectDashboardView({
   });
   const viewToggle = schemeAvailable && listAvailable;
 
+  /* The phone's board (mobile v2 lane 2, README §4.1): the switchboard's triage
+     grouping as a list, mounted where the focus view used to be whenever no
+     conversation is on top of the navigation stack. The model is pure, so the
+     bar's badge and the rows below it are counted once, in one place. */
+  const mobileTop = topScreen(mobileNavState);
+  const mobileConversationKey = mobileTop.kind === "chat" ? mobileTop.id : null;
+  const crownedPaths = useMemo<ReadonlySet<string>>(() => new Set(favoriteRows.map((row) => row.file.path)), [favoriteRows]);
+  const mobileBoardProps = {
+    files,
+    pipelines: activePipelines,
+    project,
+    seatPath,
+    hidden: hiddenSet,
+    crowned: crownedPaths,
+    now: nowSeconds,
+  };
+  const mobileBoardModel = isMobile ? mobileBoardOf(mobileBoardProps) : null;
+  /* Which conversations the phone board is showing, in the order it shows them,
+     as a signature so the presence effect below compares BY VALUE — a fresh
+     array every render would re-report the same view on every poll. Null
+     whenever the board is not the leaf. */
+  const mobileBoardSignature = mobileBoardModel && mobileConversationKey === null && projectView === "scheme" && schemeAvailable
+    ? [
+      ...mobileBoardModel.needsYou.flatMap((item) => (item.kind === "conversation" ? [item.path] : [])),
+      ...mobileBoardModel.working.map((row) => row.path),
+      ...mobileBoardModel.recent.map((row) => row.path),
+    ].join("\n")
+    : null;
+  /* The badge counts the queue rows the operator can reach from here: the
+     Viewer's conversation queue, plus this project's pipelines waiting on a
+     decision — they are queue items like any other (README §4.6), and nothing
+     else on the phone counted them. */
+  const mobileShellHost = mobileShell && mobileBoardModel
+    ? { ...mobileShell, attentionCount: mobileShell.attentionCount + (mobileBoardModel.pipelines?.needsDecision ?? 0) }
+    : mobileShell;
+
   /* Presence context: which project is open and how its durable board is
      syncing. Reported here so every leaf's slice merges under it. */
   useEffect(() => {
@@ -1645,15 +1718,19 @@ function ProjectDashboardView({
      rendered as board windows still has visible conversations, and reporting an
      empty list there told observers nothing was on screen. */
   useEffect(() => {
-    if (projectView === "scheme" && schemeAvailable) return;
-    const rows = listAvailable ? historyRows.map((row) => row.path) : [];
-    const order = rows.length > 0 ? rows : boardWindowSignature ? boardWindowSignature.split("\n") : [];
+    const mobileBoardRows = mobileBoardSignature === null ? null : mobileBoardSignature ? mobileBoardSignature.split("\n") : [];
+    if (projectView === "scheme" && schemeAvailable && mobileBoardRows === null) return;
+    /* The phone board (mobile v2 lane 2) is the mobile leaf with no
+       conversation focused: it reports the rows it renders, in the order it
+       renders them, and no focused path — nothing is open over it. */
+    const rows = mobileBoardRows ?? (listAvailable ? historyRows.map((row) => row.path) : []);
+    const order = mobileBoardRows ?? (rows.length > 0 ? rows : boardWindowSignature ? boardWindowSignature.split("\n") : []);
     const visiblePaths = order.slice(0, MAX_VISIBLE_PATHS);
-    /* A quiet history list is "list" on either platform; a truly empty project
-       on the phone is the mobile-focus empty state. */
-    const mode = listAvailable ? "list" : isMobile ? "mobile-focus" : "list";
+    /* A quiet history list is "list" on either platform; the phone's own leaves
+       — the board and a truly empty project — are the mobile-focus mode. */
+    const mode = mobileBoardRows !== null ? "mobile-focus" : listAvailable ? "list" : isMobile ? "mobile-focus" : "list";
     viewBus.reportSlice({ mode, focusedPath: null, selectedPaths: selectionInOrder(order, board.selection, { includeUnordered: true }), visiblePaths, camera: null });
-  }, [projectView, schemeAvailable, listAvailable, historyRows, isMobile, boardWindowSignature, board.selection]);
+  }, [projectView, schemeAvailable, listAvailable, historyRows, isMobile, boardWindowSignature, board.selection, mobileBoardSignature]);
 
   /* The focused conversation's handoff control docks in the host sheet (issue
      #177 item 5), so the sheet needs to know whether there is one. */
@@ -1666,7 +1743,8 @@ function ProjectDashboardView({
   ) : null;
   /* Parentless background processes dock as colored strips at the top of the
      desktop canvas; on the phone they are host detail and live in the host
-     sheet (mobile v2 lane 1), never as always-on rows under the bar. */
+     sheet as their own rows (mobile v2 lane 2), never as always-on rows under
+     the bar. */
   const dockedTaskStrips = dockedTasks.map((task) => (
     <div
       key={task.path}
@@ -1768,10 +1846,63 @@ function ProjectDashboardView({
     }
     return entries;
   };
+  /* The folded worker / quiet / readiness strips. The desktop renders them
+     inline under the board; the phone reaches them inside the host sheet, and
+     every action there is terminal, so on the phone each callback closes the
+     sheet first (unmounting the modal restores focus and unlocks the body).
+     Lane 10 retires the strips; the host sheet's own rows outlive them. */
+  const hiddenStrips = () => {
+    const closeSheetThen = <A extends unknown[]>(fn: (...args: A) => void) =>
+      isMobile ? (...args: A) => { mobileNav.closeSheet(); fn(...args); } : fn;
+    return (
+      <>
+        <TaskReadinessStrip
+          tasks={projectTasks}
+          files={files}
+          pipelines={pipelines}
+          flows={deckFlows}
+          conversationAliases={conversationAliases}
+          repository={projectCatalogEntries.find((entry) => entry.project === project)?.repository ?? null}
+          onOpenTask={closeSheetThen(openTask)}
+          onPlaceOnMap={isMobile ? undefined : placeOnMap}
+          onOpenFile={closeSheetThen(openSwitchboardFile)}
+        />
+        <LaunchHistory items={launchHistory} onRetry={closeSheetThen(retryLaunch)} />
+        <WorkerStacks
+          stacks={workerStacks}
+          files={files}
+          flows={deckFlows}
+          pipelines={pipelines}
+          onSelect={closeSheetThen(openSwitchboardFile)}
+          onExpandGroup={closeSheetThen(expandReviewGroup)}
+        />
+        {!hasArchiveNodes && residual.length ? (
+          <ResidualStrip items={residual} activeRootPaths={quietActiveRoots} onSelect={closeSheetThen(openSwitchboardFile)} />
+        ) : null}
+      </>
+    );
+  };
+
   const renderMobileSheet = (name: MobileSheetName, close: () => void) => {
     if (name === "menu") return <MobileMenuSheet title={projectName} entries={mobileMenuEntries()} onClose={close} />;
-    /* «host» is the bottom shelf below, mounted outside the shell. */
-    if (name === "host") return null;
+    /* Host details (mobile v2 lane 2): the background processes with their PIDs
+       and a Kill that acts on the tap, the runtime connection, and the quiet
+       conversations — the one place any of it appears on the phone. */
+    if (name === "host") {
+      return (
+        <MobileHostSheet
+          projectName={projectName}
+          runtime={mobileRuntime}
+          tasks={dockedTasks}
+          hiddenCount={hasArchiveNodes ? 0 : residual.length}
+          onOpenCatalog={() => { mobileNav.closeSheet(); chooseEmptyView("list"); }}
+          onClose={close}
+          leading={shelfHandoffFile ? <HandoffHandle file={shelfHandoffFile} onHandoff={() => { mobileNav.closeSheet(); addHandoffDraft(shelfHandoffFile); }} inline /> : null}
+        >
+          {boardReady ? hiddenStrips() : null}
+        </MobileHostSheet>
+      );
+    }
     return mobileShell?.renderSheet(name, close) ?? null;
   };
 
@@ -1886,18 +2017,23 @@ function ProjectDashboardView({
       ) : null}
 
       {isMobile ? (
-        /* The phone (mobile v2 lane 1): the shell's bar, banner slot and
-           receipt around the leaf. The strip inside the focus view stays
-           until lane 3 folds it into the bar's title cell. */
-        topScreen(mobileNavState).kind === "accounts" ? (
-          <MobileAccountsScreen host={mobileShell} renderSheet={renderMobileSheet} />
+        /* The phone (mobile v2 lanes 1–2): the shell's bar, banner slot and
+           receipt around the leaf, and the leaf is the BOARD until a
+           conversation is on top of the navigation stack. The strip inside the
+           focus view stays until lane 3 folds it into the bar's title cell. */
+        mobileTop.kind === "accounts" ? (
+          <MobileAccountsScreen host={mobileShellHost} renderSheet={renderMobileSheet} />
         ) : (
           <MobileShell
             screen="board"
+            /* A conversation pushed over the board gets the bar's ‹ (§3.3);
+               lane 3 makes that screen its own, with the title cell and the
+               meta line. */
+            back={mobileConversationKey !== null}
             title={<MobileBarTitle>{projectName}</MobileBarTitle>}
             titleLabel={t("mobile2.bar.switchProject")}
             titleOpens={mobileShell ? "projects" : undefined}
-            host={mobileShell}
+            host={mobileShellHost}
             onOpenSearch={onOpenSearch}
             searchTestId="dash-search"
             renderSheet={renderMobileSheet}
@@ -1905,6 +2041,24 @@ function ProjectDashboardView({
             {pipelinesAlert}
               {!boardReady ? (
                 catalogFailures > 0 ? <CatalogFailureNotice failures={catalogFailures} className="mt-[12vh]" /> : <SchemeSkeleton />
+              ) : projectView === "scheme" && schemeAvailable && mobileConversationKey === null ? (
+                <MobileBoard
+                  {...mobileBoardProps}
+                  catalogCount={catalogConversationCount}
+                  seat={(
+                    <div className="flex items-stretch px-3" data-testid="mobile-orchestrator-slot">
+                      <MobileOrchestratorRow
+                        project={project}
+                        projectName={projectName}
+                        files={files}
+                        onOpenConversation={openBoardRow}
+                      />
+                      <span aria-hidden className="min-w-0 flex-1" />
+                    </div>
+                  )}
+                  onOpenConversation={openBoardRow}
+                  onOpenCatalog={() => chooseEmptyView("list")}
+                />
               ) : projectView === "scheme" && schemeAvailable ? (
                 <MobileFocusView
                   project={project}
@@ -1923,7 +2077,7 @@ function ProjectDashboardView({
                   favorites={favoriteIdSet}
                   isolatedManualPaths={isolatedCompactHistoryPaths}
                   loaded={loaded}
-                  focus={highlight}
+                  focus={highlight ?? mobileConversationKey}
                   onSelect={openSwitchboardFile}
                   onClose={closeNode}
                   onDraftClose={removeDraft}
@@ -2084,64 +2238,10 @@ function ProjectDashboardView({
           quiet strip share one footer row (issue #177 item 5): the handoff docks
           beside a single disclosure that folds both strips. Desktop renders the
           two strips directly, side by side. */}
-      {boardReady && (() => {
-        /* Readiness strip totals cover EVERY project task (issue #290) — not
-           just the canvas-folded subset — so the shelf badge stays truthful. */
-        const workerTotal = workerStacks.reduce((sum, stack) => sum + stack.items.length, 0) + launchHistory.length + projectTasks.length;
-        const quietTotal = !hasArchiveNodes ? residual.length : 0;
-        /* Every shelf action is TERMINAL — it navigates to a board card, another
-           project, or a fresh draft that lives BEHIND the overlay. On the phone
-           the shelf is a modal (issue #419): leaving it open after a terminal
-           action would strand the target under the sheet with the body scroll
-           still locked. So on mobile each terminal callback first closes the
-           shelf (unmounting the modal restores focus and unlocks the body via
-           its own lifecycle), then runs. Desktop renders the strips inline with
-           no modal, so the callbacks pass through untouched. Internal disclosure
-           toggles live inside the strips' own state and are never wrapped. */
-        const closeShelfThen = <A extends unknown[]>(fn: (...args: A) => void) =>
-          isMobile ? (...args: A) => { mobileNav.closeSheet(); fn(...args); } : fn;
-        const strips = (
-          <>
-            <TaskReadinessStrip
-              tasks={projectTasks}
-              files={files}
-              pipelines={pipelines}
-              flows={deckFlows}
-              conversationAliases={conversationAliases}
-              repository={projectCatalogEntries.find((entry) => entry.project === project)?.repository ?? null}
-              onOpenTask={closeShelfThen(openTask)}
-              onPlaceOnMap={isMobile ? undefined : placeOnMap}
-              onOpenFile={closeShelfThen(openSwitchboardFile)}
-            />
-            <LaunchHistory items={launchHistory} onRetry={closeShelfThen(retryLaunch)} />
-            <WorkerStacks
-              stacks={workerStacks}
-              files={files}
-              flows={deckFlows}
-              pipelines={pipelines}
-              onSelect={closeShelfThen(openSwitchboardFile)}
-              onExpandGroup={closeShelfThen(expandReviewGroup)}
-            />
-            {!hasArchiveNodes && residual.length ? (
-              <ResidualStrip items={residual} activeRootPaths={quietActiveRoots} onSelect={closeShelfThen(openSwitchboardFile)} />
-            ) : null}
-          </>
-        );
-        if (!isMobile) return strips;
-        /* Chat-first (issue #419 reopened): the phone shelf reserves no bottom
-           row — it opens as an overlay sheet from the header trigger, folding the
-           handoff plus both hidden strips behind one compact disclosure. */
-        const leading = shelfHandoffFile ? <HandoffHandle file={shelfHandoffFile} onHandoff={() => { mobileNav.closeSheet(); addHandoffDraft(shelfHandoffFile); }} inline /> : null;
-        /* The host sheet (mobile v2 lane 1): opened from the board menu's «Host
-           details» row as the navigation store's «host» sheet; the docked
-           background tasks lead it as host data. */
-        return (
-          <MobileBottomShelf open={mobileNavState.sheet === "host"} onClose={mobileNav.closeSheet} total={workerTotal + quietTotal + dockedTasks.length} leading={leading}>
-            {dockedTaskStrips.length ? <div className="border-b border-border bg-sunken" data-mobile2-host-tasks>{dockedTaskStrips}</div> : null}
-            {strips}
-          </MobileBottomShelf>
-        );
-      })()}
+      {/* The desktop renders the hidden strips inline under the board; the
+          phone reaches the same strips inside the host sheet (mobile v2 lane 2),
+          which is the one place host detail lives. */}
+      {!isMobile && boardReady ? hiddenStrips() : null}
 
       <TaskToastHost />
     </div>

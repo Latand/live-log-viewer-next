@@ -264,13 +264,25 @@ test("a project with nothing in it still offers the create row — the leaf wher
   expect(String(seatPosts[0]!.clientRequestId)).toMatch(/^[A-Za-z0-9_-]{8,128}$/);
 });
 
-test("the focus view leaf still owns its own single pin — the leaves never double-mount it", async () => {
+test("the board leaf carries the single pin above its sections, and opening a conversation hands it to the focus view's strip", async () => {
   const files = [conversation({ activity: "live", proc: "running", pid: 42 })];
   const host = mount({ files, catalogKnown: true, catalogConversationCount: 1 });
-  expect(await waitFor(() => host.querySelector('[data-testid="mobile-chat-shell"]') !== null)).toBe(true);
-
+  /* The phone's first leaf is the board (mobile v2 lane 2): the pin is its
+     Orchestrator card, above every section row and outside what the list
+     scrolls. */
+  expect(await waitFor(() => host.querySelector("[data-mobile2-board]") !== null)).toBe(true);
+  const board = host.querySelector("[data-mobile2-board]") as unknown as HTMLElement;
   expect(rows(host)).toHaveLength(1);
-  /* Inside the focus view's strip, and NOT in the dashboard's own slot. */
+  expect(slot(host)).not.toBeNull();
+  const firstRow = board.querySelector('[data-mobile2-row="conversation"]') as unknown as HTMLElement;
+  expect(firstRow).not.toBeNull();
+  expect(row(host).compareDocumentPosition(firstRow) & dom.Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+  /* Opening a row pushes the conversation, and the pin travels with it into
+     the focus view's own strip: one row exists at a time, never two. */
+  flushSync(() => firstRow.click());
+  expect(await waitFor(() => host.querySelector('[data-testid="mobile-chat-shell"]') !== null)).toBe(true);
+  expect(rows(host)).toHaveLength(1);
   expect(slot(host)).toBeNull();
   expect(row(host).closest('[data-testid="mobile-chat-shell"]')).not.toBeNull();
 });

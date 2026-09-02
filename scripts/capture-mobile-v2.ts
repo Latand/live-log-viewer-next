@@ -839,7 +839,15 @@ export const DRIVERS: Record<string, Driver> = {
   "board-attention": async (page, ctx) => { await openBoard(page, ctx); return openSheet(page, "attention", TODAY.attention, "today's attention popover"); },
   "board-projects": async (page, ctx) => { await openBoard(page, ctx); return openSheet(page, "projects", TODAY.projects, "today's project drawer"); },
   "board-menu": async (page, ctx) => { await openBoard(page, ctx); return openSheet(page, "menu", TODAY.menu, "today's «More actions» menu"); },
-  "board-host": async (page, ctx) => { await openBoard(page, ctx); return openSheet(page, "host", TODAY.host, "today's hidden shelf"); },
+  /* Host detail is behind ⋯ › Host details and nowhere else (README §2 rule 5,
+     §4.1: the board's own Host section was cut), so the menu is the way in —
+     the host row replaces the menu sheet with its own. */
+  "board-host": async (page, ctx) => {
+    await openBoard(page, ctx);
+    const menu = await openSheet(page, "menu", TODAY.menu, "today's «More actions» menu");
+    const host = await openSheet(page, "host", TODAY.host, "today's hidden shelf");
+    return host.reached ? host : { reached: false, note: `${menu.note}; ${host.note}` };
+  },
   "board-search": async (page, ctx) => { await openBoard(page, ctx); return openSheet(page, "search", TODAY.search, "today's search dialog"); },
   "board-noseat": board("noseat"),
   "board-degraded": board("degraded"),

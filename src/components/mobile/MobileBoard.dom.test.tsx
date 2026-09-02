@@ -1,0 +1,323 @@
+import { afterAll, afterEach, beforeAll, beforeEach, expect, mock, test } from "bun:test";
+import { Window } from "happy-dom";
+import { createRoot, type Root } from "react-dom/client";
+import { flushSync } from "react-dom";
+
+import { emptyStore } from "@/components/runtime/runtimeModel";
+import { translate } from "@/lib/i18n";
+import type { Pipeline } from "@/lib/pipelines/types";
+import type { FileEntry } from "@/lib/types";
+
+/*
+ * The board on the phone (mobile v2 lane 2, README §8 row 2), mounted as the
+ * project leaf it really is. happy-dom does no layout, so what this guards is
+ * the contract behind the frames the capture harness measures in Chromium:
+ *
+ *   - with no conversation on top of the stack the leaf is the BOARD: the seat
+ *     first, then Needs you, the pipelines summary above Working while a
+ *     pipeline runs, and three Recent rows over the catalog;
+ *   - the board carries NO Host section — host detail is one tap away, in the
+ *     host sheet behind ⋯ › Host details, and nowhere else;
+ *   - the bar's badge counts the Needs-you rows, conversations and pipelines;
+ *   - opening a row stamps the card seen (#1244) and pushes the conversation
+ *     over the board, so ‹ returns to the list.
+ */
+
+const actualRuntimeHooks = await import("@/hooks/useRuntime");
+const actualConversationCatalogHooks = await import("@/hooks/useConversationCatalog");
+const inertRuntime = { enabled: false, connection: "live" as const, resyncedAt: null, store: emptyStore(), structuredHostsEnabled: false, lastEventAt: null };
+mock.module("@/hooks/useRuntime", () => ({
+  ...actualRuntimeHooks,
+  useRuntimeBusState: () => inertRuntime,
+  useRuntime: () => inertRuntime,
+  useRuntimeSelector: (selector: (state: typeof inertRuntime) => unknown) => selector(inertRuntime),
+  useRuntimeSession: () => null,
+  useRuntimeReceiptsForArtifact: () => [],
+  useRuntimeFlow: () => null,
+}));
+mock.module("@/hooks/useConversationCatalog", () => ({
+  useConversationCatalog: () => ({
+    items: [], nextCursor: null, total: 0, loading: false, error: false, loadMore: () => {}, retry: () => {},
+  }),
+}));
+
+const { ProjectDashboard } = await import("@/components/ProjectDashboard");
+const { MobileSheet } = await import("@/components/mobile/MobileSheet");
+const { getMobileNav, topScreen } = await import("@/components/mobile/mobileNav");
+const { receipts } = await import("@/components/mobile/MobileReceipt");
+type MobileShellHost = NonNullable<React.ComponentProps<typeof ProjectDashboard>["mobileShell"]>;
+
+const dom = new Window({ url: "http://localhost/", width: 390, height: 844 });
+const G = globalThis as Record<string, unknown>;
+(dom as unknown as { matchMedia: (query: string) => unknown }).matchMedia = (query: string) => ({
+  matches: /max-width|pointer: coarse/.test(String(query)),
+  media: String(query), onchange: null,
+  addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {}, dispatchEvent() { return false; },
+});
+
+let boardRevision = 1;
+let boardPrefs: Record<string, unknown> = {};
+let mutations: Array<Record<string, unknown>> = [];
+const emptyPrefs = () => ({
+  manual: [], hidden: [], expanded: [], favorites: [], foldedEngineChildIds: [],
+  expandedEngineTrayParentIds: [], viewMode: null, taskPanelOpen: false, seenAt: {},
+});
+const boardState = () => ({
+  schemaVersion: 1, revision: boardRevision, updatedAt: new Date(0).toISOString(),
+  pathAliases: {}, explicitManual: [], prefs: { ...emptyPrefs(), ...boardPrefs },
+});
+const jsonResponse = (body: unknown) => ({
+  ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body),
+});
+
+const OVERRIDES: Record<string, unknown> = {
+  window: dom,
+  document: dom.document,
+  navigator: dom.navigator,
+  Node: dom.Node,
+  HTMLElement: dom.HTMLElement,
+  HTMLButtonElement: dom.HTMLButtonElement,
+  Event: dom.Event,
+  KeyboardEvent: dom.KeyboardEvent,
+  MouseEvent: dom.MouseEvent,
+  PointerEvent: dom.PointerEvent,
+  sessionStorage: dom.sessionStorage,
+  localStorage: dom.localStorage,
+  requestAnimationFrame: (cb: (t: number) => void) => setTimeout(() => cb(0), 0) as unknown as number,
+  cancelAnimationFrame: (id: number) => clearTimeout(id),
+  ResizeObserver: class { observe() {} unobserve() {} disconnect() {} },
+  IntersectionObserver: class { observe() {} unobserve() {} disconnect() {} takeRecords() { return []; } },
+  fetch: (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    if (url.startsWith("/api/board")) {
+      if (init?.method === "PATCH") {
+        const body = JSON.parse(String(init.body)) as {
+          patch?: Record<string, unknown>;
+          mutations?: Array<Record<string, unknown>>;
+        };
+        for (const mutation of body.mutations ?? []) mutations.push(mutation);
+        if (body.patch) boardPrefs = { ...boardPrefs, ...body.patch };
+        boardRevision += 1;
+      }
+      return jsonResponse({ board: boardState() });
+    }
+    if (url.startsWith("/api/conversations")) return jsonResponse({ items: [], nextCursor: null });
+    /* No orchestrator seat in this project: the board's seat slot invites one
+       and no row is filtered out of the sections. */
+    if (url.startsWith("/api/orchestrator/seat")) return jsonResponse({ seat: null, pending: null, exists: true });
+    if (url.startsWith("/api/limits")) return { ok: false, status: 503, json: async () => ({}), text: async () => "" };
+    return jsonResponse({});
+  }) as unknown as typeof fetch,
+};
+const HAS: Record<string, boolean> = {};
+const SAVED: Record<string, unknown> = {};
+
+const settle = async () => { await new Promise((r) => setTimeout(r, 0)); await new Promise((r) => setTimeout(r, 0)); };
+const waitFor = async (pred: () => boolean, timeoutMs = 4000): Promise<boolean> => {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (pred()) return true;
+    await new Promise((r) => setTimeout(r, 15));
+  }
+  return pred();
+};
+
+beforeAll(() => {
+  for (const key of Object.keys(OVERRIDES)) { HAS[key] = key in G; SAVED[key] = G[key]; G[key] = OVERRIDES[key]; }
+  (dom.HTMLElement.prototype as unknown as { scrollIntoView: () => void }).scrollIntoView = () => {};
+});
+afterAll(async () => {
+  await settle();
+  for (const key of Object.keys(OVERRIDES)) { if (HAS[key]) G[key] = SAVED[key]; else delete G[key]; }
+  mock.module("@/hooks/useRuntime", () => actualRuntimeHooks);
+  mock.module("@/hooks/useConversationCatalog", () => actualConversationCatalogHooks);
+});
+
+const PROJECT = "atlas";
+const NOW = Math.floor(Date.now() / 1000);
+
+const file = (over: Partial<FileEntry> & { path: string }): FileEntry => ({
+  root: "claude-projects", name: over.path.split("/").pop(), project: PROJECT,
+  title: "A conversation", engine: "claude", kind: "session", fmt: "claude", parent: null,
+  mtime: NOW - 120, size: 2_048, activity: "idle", proc: null, pid: null, model: "opus",
+  pendingQuestion: null, waitingInput: null, conversationId: `conversation_${over.path}`,
+  ...over,
+} as unknown as FileEntry);
+
+const asking = file({
+  path: "/repo/ask.jsonl",
+  title: "Implement the export endpoint",
+  activity: "live", proc: "running", pid: 4_402,
+  lastTurn: { startedAt: (NOW - 600) * 1_000, endedAt: null },
+  pendingQuestion: {
+    kind: "question", toolUseId: "toolu-export", transcriptPath: "/repo/ask.jsonl", pid: 4_402, paneTarget: null,
+    askedAt: new Date((NOW - 540) * 1_000).toISOString(),
+    questions: [{ question: "Which format?", header: "Format", multiSelect: false, options: [] }],
+  },
+} as unknown as Partial<FileEntry> & { path: string });
+
+const running = file({
+  path: "/repo/run.jsonl",
+  title: "Rebuild the board status projection",
+  activity: "live", proc: "running", pid: 4_401, mtime: NOW - 30,
+  lastTurn: { startedAt: (NOW - 760) * 1_000, endedAt: null },
+  plan: { steps: [], done: 2, total: 5, current: "Add the held precedence", updatedAt: null },
+} as unknown as Partial<FileEntry> & { path: string });
+
+const finished = file({ path: "/repo/done.jsonl", title: "Tail: pipeline archive TTL", activity: "recent", mtime: NOW - 900 });
+
+/* A parentless background process: host data, never a board row. */
+const backgroundTask = file({
+  path: "/repo/next-dev.log", name: "next-dev.log", title: "next dev · port 8899", cmdDesc: "next dev · port 8899",
+  engine: "shell", kind: "task", fmt: "text", activity: "live", proc: "running", pid: 41_822, model: null,
+} as unknown as Partial<FileEntry> & { path: string });
+
+const decisionPipeline = {
+  id: "pipeline_atlas_p2", task: "Fast conversation switching", taskIds: [], project: PROJECT,
+  repoDir: "/repo", worktreeDir: "/repo-p2", branch: "lane/p2", baseBranch: "main", baseRef: "main",
+  lastPassedCommit: "", stages: [{ id: "implement", kind: "run" }, { id: "review", kind: "review-loop" }],
+  runs: [{ stageId: "review", attempts: [{ n: 3, state: "failed", verdict: { status: "fail", findings: ["one", "two"] }, completedAt: new Date((NOW - 3_600) * 1_000).toISOString() }] }],
+  cursor: { stageId: "review", state: "reviewing", input: null, activatedBy: null },
+  state: "needs_decision", pausedState: null, stateDetail: null, srcPath: null, srcConversationId: null,
+  createdAt: new Date((NOW - 7_200) * 1_000).toISOString(), closedAt: null,
+} as unknown as Pipeline;
+
+const runningPipeline = { ...decisionPipeline, id: "pipeline_atlas_p1", task: "Mobile redesign", state: "running", runs: [] } as unknown as Pipeline;
+
+let sheetOpens: string[] = [];
+let opened: string[] = [];
+const host = (attentionCount: number): MobileShellHost => ({
+  attentionCount,
+  arrival: null,
+  renderSheet: (name, close) => {
+    sheetOpens.push(name);
+    return (
+      <MobileSheet name={name} title={name} onClose={close}>
+        <div data-testid={`${name}-sheet-stub`} />
+      </MobileSheet>
+    );
+  },
+});
+
+const dashboardProps = (over: Partial<React.ComponentProps<typeof ProjectDashboard>> = {}) => ({
+  files: [asking, running, finished], flows: [], pipelines: [], workflows: [], tasks: [],
+  project: PROJECT, loaded: true, openNonce: 0, archived: false,
+  catalogKnown: true, catalogConversationCount: 12,
+  projectCwd: "/repo",
+  onArchive: () => {}, onUnarchive: () => {},
+  onOpenSearch: () => {},
+  onOpenCatalogFile: (entry: FileEntry) => { opened.push(entry.path); },
+  mobileShell: host(1),
+  ...over,
+});
+
+let roots: Root[] = [];
+beforeEach(() => {
+  roots = [];
+  sheetOpens = [];
+  opened = [];
+  mutations = [];
+  boardRevision = 1;
+  boardPrefs = {};
+  dom.document.body.replaceChildren();
+  dom.document.body.style.overflow = "";
+  dom.sessionStorage.clear();
+  dom.localStorage.clear();
+  dom.location.hash = "#p=" + encodeURIComponent(PROJECT);
+  getMobileNav().home();
+  receipts.dismiss();
+});
+afterEach(async () => { for (const root of roots) flushSync(() => root.unmount()); roots = []; receipts.dismiss(); await settle(); });
+
+function mount(over: Partial<React.ComponentProps<typeof ProjectDashboard>> = {}): HTMLElement {
+  const container = dom.document.createElement("div");
+  dom.document.body.appendChild(container);
+  const root = createRoot(container as unknown as Element);
+  flushSync(() => root.render(<ProjectDashboard {...dashboardProps(over)} />));
+  roots.push(root);
+  return container as unknown as HTMLElement;
+}
+
+const q = (root: HTMLElement, selector: string) => root.querySelector(selector) as unknown as HTMLElement | null;
+const all = (root: HTMLElement, selector: string) => Array.from(root.querySelectorAll(selector)) as unknown as HTMLElement[];
+const click = (el: HTMLElement | null) => { expect(el).not.toBeNull(); flushSync(() => el!.click()); };
+const board = (root: HTMLElement) => q(root, "[data-mobile2-board]");
+const sections = (root: HTMLElement) => all(root, "[data-mobile2-section]").map((el) => el.getAttribute("data-mobile2-section"));
+
+test("with no conversation focused the phone leaf is the board: the seat first, the queue, then Working and Recent", async () => {
+  const root = mount({ pipelines: [decisionPipeline, runningPipeline] });
+  expect(await waitFor(() => board(root) !== null)).toBe(true);
+  expect(q(root, '[data-mobile2-screen="board"]')).not.toBeNull();
+  /* The focus view is not mounted: one primary surface at a time. */
+  expect(q(root, '[data-testid="mobile-chat-shell"]')).toBeNull();
+  expect(sections(root)).toEqual(["orchestrator", "needs", "pipelines", "working", "recent"]);
+  /* The seat card leads, above every section row. */
+  expect(q(root, '[data-testid="mobile-orchestrator-slot"]')).not.toBeNull();
+
+  const rows = all(root, "[data-mobile2-row]");
+  const kinds = rows.map((row) => row.getAttribute("data-mobile2-row"));
+  expect(kinds).toEqual(["conversation", "pipeline", "pipelines", "conversation", "conversation", "catalog"]);
+  /* The queue holds both item kinds; the badge on the waiting row names the
+     decision, and the working row says what the agent is doing now. */
+  expect(rows[0]!.textContent).toContain("Implement the export endpoint");
+  expect(rows[0]!.textContent).toContain(translate("en", "mobile2.board.badgeQuestion"));
+  expect(rows[1]!.textContent).toContain("Fast conversation switching");
+  expect(rows[1]!.textContent).toContain(translate("en", "mobile2.board.badgeDecision"));
+  expect(rows[3]!.textContent).toContain("Add the held precedence");
+  expect(rows[5]!.textContent).toContain(translate("en", "mobile2.board.catalogCount", { count: 12 }));
+});
+
+test("the board has no Host section: background processes are rows in the host sheet behind ⋯", async () => {
+  const root = mount({ files: [asking, running, finished, backgroundTask] });
+  expect(await waitFor(() => board(root) !== null)).toBe(true);
+  expect(board(root)!.textContent).not.toContain("next dev · port 8899");
+  expect(sections(root)).not.toContain("host");
+  /* Nor a docked strip above the board, which is what the phone used to show. */
+  expect(q(root, "[data-mobile2-host-tasks]")).toBeNull();
+
+  click(q(root, '[data-mobile2-open="menu"]'));
+  await settle();
+  click(q(root, '[data-mobile2-open="host"]'));
+  await settle();
+  const sheet = q(root, '[data-mobile2-sheet="host"]')!;
+  expect(sheet).not.toBeNull();
+  expect(sheet.textContent).toContain("next dev · port 8899");
+  expect(sheet.textContent).toContain(translate("en", "mobile2.host.pid", { pid: 41_822 }));
+});
+
+test("the bar's badge counts the Needs-you rows: the conversations queued and the pipelines waiting on a decision", async () => {
+  const root = mount({ pipelines: [decisionPipeline, runningPipeline] });
+  expect(await waitFor(() => board(root) !== null)).toBe(true);
+  const rows = all(root, "[data-mobile2-row]").filter((row) => ["conversation", "pipeline"].includes(row.getAttribute("data-mobile2-row") ?? ""));
+  const queued = rows.filter((row) => row.closest("[data-mobile2-board]") && ["waiting", "needs_decision", "stalled", "limit"].includes(row.getAttribute("data-mobile2-state") ?? ""));
+  expect(queued).toHaveLength(2);
+  const badge = q(root, "[data-mobile2-attention-count]")!;
+  expect(badge).not.toBeNull();
+  expect(badge.getAttribute("data-mobile2-attention-count")).toBe("2");
+  expect(badge.getAttribute("aria-label")).toBe(translate("en", "mobile2.bar.attention", { count: 2 }));
+});
+
+test("opening a board row stamps the card seen (#1244) and pushes the conversation over the board", async () => {
+  const root = mount();
+  expect(await waitFor(() => board(root) !== null)).toBe(true);
+  expect(mutations.filter((mutation) => mutation.kind === "mark-seen")).toEqual([]);
+
+  const row = all(root, '[data-mobile2-row="conversation"]').find((el) => el.getAttribute("data-mobile2-path") === finished.path)!;
+  expect(row).toBeDefined();
+  click(row);
+  await settle();
+
+  /* The open gesture: the durable acknowledgement, the resolver's open, and
+     the conversation screen on top of the board. */
+  const seen = mutations.filter((mutation) => mutation.kind === "mark-seen");
+  expect(seen).toHaveLength(1);
+  expect(String(seen[0]!.id)).toContain("conversation_/repo/done.jsonl");
+  expect(opened).toEqual([finished.path]);
+  expect(topScreen(getMobileNav().getState())).toEqual({ kind: "chat", id: finished.path });
+  expect(await waitFor(() => board(root) === null)).toBe(true);
+
+  /* ‹ pops back to the list the operator came from. */
+  click(q(root, "[data-mobile2-back]"));
+  await settle();
+  expect(await waitFor(() => board(root) !== null)).toBe(true);
+});
