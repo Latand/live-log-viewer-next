@@ -1,88 +1,68 @@
 /**
- * Renders the desktop-v2 prototype's key screens to PNGs, locally, and runs
- * the headless gates that make each frame an acceptance check:
+ * Renders the desktop-v2 prototype's key screens to PNGs and runs the headless
+ * gates that make each frame an acceptance check:
  *
  *   bun docs/design/desktop-v2/capture.ts
- *   DESKTOP_V2_ONLY=board,pipeline-edit-stage bun docs/design/desktop-v2/capture.ts
+ *   DESKTOP_V2_ONLY=yard,chat-waiting bun docs/design/desktop-v2/capture.ts
  *   DESKTOP_V2_WIDTHS=1440 bun docs/design/desktop-v2/capture.ts
+ *   DESKTOP_V2_COLLECT=1 …   keep going after a failing frame, report all at the end
  *
  * Output lands in docs/design/desktop-v2/out/<frame>/<scheme>/<screen>.png,
  * which the directory's own .gitignore keeps out of the repository: a browser
  * render is not byte-deterministic, so it carries no privacy-manifest
- * provenance and the publication gate refuses committed rasters. The
- * orchestrator runs this to produce pictures for the operator.
+ * provenance and the publication gate refuses committed rasters (#1447).
  *
- * The pattern is docs/design/mobile-v2/capture.ts and the #979 recipe:
- * playwright over the locally installed Chrome, one context per colour scheme
- * and frame (1280×800, 1440×900, 1920×1080), and gates on every frame:
+ * The pattern is docs/design/mobile-v2/capture.ts: playwright over the locally
+ * installed Chromium, one context per colour scheme and frame (1280×800,
+ * 1440×900, 1920×1080), and on every frame:
  *
- *   - nothing scrolls sideways: the document, the rail, the column, the
- *     stage, the pinned pane, the feed, the stage graph, the kanban and each
- *     of its columns, the map, the account bodies, the editor's own scroller
- *     and the overview all keep scrollWidth ≤ clientWidth;
- *   - every visible control is at least 44 × 44 px (the issue's floor; visual
- *     weight is smaller inside the target where the design system asks);
- *   - no two visible controls' rects intersect, and a receipt never covers a
- *     control (with a dialog open only the dialog's controls count: the scrim
- *     or the click-away layer owns everything else);
- *   - the scheme actually applied (the canvas colour differs between the two);
+ *   - nothing scrolls sideways: the document, the rail, the stage, the feed,
+ *     the inspector, the accounts columns and the dialog keep scrollWidth ≤
+ *     clientWidth;
+ *   - every visible control is at least 44 × 44 px on screen — on the board
+ *     that includes the yard tiles and the block nodes at the camera's zoom,
+ *     which is why the camera never goes below the zoom at which a tile is
+ *     44 px tall;
+ *   - no two visible controls' rects intersect; a receipt covers no control;
+ *   - the requested scheme applied (the canvas colour differs);
  *   - the bench never shows inside a frame-sized viewport;
- *   - keyboard focus order: in the composer Tab walks field → model chip →
- *     attach → dictate → send slot; a dialog takes focus on open, Tab wraps
- *     inside it, Escape closes it and returns focus to the control that
- *     opened it.
+ *   - focus is never on the body;
+ *   - the composer's Tab order is field → chip → attach → mic → send slot;
+ *   - a dialog takes focus on open, Tab wraps inside it, Escape closes it and
+ *     returns focus to the control that opened it;
+ *   - no ALL-CAPS label anywhere, no banned phrase.
  *
- * The rework round adds the structural gates that make each frame an
- * acceptance check for docs/design/desktop-v2/critique.md (README §11), run on
- * every frame beside the geometry ones:
+ * The board gates, on every board frame:
  *
- *   - focus is never on the body (F5);
- *   - no `data-go` value appears twice in the column (F7);
- *   - the rail row, the column header and every overview card print the
- *     numbers one `counts(project)` computed (F6);
- *   - every stage node carries role, engine mark, model, reasoning, access and
- *     either its attempt pips or «not started», and every fail edge names its
- *     target and draws its round budget (F1);
- *   - every account row carries two meters and opens a detail (F2);
- *   - no payload hint, zoom tool or minimap survives on a stage (F19);
- *   - the composer has no permanent hint row and a pinned pane has its ⋯ (F15);
- *   - the stage is never a sentence with nothing to act on (F4);
- *   - the rail is collapsed under 1440 and expanded above it (F17);
- *   - a search snippet is clipped and never overlaps its meta column (F12);
- *   - the seat's mandate preview is three lines and Rotate is not primary (F13);
- *   - the findings title reads «attempt n · round k of m · j findings» (F18);
- *   - every task card carries a worker, a pipeline or an assign row (F3).
+ *   - the auto layout overlaps nothing: no two clusters intersect, and a
+ *     pinned cluster keeps exactly the place it was put;
+ *   - at yard altitude the block content is hidden and every tile is one
+ *     control; at block altitude every node is one control;
+ *   - the corner map draws one rect per cluster and a viewport frame;
+ *   - clusters that need the operator sort first (their keycaps are 1..k);
+ *   - every conversation of the project is in exactly one cluster, and the
+ *     bar's counts equal what the yard shows (the lineage gate);
+ *   - at yard altitude every tile carries its title, phrase, live line and a
+ *     silhouette with one ghost per node, the drawn content covers at least
+ *     70 % of the tile, and no title is truncated;
+ *   - the block view of a cluster keeps a neighbour in the frame;
+ *   - the settings sheet sits on its chip (left edges within 8 px, no scrim).
  *
- * A second pass over the rendered frames found four defects every gate above
- * was blind to, so each is a gate of its own now:
- *
- *   - no thread chip clips its identity or its state: a card that ellipses to
- *     «r…» has spent its width saying nothing (F3);
- *   - no meta fragment overflows its own box: a squeezed «nowrap» fragment
- *     paints across the next one's separator dot, and the line reads
- *     «working 4:02Read src/lib/pipelin…»; and none is cut by its nearest
- *     clipping ancestor, which is what took the «1» off a node's «applies from
- *     attempt 1». A fragment may shrink only if it can wrap;
- *   - the stage editor keeps a body of at least 300 px with its footer inside
- *     the viewport: at 1280 the record left it 142 px for 790 px of controls,
- *     which is F9's squeeze one axis over;
- *   - every compact account row carries its meter, which is the half of F2's
- *     acceptance that names the editor's and the composer's pickers.
- *
- * After the matrix, headless flows click through the design: the column's
- * arrow keys and Enter, the focus model and the Escape bridge, the single-key
- * map (n N / o i k m a p c [ ? and 1–9), the after-start pipeline editing
- * story (edit-stage for the next attempt and with restart, set-edge with the
- * budget redrawn as pips, note, rerun refused while unsettled then allowed
- * with stopCurrent, add-stage, remove-stage with undo, answer on a parked
- * stage, completed → edit → re-run), the graph at three widths with its
- * attempt history and round fold, the account rows and one account's detail
- * with Switch, the kanban's chips and a drag between columns, the map's auto
- * layout with a pin honoured and released, the receipts with their inverse
- * action, the arrival in this project and in another, the split pane's width
- * rule, and the vocabulary. The prototype is static — no server, no build step — so the page
- * is opened from a file: URL; the screen list is the same screens.js the page
- * uses.
+ * After the matrix, headless flows click through the design: pan by drag is
+ * transform-only (a MutationObserver sees no DOM change while panning — the
+ * "no reflow" promise), Ctrl+wheel zooms and the altitude flips with
+ * hysteresis, a keycap glides the camera onto its cluster, n / N walk the
+ * queue, Enter lifts and Esc lowers, a drag pins a cluster and the packer
+ * flows around it (the fit-all zoom moves by less than 10 %, the board's rect
+ * does not move under the receipt) and Release restores the auto layout, the
+ * inspector's answer / skip / pause / archive / edit-stage actions land with
+ * their inverse in a receipt, a banner from another project sits beside the
+ * canvas, a three-level lineage renders three rows with edges from the real
+ * parents, the chat's settings sheet is one level with every group visible
+ * and Esc returns focus to the chip, the send slot flips between Stop and
+ * Send, the question card answers on click, every account row opens a detail
+ * with the chart, the pace line and the conversations using it, and Esc from
+ * a chat returns to the yard with that node lifted.
  */
 import fs from "node:fs";
 import { createRequire } from "node:module";
@@ -91,7 +71,7 @@ import { pathToFileURL } from "node:url";
 
 import { chromium, type Browser, type Page } from "playwright-core";
 
-interface Screen { id: string; hash: string; title: string; scenario?: string; w?: string[] }
+interface Screen { id: string; hash: string; title: string; scenario?: string; query?: string; w?: string[] }
 
 const HERE = import.meta.dir;
 const OUT_DIR = path.join(HERE, "out");
@@ -107,12 +87,10 @@ const FRAMES = [
 const SCHEMES = ["dark", "light"] as const;
 const HIT_PX = 44;
 const CANVAS = { light: "rgb(243, 243, 246)", dark: "rgb(16, 16, 20)" } as const;
-/* One phrase per state, the product's words, no instructions and no confirmations in the UI. */
-const BANNED_WORDS = ["Waiting on you", "waiting for your answer", "Agent is waiting", "live tail", "polling stands by", "REQUEST_CHANGES", "Are you sure", "confirm", "Swipe", "Working dir"];
+const BANNED = ["Waiting on you", "waiting for your answer", "Agent is waiting", "live tail", "REQUEST_CHANGES", "Are you sure", "confirm", "Working dir", "STAGE PROMPT", "NEEDS YOU"];
 
 const only = (process.env.DESKTOP_V2_ONLY ?? "").split(",").map((s) => s.trim()).filter(Boolean);
-/* DESKTOP_V2_COLLECT=1 keeps rendering after a failing frame and reports every
-   failure at the end (still exiting 1), so one run names all the work. */
+const widths = (process.env.DESKTOP_V2_WIDTHS ?? "").split(",").map((s) => s.trim()).filter(Boolean);
 const collect = process.env.DESKTOP_V2_COLLECT === "1";
 const failures: string[] = [];
 function fail(err: unknown): void {
@@ -121,30 +99,33 @@ function fail(err: unknown): void {
   failures.push(message);
   console.error(`✗ ${message}`);
 }
-const widths = (process.env.DESKTOP_V2_WIDTHS ?? "").split(",").map((s) => s.trim()).filter(Boolean);
 
 interface Rect { x: number; y: number; w: number; h: number }
-interface Control { tag: string; label: string; rect: Rect; small: boolean; inToast: boolean }
+interface Control { tag: string; label: string; rect: Rect; small: boolean; inReceipt: boolean; fw: number; fh: number }
 interface Geometry {
   scrollers: { name: string; scrollWidth: number; clientWidth: number }[];
-  innerWidth: number;
-  canvas: string;
-  benchShown: boolean;
-  dialog: boolean;
-  controls: Control[];
-  toast: Rect | null;
+  canvas: string; benchShown: boolean; dialog: boolean; controls: Control[]; receipt: Rect | null; activeIsBody: boolean;
+  caps: string[]; banned: string[]; altitude: string | null;
+  clusters: { id: string; x: number; y: number; w: number; h: number; needs: boolean; key: number | null; pinned: boolean; nodes: number }[];
+  tilesVisible: number; nodesVisible: number; mmRects: number; mmView: boolean;
+  coverage: { missing: string[]; extra: string[]; dup: string[]; bar: Counts; yard: Counts; text: string } | null;
+  tiles: { id: string; fill: number; title: string; phrase: string; live: string; ghosts: number; truncated: boolean }[];
+  sheet: { sheetLeft: number; chipLeft: number; scrim: boolean } | null;
+  visibleClusters: number;
 }
+interface Counts { needs: number; working: number; pipelines: number }
+interface ProtoModel { clusters: { id: string; kind: string; x: number; y: number; w: number; h: number; needs: boolean; key?: number; pinned?: boolean; nodes: { conv: { id: string; seat?: boolean } | null }[]; held?: { id: string }[]; pipe?: { state: string } }[]; regions: unknown[] | null }
+interface Proto { model: () => ProtoModel; F: { conversations: { id: string; project: string }[] }; S: { project: string }; counts: (p: string) => Counts; stateBits: (c: unknown) => { key: string }; NEEDS: Set<string> }
 
 function urlFor(screen: Screen, scheme: string, width: number): string {
-  const [hash, query] = screen.hash.split("?");
-  return `${pathToFileURL(INDEX).href}?scheme=${scheme}&w=${width}${screen.scenario ? `&scenario=${screen.scenario}` : ""}${query ? `&${query}` : ""}${hash}`;
+  return `${pathToFileURL(INDEX).href}?scheme=${scheme}&w=${width}${screen.scenario ? `&scenario=${screen.scenario}` : ""}${screen.query ? `&${screen.query}` : ""}${screen.hash}`;
 }
 
 /* Every visible control with its rect clipped to its scroll ancestors and to
-   the frame, so a row scrolled under the status bar is not counted as
-   overlapping it. With a dialog open only the dialog's controls count. */
+   the frame. With a dialog open only the dialog's controls count: the scrim
+   owns everything else. */
 async function measure(page: Page): Promise<Geometry> {
-  return page.evaluate((hit) => {
+  return page.evaluate(({ hit, banned }) => {
     const app = document.getElementById("app")!;
     const clip = (el: Element) => {
       const r = el.getBoundingClientRect();
@@ -152,53 +133,86 @@ async function measure(page: Page): Promise<Geometry> {
       let a: Element | null = el.parentElement;
       while (a && a !== document.body) {
         const cs = getComputedStyle(a);
-        if (cs.overflowY !== "visible" || cs.overflowX !== "visible") {
-          const ar = a.getBoundingClientRect();
-          x1 = Math.max(x1, ar.left); y1 = Math.max(y1, ar.top); x2 = Math.min(x2, ar.right); y2 = Math.min(y2, ar.bottom);
-        }
+        if (cs.overflowY !== "visible" || cs.overflowX !== "visible") { const ar = a.getBoundingClientRect(); x1 = Math.max(x1, ar.left); y1 = Math.max(y1, ar.top); x2 = Math.min(x2, ar.right); y2 = Math.min(y2, ar.bottom); }
         a = a.parentElement;
       }
-      return { x: x1, y: y1, w: Math.max(0, x2 - x1), h: Math.max(0, y2 - y1), full: { w: r.width, h: r.height } };
+      return { x: x1, y: y1, w: Math.max(0, x2 - x1), h: Math.max(0, y2 - y1), fw: r.width, fh: r.height };
     };
-    const visible = (el: Element) => {
-      const r = el.getBoundingClientRect();
-      const cs = getComputedStyle(el);
-      return r.width > 0 && r.height > 0 && cs.visibility !== "hidden" && cs.display !== "none";
-    };
+    const visible = (el: Element) => { const r = el.getBoundingClientRect(); const cs = getComputedStyle(el); if (r.width <= 0 || r.height <= 0 || cs.visibility === "hidden" || cs.display === "none") return false; let a: Element | null = el; while (a && a !== document.body) { if (getComputedStyle(a).visibility === "hidden") return false; a = a.parentElement; } return true; };
     const dialog = app.querySelector("[data-dialog]");
-    const scope = dialog ?? app;
-    const controls: { tag: string; label: string; rect: Rect; small: boolean; inToast: boolean }[] = [];
+    /* A lifted pane is the one live surface while it is up: the nodes under it
+       are inert (pointer-events none), so only its controls count, like a dialog's. */
+    const scope = dialog ?? app.querySelector("[data-lift-scope]") ?? app;
+    const controls: Control[] = [];
     for (const el of scope.querySelectorAll('button, a[href], [role="button"], select, input, textarea')) {
       if (!visible(el)) continue;
       if (el.parentElement?.closest('button, a[href], [role="button"]')) continue;
       const c = clip(el);
       if (c.w <= 0 || c.h <= 0) continue;
-      controls.push({ tag: el.tagName.toLowerCase(), label: (el.getAttribute("aria-label") || (el as HTMLElement).innerText || el.getAttribute("placeholder") || "").trim().slice(0, 40), rect: { x: c.x, y: c.y, w: c.w, h: c.h }, small: c.full.w < hit - 0.5 || c.full.h < hit - 0.5, inToast: Boolean(el.closest(".receipt")) });
+      const app_r = app.getBoundingClientRect();
+      if (c.x + c.w <= app_r.left || c.y + c.h <= app_r.top || c.x >= app_r.right || c.y >= app_r.bottom) continue;
+      controls.push({ tag: el.tagName.toLowerCase(), label: (el.getAttribute("aria-label") || (el as HTMLElement).innerText || el.getAttribute("placeholder") || "").trim().slice(0, 40), rect: { x: c.x, y: c.y, w: c.w, h: c.h }, small: c.fw < hit - 0.5 || c.fh < hit - 0.5, inReceipt: Boolean(el.closest(".receipt")), fw: c.fw, fh: c.fh });
     }
-    const scrollers = [["document", document.documentElement], ["rail", app.querySelector(".rail")], ["column", app.querySelector(".col")], ["stage", app.querySelector(".stage")], ["pin", app.querySelector(".pin")], ["feed", app.querySelector(".stage .feed")], ["dialog", dialog],
-      ["stage graph", app.querySelector(".graph")], ["stage body", app.querySelector(".sbody")], ["kanban", app.querySelector(".kanban")], ["map", app.querySelector(".map")], ["accounts", app.querySelector(".acc-body")], ["account detail", app.querySelector(".acc-detail")], ["editor", app.querySelector(".editor .ebody")], ["overview", app.querySelector(".ov")],
-      ...[...app.querySelectorAll(".kcol .kl")].map((el, i) => [`kanban column ${i + 1}`, el] as [string, Element])]
+    const scrollers = [["document", document.documentElement], ["rail", app.querySelector(".rail")], ["stage", app.querySelector(".stagewrap")], ["feed", app.querySelector("[data-feed]")], ["inspector", app.querySelector(".insp-body")], ["accounts list", app.querySelector(".acc-list")], ["account detail", app.querySelector(".acc-detail")], ["dialog", dialog], ["chat", app.querySelector(".chat")], ["settings", app.querySelector(".settings")], ["bar", app.querySelector(".bar")], ["status", app.querySelector(".status")]]
       .filter(([, el]) => el)
       .map(([name, el]) => ({ name: name as string, scrollWidth: (el as HTMLElement).scrollWidth, clientWidth: (el as HTMLElement).clientWidth }));
-    const toastEl = app.querySelector(".receipt");
-    const tr = toastEl ? toastEl.getBoundingClientRect() : null;
+    const rc = app.querySelector(".receipt");
+    const rr = rc ? rc.getBoundingClientRect() : null;
     const bench = document.getElementById("bench");
+    const text = (app as HTMLElement).innerText;
+    const caps = [...new Set((text.match(/\b[A-Z]{4,}\b/g) ?? []).filter((w) => !["JSON", "APPROVE", "PID", "HEAD", "README", "CSV", "TTL", "API", "SHA", "URL", "HTML", "MCP", "CLI", "RAM"].includes(w)))];
+    const bannedHits = banned.filter((b) => text.includes(b));
+    const board = app.querySelector("[data-board]");
+    const proto = (window as unknown as { __proto: Proto }).__proto;
+    const model: ProtoModel = board ? proto.model() : { clusters: [], regions: null };
+    /* The lineage gate: every conversation of the project in exactly one
+       cluster, and the bar's counts equal to what the yard carries. */
+    let coverage: Geometry["coverage"] = null;
+    if (board && !model.regions) {
+      const all = proto.F.conversations.filter((c) => c.project === proto.S.project).map((c) => c.id);
+      const seen = new Set<string>(); const dup: string[] = [];
+      for (const c of model.clusters) for (const id of [...c.nodes.filter((n) => n.conv).map((n) => n.conv!.id), ...(c.held ?? []).map((h) => h.id)]) { if (seen.has(id)) dup.push(id); seen.add(id); }
+      const yard = { needs: 0, working: 0, pipelines: 0 };
+      for (const c of model.clusters) {
+        if (c.kind === "pipeline" && c.pipe) { if (c.pipe.state === "needs_decision") yard.needs += 1; if (["running", "needs_decision", "provisioning", "paused"].includes(c.pipe.state)) yard.pipelines += 1; }
+        for (const n of c.nodes) { if (!n.conv || n.conv.seat) continue; const k = proto.stateBits(n.conv).key; if (proto.NEEDS.has(k)) yard.needs += 1; if (k === "working") yard.working += 1; }
+      }
+      coverage = { missing: all.filter((id) => !seen.has(id)), extra: [...seen].filter((id) => !all.includes(id)), dup, bar: proto.counts(proto.S.project), yard, text: app.querySelector(".bar-title .meta")?.textContent ?? "" };
+    }
+    const altitudeNow = board ? (board as HTMLElement).dataset.altitude : null;
+    const tiles: Geometry["tiles"] = altitudeNow === "yard" ? [...app.querySelectorAll(".cluster .tile")].filter(visible).map((t) => {
+      const tr = t.getBoundingClientRect();
+      /* Drawn content = the bounding box of the text rows and the silhouette's
+         marks, clipped to the tile (the critique measured the text's bbox the
+         same way). */
+      const drawn = [...[".tt", ".trow", ".tl"].map((sel) => t.querySelector(sel)).filter(Boolean), ...t.querySelectorAll(".sil .gh, .sil .gm, .sil-lines .lp")].map((el) => el!.getBoundingClientRect()).filter((r) => r.width > 0 && r.height > 0);
+      const x1 = Math.max(tr.left, Math.min(...drawn.map((r) => r.left))), y1 = Math.max(tr.top, Math.min(...drawn.map((r) => r.top))), x2 = Math.min(tr.right, Math.max(...drawn.map((r) => r.right))), y2 = Math.min(tr.bottom, Math.max(...drawn.map((r) => r.bottom)));
+      const drawnArea = drawn.length ? Math.max(0, x2 - x1) * Math.max(0, y2 - y1) : 0;
+      const tt = t.querySelector(".tt") as HTMLElement | null;
+      return { id: (t.closest(".cluster") as HTMLElement).dataset.cluster!, fill: drawnArea / (tr.width * tr.height), title: tt?.textContent?.trim() ?? "", phrase: t.querySelector(".tm")?.textContent?.trim() ?? "", live: t.querySelector(".tl")?.textContent?.trim() ?? "", ghosts: t.querySelectorAll(".sil .gh").length, truncated: Boolean(tt && tt.scrollHeight - tt.clientHeight > parseFloat(getComputedStyle(tt).lineHeight) / 2) };
+    }) : [];
+    const sheetEl = app.querySelector(".settings"); const chipEl = app.querySelector('[data-focus="chip"]');
+    const sheet = sheetEl && chipEl ? { sheetLeft: sheetEl.getBoundingClientRect().left, chipLeft: chipEl.getBoundingClientRect().left, scrim: Boolean(app.querySelector(".scrim")) } : null;
+    const br = board ? board.getBoundingClientRect() : null;
+    const visibleClusters = br ? [...app.querySelectorAll(".cluster")].filter((el) => { const r = el.getBoundingClientRect(); return r.right > br.left && r.left < br.right && r.bottom > br.top && r.top < br.bottom; }).length : 0;
     return {
-      scrollers,
-      innerWidth,
-      canvas: getComputedStyle(app).backgroundColor,
-      benchShown: Boolean(bench && getComputedStyle(bench).display !== "none"),
-      dialog: Boolean(dialog),
-      controls,
-      toast: tr ? { x: tr.left, y: tr.top, w: tr.width, h: tr.height } : null,
+      scrollers, canvas: getComputedStyle(app).backgroundColor, benchShown: Boolean(bench && !bench.hidden), dialog: Boolean(dialog), controls,
+      receipt: rr ? { x: rr.left, y: rr.top, w: rr.width, h: rr.height } : null,
+      activeIsBody: !document.activeElement || document.activeElement === document.body, caps, banned: bannedHits,
+      altitude: board ? (board as HTMLElement).dataset.altitude ?? null : null,
+      clusters: model.clusters.map((c) => ({ id: c.id, x: c.x, y: c.y, w: c.w, h: c.h, needs: c.needs, key: c.key ?? null, pinned: Boolean(c.pinned), nodes: c.nodes.length })),
+      coverage, tiles, sheet, visibleClusters,
+      tilesVisible: [...app.querySelectorAll(".cluster .tile")].filter((el) => getComputedStyle(el).display !== "none").length,
+      nodesVisible: [...app.querySelectorAll(".cluster .node")].filter((el) => getComputedStyle(el).display !== "none" && getComputedStyle(el.parentElement!).visibility !== "hidden").length,
+      mmRects: app.querySelectorAll(".minimap rect:not(.mm-bg):not(.mm-view):not(.mm-region):not(.mm-desk)").length, mmView: Boolean(app.querySelector("[data-mm-view]")),
     };
-  }, HIT_PX);
+  }, { hit: HIT_PX, banned: BANNED });
 }
 
 const intersects = (a: Rect, b: Rect) => a.x < b.x + b.w - 1 && b.x < a.x + a.w - 1 && a.y < b.y + b.h - 1 && b.y < a.y + a.h - 1;
-const fmt = (c: Control) => `${c.tag} «${c.label}» ${Math.round(c.rect.w)}×${Math.round(c.rect.h)}@${Math.round(c.rect.x)},${Math.round(c.rect.y)}`;
+const fmt = (c: Control) => `${c.tag} «${c.label}» ${Math.round(c.fw)}×${Math.round(c.fh)}@${Math.round(c.rect.x)},${Math.round(c.rect.y)}`;
 
-function gate(label: string, g: Geometry, scheme: "dark" | "light"): void {
+function gate(label: string, g: Geometry, scheme: "dark" | "light", screen: Screen): void {
   for (const s of g.scrollers) if (s.scrollWidth > s.clientWidth + 1) throw new Error(`${label}: the ${s.name} scrolls sideways to ${s.scrollWidth}px in ${s.clientWidth}px`);
   if (g.benchShown) throw new Error(`${label}: the bench renders inside the frame`);
   const small = g.controls.filter((c) => c.small);
@@ -206,12 +220,46 @@ function gate(label: string, g: Geometry, scheme: "dark" | "light"): void {
   for (let i = 0; i < g.controls.length; i++) for (let j = i + 1; j < g.controls.length; j++) {
     if (intersects(g.controls[i].rect, g.controls[j].rect)) throw new Error(`${label}: two controls overlap — ${fmt(g.controls[i])} and ${fmt(g.controls[j])}`);
   }
-  if (g.toast) {
-    /* The receipt's own inverse action is the one control allowed inside it. */
-    const hit = g.controls.find((c) => !c.inToast && intersects(g.toast!, c.rect));
-    if (hit) throw new Error(`${label}: the receipt covers ${fmt(hit)}`);
-  }
+  if (g.receipt) { const hit = g.controls.find((c) => !c.inReceipt && intersects(g.receipt!, c.rect)); if (hit) throw new Error(`${label}: the receipt covers ${fmt(hit)}`); }
   if (g.canvas !== CANVAS[scheme]) throw new Error(`${label}: canvas is ${g.canvas}, expected the ${scheme} scheme's ${CANVAS[scheme]}`);
+  if (g.activeIsBody) throw new Error(`${label}: focus is on the body`);
+  if (g.caps.length) throw new Error(`${label}: ALL-CAPS label(s) ${g.caps.join(", ")}`);
+  if (g.banned.length) throw new Error(`${label}: banned phrase(s) ${g.banned.join(", ")}`);
+  if (g.altitude) {
+    for (let i = 0; i < g.clusters.length; i++) for (let j = i + 1; j < g.clusters.length; j++) {
+      const a = g.clusters[i], b = g.clusters[j];
+      if (a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h) throw new Error(`${label}: clusters ${a.id} and ${b.id} overlap in the auto layout`);
+    }
+    if (g.altitude === "yard" && g.nodesVisible) throw new Error(`${label}: ${g.nodesVisible} block node(s) visible at yard altitude`);
+    if (g.altitude === "block" && screen.hash === "#/board" && !g.nodesVisible && g.clusters.length) throw new Error(`${label}: no node visible at block altitude`);
+    if (g.mmRects !== g.clusters.length || !g.mmView) throw new Error(`${label}: the corner map draws ${g.mmRects} of ${g.clusters.length} clusters (viewport ${g.mmView})`);
+    const keyed = g.clusters.filter((c) => c.key !== null).sort((a, b) => a.key! - b.key!);
+    let seenNonNeed = false;
+    for (const c of keyed) { if (!c.needs) seenNonNeed = true; else if (seenNonNeed) throw new Error(`${label}: cluster ${c.id} needs you but is keyed after a cluster that does not`); }
+    if (screen.scenario === "pinned") { const p = g.clusters.find((c) => c.id === "p2"); if (!p || !p.pinned || p.x !== 240 || p.y !== -60) throw new Error(`${label}: the pinned cluster did not keep its place (${JSON.stringify(p)})`); }
+    if (g.coverage) {
+      const c = g.coverage;
+      if (c.missing.length || c.extra.length || c.dup.length) throw new Error(`${label}: lineage — conversations in no cluster [${c.missing.join(",")}], in a cluster but not the project [${c.extra.join(",")}], in two clusters [${c.dup.join(",")}]`);
+      for (const k of ["needs", "working", "pipelines"] as const) if (c.bar[k] !== c.yard[k]) throw new Error(`${label}: the bar says ${c.bar[k]} ${k}, the yard carries ${c.yard[k]}`);
+      if (!c.text.includes(`${c.bar.needs} need you`) || !c.text.includes(`${c.bar.working} working`)) throw new Error(`${label}: the bar prints «${c.text}» for ${JSON.stringify(c.bar)}`);
+    }
+    if (g.altitude === "yard") {
+      const byId = new Map(g.clusters.map((c) => [c.id, c]));
+      for (const t of g.tiles) {
+        if (t.fill < 0.7) throw new Error(`${label}: tile ${t.id} draws ${Math.round(t.fill * 100)} % of its rect (title, phrase, live line and silhouette)`);
+        if (!t.title || !t.phrase || !t.live) throw new Error(`${label}: tile ${t.id} lacks a title, phrase or live line (${JSON.stringify([t.title, t.phrase, t.live])})`);
+        const cl = byId.get(t.id);
+        if (cl && t.ghosts !== cl.nodes) throw new Error(`${label}: tile ${t.id} shows ${t.ghosts} ghost(s) for ${cl.nodes} node(s)`);
+        if (t.truncated) throw new Error(`${label}: tile ${t.id} truncates its title «${t.title}»`);
+      }
+    }
+    if (screen.id === "yard-block" && g.visibleClusters < 2) throw new Error(`${label}: the block view frames ${g.visibleClusters} cluster(s); a neighbour should be in view`);
+  }
+  if (screen.id === "chat-settings") {
+    if (!g.sheet) throw new Error(`${label}: no settings sheet or chip to anchor it`);
+    if (Math.abs(g.sheet.sheetLeft - g.sheet.chipLeft) > 8) throw new Error(`${label}: the sheet's left edge is ${Math.round(g.sheet.sheetLeft - g.sheet.chipLeft)} px from the chip's`);
+    if (g.sheet.scrim) throw new Error(`${label}: the sheet dims the feed with a scrim`);
+  }
 }
 
 async function open(page: Page, screen: Screen, scheme: string, width: number): Promise<void> {
@@ -221,21 +269,22 @@ async function open(page: Page, screen: Screen, scheme: string, width: number): 
   if (sameDocument) await page.reload({ waitUntil: "load" });
   await page.waitForSelector('#app[data-ready="1"]', { timeout: 10_000 });
   await page.evaluate(() => document.fonts.ready);
-  await page.waitForTimeout(screen.scenario === "arrival" ? 900 : 120);
+  await page.waitForTimeout(150);
 }
 
 const hash = (page: Page) => page.evaluate(() => location.hash);
 const hasDialog = (page: Page) => page.evaluate(() => Boolean(document.querySelector("#app [data-dialog]")));
-const active = (page: Page) => page.evaluate(() => { const a = document.activeElement as HTMLElement | null; return a ? `${a.tagName.toLowerCase()}${a.dataset.focus ? `[${a.dataset.focus}]` : ""}${a.dataset.go ? `{${a.dataset.go}}` : ""}${a.dataset.act ? `(${a.dataset.act})` : ""}` : "none"; });
+const active = (page: Page) => page.evaluate(() => { const a = document.activeElement as HTMLElement | null; return a ? `${a.tagName.toLowerCase()}${a.dataset.focus ? `[${a.dataset.focus}]` : ""}${a.dataset.go ? `{${a.dataset.go}}` : ""}${a.dataset.act ? `(${a.dataset.act})` : ""}${a.dataset.board !== undefined ? "<board>" : ""}` : "none"; });
 const activeInDialog = (page: Page) => page.evaluate(() => Boolean(document.activeElement?.closest("#app [data-dialog]")));
+const cam = (page: Page) => page.evaluate(() => ({ ...(window as unknown as { __proto: { cam: { x: number; y: number; z: number } } }).__proto.cam }));
+const altitude = (page: Page) => page.evaluate(() => (document.querySelector("[data-board]") as HTMLElement | null)?.dataset.altitude ?? null);
 async function expect(cond: boolean, msg: string): Promise<void> { if (!cond) throw new Error(`flow: ${msg}`); }
 
-/* The composer's focus order and a dialog's focus contract, measured on the
-   frames that have them. */
-async function focusGates(page: Page, label: string, screen: Screen): Promise<void> {
-  const hasComposer = await page.evaluate(() => Boolean(document.querySelector('#app .stage .box [data-focus="field"]')));
+/* The composer's focus order and a dialog's focus contract, on the frames that have them. */
+async function focusGates(page: Page, label: string): Promise<void> {
+  const hasComposer = await page.evaluate(() => Boolean(document.querySelector('#app .chat .box [data-focus="field"]')));
   if (hasComposer && !(await hasDialog(page))) {
-    await page.focus('#app .stage .box [data-focus="field"]');
+    await page.focus('#app .chat .box [data-focus="field"]');
     const order: string[] = [await page.evaluate(() => (document.activeElement as HTMLElement).dataset.focus ?? "")];
     for (let i = 0; i < 4; i++) { await page.keyboard.press("Tab"); order.push(await page.evaluate(() => (document.activeElement as HTMLElement).dataset.focus ?? "")); }
     const want = ["field", "chip", "attach", "mic", "send"];
@@ -243,634 +292,353 @@ async function focusGates(page: Page, label: string, screen: Screen): Promise<vo
   }
   if (await hasDialog(page)) {
     if (!(await activeInDialog(page))) throw new Error(`${label}: the dialog opened without taking focus (active: ${await active(page)})`);
-    const count = await page.evaluate(() => [...document.querySelectorAll("#app [data-dialog] button, #app [data-dialog] input, #app [data-dialog] textarea, #app [data-dialog] select")].filter((x) => !(x as HTMLButtonElement).disabled && (x as HTMLElement).offsetParent !== null).length);
+    const count = await page.evaluate(() => [...document.querySelectorAll("#app [data-dialog] button, #app [data-dialog] input, #app [data-dialog] textarea")].filter((x) => !(x as HTMLButtonElement).disabled && (x as HTMLElement).offsetParent !== null).length);
     for (let i = 0; i < count + 1; i++) { await page.keyboard.press("Tab"); if (!(await activeInDialog(page))) throw new Error(`${label}: Tab #${i + 1} left the dialog (active: ${await active(page)})`); }
     await page.keyboard.press("Escape");
     if (await hasDialog(page)) throw new Error(`${label}: Escape did not close the dialog`);
     const h = await hash(page);
-    if (/\/(menu|model|details|create|search|host|keys|new-agent|new-pipeline|rotate)$/.test(h) || /\/add\/\d+$/.test(h)) throw new Error(`${label}: after Escape the route still names the dialog (${h})`);
-    void screen;
+    if (/\/(menu|settings|create|search|host|keys|rotate)$/.test(h)) throw new Error(`${label}: after Escape the route still names the dialog (${h})`);
+    if (await page.evaluate(() => document.activeElement === document.body)) throw new Error(`${label}: after Escape the focus is on the body`);
   }
-}
-
-/* Structural gates that make a frame an acceptance check for the rework, run
-   on every frame beside the geometry ones. Each returns the violations it
-   found, so one run names all of them. */
-async function structure(page: Page, width: number, screen: Screen): Promise<string[]> {
-  return page.evaluate(({ width, id, hash }) => {
-    const bad: string[] = [];
-    const app = document.getElementById("app")!;
-    const proto = (window as unknown as { __proto: { counts: (id: string) => { needs: number; working: number; pipelines: number } } }).__proto;
-    const txt = (el: Element | null) => (el as HTMLElement | null)?.innerText?.replace(/\s+/g, " ").trim() ?? "";
-    const dialog = app.querySelector("[data-dialog]");
-
-    /* F5: acting never drops focus to the body. */
-    const active = document.activeElement as HTMLElement | null;
-    if (!active || active === document.body) bad.push("focus is on the body, not on the stage's primary target");
-
-    /* F7: one id, one row. */
-    const seen = new Map<string, number>();
-    for (const el of app.querySelectorAll(".col-body [data-go]")) { const g = (el as HTMLElement).dataset.go!; seen.set(g, (seen.get(g) ?? 0) + 1); }
-    for (const [g, n] of seen) if (n > 1) bad.push(`the column lists ${g} ${n} times`);
-
-    /* F6: the rail row, the column header and the overview card print the
-       numbers one function computed. */
-    for (const row of app.querySelectorAll(".rail-list .prow[data-project]")) {
-      const pid = (row as HTMLElement).dataset.project!;
-      const n = proto.counts(pid);
-      if (app.dataset.rail === "0") {
-        /* Collapsed, the row is initials and the needs count as a badge. */
-        const b = txt(row.querySelector(".ini b"));
-        if (b !== (n.needs ? String(n.needs) : "")) bad.push(`the collapsed rail row ${pid} shows «${b}», not ${n.needs || "no"} needs`);
-        continue;
-      }
-      const t = txt(row);
-      if (n.needs && !t.includes(`${n.needs} need you`)) bad.push(`rail row ${pid} reads «${t}», not ${n.needs} need you`);
-      if (n.working && !t.includes(`${n.working} working`)) bad.push(`rail row ${pid} reads «${t}», not ${n.working} working`);
-    }
-    const head = txt(app.querySelector(".col-head h1 small"));
-    if (head && !app.querySelector(".ov")) {
-      const cur = app.querySelector(".rail-list .prow.on[data-project]") as HTMLElement | null;
-      if (cur) { const n = proto.counts(cur.dataset.project!); if (!head.includes(`${n.needs} need you`)) bad.push(`the column header reads «${head}», not ${n.needs} need you`); }
-    }
-    for (const card of app.querySelectorAll(".ov .pc .ph[data-project]")) {
-      const pid = (card as HTMLElement).dataset.project!; const n = proto.counts(pid); const t = txt(card);
-      if (n.needs && !t.includes(`${n.needs} need you`)) bad.push(`overview card ${pid} reads «${t}», not ${n.needs} need you`);
-      if (!t.includes(`${n.working} working`)) bad.push(`overview card ${pid} reads «${t}», not ${n.working} working`);
-    }
-
-    /* F1: every node carries its whole definition, every loop names its
-       target and its round budget. */
-    for (const node of app.querySelectorAll(".graph .node")) {
-      const t = txt(node);
-      if (!node.querySelector(".l1 .role")) bad.push(`a stage node has no role`);
-      if (!node.querySelector(".l2 .mark")) bad.push(`stage node «${t.slice(0, 24)}» has no engine mark`);
-      for (const want of ["read-", "/"]) if (!t.includes(want)) bad.push(`stage node «${t.slice(0, 40)}» is missing «${want}»`);
-      if (!/attempt|not started/.test(t)) bad.push(`stage node «${t.slice(0, 40)}» states neither its attempts nor «not started»`);
-      if (!node.querySelector(".pips") && !t.includes("not started")) bad.push(`stage node «${t.slice(0, 24)}» shows no attempt pips`);
-    }
-    for (const loop of app.querySelectorAll(".graph .loop")) {
-      const t = txt(loop.querySelector(".ll"));
-      if (!/^↺ \S+/.test(t)) bad.push(`a fail edge label reads «${t}», not ↺ <target>`);
-      if (!loop.querySelector(".pips i.round")) bad.push(`the fail edge «${t}» draws no round budget`);
-    }
-    if (app.querySelector(".graph")) {
-      for (const node of app.querySelectorAll(".graph .node")) {
-        const id = (node as HTMLElement).dataset.node;
-        const loop = [...app.querySelectorAll(".graph .loop .ll")].some((l) => txt(l).startsWith(`↺ ${id}`));
-        if (loop && !txt(node.parentElement)) bad.push(`the loop into ${id} has no node`);
-      }
-      const meta = txt(app.querySelector(".graph"));
-      if ([...app.querySelectorAll(".graph .loop")].length && !/\d+ of \d+ rounds/.test(meta)) bad.push("no stage node states its round budget as «k of n rounds»");
-    }
-
-    /* F2: every account row, both windows. */
-    const rows = [...app.querySelectorAll(".acc-body .arow:not(.add)")];
-    if (rows.length) {
-      const meters = app.querySelectorAll(".acc-body .arow:not(.add) .meter").length;
-      if (meters !== rows.length * 2) bad.push(`${rows.length} account rows carry ${meters} meters, expected ${rows.length * 2}`);
-      for (const r of rows) if (!(r as HTMLElement).dataset.go?.startsWith("#/accounts/")) bad.push(`an account row is not a target`);
-    }
-    /* F2 is «every account, a bar», not «every account on one screen»: the
-       stage editor's picker and the composer's are where an account is chosen,
-       and a bar is what the choice is made on. */
-    for (const r of app.querySelectorAll(".arow.compact")) {
-      if (!r.querySelector(".meter")) bad.push(`the account row «${txt(r).slice(0, 24)}» shows no usage bar`);
-    }
-
-    /* F19: no request payloads, no zoom tools, no empty minimap. */
-    const stageText = txt(app.querySelector(".stage"));
-    for (const w of ["PATCH", "expectedRevision", "stageId:", "{index:"]) if (stageText.includes(w)) bad.push(`the stage still prints the payload hint «${w}»`);
-    if (app.querySelector('[data-act^="zoom"]')) bad.push("the map still carries zoom tools");
-    if (app.querySelector(".minimap")) bad.push("the map still carries a minimap");
-
-    /* F15: the composer hint is in the placeholder; the pinned pane has its menu. */
-    if (app.querySelector(".box .hint")) bad.push("the composer still carries a permanent hint row");
-    const pin = app.querySelector(".pin");
-    if (pin && !pin.querySelector('[data-go$="/menu"]')) bad.push("the pinned pane has no ⋯ menu");
-
-    /* F4: the landing stage does work. */
-    const empty = app.querySelector(".emptystage");
-    if (empty && !empty.querySelector(".btn")) bad.push("the stage shows a sentence with nothing to act on");
-    if (hash === "#/board" && empty) bad.push("the board's stage is a placard");
-
-    /* F17: under 1440 the rail starts collapsed. */
-    if (width < 1440 && !hash.includes("rail=") && app.dataset.rail !== "0") bad.push("at 1280 the rail is expanded by default");
-    if (width >= 1440 && !hash.includes("rail=") && app.dataset.rail !== "1") bad.push("at 1440 and wider the rail is collapsed by default");
-
-    /* F12: a search snippet never paints over the meta column. */
-    for (const row of app.querySelectorAll(".srow")) {
-      const snip = row.querySelector(".snip") as HTMLElement | null; const meta = row.querySelector(".sm") as HTMLElement | null;
-      if (!snip || !meta) { bad.push("a search result has no snippet or no meta"); continue; }
-      if (getComputedStyle(snip).overflow === "visible") bad.push("a search snippet is not clipped");
-      const a = snip.getBoundingClientRect(); const b = meta.getBoundingClientRect();
-      if (a.right > b.left + 1 && a.top < b.bottom - 1 && b.top < a.bottom - 1) bad.push("a search snippet overlaps its meta column");
-    }
-
-    /* F13: three faded lines of the mandate, and Rotate is not the primary. */
-    const mand = app.querySelector(".seatpanel .mand .txt") as HTMLElement | null;
-    if (mand) {
-      const lh = parseFloat(getComputedStyle(mand).lineHeight) || 18;
-      if (mand.clientHeight < lh * 2.5) bad.push(`the mandate preview shows ${Math.round(mand.clientHeight / lh)} lines, expected three`);
-      const rot = app.querySelector("[data-orchestrator-rotate]");
-      if (rot && rot.classList.contains("primary")) bad.push("Rotate is still the primary button on the seat");
-    }
-
-    /* The meta grammar holds only if every fragment fits the box it was given:
-       a squeezed nowrap fragment overflows and paints over the next one's
-       separator, and the line reads «working 4:02Read src/lib/pipelin…». .rest
-       is the one fragment allowed to give way, by clipping. */
-    const clipRight = (el: Element): number => {
-      let node = el.parentElement; let edge = Infinity;
-      while (node) {
-        const o = getComputedStyle(node).overflowX;
-        if (o === "hidden" || o === "auto" || o === "scroll") edge = Math.min(edge, node.getBoundingClientRect().right);
-        node = node.parentElement;
-      }
-      return edge;
-    };
-    for (const line of app.querySelectorAll(".meta")) {
-      for (const frag of line.children) {
-        if (frag.classList.contains("rest")) continue;
-        const box = frag.getBoundingClientRect();
-        if (!box.width) continue;
-        const range = document.createRange(); range.selectNodeContents(frag);
-        const text = range.getBoundingClientRect();
-        if (text.width > box.width + 1) bad.push(`the meta fragment «${txt(frag).slice(0, 20)}» overflows its box by ${Math.round(text.width - box.width)} px`);
-        /* A fragment wider than its box paints over the next one's dot; a
-           fragment past the nearest clipping ancestor is simply cut, and the
-           part that goes is the tail — the number the phrase exists to name. */
-        if (box.right > clipRight(frag) + 1) bad.push(`the meta fragment «${txt(frag).slice(0, 24)}» is cut by ${Math.round(box.right - clipRight(frag))} px`);
-      }
-    }
-
-    /* F9: the editor's footer stays put and its body stays usable. A pane that
-       shows two of nine groups through a 142 px slot is the squeeze the
-       critique measured, moved from the width to the height. */
-    const ebody = app.querySelector(".editor .ebody") as HTMLElement | null;
-    if (ebody) {
-      if (ebody.clientHeight < 300) bad.push(`the editor body is ${ebody.clientHeight} px tall for ${ebody.scrollHeight} px of controls`);
-      const foot = app.querySelector(".editor .foot") as HTMLElement | null;
-      if (!foot) bad.push("the editor has no pinned footer");
-      else if (foot.getBoundingClientRect().bottom > window.innerHeight + 1) bad.push("the editor's footer is below the viewport");
-    }
-
-    /* F18: one vocabulary — attempt is a run, round is a traversal. */
-    const findings = txt(app.querySelector(".findings h3"));
-    if (findings && !/attempt \d+ · round \d+ of \d+ · \d+ findings/.test(findings)) bad.push(`the findings title reads «${findings}»`);
-
-    /* F3: a kanban card is one thread, and its columns scroll down, not sideways. */
-    for (const card of app.querySelectorAll(".kcard")) {
-      if (!card.querySelector(".kchips .kchip")) bad.push(`the task card «${txt(card).slice(0, 30)}» carries no worker, pipeline or assign row`);
-    }
-    /* F3, second half: the thread has to be readable. A chip that ellipses its
-       state to «r…» or «needs a d…» has spent the card's whole width saying
-       nothing, and the state is the reason the operator looks at the card. */
-    for (const chip of app.querySelectorAll(".kchip")) {
-      for (const sel of [".who", ".st"]) {
-        const el = chip.querySelector(sel) as HTMLElement | null;
-        if (!el) continue;
-        if (el.scrollWidth > el.clientWidth + 1) bad.push(`a card chip clips «${txt(el)}» into ${el.clientWidth} px (needs ${el.scrollWidth})`);
-      }
-    }
-    void id;
-    return bad;
-  }, { width, id: screen.id, hash: screen.hash });
 }
 
 async function flows(browser: Browser): Promise<void> {
-  const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: "dark", reducedMotion: "reduce" });
-  const page = await context.newPage();
+  const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: "dark", reducedMotion: "reduce" });
+  const page = await ctx.newPage();
   const errors: string[] = [];
-  page.on("pageerror", (e) => errors.push(String(e)));
-  const at = (h: string, scenario?: string, width = 1440) => open(page, { id: "flow", hash: h, title: "", scenario }, "dark", width);
-  const text = (sel: string) => page.evaluate((s) => document.querySelector(s)?.textContent?.replace(/\s+/g, " ").trim() ?? "", sel);
-  const count = (sel: string) => page.evaluate((s) => document.querySelectorAll(s).length, sel);
-  const has = (sel: string) => page.evaluate((s) => Boolean(document.querySelector(s)), sel);
-  const center = async (sel: string) => page.evaluate((s) => { const r = document.querySelector(s)!.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + Math.min(20, r.height / 2) }; }, sel);
-  const drag = async (from: string, to: string) => {
-    const a = await center(from); const b = await center(to);
-    await page.mouse.move(a.x, a.y); await page.mouse.down();
-    await page.mouse.move((a.x + b.x) / 2, (a.y + b.y) / 2, { steps: 4 });
-    await page.mouse.move(b.x, b.y, { steps: 4 });
-    await page.mouse.up(); await page.waitForTimeout(40);
-  };
-  try {
-    /* Column keyboard: ↓ ↓ Enter opens the highlighted row. */
-    await at("#/board");
-    await page.keyboard.press("ArrowDown"); await page.keyboard.press("ArrowDown");
-    const target = await page.evaluate(() => (document.activeElement as HTMLElement).dataset.go ?? "");
-    await expect(target.startsWith("#/"), `↓ ↓ did not land on a column row (active: ${await active(page)})`);
-    await page.keyboard.press("Enter");
-    await expect((await hash(page)) === target, `Enter opened ${await hash(page)}, not ${target}`);
-    /* The filter narrows the whole column; Enter opens the first match. */
-    await at("#/board");
-    await page.focus('#app [data-focus="filter"]');
-    await page.keyboard.type("export");
-    const rows = await count("#app .col-body [data-row]");
-    await expect(rows === 3, `filtering «export» left ${rows} rows, expected the question, its pipeline and the finished design`);
-    await page.keyboard.press("Enter");
-    await expect((await hash(page)) === "#/chat/c2", `Enter on the filter opened ${await hash(page)}`);
+  page.on("pageerror", (e) => errors.push(e.message));
+  const goto = (screen: Screen | string, query = "", scenario?: string) => open(page, typeof screen === "string" ? { id: "x", hash: screen, title: "", query, scenario } : screen, "dark", 1440);
+  const boardRect = () => page.evaluate(() => { const r = document.querySelector("[data-board]")!.getBoundingClientRect(); return [r.left, r.top, r.width, r.height].join(","); });
+  const fitZoom = async () => { await page.evaluate(() => (window as unknown as { __proto: { fitAll: (a: boolean) => void } }).__proto.fitAll(false)); return (await cam(page)).z; };
+  const step = async (name: string, fn: () => Promise<void>) => { try { await fn(); console.log(`  ✓ ${name}`); } catch (e) { fail(new Error(`${name}: ${(e as Error).message}`)); } };
 
-    /* F5. The stage takes focus when it opens, and Escape is the bridge back
-       to the column's current row — which is where the single keys live. */
-    await at("#/board");
-    const queue = await page.evaluate(() => (window as unknown as { __proto: { attention: () => { go: string }[] } }).__proto.attention().map((a) => a.go));
-    await expect(queue.length === 3 && queue.includes("#/pipeline/p2"), `the queue is ${queue.join(", ")}`);
-    await page.keyboard.press("n");
-    await expect((await hash(page)) === queue[0], `n went to ${await hash(page)}`);
-    await expect((await active(page)).includes("(answer:c2:0)"), `n landed focus on ${await active(page)}, not the first question option`);
-    await page.keyboard.press("Escape");
-    await expect((await active(page)) === `button{${queue[0]}}`, `Escape from the stage landed on ${await active(page)}, not the column's current row`);
-    await page.keyboard.press("n");
-    await expect((await hash(page)) === queue[1], `the second n went to ${await hash(page)}`);
-    await expect((await active(page)) !== "none" && !(await active(page)).startsWith("body"), `the second stage opened with focus on ${await active(page)}`);
-    await page.keyboard.press("Escape"); await page.keyboard.press("n");
-    await expect((await hash(page)) === queue[2], `the third n went to ${await hash(page)}, not the pipeline decision`);
-    await expect((await active(page)).includes("[answer]"), `the parked pipeline opened with focus on ${await active(page)}, not its Answer field`);
-    await page.keyboard.press("Escape"); await page.keyboard.press("N");
-    await expect((await hash(page)) === queue[1], `N went to ${await hash(page)}`);
-    /* A conversation with nothing to answer opens on its composer, and the
-       send slot is four Tabs away. */
-    await at("#/chat/c1");
-    await expect((await active(page)) === "textarea[field]", `a working conversation opened with focus on ${await active(page)}`);
-    let tabs = 0;
-    while (tabs < 6 && !(await active(page)).includes("[send]")) { await page.keyboard.press("Tab"); tabs += 1; }
-    await expect(tabs <= 5, `the send slot is ${tabs} Tabs from the stage's focus`);
-    await page.keyboard.press("Escape");
-    await expect((await active(page)) === "button{#/chat/c1}", `Escape from the composer landed on ${await active(page)}`);
-    await page.keyboard.press("i");
-    await expect((await active(page)) === "textarea[field]", `i landed on ${await active(page)}, not the composer`);
-    /* 1 picks the first question option and the row leaves Needs you. */
-    await at("#/chat/c2");
+  await goto("#/board");
+  await step("pan is transform-only (no DOM mutation while dragging)", async () => {
+    const before = await cam(page);
+    const mutations = await page.evaluate(async () => {
+      const board = document.querySelector("[data-board]") as HTMLElement;
+      const world = board.querySelector(".world")!;
+      let count = 0;
+      /* Allowed while panning: the world's transform, the grid's background
+         offset, the board's own class and the corner map's viewport frame.
+         Anything else — a node, a cluster, a tile, a tether — is a reflow. */
+      const allowed = (m: MutationRecord) => {
+        const t = m.target as Element;
+        return m.type === "attributes" && (t === world || t.classList?.contains("grid") || t === board || t.hasAttribute?.("data-mm-view"));
+      };
+      const mo = new MutationObserver((ms) => { for (const m of ms) if (!allowed(m)) count += 1; });
+      mo.observe(board, { subtree: true, childList: true, attributes: true, characterData: true });
+      const r = board.getBoundingClientRect();
+      const ev = (type: string, x: number, y: number) => board.dispatchEvent(new PointerEvent(type, { bubbles: true, clientX: r.left + x, clientY: r.top + y, button: 0, pointerId: 1, isPrimary: true }));
+      ev("pointerdown", 600, 400);
+      for (let i = 1; i <= 30; i++) { ev("pointermove", 600 + i * 4, 400 + i * 2); await new Promise((res) => requestAnimationFrame(() => res(null))); }
+      ev("pointerup", 720, 460);
+      await new Promise((res) => setTimeout(res, 50));
+      mo.disconnect();
+      return count;
+    });
+    const after = await cam(page);
+    await expect(Math.abs(after.x - before.x - 120) < 2 && Math.abs(after.y - before.y - 60) < 2, `camera moved by ${after.x - before.x},${after.y - before.y}, expected 120,60`);
+    await expect(mutations === 0, `${mutations} DOM mutation(s) during the drag`);
+  });
+  await step("Ctrl+wheel zooms at the cursor and the altitude flips with hysteresis", async () => {
+    await page.evaluate(() => (window as unknown as { __proto: { fitAll: (a: boolean) => void } }).__proto.fitAll(false));
+    const a0 = await altitude(page); const z0 = (await cam(page)).z;
+    await expect(a0 === "yard", `after fit the altitude is ${a0} at ${z0}`);
+    const board = (await page.locator("[data-board]").boundingBox())!;
+    for (let i = 0; i < 12; i++) await page.mouse.wheel(0, -120).catch(() => undefined);
+    await page.mouse.move(board.x + 400, board.y + 300);
+    await page.keyboard.down("Control");
+    for (let i = 0; i < 12; i++) { await page.mouse.wheel(0, -160); await page.waitForTimeout(10); }
+    await page.keyboard.up("Control");
+    const z1 = (await cam(page)).z; const a1 = await altitude(page);
+    await expect(z1 > z0 * 1.5, `zoom did not grow: ${z0} → ${z1}`);
+    await expect(a1 === "block", `at ${z1} the altitude is ${a1}`);
+    await expect((await page.evaluate(() => [...document.querySelectorAll(".cluster .node")].some((el) => getComputedStyle(el.parentElement!).visibility !== "hidden"))), "no node became visible at block altitude");
+  });
+  await step("a keycap glides onto its cluster and opens the inspector", async () => {
+    await page.focus("[data-board]");
+    await page.keyboard.press("2");
+    await page.waitForTimeout(100);
+    const sel = await page.evaluate(() => (window as unknown as { __proto: { S: { selected: string }; model: () => { clusters: { id: string; key?: number }[] } } }).__proto);
+    void sel;
+    const selected = await page.evaluate(() => (window as unknown as { __proto: { S: { selected: string } } }).__proto.S.selected);
+    const keyed = await page.evaluate(() => (window as unknown as { __proto: { model: () => { clusters: { id: string; key?: number; x: number; y: number; w: number; h: number }[] } } }).__proto.model().clusters.find((c) => c.key === 2));
+    await expect(selected === keyed!.id, `selected ${selected}, keycap 2 is ${keyed!.id}`);
+    await expect(Boolean(await page.$("[data-inspector]")), "the inspector did not open");
+    const c = await cam(page); const x1 = keyed!.x * c.z + c.x, y1 = keyed!.y * c.z + c.y, x2 = (keyed!.x + keyed!.w) * c.z + c.x, y2 = (keyed!.y + keyed!.h) * c.z + c.y;
+    const b = (await page.locator("[data-board]").boundingBox())!;
+    await expect(x1 >= 0 && y1 >= 0 && x2 <= b.width && y2 <= b.height, `the cluster spans ${Math.round(x1)},${Math.round(y1)}–${Math.round(x2)},${Math.round(y2)} of ${b.width}×${b.height}`);
+    await expect((await altitude(page)) === "block", `the glide landed at ${await altitude(page)} altitude`);
+    const inView = await page.evaluate(() => { const br = document.querySelector("[data-board]")!.getBoundingClientRect(); return [...document.querySelectorAll(".cluster")].filter((el) => { const r = el.getBoundingClientRect(); return r.right > br.left && r.left < br.right && r.bottom > br.top && r.top < br.bottom; }).length; });
+    await expect(inView >= 2, `the block view frames ${inView} cluster(s); a neighbour should be in view`);
+  });
+  await step("n / N walk what needs you across clusters and conversations", async () => {
+    await page.focus("[data-board]");
+    await page.keyboard.press("Escape"); await page.keyboard.press("Escape");
+    const q = await page.evaluate(() => (window as unknown as { __proto: { needsQueue: (p: string) => { kind: string; conv?: string; cluster: string }[]; S: { project: string } } }).__proto.needsQueue((window as unknown as { __proto: { S: { project: string } } }).__proto.S.project));
+    await expect(q.length >= 3, `queue has ${q.length}`);
+    const seen: string[] = [];
+    for (let i = 0; i < q.length; i++) { await page.keyboard.press("n"); await page.waitForTimeout(60); seen.push(await page.evaluate(() => { const p = (window as unknown as { __proto: { S: { lift: string | null; selected: string | null } } }).__proto.S; return p.lift ? `conv:${p.lift}` : `cluster:${p.selected}`; })); }
+    const want = q.map((x) => (x.kind === "conv" ? `conv:${x.conv}` : `cluster:${x.cluster}`));
+    await expect(seen.join(" ") === want.join(" "), `n walked ${seen.join(" ")}, expected ${want.join(" ")}`);
+    await page.keyboard.press("N"); await page.waitForTimeout(60);
+    const back = await page.evaluate(() => { const p = (window as unknown as { __proto: { S: { lift: string | null; selected: string | null } } }).__proto.S; return p.lift ? `conv:${p.lift}` : `cluster:${p.selected}`; });
+    await expect(back === want[want.length - 2], `N went to ${back}, expected ${want[want.length - 2]}`);
+  });
+  await step("Enter lifts the selected cluster's live node, the feed is readable, Esc lowers it", async () => {
+    await goto("#/board");
+    await page.focus("[data-board]");
     await page.keyboard.press("1");
-    await expect(await has("#app .stage .qf"), "1 did not answer the question");
-    await expect((await count('#app .col-body .sec[data-sec="needs"] [data-go="#/chat/c2"]')) === 0, "the answered conversation is still in Needs you");
-    /* Every re-render restores the focused control by identity. */
-    await at("#/chat/c1");
-    await page.click('#app .stage .box [data-act="attach"]');
-    await page.waitForTimeout(30);
-    await expect((await active(page)).includes("(attach)"), `after a re-render focus is on ${await active(page)}, not the control that acted`);
-
-    /* Single keys: / o k m a p c [ ? */
-    await at("#/board");
-    await page.keyboard.press("/"); await expect(await hasDialog(page) && (await active(page)).includes("search"), `/ did not open search with the field focused (${await active(page)})`);
-    await page.keyboard.type("export");
-    await expect((await count("#app .search-rows .srow")) >= 1, "search rows did not render");
-    await page.keyboard.press("Escape"); await expect(!(await hasDialog(page)), "Escape did not close search");
-    await page.keyboard.press("o"); await expect((await hash(page)) === "#/chat/orch", `o went to ${await hash(page)}`);
-    await page.keyboard.press("Escape");
-    await page.keyboard.press("m"); await expect(await has("#app [data-map]"), "m did not show the map");
-    await page.keyboard.press("Escape");
-    await page.keyboard.press("k"); await expect(await has("#app [data-kanban]"), "k did not show the board");
-    await page.keyboard.press("Escape");
-    await page.keyboard.press("a"); await expect((await hash(page)) === "#/accounts", `a went to ${await hash(page)}`);
-    await page.keyboard.press("Escape");
-    await page.keyboard.press("p"); await expect((await hash(page)) === "#/pipelines", `p went to ${await hash(page)}`);
-    await page.keyboard.press("Escape");
-    await page.keyboard.press("c"); await expect(await hasDialog(page), "c did not open the create menu"); await page.keyboard.press("Escape");
-    await page.keyboard.press("["); await expect(await page.evaluate(() => document.getElementById("app")!.dataset.rail === "0"), "[ did not collapse the rail");
-    gate("flow/rail-collapsed", await measure(page), "dark");
-    await page.keyboard.press("[");
-    await page.keyboard.press("?"); await expect(await hasDialog(page), "? did not open the shortcuts"); await page.keyboard.press("Escape");
-    /* A dialog's trigger gets focus back. */
-    await at("#/chat/c1");
-    await page.click('#app .chat-head [data-go="#/chat/c1/menu"]');
-    await expect(await hasDialog(page) && await activeInDialog(page), "the conversation menu did not take focus");
-    await page.keyboard.press("Escape");
-    await expect((await active(page)).includes("{#/chat/c1/menu}"), `focus did not return to the menu trigger (${await active(page)})`);
-
-    /* Stop sits in the send slot while working; typing flips it to send. */
-    await at("#/chat/c1");
-    await expect(await has("#app .stage .box .send.stop"), "a working conversation does not show Stop in the send slot");
-    await page.focus('#app .stage .box [data-focus="field"]');
-    await page.keyboard.type("keep going");
-    await expect(await page.evaluate(() => { const s = document.querySelector("#app .stage .box .send"); return Boolean(s) && !s!.classList.contains("stop") && !s!.classList.contains("off"); }), "typing did not flip Stop into Send");
     await page.keyboard.press("Enter");
-    const last = await page.evaluate(() => { const b = [...document.querySelectorAll("#app .stage .mu .bubble")]; return b[b.length - 1]?.textContent ?? ""; });
-    await expect(last === "keep going", `Enter did not send (last bubble: ${last})`);
-    /* Kill from the menu acts on the click; the receipt carries Respawn. */
-    await at("#/chat/c1/menu");
-    await page.click('#app [data-dialog] [data-act="kill:c1"]');
-    await page.waitForTimeout(30);
-    const g = await measure(page);
-    await expect(Boolean(g.toast), "Kill produced no receipt");
-    gate("flow/kill-receipt", g, "dark");
-    await expect(await has("#app .stage .box .send.respawn"), "a killed conversation does not show Respawn in the slot");
-    await page.click('#app .receipt [data-act="undo"]');
-    await expect(!(await has("#app .stage .box .send.respawn")), "Respawn from the receipt did not restore the conversation");
-    /* Close card → board with a receipt that covers nothing; Reopen restores. */
-    await at("#/chat/c3/menu");
-    await page.click('#app [data-dialog] [data-act="close:c3"]');
-    await page.waitForTimeout(30);
-    await expect((await hash(page)) === "#/board" && !(await hasDialog(page)), `Close card landed on ${await hash(page)}`);
-    gate("flow/close-receipt", await measure(page), "dark");
-    await page.click('#app .receipt [data-act="undo"]');
-    await expect((await hash(page)) === "#/chat/c3", `Reopen landed on ${await hash(page)}`);
-
-    /* F1 and F10. The graph is the record's shape: every stage on screen at
-       every width, the attempts of a stage listed with their heads, and the
-       earlier round's findings reachable without leaving the stage. */
-    for (const width of [1280, 1440, 1920]) {
-      await page.setViewportSize({ width, height: width === 1280 ? 800 : width === 1440 ? 900 : 1080 });
-      await at("#/pipeline/p6", undefined, width);
-      const nodes = await count("#app .graph .node");
-      await expect(nodes === 7, `at ${width} the long pipeline draws ${nodes} of its 7 stages`);
-      const over = await page.evaluate(() => { const el = document.querySelector("#app .graph") as HTMLElement; return el.scrollWidth - el.clientWidth; });
-      await expect(over <= 1, `at ${width} the graph scrolls sideways by ${over}px`);
-      const loops = await count("#app .graph .loop");
-      await expect(loops === 2, `at ${width} the long pipeline draws ${loops} of its 2 fail edges`);
-    }
-    await page.setViewportSize({ width: 1440, height: 900 });
-    await at("#/pipeline/p2");
-    await page.click('#app .graph [data-node="review"] .nhead');
-    await page.waitForTimeout(30);
-    const attempts = await count('#app .graph [data-node="review"] .att');
-    await expect(attempts === 2, `the review node lists ${attempts} attempts, expected both`);
-    await expect((await text('#app .graph [data-node="review"] .att')).includes("7be2d0"), "an attempt row does not name its head");
-    await expect((await count('#app .graph [data-node="review"] .att .open')) === 2, "an attempt with a conversation has no open ›");
-    await at("#/pipeline/p2");
-    await expect((await text("#app .findings h3")).includes("attempt 2 · round 2 of 3 · 2 findings"), `the findings title reads «${await text("#app .findings h3")}»`);
-    await page.click('#app .findings summary');
-    await page.waitForTimeout(30);
-    await expect((await count("#app .findings details[open] li")) === 2, "round 1's findings do not open in place");
-
-    /* Pipeline editing after start (automation v2 §3.3). */
-    await at("#/pipeline/p1/stage/review");
-    const rev0 = Number((await text("#app .shead .sub")).match(/rev (\d+)/)?.[1] ?? 0);
-    await page.click('#app .editor [data-act="ed:effort:max"]');
-    await page.click('#app .editor [data-act^="pa:editStage:p1:review"]');
-    await page.waitForTimeout(30);
-    const r1 = await text("#app .receipt");
-    await expect(r1.includes("applies from attempt 1") && r1.includes(`rev ${rev0 + 1}`), `edit-stage on a stage without attempts gave «${r1}»`);
-    gate("flow/edit-stage", await measure(page), "dark");
-    await expect((await text('#app .graph [data-node="review"] .l2')).includes("max"), "the stage node does not show the saved reasoning");
-    /* Running stage: Save is pending-next-attempt; Restart stops and starts. */
-    await at("#/pipeline/p1/stage/build");
-    await page.click('#app .editor [data-act$=":rerun"]');
-    await expect(await page.evaluate(() => (document.querySelector('#app .editor [data-act^="pa:rerun:p1:build"]') as HTMLButtonElement).disabled), "re-run is enabled while attempt 1 is unsettled");
-    await page.click('#app .editor [data-act="ed:effort:xhigh"]');
-    await page.click('#app .editor [data-act^="pa:editStage:p1:build"]');
-    await page.waitForTimeout(30);
-    const r2 = await text("#app .receipt");
-    await expect(r2.includes("applies from attempt 2"), `edit-stage on a running stage gave «${r2}»`);
-    await expect((await text('#app .graph [data-node="build"]')).includes("edit pending"), "the running stage node does not show the pending edit");
-    await page.click('#app .editor [data-act="ed:stopCurrent:toggle"]');
-    await expect(!(await page.evaluate(() => (document.querySelector('#app .editor [data-act^="pa:rerun:p1:build"]') as HTMLButtonElement).disabled)), "re-run stays disabled after ticking Stop first");
-    await page.click('#app .editor [data-act^="pa:rerun:p1:build"]');
-    await page.waitForTimeout(30);
-    const r3 = await text("#app .receipt");
-    await expect(r3.includes("Attempt 2 of build started") && r3.includes("stopCurrent"), `rerun with stopCurrent gave «${r3}»`);
-    await expect((await text('#app .graph [data-node="build"]')).includes("2 attempts"), "the stage node does not count the new attempt");
-    /* Restart now on the running attempt. */
-    await at("#/pipeline/p1/stage/build");
-    await page.click('#app .editor [data-act^="pa:editRestart:p1:build"]');
-    await page.waitForTimeout(30);
-    const r4 = await text("#app .receipt");
-    await expect(r4.includes("restarted") && r4.includes("attempt 2 of build"), `restart gave «${r4}»`);
-    /* set-edge with a new round budget; note for the next attempt. */
-    await at("#/pipeline/p2/stage/review");
-    await page.click('#app .editor [data-act$=":edges"]');
-    await page.fill('#app .editor [data-act="ed:maxRounds"]', "5");
-    await page.click('#app .editor [data-act^="pa:setEdge:p2:review"]');
-    await page.waitForTimeout(30);
-    await expect((await text("#app .receipt")).includes("Edges saved"), "set-edge produced no receipt");
-    await expect((await text('#app .graph [data-node="review"] .l2')).includes("2 of 5 rounds"), `the stage node reads «${await text('#app .graph [data-node="review"] .l2')}» after the new budget`);
-    await expect((await count("#app .graph .loop .pips i.round")) === 5, "the fail edge does not draw the new budget as pips");
-    await page.click('#app .editor [data-act$=":note"]');
-    await page.fill('#app .editor [data-act="ed:note"]', "Keep the archive collection out of this lane.");
-    await page.click('#app .editor [data-act^="pa:note:p2:review"]');
-    await page.waitForTimeout(30);
-    await expect((await text('#app .graph [data-node="review"]')).includes("1 note"), "the note did not land on the stage node");
-    /* Answer on a parked stage creates the next attempt and clears the findings. */
-    await at("#/pipeline/p2");
-    await page.fill('#app [data-act="answerField"]', "Use the fake-timer clock; the sweep runs in the controller cycle.");
-    await page.click('#app [data-act="pa:answer:p2"]');
-    await page.waitForTimeout(30);
-    await expect((await text("#app .receipt")).includes("attempt 3 of review started"), `answer gave «${await text("#app .receipt")}»`);
-    await expect((await count("#app .findings")) === 0, "the findings block is still there after the answer");
-    await expect((await text('#app .col-body [data-go="#/pipeline/p2"] .badge')).includes("running"), "the column row does not read running");
-    /* add-stage after start, then remove it with undo. */
-    await at("#/pipeline/p1/add/3");
-    await page.fill('#app .editor [data-act="ed:id"]', "verify-2");
-    await page.click('#app .editor [data-act^="pa:addStage:p1:3"]');
-    await page.waitForTimeout(30);
-    await expect((await hash(page)) === "#/pipeline/p1/stage/verify-2" && (await count("#app .graph .node")) === 6, `add-stage landed on ${await hash(page)} with ${await count("#app .graph .node")} stages`);
-    gate("flow/add-stage", await measure(page), "dark");
-    await page.click('#app .editor [data-act$=":remove"]');
-    await page.click('#app .editor [data-act^="pa:removeStage:p1:verify-2"]');
-    await page.waitForTimeout(30);
-    await expect((await count("#app .graph .node")) === 5, "remove-stage did not remove the stage");
-    await page.click('#app .receipt [data-act="undo"]');
-    await expect((await count("#app .graph .node")) === 6, "Undo did not restore the stage");
-    /* Completed: edit first, then re-run reopens it. */
-    await at("#/pipeline/p4/stage/review");
-    await page.click('#app .editor [data-act^="pa:editStage:p4:review"]');
-    await page.waitForTimeout(30);
-    await expect((await text("#app .receipt")).includes("applies from attempt 2"), "edit on a completed pipeline was not accepted");
-    await page.click('#app .editor [data-act$=":rerun"]');
-    await page.click('#app .editor [data-act^="pa:rerun:p4:review"]');
-    await page.waitForTimeout(30);
-    await expect((await text("#app .shead .sub")).includes("running"), "re-run did not reopen the completed pipeline");
-    /* Draft: Start creates attempt 1. */
-    await at("#/pipeline/p3");
-    await page.click('#app [data-act="pa:start:p3"]');
-    await page.waitForTimeout(30);
-    await expect((await text("#app .shead .sub")).includes("running") && (await text('#app .graph [data-node="build"]')).includes("1 attempt"), "Start did not create attempt 1");
-
-    /* F2. Every account is a row with both windows; a row opens its detail. */
-    await at("#/accounts");
-    const arows = await count("#app .acc-body .arow:not(.add)");
-    await expect(arows === 5, `the accounts stage lists ${arows} accounts, expected all five`);
-    await page.click('#app [data-go="#/accounts/claude/cl-lab"]');
-    await expect((await hash(page)) === "#/accounts/claude/cl-lab", `an account row opened ${await hash(page)}`);
-    await expect(await has("#app .chart") && await has("#app .pace") && await has("#app .hours"), "the account detail has no burndown, pace or hourly consumption");
-    const pace = await text("#app .pace");
-    await expect(/burning at [\d.]+ % per hour/.test(pace) && /(runs out at|lasts to the reset)/.test(pace), `the pace panel reads «${pace}»`);
+    await page.waitForTimeout(80);
+    const lift = await page.$(".lift");
+    await expect(Boolean(lift), "no lifted pane");
+    const z = (await cam(page)).z;
+    await expect(z >= 1, `the lift did not bring the camera to 100 % (z ${z})`);
+    const box = (await lift!.boundingBox())!;
+    await expect(box.width >= 600 && box.height >= 480, `the lifted pane is ${box.width}×${box.height}`);
+    await expect((await page.evaluate(() => getComputedStyle(document.querySelector(".world.receded .cluster:not(.has-lift)")!).opacity)) !== "1", "the rest of the yard did not recede");
+    const a = await active(page);
+    await expect(a.includes("[opt0]") || a.includes("[lift]"), `focus after lift is ${a}`);
+    await page.keyboard.press("Escape"); await page.keyboard.press("Escape");
+    await expect(!(await page.$(".lift")), "Esc did not lower the lift");
+    await expect((await active(page)).includes("<board>"), `after Esc the focus is ${await active(page)}`);
+  });
+  await step("a drag pins a cluster, the packer flows around it, the canvas holds still, Release restores the auto layout", async () => {
+    await goto("#/board");
+    const rect0 = await boardRect(); const z0 = await fitZoom();
+    const before = await page.evaluate(() => (window as unknown as { __proto: { model: () => { clusters: { id: string; x: number; y: number }[] } } }).__proto.model().clusters.map((c) => [c.id, c.x, c.y]));
+    const target = await page.evaluate(() => { const c = (window as unknown as { __proto: { model: () => { clusters: { id: string; kind: string; x: number; y: number; w: number }[] } } }).__proto.model().clusters.find((x) => x.kind === "pipeline")!; return c; });
+    await page.evaluate((id) => (window as unknown as { __proto: { fitCluster: (id: string, a: boolean) => void } }).__proto.fitCluster(id, false), target.id);
+    const head = await page.locator(`.cluster[data-cluster="${target.id}"] .cl-head`).boundingBox();
+    await page.mouse.move(head!.x + head!.width / 2, head!.y + 20);
+    await page.mouse.down();
+    for (let i = 1; i <= 10; i++) await page.mouse.move(head!.x + head!.width / 2 + i * 12, head!.y + 20 + i * 30);
+    await page.mouse.up();
+    await page.waitForTimeout(80);
+    const after = await page.evaluate(() => (window as unknown as { __proto: { S: { pins: Record<string, { x: number; y: number }> }; model: () => { clusters: { id: string; x: number; y: number; w: number; h: number; pinned: boolean }[] } } }).__proto);
+    const pins = await page.evaluate(() => Object.keys((window as unknown as { __proto: { S: { pins: Record<string, unknown> } } }).__proto.S.pins));
+    void after;
+    await expect(pins.includes(target.id), `the drag did not pin ${target.id} (pins: ${pins.join(",")})`);
+    const clusters = await page.evaluate(() => (window as unknown as { __proto: { model: () => { clusters: { id: string; x: number; y: number; w: number; h: number; pinned: boolean }[] } } }).__proto.model().clusters);
+    for (let i = 0; i < clusters.length; i++) for (let j = i + 1; j < clusters.length; j++) { const a = clusters[i], b = clusters[j]; await expect(!(a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h), `${a.id} and ${b.id} overlap after the pin`); }
+    await expect(Boolean(await page.$(".receipt")), "no receipt after the pin");
+    await expect(Boolean(await page.$(".bar .receipt")), "the receipt is not in the bar");
+    await expect((await boardRect()) === rect0, `the board's rect moved under the receipt (${rect0} → ${await boardRect()})`);
+    await expect(Boolean(await page.$(`.cluster[data-cluster="${target.id}"].pinned .pinmark`)), "no pin mark on the header");
+    await expect(Boolean(await page.$(`.cluster[data-cluster="${target.id}"].pinned .tile .tpin`)), "no pin glyph on the tile");
+    const z1 = await fitZoom();
+    await expect(Math.abs(z1 - z0) / z0 < 0.1, `the pin moved the fit-all zoom from ${z0.toFixed(3)} to ${z1.toFixed(3)}`);
+    await page.click(".receipt .link");
+    await page.waitForTimeout(80);
+    const restored = await page.evaluate(() => (window as unknown as { __proto: { model: () => { clusters: { id: string; x: number; y: number }[] } } }).__proto.model().clusters.map((c) => [c.id, c.x, c.y]));
+    await expect(JSON.stringify(restored) === JSON.stringify(before), "Release did not restore the auto layout");
+  });
+  await step("the inspector's actions land with their inverse in the receipt", async () => {
+    await goto("#/board", "select=p2");
+    await expect(Boolean(await page.$('.inspector [data-focus="answer"]')), "a parked pipeline shows no answer field");
+    await page.fill('.inspector [data-focus="answer"]', "Keep restored pipelines out of the sweep.");
+    const rectA = await boardRect();
+    await page.click('[data-act="answer:p2"]');
+    await page.waitForTimeout(60);
+    await expect((await boardRect()) === rectA, "the board's rect moved under the Answer receipt");
+    const st = await page.evaluate(() => (window as unknown as { __proto: { F: { pipelines: { id: string; state: string; stage: string }[] } } }).__proto.F.pipelines.find((p) => p.id === "p2"));
+    await expect(st!.state === "running" && st!.stage === "build", `after Answer the record is ${st!.state} at ${st!.stage}`);
+    await expect((await page.textContent(".receipt"))!.includes("Undo"), "no Undo in the receipt");
+    await page.click(".receipt .link");
+    await page.waitForTimeout(60);
+    const back = await page.evaluate(() => (window as unknown as { __proto: { F: { pipelines: { id: string; state: string }[] } } }).__proto.F.pipelines.find((p) => p.id === "p2"));
+    await expect(back!.state === "needs_decision", `Undo left the record ${back!.state}`);
+    await page.click('[data-act="pause:p2"]');
+    await expect((await page.textContent(".receipt"))!.includes("Resume"), "Pause receipt carries no Resume");
+    await page.click(".receipt .link");
+    await page.click('[data-act="edit:p2:review"]');
+    await expect(Boolean(await page.$("[data-editor]")), "edit stage opened no editor");
+    await expect((await active(page)).includes("[prompt]"), `the editor did not take focus (${await active(page)})`);
+    await page.click('[data-act="ed:effort:max"]');
+    await page.click('[data-act^="save:p2:review"]');
+    const eff = await page.evaluate(() => (window as unknown as { __proto: { F: { pipelines: { id: string; stages: { id: string; effort: string }[]; revision: number }[] } } }).__proto.F.pipelines.find((p) => p.id === "p2")!.stages.find((s) => s.id === "review")!.effort);
+    await expect(eff === "max", `saved effort is ${eff}`);
+    await expect((await page.textContent(".receipt"))!.includes("next attempt"), "the save receipt does not say when it applies");
+    await page.click('[data-act="archive:p2"]');
+    await expect(!(await page.$('.cluster[data-cluster="p2"]')), "the archived cluster is still on the yard");
+    await page.click(".receipt .link");
+    await expect(Boolean(await page.$('.cluster[data-cluster="p2"]')), "Restore did not bring the cluster back");
+  });
+  await step("a banner from another project sits beside the canvas and the canvas holds still", async () => {
+    await goto("#/board", "", "arrival");
+    const r0 = await boardRect();
+    await expect(Boolean(await page.$(".side .banner")), "the arrival banner is not in the side column");
+    await expect(!(await page.$(".main > .banner")), "a banner sits above the canvas");
+    await page.click('[data-act="dismissBanner"]');
+    await page.waitForTimeout(60);
+    await expect(!(await page.$(".banner")), "Dismiss left the banner up");
+    await expect((await boardRect()) === r0, "the board's rect changed with the banner");
+  });
+  await step("a three-level lineage renders three rows with edges from the real parents", async () => {
+    await goto("#/board");
+    const t = await page.evaluate(() => { const m = (window as unknown as { __proto: { model: () => { clusters: { id: string; nodes: { id: string; depth: number; parent: string | null; rx: number; ry: number; w: number }[] }[] } } }).__proto.model(); const cl = m.clusters.find((c) => c.id === "t:t9")!; const paths = [...document.querySelectorAll('.cluster[data-cluster="t:t9"] .spine path')].map((p) => p.getAttribute("d")!); return { nodes: cl.nodes, paths }; });
+    const depths = new Set(t.nodes.map((n) => n.depth));
+    await expect(depths.has(0) && depths.has(1) && depths.has(2), `depths are ${[...depths].join(",")}`);
+    const c6 = t.nodes.find((n) => n.id === "c6")!, c6a = t.nodes.find((n) => n.id === "c6a")!;
+    await expect(c6a.parent === "c6" && c6a.ry > c6.ry && c6a.rx >= c6.rx, `the grandchild sits at ${c6a.rx},${c6a.ry} under ${c6.rx},${c6.ry} with parent ${c6a.parent}`);
+    await expect(t.paths.length === t.nodes.length - 1, `${t.paths.length} edges for ${t.nodes.length} nodes`);
+    await expect(t.paths.some((d) => d.startsWith(`M ${c6.rx + c6.w / 2} ${c6.ry + 88} `)), `no edge starts at c6's foot: ${t.paths.join(" | ")}`);
+  });
+  await step("the backlog tray assigns a worker and the new thread joins the yard", async () => {
+    await goto("#/board", "tray=1");
+    const n0 = (await page.evaluate(() => (window as unknown as { __proto: { model: () => { clusters: unknown[] } } }).__proto.model().clusters.length));
+    await page.click('[data-act="assign:t6"]');
+    await page.waitForTimeout(60);
+    const n1 = (await page.evaluate(() => (window as unknown as { __proto: { model: () => { clusters: unknown[] } } }).__proto.model().clusters.length));
+    await expect(n1 === n0 + 1, `clusters ${n0} → ${n1}`);
+    await expect(Boolean(await page.$('.cluster[data-cluster="t:t6"]')), "no thread cluster for the task");
+    await page.click(".receipt .link");
+    await expect(!(await page.$('.cluster[data-cluster="t:t6"]')), "Undo did not remove the thread");
+  });
+  await step("the chat's settings sheet is one level, every group visible, Esc returns focus to the chip", async () => {
+    await goto("#/chat/c1");
+    await page.click('[data-focus="chip"]');
+    await page.waitForTimeout(60);
+    await expect(Boolean(await page.$(".settings[data-dialog]")), "no settings sheet");
+    const groups = await page.evaluate(() => [...document.querySelectorAll(".settings .seg, .settings .alist, .settings .sess")].length);
+    await expect(groups >= 5, `only ${groups} groups visible (model, reasoning, speed, account, session)`);
+    await expect(!(await page.$(".settings [aria-haspopup]")), "the sheet has a submenu");
+    await expect(await activeInDialog(page), "the sheet did not take focus");
+    await expect(!(await page.$(".scrim")), "the sheet dims the feed");
+    await page.click('[data-act="set:c1:effort:xhigh"]');
+    await page.waitForTimeout(40);
+    await expect(Boolean(await page.$(".settings[data-dialog]")), "picking a value closed the sheet");
     await page.keyboard.press("Escape");
-    await expect((await hash(page)) === "#/accounts", `Escape from the account detail landed on ${await hash(page)}`);
-    await expect((await active(page)) === "button{#/accounts/claude/cl-lab}", `Escape returned focus to ${await active(page)}, not the row that opened the detail`);
-    await at("#/accounts/claude/cl-lab");
-    await page.click('#app [data-act="switch:claude:cl-lab"]');
-    await page.waitForTimeout(30);
-    const sw = await text("#app .receipt");
-    await expect(sw.includes("Lab") && (await text("#app .receipt .btn")).includes("Switch back"), `Switch gave «${sw}»`);
-    gate("flow/account-switch", await measure(page), "dark");
-
-    /* F3. A card is the thread: its chips open the worker and the pipeline,
-       and a drag between columns changes the task's status with an Undo. */
-    await at("#/kanban");
-    await page.click('#app .kcard[data-task="t1"] .kchip[data-worker]');
-    await expect((await hash(page)) === "#/chat/c2", `the worker chip opened ${await hash(page)}`);
-    await at("#/kanban");
-    await page.click('#app .kcard[data-task="t1"] .kchip[data-pipe]');
-    await expect((await hash(page)) === "#/pipeline/p1", `the pipeline chip opened ${await hash(page)}`);
-    await at("#/kanban");
-    const beforeDone = await count('#app [data-col="done"] .kcard');
-    await drag('#app .kcard[data-task="t2"] .khead', '#app [data-col="done"] .kh');
-    await expect((await count('#app [data-col="done"] .kcard')) === beforeDone + 1, "dragging a card did not change its status");
-    await expect((await text("#app .receipt")).includes("Moved to Done"), `the drag gave «${await text("#app .receipt")}»`);
-    gate("flow/kanban-drop", await measure(page), "dark");
-    await page.click('#app .receipt [data-act="undo"]');
-    await expect((await count('#app [data-col="done"] .kcard')) === beforeDone, "Undo did not move the card back");
-    /* F4. The landing stage does work: the kanban where there are tasks, the
-       first thing that needs the operator where there are none. */
-    await at("#/board");
-    await expect(await has("#app [data-kanban]"), "the board's landing stage is not the kanban");
-    await at("#/board", "notasks");
-    await expect(await has("#app .stage .chat .box"), "a project with no tasks lands on a placard, not on work");
-
-    /* F11 and operator item 5. The map arranges itself; a group the operator
-       moves is honoured, and releasing it returns it to the arrangement. */
-    await at("#/map");
-    const auto = await page.evaluate(() => [...document.querySelectorAll("#app .mapitem")].map((el) => (el as HTMLElement).style.top));
-    await expect(auto.every((t) => t.endsWith("px")), "the map did not arrange its groups");
-    const overlap = await page.evaluate(() => {
-      const rs = [...document.querySelectorAll("#app .mapitem")].map((el) => el.getBoundingClientRect());
-      for (let i = 0; i < rs.length; i++) for (let j = i + 1; j < rs.length; j++) if (rs[i].left < rs[j].right - 1 && rs[j].left < rs[i].right - 1 && rs[i].top < rs[j].bottom - 1 && rs[j].top < rs[i].bottom - 1) return true;
-      return false;
-    });
-    await expect(!overlap, "two map groups overlap in the auto layout");
-    await drag('#app .mapitem[data-item="p1"] .gh', "#app .map");
-    await expect(await has('#app .mapitem[data-item="p1"].pinned'), "dragging a group did not pin it");
-    await expect((await text("#app .receipt")).includes("Pinned where you put it"), `the drag gave «${await text("#app .receipt")}»`);
-    const flowed = await page.evaluate(() => {
-      const rs = [...document.querySelectorAll("#app .mapitem")].map((el) => el.getBoundingClientRect());
-      for (let i = 0; i < rs.length; i++) for (let j = i + 1; j < rs.length; j++) if (rs[i].left < rs[j].right - 1 && rs[j].left < rs[i].right - 1 && rs[i].top < rs[j].bottom - 1 && rs[j].top < rs[i].bottom - 1) return false;
-      return true;
-    });
-    await expect(flowed, "the rest of the map did not flow around the pinned group");
-    gate("flow/map-pinned", await measure(page), "dark");
-    await page.click('#app .receipt [data-act="undo"]');
-    await expect(!(await has("#app .mapitem.pinned")), "Release did not return the group to the auto layout");
-
-    /* F20. A decision arriving in the current project is a new row with its
-       edge and one tick of the counts — no banner, no toast. */
-    await at("#/board", "arrival-here");
-    await page.waitForTimeout(700);
-    await expect(await has("#app .col-body .row.new"), "the arrival in this project did not appear as a new row");
-    await expect(!(await has('#app [data-banner="arrival"]')), "an arrival in the current project raised a banner");
-    await expect((await text("#app .col-head h1 small")).startsWith("4 need you"), `the header count reads «${await text("#app .col-head h1 small")}» after the arrival`);
-    /* An arrival in another project is the one banner, and it is stamped seen. */
-    await at("#/chat/c1", "arrival");
-    await expect(await has('#app [data-banner="arrival"]'), "an arrival in another project shows no banner");
-    await page.click('#app [data-banner="arrival"] .open');
-    await expect((await hash(page)) === "#/chat/k1" && !(await has("#app [data-banner]")), `the banner landed on ${await hash(page)} with a banner still showing`);
-    await page.goBack(); await page.waitForTimeout(60);
-    await expect((await hash(page)) === "#/chat/c1" && !(await has('#app [data-banner="arrival"]')), "a seen decision was announced again after back");
-
-    /* Split: at 1920 the seat pins beside; at 1280 the control is absent. */
-    await page.setViewportSize({ width: 1920, height: 1080 });
-    await at("#/chat/c2", "split", 1920);
-    await expect(await page.evaluate(() => document.getElementById("app")!.dataset.pin === "1" && Boolean(document.querySelector("#app .pin .chat")) && Boolean(document.querySelector("#app .stage .chat"))), "the split did not render two panes at 1920");
-    gate("flow/split-1920", await measure(page), "dark");
-    await page.setViewportSize({ width: 1280, height: 800 });
-    await at("#/chat/c2", "split", 1280);
-    await expect(await page.evaluate(() => document.getElementById("app")!.dataset.pin === "0" && !document.querySelector('[data-act^="pin:"]')), "the split or its control renders at 1280");
-    /* F8. At 1280 the crowded column keeps every section reachable. */
-    await at("#/board", "crowded", 1280);
-    const sticky = await page.evaluate(() => [...document.querySelectorAll("#app .col-body .sec-h")].every((el) => getComputedStyle(el).position === "sticky"));
-    await expect(sticky, "the column's section headers do not stick");
-    await page.evaluate(() => { const b = document.querySelector("#app .col-body") as HTMLElement; b.scrollTop = b.scrollHeight; });
-    await page.waitForTimeout(30);
-    const bottom = await page.evaluate(() => {
-      const b = (document.querySelector("#app .col-body") as HTMLElement).getBoundingClientRect();
-      const last = document.querySelector('#app .sec[data-sec="recent"] .sec-h')!.getBoundingClientRect();
-      return last.top >= b.top - 1 && last.bottom <= b.bottom + 1;
-    });
-    await expect(bottom, "scrolling the crowded column to the end does not reach the last section header");
-    await expect(await has('#app .sec[data-sec="recent"] .sec-h[aria-expanded="false"]'), "Recent is not folded on a column longer than one screen");
-    await page.setViewportSize({ width: 1440, height: 900 });
-    /* Crowded at 1440: every Needs-you row ends inside the first screen. */
-    await at("#/board", "crowded");
-    const needBottom = await page.evaluate(() => Math.max(...[...document.querySelectorAll('#app .col-body .sec[data-sec="needs"] [data-row]')].map((r) => r.getBoundingClientRect().bottom)));
-    await expect(needBottom < 900, `with thirty conversations the last Needs-you row ends at ${needBottom}px`);
-    gate("flow/crowded", await measure(page), "dark");
-    /* F14. Fourteen projects fit one screen; the crowned card keeps its rows. */
-    await at("#/overview", "crowded");
-    const ov = await page.evaluate(() => { const el = document.querySelector("#app .ov") as HTMLElement; return { over: el.scrollHeight - el.clientHeight, quiet: document.querySelectorAll("#app .quietstrip .qchip").length, crowned: document.querySelectorAll('#app .pc [data-project="atlas"]').length ? document.querySelectorAll("#app .pc")[0].querySelectorAll("[data-row]").length : 0 }; });
-    await expect(ov.over <= 1, `the crowded overview scrolls by ${ov.over}px instead of showing every project`);
-    await expect(ov.quiet >= 8, `the crowded overview collapses ${ov.quiet} quiet projects into the strip, expected at least eight`);
-    await expect(ov.crowned >= 6, `the crowned project's card lists ${ov.crowned} rows, expected at least six`);
-
-    /* Offline: the slot is Queue and a send is held. */
-    await at("#/chat/c1", "offline");
-    const off = await page.evaluate(() => ({ banner: document.querySelector('#app [data-banner="offline"]') !== null, slot: document.querySelector("#app .stage .box .send")?.textContent?.trim() ?? "", status: document.querySelector("#app .statusbar .sb")?.textContent ?? "" }));
-    await expect(off.banner && off.slot === "Queue" && off.status.includes("offline"), `offline renders ${JSON.stringify(off)}`);
-    /* Limit: the chip warns, the popover offers the ready account and routes the not-signed-in one to sign-in. */
-    await at("#/chat/c1/model", "limit");
-    await page.click('#app [data-dialog] [data-act="signIn:claude:cl-second"]');
-    await expect((await text("#app .receipt")).includes("sign-in") && (await hasDialog(page)), "the sign-in row closed the popover or took over");
-    await page.click('#app [data-dialog] [data-act="md:c1:account:cl-lab"]');
-    await expect(!(await hasDialog(page)) && (await text("#app .stage .box .chip")).startsWith("Opus · high"), `choosing the ready account gave «${await text("#app .stage .box .chip")}»`);
-    /* No seat: the seat row invites and o opens the create draft. */
-    await at("#/board", "noseat");
-    await expect(await has('#app .seat[data-seat="none"] [data-create]'), "no-seat board does not invite");
-    await page.keyboard.press("o");
-    await expect((await hash(page)) === "#/seat/rotate" && (await text("#app [data-dialog] h2")).startsWith("Create"), `o with no seat opened ${await hash(page)}`);
-    await page.click('#app [data-dialog] [data-orchestrator-primary]');
-    await expect((await hash(page)) === "#/seat" && (await count('#app .seat[data-seat="live"]')) === 1, "Create orchestrator did not seat one");
-
-    await expect(errors.length === 0, `console errors: ${errors.join(" | ")}`);
-    console.log("flows: column keys, filter, stage focus and the Escape bridge, n/N queue, 1–9 options, i, single-key map, focus restored by identity, composer slot, kill/close receipts, the graph at three widths, attempt history, round fold, edit-stage (next attempt, restart), set-edge budget as pips, note, rerun refused/allowed, answer, add/remove/undo, completed reopen, draft start, account rows and detail with Switch, kanban chips and drag, landing stage, map auto-layout with a pin honoured and released, arrival here and elsewhere, split width rule, crowded at 1280 and 1440, crowded overview, offline, limit sign-in, no seat — green");
-  } finally {
-    await context.close();
-  }
-}
-
-function vocabulary(): void {
-  const dir = path.join(HERE, "prototype");
-  for (const file of fs.readdirSync(dir)) {
-    const text = fs.readFileSync(path.join(dir, file), "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/<!--[\s\S]*?-->/g, "");
-    for (const w of BANNED_WORDS) if (text.includes(w)) throw new Error(`vocabulary: prototype/${file} still says «${w}»`);
-  }
+    await expect((await active(page)).includes("[chip]"), `focus after Esc is ${await active(page)}`);
+    await expect((await page.textContent('[data-focus="chip"]'))!.includes("xhigh"), "the chip does not show the new reasoning");
+    await page.click('[data-focus="chip"]');
+    await page.waitForTimeout(40);
+    await expect(Boolean(await page.$(".settings[data-dialog]")), "the chip did not reopen the sheet");
+    await page.mouse.click(700, 200);
+    await page.waitForTimeout(40);
+    await expect(!(await page.$(".settings[data-dialog]")), "a click outside did not close the sheet");
+  });
+  await step("the send slot flips: Stop while working and empty, Send when typing, the message lands", async () => {
+    await goto("#/chat/c1");
+    await expect((await page.textContent('[data-focus="send"]'))!.trim() === "Stop", "the slot is not Stop on a working conversation");
+    await page.focus('[data-focus="field"]');
+    await page.keyboard.type("Also cover the CSV branch.");
+    await expect((await page.textContent('[data-focus="send"]'))!.trim() === "Send", "typing did not flip the slot to Send");
+    await page.keyboard.press("Enter");
+    await page.waitForTimeout(60);
+    const last = await page.evaluate(() => [...document.querySelectorAll("[data-feed] .msg.user .bubble")].pop()?.textContent);
+    await expect(last === "Also cover the CSV branch.", `the last user bubble is «${last}»`);
+    await expect((await active(page)).includes("[field]"), `after send the focus is ${await active(page)}`);
+  });
+  await step("a question answers on click and the conversation goes back to work", async () => {
+    await goto("#/chat/c2");
+    await expect((await active(page)).includes("[opt0]"), `the first option did not take focus (${await active(page)})`);
+    await page.click('[data-focus="opt1"]');
+    await page.waitForTimeout(60);
+    await expect(!(await page.$(".qcard")), "the question card is still open");
+    await expect((await page.textContent(".chead"))!.includes("working"), "the header does not say working");
+  });
+  await step("every account row opens a detail with the chart and the pace line; Switch carries Switch back", async () => {
+    await goto("#/accounts");
+    const ids = await page.evaluate(() => [...document.querySelectorAll(".arow[data-account]")].map((el) => (el as HTMLElement).dataset.account!));
+    await expect(ids.length === 5, `${ids.length} account rows`);
+    const meters = await page.evaluate(() => document.querySelectorAll(".arow[data-account] .meter").length);
+    await expect(meters === ids.length * 2, `${meters} meters for ${ids.length} rows`);
+    for (const id of ids) {
+      await page.click(`.arow[data-account="${id}"]`);
+      await page.waitForTimeout(40);
+      const signedIn = await page.evaluate(() => Boolean(document.querySelector(".acc-detail .chart")));
+      const quiet = await page.evaluate(() => Boolean(document.querySelector(".acc-detail .quietline")));
+      await expect(signedIn || quiet, `${id}: neither a chart nor the signed-out line`);
+      if (signedIn) await expect((await page.textContent(".acc-detail .pace"))!.includes("an hour"), `${id}: no burn rate`);
+      const charts = await page.evaluate(() => document.querySelectorAll(".acc-detail .chart").length);
+      if (signedIn) await expect(charts === 2, `${id}: ${charts} burndown chart(s), expected one per window`);
+      const using = Boolean(await page.$(".acc-detail [data-using]"));
+      await expect(using === signedIn, `${id}: the Using-this-account section is ${using ? "present" : "absent"} on a ${signedIn ? "signed-in" : "signed-out"} account`);
+    }
+    await page.click('.arow[data-account="cx-team"]');
+    const usingRows = await page.evaluate(() => [...document.querySelectorAll(".acc-detail [data-using] .irow")].map((el) => el.textContent!.trim().slice(0, 40)));
+    await expect(usingRows.length >= 2, `Team lists ${usingRows.length} conversation(s) using it`);
+    await page.click(".acc-detail [data-using] .irow");
+    await page.waitForTimeout(60);
+    await expect((await hash(page)).startsWith("#/chat/"), `the using row opened ${await hash(page)}`);
+    await goto("#/accounts");
+    await page.click('.arow[data-account="cl-lab"]');
+    await page.click('[data-act="switch:claude:cl-lab"]');
+    await expect((await page.textContent(".receipt"))!.includes("Switch back"), "no Switch back in the receipt");
+    await expect(/\d+ conversations? move/.test((await page.textContent(".receipt"))!), "the Switch receipt does not say how many conversations move");
+    await expect(Boolean(await page.$(".bar .receipt")), "the receipt is not in the bar");
+    await page.click(".receipt .link");
+    const active_ = await page.evaluate(() => (window as unknown as { __proto: { F: { accounts: { claude: { id: string; active: boolean }[] } } } }).__proto.F.accounts.claude.find((a) => a.active)!.id);
+    await expect(active_ === "cl-main", `after Switch back the active account is ${active_}`);
+  });
+  await step("the field shows every project; a tile enters its yard on that cluster", async () => {
+    await goto("#/overview");
+    const regions = await page.evaluate(() => document.querySelectorAll(".region").length);
+    await expect(regions >= 4, `${regions} regions`);
+    await page.evaluate(() => (document.querySelector('.region .cluster[data-cluster="bp1"] .tile') as HTMLElement).click());
+    await page.waitForTimeout(80);
+    await expect((await hash(page)) === "#/board", `after the tile click the route is ${await hash(page)}`);
+    await expect((await page.textContent(".bar-title .t"))!.includes("beacon"), "the yard is not beacon's");
+    await expect(Boolean(await page.$("[data-inspector]")), "the cluster is not selected in its yard");
+  });
+  await step("a chat's Esc returns to the yard with the node lifted where it lives", async () => {
+    await goto("#/chat/c1");
+    await page.keyboard.press("Escape");
+    await page.waitForTimeout(120);
+    await expect((await hash(page)) === "#/board", `Esc went to ${await hash(page)}`);
+    const lift = await page.evaluate(() => (window as unknown as { __proto: { S: { lift: string | null } } }).__proto.S.lift);
+    await expect(lift === "c1", `the lift is ${lift}`);
+    await expect(Boolean(await page.$('.lift[data-lift="c1"]')), "the node is not lifted on the yard");
+  });
+  await step("the page logged no error", async () => { await expect(errors.length === 0, errors.join(" | ")); });
+  await ctx.close();
 }
 
 async function main(): Promise<void> {
-  if (!fs.existsSync(INDEX)) throw new Error(`prototype entry not found: ${INDEX}`);
-  vocabulary();
   fs.mkdirSync(OUT_DIR, { recursive: true });
-  const executablePath = process.env.CHROME_BIN
-    ?? ["/usr/bin/chromium", "/usr/bin/google-chrome-stable", "/usr/bin/google-chrome"].find((candidate) => fs.existsSync(candidate));
+  const executablePath = process.env.CHROME_BIN;
   const browser = await chromium.launch({ headless: true, ...(executablePath ? { executablePath } : {}) });
-  const screens = only.length ? SCREENS.filter((s) => only.includes(s.id)) : SCREENS;
-  if (!screens.length) throw new Error(`DESKTOP_V2_ONLY matched no screen (known: ${SCREENS.map((s) => s.id).join(", ")})`);
-  const manifest: { frame: string; scheme: string; id: string; title: string; file: string }[] = [];
+  const manifest: { frame: string; scheme: string; screen: string; file: string }[] = [];
   try {
-    for (const frame of FRAMES.filter((f) => !widths.length || widths.includes(f.name))) {
+    for (const frame of FRAMES) {
+      if (widths.length && !widths.includes(frame.name)) continue;
       for (const scheme of SCHEMES) {
-        const context = await browser.newContext({ viewport: { width: frame.width, height: frame.height }, colorScheme: scheme, deviceScaleFactor: 1, reducedMotion: "reduce" });
-        const page = await context.newPage();
+        const ctx = await browser.newContext({ viewport: { width: frame.width, height: frame.height }, colorScheme: scheme, reducedMotion: "reduce", deviceScaleFactor: 1 });
+        const page = await ctx.newPage();
         const errors: string[] = [];
-        page.on("pageerror", (e) => errors.push(String(e)));
-        const dir = path.join(OUT_DIR, frame.name, scheme);
-        fs.mkdirSync(dir, { recursive: true });
-        for (const screen of screens) {
+        page.on("pageerror", (e) => errors.push(e.message));
+        for (const screen of SCREENS) {
+          if (only.length && !only.includes(screen.id)) continue;
           if (screen.w && !screen.w.includes(frame.name)) continue;
           const label = `${frame.name}/${scheme}/${screen.id}`;
-          await open(page, screen, scheme, frame.width);
-          const file = path.join(dir, `${screen.id}.png`);
           try {
-            gate(label, await measure(page), scheme);
-            const violations = await structure(page, frame.width, screen);
-            if (violations.length) throw new Error(`${label}: ${violations.join("; ")}`);
+            await open(page, screen, scheme, frame.width);
+            const g = await measure(page);
+            gate(label, g, scheme, screen);
+            await focusGates(page, label);
+            await open(page, screen, scheme, frame.width);
+            const dir = path.join(OUT_DIR, frame.name, scheme);
+            fs.mkdirSync(dir, { recursive: true });
+            const file = path.join(dir, `${screen.id}.png`);
             await page.screenshot({ path: file });
-            await focusGates(page, label, screen);
-            if (errors.length) throw new Error(`${label}: console errors — ${errors.splice(0).join(" | ")}`);
-          } catch (err) { fail(err); }
-          manifest.push({ frame: frame.name, scheme, id: screen.id, title: screen.title, file: path.relative(OUT_DIR, file) });
+            manifest.push({ frame: frame.name, scheme, screen: screen.id, file: path.relative(HERE, file) });
+            if (errors.length) throw new Error(`${label}: page error ${errors.splice(0).join(" | ")}`);
+            console.log(`✓ ${label}`);
+          } catch (e) { fail(e); }
         }
-        await context.close();
+        await ctx.close();
       }
     }
-    fs.writeFileSync(path.join(OUT_DIR, "manifest.json"), JSON.stringify(manifest, null, 2));
-    console.log(`${manifest.length} frames → ${OUT_DIR}`);
-    if (!only.length && !widths.length) { try { await flows(browser); } catch (err) { fail(err); } }
-    else console.log("flows skipped (a subset was requested)");
-    if (failures.length) throw new Error(`${failures.length} failure(s):\n  ${failures.join("\n  ")}`);
+    if (!only.length) { console.log("flows:"); await flows(browser); }
   } finally {
     await browser.close();
   }
+  fs.writeFileSync(path.join(OUT_DIR, "manifest.json"), JSON.stringify({ generatedAt: new Date().toISOString(), frames: manifest }, null, 2));
+  if (failures.length) { console.error(`\n${failures.length} failure(s)`); process.exit(1); }
+  console.log(`\n${manifest.length} frames → ${path.relative(process.cwd(), OUT_DIR)}`);
 }
 
-main().catch((err) => { console.error(err instanceof Error ? err.message : err); process.exit(1); });
+main().catch((e) => { console.error(e); process.exit(1); });

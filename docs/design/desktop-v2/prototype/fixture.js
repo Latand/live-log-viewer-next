@@ -1,362 +1,255 @@
-/* Invented, identity-free fixture for the desktop-v2 prototype (issue #1453).
-   No real project, account, handle, path or id appears here; every name is
-   made up and every number is illustrative. The shapes follow the mobile-v2
-   fixture (docs/design/mobile-v2/prototype/fixture.js) so both prototypes
-   speak one vocabulary, and the pipeline records carry the automation-v2
-   fields (revision, mutations, per-stage attempts with findings, waiting,
-   checkpoints) the desktop pipeline surface edits after start.
+/* Invented, identity-free fixture for the desktop-v2 prototype (issue #1453,
+   rewrite). No real project, account, handle, path or id appears here; every
+   name is made up and every number is illustrative. The vocabulary is the
+   mobile-v2 one (docs/design/mobile-v2/prototype/fixture.js): one state word
+   per conversation, `low · medium · high · xhigh · max`, badges in the
+   product's words. Pipelines carry the automation-v2 fields the inspector
+   reads (revision, per-stage attempts with findings, fail edges with round
+   budgets).
 
-   Project counts are never typed here: the prototype derives them from the
-   conversations and pipelines below, so the rail, the column header and the
-   overview cannot disagree (critique round 1, F6).
+   Project counts are never typed: the prototype derives every count from the
+   conversations, pipelines and tasks below, so the rail, the bar and the
+   overview cannot disagree.
 
    SCENARIOS at the end mutate this fixture for the state screens
-   (`?scenario=noseat|degraded|offline|held|limit|stalled|arrival|arrival-here|crowded|killed|split|notasks`). */
+   (`?scenario=crowded|noseat|degraded|offline|pinned|arrival|limit|killed`). */
 
-window.FIXTURE = {
-  now: "14:05",
-  nowMinutes: 14 * 60 + 5,
-  runtime: "connected", /* connected | degraded | offline */
-  project: "atlas",
+window.FIXTURE = (function () {
+  const F = {
+    now: "14:05",
+    nowMinutes: 14 * 60 + 5,
+    runtime: "connected", /* connected | degraded | offline */
+    project: "atlas",
 
-  projects: [
-    { id: "atlas", name: "atlas", crowned: true, age: "now" },
-    { id: "beacon", name: "beacon-site", age: "12 min" },
-    { id: "corvid", name: "corvid-tools", age: "41 min" },
-    { id: "delta", name: "delta-ledger", age: "2d", quiet: true },
-    { id: "ember", name: "ember-legacy", archived: true, age: "9d" },
-  ],
-
-  /* The orchestrator seat for the current project (PRD #976 / #979 / #1347 / #1419). */
-  seat: {
-    state: "live", /* live | none | creating */
-    engine: "claude",
-    model: "Opus",
-    effort: "high",
-    account: "Main",
-    plan: "Max plan",
-    ctx: { left: 76, window: "100k" },
-    since: "2h",
-    predecessor: true,
-    mandateVersion: 3,
-    mandate:
-      "You are the atlas orchestrator.\n\nYou own this board and you talk to me here, directly, whenever you have something worth saying.\n\n## What you do\n- one lane per issue, one owner per file\n- a fresh reviewer every round\n- merge only on APPROVE with green gates\n- never deploy red",
-    rotation: null,
-  },
-
-  hosts: [
-    { name: "structured host · atlas", pid: 41230, mem: "612 MB", since: "2h" },
-    { name: "structured host · orchestrator", pid: 41198, mem: "580 MB", since: "2h" },
-    { name: "tail worker", pid: 41355, mem: "48 MB", since: "31 min" },
-  ],
-
-  /* Every account carries both windows. `series` is the remaining percentage
-     sampled since the window opened (hours from the window start → % left),
-     the burndown the current build already computes; `hourly` is today's
-     consumption by hour (percentage points spent). */
-  accounts: {
-    claude: [
-      { id: "cl-main", label: "Main", plan: "Max plan", active: true, auth: "Authenticated", checked: "14:02",
-        windows: [
-          { label: "5 h", left: 62, reset: "resets 16:40", hours: 5, elapsed: 2.4, series: [[0, 100], [0.3, 97], [0.7, 93], [1.0, 86], [1.4, 80], [1.7, 74], [2.0, 68], [2.4, 62]] },
-          { label: "Week", left: 38, reset: "resets Mon 09:00", hours: 168, elapsed: 53, series: [[0, 100], [8, 96], [20, 90], [28, 78], [36, 66], [44, 52], [50, 43], [53, 38]] },
-        ],
-        hourly: [["09", 4], ["10", 9], ["11", 6], ["12", 12], ["13", 14], ["14", 5]] },
-      { id: "cl-lab", label: "Lab", plan: "Pro plan", active: false, auth: "Authenticated", checked: "13:50",
-        windows: [
-          { label: "5 h", left: 91, reset: "resets 18:10", hours: 5, elapsed: 0.9, series: [[0, 100], [0.4, 96], [0.9, 91]] },
-          { label: "Week", left: 74, reset: "resets Tue 09:00", hours: 168, elapsed: 29, series: [[0, 100], [10, 92], [20, 83], [29, 74]] },
-        ],
-        hourly: [["09", 0], ["10", 0], ["11", 0], ["12", 0], ["13", 5], ["14", 4]] },
-      { id: "cl-second", label: "Second", plan: "Pro plan", active: false, auth: "NeedsSignIn", checked: null, windows: [], hourly: [] },
+    projects: [
+      { id: "atlas", name: "atlas", crowned: true, age: "now" },
+      { id: "beacon", name: "beacon-site", age: "12 min" },
+      { id: "corvid", name: "corvid-tools", age: "41 min" },
+      { id: "delta", name: "delta-ledger", age: "2d", quiet: true },
+      { id: "ember", name: "ember-legacy", archived: true, age: "9d" },
     ],
-    codex: [
-      { id: "cx-main", label: "Main", plan: "Pro plan", active: true, auth: "Authenticated", checked: "14:01",
-        windows: [
-          { label: "5 h", left: 88, reset: "resets 17:15", hours: 5, elapsed: 1.8, series: [[0, 100], [0.5, 97], [1.0, 94], [1.4, 91], [1.8, 88]] },
-          { label: "Week", left: 55, reset: "resets Sun 09:00", hours: 168, elapsed: 77, series: [[0, 100], [20, 92], [40, 80], [60, 66], [77, 55]] },
-        ],
-        hourly: [["09", 2], ["10", 3], ["11", 4], ["12", 1], ["13", 2], ["14", 0]] },
-      { id: "cx-team", label: "Team", plan: "Team plan", active: false, auth: "Authenticated", checked: "13:40",
-        windows: [
-          { label: "5 h", left: 100, reset: "resets 19:00", hours: 5, elapsed: 0.1, series: [[0, 100], [0.1, 100]] },
-          { label: "Week", left: 97, reset: "resets Sun 09:00", hours: 168, elapsed: 77, series: [[0, 100], [40, 99], [77, 97]] },
-        ],
-        hourly: [["09", 0], ["10", 0], ["11", 1], ["12", 0], ["13", 0], ["14", 0]] },
-    ],
-  },
 
-  /* Tasks are the kanban's cards. `status` is one of the current build's five
-     readiness sections (now · review · blocked · planned · done); `worker` is
-     the conversation doing the task, `pipeline` the record it runs in. */
-  tasks: [
-    { id: "t1", title: "Export endpoint default format", issue: 218, status: "blocked", worker: "c2", pipeline: "p1" },
-    { id: "t2", title: "Board status projection", issue: 212, status: "now", worker: "c1" },
-    { id: "t3", title: "Archive TTL for closed pipelines", issue: 206, status: "review", worker: "c4", pipeline: "p2" },
-    { id: "t4", title: "Seat handoff smoke test", issue: 240, status: "review", worker: "c12", pipeline: "p6" },
-    { id: "t5", title: "Account migration plan", issue: 199, status: "blocked", worker: "c5" },
-    { id: "t6", title: "Directory picker keyboard support", issue: 231, status: "planned", pipeline: "p3" },
-    { id: "t7", title: "Polish overview cards", issue: 244, status: "planned" },
-    { id: "t8", title: "Fast conversation switching", issue: 209, status: "done", worker: "c6", pipeline: "p4" },
-    { id: "t9", title: "Seat tick note cap", issue: 251, status: "done", seat: true },
-  ],
-
-  conversations: [
-    {
-      id: "orch", project: "atlas", title: "Orchestrator · atlas", engine: "claude", model: "Opus", effort: "high", account: "Main",
-      state: "working", elapsed: "2:14", age: "now", seat: true, ctx: 24, tool: "list_conversations",
-      feed: [
-        { kind: "user", ts: "13:20", text: "Morning. What is open on the board?" },
-        { kind: "tool", tool: "viewer · board_snapshot", status: "ok", dur: "0.6s", ts: "13:20" },
-        { kind: "agent", ts: "13:21", text: "Two lanes finished overnight: the reseat test fix merged, the archive TTL tail is in review. Nothing needs you right now." },
-        { kind: "user", ts: "13:48", text: "Take issues 212 and 218, one lane each. Report here when a reviewer answers." },
-        { kind: "agent", ts: "13:48", text: "On it. Two lanes open: 212 on the board status projection, 218 on the export endpoint. Each gets a fresh reviewer per round." },
-        { kind: "tool", tool: "viewer · create_pipeline", status: "ok", dur: "1.2s", ts: "13:49" },
-        { kind: "tool", tool: "viewer · create_pipeline", status: "ok", dur: "0.9s", ts: "13:49" },
-        { kind: "agent", ts: "13:55", text: "218 has a question for you — which export format to default to. It is in the queue; the lane holds until you answer." },
-        { kind: "tool", tool: "viewer · list_conversations", status: "running", dur: "3s", link: true },
-      ],
-    },
-    {
-      id: "c1", project: "atlas", title: "Rebuild the board status projection", engine: "claude", model: "Opus", effort: "high", account: "Main",
-      state: "working", elapsed: "12:40", age: "now", ctx: 29, crowned: true, tool: "Edit cardStatus.ts", worktree: "llv-212-status-projection",
-      children: [{ title: "Explore: status readers", state: "done" }, { title: "Test writer", state: "working" }],
-      feed: [
-        { kind: "user", ts: "13:40", text: "Read issue 212 and tell me the smallest change that makes the board status honest about held deliveries." },
-        { kind: "run", ts: "13:41–13:42", items: [{ tool: "Read", n: 2 }, { tool: "Grep", n: 1 }] },
-        { kind: "agent", ts: "13:43", text: "The projection lives in one module that turns transcript facts into a card status. Held deliveries are read after the working state, so a held card renders as working. Swapping the precedence is a four-line change; the test that pins it is the real work.\n\nI will write the failing test first, then flip the order." },
-        { kind: "runfail", ts: "13:57", items: [
-          { tool: "Edit", detail: "CardStatusBadge.tsx", status: "ok", ts: "13:57", dur: "0.2s" },
-          { tool: "Bash", detail: "bun test src/components/CardStatusBadge.render.test.tsx", status: "fail", ts: "13:58", dur: "4.1s", error: "1 fail · expected «held», received «working»" },
-          { tool: "Edit", detail: "cardStatus.ts", status: "running", ts: "13:59", dur: "4s" },
-        ] },
-      ],
-    },
-    {
-      id: "c2", project: "atlas", title: "Implement the export endpoint", engine: "codex", model: "gpt-5.6", effort: "high", account: "Main",
-      state: "waiting", waitedFor: "9 min", age: "9 min", ctx: 41, worktree: "llv-218-export",
-      pipeline: { id: "p1", stage: "build", k: 2, n: 5 },
-      question: {
-        header: "Export format", text: "Which format should the export endpoint default to when the client does not ask for one?",
-        options: [
-          { label: "NDJSON", hint: "One record per line, streams well, what the CLI already reads." },
-          { label: "JSON array", hint: "Simplest for browsers, buffers the whole export." },
-          { label: "Both, by header", hint: "Content negotiation; more code, more tests." },
-        ],
-        chips: ["NDJSON", "Both, by header", "Ask the orchestrator"],
+    /* One seat per project that has one. */
+    seats: {
+      atlas: {
+        state: "live", engine: "claude", model: "Opus", effort: "high", account: "Main", plan: "Max plan",
+        ctx: { left: 76, window: "100k" }, since: "2h", conv: "seat", predecessor: true, mandateVersion: 3,
+        mandate: "You are the atlas orchestrator. Open one lane per issue, spawn an implementer, run a fresh reviewer every round, merge on APPROVE, and report what landed. Nothing starts until the operator asks for it. Deploy only when told; every deploy kills this seat, so report first.",
       },
-      feed: [
-        { kind: "user", ts: "13:50", text: "Implement the export endpoint from the spec in issue 218. Ask before choosing a default format." },
-        { kind: "run", ts: "13:51–13:55", items: [{ tool: "Read", n: 3 }, { tool: "Grep", n: 2 }, { tool: "Edit", n: 1 }] },
-        { kind: "agent", ts: "13:56", text: "The route, the serializer and the test scaffold are in place. One decision is yours before I wire the default." },
-      ],
+      beacon: { state: "live", engine: "codex", model: "gpt-5.6", effort: "high", account: "Main", plan: "Plus", ctx: { left: 41, window: "200k" }, since: "5h", conv: "seat-beacon", mandateVersion: 1, mandate: "You are the beacon-site orchestrator." },
     },
-    {
-      id: "c3", project: "atlas", title: "Archive TTL for closed pipelines", engine: "claude", model: "Sonnet", effort: "medium", account: "Main",
-      state: "returned", age: "32 min", ctx: 18, worktree: "llv-206-archive-ttl",
-      pipeline: { id: "p2", stage: "build", k: 1, n: 5 },
-      feed: [
-        { kind: "user", ts: "13:02", text: "Add a 14-day TTL to archived pipeline records and a test that proves the sweep runs once per tick." },
-        { kind: "run", ts: "13:03–13:28", items: [{ tool: "Read", n: 4 }, { tool: "Edit", n: 3 }, { tool: "Bash", n: 2 }] },
-        { kind: "agent", ts: "13:31", text: "Done. The sweep runs inside the existing controller cycle and the test pins one sweep per tick with fake timers. Branch pushed; the reviewer can take it." },
-      ],
-    },
-    {
-      id: "c4", project: "atlas", title: "Reviewer · archive TTL · round 2", engine: "codex", model: "gpt-5.6", effort: "xhigh", account: "Main",
-      state: "working", elapsed: "4:02", age: "now", ctx: 12, tool: "Read src/lib/pipelines/store.ts",
-      pipeline: { id: "p2", stage: "review", k: 3, n: 5 },
-      feed: [
-        { kind: "user", ts: "14:00", text: "Review round 2 of the archive TTL lane. Findings as strings." },
-        { kind: "run", ts: "14:01–14:04", items: [{ tool: "Read", n: 6 }, { tool: "Grep", n: 2 }] },
-      ],
-    },
-    {
-      id: "c5", project: "atlas", title: "Migrate accounts to the new binding", engine: "claude", model: "Opus", effort: "high", account: "Main",
-      state: "waiting", waitedFor: "24 min", age: "24 min", ctx: 33, plan: true, worktree: "llv-199-account-binding",
-      question: { header: "Plan approval", text: "Approve the plan: rebind ownership only, never copy conversations; one migration record per account.", options: [{ label: "Approve", hint: "Start implementing this plan." }, { label: "Revise", hint: "Send the plan back with notes." }], chips: ["Approve", "Revise: keep the old ids readable"] },
-      feed: [
-        { kind: "user", ts: "13:30", text: "Plan the account migration for issue 199. Plan mode: do not edit yet." },
-        { kind: "agent", ts: "13:41", text: "Plan ready. Three steps, one lane each: the binding record, the rebind command, the board projection. No conversation is ever copied." },
-      ],
-    },
-    {
-      id: "c6", project: "atlas", title: "Fast conversation switching", engine: "codex", model: "gpt-5.6", effort: "high", account: "Main",
-      state: "done", age: "2h", ctx: 56, pipeline: { id: "p4", stage: "build", k: 1, n: 2 },
-      feed: [
-        { kind: "user", ts: "11:10", text: "Make switching between conversations feel instant." },
-        { kind: "agent", ts: "12:05", text: "Cached feeds on switch, no board remount, in-app links. Measured: 38 ms median. Merged." },
-      ],
-    },
-    { id: "c7", project: "atlas", title: "Explore: status readers", engine: "claude", model: "Sonnet", effort: "low", account: "Main", state: "done", age: "50 min", ctx: 8, child: "c1", feed: [{ kind: "user", ts: "13:44", text: "List every reader of cardStatus." }, { kind: "agent", ts: "13:46", text: "Eleven readers, listed with lines." }] },
-    { id: "c8", project: "atlas", title: "Reviewer · archive TTL · round 1", engine: "codex", model: "gpt-5.6", effort: "xhigh", account: "Main", state: "done", age: "1h", ctx: 14, pipeline: { id: "p2", stage: "review", k: 3, n: 5 }, feed: [{ kind: "user", ts: "13:33", text: "Review round 1." }, { kind: "agent", ts: "13:52", text: "Request changes · 2 findings." }] },
-    { id: "c9", project: "atlas", title: "Fix · archive TTL · round 1", engine: "claude", model: "Sonnet", effort: "high", account: "Main", state: "done", age: "45 min", ctx: 22, pipeline: { id: "p2", stage: "fix", k: 4, n: 5 }, feed: [{ kind: "user", ts: "13:53", text: "Apply the two findings." }, { kind: "agent", ts: "14:00", text: "Both applied, pushed." }] },
-    { id: "c10", project: "atlas", title: "Design the export endpoint", engine: "claude", model: "Opus", effort: "high", account: "Main", state: "done", age: "1h", ctx: 30, pipeline: { id: "p1", stage: "plan", k: 1, n: 5 }, worktree: "pipeline/218-export", feed: [{ kind: "user", ts: "12:03", text: "Design the export endpoint for issue 218." }, { kind: "agent", ts: "12:40", text: "Design written to the declared output. NDJSON by default is my recommendation; the builder should ask." }] },
-    { id: "c11", project: "atlas", title: "Verify · archive TTL", engine: "claude", model: "Sonnet", effort: "medium", account: "Main", state: "done", age: "55 min", ctx: 9, pipeline: { id: "p2", stage: "verify", k: 2, n: 5 }, feed: [{ kind: "user", ts: "13:29", text: "Run the suite by path." }, { kind: "agent", ts: "13:32", text: "Green: 14 files, 212 tests." }] },
-    {
-      id: "c12", project: "atlas", title: "Reviewer · seat handoff · round 3", engine: "claude", model: "Opus", effort: "xhigh", account: "Main",
-      state: "working", elapsed: "1:12", age: "now", ctx: 6, tool: "Read src/lib/orchestrator/handoff.ts",
-      pipeline: { id: "p6", stage: "review", k: 4, n: 7 },
-      feed: [{ kind: "user", ts: "14:03", text: "Review round 3 of the seat handoff lane." }],
-    },
-    { id: "b1", project: "beacon", title: "Rewrite the pricing page copy", engine: "claude", model: "Sonnet", effort: "medium", account: "Lab", state: "working", elapsed: "6:10", age: "now", ctx: 31, tool: "Edit pricing.mdx", feed: [{ kind: "user", ts: "13:58", text: "Rewrite the pricing page in plain words." }] },
-    { id: "k1", project: "corvid", title: "Release 2.4 checklist", engine: "codex", model: "gpt-5.6", effort: "high", account: "Main", state: "waiting", waitedFor: "41 min", age: "41 min", ctx: 20, pipeline: { id: "p5", stage: "build", k: 1, n: 2 }, question: { header: "Tag the release", text: "Tag v2.4.0 from main now, or wait for the docs lane?", options: [{ label: "Tag now", hint: "" }, { label: "Wait for docs", hint: "" }], chips: ["Tag now", "Wait for docs"] }, feed: [{ kind: "user", ts: "13:20", text: "Run the release checklist for 2.4." }] },
-  ],
 
-  pipelines: [
-    {
-      id: "p1", project: "atlas", task: "Implement the export endpoint (#218)", state: "running", revision: 14, started: "2h", branch: "pipeline/218-export",
-      lastEdit: { actor: "orchestrator", at: "12 min", action: "edit-stage · review · reasoning xhigh" },
-      cursor: { stageId: "build", attempt: 1 },
-      stages: [
-        { id: "plan", role: "architect", engine: "claude", model: "Opus", effort: "high", access: "read-only", sandbox: "full", outputs: ["docs/design/218.md"], next: "build", onFail: null, attempts: [{ n: 1, state: "passed", conv: "c10", head: "a1f3c9" }], prompt: "Design the export endpoint. Write the design to the declared output and end with the verdict." },
-        { id: "build", role: "builder", engine: "codex", model: "gpt-5.6", effort: "high", access: "read-write", sandbox: "full", outputs: [], next: "verify", onFail: null, attempts: [{ n: 1, state: "running", conv: "c2", head: "a1f3c9" }], prompt: "Implement the endpoint from the design. Ask before choosing a default format." },
-        { id: "verify", role: "builder", engine: "codex", model: "gpt-5.6", effort: "medium", access: "read-write", sandbox: "full", outputs: [], next: "review", onFail: null, attempts: [], prompt: "Run the suite by path and fix what you broke." },
-        { id: "review", role: "reviewer", engine: "claude", model: "Opus", effort: "xhigh", access: "read-only", sandbox: "restricted", outputs: [], next: "publish", onFail: { to: "build", maxRounds: 3 }, attempts: [], prompt: "Review the diff against the pinned issue. Findings as strings.", pendingEdit: { fromRevision: 14, appliesFrom: 1 } },
-        { id: "fix", role: "builder", engine: "claude", model: "Sonnet", effort: "high", access: "read-write", sandbox: "full", outputs: [], next: "review", onFail: null, attempts: [], prompt: "Apply every finding. Push. Verdict." },
-      ],
-      findings: [],
-      notes: [],
-      checkpoints: [{ name: "before-review", sha: "a1f3c9", at: "13:50" }],
-      mutations: [
-        { seq: 1, at: "12:03", actor: "operator", action: "start", stage: null, effect: "applied", revision: 1 },
-        { seq: 2, at: "13:12", actor: "orchestrator", action: "note", stage: "build", effect: "applied", revision: 12, detail: "prefer NDJSON unless the operator says otherwise" },
-        { seq: 3, at: "13:50", actor: "controller", action: "checkpoint", stage: "build", effect: "applied", revision: 13, detail: "before-review" },
-        { seq: 4, at: "13:53", actor: "orchestrator", action: "edit-stage", stage: "review", effect: "pending-next-attempt", revision: 14, detail: "reasoning high → xhigh" },
-      ],
-      waiting: null,
-    },
-    {
-      id: "p2", project: "atlas", task: "Archive TTL for closed pipelines (#206)", state: "needs_decision", revision: 9, started: "3h", branch: "pipeline/206-archive-ttl",
-      lastEdit: { actor: "operator", at: "1h", action: "set-edge · review · max rounds 3" },
-      cursor: { stageId: "review", attempt: 2 },
-      stages: [
-        { id: "build", role: "builder", engine: "claude", model: "Sonnet", effort: "medium", access: "read-write", sandbox: "full", outputs: [], next: "verify", onFail: null, attempts: [{ n: 1, state: "passed", conv: "c3", head: "7be2d0" }], prompt: "Implement the TTL sweep." },
-        { id: "verify", role: "builder", engine: "claude", model: "Sonnet", effort: "medium", access: "read-write", sandbox: "full", outputs: [], next: "review", onFail: null, attempts: [{ n: 1, state: "passed", conv: "c11", head: "7be2d0" }], prompt: "Run the suite by path." },
-        { id: "review", role: "reviewer", engine: "codex", model: "gpt-5.6", effort: "xhigh", access: "read-only", sandbox: "restricted", outputs: [], next: "publish", onFail: { to: "fix", maxRounds: 3 },
-          attempts: [
-            { n: 1, state: "failed", conv: "c8", head: "7be2d0", findings: ["The sweep has no test at all; add one that proves it runs once per tick.", "Archived records keep their worktree path; the TTL must clear it."] },
-            { n: 2, state: "failed", conv: "c4", head: "9c41aa", findings: ["The sweep still runs on every poll, not once per controller tick (store.ts sweep call sits inside the read path).", "The TTL test asserts on wall-clock time; use the fake-timer clock the file already imports."] },
-          ], prompt: "Review the diff. Findings as strings." },
-        { id: "fix", role: "builder", engine: "claude", model: "Sonnet", effort: "high", access: "read-write", sandbox: "full", outputs: [], next: "review", onFail: null, attempts: [{ n: 1, state: "passed", conv: "c9", head: "9c41aa" }], prompt: "Apply every finding." },
-        { id: "publish", role: "builder", engine: "codex", model: "gpt-5.6", effort: "low", access: "read-write", sandbox: "full", outputs: [], next: null, onFail: null, attempts: [], prompt: "Open the pull request." },
-      ],
-      findings: ["The sweep still runs on every poll, not once per controller tick (store.ts sweep call sits inside the read path).", "The TTL test asserts on wall-clock time; use the fake-timer clock the file already imports."],
-      notes: [],
-      checkpoints: [],
-      mutations: [
-        { seq: 1, at: "11:02", actor: "operator", action: "start", stage: null, effect: "applied", revision: 1 },
-        { seq: 2, at: "13:00", actor: "operator", action: "set-edge", stage: "review", effect: "applied", revision: 8, detail: "fail → fix · max rounds 3" },
-        { seq: 3, at: "14:04", actor: "controller", action: "settle", stage: "review", effect: "applied", revision: 9, detail: "attempt 2 failed · round 2 of 3 used" },
-      ],
-      waiting: null,
-    },
-    {
-      id: "p3", project: "atlas", task: "Directory picker keyboard support (#231)", state: "draft", revision: 0, started: null, branch: null, lastEdit: null,
-      cursor: { stageId: "build", attempt: 0 },
-      stages: [
-        { id: "build", role: "builder", engine: "claude", model: "Sonnet", effort: "high", access: "read-write", sandbox: "full", outputs: [], next: "review", onFail: null, attempts: [], prompt: "Implement keyboard navigation in the directory picker." },
-        { id: "review", role: "reviewer", engine: "codex", model: "gpt-5.6", effort: "high", access: "read-only", sandbox: "restricted", outputs: [], next: null, onFail: { to: "build", maxRounds: 2 }, attempts: [], prompt: "Review. Findings as strings." },
-      ],
-      findings: [], notes: [], checkpoints: [], mutations: [], waiting: null,
-    },
-    {
-      id: "p4", project: "atlas", task: "Fast conversation switching (#209)", state: "completed", revision: 6, started: "5h", branch: "pipeline/209-switching", lastEdit: null,
-      cursor: { stageId: "review", attempt: 1 },
-      stages: [
-        { id: "build", role: "builder", engine: "codex", model: "gpt-5.6", effort: "high", access: "read-write", sandbox: "full", outputs: [], next: "review", onFail: null, attempts: [{ n: 1, state: "passed", conv: "c6", head: "0d8e11" }], prompt: "Make switching instant." },
-        { id: "review", role: "reviewer", engine: "claude", model: "Opus", effort: "xhigh", access: "read-only", sandbox: "restricted", outputs: [], next: null, onFail: { to: "build", maxRounds: 3 }, attempts: [{ n: 1, state: "passed", conv: null, head: "0d8e11" }], prompt: "Review." },
-      ],
-      findings: [], notes: [], checkpoints: [], mutations: [{ seq: 1, at: "09:00", actor: "operator", action: "start", stage: null, effect: "applied", revision: 1 }], waiting: null,
-    },
-    {
-      id: "p5", project: "corvid", task: "Release 2.4 (#88)", state: "running", revision: 3, started: "1h", branch: "pipeline/88-release", lastEdit: null,
-      cursor: { stageId: "build", attempt: 1 },
-      stages: [
-        { id: "build", role: "builder", engine: "codex", model: "gpt-5.6", effort: "high", access: "read-write", sandbox: "full", outputs: [], next: "review", onFail: null, attempts: [{ n: 1, state: "running", conv: "k1", head: "e4e4e4" }], prompt: "Run the release checklist." },
-        { id: "review", role: "reviewer", engine: "claude", model: "Opus", effort: "high", access: "read-only", sandbox: "restricted", outputs: [], next: null, onFail: { to: "build", maxRounds: 2 }, attempts: [], prompt: "Review." },
-      ],
-      findings: [], notes: [], checkpoints: [], mutations: [], waiting: null,
-    },
-    /* A long record: seven stages, two fail edges, the review ↺ fix loop
-       traversed twice and verify ↺ build once (critique round 1, F1). */
-    {
-      id: "p6", project: "atlas", task: "Seat handoff smoke test (#240)", state: "running", revision: 21, started: "4h", branch: "pipeline/240-seat-handoff",
-      lastEdit: { actor: "controller", at: "2 min", action: "settle · fix · attempt 2 passed" },
-      cursor: { stageId: "review", attempt: 3 },
-      stages: [
-        { id: "plan", role: "architect", engine: "claude", model: "Opus", effort: "high", access: "read-only", sandbox: "full", outputs: ["docs/design/240.md"], next: "build", onFail: null, attempts: [{ n: 1, state: "passed", conv: null, head: "b0b0b0" }], prompt: "Design the smoke test." },
-        { id: "build", role: "builder", engine: "codex", model: "gpt-5.6", effort: "high", access: "read-write", sandbox: "full", outputs: [], next: "verify", onFail: null, attempts: [{ n: 1, state: "passed", conv: null, head: "c1c1c1" }, { n: 2, state: "passed", conv: null, head: "d2d2d2" }], prompt: "Implement it." },
-        { id: "verify", role: "builder", engine: "codex", model: "gpt-5.6", effort: "medium", access: "read-write", sandbox: "full", outputs: [], next: "review", onFail: { to: "build", maxRounds: 2 }, attempts: [{ n: 1, state: "failed", conv: null, head: "c1c1c1", findings: ["The smoke test leaves a host running after the run."] }, { n: 2, state: "passed", conv: null, head: "d2d2d2" }], prompt: "Run the suite by path." },
-        { id: "review", role: "reviewer", engine: "claude", model: "Opus", effort: "xhigh", access: "read-only", sandbox: "restricted", outputs: [], next: "docs", onFail: { to: "fix", maxRounds: 3 },
-          attempts: [
-            { n: 1, state: "failed", conv: null, head: "d2d2d2", findings: ["The handoff test asserts on the successor's PID, which is not stable.", "No negative case: a refused handoff must leave the incumbent seated."] },
-            { n: 2, state: "failed", conv: null, head: "e3e3e3", findings: ["The negative case passes for the wrong reason: the fixture never seats an incumbent."] },
-            { n: 3, state: "running", conv: "c12", head: "f4f4f4" },
-          ], prompt: "Review the diff against the pinned issue." },
-        { id: "fix", role: "builder", engine: "claude", model: "Sonnet", effort: "high", access: "read-write", sandbox: "full", outputs: [], next: "review", onFail: null, attempts: [{ n: 1, state: "passed", conv: null, head: "e3e3e3" }, { n: 2, state: "passed", conv: null, head: "f4f4f4" }], prompt: "Apply every finding." },
-        { id: "docs", role: "builder", engine: "claude", model: "Sonnet", effort: "medium", access: "read-write", sandbox: "full", outputs: ["docs/orchestrator/handoff.md"], next: "publish", onFail: null, attempts: [], prompt: "Document the handoff contract." },
-        { id: "publish", role: "builder", engine: "codex", model: "gpt-5.6", effort: "low", access: "read-write", sandbox: "full", outputs: [], next: null, onFail: null, attempts: [], prompt: "Open the pull request." },
-      ],
-      findings: [], notes: [{ seq: 1, text: "Keep the incumbent seated in the negative case." }], checkpoints: [{ name: "after-verify", sha: "d2d2d2", at: "12:10" }],
-      mutations: [
-        { seq: 1, at: "10:00", actor: "operator", action: "start", stage: null, effect: "applied", revision: 1 },
-        { seq: 2, at: "11:20", actor: "controller", action: "settle", stage: "verify", effect: "applied", revision: 9, detail: "attempt 1 failed · round 1 of 2 used" },
-        { seq: 3, at: "12:10", actor: "controller", action: "checkpoint", stage: "verify", effect: "applied", revision: 12, detail: "after-verify" },
-        { seq: 4, at: "12:50", actor: "controller", action: "settle", stage: "review", effect: "applied", revision: 15, detail: "attempt 1 failed · round 1 of 3 used" },
-        { seq: 5, at: "13:30", actor: "controller", action: "settle", stage: "review", effect: "applied", revision: 18, detail: "attempt 2 failed · round 2 of 3 used" },
-        { seq: 6, at: "13:58", actor: "orchestrator", action: "note", stage: "review", effect: "applied", revision: 20, detail: "keep the incumbent seated in the negative case" },
-        { seq: 7, at: "14:03", actor: "controller", action: "settle", stage: "fix", effect: "applied", revision: 21, detail: "attempt 2 passed" },
-      ],
-      waiting: null,
-    },
-  ],
-};
+    /* Conversations. `parent` is lineage (a spawned child; "seat" is the
+       orchestrator's own spawn); `pipeline` binds a stage attempt; `task`
+       binds a board task's worker; `account` is the account the conversation
+       runs on (the accounts stage lists them). `feed` is the transcript the
+       chat stage renders. */
+    conversations: [
+      { id: "seat", project: "atlas", seat: true, title: "atlas orchestrator", engine: "claude", model: "Opus", effort: "high", state: "working", elapsed: "2:14", tool: "list_conversations", account: "cl-main",
+        feed: [
+          { kind: "agent", at: "13:33", text: "Ready in atlas.\nTell me what to ship. I open lanes, spawn implementers and reviewers, and merge on APPROVE. Nothing starts until you ask." },
+          { kind: "user", at: "13:34", text: "Take #218 and #206. Fresh reviewer every round." },
+          { kind: "agent", at: "13:34", text: "Two lanes opened. #218 is building; #206 is in review and its reviewer failed round 2 with two findings, so it is parked for your decision. Beside them I spawned the memory investigation, the limits-footer refactor, the flaky-test fix, the outbox retry, the retry-ceiling question and the presence-bus trace." },
+          { kind: "tool", tool: "viewer · list_conversations", status: "running", at: "14:05" },
+        ] },
+      { id: "c1", project: "atlas", title: "Build the export endpoint", engine: "codex", model: "gpt-5.6", effort: "high", state: "working", elapsed: "12:40", tool: "Read src/lib/export/route.ts", pipeline: { id: "p1", stage: "build" }, account: "cx-main",
+        feed: [
+          { kind: "user", at: "13:52", text: "Implement the export endpoint per the architect's plan. Keep the response streaming." },
+          { kind: "agent", at: "13:53", text: "Reading the plan and the existing route handlers first." },
+          { kind: "tool", tool: "Read src/lib/export/plan.md", status: "done", at: "13:53" },
+          { kind: "tool", tool: "Read src/app/api/export/route.ts", status: "done", at: "13:54" },
+          { kind: "agent", at: "13:58", text: "The route already streams for CSV. I will add the JSON lines branch behind the same iterator and cover both with the route test." },
+          { kind: "tool", tool: "Edit src/app/api/export/route.ts", status: "done", at: "14:01" },
+          { kind: "tool", tool: "bun test src/app/api/export/route.test.ts", status: "done", at: "14:03", out: "12 pass · 0 fail" },
+          { kind: "tool", tool: "Read src/lib/export/route.ts", status: "running", at: "14:05" },
+        ] },
+      { id: "c2", project: "atlas", title: "Hero framing for the README", engine: "claude", model: "Sonnet", effort: "medium", state: "waiting", decision: "a question", since: "9 min", task: "t3", account: "cl-main",
+        question: { title: "Choose the hero framing", options: [["Compact feed", "Make command cards and the patch fill the frame."], ["Balanced board", "Keep the parentage tree visible beside the live feed."], ["Overview first", "Lead with the cross-project status board."]] },
+        feed: [
+          { kind: "user", at: "13:40", text: "Prepare the README hero framing and ask me to choose the final composition." },
+          { kind: "agent", at: "13:41", text: "The fixture is ready. One framing decision remains before the media pass continues." },
+          { kind: "tool", tool: "AskUserQuestion", status: "running", at: "13:56" },
+        ] },
+      { id: "c3", project: "atlas", title: "Design the export endpoint", engine: "claude", model: "Opus", effort: "high", state: "done", age: "1h", pipeline: { id: "p1", stage: "plan" }, account: "cl-main",
+        feed: [{ kind: "user", at: "12:50", text: "Design the export endpoint." }, { kind: "agent", at: "13:20", text: "Plan written to src/lib/export/plan.md: one streaming iterator, two encoders, one route test per encoder." }] },
+      { id: "c4", project: "atlas", parent: "seat", title: "Fix the flaky scanner test", engine: "claude", model: "Sonnet", effort: "high", state: "returned", age: "6 min", account: "cl-lab",
+        feed: [{ kind: "user", at: "13:30", text: "Fix the flaky scanner test." }, { kind: "agent", at: "13:59", text: "The race was the temp dir being reused across cases. Isolated per test; 40 green runs in a row. Ready for review." }] },
+      { id: "c5", project: "atlas", parent: "c4", title: "Explore: where the temp dir is created", engine: "claude", model: "Haiku", effort: "low", state: "done", age: "22 min", account: "cl-lab", feed: [{ kind: "agent", at: "13:43", text: "Three call sites, one shared constant." }] },
+      { id: "c6", project: "atlas", parent: "c4", title: "Run the scanner suite 40 times", engine: "claude", model: "Sonnet", effort: "low", state: "working", elapsed: "3:05", tool: "bun test src/lib/scanner", account: "cl-lab", feed: [{ kind: "tool", tool: "bun test src/lib/scanner", status: "running", at: "14:02" }] },
+      { id: "c6a", project: "atlas", parent: "c6", title: "Explore: the seeds the suite reuses", engine: "claude", model: "Haiku", effort: "low", state: "done", age: "8 min", account: "cl-lab", feed: [{ kind: "agent", at: "13:57", text: "One seed, set once in the suite setup." }] },
+      { id: "c7", project: "atlas", title: "Release 2.4 checklist", engine: "codex", model: "gpt-5.6", effort: "medium", state: "returned", age: "24 min", account: "cx-team", feed: [{ kind: "agent", at: "13:41", text: "Checklist drafted with the twelve items from the last release and two new ones for the runtime host." }] },
+      { id: "c8", project: "atlas", parent: "seat", title: "Investigate memory growth in the host", engine: "codex", model: "gpt-5.6", effort: "xhigh", state: "stalled", stalled: "40 min", account: "cx-team", feed: [{ kind: "agent", at: "13:25", text: "Heap snapshots taken at 10-minute intervals." }] },
+      { id: "c9", project: "atlas", parent: "seat", title: "Refactor the limits footer", engine: "claude", model: "Opus", effort: "high", state: "limit", limit: { account: "Main", resets: "16:00" }, account: "cl-main", feed: [{ kind: "agent", at: "13:12", text: "Half the footer moved into the accounts model." }] },
+      /* Three lanes the seat spawned that no pipeline and no task claims: the
+         common case on a real board, and what the yard is grouped around. */
+      { id: "s1", project: "atlas", parent: "seat", title: "Tighten the outbox retry", engine: "codex", model: "gpt-5.6", effort: "high", state: "working", elapsed: "7:20", tool: "Edit src/lib/outbox/retry.ts", account: "cx-main",
+        feed: [{ kind: "user", at: "13:57", text: "Cap the outbox retry at five attempts with backoff; keep the journal contract." }, { kind: "tool", tool: "Edit src/lib/outbox/retry.ts", status: "running", at: "14:04" }] },
+      { id: "s2", project: "atlas", parent: "seat", title: "Choose the retry ceiling", engine: "claude", model: "Opus", effort: "high", state: "waiting", decision: "plan approval", since: "4 min", account: "cl-main",
+        question: { title: "Approve the retry ceiling", options: [["Five attempts", "Backoff doubles from two seconds."], ["Three attempts", "Fail fast; the journal keeps the rest."]] },
+        feed: [{ kind: "user", at: "13:58", text: "Propose the retry ceiling for the outbox and wait for my approval." }, { kind: "agent", at: "14:01", text: "Two ceilings fit the journal contract; one decision remains." }, { kind: "tool", tool: "AskUserQuestion", status: "running", at: "14:01" }] },
+      { id: "s3", project: "atlas", parent: "seat", title: "Trace the presence bus", engine: "claude", model: "Sonnet", effort: "medium", state: "returned", age: "15 min", account: "cl-main",
+        feed: [{ kind: "user", at: "13:20", text: "Trace who subscribes to the presence bus and who never unsubscribes." }, { kind: "agent", at: "13:50", text: "Four subscribers, one leak: the board keeps its handler after unmount. Patch attached." }] },
+      { id: "s3a", project: "atlas", parent: "s3", title: "Explore: presence bus subscribers", engine: "claude", model: "Haiku", effort: "low", state: "done", age: "24 min", account: "cl-main", feed: [{ kind: "agent", at: "13:41", text: "Four call sites." }] },
+      /* p2's stage conversations. */
+      { id: "c10", project: "atlas", title: "Plan the archive TTL", engine: "claude", model: "Opus", effort: "high", state: "done", age: "3h", account: "cl-main", pipeline: { id: "p2", stage: "plan" }, feed: [{ kind: "agent", at: "11:05", text: "TTL of 14 days after close, sweep on host start and hourly." }] },
+      { id: "c11", project: "atlas", title: "Build the archive TTL", engine: "codex", model: "gpt-5.6", effort: "high", state: "done", age: "2h", account: "cx-main", pipeline: { id: "p2", stage: "build", attempt: 1 }, feed: [{ kind: "agent", at: "12:10", text: "Sweep implemented behind the store." }] },
+      { id: "c12", project: "atlas", title: "Build the archive TTL · round 2", engine: "codex", model: "gpt-5.6", effort: "high", state: "done", age: "50 min", account: "cx-main", pipeline: { id: "p2", stage: "build", attempt: 2 }, feed: [{ kind: "agent", at: "13:15", text: "Both findings addressed: the sweep skips restored pipelines and the TTL is a setting." }] },
+      { id: "c13", project: "atlas", title: "Review the archive TTL", engine: "claude", model: "Opus", effort: "xhigh", state: "done", age: "1h", account: "cl-main", pipeline: { id: "p2", stage: "review", attempt: 1 }, feed: [{ kind: "agent", at: "12:40", text: "REQUEST_CHANGES · 2 findings." }] },
+      { id: "c14", project: "atlas", title: "Review the archive TTL · round 2", engine: "claude", model: "Opus", effort: "xhigh", state: "done", age: "31 min", account: "cl-main", pipeline: { id: "p2", stage: "review", attempt: 2 }, feed: [{ kind: "agent", at: "13:34", text: "REQUEST_CHANGES · 2 findings. The sweep still touches restored pipelines when the flag is set after close." }] },
+      /* p5: a running review loop in round 2. */
+      { id: "c15", project: "atlas", title: "Migrate accounts to the new binding", engine: "codex", model: "gpt-5.6", effort: "high", state: "done", age: "35 min", account: "cx-main", pipeline: { id: "p5", stage: "build", attempt: 2 }, feed: [{ kind: "agent", at: "13:30", text: "Rebinding done; the old path resolver is deleted." }] },
+      { id: "c16", project: "atlas", title: "Review the account migration · round 2", engine: "claude", model: "Opus", effort: "xhigh", state: "working", elapsed: "8:12", account: "cl-main", tool: "Read src/lib/accounts/binding.ts", pipeline: { id: "p5", stage: "review", attempt: 2 }, feed: [{ kind: "tool", tool: "Read src/lib/accounts/binding.ts", status: "running", at: "14:04" }] },
+      { id: "c17", project: "atlas", title: "Plan the account migration", engine: "claude", model: "Opus", effort: "high", state: "done", age: "2h", account: "cl-main", pipeline: { id: "p5", stage: "plan" }, feed: [{ kind: "agent", at: "12:00", text: "Plan written." }] },
+      /* Other projects. */
+      { id: "seat-beacon", project: "beacon", seat: true, title: "beacon-site orchestrator", engine: "codex", model: "gpt-5.6", effort: "high", state: "returned", age: "14 min", feed: [{ kind: "agent", at: "13:51", text: "Nothing owed. Two lanes idle." }] },
+      { id: "b1", project: "beacon", title: "Rebuild the pricing page", engine: "claude", model: "Sonnet", effort: "high", state: "working", elapsed: "31:02", tool: "Edit src/pages/pricing.tsx", feed: [{ kind: "tool", tool: "Edit src/pages/pricing.tsx", status: "running", at: "14:04" }] },
+      { id: "b2", project: "beacon", parent: "seat-beacon", title: "Lighthouse pass on the landing page", engine: "codex", model: "gpt-5.6", effort: "medium", state: "returned", age: "12 min", feed: [{ kind: "agent", at: "13:53", text: "Score 96. Two images still lack dimensions." }] },
+      { id: "b3", project: "beacon", title: "Write the changelog", engine: "claude", model: "Haiku", effort: "low", state: "done", age: "3h", feed: [{ kind: "agent", at: "11:00", text: "Done." }] },
+      { id: "k1", project: "corvid", title: "Nightly index rebuild", engine: "codex", model: "gpt-5.6", effort: "high", state: "waiting", decision: "plan approval", since: "41 min", feed: [{ kind: "agent", at: "13:24", text: "Plan: rebuild in two passes. Approve?" }], question: { title: "Approve the rebuild plan", options: [["Approve", "Two passes, nightly."], ["Change", "Tell me what to change."]] } },
+      { id: "k2", project: "corvid", title: "Deduplicate the crawl queue", engine: "claude", model: "Opus", effort: "high", state: "working", elapsed: "1:02:10", tool: "bun test", feed: [{ kind: "tool", tool: "bun test", status: "running", at: "14:00" }] },
+      { id: "d1", project: "delta", title: "Ledger export to CSV", engine: "claude", model: "Sonnet", effort: "medium", state: "done", age: "2d", feed: [{ kind: "agent", at: "09:00", text: "Shipped." }] },
+    ],
 
-/* Fixture mutations for the state screens. Each takes the fixture and edits
-   it in place before the first render. */
-window.SCENARIOS = {
-  noseat(F) { F.seat.state = "none"; F.conversations = F.conversations.filter((c) => c.id !== "orch"); },
-  degraded(F) { F.runtime = "degraded"; },
-  offline(F) { F.runtime = "offline"; },
-  held(F) { const c = F.conversations.find((x) => x.id === "c1"); c.state = "held"; c.heldCount = 2; },
-  limit(F) { const c = F.conversations.find((x) => x.id === "c1"); c.state = "limit"; c.limitReset = "16:40"; F.accounts.claude[0].windows[0].left = 0; },
-  stalled(F) { const c = F.conversations.find((x) => x.id === "c1"); c.state = "stalled"; c.stalledFor = "14 min"; },
-  killed(F) { const c = F.conversations.find((x) => x.id === "c1"); c.state = "killed"; },
-  arrival(F) { F.arrival = { id: "k1", project: "corvid", after: 400 }; },
-  /* A decision arriving in the CURRENT project: the row appears with its edge,
-     the counts pulse once, and no banner renders (critique round 1, F20). */
-  "arrival-here"(F) {
-    F.conversations.push({ id: "c13", project: "atlas", title: "Bound the journal file", engine: "codex", model: "gpt-5.6", effort: "high", account: "Main", state: "waiting", waitedFor: "now", age: "now", ctx: 12, arrivesLater: true,
-      question: { header: "Journal bound", text: "Cap the journal at 200 MB or at 7 days?", options: [{ label: "200 MB", hint: "" }, { label: "7 days", hint: "" }], chips: ["200 MB", "7 days"] }, feed: [{ kind: "user", ts: "14:04", text: "Bound the journal." }] });
-    F.arrival = { id: "c13", project: "atlas", after: 400 };
-  },
-  split(F) { F.pin = "orch"; },
-  notasks(F) { F.project = "beacon"; },
-  /* Every pinned group starts pinned so the frame shows the honoured move. */
-  pinned(F) { F.pins = { p1: { x: 40, y: 380 } }; },
-  crowded(F) {
-    const engines = ["claude", "codex"]; const models = { claude: ["Opus", "Sonnet"], codex: ["gpt-5.6", "gpt-5.5"] };
-    const states = ["working", "working", "returned", "done", "done", "done", "waiting"];
-    for (let i = 0; i < 24; i++) {
-      const engine = engines[i % 2]; const state = states[i % states.length];
-      F.conversations.push({
-        id: `x${i}`, project: "atlas", title: `Lane ${i + 10}: ${["tidy the feed cache", "rename the seat tick", "bound the journal", "index the search", "type the outbox", "gate the rasters"][i % 6]}`,
-        engine, model: models[engine][i % 2], effort: "high", account: "Main", state, elapsed: state === "working" ? `${(i % 9) + 1}:${String((i * 7) % 60).padStart(2, "0")}` : undefined,
-        waitedFor: state === "waiting" ? `${i + 2} min` : undefined, age: state === "working" ? "now" : `${(i * 11) % 59 + 1} min`, ctx: (i * 13) % 90, tool: state === "working" ? "Edit index.ts" : undefined,
-        question: state === "waiting" ? { header: "Scope check", text: "Include the archive collection in this lane?", options: [{ label: "Yes", hint: "" }, { label: "No", hint: "" }], chips: ["Yes", "No"] } : undefined,
-        feed: [{ kind: "user", ts: "13:00", text: "Do the lane." }],
-      });
-    }
-    for (let i = 0; i < 7; i++) {
-      const parked = i % 3 === 0; const worker = `x${(i * 3) % 24}`;
-      F.pipelines.push({ id: `q${i}`, project: "atlas", task: `Lane ${i + 30}: ${["journal bound", "seat tick note", "search index", "outbox types", "raster gate", "feed cache", "rename seat"][i]} (#${300 + i})`, state: parked ? "needs_decision" : "running", revision: 2 + i, started: `${i + 1}h`, branch: `pipeline/${300 + i}`, lastEdit: null, cursor: { stageId: "build", attempt: 1 }, stages: [{ id: "build", role: "builder", engine: "codex", model: "gpt-5.6", effort: "high", access: "read-write", sandbox: "full", outputs: [], next: "review", onFail: null, attempts: [{ n: 1, state: parked ? "failed" : "running", conv: worker, head: "abcdef", findings: parked ? ["One finding."] : undefined }], prompt: "Build." }, { id: "review", role: "reviewer", engine: "claude", model: "Opus", effort: "xhigh", access: "read-only", sandbox: "restricted", outputs: [], next: null, onFail: { to: "build", maxRounds: 3 }, attempts: [], prompt: "Review." }], findings: parked ? ["One finding."] : [], notes: [], checkpoints: [], mutations: [], waiting: null });
-      const c = F.conversations.find((x) => x.id === worker); if (c) c.pipeline = { id: `q${i}`, stage: "build", k: 1, n: 2 };
-    }
-    for (let i = 0; i < 12; i++) {
-      F.tasks.push({ id: `tx${i}`, title: `Lane ${i + 10}: ${["tidy the feed cache", "rename the seat tick", "bound the journal", "index the search", "type the outbox", "gate the rasters"][i % 6]}`, issue: 300 + i, status: ["now", "review", "blocked", "planned", "done"][i % 5], worker: i % 4 === 3 ? undefined : `x${i}`, pipeline: i < 7 ? `q${i}` : undefined });
-    }
-    for (let i = 0; i < 9; i++) F.projects.push({ id: `pr${i}`, name: `${["fjord", "gable", "harbor", "isle", "juniper", "kestrel", "lumen", "moraine", "nimbus"][i]}-app`, age: `${i + 1}h` });
-    F.conversations.push({ id: "pr0a", project: "pr0", title: "Rotate the API keys", engine: "codex", model: "gpt-5.6", effort: "high", account: "Main", state: "working", elapsed: "3:10", age: "now", ctx: 10, tool: "Edit keys.ts", feed: [{ kind: "user", ts: "13:50", text: "Rotate." }] });
-    F.conversations.push({ id: "pr4a", project: "pr4", title: "Tag the nightly build", engine: "claude", model: "Sonnet", effort: "medium", account: "Main", state: "waiting", waitedFor: "6 min", age: "6 min", ctx: 10, question: { header: "Tag", text: "Tag now?", options: [{ label: "Yes", hint: "" }, { label: "No", hint: "" }], chips: ["Yes"] }, feed: [{ kind: "user", ts: "13:55", text: "Tag." }] });
-  },
-};
+    /* Pipelines carry the automation-v2 record fields the inspector reads;
+       `by` is who opened the record (the seat, or the operator by hand). */
+    pipelines: [
+      { id: "p1", project: "atlas", by: "seat", task: "Implement the export endpoint", issue: 218, taskId: "t1", state: "running", stage: "build", since: "1h", revision: 4, branch: "pipeline/export-endpoint-p1",
+        stages: [
+          { id: "plan", role: "Architect", engine: "claude", model: "Opus", effort: "high", access: "read-only", kind: "run", attempts: [{ n: 1, state: "passed", conv: "c3", sha: "a1f3c9" }] },
+          { id: "build", role: "Builder", engine: "codex", model: "gpt-5.6", effort: "high", access: "read-write", kind: "run", attempts: [{ n: 1, state: "running", conv: "c1", sha: "a1f3c9" }] },
+          { id: "verify", role: "Verifier", engine: "claude", model: "Sonnet", effort: "high", access: "read-only", kind: "run", onFail: { to: "build", maxRounds: 3 }, attempts: [] },
+          { id: "review", role: "Reviewer", engine: "claude", model: "Opus", effort: "xhigh", access: "read-only", kind: "review", onFail: { to: "build", maxRounds: 3 }, attempts: [] },
+          { id: "ship", role: "Deployer", engine: "codex", model: "gpt-5.6", effort: "medium", access: "read-write", kind: "run", attempts: [] },
+        ],
+        log: [["rev 4", "note", "review", "operator", "«check the streaming path»"], ["rev 3", "edit-stage", "review", "seat", "reasoning high → xhigh"], ["rev 2", "start", "plan", "seat", "attempt 1 spawned"]] },
+      { id: "p2", project: "atlas", by: "seat", task: "Archive TTL for closed pipelines", issue: 206, taskId: "t2", state: "needs_decision", stage: "review", since: "31 min", revision: 9, branch: "pipeline/archive-ttl-p2",
+        stages: [
+          { id: "plan", role: "Architect", engine: "claude", model: "Opus", effort: "high", access: "read-only", kind: "run", attempts: [{ n: 1, state: "passed", conv: "c10", sha: "7be2d0" }] },
+          { id: "build", role: "Builder", engine: "codex", model: "gpt-5.6", effort: "high", access: "read-write", kind: "run", attempts: [{ n: 1, state: "passed", conv: "c11", sha: "7be2d0" }, { n: 2, state: "passed", conv: "c12", sha: "9c41aa" }] },
+          { id: "verify", role: "Verifier", engine: "claude", model: "Sonnet", effort: "high", access: "read-only", kind: "run", onFail: { to: "build", maxRounds: 3 }, attempts: [{ n: 1, state: "passed", conv: null, sha: "7be2d0" }, { n: 2, state: "passed", conv: null, sha: "9c41aa" }] },
+          { id: "review", role: "Reviewer", engine: "claude", model: "Opus", effort: "xhigh", access: "read-only", kind: "review", onFail: { to: "build", maxRounds: 3 }, attempts: [
+            { n: 1, state: "failed", conv: "c13", sha: "7be2d0", findings: ["The sweep deletes pipelines the operator restored after close.", "The TTL is a constant; the spec asks for a setting."] },
+            { n: 2, state: "failed", conv: "c14", sha: "9c41aa", findings: ["The sweep still touches a restored pipeline when the flag is set after the close.", "No test covers a close followed by a restore inside the TTL window."] },
+          ] },
+        ],
+        log: [["rev 9", "park", "review", "engine", "round 2 of 3 failed · 2 findings"], ["rev 8", "fail-edge", "review → build", "engine", "round 2 of 3 used"], ["rev 5", "fail-edge", "review → build", "engine", "round 1 of 3 used"]] },
+      { id: "p3", project: "atlas", by: "operator", task: "Speed up the board scan", issue: 231, taskId: "t4", state: "draft", stage: "plan", since: "5 min", revision: 1, branch: "pipeline/board-scan-p3",
+        stages: [
+          { id: "plan", role: "Architect", engine: "claude", model: "Opus", effort: "high", access: "read-only", kind: "run", attempts: [] },
+          { id: "build", role: "Builder", engine: "codex", model: "gpt-5.6", effort: "high", access: "read-write", kind: "run", attempts: [] },
+          { id: "review", role: "Reviewer", engine: "claude", model: "Opus", effort: "xhigh", access: "read-only", kind: "review", onFail: { to: "build", maxRounds: 3 }, attempts: [] },
+        ], log: [["rev 1", "create", "—", "operator", "draft from the review-loop template"]] },
+      { id: "p4", project: "atlas", by: "seat", task: "Rename the switchboard", issue: 199, taskId: "t5", state: "completed", stage: "review", since: "yesterday", revision: 6, branch: "pipeline/rename-p4",
+        stages: [
+          { id: "build", role: "Builder", engine: "codex", model: "gpt-5.6", effort: "medium", access: "read-write", kind: "run", attempts: [{ n: 1, state: "passed", conv: null, sha: "31d0aa" }] },
+          { id: "review", role: "Reviewer", engine: "claude", model: "Opus", effort: "high", access: "read-only", kind: "review", onFail: { to: "build", maxRounds: 2 }, attempts: [{ n: 1, state: "passed", conv: null, sha: "31d0aa" }] },
+        ], log: [["rev 6", "complete", "review", "engine", "APPROVE · merged"]] },
+      { id: "p5", project: "atlas", by: "seat", task: "Migrate accounts to the new binding", issue: 214, taskId: "t8", state: "running", stage: "review", since: "2h", revision: 7, branch: "pipeline/accounts-binding-p5",
+        stages: [
+          { id: "plan", role: "Architect", engine: "claude", model: "Opus", effort: "high", access: "read-only", kind: "run", attempts: [{ n: 1, state: "passed", conv: "c17", sha: "c0ffee" }] },
+          { id: "build", role: "Builder", engine: "codex", model: "gpt-5.6", effort: "high", access: "read-write", kind: "run", attempts: [{ n: 1, state: "passed", conv: null, sha: "c0ffee" }, { n: 2, state: "passed", conv: "c15", sha: "d4d4d4" }] },
+          { id: "review", role: "Reviewer", engine: "claude", model: "Opus", effort: "xhigh", access: "read-only", kind: "review", onFail: { to: "build", maxRounds: 3 }, attempts: [{ n: 1, state: "failed", conv: null, sha: "c0ffee", findings: ["The resolver keeps a path fallback the spec retires."] }, { n: 2, state: "running", conv: "c16", sha: "d4d4d4" }] },
+        ], log: [["rev 7", "fail-edge", "review → build", "engine", "round 1 of 3 used"]] },
+      { id: "bp1", project: "beacon", by: "seat", task: "Ship the pricing page", issue: 77, taskId: "bt1", state: "running", stage: "build", since: "31 min", revision: 2, branch: "pipeline/pricing-bp1",
+        stages: [
+          { id: "build", role: "Builder", engine: "claude", model: "Sonnet", effort: "high", access: "read-write", kind: "run", attempts: [{ n: 1, state: "running", conv: "b1", sha: "e1e1e1" }] },
+          { id: "review", role: "Reviewer", engine: "codex", model: "gpt-5.6", effort: "xhigh", access: "read-only", kind: "review", onFail: { to: "build", maxRounds: 3 }, attempts: [] },
+        ], log: [] },
+    ],
+
+    /* Board tasks (#1466 readiness vocabulary: now · review · blocked · planned · done). */
+    tasks: [
+      { id: "t1", project: "atlas", title: "Implement the export endpoint", issue: 218, status: "assigned", pipeline: "p1" },
+      { id: "t2", project: "atlas", title: "Archive TTL for closed pipelines", issue: 206, status: "blocked", pipeline: "p2" },
+      { id: "t3", project: "atlas", title: "README hero framing", issue: null, status: "assigned", worker: "c2" },
+      { id: "t4", project: "atlas", title: "Speed up the board scan", issue: 231, status: "inbox", pipeline: "p3" },
+      { id: "t5", project: "atlas", title: "Rename the switchboard", issue: 199, status: "done", pipeline: "p4" },
+      { id: "t6", project: "atlas", title: "Write the 2.4 release notes", issue: 240, status: "inbox" },
+      { id: "t7", project: "atlas", title: "Audit the demo fixture for stray values", issue: 236, status: "inbox" },
+      { id: "t8", project: "atlas", title: "Migrate accounts to the new binding", issue: 214, status: "assigned", pipeline: "p5" },
+      { id: "t9", project: "atlas", title: "Flaky scanner test", issue: 229, status: "assigned", worker: "c4" },
+      { id: "bt1", project: "beacon", title: "Ship the pricing page", issue: 77, status: "assigned", pipeline: "bp1" },
+      { id: "bt2", project: "beacon", title: "Image dimensions on the landing page", issue: 80, status: "inbox" },
+    ],
+
+    /* Accounts. Every window: what is left, the window length in hours, the
+       hours elapsed in it, the reset clock, and the burndown series (hours in
+       the window → % left) the detail charts. */
+    accounts: {
+      claude: [
+        { id: "cl-main", label: "Main", plan: "Max plan", auth: "Authenticated", active: true, checked: "14:00",
+          windows: [
+            { label: "5 h", left: 38, hours: 5, elapsed: 3.2, reset: "resets 16:00", series: [[0, 100], [0.5, 92], [1, 81], [1.5, 74], [2, 62], [2.5, 51], [3, 42], [3.2, 38]] },
+            { label: "Week", left: 61, hours: 168, elapsed: 96, reset: "resets Mon 09:00", series: [[0, 100], [24, 91], [48, 80], [72, 70], [96, 61]] },
+          ], hourly: [["09", 4], ["10", 9], ["11", 12], ["12", 7], ["13", 14], ["14", 6]] },
+        { id: "cl-lab", label: "Lab", plan: "Max plan", auth: "Authenticated", active: false, checked: "13:50",
+          windows: [
+            { label: "5 h", left: 91, hours: 5, elapsed: 1.5, reset: "resets 17:35", series: [[0, 100], [0.5, 98], [1, 94], [1.5, 91]] },
+            { label: "Week", left: 84, hours: 168, elapsed: 60, reset: "resets Tue 11:00", series: [[0, 100], [24, 96], [48, 89], [60, 84]] },
+          ], hourly: [["11", 2], ["12", 3], ["13", 4]] },
+        { id: "cl-second", label: "Second", plan: "Pro plan", auth: "Signed out", active: false, checked: null, windows: [], hourly: [] },
+      ],
+      codex: [
+        { id: "cx-main", label: "Main", plan: "Plus", auth: "Authenticated", active: true, checked: "13:58",
+          windows: [
+            { label: "5 h", left: 55, hours: 5, elapsed: 2.4, reset: "resets 16:40", series: [[0, 100], [0.5, 96], [1, 87], [1.5, 76], [2, 63], [2.4, 55]] },
+            { label: "Week", left: 70, hours: 168, elapsed: 80, reset: "resets Sun 22:00", series: [[0, 100], [24, 94], [48, 85], [72, 74], [80, 70]] },
+          ], hourly: [["10", 5], ["11", 8], ["12", 11], ["13", 10], ["14", 8]], resets: { available: 1, expires: "21 Sep" } },
+        { id: "cx-team", label: "Team", plan: "Business", auth: "Authenticated", active: false, checked: "13:40",
+          windows: [
+            { label: "5 h", left: 12, hours: 5, elapsed: 4.1, reset: "resets 15:00", series: [[0, 100], [1, 82], [2, 60], [3, 38], [4, 16], [4.1, 12]] },
+            { label: "Week", left: 40, hours: 168, elapsed: 120, reset: "resets Fri 08:00", series: [[0, 100], [48, 78], [96, 55], [120, 40]] },
+          ], hourly: [["09", 12], ["10", 16], ["11", 20], ["12", 18], ["13", 14]], resets: { available: 0, expires: null } },
+      ],
+    },
+
+    host: {
+      tasks: [{ name: "runtime host", pid: 41772, mem: "610 MB", age: "3d" }, { name: "scanner", pid: 41790, mem: "84 MB", age: "3d" }, { name: "transcribe worker", pid: 52210, mem: "1.2 GB", age: "2h" }],
+      hidden: [{ id: "h1", title: "Old switchboard reviewer" }, { id: "h2", title: "Docs typo sweep" }],
+      lastSeen: "14:04",
+    },
+  };
+
+  /* ── Scenarios ──────────────────────────────────────────────────────────── */
+  F.scenarios = {
+    noseat(f) { delete f.seats.atlas; f.conversations = f.conversations.filter((c) => c.id !== "seat"); },
+    degraded(f) { f.runtime = "degraded"; },
+    offline(f) { f.runtime = "offline"; },
+    pinned(f) { f.pins = { p2: { x: 240, y: -60 } }; },
+    arrival(f) { f.arrival = { conv: "k1" }; },
+    limit(f) { const c = f.conversations.find((x) => x.id === "c1"); c.state = "limit"; c.limit = { account: "Main", resets: "16:00" }; f.accounts.claude[0].windows[0].left = 0; f.accounts.claude[0].windows[0].series.push([3.3, 0]); },
+    killed(f) { f.killed = ["c1"]; },
+    crowded(f) {
+      const engines = ["claude", "codex"], models = { claude: ["Opus", "Sonnet", "Haiku"], codex: ["gpt-5.6", "gpt-5.5"] };
+      const states = ["working", "working", "returned", "done", "waiting", "working", "done", "stalled", "returned", "done"];
+      const verbs = ["Refactor", "Migrate", "Profile", "Document", "Harden", "Split", "Instrument", "Retire", "Rename", "Backfill"];
+      const nouns = ["the scanner", "the outbox", "the seat tick", "the deploy gate", "the search index", "the feed parser", "the limits cache", "the task store", "the presence bus", "the journal"];
+      for (let i = 0; i < 30; i++) {
+        const engine = engines[i % 2]; const state = states[i % states.length];
+        const c = { id: `x${i}`, project: "atlas", title: `${verbs[i % 10]} ${nouns[(i * 3) % 10]}`, engine, model: models[engine][i % models[engine].length], effort: ["low", "medium", "high"][i % 3], state, feed: [{ kind: "agent", at: "13:00", text: "Working." }] };
+        if (state === "working") { c.elapsed = `${(i % 50) + 1}:0${i % 9}`; c.tool = "bun test"; }
+        if (state === "waiting") { c.decision = i % 2 ? "a question" : "plan approval"; c.since = `${i + 2} min`; c.question = { title: "Proceed?", options: [["Yes", "Go ahead."], ["No", "Stop here."]] }; }
+        if (state === "stalled") c.stalled = `${i + 10} min`;
+        if (state === "returned" || state === "done") c.age = `${i + 1} min`;
+        if (i % 7 === 3) c.parent = `x${i - 1}`;
+        else if (i % 3 !== 0 && i % 4 !== 1) c.parent = "seat";
+        c.account = engine === "claude" ? (i % 5 ? "cl-main" : "cl-lab") : (i % 4 ? "cx-main" : "cx-team");
+        f.conversations.push(c);
+      }
+      for (let i = 0; i < 10; i++) {
+        const id = `q${i}`; const st = ["running", "running", "needs_decision", "running", "draft", "completed", "running", "paused", "running", "needs_decision"][i];
+        const conv = f.conversations.find((c) => c.id === `x${i * 3}`);
+        f.pipelines.push({ id, project: "atlas", by: i % 3 === 2 ? "operator" : "seat", task: `${verbs[(i * 7) % 10]} ${nouns[(i * 7 + 1) % 10]}`, issue: 300 + i, taskId: null, state: st, stage: st === "draft" ? "plan" : "build", since: `${i * 9 + 4} min`, revision: 2, branch: `pipeline/q${i}`,
+          stages: [
+            { id: "plan", role: "Architect", engine: "claude", model: "Opus", effort: "high", access: "read-only", kind: "run", attempts: st === "draft" ? [] : [{ n: 1, state: "passed", conv: null, sha: "ab12cd" }] },
+            { id: "build", role: "Builder", engine: "codex", model: "gpt-5.6", effort: "high", access: "read-write", kind: "run", attempts: st === "draft" ? [] : [{ n: 1, state: st === "needs_decision" ? "failed" : st === "completed" ? "passed" : "running", conv: conv ? conv.id : null, sha: "ab12cd", findings: st === "needs_decision" ? ["The builder changed the schema without a migration."] : undefined }] },
+            { id: "review", role: "Reviewer", engine: "claude", model: "Opus", effort: "xhigh", access: "read-only", kind: "review", onFail: { to: "build", maxRounds: 3 }, attempts: st === "completed" ? [{ n: 1, state: "passed", conv: null, sha: "ab12cd" }] : [] },
+          ], log: [] });
+        if (conv) conv.pipeline = { id, stage: "build" };
+      }
+      for (let i = 0; i < 9; i++) f.projects.push({ id: `pr${i}`, name: ["falcon", "granite", "harbor", "isotope", "juniper", "kestrel", "lumen", "mesa", "nimbus"][i], age: `${i + 1}h`, quiet: i > 4 });
+      for (let i = 0; i < 12; i++) f.tasks.push({ id: `tt${i}`, project: "atlas", title: `${verbs[(i * 3) % 10]} ${nouns[(i * 5) % 10]}`, issue: 400 + i, status: i % 3 ? "inbox" : "done" });
+    },
+  };
+  return F;
+})();
