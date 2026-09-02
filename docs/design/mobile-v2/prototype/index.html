@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+  <meta name="color-scheme" content="light dark">
+  <title>Agent Log Viewer · mobile v2 prototype (issue #1439)</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- The bench renders only on a wide viewport: frame size, colour scheme
+       and quick links. On a phone-sized viewport (a real phone, or the
+       capture script's emulated one) the shell below fills the screen. -->
+  <div id="bench">
+    <strong>mobile v2 · #1439</strong>
+    <label>Frame <select id="bench-frame"><option value="390">390 × 844</option><option value="430">430 × 932</option></select></label>
+    <label>Scheme <select id="bench-scheme"><option value="">system</option><option value="light">light</option><option value="dark">dark</option></select></label>
+    <nav id="bench-screens" aria-label="Screens"></nav>
+  </div>
+  <div id="phone" data-screen=""></div>
+  <script src="fixture.js"></script>
+  <script src="screens.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
