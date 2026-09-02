@@ -29,7 +29,7 @@ import {
   type HandoffDigestRequest,
   type HandoffParts,
 } from "./handoffDigest";
-import { ORCHESTRATOR_PROMPT_VERSION, ORCHESTRATOR_SYSTEM_PROMPT, orchestratorMandateForDelivery } from "./prompt";
+import { ORCHESTRATOR_PROMPT_VERSION, ORCHESTRATOR_SYSTEM_PROMPT, orchestratorMandateForDelivery, orchestratorMandateStale } from "./prompt";
 import {
   activeOrchestratorSeats,
   beginOrchestratorSeatIntent,
@@ -852,8 +852,18 @@ export async function executeOrchestratorRotation(
   /* The successor's core mandate is whatever the caller sent, else the
      incumbent's. The recorded version follows the TEXT (#1452): a rotation
      onto the built-in default is the current version whatever the incumbent
-     ran on — otherwise a v3 seat rotated onto v13 text would still read v3. */
+     ran on — otherwise a v3 seat rotated onto v13 text would still read v3.
+     Text that is neither the default nor the incumbent's own is the caller's
+     edit; over a STALE incumbent it records no version, the spawn rule for an
+     edited mandate — inheriting v3 would flag a seat running edited v13 rules
+     as stale and hand the next rotation's default prefill its edit to drop.
+     A seat on the current version keeps its version on an override. */
   const base = text(rawBody.mandate) || incumbent.mandate;
+  const promptVersion = base === ORCHESTRATOR_SYSTEM_PROMPT
+    ? ORCHESTRATOR_PROMPT_VERSION
+    : base !== incumbent.mandate && orchestratorMandateStale(incumbent.promptVersion)
+      ? null
+      : incumbent.promptVersion;
   /* Awaited ONLY when there is something to summarize. A rotation with nothing
      to compact must reach its durable `begin` with no await point, which is
      what serializes it against a concurrent designation for the same project. */
@@ -898,7 +908,7 @@ export async function executeOrchestratorRotation(
        BEFORE the seat request's own reconciliation; this is what that request
        re-checks after it, which is the last read before the durable begin. */
     expectedIncumbentSeatEpoch: incumbent.seatEpoch,
-    promptVersion: base === ORCHESTRATOR_SYSTEM_PROMPT ? ORCHESTRATOR_PROMPT_VERSION : incumbent.promptVersion,
+    promptVersion,
     ...(rawBody.engine !== undefined ? { engine: rawBody.engine } : {}),
     ...(rawBody.model !== undefined ? { model: rawBody.model } : {}),
     ...(rawBody.effort !== undefined ? { effort: rawBody.effort } : {}),
