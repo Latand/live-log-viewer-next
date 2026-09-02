@@ -2343,4 +2343,13 @@ export const uk: Record<keyof typeof en, Message> = {
   "mobile2.attention.next": "Далі",
   "mobile2.attention.empty": "Нічого не потребує вас.",
   "mobile2.accounts.title": "Акаунти й ліміти",
+  /* Стрічка mobile v2 (#1439, лінія 4): заголовок повідомлення на телефоні,
+     серії інструментів і картка запитання. Лише дописування, ключі mobile2.feed.* */
+  "mobile2.feed.needsYou": "Потрібні ви",
+  "mobile2.feed.answeredFold": "запитання · відповідено {time}",
+  "mobile2.feed.answeredFoldToggle": "Показати або сховати відповідене запитання",
+  "mobile2.feed.running": "виконується {summary}…",
+  "mobile2.feed.runFailed": { one: "{count} дія, невдалих: {failed} — розгортається на місці", few: "{count} дії, невдалих: {failed} — розгортається на місці", many: "{count} дій, невдалих: {failed} — розгортається на місці", other: "{count} дій, невдалих: {failed} — розгортається на місці" },
+  "mobile2.feed.runFold": "{count} дій — розгортається на місці",
+  "mobile2.feed.ownAnswerHint": "Або наберіть свою відповідь — вона піде як відповідь.",
 };
