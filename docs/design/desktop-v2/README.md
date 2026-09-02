@@ -1,742 +1,297 @@
-# Desktop v2 — the desktop experience, from scratch, prototype-first (issue #1453)
+# Desktop v2 — the yard: a spatial, clustered, fast board; today's chat made compact; a real accounts page (issue #1453, rewrite)
 
 > **Originating requirement.** Operator directive, 2026-09-02, given in the orchestrator conversation right after approving the mobile v2 prototype, quoted verbatim from the #1453 pipeline specification:
 >
 > *"може щось на десктопі тоді якийсь прототип продумаємо? мб якийсь редизайн теж по десктопу по UX UI з нуля, з урахуванням того що в планах і того що зроблено вже"*
 >
-> Working translation (mine): "maybe then we think through some prototype for the desktop too? maybe a redesign of the desktop as well, UX and UI from scratch, taking into account what is planned and what is already done."
+> Working translation: "maybe then we think through some prototype for the desktop too? maybe a redesign of the desktop as well, UX and UI from scratch, taking into account what is planned and what is already done."
 >
-> Issue #1453 (opened by the operator the same day; read in full on 2026-09-02) carries the scope. Quoted verbatim:
+> **The rejection this rewrite answers.** The first attempt (merged as #1464, produced on Opus after Fable hit its limit mid-turn) was shown to the operator on 2026-09-02. Their verdict, verbatim from the rewrite's pipeline specification and the orchestrator conversation:
 >
-> *Operator directive (2026-09-02, in the orchestrator conversation, after approving the mobile v2 prototype): while the mobile lanes run, think through a desktop prototype too — a UX/UI redesign of the desktop, from scratch, taking into account what is already done and what is planned. Same rule as mobile: **prototype-first**, the operator agrees the picture before any implementation lane opens. Fable owns the design.*
+> *"this design of the list of the tasks is shitty - the ui , and the board is much less nice then now, its too linear, i want it to be 2d or even 3d and fast rps to navigate and to see all work grouped around in clusters logical, maybe graph. but this is what fable would need to work on, borrow from [account B, redacted] for the new design . account page is shit, this all was done by opus 5 or fable? probably need to rewrite useing fable not opus"*
 >
-> *What must be absorbed. Shipped in the last wave (undeployed as of filing): compact failed-delivery notice (#1422), accounts dialog with actionable limits (#1424), agents search prior conversations first (#1430), feed starting window and "working…" timing (#1420), global message search profiled and ranked in memory (#1440), cached feed on switch with no board remount and in-app conversation links (#1445), orchestrator rotation authority contract (#1419), viewer-written Claude successor fork (#1448), seat tick note cap (#1450). Designed, not built: mobile v2 (#1439, `docs/design/mobile-v2/`): one bar, one banner slot, a navigation contract, sheets and in-flow receipts, state precedence, a shared vocabulary; the desktop must speak the same language and share tokens. The unified agent-mutable automation model (#1446, `docs/design/automation-v2/`): one record for pipelines, flows and review loops, editable after start; the desktop pipeline surface will eventually call the same PATCH payloads (slice 12). Standing rules: no confirmation prompts anywhere; controls are capability, not prohibition; identity-free artifacts; screen-reader work out of scope.*
+> (The account name in the quote is redacted: this repository is public and carries no identities.)
 >
-> *Wanted. 1. An audit of the desktop as it is at 1280, 1440 and 1920 px in both schemes, from rendered frames of the current build against a seeded home (the #979 recipe), covering: board and project rail, the focused conversation and feed, orchestrator panel, pipelines (strip, hub, scheme board), accounts, search, attention, switching between projects and conversations. Name what works and must be kept. 2. A mobile-v2-consistent desktop information architecture: what the persistent frame is, what a primary surface is, where the seat lives, how pipelines are read and edited, how attention and arrivals surface, how search and switching feel, what is cut. 3. A static clickable prototype (HTML/CSS/JS with invented fixtures, no framework) under `docs/design/desktop-v2/prototype/`, both schemes, the three widths, with a capture script rendering PNGs into a gitignored `out/` and headless gates (no overflow, no overlapping controls, 44 px targets, keyboard focus order for the composer and dialogs). 4. A design document `docs/design/desktop-v2/README.md`: the requirement quoted verbatim with date and source, the audit, principles, information architecture, screen-by-screen notes, what is deliberately cut, an implementation plan sliced into issues (one lane per slice, one owner per file), and a "Deferred — not currently justified" section. 5. Approval gate: the orchestrator shows the prototype to the operator; only after their word do implementation lanes open.*
+> *"дизайн чату теж пздець, зараз чат гарний але меню налаштувань і вводу не дуже, в тебе більш компактне вийшло і сподобалося, але більша частина гівно"* — the chat design is bad too; today's chat is good, but its settings menu and its input are weak; the prototype's greater compactness is the one thing they liked; most of the rest is bad.
 >
-> *Out of scope for this lane: product code changes. Mobile (owned by #1439's lanes). Screen-reader accommodations.*
+> What that means, from the specification: (1) the board is the centrepiece and must stop being a list: spatial 2D or convincingly depth-layered, all work visible at once, grouped into logical clusters, navigable fast, a graph welcome; today's `SchemeBoard` is nicer than the rejected redesign and must be studied first. (2) The task list must not be a linear column of cards; task → worker → pipeline must be spatial. (3) The accounts page is rejected; every account visible with a mandatory usage bar and a detail of consumption, burn rate and reset/burnout stays a hard requirement. (4) The chat is preserved; fix exactly the settings menu and the composer, and carry the compactness over. Still binding: a legible stage graph with per-attempt verdict pips and fail loops; all accounts with meters and clickable burn detail; task/worker/pipeline as one thread; craft inside the shared tokens with none of the generic-AI tells; auto-layout by default with drag-to-pin and release.
 
 This directory is the picture. Nothing in product source changed. What is here:
 
 | Path | What it is |
 | --- | --- |
-| `README.md` | This document: audit, principles, information architecture, screen notes, cuts, deferred scope, implementation plan. |
-| `prototype/index.html` | The clickable prototype. Open it from the file system; no server, no build step. `prototype/fixture.js` is invented, identity-free data (projects, conversations, pipelines with automation-v2 fields, accounts, hosts); `prototype/screens.js` lists the 47 key screens; `prototype/app.js` and `prototype/styles.css` are the whole implementation. |
-| `capture.ts` | `bun docs/design/desktop-v2/capture.ts` renders every key screen at 1280×800, 1440×900 and 1920×1080, dark and light, into `out/` (gitignored by `.gitignore` here) and gates each frame: nothing scrolls sideways (document, rail, column, stage, pinned pane, feed), every visible control is at least 44×44, no two visible controls overlap, a receipt never covers a control, the requested scheme applied, the bench never shows in a frame-sized viewport, the composer's Tab order is field → model chip → attach → dictate → send slot, a dialog takes focus on open, Tab wraps inside it, Escape closes it and returns focus to its trigger. After the matrix it clicks through the design headless: column arrow keys and Enter, the filter, the `n`/`N` queue across both item kinds, every single-key shortcut, focus return from the composer and from a menu, the send slot flipping between Stop and send, the answer path, Kill and Close with their receipts and inverse actions, the whole after-start pipeline editing story (edit-stage for the next attempt and with restart, set-edge, note, rerun refused while unsettled then allowed with stopCurrent, answer on a parked stage, add-stage and remove-stage with undo, completed → edit → re-run, draft → start), the arrival banner's seen stamp, the split pane's width rule, offline, the limit sheet's sign-in routing, the no-seat board and the crowded board. It also gates what the rework and the critique asked for (README §11 and §5.0): no thread chip clips its state, no meta fragment overflows its box and paints over the next separator, the stage editor keeps a usable body with its footer in the viewport, and every compact account row carries its meter. Run on 2026-09-02: 278 frames and every flow green. `DESKTOP_V2_ONLY=board,pipeline` and `DESKTOP_V2_WIDTHS=1440` narrow a run; `DESKTOP_V2_COLLECT=1` reports every failing frame at the end instead of stopping at the first. |
-| `out/` | Gitignored. `out/<frame>/<scheme>/<screen>.png` plus `out/manifest.json` from `capture.ts`; `out/current/<frame>/<scheme>/<screen>.png` plus `out/current/geometry-<frame>.json` from the audit render (§1.0). |
+| `README.md` | This document: the audit of today with what it does better, the design plan, the spatial model, screen by screen, cuts, deferred scope, the lane plan with the tests each lane supersedes. |
+| `prototype/index.html` | The clickable prototype. Open it from the file system; no server, no build step. `prototype/fixture.js` is invented, identity-free data; `prototype/screens.js` lists the 29 key screens; `prototype/app.js` and `prototype/styles.css` are the whole implementation. |
+| `capture.ts` | `bun docs/design/desktop-v2/capture.ts` renders every key screen at 1280×800, 1440×900 and 1920×1080, dark and light, into `out/` (gitignored) and gates each frame (§8). After the matrix it drives the design headless: pan, zoom, keycaps, `n`/`N`, lift, pin and release, the inspector's actions with their inverses, the settings sheet, the send slot, the question card, every account's detail, the field. Run on 2026-09-02: 174 frames and 15 flows green. `DESKTOP_V2_ONLY=yard,chat-waiting`, `DESKTOP_V2_WIDTHS=1440` and `DESKTOP_V2_COLLECT=1` narrow or soften a run. |
+| `critique.md` | This round's critique from the rendered frames: what changed because of it and what stays open for the reviewer. |
+| `out/` | Gitignored. `out/<frame>/<scheme>/<screen>.png` plus `out/manifest.json` from `capture.ts`; `out/current/<frame>/<scheme>/<screen>.png` plus `out/current/geometry-<frame>.json` from the audit render (§1.0), whose driver is the scratch file `out/_audit/audit.ts`. |
 
-**How to look at it.** On a window larger than the chosen frame the page shows a desktop frame with a bench above it (width, scheme, scenario, one link per screen). In a window of the frame's size, or with the browser's device emulation at 1440×900, the app fills the window and the bench disappears. Everything the design proposes is clickable: switch projects and conversations, answer a question, send, stop, kill and respawn, rotate the orchestrator, edit a stage after start, add and remove stages, answer a parked pipeline, use a reset, pin a conversation beside another at 1920. Query flags: `?scheme=dark|light`, `?w=1280|1440|1920`, `?scenario=noseat|degraded|offline|held|limit|stalled|killed|arrival|crowded|split`; the route is the hash (`#/board`, `#/chat/c2`, `#/pipeline/p1/stage/review`, …). Press `?` for the keyboard map.
+**How to look at it.** On a window larger than the chosen frame the page shows a desktop frame with a bench above it (width, scheme, scenario, one link per screen). In a window of the frame's size, or with device emulation at 1440×900, the app fills the window. Query flags: `?scheme=dark|light`, `?w=1280|1440|1920`, `?scenario=crowded|noseat|degraded|offline|pinned|arrival|limit|killed`, `?select=<cluster>`, `?lift=<conversation>`, `?zoom=block:<cluster>`, `?rail=1`, `?tray=1`; the route is the hash (`#/board`, `#/overview`, `#/chat/c2`, `#/accounts/codex/cx-team`). Press `?` for the keyboard map. Drag the canvas or wheel to pan; Ctrl+wheel or pinch to zoom; drag a cluster's header (or its tile) to pin it; double-click a node to lift it; digits jump to the keycapped clusters.
 
 ---
 
-## 1. Audit — what the desktop shows today
+## 1. Audit — what the desktop shows today, and what it does better than the rejected prototype
 
 ### 1.0 Method
 
-The current build (`main` at `43629d70`, 2026-09-02) was served by the repository's own demo runtime (`scripts/demo-capture.ts` → `bootstrapDemoRuntime`: the disposable seeded home under `fixtures/demo-home/.capture`, the fixture's pending-question and orchestrator-seat holders, the dev server on an ephemeral port) with two pipelines seeded through the shipped store the way `scripts/capture-issue-507-editor.ts` does (a four-stage draft and a four-stage running pipeline whose first stages bind to the fixture's synthetic transcripts). Chrome was driven by playwright-core at 1280×800, 1440×900 and 1920×1080, dark and light, with the capture clock frozen at the fixture instant, and every frame was measured the way `capture.ts` measures the prototype: visible controls under 44×44, pairs of visible controls whose rects intersect, horizontal overflow. Two traps for whoever repeats this: the dev server only answers a browser whose origin it allows (`LLV_DEV_ORIGINS`), so the page is opened through the docker-bridge host the demo environment already names, and the fixture's tmux socket wants a short `LLV_DEMO_TMUX_TMPDIR` in a deep checkout. The driver is a scratch file kept under `out/_audit/` in this worktree (gitignored); lane 0 (§8) turns it into `scripts/capture-desktop-v2.ts`. Nineteen screens per frame and scheme; the numbers below are from 1440 dark unless stated and hold within a few units at the other five cells.
+The current build (`main` at `7e5b199b`, 2026-09-02) was served as the production build under the image's Bun 1.4.0 (the machine's 1.3.3 cannot load the webpack middleware bundle, and `next dev` under Turbopack cannot start its CSS worker; both are traps for whoever repeats this and are in `out/_audit/audit.ts`), against the repository's own demo runtime: the disposable seeded home under `fixtures/demo-home/.capture`, the fixture's pending-question and orchestrator-seat holders, and two pipelines seeded through the shipped store the way `scripts/capture-issue-507-editor.ts` does (a four-stage draft and a five-stage running record with a fail edge from `verify` back to `build`). On the host the fixture's transcripts resolve into one project, so the audit's board carries seven branches, six trees, two seeded pipelines, a review loop, a task and the seat at once, which is the crowded case the design has to serve. Chrome ran at 1280×800, 1440×900 and 1920×1080, dark and light, with the capture clock frozen at the fixture instant; fourteen screens per cell were measured the way `capture.ts` measures the prototype: visible controls under 44×44, pairs of visible controls whose rects intersect, horizontal overflow.
 
 | Screen (1440 dark) | Visible controls | Under 44 px | Overlapping pairs | Smallest visible targets |
 | --- | --- | --- | --- | --- |
-| Overview | 40 | 33 | 12 | crown 24×24, notification close 24×24, push bell 26×26 |
-| Project board (scheme, fit zoom 21 %) | 74 | 66 | 5 | Remove stage 5×4, Update stage 6×6, Move stage 6×6 |
-| Focused conversation with a question (fit zoom 55 %) | 95 | 84 | 14 | Dismiss question 9×7, favourite 11×11, expand 14×10, remove column 14×10 |
-| Conversation with a subagent tree | 121 | 111 | 15 | rename 12×10, round-limit buttons 11×11 |
-| Orchestrator dock, live seat | 61 | 53 | 5 | read aloud 22×22, copy 22×22 |
-| Orchestrator seat conversation on the board | 94 | 84 | 19 | rename 12×10, favourite 11×11 |
-| Pipeline hub popover | 7 | 7 | 0 | Close controls 5×5, Start pipeline 30×9 |
-| Switchboard | 5 | 5 | 0 | close 32×32, account switches 96×32 |
-| Accounts dialog | 8 | 7 | 0 | close 22×22, Sign in 56×23 |
-| Search palette | 9 | 4 | 0 | close 32×32, scope buttons 78×28 |
-| Tasks panel open | 77 | 69 | 9 | on-canvas stage controls 5×4 |
-| New pipeline dialog | 6 | 0 | 0 | — |
+| Overview | 35 | 28 | 8 | notification close 24×24, push bell 26×26, attention filter 30×26 |
+| Board, fit all (zoom 14 %) | 188 | 181 | 75 | dismiss question 2×2, round-limit buttons 3×3 |
+| Board, 100 % | 59 | 44 | 12 | dismiss question 16×12, expand 26×18, remove column 26×18 |
+| Pipeline hub popover | (did not open from the strip at 100 %) | | | |
+| Tasks panel open | 63 | 48 | 15 | the same on-canvas controls |
+| Orchestrator dock (create) | 74 | 59 | 10 | the same, plus the dock's selects |
+| Orchestrator dock (live seat) | 187 | 177 | 65 | copy message 3×3, read aloud 3×3 |
+| Focused conversation (full window) | 21 | 18 | 0 | dismiss question 16×12, back 26×18, copy 22×22 |
+| Composer model menu open | 28 | 25 | 9 | the menu's rows over the interrupt control |
+| Accounts popover | 8 | 7 | 0 | close 22×22, Sign in 56×23, Add 43×32 |
+| Burndown chart | 3 | 3 | 0 | close 22×22, window tabs 28×20 |
+| Search palette | 4 | 4 | 0 | close 32×32, scope buttons 78×28 |
+| Switchboard | 14 | 5 | 0 | close 32×32, account switches 96×32 |
 
-At 1280 the overlap counts rise (15–19 pairs on the board screens); at 1920 the fit zoom stays at 21–55 %, so the on-canvas controls scale to 8×5 px. Every screen shares the same five overlap pairs: the rail's crown toggle is an absolutely positioned control laid over each project row. The attention island covers the Tasks panel's own header when the panel is open, the deployment pill sits on the rail's Telegram row, and the arrival toast covers the board region it points at.
+At 1280 the fit zoom is 12 % and the board's overlap count is 85; at 1920 it is 20 % and 42. Every board frame shares the same defect class: the conversation cards are rendered at full size on the canvas and the camera shrinks them until their controls are 2–4 px.
 
-### 1.1 The project rail
+### 1.1 What today does better than the rejected prototype
 
-`src/components/ProjectRail.tsx` is a fixed 248 px column. Its header holds the app title, the live count, the attention badge, the language toggle, the access QR and the push bell; at 248 px the title wraps to two lines under that load. Rows carry the name, an age, and two bare integers (`9 11`, `4 4`) with an occasional `⏸ 1` badge between them; the 2026-08 audit's finding 14 (unlabeled counter pairs) still stands. The bottom 45 % of the rail (from about y = 500 of 900 at 1440) is host and account furniture: RAM and swap meters (`ResourcesFooter`), two engine limit blocks with four bars and reset lines (`LimitsFooter`), the Telegram row, and the deployment pill riding on top of it. The rail is the project switcher and it spends less than half its height on projects.
+The operator's read ("the board is much less nice than now") holds against the frames, and it is worth being exact about why, because the rewrite keeps every one of these:
 
-### 1.2 The board header and the floating chrome
+- **It is spatial.** A pipeline is a region on the canvas: a coloured halo (`hueFromId`) with its stage cards side by side in stage order, the handoff arrows between them and the review loop drawn as a ring. A conversation tree is a root with its children below. Nothing is a row in a list; where a thing is tells you what it belongs to. The rejected prototype flattened this into a column of rows and a map of bands.
+- **It has depth.** The dot-grid canvas, the tinted wells and the white cards are three planes (#962); the eye reads a running pipeline as one framed object without reading a word.
+- **The camera is fast and real.** Continuous pan and zoom, fit-all, fit-current, 100 %, keyboard spatial navigation, a focus glide with a ring, edge chips for off-screen clusters (`+6`) and a corner minimap with the viewport frame. Moving around a board of twelve things costs nothing and never re-lays-out.
+- **The live content is on the board.** At 100 % a stage card is the conversation: the feed, the question card with its numbered options, the composer. You can answer a decision without leaving the yard. The rejected prototype put every conversation behind a click.
+- **The chat is right.** One header row with the state badge, the title and the meta; the feed with avatar, timestamp, prose and tool lines; the question card with keycapped options and an own-answer field; the composer with the send control. The operator says so, and the frames agree.
+- **The switchboard's grouping** (Waiting for you · Working · Older) and the card state vocabulary (`working 1h`, `needs you`) are the right words.
 
-`src/components/ProjectDashboard.tsx:1740–1995` renders a 40 px header: project name, a status sentence ("nothing is running right now" / "7 branches running · 6 trees"), sound, settings, search, an Orchestrator toggle, a Tasks toggle with a count, and "+ Pipeline". Below the board sit a second create cluster ("+ Agent · + Task · + Pipeline", bottom-left), the task readiness strip (bottom), the corner status pill ("4 · 5 waiting", bottom-right, `CornerStatus`), the minimap, and, top-right, the attention island ("NEEDS YOU 1 · Next · filter", `AttentionIsland`) with the arrival toast docked under it. Five surfaces answer "what is going on" in four vocabularies: the header sentence, the island's count, the corner pill's "waiting", the rail's `⏸`. Archive project and Delete project are always-visible header controls on the desktop (design-system rule 4 asked for them behind `⋯`; only the phone got that).
+### 1.2 What today does worse, from the same frames
 
-### 1.3 The board itself
+- **Fit altitude is thumbnails.** At 12–20 % the cards are unreadable rectangles with 2–4 px controls (181 of 188 visible controls under 44 px at 1440; 75 overlapping pairs). Today's board has exactly two useful zooms, 100 % and "where is everything", and nothing in between.
+- **The layout is a band.** Trees and regions sit in one left-to-right row (`layout.ts`, `REST_BAND_MAX_W` 10 500 px), so a project with six trees is a 7 000 px strip: the fit zoom drops with every tree, and the top two thirds of the canvas are empty (`board-fit` at every width).
+- **Stages that have not started are 600 × 620 px ghost windows** carrying the stage prompt as prose ("The polish chat window opens here when this stage starts"), the same weight as a live conversation.
+- **The rail spends its bottom 45 % on RAM, swap, four limit bars and the Telegram row**, and the rail's counters (`9 11`, `4 4`) are unlabelled. The attention toast covers the canvas top-right on every frame, over the very cards it announces.
+- **The tasks panel is a side list**, the orchestrator dock pushes the board 440 px sideways, and the switchboard is a modal over everything.
+- **The chat's bottom is four rows of chrome:** the `live tail` pill, a status row (`waiting for your answer · 1:29:40`), the control strip (`live · stop · refresh · compact · terminal`), the field with mic and send, and a model row (`Sonnet · Light`, attach). The settings menu is a 240 px two-level menu (Reasoning list, then `Model ›` as a submenu) anchored bottom-left, far from the field it configures; its rows overlap the interrupt control in the frames (9 pairs).
+- **Accounts** is a 400 px flyout anchored to the rail: one engine at a time, the active account's meters only, the burndown a separate popover that reads "No history yet".
 
-`src/components/scheme/SchemeBoard.tsx` is the primary surface: every conversation is a full card rendered on a zoomable canvas, pipelines are dashed regions with a hub chip, lineage lines and subagent badges connect them. Fit zoom on the seeded home is 21 % with two pipelines and one loose conversation, 55 % with six trees, 16–18 % at 1280 or with the Tasks panel open: the cards are thumbnails whose text is 2–7 px tall, the on-canvas stage editor controls (reorder, configure, remove) measure 5×4 px, and the board's one-glance triage is a row of unreadable rectangles (the 2026-08 audit's S1 finding 1, still standing: `layout.ts` wraps the rest band only past 10 500 px). Reading anything means zooming in, at which point the board no longer shows the rest. The list view (`ConversationList`) exists behind a segmented control and is a plain catalogue with a search field; it carries no state grouping.
+### 1.3 Prior art
 
-### 1.4 The focused conversation, feed and composer
-
-There is no conversation surface on the desktop. A conversation is a card on the canvas (`BranchPane`), expanded in place or expanded to the full window. Its header packs the dot, a status badge ("NEEDS YOU verify · stage 3/4"), the title, the process chip with a PID and Kill, expand, favourite, delete and close: at 55 % zoom those controls are 9–14 px targets. Below it the feed (`LogFeed`) shows the transcript with the avatar column, tool rows, the question card, then a "live tail" pill, a status row ("waiting for your answer · 1:29:40", in warning tone: the 2026-08 finding 3 is fixed on this row), the control strip (live, stop, refresh, more, terminal), the composer ("prompt — the agent will start"), and the model pill ("Sonnet · Light"). The question card leads with the question and its numbered options and ends with "Your own answer" and a Send button: this reads well and stays (§1.15). The composer's reasoning vocabulary ("Light") still differs from the seat's ("low") and the operator's (`low · high · xhigh · max`): finding 9 stands.
-
-### 1.5 The orchestrator dock
-
-`src/components/orchestrator/OrchestratorDock.tsx` pushes a 440 px column between the rail and the board (PRD #976 decision 1). With the rail that is 688 px before the board starts: 752 px of board at 1440, 592 at 1280. Its content is the best-designed surface in the build: an identity row (engine chip, model, a context figure, Rotate), the seat's conversation with the feed, "finished the turn — waiting for a reply", the control strip and a composer with the model pill. The create state (no seat) shows a prose panel, an MCP install hint in mono, engine, an "Account" select ("Main · active"), a row labelled "Reasoning" that fronts a model select and an effort select ("low"), the mandate disclosure, a footer sentence and "Create orchestrator": finding 15's mislabelled row stands. The dock is a per-project preference that is either open (and takes 30 % of the width) or closed (and the seat is out of sight).
-
-### 1.6 Pipelines: strip, hub, scheme, editor, verdict
-
-A pipeline appears three ways. On the canvas as a region with a hub chip ("⇢ Implement the export … 3/4 · stages running ▾", `PipelineHub`) whose popover holds pause/resume, retry/skip when parked and close; as a strip of stage chips with prev/next arrows, a verdict popover and a stage config popover (`PipelineStrip`); and, for a draft, as the on-canvas editor with five placeholder cards carrying reorder, configure, remove and add-edge controls (`PipelineEditor`, `StagePlaceholderPane`, `StageEdgeControls`) that render at the canvas zoom, so at fit zoom the whole editor is a set of 5×4 px targets. Findings of a failed review live in a popover on a chip. Nothing after start is editable, which is the automation-v2 requirement (#1446) the desktop has to carry: the record becomes mutable and the UI is "slice 12", deferred there to "the same PATCH payloads". The template picker (`PipelineTemplatePicker`: Plan → Build → Review, Build → Review, Build → Verify, Blank canvas, with the repository line) is clear and stays.
-
-### 1.7 Switching: the switchboard and the corner pill
-
-`src/components/Switchboard.tsx` opens a 95 vw × 95 vh modal from the corner pill: a title, the two engine account switches, a search field, then Waiting for you / Working / Recent / Older sections. On the seeded home it shows "Older 0" and "Nothing found" while four conversations are working, because the deck is fed by the timeline hook while the board already holds the files; the 2026-08 finding 12 ("Older" renders furniture at zero) stands, and finding 7 (cards say everything twice) stands in the source. Switching projects is the rail; switching conversations is the canvas, the switchboard, or the search palette's deep link. Three doors, none of them a list you can keep open.
-
-### 1.8 Attention and arrivals
-
-The attention island (`AttentionIsland`) floats top-right over the board with "NEEDS YOU n · Next › · filter", renders "NEEDS YOU 0" at rest (D1 of the 2026-08 audit, still open), and its queue popover is titled "Waiting on you". A new decision docks a toast under the island that repeats the row and covers the board region it points at (finding 8). The corner pill counts "waiting" with a different rule (5 waiting against NEEDS YOU 1 on the same screen). The rail badge is `⏸`. Overview rows carry no attention state (finding 2). `N`/`Shift-N` cycle the queue from the keyboard, which works and stays.
-
-### 1.9 Accounts
-
-`AccountsPanel` opens from the header's per-engine switch as a popover anchored to the board: the active account with a signed-in state and a "needs sign-in" chip, the checked time and Refresh, the 5 h and Week bars with "left" and reset lines, Sign in, Copy CLI, an "add account" field, and "Clean up abandoned homes". The content is right (the #1424 wave made limits actionable); the container is a popover the operator has to reopen per engine, and the same numbers are repeated in the rail footer.
-
-### 1.10 Search
-
-`search/GlobalSearch.tsx` (#1054, ranked in memory by #1440): "Find my messages", a scope switch (My messages / Everything), results with the title, the highlighted snippet, project and engine chips and the age, ↑ ↓ Enter, `/` to open. This is the one desktop surface with nothing to fix; v2 keeps it and gives it the dialog primitive.
-
-### 1.11 Tasks
-
-`tasks/TaskPanel.tsx` is a 280 px right panel with cards ("inbox · Polish overview cards · source · 2h ago"); the attention island renders over its header. The readiness strip at the bottom of the board is a second task surface.
-
-### 1.12 Overview
-
-`OverviewBoard.tsx`: a 40 px header, project cards with the bare count pair, engine chips and up to four live rows, "5 more live", and a quiet card for a project with nothing running. The one project that needs the operator is visible only in the rail badge and the island.
-
-### 1.13 Width by width
-
-- **1280×800.** Rail 248 + dock 440 leaves 592 px of board; fit zoom 18 %; header controls collide with the island when the Tasks panel opens (19 overlapping pairs). The rail footer pushes the project list to 40 % of the height.
-- **1440×900.** The frames above.
-- **1920×1080.** The same layout with a wider canvas: fit zoom still 21–55 %, so the extra width is spent on empty canvas and the cards stay thumbnails; the rail stays 248 px and the dock 440.
-
-### 1.14 The 2026-08 audit findings, re-checked on this build
-
-| Finding (docs/design/ux-audit-2026-08.md) | Status today | Where v2 answers it |
-| --- | --- | --- |
-| 1 fit zoom illegible on busy days | stands (21 % / 55 % / 16 %) | §3: the list column is the primary triage; the map is a secondary picker of tiles (§4.11) |
-| 2 overview rows carry no attention state | stands | §4.10: the overview column is the cross-project Needs you list; cards sort by state |
-| 3 operator-blocking waits show as green | fixed on the status row; the card badge still reads NEEDS YOU while the header dot is green | §2 (10): one precedence, one phrase per surface |
-| 7 switch cards say everything twice | stands in source | §6: the switchboard is cut; rows are title · one meta line |
-| 8 attention chrome occludes content | stands (toast over the board, island over the Tasks panel) | §4.8: no pill, no toast; the queue is the column; one banner slot for other-project arrivals |
-| 9 three vocabularies for effort | stands | §4.3: `low · medium · high · xhigh · max` everywhere |
-| 12 chips ellipsize, "Older 0" furniture | stands | §6: switchboard cut |
-| 14 unlabeled counter pairs | stands | §4.1: rail rows read `3 need you · 3 working` |
-| 15 "Reasoning" fronts a model dropdown | stands | §4.4: Model and Reasoning are separate segmented controls |
-| D1 "NEEDS YOU 0" at rest | open | decided here: no pill at all on the desktop; the count lives in the column header, the rail row and the empty stage |
-| T1 pipeline surface unaudited | closed by this audit (seeded pipelines) | §1.6 |
-
-### 1.15 What works and stays
-
-- The orchestrator dock's **content**: identity row, Rotate, the seat's own conversation, "finished the turn" phrase, the composer with the model pill. v2 moves it into a stage and a column card and keeps every element (§4.4).
-- The **question card** order: question, numbered options, own answer. Kept, with the answer sending on the click (§4.2).
-- **Global search** (#1054 / #1440): kept whole.
-- **The template picker** for a new pipeline: kept whole.
-- **Accounts** content (#1424): active account, windows, reset lines, Refresh, Use one reset, sign-in state. Kept, as a stage instead of a popover (§4.5).
-- **The switchboard's triage grouping** (Waiting for you / Working / Recent): kept as the column's sections, always visible instead of modal.
-- **Keyboard cycling of the queue** (`N`): kept and extended to a single-key map (§3.5).
-- **Card state vocabulary and the depth ladder** (#961, #962): kept as the column's badges and the map's tiles.
-- **Dark-scheme parity**: pixel-verified in the frames; kept through the shared tokens.
-- **In-app conversation links and the cached feed on switch** (#1445): the column's row click is exactly that switch.
-- **Direct Kill with the PID visible** in Host details; the two-step arm goes (standing rule), the receipt's Respawn is the safety net.
-
-### 1.16 Prior art
-
-Searched prior conversations (`search_transcripts`, four phrasings: "desktop redesign prototype rail column stage", "desktop v2 information architecture project rail switchboard", "scheme board pipeline strip hub audit 1440 desktop", "issue 1453 desktop UI/UX redesign"). Nothing earlier designed the desktop as a whole; the hits were the 2026-08 audit's reconnaissance stage (#693, whose synthesis is `docs/design/ux-audit-2026-08.md` and whose findings §1.14 re-checks) and this lane's own first attempt, whose prototype and capture script were preserved on a checkpoint branch when the account it ran on hit its limit; this document restores and finishes that work. The audit's own "what works" list (switchboard grouping, card state vocabulary, held/rotation visibility, dead-host recovery copy, launch-flow coherence, directory-picker keyboard support, composer focus discipline, dark parity) was re-checked against the frames and is carried in §1.15.
+`search_transcripts` was run in six phrasings ("spatial board clusters graph pan zoom desktop redesign", "SchemeBoard too linear 2d 3d clusters fast navigate", "accounts page usage bar burn rate detail design rejected", "desktop redesign board kanban accounts", "#1453", "scheme board minimap zoom clusters"), project-scoped and unscoped. The hits are this pipeline's own lineage: the first design's orchestrator turns, the two reviewer verdicts of the rework and the operator's rejection turn (read through `conversation_messages`; the quotes above are from it). One earlier hit, the 2026-08 UX audit's designer stage, names `nodes.tsx`'s far-zoom labels as the surface where states go invisible "at board altitude", which is the defect §1.2 measures. Nothing earlier designed a clustered or semantic-zoom board; nothing earlier designed an all-accounts page.
 
 ---
 
-## 2. Design principles (from the requirement and the mobile v2 contract, made concrete for a desktop)
+## 2. Design plan (written before building, checked against the frames after)
 
-1. **One frame, three regions, one primary surface.** Rail (projects) · column (the project's triage list, the seat first) · stage (one thing at a time: a conversation, a pipeline, the seat, accounts, the map, the overview). Dialogs and popovers open over the stage and never create history. The desktop's extra width buys a fourth region only at ≥ 1600 px, where one conversation can be pinned beside the stage.
-2. **The list is the board.** The column answers "what needs me, what is running, what just finished" in words, in state order, always on screen. The spatial view survives as a map of tiles behind one key; no conversation content is ever rendered on a canvas.
-3. **The seat lives in the column and opens a stage.** The orchestrator is the first card of every project's column with its state, its current tool and its context meter; its conversation is a stage like any other, with the seat panel (identity, mandate, Rotate) at the top of it. Nothing pushes the board sideways.
-4. **Pipelines are read in the column and edited in a stage.** A pipeline row says `stage k/n · <stage> · <state>`; its stage shows findings, the actions for its state, the stage graph with edges and add-points, the attributed change log, and a stage editor whose actions are the automation-v2 mutations (§4.6). Editing after start is the normal path.
-5. **One queue, one phrase, no pill.** Needs you holds conversations and pipelines, in the column, on the overview, on the rail rows as counts, and behind `n` / `N`. An arrival in another project shows in the one banner slot and collapses; an arrival in the current project is a new row with an edge. Nothing floats over content.
-6. **Keyboard first.** Single keys while nothing is being typed (`n N o / m a p t c [ ?`), arrows and Enter in the column, Escape as the universal "back to the column", Enter sends and Shift+Enter breaks a line. Every dialog traps focus and returns it. The capture proves the order.
-7. **Host details behind one click.** Background tasks, PIDs, memory, hidden conversations and the runtime connection live in one dialog; the status bar carries the one host fact worth a glance (connected / degraded / offline, the task count, the accounts' lowest window).
-8. **Few controls, all 44 px, none overlapping, one overflow.** Icon buttons are 44 px targets with 18 px glyphs; chips 30 px inside 44 px targets; the status bar is one target tall. The capture refuses any visible control under 44×44 and any two whose rects intersect.
-9. **No confirmation prompts; receipts carry the inverse.** Kill → Respawn, Close → Reopen, Archive → Restore, Skip → Retry stage, remove stage → Undo, switch account → Switch back, Start → Pause, Pin → Unpin. Four seconds, in flow above the composer or at the bottom of the stage body, never covering a control.
-10. **One state, one precedence, one vocabulary, shared with the phone.** killed > stalled > limit > held > waiting > working > returned > done; offline and degraded are frame-level. "Needs you", "a question", "plan approval", "needs a decision", "working 12:40", "finished the turn", `low · medium · high · xhigh · max`. The prototype's `stateBits` is the same function the mobile prototype carries.
-11. **Both schemes, the product's tokens.** Every colour, radius, type size and shadow is `src/styles/tokens.css` value for value; the dark palette flips with `prefers-color-scheme` and `data-theme`.
+**Subject.** One operator at a desk supervising a dozen autonomous coding agents on their own machine, all day, hands on the home row. Three questions, in order: *what needs me*, *what is running and where*, *what runs out and when*. The vernacular that fits is a marshalling yard seen from the tower: work is grouped in the yard by what it belongs to, the tower sees all of it at once, and descending to a track means reading one train.
 
----
+**Palette** — six named values, all `src/styles/tokens.css` value for value, light / dark:
 
-## 3. Information architecture
-
-### 3.1 The map
-
-```
-Rail (240 · 64 collapsed, the default under 1440)       Column (380 · 340 at 1280 · 400 at 1920)            Stage (the rest; a pinned pane of 480/520 at ≥ 1600)
-  Agent Log Viewer ‹                                       atlas · 3 need you · 3 working                    one primary surface, and it always does work:
-  Filter projects…                                         [board ⇄ list ⇄ map] [+] [⋯]                       · the board: task ▸ worker ▸ pipeline as one card (§4.12)
-  Overview · 4 need you across 4 projects                  Filter · ↑ ↓ Enter                                  · conversation (§4.2) + composer (§4.3)
-  Crowned · atlas ♛ 3                                      ┌ Orchestrator  working 2:14   ⚙ ┐                  · seat = orchestrator conversation + seat panel (§4.4)
-  Projects · beacon-site · corvid-tools 1 · delta-ledger   │ list_conversations · ▰▰▰▰▰▱ 76% left │             · pipelines list · one pipeline: graph + editor (§4.6)
-  Archive · 1                                              Needs you · 3   (conversations and pipelines)      · accounts & limits, and one account in detail (§4.5)
-  + Create project                                         Pipelines · 3   └ 2/5 build · a question · 9 min    · map (§4.11) · overview cards (§4.10)
-                                                           Working · 1                                        dialogs over the stage: + create · ⋯ board menu ·
-                                                           Recent · 6 · All conversations · n ›                  ⋯ conversation menu · next-message · details & host ·
-Status bar (44): ● connected · ⌨ 3 background tasks ··· ✦ Main 38 % left · ⌘ Main 55 % left · ? shortcuts       search · host details · shortcuts · new conversation ·
-                                                                                                                new pipeline (templates) · rotate / create orchestrator
-```
-
-### 3.2 The persistent frame
-
-The rail, the column and the status bar never leave. The rail is the project switcher (Overview, crowned projects, projects, Archive, Create project) with a filter and a collapse to 64 px icons (`[`, and the default under 1440); a collapsed row shows the project's initials with its Needs you count. The column is the selected project's triage list: the seat card, then Needs you, Pipelines, Working, Recent, each a collapsible section with its count and a **sticky header** that stacks at the top edge as the column scrolls; a filter field at the top narrows every section including the seat card, `↑ ↓` walk the rows and `Enter` opens the highlighted one. **Each id renders once**: Needs you wins, Pipelines lists only what Needs you has not already shown, and a pipeline row folds its live attempt under it as an indented child row (`└ 2/5 build · builder · a question · 9 min`) unless that conversation is already in the queue. The column header carries the project name, one sentence of counts computed by the same function the rail row and the overview card use, the board ⇄ list ⇄ map segmented control, `+` and `⋯`. The status bar carries the runtime state, the background task count (both open Host details), one chip per engine with the active account and its lowest window (which opens that account's detail), and `? shortcuts`.
-
-**The stage always does work.** There is no placard: the landing surface of a project is the board (§4.12) when it has tasks, else the first thing that needs the operator, else the orchestrator's conversation. The key legend lives in `?` and nowhere else.
-
-### 3.3 Primary surfaces and dialogs
-
-Stages, pushed onto history: the board (`#/board`, and `#/kanban` for it by name), a conversation, the seat (`#/seat`), the pipelines list, one pipeline (with `/stage/<id>` and `/add/<index>` selecting the editor), accounts (`#/accounts`) and one account in detail (`#/accounts/<engine>/<id>`), the map (`#/map`), the overview (`#/overview`). Dialogs and popovers, replacing the route and creating no history: the board `⋯` menu, the `+` create menu, search (`/`), host details, keyboard shortcuts (`?`), new conversation, new pipeline, the rotate / create-orchestrator dialog, the conversation `⋯` menu, the next-message popover (model · reasoning · account), details & host. A scrim or a click-away layer owns everything outside a dialog; Escape closes it and returns focus to the control that opened it; browser back from a dialog pops the stage underneath and takes the dialog with it.
-
-### 3.4 Widths
-
-| Frame | Rail | Column | Stage | Pinned pane |
+| Name | Token | Light | Dark | Job |
 | --- | --- | --- | --- | --- |
-| 1280 × 800 | **64 by default** (220 with `[`) | 340 | 876 | — (the Pin control is absent under 1600) |
-| 1440 × 900 | 240 | 380 | 820 | — |
-| 1920 × 1080 | 240 | 400 | 1280, or 760 beside a pinned pane | 520 |
+| Paper | `--surface-canvas` | `#f3f3f6` | `#101014` | the frame: rail, bar, side column, status |
+| Yard | `--surface-board` | `#f3f3f6` | `#0d0d11` | the canvas behind the dot grid, a notch deeper than the frame in dark |
+| Well | `hsl(<cluster hue> 50% 55% / 0.08)` (0.14 dark) | | | a cluster's halo, tinted by its own hue so ten clusters are ten identities, never one grey |
+| Card | `--surface-card` | `#ffffff` | `#17171c` | a node, the lifted pane, the inspector, dialogs |
+| Signal violet | `--color-accent` | `#5a51e0` | `#8f88ff` | the live path: the current station, the selection, the viewport frame on the map, the seat's hue |
+| Amber | `--color-warning` | `#8a5f00` | `#e0ae45` | the operator is the blocker: a cluster that needs you, a fail loop, a beacon |
 
-The rail starts collapsed under 1440 and `[` expands it, so the crowded column keeps the 156 px the rail would have taken; `screens.js` and this table say the same thing, and the capture asserts `data-rail="0"` at 1280 and `"1"` at 1440 and above.
+Verdicts are the success/danger pair on pips and rings only. The engine marks keep their brand hues at glyph size beside a model name.
 
-The pipeline stage's editor pane is 440 px (520 at 1920) beside the graph; at 1280 the editor takes the stage's width and the graph collapses to a one-line ladder above it, so the stage being edited is never off screen. The editor's own body scrolls and its footer (Save · Restart · Cancel and the "applies from attempt n" note) never leaves the viewport. The column header's count sentence is one line at every width: `n need you · m working`, and at 1280 `n need you` alone — the Pipelines section header carries the pipeline count. The feed's prose column is capped at 880 px and centred, so a 1920 stage reads as a page.
+**Type.** One family (the system sans), tabular numerals on every count and time, mono only for stage ids, shas and branch names. Roles: 15/700 stage titles, 13/700 cluster titles, 13/600 row titles, 12/600 station roles, 15/1.5 message prose in an 880 px measure, 11/400 meta, 10/600 badges. At yard altitude the tile type is counter-scaled by the inverse zoom (clamped at 3.4×), so a title reads at 13 px on screen whatever the camera does. No ALL-CAPS anywhere; the capture refuses one.
 
-### 3.5 The keyboard map
+**The spatial model** is §3. **The one memorable element is the lift**: a node rises out of its cluster into a readable pane, in place, while the rest of the yard recedes (opacity, saturation) — one depth move that makes the 2D yard read as three planes, and the way the operator answers a decision without leaving the picture.
 
-| Key | Does |
-| --- | --- |
-| `n` / `N` | next / previous item that needs you, in the column's order (conversations and pipelines); on the overview across every project |
-| `o` | the orchestrator's conversation; with no seat, the create dialog |
-| `/` | find my messages |
-| `k` / `t` | the board (the kanban of task ▸ worker ▸ pipeline threads) |
-| `m` | map ⇄ list |
-| `a` `p` | accounts & limits · pipelines |
-| `c` | create (conversation · task · pipeline · orchestrator when none) |
-| `i` | type to the agent: focus the composer from anywhere in the frame |
-| `1` – `9` | pick that option of the open question |
-| `[` | collapse / expand the rail |
-| `↑` `↓` `Enter` | move in the column and open the highlighted row (also from inside the filter field); `Enter` on a stage node opens its editor |
-| `Esc` | close the dialog; **from anywhere in the stage, back to the column's current row**, focused and scrolled into view; from an account detail, back to the accounts stage with the focus on the row that opened it; from the filter, clear it |
-| `Enter` / `Shift+Enter` | send / newline in the composer |
-| `?` | this list |
+**Checked against the generic-AI tells before building.** Identical cards with one grey shadow → the four-plane ladder; only what floats (the lift, dialogs, the inspector's receipts) casts `shadow-2`, nodes carry `shadow-1` on the well, tiles carry none. ALL-CAPS eyebrows → none, and today's `NEEDS YOU`, `STAGE PROMPT`, `REVIEW LOOP` do not survive. Gradient text, glass, glow → none; the dark board is the shipped token. Monospace as "developer vibe" → mono is reserved for identifiers. Centred hero metrics → the accounts detail leads with a number because the number is the answer; it sits left, on a well, with the window named beside it. A dashboard of equal tiles → the yard's tiles are sized by their content (a five-stage pipeline is 1 116 px wide, a lone conversation 228) and packed, so the yard is uneven the way a real yard is. Sparkline decoration → the only chart is the burndown, and it carries the ideal-pace line, the projection and the burnout zone the operator asked for.
 
-**Where the focus is.** Opening a stage moves focus to the one thing the operator came to do: the first option of an open question, else the Answer field of a parked pipeline, else the first control of an open stage editor, else the composer, else the first row. Every re-render puts the focus back on the element that was there, found by its `data-focus` / `data-act` / `data-go` identity rather than its position, so acting never drops the operator on the body — the capture asserts that on every frame.
+**What the frames changed after the plan.** (1) The first packing produced a fit zoom of 63 % at 1440, which is neither altitude: block content at 8 px. The altitude boundary moved to 80–90 % with hysteresis, so fit-all always lands on tiles and one Ctrl+wheel step lands on readable blocks. (2) Small tiles at a crowded 36 % clipped their titles under the keycap; the tile became keycap-and-pips on one row, then the title, then the phrase, and a narrow cluster clamps its title to one line. (3) Two fail loops on one pipeline drew their labels on top of each other; loops now stack in lanes with their label at the source end. (4) Beacons for off-screen clusters started on the canvas edges and covered nodes; they moved into the bar with a direction glyph. (5) The minimap and the backlog tray floated over the canvas and covered nodes; they moved into the side column, which the inspector also uses. (6) Two flat CSS names collided across surfaces (`.acc`, `.empty`) and bent the tiles' dots and the accounts' empty meters into bars — noted for lane 1: the shell's stylesheet is namespaced.
 
-Single keys are inert while an input, textarea or select has focus: text is text. `Esc` is the bridge — it leaves the field for the column's current row, and from the column every single key works. That is also how the queue is walked: `n` opens the next decision, `Esc` returns, `n` opens the one after.
+---
 
-### 3.6 Where the seat lives, how pipelines are read and edited, how attention surfaces, how switching feels
+## 3. The spatial model
 
-- **Seat.** The column's first card: `Orchestrator` · state badge (`working 2:14`) · what it does now (running tool or last line) · the context meter filling with what remains, with a ⚙ opening `#/seat`. That stage is the orchestrator's own conversation with a seat panel above the feed: filled engine mark, model · reasoning, account · plan · "holding the seat for 2h · predecessor", the state badge, the meter (`76 % left of 100k`) with "Predecessor · open ›", the mandate preview (three faded lines), Rotate and Edit the mandate, and one sentence saying that changing mandate, model or account means a successor. With no seat the card invites ("No orchestrator · Create an orchestrator ›") and `o` opens the create dialog, which is the rotate dialog in create mode (engine · model · reasoning · account rows · mandate textarea · Cancel · Create orchestrator). Confirming acts on the click and lands on `#/seat`.
-- **Pipelines.** Read: the column row (`stage 2/5 · build · running 2h · edit pending`, badge), the pipelines stage (Needs you / Active / Drafts / Completed / Archived), the map's regions. Edited: the pipeline stage (§4.6). A stage conversation reaches its pipeline from the first row of its `⋯` menu and shows `stage k/n` in its meta line.
-- **Attention and arrivals.** The Needs you section (edged rows, badges), the count in the column header, the rail row's count and badge, the overview's cross-project queue, the empty stage's "3 need you · press n", `n` / `N`. A decision that arrives in **another** project shows in the banner slot at the top of the stage (`Needs you · a question · corvid-tools / Release 2.4 checklist`, open on click, × to dismiss, collapses after ~6 s, never announced twice once opened); one in the current project is a new edged row and nothing else. Offline and degraded take the same slot in info tone on every stage and the status bar's runtime chip turns.
-- **Switching.** Projects: the rail (one click), the overview's card headers, the search result's project. Conversations: the column rows (a click replaces the stage and keeps the column), `n` / `N`, `↑ ↓ Enter`, the search result, the members line of a parent, the pipeline stage's `open ›` on an attempt, the arrival banner. The stage never remounts the frame: only the stage region changes, which is what #1445 made cheap.
+### 3.1 One canvas, four altitudes
+
+The board is one pannable, zoomable world (today's camera, kept), and what it shows depends on how far away you are:
+
+| Altitude | Zoom | What a cluster is | What is a control |
+| --- | --- | --- | --- |
+| **Field** | fit of every project | a region per project (name, `n need you`) containing that project's tiles | a tile: opens the project's yard on that cluster |
+| **Yard** | fit of one project · 30 – 80 % | a **tile**: keycap, state pips, title, one state phrase, the stage names on a wide pipeline | the tile, one 44 px target however far out |
+| **Block** | 80 – 200 % | the cluster's **nodes**: stations on a spine for a pipeline, a root with its children for a tree, the seat with its context meter | each node, one target |
+| **Lift** | ≥ 100 % on one node | the node's live pane: header, the feed's tail, the question card, the composer | the pane's own controls; the rest of the yard is inert and receded |
+
+The boundary between Yard and Block has hysteresis (up at 90 %, down at 80 %), so a pinch around the edge never flaps. The camera never goes below the zoom at which a tile is 44 px tall (30 %); a yard bigger than that is panned, and the map, the beacons and `n` reach the rest. Altitude is one attribute on the board and the stylesheet does the swap; nothing re-renders on zoom.
+
+### 3.2 Clusters — the unit of the yard, and why these
+
+A cluster is one unit of work, and the yard has four kinds:
+
+1. **The seat** — the orchestrator, pinned at the origin as the desk: its node, its context meter, account · model · reasoning. Every yard starts here.
+2. **A pipeline** — the record and every conversation it owns: stages as stations on a horizontal spine (role, stage id, engine mark, model · reasoning, access, the attempt pips, one state phrase), the pass edges, and every fail edge drawn as a bracket under the row back to its target with `↺ build · ●●○ · 2 of 3 rounds`. The task the pipeline carries is the header (`#206 Archive TTL for closed pipelines`). Drafts and completed records fold to a compact tile.
+3. **A thread** — a task with a worker but no pipeline: the task as a tag on the header, the worker node and its spawned children below.
+4. **A tree** — a conversation nobody owns, with its descendants.
+
+Why these and not workers, engines, accounts or projects: those are attributes, and they are printed on every node (the mark, the model, the account in the chip). The question the yard answers is *what is this work and where does it stand*, and a pipeline, a task and a lineage are the three things the product already treats as one unit of work (`agentLinks.deriveGroups`, `taskRelations`, `lineageModel`). The project is the yard itself; the field is the altitude above it.
+
+Every cluster gets a **hue of its own** (a hash of its id, as `hueFromId` does today) for its well, so a glance at the map or the yard separates ten clusters by colour before any label; the seat is always violet. A cluster that needs the operator carries an amber edge; its badge says which decision (`a question`, `plan approval`, `needs a decision`, `stalled`, `limit`).
+
+### 3.3 The packing — auto by default, the operator's move honoured
+
+Clusters are sorted **needs you → running → finished the turn → quiet**, the seat first, and packed on shelves from the origin, so the reading origin (top-left) is always what needs the operator and the quiet drafts and completed records fall to the bottom-right. The shelf width is derived from the clusters' total area and the frame's aspect, so the yard has the viewport's proportions and fit-all uses the screen. The packer is deterministic and has no physics: the same data always packs the same way, a new cluster inserts at its rank and everything after it shifts, and nothing ever "settles".
+
+A **drag pins**: the cluster keeps the world position it was dropped at, the header shows `pinned`, the receipt says so and carries **Release**, the bar carries `Release all` while anything is pinned, and the packer treats a pinned rect as an obstacle: the flow opens around it, never under it. The pin is per cluster and survives re-packing. Nothing the operator placed is ever moved for them, and nothing they placed is quietly undone. The keycaps stay in rank order, not in position order, so `1` is always the most urgent thing wherever it sits.
+
+### 3.4 Fast
+
+- **Pan and zoom write one transform.** The camera updates the world's transform, the grid's offset, the altitude attribute, the map's viewport frame and the bar's beacons — and nothing else. The capture proves it: a `MutationObserver` on the board sees zero mutations during a thirty-frame drag beyond those five allowed writes. No node is re-rendered, no layout is recomputed while moving.
+- **Keycaps.** Clusters are numbered `1`–`9` in rank order; a digit glides the camera onto that cluster at block altitude and opens its inspector. `n` / `N` walk everything that needs the operator in that order across pipelines and conversations, lifting each; `0` fits what needs you; `f` fits everything; `Esc` climbs one altitude; `Enter` descends one (select → lift → the conversation); arrows move the selection between clusters spatially.
+- **The map** (side column, top): one rect per cluster in its hue, the viewport frame in violet; click to jump, Enter to fit all. **Beacons** (in the bar): every off-screen cluster that needs you, with a direction glyph, click to glide; over the bar's budget they fold to `+n`, which fits what needs you.
+- **The lift** brings the camera to 100 % and the node's pane into view in one glide; `Esc` lowers it and returns focus to the board.
+
+### 3.5 The persistent frame
+
+```
+┌ rail 56 ─┬─ bar 48: project · counts · [beacons] · [− Yard 61% + ◎] · search + ⋯ ──────────────┐
+│ ⊞ 5      │                                                             │ side 372 (312 at 1280) │
+│ A  4     │   the yard                                                  │  map                   │
+│ BS       │   (or the field, a conversation, the accounts)              │  ──────────────────    │
+│ CT 1     │                                                             │  inspector when a      │
+│ DL       │                                                             │  cluster is selected,  │
+│          │                                                             │  else Needs you + the  │
+│ +        │                                                             │  backlog               │
+│ ▯        │                                                             │                        │
+├──────────┴─ status 44: ● connected · 3 tasks ······ ✦ Main ▰▰▱ 38% · ⌘ Main ▰▰▰ 55% · ? keys ────┤
+```
+
+The rail is an icon strip (initials and the needs count) because the yard wants the width; `[` expands it to names and phrases. The side column is the yard's instruments: the map on top, then either the selected cluster's inspector or, with nothing selected, the needs-you list (`n`'s order, one row each, keycap on the right) and the backlog (tasks with no worker, folded to its count, each row with Assign). The status bar carries the runtime, the background task count, one chip per engine with the active account and its lowest window as a mini meter, and the key map. Widths: the board is 1012 px at 1440, 912 at 1280, 1492 at 1920.
 
 ---
 
 ## 4. Screen by screen
 
-The prototype's 47 key screens, by their `screens.js` id. Every screen renders at the three frames in both schemes except `chat-split`, which renders at 1920 only — 278 frames, each one gated.
+### 4.1 The yard (`yard`, `yard-block`, `yard-inspect`, `yard-lift`, `yard-pinned`, `yard-crowded`, `yard-crowded-block`, `yard-noseat`, `yard-degraded`, `yard-arrival`, `yard-tray`, `yard-rail`)
 
-### 4.1 Board and project rail (`board`, `board-noseat`, `board-degraded`, `board-crowded`, `board-rail-collapsed`, `board-menu`, `create-menu`, `overview`)
+The landing surface of a project. At the fit altitude (`yard`) twelve clusters of atlas are on screen at once: the seat at the origin, then the four that need the operator with keycaps 1–4 and amber edges, then the running pipelines with their stage names printed under the pips, then the returned and quiet ones. The phrase under every title is the state in the product's words (`4/4 review · needs a decision`, `2/5 build · running`, `limit · Main resets 16:00`, `finished the turn · 6 min`). `yard-crowded` packs thirty conversations, fifteen pipelines and twenty-one tasks at 36 %: the origin is still legible, the needs-you list in the side column carries the full titles, and the map shows the shape.
 
-- **Rail rows** are dot · name · one line (`3 need you · 3 working`, `1 needs you · quiet · 41 min`, `quiet · 2d`, `archived · 9d`) · crown · a Needs you badge. Crowned projects sit in their own section; Archive folds; Create project is the rail's foot. Collapsed, a row is the project's two initials with the badge as a superscript.
-- **Column rows** are dot · title (two lines when the row needs the operator) · one meta line · one trailing element. A conversation's meta reads `waiting 9 min · ⌘ gpt-5.6 · stage 2/5` or `working 12:40 · Edit cardStatus.ts · ✦ Opus · stage 2/5`; the state phrase never truncates, the now-fragment does. A pipeline's meta reads `stage 3/5 · review · 2 findings` or `stage 2/5 · build · running 2h · edit pending`. A row that needs the operator carries a 3 px warning (or danger) edge and a badge, and its dot is hidden: two coloured elements per row at most.
-- **Needs you holds both kinds**: a conversation waiting on a question, a plan approval, stalled or at its limit, and a pipeline parked in `needs_decision`. The badge count, the rail count, `n` and the overview all read the same list.
-- **Recent** shows five rows and `All conversations · n ›`; **Pipelines** shows the active ones and folds the completed count.
-- **Degraded / offline**: the banner slot in info tone on the stage, the status bar's runtime chip in warning or danger, and `⋯ › Host details` carries a badge.
-- **Crowded** (`board-crowded`: thirty conversations, ten pipelines, fourteen projects): every Needs you row ends inside the first screen at 1280×800 (the capture checks the last one's bottom edge), the rail scrolls, the column scrolls, the frame never scrolls sideways.
-- **`+`** (`c`): New conversation, New task, New pipeline, and Create an orchestrator when there is none. **`⋯`**: Tasks (`t`), Pipelines (`p`), All conversations, Accounts & limits (`a`), Host details (with the runtime badge when not connected), Keyboard shortcuts (`?`), Sound, then Archive project (Restore in the receipt) and Delete project in danger colour (acts on the click; Restore in the receipt for 4 s).
-- **Overview** (`#/overview`, the rail's first row): the column becomes the cross-project queue, every row carrying a project chip; the stage shows one card per project (name, crown, `3 need you · 3 working · 12 total`, its rows in state order, `4 more`), quiet projects as one line. `n` walks the queue across projects.
+`yard-block` is one Ctrl+wheel step down onto the parked pipeline: four stations on a spine, the verifier's unused loop and the reviewer's traversed loop (`●●○ · 2 of 3 rounds`) drawn under the row, the current station outlined in violet, the bar beacon pointing to the next cluster that needs you off screen. `yard-inspect` adds the inspector (§4.2). `yard-lift` is the lift on the question conversation: the pane with the feed's tail, the question card and the composer stands over its cluster while the yard recedes; `Enter` opens the full conversation, `Esc` lowers it.
 
-### 4.2 Conversation and feed (`chat-working`, `chat-waiting`, `chat-idle`, `chat-menu`, `chat-details`, `chat-arrival`, `chat-offline`, `chat-held`, `chat-limit`, `chat-stalled`, `chat-killed`, `chat-split`)
+`yard-pinned` is a cluster the operator dragged: it keeps its place, wears `pinned`, and the rows flow around it; the bar offers `Release all`. `yard-noseat` shows the desk empty: the seat slot invites (`c` → Orchestrator, or the rotate dialog). `yard-degraded` and `yard-arrival` are the one banner slot: runtime state in info tone, a decision in another project in warning tone with the project named, dismissable, never over the canvas. `yard-tray` is the backlog open in the side column with Assign on every task; `yard-rail` is the rail expanded.
 
-```
-┌ ● Rebuild the board status projection                                          [pin] ⋯ ┐  52  title · meta: state phrase · ✦ Opus · high · stage 2/5 · llv-212-status-projection
-│   working 12:40 · ✦ Opus · high · stage 2/5 · llv-212-status-projection                │
-│ ⑂ 2 members · Explore: status readers · Test writer                                    │  32  members line, only when the conversation has children
-│                                   ┌ Read issue 212 and tell me the smallest change … ┐ │      user bubble, right, 72 % max, 15 px
-│ › 3 actions · Read ×2 · Grep ×1                                          13:41–13:42   │  44  folded run, one line
-│ ✦ Opus                                                                          13:43  │  44  message header: click = copy / read aloud
-│ The projection lives in one module that turns transcript facts into a card status …    │      prose, 15 px, 880 px column
-│ ┌ 🔧 Edit CardStatusBadge.tsx                                              13:57 0.2s ┐│      a run with a failure: one sunken block,
-│ │ ✕ Bash bun test …                                   exit 1                13:58 4.1s ││      36 px list items, the detail under the error,
-│ │   1 fail · expected «held», received «working»                                       ││      the running tool last
-│ └ ◌ Edit cardStatus.ts                                                     13:59 4s   ┘│
-│ ┌ Message the agent…                                                                  ┐│
-│ │ (✦ Opus · high ⌄)  📎  🎤            Enter send · Shift+Enter newline        ■ Stop │ │      one box; the slot is Stop while working and the draft is empty
-└ └──────────────────────────────────────────────────────────────────────────────────────┘ ┘
-```
+### 4.2 The inspector
 
-- **State precedence** in `stateBits`, one function for the column row, the header meta, the composer slot and the map tile:
+Selecting a cluster (click a tile or a node's cluster, a digit, `n`) opens it in the side column under the map. For a pipeline: the record line (`needs a decision · since 31 min · rev 9 · branch`), the task chip, the **findings** block when it is parked (`Reviewer · attempt 2 · round 2 of 3 · 2 findings`, the findings, an Answer field, `Answer and retry` and `Skip stage`), then **Stages** as a vertical spine of stations — ring by last verdict, role, stage id, `↺ from verify · ○○○ · 0 of 3 rounds` on a loop's target, engine · model · reasoning · access, every attempt as `attempt n · state · sha · open ›`, `edit stage ›` — then the actions for the state (Start · Pause / Resume · Archive · Re-run) with their inverse in the receipt, and the attributed change log. `edit stage ›` opens the stage editor in place (role, engine, model, reasoning, access as segmented controls, the prompt, `Save · applies from the next attempt`, `Restart the stage now` on a running stage) — the automation-v2 slice-12 payloads drawn, behind the same PATCH route. For a tree or a thread: the task chip, one row per conversation with its phrase, Open, Lift here, Kill / Respawn, Release. For the seat: identity, the context meter, three lines of the mandate, Open the conversation, Rotate.
 
-  | State | Row (meta · trailing) | Header meta | Composer |
-  | --- | --- | --- | --- |
-  | offline (frame-level) | rows keep their last state | unchanged; the banner says `Offline · reconnecting` | the slot is **Queue**; a send answers "Held until reconnected" |
-  | degraded (frame-level) | — | unchanged; info banner | unchanged |
-  | killed | `killed · messages queue` · › (Recent) | same, danger | placeholder `killed · text queues until a respawn`; the slot is **Respawn** |
-  | stalled | `14 min · ✦ Opus` · badge `stalled`, danger edge | `stalled · 14 min` | send; `⋯ › Kill agent` hints "stalled" |
-  | limit | `limit · Main resets 16:40` · badge `limit`, warning edge | same | the chip reads `Opus · Main at limit` in warning; its popover offers the other authenticated accounts and routes a not-signed-in one to the device sign-in |
-  | held | `held · 2 messages queue` · › (Working) | same, warning | placeholder `held · text you send queues` |
-  | waiting | `waiting 9 min · ⌘ gpt-5.6` · badge `a question` / `plan approval`, warning edge | `a question · 9 min` | question card + suggested chips; the placeholder reads `Your own answer…` |
-  | working | `working 12:40 · Edit cardStatus.ts · ✦ Opus` · › | `working 12:40` | the slot is **Stop**; typing flips it to send |
-  | returned | `finished the turn · 32 min` · › | same, accent | send |
-  | done | `done · 2h` · › | same | send |
+### 4.3 The field (`field`)
 
-- **Header**: dot, title, one meta line (state phrase, engine glyph, model, reasoning, `stage k/n`, the worktree in mono), then at most three controls: Pin beside (≥ 1600 only, while nothing is pinned), the seat's ⚙ on the orchestrator's own conversation, `⋯`. Every former card control is a labelled row in `⋯`: the pipeline row first (`Pipeline · <task> · stage k/n · <stage> · <state>`, opening the pipeline stage), Pin beside / Unpin, Rename, Crown / Remove crown, Hand off (receipt: Open successor), Compact context (`71 % left`), Details & host, Open in terminal, a separator, Close card (receipt: Reopen), Kill agent in danger colour with a hint (`running now` / `stalled` / `not running`; receipt: Respawn). No row asks for confirmation.
-- **Feed**: prose at 15 px in an 880 px column, the user's bubbles right at 72 %, a 44 px message header (mark · model · time) whose click offers copy and read aloud, a clean run of tool calls folded to one 44 px line, a run with a failure expanded into one sunken block of 36 px lines with the error detail, the running tool last, a viewer tool call with `open ›` when it names a conversation (#1445's in-app links).
-- **Question** (`chat-waiting`): the card (`⚠ Needs you · 9 min`, the question at 15/600, options as 44 px rows with a radio mark, "Or type your own answer below — it is sent as the reply"); picking an option sends it, so does a suggested chip, so does send with typed text; the reply renders as the user's bubble, the state flips to working, the card folds to `› question · answered 14:05` and expands on click with the pick marked; the row leaves Needs you.
-- **Details & host** (from `⋯`): account, context meter, worktree, pipeline, members; then the runtime row and the background tasks with a Kill each.
-- **Arrival** (`chat-arrival`): the banner slot above the feed shows a decision that arrived in another project; its body opens the conversation and stamps it seen; back shows no banner again.
-- **Split** (`chat-split`, 1920): Pin beside (header control or `⋯` row) pins the current conversation as a fourth region of 520 px with its own header, feed and composer (prefixed focus ids, so the composer gate walks both); the stage keeps its width rule (760 px beside the pane). At 1280 and 1440 the control does not exist and the capture checks that it does not render.
+One altitude up: every project is a region with its name and needs count, its clusters packed inside as tiles, the regions packed by urgency. Click a tile and you are in that project's yard with that cluster selected. The side column lists the projects with their counts. The rail's Overview row opens it; a project's initials open its yard.
 
-### 4.3 Composer (`chat-working`, `chat-model`, every chat screen)
+### 4.4 The conversation (`chat-waiting`, `chat-working`, `chat-settings`, `chat-menu`, `chat-seat`, `chat-limit`, `chat-killed`)
 
-One box under the feed, 880 px max, the field on top (auto-growing to 240 px) and one tool row under it: the model · reasoning chip (opening the next-message popover: "Applies to your next message", Model, Reasoning `low · medium · high · xhigh · max`, Speed for Codex, and an Account group first when the account is at its limit, listing the blocked account with its reset, the other authenticated accounts as `ready` rows, and a not-signed-in one as `sign in →`), attach, dictate, and the send slot (the `Enter sends` hint lives in the placeholder, not in a permanent row): send, or **Stop** while the agent works and the draft is empty, **Queue** while offline, **Respawn** when killed. Enter sends; the slot flips from Stop to send the moment the draft is non-empty; Escape from the field returns focus to the column's current row. Tab order: field → chip → attach → dictate → send slot, measured on every chat frame. There is no status row and no live-tail pill: elapsed time is in the header meta, and following is the feed's default.
+Today's chat, kept, and made compact in exactly the places the operator named:
 
-### 4.4 Orchestrator panel (`seat`, `seat-rotate`, `board-noseat`, `chat-menu` on the seat)
+- **One header row** (48 px): back to the yard, the state dot and badge, the title, one meta line (engine mark, `model · reasoning`, the state phrase with its elapsed time, `stage k/n`, the cluster it belongs to), previous / next within the cluster (`2/2`), `⋯`. Today's second row of chips (age, model, worktree, account) folds into that meta line, and today's `NEEDS YOU · PID · Kill · expand · close` header cluster becomes the badge and the menu.
+- **The feed is untouched**: the user bubble, the agent's avatar and timestamp and 15 px prose, the tool lines with their outcome and time, the question card with keycapped options and the own-answer field, the `working · 12:40 · Read route.ts` line where the turn is. The feed anchors to the bottom so the newest line is beside the box.
+- **One composer box**: the field on top, the tools row inside it — the settings chip (`gpt-5.6 · high`), attach, dictate, and the send slot, which is **Stop** while the agent works and the field is empty, **Send** as soon as you type, **Queue** offline, **Respawn** after a kill. Enter sends, Shift+Enter breaks. Today's four bottom rows (`live tail`, the status row, the control strip, the model row) are gone: elapsed time is in the header, Stop is the slot, and the strip's remaining actions are in the settings sheet.
+- **The settings sheet** (`chat-settings`) opens from the chip, above the box, as one level with every group visible: Model and Reasoning as segmented controls, Speed for Codex, the Account rows with their meters (the other account is one click, a signed-out one routes to sign-in), and the Session actions (Compact context, Copy resume command, Re-check host). A choice applies to the next message and the sheet stays open; `Esc` closes it and returns focus to the chip. `chat-limit` shows the chip in warning with `Main at limit` and the sheet offering the other account.
+- `chat-seat` is the orchestrator's conversation with the seat panel above the feed (identity, holding the seat for 2h, the context meter, Rotate). `chat-menu` is the `⋯`: the pipeline row first when the conversation is a stage, Show on the yard, Rename, Hand off, Kill.
 
-- **Seat card** in the column (§3.6). **Seat stage** (`#/seat`, `o`, the card, the ⚙, the seat conversation's `⋯ › Orchestrator seat`): the orchestrator's conversation with the seat panel above its feed. The panel is one card-height block: identity (filled engine mark, `Opus · high`, `Main · Max plan · holding the seat for 2h · predecessor`, the state badge), the meter (`76 % left of 100k`, `Predecessor · open ›`), the mandate preview (`Mandate v3` with an inline `Edit ›`, three lines of the real mandate faded out by a mask), and on the right **Edit the mandate** and **Rotate**, both secondary and both 44 px — Rotate is the one action that discards the seat's context, so it does not get the primary button. The identity row does not repeat the state badge the conversation header already carries. A rotation-recommended line appears in warning under the meter when ≤ 30 % of the window is left.
-- **Rotate dialog** (`seat-rotate`): a plain-sentence hint ("A successor takes the seat with the mandate below; the current orchestrator hands over its context and stops"), Engine / Model / Reasoning as segmented controls (one vocabulary), Account rows (authenticated only), the Mandate textarea prefilled and focused, Cancel / Rotate orchestrator. Confirming acts on the click, lands on `#/seat`, and the feed shows the successor's first line. With no seat the same dialog is "Create an orchestrator" with Create orchestrator as its primary; the create panel's prose and MCP install line are gone (they belong in the docs and the receipt).
-- Everything #976, #977, #1347, #1419 and #1448 decided about the seat's authority, rotation and successor forks is unchanged; only the surface moves (from a pushed dock to a card and a stage).
+### 4.5 Accounts & limits (`accounts`, `account-detail`, `account-signed-out`)
 
-### 4.5 Accounts (`accounts`, the status bar chips, `chat-limit`, `chat-model`)
+A stage, not a flyout. The left column is every account of both engines at once, each row the same recipe: the engine mark, the label and plan and check time, **both windows as meters with `n % left` and the reset clock** (empty meters and `sign in ›` on a signed-out account), the state badge. Each engine's header names the best pick now (`best now · Lab 91 % left · next reset 16:00`). A row opens its detail on the right without leaving the list: the two windows as large numbers with their meters and `1.8 h of window left`; the **burndown** for the 5 h window (the ideal-pace diagonal, the actual line coloured by what is left, the dotted projection, the `now` marker and, when the projection crosses zero before the reset, the burnout zone shaded and labelled `runs out 14:39`); the **pace** panel (`burning 21.5 % an hour · behind pace · even pace would leave 18 % by now · runs out at 14:39 · 0.3 h before the reset`, or `lasts to the reset`); today by hour; and the actions — Switch to this account (receipt with Switch back), Use one reset (Codex, with the count), Refresh, Sign in. The status bar's account chips open the same detail.
 
-**Every account at once, every one with its meters.** A stage (`a`, the status bar chips, `⋯ › Accounts & limits`): one well per engine, and inside it one row per account on the same recipe — dot, label, plan · `checked 14:02`, then **both windows as meters** (`5 h` and `Week`, each with `% left` coloured by what remains) and one line of reset clocks, then `active` / `ready` / `sign in →`. An account that is not signed in carries the same two meters, empty, and says so; nothing on this stage is a one-line row that hides its consumption. Add a … account is the last row of each well.
+### 4.6 Dialogs (`search`, `create`, `menu`, `host`, `rotate`, `keys`)
 
-**A row is a target.** Click or `Enter` opens `#/accounts/<engine>/<id>`, the account's own stage: the identity header, both windows as large meters with their reset clocks, the **burndown** (the ideal pace as a dashed line, what is actually left as the accent line, and the projection to empty as a dashed danger line — the read model `src/lib/burndown.ts` already computes), a pace panel that says `burning at 15.8 % per hour`, whether that is ahead of or behind pace, and either `runs out at 16:40 at this pace` or `lasts to the reset`, today's consumption by hour as bars, and the actions **Switch to this account** (receipt: Switch back) / Use one reset / Refresh / Sign in. `Esc` returns to the accounts stage with the focus back on the row that opened the detail.
-
-The status bar shows, per engine, the active account and its lowest window, and its chip opens that account's detail. The composer chip's Account group uses the same row recipe with each account's lowest window; the limit state of a conversation (`chat-limit`) routes to those rows.
-
-### 4.6 Pipelines: strip, hub, scheme, and editing after start (`pipelines`, `pipeline`, `pipeline-running`, `pipeline-edit-stage`, `pipeline-edit-running`, `pipeline-add-stage`, `pipeline-draft`, `pipeline-completed`, `new-pipeline`, `board-map`)
-
-The strip, the hub popover and the on-canvas editor are replaced by one stage; the scheme's pipeline regions survive on the map as regions of tiles with a hub chip that opens this stage.
-
-**The graph is the stage.** A pipeline is drawn as a signalling diagram, top to bottom, and it is the first thing in the stage body — never a strip that scrolls sideways or hides four stages of five:
-
-```
- ● ┃ Architect          plan   ✦ Opus · high · read-only · 1 attempt · passed        ●  passed
-   ┃ pass → build                                                              ⊕
- ● ┃ Builder           build   ⌘ gpt-5.6 · high · read-write · 1 attempt · running   ●  running
-   ┃ pass → verify                                                             ⊕
- ● ┃ Builder          verify   ⌘ gpt-5.6 · medium · read-write · 2 attempts · passed ●● passed
-   ┃ pass → review                                                             ⊕            ╭─╮
- ◉ ┃ Reviewer         review   ✦ Opus · xhigh · read-only · 3 attempts · running       ●●●  │ │  ↺ fix
-   ┃   attempt 1 · failed · d2d2d2 · 2 findings   open ›                                    │ │  ● ● ○
-   ┃   attempt 2 · failed · e3e3e3 · 1 finding    open ›                                    │ │
-   ┃   attempt 3 · running · f4f4f4               open ›                                    │ │
-   ┃ pass → docs ↓                                                             ⊕            │ │
- ● ┃ Builder             fix   ✦ Sonnet · high · read-write · 2 attempts · passed      ●●  ◂╯ │
-   ┃ pass → review ↑                                                           ⊕
- ○ ┊ Builder            docs   ✦ Sonnet · medium · read-write · not started
-```
-
-A 2 px **spine** runs down a 28 px gutter and each stage is a **station** on it, filled by that stage's last verdict — green passed, red failed, violet and pulsing while it runs, hollow before it starts; the spine is violet where the pipeline has been and dashed grey where it has not. **Per-attempt pips** on the node say `attempt 1 failed → attempt 2 failed → attempt 3 running` as a shape. A **fail edge is a real loop**: a bracket in the right gutter from its source to its target, with the arrowhead at the target and the **round budget as pips** (`● ● ○` = 2 of 3 spent), and the node repeats it in words (`2 of 3 rounds`). Every node carries the role as its title with the stage id beside it, the engine mark, `model · reasoning`, access, the attempt summary, `edit pending · applies from attempt n` and `k notes` when they are pending. The current stage has an accent edge and its station pulses. A node expands into its attempt list (`attempt 2 · failed · 9c41aa · 2 findings · open ›`) on click or `Enter`, so a three-round loop's history is on the stage and not in three conversations. The ⊕ on each seam inserts a stage there.
-
-The head of the stage is the task with one meta line (state · stage k/n · started · branch · rev · last edit), then the findings card of a parked pipeline (`Reviewer · attempt 2 · round 2 of 3 · 2 findings`, an earlier round folding open in place, the Answer field), then the actions, then the graph beside the editor.
-
-- **Pipelines list** (`p`): Needs you / Active / Drafts / Completed / Archived, rows as in the column, New pipeline in the header (the template picker, unchanged: Plan → Build → Review, Build → Review, Build → Verify, Blank graph; a draft lands in the column and opens its stage).
-- **Actions by state**, acting on the click: draft → Start pipeline (receipt: Pause), Discard draft (Restore); needs a decision → Retry stage, Skip stage (Retry stage), Pause, Archive (Restore); running → Pause, Checkpoint, Archive; paused → Resume, Archive; completed → Re-run the last stage (reopens it), Archive; archived → Restore. The receipt names the revision the record moved to; the request payload that carried it is the API contract below, not product copy.
-- **Stage editor** (click a stage card; `#/pipeline/<id>/stage/<stage>`): Role, Engine, Model, Reasoning, Access, Sandbox (segmented), Declared outputs for a read-only stage, Account, Prompt; a note that says what the save does (`Applies from attempt n — the next time this stage runs`, or for a running stage `Attempt 1 is running with its own copy of this definition. Saving applies from attempt 2; Restart stops attempt 1 and starts 2 from the current worktree`, or for a completed pipeline `Save the edit first, then re-run this stage to reopen it`); **Save · from attempt n**, **Restart now** on a running stage, and Cancel, all three in a footer that never leaves the viewport, with the note beside them. The four less-used groups are disclosures, shut by default so the editor opens on what is edited most: Edges (pass →, fail ↺ with the round budget; `Save edges`; a traversed edge may still be rewired, lowering the budget below the used count parks the next fail verdict), Note for attempt n (`Add note`; ten pending notes per stage at most), Re-run this stage (from worktree / last-passed / checkpoint, `Stop attempt n first` when one is unsettled, refused otherwise and the note says why), Remove this stage (only a stage without attempts; one with attempts stays as history and is routed around). Role · Engine and Model · Reasoning and Access · Sandbox sit two to a row, and no segmented label wraps at any width. The stage node shows `edit pending · applies from attempt n` and `k notes for the next attempt` until an attempt binds them; the graph beside the editor keeps the edited stage on screen, and at 1280 the ladder above the editor does the same job in one line.
-- **Add a stage** (the ⊕ on any edge or after the last stage; `#/pipeline/<id>/add/<index>`): id, role, engine, model, reasoning, prompt; the note says where it lands (`Inserted at its seam: build → new stage → verify`, and `history-only until an edge or a re-run reaches it` when it sits before the cursor); Add stage (receipt: Undo) opens the new stage's editor.
-- **The change log** lists every mutation newest first: `rev n · action · stage · detail · actor · time · effect` (applied / pending-next-attempt / restarted-attempt), which is automation-v2's attributed log rendered.
-- **Mapping to automation-v2 §3.3** (the same names, the same payloads, `expectedRevision` on every mutation that changes a definition, attaches a note, creates or stops an attempt): Save = `edit-stage`; Restart now = `edit-stage { restart: true }`; Save edges = `set-edge` (pass and fail with `maxRounds`); Add note = `note`; Re-run = `rerun-stage { from, stopCurrent }`; Answer = `answer { text }`; Add stage = `add-stage { stage, index }`; Remove stage = `remove-stage`; Checkpoint = `checkpoint { name }`; Retry stage / Skip stage / Pause / Resume / Archive / Restore / Start = `retry-stage` (`rerun-stage from: "last-passed"` once aliased) / `skip-stage` / `pause` / `resume` / `close` / `restore` / `start`. The prototype's fixture carries `revision`, `mutations`, per-stage `attempts`, `pendingEdit`, `notes`, `checkpoints` and `waiting`, and the capture's flows check the effects the engine will produce (a save on a running stage is pending for attempt n+1, a re-run is refused while attempt n is unsettled and allowed with `stopCurrent`, a completed pipeline reopens after edit-then-re-run, remove is refused on a stage with attempts). Until the automation slices land, the same screen shows today's actions and the editor answers a refused mutation with the refusal in its receipt: the control is the capability; the engine's answer is the truth.
-
-### 4.7 Search (`search`)
-
-`/` or the `⋯` row opens the dialog over the stage: the field with the query, the scope segmented control (My messages / Everything), a corpus line, results as 52 px two-line rows — the title with the project chip, the engine glyph and the time right-aligned on line one, the highlighted snippet clipped on line two, so a long snippet never paints over the meta column, `↑ ↓` to move, Enter opens the conversation at the message, Escape closes and returns focus. This is #1054 / #1440 in the new dialog primitive.
-
-### 4.8 Attention and arrivals (`board`, `overview`, `chat-arrival`, the empty stage)
-
-No pill, no toast. The queue is the column's Needs you section (both kinds, edged rows), the column header's count, the rail row's count and badge, the overview column, and `n` / `N`. There is no key legend on the stage; `?` is the one place for keys. A decision that arrives in another project shows in the stage's banner slot (`⚠ Needs you · a question · corvid-tools / Release 2.4 checklist`, open on click and stamp seen, `×`, collapse after ~6 s). One in the **current** project is a new row with its warning edge fading in once, and the column header's count and the rail badge ticking once (200–320 ms, still under reduced motion) — the column is the announcement, and silence would be a step too far. Offline and degraded take the same slot in info tone.
-
-### 4.9 Project and conversation switching (`board`, `overview`, `chat-*`, `search`)
-
-A rail row switches the project and lands on its landing stage — the board when the project has tasks, else the first thing that needs the operator, else the seat (or the map when the map was the last view). A column row switches the conversation or the pipeline in the stage and keeps the column and the rail; the row is marked current. `n` / `N` walk the queue; on the overview they cross projects and switch the rail row with them. A search result switches both. The pinned pane (≥ 1600) stays while the stage changes. There is no modal switcher: the column is the switchboard, always open.
-
-### 4.10 Overview (`overview`)
-
-Described in §4.1. The column is the cross-project queue with project chips on every row; the stage is a grid of cards (auto-fill, 300 px minimum) for the projects that have something running: the header is the project row (name, crown, `9 need you · 11 working · 11 pipelines`, ›) and the body is up to eight rows in state order plus `n more`. Projects with nothing running do not get a card — they collapse into one `Quiet · 8` strip of chips (name · last activity) under the grid, so fourteen projects fit one 1440 screen and the crowned project keeps its rows instead of being padded out by eight empty cards.
-
-### 4.11 Map (`board-map`, `map-crowded`, `map-pinned`, `m`)
-
-The segmented control (or `m`) swaps the stage for the map. A running pipeline is a **group** on a well: its header is the record (`⟐ Implement the export endpoint (#218) · 2/5 · running`, a `needs a decision` badge when it is parked) and opens the pipeline stage; inside it is the same transit vocabulary at a smaller scale — a horizontal spine of **stations**, one node per stage that has started (station, `k/n`, role, engine · model, `2 findings` on a failed one, and `↺ <target> ● ● ○` where a fail edge leaves it), and every stage that has **not** started folded into one ladder tile (`3/5 verify · 4/5 review · 5/5 fix · not started`) so the map never drowns in ghosts. Loose conversations — the ones no pipeline owns — sit in one band below, as 200 px tiles with a title, a state phrase and their engine · model. A node opens its attempt's conversation, the ladder opens the pipeline. Nothing is rendered at a size that needs zooming, so there are no zoom tools and no minimap.
-
-**The system arranges it, and honours you when you disagree.** By default the operator does nothing: every group and the loose band are laid out for them, top to bottom, sized to the map's width, with no two items overlapping — the capture asserts that. Drag a group by its header and it is **pinned** where it was put: it keeps that place, the receipt says so and carries **Release**, the group's header shows a pin mark that releases it, and the header of the map carries `Release all to auto` while anything is pinned. The rest of the map re-flows around a pinned group rather than sitting under it. Nothing is ever *forced* into a place the operator chose, and nothing they chose is ever quietly undone.
-
-### 4.12 The board: a task, its worker and its pipeline as one thread (`kanban`, `kanban-crowded`, `k`, `t`)
-
-The three objects the operator manages used to live on three surfaces joined by one-way links. The board is the surface where they are **one card**:
-
-```
-┌ In review · 2 ────────────┐
-│┃ Archive TTL for closed   │   the task: title and issue ref; a warning edge and a
-│┃ pipelines  #206          │   `needs you` badge when any part of the thread is parked
-│┃  needs you               │
-│┃  ⌘ gpt-5.6               │   the worker: engine mark, model, its state phrase —
-│┃  working 4:02            │   opens the conversation
-│┃  ⟐ 3/5 review            │   the pipeline: stage k/n and the stage's name, the record's
-│┃  needs a decision ●●●●○  │   state, and the stage ladder as pips — opens the pipeline
-└───────────────────────────┘
-```
-
-Five columns, the readiness sections the current build already computes (`taskReadiness.ts`): Now, In review, Blocked, Planned, Done, each with its count and its own vertical scroll — the board never scrolls sideways, at 1280 or at 1920. A task with no worker and no pipeline is a plain card with `＋ Assign a worker or a pipeline`, which opens the create menu. A task the orchestrator holds carries a seat chip. Dragging a card between columns changes its status on the drop, with a receipt that carries Undo — no confirmation. The board is the landing surface of a project that has tasks (§3.2), reachable by `k` or `t` and by the first button of the column header's segmented control.
-
-The thread closes in both directions: the pipeline stage's Linked tasks panel renders the same card, a conversation's `⋯` menu opens its task, and its header meta reads `task · <title>`.
-
-### 4.13 Host details and create (`host`, `new-agent`, `new-pipeline`, `create-menu`, `keys`)
-
-- **Host details**: the runtime row (`connected · updates stream` / `degraded · polling every 10 s` / `offline · reconnecting`), background tasks with name, PID in mono, memory, age and a Kill each (acts on the click), and Hidden (closed conversations with Reopen).
-- **New conversation**: Engine, Model, Reasoning (segmented), Account rows (`ready` / `chosen`, a not-signed-in one routes to sign-in), Directory, First message; Start conversation acts on the click, lands in the new conversation, receipt with Kill.
-- **Keyboard shortcuts** (`?`): the §3.5 table as a dialog.
+One dialog primitive over the stage: a scrim, focus on open, Tab wrapping, Escape closing and returning focus to the trigger, no history entry. Search (`/`) with its scope control and two-line results; Create with Conversation, Task, Pipeline and Orchestrator when there is none; the board menu (Backlog, Accounts, Host details, Release all, Archive project); Host details (runtime, background tasks with PID and Kill, hidden conversations with Reopen); Rotate (engine, model, reasoning, the account rows with meters, the mandate, one sentence that a change means a successor); the keyboard map.
 
 ---
 
 ## 5. Visual language
 
-### 5.0 Design plan (written before the rework, checked against the rendered frames after)
-
-**Subject.** A cockpit for one operator supervising a dozen autonomous coding
-agents on their own machine. Not a SaaS dashboard for a team: one person, all
-day, hands on the home row, answering three questions — *what needs me*,
-*what is running*, *what runs out and when*. The vernacular is dispatch and
-signalling, not analytics: lanes, stations, verdicts, budgets, a line that
-either advances or loops back.
-
-**Palette** — six named values, all `src/styles/tokens.css` value for value,
-light / dark:
-
-| Name | Token | Light | Dark | Job |
-| --- | --- | --- | --- | --- |
-| Slate paper | `--surface-canvas` | `#f3f3f6` | `#101014` | the frame behind everything; the rail and column sit directly on it |
-| Sheet | `--surface-card` | `#ffffff` | `#17171c` | the one lit plane: the stage, and the nodes/cards/tiles that carry an identity |
-| Well | `--surface-well` | `#f0f0f4` | `#131318` | a group recessed into the sheet: a kanban column, a map group, the editor |
-| Signal violet | `--color-accent` | `#5a51e0` | `#8f88ff` | the live path only — the traversed spine, the current station, the selected node |
-| Amber | `--color-warning` | `#8a5f00` | `#e0ae45` | the operator is the blocker: a waiting row's edge, a fail loop, a round budget |
-| Verdict pair | `--color-success` / `--color-danger` | `#177a37` / `#c62828` | `#4fc36f` / `#f07171` | passed and failed, on pips and stations only |
-
-The engine marks keep their brand hues (`--color-claude` `#d97757`,
-`--color-codex` `#2f6fd0`) and appear only as a 13–16 px glyph beside a model
-name. Terracotta is a generic-AI tell when it is a page accent; here it is the
-shipped identity of one of the two engines, at glyph size, and the page accent
-is violet.
-
-**Type.** One family (the system sans), one monospace, used for exactly three
-things: shas, branch and worktree names, PIDs. Roles: display 15/700/-0.01em
-(stage title), row title 13/600, body 13/400, feed prose 15/1.5 in an 880 px
-measure, meta 11/400 muted, badge 10/600, station keys 10/400 tabular. Every
-count, percentage, time and attempt number is tabular. No ALL-CAPS eyebrow
-anywhere: a section header is sentence case at 11/600 with its count beside
-it, because the count is the information and the label is the handle.
-
-**Meta grammar.** Fragments in a fixed order separated by a 3 px hairline dot
-at 45 % opacity, drawn by `.meta > * + *::before` — never a typed `·` in the
-content. One state phrase per surface, coloured only when the state is not
-"fine".
-
-**Layout.** One horizontal ladder of planes, left-aligned, no floating chrome:
-
-```
-┌── rail 240 ──┬── column 380 ──┬────────── stage ──────────┬─ pin 480 ─┐
-│ projects     │ seat card      │  shead: title · one sub   │ (≥1600)   │
-│ + counts     │ Needs you  ◂── │  sbody: the work itself   │           │
-│              │ Pipelines      │                           │           │
-│              │  └ attempt     │                           │           │
-│              │ Working        │                           │           │
-│              │ Recent         │                           │           │
-├──────────────┴────────────────┴───────────────────────────┴───────────┤
-│ status bar 44: runtime · tasks ·············· accounts · ? shortcuts  │
-└───────────────────────────────────────────────────────────────────────┘
-```
-
-Elevation ladder, deliberately four steps and no more: **canvas** (rail,
-column, status bar) → **sheet** (the stage, one border, one `shadow-1`) →
-**well** (groups inside the sheet: kanban columns, map groups, the editor,
-panels) → **float** (`shadow-2`, dialogs, popovers, receipts only). Rows,
-nodes, tiles and cards inside a well carry no shadow at all; a border exists
-only where two planes meet. That is the whole answer to "identical rounded
-cards with one grey shadow": the shadow says *this floats over the page*, and
-nothing else is allowed to say it.
-
-**The one memorable element: the transit line.** A pipeline is drawn as a
-signalling diagram, and it is the only place in the product that spends ink:
-
-```
- ●━━┫ Architect          plan  ◆ Opus · high · read-only     ┃
- ┃  ┃   attempt 1 · passed · a1f3c9 · open ›                 ┃
- ●━━┫ Builder           build  ◆ gpt-5.6 · high              ┃
- ┃  ┃   attempt 1 · running · a1f3c9 · open ›                ┃
- ◉━━┫ Reviewer         review  ◆ Opus · xhigh · read-only  ╮ ┃  ↺ fix
- ┊  ┃   attempt 1 · failed · 2 findings ›                   │ ┃  ● ● ○
- ┊  ┃   attempt 2 · failed · 2 findings ›                   │ ┃  2 of 3
- ○┄┄┫ Fix                 fix  ◆ Sonnet · high             ◂╯ ┃
-```
-
-A continuous 2 px **spine** runs down a 28 px gutter; each stage is a
-**station** on it (a 14 px ring, filled by the last verdict — green passed,
-red failed, violet pulsing running, hollow not started); the spine is violet
-where the pipeline has been and a dashed grey where it has not; a **fail edge
-is a real loop** drawn as a bracket in a 64 px right gutter, amber, with an
-arrowhead at its target and its round budget as pips (`● ● ○` = 2 of 3 used)
-on the loop itself. Per-attempt verdict pips sit on the node, and the attempt
-list expands under it.
-
-The same line vocabulary appears at three scales, so a pipeline is the same
-recognisable object wherever the operator meets it: full size on the pipeline
-stage; as a horizontal micro-spine of stations inside a group on the map; and
-as a 8 px pip run inside the pipeline chip on a kanban card. Nothing else in
-the design is allowed this much ink — rows, fields, dialogs and menus stay
-quiet, borderless and on one radius ladder (8 px controls, 12 px surfaces).
-
-**Motion**, four moments and no more: the current station and the working dot
-pulse at 1.6 s; a decision that arrives in the current project fades its
-warning edge in once and ticks its count once (200 / 320 ms); dialogs and
-receipts rise 6 px over 200 ms; a change-log row slides in 8 px when it is
-new. No section-entrance animation, no hover transition on cards. Everything
-stills under `prefers-reduced-motion`, which is how the capture renders.
-
-**Checked against the generic-AI tells before building.** Identical rounded
-cards with one grey shadow → replaced by the four-step elevation ladder above,
-and the gate that shadow-2 exists only on floats. ALL-CAPS eyebrows → none;
-sentence-case headers carrying counts. Middle-dot-only meta → the hairline-dot
-`.meta` grammar. Monospace on every label → mono on shas, branches and PIDs
-only. `→` on buttons → `›` is the row affordance for "this opens a surface",
-and the one `sign in →` is the shipped account phrase from #1424. Tinted
-near-black surfaces → `#101014` is the shipped dark canvas token and the brief
-pins the tokens value-for-value; the brief wins over the tell. Fade-slide-up
-everywhere → the four moments above.
-
-**What was revised after writing this plan and before building.** The first
-draft made the stage graph a horizontal timeline with the loop drawn under the
-row — which is what every CI product draws, and it is also what forced the
-sideways scroll the critique measured (F1). Vertical spine with the loop in a
-right gutter is the choice that serves *this* brief: a seven-stage record with
-two loops fits a 1280 px stage without scrolling, and the loop has somewhere to
-put its budget. The second revision: the kanban card first carried three
-separate rows (task, worker, pipeline) with a border each — three cards in a
-trench coat. It became one card with one title and two chips that share the
-card's plane, because the operator requirement is that the three read as *one
-thread*.
-
-**What the rendered frames changed.** Seven things survived the plan and did
-not survive the screenshots. (1) The map drew each fail edge as an arc between
-its two stations; once the spine wrapped at 1280 and 1440 the arc crossed the
-nodes it passed, so the map now states the loop on the node it leaves and the
-drawn loop stays on the pipeline stage, where there is a gutter for it. (2) The
-loop's label started rotated along the bracket and was unreadable at 10 px;
-it is horizontal in its own 40 px lane. (3) The kanban chip was one line and
-truncated the stage name to `3/5 …` in a 150 px column; it became two, with the
-ladder pips beside the state. (4) The column header's count sentence would not
-fit beside a three-button view control, so the pipelines count moved to the
-Pipelines section header that already had it, and at 1280 the working count
-goes too. (5) The four secondary editor groups were open by default and made
-the editor a wall; they are disclosures. (6) The board's subtitle explained how
-to drag; it now counts what is there, because an instruction a power user reads
-four hundred times is furniture. (7) The question options' `1 2 3` read as
-ordinal numbering — the generic tell — so they are drawn as keycaps, which is
-what they are: the key you press.
-
-**What a second pass through the frames changed.** The run above was green, and
-four things were still wrong in the pictures. Each is now a gate, because a
-defect a gate cannot see is one the next round reintroduces.
-
-1. **The thread chips were ellipsing their state to nothing.** In a 150 px task
-   column the chip shared one row between the phrase and the ladder pips, and
-   the phrase lost: `nee…`, `runn…`, `a question · …`, and in the narrowest
-   card `r…`. The card is where operator item 3 says a task, its worker and its
-   pipeline read as one thread, and the thread was saying nothing. The chip is
-   now three rows — identity beside its mark, then the state and the ladder each
-   owning the chip's full width — and the state **wraps** rather than ellipsing:
-   a second 14 px line costs the card nothing and keeps every word. Gate: no
-   `.kchip` `.who` or `.st` may be clipped, on any frame.
-2. **Meta fragments were painting over each other's separators.** `.meta`
-   children could shrink below their own `nowrap` text, so a squeezed fragment
-   overflowed its box and covered the next fragment's hairline dot — the
-   overview read `working 4:02Read src/lib/pipelin…` and `gpt-5.6 stage 3/5`,
-   which looks like a missing space and is actually a fragment painted on top of
-   a dot. `.rest` is the one fragment built to give way, and now the only one
-   that does. This was systemic: every meta line in the product was one tight
-   row away from it. Gate: no fragment's text may exceed its own box.
-3. **The stage editor was squeezed again, one axis over.** F9 moved the footer
-   out of hiding, but at 1280 the editor stacks under the record instead of
-   sitting beside it, and the linked task and change log left it a 142 px slot
-   for 790 px of controls — two of nine groups. While the editor is open those
-   two panels stand down, exactly as the graph already did, and come back when
-   it closes. Gate: the editor body is at least 300 px and its footer is inside
-   the viewport.
-4. **The feed was anchored to the top.** A lane with one message put it at the
-   top of an 800 px sheet with 600 px of void above the composer. The feed now
-   fills from the bottom, so the newest line is next to the box the operator
-   types in; when the transcript is longer than the sheet nothing changes.
-5. **A stage node was cutting the number its phrase exists to name.** With the
-   editor open at 1440 the node's `edit pending · applies from attempt 1` ran
-   3 px past the node's border and lost the `1`. It wraps now, which settles the
-   general rule the first fix only half-stated: **a fragment may shrink only if
-   it can wrap.** A `nowrap` fragment that shrinks overflows and paints over its
-   neighbour (defect 2); one that reflows is safe to squeeze. Gate: no fragment
-   is cut by its nearest clipping ancestor.
-
-One gate written in this pass was withdrawn. Reading the plan's "never a typed
-`·` in the content" literally, a check rejected `done · 2h`, `a question · 9
-min` and `1 attempt · passed` — and those are correct as they stand: a state and
-its qualifier are **one** fragment, coloured as one, and the drawn dot separates
-fragments from each other. The plan's sentence overstated its own practice; §5.1
-now says what the rule is. A gate that fires on 272 of 278 frames is measuring
-the wrong thing, and so was a second one that flagged any fragment wider than
-its `.meta` box — the row's padding often leaves it visibly room, so the honest
-question is whether something actually clips it.
-
-One acceptance was also unmet rather than merely overclaimed: F2 asks that "the
-composer chip's Account group reuses the same row recipe **with the meters**",
-and the compact rows in the stage editor and the composer were printing `38%
-left` as prose with no bar. They carry the bar now, which is also what operator
-item 2 says — an account is chosen by what is left in it, and a length is what
-the eye compares. Gate: every `.arow.compact` carries a meter.
-
-### 5.1 Recipes
-
-- **Tokens and the elevation ladder**: `prototype/styles.css`'s `:root` and dark blocks are `src/styles/tokens.css` value for value. Four planes and no more (§5.0): canvas (rail, column, status bar) → sheet (the stage, one border and one shadow-1) → well (kanban columns, map groups, the editor, panels) → float (shadow-2, only dialogs, popovers and receipts). Rows, nodes, tiles and cards inside a well carry no shadow at all, and a border exists only where two planes meet. Two radii: 8 px controls, 12 px surfaces; pills only for badges, chips and dots.
-- **Type**: 15/700 stage titles (the one real step above a row title), 15/1.5 message prose in an 880 px measure, 13/600 row titles, 13/400 rows and nodes, 12 for tool lines, buttons and the editor's fields, 11 for meta lines and section headers, 10 for badges and station keys; tabular numerals on every time, count, percentage and attempt number; mono only for shas, branch and worktree names and PIDs. No ALL-CAPS eyebrow anywhere.
-- **Meta grammar**: fragments in a fixed order separated by a 3 px hairline dot at 45 % opacity, drawn by the stylesheet, never a typed `·` in the content; the state phrase is the only coloured fragment. The dot separates fragments from each other; inside one fragment a state may carry its own qualifier (`done · 2h`, `a question · 9 min`, `1 attempt · passed`), because that pair is one unit and takes one colour. Fragments do not shrink — a `nowrap` fragment allowed to shrink overflows its box and paints across the next fragment's dot, which reads as a missing space. Two give way instead: `.rest`, by clipping to an ellipsis, and any fragment that can wrap. The rule is that shrinking and wrapping travel together, and never apart.
-- **State as an edge, at most two coloured elements per row**: a row that needs the operator carries a 3 px warning (or danger) edge and a badge; the current stage node a 3 px accent edge; the selected node an accent ring; nothing tints a whole header. Dots: success live (pulsing only on the current row and the stage header), warning waiting or held, danger stalled or killed, accent returned or running pipeline, neutral done.
-- **Badges**: one recipe, 20 px, soft fill + role text: `working 2:14`, `a question`, `plan approval`, `needs a decision`, `needs you`, `stalled`, `limit`, `running`, `passed`, `failed`, `draft`, `completed`, `active`, `ready`, `attempt 1 running`.
-- **Pips**: 8 px marks, one recipe at three scales — a stage's attempts on its node, a fail edge's round budget on its loop (hollow until spent), and a pipeline's whole ladder in miniature inside a kanban card's pipeline chip.
-- **Engine marks**: a 16 px glyph in secondary colour (Claude sparkle, Codex command) in rows, meta lines, stage cards and message headers; the filled 36 px circle only on the account cards and the seat panel.
-- **Meters**: the fill is what remains, coloured by what remains (accent above 30 %, warning at or under 30 %, danger at or under 10 %).
-- **Motion**: four moments (§5.0) — the current station and the working dot pulse at 1.6 s; an arrival in the current project fades its edge in and ticks its count once; dialogs and receipts rise 6 px over 200 ms; a new change-log row slides in 8 px. The banner collapses after ~6 s. Everything stills under `prefers-reduced-motion` (the capture renders with it reduced).
-- **Receipts**: raised surface, success edge, in flow above the composer box (inside a dialog, above its footer; on a list stage, at the bottom of the body), 4 s, the inverse action as an accent text button. The body shrinks by the receipt's height, so no control can sit beneath it; the gate checks every receipt against every control.
+- **Tokens and planes**: `prototype/styles.css`'s root and dark blocks are `src/styles/tokens.css` value for value. Four planes: paper (the frame) → yard (the canvas) → well (a cluster, tinted by its hue) → card (nodes, the lift, the inspector, dialogs). `shadow-1` on a node over its well; `shadow-2` only on what floats (the lift, dialogs, the settings sheet). Two radii: 8 px controls, 12 px surfaces, 16 px wells.
+- **State as an edge, at most two coloured elements per surface**: a cluster or node that needs the operator carries a 3 px amber edge and a badge; the current station a violet outline; the selected cluster a violet ring. Dots and rings: success live, amber waiting, danger stalled or killed, violet returned or running.
+- **Pips**: one 7 px recipe at three scales — attempts on a station, rounds on a loop (hollow until spent), the whole ladder on a tile.
+- **Meters**: the fill is what remains, coloured by what remains (violet above 30 %, amber at or under 30 %, danger at or under 10 %); a signed-out account's meter is empty, never absent.
+- **Motion**: camera glides 360 ms on the standard ease; the lift rises with the glide; the working dot pulses 1.6 s; receipts last 4 s. Everything stills under reduced motion, which is how the capture renders.
+- **Receipts**: raised, a success edge, in flow under the bar, 4 s, the inverse action as a text button: pin → Release, Answer → Undo, Skip → Retry stage, Pause → Resume, Archive → Restore, Kill → Respawn, Switch → Switch back, Assign → Undo. No confirmation anywhere.
 
 ---
 
 ## 6. Deliberately cut
 
-- **The scheme board as the primary surface** (`SchemeBoard` with expanded conversation cards, lineage lines, subagent badges, the on-canvas draft editor, drag-to-link handoff, lasso and bulk actions, tasks placed on the map, the task sticky composer). The frames show why: at fit zoom every day's board is a row of thumbnails with 5×4 px controls. The map survives as a secondary picker of tiles (§4.11); the actions the canvas gestures performed are rows (`⋯ › Hand off`, Close card, Archive) and, for bulk selection, §7.
-- **The switchboard modal, the switch cards and the corner status pill** (`Switchboard`, `SwitchCard`, `CornerStatus`, `useSwitchboardData`). The column is the switchboard, always open, fed by the files the board already has.
-- **The attention island, the "NEEDS YOU 0" pill and the arrival toast** on the desktop. The queue is the column; the only banner is for another project's arrival.
-- **The orchestrator dock as a pushed third column** (`OrchestratorDock`, `OrchestratorPanelToggle`). The seat is a column card and a stage; the launch module inside `OrchestratorPanel` survives as the rotate / create dialog.
-- **The pipeline strip, the hub popover, the verdict popover and the on-canvas stage editor** (`PipelineStrip` desktop mode, `PipelineHub`, `VerdictPopover`, `PipelineEditor`, `StagePlaceholderPane`, `StageEdgeControls`). One pipeline stage with findings, actions, the graph and the editor. The strip is the defect the graph replaces: it showed 3 of 5 stages at 1440 and 1 of 5 at 1280, with the fail edge as a 10 px caption.
-- **The rail footers** (RAM and swap meters, the two limit blocks, the Telegram row) and the rail header's toggles (language, access QR, push bell). Resources and background tasks are Host details; limits are the status bar and the Accounts stage; the three toggles become rows in the board `⋯` beside Sound (not prototyped; lane 1 carries them as rows).
-- **The floating create cluster, the header's status sentence, sound and settings buttons, the always-visible Archive and Delete project**. One `+` menu, one `⋯` menu, one sentence of counts under the project name.
-- **The task readiness strip and the Tasks side panel**. One board (§4.12), which is the readiness model rendered as the project's landing surface; the strip's chips become the card's worker and pipeline chips.
-- **The worker stacks and the residual strip** (`WorkerStacks`, `TreeAside`'s residual strip). Recent, `All conversations · n ›` and Host details › Hidden.
-- **The conversation card's header controls** (kill with PID, expand, favourite, delete, close inline) and the two-step Kill. One `⋯` with labelled rows; the receipt's Respawn is the safety net (standing rule: no confirmation prompts).
-- **The composer's status row, the live-tail pill and the control strip** on the desktop. Stop is the send slot, elapsed time is the header meta, the strip's rows are in `⋯`.
-- **The "Reasoning" row that fronts a model select, the "Light / Medium" tier names and the `effort: default` label**. Model and Reasoning are separate segmented controls with the tier ids.
-- **Per-engine account popovers anchored to the board**. One Accounts stage.
+- **The linear column, the kanban of five columns and the map of bands** of the rejected prototype. The yard is the one spatial model; the readiness sections survive as the packing order and the phrases, the thread as the task tag on a cluster.
+- **Full-size conversation cards on the canvas at every zoom** (`SchemeBoard`'s 600 × 780 panes, the dormant-pane machinery, `FarLabel`). A node is 200 × 88; the lift is the one place a conversation is read on the canvas, at 100 %.
+- **Placeholder stage windows** (`StagePlaceholderPane`, `StageCompletedCard`, `StageStatusRow`, `SLOT_W/SLOT_H`). A stage that has not started is a hollow station.
+- **The rest band and the tidy-tree band** (`layout.ts` `REST_BAND_MAX_W`, `FAV_BAND_GAP`), the worker stacks and the residual strip. Quiet work is a quiet tile at the bottom-right; a crowned root is a cluster like any other with a crown mark.
+- **The scheme toolbar** (hand, select, lasso, task tool, zoom buttons in the corner), lasso and bulk actions, tasks placed on the canvas and the sticky composer, the group override panel, the subagent badges and tray. The camera controls live in the bar; children are nodes in their cluster.
+- **The orchestrator dock, the attention island, the toast over the canvas, the corner status pill and the switchboard modal.** The seat is a cluster and a chat; attention is the amber edge, the keycaps, `n`, the beacons and the side column's list; the banner slot is the only announcement; switching is the yard.
+- **The rail footers** (RAM, swap, limits, Telegram) and the rail's header toggles. Resources and background tasks are Host details; limits are the status chips and the accounts stage.
+- **The chat's `live tail` pill, status row, control strip and model row.** One box.
+- **The two-level model menu.** One sheet.
+- **The per-engine accounts flyout and the separate burndown popover.** One stage.
+- **The list view** (`ProjectViewTabs` list / scheme). The yard's side column and the field cover "show me everything as rows" without a second board.
 
 ---
 
 ## 7. Deferred — not currently justified
 
-Scope the requirement does not demand, kept on record here.
-
-- **Semantic zoom for the map** (#183). The map of groups is legible at 100 % and answers "where is everything" without it; #183 stays the destination if it ever needs levels.
-- **Spatial editing on the map beyond pinning** (drag-to-link handoff, lasso and bulk actions, tasks on the canvas). Moving a group to pin it is in (§4.11); linking and bulk selection are not. The column rows and menus carry the same actions one at a time; a multi-select in the column (Shift-click, bulk Close / Archive / Kill with one receipt) is the shape if the operator asks for bulk actions.
-- **A tabbed stage or multiple pinned panes.** One stage plus one pinned pane at ≥ 1600 covers "the orchestrator beside a worker"; more panes would recreate the canvas.
-- **Resizable rail and column.** Fixed widths per frame keep the gates provable; a drag handle is a small addition later.
-- **A command palette beyond `/` and the single keys.** The map of keys is short enough to learn from `?`.
-- **Inline transcripts on the pipeline stage.** A stage card's `open ›` opens the attempt's conversation in the stage; embedding transcripts would rebuild the canvas problem.
-- **Findings ledger across rounds, checkpoint browsing, per-attempt diffs.** Automation-v2 §7 defers the ledger; the change log, the node's attempt list and the findings card's `round n ›` fold cover what the record carries.
-- **The map's fail edge drawn as an arc between its two stations.** Tried and cut: the spine wraps at 1280 and 1440, so the arc crossed the nodes and the ladder tile it passed. The map states the loop as `↺ <target> ● ● ○` on the node it leaves; the full-size loop stays on the pipeline stage, where there is a gutter to draw it in.
-- **A tablet layout.** 768–1279 px stays on the current shell with the coarse-pointer sizing fix (2026-08 finding 11); this design starts at 1280.
-- **An in-app theme toggle.** `data-theme` exists; the OS scheme flips the palette.
-- **Screen-reader work.** Out of scope by the standing audit direction; nothing here blocks it later.
-- **The document preview host** (`preview/ArtifactPreviewHost`). Untouched by this design; it opens over the stage as it opens over the board today.
+- **Force-directed or physics layout.** The shelf packer answers "grouped in clusters, needs-you at the origin" deterministically; a graph layout that settles would move things under the operator, which is the opposite of the pin rule. Revisit only if clusters gain edges between each other (a task handed from one pipeline to another).
+- **Edges between clusters** (a conversation that references another cluster, a task moved between pipelines). Today's model has no such relation; the field's regions and the cluster hues are the grouping.
+- **A true 3D projection** (perspective on the world, tilt). The operator said "2d or even 3d"; the lift, the wells and the receding yard give the depth without a camera that hides part of the canvas. A perspective tilt is a stylesheet line on the world if the picture asks for it.
+- **Semantic zoom inside the lift** (a pane that grows with the zoom). The lift is one size at 100 %.
+- **Multiple lifts at once / split panes.** One lift; the inspector beside it is the second thing on screen.
+- **Resizable side column and rail.** Fixed widths per frame keep the gates provable.
+- **A tablet layout.** 768–1279 px stays on the current shell; this design starts at 1280.
+- **The findings ledger across rounds, checkpoint browsing, per-attempt diffs** (automation-v2 §7).
+- **Screen-reader work.** Out of scope by the standing audit direction; the focus model (§3.4) and the 44 px floor do not block it.
 
 ---
 
-## 8. Implementation plan — one lane per slice, one owner per file
+## 8. What the capture proves
 
-Open only after the operator's word (Wanted 5). Each lane is one issue with the acceptance below, a pinned spec quoting the operator's requirement, and the frames from lane 0 as its evidence. A file has exactly one owner among open lanes; where a file is owned by an open mobile-v2 lane (`docs/design/mobile-v2/README.md` §8) or an automation-v2 lane (`docs/design/automation-v2/README.md` §6.1), the desktop lane opens after that lane merges and the row says so. New files carry ⁺ and live under `src/components/desktop/` unless a lane says otherwise; `src/lib/i18n/en.ts` and `uk.ts` are append-only per lane with keys prefixed `desktop2.<surface>.*`. Every edited path resolves on `origin/main` at `43629d70`.
+Every frame (29 screens × 3 widths × 2 schemes): nothing scrolls sideways (document, rail, stage, feed, inspector, the accounts columns, dialogs); every visible control is at least 44 × 44 on screen, on the canvas at the camera's zoom included; no two visible controls intersect; a receipt covers no control; the scheme applied; the bench hidden; focus never on the body; no ALL-CAPS label; none of the banned phrases; the composer's Tab order is field → chip → attach → dictate → send; a dialog takes focus, wraps Tab, closes on Escape and returns focus to its trigger. Every board frame: no two clusters overlap in the auto layout, a pinned cluster keeps exactly its place, tiles alone at yard altitude and nodes at block altitude, the map draws one rect per cluster and the viewport frame, keycaps rank needs-you first.
 
-| # | Lane | Owns (new ⁺ / edits) | After | Acceptance |
-| --- | --- | --- | --- | --- |
-| 0 | **Capture harness** | `scripts/capture-desktop-v2.ts` ⁺, `scripts/capture-desktop-v2.test.ts` ⁺ | — | Renders the production build against the seeded demo home (the `demo-capture` recipe with pipelines seeded through the shipped store, §1.0) at 1280×800, 1440×900 and 1920×1080, both schemes, the same screen ids as `prototype/screens.js` including the state screens via seeded fixtures; the same gates as `capture.ts` (no overflow, 44 px, no overlapping controls, receipt covers no control, scheme applied, composer and dialog focus order) and the §3.5 key flows; the test proves each gate can go red. |
-| 1 | **Shell: frame, routes, status bar, dialog and receipt primitives, keyboard map, board menus, host details** | `DesktopShell.tsx` ⁺, `desktopNav.ts` ⁺ (+ test: stages push, dialogs replace and create no history, Escape returns focus to the trigger), `DesktopStatusBar.tsx` ⁺, `DesktopDialog.tsx` ⁺ (scrim, focus trap, Escape), `DesktopReceipt.tsx` ⁺ (in flow, 4 s, inverse action), `desktopKeys.ts` ⁺ (+ test: single keys inert while typing), `BoardMenu.tsx` ⁺, `CreateMenu.tsx` ⁺, `HostDetailsDialog.tsx` ⁺, `KeysDialog.tsx` ⁺; edits `src/components/Viewer.tsx` (the desktop branch mounts the shell; stops mounting the dock, the fixed attention anchor and the connection pill), `src/components/runtime/DeploymentStatusPill.tsx` (a status bar chip) | 0; mobile lane 1 (`Viewer.tsx`) | Frames `board`, `board-menu`, `create-menu`, `host`, `keys`, `board-rail-collapsed`; every dialog takes focus, wraps Tab, closes on Escape and returns focus; the status bar is 44 px tall and its chips open Host details and Accounts; no control under 44 px, none overlapping. |
-| 2 | **Column, seat card, rail v2, overview v2** | `DesktopColumn.tsx` ⁺, `columnModel.ts` ⁺ (+ test: grouping, the precedence killed > stalled > limit > held > waiting > working > returned > done, both kinds in Needs you, Recent capped at five, the filter narrows the seat card, `n`/`N` order), `SeatCard.tsx` ⁺, `OverviewStage.tsx` ⁺; edits `src/components/ProjectRail.tsx` (rows read a phrase, the crown toggle inside the row's hit area, footers and header toggles stop mounting, Create project at the foot, collapse to 64 px), `src/components/OverviewBoard.tsx` (retired in favour of `OverviewStage`), `src/components/LimitsFooter.tsx`, `src/components/ResourcesFooter.tsx` (retired) | 1 | Frames `board`, `board-noseat`, `board-crowded`, `board-rail-collapsed`, `overview`, `overview-crowded`; the queue count is the same number in the column header, the rail row and the overview; no `data-go` appears twice in the column; section headers stick; with thirty conversations and ten pipelines every Needs you row ends inside the first screen at 1280 and the rail is collapsed there by default; fourteen projects fit one 1440 overview with the quiet ones as one strip. |
-| 3 | **Conversation stage: header, meta precedence, `⋯` menu, details, split** | `ConversationStage.tsx` ⁺, `DesktopConversationMenu.tsx` ⁺, `ConversationDetailsDialog.tsx` ⁺, `PinnedPane.tsx` ⁺; edits `src/components/BranchPane.tsx` (desktop: no inline header controls; the header becomes title + meta), `src/components/AgentControlStrip.tsx` (desktop: rows in the menu), `src/components/TaskHeader.tsx` (`ProcessStatusControls`: direct kill on the desktop) | 1; mobile lane 3 (`BranchPane.tsx`, `AgentControlStrip.tsx`, `TaskHeader.tsx`) | Frames `chat-working`, `chat-idle`, `chat-menu`, `chat-details`, `chat-offline`, `chat-held`, `chat-limit`, `chat-stalled`, `chat-killed`, `chat-split` (1920 only); the meta precedence test; Kill and Close act on the click with Respawn and Reopen in the receipt; the Pin control renders only at ≥ 1600. |
-| 4 | **Feed and composer at desktop density** | edits `src/components/feed/FeedItem.tsx`, `feed/cards/ToolCard.tsx`, `feed/cards/CmdGroupCard.tsx`, `feed/QuestionCard.tsx`, `feed/SuggestedReplies.tsx`, `src/components/ComposerBar.tsx`, `RuntimePill.tsx`, `TmuxComposer.tsx`, `LogFeed.tsx`, `TurnStatusBar.tsx` | 3; mobile lanes 4 and 5 (they own these files until they merge) | Frames `chat-working`, `chat-waiting`, `chat-model`; 880 px prose column at 15 px; the 44 px message header; folded runs and the failure block; options and chips send on the click and the card folds; the box with the chip inside; the slot is Stop / send / Queue / Respawn; Enter sends, Shift+Enter breaks; Tab walks field → chip → attach → dictate → send; no status row, no live-tail pill on the desktop; one vocabulary. |
-| 5 | **Seat stage and rotate dialog** | `SeatStage.tsx` ⁺, `SeatPanel.tsx` ⁺, `RotateDialog.tsx` ⁺; edits `src/components/orchestrator/OrchestratorPanel.tsx` (the launch module renders inside the dialog; the create prose and the MCP line go), `IncumbentHeader.tsx` (the identity row of the panel), `OrchestratorDock.tsx` and `OrchestratorPanelToggle.tsx` (deleted), `src/components/shellLayout.ts` (no dock inset) | 1, 3 | Frames `seat`, `seat-rotate`, `board-noseat`; `o` opens the seat or the create dialog; Rotate and Create act on the click and land on `#/seat`; the mandate textarea is focused on open; `capture-issue-977` and `978` retire with the dock and their acceptance moves to lane 0's `seat` frames. |
-| 6a | **Pipelines: the stage graph, the read side and today's actions** | `pipelines/PipelineStage.tsx` ⁺, `pipelines/PipelinesList.tsx` ⁺, `pipelines/StageGraph.tsx` ⁺ (the spine, the stations, the per-attempt pips, the fail loops with their round budgets, the attempt list, the 1280 ladder), `pipelines/ChangesLog.tsx` ⁺, `pipelines/PipelineActions.tsx` ⁺ (today's `PIPELINE_ACTIONS` through the existing PATCH route) | 1, 2 | Frames `pipelines`, `pipeline`, `pipeline-running`, `pipeline-draft`, `pipeline-long`, `new-pipeline`; every stage of a seven-stage record is on screen at 1280, 1440 and 1920 with and without the editor and `.graph` never scrolls sideways; every node shows role, engine, model, reasoning, access and its attempt pips; every fail edge shows its target and `k of n rounds`; a node expands into its attempts and every attempt with a conversation has `open ›`; Retry / Skip / Pause / Resume / Archive / Start act on the click with their inverse in the receipt; a stage conversation's `⋯` first row opens its pipeline. |
-| 6b | **Pipeline editing after start = automation-v2 slice 12** | `src/components/pipelines/StageEditor.tsx` ⁺, `AddStageEditor.tsx` ⁺; edits `src/components/pipelines/VerdictPopover.tsx` (the findings block with the Answer field), `PipelineStrip.tsx`, `PipelineHub.tsx`, `PipelineEditor.tsx`, `StagePlaceholderPane.tsx`, `StageEdgeControls.tsx` (retired on the desktop), `pipelineModel.ts` (state phrases, `waiting`, pending edits) — automation-v2 lane G owns this directory | 6a; automation-v2 slices 10 and 11 | Frames `pipeline-edit-stage`, `pipeline-edit-running`, `pipeline-add-stage`, `pipeline-completed`; the flows of `capture.ts` (save → pending-next-attempt on a running stage, restart, set-edge, note, rerun refused then allowed with stopCurrent, answer, add / remove with undo, completed → edit → re-run) run against the real route with `expectedRevision`; a refused mutation lands in the receipt with the engine's reason. |
-| 7 | **Map of tiles** | `MapStage.tsx` ⁺; edits `src/components/scheme/SchemeBoard.tsx` (tile mode: no expanded conversations on the canvas, hub chips open the pipeline stage, ghosts for stages that have not started), `scheme/layout.ts` (tile size; the rest band derives its width from the tree count — 2026-08 finding 1), `scheme/Minimap.tsx`, `scheme/expandedNode.ts`, `scheme/TasksLayer.tsx`, `scheme/TaskStickyComposer.tsx`, `scheme/BulkActionBar.tsx`, `scheme/lasso.ts` (off the map), `src/components/ProjectDashboard.tsx` (the desktop leaf mounts the map only when the column's view is map; the floating create cluster, the header toolbar, `TaskReadinessStrip`, `WorkerStacks` and the residual strip stop rendering on the desktop), `WorkerStacks.tsx`, `TreeAside.tsx` (retired on the desktop) | 2; desktop lane 12 (`TaskReadinessStrip.tsx`, which lane 12 retires); mobile lane 2 (`ProjectDashboard.tsx`); automation-v2 slices 9b and 12 (lane E's `ProjectDashboard.tsx` and `scheme/**` edits) | Frames `board-map`, `map-crowded`, `map-pinned`; nothing exceeds the map's client width at any width; a group with unstarted stages renders one ladder tile for them; no two groups overlap in the auto layout; dragging a group pins it with a receipt that carries Release, the rest flows around it, and Release (or `Release all to auto`) returns it; `m` toggles; a node opens its conversation. |
-| 8 | **Accounts stage** | `AccountsStage.tsx` ⁺; edits `src/components/AccountsPanel.tsx` (the stage layout on the desktop; the popover container goes), `EngineAccountSwitch.tsx`, `AccountBadge.tsx`, `ProjectAccounts.tsx` (retired: the status bar and the stage replace the header switch), `ConnectionPill.tsx` (retired: the status bar's runtime chip) | 1; mobile lane 9 (`AccountsPanel.tsx`, `AccountBadge.tsx`, `EngineAccountSwitch.tsx`) | Frames `accounts`, `account-detail`, `chat-limit`, `chat-model`; every account row carries two meters (the gate counts `2 × rows`) including the not-signed-in one; a row opens `#/accounts/<engine>/<id>` with the burndown, the pace line, the depletion line and the actions; Escape returns to the stage with the focus on that row; Switch from the detail lands a receipt with Switch back; the composer chip's Account group reaches the same rows; `capture-issue-1418` still green. |
-| 9 | **Attention and arrivals** | edits `src/components/attention/AttentionIsland.tsx` (no desktop pill; the count is the column's), `AttentionToast.tsx` (desktop: the banner slot, other-project arrivals only, ~6 s collapse, seen stamp), `src/components/attention.ts` (the queue includes `needs_decision` pipelines in the column's order), `attention/navigate.ts` (`n` / `N` walk that order; across projects on the overview) | 2; mobile lane 8 (`AttentionIsland.tsx`, `AttentionToast.tsx`, `attentionQueue.ts`) | Frames `chat-arrival`, `board`, `overview`; the banner never shows for the current project; a seen decision is not announced again after back; `capture-issue-963` retires with the island and its acceptance moves to lane 0. |
-| 10 | **Search in the dialog primitive** | edits `src/components/search/GlobalSearch.tsx` (desktop geometry: 760 px dialog over the stage, the scope control as a segmented control, `↑ ↓ Enter` kept) | 1 | Frame `search`; `/` opens with the field focused; Escape returns focus to the trigger. |
-| 12 | **The board: task ▸ worker ▸ pipeline as one thread** | `board/BoardStage.tsx` ⁺, `board/ThreadCard.tsx` ⁺, `board/boardModel.ts` ⁺ (+ test: the five readiness sections from `taskReadiness.ts`, a card's worker and pipeline resolution, a drop changes status and the inverse restores it); edits `src/components/TaskReadinessStrip.tsx` (retired on the desktop), `src/lib/taskReadiness.ts` (the read model is reused, not forked) | 2, 6a | Frames `kanban`, `kanban-crowded`; no horizontal scroll at any width, columns scroll vertically, every card ≥ 44 px, none overlapping; a card renders worker and pipeline chips whenever the task has them and `＋ Assign` when it has neither; the worker chip opens `#/chat/<id>`, the pipeline chip opens `#/pipeline/<id>`, a drag to `done` changes the status and the receipt's Undo restores it; the landing route of a project with tasks is the board. |
-| 11 | **Retire and document** | delete `src/components/Switchboard.tsx`, `SwitchCard.tsx`, `CornerStatus.tsx`, `src/hooks/useSwitchboardData.ts`, `src/components/pipelines/PipelineHub.tsx` and their tests; update `docs/design/viewer-design-system.md` §3.1–3.3 | 3, 6b, 7, 8, 9 | Type-check green; no desktop surface imports a retired file; the design-system doc names the column, the stage and the status bar. |
-
-Order: 0 → 1 → {2, 10} → {3, 5, 6a, 8, 9} → 4 → 12 → 6b → 7 → 11. Lanes 3, 4, 8 and 9 wait for the mobile lanes that own their files; 6b and 7 wait for the automation-v2 slices named. Review per lane by a fresh reviewer against the pinned quote and the frames. The desktop and the phone share `stateBits`, the badge recipe and the vocabulary, so a lane that lands on one form factor leaves the other untouched and a partial rollout is safe.
+The flows: pan is transform-only (no DOM mutation during a drag), Ctrl+wheel zooms at the cursor and the altitude flips with hysteresis, a keycap centres its cluster and opens the inspector, `n` / `N` walk the queue in yard order, Enter lifts a node to a ≥ 600 × 480 readable pane at ≥ 100 % with the yard receded and Esc lowers it back onto the board, a drag pins and the packer overlaps nothing and Release restores the exact auto layout, Answer / Pause / edit-stage / Archive land with Undo / Resume / a next-attempt receipt / Restore, the backlog assigns a worker and the thread appears (Undo removes it), the settings sheet is one level with every group visible and Esc returns focus to the chip, the send slot flips Stop → Send on typing and the message lands, a question answers on click, every account row opens a detail with the chart and a burn rate, Switch carries Switch back, a field tile enters its yard on that cluster, and no page error.
 
 ---
 
-## 9. Validation against the requirement
+## 9. Implementation plan — one lane per slice, one owner per file, the tests each slice supersedes
 
-| Wanted | Delivered here |
-| --- | --- |
-| 1 · audit at 1280, 1440, 1920, both schemes, from rendered frames of the current build against a seeded home, covering board and rail, conversation and feed, orchestrator panel, pipelines (strip, hub, scheme), accounts, search, attention, switching; what works and stays | §1: nineteen screens per cell rendered through the demo runtime with seeded pipelines, measured (§1.0 table), read (§1.1–1.13), re-checked against the 2026-08 audit (§1.14), the keep list (§1.15) |
-| 2 · a mobile-v2-consistent IA: the persistent frame, a primary surface, where the seat lives, how pipelines are read and edited, how attention and arrivals surface, how search and switching feel, what is cut | §2, §3, §6; `stateBits`, the badge recipe, the receipt, the banner slot, the navigation contract and the vocabulary are the mobile v2 ones |
-| 3 · static clickable prototype, HTML/CSS/JS, invented fixtures, both schemes, three widths, capture script with headless gates (no overflow, no overlapping controls, 44 px, focus order in composer and dialogs) | `prototype/` (47 screens, every action clickable, thirteen scenarios), `capture.ts` (278 gated frames plus the structural gates of §11 and the flows, green on 2026-09-02), `.gitignore` with `out/` |
-| 4 · design document: verbatim requirement with date and source, audit, principles, IA, screen by screen, cuts, implementation plan by lane with one owner per file, "Deferred — not currently justified" | this file; `git status` shows only `docs/design/desktop-v2/` |
-| 5 · approval gate | the orchestrator shows `out/` and this document to the operator; lanes 0–11 open only after their word |
+Open only after the operator's word. Each lane is one issue with the acceptance below, a pinned spec quoting §0, and the frames from lane 0 as its evidence. A file has exactly one owner among open lanes. **Per #1466, every lane also owns the pre-existing tests that assert the behaviour it replaces, listed here; the builder re-expresses each against this document's contract or deletes it with the surface, and a reviewer who finds one of these red returns to this table, not to the builder.** Where automation-v2 lane E (`scheme/**`, `ProjectDashboard.tsx`, `ProjectRail.tsx`, `OverviewBoard.tsx`) or a mobile-v2 lane owns a file, the desktop lane opens after that lane merges and the row says so. New files carry ⁺ and live under `src/components/yard/` unless a lane says otherwise; `src/lib/i18n/en.ts` and `uk.ts` are append-only per lane with keys prefixed `yard.*`. Every edited path resolves on `origin/main` at `7e5b199b`.
 
-The operator's words: "з нуля" (from scratch) → §3 replaces the whole frame; "з урахуванням того що в планах" (what is planned) → §4.6 is automation-v2's slice 12 drawn, §2 and §4 are mobile v2's contract on a desktop; "того що зроблено вже" (what is done) → §1.15 keeps the wave that shipped (#1422 compact notices as receipts, #1424 accounts content, #1440 / #1054 search whole, #1445 switching as the column, #1419 / #1448 seat authority untouched) and the audit's protected list.
+| # | Lane | Owns (new ⁺ / edits) | Tests superseded (owned by this lane) | After | Acceptance |
+| --- | --- | --- | --- | --- | --- |
+| 0 | **Capture harness** | `scripts/capture-desktop-v2.ts` ⁺ (productises `out/_audit/audit.ts`: the production build under the pinned Bun, the demo home, seeded pipelines, project keys read from the scan), `scripts/capture-desktop-v2.test.ts` ⁺ | `scripts/capture-issue-977-orchestrator-panel.ts` + `.test.ts`, `capture-issue-978-incumbent-rotate.ts`, `capture-issue-963-attention.ts`, `capture-issue-699-overview-targets.ts`, `capture-issue-1418-accounts-dialog.ts`, `capture-issue-507-editor.ts` + `capture-issue-507-gate.ts` + `.test.ts`, `capture-issue-771-selection.ts`, `capture-issue-964-anatomy.ts` + `capture-issue-964-evidence.test.ts`, `capture-issue-961-status.ts` + `capture-issue-961-evidence.test.ts` (their acceptance moves to this harness's frames as each surface lands; each retires with its surface) | — | The same screen ids as `prototype/screens.js` via seeded fixtures, the same gates as `capture.ts` (§8) and the flows; the test proves each gate can go red. |
+| 1 | **Shell: frame, rail strip, bar with beacons and camera controls, side column, status bar, dialog and receipt primitives, key map, board menu, host details** | `yard/Shell.tsx` ⁺, `YardBar.tsx` ⁺, `SideColumn.tsx` ⁺, `StatusBar.tsx` ⁺, `YardDialog.tsx` ⁺, `YardReceipt.tsx` ⁺, `yardKeys.ts` ⁺ (+ test: single keys inert while typing, Esc climbs one altitude), `BoardMenu.tsx` ⁺, `HostDetails.tsx` ⁺; edits `src/components/Viewer.tsx` (desktop mounts the shell; stops mounting `OrchestratorDock`, `AttentionIsland`, `AttentionToast`, `CornerStatus`), `ProjectRail.tsx` (icon strip, `[` expands; footers and header toggles stop mounting), `LimitsFooter.tsx` and `ResourcesFooter.tsx` (retired from the rail; the limits reader feeds the status chips), `runtime/DeploymentStatusPill.tsx` (a status chip) | `ProjectRail.dom.test.tsx`, `ProjectRail.firstRun.dom.test.tsx`, `LimitsFooter.dom.test.tsx`, `LimitsFooter.test.ts`, `ResourcesFooter.dom.test.tsx`, `ResourcesFooter.test.ts`, `Viewer.orchestratorDock.dom.test.tsx`, `Viewer.switching.dom.test.tsx` (desktop cases), `Viewer.attentionMount.test.ts`, `CornerStatus.dom.test.tsx`, `orchestrator/OrchestratorDock.dom.test.tsx`, `orchestrator/dockOpenState.dom.test.tsx`, `attention/AttentionIsland.dom.test.tsx`, `attention/AttentionToast.dom.test.tsx`, `attention/AttentionHost.dom.test.tsx`, `KeepAwakeControl.dom.test.tsx`, `SoundToggle.dom.test.tsx` (rows in the menu) | 0; mobile lane 1 (`Viewer.tsx`); automation-v2 9b (`ProjectRail.tsx`) | Frames `yard-rail`, `yard-degraded`, `yard-arrival`, `menu`, `host`, `keys`; the bar is 48 px and every control 44; dialogs take focus, wrap, return focus; the status chips open the account detail and Host details. |
+| 2 | **Yard model: clusters, packing, altitudes, the map, beacons, `n` order** | `yard/clusterModel.ts` ⁺ (+ test: the four kinds, claims, rank, hue, sizes, keycaps), `yardPack.ts` ⁺ (+ test: determinism, no overlap, a pinned rect as an obstacle, Release restores), `yardCamera.ts` ⁺ (+ test: MIN_Z from the tile floor, hysteresis, fit, keycap glide), `YardMap.tsx` ⁺, `Beacons.tsx` ⁺, `needsOrder.ts` ⁺; edits `scheme/useSchemeCamera.ts` (altitudes replace `LABEL_Z`, the floor), `scheme/layout.ts` (cluster geometry replaces the band; `NODE_W/ROOT_H/SLOT_*` go), `scheme/Minimap.tsx` (retired for `YardMap`), `scheme/offscreenClusters.ts` + `EdgeChips.tsx` (retired for `Beacons`), `scheme/spatialNav.ts` + `useSpatialNav.ts` (cluster-level arrows), `scheme/workerCollapse.ts` + `taskStacks.ts` + `WorkerStacks.tsx` + `TreeAside.tsx` (retired: quiet work is a tile), `scheme/placementHorizon.ts` (kept: the horizon ranks quiet), `src/components/attention.ts` + `attention/navigate.ts` (`n` walks the yard order) | `scheme/layout.test.ts`, `scheme/layout.lineage.test.ts`, `scheme/useSchemeCamera.test.ts`, `scheme/Minimap.render.test.tsx`, `scheme/offscreenClusters.test.ts`, `scheme/EdgeChips.dom.test.tsx`, `scheme/EdgeChips.hover.dom.test.tsx`, `scheme/spatialNav.test.ts`, `scheme/useSpatialNav.test.ts`, `scheme/workerCollapse.test.ts`, `scheme/taskStacks.test.ts`, `scheme/findFreeSlot.test.ts`, `scheme/currentWork.test.ts`, `scheme/focusFrames.test.ts`, `scheme/SchemeBoard.camera.dom.test.tsx`, `scheme/SchemeBoard.mapFraming.dom.test.tsx`, `scheme/SchemeBoard.mapStacks.dom.test.tsx`, `WorkerStacks.dom.test.tsx`, `attention.test.ts`, `attention/navigate.test.ts` | 1; automation-v2 9b and 12 (`scheme/layout.ts`, `offscreenClusters.ts`, `agentLinks.ts` pause readers) | Frames `yard`, `yard-crowded`, `yard-pinned`; the packing gates of §8; pan is transform-only; `n` order equals the side column's list; the map draws every cluster. |
+| 3 | **Yard surfaces: cluster wells, tiles, stations and loops, tree nodes, the seat cluster, pin by drag, the lift** | `yard/YardBoard.tsx` ⁺, `ClusterShell.tsx` ⁺, `Tile.tsx` ⁺, `StationNode.tsx` ⁺, `ConversationNode.tsx` ⁺, `LoopLayer.tsx` ⁺, `LiftPane.tsx` ⁺; edits `scheme/SchemeBoard.tsx` (renders clusters; the toolbar, the lasso and select modes, the task tool, the full-window overlay go), `scheme/nodes.tsx` (`NodesLayer`, `GroupsLayer`, `LoopsLayer`, `AgentLinksLayer`, `LiteNodeShell`, `FarLabel`, `MiniStackShell`, `StageSlotShell`, `DeckShell` retired), `scheme/expandedNode.ts` (the lift), `scheme/agentLinks.ts` (groups → clusters), `scheme/TasksLayer.tsx` + `TaskCard.tsx` + `TaskEdgesLayer.tsx` + `TaskStickyComposer.tsx` + `taskGeometry.ts` + `taskPlacement.ts` (retired: a task is a tag or a backlog row), `scheme/lasso.ts` + `useLasso.ts` + `selectionGesture.ts` + `bulkActions.ts` + `BulkActionBar.tsx` (retired), `scheme/SubagentBadges.tsx` + `SubagentTrayView.tsx` + `subagentBadge*.ts` + `subagentTray.ts` (retired: children are nodes), `scheme/GroupOverridePanel.tsx` (retired), `pipelines/StagePlaceholderPane.tsx` + `StageCompletedCard.tsx` + `StageStatusRow.tsx` + `PipelineStrip.tsx` + `PipelineHub.tsx` + `StageEdgeControls.tsx` (retired on the desktop: stations), `src/components/ProjectDashboard.tsx` (the desktop leaf mounts `YardBoard`; the floating create cluster, `ProjectViewTabs`, `TaskReadinessStrip`, `LaunchHistory` strip, `WorkerStacks`, the residual strip, `TaskPanel` and the `Switchboard` mount stop rendering on the desktop), `TaskReadinessStrip.tsx` (retired; `tasks/taskReadiness.ts` feeds the rank) | `scheme/SchemeBoard.selection.dom.test.tsx`, `SchemeBoard.stageOverlay.dom.test.tsx`, `SchemeBoard.pipelineComposition.dom.test.tsx`, `SchemeBoard.pipelineRegions.dom.test.tsx`, `SchemeBoard.builderReveal.dom.test.tsx`, `SchemeBoard.lineage.dom.test.tsx`, `SchemeOverlay.strip.dom.test.tsx`, `nodes.anatomy.render.test.tsx`, `nodes.dom.test.tsx`, `nodes.stageRow.dom.test.tsx`, `nodes.strip.dom.test.tsx`, `GroupsLayer.render.test.tsx`, `GroupOverridePanel.dom.test.tsx`, `GroupOverridePanel.render.test.tsx`, `AgentLinksLayer.render.test.tsx`, `agentLinks.test.ts`, `SubagentBadges.dom.test.tsx`, `SubagentBadgeAnchors.render.test.tsx`, `SubagentTrayView.dom.test.tsx`, `subagentBadgeAnchors.test.ts`, `subagentBadgeLayout.test.ts`, `subagentBadgeModel.test.ts`, `subagentTray.test.ts`, `TaskCard.dom.test.tsx`, `taskGeometry.test.ts`, `taskPlacement.test.ts`, `lasso.test.ts`, `selectionGesture.test.ts`, `bulkActions.test.ts`, `BulkActionBar.operatorGesture.dom.test.tsx`, `expandedNode.test.ts`, `pipelineRegionGeometry.test.ts`, `pipelineStageSurfaces.test.ts`, `pipelineAnchor.test.ts`, `stageGraphLayout.test.ts`, `directReviewBoardComposition.test.ts`, `renameRequest.test.ts` (rename lives in the chat menu), `pipelines/PipelineStrip.dom.test.tsx`, `PipelineStrip.render.test.tsx`, `PipelineStrip.test.ts`, `PipelineHub.dom.test.tsx`, `StageEdgeControls.dom.test.tsx`, `StagePlaceholderPane.dom.test.tsx`, `stageCardAria.render.test.tsx`, `pipelinePlaceholderStages.test.ts`, `ProjectDashboard.selection.dom.test.tsx`, `ProjectDashboard.shelf.dom.test.tsx`, `ProjectDashboard.flash.dom.test.tsx`, `ProjectDashboard.searchLanding.dom.test.tsx`, `ProjectDashboard.launchClaim.dom.test.tsx` (the draft node), `ProjectDashboard.empty.dom.test.tsx`, `ProjectDashboard.test.ts`, `TaskReadinessStrip.dom.test.tsx`, `LaunchHistory.dom.test.tsx`, `SelectedContextBadge.render.test.tsx`, `cardAnatomy.render.test.tsx`, `CardStatusBadge.render.test.tsx` (the phrase recipe moves to the node) | 2; mobile lane 2 (`ProjectDashboard.tsx`); automation-v2 9b (`scheme/**`, `ProjectDashboard.tsx`) and 12 (`pipelines/**`) | Frames `yard-block`, `yard-lift`, `yard-crowded-block`, `yard-noseat`; every node one 44 px target at block altitude; a station shows role, id, engine, model, reasoning, access, pips; every fail edge draws its target and budget; a drag pins with a receipt and Release; Enter lifts to a readable pane at ≥ 100 %, Esc lowers it, focus returns to the board. |
+| 4 | **The inspector: pipeline record, findings and answer, vertical stage graph with attempts, actions through today's PATCH route, the stage editor on the automation-v2 payloads, tree and seat inspectors, the rotate dialog** | `yard/Inspector.tsx` ⁺, `PipelineInspector.tsx` ⁺, `StageGraph.tsx` ⁺, `StageEditor.tsx` ⁺ (renders now; `edit-stage`, `note`, `answer` reach the engine when automation-v2 slice 10 admits them, and meet today's refusal in the receipt until then), `SeatInspector.tsx` ⁺, `RotateDialog.tsx` ⁺; edits `pipelines/VerdictPopover.tsx` (the findings block moves into the inspector), `pipelines/PipelineEditor.tsx` (retired on the desktop), `pipelines/pipelineModel.ts` (phrases), `orchestrator/OrchestratorPanel.tsx` (the launch module renders inside the rotate dialog), `orchestrator/IncumbentHeader.tsx`, `orchestrator/OrchestratorPanelToggle.tsx` (retired) | `pipelines/VerdictPopover.render.test.tsx`, `pipelines/createDraftPipeline.dom.test.tsx`, `pipelines/pipelineModel.test.ts` (phrases), `orchestrator/OrchestratorPanel.dom.test.tsx`, `orchestrator/incumbent.test.ts`, `orchestrator/orchestratorAnswerCache.dom.test.tsx`, `tasks/taskRelations.test.ts` (the task chip), `tasks/taskReadiness.test.ts` + `taskReadiness.restart.test.ts` (the rank; kept green, re-pointed) | 3; automation-v2 lane G (`pipelines/**`) | Frames `yard-inspect`, `rotate`; Answer / Skip / Pause / Archive / Start / Re-run act with their inverse; every attempt with a conversation has `open ›`; the editor takes focus on open; Rotate lands on the successor's conversation. |
+| 5 | **The conversation, compact: one header row, the feed as it is, one composer box, the settings sheet, the send slot** | `yard/ChatStage.tsx` ⁺, `ChatHeader.tsx` ⁺, `SettingsSheet.tsx` ⁺, `ConversationMenu.tsx` ⁺; edits `src/components/BranchPane.tsx` (desktop: one header row, the meta row folds in, no inline controls), `AgentControlStrip.tsx` (desktop: rows in the sheet's Session group; Stop is the slot), `TaskHeader.tsx` (`ProcessStatusControls`: Kill in the menu, direct), `LogFeed.tsx` (desktop: no `live tail` pill, no status bar; the working line stays), `TurnStatusBar.tsx` (desktop: none), `ComposerBar.tsx` (one box, the tools row inside, the slot), `TmuxComposer.tsx` (the slot's states from the runtime), `RuntimePill.tsx` (retired for `SettingsSheet`), `EffortPills.tsx` (retired on the desktop), `feed/QuestionCard.tsx` (keycaps on the options) | `BranchPane.render.test.tsx`, `BranchPane.liveness.dom.test.tsx`, `BranchPane.relations.dom.test.tsx`, `BranchPane.lineage.render.test.tsx`, `BranchPane.stageTitle.render.test.tsx`, `BranchPane.superseded.render.test.tsx`, `BranchPane.spawn.render.test.tsx`, `BranchPane.paneTones.test.ts`, `AgentControlStrip.action.test.tsx`, `AgentControlStrip.dom.test.tsx`, `AgentControlStrip.interruptNote.dom.test.tsx`, `agentCapabilities.test.ts`, `TaskHeader.killConfirm.dom.test.tsx`, `ProcessStatusControls.action.test.tsx`, `ComposerBar.dom.test.tsx`, `ComposerBar.attachmentGate.dom.test.tsx`, `ComposerBar.fileAttachments.dom.test.tsx`, `TmuxComposer.dom.test.tsx`, `TmuxComposer.focus.dom.test.tsx`, `TmuxComposer.liveRefreshFocus.dom.test.tsx`, `TmuxComposer.sendReadiness.dom.test.tsx`, `TmuxComposer.voiceButton.dom.test.tsx`, `TmuxComposer.deliveryNotice.dom.test.tsx`, `TmuxComposer.deadRecovery.dom.test.tsx`, `RuntimePill.dom.test.tsx`, `RuntimePill.persistence.dom.test.tsx`, `EffortPills.slot.dom.test.tsx`, `TurnStatusBar.dom.test.tsx`, `LogFeed.liveToolRows.dom.test.tsx`, `LogFeed.startingWindow.dom.test.tsx`, `feed/QuestionCard.dismiss.dom.test.tsx`, `feed/QuestionCard.delivery.dom.test.tsx`, `feed/actionGeometry.dom.test.tsx`, `AttachTerminalDialog.action.test.tsx` + `.dom.test.tsx` (Copy resume command) | 1; mobile lanes 3, 4 and 5 (`BranchPane.tsx`, `AgentControlStrip.tsx`, `TaskHeader.tsx`, `ComposerBar.tsx`, `RuntimePill.tsx`, `TmuxComposer.tsx`, `LogFeed.tsx`, `TurnStatusBar.tsx`, `feed/QuestionCard.tsx`) | Frames `chat-waiting`, `chat-working`, `chat-settings`, `chat-menu`, `chat-seat`, `chat-limit`, `chat-killed`; the 48 px header; the feed unchanged pixel-for-pixel below the header; the sheet one level with every group visible and Esc returning focus to the chip; the slot's four states; Tab order; a question answers on click and on its digit. |
+| 6 | **Accounts stage: every account, both meters, the detail with the burndown, pace and burnout** | `yard/AccountsStage.tsx` ⁺, `AccountRow.tsx` ⁺, `AccountDetail.tsx` ⁺, `Burndown.tsx` ⁺ (the chart with the ideal line, projection and burnout zone, on `src/lib/burndown.ts`'s `computePace`); edits `src/components/AccountsPanel.tsx` (desktop: the stage; the popover container goes), `BurndownPanel.tsx` (retired on the desktop), `EngineAccountSwitch.tsx` (retired: the status chips), `AccountBadge.tsx` (opens the detail), `ProjectAccounts.tsx` (a row in the detail) | `AccountsPanel.dom.test.tsx`, `AccountsPanel.render.test.tsx`, `BurndownPanel.dom.test.tsx`, `EngineAccountSwitch.dom.test.tsx`, `EngineAccountSwitch.test.tsx`, `AccountBadge.dom.test.tsx`, `AccountBadge.render.test.tsx`, `ProjectAccounts.render.test.tsx`, `operatorCredential.dom.test.ts` (sign-in rows) | 1; mobile lane 9 (`AccountsPanel.tsx`, `AccountBadge.tsx`, `EngineAccountSwitch.tsx`) | Frames `accounts`, `account-detail`, `account-signed-out`; meters = 2 × rows; every row opens a detail with the chart and the pace; Switch carries Switch back; Use one reset shows its count; a signed-out row's primary action is Sign in. |
+| 7 | **The field** | `yard/FieldStage.tsx` ⁺ (regions of tiles on the lane-2 packer); edits `src/components/OverviewBoard.tsx` (retired on the desktop) | `OverviewBoard.render.test.tsx`, `OverviewBoard.catalog.render.test.tsx`, `OverviewBoard.firstRun.dom.test.tsx`, `OverviewBoard.targets.dom.test.tsx`, `attention/returnProjectMemory.test.ts` | 2, 3; automation-v2 9b (`OverviewBoard.tsx`) | Frame `field`; a tile enters its yard on that cluster; the side column lists the projects; the first run (no project) keeps its create path. |
+| 8 | **Search in the dialog primitive; switching retired** | edits `src/components/search/GlobalSearch.tsx` (desktop geometry: the dialog primitive, 760 px, the scope control); delete `Switchboard.tsx`, `SwitchCard.tsx`, `CornerStatus.tsx`, `src/hooks/useSwitchboardData.ts`, `ConversationList.tsx`, `BoardSearchEntry.tsx` | `search/GlobalSearch.dom.test.tsx` (geometry cases), `SwitchCard.anatomy.render.test.tsx`, `SwitchCard.attention.render.test.tsx`, `SwitchCard.status.render.test.tsx`, `ConversationList.dom.test.tsx`, `BoardSearchEntry.dom.test.tsx`, `BoardHistoryControls.dom.test.tsx` (undo/redo move to the receipt) | 1, 3 | Frame `search`; `/` opens with the field focused; Escape returns focus to the trigger; no desktop surface imports a deleted file. |
+| 9 | **Retire and document** | delete the files the rows above retire once no surface imports them; update `docs/design/viewer-design-system.md` §3.1–3.3 (the yard, the side column, the one header row) and `docs/design/ux-audit-2026-08.md`'s follow-up list | the tests of the deleted files | 3, 4, 5, 6, 7, 8 | Type-check green; `bun test` by path on every lane's files green; the design-system doc names the yard. |
 
-The five requirements the operator added when the rework was commissioned, and where each one is met:
+Order: 0 → 1 → 2 → {3, 5, 6, 7} → 4 → 8 → 9. Lanes 3, 5 and 6 wait for the mobile lanes that own their files; 2, 3, 7 wait for automation-v2's retirement slice on the files it names, or take those files in the same lane by agreement. Review per lane by a fresh reviewer against the pinned quote and the frames. The desktop and the phone share `stateBits`, the badge recipe and the vocabulary, so a lane that lands on one form factor leaves the other untouched.
 
-| Wanted | Delivered here | Proven by |
+---
+
+## 10. Validation against the requirement
+
+| The operator's words | Delivered | Proven by |
 | --- | --- | --- |
-| 1 · pipeline stages as a legible, crafted stage graph — current stage, pass and fail edges, review-round budget as pips, per-attempt verdict pips, role/engine/model/effort per node — never a plain strip | §4.6: a vertical spine of stations with per-attempt pips, fail edges as bracketed loops carrying their round budget, the whole definition on every node, the attempt list on demand, the 1280 ladder | frames `pipeline`, `pipeline-running`, `pipeline-long` (seven stages, two loops, one traversed twice) at three widths in both schemes; the gate that `.graph` never scrolls sideways and every node and loop carries its fields |
-| 2 · every account at once, each with a mandatory usage bar, each row clickable to a detail of consumption, burn rate and reset/burnout timing | §4.5: one row per account with both windows as meters (empty ones for a signed-out account), and `#/accounts/<engine>/<id>` with the burndown, `burning at n % per hour`, `runs out at 16:40` or `lasts to the reset`, today by hour, and the actions | frames `accounts`, `account-detail`; the gate `.arow .meter === 2 × rows`; the flow that clicks a non-active row, reads its pace, switches with an inverse, and Escapes back onto that row |
-| 3 · a kanban where a task, its worker and its pipeline are one visual thread | §4.12: five readiness columns of cards, each card a task with its worker chip and its pipeline chip carrying the stage ladder in miniature; drag to change status with Undo | frames `kanban`, `kanban-crowded`; the flows that open the worker and the pipeline from the chips and drag a card to Done |
-| 4 · one distinctive, opinionated identity inside the shared tokens, checked against the generic-AI tells | §5.0: the design plan, its named palette from `tokens.css`, the four-plane elevation ladder, the tell-by-tell check, the two revisions the plan itself failed, and the transit line as the one place boldness is spent | every frame; the gates that keep the ladder honest (no shadow on a row, no ALL-CAPS, hairline meta) and the self-critique in §5.0 |
-| 5 · pipelines on the map as groups of stage nodes among loose conversations, auto-arranged by default and honouring an operator's move with an easy release | §4.11: groups with a horizontal spine, unstarted stages folded into one ladder tile, a loose band, an auto layout that overlaps nothing, and pinning by drag with Release and Release all to auto | frames `board-map`, `map-crowded`, `map-pinned`; the flow that asserts the auto layout overlaps nothing, drags a group, asserts the pin and the re-flow, and releases it |
+| "the board is much less nice than now, its too linear, i want it to be 2d or even 3d" | §3: one canvas, four altitudes, clusters as wells with their own hue, nodes on spines, the lift as the depth move; nothing is a column | frames `yard`, `yard-block`, `yard-lift`; the gates that tiles alone show at yard altitude and nodes at block; the lift flow |
+| "fast rps to navigate" | §3.4: transform-only camera, keycaps, `n`/`N`, `0`/`f`, arrows, the map, beacons | the pan flow's zero-mutation gate, the keycap glide flow, the `n`/`N` flow, the zoom/hysteresis flow |
+| "to see all work grouped around in clusters logical, maybe graph" | §3.2: seat, pipeline, thread, tree; the pipeline is a graph (stations, pass edges, fail loops with budgets); the field is the graph of projects | frames `yard`, `yard-crowded`, `field`; the no-overlap and rank gates |
+| "this design of the list of the tasks is shitty" | §3.2, §4.1: a task is the header of its pipeline or a tag on its thread, spatially beside its worker; tasks without a worker are the backlog in the side column with Assign | frames `yard`, `yard-tray`; the assign flow (a thread appears, Undo removes it) |
+| "account page is shit" + every account visible with a mandatory bar and a clickable detail of consumption, burn rate and reset/burnout | §4.5: every account of both engines in one list, two meters each (empty on a signed-out one), the detail beside it with the burndown, pace and burnout | frames `accounts`, `account-detail`, `account-signed-out`; the accounts flow (2 × rows meters, every row opens a chart or the signed-out line, Switch back) |
+| "зараз чат гарний але меню налаштувань і вводу не дуже, в тебе більш компактне вийшло" | §4.4: today's feed and question card intact; one header row and one composer box (compact); the settings sheet one level; the send slot | frames `chat-waiting`, `chat-working`, `chat-settings`; the settings flow, the slot flow, the question flow, the Tab-order gate |
+| stage graph with per-attempt pips and fail loops | §3.2 stations and loops on the yard; §4.2 the vertical graph in the inspector with attempts | frames `yard-block`, `yard-inspect`; the station gate |
+| craft inside the shared tokens, none of the generic-AI tells | §2, §5 | every frame; the ALL-CAPS and banned-phrase gates |
+| auto-layout by default, drag pins, release | §3.3 | frame `yard-pinned`; the pin flow (no overlap after the pin, Release restores the exact layout) |
 
 ---
 
-## 10. Over-engineering pass on this design
+## 11. Over-engineering pass on this design
 
-Cut from the first draft before it reached the prototype: a tabbed stage (one stage plus one pinned pane is the desktop's whole answer to "two things at once"); a resizable, rearrangeable dashboard (fixed widths per frame keep the gates provable and the frame learnable); a notification centre (the column is the queue; a banner slot is the only announcement); a command palette (`/` plus eleven single keys); inline transcripts on the pipeline stage (the attempt's `open ›` is one click); a second navigation model for the map (the map is a view of the same stage; tiles open the same routes); live conversation previews on the map (the exact thing the current board does at 21 %). What remains is one frame, one list, one stage, one dialog primitive, one receipt, one state function shared with the phone, and a pipeline stage that draws the automation record as it will be. A round that removes more is a successful round.
-
-The rework round removed more: the map's zoom tools and its empty minimap (they served a canvas this design does not have), the payload hints beside the actions and under the editor (documentation for the implementer on a product surface; the contract stays in §4.6's mapping table), the empty stage's key legend (`?` already owns it), the composer's permanent `Enter send` row (the placeholder says it once), the meta tagline, and — during the rework itself — the map's fail-edge arc, which crossed the nodes it passed once the spine wrapped. Four editor groups that were always open became disclosures, so the editor opens on what is edited most. Nothing was added that a gate does not check.
-
----
-
-## 11. Critique round 1 — every finding, and what the rework did with it
-
-The independent critique is `critique.md`. Severity is the critique's: P1 changes
-what the product is, P2 how it behaves on an ordinary day, P3 is cheap and
-visible. Every finding is applied. Four were applied in a way the critique
-itself offered as an alternative, or in a way its own acceptance forced; those
-say so and why.
-
-| # | Applied | Where it landed |
-| --- | --- | --- |
-| F1 · P1 · the stage strip must become a legible graph | yes | §4.6 and `graph()` in `app.js`: a vertical spine of stations, per-attempt pips, fail edges as bracketed loops with their round budget as pips, the whole definition on every node, an attempt list on demand, the 1280 ladder beside the editor. New frame `pipeline-long` (seven stages, two fail edges, one loop traversed twice) at all three widths. **One departure:** the critique offered "a wrapped grid at ≥ 1600" as an alternative; the spine is one column at every width, because a wrapped grid breaks the line's continuity, which is the whole device. The acceptance is "all stages visible without **horizontal** scroll at 1280, 1440 and 1920, with and without the editor open", and the spine holds it at every width. A seven-stage record is 721 px of spine and the 1280 sheet is ~620 px, so `pipeline-long` scrolls **down** there by one node — the axis the operator is already scrolling, and the axis a wrapped grid would have traded for a broken line. |
-| F2 · P1 · every account with a mandatory bar and a detail | yes | §4.5: one row recipe for all five accounts, both windows as meters (empty on the signed-out one), and `#/accounts/<engine>/<id>` with the burndown, the pace, the depletion clock, today by hour and the actions. New frame `account-detail`. The acceptance's second half — the composer chip's Account group reuses the row recipe *with the meters* — was unmet until the second pass through the frames: the compact rows in the stage editor and the composer printed `38% left` as prose. They carry the bar, and a gate holds every `.arow.compact` to it. |
-| F3 · P1 · a kanban where task, worker and pipeline are one thread | yes | §4.12: `#/kanban` (`k`, `t`), the five readiness sections, the card with its worker chip and its pipeline chip carrying the stage ladder as pips, `＋ Assign` when neither exists, drag between columns with Undo. New frames `kanban`, `kanban-crowded`. The second pass found the chip ellipsing the state it exists to carry (`r…`, `nee…`) in a 150 px column; the chip is three rows now and the state wraps instead, gated so no chip may clip (§5.0). |
-| F4 · P2 · the empty stage is a placard | yes | §3.2: the landing stage is the board when the project has tasks, else the first thing that needs the operator, else the seat. The key legend left; `?` owns it. New frame `board-notasks`. |
-| F5 · P1 · focus dies after `n`, `Enter` and every re-render | yes | §3.5: a stage takes focus on open (the question's first option, the Answer field, the editor's first control, the composer, the first row), every re-render restores the element by its identity, and `Esc` is the bridge from any field back to the column's current row. `i` focuses the composer, `1`–`9` pick an option, `Enter` on a node opens its editor. **One resolution:** the critique's own acceptance wants `1` to work *and* the composer focused. Both hold only if the option list — not the composer — takes focus when a question is open, and `n` is walked as `n · Esc · n`. Single keys never fire inside a text field: text is text. A gate on every frame asserts the active element is never the body. |
-| F6 · P2 · the counts disagree | yes | One `counts(project)` derived from the same lists the column renders; the seat does not count as working; the fixture's typed `needs` / `working` / `total` are gone. A gate compares the rail row, the column header and every overview card against it on every frame. |
-| F7 · P2 · the column lists the same thing twice | yes | §3.2: Needs you wins, Pipelines lists only what it has not shown, and a pipeline folds its live attempt as an indented child row unless the queue already has it. Gate: no `data-go` twice in `.col-body`. |
-| F8 · P2 · at 1280 the crowded column hides everything below the queue | yes | Sticky section headers that stack at the top edge, Recent folded on a column over one screen, and a header sentence that is one line at every width. **The alternative taken:** the critique offered glyph counts (`9 ⚠ · 10 ● · 10 ⟐`) *or* dropping the pipelines count; the pipelines count is dropped (and `working` too at 1280), because the Pipelines section header already carries it and a legend of glyphs is a second vocabulary to learn. |
-| F9 · P2 · the stage editor hides its primary action | yes | §4.6: a bounded editor pane with its own scroller and a footer (Save · Restart · Cancel and the note) that never leaves the viewport; Role · Engine, Model · Reasoning, Access · Sandbox two to a row; the account as F2's row recipe; the four secondary groups as disclosures. Gate: no segmented label wraps, no control overlaps. The second pass found the squeeze had simply moved axis — at 1280 the editor stacks under the record, which left it 142 px for 790 px of controls — so the linked task and the change log stand down while it is open, gated at a 300 px body with the footer inside the viewport. |
-| F10 · P2 · attempt and round history is unreadable | yes | §4.6: a node expands into `attempt n · state · sha · k findings · open ›`, and the findings card folds `round 1 · 2 findings ›` open in place. |
-| F11 · P2 · the map clips, drowns in ghosts, carries an empty minimap | yes | §4.11: groups sized to the map, unstarted stages folded into one ladder tile, the loose band, no zoom tools. **The alternative taken:** the minimap is removed rather than given outlines — fit-to-width plus vertical scroll is the whole navigation, and a second map of the map is the accessory to leave at home. |
-| F12 · P3 · search results overflow into the meta column | yes | §4.7: two lines, meta right-aligned on line one, the snippet clipped on line two. Gate: the snippet is clipped and never intersects the meta. |
-| F13 · P3 · the seat panel promotes Rotate | yes | §4.4: three faded lines of the mandate with an inline `Edit ›`; Edit the mandate and Rotate both secondary and 44 px; the duplicated badge gone. |
-| F14 · P2 · the overview pads quiet projects | yes | §4.10: active projects get cards of up to eight rows, quiet ones collapse into one `Quiet · n` strip. New frame `overview-crowded`. |
-| F15 · P3 · composer hint clutter, the pinned pane's missing menu | yes | The hint moved into the placeholder; the pinned pane's header carries the same `⋯`. |
-| F16 · P3 · the fixture lies about which conversation belongs to which pipeline | yes | `p1`'s plan attempt is its own conversation (`Design the export endpoint`), `p2`'s verify stage has its own, and `c5` stays loose. Every attempt's conversation is unique per pipeline. **One more found while drawing it:** `p1`'s review had a fail edge to a stage `fix` that does not exist in `p1`; a dangling edge draws nothing, so it now returns to `build`, which is what that pipeline actually does. |
-| F17 · P3 · the rail default at 1280 contradicts the doc | yes | Collapsed under 1440, expanded at 1440 and above; §3.4, `screens.js` and the gate all say it. |
-| F18 · P3 · "attempt" versus "round" | yes | An attempt is one run of a stage, a round one traversal of a fail edge. The findings title is `Reviewer · attempt 2 · round 2 of 3 · 2 findings`, the node says `2 of 3 rounds`, the change log says `attempt 2 failed · round 2 of 3 used`. Gate: the findings title must match that shape. |
-| F19 · P3 · OVER-BUILT: payload hints, the tagline, zoom tools | yes | All removed (§10). Gate: no `PATCH`, `expectedRevision` or JSON-shaped hint anywhere on a stage, no zoom control, no minimap. The API contract stays in §4.6's mapping table and in lane 6b's acceptance, which is where an implementer reads it. |
-| F20 · P3 · a current-project arrival makes no visible move | yes | §4.8: the row appears with its edge fading in once and the counts tick once, still under reduced motion, and no banner. New scenario and frame `board-arrival-here`. |
-
-**The critique's §10 "must not be regressed" list holds.** The frame, the column
-recipe, `stateBits` and its precedence, the badge recipe, the receipt with its
-inverse, no confirmation anywhere, the composer box and its slot, the question
-card, the draft surviving a switch, every pipeline editing mechanic and the
-change log, the template picker, the accounts content from #1424, the seat and
-its rotate dialog, the split pane at ≥ 1600, search and its keys, both schemes
-token-exact, 44 px targets, no overlapping controls, no sideways scroll, and
-the banned-word list — each still has its frame or its flow in `capture.ts`,
-and the run that produced this revision was green on all 278 frames and every
-flow.
+Cut from the first draft before it reached the prototype: a force-directed layout (a shelf packer is enough and keeps the pin rule honest); edges between clusters (no relation exists to draw); a perspective camera (the lift and the wells give the depth); a second navigation model for the field (it is the same board one altitude up); the rejected prototype's kanban, column and map (three surfaces for one model); zoom buttons on the canvas (four controls in the bar); a resizable side column. What remains is one canvas, one packer, one camera, one cluster recipe at three sizes, one inspector, one chat, one accounts stage and one dialog primitive. Against the current product, the design deletes more than it adds: the rows of §6 retire fourteen scheme modules, the strip and hub, the dock, the island, the switchboard and the rail footers. A round that removes more is a successful round.
