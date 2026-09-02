@@ -23,7 +23,7 @@ The operator asked for "одна унифицированная штука" that
 
 Option 3. The pipeline record is the automation record. Its name stays in code and in the tools (`create_pipeline`, `pipeline_action`, `get_pipeline`, `list_pipelines`); the concept is called an automation in prose only.
 
-The `review-loop` stage kind, the embedded flow, the headless reviewer process and the flow record retire. The one flow mechanism that survives is the structured relay into an existing conversation (`src/lib/flows/engine.ts:381`), lifted into the pipeline engine as attempt continuation for operator answers and provider-throttle resumes.
+The `review-loop` stage kind, the embedded flow, the headless reviewer process and the flow record retire. The one flow mechanism that survives is the structured relay into an existing conversation (`src/lib/flows/engine.ts:381`), lifted into the pipeline engine as attempt continuation for provider-throttle resumes (README §3.6). Operator answers spawn a fresh attempt from the worktree: a parked attempt's host is reaped, so there is no conversation to continue.
 
 ## Consequences
 

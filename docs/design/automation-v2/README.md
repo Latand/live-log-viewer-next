@@ -10,7 +10,9 @@ Working translation (mine, for reviewers who do not read Russian): "So we have n
 
 Standing prior directive, 2026-07-17, issue #340: flows and pipelines "are conceptually the same thing: an editable list of agents (roles) that gets launched as a unit. They must become one feature", with the acceptance "one UI entry point, one API surface, one state store".
 
-This design was verified against repository commit `d79b463e` (the tip of `main` on 2026-09-02). Every `file:line` below refers to that commit. Usage figures were read from the operator's state store on 2026-09-02 and cover records created between 2026-08-19 and 2026-09-02.
+This design was verified against repository commit `d79b463e` (the tip of `main` on 2026-09-02). Every `file:line` below refers to that commit; the `src/` tree at the lane head `f5666310` is byte-identical to it, so every citation holds at both. Usage figures were read from the operator's state store on 2026-09-02 and cover records created between 2026-08-19 and 2026-09-02.
+
+Revision 2 (2026-09-02) answers review round 2 of this lane: every file has one owning lane and §6 says which (§6.1); each slice names the gate that really keeps it behind current behaviour, and the admitted-action constant is that gate (§6.2); `answer` always spawns a fresh attempt because the reaper stops a parked host, and ADR-0003 says the same (§3.6); attempts bind their definition at the spawning transition, which decides `appliesFromAttempt` for the spawn-wait window too (§3.2, ADR-0002); and the mutation log has a named cap with compaction into the lifecycle journal (§3.3).
 
 ## Decision in one paragraph
 
@@ -143,8 +145,11 @@ Additions, as an illustrative sketch over the current types (`types.ts:248-303`)
 type Pipeline = /* existing fields */ & {
   /** Increments on every accepted mutation; the fence for definition edits. */
   revision: number;
-  /** Append-only, attributed. Bounded by validation. */
+  /** Append-only, attributed. At most MAX_PIPELINE_MUTATIONS entries; at the
+      cap the oldest are compacted into the lifecycle journal (§3.3). */
   mutations: PipelineMutation[];
+  /** Highest seq compacted out of `mutations`; null before the first compaction. */
+  mutationsCompactedThrough: number | null;
   /** Replaces state: "paused" and pausedState. A parked or running record
       stays parked or running while paused; the tick simply does not act. */
   paused: { at: string; actor: MutationActor } | null;
@@ -166,11 +171,15 @@ type PipelineMutation = {
   revision: number;
   action: PipelineAction;
   stageId: string | null;
-  /** The request payload, bounded like a stage prompt. */
+  /** The request payload. A text field over 1,000 characters is stored as
+      `{ digest, length }`: the current text lives on the stage, and every text
+      that ran lives on the attempt that ran it (§3.2). */
   payload: Record<string, unknown>;
   /** What the engine did with it. */
   effect: "applied" | "pending-next-attempt" | "restarted-attempt";
-  /** The attempt that will be the first to run under this mutation, once known. */
+  /** The first attempt of `stageId` to run under this mutation, decided when
+      the mutation is accepted by the binding rule in §3.2. Null when the
+      mutation has no stage. */
   appliesFromAttempt: number | null;
 };
 
@@ -191,14 +200,24 @@ type PipelineStage = /* existing fields */ & {
   /** Revision at which prompt, role, engine, model, effort, access, sandbox,
       outputs or account last changed. */
   definitionRevision: number;
-  /** Text attached by `note`, consumed by the next attempt of this stage. */
+  /** Pending notes attached by `note`, moved onto this stage's next attempt
+      when it binds (§3.2). At most MAX_PENDING_STAGE_NOTES, each bounded like
+      a stage prompt. */
   notes: Array<{ seq: number; text: string }>;
 };
 
 type PipelineStageAttempt = /* existing fields */ & {
-  /** The stage definition this attempt runs. Set when the attempt is created;
-      the prompt is rendered from it, never from the live stage. */
-  definition: { revision: number; promptDigest: string };
+  /** The stage definition this attempt runs, bound in the transaction that
+      moves it from pending to spawning (§3.2). The prompt is rendered from
+      these fields plus `effectiveRole`, never from the live stage. Null on an
+      attempt that has not bound yet and on attempts migrated from schema 5. */
+  definition: {
+    revision: number;
+    "prompt": string;
+    outputs: string[];
+    sandbox: PipelineSandbox;
+    account: string | null;
+  } | null;
   /** Branch head when the attempt was created and when it settled. */
   headAtStart: string | null;
   headAtSettle: string | null;
@@ -211,21 +230,28 @@ type PipelineStageAttempt = /* existing fields */ & {
     | { kind: "host-rebinding"; since: string; until: string }
     | { kind: "verdict-recovery"; since: string; until: string; checks: number }
     | null;
-  /** Notes consumed by this attempt, by mutation seq. */
-  notes: number[];
+  /** Notes this attempt took from the stage when it bound, rendered into its
+      prompt as a titled block. */
+  notes: Array<{ seq: number; text: string }>;
   /** How this attempt started, when it is a re-run. */
   rerun: { of: number; from: "worktree" | "last-passed" | { checkpoint: string } } | null;
   /** Set when this attempt continues the previous attempt's conversation
-      and spawns no new one (§3.6). */
+      after a provider throttle and spawns no new one (§3.4, §3.6). */
   continuesAttempt: number | null;
 };
 ```
 
 `controllerWait` (`types.ts:184-188`) and `verdictRecovery` (`types.ts:125-136`) stay as the bookkeeping behind `waiting.kind = "host-rebinding"` and `"verdict-recovery"`; the new field is the one place a reader looks. `pausedState`, `expectedReviewHeadSha`, `reviewHeadSha`, `reviewFlowSync` and `flowId` become read-only history on migrated records and are not written for new ones.
 
-### 3.2 Attempts snapshot definitions
+### 3.2 Attempts bind their definition when they leave `pending`
 
-An attempt is created from the stage definition at that moment (`engine.ts:1273-1307` already clones `effectiveRole`); the change is that the prompt is rendered when the attempt is created and its digest is stored, so the live stage can change afterwards without touching the attempt. A running attempt is defined by its own record, never by the stage it came from. That is the whole basis for "never applied under a running attempt silently": there is nothing to apply to.
+Today an attempt clones `effectiveRole` when it is created (`engine.ts:1283`) but renders its prompt from the live stage at spawn (`engine.ts:1955-1960`) and reads the stage's account pin there too (`engine.ts:1969`). The new rule: **an attempt binds its definition in the record transaction that moves it from `pending` to `spawning`** (`engine.ts:1945-1949`), the instant before its first `spawnAgent` call. Binding copies the stage's prompt template, declared outputs, sandbox, account pin and `definitionRevision` onto the attempt, re-clones `effectiveRole`, and moves the stage's pending notes onto the attempt. From then on the prompt is rendered from attempt-owned fields, the attempt's own `input`, and the two record fields pinned at start (`task` and `spec`, editable only in a draft, `engine.ts:3967`); the live stage is never read again for that attempt. Handshake retries inside the same activation (`engine.ts:1998-2031`) and an attempt a controller wait bounced back to `pending` (`engine.ts:2040-2043`) keep their binding: the first send may already have reached a host, and re-rendering from a changed stage would be the silent change this rule exists to prevent.
+
+The size precedent is `effectiveRole.promptScaffold`, already cloned per attempt today (`engine.ts:1283`); the stage prompt adds at most `MAX_STAGE_PROMPT_LENGTH` (8,000 characters, `limits.ts:7`) per attempt. Storing only a prompt digest was considered and cut: a digest cannot re-render a handshake retry.
+
+`appliesFromAttempt` follows from the binding rule and is decided when the mutation is accepted. If the stage has an attempt that has not bound (state `pending` with `definition: null`), the mutation applies to that attempt and the response names it. Otherwise it applies to the next attempt the stage creates, numbered one past the last, whether the last is running, bounced into a wait, or settled. This covers the spawn-wait window a booked controller wait (`engine.ts:1933-1937`) or an account-lock wait (§3.4) opens: a note or an edit accepted while the attempt is still unbound reaches it; one accepted after it bound reaches the attempt after, and the response says so either way. A caller who wants a change to reach a bound attempt says `restart: true` (§3.3).
+
+A running attempt is therefore defined by its own record, never by the stage it came from. That is the whole basis for "never applied under a running attempt silently": there is nothing to apply to.
 
 ### 3.3 Mutation API
 
@@ -240,15 +266,17 @@ All mutations go through `pipeline_action` and `PATCH /api/pipelines/<id>` with 
 | `set-edge` | `stageId`, `edge`, `to`, `maxRounds?` | any non-terminal state, ran or not, traversed or not | the running attempt keeps its `activatedBy`; the new edge applies at its next verdict | required |
 | `rerun-stage` (replaces `retry-stage`) | `stageId`, `from: "worktree" \| "last-passed" \| { checkpoint }`, `note?`, `discardWorktree?` | `needs_decision`, `completed` (reopens the record), or `running` when no other attempt is mid-turn | refused while any attempt is mid-turn (host reports an active turn) | optional |
 | `checkpoint` | `name` | any non-terminal state, no attempt mid-turn | the controller commits the worktree (`git add -A` for read-write, declared outputs for read-only, `git.ts:123-141`) and records `{name, sha}` | optional |
-| `note` | `stageId`, `text` | any non-terminal state | appended to `stage.notes`; consumed by the next attempt and rendered as a titled block in its prompt | optional |
-| `answer` | `text` | the cursor stage is parked in `needs_decision` | see §3.6 | optional |
+| `note` | `stageId`, `text` | any non-terminal state; at most `MAX_PENDING_STAGE_NOTES` pending on the stage | appended to `stage.notes`; the stage's next attempt to bind takes it (§3.2) and the response names that attempt in `appliesFromAttempt` | optional |
+| `answer` | `text` | the cursor stage is parked in `needs_decision` | n/a: a parked attempt is settled and its host is not held; `answer` spawns attempt n+1 from the current worktree with the question and the text as a note (§3.6) | optional |
 | `pause`, `resume` | none | as today | sets or clears the `paused` flag; parked stays parked | none |
 | `skip-stage` | none | `needs_decision` | advances along the pass edge without resetting the worktree | none |
 | `start`, `update-draft`, `set-position`, `link-task`, `unlink-task`, `set-src`, `delete`, `close` | as today | as today | unchanged | none |
 
 Round limits: `set-edge` with `maxRounds` on a fail edge raises or lowers the budget at any time; the derivation stays `failEdgeRoundsUsed` (`engine.ts:1684-1689`), so lowering below the used count parks on the next fail verdict with the same detail as today. Swapping the next reviewer is `edit-stage` on the reviewer stage between rounds; nothing separate is needed.
 
-Every mutation response says what happened: `{ revision, mutation: { seq, effect, appliesFromAttempt } }`. An agent that edits a running stage reads `pending-next-attempt` and the attempt number it will apply to, in the same answer.
+Every mutation response says what happened: `{ revision, mutation: { seq, effect, appliesFromAttempt } }`. An agent that edits a running stage reads `pending-next-attempt` and the attempt number it will apply to, in the same answer; `appliesFromAttempt` is always set for a stage-scoped mutation (§3.2).
+
+**Bound on the log.** `mutations` holds at most `MAX_PIPELINE_MUTATIONS` entries (200, declared in `limits.ts` beside the other record bounds), and a payload text field over 1,000 characters is stored as `{ digest, length }`, so the worst case is about 200 KB per record. When an accepted mutation would exceed the cap, the same mutation path first projects the record's mutations into the lifecycle journal (`projectPipelineEvents`, `projector.ts:98`, appended under idempotent keys by `appendLifecycleEvents`, `journal.ts:214-254`) and then drops the oldest entries down to the cap, recording `mutationsCompactedThrough`. Nothing is refused at the cap: a pause must always be accepted. The journal keeps its own capacity and retires ids past it (`journal.ts:247-250`), so the readable history is the record's tail plus the journal's retained range, and a mutation older than both is gone, as pause and resume history is today. `stage.notes` is bounded separately: at most `MAX_PENDING_STAGE_NOTES` (10) pending notes per stage, each at most `MAX_STAGE_PROMPT_LENGTH`; an eleventh is refused until an attempt binds, since ten unconsumed notes on one stage is a caller looping, not a workflow.
 
 ### 3.4 Lifecycle-aware settlement
 
@@ -276,16 +304,13 @@ Every attempt records `headAtStart` when it is created and `headAtSettle` at set
 
 Case C of #1409 (committed, could not push) is already caught by the controller publishing at settlement (`engine.ts:1760-1768`); the new fields make the report name the two SHAs.
 
-### 3.6 Pause as a flag; answers and continuation
+### 3.6 Pause as a flag; answers; continuation only for throttles
 
 `paused` is a flag beside the state. Pausing a parked record leaves `needs_decision` visible; resuming it leaves it parked with its decision affordance. The tick's skip condition (`engine.ts:3078`) reads the flag. This removes `pausedState` and the masking in #852.
 
-`answer { text }` on a parked cursor stage creates attempt n+1 and binds the text to it:
+**A parked attempt is settled and its host is not held.** A `needs_decision` verdict is a verdict, so the attempt reads as turn-settled (`engine.ts:3815`) and the terminal host reaper stops its host on the next sweep (`engine.ts:2963-3056`), exactly as today. Holding that host until the operator answers was considered and cut: an idle structured host costs on the order of half a gigabyte of resident memory (#747), a decision routinely arrives hours later, and any affordable hold would lapse before most answers and leave two code paths chosen by timing. `answer { text }` on a parked cursor stage therefore has one behaviour: it creates attempt n+1, which binds (§3.2) and spawns from the current worktree, with no reset, under a titled note that carries the parked attempt's question (its verdict findings and `stateDetail`) and the operator's text. If the reaper has not yet reached the old host, the spawn names it in `supersedes` (`engine.ts:1976`) and the reaper stops it on its sweep; nothing ever delivers into a parked conversation. #852's contract holds: the park stays visible under pause, plain resume leaves it parked, one canonical action creates one fresh attempt carrying the answer, a repeated call with the same `clientRequestId` replays the same mutation, and a live host is never taken over.
 
-- if the parked attempt's conversation is still deliverable (the registry's deliverability read the MCP tool `conversation_deliverability` exposes), attempt n+1 **continues** that conversation: `continuesAttempt = n`, the text is delivered once through the structured delivery path with an idempotent client-message identity (the same call the flow relay makes today, `flows/engine.ts:381`), and settlement waits for the next terminal turn of the same transcript;
-- otherwise attempt n+1 **spawns** from the current worktree with the text rendered as a note.
-
-The same continuation primitive resumes a provider-throttled attempt (§3.4). Two callers, one mechanism, and it is the one piece of the flow engine that survives the retirement, moved to `src/lib/pipelines/continuation.ts`.
+**Continuation exists for one caller: a provider throttle.** A throttled attempt is `waiting`, not settled: no verdict and no `completedAt`, so the reaper never lists it as a candidate (`engine.ts:2969`, `3815`) and the host stays. When the wait lapses the controller delivers one continuation into the same conversation through the structured delivery path with an idempotent client-message identity (the call the flow relay makes today, `flows/engine.ts:381`), recorded as attempt n+1 with `continuesAttempt = n`; a host that died during the wait means attempt n+1 spawns from the worktree instead. This is the one piece of the flow engine that survives the retirement, moved to `src/lib/pipelines/continuation.ts`.
 
 ### 3.7 Loops
 
@@ -329,7 +354,7 @@ The Viewer UI ships nothing in this pass. When it does, it calls `PATCH /api/pip
 | #1409 | yes, cases A and B; case C named | a fail-edge round that settles `pass` at an unchanged head is refused with the SHA; the reviewer's head travels in the fail-edge input; a reviewer at an unpublished head is refused before spawn |
 | #1374 | yes | no clean-HEAD wall (the flow is gone); a passed architect stage commits its declared outputs every round; `rerun-stage from: "worktree"` tolerates a dirty tree; `checkpoint` exists |
 | #452 | yes | no note cap (the reviewer is a full stage prompt); `edit-stage` works on a stage with failed attempts |
-| #852 | yes | `paused` is a flag so the park stays visible; `answer` creates one fresh attempt bound to the operator's text and delivers it once, idempotently |
+| #852 | yes | `paused` is a flag so the park stays visible and plain resume leaves it parked; `answer` creates one fresh attempt from the worktree carrying the question and the operator's text, idempotent on `clientRequestId`; nothing is delivered into the parked host, which the reaper stops as today |
 | #1073 | yes | the fail-edge loop is the only loop and rotates every round; effort per round is an `edit-stage` between rounds |
 | #340 | yes | one record, one API surface, one store; UI second |
 | Successor pipelines | yes | `set-edge` raises `maxRounds` after exhaustion; `add-stage` after start; `rerun-stage` on a completed record |
@@ -338,7 +363,7 @@ The Viewer UI ships nothing in this pass. When it does, it calls `PATCH /api/pip
 
 ## 5. Migration
 
-**Pipeline records.** Schema version 5 → 6 (`store.ts:18`, migration seam at `store.ts:486-491`): `revision = 0`, `mutations = []`, `checkpoints` seeded with one `stage:<id>:<n>` entry per passed attempt whose commit is known, `paused` derived from `state === "paused"` with `state` restored from `pausedState`, `definitionRevision = 0` on every stage, `definition = { revision: 0, promptDigest: null }` on every attempt, `waiting` derived from a pending `controllerWait` or `verdictRecovery`. All other new fields default to `null` or `[]`. The archive collection migrates the same way on read. Nothing is dropped from old records.
+**Pipeline records.** Schema version 5 → 6 (`store.ts:18`, migration seam at `store.ts:486-491`): `revision = 0`, `mutations = []`, `checkpoints` seeded with one `stage:<id>:<n>` entry per passed attempt whose commit is known, `paused` derived from `state === "paused"` with `state` restored from `pausedState`, `definitionRevision = 0` and `notes = []` on every stage, `definition = null` and `notes = []` on every attempt, `waiting` derived from a pending `controllerWait` or `verdictRecovery`. An attempt without a binding renders from the live stage, which is today's behaviour; only attempts in `pending` at migration time can still bind, and they bind on their next spawning transition, so the fallback is deleted one release after slice 4. All other new fields default to `null` or `[]`. The archive collection migrates the same way on read. Nothing is dropped from old records.
 
 **Flows.** Creation is refused first (`createFlowFromRequest`, `flows/commands.ts:133`, and the `review-loop` kind in `normalizeStages`, `engine.ts:3137`). Pipeline-owned flows in flight settle through the existing `reviewFlowSync` projection; on 2026-09-02 at most three such stages exist. After they settle, the flow engine, store, routes, tools and UI are deleted; the `flows` collection is renamed to `flows_archive` and read by nothing. Round artifacts under the state directory stay on disk as evidence. Attempts keep `flowId` and `reviewFlowSync` as frozen history.
 
@@ -350,25 +375,43 @@ The Viewer UI ships nothing in this pass. When it does, it calls `PATCH /api/pip
 
 ## 6. Implementation plan
 
-Twelve slices, each an issue, each with one owner per file. Files shared between slices are owned by one lane and land in order; the other lanes wait on that file, never edit it in parallel. Every slice ships behind the current behaviour: a new action is unreachable until its schema is published (slice 10), the settlement rule has a kill switch, and retirement starts with a refusal.
+Twelve slices, each an issue. Every file has exactly one owning lane for the whole plan (§6.1); a slice that needs files from two lanes lists both, and the lanes land their parts in the slice's order. No file appears under two lanes anywhere in §6.3.
 
-| # | Issue title | Files (owner lane) | Depends on | Switched by |
+### 6.1 File ownership
+
+| Lane | Files owned, with their tests |
+| --- | --- |
+| A (record and store) | `src/lib/pipelines/types.ts`, `store.ts`, `validation.ts`, `limits.ts`, `src/lib/pauseResumeActor.ts`, `src/lib/accounts/accountMutation.ts`, `src/lib/lifecycle/projector.ts` |
+| B (engine) | `src/lib/pipelines/engine.ts`, `durableEvidence.ts`, `prompts.ts`, `git.ts`, `listProjection.ts` |
+| C (transports) | `src/lib/mcp/server.ts`, `src/lib/mcp/bindings.ts`, `src/app/api/pipelines/[id]/route.ts` |
+| D (continuation) | new `src/lib/pipelines/continuation.ts` |
+| E (retirement) | `src/lib/flows/**`, `src/lib/workflows/**`, `src/app/api/flows/**`, `src/app/api/workflows/**`, `src/components/flows/**`, `src/components/workflows/**`, `src/components/ProjectDashboard.tsx`, `ProjectRail.tsx`, `OverviewBoard.tsx`, `projectModel.ts`, `src/components/runtime/runtimeModel.ts`, `src/components/mobile/**`, `src/components/scheme/**`, `docs/review-loop.md`, `.claude/skills/review-loop/**` |
+| F (docs and skills) | `docs/pipelines.md`, `.claude/skills/llv-conveyor/SKILL.md`, `.claude/skills/live-log-viewer-orchestration/SKILL.md` |
+| G (pipeline UI) | `src/components/pipelines/**` |
+
+### 6.2 The gates
+
+Both transports admit exactly `PIPELINE_ACTIONS`: the PATCH route builds its allow set from it (`route.ts:12`) and the MCP schema is `z.enum(PIPELINE_ACTIONS)` (`server.ts:1962`). Adding a name to that constant makes the action reachable from both at once, so the constant is the switch and nothing else pretends to be one. New actions land in a second constant beside it, `PIPELINE_ACTIONS_STAGED` (`types.ts`, lane A): `patchPipeline` accepts both sets, the engine tests call it directly as they do today, and neither transport admits a staged name. Slice 10 moves each name into `PIPELINE_ACTIONS` in the same change that publishes its typed payload. Three other gates are honest for the same reason. After-start graph edits (slice 6) are admitted only when the request carries `expectedRevision`, a field no caller sends before slice 10 publishes it, and a request without it meets today's refusal. The settlement and head-binding rules (slices 2 and 8) sit behind one environment kill switch, `LLV_PIPELINE_SETTLEMENT_V1`, which restores the 3 × 30 s rule and the unbound pass for one release. The retirement (slice 9a) starts with a refusal, which is the last cheap point to stop. Changes to actions already admitted (`pause` as a flag, `skip-stage` without a reset, the typed spawn transients) are live on merge and the table says so: they are the #852 and #1433 fixes.
+
+### 6.3 Slices
+
+| # | Issue title | Files (owner lane) | Depends on | Gate |
 | --- | --- | --- | --- | --- |
-| 1 | feat(pipelines): revision, attributed mutation log and actor on every action | `src/lib/pipelines/types.ts`, `store.ts` (+tests), `src/lib/pauseResumeActor.ts` (lane A) | none | additive; `expectedRevision` honoured only when present |
-| 2 | fix(pipelines): settlement waits on pending background tasks and provider throttles (#1441) | `src/lib/pipelines/durableEvidence.ts` (+test), `engine.ts` tickRunStage and reapers (+engine.test.ts), `listProjection.ts` (lane B) | 1 | env kill switch restoring the 3 × 30 s rule for one release |
-| 3 | fix(pipelines): transient spawn failures wait inside the attempt (#1433, #1114) | `src/lib/accounts/accountMutation.ts` (lane A), `engine.ts` spawn path (lane B) | 2 | classification by error type; parks only after the wait budget |
-| 4 | feat(pipelines): edit-stage after start with per-attempt definition snapshots | `engine.ts` patchPipeline and newAttempt, `prompts.ts` (lane B); `types.ts` action constant (lane A) | 1, 3 | action published in slice 10 |
-| 5 | feat(pipelines): rerun-stage from worktree or checkpoint, checkpoint action, pause as a flag, skip without reset (#852) | `engine.ts`, `git.ts` (+tests) (lane B); `types.ts` (lane A) | 4 | published in slice 10 |
-| 6 | feat(pipelines): add, remove, reorder stages and rewire edges after start; editable round budgets | `engine.ts` (lane B); `store.ts` graph validators, `validation.ts` (lane A) | 5 | published in slice 10 |
-| 7 | feat(pipelines): notes for the next attempt, answer, and attempt continuation | `engine.ts`, `prompts.ts` (lane B); new `src/lib/pipelines/continuation.ts` lifted from `flows/engine.ts` sendToImplementer (lane D) | 5 | published in slice 10 |
-| 8 | fix(pipelines): bind settlement to the published head (#1409) | `engine.ts` settlement (lane B), `git.ts` (lane B) | 2 | refusal on unchanged head behind the same kill switch as slice 2 |
-| 9a | chore(flows): refuse new flows and review-loop stages | `flows/commands.ts`, `engine.ts` normalizeStages, `src/lib/mcp/server.ts` descriptions (lane E) | 7 | refusal message names the replacement |
-| 9b | chore: delete the flow and workflow engines, routes, tools, UI and skill | `src/lib/flows/**`, `src/lib/workflows/**`, `src/app/api/flows/**`, `src/app/api/workflows/**`, `src/components/flows/**`, `src/components/workflows/**`, `ProjectDashboard.tsx`, `ProjectRail.tsx`, `OverviewBoard.tsx`, `projectModel.ts`, `runtimeModel.ts`, `bindings.ts` and `server.ts` flow tools, `docs/review-loop.md`, `.claude/skills/review-loop` (lane E) | 9a and every in-flight review-loop attempt settled | deletion |
-| 10 | feat(mcp): typed per-action payloads for pipeline_action, actor on every mutation, revision and mutations in get_pipeline | `src/lib/mcp/server.ts`, `bindings.ts` (+tests), `src/app/api/pipelines/[id]/route.ts` (lane C) | 1; each action as lane B lands it | this is the switch for slices 4 to 7 |
-| 11 | docs(pipelines): one record document; skills drop successor pipelines and checkpoint branches | `docs/pipelines.md`, `.claude/skills/llv-conveyor/SKILL.md`, `.claude/skills/live-log-viewer-orchestration/SKILL.md` (lane F) | 10 | docs |
-| 12 | feat(ui): after-start stage editor on the same PATCH payloads | `src/components/pipelines/**` (lane G) | 10, 11 | deferred; named here so nobody designs a second API for it |
+| 1 | feat(pipelines): revision, attributed mutation log with cap and compaction, actor on every action | `types.ts`, `store.ts`, `limits.ts`, `pauseResumeActor.ts`, `projector.ts` mutation events (A) | none | additive; `expectedRevision` honoured only when present; the log projects to the journal from the first entry |
+| 2 | fix(pipelines): settlement waits on pending background tasks and provider throttles (#1441) | `durableEvidence.ts`, `engine.ts` tickRunStage and reapers, `listProjection.ts` (B) | 1 | `LLV_PIPELINE_SETTLEMENT_V1` restores the 3 × 30 s rule for one release; until slice 7, a lapsed throttle wait spawns n+1 from the worktree |
+| 3 | fix(pipelines): transient spawn failures wait inside the attempt (#1433, #1114) | `accountMutation.ts` async lock on the spawn path (A); `engine.ts` spawn path, classification by error type (B) | 2 | live on merge: it is the #1433 fix, and the park after the wait budget is today's behaviour |
+| 4 | feat(pipelines): edit-stage after start; attempts bind their definition at the spawning transition | `types.ts` staged constant and attempt fields (A); `engine.ts` patchPipeline, newAttempt and the spawning transition, `prompts.ts` renders from the attempt (B) | 1, 3 | `edit-stage` in `PIPELINE_ACTIONS_STAGED`, unreachable from both transports; binding is behaviour-preserving, the copy is taken at the instant the prompt is rendered today |
+| 5 | feat(pipelines): rerun-stage from worktree or checkpoint, checkpoint action, pause as a flag, skip without reset (#852) | `types.ts` (A); `engine.ts`, `git.ts` (B) | 4 | `rerun-stage` and `checkpoint` staged; the `paused` flag and the reset-free `skip-stage` are live on merge as the #852 fix; `retry-stage` keeps resetting until slice 10 aliases it |
+| 6 | feat(pipelines): add, remove, reorder stages and rewire edges after start; editable round budgets | `store.ts` graph validators, `validation.ts` (A); `engine.ts` (B) | 5 | admitted after start only with `expectedRevision`; a request without it meets today's refusal |
+| 7 | feat(pipelines): notes for the next attempt, answer, provider-throttle continuation | `types.ts` (A); `engine.ts`, `prompts.ts` note block (B); `continuation.ts` lifted from `flows/engine.ts` sendToImplementer (D) | 5 | `note` and `answer` staged; continuation replaces the slice-2 fallback for a lapsed throttle wait, behind the same kill switch |
+| 8 | fix(pipelines): bind settlement to the published head (#1409) | `engine.ts` settlement, `git.ts` head reads (B) | 2 | behind `LLV_PIPELINE_SETTLEMENT_V1` with slice 2 |
+| 9a | chore: refuse new flows and review-loop stages | `flows/commands.ts` createFlowFromRequest (E); `engine.ts` normalizeStages (B); `server.ts` tool descriptions name the replacement (C) | 7 | the refusal is the switch and the last cheap point to stop |
+| 9b | chore: delete the flow and workflow engines, routes, tools, UI and skill | `src/lib/flows/**`, `src/lib/workflows/**`, `src/app/api/flows/**`, `src/app/api/workflows/**`, `src/components/flows/**`, `src/components/workflows/**`, `ProjectDashboard.tsx`, `ProjectRail.tsx`, `OverviewBoard.tsx`, `projectModel.ts`, `runtimeModel.ts`, `mobile/**`, `scheme/**`, `docs/review-loop.md`, `.claude/skills/review-loop/**` (E); `engine.ts` review-loop tick, reconcilers and `reviewFlowSync` writers (B); `server.ts` and `bindings.ts` flow tools (C); `store.ts` review-loop migration shims and `projector.ts` review-stage verdict event (A); `src/components/pipelines/StageCompletedCard.tsx` review-loop branch (G) | 9a, and every in-flight review-loop attempt settled | deletion |
+| 10 | feat(mcp): typed per-action payloads, actor on every mutation, revision and mutations in get_pipeline; staged actions admitted | `types.ts` moves each staged name into `PIPELINE_ACTIONS` and adds the `override-stage` and `retry-stage` aliases (A); `server.ts`, `bindings.ts`, `route.ts` (C) | 1, and each action as lane B lands it | this is the switch for slices 4 to 7 |
+| 11 | docs(pipelines): one record document; skills drop successor pipelines and checkpoint branches | `docs/pipelines.md`, `llv-conveyor/SKILL.md`, `live-log-viewer-orchestration/SKILL.md` (F) | 10 | docs |
+| 12 | feat(ui): after-start stage editor on the same PATCH payloads | `src/components/pipelines/**` (G) | 10, 11 | deferred; named here so nobody designs a second API for it |
 
-Lane B owns `engine.ts` throughout and lands slices 2 to 8 in order; lanes A, C, D, E and F run beside it on their own files. Slice 2 goes first because it removes the most expensive failure class in §1.5 and depends on nothing but the log.
+Lane B lands slices 2 to 8 in order, then its parts of 9a and 9b. Lane A lands its parts of 1, 3, 4, 5, 6, 7, 9b and 10 in that order. Lane C lands 9a's descriptions, 9b's deletions and 10. Lanes D, E, F and G each own one slice's worth of files. Slice 2 goes first after the log because it removes the most expensive failure class in §1.5.
 
 ## 7. Deferred, not currently justified
 
@@ -381,7 +424,9 @@ Lane B owns `engine.ts` throughout and lands slices 2 to 8 in order; lanes A, C,
 - **A separate mutation collection or event store**: the record's own bounded array is enough and keeps one transaction.
 - **Renaming pipelines to automations** in code, tools and routes.
 - **UI editor**: named in slice 12, explicitly second.
+- **Holding a parked attempt's host so an answer can continue its conversation** (#852's live-idle-host case): an idle host costs on the order of half a gigabyte (#747) and decisions arrive later than any affordable hold, so `answer` spawns fresh with the question as a note (§3.6). If the state store later shows most answers landing within minutes, a bounded hold the reaper honours like `waiting` is the shape.
+- **Editing `task` or `spec` after start**: both are pinned into every attempt's prompt, and a change would split the record's attempts across two contracts without a record of which ran under which. `update-draft` stays draft-only; a changed contract is a `note` on the stages it affects.
 
 ## 8. Over-engineering pass on this design
 
-Cut from the first draft: a new `Automation` type and store beside the pipeline record (the pipeline record already is the survivor); hot-applying an edit to a running attempt (impossible for a delivered prompt and unsafe for everything else, so the only honest behaviours are defer or restart); a `waiting` sub-state machine of its own (it is one field read from existing bookkeeping); a per-mutation approval flow (the operator's standing rule is that nothing asks for confirmation); templates and presets for whole graphs (the role registry already carries per-role presets, and `create_pipeline` takes the graph); a second HTTP surface for the UI (it calls the existing route). What remains is one record, one action list, one settlement predicate, and deletion of two engines.
+Cut from the first draft: a new `Automation` type and store beside the pipeline record (the pipeline record already is the survivor); hot-applying an edit to a running attempt (impossible for a delivered prompt and unsafe for everything else, so the only honest behaviours are defer or restart); a `waiting` sub-state machine of its own (it is one field read from existing bookkeeping); a per-mutation approval flow (the operator's standing rule is that nothing asks for confirmation); templates and presets for whole graphs (the role registry already carries per-role presets, and `create_pipeline` takes the graph); a second HTTP surface for the UI (it calls the existing route). What remains is one record, one action list, one settlement predicate, and deletion of two engines. Cut in revision 2: the continuation branch of `answer`, which was unreachable under the reaper the design keeps (§3.6), and the per-attempt prompt digest, which could not re-render a handshake retry (§3.2).
