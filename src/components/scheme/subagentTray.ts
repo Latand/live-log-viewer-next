@@ -400,6 +400,23 @@ function memberOrder(left: TrayMember, right: TrayMember, timeById: ReadonlyMap<
   );
 }
 
+/** A value signature of a projection: two projections with the same signature
+    fold and promote the same paths and draw the same trays, so a consumer may
+    keep the earlier object and every card memoised on it stays put (#1432). */
+export function subagentTraySignature(projection: SubagentTrayProjection): string {
+  const sorted = (values: Iterable<string>) => [...values].sort();
+  const trays = [...projection.traysByParent.values()]
+    .map((tray) => [
+      tray.parentConversationId,
+      tray.count,
+      tray.hottest,
+      tray.expanded,
+      tray.members.map((member) => [member.id, member.path, member.title, member.engine, member.model, member.state, member.avatarSeed]),
+    ])
+    .sort((left, right) => String(left[0]).localeCompare(String(right[0])));
+  return JSON.stringify([sorted(projection.promotedPaths), sorted(projection.foldedPaths), sorted(projection.foldedIds), trays]);
+}
+
 /**
  * The presence projection: partition every current-generation engine-native
  * child into promoted nodes and folded tray rows, grouped by durable parent id.

@@ -58,6 +58,7 @@ function ScopedProbe({ pinnedPath }: { pinnedPath?: string }) {
     files: data.files.map((entry) => entry.path),
     pins: data.pinOverlayPaths,
     scope: data.requestScope,
+    certified: data.scopeCertified,
     task: data.pipelines[0]?.task ?? "",
   })}</div>;
 }
@@ -98,12 +99,14 @@ test("concurrent pinned and global hooks keep their scopes through local pipelin
     files: ["/global", pinnedPath],
     pins: [pinnedPath],
     scope: `/api/files?path=${encodeURIComponent(pinnedPath)}`,
+    certified: true,
     task: "patched",
   }));
   expect(host.children[1]?.textContent).toBe(JSON.stringify({
     files: ["/global"],
     pins: [],
     scope: "/api/files",
+    certified: true,
     task: "patched",
   }));
 
@@ -116,6 +119,7 @@ test("concurrent pinned and global hooks keep their scopes through local pipelin
     files: ["/global"],
     pins: [],
     scope: "/api/files",
+    certified: true,
     task: "server",
   }));
 
@@ -123,7 +127,10 @@ test("concurrent pinned and global hooks keep their scopes through local pipelin
   host.remove();
 });
 
-test("hook initialization paints only an exact request-scope cache snapshot", async () => {
+/* #1432: a scope with no representation yet paints the last known GLOBAL rows,
+   marked uncertified, instead of an empty placeholder — and never the rows only
+   another pin admitted. */
+test("hook initialization paints the last known global rows for an unfetched scope, never another pin's rows", async () => {
   const pinA = "/archive/pin-a.jsonl";
   const pinB = "/archive/pin-b.jsonl";
   let calls = 0;
@@ -160,9 +167,12 @@ test("hook initialization paints only an exact request-scope cache snapshot", as
     </>);
   });
 
-  expect(host.children[0]?.textContent).toContain('"files":[]');
-  expect(host.children[1]?.textContent).toContain('"files":[]');
+  expect(host.children[0]?.textContent).toContain('"files":["/global"]');
+  expect(host.children[0]?.textContent).toContain('"certified":false');
+  expect(host.children[1]?.textContent).toContain('"files":["/global"]');
+  expect(host.children[1]?.textContent).toContain('"certified":false');
   expect(host.children[2]?.textContent).toContain(pinA);
+  expect(host.children[2]?.textContent).toContain('"certified":true');
   expect(host.children[0]?.textContent).not.toContain(pinA);
   expect(host.children[1]?.textContent).not.toContain(pinA);
 
@@ -197,11 +207,13 @@ test("an already-mounted hook drops pin-only rows in the render that changes sco
   expect(host.textContent).toContain(pinA);
 
   flushSync(() => { root.render(<ScopedProbe pinnedPath={pinB} />); });
-  expect(host.textContent).toContain('"files":[]');
+  expect(host.textContent).toContain('"files":["/global"]');
+  expect(host.textContent).toContain('"certified":false');
   expect(host.textContent).not.toContain(pinA);
 
   flushSync(() => { root.render(<ScopedProbe />); });
-  expect(host.textContent).toContain('"files":[]');
+  expect(host.textContent).toContain('"files":["/global"]');
+  expect(host.textContent).toContain('"certified":false');
   expect(host.textContent).not.toContain(pinA);
 
   release();

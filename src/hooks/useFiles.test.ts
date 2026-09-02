@@ -48,6 +48,37 @@ test("global client cache serves stale rows while revalidation patches changed f
   expect(second.tasks).toBe(first.tasks);
 });
 
+test("an unfetched scope is answered by the global rows, uncertified and identity-stable, until its own fetch lands (#1432)", async () => {
+  const pin = "/archive/beyond-cap.jsonl";
+  const cache = createFilesClientCache(async (input) => {
+    const pinnedPath = new URL(String(input), "http://localhost").searchParams.get("path");
+    return new Response(JSON.stringify({
+      files: pinnedPath ? [file("/a", "A"), file(pinnedPath, "Pinned")] : [file("/a", "A")],
+      pinOverlayPaths: pinnedPath ? [pinnedPath] : [],
+    }), { status: 200 });
+  });
+  await cache.revalidate();
+
+  const standIn = cache.readScope(pin);
+  expect(standIn.requestScope).toBe(filesApiUrl(undefined, pin));
+  expect(standIn.loaded).toBe(true);
+  expect(standIn.scopeCertified).toBe(false);
+  expect(standIn.files.map((entry) => entry.path)).toEqual(["/a"]);
+  /* The same stand-in object comes back while nothing changed: a consumer
+     rendering it repeatedly must not see a fresh identity each time. */
+  expect(cache.readScope(pin)).toBe(standIn);
+
+  await cache.revalidate(pin);
+  const certified = cache.readScope(pin);
+  expect(certified.scopeCertified).toBe(true);
+  expect(certified.files.map((entry) => entry.path)).toEqual(["/a", pin]);
+  /* Another scope asked while the pinned one is the freshest: the pin-only
+     row stays with the request that admitted it. */
+  const other = cache.readScope("/archive/other.jsonl");
+  expect(other.scopeCertified).toBe(false);
+  expect(other.files.map((entry) => entry.path)).toEqual(["/a"]);
+});
+
 test("an ordinary hydration waits for an in-flight forced revision refresh", async () => {
   let calls = 0;
   let forcedResolved = false;

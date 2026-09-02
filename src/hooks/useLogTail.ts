@@ -94,6 +94,32 @@ export interface LogTailState {
   prependGen: number;
 }
 
+/** What the hook renders for one transcript, tagged with that transcript's
+    path so a switch can never show one conversation's lines under another's
+    title (#1432). */
+interface TailView {
+  path: string | null;
+  win: { lines: string[]; start: number };
+  size: number;
+  loading: boolean;
+  error: string | null;
+  tickTime: Date | null;
+  hasMore: boolean;
+}
+
+function viewFor(file: FileEntry | null, cap: number): TailView {
+  const cached = file ? readTailCache(file.path, cap) : null;
+  return {
+    path: file?.path ?? null,
+    win: cached?.win ?? { lines: [], start: 0 },
+    size: cached?.size ?? file?.size ?? 0,
+    loading: Boolean(file && !cached),
+    error: null,
+    tickTime: cached?.tickTime ?? null,
+    hasMore: cached?.hasMore ?? false,
+  };
+}
+
 /**
  * Forward tail polling plus on-demand backward history: `lines` always hold a
  * contiguous window ending at the live tail; `loadOlder` extends the window
@@ -103,28 +129,29 @@ export interface LogTailState {
  * trimming never shifts what is being read.
  */
 export function useLogTail(file: FileEntry | null, pausedInput = false, cap = 2500): LogTailState {
-  const [initialSnapshot] = useState(() => file ? readTailCache(file.path, cap) : null);
-  const initialWin = initialSnapshot?.win ?? { lines: [], start: 0 };
+  const path = file?.path ?? null;
   const capRef = useRef(cap);
-  /* One atomic window state: the lines plus the absolute index of lines[0],
-     updated together so a trim and its start shift can never tear. */
-  const [win, setWin] = useState<{ lines: string[]; start: number }>(initialWin);
-  const [size, setSize] = useState(initialSnapshot?.size ?? 0);
-  const [loading, setLoading] = useState(Boolean(file && !initialSnapshot));
-  const [error, setError] = useState<string | null>(null);
-  const [tickTime, setTickTime] = useState<Date | null>(initialSnapshot?.tickTime ?? null);
+  const [view, setView] = useState<TailView>(() => viewFor(file, cap));
+  /* The window follows the path IN THE SAME RENDER (#1432). Re-seating it from
+     an effect painted the previous conversation's lines under the new file for
+     a frame — and parsed them for nothing — before the cached window (or the
+     empty loading state) replaced them. Set-state-in-render on the hook's own
+     state is React's sanctioned form of this: the render restarts at once with
+     the switched window and nothing below ever sees the mismatch. */
+  if (view.path !== path) setView(viewFor(file, capRef.current));
   const [paused, setPaused] = useState(false);
-  const [hasMore, setHasMore] = useState(initialSnapshot?.hasMore ?? false);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [prependGen, setPrependGen] = useState(0);
-  const winRef = useRef(initialWin);
-  const sizeRef = useRef(initialSnapshot?.size ?? 0);
-  const tickTimeRef = useRef<Date | null>(initialSnapshot?.tickTime ?? null);
-  const hasMoreRef = useRef(initialSnapshot?.hasMore ?? false);
-  const offsetRef = useRef(initialSnapshot?.offset ?? 0);
-  const startRef = useRef(initialSnapshot?.historyStart ?? 0);
-  const tailRef = useRef(initialSnapshot?.partial ?? "");
-  const firstRef = useRef(initialSnapshot?.first ?? true);
+  /* Transport state lives in refs, re-seated by the path effect below from
+     the same cached snapshot the render switched to. */
+  const winRef = useRef(view.win);
+  const sizeRef = useRef(view.size);
+  const tickTimeRef = useRef<Date | null>(view.tickTime);
+  const hasMoreRef = useRef(view.hasMore);
+  const offsetRef = useRef(0);
+  const startRef = useRef(0);
+  const tailRef = useRef("");
+  const firstRef = useRef(true);
   const genRef = useRef(0);
   const olderBusyRef = useRef(false);
 
@@ -132,18 +159,25 @@ export function useLogTail(file: FileEntry | null, pausedInput = false, cap = 25
     capRef.current = cap;
   }, [cap]);
 
-  const updateWin = (next: { lines: string[]; start: number }) => {
+  /* Every state write names the transcript it is for: a chunk or a history
+     page that lands after the pane switched away is dropped, never merged
+     into the newer conversation's window. */
+  const patch = (target: string | null, next: Partial<Omit<TailView, "path">>) => {
+    setView((prev) => (prev.path === target ? { ...prev, ...next } : prev));
+  };
+
+  const updateWin = (target: string | null, next: { lines: string[]; start: number }) => {
     winRef.current = next;
-    setWin(next);
+    patch(target, { win: next });
   };
 
-  const updateHasMore = (next: boolean) => {
+  const updateHasMore = (target: string | null, next: boolean) => {
     hasMoreRef.current = next;
-    setHasMore(next);
+    patch(target, { hasMore: next });
   };
 
-  const saveSnapshot = (path: string) => {
-    writeTailCache(path, {
+  const saveSnapshot = (target: string) => {
+    writeTailCache(target, {
       win: winRef.current,
       size: sizeRef.current,
       offset: offsetRef.current,
@@ -155,25 +189,28 @@ export function useLogTail(file: FileEntry | null, pausedInput = false, cap = 25
     });
   };
 
-  const resetWindow = () => {
+  const resetWindow = (target: string | null) => {
     offsetRef.current = 0;
     startRef.current = 0;
     tailRef.current = "";
     firstRef.current = true;
-    updateHasMore(false);
+    updateHasMore(target, false);
   };
 
   const clear = useCallback(() => {
-    if (file) tailCache.delete(file.path);
-    updateWin({ lines: [], start: 0 });
-    resetWindow();
-  }, [file?.path]);
+    if (path) tailCache.delete(path);
+    updateWin(path, { lines: [], start: 0 });
+    resetWindow(path);
+  }, [path]);
 
   useEffect(() => {
     genRef.current += 1;
-    const cached = file ? readTailCache(file.path, capRef.current) : null;
-    const nextWin = cached?.win ?? { lines: [], start: 0 };
-    winRef.current = nextWin;
+    /* The rendered window already switched (see the render above); the
+       transport state — offset, history start, decoder partial — is re-seated
+       here from the same snapshot, so the live subscription continues forward
+       from where the cached window ends instead of re-reading it. */
+    const cached = path ? readTailCache(path, capRef.current) : null;
+    winRef.current = cached?.win ?? { lines: [], start: 0 };
     offsetRef.current = cached?.offset ?? 0;
     startRef.current = cached?.historyStart ?? 0;
     tailRef.current = cached?.partial ?? "";
@@ -181,41 +218,34 @@ export function useLogTail(file: FileEntry | null, pausedInput = false, cap = 25
     hasMoreRef.current = cached?.hasMore ?? false;
     sizeRef.current = cached?.size ?? file?.size ?? 0;
     tickTimeRef.current = cached?.tickTime ?? null;
-    setWin(nextWin);
-    setHasMore(hasMoreRef.current);
-    setSize(sizeRef.current);
-    setTickTime(tickTimeRef.current);
-    setError(null);
-    setLoading(Boolean(file && !cached));
-  }, [file?.path]);
+  }, [path]);
 
   /* Forward polling rides the shared log bus: one batched request per tick
      for every mounted pane. A paused pane unsubscribes entirely — the server
      must not keep re-reading bytes nobody consumes — and resuming triggers
      the bus's immediate tick, so catch-up beats the old fixed interval. */
   useEffect(() => {
-    if (!file || paused || pausedInput) return;
+    if (!path || paused || pausedInput) return;
+    const target = path;
     let alive = true;
     const gen = genRef.current;
     const unsubscribe = subscribeLog({
-      path: file.path,
+      path: target,
       getOffset: () => offsetRef.current,
       onChunk: (result) => {
         if (!alive || gen !== genRef.current) return;
         if ("transportError" in result) {
-          setError(translate(getLocale(), "common.serverUnavailable"));
-          setLoading(false);
+          patch(target, { error: translate(getLocale(), "common.serverUnavailable"), loading: false });
           return;
         }
         if ("error" in result && result.error) {
-          setError(result.error);
-          setLoading(false);
+          patch(target, { error: result.error, loading: false });
           return;
         }
         const chunk = result as LogChunk;
         if (offsetRef.current > chunk.size) {
-          resetWindow();
-          updateWin({ lines: [], start: 0 });
+          resetWindow(target);
+          updateWin(target, { lines: [], start: 0 });
         }
         if (chunk.data) {
           let data = tailRef.current + chunk.data;
@@ -227,17 +257,17 @@ export function useLogTail(file: FileEntry | null, pausedInput = false, cap = 25
               startRef.current = chunk.start + (nl >= 0 ? utf8len(data.slice(0, nl + 1)) : utf8len(data));
               data = nl >= 0 ? data.slice(nl + 1) : "";
             }
-            updateHasMore(startRef.current > 0);
+            updateHasMore(target, startRef.current > 0);
           }
           const parts = data.split("\n");
           tailRef.current = parts.pop() ?? "";
           const complete = parts.map((line) => line.trim()).filter(Boolean);
-          if (offsetRef.current === 0) updateWin({ lines: complete, start: 0 });
+          if (offsetRef.current === 0) updateWin(target, { lines: complete, start: 0 });
           else if (complete.length) {
             const prev = winRef.current;
             const merged = prev.lines.concat(complete);
             const capNow = capRef.current;
-            updateWin(capNow > 0 && merged.length > capNow
+            updateWin(target, capNow > 0 && merged.length > capNow
               ? { lines: merged.slice(-capNow), start: prev.start + (merged.length - capNow) }
               : { lines: merged, start: prev.start });
           }
@@ -245,26 +275,26 @@ export function useLogTail(file: FileEntry | null, pausedInput = false, cap = 25
         }
         offsetRef.current = chunk.offset;
         sizeRef.current = chunk.size;
-        setSize(chunk.size);
-        setError(null);
+        const next: Partial<Omit<TailView, "path">> = { size: chunk.size, error: null, loading: false };
         /* Idle polls must not re-render every pane every 1.2s: the tick time
            moves only when bytes actually arrived (status reads "last data"). */
         if (chunk.data) {
           tickTimeRef.current = new Date();
-          setTickTime(tickTimeRef.current);
+          next.tickTime = tickTimeRef.current;
         }
-        saveSnapshot(file.path);
-        setLoading(false);
+        patch(target, next);
+        saveSnapshot(target);
       },
     });
     return () => {
       alive = false;
       unsubscribe();
     };
-  }, [file?.path, paused, pausedInput]);
+  }, [path, paused, pausedInput]);
 
   const loadOlder = useCallback(async (): Promise<number> => {
-    if (!file || olderBusyRef.current || startRef.current <= 0) return 0;
+    if (!path || olderBusyRef.current || startRef.current <= 0) return 0;
+    const target = path;
     olderBusyRef.current = true;
     setLoadingOlder(true);
     const gen = genRef.current;
@@ -273,7 +303,7 @@ export function useLogTail(file: FileEntry | null, pausedInput = false, cap = 25
       let start = startRef.current;
       // A chunk may end mid-line; hop further back until the first newline shows up.
       for (let hop = 0; hop < OLDER_CHUNK_HOPS; hop += 1) {
-        const res = await fetch(`/api/log?path=${encodeURIComponent(file.path)}&before=${start}`);
+        const res = await fetch(`/api/log?path=${encodeURIComponent(target)}&before=${start}`);
         const json = (await res.json()) as LogChunk | { error?: string };
         if (gen !== genRef.current) return 0;
         if ("error" in json && json.error) return 0;
@@ -295,13 +325,13 @@ export function useLogTail(file: FileEntry | null, pausedInput = false, cap = 25
       if (parts.at(-1) === "") parts.pop();
       const complete = parts.map((line) => line.trim()).filter(Boolean);
       startRef.current = newStart;
-      updateHasMore(newStart > 0);
+      updateHasMore(target, newStart > 0);
       if (complete.length) {
         const prev = winRef.current;
-        updateWin({ lines: complete.concat(prev.lines), start: prev.start - complete.length });
+        updateWin(target, { lines: complete.concat(prev.lines), start: prev.start - complete.length });
         setPrependGen((value) => value + 1);
       }
-      saveSnapshot(file.path);
+      saveSnapshot(target);
       return complete.length;
     } catch {
       return 0;
@@ -309,7 +339,21 @@ export function useLogTail(file: FileEntry | null, pausedInput = false, cap = 25
       olderBusyRef.current = false;
       setLoadingOlder(false);
     }
-  }, [file?.path]);
+  }, [path]);
 
-  return { lines: win.lines, linesStart: win.start, size, loading, error, tickTime, paused, setPaused, clear, hasMore, loadingOlder, loadOlder, prependGen };
+  return {
+    lines: view.win.lines,
+    linesStart: view.win.start,
+    size: view.size,
+    loading: view.loading,
+    error: view.error,
+    tickTime: view.tickTime,
+    paused,
+    setPaused,
+    clear,
+    hasMore: view.hasMore,
+    loadingOlder,
+    loadOlder,
+    prependGen,
+  };
 }

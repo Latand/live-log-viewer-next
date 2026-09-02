@@ -35,6 +35,7 @@ import {
   type OutboxOwner,
 } from "./conversation/outbox";
 import { createFeedSession, type FeedSession, type FeedSnapshot } from "./feed/parse";
+import { claimFeedSession, releaseFeedSession, takeFeedSession } from "./feed/sessionPool";
 import { FeedItem } from "./feed/FeedItem";
 import { MessageProvenanceProvider, useDeliveredMessageProvenance } from "./feed/messageProvenance";
 import { RawLineProvider, type RawLineLookup } from "./feed/rawLine";
@@ -55,6 +56,13 @@ const RENDER_STEP = 1500;
     the full history in steps. */
 const COMPACT_INITIAL = 300;
 const COMPACT_STEP = 500;
+/** The first commit of a transcript paints only its last rows (#1432): a
+    project switch mounts several panes at once and a phone switch remounts
+    one, and mounting the whole initial window in that commit is what stood
+    between the gesture and the first frame. The window grows to its initial
+    count right after that frame; the magnet keeps the tail in view and a
+    released reader keeps its anchor, so nothing the operator sees moves. */
+const FIRST_PAINT_ROWS = 60;
 /** Live-tail window while the magnet holds the bottom. Touch devices run on
     a far smaller tab memory budget (iOS kills the renderer past it), so the
     window shrinks there; «show earlier» still walks the full history. */
@@ -261,7 +269,8 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
   const anchorRef = useRef<{ top: number; height: number } | null>(null);
   const initialCount = compact ? COMPACT_INITIAL : RENDER_STEP;
   const revealStep = compact ? COMPACT_STEP : RENDER_STEP;
-  const [visibleCount, setVisibleCount] = useState(initialCount);
+  const firstPaintCount = Math.min(FIRST_PAINT_ROWS, initialCount);
+  const [visibleCount, setVisibleCount] = useState(firstPaintCount);
   const [newCount, setNewCount] = useState(0);
   const [pulse, setPulse] = useState(false);
   const [endedQuestion, setEndedQuestion] = useState<string | null>(null);
@@ -357,8 +366,27 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
     return true;
   };
 
-  // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => setVisibleCount(initialCount), [tailPath, initialCount]);
+  /* First frame: the last FIRST_PAINT_ROWS. Next frame: the full initial
+     window, with the scroll anchored exactly as a «show earlier» reveal is. */
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setVisibleCount(firstPaintCount);
+    if (firstPaintCount >= initialCount) return;
+    /* Two frames: the first commit paints, the second grows the window. A
+       host without animation frames (a bare test document) grows on a
+       macrotask instead. */
+    const raf = typeof requestAnimationFrame === "function";
+    const schedule = (fn: () => void) => (raf ? requestAnimationFrame(fn) : (setTimeout(fn, 0) as unknown as number));
+    const cancel = (handle: number) => (raf ? cancelAnimationFrame(handle) : clearTimeout(handle));
+    let handle = schedule(() => {
+      handle = schedule(() => {
+        const el = scroller.current;
+        if (el) anchorRef.current = { top: el.scrollTop, height: el.scrollHeight };
+        setVisibleCount((count) => Math.max(count, initialCount));
+      });
+    });
+    return () => cancel(handle);
+  }, [tailPath, initialCount, firstPaintCount]);
   /* Same instance, new transcript: pick up that transcript's remembered state. */
   useEffect(() => {
     if (!memoryKey) return;
@@ -424,11 +452,24 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
      which changes every /api/files poll); anything else reuses it. Feeding
      inside the memo is safe: feed() is idempotent for an unchanged window. */
   const lf = lineFilter.toLowerCase();
+  /* The session outlives this mount (#1432): a conversation that was on screen
+     earlier comes back with its parse intact — taken from the pool here, given
+     back when the key changes or the feed unmounts — so a switch paints the
+     previous rows without re-parsing the retained window. The key is exactly
+     the parse configuration above; a session is owned by one mount at a time. */
+  const sessionKey = file && tailPath ? [tailPath, file.engine, file.fmt, showSvc ? "1" : "0", lf, locale].join("\u0000") : null;
   const session: FeedSession | null = useMemo(
-    () => (file ? createFeedSession({ engine: file.engine, fmt: file.fmt, showSvc, lineFilter: lf }) : null),
+    () => (file && sessionKey
+      ? takeFeedSession(sessionKey) ?? createFeedSession({ engine: file.engine, fmt: file.fmt, showSvc, lineFilter: lf })
+      : null),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [tailPath, file?.engine, file?.fmt, showSvc, lf, locale],
+    [sessionKey],
   );
+  useEffect(() => {
+    if (!sessionKey || !session) return;
+    claimFeedSession(sessionKey, session);
+    return () => releaseFeedSession(sessionKey, session);
+  }, [sessionKey, session]);
   const feed = useMemo(
     () => (file && session ? session.feed(tail.lines, tail.linesStart, file.activity === "live") : EMPTY_FEED),
     // eslint-disable-next-line react-hooks/exhaustive-deps

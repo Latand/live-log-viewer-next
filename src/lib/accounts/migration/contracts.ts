@@ -144,7 +144,9 @@ export function migrationSuccessorLaunchProfile(profile: LaunchProfile): LaunchP
 }
 
 export interface GenerationHostEvidence {
-  kind: "tmux" | "codex-app-server" | "claude-stream";
+  /** `claude-fork`: a successor transcript the viewer wrote itself (issue #889);
+      no process existed at creation, the broker host is published from it. */
+  kind: "tmux" | "codex-app-server" | "claude-stream" | "claude-fork";
   identity: string;
   epoch: number;
   verifiedAt: string;

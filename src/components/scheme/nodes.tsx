@@ -1,7 +1,7 @@
 "use client";
 
 import { Check, Layers } from "lucide-react";
-import { memo, useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useState } from "react";
 
 import { ChevronRight } from "@/components/icons";
 import { conversationIdentity } from "@/lib/accounts/identity";
@@ -71,6 +71,7 @@ import {
 } from "./layout";
 
 const EMPTY_RELATIONS: readonly TaskRelation[] = [];
+const EMPTY_TASKS: BoardTask[] = [];
 const EMPTY_RUNTIME_ACTIVITY_BY_PATH = new Map<string, Activity>();
 
 function sameRuntimeActivityByPath(left: Map<string, Activity>, right: Map<string, Activity>): boolean {
@@ -933,7 +934,12 @@ function SelectionCheck({
   );
 }
 
-function NodeShell({
+/* Memoised (#1432): a focus move, a lasso toggle or a poll re-renders
+   NodesLayer, and this shell must re-render only when something about ITS
+   card changed — ring, dim, node geometry, flow/pipeline attachment. Every
+   callback and collection it receives is identity-stable across a NodesLayer
+   render for that to hold (see the useCallback/EMPTY_* constants there). */
+const NodeShell = memo(function NodeShell({
   node,
   ringed,
   marked,
@@ -1206,7 +1212,7 @@ function NodeShell({
       ) : null}
     </div>
   );
-}
+});
 
 /** A conversation draft as a scheme citizen: positioned like a fresh root node. */
 function DraftShell({
@@ -1576,10 +1582,10 @@ export const NodesLayer = memo(function NodesLayer({
 
   /* Board pipeline strip actions: a run stage chip / verdict opens the stage's
      own node by path; a review-loop chip routes through openPipelineFlow. */
-  const openPipelinePath = (path: string) => {
+  const openPipelinePath = useCallback((path: string) => {
     const file = files.find((entry) => entry.path === path);
     if (file) onSelect(file);
-  };
+  }, [files, onSelect]);
   /* Paths still in the scan; a run stage action is disabled once its transcript
      leaves the file set (AC4). */
   const renderablePaths = useMemo(() => new Set(files.map((entry) => entry.path)), [files]);
@@ -1600,14 +1606,20 @@ export const NodesLayer = memo(function NodesLayer({
   /* Flow ids with a rendered deck: a deck exists only for a placed implementer
      node, so derive from the layout's nodes to disable review actions whose
      implementer is unplaced. */
-  const renderableFlows = useMemo(() => renderableFlowIds(flows, new Set(layout.nodes.map((node) => node.file.path))), [flows, layout]);
+  /* Keyed on the placed PATHS, not the layout object: a relayout that placed
+     the same nodes must hand every card the same set (#1432). */
+  const placedPathKey = useMemo(() => layout.nodes.map((node) => node.file.path).join("\n"), [layout.nodes]);
+  const renderableFlows = useMemo(
+    () => renderableFlowIds(flows, new Set(placedPathKey ? placedPathKey.split("\n") : [])),
+    [flows, placedPathKey],
+  );
   /* A review-loop stage's reviewer transcript is folded into the flow's round
      deck, so focus the deck's latest round to reveal that reviewer; the node is
      removed. This is the same round-focus channel FlowStrip drives (#93 §2.2). */
-  const openPipelineFlow = (flowId: string) => {
+  const openPipelineFlow = useCallback((flowId: string) => {
     const flow = flows.find((candidate) => candidate.id === flowId);
     if (flow) onFocusRound(flow.id, flow.rounds.at(-1)?.n ?? 1);
-  };
+  }, [flows, onFocusRound]);
 
   /* A stack or deck stays lit when any conversation inside it is in the
      queue — a stalled branch may live in a mini stack, and a blocked
@@ -1687,7 +1699,7 @@ export const NodesLayer = memo(function NodesLayer({
             flow={flowsByImpl.get(node.file.path) ?? null}
             pipeline={pipeline}
             pipelineStage={pipelineStageByPath.get(node.file.path) ?? null}
-            linkedTasks={pipeline ? linkedTasksByPipeline.get(pipeline.id) ?? [] : []}
+            linkedTasks={pipeline ? linkedTasksByPipeline.get(pipeline.id) ?? EMPTY_TASKS : EMPTY_TASKS}
             relatedTasks={relatedTasksByPath?.get(node.file.path) ?? EMPTY_RELATIONS}
             flows={flows}
             files={files}
