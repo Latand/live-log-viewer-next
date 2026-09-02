@@ -46,7 +46,7 @@ mock.module("@/hooks/useLogTail", () => ({
   }),
 }));
 
-const { MobileFocusView } = await import("./MobileFocusView");
+const { MobileFocusView, BUMP_MS } = await import("./MobileFocusView");
 import type { MobileNav, MobileNavHost } from "./mobileNav";
 
 const { MobileNavContext, createMobileNav, topScreen } = await import("./mobileNav");
@@ -341,6 +341,14 @@ test("a swipe across the bar walks the switcher's order and bumps at its ends", 
   await settle();
   expect(barTitle()).toBe("Fix the flaky reseat test");
   expect(dom.document.querySelector("[data-mobile2-title]")?.getAttribute("data-mobile2-bump")).toBe("right");
+  /* The marker OUTLIVES the displacement. The 12 px shift springs back after
+     BUMP_MS, but a reader arriving after the gesture settled — the capture's
+     swipe flow does, a quarter of a second later — must still find the end of
+     the list recorded, exactly as the prototype leaves its class on. */
+  await new Promise((resolve) => setTimeout(resolve, BUMP_MS + 60));
+  expect(dom.document.querySelector("[data-mobile2-title]")?.getAttribute("data-mobile2-bump")).toBe("right");
+  /* And the cell itself is back at rest. */
+  expect((dom.document.querySelector("[data-mobile2-chat-title]") as unknown as HTMLElement).className).not.toContain("translate-x-3");
 });
 
 test("a vertical drag, and a touch outside the bar and dock, never switch the conversation", async () => {

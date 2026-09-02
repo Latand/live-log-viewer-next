@@ -426,24 +426,37 @@ export function MobileFocusView({ project, projectName, groups, manual, files, f
     if (topScreen(navState).kind === "chat") nav.replace({ kind: "chat", id: entry.id });
   }, [openEntry, setFocusPath, nav, navState]);
 
+  const [bumpPulse, setBumpPulse] = useState<{ side: "left" | "right"; id: number } | null>(null);
+
   const swipe = useCallback((dx: number) => {
     const direction = dx < 0 ? 1 : -1;
     const target = swipeTarget(switchEntries, resolvedKey, direction as 1 | -1);
     if (!target) {
-      nav.bump(direction === 1 ? "right" : "left");
+      const side = direction === 1 ? "right" : "left";
+      nav.bump(side);
+      /* The id restarts the displacement when the operator swipes the end
+         twice: without it the state is unchanged and the cell sits still. */
+      setBumpPulse((previous) => ({ side, id: (previous?.id ?? 0) + 1 }));
       return;
     }
     /* A step that lands ends whatever bump the last one at the edge started. */
     nav.clearBump();
+    setBumpPulse(null);
     switchTo(target, false);
   }, [switchEntries, resolvedKey, nav, switchTo]);
 
-  /* The bump clears itself, so the next end-of-list swipe animates again. */
+  /* Two halves of one gesture, on two clocks. The MARKER on the title cell
+     records that the last swipe found nothing to step to, and stays until one
+     lands — the prototype's `bump-r` class behaves exactly so, and the
+     capture reads the marker after the gesture has settled. The 12 px
+     DISPLACEMENT is the part the eye gets: it springs back after BUMP_MS, so
+     a cell that hit the end does not sit shifted for as long as the operator
+     stays. */
   useEffect(() => {
-    if (!navState.bump) return;
-    const timer = window.setTimeout(() => nav.clearBump(), BUMP_MS);
+    if (!bumpPulse) return;
+    const timer = window.setTimeout(() => setBumpPulse(null), BUMP_MS);
     return () => window.clearTimeout(timer);
-  }, [navState.bump, nav]);
+  }, [bumpPulse]);
 
   const onTouchStart = (event: React.TouchEvent<HTMLElement>) => {
     const touch = event.touches[0];
@@ -467,7 +480,7 @@ export function MobileFocusView({ project, projectName, groups, manual, files, f
       file={activeFile}
       offline={offline}
       stage={stage}
-      bump={navState.bump}
+      bump={bumpPulse?.side ?? null}
       renamed={renamed && renamed.path === activeFile.path ? renamed.title : null}
     />
   ) : (
