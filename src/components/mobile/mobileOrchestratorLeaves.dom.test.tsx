@@ -264,7 +264,7 @@ test("a project with nothing in it still offers the create row — the leaf wher
   expect(String(seatPosts[0]!.clientRequestId)).toMatch(/^[A-Za-z0-9_-]{8,128}$/);
 });
 
-test("the board leaf carries the single pin above its sections, and opening a conversation hands it to the focus view's strip", async () => {
+test("the board leaf carries the single pin above its sections, and the conversation it opens mounts no pin at all", async () => {
   const files = [conversation({ activity: "live", proc: "running", pid: 42 })];
   const host = mount({ files, catalogKnown: true, catalogConversationCount: 1 });
   /* The phone's first leaf is the board (mobile v2 lane 2): the pin is its
@@ -278,11 +278,13 @@ test("the board leaf carries the single pin above its sections, and opening a co
   expect(firstRow).not.toBeNull();
   expect(row(host).compareDocumentPosition(firstRow) & dom.Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
-  /* Opening a row pushes the conversation, and the pin travels with it into
-     the focus view's own strip: one row exists at a time, never two. */
+  /* Opening a row pushes the conversation screen (mobile v2 lane 3), which has
+     no strip: the pin that used to ride it is gone from this leaf — the seat is
+     reached from the switcher's first section and from `⋯ › Orchestrator seat`,
+     and lane 6 gives it the board's seat card. What must never happen is TWO
+     pins, so the dashboard's own slot stays absent here as well. */
   flushSync(() => firstRow.click());
   expect(await waitFor(() => host.querySelector('[data-testid="mobile-chat-shell"]') !== null)).toBe(true);
-  expect(rows(host)).toHaveLength(1);
+  expect(rows(host)).toHaveLength(0);
   expect(slot(host)).toBeNull();
-  expect(row(host).closest('[data-testid="mobile-chat-shell"]')).not.toBeNull();
 });

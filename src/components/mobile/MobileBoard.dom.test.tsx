@@ -371,7 +371,10 @@ test("opening a board row stamps the card seen (#1244) and pushes the conversati
   expect(String(seen[0]!.id)).toContain("conversation_/repo/done.jsonl");
   expect(topScreen(getMobileNav().getState())).toEqual({ kind: "chat", id: finished.path });
   expect(await waitFor(() => board(root) === null)).toBe(true);
-  expect(q(root, '[data-testid="mobile-focused-pane"]')?.textContent).toContain(finished.title);
+  /* The conversation screen names itself in the BAR's title cell (mobile v2
+     lane 3): the pane it opens carries no header of its own. */
+  expect(q(root, '[data-testid="mobile-focused-pane"]')).not.toBeNull();
+  expect(q(root, "[data-mobile2-title-text]")?.textContent).toContain(finished.title);
   /* The row places its node itself and does NOT go through the catalog
      resolver. That resolver lands by resetting the shell to the board
      (`nav.home()`, which predates the conversation screen), so routing a row
@@ -421,7 +424,8 @@ test("the board's footer lands the operator in the orchestrator's conversation, 
   click(dock);
   await settle();
   expect(topScreen(getMobileNav().getState())).toEqual({ kind: "chat", id: running.path });
-  expect(q(seated, '[data-testid="mobile-focused-pane"]')?.textContent).toContain(running.title);
+  expect(q(seated, '[data-testid="mobile-focused-pane"]')).not.toBeNull();
+  expect(q(seated, "[data-mobile2-title-text]")?.textContent).toContain(running.title);
   /* Same open as a row's, and the same reason it is not the resolver's. */
   expect(opened).toEqual([]);
 });

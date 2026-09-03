@@ -8,13 +8,17 @@ import type { RuntimeSessionView } from "@/hooks/useRuntime";
 import { emptyStore } from "@/components/runtime/runtimeModel";
 
 /*
- * Finding 6 (issue #241): the REAL mobile focus wrapper (`MobileFocusView` →
- * `BranchPane`) must mount the control strip for the focused conversation,
- * classify a scanner-shaped subagent as `live-subagent`, and expose 44px mobile
- * control targets. Chat-first (issue #419): the detailed runtime controls fold
- * behind the conversation-details disclosure by default, so the strip is one tap
- * away — this opens it before asserting the strip contract. Regressions in the
- * phone layout fail here independently.
+ * Finding 6 (issue #241) after mobile v2 lane 3: the REAL mobile focus wrapper
+ * (`MobileFocusView` → `MobileShell` → `BranchPane`) must reach every runtime
+ * control of the focused conversation — including a scanner-shaped subagent,
+ * whose capabilities come from its structured ROOT — and each one must be a
+ * LABELLED 44 px row, because an icon-only control has no touch route to its
+ * meaning (2026-08 audit finding 18).
+ *
+ * So the strip itself does not render on the phone at all: it is the
+ * conversation's `⋯` menu that carries Stop, Compact, Re-check, Open in
+ * terminal, Details & host and Kill, off the same hooks the desktop strip
+ * reads. Regressions in the phone layout fail here independently.
  */
 
 const dom = new HappyWindow();
@@ -77,7 +81,7 @@ const subagent: FileEntry = {
   proc: null, pid: null, conversationId: "conv-child", model: "sonnet", pendingQuestion: null, waitingInput: null,
 };
 
-test("the mobile focus view mounts the strip and classifies a scanner-shaped subagent as live-subagent", () => {
+test("the phone renders no inline control strip: every control is a labelled 44 px row in the conversation menu", () => {
   const host = dom.document.createElement("div");
   dom.document.body.append(host);
   const rootInstance = createRoot(host as unknown as HTMLElement);
@@ -100,16 +104,38 @@ test("the mobile focus view mounts the strip and classifies a scanner-shaped sub
       onDraftSpawned={() => undefined}
     />,
   ));
+  const root = host as unknown as HTMLElement;
 
-  /* Chat-first default folds the detailed runtime controls; reveal them. */
-  const details = (host as unknown as HTMLElement).querySelector('[data-testid="mobile-details-toggle"]') as HTMLButtonElement;
-  expect(details).not.toBeNull();
-  flushSync(() => details.click());
+  /* Nothing on the screen: no strip, and no details disclosure that used to
+     hide it — the whole two-row pane header is gone on the phone. */
+  expect(root.querySelector("[data-agent-control-strip]")).toBeNull();
+  expect(root.querySelector('[data-testid="mobile-details-toggle"]')).toBeNull();
+  expect(root.querySelector('[data-testid="mobile-focused-pane"] header')).toBeNull();
 
-  const strip = (host as unknown as HTMLElement).querySelector("[data-agent-control-strip]");
-  expect(strip).not.toBeNull();
-  expect(strip?.getAttribute("data-strip-surface")).toBe("structured-subagent");
-  // mobile control targets are 44px (h-11 w-11) — the strip's own buttons
-  const stripButtons = [...(strip as HTMLElement).querySelectorAll("button")];
-  expect(stripButtons.some((b) => b.className.includes("h-11") && b.className.includes("w-11"))).toBe(true);
+  /* One overflow, and the controls are inside it. */
+  const more = root.querySelector('[data-mobile2-open="menu"]') as HTMLButtonElement;
+  expect(more).not.toBeNull();
+  flushSync(() => more.click());
+  const sheet = root.querySelector('[data-mobile2-sheet="menu"]') as HTMLElement;
+  expect(sheet).not.toBeNull();
+
+  const rows = [...sheet.querySelectorAll("[data-mobile2-menu-row]")] as unknown as HTMLElement[];
+  const named = rows.map((row) => row.getAttribute("data-mobile2-menu-row"));
+  /* The structured root answers for its subagent, so the runtime controls are
+     the ones the capability matrix admits — not an empty menu. */
+  expect(named).toContain("stop");
+  expect(named).toContain("host");
+  expect(named).toContain("kill");
+  expect(named).toContain("rename");
+
+  for (const row of rows) {
+    /* 44 px, labelled, and the label is words rather than an icon alone. */
+    expect(row.className).toContain("min-h-11");
+    expect((row.textContent ?? "").trim().length).toBeGreaterThan(0);
+  }
+
+  /* Kill is last and destructive, and it asks nothing before acting (Q4). */
+  expect(named[named.length - 1]).toBe("kill");
+  const kill = sheet.querySelector('[data-testid="mobile-menu-kill"]') as HTMLElement;
+  expect(kill.className).toContain("text-danger");
 });

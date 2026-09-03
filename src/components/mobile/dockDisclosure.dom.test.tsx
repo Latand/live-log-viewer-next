@@ -7,7 +7,6 @@ import { emptyStore } from "@/components/runtime/runtimeModel";
 import type { BranchGroup } from "@/components/projectModel";
 import type { FileEntry } from "@/lib/types";
 import type { Pipeline } from "@/lib/pipelines/types";
-import type { WorkerStack } from "@/components/scheme/workerCollapse";
 
 /*
  * Issue #156 — the focused conversation must stay the dominant mobile surface.
@@ -108,7 +107,7 @@ function entry(overrides: Partial<FileEntry> & { path: string }): FileEntry {
   };
 }
 
-function view(groups: BranchGroup[], files: FileEntry[], stacks: WorkerStack[] = []) {
+function view(groups: BranchGroup[], files: FileEntry[]) {
   return (
     <MobileFocusView
       project="demo"
@@ -118,7 +117,6 @@ function view(groups: BranchGroup[], files: FileEntry[], stacks: WorkerStack[] =
       flows={[]}
       pipelines={[pipeline]}
       surfacePipelines={[pipeline]}
-      workerStacks={stacks}
       tasks={[]}
       drafts={[]}
       loaded
@@ -131,7 +129,7 @@ function view(groups: BranchGroup[], files: FileEntry[], stacks: WorkerStack[] =
   );
 }
 
-test("a focused conversation collapses docked pipelines into ONE summary row; the sheet reveals the full rail (#419/#156)", async () => {
+test("a focused conversation mounts no pipeline rail at all; the menu's row reveals the full one (#419/#156)", async () => {
   const conversation = entry({ path: "/session", title: "Main session", activity: "live", mtime: 9_000 });
   const group: BranchGroup = {
     key: conversation.path,
@@ -144,15 +142,20 @@ test("a focused conversation collapses docked pipelines into ONE summary row; th
   roots.push(mount(view([group], [conversation])));
   await settle();
 
-  /* Chat-first (#419): no per-pipeline dock rows below the pane — just one
-     44px summary row, and no stage rail is mounted until the sheet opens. */
+  /* Chat-first (#419), now with the strip gone too (mobile v2 lane 3): no
+     per-pipeline dock rows below the pane, no summary trigger on the screen,
+     and no stage rail mounted until the sheet opens. */
   expect(dom.document.querySelector('[data-testid="mobile-pipeline-dock"]')).toBeNull();
-  const summary = dom.document.querySelector('[data-testid="mobile-pipeline-summary"]') as unknown as HTMLButtonElement | null;
-  expect(summary).not.toBeNull();
+  expect(dom.document.querySelector('[data-testid="mobile-pipeline-summary"]')).toBeNull();
   expect(dom.document.querySelector('[aria-label="Pipeline stages"]')).toBeNull();
 
-  /* Tapping the summary opens the bottom sheet; docks mount collapsed there. */
-  flushSync(() => summary!.click());
+  /* The reach is the conversation menu's first row; the docks mount collapsed
+     in the sheet it opens. */
+  const more = dom.document.querySelector('[data-mobile2-open="menu"]') as unknown as HTMLButtonElement;
+  flushSync(() => more.click());
+  const row = dom.document.querySelector('[data-testid="mobile-menu-pipeline"]') as unknown as HTMLButtonElement;
+  expect(row).not.toBeNull();
+  flushSync(() => row.click());
   await settle();
   const sheet = dom.document.querySelector('[data-testid="mobile-pipeline-sheet"]');
   expect(sheet).not.toBeNull();
@@ -174,37 +177,4 @@ test("the empty-state branch (no conversation) mounts its docks expanded — the
   const dock = dom.document.querySelector('[data-testid="mobile-pipeline-dock"]');
   expect(dock).not.toBeNull();
   expect(dock!.querySelector('[aria-label="Pipeline stages"]')).not.toBeNull();
-});
-
-test("the map overlay shows the one-row pipeline summary; the sheet keeps every plan reachable (#419/#156)", async () => {
-  const conversation = entry({ path: "/session", title: "Main session", activity: "live", mtime: 9_000 });
-  const group: BranchGroup = {
-    key: conversation.path,
-    columns: [{ file: conversation, tasks: [] }],
-    returnable: [],
-    finished: [],
-    smt: conversation.mtime,
-    orphanTask: false,
-  };
-  const stack: WorkerStack = { key: "stack::pipe:p1", kind: "pipeline", id: "p1", items: [] };
-  roots.push(mount(view([group], [conversation], [stack])));
-  await settle();
-
-  const openBtn = dom.document.querySelector('button[aria-label="Open the project map"]') as HTMLButtonElement | null;
-  expect(openBtn).not.toBeNull();
-  flushSync(() => openBtn!.click());
-  await settle();
-
-  /* The map overlay carries the same one-row summary — no stack of dock rows
-     stealing the map (#419), but the plan stays one tap away. */
-  const overlay = dom.document.querySelector('[aria-label="Close the map"]')!.closest("div.fixed")!;
-  const summary = overlay.querySelector('[data-testid="mobile-pipeline-summary"]') as unknown as HTMLButtonElement | null;
-  expect(summary).not.toBeNull();
-  expect(overlay.querySelector('[data-testid="mobile-pipeline-dock"]')).toBeNull();
-
-  flushSync(() => summary!.click());
-  await settle();
-  const sheet = dom.document.querySelector('[data-testid="mobile-pipeline-sheet"]');
-  expect(sheet).not.toBeNull();
-  expect(sheet!.querySelector('[data-testid="mobile-pipeline-dock-summary"]')).not.toBeNull();
 });

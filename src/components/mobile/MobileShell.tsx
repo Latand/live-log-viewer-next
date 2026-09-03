@@ -1,7 +1,7 @@
 "use client";
 
 import { ChevronDown, ChevronLeft, Ellipsis, Search, TriangleAlert } from "lucide-react";
-import { useEffect, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 
 import type { ConnectionState } from "@/components/runtime/runtimeModel";
 import { useRuntimeBusState } from "@/hooks/useRuntime";
@@ -76,6 +76,35 @@ export interface MobileShellHost {
 }
 
 export type SheetRenderer = (name: MobileSheetName, close: () => void) => ReactNode;
+
+/** What an enclosing shell offers a screen mounted inside it: the Viewer's
+    host (the attention badge, the arrival banner, the sheets it owns), the
+    owner's own sheet renderer, and the claim a nested screen makes when it
+    renders the bar itself.
+
+    This is the seam between the shell (lane 1) and the screens that land in
+    later lanes. The board mounts the conversation screen INSIDE its own shell
+    (lane 2's leaf choice), and the conversation screen owns the bar — its
+    title cell, its meta line, its `⋯` (lane 3, README §3.2, §4.2). Rather than
+    the board guessing at another screen's bar, the screen mounts its own
+    MobileShell and CLAIMS the chrome; the shell around it yields its bar,
+    banner slot, receipt and sheet for as long as the claim stands, and passes
+    down the host and its own sheets so the inner bar still carries the badge,
+    the arrival banner and the board's `⋯` rows. Exactly one bar exists at a
+    time, and no screen has to be composed by another screen's owner. */
+export interface MobileShellChrome {
+  host: MobileShellHost | null;
+  renderSheet?: SheetRenderer;
+  /** Claimed by a nested screen's shell for as long as it is mounted. */
+  claim?: (claimed: boolean) => void;
+}
+
+const MobileShellChromeContext = createContext<MobileShellChrome | null>(null);
+
+/** The chrome an enclosing shell offers, or null at the top of the tree. */
+export function useMobileShellChrome(): MobileShellChrome | null {
+  return useContext(MobileShellChromeContext);
+}
 
 const ICON_BUTTON = "flex h-11 w-11 shrink-0 items-center justify-center rounded-[8px] text-secondary active:bg-sunken active:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40";
 
@@ -170,97 +199,130 @@ export function MobileShell({
   const nav = useMobileNavStore();
   const state = useMobileNav();
   useEffect(() => nav.attach(), [nav]);
+  /* The shell this one is mounted inside, if any: it lends its host and its
+     sheets, and it is who this shell claims the chrome from. */
+  const outer = useMobileShellChrome();
+  const outerClaim = outer?.claim;
+  useEffect(() => {
+    if (!outerClaim) return;
+    outerClaim(true);
+    return () => outerClaim(false);
+  }, [outerClaim]);
+  /* A screen mounted inside this one renders the bar instead (see
+     MobileShellChrome). While that claim stands this shell is a plain column:
+     no bar, no banner, no receipt, no dock, no sheet — one of each, always.
+     The claim changes what this shell RENDERS and never the shape of the tree
+     it renders it in, so yielding the chrome does not tear the screen inside
+     it down and mount it again. */
+  const [claimed, setClaimed] = useState(false);
+  const claim = useCallback((next: boolean) => setClaimed(next), []);
+  const effectiveHost = host ?? outer?.host ?? null;
   const close = () => nav.closeSheet();
-  const attention = (host?.attentionCount ?? 0) > 0;
+  const attention = (effectiveHost?.attentionCount ?? 0) > 0;
   const showSearch = Boolean(onOpenSearch);
-  const sheet = state.sheet ? (renderSheet?.(state.sheet, close) ?? host?.renderSheet(state.sheet, close) ?? null) : null;
+  const sheet = !claimed && state.sheet
+    ? (renderSheet?.(state.sheet, close) ?? outer?.renderSheet?.(state.sheet, close) ?? effectiveHost?.renderSheet(state.sheet, close) ?? null)
+    : null;
   const top = topScreen(state);
+  const chrome = useMemo<MobileShellChrome>(
+    () => ({ host: effectiveHost, renderSheet: renderSheet ?? outer?.renderSheet, claim }),
+    [effectiveHost, renderSheet, outer?.renderSheet, claim],
+  );
   const cell = "flex h-11 min-w-0 flex-1 items-center gap-1 rounded-[8px] px-1.5 text-left";
+  /* The screen this shell IS sits on top of the stack; when something else
+     does, another shell inside it is that screen and carries the transition
+     key. Keying on the top screen either way would remount this column — and
+     everything mounted in it — on a sibling switch that never left it. */
+  const nested = top.kind !== screen;
   return (
+    <MobileShellChromeContext.Provider value={chrome}>
     <div
-      key={screenKey(top)}
-      data-mobile2-screen={screen}
-      data-mobile2-conversation={screen === "chat" ? screenId : undefined}
-      data-mobile2-pipeline={screen === "pipeline" ? screenId : undefined}
-      data-mobile2-motion={state.motion}
-      className={`relative flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden overflow-x-clip bg-canvas transition-[transform,opacity] duration-[200ms] ease-[cubic-bezier(0.2,0,0,1)] motion-reduce:transition-none ${MOTION[state.motion] ?? ""}`}
+      key={nested ? screen : screenKey(top)}
+      data-mobile2-screen={claimed ? undefined : screen}
+      data-mobile2-conversation={!claimed && screen === "chat" ? screenId : undefined}
+      data-mobile2-pipeline={!claimed && screen === "pipeline" ? screenId : undefined}
+      data-mobile2-motion={claimed ? undefined : state.motion}
+      className={`relative flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden overflow-x-clip bg-canvas transition-[transform,opacity] duration-[200ms] ease-[cubic-bezier(0.2,0,0,1)] motion-reduce:transition-none ${claimed ? "" : MOTION[state.motion] ?? ""}`}
     >
-      <header data-mobile2-bar className="flex h-[52px] shrink-0 items-center gap-0.5 border-b border-border bg-canvas px-1">
-        {back ? (
-          <button type="button" data-mobile2-back aria-label={t("mobile2.bar.back")} className={ICON_BUTTON} onClick={() => nav.back()}>
-            <ChevronLeft className="h-5 w-5" aria-hidden />
-          </button>
-        ) : null}
-        {titleOpens ? (
-          <button
-            type="button"
-            data-mobile2-title
-            data-mobile2-open={titleOpens}
-            data-mobile2-bump={state.bump ?? undefined}
-            aria-label={titleLabel}
-            aria-haspopup="dialog"
-            aria-expanded={state.sheet === titleOpens}
-            className={`${cell} active:bg-sunken focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/40`}
-            onClick={() => nav.openSheet(titleOpens)}
-          >
-            {title}
-            <ChevronDown className="h-4 w-4 shrink-0 text-muted" aria-hidden />
-          </button>
-        ) : (
-          <div data-mobile2-title data-mobile2-bump={state.bump ?? undefined} className={cell}>
-            {title}
-          </div>
-        )}
-        {attention ? (
-          <button
-            type="button"
-            data-mobile2-open="attention"
-            data-mobile2-attention-count={host?.attentionCount}
-            aria-label={t("mobile2.bar.attention", { count: host?.attentionCount ?? 0 })}
-            aria-haspopup="dialog"
-            aria-expanded={state.sheet === "attention"}
-            className="flex h-11 shrink-0 items-center px-[3px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-            onClick={() => nav.openSheet("attention")}
-          >
-            <span className="inline-flex h-7 items-center gap-1 rounded-full border border-warning/45 bg-warning-soft px-2.5 text-ui font-bold tabular-nums text-warning">
-              <TriangleAlert className="h-[13px] w-[13px]" aria-hidden />
-              {host?.attentionCount}
-            </span>
-          </button>
-        ) : null}
-        {showSearch ? (
-          <button type="button" data-testid={searchTestId} data-mobile2-open="search" aria-label={t("mobile2.bar.search")} className={ICON_BUTTON} onClick={onOpenSearch}>
-            <Search className="h-5 w-5" aria-hidden />
-          </button>
-        ) : null}
-        {menu ? (
-          <button
-            type="button"
-            data-mobile2-open="menu"
-            aria-label={t("mobile2.bar.more")}
-            aria-haspopup="dialog"
-            aria-expanded={state.sheet === "menu"}
-            className={ICON_BUTTON}
-            onClick={() => nav.openSheet("menu")}
-          >
-            <Ellipsis className="h-5 w-5" aria-hidden />
-          </button>
-        ) : null}
-      </header>
-      <MobileBannerSlot screen={screen} arrival={host?.arrival ?? null} />
-      <div data-mobile2-body className="flex min-h-0 min-w-0 flex-1 flex-col">
+      {claimed ? null : (
+        <header data-mobile2-bar className="flex h-[52px] shrink-0 items-center gap-0.5 border-b border-border bg-canvas px-1">
+          {back ? (
+            <button type="button" data-mobile2-back aria-label={t("mobile2.bar.back")} className={ICON_BUTTON} onClick={() => nav.back()}>
+              <ChevronLeft className="h-5 w-5" aria-hidden />
+            </button>
+          ) : null}
+          {titleOpens ? (
+            <button
+              type="button"
+              data-mobile2-title
+              data-mobile2-open={titleOpens}
+              data-mobile2-bump={state.bump ?? undefined}
+              aria-label={titleLabel}
+              aria-haspopup="dialog"
+              aria-expanded={state.sheet === titleOpens}
+              className={`${cell} active:bg-sunken focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/40`}
+              onClick={() => nav.openSheet(titleOpens)}
+            >
+              {title}
+              <ChevronDown className="h-4 w-4 shrink-0 text-muted" aria-hidden />
+            </button>
+          ) : (
+            <div data-mobile2-title data-mobile2-bump={state.bump ?? undefined} className={cell}>
+              {title}
+            </div>
+          )}
+          {attention ? (
+            <button
+              type="button"
+              data-mobile2-open="attention"
+              data-mobile2-attention-count={effectiveHost?.attentionCount}
+              aria-label={t("mobile2.bar.attention", { count: effectiveHost?.attentionCount ?? 0 })}
+              aria-haspopup="dialog"
+              aria-expanded={state.sheet === "attention"}
+              className="flex h-11 shrink-0 items-center px-[3px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              onClick={() => nav.openSheet("attention")}
+            >
+              <span className="inline-flex h-7 items-center gap-1 rounded-full border border-warning/45 bg-warning-soft px-2.5 text-ui font-bold tabular-nums text-warning">
+                <TriangleAlert className="h-[13px] w-[13px]" aria-hidden />
+                {effectiveHost?.attentionCount}
+              </span>
+            </button>
+          ) : null}
+          {showSearch ? (
+            <button type="button" data-testid={searchTestId} data-mobile2-open="search" aria-label={t("mobile2.bar.search")} className={ICON_BUTTON} onClick={onOpenSearch}>
+              <Search className="h-5 w-5" aria-hidden />
+            </button>
+          ) : null}
+          {menu ? (
+            <button
+              type="button"
+              data-mobile2-open="menu"
+              aria-label={t("mobile2.bar.more")}
+              aria-haspopup="dialog"
+              aria-expanded={state.sheet === "menu"}
+              className={ICON_BUTTON}
+              onClick={() => nav.openSheet("menu")}
+            >
+              <Ellipsis className="h-5 w-5" aria-hidden />
+            </button>
+          ) : null}
+        </header>
+      )}
+      {claimed ? null : <MobileBannerSlot screen={screen} arrival={effectiveHost?.arrival ?? null} />}
+      <div data-mobile2-body={claimed ? undefined : true} className="flex min-h-0 min-w-0 flex-1 flex-col">
         {children}
       </div>
       {/* The receipt takes its own height between the body and the dock; a
           sheet shows it inside itself instead. */}
-      {state.sheet ? null : <MobileReceipt placement="flow" />}
-      {dock ? (
+      {claimed || state.sheet ? null : <MobileReceipt placement="flow" />}
+      {!claimed && dock ? (
         <footer data-mobile2-dock className="shrink-0 border-t border-border bg-card px-3 pb-[calc(6px+env(safe-area-inset-bottom))] pt-1.5">
           {dock}
         </footer>
       ) : null}
       {sheet}
     </div>
+    </MobileShellChromeContext.Provider>
   );
 }
 

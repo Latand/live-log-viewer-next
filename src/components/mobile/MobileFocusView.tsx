@@ -1,13 +1,13 @@
 "use client";
 
-import { ListTodo, Map as MapIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { Loader2, X } from "@/components/icons";
+import { Loader2 } from "@/components/icons";
 import { TaskSheet, type TaskSheetView } from "@/components/tasks/TaskSheet";
 import { taskRelationsByPath } from "@/components/tasks/taskRelations";
 import { useBoardState } from "@/hooks/useBoardState";
 import { useKeyboardInset } from "@/hooks/useComposer";
+import { useRuntimeBusState } from "@/hooks/useRuntime";
 import { selectionInOrder, viewBus } from "@/hooks/viewPresenceBus";
 import { projectDisplayName } from "@/lib/displayNames";
 import type { Flow } from "@/lib/flows/types";
@@ -15,36 +15,43 @@ import type { Pipeline } from "@/lib/pipelines/types";
 import { useLocale } from "@/lib/i18n";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
-import { MAX_VISIBLE_PATHS } from "@/lib/view/types";
 
 import { BranchPane } from "@/components/BranchPane";
-import { ConnectionPill } from "@/components/ConnectionPill";
 import { DraftAgentPane } from "@/components/DraftAgentPane";
 import { isWorkflowDraftId } from "@/components/workflows/workflowModel";
 import { WorkflowDraftPane } from "@/components/workflows/WorkflowDraftPane";
 import { RoundDeck } from "@/components/flows/RoundDeck";
-import { mapReachable } from "./mapGate";
 import { MIN_TRANSCRIPT_SHARE } from "./chatBudget";
+import { ChatEngineMark } from "./chatEngineMark";
 import { paneState, type PaneState } from "@/components/paneState";
 import type { BranchGroup } from "@/components/projectModel";
-import { activityDot, cleanTitle, engineBadge } from "@/components/utils";
+import { draftWorkingDirectory } from "@/components/projectModel";
+import { cleanTitle, engineBadge, effortTitle } from "@/components/utils";
 
-import { STAGE_GLYPH, STAGE_TONES, compactPipelineLayoutFlows, compactStageOpenTarget, latestAttempt, partitionPipelineSurfaces, pipelineLinkedTasks, renderableFlowIds, stageChipLabel, stageChipState, stageHasEvidence, stageHasNavigableHistory } from "@/components/pipelines/pipelineModel";
-import { VerdictPopover } from "@/components/pipelines/VerdictPopover";
-import { MobileOrchestratorRow } from "./MobileOrchestratorRow";
+import { compactPipelineLayoutFlows, partitionPipelineSurfaces, pipelineLinkedTasks, renderableFlowIds } from "@/components/pipelines/pipelineModel";
 import { MobilePipelineDock } from "./MobilePipelineDock";
-import { MobilePipelineDockSheet, MobilePipelineSummaryButton, MobilePipelineSummaryRow } from "./MobilePipelineDockSheet";
+import { MobilePipelineDockSheet } from "./MobilePipelineDockSheet";
 import { conversationIdentity } from "@/lib/accounts/identity";
-import { SubagentTray, type SubagentTrayApi } from "../scheme/SubagentTrayView";
+import { useFavorites } from "@/components/favorites/FavoritesContext";
+import { useOrchestratorSeat } from "@/components/orchestrator/useOrchestratorSeat";
+import { useSeatPanel } from "@/components/orchestrator/useSeatPanel";
+import { SessionTitle } from "@/components/session/SessionTitle";
 import { focusHandoffBus } from "@/components/attention/focusHandoffBus";
 import { deckKey } from "@/components/scheme/agentLinks";
 import { buildFocusFrameIndex, stageAnchorAliases } from "@/components/scheme/focusFrames";
 import { buildSchemeLayout } from "@/components/scheme/layout";
 import { SubagentBadges } from "@/components/scheme/SubagentBadges";
-import { layoutPipelineGroups, type PipelinePane } from "@/components/scheme/pipelineAnchor";
-import { isPlacedTask, taskRect } from "@/components/scheme/taskGeometry";
+import type { SubagentTrayApi } from "@/components/scheme/SubagentTrayView";
 import type { WorkerStack } from "@/components/scheme/workerCollapse";
-import { MobileMapLite } from "./MobileMapLite";
+
+import { WakeupChip, wakeupChipKey } from "@/components/WakeupChip";
+
+import { MobileBarTitle, MobileShell, useMobileShellChrome, type MobileShellHost, type SheetRenderer } from "./MobileShell";
+import { MobileConversationMenu } from "./MobileConversationMenu";
+import { MobileOrchestratorSheet } from "./MobileOrchestratorSheet";
+import { MobileSwitchSheet, switchList, swipeTarget, type SwitchCandidate, type SwitchEntry } from "./MobileSwitchSheet";
+import { CHAT_TONE_DOT, CHAT_TONE_TEXT, chatStateBits, stagePosition, type StagePosition } from "./mobileChatState";
+import { topScreen, useMobileNav, useMobileNavStore } from "./mobileNav";
 
 /* Re-exported so existing importers (and tests) keep resolving it here after
    the component moved to its own module (issue #419). */
@@ -65,15 +72,27 @@ function rememberedFocus(project: string): string | null {
    one, freshness breaks ties inside a class. */
 const STATE_SCORE: Record<PaneState, number> = { waiting: 5, stalled: 4, live: 3, returned: 2, done: 1 };
 
-/* Swipe on the pane header: mostly-horizontal and long enough to be deliberate. */
+/* A swipe across the bar or the dock: mostly-horizontal and long enough to be
+   deliberate. The prototype uses the same 56 px / 2:1 test. */
 const SWIPE_MIN_X = 56;
+/** Where a horizontal swipe switches conversations (README §3.3). Anywhere
+    else — the feed above all — keeps its own scrolling. */
+export const SWIPE_ZONE = "[data-mobile2-bar], [data-mobile2-dock]";
+/** How long the title cell's end-of-list bump runs (§5). */
+export const BUMP_MS = 200;
 const EMPTY_PATHS: ReadonlySet<string> = new Set();
 
 /* Height of the phone's bottom-up subagent badge rail — the 12-badge hard cap
-   at 30px + 6px gaps. The rail anchors to the focused pane's left edge and lifts
-   clear of the composer, so a tap expands the title rightward inside the 390px
-   viewport with no horizontal overflow. */
+   at 30 px + 6 px gaps. It anchors to the focused pane's left edge and lifts
+   clear of the composer; expansion grows rightward inside the 390 px viewport,
+   so it never adds horizontal overflow. */
 const SUBAGENT_RAIL_H = 12 * 36;
+
+/** True when a touch that landed on `target` belongs to the swipe zone. */
+export function inSwipeZone(target: EventTarget | null): boolean {
+  const element = target as Element | null;
+  return Boolean(element && typeof element.closest === "function" && element.closest(SWIPE_ZONE));
+}
 
 interface Entry {
   key: string;
@@ -96,19 +115,21 @@ interface Props {
   pipelines: Pipeline[];
   /** Active project pipelines consumed directly by the mobile pipeline dock. */
   surfacePipelines?: Pipeline[];
-  /** Collapsed worker stacks (issue #136): one dot per origin on the full-map
-      minimap, so folded workers read as a handful of dots there too. */
+  /** Accepted and IGNORED. Nothing on this screen reads collapsed worker
+      stacks any more — issue #136's layout use is gone and `buildSchemeLayout`
+      never sees them — so the declaration survives for exactly one reason: the
+      board's call site (`ProjectDashboard.tsx`, lane 2's file) still passes
+      them, and an unknown JSX attribute is a type error there. Delete that one
+      line and this goes with it. */
   workerStacks?: WorkerStack[];
-  /** Board-mounted tasks: mini-cards on the map (status-stacked cards are
-      filtered out upstream and live in the compact strip). */
+  /** Board-mounted tasks. */
   tasks: BoardTask[];
   /** The project's FULL task list for the sheet and the count badge, so a
       status-stacked card stays reachable on the phone. Defaults to `tasks`. */
   sheetTasks?: BoardTask[];
   /** Ids of not-yet-spawned conversation drafts, focusable like nodes. */
   drafts: string[];
-  /** Durable identities the user has crowned (issue #224): their roots lift into
-      the pinned top band on the map, mirroring the desktop scheme. */
+  /** Durable identities the user has crowned (issue #224). */
   favorites?: ReadonlySet<string>;
   /** Compact transcript paths opened as isolated history panes. */
   isolatedManualPaths?: ReadonlySet<string>;
@@ -121,17 +142,36 @@ interface Props {
   onDraftSpawned: (id: string, file: FileEntry) => void;
   /** The operator opened this conversation full-pane, the same signal
       `SchemeBoard` reports from a desktop expand. On the phone the gesture is a
-      chip tap, a map pick, or the pinned seat row — the deliberate act the board
-      counts as having SEEN a finished lane's outcome (#1244). */
+      switcher row, a map pick or the attention row — the deliberate act the
+      board counts as having SEEN a finished lane's outcome (#1244). */
   onConversationOpened?: (path: string) => void;
   /** Reports the focused conversation's file (or null) so the project shell can
-      dock a single handoff control in the footer shelf row (issue #177 item 5),
-      keeping the handoff, collapsed-worker, and quiet strips on one row. */
+      dock a single handoff control in the host sheet (issue #177 item 5). */
   onActiveChange?: (file: FileEntry | null) => void;
-  /** Bumped by the header `+ Task` button to open the sheet's create view. */
-  taskSheetNonce?: number;
-  /** Engine-native subagent tray surface (issue #142): the focused parent's
-      folded children render as inline rows inside its pane on the phone. */
+  /* ── The shell (mobile v2 lane 3) ──────────────────────────────────────── */
+  /** The Viewer's shell host: the attention badge, the arrival banner and the
+      sheets it owns (the project switcher, the queue, search). Optional: when
+      this screen is mounted inside the board's shell it inherits the host from
+      it (`useMobileShellChrome`), so the board's call site plumbs it once. */
+  shellHost?: MobileShellHost | null;
+  /** The project board's own sheets — its `⋯` menu and the host sheet — for
+      the sheet names this screen does not own. Inherited from the enclosing
+      shell when the caller does not pass one. */
+  renderBoardSheet?: SheetRenderer;
+  /** The search palette (#1054): a bar target on the board, a `⋯` row here. */
+  onOpenSearch?: () => void;
+  /** Background tasks behind «Details & host», as the menu row's count. */
+  hostTaskCount?: number;
+  /** Drops a draft that continues a conversation, for the menu's «Hand off»
+      row (§4.2). The board owns the draft, so the screen only asks for it. */
+  onHandoff?: (file: FileEntry) => void;
+  /** In-flow alert the project board renders above the leaf. */
+  alert?: React.ReactNode;
+  /** Engine-native subagent tray surface (issue #142). The DOCKED tray is gone
+      with the rest of this screen's chrome (§3.4 spends 0 px on it): folded
+      children are reached from the subagent rail over the pane and from the
+      feed. The prop stays in the contract because the board owns the tray for
+      the desktop and hands the same object to every leaf. */
   trayApi?: SubagentTrayApi;
 }
 
@@ -143,14 +183,37 @@ export function pipelinesToDock(pipelines: readonly Pipeline[], memberfulGroupId
 }
 
 /**
- * The phone presentation of a project: one conversation pinned nearly
- * full-screen, a strip of status chips to hop between conversations, a
- * minimap chip that unfolds the whole scheme as a pick-only map. The same
- * data the scheme draws — nothing on the diagram is unreachable, it is just
- * shown one pane at a time.
+ * The phone's CONVERSATION SCREEN (docs/design/mobile-v2/README.md §4.2, §8
+ * row 3).
+ *
+ * What used to be here — a 56 px strip carrying the pinned seat, a scroller of
+ * engine-labelled chips, the pipeline hop chips and a right cluster of map and
+ * task buttons — is gone. It cost the transcript a permanent row, it named
+ * conversations by their engine ("Claude · Claude · Claude"), and its trailing
+ * icons collided with the chip scroller's fade at 390 px (§1.3).
+ *
+ * In its place the shell's ONE bar carries the conversation: the title on one
+ * line, and a meta line under it whose state phrase never truncates (§3.2).
+ * The title cell is the switcher; a swipe across the bar or the dock walks the
+ * switcher's order minus Recent and bumps at either end; `⋯` holds every
+ * former header control as a labelled row. The screen owns no chrome of its
+ * own, so the transcript gets everything under the bar.
+ *
+ * With no conversation to show — an empty project, a board whose nodes have
+ * not loaded — the same shell renders the board leaf, which lane 2 fills with
+ * the board list.
  */
-export function MobileFocusView({ project, projectName, groups, manual, files, flows, reviewGroups = [], pipelines, surfacePipelines = [], workerStacks = [], tasks, sheetTasks, drafts, favorites, isolatedManualPaths = EMPTY_PATHS, loaded, focus, onSelect, onClose, onDraftClose, onDraftSpawned, onConversationOpened, onActiveChange, taskSheetNonce = 0, trayApi }: Props) {
+export function MobileFocusView({ project, projectName, groups, manual, files, flows, reviewGroups = [], pipelines, surfacePipelines = [], tasks, sheetTasks, drafts, favorites, isolatedManualPaths = EMPTY_PATHS, loaded, focus, onSelect, onClose, onDraftClose, onDraftSpawned, onConversationOpened, onActiveChange, shellHost = null, renderBoardSheet, onOpenSearch, hostTaskCount = 0, onHandoff, alert }: Props) {
   const { t } = useLocale();
+  /* The screen is mounted INSIDE the project board's shell (lane 2 pushes it
+     when a conversation reaches the top of the stack), so the badge, the
+     arrival banner and the board's own sheets are already one level up: this
+     screen claims the chrome and reads them off the shell around it rather
+     than having them threaded through the board's call site a second time.
+     The explicit props still win, for a caller that mounts this screen alone. */
+  const outerChrome = useMobileShellChrome();
+  const host = shellHost ?? outerChrome?.host ?? null;
+  const boardSheet = renderBoardSheet ?? outerChrome?.renderSheet;
   /* The project-scoped board store, read here for the ONE canonical selection
      (#771). Same store the desktop board and the dashboard bind — stores are
      refcounted per project, so this is the same instance, never a copy. */
@@ -158,14 +221,16 @@ export function MobileFocusView({ project, projectName, groups, manual, files, f
   /* The on-screen keyboard's overlap with this full-height root (#983). iOS
      Safari ignores interactive-widget=resizes-content, so with the keyboard up
      this 100dvh column kept its full height and the keyboard covered its
-     bottom — the composer's picker/send controls included. The browser then
-     scrolled the WINDOW to reach the focused field, hiding the header, and
-     re-asserted that scroll against every manual gesture (the snap-back:
-     an overflow-hidden root gives a gesture nothing else to move). Padding
-     the overlap away keeps the whole column inside the visible area, so the
-     browser has no reason to touch the window scroll at all. Zero whenever
-     the layout viewport already matches the visible one. */
+     bottom — the composer's picker/send controls included. Padding the overlap
+     away keeps the whole column inside the visible area. */
   const kbInset = useKeyboardInset();
+  const nav = useMobileNavStore();
+  const navState = useMobileNav();
+  /* Offline is screen-level (§4.2): every conversation shows the last state
+     received and the bar's meta line says so. */
+  const runtime = useRuntimeBusState();
+  const offline = runtime.enabled && runtime.connection === "offline";
+  const favoritesApi = useFavorites();
   /* The pinned pane, tagged with the project it belongs to. A project switch
      re-reads that project's remembered focus DURING the render that changes
      `project` (#1432): the old effect-based reset painted the previous
@@ -180,66 +245,37 @@ export function MobileFocusView({ project, projectName, groups, manual, files, f
   if (focusState.project !== project) setFocusState({ project, key: focus ?? rememberedFocus(project) });
   const focusPath = focusState.key;
   const setFocusPath = useCallback((key: string | null) => setFocusState((prev) => (prev.key === key ? prev : { project: prev.project, key })), []);
-  const [mapOpen, setMapOpen] = useState(false);
   const [pipelineSheetOpen, setPipelineSheetOpen] = useState(false);
-  const [mapFrame, setMapFrame] = useState<"all" | "current">("all");
   const [taskSheet, setTaskSheet] = useState<TaskSheetView | null>(null);
-  /* The header `+ Task` button opens the create view; the first render's nonce
-     of 0 never triggers it. */
+  /* Bumped by the menu's Rename row: the editor opens over the bar, where the
+     title cell is (§4.2, #1348). The editor reports the effective title back,
+     so the cell under it shows an optimistic rename at once instead of waiting
+     for the next scan poll. */
+  const [renameToken, setRenameToken] = useState(0);
+  const [renamed, setRenamed] = useState<{ path: string; title: string } | null>(null);
+  /* The `⋯` sheet has two faces while the board has no screen of its own: the
+     conversation's menu, and the project's. Lane 2 gives the board its own
+     screen with its own `⋯`, and the second face goes away with it. */
+  const [menuFace, setMenuFace] = useState<"chat" | "board">("chat");
+  /* Closing the sheet returns it to the conversation's own face; a row inside
+     the project menu closes it through the store, so this watches the store
+     rather than any one close handler. */
   useEffect(() => {
-    /* eslint-disable-next-line react-hooks/set-state-in-effect -- opens the sheet once per `+ Task` press */
-    if (taskSheetNonce > 0) setTaskSheet("new");
-  }, [taskSheetNonce]);
+    /* eslint-disable-next-line react-hooks/set-state-in-effect -- the sheet is gone; its face resets with it */
+    if (!navState.sheet && menuFace !== "chat") setMenuFace("chat");
+  }, [navState.sheet, menuFace]);
   const swipeRef = useRef<{ x: number; y: number } | null>(null);
-  const activeChipRef = useRef<HTMLButtonElement | null>(null);
-  /* Fade hints on the chip strip: which clipped edge still has content to reveal. */
-  const chipScrollRef = useRef<HTMLDivElement | null>(null);
-  const [chipFade, setChipFade] = useState({ left: false, right: false });
-  const syncChipFade = useCallback(() => {
-    const el = chipScrollRef.current;
-    if (!el) return;
-    const left = el.scrollLeft > 4;
-    const right = el.scrollLeft + el.clientWidth < el.scrollWidth - 4;
-    setChipFade((prev) => (prev.left === left && prev.right === right ? prev : { left, right }));
-  }, []);
 
   /* Direct review groups join the layout's flow list so their decks place
-     beside the reviewed conversation exactly like managed loops (issue #325);
-     everything action-backed below keeps reading the real `flows`. */
+     beside the reviewed conversation exactly like managed loops (issue #325). */
   const deckFlows = useMemo(() => (reviewGroups.length ? [...flows, ...reviewGroups] : flows), [flows, reviewGroups]);
   const layoutFlows = useMemo(() => compactPipelineLayoutFlows(pipelines, deckFlows), [pipelines, deckFlows]);
   const layout = useMemo(
     () => buildSchemeLayout(groups, manual, files, layoutFlows, drafts, pipelines, surfacePipelines, favorites, isolatedManualPaths),
     [groups, manual, files, layoutFlows, drafts, pipelines, surfacePipelines, favorites, isolatedManualPaths],
   );
-  const mobilePipelineOutlines = useMemo(() => {
-    const live = surfacePipelines.filter((pipeline) => pipeline.state !== "completed" && pipeline.state !== "closed");
-    const panes: PipelinePane[] = layout.nodes.map((node) => ({
-      x: node.x,
-      y: node.y,
-      w: node.w,
-      h: node.h,
-      path: node.file.path,
-      conversationId: node.file.conversationId,
-    }));
-    const placedTasks = tasks.filter(isPlacedTask);
-    const taskRects = placedTasks.map((task) => taskRect(task, false));
-    const obstacles = [
-      ...layout.nodes,
-      ...layout.decks,
-      ...layout.stacks,
-      ...layout.drafts,
-      ...layout.slots,
-      ...taskRects,
-    ];
-    const placements = layoutPipelineGroups(live, tasks, panes, obstacles);
-    return live.flatMap((pipeline) => {
-      const placement = placements.get(pipeline.id);
-      return placement ? [{ id: pipeline.id, title: pipeline.task, rect: placement.bounds }] : [];
-    });
-  }, [surfacePipelines, layout, tasks]);
-  /* Scheme order (depth-first, groups left to right) becomes the strip order,
-     so chips and the map agree on what "next" means. */
+  /* Scheme order (depth-first, groups left to right) is the order the switcher
+     lists inside each of its sections. */
   const entries = useMemo<Entry[]>(
     () => [
       ...layout.nodes.map((node) => ({ key: node.file.path, file: node.file, isRoot: node.isRoot, kind: "node" as const })),
@@ -252,10 +288,7 @@ export function MobileFocusView({ project, projectName, groups, manual, files, f
 
   /* #688: the phone's half of a focus handoff. It resolves anchors through the
      same index the desktop board publishes, but arrives by pinning the pane
-     rather than by moving a camera — there is no camera here, and one pane is
-     on screen at a time. A destination with no pane behind it (a coordinate, or
-     the space a vanished card used to occupy) is refused rather than answered
-     with an arrival that did not happen. */
+     rather than by moving a camera. */
   const focusIndex = useMemo(() => buildFocusFrameIndex(layout, project, { aliases: stageAnchorAliases(pipelines) }), [layout, project, pipelines]);
   useEffect(() => focusHandoffBus.setBoard({
     project,
@@ -264,25 +297,17 @@ export function MobileFocusView({ project, projectName, groups, manual, files, f
       const landing = anchorKeys.find((key) => byKey.has(key));
       if (!landing) return false;
       setFocusPath(landing);
-      setMapOpen(false);
       return true;
     },
     restoreCamera: () => false,
-  }), [project, focusIndex, byKey]);
-
-  /* eslint-disable react-hooks/set-state-in-effect */
-  useEffect(() => {
-    setMapOpen(false);
-  }, [project]);
+  }), [project, focusIndex, byKey, setFocusPath]);
 
   /* Any open (overview card, toast, switch of a quiet branch) arrives as the
-     transient highlight: pin it and drop the map. */
+     transient highlight: pin it. */
   useEffect(() => {
-    if (!focus) return;
-    setFocusPath(focus);
-    setMapOpen(false);
-  }, [focus]);
-  /* eslint-enable react-hooks/set-state-in-effect */
+    /* eslint-disable-next-line react-hooks/set-state-in-effect -- the opener's highlight is the pin */
+    if (focus) setFocusPath(focus);
+  }, [focus, setFocusPath]);
 
   /* The pinned key while it exists; otherwise the most attention-worthy node,
      so a closed pane falls through to the next thing that matters. */
@@ -309,20 +334,15 @@ export function MobileFocusView({ project, projectName, groups, manual, files, f
     }
   }, [focusPath, byKey, resolvedKey, project]);
 
-  useEffect(() => {
-    activeChipRef.current?.scrollIntoView({ block: "nearest", inline: "nearest" });
-    syncChipFade();
-  }, [resolvedKey, entries, syncChipFade]);
-
   const activeNode = useMemo(() => layout.nodes.find((node) => node.file.path === resolvedKey) ?? null, [layout, resolvedKey]);
   const activeDeck = useMemo(() => layout.decks.find((deck) => deck.key === resolvedKey) ?? null, [layout, resolvedKey]);
   const activeDraft = useMemo(() => layout.drafts.find((draft) => draft.key === resolvedKey) ?? null, [layout, resolvedKey]);
-  /* Report the focused conversation up so the project shell can dock its handoff
-     control in the footer shelf row (issue #177 item 5). Cleared on unmount so a
-     switch to the list view drops the stale handoff target. */
+  const activeFile = activeNode?.file ?? null;
+  /* Report the focused conversation up so the project shell can dock its
+     handoff control in the host sheet (issue #177 item 5). */
   useEffect(() => {
-    onActiveChange?.(activeNode?.file ?? null);
-  }, [activeNode, onActiveChange]);
+    onActiveChange?.(activeFile);
+  }, [activeFile, onActiveChange]);
   useEffect(() => () => onActiveChange?.(null), [onActiveChange]);
   const memberfulPipelineIds = useMemo(
     () => new Set(layout.groups.filter((group) => group.kind === "pipeline" && group.pipeline).map((group) => group.id)),
@@ -334,44 +354,33 @@ export function MobileFocusView({ project, projectName, groups, manual, files, f
   );
 
   /* Presence: the phone reports the pinned pane as the sole visible transcript
-     (a deck/draft carries no transcript path, so focus is null there); opening
-     the map switches to mobile-map and reports the whole board in layout order.
-     The nested map camera is not surfaced to observers in this MVP. */
+     (a deck/draft carries no transcript path, so focus is null there). */
   useEffect(() => {
-    const focusedPath = activeNode ? activeNode.file.path : null;
+    const focusedPath = activeFile ? activeFile.path : null;
     const boardOrder = layout.nodes.map((node) => node.file.path);
-    const visiblePaths = mapOpen
-      ? boardOrder.slice(0, MAX_VISIBLE_PATHS)
-      : activeNode
-        ? [activeNode.file.path]
-        : [];
-    /* The SAME canonical selection the desktop board writes, projected onto the
-       phone's own board order (#771), with members this order does not mention
-       appended rather than dropped. It used to hardcode `[]`, so a selection made
-       on the desktop — or on this phone's map — vanished from the snapshot as
-       soon as this view took over the slice. */
-    viewBus.reportSlice({ mode: mapOpen ? "mobile-map" : "mobile-focus", focusedPath, selectedPaths: selectionInOrder(boardOrder, board.selection, { includeUnordered: true }), visiblePaths, camera: null });
-  }, [activeNode, mapOpen, layout, board.selection]);
+    viewBus.reportSlice({
+      mode: "mobile-focus",
+      focusedPath,
+      selectedPaths: selectionInOrder(boardOrder, board.selection, { includeUnordered: true }),
+      visiblePaths: activeFile ? [activeFile.path] : [],
+      camera: null,
+    });
+  }, [activeFile, layout, board.selection]);
 
-  /* When the focused pane is a pipeline stage, a compact chain row rides above
-     it: position, current stage/state, and prev/next stage chips to hop along
-     the chain (#93 §2.3). A review-loop stage is represented on the board by its
-     round deck, so match the focused deck's flow too — otherwise focusing a
-     reviewer session would hide the row entirely. */
-  const activePath = activeNode ? activeNode.file.path : null;
-  const activeFlowId = activeDeck ? activeDeck.flow.id : null;
-  const pipelineFocus = findPipelineStage(pipelines, activePath, activeFlowId);
-  /* Run transcripts still in the scan can be opened; a review-loop only if its
-     flow has a rendered deck, which exists only for a placed implementer node —
-     so the availability set comes from the layout's placed nodes. */
+  /* Where the focused conversation sits in its pipeline: the bar's `stage k/n`
+     and the menu's first row (P2-9). A review-loop stage is represented on the
+     board by its round deck, so the focused deck's flow matches too. */
+  const stage = useMemo(
+    () => stagePosition(pipelines, activeFile ? activeFile.path : null, activeDeck ? activeDeck.flow.id : null),
+    [pipelines, activeFile, activeDeck],
+  );
   const renderablePaths = useMemo(() => new Set(files.map((entry) => entry.path)), [files]);
   const renderableFlows = useMemo(() => renderableFlowIds(layoutFlows, new Set(layout.nodes.map((node) => node.file.path))), [layoutFlows, layout]);
   const linkedTasksByPipeline = useMemo(
     () => new Map(pipelines.map((pipeline) => [pipeline.id, pipelineLinkedTasks(pipeline, sheetTasks ?? tasks, flows, files)] as const)),
     [pipelines, sheetTasks, tasks, flows, files],
   );
-  /* Conversation-side relation strip (issue #292): the focused phone pane lists
-     its assigned/captured tasks; a tap opens that task in the sheet. */
+  /* Conversation-side relation strip (issue #292). */
   const relatedTasksByPath = useMemo(() => taskRelationsByPath(files, sheetTasks ?? tasks), [files, sheetTasks, tasks]);
 
   const openStagePath = useCallback(
@@ -381,388 +390,395 @@ export function MobileFocusView({ project, projectName, groups, manual, files, f
     },
     [files, onSelect],
   );
-
-  const hopToStage = (index: number) => {
-    if (!pipelineFocus) return;
-    const stage = pipelineFocus.pipeline.stages[index];
-    if (!stage) return;
-    const target = compactStageOpenTarget(stage, latestAttempt(pipelineFocus.pipeline, stage.id), flows, renderableFlows, renderablePaths, files);
-    if (!target) return;
-    if (target.kind === "flow") {
-      const key = deckKey(target.flowId);
-      if (byKey.has(key)) setFocusPath(key);
-      return;
-    }
-    openStagePath(target.path);
-  };
-
   const openPipelineTask = useCallback((task: BoardTask) => setTaskSheet({ taskId: task.id }), []);
   const openPipelineFlow = useCallback((flowId: string) => {
     const key = deckKey(flowId);
     if (byKey.has(key)) setFocusPath(key);
-  }, [byKey]);
-
-  const step = useCallback(
-    (dir: number) => {
-      if (!entries.length) return;
-      const idx = entries.findIndex((entry) => entry.key === resolvedKey);
-      const next = entries[Math.min(entries.length - 1, Math.max(0, (idx === -1 ? 0 : idx) + dir))];
-      if (next && next.key !== resolvedKey) setFocusPath(next.key);
-    },
-    [entries, resolvedKey],
-  );
-
-  /* Rides the pane header via BranchPane's dragHandle slot: the feed below
-     keeps its native scroll, only the header answers to swipes. */
-  const swipeHandle = {
-    onTouchStart: (event: React.TouchEvent<HTMLElement>) => {
-      const touch = event.touches[0];
-      if (touch) swipeRef.current = { x: touch.clientX, y: touch.clientY };
-    },
-    onTouchEnd: (event: React.TouchEvent<HTMLElement>) => {
-      const start = swipeRef.current;
-      swipeRef.current = null;
-      const touch = event.changedTouches[0];
-      if (!start || !touch) return;
-      const dx = touch.clientX - start.x;
-      const dy = touch.clientY - start.y;
-      if (Math.abs(dx) < SWIPE_MIN_X || Math.abs(dx) < Math.abs(dy) * 2) return;
-      step(dx < 0 ? 1 : -1);
-    },
-  };
+  }, [byKey, setFocusPath]);
 
   /* Pin a pane the layout already holds, as the phone's OPEN gesture (#1244).
-     A chip tap, a map pick and the pinned seat row are the same deliberate act
-     as clicking a card on the desktop board, so each one stamps the durable
-     acknowledgement that releases a held finished outcome — otherwise a lane
-     that finished could never be read on a phone at all.
+     A switcher row and a map/attention pick are the same deliberate act as
+     clicking a card on the desktop board, so each one stamps the durable
+     acknowledgement that releases a held finished outcome.
 
-     What deliberately does NOT stamp: the header swipe in `step`, the snap
-     scroll that keeps the active chip in view, the attention fallback inside
-     `resolvedKey`, and the `onActiveChange` report. Passing a card, or having it
-     surface on its own, is not reading it — that distinction is the whole point
-     of the hold. Routes through `onSelect` need no stamp of their own: the
-     board's open already carries one.
-
-     Keyed by the entry's file so decks and drafts, which are not conversations,
-     stamp nothing. */
+     What deliberately does NOT stamp: the bar/dock swipe, the attention
+     fallback inside `resolvedKey`, and the `onActiveChange` report. Passing a
+     card, or having it surface on its own, is not reading it. */
   const openEntry = useCallback(
     (key: string) => {
       setFocusPath(key);
       const file = byKey.get(key)?.file;
       if (file) onConversationOpened?.(file.path);
     },
-    [byKey, onConversationOpened],
+    [byKey, onConversationOpened, setFocusPath],
   );
 
-  /* The orchestrator seat's own conversation, opened from the pinned row (PRD
-     #976 slice C): a laid-out pane pins directly, and a seat whose conversation
-     is not on the board yet takes the same round trip a map pick does — it
-     becomes a node and arrives back through the highlight. */
-  const openSeatConversation = useCallback(
-    (file: FileEntry) => {
-      setMapOpen(false);
-      if (byKey.has(file.path)) {
-        openEntry(file.path);
-        return;
-      }
-      onSelect(file);
-    },
-    [byKey, openEntry, onSelect],
+  /* ── The switcher, and the swipe that walks it ─────────────────────────── */
+  const projectCwd = useMemo(() => draftWorkingDirectory(files, project), [files, project]);
+  const seatRead = useOrchestratorSeat(project, projectCwd || undefined);
+  const seatStatus = seatRead.status;
+  const seatConversationId = seatStatus?.exists ? seatStatus.seat?.conversationId ?? null : null;
+  const seatKey = useMemo(() => {
+    if (!seatConversationId) return null;
+    const seated = layout.nodes.find((node) => node.file.conversationId === seatConversationId);
+    return seated?.file.path ?? seatStatus?.seat?.path ?? null;
+  }, [layout.nodes, seatConversationId, seatStatus]);
+  /* Everything the retired chip strip could pin is a switcher row, so removing
+     the strip costs no destination: the conversations, the review-round decks
+     that stand in for a folded reviewer transcript (#325 — a deck names the
+     work it reviews and takes its state from its newest round), and the
+     not-yet-spawned drafts, which sit in their own section outside the swipe. */
+  const switchEntries = useMemo(() => {
+    const candidates: SwitchCandidate[] = layout.nodes.map((node) => ({ key: node.file.path, file: node.file }));
+    for (const deck of layout.decks) {
+      const newest = [...deck.rounds].reverse().find((round) => round.file);
+      const reviewed = files.find((entry) => entry.path === deck.flow.implementerPath);
+      candidates.push({
+        key: deck.key,
+        file: newest?.file ?? null,
+        label: t("mobile2.chat.reviewOf", { title: cleanTitle(reviewed?.title ?? deck.flow.implementerPath, 60) }),
+        meta: t("scheme.flow"),
+        /* A deck whose rounds carry no transcript yet has no state to read;
+           it still belongs with the work, never among the drafts. */
+        section: newest?.file ? undefined : "recent",
+      });
+    }
+    for (const draft of layout.drafts) {
+      candidates.push({ key: draft.key, file: null, label: t("mobile2.chat.draft"), meta: t("mobile2.chat.draftMeta"), section: "drafts" });
+    }
+    return switchList(candidates, { seatKey });
+  }, [layout.nodes, layout.decks, layout.drafts, files, seatKey, t]);
+
+  /* A sibling switch REPLACES what is on screen (§3.3): ‹ still leaves the way
+     the operator came in, so it never grows the history. The stack's top has to
+     move with it — a chat entry naming the conversation the operator left would
+     send the next back gesture to the wrong place — but only when a chat screen
+     IS the top: this screen also renders while the board's own leaf is loading,
+     and there the bottom of the stack is the board and stays that way. */
+  const switchTo = useCallback((entry: SwitchEntry, stampSeen: boolean) => {
+    if (stampSeen) openEntry(entry.key);
+    else setFocusPath(entry.key);
+    /* The stack names a conversation by the BOARD KEY, the same one the board's
+       own open pushes (lane 2): the project route reads that id back as the
+       conversation to show, so a sibling switch and an open have to name the
+       screen identically or the replace would land on a screen nothing pins.
+       `entry.id` is the durable identity the row and the screen are STAMPED
+       with, which is a different question. */
+    if (topScreen(navState).kind === "chat") nav.replace({ kind: "chat", id: entry.key });
+  }, [openEntry, setFocusPath, nav, navState]);
+
+  /* Which switcher row is on screen — a conversation, a review-round deck or a
+     draft. EVERY leaf the switcher can reach is one of these, so the bar's
+     title cell, the swipe and the screen's identity are driven from HERE and
+     not from `activeFile`: a deck or a draft has no transcript, and reading
+     the cell off the file made those two leaves dead ends that showed the
+     project's name and could not be left by the gesture that reached them. */
+  const activeEntry = useMemo(
+    () => switchEntries.find((entry) => entry.key === resolvedKey) ?? null,
+    [switchEntries, resolvedKey],
   );
 
-  /* A map tap on a scheme node pins it; a quiet branch or deck round is not a
-     node yet — route it through onSelect so it becomes one and focuses via
-     the highlight round-trip. */
-  const pickFromMap = useCallback(
-    (key: string) => {
-      setMapOpen(false);
-      /* Task mini-cards on the map open in the sheet, not as panes. */
-      if (key.startsWith("task::")) {
-        setTaskSheet({ taskId: key.slice("task::".length) });
-        return;
-      }
-      if (byKey.has(key)) {
-        openEntry(key);
-        return;
-      }
-      const file = files.find((entry) => entry.path === key);
-      if (file) onSelect(file);
-    },
-    [byKey, openEntry, files, onSelect],
+  /* The seat sheet over this conversation (§4.2, §4.5): the `⋯`'s first-group
+     «Orchestrator seat» row is the phone's only route to the seat's status,
+     mandate and rotation now that the pinned row went with the strip. */
+  const [seatSheetOpen, setSeatSheetOpen] = useState(false);
+  const [seatHandoff, setSeatHandoff] = useState(false);
+  const holdsSeat = resolvedKey !== null && seatKey !== null && resolvedKey === seatKey;
+  const seatPanel = useSeatPanel({ project, files, seat: seatRead, holdsSeat, open: seatSheetOpen });
+  /* A rotation confirmed from here lands in the SUCCESSOR: the incumbent stays
+     live under the draft for as long as the rotation takes, so the phone waits
+     for the seat read to name a conversation other than this one — and for the
+     files feed to actually carry it, since pinning a key the layout has not
+     got yet would land nowhere. */
+  useEffect(() => {
+    if (!seatHandoff || !seatKey || seatKey === resolvedKey || !byKey.has(seatKey)) return;
+    setSeatSheetOpen(false);
+    setSeatHandoff(false);
+    setFocusPath(seatKey);
+  }, [seatHandoff, seatKey, resolvedKey, byKey, setFocusPath]);
+  /* And it is armed for THAT rotation only. A rotation that failed, or a draft
+     the operator abandoned, closes the sheet without a successor; leaving the
+     wait armed would hand the phone's focus to whatever seat change happened
+     next, on another surface, minutes later and unasked. */
+  useEffect(() => {
+    if (!seatSheetOpen && seatHandoff) setSeatHandoff(false);
+  }, [seatSheetOpen, seatHandoff]);
+
+  const [bumpPulse, setBumpPulse] = useState<{ side: "left" | "right"; id: number } | null>(null);
+
+  const swipe = useCallback((dx: number) => {
+    const direction = dx < 0 ? 1 : -1;
+    const target = swipeTarget(switchEntries, resolvedKey, direction as 1 | -1);
+    if (!target) {
+      const side = direction === 1 ? "right" : "left";
+      nav.bump(side);
+      /* The id restarts the displacement when the operator swipes the end
+         twice: without it the state is unchanged and the cell sits still. */
+      setBumpPulse((previous) => ({ side, id: (previous?.id ?? 0) + 1 }));
+      return;
+    }
+    /* A step that lands ends whatever bump the last one at the edge started. */
+    nav.clearBump();
+    setBumpPulse(null);
+    switchTo(target, false);
+  }, [switchEntries, resolvedKey, nav, switchTo]);
+
+  /* Two halves of one gesture, on two clocks. The MARKER on the title cell
+     records that the last swipe found nothing to step to, and stays until one
+     lands — the prototype's `bump-r` class behaves exactly so, and the
+     capture reads the marker after the gesture has settled. The 12 px
+     DISPLACEMENT is the part the eye gets: it springs back after BUMP_MS, so
+     a cell that hit the end does not sit shifted for as long as the operator
+     stays. */
+  useEffect(() => {
+    if (!bumpPulse) return;
+    const timer = window.setTimeout(() => setBumpPulse(null), BUMP_MS);
+    return () => window.clearTimeout(timer);
+  }, [bumpPulse]);
+
+  const onTouchStart = (event: React.TouchEvent<HTMLElement>) => {
+    const touch = event.touches[0];
+    swipeRef.current = touch && inSwipeZone(event.target) ? { x: touch.clientX, y: touch.clientY } : null;
+  };
+  const onTouchEnd = (event: React.TouchEvent<HTMLElement>) => {
+    const start = swipeRef.current;
+    swipeRef.current = null;
+    const touch = event.changedTouches[0];
+    if (!start || !touch || !activeEntry || navState.sheet) return;
+    const dx = touch.clientX - start.x;
+    const dy = touch.clientY - start.y;
+    if (Math.abs(dx) < SWIPE_MIN_X || Math.abs(dx) < Math.abs(dy) * 2) return;
+    swipe(dx);
+  };
+
+  /* ── The bar's title cell ──────────────────────────────────────────────── */
+  const displayName = projectDisplayName(project, projectName);
+  const title = activeFile ? (
+    <ChatBarTitle
+      file={activeFile}
+      offline={offline}
+      stage={stage}
+      bump={bumpPulse?.side ?? null}
+      renamed={renamed && renamed.path === activeFile.path ? renamed.title : null}
+    />
+  ) : activeEntry ? (
+    /* A deck or a draft names itself exactly as its switcher row does, so the
+       cell the operator taps to leave says the same thing as the row that
+       brought them here. */
+    <EntryBarTitle entry={activeEntry} offline={offline} bump={bumpPulse?.side ?? null} />
+  ) : (
+    <MobileBarTitle>{displayName}</MobileBarTitle>
+  );
+
+  /* ‹ appears only when there is a screen underneath to pop to — a pipeline
+     (lane 7) or the board list (lane 2). While the conversation IS the phone's
+     leaf, the bar carries no back target rather than a dead one (§3.2: left is
+     back, or nothing). */
+  const canLeave = navState.stack.length > 1;
+
+  const renderSheet: SheetRenderer = (name, close) => {
+    if (name === "switch") {
+      return (
+        <MobileSwitchSheet
+          title={displayName}
+          entries={switchEntries}
+          currentKey={resolvedKey}
+          onPick={(entry) => { close(); switchTo(entry, true); }}
+          onBoard={canLeave ? () => { close(); nav.back(); } : undefined}
+          onProjects={canLeave || !host ? undefined : () => nav.openSheet("projects")}
+          onClose={close}
+        />
+      );
+    }
+    if (name === "menu" && activeFile && menuFace === "chat") {
+      return (
+        <MobileConversationMenu
+          file={activeFile}
+          stage={stage}
+          crowned={Boolean(favoritesApi?.has(conversationIdentity(activeFile)))}
+          hostTaskCount={hostTaskCount}
+          pipelineCount={dockedPipelines.length}
+          onOpenSeat={seatPanel ? () => setSeatSheetOpen(true) : undefined}
+          onOpenPipeline={dockedPipelines.length ? () => setPipelineSheetOpen(true) : undefined}
+          onRename={() => setRenameToken((token) => token + 1)}
+          onToggleCrown={favoritesApi ? () => favoritesApi.toggle(conversationIdentity(activeFile)) : undefined}
+          onHandoff={onHandoff ? () => onHandoff(activeFile) : undefined}
+          onOpenHost={() => nav.openSheet("host")}
+          onOpenSearch={onOpenSearch}
+          onOpenProjectMenu={boardSheet ? () => setMenuFace("board") : undefined}
+          projectName={displayName}
+          onCloseCard={() => onClose(activeFile.path)}
+          onReopen={() => onSelect(activeFile)}
+          onClose={close}
+        />
+      );
+    }
+    return boardSheet?.(name, close) ?? null;
+  };
+
+  const leaf = activeNode ? (
+    /* One conversation, edge to edge under the bar: no pane header (the bar's
+       title cell IS it), no strip, no docked tray — §3.4 spends 0 px here. */
+    <div key={activeNode.file.path} data-testid="mobile-focused-pane" className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+      <BranchPane
+        file={activeNode.file}
+        tasks={activeNode.tasks}
+        isRoot={activeNode.isRoot}
+        showFavorite
+        onClose={() => onClose(activeNode.file.path)}
+        relatedTasks={relatedTasksByPath.get(activeNode.file.path)}
+        onOpenTask={openPipelineTask}
+      />
+      {/* The folded children (PR #441): the same 30 px bottom-up circles the
+          desktop board carries, anchored to the pane's left edge and lifted
+          above the composer. The overlay is pointer-events-none and reserves no
+          height, so it costs the transcript nothing — but it is the phone's ONE
+          route to a folded child, so it stays until the feed opens members
+          itself (§3.4). The docked subagent TRAY, which did spend 44 px, is
+          gone with the rest of this screen's chrome. */}
+      <div
+        data-testid="mobile-subagent-rail"
+        className="pointer-events-none absolute bottom-20 left-2 z-[20]"
+        style={{ width: 0, height: SUBAGENT_RAIL_H }}
+      >
+        <SubagentBadges
+          conversationId={conversationIdentity(activeNode.file)}
+          entries={files}
+          cardRect={{ x: 0, y: 0, w: 0, h: SUBAGENT_RAIL_H }}
+          onNavigate={(path) => {
+            const target = files.find((item) => item.path === path);
+            if (target) onSelect(target);
+          }}
+        />
+      </div>
+    </div>
+  ) : activeDeck ? (
+    <div key={activeDeck.key} className="relative min-h-0 flex-1">
+      <RoundDeck
+        flow={activeDeck.flow}
+        rounds={activeDeck.rounds}
+        focusRound={null}
+        groupLabel={files.find((entry) => entry.path === activeDeck.flow.implementerPath)?.title}
+      />
+    </div>
+  ) : activeDraft ? (
+    isWorkflowDraftId(activeDraft.id) ? (
+      <WorkflowDraftPane
+        key={activeDraft.key}
+        draftId={activeDraft.id}
+        project={project}
+        onClose={() => onDraftClose(activeDraft.id)}
+        onLaunched={() => onDraftClose(activeDraft.id)}
+      />
+    ) : (
+      <DraftAgentPane
+        key={activeDraft.key}
+        draftId={activeDraft.id}
+        project={project}
+        files={files}
+        onClose={() => onDraftClose(activeDraft.id)}
+        onSpawned={(file) => onDraftSpawned(activeDraft.id, file)}
+      />
+    )
+  ) : loaded ? (
+    dockedPipelines.length ? (
+      /* No conversation yet, but an active pipeline is provisioning: its plan
+         + controls ARE the surface here (issue #136 / review). */
+      <div className="flex min-h-0 flex-1 flex-col divide-y divide-border overflow-y-auto">
+        {dockedPipelines.map((pipeline) => (
+          <MobilePipelineDock key={pipeline.id} pipeline={pipeline} flows={flows} files={files} renderablePaths={renderablePaths} renderableFlows={renderableFlows} linkedTasks={linkedTasksByPipeline.get(pipeline.id) ?? []} onOpenPath={openStagePath} onOpenFlow={openPipelineFlow} onOpenTask={openPipelineTask} />
+        ))}
+      </div>
+    ) : (
+      <div className="flex flex-1 items-center justify-center text-center text-body text-muted">{t("mobile.noConvos")}</div>
+    )
+  ) : (
+    <div className="flex flex-1 items-center justify-center gap-2 text-center text-body text-muted">
+      <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+      {t("common.loading")}
+    </div>
   );
 
   return (
-    /* The mobile overflow contract (#353): the focus root clips horizontal
-       overflow at the viewport, so any horizontal scrolling lives ONLY in
-       internal `overflow-x-auto` strips (chip row, dock rail) with `min-w-0`
-       ancestors — never on the document. Measured acceptance: at 390px the
-       document scrollWidth equals the innerWidth (the production record showed
-       564px before this fix). */
+    /* The chat shell root. It carries three contracts at once:
+
+       - the swipe (§3.3) rides HERE, not on the bar itself: the bar belongs to
+         the shell, and a touch that starts anywhere else — the feed above all —
+         must keep its own scrolling (`inSwipeZone`);
+       - the keyboard inset (#983): padding the on-screen keyboard's overlap
+         away keeps the whole column inside the visible area, so the browser
+         never scrolls the window to reach the focused field;
+       - the chat-first budget (#419) and the 100dvh/overflow bounds (#440,
+         #353), stamped on the DOM they govern. */
     <div
       data-testid="mobile-chat-shell"
-      /* The chat-first budget contract (issue #419) rides the DOM it governs:
-         with the secondary chrome folded by default, the transcript owns at
-         least this share of the usable viewport before the keyboard opens. */
       data-chat-min-share={MIN_TRANSCRIPT_SHARE}
       className="relative flex h-full max-h-[100dvh] min-h-0 min-w-0 max-w-[100dvw] flex-1 flex-col overflow-hidden overflow-x-clip"
+      onTouchStart={onTouchStart}
+      onTouchEnd={onTouchEnd}
       style={kbInset > 0 ? { paddingBottom: kbInset } : undefined}
     >
-      {/* Same runtime connection pill as desktop, compact, one thumb away.
-          Renders nothing while slice-one is disabled. */}
-      <ConnectionPill compact />
-      {/* One docked navigation strip, two rows total (findings 4, 7): the pipeline
-          chain hop chips (when a stage is focused) and the conversation chips share
-          this single scrolling row with a fade hint at the clipped edge (finding
-          5); the map + tasks controls dock on the right so they never float over
-          the transcript (findings 2, 3). No separate third pipeline row. */}
-      <div className="flex shrink-0 items-stretch border-b border-border bg-card">
-        {/* The project's orchestrator, PINNED first (PRD #976 slice C): its own
-            slot outside the scrolling chips, so no amount of board order,
-            favourites or scrolling can move it or take it off screen. It rides
-            this same strip row, which `./chatBudget` already counts, so the
-            chat-first budget gains no new persistent chrome. */}
-        <MobileOrchestratorRow
-          project={project}
-          projectName={projectDisplayName(project, projectName)}
-          files={files}
-          onOpenConversation={openSeatConversation}
-        />
-        {entries.length > 1 || pipelineFocus ? (
-          <div className="relative min-w-0 flex-1">
-            <div ref={chipScrollRef} onScroll={syncChipFade} className="no-scrollbar flex items-center gap-1.5 overflow-x-auto px-2 py-1">
-              {pipelineFocus ? (
-                <>
-                  <PipelineFocusRow pipeline={pipelineFocus.pipeline} index={pipelineFocus.index} flows={flows} files={files} renderableFlows={renderableFlows} renderablePaths={renderablePaths} onHop={hopToStage} onOpenPath={openStagePath} />
-                  {entries.length > 1 ? <span aria-hidden className="mx-0.5 h-7 w-px shrink-0 bg-border" /> : null}
-                </>
-              ) : null}
-              {entries.length > 1
-                ? entries.map((entry) => (
-                    <StripChip
-                      key={entry.key}
-                      entry={entry}
-                      active={entry.key === resolvedKey}
-                      chipRef={entry.key === resolvedKey ? activeChipRef : undefined}
-                      onClick={() => openEntry(entry.key)}
-                    />
-                  ))
-                : null}
-            </div>
-            {/* Scroll affordance: a soft panel-colored fade over each clipped
-                edge, shown only while there is more to scroll that way. */}
-            <span aria-hidden className={`pointer-events-none absolute inset-y-0 left-0 w-6 bg-gradient-to-r from-card to-transparent transition-opacity ${chipFade.left ? "opacity-100" : "opacity-0"}`} />
-            <span aria-hidden className={`pointer-events-none absolute inset-y-0 right-0 w-6 bg-gradient-to-l from-card to-transparent transition-opacity ${chipFade.right ? "opacity-100" : "opacity-0"}`} />
-          </div>
-        ) : (
-          <span className="min-w-0 flex-1" aria-hidden />
-        )}
-        <div className="flex shrink-0 items-center gap-1 border-l border-border px-1.5">
-          {/* Chat-first (issue #419 reopened): with a conversation focused the
-              docked pipelines reserve ZERO height below the transcript — this
-              compact trigger rides the strip and opens the same bottom sheet. */}
-          {(activeNode || activeDeck || activeDraft) && dockedPipelines.length ? (
-            <MobilePipelineSummaryButton pipelines={dockedPipelines} onOpen={() => setPipelineSheetOpen(true)} />
-          ) : null}
-          {/* Collapsed worker stacks count toward map availability (issue #136):
-              a worker-heavy board is often one visible root plus several stacks,
-              and the map is the only place their per-origin dots can be seen. */}
-          {mapReachable(layout.nodes.length, workerStacks.length, mobilePipelineOutlines.length) ? (
-            <button
-              type="button"
-              className="inline-flex h-11 min-w-11 items-center justify-center gap-1 rounded-[8px] text-muted hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-              aria-label={t("mobile.openMap")}
-              onClick={() => { setMapFrame("all"); setMapOpen(true); }}
-            >
-              <MapIcon className="h-4 w-4" aria-hidden />
-            </button>
-          ) : null}
-          <button
-            type="button"
-            className="inline-flex h-11 min-w-11 items-center justify-center gap-1 rounded-[8px] text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-            aria-label={t("tasks.panelToggleAria")}
-            onClick={() => setTaskSheet("list")}
-          >
-            <ListTodo className="h-4 w-4 text-accent" aria-hidden />
-            {(sheetTasks ?? tasks).filter((task) => task.status !== "done").length ? (
-              <span className="rounded-full bg-accent/10 px-1 text-[10px] font-bold text-accent">
-                {(sheetTasks ?? tasks).filter((task) => task.status !== "done").length}
-              </span>
-            ) : null}
-          </button>
-        </div>
-      </div>
-
-      {/* Even card gutters that also clear the notch/rounded corners (finding 8):
-          the safe-area insets keep the pane off the screen edges symmetrically. */}
-      <div className="relative flex min-h-0 flex-1 flex-col pt-1 pl-[max(0.375rem,env(safe-area-inset-left))] pr-[max(0.375rem,env(safe-area-inset-right))] pb-[max(0.375rem,env(safe-area-inset-bottom))]">
-        {activeNode ? (
-          /* The handoff control for this pane docks in the footer shelf row
-             (issue #177 item 5), so the focus view itself renders only the pane. */
-          <div key={activeNode.file.path} data-testid="mobile-focused-pane" className="flex min-h-0 min-w-0 flex-1 flex-col gap-1">
-            <div className="flex min-h-0 min-w-0 flex-1">
-              <BranchPane
-                file={activeNode.file}
-                tasks={activeNode.tasks}
-                isRoot={activeNode.isRoot}
-                showFavorite
-                onClose={() => onClose(activeNode.file.path)}
-                dragHandle={swipeHandle}
-                relatedTasks={relatedTasksByPath.get(activeNode.file.path)}
-                onOpenTask={openPipelineTask}
-              />
-            </div>
-            {(() => {
-              const tray = trayApi?.trays.get(conversationIdentity(activeNode.file));
-              /* The focused parent's folded engine children stay inside its pane
-                 on the phone (§S2 mobile): inline rows, 44px targets, read-only
-                 open — never a durable membership change. */
-              return tray ? (
-                <SubagentTray
-                  tray={tray}
-                  variant="inline"
-                  onToggleExpanded={(expanded) => trayApi!.onToggleExpanded(tray.parentConversationId, expanded)}
-                  onOpenMember={trayApi!.onOpenMember}
-                  onUnfold={trayApi!.onUnfold}
-                />
-              ) : null;
-            })()}
-          </div>
-        ) : activeDeck ? (
-          <div key={activeDeck.key} className="relative min-h-0 flex-1">
-            <RoundDeck
-              flow={activeDeck.flow}
-              rounds={activeDeck.rounds}
-              focusRound={null}
-              groupLabel={files.find((entry) => entry.path === activeDeck.flow.implementerPath)?.title}
-            />
-          </div>
-        ) : activeDraft ? (
-          isWorkflowDraftId(activeDraft.id) ? (
-            <WorkflowDraftPane
-              key={activeDraft.key}
-              draftId={activeDraft.id}
-              project={project}
-              onClose={() => onDraftClose(activeDraft.id)}
-              onLaunched={() => onDraftClose(activeDraft.id)}
-            />
-          ) : (
-            <DraftAgentPane
-              key={activeDraft.key}
-              draftId={activeDraft.id}
-              project={project}
-              files={files}
-              onClose={() => onDraftClose(activeDraft.id)}
-              onSpawned={(file) => onDraftSpawned(activeDraft.id, file)}
-            />
-          )
-        ) : loaded ? (
-          dockedPipelines.length ? (
-            /* No conversation yet, but an active pipeline is provisioning: its
-               plan + controls ARE the surface here (issue #136 / review). */
-            <div className="flex min-h-0 flex-1 flex-col divide-y divide-border overflow-y-auto">
-              {dockedPipelines.map((pipeline) => (
-                <MobilePipelineDock key={pipeline.id} pipeline={pipeline} flows={flows} files={files} renderablePaths={renderablePaths} renderableFlows={renderableFlows} linkedTasks={linkedTasksByPipeline.get(pipeline.id) ?? []} onOpenPath={openStagePath} onOpenFlow={openPipelineFlow} onOpenTask={openPipelineTask} />
-              ))}
-            </div>
-          ) : (
-            <div className="flex flex-1 items-center justify-center text-center text-[13px] text-muted">{t("mobile.noConvos")}</div>
-          )
-        ) : (
-          <div className="flex flex-1 items-center justify-center gap-2 text-center text-[13px] text-muted">
-            <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
-            {t("common.loading")}
-          </div>
-        )}
-        {/* The subagent badge/anchor interaction on the phone (PR #441): the same
-            30x30 bottom-up circles the desktop board carries, anchored to the
-            focused pane's left edge and lifted above the composer. A hover/tap
-            expands the title, a second tap navigates to the child's CURRENT
-            generation. The overlay is pointer-events-none so only the badges
-            themselves take taps; expansion grows rightward within the 390px
-            viewport, so it never adds horizontal overflow. */}
-        {activeNode ? (
-          <div
-            data-testid="mobile-subagent-rail"
-            className="pointer-events-none absolute bottom-20 left-2 z-[20]"
-            style={{ width: 0, height: SUBAGENT_RAIL_H }}
-          >
-            <SubagentBadges
-              conversationId={conversationIdentity(activeNode.file)}
-              entries={files}
-              cardRect={{ x: 0, y: 0, w: 0, h: SUBAGENT_RAIL_H }}
-              onNavigate={(path) => {
-                const target = files.find((entry) => entry.path === path);
-                if (target) onSelect(target);
-              }}
-            />
-          </div>
-        ) : null}
-      </div>
-
-      {/* Chat owns the viewport (issue #419 reopened): the docked pipelines no
-          longer reserve ANY row below the transcript — the compact trigger in the
-          top strip opens the same bottom sheet, so the focused chat keeps the full
-          bottom of the viewport for the composer. */}
-
-      {mapOpen ? (
-        <div className="fixed inset-0 z-50 flex flex-col bg-canvas pb-[env(safe-area-inset-bottom)]">
-          <div className="flex min-h-[52px] shrink-0 items-center gap-2 border-b border-border bg-card px-2 py-1.5">
-            <span className="shrink-0 pl-1 text-[13px] font-bold">{t("mobile.map")}</span>
-            <span className="min-w-0 flex-1 truncate text-[11.5px] text-muted">{projectDisplayName(project, projectName)}</span>
-            {/* role="group" — aria-label on a role-less div is ignored by
-                accessibility APIs, so AT would hear two bare toggle buttons
-                with no "Map framing" context (round-1 review). */}
-            <div role="group" className="flex shrink-0 rounded-full border border-border bg-canvas p-0.5" aria-label={t("mobile.mapFrame")}>
-              {(["all", "current"] as const).map((value) => (
-                <button
-                  key={value}
-                  type="button"
-                  aria-pressed={mapFrame === value}
-                  className={`min-h-11 rounded-full px-3 text-[11px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
-                    mapFrame === value ? "bg-card text-accent shadow-1" : "text-muted"
-                  }`}
-                  onClick={() => setMapFrame(value)}
-                >
-                  {t(value === "all" ? "mobile.mapAll" : "mobile.mapCurrent")}
-                </button>
-              ))}
-            </div>
-            <button
-              type="button"
-              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[8px] border border-border bg-canvas text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-              aria-label={t("mobile.closeMap")}
-              onClick={() => setMapOpen(false)}
-            >
-              <X className="h-5 w-5" aria-hidden />
-            </button>
-          </div>
-          {/* Bounded lightweight projection (issue #418): fed the layout memo the
-              focus view already computed — no second buildSchemeLayout, no
-              world-sized composited layer, no transcript/pane mount, and zero
-              fetches on open — so it survives the largest board over Tailscale
-              where the full SchemeBoard OOM-killed the tab. */}
-          <MobileMapLite
-            layout={layout}
-            tasks={tasks}
-            workerStacks={workerStacks}
-            pipelineOutlines={mobilePipelineOutlines}
-            frame={mapFrame}
-            ringKey={resolvedKey}
-            onPick={pickFromMap}
+      <MobileShell
+        screen={activeEntry ? "chat" : "board"}
+        screenId={activeEntry?.id}
+        title={title}
+        titleLabel={activeEntry ? t("mobile2.chat.switcher") : t("mobile2.bar.switchProject")}
+        titleOpens={activeEntry ? "switch" : host ? "projects" : undefined}
+        back={canLeave}
+        host={host}
+        onOpenSearch={activeEntry ? undefined : onOpenSearch}
+        searchTestId="dash-search"
+        renderSheet={renderSheet}
+      >
+        {alert}
+        {leaf}
+      </MobileShell>
+      {/* Rename edits the title cell in place (§4.2, #1348): the editor lays
+          over the bar, edge to edge, so the field owns the whole width instead
+          of sharing a row with fixed controls. Mounted only after the menu's
+          Rename row asks for it; once it closes, its idle face is hidden and
+          takes no taps, so the bar underneath answers again. */}
+      {renameToken > 0 && activeFile ? (
+        <div
+          data-testid="mobile-rename-slot"
+          className="fixed inset-x-0 top-0 z-[55] h-[52px] pointer-events-none [&>[data-session-title-editor]]:pointer-events-auto [&>span:not([data-session-title-editor])]:hidden"
+        >
+          <SessionTitle
+            key={activeFile.path}
+            file={activeFile}
+            autoEditToken={renameToken}
+            alwaysVisible
+            onTitleChange={(next) => setRenamed({ path: activeFile.path, title: next })}
           />
-          {/* The lite map is pick-only and cannot paint a readable stage strip at
-              its zoom, so it never surfaces a pipeline's full plan on its own.
-              The same one-row summary rides below it (issue #419) — a tap opens
-              the sheet, keeping every active pipeline's full plan reachable
-              without a stack of rows stealing the map (issue #156). */}
-          {dockedPipelines.length ? (
-            <MobilePipelineSummaryRow pipelines={dockedPipelines} onOpen={() => setPipelineSheetOpen(true)} />
-          ) : null}
-          <div className="shrink-0 border-t border-border bg-card px-3 py-1.5 text-center text-[11px] text-muted">
-            {t("mobile.tapNode")}
-          </div>
         </div>
+      ) : null}
+
+      {/* The seat sheet (§4.5), over this conversation. It is the SAME sheet the
+          board's seat card opens — one seat surface, never a second one — fed
+          by `useSeatPanel`, which answers only for a live seat this
+          conversation holds. */}
+      {seatSheetOpen && seatPanel ? (
+        <MobileOrchestratorSheet
+          project={project}
+          projectName={displayName}
+          projectCwd={projectCwd || undefined}
+          state={seatPanel.state}
+          status={seatPanel.status}
+          file={seatPanel.file}
+          incumbent={seatPanel.incumbent}
+          pendingMandate={seatPanel.pendingMandate}
+          viewerMcpRegistered={seatPanel.viewerMcpRegistered}
+          submitting={false}
+          rotate={{ ...seatPanel.rotate, onConfirm: (input) => { setSeatHandoff(true); seatPanel.rotate.onConfirm(input); } }}
+          /* Create and resume belong to the surface that exists without a seat
+             conversation; over a LIVE seat the sheet's primary action is «Open
+             conversation», so this confirm has no control that can call it. */
+          onConfirm={() => undefined}
+          onRecheck={seatPanel.onRecheck}
+          /* Already in it: the sheet was opened FROM the seat's conversation. */
+          onOpenConversation={() => setSeatSheetOpen(false)}
+          onClose={() => setSeatSheetOpen(false)}
+        />
       ) : null}
 
       {pipelineSheetOpen && dockedPipelines.length ? (
@@ -789,177 +805,103 @@ export function MobileFocusView({ project, projectName, groups, manual, files, f
   );
 }
 
-/** The pipeline + stage index a focused transcript path — or a focused round
-    deck's flow — belongs to, if any. Review-loop stages match by flow id, since
-    the board folds their reviewer transcript into the deck. */
-function findPipelineStage(pipelines: Pipeline[], path: string | null, flowId: string | null): { pipeline: Pipeline; index: number } | null {
-  if (!path && !flowId) return null;
-  for (const pipeline of pipelines) {
-    if (pipeline.state === "closed") continue;
-    const index = pipeline.stages.findIndex((stage) => {
-      const attempt = latestAttempt(pipeline, stage.id);
-      if (!attempt) return false;
-      if (path && attempt.agentPath === path) return true;
-      return Boolean(flowId && attempt.flowId === flowId);
-    });
-    if (index >= 0) return { pipeline, index };
-  }
-  return null;
-}
-
-/** Compact pipeline chain row over a focused stage pane: position, current
-    stage/state, and prev/next stage chips as hop targets along the chain. The
-    current-stage chip opens a verdict bottom sheet (#93 §2.3) when its stage has
-    run, surfacing findings/confidence and parked Retry/Skip on mobile. */
-function PipelineFocusRow({ pipeline, index, flows, files, renderableFlows, renderablePaths, onHop, onOpenPath }: { pipeline: Pipeline; index: number; flows: Flow[]; files: readonly FileEntry[]; renderableFlows: ReadonlySet<string>; renderablePaths: ReadonlySet<string>; onHop: (index: number) => void; onOpenPath: (path: string) => void }) {
+/**
+ * The bar's title cell for a conversation (§3.2, §4.2): the title on one line,
+ * and under it the meta line — the dot, the state phrase, the engine mark, the
+ * model and its reasoning tier, and `stage k/n` when this conversation is its
+ * pipeline's current stage.
+ *
+ * The state phrase NEVER truncates; the model and the reasoning give way
+ * first. That is the whole point of the line: a conversation blocked on the
+ * operator must not read as a running one because its own word ran out of room
+ * (2026-08 audit findings 3 and 4).
+ */
+export function ChatBarTitle({ file, offline, stage, bump, renamed = null }: { file: FileEntry; offline: boolean; stage: StagePosition | null; bump: "left" | "right" | null; renamed?: string | null }) {
   const { t } = useLocale();
-  const [sheetOpen, setSheetOpen] = useState(false);
-  const total = pipeline.stages.length;
-  const stage = pipeline.stages[index]!;
-  const state = stageChipState(pipeline, stage);
-  const tone = STAGE_TONES[state];
-  const prev = index > 0 ? pipeline.stages[index - 1]! : null;
-  const next = index < total - 1 ? pipeline.stages[index + 1]! : null;
-  /* A hop resolves through stageOpenTarget, so a neighbor is reachable only while
-     its flow still has a deck (renderableFlows) or its run transcript is still in
-     the scan (renderablePaths). */
-  const prevHopEnabled = prev ? Boolean(compactStageOpenTarget(prev, latestAttempt(pipeline, prev.id), flows, renderableFlows, renderablePaths, files)) : false;
-  const nextHopEnabled = next ? Boolean(compactStageOpenTarget(next, latestAttempt(pipeline, next.id), flows, renderableFlows, renderablePaths, files)) : false;
-  const attempt = latestAttempt(pipeline, stage.id);
-  const stateLabel = t(`pipelineChipState.${state}`);
-  const prevLabel = prev ? stageChipLabel(t, prev) : "";
-  const prevState = prev ? t(`pipelineChipState.${stageChipState(pipeline, prev)}`) : "";
-  const nextLabel = next ? stageChipLabel(t, next) : "";
-  const nextState = next ? t(`pipelineChipState.${stageChipState(pipeline, next)}`) : "";
-  /* Match the shared strip: visible evidence and openable retry or review-round
-     history both keep the mobile sheet available. */
-  const canOpenVerdict = stageHasEvidence(pipeline, stage, attempt)
-    || stageHasNavigableHistory(pipeline, stage, attempt, flows, renderablePaths, files);
-  const canOpenFlow = Boolean(attempt?.flowId && renderableFlows.has(attempt.flowId));
-  const canOpenPath = Boolean(attempt?.agentPath && renderablePaths.has(attempt.agentPath));
+  const bits = chatStateBits(t, file, { offline });
+  const badge = engineBadge(file);
+  const model = file.model
+    ? file.effort ? t("mobile2.chat.identity", { model: file.model, effort: file.effort }) : file.model
+    : badge.label;
   return (
-    /* Inline chip group living inside the shared conversation-chip strip (finding
-       4): no separate row. Every hop/verdict control is a 44px tap target. */
-    <div className="flex shrink-0 items-center gap-1.5" role="group" aria-label={t("pipelineMobile.chipAria", { task: pipeline.task })} data-testid="mobile-pipeline-focus-row">
-      <span className="shrink-0 rounded-full bg-sunken px-1.5 py-1 text-[10px] font-bold text-muted" aria-hidden>⇢ {t("pipelineMobile.position", { k: index + 1, n: total })}</span>
-      {prev ? (
-        <button
-          type="button"
-          disabled={!prevHopEnabled}
-          onClick={() => onHop(index - 1)}
-          aria-label={t("pipelineMobile.prevStage", { label: prevLabel, state: prevState })}
-          className="inline-flex h-11 shrink-0 items-center rounded-full border border-border bg-card px-3 text-[11px] font-bold text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-30"
-        >
-          ‹ {stageChipLabel(t, prev)}
-        </button>
-      ) : null}
-      <button
-        type="button"
-        disabled={!canOpenVerdict}
-        onClick={() => setSheetOpen(true)}
-        aria-haspopup="dialog"
-        aria-label={t("pipelineMobile.openVerdict", { label: stageChipLabel(t, stage), state: stateLabel })}
-        className="inline-flex h-11 shrink-0 items-center gap-1 rounded-full px-3 text-[11px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-default"
-        style={{ backgroundColor: tone.soft, color: tone.color }}
-      >
-        <span aria-hidden>{stage.kind === "review-loop" ? "⟳" : "▸"}</span>
-        {stageChipLabel(t, stage)}
-        {STAGE_GLYPH[state] ? <span aria-hidden>{STAGE_GLYPH[state]}</span> : null}
-        <span className="text-[9px] font-semibold opacity-80">{t(`pipelineChipState.${state}`)}</span>
-        {attempt?.verdict ? <span aria-hidden>{attempt.verdict.status === "pass" ? "✓" : attempt.verdict.status === "fail" ? "✕" : "●"}</span> : null}
-      </button>
-      {next ? (
-        <button
-          type="button"
-          disabled={!nextHopEnabled}
-          onClick={() => onHop(index + 1)}
-          aria-label={t("pipelineMobile.nextStage", { label: nextLabel, state: nextState })}
-          className="inline-flex h-11 shrink-0 items-center rounded-full border border-border bg-card px-3 text-[11px] font-bold text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-30"
-        >
-          {stageChipLabel(t, next)} ›
-        </button>
-      ) : null}
-      {sheetOpen && attempt ? (
-        <div
-          className="fixed inset-0 z-[70] flex items-end justify-center bg-black/40"
-          role="presentation"
-          onClick={(event) => {
-            if (event.target === event.currentTarget) setSheetOpen(false);
-          }}
-        >
-          <div className="mb-0 w-full max-w-[420px] rounded-t-[16px] bg-card p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] shadow-2">
-            <div className="mx-auto mb-2 h-1 w-10 rounded-full bg-border" aria-hidden />
-            <VerdictPopover
-              pipeline={pipeline}
-              stage={stage}
-              attempt={attempt}
-              flows={flows}
-              files={files}
-              availablePaths={renderablePaths}
-              mobile
-              canOpenFlow={canOpenFlow}
-              canOpenPath={canOpenPath}
-              onClose={() => setSheetOpen(false)}
-              onOpenPath={(path) => { setSheetOpen(false); onOpenPath(path); }}
-            />
-          </div>
-        </div>
-      ) : null}
-    </div>
+    <span
+      data-mobile2-chat-title
+      className={`flex min-w-0 flex-1 flex-col justify-center transition-transform duration-[200ms] ease-[cubic-bezier(0.2,0,0,1)] motion-reduce:transition-none ${
+        bump === "right" ? "-translate-x-3" : bump === "left" ? "translate-x-3" : ""
+      }`}
+    >
+      <span data-mobile2-title-text className="min-w-0 truncate text-title font-semibold leading-tight text-primary">
+        {cleanTitle(renamed ?? file.title, 90)}
+      </span>
+      <span className="flex min-w-0 items-center gap-1 text-label font-medium leading-tight text-secondary">
+        <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${CHAT_TONE_DOT[bits.tone]} ${bits.key === "working" ? "animate-pulse motion-reduce:animate-none" : ""}`} aria-hidden />
+        <span data-mobile2-chat-state className={`shrink-0 whitespace-nowrap ${CHAT_TONE_TEXT[bits.tone]}`}>{bits.phrase}</span>
+        {offline ? null : (
+          <>
+            <span aria-hidden className="shrink-0 text-muted">·</span>
+            <ChatEngineMark file={file} />
+            <span className="min-w-0 truncate" title={effortTitle(file)}>{model}</span>
+            {stage?.current ? (
+              <>
+                <span aria-hidden className="shrink-0 text-muted">·</span>
+                <span data-mobile2-chat-stage className="shrink-0 whitespace-nowrap tabular-nums">{t("mobile2.chat.stage", { k: stage.k, n: stage.n })}</span>
+              </>
+            ) : null}
+          </>
+        )}
+        {/* The pending self-wake (#165). Its standing contract is that it shows
+            on EVERY surface, the phone included, because a conversation that
+            reads as idle is actually sleeping until a known time — and the
+            phone's pane header, which used to carry it, is gone. It rides the
+            state line rather than a row of its own, so it costs the transcript
+            nothing, and it is passive here: the cell around it is already the
+            switcher's button, and a button inside a button is not a control
+            anyone can reach. */}
+        {file.pendingWakeup ? (
+          <WakeupChip key={wakeupChipKey(file.pendingWakeup)} wakeup={file.pendingWakeup} interactive={false} className="ml-0.5" />
+        ) : null}
+      </span>
+    </span>
   );
 }
 
-/** One conversation in the switch strip: dot + engine label, the active one
-    carries its title. Waiting conversations keep their amber tone visible. */
-function StripChip({
-  entry,
-  active,
-  chipRef,
-  onClick,
-}: {
-  entry: Entry;
-  active: boolean;
-  chipRef?: React.Ref<HTMLButtonElement>;
-  onClick: () => void;
-}) {
+/**
+ * The bar's title cell for the two leaves that carry no transcript: a
+ * review-round deck and a not-yet-spawned draft (README §3.2).
+ *
+ * It says exactly what the switcher row for the same key says — the deck names
+ * the work it reviews and takes its state from its newest round, the draft says
+ * it has not been sent — so the cell an operator taps to LEAVE names the same
+ * thing as the row that brought them here. Without it these two leaves showed
+ * the project's name and opened the project switcher, which is a different
+ * screen's cell on this one's bar.
+ */
+export function EntryBarTitle({ entry, offline, bump }: { entry: SwitchEntry; offline: boolean; bump: "left" | "right" | null }) {
   const { t } = useLocale();
-  if (!entry.file) {
-    const deck = entry.kind === "deck";
-    return (
-      <button
-        ref={chipRef}
-        type="button"
-        className={`flex h-11 shrink-0 items-center gap-1 rounded-full border px-3 text-[11px] font-semibold ${
-          active ? "border-accent/60 bg-accent/10 text-primary" : "border-dashed border-border bg-canvas text-muted"
-        }`}
-        onClick={onClick}
-      >
-        <span className="text-[13px] leading-none text-accent">{deck ? "R" : "＋"}</span> {deck ? t("scheme.flow") : t("mobile.agent")}
-      </button>
-    );
-  }
-  const file = entry.file;
-  const state = paneState(file);
-  const waiting = state === "waiting" || state === "stalled";
-  const badge = engineBadge(file);
-  const title = cleanTitle(file.title, 60);
+  const bits = entry.file ? chatStateBits(t, entry.file, { offline }) : null;
   return (
-    <button
-      ref={chipRef}
-      type="button"
-      className={`flex h-11 shrink-0 items-center gap-1.5 rounded-full border px-3 text-[11px] font-semibold ${
-        active
-          ? "border-accent/60 bg-accent/10 text-primary"
-          : waiting
-            ? "border-warning/60 bg-warning-soft text-warning"
-            : "border-border bg-canvas text-muted"
+    <span
+      data-mobile2-chat-title
+      data-mobile2-entry={entry.section}
+      className={`flex min-w-0 flex-1 flex-col justify-center transition-transform duration-[200ms] ease-[cubic-bezier(0.2,0,0,1)] motion-reduce:transition-none ${
+        bump === "right" ? "-translate-x-3" : bump === "left" ? "translate-x-3" : ""
       }`}
-      title={title}
-      onClick={onClick}
     >
-      <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${activityDot(file.activity)}`} />
-      {entry.isRoot ? null : <span aria-hidden>⤷</span>}
-      {active ? <span className="max-w-[52vw] truncate">{title}</span> : <span>{waiting ? "⏸ " : ""}{badge.label}</span>}
-    </button>
+      <span data-mobile2-title-text className="min-w-0 truncate text-title font-semibold leading-tight text-primary">
+        {entry.label}
+      </span>
+      <span className="flex min-w-0 items-center gap-1 text-label font-medium leading-tight text-secondary">
+        <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${bits ? CHAT_TONE_DOT[bits.tone] : "bg-strong"}`} aria-hidden />
+        {bits ? (
+          <span data-mobile2-chat-state className={`shrink-0 whitespace-nowrap ${CHAT_TONE_TEXT[bits.tone]}`}>{bits.phrase}</span>
+        ) : (
+          <span data-mobile2-chat-state className="min-w-0 truncate">{entry.meta}</span>
+        )}
+        {/* The same standing contract as the conversation's own cell (#165). */}
+        {entry.file?.pendingWakeup ? (
+          <WakeupChip key={wakeupChipKey(entry.file.pendingWakeup)} wakeup={entry.file.pendingWakeup} interactive={false} className="ml-0.5" />
+        ) : null}
+      </span>
+    </span>
   );
 }

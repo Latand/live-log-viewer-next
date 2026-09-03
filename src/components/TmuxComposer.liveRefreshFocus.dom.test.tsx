@@ -272,7 +272,6 @@ function renderMobileFocus(root: Root, file: FileEntry): void {
       flows={[]}
       pipelines={[]}
       surfacePipelines={[]}
-      workerStacks={[]}
       tasks={[]}
       drafts={[]}
       loaded

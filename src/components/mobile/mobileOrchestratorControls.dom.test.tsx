@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeEach, expect, mock, test } from "bun:test";
 import { Window as HappyWindow } from "happy-dom";
+import { useState } from "react";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 
@@ -60,6 +61,7 @@ mock.module("@/hooks/useLogTail", () => ({
 }));
 
 const { MobileFocusView } = await import("./MobileFocusView");
+const { MobileOrchestratorRow } = await import("./MobileOrchestratorRow");
 const { resetOrchestratorSeatCacheForTests } = await import("../orchestrator/useOrchestratorSeat");
 const { resetOrchestratorIncumbentCacheForTests } = await import("../orchestrator/useOrchestratorIncumbent");
 
@@ -160,25 +162,43 @@ function incumbent(over: Record<string, unknown> = {}): Record<string, unknown> 
   };
 }
 
-const view = (files: FileEntry[]) => (
-  <MobileFocusView
-    project="atlas"
-    projectName="atlas"
-    groups={[]}
-    manual={files}
-    files={files}
-    flows={[]}
-    pipelines={[]}
-    tasks={[]}
-    drafts={[]}
-    loaded
-    focus={null}
-    onSelect={() => undefined}
-    onClose={() => undefined}
-    onDraftClose={() => undefined}
-    onDraftSpawned={() => undefined}
-  />
-);
+/*
+ * The phone leaf that hosts the pinned row. Mobile v2 lane 3 folded the
+ * conversation strip into the shell bar's title cell, so the row no longer
+ * rides inside `MobileFocusView`: it sits in its own slot beside the leaf,
+ * exactly as `ProjectDashboard` mounts it for the catalog and empty-project
+ * leaves, and a tap on it pins the conversation the focus view shows. Lane 6
+ * moves it onto the board's seat card; every claim below is about the row.
+ */
+function Leaf({ files }: { files: FileEntry[] }) {
+  const [focus, setFocus] = useState<string | null>(null);
+  return (
+    <>
+      <div data-testid="mobile-orchestrator-slot">
+        <MobileOrchestratorRow project="atlas" projectName="atlas" files={files} onOpenConversation={(file) => setFocus(file.path)} />
+      </div>
+      <MobileFocusView
+        project="atlas"
+        projectName="atlas"
+        groups={[]}
+        manual={files}
+        files={files}
+        flows={[]}
+        pipelines={[]}
+        tasks={[]}
+        drafts={[]}
+        loaded
+        focus={focus}
+        onSelect={(file) => setFocus(file.path)}
+        onClose={() => undefined}
+        onDraftClose={() => undefined}
+        onDraftSpawned={() => undefined}
+      />
+    </>
+  );
+}
+
+const view = (files: FileEntry[]) => <Leaf files={files} />;
 
 async function settle(root: Root, element: React.ReactElement, rounds = 4): Promise<void> {
   for (let round = 0; round < rounds; round += 1) {

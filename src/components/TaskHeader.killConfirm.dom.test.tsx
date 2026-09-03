@@ -92,3 +92,59 @@ test("an untitled conversation still gets a question rather than a bare PID", ()
   const host = openConfirm(runningFile(""));
   expect(host.textContent).toContain(`Stop ${en["task.confirmKillUntitled"]}?`);
 });
+
+/* Mobile v2 lane 3 moved the kill REQUEST into `useProcessKill`, so the phone's
+   menu row and this desktop control cannot drift apart. What the move must not
+   cost the desktop is the escalation: a SIGTERM the host refuses is exactly the
+   moment the operator wants SIGKILL, and the armed row already carries it as
+   its primary word. Collapsing the row on a failure buries that behind a
+   re-arm. */
+const settle = async () => { await new Promise((r) => setTimeout(r, 0)); await new Promise((r) => setTimeout(r, 0)); };
+
+test("a refused SIGTERM keeps the row armed, with SIGKILL one press away (#699/#700)", async () => {
+  const posted: { path?: string; force?: boolean }[] = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    posted.push(JSON.parse(String(init?.body)));
+    return { ok: true, status: 200, json: async () => ({ ok: false, error: "no such process" }) } as unknown as Response;
+  }) as unknown as typeof fetch;
+  try {
+    const host = openConfirm(runningFile("Rebuild the pipeline registry projection"));
+    const yes = [...host.querySelectorAll("button")].find((node) => node.textContent === en["common.yes"]);
+    expect(yes).toBeTruthy();
+    flushSync(() => { yes!.click(); });
+    await settle();
+
+    /* The question is still on screen, and the button that was «Yes» now says
+       what the next press will send. */
+    expect(host.textContent).toContain("Stop Rebuild the pipeline registry projection?");
+    expect(host.textContent).toContain("no such process");
+    const escalate = [...host.querySelectorAll("button")].find((node) => node.textContent === "SIGKILL");
+    expect(escalate).toBeTruthy();
+
+    flushSync(() => { escalate!.click(); });
+    await settle();
+    expect(posted).toEqual([
+      { path: "/sessions/kill.jsonl", force: false },
+      { path: "/sessions/kill.jsonl", force: true },
+    ]);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test("an accepted kill collapses the armed row", async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = (async () => ({ ok: true, status: 200, json: async () => ({ ok: true, pid: 908_010 }) } as unknown as Response)) as unknown as typeof fetch;
+  try {
+    const host = openConfirm(runningFile("Rebuild the pipeline registry projection"));
+    const yes = [...host.querySelectorAll("button")].find((node) => node.textContent === en["common.yes"]);
+    flushSync(() => { yes!.click(); });
+    await settle();
+
+    expect(host.textContent).not.toContain("Stop Rebuild the pipeline registry projection?");
+    expect(host.textContent).toContain("SIGTERM");
+  } finally {
+    globalThis.fetch = original;
+  }
+});

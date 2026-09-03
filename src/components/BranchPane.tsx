@@ -1,7 +1,7 @@
 "use client";
 
 import { CornerDownRight, GitBranch, Maximize2, Minimize2, Unlink2 } from "lucide-react";
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { ChevronRight, X } from "@/components/icons";
 import { useIsMobile } from "@/hooks/useIsMobile";
@@ -186,30 +186,6 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
      clear on the next snapshot, never wait for a clearing event. */
   const liveMigration = activeCardMigration(file.migration, accountIdFromPath(file.path));
   const migState = cardMigrationState(liveMigration);
-  /* The phone metadata row scrolls horizontally to stay one line (issue #177
-     item 4); this tracks whether more is clipped to the right so a fade
-     affordance can show, and the row swallows its own touch gestures so a scroll
-     never reaches the header swipe handler (issue #177 item 1 review). */
-  const metaScrollRef = useRef<HTMLDivElement | null>(null);
-  const [metaClipped, setMetaClipped] = useState(false);
-  /* Chat-first mobile shell (issue #419): on the phone the conversation shows
-     ONE compact header row by default. The metadata chips (memory/goal/model/
-     ctx/account) and the detailed runtime controls fold behind this single
-     conversation-details disclosure, reserving zero height while collapsed so
-     the transcript keeps its ≥60% viewport budget (see mobile/chatBudget.ts).
-     Desktop always renders both inline, so the flag only gates the phone. */
-  const detailsId = useId();
-  const [detailsOpen, setDetailsOpen] = useState(false);
-  const showSecondary = !isMobile || detailsOpen;
-  const syncMetaClip = useCallback(() => {
-    const el = metaScrollRef.current;
-    if (!el) return;
-    const clipped = el.scrollWidth - el.clientWidth - el.scrollLeft > 4;
-    setMetaClipped((prev) => (prev === clipped ? prev : clipped));
-  }, []);
-  useEffect(() => {
-    syncMetaClip();
-  }, [syncMetaClip, isMobile, file]);
   /* Stable card identity: a committed migration gives this conversation a new
      transcript `path` under the target account, but the same conversationId. So
      the chime pane registry, the composer's held receipts, and per-card recovery
@@ -298,208 +274,148 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
           className={`w-full shrink-0 ${isRoot ? "h-1" : "h-0.5"}`}
           style={state === "done" ? { backgroundColor: "var(--color-strong)" } : engineEdge(file)}
         />
-        {/* Two deliberate rows: identity + actions on top (the close X pinned
-            to the corner at every width), the metadata chips below. */}
-        {/* reasoning-host (issue #270): the header's width is imposed by the
-            pane (column, scheme node, phone viewport), never by its content,
-            so inline-size containment is free. It gives the effort meter a
-            defined narrow-pane behavior: below 260px the meter collapses
-            (tooltip keeps the tier) instead of crowding the chip row. */}
-        <header
-          className={`reasoning-host flex shrink-0 flex-col border-b border-border ${
-            isMobile ? "gap-y-0.5 px-2 py-1" : "gap-y-1 px-2.5 py-1.5"
-          } ${tone.header} ${
-            dragHandle ? "cursor-grab active:cursor-grabbing" : ""
-          }`}
-          {...dragHandle}
-        >
-          <div className="flex min-w-0 items-center gap-1.5">
-            <span className={`h-2 w-2 shrink-0 rounded-full ${activityDot(file.activity)}`} title={t(`branch.${state}`)} />
-            {/* The operator-facing status word (issue #961): at most one per
-                card, projected from the authorities the card already trusts. */}
-            <CardStatusBadge file={file} />
-            {titleOverride ? (
-              /* The owner names this pane (#658). The transcript's own title —
-                 the first line of the prompt it opened with — stays in the
-                 tooltip, so nothing is lost by leading with the identity. */
-              <span
-                className="min-w-0 flex-1 truncate text-[12px] font-semibold"
-                data-pane-title-override
-                title={`${titleOverride} — ${cleanTitle(file.title)}`}
-              >
-                {titleOverride}
-              </span>
-            ) : file.renamable ? (
-              <SessionTitle file={file} displayMax={90} titleClassName="text-[12px] font-semibold" alwaysVisible={isMobile} autoEditToken={autoEditToken} />
-            ) : (
-              <span className="min-w-0 flex-1 truncate text-[12px] font-semibold" title={cleanTitle(file.title)}>
-                {cleanTitle(file.title, 90)}
-              </span>
-            )}
-            <ProcessStatusControls file={file} compact hideChip={isMobile} />
-            {isMobile ? (
-              <button
-                type="button"
-                data-testid="mobile-details-toggle"
-                aria-expanded={detailsOpen}
-                aria-controls={detailsId}
-                aria-label={detailsOpen ? t("branch.detailsHide") : t("branch.detailsShow")}
-                title={detailsOpen ? t("branch.detailsHide") : t("branch.detailsShow")}
-                onClick={() => setDetailsOpen((open) => !open)}
-                className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-[8px] border border-border bg-canvas text-muted hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-              >
-                <ChevronRight className={`h-4 w-4 transition-transform ${detailsOpen ? "rotate-90" : ""}`} aria-hidden />
-              </button>
-            ) : null}
-            {showFavorite ? <FavoriteCrown id={cardId} cardRef={paneRef} touch={isMobile} /> : null}
-            {onToggleExpand ? (
-              <button
-                className={`inline-flex shrink-0 items-center justify-center rounded-[8px] border border-border bg-canvas text-muted hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
-                  isMobile ? "h-11 w-11" : "px-1.5 py-0.5"
-                }`}
-                aria-label={expanded ? t("branch.collapseFull") : t("branch.expandFull", { title: cleanTitle(file.title, 60) })}
-                title={expanded ? t("branch.collapseFull") : t("branch.expandFull", { title: cleanTitle(file.title, 60) })}
-                onClick={onToggleExpand}
-              >
-                {expanded ? <Minimize2 className={isMobile ? "h-4 w-4" : "h-3 w-3"} aria-hidden /> : <Maximize2 className={isMobile ? "h-4 w-4" : "h-3 w-3"} aria-hidden />}
-              </button>
-            ) : null}
-            {headerActions}
-            {file.spawn ? null : <DeleteFileButton file={file} onDeleted={onClose} />}
-            {onClose ? (
-              <button
-                className={`inline-flex shrink-0 items-center justify-center rounded-[8px] border border-border bg-canvas text-muted hover:border-danger/40 hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
-                  isMobile ? "h-11 w-11" : "px-1.5 py-0.5"
-                }`}
-                aria-label={t("branch.removeColumn", { title: cleanTitle(file.title, 60) })}
-                onClick={onClose}
-              >
-                <X className={isMobile ? "h-4 w-4" : "h-3 w-3"} aria-hidden />
-              </button>
-            ) : null}
-          </div>
-          {showSecondary ? (
-          <div
-            id={detailsId}
-            data-testid="mobile-conv-meta"
-            className="relative flex min-w-0 items-center gap-x-1.5"
-            /* The metadata row owns its own touch gestures on the phone so a
-               horizontal scroll to reveal clipped chips stays here and never
-               reaches MobileFocusView's header swipe (which would switch
-               conversations). The title row above still answers to swipes. */
-            onTouchStart={isMobile ? (event) => event.stopPropagation() : undefined}
-            onTouchEnd={isMobile ? (event) => event.stopPropagation() : undefined}
+        {/* On the phone this header does not exist (mobile v2 lane 3,
+            docs/design/mobile-v2/README.md §3.4): its identity moved into the
+            shell bar's title cell — title on one line, state phrase, model and
+            reasoning under it — and every one of its controls became a
+            labelled row in the conversation's `⋯` menu. Five to six 44 px
+            controls on one 390 px line left the title one to four characters
+            (2026-08 audit finding 4); the row that replaced them costs the
+            transcript nothing at all.
+
+            Desktop keeps both rows: identity + actions on top (the close X
+            pinned to the corner at every width), the metadata chips below. */}
+        {isMobile ? null : (
+          <header
+            className={`reasoning-host flex shrink-0 flex-col gap-y-1 border-b border-border px-2.5 py-1.5 ${tone.header} ${
+              dragHandle ? "cursor-grab active:cursor-grabbing" : ""
+            }`}
+            {...dragHandle}
           >
-            {/* Context usage is pinned first and never scrolls on the phone
-                (issue #177 item 1): the exact % leads the chip face so it stays
-                on screen through any overflow of the row beside it. Desktop keeps
-                ctx inline in the wrapping row. */}
-            {isMobile && file.ctx ? <CtxChip ctx={file.ctx} /> : null}
-            <div
-              ref={metaScrollRef}
-              onScroll={isMobile ? syncMetaClip : undefined}
-              /* Fade the trailing content when the phone row still has clipped
-                 chips — a background-independent scroll affordance that works over
-                 the tinted header tones. */
-              style={isMobile && metaClipped ? { maskImage: "linear-gradient(to right, #000 calc(100% - 20px), transparent)", WebkitMaskImage: "linear-gradient(to right, #000 calc(100% - 20px), transparent)" } : undefined}
-              className={`flex min-w-0 items-center gap-x-1.5 gap-y-1 ${
-                isMobile ? "no-scrollbar flex-nowrap overflow-x-auto" : "flex-wrap"
-              }`}
-            >
-              <LastActivity file={file} />
-              {/* Model + reasoning is now read-only identity only (issue #241):
-                  the model/effort *picker* moved out of the header into the
-                  unified control strip. The phone shows a single «model ·
-                  reasoning» chip; desktop shows the observed model chip + effort
-                  bars. */}
-              {isMobile ? (
-                file.model ? (
+            <div className="flex min-w-0 items-center gap-1.5">
+              <span className={`h-2 w-2 shrink-0 rounded-full ${activityDot(file.activity)}`} title={t(`branch.${state}`)} />
+              {/* The operator-facing status word (issue #961): at most one per
+                  card, projected from the authorities the card already trusts. */}
+              <CardStatusBadge file={file} />
+              {titleOverride ? (
+                /* The owner names this pane (#658). The transcript's own title —
+                   the first line of the prompt it opened with — stays in the
+                   tooltip, so nothing is lost by leading with the identity. */
+                <span
+                  className="min-w-0 flex-1 truncate text-[12px] font-semibold"
+                  data-pane-title-override
+                  title={`${titleOverride} — ${cleanTitle(file.title)}`}
+                >
+                  {titleOverride}
+                </span>
+              ) : file.renamable ? (
+                <SessionTitle file={file} displayMax={90} titleClassName="text-[12px] font-semibold" autoEditToken={autoEditToken} />
+              ) : (
+                <span className="min-w-0 flex-1 truncate text-[12px] font-semibold" title={cleanTitle(file.title)}>
+                  {cleanTitle(file.title, 90)}
+                </span>
+              )}
+              <ProcessStatusControls file={file} compact />
+              {showFavorite ? <FavoriteCrown id={cardId} cardRef={paneRef} /> : null}
+              {onToggleExpand ? (
+                <button
+                  className={"inline-flex shrink-0 items-center justify-center rounded-[8px] border border-border bg-canvas px-1.5 py-0.5 text-muted hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"}
+                  aria-label={expanded ? t("branch.collapseFull") : t("branch.expandFull", { title: cleanTitle(file.title, 60) })}
+                  title={expanded ? t("branch.collapseFull") : t("branch.expandFull", { title: cleanTitle(file.title, 60) })}
+                  onClick={onToggleExpand}
+                >
+                  {expanded ? <Minimize2 className="h-3 w-3" aria-hidden /> : <Maximize2 className="h-3 w-3" aria-hidden />}
+                </button>
+              ) : null}
+              {headerActions}
+              {file.spawn ? null : <DeleteFileButton file={file} onDeleted={onClose} />}
+              {onClose ? (
+                <button
+                  className={"inline-flex shrink-0 items-center justify-center rounded-[8px] border border-border bg-canvas px-1.5 py-0.5 text-muted hover:border-danger/40 hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"}
+                  aria-label={t("branch.removeColumn", { title: cleanTitle(file.title, 60) })}
+                  onClick={onClose}
+                >
+                  <X className="h-3 w-3" aria-hidden />
+                </button>
+              ) : null}
+            </div>
+            <div data-testid="mobile-conv-meta" className="relative flex min-w-0 items-center gap-x-1.5">
+              <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1">
+                <LastActivity file={file} />
+                {/* Model + reasoning is read-only identity only (issue #241):
+                    the picker moved out of the header into the unified control
+                    strip; the chip and the effort bars are identity. */}
+                {file.model ? (
                   <span
-                    className="inline-flex shrink-0 items-center rounded-full px-2 py-0.5 font-mono text-[10px] font-semibold"
+                    className="shrink-0 rounded-full px-1.5 py-0.5 font-mono text-[9.5px] font-semibold"
                     style={{ backgroundColor: effortTint(file).soft, color: effortTint(file).color }}
                     title={[badge.label, effortTitle(file)].filter(Boolean).join(" · ")}
                   >
-                    {file.effort ? `${file.model} · ${file.effort}` : file.model}
+                    {file.model}
                   </span>
                 ) : (
                   <span className="inline-flex shrink-0 items-center rounded-full px-2 py-0.5 text-[10px] font-bold" style={badge.style} title={effortTitle(file)}>
                     {badge.label}
                   </span>
-                )
-              ) : (
-                <>
-                  {file.model ? (
-                    <span
-                      className="shrink-0 rounded-full px-1.5 py-0.5 font-mono text-[9.5px] font-semibold"
-                      style={{ backgroundColor: effortTint(file).soft, color: effortTint(file).color }}
-                      title={[badge.label, effortTitle(file)].filter(Boolean).join(" · ")}
-                    >
-                      {file.model}
-                    </span>
-                  ) : (
-                    <span className="inline-flex shrink-0 items-center rounded-full px-2 py-0.5 text-[10px] font-bold" style={badge.style} title={effortTitle(file)}>
-                      {badge.label}
-                    </span>
-                  )}
-                  <EffortPills file={file} />
-                </>
-              )}
-              <RateLimitBadge file={file} />
-              {/* Scheduled-wakeup chip (#165): a pending self-wake shows on every
-                  surface, phone included, since it is actionable status. */}
-              <WakeupChip key={wakeupChipKey(file.pendingWakeup)} wakeup={file.pendingWakeup} />
-              {file.parentRemoved ? <ParentRemovedChip /> : null}
-              {/* Supersedence lineage chip (issue #383): the chain tail names
-                  its round and deep-links the retired predecessor with the
-                  durable #c= form, so history stays one click away. */}
-              {file.continues ? (
-                <a
-                  href={"#c=" + encodeURIComponent(file.continues.conversationId)}
-                  data-continues-chip
-                  className="inline-flex shrink-0 items-center gap-0.5 truncate rounded-full border border-accent/40 bg-accent-soft px-1.5 py-0.5 text-[9.5px] font-semibold text-accent hover:border-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-                  title={t("lineage.continuesTitle", { round: file.continues.round })}
-                >
-                  <CornerDownRight className="h-2.5 w-2.5 shrink-0" aria-hidden /> {t("lineage.continues", { round: file.continues.round })}
-                </a>
-              ) : null}
-              {/* Desktop keeps ctx inline here; on mobile it is pinned ahead of
-                  this scroller. */}
-              {!isMobile && file.ctx ? <CtxChip ctx={file.ctx} /> : null}
-              {file.worktree && !isMobile ? (
-                <span
-                  className="inline-flex shrink-0 items-center gap-0.5 rounded-full border border-border/80 px-1.5 py-0.5 font-mono text-[9.5px] text-muted"
-                  title={t("branch.worktree", { name: file.worktree })}
-                >
-                  <GitBranch className="h-2.5 w-2.5" aria-hidden /> {file.worktree}
-                </span>
-              ) : null}
-              {/* Account badge (issue #229): the third meta-chip, after ctx and
-                  the branch chip. Shell tasks carry no account, so they skip it;
-                  the id is read from the live transcript path so a migrated
-                  conversation reflects its current account. OpenClaw skips it
-                  for the same reason: the Viewer owns no OpenClaw account. */}
-              {file.engine === "shell" || file.engine === "openclaw" ? null : (
-                <AccountBadge
-                  engine={file.engine}
-                  accountId={runtime?.session.accountId ?? file.spawn?.accountId ?? accountIdFromPath(file.path)}
-                  file={file}
-                  runtimeSession={runtime?.session ?? null}
-                />
-              )}
-              {file.plan ? <PlanChip plan={file.plan} /> : null}
-              {file.goal ? <GoalChip goal={file.goal} /> : null}
-              {isRoot || isMobile ? null : (
-                <span
-                  className="inline-flex shrink-0 items-center gap-0.5 text-[10px] text-muted"
-                  title={file.handoff ? t("branch.handoffTitle") : t("branch.branchTitle")}
-                >
-                  <CornerDownRight className="h-3 w-3" aria-hidden /> {file.handoff ? t("kind.handoff") : kindLabel(t, file.kind)}
-                </span>
-              )}
+                )}
+                <EffortPills file={file} />
+                <RateLimitBadge file={file} />
+                {/* Scheduled-wakeup chip (#165): a pending self-wake shows on every
+                    surface, since it is actionable status. This header is the
+                    DESKTOP's; the phone renders none (§3.4), and carries the same
+                    chip on the bar's state line instead (`ChatBarTitle`). */}
+                <WakeupChip key={wakeupChipKey(file.pendingWakeup)} wakeup={file.pendingWakeup} />
+                {file.parentRemoved ? <ParentRemovedChip /> : null}
+                {/* Supersedence lineage chip (issue #383): the chain tail names
+                    its round and deep-links the retired predecessor with the
+                    durable #c= form, so history stays one click away. */}
+                {file.continues ? (
+                  <a
+                    href={"#c=" + encodeURIComponent(file.continues.conversationId)}
+                    data-continues-chip
+                    className="inline-flex shrink-0 items-center gap-0.5 truncate rounded-full border border-accent/40 bg-accent-soft px-1.5 py-0.5 text-[9.5px] font-semibold text-accent hover:border-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                    title={t("lineage.continuesTitle", { round: file.continues.round })}
+                  >
+                    <CornerDownRight className="h-2.5 w-2.5 shrink-0" aria-hidden /> {t("lineage.continues", { round: file.continues.round })}
+                  </a>
+                ) : null}
+                {file.ctx ? <CtxChip ctx={file.ctx} /> : null}
+                {file.worktree ? (
+                  <span
+                    className="inline-flex shrink-0 items-center gap-0.5 rounded-full border border-border/80 px-1.5 py-0.5 font-mono text-[9.5px] text-muted"
+                    title={t("branch.worktree", { name: file.worktree })}
+                  >
+                    <GitBranch className="h-2.5 w-2.5" aria-hidden /> {file.worktree}
+                  </span>
+                ) : null}
+                {/* Account badge (issue #229): the third meta-chip, after ctx and
+                    the branch chip. Shell tasks carry no account, so they skip it;
+                    the id is read from the live transcript path so a migrated
+                    conversation reflects its current account. OpenClaw skips it
+                    for the same reason: the Viewer owns no OpenClaw account. */}
+                {file.engine === "shell" || file.engine === "openclaw" ? null : (
+                  <AccountBadge
+                    engine={file.engine}
+                    accountId={runtime?.session.accountId ?? file.spawn?.accountId ?? accountIdFromPath(file.path)}
+                    file={file}
+                    runtimeSession={runtime?.session ?? null}
+                  />
+                )}
+                {file.plan ? <PlanChip plan={file.plan} /> : null}
+                {file.goal ? <GoalChip goal={file.goal} /> : null}
+                {isRoot ? null : (
+                  <span
+                    className="inline-flex shrink-0 items-center gap-0.5 text-[10px] text-muted"
+                    title={file.handoff ? t("branch.handoffTitle") : t("branch.branchTitle")}
+                  >
+                    <CornerDownRight className="h-3 w-3" aria-hidden /> {file.handoff ? t("kind.handoff") : kindLabel(t, file.kind)}
+                  </span>
+                )}
+              </div>
             </div>
-          </div>
-          ) : null}
-        </header>
+          </header>
+        )}
+
         {/* Account-migration status ribbon (issue #40): sits in the same slot
             family as the flow banner. Renders only while this conversation is
             migrating; absent otherwise, so non-migrating panes are unchanged. */}
@@ -559,7 +475,7 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
             no control applies. Dormant far-zoom board nodes suppress it entirely
             (the dormant-node contract): the strip returns on activation, and
             active review panes keep it regardless of `noComposer`. */}
-        {dormant || !showSecondary ? null : <AgentControlStrip file={file} />}
+        {dormant || isMobile ? null : <AgentControlStrip file={file} />}
         {noComposer || superseded ? null : <TmuxComposer file={file} pollPaused={feedPaused} deadHost={deadHost} sendBlockedReason={sendBlockedReason} />}
       </section>
     </div>

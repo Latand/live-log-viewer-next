@@ -690,9 +690,22 @@ test("desktop: a cold deep link from the URL still resolves a beyond-cap convers
  * with no skeleton, no refetch and no dashboard remount.
  */
 const focusedPane = (host: HTMLElement) => host.querySelector('[data-testid="mobile-focused-pane"]');
-const focusedTitle = (host: HTMLElement) => focusedPane(host)?.querySelector("header")?.textContent ?? "";
-const chipFor = (host: HTMLElement, title: string) => host.querySelector(`button[title="${title}"]`) as HTMLButtonElement | null;
-const chipActive = (host: HTMLElement, title: string) => chipFor(host, title)?.className.includes("border-accent/60") ?? false;
+/* Mobile v2 lane 3: the conversation names itself in the bar's title cell — the
+   pane it opens carries no header of its own — and a sibling switch is a
+   switcher row or a swipe across the bar, never a chip in a strip. */
+const focusedTitle = (host: HTMLElement) => host.querySelector("[data-mobile2-title-text]")?.textContent ?? "";
+const focusedIs = (host: HTMLElement, title: string) => focusedTitle(host).includes(title);
+const bar = (host: HTMLElement) => host.querySelector("[data-mobile2-bar]") as HTMLElement;
+/** Open the switcher and return the row for `title`. */
+async function switchRow(host: HTMLElement, title: string): Promise<HTMLButtonElement> {
+  if (!host.querySelector('[data-mobile2-sheet="switch"]')) {
+    await click(host.querySelector('[data-mobile2-open="switch"]')!);
+  }
+  const row = [...host.querySelectorAll('[data-mobile2-sheet="switch"] [data-mobile2-go="chat"]')]
+    .find((node) => (node.textContent ?? "").includes(title)) as HTMLButtonElement | undefined;
+  if (!row) throw new Error(`no switcher row for ${title}`);
+  return row;
+}
 /** The board leaf, and one of its conversation rows. */
 const onBoard = (host: HTMLElement) => host.querySelector("[data-mobile2-board]") !== null;
 const boardRow = (host: HTMLElement, path: string) =>
@@ -705,11 +718,11 @@ async function popToBoard(host: HTMLElement): Promise<void> {
 /** How many times the client has asked for the file list so far. */
 const fileRequests = () => requests.filter((url) => url.startsWith("/api/files")).length;
 
-function swipe(header: HTMLElement, dx: number): void {
+function swipe(zone: HTMLElement, dx: number): void {
   const start = { clientX: 200, clientY: 40 };
   const end = { clientX: 200 + dx, clientY: 40 };
-  dispatch(header, new dom.TouchEvent("touchstart", { bubbles: true, touches: [start] } as never));
-  dispatch(header, new dom.TouchEvent("touchend", { bubbles: true, changedTouches: [end] } as never));
+  dispatch(zone, new dom.TouchEvent("touchstart", { bubbles: true, touches: [start] } as never));
+  dispatch(zone, new dom.TouchEvent("touchend", { bubbles: true, changedTouches: [end] } as never));
 }
 
 test("phone: A → B → A through the board shows A's previous rows synchronously, then the fresh tail lands without a flash", async () => {
@@ -783,28 +796,32 @@ test("phone: A → B → A through the board shows A's previous rows synchronous
   expect(fresh.virtualMs).toBeLessThanOrEqual(PROMPT_RECONNECT_MS + RTT_MS + 5);
 });
 
-test("phone: the header swipe hops panes with the same cached paint", async () => {
+test("phone: a bar swipe never walks Recent — it bumps, and the switcher row is the hop", async () => {
   mobile = true;
   const host = await mountViewer("alpha");
   await until(() => onBoard(host) && boardRow(host, SHORT.path) !== null);
   /* Visit each conversation from the board once, so its feed is cached. */
   for (const entry of [SHORT, LONG, TOOLS]) {
     await click(boardRow(host, entry.path)!);
-    await until(() => focusedTitle(host).includes(entry.title) && tailLines(focusedPane(host)) > 0);
+    await until(() => focusedIs(host, entry.title) && tailLines(focusedPane(host)) > 0);
     if (entry !== TOOLS) await popToBoard(host);
   }
-  /* Strip order is layout order; a swipe hops to the neighbour. */
-  const chips = Array.from(host.querySelectorAll('button[title]')).map((button) => button.getAttribute("title") ?? "").filter((title) => [SHORT.title, LONG.title, TOOLS.title].includes(title));
-  const index = chips.indexOf(TOOLS.title);
-  const target = index > 0 ? chips[index - 1]! : chips[index + 1]!;
-  const dx = index > 0 ? 120 : -120;
 
+  /* These three finished their turns, so the switcher files them under Recent —
+     the one section the swipe deliberately never walks (README §3.3). The bar
+     bumps at the end of the list instead of stepping through finished work. */
+  await act(async () => { swipe(bar(host), -120); });
+  expect(focusedIs(host, TOOLS.title)).toBe(true);
+  expect(host.querySelector("[data-mobile2-title]")?.getAttribute("data-mobile2-bump")).toBe("right");
+
+  /* The hop is the switcher row, and a revisited conversation paints from
+     cache in the same flush as the tap. */
   beginStep();
-  await act(async () => { swipe(focusedPane(host)!.querySelector("header") as HTMLElement, dx); });
-  const hop = await until(() => focusedTitle(host).includes(target) && chipActive(host, target));
-  const rowsOnScreen = await until(() => feedRows(host, byShape("alpha", target === SHORT.title ? "short" : target === LONG.title ? "long" : "toolheavy").path) > 0);
-  record("phone", "header swipe → neighbour pane highlighted", hop);
-  record("phone", "header swipe → neighbour rows (cached) on screen", { virtualMs: hop.virtualMs + rowsOnScreen.virtualMs, workMs: rowsOnScreen.workMs }, `LogFeed renders ${probe.renders("LogFeed")}`);
+  await click(await switchRow(host, LONG.title));
+  const hop = await until(() => focusedIs(host, LONG.title));
+  const rowsOnScreen = await until(() => feedRows(host, LONG.path) > 0);
+  record("phone", "switcher row → neighbour named in the bar", hop);
+  record("phone", "switcher row → neighbour rows (cached) on screen", { virtualMs: hop.virtualMs + rowsOnScreen.virtualMs, workMs: rowsOnScreen.workMs }, `LogFeed renders ${probe.renders("LogFeed")}`);
   expect(hop.virtualMs).toBe(0);
   expect(rowsOnScreen.virtualMs).toBe(0);
   /* A sibling hop stays on the conversation screen: it replaces what that one

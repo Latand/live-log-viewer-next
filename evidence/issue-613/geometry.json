@@ -67,7 +67,54 @@
       "Builder · keep the conversation header inside a 390px viewport (613)working·claude-opus-4-8",
       "All conversations1 in the catalog"
     ],
-    "focusedPane": false
+    "focusedPane": false,
+    "paneControls": []
+  },
+  "chat-390": {
+    "scrollWidth": 390,
+    "bodyScrollWidth": 390,
+    "viewportWidth": 390,
+    "headerScrollWidth": 390,
+    "headerClientWidth": 390,
+    "controls": [
+      {
+        "label": "Back",
+        "left": 4,
+        "right": 48,
+        "width": 44,
+        "height": 44
+      },
+      {
+        "label": "Switch conversation",
+        "left": 50,
+        "right": 286.09375,
+        "width": 236.09375,
+        "height": 44
+      },
+      {
+        "label": "3 need you",
+        "left": 288.09375,
+        "right": 340,
+        "width": 51.90625,
+        "height": 44
+      },
+      {
+        "label": "More actions",
+        "left": 342,
+        "right": 386,
+        "width": 44,
+        "height": 44
+      }
+    ],
+    "menuControls": [],
+    "titleText": "Builder · keep the conversation header inside a 390px viewport (613)working·claude-opus-4-8 · high",
+    "titleWidth": 236.09375,
+    "rows": [],
+    "boardScrollWidth": -1,
+    "boardClientWidth": -1,
+    "rowTitles": [],
+    "focusedPane": true,
+    "paneControls": []
   },
   "header-390-more-open": {
     "scrollWidth": 390,
@@ -222,6 +269,7 @@
       "Builder · keep the conversation header inside a 390px viewport (613)working·claude-opus-4-8",
       "All conversations1 in the catalog"
     ],
-    "focusedPane": false
+    "focusedPane": false,
+    "paneControls": []
   }
 }

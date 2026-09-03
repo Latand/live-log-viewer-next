@@ -7,12 +7,16 @@ import type { FileEntry } from "@/lib/types";
 import { emptyStore } from "@/components/runtime/runtimeModel";
 
 /*
- * Issue #419 (reopened) — chat-first mobile conversation shell. With a
- * conversation focused at 390px, the shell must show ONE compact conversation
- * header by default: the memory/goal/model metadata chips and the detailed
- * runtime controls fold behind a single conversation-details disclosure and
- * reserve ZERO height while collapsed, handing the transcript its budget. The
- * fold is mobile-only — desktop keeps every chip and the runtime strip inline.
+ * Issue #419 (reopened), as mobile v2 lane 3 settles it. The chat-first shell
+ * asked for ONE compact conversation header on the phone, with the metadata
+ * chips and the runtime controls folded behind a disclosure. Lane 3 goes the
+ * rest of the way and removes the header entirely: the identity moved into the
+ * shell bar's title cell and every control became a labelled row in the
+ * conversation's `⋯` menu, so the pane spends ZERO height on chrome and the
+ * disclosure that used to hide it has nothing left to hide.
+ *
+ * Desktop is untouched — both header rows, every chip, and the runtime strip
+ * stay inline, with no fold control anywhere.
  */
 
 const desktop = new HappyWindow({ width: 1280, height: 800 });
@@ -142,57 +146,37 @@ function mount(dom: HappyWindow, node: React.ReactElement) {
   return host;
 }
 
-test("the phone pane defaults to one compact header: meta chips and runtime controls reserve zero height", () => {
+test("the phone pane renders no conversation header at all: no chips, no disclosure, no inline strip", () => {
   const host = mount(phone, <BranchPane file={file()} tasks={[]} isRoot />);
 
-  /* Collapsed by default — the metadata row and the runtime strip are absent
-     from the DOM entirely, so neither reserves any height. */
+  /* The whole two-row header is gone — with it the metadata row, the runtime
+     strip and the disclosure that used to fold them. Nothing here reserves
+     height, and nothing here is an icon whose meaning is untouchable. */
+  expect(host.querySelector("header")).toBeNull();
   expect(host.querySelector('[data-testid="mobile-conv-meta"]')).toBeNull();
   expect(host.querySelector("[data-agent-control-strip]")).toBeNull();
+  expect(host.querySelector('[data-testid="mobile-details-toggle"]')).toBeNull();
 
-  /* The disclosure that reveals them is a 44px target, closed, EN-labelled. */
-  const toggle = host.querySelector('[data-testid="mobile-details-toggle"]') as HTMLButtonElement;
-  expect(toggle).toBeTruthy();
-  expect(toggle.getAttribute("aria-expanded")).toBe("false");
-  expect(toggle.getAttribute("aria-label")).toBe("Show conversation details");
-  expect(toggle.className).toContain("h-11");
-  expect(toggle.className).toContain("w-11");
-
-  /* The compact header still owns the transcript below it (the composer mounts). */
+  /* What remains is what the operator came for: the transcript and a composer. */
   expect(host.querySelector("textarea")).toBeTruthy();
   bindDomGlobals(desktop);
 });
 
-test("opening the disclosure reveals the memory/goal chips and the runtime controls, and is reversible", () => {
-  const host = mount(phone, <BranchPane file={file()} tasks={[]} isRoot />);
-  const toggle = host.querySelector('[data-testid="mobile-details-toggle"]') as HTMLButtonElement;
-
-  flushSync(() => toggle.click());
-  const meta = host.querySelector('[data-testid="mobile-conv-meta"]') as HTMLElement;
-  expect(meta).toBeTruthy();
-  /* memory + goal live inside the revealed meta row (the aria-controls target):
-     the model/reasoning chip is visible; the goal objective rides its label. */
-  expect(toggle.getAttribute("aria-controls")).toBe(meta.id);
-  expect(meta.textContent).toContain("sonnet");
-  expect(meta.querySelector('[aria-label*="Ship the chat-first repair"]')).toBeTruthy();
-  expect(host.querySelector("[data-agent-control-strip]")).toBeTruthy();
-  expect(toggle.getAttribute("aria-expanded")).toBe("true");
-  expect(toggle.getAttribute("aria-label")).toBe("Hide conversation details");
-
-  /* Reversible: tapping again folds both surfaces back to zero height. */
-  flushSync(() => toggle.click());
-  expect(host.querySelector('[data-testid="mobile-conv-meta"]')).toBeNull();
-  expect(host.querySelector("[data-agent-control-strip]")).toBeNull();
-  expect(toggle.getAttribute("aria-expanded")).toBe("false");
-  bindDomGlobals(desktop);
-});
-
-test("desktop is untouched: every metadata chip and the runtime strip stay inline, no fold control", () => {
+test("desktop is untouched: both header rows stay inline, with no fold control", () => {
   const host = mount(desktop, <BranchPane file={file()} tasks={[]} isRoot />);
 
+  const header = host.querySelector("header") as HTMLElement;
+  expect(header).toBeTruthy();
   expect(host.querySelector('[data-testid="mobile-details-toggle"]')).toBeNull();
+
+  /* The identity row: the status word and the title. */
+  expect(header.textContent).toContain("A conversation with a genuinely long operator-facing title");
+
+  /* The metadata row, inline and unfolded: the observed model, the effort bars
+     the phone never had, and the goal objective on its chip. */
   const meta = host.querySelector('[data-testid="mobile-conv-meta"]') as HTMLElement;
   expect(meta).toBeTruthy();
+  expect(meta.textContent).toContain("sonnet");
+  expect(meta.querySelector("[data-effort-pills]")).toBeTruthy();
   expect(meta.querySelector('[aria-label*="Ship the chat-first repair"]')).toBeTruthy();
-  expect(host.querySelector("[data-agent-control-strip]")).toBeTruthy();
 });
