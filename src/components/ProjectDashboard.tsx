@@ -58,6 +58,8 @@ import { MobileOrchestratorRow } from "./mobile/MobileOrchestratorRow";
 import { MobileMenuSheet, type MobileMenuEntry } from "./mobile/MobileMenuSheet";
 import { showReceipt } from "./mobile/MobileReceipt";
 import { MobileAccountsScreen, MobileBarTitle, MobileShell, type MobileShellHost } from "./mobile/MobileShell";
+import { MobilePipelineScreen } from "./mobile/MobilePipelineScreen";
+import { MobilePipelinesScreen } from "./mobile/MobilePipelinesScreen";
 import { sameScreen, topScreen, useMobileNav, useMobileNavStore, type MobileSheetName } from "./mobile/mobileNav";
 import { TaskSheet, type TaskSheetView } from "./tasks/TaskSheet";
 import { Badge } from "@/components/ui/Badge";
@@ -1509,6 +1511,31 @@ function ProjectDashboardView({
     showMobileConversation(file.path);
   };
 
+  /* A stage row on the pipeline screen is the same open gesture as a board row,
+     with one difference that decides where ‹ goes (README §3.3, §4.7: «‹ from a
+     stage conversation returns to the pipeline»).
+
+     `openBoardRow` records the focus entry FIRST and pushes the screen second,
+     so the gesture leaves two history entries: the focus record, which carries
+     no shell stamp and therefore reads to the shell as the board, and the
+     conversation screen above it. From the board that is invisible — the entry
+     underneath IS the board. From a pipeline it is not: ‹ landed on the focus
+     entry, read depth 1, and dropped the operator on the board with the
+     pipeline gone.
+
+     So this gesture pushes the screen first and then re-types the entry it is
+     standing on instead of adding one: `restore` can only ever replaceState,
+     and `openBoardRow`'s own record then coalesces onto the same target
+     (`decideFocusAction`). One gesture, one entry, and the entry underneath is
+     still the pipeline's. */
+  const openPipelineStageConversation = (file: FileEntry) => {
+    if (isMobile) {
+      showMobileConversation(file.path);
+      recordFocusNavigation(file, projectKey(file), { restore: true });
+    }
+    openBoardRow(file);
+  };
+
   /* Expand a terminal direct review group back onto the board (#289 + #325):
      record the durable disclosure override as EXPANDED (so the deck
      materializes fully instead of its collapsed chip), then open the reviewed
@@ -1689,6 +1716,16 @@ function ProjectDashboardView({
     now: nowSeconds,
   };
   const mobileBoardModel = isMobile ? mobileBoardOf(mobileBoardProps) : null;
+  /* The pipeline the stack names, when the scan still carries it (lane 7). */
+  const mobilePipelineOnScreen = mobileTop.kind === "pipeline"
+    ? activePipelines.find((pipeline) => pipeline.id === mobileTop.id) ?? null
+    : null;
+  /* One opener for every door into a pipeline: the board's queue row, the
+     pipelines list, and the Needs-you sheet the bar's badge opens. */
+  const openMobilePipeline = (pipeline: Pipeline) => {
+    mobileNav.closeSheet();
+    mobileNav.push({ kind: "pipeline", id: pipeline.id });
+  };
   /* The phone's board is the leaf when the scheme is this project's view and no
      conversation sits on top of the stack; the footer and the presence slice
      both hang off that one answer. */
@@ -2071,6 +2108,34 @@ function ProjectDashboardView({
            focus view stays until lane 3 folds it into the bar's title cell. */
         mobileTop.kind === "accounts" ? (
           <MobileAccountsScreen host={mobileShell} renderSheet={renderMobileSheet} />
+        ) : mobileTop.kind === "pipelines" || mobileTop.kind === "pipeline" ? (
+          /* The pipelines list and one pipeline (mobile v2 lane 7, §4.7). Both
+             are screens on the same stack as the board, so ‹ leaves the way the
+             operator came in and a stage conversation pushed from a pipeline
+             returns to it. A pipeline the stack still names but the scan no
+             longer carries — archived from another surface while this screen
+             was open — falls back to the list rather than to nothing. */
+          mobilePipelineOnScreen ? (
+            <MobilePipelineScreen
+              pipeline={mobilePipelineOnScreen}
+              files={files}
+              flows={flows}
+              tasks={projectTasks}
+              now={nowSeconds}
+              host={mobileShell}
+              renderSheet={renderMobileSheet}
+              onOpenConversation={openPipelineStageConversation}
+              onOpenTask={(task) => openMobileTasks({ taskId: task.id })}
+            />
+          ) : (
+            <MobilePipelinesScreen
+              pipelines={activePipelines}
+              now={nowSeconds}
+              host={mobileShell}
+              renderSheet={renderMobileSheet}
+              onOpenPipeline={openMobilePipeline}
+            />
+          )
         ) : (
           <MobileShell
             screen="board"
@@ -2115,6 +2180,8 @@ function ProjectDashboardView({
                     </div>
                   )}
                   onOpenConversation={openBoardRow}
+                  onOpenPipeline={openMobilePipeline}
+                  onOpenPipelines={() => mobileNav.push({ kind: "pipelines" })}
                   onOpenCatalog={() => chooseEmptyView("list")}
                 />
               ) : projectView === "scheme" && schemeAvailable ? (

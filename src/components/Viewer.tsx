@@ -988,9 +988,21 @@ export function Viewer() {
           /* The Needs-you sheet (lane 8): the one list above, its rows opening
              through the same hand-off a popover click performs (`jumpToItem`
              moves the shared cycle pointer too, so «Next ›» here and N on a
-             desktop continue one sequence). Pipeline rows get their opener
-             from lane 7's pipeline screen. */
-          return <MobileAttentionSheet entries={shellEntries} now={clock} onOpenConversation={jumpToItem} onClose={close} />;
+             desktop continue one sequence). A pipeline row opens the pipeline
+             screen (lane 7) on the same stack the board is on, so «Next ›»
+             walks both kinds and ‹ leaves the way the operator came in. */
+          return (
+            <MobileAttentionSheet
+              entries={shellEntries}
+              now={clock}
+              onOpenConversation={jumpToItem}
+              onOpenPipeline={(row) => {
+                close();
+                getMobileNav().push({ kind: "pipeline", id: row.id });
+              }}
+              onClose={close}
+            />
+          );
         }
         return null;
       },

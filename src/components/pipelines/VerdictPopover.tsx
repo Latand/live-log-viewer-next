@@ -15,6 +15,50 @@ import { VERDICT_TONES, attemptStateLabel, patchPipeline, stageAttempts, stageCh
 const MAX_COLLAPSED_FINDINGS = 8;
 
 /**
+ * The findings of one verdict, as a block (issue #1439, lane 7). It was inline
+ * in the popover and nowhere else, so the phone's pipeline screen — which has
+ * no popover, the findings ARE its first section (README §4.7) — had to grow a
+ * second list that could disagree with this one. One block, two mounts.
+ *
+ * `heading` is the caller's: the popover names the count, the phone screen
+ * names the stage, the round and the count, both in the product's own words.
+ * `numbered` renders the phone's ordered list; the popover keeps its bullets.
+ */
+export function VerdictFindings({ findings, heading, numbered = false, mobile = false, testId }: {
+  findings: readonly string[];
+  heading: string;
+  numbered?: boolean;
+  mobile?: boolean;
+  testId?: string;
+}) {
+  const { t } = useLocale();
+  const [expanded, setExpanded] = useState(false);
+  if (!findings.length) return null;
+  const shown = expanded ? findings : findings.slice(0, MAX_COLLAPSED_FINDINGS);
+  const List = numbered ? "ol" : "ul";
+  return (
+    <div data-testid={testId} data-pipeline-findings className={`flex flex-col gap-1 ${numbered ? "" : "max-h-40 overflow-y-auto"}`}>
+      <span data-pipeline-findings-heading className={numbered ? "text-label font-bold text-danger" : "text-label font-semibold text-secondary"}>{heading}</span>
+      <List className={`flex flex-col gap-1 ${numbered ? "list-decimal pl-5 marker:text-muted marker:tabular-nums" : ""}`}>
+        {shown.map((finding, index) => (
+          <li key={index} className={numbered ? "text-ui leading-[1.45] text-primary" : "rounded-[7px] bg-canvas px-2 py-1 text-[10.5px] leading-4 text-primary"}>{finding}</li>
+        ))}
+      </List>
+      {!expanded && findings.length > MAX_COLLAPSED_FINDINGS ? (
+        <button
+          type="button"
+          data-pipeline-findings-more
+          className={`self-start font-semibold text-accent hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${numbered ? "text-ui" : "text-[10px]"} ${mobile ? "min-h-11 min-w-11" : ""}`}
+          onClick={() => setExpanded(true)}
+        >
+          {t("pipelineVerdict.more", { count: findings.length - MAX_COLLAPSED_FINDINGS })}
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+/**
  * The verdict popover (#93 §2.1): a structured stage verdict at the point of
  * evidence — status badge, confidence bar, bounded findings, prior-attempt
  * audit lines, and — when the pipeline is parked on this stage — inline
@@ -53,7 +97,6 @@ export function VerdictPopover({
   onOpenFlow?: (flowId: string) => void;
 }) {
   const { t } = useLocale();
-  const [expanded, setExpanded] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const ref = useRef<HTMLDivElement>(null);
@@ -89,7 +132,6 @@ export function VerdictPopover({
   const pathAvailable = (path: string) => !availablePaths || availablePaths.has(path);
   const mobileTarget = mobile ? "min-h-11 min-w-11" : "";
   const findings = verdict?.findings ?? [];
-  const shown = expanded ? findings : findings.slice(0, MAX_COLLAPSED_FINDINGS);
   const tone = verdict ? VERDICT_TONES[verdict.status] : null;
 
   const act = async (action: "retry-stage" | "skip-stage") => {
@@ -148,21 +190,7 @@ export function VerdictPopover({
         </div>
       ) : null}
 
-      {findings.length ? (
-        <div className="flex max-h-40 flex-col gap-1 overflow-y-auto">
-          <span className="text-label font-semibold text-secondary">{t("pipelineVerdict.findings", { count: findings.length })}</span>
-          <ul className="flex flex-col gap-1">
-            {shown.map((finding, index) => (
-              <li key={index} className="rounded-[7px] bg-canvas px-2 py-1 text-[10.5px] leading-4 text-primary">{finding}</li>
-            ))}
-          </ul>
-          {!expanded && findings.length > MAX_COLLAPSED_FINDINGS ? (
-            <button type="button" className={`self-start text-[10px] font-semibold text-accent hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${mobileTarget}`} onClick={() => setExpanded(true)}>
-              {t("pipelineVerdict.more", { count: findings.length - MAX_COLLAPSED_FINDINGS })}
-            </button>
-          ) : null}
-        </div>
-      ) : null}
+      <VerdictFindings findings={findings} heading={t("pipelineVerdict.findings", { count: findings.length })} mobile={mobile} />
 
       {priorAttempts.length ? (
         <div className="flex shrink-0 flex-col gap-0.5 border-t border-border pt-1.5">
