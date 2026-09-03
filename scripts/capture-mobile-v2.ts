@@ -958,6 +958,18 @@ const board = (scenario?: keyof typeof SCENARIOS): Driver => async (page, ctx) =
   return reached(page, HOOKS.screen("board"), "today's board: header, strip, focused pane");
 };
 
+/** One pipeline, opened from the board through the list; `state` picks which
+    row on the list (the parked one, or the one that is running). */
+const pipelineDetail = (state: "needs_decision" | "running"): Driver => async (page, ctx) => {
+  await openBoard(page, ctx);
+  const tapped = await tapFirst(page, [HOOKS.go("pipelines"), HOOKS.open("pipelines"), TODAY.pipelines]);
+  await settle(page);
+  await tapFirst(page, [`[data-mobile2-pipeline-row][data-mobile2-state="${state}"]`, "[data-mobile2-pipeline-row]"]);
+  await settle(page);
+  if (await page.locator(HOOKS.screen("pipeline")).count()) return { reached: true, note: "" };
+  return { reached: false, note: tapped ? "today's pipelines bottom sheet" : "no pipeline screen on today's phone" };
+};
+
 const chat = (key: string, scenario?: keyof typeof SCENARIOS): Driver => async (page, ctx) => {
   await openChat(page, ctx, key);
   if (scenario === "offline") await driveRuntime(page, ctx, "offline");
@@ -1018,31 +1030,19 @@ export const DRIVERS: Record<string, Driver> = {
   "chat-held": chat("c1"),
   "chat-limit": chat("c1"),
   "chat-stalled": chat("c1"),
+  /* The board's pipelines row is the one door to the list (README §3.1, §4.1);
+     from the list a row opens its pipeline. The conversation reaches the same
+     screen through ⋯ › Pipeline, which the `pipeline-stage-back` flow walks the
+     other way round. */
   "pipelines": async (page, ctx) => {
-    await openChat(page, ctx, "c5");
-    const tapped = await tapFirst(page, [HOOKS.open("pipelines"), HOOKS.go("pipelines"), TODAY.pipelines]);
+    await openBoard(page, ctx);
+    const tapped = await tapFirst(page, [HOOKS.go("pipelines"), HOOKS.open("pipelines"), TODAY.pipelines]);
     await settle(page);
     if (await page.locator(HOOKS.screen("pipelines")).count()) return { reached: true, note: "" };
     return { reached: false, note: tapped ? "today's pipelines bottom sheet" : "no pipelines entry point on today's phone" };
   },
-  "pipeline": async (page, ctx) => {
-    await openChat(page, ctx, "c8");
-    const tapped = await tapFirst(page, [HOOKS.open("pipelines"), HOOKS.go("pipelines"), TODAY.pipelines]);
-    await settle(page);
-    await tapFirst(page, ['[data-mobile2-pipeline-row][data-mobile2-state="needs_decision"]', "[data-mobile2-pipeline-row]"]);
-    await settle(page);
-    if (await page.locator(HOOKS.screen("pipeline")).count()) return { reached: true, note: "" };
-    return { reached: false, note: tapped ? "today's pipelines bottom sheet from the stage conversation" : "no pipeline screen on today's phone" };
-  },
-  "pipeline-running": async (page, ctx) => {
-    await openChat(page, ctx, "c9");
-    const tapped = await tapFirst(page, [HOOKS.open("pipelines"), HOOKS.go("pipelines"), TODAY.pipelines]);
-    await settle(page);
-    await tapFirst(page, ['[data-mobile2-pipeline-row][data-mobile2-state="running"]', "[data-mobile2-pipeline-row]"]);
-    await settle(page);
-    if (await page.locator(HOOKS.screen("pipeline")).count()) return { reached: true, note: "" };
-    return { reached: false, note: tapped ? "today's pipelines bottom sheet from the running stage" : "no pipeline screen on today's phone" };
-  },
+  "pipeline": pipelineDetail("needs_decision"),
+  "pipeline-running": pipelineDetail("running"),
   "accounts": async (page, ctx) => {
     await openBoard(page, ctx);
     const menu = await tapFirst(page, [HOOKS.open("menu")]);
