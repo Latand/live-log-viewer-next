@@ -2342,6 +2342,13 @@ export const uk: Record<keyof typeof en, Message> = {
   "mobile2.attention.title": "Потребують вас",
   "mobile2.attention.next": "Далі",
   "mobile2.attention.empty": "Нічого не потребує вас.",
+  /* mobile v2 lane 8 (#1439): рядки аркуша «Потребують вас», банер надходження.
+     Лише дописування, ключі mobile2.attention.* */
+  "mobile2.attention.pipeline": "пайплайн",
+  "mobile2.attention.nextHint": "Відкрити наступне, що потребує вас",
+  "mobile2.attention.arrival": "Потребує вас · {decision}",
+  "mobile2.attention.open": "Відкрити {title}",
+  "mobile2.attention.dismiss": "Закрити",
   "mobile2.accounts.title": "Акаунти й ліміти",
   /* Стрічка mobile v2 (#1439, лінія 4): заголовок повідомлення на телефоні,
      серії інструментів і картка запитання. Лише дописування, ключі mobile2.feed.* */

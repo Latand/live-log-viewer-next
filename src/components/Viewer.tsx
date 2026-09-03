@@ -1,6 +1,6 @@
 "use client";
 
-import { ChevronRight, Crown, X } from "lucide-react";
+import { Crown, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 
 import { formatConversationHash, isArchivedPredecessor, parseConversationHash, resolveConversationTarget, withoutArchivedPredecessors, type ConversationHash } from "@/lib/accounts/identity";
@@ -25,6 +25,8 @@ import { advanceAttentionCycle, attentionExpiries, attentionId, buildAttentionQu
 import { AttentionHost } from "./attention/AttentionHost";
 import { AttentionIsland, AttentionQueueRow } from "./attention/AttentionIsland";
 import { AttentionToast } from "./attention/AttentionToast";
+import { buildMobileAttentionQueue } from "./attention/attentionQueue";
+import { MobileAttentionSheet } from "./attention/MobileAttentionSheet";
 import { purgeLegacyOperatorCredential } from "./operatorCredential";
 import { ArtifactPreviewHost } from "./preview/ArtifactPreviewHost";
 import { VoiceBridgeRelayHost } from "./voice/VoiceBridgeRelayHost";
@@ -34,11 +36,9 @@ import { focusHandoffBus } from "./attention/focusHandoffBus";
 import { ConnectionPill } from "./ConnectionPill";
 import { resolveFavoriteRows, type FavoriteRow } from "./favorites/favoriteRows";
 import { KeepAwakeProvider } from "./KeepAwakeControl";
-import { MobilePipelineQueueRow } from "./mobile/MobileBoard";
 import { needsDecisionPipelineRows } from "./mobile/mobileBoardModel";
 import { getMobileNav } from "./mobile/mobileNav";
 import { MobileProjectSheet } from "./mobile/MobileProjectSheet";
-import { MobileSheet, MobileSheetRow, MobileSheetSection } from "./mobile/MobileSheet";
 import type { MobileShellHost } from "./mobile/MobileShell";
 import { OrchestratorDock, dockOpenFor, rememberDockOpen } from "./orchestrator/OrchestratorDock";
 import { OverviewBoard } from "./OverviewBoard";
@@ -773,7 +773,10 @@ export function Viewer() {
     () => (project === OVERVIEW || !isMobile ? [] : needsDecisionPipelineRows(pipelines, project, clock)),
     [pipelines, project, clock, isMobile],
   );
-  const shellQueueCount = shellQueue.length + shellPipelineRows.length;
+  /* Joined into the ONE list the badge counts, the sheet lists and its
+     «Next ›» walks (lane 8, `attentionQueue.ts`). */
+  const shellEntries = useMemo(() => buildMobileAttentionQueue(shellQueue, shellPipelineRows), [shellQueue, shellPipelineRows]);
+  const shellQueueCount = shellEntries.length;
 
   useEffect(() => {
     /* N and F are desktop keys (D4/D6): the phone layout renders without the
@@ -839,21 +842,6 @@ export function Viewer() {
     [queue, project, applyProject, requestFocus],
   );
 
-  /* The phone sheet's «Next ›» walks the list that sheet is showing — the
-     scoped one — so the count in its header, the rows under it and the button
-     that steps through them are one thing. The cycle pointer is the same one
-     the desktop's island and the N key move, so a phone and a desktop tab
-     never fight over where the operator is. */
-  const advanceShellAttention = useCallback(
-    (dir: 1 | -1) => {
-      const next = advanceAttentionCycle(cycleRef, shellQueue, dir);
-      if (!next) return;
-      if (next.project !== project) applyProject(next.project);
-      requestFocus(next.file.path);
-    },
-    [shellQueue, project, applyProject, requestFocus],
-  );
-
   /* A crowned row in the popover focuses its conversation, switching project
      first if the favorite lives elsewhere — same hand-off as an attention jump. */
   const openFavorite = useCallback(
@@ -895,7 +883,6 @@ export function Viewer() {
     <div ref={queueRef} className="pointer-events-auto relative">
       <AttentionIsland
         count={queue.length}
-        mobile={isMobile}
         queueOpen={queueOpen}
         filterActive={attentionFilter}
         onToggleQueue={() => setQueueOpen((value) => !value)}
@@ -998,63 +985,17 @@ export function Viewer() {
           );
         }
         if (name === "attention") {
-          const title = shellQueueCount ? `${t("mobile2.attention.title")} · ${shellQueueCount}` : t("mobile2.attention.title");
-          return (
-            <MobileSheet
-              name="attention"
-              title={title}
-              onClose={close}
-              extra={shellQueue.length > 1 ? (
-                <button
-                  type="button"
-                  data-attention-next
-                  className="inline-flex min-h-11 shrink-0 items-center gap-0.5 rounded-[8px] px-2 text-ui font-semibold text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-                  aria-label={t("attention.nextHint")}
-                  onClick={() => advanceShellAttention(1)}
-                >
-                  {t("mobile2.attention.next")}
-                  <ChevronRight className="h-4 w-4" aria-hidden />
-                </button>
-              ) : null}
-            >
-              {favoriteRows.length ? (
-                <>
-                  <MobileSheetSection>{t("favorites.sectionTitle")}</MobileSheetSection>
-                  {favoriteRows.map((row) => (
-                    <MobileSheetRow
-                      key={row.id}
-                      icon={<Crown className="h-[18px] w-[18px] fill-crown text-crown" aria-hidden />}
-                      label={cleanTitle(row.file.title, 90)}
-                      onSelect={() => openFavorite(row)}
-                    />
-                  ))}
-                </>
-              ) : null}
-              <MobileSheetSection count={shellQueueCount}>{t("attention.popoverTitle")}</MobileSheetSection>
-              {shellQueueCount ? (
-                <div className="flex flex-col gap-1.5 px-1.5">
-                  {shellQueue.map((item) => (
-                    <AttentionQueueRow key={item.id} item={item} onOpen={() => jumpToItem(item)} />
-                  ))}
-                  {/* The board's own row, so the two entries to one queue read
-                      the same words. It carries no destination until lane 7
-                      builds the pipeline screen — here as there. */}
-                  {shellPipelineRows.map((row) => (
-                    <MobilePipelineQueueRow key={row.id} row={row} />
-                  ))}
-                </div>
-              ) : (
-                <div className="px-4 py-4 text-center text-ui text-muted">{t("mobile2.attention.empty")}</div>
-              )}
-            </MobileSheet>
-          );
+          /* The Needs-you sheet (lane 8): the one list above, its rows opening
+             through the same hand-off a popover click performs (`jumpToItem`
+             moves the shared cycle pointer too, so «Next ›» here and N on a
+             desktop continue one sequence). Pipeline rows get their opener
+             from lane 7's pipeline screen. */
+          return <MobileAttentionSheet entries={shellEntries} now={clock} onOpenConversation={jumpToItem} onClose={close} />;
         }
         return null;
       },
     };
-    /* `t` is a fresh closure per render; `locale` is what changes its answers. */
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isMobile, shellQueue, shellQueueCount, shellPipelineRows, toastFile, openFile, files, projectCatalog, projectDisplayNames, pipelines, workflows, archivedProjects, crownedProjects, project, clock, loaded, catalogFailures, selectProject, createProject, favoriteRows, openFavorite, jumpToItem, advanceShellAttention, locale]);
+  }, [isMobile, shellEntries, toastFile, openFile, files, projectCatalog, projectDisplayNames, pipelines, workflows, archivedProjects, crownedProjects, project, clock, loaded, catalogFailures, selectProject, createProject, jumpToItem]);
 
   const shell = (
     <div className="flex h-full">

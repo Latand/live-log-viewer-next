@@ -200,7 +200,12 @@ test("an interrupted turn nobody is behind names no decision, on the toast or in
   }
 });
 
-test("open and dismiss stay separate targets, on the phone at full tap height", async () => {
+/* On the phone the toast is the ARRIVAL BANNER (mobile v2 lane 8, #1439): the
+   shell's one banner slot reads «Needs you · <decision>» over the title, the
+   body opens, × dismisses, both at 44 px. The collapse timer and the
+   own-conversation rule are in AttentionToast.arrival.dom.test.tsx, under fake
+   timers. */
+test("the phone banner names the decision under «Needs you», and open and dismiss stay separate 44 px targets", async () => {
   const events: string[] = [];
   const host = await render(
     <AttentionToast
@@ -211,10 +216,19 @@ test("open and dismiss stay separate targets, on the phone at full tap height", 
     />,
   );
 
+  expect(title(host)).toBe("Needs you · Rollout window");
+  expect(host.textContent).toContain("Ship the rollout");
+  /* The phone root is the arrival hook, never `data-attention-toast`: the
+     shell's banner slot is the one receipt the capture gate measures. */
+  expect(host.querySelector("[data-attention-toast]")).toBeNull();
+  const banner = host.querySelector("[data-mobile2-arrival]")!;
+  expect(banner.getAttribute("data-mobile2-arrival")).toBe("/transcripts/worker.jsonl");
+  expect(banner.className).toContain("min-h-11");
   const open = host.querySelector("[data-attention-toast-open]")!;
   const dismiss = host.querySelector("[data-attention-toast-dismiss]")!;
   expect(open.className).toContain("min-h-11");
   expect(dismiss.className).toContain("h-11");
+  expect(dismiss.className).toContain("w-11");
   await click(open);
   await click(dismiss);
   expect(events).toEqual(["open", "dismiss"]);
