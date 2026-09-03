@@ -202,7 +202,7 @@ test("integrated, portrait keyboard: long draft caps at 160px and the chrome fit
   expect(160 + MOBILE_COMPOSER_CHROME_PX).toBeLessThanOrEqual(400);
 });
 
-test("integrated, rotated keyboard: the field yields below 160px so picker and send fit (#983 round 2)", async () => {
+test("integrated, a 280px visible viewport: the whole composer unit still fits it (#983 round 2, #1483)", async () => {
   dom.sessionStorage.setItem("llvDraft:/session", LONG_DRAFT);
   const vv = makeVisualViewport(280);
   (dom as unknown as Record<string, unknown>).visualViewport = vv;
@@ -214,9 +214,14 @@ test("integrated, rotated keyboard: the field yields below 160px so picker and s
   const textarea = composerTextarea();
   expect(textarea).not.toBeNull();
   expect(textarea.value).toBe(LONG_DRAFT);
-  expect(textarea.style.height).toBe("124px");
-  expect(124 + MOBILE_COMPOSER_CHROME_PX).toBeLessThanOrEqual(280);
-  /* Past the shrunken ceiling the field scrolls internally (issue #177 item 3
+  /* #983 reserved 156px of chrome here — a docked focus strip, a separate
+     conversation header and a 44px picker row under the input — and shrank the
+     field to 124px to pay for it. Mobile v2 renders none of the three, so the
+     reserve is the bar plus the composer box's own chrome (#1483) and the
+     shared 160px cap fits inside 280 again. */
+  expect(textarea.style.height).toBe("160px");
+  expect(160 + MOBILE_COMPOSER_CHROME_PX).toBeLessThanOrEqual(280);
+  /* Past the ceiling the field scrolls internally (issue #177 item 3
      preserved), never the window. */
   expect(textarea.className).toContain("overflow-y-auto");
 });

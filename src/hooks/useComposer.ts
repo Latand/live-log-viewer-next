@@ -30,6 +30,14 @@ function subscribeViewport(onChange: () => void) {
 function useViewportHeight(): number {
   return useSyncExternalStore(subscribeViewport, () => visibleViewportHeight(window.innerHeight, window.visualViewport), () => 800);
 }
+/* The LAYOUT viewport height, tracked beside the visible one. The composer
+   box's own maximum height is written in `dvh`, which the on-screen keyboard
+   does not shrink (#983), so the ceiling needs both numbers: the visible one
+   says what fits above the keyboard, this one says how tall the composer's own
+   scroll box is allowed to be (#1483). */
+function useLayoutViewportHeight(): number {
+  return useSyncExternalStore(subscribeViewport, () => window.innerHeight, () => 800);
+}
 
 /**
  * The on-screen keyboard's overlap with the layout viewport (#983): how much of
@@ -161,10 +169,16 @@ export function useComposer({ initialText, persistText, submit, disabled = false
      screen — budgeting against the full layout height there grew the field
      past what fits above the keyboard and pushed the picker/send controls out
      of view (#983); on a short rotated viewport even the 160px cap overflows,
-     so the ceiling yields the chrome's share first and shrinks below it. */
+     so the ceiling yields the chrome's share first and shrinks below it.
+     The LAYOUT height goes in beside it because the composer box's own cap is
+     written in `dvh`, which the keyboard leaves alone: with the keyboard DOWN
+     the visible viewport says the field has room it does not have, and the
+     field grew until the tools row holding Stop fell out of its own box
+     (#1483). */
   const isMobile = useIsMobile();
   const viewportH = useViewportHeight();
-  const maxPx = isMobile ? mobileComposerCeiling(viewportH) : COMPOSER_MAX_PX;
+  const layoutH = useLayoutViewportHeight();
+  const maxPx = isMobile ? mobileComposerCeiling(viewportH, layoutH) : COMPOSER_MAX_PX;
 
   const attachments = useImageAttachments({
     onError: (message) => setStatus({ kind: "err", text: message }),
@@ -178,11 +192,18 @@ export function useComposer({ initialText, persistText, submit, disabled = false
     setStatus(null);
     /* After the state-driven value updates, drop the caret at the end and
        scroll the newest words into view — an insert always follows the text,
-       so the batch/unclaimed transcript never lands off-screen. */
+       so the batch/unclaimed transcript never lands off-screen.
+
+       `preventScroll` is what keeps that promise to the field alone (#1483):
+       an unqualified focus() lets the browser scroll every ancestor to bring
+       the field into view, and dictation calls this on EVERY segment, so each
+       chunk yanked the operator's viewport back up — off the Stop control they
+       had just scrolled down to reach. The field's own scrollTop below shows
+       the newest words without moving anything outside the textarea. */
     requestAnimationFrame(() => {
       const el = inputRef.current;
       if (!el) return;
-      el.focus();
+      el.focus({ preventScroll: true });
       const end = el.value.length;
       el.setSelectionRange(end, end);
       el.scrollTop = el.scrollHeight;
