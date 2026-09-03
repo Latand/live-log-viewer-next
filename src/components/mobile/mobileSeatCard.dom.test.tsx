@@ -5,15 +5,16 @@ import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 
 import { emptyStore } from "@/components/runtime/runtimeModel";
-import { ORCHESTRATOR_SYSTEM_PROMPT } from "@/lib/orchestrator/prompt";
+import { ORCHESTRATOR_PROMPT_VERSION, ORCHESTRATOR_SYSTEM_PROMPT } from "@/lib/orchestrator/prompt";
 import type { FileEntry } from "@/lib/types";
 
 /*
- * The phone's pinned orchestrator row and its fullscreen create sheet (issue
- * #979), against the REAL `MobileFocusView` at 390×844 — the same wrapper the
- * operator's phone mounts, so the row's position in the conversation strip, the
- * handoff into the focused pane, and the idempotency of a confirm are asserted
- * where they actually happen rather than on an isolated component.
+ * The phone's orchestrator SEAT CARD and its create draft (issue #979; mobile
+ * v2 lane 6, docs/design/mobile-v2/README.md §4.1, §4.5), against the REAL
+ * conversation screen at 390×844 — the same wrapper the operator's phone
+ * mounts, so the card's position ahead of the leaf, the handoff into the
+ * conversation, and the idempotency of a confirm are asserted where they
+ * actually happen rather than on an isolated component.
  *
  * The seat route is answered in flight, which is the only way to drive the seat
  * state machine from a test: `seatAnswer` is what the next GET returns, and
@@ -59,7 +60,8 @@ mock.module("@/hooks/useLogTail", () => ({
 }));
 
 const { MobileFocusView } = await import("./MobileFocusView");
-const { MobileOrchestratorRow } = await import("./MobileOrchestratorRow");
+const { MobileSeatCard } = await import("./MobileSeatCard");
+const { createMobileNav, MobileNavContext } = await import("./mobileNav");
 const { resetOrchestratorSeatCacheForTests } = await import("../orchestrator/useOrchestratorSeat");
 
 interface SeatAnswer { seat: unknown; pending: unknown; exists: boolean }
@@ -98,6 +100,7 @@ beforeEach(() => {
   /* Each test is a tab that has never read this project's seat; the answer is
      cached per project for the session since #1149. */
   resetOrchestratorSeatCacheForTests();
+  nav = createMobileNav(navHost());
   requests.length = 0;
   seatAnswer = { seat: null, pending: null, exists: true };
   postSeat = async () => new Response(JSON.stringify({ ok: true, state: "starting" }), { status: 200, headers: { "content-type": "application/json" } });
@@ -133,20 +136,40 @@ const seat = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
+/* A fake history per mount, so an open sheet is never inherited by the next
+   test: the navigation store says WHICH sheet is open (§3.3), and the card
+   reads it from the context the app provides. */
+function navHost() {
+  let state: unknown = null;
+  const listeners = new Set<(next: unknown) => void>();
+  return {
+    history: {
+      get state() { return state; },
+      pushState(next: unknown) { state = next; },
+      replaceState(next: unknown) { state = next; },
+      back() { for (const listener of [...listeners]) listener(state); },
+    },
+    href: () => "http://localhost/",
+    onPopstate(listener: (next: unknown) => void) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+  };
+}
+
 /*
- * The phone leaf that hosts the pinned row. Mobile v2 lane 3 folded the
- * conversation strip into the shell bar's title cell, so the row no longer
- * rides inside `MobileFocusView`: it sits in its own slot beside the leaf,
- * exactly as `ProjectDashboard` mounts it for the catalog and empty-project
- * leaves, and a tap on it pins the conversation the focus view shows. Lane 6
- * moves it onto the board's seat card; every claim below is about the row.
+ * The phone leaf that hosts the seat card. Mobile v2 lane 3 folded the
+ * conversation strip into the shell bar's title cell and lane 2 made the board
+ * a list, so the card sits in its own slot ahead of the leaf — exactly as
+ * `ProjectDashboard` mounts it above the board and above the catalog — and a
+ * tap on a live seat pins the conversation the screen below shows.
  */
-function Leaf({ files }: { files: FileEntry[] }) {
+function Leaf({ files, nav }: { files: FileEntry[]; nav: ReturnType<typeof createMobileNav> }) {
   const [focus, setFocus] = useState<string | null>(null);
   return (
-    <>
+    <MobileNavContext.Provider value={nav}>
       <div data-testid="mobile-orchestrator-slot">
-        <MobileOrchestratorRow project="atlas" projectName="atlas" files={files} onOpenConversation={(file) => setFocus(file.path)} />
+        <MobileSeatCard project="atlas" projectName="atlas" files={files} now={NOW} onOpenConversation={(file) => setFocus(file.path)} />
       </div>
       <MobileFocusView
         project="atlas"
@@ -165,11 +188,15 @@ function Leaf({ files }: { files: FileEntry[] }) {
         onDraftClose={() => undefined}
         onDraftSpawned={() => undefined}
       />
-    </>
+    </MobileNavContext.Provider>
   );
 }
 
-const view = (files: FileEntry[]) => <Leaf files={files} />;
+/** The board's own clock, frozen: the card's badge ages against it. */
+const NOW = Date.parse("2100-01-02T12:00:00.000Z") / 1000;
+
+let nav = createMobileNav(navHost());
+const view = (files: FileEntry[]) => <Leaf files={files} nav={nav} />;
 
 /** Let the seat read (and anything it schedules) land, then re-render. */
 async function settle(root: Root, element: React.ReactElement, rounds = 4): Promise<void> {
@@ -209,25 +236,41 @@ function type(field: HTMLTextAreaElement, value: string): void {
   flushSync(() => props.onChange({ target: field }));
 }
 
-const row = (host: HTMLElement) => host.querySelector("[data-orchestrator-row]") as HTMLElement;
-const openButton = (host: HTMLElement) => host.querySelector("[data-orchestrator-row-open]") as HTMLButtonElement;
+const card = (host: HTMLElement) => host.querySelector("[data-mobile2-seat-card]") as HTMLElement;
+const openButton = (host: HTMLElement) => host.querySelector("[data-mobile2-seat-open]") as HTMLButtonElement;
 const sheet = (host: HTMLElement) => host.querySelector('[data-testid="mobile-orchestrator-sheet"]') as HTMLElement | null;
+/* The primary action is the sheet's FOOTER — outside the body in the bottom
+   sheet, inside the form in the draft — so it is looked up on the host. */
+const confirmButton = (host: HTMLElement) => host.querySelector("[data-orchestrator-confirm]") as HTMLButtonElement;
+const badge = (host: HTMLElement) => host.querySelector("[data-mobile2-seat-card] [data-mobile2-seat-badge]") as HTMLElement | null;
+const meter = (host: HTMLElement) => host.querySelector("[data-mobile2-seat-card] [data-mobile2-meter]") as HTMLElement | null;
 /* Only the seat route: the mounted pane posts its own tmux target reads. */
 const seatPosts = () => requests.filter((request) => request.method === "POST" && request.url === "/api/orchestrator/seat");
 
-test("the row is pinned in its own slot, ahead of the leaf and outside anything that scrolls", async () => {
+test("with no seat the card is the invitation, ahead of the leaf and outside anything that scrolls", async () => {
   const { host } = await mount([conversation({}), orchestrator]);
-  const pinned = row(host);
+  const pinned = card(host);
   expect(pinned).not.toBeNull();
-  expect(pinned.getAttribute("data-orchestrator-row-state")).toBe("draft");
-  expect(openButton(host).textContent).toContain("Create orchestrator");
+  expect(pinned.getAttribute("data-mobile2-seat-state")).toBe("draft");
+  /* Over a vacancy the card is an invitation, not a status line (README
+     §4.1): the absence in words, and one accent line into the create draft. */
+  expect(pinned.getAttribute("data-mobile2-seat-shape")).toBe("invitation");
+  expect(openButton(host).textContent).toContain("No orchestrator");
+  const invitation = pinned.querySelector("[data-mobile2-seat-invitation]");
+  expect(invitation!.textContent).toContain("Create an orchestrator");
+  /* An invitation has no seat to describe, so it carries neither of the two
+     things a seated card does. */
+  expect(badge(host)).toBeNull();
+  expect(meter(host)).toBeNull();
+  /* And its tap goes to the draft, which is the surface that can create one. */
+  expect(openButton(host).getAttribute("data-mobile2-open")).toBe("rotate");
 
   /* Before the leaf in document order — the whole point of the pin. Mobile v2
      lane 3 removed the conversation chips it used to lead; what it must still
      lead is whatever the leaf renders under it. */
   const leaf = host.querySelector('[data-testid="mobile-chat-shell"]')!;
   expect(pinned.compareDocumentPosition(leaf) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-  /* Not INSIDE a horizontal scroller: a pinned row that scrolls away is not
+  /* Not INSIDE a horizontal scroller: a pinned card that scrolls away is not
      pinned. */
   expect(pinned.closest(".overflow-x-auto")).toBeNull();
   /* Phone tap target. */
@@ -235,14 +278,39 @@ test("the row is pinned in its own slot, ahead of the leaf and outside anything 
 });
 
 /* A board with no conversation of its own — the project is on screen for a
-   draft, a task or a running pipeline — still gets the pin. The OTHER empty
+   draft, a task or a running pipeline — still gets the card. The OTHER empty
    phone leaf, the project shell's own «nothing here yet» branch, never mounts
-   this view at all: `ProjectDashboard` chooses between the focus view, the
-   catalog list and that empty state, and it is outside this lane's files. */
-test("a strip with no conversation chips at all still shows the row", async () => {
+   this view at all: `ProjectDashboard` chooses between the board, the catalog
+   list and that empty state, and it is outside this lane's files. */
+test("a project with nothing in it at all still shows the invitation", async () => {
   const { host } = await mount([]);
-  expect(row(host)).not.toBeNull();
-  expect(row(host).getAttribute("data-orchestrator-row-state")).toBe("draft");
+  expect(card(host)).not.toBeNull();
+  expect(card(host).getAttribute("data-mobile2-seat-state")).toBe("draft");
+  expect(card(host).getAttribute("data-mobile2-seat-shape")).toBe("invitation");
+});
+
+test("the invitation opens the create draft — the rotate sheet in create mode (README §4.5)", async () => {
+  const { host, root } = await mount([conversation({})]);
+  flushSync(() => openButton(host).click());
+  await settle(root, view([conversation({})]), 2);
+
+  /* One surface, two modes: the sheet the navigation store names `rotate` is
+     the draft, and over a vacancy its primary CREATES. */
+  expect(nav.getState().sheet).toBe("rotate");
+  const panel = sheet(host)!;
+  expect(panel.getAttribute("data-mobile2-sheet")).toBe("rotate");
+  expect(panel.getAttribute("data-orchestrator-sheet-mode")).toBe("create");
+  expect(panel.querySelector("[data-orchestrator-confirm]")!.textContent).toContain("Create orchestrator");
+  /* Cancel sits in the draft, beside the primary, and takes the sheet down
+     without creating anything. */
+  const cancel = panel.querySelector("[data-orchestrator-draft-cancel]") as HTMLButtonElement;
+  expect(cancel).not.toBeNull();
+  expect(cancel.className).toContain("min-h-11");
+  flushSync(() => cancel.click());
+  await settle(root, view([conversation({})]), 2);
+  expect(sheet(host)).toBeNull();
+  expect(nav.getState().sheet).toBeNull();
+  expect(seatPosts()).toHaveLength(0);
 });
 
 test("tapping the create row opens the fullscreen sheet with the prefilled mandate and the launch pickers", async () => {
@@ -276,7 +344,7 @@ test("confirm posts the draft to the seat route — never to raw spawn — and c
   const panel = sheet(host)!;
   const mandate = panel.querySelector("[data-orchestrator-mandate]") as HTMLTextAreaElement;
   type(mandate, "You own the Atlas board. Talk to me here.");
-  flushSync(() => (panel.querySelector("[data-orchestrator-confirm]") as HTMLButtonElement).click());
+  flushSync(() => confirmButton(host).click());
   await settle(root, view([conversation({})]), 3);
 
   const posts = seatPosts();
@@ -302,7 +370,7 @@ test("a double tap posts once, and a retry after a lost reply replays the SAME k
   flushSync(() => openButton(host).click());
   await settle(root, view([conversation({})]), 2);
 
-  const confirm = () => sheet(host)!.querySelector("[data-orchestrator-confirm]") as HTMLButtonElement;
+  const confirm = () => confirmButton(host);
   /* Two taps inside one event batch: the synchronous in-flight guard is what
      keeps the second from designating a second orchestrator. */
   flushSync(() => {
@@ -332,7 +400,7 @@ test("a truncated 2xx reply is not a confirmation: the key survives it and the r
   const { host, root } = await mount([conversation({})]);
   flushSync(() => openButton(host).click());
   await settle(root, view([conversation({})]), 2);
-  flushSync(() => (sheet(host)!.querySelector("[data-orchestrator-confirm]") as HTMLButtonElement).click());
+  flushSync(() => (confirmButton(host)).click());
   await settle(root, view([conversation({})]), 3);
 
   const first = seatPosts();
@@ -341,12 +409,12 @@ test("a truncated 2xx reply is not a confirmation: the key survives it and the r
   expect(dom.sessionStorage.getItem("llvOrchestratorDraft:atlas:requestId")).toBe(String(first[0]!.body.clientRequestId));
   /* And it is READ as unknown, not as a refusal: the sheet offers the retry
      that replays it rather than a fresh mandate. */
-  expect(row(host).getAttribute("data-orchestrator-row-state")).toBe("intent-error");
+  expect(card(host).getAttribute("data-mobile2-seat-state")).toBe("intent-error");
   expect(sheet(host)!.querySelector("[data-orchestrator-intent-error]")!.textContent)
     .toContain("Trying again replays the same request");
 
   postSeat = async () => new Response(JSON.stringify({ ok: true, state: "starting" }), { status: 200, headers: { "content-type": "application/json" } });
-  flushSync(() => (sheet(host)!.querySelector("[data-orchestrator-confirm]") as HTMLButtonElement).click());
+  flushSync(() => (confirmButton(host)).click());
   await settle(root, view([conversation({})]), 3);
   const posts = seatPosts();
   expect(posts).toHaveLength(2);
@@ -360,16 +428,16 @@ test("a refused designation lands on the row and inside the sheet, with the erro
   const { host, root } = await mount([conversation({})]);
   flushSync(() => openButton(host).click());
   await settle(root, view([conversation({})]), 2);
-  flushSync(() => (sheet(host)!.querySelector("[data-orchestrator-confirm]") as HTMLButtonElement).click());
+  flushSync(() => (confirmButton(host)).click());
   await settle(root, view([conversation({})]), 3);
 
-  expect(row(host).getAttribute("data-orchestrator-row-state")).toBe("intent-error");
+  expect(card(host).getAttribute("data-mobile2-seat-state")).toBe("intent-error");
   const failure = sheet(host)!.querySelector("[data-orchestrator-intent-error]");
   expect(failure).not.toBeNull();
   expect(failure!.textContent).toContain("orchestrator cwd could not be resolved");
   /* A terminal refusal releases the key: the corrected mandate must arrive
      under a fresh one, or the seat command completes the ORIGINAL intent. */
-  flushSync(() => (sheet(host)!.querySelector("[data-orchestrator-confirm]") as HTMLButtonElement).click());
+  flushSync(() => (confirmButton(host)).click());
   await settle(root, view([conversation({})]), 3);
   const posts = seatPosts();
   expect(posts).toHaveLength(2);
@@ -389,7 +457,7 @@ test("a created seat hands the phone off from the sheet into the standard focus 
     seatAnswer = { seat: seat(), pending: null, exists: true };
     return new Response(JSON.stringify({ ok: true, state: "starting" }), { status: 200, headers: { "content-type": "application/json" } });
   };
-  flushSync(() => (sheet(host)!.querySelector("[data-orchestrator-confirm]") as HTMLButtonElement).click());
+  flushSync(() => (confirmButton(host)).click());
   await settle(root, view(files), 5);
 
   /* The sheet is gone and the phone is IN the conversation — the standard
@@ -397,21 +465,20 @@ test("a created seat hands the phone off from the sheet into the standard focus 
   expect(sheet(host)).toBeNull();
   expect(host.querySelector('[data-testid="mobile-focused-pane"] [data-link-path]')!.getAttribute("data-link-path")).toBe("/orchestrator.jsonl");
   expect(host.querySelector('[data-testid="bounded-mobile-composer"]')).not.toBeNull();
-  expect(row(host).getAttribute("data-orchestrator-row-state")).toBe("live");
-  expect(row(host).getAttribute("data-orchestrator-row-tap")).toBe("conversation");
+  expect(card(host).getAttribute("data-mobile2-seat-state")).toBe("live");
+  expect(card(host).getAttribute("data-mobile2-seat-tap")).toBe("conversation");
   /* The unedited mandate records the approved prompt's version. */
   const post = seatPosts()[0]!;
   expect(post.body.mandate).toBe(ORCHESTRATOR_SYSTEM_PROMPT.trim());
   expect(post.body.promptVersion).toBeGreaterThan(0);
 });
 
-test("tapping a live row opens the seat's conversation in the focus view", async () => {
+test("tapping a live seat opens its conversation in the standard conversation screen", async () => {
   seatAnswer = { seat: seat(), pending: null, exists: true };
   const files = [conversation({}), orchestrator];
   const { host, root } = await mount(files);
-  expect(row(host).getAttribute("data-orchestrator-row-state")).toBe("live");
-  /* The incumbent badge: the model it runs on. */
-  expect(openButton(host).textContent).toContain("opus");
+  expect(card(host).getAttribute("data-mobile2-seat-state")).toBe("live");
+  expect(card(host).getAttribute("data-mobile2-seat-shape")).toBe("seat");
   expect(host.querySelector('[data-testid="mobile-focused-pane"] [data-link-path]')!.getAttribute("data-link-path")).toBe("/other.jsonl");
 
   flushSync(() => openButton(host).click());
@@ -421,21 +488,200 @@ test("tapping a live row opens the seat's conversation in the focus view", async
   expect(host.querySelector('[data-testid="bounded-mobile-composer"]')).not.toBeNull();
 });
 
+/*
+ * What the seated card SAYS (README §4.1, §10 P2-3): «Orchestrator» with a
+ * state badge, a now line in the agent's own words, and the context meter.
+ * Account and plan are deliberately absent — they are one tap away in the
+ * sheet, because a card that lists them says less about the thing the operator
+ * opened the board to see.
+ */
+test("a seated card carries the state badge, the now line and a meter that fills with what REMAINS", async () => {
+  seatAnswer = { seat: seat(), pending: null, exists: true };
+  const working = {
+    ...orchestrator,
+    /* A turn that opened 2m 14s ago on the frozen board clock. */
+    lastTurn: { startedAt: NOW * 1000 - 134_000, endedAt: null },
+    plan: { current: "Reading the board first" },
+    ctx: { pct: 24, usedTokens: 24_000, windowTokens: 100_000, source: "transcript", confidence: "exact" },
+  } as unknown as FileEntry;
+  const { host } = await mount([conversation({}), working]);
+
+  expect(card(host).getAttribute("data-mobile2-seat-state")).toBe("live");
+  expect(openButton(host).textContent).toContain("Orchestrator");
+  /* The badge speaks the CONVERSATION's phrase, the same words the board's
+     rows and the conversation's bar carry, so one seat never reads two ways —
+     and it never truncates (2026-08 audit finding 17). */
+  expect(badge(host)!.textContent).toBe("working 2:14");
+  expect(badge(host)!.getAttribute("data-mobile2-seat-badge")).toBe("success");
+  expect(badge(host)!.className).toContain("shrink-0");
+  /* The now line: the plan step the agent published, never a guess. */
+  const now = card(host).querySelector("[data-mobile2-seat-now]");
+  expect(now!.textContent).toBe("Reading the board first");
+  /* The meter fills with what is LEFT of the window — 24 % used is 76 % left. */
+  expect(meter(host)!.getAttribute("aria-valuenow")).toBe("76");
+  expect(meter(host)!.getAttribute("data-mobile2-meter-tone")).toBe("accent");
+  expect(meter(host)!.querySelector("[data-mobile2-meter-fill]")!.getAttribute("style")).toContain("76%");
+  /* Account and plan are the sheet's (README §10 P2-3). */
+  expect(card(host).textContent).not.toContain("Max plan");
+});
+
+test("the seat's ⚙ opens the seat as a BOTTOM sheet — account · plan, the context left, the predecessor, the mandate", async () => {
+  seatAnswer = { seat: seat({ predecessorConversationId: "conv_predecessor" }), pending: null, exists: true };
+  const live = { ...orchestrator, ctx: { pct: 24, usedTokens: 24_000, windowTokens: 100_000, source: "transcript", confidence: "exact" } } as unknown as FileEntry;
+  const files = [conversation({}), live];
+  const { host, root } = await mount(files);
+
+  const controls = host.querySelector("[data-mobile2-seat-controls]") as HTMLButtonElement;
+  expect(controls).not.toBeNull();
+  expect(controls.className).toContain("h-11");
+  expect(controls.getAttribute("data-mobile2-open")).toBe("seat");
+  flushSync(() => controls.click());
+  await settle(root, view(files), 3);
+
+  /* A bottom sheet, over the board: the shell's own primitive, so the scrim,
+     the grab handle and the drag-to-close come from one place (§3.3, §5). */
+  const bottom = host.querySelector('[data-mobile2-sheet="seat"]') as HTMLElement;
+  expect(bottom).not.toBeNull();
+  expect(bottom.getAttribute("role")).toBe("dialog");
+  expect(bottom.getAttribute("aria-modal")).toBe("true");
+  expect(bottom.className).toContain("max-h-[88%]");
+  expect(bottom.previousElementSibling ?? bottom.parentElement!.querySelector("[data-mobile2-grab]")).not.toBeNull();
+
+  const panel = sheet(host)!;
+  expect(panel.getAttribute("data-orchestrator-sheet-mode")).toBe("live");
+  const identity = panel.querySelector("[data-orchestrator-incumbent]") as HTMLElement;
+  /* Account · plan belong HERE, and the model reads at its tier. */
+  expect(identity.textContent).toContain("opus");
+  /* Context, as what remains, with the window it is a share of. */
+  const context = panel.querySelector("[data-mobile2-seat-context]") as HTMLElement;
+  expect(context.getAttribute("data-mobile2-seat-context")).toBe("76");
+  expect(context.textContent).toContain("76% left of 100K");
+  expect(context.querySelector("[data-mobile2-meter]")!.getAttribute("aria-valuenow")).toBe("76");
+  /* The lineage, as a row that opens it. */
+  const predecessor = panel.querySelector('[data-orchestrator-predecessor="conv_predecessor"]') as HTMLElement;
+  expect(predecessor.textContent).toContain("Predecessor");
+  expect(predecessor.textContent).toContain("open");
+  expect(predecessor.className).toContain("min-h-11");
+  /* The rules it runs under, and the row that changes them — which says what
+     changing them costs. */
+  expect(panel.querySelector("[data-orchestrator-mandate-preview]")!.textContent).toContain("You run the Atlas board.");
+  const edit = panel.querySelector("[data-orchestrator-edit-mandate]") as HTMLButtonElement;
+  expect(edit.textContent).toContain("Edit the mandate");
+  expect(edit.textContent).toContain("replaces the orchestrator");
+  expect(panel.textContent).toContain("Changing the mandate, model or account means a successor takes the seat.");
+  /* No working-dir row: the checkout is host detail (README §10 P2-12). */
+  expect(panel.textContent).not.toContain("/repo/atlas");
+  /* And the two controls that ACT sit at the thumb, outside the scroller. */
+  const footer = bottom.querySelector("[data-orchestrator-rotate]")!.parentElement!;
+  expect(footer.contains(panel)).toBe(false);
+  expect((bottom.querySelector("[data-orchestrator-confirm]") as HTMLElement).textContent).toContain("Open conversation");
+});
+
+/*
+ * The mandate block's heading NAMES the rules the seat is running under — the
+ * approved picture reads «Mandate v3 — built-in operating rules» over a faded
+ * three-line preview (`prototype/app.js`, `seatSheet()`), and the two cases the
+ * picture has no seat for say what they are instead: rules the operator wrote,
+ * and rules the product has since moved on from. The evidence frames render a
+ * seat on the CURRENT version, so this is where the other two are asserted.
+ */
+test("the mandate heading names which rules the seat runs under, and the preview folds to three lines", async () => {
+  const files = [conversation({}), orchestrator];
+  const open = async () => {
+    const { host, root } = await mount(files);
+    flushSync(() => (host.querySelector("[data-mobile2-seat-controls]") as HTMLButtonElement).click());
+    await settle(root, view(files), 3);
+    return sheet(host)!.querySelector("[data-orchestrator-mandate-view]") as HTMLElement;
+  };
+
+  /* The built-in rules, at the version the product ships today. */
+  seatAnswer = { seat: seat({ promptVersion: ORCHESTRATOR_PROMPT_VERSION }), pending: null, exists: true };
+  const current = await open();
+  expect(current.textContent).toContain(`Mandate v${ORCHESTRATOR_PROMPT_VERSION} — built-in operating rules`);
+  /* Faded, three lines, and it expands in place rather than pushing the two
+     controls at the thumb off the sheet. */
+  const preview = current.querySelector("[data-orchestrator-mandate-preview]") as HTMLButtonElement;
+  expect(current.getAttribute("data-orchestrator-mandate-view")).toBe("preview");
+  expect(preview.getAttribute("aria-expanded")).toBe("false");
+  expect(preview.firstElementChild!.className).toContain("line-clamp-3");
+  expect(preview.textContent).toContain("You run the Atlas board.");
+
+  /* Rules the operator wrote: no version to name, so the heading says whose. */
+  seatAnswer = { seat: seat({ promptVersion: null }), pending: null, exists: true };
+  expect((await open()).textContent).toContain("Mandate — your own rules");
+
+  /* Rules the product has moved past: the heading carries BOTH numbers, which
+     is what tells the operator a rotation would change more than the model. */
+  seatAnswer = { seat: seat({ promptVersion: 4 }), pending: null, exists: true };
+  expect((await open()).textContent).toContain(`Mandate v4 — the current default is v${ORCHESTRATOR_PROMPT_VERSION}`);
+});
+
+test("the mandate preview expands in place, and folds back", async () => {
+  seatAnswer = { seat: seat({ promptVersion: ORCHESTRATOR_PROMPT_VERSION }), pending: null, exists: true };
+  const files = [conversation({}), orchestrator];
+  const { host, root } = await mount(files);
+  flushSync(() => (host.querySelector("[data-mobile2-seat-controls]") as HTMLButtonElement).click());
+  await settle(root, view(files), 3);
+
+  const block = sheet(host)!.querySelector("[data-orchestrator-mandate-view]") as HTMLElement;
+  const preview = block.querySelector("[data-orchestrator-mandate-preview]") as HTMLButtonElement;
+  flushSync(() => preview.click());
+  await settle(root, view(files), 2);
+  expect(block.getAttribute("data-orchestrator-mandate-view")).toBe("expanded");
+  expect(preview.getAttribute("aria-expanded")).toBe("true");
+  /* Expanded it scrolls itself, so the sheet's own height — and the footer
+     inside it — is unmoved by a long mandate. */
+  expect(preview.firstElementChild!.className).toContain("overflow-y-auto");
+  expect(preview.firstElementChild!.className).not.toContain("line-clamp-3");
+
+  flushSync(() => preview.click());
+  await settle(root, view(files), 2);
+  expect(block.getAttribute("data-orchestrator-mandate-view")).toBe("preview");
+});
+
+/*
+ * One seat, one phrase. The approved picture gives the board's seat card and
+ * the sheet behind it the SAME state phrase (`prototype/app.js`: `seatCard()`
+ * and `seatSheet()` both render `st.phrase` off the seat's conversation), so a
+ * seat that reads «working 2:14» on the board cannot read «live» one tap
+ * later. Both surfaces take it from `seatBadgeReading`.
+ */
+test("the sheet's badge speaks the phrase the card speaks, not a second word for the same seat", async () => {
+  seatAnswer = { seat: seat(), pending: null, exists: true };
+  const working = {
+    ...orchestrator,
+    lastTurn: { startedAt: NOW * 1000 - 134_000, endedAt: null },
+  } as unknown as FileEntry;
+  const files = [conversation({}), working];
+  const { host, root } = await mount(files);
+
+  expect(badge(host)!.textContent).toBe("working 2:14");
+  expect(badge(host)!.getAttribute("data-mobile2-seat-badge")).toBe("success");
+
+  flushSync(() => (host.querySelector("[data-mobile2-seat-controls]") as HTMLButtonElement).click());
+  await settle(root, view(files), 3);
+
+  const identity = sheet(host)!.querySelector("[data-orchestrator-incumbent]") as HTMLElement;
+  const inSheet = identity.querySelector("[data-mobile2-seat-badge]") as HTMLElement;
+  expect(inSheet.textContent).toBe("working 2:14");
+  expect(inSheet.getAttribute("data-mobile2-seat-badge")).toBe("success");
+});
+
 test("the seat's own state moves the row with no reload: rotation advisory, then a retired conversation", async () => {
   seatAnswer = { seat: seat(), pending: null, exists: true };
   const files = [conversation({}), orchestrator];
   const { host, rerender } = await mount(files);
-  expect(row(host).getAttribute("data-orchestrator-row-state")).toBe("live");
-  expect(row(host).hasAttribute("data-orchestrator-row-rotation")).toBe(false);
+  expect(card(host).getAttribute("data-mobile2-seat-state")).toBe("live");
+  expect(card(host).hasAttribute("data-mobile2-seat-rotation")).toBe(false);
 
   /* The context reading crosses the rotation line — same mount, same row. */
   await rerender([conversation({}), { ...orchestrator, ctx: { pct: 71 } } as unknown as FileEntry]);
-  expect(row(host).getAttribute("data-orchestrator-row-rotation")).toBe("strongly_recommend");
-  expect(row(host).getAttribute("data-orchestrator-row-state")).toBe("live");
+  expect(card(host).getAttribute("data-mobile2-seat-rotation")).toBe("strongly_recommend");
+  expect(card(host).getAttribute("data-mobile2-seat-state")).toBe("live");
 
   /* The seat's conversation is retired: the row says the host is gone. */
   await rerender([conversation({}), { ...orchestrator, supersededBy: "conv_successor" } as unknown as FileEntry]);
-  expect(row(host).getAttribute("data-orchestrator-row-state")).toBe("dead");
+  expect(card(host).getAttribute("data-mobile2-seat-state")).toBe("dead");
 });
 
 test("a designation failing ALONGSIDE a live incumbent gets its own control, and never takes the chat away", async () => {
@@ -446,11 +692,11 @@ test("a designation failing ALONGSIDE a live incumbent gets its own control, and
   };
   const files = [conversation({}), orchestrator];
   const { host, root } = await mount(files);
-  expect(row(host).getAttribute("data-orchestrator-row-transition")).toBe("error");
+  expect(card(host).getAttribute("data-mobile2-seat-transition")).toBe("error");
   /* The row itself still opens the conversation. */
-  expect(row(host).getAttribute("data-orchestrator-row-tap")).toBe("conversation");
+  expect(card(host).getAttribute("data-mobile2-seat-tap")).toBe("conversation");
 
-  const marker = host.querySelector("[data-orchestrator-row-transition-open]") as HTMLButtonElement;
+  const marker = host.querySelector("[data-mobile2-seat-transition-open]") as HTMLButtonElement;
   expect(marker).not.toBeNull();
   expect(marker.className).toContain("h-11");
   flushSync(() => marker.click());
@@ -533,16 +779,16 @@ test("an unreadable seat offers a re-read that recovers the row without a page r
   try {
     const files = [conversation({}), orchestrator];
     const { host, root } = await mount(files);
-    expect(row(host).getAttribute("data-orchestrator-row-state")).toBe("unavailable");
+    expect(card(host).getAttribute("data-mobile2-seat-state")).toBe("unavailable");
 
     flushSync(() => openButton(host).click());
     await settle(root, view(files), 2);
     /* The seat becomes readable — the re-read is the operator's way through,
        and it lands them in the conversation it finds. */
     seatAnswer = { seat: seat(), pending: null, exists: true };
-    flushSync(() => (sheet(host)!.querySelector("[data-orchestrator-confirm]") as HTMLButtonElement).click());
+    flushSync(() => (confirmButton(host)).click());
     await settle(root, view(files), 4);
-    expect(row(host).getAttribute("data-orchestrator-row-state")).toBe("live");
+    expect(card(host).getAttribute("data-mobile2-seat-state")).toBe("live");
     expect(seatPosts()).toHaveLength(0);
   } finally {
     globalThis.fetch = previousFetch;

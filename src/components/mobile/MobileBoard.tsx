@@ -325,11 +325,11 @@ export function mobileBoardOf(props: MobileBoardData): MobileBoardModel {
  * sends from the board — the reply is written in the conversation — so the mark
  * and the mic are one button's parts, not controls of their own.
  *
- * Rendered only when the seat is live; the no-seat invitation ("Create an
- * orchestrator to talk to…") belongs to the seat card lane, which owns what the
- * absent seat looks like everywhere else too.
+ * Over a VACANCY the same slot is the invitation's other half (lane 6): the
+ * footer says what the board is missing and opens the create draft. There is
+ * no mic on it, because there is nothing yet to dictate to.
  */
-export function MobileBoardDock({ onTell }: { onTell: () => void }) {
+export function MobileBoardDock({ onTell, create = false }: { onTell: () => void; create?: boolean }) {
   const { t } = useLocale();
   return (
     <button
@@ -343,10 +343,16 @@ export function MobileBoardDock({ onTell }: { onTell: () => void }) {
       <span aria-hidden className="grid h-7 w-7 shrink-0 place-items-center rounded-full bg-accent-soft text-accent">
         <Bot className="h-[15px] w-[15px]" />
       </span>
-      <span className="min-w-0 flex-1 truncate">{t("mobile2.board.tellOrchestrator")}</span>
-      <span aria-hidden className="grid h-8 w-8 shrink-0 place-items-center text-secondary">
-        <Mic className="h-[17px] w-[17px]" />
+      <span className={`min-w-0 flex-1 truncate ${create ? "text-accent" : ""}`}>
+        {t(create ? "mobile2.seat.createDock" : "mobile2.board.tellOrchestrator")}
       </span>
+      {create ? (
+        <ChevronRight aria-hidden className="mr-1.5 h-4 w-4 shrink-0 text-accent" />
+      ) : (
+        <span aria-hidden className="grid h-8 w-8 shrink-0 place-items-center text-secondary">
+          <Mic className="h-[17px] w-[17px]" />
+        </span>
+      )}
     </button>
   );
 }

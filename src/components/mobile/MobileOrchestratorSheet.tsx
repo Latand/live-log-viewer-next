@@ -1,6 +1,6 @@
 "use client";
 
-import { Bot, CornerDownRight, LoaderCircle, RefreshCw, RotateCcw, TriangleAlert } from "lucide-react";
+import { Bot, ChevronRight, Command, CornerDownRight, LoaderCircle, Pencil, RefreshCw, RotateCcw, Sparkle, TriangleAlert } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { X } from "@/components/icons";
@@ -12,15 +12,14 @@ import {
   type SpeedChoice,
 } from "@/components/draft/AgentLaunchControls";
 import { useModalLayer } from "@/components/modalLayer";
-import { Badge } from "@/components/ui/Badge";
 import { useKeyboardInset } from "@/hooks/useComposer";
-import { engineBadgeFor } from "@/components/utils";
-import { useLocale, type MessageKey } from "@/lib/i18n";
+import { useEngineAccounts } from "@/hooks/useEngineAccounts";
+import { useLocale, type MessageKey, type TFunction } from "@/lib/i18n";
 import { ORCHESTRATOR_PROMPT_VERSION, ORCHESTRATOR_SPAWN_CONFIG, ORCHESTRATOR_SYSTEM_PROMPT, orchestratorMandateStale } from "@/lib/orchestrator/prompt";
 import type { OrchestratorSeat } from "@/lib/orchestrator/seats";
 import type { FileEntry } from "@/lib/types";
 
-import { boardContext, ContextMeter } from "../orchestrator/IncumbentHeader";
+import { boardContext } from "../orchestrator/IncumbentHeader";
 import type { OrchestratorIncumbent } from "../orchestrator/incumbent";
 import {
   deriveRotateDraftState,
@@ -34,8 +33,73 @@ import {
   type SeatTransition,
 } from "../orchestrator/seatState";
 import type { SeatConfirmLaunch } from "../orchestrator/useSeatConfirm";
+import { humanizeDuration } from "../turnDuration";
+import { statePhrase } from "./MobileBoard";
+import { MobileMeter } from "./MobileMeter";
+import { MobileSheet } from "./MobileSheet";
+import { mobileRowState } from "./mobileBoardModel";
 import { readSeatDraftField, readSeatFlowField, writeSeatDraftField, writeSeatFlowField } from "./orchestratorDraftStorage";
-import { ROW_STATE_LABEL, ROW_TONE, orchestratorRowView } from "./orchestratorRowState";
+import {
+  CONVERSATION_STATE_TONE,
+  ROW_STATE_LABEL,
+  SEAT_STATE_TONE,
+  orchestratorRowView,
+  seatCardView,
+  type SeatBadgeTone,
+  type SeatCardView,
+} from "./orchestratorRowState";
+
+const BADGE_TONE: Record<SeatBadgeTone, string> = {
+  success: "bg-success-soft text-success",
+  warning: "bg-warning-soft text-warning",
+  danger: "bg-danger-soft text-danger",
+  accent: "bg-accent-soft text-accent",
+  neutral: "bg-sunken text-secondary",
+};
+
+/**
+ * The one badge recipe (README §5): 20 px, soft fill, role text, and it never
+ * truncates — the title beside it does first (2026-08 audit finding 17, where
+ * the phone's seat row cut the state word down to «R…»).
+ *
+ * It lives in this file, and the card imports it from here, because the card
+ * already imports the sheet: one direction, no cycle. The two surfaces say a
+ * seat's state through the same component so they cannot say it two ways.
+ */
+export function SeatBadge({ tone, children }: { tone: SeatBadgeTone; children: React.ReactNode }) {
+  return (
+    <span
+      data-mobile2-seat-badge={tone}
+      className={`inline-flex h-5 shrink-0 items-center whitespace-nowrap rounded-full px-[7px] text-caption font-semibold leading-none tabular-nums ${BADGE_TONE[tone]}`}
+    >
+      {children}
+    </span>
+  );
+}
+
+/**
+ * WHAT that badge says, decided once for both surfaces.
+ *
+ * A live seat whose transcript is on this device speaks its CONVERSATION's
+ * phrase — «working 12:40», the same words the board's rows and the
+ * conversation's bar carry — and every other state speaks the seat's own word
+ * (`orchestratorRowState`). The card and this sheet both read it from here, so
+ * a seat cannot say «working 12:40» on the board and «live» one tap later:
+ * that disagreement is what the approved picture shows as one phrase in both
+ * places (`prototype/app.js`, `seatCard()` and `seatSheet()` share `st.phrase`).
+ */
+export function seatBadgeReading(
+  t: TFunction,
+  view: SeatCardView,
+  file: FileEntry | null,
+  now: number,
+): { tone: SeatBadgeTone; text: string } {
+  if (view.badge === "conversation" && file) {
+    const conversation = mobileRowState(file, now);
+    return { tone: CONVERSATION_STATE_TONE[conversation.key], text: statePhrase(t, conversation, now) };
+  }
+  return { tone: SEAT_STATE_TONE[view.state], text: t(ROW_STATE_LABEL[view.state]) };
+}
 
 /** Everything one confirm carries. The row owns the POST — and with it the one
     idempotency key per submission — so the sheet only reports what the operator
@@ -79,58 +143,32 @@ export interface SeatRotateFlow {
 }
 
 /**
- * The phone's orchestrator sheet (PRD #976 slice C): the create draft, every
- * seat state that is not «a conversation you can open» — and, since #1347, the
- * seat's CONTROLS for the state that is.
+ * The phone's orchestrator sheets, chosen by which one the navigation store
+ * has open (§3.3):
  *
- * It is the same draft as the desktop dock — the shared launch module
- * (`useAgentLaunchDraft` + `AgentLaunchControls`), the same default mandate in
- * an editable textarea, the same `POST /api/orchestrator/seat` behind Confirm —
- * rendered as a fullscreen sheet in the pattern this codebase already uses for
- * one (`TaskSheet`, the focus view's map): `fixed inset-0`, its own header row,
- * one scrolling body, one primary action parked at the thumb.
+ *  - `seat` — the BOTTOM sheet that reads the seat (README §4.5). The board
+ *    stays visible and dimmed behind it, the handle closes it, and the two
+ *    controls that act on the seat sit at the thumb.
+ *  - `rotate` — the FULLSCREEN draft that replaces the seat, and the create
+ *    draft over a vacancy: the same surface with a different primary. It keeps
+ *    #1004's keyboard budget verbatim, because that budget was measured
+ *    against a surface that owns the whole viewport.
  *
- * On a live seat it is what the dock's incumbent header is on the desktop: who
- * holds the seat (engine, model at tier, account, context fullness), the
- * lineage it replaced, the mandate it runs under, and the one control that
- * acts on it — Rotate, which opens the SAME draft prefilled from the incumbent
- * (engine, model, reasoning, account, mandate) over the seat it would replace,
- * with its own two-way footer: keep this one, or rotate. The operator asked for
- * these from a phone and could not find them (#1347): the row's tap opened the
- * conversation and nothing else. Nothing here rotates on its own.
- *
- * It never mounts a conversation. A seat that goes live while this is open
- * hands off to `MobileFocusView` (the row closes the sheet and pins the pane),
- * which is the operator's decision from the interview: the phone reads the
- * orchestrator in the standard focus view, not in a second chat surface.
- *
- * The keyboard is the phone's whole problem here — a large textarea plus an
- * on-screen keyboard is exactly the case #983 repaired for the focus root — so
- * the sheet budgets against the SAME `useKeyboardInset` signal rather than
- * measuring the viewport a second way. The footer action stays above the
- * keyboard, and the body scrolls under it. Both safe-area insets are padded:
- * the header's controls clear the notch, the footer clears the home indicator.
+ * They are two components rather than two branches so each owns its own modal
+ * layer: switching from one to the other unmounts a surface and mounts the
+ * other, which is what makes the focus return and the scroll lock balance.
  */
-export function MobileOrchestratorSheet({
-  project,
-  projectName,
-  projectCwd,
-  state,
-  status,
-  file,
-  incumbent,
-  pendingMandate,
-  viewerMcpRegistered,
-  submitting,
-  rotate,
-  onConfirm,
-  onRecheck,
-  onOpenConversation,
-  onClose,
-}: {
+export function MobileOrchestratorSheet(props: SeatSheetProps) {
+  return props.sheet === "rotate" ? <SeatDraftSheet {...props} /> : <SeatStatusSheet {...props} />;
+}
+
+interface SeatSheetProps {
   project: string;
   projectName: string;
   projectCwd?: string;
+  /** Which of the card's two sheets is open. The name decides the container;
+      the seat state decides what is inside it. */
+  sheet: "seat" | "rotate";
   state: OrchestratorPanelState;
   /** The seat read itself, for the rotate draft's own error state. */
   status: OrchestratorSeatStatus | null;
@@ -144,18 +182,19 @@ export function MobileOrchestratorSheet({
   pendingMandate: string;
   viewerMcpRegistered: boolean;
   submitting: boolean;
+  /** Epoch seconds, the card's own clock: «holding the seat for 2h» ages on the
+      same tick the card's badge does. */
+  now: number;
   rotate: SeatRotateFlow;
   onConfirm: (payload: SeatConfirmPayload) => void;
   onRecheck: () => void;
   onOpenConversation: () => void;
   onClose: () => void;
-}) {
-  const { t } = useLocale();
-  const kbInset = useKeyboardInset();
-  const sheetRef = useRef<HTMLFormElement>(null);
-  const [mandate, setMandateState] = useState(() => readSeatDraftField(project, "mandate") || ORCHESTRATOR_SYSTEM_PROMPT);
-  const [formError, setFormError] = useState<string | null>(null);
-  const launch = useAgentLaunchDraft({
+}
+
+/** The draft's own launch state, on the create keys the desktop dock uses. */
+function useCreateDraft(project: string) {
+  return useAgentLaunchDraft({
     storage: {
       read: (name) => readSeatDraftField(project, name),
       write: (name, value) => writeSeatDraftField(project, name, value),
@@ -164,9 +203,209 @@ export function MobileOrchestratorSheet({
     initialModel: ORCHESTRATOR_SPAWN_CONFIG.model,
     initialEffort: ORCHESTRATOR_SPAWN_CONFIG.effort,
   });
+}
+
+/**
+ * The seat, read as a bottom sheet: identity (model · reasoning, the state
+ * badge, the engine mark, account · plan, how long it has held the seat), the
+ * context meter filling with what REMAINS, the predecessor, the mandate it runs
+ * under, the row that edits it, and the sentence that says editing means a
+ * successor. Rotate and Open conversation are the footer, at the thumb.
+ *
+ * Every state that is not a draft lands here too — loading, an unreadable seat,
+ * a designation still in flight — because each of them is a READING of the
+ * seat, and the one way forward each has is the same footer slot.
+ */
+function SeatStatusSheet({
+  project,
+  projectName,
+  state,
+  file,
+  incumbent,
+  pendingMandate,
+  submitting,
+  now,
+  rotate,
+  onConfirm,
+  onRecheck,
+  onOpenConversation,
+  onClose,
+}: SeatSheetProps) {
+  const { t } = useLocale();
+  const launch = useCreateDraft(project);
+  const view = orchestratorRowView(state, { conversationReady: Boolean(file) });
+  const mode = state.kind === "live" ? "live" : "create";
+
+  const primary: { key: MessageKey; run: () => void; busy: boolean } | null = state.kind === "creating"
+    ? (!submitting && state.clientRequestId
+      ? {
+          key: "orchPanel.creatingResume",
+          run: () => onConfirm({
+            engine: launch.engine,
+            model: launch.model,
+            effort: launch.effort,
+            speed: launch.speed,
+            accountId: launch.launchAccountId,
+            mandate: pendingMandate || ORCHESTRATOR_SYSTEM_PROMPT,
+            replayRequestId: state.clientRequestId,
+          }),
+          busy: false,
+        }
+      : null)
+    : state.kind === "unavailable"
+      ? { key: "orchPanel.recheck", run: onRecheck, busy: false }
+      : state.kind === "live" && file
+        ? { key: "mobile2.seat.open", run: onOpenConversation, busy: false }
+        : null;
+
+  return (
+    <MobileSheet
+      name="seat"
+      title={t("mobile2.seat.sheetTitle", { project: projectName })}
+      onClose={onClose}
+      footer={
+        <>
+          {/* Rotate: a control, and only a control. The advisory in the body
+              states the recommendation; this performs it, and ONLY when
+              pressed and then confirmed in the draft it opens. */}
+          {state.kind === "live" ? (
+            <button
+              type="button"
+              data-orchestrator-rotate
+              data-mobile2-open="rotate"
+              onClick={rotate.onOpen}
+              disabled={rotate.opening || rotate.submitting}
+              title={t("orchPanel.rotateTitle")}
+              className="inline-flex min-h-11 shrink-0 items-center justify-center gap-1.5 rounded-control border border-border bg-card px-3 text-body font-semibold text-primary active:bg-sunken focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
+            >
+              {rotate.opening
+                ? <LoaderCircle className="h-4 w-4 animate-spin" aria-hidden />
+                : <RefreshCw className="h-4 w-4" aria-hidden />}
+              {t(rotate.opening ? "orchMobile.rotateOpening" : "orchPanel.rotate")}
+            </button>
+          ) : null}
+          {primary ? (
+            <button
+              type="button"
+              data-orchestrator-confirm
+              disabled={primary.busy}
+              onClick={primary.run}
+              className="inline-flex min-h-11 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-control border border-accent bg-accent px-3 text-body font-semibold text-white shadow-1 active:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
+            >
+              {primary.busy ? <LoaderCircle className="h-4 w-4 animate-spin" aria-hidden /> : <Bot className="h-4 w-4" aria-hidden />}
+              <span className="truncate">{t(primary.key)}</span>
+            </button>
+          ) : null}
+        </>
+      }
+    >
+      <div
+        data-testid="mobile-orchestrator-sheet"
+        data-orchestrator-sheet-state={view.state}
+        data-orchestrator-sheet-mode={mode}
+        className="flex flex-col gap-3 px-4 pb-2"
+      >
+        {state.kind === "loading" ? (
+          <Centered>
+            <LoaderCircle className="h-5 w-5 animate-spin text-muted" aria-hidden />
+            <p className="text-ui text-muted" role="status">{t("orchPanel.loading")}</p>
+          </Centered>
+        ) : state.kind === "unavailable" ? (
+          <Centered>
+            <TriangleAlert className="h-6 w-6 text-warning" aria-hidden />
+            <p className="text-body font-semibold text-primary" role="alert">{t("orchPanel.unavailable")}</p>
+            <p className="text-ui leading-4 text-muted">{t("orchPanel.unavailableHint")}</p>
+          </Centered>
+        ) : state.kind === "creating" ? (
+          <Centered>
+            <LoaderCircle className="h-5 w-5 animate-spin text-accent" aria-hidden />
+            <p className="text-body font-semibold text-primary" role="status">{t("orchPanel.creating")}</p>
+            <p className="text-ui leading-4 text-muted">{t("orchPanel.creatingHint")}</p>
+            {state.launchId ? (
+              <p className="max-w-full truncate font-mono text-caption text-muted" title={state.launchId}>
+                {t("orchPanel.receipt", { launchId: state.launchId })}
+              </p>
+            ) : null}
+            {/* Durably pending with nothing of ours on the wire: the request
+                that accepted it died, and only a re-post of its OWN key
+                converges it — the phone's most likely failure by far. */}
+            {!submitting && state.clientRequestId ? (
+              <p className="text-ui leading-4 text-muted">{t("orchPanel.creatingStuck")}</p>
+            ) : null}
+          </Centered>
+        ) : state.kind === "live" ? (
+          <LiveView state={state} file={file} incumbent={incumbent} now={now} onEditMandate={rotate.onOpen} />
+        ) : (
+          /* A vacancy or a failed designation reached this sheet from somewhere
+             other than the card (the platform's forward gesture onto a replaced
+             route, a state that changed under an open sheet): the draft is the
+             surface that can act on it, and it is one tap away. */
+          <Centered>
+            <Bot className="h-6 w-6 text-accent" aria-hidden />
+            <p className="text-body font-semibold text-primary">{t("mobile2.seat.none")}</p>
+            <button
+              type="button"
+              data-mobile2-open="rotate"
+              onClick={rotate.onOpen}
+              className="inline-flex min-h-11 items-center gap-1 text-ui font-semibold text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            >
+              {t("mobile2.seat.create")}
+              <ChevronRight className="h-3.5 w-3.5 shrink-0" aria-hidden />
+            </button>
+          </Centered>
+        )}
+      </div>
+    </MobileSheet>
+  );
+}
+
+/**
+ * The create and rotate drafts, fullscreen (README §4.5, unchanged in substance
+ * from #979 / #1347 / #1004).
+ *
+ * It is the same draft as the desktop dock — the shared launch module
+ * (`useAgentLaunchDraft` + `AgentLaunchControls`), the same default mandate in
+ * an editable textarea, the same `POST /api/orchestrator/seat` behind Confirm —
+ * rendered as a fullscreen sheet in the pattern this codebase already uses for
+ * one (`TaskSheet`): `fixed inset-0`, its own header row, one scrolling body,
+ * the actions parked at the thumb.
+ *
+ * It never mounts a conversation. A seat that goes live while this is open
+ * hands off to the conversation screen (the card closes the sheet and pins the
+ * pane), which is the operator's decision from the interview: the phone reads
+ * the orchestrator in the standard conversation surface, not in a second chat
+ * inside a sheet.
+ *
+ * The keyboard is the phone's whole problem here — a large textarea plus an
+ * on-screen keyboard is exactly the case #983 repaired for the focus root — so
+ * the sheet budgets against the SAME `useKeyboardInset` signal rather than
+ * measuring the viewport a second way. The footer actions stay above the
+ * keyboard, and the body scrolls under them. Both safe-area insets are padded:
+ * the header's controls clear the notch, the footer clears the home indicator.
+ */
+function SeatDraftSheet({
+  project,
+  projectName,
+  projectCwd,
+  state,
+  status,
+  file,
+  incumbent,
+  viewerMcpRegistered,
+  submitting,
+  rotate,
+  onConfirm,
+  onClose,
+}: SeatSheetProps) {
+  const { t } = useLocale();
+  const kbInset = useKeyboardInset();
+  const sheetRef = useRef<HTMLFormElement>(null);
+  const [mandate, setMandateState] = useState(() => readSeatDraftField(project, "mandate") || ORCHESTRATOR_SYSTEM_PROMPT);
+  const [formError, setFormError] = useState<string | null>(null);
+  const launch = useCreateDraft(project);
 
   /* Full modal semantics through the shared layer stack: focus in on open, Tab
-     trapped, Escape closes, body scroll locked, focus back to the row. */
+     trapped, Escape closes, body scroll locked, focus back to the card. */
   useModalLayer({ containerRef: sheetRef, onClose });
 
   const setMandate = (value: string) => {
@@ -177,16 +416,8 @@ export function MobileOrchestratorSheet({
   };
 
   const view = orchestratorRowView(state, { conversationReady: Boolean(file) });
-  const drafting = state.kind === "draft" || state.kind === "intent-error";
   const rotating = rotate.open && rotate.seat !== null;
   const mode = rotating ? "rotate" : state.kind === "live" ? "live" : "create";
-  const params = {
-    engine: launch.engine,
-    model: launch.model,
-    effort: launch.effort,
-    speed: launch.speed,
-    accountId: launch.launchAccountId,
-  };
 
   const submitDraft = () => {
     const text = mandate.trim();
@@ -195,31 +426,25 @@ export function MobileOrchestratorSheet({
       return;
     }
     setFormError(null);
-    onConfirm({ ...params, mandate: text });
+    onConfirm({
+      engine: launch.engine,
+      model: launch.model,
+      effort: launch.effort,
+      speed: launch.speed,
+      accountId: launch.launchAccountId,
+      mandate: text,
+    });
   };
 
-  /* ONE primary action, parked at the thumb, whatever the state is. A sheet
-     that can be opened on six different states and offers a way forward on
-     only one of them is the dead end the panel's own design refuses. The rotate
-     draft brings its own footer — two ways out, keep or rotate — so it takes
-     the slot over. */
-  const primary: { key: MessageKey; run: () => void; busy: boolean } | null = rotating
+  /* The create draft's own primary, parked at the thumb. The rotate draft
+     brings its own footer — two ways out, keep or rotate — so it takes the
+     slot over; and a state that stops being a draft under an open sheet (a
+     confirm that landed) keeps the surface with no primary rather than a
+     control that no longer acts. */
+  const drafting = state.kind === "draft" || state.kind === "intent-error";
+  const primary: { key: MessageKey; run: () => void; busy: boolean } | null = rotating || !drafting
     ? null
-    : drafting
-      ? { key: state.kind === "intent-error" ? "orchPanel.confirmRetry" : "orchPanel.confirm", run: submitDraft, busy: submitting }
-      : state.kind === "creating"
-        ? (!submitting && state.clientRequestId
-          ? {
-              key: "orchPanel.creatingResume",
-              run: () => onConfirm({ ...params, mandate: pendingMandate || ORCHESTRATOR_SYSTEM_PROMPT, replayRequestId: state.clientRequestId }),
-              busy: false,
-            }
-          : null)
-        : state.kind === "unavailable"
-          ? { key: "orchPanel.recheck", run: onRecheck, busy: false }
-          : state.kind === "live" && file
-            ? { key: "orchMobile.open", run: onOpenConversation, busy: false }
-            : null;
+    : { key: state.kind === "intent-error" ? "orchPanel.confirmRetry" : "orchPanel.confirm", run: submitDraft, busy: submitting };
 
   return (
     <div
@@ -237,6 +462,7 @@ export function MobileOrchestratorSheet({
         aria-label={t("orchMobile.sheetAria", { project: projectName })}
         tabIndex={-1}
         data-testid="mobile-orchestrator-sheet"
+        data-mobile2-sheet="rotate"
         data-orchestrator-sheet-state={view.state}
         data-orchestrator-sheet-mode={mode}
         className="flex min-h-0 flex-1 flex-col focus-visible:outline-none"
@@ -250,12 +476,12 @@ export function MobileOrchestratorSheet({
             <Bot className="h-4 w-4" />
           </span>
           <span className="flex min-w-0 flex-1 flex-col">
-            <span className="truncate text-body font-semibold text-primary">{t("orchPanel.title")}</span>
+            <span className="truncate text-body font-semibold text-primary">
+              {rotating ? t("orchPanel.rotateHeading") : t("orchPanel.draftTitle")}
+            </span>
             <span className="truncate text-caption text-muted" title={projectName}>{projectName}</span>
           </span>
-          <span className={`shrink-0 rounded-full border px-2 py-0.5 text-caption font-semibold ${ROW_TONE[view.state].chip}`}>
-            {t(ROW_STATE_LABEL[view.state])}
-          </span>
+          <SeatBadge tone={SEAT_STATE_TONE[view.state]}>{t(ROW_STATE_LABEL[view.state])}</SeatBadge>
           <button
             type="button"
             onClick={onClose}
@@ -282,100 +508,84 @@ export function MobileOrchestratorSheet({
             onConfirm={rotate.onConfirm}
             onCancel={rotate.onCancel}
           />
+        ) : !drafting ? (
+          /* The draft surface with nothing to draft yet: the rotation's own
+             read is still in flight, or a confirm has just landed and the seat
+             is settling. Showing the create form here would offer to create a
+             SECOND orchestrator over a live one for the frame it takes. */
+          <Centered>
+            <LoaderCircle className="h-5 w-5 animate-spin text-accent" aria-hidden />
+            <p className="text-ui text-muted" role="status">{t("orchMobile.rotateOpening")}</p>
+          </Centered>
         ) : (
           <>
             <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-3 py-3">
-              {state.kind === "loading" ? (
-                <Centered>
-                  <LoaderCircle className="h-5 w-5 animate-spin text-muted" aria-hidden />
-                  <p className="text-ui text-muted" role="status">{t("orchPanel.loading")}</p>
-                </Centered>
-              ) : state.kind === "unavailable" ? (
-                <Centered>
-                  <TriangleAlert className="h-6 w-6 text-warning" aria-hidden />
-                  <p className="text-body font-semibold text-primary" role="alert">{t("orchPanel.unavailable")}</p>
-                  <p className="text-ui leading-4 text-muted">{t("orchPanel.unavailableHint")}</p>
-                </Centered>
-              ) : state.kind === "creating" ? (
-                <Centered>
-                  <LoaderCircle className="h-5 w-5 animate-spin text-accent" aria-hidden />
-                  <p className="text-body font-semibold text-primary" role="status">{t("orchPanel.creating")}</p>
-                  <p className="text-ui leading-4 text-muted">{t("orchPanel.creatingHint")}</p>
-                  {state.launchId ? (
-                    <p className="max-w-full truncate font-mono text-caption text-muted" title={state.launchId}>
-                      {t("orchPanel.receipt", { launchId: state.launchId })}
-                    </p>
-                  ) : null}
-                  {/* Durably pending with nothing of ours on the wire: the request
-                      that accepted it died, and only a re-post of its OWN key
-                      converges it — the phone's most likely failure by far. */}
-                  {!submitting && state.clientRequestId ? (
-                    <p className="text-ui leading-4 text-muted">{t("orchPanel.creatingStuck")}</p>
-                  ) : null}
-                </Centered>
-              ) : state.kind === "live" ? (
-                <LiveView state={state} file={file} incumbent={incumbent} catalog={launch.catalog} rotate={rotate} />
-              ) : (
-                <>
-                  {state.kind === "intent-error" ? (
-                    <IntentError error={state.error} retry={state.retry} rotate={false} />
-                  ) : (
-                    <div className="shrink-0">
-                      <h2 className="text-title font-semibold text-primary">{t("orchPanel.draftTitle")}</h2>
-                      {state.vacated ? (
-                        <p className="mt-1 text-ui leading-4 text-muted">
-                          {t("orchPanel.draftHintVacated", { project: projectName })}
-                        </p>
-                      ) : null}
-                    </div>
-                  )}
+              {state.kind === "intent-error" ? (
+                <IntentError error={state.error} retry={state.retry} rotate={false} />
+              ) : state.kind === "draft" && state.vacated ? (
+                <p className="shrink-0 text-ui leading-4 text-muted">
+                  {t("orchPanel.draftHintVacated", { project: projectName })}
+                </p>
+              ) : null}
 
-                  {/* The dock's own intro, word for word (#1163): the phone meets
-                      this draft in the same three sentences, so what an orchestrator
-                      is never depends on which surface you created it from. */}
-                  <p className="shrink-0 text-ui leading-5 text-secondary" data-orchestrator-intro>
-                    {t("orchPanel.introTalk")}{" "}
-                    {t("orchPanel.introRuns")}{" "}
-                    {t("orchPanel.introReports")}
-                  </p>
+              {/* The dock's own intro, word for word (#1163): the phone meets
+                  this draft in the same three sentences, so what an orchestrator
+                  is never depends on which surface you created it from. */}
+              <p className="shrink-0 text-ui leading-5 text-secondary" data-orchestrator-intro>
+                {t("orchPanel.introTalk")}{" "}
+                {t("orchPanel.introRuns")}{" "}
+                {t("orchPanel.introReports")}
+              </p>
 
-                  <ViewerMcpStatus registered={viewerMcpRegistered} />
+              <ViewerMcpStatus registered={viewerMcpRegistered} />
 
-                  {/* The shared launch module, in the phone's own layout: the same
-                      fields and the same invariants the dock has, lifted to 44px
-                      touch targets from OUTSIDE the module — its own recipe
-                      documents that the surrounding row owns the hit area. */}
-                  <div className="shrink-0 [&_button]:min-h-11 [&_select]:min-h-11">
-                    <AgentLaunchControls draft={launch} disabled={submitting} stacked />
-                  </div>
+              {/* The shared launch module, in the phone's own layout: the same
+                  fields and the same invariants the dock has, lifted to 44px
+                  touch targets from OUTSIDE the module — its own recipe
+                  documents that the surrounding row owns the hit area. */}
+              <div className="shrink-0 [&_button]:min-h-11 [&_select]:min-h-11">
+                <AgentLaunchControls draft={launch} disabled={submitting} stacked />
+              </div>
 
-                  <MandateField
-                    id="mobile-orchestrator-mandate"
-                    value={mandate}
-                    disabled={submitting}
-                    edited={mandate !== ORCHESTRATOR_SYSTEM_PROMPT}
-                    caption={mandateSummaryOf(mandate, null)}
-                    restoreKey="orchPanel.restoreDefault"
-                    onChange={setMandate}
-                    onRestore={() => setMandate(ORCHESTRATOR_SYSTEM_PROMPT)}
-                    cwdLine={projectCwd ? t("orchPanel.cwd", { cwd: projectCwd }) : null}
-                  />
-                </>
-              )}
+              <MandateField
+                id="mobile-orchestrator-mandate"
+                value={mandate}
+                disabled={submitting}
+                edited={mandate !== ORCHESTRATOR_SYSTEM_PROMPT}
+                caption={mandateSummaryOf(mandate, null)}
+                restoreKey="orchPanel.restoreDefault"
+                onChange={setMandate}
+                onRestore={() => setMandate(ORCHESTRATOR_SYSTEM_PROMPT)}
+                cwdLine={projectCwd ? t("orchPanel.cwd", { cwd: projectCwd }) : null}
+              />
             </div>
 
             {primary ? (
               <div className="flex shrink-0 flex-col gap-2 border-t border-border bg-sunken px-3 py-2.5">
                 {formError ? <p className="text-ui font-semibold text-danger" role="alert">{formError}</p> : null}
-                <button
-                  type="submit"
-                  data-orchestrator-confirm
-                  disabled={primary.busy}
-                  className="inline-flex min-h-11 w-full items-center justify-center gap-1.5 rounded-control border border-accent bg-accent px-3 text-body font-semibold text-white shadow-1 hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
-                >
-                  {primary.busy ? <LoaderCircle className="h-4 w-4 animate-spin" aria-hidden /> : <Bot className="h-4 w-4" aria-hidden />}
-                  {t(primary.key)}
-                </button>
+                <div className="flex items-center gap-2">
+                  {/* Cancel sits IN the draft (README §4.5), beside its primary:
+                      a create reached from the board's invitation needs a way
+                      back to the board that is not the platform gesture. */}
+                  <button
+                    type="button"
+                    data-orchestrator-draft-cancel
+                    onClick={onClose}
+                    disabled={primary.busy}
+                    className="inline-flex min-h-11 shrink-0 items-center justify-center rounded-control border border-border bg-card px-3 text-ui font-semibold text-secondary hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
+                  >
+                    {t("mobile2.seat.draftCancel")}
+                  </button>
+                  <button
+                    type="submit"
+                    data-orchestrator-confirm
+                    disabled={primary.busy}
+                    className="inline-flex min-h-11 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-control border border-accent bg-accent px-3 text-body font-semibold text-white shadow-1 hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
+                  >
+                    {primary.busy ? <LoaderCircle className="h-4 w-4 animate-spin" aria-hidden /> : <Bot className="h-4 w-4" aria-hidden />}
+                    <span className="truncate">{t(primary.key)}</span>
+                  </button>
+                </div>
               </div>
             ) : null}
           </>
@@ -501,10 +711,10 @@ function RotateDraft({
         {errored ? (
           <IntentError error={state.error} retry={state.retry} rotate />
         ) : (
-          <div className="shrink-0">
-            <h2 className="text-title font-semibold text-primary">{t("orchPanel.rotateHeading")}</h2>
-            <p className="mt-1 text-ui leading-4 text-muted">{t("orchPanel.rotateHint")}</p>
-          </div>
+          /* The heading is the sheet's own header (the prototype titles the
+             sheet by its mode); what the body owes is the sentence that says
+             what a rotation actually does. */
+          <p className="shrink-0 text-ui leading-4 text-muted">{t("orchPanel.rotateHint")}</p>
         )}
 
         <ViewerMcpStatus registered={viewerMcpRegistered} />
@@ -536,6 +746,12 @@ function RotateDraft({
       <div className="flex shrink-0 flex-col gap-2 border-t border-border bg-sunken px-3 py-2.5">
         {formError ? <p className="text-ui font-semibold text-danger" role="alert">{formError}</p> : null}
         <div className="flex items-center gap-2">
+          {/* Cancel, in the picture's own word (README §4.5: «the footer Cancel
+              / Rotate orchestrator»), and the SAME word the create draft's
+              footer carries — one draft, one way out, whichever route opened
+              it. The desktop dock keeps «Keep this one»: it sits beside a panel
+              that already shows the incumbent, where naming what stays is the
+              clearer half. */}
           <button
             type="button"
             data-orchestrator-rotate-cancel
@@ -543,7 +759,7 @@ function RotateDraft({
             disabled={submitting}
             className="inline-flex min-h-11 shrink-0 items-center justify-center rounded-control border border-border bg-card px-3 text-ui font-semibold text-secondary hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
           >
-            {t("orchPanel.rotateCancel")}
+            {t("mobile2.seat.draftCancel")}
           </button>
           {/* Its own button, not the form's submit: the sheet's submit is the
               live view's «open the conversation», and a rotation must never be
@@ -680,58 +896,63 @@ function MandateField({
   );
 }
 
-/** A seated orchestrator, read from the sheet rather than from its own chat:
-    who it is, what is riding alongside it, the rules it runs under, and the
-    controls the desktop header carries — Rotate first among them. The one
-    control that takes the operator INTO the conversation stays the footer's. */
+/**
+ * A seated orchestrator, read from the sheet rather than from its own chat
+ * (README §4.5): who holds the seat and on what, how much of its window is
+ * left, the lineage it replaced, the rules it runs under, and the one row that
+ * changes them. Rotate and «Open conversation» are the sheet's footer, at the
+ * thumb, so nothing that ACTS on the seat is inside the scroller.
+ *
+ * There is no working-dir row here, deliberately (README §10 P2-12): the
+ * checkout is host detail, and the phone keeps host detail behind
+ * `⋯ › Details & host`. The draft below states which directory a successor
+ * inherits, where the answer is about to matter (#903).
+ */
 function LiveView({
   state,
   file,
   incumbent,
-  catalog,
-  rotate,
+  now,
+  onEditMandate,
 }: {
   state: Extract<OrchestratorPanelState, { kind: "live" }>;
   file: FileEntry | null;
   incumbent: OrchestratorIncumbent | null;
-  catalog: LaunchAccountCatalog | null;
-  rotate: SeatRotateFlow;
+  now: number;
+  /** «Edit the mandate» is Rotate by another name — the same draft, opened
+      from the rules it edits — because a mandate cannot change under a running
+      orchestrator: a successor takes the seat. */
+  onEditMandate: () => void;
 }) {
   const { t } = useLocale();
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3">
-      <div className="shrink-0">
-        <h2 className="text-title font-semibold text-primary">{t("orchMobile.liveTitle")}</h2>
-        <p className="mt-1 text-ui text-muted">{t(ROW_STATE_LABEL[state.liveness])}</p>
-      </div>
-      <SeatIdentity incumbent={incumbent} file={file} catalog={catalog} predecessorConversationId={state.seat.predecessorConversationId} />
-      {/* Rotate: a control, and only a control. The advisory below states the
-          recommendation; this performs it, and ONLY when pressed and then
-          confirmed in the draft it opens. */}
-      <div className="flex shrink-0 flex-col gap-1">
-        <button
-          type="button"
-          data-orchestrator-rotate
-          onClick={rotate.onOpen}
-          disabled={rotate.opening || rotate.submitting}
-          title={t("orchPanel.rotateTitle")}
-          className="inline-flex min-h-11 w-full items-center justify-center gap-1.5 rounded-control border border-border bg-card px-3 text-body font-semibold text-primary hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
-        >
-          {rotate.opening
-            ? <LoaderCircle className="h-4 w-4 animate-spin" aria-hidden />
-            : <RefreshCw className="h-4 w-4" aria-hidden />}
-          {t(rotate.opening ? "orchMobile.rotateOpening" : "orchPanel.rotate")}
-        </button>
-        <p className="text-caption leading-4 text-muted">{t("orchPanel.rotateTitle")}</p>
-      </div>
+      <SeatIdentity
+        state={state}
+        incumbent={incumbent}
+        file={file}
+        now={now}
+        predecessorConversationId={state.seat.predecessorConversationId}
+      />
       {state.transition ? <TransitionCard transition={state.transition} /> : null}
-      {state.rotation ? <RotationCard rotation={state.rotation} /> : null}
       {orchestratorQuietBannerEligible(state, file) ? <Note tone="warning">{t("orchPanel.stalled")}</Note> : null}
       {state.liveness === "resumable" ? <Note tone="quiet">{t("orchPanel.resumable")}</Note> : null}
       <MandateView seat={state.seat} />
-      {file ? (
-        <p className="text-ui leading-4 text-muted">{t("orchMobile.liveHint")}</p>
-      ) : (
+      {/* One row, in the prototype's own words: what it does, and what it
+          costs. Nothing here rotates on its own — it opens the draft. */}
+      <button
+        type="button"
+        data-orchestrator-edit-mandate
+        data-mobile2-open="rotate"
+        onClick={onEditMandate}
+        className="flex min-h-11 w-full shrink-0 items-center gap-3 rounded-control text-left text-body font-semibold text-primary active:bg-sunken focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/40"
+      >
+        <Pencil className="h-[18px] w-[18px] shrink-0 text-secondary" aria-hidden />
+        <span className="min-w-0 flex-1 truncate">{t("mobile2.seat.editMandate")}</span>
+        <span className="shrink-0 text-label font-medium text-muted">{t("mobile2.seat.editMandateHint")}</span>
+      </button>
+      <p className="shrink-0 text-caption leading-4 text-muted">{t("mobile2.seat.successorNote")}</p>
+      {file ? null : (
         /* Seated, but its transcript has not reached this device: say so, and
            keep the board deep link rather than a control that cannot act. */
         <Centered>
@@ -751,21 +972,31 @@ function LiveView({
 }
 
 /**
- * WHO is holding the seat — the desktop's incumbent header (`IncumbentHeader`),
- * in the sheet's own layout: engine, model at tier, account and context
- * fullness on one wrapping row, the lineage link under it. The status read
- * answers first; until it has, the board's own card fills the row, so the
- * identity is populated on the first paint instead of waiting out the poll.
+ * WHO is holding the seat, and on what (README §4.5): the filled engine mark,
+ * `model · reasoning` with the seat's own state badge beside it, then account ·
+ * plan and how long this conversation has held the seat. Under it the context
+ * meter, which — like every meter on the phone — fills with what REMAINS, and
+ * the rotation advisory when the window is nearly spent.
+ *
+ * Account and plan live HERE rather than on the card (README §10 P2-3): they
+ * are what the operator checks when they are about to change the seat, and the
+ * card's job is to say what the orchestrator is doing right now.
+ *
+ * The status read answers first; until it has, the board's own card fills the
+ * row, so the identity is populated on the first paint instead of waiting out
+ * the poll.
  */
 function SeatIdentity({
+  state,
   incumbent,
   file,
-  catalog,
+  now,
   predecessorConversationId,
 }: {
+  state: Extract<OrchestratorPanelState, { kind: "live" }>;
   incumbent: OrchestratorIncumbent | null;
   file: FileEntry | null;
-  catalog: LaunchAccountCatalog | null;
+  now: number;
   predecessorConversationId: string | null;
 }) {
   const { t } = useLocale();
@@ -774,68 +1005,149 @@ function SeatIdentity({
   const model = designated?.model ?? file?.model ?? null;
   const effort = designated?.effort ?? null;
   const accountId = designated?.accountId ?? null;
-  const account = accountId
-    ? catalog?.[engine ?? "claude"]?.accounts.find((candidate) => candidate.id === accountId)?.label ?? accountId
-    : null;
-  const badge = engine ? engineBadgeFor(engine) : null;
+  /* The account's own row, for its label and its PLAN — the launch catalog
+     carries neither, and the plan is half of what this line says. */
+  const accounts = useEngineAccounts(engine === "codex" ? "codex" : "claude");
+  const row = accountId ? accounts.accounts.find((candidate) => candidate.id === accountId) ?? null : null;
+  const account = row?.label ?? accountId;
+  /* Capitalised exactly as the accounts screen does it, so «Max plan» reads
+     the same wherever the operator meets it. */
+  const planName = row?.plan?.trim() ?? "";
+  const plan = planName ? t("mobile2.seat.plan", { plan: planName.charAt(0).toUpperCase() + planName.slice(1) }) : null;
   const context = designated?.context ?? boardContext(file);
+  const percent = context?.percent ?? null;
+  const left = percent === null ? null : Math.max(0, 100 - percent);
+  const window = context?.limit ?? null;
+  /* «Holding the seat for 2h»: since the seat ACTIVATED, which is when this
+     conversation started answering for the project — a designation that has
+     not activated yet is not holding anything. */
+  const heldSince = state.seat.activatedAt ? Date.parse(state.seat.activatedAt) : NaN;
+  const held = Number.isFinite(heldSince) ? Math.max(0, now - heldSince / 1000) : null;
+  /* The card's own reading, so the seat says one thing on the board and the
+     same thing in the sheet the board's tap opens. */
+  const badge = seatBadgeReading(t, seatCardView(state, { conversationReady: Boolean(file) }), file, now);
 
   return (
     <div
       data-orchestrator-incumbent
-      className="flex shrink-0 flex-col gap-1.5 rounded-surface border border-border bg-sunken px-3 py-2.5"
+      className="flex shrink-0 flex-col gap-2 rounded-surface border border-border bg-sunken px-3 py-2.5"
       aria-label={t("orchPanel.incumbentAria")}
     >
-      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-        {badge ? <Badge style={badge.style}>{badge.label}</Badge> : null}
-        {model ? (
-          <span className="min-w-0 shrink truncate text-ui font-semibold text-primary" title={effort ? `${model} · ${effort}` : model}>
-            {model}
-            {effort ? <span className="font-normal text-muted"> · {effort}</span> : null}
+      <div className="flex min-w-0 items-start gap-2.5">
+        {/* The filled engine circle: on the phone it survives only on account
+            cards and here (README §5, P3-5). */}
+        <span
+          data-mobile2-seat-engine={engine ?? "unknown"}
+          className={`grid h-8 w-8 shrink-0 place-items-center rounded-full text-white ${engine === "codex" ? "bg-codex" : "bg-claude"}`}
+          aria-hidden
+        >
+          {engine === "codex" ? <Command className="h-[15px] w-[15px]" /> : <Sparkle className="h-[15px] w-[15px]" />}
+        </span>
+        <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+          <span className="flex min-w-0 items-center gap-1.5">
+            {model ? (
+              <span className="min-w-0 truncate text-body font-semibold text-primary">
+                {model}
+                {effort ? <span className="font-normal text-secondary"> · {effort}</span> : null}
+              </span>
+            ) : (
+              <span className="min-w-0 truncate text-body text-muted">{t("orchPanel.incumbentUnknown")}</span>
+            )}
+            <SeatBadge tone={badge.tone}>{badge.text}</SeatBadge>
           </span>
-        ) : (
-          <span className="text-ui text-muted">{t("orchPanel.incumbentUnknown")}</span>
-        )}
-        {account ? (
-          <Badge tone="neutral" shrinkable title={t("orchPanel.accountTitle", { account })}>
-            <span className="min-w-0 truncate">{account}</span>
-          </Badge>
-        ) : null}
-        <ContextMeter context={context} />
+          <span className="flex min-w-0 flex-wrap items-center gap-x-1.5 text-label text-secondary">
+            {account ? <span className="min-w-0 truncate">{account}</span> : null}
+            {account && plan ? <span aria-hidden className="opacity-60">·</span> : null}
+            {plan ? <span className="min-w-0 truncate">{plan}</span> : null}
+            {(account || plan) && held !== null ? <span aria-hidden className="opacity-60">·</span> : null}
+            {held === null ? null : (
+              <span className="shrink-0 tabular-nums" data-mobile2-seat-held>{t("mobile2.seat.holding", { age: humanizeDuration(held) })}</span>
+            )}
+          </span>
+        </span>
       </div>
+
+      {/* Context, the phone's one meter semantic: the fill is what is LEFT and
+          it is coloured by what is left (README §5, P2-4). */}
+      <div className="flex min-w-0 items-center gap-2" data-mobile2-seat-context={left === null ? "unknown" : String(left)}>
+        <span className="shrink-0 text-label font-semibold text-muted">{t("mobile2.seat.context")}</span>
+        {left === null ? (
+          <span className="text-label text-muted">{t("mobile2.seat.contextUnknown")}</span>
+        ) : (
+          <>
+            <MobileMeter left={left} className="max-w-[140px] flex-1" label={t("mobile2.seat.contextAria", { percent: String(left) })} />
+            <span className="shrink-0 text-label tabular-nums text-secondary">
+              {t("mobile2.seat.contextLeft", { percent: String(left), window: window === null ? "—" : shortTokens(window) })}
+            </span>
+          </>
+        )}
+      </div>
+      {state.rotation && left !== null ? (
+        <p className="text-label leading-4 text-warning" data-orchestrator-rotation={state.rotation.level} role="status">
+          {t("mobile2.seat.rotationRecommended", { percent: String(left) })}
+        </p>
+      ) : null}
+
       {predecessorConversationId ? (
         <a
           href={"#c=" + encodeURIComponent(predecessorConversationId)}
           data-orchestrator-predecessor={predecessorConversationId}
           title={t("orchPanel.predecessorTitle")}
-          className="inline-flex min-h-11 min-w-0 items-center gap-1 self-start text-ui text-muted hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          className="flex min-h-11 min-w-0 items-center gap-3 rounded-control text-body font-semibold text-primary active:bg-canvas focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/40"
         >
-          <CornerDownRight className="h-3.5 w-3.5 shrink-0" aria-hidden />
-          <span className="truncate">{t("orchPanel.predecessor")}</span>
+          <CornerDownRight className="h-[18px] w-[18px] shrink-0 text-secondary" aria-hidden />
+          <span className="min-w-0 flex-1 truncate">{t("mobile2.seat.predecessor")}</span>
+          <span className="inline-flex shrink-0 items-center gap-0.5 text-label font-medium text-muted">
+            {t("mobile2.seat.predecessorOpen")}
+            <ChevronRight className="h-3.5 w-3.5" aria-hidden />
+          </span>
         </a>
       ) : null}
     </div>
   );
 }
 
-/** The mandate the seat is running under, readable in place: the rules the
-    dock folds behind a disclosure in its drafts, here folded the same way. It
-    is the text the rotate draft opens prefilled with. */
+/** 176_000 → «176K», the same shortening the desktop's context chip uses. */
+function shortTokens(tokens: number): string {
+  if (tokens >= 1_000_000) {
+    const millions = tokens / 1_000_000;
+    return `${millions >= 10 || Number.isInteger(millions) ? Math.round(millions) : Math.round(millions * 10) / 10}M`;
+  }
+  return tokens >= 1000 ? `${Math.round(tokens / 1000)}K` : `${tokens}`;
+}
+
+/**
+ * The mandate the seat is running under, as the sheet's own block (README
+ * §4.5): the heading names the version, and the text below it is a faded
+ * preview — three lines, because the rules are long and the operator is here
+ * to check WHICH rules, not to read them again. It expands in place, and it is
+ * the text the rotate draft opens prefilled with.
+ */
 function MandateView({ seat }: { seat: OrchestratorSeat }) {
   const { t } = useLocale();
+  const [expanded, setExpanded] = useState(false);
+  const heading = seat.promptVersion === null
+    ? t("mobile2.seat.mandateHeadingCustom")
+    : orchestratorMandateStale(seat.promptVersion)
+      ? t("mobile2.seat.mandateHeadingStale", { version: seat.promptVersion, current: ORCHESTRATOR_PROMPT_VERSION })
+      : t("mobile2.seat.mandateHeading", { version: seat.promptVersion });
   return (
-    <details data-orchestrator-mandate-view className="shrink-0 rounded-control border border-border bg-card/60">
-      <summary className="min-h-11 cursor-pointer select-none list-item px-3 py-2.5 text-label font-semibold text-secondary marker:text-muted hover:text-primary">
-        {seat.promptVersion === null
-          ? t("orchMobile.mandateViewCustom")
-          : orchestratorMandateStale(seat.promptVersion)
-            ? t("orchMobile.mandateViewStale", { version: seat.promptVersion, current: ORCHESTRATOR_PROMPT_VERSION })
-            : t("orchMobile.mandateView", { version: seat.promptVersion })}
-      </summary>
-      <pre className="max-h-56 overflow-y-auto whitespace-pre-wrap break-words border-t border-border px-3 py-2 font-sans text-ui leading-5 text-secondary">
-        {seat.mandate}
-      </pre>
-    </details>
+    <div className="flex shrink-0 flex-col gap-1" data-orchestrator-mandate-view={expanded ? "expanded" : "preview"}>
+      <p className="text-label font-semibold text-muted">{heading}</p>
+      <button
+        type="button"
+        data-orchestrator-mandate-preview
+        aria-expanded={expanded}
+        onClick={() => setExpanded((open) => !open)}
+        className="w-full rounded-control bg-canvas px-3 py-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+      >
+        <span
+          className={`block whitespace-pre-wrap break-words text-ui leading-5 text-muted ${expanded ? "max-h-56 overflow-y-auto" : "line-clamp-3"}`}
+        >
+          {seat.mandate}
+        </span>
+      </button>
+    </div>
   );
 }
 

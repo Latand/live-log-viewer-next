@@ -398,12 +398,16 @@ test("opening a board row stamps the card seen (#1244) and pushes the conversati
   expect(topScreen(getMobileNav().getState())).toEqual({ kind: "chat", id: finished.path });
 });
 
-test("the board's footer lands the operator in the orchestrator's conversation, and shows only with a seat", async () => {
+test("the board's footer lands the operator in the orchestrator's conversation, and invites one when there is none", async () => {
   /* README §4.1 and §7 Q2: one 44 px target, one tap to the orchestrator. It
      never sends from the board — the reply is written in the conversation. */
   const root = mount();
   expect(await waitFor(() => board(root) !== null)).toBe(true);
-  expect(q(root, "[data-mobile2-board-dock]")).toBeNull();
+  /* Over a vacancy the slot is the invitation's other half (lane 6): it says
+     what the board is missing instead of offering to talk to nothing. */
+  const empty = q(root, "[data-mobile2-board-dock]")!;
+  expect(empty).not.toBeNull();
+  expect(empty.textContent).toContain(translate("en", "mobile2.seat.createDock"));
 
   seatAnswer = {
     project: PROJECT, seatEpoch: 1, conversationId: "conversation_atlas_orchestrator", path: running.path,
@@ -412,9 +416,10 @@ test("the board's footer lands the operator in the orchestrator's conversation, 
   };
   resetOrchestratorSeatCacheForTests();
   const seated = mount();
-  expect(await waitFor(() => q(seated, "[data-mobile2-board-dock]") !== null)).toBe(true);
+  /* The slot is there either way now, so what is waited for is the seat read
+     landing — the footer changing from the invitation to the conversation. */
+  expect(await waitFor(() => q(seated, "[data-mobile2-board-dock]")?.textContent?.includes(translate("en", "mobile2.board.tellOrchestrator")) === true)).toBe(true);
   const dock = q(seated, "[data-mobile2-board-dock]")!;
-  expect(dock.textContent).toContain(translate("en", "mobile2.board.tellOrchestrator"));
   expect(dock.getAttribute("aria-label")).toBe(translate("en", "mobile2.board.tellOrchestratorLabel"));
   expect(dock.className).toContain("min-h-11");
   /* The seat is the card above the sections, never a row inside them. */
@@ -460,16 +465,18 @@ test("the phone reads the seat ONCE: the board keeps it out of the list and the 
   resetOrchestratorSeatCacheForTests();
   seatReads = 0;
   const root = mount();
-  expect(await waitFor(() => q(root, "[data-mobile2-board-dock]") !== null)).toBe(true);
+  /* The dock is in the slot either way now, so the seat read landing is what
+     is waited for: the footer says «Tell the orchestrator…» only once it has. */
+  expect(await waitFor(() => q(root, "[data-mobile2-board-dock]")?.textContent?.includes(translate("en", "mobile2.board.tellOrchestrator")) === true)).toBe(true);
 
   /* The board has the answer: the seat's conversation is the card, not a row. */
   expect(all(root, '[data-mobile2-row="conversation"]').map((el) => el.getAttribute("data-mobile2-path")))
     .not.toContain(running.path);
-  /* And so does the card. */
   /* And so does the card: it is seated — the invitation is gone — from the
      same answer, without a read of its own. */
-  const card = q(root, '[data-testid="mobile-orchestrator-slot"] [data-orchestrator-row]')!;
-  expect(card.getAttribute("data-orchestrator-row-state")).toBe("live");
-  expect(card.getAttribute("data-orchestrator-row-tap")).toBe("conversation");
+  const card = q(root, '[data-testid="mobile-orchestrator-slot"] [data-mobile2-seat-card]')!;
+  expect(card.getAttribute("data-mobile2-seat-state")).toBe("live");
+  expect(card.getAttribute("data-mobile2-seat-shape")).toBe("seat");
+  expect(card.getAttribute("data-mobile2-seat-tap")).toBe("conversation");
   expect(seatReads).toBe(1);
 });

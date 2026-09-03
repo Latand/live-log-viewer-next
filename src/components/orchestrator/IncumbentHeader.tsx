@@ -153,10 +153,12 @@ export function boardContext(file: FileEntry | null): IncumbentContext | null {
  * An inferred number is marked «~» and says why in its own tooltip — a guess
  * must never be readable as a provider-reported count.
  *
- * Exported for the phone's orchestrator sheet (issue #1347): the meter is the
- * same reading on both surfaces, so it is the same component.
+ * The DESKTOP's meter, and only the desktop's: it fills with what is USED,
+ * which is the dock's own reading. The phone fills every meter with what
+ * REMAINS (mobile v2 §5), so the seat sheet there renders `MobileMeter`
+ * instead — one semantic per surface, stated rather than shared by accident.
  */
-export function ContextMeter({ context }: { context: IncumbentContext | null }) {
+function ContextMeter({ context }: { context: IncumbentContext | null }) {
   const { t } = useLocale();
   if (!context || context.tokens === null) return null;
   const { percent, estimated } = context;

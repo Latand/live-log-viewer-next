@@ -7,7 +7,6 @@ import { Window } from "happy-dom";
 import { createRoot } from "react-dom/client";
 import { chromium, type Browser } from "playwright-core";
 
-import { SUPERSEDED_CHROME } from "@/components/mobile/chatBudget";
 import { emptyStore } from "@/components/runtime/runtimeModel";
 import { setLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
@@ -33,14 +32,14 @@ import type { FileEntry } from "@/lib/types";
  * now lives; `SessionTitle.mobile.dom.test.tsx` pins the route, this pins the
  * geometry.
  *
- * #1347 — the orchestrator controls. The pinned row's entry point and the
+ * #1347 — the orchestrator controls. The seat card's entry point and the
  * sheet's Rotate control are measured as 44px targets inside the viewport, the
- * rotate draft's two footer actions likewise, and the row keeps the height the
- * chat-first budget reserves for it. Lane 3 took the row off the conversation
- * screen with the rest of the strip — the phone pins the seat above its board
- * leaves (`mobile-orchestrator-slot`) — so the row is measured where it now
- * lives, inside the REAL `ProjectDashboard` board leaf rather than in markup
- * copied out of it. The keyboard-open case is a live measurement and lives in
+ * rotate draft's two footer actions likewise, and the card keeps the board's
+ * own first row above the fold. Lane 3 took the row off the conversation
+ * screen with the rest of the strip and lane 6 made it the board's first CARD
+ * (`mobile-orchestrator-slot`), so it is measured where it now lives, inside
+ * the REAL `ProjectDashboard` board leaf rather than in markup copied out of
+ * it. The keyboard-open case is a live measurement and lives in
  * `scripts/capture-issue-979-mobile-orchestrator.ts`.
  *
  * Every measurement is written to `evidence/issue-1347-1348/geometry.json`;
@@ -261,10 +260,11 @@ interface EditorGeometry {
 interface ControlsGeometry {
   scheme: "light" | "dark";
   scrollWidth: number;
-  stripHeight: number;
+  cardBox: Box | null;
+  firstRowBottom: number;
   rowOpen: Box | null;
   rowControls: Box | null;
-  sheet: { rotate: Box | null; identityText: string; contextPercent: string | null; predecessor: boolean; mandateView: boolean } | null;
+  sheet: { rotate: Box | null; identityText: string; contextLeft: string | null; predecessor: boolean; mandateView: boolean } | null;
   rotateDraft: { confirm: Box | null; cancel: Box | null; mandate: Box | null; scrollerBottom: number } | null;
 }
 
@@ -330,28 +330,33 @@ async function measureEditor(page: import("playwright-core").Page, scheme: "ligh
 async function measureControls(page: import("playwright-core").Page, scheme: "light" | "dark"): Promise<ControlsGeometry> {
   const raw = await page.evaluate(({ boxSource }) => {
     const box = new Function("return " + boxSource)() as (el: Element) => Box;
-    const row = document.querySelector("[data-orchestrator-row]");
-    const open = document.querySelector("[data-orchestrator-row-open]");
-    const controls = document.querySelector("[data-orchestrator-row-controls]");
-    const sheet = document.querySelector("[data-testid='mobile-orchestrator-sheet']");
-    const rotate = sheet?.querySelector("[data-orchestrator-rotate]") ?? null;
-    const draft = sheet?.querySelector("[data-orchestrator-draft='rotate']") ?? null;
+    const card = document.querySelector("[data-mobile2-seat-card]");
+    const open = document.querySelector("[data-mobile2-seat-open]");
+    const controls = document.querySelector("[data-mobile2-seat-controls]");
+    const body = document.querySelector("[data-testid='mobile-orchestrator-sheet']");
+    /* The seat's two controls are the sheet's FOOTER, outside its scrolling
+       body, so they are looked up on the document. */
+    const rotate = document.querySelector("[data-orchestrator-rotate]");
+    const draft = document.querySelector("[data-orchestrator-draft='rotate']");
+    /* What the card leads on the board: the first conversation row under it. */
+    const firstRow = document.querySelector("[data-mobile2-row='conversation']");
     return {
       scrollWidth: document.documentElement.scrollWidth,
-      stripHeight: row?.parentElement ? Math.round(row.parentElement.getBoundingClientRect().height) : -1,
+      cardBox: card ? box(card) : null,
+      firstRowBottom: firstRow ? Math.round(firstRow.getBoundingClientRect().bottom) : -1,
       rowOpen: open ? box(open) : null,
       rowControls: controls ? box(controls) : null,
-      sheet: sheet ? {
+      sheet: body ? {
         rotate: rotate ? box(rotate) : null,
-        identityText: sheet.querySelector("[data-orchestrator-incumbent]")?.textContent ?? "",
-        contextPercent: sheet.querySelector("[data-orchestrator-context]")?.getAttribute("data-orchestrator-context") ?? null,
-        predecessor: Boolean(sheet.querySelector("[data-orchestrator-predecessor]")),
-        mandateView: Boolean(sheet.querySelector("[data-orchestrator-mandate-view]")),
+        identityText: body.querySelector("[data-orchestrator-incumbent]")?.textContent ?? "",
+        contextLeft: body.querySelector("[data-mobile2-seat-context]")?.getAttribute("data-mobile2-seat-context") ?? null,
+        predecessor: Boolean(body.querySelector("[data-orchestrator-predecessor]")),
+        mandateView: Boolean(body.querySelector("[data-orchestrator-mandate-view]")),
       } : null,
       rotateDraft: draft ? {
-        confirm: sheet?.querySelector("[data-orchestrator-confirm]") ? box(sheet!.querySelector("[data-orchestrator-confirm]")!) : null,
-        cancel: sheet?.querySelector("[data-orchestrator-rotate-cancel]") ? box(sheet!.querySelector("[data-orchestrator-rotate-cancel]")!) : null,
-        mandate: sheet?.querySelector("[data-orchestrator-mandate]") ? box(sheet!.querySelector("[data-orchestrator-mandate]")!) : null,
+        confirm: document.querySelector("[data-orchestrator-confirm]") ? box(document.querySelector("[data-orchestrator-confirm]")!) : null,
+        cancel: document.querySelector("[data-orchestrator-rotate-cancel]") ? box(document.querySelector("[data-orchestrator-rotate-cancel]")!) : null,
+        mandate: document.querySelector("[data-orchestrator-mandate]") ? box(document.querySelector("[data-orchestrator-mandate]")!) : null,
         scrollerBottom: draft.getBoundingClientRect().bottom,
       } : null,
     };
@@ -388,7 +393,7 @@ async function renderBoardSeat(files: FileEntry[], drive: (host: HTMLElement) =>
   await act(async () => { root.render(<ProjectDashboard {...dashboardProps(files)} />); });
   await settle();
   /* The row is the product's, in the product's slot, on the board leaf. */
-  expect(host.querySelector("[data-testid='mobile-orchestrator-slot'] [data-orchestrator-row]")).not.toBeNull();
+  expect(host.querySelector("[data-testid='mobile-orchestrator-slot'] [data-mobile2-seat-card]")).not.toBeNull();
   await drive(host as unknown as HTMLElement);
   await settle();
   const html = host.innerHTML;
@@ -453,14 +458,14 @@ test("issues 1347 + 1348: the phone's rename editor and orchestrator controls me
   /* ---- #1347: the pinned row's entry point, the sheet, the rotate draft --- */
   const files = [conversation({}), orchestrator];
   const rowHtml = await renderBoardSeat(files, async (host) => {
-    expect(host.querySelector("[data-orchestrator-row]")?.getAttribute("data-orchestrator-row-state")).toBe("live");
+    expect(host.querySelector("[data-mobile2-seat-card]")?.getAttribute("data-mobile2-seat-state")).toBe("live");
   });
   const sheetHtml = await renderBoardSeat(files, async (host) => {
-    await click(host, "[data-orchestrator-row-controls]");
+    await click(host, "[data-mobile2-seat-controls]");
     expect(host.querySelector("[data-orchestrator-rotate]")).not.toBeNull();
   });
   const rotateHtml = await renderBoardSeat(files, async (host) => {
-    await click(host, "[data-orchestrator-row-controls]");
+    await click(host, "[data-mobile2-seat-controls]");
     await click(host, "[data-orchestrator-rotate]");
     await settle(4);
     expect(host.querySelector("[data-orchestrator-draft='rotate']")).not.toBeNull();
@@ -479,11 +484,15 @@ test("issues 1347 + 1348: the phone's rename editor and orchestrator controls me
     expect(row.rowControls!.left).toBeGreaterThanOrEqual(0);
     expect(row.rowControls!.right).toBeLessThanOrEqual(390);
     expect(row.rowOpen!.right).toBeLessThanOrEqual(row.rowControls!.left + 1);
-    /* The chat-first budget (#419): the pin costs no more than the row the
-       retired chip strip was budgeted at, so the leaf under it keeps its
-       share of the viewport. Mobile v2 dropped that row from the band
-       (#1439 §3.4); its 56 px survives as the ceiling this measures against. */
-    expect(row.stripHeight).toBeLessThanOrEqual(SUPERSEDED_CHROME.focusStrip);
+    /* What #419's budget asked of the pin — «do not eat the surface you lead»
+       — moved with the seat (mobile v2 §3.4, §4.1). The card is the board's
+       first card, not a row on the conversation screen, so what it must not do
+       is push the board's own first row past the fold. */
+    expect(row.cardBox).not.toBeNull();
+    expect(row.cardBox!.top).toBeGreaterThanOrEqual(0);
+    expect(row.cardBox!.right).toBeLessThanOrEqual(390);
+    expect(row.firstRowBottom).toBeGreaterThan(row.cardBox!.bottom);
+    expect(row.firstRowBottom).toBeLessThanOrEqual(844);
 
     const sheet = await withPage(sheetHtml, "orchestrator-sheet-live", scheme, (page) => measureControls(page, scheme));
     controls.sheet!.push(sheet);
@@ -495,7 +504,9 @@ test("issues 1347 + 1348: the phone's rename editor and orchestrator controls me
     expect(sheet.sheet!.rotate!.bottom).toBeLessThanOrEqual(844);
     expect(sheet.sheet!.identityText).toContain("opus");
     expect(sheet.sheet!.identityText).toContain("spare");
-    expect(sheet.sheet!.contextPercent).toBe("24");
+    /* The meter and its words read what REMAINS (README §5): 24 % used is
+       76 % left. */
+    expect(sheet.sheet!.contextLeft).toBe("76");
     expect(sheet.sheet!.predecessor).toBe(true);
     expect(sheet.sheet!.mandateView).toBe(true);
 

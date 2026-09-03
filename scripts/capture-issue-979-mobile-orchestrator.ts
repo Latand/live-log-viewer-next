@@ -17,23 +17,32 @@
  *
  *   <tmp>/llv-issue-979-latest/out/979-<state>-<scheme>.png
  *
- * Every shot also CHECKS what it is showing: the row keeps its 44px target and
- * sits left of the first conversation chip, the phone never grows a horizontal
- * scrollbar (#353), and the sheet's confirm control stays inside the viewport.
+ * Every shot also CHECKS what it is showing: the card keeps its 44px target and
+ * leads the surface it sits on, the phone never grows a horizontal scrollbar
+ * (#353), and the sheet's confirm control stays inside the viewport.
  *
- * Issue #1347 adds the seat's CONTROLS to the same run: a live row's second
- * target (the controls entry point, measured like the row's own), the sheet it
- * opens with Rotate inside the viewport, and the rotate draft — which carries
- * the mandate textarea, so it is measured with the keyboard open exactly as
- * the create draft is.
+ * Issue #1347 adds the seat's CONTROLS to the same run: a live card's second
+ * target (the ⚙, measured like the card's own), the sheet it opens with Rotate
+ * inside the viewport, and the rotate draft — which carries the mandate
+ * textarea, so it is measured with the keyboard open exactly as the create
+ * draft is.
+ *
+ * Mobile v2 lane 6 moved the subject and this script moved with it. Two claims
+ * were written against a surface that no longer exists — the pin sitting left
+ * of the first conversation chip, and the strip row's 56 px ceiling — because
+ * lane 3 removed the strip and its chips outright, which left the chip check
+ * failing on `chips === 0`. Both are re-expressed against what the seat is
+ * now: the FIRST CARD on the board (README §4.1), ahead of every conversation
+ * row and not pushing the board's own first row past the fold. The two claims
+ * the lane's acceptance names — Rotate stays reachable, the mandate stays
+ * above the fold with the keyboard open — are unchanged and still measured
+ * live.
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
 import { chromium, type Page } from "playwright-core";
-
-import { SUPERSEDED_CHROME } from "@/components/mobile/chatBudget";
 
 import { createCaptureDirectory } from "./capture-directory";
 import { demoPort } from "./demo-capture";
@@ -167,55 +176,59 @@ const seedInit = () => {
 };
 
 /** What the phone must still be true of, whatever state is on screen. */
-async function checkPhoneGeometry(page: Page, state: string): Promise<{ row: number; strip: number; button: number }> {
+async function checkPhoneGeometry(page: Page, state: string): Promise<{ card: number; firstRow: number; button: number }> {
   const geometry = await page.evaluate(() => {
-    const row = document.querySelector("[data-orchestrator-row]");
-    const button = document.querySelector("[data-orchestrator-row-open]");
-    const controls = document.querySelector("[data-orchestrator-row-controls]");
-    const chip = document.querySelector(".overflow-x-auto button");
-    const rowRect = row?.getBoundingClientRect();
-    const chipRect = chip?.getBoundingClientRect();
+    const card = document.querySelector("[data-mobile2-seat-card]");
+    const button = document.querySelector("[data-mobile2-seat-open]");
+    const controls = document.querySelector("[data-mobile2-seat-controls]");
+    /* What the seat leads: the board's own sections. The first row is the one
+       the card must be ahead of, and must not push off the screen. */
+    const rows = [...document.querySelectorAll("[data-mobile2-row]")];
+    const cardRect = card?.getBoundingClientRect();
+    const firstRowRect = rows[0]?.getBoundingClientRect();
     const controlsRect = controls?.getBoundingClientRect();
-    const stripRect = row?.parentElement?.getBoundingClientRect();
     return {
-      row: rowRect ? Math.round(rowRect.height) : 0,
-      left: rowRect ? Math.round(rowRect.left) : -1,
-      chips: document.querySelectorAll(".overflow-x-auto button").length,
-      chipLeft: chipRect ? Math.round(chipRect.left) : Number.POSITIVE_INFINITY,
-      strip: stripRect ? Math.round(stripRect.height) : 0,
+      card: cardRect ? Math.round(cardRect.height) : 0,
+      cardTop: cardRect ? Math.round(cardRect.top) : -1,
+      cardRight: cardRect ? Math.round(cardRect.right) : -1,
+      rows: rows.length,
+      firstRowTop: firstRowRect ? Math.round(firstRowRect.top) : -1,
+      firstRowBottom: firstRowRect ? Math.round(firstRowRect.bottom) : -1,
       button: button ? Math.round(button.getBoundingClientRect().height) : 0,
       controls: controlsRect ? { height: Math.round(controlsRect.height), width: Math.round(controlsRect.width), left: Math.round(controlsRect.left), right: Math.round(controlsRect.right) } : null,
       scrollWidth: document.documentElement.scrollWidth,
       innerWidth: window.innerWidth,
+      innerHeight: window.innerHeight,
     };
   });
-  if (geometry.button < 44) throw new Error(`${state}: the row's tap target is ${geometry.button}px, under the 44px floor`);
-  /* The seat's controls (#1347): a live row's second target is held to the
-     same bar as its first — a phone target, inside the viewport, in the pinned
-     slot ahead of the scrolling chips. */
+  if (geometry.button < 44) throw new Error(`${state}: the card's tap target is ${geometry.button}px, under the 44px floor`);
+  if (geometry.cardTop < 0 || geometry.cardRight > geometry.innerWidth) {
+    throw new Error(`${state}: the seat card sits at ${geometry.cardTop}…${geometry.cardRight}px, outside the ${geometry.innerWidth}px viewport`);
+  }
+  /* The seat's controls (#1347): a live card's second target is held to the
+     same bar as its first — a phone target, inside the viewport. */
   if (geometry.controls) {
     if (geometry.controls.height < 44 || geometry.controls.width < 44) {
       throw new Error(`${state}: the controls entry point is ${geometry.controls.width}×${geometry.controls.height}px, under the 44px floor`);
     }
     if (geometry.controls.right > geometry.innerWidth) throw new Error(`${state}: the controls entry point ends at ${geometry.controls.right}px, past the ${geometry.innerWidth}px viewport`);
-    if (geometry.controls.left >= geometry.chipLeft) throw new Error(`${state}: the controls entry point starts at ${geometry.controls.left}px, not before the first chip at ${geometry.chipLeft}px`);
   }
-  /* «Before the first chip» means nothing without a chip to be before: a strip
-     that rendered none would otherwise pass this check by default. */
-  if (geometry.chips === 0) throw new Error(`${state}: the strip drew no conversation chips, so the pin's position proves nothing`);
-  if (geometry.left >= geometry.chipLeft) throw new Error(`${state}: the pinned row starts at ${geometry.left}px, not before the first chip at ${geometry.chipLeft}px`);
-  /* The chat-first budget (issue #419): the pin rides the strip row, so it must
-     not push that row past the height the transcript's share was computed
-     against. Mobile v2 retired the strip outright and rewrote the band
-     (#1439 §3.4), so the ceiling is now the height the retired row was
-     budgeted at — `SUPERSEDED_CHROME.focusStrip`, the same 56 px. */
-  if (geometry.strip > SUPERSEDED_CHROME.focusStrip) {
-    throw new Error(`${state}: the strip is ${geometry.strip}px, past the ${SUPERSEDED_CHROME.focusStrip}px the retired strip row was budgeted at`);
+  /* «The seat is first» means nothing without a row to be first of: a board
+     that drew none would otherwise pass this check by default (README §4.1,
+     PRD #976 decision 5). */
+  if (geometry.rows === 0) throw new Error(`${state}: the board drew no rows, so the card's position proves nothing`);
+  if (geometry.cardTop >= geometry.firstRowTop) {
+    throw new Error(`${state}: the seat card starts at ${geometry.cardTop}px, not before the board's first row at ${geometry.firstRowTop}px`);
   }
-  /* The mobile overflow contract (#353): the document itself never scrolls
-     sideways — only the chip strip inside it does. */
+  /* What #419's budget asked of the pin — «do not eat the surface you lead» —
+     moved with the seat (mobile v2 §3.4, §4.1): it is a card on the board now,
+     so what it must not do is push the board's own first row past the fold. */
+  if (geometry.firstRowBottom > geometry.innerHeight) {
+    throw new Error(`${state}: the seat card is ${geometry.card}px and pushes the board's first row to ${geometry.firstRowBottom}px, past the ${geometry.innerHeight}px fold`);
+  }
+  /* The mobile overflow contract (#353): the document never scrolls sideways. */
   if (geometry.scrollWidth > geometry.innerWidth) throw new Error(`${state}: the document scrolls to ${geometry.scrollWidth}px at ${geometry.innerWidth}px`);
-  return { row: geometry.row, strip: geometry.strip, button: geometry.button };
+  return { card: geometry.card, firstRow: geometry.firstRowBottom, button: geometry.button };
 }
 
 /** Rotate on the live sheet (#1347): a phone target, inside the viewport. */
@@ -435,16 +448,16 @@ async function main(): Promise<void> {
           });
         }
         await page.goto(baseUrl, { waitUntil: "networkidle" });
-        await page.waitForSelector("[data-orchestrator-row]", { timeout: 20_000 });
-        const rowState = await page.getAttribute("[data-orchestrator-row]", "data-orchestrator-row-state");
+        await page.waitForSelector("[data-mobile2-seat-card]", { timeout: 20_000 });
+        const seatState = await page.getAttribute("[data-mobile2-seat-card]", "data-mobile2-seat-state");
         const geometry = await checkPhoneGeometry(page, `${state.id}/${scheme}`);
         if (state.open) {
           await page.click(
             state.open === "marker"
-              ? "[data-orchestrator-row-transition-open]"
+              ? "[data-mobile2-seat-transition-open]"
               : state.open === "controls"
-                ? "[data-orchestrator-row-controls]"
-                : "[data-orchestrator-row-open]",
+                ? "[data-mobile2-seat-controls]"
+                : "[data-mobile2-seat-open]",
           );
           await page.waitForSelector('[data-testid="mobile-orchestrator-sheet"]', { timeout: 10_000 });
           if (state.open === "controls") {
@@ -479,7 +492,7 @@ async function main(): Promise<void> {
         await page.waitForTimeout(500);
         const shot = path.join(OUT_DIR, `979-${state.id}-${scheme}.png`);
         await page.screenshot({ path: shot });
-        console.log(`${shot}  → ${rowState}  row ${geometry.row}px · strip ${geometry.strip}px · target ${geometry.button}px`);
+        console.log(`${shot}  → ${seatState}  card ${geometry.card}px · first row ends ${geometry.firstRow}px · target ${geometry.button}px`);
         await context.close();
       }
     }

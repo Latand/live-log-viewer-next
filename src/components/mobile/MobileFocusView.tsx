@@ -754,6 +754,11 @@ export function MobileFocusView({ project, projectName, groups, manual, files, f
           project={project}
           projectName={displayName}
           projectCwd={projectCwd || undefined}
+          /* The rotate draft is the fullscreen surface and the seat's reading
+             is the bottom sheet (§4.5); the flow's own `open` is what says
+             which of the two this conversation is showing. */
+          sheet={seatPanel.rotate.open ? "rotate" : "seat"}
+          now={nowSeconds}
           state={seatPanel.state}
           status={seatPanel.status}
           file={seatPanel.file}

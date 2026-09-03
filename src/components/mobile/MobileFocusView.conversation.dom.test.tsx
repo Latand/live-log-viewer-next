@@ -567,16 +567,20 @@ test("the seat's own conversation reaches the seat from the menu's first row (§
   const row = dom.document.querySelector('[data-testid="mobile-menu-seat"]') as unknown as HTMLButtonElement;
   expect(row.textContent).toContain("Orchestrator seat");
 
-  /* One tap opens the seat sheet — the same one the board's card opens — with
-     the mandate and Rotate on it, and takes the menu with it. */
+  /* One tap opens the seat sheet — the same one the board's card opens, a
+     bottom sheet with the mandate on it and Rotate at the thumb — and takes
+     the menu with it. */
   flushSync(() => row.click());
   await settle();
   await settle();
   expect(dom.document.querySelector('[data-mobile2-sheet="menu"]')).toBeNull();
   const sheet = dom.document.querySelector('[data-testid="mobile-orchestrator-sheet"]') as unknown as HTMLElement;
   expect(sheet).not.toBeNull();
-  expect(sheet.querySelector("[data-orchestrator-rotate]")).not.toBeNull();
   expect(sheet.querySelector("[data-orchestrator-mandate-view]")).not.toBeNull();
+  const bottom = dom.document.querySelector('[data-mobile2-sheet="seat"]') as unknown as HTMLElement;
+  expect(bottom).not.toBeNull();
+  /* Rotate is the sheet's FOOTER, outside its scrolling body. */
+  expect(bottom.querySelector("[data-orchestrator-rotate]")).not.toBeNull();
 });
 
 test("a conversation that does not hold the seat has no seat row", async () => {

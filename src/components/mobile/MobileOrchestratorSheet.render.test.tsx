@@ -71,6 +71,9 @@ function quietBannerCount(file: FileEntry): number {
     <MobileOrchestratorSheet
       project="atlas"
       projectName="Atlas"
+      /* A live seat READ, which is the bottom sheet (README §4.5). */
+      sheet="seat"
+      now={Date.parse("2026-08-24T10:00:00.000Z") / 1000}
       state={state}
       status={{ seat, pending: null, exists: true, viewerMcpRegistered: false }}
       file={file}
