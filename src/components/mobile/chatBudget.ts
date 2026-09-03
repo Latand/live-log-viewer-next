@@ -31,7 +31,11 @@ export const BAR_PX = 52;
 /** The composer unit (§2 rule 8, §3.4): one box holding the field (32) and the
     tools row (44) — chip, attach, dictate, send slot — plus its padding and the
     14 px home inset. The inset lives INSIDE this number, which is why the
-    budget below subtracts no safe-area of its own. */
+    budget below subtracts no safe-area of its own. This is the unit at REST;
+    `MOBILE_COMPOSER_UNIT_CHROME_PX` in `lib/composerScroll` is the same box
+    counted from the other side — everything in these 109 px except the field —
+    and it is what the grow ceiling reserves so a dictated field never pushes
+    the tools row out of the box (#1483). */
 export const COMPOSER_PX = 109;
 /** The one banner slot under the bar (§2 rule 3): offline, degraded, or a
     decision that arrived elsewhere. It reserves its height in flow, so it is
