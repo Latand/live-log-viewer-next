@@ -41,9 +41,9 @@
     "rows": [
       {
         "label": "Create this project's orchestrator",
-        "left": 18,
-        "right": 158.21875,
-        "width": 140.21875,
+        "left": 24,
+        "right": 374,
+        "width": 350,
         "height": 44
       },
       {
@@ -243,9 +243,9 @@
     "rows": [
       {
         "label": "Create this project's orchestrator",
-        "left": 18,
-        "right": 158.21875,
-        "width": 140.21875,
+        "left": 24,
+        "right": 374,
+        "width": 350,
         "height": 44
       },
       {

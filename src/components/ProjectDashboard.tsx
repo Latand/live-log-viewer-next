@@ -54,7 +54,7 @@ import { pushTaskToast, TaskToastHost } from "./tasks/taskToast";
 import { MobileBoard, MobileBoardDock, mobileBoardOf } from "./mobile/MobileBoard";
 import { MobileFocusView } from "./mobile/MobileFocusView";
 import { MobileHostSheet } from "./mobile/MobileHostSheet";
-import { MobileOrchestratorRow } from "./mobile/MobileOrchestratorRow";
+import { MobileSeatCard } from "./mobile/MobileSeatCard";
 import { MobileMenuSheet, type MobileMenuEntry } from "./mobile/MobileMenuSheet";
 import { showReceipt } from "./mobile/MobileReceipt";
 import { MobileAccountsScreen, MobileBarTitle, MobileShell, type MobileShellHost } from "./mobile/MobileShell";
@@ -2151,10 +2151,15 @@ function ProjectDashboardView({
             searchTestId="dash-search"
             renderSheet={renderMobileSheet}
             /* The board's footer (README §4.1): one tap into the orchestrator's
-               conversation, where the operator writes. It belongs to the board
-               leaf only, and only while there is a seat to talk to — the
-               invitation the absent seat shows is the seat card's to define. */
-            dock={mobileBoardLeaf && boardReady && seatFile ? <MobileBoardDock onTell={() => openBoardRow(seatFile)} /> : undefined}
+               conversation, where the operator writes. Over a vacancy the same
+               slot is the invitation's other half — it opens the create draft,
+               which is the seat card's own sheet, so both halves of a board
+               with no orchestrator lead to the one place that makes one. */
+            dock={mobileBoardLeaf && boardReady
+              ? seatFile
+                ? <MobileBoardDock onTell={() => openBoardRow(seatFile)} />
+                : <MobileBoardDock create onTell={() => mobileNav.openSheet("rotate")} />
+              : undefined}
           >
             {pipelinesAlert}
               {!boardReady ? (
@@ -2164,8 +2169,11 @@ function ProjectDashboardView({
                   {...mobileBoardProps}
                   catalogCount={catalogConversationCount}
                   seat={(
+                    /* The card takes the board's full width (README §4.1): it
+                       is the first CARD of the list, not the chip the strip's
+                       38 vw used to cap. */
                     <div className="flex items-stretch px-3" data-testid="mobile-orchestrator-slot">
-                      <MobileOrchestratorRow
+                      <MobileSeatCard
                         project={project}
                         projectName={projectName}
                         files={files}
@@ -2174,9 +2182,11 @@ function ProjectDashboardView({
                            from the same answer instead of polling for it a
                            second time. */
                         seat={seatRead}
+                        /* The board's own clock, so the card's badge ticks with
+                           the rows beside it rather than on a second one. */
+                        now={nowSeconds}
                         onOpenConversation={openBoardRow}
                       />
-                      <span aria-hidden className="min-w-0 flex-1" />
                     </div>
                   )}
                   onOpenConversation={openBoardRow}
@@ -2229,14 +2239,14 @@ function ProjectDashboardView({
                    create one. Exactly one row exists at a time: this branch and the
                    focus view above it are alternatives. */
                 <>
-                  <div className="flex shrink-0 items-stretch border-b border-border bg-card" data-testid="mobile-orchestrator-slot">
-                    <MobileOrchestratorRow
+                  <div className="flex shrink-0 items-stretch border-b border-border px-3 py-1.5" data-testid="mobile-orchestrator-slot">
+                    <MobileSeatCard
                       project={project}
                       projectName={projectName}
                       files={files}
+                      now={nowSeconds}
                       onOpenConversation={openFullCatalogFile}
                     />
-                    <span aria-hidden className="min-w-0 flex-1" />
                   </div>
                   {listAvailable ? (
                     <ConversationList project={project} enabled={loaded && projectView === "list"} onOpen={openFullCatalogFile} />

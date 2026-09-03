@@ -1,26 +1,28 @@
 import type { MessageKey } from "@/lib/i18n";
 
 import type { OrchestratorPanelState, RotationHint } from "../orchestrator/seatState";
+import type { MobileRowState } from "./mobileBoardModel";
 
 /*
- * What the phone's pinned orchestrator row shows, as a pure projection of the
- * seat state machine (PRD #976 slice C, issue #979).
+ * What the phone's orchestrator seat card shows, as a pure projection of the
+ * seat state machine (PRD #976 slice C, issue #979; mobile v2 lane 6,
+ * docs/design/mobile-v2/README.md §4.1, §4.5).
  *
  * The panel's six states (`../orchestrator/seatState`) all reach the phone —
  * the operator's requirement is that every one of them is designed, not that
  * the phone gets a simpler machine. What differs is the DESTINATION of a tap:
- * a live seat opens its conversation in the standard `MobileFocusView`, and
- * every other state opens the fullscreen sheet, which is the only surface that
- * can act on it (create, resume a pending designation, read a terminal error,
+ * a live seat opens its conversation in the standard conversation screen, and
+ * every other state opens the seat sheet, which is the only surface that can
+ * act on it (create, resume a pending designation, read a terminal error,
  * re-read an unavailable seat).
  *
- * It lives apart from the row's JSX for the same reason the panel's derivation
- * does: a state that is never named cannot be designed, and the mapping from
- * eleven seat outcomes onto ten row renderings is exactly the part worth
- * asserting without a DOM.
+ * It lives apart from the card's JSX for the same reason the panel's
+ * derivation does: a state that is never named cannot be designed, and the
+ * mapping from eleven seat outcomes onto ten card renderings is exactly the
+ * part worth asserting without a DOM.
  */
 
-/** One word per designed row rendering; also the row's data attribute. */
+/** One word per designed seat rendering; also the card's data attribute. */
 export type OrchestratorRowState =
   | "loading"
   | "unavailable"
@@ -42,7 +44,7 @@ export interface OrchestratorRowView {
   tap: "conversation" | "sheet";
   /** The rotation advisory riding on a live incumbent, mirrored as a marker. */
   rotation: RotationHint["level"] | null;
-  /** A designation in flight or failed ALONGSIDE a live incumbent. The row's
+  /** A designation in flight or failed ALONGSIDE a live incumbent. The card's
       own tap keeps opening the conversation, so this rides as its own control
       — a failed rotation must never be the thing that takes the chat away. */
   transition: "creating" | "error" | null;
@@ -75,19 +77,67 @@ export function orchestratorRowView(
   return { ...quiet, state: "draft", attention: false };
 }
 
-/** The chip face per row state. Borders and fills carry the tone; the label
-    beside them says the same thing in words, so neither is load-bearing alone. */
-export const ROW_TONE: Record<OrchestratorRowState, { chip: string; dot: string }> = {
-  loading: { chip: "border-border bg-canvas text-muted", dot: "bg-strong/60" },
-  unavailable: { chip: "border-warning/45 bg-warning-soft text-warning", dot: "bg-warning" },
-  draft: { chip: "border-dashed border-accent/50 bg-accent/5 text-accent", dot: "bg-accent/60" },
-  creating: { chip: "border-accent/45 bg-accent-soft text-accent", dot: "bg-accent" },
-  "intent-error": { chip: "border-danger/40 bg-danger-soft text-danger", dot: "bg-danger" },
-  live: { chip: "border-success/45 bg-success-soft text-success", dot: "bg-success" },
-  stalled: { chip: "border-warning/45 bg-warning-soft text-warning", dot: "bg-warning" },
-  resumable: { chip: "border-border bg-canvas text-muted", dot: "bg-strong" },
-  dead: { chip: "border-danger/40 bg-danger-soft text-danger", dot: "bg-danger" },
-  resolving: { chip: "border-border bg-canvas text-muted", dot: "bg-strong/60" },
+/** The two faces of the seat card (README §4.1): the seat itself, or — over a
+    vacancy — the invitation that opens the create draft. */
+export type SeatCardShape = "seat" | "invitation";
+
+/** Whose state the card's badge speaks. A live seat whose transcript is on
+    this device carries the CONVERSATION's own phrase («working 2:14»), the
+    same phrase the board's rows and the conversation's bar carry, so one seat
+    never reads two ways. Everything else carries the seat's own state word. */
+export type SeatBadgeSource = "conversation" | "state";
+
+export interface SeatCardView extends OrchestratorRowView {
+  shape: SeatCardShape;
+  badge: SeatBadgeSource;
+}
+
+export function seatCardView(
+  state: OrchestratorPanelState,
+  options: { conversationReady: boolean },
+): SeatCardView {
+  const view = orchestratorRowView(state, options);
+  return {
+    ...view,
+    /* Only a plain vacancy invites. A designation that FAILED over one is not
+       an empty slot with a friendly line on it: the card says «failed» and its
+       tap opens the sheet holding the error and the draft that retries it. */
+    shape: view.state === "draft" ? "invitation" : "seat",
+    badge: view.state === "live" && view.tap === "conversation" ? "conversation" : "state",
+  };
+}
+
+/** The badge recipe's one tone per state (README §5): soft fill + role text.
+    Colour never carries a state alone — the word beside it says the same
+    thing — so a quiet seat is deliberately neutral rather than green. */
+export type SeatBadgeTone = "success" | "warning" | "danger" | "accent" | "neutral";
+
+export const SEAT_STATE_TONE: Record<OrchestratorRowState, SeatBadgeTone> = {
+  loading: "neutral",
+  unavailable: "warning",
+  draft: "accent",
+  creating: "accent",
+  "intent-error": "danger",
+  live: "success",
+  stalled: "warning",
+  resumable: "neutral",
+  dead: "danger",
+  resolving: "neutral",
+};
+
+/** The tone a LIVE seat's badge takes: its conversation's own, by the board's
+    precedence, so the card and the row that conversation would have had cannot
+    disagree. Only working and the states that need the operator are coloured;
+    a seat that has simply finished is quiet (README §5). */
+export const CONVERSATION_STATE_TONE: Record<MobileRowState["key"], SeatBadgeTone> = {
+  killed: "danger",
+  stalled: "danger",
+  limit: "warning",
+  held: "warning",
+  waiting: "warning",
+  working: "success",
+  returned: "neutral",
+  done: "neutral",
 };
 
 /** The state word, shared with the desktop panel's badge so the two surfaces

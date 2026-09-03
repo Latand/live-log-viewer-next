@@ -116,22 +116,31 @@
       {
         "scheme": "light",
         "scrollWidth": 390,
-        "stripHeight": 44,
-        "rowOpen": {
-          "label": "Orchestrator opus — live. Opens its conversation.",
-          "left": 18,
-          "right": 98.359375,
+        "cardBox": {
+          "label": "Orchestratorworking",
+          "left": 12,
+          "right": 378,
           "top": 86,
-          "bottom": 130,
-          "width": 80.359375,
+          "bottom": 142,
+          "width": 366,
+          "height": 56
+        },
+        "firstRowBottom": 232,
+        "rowOpen": {
+          "label": "Open the orchestrator's conversation — working",
+          "left": 24,
+          "right": 326,
+          "top": 92,
+          "bottom": 136,
+          "width": 302,
           "height": 44
         },
         "rowControls": {
           "label": "Orchestrator controls: rotate, model, account and mandate",
-          "left": 102.359375,
-          "right": 146.359375,
-          "top": 86,
-          "bottom": 130,
+          "left": 330,
+          "right": 374,
+          "top": 92,
+          "bottom": 136,
           "width": 44,
           "height": 44
         },
@@ -141,22 +150,31 @@
       {
         "scheme": "dark",
         "scrollWidth": 390,
-        "stripHeight": 44,
-        "rowOpen": {
-          "label": "Orchestrator opus — live. Opens its conversation.",
-          "left": 18,
-          "right": 98.359375,
+        "cardBox": {
+          "label": "Orchestratorworking",
+          "left": 12,
+          "right": 378,
           "top": 86,
-          "bottom": 130,
-          "width": 80.359375,
+          "bottom": 142,
+          "width": 366,
+          "height": 56
+        },
+        "firstRowBottom": 232,
+        "rowOpen": {
+          "label": "Open the orchestrator's conversation — working",
+          "left": 24,
+          "right": 326,
+          "top": 92,
+          "bottom": 136,
+          "width": 302,
           "height": 44
         },
         "rowControls": {
           "label": "Orchestrator controls: rotate, model, account and mandate",
-          "left": 102.359375,
-          "right": 146.359375,
-          "top": 86,
-          "bottom": 130,
+          "left": 330,
+          "right": 374,
+          "top": 92,
+          "bottom": 136,
           "width": 44,
           "height": 44
         },
@@ -168,37 +186,46 @@
       {
         "scheme": "light",
         "scrollWidth": 390,
-        "stripHeight": 44,
-        "rowOpen": {
-          "label": "Orchestrator opus — live. Opens its conversation.",
-          "left": 18,
-          "right": 98.359375,
+        "cardBox": {
+          "label": "OrchestratorworkingOrchestrator · atlaso",
+          "left": 12,
+          "right": 378,
           "top": 86,
-          "bottom": 130,
-          "width": 80.359375,
+          "bottom": 142,
+          "width": 366,
+          "height": 56
+        },
+        "firstRowBottom": 232,
+        "rowOpen": {
+          "label": "Open the orchestrator's conversation — working",
+          "left": 24,
+          "right": 326,
+          "top": 92,
+          "bottom": 136,
+          "width": 302,
           "height": 44
         },
         "rowControls": {
           "label": "Orchestrator controls: rotate, model, account and mandate",
-          "left": 102.359375,
-          "right": 146.359375,
-          "top": 86,
-          "bottom": 130,
+          "left": 330,
+          "right": 374,
+          "top": 92,
+          "bottom": 136,
           "width": 44,
           "height": 44
         },
         "sheet": {
           "rotate": {
             "label": "Rotate",
-            "left": 12,
-            "right": 378,
-            "top": 229.5,
-            "bottom": 273.5,
-            "width": 366,
+            "left": 16,
+            "right": 102.53125,
+            "top": 794,
+            "bottom": 838,
+            "width": 86.53125,
             "height": 44
           },
-          "identityText": "Claudeopus · highspare24%Replaced an earlier orchestrator",
-          "contextPercent": "24",
+          "identityText": "opus · highworkingspare·holding the seat for 0sContext76% left of 100KPredecessoropen",
+          "contextLeft": "76",
           "predecessor": true,
           "mandateView": true
         },
@@ -207,37 +234,46 @@
       {
         "scheme": "dark",
         "scrollWidth": 390,
-        "stripHeight": 44,
-        "rowOpen": {
-          "label": "Orchestrator opus — live. Opens its conversation.",
-          "left": 18,
-          "right": 98.359375,
+        "cardBox": {
+          "label": "OrchestratorworkingOrchestrator · atlaso",
+          "left": 12,
+          "right": 378,
           "top": 86,
-          "bottom": 130,
-          "width": 80.359375,
+          "bottom": 142,
+          "width": 366,
+          "height": 56
+        },
+        "firstRowBottom": 232,
+        "rowOpen": {
+          "label": "Open the orchestrator's conversation — working",
+          "left": 24,
+          "right": 326,
+          "top": 92,
+          "bottom": 136,
+          "width": 302,
           "height": 44
         },
         "rowControls": {
           "label": "Orchestrator controls: rotate, model, account and mandate",
-          "left": 102.359375,
-          "right": 146.359375,
-          "top": 86,
-          "bottom": 130,
+          "left": 330,
+          "right": 374,
+          "top": 92,
+          "bottom": 136,
           "width": 44,
           "height": 44
         },
         "sheet": {
           "rotate": {
             "label": "Rotate",
-            "left": 12,
-            "right": 378,
-            "top": 229.5,
-            "bottom": 273.5,
-            "width": 366,
+            "left": 16,
+            "right": 102.53125,
+            "top": 794,
+            "bottom": 838,
+            "width": 86.53125,
             "height": 44
           },
-          "identityText": "Claudeopus · highspare24%Replaced an earlier orchestrator",
-          "contextPercent": "24",
+          "identityText": "opus · highworkingspare·holding the seat for 0sContext76% left of 100KPredecessoropen",
+          "contextLeft": "76",
           "predecessor": true,
           "mandateView": true
         },
@@ -248,57 +284,66 @@
       {
         "scheme": "light",
         "scrollWidth": 390,
-        "stripHeight": 44,
-        "rowOpen": {
-          "label": "Orchestrator opus — live. Opens its conversation.",
-          "left": 18,
-          "right": 98.359375,
+        "cardBox": {
+          "label": "OrchestratorworkingReplace this project'",
+          "left": 12,
+          "right": 378,
           "top": 86,
-          "bottom": 130,
-          "width": 80.359375,
+          "bottom": 142,
+          "width": 366,
+          "height": 56
+        },
+        "firstRowBottom": 232,
+        "rowOpen": {
+          "label": "Open the orchestrator's conversation — working",
+          "left": 24,
+          "right": 326,
+          "top": 92,
+          "bottom": 136,
+          "width": 302,
           "height": 44
         },
         "rowControls": {
           "label": "Orchestrator controls: rotate, model, account and mandate",
-          "left": 102.359375,
-          "right": 146.359375,
-          "top": 86,
-          "bottom": 130,
+          "left": 330,
+          "right": 374,
+          "top": 92,
+          "bottom": 136,
           "width": 44,
           "height": 44
         },
         "sheet": {
           "rotate": null,
           "identityText": "",
-          "contextPercent": null,
+          "contextLeft": null,
           "predecessor": false,
           "mandateView": false
         },
         "rotateDraft": {
           "confirm": {
             "label": "Rotate orchestrator",
-            "left": 119.953125,
+            "left": 81.875,
             "right": 378,
             "top": 790,
             "bottom": 834,
-            "width": 258.046875,
+            "width": 296.125,
             "height": 44
           },
           "cancel": {
-            "label": "Keep this one",
+            "label": "Cancel",
             "left": 12,
-            "right": 111.953125,
+            "right": 73.875,
             "top": 790,
             "bottom": 834,
-            "width": 99.953125,
+            "width": 61.875,
             "height": 44
           },
           "mandate": {
             "label": "You are the viewer's built-in Manager (i",
             "left": 12,
             "right": 378,
-            "top": 629,
-            "bottom": 789,
+            "top": 602.5,
+            "bottom": 762.5,
             "width": 366,
             "height": 160
           },
@@ -308,57 +353,66 @@
       {
         "scheme": "dark",
         "scrollWidth": 390,
-        "stripHeight": 44,
-        "rowOpen": {
-          "label": "Orchestrator opus — live. Opens its conversation.",
-          "left": 18,
-          "right": 98.359375,
+        "cardBox": {
+          "label": "OrchestratorworkingReplace this project'",
+          "left": 12,
+          "right": 378,
           "top": 86,
-          "bottom": 130,
-          "width": 80.359375,
+          "bottom": 142,
+          "width": 366,
+          "height": 56
+        },
+        "firstRowBottom": 232,
+        "rowOpen": {
+          "label": "Open the orchestrator's conversation — working",
+          "left": 24,
+          "right": 326,
+          "top": 92,
+          "bottom": 136,
+          "width": 302,
           "height": 44
         },
         "rowControls": {
           "label": "Orchestrator controls: rotate, model, account and mandate",
-          "left": 102.359375,
-          "right": 146.359375,
-          "top": 86,
-          "bottom": 130,
+          "left": 330,
+          "right": 374,
+          "top": 92,
+          "bottom": 136,
           "width": 44,
           "height": 44
         },
         "sheet": {
           "rotate": null,
           "identityText": "",
-          "contextPercent": null,
+          "contextLeft": null,
           "predecessor": false,
           "mandateView": false
         },
         "rotateDraft": {
           "confirm": {
             "label": "Rotate orchestrator",
-            "left": 119.953125,
+            "left": 81.875,
             "right": 378,
             "top": 790,
             "bottom": 834,
-            "width": 258.046875,
+            "width": 296.125,
             "height": 44
           },
           "cancel": {
-            "label": "Keep this one",
+            "label": "Cancel",
             "left": 12,
-            "right": 111.953125,
+            "right": 73.875,
             "top": 790,
             "bottom": 834,
-            "width": 99.953125,
+            "width": 61.875,
             "height": 44
           },
           "mandate": {
             "label": "You are the viewer's built-in Manager (i",
             "left": 12,
             "right": 378,
-            "top": 629,
-            "bottom": 789,
+            "top": 602.5,
+            "bottom": 762.5,
             "width": 366,
             "height": 160
           },

@@ -83,6 +83,8 @@ import path from "node:path";
 
 import { chromium, type Browser, type BrowserContext, type Page, type Route } from "playwright-core";
 
+import { ORCHESTRATOR_PROMPT_VERSION } from "@/lib/orchestrator/prompt";
+
 import { createCaptureDirectory } from "./capture-directory";
 
 /* ────────────────────────────────────────────────────────────────────────── *
@@ -690,8 +692,16 @@ function seatAnswer(a: Answers, live: boolean) {
   if (!live) return { seat: null, pending: null, exists: true };
   const seat = {
     project: a.discovered.projectId, seatEpoch: 3, conversationId: "conversation_atlas_orchestrator", path: a.discovered.paths.orch,
-    mandate: "You are the atlas orchestrator.\n\nYou own this board and you talk to me here, directly, whenever you have something worth saying.", promptVersion: 3,
-    predecessorConversationId: null, state: "active",
+    mandate: "You are the atlas orchestrator.\n\nYou own this board and you talk to me here, directly, whenever you have something worth saying.",
+    /* The picture's seat runs the CURRENT built-in rules — its sheet reads
+       «Mandate v3 — built-in operating rules» (`prototype/app.js`), not the
+       stale-version heading — so the fixture tracks the product's own version
+       rather than pinning a number that goes stale the next time it moves.
+       The stale and bespoke headings are asserted in `mobileSeatCard.dom`. */
+    promptVersion: ORCHESTRATOR_PROMPT_VERSION,
+    /* The picture's seat has a lineage (`prototype/fixture.js`: `predecessor:
+       true`), which is what puts «Predecessor · open ›» on the seat sheet. */
+    predecessorConversationId: "conversation_atlas_predecessor", state: "active",
     intent: { clientRequestId: "seatreq-000001", mode: "spawn", launchId: "launch-000001", error: null },
     designatedAt: "2100-01-02T12:00:00.000Z", activatedAt: "2100-01-02T12:00:02.000Z",
   };
@@ -701,7 +711,10 @@ function seatAnswer(a: Answers, live: boolean) {
 function seatStatus(a: Answers) {
   return {
     project: a.discovered.projectId, designated: true, conversationId: "conversation_atlas_orchestrator", predecessorConversationId: "conversation_atlas_predecessor",
-    engine: "claude", model: "opus", effort: "high", accountId: null, cwd: a.repoDir, transcriptPath: a.discovered.paths.orch,
+    /* The picture's seat runs on Main at the Max plan (`prototype/fixture.js`),
+       and «account · plan» is the seat sheet's line to carry (README §4.5), so
+       the incumbent read names the account the accounts fixture describes. */
+    engine: "claude", model: "opus", effort: "high", accountId: "main", cwd: a.repoDir, transcriptPath: a.discovered.paths.orch,
     liveness: { lifecycle: "running", hostState: "alive", silentForMs: 0 },
     context: { tokens: 24_000, limit: 100_000, percent: 24, estimated: false, basis: "provider-reported usage" },
     transcriptFacts: { bytes: 4_096, messageCount: 12, toolCount: 3, compactionCount: 0 },
