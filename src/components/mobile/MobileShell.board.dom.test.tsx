@@ -355,6 +355,12 @@ test("Accounts & limits pushes the shell's accounts screen; ‹ returns to the b
   expect(q(root, '[data-mobile2-screen="board"]')).toBeNull();
   expect(q(root, "[data-mobile2-sheet]")).toBeNull();
   expect(q(root, "[data-mobile2-accounts]")).not.toBeNull();
+  /* Lane 9: what the screen holds is the phone's own accounts layout — one
+     section per engine over the same account store — never the desktop limits
+     footer it inherited from the project drawer. */
+  expect(q(root, "[data-mobile2-accounts-body]")).not.toBeNull();
+  expect([...root.querySelectorAll("[data-mobile2-accounts-engine]")].map((section) => section.getAttribute("data-mobile2-accounts-engine")))
+    .toEqual(["claude", "codex"]);
   const bar = q(root, "[data-mobile2-bar]")!;
   expect(q(bar, "[data-mobile2-back]")).not.toBeNull();
   expect(q(bar, '[data-mobile2-open="menu"]')).not.toBeNull();

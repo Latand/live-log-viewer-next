@@ -2342,6 +2342,13 @@ export const uk: Record<keyof typeof en, Message> = {
   "mobile2.attention.title": "Потребують вас",
   "mobile2.attention.next": "Далі",
   "mobile2.attention.empty": "Нічого не потребує вас.",
+  /* mobile v2 lane 8 (#1439): рядки аркуша «Потребують вас», банер надходження.
+     Лише дописування, ключі mobile2.attention.* */
+  "mobile2.attention.pipeline": "пайплайн",
+  "mobile2.attention.nextHint": "Відкрити наступне, що потребує вас",
+  "mobile2.attention.arrival": "Потребує вас · {decision}",
+  "mobile2.attention.open": "Відкрити {title}",
+  "mobile2.attention.dismiss": "Закрити",
   "mobile2.accounts.title": "Акаунти й ліміти",
   /* Стрічка mobile v2 (#1439, лінія 4): заголовок повідомлення на телефоні,
      серії інструментів і картка запитання. Лише дописування, ключі mobile2.feed.* */
@@ -2444,6 +2451,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "mobile2.chat.menuCompact": "Стиснути контекст",
   "mobile2.chat.menuDetails": "Деталі й хост",
   "mobile2.chat.menuTerminal": "Відкрити в терміналі",
+  "mobile2.chat.menuSubagents": "Підагенти",
   "mobile2.chat.menuClose": "Закрити картку",
   "mobile2.chat.menuCloseHint": "лишиться в каталозі",
   "mobile2.chat.menuKill": "Вбити агента",
@@ -2483,4 +2491,28 @@ export const uk: Record<keyof typeof en, Message> = {
   "mobile2.composer.placeholderKilled": "вбито · текст чекає в черзі до перезапуску",
   "mobile2.composer.placeholderHeld": "утримано · надіслане стає в чергу",
   "mobile2.composer.placeholderOffline": "офлайн · надіслане доставимо після відновлення зв'язку",
+  /* Екран акаунтів і лімітів mobile v2 (#1439, лінія 9): для кожного рушія
+     активний акаунт як картка з вікнами й діями, решта — тихі рядки, рядки
+     входу та рядок додавання. Лише дописування, ключі mobile2.accounts.* */
+  "mobile2.accounts.ready": "готовий",
+  "mobile2.accounts.pending": "вхід триває",
+  "mobile2.accounts.plan": "план {plan}",
+  "mobile2.accounts.checked": "перевірено {time}",
+  "mobile2.accounts.noReading": "ще без показників",
+  "mobile2.accounts.noAccounts": "Акаунтів {engine} ще немає",
+  "mobile2.accounts.cornerAria": "{left}% лишилося у вікні {window}",
+  "mobile2.accounts.windowAria": "Вікно {window} для {label}",
+  "mobile2.accounts.signIn": "увійти",
+  "mobile2.accounts.signInAria": "Увійти в {label}",
+  "mobile2.accounts.signInStarted": "Відкрито вхід через пристрій для {label} — стане активним після входу",
+  "mobile2.accounts.signInFailed": "Не вдалося відкрити вхід через пристрій для {label}",
+  "mobile2.accounts.openSignIn": "Відкрити вхід через пристрій",
+  "mobile2.accounts.switchAria": "Використовувати {label} для наступних запусків",
+  "mobile2.accounts.switched": "Наступні запуски використовують {label}",
+  "mobile2.accounts.refreshed": "Ліміти перечитано для {label}",
+  "mobile2.accounts.resetUsed": "Скидання використано на {label}",
+  "mobile2.accounts.add": "Додати акаунт {engine}",
+  "mobile2.accounts.addHint": "відкриває вхід через пристрій",
+  "mobile2.accounts.addLabel": "Назва нового акаунта",
+  "mobile2.accounts.addCancel": "Скасувати",
 };
