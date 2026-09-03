@@ -2540,4 +2540,29 @@ export const en = {
   "mobile2.chat.draftMeta": "draft · not sent yet",
   "mobile2.chat.menuPredecessor": "Predecessor · round {round}",
   "mobile2.chat.menuSeat": "Orchestrator seat",
+  /* Mobile v2 accounts & limits screen (#1439, lane 9): per engine, the
+     active account as a card with its windows and actions, the other accounts
+     as quiet rows, sign-in rows, and the add row. Append-only, keys prefixed
+     mobile2.accounts.* */
+  "mobile2.accounts.ready": "ready",
+  "mobile2.accounts.pending": "signing in",
+  "mobile2.accounts.plan": "{plan} plan",
+  "mobile2.accounts.checked": "checked {time}",
+  "mobile2.accounts.noReading": "no reading yet",
+  "mobile2.accounts.noAccounts": "No {engine} accounts yet",
+  "mobile2.accounts.cornerAria": "{left}% left of the {window} window",
+  "mobile2.accounts.windowAria": "{window} window for {label}",
+  "mobile2.accounts.signIn": "sign in",
+  "mobile2.accounts.signInAria": "Sign in to {label}",
+  "mobile2.accounts.signInStarted": "Device sign-in opened for {label} — it becomes active once signed in",
+  "mobile2.accounts.signInFailed": "Could not open the device sign-in for {label}",
+  "mobile2.accounts.openSignIn": "Open the device sign-in",
+  "mobile2.accounts.switchAria": "Use {label} for future launches",
+  "mobile2.accounts.switched": "Future launches use {label}",
+  "mobile2.accounts.refreshed": "Limits re-read for {label}",
+  "mobile2.accounts.resetUsed": "Reset used on {label}",
+  "mobile2.accounts.add": "Add a {engine} account",
+  "mobile2.accounts.addHint": "opens the device sign-in",
+  "mobile2.accounts.addLabel": "Label for the new account",
+  "mobile2.accounts.addCancel": "Cancel",
 } satisfies Dictionary;

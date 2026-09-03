@@ -7,7 +7,7 @@ import type { ConnectionState } from "@/components/runtime/runtimeModel";
 import { useRuntimeBusState } from "@/hooks/useRuntime";
 import { useLocale } from "@/lib/i18n";
 
-import { LimitsFooter } from "../LimitsFooter";
+import { MobileAccountsPanel } from "../AccountsPanel";
 import { MobileReceipt } from "./MobileReceipt";
 import { screenKey, topScreen, useMobileNav, useMobileNavStore, type MobileScreenKind, type MobileSheetName } from "./mobileNav";
 
@@ -332,15 +332,14 @@ export function MobileBarTitle({ children }: { children: ReactNode }) {
 }
 
 /** The accounts screen the board menu pushes (README §3.1, §4.8): the shell's
-    bar with ‹ and the accounts surface the project drawer used to carry. Lane 9
-    lays the accounts out for the phone; the screen and its route are the
-    shell's. */
+    bar with ‹ over the phone's accounts layout (lane 9, `AccountsPanel.tsx`);
+    the screen and its route are the shell's. */
 export function MobileAccountsScreen({ host, renderSheet }: { host?: MobileShellHost | null; renderSheet?: SheetRenderer }) {
   const { t } = useLocale();
   return (
     <MobileShell screen="accounts" back title={<MobileBarTitle>{t("mobile2.accounts.title")}</MobileBarTitle>} host={host} renderSheet={renderSheet}>
-      <div className="min-h-0 flex-1 overflow-y-auto" data-mobile2-accounts>
-        <LimitsFooter />
+      <div className="min-h-0 flex-1 overflow-y-auto overscroll-y-contain" data-mobile2-accounts>
+        <MobileAccountsPanel />
       </div>
     </MobileShell>
   );
