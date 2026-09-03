@@ -3,6 +3,7 @@
 import type { LucideIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 
+import { useIsMobile } from "@/hooks/useIsMobile";
 import { useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
@@ -62,9 +63,17 @@ function waitingStartedAt(file: Props["file"]): number | null {
  * The bar lives OUTSIDE the transcript scroller, so the floating live-tail
  * pill (anchored inside the scroller) can never collide with it at any width.
  * Renders nothing when no turn boundary is known and the agent is idle.
+ *
+ * DESKTOP ONLY since mobile v2 (#1439, README §3.4 and §6). On the phone this
+ * row is the «working… 1m 31s» line the operator photographed stacked above
+ * the keyboard: the state phrase and its clock live in the conversation bar's
+ * meta line now, and Stop is the composer's send slot. The stand-down is here
+ * rather than only at the mount site so no second mount can bring the row back
+ * to a phone.
  */
 export function TurnStatusBar({ file, workingLabel, workingIcon: Icon, compact = false }: Props) {
   const { t } = useLocale();
+  const phone = useIsMobile();
   const waiting = Boolean(file.pendingQuestion || file.rateLimit || file.waitingInput);
   const running = turnIsRunning(file);
   /* The instant the running work is measured from (#1397): the transcript
@@ -72,6 +81,8 @@ export function TurnStatusBar({ file, workingLabel, workingIcon: Icon, compact =
      what this window already counted from. */
   const since = workingSince(file);
   const pad = compact ? "px-3 py-1" : "px-6 py-1.5";
+
+  if (phone) return null;
 
   if (waiting) {
     const startedAt = waitingStartedAt(file);

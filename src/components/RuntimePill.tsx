@@ -4,12 +4,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Check, ChevronDown, ChevronLeft, ChevronRight, Loader2, Zap } from "@/components/icons";
 import { useIsMobile } from "@/hooks/useIsMobile";
+import { useEngineAccounts } from "@/hooks/useEngineAccounts";
 import { conversationIdentity } from "@/lib/accounts/identity";
 import { effortScale } from "@/lib/agent/efforts";
 import { ENGINE_MODELS, normalizeClaudeLaunchModel } from "@/lib/agent/models";
 import { useLocale, type MessageKey, type TFunction } from "@/lib/i18n";
 import type { RuntimeSettingsCapability } from "@/lib/runtime/contracts";
-import type { FileEntry } from "@/lib/types";
+import type { FileEntry, RateLimitState } from "@/lib/types";
 
 import type { StripSurface } from "./agentCapabilities";
 import type { RuntimeSession } from "./runtime/runtimeModel";
@@ -85,6 +86,18 @@ const REASONING_TIER_KEYS: Record<string, MessageKey> = {
 export function reasoningTierLabel(t: TFunction, tier: string): string {
   const key = REASONING_TIER_KEYS[tier];
   return key ? t(key) : tier;
+}
+
+/**
+ * The tier as the surface says it. One vocabulary per surface (mobile v2 §7
+ * Q5): the phone uses the operator's own words, which ARE the tier ids —
+ * `low · medium · high · xhigh · max` — the same tokens the conversation bar's
+ * meta line already renders from `file.effort`. A chip reading «Extra High»
+ * beside a bar reading «xhigh» is the third vocabulary the 2026-08 audit's
+ * finding 9 named. Desktop keeps the friendly labels it has always had.
+ */
+export function tierWord(t: TFunction, tier: string, phone: boolean): string {
+  return phone ? tier : reasoningTierLabel(t, tier);
 }
 
 function modelShortLabel(engine: "claude" | "codex", modelId: string): string {
@@ -445,19 +458,29 @@ export function RuntimePill({
   if (!engine || !pillSurface) return null;
 
   const faceModelShort = modelShortLabel(engine, face.model);
-  const faceTier = reasoningTierLabel(t, face.effort);
+  const faceTier = tierWord(t, face.effort, isMobile);
   const faceLabel = `${t("composer.runtimePill")} — ${modelLabel(engine, face.model)}, ${faceTier}`;
+  /* At the account's limit the chip stops offering a reasoning tier the next
+     message cannot use and names the wall instead (mobile v2 §4.2, §4.4); its
+     sheet leads with the accounts that can take the message. */
+  const limitedAccount = isMobile ? file.rateLimit?.accountId ?? null : null;
+  const chipText = limitedAccount
+    ? t("mobile2.composer.chipAtLimit", { model: faceModelShort, account: limitedAccount })
+    : `${faceModelShort} · ${faceTier}`;
 
   return (
-    <span className="relative inline-flex" onPointerDown={(event) => event.stopPropagation()}>
+    <span className="relative inline-flex min-w-0" onPointerDown={(event) => event.stopPropagation()}>
       <button
         ref={pillRef}
         type="button"
-        aria-haspopup="menu"
+        aria-haspopup={isMobile ? "dialog" : "menu"}
         aria-expanded={open}
         aria-busy={applying || undefined}
-        aria-label={faceLabel}
+        aria-label={limitedAccount ? `${t("composer.runtimePill")} — ${chipText}` : faceLabel}
         data-runtime-pill
+        /* The composer box's chip is what opens the «Next message» sheet
+            (mobile v2 §4.4) — the one model/reasoning surface on the phone. */
+        data-mobile2-open={isMobile ? "model" : undefined}
         onClick={() => (open ? closePopover() : setOpen(true))}
         onKeyDown={(event) => {
           if (!open && (event.key === "ArrowDown" || event.key === "Enter" || event.key === " ")) {
@@ -465,20 +488,40 @@ export function RuntimePill({
             setOpen(true);
           }
         }}
-        className={`inline-flex h-7 min-w-0 shrink items-center gap-1 rounded-control px-1.5 text-label font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 motion-reduce:transition-none ${
-          isMobile ? "relative min-h-11 before:absolute before:-inset-x-1 before:-inset-y-2 before:content-['']" : ""
-        } ${
-          applyState === "error" ? "text-danger" : "text-secondary hover:bg-sunken hover:text-primary"
-        } ${open ? "bg-sunken text-primary" : ""}`}
+        className={
+          isMobile
+            /* 28 px visual inside a 44 px target (§2 rule 7, §5). */
+            ? "flex h-11 min-w-0 shrink items-center rounded-control px-0.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            : `inline-flex h-7 min-w-0 shrink items-center gap-1 rounded-control px-1.5 text-label font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 motion-reduce:transition-none ${
+                applyState === "error" ? "text-danger" : "text-secondary hover:bg-sunken hover:text-primary"
+              } ${open ? "bg-sunken text-primary" : ""}`
+        }
       >
-        <Zap className="h-3.5 w-3.5 shrink-0 text-accent" aria-hidden />
-        <span className="max-w-[52vw] truncate md:max-w-[16rem]">
-          {faceModelShort} · {faceTier}
-        </span>
-        {applying ? (
-          <Loader2 className="h-3 w-3 shrink-0 animate-spin motion-reduce:animate-none" aria-hidden />
+        {isMobile ? (
+          <span
+            className={`inline-flex h-7 min-w-0 items-center gap-1 rounded-full px-2.5 text-label font-semibold ${
+              applyState === "error" ? "bg-danger-soft text-danger" : limitedAccount ? "bg-warning-soft text-warning" : "bg-accent-soft text-accent"
+            }`}
+          >
+            <span className="min-w-0 truncate">{chipText}</span>
+            {applying ? (
+              <Loader2 className="h-3 w-3 shrink-0 animate-spin motion-reduce:animate-none" aria-hidden />
+            ) : (
+              <ChevronDown className="h-3 w-3 shrink-0" aria-hidden />
+            )}
+          </span>
         ) : (
-          <ChevronDown className="h-3 w-3 shrink-0" aria-hidden />
+          <>
+            <Zap className="h-3.5 w-3.5 shrink-0 text-accent" aria-hidden />
+            <span className="max-w-[52vw] truncate md:max-w-[16rem]">
+              {faceModelShort} · {faceTier}
+            </span>
+            {applying ? (
+              <Loader2 className="h-3 w-3 shrink-0 animate-spin motion-reduce:animate-none" aria-hidden />
+            ) : (
+              <ChevronDown className="h-3 w-3 shrink-0" aria-hidden />
+            )}
+          </>
         )}
       </button>
       {applying ? (
@@ -518,6 +561,7 @@ export function RuntimePill({
           modelLocked={modelLocked}
           speedLocked={speedLocked}
           lockReason={lockReason}
+          limit={file.rateLimit ?? null}
           onSelectEffort={selectEffort}
           onSelectModel={selectModel}
           onSelectFast={selectFast}
@@ -810,14 +854,17 @@ function MenuRow({
 }
 
 // ---------------------------------------------------------------------------
-// Mobile bottom sheet — stacked radio sections, no submenu, stays open on select.
+// The phone's «Next message» sheet (mobile v2 §4.4) — the chip inside the
+// composer box opens this and nothing else: an Account group first while the
+// account is at its limit, then Model, Reasoning, and Speed for Codex. Stacked
+// radio rows, no submenu, stays open on select.
 // ---------------------------------------------------------------------------
 
 function RuntimeSheet({
   t, engine, face, efforts, speedShown,
-  effortLocked, modelLocked, speedLocked, lockReason,
+  effortLocked, modelLocked, speedLocked, lockReason, limit = null,
   onSelectEffort, onSelectModel, onSelectFast, onClose,
-}: PanelProps) {
+}: PanelProps & { limit?: RateLimitState | null }) {
   const sheetRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -845,22 +892,20 @@ function RuntimeSheet({
         aria-label={t("composer.runtimePill")}
         tabIndex={-1}
         data-runtime-sheet
+        data-mobile2-sheet="model"
         className="max-h-[80vh] w-full max-w-[440px] overflow-y-auto rounded-t-[16px] bg-card p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] shadow-2 focus-visible:outline-none"
       >
         <div className="mx-auto mb-2 h-1 w-10 rounded-full bg-border" aria-hidden />
+        {/* The sheet names itself (§4.4) — it is not «settings», it is what the
+            NEXT message will be sent with. */}
+        <h2 className="px-1 text-title font-semibold leading-tight text-primary">{t("mobile2.composer.sheetTitle")}</h2>
+        {/* What the sheet is FOR, in one line (§4.4): every row below changes
+            the next message, never the turn that is already running. */}
+        <p className="mb-2 px-1 text-label leading-snug text-secondary" data-mobile2-next-message>
+          {t("mobile2.composer.nextMessage", { model: modelShortLabel(engine, face.model), effort: tierWord(t, face.effort, true) })}
+        </p>
 
-        <SheetSection label={t("composer.reasoningGroup")}>
-          {efforts.map((tier) => (
-            <SheetRow
-              key={tier}
-              label={reasoningTierLabel(t, tier)}
-              checked={face.effort === tier}
-              disabled={effortLocked}
-              reason={effortLocked ? lockReason : undefined}
-              onSelect={() => onSelectEffort(tier)}
-            />
-          ))}
-        </SheetSection>
+        {limit ? <LimitAccountSection t={t} engine={engine} limit={limit} /> : null}
 
         <SheetSection label={t("composer.modelGroup")}>
           {ENGINE_MODELS[engine].map((model) => (
@@ -871,6 +916,19 @@ function RuntimeSheet({
               disabled={modelLocked}
               reason={modelLocked ? lockReason : undefined}
               onSelect={() => onSelectModel(model.id)}
+            />
+          ))}
+        </SheetSection>
+
+        <SheetSection label={t("composer.reasoningGroup")}>
+          {efforts.map((tier) => (
+            <SheetRow
+              key={tier}
+              label={tierWord(t, tier, true)}
+              checked={face.effort === tier}
+              disabled={effortLocked}
+              reason={effortLocked ? lockReason : undefined}
+              onSelect={() => onSelectEffort(tier)}
             />
           ))}
         </SheetSection>
@@ -891,6 +949,99 @@ function SheetSection({ label, children }: { label: string; children: React.Reac
     <div className="mb-2" role="radiogroup" aria-label={label}>
       <div className="mb-1 px-1 text-label font-semibold text-secondary">{label}</div>
       {children}
+    </div>
+  );
+}
+
+/** The reset wall as a clock, or null when the engine reported no time. */
+function limitResetClock(limit: RateLimitState): string | null {
+  if (limit.resetAt === null) return null;
+  const at = new Date(limit.resetAt * 1000);
+  if (Number.isNaN(at.getTime())) return null;
+  return `${String(at.getHours()).padStart(2, "0")}:${String(at.getMinutes()).padStart(2, "0")}`;
+}
+
+/**
+ * The Account group the sheet leads with while this conversation's account is
+ * at its limit (mobile v2 §4.4, P2-8). Three row kinds, and the rule the P2-8
+ * finding is about is the third one:
+ *
+ *  - the blocked account, naming its wall (`limit · resets 16:40`), inert;
+ *  - every other AUTHENTICATED account as a `ready` row — one tap sends the
+ *    next message there, the same `select` the accounts screen uses;
+ *  - an account that is not signed in as a `sign in →` row. It opens the
+ *    device sign-in and NEVER becomes the launch target on that tap: the limit
+ *    stays until an authenticated account is chosen, because an account whose
+ *    credentials have not come back cannot take a message.
+ *
+ * The sign-in row exists exactly where the accounts screen's does — Claude's
+ * `retryLogin`. Codex has no in-place sign-in for an existing account there
+ * either, so its signed-out row states the fact and stays inert rather than
+ * offering a tap that would do nothing.
+ *
+ * Mounted only at the limit, so the ordinary chip never subscribes to the
+ * accounts store at all.
+ */
+function LimitAccountSection({ t, engine, limit }: { t: TFunction; engine: "claude" | "codex"; limit: RateLimitState }) {
+  const state = useEngineAccounts(engine);
+  if (!state.accounts.length) return null;
+  const reset = limitResetClock(limit);
+  const ordered = [...state.accounts].sort((a, b) => Number(b.id === limit.accountId) - Number(a.id === limit.accountId));
+  return (
+    <div className="mb-2" data-runtime-sheet-accounts>
+      <div className="mb-1 px-1 text-label font-semibold text-secondary">{t("mobile2.composer.accountGroup")}</div>
+      {ordered.map((account) => {
+        const blocked = account.id === limit.accountId;
+        const authenticated = account.authPresent && (account.authHealth ?? "unknown") !== "signed_out" && !account.loginPending;
+        const signInReachable = !authenticated && engine === "claude";
+        const inert = blocked || (!authenticated && !signInReachable);
+        return (
+          <button
+            key={account.id}
+            type="button"
+            data-runtime-sheet-account={account.id}
+            data-runtime-account-state={blocked ? "limit" : authenticated ? "ready" : "needs-sign-in"}
+            disabled={inert || state.mutation !== null}
+            aria-disabled={inert || undefined}
+            aria-label={blocked
+              ? t("mobile2.composer.accountAtLimit", { account: account.label, time: reset ?? "" }).trim()
+              : authenticated
+                ? t("mobile2.composer.accountReadyAria", { account: account.label })
+                : t("mobile2.composer.accountSignInAria", { account: account.label })}
+            onClick={() => {
+              if (inert) return;
+              /* An account that is not signed in goes to the device sign-in and
+                 stays out of the launch: `select` is never reached from here. */
+              if (authenticated) void state.select(account.id);
+              else void state.retryLogin(account.id);
+            }}
+            className={`flex min-h-11 w-full items-center gap-2 rounded-control px-2 text-left text-body focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-100 ${
+              inert ? "text-secondary" : "text-primary active:bg-sunken"
+            }`}
+          >
+            <span className="min-w-0 flex-1 truncate">{account.label}</span>
+            {blocked ? (
+              <span className="shrink-0 rounded-full bg-warning-soft px-2 py-0.5 text-caption font-bold text-warning">
+                {reset === null ? t("mobile2.composer.accountLimitBadge") : t("mobile2.composer.accountLimitBadgeAt", { time: reset })}
+              </span>
+            ) : authenticated ? (
+              <span className="shrink-0 text-label font-semibold text-muted">{t("mobile2.composer.accountReady")}</span>
+            ) : signInReachable ? (
+              <span className="inline-flex shrink-0 items-center gap-1 text-label font-semibold text-accent">
+                {t("mobile2.composer.accountSignIn")}
+                <ChevronRight className="h-3.5 w-3.5" aria-hidden />
+              </span>
+            ) : (
+              <span className="shrink-0 text-label font-semibold text-muted">{t("mobile2.composer.accountNeedsSignIn")}</span>
+            )}
+          </button>
+        );
+      })}
+      {state.challenge ? (
+        <p className="px-2 py-1 text-label leading-snug text-secondary" data-runtime-sheet-device-auth>
+          {t("mobile2.composer.deviceCode", { code: state.challenge.code })}
+        </p>
+      ) : null}
     </div>
   );
 }

@@ -82,8 +82,9 @@ function Harness() {
       placeholder="Prompt"
       textareaAriaLabel="Prompt"
       imageAriaLabel="Add images"
-      /* The model-picker stand-in: on the phone ComposerBar renders leftSlot in
-         its always-visible 44px runtime row — the control the operator lost. */
+      /* The model-picker stand-in: on the phone ComposerBar renders leftSlot as
+         the first cell of the composer box's tools row — the control the
+         operator lost, now inside the box (mobile v2 §2 rule 8). */
       leftSlot={<button type="button">model picker</button>}
       sendLabelIdle="Send"
       sendLabelRecording="Stop"
@@ -148,11 +149,13 @@ test("rotated keyboard: the ceiling shrinks below 160px so the chrome fits the v
   expect(textarea.style.height).toBe("124px");
   /* The arithmetic that decides visibility inside the clipped shell. */
   expect(124 + MOBILE_COMPOSER_CHROME_PX).toBeLessThanOrEqual(280);
-  /* The picker row is present with its 44px row contract, and the field still
-     scrolls internally past the shrunken ceiling. */
-  const row = dom.document.querySelector('[data-testid="composer-runtime-row"]') as unknown as HTMLElement;
+  /* The tools row is present with its 44px row contract — the chip, the
+     picker and the send slot all still reachable — and the field scrolls
+     internally past the shrunken ceiling instead of pushing them out. */
+  const row = dom.document.querySelector("[data-mobile2-tools]") as unknown as HTMLElement;
   expect(row).not.toBeNull();
   expect(row.className).toContain("min-h-11");
+  expect(row.textContent).toContain("model picker");
   expect(textarea.className).toContain("overflow-y-auto");
 });
 
@@ -166,10 +169,11 @@ test("smaller rotated viewport: send stays visible because the field yields furt
   expect(textarea.style.height).toBe("84px");
   const send = dom.document.querySelector('button[aria-label="Send"]') as unknown as HTMLElement;
   expect(send).not.toBeNull();
-  /* The 44px tap-target contract: 32px visual control + the -inset-1.5
-     pseudo-element hit area (design doc §3.5). */
-  expect(send.className).toContain("h-8");
-  expect(send.className).toContain("before:-inset-1.5");
+  /* The 44px tap-target contract. Mobile v2 makes the phone's slot a REAL
+     44 px box holding a 32 px visual, because the capture's hit gate measures
+     bounding boxes and the old pseudo-element hit area measured 32 (§2 rule 7). */
+  expect(send.className).toContain("h-11");
+  expect(send.querySelector("span")!.className).toContain("h-8");
 });
 
 test("an absurdly small visible viewport floors the field at one tap-target row (#983 round 2)", () => {

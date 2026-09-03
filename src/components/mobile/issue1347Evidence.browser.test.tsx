@@ -7,7 +7,7 @@ import { Window } from "happy-dom";
 import { createRoot } from "react-dom/client";
 import { chromium, type Browser } from "playwright-core";
 
-import { PERSISTENT_CHROME } from "@/components/mobile/chatBudget";
+import { SUPERSEDED_CHROME } from "@/components/mobile/chatBudget";
 import { emptyStore } from "@/components/runtime/runtimeModel";
 import { setLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
@@ -481,8 +481,9 @@ test("issues 1347 + 1348: the phone's rename editor and orchestrator controls me
     expect(row.rowOpen!.right).toBeLessThanOrEqual(row.rowControls!.left + 1);
     /* The chat-first budget (#419): the pin costs no more than the row the
        retired chip strip was budgeted at, so the leaf under it keeps its
-       share of the viewport. */
-    expect(row.stripHeight).toBeLessThanOrEqual(PERSISTENT_CHROME.focusStrip);
+       share of the viewport. Mobile v2 dropped that row from the band
+       (#1439 §3.4); its 56 px survives as the ceiling this measures against. */
+    expect(row.stripHeight).toBeLessThanOrEqual(SUPERSEDED_CHROME.focusStrip);
 
     const sheet = await withPage(sheetHtml, "orchestrator-sheet-live", scheme, (page) => measureControls(page, scheme));
     controls.sheet!.push(sheet);
