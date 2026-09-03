@@ -2528,6 +2528,7 @@ export const en = {
   "mobile2.chat.menuCompact": "Compact context",
   "mobile2.chat.menuDetails": "Details & host",
   "mobile2.chat.menuTerminal": "Open in terminal",
+  "mobile2.chat.menuSubagents": "Subagents",
   "mobile2.chat.menuClose": "Close card",
   "mobile2.chat.menuCloseHint": "stays in the catalog",
   "mobile2.chat.menuKill": "Kill agent",

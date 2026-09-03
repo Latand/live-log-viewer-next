@@ -1,10 +1,12 @@
 "use client";
 
-import { ArrowRightLeft, Bot, Boxes, ChevronRight, CornerDownRight, Crown, FoldVertical, Info, ListTree, PencilLine, RotateCw, Search, Square, SquareTerminal, X } from "lucide-react";
+import { ArrowRightLeft, Bot, Boxes, ChevronRight, CornerDownRight, Crown, FoldVertical, GitFork, Info, ListTree, PencilLine, RotateCw, Search, Square, SquareTerminal, X } from "lucide-react";
 
 import { useLocale } from "@/lib/i18n";
 import { cleanTitle } from "@/lib/title";
 import type { FileEntry } from "@/lib/types";
+
+import type { SubagentBadge } from "../scheme/subagentBadgeModel";
 
 import { AttachTerminalDialog } from "../AttachTerminalDialog";
 import { canHandoff } from "../HandoffHandle";
@@ -12,7 +14,7 @@ import { useAgentControlActions } from "../AgentControlStrip";
 import { useProcessKill } from "../TaskHeader";
 import { effortTitle, engineBadge } from "../utils";
 import { MobileMeter } from "./MobileMeter";
-import { MobileSheet, MobileSheetDivider, MobileSheetRow } from "./MobileSheet";
+import { MobileSheet, MobileSheetDivider, MobileSheetRow, MobileSheetSection } from "./MobileSheet";
 import { showReceipt } from "./MobileReceipt";
 import { chatStateBits, type StagePosition } from "./mobileChatState";
 
@@ -51,6 +53,8 @@ export function MobileConversationMenu({
   onToggleCrown,
   onHandoff,
   onOpenHost,
+  subagents = [],
+  onOpenSubagent,
   onOpenSearch,
   onOpenProjectMenu,
   projectName,
@@ -79,6 +83,11 @@ export function MobileConversationMenu({
       board owns the draft, so the row only asks for it. */
   onHandoff?: () => void;
   onOpenHost: () => void;
+  /** This conversation's spawned children, as in-flow rows (README §6: the
+      phone has no badge rail over the feed — #1439). Each row opens the
+      child's CURRENT generation, the path the model already resolved. */
+  subagents?: readonly SubagentBadge[];
+  onOpenSubagent?: (path: string) => void;
   /** The search palette (#1054): a bar target on the board, a row here (§3.1). */
   onOpenSearch?: () => void;
   /** Swaps this sheet for the project's own menu. Every screen's `⋯` opens the
@@ -128,6 +137,7 @@ export function MobileConversationMenu({
     });
   };
   const showPipelineRow = Boolean(onOpenPipeline) && (stage !== null || pipelineCount > 0);
+  const showSubagents = subagents.length > 0 && onOpenSubagent !== undefined;
   return (
     <>
       <MobileSheet name="menu" title={title} onClose={onClose}>
@@ -182,7 +192,25 @@ export function MobileConversationMenu({
               attrs={{ "data-mobile2-menu-row": "pipeline" }}
             />
           ) : null}
-          {onOpenSeat || showPipelineRow ? <MobileSheetDivider /> : null}
+          {showSubagents ? (
+            <>
+              <MobileSheetSection count={subagents.length}>{t("mobile2.chat.menuSubagents")}</MobileSheetSection>
+              {subagents.map((child) => (
+                <MobileSheetRow
+                  key={child.id}
+                  icon={<GitFork className="h-[18px] w-[18px]" aria-hidden />}
+                  label={cleanTitle(child.title, 60)}
+                  trailing={t(`subagentTray.state.${child.state}`)}
+                  /* Unavailable is not a destination — the same reading the
+                     desktop badge gives a dead child. */
+                  disabled={child.state === "dead"}
+                  onSelect={act(() => onOpenSubagent?.(child.path))}
+                  attrs={{ "data-mobile2-menu-row": "subagent", "data-mobile2-subagent": child.id, "data-mobile2-subagent-state": child.state }}
+                />
+              ))}
+            </>
+          ) : null}
+          {onOpenSeat || showPipelineRow || showSubagents ? <MobileSheetDivider /> : null}
           <MobileSheetRow
             icon={<PencilLine className="h-[18px] w-[18px]" aria-hidden />}
             label={t("mobile2.chat.menuRename")}

@@ -2451,6 +2451,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "mobile2.chat.menuCompact": "Стиснути контекст",
   "mobile2.chat.menuDetails": "Деталі й хост",
   "mobile2.chat.menuTerminal": "Відкрити в терміналі",
+  "mobile2.chat.menuSubagents": "Підагенти",
   "mobile2.chat.menuClose": "Закрити картку",
   "mobile2.chat.menuCloseHint": "лишиться в каталозі",
   "mobile2.chat.menuKill": "Вбити агента",
