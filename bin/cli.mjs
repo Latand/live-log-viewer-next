@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync } from "node:fs";
 import http from "node:http";
 import net from "node:net";
-import { homedir } from "node:os";
+import { homedir, networkInterfaces } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -80,6 +80,8 @@ Options:
     tsLinkWarn: () => "  The link contains an access key — don't forward it to others.",
     tsCookie: () => "  After the first open the key is stored in a cookie for 30 days.",
     nonLocalWarn: () => "Warning: a non-local address exposes the viewer to the network, so access-key mode is forced on.",
+    unexpectedNonLocalBind: (address) => `The server bound ${address} even though loopback was requested. Startup was stopped before the viewer could remain exposed.`,
+    bindCheckFail: (detail) => `Couldn't verify the server bind: ${detail}. Startup was stopped.`,
     serverNotReady: () => "Server not ready.",
     runtimeHostEntryMissing: () => "The runtime host is missing from this install. Reinstall agent-log-viewer and try again.",
     runtimeHostStartFail: (detail) => `Couldn't start the structured runtime host: ${detail}`,
@@ -118,6 +120,8 @@ Options:
     tsLinkWarn: () => "  Посилання містить ключ доступу — не пересилайте його стороннім.",
     tsCookie: () => "  Після першого відкриття ключ зберігається у cookie на 30 днів.",
     nonLocalWarn: () => "Увага: нелокальна адреса відкриває viewer для мережі, тому режим ключа доступу увімкнено примусово.",
+    unexpectedNonLocalBind: (address) => `Сервер прив'язався до ${address}, хоча було запитано локальну адресу. Запуск зупинено, щоб viewer не залишився відкритим у мережу.`,
+    bindCheckFail: (detail) => `Не вдалося перевірити адресу сервера: ${detail}. Запуск зупинено.`,
     serverNotReady: () => "Сервер не готовий.",
     runtimeHostEntryMissing: () => "У цьому пакеті немає runtime host. Перевстановіть agent-log-viewer і повторіть спробу.",
     runtimeHostStartFail: (detail) => `Не вдалося запустити structured runtime host: ${detail}`,
@@ -240,7 +244,7 @@ function readPackageJson(packageRoot) {
   }
 }
 
-function resolveServer(packageRoot) {
+function resolveServer(packageRoot, hostname) {
   const bunRuntime = viewerServerBunRuntime();
   const commandFor = (command, args, bunEntry = command, bunArgs = args) => bunRuntime
     ? { command: bunRuntime, args: ["--bun", bunEntry, ...bunArgs] }
@@ -279,7 +283,7 @@ function resolveServer(packageRoot) {
   }
 
   return {
-    ...commandFor(nextBin, ["start"]),
+    ...commandFor(nextBin, ["start", "--hostname", hostname]),
     cwd: packageRoot,
     label: "next start",
   };
@@ -593,6 +597,36 @@ async function waitForReadiness(port) {
   throw new Error(m.serverTimeout(READINESS_TIMEOUT_MS / 1000));
 }
 
+function addressIsBound(hostname, port) {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.once("error", (error) => {
+      if (error?.code === "EADDRINUSE") {
+        resolve(true);
+        return;
+      }
+      reject(error);
+    });
+    server.listen({ host: hostname, port, exclusive: true }, () => {
+      server.close((error) => error ? reject(error) : resolve(false));
+    });
+  });
+}
+
+async function boundNonLoopbackAddress(port) {
+  const addresses = new Set();
+  for (const entries of Object.values(networkInterfaces())) {
+    for (const entry of entries ?? []) {
+      if (!entry.internal) addresses.add(entry.address);
+    }
+  }
+
+  for (const address of addresses) {
+    if (await addressIsBound(address, port)) return address;
+  }
+  return null;
+}
+
 function localUrl(options) {
   const host = options.hostname === "::1" ? "[::1]" : options.hostname;
   return `http://${host}:${options.port}/`;
@@ -814,7 +848,7 @@ async function main() {
     process.exit(1);
   }
 
-  const server = resolveServer(packageRoot);
+  const server = resolveServer(packageRoot, options.hostname);
   const runtimeHostConfig = cliRuntimeHostConfig(packageRoot);
   const runtimeHostEnvironment = cliRuntimeHostEnvironment(process.env, runtimeHostConfig);
   const runtimeHostSupervisor = createRuntimeHostSupervisor(
@@ -851,6 +885,23 @@ async function main() {
   } catch (error) {
     await stopAll(serverProcess, tailscaleProcessRef.current, runtimeHostSupervisor);
     fail(error instanceof Error ? error.message : m.serverNotReady());
+  }
+
+  // Verify the kernel-visible bind after readiness. This catches a launcher or
+  // framework silently widening a requested loopback bind before the listener
+  // can remain exposed.
+  if (isLoopbackHostname(options.hostname)) {
+    let exposedAddress;
+    try {
+      exposedAddress = await boundNonLoopbackAddress(options.port);
+    } catch (error) {
+      await stopAll(serverProcess, tailscaleProcessRef.current, runtimeHostSupervisor);
+      fail(m.bindCheckFail(error instanceof Error ? error.message : String(error)));
+    }
+    if (exposedAddress !== null) {
+      await stopAll(serverProcess, tailscaleProcessRef.current, runtimeHostSupervisor);
+      fail(m.unexpectedNonLocalBind(exposedAddress));
+    }
   }
 
   if (
