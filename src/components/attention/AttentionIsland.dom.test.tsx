@@ -45,7 +45,6 @@ function island(overrides: Partial<Parameters<typeof AttentionIsland>[0]> = {}) 
   return (
     <AttentionIsland
       count={3}
-      mobile={false}
       queueOpen={false}
       filterActive={false}
       onToggleQueue={() => {}}
@@ -112,18 +111,18 @@ test("the zero state is present, muted, inert and pulse-free", async () => {
   expect(zero.className).toContain("text-muted");
 });
 
-test("mobile keeps the compact count and a 44px Next, and hides the desktop-only filter", async () => {
-  const advances: Array<1 | -1> = [];
-  const host = await render(island({ mobile: true, count: 4, onNext: (dir) => advances.push(dir) }));
+/* The island is the DESKTOP corner since mobile v2 lane 8 (#1439). The phone's
+   badge is the shell's bar target — `⚠ n`, hidden at zero, 44 px, opening the
+   Needs-you sheet — and those assertions live with the shell
+   (MobileShell.dom.test.tsx) and the sheet (MobileAttentionSheet.dom.test.tsx).
+   What this component owes the phone is nothing: no compact face, no «⚠ 0». */
+test("the island has one face — the desktop's — and no phone variant to fall into", async () => {
+  const host = await render(island({ count: 4 }));
   const count = host.querySelector("[data-attention-count]")!;
-  const next = host.querySelector("[data-attention-next]")!;
-  expect(count.textContent).toContain("4");
-  expect(count.className).toContain("min-h-11");
-  expect(next.className).toContain("min-h-11");
-  expect(next.getAttribute("aria-label")).toContain("(N");
-  expect(host.querySelector("[data-attention-filter]")).toBeNull();
-  await click(next);
-  expect(advances).toEqual([1]);
+  expect(count.textContent).toContain("Needs you");
+  expect(count.className).not.toContain("min-h-11");
+  expect(host.querySelector("[data-attention-filter]")).not.toBeNull();
+  expect(host.querySelector("svg.lucide-triangle-alert")).toBeNull();
 });
 
 /* ------------------------------------------------------------------------- *
@@ -177,7 +176,6 @@ function Harness({ pointer, queue, projectQueue, onServe }: {
   return (
     <AttentionIsland
       count={queue.length}
-      mobile={false}
       queueOpen={false}
       filterActive={false}
       onToggleQueue={() => {}}
