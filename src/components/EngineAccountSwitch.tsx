@@ -3,10 +3,12 @@
 import { useEffect, useRef, useState } from "react";
 
 import { type EngineAccountsState, useEngineAccounts } from "@/hooks/useEngineAccounts";
+import { useIsMobile } from "@/hooks/useIsMobile";
 import { useLocale } from "@/lib/i18n";
 
 import { AccountsPanel, type ProjectAccountContext } from "./AccountsPanel";
 import { ChevronDown, Loader2 } from "./icons";
+import { getMobileNav } from "./mobile/mobileNav";
 import { engineTintOf } from "./utils";
 
 const ENGINE_LABEL: Record<"claude" | "codex", string> = { claude: "Claude", codex: "Codex" };
@@ -22,12 +24,18 @@ const ENGINE_LABEL: Record<"claude" | "codex", string> = { claude: "Claude", cod
  * the accessible name.
  */
 export function EngineAccountSwitch({ engine, projectContext }: { engine: "claude" | "codex"; projectContext?: ProjectAccountContext }) {
-  return <EngineAccountSwitchControl state={useEngineAccounts(engine)} projectContext={projectContext} />;
+  const isMobile = useIsMobile();
+  /* The phone has one accounts surface (mobile v2 lane 9, README §4.8): the
+     Accounts & limits screen. The trigger pushes it instead of floating the
+     desktop dialog over whatever the operator is looking at. */
+  const openScreen = isMobile ? () => getMobileNav().push({ kind: "accounts" }) : undefined;
+  return <EngineAccountSwitchControl state={useEngineAccounts(engine)} projectContext={projectContext} onOpenScreen={openScreen} />;
 }
 
 /** Interactive rendering half, separated so collapsed and expanded behavior
-    can be exercised with a deterministic account state. */
-export function EngineAccountSwitchControl({ state, projectContext }: { state: EngineAccountsState; projectContext?: ProjectAccountContext }) {
+    can be exercised with a deterministic account state. With `onOpenScreen`
+    the trigger hands over to that screen and never opens the dialog. */
+export function EngineAccountSwitchControl({ state, projectContext, onOpenScreen }: { state: EngineAccountsState; projectContext?: ProjectAccountContext; onOpenScreen?: () => void }) {
   const { t } = useLocale();
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -61,11 +69,11 @@ export function EngineAccountSwitchControl({ state, projectContext }: { state: E
       <button
         ref={triggerRef}
         type="button"
-        aria-expanded={open}
+        aria-expanded={onOpenScreen ? undefined : open}
         aria-haspopup="dialog"
         aria-label={`${t("accounts.triggerAria", { engine: engineName })} — ${label}`}
         title={`${engineName} · ${label}`}
-        onClick={() => setOpen((value) => !value)}
+        onClick={() => (onOpenScreen ? onOpenScreen() : setOpen((value) => !value))}
         className="flex h-8 items-center gap-1 rounded-[7px] border border-border bg-canvas px-2 text-[11px] font-semibold hover:bg-sunken focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
       >
         <span className="shrink-0 font-bold" style={{ color: tint.color }}>{engineName}</span>
@@ -76,7 +84,7 @@ export function EngineAccountSwitchControl({ state, projectContext }: { state: E
           <ChevronDown className="h-3 w-3 shrink-0 text-muted" aria-hidden />
         )}
       </button>
-      {open ? <AccountsPanel state={state} onClose={close} placement="header" projectContext={projectContext} /> : null}
+      {open && !onOpenScreen ? <AccountsPanel state={state} onClose={close} placement="header" projectContext={projectContext} /> : null}
     </div>
   );
 }

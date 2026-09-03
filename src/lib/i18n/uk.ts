@@ -2470,4 +2470,28 @@ export const uk: Record<keyof typeof en, Message> = {
   "mobile2.chat.draftMeta": "чернетка · ще не надіслано",
   "mobile2.chat.menuPredecessor": "Попередник · раунд {round}",
   "mobile2.chat.menuSeat": "Місце оркестратора",
+  /* Екран акаунтів і лімітів mobile v2 (#1439, лінія 9): для кожного рушія
+     активний акаунт як картка з вікнами й діями, решта — тихі рядки, рядки
+     входу та рядок додавання. Лише дописування, ключі mobile2.accounts.* */
+  "mobile2.accounts.ready": "готовий",
+  "mobile2.accounts.pending": "вхід триває",
+  "mobile2.accounts.plan": "план {plan}",
+  "mobile2.accounts.checked": "перевірено {time}",
+  "mobile2.accounts.noReading": "ще без показників",
+  "mobile2.accounts.noAccounts": "Акаунтів {engine} ще немає",
+  "mobile2.accounts.cornerAria": "{left}% лишилося у вікні {window}",
+  "mobile2.accounts.windowAria": "Вікно {window} для {label}",
+  "mobile2.accounts.signIn": "увійти",
+  "mobile2.accounts.signInAria": "Увійти в {label}",
+  "mobile2.accounts.signInStarted": "Відкрито вхід через пристрій для {label} — стане активним після входу",
+  "mobile2.accounts.signInFailed": "Не вдалося відкрити вхід через пристрій для {label}",
+  "mobile2.accounts.openSignIn": "Відкрити вхід через пристрій",
+  "mobile2.accounts.switchAria": "Використовувати {label} для наступних запусків",
+  "mobile2.accounts.switched": "Наступні запуски використовують {label}",
+  "mobile2.accounts.refreshed": "Ліміти перечитано для {label}",
+  "mobile2.accounts.resetUsed": "Скидання використано на {label}",
+  "mobile2.accounts.add": "Додати акаунт {engine}",
+  "mobile2.accounts.addHint": "відкриває вхід через пристрій",
+  "mobile2.accounts.addLabel": "Назва нового акаунта",
+  "mobile2.accounts.addCancel": "Скасувати",
 };

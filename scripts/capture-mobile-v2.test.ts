@@ -75,7 +75,7 @@ describe("parseArgs", () => {
 /* ── gates ───────────────────────────────────────────────────────────────── */
 
 const control = (label: string, x: number, y: number, w = 44, h = 44, extra: Partial<Control> = {}): Control =>
-  ({ tag: "button", label, rect: { x, y, w, h }, small: w < 43.5 || h < 43.5, inReceipt: null, ...extra });
+  ({ tag: "button", label, rect: { x, y, w, h }, small: w < 43.5 || h < 43.5, inReceipts: [], ...extra });
 
 /** A frame the prototype would produce: one bar, three targets, a composer
     above a 336 px keyboard, the dark canvas. */
@@ -137,8 +137,18 @@ describe("gates", () => {
   test("receipt: its own inverse action inside it is not covered", () => {
     const g = green();
     g.controls = g.controls.filter((c) => c.label !== "send");
-    g.controls.push(control("Respawn", 320, 448, 60, 44, { inReceipt: 0 }));
+    g.controls.push(control("Respawn", 320, 448, 60, 44, { inReceipts: [0] }));
     g.receipts.push({ x: 0, y: 440, w: 390, h: 60 });
+    g.send = { bottom: 400 };
+    expect(evaluateGates(g, dark)).toEqual([]);
+  });
+  test("receipt: a control inside a banner that wraps its own toast is covered by neither", () => {
+    /* The banner slot marks itself and carries the attention toast, which
+       marks itself too: the same control is inside both rects. */
+    const g = green();
+    g.controls = g.controls.filter((c) => c.label !== "send");
+    g.controls.push(control("Needs you · plan approval", 0, 52, 330, 57, { inReceipts: [0, 1] }));
+    g.receipts.push({ x: 0, y: 52, w: 390, h: 57 }, { x: 0, y: 52, w: 390, h: 57 });
     g.send = { bottom: 400 };
     expect(evaluateGates(g, dark)).toEqual([]);
   });
