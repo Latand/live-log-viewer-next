@@ -33,7 +33,7 @@ import path from "node:path";
 
 import { chromium, type Page } from "playwright-core";
 
-import { PERSISTENT_CHROME } from "@/components/mobile/chatBudget";
+import { SUPERSEDED_CHROME } from "@/components/mobile/chatBudget";
 
 import { createCaptureDirectory } from "./capture-directory";
 import { demoPort } from "./demo-capture";
@@ -204,11 +204,13 @@ async function checkPhoneGeometry(page: Page, state: string): Promise<{ row: num
      that rendered none would otherwise pass this check by default. */
   if (geometry.chips === 0) throw new Error(`${state}: the strip drew no conversation chips, so the pin's position proves nothing`);
   if (geometry.left >= geometry.chipLeft) throw new Error(`${state}: the pinned row starts at ${geometry.left}px, not before the first chip at ${geometry.chipLeft}px`);
-  /* The chat-first budget (issue #419): the pin rides the strip row that
-     `chatBudget` already counts, so it must not push that row past the height
-     the transcript's 60% share is computed against. */
-  if (geometry.strip > PERSISTENT_CHROME.focusStrip) {
-    throw new Error(`${state}: the strip is ${geometry.strip}px, past the ${PERSISTENT_CHROME.focusStrip}px the chat budget reserves for it`);
+  /* The chat-first budget (issue #419): the pin rides the strip row, so it must
+     not push that row past the height the transcript's share was computed
+     against. Mobile v2 retired the strip outright and rewrote the band
+     (#1439 §3.4), so the ceiling is now the height the retired row was
+     budgeted at — `SUPERSEDED_CHROME.focusStrip`, the same 56 px. */
+  if (geometry.strip > SUPERSEDED_CHROME.focusStrip) {
+    throw new Error(`${state}: the strip is ${geometry.strip}px, past the ${SUPERSEDED_CHROME.focusStrip}px the retired strip row was budgeted at`);
   }
   /* The mobile overflow contract (#353): the document itself never scrolls
      sideways — only the chip strip inside it does. */

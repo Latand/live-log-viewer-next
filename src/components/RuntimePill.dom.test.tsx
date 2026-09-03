@@ -403,7 +403,7 @@ test("the model drill-down keeps model rows available for turn-boundary reconfig
   await click(submenu[0]!);
   // One anchored surface — the root panel is gone, the model panel is in place.
   const modelRows = [...host.querySelectorAll('[data-runtime-row="model"]')];
-  expect(modelRows.map((row) => row.textContent)).toEqual(["GPT-5.6-Sol", "GPT-5.6-Terra"]);
+  expect(modelRows.map((row) => row.textContent)).toEqual(["GPT-5.6-Sol", "GPT-5.6-Terra", "GPT-5.6-Luna"]);
   expect(modelRows[0]!.getAttribute("aria-checked")).toBe("true");
   expect(modelRows[1]!.hasAttribute("disabled")).toBe(false);
   // The back row returns to the root panel; its accessible name is the wired
@@ -478,21 +478,32 @@ test("Escape closes the popover and returns focus to the pill", async () => {
   await act(async () => root.unmount());
 });
 
-test("at 390px the pill opens a modal sheet with 44px radio rows that stays open across selections", async () => {
+test("at 390px the chip opens the «Next message» sheet, which stays open across selections", async () => {
   mobile = true;
   const { host, root } = await renderPill(
     <RuntimePill file={codexFile} surface="structured" runtimeSettings={CODEX_STRUCTURED} />,
   );
-  await click(host.querySelector("[data-runtime-pill]")!);
+  /* Mobile v2 §4.4: the chip inside the composer box is what opens it, and the
+     capture reaches it by that hook. */
+  const chip = host.querySelector("[data-runtime-pill]")!;
+  expect(chip.getAttribute("data-mobile2-open")).toBe("model");
+  await click(chip);
   const sheet = host.querySelector('[role="dialog"][data-runtime-sheet]')!;
   expect(sheet.getAttribute("aria-modal")).toBe("true");
   expect(sheet.getAttribute("aria-label")).toBe("Model and reasoning — applies to your next message");
+  expect(sheet.getAttribute("data-mobile2-sheet")).toBe("model");
+  /* It says what it applies to, and in the operator's own tier words (§7 Q5). */
+  expect(host.querySelector("[data-mobile2-next-message]")!.textContent)
+    .toBe("Applies to your next message: 5.6-Sol · high");
   const sections = [...sheet.querySelectorAll('[role="radiogroup"]')];
-  expect(sections.map((section) => section.getAttribute("aria-label"))).toEqual(["Reasoning", "Model", "Speed"]);
+  expect(sections.map((section) => section.getAttribute("aria-label"))).toEqual(["Model", "Reasoning", "Speed"]);
   const rows = [...sheet.querySelectorAll("[data-runtime-sheet-row]")];
   expect(rows.every((row) => row.className.includes("min-h-11"))).toBe(true);
+  /* One vocabulary: the rows are the tier ids, never a third spelling of them. */
+  const reasoning = [...sections[1]!.querySelectorAll("[data-runtime-sheet-row]")].map((row) => row.textContent);
+  expect(reasoning).toEqual(["low", "medium", "high", "xhigh", "max", "ultra"]);
   // Selecting a tier commits but keeps the sheet open (model + reasoning in one visit).
-  const ultra = rows.find((row) => row.textContent === "Ultra")!;
+  const ultra = rows.find((row) => row.textContent === "ultra")!;
   await click(ultra);
   expect(JSON.parse(localStorage.getItem(key + ":profile")!)).toEqual({ effort: "ultra" });
   expect(host.querySelector("[data-runtime-sheet]")).not.toBeNull();

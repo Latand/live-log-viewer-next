@@ -190,25 +190,28 @@ test("typing non-empty text enables Send in the same synchronous flush on a live
 });
 
 test.each(["codex", "claude"] as const)(
-  "the %s Viewer-launched conversation exposes the pill on the phone without any disclosure",
+  "the %s Viewer-launched conversation carries the model chip INSIDE the composer box",
   async (engine) => {
     mobile = true;
     quietWire();
     const { host, root } = await renderInto(
       <TmuxComposer file={viewerLaunchedFile(engine, `conv-499-${engine}`)} />,
     );
-    /* The pill is on screen immediately — no options toggle press required. */
+    /* The chip is on screen immediately — no options toggle press required
+       (#499) — and since mobile v2 (#1439 §2 rule 8) it is a cell of the box's
+       tools row rather than a 44 px row stacked beneath the box. */
     const pill = host.querySelector("[data-runtime-pill]") as HTMLButtonElement;
     expect(pill).toBeTruthy();
-    const row = pill.closest('[data-testid="composer-runtime-row"]')!;
-    expect(row).toBeTruthy();
-    expect(row.className).toContain("min-h-11");
-    /* And it opens the mobile sheet with the model/reasoning sections. */
+    const tools = pill.closest("[data-mobile2-tools]")!;
+    expect(tools).toBeTruthy();
+    expect(tools.closest("[data-mobile2-composer]")).toBeTruthy();
+    expect(host.querySelector('[data-testid="composer-runtime-row"]')).toBeNull();
+    /* And it opens the «Next message» sheet with the model/reasoning sections. */
     await act(async () => {
       pill.click();
       await new Promise((r) => setTimeout(r, 0));
     });
-    expect(host.querySelector("[data-runtime-sheet]")).toBeTruthy();
+    expect(host.querySelector('[data-mobile2-sheet="model"]')).toBeTruthy();
     flushSync(() => root.unmount());
   },
 );

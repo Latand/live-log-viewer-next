@@ -451,20 +451,24 @@ for (const mobile of [false, true]) {
     /* Wait for the pill's persisted-state hydration: the surface resolution
        mounts the runtime strip, and the pill's load effect reads the
        identity-scoped runtime draft — swapping the initial synthesized default
-       face for the stored `GPT-5.6-Terra, High`. */
+       face for the stored `GPT-5.6-Terra, high`. */
     for (let attempt = 0; attempt < 50 && !runtimePillLabel(host).includes("GPT-5.6-Terra"); attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 2));
     }
     /* The runtime model/reasoning choice rode the resolution untouched — the
        RENDERED accessible face, not just the storage record. Reverting EITHER
        axis makes this RED: a model reversion drops "GPT-5.6-Terra" (→ the
-       "GPT-5.6-Sol" default) and a reasoning reversion drops "High" (→ the
-       "Light" default). */
+       "GPT-5.6-Sol" default) and a reasoning reversion drops the chosen tier
+       (→ the lowest one). One vocabulary per surface (mobile v2 §7 Q5): the
+       phone says the tier id the operator says, the desktop keeps its friendly
+       label, and each is checked in its own words. */
+    const tier = mobile ? ", high" : "High";
+    const revertedTier = mobile ? ", low" : "Light";
     const label = runtimePillLabel(host);
     expect(label).toContain("GPT-5.6-Terra");
-    expect(label).toContain("High");
+    expect(label).toContain(tier);
     expect(label).not.toContain("GPT-5.6-Sol");
-    expect(label).not.toContain("Light");
+    expect(label).not.toContain(revertedTier);
     expect(JSON.parse(localStorage.getItem(runtimeKey)!)).toEqual({ model: "gpt-5.6-terra", effort: "high" });
   });
 }

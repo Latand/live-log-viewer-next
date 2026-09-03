@@ -1,107 +1,132 @@
 /**
- * Mobile chat-first viewport budget (issue #419).
+ * The phone's viewport budget, rewritten for mobile v2
+ * (docs/design/mobile-v2/README.md §3.4).
  *
- * The phone stacks a fixed band of chrome above and below the scrolling
- * transcript. Left unchecked, project navigation, the conversation header's
- * memory/goal chips, the detailed runtime controls, and the pipeline / handoff
- * shelves squeeze the transcript into the smallest region on screen — the
- * reopened production failure at 390×844.
+ * The old model (issue #419) counted five persistent rows — shell header,
+ * focus strip, conversation header, composer input row, composer pill row —
+ * and proved the transcript kept 60% of an 844 px viewport. The arithmetic was
+ * green while the operator's phone showed roughly half the screen as chrome,
+ * because four rows that are ALSO always on were never in the sum: the docked
+ * background-task strip, the attention banner, the subagent tray, and the
+ * live-tail pill with the turn status bar under it (§1.6). A budget that omits
+ * what is on screen measures nothing.
  *
- * This module is the arithmetic contract behind the repair. It enumerates every
- * persistent surface's mobile height so "the transcript owns at least 60% of the
- * usable viewport before the keyboard opens" is a checked property, and it proves
- * the secondary surfaces MUST default to collapsed (zero reserved height) to
- * clear that bar. `BranchPane` folds exactly those surfaces behind one compact
- * conversation-details disclosure; `MobileFocusView` stamps
- * `MIN_TRANSCRIPT_SHARE` onto the focus root so the contract travels with the
- * DOM it governs.
+ * v2 removes the omissions instead of counting them. Host detail moved behind
+ * `⋯ › Host details`, the conversation header folded into the bar's title cell,
+ * the strip is gone, and the composer, its model chip and the Stop control are
+ * ONE unit (§2 rule 8) — so the band is two regions, and every region left in
+ * it is one this module can name:
  *
- * The pipeline summary and bottom shelf are counted here even though they are
- * themselves conditional: including them is the conservative worst case, so the
- * guarantee holds a fortiori on the many screens where they are absent.
+ *   bar 52 + composer 109                    = 161 px  (81% transcript at 844)
+ *   … + the banner slot 45                   = 206 px  (76%)
+ *   … + suggested chips 32, keyboard 336     = 193 px of 508 visible (62%)
+ *
+ * Those are the three numbers §3.4 publishes, and `chatBudget.test.ts` is what
+ * holds them. `MobileFocusView` stamps {@link MIN_TRANSCRIPT_SHARE} onto the
+ * focus root, so the contract travels with the DOM it governs.
  */
 
-/** The transcript's guaranteed share of the usable viewport, keyboard closed. */
-export const MIN_TRANSCRIPT_SHARE = 0.6;
+/** The one bar (§3.2): back, title cell, at most three 44 px targets. */
+export const BAR_PX = 52;
+/** The composer unit (§2 rule 8, §3.4): one box holding the field (32) and the
+    tools row (44) — chip, attach, dictate, send slot — plus its padding and the
+    14 px home inset. The inset lives INSIDE this number, which is why the
+    budget below subtracts no safe-area of its own. */
+export const COMPOSER_PX = 109;
+/** The one banner slot under the bar (§2 rule 3): offline, degraded, or a
+    decision that arrived elsewhere. It reserves its height in flow, so it is
+    chrome for as long as it is up. */
+export const BANNER_PX = 45;
+/** Suggested-reply chips, 32 px visual inside a 44 px hit, directly above the
+    composer box (§4.3). They stay while the keyboard is open. */
+export const SUGGESTED_CHIPS_PX = 32;
+/** An iOS keyboard's share of a 390×844 phone (#983, §4.3). */
+export const KEYBOARD_PX = 336;
 
-/** Persistent chrome, always on screen with a conversation focused. Each value
-    is the rendered mobile height in CSS px (a Tailwind row plus its padding).
-    Every secondary surface — pipelines, tasks, handoff, hidden strips — is a
-    compact icon trigger in the top chrome now (issue #419 reopened), so the
-    focused chat reserves NO bottom row for any of them. */
+/** Persistent chrome with a conversation focused: everything always on screen. */
 export const PERSISTENT_CHROME = {
-  /** Project shell header: name, undo, shelf/create/more triggers (`min-h-[52px]`). */
+  bar: BAR_PX,
+  composer: COMPOSER_PX,
+} as const;
+
+/**
+ * The band v2 replaced, region by region (§3.4, "Today" column). These are the
+ * five rows the #419 budget counted — 264 px — and they are kept here because
+ * the surfaces that were measured against one of them still are: the retired
+ * chip strip's 56 px is the ceiling the orchestrator pin must not exceed
+ * (#1347), and a number cannot be a ceiling once nobody can name it.
+ */
+export const SUPERSEDED_CHROME = {
+  /** Project shell header → the one 52 px bar. */
   shellHeader: 52,
-  /** Conversation-switch strip in MobileFocusView, also holding the map,
-      pipelines, and tasks icon triggers (h-11 targets). */
+  /** Conversation-switch strip → the bar's title cell and the switcher sheet. */
   focusStrip: 56,
-  /** One compact conversation header row in BranchPane. */
+  /** BranchPane's compact header row → folded into the title cell. */
   conversationHeader: 56,
-  /** Composer primary row: the input field with its mic + send controls. */
+  /** Composer input row → the composer unit's field. */
   composerPrimary: 56,
-  /** The always-visible model/reasoning pill row under the input (issue #499):
-      the one obvious mobile runtime control, so it counts as persistent. */
+  /** The always-visible model/reasoning pill row (#499) → the chip INSIDE the
+      box, which is the row the operator asked us to stop stacking. */
   composerRuntimePill: 44,
 } as const;
 
-/** Secondary chrome, each behind a disclosure or overlay. Closed it reserves
-    zero height; the value is what it WOULD add back to the band if it were still
-    an inline row. Every pipeline/task/history/handoff surface lives here now
-    (issue #419 reopened): the focused chat viewport reserves none of their
-    height by default, and the model proves that folding them is load-bearing. */
-export const SECONDARY_CHROME = {
-  /** Header metadata chips: memory (plan), goal, model/reasoning, ctx, account. */
-  conversationMeta: 40,
-  /** Detailed runtime controls: Stop, compact, terminal. */
-  runtimeControls: 48,
-  /** The docked-pipeline summary/rail that used to sit as a persistent row below
-      the transcript — now reached from the focus-strip pipelines icon. */
-  pipelineRail: 44,
-  /** The handoff control + hidden worker/quiet/readiness strips that used to sit
-      as a persistent bottom row — now an overlay from the header shelf trigger. */
-  handoffHidden: 44,
+/**
+ * Persistent rows the old budget never counted (§1.6) — the difference between
+ * "264 budgeted" and the "~440–480 observed" on the operator's screenshot.
+ * Every one of them is 0 px in v2: tasks live in the host sheet, children open
+ * from the feed, Stop is the send slot and elapsed time is the bar's meta line.
+ * The arrival banner is the only survivor, at the slot's 45 px rather than 60,
+ * and only while it is up.
+ */
+export const UNCOUNTED_CHROME = {
+  /** One docked `TaskStrip` per parentless background process (§1.2). */
+  dockedTaskStrip: 44,
+  /** The in-flow attention toast (§1.9). */
+  attentionBanner: 60,
+  /** The inline subagent tray (§1.6). */
+  subagentTray: 44,
+  /** The live-tail pill plus the turn status bar (§1.6) — this lane's removal. */
+  liveTailAndStatusBar: 40,
 } as const;
 
-export type SecondaryKey = keyof typeof SECONDARY_CHROME;
+/** The transcript's guaranteed share of the viewport, keyboard closed. The
+    worst persistent case is the banner slot up (206 px of 844 = 76%), so the
+    floor is what that case clears — a full 15 points above the #419 contract. */
+export const MIN_TRANSCRIPT_SHARE = 0.75;
+/** The same guarantee with the keyboard open (§4.3): 315 px of the 508 that are
+    visible, with the whole question card inside them. */
+export const MIN_KEYBOARD_TRANSCRIPT_SHARE = 0.6;
 
 export interface Viewport {
-  /** Visual viewport height in CSS px (e.g. 844 at iPhone 390×844). */
+  /** Layout viewport height in CSS px (844 at iPhone 390×844). */
   height: number;
-  /** Safe-area inset consumed at the bottom (home indicator). Default 0. */
-  safeBottom?: number;
-  /** Safe-area inset at the top not already excluded by the browser. Default 0. */
-  safeTop?: number;
-  /** Which secondary disclosures are open. Absent/empty = the default: all closed. */
-  open?: readonly SecondaryKey[];
+  /** The banner slot is showing something (offline, degraded, an arrival). */
+  banner?: boolean;
+  /** Suggested-reply chips ride above the composer box. */
+  chips?: boolean;
+  /** The on-screen keyboard's height, 0 (the default) while it is closed. */
+  keyboard?: number;
 }
 
 export interface ChatBudget {
-  /** Viewport height minus the safe-area insets. */
+  /** Viewport height minus whatever the keyboard covers. */
   readonly usable: number;
-  /** Total persistent + opened-secondary chrome height. */
+  /** Every region of chrome on screen, summed. */
   readonly chrome: number;
   /** Height left for the transcript, never negative. */
   readonly transcript: number;
   /** transcript / usable, clamped to [0, 1]. */
   readonly share: number;
-  /** True when the transcript clears `MIN_TRANSCRIPT_SHARE`. */
+  /** True when the transcript clears the guarantee for this keyboard state. */
   readonly meetsMinimum: boolean;
 }
 
-function total(values: Record<string, number>): number {
-  return Object.values(values).reduce((carry, value) => carry + value, 0);
-}
-
-/** The transcript's height and share for a viewport and disclosure state. */
-export function chatBudget({ height, safeBottom = 0, safeTop = 0, open = [] }: Viewport): ChatBudget {
-  const usable = Math.max(0, height - safeBottom - safeTop);
-  const openSet = new Set(open);
-  const secondary = (Object.keys(SECONDARY_CHROME) as SecondaryKey[]).reduce(
-    (carry, key) => carry + (openSet.has(key) ? SECONDARY_CHROME[key] : 0),
-    0,
-  );
-  const chrome = total(PERSISTENT_CHROME) + secondary;
+/** The transcript's height and share for one viewport and its chrome. */
+export function chatBudget({ height, banner = false, chips = false, keyboard = 0 }: Viewport): ChatBudget {
+  const usable = Math.max(0, height - Math.max(0, keyboard));
+  const chrome = BAR_PX + COMPOSER_PX + (banner ? BANNER_PX : 0) + (chips ? SUGGESTED_CHIPS_PX : 0);
   const transcript = Math.max(0, usable - chrome);
   const share = usable > 0 ? Math.min(1, transcript / usable) : 0;
-  return { usable, chrome, transcript, share, meetsMinimum: share >= MIN_TRANSCRIPT_SHARE };
+  const floor = keyboard > 0 ? MIN_KEYBOARD_TRANSCRIPT_SHARE : MIN_TRANSCRIPT_SHARE;
+  return { usable, chrome, transcript, share, meetsMinimum: share >= floor };
 }

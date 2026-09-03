@@ -12,7 +12,7 @@ import { Badge, type BadgeTone } from "@/components/ui/Badge";
 import { useComposer } from "@/hooks/useComposer";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useCodexRealtime } from "@/hooks/useCodexRealtime";
-import type { RuntimeSessionView } from "@/hooks/useRuntime";
+import { interruptRuntime, useRuntimeBusState, type RuntimeSessionView } from "@/hooks/useRuntime";
 import type { SelectedContextRef } from "@/lib/selection/selectedContext";
 import { useViewerSelectedContext, viewerSelectedContext } from "@/lib/selection/viewerSelectedContext";
 import { useHostTarget } from "@/hooks/useHostTarget";
@@ -23,7 +23,8 @@ import { getLocale, useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 import type { RuntimeReceipt } from "@/components/runtime/runtimeModel";
 
-import { ComposerBar } from "./ComposerBar";
+import { ComposerBar, composerSlotKind, type ComposerSlotKind } from "./ComposerBar";
+import { chatState } from "./mobile/mobileChatState";
 import { SelectedContextBadge } from "./SelectedContextBadge";
 import { OutboxDispatcher } from "./conversation/OutboxDispatcher";
 import {
@@ -1484,6 +1485,13 @@ export function TmuxComposerCore({
   const { text, textRef, setText, setTextState, inputRef, setStatus, busy, setBusy, voiceSending, attachments } = composer;
   const attachmentDraftHydrated = useRef(false);
   const isMobile = useIsMobile();
+  /* The runtime's own connection, for the phone's Queue slot (§4.2): while the
+     bus is off this reads inert, so nothing changes on the landing-disabled
+     path. */
+  const runtimeBus = useRuntimeBusState();
+  const runtimeOffline = runtimeBus.enabled && runtimeBus.connection === "offline";
+  /* One in-flight slot action at a time — Stop or Respawn. */
+  const [slotBusy, setSlotBusy] = useState(false);
   /* Interrupt / compact / attach-terminal / mode chip moved into the unified
      control strip (issue #241) — the composer keeps only the message surface
      (text, images, mic, send) and its delivery receipts. */
@@ -2609,16 +2617,107 @@ export function TmuxComposerCore({
         ? t("composer.spawnAria")
         : t("composer.sendAria", { target: target ?? "" });
 
+  /* ── The phone's send slot (mobile v2 §2 rule 8, §4.2) ──────────────────────
+     The one inline control under the field. It replaced two rows the operator
+     photographed above the keyboard: the live-tail pill and the «working …»
+     status bar. Its kind is decided from the SAME state authority every other
+     phone surface reads (`chatState`), so the slot and the bar's meta line can
+     never disagree about what the conversation is doing. Desktop passes no slot
+     and keeps its plain send. */
+  const phoneState = chatState(file);
+  const composerHasDraft = text.trim().length > 0 || attachments.images.length > 0 || attachments.files.length > 0;
+  const slotKind = composerSlotKind({
+    killed: phoneState === "killed",
+    offline: runtimeOffline,
+    working: phoneState === "working",
+    hasDraft: composerHasDraft,
+  });
+
+  /* Stop, from the composer instead of a strip the phone no longer shows. It
+     routes exactly where this composer's own send does — the structured host
+     it already resolved, or the legacy conversation-host action. */
+  const stopTurn = async () => {
+    if (slotBusy) return;
+    setSlotBusy(true);
+    setStatus(null);
+    try {
+      const result = structuredSession
+        ? await interruptRuntime(structuredSession.session.conversationId, mintIdempotencyKey())
+        : await fetch("/api/tmux", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ action: "interrupt", path: file.path }),
+          }).then(async (response) => {
+            const body = (await response.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+            return { ok: response.ok && body.ok === true, error: body.error };
+          });
+      if (!result.ok) setStatus({ kind: "err", text: result.error ?? t("composer.failedInterrupt") });
+    } catch {
+      setStatus({ kind: "err", text: t("common.serverUnavailable") });
+    } finally {
+      setSlotBusy(false);
+    }
+  };
+
+  /* Respawn, the killed conversation's way back (§4.2). The conversation menu
+     leaves it here deliberately: with no agent there is nothing to send to, so
+     the send slot IS the recovery. Same durable `resume` the dead-host banner
+     uses, followed by the snapshot refresh that clears the killed state. */
+  const respawnAgent = async () => {
+    if (slotBusy) return;
+    setSlotBusy(true);
+    setStatus(null);
+    try {
+      const response = await fetch("/api/tmux", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "resume", path: file.path }),
+      });
+      if (!response.ok) {
+        const body = (await response.json().catch(() => ({}))) as { error?: string };
+        setStatus({ kind: "err", text: body.error ?? t("deadHost.respawnFailed") });
+      } else {
+        await runtimeDependencies.refreshRuntime();
+      }
+    } catch {
+      setStatus({ kind: "err", text: t("deadHost.respawnFailed") });
+    } finally {
+      setSlotBusy(false);
+    }
+  };
+
+  const SLOT: Record<ComposerSlotKind, { label: string; text?: string; onAct?: () => void }> = {
+    /* `send` keeps the bar's own idle label — the surface decides whether this
+       composer sends to an agent or launches one. */
+    send: { label: spawnMode ? t("composer.launchAgent") : t("composer.sendToAgent") },
+    stop: { label: t("mobile2.composer.stop"), onAct: () => void stopTurn() },
+    queue: { label: t("mobile2.composer.queueAria"), text: t("mobile2.composer.queue") },
+    respawn: { label: t("mobile2.composer.respawnAria"), text: t("mobile2.composer.respawn"), onAct: () => void respawnAgent() },
+  };
+
+  /* The placeholder says what happens to what is typed, in the same words the
+     bar's meta line uses (§4.2's state table). */
+  const phonePlaceholder = phoneState === "killed"
+    ? t("mobile2.composer.placeholderKilled")
+    : runtimeOffline
+      ? t("mobile2.composer.placeholderOffline")
+      : phoneState === "held"
+        ? t("mobile2.composer.placeholderHeld")
+        : null;
+
   const composerBar = (
     <ComposerBar
       composer={composer}
-      placeholder={placeholder ?? (unresolvedOwnership
-        ? t("composer.placeholderResolving")
-        : relayMode
-          ? t("composer.placeholderRelay")
-          : spawnMode
-            ? t("composer.placeholderSpawn")
-            : t("composer.placeholderSend"))}
+      placeholder={placeholder ?? (isMobile && phonePlaceholder
+        ? phonePlaceholder
+        : unresolvedOwnership
+          ? t("composer.placeholderResolving")
+          : relayMode
+            ? t("composer.placeholderRelay")
+            : spawnMode
+              ? t("composer.placeholderSpawn")
+              : t("composer.placeholderSend"))}
+      sendSlot={isMobile ? { kind: slotKind, busy: slotBusy, ...SLOT[slotKind] } : null}
       textareaAriaLabel={t("composer.textAria")}
       imageAriaLabel={t("composer.addAttachments")}
       sendLabelIdle={spawnMode ? t("composer.launchAgent") : t("composer.sendToAgent")}

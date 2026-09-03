@@ -4,6 +4,7 @@ import { ArrowDownToLine, CornerDownRight, type LucideIcon, Wrench } from "lucid
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { ArrowDown, ChevronUp, Sparkle } from "@/components/icons";
+import { useIsMobile } from "@/hooks/useIsMobile";
 import { useRuntimeSessionForConversation } from "@/hooks/useRuntime";
 import { useToolActivityCues } from "@/hooks/useToolActivityCues";
 import { accountIdFromPath } from "@/lib/accounts/badge";
@@ -170,6 +171,15 @@ interface Props {
 }
 
 export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, setFollow, compact = false, onLaunchRetry }: Props) {
+  /* Mobile v2 §3.4, §6: on the phone the transcript ends at the composer. The
+     live-tail pill and the turn status bar below it are both gone — following
+     is the feed's default and needs no pill, and elapsed time lives in the
+     bar's meta line while Stop is the composer's send slot. Together they were
+     the ~40 px of bottom chrome the old budget never counted, and two of the
+     three rows the operator photographed stacked above the keyboard. The
+     «back to live» control is NOT part of that: it only exists once the
+     operator has scrolled away, and without it a phone cannot get back. */
+  const phone = useIsMobile();
   const { locale, t } = useLocale();
   const memoryKey = file ? conversationIdentity(file) : null;
   /* The conversation's own outbox (issue #561): submitted drafts render as
@@ -800,7 +810,7 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
     <div className="relative flex min-h-0 flex-1 flex-col">
       {file && feed.items.length ? (
         magnet ? (
-          file.activity === "live" ? (
+          file.activity === "live" && !phone ? (
             <div
               data-live-tail-pill
               className={`pointer-events-none absolute bottom-2 ${pillPos} z-10 inline-flex items-center gap-1 rounded-full bg-success px-2 py-0.5 text-[10px] font-bold text-white shadow-1 transition-transform duration-200 ${
@@ -1093,8 +1103,11 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
       </div>
     </div>
     {/* Bottom working-status slot: live elapsed from the transcript receipt.
-        Completed totals stay beside their response rows in the scroller. */}
-    {file ? (
+        Completed totals stay beside their response rows in the scroller. Not on
+        the phone (mobile v2 §3.4): the bar's meta line carries the state phrase
+        and its clock, and a second one under the feed is the row the operator
+        asked us to remove. */}
+    {file && !phone ? (
       <TurnStatusBar file={file} workingLabel={working.label} workingIcon={working.icon} compact={compact} />
     ) : null}
     </div>
