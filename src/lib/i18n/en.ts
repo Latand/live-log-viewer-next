@@ -2413,6 +2413,13 @@ export const en = {
   "mobile2.attention.title": "Needs you",
   "mobile2.attention.next": "Next",
   "mobile2.attention.empty": "Nothing needs you.",
+  /* mobile v2 lane 8 (#1439): the Needs-you sheet rows, the arrival banner.
+     Append-only, keys prefixed mobile2.attention.* */
+  "mobile2.attention.pipeline": "pipeline",
+  "mobile2.attention.nextHint": "Open the next one that needs you",
+  "mobile2.attention.arrival": "Needs you · {decision}",
+  "mobile2.attention.open": "Open {title}",
+  "mobile2.attention.dismiss": "Dismiss",
   "mobile2.accounts.title": "Accounts & limits",
   /* Mobile v2 feed (#1439, lane 4): the phone's message header, tool runs
      and question card. Append-only, keys prefixed mobile2.feed.* */
