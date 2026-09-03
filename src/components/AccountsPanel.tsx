@@ -11,6 +11,7 @@ import {
   type AccountOperation,
   type AccountAuthHealth,
   type AccountOption,
+  type DeviceAuth,
   type EngineAccountsState,
   type LimitsAction,
 } from "@/hooks/useEngineAccounts";
@@ -899,14 +900,19 @@ export function AccountsPanel({
 
 export type MobileAccountState = "active" | "ready" | "needsSignIn" | "pending";
 
-/** One state per row: a live sign-in outranks everything (the row shows the
-    device sign-in), then a missing or signed-out credential (the row stays
-    inactive even when the registry still names it active), then active. */
+const MOBILE_STATE_OF: Record<RowState, MobileAccountState> = {
+  pending: "pending",
+  needsLogin: "needsSignIn",
+  active: "active",
+  idle: "ready",
+};
+
+/** One state per row, in the phone's words. The precedence is the dialog's own
+    `rowState` — a live sign-in outranks everything, then a missing or
+    signed-out credential (the row stays inactive even when the registry still
+    names it active), then active — so the two surfaces cannot drift apart. */
 export function mobileAccountState(account: AccountOption, activeId: string): MobileAccountState {
-  if (account.loginPending) return "pending";
-  if (!account.authPresent || authHealth(account) === "signed_out") return "needsSignIn";
-  if (account.id === activeId) return "active";
-  return "ready";
+  return MOBILE_STATE_OF[rowState(account, activeId)];
 }
 
 /** The corner number: the tightest window, named. `null` without a reading. */
@@ -929,20 +935,27 @@ function mobileSignInAvailable(engine: "claude" | "codex", account: AccountOptio
 
 /** Codex keeps its device-login contract on the accounts route (`action:
     "retry"`); the store has no verb for it, so the screen asks the route and
-    re-reads the list, which then carries the pending login and its code. */
-async function startCodexDeviceSignIn(state: EngineAccountsState, accountId: string): Promise<boolean> {
+    re-reads the list, which then carries the pending login. The verification
+    link and its code come back in THAT answer and nowhere else, so the caller
+    keeps what it was handed and the row shows it. */
+async function startCodexDeviceSignIn(state: EngineAccountsState, accountId: string): Promise<{ ok: boolean; deviceAuth: DeviceAuth | null }> {
+  let deviceAuth: DeviceAuth | null = null;
   try {
     const response = await fetch("/api/accounts/codex", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ action: "retry", id: accountId }),
     });
-    if (!response.ok) return false;
+    if (!response.ok) return { ok: false, deviceAuth: null };
+    const body = await response.json().catch(() => null) as { deviceAuth?: { url?: unknown; code?: unknown } } | null;
+    const url = body?.deviceAuth?.url;
+    const code = body?.deviceAuth?.code;
+    if (typeof url === "string" && typeof code === "string") deviceAuth = { url, code };
   } catch {
-    return false;
+    return { ok: false, deviceAuth: null };
   }
   await state.refresh();
-  return true;
+  return { ok: true, deviceAuth };
 }
 
 function planLabel(plan: string | null | undefined, t: TFunction): string | null {
@@ -998,7 +1011,7 @@ function MobileAccountHead({ account, engine, state, quota, t }: { account: Acco
   const corner = state === "pending" ? null : mobileAccountCorner(quota, t);
   const plan = planLabel(account.plan ?? quota.plan, t);
   const observed = limitRows(quota, t).map((row) => row.window.observedAt).filter((value): value is number => value !== null);
-  const checked = state === "active" && observed.length ? formatCheckedClock(new Date(Math.min(...observed) * 1000).toISOString()) : null;
+  const checked = observed.length ? formatCheckedClock(new Date(Math.min(...observed) * 1000).toISOString()) : null;
   return (
     <>
       <MobileEngineFill engine={engine} />
@@ -1028,23 +1041,25 @@ function MobileAccountHead({ account, engine, state, quota, t }: { account: Acco
 }
 
 /** The device sign-in a pending row shows under itself: Codex hands over the
-    verification link and its code; Claude's login row carries its own link,
-    code entry and Cancel. Both are 44 px targets. */
-function MobilePendingSignIn({ account, engine, state, loginBusy }: { account: AccountOption; engine: "claude" | "codex"; state: EngineAccountsState; loginBusy: boolean }) {
+    verification link and its code — from the list when it carries one, else
+    from the answer this screen's own tap was handed; Claude's login row
+    carries its own link, code entry and Cancel. Both are 44 px targets. */
+function MobilePendingSignIn({ account, engine, state, loginBusy, deviceAuth }: { account: AccountOption; engine: "claude" | "codex"; state: EngineAccountsState; loginBusy: boolean; deviceAuth: DeviceAuth | null }) {
   const { t } = useLocale();
   if (engine === "claude") return account.login ? <ClaudeLoginRow key={account.login.operationId} account={account} state={state} loginBusy={loginBusy} /> : null;
-  if (!account.deviceAuth) return null;
+  const challenge = account.deviceAuth ?? deviceAuth;
+  if (!challenge) return null;
   return (
     <div data-mobile2-account-device-signin className="flex items-center gap-2 px-3 text-label text-muted">
-      <a href={account.deviceAuth.url} target="_blank" rel="noreferrer noopener" className="inline-flex min-h-11 items-center font-semibold text-accent underline">
+      <a href={challenge.url} target="_blank" rel="noreferrer noopener" className="inline-flex min-h-11 items-center font-semibold text-accent underline">
         {t("mobile2.accounts.openSignIn")}
       </a>
-      <code className="select-all font-mono text-ui font-semibold text-primary">{account.deviceAuth.code}</code>
+      <code className="select-all font-mono text-ui font-semibold text-primary">{challenge.code}</code>
     </div>
   );
 }
 
-function MobileAccountCard({ account, engine, state, quota, now, engineState, receipts, focused, loginBusy, onSwitch, onSignIn }: {
+function MobileAccountCard({ account, engine, state, quota, now, engineState, receipts, focused, loginBusy, deviceAuth, onSwitch, onSignIn }: {
   account: AccountOption;
   engine: "claude" | "codex";
   state: MobileAccountState;
@@ -1054,6 +1069,9 @@ function MobileAccountCard({ account, engine, state, quota, now, engineState, re
   receipts: ReceiptStore;
   focused: boolean;
   loginBusy: boolean;
+  /** The device sign-in this screen's own tap opened for this account, when
+      the account list does not carry the challenge itself. */
+  deviceAuth: DeviceAuth | null;
   onSwitch: () => void;
   onSignIn: () => void;
 }) {
@@ -1088,7 +1106,7 @@ function MobileAccountCard({ account, engine, state, quota, now, engineState, re
         ) : (
           <div className={rowClass}>{head}</div>
         )}
-        {state === "pending" ? <MobilePendingSignIn account={account} engine={engine} state={engineState} loginBusy={loginBusy} /> : null}
+        {state === "pending" || deviceAuth ? <MobilePendingSignIn account={account} engine={engine} state={engineState} loginBusy={loginBusy} deviceAuth={deviceAuth} /> : null}
         {engine === "claude" && state === "needsSignIn" && account.login?.result?.status === "failure"
           ? <ClaudeLoginRow key={account.login.operationId} account={account} state={engineState} loginBusy={loginBusy} />
           : null}
@@ -1234,6 +1252,7 @@ function MobileEngineSection({ state, now, focusAccountId, receipts }: { state: 
   const { engine, accounts, active, notice, status } = state;
   const engineName = engineDisplay(engine);
   const loginBusy = engine === "claude" && accounts.some((account) => account.login != null && NONTERMINAL_CLAUDE_LOGIN_PHASES.has(account.login.phase));
+  const [challenge, setChallenge] = useState<{ accountId: string; deviceAuth: DeviceAuth } | null>(null);
   /* The active card leads; the rest keep the registry's order. */
   const ordered = [...accounts].sort((a, b) => Number(mobileAccountState(b, active) === "active") - Number(mobileAccountState(a, active) === "active"));
 
@@ -1244,9 +1263,15 @@ function MobileEngineSection({ state, now, focusAccountId, receipts }: { state: 
       receipts.show(t("mobile2.accounts.switched", { label: account.label }), { kind: "switchBack", run: () => void state.select(before) });
     });
   };
+  /* A sign-in tap opens the device sign-in and nothing else: the account it
+     names never becomes the active one here (P2-8, README §4.8). It returns
+     that way — by signing in — and the next list read is what says so. */
   const signIn = (account: AccountOption) => {
-    const started = engine === "claude" ? state.retryLogin(account.id) : startCodexDeviceSignIn(state, account.id);
-    void started.then((ok) => {
+    const started = engine === "claude"
+      ? state.retryLogin(account.id).then((ok) => ({ ok, deviceAuth: null as DeviceAuth | null }))
+      : startCodexDeviceSignIn(state, account.id);
+    void started.then(({ ok, deviceAuth }) => {
+      setChallenge(ok && deviceAuth ? { accountId: account.id, deviceAuth } : null);
       receipts.show(t(ok ? "mobile2.accounts.signInStarted" : "mobile2.accounts.signInFailed", { label: account.label }));
     });
   };
@@ -1271,6 +1296,7 @@ function MobileEngineSection({ state, now, focusAccountId, receipts }: { state: 
           receipts={receipts}
           focused={account.id === focusAccountId}
           loginBusy={loginBusy}
+          deviceAuth={challenge?.accountId === account.id ? challenge.deviceAuth : null}
           onSwitch={() => switchTo(account)}
           onSignIn={() => signIn(account)}
         />

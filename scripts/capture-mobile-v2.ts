@@ -155,7 +155,10 @@ export interface Control {
   /** True when the unclipped box is under the 44 px floor. */
   small: boolean;
   /** Index into `receipts` when the control lives inside that receipt. */
-  inReceipt: number | null;
+  /** Indices of every receipt element that CONTAINS this control. The banner
+      slot wraps its own toast, so a control can sit inside two of them; a
+      control inside the receipt under test is not covered by it. */
+  inReceipts: number[];
 }
 export interface Geometry {
   scrollWidth: number;
@@ -196,7 +199,7 @@ export function evaluateGates(g: Geometry, ctx: GateContext): GateFailure[] {
   }
   if (overlaps.length) out.push({ gate: "overlap", message: `${overlaps.length} pair(s) of controls overlap — ${overlaps.slice(0, 4).join("; ")}` });
   g.receipts.forEach((receipt, index) => {
-    const hit = g.controls.find((c) => c.inReceipt !== index && intersects(receipt, c.rect));
+    const hit = g.controls.find((c) => !c.inReceipts.includes(index) && intersects(receipt, c.rect));
     if (hit) out.push({ gate: "receipt", message: `a receipt at ${Math.round(receipt.x)},${Math.round(receipt.y)} (${Math.round(receipt.w)}×${Math.round(receipt.h)}) covers ${fmt(hit)}` });
   });
   if (g.canvas !== CANVAS[ctx.scheme]) out.push({ gate: "scheme", message: `canvas is ${g.canvas}, expected the ${ctx.scheme} scheme's ${CANVAS[ctx.scheme]}` });
@@ -338,13 +341,13 @@ async function measure(page: Page): Promise<Geometry> {
       if (!visible(el) || el.hasAttribute("aria-hidden") || (el as HTMLElement).tabIndex < 0 && el.tagName !== "BUTTON" && el.tagName !== "A") continue;
       const c = clip(el);
       if (c.w <= 0 || c.h <= 0) continue;
-      const inReceipt = receiptEls.findIndex((r) => r.contains(el));
+      const inReceipts = receiptEls.flatMap((r, index) => (r.contains(el) ? [index] : []));
       controls.push({
         tag: el.tagName.toLowerCase(),
         label: (el.getAttribute("aria-label") || el.textContent || "").trim().replace(/\s+/g, " ").slice(0, 40),
         rect: { x: c.x, y: c.y, w: c.w, h: c.h },
         small: c.full.w < hit - 0.5 || c.full.h < hit - 0.5,
-        inReceipt: inReceipt >= 0 ? inReceipt : null,
+        inReceipts,
       });
     }
     const first = (sel: string) => [...document.querySelectorAll(sel)].find(visible) ?? null;
@@ -410,6 +413,107 @@ const SEEDS: Seed[] = [
     crowd: true,
   })),
 ];
+
+/* ────────────────────────────────────────────────────────────────────────── *
+ * The accounts answer — the prototype's accounts fixture, on the wire's shape  *
+ * ────────────────────────────────────────────────────────────────────────── */
+
+/* `docs/design/mobile-v2/prototype/fixture.js` `accounts`, told the way
+   `/api/accounts` tells it, so the Accounts & limits screen (lane 9) renders
+   what the picture shows: an active card with its windows, an authenticated
+   account as a quiet `ready` row, and one that is not signed in. Every label,
+   plan and number here is invented. The seeded home cannot carry this — a
+   managed account is a directory with a credential in it, and a limits
+   reading is a live provider answer — so the answer is fulfilled, exactly as
+   the board's files, pipelines and seat answers are. */
+
+const accountWindow = (usedPercent: number, resetsInHours: number, windowMinutes: number) =>
+  ({ usedPercent, resetsAt: CAPTURE_S + Math.round(resetsInHours * 3_600), windowMinutes });
+
+interface AccountFixture {
+  id: string;
+  label: string;
+  kind: "legacy" | "managed";
+  authPresent: boolean;
+  plan?: string;
+  /** Minutes before the capture instant the reading was taken. */
+  checkedAgoMinutes?: number;
+  session?: ReturnType<typeof accountWindow>;
+  weekly?: ReturnType<typeof accountWindow>;
+  flagship?: ReturnType<typeof accountWindow> & { tier: string };
+  resets?: { availableCount: number; expiresAt: number | null };
+}
+
+const ACCOUNTS: Record<"claude" | "codex", { active: string; accounts: AccountFixture[] }> = {
+  claude: {
+    active: "main",
+    accounts: [
+      {
+        id: "main", label: "Main", kind: "legacy", authPresent: true, plan: "max", checkedAgoMinutes: 8,
+        session: accountWindow(38, 2.6, 300),
+        weekly: accountWindow(62, 72, 10_080),
+        flagship: { ...accountWindow(29, 72, 10_080), tier: "opus" },
+      },
+      {
+        id: "lab", label: "Lab", kind: "managed", authPresent: true, plan: "pro", checkedAgoMinutes: 20,
+        session: accountWindow(12, 4, 300),
+        weekly: accountWindow(36, 140, 10_080),
+      },
+      { id: "second", label: "Second", kind: "managed", authPresent: false },
+    ],
+  },
+  codex: {
+    active: "main",
+    accounts: [
+      {
+        id: "main", label: "Main", kind: "legacy", authPresent: true, plan: "pro", checkedAgoMinutes: 5,
+        session: accountWindow(72, 1.4, 300),
+        weekly: accountWindow(55, 48, 10_080),
+        resets: { availableCount: 1, expiresAt: CAPTURE_S + 20 * 86_400 },
+      },
+      { id: "spare", label: "Spare", kind: "managed", authPresent: false },
+    ],
+  },
+};
+
+function accountsAnswer(): Record<string, unknown> {
+  const engineBlock = (engine: "claude" | "codex") => {
+    const block = ACCOUNTS[engine];
+    return {
+      active: block.active,
+      accounts: block.accounts.map((account) => {
+        const reading = account.session || account.weekly || account.flagship;
+        const checkedAt = new Date(CAPTURE_MS - (account.checkedAgoMinutes ?? 0) * 60_000).toISOString();
+        return {
+          id: account.id,
+          label: account.label,
+          kind: account.kind,
+          authPresent: account.authPresent,
+          loginPending: false,
+          loginState: account.authPresent ? "authenticated" : "idle",
+          attemptState: null,
+          deviceAuth: null,
+          login: null,
+          auth: { state: account.authPresent ? "authenticated" : "signed_out", method: null, email: null, plan: account.plan ?? null, checkedAt: account.authPresent ? checkedAt : null },
+          limits: reading
+            ? { state: "fresh", session: account.session ?? null, weekly: account.weekly ?? null, flagship: account.flagship ?? null, checkedAt }
+            : { state: "unavailable", session: null, weekly: null, flagship: null, checkedAt: null },
+          resetCredits: account.resets ?? null,
+          effective: null,
+        };
+      }),
+      migration: null,
+      autoBalance: { enabled: false, cooldownUntil: null, thresholdPercent: 15, state: "disabled" },
+    };
+  };
+  return {
+    claude: engineBlock("claude"),
+    codex: engineBlock("codex"),
+    mutationLocked: { claude: false, codex: false },
+    migration: { claude: null, codex: null },
+    autoBalance: { claude: engineBlock("claude").autoBalance, codex: engineBlock("codex").autoBalance },
+  };
+}
 
 interface Home { base: string; home: string; repoDir: string; outDir: string }
 
@@ -729,6 +833,7 @@ async function installAnswers(page: Page, a: Answers): Promise<{ failSnapshot: (
     await route.fulfill({ response, body: JSON.stringify(body) });
   });
   await page.route("**/api/pipelines", (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ pipelines: pipelinesAnswer(a) }) }));
+  await page.route("**/api/accounts", (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(accountsAnswer()) }));
   await page.route("**/api/orchestrator/seat", (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(seatAnswer(a, !a.scenario.noseat)) }));
   await page.route("**/api/orchestrator/seat?*", (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(seatAnswer(a, !a.scenario.noseat)) }));
   await page.route("**/api/orchestrator/seat/status*", (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(seatStatus(a)) }));

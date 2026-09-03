@@ -6,7 +6,8 @@ import { createRoot, type Root } from "react-dom/client";
 import type { EngineAccountsState } from "@/hooks/useEngineAccounts";
 import { installActEnv } from "@/test-helpers/actEnv";
 
-import { EngineAccountSwitchControl } from "./EngineAccountSwitch";
+import { getMobileNav, topScreen } from "./mobile/mobileNav";
+import { EngineAccountSwitch, EngineAccountSwitchControl } from "./EngineAccountSwitch";
 
 const dom = new Window();
 Object.assign(globalThis, {
@@ -19,6 +20,14 @@ Object.assign(globalThis, {
   MouseEvent: dom.MouseEvent,
   PointerEvent: dom.PointerEvent,
   KeyboardEvent: dom.KeyboardEvent,
+});
+/** Phone or desktop, per test: `useIsMobile` reads this and nothing else. */
+let phone = false;
+(dom as unknown as { matchMedia(query: string): unknown }).matchMedia = (query: string) => ({
+  matches: phone,
+  media: query,
+  addEventListener() {},
+  removeEventListener() {},
 });
 installActEnv();
 
@@ -126,4 +135,62 @@ test("the active account is collapsed at rest and the full switch flow opens on 
   expect(harbor).toBeTruthy();
   await act(async () => harbor!.click());
   expect(selected as unknown as string).toBe("account-harbor");
+});
+
+/*
+ * The phone has ONE accounts surface (mobile v2 lane 9, README §3.1 and §4.8):
+ * the Accounts & limits screen the board menu pushes. A trigger on a
+ * phone-sized viewport goes there instead of floating the desktop dialog over
+ * whatever the operator is looking at — the dialog is a 95vw flyout with its
+ * own scroller, which is exactly the surface this redesign replaces.
+ */
+
+test("with an accounts screen to open, the trigger pushes it and never opens the dialog", async () => {
+  let opened = 0;
+  const state = accountState(async () => true);
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  mounted.push({ root, host });
+
+  await act(async () => root.render(<EngineAccountSwitchControl state={state} onOpenScreen={() => { opened += 1; }} />));
+
+  const trigger = host.querySelector('button[aria-haspopup="dialog"]') as HTMLButtonElement;
+  // Nothing expands here: the control hands over to a screen.
+  expect(trigger.getAttribute("aria-expanded")).toBeNull();
+
+  await act(async () => trigger.click());
+
+  expect(opened).toBe(1);
+  expect(host.querySelector('[role="dialog"]')).toBeNull();
+  expect(host.textContent).not.toContain("Harbor light");
+});
+
+test("on a phone the mounted switch lands the shell on the accounts screen", async () => {
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(JSON.stringify({
+    claude: { active: "cl-main", accounts: [{ id: "cl-main", label: "Main", kind: "managed", authPresent: true, loginPending: false }] },
+    codex: { active: "cx-main", accounts: [{ id: "cx-main", label: "Main", kind: "managed", authPresent: true, loginPending: false }] },
+  }), { status: 200, headers: { "content-type": "application/json" } })) as unknown as typeof fetch;
+  phone = true;
+  try {
+    const nav = getMobileNav();
+    nav.home();
+    expect(topScreen(nav.getState()).kind).toBe("board");
+
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    mounted.push({ root, host });
+    await act(async () => root.render(<EngineAccountSwitch engine="codex" />));
+
+    await act(async () => (host.querySelector('button[aria-haspopup="dialog"]') as HTMLButtonElement).click());
+
+    expect(topScreen(nav.getState()).kind).toBe("accounts");
+    expect(host.querySelector('[role="dialog"]')).toBeNull();
+    nav.home();
+  } finally {
+    phone = false;
+    globalThis.fetch = realFetch;
+  }
 });
