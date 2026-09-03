@@ -7,6 +7,7 @@ import { TaskSheet, type TaskSheetView } from "@/components/tasks/TaskSheet";
 import { taskRelationsByPath } from "@/components/tasks/taskRelations";
 import { useBoardState } from "@/hooks/useBoardState";
 import { useKeyboardInset } from "@/hooks/useComposer";
+import { useNowSeconds } from "@/hooks/useNowSeconds";
 import { useRuntimeBusState } from "@/hooks/useRuntime";
 import { selectionInOrder, viewBus } from "@/hooks/viewPresenceBus";
 import { projectDisplayName } from "@/lib/displayNames";
@@ -40,7 +41,7 @@ import { focusHandoffBus } from "@/components/attention/focusHandoffBus";
 import { deckKey } from "@/components/scheme/agentLinks";
 import { buildFocusFrameIndex, stageAnchorAliases } from "@/components/scheme/focusFrames";
 import { buildSchemeLayout } from "@/components/scheme/layout";
-import { SubagentBadges } from "@/components/scheme/SubagentBadges";
+import { subagentsOf } from "@/components/scheme/subagentBadgeModel";
 import type { SubagentTrayApi } from "@/components/scheme/SubagentTrayView";
 import type { WorkerStack } from "@/components/scheme/workerCollapse";
 
@@ -81,12 +82,6 @@ export const SWIPE_ZONE = "[data-mobile2-bar], [data-mobile2-dock]";
 /** How long the title cell's end-of-list bump runs (§5). */
 export const BUMP_MS = 200;
 const EMPTY_PATHS: ReadonlySet<string> = new Set();
-
-/* Height of the phone's bottom-up subagent badge rail — the 12-badge hard cap
-   at 30 px + 6 px gaps. It anchors to the focused pane's left edge and lifts
-   clear of the composer; expansion grows rightward inside the 390 px viewport,
-   so it never adds horizontal overflow. */
-const SUBAGENT_RAIL_H = 12 * 36;
 
 /** True when a touch that landed on `target` belongs to the swipe zone. */
 export function inSwipeZone(target: EventTarget | null): boolean {
@@ -338,6 +333,15 @@ export function MobileFocusView({ project, projectName, groups, manual, files, f
   const activeDeck = useMemo(() => layout.decks.find((deck) => deck.key === resolvedKey) ?? null, [layout, resolvedKey]);
   const activeDraft = useMemo(() => layout.drafts.find((draft) => draft.key === resolvedKey) ?? null, [layout, resolvedKey]);
   const activeFile = activeNode?.file ?? null;
+  /* The focused conversation's spawned children, for the `⋯` menu's rows. The
+     desktop reads the same model for its badges; the state a row shows moves
+     with this clock, so a child that goes quiet leaves «working» without a
+     rescan (issue #669). */
+  const nowSeconds = useNowSeconds();
+  const subagents = useMemo(
+    () => (activeFile ? subagentsOf(conversationIdentity(activeFile), files, undefined, nowSeconds) : []),
+    [activeFile, files, nowSeconds],
+  );
   /* Report the focused conversation up so the project shell can dock its
      handoff control in the host sheet (issue #177 item 5). */
   useEffect(() => {
@@ -604,6 +608,11 @@ export function MobileFocusView({ project, projectName, groups, manual, files, f
           onToggleCrown={favoritesApi ? () => favoritesApi.toggle(conversationIdentity(activeFile)) : undefined}
           onHandoff={onHandoff ? () => onHandoff(activeFile) : undefined}
           onOpenHost={() => nav.openSheet("host")}
+          subagents={subagents}
+          onOpenSubagent={(path) => {
+            const target = files.find((item) => item.path === path);
+            if (target) onSelect(target);
+          }}
           onOpenSearch={onOpenSearch}
           onOpenProjectMenu={boardSheet ? () => setMenuFace("board") : undefined}
           projectName={displayName}
@@ -629,28 +638,11 @@ export function MobileFocusView({ project, projectName, groups, manual, files, f
         relatedTasks={relatedTasksByPath.get(activeNode.file.path)}
         onOpenTask={openPipelineTask}
       />
-      {/* The folded children (PR #441): the same 30 px bottom-up circles the
-          desktop board carries, anchored to the pane's left edge and lifted
-          above the composer. The overlay is pointer-events-none and reserves no
-          height, so it costs the transcript nothing — but it is the phone's ONE
-          route to a folded child, so it stays until the feed opens members
-          itself (§3.4). The docked subagent TRAY, which did spend 44 px, is
-          gone with the rest of this screen's chrome. */}
-      <div
-        data-testid="mobile-subagent-rail"
-        className="pointer-events-none absolute bottom-20 left-2 z-[20]"
-        style={{ width: 0, height: SUBAGENT_RAIL_H }}
-      >
-        <SubagentBadges
-          conversationId={conversationIdentity(activeNode.file)}
-          entries={files}
-          cardRect={{ x: 0, y: 0, w: 0, h: SUBAGENT_RAIL_H }}
-          onNavigate={(path) => {
-            const target = files.find((item) => item.path === path);
-            if (target) onSelect(target);
-          }}
-        />
-      </div>
+      {/* No badge rail and no docked tray over the feed (README §3.4, §6):
+          the desktop scheme's badges are laid out from a card rect the phone
+          does not have, so mounted here they floated down the feed's left edge
+          over the prose (#1439). The children are rows in the `⋯` menu instead
+          — `subagents`, below — so the transcript keeps its full width. */}
     </div>
   ) : activeDeck ? (
     <div key={activeDeck.key} className="relative min-h-0 flex-1">

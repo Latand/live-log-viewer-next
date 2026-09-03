@@ -7,11 +7,16 @@ import type { FileEntry } from "@/lib/types";
 import { emptyStore } from "@/components/runtime/runtimeModel";
 
 /*
- * 390px acceptance for PR #441: the REAL phone wrapper (`MobileFocusView`)
- * mounts the subagent badge/anchor interaction on the focused conversation —
- * the two-tap title-then-navigation the desktop board already carries — and
- * navigates to the CURRENT non-archived generation rather than the stale
- * file-order entry.
+ * 390 × 844 acceptance for #1439's phone conversation screen and its subagents.
+ *
+ * The desktop scheme's `SubagentBadges` positions every badge absolutely from
+ * `layoutBadges(children, cardRect)`; the phone has no scheme canvas and no card
+ * rect, so mounted there the badges landed down the feed's left edge, over the
+ * prose (the prod defect the operator reported on commit 6b59d462). The phone
+ * gives the feed its full width (lane 4) and reaches a child through the
+ * conversation's own `⋯` menu: an in-flow row per child, which navigates to the
+ * CURRENT non-archived generation rather than the stale file-order entry — the
+ * same guarantee the badge used to carry (PR #441).
  */
 
 const dom = new HappyWindow({ innerWidth: 390, innerHeight: 844 });
@@ -112,24 +117,40 @@ const childCurrent = conversation({
   parent: "/parent.jsonl", conversationId: "conv_child", generation: 2, mtime: 6,
 });
 
-test("the focused conversation mounts its subagent badge at 390px", async () => {
+async function openMenu(): Promise<void> {
+  const more = dom.document.querySelector('[data-mobile2-open="menu"]') as unknown as HTMLButtonElement | null;
+  expect(more).not.toBeNull();
+  flushSync(() => more!.click());
+  await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+test("the phone conversation screen mounts no absolutely-positioned desktop badges over the feed at 390 × 844", async () => {
   const host = await renderFocus([parent, childStale, childCurrent], "/parent.jsonl", () => undefined);
-  const badge = host.querySelector('[data-subagent-badge="conv_child"]') as HTMLButtonElement | null;
-  expect(badge).not.toBeNull();
-  expect(badge!.hasAttribute("data-scheme-ui")).toBe(true);
-  expect(badge!.className).toContain("pointer-events-auto");
+  const pane = host.querySelector('[data-testid="mobile-focused-pane"]');
+  expect(pane).not.toBeNull();
+  /* No desktop badge, no overflow chip, no rail to hold them. */
+  expect(host.querySelector("[data-subagent-badge], [data-subagent-overflow]")).toBeNull();
+  expect(host.querySelector('[data-testid="mobile-subagent-rail"]')).toBeNull();
+  /* Nothing that names a subagent is taken out of the flow inside the pane:
+     an absolutely-positioned marker there is exactly what floated over the
+     prose, wherever its coordinates come from. */
+  const floating = [...pane!.querySelectorAll("[data-subagent-badge], [data-subagent-overflow], [data-subagent-fold]")]
+    .filter((node) => (node as HTMLElement).className.split(/\s+/).includes("absolute"));
+  expect(floating).toEqual([]);
 });
 
-test("two taps navigate to the current non-archived generation, not the stale file-order entry", async () => {
+test("the ⋯ menu lists the child as an in-flow row that opens the current non-archived generation", async () => {
   const selected: string[] = [];
-  const host = await renderFocus([childStale, childCurrent, parent], "/parent.jsonl", (file) => selected.push(file.path));
-  const badge = host.querySelector('[data-subagent-badge="conv_child"]') as HTMLButtonElement;
-  const tap = () => badge.dispatchEvent(new dom.PointerEvent("pointerup", { bubbles: true, pointerType: "touch" }) as unknown as Event);
+  await renderFocus([childStale, childCurrent, parent], "/parent.jsonl", (file) => selected.push(file.path));
+  await openMenu();
+  const rows = [...dom.document.querySelectorAll('[data-mobile2-menu-row="subagent"]')] as unknown as HTMLButtonElement[];
+  expect(rows.map((row) => row.getAttribute("data-mobile2-subagent"))).toEqual(["conv_child"]);
+  const row = rows[0]!;
+  expect(row.textContent).toContain("Spawned worker");
+  /* A sheet row, in the flow of the sheet: never the scheme's floating chip. */
+  expect(row.className.split(/\s+/)).not.toContain("absolute");
+  expect(row.hasAttribute("data-scheme-ui")).toBe(false);
 
-  flushSync(() => tap());
-  expect(badge.getAttribute("aria-expanded")).toBe("true");
-  expect(selected).toEqual([]);
-
-  flushSync(() => tap());
+  flushSync(() => row.click());
   expect(selected).toEqual(["/child-gen2.jsonl"]);
 });
