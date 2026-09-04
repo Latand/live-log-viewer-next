@@ -30,10 +30,14 @@ export function isKnownEffortTier(value: string): boolean {
 }
 
 /* Codex reasoning scales vary per model (`supported_reasoning_levels` in
-   ~/.codex/models_cache.json): gpt-5.6 sol/terra add max+ultra above xhigh,
-   the rest of the 5.6 family adds max, and everything older (or unknown) runs
-   the classic low…xhigh. First matching prefix wins. */
+   ~/.codex/models_cache.json): gpt-6-astra and gpt-5.6 sol/terra add max+ultra
+   above xhigh, the rest of the 5.6 family adds max, and everything older (or
+   unknown) runs the classic low…xhigh. First matching prefix wins, and a model
+   the table has never been told about falls through to the classic scale — so
+   every new flagship has to be added here, or its top tiers vanish from the
+   selector without any error to notice. */
 const CODEX_MODEL_SCALES: readonly (readonly [RegExp, readonly string[]])[] = [
+  [/^gpt-6-astra\b/, ["low", "medium", "high", "xhigh", "max", "ultra"]],
   [/^gpt-5\.6-(sol|terra)\b/, ["low", "medium", "high", "xhigh", "max", "ultra"]],
   [/^gpt-5\.6\b/, ["low", "medium", "high", "xhigh", "max"]],
 ];

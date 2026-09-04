@@ -14,6 +14,10 @@ describe("effortScale", () => {
     expect(effortScale("codex", "gpt-5.6-terra")).toEqual(["low", "medium", "high", "xhigh", "max", "ultra"]);
   });
 
+  test("codex gpt-6-astra carries the max and ultra tiers", () => {
+    expect(effortScale("codex", "gpt-6-astra")).toEqual(["low", "medium", "high", "xhigh", "max", "ultra"]);
+  });
+
   test("other gpt-5.6 models top out at max", () => {
     expect(effortScale("codex", "gpt-5.6-luna")).toEqual(["low", "medium", "high", "xhigh", "max"]);
     expect(effortScale("codex", "gpt-5.6")).toEqual(["low", "medium", "high", "xhigh", "max"]);
@@ -52,6 +56,11 @@ describe("effortMeter", () => {
     expect(effortMeter("codex", "gpt-5.6-sol", "max")).toEqual({ level: 5, slots: 6 });
     expect(effortMeter("codex", "gpt-5.6-terra", "ultra")).toEqual({ level: 6, slots: 6 });
     expect(effortMeter("codex", "gpt-5.6-sol", "low")).toEqual({ level: 1, slots: 6 });
+  });
+
+  test("codex max and ultra sit at the top of the gpt-6-astra meter", () => {
+    expect(effortMeter("codex", "gpt-6-astra", "max")).toEqual({ level: 5, slots: 6 });
+    expect(effortMeter("codex", "gpt-6-astra", "ultra")).toEqual({ level: 6, slots: 6 });
   });
 
   test("recognized tiers outside the model's scale clamp to the nearest end", () => {

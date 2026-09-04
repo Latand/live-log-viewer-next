@@ -139,5 +139,5 @@ test("adoptRuntimeProfile carries the live reconfigure :phase so pending/confirm
 
 test("defaults synthesize a catalog model and lowest in-scale effort for unknown observed runtimes", () => {
   const unknown: FileEntry = { ...file, model: "gpt-9-experimental", effort: "warp" };
-  expect(defaults(unknown)).toEqual({ model: "gpt-5.6-sol", effort: "low", fast: false });
+  expect(defaults(unknown)).toEqual({ model: "gpt-6-astra", effort: "low", fast: false });
 });

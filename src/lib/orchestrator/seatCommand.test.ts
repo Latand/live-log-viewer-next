@@ -1178,7 +1178,7 @@ test("spawn-mode seat creation rejects an explicit model outside the engine cata
 
   expect(result).toEqual({
     status: 400,
-    body: { error: "invalid codex model id \"gpt-5.6-codex\"; valid codex model ids: gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna" },
+    body: { error: "invalid codex model id \"gpt-5.6-codex\"; valid codex model ids: gpt-6-astra, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna" },
   });
   expect(recorded.spawns).toEqual([]);
   expect(orchestratorSeatFor("proj-a")).toMatchObject({ active: null, pending: null });

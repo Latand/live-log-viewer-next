@@ -110,7 +110,7 @@ test("spawn admission rejects an explicit model outside the selected engine cata
 
   expect(response.status).toBe(400);
   expect(await response.json()).toEqual({
-    error: "invalid codex model id \"gpt-5.6-codex\"; valid codex model ids: gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna",
+    error: "invalid codex model id \"gpt-5.6-codex\"; valid codex model ids: gpt-6-astra, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna",
   });
 });
 
@@ -2950,7 +2950,7 @@ test("unknown Codex models reject before image blob and receipt mutation", async
     }), dependencies);
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({
-      error: "invalid codex model id \"gpt-5.3-codex-spark\"; valid codex model ids: gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna",
+      error: "invalid codex model id \"gpt-5.3-codex-spark\"; valid codex model ids: gpt-6-astra, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna",
     });
     expect(storageCalled).toBeFalse();
     expect(Object.keys(agentRegistry().snapshot().receipts).sort()).toEqual(beforeReceipts);

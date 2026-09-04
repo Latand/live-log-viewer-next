@@ -8,11 +8,13 @@ export type AgentModelOption = {
   use: "implement" | "review" | "general";
 };
 
+export const CODEX_ASTRA_MODEL = "gpt-6-astra";
 export const CODEX_SOL_MODEL = "gpt-5.6-sol";
 export const CODEX_TERRA_MODEL = "gpt-5.6-terra";
 export const CODEX_LUNA_MODEL = "gpt-5.6-luna";
 
 const CODEX_IMAGE_INPUT_MODELS = new Set([
+  CODEX_ASTRA_MODEL,
   CODEX_SOL_MODEL,
   CODEX_TERRA_MODEL,
   CODEX_LUNA_MODEL,
@@ -35,6 +37,13 @@ export const ENGINE_MODELS: Record<"claude" | "codex", readonly AgentModelOption
     { id: "haiku", label: "Haiku", shortLabel: "Haiku", use: "general" },
   ],
   codex: [
+    // Astra leads the list because it is the account's own default, and the
+    // head is what runtimeProfile falls back to for a conversation on an
+    // uncatalogued model — it agrees with defaultModelFor below. Its `review`
+    // use is shared with Sol on purpose: the account describes Astra as its
+    // most capable model, and Sol keeps the role it already held, having been
+    // left in the list with no upgrade target.
+    { id: CODEX_ASTRA_MODEL, label: "GPT-6-Astra", shortLabel: "6-Astra", use: "review" },
     { id: CODEX_SOL_MODEL, label: "GPT-5.6-Sol", shortLabel: "5.6-Sol", use: "review" },
     { id: CODEX_TERRA_MODEL, label: "GPT-5.6-Terra", shortLabel: "5.6-Terra", use: "implement" },
     { id: CODEX_LUNA_MODEL, label: "GPT-5.6-Luna", shortLabel: "5.6-Luna", use: "general" },
@@ -54,9 +63,10 @@ export function validateLaunchModel(engine: "claude" | "codex", model: string): 
   };
 }
 
-/** A fresh Codex conversation starts on the architecture/review profile. */
+/** A fresh Codex conversation starts on the architecture/review profile —
+    the model the account itself reports as default. */
 export function defaultModelFor(engine: "claude" | "codex"): string {
-  return engine === "codex" ? CODEX_SOL_MODEL : "opus";
+  return engine === "codex" ? CODEX_ASTRA_MODEL : "opus";
 }
 
 const CLAUDE_MODEL_FAMILIES = ["fable", "opus", "sonnet", "haiku"] as const;

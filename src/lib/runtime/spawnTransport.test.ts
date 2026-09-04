@@ -116,6 +116,7 @@ describe("structuredSpawnGap", () => {
   test("negotiates Claude images and Codex image-capable models", () => {
     expect(structuredSpawnGap({ engine: "claude", model: "fable", hasImages: true, fast: null }, enabled)).toBeNull();
     expect(structuredSpawnGap({ engine: "codex", model: "gpt-5.6-sol", hasImages: true, fast: null }, enabled)).toBeNull();
+    expect(structuredSpawnGap({ engine: "codex", model: "gpt-6-astra", hasImages: true, fast: null }, enabled)).toBeNull();
     expect(structuredSpawnGap({ engine: "codex", model: "gpt-5.3-codex-spark", hasImages: true, fast: null }, enabled))
       .toContain("does not advertise image input");
   });

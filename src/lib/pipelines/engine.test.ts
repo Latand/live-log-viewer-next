@@ -6954,7 +6954,7 @@ test("override-stage rejects an unknown/disallowed role and an incompatible role
   const unknown = await patchPipeline(created.id, { action: "override-stage", stageId: "build", engine: "codex", model: "gpt-5.6-codex" }, ports);
   expect(unknown).toMatchObject({
     status: 400,
-    error: "invalid codex model id \"gpt-5.6-codex\"; valid codex model ids: gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna",
+    error: "invalid codex model id \"gpt-5.6-codex\"; valid codex model ids: gpt-6-astra, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna",
   });
 });
 

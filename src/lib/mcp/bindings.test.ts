@@ -156,13 +156,13 @@ test("spawn_agent rejects an explicit model outside the engine catalog before co
     (error: unknown) => error as Error & { details?: { violations?: Array<{ field: string; message: string; expected: string }> } },
   );
 
-  const message = "invalid codex model id \"gpt-5.6-codex\"; valid codex model ids: gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna";
+  const message = "invalid codex model id \"gpt-5.6-codex\"; valid codex model ids: gpt-6-astra, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna";
   expect(refusal?.name).toBe("McpToolRefusal");
   expect(refusal?.message).toBe(message);
   expect(refusal?.details?.violations).toEqual([{
     field: "model",
     message,
-    expected: "one of: gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna",
+    expected: "one of: gpt-6-astra, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna",
   }]);
   expect(requests).toEqual([]);
 });
@@ -2360,7 +2360,7 @@ test("create_pipeline batches every invalid stage model with each engine catalog
     "stages[0].model",
     "stages[1].model",
   ]);
-  expect(refusal?.message).toContain("valid codex model ids: gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna");
+  expect(refusal?.message).toContain("valid codex model ids: gpt-6-astra, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna");
   expect(refusal?.message).toContain("valid claude model ids: opus, fable, sonnet, haiku");
 });
 

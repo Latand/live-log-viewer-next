@@ -9,6 +9,15 @@ describe("reconfigurationFromBody", () => {
     });
   });
 
+  test("accepts gpt-6-astra at ultra, the tier its account reports", () => {
+    expect(reconfigurationFromBody("codex", { model: "gpt-6-astra", effort: "ultra", fast: false })).toEqual({
+      value: { model: "gpt-6-astra", effort: "ultra", fast: false },
+    });
+    expect(reconfigurationFromBody("codex", { model: "gpt-6-astra", effort: "max", fast: false })).toEqual({
+      value: { model: "gpt-6-astra", effort: "max", fast: false },
+    });
+  });
+
   test("rejects malformed account identifiers before any switch is queued", () => {
     expect(reconfigurationFromBody("codex", {
       model: "gpt-5.6-sol",
