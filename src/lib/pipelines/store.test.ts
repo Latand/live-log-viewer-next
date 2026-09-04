@@ -16,13 +16,13 @@ async function waitForFile(filename: string): Promise<void> {
   }
 }
 
-test("pipelines round-trip through a schema-versioned state file", () => {
+test.each(["max", "ultra"])("Astra %s pipelines persist creation and stage edits", (effort) => {
   const previous = process.env.LLV_STATE_DIR;
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-pipelines-store-"));
   process.env.LLV_STATE_DIR = sandbox;
   try {
     const stages: PipelineStage[] = [
-      { id: "build", kind: "run" as const, role: { roleId: "builder" }, engine: "codex" as const, prompt: "build", next: "review", effectiveRole: { roleId: "builder", engine: "codex", model: "gpt-5.6-sol", effort: "medium", access: "read-write", promptScaffold: "builder" } },
+      { id: "build", kind: "run" as const, role: { roleId: "builder" }, engine: "codex" as const, prompt: "build", next: "review", effectiveRole: { roleId: "builder", engine: "codex", model: "gpt-6-astra", effort, access: "read-write", promptScaffold: "builder" } },
       { id: "review", kind: "review-loop" as const, role: { roleId: "reviewer" }, engine: "codex" as const, prompt: "review", next: null, effectiveRole: { roleId: "reviewer", engine: "codex", model: "gpt-5.6-sol", effort: "xhigh", access: "read-only", promptScaffold: "reviewer" } },
     ];
     const pipeline = buildPipeline({
@@ -41,6 +41,9 @@ test("pipelines round-trip through a schema-versioned state file", () => {
     savePipelines([pipeline]);
     checkpointPipelineRollbackMirrorsForDemotion();
     expect(JSON.parse(fs.readFileSync(path.join(sandbox, "pipelines.json"), "utf8"))).toMatchObject({ schemaVersion: PIPELINES_SCHEMA_VERSION });
+    expect(loadPipelines()).toEqual([pipeline]);
+    pipeline.stages[0]!.effectiveRole.effort = effort === "max" ? "ultra" : "max";
+    savePipelines([pipeline]);
     expect(loadPipelines()).toEqual([pipeline]);
   } finally {
     if (previous === undefined) delete process.env.LLV_STATE_DIR;

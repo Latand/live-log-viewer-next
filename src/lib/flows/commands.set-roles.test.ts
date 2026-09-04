@@ -320,3 +320,26 @@ test("retry-round allocates a fresh immutable reviewer binding", () => {
   expect(retried.reviewerBindingId).toBeString();
   expect(retried.reviewerBindingId).not.toBe("binding-original");
 });
+
+for (const model of ["gpt-6-astra", "gpt-5.6-sol"]) {
+  for (const effort of ["max", "ultra"]) {
+    test(`set-roles persists ${model} ${effort}`, () => {
+      seed();
+      const result = patchFlow("f1", { action: "set-roles", roles: { reviewer: { model, effort } } });
+      expect(result.error).toBeUndefined();
+      expect(loadFlows()[0]!.roles.reviewer).toEqual({ engine: "codex", model, effort });
+    });
+  }
+}
+for (const [engine, model, options] of [
+  ["codex", "gpt-5.6-luna", "low, medium, high, xhigh, max"],
+  ["claude", "opus", "low, medium, high, xhigh, max"],
+] as const) {
+  test(`set-roles refuses ${model} ultra with its actual options`, () => {
+    const original = seed();
+    const result = patchFlow("f1", { action: "set-roles", roles: { reviewer: { engine, model, effort: "ultra" } } });
+    expect(result.status).toBe(400);
+    expect(result.error).toBe(`effort for ${model} must be one of: ${options}`);
+    expect(loadFlows()[0]!.roles).toEqual(original.roles);
+  });
+}

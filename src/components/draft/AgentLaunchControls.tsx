@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 import { ReasoningControls, type SpeedChoice } from "@/components/ReasoningControls";
 import { Select } from "@/components/ui/Select";
 import { engineTintOf } from "@/components/utils";
-import { isEngineEffort } from "@/lib/agent/efforts";
+import { effortScale } from "@/lib/agent/efforts";
 import { defaultModelFor } from "@/lib/agent/models";
 import { useLocale } from "@/lib/i18n";
 
@@ -196,7 +196,7 @@ export function useAgentLaunchDraft(options: {
        explicit choice so the new engine launches on its own active account. */
     setAccountId("");
     setModel(defaultModelFor(value));
-    if (effort && !isEngineEffort(value, effort)) setEffort("");
+    if (effort && !effortScale(value, defaultModelFor(value))!.includes(effort)) setEffort("");
   };
 
   const section = catalog?.[engine] ?? null;

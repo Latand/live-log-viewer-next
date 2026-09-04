@@ -2,7 +2,7 @@
 
 import { useEffect, useId, useState } from "react";
 
-import { ENGINE_EFFORTS } from "@/lib/agent/efforts";
+import { effortScale } from "@/lib/agent/efforts";
 import { ENGINE_MODELS } from "@/lib/agent/models";
 import type { FlowPreset, FlowsResponse, RoleConfig } from "@/lib/flows/types";
 import { useLocale } from "@/lib/i18n";
@@ -56,7 +56,7 @@ function RoleEditor({
         onChange={(event) => onChange({ ...role, effort: event.target.value || null })}
       >
         <option value="">{t("flowDialog.effortDefault")}</option>
-        {ENGINE_EFFORTS[role.engine].map((effort) => (
+        {effortScale(role.engine, role.model)!.map((effort) => (
           <option key={effort} value={effort}>
             {effort}
           </option>

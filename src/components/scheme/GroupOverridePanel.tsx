@@ -3,7 +3,7 @@
 import { Pause, Play, RefreshCw, Square, X } from "lucide-react";
 import { useState } from "react";
 
-import { ENGINE_EFFORTS } from "@/lib/agent/efforts";
+import { effortScale } from "@/lib/agent/efforts";
 import type { FlowEngine } from "@/lib/flows/types";
 import { useLocale } from "@/lib/i18n";
 
@@ -29,7 +29,7 @@ export function resetRuntimeForEngine(
 ): void {
   ctl.setEngine(next);
   ctl.setModel("");
-  if (ctl.effort && !ENGINE_EFFORTS[next].includes(ctl.effort)) ctl.setEffort("");
+  if (ctl.effort && !effortScale(next, null)!.includes(ctl.effort)) ctl.setEffort("");
 }
 
 /**
@@ -80,13 +80,10 @@ const primaryBtn =
 const ghostBtn =
   "inline-flex flex-1 items-center justify-center gap-1 rounded-full border border-border bg-canvas px-3 py-1 text-[11px] font-bold text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40";
 
-/* The effort tiers offered depend on the selected engine — codex tops out at
-   xhigh, claude adds max — so the control can never present a combination the
-   API rejects (issue #118 review: codex + max was a guaranteed 400). A stale
-   value outside the engine's list falls back to the default option. */
-function EffortSelect({ engine, value, onChange, label }: { engine: FlowEngine; value: string; onChange: (value: string) => void; label: string }) {
+/* Offer the selected model's scale, including its supported top tiers. */
+function EffortSelect({ engine, model, value, onChange, label }: { engine: FlowEngine; model: string; value: string; onChange: (value: string) => void; label: string }) {
   const { t } = useLocale();
-  const tiers = ENGINE_EFFORTS[engine];
+  const tiers = effortScale(engine, model.trim() || null)!;
   const safe = value && tiers.includes(value) ? value : "";
   return (
     <label className="flex min-w-0 flex-1 flex-col gap-1">
@@ -174,7 +171,7 @@ function FlowOverride({ group, onClose }: { group: SchemeGroup; onClose: () => v
       <span className="text-[10.5px] font-bold text-primary">{t("groupOverride.reviewerRole")}</span>
       <div className="flex items-end gap-1.5">
         <EngineSelect value={engine} onChange={(next) => resetRuntimeForEngine(next, { setEngine, setModel, setEffort, effort })} />
-        <EffortSelect engine={engine} value={effort} onChange={setEffort} label={t("groupOverride.effort")} />
+        <EffortSelect engine={engine} model={model} value={effort} onChange={setEffort} label={t("groupOverride.effort")} />
       </div>
       <label className="flex flex-col gap-1">
         <span className={fieldLabel}>{t("groupOverride.model")}</span>

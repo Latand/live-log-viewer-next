@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import path from "node:path";
 
-import { isEngineEffort } from "@/lib/agent/efforts";
+import { effortScale } from "@/lib/agent/efforts";
 import { validateLaunchModel } from "@/lib/agent/models";
 import { agentRegistry } from "@/lib/agent/registry";
 import { headCwd } from "@/lib/agent/transcript";
@@ -68,7 +68,9 @@ function roleOverrideFromRequest(
     if ("error" in validation) return validation;
     next.model = validation.model;
   }
-  if (next.effort && !isEngineEffort(next.engine, next.effort)) return { error: "invalid reviewer role override" };
+  const model = next.model;
+  const scale = effortScale(next.engine, model)!;
+  if (next.effort && !scale.includes(next.effort)) return { error: `effort for ${model ?? next.engine} must be one of: ${scale.join(", ")}` };
   return { role: next };
 }
 

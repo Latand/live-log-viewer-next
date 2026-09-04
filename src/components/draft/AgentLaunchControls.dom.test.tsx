@@ -102,7 +102,7 @@ test("a surface's canonical configuration is the opening state, and it persists 
   expect(store.get("effort")).toBe("high");
 });
 
-test("switching engines re-defaults the model, drops the other engine's account, and drops a tier it doesn't have", async () => {
+test("switching engines preserves max supported by the new default model", async () => {
   store.clear();
   const { draft } = mount();
   await settle();
@@ -115,8 +115,8 @@ test("switching engines re-defaults the model, drops the other engine's account,
 
   expect(draft().engine).toBe("codex");
   expect(draft().model).not.toBe("opus");
-  /* «max» is a claude tier; codex falls back to the CLI default. */
-  expect(draft().effort).toBe("");
+  /* Astra supports the existing max selection. */
+  expect(draft().effort).toBe("max");
   expect(draft().accountId).toBe("");
   expect(draft().launchAccountId).toBe("codex-a");
 });

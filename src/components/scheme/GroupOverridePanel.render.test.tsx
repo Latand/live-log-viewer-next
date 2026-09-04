@@ -23,7 +23,7 @@ test("resetRuntimeForEngine clears the model and normalizes effort on an engine 
     expect(calls.model).toBe("");
     expect("effort" in calls).toBe(false); // high is valid for claude — kept
   }
-  /* claude(max)→codex: model cleared AND the codex-invalid max effort reset. */
+  /* claude(max)→codex: a cleared model has only the base scale. */
   {
     const calls: Record<string, string> = {};
     resetRuntimeForEngine("codex", {
@@ -34,7 +34,7 @@ test("resetRuntimeForEngine clears the model and normalizes effort on an engine 
     });
     expect(calls.engine).toBe("codex");
     expect(calls.model).toBe("");
-    expect(calls.effort).toBe(""); // max is invalid for codex — cleared
+    expect(calls.effort).toBe(""); // unresolved Codex model uses the base scale
   }
 });
 
@@ -152,4 +152,11 @@ test("a draft pipeline exposes metadata, a canvas pointer, Start, and discard co
   expect(html).toContain("Start pipeline");
   expect(html).toContain("Discard draft");
   expect(html).not.toContain("Pause pipeline");
+});
+
+test.each(["gpt-6-astra", "gpt-5.6-sol"])("reviewer override offers %s ultra", (model) => {
+  const group = { ...flowGroup, flow: { ...flow, roles: { ...flow.roles, reviewer: { engine: "codex" as const, model, effort: "ultra" } } } };
+  const html = renderToStaticMarkup(<GroupOverridePanel group={group} onClose={noop} />);
+  expect(html).toContain('value="ultra" selected=""');
+  expect(html).toContain('value="max"');
 });
