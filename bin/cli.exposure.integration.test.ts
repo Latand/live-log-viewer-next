@@ -122,21 +122,21 @@ function captureOutput(child: ReturnType<typeof spawn>) {
 
 /**
  * A `bin/server-runtime.mjs` that behaves exactly like the real one except that
- * one address cannot be evaluated — the shape a Windows runner produces for a
- * link-local zone its resolver rejects. Every other address, and the CLI under
- * test, goes through the real module.
+ * the bind probe fails for one address the way a Windows resolver fails for a
+ * link-local zone it will not accept. The failure is delivered through the real
+ * per-address seam, so the reading, its classification and the CLI's handling
+ * of the result are all the shipped code.
  */
 function unevaluableProbeModule(address: string): string {
   const real = JSON.stringify(pathToFileURL(path.resolve("bin/server-runtime.mjs")).href);
   return [
     `export * from ${real};`,
-    `import { nonLoopbackProbeAddresses, readNonLoopbackBindState as read } from ${real};`,
+    `import { attemptAddressBind, readNonLoopbackBindState as read } from ${real};`,
     `const UNEVALUABLE = ${JSON.stringify(address)};`,
-    "export async function readNonLoopbackBindState(port, options = {}) {",
-    "  const addresses = nonLoopbackProbeAddresses().filter((candidate) => candidate !== UNEVALUABLE);",
-    "  const state = await read(port, { ...options, addresses });",
-    '  state.unevaluated.set(UNEVALUABLE, "getaddrinfo ENOTFOUND " + UNEVALUABLE);',
-    "  return state;",
+    "export function readNonLoopbackBindState(port, options = {}) {",
+    "  return read(port, { ...options, listen: (address, addressPort) => address === UNEVALUABLE",
+    '    ? Promise.reject(Object.assign(new Error("getaddrinfo ENOTFOUND " + address), { code: "ENOTFOUND" }))',
+    "    : attemptAddressBind(address, addressPort) });",
     "}",
   ].join("\n");
 }
@@ -284,14 +284,23 @@ test("an address the platform will not evaluate neither stops startup nor claims
   const port = await availablePort();
   const child = spawn(process.execPath, ["--bun", fixture.cli, "--no-open", "--port", String(port)], {
     cwd: path.dirname(path.dirname(fixture.cli)),
-    env: fixture.env,
+    // LLV_LANG pins the message table the assertion below reads, so the
+    // operator's own locale cannot decide whether this test passes.
+    env: { ...fixture.env, LLV_LANG: "en" },
     stdio: ["ignore", "pipe", "pipe"],
   });
   children.add(child);
   const output = captureOutput(child);
 
-  await waitForStatus("127.0.0.1", port, 200);
+  // The banner comes first: it is the assertion that names the CLI's own stderr
+  // when a probe the guard could not answer killed startup instead.
   await output.waitFor("Agent Log Viewer", 10_000);
+  // What the guard could not cover is said out loud rather than only recorded.
+  await output.waitFor(
+    `the exposure check skipped addresses this machine would not answer for: ${nonLoopbackAddress}`,
+    10_000,
+  );
+  await waitForStatus("127.0.0.1", port, 200);
   expect(child.exitCode).toBeNull();
   expect(child.signalCode).toBeNull();
   // The probe could not answer for that address and the guard read nothing into

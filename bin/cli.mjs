@@ -84,6 +84,7 @@ Options:
     nonLocalWarn: () => "Warning: a non-local address exposes the viewer to the network, so access-key mode is forced on.",
     unexpectedNonLocalBind: (address) => `The server bound ${address} even though loopback was requested. Startup was stopped before the viewer could remain exposed.`,
     bindCheckFail: (detail) => `Couldn't verify the server bind: ${detail}. Startup was stopped.`,
+    bindCheckSkipped: (addresses) => `Warning: the exposure check skipped addresses this machine would not answer for: ${addresses}.`,
     serverNotReady: () => "Server not ready.",
     runtimeHostEntryMissing: () => "The runtime host is missing from this install. Reinstall agent-log-viewer and try again.",
     runtimeHostStartFail: (detail) => `Couldn't start the structured runtime host: ${detail}`,
@@ -124,6 +125,7 @@ Options:
     nonLocalWarn: () => "Увага: нелокальна адреса відкриває viewer для мережі, тому режим ключа доступу увімкнено примусово.",
     unexpectedNonLocalBind: (address) => `Сервер прив'язався до ${address}, хоча було запитано локальну адресу. Запуск зупинено, щоб viewer не залишився відкритим у мережу.`,
     bindCheckFail: (detail) => `Не вдалося перевірити адресу сервера: ${detail}. Запуск зупинено.`,
+    bindCheckSkipped: (addresses) => `Увага: перевірка на відкритість пропустила адреси, на які ця машина не відповідає: ${addresses}.`,
     serverNotReady: () => "Сервер не готовий.",
     runtimeHostEntryMissing: () => "У цьому пакеті немає runtime host. Перевстановіть agent-log-viewer і повторіть спробу.",
     runtimeHostStartFail: (detail) => `Не вдалося запустити structured runtime host: ${detail}`,
@@ -880,6 +882,12 @@ async function main() {
     let exposedAddress = null;
     try {
       const bindStateAfterLaunch = await readNonLoopbackBindState(options.port);
+      // An address the guard could not evaluate narrows what it covered, so say
+      // which. Recording it where nobody reads it would make a security check
+      // degrade in silence.
+      if (bindStateAfterLaunch.unevaluated.size > 0) {
+        console.error(m.bindCheckSkipped([...bindStateAfterLaunch.unevaluated.keys()].join(", ")));
+      }
       exposedAddress = newlyBoundNonLoopbackAddress(bindStateBeforeLaunch, bindStateAfterLaunch);
     } catch (error) {
       await stopAll(serverProcess, tailscaleProcessRef.current, runtimeHostSupervisor);

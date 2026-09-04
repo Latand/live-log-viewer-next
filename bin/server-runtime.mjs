@@ -257,13 +257,15 @@ export function classifyBindProbeFailure(error, platform = process.platform) {
 
 /**
  * Bind an address once and release it. Resolves when the address was free,
- * rejects with the operating system's error otherwise.
+ * rejects with the operating system's error otherwise. This is the per-address
+ * half of the probe, and the half whose failures differ by platform, so it is
+ * exported for a caller that needs to substitute it.
  *
  * @param {string} address
  * @param {number} port
  * @returns {Promise<void>}
  */
-function listenProbe(address, port) {
+export function attemptAddressBind(address, port) {
   return new Promise((resolve, reject) => {
     const server = net.createServer((socket) => {
       // A connection landing inside the probe's window must not reach the
@@ -299,7 +301,7 @@ export async function readNonLoopbackBindState(port, options = {}) {
   const platform = options.platform ?? process.platform;
   const addresses = options.addresses
     ?? nonLoopbackProbeAddresses({ platform, interfaces: options.interfaces });
-  const listen = options.listen ?? listenProbe;
+  const listen = options.listen ?? attemptAddressBind;
   const occupied = new Set();
   const free = new Set();
   const unevaluated = new Map();
