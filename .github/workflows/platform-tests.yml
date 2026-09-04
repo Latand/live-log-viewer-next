@@ -78,6 +78,7 @@ jobs:
           src/runtime-host/socket.test.ts
           src/runtime-host/runtimeHostFence.test.ts
           bin/server-runtime.test.ts
+          bin/bind-guard.test.ts
 
   windows-platform:
     name: Windows (native)
@@ -146,3 +147,4 @@ jobs:
           src/runtime-host/socket.test.ts
           src/runtime-host/runtimeHostFence.test.ts
           bin/server-runtime.test.ts
+          bin/bind-guard.test.ts

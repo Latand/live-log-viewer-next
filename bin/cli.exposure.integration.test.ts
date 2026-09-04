@@ -4,6 +4,7 @@ import http from "node:http";
 import net from "node:net";
 import { networkInterfaces, tmpdir } from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, expect, test } from "bun:test";
 
 const fixtures = new Set<string>();
@@ -119,7 +120,28 @@ function captureOutput(child: ReturnType<typeof spawn>) {
   };
 }
 
-async function checkoutFixture(options: { ignoreHostname?: boolean } = {}): Promise<{ cli: string; env: NodeJS.ProcessEnv }> {
+/**
+ * A `bin/server-runtime.mjs` that behaves exactly like the real one except that
+ * one address cannot be evaluated — the shape a Windows runner produces for a
+ * link-local zone its resolver rejects. Every other address, and the CLI under
+ * test, goes through the real module.
+ */
+function unevaluableProbeModule(address: string): string {
+  const real = JSON.stringify(pathToFileURL(path.resolve("bin/server-runtime.mjs")).href);
+  return [
+    `export * from ${real};`,
+    `import { nonLoopbackProbeAddresses, readNonLoopbackBindState as read } from ${real};`,
+    `const UNEVALUABLE = ${JSON.stringify(address)};`,
+    "export async function readNonLoopbackBindState(port, options = {}) {",
+    "  const addresses = nonLoopbackProbeAddresses().filter((candidate) => candidate !== UNEVALUABLE);",
+    "  const state = await read(port, { ...options, addresses });",
+    '  state.unevaluated.set(UNEVALUABLE, "getaddrinfo ENOTFOUND " + UNEVALUABLE);',
+    "  return state;",
+    "}",
+  ].join("\n");
+}
+
+async function checkoutFixture(options: { ignoreHostname?: boolean; unevaluableAddress?: string } = {}): Promise<{ cli: string; env: NodeJS.ProcessEnv }> {
   const fixture = await mkdtemp(path.join(tmpdir(), "llv-cli-exposure-"));
   fixtures.add(fixture);
   const bin = path.join(fixture, "bin");
@@ -136,7 +158,9 @@ async function checkoutFixture(options: { ignoreHostname?: boolean } = {}): Prom
   ]);
   await Promise.all([
     copyFile(path.resolve("bin/cli.mjs"), path.join(bin, "cli.mjs")),
-    copyFile(path.resolve("bin/server-runtime.mjs"), path.join(bin, "server-runtime.mjs")),
+    options.unevaluableAddress === undefined
+      ? copyFile(path.resolve("bin/server-runtime.mjs"), path.join(bin, "server-runtime.mjs"))
+      : writeFile(path.join(bin, "server-runtime.mjs"), unevaluableProbeModule(options.unevaluableAddress)),
     copyFile(path.resolve("bin/tailscale.mjs"), path.join(bin, "tailscale.mjs")),
     writeFile(path.join(fixture, "package.json"), JSON.stringify({ type: "module", version: "0.0.0" })),
     writeFile(path.join(nextBin, "next"), `
@@ -251,4 +275,26 @@ test("the CLI rejects a checkout server that binds beyond the requested loopback
   const exitCode = await waitForExit(child, 2_000);
   expect(exitCode).toBe(1);
   expect(await probe(nonLoopbackIpv4Address(), port)).toBe(0);
+});
+
+test("an address the platform will not evaluate neither stops startup nor claims exposure", async () => {
+  const nonLoopbackAddress = nonLoopbackIpv4Address();
+  const fixture = await checkoutFixture({ unevaluableAddress: nonLoopbackAddress });
+  await mkdir(fixture.env.TMPDIR!, { recursive: true });
+  const port = await availablePort();
+  const child = spawn(process.execPath, ["--bun", fixture.cli, "--no-open", "--port", String(port)], {
+    cwd: path.dirname(path.dirname(fixture.cli)),
+    env: fixture.env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  children.add(child);
+  const output = captureOutput(child);
+
+  await waitForStatus("127.0.0.1", port, 200);
+  await output.waitFor("Agent Log Viewer", 10_000);
+  expect(child.exitCode).toBeNull();
+  expect(child.signalCode).toBeNull();
+  // The probe could not answer for that address and the guard read nothing into
+  // the silence: startup survived, and the listener is still loopback-only.
+  expect(await probe(nonLoopbackAddress, port)).toBe(0);
 });

@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync } from "node:fs";
 import http from "node:http";
 import net from "node:net";
-import { homedir, networkInterfaces } from "node:os";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -14,6 +14,8 @@ import {
   cliRuntimeHostConfig,
   cliRuntimeHostEnvironment,
   discardWakatimeEnvironmentCredential,
+  newlyBoundNonLoopbackAddress,
+  readNonLoopbackBindState,
   viewerChildProcessOptions,
   viewerServerBunRuntime,
 } from "./server-runtime.mjs";
@@ -597,41 +599,6 @@ async function waitForReadiness(port) {
   throw new Error(m.serverTimeout(READINESS_TIMEOUT_MS / 1000));
 }
 
-function addressIsBound(hostname, port) {
-  return new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.once("error", (error) => {
-      if (error?.code === "EADDRINUSE") {
-        resolve(true);
-        return;
-      }
-      reject(error);
-    });
-    server.listen({ host: hostname, port, exclusive: true }, () => {
-      server.close((error) => error ? reject(error) : resolve(false));
-    });
-  });
-}
-
-async function boundNonLoopbackAddresses(port) {
-  const addresses = new Set();
-  for (const [interfaceName, entries] of Object.entries(networkInterfaces())) {
-    for (const entry of entries ?? []) {
-      if (entry.internal) continue;
-      const address = entry.family === "IPv6" && entry.scopeid > 0
-        ? `${entry.address}%${interfaceName}`
-        : entry.address;
-      addresses.add(address);
-    }
-  }
-
-  const occupied = new Set();
-  for (const address of addresses) {
-    if (await addressIsBound(address, port)) occupied.add(address);
-  }
-  return occupied;
-}
-
 function localUrl(options) {
   const host = options.hostname === "::1" ? "[::1]" : options.hostname;
   return `http://${host}:${options.port}/`;
@@ -853,10 +820,15 @@ async function main() {
     process.exit(1);
   }
 
-  let occupiedNonLoopbackAddresses = new Set();
+  // Snapshot who holds each non-loopback address before the Viewer exists, so
+  // the post-readiness guard can only attribute a NEWLY bound one to it. An
+  // address this machine will not answer for is recorded as unevaluated and
+  // carried; only an unreadable interface list leaves the guard blind enough
+  // to stop here.
+  let bindStateBeforeLaunch = { occupied: new Set(), free: new Set(), unevaluated: new Map() };
   if (isLoopbackHostname(options.hostname)) {
     try {
-      occupiedNonLoopbackAddresses = await boundNonLoopbackAddresses(options.port);
+      bindStateBeforeLaunch = await readNonLoopbackBindState(options.port);
     } catch (error) {
       fail(m.bindCheckFail(error instanceof Error ? error.message : String(error)));
     }
@@ -905,11 +877,10 @@ async function main() {
   // framework silently widening a requested loopback bind before the listener
   // can remain exposed.
   if (isLoopbackHostname(options.hostname)) {
-    let exposedAddress;
+    let exposedAddress = null;
     try {
-      const boundAddresses = await boundNonLoopbackAddresses(options.port);
-      exposedAddress = [...boundAddresses]
-        .find((address) => !occupiedNonLoopbackAddresses.has(address)) ?? null;
+      const bindStateAfterLaunch = await readNonLoopbackBindState(options.port);
+      exposedAddress = newlyBoundNonLoopbackAddress(bindStateBeforeLaunch, bindStateAfterLaunch);
     } catch (error) {
       await stopAll(serverProcess, tailscaleProcessRef.current, runtimeHostSupervisor);
       fail(m.bindCheckFail(error instanceof Error ? error.message : String(error)));
