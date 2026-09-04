@@ -39,11 +39,13 @@ for attempt in 1 2 3; do
     exit "$status"
   fi
 
+  # Bun 1.3.3 colors its banner even with NO_COLOR. Remove SGR formatting
+  # before matching; retain all other diagnostics and control sequences.
   # Match the complete diagnostic, excluding only Bun's banner and blank
   # lines. A title mentioning Timeout, extra diagnostics, or a changed output
   # format cannot turn an advisory or unknown failure into a retry.
   # Format: oven-sh/bun, bun-v1.3.3, src/cli/audit_command.zig sendAuditRequest.
-  diagnostic="$(sed -E '/^bun audit v[^[:space:]]+.*$/d; /^[[:space:]]*$/d' "$output")"
+  diagnostic="$(sed -E -e $'s/\033\\[[0-9;]*m//g' -e '/^bun audit v[^[:space:]]+.*$/d; /^[[:space:]]*$/d' "$output")"
   case "$diagnostic" in
     'Timeout: audit request failed'|\
     'ConnectionRefused: audit request failed'|\
@@ -72,7 +74,7 @@ for attempt in 1 2 3; do
       child=""
       ;;
     *)
-      if grep -Eq '^[1-9][0-9]* vulnerabilities \(.*[1-9][0-9]* (high|critical)(,|\))' "$output"; then
+      if grep -Eq '^[1-9][0-9]* vulnerabilities \(.*[1-9][0-9]* (high|critical)(,|\))' <<< "$diagnostic"; then
         echo 'Dependency audit reported high/critical advisories; security gate remains blocked.' >&2
       else
         echo "Audit failed with an unrecognized error (exit ${status}); security gate remains blocked. No retry." >&2

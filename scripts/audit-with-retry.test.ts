@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { gunzipSync } from "node:zlib";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -44,7 +45,7 @@ const count = existsSync(calls) ? readFileSync(calls, "utf8").trim().split("\\n"
 appendFileSync(calls, JSON.stringify(process.argv.slice(2)) + "\\n");
 const sequence = JSON.parse(process.env.AUDIT_TEST_SEQUENCE!);
 const scenario = sequence[Math.min(count, sequence.length - 1)];
-console.error("bun audit v1.3.3 (fixture)");
+console.error("\\x1b[0m\\x1b[1mbun audit \\x1b[0m\\x1b[2mv1.3.3 (fixture)\\x1b[0m");
 if (scenario === "success") { console.log("No vulnerabilities found"); process.exit(0); }
 if (scenario === "timeout") { console.error("Timeout: audit request failed"); process.exit(1); }
 if (scenario === "503") { console.error("error: audit request failed (status 503)"); process.exit(1); }
@@ -57,7 +58,7 @@ if (scenario === "hang" || scenario === "resist") {
   writeFileSync(root + "/pid", String(process.pid));
   setInterval(() => {}, 1000);
 } else {
-  console.log("fixture-package  <2.0.0\\n  high: Timeout: audit request failed\\n  https://github.com/advisories/GHSA-aaaa-bbbb-cccc\\n\\n1 vulnerabilities (1 high)");
+  console.log("fixture-package  <2.0.0\\n  high: Timeout: audit request failed\\n  https://github.com/advisories/GHSA-aaaa-bbbb-cccc\\n\\n\\x1b[1m1 vulnerabilities (1 \\x1b[31mhigh\\x1b[0m)");
   process.exit(1);
 }
 `);
@@ -93,6 +94,42 @@ test("exhausted transport errors block with an unreachable classification", asyn
   expect(result.text).toContain("Advisory service unreachable after 3 attempts");
   expect(result.text).not.toContain("reported high/critical");
 });
+
+for (const statuses of [[503, 200], [503, 503, 503], [403]]) {
+  test(`real Bun advisory endpoint responds with ${statuses.join(" then ")}`, async () => {
+    const f = fixture([], "2s");
+    // Keep Bun's actual output and HTTP request path in the regression. Only
+    // backoff duration and the outer deadline are shortened by fixture shims.
+    writeFileSync(join(f.root, "bin/bun"), '#!/bin/bash\nexec "$AUDIT_TEST_BUN" "$@"\n');
+    for (const file of ["package.json", "bun.lock"]) {
+      copyFileSync(join(import.meta.dir, "..", file), join(f.root, file));
+    }
+    const requests: { method: string; path: string; body: string }[] = [];
+    const server = Bun.serve({
+      hostname: "127.0.0.1", port: 0,
+      async fetch(request) {
+        const bytes = Buffer.from(await request.arrayBuffer());
+        const body = request.headers.get("content-encoding") === "gzip" ? gunzipSync(bytes).toString() : bytes.toString();
+        requests.push({ method: request.method, path: new URL(request.url).pathname, body });
+        return Response.json({}, { status: statuses[Math.min(requests.length - 1, statuses.length - 1)] });
+      },
+    });
+    try {
+      const result = await f.start(`bash scripts/audit-with-retry.sh --audit-level=high --registry=http://127.0.0.1:${server.port}`).result();
+      expect(result.status).toBe(statuses.includes(200) ? 0 : 1);
+      expect(requests).toHaveLength(statuses.length);
+      for (const request of requests) {
+        expect(request.method).toBe("POST");
+        expect(request.path).toBe("/-/npm/v1/security/advisories/bulk");
+        expect(Object.keys(JSON.parse(request.body)).length).toBeGreaterThan(0);
+      }
+      expect(result.sleeps).toEqual(["5", "10"].slice(0, statuses.length - 1));
+      expect(result.text).toContain(statuses.includes(200) ? "Dependency audit passed" : statuses[0] === 403 ? "unrecognized error" : "Advisory service unavailable after 3 attempts");
+    } finally {
+      await server.stop(true);
+    }
+  });
+}
 
 for (const [scenario, status] of [["advisory", 1], ["unknown", 42], ["403", 1], ["mixed", 1], ["signal", 143]] as const) {
   test(`${scenario} fails promptly and preserves the child status`, async () => {
