@@ -100,10 +100,16 @@ function readJsonRecord(filename: string): Record<string, unknown> | null {
 
 /* A credential travels in an HTTP header, so a value that cannot appear in one
    counts as absent. Sending nothing draws the Viewer's own legible refusal;
-   throwing at header construction would take the whole tool call down first. */
+   throwing at header construction would take the whole tool call down first.
+   The line sits where a header field value's does: printable ASCII, the space
+   included, because the Viewer matches `Bearer\s+(.+)` and authenticates a key
+   holding one — discarding it here would only move #1511's 403 from the gate
+   into this client. Everything outside that range stays absent: a control byte
+   is no part of a field value, and a non-ASCII one this runtime either refuses
+   to construct or re-encodes into a key the Viewer never configured. */
 function credential(value: unknown): string | null {
   const token = typeof value === "string" ? value.trim() : "";
-  return token.length > 0 && !/[^!-~]/.test(token) ? token : null;
+  return token.length > 0 && !/[^\x20-\x7e]/.test(token) ? token : null;
 }
 
 function configRoot(env: ControlEnvironment): string {

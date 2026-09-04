@@ -769,22 +769,29 @@ test("a control surface that never answers falls back instead of hanging the pro
   expect(runtimeMethods).toEqual([]);
 }, 9_000);
 
-/** #1511: #1496 made the Viewer authenticate every connection once a token is
-    configured, and the MCP control client sent none. The candidate's own
-    deployment probe was refused 403 by the release it was grading, and the
-    whole MCP surface — every agent's Viewer tools, the orchestrator's included
-    — would have answered 403 the moment such a build was promoted. The gate in
-    front of this fixture is the real `proxy()`, so the client is judged by the
-    Viewer's own rule rather than by a restatement of it. */
-test("an MCP control read carries the credential the Viewer's own gate requires", async () => {
+/* #1511: #1496 made the Viewer authenticate every connection once a token is
+   configured, and the MCP control client sent none. The candidate's own
+   deployment probe was refused 403 by the release it was grading, and the
+   whole MCP surface — every agent's Viewer tools, the orchestrator's included
+   — would have answered 403 the moment such a build was promoted. The gate in
+   front of this fixture is the real `proxy()`, so the client is judged by the
+   Viewer's own rule rather than by a restatement of it. */
+const GATED_DEPLOYMENT = {
+  deploymentId: "deployment_gated_read",
+  phase: "succeeded",
+  revision: "e".repeat(40),
+};
+
+/** One control read with `key` configured on both ends, reporting every status
+    the gate refused with — so a read that reached the surface some other way
+    cannot pass for an authenticated one. */
+async function gatedControlRead(
+  key: string,
+  clientRequestId: string,
+): Promise<{ read: unknown; refusals: number[] }> {
   delete process.env.LLV_RUNTIME_EVENTS;
   delete process.env.LLV_RUNTIME_HOST_SOCKET;
-  process.env.LLV_TOKEN = "control-plane-gate-token";
-  const deployment = {
-    deploymentId: "deployment_gated_read",
-    phase: "succeeded",
-    revision: "e".repeat(40),
-  };
+  process.env.LLV_TOKEN = key;
   const refusals: number[] = [];
   const server = Bun.serve({
     hostname: "127.0.0.1",
@@ -795,17 +802,29 @@ test("an MCP control read carries the credential the Viewer's own gate requires"
         refusals.push(gate.status);
         return gate;
       }
-      return Response.json({ count: 1, deployments: [deployment] });
+      return Response.json({ count: 1, deployments: [GATED_DEPLOYMENT] });
     },
   });
   installViewerControlFixture(server.url.origin);
 
   try {
-    expect(await viewerMcpBindings().deployment_status({
-      clientRequestId: "deployment-gated-read",
-    })).toEqual({ count: 1, deployments: [deployment] });
-    expect(refusals).toEqual([]);
+    return { read: await viewerMcpBindings().deployment_status({ clientRequestId }), refusals };
   } finally {
     server.stop(true);
   }
+}
+
+test("an MCP control read carries the credential the Viewer's own gate requires", async () => {
+  expect(await gatedControlRead("control-plane-gate-token", "deployment-gated-read"))
+    .toEqual({ read: { count: 1, deployments: [GATED_DEPLOYMENT] }, refusals: [] });
+});
+
+/* One layer along from the same defect: the Viewer matches `Bearer\s+(.+)`,
+   so a configured key holding an internal space authenticates. A client that
+   judged such a key unsendable would send nothing and be refused 403 by the
+   release it is reading — #1511's failure, moved from the gate into the
+   client. */
+test("a configured key holding a space is carried, because the Viewer accepts it", async () => {
+  expect(await gatedControlRead("control plane gate key", "deployment-gated-spaced-read"))
+    .toEqual({ read: { count: 1, deployments: [GATED_DEPLOYMENT] }, refusals: [] });
 });

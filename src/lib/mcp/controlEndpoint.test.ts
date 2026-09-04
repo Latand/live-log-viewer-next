@@ -225,3 +225,58 @@ test("a client pinned by a partial release environment reads no ambient state at
     readFile.mockRestore();
   }
 });
+
+/* The Viewer parses its header with `/^Bearer\s+(.+)$/i`, so a key holding an
+   internal space authenticates against the running release. A client that
+   discarded such a key would send nothing and be refused 403 — #1511's own
+   failure moved one layer along. Only a value that cannot travel in a header
+   is absent. */
+
+const SPACED = "release key with spaces";
+
+test("a key the Viewer authenticates survives every resolver path when it holds a space", () => {
+  const directory = sandbox();
+  try {
+    const endpoint = "http://127.0.0.1:19020";
+    const stateDir = releaseState(directory, { endpoint, token: SPACED });
+    expect(viewerControlToken({
+      LLV_STATE_DIR: stateDir,
+      XDG_CONFIG_HOME: directory,
+      LLV_VIEWER_PORT: "19020",
+    }, endpoint)).toBe(SPACED);
+    expect(viewerControlToken({ [VIEWER_CONTROL_TOKEN_ENV]: SPACED }, endpoint)).toBe(SPACED);
+
+    const keyFile = path.join(directory, "agent-log-viewer", "token");
+    fs.mkdirSync(path.dirname(keyFile), { recursive: true });
+    fs.writeFileSync(keyFile, `  ${SPACED}  `, { mode: 0o600 });
+    expect(viewerControlToken({
+      XDG_CONFIG_HOME: directory,
+      LLV_VIEWER_PORT: "19021",
+    }, "http://127.0.0.1:19021")).toBe(SPACED);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a key that cannot travel in a header still counts as absent", () => {
+  const directory = sandbox();
+  try {
+    const endpoint = "http://127.0.0.1:19022";
+    /* Built from character codes on purpose: a real control byte written into
+       this file would be invisible to everyone reading it. CR, LF, NUL, VT and
+       DEL are all outside the field-vchar an HTTP header value is made of. */
+    for (const code of [0x0d, 0x0a, 0x00, 0x0b, 0x7f]) {
+      const unsendable = `release${String.fromCharCode(code)}key`;
+      const stateDir = releaseState(directory, { endpoint, token: unsendable });
+      expect(viewerControlToken({
+        LLV_STATE_DIR: stateDir,
+        XDG_CONFIG_HOME: directory,
+        LLV_TOKEN: unsendable,
+        LLV_VIEWER_PORT: "19022",
+      }, endpoint)).toBeNull();
+      expect(viewerControlToken({ [VIEWER_CONTROL_TOKEN_ENV]: unsendable }, endpoint)).toBeNull();
+    }
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
