@@ -613,7 +613,7 @@ function addressIsBound(hostname, port) {
   });
 }
 
-async function boundNonLoopbackAddress(port) {
+async function boundNonLoopbackAddresses(port) {
   const addresses = new Set();
   for (const [interfaceName, entries] of Object.entries(networkInterfaces())) {
     for (const entry of entries ?? []) {
@@ -625,10 +625,11 @@ async function boundNonLoopbackAddress(port) {
     }
   }
 
+  const occupied = new Set();
   for (const address of addresses) {
-    if (await addressIsBound(address, port)) return address;
+    if (await addressIsBound(address, port)) occupied.add(address);
   }
-  return null;
+  return occupied;
 }
 
 function localUrl(options) {
@@ -852,6 +853,15 @@ async function main() {
     process.exit(1);
   }
 
+  let occupiedNonLoopbackAddresses = new Set();
+  if (isLoopbackHostname(options.hostname)) {
+    try {
+      occupiedNonLoopbackAddresses = await boundNonLoopbackAddresses(options.port);
+    } catch (error) {
+      fail(m.bindCheckFail(error instanceof Error ? error.message : String(error)));
+    }
+  }
+
   const server = resolveServer(packageRoot, options.hostname);
   const runtimeHostConfig = cliRuntimeHostConfig(packageRoot);
   const runtimeHostEnvironment = cliRuntimeHostEnvironment(process.env, runtimeHostConfig);
@@ -897,7 +907,9 @@ async function main() {
   if (isLoopbackHostname(options.hostname)) {
     let exposedAddress;
     try {
-      exposedAddress = await boundNonLoopbackAddress(options.port);
+      const boundAddresses = await boundNonLoopbackAddresses(options.port);
+      exposedAddress = [...boundAddresses]
+        .find((address) => !occupiedNonLoopbackAddresses.has(address)) ?? null;
     } catch (error) {
       await stopAll(serverProcess, tailscaleProcessRef.current, runtimeHostSupervisor);
       fail(m.bindCheckFail(error instanceof Error ? error.message : String(error)));

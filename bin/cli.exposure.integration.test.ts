@@ -8,6 +8,7 @@ import { afterEach, expect, test } from "bun:test";
 
 const fixtures = new Set<string>();
 const children = new Set<ReturnType<typeof spawn>>();
+const listeners = new Set<net.Server>();
 
 afterEach(async () => {
   for (const child of children) {
@@ -22,6 +23,10 @@ afterEach(async () => {
     if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
   }));
   children.clear();
+  await Promise.all([...listeners].map((listener) => new Promise<void>((resolve, reject) => {
+    listener.close((error) => error ? reject(error) : resolve());
+  })));
+  listeners.clear();
   await Promise.all([...fixtures].map((fixture) => rm(fixture, { recursive: true, force: true })));
   fixtures.clear();
 });
@@ -199,6 +204,36 @@ test("the checkout next start path keeps the default listener on loopback", asyn
   expect(child.exitCode).toBeNull();
   expect(child.signalCode).toBeNull();
   expect(await probe(nonLoopbackIpv4Address(), port)).toBe(0);
+});
+
+test("a pre-existing non-loopback listener does not impersonate a widened Viewer bind", async () => {
+  const fixture = await checkoutFixture();
+  await mkdir(fixture.env.TMPDIR!, { recursive: true });
+  const port = await availablePort();
+  const nonLoopbackAddress = nonLoopbackIpv4Address();
+  const unrelated = http.createServer((_request, response) => {
+    response.writeHead(204);
+    response.end();
+  });
+  await new Promise<void>((resolve, reject) => {
+    unrelated.once("error", reject);
+    unrelated.listen({ host: nonLoopbackAddress, port, exclusive: true }, resolve);
+  });
+  listeners.add(unrelated);
+
+  const child = spawn(process.execPath, ["--bun", fixture.cli, "--no-open", "--port", String(port)], {
+    cwd: path.dirname(path.dirname(fixture.cli)),
+    env: fixture.env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  children.add(child);
+  const output = captureOutput(child);
+
+  await waitForStatus("127.0.0.1", port, 200);
+  await output.waitFor("Agent Log Viewer", 10_000);
+  expect(child.exitCode).toBeNull();
+  expect(child.signalCode).toBeNull();
+  expect(await probe(nonLoopbackAddress, port)).toBe(204);
 });
 
 test("the CLI rejects a checkout server that binds beyond the requested loopback address", async () => {
