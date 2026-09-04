@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 
+import { refreshRuntime } from "@/hooks/useRuntime";
+import { requestFilesRefresh } from "@/lib/filesEvents";
 import type { FileEntry } from "@/lib/types";
 
 import type { SeatRotateFlow } from "../mobile/MobileOrchestratorSheet";
@@ -9,13 +11,15 @@ import { seatFlowStorage } from "../mobile/orchestratorDraftStorage";
 import {
   deriveOrchestratorPanelState,
   resolveSeatFile,
+  seatBindPending,
   seatRequestSettled,
   type OrchestratorPanelState,
   type OrchestratorSeatStatus,
 } from "./seatState";
-import type { OrchestratorIncumbent } from "./incumbent";
+import { incumbentHostLive, type OrchestratorIncumbent } from "./incumbent";
 import { useOrchestratorIncumbent } from "./useOrchestratorIncumbent";
 import { useSeatConfirm } from "./useSeatConfirm";
+import { useSeatBindingFeedback } from "./useSeatBindingFeedback";
 import { useSeatSurface } from "./useSeatSurface";
 
 /**
@@ -67,7 +71,7 @@ export function useSeatPanel(input: {
   const { status, failed, refresh } = seat;
   const seatConversationId = status?.seat?.conversationId ?? null;
 
-  const { incumbent: read, refresh: refreshIncumbent } = useOrchestratorIncumbent(project, holdsSeat && open);
+  const { incumbent: read, stale: readStale, refresh: refreshIncumbent } = useOrchestratorIncumbent(project, holdsSeat && open);
   /* A reading is only about the conversation it names: right after a rotation
      the seat has already advanced to the successor while this slower poll still
      describes the predecessor. */
@@ -82,6 +86,15 @@ export function useSeatPanel(input: {
     [files, seatConversationId, status?.seat?.path, incumbent?.transcriptPath],
   );
   const surface = useSeatSurface(file);
+  const unboundForMs = useSeatBindingFeedback({
+    project,
+    conversationId: seatConversationId,
+    active: holdsSeat && open && Boolean(status?.exists && seatConversationId),
+    pending: seatBindPending(file, surface),
+    hasReading: incumbent !== null,
+    stale: readStale,
+    refreshIncumbent,
+  });
 
   /* The rotate flow, on the dock's own Rotate keys: one durable intent per
      submission wherever it was started (`useSeatConfirm`). */
@@ -101,6 +114,8 @@ export function useSeatPanel(input: {
     file,
     surface,
     incumbent,
+    hostLive: !readStale && incumbentHostLive(incumbent),
+    unboundForMs,
   });
 
   /* A rotation whose outcome is not yet settled KEEPS the draft; settled, the
@@ -148,6 +163,11 @@ export function useSeatPanel(input: {
     pendingMandate: status?.pending?.mandate ?? "",
     viewerMcpRegistered: status?.viewerMcpRegistered === true,
     rotate: rotateFlow,
-    onRecheck: () => void refresh(),
+    onRecheck: () => {
+      void refresh();
+      void refreshIncumbent();
+      requestFilesRefresh();
+      void refreshRuntime();
+    },
   };
 }
