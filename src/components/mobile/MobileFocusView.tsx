@@ -350,9 +350,9 @@ export function MobileFocusView({ project, projectName, groups, manual, files, f
      clicking a card on the desktop board, so each one stamps the durable
      acknowledgement that releases a held finished outcome.
 
-     What deliberately does NOT stamp: the bar/dock swipe, the attention
-     fallback inside `resolvedKey`, and the `onActiveChange` report. Passing a
-     card, or having it surface on its own, is not reading it. */
+     What deliberately does NOT stamp: the bar/dock swipe and the attention
+     fallback inside `resolvedKey`. Passing a card, or having it surface on
+     its own, is not reading it. */
   const openEntry = useCallback(
     (key: string) => {
       setFocusPath(key);

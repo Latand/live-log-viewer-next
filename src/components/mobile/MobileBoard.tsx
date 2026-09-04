@@ -173,7 +173,10 @@ function ConversationRow({ row, quiet, now, onOpen }: { row: MobileBoardConversa
           {row.now ? (
             <>
               <span aria-hidden className="shrink-0 opacity-60">·</span>
-              <span className="min-w-0 truncate">{row.now}</span>
+              {/* The now-fragment gives way first: it changes every few seconds
+                  and is whole one tap away, while the model is the row's
+                  identity and the launch is the operator's question. */}
+              <span className="min-w-0 shrink-[6] truncate">{row.now}</span>
             </>
           ) : null}
           {row.file.model ? (

@@ -250,6 +250,7 @@ test("a never-run stage's row opens its configuration in a sheet — the desktop
      the first attempt. */
   expect(q(host, '[data-mobile2-stage="design"]')!.getAttribute("data-mobile2-stage-configure")).toBeNull();
 
+  fix.focus();
   click(fix);
   await settle();
   /* The nav store owns «a sheet is open» (§3.3); the screen says which stage. */
@@ -260,13 +261,33 @@ test("a never-run stage's row opens its configuration in a sheet — the desktop
     stage: translate("en", "mobile2.pipeline.stageTitle", { role: translate("en", "roleCopy.builder.name"), stage: "fix" }),
   }));
   expect(sheet!.querySelector('[data-mobile2-stage-config="fix"] [data-pipeline-stage-card="p2::fix"]')).not.toBeNull();
+  /* A real modal dialog, as the retired dock sheet was (PR #431): it takes
+     focus on open, so the keyboard is inside it. */
+  expect(sheet!.getAttribute("aria-modal")).toBe("true");
+  expect(sheet!.contains(dom.document.activeElement as never)).toBe(true);
 
-  /* Escape closes the sheet and nothing else: the screen is still here. */
+  /* The stage editor — what #507 F2 stacked ABOVE the dock sheet as a second
+     modal layer that fought it for Tab and Escape — unfolds INSIDE this sheet
+     now: the pane's own toggle opens the role and runtime controls in place,
+     the sheet stays the one layer, and its controls are the sheet's own. */
+  const toggle = sheet!.querySelector(`button[aria-label="${translate("en", "groupOverride.applyStage")}"]`) as unknown as HTMLButtonElement | null;
+  expect(toggle).not.toBeNull();
+  expect(toggle!.getAttribute("aria-expanded")).toBe("false");
+  click(toggle);
+  await settle();
+  expect(toggle!.getAttribute("aria-expanded")).toBe("true");
+  expect(sheet!.querySelector('label[for="draft-role-pipeline-config::p2::fix"]')).not.toBeNull();
+  expect(store.getState().sheet).toBe("stage");
+  expect(dom.document.querySelectorAll('[role="dialog"]').length).toBe(1);
+
+  /* Escape closes the sheet — editor and all — and nothing else: the screen
+     is still here, and focus is back on the row that opened it. */
   flushSync(() => dom.document.dispatchEvent(new dom.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }) as never));
   await settle();
   expect(dom.document.querySelector('[data-mobile2-sheet="stage"]')).toBeNull();
   expect(store.getState().sheet).toBeNull();
   expect(q(host, '[data-mobile2-screen="pipeline"]')).not.toBeNull();
+  expect(dom.document.activeElement).toBe(fix as never);
 
   /* A finished pipeline configures nothing: its never-run stages are statements. */
   const done = mount(<MobilePipelineScreen pipeline={parkedPipeline({ state: "completed", cursor: null })} files={[IMPLEMENT, REVIEW]} now={NOW} onOpenConversation={() => {}} />);

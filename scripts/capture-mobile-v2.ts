@@ -41,7 +41,7 @@
  *   data-mobile2-bar                    the one bar          data-mobile2-title   its title cell
  *   data-mobile2-back                   the bar's ‹          data-mobile2-bump    set on the title after an end-of-list swipe
  *   data-mobile2-screen="board|chat|pipelines|pipeline|accounts"
- *   data-mobile2-sheet="projects|attention|menu|host|search|seat|rotate|switch|model"
+ *   data-mobile2-sheet="projects|attention|menu|host|search|seat|rotate|switch|model|stage"
  *   data-mobile2-open="<sheet>"         a control that opens that sheet
  *   data-mobile2-close                  the sheet's × (the scrim carries it too)
  *   data-mobile2-go="<screen>"          a row that pushes that screen (accounts, pipelines, pipeline, chat)
@@ -299,7 +299,6 @@ const TODAY = {
   model: '[data-testid="composer-options-toggle"]',
   chatHost: '[data-testid="mobile-details-toggle"]',
   pipelines: '[data-testid="mobile-pipeline-summary"]',
-  pipelineSheet: '[data-testid="mobile-pipeline-sheet"]',
   accounts: 'button[aria-label$="accounts — switch or add"]',
 } as const;
 
