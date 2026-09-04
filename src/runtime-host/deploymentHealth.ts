@@ -22,7 +22,15 @@ export function viewerHealthRequestPlan(endpoint: string, token: string | null):
   const remoteHeaders = { "x-forwarded-for": "203.0.113.10" };
   const authenticatedHeaders = token ? { ...remoteHeaders, authorization: `Bearer ${token}` } : {};
   return {
-    root: { url: `${endpoint}/`, headers: {} },
+    /* Every probe whose expectation is a 200 carries whatever credentials the
+       candidate requires of it. Once a token is configured, every request
+       authenticates, loopback included (#1496), so an unauthenticated success
+       is no longer a property a correct Viewer has, and requiring one held a
+       healthy candidate out of promotion (#1511). With no token there is
+       nothing to carry, and a plain 200 remains the proof that the Viewer
+       serves its own root. `unauthorized` below is the one probe left
+       uncredentialed, because the refusal is what it asserts. */
+    root: { url: `${endpoint}/`, headers: token ? { authorization: `Bearer ${token}` } : {} },
     authenticated: token
       ? { url: `${endpoint}/`, headers: authenticatedHeaders }
       : null,
