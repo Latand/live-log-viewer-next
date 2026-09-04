@@ -1,6 +1,6 @@
 import { configForParams, listRoles, roleFenceBlock, roleScaffoldBody, validateRoleParams } from "@/lib/roles/registry";
 import { MAX_SCAFFOLD_LENGTH } from "@/lib/roles/store";
-import { isEngineEffort } from "@/lib/agent/efforts";
+import { effortScale } from "@/lib/agent/efforts";
 import { validateLaunchModel } from "@/lib/agent/models";
 import { defaultRoleParameterValue } from "@/lib/roles/parameters";
 
@@ -55,7 +55,7 @@ export const pipelineRoleLookup: PipelineRoleLookup = (roleId, params) => {
   return {
     /* Parameter-aware runtime: Builder domain=frontend → Claude/Opus,
        mode=apply-fixes → Terra, matching the registry so an omitted override
-       does not silently fall back to the base Sol config. */
+       does not silently fall back to the base Astra config. */
     ...configForParams(definition, parameters),
     access: definition.capabilities.includes("read-only") ? "read-only" : "read-write",
     promptScaffold: `${body.slice(0, MAX_SCAFFOLD_LENGTH - fences.length)}${fences}`,
@@ -125,8 +125,9 @@ export function resolvePipelineRole(
     const validation = validateLaunchModel(engine, model);
     if ("error" in validation) return { error: validation.error, field: "model" };
   }
-  if (effort && !isEngineEffort(engine, effort)) {
-    return { error: `stage effort is not supported by ${engine}` };
+  const scale = effortScale(engine, model)!;
+  if (effort && !scale.includes(effort)) {
+    return { error: `stage effort for ${engine}/${model ?? "default"} must be one of: ${scale.join(", ")}` };
   }
   /* The store refuses to load a referenced role without a scaffold, so an
      empty resolution must fail the create instead of persisting a record

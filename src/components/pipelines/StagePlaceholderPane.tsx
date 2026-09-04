@@ -133,7 +133,8 @@ export function StagePlaceholderPane({ slot, interactive }: { slot: StageSlot; i
   const changeEngine = (next: FlowEngine) => {
     if (next === engine) return;
     /* Switching the engine invalidates the model and can invalidate the effort
-       tier; clearing the pins hands both back to the engine/role defaults. */
+       tier; model:null leaves the CLI model unresolved. Keep only the base
+       engine tiers, matching resolvePipelineRole for an explicit null model. */
     const keepEffort = Boolean(runtime.effort && isEngineEffort(next, runtime.effort));
     setEngine(next);
     setRuntime((current) => ({ ...current, model: "", effort: keepEffort ? current.effort : "" }));

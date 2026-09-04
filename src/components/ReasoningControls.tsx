@@ -2,7 +2,7 @@
 
 import { effortTierLabel } from "@/components/builderCopy";
 import { Select } from "@/components/ui/Select";
-import { ENGINE_EFFORTS } from "@/lib/agent/efforts";
+import { effortScale } from "@/lib/agent/efforts";
 import { ENGINE_MODELS } from "@/lib/agent/models";
 import { useLocale } from "@/lib/i18n";
 
@@ -12,7 +12,7 @@ export type SpeedChoice = "" | "fast" | "standard";
 /**
  * Reasoning-effort select plus the codex-only speed (fast/standard) select —
  * the shared control strip for every "start a new agent" surface. The tier
- * list follows the engine; an empty value leaves the CLI on its own default.
+ * list follows the selected model; an empty value leaves the CLI on its own default.
  * All three ride the design system's one select recipe (issue #221 §6), and
  * tier/speed labels localize while the submitted values stay the CLI tokens.
  */
@@ -48,7 +48,12 @@ export function ReasoningControls({
         roomy={roomy}
         aria-label={t("draft.modelAria")}
         title={t("draft.modelAria")}
-        onChange={(event) => onModel(event.target.value)}
+        onChange={(event) => {
+          const nextModel = event.target.value;
+          onModel(nextModel);
+          // An unsupported tier returns to the CLI default; supported choices survive.
+          if (effort && !effortScale(engine, nextModel)!.includes(effort)) onEffort("");
+        }}
       >
         <option value="">{t("draft.modelDefault")}</option>
         {ENGINE_MODELS[engine].map((option) => (
@@ -66,7 +71,7 @@ export function ReasoningControls({
         onChange={(event) => onEffort(event.target.value)}
       >
         <option value="">{t("draft.effortDefault")}</option>
-        {ENGINE_EFFORTS[engine].map((tier) => (
+        {effortScale(engine, model)!.map((tier) => (
           <option key={tier} value={tier}>
             {effortTierLabel(t, tier)}
           </option>

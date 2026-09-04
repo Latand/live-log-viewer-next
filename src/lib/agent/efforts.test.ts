@@ -14,6 +14,10 @@ describe("effortScale", () => {
     expect(effortScale("codex", "gpt-5.6-terra")).toEqual(["low", "medium", "high", "xhigh", "max", "ultra"]);
   });
 
+  test("codex gpt-6-astra carries the max and ultra tiers", () => {
+    expect(effortScale("codex", "gpt-6-astra")).toEqual(["low", "medium", "high", "xhigh", "max", "ultra"]);
+  });
+
   test("other gpt-5.6 models top out at max", () => {
     expect(effortScale("codex", "gpt-5.6-luna")).toEqual(["low", "medium", "high", "xhigh", "max"]);
     expect(effortScale("codex", "gpt-5.6")).toEqual(["low", "medium", "high", "xhigh", "max"]);
@@ -54,6 +58,11 @@ describe("effortMeter", () => {
     expect(effortMeter("codex", "gpt-5.6-sol", "low")).toEqual({ level: 1, slots: 6 });
   });
 
+  test("codex max and ultra sit at the top of the gpt-6-astra meter", () => {
+    expect(effortMeter("codex", "gpt-6-astra", "max")).toEqual({ level: 5, slots: 6 });
+    expect(effortMeter("codex", "gpt-6-astra", "ultra")).toEqual({ level: 6, slots: 6 });
+  });
+
   test("recognized tiers outside the model's scale clamp to the nearest end", () => {
     // A legacy transcript recording `minimal` still shows the lowest bar.
     expect(effortMeter("codex", "gpt-5.5", "minimal")).toEqual({ level: 1, slots: 4 });
@@ -69,4 +78,14 @@ describe("effortMeter", () => {
     expect(effortMeter("codex", "gpt-5.6-sol", "bogus")).toEqual({ level: 0, slots: 0 });
     expect(effortMeter("shell", null, "high")).toEqual({ level: 0, slots: 0 });
   });
+});
+
+test("spawn reasoning admits model-specific top tiers for Astra and Sol", async () => {
+  const { reasoningFromBody } = await import("./efforts");
+  for (const model of ["gpt-6-astra", "gpt-5.6-sol"]) {
+    for (const effort of ["max", "ultra"]) {
+      expect(reasoningFromBody("codex", { model, effort })).toEqual({ effort, fast: null });
+    }
+  }
+  expect(reasoningFromBody("codex", { model: "gpt-5.6-luna", effort: "ultra" }).error).toBeDefined();
 });

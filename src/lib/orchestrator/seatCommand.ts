@@ -909,8 +909,12 @@ export async function executeOrchestratorRotation(
        re-checks after it, which is the last read before the durable begin. */
     expectedIncumbentSeatEpoch: incumbent.seatEpoch,
     promptVersion,
-    ...(rawBody.engine !== undefined ? { engine: rawBody.engine } : {}),
-    ...(rawBody.model !== undefined ? { model: rawBody.model } : {}),
+    // Omitted runtime settings continue the incumbent. An explicit engine
+    // switch uses the role validator to resolve its model.
+    ...(rawBody.engine !== undefined ? { engine: rawBody.engine } : incumbent.engine ? { engine: incumbent.engine } : {}),
+    ...(rawBody.model !== undefined ? { model: rawBody.model }
+      : (rawBody.engine === undefined || rawBody.engine === incumbent.engine) && incumbent.model
+        ? { model: incumbent.model } : {}),
     ...(rawBody.effort !== undefined ? { effort: rawBody.effort } : {}),
     ...(rawBody.fast !== undefined ? { fast: rawBody.fast } : {}),
     /* Issue #903: a rotation without an explicit cwd continues in the

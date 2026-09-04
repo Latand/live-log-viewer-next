@@ -310,3 +310,25 @@ test("a parked pipeline offers retry and skip", async () => {
   flushSync(() => root.unmount());
   host.remove();
 });
+
+
+test.each(["ultra", "max"])("reviewer override reconciles Astra/%s to Luna before PATCH", (effort) => {
+  const group: SchemeGroup = {
+    ...flowGroup,
+    flow: { ...flowGroup.flow!, roles: { ...flowGroup.flow!.roles, reviewer: { engine: "codex", model: "gpt-6-astra", effort } } },
+  };
+  const { host, root } = mount(<GroupOverridePanel group={group} onClose={() => undefined} />);
+  try {
+    const model = host.querySelector('input:not([type="number"])') as HTMLInputElement;
+    // happy-dom lacks React's text-input value tracker; use the input's handler.
+    const propsKey = Object.keys(model).find((key) => key.startsWith("__reactProps$"))!;
+    const props = (model as unknown as Record<string, { onChange: (event: unknown) => void }>)[propsKey]!;
+    flushSync(() => props.onChange({ target: { value: "gpt-5.6-luna" } }));
+    expect(model.value).toBe("gpt-5.6-luna");
+    const expected = effort === "ultra" ? null : effort;
+    expect((host.querySelectorAll("select")[1] as HTMLSelectElement).value).toBe(expected ?? "");
+    flushSync(() => [...host.querySelectorAll("button")].find((button) => button.textContent === "Update reviewer")!.click());
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.body).toMatchObject({ action: "set-roles", roles: { reviewer: { model: "gpt-5.6-luna", effort: expected } } });
+  } finally { flushSync(() => root.unmount()); }
+});

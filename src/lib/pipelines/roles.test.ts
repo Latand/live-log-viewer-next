@@ -57,11 +57,11 @@ test("role resolution fails closed when the Builder preset is unavailable", () =
     .toBe("Builder role is unavailable in the role registry");
 });
 
-test("production role lookup reads the shared Builder preset", () => {
+test("production role lookup reads the fresh Astra Builder preset", () => {
   expect(resolvePipelineRole({}, "run", pipelineRoleLookup).role).toMatchObject({
     roleId: null,
     engine: "codex",
-    model: "gpt-5.6-sol",
+    model: "gpt-6-astra",
     effort: "medium",
     access: "read-write",
     promptScaffold: null,
@@ -96,7 +96,7 @@ test("cross-engine overrides require a compatible model", () => {
 
 test("stage model overrides enumerate the selected engine catalog when invalid", () => {
   expect(resolvePipelineRole({ engine: "codex", model: "gpt-5.6-codex" }, "run", REGISTRY_LOOKUP).error)
-    .toBe("invalid codex model id \"gpt-5.6-codex\"; valid codex model ids: gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna");
+    .toBe("invalid codex model id \"gpt-5.6-codex\"; valid codex model ids: gpt-6-astra, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna");
   expect(resolvePipelineRole({ engine: "claude", model: "claude-fable-5" }, "run", REGISTRY_LOOKUP).error)
     .toBe("invalid claude model id \"claude-fable-5\"; valid claude model ids: opus, fable, sonnet, haiku");
 });
@@ -200,7 +200,26 @@ test("Builder domain=frontend keeps the canonical frontend scaffold guidance (pa
 
 test("codex model overrides use the curated launch catalog at create time", () => {
   expect(resolvePipelineRole({ model: `gpt-${"x".repeat(200)}` }, "run", REGISTRY_LOOKUP).error)
-    .toContain("valid codex model ids: gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna");
+    .toContain("valid codex model ids: gpt-6-astra, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna");
   expect(resolvePipelineRole({ model: "gpt-5.6\u0000sol" }, "run", REGISTRY_LOOKUP).error)
-    .toContain("valid codex model ids: gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna");
+    .toContain("valid codex model ids: gpt-6-astra, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna");
 });
+
+for (const effort of ["xhigh", "max", "ultra"]) {
+  test(`production pipeline lookup accepts Astra at ${effort}`, () => {
+    expect(resolvePipelineRole({ model: "gpt-6-astra", effort }, "run", pipelineRoleLookup).role)
+      .toMatchObject({ model: "gpt-6-astra", effort });
+  });
+}
+
+test("explicit Sol remains selectable through production pipeline lookup", () => {
+  expect(resolvePipelineRole({ model: "gpt-5.6-sol", effort: "xhigh" }, "run", pipelineRoleLookup).role)
+    .toMatchObject({ model: "gpt-5.6-sol", effort: "xhigh" });
+});
+
+for (const [engine, model] of [["codex", "gpt-5.6-luna"], ["claude", "opus"]] as const) {
+  test(`production pipeline lookup refuses ${model}/ultra with model options`, () => {
+    expect(resolvePipelineRole({ engine, model, effort: "ultra" }, "run", pipelineRoleLookup).error)
+      .toBe(`stage effort for ${engine}/${model} must be one of: low, medium, high, xhigh, max`);
+  });
+}

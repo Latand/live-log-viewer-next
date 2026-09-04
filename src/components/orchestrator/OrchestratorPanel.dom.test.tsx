@@ -1588,3 +1588,31 @@ test("the badge is localized with the rest of the dock", async () => {
   expect(stateBadge(host).getAttribute("data-orchestrator-badge")).toBe("needs-you");
   expect(stateBadge(host).textContent).toBe("потребує тебе");
 });
+
+
+test.each(["ultra", "max"])("Astra/%s to Luna submits the displayed effort", async (effort) => {
+  const host = mount();
+  await settle();
+  const codex = [...host.querySelectorAll('[role="radio"]')].find((node) => node.textContent === "Codex") as HTMLButtonElement;
+  flushSync(() => codex.click());
+  const modelSelect = host.querySelector('select[aria-label="Agent model"]') as HTMLSelectElement;
+  const effortSelect = host.querySelector('select[aria-label="Reasoning effort level"]') as HTMLSelectElement;
+  const select = (field: HTMLSelectElement, value: string) => flushSync(() => {
+    field.value = value;
+    field.dispatchEvent(new dom.Event("change", { bubbles: true }) as unknown as Event);
+  });
+  select(modelSelect, "gpt-6-astra");
+  select(effortSelect, effort);
+  expect(effortSelect.value).toBe(effort);
+  select(modelSelect, "gpt-5.6-luna");
+  expect(modelSelect.value).toBe("gpt-5.6-luna");
+  const expected = effort === "ultra" ? "" : effort;
+  expect(effortSelect.value).toBe(expected);
+  expect(effortSelect.selectedOptions[0]?.textContent).toBe(expected || "effort: default");
+  expect(dom.sessionStorage.getItem("llvOrchestratorDraft:atlas:effort")).toBe(expected || null);
+  flushSync(() => confirmButton(host).click());
+  await settle();
+  expect(seatPosts).toHaveLength(1);
+  expect(seatPosts[0]?.model).toBe("gpt-5.6-luna");
+  expect(seatPosts[0]?.effort).toBe(expected || undefined);
+});

@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { statePath } from "@/lib/configDir";
-import { isEngineEffort } from "@/lib/agent/efforts";
+import { effortScale } from "@/lib/agent/efforts";
 import { normalizeClaudeLaunchModel } from "@/lib/agent/models";
 
 import { ROLE_DEFAULTS } from "./defaults";
@@ -56,7 +56,11 @@ function isCompatibleOverride(id: RoleId, override: RoleOverride): boolean {
   if (config.model.length > 128 || /[\u0000-\u001f\u007f]/.test(config.model)) return false;
   if (config.engine === "claude" && !normalizeClaudeLaunchModel(config.model)) return false;
   if (config.engine === "codex" && !config.model.startsWith("gpt-")) return false;
-  return isEngineEffort(config.engine, config.effort);
+  const scale = effortScale(config.engine, config.model)!;
+  if (!scale.includes(config.effort)) {
+    throw new RoleStoreError(`invalid role override: ${id}; effort for ${config.engine}/${config.model} must be one of: ${scale.join(", ")}`);
+  }
+  return true;
 }
 
 export function loadRoleOverrides(): RoleOverridesFile {

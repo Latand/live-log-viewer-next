@@ -1,4 +1,4 @@
-import { isEngineEffort } from "@/lib/agent/efforts";
+import { effortScale } from "@/lib/agent/efforts";
 import { validateLaunchModel } from "@/lib/agent/models";
 
 import { BUILDER_APPLY_FIXES_CONFIG, BUILDER_FRONTEND_CONFIG } from "./paramConfig";
@@ -104,7 +104,8 @@ function resolveConfig(definition: RoleDefinition, params: RoleParamValues, expl
   const model = validateLaunchModel(config.engine, config.model);
   if ("error" in model) return { ok: false, error: model.error };
   config.model = model.model;
-  if (!isEngineEffort(config.engine, config.effort)) return { ok: false, error: `effort for ${config.engine} must be one of: ${config.engine === "codex" ? "low, medium, high, xhigh" : "low, medium, high, xhigh, max"}` };
+  const scale = effortScale(config.engine, config.model)!;
+  if (!scale.includes(config.effort)) return { ok: false, error: `effort for ${config.engine} must be one of: ${scale.join(", ")}` };
   return { ok: true, value: config };
 }
 

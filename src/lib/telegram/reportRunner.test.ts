@@ -209,6 +209,7 @@ test("Run now launches a board-visible Codex conversation holding exactly viewer
   expect(body.mcpServers).toBeUndefined();
   expect(ports.grants[0]).toEqual(["viewer", "telegram"]);
   expect(body.engine).toBe("codex");
+  expect(body.model).toBe("gpt-6-astra");
   /* No role and no parent: a role preset or a lineage parent would classify
      the launch as delegated and strip the grant. The durable link to the run
      is the attempt id instead. */

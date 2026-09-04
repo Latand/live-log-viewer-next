@@ -102,7 +102,7 @@ test("a surface's canonical configuration is the opening state, and it persists 
   expect(store.get("effort")).toBe("high");
 });
 
-test("switching engines re-defaults the model, drops the other engine's account, and drops a tier it doesn't have", async () => {
+test("switching engines preserves max supported by the new default model", async () => {
   store.clear();
   const { draft } = mount();
   await settle();
@@ -115,8 +115,8 @@ test("switching engines re-defaults the model, drops the other engine's account,
 
   expect(draft().engine).toBe("codex");
   expect(draft().model).not.toBe("opus");
-  /* «max» is a claude tier; codex falls back to the CLI default. */
-  expect(draft().effort).toBe("");
+  /* Astra supports the existing max selection. */
+  expect(draft().effort).toBe("max");
   expect(draft().accountId).toBe("");
   expect(draft().launchAccountId).toBe("codex-a");
 });
@@ -168,4 +168,24 @@ test("a malformed accounts body hides the selector rather than breaking the draf
   expect(parsed.claude.accounts).toEqual([]);
   expect(parsed.codex.accounts).toEqual([]);
   expect(parsed.claude.active).toBe("");
+});
+
+
+test.each(["ultra", "max"])("model switch reconciles and persists Astra/%s for Luna", async (effort) => {
+  store.clear();
+  store.set("engine", "codex");
+  store.set("model", "gpt-6-astra");
+  store.set("effort", effort);
+  const { host, draft } = mount();
+  await settle();
+  const model = host.querySelector('select[aria-label="Agent model"]') as HTMLSelectElement;
+  flushSync(() => {
+    model.value = "gpt-5.6-luna";
+    model.dispatchEvent(new dom.Event("change", { bubbles: true }) as unknown as Event);
+  });
+  const expected = effort === "ultra" ? "" : effort;
+  expect((host.querySelector('select[aria-label="Reasoning effort level"]') as HTMLSelectElement).value).toBe(expected);
+  expect(draft().model).toBe("gpt-5.6-luna");
+  expect(draft().effort).toBe(expected);
+  expect(store.get("effort")).toBe(expected || undefined);
 });

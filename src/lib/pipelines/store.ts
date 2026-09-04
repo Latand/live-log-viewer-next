@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { statePath } from "@/lib/configDir";
 import { canonicalProject } from "@/lib/projects/aliases";
-import { isEngineEffort } from "@/lib/agent/efforts";
+import { effortScale } from "@/lib/agent/efforts";
 import { normalizeClaudeLaunchModel } from "@/lib/agent/models";
 import { MAX_SCAFFOLD_LENGTH } from "@/lib/roles/store";
 import { initializeStateCollections, SqliteStateCollection, type StateCollectionSeed } from "@/lib/state/sqliteStateStore";
@@ -56,7 +56,7 @@ export function isEffectiveRole(value: unknown): value is EffectivePipelineRole 
   if (role.model !== null && typeof role.model !== "string") return false;
   if (role.model && role.engine === "claude" && !normalizeClaudeLaunchModel(role.model)) return false;
   if (role.model && role.engine === "codex" && (role.model.length > 128 || !role.model.startsWith("gpt-") || /[\u0000-\u001f\u007f]/.test(role.model))) return false;
-  if (role.effort !== null && (typeof role.effort !== "string" || !isEngineEffort(role.engine, role.effort))) return false;
+  if (role.effort !== null && (typeof role.effort !== "string" || !effortScale(role.engine, role.model)!.includes(role.effort))) return false;
   return (
     (role.roleId === null || PIPELINE_ROLE_IDS.includes(role.roleId as typeof PIPELINE_ROLE_IDS[number])) &&
     (role.access === "read-only" || role.access === "read-write") &&

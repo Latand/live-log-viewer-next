@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 
-import { CODEX_SOL_MODEL } from "@/lib/agent/models";
+import { defaultModelFor } from "@/lib/agent/models";
 
 import {
   REPORT_TIME_ZONE,
@@ -537,7 +537,7 @@ export class TelegramReportRunner {
       spawned = await this.ports.spawn({
         body: {
           engine: "codex",
-          model: CODEX_SOL_MODEL,
+          model: defaultModelFor("codex"),
           effort: "medium",
           cwd: reportWorkspaceDir(),
           title: reportConversationTitle({ windowStart: window.startAt, windowEnd: window.endAt }),

@@ -234,6 +234,7 @@ async function postTaskSpawn(
 
   const reasoning = reasoningFromBody(engine, retryOf
     ? {
+        model: retryOf.launchProfile.model,
         ...(retryOf.launchProfile.effort != null ? { effort: retryOf.launchProfile.effort } : {}),
         ...(retryOf.launchProfile.fast != null ? { fast: retryOf.launchProfile.fast } : {}),
       }

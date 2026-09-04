@@ -1,4 +1,4 @@
-import { CODEX_SOL_MODEL, CODEX_TERRA_MODEL } from "@/lib/agent/models";
+import { CODEX_ASTRA_MODEL, CODEX_TERRA_MODEL } from "@/lib/agent/models";
 
 import type { RoleDefinition } from "./types";
 
@@ -45,7 +45,7 @@ export const ROLE_DEFAULTS: readonly RoleDefinition[] = [
     id: "reviewer",
     name: "Reviewer",
     description: "Reviews a code diff and returns severity-ranked evidence-backed findings.",
-    config: { engine: "codex", model: CODEX_SOL_MODEL, effort: "xhigh" },
+    config: { engine: "codex", model: CODEX_ASTRA_MODEL, effort: "xhigh" },
     parameters: [
       { key: "diffSource", label: "Diff source", description: "Diff or pull request reference to inspect.", kind: "text", required: true },
       { key: "lens", label: "Lens", description: "Review lens.", kind: "select", options: ["correctness", "over-engineering", "silent-failure", "test-coverage", "scope", "prod-ops", "standards+spec", "code-smells", "all"] },
@@ -60,7 +60,7 @@ export const ROLE_DEFAULTS: readonly RoleDefinition[] = [
     id: "verifier",
     name: "Verifier",
     description: "Tests supplied hypotheses and returns a per-claim evidence verdict.",
-    config: { engine: "codex", model: CODEX_SOL_MODEL, effort: "high" },
+    config: { engine: "codex", model: CODEX_ASTRA_MODEL, effort: "high" },
     parameters: [
       { key: "claims", label: "Claims", description: "Hypotheses to confirm or refute.", kind: "text", required: true },
     ],
@@ -72,7 +72,7 @@ export const ROLE_DEFAULTS: readonly RoleDefinition[] = [
     id: "builder",
     name: "Builder",
     description: "Writes product code for a scoped directive.",
-    config: { engine: "codex", model: CODEX_SOL_MODEL, effort: "medium" },
+    config: { engine: "codex", model: CODEX_ASTRA_MODEL, effort: "medium" },
     parameters: [
       { key: "mode", label: "Mode", description: "Implementation discipline.", kind: "select", options: ["plain", "apply-fixes", "tdd", "diagnose", "prototype", "merge-resolve"] },
       { key: "domain", label: "Domain", description: "Product domain for the implementation.", kind: "select", options: ["general", "frontend"] },
@@ -107,7 +107,7 @@ export const ROLE_DEFAULTS: readonly RoleDefinition[] = [
     id: "prod-auditor",
     name: "Prod-auditor",
     description: "Performs a read-only evidence-backed production investigation.",
-    config: { engine: "codex", model: CODEX_SOL_MODEL, effort: "xhigh" },
+    config: { engine: "codex", model: CODEX_ASTRA_MODEL, effort: "xhigh" },
     parameters: [
       { key: "questions", label: "Questions", description: "Production questions to investigate.", kind: "text", required: true },
     ],
