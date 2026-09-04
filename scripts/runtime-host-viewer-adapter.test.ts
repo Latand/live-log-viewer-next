@@ -33,6 +33,7 @@ import { flowStateCollectionSeed } from "../src/lib/flows/store";
 import { pipelineStateCollectionSeeds } from "../src/lib/pipelines/store";
 import { workflowStateCollectionSeed } from "../src/lib/workflows/store";
 import { initializeStateCollections } from "../src/lib/state/sqliteStateStore";
+import { VIEWER_CONTROL_TOKEN_ENV } from "../src/lib/mcp/controlEndpoint";
 import { mcpProbeEnvironment, runBootstrapRelease } from "./runtime-host-viewer-adapter";
 
 const root = path.resolve(import.meta.dir, "..");
@@ -51,6 +52,26 @@ test("candidate MCP probes read through the candidate Viewer endpoint", () => {
 
   expect(environment.LLV_VIEWER_CONTROL_URL).toBe("http://candidate.invalid");
   expect(environment.LLV_VIEWER_DEPLOY_TARGET).toBe("/state/candidate-target.json");
+});
+
+/** #1511: the candidate authenticates every connection when a token is
+    configured (#1496), so the probe carries the credential of the endpoint it
+    was pinned to. A candidate with no token configured carries none. */
+test("a candidate MCP probe carries the candidate's own credential, and none when there is none", () => {
+  const credentialed = mcpProbeEnvironment(
+    "http://candidate.invalid",
+    "/state/candidate-target.json",
+    { NODE_ENV: "test" },
+    "candidate-key",
+  );
+  const bare = mcpProbeEnvironment(
+    "http://candidate.invalid",
+    "/state/candidate-target.json",
+    { NODE_ENV: "test" },
+  );
+
+  expect(credentialed[VIEWER_CONTROL_TOKEN_ENV]).toBe("candidate-key");
+  expect(bare).not.toHaveProperty(VIEWER_CONTROL_TOKEN_ENV);
 });
 
 test("a candidate MCP probe without a candidate endpoint refuses instead of reading the deployed Viewer", () => {

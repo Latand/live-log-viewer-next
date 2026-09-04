@@ -36,7 +36,7 @@ import {
 import { ensureCanonicalMirror, resolveCanonicalRevision } from "../src/runtime-host/canonicalMirror";
 import { allocateBuiltCandidatePort, candidatePortsFromEnvironmentLists, isCandidatePortAvailable } from "../src/runtime-host/candidatePort";
 import { withBootstrapMcpHealthProbeAdmission } from "../src/runtime-host/bootstrapMcpHealthProbeAdmission";
-import { viewerCandidateContainerName, viewerCandidateImageName, viewerComposeSnapshotName } from "../src/runtime-host/deploymentArtifacts";
+import { viewerCandidateContainerName, viewerCandidateImageName, viewerComposeSnapshotPath } from "../src/runtime-host/deploymentArtifacts";
 import { bootstrapViewerRelease } from "../src/runtime-host/deploymentBootstrap";
 import {
   parseRuntimeHostRehearsalReport,
@@ -44,6 +44,7 @@ import {
 } from "../src/runtime-host/hostRehearsal";
 import { McpHealthProbeAdmissions } from "../src/runtime-host/mcpHealthProbeAdmission";
 import type { McpHealthProbeAdmissionConsumer } from "../src/runtime-host/mcpHealthProbeAdmissionChannel";
+import { VIEWER_CONTROL_TOKEN_ENV } from "../src/lib/mcp/controlEndpoint";
 import { probeControlUrl, probeMcpRuntime } from "../src/runtime-host/mcpRuntimeProbe";
 import { McpRuntimeReleaseStore } from "../src/runtime-host/mcpRuntimeRelease";
 import {
@@ -173,7 +174,7 @@ async function resolveRevision(requested: string): Promise<string> {
 }
 
 function composeConfigFile(container: string): string {
-  return path.join(deploymentDir, "compose", viewerComposeSnapshotName(container));
+  return viewerComposeSnapshotPath(stateDir, container);
 }
 
 function writeComposeConfig(container: string, config: string): void {
@@ -376,6 +377,18 @@ function serviceToken(candidate: ViewerReleaseIdentity): string | null {
   return viewerAuthenticationTokenFromConfig(fs.readFileSync(composeConfigFile(candidate.container), "utf8"));
 }
 
+/** The same credential where the release may predate Compose snapshots: a
+    release published by an older adapter has none to read, and the probe then
+    resolves whatever the machine's own state offers, as any client does. */
+function optionalServiceToken(release: ViewerReleaseIdentity): string | null {
+  try {
+    return serviceToken(release);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+}
+
 const PROBE_TIMEOUT_MS = 5_000;
 
 interface ProbeResponse {
@@ -561,6 +574,7 @@ export function mcpProbeEnvironment(
   endpoint: string,
   deployTarget: string,
   env: NodeJS.ProcessEnv = process.env,
+  token: string | null = null,
 ): Record<string, string> {
   /* An empty endpoint would leave the probe's control reads on the binding's
      fixed-port fallback, which addresses the deployed Viewer rather than the
@@ -577,6 +591,11 @@ export function mcpProbeEnvironment(
     // Candidate health must exercise the candidate's web/runtime client. The
     // stable listener still serves the previous generation before promotion.
     LLV_VIEWER_CONTROL_URL: controlUrl,
+    /* The probed Viewer authenticates every connection when a token is
+       configured (#1496), and the release state still names the incumbent, so
+       the probe carries the credential of the endpoint it was pinned to rather
+       than resolving one for a Viewer it is not grading (#1511). */
+    ...(token ? { [VIEWER_CONTROL_TOKEN_ENV]: token } : {}),
   };
 }
 
@@ -634,7 +653,7 @@ async function verify(
     ? targetFile
     : path.join(stateDir, `mcp-candidate-probe-${candidate.mcpRuntime.releaseId}.json`);
   if (!promoted) writeReleaseTarget(probeTarget, candidate);
-  const probeEnvironment = mcpProbeEnvironment(endpoint, probeTarget);
+  const probeEnvironment = mcpProbeEnvironment(endpoint, probeTarget, process.env, serviceToken(candidate));
   const mcpRuntime = await probeMcpRuntime({
     command: process.execPath,
     args: [path.join(mcpRuntimeRoot, "bin", "mcp-server.mjs")],
@@ -1091,7 +1110,7 @@ async function reconcileMcpRuntime(
   try {
     mcpRuntimeStore.installStableLauncher(deploymentPackageRoot);
     const publication = switchTarget({ ...previous, mcpRuntime: runtime }, "activate");
-    const probeEnvironment = mcpProbeEnvironment(stableEndpoint, targetFile);
+    const probeEnvironment = mcpProbeEnvironment(stableEndpoint, targetFile, process.env, optionalServiceToken(previous));
     const health = await probeMcpRuntime({
       command: process.execPath,
       args: [path.join(mcpRuntimeRoot, "bin", "mcp-server.mjs")],
