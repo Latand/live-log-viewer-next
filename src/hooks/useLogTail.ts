@@ -248,17 +248,23 @@ export function useLogTail(file: FileEntry | null, pausedInput = false, cap = 25
           updateWin(target, { lines: [], start: 0 });
         }
         if (chunk.data) {
-          let data = tailRef.current + chunk.data;
+          /* A chunk that begins past where this window left off — the first
+             read of a large file, or the bounded catch-up jumping a stale
+             subscriber forward — starts inside a record whose head was never
+             delivered. Drop through its first newline, and drop whatever
+             partial the previous chunk left behind, so no half record ever
+             reaches the parser as a line (#1498). */
+          const resumed = firstRef.current || chunk.start > offsetRef.current;
+          let data = (resumed ? "" : tailRef.current) + chunk.data;
           tailRef.current = "";
-          if (firstRef.current) {
-            startRef.current = chunk.start;
-            if (chunk.start > 0) {
-              const nl = data.indexOf("\n");
-              startRef.current = chunk.start + (nl >= 0 ? utf8len(data.slice(0, nl + 1)) : utf8len(data));
-              data = nl >= 0 ? data.slice(nl + 1) : "";
-            }
-            updateHasMore(target, startRef.current > 0);
+          if (firstRef.current) startRef.current = chunk.start;
+          if (resumed && chunk.start > 0) {
+            const nl = data.indexOf("\n");
+            const skipped = nl >= 0 ? data.slice(0, nl + 1) : data;
+            if (firstRef.current) startRef.current = chunk.start + utf8len(skipped);
+            data = nl >= 0 ? data.slice(nl + 1) : "";
           }
+          if (firstRef.current) updateHasMore(target, startRef.current > 0);
           const parts = data.split("\n");
           tailRef.current = parts.pop() ?? "";
           const complete = parts.map((line) => line.trim()).filter(Boolean);

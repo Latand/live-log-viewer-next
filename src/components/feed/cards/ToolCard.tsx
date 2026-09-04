@@ -9,10 +9,11 @@ import { GlyphIcon, Loader2 } from "../../icons";
 import { hhmm } from "../../utils";
 import { ACTION_GUTTER, MESSAGE_ACTION } from "../actionStyles";
 import { CopyButton } from "../CopyButton";
-import { tr, type ToolEvent } from "../parse";
+import { tr, type ToolEvent, type ToolOutputBlock } from "../parse";
 import type { ArgChip } from "../tools";
 import { formatDuration, isFollowUpCall, toolDurationMs } from "../toolBlocks";
 import { DiffCard } from "./DiffCard";
+import { ImageCard } from "./ImageCard";
 import { OrchestrationCard } from "./OrchestrationCard";
 import { OutputPreview } from "./OutputPreview";
 import { StatusIcon } from "./shared";
@@ -135,12 +136,21 @@ export function ToolBody({ event }: { event: ToolEvent }) {
       {event.orchestration ? <OrchestrationCard orchestration={event.orchestration} source={event.command} /> : null}
       {hasDiff && event.body?.type === "diff" ? <DiffCard body={event.body} /> : null}
       {showOutput ? (
-        <OutputPreview
-          output={event.outputPreview}
-          truncated={event.outputTruncated}
-          lang={event.lang}
-          heading={event.stderr !== undefined ? tr("tools.stdout") : undefined}
-        />
+        event.outputBlocks?.length ? (
+          <ToolOutputBlocks
+            blocks={event.outputBlocks}
+            truncated={event.outputTruncated}
+            lang={event.lang}
+            heading={event.stderr !== undefined ? tr("tools.stdout") : undefined}
+          />
+        ) : (
+          <OutputPreview
+            output={event.outputPreview}
+            truncated={event.outputTruncated}
+            lang={event.lang}
+            heading={event.stderr !== undefined ? tr("tools.stdout") : undefined}
+          />
+        )
       ) : null}
       {event.stderr !== undefined ? (
         <OutputPreview
@@ -153,6 +163,40 @@ export function ToolBody({ event }: { event: ToolEvent }) {
         />
       ) : null}
     </div>
+  );
+}
+
+/* #1498: a result that carried pictures renders its blocks in transcript
+   order — text through the capped preview, a picture through the feed's own
+   ImageCard, collapsed to its chip so the data URI enters the DOM only when
+   the operator opens it. A picture whose data did not survive falls back to
+   the same text placeholder the flattened preview carries, so a broken frame
+   degrades to a line rather than to a blank card. */
+function ToolOutputBlocks({
+  blocks,
+  truncated,
+  lang,
+  heading,
+}: {
+  blocks: readonly ToolOutputBlock[];
+  truncated: boolean;
+  lang?: string | null;
+  heading?: string;
+}) {
+  const lastText = blocks.reduce((last, block, index) => (block.type === "text" ? index : last), -1);
+  let firstText = true;
+  return (
+    <>
+      {blocks.map((block, index) => {
+        if (block.type === "image" && block.data) {
+          return <ImageCard key={index} media={block.media} data={block.data} w={block.w} h={block.h} bytes={block.bytes} initialView="chip" inset />;
+        }
+        const text = block.type === "text" ? block.text : `[${tr("render.imageOutput")}]`;
+        const node = <OutputPreview key={index} output={text} truncated={truncated && index === lastText} lang={lang} heading={firstText ? heading : undefined} />;
+        firstText = false;
+        return node;
+      })}
+    </>
   );
 }
 
