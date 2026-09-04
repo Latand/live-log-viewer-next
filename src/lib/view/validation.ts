@@ -57,7 +57,7 @@ export function validatePresence(value: unknown): PresencePayloadV1 {
   const device = record(body.device, "device"); exact(device, ["kind", "browser"], "device");
   const viewport = record(body.viewport, "viewport"); exact(viewport, ["width", "height", "dpr"], "viewport");
   const board = record(body.board, "board"); exact(board, ["renderedRevision", "durableRevision", "sync"], "board");
-  const mode = oneOf(body.mode, "mode", ["overview", "scheme", "list", "mobile-focus", "mobile-map"] as const);
+  const mode = oneOf(body.mode, "mode", ["overview", "scheme", "list", "mobile-focus"] as const);
   const camera = body.camera === null ? null : record(body.camera, "camera");
   if (camera) exact(camera, ["x", "y", "zoom", "worldRect"], "camera");
   const worldRect = camera ? record(camera.worldRect, "camera.worldRect") : null;

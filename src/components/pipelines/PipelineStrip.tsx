@@ -26,6 +26,7 @@ import {
   pipelineStateLabel,
   stageAccess,
   stageAttempts,
+  stageConfigurable,
   stageChipLabel,
   stageChipState,
   stageDockCompact,
@@ -82,8 +83,8 @@ export function verdictPlacement(
  * so a strip near the page header never renders it off-screen. Recomputed on
  * scroll/resize.
  *
- * The portal sits at z-[80] — above the z-[70] mobile pipeline dock sheet
- * (MobilePipelineDockSheet) that hosts the strip on a phone (#507 review F3).
+ * The portal sits at z-[80] — above the phone's z-[60] bottom sheets
+ * (`MobileSheet`), so it stays reachable over one (#507 review F3).
  * The verdict popover and the stage configuration editor both mount here, and a
  * z-[60] portal painted UNDER the sheet's z-[70] backdrop was invisible and
  * unclickable at 390px; z-[80] clears the sheet while staying below the
@@ -165,7 +166,7 @@ function AnchoredActionMenu({ anchorRef, children }: { anchorRef: RefObject<HTML
 /**
  * The on-canvas stage editor as a real modal dialog (#507 review F3 portal +
  * final F2 ownership). It mounts through the {@link AnchoredVerdict} body portal
- * (z-[80], above the mobile dock sheet's z-[70]) and registers as a modal LAYER:
+ * (z-[80], above the phone's z-[60] sheets) and registers as a modal LAYER:
  * Tab/Shift+Tab stay inside the editor, Escape closes it, and — because the
  * layer stack hands ownership to the topmost layer — the underlying phone sheet
  * yields its own trap/Escape while this editor is open. The autoFocus close
@@ -298,9 +299,7 @@ function StageChip({
     return compactStageOpenTarget(candidate, candidateAttempt, flows, renderableFlows, renderablePaths, files);
   };
   const openTarget = targetFor(stage);
-  const stageConfigurable = (candidate: PipelineStage) =>
-    stageAttempts(pipeline, candidate.id).length === 0 && pipeline.state !== "completed" && pipeline.state !== "closed";
-  const configurable = stageConfigurable(stage);
+  const configurable = stageConfigurable(pipeline, stage.id);
   const canUseTarget = (target: ReturnType<typeof targetFor>) => target
     ? (target.kind === "flow" ? Boolean(onOpenFlow) : Boolean(onOpenPath))
     : false;
@@ -346,7 +345,7 @@ function StageChip({
     && stageDockCompact(pipeline, stage, attempt, flows, renderableFlows, renderablePaths, files);
 
   const previousTarget = previousStage ? targetFor(previousStage) : null;
-  const previousConfigurable = previousStage ? stageConfigurable(previousStage) : false;
+  const previousConfigurable = previousStage ? stageConfigurable(pipeline, previousStage.id) : false;
   const previousLabel = previousStage ? stageChipLabel(t, previousStage) : "";
   const previousState = previousStage ? t(`pipelineChipState.${stageChipState(pipeline, previousStage)}`) : "";
   const configurationSlot: StageSlot = {

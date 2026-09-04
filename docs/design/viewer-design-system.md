@@ -321,34 +321,41 @@ bordered buttons right):
 - Tasks toggle keeps its position; its counter uses the Badge spec (§3.7),
   accent only when >0 (open tasks are actionable — allowed by rule 5).
 
-## 3.2 Conversation chip row (`MobileFocusView` strip, `StripChip`)
+## 3.2 Conversation bar title cell (`MobileShell`, `ChatBarTitle` in `MobileFocusView`)
 
-**Before** (active chip duplicates the card title; pills 44px tall):
-
-```
-│ (● fix: suppress project hydra…) (⏸ Codex) (● Claude) (⤷ ● Codex) [🗺][☑3] │
-        ↑ same title again 100px below in the card header
-```
-
-**After**:
+The chip row this section used to specify — `StripChip`, a 44 px scroller of
+engine-labelled chips with a map button and a task button at its end — is
+retired. Mobile v2 lane 3 folded the conversation's identity into the shell's
+one bar, and lane 10 deleted the strip's remaining siblings (`MobileMapLite`,
+`MobilePipelineDock` / `MobilePipelineDockSheet`, `MobileBottomShelf`). What a
+conversation shows on the phone now:
 
 ```
-│ (● Claude ✓)  (⏸ Codex)  (● Codex)  (⤷ Claude)   ···    🗺  ☑3            │
-     active = accent ring + engine label only — never the title
+│ ‹  Rebuild the board status projection        ⚠ 3   ⋯ │  52  title cell: tap = switcher, swipe = prev/next
+│    ● working 12:40 · ✦ Opus · high · stage 3/5        │      meta line: state phrase first, never truncated
 ```
 
-- Chips: visual height 32px, `--radius-control` is wrong here — chips *are*
-  status badges, so they keep pill shape (allowed by §1.3); hit area inflated
-  to 44px with transparent padding.
-- Active chip: `accent` 1.5px border + `accent-soft` fill, engine label
-  `--text-label`/600. **No title** (rule 3). Verdict/waiting glyphs stay.
-- Waiting chips keep the warning tone (`warning-soft` bg / `warning` text) —
-  they are the strip's whole point.
-- Inactive chips: `--surface-sunken`, `text-muted`, **no border** — border is
-  reserved for the active/waiting states so the strip stops being a bead chain
-  of outlines.
-- Edge fades and scroll behavior unchanged. Desktop has no chip row (the
-  scheme board is the switcher) — no desktop variant.
+- The title cell is the ONE elastic cell of the bar (≥ 190 px at 390 px): the
+  title on one line, `--text-title`/600, truncating last; under it the meta
+  line in `--text-label`/500 — a 6 px dot in the state's tone, the state
+  phrase (`chatStateBits`: one vocabulary for the bar, the switcher rows and
+  the board rows), the engine glyph, the model and its reasoning tier, and
+  `stage k/n` while the conversation is its pipeline's current stage. The
+  phrase never truncates; the model and reasoning give way first (rule 3
+  still holds: the cell never repeats the title anywhere else).
+- A tap on the cell opens the switcher sheet (`MobileSwitchSheet`): the
+  board's sections as dense 44 px rows, the current one checked, `Board ›` in
+  the header. A horizontal swipe across the bar or the composer dock replaces
+  the conversation with its sibling in the switcher's order and bumps 12 px at
+  either end. Neither creates history.
+- Everything the strip's trailing buttons reached is a labelled row now: the
+  pipeline is the conversation menu's first row (`⋯ › Pipeline · <task>`,
+  opening the pipeline screen, `‹` returning here), the project's own rows —
+  tasks among them — sit one row down in the same menu, and there is no map
+  (`docs/design/mobile-v2/README.md` §6).
+- Desktop has no bar title cell (the scheme board is the switcher) — no
+  desktop variant. The full contract is `docs/design/mobile-v2/README.md`
+  §3.2, §3.3 and §4.2.
 
 ## 3.3 Conversation card (`BranchPane`, `AgentRuntimeControls`,
 `ProcessStatusControls`, `SessionTitle`, `HandoffHandle`)

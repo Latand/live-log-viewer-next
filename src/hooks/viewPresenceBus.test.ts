@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 
 import type { SchemeLayout } from "@/components/scheme/layout";
 import { MAX_SELECTED_PATHS } from "@/lib/view/types";
+import { validatePresence } from "@/lib/view/validation";
 
 import {
   cameraToPresence,
@@ -170,4 +171,20 @@ test("the bus notifies only on a real change and merges context under the slice"
   expect(merged.project).toBe("p");
   expect(merged.mode).toBe("list");
   expect(merged.visiblePaths).toEqual(["a"]);
+});
+
+test("the phone publishes one mode, mobile-focus; the map-lite mode is retired with the map (mobile v2 lane 10)", () => {
+  const payload = {
+    schemaVersion: 1, viewSessionId: "view-session-a", deviceId: "device-a",
+    device: { kind: "mobile", browser: "chrome" }, visibility: "visible", sequence: 1, inputSequence: 0,
+    project: "p", mode: "mobile-focus", viewport: { width: 390, height: 844, dpr: 2 }, camera: null,
+    focusedPath: null, selectedPaths: [], visiblePaths: [], board: UNAVAILABLE_BOARD,
+  };
+  expect(validatePresence(payload).mode).toBe("mobile-focus");
+  /* The server refuses the retired mode, so no stale leaf can report it. */
+  expect(() => validatePresence({ ...payload, mode: "mobile-map" })).toThrow(/mode/);
+  /* And the type no longer admits it, so no leaf can be written to report it. */
+  // @ts-expect-error — "mobile-map" left the ViewMode union with the map (README §6, §8 row 10)
+  const slice: ViewSlice = { mode: "mobile-map", focusedPath: null, selectedPaths: [], visiblePaths: [], camera: null };
+  expect(slice.mode as string).toBe("mobile-map");
 });

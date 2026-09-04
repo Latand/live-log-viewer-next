@@ -8,8 +8,9 @@ import { translate } from "@/lib/i18n";
 import type { BoardTask } from "@/lib/tasks/types";
 
 /*
- * Issue #419 (reopened) — Sol finding 1. The phone hidden/handoff shelf is a
- * modal (MobileBottomShelf). Its actions are TERMINAL: opening a task/agent,
+ * Issue #419 (reopened) — Sol finding 1. The phone's host sheet (which took
+ * over from the retired hidden/handoff shelf — mobile v2 lanes 2 and 10) is a
+ * modal. Its actions are TERMINAL: opening a task/agent,
  * retrying a launch, expanding a worker or review group, or handing off all
  * navigate to content that lives BEHIND the overlay. Leaving the modal open
  * after such an action strands the target under the sheet with the body scroll

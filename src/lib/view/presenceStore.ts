@@ -60,7 +60,7 @@ const CLOCK_SKEW_MS = 5_000;
 
 const DEVICE_KINDS = new Set(["desktop", "tablet", "mobile"]);
 const BROWSER_KINDS = new Set(["chrome", "firefox", "safari", "other"]);
-const VIEW_MODES = new Set(["overview", "scheme", "list", "mobile-focus", "mobile-map"]);
+const VIEW_MODES = new Set(["overview", "scheme", "list", "mobile-focus"]);
 const BOARD_SYNC = new Set(["current", "pending", "stale", "unavailable"]);
 
 function finiteNumber(value: unknown): value is number {

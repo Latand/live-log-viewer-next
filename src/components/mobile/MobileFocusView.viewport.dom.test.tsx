@@ -7,14 +7,16 @@ import { emptyStore } from "@/components/runtime/runtimeModel";
 import type { BranchGroup } from "@/components/projectModel";
 import type { FileEntry } from "@/lib/types";
 import type { Pipeline } from "@/lib/pipelines/types";
+import type { MobileScreen } from "@/components/mobile/mobileNav";
 
 /*
- * Issue #419 — chat-first viewport, as mobile v2 lane 3 leaves it. The
+ * Issue #419 — chat-first viewport, as mobile v2 lanes 3 and 10 leave it. The
  * conversation screen owns no chrome of its own: no strip, no pane header, no
- * inline pipeline rail. The docked pipelines are ONE row in the conversation's
- * `⋯` menu (README §4.2), whose sheet lists them and folds the completed ones
- * behind a single disclosure. Opening and closing a sheet never remounts the
- * focused pane — a sheet is over the screen, never instead of it (§3.3).
+ * inline pipeline rail, no dock sheet. The pipelines are ONE row in the
+ * conversation's `⋯` menu (README §4.2, P2-9), and the row PUSHES a screen:
+ * the stage conversation's own pipeline, else the pipelines list. Opening and
+ * closing a sheet never remounts the focused pane — a sheet is over the
+ * screen, never instead of it (§3.3).
  */
 
 const actualRuntimeHooks = await import("@/hooks/useRuntime");
@@ -29,6 +31,7 @@ mock.module("@/hooks/useRuntime", () => ({
 }));
 
 const { MobileFocusView } = await import("@/components/mobile/MobileFocusView");
+const { getMobileNav, topScreen } = await import("@/components/mobile/mobileNav");
 
 const dom = new Window({ url: "http://localhost/" });
 const G = globalThis as Record<string, unknown>;
@@ -65,7 +68,7 @@ afterAll(async () => {
 });
 
 let roots: Root[] = [];
-beforeEach(() => { dom.document.body.replaceChildren(); roots = []; });
+beforeEach(() => { dom.document.body.replaceChildren(); roots = []; getMobileNav().home(); });
 afterEach(async () => { for (const r of roots) flushSync(() => r.unmount()); roots = []; await settle(); dom.sessionStorage.clear(); });
 
 function mount(node: React.ReactElement): Root {
@@ -100,13 +103,13 @@ function entry(overrides: Partial<FileEntry> & { path: string }): FileEntry {
   };
 }
 
-function view() {
+function view({ surface = pipelines, empty = false }: { surface?: Pipeline[]; empty?: boolean } = {}) {
   const conversation = entry({ path: "/session", title: "Main session", activity: "live", mtime: 9_000 });
   const group: BranchGroup = { key: conversation.path, columns: [{ file: conversation, tasks: [] }], returnable: [], finished: [], smt: conversation.mtime, orphanTask: false };
   return (
     <MobileFocusView
-      project="demo" groups={[group]} manual={[]} files={[conversation]} flows={[]}
-      pipelines={pipelines} surfacePipelines={pipelines} tasks={[]} drafts={[]}
+      project="demo" groups={empty ? [] : [group]} manual={[]} files={empty ? [] : [conversation]} flows={[]}
+      pipelines={surface} surfacePipelines={surface} tasks={[]} drafts={[]}
       loaded focus={null} onSelect={() => {}} onClose={() => {}} onDraftClose={() => {}} onDraftSpawned={() => {}}
     />
   );
@@ -120,13 +123,14 @@ function openMenu(): HTMLElement {
   return dom.document.querySelector('[data-mobile2-sheet="menu"]') as unknown as HTMLElement;
 }
 
-/** Open the pipelines from the menu's first row, and return the dock sheet. */
-async function openPipelines(): Promise<HTMLElement> {
+/** Tap the menu's pipeline row. The row PUSHES a screen (P2-9), so what comes
+    back is the navigation stack's top. */
+async function tapPipelineRow(): Promise<MobileScreen> {
   const row = openMenu().querySelector('[data-testid="mobile-menu-pipeline"]') as unknown as HTMLButtonElement;
   expect(row).not.toBeNull();
   flushSync(() => row.click());
   await settle();
-  return dom.document.querySelector('[data-testid="mobile-pipeline-sheet"]') as unknown as HTMLElement;
+  return topScreen(getMobileNav().getState());
 }
 
 test("a focused conversation reserves ZERO rows for the pipelines: they are the menu's first row (#419, README \u00a74.2)", async () => {
@@ -152,10 +156,30 @@ test("a focused conversation reserves ZERO rows for the pipelines: they are the 
   expect(rows[0]).toBe("pipeline");
 });
 
-test("the menu's pipeline row opens the sheet with the full rails (#419)", async () => {
+test("the menu's pipeline row pushes the pipelines list; nothing of the retired dock sheet mounts (P2-9, lane 10)", async () => {
   roots.push(mount(view()));
   await settle();
-  expect(await openPipelines()).not.toBeNull();
+  expect(await tapPipelineRow()).toEqual({ kind: "pipelines" });
+  expect(dom.document.querySelector('[data-testid="mobile-pipeline-sheet"]')).toBeNull();
+  expect(dom.document.querySelector('[data-testid="mobile-pipeline-dock"]')).toBeNull();
+  expect(dom.document.querySelector('[data-mobile2-sheet]')).toBeNull();
+});
+
+test("on a stage conversation the row names its stage and pushes that pipeline (P2-9, §4.2)", async () => {
+  /* The focused conversation ran the running pipeline's first stage. */
+  const staged = {
+    ...pipe("p-run", "running"),
+    runs: [{ stageId: "plan", attempts: [{ n: 1, state: "running", agentPath: "/session", flowId: null }] }],
+    cursor: { stageId: "plan", state: "running", input: null, activatedBy: null },
+  } as unknown as Pipeline;
+  roots.push(mount(view({ surface: [staged, pipe("p-done1", "completed")] })));
+  await settle();
+  const row = openMenu().querySelector('[data-testid="mobile-menu-pipeline"]') as unknown as HTMLButtonElement;
+  expect(row.textContent).toContain("Task p-run");
+  expect(row.textContent).toContain("stage 1/2");
+  flushSync(() => row.click());
+  await settle();
+  expect(topScreen(getMobileNav().getState())).toEqual({ kind: "pipeline", id: "p-run" });
 });
 
 test("the conversation screen mounts no pane header at 390px: the bar's title cell is the identity (\u00a73.4)", async () => {
@@ -172,26 +196,13 @@ test("the conversation screen mounts no pane header at 390px: the bar's title ce
   expect(title!.querySelector("[data-mobile2-chat-state]")).not.toBeNull();
 });
 
-test("the sheet folds completed pipelines behind one reversible disclosure (#419)", async () => {
-  roots.push(mount(view()));
+test("with nothing to show the leaf says so and mounts no dock: a provisioning pipeline is the board's row and screen, not this leaf's surface (lane 10)", async () => {
+  roots.push(mount(view({ surface: [pipe("p-new", "provisioning")], empty: true })));
   await settle();
-  const sheet = await openPipelines();
-
-  /* The one ongoing pipeline is listed directly; the two completed ones hide
-     behind a single "2 completed" disclosure until it is opened. */
-  expect(sheet.querySelectorAll('[data-testid="mobile-pipeline-dock"]').length).toBe(1);
-  const group = sheet.querySelector('[data-testid="mobile-pipeline-completed-group"]')!;
-  expect(group.textContent).toContain("2 completed");
-
-  const toggle = sheet.querySelector('[data-testid="mobile-pipeline-completed-toggle"]') as unknown as HTMLButtonElement;
-  flushSync(() => toggle.click());
-  await settle();
-  expect(sheet.querySelectorAll('[data-testid="mobile-pipeline-dock"]').length).toBe(3);
-
-  /* Reversible. */
-  flushSync(() => toggle.click());
-  await settle();
-  expect(sheet.querySelectorAll('[data-testid="mobile-pipeline-dock"]').length).toBe(1);
+  const shell = dom.document.querySelector('[data-testid="mobile-chat-shell"]')!;
+  expect(shell.textContent).toContain("No conversations yet");
+  expect(dom.document.querySelector('[data-testid="mobile-pipeline-dock"]')).toBeNull();
+  expect(dom.document.querySelector('[aria-label="Pipeline stages"]')).toBeNull();
 });
 
 test("the focus shell stamps the chat-first transcript budget onto the DOM it governs (#419)", async () => {

@@ -2576,4 +2576,18 @@ export const uk: Record<keyof typeof en, Message> = {
   "mobile2.seat.open": "Відкрити розмову",
   "mobile2.seat.draftCancel": "Скасувати",
   "mobile2.seat.createDock": "Створіть оркестратора, щоб спілкуватися…",
+  /* #1487 (mobile v2, лейн 10): виправлені фрази для розмови без хоста. */
+  "mobile2.board.killedAge": "вбито · {age}",
+  "mobile2.board.heldQueued": { one: "утримано · {count} повідомлення в черзі", few: "утримано · {count} повідомлення в черзі", many: "утримано · {count} повідомлень у черзі", other: "утримано · {count} повідомлень у черзі" },
+  "mobile2.board.started": "запущено {age} тому",
+  "mobile2.chat.stateKilledAge": "вбито · {age}",
+  "mobile2.chat.stateHeldQueued": { one: "утримано · {count} повідомлення в черзі", few: "утримано · {count} повідомлення в черзі", many: "утримано · {count} повідомлень у черзі", other: "утримано · {count} повідомлень у черзі" },
+  "mobile2.composer.placeholderStopped": "хост зупинено · текст чекає в черзі до перезапуску",
+  /* Mobile v2, лейн 10: екран пайплайна перебирає те, до чого вів прибраний док. */
+  "mobile2.pipeline.configure": "Налаштувати етап {stage}",
+  "mobile2.pipeline.configureTitle": "Налаштування · {stage}",
+  "mobile2.pipeline.attempt": "спроба {n} · {state}",
+  "mobile2.pipeline.openAttempt": "Відкрити транскрипт спроби {n}",
+  "mobile2.pipeline.reviewTranscript": "транскрипт рев’ю · раунд {n}",
+  "mobile2.pipeline.openReviewTranscript": "Відкрити транскрипт рев’ю раунду {n}",
 };

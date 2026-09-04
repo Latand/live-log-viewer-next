@@ -8,6 +8,7 @@ import type { BranchGroup } from "@/components/projectModel";
 import type { FileEntry } from "@/lib/types";
 import type { Flow } from "@/lib/flows/types";
 import type { Pipeline } from "@/lib/pipelines/types";
+import type { MobileScreen } from "@/components/mobile/mobileNav";
 
 /*
  * Issue #325 — 390px coverage: a direct one-shot review group must surface on
@@ -30,6 +31,7 @@ mock.module("@/hooks/useRuntime", () => ({
 
 const { MobileFocusView } = await import("@/components/mobile/MobileFocusView");
 const { directReviewFlows } = await import("@/components/flows/directReviewGroups");
+const { getMobileNav, topScreen } = await import("@/components/mobile/mobileNav");
 
 const dom = new Window({ url: "http://localhost/" });
 const G = globalThis as Record<string, unknown>;
@@ -111,21 +113,19 @@ function openDeck(): void {
   flushSync(() => row!.click());
 }
 
-/** The pipeline plan: the conversation menu's first row opens the dock sheet,
-    and the dock's own disclosure expands the full stage rail. */
-async function openPipelineRail(): Promise<HTMLElement> {
+/** The pipeline plan: the conversation menu's first row PUSHES the pipeline
+    screen (mobile v2 lane 7, P2-9) — the dock sheet and its rail are retired
+    (lane 10). What comes back is the navigation stack's top. */
+async function tapPipelineRow(): Promise<MobileScreen> {
+  getMobileNav().home();
   const more = dom.document.querySelector('[data-mobile2-open="menu"]') as unknown as HTMLButtonElement;
   flushSync(() => more.click());
   const row = dom.document.querySelector('[data-testid="mobile-menu-pipeline"]') as unknown as HTMLButtonElement;
   expect(row).not.toBeNull();
   flushSync(() => row.click());
   await settle();
-  const dock = dom.document.querySelector('[data-testid="mobile-pipeline-sheet"] [data-testid="mobile-pipeline-dock"]') as unknown as HTMLElement;
-  expect(dock).not.toBeNull();
-  const summary = dock.querySelector('[data-testid="mobile-pipeline-dock-summary"]') as unknown as HTMLButtonElement;
-  flushSync(() => summary.click());
-  await settle();
-  return dock;
+  expect(dom.document.querySelector('[data-testid="mobile-pipeline-sheet"]')).toBeNull();
+  return topScreen(getMobileNav().getState());
 }
 
 test("a direct review group rides the phone switcher as a round deck with accessible verdict history (#325)", async () => {
@@ -279,7 +279,7 @@ test("a terminal direct group rides the phone as a tappable collapsed verdict ch
   expect(banner).toBeDefined();
 });
 
-test("an active pipeline-owned review keeps prior same-round bindings in the compact mobile rail (#353)", async () => {
+test("an active pipeline-owned review names its stage in the menu row, and the row pushes its pipeline — where the round's other transcripts are rows (#353, lane 10)", async () => {
   const builder = entry({ path: "/pipeline-builder", title: "Pipeline builder", conversationId: "conversation-builder", activity: "live", mtime: 9_000 });
   const membership = (slot: string) => ({
     kind: "flow" as const,
@@ -350,26 +350,15 @@ test("an active pipeline-owned review keeps prior same-round bindings in the com
   expect(dom.document.querySelector('[data-testid="mobile-menu-pipeline"]')?.textContent).toContain("stage ");
   flushSync(() => (dom.document.querySelector("[data-mobile2-close]") as unknown as HTMLButtonElement).click());
 
-  /* The full rail — and its verdict/round history — stays reachable behind the
-     menu row and the dock's own disclosure (#156/#419). */
-  const dock = await openPipelineRail();
-  const history = ([...dock.querySelectorAll("button")] as unknown as HTMLButtonElement[])
-    .filter((button) => button.getAttribute("aria-label")?.startsWith("Open verdict for stage"))
-    .at(-1);
-  expect(history).toBeDefined();
-  expect(history!.className).toContain("min-w-11");
-  flushSync(() => (history as HTMLButtonElement).click());
-  await settle();
-
-  const priorTranscript = dom.document.querySelector('button[aria-label="Open review transcript 1"]') as unknown as HTMLButtonElement | null;
-  expect(priorTranscript).not.toBeNull();
-  expect(priorTranscript!.className).toContain("min-h-11");
-  expect(priorTranscript!.className).toContain("min-w-11");
-  flushSync(() => priorTranscript!.click());
-  expect(selected.path).toBe(priorReviewer.path);
+  /* The row pushes THIS pipeline's screen. The round's other reviewer
+     transcript — what the retired rail's verdict history listed — is a row
+     under the review stage there (`MobilePipelineScreen.dom`); nothing on the
+     conversation screen opens a transcript behind the operator's back. */
+  expect(await tapPipelineRow()).toEqual({ kind: "pipeline", id: pipeline.id });
+  expect(selected.path).toBeNull();
 });
 
-test("an active retry opens prior transcript history from the mobile pipeline rail (#353)", async () => {
+test("an active retry's menu row pushes its pipeline, where the earlier attempt is a row (#353, lane 10)", async () => {
   const prior = entry({ path: "/pipeline-retry-1", title: "Pipeline retry 1", mtime: 9_000 });
   const current = entry({ path: "/pipeline-retry-2", title: "Pipeline retry 2", activity: "live", mtime: 10_000 });
   const pipeline = {
@@ -393,20 +382,15 @@ test("an active retry opens prior transcript history from the mobile pipeline ra
   ));
   await settle();
 
-  const dock = await openPipelineRail();
-  const history = ([...dock.querySelectorAll("button")] as unknown as HTMLButtonElement[])
-    .find((button) => button.getAttribute("aria-label")?.startsWith("Open verdict for stage"));
-  expect(history).toBeDefined();
-  expect(history!.disabled).toBe(false);
-  flushSync(() => history!.click());
-  await settle();
-
-  const priorTranscript = dom.document.querySelector('button[aria-label="Open transcript for attempt 1"]') as unknown as HTMLButtonElement | null;
-  expect(priorTranscript).not.toBeNull();
-  expect(priorTranscript!.className).toContain("min-h-11");
-  expect(priorTranscript!.className).toContain("min-w-11");
-  flushSync(() => priorTranscript!.click());
-  expect(selected.path).toBe(prior.path);
+  /* The stage the conversation is on names itself in the menu row; the row
+     pushes the pipeline screen, and the earlier attempt's transcript is a row
+     under the stage there (`MobilePipelineScreen.dom`). */
+  const more = dom.document.querySelector('[data-mobile2-open="menu"]') as unknown as HTMLButtonElement;
+  flushSync(() => more.click());
+  expect(dom.document.querySelector('[data-testid="mobile-menu-pipeline"]')?.textContent).toContain("Retry on mobile");
+  flushSync(() => (dom.document.querySelector("[data-mobile2-close]") as unknown as HTMLButtonElement).click());
+  expect(await tapPipelineRow()).toEqual({ kind: "pipeline", id: pipeline.id });
+  expect(selected.path).toBeNull();
 });
 
 test("a focused deck keeps the switcher on the bar and the swipe that walks it (#1439 lane 3)", async () => {

@@ -410,7 +410,7 @@ test("the phone's focus mode publishes the selection the desktop board made", as
   /* Same project, phone width: MobileFocusView takes over the slice. */
   mobile = true;
   const phone = mount();
-  expect(await waitFor(() => slice().mode === "mobile-focus" || slice().mode === "mobile-map")).toBe(true);
+  expect(await waitFor(() => slice().mode === "mobile-focus")).toBe(true);
   await settle();
   expect(slice().mode).toBe("mobile-focus");
   /* This used to be `[]`, so a selection vanished from the snapshot the moment

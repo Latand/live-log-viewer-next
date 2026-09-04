@@ -2625,9 +2625,14 @@ export function TmuxComposerCore({
      never disagree about what the conversation is doing. Desktop passes no slot
      and keeps its plain send. */
   const phoneState = chatState(file);
+  /* Respawn answers to the HOST, not to the turn (#1487). A host stopped after
+     its turn settled is not a killed conversation — the bar reads «done» — but
+     it is still a conversation with nobody to send to, and its way back is the
+     same resume. */
+  const hostGone = file.proc === "killed";
   const composerHasDraft = text.trim().length > 0 || attachments.images.length > 0 || attachments.files.length > 0;
   const slotKind = composerSlotKind({
-    killed: phoneState === "killed",
+    killed: hostGone,
     offline: runtimeOffline,
     working: phoneState === "working",
     hasDraft: composerHasDraft,
@@ -2697,8 +2702,8 @@ export function TmuxComposerCore({
 
   /* The placeholder says what happens to what is typed, in the same words the
      bar's meta line uses (§4.2's state table). */
-  const phonePlaceholder = phoneState === "killed"
-    ? t("mobile2.composer.placeholderKilled")
+  const phonePlaceholder = hostGone
+    ? t(phoneState === "killed" ? "mobile2.composer.placeholderKilled" : "mobile2.composer.placeholderStopped")
     : runtimeOffline
       ? t("mobile2.composer.placeholderOffline")
       : phoneState === "held"

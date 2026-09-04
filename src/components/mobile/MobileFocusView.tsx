@@ -29,9 +29,7 @@ import type { BranchGroup } from "@/components/projectModel";
 import { draftWorkingDirectory } from "@/components/projectModel";
 import { cleanTitle, engineBadge, effortTitle } from "@/components/utils";
 
-import { compactPipelineLayoutFlows, partitionPipelineSurfaces, pipelineLinkedTasks, renderableFlowIds } from "@/components/pipelines/pipelineModel";
-import { MobilePipelineDock } from "./MobilePipelineDock";
-import { MobilePipelineDockSheet } from "./MobilePipelineDockSheet";
+import { compactPipelineLayoutFlows } from "@/components/pipelines/pipelineModel";
 import { conversationIdentity } from "@/lib/accounts/identity";
 import { useFavorites } from "@/components/favorites/FavoritesContext";
 import { useOrchestratorSeat } from "@/components/orchestrator/useOrchestratorSeat";
@@ -43,7 +41,6 @@ import { buildFocusFrameIndex, stageAnchorAliases } from "@/components/scheme/fo
 import { buildSchemeLayout } from "@/components/scheme/layout";
 import { subagentsOf } from "@/components/scheme/subagentBadgeModel";
 import type { SubagentTrayApi } from "@/components/scheme/SubagentTrayView";
-import type { WorkerStack } from "@/components/scheme/workerCollapse";
 
 import { WakeupChip, wakeupChipKey } from "@/components/WakeupChip";
 
@@ -53,10 +50,6 @@ import { MobileOrchestratorSheet } from "./MobileOrchestratorSheet";
 import { MobileSwitchSheet, switchList, swipeTarget, type SwitchCandidate, type SwitchEntry } from "./MobileSwitchSheet";
 import { CHAT_TONE_DOT, CHAT_TONE_TEXT, chatStateBits, stagePosition, type StagePosition } from "./mobileChatState";
 import { topScreen, useMobileNav, useMobileNavStore } from "./mobileNav";
-
-/* Re-exported so existing importers (and tests) keep resolving it here after
-   the component moved to its own module (issue #419). */
-export { MobilePipelineDock } from "./MobilePipelineDock";
 
 const focusKey = (project: string) => "llvFocus:" + project;
 /** The pane this tab last pinned in `project`, or null (also on the server). */
@@ -108,15 +101,10 @@ interface Props {
       flow control (renderableFlows and the pipeline focus row read real flows). */
   reviewGroups?: Flow[];
   pipelines: Pipeline[];
-  /** Active project pipelines consumed directly by the mobile pipeline dock. */
+  /** Active project pipelines: they shape the layout's pipeline groups, and
+      their count is the menu's pipeline row on a conversation that is no
+      stage of any of them (the row then opens the pipelines list). */
   surfacePipelines?: Pipeline[];
-  /** Accepted and IGNORED. Nothing on this screen reads collapsed worker
-      stacks any more — issue #136's layout use is gone and `buildSchemeLayout`
-      never sees them — so the declaration survives for exactly one reason: the
-      board's call site (`ProjectDashboard.tsx`, lane 2's file) still passes
-      them, and an unknown JSX attribute is a type error there. Delete that one
-      line and this goes with it. */
-  workerStacks?: WorkerStack[];
   /** Board-mounted tasks. */
   tasks: BoardTask[];
   /** The project's FULL task list for the sheet and the count badge, so a
@@ -140,9 +128,6 @@ interface Props {
       switcher row, a map pick or the attention row — the deliberate act the
       board counts as having SEEN a finished lane's outcome (#1244). */
   onConversationOpened?: (path: string) => void;
-  /** Reports the focused conversation's file (or null) so the project shell can
-      dock a single handoff control in the host sheet (issue #177 item 5). */
-  onActiveChange?: (file: FileEntry | null) => void;
   /* ── The shell (mobile v2 lane 3) ──────────────────────────────────────── */
   /** The Viewer's shell host: the attention badge, the arrival banner and the
       sheets it owns (the project switcher, the queue, search). Optional: when
@@ -170,13 +155,6 @@ interface Props {
   trayApi?: SubagentTrayApi;
 }
 
-/** The phone consumes the same memberful/shelf partition directly. */
-export function pipelinesToDock(pipelines: readonly Pipeline[], memberfulGroupIds: ReadonlySet<string>): Pipeline[] {
-  const partition = partitionPipelineSurfaces(pipelines, memberfulGroupIds);
-  const visible = new Set([...partition.memberful, ...partition.shelf].map((pipeline) => pipeline.id));
-  return pipelines.filter((pipeline) => visible.has(pipeline.id));
-}
-
 /**
  * The phone's CONVERSATION SCREEN (docs/design/mobile-v2/README.md §4.2, §8
  * row 3).
@@ -198,7 +176,7 @@ export function pipelinesToDock(pipelines: readonly Pipeline[], memberfulGroupId
  * not loaded — the same shell renders the board leaf, which lane 2 fills with
  * the board list.
  */
-export function MobileFocusView({ project, projectName, groups, manual, files, flows, reviewGroups = [], pipelines, surfacePipelines = [], tasks, sheetTasks, drafts, favorites, isolatedManualPaths = EMPTY_PATHS, loaded, focus, onSelect, onClose, onDraftClose, onDraftSpawned, onConversationOpened, onActiveChange, shellHost = null, renderBoardSheet, onOpenSearch, hostTaskCount = 0, onHandoff, alert }: Props) {
+export function MobileFocusView({ project, projectName, groups, manual, files, flows, reviewGroups = [], pipelines, surfacePipelines = [], tasks, sheetTasks, drafts, favorites, isolatedManualPaths = EMPTY_PATHS, loaded, focus, onSelect, onClose, onDraftClose, onDraftSpawned, onConversationOpened, shellHost = null, renderBoardSheet, onOpenSearch, hostTaskCount = 0, onHandoff, alert }: Props) {
   const { t } = useLocale();
   /* The screen is mounted INSIDE the project board's shell (lane 2 pushes it
      when a conversation reaches the top of the stack), so the badge, the
@@ -240,7 +218,6 @@ export function MobileFocusView({ project, projectName, groups, manual, files, f
   if (focusState.project !== project) setFocusState({ project, key: focus ?? rememberedFocus(project) });
   const focusPath = focusState.key;
   const setFocusPath = useCallback((key: string | null) => setFocusState((prev) => (prev.key === key ? prev : { project: prev.project, key })), []);
-  const [pipelineSheetOpen, setPipelineSheetOpen] = useState(false);
   const [taskSheet, setTaskSheet] = useState<TaskSheetView | null>(null);
   /* Bumped by the menu's Rename row: the editor opens over the bar, where the
      title cell is (§4.2, #1348). The editor reports the effective title back,
@@ -342,21 +319,6 @@ export function MobileFocusView({ project, projectName, groups, manual, files, f
     () => (activeFile ? subagentsOf(conversationIdentity(activeFile), files, undefined, nowSeconds) : []),
     [activeFile, files, nowSeconds],
   );
-  /* Report the focused conversation up so the project shell can dock its
-     handoff control in the host sheet (issue #177 item 5). */
-  useEffect(() => {
-    onActiveChange?.(activeFile);
-  }, [activeFile, onActiveChange]);
-  useEffect(() => () => onActiveChange?.(null), [onActiveChange]);
-  const memberfulPipelineIds = useMemo(
-    () => new Set(layout.groups.filter((group) => group.kind === "pipeline" && group.pipeline).map((group) => group.id)),
-    [layout.groups],
-  );
-  const dockedPipelines = useMemo(
-    () => pipelinesToDock(surfacePipelines, memberfulPipelineIds),
-    [surfacePipelines, memberfulPipelineIds],
-  );
-
   /* Presence: the phone reports the pinned pane as the sole visible transcript
      (a deck/draft carries no transcript path, so focus is null there). */
   useEffect(() => {
@@ -378,36 +340,19 @@ export function MobileFocusView({ project, projectName, groups, manual, files, f
     () => stagePosition(pipelines, activeFile ? activeFile.path : null, activeDeck ? activeDeck.flow.id : null),
     [pipelines, activeFile, activeDeck],
   );
-  const renderablePaths = useMemo(() => new Set(files.map((entry) => entry.path)), [files]);
-  const renderableFlows = useMemo(() => renderableFlowIds(layoutFlows, new Set(layout.nodes.map((node) => node.file.path))), [layoutFlows, layout]);
-  const linkedTasksByPipeline = useMemo(
-    () => new Map(pipelines.map((pipeline) => [pipeline.id, pipelineLinkedTasks(pipeline, sheetTasks ?? tasks, flows, files)] as const)),
-    [pipelines, sheetTasks, tasks, flows, files],
-  );
   /* Conversation-side relation strip (issue #292). */
   const relatedTasksByPath = useMemo(() => taskRelationsByPath(files, sheetTasks ?? tasks), [files, sheetTasks, tasks]);
 
-  const openStagePath = useCallback(
-    (path: string) => {
-      const file = files.find((entry) => entry.path === path);
-      if (file) onSelect(file);
-    },
-    [files, onSelect],
-  );
   const openPipelineTask = useCallback((task: BoardTask) => setTaskSheet({ taskId: task.id }), []);
-  const openPipelineFlow = useCallback((flowId: string) => {
-    const key = deckKey(flowId);
-    if (byKey.has(key)) setFocusPath(key);
-  }, [byKey, setFocusPath]);
 
   /* Pin a pane the layout already holds, as the phone's OPEN gesture (#1244).
      A switcher row and a map/attention pick are the same deliberate act as
      clicking a card on the desktop board, so each one stamps the durable
      acknowledgement that releases a held finished outcome.
 
-     What deliberately does NOT stamp: the bar/dock swipe, the attention
-     fallback inside `resolvedKey`, and the `onActiveChange` report. Passing a
-     card, or having it surface on its own, is not reading it. */
+     What deliberately does NOT stamp: the bar/dock swipe and the attention
+     fallback inside `resolvedKey`. Passing a card, or having it surface on
+     its own, is not reading it. */
   const openEntry = useCallback(
     (key: string) => {
       setFocusPath(key);
@@ -601,9 +546,15 @@ export function MobileFocusView({ project, projectName, groups, manual, files, f
           stage={stage}
           crowned={Boolean(favoritesApi?.has(conversationIdentity(activeFile)))}
           hostTaskCount={hostTaskCount}
-          pipelineCount={dockedPipelines.length}
+          pipelineCount={surfacePipelines.length}
           onOpenSeat={seatPanel ? () => setSeatSheetOpen(true) : undefined}
-          onOpenPipeline={dockedPipelines.length ? () => setPipelineSheetOpen(true) : undefined}
+          /* P2-9 (§4.2): a stage conversation opens ITS pipeline's screen, and
+             ‹ from there returns here; a conversation that is no stage opens
+             the pipelines list. Both are screens on the stack the board owns
+             (lane 7), so the dock sheet this row used to open is retired. */
+          onOpenPipeline={stage
+            ? () => nav.push({ kind: "pipeline", id: stage.pipeline.id })
+            : surfacePipelines.length ? () => nav.push({ kind: "pipelines" }) : undefined}
           onRename={() => setRenameToken((token) => token + 1)}
           onToggleCrown={favoritesApi ? () => favoritesApi.toggle(conversationIdentity(activeFile)) : undefined}
           onHandoff={onHandoff ? () => onHandoff(activeFile) : undefined}
@@ -673,17 +624,10 @@ export function MobileFocusView({ project, projectName, groups, manual, files, f
       />
     )
   ) : loaded ? (
-    dockedPipelines.length ? (
-      /* No conversation yet, but an active pipeline is provisioning: its plan
-         + controls ARE the surface here (issue #136 / review). */
-      <div className="flex min-h-0 flex-1 flex-col divide-y divide-border overflow-y-auto">
-        {dockedPipelines.map((pipeline) => (
-          <MobilePipelineDock key={pipeline.id} pipeline={pipeline} flows={flows} files={files} renderablePaths={renderablePaths} renderableFlows={renderableFlows} linkedTasks={linkedTasksByPipeline.get(pipeline.id) ?? []} onOpenPath={openStagePath} onOpenFlow={openPipelineFlow} onOpenTask={openPipelineTask} />
-        ))}
-      </div>
-    ) : (
-      <div className="flex flex-1 items-center justify-center text-center text-body text-muted">{t("mobile.noConvos")}</div>
-    )
+    /* Nothing to show. The board is the phone's leaf for that (lane 2), and a
+       provisioning pipeline is a row there with a screen behind it (lane 7);
+       the dock that used to fill this branch went with lane 10. */
+    <div className="flex flex-1 items-center justify-center text-center text-body text-muted">{t("mobile.noConvos")}</div>
   ) : (
     <div className="flex flex-1 items-center justify-center gap-2 text-center text-body text-muted">
       <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
@@ -775,23 +719,6 @@ export function MobileFocusView({ project, projectName, groups, manual, files, f
           /* Already in it: the sheet was opened FROM the seat's conversation. */
           onOpenConversation={() => setSeatSheetOpen(false)}
           onClose={() => setSeatSheetOpen(false)}
-        />
-      ) : null}
-
-      {pipelineSheetOpen && dockedPipelines.length ? (
-        <MobilePipelineDockSheet
-          pipelines={dockedPipelines}
-          render={{
-            flows,
-            files,
-            renderablePaths,
-            renderableFlows,
-            linkedTasksByPipeline,
-            onOpenPath: openStagePath,
-            onOpenFlow: openPipelineFlow,
-            onOpenTask: openPipelineTask,
-          }}
-          onClose={() => setPipelineSheetOpen(false)}
         />
       ) : null}
 

@@ -5,6 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 
 import { emptyStore, type ConnectionState } from "@/components/runtime/runtimeModel";
 import { translate } from "@/lib/i18n";
+import type { Flow } from "@/lib/flows/types";
 import type { Pipeline } from "@/lib/pipelines/types";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
@@ -19,7 +20,10 @@ import type { FileEntry } from "@/lib/types";
  *     the product's own words (the stage's role name, its round, the count);
  *   - every stage that ran has a conversation and the row opens it, and the
  *     current stage is the one with the accent edge;
- *   - the linked tasks come last.
+ *   - the linked tasks come last;
+ *   - what the retired dock sheet alone could reach lives here now (lane 10):
+ *     a never-run stage's row opens its configuration in a sheet, and a
+ *     stage's earlier attempts and review transcripts are rows under it.
  */
 
 const actualRuntimeHooks = await import("@/hooks/useRuntime");
@@ -83,14 +87,15 @@ function nav() {
   });
 }
 
-function mount(node: React.ReactNode): HTMLElement {
+function mount(node: React.ReactNode, store = nav()): HTMLElement {
   const host = dom.document.createElement("div");
   dom.document.body.appendChild(host);
   const root = createRoot(host as unknown as Element);
-  flushSync(() => root.render(<MobileNavContext.Provider value={nav()}>{node}</MobileNavContext.Provider>));
+  flushSync(() => root.render(<MobileNavContext.Provider value={store}>{node}</MobileNavContext.Provider>));
   roots.push(root);
   return host as unknown as HTMLElement;
 }
+const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 const q = (host: HTMLElement, selector: string) => host.querySelector(selector) as unknown as HTMLElement | null;
 const qa = (host: HTMLElement, selector: string) => Array.from(host.querySelectorAll(selector)) as unknown as HTMLElement[];
@@ -111,12 +116,16 @@ const file = (path: string, title: string): FileEntry => ({
 const IMPLEMENT = file("/repo/implement.jsonl", "Implement fast switching");
 const REVIEW = file("/repo/review.jsonl", "Review round 3");
 
+/* Every stage carries the role the engine resolved for it, as a real pipeline
+   does: the stage sheet renders the desktop's own editor, which reads it. */
+const role = (roleId: string, access: "read-only" | "read-write" = "read-write") =>
+  ({ roleId, engine: "claude", model: "opus", effort: "high", access, promptScaffold: null });
 const STAGES = [
-  { id: "design", kind: "run", role: { roleId: "architect" }, prompt: "p", next: "implement" },
-  { id: "implement", kind: "run", role: { roleId: "builder" }, prompt: "p", next: "review" },
-  { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "p", next: "fix", onFail: { to: "implement", maxRounds: 3 } },
-  { id: "fix", kind: "run", role: { roleId: "builder" }, prompt: "p", next: "merge" },
-  { id: "merge", kind: "run", role: { roleId: "builder" }, prompt: "p", next: null },
+  { id: "design", kind: "run", role: { roleId: "architect" }, prompt: "p", next: "implement", effectiveRole: role("architect", "read-only") },
+  { id: "implement", kind: "run", role: { roleId: "builder" }, prompt: "p", next: "review", effectiveRole: role("builder") },
+  { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "p", next: "fix", onFail: { to: "implement", maxRounds: 3 }, effectiveRole: role("reviewer", "read-only") },
+  { id: "fix", kind: "run", role: { roleId: "builder" }, prompt: "p", next: "merge", effectiveRole: role("builder") },
+  { id: "merge", kind: "run", role: { roleId: "builder" }, prompt: "p", next: null, effectiveRole: role("builder") },
 ];
 
 const attempt = (over: Record<string, unknown>) => ({
@@ -204,9 +213,12 @@ test("every reviewed stage opens its own conversation; a stage with none is a st
   /* Only the stage the cursor is on carries the accent edge. */
   expect(stages.map((el) => el.getAttribute("data-mobile2-stage-current"))).toEqual([null, null, "true", null, null]);
   /* The two stages whose transcripts are in the scan are doors; the design
-     stage ran without one, and the two pending stages have not run at all. */
+     stage ran without one and is a statement; the two pending stages have not
+     run at all, so each is the way to its configuration (lane 10) — a control,
+     but not a door to a conversation. */
   expect(stages.map((el) => el.getAttribute("data-mobile2-go"))).toEqual([null, "chat", "chat", null, null]);
-  expect(stages.map((el) => el.tagName)).toEqual(["DIV", "BUTTON", "BUTTON", "DIV", "DIV"]);
+  expect(stages.map((el) => el.getAttribute("data-mobile2-stage-configure"))).toEqual([null, null, null, "true", "true"]);
+  expect(stages.map((el) => el.tagName)).toEqual(["DIV", "BUTTON", "BUTTON", "BUTTON", "BUTTON"]);
 
   click(stages[2]!);
   expect(opened).toEqual([REVIEW.path]);
@@ -224,6 +236,138 @@ test("every reviewed stage opens its own conversation; a stage with none is a st
   expect(stages[2]!.textContent).toContain(translate("en", "mobile2.pipeline.reviewRound", { round: 3 }));
   expect(stages[2]!.textContent).toContain(translate("en", "pipelineChipState.failed"));
   expect(stages[2]!.textContent).toContain(translate("en", "pipelineVerdict.findings", { count: 2 }));
+});
+
+test("a never-run stage's row opens its configuration in a sheet — the desktop's own editor — Tab stays inside it, and Escape closes only the sheet (lane 10, PR #431, #507 F2)", async () => {
+  const store = nav();
+  const host = mount(<MobilePipelineScreen pipeline={parkedPipeline()} files={[IMPLEMENT, REVIEW]} now={NOW} onOpenConversation={() => {}} />, store);
+  const fix = q(host, '[data-mobile2-stage="fix"]')!;
+  expect(fix.getAttribute("aria-label")).toBe(translate("en", "mobile2.pipeline.configure", {
+    stage: translate("en", "mobile2.pipeline.stageTitle", { role: translate("en", "roleCopy.builder.name"), stage: "fix" }),
+  }));
+  expect(fix.className).toContain("min-h-[52px]");
+  /* A stage that ran configures nothing: the engine snapshots its config at
+     the first attempt. */
+  expect(q(host, '[data-mobile2-stage="design"]')!.getAttribute("data-mobile2-stage-configure")).toBeNull();
+
+  fix.focus();
+  click(fix);
+  await settle();
+  /* The nav store owns «a sheet is open» (§3.3); the screen says which stage. */
+  expect(store.getState().sheet).toBe("stage");
+  const sheet = dom.document.querySelector('[data-mobile2-sheet="stage"]') as unknown as HTMLElement | null;
+  expect(sheet).not.toBeNull();
+  expect(sheet!.textContent).toContain(translate("en", "mobile2.pipeline.configureTitle", {
+    stage: translate("en", "mobile2.pipeline.stageTitle", { role: translate("en", "roleCopy.builder.name"), stage: "fix" }),
+  }));
+  expect(sheet!.querySelector('[data-mobile2-stage-config="fix"] [data-pipeline-stage-card="p2::fix"]')).not.toBeNull();
+  /* A real modal dialog, as the retired dock sheet was (PR #431): it takes
+     focus on open, so the keyboard is inside it. */
+  expect(sheet!.getAttribute("aria-modal")).toBe("true");
+  expect(sheet!.contains(dom.document.activeElement as never)).toBe(true);
+
+  /* The stage editor — what #507 F2 stacked ABOVE the dock sheet as a second
+     modal layer that fought it for Tab and Escape — unfolds INSIDE this sheet
+     now: the pane's own toggle opens the role and runtime controls in place,
+     the sheet stays the one layer, and its controls are the sheet's own. */
+  const toggle = sheet!.querySelector(`button[aria-label="${translate("en", "groupOverride.applyStage")}"]`) as unknown as HTMLButtonElement | null;
+  expect(toggle).not.toBeNull();
+  expect(toggle!.getAttribute("aria-expanded")).toBe("false");
+  click(toggle);
+  await settle();
+  expect(toggle!.getAttribute("aria-expanded")).toBe("true");
+  expect(sheet!.querySelector('label[for="draft-role-pipeline-config::p2::fix"]')).not.toBeNull();
+  expect(store.getState().sheet).toBe("stage");
+  expect(dom.document.querySelectorAll('[role="dialog"]').length).toBe(1);
+
+  /* Tab is trapped inside the sheet in both directions, editor included — the
+     retired dock sheet's contract (PR #431) and the editor's (#507 F2), now
+     one layer's: from the last control Tab wraps to the first, from the first
+     Shift+Tab wraps to the last, and focus never leaves the sheet. */
+  const press = (init: { key: string; shiftKey?: boolean }) =>
+    flushSync(() => dom.document.dispatchEvent(new dom.KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init }) as never));
+  const focusables = Array.from(sheet!.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'))
+    .filter((el) => !el.hasAttribute("disabled") && el.getAttribute("tabindex") !== "-1") as unknown as HTMLElement[];
+  expect(focusables.length).toBeGreaterThan(1);
+  const first = focusables[0]!;
+  const last = focusables[focusables.length - 1]!;
+  /* The editor's controls are among the sheet's own focusables. */
+  expect(focusables.some((el) => el.id === "draft-role-pipeline-config::p2::fix")).toBe(true);
+  last.focus();
+  expect(dom.document.activeElement).toBe(last as never);
+  press({ key: "Tab" });
+  expect(dom.document.activeElement).toBe(first as never);
+  expect(sheet!.contains(dom.document.activeElement as never)).toBe(true);
+  first.focus();
+  press({ key: "Tab", shiftKey: true });
+  expect(dom.document.activeElement).toBe(last as never);
+  expect(sheet!.contains(dom.document.activeElement as never)).toBe(true);
+
+  /* Escape closes the sheet — editor and all — and nothing else: the screen
+     is still here, and focus is back on the row that opened it. */
+  flushSync(() => dom.document.dispatchEvent(new dom.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }) as never));
+  await settle();
+  expect(dom.document.querySelector('[data-mobile2-sheet="stage"]')).toBeNull();
+  expect(store.getState().sheet).toBeNull();
+  expect(q(host, '[data-mobile2-screen="pipeline"]')).not.toBeNull();
+  expect(dom.document.activeElement).toBe(fix as never);
+
+  /* A finished pipeline configures nothing: its never-run stages are statements. */
+  const done = mount(<MobilePipelineScreen pipeline={parkedPipeline({ state: "completed", cursor: null })} files={[IMPLEMENT, REVIEW]} now={NOW} onOpenConversation={() => {}} />);
+  expect(q(done, '[data-mobile2-stage="fix"]')!.getAttribute("data-mobile2-stage-configure")).toBeNull();
+  expect(q(done, '[data-mobile2-stage="fix"]')!.tagName).toBe("DIV");
+});
+
+test("a stage's earlier attempts and a round's other reviewer transcript are rows under it, each opening its transcript (lane 10, #353)", () => {
+  const PRIOR = file("/repo/implement-1.jsonl", "Implement, first try");
+  const REVIEW_BOUND = { ...REVIEW, conversationId: "conversation-review-b" } as FileEntry;
+  const membership = (slot: string) => ({
+    kind: "flow" as const, containerId: "flow-9", role: "reviewer", slot, stageId: null, stageOrder: null, round: 3, parentConversationId: "conversation-builder",
+  });
+  const PRIOR_REVIEWER = {
+    ...file("/repo/review-a.jsonl", "Review round 3, binding a"),
+    conversationId: "conversation-review-a",
+    durableLineage: { kind: "review", role: "reviewer", parentConversationId: "conversation-builder", reviewsConversationId: "conversation-builder", memberships: [membership("reviewer:3:binding-a")] },
+  } as unknown as FileEntry;
+  const flow = {
+    id: "flow-9", implementerPath: IMPLEMENT.path, state: "reviewing",
+    rounds: [{ n: 3, reviewerPath: REVIEW_BOUND.path, reviewerConversationId: REVIEW_BOUND.conversationId }],
+  } as unknown as Flow;
+  const pipeline = parkedPipeline({
+    runs: [
+      { stageId: "design", attempts: [attempt({})] },
+      { stageId: "implement", attempts: [attempt({ n: 1, state: "failed", agentPath: PRIOR.path, verdict: { status: "fail", findings: ["the export endpoint returned 500"] } }), attempt({ n: 2, agentPath: IMPLEMENT.path })] },
+      { stageId: "review", attempts: [attempt({ n: 3, state: "failed", agentPath: REVIEW_BOUND.path, flowId: "flow-9", verdict: { status: "fail", findings: ["one", "two"] } })] },
+    ] as unknown as Pipeline["runs"],
+  });
+  const opened: string[] = [];
+  const host = mount(<MobilePipelineScreen pipeline={pipeline} files={[IMPLEMENT, REVIEW_BOUND, PRIOR, PRIOR_REVIEWER]} flows={[flow]} now={NOW} onOpenConversation={(entry) => opened.push(entry.path)} />);
+
+  /* The earlier attempt is a row under its stage, named by its outcome; the
+     operational attempt is the stage row itself and is never listed twice. */
+  const prior = q(host, '[data-mobile2-stage-group="implement"] [data-mobile2-stage-attempt="1"]')!;
+  expect(prior).not.toBeNull();
+  expect(prior.tagName).toBe("BUTTON");
+  expect(prior.className).toContain("min-h-11");
+  expect(prior.textContent).toContain(translate("en", "mobile2.pipeline.attempt", { n: 1, state: translate("en", "pipelineVerdict.fail") }));
+  expect(q(host, '[data-mobile2-stage-attempt="2"]')).toBeNull();
+  click(prior);
+  expect(opened).toEqual([PRIOR.path]);
+
+  /* The round's other reviewer binding is a row under the review stage. */
+  const binding = q(host, `[data-mobile2-stage-group="review"] [data-mobile2-review-transcript="${PRIOR_REVIEWER.path}"]`)!;
+  expect(binding).not.toBeNull();
+  expect(binding.textContent).toContain(translate("en", "mobile2.pipeline.reviewTranscript", { n: 3 }));
+  click(binding);
+  expect(opened).toEqual([PRIOR.path, PRIOR_REVIEWER.path]);
+  /* The reviewer the stage row itself opens is not listed a second time. */
+  expect(q(host, `[data-mobile2-review-transcript="${REVIEW_BOUND.path}"]`)).toBeNull();
+
+  /* An attempt whose transcript left the scan is a statement, not a dead button. */
+  const gone = mount(<MobilePipelineScreen pipeline={pipeline} files={[IMPLEMENT, REVIEW_BOUND]} flows={[flow]} now={NOW} onOpenConversation={() => {}} />);
+  const orphan = q(gone, '[data-mobile2-stage-attempt="1"]')!;
+  expect(orphan.tagName).toBe("DIV");
+  expect(orphan.getAttribute("data-mobile2-go")).toBeNull();
 });
 
 test("a stage the product already names once says it once", () => {

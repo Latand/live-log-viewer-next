@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 
 import type { Pipeline } from "@/lib/pipelines/types";
+import { translate } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
 import { CHAT_STATE_PRECEDENCE, chatState, chatStateBits, stagePosition, type ChatStateKey } from "./mobileChatState";
@@ -49,7 +50,9 @@ function base(): FileEntry {
 
 /** Each state's own signal, applied to a conversation that carries none. */
 const SIGNAL: Record<Exclude<ChatStateKey, "offline">, (file: FileEntry) => FileEntry> = {
-  killed: (file) => ({ ...file, proc: "killed" }),
+  /* A killed conversation is a host that died with its turn OPEN (#1487): the
+     transcript's last turn never closed. */
+  killed: (file) => ({ ...file, proc: "killed", lastTurn: { startedAt: NOW_MS - 60_000, endedAt: null } }),
   /* A stalled conversation is one the attention queue still holds: a live
      process whose transcript stopped growing, inside the queue's own TTL. */
   stalled: (file) => ({ ...file, activity: "stalled", proc: "running", mtime: NOW_S - 60 }),
@@ -168,6 +171,38 @@ test("a review-loop stage matches by flow id, since the board folds its reviewer
   const position = stagePosition([withFlow], null, "flow-9");
   expect(position).not.toBeNull();
   expect({ k: position!.k, n: position!.n, current: position!.current }).toEqual({ k: 3, n: 3, current: true });
+});
+
+test("a host stopped after its turn settled is the finished conversation it is, not a killed one (#1487)", () => {
+  const settled = { ...base(), proc: "killed", lastTurn: { startedAt: NOW_MS - 600_000, endedAt: NOW_MS - 120_000 } } as FileEntry;
+  expect(chatState(settled, { nowMs: NOW_MS })).toBe("done");
+  const bits = chatStateBits(t, settled, { nowMs: NOW_MS });
+  expect(bits.tone).toBe("neutral");
+  expect(bits.phrase).toContain("stateDone");
+  /* A child that returned to its parent keeps the accent reading. */
+  expect(chatState({ ...settled, parent: "/root.jsonl", activity: "recent" } as FileEntry, { nowMs: NOW_MS })).toBe("returned");
+  /* No evidence of an open turn reads settled: the alarming word is earned. */
+  expect(chatState({ ...base(), proc: "killed" } as FileEntry, { nowMs: NOW_MS })).toBe("done");
+  /* A dead host over a fresh transcript is not working. */
+  expect(chatState({ ...settled, activity: "live", lastTurn: undefined } as FileEntry, { nowMs: NOW_MS })).toBe("done");
+  /* The killed phrase carries the age and says nothing about a queue. */
+  const dead = chatStateBits(t, SIGNAL.killed(base()), { nowMs: NOW_MS });
+  expect(dead.key).toBe("killed");
+  expect(dead.tone).toBe("danger");
+  expect(dead.phrase).toMatch(/^mobile2\.chat\.stateKilledAge\(age=/);
+  expect(translate("en", "mobile2.chat.stateKilledAge", { age: "14m ago" })).toBe("killed · 14m ago");
+  expect(translate("en", "mobile2.chat.stateKilledAge", { age: "14m ago" })).not.toMatch(/queue/);
+});
+
+test("the held phrase counts its messages with the right plural at 1 and at n, in both locales (#1487)", () => {
+  const one = SIGNAL.held(base());
+  one.migration = { ...one.migration!, heldDeliveries: 1 };
+  expect(chatStateBits(t, one, { nowMs: NOW_MS }).phrase).toBe("mobile2.chat.stateHeldQueued(count=1)");
+  expect(chatStateBits(t, SIGNAL.held(base()), { nowMs: NOW_MS }).phrase).toBe("mobile2.chat.stateHeldQueued(count=2)");
+  expect(translate("en", "mobile2.chat.stateHeldQueued", { count: 1 })).toBe("held · 1 message queued");
+  expect(translate("en", "mobile2.chat.stateHeldQueued", { count: 4 })).toBe("held · 4 messages queued");
+  expect(translate("uk", "mobile2.chat.stateHeldQueued", { count: 1 })).toBe("утримано · 1 повідомлення в черзі");
+  expect(translate("uk", "mobile2.chat.stateHeldQueued", { count: 5 })).toBe("утримано · 5 повідомлень у черзі");
 });
 
 test("held covers both authorities: the account-switch fence and a stuck delivery", () => {

@@ -19,6 +19,7 @@ import {
   latestAttempt,
   resolvePipelineMemberPaths,
   stageAttempts,
+  stageConfigurable,
   stageDockCompact,
   compactStageOpenTarget,
   compactPipelineOpenTarget,
@@ -1642,4 +1643,16 @@ describe("stage surface titles and settled rows (#658)", () => {
     /* Attemptless: the chip state itself, so the row is never blank. */
     expect(stageOutcomeReason(fakeT, pipeline({ stages }), buildStage)).toBe("pipelineChipState.pending");
   });
+});
+
+test("stageConfigurable: a stage is open to configuration only while it never ran and its pipeline is not over (mobile v2 lane 10)", () => {
+  const running = { state: "running", runs: [{ stageId: "build", attempts: [{ n: 1 }] }] } as unknown as Pipeline;
+  /* The engine snapshots a stage's config at its first attempt. */
+  expect(stageConfigurable(running, "review")).toBe(true);
+  expect(stageConfigurable(running, "build")).toBe(false);
+  /* A pipeline that is over has no stage left to change. */
+  expect(stageConfigurable({ ...running, state: "completed" } as Pipeline, "review")).toBe(false);
+  expect(stageConfigurable({ ...running, state: "closed" } as Pipeline, "review")).toBe(false);
+  /* A draft is all configuration. */
+  expect(stageConfigurable({ ...running, state: "draft", runs: [] } as unknown as Pipeline, "build")).toBe(true);
 });

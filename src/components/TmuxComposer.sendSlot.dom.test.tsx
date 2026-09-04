@@ -200,7 +200,8 @@ test("offline, the slot is Queue and says the text is delivered on reconnect", a
 });
 
 test("a killed conversation offers Respawn, and the tap resumes its host", async () => {
-  const { host, root } = await render(conversation({ proc: "killed", pid: null, activity: "recent" }));
+  /* Killed: the host died with its turn open (#1487). */
+  const { host, root } = await render(conversation({ proc: "killed", pid: null, activity: "recent", lastTurn: { startedAt: Date.now() - 60_000, endedAt: null } }));
   expect(slotKind(host)).toBe("respawn");
   const field = host.querySelector("textarea") as HTMLTextAreaElement;
   expect(field.getAttribute("placeholder")).toContain("queues until a respawn");
@@ -216,8 +217,21 @@ test("a killed conversation offers Respawn, and the tap resumes its host", async
 
 test("killed outranks offline: the way back beats a queue that cannot drain", async () => {
   connection = "offline";
-  const { host, root } = await render(conversation({ proc: "killed", pid: null, activity: "recent" }));
+  const { host, root } = await render(conversation({ proc: "killed", pid: null, activity: "recent", lastTurn: { startedAt: Date.now() - 60_000, endedAt: null } }));
   expect(slotKind(host)).toBe("respawn");
+  flushSync(() => root.unmount());
+});
+
+test("a host stopped after its turn settled still offers Respawn: the way back answers to the host, not the turn (#1487)", async () => {
+  /* The bar reads «done» over this conversation — it finished — but there is
+     nobody to send to, so the slot is the same resume, and the placeholder
+     says what happened without the alarming word. */
+  const { host, root } = await render(conversation({ proc: "killed", pid: null, activity: "idle", lastTurn: { startedAt: Date.now() - 600_000, endedAt: Date.now() - 120_000 } }));
+  expect(slotKind(host)).toBe("respawn");
+  const field = host.querySelector("textarea") as HTMLTextAreaElement;
+  expect(field.getAttribute("placeholder")).toContain("the host stopped");
+  expect(field.getAttribute("placeholder")).toContain("queues until a respawn");
+  expect(field.getAttribute("placeholder")).not.toContain("killed");
   flushSync(() => root.unmount());
 });
 

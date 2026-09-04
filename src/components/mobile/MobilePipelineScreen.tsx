@@ -1,31 +1,39 @@
 "use client";
 
-import { Archive, Check, Pause, Play, RefreshCw, SkipForward } from "lucide-react";
+import { Archive, Check, Pause, Play, RefreshCw, Settings2, SkipForward } from "lucide-react";
 
 import { ChevronRight, Loader2, X } from "@/components/icons";
-import { useSyncExternalStore } from "react";
+import { useState, useSyncExternalStore } from "react";
 
 import { useLocale, type TFunction } from "@/lib/i18n";
 import type { Flow } from "@/lib/flows/types";
-import type { Pipeline, PipelineAction, PipelineStage } from "@/lib/pipelines/types";
+import type { Pipeline, PipelineAction, PipelineStage, PipelineStageAttempt } from "@/lib/pipelines/types";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
 
+import { reviewerBindingTargetsForRound } from "../flows/flowModel";
 import {
   attemptNavTarget,
+  attemptStateLabel,
   latestAttempt,
   patchPipeline,
   pipelineLinkedTasks,
   pipelineStagePosition,
   resolveStageNavFile,
+  stageAttempts,
   stageChipLabel,
   stageChipState,
+  stageConfigurable,
+  verdictStatusLabel,
 } from "../pipelines/pipelineModel";
+import { StagePlaceholderPane } from "../pipelines/StagePlaceholderPane";
 import { VerdictFindings } from "../pipelines/VerdictPopover";
+import type { StageSlot } from "../scheme/layout";
 import { humanizeDuration } from "../turnDuration";
 import { RECEIPT_MS, showReceipt, type ReceiptTimers } from "./MobileReceipt";
+import { MobileSheet } from "./MobileSheet";
 import { MobileShell, type MobileShellHost, type SheetRenderer } from "./MobileShell";
-import { useMobileNavStore } from "./mobileNav";
+import { useMobileNav, useMobileNavStore } from "./mobileNav";
 
 /*
  * One pipeline on the phone (issue #1439, lane 7; docs/design/mobile-v2/
@@ -41,6 +49,13 @@ import { useMobileNavStore } from "./mobileNav";
  * verdict popover reach — retry-stage, skip-stage, pause, resume, close — and
  * acts on the tap that names it, with no confirmation prompt (README §2 rule
  * 9, Q4).
+ *
+ * Lane 10 retired the dock sheet that used to unfold the desktop rail on the
+ * phone, and two things only that rail could reach came here rather than
+ * vanishing: a never-run stage's CONFIGURATION (its row opens the desktop's
+ * own `StagePlaceholderPane` in a sheet), and a stage's EARLIER ATTEMPTS and
+ * a review round's other transcripts (rows under the stage, each opening its
+ * conversation) — what the rail's verdict popover listed as history.
  */
 
 /* ────────────────────────────────────────────────────────────────────────── *
@@ -257,6 +272,31 @@ export function stageMetaLine(t: TFunction, pipeline: Pipeline, stage: PipelineS
   ].filter(Boolean).join(" · ");
 }
 
+/** The stage's earlier attempts, in their own order: every persisted attempt
+    but the operational one. Each is a row the phone opens when its transcript
+    is still in the scan — the retired rail's «prior attempts». */
+export function priorAttempts(pipeline: Pipeline, stage: PipelineStage): PipelineStageAttempt[] {
+  const current = latestAttempt(pipeline, stage.id);
+  return stageAttempts(pipeline, stage.id).filter((attempt) => attempt.n !== current?.n);
+}
+
+/** A review round's other reviewer transcripts — the same-round rebindings the
+    flow still names — that no attempt of the stage already opens. The same
+    derivation the desktop's verdict popover lists. */
+export function reviewTranscripts(pipeline: Pipeline, stage: PipelineStage, flows: readonly Flow[], files: readonly FileEntry[]): { n: number; path: string }[] {
+  const attempts = stageAttempts(pipeline, stage.id);
+  const flowIds = new Set(attempts.flatMap((attempt) => attempt.flowId ? [attempt.flowId] : []));
+  const attemptPaths = new Set(attempts.flatMap((attempt) => attempt.agentPath ? [attempt.agentPath] : []));
+  const seen = new Set<string>();
+  return flows
+    .filter((flow) => flowIds.has(flow.id))
+    .flatMap((flow) => flow.rounds.flatMap((round) => reviewerBindingTargetsForRound(flow, round, files).flatMap(({ path }) => {
+      if (attemptPaths.has(path) || seen.has(path)) return [];
+      seen.add(path);
+      return [{ n: round.n, path }];
+    })));
+}
+
 export interface MobilePipelineScreenProps {
   pipeline: Pipeline;
   files: readonly FileEntry[];
@@ -288,7 +328,44 @@ export function MobilePipelineScreen({
 }: MobilePipelineScreenProps) {
   const { t } = useLocale();
   const nav = useMobileNavStore();
+  const navState = useMobileNav();
   const pending = usePendingPipelineAct(acts);
+  /* The stage-configuration sheet (lane 10). The nav store says a sheet is
+     open (§3.3: a sheet creates no history, and back takes it with the
+     screen); this says which stage. The pane inside is the desktop's own
+     editor, so a change made from the phone is the same `override-stage`
+     PATCH the board sends. */
+  const [configuring, setConfiguring] = useState<string | null>(null);
+  const configStage = navState.sheet === "stage" && configuring
+    ? pipeline.stages.find((stage) => stage.id === configuring) ?? null
+    : null;
+  const openConfiguration = (stage: PipelineStage): void => {
+    setConfiguring(stage.id);
+    nav.openSheet("stage");
+  };
+  const sheets: SheetRenderer = (name, close) => {
+    if (name !== "stage") return renderSheet?.(name, close) ?? null;
+    if (!configStage) return null;
+    const slot: StageSlot = {
+      key: `pipeline-config::${pipeline.id}::${configStage.id}`,
+      pipeline,
+      stage: configStage,
+      index: pipeline.stages.indexOf(configStage),
+      total: pipeline.stages.length,
+      presentation: "placeholder",
+      x: 0,
+      y: 0,
+      w: 0,
+      h: 0,
+    };
+    return (
+      <MobileSheet name="stage" title={t("mobile2.pipeline.configureTitle", { stage: stageRowTitle(t, configStage) })} onClose={close}>
+        <div data-mobile2-stage-config={configStage.id} className="flex h-[min(620px,72dvh)] min-h-0 flex-col px-3 pb-3 [&_button]:min-h-11 [&_button]:min-w-11">
+          <StagePlaceholderPane slot={slot} interactive />
+        </div>
+      </MobileSheet>
+    );
+  };
   const held = pending?.pipelineId === pipeline.id;
   const { k, n } = pipelineStagePosition(pipeline);
   const created = Date.parse(pipeline.createdAt);
@@ -342,7 +419,7 @@ export function MobilePipelineScreen({
       back
       title={title}
       host={host}
-      renderSheet={renderSheet}
+      renderSheet={sheets}
     >
       <div data-mobile2-pipeline-body className="flex min-h-0 min-w-0 flex-1 flex-col gap-1.5 overflow-y-auto overflow-x-hidden pb-3">
         {findings.length && cursorStage ? (
@@ -381,7 +458,9 @@ export function MobilePipelineScreen({
               index={index}
               current={pipeline.cursor?.stageId === stage.id}
               files={files}
+              flows={flows}
               onOpenConversation={onOpenConversation}
+              onConfigure={openConfiguration}
             />
           ))}
         </div>
@@ -461,14 +540,24 @@ function ActionRow({ pipeline, held, onRun }: {
   );
 }
 
-/** One stage. Every stage that ran has a conversation, and the row opens it. */
-function StageRow({ pipeline, stage, index, current, files, onOpenConversation }: {
+const TAPPABLE = "active:bg-sunken focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/40";
+
+/**
+ * One stage. Every stage that ran has a conversation, and the row opens it. A
+ * stage that never ran, in a pipeline that is not over, is the way to its
+ * configuration (lane 10): the row opens the stage sheet. Under the row, the
+ * stage's earlier attempts and its review round's other transcripts, each a
+ * row of its own.
+ */
+function StageRow({ pipeline, stage, index, current, files, flows, onOpenConversation, onConfigure }: {
   pipeline: Pipeline;
   stage: PipelineStage;
   index: number;
   current: boolean;
   files: readonly FileEntry[];
+  flows: readonly Flow[];
   onOpenConversation: (file: FileEntry) => void;
+  onConfigure: (stage: PipelineStage) => void;
 }) {
   const { t } = useLocale();
   const state = stageChipState(pipeline, stage);
@@ -477,22 +566,92 @@ function StageRow({ pipeline, stage, index, current, files, onOpenConversation }
      uses: a migrated attempt opens its live generation, and an attempt whose
      transcript has left the scan opens nothing rather than a stale one. */
   const file = resolveStageNavFile(attemptNavTarget(attempt), files);
+  /* Configurable by the one rule the desktop's pane and strip read too. */
+  const configurable = !file && stageConfigurable(pipeline, stage.id);
+  const title = stageRowTitle(t, stage);
+  const Tag = file || configurable ? "button" : "div";
+  const control = file
+    ? { type: "button" as const, onClick: () => onOpenConversation(file), "aria-label": t("mobile2.pipeline.openStage", { stage: title }) }
+    : configurable
+      ? { type: "button" as const, onClick: () => onConfigure(stage), "aria-label": t("mobile2.pipeline.configure", { stage: title }), "aria-haspopup": "dialog" as const }
+      : {};
+  return (
+    <div data-mobile2-stage-group={stage.id}>
+      <Tag
+        {...control}
+        data-mobile2-stage={stage.id}
+        data-mobile2-go={file ? "chat" : undefined}
+        data-mobile2-stage-configure={configurable ? "true" : undefined}
+        data-mobile2-stage-state={state}
+        data-mobile2-stage-current={current ? "true" : undefined}
+        className={`flex min-h-[52px] w-full items-center gap-2.5 py-2 pl-3 pr-2.5 text-left ${current ? "shadow-[inset_3px_0_0_var(--color-accent)]" : ""} ${file || configurable ? TAPPABLE : ""}`}
+      >
+        <StageMark state={state} index={index} />
+        <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+          <span className="truncate text-body font-semibold leading-[1.25] text-primary">{title}</span>
+          <span className="truncate text-label tabular-nums text-muted">{stageMetaLine(t, pipeline, stage)}</span>
+        </span>
+        {file ? (
+          <ChevronRight className="h-[18px] w-[18px] shrink-0 text-muted" aria-hidden />
+        ) : configurable ? (
+          <Settings2 className="h-[18px] w-[18px] shrink-0 text-secondary" aria-hidden />
+        ) : null}
+      </Tag>
+      {priorAttempts(pipeline, stage).map((prior) => (
+        <AttemptRow key={prior.n} attempt={prior} files={files} onOpenConversation={onOpenConversation} />
+      ))}
+      {reviewTranscripts(pipeline, stage, flows, files).map((transcript) => (
+        <TranscriptRow key={transcript.path} n={transcript.n} path={transcript.path} files={files} onOpenConversation={onOpenConversation} />
+      ))}
+    </div>
+  );
+}
+
+const SUB_ROW = "flex min-h-11 w-full items-center gap-2.5 border-t border-border py-1.5 pl-[46px] pr-2.5 text-left text-label tabular-nums text-muted";
+
+/** An earlier attempt of the stage: a row that opens its transcript while the
+    scan still carries it, a statement once it does not. */
+function AttemptRow({ attempt, files, onOpenConversation }: {
+  attempt: PipelineStageAttempt;
+  files: readonly FileEntry[];
+  onOpenConversation: (file: FileEntry) => void;
+}) {
+  const { t } = useLocale();
+  const file = resolveStageNavFile(attemptNavTarget(attempt), files);
+  const outcome = attempt.verdict ? verdictStatusLabel(t, attempt.verdict.status) : attemptStateLabel(t, attempt.state);
   const Tag = file ? "button" : "div";
   return (
     <Tag
-      {...(file ? { type: "button" as const, onClick: () => onOpenConversation(file), "aria-label": t("mobile2.pipeline.openStage", { stage: stageRowTitle(t, stage) }) } : {})}
-      data-mobile2-stage={stage.id}
+      {...(file ? { type: "button" as const, onClick: () => onOpenConversation(file), "aria-label": t("mobile2.pipeline.openAttempt", { n: attempt.n }) } : {})}
+      data-mobile2-stage-attempt={attempt.n}
       data-mobile2-go={file ? "chat" : undefined}
-      data-mobile2-stage-state={state}
-      data-mobile2-stage-current={current ? "true" : undefined}
-      className={`flex min-h-[52px] w-full items-center gap-2.5 py-2 pl-3 pr-2.5 text-left ${current ? "shadow-[inset_3px_0_0_var(--color-accent)]" : ""} ${file ? "active:bg-sunken focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/40" : ""}`}
+      className={`${SUB_ROW} ${file ? TAPPABLE : ""}`}
     >
-      <StageMark state={state} index={index} />
-      <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-        <span className="truncate text-body font-semibold leading-[1.25] text-primary">{stageRowTitle(t, stage)}</span>
-        <span className="truncate text-label tabular-nums text-muted">{stageMetaLine(t, pipeline, stage)}</span>
-      </span>
-      {file ? <ChevronRight className="h-[18px] w-[18px] shrink-0 text-muted" aria-hidden /> : null}
+      <span className="min-w-0 flex-1 truncate">{t("mobile2.pipeline.attempt", { n: attempt.n, state: outcome })}</span>
+      {file ? <ChevronRight className="h-4 w-4 shrink-0 text-muted" aria-hidden /> : null}
+    </Tag>
+  );
+}
+
+/** Another reviewer transcript of the same round (a rebinding), by path. */
+function TranscriptRow({ n, path, files, onOpenConversation }: {
+  n: number;
+  path: string;
+  files: readonly FileEntry[];
+  onOpenConversation: (file: FileEntry) => void;
+}) {
+  const { t } = useLocale();
+  const file = files.find((entry) => entry.path === path) ?? null;
+  const Tag = file ? "button" : "div";
+  return (
+    <Tag
+      {...(file ? { type: "button" as const, onClick: () => onOpenConversation(file), "aria-label": t("mobile2.pipeline.openReviewTranscript", { n }) } : {})}
+      data-mobile2-review-transcript={path}
+      data-mobile2-go={file ? "chat" : undefined}
+      className={`${SUB_ROW} ${file ? TAPPABLE : ""}`}
+    >
+      <span className="min-w-0 flex-1 truncate">{t("mobile2.pipeline.reviewTranscript", { n })}</span>
+      {file ? <ChevronRight className="h-4 w-4 shrink-0 text-muted" aria-hidden /> : null}
     </Tag>
   );
 }

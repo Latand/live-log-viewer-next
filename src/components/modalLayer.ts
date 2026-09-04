@@ -4,8 +4,8 @@ import { useEffect, useRef, type RefObject } from "react";
 
 /*
  * A process-wide stack of open modal layers so nested modals coordinate
- * ownership (#507 final review F2). A phone opens the pipeline bottom sheet
- * (MobilePipelineDockSheet) and then a stage editor ABOVE it; both are dialogs
+ * ownership (#507 final review F2). A phone opens a bottom sheet
+ * (`MobileSheet`) and then a stage editor ABOVE it; both are dialogs
  * that trap Tab focus and answer Escape on `window`. Without coordination the
  * lower sheet's trap yanks Tab back out of the editor and its Escape closes the
  * wrong surface. This stack makes exactly the TOPMOST layer own Tab and Escape;

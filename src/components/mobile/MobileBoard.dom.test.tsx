@@ -4,7 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { flushSync } from "react-dom";
 
 import { emptyStore } from "@/components/runtime/runtimeModel";
-import { translate } from "@/lib/i18n";
+import { translate, type Locale, type TFunction } from "@/lib/i18n";
 import type { Pipeline } from "@/lib/pipelines/types";
 import type { FileEntry } from "@/lib/types";
 
@@ -20,7 +20,11 @@ import type { FileEntry } from "@/lib/types";
  *     host sheet behind ⋯ › Host details, and nowhere else;
  *   - the bar's badge counts the Needs-you rows, conversations and pipelines;
  *   - opening a row stamps the card seen (#1244) and pushes the conversation
- *     over the board, so ‹ returns to the list.
+ *     over the board, so ‹ returns to the list;
+ *   - a row says WHEN (#1487): a host that died mid-turn reads killed with its
+ *     age and claims no queue, a host stopped after its turn settled reads
+ *     done, the held plurals are grammatical at 1 and at n, and every row
+ *     ends with when it was launched.
  */
 
 const actualRuntimeHooks = await import("@/hooks/useRuntime");
@@ -47,6 +51,8 @@ const { getMobileNav, topScreen } = await import("@/components/mobile/mobileNav"
 const { receipts } = await import("@/components/mobile/MobileReceipt");
 const { resetOrchestratorSeatCacheForTests } = await import("@/components/orchestrator/useOrchestratorSeat");
 const { buildMobileBoard, needsDecisionPipelineRows } = await import("@/components/mobile/mobileBoardModel");
+const { launchAge, statePhrase } = await import("@/components/mobile/MobileBoard");
+const { humanizeDuration } = await import("@/components/turnDuration");
 const { formatResetClock } = await import("@/components/rateLimit");
 type MobileShellHost = NonNullable<React.ComponentProps<typeof ProjectDashboard>["mobileShell"]>;
 
@@ -433,6 +439,102 @@ test("the board's footer lands the operator in the orchestrator's conversation, 
   expect(q(seated, "[data-mobile2-title-text]")?.textContent).toContain(running.title);
   /* Same open as a row's, and the same reason it is not the resolver's. */
   expect(opened).toEqual([]);
+});
+
+test("a row says when: a killed host carries its age and no queue, a settled host reads done, and every row says when it was launched (#1487)", async () => {
+  const started = new Date((NOW - 10_800) * 1_000).toISOString();
+  /* The host died with its turn open — the one row worth the danger dot. */
+  const zombie = file({
+    path: "/repo/zombie.jsonl", title: "Research the reseat race", proc: "killed", pid: null,
+    activity: "stalled", activityReason: "jsonl_turn_stalled", mtime: NOW - 900,
+    lastTurn: { startedAt: (NOW - 1_500) * 1_000, endedAt: null }, sessionStartedAt: started,
+  } as unknown as Partial<FileEntry> & { path: string });
+  /* The operator's own case: the stage settled, the host was stopped, the work is on disk. */
+  const settled = file({
+    path: "/repo/settled.jsonl", title: "Write the migration notes", proc: "killed", pid: null,
+    activity: "idle", mtime: NOW - 7_200,
+    lastTurn: { startedAt: (NOW - 9_000) * 1_000, endedAt: (NOW - 7_200) * 1_000 }, sessionStartedAt: started,
+  } as unknown as Partial<FileEntry> & { path: string });
+  const held = (path: string, heldDeliveries: number) => file({
+    path, title: `Held ${heldDeliveries}`, activity: "live", proc: "running", pid: 4_410,
+    migration: { intentId: "i1", trigger: "manual", phase: "switching", targetAccountId: "other", heldDeliveries, failure: null },
+  } as unknown as Partial<FileEntry> & { path: string });
+  /* A working row with all four fragments: the phrase, the now-fragment, the
+     model and the launch. */
+  const busy = file({
+    path: "/repo/busy.jsonl", title: "Rebuild the board status projection", activity: "live", proc: "running", pid: 4_409, mtime: NOW - 30,
+    lastTurn: { startedAt: (NOW - 760) * 1_000, endedAt: null }, sessionStartedAt: started,
+    plan: { steps: [], done: 1, total: 3, current: "Edit cardStatus.ts", updatedAt: null },
+  } as unknown as Partial<FileEntry> & { path: string });
+  const root = mount({ files: [zombie, settled, busy, held("/repo/held-1.jsonl", 1), held("/repo/held-3.jsonl", 3)] });
+  expect(await waitFor(() => board(root) !== null)).toBe(true);
+
+  const rowOf = (path: string) => q(root, `[data-mobile2-row="conversation"][data-mobile2-path="${path}"]`)!;
+  const phrase = (path: string) => rowOf(path).querySelector("[data-mobile2-phrase]")!.textContent ?? "";
+  const dot = (path: string) => rowOf(path).querySelector("span[aria-hidden]")!.className;
+
+  expect(rowOf(zombie.path).getAttribute("data-mobile2-state")).toBe("killed");
+  expect(phrase(zombie.path)).toMatch(/^killed · 15m/);
+  expect(phrase(zombie.path)).not.toMatch(/queue/i);
+  expect(dot(zombie.path)).toContain("bg-danger");
+
+  expect(rowOf(settled.path).getAttribute("data-mobile2-state")).toBe("done");
+  expect(phrase(settled.path)).toMatch(/^done · 2h/);
+  expect(dot(settled.path)).toContain("bg-strong");
+  expect(dot(settled.path)).not.toContain("bg-danger");
+
+  expect(phrase("/repo/held-1.jsonl")).toBe("held · 1 message queued");
+  expect(phrase("/repo/held-3.jsonl")).toBe("held · 3 messages queued");
+
+  /* Every row ends with when it was launched, beside the state's own age. */
+  expect(rowOf(zombie.path).querySelector("[data-mobile2-started]")!.textContent).toMatch(/^started 3h/);
+  expect(rowOf(settled.path).querySelector("[data-mobile2-started]")!.textContent).toMatch(/^started 3h/);
+  /* A conversation nothing durable dates says nothing rather than guessing. */
+  expect(rowOf("/repo/held-1.jsonl").querySelector("[data-mobile2-started]")).toBeNull();
+  /* The launch's age is one unit — context, not the clock the operator acts on. */
+  expect(launchAge(2 * 3600 + 25 * 60)).toBe("2h");
+  expect(launchAge(25 * 60 + 40)).toBe("25m");
+  expect(launchAge(40)).toBe("40s");
+
+  /* The meta line has exactly ONE elastic fragment, the now-fragment, so at
+     390 px a working row loses the tool name it is on and never its model or
+     its launch (the round-2 review of #1487 found both truncated). */
+  const busyRow = rowOf(busy.path);
+  expect(busyRow.getAttribute("data-mobile2-state")).toBe("working");
+  const nowSpan = busyRow.querySelector("[data-mobile2-now]")!;
+  expect(nowSpan.textContent).toContain("Edit cardStatus.ts");
+  expect(nowSpan.className).toContain("truncate");
+  expect(nowSpan.className).toContain("min-w-0");
+  const modelSpan = busyRow.querySelector("[data-mobile2-model]")!;
+  expect(modelSpan.textContent).toBe("opus");
+  expect(modelSpan.className).toContain("shrink-0");
+  expect(modelSpan.className).not.toContain("truncate");
+  expect(busyRow.querySelector("[data-mobile2-phrase]")!.className).toContain("shrink-0");
+  expect(busyRow.querySelector("[data-mobile2-started]")!.className).toContain("shrink-0");
+  /* A row that is not working carries no now-fragment, so nothing on it is elastic. */
+  expect(rowOf(settled.path).querySelector("[data-mobile2-now]")).toBeNull();
+});
+
+test("each phrase carries its age, and the held plurals read right at 1 and at n, in both locales (#1487)", () => {
+  const bits = (key: Parameters<typeof statePhrase>[1]["key"], over: Partial<Parameters<typeof statePhrase>[1]> = {}): Parameters<typeof statePhrase>[1] =>
+    ({ key, section: "recent", dot: "neutral", edge: null, badge: null, seconds: 900, held: 0, resetAt: null, account: null, ...over });
+  const tOf = (locale: Locale): TFunction => ((key: string, vars?: Record<string, unknown>) => translate(locale, key as never, vars as never)) as unknown as TFunction;
+  for (const locale of ["en", "uk"] as const) {
+    const t = tOf(locale);
+    const age = humanizeDuration(900);
+    expect(statePhrase(t, bits("killed"), NOW)).toBe(translate(locale, "mobile2.board.killedAge", { age }));
+    expect(statePhrase(t, bits("stalled"), NOW)).toBe(translate(locale, "mobile2.board.stalled", { age }));
+    expect(statePhrase(t, bits("waiting"), NOW)).toBe(translate(locale, "mobile2.board.waiting", { age }));
+    expect(statePhrase(t, bits("returned"), NOW)).toBe(translate(locale, "mobile2.board.returned", { age }));
+    expect(statePhrase(t, bits("done"), NOW)).toBe(translate(locale, "mobile2.board.done", { age }));
+    for (const key of ["killed", "stalled", "waiting", "returned", "done"] as const) expect(statePhrase(t, bits(key), NOW)).toContain(age);
+  }
+  expect(statePhrase(tOf("en"), bits("killed"), NOW)).toBe("killed · 15m");
+  expect(statePhrase(tOf("en"), bits("held", { held: 1 }), NOW)).toBe("held · 1 message queued");
+  expect(statePhrase(tOf("en"), bits("held", { held: 5 }), NOW)).toBe("held · 5 messages queued");
+  expect(statePhrase(tOf("uk"), bits("held", { held: 1 }), NOW)).toBe("утримано · 1 повідомлення в черзі");
+  expect(statePhrase(tOf("uk"), bits("held", { held: 3 }), NOW)).toBe("утримано · 3 повідомлення в черзі");
+  expect(statePhrase(tOf("uk"), bits("held", { held: 5 }), NOW)).toBe("утримано · 5 повідомлень у черзі");
 });
 
 test("a row at its account's limit says which account and when the window reopens", async () => {

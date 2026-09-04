@@ -44,7 +44,7 @@ function finite(value: unknown, field: string): number {
   return value;
 }
 
-const VIEW_MODES: readonly ViewMode[] = ["overview", "scheme", "list", "mobile-focus", "mobile-map"];
+const VIEW_MODES: readonly ViewMode[] = ["overview", "scheme", "list", "mobile-focus"];
 
 function frame(value: unknown): FocusFrame {
   const raw = object(value, "frameAtCreation");

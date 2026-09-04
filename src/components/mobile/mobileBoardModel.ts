@@ -6,7 +6,7 @@ import type { FileEntry } from "@/lib/types";
 
 import { attentionId, blockingStuckDelivery, buildAttentionQueue, openBridgeAsk, stalledAttention } from "../attention";
 import { isAuxTask, isChildConversation, isConversation, isSubagent, projectKey } from "../projectModel";
-import { turnIsRunning } from "../turnDuration";
+import { turnIsRunning, turnLeftOpen } from "../turnDuration";
 import { workingSince } from "../workingSince";
 
 /*
@@ -25,7 +25,9 @@ import { workingSince } from "../workingSince";
  * need the operator, a phrase in the meta line otherwise.
  *
  * Nothing here invents a lifecycle. Each branch names the authority the board
- * already trusts: the kill is the process state, «stalled» and «waiting» are
+ * already trusts: the kill is the process state read together with the turn
+ * it left behind (a host stopped after its turn settled is a finished
+ * conversation, not a killed one — #1487), «stalled» and «waiting» are
  * the attention queue's own signals (`attentionId`, so the bar's badge and
  * these rows cannot count different things), «limit» is the rate-limit wall,
  * «held» is the account-switch delivery fence read exactly as the card status
@@ -127,7 +129,14 @@ export function mobileRowState(file: FileEntry, now: number = Date.now() / 1000)
     account: null,
     ...over,
   });
-  if (file.proc === "killed") return bits({ key: "killed", dot: "danger", seconds: Math.max(0, now - file.mtime) });
+  /* `proc === "killed"` is two outcomes, not one (#1487). A host that died
+     while its turn was open is the zombie the liveness snapshot reports as
+     `host_gone_turn_open`, and the one row worth the danger dot. A host
+     stopped AFTER its turn settled — `host_gone_turn_settled` — is how every
+     finished stage ends: it falls through to the ordinary reading of a
+     finished conversation, in the neutral tone, so the alarming word keeps
+     meaning something when it does appear. */
+  if (file.proc === "killed" && turnLeftOpen(file)) return bits({ key: "killed", dot: "danger", seconds: Math.max(0, now - file.mtime) });
   if (stalledAttention(file, now)) {
     return bits({ key: "stalled", dot: "danger", edge: "danger", badge: "stalled", seconds: Math.max(0, now - file.mtime) });
   }
@@ -147,7 +156,8 @@ export function mobileRowState(file: FileEntry, now: number = Date.now() / 1000)
   if (attentionId(file, now) !== null) {
     return bits({ key: "waiting", dot: "warning", edge: "warning", badge: waitingBadge(file, now), seconds: Math.max(0, now - waitingSince(file, now)) });
   }
-  if (turnIsRunning(file)) {
+  /* A dead host runs nothing, whatever freshness the transcript still carries. */
+  if (file.proc !== "killed" && turnIsRunning(file)) {
     const since = workingSince(file);
     return bits({ key: "working", dot: "success", seconds: since === null ? null : Math.max(0, now - since / 1000) });
   }
@@ -168,6 +178,22 @@ export function nowFragment(file: FileEntry): string | null {
   return objective ? objective : null;
 }
 
+/**
+ * When the conversation was launched, in epoch seconds, or null when nothing
+ * durable names it (#1487: the operator wants every row to say when a thing
+ * was started, not only how long since it last moved). The transcript
+ * header's own creation time first; before a transcript exists, the launch's
+ * admission — the same instant the working timer counts from in the starting
+ * window.
+ */
+export function launchedAt(file: FileEntry): number | null {
+  const started = isoSeconds(file.sessionStartedAt);
+  if (started !== null) return started;
+  const launch = file.spawn ?? file.launch ?? null;
+  const admitted = launch?.admittedAt ?? launch?.promptAt;
+  return typeof admitted === "number" && Number.isFinite(admitted) ? admitted / 1000 : null;
+}
+
 export interface MobileBoardConversation {
   file: FileEntry;
   path: string;
@@ -175,6 +201,9 @@ export interface MobileBoardConversation {
   state: MobileRowState;
   /** The agent's current step, on a working row. */
   now: string | null;
+  /** Epoch seconds the conversation was launched, when known; the row ends
+      with «started 3h ago» so the state's own age and the launch both read. */
+  launchedAt: number | null;
   crowned: boolean;
 }
 
@@ -323,6 +352,7 @@ export function buildMobileBoard({
       title: cleanTitle(file.title, 90),
       state,
       now: state.key === "working" ? nowFragment(file) : null,
+      launchedAt: launchedAt(file),
       crowned: crowned.has(file.path),
     });
   }

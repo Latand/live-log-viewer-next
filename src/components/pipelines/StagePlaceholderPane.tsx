@@ -25,7 +25,7 @@ import {
   optimisticReorderStage,
   patchPipeline,
   reviewLoopChainValid,
-  stageAttempts,
+  stageConfigurable,
   stageChipLabel,
   stageChipState,
   stagePaneTitle,
@@ -76,11 +76,7 @@ export function StagePlaceholderPane({ slot, interactive }: { slot: StageSlot; i
   const draft = pipeline.state === "draft";
   /* Only a stage that has never run can be re-configured — the engine snapshots
      a stage's config at its first attempt (same guard as the builder panel). */
-  const editable =
-    interactive &&
-    stageAttempts(pipeline, stage.id).length === 0 &&
-    pipeline.state !== "completed" &&
-    pipeline.state !== "closed";
+  const editable = interactive && stageConfigurable(pipeline, stage.id);
 
   const effectiveModel = stage.effectiveRole.model ?? "";
   const effectiveEffort = stage.effectiveRole.effort ?? "";
