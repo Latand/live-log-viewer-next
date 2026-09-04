@@ -179,7 +179,11 @@ function FlowOverride({ group, onClose }: { group: SchemeGroup; onClose: () => v
           className={inputBase}
           value={model}
           placeholder={t("groupOverride.modelPlaceholder")}
-          onChange={(event) => setModel(event.target.value)}
+          onChange={(event) => {
+            const nextModel = event.target.value;
+            setModel(nextModel);
+            if (effort && !effortScale(engine, nextModel)!.includes(effort)) setEffort("");
+          }}
         />
       </label>
       <button

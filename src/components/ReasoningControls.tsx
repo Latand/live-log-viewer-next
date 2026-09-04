@@ -48,7 +48,12 @@ export function ReasoningControls({
         roomy={roomy}
         aria-label={t("draft.modelAria")}
         title={t("draft.modelAria")}
-        onChange={(event) => onModel(event.target.value)}
+        onChange={(event) => {
+          const nextModel = event.target.value;
+          onModel(nextModel);
+          // An unsupported tier returns to the CLI default; supported choices survive.
+          if (effort && !effortScale(engine, nextModel)!.includes(effort)) onEffort("");
+        }}
       >
         <option value="">{t("draft.modelDefault")}</option>
         {ENGINE_MODELS[engine].map((option) => (

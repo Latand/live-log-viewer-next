@@ -42,7 +42,10 @@ function RoleEditor({
         placeholder={t("flowDialog.modelPlaceholder")}
         aria-label={t("flowDialog.model", { label })}
         className="h-7 w-0 min-w-0 flex-1 rounded-[8px] border border-border bg-canvas px-1.5 font-mono text-[11px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-        onChange={(event) => onChange({ ...role, model: event.target.value.trim() || null })}
+        onChange={(event) => {
+          const model = event.target.value.trim() || null;
+          onChange({ ...role, model, effort: role.effort && effortScale(role.engine, model)!.includes(role.effort) ? role.effort : null });
+        }}
       />
       <datalist id={modelListId}>
         {ENGINE_MODELS[role.engine].map((option) => (
