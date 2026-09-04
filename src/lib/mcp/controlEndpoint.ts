@@ -1,4 +1,8 @@
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+import { viewerComposeSnapshotPath } from "@/runtime-host/deploymentArtifacts";
 
 const DEFAULT_VIEWER_CONTROL_URL = "http://127.0.0.1:8898";
 
@@ -78,4 +82,105 @@ export function viewerControlOrigin(
   if (!currentRelease) return configured;
   if (loopbackOrigin(configured) === currentRelease) return currentRelease;
   return stableControlOrigin(env);
+}
+
+export const VIEWER_CONTROL_TOKEN_ENV = "LLV_VIEWER_CONTROL_TOKEN";
+
+function record(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function readJsonRecord(filename: string): Record<string, unknown> | null {
+  try {
+    return record(JSON.parse(fs.readFileSync(filename, "utf8")) as unknown);
+  } catch {
+    return null;
+  }
+}
+
+/* A credential travels in an HTTP header, so a value that cannot appear in one
+   counts as absent. Sending nothing draws the Viewer's own legible refusal;
+   throwing at header construction would take the whole tool call down first. */
+function credential(value: unknown): string | null {
+  const token = typeof value === "string" ? value.trim() : "";
+  return token.length > 0 && !/[^!-~]/.test(token) ? token : null;
+}
+
+function configRoot(env: ControlEnvironment): string {
+  /* `os.homedir()` rather than `$HOME`, matching the launcher: on Windows HOME
+     is not a Windows variable at all. */
+  return env.XDG_CONFIG_HOME?.trim() || path.join(os.homedir(), ".config");
+}
+
+function stateDirectory(env: ControlEnvironment): string {
+  return env.LLV_STATE_DIR?.trim() || path.join(configRoot(env), "agent-log-viewer", "state");
+}
+
+function releaseTargetFile(env: ControlEnvironment, stateDir: string): string {
+  return env.LLV_VIEWER_DEPLOY_TARGET?.trim() || path.join(stateDir, "viewer-release.json");
+}
+
+/** Whether `origin` is the Viewer this machine's own release state names — its
+    release endpoint, or the stable listener in front of it. An ambient
+    credential travels only there: an endpoint someone else pointed this client
+    at gets no key of the operator's. */
+function addressesOwnViewer(
+  env: ControlEnvironment,
+  origin: string,
+  target: Record<string, unknown> | null,
+): boolean {
+  if (origin === loopbackOrigin(target?.endpoint)) return true;
+  try {
+    return origin === stableControlOrigin(env);
+  } catch {
+    return false;
+  }
+}
+
+/** The exact environment the running Viewer enforces, from the release
+    container's Compose snapshot (0600, inside the operator's 0700 state). */
+function releaseCredential(stateDir: string, target: Record<string, unknown> | null): string | null {
+  const container = typeof target?.container === "string" && target.container.trim() ? target.container : null;
+  if (!container) return null;
+  const compose = readJsonRecord(viewerComposeSnapshotPath(stateDir, container));
+  return credential(record(record(record(compose?.services)?.viewer)?.environment)?.LLV_TOKEN);
+}
+
+/** The key the CLI writes for its own links, which is what a Viewer started
+    outside a deployment authenticates against. */
+function machineKey(env: ControlEnvironment): string | null {
+  try {
+    return credential(fs.readFileSync(path.join(configRoot(env), "agent-log-viewer", "token"), "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The credential a control request must carry. #1496 made the Viewer
+ * authenticate every connection whenever a token is configured, loopback
+ * included, because loopback is shared by every OS account. This client sent
+ * none, so a candidate's own deployment probe was refused by the release it was
+ * grading, and every agent's Viewer tools would have answered 403 the moment
+ * such a build was promoted (#1511).
+ *
+ * Agent processes are launched with `LLV_TOKEN` unset on purpose, so the key is
+ * resolved from the same operator-only state that already names the control
+ * origin, never from the agent's environment. A caller that pinned its own
+ * credential keeps it; nothing else travels to an endpoint the release state
+ * does not name; and a Viewer with no token configured still gets a bare
+ * request, which is what it expects.
+ */
+export function viewerControlToken(env: ControlEnvironment, origin: string): string | null {
+  const pinned = credential(env[VIEWER_CONTROL_TOKEN_ENV]);
+  if (pinned) return pinned;
+  /* The same rule the origin resolution follows: a client pinned to an explicit
+     endpoint by a partial release environment consults no ambient state, so it
+     can neither resolve a credential there nor send one to that endpoint. */
+  if (env.LLV_VIEWER_CONTROL_URL?.trim()
+    && (!env.LLV_VIEWER_DEPLOY_TARGET?.trim() || !env.LLV_VIEWER_PORT?.trim())) return null;
+  const stateDir = stateDirectory(env);
+  const target = readJsonRecord(releaseTargetFile(env, stateDir));
+  if (!addressesOwnViewer(env, origin, target)) return null;
+  return credential(env.LLV_TOKEN) ?? releaseCredential(stateDir, target) ?? machineKey(env);
 }

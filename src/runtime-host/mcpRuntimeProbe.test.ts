@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { VIEWER_CONTROL_TOKEN_ENV } from "@/lib/mcp/controlEndpoint";
 import { MCP_TOOL_NAMES } from "@/lib/mcp/server";
 
 import { RuntimeHost } from "./host";
@@ -407,3 +408,81 @@ test("a refusal naming a home path is redacted and clamped before it is recorded
   expect(failure!.error.endsWith("...")).toBe(true);
   expect(failure!.error.length).toBeLessThan(refusal.length / 2);
 });
+
+/** #1511: once a token is configured the Viewer authenticates every connection,
+    loopback included (#1496), so a probe whose reads carry nothing is refused by
+    the very candidate it is grading and the deploy fails one gate after
+    readiness. This stub refuses exactly as the real gate does, so the credential
+    has to travel from the adapter's probe environment, through the spawned MCP
+    server, to the read. */
+function gatedCandidateControl(token: string) {
+  return Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(request) {
+      if (request.headers.get("authorization") !== `Bearer ${token}`) {
+        return Response.json({ error: "access denied: key required" }, { status: 403 });
+      }
+      return new URL(request.url).pathname === "/api/runtime/deployments"
+        ? Response.json({ count: 0, deployments: [] })
+        : Response.json({ error: "not found" }, { status: 404 });
+    },
+  });
+}
+
+test("a candidate that authenticates every connection is probed with the credential it was handed", async () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-probe-gated-"));
+  const socketPath = path.join(sandbox, "runtime.sock");
+  const journal = new RuntimeJournal(path.join(sandbox, "runtime.sqlite"));
+  const admissions = new McpHealthProbeAdmissions();
+  const server = serveRuntimeHost(socketPath, new RuntimeHost(
+    journal,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    admissions,
+  ));
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  const environment = Object.fromEntries(Object.entries(process.env)
+    .filter((entry): entry is [string, string] => typeof entry[1] === "string"));
+  environment.LLV_STATE_DIR = sandbox;
+  environment.LLV_RUNTIME_EVENTS = "1";
+  environment.LLV_RUNTIME_HOST_SOCKET = socketPath;
+  environment.LLV_AGENT_REGISTRY_SQLITE = "off";
+  environment.LLV_CODEX_HOME = path.join(sandbox, "codex");
+  environment.LLV_CLAUDE_HOME = path.join(sandbox, "claude");
+  const control = gatedCandidateControl("candidate-key");
+  environment[VIEWER_CONTROL_URL_ENV] = control.url.origin;
+  environment[VIEWER_CONTROL_TOKEN_ENV] = "candidate-key";
+
+  try {
+    const evidence = await probeMcpRuntime({
+      command: process.execPath,
+      args: [path.join(process.cwd(), "bin", "mcp-server.mjs")],
+      cwd: process.cwd(),
+      env: environment,
+      runtime: {
+        source: "managed",
+        revision: "8".repeat(40),
+        releaseId: "deploy-probe-gated",
+        artifactDigest: "b".repeat(64),
+        stagedAt: "2026-09-04T08:00:00.000Z",
+      },
+      healthProbeCapability: admissions.issue(),
+      healthProbeAdmissions: admissions,
+    });
+
+    expect(evidence).toMatchObject({
+      ok: true,
+      processReady: true,
+      calls: { deploymentStatus: true, boardSnapshot: true },
+    });
+    expect(evidence.callFailures).toBeUndefined();
+  } finally {
+    control.stop(true);
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    journal.close();
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+}, 20_000);
