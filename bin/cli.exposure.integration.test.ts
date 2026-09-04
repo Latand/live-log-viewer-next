@@ -90,6 +90,30 @@ async function waitForExit(child: ReturnType<typeof spawn>, timeoutMs: number): 
   });
 }
 
+function captureOutput(child: ReturnType<typeof spawn>) {
+  let output = "";
+  child.stdout?.on("data", (chunk) => {
+    output += String(chunk);
+  });
+  child.stderr?.on("data", (chunk) => {
+    output += String(chunk);
+  });
+
+  return {
+    async waitFor(text: string, timeoutMs: number): Promise<void> {
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        if (output.includes(text)) return;
+        if (child.exitCode !== null || child.signalCode !== null) {
+          throw new Error(`CLI exited before ${JSON.stringify(text)} appeared:\n${output}`);
+        }
+        await Bun.sleep(25);
+      }
+      throw new Error(`CLI output did not include ${JSON.stringify(text)}:\n${output}`);
+    },
+  };
+}
+
 async function checkoutFixture(options: { ignoreHostname?: boolean } = {}): Promise<{ cli: string; env: NodeJS.ProcessEnv }> {
   const fixture = await mkdtemp(path.join(tmpdir(), "llv-cli-exposure-"));
   fixtures.add(fixture);
@@ -168,8 +192,12 @@ test("the checkout next start path keeps the default listener on loopback", asyn
     stdio: ["ignore", "pipe", "pipe"],
   });
   children.add(child);
+  const output = captureOutput(child);
 
   await waitForStatus("127.0.0.1", port, 200);
+  await output.waitFor("Agent Log Viewer", 10_000);
+  expect(child.exitCode).toBeNull();
+  expect(child.signalCode).toBeNull();
   expect(await probe(nonLoopbackIpv4Address(), port)).toBe(0);
 });
 

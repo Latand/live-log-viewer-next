@@ -615,9 +615,13 @@ function addressIsBound(hostname, port) {
 
 async function boundNonLoopbackAddress(port) {
   const addresses = new Set();
-  for (const entries of Object.values(networkInterfaces())) {
+  for (const [interfaceName, entries] of Object.entries(networkInterfaces())) {
     for (const entry of entries ?? []) {
-      if (!entry.internal) addresses.add(entry.address);
+      if (entry.internal) continue;
+      const address = entry.family === "IPv6" && entry.scopeid > 0
+        ? `${entry.address}%${interfaceName}`
+        : entry.address;
+      addresses.add(address);
     }
   }
 
