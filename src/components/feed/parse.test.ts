@@ -1525,15 +1525,21 @@ describe("Codex payload audit fixture", () => {
     }
   });
 
-  test("typed tool output keeps an image placeholder beside captured text", () => {
+  test("typed tool output carries its image on the card and keeps a text placeholder for copy/speech (#1498)", () => {
     const feed = buildFeed(codexFile, lines, false, "");
     const tools = feed.items.flatMap((item): Extract<Item, { kind: "tool" }>[] =>
       item.kind === "tool" ? [item] : item.kind === "cmd-group" ? item.calls : [],
     );
     const custom = tools.find((item) => item.id === "custom-call");
     expect(custom?.outputPreview).toContain("Synthetic poll output");
+    /* The flattened text keeps a placeholder where the picture sits, never the payload. */
     expect(custom?.outputPreview.toLowerCase()).toContain("image");
     expect(custom?.outputPreview).not.toContain("c3ludGhldGlj");
+    /* The picture itself rides the card as an ordered block after the text. */
+    expect(custom?.outputBlocks).toEqual([
+      { type: "text", text: "Synthetic poll output" },
+      { type: "image", media: "image/png", data: "c3ludGhldGlj" },
+    ]);
   });
 
   test("typed tool output keeps primitive values and unknown block labels", () => {
@@ -2384,5 +2390,119 @@ describe("issue 1398: one Codex user message reaches the rollout as several reco
       userItemCompleted("2026-09-01T09:01:00.002Z", "A second question."),
     ], false, "");
     expect(userRows(feed).map((item) => (item as { text: string }).text)).toEqual([PROMPT, "A second question."]);
+  });
+});
+
+describe("tool results carry their images (#1498)", () => {
+  const frameData = "c3ludGhldGljLWZyYW1l";
+  const claudeRead = (id: string, file: string) =>
+    JSON.stringify({
+      type: "assistant",
+      timestamp: "2026-09-03T23:52:20.000Z",
+      message: { content: [{ type: "tool_use", id, name: "Read", input: { file_path: file } }] },
+    });
+  /* The CLI's own shape for a Read of a raster: the base64 sits in the
+     tool_result block, and `toolUseResult.file` repeats it with the dimensions. */
+  const claudeImageResult = (id: string, data: string, more: Record<string, unknown>[] = []) =>
+    JSON.stringify({
+      type: "user",
+      timestamp: "2026-09-03T23:52:23.000Z",
+      message: {
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: id, content: [{ type: "image", source: { type: "base64", media_type: "image/jpeg", data } }, ...more] }],
+      },
+      toolUseResult: {
+        type: "image",
+        file: { base64: data, type: "image/jpeg", originalSize: 304134, dimensions: { originalWidth: 1999, originalHeight: 1161, displayWidth: 1999, displayHeight: 1161 } },
+      },
+    });
+  const codexTyped = (id: string, output: unknown[]) => [
+    JSON.stringify({ type: "response_item", timestamp: "t1", payload: { type: "custom_tool_call", call_id: id, name: "exec", input: "capture();" } }),
+    JSON.stringify({ type: "response_item", timestamp: "t2", payload: { type: "custom_tool_call_output", call_id: id, output } }),
+  ];
+  const toolItems = (feed: ReturnType<typeof buildFeed>) =>
+    feed.items.flatMap((item): Extract<Item, { kind: "tool" }>[] => (item.kind === "tool" ? [item] : item.kind === "cmd-group" ? item.calls : []));
+
+  test("a Claude Read of an image file puts the picture on the Read card instead of beside it", () => {
+    const lines = [claudeRead("toolu-frame", "/workspace/frames/op-image-1.jpg"), claudeImageResult("toolu-frame", frameData)];
+    const feed = buildFeed(claudeFile, lines, false, "");
+    const read = toolItems(feed).find((item) => item.id === "toolu-frame");
+    expect(read?.status).toBe("ok");
+    expect(read?.outputBlocks).toEqual([{ type: "image", media: "image/jpeg", data: frameData, w: 1999, h: 1161, bytes: 304134 }]);
+    /* The card owns the picture: no standalone image row is pushed around it. */
+    expect(itemsOfKind(feed, "image")).toHaveLength(0);
+    expect(read?.outputPreview).not.toContain(frameData);
+    /* A result that carries a picture opens on the desktop the way an edit's diff does. */
+    expect(read?.open).toBe(true);
+    assertParity(claudeFile, lines, { chunks: [1] });
+  });
+
+  test("a pasted Claude image keeps its own standalone card (the path that already worked)", () => {
+    const pasted = JSON.stringify({
+      type: "user",
+      timestamp: "2026-09-03T23:50:00.000Z",
+      message: { role: "user", content: [{ type: "text", text: "compare with this" }, { type: "image", source: { type: "base64", media_type: "image/png", data: frameData } }] },
+    });
+    const feed = buildFeed(claudeFile, [pasted], false, "");
+    expect(itemsOfKind(feed, "image")).toEqual([{ kind: "image", media: "image/png", data: frameData, w: undefined, h: undefined, bytes: undefined }]);
+    expect(itemsOfKind(feed, "user")).toHaveLength(1);
+  });
+
+  test("a Codex typed output keeps text and images in order, neither replacing the other", () => {
+    const lines = codexTyped("mixed-image", [
+      { type: "input_text", text: "Script completed\nWall time 0.1 seconds\nOutput:\nbefore the frame" },
+      { type: "input_image", image_url: "data:image/png;base64,c3ludGhldGlj" },
+      { type: "input_text", text: "after the frame" },
+    ]);
+    const feed = buildFeed(codexFile, lines, false, "");
+    const call = toolItems(feed).find((item) => item.id === "mixed-image");
+    expect(call?.outputBlocks).toEqual([
+      { type: "text", text: "before the frame" },
+      { type: "image", media: "image/png", data: "c3ludGhldGlj" },
+      { type: "text", text: "after the frame" },
+    ]);
+    expect(call?.outputPreview).toContain("before the frame");
+    expect(call?.outputPreview).toContain("after the frame");
+    expect(call?.outputPreview).not.toContain("c3ludGhldGlj");
+    expect(itemsOfKind(feed, "image")).toHaveLength(0);
+    assertParity(codexFile, lines, { chunks: [1] });
+  });
+
+  test("a malformed, unsupported or oversized image block degrades to the text placeholder and keeps the card's text", () => {
+    const oversized = "A".repeat(Math.ceil((12 * 1024 * 1024 * 4) / 3));
+    const lines = codexTyped("broken-image", [
+      { type: "input_text", text: "captured" },
+      { type: "input_image" },
+      { type: "image", source: { type: "base64", media_type: "image/jpeg" } },
+      { type: "input_image", image_url: "data:image/svg+xml;base64,PHN2Zz4=" },
+      { type: "input_image", image_url: `data:image/png;base64,${oversized}` },
+      { type: "image", source: { type: "base64", media_type: "image/png", data: "not base64 at all!" } },
+    ]);
+    const feed = buildFeed(codexFile, lines, false, "");
+    const call = toolItems(feed).find((item) => item.id === "broken-image");
+    expect(call?.status).toBe("ok");
+    expect(call?.outputPreview).toContain("captured");
+    expect(call?.outputPreview.toLowerCase()).toContain("image");
+    /* Nothing survived as a picture, so the card keeps the plain text path. */
+    expect(call?.outputBlocks).toBeUndefined();
+    const serialized = JSON.stringify(feed.items);
+    expect(serialized).not.toContain("PHN2Zz4=");
+    expect(serialized).not.toContain(oversized.slice(0, 128));
+    expect(serialized).not.toContain("not base64 at all!");
+  });
+
+  test("a Claude result mixing text and images keeps both in order and the file's dimensions on the picture", () => {
+    const lines = [
+      claudeRead("toolu-mixed", "/workspace/frames/op-image-2.jpg"),
+      claudeImageResult("toolu-mixed", frameData, [{ type: "text", text: "1999x1161 frame, captured at 100%" }]),
+    ];
+    const feed = buildFeed(claudeFile, lines, false, "");
+    const read = toolItems(feed).find((item) => item.id === "toolu-mixed");
+    expect(read?.outputBlocks).toEqual([
+      { type: "image", media: "image/jpeg", data: frameData, w: 1999, h: 1161, bytes: 304134 },
+      { type: "text", text: "1999x1161 frame, captured at 100%" },
+    ]);
+    expect(read?.outputPreview).toContain("1999x1161 frame, captured at 100%");
+    assertParity(claudeFile, lines, { chunks: [1] });
   });
 });

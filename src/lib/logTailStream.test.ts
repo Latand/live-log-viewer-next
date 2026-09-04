@@ -37,11 +37,14 @@ function asChunk(event: LogTailStreamEvent): LogChunk {
 
 describe("LogTailStreamSession", () => {
   test("a stale live offset skips an oversized backlog and resumes from the bounded tail", async () => {
-    const prefix = "x".repeat(MAX_CHUNK + 128);
+    /* A backlog of ordinary records: the stale subscriber sits on a record
+       boundary and the bounded catch-up jumps it to the live window. */
+    const line = "x".repeat(1023) + "\n";
+    const prefix = line.repeat(Math.ceil((MAX_CHUNK + 128) / line.length));
     const tail = "y".repeat(MAX_CHUNK);
     const file = writeLog("stale-offset.log", prefix + tail);
 
-    const chunk = await readTailChunk(file, 1);
+    const chunk = await readTailChunk(file, line.length);
 
     expect(chunk).not.toBeNull();
     expect(chunk).toMatchObject({
@@ -50,6 +53,48 @@ describe("LogTailStreamSession", () => {
       size: prefix.length + tail.length,
       data: tail,
     });
+  });
+
+  /* #1498: an agent reading a rendered frame appends one 800 KB record — larger
+     than the live window — and the operator's feed lost it: the bounded
+     catch-up jumped into the middle of the record and the partial line was
+     dropped. A record is served from its first byte however long it is; the
+     jump only ever skips whole records. */
+  test("a record longer than the live window is served from its first byte, in sequence", async () => {
+    const head = '{"seq":1}\n';
+    const record = '{"frame":"' + "z".repeat(MAX_CHUNK + 4096) + '"}\n';
+    const file = writeLog("oversized-record.log", head + record);
+
+    const first = await readTailChunk(file, head.length);
+    expect(first).toMatchObject({ start: head.length, offset: head.length + MAX_CHUNK, size: head.length + record.length });
+    const second = await readTailChunk(file, first!.offset);
+    expect(second).toMatchObject({ start: first!.offset, offset: head.length + record.length });
+    expect(first!.data + second!.data).toBe(record);
+  });
+
+  test("a subscriber inside a record finishes that record before the bounded jump skips ahead", async () => {
+    const one = '{"frame":1,"data":"' + "a".repeat(MAX_CHUNK + 2048) + '"}\n';
+    const two = '{"frame":2,"data":"' + "b".repeat(MAX_CHUNK + 2048) + '"}\n';
+    const file = writeLog("back-to-back-records.log", one + two);
+
+    /* Holding the head of record one, the subscriber is handed its tail — and
+       nothing past it, so the carried partial line stays whole. */
+    const finish = await readTailChunk(file, MAX_CHUNK);
+    expect(finish).toMatchObject({ start: MAX_CHUNK, offset: one.length, data: one.slice(MAX_CHUNK) });
+    /* On the boundary, the next record is itself longer than the window: it is
+       served from its first byte rather than jumped into. */
+    const next = await readTailChunk(file, one.length);
+    expect(next).toMatchObject({ start: one.length, offset: one.length + MAX_CHUNK, data: two.slice(0, MAX_CHUNK) });
+  });
+
+  test("a subscriber on a record boundary behind ordinary records still jumps to the live window", async () => {
+    const line = '{"seq":0,"pad":"' + "p".repeat(1000) + '"}\n';
+    const backlog = line.repeat(Math.ceil((2 * MAX_CHUNK) / line.length));
+    const tail = '{"seq":1}\n';
+    const file = writeLog("boundary-jump.log", backlog + tail);
+
+    const chunk = await readTailChunk(file, line.length);
+    expect(chunk).toMatchObject({ start: backlog.length + tail.length - MAX_CHUNK, offset: backlog.length + tail.length });
   });
 
   test("initial catch-up spends one connection byte budget and continues later", async () => {
