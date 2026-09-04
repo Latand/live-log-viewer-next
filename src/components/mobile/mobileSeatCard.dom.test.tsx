@@ -50,6 +50,7 @@ mock.module("@/hooks/useRuntime", () => ({
   useRuntimeSessionByArtifact: () => null,
   useRuntimeReceiptsForArtifact: () => [],
   useRuntimeFlow: () => null,
+  refreshRuntime: async () => { runtimeRefreshes += 1; return true; },
 }));
 mock.module("@/hooks/useLogTail", () => ({
   useLogTail: () => ({
@@ -64,6 +65,9 @@ const { MobileSeatCard } = await import("./MobileSeatCard");
 const { createMobileNav, MobileNavContext } = await import("./mobileNav");
 const { resetOrchestratorSeatCacheForTests } = await import("../orchestrator/useOrchestratorSeat");
 
+const { resetOrchestratorIncumbentCacheForTests } = await import("../orchestrator/useOrchestratorIncumbent");
+const { FILES_CHANGED_EVENT } = await import("@/lib/filesEvents");
+
 interface SeatAnswer { seat: unknown; pending: unknown; exists: boolean }
 interface Recorded { url: string; method: string; body: Record<string, unknown> }
 
@@ -72,12 +76,15 @@ let postSeat: (body: Record<string, unknown>) => Promise<Response> = async () =>
   new Response(JSON.stringify({ ok: true, state: "starting" }), { status: 200, headers: { "content-type": "application/json" } });
 const requests: Recorded[] = [];
 const realFetch = globalThis.fetch;
+let incumbentAnswer: Record<string, unknown> | null = null;
+let runtimeRefreshes = 0;
 
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = String(input);
   const method = init?.method ?? "GET";
   const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {};
   requests.push({ url, method, body });
+  if (url.startsWith("/api/orchestrator/seat/status")) return Response.json(incumbentAnswer);
   if (url.startsWith("/api/orchestrator/seat") && method === "POST") return postSeat(body);
   if (url.startsWith("/api/orchestrator/seat")) {
     return new Response(JSON.stringify(seatAnswer), { status: 200, headers: { "content-type": "application/json" } });
@@ -100,6 +107,9 @@ beforeEach(() => {
   /* Each test is a tab that has never read this project's seat; the answer is
      cached per project for the session since #1149. */
   resetOrchestratorSeatCacheForTests();
+  resetOrchestratorIncumbentCacheForTests();
+  incumbentAnswer = null;
+  runtimeRefreshes = 0;
   nav = createMobileNav(navHost());
   requests.length = 0;
   seatAnswer = { seat: null, pending: null, exists: true };
@@ -794,3 +804,61 @@ test("an unreadable seat offers a re-read that recovers the row without a page r
     globalThis.fetch = previousFetch;
   }
 });
+
+
+test("missing-catalog board card offers Re-bind after 10s and clears only when the catalog read delivers its file", async () => {
+  seatAnswer = { seat: seat(), pending: null, exists: true };
+  incumbentAnswer = { project: "atlas", designated: true, conversationId: "conv_orchestrator", engine: "claude", model: "opus", liveness: { hostState: "alive", lifecycle: "running" } };
+  // The board-card host, without mounting a conversation screen behind it.
+  const cardView = (files: FileEntry[]) => <MobileNavContext.Provider value={nav}>
+    <MobileSeatCard project="atlas" projectName="Atlas" files={files} now={NOW} onOpenConversation={() => { throw new Error("unexpected navigation"); }} />
+  </MobileNavContext.Provider>;
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  roots.add(root);
+  flushSync(() => root.render(cardView([])));
+  await settle(root, cardView([]));
+  const rerender = async (files: FileEntry[]) => {
+    flushSync(() => root.render(cardView(files)));
+    await settle(root, cardView(files));
+  };
+  flushSync(() => openButton(host).click());
+  await settle(root, cardView([]));
+  const rebind = () => host.querySelector<HTMLButtonElement>("[data-orchestrator-rebind]");
+  expect(sheet(host)).not.toBeNull();
+  expect(rebind()).toBeNull();
+  await new Promise((resolve) => setTimeout(resolve, 10_050));
+  await settle(root, cardView([]));
+  expect(host.querySelector('[data-orchestrator-bind-failure="catalog"]')).not.toBeNull();
+  expect(rebind()!.className).toContain("min-h-11");
+  const storageBefore = dom.localStorage.length;
+  const before = requests.length;
+  let catalogReads = 0;
+  let deliver = false;
+  const refreshCatalog = () => {
+    catalogReads += 1;
+    if (deliver) void rerender([orchestrator]);
+  };
+  dom.addEventListener(FILES_CHANGED_EVENT, refreshCatalog);
+  try {
+    flushSync(() => rebind()!.click());
+    await settle(root, cardView([]));
+    expect(rebind()).not.toBeNull(); // Callback completion cannot clear the fault.
+    deliver = true;
+    flushSync(() => rebind()!.click());
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(rebind()).toBeNull();
+    expect(sheet(host)).not.toBeNull();
+    expect(nav.getState().sheet).toBe("seat");
+    expect(catalogReads).toBe(2);
+    expect(runtimeRefreshes).toBe(2);
+    const reads = requests.slice(before);
+    expect(reads.filter((r) => r.url.startsWith("/api/orchestrator/seat/status")).length).toBeGreaterThanOrEqual(2);
+    expect(reads.filter((r) => r.url.startsWith("/api/orchestrator/seat?")).length).toBeGreaterThanOrEqual(2);
+    expect(reads.every((r) => r.method === "GET")).toBe(true);
+    expect(dom.localStorage.length).toBe(storageBefore);
+  } finally {
+    dom.removeEventListener(FILES_CHANGED_EVENT, refreshCatalog);
+  }
+}, 15_000);

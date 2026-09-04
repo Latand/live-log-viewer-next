@@ -1,7 +1,7 @@
 "use client";
 
 import { Bot, ChevronRight, Command, CornerDownRight, LoaderCircle, Pencil, RefreshCw, RotateCcw, Sparkle, TriangleAlert } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 
 import { X } from "@/components/icons";
 import {
@@ -232,6 +232,7 @@ function SeatStatusSheet({
   onClose,
 }: SeatSheetProps) {
   const { t } = useLocale();
+  const kbInset = useKeyboardInset();
   const launch = useCreateDraft(project);
   const view = orchestratorRowView(state, { conversationReady: Boolean(file) });
   const mode = state.kind === "live" ? "live" : "create";
@@ -258,45 +259,65 @@ function SeatStatusSheet({
         ? { key: "mobile2.seat.open", run: onOpenConversation, busy: false }
         : null;
 
+  // The conversation can open this sheet while its overlay keyboard remains
+  // visible. Budget the fixed scrim against the same inset as the composer.
   return (
+    <div
+      className="[&>[data-mobile2-scrim]]:bottom-[var(--seat-keyboard-inset)]"
+      style={{ "--seat-keyboard-inset": `${kbInset}px` } as CSSProperties}
+    >
     <MobileSheet
       name="seat"
       title={t("mobile2.seat.sheetTitle", { project: projectName })}
       onClose={onClose}
       footer={
-        <>
-          {/* Rotate: a control, and only a control. The advisory in the body
-              states the recommendation; this performs it, and ONLY when
-              pressed and then confirmed in the draft it opens. */}
-          {state.kind === "live" ? (
+        <div className="flex min-w-0 flex-1 flex-col gap-2">
+          {state.kind === "live" && state.bindFailure ? (
             <button
               type="button"
-              data-orchestrator-rotate
-              data-mobile2-open="rotate"
-              onClick={rotate.onOpen}
-              disabled={rotate.opening || rotate.submitting}
-              title={t("orchPanel.rotateTitle")}
-              className="inline-flex min-h-11 shrink-0 items-center justify-center gap-1.5 rounded-control border border-border bg-card px-3 text-body font-semibold text-primary active:bg-sunken focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
+              data-orchestrator-rebind
+              onClick={onRecheck}
+              title={t("orchPanel.rebindTitle")}
+              className="inline-flex min-h-11 w-full items-center justify-center gap-1.5 rounded-control border border-border bg-card px-3 text-body font-semibold text-primary active:bg-sunken focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             >
-              {rotate.opening
-                ? <LoaderCircle className="h-4 w-4 animate-spin" aria-hidden />
-                : <RefreshCw className="h-4 w-4" aria-hidden />}
-              {t(rotate.opening ? "orchMobile.rotateOpening" : "orchPanel.rotate")}
+              <RefreshCw className="h-4 w-4" aria-hidden />
+              {t("orchPanel.rebind")}
             </button>
           ) : null}
-          {primary ? (
-            <button
-              type="button"
-              data-orchestrator-confirm
-              disabled={primary.busy}
-              onClick={primary.run}
-              className="inline-flex min-h-11 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-control border border-accent bg-accent px-3 text-body font-semibold text-white shadow-1 active:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
-            >
-              {primary.busy ? <LoaderCircle className="h-4 w-4 animate-spin" aria-hidden /> : <Bot className="h-4 w-4" aria-hidden />}
-              <span className="truncate">{t(primary.key)}</span>
-            </button>
-          ) : null}
-        </>
+          <div className="flex min-w-0 gap-2">
+            {/* Rotate: a control, and only a control. The advisory in the body
+                states the recommendation; this performs it, and ONLY when
+                pressed and then confirmed in the draft it opens. */}
+            {state.kind === "live" ? (
+              <button
+                type="button"
+                data-orchestrator-rotate
+                data-mobile2-open="rotate"
+                onClick={rotate.onOpen}
+                disabled={rotate.opening || rotate.submitting}
+                title={t("orchPanel.rotateTitle")}
+                className="inline-flex min-h-11 shrink-0 items-center justify-center gap-1.5 rounded-control border border-border bg-card px-3 text-body font-semibold text-primary active:bg-sunken focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
+              >
+                {rotate.opening
+                  ? <LoaderCircle className="h-4 w-4 animate-spin" aria-hidden />
+                  : <RefreshCw className="h-4 w-4" aria-hidden />}
+                {t(rotate.opening ? "orchMobile.rotateOpening" : "orchPanel.rotate")}
+              </button>
+            ) : null}
+            {primary ? (
+              <button
+                type="button"
+                data-orchestrator-confirm
+                disabled={primary.busy}
+                onClick={primary.run}
+                className="inline-flex min-h-11 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-control border border-accent bg-accent px-3 text-body font-semibold text-white shadow-1 active:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
+              >
+                {primary.busy ? <LoaderCircle className="h-4 w-4 animate-spin" aria-hidden /> : <Bot className="h-4 w-4" aria-hidden />}
+                <span className="truncate">{t(primary.key)}</span>
+              </button>
+            ) : null}
+          </div>
+        </div>
       }
     >
       <div
@@ -356,6 +377,7 @@ function SeatStatusSheet({
         )}
       </div>
     </MobileSheet>
+    </div>
   );
 }
 
@@ -934,6 +956,12 @@ function LiveView({
         now={now}
         predecessorConversationId={state.seat.predecessorConversationId}
       />
+      {state.bindFailure ? (
+        <div role="status" data-orchestrator-bind-failure={state.bindFailure} className="rounded-control border border-warning/30 bg-warning/10 px-3 py-2 text-ui text-primary">
+          <p className="font-semibold">{t("orchPanel.bindStalled")}</p>
+          <p>{t(state.bindFailure === "catalog" ? "orchPanel.bindStalledCatalog" : "orchPanel.bindStalledSurface")}</p>
+        </div>
+      ) : null}
       {state.transition ? <TransitionCard transition={state.transition} /> : null}
       {orchestratorQuietBannerEligible(state, file) ? <Note tone="warning">{t("orchPanel.stalled")}</Note> : null}
       {state.liveness === "resumable" ? <Note tone="quiet">{t("orchPanel.resumable")}</Note> : null}

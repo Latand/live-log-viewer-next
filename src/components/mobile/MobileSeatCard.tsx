@@ -4,6 +4,7 @@ import { Bot, ChevronRight, LoaderCircle, RotateCw, SlidersHorizontal, TriangleA
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { applySpawnedConversationSnapshot } from "@/hooks/useFiles";
+import { refreshRuntime } from "@/hooks/useRuntime";
 import { requestFilesRefresh } from "@/lib/filesEvents";
 import { useLocale } from "@/lib/i18n";
 import { ORCHESTRATOR_PROMPT_VERSION, ORCHESTRATOR_SYSTEM_PROMPT } from "@/lib/orchestrator/prompt";
@@ -21,12 +22,15 @@ import {
   classifySeatFailure,
   deriveOrchestratorPanelState,
   newSeatRequestId,
+  seatBindPending,
   seatRequestSettled,
   type SeatSubmitFailure,
 } from "../orchestrator/seatState";
 import { useOrchestratorIncumbent } from "../orchestrator/useOrchestratorIncumbent";
 import { useOrchestratorSeat, type OrchestratorSeatRead } from "../orchestrator/useOrchestratorSeat";
 import { useSeatConfirm } from "../orchestrator/useSeatConfirm";
+import { incumbentHostLive } from "../orchestrator/incumbent";
+import { useSeatBindingFeedback } from "../orchestrator/useSeatBindingFeedback";
 import { useSeatSurface } from "../orchestrator/useSeatSurface";
 import { MobileMeter } from "./MobileMeter";
 import { MobileOrchestratorSheet, SeatBadge, seatBadgeReading, type SeatConfirmPayload, type SeatRotateFlow } from "./MobileOrchestratorSheet";
@@ -182,7 +186,7 @@ export function MobileSeatCard({
      is showing them or a rotate draft is about to prefill from them: the card
      itself carries the board's own reading, so a phone that never opens the
      sheet never pays for the slower status poll. */
-  const { incumbent: read, refresh: refreshIncumbent } = useOrchestratorIncumbent(project, seated && sheetOpen);
+  const { incumbent: read, stale: readStale, refresh: refreshIncumbent } = useOrchestratorIncumbent(project, seated && sheetOpen);
   /* A reading is only about the conversation it names: right after a rotation
      the seat has already advanced to the successor while this slower poll still
      describes the predecessor. */
@@ -201,6 +205,15 @@ export function MobileSeatCard({
     [files, seatConversationId, currentPath, seatPath],
   );
   const surface = useSeatSurface(file);
+  const unboundForMs = useSeatBindingFeedback({
+    project,
+    conversationId: seatConversationId,
+    active: seated && openName === "seat",
+    pending: seatBindPending(file, surface),
+    hasReading: incumbent !== null,
+    stale: readStale,
+    refreshIncumbent,
+  });
 
   /* The rotate flow, on the dock's own Rotate keys: a rotation half-written on
      one surface continues — and replays the same durable intent — on the other. */
@@ -218,6 +231,8 @@ export function MobileSeatCard({
     file,
     surface,
     incumbent,
+    hostLive: !readStale && incumbentHostLive(incumbent),
+    unboundForMs,
   });
   const view = seatCardView(state, { conversationReady: Boolean(file) });
 
@@ -461,7 +476,12 @@ export function MobileSeatCard({
       now={clock}
       rotate={rotateFlow}
       onConfirm={(payload) => void confirm(payload)}
-      onRecheck={() => void refresh()}
+      onRecheck={() => {
+        void refresh();
+        void refreshIncumbent();
+        requestFilesRefresh();
+        void refreshRuntime();
+      }}
       onOpenConversation={() => {
         closeSheet();
         openConversation();
