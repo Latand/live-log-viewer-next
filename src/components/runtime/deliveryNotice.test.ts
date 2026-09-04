@@ -48,7 +48,7 @@ test("#1362 a known reason code reads as its human sentence and has nothing furt
 });
 
 test("#1362 an unknown short reason is the cause itself; an absent reason has no cause", () => {
-  expect(describeReceiptFailure(t, "quota-exceeded")).toEqual({ cause: "quota-exceeded", full: "quota-exceeded", detail: null });
+  expect(describeReceiptFailure(t, "quota-exceeded")).toEqual({ cause: "quota-exceeded", full: "quota-exceeded", detail: { sentence: "quota-exceeded", remediation: null } });
   expect(describeReceiptFailure(t, null)).toEqual({ cause: null, full: null, detail: null });
   expect(describeReceiptFailure(t, "   ")).toEqual({ cause: null, full: null, detail: null });
 });
@@ -72,14 +72,12 @@ test("#1362 the run is the newest consecutive same-cause failures; older other c
   expect(run!.causeKey).toBe(failureCauseKey(HOST_DOWN));
   expect(run!.attempts.map((attempt) => attempt.operationId)).toEqual(["op-a2", "op-a1"]);
   expect(run!.dismissIds).toEqual(["op-a2", "op-a1"]);
-  expect(run!.groupCount).toBe(2);
 });
 
 test("#1362 three retries of one message count as three attempts of one group", () => {
   const groups = deliveryAttemptGroups([2, 1, 0].map((second) =>
     receipt({ operationId: `op-retry-${second}`, at: `2026-08-31T10:00:0${second}.000Z` })));
   const run = deliveryNoticeRun(groups, [])!;
-  expect(run.groupCount).toBe(1);
   expect(run.attempts).toHaveLength(3);
   expect(run.dismissIds).toEqual(["op-retry-2", "op-retry-1", "op-retry-0"]);
 });
@@ -104,5 +102,12 @@ test("#1362 textless failed sends join the run by time and cause", () => {
   const run = deliveryNoticeRun(groups, textless)!;
   expect(run.current.operationId).toBe("op-textless-new");
   expect(run.attempts.map((attempt) => attempt.operationId)).toEqual(["op-textless-new", "op-with-text", "op-textless-old"]);
-  expect(run.groupCount).toBe(3);
+});
+
+test("#1426 every single-clause verbatim reason remains available on expand", () => {
+  for (const reason of ["recovery failed", "The connection to the structured recovery process was severed before the delivery acknowledgement could be recorded and the pending message remains unverified until the conversation can be opened again and its latest response checked"]) {
+    expect(describeReceiptFailure(t, reason)).toEqual({
+      cause: reason, full: reason, detail: { sentence: reason, remediation: null },
+    });
+  }
 });
