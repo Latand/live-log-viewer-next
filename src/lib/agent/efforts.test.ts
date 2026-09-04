@@ -79,3 +79,13 @@ describe("effortMeter", () => {
     expect(effortMeter("shell", null, "high")).toEqual({ level: 0, slots: 0 });
   });
 });
+
+test("spawn reasoning admits model-specific top tiers for Astra and Sol", async () => {
+  const { reasoningFromBody } = await import("./efforts");
+  for (const model of ["gpt-6-astra", "gpt-5.6-sol"]) {
+    for (const effort of ["max", "ultra"]) {
+      expect(reasoningFromBody("codex", { model, effort })).toEqual({ effort, fast: null });
+    }
+  }
+  expect(reasoningFromBody("codex", { model: "gpt-5.6-luna", effort: "ultra" }).error).toBeDefined();
+});

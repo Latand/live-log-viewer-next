@@ -3862,3 +3862,48 @@ test("a structured launch that dies on an unreachable host terminalizes its rece
     else process.env.NEXT_PUBLIC_RUNTIME_UI = previous.ui;
   }
 });
+
+test("Astra and Sol orchestrator spawns carry top-tier effort and images into the launch profile", async () => {
+  const saved = { ...process.env };
+  const cwd = fs.mkdtempSync(path.join(routeSandbox, "codex-seat-"));
+  Object.assign(process.env, {
+    LLV_SPAWN_TRANSPORT: "structured", LLV_STRUCTURED_HOSTS: "1",
+    LLV_RUNTIME_EVENTS: "1", NEXT_PUBLIC_RUNTIME_UI: "1",
+    LLV_RUNTIME_HOST_SOCKET: path.join(cwd, "runtime.sock"),
+  });
+  const codexBinary = path.join(cwd, "codex-test");
+  fs.writeFileSync(codexBinary, "#!/bin/sh\nprintf '[]'\n", { mode: 0o755 });
+  process.env.LLV_CODEX_BINARY = codexBinary;
+  const base = structuredRouteDependencies(cwd);
+  const profiles: Array<{ model: string | null; effort: string | null }> = [];
+  const deps: SpawnRouteTestDependencies = {
+    ...base,
+    resolveHealthySpawnAccount: async () => ({
+      engine: "codex", accountId: "codex-test", kind: "managed",
+      home: path.join(cwd, "account"), transcriptRoot: path.join(cwd, "sessions"), env: { NODE_ENV: "test" },
+    }),
+    spawnStructuredConversation: async (input) => {
+      profiles.push(input.receipt.launchProfile);
+      return base.spawnStructuredConversation!(input);
+    },
+  };
+  const png = Buffer.from("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489", "hex").toString("base64");
+  try {
+    for (const model of ["gpt-6-astra", "gpt-5.6-sol"]) {
+      for (const effort of ["max", "ultra"]) {
+        const response = await POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
+          method: "POST",
+          headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json", "sec-fetch-site": "same-origin" },
+          body: JSON.stringify({ title: "Coordinate project", clientAttemptId: `seat_${model.replaceAll(".", "_")}_${effort}`, engine: "codex", model, effort, role: "orchestrator", cwd, prompt: "Coordinate the project", images: [{ base64: png, mime: "image/png" }] }),
+        }), deps);
+        expect({ status: response.status, body: await response.json() }).toMatchObject({ status: 202 });
+        expect(profiles.at(-1)).toMatchObject({ model, effort });
+      }
+    }
+  } finally {
+    for (const key of ["LLV_CODEX_BINARY", "LLV_SPAWN_TRANSPORT", "LLV_STRUCTURED_HOSTS", "LLV_RUNTIME_EVENTS", "NEXT_PUBLIC_RUNTIME_UI", "LLV_RUNTIME_HOST_SOCKET"]) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
+  }
+});

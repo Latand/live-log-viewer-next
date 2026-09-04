@@ -1890,3 +1890,29 @@ test("a pending launch that settles DURING summarization is seated, and the stal
   expect(activeOrchestratorSeats().map((seat) => seat.conversationId)).toEqual([newer]);
   expect(orchestratorRevocations().some((revocation) => revocation.conversationId === newer)).toBeFalse();
 });
+
+for (const model of ["gpt-6-astra", "gpt-5.6-sol"]) {
+  test(`${model} seat rotation inherits its engine and model`, async () => {
+    const { deps, recorded } = dependencies();
+    const created = await executeOrchestratorSeatRequest({ ...spawnRequest(), engine: "codex", model, effort: "medium" }, deps);
+    expect(created.status).toBe(200);
+    deps.spawn = async (body) => {
+      recorded.spawns.push(body);
+      return { status: 200, body: { ok: true, conversationId: OLD_ID, path: "/tmp/successor.jsonl" } };
+    };
+    const rotated = await executeOrchestratorRotation({ project: "proj-a", clientRequestId: "req_rotate_model" }, deps);
+    expect(rotated.status).toBe(200);
+    expect(recorded.spawns[1]).toMatchObject({ engine: "codex", model });
+    expect(orchestratorSeatFor("proj-a").active).toMatchObject({ engine: "codex", model, conversationId: OLD_ID, predecessorConversationId: NEW_ID });
+  });
+  for (const effort of ["max", "ultra"]) {
+    test(`${model} seat creation and explicit rotation accept ${effort}`, async () => {
+      const { deps, recorded } = dependencies();
+      const created = await executeOrchestratorSeatRequest({ ...spawnRequest(), engine: "codex", model, effort }, deps);
+      expect(created.status).toBe(200);
+      const rotated = await executeOrchestratorRotation({ project: "proj-a", clientRequestId: "req_rotate_effort", engine: "codex", model, effort }, deps);
+      expect(rotated.status).toBe(200);
+      expect(recorded.spawns[1]).toMatchObject({ engine: "codex", model, effort });
+    });
+  }
+}

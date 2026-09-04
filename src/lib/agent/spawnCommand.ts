@@ -14,7 +14,7 @@ import { agentRegistry, identityMaterializationFence, SpawnChildLimitError, type
 import { reasoningFromBody } from "@/lib/agent/efforts";
 import { grantedMcpServers, mcpServersForSession, normalizeSpawnMcpServers, SCHEDULED_REPORT_SESSION_CLASS, type McpSessionClass } from "@/lib/agent/mcpAllowlist";
 import { normalizeSpawnPlugins, pluginAllowlistForSession, SCHEDULED_REPORT_PLUGINS, sessionOriginFor } from "@/lib/agent/pluginAllowlist";
-import { codexModelSupportsImages, modelFromBody, validateLaunchModel } from "@/lib/agent/models";
+import { codexModelSupportsImages, defaultModelFor, modelFromBody, validateLaunchModel } from "@/lib/agent/models";
 import { directOperatorActivityAuthority } from "@/lib/agent/operatorAuthority";
 import { resolveSpawnRole } from "@/lib/roles/registry";
 import { assertDarwinStructuredRuntime } from "@/lib/proc/darwinIdentity";
@@ -237,6 +237,7 @@ export async function executeSpawnRequest(
 
   const reasoning = reasoningFromBody(engine, {
     ...body,
+    model: body.model ?? role.value?.config.model ?? defaultModelFor(engine),
     effort: body.effort === undefined ? role.value?.config.effort : body.effort,
   });
   if (reasoning.error) return NextResponse.json({ error: reasoning.error }, { status: 400 });

@@ -114,11 +114,12 @@ export function clampEffortToScale(
     unset elsewhere. */
 export function reasoningFromBody(
   engine: AgentEngineName,
-  body: { effort?: unknown; fast?: unknown },
+  body: { effort?: unknown; fast?: unknown; model?: unknown },
 ): { effort: string | null; fast: boolean | null; error?: string } {
   const rawEffort = typeof body.effort === "string" ? body.effort.trim() : "";
-  if (rawEffort && !isEngineEffort(engine, rawEffort)) {
-    return { effort: null, fast: null, error: `effort for ${engine} must be one of: ${ENGINE_EFFORTS[engine].join(", ")}` };
+  const scale = effortScale(engine, typeof body.model === "string" ? body.model : null)!;
+  if (rawEffort && !scale.includes(rawEffort)) {
+    return { effort: null, fast: null, error: `effort for ${engine} must be one of: ${scale.join(", ")}` };
   }
   const fast = engine === "codex" && typeof body.fast === "boolean" ? body.fast : null;
   return { effort: rawEffort || null, fast };
