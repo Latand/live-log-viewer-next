@@ -131,3 +131,35 @@ test("A to B to A restores cached tail lines before the delayed transport respon
   expect(dom.document.querySelector("output")?.textContent).toContain("cached A");
   expect(dom.document.querySelector("output")?.textContent).toContain("live A");
 });
+
+/* #1498: a chunk that begins past where the window left off — the bounded
+   catch-up jumping a stale subscriber forward — starts inside a record whose
+   head was never delivered. The carried partial line and the half record it
+   begins with are both dropped, so no spliced garbage line ever reaches the
+   parser; a contiguous chunk still joins the partial it continues. */
+test("a resumed chunk drops the carried partial and the half record it begins with; a contiguous chunk still joins its partial", async () => {
+  const a = entry("/sessions/project-a/resumed.jsonl");
+  mount(a);
+  const subscriber = await waitForSubscriber(a.path);
+  const one = '{"message":"one"}\n';
+  const head = '{"mess';
+  deliver(subscriber, { data: one + head, offset: one.length + head.length, size: 400, start: 0 });
+  expect(dom.document.querySelector("output")?.textContent).toBe('{"message":"one"}');
+
+  /* The server jumped ahead: this chunk starts well past the offset the
+     window left off at, inside a record the client never saw the head of. */
+  const jumpStart = 200;
+  const half = 'age-of-a-different-record"}\n';
+  const live = '{"message":"live"}\n';
+  deliver(subscriber, { data: half + live, offset: jumpStart + half.length + live.length, size: 400, start: jumpStart });
+  const text = dom.document.querySelector("output")?.textContent ?? "";
+  expect(text).toBe('{"message":"one"}|{"message":"live"}');
+  expect(text).not.toContain("different-record");
+
+  /* A contiguous chunk (start === the offset the window left off at) keeps
+     joining the partial it continues, exactly as before. */
+  const from = subscriber.getOffset();
+  deliver(subscriber, { data: '{"mess', offset: from + 6, size: 400, start: from });
+  deliver(subscriber, { data: 'age":"two"}\n', offset: from + 6 + 12, size: 400, start: from + 6 });
+  expect(dom.document.querySelector("output")?.textContent).toBe('{"message":"one"}|{"message":"live"}|{"message":"two"}');
+});

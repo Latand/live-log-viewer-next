@@ -35,6 +35,16 @@ export type ToolStatus = "run" | "ok" | "err";
     (e.g. a highlighted Read body) actually needs them. */
 export type ToolBody = { type: "diff"; files: FileDiff[]; filesTruncated: boolean };
 
+/** One ordered block of a tool result (#1498). A result is text until an
+    engine hands the agent a picture — a Read of a raster, a capture script's
+    frame — and a picture cannot survive the flattened string. A `text` block
+    is decoded, redacted and capped like the preview; an `image` block is the
+    raster the agent saw, bounded by the inbox image policy, with the file's
+    dimensions when the engine reported them. */
+export type ToolOutputBlock =
+  | { type: "text"; text: string }
+  | { type: "image"; media: string; data: string; w?: number; h?: number; bytes?: number };
+
 /** One inner operation of a `functions.exec` orchestration record. Per-call
     status and output are not in the transcript — the combined output attaches
     to the outer event — so a nested call carries only what was parsed: its
@@ -92,6 +102,12 @@ export type ToolEvent = {
   statusLabel: string;
   outputPreview: string;
   outputTruncated: boolean;
+  /** The result's ordered text and image blocks (#1498). Present only when the
+      result carried at least one picture; a text-only result keeps
+      `outputPreview` alone and the card's plain text path. The flattened
+      preview keeps a text placeholder where each picture sits, so copy,
+      speech and the phone's failure detail still read in order. */
+  outputBlocks?: ToolOutputBlock[];
   /** Working directory recovered from the call args or a `cd … &&` prefix. */
   cwd?: string;
   /** Numeric exit code recovered from a `exited with code N` result line. */
@@ -511,26 +527,103 @@ function normalizeCodexUserContent(content: unknown): CodexUserContent {
   return { ...decodeCodexStructuredUserText(text.join(" ").trim()), attachments };
 }
 
-/** Responses custom tools return either plain text or typed text blocks. */
-function toolOutputText(value: unknown): string {
-  if (typeof value === "string") return redactTranscriptText(value);
-  if (Array.isArray(value)) {
-    return value
-      .map((part) => {
-        if (typeof part === "string") return redactTranscriptText(part);
-        if (typeof part === "number" || typeof part === "boolean") return String(part);
-        if (!part || typeof part !== "object" || Array.isArray(part)) return "";
-        const block = rec(part);
-        const text = textPart(block.text) || textPart(block.input_text) || textPart(block.output_text);
-        if (text) return redactTranscriptText(text);
-        if (block.type === "input_image" || block.type === "image") return `[${tr("render.imageOutput")}]`;
-        const type = redactTranscriptText(textPart(block.type)).slice(0, ATTACHMENT_TYPE_MAX);
-        return `[${type ? tr("render.toolOutputType", { type }) : tr("render.toolOutput")}]`;
-      })
-      .filter(Boolean)
-      .join("\n");
+type ToolImageBlock = Extract<ToolOutputBlock, { type: "image" }>;
+/** A tool result parsed for the card: the flattened text every consumer reads,
+    and — only when a picture survived — the ordered blocks the card draws. */
+type ToolOutput = { text: string; blocks?: ToolOutputBlock[] };
+
+const BASE64_BODY_RE = /^[A-Za-z0-9+/]+={0,2}$/;
+
+/* The raster a tool-result block carries, in either engine's shape: Claude's
+   `{ source: { type: "base64", media_type, data } }` and Codex's
+   `{ image_url: "data:…;base64,…" }` (or `{ image_url: { url } }` / `data`).
+   Null for anything the feed may not draw — no payload, an unsupported media
+   type, a body that is not base64, or one over the inbox limit — so the caller
+   keeps the text placeholder for it and the card degrades to text (#1498). */
+function toolImageBlock(block: Record<string, unknown>): ToolImageBlock | null {
+  const source = rec(block.source);
+  const inline = textPart(source.data);
+  if (inline) {
+    const media = textPart(source.media_type).trim().toLowerCase();
+    if (!inboxImageExt(media)) return null;
+    if (!BASE64_BODY_RE.test(inline) || base64DecodedLength(inline) > MAX_INBOX_IMAGE_BYTES) return null;
+    return { type: "image", media, data: inline };
   }
-  return value === undefined || value === null ? "" : redactTranscriptText(JSON.stringify(value));
+  const url = textPart(block.image_url) || textPart(rec(block.image_url).url) || textPart(block.data);
+  const image = url ? codexImageFromDataUrl(url) : null;
+  return image ? { type: "image", media: image.media, data: image.data } : null;
+}
+
+/* Typed result parts become one flattened text and, when a picture survived,
+   the ordered blocks. Text parts keep flowing into the string exactly as
+   before; a picture leaves a placeholder in the string and rides beside it as
+   a block, so the card can draw it where the transcript put it (#1498).
+   `decorate` lets the Claude arm attach the file's reported dimensions. */
+function toolOutputFromBlocks(parts: unknown[], decorate: (image: ToolImageBlock, ordinal: number) => ToolImageBlock = (image) => image): ToolOutput {
+  const texts: string[] = [];
+  const blocks: ToolOutputBlock[] = [];
+  let pictures = 0;
+  const pushText = (text: string) => {
+    if (!text) return;
+    texts.push(text);
+    const last = blocks[blocks.length - 1];
+    if (last?.type === "text") last.text = `${last.text}\n${text}`;
+    else blocks.push({ type: "text", text });
+  };
+  for (const part of parts) {
+    if (typeof part === "string") {
+      pushText(redactTranscriptText(part));
+      continue;
+    }
+    if (typeof part === "number" || typeof part === "boolean") {
+      pushText(String(part));
+      continue;
+    }
+    if (!part || typeof part !== "object" || Array.isArray(part)) continue;
+    const block = rec(part);
+    const text = textPart(block.text) || textPart(block.input_text) || textPart(block.output_text);
+    if (text) {
+      pushText(redactTranscriptText(text));
+      continue;
+    }
+    if (block.type === "input_image" || block.type === "image") {
+      const image = toolImageBlock(block);
+      if (image) {
+        pictures += 1;
+        blocks.push(decorate(image, pictures));
+        texts.push(`[${tr("render.imageOutput")}]`);
+      } else {
+        pushText(`[${tr("render.imageOutput")}]`);
+      }
+      continue;
+    }
+    const type = redactTranscriptText(textPart(block.type)).slice(0, ATTACHMENT_TYPE_MAX);
+    pushText(`[${type ? tr("render.toolOutputType", { type }) : tr("render.toolOutput")}]`);
+  }
+  return { text: texts.join("\n"), ...(pictures ? { blocks } : {}) };
+}
+
+/** Responses custom tools return either plain text or typed text blocks, and a
+    typed block may be a picture (#1498). */
+function toolOutput(value: unknown): ToolOutput {
+  if (typeof value === "string") return { text: redactTranscriptText(value) };
+  if (Array.isArray(value)) return toolOutputFromBlocks(value);
+  return { text: value === undefined || value === null ? "" : redactTranscriptText(JSON.stringify(value)) };
+}
+
+function toolOutputText(value: unknown): string {
+  return toolOutput(value).text;
+}
+
+/* A Read's `toolUseResult.file` describes the one raster the Read returned:
+   its dimensions and byte size label the picture's chip. It says nothing about
+   a result carrying several pictures, so those keep their bare blocks. */
+function withFileDimensions(image: ToolImageBlock, fileWrap: Record<string, unknown>): ToolImageBlock {
+  const dims = rec(fileWrap.dimensions);
+  const w = num(dims.originalWidth);
+  const h = num(dims.originalHeight);
+  const bytes = num(fileWrap.originalSize);
+  return { ...image, ...(w !== undefined ? { w } : {}), ...(h !== undefined ? { h } : {}), ...(bytes !== undefined ? { bytes } : {}) };
 }
 
 /* Read the interactive session identifier from the original output envelope
@@ -673,6 +766,29 @@ const WAKEUP_PROMPT_MAX = 4_000;
 /* A Codex result-preamble line (custom-tool + interactive-shell wrappers, all
    known variants). Used to strip the contiguous leading metadata block. */
 const PREAMBLE_LINE = /^(?:Chunk ID:|Wall time\b|Original token count:|Output:[ \t]*$|Script completed\b|Script running with (?:cell|session) ID\b|Process running with (?:cell|session) ID\b|Process exited with code\b)/;
+
+/* One result text made readable: real newlines, ANSI removed (issue #141), and
+   — for the leading block of a result — the Codex wrapper preamble stripped.
+   A bare `{}` (a script that returned nothing) is no output (issue #90). */
+function cleanOutputText(text: string, stripPreamble: boolean): string {
+  const lines = decodeTerminalText(text).split("\n");
+  let start = 0;
+  if (stripPreamble) while (start < lines.length && PREAMBLE_LINE.test(lines[start]!)) start += 1;
+  const stripped = lines.slice(start).join("\n").trim();
+  return stripped === "{}" ? "" : stripped;
+}
+
+/* Adjacent text blocks read as one block, so the seam between what earlier
+   polls carried and what a new result adds never splits a paragraph. */
+function mergeTextBlocks(blocks: readonly ToolOutputBlock[]): ToolOutputBlock[] {
+  const out: ToolOutputBlock[] = [];
+  for (const block of blocks) {
+    const last = out[out.length - 1];
+    if (block.type === "text" && last?.type === "text") out[out.length - 1] = { type: "text", text: `${last.text}\n${block.text}` };
+    else out.push(block);
+  }
+  return out;
+}
 const CODE_EXT_RE = /\.([A-Za-z0-9]{1,10})$/;
 const CWD_MAX = 400;
 
@@ -1635,7 +1751,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
   };
   /* Attaches a result copy-on-write: the record gets a fresh ToolEvent and the
      owning entry a fresh item, so exactly one row changes identity. */
-  const attach = (callRec: CallRec | undefined, output: string, errFlag?: boolean, rawSession?: string, resultTs?: unknown) => {
+  const attach = (callRec: CallRec | undefined, output: string, errFlag?: boolean, rawSession?: string, resultTs?: unknown, blocks?: ToolOutputBlock[]) => {
     if (!callRec) return null;
     const code = output.match(/exited with code (\d+)/)?.[1];
     /* Codex interactive-shell wall time, read before the preamble is stripped, so
@@ -1651,11 +1767,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
        Strip the contiguous leading block of those lines, decode the payload (real
        newlines, ANSI removed — issue #141), and treat a bare `{}` (a script that
        returned nothing) as no output (issue #90). */
-    const lines = decodeTerminalText(output).split("\n");
-    let start = 0;
-    while (start < lines.length && PREAMBLE_LINE.test(lines[start]!)) start += 1;
-    const stripped = lines.slice(start).join("\n").trim();
-    const body = stripped === "{}" ? "" : stripped;
+    const body = cleanOutputText(output, true);
     const isErr = errFlag === true || (code !== undefined && code !== "0");
     const prev = callRec.event;
     /* An empty codex wait/stdin chunk collapses to "waiting Ns" rather than an
@@ -1679,6 +1791,25 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       const combined = (prev.outputPreview + "\n" + redactSecrets(stdoutBody)).trim();
       outputTruncated = prev.outputTruncated || combined.length > limit;
       outputPreview = combined.slice(-limit);
+    }
+    /* #1498: a result that carried pictures keeps them as ordered blocks
+       beside the flattened preview. Each text block gets the preview's own
+       decode, wrapper strip (leading block only), redaction and cap; what
+       earlier polls of the same call already showed stays ahead of them. */
+    let outputBlocks = prev.outputBlocks;
+    if (blocks?.some((block) => block.type === "image")) {
+      const limit = isErr ? OUTPUT_ERR_MAX : OUTPUT_OK_MAX;
+      const carried: ToolOutputBlock[] = prev.outputBlocks ?? (prev.outputPreview ? [{ type: "text", text: prev.outputPreview }] : []);
+      const fresh: ToolOutputBlock[] = [];
+      blocks.forEach((block, index) => {
+        if (block.type === "image") {
+          fresh.push(block);
+          return;
+        }
+        const text = redactSecrets(cleanOutputText(block.text, index === 0)).slice(-limit);
+        if (text) fresh.push({ type: "text", text });
+      });
+      outputBlocks = mergeTextBlocks([...carried, ...fresh]);
     }
     let stderr = prev.stderr;
     let stderrTruncated = prev.stderrTruncated;
@@ -1729,10 +1860,14 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
         : idleWait
           ? tr("tools.waitingSeconds", { n: Math.round(Number(wallSeconds)) })
           : "ok",
-      open: prev.open || isErr,
+      /* A result that carried a picture opens the card by default the way an
+         edit's diff does (issue #90): the chip is visible without a click and
+         decodes nothing until the operator opens it (#1498). */
+      open: prev.open || isErr || outputBlocks !== prev.outputBlocks,
       srcResult: curSrc,
       outputPreview,
       outputTruncated,
+      ...(outputBlocks !== undefined ? { outputBlocks } : {}),
       ...(exitCode !== undefined ? { exitCode } : {}),
       ...(durationMs !== undefined ? { durationMs } : {}),
       ...(endTs !== undefined ? { endTs } : {}),
@@ -1756,7 +1891,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     if (wakeup && wakeup.failed) recomputeWakeupStates();
     return event;
   };
-  const addOutput = (callId: string | undefined, output: string, err?: boolean, rawSession?: string, resultTs?: unknown) => {
+  const addOutput = (callId: string | undefined, output: string, err?: boolean, rawSession?: string, resultTs?: unknown, blocks?: ToolOutputBlock[]) => {
     if (!callId) return;
     const tseq = tmsgSeqs.get(callId);
     if (tseq !== undefined) {
@@ -1773,7 +1908,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       }
       return;
     }
-    const event = attach(calls.get(callId), output, err, rawSession, resultTs);
+    const event = attach(calls.get(callId), output, err, rawSession, resultTs, blocks);
     if (!event && output && showSvc) push({ kind: "svc", text: "output: " + redactSecrets(output).slice(0, 200) });
   };
   const addSvc = (text: string) => {
@@ -2405,8 +2540,8 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       }
       if (p.type === "function_call_output") {
         const rawSession = toolOutputSession(p.output);
-        const output = toolOutputText(p.output);
-        return addOutput(textPart(p.call_id), output, toolOutputFailed(output), rawSession, ts);
+        const { text: output, blocks } = toolOutput(p.output);
+        return addOutput(textPart(p.call_id), output, toolOutputFailed(output), rawSession, ts, blocks);
       }
       /* Fresh rollouts wrap apply_patch as a "custom_tool_call": `input` is the
          raw patch text directly (unlike function_call, whose `arguments` is a
@@ -2422,8 +2557,8 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       }
       if (p.type === "custom_tool_call_output") {
         const rawSession = toolOutputSession(p.output);
-        const output = toolOutputText(p.output);
-        return addOutput(textPart(p.call_id), output, toolOutputFailed(output), rawSession, ts);
+        const { text: output, blocks } = toolOutput(p.output);
+        return addOutput(textPart(p.call_id), output, toolOutputFailed(output), rawSession, ts, blocks);
       }
       if (p.type === "reasoning" || p.type === "agent_message") return addSvc(textPart(p.type));
       return addRecord(ts, textPart(p.type) || "item", p);
@@ -2471,15 +2606,20 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
           if (part.type === "text") addUserText(ts, textPart(part.text), isHarness, deliveredMessage);
           else if (part.type === "image") pushImage(part, fileWrap);
           else if (part.type === "tool_result") {
-            const inner = arr(part.content);
-            for (const block of inner) {
-              if (block.type === "image") pushImage(block, fileWrap);
+            if (typeof part.content === "string") {
+              addOutput(textPart(part.tool_use_id), part.content, part.is_error === true, undefined, ts);
+              continue;
             }
-            const contentText =
-              typeof part.content === "string"
-                ? part.content
-                : inner.filter((x) => x.type !== "image").map((x) => textPart(x.text)).join(" ");
-            addOutput(textPart(part.tool_use_id), contentText, part.is_error === true, undefined, ts);
+            /* #1498: a picture in the result — a Read of a raster — belongs to
+               the tool's card, not to a standalone row pushed beside it. The
+               text keeps its shape; the file wrapper describes the one raster a
+               Read returned, so its dimensions label a lone picture only. */
+            const inner = arr(part.content);
+            const pictures = inner.filter((block) => block.type === "image").length;
+            const output = pictures
+              ? toolOutputFromBlocks(inner, (image) => (pictures === 1 ? withFileDimensions(image, fileWrap) : image))
+              : { text: inner.map((x) => textPart(x.text)).join(" ") };
+            addOutput(textPart(part.tool_use_id), output.text, part.is_error === true, undefined, ts, output.blocks);
           }
         }
       }
