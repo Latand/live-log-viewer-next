@@ -23,11 +23,11 @@ Object.assign(globalThis, {
   PointerEvent: dom.MouseEvent,
 });
 
-const UUID = "11111111-2222-4333-8444-555555555555";
+const UUID = "session-title-test";
 
 function entry(over: Partial<FileEntry> = {}): FileEntry {
   return {
-    path: `/home/u/.claude/projects/proj/${UUID}.jsonl`,
+    path: `/fixtures/sessions/${UUID}.jsonl`,
     root: "claude-projects",
     name: "x",
     project: "proj",
@@ -142,6 +142,64 @@ test("Escape cancels without saving", async () => {
   await settle();
   expect(calls).toHaveLength(0);
   expect(view.host.querySelector('input[aria-label="Session title"]')).toBeNull();
+  expect(view.host.textContent).toContain("Fix the login bug");
+});
+
+for (const action of ["Cancel", "Save name", "Reset to auto title"] as const) {
+  test(`mouse press keeps focus until ${action} chooses persistence`, async () => {
+    const view = mount(entry({ title: "Custom name", autoTitle: "Auto title", titleRevision: 3 }));
+    flushSync(() => (view.host.querySelector('button[aria-label^="Rename"]') as HTMLButtonElement).click());
+    const input = view.host.querySelector("input")!;
+    flushSync(() => typeInto(input, "Edited name"));
+    const button = view.host.querySelector(`button[aria-label="${action}"]`) as HTMLButtonElement;
+    const press = new dom.PointerEvent("pointerdown", { bubbles: true, cancelable: true, pointerType: "mouse" });
+    flushSync(() => dispatch(button, press));
+    if (!press.defaultPrevented) flushSync(() => button.focus());
+    expect(press.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(input);
+    expect(calls).toHaveLength(0);
+    flushSync(() => button.click());
+    await settle();
+    expect(calls).toHaveLength(action === "Cancel" ? 0 : 1);
+    if (action !== "Cancel") expect(calls[0]!.body.title).toBe(action === "Save name" ? "Edited name" : null);
+    expect(view.host.querySelector("input")).toBeNull();
+  });
+}
+
+test("an abandoned button press preserves later outside blur-save and input selection", async () => {
+  const view = mount(entry());
+  flushSync(() => (view.host.querySelector('button[aria-label^="Rename"]') as HTMLButtonElement).click());
+  const input = view.host.querySelector("input")!;
+  flushSync(() => typeInto(input, "Save on leaving"));
+  const selectionPress = new dom.PointerEvent("pointerdown", { bubbles: true, cancelable: true });
+  flushSync(() => dispatch(input, selectionPress));
+  expect(selectionPress.defaultPrevented).toBe(false);
+  const cancel = view.host.querySelector('button[aria-label="Cancel"]')!;
+  const press = new dom.PointerEvent("pointerdown", { bubbles: true, cancelable: true });
+  flushSync(() => dispatch(cancel, press));
+  expect(press.defaultPrevented).toBe(true);
+  flushSync(() => dispatch(cancel, new dom.PointerEvent("pointercancel", { bubbles: true })));
+  flushSync(() => dispatch(input, new dom.FocusEvent("focusout", { bubbles: true, relatedTarget: null })));
+  await settle();
+  expect(calls).toHaveLength(1);
+  expect(calls[0]!.body.title).toBe("Save on leaving");
+});
+
+test("keyboard focus can reach Cancel and discard the draft", async () => {
+  const view = mount(entry());
+  flushSync(() => (view.host.querySelector('button[aria-label^="Rename"]') as HTMLButtonElement).click());
+  const input = view.host.querySelector("input")!;
+  flushSync(() => typeInto(input, "Discard by keyboard"));
+  const cancel = view.host.querySelector('button[aria-label="Cancel"]') as HTMLButtonElement;
+  flushSync(() => cancel.focus());
+  expect(view.host.querySelector("input")).toBe(input);
+  expect(document.activeElement).toBe(cancel);
+  expect(calls).toHaveLength(0);
+  // Keyboard activation emits click without a pointer press.
+  flushSync(() => cancel.click());
+  await settle();
+  expect(calls).toHaveLength(0);
+  expect(view.host.querySelector("input")).toBeNull();
   expect(view.host.textContent).toContain("Fix the login bug");
 });
 
@@ -341,8 +399,8 @@ test("an instance with no autoEditToken never auto-opens (the node's board pane 
   expect(view.host.querySelector('input[aria-label="Session title"]')).toBeNull();
 });
 
-const sessionA = () => entry({ path: "/home/u/.claude/projects/proj/aaaaaaaa-2222-4333-8444-555555555555.jsonl", conversationId: "conversation_A", title: "Session A" });
-const sessionB = () => entry({ path: "/home/u/.claude/projects/proj/bbbbbbbb-2222-4333-8444-555555555555.jsonl", conversationId: "conversation_B", title: "Session B" });
+const sessionA = () => entry({ path: "/fixtures/sessions/session-a.jsonl", conversationId: "conversation_A", title: "Session A" });
+const sessionB = () => entry({ path: "/fixtures/sessions/session-b.jsonl", conversationId: "conversation_B", title: "Session B" });
 
 test("switching sessions before a save settles resets the editor and shows the new session", () => {
   const view = mount(sessionA());
@@ -363,7 +421,7 @@ test("switching sessions before a save settles resets the editor and shows the n
 
 test("conversation-id enrichment on the same path keeps the editor open (no reset)", () => {
   // Initially no conversationId; identity is the path.
-  const bare = entry({ path: "/home/u/.claude/projects/proj/enrich.jsonl", title: "Session" });
+  const bare = entry({ path: "/fixtures/sessions/enrich.jsonl", title: "Session" });
   const view = mount(bare);
   flushSync(() => (view.host.querySelector('button[aria-label^="Rename"]') as HTMLButtonElement).click());
   expect(view.host.querySelector('input[aria-label="Session title"]')).toBeTruthy();
@@ -371,14 +429,14 @@ test("conversation-id enrichment on the same path keeps the editor open (no rese
   // A later poll fills in conversationId for the same path — enrichment, not a
   // switch: the open editor (an in-progress draft) must survive, and nothing is
   // saved.
-  view.rerender(entry({ path: "/home/u/.claude/projects/proj/enrich.jsonl", conversationId: "conversation_E", title: "Session" }));
+  view.rerender(entry({ path: "/fixtures/sessions/enrich.jsonl", conversationId: "conversation_E", title: "Session" }));
   expect(view.host.querySelector('input[aria-label="Session title"]')).toBeTruthy();
   expect(calls).toHaveLength(0);
 });
 
 test("succession (new path, same conversation id) keeps the editor open (no reset)", () => {
-  const gen1 = entry({ path: "/home/u/.claude/projects/proj/gen1.jsonl", conversationId: "conversation_X", title: "S" });
-  const gen2 = entry({ path: "/home/u/.claude/projects/proj/gen2.jsonl", conversationId: "conversation_X", title: "S" });
+  const gen1 = entry({ path: "/fixtures/sessions/gen1.jsonl", conversationId: "conversation_X", title: "S" });
+  const gen2 = entry({ path: "/fixtures/sessions/gen2.jsonl", conversationId: "conversation_X", title: "S" });
   const view = mount(gen1);
   flushSync(() => (view.host.querySelector('button[aria-label^="Rename"]') as HTMLButtonElement).click());
   expect(view.host.querySelector('input[aria-label="Session title"]')).toBeTruthy();
