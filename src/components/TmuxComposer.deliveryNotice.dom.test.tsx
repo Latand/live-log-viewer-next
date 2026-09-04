@@ -181,7 +181,7 @@ test("#1362 expanding the notice reveals the full cause and its remediation, onc
   expect(summary.getAttribute("aria-label")).toContain(t("runtime.receipt.hideDetails"));
 
   const details = stack.querySelector("[data-runtime-receipt-details]") as HTMLElement;
-  const detail = details.querySelector("[data-delivery-notice-detail]") as HTMLElement;
+  const detail = stack.querySelector("[data-delivery-notice-detail]") as HTMLElement;
   expect(detail).not.toBeNull();
   expect(detail.querySelector("[data-delivery-notice-sentence]")?.textContent).toBe(HOST_DOWN_SENTENCE);
   expect(detail.querySelector("[data-delivery-notice-remediation]")?.textContent).toBe(HOST_DOWN_REMEDIATION);
@@ -375,3 +375,44 @@ test("#1362 the notice holds its anatomy at desktop and 390px in both locales", 
     }
   }
 });
+
+for (const reason of [HOST_DOWN, "The connection to the structured recovery process was severed before the delivery acknowledgement could be recorded and the pending message remains unverified until the conversation can be opened again and its latest response checked"]) {
+  test(`#1426 expanded reason is outside capped history with three retries at 390px: ${reason}`, () => {
+    const retries: string[] = [];
+    const edits: string[] = [];
+    const dismissals: string[][] = [];
+    const mounted = mount({
+      receipts: threeRetries().map((entry) => ({ ...entry, reason })),
+      onRetry: (entry) => retries.push(entry.operationId),
+      onEdit: (entry) => edits.push(entry.operationId),
+      onDismiss: (ids) => dismissals.push(ids),
+    }, 390);
+    click(mounted.summary());
+    expect(mounted.stack().open).toBe(true);
+    const detail = mounted.stack().querySelector("[data-delivery-notice-detail]")!;
+    const history = mounted.stack().querySelector("[data-runtime-receipt-details]")!;
+    // DOM pins the boundary; real browser geometry is required to prove the fold.
+    expect(detail).not.toBeNull();
+    expect(history.contains(detail)).toBe(false);
+    expect(detail.nextElementSibling).toBe(history);
+    expect(classes(history)).toContain("max-h-36");
+    expect(classes(history)).toContain("overflow-y-auto");
+    const sentence = detail.querySelector("[data-delivery-notice-sentence]")!;
+    expect(sentence.textContent).toBe(reason.split(";")[0]);
+    expect(classes(sentence)).toContain("whitespace-pre-wrap");
+    expect(classes(sentence)).toContain("break-words");
+    expect(history.querySelectorAll("[data-receipt-message]")).toHaveLength(1);
+    const messageRow = history.querySelector("[data-receipt-message]")!.parentElement!;
+    expect(classes(messageRow)).toContain("max-sm:[&>[data-operation]]:contents");
+    const buttons = [...history.querySelectorAll("button")];
+    for (const key of ["runtime.receipt.retry", "runtime.receipt.edit", "runtime.receipt.dismiss"] as const) {
+      const button = buttons.find((entry) => (entry.textContent || entry.getAttribute("aria-label")) === translate("en", key));
+      expect(button).toBeDefined();
+      click(button!);
+    }
+    expect(retries).toEqual(["op-retry-2"]);
+    expect(edits).toEqual(["op-retry-2"]);
+    expect(dismissals).toEqual([["op-retry-2", "op-retry-1", "op-retry-0"]]);
+    mounted.cleanup();
+  });
+}

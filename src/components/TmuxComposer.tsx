@@ -550,26 +550,26 @@ export function RuntimeComposerReceipts({
                 </span>
               ) : null}
             </summary>
+            {/* What expanding reveals (issue #1362): the full sentence and the
+                remediation after it, once for the run — never once per
+                attempt. Wraps rather than truncates: this is where the
+                operator reads what to do. */}
+            {notice && noticeFailure?.detail ? (
+              <div className="border-t border-border/70 px-3.5 py-2 text-secondary" data-delivery-notice-detail>
+                <p className="whitespace-pre-wrap break-words" data-delivery-notice-sentence>
+                  {noticeFailure.detail.sentence}
+                </p>
+                {noticeFailure.detail.remediation ? (
+                  <p className="whitespace-pre-wrap break-words text-muted" data-delivery-notice-remediation>
+                    {noticeFailure.detail.remediation}
+                  </p>
+                ) : null}
+              </div>
+            ) : null}
             <div
               className="max-h-36 space-y-1 overflow-y-auto border-t border-border/70 p-1.5"
               data-runtime-receipt-details
             >
-              {/* What expanding reveals (issue #1362): the full sentence and the
-                  remediation after it, once for the run — never once per
-                  attempt. Wraps rather than truncates: this is where the
-                  operator reads what to do. */}
-              {notice && noticeFailure?.detail ? (
-                <div className="rounded-control bg-card/70 px-2 py-1 text-secondary" data-delivery-notice-detail>
-                  <p className="whitespace-pre-wrap break-words" data-delivery-notice-sentence>
-                    {noticeFailure.detail.sentence}
-                  </p>
-                  {noticeFailure.detail.remediation ? (
-                    <p className="whitespace-pre-wrap break-words text-muted" data-delivery-notice-remediation>
-                      {noticeFailure.detail.remediation}
-                    </p>
-                  ) : null}
-                </div>
-              ) : null}
               {attemptGroups.map((group) => {
                 const receipt = group.current;
                 const history = supersededStatusLabels(group.attempts);
@@ -592,11 +592,10 @@ export function RuntimeComposerReceipts({
                     className="flex min-w-0 flex-col items-end gap-0.5 rounded-control bg-card/70 px-2 py-1"
                     {...(pending ? { "data-optimistic-message": "true" } : {})}
                   >
-                    {/* The action chip (state badge + Retry/Edit) wraps under
-                        the message on narrow screens instead of squeezing the
-                        text into a sliver — the payload must stay readable at
-                        390px in exactly the failed state that needs it. */}
-                    <div className="flex w-full min-w-0 flex-wrap items-start justify-end gap-1.5">
+                    {/* On phones the chip's children share the row's wrapping
+                        context, so Dismiss can sit beside Retry/Edit instead
+                        of consuming another 44px line below the whole chip. */}
+                    <div className="flex w-full min-w-0 flex-wrap items-start justify-end gap-1.5 max-sm:[&>[data-operation]]:contents">
                       <span
                         className="min-w-[8rem] flex-1 whitespace-pre-wrap break-words text-right text-secondary"
                         data-receipt-message

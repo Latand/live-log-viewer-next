@@ -63,8 +63,8 @@ export interface ReceiptFailureDescription {
   cause: string | null;
   /** The whole reason, for hover. */
   full: string | null;
-  /** What expanding reveals beyond the terse cause: the full first sentence
-      and the remediation after it. Null when the cause already says it all. */
+  /** Every verbatim reason stays readable on expand, even if the row clips it.
+      Known reason codes use their short human label and need no detail. */
   detail: { sentence: string; remediation: string | null } | null;
 }
 
@@ -86,11 +86,10 @@ export function describeReceiptFailure(t: TFunction, reason: string | null | und
   const { head, rest } = splitClauses(trimmed);
   const key = patternKey(head);
   const cause = key ? t(key) : head;
-  const revealsMore = rest !== null || cause.toLowerCase() !== head.toLowerCase();
   return {
     cause,
     full: trimmed,
-    detail: revealsMore ? { sentence: head, remediation: rest } : null,
+    detail: { sentence: head, remediation: rest },
   };
 }
 
@@ -102,8 +101,6 @@ export interface DeliveryNoticeRun {
   attempts: RuntimeReceipt[];
   /** Every settled attempt dismissing the notice hides (issue #264 rule 3). */
   dismissIds: string[];
-  /** Logical messages behind the notice; one for a single message's retries. */
-  groupCount: number;
 }
 
 /**
@@ -140,6 +137,5 @@ export function deliveryNoticeRun(
     dismissIds: run.flatMap((group) => group.attempts
       .filter((attempt) => receiptIsTerminal(attempt.status))
       .map((attempt) => attempt.operationId)),
-    groupCount: run.length,
   };
 }
