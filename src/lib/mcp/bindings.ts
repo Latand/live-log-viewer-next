@@ -132,7 +132,7 @@ import { hardenedRedact } from "@/lib/view/compactText";
 import { validateSnapshotRequest } from "@/lib/view/validation";
 
 import { McpToolRefusal, type McpToolArgs, type McpToolBindings, type McpToolCallContext, type McpToolPayload } from "./server";
-import { viewerControlOrigin } from "./controlEndpoint";
+import { viewerControlOrigin, viewerControlToken } from "./controlEndpoint";
 import {
   productionSelectedContextDependencies,
   resolveSelectedContext,
@@ -208,6 +208,7 @@ async function requestViewerControl(
   pinConfiguredEndpoint = false,
 ): Promise<{ response: Response; parsed: unknown; unreadable: boolean }> {
   const baseUrl = viewerControlOrigin(process.env, pinConfiguredEndpoint);
+  const token = viewerControlToken(process.env, baseUrl);
   const now = Date.now();
   const deadlineAt = context.deadlineAt;
   const retryable = deadlineAt !== undefined;
@@ -227,6 +228,10 @@ async function requestViewerControl(
     });
     try {
       const headers = new Headers(init.headers);
+      /* The Viewer authenticates every connection once a token is configured
+         (#1496), so a control read that sends nothing is refused exactly like a
+         stranger's (#1511). A caller that set its own authorization keeps it. */
+      if (token && !headers.has("authorization")) headers.set("authorization", `Bearer ${token}`);
       if (init.method === "POST") {
         headers.set("origin", baseUrl);
         headers.set("sec-fetch-site", "same-origin");

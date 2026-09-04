@@ -28,6 +28,7 @@ import {
   viewerDeploymentReleaseReady,
   viewerDeploymentStructuredHostStartup,
   viewerHealthFailureDetail,
+  type ViewerHealthRequest,
   viewerHealthRequestPlan,
   waitForViewerReadiness,
 } from "./deploymentHealth";
@@ -109,7 +110,9 @@ test("health request plan exercises remote authorization and rejection", () => {
   const authorized = proxy(new NextRequest(plan.authenticated.url, { headers: plan.authenticated.headers }));
   const unauthorized = proxy(new NextRequest(plan.unauthorized.url, { headers: plan.unauthorized.headers }));
 
-  expect(plan.root.headers).toEqual({});
+  const bearer = plan.authenticated.headers.authorization;
+  expect(bearer?.startsWith("Bearer ")).toBe(true);
+  expect(plan.root).toEqual({ url: "http://127.0.0.1:18001/", headers: { authorization: bearer } });
   expect(plan.capability).toEqual({
     url: "http://127.0.0.1:18001/api/runtime/deployments/capabilities/v1",
     headers: plan.authenticated.headers,
@@ -420,4 +423,37 @@ test("probe bodies and candidate output stay bounded and printable", () => {
   expect(probeExcerpt("x".repeat(400))).toHaveLength(203);
   expect(candidateLogExcerpt("first\n\nsecond\nthird\n", { maxLines: 2 })).toEqual(["second", "third"]);
   expect(candidateLogExcerpt("y".repeat(300), { maxChars: 40 })).toEqual([`${"y".repeat(40)}...`]);
+});
+
+/** #1511: readiness required an unauthenticated 200 on `root`, and #1496 began
+    correctly refusing exactly that, so no token-configured candidate could ship.
+    Every probe the gate requires to answer 200 must carry credentials of its
+    own. `unauthorized` is excluded because the refusal *is* its expectation. */
+test("a token-configured readiness plan requires no unauthenticated success", () => {
+  process.env.LLV_TOKEN = "viewer-token";
+  const plan = viewerHealthRequestPlan("http://127.0.0.1:18001", "viewer-token");
+  if (!plan.authenticated || !plan.unauthorized) throw new Error("authenticated request plan is missing");
+  const mustSucceed: Array<[string, ViewerHealthRequest]> = [
+    ["root", plan.root],
+    ["authenticated", plan.authenticated],
+    ["capability", plan.capability],
+  ];
+
+  const refused = mustSucceed
+    .filter(([, request]) => proxy(new NextRequest(request.url, { headers: request.headers })).status === 403)
+    .map(([name]) => name);
+
+  expect(refused).toEqual([]);
+  expect(proxy(new NextRequest(plan.unauthorized.url, { headers: plan.unauthorized.headers })).status).toBe(403);
+});
+
+test("a tokenless readiness plan still requires a plain 200 on root", () => {
+  delete process.env.LLV_TOKEN;
+  const plan = viewerHealthRequestPlan("http://127.0.0.1:18001", null);
+
+  expect(plan.root).toEqual({ url: "http://127.0.0.1:18001/", headers: {} });
+  expect(plan.authenticated).toBeNull();
+  expect(plan.unauthorized).toBeNull();
+  expect(proxy(new NextRequest(plan.root.url, { headers: plan.root.headers }))
+    .headers.get("x-middleware-next")).toBe("1");
 });
