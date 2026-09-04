@@ -23,6 +23,7 @@ import {
   stageAttempts,
   stageChipLabel,
   stageChipState,
+  stageConfigurable,
   verdictStatusLabel,
 } from "../pipelines/pipelineModel";
 import { StagePlaceholderPane } from "../pipelines/StagePlaceholderPane";
@@ -269,13 +270,6 @@ export function stageMetaLine(t: TFunction, pipeline: Pipeline, stage: PipelineS
     t(`pipelineChipState.${stageChipState(pipeline, stage)}`),
     findings ? t("pipelineVerdict.findings", { count: findings }) : null,
   ].filter(Boolean).join(" · ");
-}
-
-/** A stage the phone can still configure: it never ran, in a pipeline that is
-    not over — the strip's own rule (`PipelineStrip`), so the two surfaces
-    cannot disagree about which stages are still open to change. */
-export function stageConfigurable(pipeline: Pipeline, stage: PipelineStage): boolean {
-  return stageAttempts(pipeline, stage.id).length === 0 && pipeline.state !== "completed" && pipeline.state !== "closed";
 }
 
 /** The stage's earlier attempts, in their own order: every persisted attempt
@@ -572,7 +566,8 @@ function StageRow({ pipeline, stage, index, current, files, flows, onOpenConvers
      uses: a migrated attempt opens its live generation, and an attempt whose
      transcript has left the scan opens nothing rather than a stale one. */
   const file = resolveStageNavFile(attemptNavTarget(attempt), files);
-  const configurable = !file && stageConfigurable(pipeline, stage);
+  /* Configurable by the one rule the desktop's pane and strip read too. */
+  const configurable = !file && stageConfigurable(pipeline, stage.id);
   const title = stageRowTitle(t, stage);
   const Tag = file || configurable ? "button" : "div";
   const control = file

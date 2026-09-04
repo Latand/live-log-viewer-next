@@ -198,6 +198,15 @@ export function stageAttempts(pipeline: Pipeline, stageId: string): PipelineStag
   return pipeline.runs.find((run) => run.stageId === stageId)?.attempts ?? [];
 }
 
+/** Whether a stage is still open to configuration: it never ran, in a pipeline
+    that is not over. The engine snapshots a stage's config at its first
+    attempt, so the desktop's placeholder pane, the strip's configure chip and
+    the phone's stage row all ask this one predicate rather than each keeping
+    its own copy of the rule. */
+export function stageConfigurable(pipeline: Pipeline, stageId: string): boolean {
+  return stageAttempts(pipeline, stageId).length === 0 && pipeline.state !== "completed" && pipeline.state !== "closed";
+}
+
 /** Pipeline lifecycle states that still project planned-stage placeholders on the
     board: a draft/provisioning/running/blocked pipeline shows its yet-to-launch
     stages as conversation-shaped placeholders inside its colored halo (#353).

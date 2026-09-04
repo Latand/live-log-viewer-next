@@ -26,6 +26,7 @@ import {
   pipelineStateLabel,
   stageAccess,
   stageAttempts,
+  stageConfigurable,
   stageChipLabel,
   stageChipState,
   stageDockCompact,
@@ -298,9 +299,7 @@ function StageChip({
     return compactStageOpenTarget(candidate, candidateAttempt, flows, renderableFlows, renderablePaths, files);
   };
   const openTarget = targetFor(stage);
-  const stageConfigurable = (candidate: PipelineStage) =>
-    stageAttempts(pipeline, candidate.id).length === 0 && pipeline.state !== "completed" && pipeline.state !== "closed";
-  const configurable = stageConfigurable(stage);
+  const configurable = stageConfigurable(pipeline, stage.id);
   const canUseTarget = (target: ReturnType<typeof targetFor>) => target
     ? (target.kind === "flow" ? Boolean(onOpenFlow) : Boolean(onOpenPath))
     : false;
@@ -346,7 +345,7 @@ function StageChip({
     && stageDockCompact(pipeline, stage, attempt, flows, renderableFlows, renderablePaths, files);
 
   const previousTarget = previousStage ? targetFor(previousStage) : null;
-  const previousConfigurable = previousStage ? stageConfigurable(previousStage) : false;
+  const previousConfigurable = previousStage ? stageConfigurable(pipeline, previousStage.id) : false;
   const previousLabel = previousStage ? stageChipLabel(t, previousStage) : "";
   const previousState = previousStage ? t(`pipelineChipState.${stageChipState(pipeline, previousStage)}`) : "";
   const configurationSlot: StageSlot = {

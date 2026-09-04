@@ -31,8 +31,10 @@ import {
  * launch (#1487): the phrase's own age is the state's clock — how long owed,
  * how long this turn, how long since the last move — and the launch is the
  * other thing the operator asked to read everywhere, so both ride the line,
- * each under its own word. The state phrase and the launch never truncate —
- * the model and the now-fragment do first. There is no Host section: host
+ * each under its own word. The state phrase, the model and the launch never
+ * truncate: the now-fragment is the ONE fragment that gives way, because it
+ * changes every few seconds and is whole one tap away, while the other three
+ * are the row's identity and its two clocks. There is no Host section: host
  * detail lives behind ⋯ › Host details (`MobileHostSheet`), and degradation is
  * the shell banner's job.
  *
@@ -171,19 +173,19 @@ function ConversationRow({ row, quiet, now, onOpen }: { row: MobileBoardConversa
         <span className="flex items-center gap-[5px] overflow-hidden text-label tabular-nums text-muted">
           <span data-mobile2-phrase className={`shrink-0 ${state.badge ? "" : PHRASE_TONE[state.key]}`}>{statePhrase(t, state, now)}</span>
           {row.now ? (
-            <>
-              <span aria-hidden className="shrink-0 opacity-60">·</span>
-              {/* The now-fragment gives way first: it changes every few seconds
-                  and is whole one tap away, while the model is the row's
-                  identity and the launch is the operator's question. */}
-              <span className="min-w-0 shrink-[6] truncate">{row.now}</span>
-            </>
+            /* The one elastic fragment of the line: it absorbs whatever the
+               row cannot fit, so the model and the launch stay whole at
+               390 px. Its separator rides inside it and goes with it. */
+            <span data-mobile2-now className="min-w-0 truncate">
+              <span aria-hidden className="mr-[5px] opacity-60">·</span>
+              {row.now}
+            </span>
           ) : null}
           {row.file.model ? (
             <>
               <span aria-hidden className="shrink-0 opacity-60">·</span>
               <EngineMark engine={row.file.engine} />
-              <span className="min-w-0 truncate">{row.file.model}</span>
+              <span data-mobile2-model className="shrink-0">{row.file.model}</span>
             </>
           ) : null}
           {row.launchedAt === null ? null : (

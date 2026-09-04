@@ -238,7 +238,7 @@ test("every reviewed stage opens its own conversation; a stage with none is a st
   expect(stages[2]!.textContent).toContain(translate("en", "pipelineVerdict.findings", { count: 2 }));
 });
 
-test("a never-run stage's row opens its configuration in a sheet — the desktop's own editor — and Escape closes only the sheet (lane 10, #507 F2)", async () => {
+test("a never-run stage's row opens its configuration in a sheet — the desktop's own editor — Tab stays inside it, and Escape closes only the sheet (lane 10, PR #431, #507 F2)", async () => {
   const store = nav();
   const host = mount(<MobilePipelineScreen pipeline={parkedPipeline()} files={[IMPLEMENT, REVIEW]} now={NOW} onOpenConversation={() => {}} />, store);
   const fix = q(host, '[data-mobile2-stage="fix"]')!;
@@ -279,6 +279,29 @@ test("a never-run stage's row opens its configuration in a sheet — the desktop
   expect(sheet!.querySelector('label[for="draft-role-pipeline-config::p2::fix"]')).not.toBeNull();
   expect(store.getState().sheet).toBe("stage");
   expect(dom.document.querySelectorAll('[role="dialog"]').length).toBe(1);
+
+  /* Tab is trapped inside the sheet in both directions, editor included — the
+     retired dock sheet's contract (PR #431) and the editor's (#507 F2), now
+     one layer's: from the last control Tab wraps to the first, from the first
+     Shift+Tab wraps to the last, and focus never leaves the sheet. */
+  const press = (init: { key: string; shiftKey?: boolean }) =>
+    flushSync(() => dom.document.dispatchEvent(new dom.KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init }) as never));
+  const focusables = Array.from(sheet!.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'))
+    .filter((el) => !el.hasAttribute("disabled") && el.getAttribute("tabindex") !== "-1") as unknown as HTMLElement[];
+  expect(focusables.length).toBeGreaterThan(1);
+  const first = focusables[0]!;
+  const last = focusables[focusables.length - 1]!;
+  /* The editor's controls are among the sheet's own focusables. */
+  expect(focusables.some((el) => el.id === "draft-role-pipeline-config::p2::fix")).toBe(true);
+  last.focus();
+  expect(dom.document.activeElement).toBe(last as never);
+  press({ key: "Tab" });
+  expect(dom.document.activeElement).toBe(first as never);
+  expect(sheet!.contains(dom.document.activeElement as never)).toBe(true);
+  first.focus();
+  press({ key: "Tab", shiftKey: true });
+  expect(dom.document.activeElement).toBe(last as never);
+  expect(sheet!.contains(dom.document.activeElement as never)).toBe(true);
 
   /* Escape closes the sheet — editor and all — and nothing else: the screen
      is still here, and focus is back on the row that opened it. */

@@ -459,7 +459,14 @@ test("a row says when: a killed host carries its age and no queue, a settled hos
     path, title: `Held ${heldDeliveries}`, activity: "live", proc: "running", pid: 4_410,
     migration: { intentId: "i1", trigger: "manual", phase: "switching", targetAccountId: "other", heldDeliveries, failure: null },
   } as unknown as Partial<FileEntry> & { path: string });
-  const root = mount({ files: [zombie, settled, held("/repo/held-1.jsonl", 1), held("/repo/held-3.jsonl", 3)] });
+  /* A working row with all four fragments: the phrase, the now-fragment, the
+     model and the launch. */
+  const busy = file({
+    path: "/repo/busy.jsonl", title: "Rebuild the board status projection", activity: "live", proc: "running", pid: 4_409, mtime: NOW - 30,
+    lastTurn: { startedAt: (NOW - 760) * 1_000, endedAt: null }, sessionStartedAt: started,
+    plan: { steps: [], done: 1, total: 3, current: "Edit cardStatus.ts", updatedAt: null },
+  } as unknown as Partial<FileEntry> & { path: string });
+  const root = mount({ files: [zombie, settled, busy, held("/repo/held-1.jsonl", 1), held("/repo/held-3.jsonl", 3)] });
   expect(await waitFor(() => board(root) !== null)).toBe(true);
 
   const rowOf = (path: string) => q(root, `[data-mobile2-row="conversation"][data-mobile2-path="${path}"]`)!;
@@ -488,6 +495,24 @@ test("a row says when: a killed host carries its age and no queue, a settled hos
   expect(launchAge(2 * 3600 + 25 * 60)).toBe("2h");
   expect(launchAge(25 * 60 + 40)).toBe("25m");
   expect(launchAge(40)).toBe("40s");
+
+  /* The meta line has exactly ONE elastic fragment, the now-fragment, so at
+     390 px a working row loses the tool name it is on and never its model or
+     its launch (the round-2 review of #1487 found both truncated). */
+  const busyRow = rowOf(busy.path);
+  expect(busyRow.getAttribute("data-mobile2-state")).toBe("working");
+  const nowSpan = busyRow.querySelector("[data-mobile2-now]")!;
+  expect(nowSpan.textContent).toContain("Edit cardStatus.ts");
+  expect(nowSpan.className).toContain("truncate");
+  expect(nowSpan.className).toContain("min-w-0");
+  const modelSpan = busyRow.querySelector("[data-mobile2-model]")!;
+  expect(modelSpan.textContent).toBe("opus");
+  expect(modelSpan.className).toContain("shrink-0");
+  expect(modelSpan.className).not.toContain("truncate");
+  expect(busyRow.querySelector("[data-mobile2-phrase]")!.className).toContain("shrink-0");
+  expect(busyRow.querySelector("[data-mobile2-started]")!.className).toContain("shrink-0");
+  /* A row that is not working carries no now-fragment, so nothing on it is elastic. */
+  expect(rowOf(settled.path).querySelector("[data-mobile2-now]")).toBeNull();
 });
 
 test("each phrase carries its age, and the held plurals read right at 1 and at n, in both locales (#1487)", () => {
