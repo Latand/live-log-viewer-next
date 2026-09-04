@@ -6,8 +6,7 @@ import type { FileEntry } from "@/lib/types";
 
 import { attentionId, blockingStuckDelivery } from "../attention";
 import { latestAttempt, stageChipState, type StageChipState } from "../pipelines/pipelineModel";
-import { clockDuration } from "../turnDuration";
-import { turnIsRunning } from "../turnDuration";
+import { clockDuration, turnIsRunning, turnLeftOpen } from "../turnDuration";
 import { fmtAge } from "../utils";
 import { workingSince } from "../workingSince";
 
@@ -28,6 +27,11 @@ import { workingSince } from "../workingSince";
  * the authorities the board already trusts — the process state, the activity,
  * the rate-limit wall, the account-switch delivery fence, the attention queue
  * and the open turn — so this module invents no lifecycle of its own.
+ *
+ * `killed` is the process state read together with the turn the host left
+ * behind (#1487): a host that died mid-turn is killed; a host stopped after
+ * its turn settled — the ordinary end of every finished stage — reads as the
+ * finished conversation it is, in the neutral tone.
  */
 export type ChatStateKey =
   | "offline"
@@ -124,14 +128,15 @@ export function heldMessages(file: FileEntry, nowMs: number = Date.now()): numbe
 /** The one state of a conversation. */
 export function chatState(file: FileEntry, { offline = false, nowMs = Date.now() }: ChatStateOptions = {}): ChatStateKey {
   if (offline) return "offline";
-  if (file.proc === "killed") return "killed";
+  if (file.proc === "killed" && turnLeftOpen(file)) return "killed";
   /* Stalled needs the attention queue's own TTL judgement: a permission prompt
      from two days ago is dead context, not a conversation holding the line. */
   if (file.activity === "stalled" && attentionId(file, nowMs / 1000) !== null) return "stalled";
   if (file.rateLimit) return "limit";
   if (heldMessages(file, nowMs) !== null) return "held";
   if (file.pendingQuestion || file.waitingInput || file.bridgeAsk) return "waiting";
-  if (turnIsRunning(file)) return "working";
+  /* A dead host runs nothing, whatever freshness the transcript still carries. */
+  if (file.proc !== "killed" && turnIsRunning(file)) return "working";
   /* A conversation that finished its turn and is waiting on the operator is
      the queue's business; the attention id is what says so. */
   if (attentionId(file, nowMs / 1000) !== null) return "waiting";
@@ -178,7 +183,7 @@ export function chatStateBits(t: TFunction, file: FileEntry, options: ChatStateO
     case "offline":
       return { key, tone, phrase: t("mobile2.chat.stateOffline"), badge: null };
     case "killed":
-      return { key, tone, phrase: t("mobile2.chat.stateKilled"), badge: null };
+      return { key, tone, phrase: t("mobile2.chat.stateKilledAge", { age }), badge: null };
     case "stalled":
       return { key, tone, phrase: t("mobile2.chat.stateStalled", { age }), badge: t("mobile2.chat.badgeStalled") };
     case "limit": {
@@ -192,7 +197,7 @@ export function chatStateBits(t: TFunction, file: FileEntry, options: ChatStateO
       return { key, tone, phrase, badge: t("mobile2.chat.badgeLimit") };
     }
     case "held":
-      return { key, tone, phrase: t("mobile2.chat.stateHeld", { count: heldMessages(file, nowMs) ?? 1 }), badge: null };
+      return { key, tone, phrase: t("mobile2.chat.stateHeldQueued", { count: heldMessages(file, nowMs) ?? 1 }), badge: null };
     case "waiting": {
       const question = Boolean(file.pendingQuestion || file.waitingInput || file.bridgeAsk);
       return {

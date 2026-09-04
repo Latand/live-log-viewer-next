@@ -599,7 +599,7 @@ async function waitForServer(url: string, child: ChildProcess): Promise<void> {
 type Entry = Record<string, unknown> & { path: string; title?: string; cwd?: string; project?: string; mtime?: number };
 
 /** The prototype's `stateBits` inputs, as today's file fields. */
-type ConversationState = "working" | "waiting-question" | "waiting-plan" | "returned" | "done" | "held" | "limit" | "stalled";
+type ConversationState = "working" | "waiting-question" | "waiting-plan" | "returned" | "done" | "held" | "limit" | "stalled" | "finished" | "killed";
 
 function statePatch(state: ConversationState, entry: Entry, pid: number): Record<string, unknown> {
   const mtime = entry.mtime ?? CAPTURE_S;
@@ -629,6 +629,11 @@ function statePatch(state: ConversationState, entry: Entry, pid: number): Record
     case "held": return { ...running, stuckDelivery: { since: new Date(CAPTURE_MS - 10 * 60_000).toISOString(), attempts: 2, state: "held" } };
     case "limit": return { ...running, rateLimit: { source: "account", accountId: null, window: "session", resetAt: CAPTURE_S + 2 * 3600 + 38 * 60 } };
     case "stalled": return { ...running, activity: "stalled", activityReason: "jsonl_turn_stalled", mtime: CAPTURE_S - 14 * 60 };
+    /* #1487: a host stopped AFTER its turn settled — the ordinary end of a
+       finished stage — reads as done, never as killed. */
+    case "finished": return { proc: "killed", pid: null, activity: "idle", lastTurn: { startedAt: mtime * 1000 - 25 * 60_000, endedAt: mtime * 1000 } };
+    /* #1487: a host that died with its turn OPEN is the killed row. */
+    case "killed": return { proc: "killed", pid: null, activity: "stalled", activityReason: "jsonl_turn_stalled", lastTurn: { startedAt: mtime * 1000 - 12 * 60_000, endedAt: null }, mtime: CAPTURE_S - 9 * 60 };
   }
 }
 
@@ -651,7 +656,7 @@ const BACKGROUND_TASKS = [
 ];
 
 const BASE_STATES: Record<string, ConversationState> = {
-  orch: "working", c1: "working", c2: "waiting-question", c6: "waiting-plan", c5: "working", c9: "working", c3: "returned", c8: "returned", c4: "done",
+  orch: "working", c1: "working", c2: "waiting-question", c6: "waiting-plan", c5: "working", c9: "working", c3: "returned", c8: "returned", c4: "finished",
 };
 
 export interface Scenario {
@@ -794,10 +799,16 @@ function patchFiles(body: { files?: Entry[]; pipelines?: unknown[] }, a: Answers
     if (key.startsWith("x") && !a.scenario.crowded) continue;
     if (key === "orch" && a.scenario.noseat) continue;
     pid += 1;
-    const state = key.startsWith("x") ? (["done", "returned", "done", "done", "working", "done", "returned", "done"] as ConversationState[])[Number(key.slice(1)) % 8] : states[key];
+    const state = key.startsWith("x") ? (["done", "returned", "done", "done", "working", "killed", "returned", "done"] as ConversationState[])[Number(key.slice(1)) % 8] : states[key];
     if (state) {
       if (a.scenario.arrival && key === "c6" && !a.arrived) Object.assign(entry, statePatch("working", entry, pid));
       else Object.assign(entry, statePatch(state, entry, pid));
+      /* #1487: the row ends with when the conversation was launched. The seeded
+         transcript's own header dates it at seeding time — a minute before the
+         capture — so the picture dates every launch two hours before its last
+         turn began, older than the state's own age as a real lane's is. */
+      const turnStart = (entry as { lastTurn?: { startedAt?: number } }).lastTurn?.startedAt ?? (entry.mtime ?? CAPTURE_S) * 1000;
+      (entry as { sessionStartedAt?: string }).sessionStartedAt = new Date(turnStart - 2 * 3600_000).toISOString();
     }
     const step = NOW_STEPS[key];
     if (step && entry.proc === "running") {

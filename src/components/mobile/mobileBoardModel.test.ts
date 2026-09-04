@@ -3,7 +3,7 @@ import { expect, test } from "bun:test";
 import type { Pipeline } from "@/lib/pipelines/types";
 import type { FileEntry } from "@/lib/types";
 
-import { buildMobileBoard, mobileRowState, nowFragment, RECENT_CAP } from "./mobileBoardModel";
+import { buildMobileBoard, launchedAt, mobileRowState, nowFragment, RECENT_CAP } from "./mobileBoardModel";
 
 /*
  * The phone board's projection (issue #1439, lane 2; README §4.1, §4.2).
@@ -16,6 +16,11 @@ import { buildMobileBoard, mobileRowState, nowFragment, RECENT_CAP } from "./mob
  * standing in the queue beside conversations, the pipelines summary rising
  * above Working while any pipeline runs, Recent capped at three, and the
  * now-fragment that says what a working agent is doing.
+ *
+ * #1487 adds the line the killed row has to respect: a host stopped after its
+ * turn settled is a finished conversation, and only a host that died with its
+ * turn open is killed; and the launch instant every row carries beside the
+ * state's own age.
  */
 
 const NOW = 1_800_000_000;
@@ -120,6 +125,65 @@ test("the precedence is one order, and a lower signal never outranks a higher on
   expect(mobileRowState(working(base), NOW).key).toBe("working");
   expect(mobileRowState(entry({ ...base, activity: "recent" }), NOW).key).toBe("returned");
   expect(mobileRowState(entry(base), NOW).key).toBe("done");
+});
+
+test("a host stopped after its turn settled is a finished conversation; only a host that died mid-turn is killed (#1487)", () => {
+  /* The operator's own case: the stage settled, the host was stopped, every
+     deliverable is on disk. The transcript's last turn closed. */
+  const settled = entry({
+    path: "/p/settled.jsonl",
+    proc: "killed",
+    pid: null,
+    activity: "idle",
+    mtime: NOW - 7_200,
+    lastTurn: { startedAt: (NOW - 9_000) * 1_000, endedAt: (NOW - 7_200) * 1_000 },
+  });
+  const finished = mobileRowState(settled, NOW);
+  expect(finished).toMatchObject({ key: "done", dot: "neutral", section: "recent", edge: null, badge: null });
+  expect(Math.round(finished.seconds ?? 0)).toBe(7_200);
+  /* Recently settled: the same accent «finished the turn» a live host's reads. */
+  expect(mobileRowState({ ...settled, activity: "recent" }, NOW).key).toBe("returned");
+  /* The provider-authoritative turn state outranks the boundary: idle is settled. */
+  expect(mobileRowState({
+    ...settled,
+    lastTurn: { startedAt: (NOW - 9_000) * 1_000, endedAt: null },
+    authoritativeTurn: { state: "idle", source: "assistant", terminalAt: null },
+  }, NOW).key).toBe("done");
+  /* No evidence of an open turn at all reads settled: the alarming word is earned. */
+  expect(mobileRowState(entry({ path: "/p/bare.jsonl", proc: "killed", pid: null }), NOW).key).toBe("done");
+  /* A dead host over a still-fresh transcript is not «working» either. */
+  expect(mobileRowState({ ...settled, activity: "live", lastTurn: undefined }, NOW).key).toBe("done");
+
+  /* The host that died mid-turn — the liveness snapshot's `host_gone_turn_open`
+     — is the killed row: the transcript's last turn never closed. */
+  const zombie = entry({
+    path: "/p/zombie.jsonl",
+    proc: "killed",
+    pid: null,
+    activity: "stalled",
+    activityReason: "jsonl_turn_stalled",
+    mtime: NOW - 900,
+    lastTurn: { startedAt: (NOW - 1_500) * 1_000, endedAt: null },
+  });
+  const dead = mobileRowState(zombie, NOW);
+  expect(dead).toMatchObject({ key: "killed", dot: "danger", section: "recent", edge: null, badge: null, held: 0 });
+  expect(Math.round(dead.seconds ?? 0)).toBe(900);
+  expect(mobileRowState({ ...zombie, activity: "live", mtime: NOW - 5 }, NOW).key).toBe("killed");
+  /* The authoritative state says busy: killed, whatever the boundary says. */
+  expect(mobileRowState({ ...settled, authoritativeTurn: { state: "busy", source: "lifecycle", terminalAt: null } }, NOW).key).toBe("killed");
+});
+
+test("a row carries when it was launched, from the transcript header or the launch's admission (#1487)", () => {
+  const started = new Date((NOW - 10_800) * 1_000).toISOString();
+  expect(launchedAt(entry({ path: "/p/a.jsonl", sessionStartedAt: started }))).toBe(NOW - 10_800);
+  /* Before a transcript exists, the launch's admission is the earliest durable instant. */
+  expect(launchedAt(entry({ path: "/p/b.jsonl", spawn: { admittedAt: (NOW - 30) * 1_000 } as unknown as FileEntry["spawn"] }))).toBe(NOW - 30);
+  expect(launchedAt(entry({ path: "/p/c.jsonl", sessionStartedAt: null }))).toBeNull();
+  expect(launchedAt(entry({ path: "/p/d.jsonl" }))).toBeNull();
+  /* Two clocks on one row: the state's own age (since the last move) and the launch. */
+  const model = buildMobileBoard({ files: [entry({ path: "/p/a.jsonl", sessionStartedAt: started, mtime: NOW - 7_200 })], pipelines: [], project: PROJECT, now: NOW });
+  expect(model.recent[0]!.launchedAt).toBe(NOW - 10_800);
+  expect(Math.round(model.recent[0]!.state.seconds ?? 0)).toBe(7_200);
 });
 
 test("a row that needs the operator carries the edge and the badge; the rest carry neither", () => {

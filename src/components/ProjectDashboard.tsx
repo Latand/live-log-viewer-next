@@ -63,7 +63,6 @@ import { MobilePipelinesScreen } from "./mobile/MobilePipelinesScreen";
 import { sameScreen, topScreen, useMobileNav, useMobileNavStore, type MobileSheetName } from "./mobile/mobileNav";
 import { TaskSheet, type TaskSheetView } from "./tasks/TaskSheet";
 import { Badge } from "@/components/ui/Badge";
-import { canHandoff, HandoffHandle } from "./HandoffHandle";
 import { SchemeBoard } from "./scheme/SchemeBoard";
 import { CatalogFailureNotice } from "./CatalogFailureNotice";
 import { SchemeSkeleton } from "./scheme/SchemeSkeleton";
@@ -474,10 +473,6 @@ function ProjectDashboardView({
   };
   const [drafts, setDrafts] = useState<string[]>([]);
   const [pendingRestoredHandoffs, setPendingRestoredHandoffs] = useState<Set<string>>(() => new Set());
-  /* The phone focus view reports its currently-focused conversation here so the
-     footer shelf can dock that pane's handoff control on its single row (issue
-     #177 item 5). */
-  const [mobileActiveFile, setMobileActiveFile] = useState<FileEntry | null>(null);
   /* Desktop `+ Task`: bump drops the inline sticky composer in a free slot on
      the board (pinned near the button). */
   const [newTaskNonce, setNewTaskNonce] = useState(0);
@@ -1817,10 +1812,6 @@ function ProjectDashboardView({
     viewBus.reportSlice({ mode, focusedPath: null, selectedPaths: selectionInOrder(order, board.selection, { includeUnordered: true }), visiblePaths, camera: null });
   }, [projectView, schemeAvailable, listAvailable, historyRows, isMobile, boardWindowSignature, board.selection, mobileBoardSignature]);
 
-  /* The focused conversation's handoff control docks in the host sheet (issue
-     #177 item 5), so the sheet needs to know whether there is one. */
-  const shelfHandoffFile = isMobile && projectView === "scheme" && mobileActiveFile && canHandoff(mobileActiveFile) ? mobileActiveFile : null;
-
   const pipelinesAlert = pipelinesError ? (
     <div className="shrink-0 border-b border-border bg-warning-soft px-3 py-1.5 text-[11.5px] text-warning" role="alert">
       {t("dash.pipelinesUnavailable")}
@@ -1982,7 +1973,6 @@ function ProjectDashboardView({
           hiddenCount={hasArchiveNodes ? 0 : residual.length}
           onOpenCatalog={() => { mobileNav.closeSheet(); chooseEmptyView("list"); }}
           onClose={close}
-          leading={shelfHandoffFile ? <HandoffHandle file={shelfHandoffFile} onHandoff={() => { mobileNav.closeSheet(); addHandoffDraft(shelfHandoffFile); }} inline /> : null}
         >
           {boardReady ? hiddenStrips() : null}
         </MobileHostSheet>
@@ -2205,7 +2195,6 @@ function ProjectDashboardView({
                   reviewGroups={directReviewGroups}
                   pipelines={pipelines}
                   surfacePipelines={activePipelines}
-                  workerStacks={workerStacks}
                   tasks={hasNodes ? boardTasks : EMPTY_TASKS}
                   sheetTasks={projectTasks}
                   drafts={layoutDrafts}
@@ -2224,7 +2213,11 @@ function ProjectDashboardView({
                   onDraftClose={removeDraft}
                   onDraftSpawned={draftSpawned}
                   onConversationOpened={markPathSeen}
-                  onActiveChange={setMobileActiveFile}
+                  /* «Hand off» is a row in the conversation's ⋯ (§4.2): the
+                     board owns the draft, the screen only asks for it. The
+                     host sheet's handoff handle — the last of the retired
+                     shelf's contents — went with lane 10. */
+                  onHandoff={addHandoffDraft}
                   trayApi={trayApi}
                 />
               ) : (

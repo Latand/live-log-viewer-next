@@ -50,7 +50,6 @@ export const FOLLOWABLE_MODES: ReadonlySet<ViewMode> = new Set<ViewMode>([
   "overview",
   "scheme",
   "mobile-focus",
-  "mobile-map",
 ]);
 
 /** The presence facts the predicate reads. A narrow shape rather than the full

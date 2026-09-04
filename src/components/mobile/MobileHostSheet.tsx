@@ -132,7 +132,6 @@ export function MobileHostSheet({
   onOpenCatalog,
   onClose,
   onKilled,
-  leading,
   children,
 }: {
   projectName: string;
@@ -144,15 +143,12 @@ export function MobileHostSheet({
   onOpenCatalog?: () => void;
   onClose: () => void;
   onKilled?: (path: string) => void;
-  /** The focused conversation's handoff control, when there is one. */
-  leading?: React.ReactNode;
   /** The folded worker / quiet / readiness strips (retired in lane 10). */
   children?: React.ReactNode;
 }) {
   const { t } = useLocale();
   return (
     <MobileSheet name="host" title={t("mobile2.host.title", { project: projectName })} onClose={onClose}>
-      {leading ? <div className="px-4 pb-1">{leading}</div> : null}
       <Row label={t("mobile2.host.runtime")}>
         <span className={`inline-flex h-5 shrink-0 items-center rounded-full px-[7px] text-caption font-semibold leading-none ${RUNTIME_TONE[runtime]}`} data-connection={runtime}>
           {t(RUNTIME_BADGE[runtime])}

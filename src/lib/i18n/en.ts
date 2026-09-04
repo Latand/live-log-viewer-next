@@ -2658,4 +2658,24 @@ export const en = {
   "mobile2.seat.open": "Open conversation",
   "mobile2.seat.draftCancel": "Cancel",
   "mobile2.seat.createDock": "Create an orchestrator to talk to…",
+  /* #1487 (mobile v2 lane 10): the phrases a row shows for a host that is
+     gone, corrected. `mobile2.board.killed` / `mobile2.chat.stateKilled` above
+     claimed a message queue nobody measured and carried no age, and the held
+     plurals were swapped; the dictionary is append-only per lane, so the
+     corrected phrases are new keys and the old ones are no longer read. */
+  "mobile2.board.killedAge": "killed · {age}",
+  "mobile2.board.heldQueued": { one: "held · {count} message queued", other: "held · {count} messages queued" },
+  "mobile2.board.started": "started {age} ago",
+  "mobile2.chat.stateKilledAge": "killed · {age}",
+  "mobile2.chat.stateHeldQueued": { one: "held · {count} message queued", other: "held · {count} messages queued" },
+  "mobile2.composer.placeholderStopped": "the host stopped · text queues until a respawn",
+  /* Mobile v2 lane 10: the pipeline screen takes over what the retired dock
+     sheet could reach — a never-run stage's configuration, and the earlier
+     attempts and review transcripts of a stage. */
+  "mobile2.pipeline.configure": "Configure the stage {stage}",
+  "mobile2.pipeline.configureTitle": "Configure · {stage}",
+  "mobile2.pipeline.attempt": "attempt {n} · {state}",
+  "mobile2.pipeline.openAttempt": "Open the transcript of attempt {n}",
+  "mobile2.pipeline.reviewTranscript": "review transcript · round {n}",
+  "mobile2.pipeline.openReviewTranscript": "Open the review transcript of round {n}",
 } satisfies Dictionary;

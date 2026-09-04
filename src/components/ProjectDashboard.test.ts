@@ -12,7 +12,6 @@ import {
 } from "./pipelines/pipelineModel";
 import { buildSchemeLayout } from "./scheme/layout";
 import { collapsibleWorkerFiles, finishedLaneOutcomePaths, groupWorkerStacks, pipelineCursorStagePaths } from "./scheme/workerCollapse";
-import { buildMobileMapModel } from "./mobile/mobileMapModel";
 
 test("a catalog focus waits for its pinned conversation to hydrate", () => {
   const path = "/sessions/capped-out.jsonl";
@@ -251,10 +250,9 @@ test("the audited board shape folds settled work and keeps every unfinished card
 
   const stacks = groupWorkerStacks(collapsed, [], new Set(), { originOf: () => rootPath });
   expect(stacks.reduce((sum, stack) => sum + stack.items.length, 0)).toBe(auditFixture.expected.collapsed);
-  const layout = buildSchemeLayout(after, [], files);
-  const mobile = buildMobileMapModel(layout, [], stacks);
-  expect(mobile.markers.filter((marker) => marker.kind === "node")).toHaveLength(auditFixture.expected.columnsAfter);
-  expect(mobile.markers.filter((marker) => marker.kind === "worker").reduce((sum, marker) => sum + (marker.count ?? 0), 0)).toBe(auditFixture.expected.collapsed);
+  /* The phone reads the same fold through its board rows now (mobile v2 lane
+     2); the map-lite projection this used to assert is retired (lane 10). */
+  expect(buildSchemeLayout(after, [], files).nodes).toHaveLength(auditFixture.expected.columnsAfter);
 
   /* Opening the finished lane releases it, and nothing else moves. */
   const acknowledged = projection(new Map([[unreadFinished[0]!.path, nowSeconds]]));

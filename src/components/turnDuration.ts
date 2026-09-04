@@ -45,6 +45,22 @@ export function turnIsRunning(file: Pick<FileEntry, "lastTurn" | "activity">): b
   return file.activity === "live" && (!file.lastTurn || file.lastTurn.endedAt === null);
 }
 
+/** Whether the transcript's last turn never closed. This is the line the
+    liveness snapshot draws between a host that died mid-turn
+    (`host_gone_turn_open`, the zombie) and one stopped after its turn settled
+    (`host_gone_turn_settled`, the ordinary end of every finished stage), read
+    from the same evidence in the same order: the provider-authoritative turn
+    state, then the transcript's own turn boundary, then the scan's reason for
+    its activity. With no evidence of an open turn the answer is «settled»:
+    the alarming reading has to be earned (#1487). */
+export function turnLeftOpen(file: Pick<FileEntry, "authoritativeTurn" | "lastTurn" | "activityReason" | "activity">): boolean {
+  const turn = file.authoritativeTurn;
+  if (turn && turn.state !== "unknown") return turn.state === "busy";
+  if (file.lastTurn) return file.lastTurn.endedAt === null;
+  if (file.activityReason === "jsonl_turn_open" || file.activityReason === "jsonl_turn_stalled") return true;
+  return file.activity === "stalled";
+}
+
 /** Seconds spanned by a completed turn, or null when it is still running or the
     boundary is unavailable. */
 export function turnDurationSeconds(file: Pick<FileEntry, "lastTurn">): number | null {

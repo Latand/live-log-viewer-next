@@ -27,9 +27,14 @@ import {
  * needs the operator the 3 px edge and the badge are the two coloured elements
  * and the meta line stays in secondary text; on a working row the meta reads
  * the state phrase, what the agent is doing now, and the engine mark with the
- * model. The state phrase never truncates — the model and the now-fragment do
- * first. There is no Host section: host detail lives behind ⋯ › Host details
- * (`MobileHostSheet`), and degradation is the shell banner's job.
+ * model. Every row ends with «started 3h ago» when the transcript names its
+ * launch (#1487): the phrase's own age is the state's clock — how long owed,
+ * how long this turn, how long since the last move — and the launch is the
+ * other thing the operator asked to read everywhere, so both ride the line,
+ * each under its own word. The state phrase and the launch never truncate —
+ * the model and the now-fragment do first. There is no Host section: host
+ * detail lives behind ⋯ › Host details (`MobileHostSheet`), and degradation is
+ * the shell banner's job.
  *
  * Everything the board shows comes from `mobileBoardModel`, so the grouping,
  * the precedence and the badge count are decided in one pure place and this
@@ -81,6 +86,16 @@ function Badge({ tone, children }: { tone: "warning" | "danger"; children: React
   );
 }
 
+/** The launch's age, to one unit (#1487): «started 2h ago», never «2h 25m».
+    The state's own age keeps its precision — it is the clock the operator
+    acts on — and the launch is context, so it takes the row's width only for
+    the digit that matters. */
+export function launchAge(seconds: number): string {
+  const total = Math.max(0, Math.round(seconds));
+  const unit = total >= 3600 ? 3600 : total >= 60 ? 60 : 1;
+  return humanizeDuration(Math.floor(total / unit) * unit);
+}
+
 /** The state phrase of a row, in the operator's words. It never truncates.
     `now` dates the limit's reset — today's shows the hour, a later one the day
     with it — so the row reads «Main resets 16:40» (README §4.2). */
@@ -88,7 +103,9 @@ export function statePhrase(t: TFunction, state: MobileRowState, now: number): s
   const seconds = state.seconds ?? 0;
   switch (state.key) {
     case "killed":
-      return t("mobile2.board.killed");
+      /* The age the model computes, like every neighbour; and nothing about a
+         queue — a killed row never measured one (#1487). */
+      return t("mobile2.board.killedAge", { age: humanizeDuration(seconds) });
     case "stalled":
       return t("mobile2.board.stalled", { age: humanizeDuration(seconds) });
     case "limit": {
@@ -102,7 +119,7 @@ export function statePhrase(t: TFunction, state: MobileRowState, now: number): s
         : t("mobile2.board.limitResets", { time: resets });
     }
     case "held":
-      return t("mobile2.board.held", { count: state.held });
+      return t("mobile2.board.heldQueued", { count: state.held });
     case "waiting":
       return t("mobile2.board.waiting", { age: humanizeDuration(seconds) });
     case "working":
@@ -166,6 +183,12 @@ function ConversationRow({ row, quiet, now, onOpen }: { row: MobileBoardConversa
               <span className="min-w-0 truncate">{row.file.model}</span>
             </>
           ) : null}
+          {row.launchedAt === null ? null : (
+            <>
+              <span aria-hidden className="shrink-0 opacity-60">·</span>
+              <span data-mobile2-started className="shrink-0">{t("mobile2.board.started", { age: launchAge(now - row.launchedAt) })}</span>
+            </>
+          )}
         </span>
       </span>
       {state.badge ? (

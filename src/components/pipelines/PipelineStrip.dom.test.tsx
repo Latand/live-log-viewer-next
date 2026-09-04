@@ -88,10 +88,11 @@ test("planned stage configuration opens on demand and Escape restores the compac
   expect(dom.document.activeElement?.getAttribute("aria-label")).toBe("Configure stage Builder, state pending");
 });
 
-test("the stage configuration editor portals above the mobile dock sheet (#507 review F3)", async () => {
-  /* On a phone the strip lives inside MobilePipelineDockSheet (fixed z-[70]).
-     The configuration editor mounts through the AnchoredVerdict body portal, so
-     its portal layer must sit ABOVE 70 — a z-[60] layer painted under the
+test("the stage configuration editor portals above the phone's bottom sheets (#507 review F3)", async () => {
+  /* The phone's sheets (`MobileSheet`) are fixed z-[60]; the dock sheet that
+     first exposed this sat at z-[70] and is retired (mobile v2 lane 10). The
+     configuration editor mounts through the AnchoredVerdict body portal, so
+     its portal layer must sit ABOVE any of them — a layer painted under a
      sheet's backdrop was invisible and unclickable at 390px. */
   const element = dom.document.createElement("div");
   dom.document.body.append(element);

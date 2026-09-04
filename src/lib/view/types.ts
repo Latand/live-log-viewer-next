@@ -8,7 +8,7 @@ export const MAX_SCOPE_PATHS = 16;
 export const MAX_RESPONSE_BYTES = 96 * 1024;
 export const MAX_TEXT_BYTES = 32 * 1024;
 
-export type ViewMode = "overview" | "scheme" | "list" | "mobile-focus" | "mobile-map";
+export type ViewMode = "overview" | "scheme" | "list" | "mobile-focus";
 export type DeviceKind = "desktop" | "tablet" | "mobile";
 export type BrowserKind = "chrome" | "firefox" | "safari" | "other";
 export type ViewFreshness = "active" | "background" | "stale";
