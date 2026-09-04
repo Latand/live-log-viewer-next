@@ -183,3 +183,43 @@ test("a picture block without data falls back to the text placeholder and never 
   expect(chipOf(host)).toBeNull();
   expect(host.querySelector("img")).toBeNull();
 });
+
+test("phone at 390 px: a folded run of image Reads opens into readable blocks whose pictures are chips, decoding none until one is opened", () => {
+  narrowViewport = true;
+  const calls = [1, 2, 3].map((n) =>
+    frameRead({ id: `read-frame-${n}`, summary: `Read op-image-${n}.jpg`, outputPreview: `[${en("render.imageOutput")}]`, outputBlocks: [frame], open: false }),
+  );
+  const group: CmdGroupItem = {
+    kind: "cmd-group",
+    ids: calls.map((call) => call.id),
+    calls,
+    t0: calls[0]!.ts,
+    t1: calls[2]!.ts,
+    byTool: { Read: 3 },
+    okCount: 3,
+    errCount: 0,
+    hasErr: false,
+    active: false,
+  };
+  const host = mount(<CmdGroupCard item={group} />);
+  /* The phone folds a settled run to one line; nothing of the pictures is in the DOM yet. */
+  const fold = host.querySelector("[data-mobile-run-fold]")!;
+  expect(fold).toBeTruthy();
+  expect(fold.getAttribute("aria-expanded")).toBe("false");
+  expect(fold.textContent).toContain("Read ×3");
+  expect(chipOf(host)).toBeNull();
+  expect(host.innerHTML).not.toContain(FRAME_DATA);
+  /* Opening the run shows every picture as a chip and still decodes none of them. */
+  click(fold);
+  const chips = [...host.querySelectorAll("button")].filter((button) => button.textContent?.includes(en("common.show")));
+  expect(chips).toHaveLength(3);
+  expect(chips.every((chip) => chip.getAttribute("class")?.includes("min-h-11"))).toBe(true);
+  expect(host.querySelectorAll("img")).toHaveLength(0);
+  expect(host.innerHTML).not.toContain(FRAME_DATA);
+  /* One tap decodes exactly that picture, width-bounded so the 390 px page never scrolls sideways. */
+  click(chips[1]!);
+  const imgs = host.querySelectorAll("img");
+  expect(imgs).toHaveLength(1);
+  expect(imgs[0]!.getAttribute("src")).toBe(FRAME_URI);
+  expect(imgs[0]!.getAttribute("class")).toContain("max-w-full");
+});
