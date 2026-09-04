@@ -14,6 +14,8 @@ import {
   cliRuntimeHostConfig,
   cliRuntimeHostEnvironment,
   discardWakatimeEnvironmentCredential,
+  newlyBoundNonLoopbackAddress,
+  readNonLoopbackBindState,
   viewerChildProcessOptions,
   viewerServerBunRuntime,
 } from "./server-runtime.mjs";
@@ -80,6 +82,9 @@ Options:
     tsLinkWarn: () => "  The link contains an access key — don't forward it to others.",
     tsCookie: () => "  After the first open the key is stored in a cookie for 30 days.",
     nonLocalWarn: () => "Warning: a non-local address exposes the viewer to the network, so access-key mode is forced on.",
+    unexpectedNonLocalBind: (address) => `The server bound ${address} even though loopback was requested. Startup was stopped before the viewer could remain exposed.`,
+    bindCheckFail: (detail) => `Couldn't verify the server bind: ${detail}. Startup was stopped.`,
+    bindCheckSkipped: (addresses) => `Warning: the exposure check skipped addresses this machine would not answer for: ${addresses}.`,
     serverNotReady: () => "Server not ready.",
     runtimeHostEntryMissing: () => "The runtime host is missing from this install. Reinstall agent-log-viewer and try again.",
     runtimeHostStartFail: (detail) => `Couldn't start the structured runtime host: ${detail}`,
@@ -118,6 +123,9 @@ Options:
     tsLinkWarn: () => "  Посилання містить ключ доступу — не пересилайте його стороннім.",
     tsCookie: () => "  Після першого відкриття ключ зберігається у cookie на 30 днів.",
     nonLocalWarn: () => "Увага: нелокальна адреса відкриває viewer для мережі, тому режим ключа доступу увімкнено примусово.",
+    unexpectedNonLocalBind: (address) => `Сервер прив'язався до ${address}, хоча було запитано локальну адресу. Запуск зупинено, щоб viewer не залишився відкритим у мережу.`,
+    bindCheckFail: (detail) => `Не вдалося перевірити адресу сервера: ${detail}. Запуск зупинено.`,
+    bindCheckSkipped: (addresses) => `Увага: перевірка на відкритість пропустила адреси, на які ця машина не відповідає: ${addresses}.`,
     serverNotReady: () => "Сервер не готовий.",
     runtimeHostEntryMissing: () => "У цьому пакеті немає runtime host. Перевстановіть agent-log-viewer і повторіть спробу.",
     runtimeHostStartFail: (detail) => `Не вдалося запустити structured runtime host: ${detail}`,
@@ -240,7 +248,7 @@ function readPackageJson(packageRoot) {
   }
 }
 
-function resolveServer(packageRoot) {
+function resolveServer(packageRoot, hostname) {
   const bunRuntime = viewerServerBunRuntime();
   const commandFor = (command, args, bunEntry = command, bunArgs = args) => bunRuntime
     ? { command: bunRuntime, args: ["--bun", bunEntry, ...bunArgs] }
@@ -279,7 +287,7 @@ function resolveServer(packageRoot) {
   }
 
   return {
-    ...commandFor(nextBin, ["start"]),
+    ...commandFor(nextBin, ["start", "--hostname", hostname]),
     cwd: packageRoot,
     label: "next start",
   };
@@ -814,7 +822,21 @@ async function main() {
     process.exit(1);
   }
 
-  const server = resolveServer(packageRoot);
+  // Snapshot who holds each non-loopback address before the Viewer exists, so
+  // the post-readiness guard can only attribute a NEWLY bound one to it. An
+  // address this machine will not answer for is recorded as unevaluated and
+  // carried; only an unreadable interface list leaves the guard blind enough
+  // to stop here.
+  let bindStateBeforeLaunch = { occupied: new Set(), free: new Set(), unevaluated: new Map() };
+  if (isLoopbackHostname(options.hostname)) {
+    try {
+      bindStateBeforeLaunch = await readNonLoopbackBindState(options.port);
+    } catch (error) {
+      fail(m.bindCheckFail(error instanceof Error ? error.message : String(error)));
+    }
+  }
+
+  const server = resolveServer(packageRoot, options.hostname);
   const runtimeHostConfig = cliRuntimeHostConfig(packageRoot);
   const runtimeHostEnvironment = cliRuntimeHostEnvironment(process.env, runtimeHostConfig);
   const runtimeHostSupervisor = createRuntimeHostSupervisor(
@@ -851,6 +873,30 @@ async function main() {
   } catch (error) {
     await stopAll(serverProcess, tailscaleProcessRef.current, runtimeHostSupervisor);
     fail(error instanceof Error ? error.message : m.serverNotReady());
+  }
+
+  // Verify the kernel-visible bind after readiness. This catches a launcher or
+  // framework silently widening a requested loopback bind before the listener
+  // can remain exposed.
+  if (isLoopbackHostname(options.hostname)) {
+    let exposedAddress = null;
+    try {
+      const bindStateAfterLaunch = await readNonLoopbackBindState(options.port);
+      // An address the guard could not evaluate narrows what it covered, so say
+      // which. Recording it where nobody reads it would make a security check
+      // degrade in silence.
+      if (bindStateAfterLaunch.unevaluated.size > 0) {
+        console.error(m.bindCheckSkipped([...bindStateAfterLaunch.unevaluated.keys()].join(", ")));
+      }
+      exposedAddress = newlyBoundNonLoopbackAddress(bindStateBeforeLaunch, bindStateAfterLaunch);
+    } catch (error) {
+      await stopAll(serverProcess, tailscaleProcessRef.current, runtimeHostSupervisor);
+      fail(m.bindCheckFail(error instanceof Error ? error.message : String(error)));
+    }
+    if (exposedAddress !== null) {
+      await stopAll(serverProcess, tailscaleProcessRef.current, runtimeHostSupervisor);
+      fail(m.unexpectedNonLocalBind(exposedAddress));
+    }
   }
 
   if (
