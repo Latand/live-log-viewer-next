@@ -54,7 +54,6 @@ export default function PdfPane({
   const [fitWidth, setFitWidth] = useState(true);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const frameRef = useRef<HTMLDivElement | null>(null);
-  const renderTaskRef = useRef<{ cancel: () => void } | null>(null);
 
   useEffect(() => {
     let task: { promise: Promise<PDFDocumentProxy>; destroy: () => Promise<void> } | null = null;
@@ -83,47 +82,62 @@ export default function PdfPane({
     };
   }, [path, etag, onFailure]);
 
-  const paint = useCallback(async () => {
+  useEffect(() => {
     const canvas = canvasRef.current;
     const frame = frameRef.current;
     if (!doc || !canvas || !frame) return;
-    const pdfPage = await doc.getPage(page);
-    const base = pdfPage.getViewport({ scale: 1 });
-    const scale = (fitWidth ? Math.max((frame.clientWidth - 24) / base.width, 0.1) : 1) * zoom;
-    const viewport = pdfPage.getViewport({ scale });
-    const ratio = window.devicePixelRatio || 1;
-    canvas.width = Math.floor(viewport.width * ratio);
-    canvas.height = Math.floor(viewport.height * ratio);
-    canvas.style.width = `${Math.floor(viewport.width)}px`;
-    canvas.style.height = `${Math.floor(viewport.height)}px`;
-    const context = canvas.getContext("2d");
-    if (!context) return;
-    renderTaskRef.current?.cancel();
-    const renderTask = pdfPage.render({
-      canvas,
-      canvasContext: context,
-      viewport,
-      transform: ratio !== 1 ? [ratio, 0, 0, ratio, 0, 0] : undefined,
-    });
-    renderTaskRef.current = renderTask;
-    await renderTask.promise.catch(() => {
-      /* superseded by a newer paint */
-    });
-  }, [doc, page, zoom, fitWidth]);
+    let disposed = false;
+    let paintId = 0;
+    let renderTask: { cancel: () => void } | null = null;
 
-  useEffect(() => {
+    const paint = async () => {
+      const id = ++paintId;
+      const isCurrent = () => !disposed && id === paintId;
+      renderTask?.cancel();
+      renderTask = null;
+      try {
+        const pdfPage = await doc.getPage(page);
+        // A pending page fetch can outlive navigation, resize, or unmount.
+        if (!isCurrent()) return;
+        const base = pdfPage.getViewport({ scale: 1 });
+        const scale = (fitWidth ? Math.max((frame.clientWidth - 24) / base.width, 0.1) : 1) * zoom;
+        const viewport = pdfPage.getViewport({ scale });
+        const ratio = window.devicePixelRatio || 1;
+        canvas.width = Math.floor(viewport.width * ratio);
+        canvas.height = Math.floor(viewport.height * ratio);
+        canvas.style.width = `${Math.floor(viewport.width)}px`;
+        canvas.style.height = `${Math.floor(viewport.height)}px`;
+        const context = canvas.getContext("2d");
+        if (!context) return;
+        const task = pdfPage.render({
+          canvas,
+          canvasContext: context,
+          viewport,
+          transform: ratio !== 1 ? [ratio, 0, 0, ratio, 0, 0] : undefined,
+        });
+        renderTask = task;
+        await task.promise;
+      } catch (error: unknown) {
+        if (!isCurrent()) return;
+        const status = (error as { status?: number } | null)?.status;
+        onFailure(typeof status === "number" ? failureFromStatus(status) : "error");
+      } finally {
+        if (isCurrent()) renderTask = null;
+      }
+    };
+
     void paint();
-  }, [paint]);
-
-  /* Fit-width follows the sheet being resized. */
-  useEffect(() => {
-    if (!fitWidth || typeof ResizeObserver === "undefined") return;
-    const frame = frameRef.current;
-    if (!frame) return;
-    const observer = new ResizeObserver(() => void paint());
-    observer.observe(frame);
-    return () => observer.disconnect();
-  }, [fitWidth, paint]);
+    /* Fit-width follows the sheet being resized, sharing the paint fence. */
+    const observer = fitWidth && typeof ResizeObserver !== "undefined"
+      ? new ResizeObserver(() => { if (!disposed) void paint(); })
+      : null;
+    observer?.observe(frame);
+    return () => {
+      disposed = true;
+      observer?.disconnect();
+      renderTask?.cancel();
+    };
+  }, [doc, page, zoom, fitWidth, onFailure]);
 
   /* Same touch-target contract as the host header: 44 px controls on mobile. */
   const control = mobile ? "h-11 w-11" : "h-7 w-7";
