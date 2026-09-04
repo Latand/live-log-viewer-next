@@ -88,44 +88,63 @@ jobs:
       - name: Install production and development dependencies
         run: bun install --frozen-lockfile
 
+      - name: Verify audit retry behavior
+        env:
+          HOME: ${{ runner.temp }}/audit-tests/home
+          XDG_CONFIG_HOME: ${{ runner.temp }}/audit-tests/config
+          LLV_STATE_DIR: ${{ runner.temp }}/audit-tests/state
+          LLV_CLAUDE_HOME: ${{ runner.temp }}/audit-tests/claude
+          LLV_CODEX_HOME: ${{ runner.temp }}/audit-tests/codex
+          TMPDIR: ${{ runner.temp }}/audit-tests/tmp
+        run: |
+          mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$LLV_STATE_DIR" "$LLV_CLAUDE_HOME" "$LLV_CODEX_HOME" "$TMPDIR"
+          bun test scripts/audit-with-retry.test.ts
+
       - name: Audit production and development dependencies
         shell: bash
         run: |
           set -euo pipefail
 
           audit_ids="$(bun -e '
-          const fs = require("node:fs");
+          // Bun 1.3.3 can swallow an uncaught CommonJS eval exception.
+          // Explicitly exit so malformed or expired allowlist entries block the gate.
+          try {
+            const fs = require("node:fs");
 
-          const allowlist = JSON.parse(fs.readFileSync("security/audit-allowlist.json", "utf8"));
-          const today = new Date().toISOString().slice(0, 10);
-          const idPattern = /^(?:CVE-\d{4}-\d{4,}|GHSA-[a-z0-9]+(?:-[a-z0-9]+)+)$/i;
-          const datePattern = /^\d{4}-\d{2}-\d{2}$/;
-          const seen = new Set();
+            const allowlist = JSON.parse(fs.readFileSync("security/audit-allowlist.json", "utf8"));
+            const today = new Date().toISOString().slice(0, 10);
+            const idPattern = /^(?:CVE-\d{4}-\d{4,}|GHSA-[a-z0-9]+(?:-[a-z0-9]+)+)$/i;
+            const datePattern = /^\d{4}-\d{2}-\d{2}$/;
+            const seen = new Set();
 
-          if (!Array.isArray(allowlist)) {
-            throw new Error("security/audit-allowlist.json must contain an array");
-          }
-          for (const [index, entry] of allowlist.entries()) {
-            if (!entry || typeof entry !== "object") {
-              throw new Error(`Allowlist entry ${index} must be an object`);
+            if (!Array.isArray(allowlist)) {
+              throw new Error("security/audit-allowlist.json must contain an array");
             }
-            const id = typeof entry.id === "string" ? entry.id.trim() : "";
-            const reason = typeof entry.reason === "string" ? entry.reason.trim() : "";
-            const expires = entry.expires;
-            if (!idPattern.test(id)) throw new Error(`Allowlist entry ${index} has an invalid advisory id`);
-            if (!reason) throw new Error(`Allowlist entry ${index} must include a reason`);
-            if (typeof expires !== "string" || !datePattern.test(expires)) {
-              throw new Error(`Allowlist entry ${index} must include an ISO expiry date`);
+            for (const [index, entry] of allowlist.entries()) {
+              if (!entry || typeof entry !== "object") {
+                throw new Error(`Allowlist entry ${index} must be an object`);
+              }
+              const id = typeof entry.id === "string" ? entry.id.trim() : "";
+              const reason = typeof entry.reason === "string" ? entry.reason.trim() : "";
+              const expires = entry.expires;
+              if (!idPattern.test(id)) throw new Error(`Allowlist entry ${index} has an invalid advisory id`);
+              if (!reason) throw new Error(`Allowlist entry ${index} must include a reason`);
+              if (typeof expires !== "string" || !datePattern.test(expires)) {
+                throw new Error(`Allowlist entry ${index} must include an ISO expiry date`);
+              }
+              const parsedExpiry = new Date(`${expires}T00:00:00Z`);
+              if (parsedExpiry.toISOString().slice(0, 10) !== expires) {
+                throw new Error(`Allowlist entry ${index} has an invalid expiry date`);
+              }
+              if (expires < today) throw new Error(`Allowlist entry ${id} expired on ${expires}`);
+              if (seen.has(id.toUpperCase())) throw new Error(`Duplicate allowlist entry for ${id}`);
+              seen.add(id.toUpperCase());
+              console.error(`Allowlisting ${id} through ${expires}: ${reason}`);
+              process.stdout.write(`${id}\n`);
             }
-            const parsedExpiry = new Date(`${expires}T00:00:00Z`);
-            if (parsedExpiry.toISOString().slice(0, 10) !== expires) {
-              throw new Error(`Allowlist entry ${index} has an invalid expiry date`);
-            }
-            if (expires < today) throw new Error(`Allowlist entry ${id} expired on ${expires}`);
-            if (seen.has(id.toUpperCase())) throw new Error(`Duplicate allowlist entry for ${id}`);
-            seen.add(id.toUpperCase());
-            console.error(`Allowlisting ${id} through ${expires}: ${reason}`);
-            process.stdout.write(`${id}\n`);
+          } catch (error) {
+            console.error(error);
+            process.exit(1);
           }
           '
           )"
@@ -136,4 +155,4 @@ jobs:
               audit_args+=("--ignore=$advisory")
             done <<< "$audit_ids"
           fi
-          bun audit --audit-level=high "${audit_args[@]}"
+          bash scripts/audit-with-retry.sh --audit-level=high "${audit_args[@]}"
