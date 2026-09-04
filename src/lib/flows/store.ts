@@ -24,42 +24,6 @@ const stateDatabaseFile = () => statePath("state.sqlite");
 const presetsFile = () => statePath("review-loop-presets.json");
 const flowArtifactDir = () => statePath("flows");
 
-const LEGACY_SEEDED_PRESETS: FlowPreset[] = [
-  {
-    name: "Codex high → Fable",
-    implementer: { engine: "codex", model: null, effort: "high" },
-    reviewer: { engine: "claude", model: "fable", effort: null },
-  },
-  {
-    name: "Fable → Codex xhigh",
-    implementer: { engine: "claude", model: "fable", effort: null },
-    reviewer: { engine: "codex", model: null, effort: "xhigh" },
-  },
-  {
-    name: "Sonnet → Codex xhigh",
-    implementer: { engine: "claude", model: "sonnet", effort: null },
-    reviewer: { engine: "codex", model: null, effort: "xhigh" },
-  },
-  {
-    name: "Codex high → Codex xhigh",
-    implementer: { engine: "codex", model: null, effort: "high" },
-    reviewer: { engine: "codex", model: null, effort: "xhigh" },
-  },
-];
-
-/** Defaults written by releases before the role registry. Exact matches are
-    regenerated, while any user-edited variant stays intact. The next time a
-    role default's engine/model/effort changes, append the previous
-    generation's seed shape here too, or its exact-match migration silently
-    stops firing for anyone still on the old preset name/config pair. */
-const PRE_ROLE_SEEDED_PRESETS: FlowPreset[] = [
-  { name: "Terra high → Sol xhigh", implementer: { engine: "codex", model: "gpt-5.6-terra", effort: "high" }, reviewer: { engine: "codex", model: "gpt-5.6-sol", effort: "xhigh" } },
-  { name: "Terra low → Sol xhigh", implementer: { engine: "codex", model: "gpt-5.6-terra", effort: "low" }, reviewer: { engine: "codex", model: "gpt-5.6-sol", effort: "xhigh" } },
-  { name: "Terra high → Fable", implementer: { engine: "codex", model: "gpt-5.6-terra", effort: "high" }, reviewer: { engine: "claude", model: "fable", effort: null } },
-  { name: "Fable → Sol xhigh", implementer: { engine: "claude", model: "fable", effort: null }, reviewer: { engine: "codex", model: "gpt-5.6-sol", effort: "xhigh" } },
-  { name: "Sonnet → Sol xhigh", implementer: { engine: "claude", model: "sonnet", effort: null }, reviewer: { engine: "codex", model: "gpt-5.6-sol", effort: "xhigh" } },
-];
-
 /** A role override that passes the store's shape check can still fail the
     registry's semantic validation (e.g. a codex model not prefixed `gpt-`).
     Seed derivation must never crash on that — it falls back to the role's
@@ -71,7 +35,7 @@ function flowRole(definitions: RoleDefinition[], role: "builder" | "reviewer" | 
   return { ...ROLE_DEFAULTS.find((candidate) => candidate.id === role)!.config };
 }
 
-/** Managed seed profiles resolve from the role registry on every load. */
+/** New seed profiles derive their defaults from the role registry. */
 export function seededPresetsFromRoles(): FlowPreset[] {
   const definitions = loadRoleDefinitionsOrDefaults();
   const builder = flowRole(definitions, "builder");
@@ -79,11 +43,11 @@ export function seededPresetsFromRoles(): FlowPreset[] {
   const reviewer = flowRole(definitions, "reviewer");
   const architect = flowRole(definitions, "architect");
   const presets: FlowPreset[] = [
-    { name: "Sol medium → Sol xhigh", implementer: builder, reviewer },
-    { name: "Terra low → Sol xhigh", implementer: fixer, reviewer },
-    { name: "Sol medium → Opus 5", implementer: builder, reviewer: architect },
-    { name: "Opus 5 → Sol xhigh", implementer: architect, reviewer },
-    { name: "Sonnet → Sol xhigh", implementer: { engine: "claude", model: "sonnet", effort: "high" }, reviewer },
+    { name: "Astra medium → Astra xhigh", implementer: builder, reviewer },
+    { name: "Terra low → Astra xhigh", implementer: fixer, reviewer },
+    { name: "Astra medium → Opus 5", implementer: builder, reviewer: architect },
+    { name: "Opus 5 → Astra xhigh", implementer: architect, reviewer },
+    { name: "Sonnet → Astra xhigh", implementer: { engine: "claude", model: "sonnet", effort: "high" }, reviewer },
   ];
   return presets.map((preset) => ({ ...preset, managed: "role-registry" }));
 }
@@ -177,20 +141,11 @@ function isRoleConfig(value: unknown): value is FlowPreset["implementer"] {
   );
 }
 
-function sameRole(left: FlowPreset["implementer"], right: FlowPreset["implementer"]): boolean {
-  return left.engine === right.engine && left.model === right.model && left.effort === right.effort;
-}
-
-function samePreset(left: FlowPreset, right: FlowPreset): boolean {
-  return left.name === right.name && sameRole(left.implementer, right.implementer) && sameRole(left.reviewer, right.reviewer);
-}
-
-/** Replace untouched legacy defaults while retaining every custom preset. */
+/** Seed missing names only: persisted selections, including formerly managed
+    seeds, belong to the operator and are never migrated on read. */
 export function mergeSeededPresets(presets: FlowPreset[], seeds = seededPresetsFromRoles()): FlowPreset[] {
-  const custom = presets.filter((preset) => preset.managed !== "role-registry" && ![...LEGACY_SEEDED_PRESETS, ...PRE_ROLE_SEEDED_PRESETS].some((legacy) => samePreset(preset, legacy)));
-  const names = new Set(custom.map((preset) => preset.name));
-  const missingSeeds = seeds.filter((preset) => !names.has(preset.name));
-  return [...missingSeeds, ...custom];
+  const names = new Set(presets.map((preset) => preset.name));
+  return [...seeds.filter((preset) => !names.has(preset.name)), ...presets];
 }
 
 let flowsCache: { signature: string; flows: Flow[] } | null = null;

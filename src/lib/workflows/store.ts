@@ -47,65 +47,6 @@ export function defaultFixerFromRoles(definitions?: RoleDefinition[]): RoleConfi
     takes effect without a process restart. */
 export const DEFAULT_FIXER: RoleConfig = defaultFixerFromRoles();
 
-/* The user's canonical template (design doc example), seeded on first load
-   the way flow presets are. */
-const LEGACY_SEEDED_TEMPLATES: WorkflowTemplate[] = [
-  {
-    name: "fullstack",
-    setup: "bun install",
-    verify: "bun test && bun run build",
-    finish: "pr",
-    stages: [
-      {
-        kind: "implement",
-        agent: { engine: "codex", model: null, effort: "high" },
-        scope: "Backend/API: server logic, data layer, API routes. Leave UI components alone.",
-      },
-      {
-        kind: "implement",
-        agent: { engine: "claude", model: "fable", effort: null },
-        scope: "UI/frontend: components, hooks, styling, i18n labels. Build on the backend contract from the previous stage.",
-      },
-      {
-        kind: "review-loop",
-        reviewer: { engine: "codex", model: null, effort: "xhigh" },
-        fixer: { engine: "codex", model: null, effort: "low" },
-        roundLimit: 5,
-        reviewerMode: "headless",
-      },
-    ],
-  },
-];
-
-/** Defaults written before registry-derived profiles. Exact copies migrate to
-    the current role configs; records changed by a user retain their values.
-    The next time a role default's engine/model/effort changes, append the
-    previous generation's seed shape here too, or its exact-match migration
-    silently stops firing for anyone still on the old template name/config
-    pair. */
-const PRE_ROLE_SEEDED_TEMPLATES: WorkflowTemplate[] = [
-  {
-    name: "fullstack",
-    setup: "bun install",
-    verify: "bun test && bun run build",
-    finish: "pr",
-    stages: [
-      { kind: "implement", agent: { engine: "codex", model: "gpt-5.6-terra", effort: "high" }, scope: "Backend/API: server logic, data layer, API routes. Leave UI components alone." },
-      { kind: "implement", agent: { engine: "claude", model: "fable", effort: null }, scope: "UI/frontend: components, hooks, styling, i18n labels. Build on the backend contract from the previous stage." },
-      { kind: "review-loop", reviewer: { engine: "codex", model: "gpt-5.6-sol", effort: "xhigh" }, fixer: { engine: "codex", model: "gpt-5.6-terra", effort: "low" }, roundLimit: 5, reviewerMode: "headless" },
-    ],
-  },
-  {
-    name: "Terra → Sol review",
-    verify: "bun test && bun run build",
-    finish: "pr",
-    stages: [
-      { kind: "implement", agent: { engine: "codex", model: "gpt-5.6-terra", effort: "high" }, scope: "Implement the requested change end to end, including focused tests and documentation updates." },
-      { kind: "review-loop", reviewer: { engine: "codex", model: "gpt-5.6-sol", effort: "xhigh" }, fixer: { engine: "codex", model: "gpt-5.6-terra", effort: "low" }, roundLimit: 5, reviewerMode: "headless" },
-    ],
-  },
-];
-
 export function seededTemplatesFromRoles(): WorkflowTemplate[] {
   const definitions = loadRoleDefinitionsOrDefaults();
   const builder = registryRole("builder", {}, definitions);
@@ -139,7 +80,7 @@ export function seededTemplatesFromRoles(): WorkflowTemplate[] {
     ],
   },
   {
-    name: "Sol medium → Sol xhigh review",
+    name: "Astra medium → Astra xhigh review",
     verify: "bun test && bun run build",
     finish: "pr",
     stages: [
@@ -625,13 +566,11 @@ export function saveTemplates(templates: WorkflowTemplate[]): void {
   atomicWriteJson(templatesFile(), { templates });
 }
 
-/** Upgrade untouched built-in templates and keep user-authored definitions. */
+/** Seed missing names only; saved templates keep their selected configs even
+    when an earlier release marked them as managed defaults. */
 export function mergeSeededTemplates(templates: WorkflowTemplate[], seeds = seededTemplatesFromRoles()): WorkflowTemplate[] {
-  const legacy = new Set([...LEGACY_SEEDED_TEMPLATES, ...PRE_ROLE_SEEDED_TEMPLATES].map((template) => JSON.stringify(normalizeTemplate(template))));
-  const custom = templates.filter((template) => template.managed !== "role-registry" && !legacy.has(JSON.stringify(template)));
-  const names = new Set(custom.map((template) => template.name));
-  const missingSeeds = seeds.filter((template) => !names.has(template.name));
-  return [...missingSeeds, ...custom];
+  const names = new Set(templates.map((template) => template.name));
+  return [...seeds.filter((template) => !names.has(template.name)), ...templates];
 }
 
 function slugify(text: string): string {
