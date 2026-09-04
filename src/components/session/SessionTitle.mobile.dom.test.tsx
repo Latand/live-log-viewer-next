@@ -274,3 +274,42 @@ test("Enter saves what was typed and the bar's title cell shows the new name", a
      sees the name they typed without waiting for the next scan. */
   expect(barTitle(host)).toBe("Phone rename");
 });
+
+for (const action of ["Cancel", "Save name"] as const) {
+  test(`a phone ${action} press prevents null-target blur before click`, async () => {
+    const files = [neighbour, focused];
+    const { host, root } = await mount(files);
+    const originalBarTitle = barTitle(host);
+    openRename(host);
+    await settle(root, view(files), 1);
+    const field = input(host)!;
+    flushSync(() => typeInto(field, "Phone draft"));
+    const button = editor(host)!.querySelector(`button[aria-label="${action}"]`)!;
+    // Press the icon too: the event must reach the button through its child.
+    const target = button.querySelector("svg")!;
+    const press = new dom.PointerEvent("pointerdown", { bubbles: true, cancelable: true, pointerType: "touch" });
+    flushSync(() => target.dispatchEvent(press as unknown as Event));
+    // happy-dom has no native Safari focus default. Model its reported
+    // blur-before-click ordering only when the press permits that default.
+    if (!press.defaultPrevented) {
+      flushSync(() => field.dispatchEvent(new dom.FocusEvent("focusout", { bubbles: true, relatedTarget: null }) as unknown as Event));
+    }
+    expect(requests.filter((request) => request.url === "/api/session/title")).toHaveLength(0);
+    expect(press.defaultPrevented).toBe(true);
+    expect(input(host)).toBe(field);
+    expect(dom.document.activeElement).toBe(field as unknown as typeof dom.document.activeElement);
+    flushSync(() => target.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
+    await settle(root, view(files));
+
+    const saves = requests.filter((request) => request.url === "/api/session/title");
+    expect(saves).toHaveLength(action === "Cancel" ? 0 : 1);
+    if (action === "Save name") expect(saves[0]!.body.title).toBe("Phone draft");
+    expect(input(host)).toBeNull();
+    expect(barTitle(host)).toBe(action === "Cancel" ? originalBarTitle : "Phone draft");
+    if (action === "Cancel") {
+      openRename(host);
+      await settle(root, view(files), 1);
+      expect(input(host)!.value).toBe(LONG_TITLE);
+    }
+  });
+}

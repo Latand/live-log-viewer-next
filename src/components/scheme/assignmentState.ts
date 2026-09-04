@@ -1,5 +1,6 @@
 import type { TaskAssignment } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
+import { turnLeftOpen } from "../turnDuration";
 
 export type AssignmentAgentState = "spawning" | "failed" | "gone" | "migrating" | "killed" | "unhosted" | "live";
 
@@ -12,7 +13,7 @@ export function assignmentAgentState(
   if (assignment.state === "spawning" && !assignment.path) return "spawning";
   if (!file) return "gone";
   if (file.migration) return "migrating";
-  if (file.proc === "killed") return "killed";
+  if (file.proc === "killed") return turnLeftOpen(file) ? "killed" : "unhosted";
   if (file.proc === "running" || file.activity === "live" || file.activity === "recent") return "live";
   return "unhosted";
 }

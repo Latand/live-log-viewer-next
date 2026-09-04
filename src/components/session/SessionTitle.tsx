@@ -283,6 +283,9 @@ export function SessionTitle({ file, displayMax = 90, titleClassName = "", class
   };
 
   const stop = (event: React.PointerEvent) => event.stopPropagation();
+  // Keep focus in the editor until the click chooses Save/Reset/Cancel.
+  // Safari can otherwise blur with relatedTarget=null before that click.
+  const keepEditorFocus = (event: React.PointerEvent<HTMLButtonElement>) => event.preventDefault();
   /* The phone's pane header is also its swipe handle (`MobileFocusView` steps
      to the next conversation on a horizontal drag across it). A drag INSIDE
      the editor is the operator moving through a long title, so it stays here
@@ -342,6 +345,7 @@ export function SessionTitle({ file, displayMax = 90, titleClassName = "", class
           }`}
           aria-label={t("rename.save")}
           title={t("rename.save")}
+          onPointerDown={keepEditorFocus}
           onClick={() => commit(inputRef.current?.value ?? value)}
         >
           <Check className={isMobile ? "h-4 w-4" : "h-3 w-3"} aria-hidden />
@@ -354,6 +358,7 @@ export function SessionTitle({ file, displayMax = 90, titleClassName = "", class
             }`}
             aria-label={t("rename.reset")}
             title={t("rename.resetHint", { title: cleanTitle(autoTitle, 60) })}
+            onPointerDown={keepEditorFocus}
             onClick={() => commit(null)}
           >
             <RotateCw className={isMobile ? "h-4 w-4" : "h-3 w-3"} aria-hidden />
@@ -366,6 +371,7 @@ export function SessionTitle({ file, displayMax = 90, titleClassName = "", class
           }`}
           aria-label={t("rename.cancel")}
           title={t("rename.cancel")}
+          onPointerDown={keepEditorFocus}
           onClick={cancel}
         >
           <X className={isMobile ? "h-4 w-4" : "h-3 w-3"} aria-hidden />
