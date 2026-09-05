@@ -132,7 +132,9 @@ import { hardenedRedact } from "@/lib/view/compactText";
 import { validateSnapshotRequest } from "@/lib/view/validation";
 
 import {
+  McpDispatchNotExecutedError,
   McpDispatchUncertainError,
+  McpDispatchVerdictError,
   McpToolRefusal,
   type McpRecoverableTool,
   type McpRecoveryEvidence,
@@ -428,6 +430,9 @@ async function dispatchViewerControl(
   requestHeaders.set("origin", baseUrl);
   requestHeaders.set("sec-fetch-site", "same-origin");
   let response: Response;
+  /* From here on the request may be on the wire: the service reads this to
+     tell a failure that happened BEFORE any dispatch from one after it. */
+  if (context.dispatch) context.dispatch.attempted = true;
   try {
     response = await fetch(new URL(pathname, baseUrl), {
       method: "POST",
@@ -439,7 +444,7 @@ async function dispatchViewerControl(
     attempt.release();
     const code = (error as { code?: unknown }).code;
     if (code === "ConnectionRefused" || code === "ECONNREFUSED") {
-      throw new Error("Viewer control is unreachable: the connection was refused before the request was sent");
+      throw new McpDispatchNotExecutedError("Viewer control is unreachable: the connection was refused before the request was sent");
     }
     throw new McpDispatchUncertainError(
       attempt.signal.aborted
@@ -466,7 +471,7 @@ async function dispatchViewerControl(
        except a 409, which in this codebase is how an ADMITTED but ambiguous
        operation is answered, with its id in the body that was just lost. */
     if (response.status >= 400 && response.status < 500 && response.status !== 409) {
-      throw new Error(`Viewer control refused the request with status ${response.status}`);
+      throw new McpDispatchVerdictError(`Viewer control refused the request with status ${response.status}`, { status: response.status });
     }
     throw new McpDispatchUncertainError(`Viewer control returned an unreadable response with status ${response.status}; the request may have been received`);
   }
@@ -478,7 +483,8 @@ async function dispatchViewerControl(
     const operationId = text(result.operationId);
     const launchId = text(result.launchId);
     if (operationId || launchId) {
-      throw new McpToolRefusal(message, {
+      throw new McpDispatchVerdictError(message, {
+        status: response.status,
         ...(operationId ? { operationId } : {}),
         ...(launchId ? { launchId } : {}),
         ...(text(result.conversationId) ? { conversationId: text(result.conversationId) } : {}),
@@ -487,7 +493,7 @@ async function dispatchViewerControl(
         ...(text(result.code) ? { code: text(result.code) } : {}),
       });
     }
-    throw new McpToolRefusal(message, {
+    throw new McpDispatchVerdictError(message, {
       status: response.status,
       ...(text(result.code) ? { code: text(result.code) } : {}),
     });
@@ -654,7 +660,16 @@ function productionCallerProject(): string | null {
   const authority = attentionCallerAuthority(attentionCallerSources());
   const conversationId = authority.kind === "root" || authority.kind === "worker" ? authority.conversationId : null;
   if (!conversationId) return null;
-  const conversation = agentRegistry().conversation(conversationId as `conversation_${string}`);
+  return callerProjectFromSnapshot(agentRegistry().readOnlySnapshot(), conversationId);
+}
+
+/**
+ * The canonical project of an authenticated caller: its conversation's
+ * recorded project ownership, else the project of its launch directory. One
+ * resolver for every consumer, read from the registry's own projection.
+ */
+function callerProjectFromSnapshot(snapshot: RegistrySnapshot, conversationId: string): string | null {
+  const conversation = readOnlyConversationLookupFromSnapshot(snapshot).conversation(conversationId as `conversation_${string}`);
   if (!conversation) return null;
   if (conversation.projectOwnership?.project) return conversation.projectOwnership.project;
   const cwd = conversation.generations.at(-1)?.launchProfile?.cwd?.trim();
@@ -3759,21 +3774,27 @@ export function viewerMcpToolPolicy(
 
 /* ── ORIGINAL-KEY RECOVERY (#1490) ──────────────────────────────────────── */
 
-/** The server-derived caller, and nothing the arguments say. A resolver that
-    faults reads as unidentified, which fails recovery closed. */
-function recoveryCaller(dependencies: Partial<Pick<ViewerMcpDomainDependencies, "attentionAuthority" | "callerProject">>): McpRequestCaller {
+/** The server-derived caller, and nothing the arguments say. The project is
+    the canonical one of the AUTHENTICATED conversation, read from the registry
+    projection the call already holds — never a separately resolved guess. An
+    authority or registry that faults reads as unidentified, which fails both
+    a fresh claim and a recovery closed. */
+function recoveryCaller(dependencies: Partial<Pick<ViewerMcpDomainDependencies, "attentionAuthority" | "registrySnapshot">>): McpRequestCaller {
+  const unidentified: McpRequestCaller = { kind: "unidentified", conversationId: null, project: null };
   let authority: AttentionCallerAuthority;
   try {
     authority = dependencies.attentionAuthority?.() ?? { kind: "unidentified" };
   } catch {
-    authority = { kind: "unidentified" };
+    return unidentified;
   }
-  if (authority.kind === "unidentified") return { kind: "unidentified", conversationId: null, project: null };
-  let project: string | null = null;
+  if (authority.kind === "unidentified") return unidentified;
+  if (authority.conversationId === null) return { kind: authority.kind, conversationId: null, project: null };
+  let project: string | null;
   try {
-    project = dependencies.callerProject?.() ?? null;
+    if (!dependencies.registrySnapshot) return unidentified;
+    project = callerProjectFromSnapshot(dependencies.registrySnapshot(), authority.conversationId);
   } catch {
-    project = null;
+    return unidentified;
   }
   return { kind: authority.kind, conversationId: authority.conversationId, project };
 }
@@ -3840,10 +3861,13 @@ async function recoverSend(
     return { outcome: "unknown", evidence: "delivery-record", reason: `the delivery record could not be read: ${found.reason}`, ids: {} };
   }
   if (found.kind === "absent") return { outcome: "unknown", evidence: "none", reason: RECOVERY_ABSENT_REASON, ids: {} };
+  if (found.kind === "unresolved") {
+    return { outcome: "unknown", evidence: "none", reason: "the bound target names no conversation the registry knows, so no delivery record can be matched to it", ids: {} };
+  }
   if (found.kind === "ambiguous") {
     return { outcome: "unknown", evidence: "delivery-record", reason: "more than one delivery operation claims this key; the match is ambiguous", ids: {} };
   }
-  const receipt = found.current.readable && found.current.value ? found.current.value : found.receipt;
+  const receipt = found.current.readable ? found.current.value : found.receipt;
   const ids: Record<string, string> = {
     operationId: found.operationId,
     ...(receipt.conversationId ? { conversationId: receipt.conversationId } : {}),

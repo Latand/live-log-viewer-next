@@ -2655,6 +2655,7 @@ test("an ambiguous send's operation id and resend guidance survive the control r
     expect(refusal).toBeInstanceOf(Error);
     expect((refusal as Error).message).toContain("delivery was started and never settled");
     expect((refusal as { details?: Record<string, unknown> }).details).toEqual({
+      status: 409,
       operationId,
       resend: "verify-first",
       actuation: "started",
@@ -2666,9 +2667,10 @@ test("an ambiguous send's operation id and resend guidance survive the control r
 
 /* ── ORIGINAL-KEY RECOVERY (#1490) ─────────────────────────────────────── */
 
-import { McpDispatchUncertainError, McpToolRefusal, type McpRequestBinding } from "./server";
-import { productionViewerControlDependencies, sendDownstreamKey, viewerMcpRecoverableTools } from "./bindings";
+import { McpDispatchNotExecutedError, McpDispatchUncertainError, McpDispatchVerdictError, McpToolRefusal, type McpDispatchTracker, type McpRequestBinding } from "./server";
+import { productionDomainDependencies, productionViewerControlDependencies, sendDownstreamKey, viewerMcpRecoverableTools } from "./bindings";
 import { SEND_UNVERIFIED_REASON } from "@/lib/runtime/sendSettlement";
+import { projectForCwd } from "@/lib/scanner/describe";
 
 const originalControlUrl = process.env.LLV_VIEWER_CONTROL_URL;
 const originalDeployTarget = process.env.LLV_VIEWER_DEPLOY_TARGET;
@@ -2679,11 +2681,13 @@ afterEach(() => {
   else process.env.LLV_VIEWER_DEPLOY_TARGET = originalDeployTarget;
 });
 
-async function classify(run: () => Promise<unknown>): Promise<{ kind: "answer" | "uncertain" | "refusal" | "error"; value: unknown }> {
+async function classify(run: () => Promise<unknown>): Promise<{ kind: "answer" | "uncertain" | "verdict" | "refusal" | "not-executed" | "error"; value: unknown }> {
   try {
     return { kind: "answer", value: await run() };
   } catch (error) {
     if (error instanceof McpDispatchUncertainError) return { kind: "uncertain", value: error.message };
+    if (error instanceof McpDispatchNotExecutedError) return { kind: "not-executed", value: error.message };
+    if (error instanceof McpDispatchVerdictError) return { kind: "verdict", value: { message: error.message, details: error.details } };
     if (error instanceof McpToolRefusal) return { kind: "refusal", value: { message: error.message, details: error.details } };
     return { kind: "error", value: (error as Error).message };
   }
@@ -2706,10 +2710,20 @@ test("the single dispatch classifies every transport outcome by what it can prov
   });
   process.env.LLV_VIEWER_CONTROL_URL = viewer.url.origin;
   const dispatch = productionViewerControlDependencies().dispatch!;
-  const send = () => dispatch("/api/tmux", { text: "x" }, {}, { deadlineAt: Date.now() + 2_000 });
+  /* The tracker the service hands down: the transport marks it the moment the
+     request may be on the wire, and never before. */
+  let tracker: McpDispatchTracker = { attempted: false };
+  const send = () => {
+    tracker = { attempted: false };
+    return dispatch("/api/tmux", { text: "x" }, {}, { deadlineAt: Date.now() + 2_000, dispatch: tracker });
+  };
+  /* The deliberately unanswered request, released before the server stops so
+     the teardown never waits on a handler that would otherwise hang forever. */
+  const unanswered: { release: ((response: Response) => void) | null } = { release: null };
   try {
     expect(await classify(send)).toEqual({ kind: "answer", value: { ok: true } });
     expect(requests).toBe(1);
+    expect(tracker.attempted).toBe(true);
 
     answer = () => new Response(null, { status: 503 });
     expect(await classify(send)).toMatchObject({ kind: "uncertain" });
@@ -2726,33 +2740,36 @@ test("the single dispatch classifies every transport outcome by what it can prov
       },
     }), { headers: { "content-type": "application/json" } });
     expect(await classify(send)).toMatchObject({ kind: "uncertain" });
-    answer = () => new Promise<Response>(() => {});
+    answer = () => new Promise<Response>((resolve) => { unanswered.release = resolve; });
     expect(await classify(() => dispatch("/api/tmux", { text: "x" }, {}, { deadlineAt: Date.now() + 600 }))).toMatchObject({ kind: "uncertain", value: expect.stringContaining("deadline") });
     expect(requests).toBe(7);
 
-    /* The server's own verdicts. */
+    /* The server's own verdicts, tagged as such and carrying their status. */
     answer = () => Response.json({ error: "empty message" }, { status: 400 });
-    expect(await classify(send)).toEqual({ kind: "refusal", value: { message: "empty message", details: { status: 400 } } });
+    expect(await classify(send)).toEqual({ kind: "verdict", value: { message: "empty message", details: { status: 400 } } });
     answer = () => Response.json({ error: "delivery was started and never settled", operationId: "op_admitted", resend: "verify-first", actuation: "started" }, { status: 409 });
     expect(await classify(send)).toEqual({
-      kind: "refusal",
-      value: { message: "delivery was started and never settled", details: { operationId: "op_admitted", resend: "verify-first", actuation: "started" } },
+      kind: "verdict",
+      value: { message: "delivery was started and never settled", details: { status: 409, operationId: "op_admitted", resend: "verify-first", actuation: "started" } },
     });
     answer = () => Response.json({ error: "spawn was refused", code: "ROLE_DENIED", launchId: "launch_refused", conversationId: "conversation_refused" }, { status: 403 });
-    expect(await classify(send)).toMatchObject({ kind: "refusal", value: { details: { launchId: "launch_refused", conversationId: "conversation_refused", code: "ROLE_DENIED" } } });
+    expect(await classify(send)).toMatchObject({ kind: "verdict", value: { details: { status: 403, launchId: "launch_refused", conversationId: "conversation_refused", code: "ROLE_DENIED" } } });
     answer = () => Response.json({ error: "host is starting", code: "HOST_STARTING" }, { status: 503 });
-    expect(await classify(send)).toMatchObject({ kind: "refusal", value: { details: { status: 503, code: "HOST_STARTING" } } });
+    expect(await classify(send)).toMatchObject({ kind: "verdict", value: { details: { status: 503, code: "HOST_STARTING" } } });
     answer = () => new Response("<html>not found</html>", { status: 404 });
-    expect(await classify(send)).toMatchObject({ kind: "error", value: expect.stringContaining("refused the request with status 404") });
+    expect(await classify(send)).toMatchObject({ kind: "verdict", value: { message: expect.stringContaining("refused the request with status 404"), details: { status: 404 } } });
     /* A 409 whose body was lost may have named an admitted operation. */
     answer = () => new Response("", { status: 409 });
     expect(await classify(send)).toMatchObject({ kind: "uncertain" });
     expect(requests).toBe(13);
+    expect(tracker.attempted).toBe(true);
   } finally {
+    unanswered.release?.(Response.json({ ok: true }));
     await viewer.stop(true);
   }
-  /* A refused connection never carried the request: a plain (not-executed) error. */
-  expect(await classify(send)).toMatchObject({ kind: "error", value: expect.stringContaining("connection was refused") });
+  /* A refused connection never carried the request: proven not executed. */
+  expect(await classify(send)).toMatchObject({ kind: "not-executed", value: expect.stringContaining("connection was refused") });
+  expect(tracker.attempted).toBe(true);
 });
 
 test("send and spawn bindings dispatch through the single-attempt seam with the persisted downstream key", async () => {
@@ -2811,30 +2828,69 @@ test("bind resolves caller and target server-side, never from the arguments", as
     observedAt: "2026-09-05T08:00:00.000Z",
   }]);
   const recipient = Object.values(registry.snapshot().conversations)[0]!;
+  /* Two calling conversations launched from two directories: the project a
+     caller is bound to is the canonical one of the conversation the server
+     authenticated, read from the registry, never a separately resolved guess. */
+  const callerCwdA = path.join(sandbox, "caller-a");
+  const callerCwdB = path.join(sandbox, "caller-b");
+  const callerFor = (cwd: string, name: string) => {
+    const callerPath = path.join(cwd, `${name}.jsonl`);
+    registry.reconcileConversations([{
+      engine: "codex",
+      path: callerPath,
+      accountId: "bind-fixture-account",
+      launchProfile: emptyLaunchProfile({ cwd }),
+      turn: { state: "idle", source: "assistant", terminalAt: null },
+      observedAt: "2026-09-05T08:00:00.000Z",
+    }]);
+    return registry.conversationForPath(callerPath)!;
+  };
+  const callerA = callerFor(callerCwdA, "caller-a");
+  const callerB = callerFor(callerCwdB, "caller-b");
+  const projectA = projectForCwd(callerCwdA);
+  const projectB = projectForCwd(callerCwdB);
+  expect(typeof projectA).toBe("string");
+  expect(projectA).not.toBe(projectB);
+  let authority: { kind: "worker"; conversationId: string; role: string | null } = { kind: "worker", conversationId: callerA.id, role: "builder" };
+  /* The REAL production dependency set, with only the registry projection and
+     the caller-authority seam replaced — so a resolver the production set does
+     not wire cannot pass here. */
   const tools = viewerMcpRecoverableTools({
+    ...productionDomainDependencies,
     registrySnapshot: () => registry.readOnlySnapshot(),
-    attentionAuthority: () => ({ kind: "worker", conversationId: "conversation_real_caller", role: "builder" }),
-    callerProject: () => "proj-real",
-  } as never);
+    attentionAuthority: () => authority,
+  });
   const forged = { callerConversationId: "conversation_forged", callerProject: "proj-forged", caller: { kind: "root" }, origin: { kind: "operator" } };
   const send = await tools.send_message!.bind({ clientRequestId: "bind-request-1", transcriptPath, text: "hi", ...forged });
   expect(send).toMatchObject({
-    caller: { kind: "worker", conversationId: "conversation_real_caller", project: "proj-real" },
+    caller: { kind: "worker", conversationId: callerA.id, project: projectA },
     target: { identity: recipient.id },
     downstreamKey: "bind-request-1",
   });
   const spawn = await tools.spawn_agent!.bind({ clientRequestId: "bind-request-1", cwd: sandbox, "prompt": "go", title: "Bind launch", ...forged });
-  expect(spawn).toMatchObject({ caller: { kind: "worker", conversationId: "conversation_real_caller", project: "proj-real" }, target: { identity: sandbox }, downstreamKey: "bind-request-1" });
+  expect(spawn).toMatchObject({ caller: { kind: "worker", conversationId: callerA.id, project: projectA }, target: { identity: sandbox }, downstreamKey: "bind-request-1" });
   expect(typeof spawn.target.project).toBe("string");
   expect(await tools.spawn_agent!.bind({ clientRequestId: "x".repeat(200), cwd: sandbox, "prompt": "go", title: "Bind launch" }))
     .toMatchObject({ downstreamKey: expect.stringMatching(/^mcp_[0-9a-f]{24}$/) });
+  /* Another authenticated conversation binds to ITS project: a replay from a
+     caller whose project differs is what the service then refuses. */
+  authority = { kind: "worker", conversationId: callerB.id, role: "builder" };
+  expect(await tools.send_message!.bind({ clientRequestId: "bind-request-1", transcriptPath, text: "hi" }))
+    .toMatchObject({ caller: { kind: "worker", conversationId: callerB.id, project: projectB } });
 
-  /* A faulting or absent resolver reads as unidentified, which fails closed. */
+  /* A faulting authority, or a registry that cannot answer for the caller's
+     project, reads as unidentified, which fails closed. */
   const faulting = viewerMcpRecoverableTools({
     registrySnapshot: () => registry.readOnlySnapshot(),
     attentionAuthority: () => { throw new Error("registry unreadable"); },
   } as never);
   expect(await faulting.send_message!.bind({ clientRequestId: "bind-2", conversationId: recipient.id, text: "hi" }))
+    .toMatchObject({ caller: { kind: "unidentified", conversationId: null, project: null } });
+  const projectless = viewerMcpRecoverableTools({
+    registrySnapshot: () => { throw new Error("registry unreadable"); },
+    attentionAuthority: () => authority,
+  } as never);
+  expect(await projectless.spawn_agent!.bind({ clientRequestId: "bind-2", cwd: sandbox, "prompt": "go", title: "Bind launch" }))
     .toMatchObject({ caller: { kind: "unidentified", conversationId: null, project: null } });
   expect(() => tools.send_message!.bind({ clientRequestId: "bind-3", text: "hi" })).toThrow("conversationId or transcriptPath is required");
   expect(() => tools.spawn_agent!.bind({ clientRequestId: "bind-3", "prompt": "go" })).toThrow("cwd is required");
@@ -2887,6 +2943,18 @@ test("send recovery maps the durable delivery record to the closed outcome set",
   expect(await recover(...binding("accepted-key"))).toMatchObject({ outcome: "settled", ids: { operationId: "op_accepted" }, facts: { state: "delivered", resend: "not-needed", duplicateRisk: false } });
   registry.recordDeliveryOutcome(reservation.id, "failed", SEND_UNVERIFIED_REASON, "unverified");
   expect(await recover(...binding("legacy-key"))).toMatchObject({ outcome: "settled", reason: SEND_UNVERIFIED_REASON, facts: { state: "failed", resend: "verify-first", duplicateRisk: true } });
+
+  /* A target bound to a path the registry never resolved matches no record:
+     one or many operations under the key, none is disclosed. */
+  const [byPath, pathOptions] = binding("accepted-key");
+  const unresolved = await recover({ ...byPath, target: { project: null, identity: "/nowhere/recipient.jsonl" } }, pathOptions);
+  expect(unresolved).toMatchObject({ outcome: "unknown", evidence: "none", ids: {} });
+  expect(JSON.stringify(unresolved)).not.toContain("op_accepted");
+  /* Recovery reads leave the delivery record exactly as it was. */
+  const before = JSON.stringify(registry.readOnlySnapshot());
+  await recover(...binding("accepted-key"));
+  await recover(...binding("legacy-key"));
+  expect(JSON.stringify(registry.readOnlySnapshot())).toBe(before);
 
   /* Unreadable state keeps uncertainty; a bound target with no identity is unknown. */
   const broken = viewerMcpRecoverableTools({

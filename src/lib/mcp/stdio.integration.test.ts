@@ -42,6 +42,20 @@ function isolatedEnvironment(sandbox: string, extra: Record<string, string> = {}
   return { ...environment, ...directories, ...extra };
 }
 
+/**
+ * A calling conversation the packaged MCP server can present: a launch
+ * receipt in the sandbox registry and the spawn capability minted for it.
+ * Since #1490 a recoverable mutation from a caller the server cannot identify
+ * is refused before anything is claimed, so every test that dispatches one
+ * speaks as this conversation.
+ */
+function identifiedEnvironment(sandbox: string, extra: Record<string, string> = {}): Record<string, string> {
+  const environment = isolatedEnvironment(sandbox, extra);
+  const registry = new AgentRegistry(path.join(environment.LLV_STATE_DIR!, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const caller = registry.beginSpawn("codex", sandbox, { cwd: sandbox, title: "Packaged MCP caller" });
+  return { ...environment, LLV_SPAWN_CAPABILITY: registry.rotateSpawnCapabilityForReceipt(caller.launchId) };
+}
+
 function spawnResult(label: string): Response {
   return Response.json({
     conversationId: `conversation_${label}`,
@@ -145,7 +159,7 @@ test("a packaged MCP spawn is dispatched once: a Viewer restart mid-request answ
     },
   });
   const viewerPort = firstViewer.port;
-  const environment = isolatedEnvironment(sandbox, {
+  const environment = identifiedEnvironment(sandbox, {
     LLV_VIEWER_DEPLOY_TARGET: path.join(sandbox, "viewer-release.json"),
     LLV_VIEWER_CONTROL_URL: firstViewer.url.origin,
   });
@@ -199,13 +213,12 @@ test("a packaged MCP spawn is dispatched once: a Viewer restart mid-request answ
     /* The restarted Viewer never received the lost request again. */
     expect(restartedKeys).not.toContain("restart-during");
 
-    /* This MCP process carries no caller identity, so an existing claim is
-       not its to recover: a repeat under the key, explicit or ordinary, is
-       refused without disclosure — and still dispatches nothing. */
+    /* A repeat under the key, explicit or ordinary, is a READ of the durable
+       record — which holds no launch receipt for it, so the fate stays
+       unknown — and still dispatches nothing. */
     for (const extra of [{ recoveryOnly: true }, {}]) {
       const lookup = await callSpawn(session.client, "restart-during", extra);
-      expect(lookup.structuredContent).toMatchObject({ ok: false, code: "recovery_not_permitted", retryable: false });
-      expect((lookup.structuredContent as { details?: unknown }).details).toBeUndefined();
+      expect(lookup.structuredContent).toMatchObject({ ok: false, code: "outcome_unknown", retryable: false, replayed: true, details: { outcome: "unknown", nextAction: "original-key-lookup" } });
     }
     expect(restartedKeys).not.toContain("restart-during");
 
@@ -276,7 +289,7 @@ test("a packaged MCP tool falls back from a retired launch port to the stable Vi
     container: "viewer-fixture",
     endpoint: stableViewer.url.origin,
   }));
-  const session = await startMcp(isolatedEnvironment(sandbox, {
+  const session = await startMcp(identifiedEnvironment(sandbox, {
     LLV_VIEWER_DEPLOY_TARGET: targetFile,
     LLV_VIEWER_CONTROL_URL: retiredOrigin,
     LLV_VIEWER_PORT: String(stableViewer.port),
@@ -318,6 +331,8 @@ interface CausalFixture {
   control(value: Record<string, unknown>): void;
   marker(name: string, timeoutMs?: number): Promise<void>;
   release(): void;
+  /** Releases the execution barrier: admitted effects run from here on. */
+  execute(): void;
   resetMarkers(): void;
   startHost(): Promise<HostProcess>;
   mcp(options?: { identified?: boolean; name?: string }): Promise<McpSession>;
@@ -360,8 +375,16 @@ async function causalFixture(prefix: string): Promise<CausalFixture> {
   const callerReceipt = registry.beginSpawn("codex", sandbox, { cwd: sandbox, title: "Causal proof caller" });
   const capability = registry.rotateSpawnCapabilityForReceipt(callerReceipt.launchId);
 
+  /* One stable port for every generation of the controlled host, as the
+     production Viewer has: an MCP process keeps its endpoint across a host
+     restart, so a call after the restart reaches the production route rather
+     than a dead port. */
+  const probe = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("") });
+  const port = probe.port;
+  await probe.stop(true);
   const config = {
     portFile: path.join(sandbox, "host.port"),
+    port,
     effectsPath,
     responsesPath,
     controlPath,
@@ -400,6 +423,7 @@ async function causalFixture(prefix: string): Promise<CausalFixture> {
       }
     },
     release: () => fs.writeFileSync(path.join(markerDir, "release"), "1"),
+    execute: () => fs.writeFileSync(path.join(markerDir, "execute"), "1"),
     resetMarkers: () => {
       for (const entry of fs.readdirSync(markerDir)) fs.rmSync(path.join(markerDir, entry), { force: true });
     },
@@ -615,18 +639,31 @@ test("network failure without dispatch proof stays unknown and never redelivers;
 
     /* A pre-dispatch rejection by the production route: no receipt, no writer. */
     const rejected = await call(mcp, "spawn_agent", spawnArguments(fixture, "spawn-rejected-1", { cwd: path.join(fixture.sandbox, "missing") }));
-    expect(rejected).toMatchObject({ ok: false, code: "tool_failed", details: { outcome: "not-executed", nextAction: "new-request-permitted" } });
+    expect(rejected).toMatchObject({ ok: false, code: "tool_failed", details: { outcome: "not-executed", nextAction: "new-request-permitted", evidence: "dispatch-refused" } });
+    /* The proof is the production route's OWN 4xx verdict, not a dead port. */
+    expect(String(rejected.error)).not.toContain("connection was refused");
+    const verdicts = fixture.responses().filter((response) => response.pathname === "/api/spawn" && response.body.includes("missing"));
+    expect(verdicts).toHaveLength(1);
+    expect(verdicts[0]!.status).toBeGreaterThanOrEqual(400);
+    expect(verdicts[0]!.status).toBeLessThan(500);
+    expect(rejected.details?.status).toBe(verdicts[0]!.status);
     expect(await call(mcp, "spawn_agent", spawnArguments(fixture, "spawn-rejected-1", { cwd: path.join(fixture.sandbox, "missing") })))
       .toMatchObject({ ok: false, replayed: true, details: { outcome: "not-executed" } });
     expect(fixture.effects()).toHaveLength(0);
     expect(Object.values(fixture.registryFile().receipts).filter((receipt) => receipt.clientAttemptId === "spawn-rejected-1")).toHaveLength(0);
 
-    /* recoveryOnly under a key nothing ever claimed starts no work and closes
-       the key: a later ordinary call under it cannot dispatch. */
+    /* recoveryOnly under a key nothing ever claimed starts no work and writes
+       nothing: unknown, because the original may still be on its way — and
+       when it arrives it claims and dispatches exactly once. */
     const probe = await call(mcp, "send_message", sendArguments(fixture, "send-never-1", { recoveryOnly: true }));
-    expect(probe).toMatchObject({ ok: false, code: "not_executed", details: { outcome: "not-executed" } });
-    expect(await call(mcp, "send_message", sendArguments(fixture, "send-never-1"))).toMatchObject({ ok: false, code: "not_executed", replayed: true });
+    expect(probe).toMatchObject({ ok: false, code: "outcome_unknown", replayed: false, details: { outcome: "unknown", evidence: "none", nextAction: "original-key-lookup" } });
     expect(fixture.effects()).toHaveLength(0);
+    const arrived = await call(mcp, "send_message", sendArguments(fixture, "send-never-1"));
+    expect(arrived).toMatchObject({ ok: true, replayed: false, outcome: "delivered" });
+    expect(fixture.effects().filter((effect) => effect.kind === "recipient" && effect.clientMessageId === "send-never-1")).toHaveLength(1);
+    expect(await call(mcp, "send_message", sendArguments(fixture, "send-never-1", { recoveryOnly: true })))
+      .toMatchObject({ ok: true, outcome: "settled", operationId: arrived.operationId, state: "delivered" });
+    expect(fixture.effects().filter((effect) => effect.kind === "recipient" && effect.clientMessageId === "send-never-1")).toHaveLength(1);
   } finally {
     await mcp.close();
     await host.stop();
@@ -645,15 +682,28 @@ test("spoofing and concurrency: another caller, a changed payload, and two proce
     expect(accepted).toMatchObject({ ok: true, outcome: "queued", settled: false });
 
     /* An unidentified caller — the same key, the same payload, even forged
-       caller fields — learns nothing. */
+       caller fields — learns nothing, and cannot dispatch a fresh mutation
+       either: the refusal is the same under an existing and an absent key. */
     const forged = await call(stranger, "send_message", sendArguments(fixture, "send-owned-1", {
       recoveryOnly: true,
       callerConversationId: fixture.caller.conversationId,
       callerProject: "spoofed",
     }));
-    expect(forged).toMatchObject({ ok: false, code: "recovery_not_permitted" });
+    expect(forged).toMatchObject({ ok: false, code: "caller_unidentified", retryable: false });
     expect(forged.details).toBeUndefined();
     expect(JSON.stringify(forged)).not.toContain(String(accepted.operationId));
+    for (const [name, args] of [
+      ["send_message", sendArguments(fixture, "send-owned-1")],
+      ["send_message", sendArguments(fixture, "send-anonymous-1")],
+      ["spawn_agent", spawnArguments(fixture, "spawn-anonymous-1")],
+    ] as const) {
+      const refused = await call(stranger, name, args);
+      expect(refused).toMatchObject({ ok: false, code: "caller_unidentified", replayed: false });
+      expect(refused.details).toBeUndefined();
+    }
+    expect(fixture.effects().filter((effect) => String(effect.clientMessageId ?? effect.clientAttemptId).includes("anonymous"))).toHaveLength(0);
+    expect(fixture.responses().filter((response) => response.body.includes("anonymous"))).toHaveLength(0);
+    expect(Object.values(fixture.registryFile().receipts).filter((receipt) => receipt.clientAttemptId === "spawn-anonymous-1")).toHaveLength(0);
 
     /* The owner with a changed payload is a conflict, not a second send. */
     expect(await call(owner, "send_message", sendArguments(fixture, "send-owned-1", { text: "changed" })))
@@ -678,6 +728,150 @@ test("spoofing and concurrency: another caller, a changed payload, and two proce
     await owner.close();
     await stranger.close();
     await peer.close();
+    await host.stop();
+  }
+}, 40_000);
+
+test("send: admitted, response lost BEFORE the recipient acts, original-key recovery across MCP and host restart — one recipient delivery", async () => {
+  const fixture = await causalFixture("llv-1490-send-barrier-");
+  let host = await fixture.startHost();
+  let mcp = await fixture.mcp();
+  try {
+    /* The production handler admits the send (the reservation exists), the
+       response is cut after its status line, and the recipient has NOT yet
+       taken anything: two barriers, admission and execution, and the loss
+       happens between them. */
+    fixture.control({ mode: "cut", sendEffect: "deliver", admission: "hold-effect" });
+    const original = call(mcp, "send_message", sendArguments(fixture, "send-barrier-1"));
+    await fixture.marker("admitted");
+    await fixture.marker("accepted");
+    expect(fixture.effects()).toHaveLength(0);
+    const lost = await original;
+    expect(lost).toMatchObject({ ok: true, recovered: true, outcome: "accepted", state: "in-flight", nextAction: "original-key-lookup" });
+    expect(typeof lost.operationId).toBe("string");
+    const operationId = lost.operationId as string;
+    expect(fixture.effects()).toHaveLength(0);
+
+    /* The MCP process that made the call is gone before anything executed.
+       A fresh one, under the original key, reads the admission and starts
+       nothing; the ordinary call under the key starts nothing either. */
+    await mcp.close();
+    mcp = await fixture.mcp({ name: "viewer-causal-proof-restarted" });
+    expect(await call(mcp, "send_message", sendArguments(fixture, "send-barrier-1", { recoveryOnly: true })))
+      .toMatchObject({ ok: true, outcome: "accepted", operationId, replayed: true });
+    expect(await call(mcp, "send_message", sendArguments(fixture, "send-barrier-1")))
+      .toMatchObject({ ok: true, outcome: "accepted", operationId, replayed: true });
+    expect(fixture.effects()).toHaveLength(0);
+
+    /* Execution is released: the recipient takes the admitted send once. */
+    fixture.execute();
+    const deadline = Date.now() + 10_000;
+    while (fixture.effects().length === 0) {
+      if (Date.now() > deadline) throw new Error("the admitted send never executed");
+      await Bun.sleep(5);
+    }
+    const recovered = await call(mcp, "send_message", sendArguments(fixture, "send-barrier-1", { recoveryOnly: true }));
+    expect(recovered).toMatchObject({ ok: true, outcome: "settled", operationId, state: "delivered", resend: "not-needed", nextAction: "follow-disposition" });
+
+    /* The host restarts against the same stores: same answer, nothing new. */
+    await host.kill();
+    fixture.control({ mode: "respond" });
+    host = await fixture.startHost();
+    expect(await call(mcp, "send_message", sendArguments(fixture, "send-barrier-1")))
+      .toMatchObject({ ok: true, outcome: "settled", operationId, state: "delivered" });
+    const receipt = await mcp.client.callTool({ name: "message_receipt", arguments: { clientRequestId: "send-barrier-1-receipt", operationId } });
+    expect(receipt.structuredContent).toMatchObject({ ok: true, operationId, state: "delivered" });
+
+    const deliveries = fixture.effects().filter((effect) => effect.kind === "recipient");
+    expect(deliveries).toHaveLength(1);
+    expect(deliveries[0]).toMatchObject({ clientMessageId: "send-barrier-1", operationId });
+    expect(Object.values(fixture.registryFile().heldDeliveries).filter((delivery) => delivery.clientMessageId === "send-barrier-1")).toHaveLength(1);
+    expect(fixture.responses().filter((response) => response.pathname === "/api/tmux" && response.body.includes("send-barrier-1"))).toHaveLength(1);
+  } finally {
+    await mcp.close();
+    await host.stop();
+  }
+}, 40_000);
+
+test("spawn: admitted, response lost BEFORE the writer acts, original-key recovery across MCP and host restart — one launch, one conversation, one writer", async () => {
+  const fixture = await causalFixture("llv-1490-spawn-barrier-");
+  let host = await fixture.startHost();
+  let mcp = await fixture.mcp();
+  try {
+    fixture.control({ mode: "cut", admission: "hold-effect" });
+    const original = call(mcp, "spawn_agent", spawnArguments(fixture, "spawn-barrier-1"));
+    await fixture.marker("admitted");
+    await fixture.marker("accepted");
+    expect(fixture.effects()).toHaveLength(0);
+    const lost = await original;
+    expect(lost).toMatchObject({ ok: true, recovered: true, nextAction: "original-key-lookup" });
+    expect(["accepted", "in-flight"]).toContain(String(lost.outcome));
+    const launchId = lost.launchId as string;
+    const conversationId = lost.conversationId as string;
+    expect(typeof launchId).toBe("string");
+    expect(typeof conversationId).toBe("string");
+    expect(fixture.effects()).toHaveLength(0);
+
+    await mcp.close();
+    mcp = await fixture.mcp({ name: "viewer-causal-proof-restarted" });
+    expect(await call(mcp, "spawn_agent", spawnArguments(fixture, "spawn-barrier-1", { recoveryOnly: true })))
+      .toMatchObject({ ok: true, launchId, conversationId, replayed: true });
+    expect(await call(mcp, "spawn_agent", spawnArguments(fixture, "spawn-barrier-1")))
+      .toMatchObject({ ok: true, launchId, conversationId, replayed: true });
+    expect(fixture.effects()).toHaveLength(0);
+
+    fixture.execute();
+    const deadline = Date.now() + 10_000;
+    while (fixture.effects().length === 0) {
+      if (Date.now() > deadline) throw new Error("the admitted launch never executed");
+      await Bun.sleep(5);
+    }
+    expect(await call(mcp, "spawn_agent", spawnArguments(fixture, "spawn-barrier-1", { recoveryOnly: true })))
+      .toMatchObject({ ok: true, launchId, conversationId });
+
+    await host.kill();
+    fixture.control({ mode: "respond" });
+    host = await fixture.startHost();
+    expect(await call(mcp, "spawn_agent", spawnArguments(fixture, "spawn-barrier-1")))
+      .toMatchObject({ ok: true, launchId, conversationId });
+
+    const launches = fixture.effects().filter((effect) => effect.kind === "writer");
+    expect(launches).toHaveLength(1);
+    expect(launches[0]).toMatchObject({ launchId, conversationId, clientAttemptId: "spawn-barrier-1" });
+    const receipts = Object.values(fixture.registryFile().receipts).filter((receipt) => receipt.clientAttemptId === "spawn-barrier-1");
+    expect(receipts).toHaveLength(1);
+    expect(String(receipts[0]?.conversationId)).toBe(conversationId);
+    expect(fixture.responses().filter((response) => response.pathname === "/api/spawn" && response.body.includes(launchId))).toHaveLength(1);
+  } finally {
+    await mcp.close();
+    await host.stop();
+  }
+}, 40_000);
+
+test("a lookup from another process before the original ever claims stays unknown, writes nothing, and the original then dispatches once", async () => {
+  const fixture = await causalFixture("llv-1490-before-claim-");
+  const host = await fixture.startHost();
+  const owner = await fixture.mcp({ name: "viewer-owner" });
+  const observer = await fixture.mcp({ name: "viewer-observer" });
+  try {
+    fixture.control({ mode: "respond", sendEffect: "deliver" });
+    for (const name of ["send_message", "spawn_agent"] as const) {
+      const args = name === "send_message" ? sendArguments(fixture, "before-claim-1") : spawnArguments(fixture, "before-claim-1");
+      const early = await call(observer, name, { ...args, recoveryOnly: true });
+      expect(early).toMatchObject({ ok: false, code: "outcome_unknown", replayed: false, details: { outcome: "unknown", evidence: "none", nextAction: "original-key-lookup" } });
+      /* The original, arriving after the lookup, is not suppressed: it
+         claims, dispatches once, and the observer then reads its record. */
+      const original = await call(owner, name, args);
+      expect(original).toMatchObject({ ok: true, replayed: false });
+      const late = await call(observer, name, { ...args, recoveryOnly: true });
+      expect(late).toMatchObject({ ok: true, recovered: true, replayed: true });
+      expect(late.operationId ?? late.launchId).toBe(original.operationId ?? original.launchId);
+    }
+    expect(fixture.effects().filter((effect) => effect.kind === "recipient")).toHaveLength(1);
+    expect(fixture.effects().filter((effect) => effect.kind === "writer")).toHaveLength(1);
+  } finally {
+    await owner.close();
+    await observer.close();
     await host.stop();
   }
 }, 40_000);

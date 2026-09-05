@@ -650,12 +650,17 @@ function settleProjection(
  * exact client message key handed to the send route. This is the read-only
  * primitive the MCP recovery path and the seat monitor's harvest (#1465) share:
  * it accepts a binding somebody else established, answers from the registry's
- * own records, and can neither enqueue, retry, withdraw nor spawn.
+ * own records and the journal's CURRENT row, and can neither enqueue, retry,
+ * withdraw, settle, fence nor spawn. Nothing here writes: a reservation that is
+ * past its settlement deadline is reported exactly as it rests, because a
+ * lookup is an observation and `message_receipt` is where a send is ENDED.
  *
  * The answer is closed. `found` names exactly one operation; `absent` means
  * the records hold nothing under that key — an observation, never proof that
- * nothing executed; `ambiguous` means more than one operation claims the key,
- * which discloses none of them.
+ * nothing executed; `ambiguous` means more than one operation claims the key
+ * under the bound recipient, which discloses none of them; `unresolved` means
+ * the bound target names no conversation the registry knows, so no record can
+ * be matched to it and none is disclosed.
  */
 export interface OriginalSendBinding {
   /** Canonical conversation id (alias-resolved), or a transcript path when the
@@ -668,14 +673,23 @@ export interface OriginalSendBinding {
 export type OriginalSendLookup =
   | { kind: "found"; operationId: string; deliveryId: string | null; receipt: SendReceipt; reservationState: HeldDelivery["state"] | null }
   | { kind: "absent" }
-  | { kind: "ambiguous"; operationIds: string[] };
+  | { kind: "ambiguous"; operationIds: string[] }
+  | { kind: "unresolved" };
 
 export function lookupOriginalSend(file: RegistryFile, binding: OriginalSendBinding): OriginalSendLookup {
   const lookup = readOnlyConversationLookupFromSnapshot(file);
   const canonical = (id: string): string => lookup.conversation(id as ViewerConversationId)?.id ?? id;
+  /* The target is resolved through the registry's own lookup — a conversation
+     id through its alias walk, a path through the path index — and a target
+     nothing resolves matches nothing. An exact id the registry does not know
+     still matches only records carrying that exact id; a path it does not know
+     matches no record at all, because a path is not an identity. */
   const byConversation = binding.conversationId.startsWith("conversation_");
-  const target = byConversation ? canonical(binding.conversationId) : null;
-  const matches = (conversationId: string): boolean => !byConversation || canonical(conversationId) === target;
+  const target = byConversation
+    ? canonical(binding.conversationId)
+    : lookup.conversationForPath(binding.conversationId)?.id ?? null;
+  if (!target) return { kind: "unresolved" };
+  const matches = (conversationId: string): boolean => canonical(conversationId) === target;
   const operations = new Map<string, string | null>();
   for (const delivery of Object.values(file.heldDeliveries)) {
     if (delivery.clientMessageId !== binding.clientMessageId || !matches(delivery.conversationId)) continue;
@@ -695,15 +709,51 @@ export function lookupOriginalSend(file: RegistryFile, binding: OriginalSendBind
 }
 
 export type OriginalSendEvidence =
-  | { kind: "found"; operationId: string; deliveryId: string | null; receipt: SendReceipt; reservationState: HeldDelivery["state"] | null; current: Evidence<SendReceipt | null> }
+  | { kind: "found"; operationId: string; deliveryId: string | null; receipt: SendReceipt; reservationState: HeldDelivery["state"] | null; current: Evidence<SendReceipt> }
   | { kind: "absent" }
   | { kind: "ambiguous"; operationIds: string[] }
+  | { kind: "unresolved" }
   | { kind: "unreadable"; reason: string };
 
 /**
- * The lookup above, then the CURRENT answer for the one operation it found —
- * the same settlement read `message_receipt` performs, which may reconnect to
- * the runtime journal. A journal or registry that cannot be read keeps the
+ * The CURRENT answer for one found operation, projected without writing.
+ *
+ * A durable record that is already terminal is the answer. One still in flight
+ * is checked against the journal's current retry leaf, and a terminal verdict
+ * there is REPORTED — never written back onto the reservation, never fenced,
+ * never aged past a deadline. A journal that cannot be read leaves the durable
+ * projection standing and says so. Where {@link resolveSendReceipt} may end a
+ * send, this only looks at it.
+ */
+async function projectCurrentSend(
+  projected: SendReceipt,
+  operationId: string,
+  ports: SendSettlementPorts,
+): Promise<Evidence<SendReceipt>> {
+  if (projected.state !== "in-flight") return { readable: true, value: projected };
+  const client = ports.client === undefined ? runtimeHostClient() : ports.client;
+  if (!client) return { readable: true, value: { ...projected, evidence: "delivery-record" } };
+  const journal = await readEvidence(
+    () => client.operationStatus(operationId, { currentRetryLeaf: true }),
+    "runtime host is unavailable",
+  );
+  if (!journal.readable) return journal;
+  const receipt = journal.value?.receipt ?? null;
+  const verdict = journalVerdict(receipt?.status ?? null, receipt?.reason);
+  if (!verdict) return { readable: true, value: { ...projected, evidence: "delivery-journal" } };
+  if (verdict.state === "delivered") {
+    return { readable: true, value: { ...projected, state: "delivered", reason: null, duplicateRisk: false, resend: "not-needed", evidence: "delivery-journal" } };
+  }
+  return {
+    readable: true,
+    value: { ...projected, state: "failed", reason: verdict.reason, ...resendGuidance(verdict.disposition, verdict.reason), evidence: "delivery-journal" },
+  };
+}
+
+/**
+ * The lookup above, then the current answer for the one operation it found.
+ * Read-only end to end: the registry snapshot and the journal row are read,
+ * and neither is changed. A journal or registry that cannot be read keeps the
  * identity the durable record established and marks the current answer
  * unreadable; it never turns into an absence.
  */
@@ -716,6 +766,6 @@ export async function resolveOriginalSend(
   if (!snapshot.readable) return { kind: "unreadable", reason: snapshot.reason };
   const found = lookupOriginalSend(snapshot.value, binding);
   if (found.kind !== "found") return found;
-  const current = await readEvidence(() => resolveSendReceipt(found.operationId, ports), "the current delivery answer could not be read");
+  const current = await projectCurrentSend(found.receipt, found.operationId, ports);
   return { ...found, current };
 }

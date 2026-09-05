@@ -35,12 +35,21 @@ async function awaitFile(filename: string): Promise<void> {
  *
  * A control file, re-read on every request, decides how the RESPONSE behaves
  * after the handler has run: answered normally, held until a release file
- * appears, or held forever so the test can kill this process once the
- * acceptance marker is written. The handler itself always runs to completion
- * first — the response is what gets lost, never the effect.
+ * appears, cut after its headers, or held forever so the test can kill this
+ * process once the acceptance marker is written.
+ *
+ * Admission and execution are two separate barriers. With `admission:
+ * "hold-effect"` the fixtures write the `admitted` marker the moment the
+ * durable record exists (the reservation for a send, the launch receipt for a
+ * spawn) and produce their effect only once the `execute` file appears — so a
+ * test can lose the response BETWEEN the server admitting the request and the
+ * recipient or writer doing anything, and then count exactly one effect.
  */
 interface HttpHostConfig {
   portFile: string;
+  /** The stable port every generation of this host listens on, as the
+      production Viewer does, so an MCP process outlives a host restart. */
+  port?: number;
   effectsPath: string;
   /** Every answer the production handlers produced, whether or not it was
       delivered — the fixture's own record of what the HTTP layer said. */
@@ -56,9 +65,12 @@ interface HttpHostControl {
       marker, then wait for the release file before answering. `lose`: run the
       handler, write the accepted marker, never answer. `hold-before`: write the
       reached marker BEFORE the handler runs and wait for the release file. */
-  mode?: "respond" | "hold" | "lose" | "hold-before";
+  mode?: "respond" | "hold" | "lose" | "hold-before" | "cut";
   /** What the send fixture does once the reservation exists. */
   sendEffect?: "deliver" | "queue";
+  /** `hold-effect`: write the `admitted` marker as soon as the durable record
+      exists and defer the effect until the `execute` file appears. */
+  admission?: "immediate" | "hold-effect";
 }
 
 async function runHttpHost(configPath: string): Promise<void> {
@@ -84,6 +96,13 @@ async function runHttpHost(configPath: string): Promise<void> {
   const marker = (name: string): void => {
     fs.writeFileSync(path.join(config.markerDir, name), String(Date.now()));
   };
+  /* The execution barrier: an admitted request's effect waits here until the
+     test releases execution. Runs off the request path so a held effect never
+     blocks the response or the next request. */
+  const executionBarrier = async (): Promise<void> => {
+    marker("admitted");
+    await awaitFile(path.join(config.markerDir, "execute"));
+  };
 
   setConversationHostDependenciesForTests({
     completedFileScan: async () => ({ snapshot: { files: [] } }) as never,
@@ -108,13 +127,22 @@ async function runHttpHost(configPath: string): Promise<void> {
         null,
         { operationId, kind: "send", policy: "queue" },
       );
-      if (reservation.state === "assigned") {
+      const actuate = (): void => {
         registry.beginDeliveryAttempt(reservation.id, config.recipientGenerationId);
         /* THE recipient effect: the controlled recipient takes the message
            exactly here, once per actuation, whatever the HTTP layer answers. */
         effect({ kind: "recipient", clientMessageId, operationId, text: request.text });
         if ((control().sendEffect ?? "deliver") === "deliver") {
           registry.recordDeliveryOutcome(reservation.id, "delivered", null, "delivered");
+        }
+      };
+      if (reservation.state === "assigned") {
+        if (control().admission === "hold-effect") {
+          /* Admitted and answered as queued; the recipient takes it only once
+             execution is released, like a drain the runtime runs later. */
+          void executionBarrier().then(actuate);
+        } else {
+          actuate();
         }
       }
       const receipt = sendReceiptFor(registry.readOnlySnapshot(), operationId);
@@ -147,6 +175,10 @@ async function runHttpHost(configPath: string): Promise<void> {
     defer: (work: () => Promise<void>) => { void work(); },
     storeImages: () => [],
     spawnStructuredConversation: async (input: { receipt: { launchId: string; conversationId: string; clientAttemptId: string | null }; prompt: string }) => {
+      /* The launch receipt already exists when the route hands the launch
+         here: that is the admission. The writer runs only once execution is
+         released. */
+      if (control().admission === "hold-effect") await executionBarrier();
       /* THE writer effect: the controlled writer creates the conversation's
          transcript exactly here, once per launch it is handed. */
       const transcriptPath = path.join(config.transcriptRoot, `${input.receipt.launchId}.jsonl`);
@@ -164,7 +196,7 @@ async function runHttpHost(configPath: string): Promise<void> {
 
   const server = Bun.serve({
     hostname: "127.0.0.1",
-    port: 0,
+    port: config.port ?? 0,
     fetch: async (request) => {
       const url = new URL(request.url);
       const current = control();
@@ -185,6 +217,14 @@ async function runHttpHost(configPath: string): Promise<void> {
         marker("accepted");
         if (current.mode === "lose") return new Promise<Response>(() => {});
         await awaitFile(path.join(config.markerDir, "release"));
+      }
+      if (current.mode === "cut") {
+        /* The response is lost after its status line: the body errors before
+           a byte of it is readable, so the caller learns nothing from it. */
+        marker("accepted");
+        return new Response(new ReadableStream<Uint8Array>({
+          start(controller) { controller.error(new Error("response cut by the fixture")); },
+        }), { status: response.status, headers: { "content-type": "application/json" } });
       }
       return answer;
     },

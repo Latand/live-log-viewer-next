@@ -176,6 +176,15 @@ export interface McpToolCallContext {
       a recoverable mutation's single dispatch; the binding reads its downstream
       idempotency key from here rather than deriving one of its own. */
   binding?: McpRequestBinding;
+  /** #1490: written by the transport the moment the request may be on the
+      wire. A failure raised while this still says `false` happened before any
+      dispatch, which is the only way an error without an id proves that the
+      server did nothing. */
+  dispatch?: McpDispatchTracker;
+}
+
+export interface McpDispatchTracker {
+  attempted: boolean;
 }
 export type McpToolBinding = (args: McpToolArgs, context?: McpToolCallContext) => Promise<McpToolPayload>;
 export type McpToolBindings = Record<McpToolName, McpToolBinding>;
@@ -445,9 +454,6 @@ export interface McpRecoveryReceiptStore extends McpReceiptStore {
   /** Writes the result only if none is recorded yet, and returns whatever the
       row holds afterwards — the first terminal answer always wins. */
   settle(key: string, digest: string, result: McpToolResult, stage?: "settled" | "not-executed"): McpToolResult | Promise<McpToolResult>;
-  /** Inserts a permanently closed `not-executed` row under a key nothing has
-      claimed. False when the key was claimed in the meantime. */
-  fenceAbsent(key: string, digest: string, binding: McpRequestBinding, result: McpToolResult): boolean | Promise<boolean>;
 }
 
 export function supportsMcpRecovery(store: McpReceiptStore): store is McpRecoveryReceiptStore {
@@ -455,8 +461,7 @@ export function supportsMcpRecovery(store: McpReceiptStore): store is McpRecover
   return typeof candidate.lookup === "function"
     && typeof candidate.markDispatching === "function"
     && typeof candidate.fenceUndispatched === "function"
-    && typeof candidate.settle === "function"
-    && typeof candidate.fenceAbsent === "function";
+    && typeof candidate.settle === "function";
 }
 
 function recordOf(receipt: Receipt): McpReceiptRecord {
@@ -515,11 +520,6 @@ export class MemoryMcpReceiptStore implements McpRecoveryReceiptStore {
     return result;
   }
 
-  fenceAbsent(key: string, digest: string, binding: McpRequestBinding, result: McpToolResult): boolean {
-    if (this.receipts.has(key)) return false;
-    this.receipts.set(key, { digest, binding, result, stage: "not-executed" });
-    return true;
-  }
 }
 
 type ReceiptFile = {
@@ -1295,9 +1295,6 @@ export class FileMcpReceiptStore implements McpRecoveryReceiptStore {
     });
   }
 
-  fenceAbsent(key: string, digest: string, binding: McpRequestBinding, result: McpToolResult): Promise<boolean> {
-    return this.transition(key, digest, (receipt) => (receipt ? null : { digest, binding, result, stage: "not-executed" }));
-  }
 }
 
 type StoredSqliteReceipt = {
@@ -1487,15 +1484,6 @@ export class SqliteMcpReceiptStore implements McpRecoveryReceiptStore {
       try { this.db.exec("ROLLBACK"); } catch { /* transaction already closed */ }
       throw error;
     }
-  }
-
-  fenceAbsent(key: string, digest: string, binding: McpRequestBinding, result: McpToolResult): boolean {
-    const resultJson = JSON.stringify(result);
-    const bindingJson = JSON.stringify(binding);
-    return this.db.query<unknown, [string, string, string, number, number, string]>(`
-      INSERT OR IGNORE INTO mcp_receipts(receipt_key, digest, retention, result_json, storage_bytes, claimed_at, binding_json, stage)
-      VALUES (?, ?, 'durable', ?, ?, ?, ?, 'not-executed')
-    `).run(key, digest, resultJson, this.storageBytes(key, digest, resultJson, bindingJson), this.now(), bindingJson).changes === 1;
   }
 
   private selectRow(key: string): StoredSqliteReceipt | null {
@@ -1888,6 +1876,31 @@ export class McpDispatchUncertainError extends Error {
   }
 }
 
+/**
+ * Thrown by the transport when it can PROVE the request never left this
+ * process: the kernel refused the connection, so no byte was written and the
+ * server did nothing. The one transport failure that closes an attempt as
+ * not-executed.
+ */
+export class McpDispatchNotExecutedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "McpDispatchNotExecutedError";
+  }
+}
+
+/**
+ * The server's own answer to the one dispatch: a JSON verdict with a status.
+ * Carries every id the verdict named. Distinct from a refusal a binding raises
+ * on its own, so the service knows this one came back from the server.
+ */
+export class McpDispatchVerdictError extends McpToolRefusal {
+  constructor(message: string, details: McpToolPayload & { status: number }) {
+    super(message, details);
+    this.name = "McpDispatchVerdictError";
+  }
+}
+
 function sameCaller(recorded: McpRequestCaller, current: McpRequestCaller): boolean {
   return recorded.kind === current.kind
     && recorded.conversationId === current.conversationId
@@ -1898,6 +1911,16 @@ function identifiedCaller(caller: McpRequestCaller): boolean {
   return caller.kind === "root" || (caller.kind === "worker" && caller.conversationId !== null);
 }
 
+/** The string-valued ids a refusal carried, kept on an uncertain answer. */
+function stringIds(details: McpToolPayload): Record<string, string> {
+  const ids: Record<string, string> = {};
+  for (const name of ["operationId", "launchId", "conversationId", "deliveryId", "transcriptPath"]) {
+    const value = details[name];
+    if (typeof value === "string" && value) ids[name] = value;
+  }
+  return ids;
+}
+
 function nextActionFor(outcome: McpRecoveryOutcome): McpRecoveryNextAction {
   if (outcome === "settled") return "follow-disposition";
   if (outcome === "not-executed") return "new-request-permitted";
@@ -1905,6 +1928,7 @@ function nextActionFor(outcome: McpRecoveryOutcome): McpRecoveryNextAction {
 }
 
 const RECOVERY_NOT_PERMITTED = "this clientRequestId cannot be recovered by this caller";
+const CALLER_UNIDENTIFIED = "the caller's identity could not be established, so this mutation is refused before anything is claimed or dispatched";
 
 function recoveryAnswer(
   toolName: McpToolName,
@@ -2013,7 +2037,10 @@ export function createMcpToolService(
         : effectiveArgs;
       const digest = requestDigest(typedTool, digestArgs);
       const key = `${typedTool}:${requestId}`;
-      const active = inFlight.get(key);
+      /* A recoverable mutation never joins an in-process duplicate: who is
+         calling is decided first, and every later call under the key — in
+         this process or another — is answered from the durable record. */
+      const active = recoverable ? undefined : inFlight.get(key);
       if (active) {
         if (active.digest !== digest) {
           return finish(failure(toolName, requestId, "idempotency_conflict", "clientRequestId was already used with different arguments", false, true), "conflict");
@@ -2052,6 +2079,13 @@ export function createMcpToolService(
           owner: { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) },
           claimedAt: new Date().toISOString(),
         };
+        /* No identity, no claim: a mutation nobody could ever recover is not
+           dispatched, and the refusal is the same whether or not the key
+           exists, so it discloses nothing. */
+        if (!identifiedCaller(binding.caller)) {
+          outcome = "failure";
+          return failure(typedTool, requestId, "caller_unidentified", CALLER_UNIDENTIFIED, false, false);
+        }
         const notPermitted = () => {
           outcome = "failure";
           return failure(typedTool, requestId, "recovery_not_permitted", RECOVERY_NOT_PERMITTED, false, true);
@@ -2063,7 +2097,6 @@ export function createMcpToolService(
                to come from the downstream record itself or not at all. The
                row stays intact either way; what it holds is disclosed only to
                a caller the durable evidence names as its owner. */
-            if (!identifiedCaller(binding.caller)) return notPermitted();
             const evidence = await tool.recover(binding, { legacy: true, context });
             if (evidence.ownership !== "established") {
               outcome = "failure";
@@ -2085,7 +2118,7 @@ export function createMcpToolService(
             outcome = evidence.outcome === "unknown" ? "failure" : "replay";
             return recoveryAnswer(typedTool, requestId, evidence, true, record.result);
           }
-          if (!identifiedCaller(binding.caller) || !sameCaller(recorded.caller, binding.caller)) return notPermitted();
+          if (!sameCaller(recorded.caller, binding.caller)) return notPermitted();
           if (record.digest !== digest) {
             outcome = "conflict";
             return failure(typedTool, requestId, "idempotency_conflict", "clientRequestId was already used with different arguments", false, true);
@@ -2132,25 +2165,27 @@ export function createMcpToolService(
           const record = await store.lookup(key);
           phaseDurations.claim = performance.now() - claimStartedAt;
           if (record) return recoverRecord(record);
-          if (!identifiedCaller(binding.caller)) return notPermitted();
-          /* Nothing ever claimed this key here, so nothing was dispatched
-             from here — and closing the key now makes that permanent: an
-             original call still on its way claims a closed row instead of
-             dispatching. Recovery starts no work; it only stops any. */
-          const closed = recoveryAnswer(typedTool, requestId, {
-            outcome: "not-executed",
-            evidence: "mcp-receipt",
-            reason: "no claim exists for this clientRequestId, so it was never dispatched; the key is now permanently closed and a new request may be made deliberately",
+          /* Nothing has claimed this key HERE — which is an observation, not a
+             verdict: the original may be a moment from claiming it, in this
+             process or another, and a lookup that wrote anything under the
+             key would be the claim it promised never to make, cancelling that
+             original. So nothing is written, the downstream record is read in
+             case the work was admitted by a path that never claimed here, and
+             the answer stays unknown while execution remains possible. */
+          const evidence = await tool.recover(binding, { legacy: false, context }).catch((cause: unknown): McpRecoveryEvidence => ({
+            outcome: "unknown",
+            evidence: "none",
+            reason: cause instanceof Error ? cause.message : String(cause),
             ids: {},
-          }, false);
-          if (await store.fenceAbsent(key, digest, binding, closed)) {
-            outcome = "failure";
-            return closed;
-          }
-          const raced = await store.lookup(key);
-          if (raced) return recoverRecord(raced);
+          }));
           outcome = "failure";
-          return recoveryAnswer(typedTool, requestId, { outcome: "unknown", evidence: "mcp-receipt", reason: "the receipt store could not be read consistently", ids: {} }, false);
+          if (evidence.outcome === "unknown") {
+            return recoveryAnswer(typedTool, requestId, {
+              ...evidence,
+              reason: `no claim exists for this clientRequestId yet and ${evidence.reason ?? "no downstream record holds it"}; the original call may still be on its way, so look it up again under the same key`,
+            }, false);
+          }
+          return recoveryAnswer(typedTool, requestId, evidence, false);
         }
         const claim = await store.claim(key, digest, retention, binding);
         phaseDurations.claim = performance.now() - claimStartedAt;
@@ -2170,8 +2205,9 @@ export function createMcpToolService(
         }
         const bindingStartedAt = performance.now();
         let settled: McpToolResult;
+        const dispatch: McpDispatchTracker = { attempted: false };
         try {
-          const payload = await bindings[typedTool](effectiveArgs, { ...context, binding });
+          const payload = await bindings[typedTool](effectiveArgs, { ...context, binding, dispatch });
           settled = {
             ...payload,
             ...(normalized.clamped ? { clamped: normalized.clamped } : {}),
@@ -2201,14 +2237,38 @@ export function createMcpToolService(
               : evidence;
             return recoveryAnswer(typedTool, requestId, uncertain, false);
           }
-          /* Anything else is the server's own answer, or a refusal before any
-             dispatch. A refusal that names an ADMITTED id (an operation or a
-             launch) is a terminal verdict about work the server holds and keeps
-             that id and its guidance; one that names none proves nothing
-             executed, and the attempt is closed as such. */
+          /* What the failure PROVES decides the answer. An error naming an
+             ADMITTED id (an operation or a launch) is a terminal verdict about
+             work the server holds and keeps that id and its guidance. Nothing
+             executed only when the request provably never left: the transport
+             says so, the request was never handed to it, or the server's own
+             4xx verdict refused it. Everything else — an exception after the
+             request may be on the server, a 5xx, a 409 whose id was lost —
+             leaves the row `dispatching` and is answered from the evidence,
+             exactly as a lost response is; nothing here may invite a new key. */
           outcome = error instanceof DeadlineExceededError ? "deadline" : "failure";
           const refusal = error instanceof McpToolRefusal ? error.details : {};
           const admitted = typeof refusal.operationId === "string" || typeof refusal.launchId === "string";
+          const verdictStatus = error instanceof McpDispatchVerdictError ? Number(error.details.status) : null;
+          const proven = !admitted && (
+            error instanceof McpDispatchNotExecutedError
+            || !dispatch.attempted
+            || (verdictStatus !== null && verdictStatus >= 400 && verdictStatus < 500 && verdictStatus !== 409)
+          );
+          if (!admitted && !proven) {
+            outcome = context.signal?.aborted ? "cancelled" : "failure";
+            const message = error instanceof Error ? error.message : String(error);
+            const evidence = await tool.recover(binding, { legacy: false, context }).catch((cause: unknown): McpRecoveryEvidence => ({
+              outcome: "unknown",
+              evidence: "none",
+              reason: cause instanceof Error ? cause.message : String(cause),
+              ids: {},
+            }));
+            const uncertain: McpRecoveryEvidence = evidence.outcome === "unknown"
+              ? { ...evidence, reason: `${message}; ${evidence.reason ?? "no durable evidence of the request was found yet"}`, ids: { ...stringIds(refusal), ...evidence.ids } }
+              : evidence;
+            return recoveryAnswer(typedTool, requestId, uncertain, false);
+          }
           const details: McpToolPayload = {
             ...refusal,
             outcome: admitted ? "settled" : "not-executed",
@@ -2330,7 +2390,7 @@ export function createMcpToolService(
  */
 export const RECOVERY_CONTRACT_DESCRIPTION = [
   "Recovery under the ORIGINAL `clientRequestId` (#1490): the claim is bound server-side to the calling conversation, its project, the canonical target and the exact downstream key BEFORE the one dispatch, and the request is sent exactly once — never re-POSTed after it may have reached the Viewer.",
-  "Repeat the same call with the same arguments (with or without `recoveryOnly: true`) to learn what became of it. A fresh ordinary call claims and dispatches once; an existing claim is answered by READING the durable downstream record, never by dispatching again; `recoveryOnly: true` never claims an absent key or starts any work. Changed arguments under an existing key are an `idempotency_conflict`; another caller or project is refused without disclosure.",
+  "Repeat the same call with the same arguments (with or without `recoveryOnly: true`) to learn what became of it. A fresh ordinary call claims and dispatches once; an existing claim is answered by READING the durable downstream record, never by dispatching again; `recoveryOnly: true` never claims an absent key or starts any work. Changed arguments under an existing key are an `idempotency_conflict`; another caller or project is refused without disclosure, and a caller whose identity the server cannot establish is refused (`caller_unidentified`) before anything is claimed or dispatched.",
   "The answer's `outcome` is closed: `accepted` (durably admitted, with its actual ids), `in-flight` (executing), `settled` (terminal, with the actual state and resend guidance), `not-executed` (the server proves dispatch never began and the attempt is permanently closed), or `unknown` (timeout, interrupted claim, unreadable or ambiguous evidence, or absence while execution is still possible). `nextAction` says what is permitted: on `unknown`, `accepted` and `in-flight` ONLY another lookup under the same key — `retryable` never means a new key may be used, and nothing is ever redelivered automatically. `message_receipt(operationId)` remains available for an accepted send.",
 ].join(" ");
 
@@ -2424,7 +2484,7 @@ const clientRequestIdSchema = z.string().min(1).describe("Stable idempotency key
 /* #1490: the one recovery switch. Excluded from the argument digest, so the
    same logical call with and without it is one call. */
 const recoveryOnlySchema = z.boolean().optional()
-  .describe("Default false. true: read what became of the call already made under this clientRequestId with these same arguments, and never claim an absent key or start any work — an absent claim is closed as not-executed. false: claim and dispatch once if the key is new; otherwise recover exactly as with true. Excluded from the argument digest.");
+  .describe("Default false. true: read what became of the call already made under this clientRequestId with these same arguments, and never claim an absent key or start any work — an absent claim is answered unknown (the original may still be on its way) and nothing is written under the key. false: claim and dispatch once if the key is new; otherwise recover exactly as with true. Excluded from the argument digest.");
 /* #844 §7: the selected-card reference an operator turn carried, in either of
    the two forms a caller actually holds — the `ctx=` token copied off the
    structured-user marker, or that token already decoded. The object stays open
