@@ -241,6 +241,85 @@ describe("MCP tool service", () => {
     }));
   }, 30_000);
 
+  test("cold concurrent starts migrate every prior SQLite schema once and keep the receipts", async () => {
+    /* #1490: two processes that both inspect the columns and then both ALTER
+       TABLE make the loser throw "duplicate column name". Every schema a
+       production database can carry is opened cold by twenty processes at the
+       same instant; each must initialize and read the seeded receipt back. */
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-receipts-cold-"));
+    scratch.push(directory);
+    const childPath = path.join(import.meta.dir, "receiptStoreProbeChild.ts");
+    const digest = "e".repeat(64);
+    const key = "send_message:cold-seeded";
+    const seededResult: McpToolResult = { ok: true, toolName: "send_message", clientRequestId: "cold-seeded", replayed: false, operationId: "op_cold" };
+    const baseColumns = `
+      sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+      receipt_key TEXT NOT NULL UNIQUE,
+      digest TEXT NOT NULL,
+      retention TEXT NOT NULL CHECK(retention IN ('bounded', 'durable')),
+      result_json TEXT,
+      storage_bytes INTEGER NOT NULL,
+      claimed_at INTEGER NOT NULL`;
+    const schemas: { name: string; extraColumns: string; seed: (raw: Database) => void; expected: unknown }[] = [
+      {
+        name: "legacy",
+        extraColumns: "",
+        seed: (raw) => raw.query("INSERT INTO mcp_receipts(receipt_key, digest, retention, result_json, storage_bytes, claimed_at) VALUES (?, ?, 'durable', ?, 1, 1)")
+          .run(key, digest, JSON.stringify(seededResult)),
+        expected: { digest, result: seededResult, binding: null, stage: "settled" },
+      },
+      {
+        name: "previous-repair",
+        extraColumns: ", binding_json TEXT, stage TEXT",
+        seed: (raw) => raw.query("INSERT INTO mcp_receipts(receipt_key, digest, retention, result_json, storage_bytes, claimed_at, binding_json, stage) VALUES (?, ?, 'durable', ?, 1, 1, NULL, 'settled')")
+          .run(key, digest, JSON.stringify(seededResult)),
+        expected: { digest, result: seededResult, binding: null, stage: "settled" },
+      },
+      { name: "absent", extraColumns: "", seed: () => {}, expected: null },
+    ];
+    for (const schema of schemas) {
+      const sqlitePath = path.join(directory, `${schema.name}.sqlite`);
+      if (schema.name !== "absent") {
+        const raw = new Database(sqlitePath, { create: true, strict: true });
+        raw.exec(`
+          CREATE TABLE mcp_receipt_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+          CREATE TABLE mcp_receipts (${baseColumns}${schema.extraColumns});
+        `);
+        schema.seed(raw);
+        raw.close();
+      }
+      const startPath = path.join(directory, `${schema.name}-start`);
+      const processes = 20;
+      const children = Array.from({ length: processes }, (_value, index) => Bun.spawn({
+        cmd: [
+          process.execPath, childPath, "cold-start", sqlitePath,
+          path.join(directory, `${schema.name}-ready-${index}`), startPath,
+          path.join(directory, `${schema.name}-result-${index}.json`), String(index), key,
+        ],
+        cwd: import.meta.dir,
+        env: { ...process.env, LLV_STATE_DIR: path.join(directory, "state", schema.name, String(index)) },
+        stdout: "pipe",
+        stderr: "pipe",
+      }));
+      expect(await waitForFileCount(directory, `${schema.name}-ready-`, processes)).toBeTrue();
+      fs.writeFileSync(startPath, String(Date.now() + 150));
+      const outcomes = await Promise.all(children.map(childResult));
+      expect(outcomes).toEqual(Array.from({ length: processes }, () => ({ exit: 0, error: "" })));
+      const results = Array.from({ length: processes }, (_value, index) => JSON.parse(
+        fs.readFileSync(path.join(directory, `${schema.name}-result-${index}.json`), "utf8"),
+      ) as { index: number; ok: boolean; error?: string; record?: unknown });
+      expect(results.map(({ ok, error }) => `${schema.name}:${ok ? "ok" : error}`))
+        .toEqual(Array.from({ length: processes }, () => `${schema.name}:ok`));
+      expect(results.map(({ record }) => record)).toEqual(Array.from({ length: processes }, () => schema.expected));
+
+      const migrated = new Database(sqlitePath, { readonly: true, strict: true });
+      const columns = migrated.query<{ name: string }, []>("PRAGMA table_info(mcp_receipts)").all().map((column) => column.name);
+      expect(columns).toEqual(["sequence", "receipt_key", "digest", "retention", "result_json", "storage_bytes", "claimed_at", "binding_json", "stage", "recovery_result_json"]);
+      expect(migrated.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM mcp_receipts").get()?.count).toBe(schema.name === "absent" ? 0 : 1);
+      migrated.close();
+    }
+  }, 60_000);
+
   test("SQLite read receipt count retention expires the oldest completed replay", async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-receipts-count-"));
     scratch.push(directory);

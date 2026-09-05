@@ -280,8 +280,40 @@ async function runHttpHost(configPath: string): Promise<void> {
   await new Promise<never>(() => {});
 }
 
+/** Spin until a shared wall-clock instant so every cold process opens the
+    database in the same few microseconds, which is what a file barrier polled
+    every few milliseconds cannot line up. */
+function waitUntil(deadlineMs: number): void {
+  while (Date.now() < deadlineMs) { /* spin */ }
+}
+
 if (process.argv[2] === "http-host") {
   await runHttpHost(process.argv[3]!);
+} else if (process.argv[2] === "cold-start") {
+  /* ── ROLE: cold concurrent starter (#1490) ───────────────────────────────
+     One of N processes opening an EXISTING database whose schema predates the
+     repair columns, or a database that does not exist yet, at the same
+     instant. Nothing here pre-initializes the schema: the constructor under
+     test is what races. The process reports whether it initialized and what
+     it read back for the seeded receipt. */
+  const filename = process.argv[3]!;
+  const readyPath = process.argv[4]!;
+  const startPath = process.argv[5]!;
+  const resultPath = process.argv[6]!;
+  const index = Number(process.argv[7]!);
+  const key = process.argv[8]!;
+  fs.writeFileSync(readyPath, String(index));
+  waitFor(startPath);
+  waitUntil(Number(fs.readFileSync(startPath, "utf8")));
+  let outcome: Record<string, unknown>;
+  try {
+    const store = new SqliteMcpReceiptStore(filename);
+    outcome = { index, ok: true, record: await store.lookup(key) };
+    store.close();
+  } catch (error) {
+    outcome = { index, ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+  fs.writeFileSync(resultPath, JSON.stringify(outcome));
 } else {
   const filename = process.argv[2]!;
   const readyPath = process.argv[3]!;

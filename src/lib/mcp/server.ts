@@ -1370,31 +1370,10 @@ export class SqliteMcpReceiptStore implements McpRecoveryReceiptStore {
     this.readReceiptByteCap = Math.max(1, Math.floor(options.readReceiptByteCap ?? SQLITE_READ_RECEIPT_BYTE_CAP));
     this.boundedPendingTtlMs = Math.max(1, Math.floor(options.boundedPendingTtlMs ?? SQLITE_BOUNDED_PENDING_TTL_MS));
     this.now = options.now ?? Date.now;
+    /* The journal mode cannot change inside a transaction, so these run
+       before the schema transaction below. */
     this.db.exec("PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA auto_vacuum = INCREMENTAL;");
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS mcp_receipt_meta (
-        key TEXT PRIMARY KEY,
-        value TEXT NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS mcp_receipts (
-        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-        receipt_key TEXT NOT NULL UNIQUE,
-        digest TEXT NOT NULL,
-        retention TEXT NOT NULL CHECK(retention IN ('bounded', 'durable')),
-        result_json TEXT,
-        storage_bytes INTEGER NOT NULL,
-        claimed_at INTEGER NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS mcp_receipts_retention_sequence
-      ON mcp_receipts(retention, sequence);
-    `);
-    /* #1490: the bound identity and dispatch stage of a recoverable mutation.
-       Added in place so an existing database keeps every row it holds; rows
-       from before carry NULL in both and are read as legacy. */
-    const columns = new Set(this.db.query<{ name: string }, []>("PRAGMA table_info(mcp_receipts)").all().map((column) => column.name));
-    if (!columns.has("binding_json")) this.db.exec("ALTER TABLE mcp_receipts ADD COLUMN binding_json TEXT");
-    if (!columns.has("stage")) this.db.exec("ALTER TABLE mcp_receipts ADD COLUMN stage TEXT");
-    if (!columns.has("recovery_result_json")) this.db.exec("ALTER TABLE mcp_receipts ADD COLUMN recovery_result_json TEXT");
+    this.initializeSchema();
     this.importLegacyFile(options.legacyFilePath);
     this.db.exec("BEGIN IMMEDIATE");
     try {
@@ -1561,6 +1540,48 @@ export class SqliteMcpReceiptStore implements McpRecoveryReceiptStore {
 
   close(): void {
     this.db.close();
+  }
+
+  /**
+   * Creates the tables and adds every column a database from an earlier
+   * schema lacks, in ONE write transaction. Several MCP processes start cold
+   * against the same database at once; the write lock makes one of them
+   * inspect and migrate while the others wait on `busy_timeout` and then find
+   * the columns already there. Two processes that both inspected first would
+   * both ALTER, and the second would throw "duplicate column name".
+   */
+  private initializeSchema(): void {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS mcp_receipt_meta (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS mcp_receipts (
+          sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+          receipt_key TEXT NOT NULL UNIQUE,
+          digest TEXT NOT NULL,
+          retention TEXT NOT NULL CHECK(retention IN ('bounded', 'durable')),
+          result_json TEXT,
+          storage_bytes INTEGER NOT NULL,
+          claimed_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS mcp_receipts_retention_sequence
+        ON mcp_receipts(retention, sequence);
+      `);
+      /* #1490: the bound identity and dispatch stage of a recoverable mutation.
+         Added in place so an existing database keeps every row it holds; rows
+         from before carry NULL in both and are read as legacy. */
+      const columns = new Set(this.db.query<{ name: string }, []>("PRAGMA table_info(mcp_receipts)").all().map((column) => column.name));
+      if (!columns.has("binding_json")) this.db.exec("ALTER TABLE mcp_receipts ADD COLUMN binding_json TEXT");
+      if (!columns.has("stage")) this.db.exec("ALTER TABLE mcp_receipts ADD COLUMN stage TEXT");
+      if (!columns.has("recovery_result_json")) this.db.exec("ALTER TABLE mcp_receipts ADD COLUMN recovery_result_json TEXT");
+      this.db.exec("COMMIT");
+    } catch (error) {
+      try { this.db.exec("ROLLBACK"); } catch { /* transaction already closed */ }
+      throw error;
+    }
   }
 
   private importLegacyFile(legacyFilePath: string | undefined): void {
