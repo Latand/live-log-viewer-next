@@ -24,10 +24,13 @@ import type { Workflow } from "@/lib/workflows/types";
 import { BoardHistoryControls } from "./BoardHistoryControls";
 import { createFocusEdgeGate } from "./focusRequestEdge";
 import { TaskStrip } from "./BranchPane";
+import { MobileInlineCatalog, useMobileInlineCatalog } from "./mobile/MobileInlineCatalog";
+import { deriveOrchestratorPanelState, resolveSeatFile } from "./orchestrator/seatState";
 import { ConversationList } from "./ConversationList";
 import { clearDraftStorage, draftCwd, draftParentConversationId, draftSrc, resolveSystemDraftCwd, setDraftCwd, setDraftSrc, setDraftText } from "./DraftAgentPane";
 import { OrchestratorPanelToggle } from "./orchestrator/OrchestratorPanelToggle";
 import { useOrchestratorSeat } from "./orchestrator/useOrchestratorSeat";
+import { useOrchestratorIncumbent } from "./orchestrator/useOrchestratorIncumbent";
 import { planBoardConvergence, planClose } from "./projectBoardMutations";
 import { reviewerCloseMutations } from "./reviewerAutoClose";
 import { directReviewFlows, isDirectReviewFlow } from "./flows/directReviewGroups";
@@ -389,8 +392,27 @@ function ProjectDashboardView({
      Null on the desktop, which has no board list to keep the seat out of. */
   const projectDraftCwd = useMemo(() => draftWorkingDirectory(files, project), [files, project]);
   const boardIsMobileLeaf = isMobile && topScreen(mobileNavState).kind !== "chat";
-  const seatRead = useOrchestratorSeat(boardIsMobileLeaf ? project : null, projectDraftCwd || undefined);
-  const seatPath = seatRead.status?.seat?.path ?? null;
+  const cachedSeatRead = useOrchestratorSeat(boardIsMobileLeaf ? project : null, projectDraftCwd || undefined);
+  // A failed revalidation retains a known incumbent, but cannot affirm vacancy.
+  // Give the card, its sheet, and the footer the same safe reading.
+  const seatRead = cachedSeatRead.failed
+    && !(cachedSeatRead.status?.exists && cachedSeatRead.status.seat?.conversationId)
+    ? { ...cachedSeatRead, status: null }
+    : cachedSeatRead;
+  const seatId = seatRead.status?.seat?.conversationId ?? null;
+  // The card and footer share the sheet's existing status read. Keep its slower
+  // poll sheet-gated, and retain the resolved identity when the sheet closes.
+  const seatIncumbentRead = useOrchestratorIncumbent(isMobile ? project : null,
+    boardIsMobileLeaf && Boolean(seatRead.status?.exists && seatId)
+      && (mobileNavState.sheet === "seat" || mobileNavState.sheet === "rotate"));
+  const seatIncumbent = seatIncumbentRead.incumbent?.project === project
+    && seatIncumbentRead.incumbent.conversationId === seatId ? seatIncumbentRead.incumbent : null;
+  const seatFile = resolveSeatFile({ files, conversationId: seatId,
+    seatPath: seatRead.status?.seat?.path ?? null, currentPath: seatIncumbent?.transcriptPath ?? null });
+  const seatPath = seatFile?.path ?? seatRead.status?.seat?.path ?? null;
+  const seatState = deriveOrchestratorPanelState({ status: seatRead.status, statusFailed: seatRead.failed,
+    submitting: false, submitFailure: null, file: seatFile, surface: null });
+  const inlineCatalog = useMobileInlineCatalog(project, isMobile && loaded);
   const projectName = projectDisplayName(
     project,
     providedProjectName ?? projectCatalogEntries.find((entry) => entry.project === project)?.displayName,
@@ -1725,8 +1747,6 @@ function ProjectDashboardView({
      conversation sits on top of the stack; the footer and the presence slice
      both hang off that one answer. */
   const mobileBoardLeaf = isMobile && projectView === "scheme" && schemeAvailable && mobileConversationKey === null;
-  /* The seat's own transcript, for the footer that opens it. */
-  const seatFile = seatPath ? files.find((file) => file.path === seatPath) ?? null : null;
   /* Which conversations the phone board is showing, in the order it shows them,
      as a signature so the presence effect below compares BY VALUE — a fresh
      array every render would re-report the same view on every poll. Null
@@ -1849,7 +1869,7 @@ function ProjectDashboardView({
          board face is the way back from it. */
       entries.push(
         { kind: "row", key: "view-board", icon: <Network className="h-[18px] w-[18px]" aria-hidden />, label: t("mobile2.menu.board"), checked: projectView === "scheme", onSelect: () => { mobileNav.closeSheet(); chooseEmptyView("scheme"); } },
-        { kind: "row", key: "view-catalog", icon: <LayoutGrid className="h-[18px] w-[18px]" aria-hidden />, label: t("mobile2.menu.catalog"), trailing: t("mobile2.menu.catalogCount", { count: catalogConversationCount }), checked: projectView === "list", onSelect: () => { mobileNav.closeSheet(); chooseEmptyView("list"); } },
+        { kind: "row", key: "view-catalog", icon: <LayoutGrid className="h-[18px] w-[18px]" aria-hidden />, label: t("mobile2.menu.catalog"), trailing: inlineCatalog.catalog.known ? t("mobile.catalog.count", { count: inlineCatalog.catalog.total }) : undefined, checked: projectView === "list", onSelect: () => { mobileNav.closeSheet(); chooseEmptyView("list"); } },
       );
     }
     entries.push(
@@ -2146,9 +2166,10 @@ function ProjectDashboardView({
                which is the seat card's own sheet, so both halves of a board
                with no orchestrator lead to the one place that makes one. */
             dock={mobileBoardLeaf && boardReady
-              ? seatFile
+              ? seatState.kind === "live" && seatFile
                 ? <MobileBoardDock onTell={() => openBoardRow(seatFile)} />
-                : <MobileBoardDock create onTell={() => mobileNav.openSheet("rotate")} />
+                : <MobileBoardDock create={seatState.kind === "draft"} unresolved={seatState.kind !== "draft"}
+                    onTell={() => mobileNav.openSheet(seatState.kind === "draft" ? "rotate" : "seat")} />
               : undefined}
           >
             {pipelinesAlert}
@@ -2157,7 +2178,12 @@ function ProjectDashboardView({
               ) : mobileBoardLeaf ? (
                 <MobileBoard
                   {...mobileBoardProps}
-                  catalogCount={catalogConversationCount}
+                  catalogCount={inlineCatalog.catalog.known ? inlineCatalog.catalog.total : undefined}
+                  catalogState={inlineCatalog.catalog.error ? "error" : inlineCatalog.catalog.loading ? "loading" : undefined}
+                  catalogExpanded={inlineCatalog.view.expanded}
+                  catalogPosition={inlineCatalog.view.position}
+                  catalog={<MobileInlineCatalog catalog={inlineCatalog.catalog} query={inlineCatalog.view.query}
+                    onQuery={inlineCatalog.setQuery} files={files} onOpen={openFullCatalogFile} />}
                   seat={(
                     /* The card takes the board's full width (README §4.1): it
                        is the first CARD of the list, not the chip the strip's
@@ -2172,6 +2198,7 @@ function ProjectDashboardView({
                            from the same answer instead of polling for it a
                            second time. */
                         seat={seatRead}
+                        incumbentRead={seatIncumbentRead}
                         /* The board's own clock, so the card's badge ticks with
                            the rows beside it rather than on a second one. */
                         now={nowSeconds}
@@ -2182,7 +2209,7 @@ function ProjectDashboardView({
                   onOpenConversation={openBoardRow}
                   onOpenPipeline={openMobilePipeline}
                   onOpenPipelines={() => mobileNav.push({ kind: "pipelines" })}
-                  onOpenCatalog={() => chooseEmptyView("list")}
+                  onOpenCatalog={inlineCatalog.toggle}
                 />
               ) : projectView === "scheme" && schemeAvailable ? (
                 <MobileFocusView
