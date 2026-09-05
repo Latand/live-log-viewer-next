@@ -1022,6 +1022,20 @@ async function spawnAgent(args: McpToolArgs, control: ViewerControlDependencies,
     ...internalServiceHeaders("mcp"),
     [VIEWER_SPAWN_CAPABILITY_HEADER]: ensureOperatorSpawnCapability(),
   });
+  // A readable body alone establishes no acceptance. Validate the fields
+  // this binding publishes before the service can persist a successful replay.
+  if (!text(result.launchId) || !text(result.conversationId)
+    || !["starting", "path-pending", "settled"].includes(result.state as string)
+    || !["pending", "queued", "delivered"].includes(result.initialMessage as string)
+    || (result.ok !== undefined && result.ok !== true)
+    || (result.launched !== undefined && typeof result.launched !== "boolean")
+    || (result.retrySafe !== undefined && result.retrySafe !== false)
+    || (result.path !== undefined && result.path !== null && !text(result.path))
+    || (result.initialMessage === "delivered" && result.launched === false)
+    || (result.state === "starting" && result.initialMessage !== "pending")
+    || (result.state === "settled" && result.initialMessage !== "delivered")) {
+    throw new McpDispatchUncertainError("the spawn response lacks consistent acceptance evidence; recover the original request from its durable receipt");
+  }
   return {
     conversationId: result.conversationId,
     transcriptPath: result.path,
@@ -1066,6 +1080,19 @@ async function sendMessage(
        is the server's own caller attribution, so the feed can say WHO relayed. */
     origin: mcpSenderOrigin(dependencies),
   }, callerCapabilityHeaders());
+  const receipt = objectRecord(outcome.receipt) ? outcome.receipt : null;
+  const operationId = text(outcome.operationId) || text(receipt?.operationId);
+  const settledOutcome = text(outcome.outcome);
+  if (!operationId
+    || !["delivered-to-live", "resumed", "held", "pending", "reconfigured", "queued", "delivering", "delivered"].includes(settledOutcome)
+    || (outcome.ok !== undefined && outcome.ok !== true)
+    || (outcome.operationId !== undefined && outcome.operationId !== operationId)
+    || (outcome.receipt !== undefined && (!receipt
+      || receipt.operationId !== operationId
+      || !["queued", "delivered"].includes(receipt.status as string)
+      || (settledOutcome === "delivered") !== (receipt.status === "delivered")))) {
+    throw new McpDispatchUncertainError("the send response lacks consistent acceptance evidence; recover the original request from its durable receipt");
+  }
   /* The registry's OWN lookup over the projection this call already holds (#845),
      rather than a local reimplementation of it. The alias walk is multi-hop and
      cycle-guarded and the path index covers continuity paths, so a send addressed by
@@ -1075,11 +1102,10 @@ async function sendMessage(
   const conversation = conversationId
     ? lookup.conversation(conversationId as `conversation_${string}`)
     : lookup.conversationForPath(transcriptPath);
-  const settledOutcome = outcome.outcome ?? "delivered";
   return {
     conversationId: (conversation?.id ?? conversationId) || null,
     transcriptPath: (conversation?.generations.at(-1)?.path ?? transcriptPath) || null,
-    operationId: outcome.operationId ?? (outcome.receipt as { operationId?: unknown } | undefined)?.operationId ?? null,
+    operationId,
     outcome: settledOutcome,
     /* #1131: acceptance is not arrival. A `queued` send is admitted and not yet
        settled, and saying so on the answer itself is what stops a caller from

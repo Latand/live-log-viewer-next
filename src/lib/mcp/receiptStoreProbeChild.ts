@@ -79,6 +79,8 @@ interface HttpHostControl {
   /** Replace an actual handler answer after its effects with a proxy error. */
   lostStatus?: number;
   lostJson?: boolean;
+  /** Replace the admitted handler's response with incomplete or contradictory JSON. */
+  replacedAnswer?: Record<string, unknown>;
 }
 
 async function runHttpHost(configPath: string): Promise<void> {
@@ -220,6 +222,10 @@ async function runHttpHost(configPath: string): Promise<void> {
       else return new Response(JSON.stringify({ error: "unrouted" }), { status: 404, headers: { "content-type": "application/json" } });
       const answerBody = await response.text();
       fs.appendFileSync(config.responsesPath, `${JSON.stringify({ pathname: url.pathname, status: response.status, body: answerBody })}\n`);
+      if (current.replacedAnswer) {
+        marker("accepted");
+        return Response.json(current.replacedAnswer);
+      }
       if (current.lostStatus) {
         marker("accepted");
         return new Response(current.lostJson ? JSON.stringify({ error: "upstream response lost" }) : "<html>upstream response lost</html>", {

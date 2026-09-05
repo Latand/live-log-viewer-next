@@ -63,8 +63,8 @@ function spawnResult(label: string): Response {
     conversationId: `conversation_${label}`,
     path: `/fixture/${label}.jsonl`,
     launchId: `launch_${label}`,
-    state: "running",
-    initialMessage: null,
+    state: "starting",
+    initialMessage: "pending",
   });
 }
 
@@ -1060,3 +1060,77 @@ test("path-only send: late registration after binding, lost response, and restar
     await host.stop();
   }
 }, 40_000);
+
+
+for (const tool of ["send_message", "spawn_agent"] as const) {
+  test(`${tool}: incomplete successful JSON recovers admission before execution and across restart`, async () => {
+    const fixture = await causalFixture("llv-1490-incomplete-");
+    let host = await fixture.startHost();
+    let mcp = await fixture.mcp();
+    try {
+      const answers = tool === "send_message"
+        ? [{}, { ok: true }, { outcome: "delivered" }, { operationId: "op_incomplete" },
+          { operationId: "op_incomplete", outcome: "delivered", receipt: { operationId: "op_other", status: "queued" } }]
+        : [{}, { ok: true }, { state: "settled" }, { launchId: "launch_incomplete" },
+          { launchId: "launch_incomplete", conversationId: "conversation_incomplete", state: "starting", initialMessage: "delivered" }];
+      for (const [index, replacedAnswer] of answers.entries()) {
+        fixture.resetMarkers();
+        fixture.control({ admission: "hold-effect", replacedAnswer });
+        const key = `incomplete-${index}`;
+        const args = tool === "send_message" ? sendArguments(fixture, key) : spawnArguments(fixture, key);
+        const before = fixture.effects().length;
+        const original = call(mcp, tool, args);
+        await fixture.marker("admitted");
+        await fixture.marker("accepted");
+        const result = await original;
+        expect(fixture.effects()).toHaveLength(before);
+        expect(result).toMatchObject({ ok: true, recovered: true, nextAction: "original-key-lookup" });
+        expect(["accepted", "in-flight"]).toContain(String(result.outcome));
+        const actual = JSON.parse(fixture.responses().at(-1)!.body);
+        const ids = tool === "send_message"
+          ? { operationId: actual.operationId }
+          : { launchId: actual.launchId, conversationId: actual.conversationId };
+        expect(result).toMatchObject(ids);
+        expect(Object.values(ids).every((id) => typeof id === "string" && id.length > 0)).toBe(true);
+        await mcp.close();
+        mcp = await fixture.mcp();
+        for (const recoveryOnly of [true, false]) {
+          const replay = await call(mcp, tool, { ...args, recoveryOnly });
+          expect(replay).toMatchObject({ ok: true, recovered: true, ...ids });
+          expect(["accepted", "in-flight"]).toContain(String(replay.outcome));
+        }
+        expect(fixture.effects()).toHaveLength(before);
+        fixture.execute();
+        const deadline = Date.now() + 10_000;
+        while (fixture.effects().length === before) {
+          if (Date.now() > deadline) throw new Error("the admitted operation never executed");
+          await Bun.sleep(5);
+        }
+        expect(fixture.effects()).toHaveLength(before + 1);
+        expect(fixture.effects().at(-1)).toMatchObject(ids);
+        await mcp.close();
+        await host.kill();
+        fixture.control({ mode: "respond" });
+        host = await fixture.startHost();
+        mcp = await fixture.mcp();
+        for (const recoveryOnly of [true, false]) {
+          const replay = await call(mcp, tool, { ...args, recoveryOnly });
+          expect(replay).toMatchObject({ ok: true, ...ids });
+          if (tool === "send_message") expect(replay).toMatchObject({ outcome: "settled", state: "delivered" });
+        }
+        expect(fixture.effects()).toHaveLength(before + 1);
+        if (tool === "spawn_agent") {
+          const receipts = Object.values(fixture.registryFile().receipts).filter((receipt) => receipt.clientAttemptId === key);
+          expect(receipts).toHaveLength(1);
+          expect(receipts[0]).toMatchObject(ids);
+        } else {
+          const deliveries = Object.values(fixture.registryFile().heldDeliveries).filter((delivery) => delivery.clientMessageId === key);
+          expect(deliveries).toHaveLength(1);
+        }
+      }
+    } finally {
+      await mcp.close();
+      await host.stop();
+    }
+  }, 120_000);
+}

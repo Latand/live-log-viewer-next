@@ -172,7 +172,7 @@ test("MCP message delivery always presents authenticated service provenance with
   const send = viewerMcpBindings(undefined, {
     post: async (_pathname, _body, headers) => {
       requests.push({ headers });
-      return { outcome: "delivered" };
+      return { operationId: "op_service_provenance", outcome: "delivered" };
     },
   }).send_message;
   const previous = process.env[VIEWER_SPAWN_CAPABILITY_ENV];
@@ -314,7 +314,8 @@ test("spawn_agent derives required role params from the prompt and preserves sup
         conversationId: `conversation_${bodies.length}`,
         path: `/repo/session-${bodies.length}.jsonl`,
         launchId: `launch_${bodies.length}`,
-        state: "queued",
+        state: "starting",
+        initialMessage: "pending",
       };
     },
   }).spawn_agent;
@@ -398,7 +399,8 @@ test("spawn_agent coerces and clamps bounded role params before the control requ
         conversationId: `conversation_${bodies.length}`,
         path: `/repo/session-${bodies.length}.jsonl`,
         launchId: `launch_${bodies.length}`,
-        state: "queued",
+        state: "starting",
+        initialMessage: "pending",
       };
     },
   }), new MemoryMcpReceiptStore());
@@ -2799,7 +2801,7 @@ test("send and spawn bindings dispatch through the single-attempt seam with the 
     dispatch: async (pathname, body) => {
       dispatched.push({ pathname, body });
       return pathname === "/api/spawn"
-        ? { conversationId: "conversation_new", path: null, launchId: "launch_new", state: "starting" }
+        ? { conversationId: "conversation_new", path: null, launchId: "launch_new", state: "starting", initialMessage: "pending" }
         : { operationId: "op_new", outcome: "queued" };
     },
   }, { registrySnapshot: () => ({ conversations: {}, conversationAliases: {} }) } as never);
@@ -3059,4 +3061,61 @@ test("spawn recovery maps the launch receipt to the closed outcome set and estab
 
   const broken = viewerMcpRecoverableTools({ registrySnapshot: () => { throw new Error("registry unreadable"); } } as never);
   expect(await broken.spawn_agent!.recover(...binding("child_attempt_1"))).toMatchObject({ outcome: "unknown", evidence: "spawn-receipt", reason: expect.stringContaining("registry unreadable") });
+});
+
+
+test("incomplete and contradictory mutation answers remain unknown when no durable evidence exists, including SQLite restart", async () => {
+  const { SqliteMcpReceiptStore } = await import("./server");
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-incomplete-"));
+  sandboxes.push(sandbox);
+  process.env.LLV_STATE_DIR = sandbox;
+  const databasePath = path.join(sandbox, "receipts.sqlite");
+  let response: Record<string, unknown> = {};
+  let dispatches = 0;
+  let reads = 0;
+  const bindings = viewerMcpBindings(undefined, {
+    post: async () => { throw new Error("automatic POST fallback is forbidden"); },
+    dispatch: async () => { dispatches += 1; return response; },
+  }, { registrySnapshot: () => ({ conversations: {}, conversationAliases: {} }) } as never);
+  const caller = { kind: "worker" as const, conversationId: "conversation_caller", project: null };
+  const recovery = {
+    bind: (args: Record<string, unknown>) => ({ caller, target: { identity: String(args.conversationId ?? args.cwd), project: projectForCwd(sandbox) }, downstreamKey: String(args.clientRequestId) }),
+    recover: async () => { reads += 1; return { outcome: "unknown" as const, evidence: "none", reason: null, ids: {} }; },
+  };
+  let store = new SqliteMcpReceiptStore(databasePath);
+  const service = () => createMcpToolService(bindings, store, undefined, { recovery: { send_message: recovery, spawn_agent: recovery } });
+  try {
+    for (const tool of ["send_message", "spawn_agent"] as const) {
+      const valid = tool === "send_message"
+        ? { operationId: "op_answer", outcome: "delivered" }
+        : { launchId: "launch_answer", conversationId: "conversation_answer", state: "settled", initialMessage: "delivered" };
+      const incomplete = Object.keys(valid).map((key) => Object.fromEntries(Object.entries(valid).filter(([field]) => field !== key)));
+      const contradictory = tool === "send_message"
+        ? [{ ...valid, receipt: { operationId: "op_other", status: "delivered" } },
+          { ...valid, receipt: { operationId: "op_answer", status: "queued" } },
+          { ...valid, outcome: "queued", receipt: { operationId: "op_answer", status: "delivered" } },
+          { ...valid, outcome: "unknown" }, { ...valid, operationId: 123 }]
+        : [{ ...valid, state: "starting" }, { ...valid, state: " starting " }, { ...valid, launched: false },
+          { ...valid, retrySafe: true }, { ...valid, path: {} }, { ...valid, conversationId: 123 }];
+      for (const [index, value] of [{}, { ok: true }, ...incomplete, ...contradictory, { ...valid, ok: false }].entries()) {
+        response = value;
+        const clientRequestId = `${tool}-incomplete-${index}`;
+        const args = tool === "send_message"
+          ? { clientRequestId, conversationId: "conversation_target", text: "hello" }
+          : { clientRequestId, cwd: sandbox, prompt: "go", title: "Incomplete response" };
+        const before = dispatches;
+        const beforeReads = reads;
+        const unknown = { ok: false, code: "outcome_unknown", retryable: false, details: { outcome: "unknown", nextAction: "original-key-lookup" } };
+        expect(await service().callTool(tool, args)).toMatchObject(unknown);
+        expect(reads).toBeGreaterThan(beforeReads);
+        store.close();
+        store = new SqliteMcpReceiptStore(databasePath);
+        expect(await service().callTool(tool, { ...args, recoveryOnly: true })).toMatchObject(unknown);
+        expect(await service().callTool(tool, args)).toMatchObject(unknown);
+        expect(dispatches).toBe(before + 1);
+      }
+    }
+  } finally {
+    store.close();
+  }
 });
