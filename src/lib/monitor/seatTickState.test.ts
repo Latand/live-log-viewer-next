@@ -41,8 +41,9 @@ const row = {
     conversationId: CONVERSATION,
     seatEpoch: 7,
     operationId: "op-wake-1",
-    commit: { proposal: false, reasons: ["interval" as const], fingerprint: "fp-1", eventsThrough: 44 },
+    commit: { proposal: false, reasons: ["interval" as const], fingerprint: "fp-1", eventsThrough: 44, children: [CONVERSATION] },
   },
+  harvestedChildren: [CONVERSATION],
   pullRequestGap: {
     gap: "command-failed" as const,
     since: "2026-08-28T08:00:00.000Z",
@@ -248,4 +249,48 @@ test("a sealed cursor of zero written by this version stays a cursor", () => {
 
 test("the state file lives under the viewer state dir with no configuration", () => {
   expect(seatTickStatePath()).toBe(path.join(SANDBOX, "state", "seat-tick.json"));
+});
+
+/* ------------------------------------------------------------------------- *
+ * The harvest cursor (#1465).
+ * ------------------------------------------------------------------------- */
+
+const CHILD = ["conversation", "c1d2e3f4a5b6c7d8"].join("_");
+
+test("a row from before the harvest existed reads an empty cursor, and a plan without children harvests nothing (#1465)", () => {
+  const file = path.join(SANDBOX, "pre-harvest.json");
+  const { harvestedChildren: _cursor, ...legacyRow } = row;
+  const { children: _children, ...legacyCommit } = row.outstandingWake.commit;
+  fs.writeFileSync(file, JSON.stringify({ version: 2, projects: { viewer: { ...legacyRow, outstandingWake: { ...row.outstandingWake, commit: legacyCommit } } } }));
+  const persisted = readSeatTickState("viewer", file);
+  expect(persisted.harvestedChildren).toEqual([]);
+  expect(persisted.outstandingWake!.commit.children).toEqual([]);
+});
+
+test("the cursor keeps only short strings, bounded, and the plan's children likewise (#1465)", () => {
+  const file = path.join(SANDBOX, "harvest-bounds.json");
+  const noise = [CHILD, 7, null, "", "x".repeat(201), { id: CHILD }];
+  const crowd = Array.from({ length: 250 }, (_, index) => `conversation_${index}`);
+  fs.writeFileSync(file, JSON.stringify({ version: 2, projects: {
+    viewer: { ...row, harvestedChildren: [...noise, ...crowd], outstandingWake: { ...row.outstandingWake, commit: { ...row.outstandingWake.commit, children: noise } } },
+  } }));
+  const persisted = readSeatTickState("viewer", file);
+  expect(persisted.harvestedChildren).toHaveLength(200);
+  expect(persisted.harvestedChildren[0]).toBe(CHILD);
+  expect(persisted.outstandingWake!.commit.children).toEqual([CHILD]);
+});
+
+test("a rotation keeps the harvest cursor: what the project was told is not the seat's judgement (#1465)", () => {
+  const rotated = seatTickStateForEpoch({ ...row, harvestedChildren: [CHILD] }, 8);
+  expect(rotated.seatEpoch).toBe(8);
+  expect(rotated.harvestedChildren).toEqual([CHILD]);
+  expect(rotated.stalledSeen).toEqual([]);
+});
+
+test("a cursor written by one process is read by the next, whole (#1465)", () => {
+  const file = path.join(SANDBOX, "harvest-durable.json");
+  writeSeatTickState("viewer", { ...emptySeatTickState(), harvestedChildren: [CHILD, CONVERSATION] }, file);
+  expect(readSeatTickState("viewer", file).harvestedChildren).toEqual([CHILD, CONVERSATION]);
+  writeSeatTickState("other", emptySeatTickState(), file);
+  expect(readSeatTickState("viewer", file).harvestedChildren).toEqual([CHILD, CONVERSATION]);
 });

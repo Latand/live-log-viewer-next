@@ -1,7 +1,16 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 
-import { agentRegistry } from "@/lib/agent/registry";
+import {
+  agentRegistry,
+  readOnlyConversationLookupFromSnapshot,
+  SPAWN_STARTING_ADMISSION_LEASE_MS,
+  type AgentRegistryEntry,
+  type RegistryFile,
+  type SpawnLineageEdge,
+  type SpawnReceipt,
+} from "@/lib/agent/registry";
+import { sessionKeyFromTranscript, sessionKeyId, type SessionKey } from "@/lib/agent/sessionKey";
 import { statePath } from "@/lib/configDir";
 import { pageFromEvents, readLifecycleJournal } from "@/lib/lifecycle/journal";
 import { agentLivenessSnapshot, productionLivenessSources, type AgentLivenessRecord } from "@/lib/lifecycle/liveness";
@@ -11,6 +20,14 @@ import { projectTaskPipelineIds } from "@/lib/pipelines/taskBinding";
 import type { Pipeline } from "@/lib/pipelines/types";
 import { runtimeHostClient, type RuntimeHostClient } from "@/lib/runtime/client";
 import { latestLedgerDeployment } from "@/lib/runtime/deploymentLedger";
+import {
+  resolveOriginalSend,
+  resolveSendReceipt,
+  type OriginalSendBinding,
+  type OriginalSendEvidence,
+  type SendReceipt,
+} from "@/lib/runtime/sendSettlement";
+import { resolveProjectAttribution } from "@/lib/session/projectResolution";
 import type { StructuredHostRetirementReport } from "@/lib/runtime/structuredHostRetirement";
 import { loadTasks } from "@/lib/tasks/store";
 import type { BoardTask } from "@/lib/tasks/types";
@@ -31,6 +48,8 @@ import type { PipelineSummary, TaskSummary } from "./viewerApi";
 import {
   type SeatTickActivity,
   type SeatTickCheckInput,
+  type SeatTickChildInput,
+  type SeatTickChildrenGap,
   type SeatTickEventInput,
   type SeatTickOutstandingWake,
   type SeatTickPipelineInput,
@@ -67,6 +86,12 @@ const PULL_REQUEST_LIMIT = 60;
 const PULL_REQUEST_TITLE_LIMIT = 120;
 /** Liveness rows one project's check asks for. */
 const LIVENESS_LIMIT = 60;
+/** Standalone children one check projects (#1465), newest launch first once
+    the harvested ones are removed. A seat with more live children than this
+    has other problems; the bound keeps the check a bounded registry read. */
+const CHILD_LIMIT = 60;
+/** Bounded child title carried into a wake item. */
+const CHILD_TITLE_LIMIT = 120;
 
 /**
  * What became of a wake the delivery layer accepted and kept.
@@ -77,8 +102,15 @@ const LIVENESS_LIMIT = 60;
  * holder settled it without ever delivering it, so the next check may raise it
  * again; `unknown` means the holder could not be asked, which is not evidence
  * of anything and leaves the wake outstanding.
+ *
+ * `uncertain` (#1465) is the answer the holder gives when it ENDED the send
+ * without proving arrival either way — a host that took the message and died,
+ * a settlement deadline that passed with no journal to ask. It is not a drop:
+ * the seat may have the message, so raising it again under a new key could
+ * wake the seat twice. And it is not a landing: nothing the wake carried may
+ * be acknowledged on it. The controller bounds it without crediting it.
  */
-export type SeatTickWakeState = "retained" | "landed" | "dropped" | "unknown";
+export type SeatTickWakeState = "retained" | "landed" | "dropped" | "unknown" | "uncertain";
 
 /**
  * What taking a retained wake back achieved.
@@ -111,18 +143,70 @@ function registryDeliveryFor(wake: SeatTickOutstandingWake): { id: string; state
  *
  * `currentRetryLeaf` follows a retried send to the operation that is actually
  * live, because a retry leaves the parent terminal and the leaf is the one the
- * drain will deliver. An operation the host has never heard of is one nothing
- * will deliver, which is a drop rather than an unknown.
+ * drain will deliver.
+ *
+ * An operation the host has no record of is `unknown` (#1465), never a drop:
+ * absence is an observation about the journal, and a journal that was rotated,
+ * replaced or never reached is not proof that nothing was delivered. The
+ * durable delivery record is what proves a loss, and {@link wakeStateFromRecord}
+ * asks it first. `interrupted` and the terminal-but-unverified `uncertain` are
+ * exactly that — a send ended without proof either way.
  */
 export async function runtimeWakeState(operationId: string, client: RuntimeHostClient): Promise<SeatTickWakeState> {
   const current = await client.operationStatus(operationId, { currentRetryLeaf: true });
-  if (!current) return "dropped";
+  if (!current) return "unknown";
   const status = current.receipt.status;
   if (RUNTIME_QUEUED.has(status) || RUNTIME_IN_FLIGHT.has(status)) return "retained";
   if (RUNTIME_LANDED.has(status)) return "landed";
-  /* `failed`, `interrupted` and the terminal-but-unverified `uncertain`. None
-     of them is evidence the seat was woken, so none of them advances a stamp. */
-  return "dropped";
+  if (status === "failed" || status === "rejected") return "dropped";
+  return "uncertain";
+}
+
+/**
+ * What the durable delivery record says became of the wake, read under the
+ * idempotency key the tick itself bound before the send (#1465, on the #1490
+ * contract).
+ *
+ * The record is asked before any journal: a reservation that the settlement
+ * ended is the answer whatever the journal remembers, and the resend guidance
+ * it carries is the only thing that distinguishes a PROVEN loss (`safe`, the
+ * fenced disposition) from a send that merely could not be verified
+ * (`verify-first`). A send still in flight is ended by the settlement itself
+ * — this operation is the tick's own, so the tick is the caller entitled to
+ * end it — and that answer is classified the same way; inside the settlement
+ * window it comes back unchanged, which is `retained`.
+ *
+ * Absence under the key is not a loss either. A wake the record never held
+ * but the runtime queued (a legacy row, a mirror that was compacted) is asked
+ * of the runtime; with nothing to ask, the answer is `unknown` and the wake
+ * stays outstanding.
+ */
+export async function wakeStateFromRecord(
+  wake: SeatTickOutstandingWake,
+  ports: {
+    lookup: (binding: OriginalSendBinding) => Promise<OriginalSendEvidence>;
+    /** Ends an in-flight send of the tick's own, or reports it still in flight. */
+    settle: (operationId: string) => Promise<SendReceipt | null>;
+    runtime: (operationId: string) => Promise<SeatTickWakeState>;
+  },
+): Promise<SeatTickWakeState> {
+  const evidence = await ports.lookup({ conversationId: wake.conversationId, clientMessageId: wake.clientMessageId });
+  if (evidence.kind === "absent") return wake.operationId ? ports.runtime(wake.operationId) : "unknown";
+  if (evidence.kind !== "found") return "unknown";
+  if (!evidence.current.readable) return "unknown";
+  const current = evidence.current.value;
+  if (current.state !== "in-flight") return receiptWakeState(current);
+  const settled = await ports.settle(evidence.operationId);
+  if (!settled) return "unknown";
+  return settled.state === "in-flight" ? "retained" : receiptWakeState(settled);
+}
+
+function receiptWakeState(receipt: SendReceipt): SeatTickWakeState {
+  if (receipt.state === "delivered") return "landed";
+  if (receipt.state === "in-flight") return "retained";
+  /* `safe` is the fenced, proven non-delivery and the only failure that
+     licenses raising the wake again; everything else ended without proof. */
+  return receipt.resend === "safe" ? "dropped" : "uncertain";
 }
 
 /**
@@ -198,6 +282,10 @@ export interface SeatTickSources {
   /** Whether the layer holding a retained wake still has it, and whether the
       seat ever got it. The tick's stamps move on this answer and nothing else. */
   wakeState: (wake: SeatTickOutstandingWake) => Promise<SeatTickWakeState>;
+  /** The durable delivery record under a key the tick bound before a send
+      (#1465), for the send whose outcome never came back at all. Read-only.
+      Absent means the production lookup over the process registry. */
+  originalSend?: (binding: OriginalSendBinding) => Promise<OriginalSendEvidence>;
   /** Take a retained wake back from that same layer, before it can reach a seat
       that has been replaced. The reason is stored where the payload is. */
   withdrawWake: (wake: SeatTickOutstandingWake, reason: string) => Promise<SeatTickWithdrawal>;
@@ -237,17 +325,15 @@ export function defaultSeatTickSources(): SeatTickSources {
        host — the registry row beside it is a mirror, and settling a mirror stops
        nothing. A send parked behind an account migration never reached a host at
        all, and there the registry reservation IS the retention. */
-    wakeState: async (wake) => {
-      if (wake.operationId) {
+    wakeState: async (wake) => wakeStateFromRecord(wake, {
+      lookup: (binding) => resolveOriginalSend(binding),
+      settle: (operationId) => resolveSendReceipt(operationId),
+      runtime: async (operationId) => {
         const client = runtimeHostClient();
-        return client ? runtimeWakeState(wake.operationId, client) : "unknown";
-      }
-      const delivery = registryDeliveryFor(wake);
-      if (!delivery) return "unknown";
-      if (delivery.state === "delivered") return "landed";
-      if (delivery.state === "failed") return "dropped";
-      return "retained";
-    },
+        return client ? runtimeWakeState(operationId, client) : "unknown";
+      },
+    }),
+    originalSend: (binding) => resolveOriginalSend(binding),
     withdrawWake: async (wake, reason) => {
       if (wake.operationId) {
         const client = runtimeHostClient();
@@ -467,12 +553,19 @@ export function repoDirForProject(
 function changeFingerprint(
   pipelines: readonly SeatTickPipelineInput[],
   tasks: readonly SeatTickTaskInput[],
+  children: readonly SeatTickChildInput[],
   pullRequests: readonly SeatTickPullRequestInput[],
   pullRequestsUnavailable: SeatTickPullRequestGap | null,
 ): string {
+  /* A child's status and outcome instant decide two wake reasons (#1465), so
+     they are in the half the guard reads: a child finishing, or a harvested one
+     leaving the projection, is the movement that resets the guard. A source
+     that could not be read contributes nothing here — the children list is
+     empty then, and the gap beside it keeps the check from concluding quiet. */
   const board = [
     ...pipelines.map((pipeline) => `p:${pipeline.id}:${pipeline.state}:${pipeline.updatedAt ?? ""}`),
     ...tasks.map((task) => `t:${task.id}:${task.status}:${task.owned}:${task.updatedAt ?? ""}`),
+    ...children.map((child) => `c:${child.conversationId}:${child.status}:${child.terminalAt ?? ""}`),
   ].sort();
   /* The set of unmerged pull requests, for the same reason the card's movement
      instant is in the half above: it decides a wake reason, so a guard keyed on
@@ -726,6 +819,178 @@ async function unmergedPullRequests(context: {
   return { pullRequests: found.sort((left, right) => left.number - right.number), unavailable: null, gap: null };
 }
 
+
+/* ------------------------------------------------------------------------- *
+ * Standalone children (#1465).
+ *
+ * The seat's spawned workers, read from ONE registry snapshot the check already
+ * takes: the `viewer-spawn` lineage edges whose parent is the seat, each with
+ * its launch receipt, its conversation's own turn record and its host entries.
+ * Direct children only — a grandchild is its parent's to harvest. No transcript
+ * is opened; the one question the registry cannot answer from its own records,
+ * "is this open turn still moving?", is asked of the liveness plane targeted by
+ * conversation id, and only for a child whose turn the registry says is open.
+ *
+ * What is excluded, and why, is most of the projection. A child that belongs
+ * to a pipeline, flow or orchestrator container carries a durable membership
+ * row written at admission; it is already that container's to announce, so
+ * counting its lineage edge too would double-count it. A child attributed to
+ * another project — through the same attribution path the board uses, cwd and
+ * the deleted-worktree map included — is another seat's. An `engine-native`
+ * edge is a session the engine forked on its own, never a spawn the seat asked
+ * for. A conversation with no edge at all was started by hand.
+ * ------------------------------------------------------------------------- */
+
+const LIVE_CHILD_RECEIPT_STATES: ReadonlySet<SpawnReceipt["state"]> = new Set(["starting", "pane-bound", "host-verified", "prompt-delivered", "path-pending"]);
+const LIVE_CHILD_HOST_STATES: ReadonlySet<AgentRegistryEntry["status"]> = new Set(["starting", "live", "idle", "handoff"]);
+const CONTAINER_MEMBERSHIPS: ReadonlySet<string> = new Set(["pipeline", "flow", "orchestrator"]);
+
+/** The registry entries that could be hosting this child, by every session key
+    the records tie to it. */
+function childHostEntries(file: RegistryFile, edge: SpawnLineageEdge, receipt: SpawnReceipt | null, transcriptKey: SessionKey | null): AgentRegistryEntry[] {
+  const keys = [receipt?.key, edge.childSessionKey, transcriptKey].filter((key): key is SessionKey => Boolean(key));
+  return [...new Set(keys.map(sessionKeyId))].flatMap((key) => (file.entries[key] ? [file.entries[key]!] : []));
+}
+
+/** Whether anything is still running this child: a host entry in a live state,
+    or a launch receipt the spawn path has not finished with. A `starting`
+    receipt past its admission lease is a launch that never got anywhere, and
+    is no evidence of a host. */
+function childHosted(receipt: SpawnReceipt | null, entries: readonly AgentRegistryEntry[], now: number): boolean {
+  if (entries.some((entry) => LIVE_CHILD_HOST_STATES.has(entry.status))) return true;
+  if (!receipt || !LIVE_CHILD_RECEIPT_STATES.has(receipt.state)) return false;
+  if (receipt.state !== "starting") return true;
+  const createdAt = Date.parse(receipt.createdAt);
+  return Number.isFinite(createdAt) && now - createdAt <= SPAWN_STARTING_ADMISSION_LEASE_MS;
+}
+
+interface ProjectedChild {
+  input: SeatTickChildInput;
+  /** The registry's turn record, for deciding whether to ask the liveness plane. */
+  turn: "busy" | "idle" | "terminal" | "unknown";
+  hosted: boolean;
+  createdAt: string;
+}
+
+/** One child, classified from the snapshot alone. Null for a child that is
+    not this seat's to see. */
+function projectChild(
+  file: RegistryFile,
+  lookup: ReturnType<typeof readOnlyConversationLookupFromSnapshot>,
+  edge: SpawnLineageEdge,
+  project: string,
+  now: number,
+): ProjectedChild | null {
+  if (edge.source !== "viewer-spawn") return null;
+  const childId = lookup.canonicalConversationId(edge.childConversationId);
+  if ((file.memberships[childId] ?? []).some((membership) => CONTAINER_MEMBERSHIPS.has(membership.kind))) return null;
+  const receipt = edge.evidence.launchId ? file.receipts[edge.evidence.launchId] ?? null : null;
+  const conversation = lookup.conversation(childId);
+  const generation = conversation?.generations.at(-1) ?? null;
+  const transcriptKey = conversation && generation ? sessionKeyFromTranscript(conversation.engine, generation.path) : null;
+  const entries = childHostEntries(file, edge, receipt, transcriptKey);
+  const attributed = resolveProjectAttribution({
+    projectOwnership: conversation?.projectOwnership ?? null,
+    cwd: receipt?.cwd ?? entries[0]?.cwd ?? null,
+    launchProfileProject: receipt?.launchProfile.project ?? generation?.launchProfile.project ?? null,
+  }).project;
+  if (!attributed || canonicalOrchestratorProject(attributed) !== project) return null;
+
+  const title = redactBounded(
+    receipt?.launchProfile.title ?? generation?.launchProfile.title ?? edge.role ?? "spawned child",
+    CHILD_TITLE_LIMIT,
+  );
+  const hosted = childHosted(receipt, entries, now);
+  const turn = conversation?.turn.state ?? "unknown";
+  const base = { conversationId: childId, title, activity: null };
+  const createdAt = edge.createdAt;
+  /* A launch that failed or conflicted before it ran: terminal, outcome
+     failed. The receipt is the whole record of it. */
+  if (receipt && (receipt.rejection || receipt.state === "failed" || receipt.state === "conflicted")) {
+    return { input: { ...base, status: "terminal", outcome: "failed", terminalAt: receipt.rejection?.rejectedAt ?? receipt.createdAt }, turn, hosted, createdAt };
+  }
+  if (!conversation) return { input: { ...base, status: "unknown", outcome: null, terminalAt: null }, turn, hosted, createdAt };
+  if (turn === "terminal") {
+    return { input: { ...base, status: "terminal", outcome: "finished", terminalAt: conversation.turn.terminalAt ?? conversation.turn.observedAt ?? conversation.updatedAt }, turn, hosted, createdAt };
+  }
+  if (hosted) return { input: { ...base, status: "running", outcome: null, terminalAt: null }, turn, hosted, createdAt };
+  /* No host anywhere. A settled turn with nothing running it is a worker that
+     finished and whose host was released — the seat's to harvest. An OPEN turn
+     with nothing running it is a stall the registry can see on its own, and
+     it is reported as such, never as finished. A turn the registry never
+     observed is unknown, and stays unknown. */
+  if (turn === "idle") {
+    return { input: { ...base, status: "terminal", outcome: "finished", terminalAt: conversation.turn.observedAt ?? conversation.updatedAt }, turn, hosted, createdAt };
+  }
+  if (turn === "busy") {
+    return {
+      input: { ...base, status: "running", outcome: null, terminalAt: null, activity: { lifecycle: "gone", reason: "host_gone_turn_open", turnState: "busy" } },
+      turn,
+      hosted,
+      createdAt,
+    };
+  }
+  return { input: { ...base, status: "unknown", outcome: null, terminalAt: null }, turn, hosted, createdAt };
+}
+
+interface ChildEvidence {
+  children: SeatTickChildInput[];
+  unavailable: SeatTickChildrenGap | null;
+  /** Harvested ids seen running again, which the row releases (#1465): a
+      worker the seat re-instructed is owed again when it next finishes. */
+  released: string[];
+}
+
+async function childWork(
+  project: string,
+  seat: SeatTickSeatInput | null,
+  state: SeatTickProjectState,
+  policy: SeatTickPolicy,
+  sources: SeatTickSources,
+): Promise<ChildEvidence> {
+  if (!seat) return { children: [], unavailable: null, released: [] };
+  let file: RegistryFile;
+  try {
+    file = sources.registry().readOnlySnapshot();
+  } catch {
+    return { children: [], unavailable: "registry-unreadable", released: [] };
+  }
+  const now = sources.now();
+  const lookup = readOnlyConversationLookupFromSnapshot(file);
+  const seatId = lookup.canonicalConversationId(seat.conversationId as `conversation_${string}`);
+  const projected: ProjectedChild[] = [];
+  for (const edge of Object.values(file.lineageEdges)) {
+    if (lookup.canonicalConversationId(edge.parentConversationId) !== seatId) continue;
+    const child = projectChild(file, lookup, edge, project, now);
+    if (child) projected.push(child);
+  }
+  const harvested = new Set(state.harvestedChildren);
+  const released = projected
+    .filter((child) => harvested.has(child.input.conversationId) && child.input.status === "running")
+    .map((child) => child.input.conversationId);
+  const bounded = projected
+    .filter((child) => !harvested.has(child.input.conversationId) || child.input.status === "running")
+    .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))
+    .slice(0, CHILD_LIMIT);
+  const children: SeatTickChildInput[] = [];
+  for (const child of bounded) {
+    let input = child.input;
+    /* The verdict is asked only where it can matter: a hosted child whose turn
+       the registry records open. Targeted by id, one transcript at most, never
+       a sweep — and an unanswerable read says nothing, which is never a stall. */
+    if (child.input.status === "running" && child.turn === "busy" && child.hosted) {
+      try {
+        const rows = await sources.liveness({ conversationId: child.input.conversationId, stallAfterMs: policy.stallAfterMs, limit: 1 });
+        input = { ...input, activity: activityOf(rows[0]) };
+      } catch {
+        input = { ...input, activity: null };
+      }
+    }
+    children.push(input);
+  }
+  return { children, unavailable: null, released };
+}
+
 export async function gatherSeatTickInput(
   project: string,
   state: SeatTickProjectState,
@@ -768,6 +1033,8 @@ export async function gatherSeatTickInput(
      made about the wrong pipeline. */
   const openPipelineIds = new Set(sources.pipelines().filter(isOpen).map((pipeline) => pipeline.id));
   const { events, cursor } = eventsSince(canonical, state.eventsThrough, openPipelineIds, sources);
+  const { children, unavailable: childrenUnavailable, released } = await childWork(canonical, seat, state, policy, sources);
+  const harvestedChildren = released.length > 0 ? state.harvestedChildren.filter((id) => !released.includes(id)) : state.harvestedChildren;
   const { pullRequests, unavailable: pullRequestsUnavailable, gap: pullRequestGap } = await unmergedPullRequests({
     project: canonical,
     seat,
@@ -793,7 +1060,9 @@ export async function gatherSeatTickInput(
     pullRequests,
     pullRequestsUnavailable,
     signals: signals(canonical, seat, sources),
-    changeFingerprint: changeFingerprint(pipelines, tasks, pullRequests, pullRequestsUnavailable),
+    children,
+    childrenUnavailable,
+    changeFingerprint: changeFingerprint(pipelines, tasks, children, pullRequests, pullRequestsUnavailable),
     /* The sealed cursor travels on the state the decision carries forward, so a
        check of any verdict — a skip included, which remembers nothing else —
        persists where the journal stood when the tick first saw this project.
@@ -801,7 +1070,7 @@ export async function gatherSeatTickInput(
        is what attempted the read, so the gather is what records what became of
        it, and the decision reads that row to know whether this is the outage
        worth putting on the board. */
-    state: { ...state, eventsThrough: cursor, pullRequestGap },
+    state: { ...state, eventsThrough: cursor, pullRequestGap, harvestedChildren },
     policy,
     settings,
   };

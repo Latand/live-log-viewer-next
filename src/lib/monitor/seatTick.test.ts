@@ -18,6 +18,7 @@ import { defaultSeatTickSettings, effectiveSeatTickSettings, type SeatTickSettin
 import {
   emptySeatTickState,
   type SeatTickCheckInput,
+  type SeatTickChildInput,
   type SeatTickEventInput,
   type SeatTickPipelineInput,
   type SeatTickProjectState,
@@ -98,12 +99,27 @@ function input(over: Partial<SeatTickCheckInput> = {}): SeatTickCheckInput {
     pullRequests: [],
     pullRequestsUnavailable: null,
     signals: [],
+    children: [],
+    childrenUnavailable: null,
     changeFingerprint: "fp-1",
     state: emptySeatTickState(),
     policy: DEFAULT_SEAT_TICK_POLICY,
     /* The default a project nobody configured reads (#1275): every case below
        that does not say otherwise is the tick exactly as it shipped. */
     settings: effectiveSeatTickSettings(defaultSeatTickSettings(PROJECT), NOW, SEAT_TICK_WAKE_INTERVAL_MS),
+    ...over,
+  };
+}
+
+/** A standalone child the seat spawned (#1465). */
+function child(over: Partial<SeatTickChildInput> = {}): SeatTickChildInput {
+  return {
+    conversationId: ["conversation", "c1d2e3f4a5b6c7d8"].join("_"),
+    title: "build the exporter",
+    status: "running",
+    outcome: null,
+    terminalAt: null,
+    activity: null,
     ...over,
   };
 }
@@ -1170,4 +1186,149 @@ test("the stall threshold the tick configures is the one the liveness read appli
   const exactly = evaluateLiveness({ ...ALIVE, turnState: "busy", silentForMs: DEFAULT_SEAT_TICK_POLICY.stallAfterMs });
   expect(justUnder.lifecycle).toBe("running");
   expect(exactly.lifecycle).toBe("stalled");
+});
+
+/* ------------------------------------------------------------------------- *
+ * Standalone spawned children (#1465).
+ * ------------------------------------------------------------------------- */
+
+const OVERDUE_STATE = { lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString() };
+const SECOND_CHILD = ["conversation", "d8c7b6a5f4e3d2c1"].join("_");
+const THIRD_CHILD = ["conversation", "e3f4a5b6c7d8c1d2"].join("_");
+
+test("a running child is open work and agenda enough for the interval wake (#1465)", () => {
+  const decision = seatTickDecision(input({ children: [child()], state: stateWith(OVERDUE_STATE) }));
+  expect(reasonsOf(decision.verdict)).toEqual(["interval"]);
+  expect(decision.verdict).toMatchObject({ items: [{ kind: "child", id: child().conversationId, label: "build the exporter — spawned child running" }] });
+});
+
+test("a running child inside the interval is quiet, and holds the proposal slot shut (#1465)", () => {
+  const decision = seatTickDecision(input({ children: [child()], state: stateWith({ lastWakeAt: new Date(NOW - 5 * MINUTE).toISOString() }) }));
+  expect(decision.verdict).toEqual({ kind: "quiet", detail: "nothing owed" });
+  const due = seatTickDecision(input({ children: [child()], state: stateWith(OVERDUE_STATE), events: [] }));
+  expect(due.verdict.kind).not.toBe("proactive");
+});
+
+test("a terminal child is a wake reason of its own, named as an item (#1465)", () => {
+  const finished = child({ status: "terminal", outcome: "finished", terminalAt: new Date(NOW - 20 * MINUTE).toISOString() });
+  const decision = seatTickDecision(input({ children: [finished], state: stateWith(OVERDUE_STATE) }));
+  expect(decision.verdict).toMatchObject({
+    kind: "wake",
+    reasons: [{ kind: "child-terminal", detail: "a spawned child finished and its outcome is unharvested" }],
+    items: [{ kind: "child", id: finished.conversationId, label: "build the exporter — spawned child finished, outcome unharvested" }],
+    deferred: 0,
+  });
+});
+
+test("a failed launch is a terminal child too, and the reason says so (#1465)", () => {
+  const failed = child({ status: "terminal", outcome: "failed", terminalAt: new Date(NOW - 20 * MINUTE).toISOString() });
+  const decision = seatTickDecision(input({ children: [failed], state: stateWith(OVERDUE_STATE) }));
+  expect(decision.verdict).toMatchObject({ reasons: [{ kind: "child-terminal", detail: "a spawned child failed and its outcome is unharvested" }] });
+});
+
+test("a terminal child waits out the wake interval like every other reason (#1465)", () => {
+  const finished = child({ status: "terminal", outcome: "finished", terminalAt: new Date(NOW - 20 * MINUTE).toISOString() });
+  const decision = seatTickDecision(input({ children: [finished], state: stateWith({ lastWakeAt: new Date(NOW - 5 * MINUTE).toISOString() }) }));
+  expect(decision.verdict).toEqual({ kind: "quiet", detail: "nothing owed" });
+});
+
+test("terminal children are named oldest outcome first, and the plan records only the ones the wake carries (#1465)", () => {
+  const children = [
+    child({ conversationId: THIRD_CHILD, status: "terminal", outcome: "finished", terminalAt: new Date(NOW - 5 * MINUTE).toISOString() }),
+    child({ status: "terminal", outcome: "finished", terminalAt: new Date(NOW - 30 * MINUTE).toISOString() }),
+    child({ conversationId: SECOND_CHILD, status: "terminal", outcome: "failed", terminalAt: new Date(NOW - 20 * MINUTE).toISOString() }),
+  ];
+  const decision = seatTickDecision(input({
+    children,
+    state: stateWith(OVERDUE_STATE),
+    policy: { ...DEFAULT_SEAT_TICK_POLICY, itemsPerWake: 2 },
+  }));
+  expect(decision.verdict).toMatchObject({ kind: "wake", deferred: 1 });
+  const verdict = decision.verdict as Extract<SeatTickVerdict, { kind: "wake" }>;
+  expect(verdict.items.map((item) => item.id)).toEqual([child().conversationId, SECOND_CHILD]);
+  expect(verdict.reasons[0]!.detail).toBe("a spawned child finished and its outcome is unharvested and 2 more");
+  const commit = seatTickWakeCommitPlan(decision.verdict, { fingerprint: "fp-2", eventsThrough: 0, terminalChildren: children.map((entry) => entry.conversationId) })!;
+  expect(commit.children).toEqual([child().conversationId, SECOND_CHILD]);
+});
+
+test("a running child named as agenda is never recorded as harvested (#1465)", () => {
+  const decision = seatTickDecision(input({ children: [child()], state: stateWith(OVERDUE_STATE) }));
+  const commit = seatTickWakeCommitPlan(decision.verdict, { fingerprint: "fp-2", eventsThrough: 0, terminalChildren: [] })!;
+  expect(commit.children).toEqual([]);
+  const proposal = seatTickWakeCommitPlan({ kind: "proactive", detail: "" }, { fingerprint: "fp-2", eventsThrough: 0, terminalChildren: [child().conversationId] })!;
+  expect(proposal.children).toEqual([]);
+});
+
+test("the landing appends the harvested children to the cursor, once each, bounded (#1465)", () => {
+  const before = stateWith({ harvestedChildren: [SECOND_CHILD] });
+  const landed = seatTickWakeCommit(before, { proposal: false, reasons: ["child-terminal"], fingerprint: "fp-2", eventsThrough: 0, children: [child().conversationId, SECOND_CHILD] }, NOW);
+  expect(landed.harvestedChildren).toEqual([child().conversationId, SECOND_CHILD]);
+  const crowded = stateWith({ harvestedChildren: Array.from({ length: 200 }, (_, index) => `conversation_${index}`) });
+  const bounded = seatTickWakeCommit(crowded, { proposal: false, reasons: ["child-terminal"], fingerprint: "fp-2", eventsThrough: 0, children: [THIRD_CHILD] }, NOW);
+  expect(bounded.harvestedChildren).toHaveLength(200);
+  expect(bounded.harvestedChildren.at(-1)).toBe(THIRD_CHILD);
+  expect(bounded.harvestedChildren[0]).toBe("conversation_1");
+});
+
+test("a proposal landing harvests nothing (#1465)", () => {
+  const before = stateWith({ harvestedChildren: [SECOND_CHILD] });
+  const landed = seatTickWakeCommit(before, { proposal: true, reasons: [], fingerprint: "fp-2", eventsThrough: 0, children: [] }, NOW);
+  expect(landed.harvestedChildren).toEqual([SECOND_CHILD]);
+});
+
+test("an unknown child is neither open work nor a harvest, and the quiet line counts it (#1465)", () => {
+  const decision = seatTickDecision(input({ children: [child({ status: "unknown" })], state: stateWith({ lastWakeAt: new Date(NOW - 5 * MINUTE).toISOString(), lastProposalAt: new Date(NOW - MINUTE).toISOString() }) }));
+  expect(decision.verdict).toEqual({ kind: "quiet", detail: "the board is done and the proposal slot is not due; 1 spawned child(ren) in an unknown state" });
+  const beside = seatTickDecision(input({ children: [child({ status: "unknown" })], tasks: [card({ status: "inbox" })], state: stateWith(OVERDUE_STATE) }));
+  expect(beside.verdict).toEqual({ kind: "quiet", detail: "nothing owed; 1 spawned child(ren) in an unknown state" });
+});
+
+test("a stalled child wakes only once it has persisted across two consecutive checks (#1465)", () => {
+  const stalled = child({ activity: { lifecycle: "stalled", reason: "host_alive_transcript_silent", turnState: "busy" } });
+  const first = seatTickDecision(input({ children: [stalled], state: stateWith(OVERDUE_STATE) }));
+  expect(reasonsOf(first.verdict)).toEqual(["interval"]);
+  expect(first.state.stalledSeen).toEqual([`child:${stalled.conversationId}`]);
+  const second = seatTickDecision(input({ children: [stalled], state: stateWith({ ...OVERDUE_STATE, stalledSeen: [`child:${stalled.conversationId}`] }) }));
+  expect(second.verdict).toMatchObject({
+    reasons: [{ kind: "stalled", detail: `child ${stalled.conversationId} runs a turn the registry reports stalled (host_alive_transcript_silent)` }],
+    items: [{ kind: "child", id: stalled.conversationId, label: `build the exporter — child ${stalled.conversationId} runs a turn the registry reports stalled (host_alive_transcript_silent)` }],
+  });
+});
+
+test("a long-running child the plane calls running is never stalled, and a child with no verdict is not either (#1465)", () => {
+  const running = child({ activity: { lifecycle: "running", reason: "host_alive_turn_active", turnState: "busy" } });
+  const seen = stateWith({ ...OVERDUE_STATE, stalledSeen: [`child:${running.conversationId}`] });
+  expect(reasonsOf(seatTickDecision(input({ children: [running], state: seen })).verdict)).toEqual(["interval"]);
+  expect(reasonsOf(seatTickDecision(input({ children: [child()], state: seen })).verdict)).toEqual(["interval"]);
+  expect(seatTickDecision(input({ children: [child()], state: seen })).state.stalledSeen).toEqual([]);
+});
+
+test("unreadable children are a gap the wake names, and an error when nothing else is owed (#1465)", () => {
+  const blind = seatTickDecision(input({ childrenUnavailable: "registry-unreadable", state: stateWith(OVERDUE_STATE) }));
+  expect(blind.verdict).toEqual({
+    kind: "error",
+    detail: "the seat's spawned children could not be read (registry-unreadable), so nothing owed is not established",
+  });
+  expect(blind.state.lastWakeAt).toBe(OVERDUE_STATE.lastWakeAt);
+  expect(blind.cards).toEqual([]);
+  const woken = seatTickDecision(input({ childrenUnavailable: "registry-unreadable", pipelines: [lane()], state: stateWith(OVERDUE_STATE) }));
+  expect(woken.verdict).toMatchObject({
+    kind: "wake",
+    reasons: [{ kind: "interval" }],
+    gaps: [{ source: "children", gap: "registry-unreadable" }],
+  });
+  /* No card and no standing-run row for this source: the registry is the
+     Viewer's own store, and the journal line says what happened. */
+  expect(woken.cards).toEqual([]);
+  expect(woken.state.pullRequestGap).toBeNull();
+});
+
+test("a child-terminal reason that stops producing change is held by the retry guard like any other (#1465)", () => {
+  const finished = child({ status: "terminal", outcome: "finished", terminalAt: new Date(NOW - 20 * MINUTE).toISOString() });
+  const decision = seatTickDecision(input({
+    children: [finished],
+    state: stateWith({ ...OVERDUE_STATE, lastWakeFingerprint: "fp-1", wakesWithoutChange: { "child-terminal": 2 } }),
+  }));
+  expect(decision.verdict).toEqual({ kind: "quiet", detail: "every wake reason is held by the retry guard" });
+  expect(decision.cards.map((entry) => entry.ref)).toEqual(["seat-tick-stuck-child-terminal"]);
 });

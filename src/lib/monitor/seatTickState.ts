@@ -64,8 +64,23 @@ function normalizeWakeCommit(value: unknown): SeatTickWakeCommit | null {
       .filter((entry): entry is SeatTickWakeReasonKind => SEAT_TICK_WAKE_REASON_KINDS.includes(entry as SeatTickWakeReasonKind)),
     fingerprint: raw.fingerprint.slice(0, 200),
     eventsThrough: raw.eventsThrough,
+    /* A plan written before the harvest existed names no child, and a landing
+       credited from it harvests nothing — the safe direction. */
+    children: conversationIds(raw.children),
   };
 }
+
+/** A bounded list of conversation ids, as the harvest cursor and a commit
+    plan carry one (#1465). Anything that is not a short string is dropped. */
+function conversationIds(value: unknown): string[] {
+  return (Array.isArray(value) ? value : [])
+    .filter((entry): entry is string => typeof entry === "string" && entry.length > 0 && entry.length <= 200)
+    .slice(0, HARVESTED_CHILDREN_LIMIT);
+}
+
+/** How many harvested child ids one row keeps. Past it the oldest are let go:
+    a child that old has long left the bounded projection anyway. */
+export const HARVESTED_CHILDREN_LIMIT = 200;
 
 /**
  * The cursor a row starts the next check from.
@@ -153,6 +168,9 @@ function normalizeRow(value: unknown, legacy: boolean): SeatTickProjectState {
     eventsThrough: eventsThrough(raw, legacy),
     outstandingWake: normalizeOutstandingWake(raw.outstandingWake),
     pullRequestGap: normalizeSourceGap(raw.pullRequestGap),
+    /* Absent on every row from before #1465, and absent reads as empty: a
+       project's children are all owed until a delivered wake names them. */
+    harvestedChildren: conversationIds(raw.harvestedChildren),
   };
 }
 
@@ -198,6 +216,10 @@ function readFile(filePath: string): SeatTickStateFile {
  *   `gh` and the machine it runs on. A rotation does not fix a missing
  *   credential, so clearing it here would re-report the same outage to the
  *   board and put the read back on the five-minute retry it had outgrown.
+ * - The harvest cursor (#1465), for the same reason as the event cursor: it
+ *   records which finished children the PROJECT was already told about, and
+ *   re-announcing every one of them to a successor would bury the child that
+ *   finished after it sat down.
  */
 export function seatTickStateForEpoch(row: SeatTickProjectState, seatEpoch: number | null): SeatTickProjectState {
   if (row.seatEpoch === seatEpoch) return row;
@@ -209,6 +231,7 @@ export function seatTickStateForEpoch(row: SeatTickProjectState, seatEpoch: numb
     lastProposalAt: row.lastProposalAt,
     outstandingWake: row.outstandingWake,
     pullRequestGap: row.pullRequestGap,
+    harvestedChildren: row.harvestedChildren,
   };
 }
 
