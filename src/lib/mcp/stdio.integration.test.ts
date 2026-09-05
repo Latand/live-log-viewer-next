@@ -6,6 +6,8 @@ import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
+import { Database } from "bun:sqlite";
+
 import { AgentRegistry } from "@/lib/agent/registry";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 
@@ -335,7 +337,9 @@ interface CausalFixture {
   execute(): void;
   resetMarkers(): void;
   startHost(): Promise<HostProcess>;
-  mcp(options?: { identified?: boolean; name?: string }): Promise<McpSession>;
+  /** `caller: "other"` speaks as a second authenticated conversation — a
+      launch receipt of its own with its own capability. */
+  mcp(options?: { identified?: boolean; name?: string; caller?: "owner" | "other" }): Promise<McpSession>;
   registryFile(): ReturnType<AgentRegistry["readOnlySnapshot"]>;
 }
 
@@ -374,6 +378,8 @@ async function causalFixture(prefix: string): Promise<CausalFixture> {
      binds to — server-derived, never something the arguments could say. */
   const callerReceipt = registry.beginSpawn("codex", sandbox, { cwd: sandbox, title: "Causal proof caller" });
   const capability = registry.rotateSpawnCapabilityForReceipt(callerReceipt.launchId);
+  const otherReceipt = registry.beginSpawn("codex", sandbox, { cwd: sandbox, title: "Causal proof other caller" });
+  const otherCapability = registry.rotateSpawnCapabilityForReceipt(otherReceipt.launchId);
 
   /* One stable port for every generation of the controlled host, as the
      production Viewer has: an MCP process keeps its endpoint across a host
@@ -465,7 +471,7 @@ async function causalFixture(prefix: string): Promise<CausalFixture> {
     mcp: (options = {}) => startMcp({
       ...environment,
       LLV_VIEWER_CONTROL_URL: `http://127.0.0.1:${Number(fs.readFileSync(config.portFile, "utf8"))}`,
-      ...(options.identified === false ? {} : { LLV_SPAWN_CAPABILITY: capability }),
+      ...(options.identified === false ? {} : { LLV_SPAWN_CAPABILITY: options.caller === "other" ? otherCapability : capability }),
     }, options.name ?? "viewer-causal-proof"),
     registryFile: () => registry.readOnlySnapshot(),
   };
@@ -592,8 +598,9 @@ test("lookup before acceptance stays unknown, late acceptance is then found, and
     expect(late).toMatchObject({ ok: true, outcome: "settled", state: "delivered", operationId: settled.operationId });
     expect(late.original).toMatchObject({ ok: true, operationId: settled.operationId });
 
-    /* A response that arrives AFTER a recovery already answered: the
-       original settles its own success and the recovery answer stands. */
+    /* A response that arrives AFTER a recovery already answered from
+       terminal evidence: that answer was written when it was seen, so the
+       original's own call receives it too, and nothing later replaces it. */
     fixture.resetMarkers();
     fixture.control({ mode: "hold", sendEffect: "deliver" });
     const held = call(original, "send_message", sendArguments(fixture, "send-late-2"));
@@ -602,7 +609,7 @@ test("lookup before acceptance stays unknown, late acceptance is then found, and
     expect(during).toMatchObject({ ok: true, outcome: "settled", state: "delivered" });
     fixture.release();
     const originalAnswer = await held;
-    expect(originalAnswer).toMatchObject({ ok: true, replayed: false, operationId: during.operationId });
+    expect(originalAnswer).toMatchObject({ ok: true, outcome: "settled", state: "delivered", operationId: during.operationId, replayed: true });
     const after = await call(observer, "send_message", sendArguments(fixture, "send-late-2"));
     expect(after).toMatchObject({ ok: true, replayed: true, operationId: during.operationId });
     expect(fixture.effects().filter((effect) => effect.kind === "recipient")).toHaveLength(2);
@@ -872,6 +879,102 @@ test("a lookup from another process before the original ever claims stays unknow
   } finally {
     await owner.close();
     await observer.close();
+    await host.stop();
+  }
+}, 40_000);
+
+test("send: a delayed 409 after recovery already proved delivery never regresses the answer — across MCP restart, one recipient delivery", async () => {
+  const fixture = await causalFixture("llv-1490-late-verdict-");
+  const host = await fixture.startHost();
+  let original = await fixture.mcp({ name: "viewer-original" });
+  const observer = await fixture.mcp({ name: "viewer-observer" });
+  try {
+    /* The handler delivers, the response is held, and what the original
+       finally receives is the server's ambiguity verdict naming the admitted
+       operation — the answer that, taken alone, settles as verify-first. */
+    fixture.control({ mode: "hold", sendEffect: "deliver", lateVerdict: { status: 409 } });
+    const held = call(original, "send_message", sendArguments(fixture, "send-late-verdict-1"));
+    await fixture.marker("accepted");
+    const during = await call(observer, "send_message", sendArguments(fixture, "send-late-verdict-1", { recoveryOnly: true }));
+    expect(during).toMatchObject({ ok: true, recovered: true, outcome: "settled", state: "delivered", resend: "not-needed", nextAction: "follow-disposition" });
+    const operationId = during.operationId as string;
+    expect(typeof operationId).toBe("string");
+
+    fixture.release();
+    const late = await held;
+    expect(late).toMatchObject({ ok: true, outcome: "settled", state: "delivered", resend: "not-needed", operationId, replayed: true });
+    expect(JSON.stringify(late)).not.toContain("verify-first");
+    for (const session of [original, observer]) {
+      expect(await call(session, "send_message", sendArguments(fixture, "send-late-verdict-1")))
+        .toMatchObject({ ok: true, outcome: "settled", state: "delivered", operationId, replayed: true });
+    }
+
+    /* A fresh MCP process against the same store reads the same answer. */
+    await original.close();
+    original = await fixture.mcp({ name: "viewer-original-restarted" });
+    expect(await call(original, "send_message", sendArguments(fixture, "send-late-verdict-1")))
+      .toMatchObject({ ok: true, outcome: "settled", state: "delivered", operationId, replayed: true });
+    const receipt = await original.client.callTool({ name: "message_receipt", arguments: { clientRequestId: "send-late-verdict-1-receipt", operationId } });
+    expect(receipt.structuredContent).toMatchObject({ ok: true, operationId, state: "delivered" });
+
+    const deliveries = fixture.effects().filter((effect) => effect.kind === "recipient");
+    expect(deliveries).toHaveLength(1);
+    expect(deliveries[0]).toMatchObject({ clientMessageId: "send-late-verdict-1", operationId });
+    expect(fixture.responses().filter((response) => response.pathname === "/api/tmux")).toHaveLength(1);
+  } finally {
+    await original.close();
+    await observer.close();
+    await host.stop();
+  }
+}, 40_000);
+
+test("through the protocol: a lost claim discloses nothing to another caller, and an unreadable receipt row answers unknown without dispatching", async () => {
+  const fixture = await causalFixture("llv-1490-store-damage-");
+  const host = await fixture.startHost();
+  const owner = await fixture.mcp({ name: "viewer-owner" });
+  const other = await fixture.mcp({ caller: "other", name: "viewer-other" });
+  try {
+    fixture.control({ mode: "respond", sendEffect: "deliver" });
+    const launched = await call(owner, "spawn_agent", spawnArguments(fixture, "spawn-lost-claim-1"));
+    expect(launched).toMatchObject({ ok: true, replayed: false });
+    const launchId = launched.launchId as string;
+    const conversationId = launched.conversationId as string;
+    const sent = await call(owner, "send_message", sendArguments(fixture, "send-corrupt-1"));
+    expect(sent).toMatchObject({ ok: true, replayed: false });
+    const operationId = sent.operationId as string;
+    expect(fixture.effects()).toHaveLength(2);
+
+    /* The receipt store is damaged underneath every process: the spawn's
+       claim row is gone, and the send's row carries a binding that cannot be
+       parsed. The downstream records — the launch receipt, the delivery —
+       are intact. */
+    const database = new Database(path.join(fixture.state, "mcp-receipts.sqlite"), { strict: true });
+    database.query("DELETE FROM mcp_receipts WHERE receipt_key = ?").run("spawn_agent:spawn-lost-claim-1");
+    database.query("UPDATE mcp_receipts SET binding_json = ? WHERE receipt_key = ?").run("{not json", "send_message:send-corrupt-1");
+    database.close();
+
+    for (const session of [other, owner]) {
+      /* No claim: nothing establishes whose launch the intact receipt is, so
+         nobody — another authenticated caller, or the owner — is handed it. */
+      const absent = await call(session, "spawn_agent", spawnArguments(fixture, "spawn-lost-claim-1", { recoveryOnly: true }));
+      expect(absent).toMatchObject({ ok: false, code: "outcome_unknown", retryable: false, replayed: false, details: { outcome: "unknown", evidence: "none", nextAction: "original-key-lookup" } });
+      expect(JSON.stringify(absent)).not.toContain(launchId);
+      expect(JSON.stringify(absent)).not.toContain(conversationId);
+      /* An unreadable row: unknown, with the guidance, and nothing read or
+         dispatched on its behalf — explicit or ordinary. */
+      for (const args of [sendArguments(fixture, "send-corrupt-1", { recoveryOnly: true }), sendArguments(fixture, "send-corrupt-1")]) {
+        const unreadable = await call(session, "send_message", args);
+        expect(unreadable).toMatchObject({ ok: false, code: "outcome_unknown", retryable: false, details: { outcome: "unknown", evidence: "mcp-receipt-unreadable", nextAction: "original-key-lookup" } });
+        expect(String(unreadable.error)).toContain("could not be read");
+        expect(JSON.stringify(unreadable)).not.toContain(operationId);
+      }
+    }
+    expect(fixture.effects()).toHaveLength(2);
+    expect(fixture.responses().filter((response) => response.pathname === "/api/tmux")).toHaveLength(1);
+    expect(fixture.responses().filter((response) => response.pathname === "/api/spawn")).toHaveLength(1);
+  } finally {
+    await owner.close();
+    await other.close();
     await host.stop();
   }
 }, 40_000);

@@ -2798,7 +2798,16 @@ test("send and spawn bindings dispatch through the single-attempt seam with the 
     claimedAt: new Date().toISOString(),
   });
   await bindings.send_message({ clientRequestId: "seam-1", conversationId: "conversation_target", text: "hello", recoveryOnly: false }, { binding: binding("persisted-send-key") });
-  await bindings.spawn_agent({ clientRequestId: "seam-1", cwd: sandbox, "prompt": "go", title: "Seam launch", recoveryOnly: false }, { binding: { ...binding("persisted_spawn_key"), toolName: "spawn_agent" } });
+  await bindings.spawn_agent({ clientRequestId: "seam-1", cwd: sandbox, "prompt": "go", title: "Seam launch", recoveryOnly: false }, {
+    binding: { ...binding("persisted_spawn_key"), toolName: "spawn_agent", target: { project: projectForCwd(sandbox), identity: sandbox } },
+  });
+  /* A persisted binding that does not name the canonical target of these
+     arguments is not dispatched under: refused before the request is built. */
+  const drifted = { ...binding("persisted_spawn_key"), toolName: "spawn_agent" as const, target: { project: "proj-forged", identity: sandbox } };
+  expect(bindings.spawn_agent({ clientRequestId: "seam-2", cwd: sandbox, "prompt": "go", title: "Seam launch" }, { binding: drifted }))
+    .rejects.toMatchObject({ details: { code: "binding_mismatch", status: 400 } });
+  await expect(bindings.spawn_agent({ clientRequestId: "seam-2", cwd: sandbox, "prompt": "go", title: "Seam launch" }, { binding: drifted })).rejects.toThrow("canonical target");
+  expect(dispatched.filter((call) => call.pathname === "/api/spawn")).toHaveLength(1);
   const longKey = "k".repeat(300);
   await bindings.send_message({ clientRequestId: longKey, conversationId: "conversation_target", text: "hello" });
   expect(posted).toEqual([]);
@@ -2870,6 +2879,23 @@ test("bind resolves caller and target server-side, never from the arguments", as
   const spawn = await tools.spawn_agent!.bind({ clientRequestId: "bind-request-1", cwd: sandbox, "prompt": "go", title: "Bind launch", ...forged });
   expect(spawn).toMatchObject({ caller: { kind: "worker", conversationId: callerA.id, project: projectA }, target: { identity: sandbox }, downstreamKey: "bind-request-1" });
   expect(typeof spawn.target.project).toBe("string");
+  /* The target project is the launch directory's and nothing the arguments
+     say: a supplied `project` may only repeat it. A contradiction — another
+     project, a value that is not a project key — is refused before any
+     claim, because the route would record it as the conversation's owner. */
+  const canonical = spawn.target.project!;
+  expect(await tools.spawn_agent!.bind({ clientRequestId: "bind-request-1", cwd: sandbox, "prompt": "go", title: "Bind launch", project: canonical }))
+    .toMatchObject({ target: { project: canonical, identity: sandbox } });
+  for (const project of ["proj-forged", projectB, "not a project key!"]) {
+    expect(() => tools.spawn_agent!.bind({ clientRequestId: "bind-request-1", cwd: sandbox, "prompt": "go", title: "Bind launch", project }))
+      .toThrow("contradicts the canonical project");
+  }
+  try {
+    tools.spawn_agent!.bind({ clientRequestId: "bind-request-1", cwd: sandbox, "prompt": "go", title: "Bind launch", project: "proj-forged" });
+  } catch (error) {
+    expect(error).toBeInstanceOf(McpToolRefusal);
+    expect((error as McpToolRefusal).details).toMatchObject({ code: "invalid_request", status: 400, canonicalProject: canonical });
+  }
   expect(await tools.spawn_agent!.bind({ clientRequestId: "x".repeat(200), cwd: sandbox, "prompt": "go", title: "Bind launch" }))
     .toMatchObject({ downstreamKey: expect.stringMatching(/^mcp_[0-9a-f]{24}$/) });
   /* Another authenticated conversation binds to ITS project: a replay from a

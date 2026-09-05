@@ -791,7 +791,13 @@ test("spawn_agent and send_message publish recoveryOnly and the recovery contrac
     for (const toolName of ["spawn_agent", "send_message"] as const) {
       const tool = listed.tools.find((candidate) => candidate.name === toolName)!;
       const schema = tool.inputSchema as { properties: Record<string, { type?: string; description?: string }>; required?: string[] };
+      /* Captured before toMatchObject, which swaps the matched field for its matcher. */
+      const recoveryOnlyDescription = String(schema.properties.recoveryOnly?.description);
       expect(schema.properties.recoveryOnly).toMatchObject({ type: "boolean", description: expect.stringContaining("never claim an absent key") });
+      expect(recoveryOnlyDescription).toContain("nothing is disclosed");
+      if (toolName === "spawn_agent") {
+        expect(String(schema.properties.project.description)).toContain("resolved server-side from cwd");
+      }
       expect(schema.required ?? []).not.toContain("recoveryOnly");
       expect(tool.description).toContain(RECOVERY_CONTRACT_DESCRIPTION);
       for (const rule of [

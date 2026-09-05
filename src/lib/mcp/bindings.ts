@@ -86,6 +86,7 @@ import { loadPipelinesForList } from "@/lib/pipelines/store";
 import type { CreatePipelineRequest, PatchPipelineRequest, Pipeline, PipelineAction } from "@/lib/pipelines/types";
 import type { PauseResumeActor } from "@/lib/pauseResumeActor";
 import { listFiles } from "@/lib/scanner";
+import { validExplicitProject } from "@/lib/accounts/migration/contracts";
 import { describe, projectForCwd, reprojectFileDescription } from "@/lib/scanner/describe";
 import { pathAllowed, scanRootEntries } from "@/lib/scanner/roots";
 import { completedFileScan } from "@/lib/scanner/scanCache";
@@ -1001,6 +1002,20 @@ async function spawnAgent(args: McpToolArgs, control: ViewerControlDependencies,
   /* #1490: the persisted downstream key wins over a recomputation — it is the
      key the claim was bound to and the one recovery will look up. */
   const clientAttemptId = context?.binding?.downstreamKey ?? spawnAttemptId(requestId(args));
+  if (context?.binding) {
+    /* The persisted binding must be the one this dispatch would make now: a
+       row whose target disagrees with the canonical resolution of these
+       arguments is not dispatched under it. Nothing has left this process,
+       so the attempt closes as not-executed. */
+    const cwd = spawnCwd(args);
+    const target = context.binding.target;
+    if (target.identity !== cwd || target.project !== spawnTargetProject(args, cwd)) {
+      throw new McpToolRefusal(
+        "the persisted binding does not name the canonical target of this spawn; nothing was dispatched",
+        { code: "binding_mismatch", status: 400 },
+      );
+    }
+  }
   const body = withoutKeys(args, ["clientRequestId", "recoveryOnly"]);
   const roleParams = defaultMcpSpawnRoleParams(args);
   const result = await dispatchControl(control)("/api/spawn", {
@@ -3831,11 +3846,32 @@ function bindSend(args: McpToolArgs, dependencies: ViewerMcpDomainDependencies):
   };
 }
 
+/** The canonical project of a spawn's target: the launch directory's, and
+    nothing the arguments say. A supplied `project` is admitted only when it
+    names that same project. The route records an explicit project as the new
+    conversation's durable ownership, so a value that contradicts the launch
+    directory would make a forged project both the binding's metadata and the
+    conversation's owner; it is refused before any claim, so the key is not
+    burned. */
+function spawnTargetProject(args: McpToolArgs, cwd: string): string | null {
+  const canonical = projectForCwd(cwd);
+  const supplied = text(args.project).trim();
+  if (!supplied) return canonical;
+  const explicit = validExplicitProject(supplied);
+  if (!explicit || explicit !== canonical) {
+    throw new McpToolRefusal(
+      "project contradicts the canonical project of cwd; omit it or name the launch directory's own project",
+      { code: "invalid_request", status: 400, ...(canonical ? { canonicalProject: canonical } : {}) },
+    );
+  }
+  return canonical;
+}
+
 function bindSpawn(args: McpToolArgs, dependencies: ViewerMcpDomainDependencies): McpRequestBindingInput {
   const cwd = spawnCwd(args);
   return {
     caller: recoveryCaller(dependencies),
-    target: { project: text(args.project) || projectForCwd(cwd), identity: cwd },
+    target: { project: spawnTargetProject(args, cwd), identity: cwd },
     downstreamKey: spawnAttemptId(requestId(args)),
   };
 }

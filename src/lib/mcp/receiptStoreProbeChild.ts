@@ -71,6 +71,11 @@ interface HttpHostControl {
   /** `hold-effect`: write the `admitted` marker as soon as the durable record
       exists and defer the effect until the `execute` file appears. */
   admission?: "immediate" | "hold-effect";
+  /** With `hold`: once released, answer with this status and the server's
+      ambiguity verdict — the ids the handler actually admitted, `resend:
+      verify-first`, `actuation: started` — instead of the handler's own
+      answer. The delayed error that would regress a recovered success. */
+  lateVerdict?: { status: number };
 }
 
 async function runHttpHost(configPath: string): Promise<void> {
@@ -217,6 +222,21 @@ async function runHttpHost(configPath: string): Promise<void> {
         marker("accepted");
         if (current.mode === "lose") return new Promise<Response>(() => {});
         await awaitFile(path.join(config.markerDir, "release"));
+        if (current.lateVerdict) {
+          let admitted: Record<string, unknown> = {};
+          try {
+            admitted = JSON.parse(answerBody) as Record<string, unknown>;
+          } catch { /* the verdict then names no id, as a lost body would */ }
+          const verdict = {
+            error: "delivery was started and never settled",
+            ...(typeof admitted.operationId === "string" ? { operationId: admitted.operationId } : {}),
+            ...(typeof admitted.launchId === "string" ? { launchId: admitted.launchId } : {}),
+            ...(typeof admitted.conversationId === "string" ? { conversationId: admitted.conversationId } : {}),
+            resend: "verify-first",
+            actuation: "started",
+          };
+          return new Response(JSON.stringify(verdict), { status: current.lateVerdict.status, headers: { "content-type": "application/json" } });
+        }
       }
       if (current.mode === "cut") {
         /* The response is lost after its status line: the body errors before
