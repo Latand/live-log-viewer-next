@@ -13,6 +13,7 @@ import {
   OUTBOX_LIMIT,
   OUTBOX_MTIME_GRACE_MS,
   outboxStateForReceiptStatus,
+  outboxReceiptPatch,
   publishTranscriptEchoes,
   readOutbox,
   resetOutboxForTests,
@@ -1824,4 +1825,64 @@ test("a text-only delivering entry returns to the queue for replay after a refre
   const restored = readOutbox("conv");
   expect(restored[0]!.state).toBe("queued");
   expect(nextDispatch(restored)?.id).toBe("k1");
+});
+
+
+describe("authoritative receipt settlement", () => {
+  const origin = Date.parse("2026-01-01T00:00:00.000Z");
+  const terminalAt = origin + 40_000;
+  const now = origin + 120_000;
+  const receipt = { at: new Date(terminalAt).toISOString(), admittedAt: new Date(origin).toISOString() };
+  const entry: OutboxEntry = { id: "receipt-key", text: "Inspect queued work.", images: 0, at: origin, state: "delivering" };
+
+  test("terminal receipt time is stable across repeated, incomplete and stale projections", () => {
+    const patch = outboxReceiptPatch(entry, "delivered", receipt, now)!;
+    expect(patch).toMatchObject({ state: "delivered", settledAt: terminalAt, receiptSettlement: "known" });
+    const settled = { ...entry, ...patch };
+    for (const at of [receipt.at, "", new Date(now).toISOString()]) {
+      expect(outboxReceiptPatch(settled, "delivered", { at }, now + 60_000)).toBeNull();
+    }
+    for (const status of ["queued", "delivering", "uncertain", "pending", "failed"] as const) {
+      expect(outboxReceiptPatch(settled, status, receipt, now)).toBeNull();
+    }
+  });
+
+  test("unknown settlement survives persistence without using admission for retirement", () => {
+    enqueueOutbox("conv", entry);
+    updateOutbox("conv", entry.id, outboxReceiptPatch(entry, "delivered", { at: "" }, now)!);
+    resetOutboxForTests();
+    const restored = readOutbox("conv");
+    expect(restored[0]).toMatchObject({ state: "delivered", receiptSettlement: "unknown" });
+    expect(restored[0]?.settledAt).toBeUndefined();
+    expect(visibleOutbox(restored, echoes(), now + OUTBOX_DELIVERED_TTL_MS, null, now)).toHaveLength(1);
+    expect(visibleOutbox(restored, echoes(entry.text), now)).toHaveLength(0);
+    updateOutbox("conv", entry.id, outboxReceiptPatch(restored[0]!, "delivered", receipt, now)!);
+    resetOutboxForTests();
+    expect(readOutbox("conv")[0]?.settledAt).toBe(terminalAt);
+    expect(visibleOutbox(readOutbox("conv"), echoes(), now, null, origin + 60_000)).toHaveLength(0);
+  });
+
+  test("legacy persisted deliveries retain their old retirement contract", () => {
+    enqueueOutbox("conv", entry);
+    updateOutbox("conv", entry.id, { state: "delivered" });
+    resetOutboxForTests();
+    expect(visibleOutbox(readOutbox("conv"), echoes(), now, null, now)).toHaveLength(0);
+    // A fresh authoritative receipt also repairs a legacy browser-time stamp.
+    const old = { ...entry, state: "delivered" as const, settledAt: now };
+    expect(outboxReceiptPatch(old, "delivered", receipt, now)?.settledAt).toBe(terminalAt);
+  });
+
+  test("an exact scaffolded echo consumes only its own identical submission", () => {
+    const scaffold = "Context for this request.\n\nInspect queued work.";
+    const first = { ...entry, echoText: scaffold, ...outboxReceiptPatch(entry, "delivered", { at: "" }, now) };
+    const second = { ...entry, id: "next-key", echoText: scaffold, echoBaseline: 1 };
+    expect(visibleOutbox([first, second], echoes([scaffold, 1]), now)).toEqual([second]);
+  });
+
+  test.each(["queued", "delivering", "uncertain", "pending"] as const)("%s never establishes a delivery clock", (status) => {
+    const patch = outboxReceiptPatch(entry, status, receipt, now);
+    expect(patch?.settledAt).toBeUndefined();
+    expect(patch?.receiptSettlement).toBeUndefined();
+    expect(visibleOutbox([{ ...entry, ...patch }], echoes(), now + OUTBOX_DELIVERED_TTL_MS, null, now)).toHaveLength(1);
+  });
 });
