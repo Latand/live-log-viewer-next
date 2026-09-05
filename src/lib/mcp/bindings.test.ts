@@ -3129,3 +3129,42 @@ test("incomplete and contradictory mutation answers remain unknown when no durab
     store.close();
   }
 });
+
+
+test("task placement bindings require atomic guards and classify field refusals as non-retryable", async () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "task-binding-position-"));
+  sandboxes.push(sandbox);
+  const env: NodeJS.ProcessEnv = { ...process.env, LLV_VIEWER_CONTROL_URL: "http://127.0.0.1:1", LLV_RUNTIME_HOST_SOCKET: path.join(sandbox, "runtime.sock") };
+  for (const key of ["HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "LLV_STATE_DIR", "LLV_CODEX_HOME", "LLV_CLAUDE_HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "TMPDIR"]) {
+    const dir = path.join(sandbox, key); fs.mkdirSync(dir); env[key] = dir;
+  }
+  // Child imports happen only after every root has been isolated. The parent
+  // file already imports bindings for its existing dependency-injected tests.
+  const child = Bun.spawn([process.execPath, "-e", `
+    import fs from "node:fs";
+    import { viewerMcpBindings } from "./src/lib/mcp/bindings";
+    import { createMcpToolService, MemoryMcpReceiptStore } from "./src/lib/mcp/server";
+    import { TASKS_FILE } from "./src/lib/tasks/store";
+    if (!TASKS_FILE.startsWith(process.env.LLV_STATE_DIR + "/")) throw new Error("state escaped sandbox");
+    const service = createMcpToolService(viewerMcpBindings(), new MemoryMcpReceiptStore());
+    const created = await service.callTool("create_task", { clientRequestId: "binding-position-create", project: "fixture-project", text: "task" });
+    if (!created.ok) throw new Error(created.error);
+    const before = fs.readFileSync(TASKS_FILE, "utf8");
+    const missing = await service.callTool("update_task", { clientRequestId: "binding-missing-guard", taskId: created.taskId, pos: { x: 0, y: 0 } });
+    const invalid = [];
+    for (const [index, pos] of [null, {}, { x: 1 }, { x: Infinity, y: 1 }, { x: 0, y: NaN }].entries()) {
+      invalid.push(await service.callTool("create_task", { clientRequestId: "binding-invalid-pos-" + index, project: "fixture-project", text: "task", placement: "pinned", pos }));
+    }
+    console.log(JSON.stringify({ missing, invalid, unchanged: fs.readFileSync(TASKS_FILE, "utf8") === before }));
+  `], { cwd: process.cwd(), env, stdout: "pipe", stderr: "pipe" });
+  const output = await new Response(child.stdout).text();
+  const error = await new Response(child.stderr).text();
+  expect([await child.exited, error]).toEqual([0, ""]);
+  const result = JSON.parse(output);
+  expect(result.missing).toMatchObject({ ok: false, code: "TASK_INVALID_FIELD", retryable: false, details: { field: "expectedProject" } });
+  for (const invalid of result.invalid) {
+    expect(invalid).toMatchObject({ ok: false, code: "TASK_INVALID_FIELD", retryable: false });
+    expect(invalid.details.field.startsWith("pos")).toBe(true);
+  }
+  expect(result.unchanged).toBe(true);
+});
