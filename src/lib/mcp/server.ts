@@ -2319,19 +2319,17 @@ export function createMcpToolService(
              ADMITTED id (an operation or a launch) is a terminal verdict about
              work the server holds and keeps that id and its guidance. Nothing
              executed only when the request provably never left: the transport
-             says so, the request was never handed to it, or the server's own
-             4xx verdict refused it. Everything else — an exception after the
-             request may be on the server, a 5xx, a 409 whose id was lost —
+             says so or the request was never handed to it. HTTP status and
+             an error body alone provide no pre-dispatch proof. Everything
+             else after the request may be on the server
              leaves the row `dispatching` and is answered from the evidence,
              exactly as a lost response is; nothing here may invite a new key. */
           outcome = error instanceof DeadlineExceededError ? "deadline" : "failure";
           const refusal = error instanceof McpToolRefusal ? error.details : {};
           const admitted = typeof refusal.operationId === "string" || typeof refusal.launchId === "string";
-          const verdictStatus = error instanceof McpDispatchVerdictError ? Number(error.details.status) : null;
           const proven = !admitted && (
             error instanceof McpDispatchNotExecutedError
             || !dispatch.attempted
-            || (verdictStatus !== null && verdictStatus >= 400 && verdictStatus < 500 && verdictStatus !== 409)
           );
           if (!admitted && !proven) {
             outcome = context.signal?.aborted ? "cancelled" : "failure";

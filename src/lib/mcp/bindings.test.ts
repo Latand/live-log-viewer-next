@@ -2757,11 +2757,27 @@ test("the single dispatch classifies every transport outcome by what it can prov
     answer = () => Response.json({ error: "host is starting", code: "HOST_STARTING" }, { status: 503 });
     expect(await classify(send)).toMatchObject({ kind: "verdict", value: { details: { status: 503, code: "HOST_STARTING" } } });
     answer = () => new Response("<html>not found</html>", { status: 404 });
-    expect(await classify(send)).toMatchObject({ kind: "verdict", value: { message: expect.stringContaining("refused the request with status 404"), details: { status: 404 } } });
+    expect(await classify(send)).toMatchObject({ kind: "uncertain" });
     /* A 409 whose body was lost may have named an admitted operation. */
     answer = () => new Response("", { status: 409 });
     expect(await classify(send)).toMatchObject({ kind: "uncertain" });
     expect(requests).toBe(13);
+    // Exercise every error status, including nonstandard proxy 4xx/5xx,
+    // for both mutation endpoints. An unreadable body proves no refusal.
+    for (const pathname of ["/api/tmux", "/api/spawn"]) {
+      for (let status = 300; status <= 599; status += 1) {
+        answer = () => new Response("<html>response lost</html>", { status });
+        const before = requests;
+        expect(await classify(() => dispatch(pathname, {}, {}, { deadlineAt: Date.now() + 2_000 }))).toMatchObject({ kind: "uncertain" });
+        expect(requests).toBe(before + 1);
+      }
+    }
+
+    // A 307 must not automatically repeat the POST at its Location.
+    answer = () => new Response(null, { status: 307, headers: { location: "/redirected" } });
+    const beforeRedirect = requests;
+    expect(await classify(send)).toMatchObject({ kind: "uncertain" });
+    expect(requests).toBe(beforeRedirect + 1);
     expect(tracker.attempted).toBe(true);
   } finally {
     unanswered.release?.(Response.json({ ok: true }));
@@ -2876,6 +2892,8 @@ test("bind resolves caller and target server-side, never from the arguments", as
     target: { identity: recipient.id },
     downstreamKey: "bind-request-1",
   });
+  expect(await tools.send_message!.bind({ clientRequestId: "unindexed", transcriptPath: path.join(sandbox, "late.jsonl"), text: "hi" }))
+    .toMatchObject({ target: { identity: path.join(sandbox, "late.jsonl") } });
   const spawn = await tools.spawn_agent!.bind({ clientRequestId: "bind-request-1", cwd: sandbox, "prompt": "go", title: "Bind launch", ...forged });
   expect(spawn).toMatchObject({ caller: { kind: "worker", conversationId: callerA.id, project: projectA }, target: { identity: sandbox }, downstreamKey: "bind-request-1" });
   expect(typeof spawn.target.project).toBe("string");

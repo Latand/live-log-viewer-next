@@ -1980,12 +1980,24 @@ describe("original-key recovery (#1490)", () => {
     });
     expect(await carried.service.callTool("send_message", SEND)).toMatchObject({ ok: false, code: "outcome_unknown", details: { outcome: "unknown", conversationId: "conversation_named" } });
 
-    /* Proven: the transport never connected (even though it tried), a 4xx
-       verdict from the server, or a failure before the request was handed to
-       the transport at all. */
+    // All error status families without affirmative dispatch proof stay open.
+    for (let status = 300; status <= 599; status += 1) {
+      const harness = recoveryHarness(OWNER, undefined, {
+        bindingImpl: async (_args, context) => {
+          context!.dispatch!.attempted = true;
+          throw new McpDispatchVerdictError("response without dispatch proof", { status });
+        },
+      });
+      expect(await harness.service.callTool("send_message", SEND)).toMatchObject({
+        code: "outcome_unknown", details: { outcome: "unknown", nextAction: "original-key-lookup" },
+      });
+      expect(await harness.store.lookup("send_message:recover-1")).toMatchObject({ stage: "dispatching", result: null });
+      expect(harness.recoverCalls).toHaveLength(1);
+    }
+    /* Proven: the transport never connected, or the failure happened before
+       the request was handed to the transport. */
     for (const thrown of [
       new McpDispatchNotExecutedError("Viewer control is unreachable: the connection was refused before the request was sent"),
-      new McpDispatchVerdictError("empty message", { status: 400 }),
     ]) {
       const harness = recoveryHarness(OWNER, undefined, {
         bindingImpl: async (_args, context) => { context!.dispatch!.attempted = true; throw thrown; },

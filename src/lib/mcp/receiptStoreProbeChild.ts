@@ -76,6 +76,9 @@ interface HttpHostControl {
       verify-first`, `actuation: started` — instead of the handler's own
       answer. The delayed error that would regress a recovered success. */
   lateVerdict?: { status: number };
+  /** Replace an actual handler answer after its effects with a proxy error. */
+  lostStatus?: number;
+  lostJson?: boolean;
 }
 
 async function runHttpHost(configPath: string): Promise<void> {
@@ -217,6 +220,13 @@ async function runHttpHost(configPath: string): Promise<void> {
       else return new Response(JSON.stringify({ error: "unrouted" }), { status: 404, headers: { "content-type": "application/json" } });
       const answerBody = await response.text();
       fs.appendFileSync(config.responsesPath, `${JSON.stringify({ pathname: url.pathname, status: response.status, body: answerBody })}\n`);
+      if (current.lostStatus) {
+        marker("accepted");
+        return new Response(current.lostJson ? JSON.stringify({ error: "upstream response lost" }) : "<html>upstream response lost</html>", {
+          status: current.lostStatus,
+          headers: { "content-type": current.lostJson ? "application/json" : "text/html" },
+        });
+      }
       const answer = new Response(answerBody, { status: response.status, headers: { "content-type": "application/json" } });
       if (current.mode === "hold" || current.mode === "lose") {
         marker("accepted");

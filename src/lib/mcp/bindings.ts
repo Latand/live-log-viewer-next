@@ -406,8 +406,8 @@ async function postViewerControl(
  * did nothing; a reset, a timeout after the write, an unreadable or missing
  * body, and a proxy status that says nothing about the upstream all leave the
  * request possibly on the server and are reported as uncertain. A JSON answer
- * from the handler is the server's own verdict and is returned or refused as
- * such — a refusal carrying an admitted id keeps that id.
+ * carrying an admitted id keeps that id. A status or error body alone cannot
+ * prove that the handler rejected the request before dispatch.
  */
 async function dispatchViewerControl(
   pathname: string,
@@ -437,6 +437,8 @@ async function dispatchViewerControl(
   try {
     response = await fetch(new URL(pathname, baseUrl), {
       method: "POST",
+      // Redirects can repeat a POST after the first endpoint accepted it.
+      redirect: "error",
       headers: requestHeaders,
       body: JSON.stringify(body),
       signal: attempt.signal,
@@ -468,12 +470,6 @@ async function dispatchViewerControl(
     throw new McpDispatchUncertainError(`Viewer control answered status ${response.status} without a verdict; the request may have been received`);
   }
   if (unreadable) {
-    /* A 4xx whose body could not be read is still the handler's refusal —
-       except a 409, which in this codebase is how an ADMITTED but ambiguous
-       operation is answered, with its id in the body that was just lost. */
-    if (response.status >= 400 && response.status < 500 && response.status !== 409) {
-      throw new McpDispatchVerdictError(`Viewer control refused the request with status ${response.status}`, { status: response.status });
-    }
     throw new McpDispatchUncertainError(`Viewer control returned an unreadable response with status ${response.status}; the request may have been received`);
   }
   if (!objectRecord(parsed)) {
@@ -3840,7 +3836,7 @@ function bindSend(args: McpToolArgs, dependencies: ViewerMcpDomainDependencies):
     caller: recoveryCaller(dependencies),
     target: {
       project: conversationProject(conversation),
-      identity: conversation?.id ?? conversationId ?? transcriptPath,
+      identity: conversation?.id ?? (conversationId || transcriptPath),
     },
     downstreamKey: sendDownstreamKey(requestId(args)),
   };

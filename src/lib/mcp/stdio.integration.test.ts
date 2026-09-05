@@ -644,20 +644,26 @@ test("network failure without dispatch proof stays unknown and never redelivers;
     expect(await call(mcp, "send_message", sendArguments(fixture, "send-cut-1", { recoveryOnly: true }))).toMatchObject({ ok: false, code: "outcome_unknown" });
     expect(fixture.effects()).toHaveLength(0);
 
-    /* A pre-dispatch rejection by the production route: no receipt, no writer. */
+    /* A route rejection without affirmative dispatch proof stays unknown. */
     const rejected = await call(mcp, "spawn_agent", spawnArguments(fixture, "spawn-rejected-1", { cwd: path.join(fixture.sandbox, "missing") }));
-    expect(rejected).toMatchObject({ ok: false, code: "tool_failed", details: { outcome: "not-executed", nextAction: "new-request-permitted", evidence: "dispatch-refused" } });
-    /* The proof is the production route's OWN 4xx verdict, not a dead port. */
+    expect(rejected).toMatchObject({ ok: false, code: "outcome_unknown", details: { outcome: "unknown", nextAction: "original-key-lookup" } });
+    /* The observed 4xx alone does not prove that no work was admitted. */
     expect(String(rejected.error)).not.toContain("connection was refused");
     const verdicts = fixture.responses().filter((response) => response.pathname === "/api/spawn" && response.body.includes("missing"));
     expect(verdicts).toHaveLength(1);
     expect(verdicts[0]!.status).toBeGreaterThanOrEqual(400);
     expect(verdicts[0]!.status).toBeLessThan(500);
-    expect(rejected.details?.status).toBe(verdicts[0]!.status);
+
     expect(await call(mcp, "spawn_agent", spawnArguments(fixture, "spawn-rejected-1", { cwd: path.join(fixture.sandbox, "missing") })))
-      .toMatchObject({ ok: false, replayed: true, details: { outcome: "not-executed" } });
+      .toMatchObject({ ok: false, replayed: true, details: { outcome: "unknown" } });
     expect(fixture.effects()).toHaveLength(0);
     expect(Object.values(fixture.registryFile().receipts).filter((receipt) => receipt.clientAttemptId === "spawn-rejected-1")).toHaveLength(0);
+
+    await host.kill();
+    const disconnected = await call(mcp, "spawn_agent", spawnArguments(fixture, "spawn-unconnected"));
+    expect(disconnected).toMatchObject({ ok: false, details: { outcome: "not-executed", nextAction: "new-request-permitted" } });
+    expect(fixture.effects()).toHaveLength(0);
+    host = await fixture.startHost();
 
     /* recoveryOnly under a key nothing ever claimed starts no work and writes
        nothing: unknown, because the original may still be on its way — and
@@ -975,6 +981,82 @@ test("through the protocol: a lost claim discloses nothing to another caller, an
   } finally {
     await owner.close();
     await other.close();
+    await host.stop();
+  }
+}, 40_000);
+
+for (const tool of ["send_message", "spawn_agent"] as const) {
+  test(`${tool}: proxy errors after actual effect recover the original identity across process restart`, async () => {
+    const fixture = await causalFixture("llv-1490-proxy-");
+    let host = await fixture.startHost();
+    let mcp = await fixture.mcp();
+    try {
+      // Cover timeout, throttling, nonstandard client/proxy and server errors,
+      // with both unreadable and valid JSON bodies after actual acceptance.
+      for (const status of [400, 408, 425, 429, 499, 500, 502, 503, 504]) {
+        for (const lostJson of [false, true]) {
+          const key = `proxy-${status}-${lostJson}`;
+          const args = tool === "send_message" ? sendArguments(fixture, key) : spawnArguments(fixture, key);
+          fixture.control({ lostStatus: status, lostJson });
+          const before = fixture.effects().length;
+          const result = await call(mcp, tool, args);
+          expect(fixture.effects()).toHaveLength(before + 1);
+          const effect = fixture.effects().at(-1)!;
+          const ids = tool === "send_message"
+            ? { operationId: effect.operationId }
+            : { launchId: effect.launchId, conversationId: effect.conversationId };
+          expect(result).toMatchObject({ ok: true, recovered: true, ...ids });
+          expect(result.nextAction).not.toBe("new-request-permitted");
+          await mcp.close();
+          await host.kill();
+          fixture.control({ mode: "respond" });
+          host = await fixture.startHost();
+          mcp = await fixture.mcp();
+          for (const recoveryOnly of [true, false]) {
+            expect(await call(mcp, tool, { ...args, recoveryOnly })).toMatchObject({ ok: true, ...ids });
+          }
+          expect(fixture.effects()).toHaveLength(before + 1);
+          if (tool === "spawn_agent") {
+            const receipts = Object.values(fixture.registryFile().receipts).filter((receipt) => receipt.clientAttemptId === key);
+            expect(receipts).toHaveLength(1);
+            expect(receipts[0]).toMatchObject({ conversationId: effect.conversationId });
+          }
+        }
+      }
+    } finally {
+      await mcp.close();
+      await host.stop();
+    }
+  }, 120_000);
+}
+
+test("path-only send: late registration after binding, lost response, and restart retain one delivery", async () => {
+  const fixture = await causalFixture("llv-1490-path-");
+  let host = await fixture.startHost();
+  let mcp = await fixture.mcp();
+  const transcriptPath = path.join(fixture.sandbox, "late-recipient.jsonl");
+  const args = { clientRequestId: "late-path", transcriptPath, text: "late registered recipient" };
+  try {
+    expect(fixture.registry.conversationForPath(transcriptPath)).toBeNull();
+    fixture.control({ mode: "hold-before", lostStatus: 408 });
+    const original = call(mcp, "send_message", args);
+    await fixture.marker("reached");
+    // HTTP has received the already-bound request but has not handled it yet.
+    fixture.registry.recordConversationContinuityPath(fixture.recipient.conversationId as `conversation_${string}`, transcriptPath);
+    fixture.release();
+    // The fixture replaces the accepted response with an unreadable 408.
+    const result = await original;
+    expect(result).toMatchObject({ ok: true, recovered: true, outcome: "settled" });
+    await mcp.close();
+    await host.kill();
+    fixture.control({ mode: "respond" });
+    host = await fixture.startHost();
+    mcp = await fixture.mcp();
+    const recovered = await call(mcp, "send_message", { ...args, recoveryOnly: true });
+    expect(recovered).toMatchObject({ ok: true, outcome: "settled", operationId: fixture.effects()[0]!.operationId });
+    expect(fixture.effects()).toHaveLength(1);
+  } finally {
+    await mcp.close();
     await host.stop();
   }
 }, 40_000);
