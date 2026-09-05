@@ -313,7 +313,7 @@ test("with no conversation focused the phone leaf is the board: the seat first, 
   expect((rows[1]!.querySelector("span[aria-hidden]") as unknown as HTMLElement).className).toContain("invisible");
   expect((rows[3]!.querySelector("span[aria-hidden]") as unknown as HTMLElement).className).not.toContain("invisible");
   expect(rows[3]!.textContent).toContain("Add the held precedence");
-  expect(rows[5]!.textContent).toContain(translate("en", "mobile2.board.catalogCount", { count: 12 }));
+  expect(rows[5]!.textContent).toContain(translate("en", "mobile.catalog.unknown"));
 });
 
 test("the board has no Host section: background processes are rows in the host sheet behind ⋯", async () => {
@@ -411,6 +411,7 @@ test("the board's footer lands the operator in the orchestrator's conversation, 
   expect(await waitFor(() => board(root) !== null)).toBe(true);
   /* Over a vacancy the slot is the invitation's other half (lane 6): it says
      what the board is missing instead of offering to talk to nothing. */
+  expect(await waitFor(() => q(root, "[data-mobile2-board-dock]")?.textContent?.includes(translate("en", "mobile2.seat.createDock")) === true)).toBe(true);
   const empty = q(root, "[data-mobile2-board-dock]")!;
   expect(empty).not.toBeNull();
   expect(empty.textContent).toContain(translate("en", "mobile2.seat.createDock"));

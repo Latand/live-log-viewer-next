@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { FileEntry } from "@/lib/types";
 
@@ -10,22 +10,14 @@ interface ConversationPage {
   total: number;
 }
 
-interface ConversationCatalogData extends ConversationPage {
+export interface ConversationCatalogData extends ConversationPage {
   loading: boolean;
+  known: boolean;
+  expired: boolean;
+  refresh: () => void;
   error: boolean;
   loadMore: () => void;
   retry: () => void;
-}
-
-interface SettledCatalogRequest {
-  key: string;
-  page: ConversationPage;
-  error: boolean;
-}
-
-interface MoreRequest {
-  key: string;
-  cursor: string;
 }
 
 const EMPTY_PAGE: ConversationPage = { items: [], nextCursor: null, total: 0 };
@@ -46,8 +38,8 @@ export function conversationCatalogCursorExpired(cause: unknown): boolean {
   return cause instanceof ConversationCatalogRequestError && cause.status === 409;
 }
 
-function conversationCatalogUrl(project: string | undefined, query: string, cursor?: string | null): string {
-  const params = new URLSearchParams({ limit: "40" });
+function conversationCatalogUrl(project: string | undefined, query: string, cursor: string | null, pageSize: number): string {
+  const params = new URLSearchParams({ limit: String(pageSize) });
   if (project) params.set("project", project);
   if (query.trim()) params.set("q", query.trim());
   if (cursor) params.set("cursor", cursor);
@@ -59,99 +51,99 @@ async function fetchConversationPage(
   query: string,
   cursor: string | null,
   signal: AbortSignal,
+  pageSize: number,
 ): Promise<ConversationPage> {
-  const response = await fetch(conversationCatalogUrl(project, query, cursor), { signal });
+  const response = await fetch(conversationCatalogUrl(project, query, cursor, pageSize), { signal });
   if (!response.ok) throw new ConversationCatalogRequestError(response.status);
   return response.json() as Promise<ConversationPage>;
 }
 
+interface CatalogSnapshot extends ConversationPage {
+  failedCursor?: string | null;
+  known: boolean;
+  error: boolean;
+  expired: boolean;
+}
+
+/** Each scope keeps one coherent cursor chain for this mounted consumer. */
 export function useConversationCatalog({
-  project,
-  query = "",
-  enabled = true,
+  project, query = "", enabled = true, pageSize = 40, scopeKey,
 }: {
   project?: string;
   query?: string;
   enabled?: boolean;
+  pageSize?: number;
+  /** The owning Home project, including when its query searches globally. */
+  scopeKey?: string;
 }): ConversationCatalogData {
-  const [request, setRequest] = useState({ project, query });
-  useEffect(() => {
-    if (query === request.query && project === request.project) return;
-    const delay = conversationCatalogRequestDelay(request.query, query);
-    const timer = window.setTimeout(() => setRequest({ project, query }), delay);
-    return () => window.clearTimeout(timer);
-  }, [project, query, request.project, request.query]);
-  const requestKey = `${request.project ?? ""}\u0000${request.query}`;
-  const [settled, setSettled] = useState<SettledCatalogRequest>({
-    key: "",
-    page: EMPTY_PAGE,
-    error: false,
-  });
-  const [moreRequest, setMoreRequest] = useState<MoreRequest | null>(null);
-  const [retryNonce, setRetryNonce] = useState(0);
+  const key = JSON.stringify([scopeKey ?? null, project ?? null, query.trim(), pageSize]);
+  const cache = useRef(new Map<string, CatalogSnapshot>());
+  const flight = useRef<{ key: string; controller: AbortController } | null>(null);
+  const [, render] = useState(0);
+  const update = useCallback(() => render((n) => n + 1), []);
+  const active = useRef({ key, enabled });
+  active.current = { key, enabled };
+  const previousQuery = useRef(query);
 
-  useEffect(() => {
-    if (!enabled) return;
+  const request = useCallback((cursor: string | null) => {
+    if (!active.current.enabled || active.current.key !== key || flight.current) return;
     const controller = new AbortController();
-    void fetchConversationPage(request.project, request.query, null, controller.signal)
-      .then((result) => setSettled({ key: requestKey, page: result, error: false }))
+    const token = { key, controller };
+    flight.current = token;
+    update();
+    void fetchConversationPage(project, query, cursor, controller.signal, pageSize)
+      .then((page) => {
+        if (controller.signal.aborted || flight.current !== token || active.current.key !== key) return;
+        const current = cache.current.get(key);
+        const seen = new Set<string>();
+        const items = [...(cursor ? current?.items ?? [] : []), ...page.items]
+          .filter((item) => { if (seen.has(item.path)) return false; seen.add(item.path); return true; });
+        cache.current.set(key, { ...page, items, known: true, error: false, expired: false });
+      })
       .catch((cause: unknown) => {
-        if ((cause as { name?: string }).name !== "AbortError") {
-          setSettled({ key: requestKey, page: EMPTY_PAGE, error: true });
-        }
-      });
-    return () => controller.abort();
-  }, [request.project, request.query, enabled, requestKey, retryNonce]);
-
-  useEffect(() => {
-    if (!moreRequest || moreRequest.key !== requestKey) return;
-    const controller = new AbortController();
-    void fetchConversationPage(request.project, request.query, moreRequest.cursor, controller.signal)
-      .then((result) => {
-        setSettled((current) => {
-          if (current.key !== moreRequest.key) return current;
-          const seen = new Set(current.page.items.map((item) => item.path));
-          return {
-            key: current.key,
-            page: {
-              items: [...current.page.items, ...result.items.filter((item) => !seen.has(item.path))],
-              nextCursor: result.nextCursor,
-              total: result.total,
-            },
-            error: false,
-          };
+        if (controller.signal.aborted || flight.current !== token || active.current.key !== key) return;
+        cache.current.set(key, {
+          ...(cache.current.get(key) ?? { ...EMPTY_PAGE, known: false, expired: false }),
+          error: true, failedCursor: conversationCatalogCursorExpired(cause) ? null : cursor,
+          expired: conversationCatalogCursorExpired(cause) || (cache.current.get(key)?.expired ?? false),
         });
       })
-      .catch((cause: unknown) => {
-        if (conversationCatalogCursorExpired(cause)) {
-          setRetryNonce((value) => value + 1);
-        } else if ((cause as { name?: string }).name !== "AbortError") {
-          setSettled((current) =>
-            current.key === moreRequest.key ? { ...current, error: true } : current,
-          );
-        }
-      })
       .finally(() => {
-        if (!controller.signal.aborted) {
-          setMoreRequest((current) => (current === moreRequest ? null : current));
-        }
+        if (flight.current !== token) return;
+        flight.current = null;
+        update();
       });
-    return () => controller.abort();
-  }, [moreRequest, request.project, request.query, requestKey]);
+  }, [key, project, query, pageSize, update]);
 
-  const current = enabled && settled.key === requestKey ? settled : null;
-  const page = current?.page ?? EMPTY_PAGE;
-  const loading = enabled && (current === null || moreRequest?.key === requestKey);
-  const error = current?.error ?? false;
+  useEffect(() => {
+    const delay = conversationCatalogRequestDelay(previousQuery.current, query);
+    previousQuery.current = query;
+    const timer = window.setTimeout(() => {
+      if (enabled && !cache.current.has(key)) request(null);
+    }, delay);
+    return () => {
+      window.clearTimeout(timer);
+      if (flight.current?.key === key) {
+        flight.current.controller.abort();
+        flight.current = null;
+      }
+    };
+  }, [key, query, enabled, request]);
 
+  const page = cache.current.get(key);
+  const loading = enabled && (!page || flight.current?.key === key);
   const loadMore = useCallback(() => {
-    if (!loading && page.nextCursor) setMoreRequest({ key: requestKey, cursor: page.nextCursor });
-  }, [loading, page.nextCursor, requestKey]);
-
+    const current = cache.current.get(key);
+    if (current?.nextCursor && !current.error && !current.expired) request(current.nextCursor);
+  }, [key, request]);
+  const refresh = useCallback(() => request(null), [request]);
   const retry = useCallback(() => {
-    setMoreRequest(null);
-    setRetryNonce((value) => value + 1);
-  }, []);
-
-  return { ...page, loading, error, loadMore, retry };
+    const current = cache.current.get(key);
+    request(current?.expired ? null : current?.error ? current.failedCursor ?? null : current?.nextCursor ?? null);
+  }, [key, request]);
+  return {
+    ...(page ?? EMPTY_PAGE), known: page?.known ?? false,
+    loading, error: page?.error ?? false, expired: page?.expired ?? false,
+    loadMore, retry, refresh,
+  };
 }

@@ -24,6 +24,8 @@ import type { Workflow } from "@/lib/workflows/types";
 import { BoardHistoryControls } from "./BoardHistoryControls";
 import { createFocusEdgeGate } from "./focusRequestEdge";
 import { TaskStrip } from "./BranchPane";
+import { MobileInlineCatalog, useMobileInlineCatalog } from "./mobile/MobileInlineCatalog";
+import { deriveOrchestratorPanelState } from "./orchestrator/seatState";
 import { ConversationList } from "./ConversationList";
 import { clearDraftStorage, draftCwd, draftParentConversationId, draftSrc, resolveSystemDraftCwd, setDraftCwd, setDraftSrc, setDraftText } from "./DraftAgentPane";
 import { OrchestratorPanelToggle } from "./orchestrator/OrchestratorPanelToggle";
@@ -390,7 +392,13 @@ function ProjectDashboardView({
   const projectDraftCwd = useMemo(() => draftWorkingDirectory(files, project), [files, project]);
   const boardIsMobileLeaf = isMobile && topScreen(mobileNavState).kind !== "chat";
   const seatRead = useOrchestratorSeat(boardIsMobileLeaf ? project : null, projectDraftCwd || undefined);
-  const seatPath = seatRead.status?.seat?.path ?? null;
+  const seatId = seatRead.status?.seat?.conversationId;
+  const seatFile = (seatId ? files.find((file) => file.conversationId === seatId) : null)
+    ?? files.find((file) => file.path === seatRead.status?.seat?.path) ?? null;
+  const seatPath = seatFile?.path ?? seatRead.status?.seat?.path ?? null;
+  const seatState = deriveOrchestratorPanelState({ status: seatRead.status, statusFailed: seatRead.failed,
+    submitting: false, submitFailure: null, file: seatFile, surface: null });
+  const inlineCatalog = useMobileInlineCatalog(project, isMobile && loaded);
   const projectName = projectDisplayName(
     project,
     providedProjectName ?? projectCatalogEntries.find((entry) => entry.project === project)?.displayName,
@@ -1725,8 +1733,6 @@ function ProjectDashboardView({
      conversation sits on top of the stack; the footer and the presence slice
      both hang off that one answer. */
   const mobileBoardLeaf = isMobile && projectView === "scheme" && schemeAvailable && mobileConversationKey === null;
-  /* The seat's own transcript, for the footer that opens it. */
-  const seatFile = seatPath ? files.find((file) => file.path === seatPath) ?? null : null;
   /* Which conversations the phone board is showing, in the order it shows them,
      as a signature so the presence effect below compares BY VALUE — a fresh
      array every render would re-report the same view on every poll. Null
@@ -1849,7 +1855,7 @@ function ProjectDashboardView({
          board face is the way back from it. */
       entries.push(
         { kind: "row", key: "view-board", icon: <Network className="h-[18px] w-[18px]" aria-hidden />, label: t("mobile2.menu.board"), checked: projectView === "scheme", onSelect: () => { mobileNav.closeSheet(); chooseEmptyView("scheme"); } },
-        { kind: "row", key: "view-catalog", icon: <LayoutGrid className="h-[18px] w-[18px]" aria-hidden />, label: t("mobile2.menu.catalog"), trailing: t("mobile2.menu.catalogCount", { count: catalogConversationCount }), checked: projectView === "list", onSelect: () => { mobileNav.closeSheet(); chooseEmptyView("list"); } },
+        { kind: "row", key: "view-catalog", icon: <LayoutGrid className="h-[18px] w-[18px]" aria-hidden />, label: t("mobile2.menu.catalog"), trailing: inlineCatalog.catalog.known ? t("mobile.catalog.count", { count: inlineCatalog.catalog.total }) : undefined, checked: projectView === "list", onSelect: () => { mobileNav.closeSheet(); chooseEmptyView("list"); } },
       );
     }
     entries.push(
@@ -2146,9 +2152,10 @@ function ProjectDashboardView({
                which is the seat card's own sheet, so both halves of a board
                with no orchestrator lead to the one place that makes one. */
             dock={mobileBoardLeaf && boardReady
-              ? seatFile
+              ? seatState.kind === "live" && seatFile
                 ? <MobileBoardDock onTell={() => openBoardRow(seatFile)} />
-                : <MobileBoardDock create onTell={() => mobileNav.openSheet("rotate")} />
+                : <MobileBoardDock create={seatState.kind === "draft" && !seatRead.failed} unresolved={seatState.kind !== "draft" || seatRead.failed}
+                    onTell={() => mobileNav.openSheet(seatState.kind === "draft" && !seatRead.failed ? "rotate" : "seat")} />
               : undefined}
           >
             {pipelinesAlert}
@@ -2157,7 +2164,12 @@ function ProjectDashboardView({
               ) : mobileBoardLeaf ? (
                 <MobileBoard
                   {...mobileBoardProps}
-                  catalogCount={catalogConversationCount}
+                  catalogCount={inlineCatalog.catalog.known ? inlineCatalog.catalog.total : undefined}
+                  catalogState={inlineCatalog.catalog.error ? "error" : inlineCatalog.catalog.loading ? "loading" : undefined}
+                  catalogExpanded={inlineCatalog.view.expanded}
+                  catalogPosition={inlineCatalog.view.position}
+                  catalog={<MobileInlineCatalog catalog={inlineCatalog.catalog} query={inlineCatalog.view.query}
+                    onQuery={inlineCatalog.setQuery} files={files} onOpen={openFullCatalogFile} />}
                   seat={(
                     /* The card takes the board's full width (README §4.1): it
                        is the first CARD of the list, not the chip the strip's
@@ -2182,7 +2194,7 @@ function ProjectDashboardView({
                   onOpenConversation={openBoardRow}
                   onOpenPipeline={openMobilePipeline}
                   onOpenPipelines={() => mobileNav.push({ kind: "pipelines" })}
-                  onOpenCatalog={() => chooseEmptyView("list")}
+                  onOpenCatalog={inlineCatalog.toggle}
                 />
               ) : projectView === "scheme" && schemeAvailable ? (
                 <MobileFocusView
