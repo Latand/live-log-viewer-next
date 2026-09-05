@@ -11,7 +11,17 @@ process.env.XDG_CONFIG_HOME = path.join(SANDBOX, "config");
 process.env.TMPDIR = path.join(SANDBOX, "tmp");
 fs.mkdirSync(process.env.TMPDIR, { recursive: true });
 
-const { gatherSeatTickInput, repoDirForProject, runtimeWakeState, seatTickProjects, wakeStateFromRecord, withdrawRuntimeWake } = await import("./seatTickSources");
+const { gatherSeatTickInput: gatherProduction, repoDirForProject, runtimeWakeState, seatTickProjects, wakeStateFromRecord, withdrawRuntimeWake } = await import("./seatTickSources");
+const { SeatTickAccounting } = await import("./seatTickAccounting");
+const { FileRuntimeEventStore } = await import("@/lib/runtime/eventStore");
+const { statePath } = await import("@/lib/configDir");
+const gatherSeatTickInput: typeof gatherProduction = (project, state, policy, ports) => {
+  if (state.accounting) return gatherProduction(project, state, policy, ports);
+  const dir = fs.mkdtempSync(path.join(SANDBOX, "gather-state-"));
+  const accounting = new SeatTickAccounting(path.join(dir, "state.sqlite"), project);
+  accounting.initialize(state, null);
+  return gatherProduction(project, accounting.readState(), policy, ports);
+};
 const { AgentRegistry } = await import("@/lib/agent/registry");
 const { emptyLaunchProfile } = await import("@/lib/accounts/migration/contracts");
 const { sessionKeyFromTranscript } = await import("@/lib/agent/sessionKey");
@@ -169,6 +179,8 @@ function sources(over: {
     },
     tasks: () => (over.tasks ?? []) as never,
     registry: () => (over.registry ?? {
+      pageSeatChildren: () => ({ file: { entries: {}, receipts: {}, lineageEdges: {}, memberships: {}, conversations: {}, conversationAliases: {} }, keys: [], nextKey: "", throughKey: "", complete: true, evidenceGap: false }),
+      seatTickConversation: () => ({ id: CONVERSATION, turn: { state: over.seatTurn ?? "idle" } }),
       conversation: () => ({ turn: { state: over.seatTurn ?? "idle" } }),
       conversationForPath: () => null,
       readOnlySnapshot: () => ({ entries: {}, receipts: {}, lineageEdges: {}, memberships: {}, conversations: {}, conversationAliases: {} }),
@@ -1313,7 +1325,7 @@ test("an operation that left the queue mid-withdrawal is re-read rather than ass
 test("an operation already settled unsent needs no withdrawal", async () => {
   const transitions: { operationId: string; status: string; reason: string | null }[] = [];
   expect(await withdrawRuntimeWake("op-wake-1", "gone", runtimeClient({ statuses: ["failed"], transitions }))).toBe("withdrawn");
-  expect(await withdrawRuntimeWake("op-wake-1", "gone", runtimeClient({ transitions }))).toBe("withdrawn");
+  expect(await withdrawRuntimeWake("op-wake-1", "gone", runtimeClient({ transitions }))).toBe("unknown");
   expect(transitions).toEqual([]);
 });
 
@@ -1417,7 +1429,7 @@ function childRegistry(name: string): ChildRegistry {
   const dir = fs.mkdtempSync(path.join(SANDBOX, `${name}-`));
   const cwd = path.join(dir, "repo");
   fs.mkdirSync(cwd);
-  const registry = new AgentRegistry(path.join(dir, "agent-registry.json"), () => false);
+  const registry = new AgentRegistry(path.join(dir, "agent-registry.json"), () => false, undefined, { sqliteMode: "sqlite" });
   const seat = registry.ensureConversation("claude", path.join(dir, `${crypto.randomUUID()}.jsonl`), null);
   const project = projectForCwd(cwd);
   if (!project) throw new Error("fixture cwd resolves to no project");
@@ -1433,16 +1445,17 @@ function childRegistry(name: string): ChildRegistry {
     spawn(options) {
       const childCwd = options.cwd ?? cwd;
       const childPath = path.join(dir, `${crypto.randomUUID()}.jsonl`);
-      const child = registry.ensureConversation("claude", childPath, null);
+      const observed = options.unobserved ? null : registry.ensureConversation("claude", childPath, null);
       const begun = registry.beginSpawnRequest({
         engine: "claude",
         cwd: childCwd,
         transport: "structured",
-        conversationId: child.id,
+        ...(observed ? { conversationId: observed.id } : {}),
         parentConversationId: (options.parent ?? seat.id) as never,
         parentSource: "explicit",
         launchProfile: { title: options.title },
       });
+      const child = observed ?? { id: begun.receipt.conversationId, generations: [] };
       if (!options.unobserved) {
         registry.reconcileConversations([{
           engine: "claude",
@@ -1455,6 +1468,11 @@ function childRegistry(name: string): ChildRegistry {
       }
       if (options.host) {
         registry.upsert({ key: sessionKeyFromTranscript("claude", childPath)!, artifactPath: childPath, cwd: childCwd, accountId: null, status: options.host, host: null, claimEpoch: 0, claimOwner: null, pendingAction: null });
+      }
+      if (observed && (options.turn === "terminal" || (options.turn === "idle" && options.host !== "idle"))) {
+        const ledger = new FileRuntimeEventStore(statePath("structured-host-events"));
+        ledger.append(observed.generations[0]!.id, { kind: "turn-started", turnId: "turn-one", seq: 1 });
+        ledger.append(observed.generations[0]!.id, { kind: "turn-ended", turnId: "turn-one", status: "completed", seq: 2 });
       }
       return { id: child.id, launchId: begun.receipt.launchId, path: childPath };
     },
@@ -1497,7 +1515,7 @@ test("each kind of child is classified from the snapshot alone (#1465)", async (
   expect(byId.get(failed.id)).toMatchObject({ status: "terminal", outcome: "failed", title: "failed launch" });
   expect(byId.get(reserved.id)).toMatchObject({ status: "unknown", outcome: null });
   expect(byId.get(unknownTurn.id)).toMatchObject({ status: "unknown" });
-  expect(input.childrenUnavailable).toBeNull();
+  expect(input.childrenUnavailable).toBe("registry-unreadable");
   /* Liveness is asked by id, for the hosted open turns only: the stall the
      registry can see itself and the settled turns cost no read. */
   expect(livenessCalls).toEqual([{ conversationId: running.id, stallAfterMs: DEFAULT_SEAT_TICK_POLICY.stallAfterMs }]);
@@ -1516,7 +1534,8 @@ test("harvested children leave the projection, and one seen running again is rel
   const again = fixture.spawn({ title: "re-instructed worker", turn: "busy", host: "live" });
   const input = await childGather(fixture, {}, { ...emptySeatTickState(), harvestedChildren: [finished.id, again.id] });
   expect(input.children.map((child) => child.conversationId)).toEqual([again.id]);
-  expect(input.state.harvestedChildren).toEqual([finished.id]);
+  expect(input.state.harvestedChildren).toEqual([]);
+  expect(new SeatTickAccounting(input.state.accounting!.filename, fixture.project).page("legacy", 10)).toHaveLength(2);
 });
 
 test("other seats' children, other projects' children and the seat itself are not projected (#1465)", async () => {
@@ -1533,11 +1552,16 @@ test("other seats' children, other projects' children and the seat itself are no
   expect(noSeat.children).toEqual([]);
 });
 
-test("the projection is bounded to the newest launches after the harvested ones are removed (#1465)", async () => {
+test("paged discovery eventually reaches every child without a newest window (#1465)", async () => {
   const fixture = childRegistry("bounded");
   for (let index = 0; index < 63; index += 1) fixture.spawn({ title: `worker ${index}`, turn: "terminal", terminalAt: new Date(fixture.now - 20 * MINUTE_MS).toISOString() });
-  const input = await childGather(fixture);
-  expect(input.children).toHaveLength(60);
+  let input = await childGather(fixture);
+  for (let tick = 0; tick < 12; tick++) {
+    expect(input.children.length).toBeLessThanOrEqual(20);
+    input = await childGather(fixture, {}, input.state);
+  }
+  const accounting = new SeatTickAccounting(input.state.accounting!.filename, fixture.project);
+  expect(accounting.collection.snapshot().filter((row) => row.kind === "outcome")).toHaveLength(63);
 });
 
 test("a snapshot that cannot be taken is a gap, and the children read as none (#1465)", async () => {
@@ -1545,7 +1569,8 @@ test("a snapshot that cannot be taken is a gap, and the children read as none (#
   fixture.spawn({ title: "worker", turn: "terminal", terminalAt: new Date(fixture.now - 20 * MINUTE_MS).toISOString() });
   const registry = fixture.registry;
   const blind = {
-    conversation: (id: string) => registry.conversation(id as never),
+    seatTickConversation: registry.seatTickConversation.bind(registry),
+            conversation: (id: string) => registry.conversation(id as never),
     conversationForPath: (artifactPath: string) => registry.conversationForPath(artifactPath),
     readOnlySnapshot: () => { throw new Error("rewriting"); },
   } as never;
@@ -1566,6 +1591,10 @@ test("a child finishing, and a harvested child leaving, both move the fingerprin
     turn: { state: "terminal", source: "lifecycle", terminalAt: new Date(fixture.now - MINUTE_MS).toISOString() },
     observedAt: new Date(fixture.now - MINUTE_MS).toISOString(),
   }]);
+  const ledger = new FileRuntimeEventStore(statePath("structured-host-events"));
+  const generation = fixture.registry.conversation(worker.id as never)!.generations[0]!.id;
+  ledger.append(generation, { kind: "turn-started", turnId: "turn-one", seq: 1 });
+  ledger.append(generation, { kind: "turn-ended", turnId: "turn-one", status: "completed", seq: 2 });
   const finished = await childGather(fixture);
   expect(seatTickBoardMoved(running.changeFingerprint, finished.changeFingerprint)).toBe(true);
   const harvested = await childGather(fixture, {}, { ...emptySeatTickState(), harvestedChildren: [worker.id] });

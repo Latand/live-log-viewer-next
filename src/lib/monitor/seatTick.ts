@@ -2,7 +2,6 @@ import { isTerminalHighSignalEvent } from "@/lib/lifecycle/vocabulary";
 
 import { seatTickRetryGuardRef, seatTickSourceGapRef, ORCHESTRATOR_ALERT_REF, SEAT_TICK_SETTINGS_REF } from "./cards";
 import { evidenceStallReason } from "./classify";
-import { HARVESTED_CHILDREN_LIMIT } from "./seatTickState";
 import {
   SEAT_TICK_WAKE_REASON_KINDS,
   type SeatTickCard,
@@ -880,6 +879,7 @@ function wakeItems(context: {
     items.push({
       kind: "child",
       id: child.conversationId,
+      outcomeId: child.outcomeId,
       label: `${child.title} — spawned child ${child.outcome ?? "finished"}, outcome unharvested`,
     });
   }
@@ -913,7 +913,7 @@ function wakeItems(context: {
   for (const child of input.children) {
     if (!isRunningChild(child)) continue;
     if (items.some((item) => item.id === child.conversationId)) continue;
-    items.push({ kind: "child", id: child.conversationId, label: `${child.title} — spawned child running` });
+    items.push({ kind: "child", id: child.outcomeId ?? child.conversationId, label: `${child.title} — spawned child running` });
   }
   for (const signal of input.signals) {
     items.push({ kind: "signal", id: signal.id, label: signal.label });
@@ -946,7 +946,7 @@ export function seatTickWakeCommitPlan(
   if (verdict.kind === "proactive") return { proposal: true, reasons: [], fingerprint, eventsThrough, children: [] };
   if (verdict.kind !== "wake") return null;
   const terminal = new Set(context.terminalChildren ?? []);
-  const children = verdict.items.filter((item) => item.kind === "child" && terminal.has(item.id)).map((item) => item.id);
+  const children = verdict.items.filter((item) => item.kind === "child" && terminal.has(item.outcomeId ?? item.id)).map((item) => item.outcomeId ?? item.id);
   return { proposal: false, reasons: verdict.reasons.map((reason) => reason.kind), fingerprint, eventsThrough, children };
 }
 
@@ -1012,8 +1012,8 @@ export function seatTickWakeCommit(
 }
 
 /** The harvest cursor after a landing (#1465): the children this wake named,
-    appended once each, the oldest let go past the bound. */
+    appended once each. Durable outcome rows retain acknowledgment history. */
 function harvested(before: readonly string[], named: readonly string[]): string[] {
   const merged = [...before.filter((id) => !named.includes(id)), ...named];
-  return merged.slice(Math.max(0, merged.length - HARVESTED_CHILDREN_LIMIT));
+  return [...new Set(merged)];
 }

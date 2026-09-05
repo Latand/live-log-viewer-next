@@ -1,5 +1,8 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
+import path from "node:path";
+import { SeatTickAccounting, type AccountingChild, type AccountingOwner } from "./seatTickAccounting";
+import { readChildLedger } from "./seatTickChildLedger";
 
 import {
   agentRegistry,
@@ -86,10 +89,6 @@ const PULL_REQUEST_LIMIT = 60;
 const PULL_REQUEST_TITLE_LIMIT = 120;
 /** Liveness rows one project's check asks for. */
 const LIVENESS_LIMIT = 60;
-/** Standalone children one check projects (#1465), newest launch first once
-    the harvested ones are removed. A seat with more live children than this
-    has other problems; the bound keeps the check a bounded registry read. */
-const CHILD_LIMIT = 60;
 /** Bounded child title carried into a wake item. */
 const CHILD_TITLE_LIMIT = 120;
 
@@ -229,10 +228,11 @@ export async function withdrawRuntimeWake(
   client: RuntimeHostClient,
 ): Promise<SeatTickWithdrawal> {
   const current = await client.operationStatus(operationId, { currentRetryLeaf: true });
-  if (!current) return "withdrawn";
+  if (!current) return "unknown";
   const status = current.receipt.status;
   if (RUNTIME_LANDED.has(status) || RUNTIME_IN_FLIGHT.has(status)) return "too-late";
-  if (!RUNTIME_QUEUED.has(status)) return "withdrawn";
+  if (status === "failed" || status === "rejected") return "withdrawn";
+  if (!RUNTIME_QUEUED.has(status)) return "unknown";
   try {
     const settled = await client.transitionOperation(current.operationId, "failed", { reason });
     return settled.receipt.status === "failed" ? "withdrawn" : "too-late";
@@ -342,12 +342,9 @@ export function defaultSeatTickSources(): SeatTickSources {
       const delivery = registryDeliveryFor(wake);
       if (!delivery) return "unknown";
       if (delivery.state === "delivered") return "too-late";
-      if (delivery.state === "failed") return "withdrawn";
+      if (delivery.state !== "held") return "unknown";
       agentRegistry().terminalizeHeldDelivery(delivery.id, reason);
-      /* An attempt whose journal outcome is unknown may already have been
-         written to the engine; terminalizing stops another attempt, and the
-         honest report is still that the seat may have it. */
-      return delivery.state === "delivery-uncertain" ? "too-late" : "withdrawn";
+      return "withdrawn";
     },
     now: () => Date.now(),
   };
@@ -456,7 +453,7 @@ async function laneActivity(project: string, policy: SeatTickPolicy, sources: Se
 async function seatInput(project: string, policy: SeatTickPolicy, sources: SeatTickSources): Promise<SeatTickSeatInput | null> {
   const seat = sources.seatFor(project).active;
   if (!seat?.conversationId) return null;
-  const conversation = sources.registry().conversation(seat.conversationId as `conversation_${string}`);
+  const conversation = sources.registry().seatTickConversation(seat.conversationId);
   const turn = conversation?.turn.state ?? "unknown";
   let activity: SeatTickActivity | null = null;
   if (turn === "busy") {
@@ -565,7 +562,7 @@ function changeFingerprint(
   const board = [
     ...pipelines.map((pipeline) => `p:${pipeline.id}:${pipeline.state}:${pipeline.updatedAt ?? ""}`),
     ...tasks.map((task) => `t:${task.id}:${task.status}:${task.owned}:${task.updatedAt ?? ""}`),
-    ...children.map((child) => `c:${child.conversationId}:${child.status}:${child.terminalAt ?? ""}`),
+    ...children.map((child) => `c:${child.conversationId}:${child.outcomeId ?? ""}:${child.status}:${child.terminalAt ?? ""}`),
   ].sort();
   /* The set of unmerged pull requests, for the same reason the card's movement
      instant is in the half above: it decides a wake reason, so a guard keyed on
@@ -820,26 +817,9 @@ async function unmergedPullRequests(context: {
 }
 
 
-/* ------------------------------------------------------------------------- *
- * Standalone children (#1465).
- *
- * The seat's spawned workers, read from ONE registry snapshot the check already
- * takes: the `viewer-spawn` lineage edges whose parent is the seat, each with
- * its launch receipt, its conversation's own turn record and its host entries.
- * Direct children only — a grandchild is its parent's to harvest. No transcript
- * is opened; the one question the registry cannot answer from its own records,
- * "is this open turn still moving?", is asked of the liveness plane targeted by
- * conversation id, and only for a child whose turn the registry says is open.
- *
- * What is excluded, and why, is most of the projection. A child that belongs
- * to a pipeline, flow or orchestrator container carries a durable membership
- * row written at admission; it is already that container's to announce, so
- * counting its lineage edge too would double-count it. A child attributed to
- * another project — through the same attribution path the board uses, cwd and
- * the deleted-worktree map included — is another seat's. An `engine-native`
- * edge is a session the engine forked on its own, never a spawn the seat asked
- * for. A conversation with no edge at all was started by hand.
- * ------------------------------------------------------------------------- */
+/* Standalone child discovery uses indexed lineage pages. Persistent FIFO
+ * tickets poll proven child generations and retain owed outcomes until landing.
+ * Running activity and terminal ledger evidence are separate projections. */
 
 const LIVE_CHILD_RECEIPT_STATES: ReadonlySet<SpawnReceipt["state"]> = new Set(["starting", "pane-bound", "host-verified", "prompt-delivered", "path-pending"]);
 const LIVE_CHILD_HOST_STATES: ReadonlySet<AgentRegistryEntry["status"]> = new Set(["starting", "live", "idle", "handoff"]);
@@ -936,9 +916,6 @@ function projectChild(
 interface ChildEvidence {
   children: SeatTickChildInput[];
   unavailable: SeatTickChildrenGap | null;
-  /** Harvested ids seen running again, which the row releases (#1465): a
-      worker the seat re-instructed is owed again when it next finishes. */
-  released: string[];
 }
 
 async function childWork(
@@ -948,47 +925,99 @@ async function childWork(
   policy: SeatTickPolicy,
   sources: SeatTickSources,
 ): Promise<ChildEvidence> {
-  if (!seat) return { children: [], unavailable: null, released: [] };
-  let file: RegistryFile;
-  try {
-    file = sources.registry().readOnlySnapshot();
-  } catch {
-    return { children: [], unavailable: "registry-unreadable", released: [] };
-  }
+  if (!seat) return { children: [], unavailable: null };
+  if (!state.accounting) return { children: [], unavailable: "registry-unreadable" };
+  const accounting = new SeatTickAccounting(state.accounting.filename, project);
+  const registry = sources.registry();
   const now = sources.now();
-  const lookup = readOnlyConversationLookupFromSnapshot(file);
-  const seatId = lookup.canonicalConversationId(seat.conversationId as `conversation_${string}`);
-  const projected: ProjectedChild[] = [];
-  for (const edge of Object.values(file.lineageEdges)) {
-    if (lookup.canonicalConversationId(edge.parentConversationId) !== seatId) continue;
-    const child = projectChild(file, lookup, edge, project, now);
-    if (child) projected.push(child);
-  }
-  const harvested = new Set(state.harvestedChildren);
-  const released = projected
-    .filter((child) => harvested.has(child.input.conversationId) && child.input.status === "running")
-    .map((child) => child.input.conversationId);
-  const bounded = projected
-    .filter((child) => !harvested.has(child.input.conversationId) || child.input.status === "running")
-    .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))
-    .slice(0, CHILD_LIMIT);
+  let gap = state.accounting.gap !== null;
   const children: SeatTickChildInput[] = [];
-  for (const child of bounded) {
-    let input = child.input;
-    /* The verdict is asked only where it can matter: a hosted child whose turn
-       the registry records open. Targeted by id, one transcript at most, never
-       a sweep — and an unanswerable read says nothing, which is never a stall. */
-    if (child.input.status === "running" && child.turn === "busy" && child.hosted) {
-      try {
-        const rows = await sources.liveness({ conversationId: child.input.conversationId, stallAfterMs: policy.stallAfterMs, limit: 1 });
-        input = { ...input, activity: activityOf(rows[0]) };
-      } catch {
-        input = { ...input, activity: null };
+  const classify = (page: NonNullable<ReturnType<typeof registry.pageSeatChildren>>, id: string) => {
+    const edge = page.file.lineageEdges[id];
+    if (!edge) return null;
+    return projectChild(page.file, readOnlyConversationLookupFromSnapshot(page.file), edge, project, now);
+  };
+  try {
+    accounting.owner(seat.conversationId, seat.seatEpoch);
+    const ownersIncomplete = accounting.discoverRevokedOwners(statePath("orchestrator-seats.json"), (ownerProject) => canonicalOrchestratorProject(ownerProject) === project);
+    gap ||= ownersIncomplete;
+    const ownerTicket = accounting.page("owner-poll", 1)[0];
+    if (ownerTicket?.kind === "owner-poll") {
+      const owner = accounting.get(ownerTicket.target);
+      if (!owner || owner.kind !== "owner") throw new Error("missing owner provenance");
+      const page = registry.pageSeatChildren(owner.conversationId, owner.after, owner.through, 20);
+      if (!page) throw new Error("registry backend cannot page children");
+      const discovered: AccountingChild[] = [];
+      for (const id of page.keys) {
+        const edge = page.file.lineageEdges[id]!;
+        const child = classify(page, id);
+        if (child && edge.evidence.launchId) discovered.push(accounting.child(id, owner.conversationId, edge.evidence.launchId, child.input));
       }
+      const nextOwner: AccountingOwner = { ...owner, after: page.complete ? "" : page.nextKey, through: page.complete ? null : page.throughKey };
+      accounting.discovery(ownerTicket, nextOwner, discovered);
+      gap ||= page.evidenceGap || !page.complete;
     }
-    children.push(input);
-  }
-  return { children, unavailable: null, released };
+    let bytesLeft = 262144;
+    let recordsLeft = 200;
+    for (const ticket of accounting.page("poll", 8)) {
+      if (ticket.kind !== "poll") throw new Error("invalid poll ticket");
+      const child = accounting.get(ticket.target);
+      if (!child || child.kind !== "child") throw new Error("missing child provenance");
+      const page = registry.pageSeatChildren(child.owner, "", "", 1, [child.rowKey]);
+      if (!page) throw new Error("registry backend cannot project child");
+      const projected = classify(page, child.rowKey);
+      const edge = page.file.lineageEdges[child.rowKey];
+      if (!projected || !edge || edge.parentConversationId !== child.owner || edge.evidence.launchId !== child.launchId) {
+        accounting.ingest(ticket, { ...child, input: { ...child.input, status: "unknown", outcome: null } }, null, []);
+        gap = true;
+        continue;
+      }
+      child.input = projected.input;
+      if (child.input.status === "unknown") { children.push(child.input); gap = true; }
+      const lookup = readOnlyConversationLookupFromSnapshot(page.file);
+      const conversation = lookup.conversation(edge.childConversationId);
+      const generations = conversation?.generations ?? [];
+      const generation = generations[child.generationIndex % Math.max(1, generations.length)];
+      const receipt = page.file.receipts[child.launchId];
+      // A failed receipt after materialization cannot establish pre-execution failure.
+      const failure = receipt?.state === "failed" && receipt.key === null && receipt.artifactPath === null && generations.length === 0;
+      if (generation && bytesLeft > 0 && recordsLeft > 0) {
+        const source = accounting.source(child, conversation!.engine, generation.id);
+        const read = readChildLedger(path.join(statePath("structured-host-events"), `${encodeURIComponent(generation.id)}.jsonl`), source.cursor, Math.min(bytesLeft, 32768), recordsLeft);
+        source.cursor = read.cursor;
+        if (read.cursor.atEnd && read.cursor.activeTurn === null && read.cursor.settledThrough > 0
+          && (projected.turn === "idle" || projected.turn === "terminal")) {
+          child.input = { ...child.input, status: "terminal", outcome: "finished" };
+        }
+        bytesLeft -= read.bytes; recordsLeft -= read.records;
+        gap ||= source.cursor.gap !== null;
+        child.generationIndex = (child.generationIndex + 1) % generations.length;
+        accounting.ingest(ticket, child, source, read.outcomes);
+      } else accounting.ingest(ticket, child, null, [], failure);
+    }
+    for (const ticket of accounting.page("running", 8)) {
+      if (ticket.kind !== "running") continue;
+      const child = accounting.get(ticket.target);
+      if (!child || child.kind !== "child") throw new Error("missing running child");
+      const page = registry.pageSeatChildren(child.owner, "", "", 1, [child.rowKey]);
+      const projected = page && classify(page, child.rowKey);
+      if (!projected || projected.input.status !== "running") { gap = true; continue; }
+      let input = projected.input;
+      if (projected.turn === "busy" && projected.hosted) {
+        try { input = { ...input, activity: activityOf((await sources.liveness({ conversationId: input.conversationId, stallAfterMs: policy.stallAfterMs, limit: 1 }))[0]) }; }
+        catch { input = { ...input, activity: null }; }
+      }
+      children.push(input);
+    }
+    for (const outcome of accounting.ready(20)) {
+      const child = accounting.get(outcome.child);
+      if (!child || child.kind !== "child") throw new Error("missing ready child");
+      const page = registry.pageSeatChildren(child.owner, "", "", 1, [child.rowKey]);
+      if (!page || !classify(page, child.rowKey) || page.file.lineageEdges[child.rowKey]?.parentConversationId !== child.owner) { accounting.defer(outcome); gap = true; continue; }
+      children.push(outcome.input);
+    }
+  } catch { gap = true; }
+  return { children, unavailable: gap ? "registry-unreadable" : null };
 }
 
 export async function gatherSeatTickInput(
@@ -1033,8 +1062,8 @@ export async function gatherSeatTickInput(
      made about the wrong pipeline. */
   const openPipelineIds = new Set(sources.pipelines().filter(isOpen).map((pipeline) => pipeline.id));
   const { events, cursor } = eventsSince(canonical, state.eventsThrough, openPipelineIds, sources);
-  const { children, unavailable: childrenUnavailable, released } = await childWork(canonical, seat, state, policy, sources);
-  const harvestedChildren = released.length > 0 ? state.harvestedChildren.filter((id) => !released.includes(id)) : state.harvestedChildren;
+  const { children, unavailable: childrenUnavailable } = await childWork(canonical, seat, state, policy, sources);
+  const harvestedChildren = state.harvestedChildren;
   const { pullRequests, unavailable: pullRequestsUnavailable, gap: pullRequestGap } = await unmergedPullRequests({
     project: canonical,
     seat,
@@ -1070,7 +1099,7 @@ export async function gatherSeatTickInput(
        is what attempted the read, so the gather is what records what became of
        it, and the decision reads that row to know whether this is the outage
        worth putting on the board. */
-    state: { ...state, eventsThrough: cursor, pullRequestGap, harvestedChildren },
+    state: { ...state, eventsThrough: cursor, pullRequestGap, harvestedChildren, accounting: state.accounting ? new SeatTickAccounting(state.accounting.filename, canonical).readState().accounting : undefined },
     policy,
     settings,
   };

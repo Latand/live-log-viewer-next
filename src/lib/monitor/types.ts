@@ -212,6 +212,7 @@ export interface SeatTickWakeReason {
 
 /** One line of the wake's body. Bounded and structural — never transcript text. */
 export interface SeatTickItem {
+  outcomeId?: string;
   kind: "pipeline" | "task" | "event" | "signal" | "pull-request" | "child";
   id: string;
   label: string;
@@ -462,6 +463,8 @@ export type SeatTickChildrenGap = "registry-unreadable";
  */
 export interface SeatTickChildInput {
   conversationId: string;
+  /** Immutable completed-turn identity, independent of conversation reuse. */
+  outcomeId?: string;
   /** Bounded, already redacted by the source. */
   title: string;
   status: "running" | "terminal" | "unknown";
@@ -557,10 +560,13 @@ export interface SeatTickOutstandingWake {
       account migration hold, or a legacy send that never reached a host. */
   operationId: string | null;
   commit: SeatTickWakeCommit;
+  /** Exact prepared payload, persisted before transport. */
+  text?: string;
 }
 
-/** The durable row per project, `state/seat-tick.json`. */
+/** Project tick state; SQLite accounting owns persistence and legacy migration. */
 export interface SeatTickProjectState {
+  accounting?: { filename: string; revision: number; gap: string | null };
   seatEpoch: number | null;
   lastCheckAt: string | null;
   lastWakeAt: string | null;
@@ -612,17 +618,8 @@ export interface SeatTickProjectState {
   /** The pull-request source's unbroken run of failures (#1298), or null while
       it is answering. Cleared by an answer and by nothing else. */
   pullRequestGap: SeatTickSourceGap | null;
-  /**
-   * The harvest cursor (#1465): conversation ids of terminal children a
-   * DELIVERED wake has already named. Written by the landing and by nothing
-   * else, so a wake that was refused, dropped or left uncertain leaves the
-   * child owed, and a check that raises the same wake again names it again.
-   *
-   * An exact id set rather than a time watermark: the projection is bounded,
-   * and a child seen running again is released from it, so a worker the seat
-   * re-instructs is owed again when it next finishes. Survives a rotation like
-   * the event cursor — it is a fact about what the project was told.
-   */
+  /** Legacy conversation-only acknowledgment evidence. The v3 store imports
+      it into separate rows and keeps this transient compatibility field empty. */
   harvestedChildren: string[];
 }
 

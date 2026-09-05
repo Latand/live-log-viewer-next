@@ -1822,3 +1822,65 @@ test("production-sized SQLite registry bounds ten-lane writes, concurrent reads,
   expect(sqlite.writerWaitP95).toBeLessThan(100);
   expect(sqlite.readerP95).toBeLessThan(100);
 }, 60_000);
+
+test("seat child discovery uses its parent index and bounded payload reads across a large unrelated registry", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "registry-seat-page-"));
+  const seed = new AgentRegistry(path.join(directory, "seed.json"), undefined, undefined, { sqliteMode: "off" });
+  const parent = seed.ensureConversation("codex", "/sessions/seat.jsonl", null);
+  const child = seed.beginSpawnRequest({ engine: "codex", cwd: "/seat-project", launchProfile: { title: "bounded child" }, parentConversationId: parent.id, parentSource: "explicit" });
+  const initial = seed.snapshot();
+  const edge = initial.lineageEdges[child.receipt.conversationId]!;
+  for (let n = 0; n < 3000; n++) {
+    const id = ["conversation", String(n).padStart(8, "0")].join("_") as typeof parent.id;
+    initial.lineageEdges[id] = { ...edge, childConversationId: id,
+      parentConversationId: n < 205 ? parent.id : ["conversation", "unrelated"].join("_") as typeof parent.id,
+      evidence: { ...edge.evidence, launchId: null } };
+  }
+  const reads = new Map<string, number>();
+  let snapshots = 0;
+  const filename = path.join(directory, "registry.sqlite");
+  const store = new SqliteAgentRegistryStore(filename, { initialSnapshot: initial, normalize: normalizeRegistry,
+    onSnapshotLoad: () => snapshots++, onRowPayloadRead: (name, count) => reads.set(name, (reads.get(name) ?? 0) + count) });
+  const seen = new Set<string>();
+  let after = "";
+  let through: string | null = null;
+  for (let tick = 0; tick < 20; tick++) {
+    reads.clear();
+    const page = store.pageSeatChildren(parent.id, after, through, 20);
+    expect(reads.get("lineageEdges")).toBeLessThanOrEqual(20);
+    expect(page.keys.length).toBeLessThanOrEqual(20);
+    page.keys.forEach((id) => seen.add(id));
+    after = page.nextKey; through = page.throughKey;
+    if (page.complete) break;
+  }
+  expect(seen.size).toBe(206);
+  expect(snapshots).toBe(0);
+  const db = new Database(filename, { readonly: true });
+  const plan = db.query<{ detail: string }, [string, string, string, number]>(`EXPLAIN QUERY PLAN
+    SELECT row_key,value_json FROM registry_rows WHERE collection='lineageEdges'
+    AND json_extract(value_json,'$.source')='viewer-spawn'
+    AND json_extract(value_json,'$.parentConversationId')=? AND row_key>? AND row_key<=?
+    ORDER BY row_key LIMIT ?`).all(parent.id, "", "~", 20);
+  expect(plan.some((entry) => entry.detail.includes("registry_seat_children"))).toBe(true);
+  expect(plan.some((entry) => entry.detail.includes("TEMP B-TREE"))).toBe(false);
+  db.close();
+});
+
+
+test("a cyclic child alias leaves other children in the same indexed page readable", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "registry-seat-alias-"));
+  const seed = new AgentRegistry(path.join(directory, "seed.json"), undefined, undefined, { sqliteMode: "off" });
+  const parent = seed.ensureConversation("codex", "/sessions/seat.jsonl", null);
+  const spawn = (title: string) => seed.beginSpawnRequest({ engine: "codex", cwd: "/seat-project",
+    launchProfile: { title }, parentConversationId: parent.id, parentSource: "explicit" }).receipt;
+  const bad = spawn("ambiguous");
+  const good = spawn("readable");
+  const initial = seed.snapshot();
+  initial.conversationAliases[bad.conversationId] = bad.conversationId;
+  const store = new SqliteAgentRegistryStore(path.join(directory, "registry.sqlite"), { initialSnapshot: initial, normalize: normalizeRegistry });
+  const page = store.pageSeatChildren(parent.id, "", null, 20);
+  expect(page.evidenceGap).toBe(true);
+  expect(page.file.lineageEdges[bad.conversationId]).toBeUndefined();
+  expect(page.file.lineageEdges[good.conversationId]?.parentConversationId).toBe(parent.id);
+  expect(page.file.receipts[good.launchId]?.conversationId).toBe(good.conversationId);
+});

@@ -1,8 +1,8 @@
 import fs from "node:fs";
+import path from "node:path";
+import { SeatTickAccounting } from "./seatTickAccounting";
 
 import { statePath } from "@/lib/configDir";
-import { writeJsonDurably } from "@/lib/state/durableJson";
-import { withFileTransactionSync } from "@/lib/state/fileTransaction";
 
 import {
   emptySeatTickState,
@@ -15,16 +15,8 @@ import {
   type SeatTickWakeReasonKind,
 } from "./types";
 
-/**
- * The seat tick's durable row per project (issue #1245).
- *
- * A timer that happened to be running is never the source of truth. Everything
- * that decides what a check does — when the last check and the last DELIVERED
- * wake were, what was stalled at the previous check, which lifecycle events the
- * seat has actually been told about, whether the last wake changed anything —
- * lives here, so a Viewer restart, a deploy or a rotation resumes from the
- * stamps rather than from a process's memory.
- */
+/** The legacy decoder and the public tick-state API. The original JSON is
+ * retained; bounded, versioned migration makes SQLite accounting authoritative. */
 
 /**
  * Version 2 changes one field's meaning: `eventsThrough` may be null, and null
@@ -50,9 +42,8 @@ function isoOrNull(value: unknown): string | null {
   return typeof value === "string" && Number.isFinite(Date.parse(value)) ? value : null;
 }
 
-/** The commit a landing will apply. A row missing it is a row from before the
-    plan was recorded, and a wake whose landing cannot be credited correctly is
-    better forgotten than credited wrongly — so the whole record drops. */
+/** Decode the frozen landing plan. Migration retains a gap when an
+    outstanding record has no usable plan, preventing a replacement send. */
 function normalizeWakeCommit(value: unknown): SeatTickWakeCommit | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const raw = value as Record<string, unknown>;
@@ -70,17 +61,13 @@ function normalizeWakeCommit(value: unknown): SeatTickWakeCommit | null {
   };
 }
 
-/** A bounded list of conversation ids, as the harvest cursor and a commit
-    plan carry one (#1465). Anything that is not a short string is dropped. */
+/** Legacy identities have a bounded length; positive evidence is never
+    truncated by list size. Migration stores acknowledgments as separate rows. */
 function conversationIds(value: unknown): string[] {
   return (Array.isArray(value) ? value : [])
-    .filter((entry): entry is string => typeof entry === "string" && entry.length > 0 && entry.length <= 200)
-    .slice(0, HARVESTED_CHILDREN_LIMIT);
+    .filter((entry): entry is string => typeof entry === "string" && entry.length > 0 && entry.length <= 200);
 }
 
-/** How many harvested child ids one row keeps. Past it the oldest are let go:
-    a child that old has long left the bounded projection anyway. */
-export const HARVESTED_CHILDREN_LIMIT = 200;
 
 /**
  * The cursor a row starts the next check from.
@@ -103,8 +90,8 @@ function eventsThrough(raw: Record<string, unknown>, legacy: boolean): number | 
 function normalizeOutstandingWake(value: unknown): SeatTickOutstandingWake | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const raw = value as Record<string, unknown>;
-  const clientMessageId = typeof raw.clientMessageId === "string" ? raw.clientMessageId.slice(0, 300) : "";
-  const conversationId = typeof raw.conversationId === "string" ? raw.conversationId.slice(0, 200) : "";
+  const clientMessageId = typeof raw.clientMessageId === "string" ? raw.clientMessageId : "";
+  const conversationId = typeof raw.conversationId === "string" ? raw.conversationId : "";
   const seatEpoch = raw.seatEpoch;
   const commit = normalizeWakeCommit(raw.commit);
   if (!clientMessageId || !conversationId || !commit || typeof seatEpoch !== "number" || !Number.isSafeInteger(seatEpoch)) return null;
@@ -112,8 +99,9 @@ function normalizeOutstandingWake(value: unknown): SeatTickOutstandingWake | nul
     clientMessageId,
     conversationId,
     seatEpoch,
-    operationId: typeof raw.operationId === "string" && raw.operationId ? raw.operationId.slice(0, 200) : null,
+    operationId: typeof raw.operationId === "string" && raw.operationId ? raw.operationId : null,
     commit,
+    ...(typeof raw.text === "string" ? { text: raw.text } : {}),
   };
 }
 
@@ -232,22 +220,31 @@ export function seatTickStateForEpoch(row: SeatTickProjectState, seatEpoch: numb
     outstandingWake: row.outstandingWake,
     pullRequestGap: row.pullRequestGap,
     harvestedChildren: row.harvestedChildren,
+    accounting: row.accounting,
   };
 }
 
+function accountingFor(project: string, filePath: string): SeatTickAccounting {
+  const filename = filePath === seatTickStatePath() ? path.join(path.dirname(filePath), "state.sqlite") : `${filePath}.sqlite`;
+  const accounting = new SeatTickAccounting(filename, project);
+  accounting.migrateLegacy(filePath, (raw, version) => normalizeRow(raw, version !== 2));
+  return accounting;
+}
+
 export function readSeatTickState(project: string, filePath = seatTickStatePath()): SeatTickProjectState {
-  return readFile(filePath).projects[project] ?? emptySeatTickState();
+  return accountingFor(project, filePath).readState();
 }
 
 export function readSeatTickStateFile(filePath = seatTickStatePath()): Record<string, SeatTickProjectState> {
-  return readFile(filePath).projects;
+  for (const project of Object.keys(readFile(filePath).projects)) accountingFor(project, filePath);
+  const filename = filePath === seatTickStatePath() ? path.join(path.dirname(filePath), "state.sqlite") : `${filePath}.sqlite`;
+  const accounting = new SeatTickAccounting(filename, "");
+  return Object.fromEntries(accounting.collection.snapshot().flatMap((row) => row.kind === "project"
+    ? [[row.project, { ...row.state, accounting: { filename, revision: row.revision, gap: row.gap } }]] : []));
 }
 
-/** Serialized read-modify-write of one project's row; other projects' rows are
-    re-read inside the transaction so two projects' checks cannot clobber. */
+/** Conditional project write. The legacy JSON is retained byte-for-byte. */
 export function writeSeatTickState(project: string, row: SeatTickProjectState, filePath = seatTickStatePath()): void {
-  withFileTransactionSync(filePath, "seat tick state is busy", () => {
-    const file = readFile(filePath);
-    writeJsonDurably(filePath, { version: SEAT_TICK_STATE_VERSION, projects: { ...file.projects, [project]: row } });
-  });
+  const accounting = accountingFor(project, filePath);
+  accounting.writeState(row.accounting ? row : { ...row, accounting: accounting.readState().accounting });
 }

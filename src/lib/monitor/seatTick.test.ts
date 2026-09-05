@@ -1259,15 +1259,15 @@ test("a running child named as agenda is never recorded as harvested (#1465)", (
   expect(proposal.children).toEqual([]);
 });
 
-test("the landing appends the harvested children to the cursor, once each, bounded (#1465)", () => {
+test("the landing preserves all named identities without evicting older acknowledgments (#1465)", () => {
   const before = stateWith({ harvestedChildren: [SECOND_CHILD] });
   const landed = seatTickWakeCommit(before, { proposal: false, reasons: ["child-terminal"], fingerprint: "fp-2", eventsThrough: 0, children: [child().conversationId, SECOND_CHILD] }, NOW);
   expect(landed.harvestedChildren).toEqual([child().conversationId, SECOND_CHILD]);
   const crowded = stateWith({ harvestedChildren: Array.from({ length: 200 }, (_, index) => `conversation_${index}`) });
   const bounded = seatTickWakeCommit(crowded, { proposal: false, reasons: ["child-terminal"], fingerprint: "fp-2", eventsThrough: 0, children: [THIRD_CHILD] }, NOW);
-  expect(bounded.harvestedChildren).toHaveLength(200);
+  expect(bounded.harvestedChildren).toHaveLength(201);
   expect(bounded.harvestedChildren.at(-1)).toBe(THIRD_CHILD);
-  expect(bounded.harvestedChildren[0]).toBe("conversation_1");
+  expect(bounded.harvestedChildren[0]).toBe("conversation_0");
 });
 
 test("a proposal landing harvests nothing (#1465)", () => {
