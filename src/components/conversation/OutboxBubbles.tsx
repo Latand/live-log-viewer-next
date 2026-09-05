@@ -63,6 +63,11 @@ function stateChip(
     icon: <TriangleAlert className="h-3 w-3 shrink-0" aria-hidden />,
     className: "text-warning", wait: "uncertain",
   };
+  if (entry.acceptedHeld && entry.state === "delivering") return {
+    label: t("composer.deliveryHeldWaiting"),
+    icon: <Clock3 className="h-3 w-3" aria-hidden />,
+    className: "text-warning",
+  };
   const held = switchHold && (entry.state === "delivering" || entry.state === "queued");
   if (held) {
     return {

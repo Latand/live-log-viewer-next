@@ -50,6 +50,10 @@ export interface OutboxEntry {
   deliveryUncertain?: true;
   /** Original-operation evidence retained across reload and receipt-tail eviction. */
   deliveryReceipt?: RuntimeReceipt;
+  /** Admission identity when the HTTP response has no receipt yet. */
+  operationId?: string;
+  /** Server-owned held admission; await its receipt without local replay. */
+  acceptedHeld?: true;
   /** Moment the entry left `queued`/`delivering` (ms), for the hard-cap TTL. */
   settledAt?: number;
   /** Receipt-driven delivery has its own clock authority. Unknown receipt
@@ -209,7 +213,7 @@ export function outboxReceiptPatch(
     && typeof receipt.revision === "number" && receipt.revision < previous.revision) return null;
   if (previous && receipt?.operationId === previous.operationId && receipt.revision === previous.revision
     && (previous.status === "failed" || previous.status === "rejected") && previous.resend === "safe"
-    && (entry.state === "queued" || entry.state === "delivering") && !entry.deliveryUncertain) return null;
+    && (entry.state === "queued" || entry.state === "delivering")) return null;
   // Moving/error observations cannot erase uncertainty. Only arrival, a proven
   // safe rejection, or the explicit original-operation discard resolves it.
   const success = outboxStateForReceiptStatus(status) === "delivered";
@@ -218,7 +222,7 @@ export function outboxReceiptPatch(
   const deliveryUncertain = unknown || (entry.deliveryUncertain && !success && !definitive) ? true : undefined;
   const state = deliveryUncertain ? "delivering" : outboxStateForReceiptStatus(status);
   const patch: Partial<OutboxEntry> = {
-    state, deliveryUncertain,
+    state, deliveryUncertain, acceptedHeld: undefined,
     awaitingTurn: deliveryUncertain ? undefined : outboxAwaitsTurnBoundary(status),
     ...(receipt?.operationId ? { deliveryReceipt: (deliveryUncertain
       ? { ...receipt, resend: "verify-first", reason: receipt.reason ?? previous?.reason }
@@ -396,7 +400,7 @@ function persistedQueue(cardId: string): readonly OutboxEntry[] {
       /* The initial launch prompt is owned by the spawn, not the composer: it
          survives a refresh exactly as it was (never re-dispatched, never
          re-queued) until its transcript echo or live adoption retires it. */
-      if (entry.launchOwned || entry.deliveryUncertain || entry.deliveryReceipt) return counted;
+      if (entry.launchOwned || entry.deliveryUncertain || entry.deliveryReceipt || entry.acceptedHeld) return counted;
       const unsettled = entry.state === "delivering" || entry.state === "queued";
       /* A `delivering` entry recorded before a refresh has no owner in this
          mount: it returns to the queue so the serial dispatcher replays it

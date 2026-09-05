@@ -255,6 +255,7 @@ export function useRuntimeFlow(flowId: string | null): Flow | null {
 export interface CommandResult {
   ok: boolean;
   operationId?: string;
+  held?: true;
   receipt?: RuntimeReceipt;
   status?: number;
   error?: string;
@@ -284,6 +285,7 @@ async function postCommand(url: string, body: unknown): Promise<CommandResult> {
       status: res.status,
       operationId: typeof json.operationId === "string" ? json.operationId : receipt?.operationId,
       receipt,
+      ...(res.ok && json.held === true ? { held: true as const } : {}),
       ...(!res.ok ? { error: typeof json.error === "string" ? json.error : undefined } : {}),
     };
   } catch {

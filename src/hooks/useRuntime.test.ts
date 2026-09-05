@@ -109,3 +109,17 @@ describe("command HTTP evidence", () => {
     finally { globalThis.fetch = original; }
   });
 });
+
+
+test.each([202, 503])("held admission preserves identity and HTTP semantics at %s", async status => {
+  const original = globalThis.fetch;
+  globalThis.fetch = (async () => Response.json({ held: true, operationId: "held-operation" }, { status })) as unknown as typeof fetch;
+  try {
+    const result = await sendRuntimeMessage({ conversationId: "held-conversation", text: "Check status", idempotencyKey: "held-key" });
+    expect(result.ok).toBe(status === 202);
+    expect(result.status).toBe(status);
+    expect(result.operationId).toBe("held-operation");
+    expect(result.held).toBe(status === 202 ? true : undefined);
+    expect(result.receipt).toBeUndefined();
+  } finally { globalThis.fetch = original; }
+});

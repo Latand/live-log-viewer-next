@@ -140,6 +140,8 @@ interface SentEntry {
 }
 
 interface ComposerSendResult {
+  operationId?: string;
+  held?: true;
   ok?: boolean;
   structured?: boolean;
   error?: string;
@@ -1585,7 +1587,10 @@ export function TmuxComposerCore({
   )).map((receipt) => {
     const entry = outbox.find((entry) => entry.deliveryUncertain
       && (entry.id === receipt.idempotencyKey || entry.deliveryReceipt?.operationId === receipt.operationId));
-    const unresolved = receipt.status === "pending" || receipt.status === "applying"
+    const priorSafeAttempt = entry?.deliveryReceipt?.resend === "safe"
+      && receipt.operationId === entry.deliveryReceipt.operationId
+      && receipt.revision === entry.deliveryReceipt.revision;
+    const unresolved = priorSafeAttempt || receipt.status === "pending" || receipt.status === "applying"
       || receipt.status === "queued" || receipt.status === "delivering" || receipt.status === "uncertain"
       || (receipt.status === "failed" && receipt.resend !== "safe" && receipt.reason !== "delivery-discarded");
     return entry && unresolved ? { ...receipt, resend: "verify-first" as const, reason: receipt.reason ?? entry.deliveryReceipt?.reason } : receipt;
@@ -1906,7 +1911,7 @@ export function TmuxComposerCore({
     for (const entry of outbox) {
       if (entry.launchOwned) continue;
       const receipt = displayedRuntimeReceipts.find((candidate) =>
-        (candidate.idempotencyKey === entry.id || candidate.operationId === entry.deliveryReceipt?.operationId));
+        (candidate.idempotencyKey === entry.id || candidate.operationId === (entry.deliveryReceipt?.operationId ?? entry.operationId)));
       if (!receipt) continue;
       const patch = outboxReceiptPatch(entry, receipt.status, receipt, nowMs());
       if (!patch) continue;
@@ -2116,10 +2121,13 @@ export function TmuxComposerCore({
         outboxFiles.current.delete(outboxId);
       }
     };
+    const receiptBeforeAttempt = outboxId ? readOutbox(cardId).find((entry) => entry.id === outboxId)?.deliveryReceipt : undefined;
     const markOutboxUnknown = () => {
       if (!outboxId) return;
       const entry = readOutbox(cardId).find((entry) => entry.id === outboxId);
-      if (!entry || entry.state === "delivered" || entry.deliveryReceipt?.resend === "safe"
+      if (!entry || entry.state === "delivered" || (entry.deliveryReceipt?.resend === "safe"
+        && (!receiptBeforeAttempt || entry.deliveryReceipt.operationId !== receiptBeforeAttempt.operationId
+          || entry.deliveryReceipt.revision > receiptBeforeAttempt.revision))
         || entry.deliveryReceipt?.reason === "delivery-discarded") return;
       updateOutbox(cardId, outboxId, { state: "delivering", deliveryUncertain: true });
     };
@@ -2386,6 +2394,8 @@ export function TmuxComposerCore({
               error: result.error,
               status: result.status,
               receipt: result.receipt,
+              operationId: result.operationId,
+              held: result.held,
               outcome: (result.receipt?.status === "delivering" || result.receipt?.status === "delivered"
                 ? result.receipt.status
                 : "queued") as "delivering" | "delivered" | "queued",
@@ -2414,6 +2424,11 @@ export function TmuxComposerCore({
             return { ...body, status: response.status, ok: response.ok && body.ok === true };
           }));
       const json = await withComposerAdmissionDeadline(admissionRequest, admissionTiming.admissionDeadlineMs);
+      if (json.operationId) {
+        if (outboxId) updateOutbox(cardId, outboxId, { operationId: json.operationId });
+        persistPendingDeliveries(pendingDeliveries.current.map((entry) =>
+          entry.key === clientMessageId ? { ...entry, operationId: json.operationId } : entry));
+      }
       /* #691 §4 — the bridge cursor moves only on DURABLE admission.
          `json.ok` is not that: a structured send answers ok with a receipt that may
          still be `pending`, which the server has not committed to holding. So the
@@ -2476,7 +2491,7 @@ export function TmuxComposerCore({
            outbox retains this snapshot for any permitted same-key retry.
            Direct submissions can release a proven pre-dispatch rejection. */
         const possiblyAccepted = Boolean(json.receipt && receiptHasUnknownFate(json.receipt)) || !receiptIsTerminal(json.receipt?.status ?? "pending")
-          && (json.status === undefined || json.status >= 500);
+          && (json.status === undefined || json.status >= 500 || json.status === 409);
         if (!possiblyAccepted && recordedThisAttempt && !outboxId) {
           persistPendingDeliveries(pendingDeliveries.current.filter((entry) => entry.key !== clientMessageId));
         }
@@ -2503,6 +2518,14 @@ export function TmuxComposerCore({
         return;
       }
       if (json.structured) {
+        if (json.held && json.operationId && outboxId) {
+          const entry = readOutbox(cardId).find((candidate) => candidate.id === outboxId);
+          if (entry && entry.state !== "delivered" && !entry.deliveryUncertain
+            && entry.deliveryReceipt?.reason !== "delivery-discarded") {
+            updateOutbox(cardId, outboxId, { state: "delivering", acceptedHeld: true, operationId: json.operationId });
+          }
+          return;
+        }
         markOutboxUnknown();
         return;
       }

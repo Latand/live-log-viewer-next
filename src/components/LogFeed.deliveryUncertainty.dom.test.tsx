@@ -505,3 +505,74 @@ test("non-2xx definitive pre-dispatch failure keeps safe retry controls", async 
     expect(readOutbox(file.conversationId!)[0]?.state).toBe("delivering");
   } finally { await act(async () => mounted.root.unmount()); }
 });
+
+
+test.each(["reservation", "idempotency"])("ambiguous %s conflict retains unknown identity across remount", async conflict => {
+  const sends: SendBody[] = [];
+  mockWire(sends, [() => ({ status: 409, json: { error: `${conflict} conflict`, operationId: captured.operationId } })]);
+  let mounted = await renderInto(surface());
+  try {
+    await settle(() => composerControls(mounted.host).type(captured.text!));
+    await settle(() => composerControls(mounted.host).submit());
+    expect(readOutbox(file.conversationId!)[0]?.deliveryUncertain).toBe(true);
+    expect(readOutbox(file.conversationId!)[0]?.operationId).toBe(captured.operationId);
+    await act(async () => mounted.root.unmount());
+    resetOutboxForTests();
+    mounted = await renderInto(surface());
+    await settle(() => { retryOutbox(file.conversationId!, sends[0]!.idempotencyKey); cancelOutbox(file.conversationId!, sends[0]!.idempotencyKey); });
+    expect(mounted.host.querySelector("[data-outbox-entry]")?.textContent).toContain("outcome is unknown");
+    expect(mounted.host.querySelector("[data-outbox-retry], [data-outbox-cancel]")).toBeNull();
+    expect(sends).toHaveLength(1);
+  } finally { await act(async () => mounted.root.unmount()); }
+});
+
+test("accepted held response persists identity and settles by original operation without resend", async () => {
+  const sends: SendBody[] = [];
+  mockWire(sends, [() => ({ status: 202, json: { held: true, operationId: captured.operationId } })]);
+  let mounted = await renderInto(surface());
+  try {
+    await settle(() => composerControls(mounted.host).type(captured.text!));
+    await settle(() => composerControls(mounted.host).submit());
+    expect(readOutbox(file.conversationId!)[0]?.acceptedHeld).toBe(true);
+    expect(readOutbox(file.conversationId!)[0]?.operationId).toBe(captured.operationId);
+    await act(async () => mounted.root.unmount());
+    resetOutboxForTests();
+    mounted = await renderInto(surface());
+    expect(mounted.host.querySelector("[data-outbox-entry]")?.textContent).toContain("Held");
+    expect(mounted.host.querySelector("[data-outbox-entry]")?.textContent).not.toContain("unknown");
+    expect(mounted.host.querySelector("[data-outbox-retry], [data-outbox-cancel]")).toBeNull();
+    snapshotReceipts = [{ ...captured, status: "delivered", resend: "not-needed", revision: 8, at: new Date().toISOString() }];
+    await settle(() => mounted.root.render(surface()));
+    expect(readOutbox(file.conversationId!)[0]?.state).toBe("delivered");
+    expect(readOutbox(file.conversationId!)[0]?.acceptedHeld).toBeUndefined();
+    expect(sends).toHaveLength(1);
+  } finally { await act(async () => mounted.root.unmount()); }
+});
+
+test.each(["network", "503", "malformed"])("safe retry followed by %s becomes unknown despite cached rejection", async mode => {
+  const sends: SendBody[] = [];
+  globalThis.fetch = (async (input, init) => {
+    if (String(input) !== "/api/runtime/send") return new Response("{}", { status: 404 });
+    sends.push(JSON.parse(init?.body as string));
+    if (sends.length === 1) return Response.json({ receipt: { ...captured, idempotencyKey: sends[0]!.idempotencyKey, status: "rejected", resend: "safe", reason: "Rejected before dispatch" } }, { status: 400 });
+    if (mode === "network") throw new Error("lost retry response");
+    return new Response(mode === "malformed" ? "bad-json" : "{}", { status: 503 });
+  }) as typeof fetch;
+  let mounted = await renderInto(surface());
+  try {
+    await settle(() => composerControls(mounted.host).type(captured.text!));
+    await settle(() => composerControls(mounted.host).submit());
+    await settle(() => mounted.host.querySelector<HTMLButtonElement>("[data-outbox-retry]")!.click());
+    expect(sends).toHaveLength(2);
+    expect(sends[1]).toEqual(sends[0]);
+    expect(readOutbox(file.conversationId!)[0]?.deliveryUncertain).toBe(true);
+    await act(async () => mounted.root.unmount());
+    resetOutboxForTests();
+    mounted = await renderInto(surface());
+    expect(readOutbox(file.conversationId!)[0]?.deliveryUncertain).toBe(true);
+    expect(mounted.host.querySelector("[data-outbox-retry], [data-outbox-cancel]")).toBeNull();
+    await settle(() => mounted.host.querySelector<HTMLDetailsElement>("details[data-runtime-receipt-stack]")?.setAttribute("open", ""));
+    expect(mounted.host.querySelector("[data-receipt-uncertain-retry]")).not.toBeNull();
+    expect(sends).toHaveLength(2);
+  } finally { await act(async () => mounted.root.unmount()); }
+});
