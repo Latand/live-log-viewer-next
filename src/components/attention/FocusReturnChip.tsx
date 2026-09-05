@@ -19,7 +19,9 @@ export interface FocusReturnChipProps {
 export function FocusReturnChip({ onReturn, precise, t, arrival }: FocusReturnChipProps) {
   const label = precise ? t("attention.return") : t("attention.returnLine");
   return (
-    <div data-scheme-ui className="pointer-events-none absolute left-3 top-[52px] z-40 flex max-w-[min(28rem,calc(100%-1.5rem))] flex-col items-start gap-2">
+    // AttentionHost mounts at the Viewer root. Clear the 248px project rail
+    // and the board toolbar before placing the arrival and its Back control.
+    <div data-scheme-ui className="pointer-events-none absolute left-[260px] top-[100px] z-40 flex max-w-[min(28rem,calc(100%-272px))] flex-col items-start gap-2">
       {arrival && (
         <div
           data-testid="attention-arrival"
