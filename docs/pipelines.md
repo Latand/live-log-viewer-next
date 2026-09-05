@@ -103,7 +103,23 @@ Pipeline stages cannot create another pipeline. The stage-kind validator and the
 - `skip-stage` — record an operator skip and follow `next`.
 - `close` — close the pipeline and any embedded flow while retaining history, the worktree, and any live stage panes for inspection. A close first asks the runtime host to end each resident stage host; when the calling process has no structured control channel at all (an MCP host process), it ends the host by the identity the registry recorded (pid, start identity, boot epoch). That path acts only on an attempt affirmatively bound to the row: the attempt names the conversation the row is the current generation of, and its launch has a receipt naming that same conversation; no launch, no receipt, or a receipt naming another conversation is unresolved ownership and nothing is signalled. The same authority (the row still naming that exact process for that conversation, no orchestrator seat) is asked again after every await inside the termination and one step before each signal. The report says which Viewer generation started the host and whether it still exists. A signal that was sent and did not end the whole authorized tree — a survivor, a refused signal — leaves the close refused with the pids named, and the survivors' identities are kept on the attempt: until each is proven gone, no later close may terminalize the attempt on registry or transcript evidence, however dead the row looks.
 
-After a Viewer restart, startup adoption consults the pipeline record before re-hosting a structured conversation: a conversation whose stage attempt has already settled (passed, failed, parked or skipped) is not resumed on the strength of its unfinished-turn claim alone, because no controller would accept its verdict or advance it. Work owed to it — a held delivery, a pending operation, an orchestrator recovery — still hosts it, and the close above then reaches that host.
+After a Viewer restart, startup adoption consults the pipeline record before re-hosting a structured conversation: a conversation whose stage attempt has already settled (passed, failed, parked or skipped) is not resumed on the strength of its unfinished-turn claim alone, because no controller would accept its verdict or advance it. Work owed to it — a held delivery, a pending operation, an orchestrator recovery — can still make it eligible, subject to the evidence fences below.
+
+
+A partial close retains the PID, process start identity and boot epoch of every
+captured survivor on the attempt. Authority or identity loss after termination
+starts preserves this evidence. Later partial stops merge survivors across host
+generations; only a positive death observation removes an identity. A dead root
+or terminal transcript cannot settle a close while any recorded survivor remains
+alive or unverifiable. Retained identities provide evidence for refusing a close;
+they do not grant permission to signal a detached survivor.
+
+Startup defers pipeline conversations when their pipeline records cannot be read
+or an earlier termination has unresolved survivors. Pending work does not bypass
+this fence. Deferred rows retain their recovery evidence and are excluded from
+launch and skipped-host demotion. Startup retries the read and process probes;
+a replacement becomes eligible only after the evidence permits it under the
+existing adoption rules.
 
 When a park happened before the stage produced a verdict, `retry-stage` and `skip-stage` refuse with 409 while the attempt's pane still hosts a live agent — resetting the worktree under a mid-turn agent would let its strays land in the next stage commit. Wait for the agent to exit or kill the pane, then retry.
 

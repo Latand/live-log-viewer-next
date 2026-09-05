@@ -133,6 +133,7 @@ if (mode === "spawn") {
 } else {
   const adopted: Array<{ key: string; host: ProcessIdentity }> = [];
   const considered: string[] = [];
+  let deferred: string | null = null;
   const hosts = await adoptStructuredHostsAtStartup({
     registry,
     adopt: async () => [],
@@ -161,8 +162,13 @@ if (mode === "spawn") {
       }
       return result;
     },
+  }).catch((error: unknown) => {
+    if (!(error instanceof Error) || !error.message.startsWith("pipeline startup evidence is unresolved")) throw error;
+    deferred = error.message;
+    return [];
   });
   report({
+    deferred,
     adopted,
     considered,
     published: hosts.map((item) => sessionKeyId(item.key)),

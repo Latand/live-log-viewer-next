@@ -113,8 +113,8 @@ export type PipelineStageStopResult =
       `detail` names the evidence when the stop went around the runtime. */
   | { outcome: "stopped"; detail?: string }
   | { outcome: "not-running" }
-  /** A signal was sent and the authorized tree did not all go (#1501): a
-      survivor, or a refused signal (EPERM). Typed apart from `failed` because
+  /** Termination was attempted and the authorized tree is unresolved (#1501):
+      a survivor, refused signal, or lost authority. Typed apart from `failed` because
       no evidence about the registry row or the transcript may terminalize
       the attempt over it — the processes named in `survivors` are still the
       attempt's, and only their proven death releases it. */
@@ -720,9 +720,9 @@ const NO_CONTROL_CHANNEL = "this process has no structured control channel (LLV_
  * signal, and the host is ended through the same identity-fenced termination
  * the resources rail uses, which signals exactly once per pid.
  *
- * Every refusal here is a `failed` stop with no signal sent: a missing or
- * contradictory fact never becomes a kill. A signal that was sent and did not
- * end the whole authorized tree — a survivor, an EPERM — is `unresolved`, with
+ * A refusal before termination starts is a `failed` stop with no signal sent.
+ * Once termination starts, a survivor, an EPERM, or lost authority is
+ * `unresolved`, with
  * each survivor's identity, and the close keeps that record on the attempt so
  * no later evidence about the row or the transcript can terminalize it while
  * one of them is still that process. The row is retired only by the
@@ -788,10 +788,10 @@ async function stopStageHostByRecordedIdentity(
     };
   }
   const named = outcome.remaining.length > 0 ? `; still running: ${outcome.remaining.join(", ")}` : "";
-  if (outcome.status === 500) {
-    /* A signal went out and the tree is not all gone. Survivors keep their
-       identity so the attempt stays refusable by proof, not by pid. */
-    const survivors: PipelineUnresolvedTermination["survivors"] = outcome.survivors.length > 0
+  if (outcome.terminationStarted || outcome.status === 500) {
+    /* Termination may have effects even when a later authority check refuses.
+       Keep captured identities until their death is proven. */
+    const survivors: PipelineUnresolvedTermination["survivors"] = outcome.terminationStarted || outcome.survivors.length > 0
       ? outcome.survivors.map((survivor) => ({ pid: survivor.pid, startIdentity: survivor.startIdentity, bootEpoch: survivor.bootEpoch ?? null }))
       : outcome.remaining.map((pid) => ({ pid, startIdentity: null }));
     return {
@@ -801,6 +801,19 @@ async function stopStageHostByRecordedIdentity(
     };
   }
   return refused(`${outcome.error} (pid ${ref.pid}${named}); ${generation}`);
+}
+
+function rememberUnresolvedTermination(
+  attempt: PipelineStageAttempt,
+  result: Extract<PipelineStageStopResult, { outcome: "unresolved" }>,
+  recordedAt: string,
+): void {
+  const survivors = [...(attempt.unresolvedTermination?.survivors ?? []), ...result.survivors]
+    .filter((survivor) => processIdentityStatus(survivor) !== "dead");
+  const unique = new Map(survivors.map((survivor) => [
+    JSON.stringify([survivor.pid, survivor.startIdentity, survivor.bootEpoch ?? null]), survivor,
+  ]));
+  attempt.unresolvedTermination = { survivors: [...unique.values()], error: result.error, recordedAt };
 }
 
 /**
@@ -813,6 +826,7 @@ function unresolvedTerminationRefusal(attempt: PipelineStageAttempt): string | n
   const record = attempt.unresolvedTermination;
   if (!record) return null;
   const standing: string[] = [];
+  record.survivors = record.survivors.filter((survivor) => processIdentityStatus(survivor) !== "dead");
   for (const survivor of record.survivors) {
     const status = processIdentityStatus(survivor);
     if (status === "dead") continue;
@@ -822,7 +836,7 @@ function unresolvedTerminationRefusal(attempt: PipelineStageAttempt): string | n
     delete attempt.unresolvedTermination;
     return null;
   }
-  return `an earlier stop left authorized processes it could not end (${record.error}); ${standing.join(", ")}; nothing was signalled`;
+  return `an earlier stop left authorized processes it could not end (${record.error}); ${standing.join(", ")}`;
 }
 
 export function defaultPipelinePorts(
@@ -2350,6 +2364,7 @@ async function tickRunStage(
       paneId: attempt.paneId,
       ...(attempt.historical ? { adopted: true as const } : {}),
     });
+    if (stopped.outcome === "unresolved") rememberUnresolvedTermination(attempt, stopped, ports.now());
     if (stopped.outcome === "failed" || stopped.outcome === "unresolved" || stopped.outcome === "unconfirmed") {
       pipeline.stateDetail = stopped.outcome === "unconfirmed"
         ? "automatic recovery is waiting for the unavailable stage host to terminate"
@@ -3150,7 +3165,7 @@ async function reconcileTerminalStageHosts(pipeline: Pipeline, ports: PipelinePo
   const survivors: Array<PipelineStageHostRef & { operationId: string | null; detail: string }> = [];
   let attempted = false;
   let deferred = false;
-  for (const [index, { target }] of candidates.entries()) {
+  for (const [index, { target, attempt }] of candidates.entries()) {
     const attemptKey = `${target.stageId}:${target.attempt}`;
     if (ports.monotonicNow() >= deadline) {
       deferred = true;
@@ -3166,6 +3181,12 @@ async function reconcileTerminalStageHosts(pipeline: Pipeline, ports: PipelinePo
       }
       break;
     }
+    const unresolved = unresolvedTerminationRefusal(attempt);
+    if (unresolved) {
+      attempted = true;
+      survivors.push({ ...target, operationId: null, detail: unresolved });
+      continue;
+    }
     if (!(await ports.stageHostResident(target))) {
       settledAttempts.add(attemptKey);
       continue;
@@ -3179,6 +3200,7 @@ async function reconcileTerminalStageHosts(pipeline: Pipeline, ports: PipelinePo
     }
     attempted = true;
     const result = await ports.stopStageAgent(target);
+    if (result.outcome === "unresolved") rememberUnresolvedTermination(attempt, result, ports.now());
     if (result.outcome === "stopped") {
       reap.stopped += 1;
       settledAttempts.add(attemptKey);
@@ -4594,8 +4616,8 @@ export async function patchPipeline(
              survivors ride the attempt with their identities: from here no
              close may terminalize it on row or transcript evidence until each
              of them is proven gone (#1501). */
-          candidate.attempt.unresolvedTermination = { survivors: result.survivors, error: result.error, recordedAt: ports.now() };
-          close.stillRunning.push({ ...target, error: result.error });
+          rememberUnresolvedTermination(candidate.attempt, result, ports.now());
+          close.stillRunning.push({ ...target, error: unresolvedTerminationRefusal(candidate.attempt) ?? result.error });
           continue;
         }
         const unresolved = unresolvedTerminationRefusal(candidate.attempt);

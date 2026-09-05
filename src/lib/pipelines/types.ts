@@ -197,7 +197,7 @@ export type PipelineStageAttempt = {
   /** Bounded, append-only reconciliation receipt for terminal parser misses. */
   verdictRecovery?: PipelineVerdictRecovery;
   /** What a close could prove it did not finish (#1501): the authorized host
-      processes that outlived the last identity-bound stop, each with the
+      processes still unresolved across identity-bound stops, each with the
       kernel identity it carried. While one of them is still that process, no
       close may terminalize this attempt, however dead the registry row looks;
       the record is cleared once every one is proven gone. */

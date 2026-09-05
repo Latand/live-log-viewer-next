@@ -311,6 +311,9 @@ export type StructuredHostTerminationOutcome =
           gone (or still there) without trusting the pid alone (#1501). Empty
           when nothing authorized survived. */
       survivors: ProcessIdentity[];
+      /** A runtime termination or signal was attempted; refusals must retain
+          its effects even when authority is subsequently lost. */
+      terminationStarted?: true;
       /** The authority this target carried is spent: the pid is no longer the
           process the snapshot listed, so the target is consumed, not retried. */
       stale?: true;
@@ -479,6 +482,12 @@ export async function terminateStructuredHostTree(
       };
     }
   }
+  let terminationStarted = false;
+  const partialEvidence = () => {
+    if (!terminationStarted) return { survivors: [] as ProcessIdentity[] };
+    const survivors = [...identities.values()].filter((identity) => processIdentityStatus(identity, identityProbe) !== "dead");
+    return { survivors, terminationStarted: true as const };
+  };
   const identityRefusal = (): Extract<StructuredHostTerminationOutcome, { ok: false }> | null => {
     for (const [candidate, expectedIdentity] of identities) {
       const status = processIdentityStatus(expectedIdentity, identityProbe);
@@ -494,7 +503,7 @@ export async function terminateStructuredHostTree(
             ? "host process identity changed before signalling — refresh the resource list"
             : `process ${candidate} identity changed before signalling — refresh the resource list`,
         remaining: [candidate],
-        survivors: [],
+        ...partialEvidence(),
         ...(candidate === pid ? { stale: true as const } : {}),
       };
     }
@@ -506,7 +515,7 @@ export async function terminateStructuredHostTree(
   const authorityRefusal = (): Extract<StructuredHostTerminationOutcome, { ok: false }> | null => {
     const refused = dependencies.authorize?.() ?? null;
     if (!refused) return null;
-    return { ok: false, status: refused.status, error: refused.error, remaining: survivors(), survivors: [] };
+    return { ok: false, status: refused.status, error: refused.error, remaining: survivors(), ...partialEvidence() };
   };
   const survivors = () => tree.filter((candidate) => alive(candidate));
   /* Ownership is asked at kill time, never read off the snapshot: the seat may
@@ -519,6 +528,7 @@ export async function terminateStructuredHostTree(
   let via: "runtime" | "process-group" = "process-group";
   let runtimeFailure = false;
   if (key) {
+    terminationStarted = true;
     try {
       if (await terminateOwned(key, expected)) via = "runtime";
     } catch {
@@ -539,6 +549,7 @@ export async function terminateStructuredHostTree(
 
   const refusals: string[] = [];
   const signalOnce = (target: number, value: NodeJS.Signals) => {
+    terminationStarted = true;
     try {
       signal(target, value);
     } catch (error) {
@@ -561,6 +572,10 @@ export async function terminateStructuredHostTree(
     }
     for (const candidate of standing) {
       if (groupLeader !== null && groupOf(candidate) === groupLeader) continue;
+      const changed = identityRefusal();
+      if (changed) return changed;
+      const refused = authorityRefusal();
+      if (refused) return refused;
       signalOnce(candidate, value);
     }
     return null;
@@ -596,10 +611,7 @@ export async function terminateStructuredHostTree(
       status: 500,
       error,
       remaining,
-      survivors: remaining.flatMap((candidate) => {
-        const recorded = identities.get(candidate);
-        return recorded ? [recorded] : [];
-      }),
+      ...partialEvidence(),
     };
   }
   /* The runtime path already retired the row as part of its own lifecycle. */

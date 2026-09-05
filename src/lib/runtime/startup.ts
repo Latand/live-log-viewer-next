@@ -9,7 +9,7 @@ import { agentRegistry, type AgentRegistry, type AgentRegistryEntry, type Proces
 import { effectiveClaudePermissionMode } from "@/lib/agent/cli";
 import { sessionKeyId, type SessionKey } from "@/lib/agent/sessionKey";
 import { activeOrchestratorSeats, type OrchestratorSeat } from "@/lib/orchestrator/seats";
-import { processIdentityMayOwn } from "@/lib/processIdentity";
+import { processIdentityMayOwn, processIdentityStatus } from "@/lib/processIdentity";
 import { assertDarwinStructuredRuntime } from "@/lib/proc/darwinIdentity";
 import { readStableTailRecords } from "@/lib/scanner/activity";
 import { withoutWakatimeCredential } from "@/lib/wakatime/credential";
@@ -645,6 +645,7 @@ function structuredStartupAdoptionFilter(
   orchestratorSeats: () => OrchestratorSeat[] = activeOrchestratorSeats,
   unreadableTranscriptHostKeys: ReadonlySet<string> = new Set(),
   settledStageConversationIds: ReadonlySet<string> = new Set(),
+  deferredStageConversationIds: ReadonlySet<string> = new Set(),
 ): StructuredHostAdoptionFilter {
   const conversationsByCurrentEntry = new Map(Object.values(snapshot.conversations).flatMap((conversation) => {
     const generation = conversation.generations.at(-1);
@@ -663,6 +664,7 @@ function structuredStartupAdoptionFilter(
     /* A superseded conversation is terminal (issue #383): a boot can never
        revive a retired round, held work or not — the successor owns it. */
     if (conversation.supersededBy) return false;
+    if (deferredStageConversationIds.has(registry.canonicalConversationId(conversation.id))) return false;
     const orchestratorRecoveryTargets = orchestratorRecoveries.get(sessionKeyId(entry.key));
     if (orchestratorRecoveryTargets?.some((target) =>
       orchestratorRestartRecoveryTargetIsCurrent(registry, target, orchestratorSeats()))) {
@@ -705,34 +707,44 @@ function structuredStartupAdoptionFilter(
 
 const SETTLED_STAGE_ATTEMPT_STATES = new Set(["passed", "failed", "needs_decision", "skipped"]);
 
-/**
- * Every conversation a pipeline stage attempt was launched for and has since
- * settled, by canonical id (#1501). The pipeline record is the authority on
- * whether a stage is still being driven; the registry row only knows whether
- * the turn looked unfinished when its last writer left. An unreadable
- * pipeline registry contributes nothing rather than blocking the boot.
- */
-function settledPipelineStageConversationIds(registry: AgentRegistry): ReadonlySet<string> {
+interface PipelineStartupEvidence {
+  settled: ReadonlySet<string>;
+  deferred: ReadonlySet<string>;
+}
+
+/** Pipeline attempts determine whether startup may create another writer.
+    A failed read retains pipeline members without launch or demotion; a
+    captured survivor blocks even pending work until its identity is dead. */
+function pipelineStartupEvidence(registry: AgentRegistry): PipelineStartupEvidence {
   const settled = new Set<string>();
+  const deferred = new Set<string>();
   let pipelines;
   try {
     pipelines = [...loadPipelines(), ...loadArchivedPipelines()];
   } catch (error) {
-    console.error("[structured hosts] pipeline registry unreadable; startup adoption cannot consult stage state", {
+    console.error("[structured hosts] pipeline registry unreadable; deferring pipeline adoption", {
       error: error instanceof Error ? error.message : String(error),
     });
-    return settled;
+    for (const [id, memberships] of Object.entries(registry.readOnlySnapshot().memberships)) {
+      if (memberships.some((membership) => membership.kind === "pipeline")) {
+        deferred.add(registry.canonicalConversationId(id as ViewerConversationId));
+      }
+    }
+    return { settled, deferred };
   }
   for (const pipeline of pipelines) {
     for (const run of pipeline.runs) {
       for (const attempt of run.attempts) {
-        if (!SETTLED_STAGE_ATTEMPT_STATES.has(attempt.state)) continue;
         if (!attempt.conversationId?.startsWith("conversation_")) continue;
-        settled.add(registry.canonicalConversationId(attempt.conversationId as ViewerConversationId));
+        const id = registry.canonicalConversationId(attempt.conversationId as ViewerConversationId);
+        if (SETTLED_STAGE_ATTEMPT_STATES.has(attempt.state)) settled.add(id);
+        if (attempt.unresolvedTermination?.survivors.some((identity) => processIdentityStatus(identity) !== "dead")) {
+          deferred.add(id);
+        }
       }
     }
   }
-  return settled;
+  return { settled, deferred };
 }
 
 export interface StructuredStartupDependencies {
@@ -742,9 +754,9 @@ export interface StructuredStartupDependencies {
   liveness?: TurnLivenessDependencies;
   /** Whether the delivery controller resolves a host this pass adopted. */
   hostClaimed?: (key: SessionKey) => boolean;
-  /** Canonical ids of conversations whose pipeline stage attempt has settled
-      (#1501). Defaults to reading the pipeline registry and its archive. */
-  settledStageConversations?: (registry: AgentRegistry) => ReadonlySet<string>;
+  /** Settled stages and conversations deferred by unavailable pipeline state
+      or unresolved survivors. Defaults to reading active and archived records. */
+  pipelineEvidence?: (registry: AgentRegistry) => PipelineStartupEvidence;
   orchestratorSeats?: typeof activeOrchestratorSeats;
   /** Reconciles transcript state, answering which conversations it could not
       read. A stub that answers nothing reports nothing unreadable. */
@@ -768,6 +780,10 @@ export async function adoptStructuredHostsAtStartup(
   const registry = dependencies.registry ?? agentRegistry();
   const client = dependencies.client === undefined ? runtimeHostClient() : dependencies.client;
   const orchestratorSeats = dependencies.orchestratorSeats ?? activeOrchestratorSeats;
+  const pipelineEvidence = (dependencies.pipelineEvidence ?? pipelineStartupEvidence)(registry);
+  const deferredHostKeys = new Set(Object.values(registry.readOnlySnapshot().conversations)
+    .filter((conversation) => pipelineEvidence.deferred.has(registry.canonicalConversationId(conversation.id)))
+    .flatMap((conversation) => conversation.generations.map((generation) => sessionKeyId({ engine: conversation.engine, sessionId: generation.id }))));
   /* Capture hosted seat ownership before any awaited startup work can refresh
      a terminal transcript or reconcile away the predecessor host wrapper. */
   const orchestratorRecoveries = mergeOrchestratorRestartRecoveries(
@@ -811,9 +827,8 @@ export async function adoptStructuredHostsAtStartup(
   /* Pending work makes a terminal conversation adoption-eligible. Clear any
      provably dead wrapper before that decision so its stale writer fence
      cannot block the startup recovery path. */
-  reconcileDeadStructuredRegistryHosts(registry, (entry) => orchestratorHostKeys.has(sessionKeyId(entry.key)));
+  reconcileDeadStructuredRegistryHosts(registry, (entry) => orchestratorHostKeys.has(sessionKeyId(entry.key)) || deferredHostKeys.has(sessionKeyId(entry.key)));
   const signals = await structuredStartupSignals(registry, client);
-  const settledStageConversations = (dependencies.settledStageConversations ?? settledPipelineStageConversationIds)(registry);
   const shouldAdopt = structuredStartupAdoptionFilter(
     registry,
     signals,
@@ -821,7 +836,8 @@ export async function adoptStructuredHostsAtStartup(
     orchestratorRecoveriesByHostKey,
     orchestratorSeats,
     unreadableTranscripts,
-    settledStageConversations,
+    pipelineEvidence.settled,
+    pipelineEvidence.deferred,
   );
   const adoptionCandidates = Object.values(registry.readOnlySnapshot().entries).filter((entry) =>
     entry.structuredHost && shouldAdopt(entry));
@@ -966,6 +982,7 @@ export async function adoptStructuredHostsAtStartup(
        clears the active turn and can signal an unclaimable Claude orphan — and
        an unreadable tail is no more grounds for that than it is for a launch
        (#1281). Whatever can read the artifact next decides. */
+    || deferredHostKeys.has(sessionKeyId(entry.key))
     || unreadableTranscripts.has(sessionKeyId(entry.key))
     || shouldAdopt(entry);
   const candidateCodexHosts = nextAdoptedHosts.filter(
@@ -997,7 +1014,8 @@ export async function adoptStructuredHostsAtStartup(
     orchestratorRecoveriesByHostKey,
     orchestratorSeats,
     unreadableTranscripts,
-    settledStageConversations,
+    pipelineEvidence.settled,
+    pipelineEvidence.deferred,
   );
   const finalHostKeys = new Set(nextAdoptedHosts.map((item) => sessionKeyId(item.key)));
   const shouldPublish: StructuredHostAdoptionFilter = (entry) =>
@@ -1025,7 +1043,7 @@ export async function adoptStructuredHostsAtStartup(
   await enqueueOrchestratorRestartRecoveries(
     registry,
     client,
-    orchestratorRecoveries,
+    orchestratorRecoveries.filter((target) => !deferredHostKeys.has(target.hostKey)),
     finalHostKeys,
     orchestratorSeats,
   );
@@ -1039,6 +1057,11 @@ export async function adoptStructuredHostsAtStartup(
       signals.pendingCodexContinuationConversationIds,
     );
     await kickStructuredDeliveryQueue();
+  }
+  if (deferredHostKeys.size > 0) {
+    retryAdoptedHosts = nextAdoptedHosts;
+    retryOrchestratorRecoveries = [...orchestratorRecoveries];
+    throw new Error(`pipeline startup evidence is unresolved; deferred ${deferredHostKeys.size} host(s)`);
   }
   if (client) await recoverPendingStructuredSpawns(registry, client);
   adoptedHosts = nextAdoptedHosts;

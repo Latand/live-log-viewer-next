@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { spawn, type ChildProcess } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -36,6 +37,10 @@ const isolatedEnvironment = {
   XDG_CONFIG_HOME: path.join(isolated, "config"),
   LLV_STATE_DIR: path.join(isolated, "state"),
   TMPDIR: path.join(isolated, "tmp"),
+  LLV_CLAUDE_HOME: path.join(isolated, "claude"),
+  LLV_CODEX_HOME: path.join(isolated, "codex"),
+  CODEX_HOME: path.join(isolated, "codex"),
+  CLAUDE_CONFIG_DIR: path.join(isolated, "claude"),
 };
 const ambientEnvironment = Object.fromEntries(
   ["LLV_RUNTIME_HOST_SOCKET", "LLV_STRUCTURED_HOSTS", "NODE_ENV", ...Object.keys(isolatedEnvironment)]
@@ -180,6 +185,7 @@ type SpawnReport = {
   descendant: ProcessIdentity | null;
 };
 type AdoptReport = {
+  deferred: string | null;
   generation: ProcessIdentity;
   adopted: Array<{ key: string; host: ProcessIdentity }>;
   considered: string[];
@@ -880,4 +886,179 @@ test("with a control channel present the runtime path answers and the identity p
   expect(signals).toEqual([]);
   expect(current.hostA.alive()).toBeTrue();
   expect(processIdentityStatus(current.hostA.identity)).toBe("alive");
+});
+
+
+test("authority lost after TERM retains every survivor across HTTP closes and startup (#1501)", async () => {
+  const current = await lane("tree");
+  const survivor = current.descendant!;
+  const pipeline = pipelineFor(current);
+  let seatInstalled = false;
+  process.kill = ((pid: number, signal?: NodeJS.Signals) => {
+    signals.push({ pid, signal });
+    if (pid === survivor.pid) throw Object.assign(new Error("refused"), { code: "EPERM" });
+    const result = realKill.call(process, pid, signal);
+    if (signal === "SIGTERM" && Math.abs(pid) === current.hostA.pid) {
+      setTimeout(() => {
+        current.registry.rememberMembership(current.conversationId, {
+          kind: "orchestrator", containerId: "seat-after-term", role: "orchestrator", slot: "seat",
+          stageId: null, stageOrder: null, round: null, parentConversationId: null,
+        });
+        seatInstalled = true;
+      }, 0);
+    }
+    return result;
+  }) as typeof process.kill;
+  const closed = await closeOverHttp(pipeline.id);
+  expect(seatInstalled).toBeTrue();
+  expect(closed.status).toBe(409);
+  expect(closed.close!.stillRunning[0]!.error).toContain("orchestrator seat");
+  expect(closed.close!.stillRunning[0]!.error).not.toContain("nothing was signalled");
+  expect(current.hostA.alive()).toBeFalse();
+  expect(survivor.alive()).toBeTrue();
+  expect(pipelineRecord(pipeline.id).runs[0]!.attempts[0]!.unresolvedTermination?.survivors).toContainEqual(survivor.identity);
+  signals.length = 0;
+  expect((await closeOverHttp(pipeline.id)).status).toBe(409);
+  expect(signals).toEqual([]);
+  await current.incumbent.end();
+  holdWork(current);
+  const rebooted = await successor(current);
+  expect(rebooted.report.adopted).toEqual([]);
+  expect(rebooted.report.deferred).toContain("pipeline startup evidence is unresolved");
+  expect((await closeOverHttp(pipeline.id)).status).toBe(409);
+  expect(signals).toEqual([]);
+});
+
+test("successor partial stop merges an earlier generation's late survivor evidence across restart (#1501)", async () => {
+  const current = await lane("tree");
+  const survivorA = current.descendant!;
+  const pipeline = pipelineFor(current);
+  const first = await closeWithTermination(pipeline.id, {
+    signal: (pid, value) => {
+      if (pid === survivorA.pid) throw Object.assign(new Error("refused"), { code: "EPERM" });
+      realKill.call(process, pid, value);
+    }, deadlineMs: 100, graceMs: 20,
+  });
+  expect(first.status).toBe(409);
+  const partial = pipelineRecord(pipeline.id);
+  const evidenceA = partial.runs[0]!.attempts[0]!.unresolvedTermination!;
+  /* Model a successor admitted before the first close publishes its survivor
+     evidence: persist that earlier snapshot for the actual startup pass, then
+     publish A's result before closing B. Both generations are real writers. */
+  delete partial.runs[0]!.attempts[0]!.unresolvedTermination;
+  savePipelines(loadPipelines().map((record) => record.id === pipeline.id ? partial : record));
+  await current.incumbent.end();
+  holdWork(current);
+  const adopted = await successor(current);
+  expect(adopted.report.adopted).toHaveLength(1);
+  const hostB = adopted.report.adopted[0]!.host;
+  const published = pipelineRecord(pipeline.id);
+  published.runs[0]!.attempts[0]!.unresolvedTermination = evidenceA;
+  savePipelines(loadPipelines().map((record) => record.id === pipeline.id ? published : record));
+  const second = await closeWithTermination(pipeline.id, {
+    signal: () => { throw Object.assign(new Error("refused"), { code: "EPERM" }); }, deadlineMs: 100, graceMs: 20,
+  });
+  expect(second.status).toBe(409);
+  expect(pipelineRecord(pipeline.id).runs[0]!.attempts[0]!.unresolvedTermination?.survivors).toEqual(expect.arrayContaining([survivorA.identity, hostB]));
+  const closesB = await closeOverHttp(pipeline.id);
+  expect(closesB.status).toBe(409);
+  expect(processIdentityStatus(hostB)).toBe("dead");
+  expect(survivorA.alive()).toBeTrue();
+  expect(pipelineRecord(pipeline.id).runs[0]!.attempts[0]!.unresolvedTermination?.survivors).toEqual([survivorA.identity]);
+  await adopted.end();
+  const rebooted = await successor(current);
+  expect(rebooted.report.adopted).toEqual([]);
+  expect(rebooted.report.deferred).not.toBeNull();
+  signals.length = 0;
+  expect((await closeOverHttp(pipeline.id)).status).toBe(409);
+  expect(signals).toEqual([]);
+  await survivorA.end();
+  expect((await closeOverHttp(pipeline.id)).status).toBe(200);
+  expect(pipelineRecord(pipeline.id).runs[0]!.attempts[0]!.unresolvedTermination).toBeUndefined();
+});
+
+test("unreadable pipeline state defers startup without demotion and a successful reread recovers (#1501)", async () => {
+  const current = await lane();
+  const pipeline = pipelineFor(current);
+  await loseIncumbent(current);
+  const before = current.entry()!;
+  const database = new Database(path.join(isolatedEnvironment.LLV_STATE_DIR, "state.sqlite"));
+  const row = database.query("SELECT value_json FROM state_rows WHERE collection = 'pipelines' AND row_key = ?").get(pipeline.id) as { value_json: string };
+  database.query("UPDATE state_rows SET value_json = ? WHERE collection = 'pipelines' AND row_key = ?").run("{unreadable", pipeline.id);
+  let blocked: Generation<AdoptReport>;
+  try {
+    blocked = await successor(current);
+    expect(blocked.report.adopted).toEqual([]);
+    expect(blocked.report.deferred).not.toBeNull();
+    expect(current.entry()!.status).toBe(before.status);
+    expect(current.hostedBy()).toEqual(before.structuredHost!.process);
+    expect(signals).toEqual([]);
+    await blocked.end();
+  } finally {
+    database.query("UPDATE state_rows SET value_json = ? WHERE collection = 'pipelines' AND row_key = ?").run(row.value_json, pipeline.id);
+    database.close();
+  }
+  holdWork(current);
+  const recovered = await successor(current);
+  expect(recovered.report.deferred).toBeNull();
+  expect(recovered.report.adopted).toHaveLength(1);
+  expect((await closeOverHttp(pipeline.id)).status).toBe(200);
+});
+
+
+test("startup defers a running attempt with an unverifiable survivor until positive death permits reread recovery (#1501)", async () => {
+  const current = await lane("tree");
+  const survivor = current.descendant!;
+  const pipeline = pipelineFor(current, { attemptState: "running" });
+  expect((await closeWithTermination(pipeline.id, {
+    signal: (pid, value) => {
+      if (pid === survivor.pid) throw Object.assign(new Error("refused"), { code: "EPERM" });
+      realKill.call(process, pid, value);
+    }, deadlineMs: 100, graceMs: 20,
+  })).status).toBe(409);
+  const record = pipelineRecord(pipeline.id);
+  expect(record.runs[0]!.attempts[0]!.state).toBe("running");
+  record.runs[0]!.attempts[0]!.unresolvedTermination!.survivors[0]!.bootEpoch = null;
+  savePipelines(loadPipelines().map((item) => item.id === pipeline.id ? record : item));
+  await current.incumbent.end();
+  holdWork(current);
+  const blocked = await successor(current);
+  expect(blocked.report.deferred).not.toBeNull();
+  expect(blocked.report.adopted).toEqual([]);
+  expect(survivor.alive()).toBeTrue();
+  await blocked.end();
+  await survivor.end();
+  const recovered = await successor(current);
+  expect(recovered.report.deferred).toBeNull();
+  expect(recovered.report.adopted).toHaveLength(1);
+  expect((await closeOverHttp(pipeline.id)).status).toBe(200);
+});
+
+
+test("terminal reap retains a partial tree for later ticks, HTTP close and startup (#1501)", async () => {
+  const current = await lane("tree");
+  const survivor = current.descendant!;
+  const pipeline = pipelineFor(current);
+  /* The completed turn makes this a terminal-reap candidate. */
+  fs.appendFileSync(current.transcriptPath, `${JSON.stringify({ type: "assistant", timestamp: new Date().toISOString(), message: { role: "assistant", content: [{ type: "text", text: "finished" }], stop_reason: "end_turn" } })}\n`);
+  const ports = defaultPipelinePorts();
+  ports.stopStageAgent = (target) => stopPipelineStageAgent(target, { termination: {
+    signal: (pid, value) => {
+      if (pid === survivor.pid) throw Object.assign(new Error("refused"), { code: "EPERM" });
+      realKill.call(process, pid, value);
+    }, deadlineMs: 100, graceMs: 20,
+  } });
+  await tickPipelines([], ports);
+  expect(current.hostA.alive()).toBeFalse();
+  expect(survivor.alive()).toBeTrue();
+  expect(pipelineRecord(pipeline.id).runs[0]!.attempts[0]!.unresolvedTermination?.survivors).toEqual([survivor.identity]);
+  await tickPipelines([], defaultPipelinePorts());
+  expect((await closeOverHttp(pipeline.id)).status).toBe(409);
+  await current.incumbent.end();
+  holdWork(current);
+  const rebooted = await successor(current);
+  expect(rebooted.report.adopted).toEqual([]);
+  expect(rebooted.report.deferred).not.toBeNull();
+  await survivor.end();
+  expect((await closeOverHttp(pipeline.id)).status).toBe(200);
 });

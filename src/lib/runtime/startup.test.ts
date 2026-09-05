@@ -1523,7 +1523,7 @@ test("startup adoption does not re-host a settled stage attempt on its unfinishe
   await adoptStructuredHostsAtStartup({
     registry,
     client,
-    settledStageConversations: () => new Set([settled.conversation.id, owed.conversation.id]),
+    pipelineEvidence: () => ({ settled: new Set([settled.conversation.id, owed.conversation.id]), deferred: new Set() }),
     adopt: async () => [],
     adoptClaude: async (received, _optionsFor, _env, shouldAdopt = () => true) => {
       for (const entry of Object.values(received.snapshot().entries)) {
@@ -4437,4 +4437,49 @@ test("startup settles a delivered pipeline retry and collapses its rebooted pred
   await bindStructuredDeliveryQueue([], { registry, client: null });
   journal.close();
   fs.rmSync(directory, { recursive: true, force: true });
+});
+
+
+test("deferred pipeline evidence preserves both engines while unrelated startup proceeds, then rereads (#1501)", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-startup-pipeline-deferred-"));
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const blocked = ["claude", "codex"].map((engine, index) => addStructuredRestartConversation(registry, directory, {
+    engine: engine as "claude" | "codex", sessionId: `00000000-0000-0000-0000-00000000000${index + 1}`,
+    status: "live", turn: "busy", activeTurnRef: "unfinished",
+  }));
+  const unrelated = addStructuredRestartConversation(registry, directory, {
+    engine: "claude", sessionId: "00000000-0000-0000-0000-000000000003", status: "live", turn: "busy", activeTurnRef: "unfinished",
+  });
+  const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeJournalClient(journal);
+  let deferred = new Set(blocked.map((item) => item.conversation.id));
+  const selected: string[] = [];
+  const adopt: NonNullable<Parameters<typeof adoptStructuredHostsAtStartup>[0]>["adopt"] = async (received, _options, _env, filter = () => true) => {
+    for (const entry of Object.values(received.readOnlySnapshot().entries)) {
+      if (entry.structuredHost && filter(entry)) selected.push(entry.key.sessionId);
+    }
+    return [];
+  };
+  const dependencies = {
+    registry, client, refreshTranscriptState: async () => new Set<string>(),
+    pipelineEvidence: () => ({ settled: new Set<string>(), deferred }),
+    adopt, adoptClaude: adopt as never,
+  };
+  try {
+    await expect(adoptStructuredHostsAtStartup(dependencies)).rejects.toThrow("pipeline startup evidence is unresolved");
+    expect(new Set(selected)).toEqual(new Set([unrelated.conversation.generations.at(-1)!.id]));
+    for (const item of blocked) {
+      expect(registry.conversation(item.conversation.id)?.turn.state).toBe("busy");
+      const generation = item.conversation.generations.at(-1)!;
+      expect(registry.readOnlySnapshot().entries[`${item.conversation.engine}:${generation.id}`]!.status).toBe("live");
+    }
+    deferred = new Set();
+    selected.length = 0;
+    await adoptStructuredHostsAtStartup(dependencies);
+    expect(new Set(selected).size).toBe(3);
+  } finally {
+    await bindStructuredDeliveryQueue([], { registry, client: null });
+    journal.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });

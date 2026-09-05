@@ -838,3 +838,24 @@ test("a row that is not the current generation of any conversation, or has no ho
   expect(missing).toMatchObject({ ok: false });
   expect((missing as { error: string }).error).toContain("no row");
 });
+
+
+test("identity loss after TERM retains other captured survivors and sends no further signal (#1501)", async () => {
+  let changed = false;
+  const signalled: Array<[number, NodeJS.Signals]> = [];
+  const outcome = await terminateStructuredHostTree(ref({ pid: 8200, startIdentity: "8200:start", sessionId: CLAUDE_SESSION }), {
+    processIdentity: (pid) => changed && pid === 8200 ? "8200:replacement" : `${pid}:start`,
+    pidAlive: () => true,
+    ppidMap: () => new Map([[8201, 8200]]),
+    processGroupId: () => null,
+    protectedPids: () => new Set(),
+    terminateOwnedHost: async () => false,
+    signal: (pid, value) => { signalled.push([pid, value]); changed = true; },
+    retireRegistryEntry: () => { throw new Error("must not retire a partial tree"); },
+  });
+  expect(signalled).toEqual([[8200, "SIGTERM"]]);
+  expect(outcome).toMatchObject({
+    ok: false, status: 409, terminationStarted: true,
+    survivors: [{ pid: 8201, startIdentity: "8201:start" }],
+  });
+});
