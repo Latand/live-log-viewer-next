@@ -1250,3 +1250,90 @@ test("compaction retires the reservation and keeps what it proved about the send
     active.close();
   }
 });
+
+/* ── ORIGINAL-KEY LOOKUP (#1490) ─────────────────────────────────────────── */
+
+const { lookupOriginalSend, resolveOriginalSend } = await import("./sendSettlement");
+
+test("the original-key lookup finds one send by bound recipient and key, and reads its current answer", async () => {
+  const active = fixture("original-key");
+  try {
+    const binding = { conversationId: active.conversationId, clientMessageId: "original-key-1" };
+    expect(lookupOriginalSend(active.registry.readOnlySnapshot(), binding)).toEqual({ kind: "absent" });
+
+    const accepted = acceptSend(active, { clientMessageId: "original-key-1", operationId: "op_original_1" });
+    const found = lookupOriginalSend(active.registry.readOnlySnapshot(), binding);
+    expect(found).toMatchObject({ kind: "found", operationId: accepted.operationId, deliveryId: accepted.deliveryId, reservationState: "delivery-uncertain" });
+    expect(found.kind === "found" && found.receipt.state).toBe("in-flight");
+
+    /* The same key under a DIFFERENT recipient is a different send. */
+    expect(lookupOriginalSend(active.registry.readOnlySnapshot(), { ...binding, conversationId: "conversation_elsewhere" })).toEqual({ kind: "absent" });
+
+    /* The current answer is the settlement read `message_receipt` performs. */
+    active.journal.transitionOperation(accepted.operationId, "delivered", { turnId: "turn-original" });
+    const resolved = await resolveOriginalSend(binding, { registry: active.registry, client: active.client });
+    expect(resolved).toMatchObject({ kind: "found", operationId: accepted.operationId, current: { readable: true, value: { state: "delivered", resend: "not-needed" } } });
+  } finally {
+    active.close();
+  }
+});
+
+test("the original-key lookup survives reservation compaction through the owner row", async () => {
+  let clock = Date.now();
+  const active = fixture("original-key-compacted", { now: () => clock });
+  try {
+    const binding = { conversationId: active.conversationId, clientMessageId: "compacted-original-key" };
+    const accepted = acceptSend(active, { clientMessageId: binding.clientMessageId, operationId: "op_compacted_original" });
+    await resolveSendReceipt(accepted.operationId, { registry: active.registry, client: active.client, now: AFTER_THE_WINDOW });
+    clock += 8 * 24 * 60 * 60 * 1000;
+    const later = acceptSend(active, { clientMessageId: "compacting-original-key", operationId: "op_compacting_original" });
+    active.registry.recordDeliveryOutcome(later.deliveryId, "delivered", null, "delivered");
+    expect(active.registry.readOnlySnapshot().heldDeliveries[accepted.deliveryId]).toBeUndefined();
+
+    const found = lookupOriginalSend(active.registry.readOnlySnapshot(), binding);
+    expect(found).toMatchObject({ kind: "found", operationId: accepted.operationId, deliveryId: null, reservationState: null });
+    expect(found.kind === "found" && found.receipt).toMatchObject({ state: "failed", reason: SEND_LOST_REASON, resend: "safe" });
+  } finally {
+    active.close();
+  }
+});
+
+test("the original-key lookup answers ambiguity and unreadable state as such, never as absence or a match", async () => {
+  const active = fixture("original-key-ambiguous");
+  try {
+    /* A second recipient in the same registry holding the same key. */
+    const otherPath = path.join(path.dirname(active.transcriptPath), "other-recipient.jsonl");
+    active.registry.reconcileConversations([{
+      engine: "codex",
+      path: otherPath,
+      accountId: "settlement-fixture-account",
+      launchProfile: emptyLaunchProfile({ cwd: path.dirname(otherPath) }),
+      turn: { state: "idle", source: "assistant", terminalAt: null },
+      observedAt: "2026-08-30T10:00:00.000Z",
+    }]);
+    const other = Object.values(active.registry.snapshot().conversations).find((conversation) => conversation.id !== active.conversationId)!;
+    acceptSend(active, { clientMessageId: "shared-key", operationId: "op_shared_a" });
+    active.registry.holdDelivery(other.id, "hello", "shared-key", "text", [], null, { operationId: "op_shared_b", kind: "send", policy: "queue" });
+
+    /* Bound to a recipient, the key is unambiguous; bound only to a path the
+       registry cannot resolve, two operations claim it and none is disclosed. */
+    expect(lookupOriginalSend(active.registry.readOnlySnapshot(), { conversationId: active.conversationId, clientMessageId: "shared-key" }))
+      .toMatchObject({ kind: "found", operationId: "op_shared_a" });
+    expect(lookupOriginalSend(active.registry.readOnlySnapshot(), { conversationId: "/nowhere/recipient.jsonl", clientMessageId: "shared-key" }))
+      .toEqual({ kind: "ambiguous", operationIds: ["op_shared_a", "op_shared_b"] });
+
+    const broken = { readOnlySnapshot: () => { throw new Error("registry file is unreadable"); } } as unknown as AgentRegistry;
+    expect(await resolveOriginalSend({ conversationId: active.conversationId, clientMessageId: "shared-key" }, { registry: broken, client: null }))
+      .toEqual({ kind: "unreadable", reason: "registry file is unreadable" });
+
+    /* A found send whose current answer cannot be read keeps its identity. */
+    const failingClient = {
+      ...active.client,
+      operationStatus: async () => { throw new Error("journal socket is gone"); },
+    } as RuntimeHostClient;
+    const kept = await resolveOriginalSend({ conversationId: active.conversationId, clientMessageId: "shared-key" }, { registry: active.registry, client: failingClient });
+    expect(kept).toMatchObject({ kind: "found", operationId: "op_shared_a", current: { readable: true, value: { state: "in-flight", evidence: "delivery-record" } } });
+  } finally {
+    active.close();
+  }
+});

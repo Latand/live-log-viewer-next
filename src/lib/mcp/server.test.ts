@@ -315,7 +315,7 @@ describe("MCP tool service", () => {
       .toEqual({ ...completed, replayed: true });
     expect(restarted.claim("list_tasks:abandoned-0", digest, "bounded")).toEqual({ kind: "fresh" });
     expect(restarted.claim("send_message:durable-pending", digest, "durable")).toMatchObject({ kind: "pending" });
-    expect(restarted.claim("send_message:durable-pending", "b".repeat(64), "durable")).toEqual({ kind: "conflict" });
+    expect(restarted.claim("send_message:durable-pending", "b".repeat(64), "durable")).toMatchObject({ kind: "conflict" });
     restarted.close();
 
     const database = new Database(filename, { readonly: true, strict: true });
@@ -1672,4 +1672,438 @@ test("#774 tool schemas publish the closed sets their servers enforce", () => {
     clientRequestId: "snapshot-extra-key",
     unknown: true,
   }).success).toBe(false);
+});
+
+/* ── ORIGINAL-KEY RECOVERY (#1490) ─────────────────────────────────────── */
+
+import {
+  McpDispatchUncertainError,
+  McpToolRefusal,
+  type McpRecoverableTool,
+  type McpRecoveryEvidence,
+  type McpRecoveryReceiptStore,
+  type McpRequestBinding,
+  type McpRequestCaller,
+  type McpToolCallContext,
+} from "./server";
+
+const OWNER: McpRequestCaller = { kind: "worker", conversationId: "conversation_owner", project: "proj-a" };
+const OTHER: McpRequestCaller = { kind: "worker", conversationId: "conversation_other", project: "proj-a" };
+const OTHER_PROJECT: McpRequestCaller = { kind: "worker", conversationId: "conversation_owner", project: "proj-b" };
+const UNIDENTIFIED: McpRequestCaller = { kind: "unidentified", conversationId: null, project: null };
+
+interface RecoveryHarness {
+  service: ReturnType<typeof createMcpToolService>;
+  store: McpRecoveryReceiptStore;
+  bindingCalls: McpToolCallContext[];
+  recoverCalls: { binding: McpRequestBinding; legacy: boolean }[];
+  evidence: McpRecoveryEvidence;
+  bindingImpl: (args: Record<string, unknown>, context?: McpToolCallContext) => Promise<Record<string, unknown>>;
+}
+
+function recoveryHarness(
+  caller: McpRequestCaller,
+  store: McpRecoveryReceiptStore = new MemoryMcpReceiptStore(),
+  overrides: Partial<Pick<RecoveryHarness, "evidence" | "bindingImpl">> = {},
+): RecoveryHarness {
+  const harness: RecoveryHarness = {
+    service: undefined as never,
+    store,
+    bindingCalls: [],
+    recoverCalls: [],
+    evidence: overrides.evidence ?? { outcome: "unknown", evidence: "none", reason: "nothing recorded yet", ids: {} },
+    bindingImpl: overrides.bindingImpl ?? (async () => ({ operationId: "op_dispatched", outcome: "queued" })),
+  };
+  const bindings = Object.fromEntries(MCP_TOOL_NAMES.map((toolName) => [toolName, async () => ({})])) as unknown as McpToolBindings;
+  bindings.send_message = async (args, context) => {
+    harness.bindingCalls.push(context ?? {});
+    return harness.bindingImpl(args, context);
+  };
+  const tool: McpRecoverableTool = {
+    bind: (args) => {
+      if (typeof args.text !== "string") throw new McpToolRefusal("text is required", { code: "invalid_request" });
+      return { caller, target: { project: "proj-a", identity: String(args.conversationId) }, downstreamKey: `key:${String(args.clientRequestId)}` };
+    },
+    recover: async (binding, options) => {
+      harness.recoverCalls.push({ binding, legacy: options.legacy });
+      return harness.evidence;
+    },
+  };
+  harness.service = createMcpToolService(bindings, store, undefined, { recovery: { send_message: tool } });
+  return harness;
+}
+
+const SEND = { clientRequestId: "recover-1", conversationId: "conversation_target", text: "hold" };
+
+describe("original-key recovery (#1490)", () => {
+  test("a fresh ordinary call binds before dispatch, dispatches once with the persisted key, and settles", async () => {
+    const harness = recoveryHarness(OWNER);
+    const first = await harness.service.callTool("send_message", SEND);
+    expect(first).toMatchObject({ ok: true, operationId: "op_dispatched", replayed: false });
+    expect(harness.bindingCalls).toHaveLength(1);
+    expect(harness.bindingCalls[0]?.binding).toMatchObject({
+      version: 1,
+      toolName: "send_message",
+      clientRequestId: "recover-1",
+      caller: OWNER,
+      target: { project: "proj-a", identity: "conversation_target" },
+      downstreamKey: "key:recover-1",
+      owner: { pid: process.pid },
+    });
+    const record = await harness.store.lookup("send_message:recover-1");
+    expect(record).toMatchObject({ stage: "settled", binding: { downstreamKey: "key:recover-1", caller: OWNER } });
+    expect(record?.result).toMatchObject({ ok: true, operationId: "op_dispatched" });
+
+    /* Ordinary replay keeps the recorded result; the binding is never re-run. */
+    expect(await harness.service.callTool("send_message", SEND)).toMatchObject({ ok: true, operationId: "op_dispatched", replayed: true });
+    expect(harness.bindingCalls).toHaveLength(1);
+    expect(harness.recoverCalls).toHaveLength(0);
+
+    /* Explicit recovery of a completed call reads current evidence and
+       carries the original alongside — recoveryOnly is not in the digest. */
+    harness.evidence = { outcome: "settled", evidence: "delivery-record", reason: null, ids: { operationId: "op_dispatched" }, facts: { state: "delivered" } };
+    const explicit = await harness.service.callTool("send_message", { ...SEND, recoveryOnly: true });
+    expect(explicit).toMatchObject({ ok: true, recovered: true, outcome: "settled", state: "delivered", operationId: "op_dispatched", nextAction: "follow-disposition", replayed: true });
+    expect((explicit as { original?: unknown }).original).toMatchObject({ ok: true, operationId: "op_dispatched" });
+    expect(harness.recoverCalls).toEqual([{ binding: expect.objectContaining({ downstreamKey: "key:recover-1" }), legacy: false }]);
+    expect(harness.bindingCalls).toHaveLength(1);
+  });
+
+  test("recoveryOnly under an absent key starts no work and permanently closes the key", async () => {
+    const harness = recoveryHarness(OWNER);
+    const probe = await harness.service.callTool("send_message", { ...SEND, recoveryOnly: true });
+    expect(probe).toMatchObject({ ok: false, code: "not_executed", retryable: true, details: { outcome: "not-executed", nextAction: "new-request-permitted" } });
+    expect(harness.bindingCalls).toHaveLength(0);
+    expect(await harness.store.lookup("send_message:recover-1")).toMatchObject({ stage: "not-executed", binding: { caller: OWNER } });
+    /* The original call arriving later finds the closed row and never dispatches. */
+    expect(await harness.service.callTool("send_message", SEND)).toMatchObject({ ok: false, code: "not_executed", replayed: true });
+    expect(harness.bindingCalls).toHaveLength(0);
+  });
+
+  test("changed arguments conflict, and recoveryOnly alone never changes the digest", async () => {
+    const harness = recoveryHarness(OWNER);
+    await harness.service.callTool("send_message", { ...SEND, recoveryOnly: false });
+    expect(await harness.service.callTool("send_message", { ...SEND, text: "changed" })).toMatchObject({ ok: false, code: "idempotency_conflict" });
+    expect(await harness.service.callTool("send_message", { ...SEND, text: "changed", recoveryOnly: true })).toMatchObject({ ok: false, code: "idempotency_conflict" });
+    expect(await harness.service.callTool("send_message", SEND)).toMatchObject({ ok: true, replayed: true });
+    expect(harness.bindingCalls).toHaveLength(1);
+  });
+
+  test("another caller, another project, or an unidentified caller is refused without disclosure", async () => {
+    const store = new MemoryMcpReceiptStore();
+    const owner = recoveryHarness(OWNER, store);
+    await owner.service.callTool("send_message", SEND);
+    for (const caller of [OTHER, OTHER_PROJECT, UNIDENTIFIED]) {
+      const stranger = recoveryHarness(caller, store);
+      for (const args of [SEND, { ...SEND, recoveryOnly: true }, { ...SEND, text: "changed" }]) {
+        const answer = await stranger.service.callTool("send_message", args);
+        expect(answer).toEqual({
+          ok: false,
+          toolName: "send_message",
+          clientRequestId: "recover-1",
+          replayed: true,
+          error: "this clientRequestId cannot be recovered by this caller",
+          code: "recovery_not_permitted",
+          retryable: false,
+        });
+        expect(JSON.stringify(answer)).not.toContain("op_dispatched");
+      }
+      expect(stranger.bindingCalls).toHaveLength(0);
+      expect(stranger.recoverCalls).toHaveLength(0);
+    }
+    /* An unidentified caller may still make a fresh ordinary call of its own
+       (as before), but cannot recover it afterwards. */
+    const anonymous = recoveryHarness(UNIDENTIFIED, store);
+    expect(await anonymous.service.callTool("send_message", { ...SEND, clientRequestId: "anon-1" })).toMatchObject({ ok: true, replayed: false });
+    expect(await anonymous.service.callTool("send_message", { ...SEND, clientRequestId: "anon-1", recoveryOnly: true })).toMatchObject({ ok: false, code: "recovery_not_permitted" });
+    expect(await anonymous.service.callTool("send_message", { ...SEND, clientRequestId: "anon-2", recoveryOnly: true })).toMatchObject({ ok: false, code: "recovery_not_permitted" });
+    expect(await anonymous.store.lookup("send_message:anon-2")).toBeNull();
+  });
+
+  test("an uncertain dispatch leaves the claim open, answers from evidence, and is never redispatched", async () => {
+    const harness = recoveryHarness(OWNER, undefined, {
+      bindingImpl: async () => { throw new McpDispatchUncertainError("the connection failed after the request may have been sent"); },
+    });
+    const lost = await harness.service.callTool("send_message", SEND);
+    expect(lost).toMatchObject({
+      ok: false,
+      code: "outcome_unknown",
+      retryable: false,
+      replayed: false,
+      details: { outcome: "unknown", nextAction: "original-key-lookup", evidence: "none" },
+    });
+    expect(String((lost as { error: string }).error)).toContain("may have been sent");
+    expect(await harness.store.lookup("send_message:recover-1")).toMatchObject({ stage: "dispatching", result: null });
+    expect(harness.recoverCalls).toHaveLength(1);
+
+    /* Later calls under the key read evidence only. */
+    expect(await harness.service.callTool("send_message", SEND)).toMatchObject({ ok: false, code: "outcome_unknown", replayed: true });
+    harness.evidence = { outcome: "accepted", evidence: "delivery-record", reason: "accepted for delivery", ids: { operationId: "op_found" }, facts: { state: "in-flight" } };
+    expect(await harness.service.callTool("send_message", { ...SEND, recoveryOnly: true }))
+      .toMatchObject({ ok: true, recovered: true, outcome: "accepted", operationId: "op_found", nextAction: "original-key-lookup", replayed: true });
+    harness.evidence = { outcome: "settled", evidence: "delivery-journal", reason: null, ids: { operationId: "op_found" }, facts: { state: "delivered", resend: "not-needed" } };
+    expect(await harness.service.callTool("send_message", SEND)).toMatchObject({ ok: true, outcome: "settled", resend: "not-needed", nextAction: "follow-disposition" });
+    expect(harness.bindingCalls).toHaveLength(1);
+    /* Evidence never becomes a stored result: the row stays open for the
+       original response, and nothing pretends to know more than it does. */
+    expect(await harness.store.lookup("send_message:recover-1")).toMatchObject({ stage: "dispatching", result: null });
+  });
+
+  test("a server refusal before dispatch settles as not-executed; one carrying an admitted id keeps it", async () => {
+    const refused = recoveryHarness(OWNER, undefined, {
+      bindingImpl: async () => { throw new McpToolRefusal("directory does not exist", { status: 400 }); },
+    });
+    expect(await refused.service.callTool("send_message", SEND)).toMatchObject({
+      ok: false,
+      code: "tool_failed",
+      retryable: true,
+      details: { status: 400, outcome: "not-executed", nextAction: "new-request-permitted" },
+    });
+    expect(await refused.store.lookup("send_message:recover-1")).toMatchObject({ stage: "not-executed" });
+    expect(await refused.service.callTool("send_message", SEND)).toMatchObject({ ok: false, code: "tool_failed", replayed: true, details: { outcome: "not-executed" } });
+    expect(refused.bindingCalls).toHaveLength(1);
+
+    const admitted = recoveryHarness(OWNER, undefined, {
+      bindingImpl: async () => { throw new McpToolRefusal("delivery was started and never settled", { operationId: "op_ambiguous", resend: "verify-first", actuation: "started" }); },
+    });
+    expect(await admitted.service.callTool("send_message", SEND)).toMatchObject({
+      ok: false,
+      code: "tool_failed",
+      retryable: false,
+      details: { operationId: "op_ambiguous", resend: "verify-first", outcome: "settled", nextAction: "follow-disposition" },
+    });
+    expect(await admitted.store.lookup("send_message:recover-1")).toMatchObject({ stage: "settled" });
+  });
+
+  test("a claim whose owner died before dispatch is closed as not-executed; a live owner's claim stays unknown", async () => {
+    const store = new MemoryMcpReceiptStore();
+    const harness = recoveryHarness(OWNER, store);
+    const digest = (await (async () => {
+      /* Produce the exact digest the service computes by claiming through it once. */
+      const probe = recoveryHarness(OWNER, new MemoryMcpReceiptStore());
+      await probe.service.callTool("send_message", SEND);
+      return (await probe.store.lookup("send_message:recover-1"))!.digest;
+    })());
+    const binding = (context: Partial<McpRequestBinding["owner"]>): McpRequestBinding => ({
+      version: 1,
+      toolName: "send_message",
+      clientRequestId: "recover-1",
+      caller: OWNER,
+      target: { project: "proj-a", identity: "conversation_target" },
+      downstreamKey: "key:recover-1",
+      owner: { pid: process.pid, startIdentity: null, ...context },
+      claimedAt: new Date().toISOString(),
+    });
+
+    /* Live owner: the dispatch may be a moment away — unknown, nothing closed. */
+    expect(store.claim("send_message:recover-1", digest, "durable", binding({}))).toEqual({ kind: "fresh" });
+    const live = await harness.service.callTool("send_message", SEND);
+    expect(live).toMatchObject({ ok: false, code: "outcome_unknown", details: { outcome: "unknown", evidence: "mcp-receipt" } });
+    expect(await store.lookup("send_message:recover-1")).toMatchObject({ stage: "claimed", result: null });
+    expect(harness.bindingCalls).toHaveLength(0);
+    expect(harness.recoverCalls).toHaveLength(0);
+
+    /* Dead owner: closed for good, and the closure is what proves zero effect. */
+    const dead = new MemoryMcpReceiptStore();
+    const deadHarness = recoveryHarness(OWNER, dead);
+    expect(dead.claim("send_message:recover-1", digest, "durable", binding({ pid: 2 ** 22 - 1 }))).toEqual({ kind: "fresh" });
+    const closed = await deadHarness.service.callTool("send_message", { ...SEND, recoveryOnly: true });
+    expect(closed).toMatchObject({ ok: false, code: "not_executed", details: { outcome: "not-executed", evidence: "mcp-receipt" }, replayed: true });
+    expect(await dead.lookup("send_message:recover-1")).toMatchObject({ stage: "not-executed" });
+    expect(dead.markDispatching("send_message:recover-1", digest)).toBe(false);
+    expect(await deadHarness.service.callTool("send_message", SEND)).toMatchObject({ ok: false, code: "not_executed", replayed: true });
+    expect(deadHarness.bindingCalls).toHaveLength(0);
+  });
+
+  test("a legacy claim without a binding discloses its result only when downstream evidence establishes ownership", async () => {
+    const store = new MemoryMcpReceiptStore();
+    const bindings = Object.fromEntries(MCP_TOOL_NAMES.map((toolName) => [toolName, async () => ({ operationId: "op_legacy" })])) as unknown as McpToolBindings;
+    /* The row as a pre-#1490 server wrote it: no binding, no stage. */
+    await createMcpToolService(bindings, store).callTool("send_message", SEND);
+    expect(await store.lookup("send_message:recover-1")).toMatchObject({ binding: null, stage: "settled" });
+
+    const unowned = recoveryHarness(OWNER, store, {
+      evidence: { outcome: "settled", evidence: "delivery-record", reason: null, ids: { operationId: "op_legacy" }, ownership: "unknown" },
+    });
+    for (const args of [SEND, { ...SEND, recoveryOnly: true }]) {
+      const answer = await unowned.service.callTool("send_message", args);
+      expect(answer).toMatchObject({ ok: false, code: "outcome_unknown", details: { outcome: "unknown", evidence: "legacy-receipt-unbound" } });
+      expect(JSON.stringify(answer)).not.toContain("op_legacy");
+    }
+    expect(unowned.recoverCalls.map((call) => call.legacy)).toEqual([true, true]);
+    expect(unowned.bindingCalls).toHaveLength(0);
+    expect(await store.lookup("send_message:recover-1")).toMatchObject({ binding: null, stage: "settled" });
+
+    const owned = recoveryHarness(OWNER, store, {
+      evidence: { outcome: "settled", evidence: "spawn-receipt", reason: null, ids: { launchId: "launch_legacy" }, ownership: "established" },
+    });
+    expect(await owned.service.callTool("send_message", SEND)).toMatchObject({ ok: true, operationId: "op_legacy", replayed: true });
+    expect(await owned.service.callTool("send_message", { ...SEND, recoveryOnly: true })).toMatchObject({ ok: true, recovered: true, outcome: "settled", launchId: "launch_legacy" });
+    expect(await owned.service.callTool("send_message", { ...SEND, text: "changed" })).toMatchObject({ ok: false, code: "idempotency_conflict" });
+  });
+
+  test("the original response completing after a recovery settles once, and a later error cannot overwrite it", async () => {
+    const store = new MemoryMcpReceiptStore();
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const original = recoveryHarness(OWNER, store, {
+      bindingImpl: async () => { await held; return { operationId: "op_late" }; },
+    });
+    const pending = original.service.callTool("send_message", SEND);
+    await Bun.sleep(5);
+    expect(await store.lookup("send_message:recover-1")).toMatchObject({ stage: "dispatching", result: null });
+
+    const observer = recoveryHarness(OWNER, store, {
+      evidence: { outcome: "accepted", evidence: "delivery-record", reason: "accepted", ids: { operationId: "op_late" } },
+    });
+    expect(await observer.service.callTool("send_message", { ...SEND, recoveryOnly: true })).toMatchObject({ ok: true, outcome: "accepted", operationId: "op_late" });
+    expect(observer.bindingCalls).toHaveLength(0);
+
+    release();
+    expect(await pending).toMatchObject({ ok: true, operationId: "op_late", replayed: false });
+    expect(await store.lookup("send_message:recover-1")).toMatchObject({ stage: "settled" });
+    expect(await observer.service.callTool("send_message", SEND)).toMatchObject({ ok: true, operationId: "op_late", replayed: true });
+
+    /* A terminal answer already recorded wins over any later write. */
+    const digest = (await store.lookup("send_message:recover-1"))!.digest;
+    const late = { ok: false as const, toolName: "send_message", clientRequestId: "recover-1", replayed: false, error: "late", code: "tool_failed", retryable: true };
+    expect(store.settle("send_message:recover-1", digest, late)).toMatchObject({ ok: true, operationId: "op_late" });
+    expect(store.fenceUndispatched("send_message:recover-1", digest, late)).toBe(false);
+    expect((await store.lookup("send_message:recover-1"))?.result).toMatchObject({ ok: true, operationId: "op_late" });
+  });
+
+  test("the file and SQLite stores persist the binding and stage, transition conditionally, and migrate in place", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-recovery-stores-"));
+    scratch.push(directory);
+    const binding: McpRequestBinding = {
+      version: 1,
+      toolName: "send_message",
+      clientRequestId: "durable-1",
+      caller: OWNER,
+      target: { project: "proj-a", identity: "conversation_target" },
+      downstreamKey: "durable-1",
+      owner: { pid: process.pid, startIdentity: null },
+      claimedAt: "2026-09-05T08:00:00.000Z",
+    };
+    const digest = "c".repeat(64);
+    const result: McpToolResult = { ok: true, toolName: "send_message", clientRequestId: "durable-1", replayed: false, operationId: "op_durable" };
+    const closed: McpToolResult = { ok: false, toolName: "send_message", clientRequestId: "durable-1", replayed: false, error: "closed", code: "not_executed", retryable: true };
+
+    /* An existing SQLite database from before the columns existed. */
+    const sqlitePath = path.join(directory, "mcp-receipts.sqlite");
+    const raw = new Database(sqlitePath, { create: true, strict: true });
+    raw.exec(`
+      CREATE TABLE mcp_receipt_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      CREATE TABLE mcp_receipts (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        receipt_key TEXT NOT NULL UNIQUE,
+        digest TEXT NOT NULL,
+        retention TEXT NOT NULL CHECK(retention IN ('bounded', 'durable')),
+        result_json TEXT,
+        storage_bytes INTEGER NOT NULL,
+        claimed_at INTEGER NOT NULL
+      );
+    `);
+    raw.query("INSERT INTO mcp_receipts(receipt_key, digest, retention, result_json, storage_bytes, claimed_at) VALUES (?, ?, 'durable', ?, 1, 1)")
+      .run("send_message:legacy-1", digest, JSON.stringify({ ...result, clientRequestId: "legacy-1" }));
+    raw.query("INSERT INTO mcp_receipts(receipt_key, digest, retention, result_json, storage_bytes, claimed_at) VALUES (?, ?, 'durable', NULL, 1, 1)")
+      .run("send_message:legacy-pending", digest);
+    raw.close();
+
+    const stores: { name: string; store: McpRecoveryReceiptStore }[] = [
+      { name: "file", store: new FileMcpReceiptStore(path.join(directory, "receipts.json")) },
+      { name: "sqlite", store: new SqliteMcpReceiptStore(sqlitePath) },
+    ];
+    for (const { name, store } of stores) {
+      const key = `send_message:durable-1`;
+      expect(await store.claim(key, digest, "durable", binding)).toEqual({ kind: "fresh" });
+      expect(await store.lookup(key)).toEqual({ digest, result: null, binding, stage: "claimed" });
+      expect(await store.claim(key, digest, "durable", binding)).toMatchObject({ kind: "pending", record: { stage: "claimed", binding } });
+      expect(await store.claim(key, "d".repeat(64), "durable", binding)).toMatchObject({ kind: "conflict", record: { binding } });
+      expect(await store.markDispatching(key, "d".repeat(64))).toBe(false);
+      expect(await store.fenceAbsent(key, digest, binding, closed)).toBe(false);
+      expect(await store.markDispatching(key, digest)).toBe(true);
+      expect(await store.markDispatching(key, digest)).toBe(false);
+      expect(await store.fenceUndispatched(key, digest, closed)).toBe(false);
+      expect((await store.lookup(key))?.stage).toBe("dispatching");
+      expect(await store.settle(key, digest, result)).toEqual(result);
+      expect(await store.settle(key, digest, closed)).toEqual(result);
+      expect(await store.lookup(key)).toMatchObject({ result, stage: "settled", binding });
+      expect(await store.claim(key, digest, "durable", binding)).toMatchObject({ kind: "replay", result, record: { stage: "settled" } });
+
+      const fenced = `send_message:fenced-${name}`;
+      const fencedBinding = { ...binding, clientRequestId: `fenced-${name}` };
+      expect(await store.fenceAbsent(fenced, digest, fencedBinding, { ...closed, clientRequestId: `fenced-${name}` })).toBe(true);
+      expect(await store.lookup(fenced)).toMatchObject({ stage: "not-executed", binding: fencedBinding });
+      expect(await store.claim(fenced, digest, "durable", fencedBinding)).toMatchObject({ kind: "replay", record: { stage: "not-executed" } });
+
+      const undispatched = `send_message:undispatched-${name}`;
+      const undispatchedBinding = { ...binding, clientRequestId: `undispatched-${name}` };
+      expect(await store.claim(undispatched, digest, "durable", undispatchedBinding)).toEqual({ kind: "fresh" });
+      expect(await store.fenceUndispatched(undispatched, digest, { ...closed, clientRequestId: `undispatched-${name}` })).toBe(true);
+      expect(await store.markDispatching(undispatched, digest)).toBe(false);
+      expect(await store.lookup(undispatched)).toMatchObject({ stage: "not-executed" });
+    }
+    /* Rows from before the columns existed read as legacy: no binding, no
+       claim stage, and their results intact. */
+    const sqlite = stores[1]!.store;
+    expect(await sqlite.lookup("send_message:legacy-1")).toMatchObject({ binding: null, stage: "settled", result: { operationId: "op_durable" } });
+    expect(await sqlite.lookup("send_message:legacy-pending")).toEqual({ digest, result: null, binding: null, stage: null });
+    (sqlite as SqliteMcpReceiptStore).close();
+
+    /* The file store's bytes survive a reopen with the binding intact, and
+       the legacy JSON import carries binding and stage into SQLite. */
+    const reopened = new FileMcpReceiptStore(path.join(directory, "receipts.json"));
+    expect(await reopened.lookup("send_message:durable-1")).toMatchObject({ binding, stage: "settled" });
+    const imported = new SqliteMcpReceiptStore(path.join(directory, "imported.sqlite"), { legacyFilePath: path.join(directory, "receipts.json") });
+    expect(imported.lookup("send_message:durable-1")).toMatchObject({ binding, stage: "settled", result });
+    expect(imported.lookup("send_message:fenced-file")).toMatchObject({ stage: "not-executed" });
+    imported.close();
+
+    /* A malformed binding fails closed on read. */
+    const corrupt = path.join(directory, "corrupt.json");
+    fs.writeFileSync(corrupt, JSON.stringify({
+      version: 2,
+      readReceipts: {},
+      mutationReceipts: { "send_message:bad": { digest, binding: { version: 1, toolName: "send_message" }, stage: "claimed" } },
+    }));
+    await expect(new FileMcpReceiptStore(corrupt).lookup("send_message:bad")).rejects.toThrow("invalid MCP receipt file");
+  });
+
+  test("two SQLite store instances racing one key yield one dispatch owner", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-recovery-race-"));
+    scratch.push(directory);
+    const filename = path.join(directory, "mcp-receipts.sqlite");
+    const first = new SqliteMcpReceiptStore(filename);
+    const second = new SqliteMcpReceiptStore(filename);
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const a = recoveryHarness(OWNER, first, { bindingImpl: async () => { await held; return { operationId: "op_race" }; } });
+    const b = recoveryHarness(OWNER, second, {
+      evidence: { outcome: "unknown", evidence: "none", reason: "nothing recorded yet", ids: {} },
+      bindingImpl: async () => { throw new Error("the second process must never dispatch"); },
+    });
+    const winner = a.service.callTool("send_message", SEND);
+    await Bun.sleep(5);
+    expect(await b.service.callTool("send_message", SEND)).toMatchObject({ ok: false, code: "outcome_unknown", replayed: true });
+    expect(await b.service.callTool("send_message", { ...SEND, recoveryOnly: true })).toMatchObject({ ok: false, code: "outcome_unknown" });
+    expect(b.bindingCalls).toHaveLength(0);
+    release();
+    expect(await winner).toMatchObject({ ok: true, operationId: "op_race", replayed: false });
+    expect(await b.service.callTool("send_message", SEND)).toMatchObject({ ok: true, operationId: "op_race", replayed: true });
+    expect(a.bindingCalls).toHaveLength(1);
+    first.close();
+    second.close();
+  });
+
+  test("a recoverable tool requires a store that can recover", () => {
+    const bindings = Object.fromEntries(MCP_TOOL_NAMES.map((toolName) => [toolName, async () => ({})])) as unknown as McpToolBindings;
+    const legacyStore: McpReceiptStore = { claim: () => ({ kind: "fresh" }), complete: () => {} };
+    const tool: McpRecoverableTool = {
+      bind: () => ({ caller: OWNER, target: { project: null, identity: null }, downstreamKey: "k" }),
+      recover: async () => ({ outcome: "unknown", evidence: "none", reason: null, ids: {} }),
+    };
+    const service = createMcpToolService(bindings, legacyStore, undefined, { recovery: { send_message: tool } });
+    expect(service.callTool("send_message", SEND)).rejects.toThrow("cannot recover send_message");
+  });
 });
