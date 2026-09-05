@@ -88,18 +88,18 @@ describe("task store", () => {
     expect(loadTasks(filePath)).toEqual(tasks);
   });
 
-  test("corrupt or missing files load as an empty list", () => {
+  test("only a missing file establishes an empty store", () => {
     const filePath = tmpFile();
     expect(loadTasks(filePath)).toEqual([]);
     fs.writeFileSync(filePath, "{", "utf8");
-    expect(loadTasks(filePath)).toEqual([]);
+    expect(() => loadTasks(filePath)).toThrow();
   });
 
-  test("runtime validation filters malformed tasks", () => {
+  test("runtime validation refuses malformed task state", () => {
     const filePath = tmpFile();
     const valid = task();
     fs.writeFileSync(filePath, JSON.stringify({ tasks: [valid, { ...valid, id: 3 }, { ...valid, pos: { x: Number.NaN, y: 0 } }] }));
-    expect(loadTasks(filePath)).toEqual([valid]);
+    expect(() => loadTasks(filePath)).toThrow("invalid persisted task row");
     expect(isTask(valid)).toBe(true);
   });
 
@@ -469,7 +469,7 @@ describe("task delivery assembly", () => {
   });
 
   test("task launch replay updates one assignment by durable launch identity", () => {
-    const launchId = "9173e9a2-2f14-4a70-818a-bd4052a1ad4a";
+    const launchId = crypto.randomUUID();
     const conversationId = "conversation_ac6029b9";
     const pending = mergeAssignments([], [{
       launchId,
@@ -512,4 +512,21 @@ describe("task delivery assembly", () => {
     expect(pinnedAccountId(assignments, "claude")).toBe("claude-work");
     expect(pinnedAccountId(assignments, "codex")).toBe("codex-work");
   });
+});
+
+
+test("placement guards leave unrelated content callers compatible and validate against the selected row", () => {
+  const original = task();
+  expect(patchTask([original], original.id, { text: "content" }).ok).toBe(true);
+  const missing = patchTask([original], original.id, { pos: { x: 1, y: 2 } }, undefined, { requirePlacementGuards: true });
+  expect(missing).toMatchObject({ ok: false, code: "TASK_INVALID_FIELD", field: "expectedProject" });
+  expect(patchTask([original], original.id, { text: "content", expectedProject: "proj" })).toMatchObject({ ok: false, field: "expectedRevision" });
+  expect(patchTask([original], original.id, { placement: "pinned" }).ok).toBe(true);
+  const unplaced = patchTask([original], original.id, { placement: "unplaced", pos: { x: -0.5, y: 0 } });
+  expect(unplaced.ok).toBe(true);
+  if (unplaced.ok) expect(unplaced.task.pos).toBeUndefined();
+  for (const pos of [null, {}, { x: 0 }, { x: 0, y: Infinity }, { x: NaN, y: 0 }]) {
+    expect(patchTask([original], original.id, { pos })).toMatchObject({ ok: false, code: "TASK_INVALID_FIELD" });
+  }
+  expect(original).toEqual(task());
 });

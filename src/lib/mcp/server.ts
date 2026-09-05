@@ -2518,12 +2518,15 @@ export function createMcpToolService(
             : context.signal?.aborted
               ? "cancelled"
               : "failure";
+          const taskCode = (typedTool === "create_task" || typedTool === "update_task")
+            && error instanceof McpToolRefusal && typeof error.details.code === "string"
+            && error.details.code.startsWith("TASK_") ? error.details.code : null;
           settled = failure(
             typedTool,
             requestId,
-            "tool_failed",
+            taskCode ?? "tool_failed",
             error instanceof Error ? error.message : String(error),
-            true,
+            taskCode === null,
             false,
             error instanceof McpToolRefusal ? error.details : undefined,
           );
@@ -2858,7 +2861,8 @@ export const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
     clientRequestId: clientRequestIdSchema,
     project: z.string().min(1),
     text: z.string().min(1),
-    placement: z.enum(["pinned", "unplaced"]).optional(),
+    placement: z.enum(["pinned", "unplaced"]).optional().describe("Omitted placement creates an unplaced task. Pinned requires pos; unplaced must omit pos."),
+    pos: z.object({ x: z.number().finite(), y: z.number().finite() }).optional(),
     dueAt: z.string().optional(),
     dueTz: z.string().optional(),
     attachments: z.array(z.unknown()).optional(),
@@ -2866,9 +2870,12 @@ export const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
   update_task: z.object({
     clientRequestId: clientRequestIdSchema,
     taskId: entityIdSchema,
+    expectedProject: z.string().min(1).optional().describe("Required for pos or placement updates: copy the current task project exactly."),
+    expectedRevision: z.string().min(1).optional().describe("Required for pos or placement updates: copy the opaque revision from get_task or list_tasks."),
     text: z.string().optional(),
     status: z.enum(["inbox", "assigned", "blocked", "done"]).optional(),
-    placement: z.enum(["pinned", "unplaced"]).optional(),
+    placement: z.enum(["pinned", "unplaced"]).optional().describe("Pinned retains existing pos when omitted; unplaced removes pos. Placement updates require expectedProject and expectedRevision."),
+    pos: z.object({ x: z.number().finite(), y: z.number().finite() }).optional(),
     dueAt: z.string().nullable().optional(),
     dueTz: z.string().nullable().optional(),
   }).passthrough(),
@@ -3174,10 +3181,29 @@ export function createViewerMcpServer(service: McpToolService): McpServer {
     instructions: "Use clientRequestId on every call. Reuse it only when replaying the same logical operation.",
   });
   for (const toolName of MCP_TOOL_NAMES) {
+    const taskMutation = toolName === "create_task" || toolName === "update_task";
+    const schema = TOOL_INPUT_SCHEMAS[toolName];
+    // The SDK's default validation error has no retryability or field envelope.
+    // Preserve the published input shape, but carry invalid optional task fields through
+    // to our strict validation below, before dispatch or receipt acquisition.
+    const inputSchema = taskMutation ? schema.extend(Object.fromEntries(
+      Object.entries(schema.shape).filter(([, fieldSchema]) => fieldSchema.isOptional())
+        .map(([field, fieldSchema]) => [field, fieldSchema.catch((context: { input: unknown } | undefined) => context?.input)]),
+    )) : schema;
     server.registerTool(toolName, {
       description: TOOL_DESCRIPTIONS[toolName],
-      inputSchema: TOOL_INPUT_SCHEMAS[toolName],
+      inputSchema,
     }, async (args, extra) => {
+      if (taskMutation) {
+        const parsed = schema.safeParse(args);
+        if (!parsed.success) {
+          const issues = parsed.error.issues.map(issue => ({ field: issue.path.join("."), message: issue.message }));
+          const result = failure(toolName, String((args as McpToolArgs).clientRequestId), "TASK_INVALID_FIELD",
+            issues.map(issue => `${issue.field}: ${issue.message}`).join("; "), false, false,
+            { field: issues[0]?.field, issues });
+          return { content: [{ type: "text" as const, text: JSON.stringify(result) }], structuredContent: result, isError: true };
+        }
+      }
       const timeoutMs = 30_000;
       const deadline = deadlineSignal(timeoutMs, {
         signal: extra.signal,
