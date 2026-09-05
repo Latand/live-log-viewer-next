@@ -4621,7 +4621,7 @@ export async function patchPipeline(
           continue;
         }
         const unresolved = unresolvedTerminationRefusal(candidate.attempt);
-        if (unresolved && result.outcome !== "unconfirmed") {
+        if (unresolved) {
           close.stillRunning.push({ ...target, error: unresolved });
           continue;
         }
@@ -4655,6 +4655,18 @@ export async function patchPipeline(
         } else {
           close.alreadyStopped.push(target);
           terminalizeAttemptForClose(candidate, "the stage host was already absent when the pipeline closed", ports);
+        }
+      }
+      /* Host deduplication and the teardown deadline can skip an attempt's
+         stop call. Its durable survivors still veto terminalization. */
+      for (const run of pipeline.runs) {
+        for (const pending of run.attempts) {
+          const unresolved = unresolvedTerminationRefusal(pending);
+          if (!unresolved || close.stillRunning.some((item) => item.stageId === run.stageId && item.attempt === pending.n)) continue;
+          close.stillRunning.push({
+            stageId: run.stageId, attempt: pending.n, conversationId: pending.conversationId,
+            agentPath: pending.agentPath, paneId: pending.paneId, error: unresolved,
+          });
         }
       }
       close.worktree = closeWorktreeReport(pipeline, ports);

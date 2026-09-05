@@ -1062,3 +1062,62 @@ test("terminal reap retains a partial tree for later ticks, HTTP close and start
   await survivor.end();
   expect((await closeOverHttp(pipeline.id)).status).toBe(200);
 });
+
+test("an unconfirmed later stop cannot acknowledge away a captured survivor (#1501)", async () => {
+  const current = await lane("tree");
+  const survivor = current.descendant!;
+  const pipeline = pipelineFor(current);
+  expect((await closeWithTermination(pipeline.id, {
+    signal: (pid, value) => {
+      if (pid === survivor.pid) throw Object.assign(new Error("refused"), { code: "EPERM" });
+      realKill.call(process, pid, value);
+    }, deadlineMs: 100, graceMs: 20,
+  })).status).toBe(409);
+  signals.length = 0;
+  for (const acknowledgeHosts of [false, true]) {
+    const result = await patchPipeline(pipeline.id, { action: "close", acknowledgeHosts }, {
+      ...defaultPipelinePorts(),
+      stopStageAgent: async () => ({ outcome: "unconfirmed", operationId: null, detail: "control receipt unavailable" }),
+    });
+    expect(result.status).toBe(409);
+    expect(pipelineRecord(pipeline.id).state).not.toBe("closed");
+    expect(pipelineRecord(pipeline.id).runs[0]!.attempts[0]!.unresolvedTermination?.survivors).toEqual([survivor.identity]);
+    expect(survivor.alive()).toBeTrue();
+    expect(signals).toEqual([]);
+  }
+  await survivor.end();
+  expect((await closeOverHttp(pipeline.id)).status).toBe(200);
+});
+
+test.each(["shared host", "expired budget"])("%s cannot skip an attempt's durable survivors (#1501)", async (mode) => {
+  const current = await lane("tree");
+  const survivor = current.descendant!;
+  const pipeline = pipelineFor(current);
+  expect((await closeWithTermination(pipeline.id, {
+    signal: (pid, value) => {
+      if (pid === survivor.pid) throw Object.assign(new Error("refused"), { code: "EPERM" });
+      realKill.call(process, pid, value);
+    }, deadlineMs: 100, graceMs: 20,
+  })).status).toBe(409);
+  const record = pipelineRecord(pipeline.id);
+  const first = record.runs[0]!.attempts[0]!;
+  const second = structuredClone(first);
+  second.n = 2;
+  if (mode === "expired budget") second.agentPath += ".next";
+  delete first.unresolvedTermination;
+  record.runs[0]!.attempts.push(second);
+  savePipelines(loadPipelines().map((item) => item.id === pipeline.id ? record : item));
+  let clock = 0;
+  signals.length = 0;
+  const result = await patchPipeline(pipeline.id, { action: "close", acknowledgeHosts: true }, {
+    ...defaultPipelinePorts(), monotonicNow: () => clock += 20_000,
+    stopStageAgent: async () => ({ outcome: "not-running" }),
+  });
+  expect(result.status).toBe(409);
+  expect(pipelineRecord(pipeline.id).state).not.toBe("closed");
+  expect(pipelineRecord(pipeline.id).runs[0]!.attempts[1]!.unresolvedTermination?.survivors).toEqual([survivor.identity]);
+  expect(survivor.alive()).toBeTrue();
+  expect(signals).toEqual([]);
+  await survivor.end();
+  expect((await closeOverHttp(pipeline.id)).status).toBe(200);
+});

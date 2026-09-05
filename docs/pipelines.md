@@ -113,6 +113,9 @@ generations; only a positive death observation removes an identity. A dead root
 or terminal transcript cannot settle a close while any recorded survivor remains
 alive or unverifiable. Retained identities provide evidence for refusing a close;
 they do not grant permission to signal a detached survivor.
+Every attempt's saved survivors are checked even when host deduplication or the
+teardown deadline skips its stop call. An unconfirmed receipt and host
+acknowledgement cannot clear that evidence.
 
 Startup defers pipeline conversations when their pipeline records cannot be read
 or an earlier termination has unresolved survivors. Pending work does not bypass
