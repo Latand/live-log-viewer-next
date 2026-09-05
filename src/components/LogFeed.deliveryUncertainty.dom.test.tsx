@@ -1301,69 +1301,136 @@ for (const initialState of ["in-flight", "failed"] as const) {
   }
 }
 
-for (const structuredHosts of [false, true]) {
-  for (const attachment of ["none", "image", "document"] as const) {
-    test(`producer ${structuredHosts ? "queued" : "pending"} admission retains ${attachment} through remount`, async () => {
-      const { RuntimeJournal } = await import("@/runtime-host/journal");
-      const { runtimeImageRefsForUploads } = await import("@/lib/runtime/runtimeImageStore");
-      const previousReader = globalThis.FileReader;
-      globalThis.FileReader = class extends ImmediateFileReader {
-        readAsDataURL(): void {
-          this.result = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aXioAAAAASUVORK5CYII=";
-          queueMicrotask(() => this.onload?.());
-        }
-      } as unknown as typeof FileReader;
-      const fs = await import("node:fs");
-      const os = await import("node:os");
-      const path = await import("node:path");
-      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pending-producer-"));
-      const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { structuredHosts });
-      journal.append({ kind: "session-status", scope: { type: "session", id: file.conversationId! }, payload: {
-        conversationId: file.conversationId!, sessionKey: { engine: "codex", sessionId: "session-pending" },
-        hostKind: "codex-app-server", host: "hosted", turn: "idle", provenance: "structured",
-        capabilities: { steer: true, structuredAttention: true, imageInput: { supported: true } },
-      } });
-      const sends: SendBody[] = [];
-      mockWire(sends, [body => {
-        const result = journal.executeOperation({ ...body, conversationId: (body as SendBody & { conversationId: string }).conversationId, images: runtimeImageRefsForUploads(body.images ?? []), kind: "send", operationId: "operation-pending" });
-        return { status: 202, json: { operationId: result.operationId, receipt: result.receipt } };
-      }]);
-      writeProfile(file, { effort: "high", fast: false });
-      let mounted = await renderInto(surface());
-      try {
-        await settle(() => composerControls(mounted.host).type("pending immutable request"));
-        if (attachment === "image") await pasteImage(mounted.host, "pending-image");
-        if (attachment === "document") {
-          const textarea = mounted.host.querySelector("textarea")!;
-          const propsKey = Object.keys(textarea).find(key => key.startsWith("__reactProps$"))!;
-          const props = (textarea as unknown as Record<string, { onDrop(event: unknown): void }>)[propsKey]!;
-          await settle(() => props.onDrop({ dataTransfer: { files: [new dom.File(["document"], "pending.pdf", { type: "application/pdf" })] }, preventDefault() {}, stopPropagation() {} }));
-        }
-        await settle(() => composerControls(mounted.host).submit());
-        expect(sends).toHaveLength(1);
-        expect(readOutbox(file.conversationId!)[0]?.operationId).toBe("operation-pending");
-        const original = structuredClone(sends[0]!);
-        expect(original.images?.length ?? 0).toBe(attachment === "image" ? 1 : 0);
-        expect((original as SendBody & { files?: unknown[] }).files?.length ?? 0).toBe(attachment === "document" ? 1 : 0);
-        expect(readOutbox(file.conversationId!)[0]?.deliveryReceipt?.status).toBe(structuredHosts ? "queued" : "pending");
-        if (!structuredHosts) expect(sessionStorage.getItem(`llvPendingSend:${file.conversationId}`)).toContain(original.idempotencyKey);
-        await act(async () => mounted.root.unmount());
-        resetOutboxForTests();
-        writeProfile(file, { effort: "low", fast: true });
-        mounted = await renderInto(surface());
-        await settle(() => {});
-        expect(sends).toEqual([original]);
-        expect(readOutbox(file.conversationId!)[0]?.state).toBe("delivering");
-        expect(readOutbox(file.conversationId!)[0]?.originalOperationOnly).toBe(true);
-        await settle(() => composerControls(mounted.host).type("later draft"));
-        await pasteImage(mounted.host, "later-image");
-        snapshotReceipts = [{ ...captured, operationId: "operation-pending", idempotencyKey: original.idempotencyKey, status: "delivered", resend: "not-needed", at: new Date().toISOString() }];
-        await settle(() => mounted.root.render(surface()));
-        expect(readOutbox(file.conversationId!)[0]?.state).toBe("delivered");
-        expect(sends).toEqual([original]);
-        expect(mounted.host.querySelector<HTMLTextAreaElement>("textarea")!.value).toBe("later draft");
-        expect(mounted.host.querySelectorAll("img")).toHaveLength(1);
-      } finally { await act(async () => mounted.root.unmount()); journal.close(); globalThis.FileReader = previousReader; }
-    });
+for (const laterDraft of ["pending immutable request", "pending immutable request with newer suffix"]) {
+  for (const structuredHosts of [false, true]) {
+    for (const attachment of ["none", "image", "document"] as const) {
+      test(`producer ${structuredHosts ? "queued" : "pending"} admission retains ${attachment} through remount with ${laterDraft}`, async () => {
+        const { RuntimeJournal } = await import("@/runtime-host/journal");
+        const { runtimeImageRefsForUploads } = await import("@/lib/runtime/runtimeImageStore");
+        const previousReader = globalThis.FileReader;
+        globalThis.FileReader = class extends ImmediateFileReader {
+          readAsDataURL(): void {
+            this.result = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aXioAAAAASUVORK5CYII=";
+            queueMicrotask(() => this.onload?.());
+          }
+        } as unknown as typeof FileReader;
+        const fs = await import("node:fs");
+        const os = await import("node:os");
+        const path = await import("node:path");
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pending-producer-"));
+        const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { structuredHosts });
+        journal.append({ kind: "session-status", scope: { type: "session", id: file.conversationId! }, payload: {
+          conversationId: file.conversationId!, sessionKey: { engine: "codex", sessionId: "session-pending" },
+          hostKind: "codex-app-server", host: "hosted", turn: "idle", provenance: "structured",
+          capabilities: { steer: true, structuredAttention: true, imageInput: { supported: true } },
+        } });
+        const sends: SendBody[] = [];
+        mockWire(sends, [body => {
+          const result = journal.executeOperation({ ...body, conversationId: (body as SendBody & { conversationId: string }).conversationId, images: runtimeImageRefsForUploads(body.images ?? []), kind: "send", operationId: "operation-pending" });
+          return { status: 202, json: { operationId: result.operationId, receipt: result.receipt } };
+        }]);
+        writeProfile(file, { effort: "high", fast: false });
+        let mounted = await renderInto(surface());
+        try {
+          await settle(() => composerControls(mounted.host).type("pending immutable request"));
+          if (attachment === "image") await pasteImage(mounted.host, "pending-image");
+          if (attachment === "document") {
+            const textarea = mounted.host.querySelector("textarea")!;
+            const propsKey = Object.keys(textarea).find(key => key.startsWith("__reactProps$"))!;
+            const props = (textarea as unknown as Record<string, { onDrop(event: unknown): void }>)[propsKey]!;
+            await settle(() => props.onDrop({ dataTransfer: { files: [new dom.File(["document"], "pending.pdf", { type: "application/pdf" })] }, preventDefault() {}, stopPropagation() {} }));
+          }
+          await settle(() => composerControls(mounted.host).submit());
+          expect(sends).toHaveLength(1);
+          expect(readOutbox(file.conversationId!)[0]?.operationId).toBe("operation-pending");
+          const original = structuredClone(sends[0]!);
+          expect(original.images?.length ?? 0).toBe(attachment === "image" ? 1 : 0);
+          expect((original as SendBody & { files?: unknown[] }).files?.length ?? 0).toBe(attachment === "document" ? 1 : 0);
+          expect(readOutbox(file.conversationId!)[0]?.deliveryReceipt?.status).toBe(structuredHosts ? "queued" : "pending");
+          if (!structuredHosts) expect(sessionStorage.getItem(`llvPendingSend:${file.conversationId}`)).toContain(original.idempotencyKey);
+          await act(async () => mounted.root.unmount());
+          resetOutboxForTests();
+          writeProfile(file, { effort: "low", fast: true });
+          mounted = await renderInto(surface());
+          await settle(() => {});
+          expect(sends).toEqual([original]);
+          expect(readOutbox(file.conversationId!)[0]?.state).toBe("delivering");
+          expect(readOutbox(file.conversationId!)[0]?.originalOperationOnly).toBe(true);
+          await settle(() => composerControls(mounted.host).type(laterDraft));
+          await pasteImage(mounted.host, "later-image");
+          journal.transitionOperation("operation-pending", "delivering");
+          snapshotReceipts = [journal.transitionOperation("operation-pending", "delivered").receipt];
+          await settle(() => mounted.root.render(surface()));
+          expect(readOutbox(file.conversationId!)[0]?.state).toBe("delivered");
+          expect(sends).toEqual([original]);
+          expect(mounted.host.querySelector<HTMLTextAreaElement>("textarea")!.value).toBe(laterDraft);
+          expect(mounted.host.querySelectorAll("img")).toHaveLength(1);
+        } finally { await act(async () => mounted.root.unmount()); journal.close(); globalThis.FileReader = previousReader; }
+      });
+    }
   }
+
+}
+
+for (const emptySelection of [false, true]) {
+  test.each([false, true])("receiptless safe retry preserves selected context empty=" + emptySelection + " remount=%s", async remount => {
+    const { viewBus } = await import("@/hooks/viewPresenceBus");
+    viewBus.reportIdentity({ viewSessionId: "review-view", deviceId: "review-device" });
+    viewBus.reportContext({ project: "viewer", board: { renderedRevision: null, durableRevision: null, sync: "unavailable" } });
+    viewBus.reportCards([{ path: "fixtures/a.jsonl", conversationId: "conversation_context_a", project: "viewer", label: "A" }, { path: "fixtures/b.jsonl", conversationId: "conversation_context_b", project: "viewer", label: "B" }]);
+    const select = (path: string) => viewBus.reportSlice({ mode: "list", focusedPath: path, selectedPaths: [path], visiblePaths: [], camera: null });
+    select(emptySelection ? "" : "fixtures/a.jsonl");
+    const sends: SendBody[] = [];
+    mockWire(sends, [() => ({ status: 503, json: {} }), body => ({ status: 200, json: { receipt: runtimeReceiptForSend({ operationId: "review-safe", conversationId: file.conversationId!, clientMessageId: body.idempotencyKey, kind: "send", state: "in-flight", reason: "accepted", acceptedAt: new Date().toISOString(), settledAt: null, duplicateRisk: false, resend: null, evidence: "delivery-record" }) } })]);
+    writeProfile(file, { effort: "high", fast: false });
+    let mounted = await renderInto(surface());
+    try {
+      await settle(() => composerControls(mounted.host).type("immutable request"));
+      await pasteImage(mounted.host, "immutable-image");
+      await settle(() => composerControls(mounted.host).submit());
+      expect(sends).toHaveLength(1);
+      expect((sends[0] as SendBody & { selectedContext: { conversationId?: string } }).selectedContext.conversationId).toBe(emptySelection ? undefined : "conversation_context_a");
+      if (remount) {
+        await act(async () => mounted.root.unmount()); resetOutboxForTests();
+        mounted = await renderInto(surface());
+      }
+      writeProfile(file, { effort: "low", fast: true });
+      await settle(() => select("fixtures/b.jsonl"));
+      snapshotReceipts = [runtimeReceiptForSend({ operationId: "review-safe", conversationId: file.conversationId!, clientMessageId: sends[0]!.idempotencyKey, kind: "send", state: "failed", reason: "pre-dispatch rejection", acceptedAt: new Date().toISOString(), settledAt: new Date().toISOString(), duplicateRisk: false, resend: "safe", evidence: "delivery-record" })];
+      await settle(() => mounted.root.render(surface()));
+      expect(readOutbox(file.conversationId!)[0]?.state).toBe("failed");
+      await settle(() => retryOutbox(file.conversationId!, sends[0]!.idempotencyKey));
+      expect(sends).toHaveLength(2);
+      expect(sends[1]).toEqual(sends[0]);
+    } finally { await act(async () => mounted.root.unmount()); viewBus.reportIdentity(null); viewBus.reportCards([]); }
+  });
+
+}
+
+for (const storedContext of [undefined, { version: 1, state: "selected", conversationId: "invalid" }]) {
+  test(`restored incomplete context fences safe local retry: ${JSON.stringify(storedContext)}`, async () => {
+    const sends: SendBody[] = [];
+    mockWire(sends, [() => ({ status: 503, json: {} })]);
+    let mounted = await renderInto(surface());
+    try {
+      await settle(() => composerControls(mounted.host).type("preserved original"));
+      await settle(() => composerControls(mounted.host).submit());
+      expect(sends).toHaveLength(1);
+      await act(async () => mounted.root.unmount());
+      const storageKey = `llvPendingSend:${file.conversationId}`;
+      const pending = JSON.parse(sessionStorage.getItem(storageKey)!);
+      pending[0].selectedContext = storedContext;
+      sessionStorage.setItem(storageKey, JSON.stringify(pending));
+      resetOutboxForTests();
+      mounted = await renderInto(surface());
+      await settle(() => composerControls(mounted.host).type("newer draft"));
+      snapshotReceipts = [runtimeReceiptForSend({ operationId: "safe-incomplete", conversationId: file.conversationId!, clientMessageId: sends[0]!.idempotencyKey, kind: "send", state: "failed", reason: "pre-dispatch rejection", acceptedAt: new Date().toISOString(), settledAt: new Date().toISOString(), duplicateRisk: false, resend: "safe", evidence: "delivery-record" })];
+      await settle(() => mounted.root.render(surface()));
+      expect(readOutbox(file.conversationId!)[0]).toMatchObject({ state: "failed", originalOperationOnly: true });
+      expect(mounted.host.querySelectorAll("[data-outbox-retry]")).toHaveLength(0);
+      await settle(() => retryOutbox(file.conversationId!, sends[0]!.idempotencyKey));
+      expect(sends).toHaveLength(1);
+      expect(mounted.host.querySelector<HTMLTextAreaElement>("textarea")!.value).toBe("newer draft");
+    } finally { await act(async () => mounted.root.unmount()); }
+  });
 }

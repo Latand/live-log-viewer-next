@@ -13,7 +13,7 @@ import { useComposer } from "@/hooks/useComposer";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useCodexRealtime } from "@/hooks/useCodexRealtime";
 import { interruptRuntime, useRuntimeBusState, type RuntimeSessionView } from "@/hooks/useRuntime";
-import type { SelectedContextRef } from "@/lib/selection/selectedContext";
+import { parseSelectedContextRef, type SelectedContextRef } from "@/lib/selection/selectedContext";
 import { useViewerSelectedContext, viewerSelectedContext } from "@/lib/selection/viewerSelectedContext";
 import { useHostTarget } from "@/hooks/useHostTarget";
 import { accountIdFromPath } from "@/lib/accounts/badge";
@@ -905,6 +905,7 @@ interface PersistedPendingDelivery {
   images?: unknown;
   runtime?: unknown;
   runtimeCaptured?: unknown;
+  selectedContext?: unknown;
   reconciling?: unknown;
   payloadComplete?: unknown;
   operationId?: unknown;
@@ -1008,12 +1009,14 @@ export function readPendingDeliveries(id: string): PendingDelivery[] {
       .slice(0, PENDING_DELIVERY_LIMIT)
       .map((entry) => {
         const images = persistedImages(entry.images);
-        const payloadComplete = images !== null && entry.payloadComplete !== false;
+        const selectedContext = parseSelectedContextRef(entry.selectedContext);
+        const payloadComplete = images !== null && selectedContext !== null && entry.payloadComplete !== false;
         const runtime = persistedRuntime(entry.runtime);
         return {
           key: entry.key,
           text: entry.text,
           images: images ?? [],
+          ...(selectedContext ? { selectedContext } : {}),
           ...(runtime ? { runtime } : {}),
           ...(entry.runtimeCaptured === true ? { runtimeCaptured: true as const } : {}),
           ...(payloadComplete ? {} : { payloadComplete: false as const }),
@@ -1029,7 +1032,7 @@ export function readPendingDeliveries(id: string): PendingDelivery[] {
 export function writePendingDeliveries(id: string, pending: readonly PendingDelivery[]): void {
   try {
     if (pending.length) {
-      sessionStorage.setItem(pendingSendKey(id), JSON.stringify(pending.map(({ key, text, images, files, runtime, runtimeCaptured, reconciling, payloadComplete, operationId }) => ({
+      sessionStorage.setItem(pendingSendKey(id), JSON.stringify(pending.map(({ key, text, images, files, runtime, runtimeCaptured, selectedContext, reconciling, payloadComplete, operationId }) => ({
         key,
         text,
         images: images.map(({ id: imageId, base64, mime }) => ({
@@ -1039,6 +1042,7 @@ export function writePendingDeliveries(id: string, pending: readonly PendingDeli
         })),
         ...(runtime ? { runtime } : {}),
         ...(runtimeCaptured ? { runtimeCaptured: true } : {}),
+        ...(selectedContext ? { selectedContext } : {}),
         ...(reconciling ? { reconciling: true } : {}),
         /* A generation whose files live only in memory is observable for late
            settlement but never lends its key to a replay (#1224). */
@@ -1820,6 +1824,12 @@ export function TmuxComposerCore({
     receiptReconciliations.current.clear();
     const restoredPending = readPendingDeliveries(cardId);
     pendingDeliveries.current = restoredPending;
+    /* These generations already left the draft when enqueued. Restore their
+       ownership before late receipts can settle text typed after remount. */
+    outboxKeys.current = new Set(readOutbox(cardId).map((entry) => entry.id));
+    for (const entry of restoredPending) {
+      if (entry.payloadComplete === false) updateOutbox(cardId, entry.key, { originalOperationOnly: true });
+    }
     setReplayGenerationAvailable(restoredPending.some((entry) => entry.payloadComplete !== false));
     runtimeSendSnapshots.current = new Map();
     /* Replay ownership survives independently from the editable draft: an
@@ -2227,7 +2237,7 @@ export function TmuxComposerCore({
        now, so the operator moving the board a moment later cannot rewrite the
        admitted turn. A replay reuses the generation's original reference for
        the same reason it replays the original bytes. */
-    const selectedContext = replayGeneration?.selectedContext ?? viewerSelectedContext();
+    const selectedContext = replayGeneration ? replayGeneration.selectedContext : viewerSelectedContext();
     /* #691 §4, the no-call path: a turn is opening, so whatever the manager
        reported while nothing was live rides in with it. Never on a replay — a
        retained generation replays its original bytes under its original key, and

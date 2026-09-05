@@ -344,6 +344,7 @@ test("a refresh resumes a timed-out generation without another send", async () =
     }
     expect(sentKeys).toHaveLength(1);
     expect(sessionStorage.getItem(`llvPendingSend:${conversationId}`)).toContain('"reconciling":true');
+    expect(textarea.value).toBe("");
 
     flushSync(() => root.unmount());
     let releaseRefresh: (() => void) | null = null;
@@ -372,15 +373,16 @@ test("a refresh resumes a timed-out generation without another send", async () =
     expect(sentKeys).toHaveLength(1);
 
     textarea = host.querySelector("textarea") as HTMLTextAreaElement;
+    expect(textarea.value).toBe("");
     const propsKey = Object.keys(textarea).find((key) => key.startsWith("__reactProps$"))!;
     const textareaProps = (textarea as unknown as Record<string, { onChange(event: unknown): void }>)[propsKey]!;
     flushSync(() => textareaProps.onChange({ target: { value: `${prompt}\nafter refresh typing` } }));
     flushSync(() => releaseRefresh!());
-    for (let attempt = 0; attempt < 50 && textarea.value !== "after refresh typing"; attempt += 1) {
+    for (let attempt = 0; attempt < 50 && textarea.value !== `${prompt}\nafter refresh typing`; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 2));
     }
 
-    expect(textarea.value).toBe("after refresh typing");
+    expect(textarea.value).toBe(`${prompt}\nafter refresh typing`);
     expect(sessionStorage.getItem(`llvPendingSend:${conversationId}`)).toBeNull();
     expect(host.querySelectorAll('[data-receipt-uncertain-retry]')).toHaveLength(1);
     expect(outboxOf(conversationId).find(entry => entry.id === sentKeys[0])?.deliveryUncertain).toBe(true);
