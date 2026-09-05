@@ -71,9 +71,11 @@ import { readOutbox, resetOutboxForTests, retryOutbox } from "./conversation/out
 const realFetch = globalThis.fetch;
 
 beforeEach(() => {
+  structuredView.receipts = [];
   installTmuxComposerRuntimeForTests({
     useRuntimeView: (candidate) => candidate.conversationId === "conv-stale-key" ? structuredView : null,
     refreshRuntime: async () => true,
+    useRuntimeReceipts: () => structuredView.receipts,
   });
 });
 
@@ -175,9 +177,9 @@ test("a remount cannot stamp a stale unresolved generation's key onto the operat
   await settle(() => composerControls(host).submit());
   expect(sends).toHaveLength(1);
   expect(sends[0]!.text).toBe("the message the dead host never received");
-  /* The unresolved generation is durable; the bubble is failed and retryable. */
+  /* The unresolved generation is durable and cannot be locally retried. */
   expect(sessionStorage.getItem("llvPendingSend:conv-stale-key")).toContain(sends[0]!.idempotencyKey);
-  expect(readOutbox("conv-stale-key").find((entry) => entry.state === "failed")?.id).toBe(sends[0]!.idempotencyKey);
+  expect(readOutbox("conv-stale-key").find((entry) => entry.deliveryUncertain)?.id).toBe(sends[0]!.idempotencyKey);
 
   /* The tab reloads: the composer rebuilds its outbox state from the durable
      records while the stale generation is still unresolved. */
@@ -192,6 +194,12 @@ test("a remount cannot stamp a stale unresolved generation's key onto the operat
      key carrying ITS OWN text — never the stale generation's key or bytes. */
   await settle(() => composerControls(host).type("a brand new message"));
   await settle(() => composerControls(host).submit());
+  expect(sends).toHaveLength(1);
+  const queued = readOutbox("conv-stale-key").find(entry => entry.text === "a brand new message")!;
+  expect(queued.id).not.toBe(sends[0]!.idempotencyKey);
+  expect(queued.state).toBe("queued");
+  structuredView.receipts = [delivered(sends[0]!).json.receipt as RuntimeSessionView["receipts"][number]];
+  await settle(() => root.render(<TmuxComposer file={file} />));
   expect(sends).toHaveLength(2);
   expect(sends[1]!.text).toBe("a brand new message");
   expect(sends[1]!.idempotencyKey).not.toBe(sends[0]!.idempotencyKey);
@@ -202,7 +210,11 @@ test("a remount cannot stamp a stale unresolved generation's key onto the operat
 test("a retry replays the failed generation exactly while an edited resend is a new message", async () => {
   const sends: SendBody[] = [];
   mockWire(sends, [
-    () => ({ status: 503, json: { ok: false, error: "structured host ownership is unavailable; retry after runtime synchronization" } }),
+    body => ({ status: 503, json: { ok: false, receipt: {
+      operationId: "safe-original", conversationId: "conv-stale-key", idempotencyKey: body.idempotencyKey,
+      kind: "send", status: "failed", resend: "safe", reason: "pre-dispatch rejection",
+      at: new Date().toISOString(), revision: 1,
+    } } }),
     delivered,
   ]);
 

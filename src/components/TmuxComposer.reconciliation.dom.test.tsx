@@ -166,7 +166,7 @@ test("a mid-flight queued admission settles the generation and the stale timeout
   const admission = (status: RuntimeReceipt["status"], revision: number): RuntimeReceipt => ({
     operationId: "op-remount-admitted",
     idempotencyKey: sentKeys[0]!,
-    conversationId: "conversation_bus-session",
+    conversationId,
     kind: "send",
     status,
     text: prompt,
@@ -268,7 +268,7 @@ test("a queued admission after remount still clears the persisted generation exa
     /* Queue-first: the composer cleared at submit; the message is the durable
        outbox bubble (failed after the 503), and its generation is persisted. */
     expect(textarea.value).toBe("");
-    expect(outboxOf(conversationId).find((e) => e.text === prompt)?.state).toBe("failed");
+    expect(outboxOf(conversationId).find((e) => e.text === prompt)?.state).toBe("delivering");
     expect(sessionStorage.getItem(`llvPendingSend:${conversationId}`)).toContain(sentKeys[0]!);
 
     /* The tab refreshes: the composer unmounts and a fresh one mounts, with more
@@ -279,7 +279,7 @@ test("a queued admission after remount still clears the persisted generation exa
     publishReceipts([{
       operationId: "op-remount-admitted",
       idempotencyKey: sentKeys[0]!,
-      conversationId: "conversation_bus-session",
+      conversationId,
       kind: "send",
       status: "queued",
       text: prompt,
@@ -297,12 +297,9 @@ test("a queued admission after remount still clears the persisted generation exa
     expect(sessionStorage.getItem(`llvDraft:${conversationId}`)).toBe("after refresh typing");
     expect(sessionStorage.getItem(`llvPendingSend:${conversationId}`)).toBe(null);
     expect(outboxOf(conversationId).find((e) => e.text === prompt)?.state).toBe("delivering");
-    /* The receipt stack keeps the truthful queued record with the payload. */
-    const queued = host.querySelector('[data-receipt-status="queued"]');
-    expect(queued?.getAttribute("data-receipt-wait")).toBe("awaiting-handover");
-    expect(queued?.textContent).toContain(translate("en", "runtime.receipt.awaitingHandoverFor", {
-      waited: translate("en", "runtime.receipt.waitedSec", { n: 1 }),
-    }));
+    /* Admission after a lost response retains unknown arrival and original recovery. */
+    expect(outboxOf(conversationId).find(entry => entry.id === sentKeys[0])?.deliveryUncertain).toBe(true);
+    expect(host.querySelectorAll('[data-receipt-uncertain-retry]')).toHaveLength(1);
     expect(host.querySelector("[data-receipt-preview]")?.textContent).toBe(prompt);
   } finally {
     flushSync(() => root.unmount());
@@ -385,7 +382,8 @@ test("a refresh resumes a timed-out generation without another send", async () =
 
     expect(textarea.value).toBe("after refresh typing");
     expect(sessionStorage.getItem(`llvPendingSend:${conversationId}`)).toBeNull();
-    expect(host.querySelectorAll('[data-receipt-status="queued"]')).toHaveLength(1);
+    expect(host.querySelectorAll('[data-receipt-uncertain-retry]')).toHaveLength(1);
+    expect(outboxOf(conversationId).find(entry => entry.id === sentKeys[0])?.deliveryUncertain).toBe(true);
   } finally {
     flushSync(() => root.unmount());
     publishReceipts([]);
@@ -491,7 +489,8 @@ test("a delayed receipt reconciles one text-plus-images generation on desktop an
       expect(previews()).toEqual([nextPreview]);
       expect(new Set(sentKeys)).toEqual(new Set([sentKeys[0]!]));
       expect(outboxOf(conversationId).find((e) => e.text === prompt)?.state).toBe("delivering");
-      expect(host.querySelectorAll('[data-receipt-status="queued"]')).toHaveLength(1);
+      expect(host.querySelectorAll('[data-receipt-uncertain-retry]')).toHaveLength(1);
+    expect(outboxOf(conversationId).find(entry => entry.id === sentKeys[0])?.deliveryUncertain).toBe(true);
       expect(host.querySelector(`[aria-label="${translate("en", "runtime.receipt.retry")}"]`)).toBeNull();
       if (mobile) {
         expect(form.getAttribute("data-testid")).toBe("bounded-mobile-composer");
@@ -578,7 +577,8 @@ test("only a confirmed retryable failure exposes Retry after a timeout", async (
     flushSync(() => publishReceipts([terminalReceipt("uncertain", 1)]));
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect((host.querySelector('button[type="submit"]') as HTMLButtonElement).disabled).toBe(true);
-    expect(retries()).toHaveLength(0);
+    expect(host.querySelectorAll("[data-receipt-uncertain-retry]")).toHaveLength(1);
+    expect(retries().filter(button => !button.hasAttribute("data-receipt-uncertain-retry"))).toHaveLength(0);
     expect(outboxOf(conversationId).find((e) => e.text === prompt)?.state).toBe("delivering");
 
     /* Only a CONFIRMED retryable failure exposes Retry: the bubble settles to
@@ -588,7 +588,7 @@ test("only a confirmed retryable failure exposes Retry after a timeout", async (
     expect((host.querySelector('button[type="submit"]') as HTMLButtonElement).disabled).toBe(false);
     expect(retries()).toHaveLength(1);
     expect(host.querySelectorAll("[data-receipt-message]")).toHaveLength(1);
-    expect(outboxOf(conversationId).find((e) => e.text === prompt)?.state).toBe("failed");
+    expect(outboxOf(conversationId).find((e) => e.text === prompt)?.state).toBe("delivering");
   } finally {
     flushSync(() => root.unmount());
     publishReceipts([]);

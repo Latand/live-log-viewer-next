@@ -123,3 +123,18 @@ test.each([202, 503])("held admission preserves identity and HTTP semantics at %
     expect(result.receipt).toBeUndefined();
   } finally { globalThis.fetch = original; }
 });
+
+
+test.each([200, 503].flatMap(status => ["conversation", "key", "envelope"].map(mismatch => ({ status, mismatch }))))("send evidence rejects contradictory identity (%j)", async ({ status, mismatch }) => {
+  const original = globalThis.fetch;
+  globalThis.fetch = (async () => Response.json({ operationId: "original-operation", receipt: {
+    operationId: mismatch === "envelope" ? "foreign-operation" : "original-operation",
+    conversationId: mismatch === "conversation" ? "foreign-conversation" : "original-conversation",
+    idempotencyKey: mismatch === "key" ? "foreign-key" : "original-key",
+    kind: "send", status: "delivered", revision: 1, at: new Date().toISOString(),
+  } }, { status })) as unknown as typeof fetch;
+  try {
+    expect(await sendRuntimeMessage({ conversationId: "original-conversation", idempotencyKey: "original-key", text: "original text" }))
+      .toEqual({ ok: false, status, error: "receipt-identity-mismatch" });
+  } finally { globalThis.fetch = original; }
+});

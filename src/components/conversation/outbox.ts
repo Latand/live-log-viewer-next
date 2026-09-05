@@ -198,6 +198,12 @@ export function receiptHasUnknownFate(receipt: Pick<RuntimeReceipt, "status" | "
     && (receipt.status === "uncertain" || receipt.resend === "verify-first");
 }
 
+/** Arrival and explicit discard permanently settle an immutable operation.
+ * Settlement fallback receipts and journal receipts have independent revisions. */
+export function receiptHasAbsorbingOutcome(receipt: Pick<RuntimeReceipt, "status" | "reason">): boolean {
+  return outboxStateForReceiptStatus(receipt.status) === "delivered" || receipt.reason === "delivery-discarded";
+}
+
 /** Project receipt evidence without turning an unknown outcome into a replayable failure. */
 export function outboxReceiptPatch(
   entry: Pick<OutboxEntry, "state" | "awaitingTurn"> & Partial<OutboxEntry>,
@@ -205,11 +211,20 @@ export function outboxReceiptPatch(
   receipt?: { at: string; admittedAt?: string } & Partial<RuntimeReceipt>,
   nowMs?: number,
 ): Partial<OutboxEntry> | null {
+  const previous = entry.deliveryReceipt;
+  const retryParent = (receipt as (Partial<RuntimeReceipt> & { retryOfOperationId?: string }) | undefined)?.retryOfOperationId;
+  const linkedRetry = previous && !entry.deliveryUncertain && !receiptHasUnknownFate(previous)
+    && retryParent === previous.operationId;
+  const currentOperation = previous && receipt?.operationId === previous.operationId
+    && receipt.idempotencyKey === previous.idempotencyKey;
+  if (receipt?.idempotencyKey && entry.id && receipt.idempotencyKey !== entry.id && !linkedRetry && !currentOperation) return null;
   const unknown = receiptHasUnknownFate({ ...receipt, status });
   if (!unknown && !receiptIsAdmitted(status) && !receiptIsTerminal(status)) return null;
   if (entry.state === "delivered" && (outboxStateForReceiptStatus(status) !== "delivered" || !receipt)) return null;
-  const previous = entry.deliveryReceipt;
   if (previous && receipt?.operationId === previous.operationId
+    && receiptHasAbsorbingOutcome(previous) && !receiptHasAbsorbingOutcome({ ...receipt, status })) return null;
+  if (previous && receipt?.operationId === previous.operationId
+    && !receiptHasAbsorbingOutcome({ ...receipt, status })
     && typeof receipt.revision === "number" && receipt.revision < previous.revision) return null;
   if (previous && receipt?.operationId === previous.operationId && receipt.revision === previous.revision
     && (previous.status === "failed" || previous.status === "rejected") && previous.resend === "safe"

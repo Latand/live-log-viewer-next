@@ -56,6 +56,24 @@ function publishReceipts(next: RuntimeReceipt[]): void {
 import { TmuxComposer } from "./TmuxComposer";
 import { readOutbox, retryOutbox } from "./conversation/outbox";
 
+/** A timeout is never replay authority. Prove no local effect, then deliver an
+ * affirmative pre-dispatch rejection before exercising immutable retry bytes. */
+async function confirmSafeRetry(conversationId: string, key: string): Promise<void> {
+  const before = readOutbox(conversationId).find(entry => entry.id === key)!;
+  expect(before.deliveryUncertain).toBe(true);
+  flushSync(() => retryOutbox(conversationId, key));
+  await sleep(0);
+  expect(readOutbox(conversationId).find(entry => entry.id === key)).toEqual(before);
+  flushSync(() => publishReceipts([{
+    operationId: `safe-${key}`, idempotencyKey: key, conversationId,
+    kind: "send", status: "failed", resend: "safe", reason: "pre-dispatch rejection",
+    text: before.text, at: new Date().toISOString(), revision: 1,
+  }]));
+  await sleep(0);
+  expect(readOutbox(conversationId).find(entry => entry.id === key)?.deliveryUncertain).toBeUndefined();
+}
+
+
 beforeEach(() => {
   setRuntimeUiEnabledForTests(false);
   setComposerAdmissionTimingForTests({
@@ -175,18 +193,18 @@ test("late receipt-free legacy success settles live-pane and resume generations 
       await sleep(10);
       flushSync(() => textareaProps.onChange({ target: { value: later } }));
       await sleep(50);
-      expect(host.querySelectorAll('[data-receipt-status="uncertain"]')).toHaveLength(1);
+      expect(host.querySelectorAll('[data-operation^="composer-unconfirmed:"] > [role="status"]')).toHaveLength(1);
       for (let attempt = 0; attempt < 50 && sessionStorage.getItem(`llvPendingSend:${conversationId}`); attempt += 1) {
         await sleep(3);
       }
-      for (let attempt = 0; attempt < 50 && host.querySelectorAll('[data-receipt-status="uncertain"]').length; attempt += 1) {
+      for (let attempt = 0; attempt < 50 && host.querySelectorAll('[data-operation^="composer-unconfirmed:"] > [role="status"]').length; attempt += 1) {
         await sleep(3);
       }
 
       expect(attempts).toEqual([{ key: attempts[0]!.key, text: original }]);
       expect(textarea.value).toBe(later);
       expect(sessionStorage.getItem(`llvPendingSend:${conversationId}`)).toBeNull();
-      expect(host.querySelectorAll('[data-receipt-status="uncertain"]')).toHaveLength(0);
+      expect(host.querySelectorAll('[data-operation^="composer-unconfirmed:"] > [role="status"]')).toHaveLength(0);
       expect(submitButton(host).disabled).toBe(false);
     } finally {
       flushSync(() => root.unmount());
@@ -225,7 +243,7 @@ test("identity commit invalidates a delayed legacy success before passive cleanu
     await sleep(5);
     const form = (host.querySelector("textarea") as HTMLTextAreaElement).closest("form")!;
     flushSync(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
-    for (let attempt = 0; attempt < 50 && !host.querySelector('[data-receipt-status="uncertain"]'); attempt += 1) {
+    for (let attempt = 0; attempt < 50 && !host.querySelector('[data-operation^="composer-unconfirmed:"] > [role="status"]'); attempt += 1) {
       await sleep(3);
     }
     const pendingBefore = sessionStorage.getItem(`llvPendingSend:${originalId}`);
@@ -282,7 +300,7 @@ test("unmount commit invalidates a delayed legacy success before passive cleanup
     await sleep(5);
     const form = (host.querySelector("textarea") as HTMLTextAreaElement).closest("form")!;
     flushSync(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
-    for (let attempt = 0; attempt < 50 && !host.querySelector('[data-receipt-status="uncertain"]'); attempt += 1) {
+    for (let attempt = 0; attempt < 50 && !host.querySelector('[data-operation^="composer-unconfirmed:"] > [role="status"]'); attempt += 1) {
       await sleep(3);
     }
     const pendingBefore = sessionStorage.getItem(`llvPendingSend:${conversationId}`);
@@ -314,7 +332,7 @@ test("unmount commit invalidates a delayed legacy success before passive cleanup
   }
 });
 
-test("no receipt within the local window recovers the composer for an exactly-once same-key retry", async () => {
+test("expiry preserves the generation until affirmative rejection permits same-key retry", async () => {
   setLocale("en");
   mobileViewport = false;
   const conversationId = "conv-expiry-recover";
@@ -338,14 +356,14 @@ test("no receipt within the local window recovers the composer for an exactly-on
         ok: true,
         structured: true,
         receipt: {
-          operationId: "op-expiry-retry",
+          operationId: `safe-${body.clientMessageId}`,
           idempotencyKey: body.clientMessageId,
           conversationId,
           kind: "send",
           status: "queued",
           text: prompt,
           at: "2026-07-20T09:00:00.000Z",
-          revision: 1,
+          revision: 2,
         },
       }),
     } as Response;
@@ -373,7 +391,7 @@ test("no receipt within the local window recovers the composer for an exactly-on
     /* Accurate, recoverable wording for the expired-window state. */
     expect(host.textContent).toContain(translate("en", "composer.deliveryUnconfirmed"));
     /* One durable, honest receipt row for the preserved generation. */
-    expect(host.querySelectorAll('[data-receipt-status="uncertain"]')).toHaveLength(1);
+    expect(host.querySelectorAll('[data-operation^="composer-unconfirmed:"] > [role="status"]')).toHaveLength(1);
     expect(host.querySelector("[data-receipt-preview]")?.textContent).toBe(prompt);
     /* The reconciliation loop never actuates a second send on its own. */
     await sleep(60);
@@ -388,6 +406,7 @@ test("no receipt within the local window recovers the composer for an exactly-on
       effort: "low",
       fast: true,
     }));
+    await confirmSafeRetry(conversationId, expired.id);
     flushSync(() => retryOutbox(conversationId, expired.id));
     await sleep(0);
     expect(sentKeys).toHaveLength(2);
@@ -427,14 +446,14 @@ test("editing after expiry retries the immutable generation and preserves the la
         ok: true,
         structured: true,
         receipt: {
-          operationId: "op-expiry-edited-draft",
+          operationId: `safe-${body.clientMessageId}`,
           idempotencyKey: body.clientMessageId,
           conversationId,
           kind: "send",
           status: "queued",
           text: original,
           at: new Date().toISOString(),
-          revision: 1,
+          revision: 2,
         },
       }),
     } as Response;
@@ -457,6 +476,7 @@ test("editing after expiry retries the immutable generation and preserves the la
     flushSync(() => textareaProps.onChange({ target: { value: laterDraft } }));
 
     const expired = readOutbox(conversationId).find((entry) => entry.text === original)!;
+    await confirmSafeRetry(conversationId, expired.id);
     flushSync(() => retryOutbox(conversationId, expired.id));
     await sleep(0);
 
@@ -500,7 +520,7 @@ test("a late receipt after the window still settles the preserved generation wit
   try {
     flushSync(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
     await untilSendEnabled(host);
-    expect(host.querySelectorAll('[data-receipt-status="uncertain"]')).toHaveLength(1);
+    expect(host.querySelectorAll('[data-operation^="composer-unconfirmed:"] > [role="status"]')).toHaveLength(1);
 
     /* The durable admission finally lands, well after the local window closed. */
     flushSync(() => publishReceipts([{
@@ -517,9 +537,10 @@ test("a late receipt after the window still settles the preserved generation wit
 
     expect(textarea.value).toBe("");
     expect(sentKeys).toHaveLength(1);
-    /* The uncertain row is superseded — exactly one durable receipt remains. */
-    expect(host.querySelectorAll('[data-receipt-status="uncertain"]')).toHaveLength(0);
-    expect(host.querySelectorAll('[data-receipt-status="queued"]')).toHaveLength(1);
+    /* The original receipt replaces the local placeholder but arrival remains unknown. */
+    expect(host.querySelectorAll('[data-operation^="composer-unconfirmed:"] > [role="status"]')).toHaveLength(0);
+    expect(host.querySelectorAll('[data-receipt-uncertain-retry]')).toHaveLength(1);
+    expect(readOutbox(conversationId)[0]?.deliveryUncertain).toBe(true);
     expect(sessionStorage.getItem(`llvPendingSend:${conversationId}`)).toBe(null);
   } finally {
     flushSync(() => root.unmount());
@@ -574,6 +595,7 @@ test("the recovered generation survives a remount and keeps its original key", a
 
     /* The explicit retry replays the ORIGINAL key across the remount. */
     const expired = readOutbox(conversationId).find((entry) => entry.text === prompt)!;
+    await confirmSafeRetry(conversationId, expired.id);
     flushSync(() => retryOutbox(conversationId, expired.id));
     await sleep(0);
     expect(sentKeys).toHaveLength(2);
@@ -674,7 +696,8 @@ test("an image-bearing generation restores exact bytes across a remount on deskt
 
       textarea = host.querySelector("textarea") as HTMLTextAreaElement;
       const expired = readOutbox(conversationId).find((entry) => entry.text === prompt)!;
-      flushSync(() => retryOutbox(conversationId, expired.id));
+      await confirmSafeRetry(conversationId, expired.id);
+    flushSync(() => retryOutbox(conversationId, expired.id));
       await sleep(0);
 
       expect(attempts).toHaveLength(2);
@@ -802,7 +825,7 @@ test("a terminal failure after the window exposes Retry and re-enables the compo
   try {
     flushSync(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
     await untilSendEnabled(host);
-    expect(host.querySelectorAll('[data-receipt-status="uncertain"]')).toHaveLength(1);
+    expect(host.querySelectorAll('[data-operation^="composer-unconfirmed:"] > [role="status"]')).toHaveLength(1);
     expect(retries()).toHaveLength(0);
 
     flushSync(() => publishReceipts([{
@@ -812,6 +835,7 @@ test("a terminal failure after the window exposes Retry and re-enables the compo
       kind: "send",
       status: "failed",
       reason: "dead-host",
+      resend: "safe",
       text: prompt,
       at: "2026-07-20T09:03:00.000Z",
       revision: 1,
@@ -821,7 +845,7 @@ test("a terminal failure after the window exposes Retry and re-enables the compo
     /* The failure supersedes the uncertain row and offers Retry; the composer
        stays usable while the receipt retains the exact payload. */
     expect(submitButton(host).disabled).toBe(false);
-    expect(host.querySelectorAll('[data-receipt-status="uncertain"]')).toHaveLength(0);
+    expect(host.querySelectorAll('[data-operation^="composer-unconfirmed:"] > [role="status"]')).toHaveLength(0);
     expect(retries()).toHaveLength(1);
     expect(textarea.value).toBe("");
     expect(sentKeys).toHaveLength(1);
@@ -940,14 +964,14 @@ test("an edited image tray retries the immutable images and preserves later atta
           ok: true,
           structured: true,
           receipt: {
-            operationId: `op-expiry-images-${width}`,
+            operationId: `safe-${body.clientMessageId}`,
             idempotencyKey: body.clientMessageId,
             conversationId,
             kind: "send",
             status: "queued",
             text: prompt,
             at: new Date().toISOString(),
-            revision: 1,
+            revision: 2,
           },
         }),
       } as Response;
@@ -987,7 +1011,7 @@ test("an edited image tray retries the immutable images and preserves later atta
       /* Queue-first owns the submitted images; the editable tray clears for
          the next generation even while admission remains unconfirmed. */
       expect(previews()).toEqual([]);
-      expect(host.querySelectorAll('[data-receipt-status="uncertain"]')).toHaveLength(1);
+      expect(host.querySelectorAll('[data-operation^="composer-unconfirmed:"] > [role="status"]')).toHaveLength(1);
 
       /* An image added after expiry belongs exclusively to the next draft. */
       pasteImage(`later-${width}`);
@@ -997,7 +1021,8 @@ test("an edited image tray retries the immutable images and preserves later atta
 
       /* The retry replays the same key with the original image bytes. */
       const expired = readOutbox(conversationId).find((entry) => entry.text === prompt)!;
-      flushSync(() => retryOutbox(conversationId, expired.id));
+      await confirmSafeRetry(conversationId, expired.id);
+    flushSync(() => retryOutbox(conversationId, expired.id));
       await sleep(0);
       expect(sentKeys).toHaveLength(2);
       expect(sentKeys[1]).toBe(sentKeys[0]);

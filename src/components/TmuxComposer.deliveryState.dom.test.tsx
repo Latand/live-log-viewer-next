@@ -250,7 +250,7 @@ test("a failure renders once with retry, edit, and dismiss, and dismissal report
   flushSync(() => root.unmount());
 });
 
-test("retry appears once only after an authoritative retryable terminal failure", async () => {
+test("uncertainty uses original-operation recovery and terminal failure uses ordinary retry", async () => {
   setLocale("en");
   const retryLabel = translate("en", "runtime.receipt.retry");
   const view = (status: RuntimeReceipt["status"]) => (
@@ -265,7 +265,8 @@ test("retry appears once only after an authoritative retryable terminal failure"
   const retries = () => [...host.querySelectorAll("button")]
     .filter((button) => button.textContent === retryLabel);
 
-  expect(retries()).toHaveLength(0);
+  expect(host.querySelectorAll("[data-receipt-uncertain-retry]")).toHaveLength(1);
+  expect(retries().filter(button => !button.hasAttribute("data-receipt-uncertain-retry"))).toHaveLength(0);
   await settle(() => root.render(view("rejected")));
   expect(retries()).toHaveLength(0);
   await settle(() => root.render(view("failed")));

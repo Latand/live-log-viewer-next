@@ -66,7 +66,7 @@ afterEach(() => {
   setRuntimeUiEnabledForTests(null);
 });
 
-test("queue-first: a lost image send keeps its own immutable snapshot through a retry until the late delivery settles it", async () => {
+test("queue-first: a lost image send keeps its own immutable snapshot while retry is blocked until the late delivery settles it", async () => {
   const sentKeys: string[] = [];
   const sentImageCounts: number[] = [];
   globalThis.fetch = (async (input, init) => {
@@ -80,19 +80,6 @@ test("queue-first: a lost image send keeps its own immutable snapshot through a 
     if (sentKeys.length === 1) {
       /* The server accepted and delivers, yet the response is lost. */
       return { ok: false, status: 503, json: async () => ({ ok: false, error: "runtime host request timed out" }) } as Response;
-    }
-    if (sentKeys.length === 2) {
-      /* The retry replays the key with a CHANGED image set: a reservation
-         conflict, typed 409, and — crucially — no delivered receipt. */
-      return {
-        ok: false,
-        status: 409,
-        json: async () => ({
-          ok: false,
-          structured: true,
-          error: "client message id is already reserved for another request",
-        }),
-      } as Response;
     }
     return { ok: true, status: 200, json: async () => ({ ok: true, outcome: "delivered-to-live" }) } as Response;
   }) as typeof fetch;
@@ -147,7 +134,7 @@ test("queue-first: a lost image send keeps its own immutable snapshot through a 
   const lateReceipt = (revision: number): RuntimeReceipt => ({
     operationId: "op-late-delivery",
     idempotencyKey: sentKeys[0]!,
-    conversationId: "conversation_bus-session",
+    conversationId: "conv-pending-images",
     kind: "send",
     status: "delivered",
     text: "annotate the screenshot",
@@ -161,7 +148,7 @@ test("queue-first: a lost image send keeps its own immutable snapshot through a 
     const sentPreview = previews()[0];
     /* Queue-first (round-1 P1#1/#4): submitting snapshots this generation's one
        image into the durable outbox entry and clears the composer + tray
-       immediately. The lost first attempt (503) marks the bubble failed while
+       immediately. The lost first attempt (503) marks arrival unknown while
        preserving its immutable image snapshot. */
     flushSync(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -169,7 +156,8 @@ test("queue-first: a lost image send keeps its own immutable snapshot through a 
     expect(textarea.value).toBe("");
     await untilPreviews(0);
     const failed = readOutbox("conv-pending-images").find((entry) => entry.text === "annotate the screenshot")!;
-    expect(failed.state).toBe("failed");
+    expect(failed.state).toBe("delivering");
+    expect(failed.deliveryUncertain).toBe(true);
     expect(failed.images).toBe(1);
 
     /* An image attached AFTER the submit belongs to the NEXT message — it never
@@ -179,13 +167,12 @@ test("queue-first: a lost image send keeps its own immutable snapshot through a 
     const laterPreview = previews()[0];
     expect(laterPreview).not.toBe(sentPreview);
 
-    /* Retrying the failed bubble replays the SAME key with the SAME one-image
-       snapshot — never the two images now on screen. */
+    /* Unknown arrival forbids ordinary replay, preserving the original snapshot. */
     flushSync(() => retryOutbox("conv-pending-images", failed.id));
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(sentKeys).toHaveLength(2);
-    expect(sentKeys[1]).toBe(sentKeys[0]);
-    expect(sentImageCounts[1]).toBe(1);
+    expect(sentKeys).toHaveLength(1);
+    expect(sentImageCounts).toEqual([1]);
+    expect(readOutbox("conv-pending-images").find(entry => entry.id === failed.id)).toEqual(failed);
     /* The later image B still sits in the tray for the next message. */
     expect(previews()).toEqual([laterPreview]);
 
@@ -202,9 +189,9 @@ test("queue-first: a lost image send keeps its own immutable snapshot through a 
     flushSync(() => appendComposerDraft("conv-pending-images", "next ask"));
     flushSync(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(sentKeys).toHaveLength(3);
-    expect(sentKeys[2]).not.toBe(sentKeys[0]);
-    expect(sentImageCounts[2]).toBe(1);
+    expect(sentKeys).toHaveLength(2);
+    expect(sentKeys[1]).not.toBe(sentKeys[0]);
+    expect(sentImageCounts[1]).toBe(1);
   } finally {
     flushSync(() => root.unmount());
     publishReceipts([]);

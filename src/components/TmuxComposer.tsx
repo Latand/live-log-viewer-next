@@ -36,6 +36,7 @@ import {
   outboxHistory,
   outboxReceiptPatch,
   receiptHasUnknownFate,
+  receiptHasAbsorbingOutcome,
   readOutbox,
   rebindOutboxEchoText,
   releaseHeldOutbox,
@@ -186,13 +187,13 @@ export function mergeRuntimeReceipts(
     operationsByIdempotencyKey.set(receipt.idempotencyKey, operations);
   }
   const revisionOrder = (left: RuntimeReceipt, right: RuntimeReceipt) =>
-    right.revision - left.revision
+    Number(receiptHasAbsorbingOutcome(right)) - Number(receiptHasAbsorbingOutcome(left))
+      || right.revision - left.revision
       || Date.parse(right.at) - Date.parse(left.at)
       || left.operationId.localeCompare(right.operationId)
       || left.idempotencyKey.localeCompare(right.idempotencyKey);
-  /* Tier one: within one operationId the journal's revision counter is the
-     single ordering authority, whichever plane (durable bus or immediate
-     response) carried the receipt. */
+  /* Terminal arrival/discard survives independent settlement/journal revision
+     counters. Moving observations still use journal revision ordering. */
   const sourced = [
     ...runtimeReceipts.map((receipt) => ({ receipt, durable: true })),
     ...immediateReceipts.map((receipt) => ({ receipt, durable: false })),
@@ -1603,9 +1604,10 @@ export function TmuxComposerCore({
   /* Durable receipts for this session from the runtime bus (empty while the bus
      is disabled or the session is legacy/unhosted). */
   const runtimeReceipts = runtimeDependencies.useRuntimeReceiptsForArtifact(file.path, cardId);
-  const displayedRuntimeReceipts = mergeRuntimeReceipts(runtimeReceipts, mergeRuntimeReceipts(
+  const displayedRuntimeReceipts = mergeRuntimeReceipts(runtimeReceipts.filter((receipt) => receipt.conversationId === cardId), mergeRuntimeReceipts(
     immediateRuntimeReceipts.filter((receipt) => receipt.conversationId === cardId),
-    outbox.flatMap((entry) => entry.deliveryReceipt ? [entry.deliveryReceipt] : []),
+    outbox.flatMap((entry) => entry.deliveryReceipt?.conversationId === cardId
+      && (entry.deliveryReceipt.idempotencyKey === entry.id || retryParentOperationId(entry.deliveryReceipt)) ? [entry.deliveryReceipt] : []),
   )).map((receipt) => {
     const entry = outbox.find((entry) => entry.deliveryUncertain
       && (entry.id === receipt.idempotencyKey || entry.deliveryReceipt?.operationId === receipt.operationId));
@@ -1712,17 +1714,14 @@ export function TmuxComposerCore({
     setReconcilingSend(receiptReconciliations.current.size > 0);
   };
 
-  /* The local reconciliation window closed without a durable admission or
-     terminal receipt. Release the composer for an explicit same-key retry.
-     Preserve the generation, its idempotency key, and its attachments. The
-     durable receipt stream continues observing: a late admission clears the
-     draft through settlePendingDeliveries, and a terminal failure surfaces
-     Retry. This path performs no automatic actuation. */
+  /* The reconciliation window closed without authoritative evidence. Release
+     the composer while preserving the generation, key and attachments. Local
+     replay stays blocked until affirmative rejection; a real original receipt
+     supplies recovery controls. Late admission still settles the draft. */
   const releaseReconciliationToRetry = (clientMessageId: string) => {
     receiptReconciliations.current.delete(clientMessageId);
-    /* Drop the reconciling marker so a remount exposes a recoverable retry.
-       Keep the generation so a late receipt can settle it and the key remains
-       replayable. */
+    /* Drop the polling marker while retaining the unresolved generation for
+       late receipt reconciliation across remount. */
     persistPendingDeliveries(pendingDeliveries.current.map((entry) =>
       entry.key === clientMessageId
         ? releasePendingReconciliation(entry)
@@ -1770,6 +1769,7 @@ export function TmuxComposerCore({
         releaseReconciliationToRetry(clientMessageId);
         return;
       }
+      if (receipt.conversationId !== cardId || receipt.idempotencyKey !== clientMessageId) return;
       setImmediateRuntimeReceipts((current) => [
         receipt,
         ...current.filter((candidate) => candidate.operationId !== receipt.operationId),
@@ -1933,7 +1933,9 @@ export function TmuxComposerCore({
     for (const entry of outbox) {
       if (entry.launchOwned) continue;
       const receipt = displayedRuntimeReceipts.find((candidate) =>
-        (candidate.idempotencyKey === entry.id || candidate.operationId === (entry.deliveryReceipt?.operationId ?? entry.operationId)));
+        (candidate.idempotencyKey === entry.id || candidate.operationId === (entry.deliveryReceipt?.operationId ?? entry.operationId)
+          || (entry.deliveryReceipt && !entry.deliveryUncertain && !receiptHasUnknownFate(entry.deliveryReceipt)
+            && retryParentOperationId(candidate) === entry.deliveryReceipt.operationId)));
       if (!receipt) continue;
       const patch = outboxReceiptPatch(entry, receipt.status, receipt, nowMs());
       if (!patch) continue;
@@ -2132,7 +2134,7 @@ export function TmuxComposerCore({
          like an in-flight delivery otherwise. */
       updateOutbox(cardId, outboxId, {
         state,
-        ...(state === "delivered" ? { deliveryUncertain: undefined } : {}),
+        ...(state === "delivered" ? { deliveryUncertain: undefined, deliveryReceipt: undefined } : {}),
         settledAt: nowMs(),
         awaitingTurn,
         ...(error ? { error } : {}),
@@ -2445,7 +2447,13 @@ export function TmuxComposerCore({
             const body = await response.json() as ComposerSendResult;
             return { ...body, status: response.status, ok: response.ok && body.ok === true };
           }));
-      const json = await withComposerAdmissionDeadline(admissionRequest, admissionTiming.admissionDeadlineMs);
+      let json = await withComposerAdmissionDeadline(admissionRequest, admissionTiming.admissionDeadlineMs);
+      if (json.receipt && (json.receipt.conversationId !== cardId
+        || json.receipt.idempotencyKey !== clientMessageId
+        || (json.operationId && json.receipt.operationId !== json.operationId))) {
+        json = { ...json, ok: false, receipt: undefined, operationId: undefined, held: undefined,
+          error: "receipt-identity-mismatch" };
+      }
       if (json.operationId) {
         if (outboxId) updateOutbox(cardId, outboxId, { operationId: json.operationId });
         persistPendingDeliveries(pendingDeliveries.current.map((entry) =>
@@ -2512,7 +2520,7 @@ export function TmuxComposerCore({
            server may have accepted: a retry never overwrites it, and a
            outbox retains this snapshot for any permitted same-key retry.
            Direct submissions can release a proven pre-dispatch rejection. */
-        const possiblyAccepted = Boolean(json.receipt && receiptHasUnknownFate(json.receipt)) || !receiptIsTerminal(json.receipt?.status ?? "pending")
+        const possiblyAccepted = json.error === "receipt-identity-mismatch" || Boolean(json.receipt && receiptHasUnknownFate(json.receipt)) || !receiptIsTerminal(json.receipt?.status ?? "pending")
           && (json.status === undefined || json.status >= 500 || json.status === 409);
         if (!possiblyAccepted && recordedThisAttempt && !outboxId) {
           persistPendingDeliveries(pendingDeliveries.current.filter((entry) => entry.key !== clientMessageId));
@@ -2571,6 +2579,8 @@ export function TmuxComposerCore({
             entry.key === clientMessageId ? { ...entry, reconciling: true } : entry));
           const lateReceipt = admissionRequest?.then((result) => {
             const receipt = result.receipt;
+            if (receipt && (receipt.conversationId !== cardId || receipt.idempotencyKey !== clientMessageId
+              || (result.operationId && result.operationId !== receipt.operationId))) return null;
             if (receipt && (receiptIsAdmitted(receipt.status) || receiptIsTerminal(receipt.status))) {
               return (receipt.kind === "send" || receipt.kind === "steer")
                 && !receipt.text && payloadText.trim()
@@ -2603,11 +2613,18 @@ export function TmuxComposerCore({
     void send(claimed.text, { clientMessageId: claimed.id }, claimed.id);
   };
 
-  const rememberRuntimeReceipt = (receipt: RuntimeReceipt) => {
+  const rememberRuntimeReceipt = (receipt: RuntimeReceipt, original: RuntimeReceipt, allowRetryLeaf = false, responseOperationId?: string) => {
+    const sameOperation = receipt.idempotencyKey === original.idempotencyKey && receipt.operationId === original.operationId;
+    const retryLeaf = allowRetryLeaf && !receiptHasUnknownFate(original)
+      && retryParentOperationId(receipt) === original.operationId;
+    if (receipt.conversationId !== original.conversationId || receipt.conversationId !== cardId
+      || (!sameOperation && !retryLeaf)
+      || (responseOperationId && responseOperationId !== receipt.operationId && !retryLeaf)) return false;
     setImmediateRuntimeReceipts((current) => [
       receipt,
       ...current.filter((candidate) => candidate.operationId !== receipt.operationId),
     ].slice(0, 8));
+    return true;
   };
 
   const retryRuntimeReceipt = async (receipt: RuntimeReceipt, mode?: "uncertain") => {
@@ -2622,9 +2639,9 @@ export function TmuxComposerCore({
             body: JSON.stringify({ action: "retry-uncertain" }),
           }
         : { method: "POST" });
-      const body = (await response.json().catch(() => ({}))) as { receipt?: RuntimeReceipt; error?: string };
-      if (body.receipt) rememberRuntimeReceipt(body.receipt);
-      if (!response.ok || !body.receipt) {
+      const body = (await response.json().catch(() => ({}))) as { operationId?: string; receipt?: RuntimeReceipt; error?: string };
+      const accepted = body.receipt && rememberRuntimeReceipt(body.receipt, receipt, mode !== "uncertain", body.operationId);
+      if (!response.ok || !accepted) {
         setStatus({ kind: "err", text: body.error ?? t("common.failedSend") });
         return;
       }
@@ -2641,9 +2658,9 @@ export function TmuxComposerCore({
     setStatus(null);
     try {
       const response = await fetch(`/api/runtime/operations/${encodeURIComponent(receipt.operationId)}`, { method: "DELETE" });
-      const body = (await response.json().catch(() => ({}))) as { receipt?: RuntimeReceipt; error?: string };
-      if (body.receipt) rememberRuntimeReceipt(body.receipt);
-      if (!response.ok || !body.receipt) {
+      const body = (await response.json().catch(() => ({}))) as { operationId?: string; receipt?: RuntimeReceipt; error?: string };
+      const accepted = body.receipt && rememberRuntimeReceipt(body.receipt, receipt, false, body.operationId);
+      if (!response.ok || !accepted) {
         setStatus({ kind: "err", text: body.error ?? t("common.failedSend") });
         return;
       }

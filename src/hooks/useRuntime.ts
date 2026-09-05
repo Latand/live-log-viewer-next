@@ -278,12 +278,19 @@ async function postCommand(url: string, body: unknown): Promise<CommandResult> {
       && "conversationId" in candidate && typeof candidate.conversationId === "string"
       && "status" in candidate && typeof candidate.status === "string"
       ? candidate as RuntimeReceipt : undefined;
+    const request = body as { conversationId?: string; idempotencyKey?: string; operationId?: string };
+    const operationId = typeof json.operationId === "string" ? json.operationId : receipt?.operationId;
+    const contradictory = receipt && (receipt.conversationId !== request.conversationId
+      || (request.idempotencyKey !== undefined && receipt.idempotencyKey !== request.idempotencyKey)
+      || (request.operationId !== undefined && receipt.operationId !== request.operationId)
+      || (operationId !== undefined && receipt.operationId !== operationId));
+    if (contradictory) return { ok: false, status: res.status, error: "receipt-identity-mismatch" };
     // HTTP failure can follow dispatch. Keep the complete receipt so callers
     // can reconcile its original operation without treating the request as OK.
     return {
       ok: res.ok,
       status: res.status,
-      operationId: typeof json.operationId === "string" ? json.operationId : receipt?.operationId,
+      operationId,
       receipt,
       ...(res.ok && json.held === true ? { held: true as const } : {}),
       ...(!res.ok ? { error: typeof json.error === "string" ? json.error : undefined } : {}),
