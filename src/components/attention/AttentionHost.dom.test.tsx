@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, expect, spyOn, test } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -89,6 +89,8 @@ beforeEach(() => {
 afterEach(async () => {
   for (const root of roots) flushSync(() => root.unmount());
   roots = [];
+  arrivalClockCleanup?.();
+  arrivalClockCleanup = undefined;
   await settle();
   if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
   else process.env.LLV_STATE_DIR = previousStateDir;
@@ -948,4 +950,199 @@ test("a directed request whose target is gone records no focus entry", async () 
 
   expect(record().state).toBe("expired");
   expect(recorded).toEqual([]);
+});
+
+
+/* Only the arrival timeout is controlled; polling, transport, React and the
+   navigation boundary continue to run normally against the real store. */
+let arrivalClockCleanup: (() => void) | undefined;
+function arrivalClock() {
+  let clock = Date.now();
+  const originalTimeout = globalThis.setTimeout;
+  const originalClear = globalThis.clearTimeout;
+  const callbacks: Array<{ deadline: number; callback: () => void; cancelled: boolean; fired: boolean }> = [];
+  const dateSpy = spyOn(Date, "now").mockImplementation(() => clock);
+  const timerSpy = spyOn(globalThis, "setTimeout").mockImplementation(((callback: () => void, delay?: number, ...args: unknown[]) => {
+    if (delay !== 8_000) return originalTimeout(callback, delay, ...args);
+    const entry = { deadline: clock + delay, callback, cancelled: false, fired: false };
+    callbacks.push(entry);
+    return entry;
+  }) as typeof setTimeout);
+  const clearSpy = spyOn(globalThis, "clearTimeout").mockImplementation(((timer: unknown) => {
+    const entry = callbacks.find((entry) => entry === timer);
+    if (entry) entry.cancelled = true;
+    else originalClear(timer as ReturnType<typeof setTimeout>);
+  }) as typeof clearTimeout);
+  arrivalClockCleanup = () => { timerSpy.mockRestore(); clearSpy.mockRestore(); dateSpy.mockRestore(); };
+  return {
+    callbacks,
+    async advance(ms: number) {
+      clock += ms;
+      for (const entry of callbacks) {
+        if (!entry.cancelled && !entry.fired && entry.deadline <= clock) {
+          entry.fired = true;
+          entry.callback();
+        }
+      }
+      await settle();
+    },
+  };
+}
+const strip = () => one("[data-testid='attention-arrival']");
+
+for (const directed of [false, true]) {
+  test(`${directed ? "directed" : "auto-follow"} arrival explains only the confirmed landing for eight seconds; polls preserve its deadline`, async () => {
+    const clock = arrivalClock();
+    if (directed) raiseDirected(); else raise();
+    const { bus } = board({ [ANCHOR]: LIVE_RECT });
+    unreachable = new Set(["arrive"]);
+    mount(bus);
+    expect(strip()).toBeNull();
+    await settle();
+    expect(strip()).toBeNull();
+    expect(clock.callbacks).toHaveLength(0);
+    unreachable.clear();
+    await poll();
+    expect(record().state).toBe("following");
+    expect(strip()?.textContent).toBe("Orchestrator moved you here: The reviewer finished with request-changes.");
+    expect(strip()?.querySelector("button")).toBeNull();
+    const deadline = clock.callbacks[0].deadline;
+    await clock.advance(4_000);
+    for (let i = 0; i < 3; i += 1) await poll();
+    expect(clock.callbacks).toHaveLength(1);
+    expect(clock.callbacks[0].deadline).toBe(deadline);
+    await clock.advance(3_999);
+    expect(strip()).not.toBeNull();
+    await clock.advance(1);
+    expect(strip()).toBeNull();
+    expect(one("[data-testid='attention-return']")).not.toBeNull();
+    await poll();
+    expect(strip()).toBeNull();
+    expect(clock.callbacks).toHaveLength(1);
+  });
+}
+
+test("an empty reason follows with Back and no announcement", async () => {
+  const request = raiseDirected();
+  const file = readAttentionFile();
+  file.requests.find((entry) => entry.id === request.id)!.reason = "   ";
+  // A legacy empty reason is read through the same on-disk store as every poll.
+  fs.writeFileSync(path.join(sandbox, "attention.json"), JSON.stringify(file));
+  const { bus } = board({ [ANCHOR]: LIVE_RECT });
+  mount(bus);
+  await settle();
+  expect(record().state).toBe("following");
+  expect(strip()).toBeNull();
+  expect(one("[data-testid='attention-return']")).not.toBeNull();
+});
+
+test("a new arrival gets eight full seconds and an old timeout cannot hide it", async () => {
+  const clock = arrivalClock();
+  raiseDirected();
+  const { bus } = board({ [ANCHOR]: LIVE_RECT });
+  mount(bus);
+  await settle();
+  const old = clock.callbacks[0];
+  await clock.advance(5_000);
+  flushSync(() => click(one("[data-testid='attention-return']")!));
+  expect(strip() === null).toBe(true);
+  await settle();
+  raiseSecond();
+  await poll();
+  expect(strip()?.textContent).toContain("The reviewer answered again.");
+  expect(clock.callbacks).toHaveLength(2);
+  old.callback();
+  await settle();
+  expect(strip()).not.toBeNull();
+  await clock.advance(7_999);
+  expect(strip()).not.toBeNull();
+  await clock.advance(1);
+  expect(strip()).toBeNull();
+  expect(one("[data-testid='attention-return']")).not.toBeNull();
+});
+
+test("mobile switch removes a cached arrival and returning to desktop never replays it", async () => {
+  const clock = arrivalClock();
+  raiseDirected();
+  const { bus } = board({ [ANCHOR]: LIVE_RECT });
+  const root = mount(bus);
+  await settle();
+  expect(strip()).not.toBeNull();
+  flushSync(() => root.render(<AttentionHost mobile bus={bus} deviceId={DEVICE} />));
+  expect(strip()).toBeNull();
+  expect(one("[data-testid='attention-return']")).toBeNull();
+  await settle();
+  expect(clock.callbacks[0].cancelled).toBe(true);
+  flushSync(() => root.render(<AttentionHost mobile={false} bus={bus} deviceId={DEVICE} fetchFn={transport()} />));
+  await settle();
+  expect(strip()).toBeNull();
+});
+
+test("unmount cancels the arrival timer and a following replay stays silent", async () => {
+  const clock = arrivalClock();
+  raiseDirected();
+  const { bus } = board({ [ANCHOR]: LIVE_RECT });
+  const root = mount(bus);
+  await settle();
+  expect(strip()).not.toBeNull();
+  flushSync(() => root.unmount());
+  roots = roots.filter((held) => held !== root);
+  expect(clock.callbacks[0].cancelled).toBe(true);
+  clock.callbacks[0].callback();
+  mount(bus);
+  await settle();
+  expect(strip()).toBeNull();
+  expect(one("[data-testid='attention-return']")).not.toBeNull();
+  expect(clock.callbacks).toHaveLength(1);
+});
+
+test("lost navigation and a wrong executing tab never announce arrival", async () => {
+  const clock = arrivalClock();
+  raiseDirectedAtSession("tab-active");
+  const other = board({ [ANCHOR]: LIVE_RECT });
+  mount(other.bus, { viewSessionId: "tab-idle" });
+  await settle();
+  expect(strip()).toBeNull();
+  const missing = board({});
+  mount(missing.bus, { viewSessionId: "tab-active", observe: () => ({ camera: null, focusedPath: null }) });
+  await settle();
+  expect(strip()).toBeNull();
+  expect(clock.callbacks).toHaveLength(0);
+});
+
+test("arrival text is escaped and a closed following record clears it", async () => {
+  arrivalClock();
+  const reason = '<img src=x onerror="alert(1)"> & reviewer ready';
+  raiseAttentionRequest({
+    origin: "root-agent", target: { kind: "conversation", path: ANCHOR },
+    frameAtCreation: { project: "demo", rect: RAISED_RECT, boardRevision: 4 },
+    intent: "show", reason, directedAt: DEVICE,
+  }, { now, id: "attention_1" });
+  const { bus } = board({ [ANCHOR]: LIVE_RECT });
+  mount(bus);
+  await settle();
+  expect(strip()?.textContent).toBe(`Orchestrator moved you here: ${reason}`);
+  expect(strip()?.querySelector("img")).toBeNull();
+  expect(answerAttentionRequest("attention_1", { kind: "return", deviceId: DEVICE, via: "manual-move" }, { now }).ok).toBe(true);
+  await poll();
+  expect(strip() === null).toBe(true);
+  expect(one("[data-testid='attention-return']") === null).toBe(true);
+});
+
+test("a desktop landing awaiting confirmation cannot announce after a mobile round trip", async () => {
+  const clock = arrivalClock();
+  raiseDirected();
+  unreachable = new Set(["arrive"]);
+  const { bus } = board({ [ANCHOR]: LIVE_RECT });
+  const root = mount(bus);
+  await settle();
+  expect(record().state).toBe("accepted");
+  flushSync(() => root.render(<AttentionHost mobile bus={bus} deviceId={DEVICE} />));
+  await settle();
+  unreachable.clear();
+  flushSync(() => root.render(<AttentionHost mobile={false} bus={bus} deviceId={DEVICE} fetchFn={transport()} />));
+  await settle();
+  expect(record().state).toBe("following");
+  expect(strip() === null).toBe(true);
+  expect(clock.callbacks).toHaveLength(0);
 });

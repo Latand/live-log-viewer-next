@@ -2358,6 +2358,7 @@ export const en = {
   /* The persistent root-conversation overlay (#691) and the focus handoff it
      surfaces (#688). */
 
+  "attention.arrival": "Orchestrator moved you here: {reason}",
   "attention.return": "Back to where you were",
   "attention.returnLine": "Go back to where you were",
 
