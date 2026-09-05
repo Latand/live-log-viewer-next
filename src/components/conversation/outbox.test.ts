@@ -2039,3 +2039,15 @@ describe("issue 1538: bounded compaction preserves unresolved operations", () =>
     expect(compactOutboxQueue(entries).evicted.map((entry) => entry.id)).toEqual(["delivered-0", "delivered-1", "delivered-2", "delivered-3", "delivered-4"]);
   });
 });
+
+test("explicit original-operation fence survives hydration and blocks dispatch without receipt metadata", () => {
+  const card = "pending-fence";
+  sessionStorage.setItem(`llvOutbox:${card}`, JSON.stringify([
+    { id: "pending-key", text: "pending request", images: 0, at: Date.now(), state: "delivering", originalOperationOnly: true },
+  ]));
+  expect(readOutbox(card)[0]?.state).toBe("delivering");
+  updateOutbox(card, "pending-key", { state: "queued" });
+  expect(nextDispatch(readOutbox(card))).toBeNull();
+  expect(claimOutboxDispatch(card, "pending-key")).toBeNull();
+  expect(readOutbox(card)[0]?.state).toBe("queued");
+});

@@ -235,7 +235,7 @@ export function outboxReceiptPatch(
     && receipt.idempotencyKey === previous.idempotencyKey;
   if (receipt?.idempotencyKey && entry.id && receipt.idempotencyKey !== entry.id && !linkedRetry && !currentOperation) return null;
   const unknown = receiptHasUnknownFate({ ...receipt, status });
-  if (!unknown && !receiptIsAdmitted(status) && !receiptIsTerminal(status)) return null;
+  if (!unknown && !(status === "pending" && receipt?.operationId) && !receiptIsAdmitted(status) && !receiptIsTerminal(status)) return null;
   if (entry.state === "delivered" && (outboxStateForReceiptStatus(status) !== "delivered" || !receipt)) return null;
   if (previous && receipt?.operationId === previous.operationId
     && receiptHasAbsorbingOutcome(previous) && !receiptHasAbsorbingOutcome({ ...receipt, status })) return null;
@@ -439,7 +439,7 @@ function persistedQueue(cardId: string): readonly OutboxEntry[] {
       if (entry.launchOwned) return counted;
       /* Receipt metadata cannot reconstruct the original runtime/context or
          attachment bytes. Recovery remains on the server-owned operation. */
-      if (entry.deliveryReceipt || entry.acceptedHeld) return { ...counted, originalOperationOnly: true };
+      if (entry.originalOperationOnly || entry.deliveryReceipt || entry.acceptedHeld) return { ...counted, originalOperationOnly: true };
       if (entry.deliveryUncertain) return counted;
       const unsettled = entry.state === "delivering" || entry.state === "queued";
       /* A `delivering` entry recorded before a refresh has no owner in this
@@ -1569,7 +1569,7 @@ export function outboxHistory(queue: readonly OutboxEntry[]): string[] {
     composer, so it neither dispatches nor blocks the drain (round-1 P1#2/#4). */
 export function nextDispatch(queue: readonly OutboxEntry[]): OutboxEntry | null {
   if (queue.some((entry) => entry.state === "delivering" && !entry.launchOwned)) return null;
-  return queue.find((entry) => entry.state === "queued") ?? null;
+  return queue.find((entry) => entry.state === "queued" && !entry.originalOperationOnly) ?? null;
 }
 
 /** Atomically claim one queued entry before any asynchronous wire work starts. */
@@ -1577,7 +1577,7 @@ export function claimOutboxDispatch(cardId: string, id: string): OutboxEntry | n
   const queue = readOutbox(cardId);
   if (queue.some((entry) => entry.state === "delivering" && !entry.launchOwned)) return null;
   const entry = queue.find((candidate) => candidate.id === id);
-  if (!entry || entry.state !== "queued") return null;
+  if (!entry || entry.state !== "queued" || entry.originalOperationOnly) return null;
   const claimed: OutboxEntry = { ...entry, state: "delivering" };
   write(cardId, queue.map((candidate) => candidate.id === id ? claimed : candidate));
   return claimed;
