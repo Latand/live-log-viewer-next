@@ -2571,6 +2571,8 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       codexCompacted = { src: curSrc };
       return addCompact(ts);
     }
+    // Retain the diagnostic payload when shown; count hidden usage as service bookkeeping.
+    if (obj.type === "token_usage_record" && !showSvc) return addSvc(textPart(obj.type));
     if (obj.type === "turn_context" || obj.type === "world_state" || obj.type === "inter_agent_communication_metadata") {
       return addSvc(textPart(obj.type));
     }
