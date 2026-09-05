@@ -269,13 +269,13 @@ test("uncertainty survives reload, conversation switches, and late errors; actio
   } finally { await act(async () => mounted.root.unmount()); }
 });
 
-test.each(["network", "503"])("%s after possible dispatch stays visible without dispatch on remount", async mode => {
+test.each(["network", "503", "malformed", "null"])("%s after possible dispatch stays visible without dispatch on remount", async mode => {
   const sends: SendBody[] = [];
   globalThis.fetch = (async (input, init) => {
     if (String(input) === "/api/runtime/send") {
       sends.push(JSON.parse(init?.body as string));
       if (mode === "network") throw new Error("lost response");
-      return new Response("{}", { status: 503 });
+      return new Response(mode === "malformed" ? "invalid-json" : mode === "null" ? "null" : "{}", { status: 503 });
     }
     return new Response("{}", { status: 404 });
   }) as typeof fetch;
@@ -431,7 +431,7 @@ test.skipIf(!process.env.LLV_UNCERTAINTY_BROWSER)("390/430 mounted uncertainty h
 test("non-2xx original receipt retains identity and verify-first evidence through the send normalizer", async () => {
   const sends: SendBody[] = [];
   mockWire(sends, [(body) => ({ status: 503, json: { receipt: { ...captured, idempotencyKey: body.idempotencyKey }, operationId: captured.operationId, error: "recipient evidence unavailable" } })]);
-  const mounted = await renderInto(surface());
+  let mounted = await renderInto(surface());
   try {
     await settle(() => composerControls(mounted.host).type(captured.text!));
     await settle(() => composerControls(mounted.host).submit());
@@ -439,5 +439,62 @@ test("non-2xx original receipt retains identity and verify-first evidence throug
     expect(readOutbox(file.conversationId!)[0]?.deliveryReceipt?.operationId).toBe(captured.operationId);
     expect(readOutbox(file.conversationId!)[0]?.deliveryReceipt?.resend).toBe("verify-first");
     expect(mounted.host.querySelector("[data-outbox-entry]")?.textContent).toContain("outcome is unknown");
+    expect(readOutbox(file.conversationId!)[0]?.deliveryReceipt?.reason).toBe(captured.reason);
+    await act(async () => mounted.root.unmount());
+    resetOutboxForTests();
+    mounted = await renderInto(surface());
+    expect(readOutbox(file.conversationId!)[0]?.deliveryReceipt?.operationId).toBe(captured.operationId);
+    await settle(() => {
+      retryOutbox(file.conversationId!, sends[0]!.idempotencyKey);
+      cancelOutbox(file.conversationId!, sends[0]!.idempotencyKey);
+    });
+    expect(sends).toHaveLength(1);
+    expect(mounted.host.querySelector("[data-outbox-retry], [data-outbox-cancel]")).toBeNull();
+  } finally { await act(async () => mounted.root.unmount()); }
+});
+
+test.each(["queued", "failed", "network"])("late %s send callback cannot reverse authoritative success", async outcome => {
+  const sends: SendBody[] = [];
+  let resolve!: (response: Response) => void;
+  let reject!: (error: Error) => void;
+  globalThis.fetch = (async (input, init) => {
+    if (String(input) === "/api/runtime/send") {
+      sends.push(JSON.parse(init?.body as string));
+      return new Promise<Response>((yes, no) => { resolve = yes; reject = no; });
+    }
+    return new Response("{}", { status: 404 });
+  }) as typeof fetch;
+  const mounted = await renderInto(surface());
+  try {
+    await settle(() => composerControls(mounted.host).type(captured.text!));
+    await settle(() => composerControls(mounted.host).submit());
+    expect(sends).toHaveLength(1);
+    const delivered: RuntimeReceipt = { ...captured, idempotencyKey: sends[0]!.idempotencyKey, status: "delivered", resend: "not-needed", revision: 8, at: new Date().toISOString() };
+    snapshotReceipts = [delivered];
+    await settle(() => mounted.root.render(surface()));
+    expect(readOutbox(file.conversationId!)[0]?.state).toBe("delivered");
+    await settle(() => {
+      if (outcome === "network") reject(new Error("late connection loss"));
+      else resolve(Response.json({ operationId: captured.operationId, receipt: { ...delivered, status: outcome, revision: 4, resend: "verify-first" }, error: "late evidence unavailable" }, { status: 503 }));
+    });
+    expect(readOutbox(file.conversationId!)[0]?.state).toBe("delivered");
+    expect(readOutbox(file.conversationId!)[0]?.settledAt).toBe(Date.parse(delivered.at));
+    expect(mounted.host.querySelector("[data-outbox-entry]")?.textContent).toContain("Delivered");
+    expect(mounted.host.querySelector("[data-outbox-entry]")?.textContent).not.toContain("unknown");
+    expect(sends).toHaveLength(1);
+  } finally { await act(async () => mounted.root.unmount()); }
+});
+
+test("non-2xx definitive pre-dispatch failure keeps safe retry controls", async () => {
+  const sends: SendBody[] = [];
+  mockWire(sends, [body => ({ status: 400, json: { receipt: { ...captured, idempotencyKey: body.idempotencyKey, status: "rejected", resend: "safe", reason: "Rejected before dispatch" }, error: "Rejected before dispatch" } })]);
+  const mounted = await renderInto(surface());
+  try {
+    await settle(() => composerControls(mounted.host).type(captured.text!));
+    await settle(() => composerControls(mounted.host).submit());
+    expect(readOutbox(file.conversationId!)[0]?.state).toBe("failed");
+    expect(readOutbox(file.conversationId!)[0]?.deliveryUncertain).toBeUndefined();
+    expect(mounted.host.querySelector("[data-outbox-retry]")).not.toBeNull();
+    expect(sends).toHaveLength(1);
   } finally { await act(async () => mounted.root.unmount()); }
 });
