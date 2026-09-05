@@ -1,6 +1,8 @@
 "use client";
 
 import { ChevronRight, Command, Crown, MessageCircle, Mic, Sparkle } from "@/components/icons";
+import { useLayoutEffect, useRef } from "react";
+import { captureCatalogPosition, restoreCatalogPosition, type CatalogPosition } from "./MobileInlineCatalog";
 import { Bot } from "lucide-react";
 import { useLocale, type TFunction } from "@/lib/i18n";
 import type { Pipeline } from "@/lib/pipelines/types";
@@ -326,6 +328,10 @@ export interface MobileBoardProps extends MobileBoardData {
   seat?: React.ReactNode;
   /** Conversations in the catalog behind «All conversations · n ›». */
   catalogCount?: number;
+  catalogState?: "loading" | "error";
+  catalogExpanded?: boolean;
+  catalog?: React.ReactNode;
+  catalogPosition?: CatalogPosition;
   onOpenConversation: (file: FileEntry) => void;
   onOpenPipeline?: (pipeline: Pipeline) => void;
   onOpenPipelines?: () => void;
@@ -357,7 +363,7 @@ export function mobileBoardOf(props: MobileBoardData): MobileBoardModel {
  * footer says what the board is missing and opens the create draft. There is
  * no mic on it, because there is nothing yet to dictate to.
  */
-export function MobileBoardDock({ onTell, create = false }: { onTell: () => void; create?: boolean }) {
+export function MobileBoardDock({ onTell, create = false, unresolved = false }: { onTell: () => void; create?: boolean; unresolved?: boolean }) {
   const { t } = useLocale();
   return (
     <button
@@ -372,7 +378,7 @@ export function MobileBoardDock({ onTell, create = false }: { onTell: () => void
         <Bot className="h-[15px] w-[15px]" />
       </span>
       <span className={`min-w-0 flex-1 truncate ${create ? "text-accent" : ""}`}>
-        {t(create ? "mobile2.seat.createDock" : "mobile2.board.tellOrchestrator")}
+        {t(unresolved ? "mobile2.board.orchestrator" : create ? "mobile2.seat.createDock" : "mobile2.board.tellOrchestrator")}
       </span>
       {create ? (
         <ChevronRight aria-hidden className="mr-1.5 h-4 w-4 shrink-0 text-accent" />
@@ -388,12 +394,16 @@ export function MobileBoardDock({ onTell, create = false }: { onTell: () => void
 export function MobileBoard(props: MobileBoardProps) {
   const { t } = useLocale();
   const { seat, onOpenConversation, onOpenPipeline, onOpenPipelines, onOpenCatalog, catalogCount } = props;
+  const scroll = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    if (scroll.current && props.catalogPosition && props.catalogExpanded) restoreCatalogPosition(scroll.current, props.catalogPosition);
+  }, [props.project, props.catalogPosition, props.catalogExpanded]);
   const model = mobileBoardOf(props);
   const now = props.now ?? Date.now() / 1000;
   const pipelinesRow = model.pipelines ? <PipelinesRow model={model} onOpen={onOpenPipelines} /> : null;
   const stack = (children: React.ReactNode) => <div className="flex flex-col gap-1.5 px-3">{children}</div>;
   return (
-    <div data-mobile2-board className="min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden pb-3">
+    <div ref={scroll} onScroll={() => { if (scroll.current && props.catalogPosition && props.catalogExpanded) captureCatalogPosition(scroll.current, props.catalogPosition); }} data-mobile2-board className="min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden pb-3">
       {seat ? (
         <>
           <Section label={t("mobile2.board.orchestrator")} id="orchestrator" />
@@ -443,18 +453,22 @@ export function MobileBoard(props: MobileBoardProps) {
               type="button"
               data-mobile2-row="catalog"
               className={`${CARD} min-h-14 bg-quiet shadow-none ring-1 ring-inset ring-border`}
+              aria-expanded={props.catalogExpanded}
               onClick={onOpenCatalog}
             >
               <span aria-hidden className="h-2 w-2 shrink-0 rounded-full bg-strong" />
               <span className="flex min-w-0 flex-1 flex-col gap-0.5">
                 <span className="truncate text-body font-semibold leading-[1.25] text-secondary">{t("mobile2.board.allConversations")}</span>
                 <span className="truncate text-label tabular-nums text-muted">
-                  {t("mobile2.board.catalogCount", { count: catalogCount ?? model.recentTotal })}
+                  {catalogCount === undefined
+                    ? t(props.catalogState === "error" ? "list.failed" : props.catalogState === "loading" ? "common.loading" : "mobile.catalog.unknown")
+                    : t("mobile.catalog.count", { count: catalogCount })}
                 </span>
               </span>
-              <ChevronRight className="h-[18px] w-[18px] shrink-0 text-muted" aria-hidden />
+              <ChevronRight className={`h-[18px] w-[18px] shrink-0 text-muted ${props.catalogExpanded ? "rotate-90" : ""}`} aria-hidden />
             </button>
           ) : null}
+          {props.catalogExpanded ? props.catalog : null}
         </>,
       )}
     </div>
