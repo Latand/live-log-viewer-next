@@ -297,6 +297,15 @@ export interface SpawnLineageEdge {
   createdAt: string;
 }
 
+export interface SeatChildrenPage {
+  file: RegistryFile;
+  keys: string[];
+  nextKey: string;
+  throughKey: string;
+  complete: boolean;
+  evidenceGap: boolean;
+}
+
 export interface DurableConversationMembership {
   conversationId: ViewerConversationId;
   kind: "flow" | "pipeline" | "orchestrator";
@@ -4025,6 +4034,20 @@ export class AgentRegistry {
   snapshotSpawns(launchIds: readonly string[]): SnapshotSpawnProjection {
     if (this.sqliteStore) return this.sqliteStore.snapshotSpawns(launchIds);
     return snapshotSpawnsFromRegistry(this.readOnlySnapshot(), launchIds);
+  }
+
+  /** Monitor-only bounded lineage projection; JSON backends cannot prove a bounded read. */
+  pageSeatChildren(parentId: string, afterKey: string, throughKey: string | null, limit: number, keys?: readonly string[]): SeatChildrenPage | null {
+    if (this.sqliteMode !== "sqlite" && this.sqliteMode !== "read") return null;
+    return this.sqliteStore?.pageSeatChildren(parentId, afterKey, throughKey, limit, keys) ?? null;
+  }
+
+  /** The monitor's own seat read must not materialize the registry either. */
+  seatTickConversation(id: string): Pick<RegistryConversation, "id" | "turn"> | null {
+    if (!this.sqliteStore || (this.sqliteMode !== "sqlite" && this.sqliteMode !== "read")) {
+      throw new Error("bounded seat projection requires the authoritative SQLite registry");
+    }
+    return this.sqliteStore.seatTickConversation(id);
   }
 
   /** Resolves only conversation ids already present in the bounded custom-title

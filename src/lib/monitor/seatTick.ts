@@ -6,6 +6,7 @@ import {
   SEAT_TICK_WAKE_REASON_KINDS,
   type SeatTickCard,
   type SeatTickCheckInput,
+  type SeatTickChildInput,
   type SeatTickDecision,
   type SeatTickEventInput,
   type SeatTickEvidenceGap,
@@ -139,6 +140,24 @@ function isOpenLane(pipeline: SeatTickPipelineInput): boolean {
   return pipeline.state !== "terminal";
 }
 
+/** A standalone child with a live host behind it (#1465): open work, exactly
+    as an open lane is. An unknown child is neither this nor terminal. */
+function isRunningChild(child: SeatTickChildInput): boolean {
+  return child.status === "running";
+}
+
+/** A child whose outcome is owed to the seat (#1465). The gather has already
+    removed every child a delivered wake named, so each of these is unharvested. */
+function isTerminalChild(child: SeatTickChildInput): boolean {
+  return child.status === "terminal";
+}
+
+/** The stall memory's id for a child, kept apart from lane ids so a lane and
+    a child can never share an entry. */
+function childStallId(child: SeatTickChildInput): string {
+  return `child:${child.conversationId}`;
+}
+
 /**
  * An assigned card nobody started — and only while that is a fact about NOW.
  *
@@ -174,11 +193,20 @@ function isUnstarted(task: SeatTickTaskInput, now: number, backlogAfterMs: numbe
  * unmerged" the same answer, and the tick said `quiet — nothing owed` to the
  * second one every five minutes for twelve hours. A finished lane's open pull
  * request is the obligation that finishing created, so it is open work.
+ *
+ * The fourth and fifth are #1465, the same blindness one layer down. A seat
+ * that works through plain spawned children has no lane at all, so a running
+ * worker was not open work and a finished one was not an obligation — the tick
+ * answered `proactive` over a worker mid-task, and managers took to inventing
+ * assigned heartbeat cards to be woken at all. A running child is open work
+ * and an unharvested terminal child is the obligation finishing created.
  */
 function hasOpenWork(input: SeatTickCheckInput): boolean {
   return input.pipelines.some(isOpenLane)
     || input.tasks.some((task) => task.status === "inbox" || task.status === "assigned")
-    || input.pullRequests.length > 0;
+    || input.pullRequests.length > 0
+    || input.children.some(isRunningChild)
+    || input.children.some(isTerminalChild);
 }
 
 /**
@@ -280,6 +308,42 @@ function stalledLanes(input: SeatTickCheckInput): { pipeline: SeatTickPipelineIn
     }
   }
   return found;
+}
+
+/**
+ * The children that are not moving (#1465), by the same two rules as the lanes
+ * above and never by arithmetic over a launch instant.
+ *
+ * The liveness plane's verdict for the child's open turn is the first: a
+ * `stalled` or `gone` verdict is the registry's own, already reconciled with
+ * host death. The second is the registry's own evidence with no verdict to ask
+ * for: a turn the registry records open with no host anywhere behind it. The
+ * gather reports that as a `gone` verdict from the registry, so it reaches
+ * here through the same clause. A long-running live turn the plane calls
+ * `running` is never here, however long it has been open.
+ */
+function stalledChildren(input: SeatTickCheckInput): { child: SeatTickChildInput; reason: string }[] {
+  const found: { child: SeatTickChildInput; reason: string }[] = [];
+  for (const child of input.children) {
+    if (!isRunningChild(child)) continue;
+    const activity = child.activity;
+    if (activity && (activity.lifecycle === "stalled" || activity.lifecycle === "gone")) {
+      found.push({ child, reason: `child ${child.conversationId} runs a turn the registry reports ${activity.lifecycle} (${activity.reason})` });
+    }
+  }
+  return found;
+}
+
+/** The terminal children in harvest order: the one that finished first is
+    named first, so a bound that holds some back holds back the newest. */
+function terminalChildren(input: SeatTickCheckInput): SeatTickChildInput[] {
+  return input.children.filter(isTerminalChild).sort((left, right) => {
+    const at = (child: SeatTickChildInput): number => {
+      const parsed = child.terminalAt ? Date.parse(child.terminalAt) : Number.NaN;
+      return Number.isFinite(parsed) ? parsed : Number.POSITIVE_INFINITY;
+    };
+    return at(left) - at(right) || left.conversationId.localeCompare(right.conversationId);
+  });
 }
 
 function elapsed(since: string | null, now: number, window: number): boolean {
@@ -455,14 +519,28 @@ function settingsCards(input: SeatTickCheckInput): SeatTickCard[] {
  * named, so a seat acting on the rest of the wake knows what is NOT in it.
  */
 function evidenceGaps(input: SeatTickCheckInput): SeatTickEvidenceGap[] {
+  const gaps: SeatTickEvidenceGap[] = [];
   const gap = input.pullRequestsUnavailable;
-  if (!gap) return [];
-  return [{
-    source: "pull-requests",
-    gap,
-    detail: `the open pull requests of this project's finished lanes could not be read (${gap}), `
-      + "so a pull request a finished lane left unmerged cannot be named in this wake",
-  }];
+  if (gap) {
+    gaps.push({
+      source: "pull-requests",
+      gap,
+      detail: `the open pull requests of this project's finished lanes could not be read (${gap}), `
+        + "so a pull request a finished lane left unmerged cannot be named in this wake",
+    });
+  }
+  /* The second source that can fail without failing the whole check (#1465).
+     Unreadable children are unknown children: not open work, not harvested,
+     not quiet. */
+  if (input.childrenUnavailable) {
+    gaps.push({
+      source: "children",
+      gap: input.childrenUnavailable,
+      detail: `the seat's spawned children could not be read (${input.childrenUnavailable}), `
+        + "so a running or finished worker cannot be named in this wake",
+    });
+  }
+  return gaps;
 }
 
 /**
@@ -494,10 +572,9 @@ function evidenceGaps(input: SeatTickCheckInput): SeatTickEvidenceGap[] {
  */
 function sourceGapReport(
   input: SeatTickCheckInput,
-  gaps: readonly SeatTickEvidenceGap[],
 ): { card: SeatTickCard; gap: SeatTickSourceGap } | null {
   const gap = input.state.pullRequestGap;
-  if (gaps.length === 0 || !gap || gap.reported) return null;
+  if (!input.pullRequestsUnavailable || !gap || gap.reported) return null;
   if (!seatTickSourceGapStanding(gap, input.now, input.settings.wakeIntervalMs)) return null;
   return {
     card: {
@@ -560,10 +637,14 @@ function decide(input: SeatTickCheckInput): SeatTickDecision {
     eventsThrough: dischargedThrough(input.events, unchanged.eventsThrough),
   };
   const stalled = stalledLanes(input);
-  const stalledNow = stalled.map((entry) => entry.pipeline.id);
+  const stalledKids = stalledChildren(input);
+  const stalledNow = [...stalled.map((entry) => entry.pipeline.id), ...stalledKids.map((entry) => childStallId(entry.child))];
   /* A stall is only reported once it survived a second check, so a lane between
      two attempts is never called stuck. */
   const persistedStalls = stalled.filter((entry) => input.state.stalledSeen.includes(entry.pipeline.id));
+  const persistedChildStalls = stalledKids.filter((entry) => input.state.stalledSeen.includes(childStallId(entry.child)));
+  const harvest = terminalChildren(input);
+  const unknownChildren = input.children.filter((child) => child.status === "unknown").length;
   const unstarted = input.tasks.filter((task) => isUnstarted(task, input.now, input.policy.backlogAfterMs));
   const backlog = input.tasks.filter((task) => task.status === "assigned" && !task.owned).length - unstarted.length;
   const openWork = hasOpenWork(input);
@@ -611,6 +692,16 @@ function decide(input: SeatTickCheckInput): SeatTickDecision {
       const more = laneEvents.length > 1 ? ` and ${laneEvents.length - 1} more` : "";
       candidates.push({ kind: "lane-event", detail: `${first.type} since the last delivered wake${more}` });
     }
+    /* A finished standalone child (#1465), the lane event's counterpart for a
+       seat with no lanes: "your worker finished, go harvest it", once. Once,
+       because the cursor that discharges it is written by a DELIVERED wake and
+       the gather removes what the cursor names; a wake that never landed leaves
+       the child here for the next check. Same interval, same guard. */
+    if (harvest.length > 0) {
+      const first = harvest[0]!;
+      const more = harvest.length > 1 ? ` and ${harvest.length - 1} more` : "";
+      candidates.push({ kind: "child-terminal", detail: `a spawned child ${first.outcome ?? "finished"} and its outcome is unharvested${more}` });
+    }
     /* The mirror image (#1289), and it is a wake reason rather than a silence
        for one reason: a lane that finished with its pull request unmerged is
        the seat's next obligation, and the tick could not see one. It takes no
@@ -629,8 +720,8 @@ function decide(input: SeatTickCheckInput): SeatTickDecision {
         detail: `pull request #${first.number}${more} left open by a lane that finished`,
       });
     }
-    if (persistedStalls.length > 0) {
-      candidates.push({ kind: "stalled", detail: persistedStalls[0]!.reason });
+    if (persistedStalls.length > 0 || persistedChildStalls.length > 0) {
+      candidates.push({ kind: "stalled", detail: (persistedStalls[0] ?? persistedChildStalls[0])!.reason });
     }
     if (unstarted.length > 0) {
       /* The excluded count travels with the reason so a seat reading "2" beside
@@ -647,7 +738,7 @@ function decide(input: SeatTickCheckInput): SeatTickDecision {
        operator's move to assigned is what starts it — leaves that agenda empty,
        and an hourly wake with an empty agenda is the burnt-quota tick this
        replaces. */
-    const intervalAgenda = input.pipelines.some(isOpenLane) || input.signals.length > 0;
+    const intervalAgenda = input.pipelines.some(isOpenLane) || input.children.some(isRunningChild) || input.signals.length > 0;
     if (openWork && intervalAgenda && candidates.length === 0) {
       candidates.push({ kind: "interval", detail: "the wake interval elapsed while work is open" });
     }
@@ -675,7 +766,7 @@ function decide(input: SeatTickCheckInput): SeatTickDecision {
      twenty-three journal lines nobody was reading is what the operator got
      instead of being told. */
   const gaps = evidenceGaps(input);
-  const gapReport = sourceGapReport(input, gaps);
+  const gapReport = sourceGapReport(input);
   if (gapReport) cards.push(gapReport.card);
   /* The row this check writes says the outage is UNREPORTED, and it says so
      even while the card for it is being raised. Marking it reported here is a
@@ -698,7 +789,7 @@ function decide(input: SeatTickCheckInput): SeatTickDecision {
      The guard and the interval are untouched by any of it: the reasons here
      passed both, and a gap adds none. */
   if (reasons.length > 0) {
-    const all = wakeItems({ input, stalled: persistedStalls, laneEvents, unstarted });
+    const all = wakeItems({ input, stalled: persistedStalls, stalledChildren: persistedChildStalls, harvest, laneEvents, unstarted });
     return {
       verdict: {
         kind: "wake",
@@ -720,10 +811,14 @@ function decide(input: SeatTickCheckInput): SeatTickDecision {
      sent, and a failed read still cannot spend it. It stays ahead of every
      verdict below, each of which says nothing is owed. */
   if (gaps.length > 0) {
+    const first = gaps[0]!;
+    const subject = first.source === "children"
+      ? "the seat's spawned children"
+      : "the open pull requests of this project's finished lanes";
     return {
       verdict: {
         kind: "error",
-        detail: `the open pull requests of this project's finished lanes could not be read (${gaps[0]!.gap}), so nothing owed is not established`,
+        detail: `${subject} could not be read (${first.gap}), so nothing owed is not established`,
       },
       state,
       cards,
@@ -738,21 +833,25 @@ function decide(input: SeatTickCheckInput): SeatTickDecision {
     return { verdict: { kind: "quiet", detail: "every wake reason is held by the retry guard" }, state: quiet(state, at), cards };
   }
 
+  /* A child the registry cannot place is named in the line and nowhere else
+     (#1465): it is not owed, and it is not settled either. */
+  const unplaced = unknownChildren > 0 ? `; ${unknownChildren} spawned child(ren) in an unknown state` : "";
+
   if (!openWork) {
     const idle = { ...quiet(state, at), idleSince: input.state.idleSince ?? at };
     /* The proposal is a wake too — it resumes a host and spends a turn — so it
        waits out the same hour on top of its own 24-hour slot. */
     if (wakeDue && elapsed(input.state.lastProposalAt, input.now, input.policy.proposalIntervalMs)) {
       return {
-        verdict: { kind: "proactive", detail: "no open lane, no unblocked task, and the proposal slot is due" },
+        verdict: { kind: "proactive", detail: `no open lane, no unblocked task, and the proposal slot is due${unplaced}` },
         state: idle,
         cards: [],
       };
     }
-    return { verdict: { kind: "quiet", detail: "the board is done and the proposal slot is not due" }, state: idle, cards: [] };
+    return { verdict: { kind: "quiet", detail: `the board is done and the proposal slot is not due${unplaced}` }, state: idle, cards: [] };
   }
 
-  return { verdict: { kind: "quiet", detail: "nothing owed" }, state: { ...quiet(state, at), idleSince: null }, cards: [] };
+  return { verdict: { kind: "quiet", detail: `nothing owed${unplaced}` }, state: { ...quiet(state, at), idleSince: null }, cards: [] };
 }
 
 function quiet(state: SeatTickProjectState, at: string): SeatTickProjectState {
@@ -762,6 +861,9 @@ function quiet(state: SeatTickProjectState, at: string): SeatTickProjectState {
 function wakeItems(context: {
   input: SeatTickCheckInput;
   stalled: { pipeline: SeatTickPipelineInput; reason: string }[];
+  stalledChildren: { child: SeatTickChildInput; reason: string }[];
+  /** Terminal children in harvest order, oldest outcome first. */
+  harvest: readonly SeatTickChildInput[];
   laneEvents: readonly SeatTickEventInput[];
   unstarted: SeatTickTaskInput[];
 }): SeatTickItem[] {
@@ -769,6 +871,17 @@ function wakeItems(context: {
   const items: SeatTickItem[] = [];
   for (const event of context.laneEvents) {
     items.push({ kind: "event", id: event.pipelineId ?? event.type, label: `${event.type}: ${event.summary}` });
+  }
+  /* Oldest outcome first (#1465), so the per-wake bound holds back the newest
+     and the child that has waited longest is harvested first. Only the items
+     that fit are recorded as harvested when the wake lands; the rest stay owed. */
+  for (const child of context.harvest) {
+    items.push({
+      kind: "child",
+      id: child.conversationId,
+      outcomeId: child.outcomeId,
+      label: `${child.title} — spawned child ${child.outcome ?? "finished"}, outcome unharvested`,
+    });
   }
   /* Named, not merely counted (#1289). The twelve hours were spent because the
      seat had no way to know a pull request was waiting; a wake that says one is
@@ -784,6 +897,9 @@ function wakeItems(context: {
   for (const entry of context.stalled) {
     items.push({ kind: "pipeline", id: entry.pipeline.id, label: `${entry.pipeline.title} — ${entry.reason}` });
   }
+  for (const entry of context.stalledChildren) {
+    items.push({ kind: "child", id: entry.child.conversationId, label: `${entry.child.title} — ${entry.reason}` });
+  }
   for (const task of context.unstarted) {
     items.push({ kind: "task", id: task.id, label: `${task.title} — assigned, nothing started it` });
   }
@@ -793,6 +909,11 @@ function wakeItems(context: {
     if (!isOpenLane(pipeline)) continue;
     if (items.some((item) => item.id === pipeline.id)) continue;
     items.push({ kind: "pipeline", id: pipeline.id, label: `${pipeline.title} — open` });
+  }
+  for (const child of input.children) {
+    if (!isRunningChild(child)) continue;
+    if (items.some((item) => item.id === child.conversationId)) continue;
+    items.push({ kind: "child", id: child.outcomeId ?? child.conversationId, label: `${child.title} — spawned child running` });
   }
   for (const signal of input.signals) {
     items.push({ kind: "signal", id: signal.id, label: signal.label });
@@ -812,11 +933,21 @@ function wakeItems(context: {
  */
 export function seatTickWakeCommitPlan(
   verdict: SeatTickVerdict,
-  context: { fingerprint: string; eventsThrough: number },
+  context: {
+    fingerprint: string;
+    eventsThrough: number;
+    /** The terminal children the check saw (#1465). Only those the wake
+        actually names — inside the per-wake bound — are recorded as harvested
+        by its landing; a child the bound held back stays owed. */
+    terminalChildren?: readonly string[];
+  },
 ): SeatTickWakeCommit | null {
-  if (verdict.kind === "proactive") return { proposal: true, reasons: [], ...context };
+  const { fingerprint, eventsThrough } = context;
+  if (verdict.kind === "proactive") return { proposal: true, reasons: [], fingerprint, eventsThrough, children: [] };
   if (verdict.kind !== "wake") return null;
-  return { proposal: false, reasons: verdict.reasons.map((reason) => reason.kind), ...context };
+  const terminal = new Set(context.terminalChildren ?? []);
+  const children = verdict.items.filter((item) => item.kind === "child" && terminal.has(item.outcomeId ?? item.id)).map((item) => item.outcomeId ?? item.id);
+  return { proposal: false, reasons: verdict.reasons.map((reason) => reason.kind), fingerprint, eventsThrough, children };
 }
 
 /**
@@ -876,5 +1007,13 @@ export function seatTickWakeCommit(
     idleSince: null,
     eventsThrough,
     outstandingWake: null,
+    harvestedChildren: harvested(state.harvestedChildren, commit.children),
   };
+}
+
+/** The harvest cursor after a landing (#1465): the children this wake named,
+    appended once each. Durable outcome rows retain acknowledgment history. */
+function harvested(before: readonly string[], named: readonly string[]): string[] {
+  const merged = [...before.filter((id) => !named.includes(id)), ...named];
+  return [...new Set(merged)];
 }

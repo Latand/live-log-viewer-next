@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { SeatTickAccounting } from "./seatTickAccounting";
 
 import { statePath } from "@/lib/configDir";
 import { deliverConversationMessage, type DeliveryOutcome } from "@/lib/delivery";
@@ -294,26 +295,6 @@ function wakePromptIdentity(monitorPrompt: string | null): string {
   return `:prompt-${crypto.createHash("sha256").update(monitorPrompt).digest("hex").slice(0, 16)}`;
 }
 
-/**
- * Whether the layer accepted the wake and kept it.
- *
- * The complement of {@link wakeReached} over an accepted send: the payload is
- * durably retained against the conversation it was addressed to, and it will
- * be delivered when whatever is blocking it clears — which may be after this
- * seat has been replaced.
- */
-function wakeRetained(outcome: DeliveryOutcome): boolean {
-  return outcome.ok && !wakeReached(outcome);
-}
-
-/** Which layer is holding a retained wake, in the one field that says so. A
-    structured send names the runtime host operation it was queued under; a
-    migration hold and a legacy send name nothing, and the Viewer registry's own
-    reservation is then the retention. */
-function retainedOperationId(outcome: DeliveryOutcome): string | null {
-  return outcome.ok ? outcome.operationId ?? null : null;
-}
-
 const REVOKED_WAKE_REASON = "the seat tick revoked a wake raised for a seat that has since been replaced";
 
 /** What the reconcile concluded: the journal line it owes, and what the row
@@ -323,6 +304,7 @@ interface WakeSettlement {
   verdict: SeatTickVerdictKind;
   outcome: string;
   detail: string;
+  /** Only landed evidence commits; uncertain evidence retains the attempt. */
   row: "commit" | "clear" | "keep";
 }
 
@@ -349,8 +331,8 @@ interface WakeSettlement {
  * holder has already let the payload go, that is said out loud (`too-late`)
  * rather than reported as a successful revocation.
  *
- * The seat that is still the same seat keeps a wake still in flight: that one
- * is the replay the next check re-raises under the same `clientMessageId`.
+ * An in-flight wake stays prepared under its original `clientMessageId`;
+ * subsequent checks query its receipt before considering another dispatch.
  *
  * A landing credited here is stamped at the instant it was OBSERVED rather than
  * the instant it happened, so the hourly bound starts up to one check interval
@@ -376,9 +358,11 @@ async function reconcileOutstandingWake(context: {
 
   let settlement: WakeSettlement | null;
   try {
-    settlement = replaced
-      ? withdrawal(await context.sources.withdrawWake(outstanding, REVOKED_WAKE_REASON))
-      : landing(await context.sources.wakeState(outstanding));
+    const observed = await context.sources.wakeState(outstanding);
+    settlement = landing(observed);
+    if (replaced && observed !== "landed" && observed !== "dropped") {
+      settlement = withdrawal(await context.sources.withdrawWake(outstanding, REVOKED_WAKE_REASON));
+    }
   } catch (error) {
     const reason = redactMonitorText(error instanceof Error ? error.message : "unknown error");
     /* A holder that cannot answer must not take the check down with it, and it
@@ -394,8 +378,6 @@ async function reconcileOutstandingWake(context: {
     ? seatTickWakeCommit(context.state, outstanding.commit, context.now)
     : settlement.row === "clear"
       ? { ...context.state, outstandingWake: null }
-      /* An unreachable holder leaves the payload exactly where it was, so the
-         row keeps it: a later check is the one that takes it back. */
       : context.state;
 
   context.appendRecord({
@@ -411,6 +393,11 @@ async function reconcileOutstandingWake(context: {
     delivery: { clientMessageId: outstanding.clientMessageId, outcome: settlement.outcome },
     detail: settlement.detail,
   });
+  if (context.state.accounting && (settlement.row === "commit" || settlement.row === "clear")) {
+    const accounting = new SeatTickAccounting(context.state.accounting.filename, context.project);
+    accounting.settle(outstanding.clientMessageId, next, settlement.row === "commit");
+    return accounting.readState();
+  }
   return next;
 }
 
@@ -427,7 +414,7 @@ function withdrawal(result: Awaited<ReturnType<SeatTickSources["withdrawWake"]>>
     return {
       verdict: "revoked",
       outcome: "too-late",
-      row: "clear",
+      row: "keep",
       detail: "the wake raised for the replaced seat could not be taken back: the layer holding it had already let it go, so the replaced seat may have received it",
     };
   }
@@ -454,6 +441,14 @@ function landing(result: Awaited<ReturnType<SeatTickSources["wakeState"]>>): Wak
       outcome: "dropped",
       row: "clear",
       detail: "the layer holding the wake settled it without delivering it, so no stamp moves and the next check may raise it again",
+    };
+  }
+  if (result === "uncertain") {
+    return {
+      verdict: "uncertain",
+      outcome: "uncertain",
+      row: "keep",
+      detail: "the layer holding the wake ended it without proving arrival; the original key and all obligations remain outstanding",
     };
   }
   /* `retained` is the steady state between two checks and `unknown` is a read
@@ -578,6 +573,7 @@ async function check(
 
   let delivery: SeatTickRunRecord["delivery"] = null;
   const verdict = decision.verdict;
+  const terminalChildren = input.children.filter((child) => child.status === "terminal").map((child) => child.outcomeId ?? child.conversationId);
 
   if ((verdict.kind === "wake" || verdict.kind === "proactive") && input.seat) {
     const clientMessageId = wakeClientMessageId(input.project, input.seat.seatEpoch, verdict, {
@@ -623,63 +619,73 @@ async function check(
     const rotated = !current
       || current.seatEpoch !== input.seat.seatEpoch
       || current.conversationId !== input.seat.conversationId;
+    /* A prepared wake retains its original key and payload until settlement,
+       including across prompt changes and seat rotation. */
+    const outstanding = state.outstandingWake;
+    const withheld = outstanding !== null;
+    /* The cursor then moves past everything this check READ, not only what
+       the message listed: the terminal events are the ones carried, and the
+       routine progress between them is what the seat is deliberately not
+       told about one line at a time. Anything the page bound left behind
+       keeps its place and is offered again. Terminal children are recorded
+       only as far as the wake names them (#1465). */
+    const commit = seatTickWakeCommitPlan(verdict, {
+      fingerprint: input.changeFingerprint,
+      eventsThrough: input.events.at(-1)?.seq ?? state.eventsThrough ?? 0,
+      terminalChildren,
+    });
     if (rotated) {
       delivery = { clientMessageId, outcome: "seat-rotated" };
-    } else {
-      const outcome = await deliver({
-        pid: null,
-        path: current.path ?? input.seat.path ?? "",
-        conversationId: current.conversationId,
-        clientMessageId,
-        text,
-        images: [],
-        origin: { kind: "agent", role: "seat-tick" },
-      });
-      delivery = { clientMessageId, outcome: deliveryOutcomeLabel(outcome) };
-      /* Only a wake the seat actually has is recorded as one. A refusal, a
-         failure, a migration hold or a runtime queue leaves the wake stamp and
-         the event cursor exactly where they were, so the next check re-raises
-         the same wake under the same id rather than waiting out an hour for a
-         message nobody read.
-
-         The cursor then moves past everything this check READ, not only what
-         the message listed: the terminal events are the ones carried, and the
-         routine progress between them is what the seat is deliberately not
-         told about one line at a time. Anything the page bound left behind
-         keeps its place and is offered again. */
-      const commit = seatTickWakeCommitPlan(verdict, {
-        fingerprint: input.changeFingerprint,
-        eventsThrough: input.events.at(-1)?.seq ?? state.eventsThrough ?? 0,
-      });
-      if (commit && wakeReached(outcome)) {
-        state = seatTickWakeCommit(state, commit, input.now);
-      } else if (commit && wakeRetained(outcome)) {
-        /* Accepted and kept. The payload now outlives this check, so it is
-           written down with the handle of whichever layer kept it and the
-           commit this wake would earn — then reconciled at once, because the
-           rotation that matters most is the one that landed while the send was
-           in flight, and because a fast drain may already have delivered it. */
-        state = {
-          ...state,
-          outstandingWake: {
-            clientMessageId,
-            /* The seat the rotation check just proved `current` still is, in
-               the one form that is typed as an addressable conversation. */
-            conversationId: input.seat.conversationId,
-            seatEpoch: input.seat.seatEpoch,
-            operationId: retainedOperationId(outcome),
-            commit,
-          },
-        };
-        state = await reconcileOutstandingWake({
-          project: input.project,
-          state,
-          seat: sources.seatFor(input.project).active ?? null,
-          sources,
-          appendRecord,
-          at,
-          now: input.now,
-        });
+    } else if (withheld) {
+      delivery = { clientMessageId, outcome: "deferred-outstanding" };
+    } else if (commit) {
+      const wake = {
+        clientMessageId, conversationId: input.seat.conversationId, seatEpoch: input.seat.seatEpoch,
+        operationId: null, commit, text,
+      };
+      const accounting = state.accounting ? new SeatTickAccounting(state.accounting.filename, input.project) : null;
+      const prepared = accounting ? accounting.prepare(state, wake) : true;
+      if (!prepared) {
+        delivery = { clientMessageId, outcome: "deferred-outstanding" };
+        state = accounting!.readState();
+      } else {
+        state = accounting ? accounting.readState() : { ...state, outstandingWake: wake };
+        if (!accounting) writeState(input.project, state);
+        // Preparation is durable before transport, and seat authority is re-read afterward.
+        const authority = sources.seatFor(input.project).active;
+        if (!authority || authority.seatEpoch !== wake.seatEpoch || authority.conversationId !== wake.conversationId) {
+          delivery = { clientMessageId, outcome: "seat-rotated" };
+          // This invocation has not entered transport, so non-delivery is proven.
+          if (accounting) {
+            accounting.settle(clientMessageId, state, false);
+            state = accounting.readState();
+          } else state = { ...state, outstandingWake: null };
+        } else {
+          let outcome: DeliveryOutcome | null = null;
+          try {
+            outcome = await deliver({ pid: null, path: authority.path ?? input.seat.path ?? "", conversationId: authority.conversationId,
+              clientMessageId, text, images: [], origin: { kind: "agent", role: "seat-tick" } });
+            delivery = { clientMessageId, outcome: deliveryOutcomeLabel(outcome) };
+          } catch {
+            delivery = { clientMessageId, outcome: "unreturned" };
+            // Missing receipts do not authorize forgetting a prepared attempt.
+          }
+          if (outcome && wakeReached(outcome)) {
+            const landed = seatTickWakeCommit(state, commit, input.now);
+            if (accounting) {
+              accounting.settle(clientMessageId, landed, true);
+              state = accounting.readState();
+            } else state = landed;
+          } else {
+            if (outcome?.operationId && state.outstandingWake) {
+              state = { ...state, outstandingWake: { ...state.outstandingWake, operationId: outcome.operationId } };
+              if (accounting) { accounting.writeState(state); state = accounting.readState(); }
+              else writeState(input.project, state);
+            }
+            state = await reconcileOutstandingWake({ project: input.project, state,
+              seat: sources.seatFor(input.project).active ?? null, sources, appendRecord, at, now: input.now });
+          }
+        }
       }
     }
   }

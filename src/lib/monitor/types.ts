@@ -190,7 +190,10 @@ export type SeatTickWakeReasonKind =
   /** A board task the operator assigned that nothing has started. */
   | "unstarted-task"
   /** The wake interval elapsed while work is open — "roughly hourly". */
-  | "interval";
+  | "interval"
+  /** A standalone child the seat spawned reached a terminal outcome nobody has
+      harvested (#1465): its result is the seat's next obligation, once. */
+  | "child-terminal";
 
 export const SEAT_TICK_WAKE_REASON_KINDS: readonly SeatTickWakeReasonKind[] = [
   "lane-event",
@@ -198,6 +201,7 @@ export const SEAT_TICK_WAKE_REASON_KINDS: readonly SeatTickWakeReasonKind[] = [
   "stalled",
   "unstarted-task",
   "interval",
+  "child-terminal",
 ];
 
 export interface SeatTickWakeReason {
@@ -208,7 +212,8 @@ export interface SeatTickWakeReason {
 
 /** One line of the wake's body. Bounded and structural — never transcript text. */
 export interface SeatTickItem {
-  kind: "pipeline" | "task" | "event" | "signal" | "pull-request";
+  outcomeId?: string;
+  kind: "pipeline" | "task" | "event" | "signal" | "pull-request" | "child";
   id: string;
   label: string;
 }
@@ -262,10 +267,10 @@ export type SeatTickVerdict =
 export interface SeatTickEvidenceGap {
   /** Which evidence is missing. A stable token: it names the card the standing
       failure is reported under, so two outages of one source are one card. */
-  source: "pull-requests";
+  source: "pull-requests" | "children";
   /** The class of the failure, as the source itself reported it. Machine
       token, because the journal line carrying it is published. */
-  gap: SeatTickPullRequestGap;
+  gap: SeatTickPullRequestGap | SeatTickChildrenGap;
   /** What the seat loses while it stands, in one publication-safe clause. */
   detail: string;
 }
@@ -435,6 +440,44 @@ export type SeatTickPullRequestGap =
   | "malformed-output"
   | "lanes-unreadable";
 
+/**
+ * Why a check could not read the seat's spawned children (#1465). One token:
+ * the registry snapshot the projection is read from could not be taken at all.
+ * There is no card and no standing-run row for it — the registry is the
+ * Viewer's own store, and a Viewer that cannot read it has larger problems the
+ * board already shows.
+ */
+export type SeatTickChildrenGap = "registry-unreadable";
+
+/**
+ * One standalone child the seat spawned (#1465), projected from the durable
+ * registry alone: the lineage edge, the launch receipt, the conversation's own
+ * turn record and its host entries. No transcript is opened for it.
+ *
+ * `running` is a child with live host evidence — open work, and agenda enough
+ * for the interval wake. `terminal` is a child whose outcome is the seat's to
+ * harvest: it finished (`finished`) or its launch failed (`failed`). `unknown`
+ * is a child the registry cannot place — no conversation record, or a turn it
+ * never observed with no host behind it — and it is neither open work nor
+ * harvestable: an unknown is kept unknown, never counted as completed.
+ */
+export interface SeatTickChildInput {
+  conversationId: string;
+  /** Immutable completed-turn identity, independent of conversation reuse. */
+  outcomeId?: string;
+  /** Bounded, already redacted by the source. */
+  title: string;
+  status: "running" | "terminal" | "unknown";
+  outcome: "finished" | "failed" | null;
+  /** When the terminal outcome was recorded, for ordering the harvest oldest
+      first. Null while the child is not terminal. */
+  terminalAt: string | null;
+  /** The liveness plane's verdict for a running child's open turn, asked only
+      when the registry says the turn is open. Null is no verdict, never a
+      stall. */
+  activity: SeatTickActivity | null;
+}
+
 /** A durable log line the Viewer already writes: a deploy outcome, the host
     retirement report, a seat whose own turn stopped progressing. */
 export interface SeatTickSignalInput {
@@ -485,6 +528,9 @@ export interface SeatTickWakeCommit {
   reasons: SeatTickWakeReasonKind[];
   fingerprint: string;
   eventsThrough: number;
+  /** Terminal children this wake names (#1465). A landing records them as
+      harvested; a wake that never lands leaves them owed. */
+  children: string[];
 }
 
 /**
@@ -514,10 +560,13 @@ export interface SeatTickOutstandingWake {
       account migration hold, or a legacy send that never reached a host. */
   operationId: string | null;
   commit: SeatTickWakeCommit;
+  /** Exact prepared payload, persisted before transport. */
+  text?: string;
 }
 
-/** The durable row per project, `state/seat-tick.json`. */
+/** Project tick state; SQLite accounting owns persistence and legacy migration. */
 export interface SeatTickProjectState {
+  accounting?: { filename: string; revision: number; gap: string | null };
   seatEpoch: number | null;
   lastCheckAt: string | null;
   lastWakeAt: string | null;
@@ -569,6 +618,9 @@ export interface SeatTickProjectState {
   /** The pull-request source's unbroken run of failures (#1298), or null while
       it is answering. Cleared by an answer and by nothing else. */
   pullRequestGap: SeatTickSourceGap | null;
+  /** Legacy conversation-only acknowledgment evidence. The v3 store imports
+      it into separate rows and keeps this transient compatibility field empty. */
+  harvestedChildren: string[];
 }
 
 export interface SeatTickCheckInput {
@@ -602,6 +654,16 @@ export interface SeatTickCheckInput {
    */
   pullRequestsUnavailable: SeatTickPullRequestGap | null;
   signals: readonly SeatTickSignalInput[];
+  /** The seat's own standalone children (#1465), bounded and project-scoped,
+      with already-harvested terminal ones removed. Empty when the seat spawned
+      nothing, and empty when the registry could not be read — the field below
+      says which. */
+  children: readonly SeatTickChildInput[];
+  /** Set when the children could not be projected at all. Read exactly like
+      {@link SeatTickCheckInput.pullRequestsUnavailable}: the reasons resting on
+      it are withheld, every other reason still wakes, and with nothing else
+      owed the check ends `error` rather than quiet. */
+  childrenUnavailable: SeatTickChildrenGap | null;
   /**
    * Digest of everything a wake could change, in two parts separated by a dot:
    * the evidence every check reads, then the pull-request evidence.
@@ -688,12 +750,14 @@ export interface SeatTickDecision {
   reportedSourceGap?: SeatTickSourceGap | null;
 }
 
-/** What one check recorded. Four kinds are journal-only: `refused` is a sweep
-    or a second clock refused for want of authority, and the other three are
+/** What one check recorded. Five kinds are journal-only: `refused` is a sweep
+    or a second clock refused for want of authority, and the other four are
     what became of a retained wake — it was taken back from a seat that had
     already been replaced (`revoked`), the layer holding it delivered it after
-    all (`landed`), or that layer settled it without ever delivering it
-    (`dropped`). */
+    all (`landed`), that layer settled it having PROVED it never delivered it
+    (`dropped`), or it ended the send without proving arrival either way
+    (`uncertain`, #1465): bounded without credit, so the interval starts and
+    nothing the wake carried is acknowledged. */
 export type SeatTickVerdictKind =
   | SeatTickVerdict["kind"]
   /** A check that threw outright, which the decision never gets to see. The
@@ -703,7 +767,8 @@ export type SeatTickVerdictKind =
   | "refused"
   | "revoked"
   | "landed"
-  | "dropped";
+  | "dropped"
+  | "uncertain";
 
 /**
  * One audited check. Like {@link MonitorRunRecord} it carries no transcript
@@ -741,5 +806,6 @@ export function emptySeatTickState(): SeatTickProjectState {
     eventsThrough: null,
     outstandingWake: null,
     pullRequestGap: null,
+    harvestedChildren: [],
   };
 }

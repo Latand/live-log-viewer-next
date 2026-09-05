@@ -6,7 +6,7 @@ import type { Database as BunDatabase } from "bun:sqlite";
 
 import { reboundAssembledMcpGrants, rowClaimsBeyondBaselineGrant, type McpGrantPolicy } from "./mcpAllowlist";
 import { identityMaterializationFence } from "./identityMaterialization";
-import type { RegistryFile, SnapshotSpawnProjection, SnapshotTitleConversationProjection } from "./registry";
+import type { RegistryFile, SeatChildrenPage, SnapshotSpawnProjection, SnapshotTitleConversationProjection } from "./registry";
 import { sessionKeyId } from "./sessionKey";
 
 /** The collections the MCP grant decision reads and writes. Touching any one of
@@ -222,6 +222,9 @@ export class SqliteAgentRegistryStore {
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS registry_rows_collection_order
       ON registry_rows(collection, row_order);
+      CREATE INDEX IF NOT EXISTS registry_seat_children
+      ON registry_rows(json_extract(value_json, '$.parentConversationId'), row_key)
+      WHERE collection = 'lineageEdges' AND json_extract(value_json, '$.source') = 'viewer-spawn';
     `);
     this.secureFiles();
     this.importFirstBoot(options.initialSnapshot);
@@ -336,6 +339,105 @@ export class SqliteAgentRegistryStore {
       return projection;
     } catch (error) {
       try { this.db.exec("ROLLBACK"); } catch { /* transaction already closed */ }
+      throw error;
+    }
+  }
+
+  pageSeatChildren(parentId: string, afterKey: string, throughKey: string | null, limit: number, keys?: readonly string[]): SeatChildrenPage {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 60) throw new Error("invalid child page limit");
+    if (keys && keys.length > limit) throw new Error("child key budget exceeded");
+    this.db.exec("BEGIN");
+    try {
+      const file = this.normalize({ version: 2, entries: {}, receipts: {} });
+      let evidenceGap = false;
+      const read = (collection: RowCollection, key: string) => {
+        const row = this.db.query<{ value_json: string }, [string, string]>(
+          "SELECT value_json FROM registry_rows WHERE collection=? AND row_key=?",
+        ).get(collection, key);
+        this.onRowPayloadRead?.(collection, row ? 1 : 0);
+        if (row) (file[collection] as Record<string, unknown>)[key] = this.parseRow(collection, key, row.value_json, true);
+      };
+      const through = throughKey ?? this.db.query<{ row_key: string }, [string]>(`
+        SELECT row_key FROM registry_rows WHERE collection='lineageEdges'
+        AND json_extract(value_json,'$.source')='viewer-spawn'
+        AND json_extract(value_json,'$.parentConversationId')=? ORDER BY row_key DESC LIMIT 1
+      `).get(parentId)?.row_key ?? "";
+      const rows = keys ? keys.flatMap((key) => {
+        const row = this.db.query<{ row_key: string; value_json: string }, [string]>(
+          "SELECT row_key,value_json FROM registry_rows WHERE collection='lineageEdges' AND row_key=?",
+        ).get(key);
+        return row ? [row] : [];
+      }) : this.db.query<{ row_key: string; value_json: string }, [string, string, string, number]>(`
+        SELECT row_key,value_json FROM registry_rows WHERE collection='lineageEdges'
+        AND json_extract(value_json,'$.source')='viewer-spawn'
+        AND json_extract(value_json,'$.parentConversationId')=? AND row_key>? AND row_key<=?
+        ORDER BY row_key LIMIT ?
+      `).all(parentId, afterKey, through, limit);
+      this.onRowPayloadRead?.("lineageEdges", rows.length);
+      for (const row of rows) {
+        const edge = this.parseRow("lineageEdges", row.row_key, row.value_json, true) as RegistryFile["lineageEdges"][string];
+        file.lineageEdges[row.row_key] = edge;
+        if (edge.evidence.launchId) read("receipts", edge.evidence.launchId);
+        let id: string = edge.childConversationId;
+        let invalidAlias = false;
+        const seen = new Set<string>();
+        for (let depth = 0; depth < 64; depth++) {
+          if (seen.has(id)) { evidenceGap = true; invalidAlias = true; break; }
+          seen.add(id);
+          read("conversationAliases", id);
+          const alias = file.conversationAliases[id];
+          if (!alias) break;
+          id = alias;
+          if (depth === 63) { evidenceGap = true; invalidAlias = true; }
+        }
+        if (invalidAlias) { delete file.lineageEdges[row.row_key]; continue; }
+        read("conversations", id);
+        read("memberships", id);
+        const conversation = file.conversations[id];
+        const receipt = edge.evidence.launchId ? file.receipts[edge.evidence.launchId] : null;
+        const generation = conversation?.generations.at(-1);
+        for (const key of [edge.childSessionKey, receipt?.key, generation ? { engine: conversation!.engine, sessionId: generation.id } : null]) {
+          if (key) read("entries", sessionKeyId(key));
+        }
+      }
+      this.db.exec("COMMIT");
+      const nextKey = rows.at(-1)?.row_key ?? afterKey;
+      return { file, keys: rows.map((row) => row.row_key), nextKey, throughKey: through, complete: rows.length < limit || nextKey === through, evidenceGap };
+    } catch (error) {
+      try { this.db.exec("ROLLBACK"); } catch { /* No open transaction. */ }
+      throw error;
+    }
+  }
+
+  seatTickConversation(id: string): Pick<RegistryFile["conversations"][string], "id" | "turn"> | null {
+    this.db.exec("BEGIN");
+    try {
+      const read = (collection: "conversationAliases" | "conversations", key: string) => {
+        const row = this.db.query<{ value_json: string }, [string, string]>(
+          "SELECT value_json FROM registry_rows WHERE collection=? AND row_key=?",
+        ).get(collection, key);
+        this.onRowPayloadRead?.(collection, row ? 1 : 0);
+        return row ? this.parseRow(collection, key, row.value_json, true) : undefined;
+      };
+      const seen = new Set<string>();
+      let current = id;
+      for (let depth = 0; depth < 64; depth++) {
+        if (seen.has(current)) throw new Error("seat alias cycle");
+        seen.add(current);
+        const alias = read("conversationAliases", current);
+        if (alias === undefined) {
+          const raw = read("conversations", current);
+          const conversation = raw === undefined ? null : this.normalize({ version: 2, entries: {}, receipts: {}, conversations: { [current]: raw } }).conversations[current];
+          if (raw !== undefined && !conversation) throw new Error("invalid seat conversation");
+          this.db.exec("COMMIT");
+          return conversation ? { id: conversation.id, turn: conversation.turn } : null;
+        }
+        if (typeof alias !== "string" || !alias.startsWith("conversation_")) throw new Error("invalid seat alias");
+        current = alias;
+      }
+      throw new Error("seat alias traversal budget exhausted");
+    } catch (error) {
+      try { this.db.exec("ROLLBACK"); } catch { /* No open transaction. */ }
       throw error;
     }
   }

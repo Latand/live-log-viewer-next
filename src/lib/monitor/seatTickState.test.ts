@@ -13,6 +13,7 @@ fs.mkdirSync(process.env.TMPDIR, { recursive: true });
 
 const { readSeatTickState, readSeatTickStateFile, seatTickStateForEpoch, seatTickStatePath, writeSeatTickState } = await import("./seatTickState");
 import { emptySeatTickState } from "./types";
+const { SeatTickAccounting } = await import("./seatTickAccounting");
 
 afterAll(() => {
   fs.rmSync(SANDBOX, { recursive: true, force: true });
@@ -41,8 +42,9 @@ const row = {
     conversationId: CONVERSATION,
     seatEpoch: 7,
     operationId: "op-wake-1",
-    commit: { proposal: false, reasons: ["interval" as const], fingerprint: "fp-1", eventsThrough: 44 },
+    commit: { proposal: false, reasons: ["interval" as const], fingerprint: "fp-1", eventsThrough: 44, children: [CONVERSATION] },
   },
+  harvestedChildren: [CONVERSATION],
   pullRequestGap: {
     gap: "command-failed" as const,
     since: "2026-08-28T08:00:00.000Z",
@@ -55,8 +57,8 @@ const row = {
 test("a row survives the write and reads back whole", () => {
   const file = path.join(SANDBOX, "seat-tick.json");
   writeSeatTickState("viewer", row, file);
-  expect(readSeatTickState("viewer", file)).toEqual(row);
-  expect(readSeatTickState("other", file)).toEqual(emptySeatTickState());
+  expect(readSeatTickState("viewer", file)).toMatchObject({ ...row, harvestedChildren: [] });
+  expect(readSeatTickState("other", file)).toMatchObject(emptySeatTickState());
 });
 
 test("one project's write leaves the others' rows alone", () => {
@@ -69,10 +71,10 @@ test("one project's write leaves the others' rows alone", () => {
 });
 
 test("a missing, unreadable or malformed file reads as an empty row rather than throwing", () => {
-  expect(readSeatTickState("viewer", path.join(SANDBOX, "absent.json"))).toEqual(emptySeatTickState());
+  expect(readSeatTickState("viewer", path.join(SANDBOX, "absent.json"))).toMatchObject(emptySeatTickState());
   const broken = path.join(SANDBOX, "broken.json");
   fs.writeFileSync(broken, "{ not json");
-  expect(readSeatTickState("viewer", broken)).toEqual(emptySeatTickState());
+  expect(readSeatTickState("viewer", broken).accounting?.gap).not.toBeNull();
 });
 
 test("a hand-edited row loses fields it is not allowed to carry", () => {
@@ -243,9 +245,66 @@ test("a sealed cursor of zero written by this version stays a cursor", () => {
   const file = path.join(SANDBOX, "sealed-zero.json");
   writeSeatTickState("viewer", { ...emptySeatTickState(), eventsThrough: 0 }, file);
   expect(readSeatTickState("viewer", file).eventsThrough).toBe(0);
-  expect(JSON.parse(fs.readFileSync(file, "utf8")).version).toBe(2);
+  expect(fs.existsSync(file)).toBe(false);
 });
 
 test("the state file lives under the viewer state dir with no configuration", () => {
   expect(seatTickStatePath()).toBe(path.join(SANDBOX, "state", "seat-tick.json"));
+});
+
+/* ------------------------------------------------------------------------- *
+ * The harvest cursor (#1465).
+ * ------------------------------------------------------------------------- */
+
+const CHILD = ["conversation", "c1d2e3f4a5b6c7d8"].join("_");
+
+test("a row from before the harvest existed reads an empty cursor, and a plan without children harvests nothing (#1465)", () => {
+  const file = path.join(SANDBOX, "pre-harvest.json");
+  const { harvestedChildren: _cursor, ...legacyRow } = row;
+  const { children: _children, ...legacyCommit } = row.outstandingWake.commit;
+  fs.writeFileSync(file, JSON.stringify({ version: 2, projects: { viewer: { ...legacyRow, outstandingWake: { ...row.outstandingWake, commit: legacyCommit } } } }));
+  const persisted = readSeatTickState("viewer", file);
+  expect(persisted.harvestedChildren).toEqual([]);
+  expect(persisted.outstandingWake!.commit.children).toEqual([]);
+});
+
+test("migration retains every valid legacy acknowledgment without an eviction window", () => {
+  const file = path.join(SANDBOX, "harvest-bounds.json");
+  const crowd = Array.from({ length: 250 }, (_, index) => ["conversation", String(index)].join("_"));
+  const original = JSON.stringify({ version: 2, projects: { viewer: { ...row, harvestedChildren: crowd } } });
+  fs.writeFileSync(file, original);
+  let persisted = readSeatTickState("viewer", file);
+  expect(persisted.accounting?.gap).toBe("legacy-migration-pending");
+  for (let tick = 0; tick < 5 && persisted.accounting?.gap; tick++) persisted = readSeatTickState("viewer", file);
+  expect(persisted.accounting?.gap).toBeNull();
+  const accounting = new SeatTickAccounting(persisted.accounting!.filename, "viewer");
+  expect(accounting.collection.snapshot().filter((entry) => entry.kind === "legacy")).toHaveLength(250);
+  expect(persisted.harvestedChildren).toEqual([]);
+  expect(persisted.outstandingWake!.commit.children).toEqual([CONVERSATION]);
+  expect(fs.readFileSync(file, "utf8")).toBe(original);
+});
+
+test("a rotation keeps the harvest cursor: what the project was told is not the seat's judgement (#1465)", () => {
+  const rotated = seatTickStateForEpoch({ ...row, harvestedChildren: [CHILD] }, 8);
+  expect(rotated.seatEpoch).toBe(8);
+  expect(rotated.harvestedChildren).toEqual([CHILD]);
+  expect(rotated.stalledSeen).toEqual([]);
+});
+
+test("legacy acknowledgments survive reopening and another project's write", () => {
+  const file = path.join(SANDBOX, "harvest-durable.json");
+  fs.writeFileSync(file, JSON.stringify({ version: 2, projects: { viewer: { ...row, harvestedChildren: [CHILD, CONVERSATION] } } }));
+  const first = readSeatTickState("viewer", file);
+  writeSeatTickState("other", emptySeatTickState(), file);
+  const accounting = new SeatTickAccounting(first.accounting!.filename, "viewer");
+  expect(new Set(accounting.page("legacy", 10).map((entry) => entry.kind === "legacy" ? entry.conversationId : ""))).toEqual(new Set([CHILD, CONVERSATION]));
+});
+
+
+test("falsy malformed legacy outstanding values keep migration blocked", () => {
+  for (const outstandingWake of [false, 0, ""]) {
+    const file = path.join(SANDBOX, `malformed-outstanding-${String(outstandingWake)}.json`);
+    fs.writeFileSync(file, JSON.stringify({ version: 2, projects: { viewer: { outstandingWake } } }));
+    expect(readSeatTickState("viewer", file).accounting?.gap).toBe("legacy-outstanding-unreadable");
+  }
 });

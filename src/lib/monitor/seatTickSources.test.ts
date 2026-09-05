@@ -11,14 +11,29 @@ process.env.XDG_CONFIG_HOME = path.join(SANDBOX, "config");
 process.env.TMPDIR = path.join(SANDBOX, "tmp");
 fs.mkdirSync(process.env.TMPDIR, { recursive: true });
 
-const { gatherSeatTickInput, repoDirForProject, runtimeWakeState, seatTickProjects, withdrawRuntimeWake } = await import("./seatTickSources");
+const { gatherSeatTickInput: gatherProduction, repoDirForProject, runtimeWakeState, seatTickProjects, wakeStateFromRecord, withdrawRuntimeWake } = await import("./seatTickSources");
+const { SeatTickAccounting } = await import("./seatTickAccounting");
+const { FileRuntimeEventStore } = await import("@/lib/runtime/eventStore");
+const { statePath } = await import("@/lib/configDir");
+const gatherSeatTickInput: typeof gatherProduction = (project, state, policy, ports) => {
+  if (state.accounting) return gatherProduction(project, state, policy, ports);
+  const dir = fs.mkdtempSync(path.join(SANDBOX, "gather-state-"));
+  const accounting = new SeatTickAccounting(path.join(dir, "state.sqlite"), project);
+  accounting.initialize(state, null);
+  return gatherProduction(project, accounting.readState(), policy, ports);
+};
+const { AgentRegistry } = await import("@/lib/agent/registry");
+const { emptyLaunchProfile } = await import("@/lib/accounts/migration/contracts");
+const { sessionKeyFromTranscript } = await import("@/lib/agent/sessionKey");
+const { projectForCwd } = await import("@/lib/scanner/describe");
+import type { OriginalSendEvidence, SendReceipt } from "@/lib/runtime/sendSettlement";
 import type { SeatTickSources } from "./seatTickSources";
 const { DEFAULT_SEAT_TICK_POLICY, seatTickBoardMoved, seatTickDecision, seatTickWakeCommit } = await import("./seatTick");
 const { defaultSeatTickSettings } = await import("./seatTickSettings");
 import type { AgentLivenessRecord } from "@/lib/lifecycle/liveness";
 import type { OpenPullRequest, OpenPullRequestsUnavailable } from "./githubEvidence";
 import type { LifecycleEvent, LifecycleJournalFile } from "@/lib/lifecycle/journal";
-import { emptySeatTickState, type SeatTickProjectState } from "./types";
+import { emptySeatTickState, type SeatTickOutstandingWake, type SeatTickProjectState } from "./types";
 
 /**
  * The gathering half of the tick (#1245): the projection the pure pre-check
@@ -142,10 +157,16 @@ function sources(over: {
   archiveCalls?: number[];
   archiveThrows?: boolean;
   noSeat?: boolean;
+  /** A real registry standing in for the stub (#1465). */
+  registry?: InstanceType<typeof AgentRegistry>;
+  /** The liveness plane's verdict for a child, by id (#1465). */
+  childRows?: Record<string, AgentLivenessRecord>;
+  seatConversationId?: string;
+  now?: number;
 }): SeatTickSources {
   return {
     seatFor: () => ({
-      active: over.noSeat ? null : { conversationId: CONVERSATION, seatEpoch: 7, path: null } as never,
+      active: over.noSeat ? null : { conversationId: over.seatConversationId ?? CONVERSATION, seatEpoch: 7, path: null } as never,
       pending: null,
       history: [],
     }),
@@ -157,9 +178,12 @@ function sources(over: {
       return (over.archivedPipelines ?? []) as never;
     },
     tasks: () => (over.tasks ?? []) as never,
-    registry: () => ({
+    registry: () => (over.registry ?? {
+      pageSeatChildren: () => ({ file: { entries: {}, receipts: {}, lineageEdges: {}, memberships: {}, conversations: {}, conversationAliases: {} }, keys: [], nextKey: "", throughKey: "", complete: true, evidenceGap: false }),
+      seatTickConversation: () => ({ id: CONVERSATION, turn: { state: over.seatTurn ?? "idle" } }),
       conversation: () => ({ turn: { state: over.seatTurn ?? "idle" } }),
       conversationForPath: () => null,
+      readOnlySnapshot: () => ({ entries: {}, receipts: {}, lineageEdges: {}, memberships: {}, conversations: {}, conversationAliases: {} }),
     }) as never,
     liveness: async (request) => {
       over.livenessCalls?.push({
@@ -168,6 +192,8 @@ function sources(over: {
         stallAfterMs: request.stallAfterMs,
       });
       if (over.livenessThrows) throw new Error("the liveness plane is unavailable");
+      const childRow = request.conversationId ? over.childRows?.[request.conversationId] : undefined;
+      if (childRow) return [childRow];
       return request.conversationId ? over.seatRows ?? [] : over.laneRows ?? [];
     },
     lifecycleJournal: () => journal(over.events ?? []),
@@ -182,7 +208,7 @@ function sources(over: {
     },
     wakeState: async () => "retained",
     withdrawWake: async () => "withdrawn",
-    now: () => NOW,
+    now: () => over.now ?? NOW,
   };
 }
 
@@ -1164,7 +1190,7 @@ test("a wake sent under a blind source still counts against the retry guard", as
   );
   const committed = seatTickWakeCommit(
     { ...blind.state, lastWakeFingerprint: readable.changeFingerprint, wakesWithoutChange: { stalled: 1 } },
-    { fingerprint: blind.changeFingerprint, reasons: ["stalled"], eventsThrough: 0, proposal: false },
+    { fingerprint: blind.changeFingerprint, reasons: ["stalled"], eventsThrough: 0, proposal: false, children: [] },
     NOW,
   );
   expect(committed.wakesWithoutChange.stalled).toBe(2);
@@ -1238,7 +1264,7 @@ const WAKE = {
   conversationId: CONVERSATION,
   seatEpoch: 7,
   operationId: "op-wake-1",
-  commit: { proposal: false, reasons: ["interval" as const], fingerprint: "fp-1", eventsThrough: 44 },
+  commit: { proposal: false, reasons: ["interval" as const], fingerprint: "fp-1", eventsThrough: 44, children: [] },
 };
 
 /* `queued` is what a structured host answers for EVERY admitted send, idle host
@@ -1250,9 +1276,12 @@ test("the runtime host's own status is what says whether the wake reached the se
   expect(await runtimeWakeState("op-wake-1", runtimeClient({ statuses: ["delivering"] }))).toBe("retained");
   expect(await runtimeWakeState("op-wake-1", runtimeClient({ statuses: ["delivered"] }))).toBe("landed");
   expect(await runtimeWakeState("op-wake-1", runtimeClient({ statuses: ["failed"] }))).toBe("dropped");
-  expect(await runtimeWakeState("op-wake-1", runtimeClient({ statuses: ["uncertain"] }))).toBe("dropped");
-  /* An operation the host has never heard of is one nothing will deliver. */
-  expect(await runtimeWakeState("op-wake-1", runtimeClient({}))).toBe("dropped");
+  /* Ended without proof either way is not a drop (#1465): the seat may have it. */
+  expect(await runtimeWakeState("op-wake-1", runtimeClient({ statuses: ["uncertain"] }))).toBe("uncertain");
+  expect(await runtimeWakeState("op-wake-1", runtimeClient({ statuses: ["interrupted"] }))).toBe("uncertain");
+  /* An operation the host has no record of is an observation about the
+     journal, never proof that nothing was delivered (#1465). */
+  expect(await runtimeWakeState("op-wake-1", runtimeClient({}))).toBe("unknown");
 });
 
 /* The finding this round exists for: the revocation has to reach the queue that
@@ -1296,7 +1325,7 @@ test("an operation that left the queue mid-withdrawal is re-read rather than ass
 test("an operation already settled unsent needs no withdrawal", async () => {
   const transitions: { operationId: string; status: string; reason: string | null }[] = [];
   expect(await withdrawRuntimeWake("op-wake-1", "gone", runtimeClient({ statuses: ["failed"], transitions }))).toBe("withdrawn");
-  expect(await withdrawRuntimeWake("op-wake-1", "gone", runtimeClient({ transitions }))).toBe("withdrawn");
+  expect(await withdrawRuntimeWake("op-wake-1", "gone", runtimeClient({ transitions }))).toBe("unknown");
   expect(transitions).toEqual([]);
 });
 
@@ -1307,4 +1336,268 @@ test("both questions are asked of the operation the wake names", async () => {
   expect(await runtimeWakeState(WAKE.operationId, runtimeClient({ statuses: ["queued"] }))).toBe("retained");
   await withdrawRuntimeWake(WAKE.operationId, "the seat was replaced", runtimeClient({ statuses: ["queued"], transitions }));
   expect(transitions.map((entry) => entry.operationId)).toEqual([WAKE.operationId]);
+});
+
+/* ------------------------------------------------------------------------- *
+ * The receipt boundary (#1465): what the durable delivery record says became
+ * of a wake, classified by the #1490 contract.
+ * ------------------------------------------------------------------------- */
+
+function receipt(over: Partial<SendReceipt>): SendReceipt {
+  return {
+    operationId: "op-wake-1",
+    kind: "send",
+    conversationId: CONVERSATION,
+    clientMessageId: WAKE.clientMessageId,
+    state: "in-flight",
+    reason: null,
+    acceptedAt: new Date(NOW - MINUTE_MS).toISOString(),
+    settledAt: null,
+    duplicateRisk: false,
+    resend: null,
+    evidence: "delivery-record",
+    ...over,
+  };
+}
+const MINUTE_MS = 60_000;
+
+function found(current: SendReceipt): OriginalSendEvidence {
+  return { kind: "found", operationId: current.operationId, deliveryId: "delivery-1", receipt: current, reservationState: "assigned", current: { readable: true, value: current } };
+}
+
+async function classify(evidence: OriginalSendEvidence, over: { settle?: SendReceipt | null; runtime?: "retained" | "landed" | "dropped" | "unknown" | "uncertain"; wake?: SeatTickOutstandingWake } = {}) {
+  const calls: string[] = [];
+  const state = await wakeStateFromRecord(over.wake ?? WAKE, {
+    lookup: async () => { calls.push("lookup"); return evidence; },
+    settle: async () => { calls.push("settle"); return over.settle ?? null; },
+    runtime: async () => { calls.push("runtime"); return over.runtime ?? "unknown"; },
+  });
+  return { state, calls };
+}
+
+test("a delivered record lands, a fenced loss drops, and an unverified failure is uncertain (#1465)", async () => {
+  expect((await classify(found(receipt({ state: "delivered", resend: "not-needed" })))).state).toBe("landed");
+  expect((await classify(found(receipt({ state: "failed", resend: "safe" })))).state).toBe("dropped");
+  expect((await classify(found(receipt({ state: "failed", resend: "verify-first", duplicateRisk: true })))).state).toBe("uncertain");
+  /* A failure whose guidance is missing proves nothing, so it is not a drop. */
+  expect((await classify(found(receipt({ state: "failed", resend: null })))).state).toBe("uncertain");
+});
+
+test("an in-flight record is ended by the tick's own settlement, and classified by its answer (#1465)", async () => {
+  const still = await classify(found(receipt({})), { settle: receipt({}) });
+  expect(still).toEqual({ state: "retained", calls: ["lookup", "settle"] });
+  expect((await classify(found(receipt({})), { settle: receipt({ state: "delivered", resend: "not-needed" }) })).state).toBe("landed");
+  expect((await classify(found(receipt({})), { settle: receipt({ state: "failed", resend: "safe" }) })).state).toBe("dropped");
+  expect((await classify(found(receipt({})), { settle: receipt({ state: "failed", resend: "verify-first" }) })).state).toBe("uncertain");
+  expect((await classify(found(receipt({})), { settle: null })).state).toBe("unknown");
+});
+
+test("a record the journal could not be read for is unknown, whatever the durable projection says (#1465)", async () => {
+  const current = receipt({});
+  const unreadable: OriginalSendEvidence = { kind: "found", operationId: current.operationId, deliveryId: "delivery-1", receipt: current, reservationState: "assigned", current: { readable: false, reason: "runtime host is unavailable" } };
+  expect(await classify(unreadable)).toEqual({ state: "unknown", calls: ["lookup"] });
+});
+
+test("absence under the key asks the runtime when there is an operation to ask about, and is unknown otherwise (#1465)", async () => {
+  expect(await classify({ kind: "absent" }, { runtime: "retained" })).toEqual({ state: "retained", calls: ["lookup", "runtime"] });
+  expect(await classify({ kind: "absent" }, { runtime: "dropped" })).toEqual({ state: "dropped", calls: ["lookup", "runtime"] });
+  expect(await classify({ kind: "absent" }, { wake: { ...WAKE, operationId: null } })).toEqual({ state: "unknown", calls: ["lookup"] });
+});
+
+test("ambiguity, an unresolved target, an unreadable record and a contradictory one are all unknown (#1465)", async () => {
+  expect((await classify({ kind: "ambiguous", operationIds: ["op-a", "op-b"] })).state).toBe("unknown");
+  expect((await classify({ kind: "unresolved" })).state).toBe("unknown");
+  expect((await classify({ kind: "unreadable", reason: "the delivery record could not be read" })).state).toBe("unknown");
+  expect((await classify({ kind: "contradictory" })).state).toBe("unknown");
+});
+
+/* ------------------------------------------------------------------------- *
+ * The child projection (#1465): what one registry snapshot says about the
+ * seat's spawned children.
+ * ------------------------------------------------------------------------- */
+
+interface ChildRegistry {
+  registry: InstanceType<typeof AgentRegistry>;
+  cwd: string;
+  project: string;
+  seatId: string;
+  now: number;
+  spawn(options: { title: string; turn?: "busy" | "idle" | "terminal" | "unknown"; terminalAt?: string | null; host?: "live" | "dead" | "idle" | null; cwd?: string; unobserved?: boolean; parent?: string }): { id: string; launchId: string; path: string };
+}
+
+function childRegistry(name: string): ChildRegistry {
+  const dir = fs.mkdtempSync(path.join(SANDBOX, `${name}-`));
+  const cwd = path.join(dir, "repo");
+  fs.mkdirSync(cwd);
+  const registry = new AgentRegistry(path.join(dir, "agent-registry.json"), () => false, undefined, { sqliteMode: "sqlite" });
+  const seat = registry.ensureConversation("claude", path.join(dir, `${crypto.randomUUID()}.jsonl`), null);
+  const project = projectForCwd(cwd);
+  if (!project) throw new Error("fixture cwd resolves to no project");
+  /* Three minutes past the writes, so a `starting` receipt has outlived its
+     admission lease and is not evidence of a host. */
+  const now = Date.now() + 3 * MINUTE_MS;
+  return {
+    registry,
+    cwd,
+    project,
+    seatId: seat.id,
+    now,
+    spawn(options) {
+      const childCwd = options.cwd ?? cwd;
+      const childPath = path.join(dir, `${crypto.randomUUID()}.jsonl`);
+      const observed = options.unobserved ? null : registry.ensureConversation("claude", childPath, null);
+      const begun = registry.beginSpawnRequest({
+        engine: "claude",
+        cwd: childCwd,
+        transport: "structured",
+        ...(observed ? { conversationId: observed.id } : {}),
+        parentConversationId: (options.parent ?? seat.id) as never,
+        parentSource: "explicit",
+        launchProfile: { title: options.title },
+      });
+      const child = observed ?? { id: begun.receipt.conversationId, generations: [] };
+      if (!options.unobserved) {
+        registry.reconcileConversations([{
+          engine: "claude",
+          path: childPath,
+          accountId: null,
+          launchProfile: emptyLaunchProfile({ cwd: childCwd, title: options.title }),
+          turn: { state: options.turn ?? "busy", source: "assistant", terminalAt: options.terminalAt ?? null },
+          observedAt: new Date(now - 5 * MINUTE_MS).toISOString(),
+        }]);
+      }
+      if (options.host) {
+        registry.upsert({ key: sessionKeyFromTranscript("claude", childPath)!, artifactPath: childPath, cwd: childCwd, accountId: null, status: options.host, host: null, claimEpoch: 0, claimOwner: null, pendingAction: null });
+      }
+      if (observed && (options.turn === "terminal" || (options.turn === "idle" && options.host !== "idle"))) {
+        const ledger = new FileRuntimeEventStore(statePath("structured-host-events"));
+        ledger.append(observed.generations[0]!.id, { kind: "turn-started", turnId: "turn-one", seq: 1 });
+        ledger.append(observed.generations[0]!.id, { kind: "turn-ended", turnId: "turn-one", status: "completed", seq: 2 });
+      }
+      return { id: child.id, launchId: begun.receipt.launchId, path: childPath };
+    },
+  };
+}
+
+function childGather(fixture: ChildRegistry, over: Parameters<typeof sources>[0] = {}, state: SeatTickProjectState = emptySeatTickState()) {
+  return gatherSeatTickInput(fixture.project, state, DEFAULT_SEAT_TICK_POLICY, sources({
+    registry: fixture.registry,
+    seatConversationId: fixture.seatId,
+    pipelines: [],
+    now: fixture.now,
+    ...over,
+  }));
+}
+
+test("each kind of child is classified from the snapshot alone (#1465)", async () => {
+  const fixture = childRegistry("classify");
+  const running = fixture.spawn({ title: "running worker", turn: "busy", host: "live" });
+  const idleHosted = fixture.spawn({ title: "idle worker with a host", turn: "idle", host: "idle" });
+  const finished = fixture.spawn({ title: "finished worker", turn: "terminal", terminalAt: new Date(fixture.now - 20 * MINUTE_MS).toISOString() });
+  const released = fixture.spawn({ title: "released worker", turn: "idle", host: "dead" });
+  const gone = fixture.spawn({ title: "worker whose host died", turn: "busy", host: "dead" });
+  const failed = fixture.spawn({ title: "failed launch", unobserved: true });
+  fixture.registry.failSpawn(failed.launchId, "could not start");
+  const reserved = fixture.spawn({ title: "reservation nothing settled", unobserved: true });
+  const unknownTurn = fixture.spawn({ title: "never observed", turn: "unknown" });
+  const livenessCalls: { project?: string; conversationId?: string; stallAfterMs: number }[] = [];
+  const input = await childGather(fixture, {
+    livenessCalls,
+    childRows: { [running.id]: livenessRow({ conversationId: running.id, lifecycle: "running", reason: "host_alive_turn_active", pipeline: null }) },
+  });
+  const byId = new Map(input.children.map((child) => [child.conversationId, child]));
+  expect(byId.get(running.id)).toMatchObject({ status: "running", outcome: null, title: "running worker", activity: { lifecycle: "running", reason: "host_alive_turn_active" } });
+  expect(byId.get(idleHosted.id)).toMatchObject({ status: "running", activity: null });
+  expect(byId.get(finished.id)).toMatchObject({ status: "terminal", outcome: "finished", terminalAt: new Date(fixture.now - 20 * MINUTE_MS).toISOString() });
+  expect(byId.get(released.id)).toMatchObject({ status: "terminal", outcome: "finished" });
+  expect(byId.get(released.id)!.terminalAt).not.toBeNull();
+  expect(byId.get(gone.id)).toMatchObject({ status: "running", activity: { lifecycle: "gone", reason: "host_gone_turn_open", turnState: "busy" } });
+  expect(byId.get(failed.id)).toMatchObject({ status: "terminal", outcome: "failed", title: "failed launch" });
+  expect(byId.get(reserved.id)).toMatchObject({ status: "unknown", outcome: null });
+  expect(byId.get(unknownTurn.id)).toMatchObject({ status: "unknown" });
+  expect(input.childrenUnavailable).toBe("registry-unreadable");
+  /* Liveness is asked by id, for the hosted open turns only: the stall the
+     registry can see itself and the settled turns cost no read. */
+  expect(livenessCalls).toEqual([{ conversationId: running.id, stallAfterMs: DEFAULT_SEAT_TICK_POLICY.stallAfterMs }]);
+});
+
+test("a fresh launch inside its admission lease is a running child even before a host is recorded (#1465)", async () => {
+  const fixture = childRegistry("fresh-launch");
+  const fresh = fixture.spawn({ title: "just launched", turn: "unknown" });
+  const input = await childGather(fixture, { now: Date.now() });
+  expect(input.children).toMatchObject([{ conversationId: fresh.id, status: "running" }]);
+});
+
+test("harvested children leave the projection, and one seen running again is released from the cursor (#1465)", async () => {
+  const fixture = childRegistry("harvested");
+  const finished = fixture.spawn({ title: "finished worker", turn: "terminal", terminalAt: new Date(fixture.now - 20 * MINUTE_MS).toISOString() });
+  const again = fixture.spawn({ title: "re-instructed worker", turn: "busy", host: "live" });
+  const input = await childGather(fixture, {}, { ...emptySeatTickState(), harvestedChildren: [finished.id, again.id] });
+  expect(input.children.map((child) => child.conversationId)).toEqual([again.id]);
+  expect(input.state.harvestedChildren).toEqual([]);
+  expect(new SeatTickAccounting(input.state.accounting!.filename, fixture.project).page("legacy", 10)).toHaveLength(2);
+});
+
+test("other seats' children, other projects' children and the seat itself are not projected (#1465)", async () => {
+  const fixture = childRegistry("scope");
+  const elsewhere = path.join(path.dirname(fixture.cwd), "other-repo");
+  fs.mkdirSync(elsewhere);
+  fixture.spawn({ title: "another project", turn: "terminal", terminalAt: new Date(fixture.now - 20 * MINUTE_MS).toISOString(), cwd: elsewhere });
+  const otherSeat = fixture.registry.ensureConversation("claude", path.join(path.dirname(fixture.cwd), `${crypto.randomUUID()}.jsonl`), null);
+  fixture.spawn({ title: "another seat's", turn: "terminal", terminalAt: new Date(fixture.now - 20 * MINUTE_MS).toISOString(), parent: otherSeat.id });
+  const mine = fixture.spawn({ title: "mine", turn: "terminal", terminalAt: new Date(fixture.now - 20 * MINUTE_MS).toISOString() });
+  const input = await childGather(fixture);
+  expect(input.children.map((child) => child.conversationId)).toEqual([mine.id]);
+  const noSeat = await childGather(fixture, { noSeat: true });
+  expect(noSeat.children).toEqual([]);
+});
+
+test("paged discovery eventually reaches every child without a newest window (#1465)", async () => {
+  const fixture = childRegistry("bounded");
+  for (let index = 0; index < 63; index += 1) fixture.spawn({ title: `worker ${index}`, turn: "terminal", terminalAt: new Date(fixture.now - 20 * MINUTE_MS).toISOString() });
+  let input = await childGather(fixture);
+  for (let tick = 0; tick < 12; tick++) {
+    expect(input.children.length).toBeLessThanOrEqual(20);
+    input = await childGather(fixture, {}, input.state);
+  }
+  const accounting = new SeatTickAccounting(input.state.accounting!.filename, fixture.project);
+  expect(accounting.collection.snapshot().filter((row) => row.kind === "outcome")).toHaveLength(63);
+});
+
+test("a snapshot that cannot be taken is a gap, and the children read as none (#1465)", async () => {
+  const fixture = childRegistry("unreadable");
+  fixture.spawn({ title: "worker", turn: "terminal", terminalAt: new Date(fixture.now - 20 * MINUTE_MS).toISOString() });
+  const registry = fixture.registry;
+  const blind = {
+    seatTickConversation: registry.seatTickConversation.bind(registry),
+            conversation: (id: string) => registry.conversation(id as never),
+    conversationForPath: (artifactPath: string) => registry.conversationForPath(artifactPath),
+    readOnlySnapshot: () => { throw new Error("rewriting"); },
+  } as never;
+  const input = await childGather(fixture, { registry: blind });
+  expect(input.children).toEqual([]);
+  expect(input.childrenUnavailable).toBe("registry-unreadable");
+});
+
+test("a child finishing, and a harvested child leaving, both move the fingerprint (#1465)", async () => {
+  const fixture = childRegistry("fingerprint");
+  const worker = fixture.spawn({ title: "worker", turn: "busy", host: "live" });
+  const running = await childGather(fixture);
+  fixture.registry.reconcileConversations([{
+    engine: "claude",
+    path: worker.path,
+    accountId: null,
+    launchProfile: emptyLaunchProfile({ cwd: fixture.cwd, title: "worker" }),
+    turn: { state: "terminal", source: "lifecycle", terminalAt: new Date(fixture.now - MINUTE_MS).toISOString() },
+    observedAt: new Date(fixture.now - MINUTE_MS).toISOString(),
+  }]);
+  const ledger = new FileRuntimeEventStore(statePath("structured-host-events"));
+  const generation = fixture.registry.conversation(worker.id as never)!.generations[0]!.id;
+  ledger.append(generation, { kind: "turn-started", turnId: "turn-one", seq: 1 });
+  ledger.append(generation, { kind: "turn-ended", turnId: "turn-one", status: "completed", seq: 2 });
+  const finished = await childGather(fixture);
+  expect(seatTickBoardMoved(running.changeFingerprint, finished.changeFingerprint)).toBe(true);
+  const harvested = await childGather(fixture, {}, { ...emptySeatTickState(), harvestedChildren: [worker.id] });
+  expect(seatTickBoardMoved(finished.changeFingerprint, harvested.changeFingerprint)).toBe(true);
+  expect(seatTickBoardMoved(finished.changeFingerprint, (await childGather(fixture)).changeFingerprint)).toBe(false);
 });
