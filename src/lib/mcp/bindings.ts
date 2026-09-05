@@ -86,6 +86,7 @@ import { loadPipelinesForList } from "@/lib/pipelines/store";
 import type { CreatePipelineRequest, PatchPipelineRequest, Pipeline, PipelineAction } from "@/lib/pipelines/types";
 import type { PauseResumeActor } from "@/lib/pauseResumeActor";
 import { listFiles } from "@/lib/scanner";
+import { validExplicitProject } from "@/lib/accounts/migration/contracts";
 import { describe, projectForCwd, reprojectFileDescription } from "@/lib/scanner/describe";
 import { pathAllowed, scanRootEntries } from "@/lib/scanner/roots";
 import { completedFileScan } from "@/lib/scanner/scanCache";
@@ -97,7 +98,7 @@ import type { RuntimeHostRequestHealth } from "@/lib/runtime/client";
 import type { ViewerDeploymentStatus } from "@/lib/runtime/contracts";
 import { messageOriginRole, type MessageOrigin } from "@/lib/runtime/messageOrigin";
 import { ledgerDeployment, ledgerDeployments } from "@/lib/runtime/deploymentLedger";
-import { resolveSendReceipt } from "@/lib/runtime/sendSettlement";
+import { resolveOriginalSend, resolveSendReceipt, type SendSettlementPorts } from "@/lib/runtime/sendSettlement";
 import {
   SELECTED_TAIL_MAX_BYTES,
   SELECTED_TAIL_MAX_LINES,
@@ -131,7 +132,22 @@ import { resolveSiblings } from "@/lib/view/siblings";
 import { hardenedRedact } from "@/lib/view/compactText";
 import { validateSnapshotRequest } from "@/lib/view/validation";
 
-import { McpToolRefusal, type McpToolArgs, type McpToolBindings, type McpToolCallContext, type McpToolPayload } from "./server";
+import {
+  McpDispatchNotExecutedError,
+  McpDispatchUncertainError,
+  McpDispatchVerdictError,
+  McpToolRefusal,
+  type McpRecoverableTool,
+  type McpRecoveryEvidence,
+  type McpRequestBinding,
+  type McpRequestBindingInput,
+  type McpRequestCaller,
+  type McpToolArgs,
+  type McpToolBindings,
+  type McpToolCallContext,
+  type McpToolName,
+  type McpToolPayload,
+} from "./server";
 import { viewerControlOrigin, viewerControlToken } from "./controlEndpoint";
 import {
   productionSelectedContextDependencies,
@@ -160,6 +176,16 @@ const productionLinkTaskDependencies: LinkTaskToPipelineDependencies = {
 export interface ViewerControlDependencies {
   get?(pathname: string, context?: McpToolCallContext): Promise<Record<string, unknown>>;
   post(
+    pathname: string,
+    body: Record<string, unknown>,
+    headers?: Record<string, string>,
+    context?: McpToolCallContext,
+  ): Promise<Record<string, unknown>>;
+  /** #1490: ONE attempt, never repeated once the request may have reached the
+      Viewer. Throws {@link McpDispatchUncertainError} for every failure that
+      cannot prove the server did nothing. Optional so a harness that supplies
+      only `post` keeps working; the production set always provides it. */
+  dispatch?(
     pathname: string,
     body: Record<string, unknown>,
     headers?: Record<string, string>,
@@ -373,12 +399,118 @@ async function postViewerControl(
   return result;
 }
 
+/**
+ * One dispatch of a recoverable mutation (#1490). No reconnect loop: the
+ * request is written once, and what comes back is classified by what it can
+ * PROVE. A connection the kernel refused never carried a byte, so the server
+ * did nothing; a reset, a timeout after the write, an unreadable or missing
+ * body, and a proxy status that says nothing about the upstream all leave the
+ * request possibly on the server and are reported as uncertain. A JSON answer
+ * carrying an admitted id keeps that id. A status or error body alone cannot
+ * prove that the handler rejected the request before dispatch.
+ */
+async function dispatchViewerControl(
+  pathname: string,
+  body: Record<string, unknown>,
+  headers: Record<string, string> = {},
+  context: McpToolCallContext = {},
+  pinConfiguredEndpoint = false,
+): Promise<Record<string, unknown>> {
+  const baseUrl = viewerControlOrigin(process.env, pinConfiguredEndpoint);
+  const token = viewerControlToken(process.env, baseUrl);
+  const now = Date.now();
+  const budgetMs = context.deadlineAt === undefined
+    ? CONTROL_UNSCOPED_RECOVERY_BUDGET_MS
+    : Math.max(1, context.deadlineAt - now - CONTROL_DEADLINE_RESERVE_MS);
+  const attempt = deadlineSignal(Math.min(CONTROL_ATTEMPT_TIMEOUT_MS, budgetMs), {
+    signal: context.signal,
+    reason: "Viewer control dispatch timed out",
+  });
+  const requestHeaders = new Headers({ "content-type": "application/json", ...headers });
+  if (token && !requestHeaders.has("authorization")) requestHeaders.set("authorization", `Bearer ${token}`);
+  requestHeaders.set("origin", baseUrl);
+  requestHeaders.set("sec-fetch-site", "same-origin");
+  let response: Response;
+  /* From here on the request may be on the wire: the service reads this to
+     tell a failure that happened BEFORE any dispatch from one after it. */
+  if (context.dispatch) context.dispatch.attempted = true;
+  try {
+    response = await fetch(new URL(pathname, baseUrl), {
+      method: "POST",
+      // Redirects can repeat a POST after the first endpoint accepted it.
+      redirect: "error",
+      headers: requestHeaders,
+      body: JSON.stringify(body),
+      signal: attempt.signal,
+    });
+  } catch (error) {
+    attempt.release();
+    const code = (error as { code?: unknown }).code;
+    if (code === "ConnectionRefused" || code === "ECONNREFUSED") {
+      throw new McpDispatchNotExecutedError("Viewer control is unreachable: the connection was refused before the request was sent");
+    }
+    throw new McpDispatchUncertainError(
+      attempt.signal.aborted
+        ? "the Viewer did not answer before the dispatch deadline; the request may have been received"
+        : `the connection failed after the request may have been sent (${code ? String(code) : "connection failed"})`,
+    );
+  }
+  let parsed: unknown;
+  let unreadable = false;
+  try {
+    parsed = await response.json() as unknown;
+  } catch {
+    unreadable = true;
+  } finally {
+    attempt.release();
+  }
+  const result = objectRecord(parsed) ? parsed : {};
+  const answered = !unreadable && objectRecord(parsed) && Boolean(text(result.error) || text(result.code) || Object.keys(result).length);
+  if (TRANSIENT_CONTROL_STATUSES.has(response.status) || (response.status === 503 && !answered)) {
+    throw new McpDispatchUncertainError(`Viewer control answered status ${response.status} without a verdict; the request may have been received`);
+  }
+  if (unreadable) {
+    throw new McpDispatchUncertainError(`Viewer control returned an unreadable response with status ${response.status}; the request may have been received`);
+  }
+  if (!objectRecord(parsed)) {
+    throw new McpDispatchUncertainError(`Viewer control returned a malformed response with status ${response.status}; the request may have been received`);
+  }
+  if (result.error || (!response.ok && result.state !== "busy")) {
+    const message = text(result.error) || `Viewer control request failed with status ${response.status}`;
+    const operationId = text(result.operationId);
+    const launchId = text(result.launchId);
+    if (operationId || launchId) {
+      throw new McpDispatchVerdictError(message, {
+        status: response.status,
+        ...(operationId ? { operationId } : {}),
+        ...(launchId ? { launchId } : {}),
+        ...(text(result.conversationId) ? { conversationId: text(result.conversationId) } : {}),
+        ...(text(result.resend) ? { resend: text(result.resend) } : {}),
+        ...(result.actuation === "started" ? { actuation: "started" } : {}),
+        ...(text(result.code) ? { code: text(result.code) } : {}),
+      });
+    }
+    throw new McpDispatchVerdictError(message, {
+      status: response.status,
+      ...(text(result.code) ? { code: text(result.code) } : {}),
+    });
+  }
+  return result;
+}
+
 export function productionViewerControlDependencies(
   pinConfiguredEndpoint = false,
 ): ViewerControlDependencies {
   return {
     get: (pathname, context) => getViewerControl(pathname, context, pinConfiguredEndpoint),
     post: (pathname, body, headers, context) => postViewerControl(
+      pathname,
+      body,
+      headers,
+      context,
+      pinConfiguredEndpoint,
+    ),
+    dispatch: (pathname, body, headers, context) => dispatchViewerControl(
       pathname,
       body,
       headers,
@@ -404,7 +536,14 @@ function viewerControlForCall(
   return {
     ...(control.get ? { get: (pathname: string) => control.get!(pathname, context) } : {}),
     post: (pathname, body, headers) => control.post(pathname, body, headers, context),
+    ...(control.dispatch ? { dispatch: (pathname, body, headers) => control.dispatch!(pathname, body, headers, context) } : {}),
   };
+}
+
+/** The single-attempt dispatch where the control set provides one, and the
+    plain post of a harness that provides only that. */
+function dispatchControl(control: ViewerControlDependencies): NonNullable<ViewerControlDependencies["dispatch"]> {
+  return control.dispatch ?? control.post;
 }
 
 type RegistrySnapshot = ReturnType<ReturnType<typeof agentRegistry>["readOnlySnapshot"]>;
@@ -503,6 +642,9 @@ export interface ViewerMcpDomainDependencies {
   /** Accounts the catalog holds, per engine, so a binding can be answered with
       labels and a caller can see what there is to bind. */
   listBindableAccounts?(engine: BindingEngine): { accountId: string; label: string }[];
+  /** #1490: the ports the original-key send lookup settles through. Absent
+      means production (the shared registry and the runtime host socket). */
+  sendSettlementPorts?(): SendSettlementPorts;
 }
 
 /**
@@ -515,7 +657,16 @@ function productionCallerProject(): string | null {
   const authority = attentionCallerAuthority(attentionCallerSources());
   const conversationId = authority.kind === "root" || authority.kind === "worker" ? authority.conversationId : null;
   if (!conversationId) return null;
-  const conversation = agentRegistry().conversation(conversationId as `conversation_${string}`);
+  return callerProjectFromSnapshot(agentRegistry().readOnlySnapshot(), conversationId);
+}
+
+/**
+ * The canonical project of an authenticated caller: its conversation's
+ * recorded project ownership, else the project of its launch directory. One
+ * resolver for every consumer, read from the registry's own projection.
+ */
+function callerProjectFromSnapshot(snapshot: RegistrySnapshot, conversationId: string): string | null {
+  const conversation = readOnlyConversationLookupFromSnapshot(snapshot).conversation(conversationId as `conversation_${string}`);
   if (!conversation) return null;
   if (conversation.projectOwnership?.project) return conversation.projectOwnership.project;
   const cwd = conversation.generations.at(-1)?.launchProfile?.cwd?.trim();
@@ -842,12 +993,28 @@ export function requestAttentionOperationKey(clientRequestId: string): string {
   return mcpOperationId("request_attention", clientRequestId);
 }
 
-async function spawnAgent(args: McpToolArgs, control: ViewerControlDependencies): Promise<McpToolPayload> {
+async function spawnAgent(args: McpToolArgs, control: ViewerControlDependencies, context?: McpToolCallContext): Promise<McpToolPayload> {
   validateExplicitMcpLaunchModel(args);
-  const clientAttemptId = spawnAttemptId(requestId(args));
-  const body = withoutKeys(args, ["clientRequestId"]);
+  /* #1490: the persisted downstream key wins over a recomputation — it is the
+     key the claim was bound to and the one recovery will look up. */
+  const clientAttemptId = context?.binding?.downstreamKey ?? spawnAttemptId(requestId(args));
+  if (context?.binding) {
+    /* The persisted binding must be the one this dispatch would make now: a
+       row whose target disagrees with the canonical resolution of these
+       arguments is not dispatched under it. Nothing has left this process,
+       so the attempt closes as not-executed. */
+    const cwd = spawnCwd(args);
+    const target = context.binding.target;
+    if (target.identity !== cwd || target.project !== spawnTargetProject(args, cwd)) {
+      throw new McpToolRefusal(
+        "the persisted binding does not name the canonical target of this spawn; nothing was dispatched",
+        { code: "binding_mismatch", status: 400 },
+      );
+    }
+  }
+  const body = withoutKeys(args, ["clientRequestId", "recoveryOnly"]);
   const roleParams = defaultMcpSpawnRoleParams(args);
-  const result = await control.post("/api/spawn", {
+  const result = await dispatchControl(control)("/api/spawn", {
     ...body,
     ...(roleParams ? { roleParams } : {}),
     clientAttemptId,
@@ -855,6 +1022,20 @@ async function spawnAgent(args: McpToolArgs, control: ViewerControlDependencies)
     ...internalServiceHeaders("mcp"),
     [VIEWER_SPAWN_CAPABILITY_HEADER]: ensureOperatorSpawnCapability(),
   });
+  // A readable body alone establishes no acceptance. Validate the fields
+  // this binding publishes before the service can persist a successful replay.
+  if (!text(result.launchId) || !text(result.conversationId)
+    || !["starting", "path-pending", "settled"].includes(result.state as string)
+    || !["pending", "queued", "delivered"].includes(result.initialMessage as string)
+    || (result.ok !== undefined && result.ok !== true)
+    || (result.launched !== undefined && typeof result.launched !== "boolean")
+    || (result.retrySafe !== undefined && result.retrySafe !== false)
+    || (result.path !== undefined && result.path !== null && !text(result.path))
+    || (result.initialMessage === "delivered" && result.launched === false)
+    || (result.state === "starting" && result.initialMessage !== "pending")
+    || (result.state === "settled" && result.initialMessage !== "delivered")) {
+    throw new McpDispatchUncertainError("the spawn response lacks consistent acceptance evidence; recover the original request from its durable receipt");
+  }
   return {
     conversationId: result.conversationId,
     transcriptPath: result.path,
@@ -865,27 +1046,51 @@ async function spawnAgent(args: McpToolArgs, control: ViewerControlDependencies)
   };
 }
 
+/**
+ * The exact client message key a send hands the conversation-host route
+ * (#1490). The route keeps the first 128 characters of what it is given, so
+ * every clientRequestId is hashed into a bounded key. No raw input shares
+ * the generated namespace. Recovery always uses the already persisted key.
+ */
+export function sendDownstreamKey(clientRequestId: string): string {
+  return `mcp_send_${crypto.createHash("sha256").update(clientRequestId).digest("hex")}`;
+}
+
 async function sendMessage(
   args: McpToolArgs,
   control: ViewerControlDependencies,
   dependencies: Pick<ViewerMcpDomainDependencies, "registrySnapshot"> &
     Partial<Pick<ViewerMcpDomainDependencies, "callerAttribution" | "attentionAuthority">>,
+  context?: McpToolCallContext,
 ): Promise<McpToolPayload> {
   const conversationId = text(args.conversationId);
   const transcriptPath = text(args.transcriptPath) || text(args.path);
   if (!conversationId && !transcriptPath) throw new Error("conversationId or transcriptPath is required");
   const message = requiredMessageText(args);
-  const outcome = await control.post("/api/tmux", {
+  const outcome = await dispatchControl(control)("/api/tmux", {
     pid: null,
     path: transcriptPath,
     ...(conversationId ? { conversationId } : {}),
-    clientMessageId: requestId(args),
+    clientMessageId: context?.binding?.downstreamKey ?? sendDownstreamKey(requestId(args)),
     text: message,
     images: [],
     /* #1117: an MCP send is inter-agent traffic by definition; the sender role
        is the server's own caller attribution, so the feed can say WHO relayed. */
     origin: mcpSenderOrigin(dependencies),
   }, callerCapabilityHeaders());
+  const receipt = objectRecord(outcome.receipt) ? outcome.receipt : null;
+  const operationId = text(outcome.operationId) || text(receipt?.operationId);
+  const settledOutcome = text(outcome.outcome);
+  if (!operationId
+    || !["delivered-to-live", "resumed", "held", "pending", "reconfigured", "queued", "delivering", "delivered"].includes(settledOutcome)
+    || (outcome.ok !== undefined && outcome.ok !== true)
+    || (outcome.operationId !== undefined && outcome.operationId !== operationId)
+    || (outcome.receipt !== undefined && (!receipt
+      || receipt.operationId !== operationId
+      || !["queued", "delivered"].includes(receipt.status as string)
+      || (settledOutcome === "delivered") !== (receipt.status === "delivered")))) {
+    throw new McpDispatchUncertainError("the send response lacks consistent acceptance evidence; recover the original request from its durable receipt");
+  }
   /* The registry's OWN lookup over the projection this call already holds (#845),
      rather than a local reimplementation of it. The alias walk is multi-hop and
      cycle-guarded and the path index covers continuity paths, so a send addressed by
@@ -895,11 +1100,10 @@ async function sendMessage(
   const conversation = conversationId
     ? lookup.conversation(conversationId as `conversation_${string}`)
     : lookup.conversationForPath(transcriptPath);
-  const settledOutcome = outcome.outcome ?? "delivered";
   return {
     conversationId: (conversation?.id ?? conversationId) || null,
     transcriptPath: (conversation?.generations.at(-1)?.path ?? transcriptPath) || null,
-    operationId: outcome.operationId ?? (outcome.receipt as { operationId?: unknown } | undefined)?.operationId ?? null,
+    operationId,
     outcome: settledOutcome,
     /* #1131: acceptance is not arrival. A `queued` send is admitted and not yet
        settled, and saying so on the answer itself is what stops a caller from
@@ -3603,14 +3807,250 @@ export function viewerMcpToolPolicy(
   );
 }
 
+/* ── ORIGINAL-KEY RECOVERY (#1490) ──────────────────────────────────────── */
+
+/** The server-derived caller, and nothing the arguments say. The project is
+    the canonical one of the AUTHENTICATED conversation, read from the registry
+    projection the call already holds — never a separately resolved guess. An
+    authority or registry that faults reads as unidentified, which fails both
+    a fresh claim and a recovery closed. */
+function recoveryCaller(dependencies: Partial<Pick<ViewerMcpDomainDependencies, "attentionAuthority" | "registrySnapshot">>): McpRequestCaller {
+  const unidentified: McpRequestCaller = { kind: "unidentified", conversationId: null, project: null };
+  let authority: AttentionCallerAuthority;
+  try {
+    authority = dependencies.attentionAuthority?.() ?? { kind: "unidentified" };
+  } catch {
+    return unidentified;
+  }
+  if (authority.kind === "unidentified") return unidentified;
+  if (authority.conversationId === null) return { kind: authority.kind, conversationId: null, project: null };
+  let project: string | null;
+  try {
+    if (!dependencies.registrySnapshot) return unidentified;
+    project = callerProjectFromSnapshot(dependencies.registrySnapshot(), authority.conversationId);
+  } catch {
+    return unidentified;
+  }
+  return { kind: authority.kind, conversationId: authority.conversationId, project };
+}
+
+function spawnCwd(args: McpToolArgs): string {
+  const raw = text(args.cwd);
+  if (!raw) throw new Error("cwd is required");
+  return path.resolve(raw === "~" || raw.startsWith("~/") ? path.join(os.homedir(), raw.slice(1)) : raw);
+}
+
+function conversationProject(conversation: { projectOwnership?: { project?: string } | null; generations: { launchProfile?: { cwd?: string | null } | null }[] } | null | undefined): string | null {
+  if (!conversation) return null;
+  if (conversation.projectOwnership?.project) return conversation.projectOwnership.project;
+  const cwd = conversation.generations.at(-1)?.launchProfile?.cwd?.trim();
+  return cwd ? projectForCwd(cwd) : null;
+}
+
+function bindSend(args: McpToolArgs, dependencies: ViewerMcpDomainDependencies): McpRequestBindingInput {
+  const conversationId = text(args.conversationId);
+  const transcriptPath = text(args.transcriptPath) || text(args.path);
+  if (!conversationId && !transcriptPath) throw new Error("conversationId or transcriptPath is required");
+  requiredMessageText(args);
+  const lookup = readOnlyConversationLookupFromSnapshot(dependencies.registrySnapshot());
+  const conversation = conversationId
+    ? lookup.conversation(conversationId as `conversation_${string}`)
+    : lookup.conversationForPath(transcriptPath);
+  return {
+    caller: recoveryCaller(dependencies),
+    target: {
+      project: conversationProject(conversation),
+      identity: conversation?.id ?? (conversationId || transcriptPath),
+    },
+    downstreamKey: sendDownstreamKey(requestId(args)),
+  };
+}
+
+/** The canonical project of a spawn's target: the launch directory's, and
+    nothing the arguments say. A supplied `project` is admitted only when it
+    names that same project. The route records an explicit project as the new
+    conversation's durable ownership, so a value that contradicts the launch
+    directory would make a forged project both the binding's metadata and the
+    conversation's owner; it is refused before any claim, so the key is not
+    burned. */
+function spawnTargetProject(args: McpToolArgs, cwd: string): string | null {
+  const canonical = projectForCwd(cwd);
+  const supplied = text(args.project).trim();
+  if (!supplied) return canonical;
+  const explicit = validExplicitProject(supplied);
+  if (!explicit || explicit !== canonical) {
+    throw new McpToolRefusal(
+      "project contradicts the canonical project of cwd; omit it or name the launch directory's own project",
+      { code: "invalid_request", status: 400, ...(canonical ? { canonicalProject: canonical } : {}) },
+    );
+  }
+  return canonical;
+}
+
+function bindSpawn(args: McpToolArgs, dependencies: ViewerMcpDomainDependencies): McpRequestBindingInput {
+  const cwd = spawnCwd(args);
+  return {
+    caller: recoveryCaller(dependencies),
+    target: { project: spawnTargetProject(args, cwd), identity: cwd },
+    downstreamKey: `mcp_spawn_${crypto.createHash("sha256").update(requestId(args)).digest("hex")}`,
+  };
+}
+
+const RECOVERY_ABSENT_REASON = "no downstream record holds this request yet; execution remains possible, so look it up again under the same clientRequestId";
+
+async function recoverSend(
+  binding: McpRequestBinding,
+  legacy: boolean,
+  dependencies: ViewerMcpDomainDependencies,
+  args?: McpToolArgs,
+): Promise<McpRecoveryEvidence> {
+  /* A send carries no durable sender identity of its own, so a claim made
+     before bindings existed has no evidence that establishes its owner. */
+  if (legacy) {
+    return { outcome: "unknown", evidence: "legacy-receipt-unbound", reason: "no durable evidence establishes the owner of this send", ids: {}, ownership: "unknown" };
+  }
+  if (!binding.target.identity) {
+    return { outcome: "unknown", evidence: "none", reason: "the bound target names no conversation", ids: {} };
+  }
+  const ports: SendSettlementPorts = dependencies.sendSettlementPorts?.() ?? {};
+  const found = await resolveOriginalSend({ conversationId: binding.target.identity, clientMessageId: binding.downstreamKey, ...(typeof args?.text === "string" ? { text: args.text } : {}) }, ports);
+  if (found.kind === "unreadable") {
+    return { outcome: "unknown", evidence: "delivery-record", reason: `the delivery record could not be read: ${found.reason}`, ids: {} };
+  }
+  if (found.kind === "absent") return { outcome: "unknown", evidence: "none", reason: RECOVERY_ABSENT_REASON, ids: {} };
+  if (found.kind === "unresolved") {
+    return { outcome: "unknown", evidence: "none", reason: "the bound target names no conversation the registry knows, so no delivery record can be matched to it", ids: {} };
+  }
+  if (found.kind === "contradictory") {
+    return { outcome: "unknown", evidence: "delivery-record", reason: "the delivery payload contradicts the bound request", ids: {}, ownership: "unknown" };
+  }
+  if (found.kind === "ambiguous") {
+    return { outcome: "unknown", evidence: "delivery-record", reason: "more than one delivery operation claims this key; the match is ambiguous", ids: {} };
+  }
+  const receipt = found.current.readable ? found.current.value : found.receipt;
+  const ids: Record<string, string> = {
+    operationId: found.operationId,
+    ...(receipt.conversationId ? { conversationId: receipt.conversationId } : {}),
+    ...(found.deliveryId ? { deliveryId: found.deliveryId } : {}),
+  };
+  const unreadableNote = found.current.readable ? null : `; the current runtime answer could not be read (${found.current.reason})`;
+  if (receipt.state === "delivered" || receipt.state === "failed") {
+    return {
+      outcome: "settled",
+      evidence: receipt.evidence,
+      reason: receipt.reason ? `${receipt.reason}${unreadableNote ?? ""}` : unreadableNote?.slice(2) ?? null,
+      ids,
+      facts: {
+        state: receipt.state,
+        resend: receipt.resend,
+        duplicateRisk: receipt.duplicateRisk,
+        acceptedAt: receipt.acceptedAt,
+        settledAt: receipt.settledAt,
+      },
+    };
+  }
+  const executing = found.reservationState === "delivery-uncertain";
+  return {
+    outcome: executing ? "in-flight" : "accepted",
+    evidence: receipt.evidence,
+    reason: `${receipt.reason ?? "accepted for delivery"}${unreadableNote ?? ""}`,
+    ids,
+    facts: { state: receipt.state, acceptedAt: receipt.acceptedAt, resend: receipt.resend, duplicateRisk: receipt.duplicateRisk },
+  };
+}
+
+async function recoverSpawn(
+  binding: McpRequestBinding,
+  legacy: boolean,
+  dependencies: ViewerMcpDomainDependencies,
+  args?: McpToolArgs,
+): Promise<McpRecoveryEvidence> {
+  let snapshot: RegistrySnapshot;
+  try {
+    snapshot = dependencies.registrySnapshot();
+  } catch (error) {
+    return { outcome: "unknown", evidence: "spawn-receipt", reason: `the launch record could not be read: ${error instanceof Error ? error.message : String(error)}`, ids: {} };
+  }
+  const key = legacy ? spawnAttemptId(binding.clientRequestId) : binding.downstreamKey;
+  const receipts = Object.values(snapshot.receipts).filter((receipt) => receipt.clientAttemptId === key);
+  if (receipts.length === 0) {
+    return { outcome: "unknown", evidence: "none", reason: RECOVERY_ABSENT_REASON, ids: {}, ...(legacy ? { ownership: "unknown" as const } : {}) };
+  }
+  if (receipts.length > 1) {
+    return { outcome: "unknown", evidence: "spawn-receipt", reason: "more than one launch receipt claims this key; the match is ambiguous", ids: {}, ...(legacy ? { ownership: "unknown" as const } : {}) };
+  }
+  const receipt = receipts[0]!;
+  const ownership = legacy
+    ? (binding.caller.conversationId !== null && receipt.parentConversationId === binding.caller.conversationId ? "established" : "unknown")
+    : undefined;
+  if (legacy && ownership !== "established") {
+    return { outcome: "unknown", evidence: "legacy-receipt-unbound", reason: "no durable evidence establishes the owner of this launch", ids: {}, ownership: "unknown" };
+  }
+  if ((receipt.parentConversationId !== null && receipt.parentConversationId !== binding.caller.conversationId)
+    || (binding.target.identity && path.resolve(receipt.cwd) !== binding.target.identity)
+    || (typeof args?.prompt === "string" && receipt.launchDisplay && receipt.launchDisplay.prompt !== args.prompt)) {
+    return { outcome: "unknown", evidence: "spawn-receipt", reason: "the durable launch owner or payload contradicts the bound request", ids: {}, ownership: "unknown" };
+  }
+  const ids: Record<string, string> = {
+    launchId: receipt.launchId,
+    conversationId: receipt.conversationId,
+    ...(receipt.artifactPath ? { transcriptPath: receipt.artifactPath } : {}),
+  };
+  const terminal = receipt.rejection !== null || receipt.state === "failed" || receipt.state === "conflicted" || receipt.state === "completed";
+  if (terminal) {
+    return {
+      outcome: "settled",
+      evidence: "spawn-receipt",
+      reason: receipt.rejection?.guidance ?? receipt.error ?? null,
+      ids,
+      facts: {
+        state: receipt.state,
+        launched: receipt.state === "completed",
+        ...(receipt.rejection ? { rejection: receipt.rejection.code } : {}),
+      },
+      ...(ownership ? { ownership } : {}),
+    };
+  }
+  const executing = receipt.verifiedHost !== null || receipt.pane !== null
+    || receipt.state === "host-verified" || receipt.state === "prompt-delivered" || receipt.state === "path-pending";
+  return {
+    outcome: executing ? "in-flight" : "accepted",
+    evidence: "spawn-receipt",
+    reason: `launch receipt is ${receipt.state}`,
+    ids,
+    facts: { state: receipt.state },
+    ...(ownership ? { ownership } : {}),
+  };
+}
+
+/**
+ * The recoverable mutations (#1490): both bind the caller before dispatch and
+ * answer an existing claim from durable evidence only. Neither `recover` can
+ * reach a mutation binding.
+ */
+export function viewerMcpRecoverableTools(
+  domainDependencies: ViewerMcpDomainDependencies = productionDomainDependencies,
+): Partial<Record<McpToolName, McpRecoverableTool>> {
+  return {
+    spawn_agent: {
+      bind: (args) => bindSpawn(args, domainDependencies),
+      recover: (binding, options) => recoverSpawn(binding, options.legacy, domainDependencies, options.args),
+    },
+    send_message: {
+      bind: (args) => bindSend(args, domainDependencies),
+      recover: (binding, options) => recoverSend(binding, options.legacy, domainDependencies, options.args),
+    },
+  };
+}
+
 export function viewerMcpBindings(
   linkTaskDependencies: LinkTaskToPipelineDependencies = productionLinkTaskDependencies,
   controlDependencies: ViewerControlDependencies = productionViewerControlDependencies(),
   domainDependencies: ViewerMcpDomainDependencies = productionDomainDependencies,
 ): McpToolBindings {
   return {
-    spawn_agent: (args, context) => spawnAgent(args, viewerControlForCall(controlDependencies, context)),
-    send_message: (args, context) => sendMessage(args, viewerControlForCall(controlDependencies, context), domainDependencies),
+    spawn_agent: (args, context) => spawnAgent(args, viewerControlForCall(controlDependencies, context), context),
+    send_message: (args, context) => sendMessage(args, viewerControlForCall(controlDependencies, context), domainDependencies, context),
     message_receipt: (args) => messageReceipt(args),
     create_task: createBoardTask,
     update_task: updateBoardTask,
