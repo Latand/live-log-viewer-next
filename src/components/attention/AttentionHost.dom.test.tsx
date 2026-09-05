@@ -19,6 +19,7 @@ import type { MiniStack, SchemeRect } from "@/components/scheme/layout";
 import { AttentionHost, resetHandoffTransactionsForTest } from "./AttentionHost";
 import { createFocusHandoffBus, type BoardFocusController } from "./focusHandoffBus";
 import { claimHandoff, readHandoffClaim } from "./handoffClaim";
+import { setLeftShellInset } from "../shellLayout";
 import type { FocusObservation } from "./navigate";
 
 /*
@@ -66,6 +67,7 @@ afterAll(async () => {
 
 let roots: Root[] = [];
 beforeEach(() => {
+  setLeftShellInset(0);
   dom.document.body.replaceChildren();
   roots = [];
   visibility = "visible";
@@ -89,6 +91,7 @@ beforeEach(() => {
 afterEach(async () => {
   for (const root of roots) flushSync(() => root.unmount());
   roots = [];
+  setLeftShellInset(0);
   arrivalClockCleanup?.();
   arrivalClockCleanup = undefined;
   await settle();
@@ -989,6 +992,34 @@ function arrivalClock() {
   };
 }
 const strip = () => one("[data-testid='attention-arrival']");
+
+test("dock opening, resizing and closing move the arrival and retained Back without renewing the deadline", async () => {
+  const clock = arrivalClock();
+  raiseDirected();
+  const { bus } = board({ [ANCHOR]: LIVE_RECT });
+  mount(bus);
+  await settle();
+  const arrival = strip()!;
+  const cluster = arrival.parentElement!;
+  const back = one("[data-testid='attention-return']");
+  const deadline = clock.callbacks[0].deadline;
+  const closedStyle = cluster.getAttribute("style");
+  await clock.advance(4_000);
+  flushSync(() => setLeftShellInset(248 + 440));
+  const openStyle = cluster.getAttribute("style");
+  expect(openStyle).not.toBe(closedStyle);
+  flushSync(() => setLeftShellInset(248 + 700));
+  expect(cluster.getAttribute("style")).not.toBe(openStyle);
+  expect(strip()).toBe(arrival);
+  expect(one("[data-testid='attention-return']")).toBe(back);
+  expect(clock.callbacks).toHaveLength(1);
+  expect(clock.callbacks[0].deadline).toBe(deadline);
+  await clock.advance(4_000);
+  expect(strip()).toBeNull();
+  expect(one("[data-testid='attention-return']")).toBe(back);
+  flushSync(() => setLeftShellInset(0));
+  expect(cluster.getAttribute("style")).toBe(closedStyle);
+});
 
 for (const directed of [false, true]) {
   test(`${directed ? "directed" : "auto-follow"} arrival explains only the confirmed landing for eight seconds; polls preserve its deadline`, async () => {

@@ -3,6 +3,8 @@
 import { CornerUpLeft } from "lucide-react";
 
 import type { TFunction } from "@/lib/i18n";
+import { MIN_WIDTH, RAIL_WIDTH, RESERVED_BESIDE_DOCK } from "../orchestrator/OrchestratorDock";
+import { useLeftShellInset } from "../shellLayout";
 
 /** Back stays available after the passive arrival explanation expires. */
 
@@ -18,10 +20,19 @@ export interface FocusReturnChipProps {
 
 export function FocusReturnChip({ onReturn, precise, t, arrival }: FocusReturnChipProps) {
   const label = precise ? t("attention.return") : t("attention.returnLine");
+  const inset = useLeftShellInset();
+  // The store holds the preferred dock width. Apply its CSS viewport clamp too,
+  // so resizing the window keeps this cluster beside the rendered dock.
+  const left = inset > 0
+    ? `calc(${RAIL_WIDTH + 12}px + max(${MIN_WIDTH}px, min(${inset - RAIL_WIDTH}px, calc(100vw - ${RESERVED_BESIDE_DOCK}px))))`
+    : `${RAIL_WIDTH + 12}px`;
   return (
-    // AttentionHost mounts at the Viewer root. Clear the 248px project rail
-    // and the board toolbar before placing the arrival and its Back control.
-    <div data-scheme-ui className="pointer-events-none absolute left-[260px] top-[100px] z-40 flex max-w-[min(28rem,calc(100%-272px))] flex-col items-start gap-2">
+    // AttentionHost mounts at the Viewer root, outside the board's flex column.
+    <div
+      data-scheme-ui
+      style={{ left, maxWidth: `min(28rem, calc(100vw - ${left} - 12px))` }}
+      className="pointer-events-none absolute top-[100px] z-40 flex flex-col items-start gap-2"
+    >
       {arrival && (
         <div
           data-testid="attention-arrival"
