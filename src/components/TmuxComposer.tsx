@@ -34,9 +34,8 @@ import {
   enqueueOutbox,
   markOutboxResponded,
   outboxHistory,
-  outboxAwaitsTurnBoundary,
   outboxReceiptPatch,
-  outboxStateForReceiptStatus,
+  readOutbox,
   rebindOutboxEchoText,
   releaseHeldOutbox,
   transcriptEchoCount,
@@ -1856,14 +1855,11 @@ export function TmuxComposerCore({
          truly delivered receipt marks it `delivered`. */
       if (outboxKeys.current.has(settlement.entry.key)) {
         const receipt = displayedRuntimeReceipts.find((candidate) =>
-          candidate.idempotencyKey === settlement.entry.key && receiptIsAdmitted(candidate.status));
-        const state = receipt ? outboxStateForReceiptStatus(receipt.status) : "delivered";
-        updateOutbox(cardId, settlement.entry.key, {
-          state,
-          settledAt: nowMs(),
-          /* #1213: parked at a turn boundary is not "on the wire". */
-          awaitingTurn: receipt ? outboxAwaitsTurnBoundary(receipt.status) : undefined,
-        });
+          (candidate.idempotencyKey === settlement.entry.key
+            || candidate.operationId === settlement.entry.operationId) && receiptIsAdmitted(candidate.status));
+        const entry = readOutbox(cardId).find((candidate) => candidate.id === settlement.entry.key);
+        const patch = entry && receipt ? outboxReceiptPatch(entry, receipt.status, receipt, nowMs()) : null;
+        if (patch) updateOutbox(cardId, settlement.entry.key, patch);
       } else {
         const next = draftAfterDelivery(textRef.current, settlement.text);
         if (next !== textRef.current) setText(next);
@@ -1887,14 +1883,14 @@ export function TmuxComposerCore({
      bubble. Launch-owned bubbles retire on their echo, not on a receipt. */
   useEffect(() => {
     for (const entry of outbox) {
-      if (entry.launchOwned || entry.state === "delivered") continue;
+      if (entry.launchOwned) continue;
       const receipt = displayedRuntimeReceipts.find((candidate) =>
         candidate.idempotencyKey === entry.id
         && (receiptIsAdmitted(candidate.status) || receiptIsTerminal(candidate.status)));
       if (!receipt) continue;
-      const patch = outboxReceiptPatch(entry, receipt.status);
+      const patch = outboxReceiptPatch(entry, receipt.status, receipt, nowMs());
       if (!patch) continue;
-      updateOutbox(cardId, entry.id, { ...patch, settledAt: nowMs() });
+      updateOutbox(cardId, entry.id, patch);
     }
   }, [displayedRuntimeReceipts, outbox, cardId]);
 
@@ -2083,6 +2079,7 @@ export function TmuxComposerCore({
         `delivering`, only a delivered receipt reads `delivered` (round-1 P1#4). */
     const settleOutbox = (state: OutboxState, error?: string, held?: boolean, awaitingTurn?: true) => {
       if (!outboxId) return;
+      if (readOutbox(cardId).find((entry) => entry.id === outboxId)?.state === "delivered") return;
       /* A held settlement stamps the entry so `releaseHeldOutbox` can requeue
          it level-wise once the switch is over — a parked hold looks exactly
          like an in-flight delivery otherwise. */
@@ -2105,12 +2102,19 @@ export function TmuxComposerCore({
       /* `queued` is durable admission at a turn boundary. It is a switch hold
          only while the card's migration evidence says this delivery belongs to
          a successor; an ordinary queued receipt must never requeue itself. */
-      return settleOutbox(
-        outboxStateForReceiptStatus(receipt.status),
-        undefined,
-        holdsDelivery && receipt.status === "queued",
-        outboxAwaitsTurnBoundary(receipt.status),
-      );
+      if (!outboxId) return;
+      const entry = readOutbox(cardId).find((candidate) => candidate.id === outboxId);
+      if (!entry) return;
+      const patch = outboxReceiptPatch(entry, receipt.status, receipt, nowMs());
+      const held = holdsDelivery && receipt.status === "queued" && entry.state !== "delivered";
+      if (patch || (held && !entry.heldForSwitch)) updateOutbox(cardId, outboxId, {
+        ...patch,
+        ...(held ? { heldForSwitch: true as const } : {}),
+      });
+      if (receipt.status === "delivered") {
+        outboxImages.current.delete(outboxId);
+        outboxFiles.current.delete(outboxId);
+      }
     };
     /* Resolve the key before selecting the payload. A generation retained after
        uncertain admission owns an immutable text/image snapshot; later edits

@@ -22,6 +22,7 @@ import { setLocale, translate } from "@/lib/i18n";
 import { attachModeFor, capabilitiesFor } from "./agentCapabilities";
 import { setTmuxComposerRuntimeDependenciesForTests } from "./tmuxComposerRuntime";
 import { useAgentCapabilities } from "./useAgentCapabilities";
+import type { RuntimeReceipt } from "./runtime/runtimeModel";
 
 const dom = new Window();
 installActEnv();
@@ -81,11 +82,14 @@ const structuredView: RuntimeSessionView = {
 
 import { TmuxComposer } from "./TmuxComposer";
 import { writeProfile } from "./runtimeProfile";
-import { readOutbox, resetOutboxForTests, retryOutbox } from "./conversation/outbox";
+import { enqueueOutbox, updateOutbox, visibleOutbox, readOutbox, resetOutboxForTests, retryOutbox } from "./conversation/outbox";
+
+let snapshotReceipts: RuntimeReceipt[] = [];
 
 const realFetch = globalThis.fetch;
 
 beforeEach(() => {
+  snapshotReceipts = [];
   setRuntimeUiEnabledForTests(false);
   setTmuxComposerRuntimeDependenciesForTests({
     useAgentCapabilities: (candidate) => {
@@ -102,7 +106,7 @@ beforeEach(() => {
     },
     useRuntimeReceiptsForArtifact: (path, conversationId) => {
       const real = useRuntimeReceiptsForArtifact(path, conversationId);
-      return path === "/codex-snapshot.jsonl" || conversationId === "conv-snapshot" ? [] : real;
+      return path === "/codex-snapshot.jsonl" || conversationId === "conv-snapshot" ? snapshotReceipts : real;
     },
   });
 });
@@ -235,7 +239,7 @@ test("text-only unhosted structured composer sends through durable recovery admi
   const sends: SendBody[] = [];
   mockWire(sends, [delivered]);
 
-  const { host, root } = await renderInto(<TmuxComposer file={file} deadHost />);
+  const { host, root } = await renderInto(<TmuxComposer file={{ ...file, proc: null }} deadHost />);
   const { type, submit } = composerControls(host);
   await settle(() => type("continue while the host recovers"));
   await settle(() => submit());
@@ -258,7 +262,7 @@ test("dead structured image-only input stays removable and avoids failing recove
 
   structuredView.session.host = "unhosted";
   await act(async () => {
-    root.render(<TmuxComposer file={file} deadHost />);
+    root.render(<TmuxComposer file={{ ...file, proc: null }} deadHost />);
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
 
@@ -296,7 +300,7 @@ test("dead structured text plus images stays local and retries after hosting ret
 
   structuredView.session.host = "unhosted";
   await act(async () => {
-    root.render(<TmuxComposer file={file} deadHost />);
+    root.render(<TmuxComposer file={{ ...file, proc: null }} deadHost />);
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
   await settle(() => composerControls(host).submit());
@@ -338,7 +342,7 @@ test("structured recovery state is bounded and exposes retry details", async () 
     return new Promise<Response>((resolve) => { finishRecovery = resolve; });
   }) as typeof fetch;
 
-  const { host, root } = await renderInto(<TmuxComposer file={file} deadHost />);
+  const { host, root } = await renderInto(<TmuxComposer file={{ ...file, proc: null }} deadHost />);
   const { type, submit } = composerControls(host);
   await settle(() => type("preserve this recovery draft"));
   await settle(() => submit());
@@ -488,4 +492,131 @@ test("a send with no explicit selection rides no runtime override, on first atte
   expect(sends[1]!.runtime).toBeUndefined();
 
   await act(async () => root.unmount());
+});
+
+// Synthetic delayed reconnect: the recipient settled before the retained reply.
+test("late receipt snapshot preserves delivery time across replay and remount", async () => {
+  const origin = Date.now() - 120_000;
+  const serverAt = origin + 40_000;
+  const key = "late-snapshot";
+  enqueueOutbox("conv-snapshot", { id: key, text: "Inspect queued work.", images: 0, at: origin });
+  updateOutbox("conv-snapshot", key, { state: "delivering" });
+  const sends: SendBody[] = [];
+  mockWire(sends, [delivered]);
+  let mounted = await renderInto(<TmuxComposer file={file} />);
+  try {
+    snapshotReceipts = [{
+      operationId: "op-late-snapshot", idempotencyKey: key, conversationId: "conv-snapshot",
+      kind: "send", status: "delivered", admittedAt: new Date(origin).toISOString(),
+      at: new Date(serverAt).toISOString(), revision: 3,
+    }];
+    await settle(() => mounted.root.render(<TmuxComposer file={file} />));
+    expect(readOutbox("conv-snapshot")[0]?.settledAt).toBe(serverAt);
+    expect(visibleOutbox(readOutbox("conv-snapshot"), new Map(), Date.now(), null, origin + 60_000)).toHaveLength(0);
+    await settle(() => mounted.root.render(<TmuxComposer file={file} />));
+    expect(readOutbox("conv-snapshot")[0]?.settledAt).toBe(serverAt);
+    await act(async () => mounted.root.unmount());
+    mounted = await renderInto(<TmuxComposer file={file} />);
+    expect(readOutbox("conv-snapshot")[0]?.settledAt).toBe(serverAt);
+    expect(sends).toHaveLength(0);
+  } finally {
+    await act(async () => mounted.root.unmount());
+  }
+});
+
+
+test.each(["missing", "invalid", "future", "before-submission", "before-admission"])(
+  "delivered snapshot with %s time waits for valid settlement evidence",
+  async (variant) => {
+    const origin = Date.now() - 1_200_000;
+    const key = "unknown-settlement";
+    const serverAt = origin + 40_000;
+    const at = variant === "missing" ? undefined : variant === "invalid" ? "not-a-date"
+      : variant === "future" ? new Date(Date.now() + 60_000).toISOString()
+      : variant === "before-submission" ? new Date(origin - 1_000).toISOString()
+      : new Date(origin + 1_000).toISOString();
+    snapshotReceipts = [{
+      operationId: "op-unknown-settlement", idempotencyKey: key, conversationId: "conv-snapshot",
+      kind: "send", status: "delivered", admittedAt: new Date(origin + 2_000).toISOString(),
+      at, revision: 3,
+    } as RuntimeReceipt];
+    enqueueOutbox("conv-snapshot", { id: key, text: "Inspect queued work.", images: 0, at: origin });
+    updateOutbox("conv-snapshot", key, { state: "delivering" });
+    mockWire([], [delivered]);
+    const mounted = await renderInto(<TmuxComposer file={file} />);
+    try {
+      expect(readOutbox("conv-snapshot")[0]?.state).toBe("delivered");
+      expect(readOutbox("conv-snapshot")[0]?.settledAt).toBeUndefined();
+      expect(visibleOutbox(readOutbox("conv-snapshot"), new Map(), Date.now(), null, origin + 60_000)).toHaveLength(1);
+      // Exact echo remains sufficient even while the settlement time is unknown.
+      expect(visibleOutbox(readOutbox("conv-snapshot"), new Map([["Inspect queued work.", 1]]), Date.now())).toHaveLength(0);
+      snapshotReceipts = [{ ...snapshotReceipts[0]!, at: new Date(serverAt).toISOString(), revision: 4 }];
+      await settle(() => mounted.root.render(<TmuxComposer file={file} />));
+      expect(readOutbox("conv-snapshot")[0]?.settledAt).toBe(serverAt);
+      expect(visibleOutbox(readOutbox("conv-snapshot"), new Map(), Date.now(), null, origin + 60_000)).toHaveLength(0);
+    } finally {
+      await act(async () => mounted.root.unmount());
+    }
+  },
+);
+
+test("immediate delivered response uses its terminal transition time", async () => {
+  const sends: SendBody[] = [];
+  let serverAt = 0;
+  const realNow = Date.now;
+  const origin = realNow();
+  let clock = origin;
+  Date.now = () => clock;
+  mockWire(sends, [(body) => {
+    serverAt = origin + 40_000;
+    clock = origin + 120_000;
+    const response = delivered(body);
+    response.json.receipt.at = new Date(serverAt).toISOString();
+    return response;
+  }]);
+  const { host, root } = await renderInto(<TmuxComposer file={file} />);
+  try {
+    const controls = composerControls(host);
+    await settle(() => controls.type("Inspect queued work."));
+    await settle(controls.submit);
+    expect(sends).toHaveLength(1);
+    expect(readOutbox("conv-snapshot")[0]).toMatchObject({ state: "delivered", settledAt: serverAt });
+  } finally {
+    Date.now = realNow;
+    await act(async () => root.unmount());
+  }
+});
+
+
+test("queued send settles from a later snapshot without resending or re-aging", async () => {
+  const sends: SendBody[] = [];
+  const originalNow = Date.now;
+  const origin = originalNow();
+  let clock = origin;
+  Date.now = () => clock;
+  mockWire(sends, [(body) => ({ status: 200, json: { ok: true, receipt: {
+    ...delivered(body).json.receipt, status: "queued", at: new Date(origin).toISOString(),
+  } } })]);
+  const { host, root } = await renderInto(<TmuxComposer file={file} />);
+  try {
+    const controls = composerControls(host);
+    await settle(() => controls.type("Inspect queued work."));
+    await settle(controls.submit);
+    expect(readOutbox("conv-snapshot")[0]).toMatchObject({ state: "delivering", awaitingTurn: true });
+    expect(readOutbox("conv-snapshot")[0]?.settledAt).toBeUndefined();
+    clock = origin + 120_000;
+    snapshotReceipts = [{ ...delivered(sends[0]!).json.receipt,
+      kind: "send", status: "delivered", at: new Date(origin + 40_000).toISOString(), revision: 3,
+    }];
+    await settle(() => root.render(<TmuxComposer file={file} />));
+    expect(readOutbox("conv-snapshot")[0]).toMatchObject({ state: "delivered", settledAt: origin + 40_000 });
+    snapshotReceipts = [{ ...snapshotReceipts[0]!, at: "", revision: 4 }];
+    clock += 60_000;
+    await settle(() => root.render(<TmuxComposer file={file} />));
+    expect(readOutbox("conv-snapshot")[0]?.settledAt).toBe(origin + 40_000);
+    expect(sends).toHaveLength(1);
+  } finally {
+    Date.now = originalNow;
+    await act(async () => root.unmount());
+  }
 });
