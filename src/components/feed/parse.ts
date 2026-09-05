@@ -2467,7 +2467,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     if (obj.type === "turn_context" || obj.type === "compacted") reasoningBoundary += 1;
     const semanticKind = codexThreadItemKind(rec(p.item).type) || boundaryType;
     if (["message", "usermessage", "agentmessage", "functioncall", "functioncalloutput", "customtoolcall",
-      "customtoolcalloutput", "commandexecution", "filechange", "mcptoolcall", "dynamictoolcall",
+      "customtoolcalloutput", "commandexecution", "filechange", "mcptoolcall", "dynamictoolcall", "extension",
       "collabagenttoolcall", "websearch", "imageview", "imagegeneration", "mcptoolcallbegin", "mcptoolcallend",
       "commandexecutionoutputdelta", "filechangeoutputdelta"].includes(semanticKind)) reasoningBoundary += 1;
     if (["taskstarted", "taskcomplete", "turnstarted", "turncompleted", "turnaborted", "contextcompacted"].includes(boundaryType)) {

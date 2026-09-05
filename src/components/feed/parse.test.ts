@@ -2634,6 +2634,27 @@ describe("compact identified reasoning (#1534)", () => {
     expect(rows.filter(({ item }) => item.kind === "think")).toHaveLength(2);
   });
 
+  test("Extension completion separates reasoning while retaining the earlier tool slot", () => {
+    const extension = (type: string) => JSON.stringify({ type: "event_msg", payload: {
+      type, turn_id: "turn-a", item: { type: "Extension", id: "extension-a",
+        kind: "search", action: "lookup", query: "fixture", results: type === "item_completed" ? "done" : "" },
+    } });
+    const lines = [extension("item_started"), reasoning("before"), extension("item_completed"), reasoning("after")];
+    const parser = session();
+    const before = parser.feed(lines.slice(0, 2), 0, true);
+    const live = parser.feed(lines, 0, true);
+    expect(live.items.map(({ item }) => item.kind)).toEqual(["tool", "think", "think"]);
+    expect(live.items[0].key).toBe(before.items[0].key);
+    expect(live.items[0].item).toMatchObject({ kind: "tool", id: "extension-a", tool: "Extension", status: "ok", outputPreview: '"done"' });
+    expect(live.items.slice(1).map(({ item }) => item.kind === "think" ? item.members : [])).toEqual([
+      [{ sourceId: "before", anchorKey: "row:1:0", text: "", availability: "unavailable" }],
+      [{ sourceId: "after", anchorKey: "row:3:0", text: "", availability: "unavailable" }],
+    ]);
+    expect(parser.feed(lines, 0, false).items).toEqual(live.items);
+    expect(session().feed(lines, 0, false).items).toEqual(live.items);
+    assertParity(codexFile, lines, { chunks: [1] });
+  });
+
   for (const boundary of [
     { type: "event_msg", payload: { type: "task_started" } },
     { type: "event_msg", payload: { type: "turn_aborted" } },
