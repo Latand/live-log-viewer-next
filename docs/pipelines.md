@@ -101,7 +101,43 @@ Pipeline stages cannot create another pipeline. The stage-kind validator and the
 - `resume` — return to the saved pipeline phase and resume an embedded flow.
 - `retry-stage` — restore the last passed commit and start a fresh attempt.
 - `skip-stage` — record an operator skip and follow `next`.
-- `close` — close the pipeline and any embedded flow while retaining history, the worktree, and any live stage panes for inspection.
+- `close` — close the pipeline and any embedded flow while retaining history, the worktree, and any live stage panes for inspection. A close first asks the runtime host to end each resident stage host; when the calling process has no structured control channel at all (an MCP host process), it ends the host by the identity the registry recorded (pid, start identity, boot epoch). That path acts only on an attempt affirmatively bound to the row: the attempt names the conversation the row is the current generation of, and its launch has a receipt naming that same conversation; no launch, no receipt, or a receipt naming another conversation is unresolved ownership and nothing is signalled. The same authority (the row still naming that exact process for that conversation, no orchestrator seat) is asked again after every await inside the termination and one step before each signal. The report says which Viewer generation started the host and whether it still exists. A signal that was sent and did not end the whole authorized tree — a survivor, a refused signal — leaves the close refused with the pids named, and the survivors' identities are kept on the attempt: until each is proven gone, no later close may terminalize the attempt on registry or transcript evidence, however dead the row looks.
+
+After a Viewer restart, startup adoption consults the pipeline record before re-hosting a structured conversation: a conversation whose stage attempt has already settled (passed, failed, parked or skipped) is not resumed on the strength of its unfinished-turn claim alone, because no controller would accept its verdict or advance it. Work owed to it — a held delivery, a pending operation, an orchestrator recovery — can still make it eligible, subject to the evidence fences below.
+
+
+A partial close retains the PID, process start identity and boot epoch of every
+captured survivor on the attempt. Authority or identity loss after termination
+starts preserves this evidence, including exceptions from authority or process
+probes. Later partial stops merge survivors across host
+generations; only a positive death observation removes an identity. A dead root
+or terminal transcript cannot settle a close while any recorded survivor remains
+alive or unverifiable. Retained identities provide evidence for refusing a close;
+they do not grant permission to signal a detached survivor.
+Every attempt's saved survivors are checked even when host deduplication or the
+teardown deadline skips its stop call. An unconfirmed receipt and host
+acknowledgement cannot clear that evidence.
+
+Startup defers pipeline conversations when their pipeline records cannot be read
+or an earlier termination has unresolved survivors. Pending work does not bypass
+this fence. Deferred rows retain their recovery evidence and are excluded from
+launch and skipped-host demotion. The startup pass still completes: the boot
+reads ready, every unrelated host is published, and pending-spawn recovery runs
+in the same pass unless a pending launch receipt is reserved for a fenced
+pipeline conversation, in which case the whole recovery waits with the rows.
+What startup repeats is the evidence read alone (the pipeline record and the
+survivor process probes), on a backoff from one second to thirty; the adoption
+pass runs again only when that evidence has moved, and a replacement becomes
+eligible only after the evidence permits it under the existing adoption rules.
+Startup reads this evidence after transcript refresh and holds the existing
+pipeline mutation lease through adoption, demotion and publication. A concurrent
+close either publishes its survivors before that read, or waits and checks the
+host that startup publishes.
+
+Retry, skip and subsequent pipeline ticks also check survivors on every retained
+attempt, including older generations, before resetting a worktree, advancing or
+creating another stage writer. Alive or unavailable identities refuse these
+actions with no reset or launch.
 
 When a park happened before the stage produced a verdict, `retry-stage` and `skip-stage` refuse with 409 while the attempt's pane still hosts a live agent — resetting the worktree under a mid-turn agent would let its strays land in the next stage commit. Wait for the agent to exit or kill the pane, then retry.
 
