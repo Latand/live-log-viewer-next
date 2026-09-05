@@ -1,6 +1,7 @@
 "use client";
 
 import { memo } from "react";
+import { useLocale } from "@/lib/i18n";
 
 import { useIsMobile } from "@/hooks/useIsMobile";
 import type { MandateDelivery } from "@/lib/runtime/messageOrigin";
@@ -101,6 +102,7 @@ const ENGINE_LABEL: Record<"codex" | "claude" | "openclaw", string> = {
    every message that did not change. The provenance lookup arrives by context,
    so a resolved map re-renders exactly the memoized consumers. */
 export const FeedItem = memo(function FeedItem({ item: sourceItem, speakText }: { item: Item; speakText?: string }) {
+  const { t } = useLocale();
   const provenance = useMessageProvenance();
   const isMobile = useIsMobile();
   const item = resolveDeliveredItem(sourceItem, provenance);
@@ -315,20 +317,30 @@ export const FeedItem = memo(function FeedItem({ item: sourceItem, speakText }: 
     );
   }
   if (item.kind === "think") {
-    const long = item.text.length > 150;
+    const available = item.availability === "available" || Boolean(item.text.trim());
+    const count = item.members?.length ?? 1;
     return (
-      <details className={`my-0.5 ${indent}text-label italic text-muted`}>
-        <summary className={`flex list-none items-center gap-1.5 truncate ${long ? "cursor-pointer [@media(pointer:coarse)]:min-h-11" : ""}`} title={tr("render.reasoning")}>
+      <details className={`group relative my-0.5 ${indent}text-label text-muted`} data-reasoning-availability={available ? "available" : "unavailable"}>
+        <summary className="flex min-h-11 cursor-pointer list-none items-center gap-1.5" aria-label={`${t("render.reasoningGroup", { count })} · ${t(available ? "render.reasoningAvailable" : "render.reasoningUnavailable")}`}>
+          {/* All source positions resolve to the compact header, including
+              members prepended into a group whose first source changed. */}
+          {item.members?.map((member) => (
+            <span key={member.sourceId} data-feed-key={member.anchorKey} data-feed-source-id={member.sourceId} aria-hidden className="pointer-events-none absolute inset-x-0 top-0 h-11" />
+          ))}
           <Brain className="h-3.5 w-3.5 shrink-0" aria-hidden />
-          <span className="truncate">
-            {item.text.slice(0, 150)}
-            {long ? "…" : ""}
-          </span>
+          <span className="min-w-0 break-words">{t("render.reasoningGroup", { count })}</span>
+          <span className="ml-auto text-[11px]">{t(available ? "render.reasoningAvailable" : "render.reasoningUnavailable")}</span>
+          <ChevronUp className="h-3 w-3 shrink-0 rotate-180 group-open:rotate-0" aria-hidden />
         </summary>
-        {long ? <div className="whitespace-pre-wrap break-words pt-1 not-italic">{mdBlocks(item.text)}</div> : null}
+        {available ? (
+          <div className="whitespace-pre-wrap break-words pt-1 text-[13px] leading-relaxed text-secondary [overflow-wrap:anywhere]">{item.text}</div>
+        ) : (
+          <p className="break-words pb-1">{t("render.reasoningNotProvided")}</p>
+        )}
       </details>
     );
   }
+
   if (item.kind === "svc") return <div className="my-1 break-words text-[11.5px] text-muted">{item.text}</div>;
   if (item.kind === "note") return <div className="my-2 break-words text-[12.5px] text-muted">{md(item.text)}</div>;
   return <div className={`my-0.5 break-words text-[12.5px] ${item.err ? "text-danger" : "text-secondary"}`}>{item.text}</div>;

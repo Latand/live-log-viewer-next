@@ -1,9 +1,9 @@
 "use client";
 
-import type { FeedEntry } from "@/components/feed/parse";
+import type { FeedEntry, FeedSnapshot } from "@/components/feed/parse";
 import { newestTranscriptInstant } from "@/components/feed/transcriptOrder";
 import type { RuntimeTurnAxis } from "@/lib/runtime/contracts";
-import { useSyncExternalStore } from "react";
+import { useLayoutEffect, useMemo, useRef, useSyncExternalStore } from "react";
 import {
   LIVE_TURN_ITEM_LIMIT,
   LIVE_TURN_OVERFLOW_LIMIT,
@@ -42,6 +42,7 @@ function toolIdsOf({ item }: FeedEntry): string[] {
 
 /** Every durable identity a canonical row can claim a live row with. */
 function claimIdsOf(entry: FeedEntry): string[] {
+  if (entry.item.kind === "think" && entry.item.members) return entry.item.members.map((member) => member.sourceId);
   const sourceId = sourceIdOf(entry);
   return [...(sourceId ? [sourceId] : []), ...toolIdsOf(entry)];
 }
@@ -140,6 +141,9 @@ function canonicalAssistantItems(feed: readonly FeedEntry[]): CanonicalAssistant
   return feed.flatMap((entry) => {
     const { item } = entry;
     const sourceId = sourceIdOf(entry);
+    if (item.kind === "think" && item.members) {
+      return item.members.map((member) => ({ sourceId: member.sourceId, text: member.text, at: null }));
+    }
     if (item.kind === "prose") {
       return [{
         sourceId,
@@ -159,6 +163,58 @@ function canonicalAssistantItems(feed: readonly FeedEntry[]): CanonicalAssistant
       at: item.kind === "review" ? timestamp(item.ts) : null,
     }];
   });
+}
+
+/** Enrich only matching canonical reasoning members, in their original slots.
+ * The caller may retain its previous projection while an empty transcript echo
+ * outlives the live buffer. That projection is pane-scoped, never global state.
+ * Native populated text remains authoritative; unrelated overlays are untouched.
+ */
+export function enrichCanonicalReasoning(
+  feed: readonly FeedEntry[],
+  liveTurn: RuntimeLiveTurn | null | undefined,
+  previous: readonly FeedEntry[] = [],
+): readonly FeedEntry[] {
+  const exposed = new Map(runtimeLiveTurnItems(liveTurn)
+    .filter((item) => item.itemId && !item.tool && item.text.trim())
+    .map((item) => [item.itemId!, item.text.trim()]));
+  const retained = new Map(previous.flatMap(({ item }) => item.kind === "think"
+    ? (item.members ?? []).map((member) => [member.sourceId, member] as const) : []));
+  let changed = false;
+  const enriched = feed.map((entry) => {
+    if (entry.item.kind !== "think" || !entry.item.members) return entry;
+    const item = entry.item;
+    let memberChanged = false;
+    const members = item.members!.map((member) => {
+      if (member.text) return member;
+      const old = retained.get(member.sourceId);
+      const text = exposed.get(member.sourceId)
+        || (old?.anchorKey === member.anchorKey ? old.text : "");
+      if (!text) return member;
+      memberChanged = true;
+      return { ...member, text, availability: "available" as const };
+    });
+    if (!memberChanged) return entry;
+    changed = true;
+    return { ...entry, item: { ...item, members, availability: "available" as const,
+      text: members.map((member) => member.text).filter(Boolean).join("\n\n") } };
+  });
+  return changed ? enriched : feed;
+}
+
+/** Retain exposed text only for the mounted pane's current canonical members.
+ * Update the retained projection after commit so abandoned renders cannot
+ * publish text into a different conversation or mutate the pooled parser.
+ */
+export function useReasoningFeed(feed: FeedSnapshot, liveTurn: RuntimeLiveTurn | null, identity: string | null): FeedSnapshot {
+  const previous = useRef<{ identity: string | null; feed: FeedSnapshot } | null>(null);
+  const projected = useMemo(() => {
+    const retained = identity && previous.current?.identity === identity ? previous.current.feed.items : [];
+    const items = enrichCanonicalReasoning(feed.items, liveTurn, retained);
+    return items === feed.items ? feed : { ...feed, items: [...items] };
+  }, [feed, liveTurn, identity]);
+  useLayoutEffect(() => { previous.current = { identity, feed: projected }; }, [identity, projected]);
+  return projected;
 }
 
 /**
@@ -199,6 +255,8 @@ export function visibleRuntimeLiveTurnItems(
   if (!overlay.length) return overlay;
   const canonical = canonicalAssistantItems(feed);
   const currentClaims = new Set(canonical.flatMap((item) => item.sourceId ? [item.sourceId] : []));
+  const reasoningClaims = new Set(feed.flatMap(({ item }) => item.kind === "think"
+    ? (item.members ?? []).map((member) => member.sourceId) : []));
   const transcriptAt = newestTranscriptInstant(feed);
   const claimed = new Set<number>();
   /** The transcript has moved past this item, so the tail must not show it. */
@@ -207,6 +265,8 @@ export function visibleRuntimeLiveTurnItems(
     return transcriptAt !== null && liveAt !== null && liveAt <= transcriptAt;
   };
   return overlay.filter((live) => {
+    // A projected reasoning member already displays this delta in source order.
+    if (live.itemId && reasoningClaims.has(live.itemId)) return false;
     if (live.phase === "streaming") return sessionTurn !== "idle" || !transcriptMovedPast(live);
     if (live.itemId && (persistedClaims.has(live.itemId) || currentClaims.has(live.itemId))) return false;
     let owner = live.itemId

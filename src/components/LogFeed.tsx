@@ -22,6 +22,7 @@ import {
   adoptCanonicalAssistantClaims,
   publishCanonicalAssistantClaims,
   useCanonicalAssistantClaims,
+  useReasoningFeed,
   visibleRuntimeLiveTurnItems,
 } from "./conversation/liveTurnHandoff";
 import { orderedConversationTail } from "./conversation/tailOrder";
@@ -524,11 +525,12 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
     claimFeedSession(sessionKey, session);
     return () => releaseFeedSession(sessionKey, session);
   }, [sessionKey, session]);
-  const feed = useMemo(
+  const canonicalFeed = useMemo(
     () => (file && session ? session.feed(tail.lines, tail.linesStart, file.activity === "live") : EMPTY_FEED),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [session, file?.activity, tail.lines, tail.linesStart],
   );
+  const feed = useReasoningFeed(canonicalFeed, runtimeLiveTurn, `${memoryKey}\0${tailPath}`);
   /* Tool activity earns its cue from the parse itself: every newly appended
      call ticks once, keyed on the engine's call id — even one that settled
      inside a single tail tick — while re-parses, remounts and paged-in history

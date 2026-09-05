@@ -5,7 +5,7 @@ import { join } from "node:path";
 import type { FileEntry } from "@/lib/types";
 import type { RuntimeLiveTurn } from "@/lib/runtime/liveTurn";
 
-import { visibleRuntimeLiveTurnItems } from "@/components/conversation/liveTurnHandoff";
+import { enrichCanonicalReasoning, visibleRuntimeLiveTurnItems } from "@/components/conversation/liveTurnHandoff";
 import { buildFeed, createFeedSession, type FeedEntry, type Item } from "./parse";
 
 const codexFile = {
@@ -67,14 +67,18 @@ describe("Codex current-generation turn chronology (#1395)", () => {
 
     expect(reasoning).toMatchObject({
       kind: "think",
-      text: "agent reasoning",
+      text: "",
+      availability: "unavailable",
       sourceId: "reasoning-stream",
     });
-    expect(visibleRuntimeLiveTurnItems(streamed, completed.items, undefined, "idle")).toEqual([]);
-    expect(itemOrder(entryItems(completed.items))).toEqual([
+    // This supplied-text control is conditional; the captured native fixture
+    // itself has no readable summary and proves no historical delta loss.
+    const enriched = enrichCanonicalReasoning(completed.items, streamed);
+    expect(visibleRuntimeLiveTurnItems(streamed, enriched, undefined, "idle")).toEqual([]);
+    expect(itemOrder(entryItems(enriched))).toEqual([
       "Inspecting the parser first.",
       "command-first",
-      "agent reasoning",
+      "The first result fixes the ordering seam.",
       "command-second",
       "The task is complete.",
     ]);
@@ -90,7 +94,7 @@ describe("Codex current-generation turn chronology (#1395)", () => {
     expect(liveOrder).toEqual([
       "Inspecting the parser first.",
       "command-first",
-      "agent reasoning",
+      "",
       "command-second",
     ]);
     expect(completedOrder).toEqual([...liveOrder, "The task is complete."]);
