@@ -1,7 +1,7 @@
 "use client";
 
 import { ArrowDownToLine, CornerDownRight, type LucideIcon, Wrench } from "lucide-react";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Component, type ReactNode, type RefObject, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { ArrowDown, ChevronUp, Sparkle } from "@/components/icons";
 import { useIsMobile } from "@/hooks/useIsMobile";
@@ -124,6 +124,51 @@ function viewportAnchor(scroller: HTMLElement, path: string): ViewportAnchor | n
 
 function rowForAnchor(scroller: HTMLElement, key: string): HTMLElement | null {
   return feedRows(scroller).find((row) => row.dataset.feedKey === key) ?? null;
+}
+
+interface PrependViewportProps {
+  children: ReactNode;
+  scroller: RefObject<HTMLDivElement | null>;
+  identity: string;
+  prependGen: number;
+  visibleCount: number;
+  following: RefObject<boolean>;
+}
+
+/* The before-mutation lifecycle reads the current viewport, including gestures
+   made while history was in flight. Layout-effect cleanups can run after DOM
+   mutations and therefore cannot supply this snapshot. */
+class PrependViewport extends Component<PrependViewportProps> {
+  getSnapshotBeforeUpdate(previous: PrependViewportProps): (ViewportAnchor & { toolSource?: string }) | null {
+    const { scroller, identity, prependGen, visibleCount, following } = this.props;
+    if (identity !== previous.identity || following.current
+      || (prependGen === previous.prependGen && visibleCount <= previous.visibleCount)) return null;
+    const el = scroller.current;
+    const anchor = el ? viewportAnchor(el, identity) : null;
+    if (!el || !anchor) return null;
+    const toolSource = rowForAnchor(el, anchor.key)?.dataset.feedToolSources?.split(" ")[0];
+    return { ...anchor, toolSource };
+  }
+
+  componentDidUpdate(_previous: PrependViewportProps, _state: unknown, anchor: (ViewportAnchor & { toolSource?: string }) | null) {
+    const el = this.props.scroller.current;
+    if (!el || !anchor || this.props.following.current) return;
+    // A boundary tool run can absorb older calls and acquire a new group key.
+    // Source positions disambiguate repeated provider tool ids in that run.
+    const row = rowForAnchor(el, anchor.key) ?? (anchor.toolSource
+      ? feedRows(el).find((candidate) => candidate.dataset.feedToolSources?.split(" ").includes(anchor.toolSource!))
+      : null);
+    if (!row) return;
+    // Measure the residual after native anchoring, avoiding double compensation.
+    const bounds = el.getBoundingClientRect();
+    const delta = row.getBoundingClientRect().top - bounds.top - anchor.offset;
+    // Compact panes can sit inside the scaled project canvas. DOM rectangles
+    // use viewport pixels while scrollTop uses untransformed layout pixels.
+    const scale = el.offsetHeight ? bounds.height / el.offsetHeight : 1;
+    if (delta && scale > 0) el.scrollTop += delta / scale;
+  }
+
+  render() { return this.props.children; }
 }
 
 function canScrollVertically(element: HTMLElement, deltaY: number): boolean {
@@ -276,7 +321,8 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
   );
   const scroller = useRef<HTMLDivElement | null>(null);
   const content = useRef<HTMLDivElement | null>(null);
-  const anchorRef = useRef<{ top: number; height: number } | null>(null);
+  const olderRequestRef = useRef<object | null>(null);
+  const historyOwnerRef = useRef<object>({});
   const initialCount = compact ? COMPACT_INITIAL : RENDER_STEP;
   const revealStep = compact ? COMPACT_STEP : RENDER_STEP;
   const firstPaintCount = Math.min(FIRST_PAINT_ROWS, initialCount);
@@ -390,8 +436,6 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
     const cancel = (handle: number) => (raf ? cancelAnimationFrame(handle) : clearTimeout(handle));
     let handle = schedule(() => {
       handle = schedule(() => {
-        const el = scroller.current;
-        if (el) anchorRef.current = { top: el.scrollTop, height: el.scrollHeight };
         setVisibleCount((count) => Math.max(count, initialCount));
       });
     });
@@ -529,15 +573,14 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
     pendingRestoreRef.current = null;
   }, [tailPath]);
 
-  /* Older history grows the content above the viewport; keep what the user
-     was reading in place by compensating the scroll offset. */
   useLayoutEffect(() => {
-    const el = scroller.current;
-    const anchor = anchorRef.current;
-    if (!el || !anchor) return;
-    anchorRef.current = null;
-    el.scrollTop = anchor.top + (el.scrollHeight - anchor.height);
-  }, [tail.prependGen, visibleCount]);
+    historyOwnerRef.current = {};
+    olderRequestRef.current = null;
+    return () => {
+      historyOwnerRef.current = {};
+      olderRequestRef.current = null;
+    };
+  }, [tailPath, memoryKey]);
 
   /* Glued: keep the bottom in view. Keyed by item-list identity, not length —
      at the tail cap every poll trims above and appends below with the count
@@ -589,10 +632,20 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
   }, []);
 
   const revealOlder = () => {
-    const el = scroller.current;
-    if (el) anchorRef.current = { top: el.scrollTop, height: el.scrollHeight };
-    if (hiddenLocal) setVisibleCount((value) => value + revealStep);
-    else if (tail.hasMore) void tail.loadOlder().then(() => setVisibleCount((value) => value + revealStep));
+    if (hiddenLocal) {
+      setVisibleCount((value) => value + revealStep);
+    } else if (tail.hasMore && !olderRequestRef.current) {
+      const owner = historyOwnerRef.current;
+      const request = {};
+      olderRequestRef.current = request;
+      void tail.loadOlder().then((added) => {
+        if (historyOwnerRef.current === owner && added > 0) {
+          setVisibleCount((value) => value + revealStep);
+        }
+      }).finally(() => {
+        if (olderRequestRef.current === request) olderRequestRef.current = null;
+      });
+    }
   };
   const canRevealOlder = hiddenLocal > 0 || tail.hasMore;
 
@@ -953,6 +1006,8 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
           if (el.scrollTop < 120 && canRevealOlder && !tail.loadingOlder && !tail.loading) revealOlder();
         }}
       >
+      <PrependViewport scroller={scroller} identity={`${memoryKey}\0${tailPath}`}
+        prependGen={tail.prependGen} visibleCount={visibleCount} following={magnetRef}>
       <div ref={content} className={compact ? "px-3 pb-3 text-body" : "mx-auto w-full max-w-[1060px] px-6 pb-4"}>
         {!file ? (
           <div className="mt-[20vh] text-center text-muted">{t("feed.pickLog")}</div>
@@ -1002,6 +1057,8 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
                     key={key}
                     data-feed-key={anchorKey ?? undefined}
                     data-feed-kind={item.kind}
+                    data-feed-tool-sources={item.kind === "cmd-group" ? item.calls.map((call) => call.srcCall).join(" ")
+                      : item.kind === "tool" ? String(item.srcCall) : undefined}
                     data-feed-source-id={"sourceId" in item ? item.sourceId : undefined}
                     className={compact ? "feed-cv" : undefined}
                   >
@@ -1100,6 +1157,7 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
           </>
         )}
         </div>
+      </PrependViewport>
       </div>
     </div>
     {/* Bottom working-status slot: live elapsed from the transcript receipt.

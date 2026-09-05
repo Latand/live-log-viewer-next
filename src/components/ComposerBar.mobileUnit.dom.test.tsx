@@ -242,6 +242,13 @@ test("a blocked Send explains itself inline and offers the recovery action", () 
   const recover = reason.querySelector("button") as HTMLButtonElement;
   expect(recover).toBeTruthy();
   expect(recover.textContent).toContain("Re-check");
+  expect(recover.type).toBe("button");
+  expect(recover.disabled).toBe(false);
+  expect(recover.className).toContain("min-h-11");
+  expect(recover.className).toContain("min-w-11");
+  const visual = recover.firstElementChild as HTMLElement;
+  expect(visual.className).toContain("h-8");
+  expect(visual.className).toContain("border");
   flushSync(() => recover.click());
   expect(recovered).toBe(1);
   flushSync(() => root.unmount());
