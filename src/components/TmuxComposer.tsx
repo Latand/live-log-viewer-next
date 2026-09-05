@@ -34,6 +34,7 @@ import {
   enqueueOutbox,
   markOutboxResponded,
   outboxHistory,
+  outboxCanAdmit,
   outboxReceiptPatch,
   receiptHasUnknownFate,
   receiptHasAbsorbingOutcome,
@@ -2095,6 +2096,15 @@ export function TmuxComposerCore({
       return;
     }
     if (structuredSession && requestedImages.length && !attachments.validate()) return;
+    /* Capacity is a pre-flight refusal like the others (#1538): the bounded
+       queue compacts settled history only, so when every slot still holds an
+       unresolved operation the new submission is refused HERE — the
+       draft and its attachments stay in the composer, nothing is minted,
+       nothing dispatches. The store below re-checks under the same rule. */
+    if (!outboxCanAdmit(readOutbox(cardId))) {
+      setStatus({ kind: "err", text: t("composer.outboxFull") });
+      return;
+    }
     /* Every queued submission is its own logical generation and mints its own
        fresh key at the moment it enters the queue. Replay identity lives on
        the durable outbox entry (its id IS the key), never on composer state a
@@ -2104,7 +2114,7 @@ export function TmuxComposerCore({
     outboxImages.current.set(clientMessageId, requestedImages);
     if (requestedFiles.length) outboxFiles.current.set(clientMessageId, requestedFiles);
     outboxKeys.current.add(clientMessageId);
-    enqueueOutbox(cardId, {
+    const admitted = enqueueOutbox(cardId, {
       id: clientMessageId,
       text: requestedText,
       images: requestedImages.length,
@@ -2119,6 +2129,13 @@ export function TmuxComposerCore({
          fresh bubble — only its own later echo does. */
       echoBaseline: transcriptEchoCount(cardId, requestedText),
     });
+    if (!admitted) {
+      outboxImages.current.delete(clientMessageId);
+      outboxFiles.current.delete(clientMessageId);
+      outboxKeys.current.delete(clientMessageId);
+      setStatus({ kind: "err", text: t("composer.outboxFull") });
+      return;
+    }
     if (!preserveDraft) {
       setText("");
       attachments.clearAll();

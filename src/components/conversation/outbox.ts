@@ -298,7 +298,11 @@ function authoritativeReceiptTime(
 }
 
 /** Bounded per conversation: the queue is working state plus recent history for
-    ArrowUp/ArrowDown, never an archive (the transcript is the archive). */
+    ArrowUp/ArrowDown, never an archive (the transcript is the archive). The
+    bound is enforced on ADMISSION of a new submission: settled history is
+    compacted first, an unresolved operation is never evicted, and when every
+    slot holds an unresolved operation a new submission is refused before its
+    draft leaves the composer (see {@link outboxCanAdmit}). */
 export const OUTBOX_LIMIT = 32;
 /** A delivered entry stops rendering once the transcript grew past its
     delivery moment: newer transcript records prove the agent has moved on, so
@@ -418,7 +422,7 @@ function persistedQueue(cardId: string): readonly OutboxEntry[] {
   try {
     const raw = JSON.parse(sessionStorage.getItem(storageKey(cardId)) ?? "[]") as unknown;
     if (!Array.isArray(raw)) return EMPTY;
-    return raw.filter(isEntry).slice(-OUTBOX_LIMIT).map((rawEntry) => {
+    return compactOutboxQueue(raw.filter(isEntry)).kept.map((rawEntry) => {
       const entry = normalizeOutboxOwner(rawEntry);
       const images = typeof entry.images === "number" ? entry.images : 0;
       const files = typeof entry.files === "number" ? entry.files : 0;
@@ -705,13 +709,75 @@ function occurrenceTombstone(entry: OutboxEntry): PersistedOccurrenceTombstone |
   };
 }
 
-/** Compact recent queue/history while preserving older terminal occurrence owners. */
+/**
+ * Whether an entry is still the operator's to see through (#1538). Anything
+ * in flight (`queued`/`delivering`, including held and turn-boundary parking),
+ * anything actionable (`failed`: local retry/cancel or original-operation
+ * recovery/discard) and any possibly-dispatched submission whose fate is still
+ * unknown is unresolved. It carries the only copy of the submission's
+ * immutable payload, key and receipt evidence, so recent-history compaction
+ * must never evict it. Everything else is disposable history: delivered rows,
+ * rows retired by their transcript echo, rows whose turn already started or
+ * was adopted live, and launch rows, which the spawn owns through the
+ * current-launch record.
+ */
+export function outboxEntryUnresolved(entry: OutboxEntry): boolean {
+  if (entry.launchOwned) return false;
+  if (entry.retiredEchoId || entry.adoptedAt !== undefined || entry.responseStartedAt !== undefined) return false;
+  if (entry.state === "queued" || entry.state === "delivering") return true;
+  /* A failed row is actionable (retry/cancel or original-operation recovery)
+     unless its operation was explicitly discarded: that outcome is absorbing,
+     the row keeps only a Remove control, and it is history like a delivered row. */
+  if (entry.state === "failed") return !(entry.deliveryReceipt && receiptHasAbsorbingOutcome(entry.deliveryReceipt));
+  return entry.deliveryUncertain === true;
+}
+
+/**
+ * Bound a queue to {@link OUTBOX_LIMIT} by evicting the OLDEST settled entries
+ * first, in queue order. Unresolved entries are never evicted, so a queue whose
+ * unresolved population alone exceeds the limit is returned intact; only
+ * {@link enqueueOutbox} adds operator submissions, and it refuses admission in
+ * that state instead of compacting. Relative order of the kept entries is
+ * preserved.
+ */
+export function compactOutboxQueue(
+  queue: readonly OutboxEntry[],
+): { kept: OutboxEntry[]; evicted: OutboxEntry[] } {
+  let overflow = queue.length - OUTBOX_LIMIT;
+  if (overflow <= 0) return { kept: [...queue], evicted: [] };
+  const kept: OutboxEntry[] = [];
+  const evicted: OutboxEntry[] = [];
+  for (const entry of queue) {
+    if (overflow > 0 && !outboxEntryUnresolved(entry)) {
+      evicted.push(entry);
+      overflow -= 1;
+      continue;
+    }
+    kept.push(entry);
+  }
+  return { kept, evicted };
+}
+
+/**
+ * Whether one more operator submission may enter the queue without evicting an
+ * unresolved operation: there is a free slot, or a settled entry that
+ * compaction can retire. False means every slot holds an unresolved operation;
+ * the composer must refuse the submission BEFORE clearing the draft or its
+ * attachments, and the operator frees a slot by resolving, retrying, recovering
+ * or removing one of the existing entries.
+ */
+export function outboxCanAdmit(queue: readonly OutboxEntry[]): boolean {
+  if (queue.length < OUTBOX_LIMIT) return true;
+  return queue.some((entry) => !outboxEntryUnresolved(entry));
+}
+
+/** Compact recent queue/history while preserving older terminal occurrence owners
+    and every unresolved operation. */
 function writeBounded(cardId: string, queue: readonly OutboxEntry[]): void {
-  const overflow = Math.max(0, queue.length - OUTBOX_LIMIT);
-  if (overflow > 0) {
-    for (const entry of queue.slice(0, overflow)) recordCurrentLaunchEntry(cardId, entry);
-    const additions = queue
-      .slice(0, overflow)
+  const { kept, evicted } = compactOutboxQueue(queue);
+  if (evicted.length) {
+    for (const entry of evicted) recordCurrentLaunchEntry(cardId, entry);
+    const additions = evicted
       .map(occurrenceTombstone)
       .filter((entry): entry is PersistedOccurrenceTombstone => entry !== null);
     if (additions.length) {
@@ -721,7 +787,7 @@ function writeBounded(cardId: string, queue: readonly OutboxEntry[]): void {
       );
     }
   }
-  write(cardId, queue.slice(-OUTBOX_LIMIT));
+  write(cardId, kept);
 }
 
 /** The queue for a conversation, hydrating from sessionStorage on first read. */
@@ -734,8 +800,17 @@ export function readOutbox(cardId: string): readonly OutboxEntry[] {
   return restored;
 }
 
-/** Submit a draft into the queue. Returns the entry the dispatcher will send. */
-export function enqueueOutbox(cardId: string, entry: Omit<OutboxEntry, "state">): OutboxEntry {
+/**
+ * Submit a draft into the queue. Returns the entry the dispatcher will send, or
+ * `null` when the queue is at capacity with only unresolved operations
+ * ({@link outboxCanAdmit}): admitting would evict one of them, so the
+ * submission is refused and the queue is left untouched. Callers check
+ * admission before discarding the draft; the `null` is the store's own fence
+ * against a stale caller.
+ */
+export function enqueueOutbox(cardId: string, entry: Omit<OutboxEntry, "state">): OutboxEntry | null {
+  const current = readOutbox(cardId).filter((item) => item.id !== entry.id);
+  if (!outboxCanAdmit(current)) return null;
   const key = echoKey(entry.echoText ?? entry.text);
   const baselineIds = entry.echoBaselineIds
     ?? readEchoLedger(cardId).filter((echo) => echo.key === key).map((echo) => echo.id);
@@ -745,7 +820,7 @@ export function enqueueOutbox(cardId: string, entry: Omit<OutboxEntry, "state">)
     ...(baselineIds.length ? { echoBaselineIds: baselineIds } : {}),
     state: "queued",
   };
-  writeBounded(cardId, [...readOutbox(cardId).filter((item) => item.id !== entry.id), queued]);
+  writeBounded(cardId, [...current, queued]);
   return queued;
 }
 

@@ -1048,3 +1048,168 @@ test.each([
     expect(calls).toEqual(outcome === "safe" && !newerJournal ? ["POST", "POST"] : [outcome === "discarded" ? "DELETE" : "POST"]);
   } finally { bus.stop(); await act(async () => mounted.root.unmount()); }
 });
+
+/* #1538 capacity: the 32-entry queue compacts settled history only and keeps
+   every unresolved operation. Both cases cross the real boundary through the mounted
+   form and the real serial dispatcher; the wire is the only mock. An unknown
+   original keeps the drain closed (nothing else may go on the wire while one
+   submission's fate is unknown), so everything submitted after it stays queued. */
+const deliveredResponse = (body: SendBody, index: number) => ({ status: 200, json: { operationId: `operation-delivered-${index}`, receipt: {
+  ...captured, operationId: `operation-delivered-${index}`, idempotencyKey: body.idempotencyKey, status: "delivered", resend: "not-needed", reason: undefined, revision: 1,
+  at: new Date().toISOString(), admittedAt: new Date().toISOString(), text: body.text } } });
+const uncertainResponse = (body: SendBody) => ({ status: 503, json: { receipt: { ...captured, idempotencyKey: body.idempotencyKey }, operationId: captured.operationId, error: "recipient evidence unavailable" } });
+const heldResponse = (_body: SendBody, index: number) => ({ status: 202, json: { held: true, operationId: `operation-held-${index}` } });
+
+function capacityWire(sends: SendBody[], respond: (body: SendBody, index: number) => { status: number; json: unknown }, calls: { url: string; method?: string }[] = [], discardReceipt?: () => RuntimeReceipt): void {
+  globalThis.fetch = (async (input: string | URL | Request, init?: { method?: string; body?: string }) => {
+    const url = String(input);
+    if (url.includes("/api/runtime/operations/")) {
+      calls.push({ url, method: init?.method });
+      return Response.json({ operationId: captured.operationId, receipt: discardReceipt!() }, { status: 200 });
+    }
+    if (url !== "/api/runtime/send") return new Response("{}", { status: 404 });
+    const body = JSON.parse(init?.body ?? "{}") as SendBody;
+    sends.push(body);
+    const script = respond(body, sends.length - 1);
+    return { ok: script.status < 400, status: script.status, json: async () => script.json } as Response;
+  }) as typeof fetch;
+}
+
+const pasteImage = async (host: HTMLElement, tag: string) => {
+  const textarea = host.querySelector("textarea")!;
+  const propsKey = Object.keys(textarea).find((key) => key.startsWith("__reactProps$"))!;
+  const textareaProps = (textarea as unknown as Record<string, { onPaste(event: unknown): void }>)[propsKey]!;
+  await settle(() => textareaProps.onPaste({
+    clipboardData: { items: [{ type: "image/png", getAsFile: () => new dom.File([new TextEncoder().encode(`png-${tag}`)], `${tag}.png`, { type: "image/png" }) }] },
+    preventDefault() {},
+  }));
+  for (let attempt = 0; attempt < 50 && host.querySelectorAll("img").length !== 1; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 2));
+  expect(host.querySelectorAll("img")).toHaveLength(1);
+};
+
+test("issue 1538: delivered history compacts first; an unknown original survives the boundary, remount and recovery, then admission closes", async () => {
+  const sends: SendBody[] = [];
+  const calls: { url: string; method?: string }[] = [];
+  capacityWire(sends, (body, index) => index < 5 ? deliveredResponse(body, index) : index === 5 ? uncertainResponse(body) : heldResponse(body, index), calls,
+    () => runtimeReceiptForSend({ operationId: captured.operationId, clientMessageId: sends[5]!.idempotencyKey, conversationId: captured.conversationId,
+      kind: "send", state: "failed", reason: "delivery-discarded", resend: "not-needed", acceptedAt: captured.admittedAt, settledAt: captured.at } as SendReceipt));
+  let mounted = await renderInto(surface());
+  const submit = async (text: string) => {
+    await settle(() => composerControls(mounted.host).type(text));
+    await settle(() => composerControls(mounted.host).submit());
+  };
+  const queue = () => readOutbox(file.conversationId!);
+  try {
+    for (let index = 0; index < 5; index += 1) await submit(index % 2 ? captured.text! : `delivered before ${index}`);
+    expect(sends).toHaveLength(5);
+    expect(queue().filter((entry) => entry.state === "delivered")).toHaveLength(5);
+    await submit(captured.text!);
+    const original = sends[5]!.idempotencyKey;
+    const originalEntry = () => queue().find((entry) => entry.id === original);
+    expect(originalEntry()).toMatchObject({ deliveryUncertain: true, state: "delivering" });
+    // 26 later rows fill the queue to 32; each of the next 5 evicts one delivered row, oldest first, never the original.
+    for (let index = 0; index < 26; index += 1) await submit(index % 2 ? captured.text! : `later message ${index}`);
+    expect(queue()).toHaveLength(32);
+    expect(queue().map((entry) => entry.id).slice(0, 6)).toEqual(sends.map((body) => body.idempotencyKey));
+    for (let index = 0; index < 5; index += 1) {
+      await submit(`boundary message ${index}`);
+      expect(mounted.host.querySelector("textarea")?.value).toBe("");
+      expect(queue()).toHaveLength(32);
+      expect(queue().some((entry) => entry.id === sends[index]!.idempotencyKey)).toBe(false);
+      expect(queue().some((entry) => entry.id === sends[index + 1]!.idempotencyKey)).toBe(true);
+    }
+    expect(queue()[0]?.id).toBe(original);
+    expect(queue().filter((entry) => entry.state === "queued")).toHaveLength(31);
+    expect(originalEntry()).toMatchObject({ text: captured.text, images: 0, deliveryUncertain: true, state: "delivering" });
+    expect(originalEntry()?.deliveryReceipt?.operationId).toBe(captured.operationId);
+    expect(sends).toHaveLength(6);
+
+    // Every slot is unresolved now: the next submission is refused with its draft intact.
+    await submit("one past capacity");
+    expect(mounted.host.querySelector("textarea")?.value).toBe("one past capacity");
+    expect(mounted.host.querySelector('[data-testid="composer-status"]')?.textContent).toBe(translate("en", "composer.outboxFull"));
+    expect(queue()).toHaveLength(32);
+    expect(queue().some((entry) => entry.text === "one past capacity")).toBe(false);
+    const ids = queue().map((entry) => entry.id);
+
+    await act(async () => mounted.root.unmount());
+    resetOutboxForTests();
+    mounted = await renderInto(surface());
+    expect(queue().map((entry) => entry.id)).toEqual(ids);
+    expect(originalEntry()).toMatchObject({ text: captured.text, deliveryUncertain: true });
+    expect(originalEntry()?.deliveryReceipt?.operationId).toBe(captured.operationId);
+    const rows = mounted.host.querySelectorAll(`[data-operation="${captured.operationId}"]`);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.querySelector("[data-receipt-uncertain-retry]")).not.toBeNull();
+    expect(mounted.host.querySelector(`[data-outbox-entry="${original}"]`)?.textContent).toContain("outcome is unknown");
+    expect(mounted.host.querySelector(`[data-outbox-retry="${original}"], [data-outbox-cancel="${original}"]`)).toBeNull();
+    expect(sends).toHaveLength(6);
+
+    // Original-operation discard at capacity binds to the original, settles it, and reopens admission.
+    await settle(() => rows[0]!.querySelector<HTMLButtonElement>("[data-receipt-discard]")!.click());
+    expect(calls).toEqual([{ url: `/api/runtime/operations/${captured.operationId}`, method: "DELETE" }]);
+    expect(originalEntry()).toMatchObject({ state: "failed", deliveryUncertain: undefined });
+    expect(originalEntry()?.deliveryReceipt?.reason).toBe("delivery-discarded");
+    await submit("admitted after discard");
+    expect(mounted.host.querySelector("textarea")?.value).toBe("");
+    expect(queue()).toHaveLength(32);
+    expect(queue().at(-1)?.text).toBe("admitted after discard");
+    expect(originalEntry()).toBeUndefined();
+  } finally { await act(async () => mounted.root.unmount()); }
+});
+
+test("issue 1538: exhausted unresolved capacity refuses the new submission before clearing its draft or attachments", async () => {
+  const sends: SendBody[] = [];
+  capacityWire(sends, (body, index) => index === 0 ? uncertainResponse(body) : heldResponse(body, index));
+  let mounted = await renderInto(surface());
+  const queue = () => readOutbox(file.conversationId!);
+  try {
+    await settle(() => composerControls(mounted.host).type(captured.text!));
+    await settle(() => composerControls(mounted.host).submit());
+    const original = sends[0]!.idempotencyKey;
+    for (let index = 0; index < 31; index += 1) {
+      await settle(() => composerControls(mounted.host).type(index % 2 ? captured.text! : `queued message ${index}`));
+      await settle(() => composerControls(mounted.host).submit());
+    }
+    expect(sends).toHaveLength(1);
+    expect(queue()).toHaveLength(32);
+    expect(queue().filter((entry) => entry.state === "queued")).toHaveLength(31);
+    expect(mounted.host.querySelector("textarea")?.value).toBe("");
+
+    await settle(() => composerControls(mounted.host).type("the thirty-third message"));
+    await pasteImage(mounted.host, "refused");
+    const before = queue().map((entry) => entry.id);
+    await settle(() => composerControls(mounted.host).submit());
+    expect(mounted.host.querySelector('[data-testid="composer-status"]')?.textContent).toBe(translate("en", "composer.outboxFull"));
+    expect(mounted.host.querySelector("textarea")?.value).toBe("the thirty-third message");
+    expect(mounted.host.querySelectorAll("img")).toHaveLength(1);
+    expect(queue().map((entry) => entry.id)).toEqual(before);
+    expect(sends).toHaveLength(1);
+    expect(queue()[0]?.id).toBe(original);
+    expect(queue()[0]?.deliveryReceipt?.operationId).toBe(captured.operationId);
+
+    // Remount keeps every unresolved row; the refusal still holds.
+    await act(async () => mounted.root.unmount());
+    resetOutboxForTests();
+    mounted = await renderInto(surface());
+    expect(queue().map((entry) => entry.id)).toEqual(before);
+    expect(mounted.host.querySelectorAll(`[data-operation="${captured.operationId}"]`)).toHaveLength(1);
+    expect(mounted.host.querySelectorAll("[data-outbox-entry]")).toHaveLength(32);
+    await settle(() => composerControls(mounted.host).type("still refused"));
+    await settle(() => composerControls(mounted.host).submit());
+    expect(mounted.host.querySelector("textarea")?.value).toBe("still refused");
+    expect(sends).toHaveLength(1);
+
+    // Removing one queued row through its existing control frees a slot; the same draft is then admitted and waits behind the unknown original.
+    const queued = queue().find((entry) => entry.state === "queued")!;
+    await settle(() => mounted.host.querySelector<HTMLButtonElement>(`[data-outbox-cancel="${queued.id}"]`)!.click());
+    expect(queue()).toHaveLength(31);
+    await settle(() => composerControls(mounted.host).submit());
+    expect(mounted.host.querySelector("textarea")?.value).toBe("");
+    expect(mounted.host.querySelector('[data-testid="composer-status"]')).toBeNull();
+    expect(queue()).toHaveLength(32);
+    expect(queue().at(-1)).toMatchObject({ text: "still refused", state: "queued" });
+    expect(queue()[0]?.id).toBe(original);
+    expect(sends).toHaveLength(1);
+  } finally { await act(async () => mounted.root.unmount()); }
+});

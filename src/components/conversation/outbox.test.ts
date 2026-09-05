@@ -5,6 +5,7 @@ import {
   adoptOutbox,
   cancelOutbox,
   claimOutboxDispatch,
+  compactOutboxQueue,
   enqueueOutbox,
   markOutboxResponded,
   nextDispatch,
@@ -12,6 +13,7 @@ import {
   OUTBOX_DELIVERED_TTL_MS,
   OUTBOX_LIMIT,
   OUTBOX_MTIME_GRACE_MS,
+  outboxCanAdmit,
   outboxStateForReceiptStatus,
   outboxReceiptPatch,
   publishTranscriptEchoes,
@@ -618,12 +620,15 @@ test("issue 626: the unresolved-owner cap deterministically preserves the oldest
     });
   }
   for (let index = 0; index < OUTBOX_LIMIT; index += 1) {
+    /* Settled filler: compaction retires delivered history only (#1538), so the
+       rows that push older entries out are delivered. */
     enqueueOutbox(conversation, {
       id: `active-cap-filler-${index}`,
       text: `active cap filler ${index}`,
       images: 0,
       at: 10_000 + index,
     });
+    updateOutbox(conversation, `active-cap-filler-${index}`, { state: "delivered", settledAt: 10_000 + index });
   }
 
   enqueueOutbox(conversation, {
@@ -677,12 +682,15 @@ test("issue 626: the completed-owner cap deterministically preserves the newest 
     }]);
   }
   for (let index = 0; index < OUTBOX_LIMIT; index += 1) {
+    /* Settled filler: compaction retires delivered history only (#1538), so the
+       rows that push older entries out are delivered. */
     enqueueOutbox(conversation, {
       id: `completed-cap-filler-${index}`,
       text: `completed cap filler ${index}`,
       images: 0,
       at: 10_000 + index,
     });
+    updateOutbox(conversation, `completed-cap-filler-${index}`, { state: "delivered", settledAt: 10_000 + index });
   }
 
   publishTranscriptEchoes(conversation, Array.from({ length: 513 }, (_, index) => ({
@@ -875,12 +883,15 @@ describe("seedLaunchOutbox (P1#2)", () => {
     expect(typeof readOutbox(provisional)[0]?.retiredEchoId).toBe("string");
 
     for (let index = 0; index < OUTBOX_LIMIT; index += 1) {
+      /* Settled filler: compaction retires delivered history only (#1538), so the
+         rows that push older entries out are delivered. */
       enqueueOutbox(provisional, {
         id: `terminal-launch-filler-${index}`,
         text: `terminal launch filler ${index}`,
         images: 0,
         at: 2_000 + index,
       });
+      updateOutbox(provisional, `terminal-launch-filler-${index}`, { state: "delivered", settledAt: 2_000 + index });
     }
     expect(readOutbox(provisional).some((entry) => entry.id === "launch_626_terminal")).toBe(false);
 
@@ -916,12 +927,15 @@ describe("seedLaunchOutbox (P1#2)", () => {
     expect(visibleOutbox(readOutbox(provisional), echoes(), 1_101)).toEqual([]);
 
     for (let index = 0; index < OUTBOX_LIMIT; index += 1) {
+      /* Settled filler: compaction retires delivered history only (#1538), so the
+         rows that push older entries out are delivered. */
       enqueueOutbox(provisional, {
         id: `response-terminal-warm-${index}`,
         text: `response terminal warm ${index}`,
         images: 0,
         at: 2_000 + index,
       });
+      updateOutbox(provisional, `response-terminal-warm-${index}`, { state: "delivered", settledAt: 2_000 + index });
     }
     expect(readOutbox(provisional).some((entry) => entry.id === launchId)).toBe(false);
 
@@ -1000,12 +1014,15 @@ describe("seedLaunchOutbox (P1#2)", () => {
       expect(visibleOutbox(readOutbox(provisional), echoes(), Date.now())).toEqual([]);
 
       for (let index = 0; index < OUTBOX_LIMIT; index += 1) {
+        /* Settled filler: compaction retires delivered history only (#1538), so the
+           rows that push older entries out are delivered. */
         enqueueOutbox(provisional, {
           id: `ttl-terminal-warm-${index}`,
           text: `ttl terminal warm ${index}`,
           images: 0,
           at: 2_000 + index,
         });
+        updateOutbox(provisional, `ttl-terminal-warm-${index}`, { state: "delivered", settledAt: 2_000 + index });
       }
       expect(readOutbox(provisional).some((entry) => entry.id === launchId)).toBe(false);
 
@@ -1093,12 +1110,15 @@ describe("seedLaunchOutbox (P1#2)", () => {
       /* Compaction evicts the delivered entry from the recent queue BEFORE the
          TTL elapses; its settlement survives only in the current-launch slot. */
       for (let index = 0; index < OUTBOX_LIMIT; index += 1) {
+        /* Settled filler: compaction retires delivered history only (#1538), so the
+           rows that push older entries out are delivered. */
         enqueueOutbox(provisional, {
           id: `ttl-reseed-warm-${index}`,
           text: `ttl reseed warm ${index}`,
           images: 0,
           at: 2_000 + index,
         });
+        updateOutbox(provisional, `ttl-reseed-warm-${index}`, { state: "delivered", settledAt: 2_000 + index });
       }
       expect(readOutbox(provisional).some((entry) => entry.id === launchId)).toBe(false);
 
@@ -1432,12 +1452,15 @@ describe("seedLaunchOutbox (P1#2)", () => {
       text: "older terminal launch text",
     }]);
     for (let index = 0; index < OUTBOX_LIMIT; index += 1) {
+      /* Settled filler: compaction retires delivered history only (#1538), so the
+         rows that push older entries out are delivered. */
       enqueueOutbox(conversation, {
         id: `current-launch-filler-${index}`,
         text: `current launch filler ${index}`,
         images: 0,
         at: 2_000 + index,
       });
+      updateOutbox(conversation, `current-launch-filler-${index}`, { state: "delivered", settledAt: 2_000 + index });
     }
 
     seedLaunchOutbox(conversation, {
@@ -1547,12 +1570,15 @@ describe("seedLaunchOutbox (P1#2)", () => {
         });
         retire("older-no-echo-launch", 1_100);
         for (let index = 0; index < OUTBOX_LIMIT; index += 1) {
+          /* Settled filler: compaction retires delivered history only (#1538), so the
+             rows that push older entries out are delivered. */
           enqueueOutbox(conversation, {
             id: `older-no-echo-filler-${reason}-${index}`,
             text: `older no-echo filler ${reason} ${index}`,
             images: 0,
             at: 2_000 + index,
           });
+          updateOutbox(conversation, `older-no-echo-filler-${reason}-${index}`, { state: "delivered", settledAt: 2_000 + index });
         }
 
         seedLaunchOutbox(conversation, {
@@ -1563,12 +1589,15 @@ describe("seedLaunchOutbox (P1#2)", () => {
         });
         retire("newer-no-echo-launch", 3_100);
         for (let index = 0; index < OUTBOX_LIMIT; index += 1) {
+          /* Settled filler: compaction retires delivered history only (#1538), so the
+             rows that push older entries out are delivered. */
           enqueueOutbox(conversation, {
             id: `newer-no-echo-filler-${reason}-${index}`,
             text: `newer no-echo filler ${reason} ${index}`,
             images: 0,
             at: 4_000 + index,
           });
+          updateOutbox(conversation, `newer-no-echo-filler-${reason}-${index}`, { state: "delivered", settledAt: 4_000 + index });
         }
 
         resetOutboxForTests();
@@ -1919,4 +1948,94 @@ test("validated safe evidence crosses revision domains only through its observed
   expect(patch.deliveryReceipt?.revision).toBe(1);
   expect(outboxReceiptPatch({ ...entry, ...patch }, "failed", unknown)).toBeNull();
   expect(outboxReceiptPatch({ ...entry, ...patch }, "failed", { ...unknown, revision: 5 })?.deliveryUncertain).toBe(true);
+});
+
+describe("issue 1538: bounded compaction preserves unresolved operations", () => {
+  const unknownReceipt = {
+    operationId: "operation-original", idempotencyKey: "key-original", conversationId: "conversation_1538",
+    kind: "send" as const, status: "failed" as const, resend: "verify-first" as const, revision: 4,
+    at: "2026-09-05T08:00:01.000Z", admittedAt: "2026-09-05T08:00:00.000Z",
+    reason: "Dispatch began; arrival unverified",
+  };
+
+  test("settled history is compacted first, in order; unresolved rows keep identity and payload across restore", () => {
+    const conversation = "conversation_1538_mixed";
+    enqueueOutbox(conversation, { id: "key-original", text: "Check the release status", images: 0, at: 1_000 });
+    updateOutbox(conversation, "key-original", { state: "delivering", deliveryUncertain: true, deliveryReceipt: unknownReceipt });
+    // A textless image submission that never left the queue and an ordinary failed row are unresolved too.
+    enqueueOutbox(conversation, { id: "key-textless", text: "", images: 2, at: 1_001 });
+    enqueueOutbox(conversation, { id: "key-failed", text: "Check the release status", images: 0, at: 1_002 });
+    updateOutbox(conversation, "key-failed", { state: "failed", settledAt: 1_003, error: "500" });
+    // A discarded operation is absorbing history: it compacts like a delivered row.
+    enqueueOutbox(conversation, { id: "key-discarded", text: "discard me", images: 0, at: 1_004 });
+    updateOutbox(conversation, "key-discarded", { state: "failed", settledAt: 1_005,
+      deliveryReceipt: { ...unknownReceipt, operationId: "operation-discarded", idempotencyKey: "key-discarded", resend: "not-needed", reason: "delivery-discarded" } });
+    for (let index = 0; index < OUTBOX_LIMIT; index += 1) {
+      const id = `later-${index}`;
+      expect(enqueueOutbox(conversation, { id, text: `later ${index}`, images: 0, at: 2_000 + index })).not.toBeNull();
+      updateOutbox(conversation, id, { state: "delivered", settledAt: 2_500 + index });
+    }
+    const queue = readOutbox(conversation);
+    expect(queue).toHaveLength(OUTBOX_LIMIT);
+    expect(queue.slice(0, 3).map((entry) => entry.id)).toEqual(["key-original", "key-textless", "key-failed"]);
+    expect(queue.some((entry) => entry.id === "key-discarded")).toBe(false);
+    expect(queue.some((entry) => entry.id === "later-0")).toBe(false);
+    expect(queue.slice(3).map((entry) => entry.id)).toEqual(Array.from({ length: OUTBOX_LIMIT - 3 }, (_, index) => `later-${index + 3}`));
+
+    resetOutboxForTests();
+    const restored = readOutbox(conversation);
+    expect(restored.map((entry) => entry.id)).toEqual(queue.map((entry) => entry.id));
+    const original = restored.find((entry) => entry.id === "key-original")!;
+    expect(original).toMatchObject({ text: "Check the release status", images: 0, deliveryUncertain: true, state: "delivering" });
+    expect(original.deliveryReceipt).toEqual(unknownReceipt);
+    expect(restored.find((entry) => entry.id === "key-textless")).toMatchObject({ text: "", images: 2, state: "failed", needsReattach: true });
+  });
+
+  test("admission is refused while every slot is unresolved and resumes once one resolves", () => {
+    const conversation = "conversation_1538_exhausted";
+    for (let index = 0; index < OUTBOX_LIMIT; index += 1) {
+      expect(enqueueOutbox(conversation, { id: `pending-${index}`, text: `pending ${index}`, images: 0, at: 1_000 + index })).not.toBeNull();
+    }
+    updateOutbox(conversation, "pending-0", { state: "delivering", deliveryUncertain: true, deliveryReceipt: { ...unknownReceipt, idempotencyKey: "pending-0" } });
+    const before = readOutbox(conversation);
+    expect(outboxCanAdmit(before)).toBe(false);
+    expect(enqueueOutbox(conversation, { id: "refused", text: "one too many", images: 1, at: 5_000 })).toBeNull();
+    expect(readOutbox(conversation)).toBe(before);
+    expect(readOutbox(conversation).map((entry) => entry.id)).not.toContain("refused");
+    // Re-submitting an entry that already holds a slot is not a new admission.
+    expect(enqueueOutbox(conversation, { id: "pending-5", text: "pending 5", images: 0, at: 1_005 })).not.toBeNull();
+    expect(readOutbox(conversation)).toHaveLength(OUTBOX_LIMIT);
+
+    // Existing recovery still works at capacity, and settles a slot.
+    cancelOutbox(conversation, "pending-7");
+    expect(outboxCanAdmit(readOutbox(conversation))).toBe(true);
+    expect(enqueueOutbox(conversation, { id: "admitted-after-cancel", text: "fits now", images: 0, at: 5_001 })?.state).toBe("queued");
+    expect(outboxCanAdmit(readOutbox(conversation))).toBe(false);
+    updateOutbox(conversation, "pending-8", { state: "delivered", settledAt: 6_000 });
+    expect(outboxCanAdmit(readOutbox(conversation))).toBe(true);
+    expect(enqueueOutbox(conversation, { id: "admitted-after-delivery", text: "fits again", images: 0, at: 5_002 })).not.toBeNull();
+    const after = readOutbox(conversation);
+    expect(after).toHaveLength(OUTBOX_LIMIT);
+    expect(after.some((entry) => entry.id === "pending-8")).toBe(false);
+    expect(after[0]?.id).toBe("pending-0");
+    expect(after[0]?.deliveryReceipt?.operationId).toBe(unknownReceipt.operationId);
+  });
+
+  test("a persisted queue above the limit restores every unresolved row before the newest history", () => {
+    const conversation = "conversation_1538_persisted";
+    const entries: OutboxEntry[] = [
+      { id: "old-unknown", text: "Check the release status", images: 0, at: 100, state: "delivering", deliveryUncertain: true, deliveryReceipt: unknownReceipt },
+      { id: "old-held", text: "", images: 1, at: 101, state: "delivering", acceptedHeld: true, operationId: "operation-held" },
+      ...Array.from({ length: OUTBOX_LIMIT + 3 }, (_, index): OutboxEntry => ({
+        id: `delivered-${index}`, text: `delivered ${index}`, images: 0, at: 200 + index, state: "delivered", settledAt: 300 + index,
+      })),
+    ];
+    sessionStorage.setItem("llvOutbox:" + conversation, JSON.stringify(entries));
+    const restored = readOutbox(conversation);
+    expect(restored).toHaveLength(OUTBOX_LIMIT);
+    expect(restored.slice(0, 2).map((entry) => entry.id)).toEqual(["old-unknown", "old-held"]);
+    expect(restored[2]?.id).toBe("delivered-5");
+    expect(restored.at(-1)?.id).toBe(`delivered-${OUTBOX_LIMIT + 2}`);
+    expect(compactOutboxQueue(entries).evicted.map((entry) => entry.id)).toEqual(["delivered-0", "delivered-1", "delivered-2", "delivered-3", "delivered-4"]);
+  });
 });
