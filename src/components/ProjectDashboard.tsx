@@ -391,7 +391,13 @@ function ProjectDashboardView({
      Null on the desktop, which has no board list to keep the seat out of. */
   const projectDraftCwd = useMemo(() => draftWorkingDirectory(files, project), [files, project]);
   const boardIsMobileLeaf = isMobile && topScreen(mobileNavState).kind !== "chat";
-  const seatRead = useOrchestratorSeat(boardIsMobileLeaf ? project : null, projectDraftCwd || undefined);
+  const cachedSeatRead = useOrchestratorSeat(boardIsMobileLeaf ? project : null, projectDraftCwd || undefined);
+  // A failed revalidation retains a known incumbent, but cannot affirm vacancy.
+  // Give the card, its sheet, and the footer the same safe reading.
+  const seatRead = cachedSeatRead.failed
+    && !(cachedSeatRead.status?.exists && cachedSeatRead.status.seat?.conversationId)
+    ? { ...cachedSeatRead, status: null }
+    : cachedSeatRead;
   const seatId = seatRead.status?.seat?.conversationId;
   const seatFile = (seatId ? files.find((file) => file.conversationId === seatId) : null)
     ?? files.find((file) => file.path === seatRead.status?.seat?.path) ?? null;
@@ -2154,8 +2160,8 @@ function ProjectDashboardView({
             dock={mobileBoardLeaf && boardReady
               ? seatState.kind === "live" && seatFile
                 ? <MobileBoardDock onTell={() => openBoardRow(seatFile)} />
-                : <MobileBoardDock create={seatState.kind === "draft" && !seatRead.failed} unresolved={seatState.kind !== "draft" || seatRead.failed}
-                    onTell={() => mobileNav.openSheet(seatState.kind === "draft" && !seatRead.failed ? "rotate" : "seat")} />
+                : <MobileBoardDock create={seatState.kind === "draft"} unresolved={seatState.kind !== "draft"}
+                    onTell={() => mobileNav.openSheet(seatState.kind === "draft" ? "rotate" : "seat")} />
               : undefined}
           >
             {pipelinesAlert}

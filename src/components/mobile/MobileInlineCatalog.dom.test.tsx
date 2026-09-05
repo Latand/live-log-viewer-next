@@ -23,7 +23,8 @@ const rows: FileEntry[] = Array.from({ length: 45 }, (_, i) => ({
 let revision = 1;
 const prefs = { manual: [], hidden: [], expanded: [], favorites: [], foldedEngineChildIds: [], expandedEngineTrayParentIds: [], viewMode: null, taskPanelOpen: false, seenAt: {} };
 const requests: string[] = [];
-Object.assign(window, { catalogRequests: requests });
+let seatMode = "incumbent";
+Object.assign(window, { catalogRequests: requests, setSeatMode: (mode: string) => { seatMode = mode; } });
 window.fetch = async (input, init) => {
   const url = new URL(String(input), location.origin);
   let body: unknown = {};
@@ -35,9 +36,11 @@ window.fetch = async (input, init) => {
     if (init?.method === "PATCH") Object.assign(prefs, JSON.parse(String(init.body)).patch ?? {});
     body = { board: { schemaVersion: 1, revision: revision++, updatedAt: new Date(0).toISOString(), pathAliases: {}, explicitManual: [], prefs } };
   } else if (url.pathname === "/api/orchestrator/seat") {
+    if (seatMode === "failed") return new Response("{}", { status: 503 });
     body = { exists: true, pending: null, seat: { project: "atlas", seatEpoch: 1, conversationId: rows[0]!.conversationId,
       path: null, mandate: "Coordinate", state: "active", designatedAt: "2026-01-01T00:00:00.000Z",
       intent: { clientRequestId: "synthetic-seat-1", mode: "existing", launchId: null, error: null } } };
+    if (seatMode === "vacant") body = { exists: false, pending: null, seat: null };
   } else if (url.pathname === "/api/log") body = { entries: [], hasMore: false };
   return new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
 };
@@ -120,6 +123,16 @@ try {
   evidence.push({width,height, initial, beforeAppend,afterAppend, before,afterPoll,afterBack,afterReopen,...geometry});
   await page.screenshot({path:`${out}/${width}-returned.png`});
   if (initial !== 1 || Math.abs(beforeAppend-afterAppend)>2 || Math.abs(before-afterPoll)>2 || Math.abs(before-afterBack)>2 || Math.abs(before-afterReopen)>2 || geometry.overflow || geometry.boardOverflow || geometry.rows !== 40 || geometry.unique !== 40 || geometry.controls.some(h=>h<44)) throw Error(JSON.stringify(evidence));
+  await page.evaluate(() => (window as any).setSeatMode("vacant"));
+  await page.locator('[data-mobile2-seat-invitation]').waitFor();
+  await page.evaluate(() => (window as any).setSeatMode("failed"));
+  await page.locator('[data-mobile2-seat-invitation]').waitFor({ state: 'detached' });
+  await page.locator('[data-mobile2-seat-open]').click();
+  await page.waitForFunction(() => document.querySelector('[data-mobile2-seat-open]')?.getAttribute('data-mobile2-open') === 'seat');
+  if ((await page.locator('[data-mobile2-board-dock]').textContent())?.includes('Create an orchestrator')) throw Error('stale vacancy in footer');
+  await page.screenshot({ path: `${out}/${width}-seat-unavailable.png` });
+  await page.evaluate(() => (window as any).setSeatMode("vacant"));
+  await page.locator('[data-mobile2-seat-invitation]').waitFor();
   await page.close();
  }
  await Bun.write(out+'/geometry.json', JSON.stringify(evidence,null,2));

@@ -332,6 +332,42 @@ test("failed seat read and an unresolved designation never offer Create", async 
   click(q(second, '[data-mobile2-board-dock]')); expect(getMobileNav().getState().sheet).toBe("seat");
 });
 
+test("a failed vacancy poll disables creation on both Home surfaces until revalidated", async () => {
+  const root = mount();
+  expect(await waitFor(() => q(root, '[data-mobile2-seat-invitation]') !== null)).toBe(true);
+  expect(q(root, '[data-mobile2-board-dock]')!.textContent).toContain(translate("en", "mobile2.seat.createDock"));
+  seatFailure = true;
+  const reads = seatReads;
+  expect(await waitFor(() => seatReads > reads, 8000)).toBe(true);
+  await settle();
+  expect(q(root, '[data-mobile2-seat-invitation]')).toBeNull();
+  expect(q(root, '[data-mobile2-board-dock]')!.textContent).not.toContain(translate("en", "mobile2.seat.createDock"));
+  click(q(root, '[data-mobile2-seat-open]'));
+  expect(getMobileNav().getState().sheet).toBe("seat");
+  flushSync(() => getMobileNav().closeSheet());
+  click(q(root, '[data-mobile2-board-dock]'));
+  expect(getMobileNav().getState().sheet).toBe("seat");
+  flushSync(() => getMobileNav().closeSheet());
+  seatFailure = false;
+  expect(await waitFor(() => q(root, '[data-mobile2-seat-invitation]') !== null, 8000)).toBe(true);
+  expect(q(root, '[data-mobile2-board-dock]')!.textContent).toContain(translate("en", "mobile2.seat.createDock"));
+}, 20000);
+
+test("a failed poll preserves the known null-path incumbent on both Home surfaces", async () => {
+  seatAnswer = { project: PROJECT, seatEpoch: 1, conversationId: running.conversationId, path: null,
+    mandate: "Coordinate", state: "active", designatedAt: "2100-01-02T13:00:00.000Z",
+    intent: { clientRequestId: "seat-known-incumbent", mode: "existing", launchId: null, error: null } };
+  const root = mount();
+  expect(await waitFor(() => q(root, '[data-mobile2-seat-tap="conversation"]') !== null)).toBe(true);
+  seatFailure = true;
+  const reads = seatReads;
+  expect(await waitFor(() => seatReads > reads, 8000)).toBe(true);
+  await settle();
+  expect(q(root, '[data-mobile2-seat-tap="conversation"]')).not.toBeNull();
+  expect(q(root, '[data-mobile2-board-dock]')!.textContent).toContain(translate("en", "mobile2.board.tellOrchestrator"));
+  expect(q(root, '[data-mobile2-seat-invitation]')).toBeNull();
+}, 12000);
+
 test("Home retains visible rows during deferred append, expired cursor and failed refresh", async () => {
   let respond: ((value: unknown) => void) | undefined;
   catalogReply = (url) => url.searchParams.has("cursor")
