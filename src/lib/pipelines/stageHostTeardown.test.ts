@@ -241,6 +241,44 @@ test("a refused kill surfaces the still-running host instead of claiming a stop 
   setAgentRegistryForTests(null);
 });
 
+/* #1501: the typed "no control channel" answer is the one refusal the stop
+   may act on by itself, from the registry row's recorded identity. The
+   fixture row here names this test process without a boot epoch, so the
+   fallback must refuse by name and signal nothing; the full process cases run
+   in stageHostGenerationClose.integration.test.ts. */
+test("a typed no-channel answer enters the identity path, which refuses an incomplete row without a signal (#1501)", async () => {
+  const fixture = hostedConversation();
+  killResult = { status: 503, body: { error: "structured runtime host is unavailable", code: "runtime-host-unavailable" } };
+  let signalled = 0;
+
+  const result = await stopPipelineStageAgent(target(fixture.conversationId), {
+    termination: { signal: () => { signalled += 1; } },
+  });
+
+  expect(result).toMatchObject({ outcome: "failed" });
+  const error = (result as { error: string }).error;
+  expect(error).toContain("boot epoch is unknown");
+  expect(error).toContain("nothing was signalled");
+  expect(error).toContain("no structured control channel");
+  expect(signalled).toBe(0);
+  expect(killed).toHaveLength(1);
+  setAgentRegistryForTests(null);
+});
+
+test("an untyped refusal never enters the identity path (#1501)", async () => {
+  const fixture = hostedConversation();
+  killResult = { status: 503, body: { error: "structured runtime host is unavailable" } };
+  let signalled = 0;
+
+  const result = await stopPipelineStageAgent(target(fixture.conversationId), {
+    termination: { signal: () => { signalled += 1; } },
+  });
+
+  expect(result).toEqual({ outcome: "failed", error: "structured runtime host is unavailable" });
+  expect(signalled).toBe(0);
+  setAgentRegistryForTests(null);
+});
+
 test("the residency probe reads host state without dispatching anything (#670)", async () => {
   const live = hostedConversation();
   const ports = defaultPipelinePorts();

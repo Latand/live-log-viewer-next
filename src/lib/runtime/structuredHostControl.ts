@@ -10,6 +10,7 @@ import {
   sameRecordedProcessIdentity,
   systemBootEpoch,
   type ProcessIdentityProbe,
+  type ProcessIdentityStatus,
 } from "@/lib/processIdentity";
 import { RESOURCE_STRUCTURED_HOST_LIMIT } from "@/lib/types";
 import type { StructuredHostKillRef, StructuredHostRecord } from "@/lib/resources";
@@ -73,6 +74,111 @@ export function readStructuredHostRecords(dependencies: {
       owned: owned(entry.key),
     } satisfies StructuredHostRecord;
   });
+}
+
+/** The Viewer generation that claimed a host, as the registry recorded it in
+    `claimOwner` (`structured-host:<json identity>`, the format the registry's
+    own claim writer produces), and what the kernel says about it now. */
+export interface StructuredHostOwnerGeneration {
+  identity: ProcessIdentity | null;
+  status: ProcessIdentityStatus | "unrecorded";
+}
+
+const STRUCTURED_CLAIM_OWNER_PREFIX = "structured-host:";
+
+function structuredClaimOwnerIdentity(owner: string | null): ProcessIdentity | null {
+  if (!owner?.startsWith(STRUCTURED_CLAIM_OWNER_PREFIX)) return null;
+  try {
+    const parsed = JSON.parse(owner.slice(STRUCTURED_CLAIM_OWNER_PREFIX.length)) as Partial<ProcessIdentity>;
+    if (!Number.isInteger(parsed.pid) || parsed.pid! <= 0) return null;
+    return {
+      pid: parsed.pid!,
+      startIdentity: typeof parsed.startIdentity === "string" ? parsed.startIdentity : null,
+      ...(typeof parsed.bootEpoch === "string" ? { bootEpoch: parsed.bootEpoch } : {}),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** One line for a report: which generation started the host and whether it
+    is still there. */
+export function describeStructuredHostOwnerGeneration(owner: StructuredHostOwnerGeneration): string {
+  if (!owner.identity) return "the registry records no owner generation for this host";
+  const verdict = owner.status === "alive"
+    ? "is still running"
+    : owner.status === "dead"
+      ? "no longer exists"
+      : "cannot be verified";
+  return `the Viewer generation that started it (pid ${owner.identity.pid}) ${verdict}`;
+}
+
+export type StructuredHostRegistryRef =
+  | { ok: true; ref: StructuredHostKillRef; owner: StructuredHostOwnerGeneration }
+  /** The row cannot authorize a signal. Nothing has been signalled. */
+  | { ok: false; error: string; owner: StructuredHostOwnerGeneration };
+
+/**
+ * A kill reference taken from the durable registry row alone — never from
+ * process discovery — for a caller that has no channel to the runtime host
+ * generation the row names (#1501). The row is the association: the engine
+ * process the Viewer spawned or adopted (`structuredHost.process`, with its
+ * start identity and boot epoch) and the generation that claimed it
+ * (`claimOwner`). The ref binds to the conversation whose *current* generation
+ * is this session; a row that is not the current generation of any
+ * conversation is not a target. Missing identity fields refuse here, before
+ * the termination's own fence, so the report can say which field the row lacks.
+ */
+export function structuredHostKillRefFromRegistry(
+  key: SessionKey,
+  dependencies: {
+    snapshot?: () => RegistryFile;
+    owned?: (key: SessionKey) => boolean;
+    identityProbe?: ProcessIdentityProbe;
+  } = {},
+): StructuredHostRegistryRef {
+  const file = (dependencies.snapshot ?? (() => agentRegistry().readOnlySnapshot()))();
+  const entry = file.entries[sessionKeyId(key)] ?? null;
+  const ownerIdentity = structuredClaimOwnerIdentity(entry?.claimOwner ?? null);
+  const owner: StructuredHostOwnerGeneration = {
+    identity: ownerIdentity,
+    status: ownerIdentity ? processIdentityStatus(ownerIdentity, dependencies.identityProbe) : "unrecorded",
+  };
+  if (!entry) return { ok: false, error: "the registry has no row for this session", owner };
+  const process = entry.structuredHost?.process ?? null;
+  if (!process) return { ok: false, error: "the registry row names no host process", owner };
+  if (key.engine !== "claude" && key.engine !== "codex") {
+    return { ok: false, error: `a ${key.engine} session has no structured host to end`, owner };
+  }
+  if (typeof process.startIdentity !== "string" || process.startIdentity.length === 0) {
+    return { ok: false, error: `host process identity is unknown (pid ${process.pid} was recorded without a start identity)`, owner };
+  }
+  if (typeof process.bootEpoch !== "string" || process.bootEpoch.length === 0) {
+    return { ok: false, error: `host boot epoch is unknown (pid ${process.pid} was recorded without one)`, owner };
+  }
+  const conversation = Object.values(file.conversations)
+    .find((candidate) => candidate.generations.at(-1)?.id === key.sessionId) ?? null;
+  if (!conversation) {
+    return { ok: false, error: "the registry row is not the current generation of any conversation", owner };
+  }
+  const memberships = file.memberships[conversation.id] ?? [];
+  return {
+    ok: true,
+    owner,
+    ref: {
+      kind: "structured",
+      pid: process.pid,
+      startIdentity: process.startIdentity,
+      bootEpoch: process.bootEpoch,
+      engine: key.engine,
+      sessionId: key.sessionId,
+      conversationId: conversation.id,
+      seat: memberships.some((membership) => membership.kind === "orchestrator"),
+      turnBusy: conversation.turn.state === "unknown" ? null : conversation.turn.state === "busy",
+      owned: (dependencies.owned ?? hasStructuredDeliveryHost)(key),
+      lastActiveAt: entry.updatedAt,
+    },
+  };
 }
 
 /**

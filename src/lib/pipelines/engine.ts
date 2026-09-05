@@ -11,7 +11,7 @@ import { freshSpecFor } from "@/lib/agent/cli";
 import { agentRegistry, identityMaterializationFence, type DurableMembershipInput, type TmuxHostEvidence } from "@/lib/agent/registry";
 import { forEachCooperatively } from "@/lib/cooperative";
 import { transcriptAllowed } from "@/lib/agent/spawnParent";
-import { sessionKeyFromTranscript, sessionKeyId } from "@/lib/agent/sessionKey";
+import { sessionKeyFromTranscript, sessionKeyId, type SessionKey } from "@/lib/agent/sessionKey";
 import { headCwd } from "@/lib/agent/transcript";
 import { MAX_FLOW_NOTE_LENGTH, closeFlow, createFlowFromRequest, isRecoverableLegacyRelayFailurePause, patchFlow } from "@/lib/flows/commands";
 import { lastAssistantMessage, readFindingsFile } from "@/lib/flows/findings";
@@ -22,6 +22,14 @@ import { isRuntimeHostTransportFailure, runtimeHostClient, type RuntimeHostClien
 import { structuredHostsEnabled, supervisedRuntimeHostUnavailableReason } from "@/lib/runtime/flags";
 import { conversationTurnLiveness, type TurnLivenessDependencies } from "@/lib/runtime/liveness";
 import { structuredDeliveryPublicationState } from "@/lib/runtime/structuredDeliveryController";
+import { RUNTIME_HOST_UNAVAILABLE_CODE } from "@/lib/runtime/structuredControls";
+import {
+  describeStructuredHostOwnerGeneration,
+  structuredHostKillRefFromRegistry,
+  structuredHostKillRefusal,
+  terminateStructuredHostTree,
+  type StructuredHostTerminationDependencies,
+} from "@/lib/runtime/structuredHostControl";
 import { redactBounded } from "@/lib/monitor/redact";
 import { parseReview, type ReviewFinding } from "@/lib/review";
 import { spawnStructuredConversation } from "@/lib/runtime/structuredSpawn";
@@ -93,11 +101,15 @@ export type PipelineStageHostRef = {
   /** Set for a conversation a stage agent spawned and the pipeline adopted, so
       the report distinguishes it from the stage's own launch. */
   adopted?: true;
+  /** The attempt's immutable launch identity. A stop that has to act on the
+      registry row alone (#1501) binds the row to this launch's receipt. */
+  launchId?: string | null;
 };
 
 export type PipelineStageStopResult =
-  /** Termination is evidenced: the kill was delivered, or the host is gone. */
-  | { outcome: "stopped" }
+  /** Termination is evidenced: the kill was delivered, or the host is gone.
+      `detail` names the evidence when the stop went around the runtime. */
+  | { outcome: "stopped"; detail?: string }
   | { outcome: "not-running" }
   /** The kill was accepted (a `queued` receipt is the normal first answer) but
       termination was not evidenced inside the confirmation budget. The host may
@@ -488,6 +500,9 @@ const KILL_REFUSED_STATES = new Set(["failed", "rejected"]);
 
 export type StageStopProbes = {
   client?: RuntimeHostClient | null;
+  /** Injected into the identity-bound termination a socketless caller falls
+      back to (#1501); production uses the real kernel probes and signals. */
+  termination?: StructuredHostTerminationDependencies;
   action?: (request: {
     conversationId: string;
     transcriptPath: string;
@@ -521,6 +536,8 @@ export type StageStopProbes = {
 type StageHostProbe = {
   conversationId: ViewerConversationId;
   transcriptPath: string;
+  /** The conversation's current generation: the one registry row a stop may act on. */
+  key: SessionKey;
   resident(): boolean;
   /** Durable tmux evidence recorded for this session, if any. It is the only
       thing that can identify a stored pane id as still being this agent's. */
@@ -543,6 +560,7 @@ async function stageHostProbe(target: PipelineStageHostRef): Promise<StageHostPr
   return {
     conversationId: conversation.id,
     transcriptPath: generation.path,
+    key: { engine: conversation.engine, sessionId: generation.id },
     /* Re-read every call: the registry read cache invalidates on the file
        signature, so a teardown written by the host process is visible here. */
     resident: () => {
@@ -625,7 +643,10 @@ export async function stopPipelineStageAgent(
       return applyConversationAction(request);
     });
     const result = await applyAction({ conversationId, transcriptPath, action: "kill" });
-    const body = result.body as { ok?: boolean; error?: string; operationId?: string; receipt?: { status?: string } };
+    const body = result.body as { ok?: boolean; error?: string; code?: string; operationId?: string; receipt?: { status?: string } };
+    if (result.status === 503 && body.code === RUNTIME_HOST_UNAVAILABLE_CODE) {
+      return await stopStageHostByRecordedIdentity(target, probe, probes.termination ?? {});
+    }
     if (result.status >= 400 || body.ok !== true) {
       return { outcome: "failed", error: body.error ?? `stage host kill was refused with status ${result.status}` };
     }
@@ -665,6 +686,77 @@ export async function stopPipelineStageAgent(
   } catch (error) {
     return { outcome: "failed", error: error instanceof Error ? error.message : String(error) };
   }
+}
+
+/** Why this process could not use the runtime command channel; every report
+    the identity path produces ends with it, so the operator can tell a
+    socketless caller from a host that answered. */
+const NO_CONTROL_CHANNEL = "this process has no structured control channel (LLV_RUNTIME_HOST_SOCKET is unset), so no runtime host generation could be asked";
+
+/**
+ * Ends a stage host from a process that has no channel to any runtime host
+ * generation (#1501): the MCP host process, which answered every close of a
+ * parked lane with "structured runtime host is unavailable" while the host it
+ * could see kept burning quota under a Viewer generation the record no longer
+ * named.
+ *
+ * The authority comes from the durable registry row and nothing else: the
+ * engine process the Viewer recorded (pid, start identity, boot epoch) and the
+ * generation that claimed it. It is bound to the attempt before anything is
+ * signalled — the attempt's conversation must be the one the row is the
+ * current generation of, and the attempt's launch receipt must name that same
+ * conversation — then re-validated for a seat at the moment of the kill, and
+ * ended through the same identity-fenced termination the resources rail uses,
+ * which signals exactly once per pid and reports survivors as failure.
+ *
+ * Every refusal here is a `failed` stop with no signal sent: a missing or
+ * contradictory fact never becomes a kill. The row is retired only by the
+ * termination itself, and only once the tree is proven gone, so a survivor
+ * or an EPERM leaves the row, the attempt and the pipeline exactly as they
+ * were for the next close.
+ */
+async function stopStageHostByRecordedIdentity(
+  target: PipelineStageHostRef,
+  probe: StageHostProbe,
+  termination: StructuredHostTerminationDependencies,
+): Promise<PipelineStageStopResult> {
+  const registry = agentRegistry();
+  const bound = (reason: string): PipelineStageStopResult => ({
+    outcome: "failed",
+    error: `contradictory ownership: ${reason}; nothing was signalled; ${NO_CONTROL_CHANNEL}`,
+  });
+  if (target.conversationId?.startsWith("conversation_")
+    && registry.canonicalConversationId(target.conversationId as ViewerConversationId) !== probe.conversationId) {
+    return bound(`the attempt names ${target.conversationId} but the registry resolves its transcript to ${probe.conversationId}`);
+  }
+  if (target.launchId) {
+    const receipt = registry.readOnlySnapshot().receipts[target.launchId] ?? null;
+    if (receipt && registry.canonicalConversationId(receipt.conversationId) !== probe.conversationId) {
+      return bound(`the attempt's launch receipt names ${receipt.conversationId}, not ${probe.conversationId}`);
+    }
+  }
+  const built = structuredHostKillRefFromRegistry(probe.key);
+  const generation = describeStructuredHostOwnerGeneration(built.owner);
+  if (!built.ok) {
+    return { outcome: "failed", error: `${built.error}; nothing was signalled; ${generation}; ${NO_CONTROL_CHANNEL}` };
+  }
+  const { ref } = built;
+  const refusal = structuredHostKillRefusal(ref, { kind: "row" }, false);
+  if (refusal) {
+    return { outcome: "failed", error: `${refusal.error} (pid ${ref.pid}); nothing was signalled; ${generation}; ${NO_CONTROL_CHANNEL}` };
+  }
+  const outcome = await terminateStructuredHostTree(ref, termination);
+  if (outcome.ok) {
+    return {
+      outcome: "stopped",
+      detail: `ended host pid ${ref.pid} by its recorded identity (${outcome.via}); ${generation}; ${NO_CONTROL_CHANNEL}`,
+    };
+  }
+  const survivors = outcome.remaining.length > 0 ? `; still running: ${outcome.remaining.join(", ")}` : "";
+  return {
+    outcome: "failed",
+    error: `${outcome.error} (pid ${ref.pid}${survivors}); ${generation}; ${NO_CONTROL_CHANNEL}`,
+  };
 }
 
 export function defaultPipelinePorts(
@@ -3807,6 +3899,7 @@ function launchedStageHosts(pipeline: Pipeline): StageHostCandidate[] {
           agentPath: attempt.agentPath,
           paneId: attempt.paneId,
           ...(attempt.historical ? { adopted: true as const } : {}),
+          launchId: attempt.launchId,
         },
         /* Same reading orphanAgentPane uses: a verdict or a completion stamp
            means the turn ended, so what is left in the pane is an idle CLI. A
@@ -4430,8 +4523,10 @@ export async function patchPipeline(
           break;
         }
         const result = await ports.stopStageAgent(target);
-        if (result.outcome === "stopped") close.stopped.push(target);
-        else if (result.outcome === "failed") {
+        if (result.outcome === "stopped") {
+          close.stopped.push(target);
+          if (result.detail) close.notes.push({ ...target, detail: result.detail });
+        } else if (result.outcome === "failed") {
           const evidence = await closeStopFailureEvidence(candidate, ports);
           if (evidence) {
             const detail = `stop failed with "${result.error}"; terminalized from ${evidence}`;

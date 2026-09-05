@@ -8,7 +8,12 @@ import { procBackend } from "@/lib/proc";
 import { systemBootEpoch } from "@/lib/processIdentity";
 import type { StructuredHostKillRef } from "@/lib/resources";
 
-import { readStructuredHostRecords, structuredHostKillRefusal, terminateStructuredHostTree } from "./structuredHostControl";
+import {
+  readStructuredHostRecords,
+  structuredHostKillRefFromRegistry,
+  structuredHostKillRefusal,
+  terminateStructuredHostTree,
+} from "./structuredHostControl";
 
 const CLAUDE_SESSION = ["019f4906", "3f67", "7b72", "9fbc", "9ec3b5ad1326"].join("-");
 const CODEX_SESSION = ["029f4906", "3f67", "7b72", "9fbc", "9ec3b5ad1326"].join("-");
@@ -666,4 +671,93 @@ test("a host no registry record covers has no idle age to prove", () => {
     .toMatchObject({ status: 409, error: expect.stringContaining("own row") });
   /* Its own row still kills it — that is the whole point of listing it. */
   expect(structuredHostKillRefusal(orphan, { kind: "row" }, true, dependencies)).toBeNull();
+});
+
+/* #1501: a caller with no channel to the runtime host builds its kill ref
+   from the registry row alone. These drive that builder with rows that lack
+   or contradict the facts it needs; none of them may yield a ref. */
+const LANE_KEY: SessionKey = { engine: "claude", sessionId: CLAUDE_SESSION };
+const OWN_IDENTITY = { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid), bootEpoch: BOOT_EPOCH };
+
+function laneSnapshot(entryOver: Record<string, unknown> = {}, over: Parameters<typeof snapshot>[0] = {}): RegistryFile {
+  return snapshot({
+    entries: { [`claude:${CLAUDE_SESSION}`]: entry({ claimOwner: `structured-host:${JSON.stringify(OWN_IDENTITY)}`, ...entryOver }) },
+    conversations: { [LANE_CONVERSATION]: conversation({}) },
+    ...over,
+  });
+}
+
+test("a complete row yields a ref bound to its conversation, with the owner generation's status (#1501)", () => {
+  const built = structuredHostKillRefFromRegistry(LANE_KEY, { snapshot: () => laneSnapshot(), owned: () => false });
+
+  expect(built).toMatchObject({
+    ok: true,
+    ref: {
+      kind: "structured",
+      pid: 4_100,
+      startIdentity: "4100:start",
+      bootEpoch: BOOT_EPOCH,
+      engine: "claude",
+      sessionId: CLAUDE_SESSION,
+      conversationId: LANE_CONVERSATION,
+      seat: false,
+      turnBusy: false,
+      owned: false,
+    },
+    owner: { identity: { pid: process.pid }, status: "alive" },
+  });
+});
+
+test("a seat membership rides the ref so the kill gate can refuse it (#1501)", () => {
+  const built = structuredHostKillRefFromRegistry(LANE_KEY, {
+    snapshot: () => laneSnapshot({}, {
+      memberships: { [LANE_CONVERSATION]: [{ conversationId: LANE_CONVERSATION, kind: "orchestrator", containerId: "seat", role: "orchestrator", slot: "seat", stageId: null, stageOrder: null, round: null, parentConversationId: null, createdAt: "2026-08-26T08:00:00.000Z" }] },
+    }),
+    owned: () => false,
+  });
+
+  expect(built).toMatchObject({ ok: true, ref: { seat: true } });
+  expect(structuredHostKillRefusal((built as { ref: StructuredHostKillRef }).ref, { kind: "row" }, false, { snapshot: () => laneSnapshot() }))
+    .toMatchObject({ status: 409 });
+});
+
+test("a row without a start identity or boot epoch is refused by name, and a dead owner generation is reported (#1501)", () => {
+  const deadOwner = `structured-host:${JSON.stringify({ pid: 2_147_483_000, startIdentity: "gone:start", bootEpoch: BOOT_EPOCH })}`;
+  const noStart = structuredHostKillRefFromRegistry(LANE_KEY, {
+    snapshot: () => laneSnapshot({
+      claimOwner: deadOwner,
+      structuredHost: { kind: "claude-broker", endpoint: "stdio", process: { pid: 4_100, startIdentity: null, bootEpoch: BOOT_EPOCH }, eventCursor: 3, protocolVersion: null, writerClaimEpoch: 1, activeTurnRef: null, pendingAttention: [], activeFlags: [] },
+    }),
+  });
+  expect(noStart).toMatchObject({ ok: false, owner: { status: "dead" } });
+  expect((noStart as { error: string }).error).toContain("identity is unknown");
+  expect((noStart as { error: string }).error).toContain("4100");
+
+  const noEpoch = structuredHostKillRefFromRegistry(LANE_KEY, {
+    snapshot: () => laneSnapshot({
+      structuredHost: { kind: "claude-broker", endpoint: "stdio", process: { pid: 4_100, startIdentity: "4100:start" }, eventCursor: 3, protocolVersion: null, writerClaimEpoch: 1, activeTurnRef: null, pendingAttention: [], activeFlags: [] },
+    }),
+  });
+  expect(noEpoch).toMatchObject({ ok: false });
+  expect((noEpoch as { error: string }).error).toContain("boot epoch is unknown");
+});
+
+test("a row that is not the current generation of any conversation, or has no host or no row, yields nothing (#1501)", () => {
+  const superseded = structuredHostKillRefFromRegistry(LANE_KEY, {
+    snapshot: () => laneSnapshot({}, {
+      conversations: { [LANE_CONVERSATION]: conversation({ generations: [
+        ...(conversation({}) as { generations: unknown[] }).generations,
+        { id: CODEX_SESSION, path: "/home/user/.claude/projects/-repo/next.jsonl", accountId: null, launchProfile: {}, historyHash: null, host: null, createdAt: "2026-08-26T09:00:00.000Z", archivedAt: null },
+      ] }) },
+    }),
+  });
+  expect(superseded).toMatchObject({ ok: false });
+  expect((superseded as { error: string }).error).toContain("not the current generation");
+
+  const hostless = structuredHostKillRefFromRegistry(LANE_KEY, { snapshot: () => laneSnapshot({ structuredHost: null, claimOwner: "not-a-structured-claim" }) });
+  expect(hostless).toMatchObject({ ok: false, owner: { identity: null, status: "unrecorded" } });
+
+  const missing = structuredHostKillRefFromRegistry(LANE_KEY, { snapshot: () => snapshot() });
+  expect(missing).toMatchObject({ ok: false });
+  expect((missing as { error: string }).error).toContain("no row");
 });

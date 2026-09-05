@@ -101,7 +101,7 @@ Pipeline stages cannot create another pipeline. The stage-kind validator and the
 - `resume` — return to the saved pipeline phase and resume an embedded flow.
 - `retry-stage` — restore the last passed commit and start a fresh attempt.
 - `skip-stage` — record an operator skip and follow `next`.
-- `close` — close the pipeline and any embedded flow while retaining history, the worktree, and any live stage panes for inspection.
+- `close` — close the pipeline and any embedded flow while retaining history, the worktree, and any live stage panes for inspection. A close first asks the runtime host to end each resident stage host; when the calling process has no structured control channel at all (an MCP host process), it ends the host by the identity the registry recorded (pid, start identity, boot epoch), bound to the attempt's conversation and launch and revalidated for an orchestrator seat, and the report says which Viewer generation started the host and whether it still exists. A row with missing or contradictory identity, a seat, a survivor or a refused signal leaves the close refused with the pid named and nothing signalled.
 
 When a park happened before the stage produced a verdict, `retry-stage` and `skip-stage` refuse with 409 while the attempt's pane still hosts a live agent — resetting the worktree under a mid-turn agent would let its strays land in the next stage commit. Wait for the agent to exit or kill the pane, then retry.
 

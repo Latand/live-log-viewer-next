@@ -38,7 +38,14 @@ export type StructuredControlResult =
       caller can tell "this engine cannot" from "this attempt failed", and no
       prompt-based fallback is ever offered in its place. */
   | { status: 409; body: { error: string; code: "unsupported-capability"; capability: RuntimeControlCapability } }
+  /** The calling process has no structured control channel at all (no
+      `LLV_RUNTIME_HOST_SOCKET`): the command was never sent. Typed so a caller
+      can tell "this process cannot ask any host generation" from a host that
+      answered and refused (#1501). */
+  | { status: 503; body: { error: string; code: typeof RUNTIME_HOST_UNAVAILABLE_CODE } }
   | { status: 400 | 409 | 503; body: { error: string } };
+
+export const RUNTIME_HOST_UNAVAILABLE_CODE = "runtime-host-unavailable";
 
 const STRUCTURED_CONTROL_ACTIONS = new Set(["interrupt", "kill", "reconfigure", "compact"]);
 
@@ -176,7 +183,9 @@ export async function dispatchStructuredControl(
   }
 
   const client = dependencies.client === undefined ? runtimeHostClient() : dependencies.client;
-  if (!client) return { status: 503, body: { error: "structured runtime host is unavailable" } };
+  if (!client) {
+    return { status: 503, body: { error: "structured runtime host is unavailable", code: RUNTIME_HOST_UNAVAILABLE_CODE } };
+  }
   const operationId = request.operationId ?? (dependencies.operationId ?? newOperationId)();
   /* Set when the named account is outside the project's pool, and CALLED only
      once the command has been accepted: what it produces rides both the
