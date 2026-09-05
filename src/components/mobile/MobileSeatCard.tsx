@@ -21,12 +21,13 @@ import { draftWorkingDirectory } from "../projectModel";
 import {
   classifySeatFailure,
   deriveOrchestratorPanelState,
+  resolveSeatFile,
   newSeatRequestId,
   seatBindPending,
   seatRequestSettled,
   type SeatSubmitFailure,
 } from "../orchestrator/seatState";
-import { useOrchestratorIncumbent } from "../orchestrator/useOrchestratorIncumbent";
+import { useOrchestratorIncumbent, type OrchestratorIncumbentRead } from "../orchestrator/useOrchestratorIncumbent";
 import { useOrchestratorSeat, type OrchestratorSeatRead } from "../orchestrator/useOrchestratorSeat";
 import { useSeatConfirm } from "../orchestrator/useSeatConfirm";
 import { incumbentHostLive } from "../orchestrator/incumbent";
@@ -115,6 +116,7 @@ export function MobileSeatCard({
   projectName,
   files,
   seat,
+  incumbentRead,
   now,
   onOpenConversation,
 }: {
@@ -128,6 +130,9 @@ export function MobileSeatCard({
       answer. Given a read, this card starts none of its own: the hook called
       with a null project issues no request and sets no interval. */
   seat?: OrchestratorSeatRead;
+  /** Home shares the sheet-gated read with its footer. Other hosts retain this
+      card's own reader. Supplying a read disables the card's status poll. */
+  incumbentRead?: OrchestratorIncumbentRead;
   /** Epoch seconds, the board's own clock: the badge's elapsed time ticks with
       the rows beside it rather than on a second clock of its own. */
   now?: number;
@@ -186,22 +191,16 @@ export function MobileSeatCard({
      is showing them or a rotate draft is about to prefill from them: the card
      itself carries the board's own reading, so a phone that never opens the
      sheet never pays for the slower status poll. */
-  const { incumbent: read, stale: readStale, refresh: refreshIncumbent } = useOrchestratorIncumbent(project, seated && sheetOpen);
+  const ownIncumbent = useOrchestratorIncumbent(incumbentRead ? null : project, !incumbentRead && seated && sheetOpen);
+  const { incumbent: read, stale: readStale, refresh: refreshIncumbent } = incumbentRead ?? ownIncumbent;
   /* A reading is only about the conversation it names: right after a rotation
      the seat has already advanced to the successor while this slower poll still
      describes the predecessor. */
-  const incumbent = read && read.conversationId === seatConversationId ? read : null;
+  const incumbent = read && read.project === project && read.conversationId === seatConversationId ? read : null;
   const currentPath = incumbent?.transcriptPath ?? null;
   const seatPath = status?.seat?.path ?? null;
   const file = useMemo(
-    () => (seatConversationId
-      ? files.find((entry) => entry.conversationId === seatConversationId)
-        /* The registry's current generation for the id (#1182), then the path
-           the seat recorded at activation, as hints of decreasing freshness. */
-        ?? files.find((entry) => currentPath !== null && entry.path === currentPath)
-        ?? files.find((entry) => entry.path === seatPath)
-        ?? null
-      : null),
+    () => resolveSeatFile({ files, conversationId: seatConversationId, currentPath, seatPath }),
     [files, seatConversationId, currentPath, seatPath],
   );
   const surface = useSeatSurface(file);

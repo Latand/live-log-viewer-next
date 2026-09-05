@@ -27,6 +27,7 @@ const { ProjectDashboard } = await import("@/components/ProjectDashboard");
 const { MobileSheet } = await import("@/components/mobile/MobileSheet");
 const { getMobileNav, topScreen } = await import("@/components/mobile/mobileNav");
 const { receipts } = await import("@/components/mobile/MobileReceipt");
+const { resetOrchestratorIncumbentCacheForTests } = await import("@/components/orchestrator/useOrchestratorIncumbent");
 const { resetOrchestratorSeatCacheForTests } = await import("@/components/orchestrator/useOrchestratorSeat");
 type MobileShellHost = NonNullable<React.ComponentProps<typeof ProjectDashboard>["mobileShell"]>;
 
@@ -95,6 +96,10 @@ const OVERRIDES: Record<string, unknown> = {
     /* No orchestrator seat in this project by default: the board's seat slot
        invites one and no row is filtered out of the sections. A test that needs
        the footer seats one first. */
+    if (url.startsWith("/api/orchestrator/seat/status")) {
+      incumbentReads += 1;
+      return jsonResponse(incumbentAnswer);
+    }
     if (url.startsWith("/api/orchestrator/seat")) {
       seatReads += 1;
       if (seatFailure) return { ok: false, status: 503, json: async () => ({}) };
@@ -108,6 +113,8 @@ const OVERRIDES: Record<string, unknown> = {
 let seatAnswer: Record<string, unknown> | null = null;
 /** How many times this phone has asked for it. */
 let seatReads = 0;
+let incumbentReads = 0;
+let incumbentAnswer: Record<string, unknown> | null = null;
 
 const HAS: Record<string, boolean> = {};
 const SAVED: Record<string, unknown> = {};
@@ -213,6 +220,9 @@ beforeEach(() => {
   receipts.dismiss();
   seatAnswer = null;
   seatReads = 0;
+  incumbentReads = 0;
+  incumbentAnswer = null;
+  resetOrchestratorIncumbentCacheForTests();
   /* The seat read is cached per project for the whole module (#1149), so a
      test that seats one has to start from an unanswered cache. */
   resetOrchestratorSeatCacheForTests();
@@ -394,3 +404,58 @@ test("Home retains visible rows during deferred append, expired cursor and faile
   expect(await waitFor(() => all(root, '[data-catalog-path]').length === 1)).toBe(true);
   expect(all(root, '[data-catalog-path]')[0]!.dataset.catalogPath).toBe(catalogItems[44]!.path);
 });
+
+
+test("Home card and footer share the incumbent-resolved transcript with a scanner-native file ID", async () => {
+  seatAnswer = { project: PROJECT, seatEpoch: 1, conversationId: "conversation_manager", path: null,
+    mandate: "Coordinate", state: "active", designatedAt: "2100-01-02T13:00:00.000Z",
+    intent: { clientRequestId: "seat-manager", mode: "existing", launchId: null, error: null } };
+  incumbentAnswer = { project: PROJECT, designated: true, conversationId: "conversation_manager",
+    transcriptPath: running.path, liveness: { lifecycle: "running", hostState: "alive" } };
+  const root = mount();
+  expect(await waitFor(() => q(root, '[data-mobile2-seat-open]') !== null)).toBe(true);
+  await settle();
+  expect(incumbentReads).toBe(0);
+  click(q(root, '[data-mobile2-seat-open]'));
+  expect(await waitFor(() => q(root, '[data-mobile2-seat-controls]') !== null)).toBe(true);
+  const readsAfterResolution = incumbentReads;
+  expect(readsAfterResolution).toBeGreaterThan(0);
+  flushSync(() => getMobileNav().closeSheet());
+  await settle();
+  click(q(root, '[data-mobile2-board-dock]'));
+  expect(await waitFor(() => topScreen(getMobileNav().getState()).kind === "chat")).toBe(true);
+  expect(topScreen(getMobileNav().getState())).toMatchObject({ kind: "chat", id: running.path });
+  flushSync(() => getMobileNav().home());
+  expect(await waitFor(() => q(root, '[data-mobile2-seat-open]') !== null)).toBe(true);
+  click(q(root, '[data-mobile2-seat-open]'));
+  expect(await waitFor(() => topScreen(getMobileNav().getState()).kind === "chat")).toBe(true);
+  expect(topScreen(getMobileNav().getState())).toMatchObject({ kind: "chat", id: running.path });
+  expect(incumbentReads).toBe(readsAfterResolution);
+});
+
+for (const mismatch of ["project", "conversation"] as const) {
+  test(`Home rejects an incumbent response for a different ${mismatch} on card and footer`, async () => {
+    seatAnswer = { project: PROJECT, seatEpoch: 2, conversationId: "conversation_manager", path: null,
+      mandate: "Coordinate", state: "active", designatedAt: "2100-01-02T13:00:00.000Z",
+      intent: { clientRequestId: "seat-manager", mode: "existing", launchId: null, error: null } };
+    incumbentAnswer = { project: mismatch === "project" ? "other-project" : PROJECT,
+      designated: true, conversationId: mismatch === "conversation" ? "conversation_previous" : "conversation_manager",
+      transcriptPath: running.path, liveness: { lifecycle: "running", hostState: "alive" } };
+    const root = mount();
+    expect(await waitFor(() => q(root, '[data-mobile2-seat-open]') !== null)).toBe(true);
+    click(q(root, '[data-mobile2-seat-open]'));
+    expect(await waitFor(() => incumbentReads > 0)).toBe(true);
+    await settle();
+    flushSync(() => getMobileNav().closeSheet());
+    await settle();
+    for (const selector of ['[data-mobile2-board-dock]', '[data-mobile2-seat-open]']) {
+      click(q(root, selector));
+      await settle();
+      expect(topScreen(getMobileNav().getState()).kind).not.toBe("chat");
+      expect(getMobileNav().getState().sheet).toBe("seat");
+      expect(root.textContent).not.toContain(translate("en", "mobile2.seat.createDock"));
+      flushSync(() => getMobileNav().closeSheet());
+      await settle();
+    }
+  });
+}

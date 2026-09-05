@@ -25,11 +25,12 @@ import { BoardHistoryControls } from "./BoardHistoryControls";
 import { createFocusEdgeGate } from "./focusRequestEdge";
 import { TaskStrip } from "./BranchPane";
 import { MobileInlineCatalog, useMobileInlineCatalog } from "./mobile/MobileInlineCatalog";
-import { deriveOrchestratorPanelState } from "./orchestrator/seatState";
+import { deriveOrchestratorPanelState, resolveSeatFile } from "./orchestrator/seatState";
 import { ConversationList } from "./ConversationList";
 import { clearDraftStorage, draftCwd, draftParentConversationId, draftSrc, resolveSystemDraftCwd, setDraftCwd, setDraftSrc, setDraftText } from "./DraftAgentPane";
 import { OrchestratorPanelToggle } from "./orchestrator/OrchestratorPanelToggle";
 import { useOrchestratorSeat } from "./orchestrator/useOrchestratorSeat";
+import { useOrchestratorIncumbent } from "./orchestrator/useOrchestratorIncumbent";
 import { planBoardConvergence, planClose } from "./projectBoardMutations";
 import { reviewerCloseMutations } from "./reviewerAutoClose";
 import { directReviewFlows, isDirectReviewFlow } from "./flows/directReviewGroups";
@@ -398,9 +399,16 @@ function ProjectDashboardView({
     && !(cachedSeatRead.status?.exists && cachedSeatRead.status.seat?.conversationId)
     ? { ...cachedSeatRead, status: null }
     : cachedSeatRead;
-  const seatId = seatRead.status?.seat?.conversationId;
-  const seatFile = (seatId ? files.find((file) => file.conversationId === seatId) : null)
-    ?? files.find((file) => file.path === seatRead.status?.seat?.path) ?? null;
+  const seatId = seatRead.status?.seat?.conversationId ?? null;
+  // The card and footer share the sheet's existing status read. Keep its slower
+  // poll sheet-gated, and retain the resolved identity when the sheet closes.
+  const seatIncumbentRead = useOrchestratorIncumbent(isMobile ? project : null,
+    boardIsMobileLeaf && Boolean(seatRead.status?.exists && seatId)
+      && (mobileNavState.sheet === "seat" || mobileNavState.sheet === "rotate"));
+  const seatIncumbent = seatIncumbentRead.incumbent?.project === project
+    && seatIncumbentRead.incumbent.conversationId === seatId ? seatIncumbentRead.incumbent : null;
+  const seatFile = resolveSeatFile({ files, conversationId: seatId,
+    seatPath: seatRead.status?.seat?.path ?? null, currentPath: seatIncumbent?.transcriptPath ?? null });
   const seatPath = seatFile?.path ?? seatRead.status?.seat?.path ?? null;
   const seatState = deriveOrchestratorPanelState({ status: seatRead.status, statusFailed: seatRead.failed,
     submitting: false, submitFailure: null, file: seatFile, surface: null });
@@ -2190,6 +2198,7 @@ function ProjectDashboardView({
                            from the same answer instead of polling for it a
                            second time. */
                         seat={seatRead}
+                        incumbentRead={seatIncumbentRead}
                         /* The board's own clock, so the card's badge ticks with
                            the rows beside it rather than on a second one. */
                         now={nowSeconds}

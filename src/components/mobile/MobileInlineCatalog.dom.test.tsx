@@ -24,7 +24,8 @@ let revision = 1;
 const prefs = { manual: [], hidden: [], expanded: [], favorites: [], foldedEngineChildIds: [], expandedEngineTrayParentIds: [], viewMode: null, taskPanelOpen: false, seenAt: {} };
 const requests: string[] = [];
 let seatMode = "incumbent";
-Object.assign(window, { catalogRequests: requests, setSeatMode: (mode: string) => { seatMode = mode; } });
+let incumbentReads = 0;
+Object.assign(window, { catalogRequests: requests, setSeatMode: (mode: string) => { seatMode = mode; }, getIncumbentReadCount: () => incumbentReads, mobileNav: getMobileNav });
 window.fetch = async (input, init) => {
   const url = new URL(String(input), location.origin);
   let body: unknown = {};
@@ -37,10 +38,14 @@ window.fetch = async (input, init) => {
     body = { board: { schemaVersion: 1, revision: revision++, updatedAt: new Date(0).toISOString(), pathAliases: {}, explicitManual: [], prefs } };
   } else if (url.pathname === "/api/orchestrator/seat") {
     if (seatMode === "failed") return new Response("{}", { status: 503 });
-    body = { exists: true, pending: null, seat: { project: "atlas", seatEpoch: 1, conversationId: rows[0]!.conversationId,
+    body = { exists: true, pending: null, seat: { project: "atlas", seatEpoch: 1, conversationId: seatMode === "scanner-id" ? "conversation_manager" : rows[0]!.conversationId,
       path: null, mandate: "Coordinate", state: "active", designatedAt: "2026-01-01T00:00:00.000Z",
       intent: { clientRequestId: "synthetic-seat-1", mode: "existing", launchId: null, error: null } } };
     if (seatMode === "vacant") body = { exists: false, pending: null, seat: null };
+  } else if (url.pathname === "/api/orchestrator/seat/status") {
+    incumbentReads += 1;
+    body = { project: "atlas", designated: true, conversationId: "conversation_manager", transcriptPath: rows[0]!.path,
+      liveness: { lifecycle: "running", hostState: "alive" } };
   } else if (url.pathname === "/api/log") body = { entries: [], hasMore: false };
   return new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
 };
@@ -133,10 +138,27 @@ try {
   await page.screenshot({ path: `${out}/${width}-seat-unavailable.png` });
   await page.evaluate(() => (window as any).setSeatMode("vacant"));
   await page.locator('[data-mobile2-seat-invitation]').waitFor();
+  await page.evaluate(() => { (window as any).mobileNav().closeSheet(); (window as any).setSeatMode("scanner-id"); });
+  await page.waitForFunction(() => document.querySelector('[data-mobile2-seat-open]')?.getAttribute('data-mobile2-open') === 'seat'
+    && !document.querySelector('[data-mobile2-seat-invitation]'));
+  await page.locator('[data-mobile2-seat-open]').click();
+  await page.locator('[data-mobile2-seat-controls]').waitFor();
+  const resolutionReads = await page.evaluate(() => (window as any).getIncumbentReadCount());
+  await page.evaluate(() => (window as any).mobileNav().closeSheet());
+  await page.locator('[data-mobile2-board-dock]').click();
+  await page.waitForFunction(() => (window as any).mobileNav().getState().stack.at(-1)?.kind === 'chat');
+  const footerTarget = await page.evaluate(() => (window as any).mobileNav().getState().stack.at(-1));
+  await page.evaluate(() => (window as any).mobileNav().home());
+  await page.locator('[data-mobile2-seat-open]').click();
+  await page.waitForFunction(() => (window as any).mobileNav().getState().stack.at(-1)?.kind === 'chat');
+  const cardTarget = await page.evaluate(() => (window as any).mobileNav().getState().stack.at(-1));
+  const finalReads = await page.evaluate(() => (window as any).getIncumbentReadCount());
+  if (footerTarget.id !== '/repo/history-0.jsonl' || cardTarget.id !== footerTarget.id || finalReads !== resolutionReads) throw Error('seat identity or idle polling mismatch');
+  await Bun.write(out + '/' + width + '-seat-identity.json', JSON.stringify({ footerTarget, cardTarget, resolutionReads, finalReads }));
   await page.close();
  }
  await Bun.write(out+'/geometry.json', JSON.stringify(evidence,null,2));
  console.log(JSON.stringify(evidence,null,2));
 } finally { await browser.close(); server.stop(true); }
 
-}, 60000);
+}, 90000);
