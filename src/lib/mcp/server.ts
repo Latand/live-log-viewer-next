@@ -2315,15 +2315,9 @@ export function createMcpToolService(
               : evidence;
             return answerFromEvidence(uncertain, false);
           }
-          /* What the failure PROVES decides the answer. An error naming an
-             ADMITTED id (an operation or a launch) is a terminal verdict about
-             work the server holds and keeps that id and its guidance. Nothing
-             executed only when the request provably never left: the transport
-             says so or the request was never handed to it. HTTP status and
-             an error body alone provide no pre-dispatch proof. Everything
-             else after the request may be on the server
-             leaves the row `dispatching` and is answered from the evidence,
-             exactly as a lost response is; nothing here may invite a new key. */
+          /* Admission identifies work whose outcome still needs evidence.
+             Only affirmative pre-dispatch proof closes an attempt. HTTP
+             status, error text, and admitted IDs cannot establish termination. */
           outcome = error instanceof DeadlineExceededError ? "deadline" : "failure";
           const refusal = error instanceof McpToolRefusal ? error.details : {};
           const admitted = typeof refusal.operationId === "string" || typeof refusal.launchId === "string";
@@ -2331,8 +2325,17 @@ export function createMcpToolService(
             error instanceof McpDispatchNotExecutedError
             || !dispatch.attempted
           );
-          if (!admitted && !proven) {
+          if (!proven) {
             outcome = context.signal?.aborted ? "cancelled" : "failure";
+            // A concurrent recovery may already have established termination.
+            // Preserve that result even if the downstream read is now unavailable.
+            let current: McpReceiptRecord | null;
+            try {
+              current = await store.lookup(key);
+            } catch (cause) {
+              return unreadableReceipt(cause, false);
+            }
+            if (current?.result) return { ...current.result, replayed: true };
             const message = error instanceof Error ? error.message : String(error);
             const evidence = await readEvidence(binding, false);
             const uncertain: McpRecoveryEvidence = evidence.outcome === "unknown"
@@ -2342,16 +2345,16 @@ export function createMcpToolService(
           }
           const details: McpToolPayload = {
             ...refusal,
-            outcome: admitted ? "settled" : "not-executed",
-            evidence: admitted ? "dispatch-answer" : "dispatch-refused",
-            nextAction: admitted ? "follow-disposition" : "new-request-permitted",
+            outcome: "not-executed",
+            evidence: "dispatch-refused",
+            nextAction: "new-request-permitted",
           };
           settled = failure(
             typedTool,
             requestId,
             "tool_failed",
             error instanceof Error ? error.message : String(error),
-            !admitted,
+            true,
             false,
             details,
           );

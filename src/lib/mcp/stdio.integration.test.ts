@@ -1062,8 +1062,9 @@ test("path-only send: late registration after binding, lost response, and restar
 }, 40_000);
 
 
-for (const tool of ["send_message", "spawn_agent"] as const) {
-  test(`${tool}: incomplete successful JSON recovers admission before execution and across restart`, async () => {
+for (const { tool, idBearingError } of (["send_message", "spawn_agent"] as const)
+  .flatMap((tool) => [false, true].map((idBearingError) => ({ tool, idBearingError })))) {
+  test(`${tool}: ${idBearingError ? "ID-bearing error" : "incomplete successful JSON"} recovers admission before execution and across restart`, async () => {
     const fixture = await causalFixture("llv-1490-incomplete-");
     let host = await fixture.startHost();
     let mcp = await fixture.mcp();
@@ -1073,15 +1074,18 @@ for (const tool of ["send_message", "spawn_agent"] as const) {
           { operationId: "op_incomplete", outcome: "delivered", receipt: { operationId: "op_other", status: "queued" } }]
         : [{}, { ok: true }, { state: "settled" }, { launchId: "launch_incomplete" },
           { launchId: "launch_incomplete", conversationId: "conversation_incomplete", state: "starting", initialMessage: "delivered" }];
-      for (const [index, replacedAnswer] of answers.entries()) {
+      for (const [index, replacedAnswer] of (idBearingError ? [{}] : answers).entries()) {
         fixture.resetMarkers();
-        fixture.control({ admission: "hold-effect", replacedAnswer });
+        fixture.control(idBearingError
+          ? { admission: "hold-effect", mode: "hold", lateVerdict: { status: 503 } }
+          : { admission: "hold-effect", replacedAnswer });
         const key = `incomplete-${index}`;
         const args = tool === "send_message" ? sendArguments(fixture, key) : spawnArguments(fixture, key);
         const before = fixture.effects().length;
         const original = call(mcp, tool, args);
         await fixture.marker("admitted");
         await fixture.marker("accepted");
+        if (idBearingError) fixture.release();
         const result = await original;
         expect(fixture.effects()).toHaveLength(before);
         expect(result).toMatchObject({ ok: true, recovered: true, nextAction: "original-key-lookup" });

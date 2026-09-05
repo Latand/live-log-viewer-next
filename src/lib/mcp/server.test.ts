@@ -1967,7 +1967,7 @@ describe("original-key recovery (#1490)", () => {
     for (const [thrown, expected] of [
       [new McpDispatchVerdictError("upstream failed", { status: 500 }), { code: "outcome_unknown", details: { outcome: "unknown" } }],
       [new McpDispatchVerdictError("conflict", { status: 409 }), { code: "outcome_unknown", details: { outcome: "unknown" } }],
-      [new McpToolRefusal("delivery was started", { operationId: "op_kept", resend: "verify-first" }), { code: "tool_failed", details: { outcome: "settled", operationId: "op_kept", nextAction: "follow-disposition" } }],
+      [new McpToolRefusal("delivery was started", { operationId: "op_kept", resend: "verify-first" }), { code: "outcome_unknown", details: { outcome: "unknown", operationId: "op_kept", nextAction: "original-key-lookup" } }],
     ] as const) {
       const harness = recoveryHarness(OWNER, undefined, {
         bindingImpl: async (_args, context) => { context!.dispatch!.attempted = true; throw thrown; },
@@ -2075,8 +2075,8 @@ describe("original-key recovery (#1490)", () => {
     let release!: () => void;
     const held = new Promise<void>((resolve) => { release = resolve; });
     /* The original's dispatch answers late, and with a 409 that names the
-       admitted operation: the server's ambiguity verdict, which would settle
-       the row as `tool_failed` / verify-first if nothing better were known. */
+       admitted operation. Admission does not establish a terminal outcome;
+       the already recovered delivery must remain the answer. */
     const original = recoveryHarness(OWNER, first, {
       bindingImpl: async () => {
         await held;
@@ -2198,11 +2198,11 @@ describe("original-key recovery (#1490)", () => {
     });
     expect(await admitted.service.callTool("send_message", SEND)).toMatchObject({
       ok: false,
-      code: "tool_failed",
+      code: "outcome_unknown",
       retryable: false,
-      details: { operationId: "op_ambiguous", resend: "verify-first", outcome: "settled", nextAction: "follow-disposition" },
+      details: { operationId: "op_ambiguous", outcome: "unknown", nextAction: "original-key-lookup" },
     });
-    expect(await admitted.store.lookup("send_message:recover-1")).toMatchObject({ stage: "settled" });
+    expect(await admitted.store.lookup("send_message:recover-1")).toMatchObject({ stage: "dispatching", result: null });
   });
 
   test("a claim whose owner died before dispatch is closed as not-executed; a live owner's claim stays unknown", async () => {
