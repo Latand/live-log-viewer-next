@@ -780,3 +780,70 @@ test("request_attention admits every target shape the attention record accepts",
   expect(refused.success).toBe(false);
   expect(JSON.stringify(refused.error?.issues)).toContain("conversation");
 });
+
+/* ── ORIGINAL-KEY RECOVERY (#1490) ─────────────────────────────────────── */
+
+import { RECOVERY_CONTRACT_DESCRIPTION, type McpRecoverableTool } from "./server";
+
+test("spawn_agent and send_message publish recoveryOnly and the recovery contract, and the flag never enters the digest", async () => {
+  await withProtocolClient(inertBindings(), async (client) => {
+    const listed = await client.listTools();
+    for (const toolName of ["spawn_agent", "send_message"] as const) {
+      const tool = listed.tools.find((candidate) => candidate.name === toolName)!;
+      const schema = tool.inputSchema as { properties: Record<string, { type?: string; description?: string }>; required?: string[] };
+      /* Captured before toMatchObject, which swaps the matched field for its matcher. */
+      const recoveryOnlyDescription = String(schema.properties.recoveryOnly?.description);
+      expect(schema.properties.recoveryOnly).toMatchObject({ type: "boolean", description: expect.stringContaining("never claim an absent key") });
+      expect(recoveryOnlyDescription).toContain("nothing is disclosed");
+      if (toolName === "spawn_agent") {
+        expect(String(schema.properties.project.description)).toContain("resolved server-side from cwd");
+      }
+      expect(schema.required ?? []).not.toContain("recoveryOnly");
+      expect(tool.description).toContain(RECOVERY_CONTRACT_DESCRIPTION);
+      for (const rule of [
+        "sent exactly once",
+        "`recoveryOnly: true` never claims an absent key",
+        "`idempotency_conflict`",
+        "refused without disclosure",
+        "`accepted`",
+        "`in-flight`",
+        "`settled`",
+        "`not-executed`",
+        "`unknown`",
+        "`retryable` never means a new key may be used",
+        "`message_receipt(operationId)` remains available",
+      ]) expect(tool.description).toContain(rule);
+    }
+    expect(listed.tools.find((candidate) => candidate.name === "message_receipt")).toBeDefined();
+  });
+
+  /* Over the protocol: the same logical call with and without the flag is one
+     call, answered once by dispatch and afterwards by recovery only. */
+  const bindingCalls: unknown[] = [];
+  const bindings = inertBindings({
+    send_message: async (args) => { bindingCalls.push(args); return { operationId: "op_parity" }; },
+  });
+  const tool: McpRecoverableTool = {
+    bind: () => ({ caller: { kind: "worker", conversationId: "conversation_parity", project: null }, target: { project: null, identity: "conversation_target" }, downstreamKey: "parity-1" }),
+    recover: async () => ({ outcome: "settled", evidence: "delivery-record", reason: null, ids: { operationId: "op_parity" }, facts: { state: "delivered" } }),
+  };
+  const server = createViewerMcpServer(createMcpToolService(bindings, new MemoryMcpReceiptStore(), undefined, { recovery: { send_message: tool } }));
+  const client = new Client({ name: "schema-parity-recovery", version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const args = { clientRequestId: "parity-1", conversationId: "conversation_target", text: "hold" };
+    const first = await client.callTool({ name: "send_message", arguments: { ...args, recoveryOnly: false } });
+    expect(first.structuredContent).toMatchObject({ ok: true, operationId: "op_parity", replayed: false });
+    const explicit = await client.callTool({ name: "send_message", arguments: { ...args, recoveryOnly: true } });
+    expect(explicit.structuredContent).toMatchObject({ ok: true, recovered: true, outcome: "settled", operationId: "op_parity", replayed: true });
+    const ordinary = await client.callTool({ name: "send_message", arguments: args });
+    expect(ordinary.structuredContent).toMatchObject({ ok: true, operationId: "op_parity", replayed: true });
+    expect(bindingCalls).toHaveLength(1);
+    const rejected = await client.callTool({ name: "send_message", arguments: { ...args, recoveryOnly: "yes" } });
+    expect(rejected.isError).toBe(true);
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});

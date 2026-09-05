@@ -1,5 +1,6 @@
 import {
   agentRegistry,
+  readOnlyConversationLookupFromSnapshot,
   type AgentRegistry,
   type DeliveryOperationOwner,
   type DeliveryTerminalDisposition,
@@ -8,13 +9,14 @@ import {
 import { sessionKeyId } from "@/lib/agent/sessionKey";
 import type { HeldDelivery, ViewerConversationId } from "@/lib/accounts/migration/contracts";
 
+import { structuredContentDigest } from "./structuredContent";
 import { runtimeHostClient, type RuntimeHostClient } from "./client";
 import {
   RUNTIME_DELIVERY_DISCARDED_REASON,
   type RuntimeOperationReceipt,
   type RuntimeReceiptStatus,
 } from "./contracts";
-import { readEvidence, unreadableEvidence } from "./evidence";
+import { readEvidence, readEvidenceSync, unreadableEvidence, type Evidence } from "./evidence";
 
 /**
  * Settlement of accepted sends (#1131).
@@ -639,4 +641,147 @@ function settleProjection(
     ...resendGuidance(verdict.disposition, verdict.reason),
     evidence,
   };
+}
+
+/**
+ * ── ORIGINAL-KEY LOOKUP (#1490) ───────────────────────────────────────────
+ *
+ * What the durable delivery records say about a send known only by the
+ * identity its caller bound BEFORE dispatch: the canonical recipient and the
+ * exact client message key handed to the send route. This is the read-only
+ * primitive the MCP recovery path and the seat monitor's harvest (#1465) share:
+ * it accepts a binding somebody else established, answers from the registry's
+ * own records and the journal's CURRENT row, and can neither enqueue, retry,
+ * withdraw, settle, fence nor spawn. Nothing here writes: a reservation that is
+ * past its settlement deadline is reported exactly as it rests, because a
+ * lookup is an observation and `message_receipt` is where a send is ENDED.
+ *
+ * The answer is closed. `found` names exactly one operation; `absent` means
+ * the records hold nothing under that key — an observation, never proof that
+ * nothing executed; `ambiguous` means more than one operation claims the key
+ * under the bound recipient, which discloses none of them; `unresolved` means
+ * the bound target names no conversation the registry knows, so no record can
+ * be matched to it and none is disclosed.
+ */
+export interface OriginalSendBinding {
+  /** Canonical conversation id (alias-resolved), or a transcript path when the
+      send was addressed by path and no conversation was registered for it. */
+  conversationId: string;
+  /** The exact `clientMessageId` the send route was handed. */
+  clientMessageId: string;
+  /** Original text, when the caller has already verified its argument digest. */
+  text?: string;
+}
+
+export type OriginalSendLookup =
+  | { kind: "found"; operationId: string; deliveryId: string | null; receipt: SendReceipt; reservationState: HeldDelivery["state"] | null }
+  | { kind: "absent" }
+  | { kind: "ambiguous"; operationIds: string[] }
+  | { kind: "unresolved" }
+  | { kind: "contradictory" };
+
+export function lookupOriginalSend(file: RegistryFile, binding: OriginalSendBinding): OriginalSendLookup {
+  const lookup = readOnlyConversationLookupFromSnapshot(file);
+  const canonical = (id: string): string => lookup.conversation(id as ViewerConversationId)?.id ?? id;
+  /* The target is resolved through the registry's own lookup — a conversation
+     id through its alias walk, a path through the path index — and a target
+     nothing resolves matches nothing. An exact id the registry does not know
+     still matches only records carrying that exact id; a path it does not know
+     matches no record at all, because a path is not an identity. */
+  const byConversation = binding.conversationId.startsWith("conversation_");
+  const target = byConversation
+    ? canonical(binding.conversationId)
+    : lookup.conversationForPath(binding.conversationId)?.id ?? null;
+  if (!target) return { kind: "unresolved" };
+  const matches = (conversationId: string): boolean => canonical(conversationId) === target;
+  const operations = new Map<string, string | null>();
+  for (const delivery of Object.values(file.heldDeliveries)) {
+    if (delivery.clientMessageId !== binding.clientMessageId || !matches(delivery.conversationId)) continue;
+    operations.set(delivery.command.operationId, delivery.id);
+  }
+  for (const [operationId, owner] of Object.entries(file.deliveryOperationOwners)) {
+    if (owner.clientMessageId !== binding.clientMessageId || owner.retryOfOperationId || !matches(owner.conversationId)) continue;
+    if (!operations.has(operationId)) operations.set(operationId, owner.deliveryId);
+  }
+  if (operations.size === 0) return { kind: "absent" };
+  if (operations.size > 1) return { kind: "ambiguous", operationIds: [...operations.keys()].sort() };
+  const [[operationId, deliveryId]] = [...operations.entries()];
+  const reservation = deliveryId ? file.heldDeliveries[deliveryId] : undefined;
+  const owner = file.deliveryOperationOwners[operationId];
+  if ((owner && (!matches(owner.conversationId) || owner.clientMessageId !== binding.clientMessageId
+      || owner.deliveryId !== deliveryId || owner.retryOfOperationId))
+    || (reservation && (!matches(reservation.conversationId) || reservation.clientMessageId !== binding.clientMessageId
+      || reservation.command.operationId !== operationId))) return { kind: "contradictory" };
+  const receipt = sendReceiptFor(file, operationId);
+  if (!receipt) return { kind: "absent" };
+  if (binding.text !== undefined) {
+    const expected = structuredContentDigest({ text: binding.text, images: [] });
+    if ((reservation?.text && reservation.text !== binding.text)
+      || (reservation?.contentDigest && reservation.contentDigest !== expected)
+      || (owner?.contentDigest && owner.contentDigest !== expected)) return { kind: "contradictory" };
+  }
+  return { kind: "found", operationId, deliveryId: reservation ? deliveryId : null, receipt, reservationState: reservation?.state ?? null };
+}
+
+export type OriginalSendEvidence =
+  | { kind: "found"; operationId: string; deliveryId: string | null; receipt: SendReceipt; reservationState: HeldDelivery["state"] | null; current: Evidence<SendReceipt> }
+  | { kind: "absent" }
+  | { kind: "ambiguous"; operationIds: string[] }
+  | { kind: "unresolved" }
+  | { kind: "unreadable"; reason: string }
+  | { kind: "contradictory" };
+
+/**
+ * The CURRENT answer for one found operation, projected without writing.
+ *
+ * A durable record that is already terminal is the answer. One still in flight
+ * is checked against the journal's current retry leaf, and a terminal verdict
+ * there is REPORTED — never written back onto the reservation, never fenced,
+ * never aged past a deadline. A journal that cannot be read leaves the durable
+ * projection standing and says so. Where {@link resolveSendReceipt} may end a
+ * send, this only looks at it.
+ */
+async function projectCurrentSend(
+  projected: SendReceipt,
+  operationId: string,
+  ports: SendSettlementPorts,
+): Promise<Evidence<SendReceipt>> {
+  if (projected.state !== "in-flight") return { readable: true, value: projected };
+  const client = ports.client === undefined ? runtimeHostClient() : ports.client;
+  if (!client) return { readable: true, value: { ...projected, evidence: "delivery-record" } };
+  const journal = await readEvidence(
+    () => client.operationStatus(operationId, { currentRetryLeaf: true }),
+    "runtime host is unavailable",
+  );
+  if (!journal.readable) return journal;
+  const receipt = journal.value?.receipt ?? null;
+  const verdict = journalVerdict(receipt?.status ?? null, receipt?.reason);
+  if (!verdict) return { readable: true, value: { ...projected, evidence: "delivery-journal" } };
+  if (verdict.state === "delivered") {
+    return { readable: true, value: { ...projected, state: "delivered", reason: null, duplicateRisk: false, resend: "not-needed", evidence: "delivery-journal" } };
+  }
+  return {
+    readable: true,
+    value: { ...projected, state: "failed", reason: verdict.reason, ...resendGuidance(verdict.disposition, verdict.reason), evidence: "delivery-journal" },
+  };
+}
+
+/**
+ * The lookup above, then the current answer for the one operation it found.
+ * Read-only end to end: the registry snapshot and the journal row are read,
+ * and neither is changed. A journal or registry that cannot be read keeps the
+ * identity the durable record established and marks the current answer
+ * unreadable; it never turns into an absence.
+ */
+export async function resolveOriginalSend(
+  binding: OriginalSendBinding,
+  ports: SendSettlementPorts = {},
+): Promise<OriginalSendEvidence> {
+  const registry = ports.registry ?? agentRegistry();
+  const snapshot = readEvidenceSync(() => registry.readOnlySnapshot(), "the delivery record could not be read");
+  if (!snapshot.readable) return { kind: "unreadable", reason: snapshot.reason };
+  const found = lookupOriginalSend(snapshot.value, binding);
+  if (found.kind !== "found") return found;
+  const current = await projectCurrentSend(found.receipt, found.operationId, ports);
+  return { ...found, current };
 }
