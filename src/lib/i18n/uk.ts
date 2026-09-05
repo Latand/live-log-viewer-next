@@ -2292,6 +2292,7 @@ export const uk: Record<keyof typeof en, Message> = {
 
   /* Постійний оверлей кореневої розмови (#691) і передача фокуса (#688). */
 
+  "attention.arrival": "Оркестратор перемістив вас сюди: {reason}",
   "attention.return": "Назад, де ви були",
   "attention.returnLine": "Повернутися туди, де ви були",
 

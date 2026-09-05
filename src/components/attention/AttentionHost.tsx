@@ -22,8 +22,8 @@ import { forgetReturnProject, readReturnProject, rememberReturnProject } from ".
  *
  * DESKTOP FOLLOWS IMMEDIATELY. An explicit focus event from the root agent
  * moves the view; there is no consent step, no preview, and no action row. The
- * confirmation cluster that used to live here is gone, and the only thing left
- * behind is a small Back control in the board chrome.
+ * confirmation cluster that used to live here is gone. A brief arrival reason
+ * accompanies the small Back control in the board chrome.
  *
  * MOBILE IS CHAT-ONLY. The phone never renders, offers, accepts or navigates a
  * focus request. That is enforced by withholding the device id — the same
@@ -160,6 +160,18 @@ export function AttentionHost({ mobile, bus = focusHandoffBus, deviceId: forcedD
      in-flight moves (cleanup for finding 4) and never a concurrent mount's.
      The durable claim survives in sessionStorage, so a remount resumes the
      handoff with the original pre-move viewport instead of restarting it. */
+  // Only a move observed by this mount can announce an arrival. Replayed
+  // following records still offer Back without announcing an old move again.
+  const [landedId, setLandedId] = useState<string | null>(null);
+  const arrivalGeneration = useRef(0);
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- a surface switch invalidates the local landing proof
+    setLandedId(null);
+    return () => { arrivalGeneration.current += 1; };
+  }, [deviceId, viewSessionId]);
+  const [arrival, setArrival] = useState<{ id: string; deadline: number } | null>(null);
+  const announced = useRef(new Set<string>());
+
   const ownTransactions = useRef(new Set<AbortController>());
   useEffect(() => {
     const owned = ownTransactions.current;
@@ -216,6 +228,7 @@ export function AttentionHost({ mobile, bus = focusHandoffBus, deviceId: forcedD
       OBSERVED the camera at the frame (see `runFocusTransaction`). */
   const completeHandoff = useCallback(async (request: AttentionRequestV1, resume = false) => {
     if (runningHandoffs.has(request.id)) return;
+    const generation = arrivalGeneration.current;
     const controller = new AbortController();
     runningHandoffs.set(request.id, controller);
     ownTransactions.current.add(controller);
@@ -233,6 +246,9 @@ export function AttentionHost({ mobile, bus = focusHandoffBus, deviceId: forcedD
            entitled to close the record over this. */
         keepReturnPoint = true;
         return;
+      }
+      if (outcome.resolution !== "lost" && generation === arrivalGeneration.current) {
+        setLandedId(request.id);
       }
       const arrival = await offers.arrive(request, outcome.resolution);
       /* The record says `following` only when the server said so. A move that
@@ -417,22 +433,42 @@ export function AttentionHost({ mobile, bus = focusHandoffBus, deviceId: forcedD
   }, [deviceId, actionableRequestId, actionableRequest, directedRequestId, directedRequest, onAccept, onDirected]);
 
   const onReturnClick = useCallback(() => {
+    setArrival(null);
     if (offer) void onReturn(offer.request);
   }, [offer, onReturn]);
 
-  /* The whole surface: one small control, and only while there is somewhere to
-     go back to. Everything else the overlay used to put here — the request card,
-     the accept/preview/decline row, the refusal band — is gone. A move that has
-     already happened does not need announcing, and a failed one is reported to
-     the agent through the focus-follow outcome rather than as a banner over the
-     operator's board. Gated on the record's OWN `following` — not merely on the
-     device status — so a directed request still mid-flight (`accepted`, nothing
-     moved yet) never shows a Return before there is anywhere to return from.
-     And on the executing SESSION: two tabs share a device id, but the return
-     point was captured from ONE tab's viewport — a Return rendered on the
-     other would restore that framing into a board it never left. */
-  if (!offer || offer.status !== "following" || offer.request.state !== "following") return null;
-  if (offer.request.directedSessionId !== undefined && offer.request.directedSessionId !== viewSessionId) return null;
+  // The record must confirm the move for this executing tab before either
+  // surface appears. Mobile suppresses even a cached desktop following record.
+  const following = deviceId && offer?.status === "following"
+    && offer.request.state === "following"
+    && (offer.request.directedSessionId === undefined || offer.request.directedSessionId === viewSessionId)
+    ? offer : null;
+  const arrivalId = following?.request.id === landedId && following.request.reason.trim()
+    ? following.request.id : null;
 
-  return <FocusReturnChip onReturn={onReturnClick} precise={offer.returnAvailable} t={t} />;
+  useEffect(() => {
+    if (!arrivalId || announced.current.has(arrivalId)) {
+      // Eligibility changed (Return, mobile, lost target, or another tab).
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- discard an announcement when its confirmed following scope ends
+      setArrival(null);
+      return;
+    }
+    announced.current.add(arrivalId);
+    const next = { id: arrivalId, deadline: Date.now() + 8_000 };
+    setArrival(next);
+    const timer = setTimeout(() => {
+      setArrival((current) => current === next ? null : current);
+    }, Math.max(0, next.deadline - Date.now()));
+    return () => clearTimeout(timer);
+  }, [arrivalId]);
+
+  if (!following) return null;
+  return (
+    <FocusReturnChip
+      onReturn={onReturnClick}
+      precise={following.returnAvailable}
+      arrival={arrival?.id === arrivalId ? t("attention.arrival", { reason: following.request.reason }) : undefined}
+      t={t}
+    />
+  );
 }
