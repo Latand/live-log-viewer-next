@@ -2510,3 +2510,61 @@ for (const tool of ["send_message", "spawn_agent"] as const) {
     expect(observer.bindingCalls).toHaveLength(0);
   });
 }
+
+for (const tool of ["send_message", "spawn_agent"] as const) {
+  for (const backend of ["memory", "file", "sqlite"] as const) {
+    test(`${tool}: ${backend} preserves ordinary acceptance and stronger terminal recovery separately`, async () => {
+      const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-accepted-terminal-"));
+      scratch.push(directory);
+      const filename = path.join(directory, backend === "sqlite" ? "receipts.sqlite" : "receipts.json");
+      const memory = new MemoryMcpReceiptStore();
+      const open = () => backend === "memory" ? memory : backend === "file"
+        ? new FileMcpReceiptStore(filename) : new SqliteMcpReceiptStore(filename);
+      let store = open();
+      const args = tool === "send_message" ? SEND : SPAWN;
+      const ids: Record<string, string> = tool === "send_message" ? { operationId: "op_accepted" }
+        : { launchId: "launch_accepted", conversationId: "conversation_accepted" };
+      const terminal: McpRecoveryEvidence = { outcome: "settled", evidence: "durable-fixture", reason: null, ids,
+        facts: { state: tool === "send_message" ? "failed" : "completed", resend: "verify-first", duplicateRisk: true } };
+      const original = recoveryHarness(OWNER, store, { bindingImpl: async () => ({ ...ids, state: "queued" }) });
+      const accepted = await original.service.callTool(tool, args);
+      original.evidence = terminal;
+      const recovered = await original.service.callTool(tool, { ...args, recoveryOnly: true });
+      expect(recovered).toMatchObject({ ok: true, outcome: "settled", ...ids, resend: "verify-first", duplicateRisk: true });
+      expect(await original.service.callTool(tool, args)).toEqual({ ...accepted, replayed: true });
+      expect(original.bindingCalls).toHaveLength(1);
+      const key = `${tool}:${args.clientRequestId}`;
+      const record = (await store.lookup(key))!;
+      expect(record.result).toEqual(accepted);
+      expect(record.recoveryResult).toEqual(recovered);
+      if (backend === "file") {
+        const imported = new SqliteMcpReceiptStore(path.join(directory, "imported.sqlite"), { legacyFilePath: filename });
+        try { expect(imported.lookup(key)).toMatchObject({ result: accepted, recoveryResult: recovered }); }
+        finally { imported.close(); }
+      }
+      // Conflicting terminal writes from a second owner cannot regress the first.
+      const contender = open();
+      expect(await contender.settle(key, record.digest, { ...recovered, state: "contradictory" } as McpToolResult, "settled", true)).toEqual(recovered);
+      await expect(Promise.resolve().then(() => contender.settle(key, "changed-digest", recovered, "settled", true))).rejects.toThrow("ownership changed");
+      if (contender instanceof SqliteMcpReceiptStore) contender.close();
+      if (store instanceof SqliteMcpReceiptStore) store.close();
+      store = open();
+      try {
+        const restarted = recoveryHarness(OWNER, store);
+        for (const evidence of [
+          { outcome: "unknown", evidence: "none", reason: "absent", ids: {} },
+          "unreadable",
+        ]) {
+          restarted.evidence = (evidence === "unreadable" ? Promise.reject(new Error("downstream unreadable")) : evidence) as McpRecoveryEvidence;
+          expect(await restarted.service.callTool(tool, { ...args, recoveryOnly: true })).toMatchObject({
+            ok: true, outcome: "settled", evidence: "mcp-receipt", ...ids, resend: "verify-first", duplicateRisk: true,
+          });
+          expect(await restarted.service.callTool(tool, args)).toEqual({ ...accepted, replayed: true });
+        }
+        const stranger = recoveryHarness(OTHER, store);
+        expect(await stranger.service.callTool(tool, { ...args, recoveryOnly: true })).toMatchObject({ code: "recovery_not_permitted" });
+        expect(restarted.bindingCalls).toHaveLength(0);
+      } finally { if (store instanceof SqliteMcpReceiptStore) store.close(); }
+    });
+  }
+}

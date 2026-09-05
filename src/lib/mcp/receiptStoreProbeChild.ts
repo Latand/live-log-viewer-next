@@ -187,7 +187,7 @@ async function runHttpHost(configPath: string): Promise<void> {
     assertStructuredRuntime: () => {},
     defer: (work: () => Promise<void>) => { void work(); },
     storeImages: () => [],
-    spawnStructuredConversation: async (input: { receipt: { launchId: string; conversationId: string; clientAttemptId: string | null }; prompt: string }) => {
+    spawnStructuredConversation: async (input: { receipt: { launchId: string; conversationId: string; clientAttemptId: string | null; cwd: string }; prompt: string }) => {
       /* The launch receipt already exists when the route hands the launch
          here: that is the admission. The writer runs only once execution is
          released. */
@@ -206,7 +206,7 @@ async function runHttpHost(configPath: string): Promise<void> {
       if (control().settleWriter) {
         agentRegistry().completeSpawn(input.receipt.launchId, {
           key: { engine: "codex", sessionId: input.receipt.launchId },
-          artifactPath: transcriptPath, cwd: config.transcriptRoot, accountId: null,
+          artifactPath: transcriptPath, cwd: input.receipt.cwd, accountId: null,
           status: "idle", host: null, claimEpoch: 0, claimOwner: null, pendingAction: null,
         });
       }

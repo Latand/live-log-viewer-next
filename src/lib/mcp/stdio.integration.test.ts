@@ -1293,3 +1293,62 @@ for (const tool of ["send_message", "spawn_agent"] as const) {
     }
   }, 40_000);
 }
+
+for (const tool of ["send_message", "spawn_agent"] as const) {
+  test(`${tool}: queued ordinary replay and terminal recovery both survive downstream loss and process restart`, async () => {
+    const fixture = await causalFixture("llv-1490-accepted-terminal-");
+    let host = await fixture.startHost();
+    let mcp = await fixture.mcp();
+    try {
+      fixture.control({ mode: "respond", admission: "hold-effect", settleWriter: true });
+      const args = tool === "send_message" ? sendArguments(fixture, "accepted-terminal") : spawnArguments(fixture, "accepted-terminal");
+      const accepted = await call(mcp, tool, args);
+      expect(accepted.ok).toBe(true);
+      expect(accepted.settled).not.toBe(true);
+      expect(fixture.effects()).toHaveLength(0);
+      fixture.execute();
+      // Poll the durable settlement barrier, not a widened delay: the effect
+      // and its terminal record are both required before the recovery read.
+      const deadline = Date.now() + 10_000;
+      while (true) {
+        const file = fixture.registryFile();
+        const terminal = tool === "send_message"
+          ? Object.values(file.heldDeliveries).some((delivery) => delivery.state === "delivered")
+          : Object.values(file.receipts).some((receipt) => receipt.launchId === accepted.launchId && receipt.state === "completed");
+        if (terminal) break;
+        if (Date.now() > deadline) throw new Error(`terminal effect barrier never reached: ${JSON.stringify({ accepted, effects: fixture.effects(), receipts: Object.values(file.receipts).map(({ launchId, state }) => ({ launchId, state })) })}`);
+        await Bun.sleep(5);
+      }
+      expect(fixture.effects()).toHaveLength(1);
+      const terminal = await call(mcp, tool, { ...args, recoveryOnly: true });
+      const effect = fixture.effects()[0]!;
+      const ids = tool === "send_message" ? { operationId: effect.operationId }
+        : { launchId: effect.launchId, conversationId: effect.conversationId };
+      expect(terminal).toMatchObject({ ok: true, outcome: "settled", ...ids });
+      const disposition = tool === "send_message" ? { state: terminal.state, resend: terminal.resend, duplicateRisk: terminal.duplicateRisk }
+        : { state: terminal.state, launched: terminal.launched };
+      expect(await call(mcp, tool, args)).toEqual({ ...accepted, replayed: true });
+      await mcp.close();
+      await host.kill();
+      const registryPath = path.join(fixture.state, "agent-registry.json");
+      const registry = JSON.parse(fs.readFileSync(registryPath, "utf8"));
+      if (tool === "send_message") {
+        registry.heldDeliveries = {};
+        registry.deliveryOperationOwners = {};
+      } else delete registry.receipts[String(effect.launchId)];
+      fs.writeFileSync(registryPath, JSON.stringify(registry));
+      fixture.control({ mode: "respond" });
+      host = await fixture.startHost();
+      mcp = await fixture.mcp();
+      expect(await call(mcp, tool, { ...args, recoveryOnly: true })).toMatchObject({
+        ok: true, outcome: "settled", evidence: "mcp-receipt", ...ids, ...disposition,
+      });
+      expect(await call(mcp, tool, args)).toEqual({ ...accepted, replayed: true });
+      expect(fixture.effects()).toHaveLength(1);
+      expect(fixture.responses()).toHaveLength(1);
+    } finally {
+      await mcp.close();
+      await host.stop();
+    }
+  }, 40_000);
+}

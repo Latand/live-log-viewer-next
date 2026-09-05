@@ -414,6 +414,8 @@ export interface McpRequestBinding extends McpRequestBindingInput {
 export interface McpReceiptRecord {
   digest: string;
   result: McpToolResult | null;
+  /** Stronger terminal recovery, kept separately from the ordinary replay. */
+  recoveryResult?: McpToolResult | null;
   binding: McpRequestBinding | null;
   stage: McpDispatchStage | null;
 }
@@ -421,6 +423,7 @@ export interface McpReceiptRecord {
 type Receipt = {
   digest: string;
   result?: McpToolResult;
+  recoveryResult?: McpToolResult;
   binding?: McpRequestBinding;
   stage?: McpDispatchStage;
 };
@@ -452,8 +455,9 @@ export interface McpRecoveryReceiptStore extends McpReceiptStore {
       row is no longer merely claimed (it was dispatched, or already closed). */
   fenceUndispatched(key: string, digest: string, result: McpToolResult): boolean | Promise<boolean>;
   /** Writes the result only if none is recorded yet, and returns whatever the
-      row holds afterwards — the first terminal answer always wins. */
-  settle(key: string, digest: string, result: McpToolResult, stage?: "settled" | "not-executed"): McpToolResult | Promise<McpToolResult>;
+      row holds afterwards — the first terminal answer always wins. Recovery
+      may save stronger terminal evidence alongside an ordinary acceptance. */
+  settle(key: string, digest: string, result: McpToolResult, stage?: "settled" | "not-executed", recovery?: boolean): McpToolResult | Promise<McpToolResult>;
 }
 
 export function supportsMcpRecovery(store: McpReceiptStore): store is McpRecoveryReceiptStore {
@@ -468,9 +472,34 @@ function recordOf(receipt: Receipt): McpReceiptRecord {
   return {
     digest: receipt.digest,
     result: receipt.result ?? null,
+    ...(receipt.recoveryResult ? { recoveryResult: receipt.recoveryResult } : {}),
     binding: receipt.binding ?? null,
     stage: receipt.stage ?? (receipt.result ? "settled" : null),
   };
+}
+
+function terminalReceiptResult(result: McpToolResult | null | undefined): result is McpToolResult {
+  return Boolean(result && (result.ok
+    ? result.outcome === "settled" || result.settled === true
+      || (result.toolName === "spawn_agent" && result.state === "settled")
+    : result.details?.outcome === "settled"));
+}
+
+function receiptSettlement(
+  receipt: Receipt,
+  result: McpToolResult,
+  stage: "settled" | "not-executed",
+  recovery: boolean,
+): { receipt: Receipt; result: McpToolResult } {
+  if (recovery && !terminalReceiptResult(result)) throw new Error("MCP recovery requires terminal evidence");
+  if (receipt.recoveryResult) return { receipt, result: receipt.recoveryResult };
+  if (receipt.result) {
+    if (recovery && !terminalReceiptResult(receipt.result) && receipt.stage !== "not-executed") {
+      return { receipt: { ...receipt, recoveryResult: result }, result };
+    }
+    return { receipt, result: receipt.result };
+  }
+  return { receipt: { ...receipt, result, stage }, result };
 }
 
 export class MemoryMcpReceiptStore implements McpRecoveryReceiptStore {
@@ -512,12 +541,12 @@ export class MemoryMcpReceiptStore implements McpRecoveryReceiptStore {
     return true;
   }
 
-  settle(key: string, digest: string, result: McpToolResult, stage: "settled" | "not-executed" = "settled"): McpToolResult {
+  settle(key: string, digest: string, result: McpToolResult, stage: "settled" | "not-executed" = "settled", recovery = false): McpToolResult {
     const receipt = this.receipts.get(key);
     if (!receipt || receipt.digest !== digest) throw new Error("MCP receipt ownership changed");
-    if (receipt.result) return receipt.result;
-    this.receipts.set(key, { ...receipt, result, stage });
-    return result;
+    const settled = receiptSettlement(receipt, result, stage, recovery);
+    this.receipts.set(key, settled.receipt);
+    return settled.result;
   }
 
 }
@@ -598,7 +627,7 @@ function validReceiptResult(value: unknown, toolName: McpToolName, requestId: st
     && typeof value.retryable === "boolean";
 }
 
-const RECEIPT_MEMBER_KEYS = ["binding", "digest", "result", "stage"] as const;
+const RECEIPT_MEMBER_KEYS = ["binding", "digest", "recoveryResult", "result", "stage"] as const;
 const DISPATCH_STAGES: ReadonlySet<string> = new Set<McpDispatchStage>(["claimed", "dispatching", "not-executed", "settled"]);
 
 function isDispatchStage(value: unknown): value is McpDispatchStage {
@@ -638,6 +667,7 @@ function validateReceiptRecord(
       || typeof candidate.digest !== "string"
       || !/^[0-9a-f]{64}$/i.test(candidate.digest)
       || ("result" in candidate && !validReceiptResult(candidate.result, parts.toolName, parts.requestId))
+      || ("recoveryResult" in candidate && (!validReceiptResult(candidate.recoveryResult, parts.toolName, parts.requestId) || !terminalReceiptResult(candidate.recoveryResult)))
       || ("binding" in candidate && !validRequestBinding(candidate.binding, parts.toolName, parts.requestId))
       || ("stage" in candidate && !isDispatchStage(candidate.stage))) {
       throw new Error(`invalid MCP receipt file: invalid receipt ${JSON.stringify(key)}`);
@@ -1282,16 +1312,18 @@ export class FileMcpReceiptStore implements McpRecoveryReceiptStore {
       receipt && receipt.stage === "claimed" && !receipt.result ? { ...receipt, result, stage: "not-executed" } : null);
   }
 
-  async settle(key: string, digest: string, result: McpToolResult, stage: "settled" | "not-executed" = "settled"): Promise<McpToolResult> {
+  async settle(key: string, digest: string, result: McpToolResult, stage: "settled" | "not-executed" = "settled", recovery = false): Promise<McpToolResult> {
     return withFileLock(this.filePath, () => {
       const state = readReceiptFile(this.filePath);
       const receipt = state.mutationReceipts[key] ?? state.readReceipts[key];
       if (!receipt || receipt.digest !== digest) throw new Error("MCP receipt ownership changed");
-      if (receipt.result) return receipt.result;
-      delete state.readReceipts[key];
-      state.mutationReceipts[key] = { ...receipt, result, stage };
-      writeReceiptFile(this.filePath, state);
-      return result;
+      const settled = receiptSettlement(receipt, result, stage, recovery);
+      if (settled.receipt !== receipt) {
+        delete state.readReceipts[key];
+        state.mutationReceipts[key] = settled.receipt;
+        writeReceiptFile(this.filePath, state);
+      }
+      return settled.result;
     });
   }
 
@@ -1300,6 +1332,7 @@ export class FileMcpReceiptStore implements McpRecoveryReceiptStore {
 type StoredSqliteReceipt = {
   digest: string;
   result_json: string | null;
+  recovery_result_json: string | null;
   claimed_at: number;
   binding_json: string | null;
   stage: string | null;
@@ -1361,6 +1394,7 @@ export class SqliteMcpReceiptStore implements McpRecoveryReceiptStore {
     const columns = new Set(this.db.query<{ name: string }, []>("PRAGMA table_info(mcp_receipts)").all().map((column) => column.name));
     if (!columns.has("binding_json")) this.db.exec("ALTER TABLE mcp_receipts ADD COLUMN binding_json TEXT");
     if (!columns.has("stage")) this.db.exec("ALTER TABLE mcp_receipts ADD COLUMN stage TEXT");
+    if (!columns.has("recovery_result_json")) this.db.exec("ALTER TABLE mcp_receipts ADD COLUMN recovery_result_json TEXT");
     this.importLegacyFile(options.legacyFilePath);
     this.db.exec("BEGIN IMMEDIATE");
     try {
@@ -1463,23 +1497,30 @@ export class SqliteMcpReceiptStore implements McpRecoveryReceiptStore {
     }
   }
 
-  settle(key: string, digest: string, result: McpToolResult, stage: "settled" | "not-executed" = "settled"): McpToolResult {
-    const resultJson = JSON.stringify(result);
+  settle(key: string, digest: string, result: McpToolResult, stage: "settled" | "not-executed" = "settled", recovery = false): McpToolResult {
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      const receipt = this.selectRow(key);
-      if (!receipt || receipt.digest !== digest) throw new Error("MCP receipt ownership changed");
-      if (receipt.result_json !== null) {
-        this.db.exec("COMMIT");
-        return this.parseResult(key, receipt.result_json);
+      const row = this.selectRow(key);
+      if (!row || row.digest !== digest) throw new Error("MCP receipt ownership changed");
+      const record = this.recordOfRow(key, row);
+      const receipt: Receipt = {
+        digest, ...(record.result ? { result: record.result } : {}),
+        ...(record.recoveryResult ? { recoveryResult: record.recoveryResult } : {}),
+        ...(record.stage ? { stage: record.stage } : {}),
+      };
+      const settled = receiptSettlement(receipt, result, stage, recovery);
+      if (settled.receipt !== receipt) {
+        const resultJson = settled.receipt.result ? JSON.stringify(settled.receipt.result) : null;
+        const recoveryJson = settled.receipt.recoveryResult ? JSON.stringify(settled.receipt.recoveryResult) : null;
+        this.db.query<unknown, [string | null, string | null, number, string | null, string]>(`
+          UPDATE mcp_receipts
+          SET result_json = ?, recovery_result_json = ?, storage_bytes = ?, stage = ?, retention = 'durable'
+          WHERE receipt_key = ?
+        `).run(resultJson, recoveryJson,
+          this.storageBytes(key, digest, resultJson, row.binding_json, recoveryJson), settled.receipt.stage ?? null, key);
       }
-      this.db.query<unknown, [string, number, string, string]>(`
-        UPDATE mcp_receipts
-        SET result_json = ?, storage_bytes = ?, stage = ?, retention = 'durable'
-        WHERE receipt_key = ?
-      `).run(resultJson, this.storageBytes(key, digest, resultJson, receipt.binding_json), stage, key);
       this.db.exec("COMMIT");
-      return result;
+      return settled.result;
     } catch (error) {
       try { this.db.exec("ROLLBACK"); } catch { /* transaction already closed */ }
       throw error;
@@ -1488,7 +1529,7 @@ export class SqliteMcpReceiptStore implements McpRecoveryReceiptStore {
 
   private selectRow(key: string): StoredSqliteReceipt | null {
     return this.db.query<StoredSqliteReceipt, [string]>(`
-      SELECT digest, result_json, claimed_at, binding_json, stage
+      SELECT digest, result_json, recovery_result_json, claimed_at, binding_json, stage
       FROM mcp_receipts
       WHERE receipt_key = ?
     `).get(key);
@@ -1507,8 +1548,11 @@ export class SqliteMcpReceiptStore implements McpRecoveryReceiptStore {
       if (!validRequestBinding(parsed, parts?.toolName, parts?.requestId)) throw new Error("invalid MCP receipt database binding");
       binding = parsed;
     }
+    const recoveryResult = receipt.recovery_result_json === null ? null : this.parseResult(key, receipt.recovery_result_json);
+    if (recoveryResult && !terminalReceiptResult(recoveryResult)) throw new Error("invalid MCP terminal recovery result");
     return {
       digest: receipt.digest,
+      ...(recoveryResult ? { recoveryResult } : {}),
       result: receipt.result_json === null ? null : this.parseResult(key, receipt.result_json),
       binding,
       stage: isDispatchStage(receipt.stage) ? receipt.stage : receipt.result_json === null ? null : "settled",
@@ -1531,19 +1575,20 @@ export class SqliteMcpReceiptStore implements McpRecoveryReceiptStore {
     if (!fs.existsSync(legacyFilePath)) return;
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      const insert = this.db.query<unknown, [string, string, ReceiptRetention, string | null, number, number, string | null, string | null]>(`
+      const insert = this.db.query<unknown, [string, string, ReceiptRetention, string | null, number, number, string | null, string | null, string | null]>(`
         INSERT OR IGNORE INTO mcp_receipts(
-          receipt_key, digest, retention, result_json, storage_bytes, claimed_at, binding_json, stage
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          receipt_key, digest, retention, result_json, storage_bytes, claimed_at, binding_json, stage, recovery_result_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       let claimedAt = this.now() - Object.keys(state.readReceipts).length - Object.keys(state.mutationReceipts).length;
       const importCollection = (receipts: Record<string, Receipt>, retention: ReceiptRetention) => {
         for (const [key, receipt] of Object.entries(receipts)) {
           const resultJson = receipt.result === undefined ? null : JSON.stringify(receipt.result);
           const bindingJson = receipt.binding === undefined ? null : JSON.stringify(receipt.binding);
+          const recoveryJson = receipt.recoveryResult === undefined ? null : JSON.stringify(receipt.recoveryResult);
           insert.run(
             key, receipt.digest, retention, resultJson,
-            this.storageBytes(key, receipt.digest, resultJson, bindingJson), claimedAt, bindingJson, receipt.stage ?? null,
+            this.storageBytes(key, receipt.digest, resultJson, bindingJson, recoveryJson), claimedAt, bindingJson, receipt.stage ?? null, recoveryJson,
           );
           claimedAt += 1;
         }
@@ -1627,11 +1672,12 @@ export class SqliteMcpReceiptStore implements McpRecoveryReceiptStore {
     return parsed;
   }
 
-  private storageBytes(key: string, digest: string, resultJson: string | null, bindingJson: string | null = null): number {
+  private storageBytes(key: string, digest: string, resultJson: string | null, bindingJson: string | null = null, recoveryJson: string | null = null): number {
     return Buffer.byteLength(key)
       + Buffer.byteLength(digest)
       + (resultJson === null ? 0 : Buffer.byteLength(resultJson))
-      + (bindingJson === null ? 0 : Buffer.byteLength(bindingJson));
+      + (bindingJson === null ? 0 : Buffer.byteLength(bindingJson))
+      + (recoveryJson === null ? 0 : Buffer.byteLength(recoveryJson));
   }
 
   private meta(key: string): string | null {
@@ -2113,22 +2159,19 @@ export function createMcpToolService(
             reason: cause instanceof Error ? cause.message : String(cause),
             ids: {},
           }));
-        const terminalResult = (result: McpToolResult | null | undefined): result is McpToolResult => Boolean(result && (result.ok
-          ? result.outcome === "settled" || result.settled === true
-            || (typedTool === "spawn_agent" && result.state === "settled")
-          : result.details?.outcome === "settled"));
+        const terminalResult = terminalReceiptResult;
         const readableStoredResult = async (): Promise<McpToolResult | null> => {
           const current = await store.lookup(key);
           if (!current?.result || current.digest !== digest || !current.binding
             || !sameCaller(current.binding.caller, binding.caller)) return null;
-          return current.result;
+          return current.recoveryResult ?? current.result;
         };
         /* Terminal downstream evidence becomes the row's answer, written
            conditionally: the first terminal answer wins, so a dispatch error
            that arrives after the work was proven delivered — or a late
            original response — can never replace it. Open outcomes are never
-           written: the row stays open for the original response, and a row
-           that already holds a result keeps it. */
+           written: the row stays open for the original response. An ordinary
+           acceptance keeps its replay while terminal recovery is saved beside it. */
         const answerFromEvidence = async (
           evidence: McpRecoveryEvidence,
           replayed: boolean,
@@ -2146,7 +2189,7 @@ export function createMcpToolService(
           if (current && current.digest !== digest) return notPermitted();
           // Contradictory ownership never licenses disclosure of cached IDs.
           if (evidence.ownership === "unknown") return recoveryAnswer(typedTool, requestId, evidence, replayed);
-          const previous = current?.result ?? original;
+          const previous = current?.recoveryResult ?? current?.result ?? original;
           if (terminalResult(previous)) return {
             ...previous,
             ...(recoveryOnly && previous.ok ? {
@@ -2160,10 +2203,10 @@ export function createMcpToolService(
             replayed: true,
           };
           const answer = recoveryAnswer(typedTool, requestId, evidence, replayed, previous);
-          if (evidence.outcome !== "settled" || previous) return answer;
+          if (evidence.outcome !== "settled") return answer;
           let stored: McpToolResult;
           try {
-            stored = await store.settle(key, digest, answer, "settled");
+            stored = await store.settle(key, digest, answer, "settled", true);
           } catch {
             // A failed write can race a successful terminal recovery.
             try {
