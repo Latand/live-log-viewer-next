@@ -255,6 +255,7 @@ export function useRuntimeFlow(flowId: string | null): Flow | null {
 export interface CommandResult {
   ok: boolean;
   operationId?: string;
+  held?: true;
   receipt?: RuntimeReceipt;
   status?: number;
   error?: string;
@@ -267,9 +268,33 @@ async function postCommand(url: string, body: unknown): Promise<CommandResult> {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
     });
-    const json = (await res.json().catch(() => ({}))) as { operationId?: string; receipt?: RuntimeReceipt; error?: string };
-    if (!res.ok) return { ok: false, status: res.status, error: json.error };
-    return { ok: true, operationId: json.operationId, receipt: json.receipt, status: res.status };
+    const payload: unknown = await res.json().catch(() => null);
+    const json = payload && typeof payload === "object" && !Array.isArray(payload)
+      ? payload as Record<string, unknown> : {};
+    const candidate = json.receipt;
+    const receipt = candidate && typeof candidate === "object" && !Array.isArray(candidate)
+      && "operationId" in candidate && typeof candidate.operationId === "string"
+      && "idempotencyKey" in candidate && typeof candidate.idempotencyKey === "string"
+      && "conversationId" in candidate && typeof candidate.conversationId === "string"
+      && "status" in candidate && typeof candidate.status === "string"
+      ? candidate as RuntimeReceipt : undefined;
+    const request = body as { conversationId?: string; idempotencyKey?: string; operationId?: string };
+    const operationId = typeof json.operationId === "string" ? json.operationId : receipt?.operationId;
+    const contradictory = receipt && (receipt.conversationId !== request.conversationId
+      || (request.idempotencyKey !== undefined && receipt.idempotencyKey !== request.idempotencyKey)
+      || (request.operationId !== undefined && receipt.operationId !== request.operationId)
+      || (operationId !== undefined && receipt.operationId !== operationId));
+    if (contradictory) return { ok: false, status: res.status, error: "receipt-identity-mismatch" };
+    // HTTP failure can follow dispatch. Keep the complete receipt so callers
+    // can reconcile its original operation without treating the request as OK.
+    return {
+      ok: res.ok,
+      status: res.status,
+      operationId,
+      receipt,
+      ...(res.ok && json.held === true ? { held: true as const } : {}),
+      ...(!res.ok ? { error: typeof json.error === "string" ? json.error : undefined } : {}),
+    };
   } catch {
     return { ok: false, error: "network" };
   }

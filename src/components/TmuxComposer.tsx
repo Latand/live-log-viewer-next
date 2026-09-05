@@ -13,7 +13,7 @@ import { useComposer } from "@/hooks/useComposer";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useCodexRealtime } from "@/hooks/useCodexRealtime";
 import { interruptRuntime, useRuntimeBusState, type RuntimeSessionView } from "@/hooks/useRuntime";
-import type { SelectedContextRef } from "@/lib/selection/selectedContext";
+import { parseSelectedContextRef, type SelectedContextRef } from "@/lib/selection/selectedContext";
 import { useViewerSelectedContext, viewerSelectedContext } from "@/lib/selection/viewerSelectedContext";
 import { useHostTarget } from "@/hooks/useHostTarget";
 import { accountIdFromPath } from "@/lib/accounts/badge";
@@ -34,7 +34,12 @@ import {
   enqueueOutbox,
   markOutboxResponded,
   outboxHistory,
+  outboxCanAdmit,
   outboxReceiptPatch,
+  receiptHasUnknownFate,
+  receiptHasAbsorbingOutcome,
+  receiptEvidenceOrder,
+  type ObservedRuntimeReceipt,
   readOutbox,
   rebindOutboxEchoText,
   releaseHeldOutbox,
@@ -139,6 +144,8 @@ interface SentEntry {
 }
 
 interface ComposerSendResult {
+  operationId?: string;
+  held?: true;
   ok?: boolean;
   structured?: boolean;
   error?: string;
@@ -158,6 +165,21 @@ const SPAWN_TTL_MS = 90_000;
 const PANE_TTL_MS = 10 * 60_000;
 const RECOVERABLE_BUSY_RETRY_REASONS = new Set(["delivery-auto-retry", "interrupt-auto-retry"]);
 const sentKey = (id: string) => "llvSent:" + id;
+
+const recoveryReceiptsKey = (id: string) => "llvRecoveryReceipts:" + id;
+function readRecoveryReceipts(id: string): RuntimeReceipt[] {
+  try {
+    const value: unknown = JSON.parse(sessionStorage.getItem(recoveryReceiptsKey(id)) ?? "[]");
+    return Array.isArray(value) ? value.filter((receipt): receipt is RuntimeReceipt =>
+      receipt && receipt.conversationId === id && typeof receipt.operationId === "string"
+      && typeof receipt.idempotencyKey === "string" && typeof receipt.revision === "number"
+      && typeof receipt.status === "string" && typeof receipt.at === "string") : [];
+  } catch { return []; }
+}
+function writeRecoveryReceipts(id: string, receipts: RuntimeReceipt[]): void {
+  try { sessionStorage.setItem(recoveryReceiptsKey(id), JSON.stringify(receipts.slice(0, 512))); }
+  catch { /* Keep in-memory evidence if session storage is unavailable. */ }
+}
 
 export function deliveryAttemptKey(current: string, stored?: string): string {
   return stored || current;
@@ -183,13 +205,11 @@ export function mergeRuntimeReceipts(
     operationsByIdempotencyKey.set(receipt.idempotencyKey, operations);
   }
   const revisionOrder = (left: RuntimeReceipt, right: RuntimeReceipt) =>
-    right.revision - left.revision
-      || Date.parse(right.at) - Date.parse(left.at)
+    receiptEvidenceOrder(left, right)
       || left.operationId.localeCompare(right.operationId)
       || left.idempotencyKey.localeCompare(right.idempotencyKey);
-  /* Tier one: within one operationId the journal's revision counter is the
-     single ordering authority, whichever plane (durable bus or immediate
-     response) carried the receipt. */
+  /* Terminal arrival/discard survives independent settlement/journal revision
+     counters. Moving observations still use journal revision ordering. */
   const sourced = [
     ...runtimeReceipts.map((receipt) => ({ receipt, durable: true })),
     ...immediateReceipts.map((receipt) => ({ receipt, durable: false })),
@@ -291,11 +311,17 @@ export function RuntimeComposerReceipts({
   const { t } = useLocale();
   const statusId = useId();
   const [detailsOpen, setDetailsOpen] = useState(false);
-  /* Visibility and grouping live in the delivery-state model (issue #264):
-     resolved successes render nothing (the feed bubble is the receipt), a
-     group superseded by a successful resend of the same text goes quiet, and
-     dismissed settled problems stay dismissed. */
-  const attemptGroups = deliveryAttemptGroups(receipts, dismissed);
+  // Current original-operation evidence must survive text-based history folding.
+  // Repeated snapshots share one row; a different operation cannot resolve it.
+  const currentReceipts = mergeRuntimeReceipts(receipts, []);
+  const unknownReceipts = currentReceipts.filter(receiptHasUnknownFate);
+  const ordinaryReceipts = currentReceipts.filter((receipt) => !receiptHasUnknownFate(receipt));
+  const attemptGroups = [
+    ...deliveryAttemptGroups(ordinaryReceipts, dismissed),
+    ...unknownReceipts
+      .filter((receipt) => (receipt.kind === "send" || receipt.kind === "steer") && Boolean(receipt.text))
+      .map((receipt) => ({ current: receipt, attempts: [receipt] })),
+  ].sort((left, right) => Date.parse(right.current.at) - Date.parse(left.current.at));
   const visibleAttempts = attemptGroups.flatMap((group) => group.attempts);
   /* A wait only becomes news by getting older, and nothing else re-renders this
      row while a message is parked at a turn boundary. One local interval, no
@@ -315,6 +341,7 @@ export function RuntimeComposerReceipts({
   const isMessage = (receipt: RuntimeReceipt) => receipt.kind === "send" || receipt.kind === "steer";
   const editable = (receipt: RuntimeReceipt) => isMessage(receipt)
     && (receipt.status === "failed" || receipt.status === "rejected")
+    && !receiptHasUnknownFate(receipt)
     && typeof receipt.text === "string"
     && receipt.text.length > 0
     && receipt.text.length < 240;
@@ -335,27 +362,44 @@ export function RuntimeComposerReceipts({
     admittedAt: group.current.admittedAt ?? group.current.at,
     nowMs: now,
   });
+  const receiptStatusText = (receipt: RuntimeReceipt): string => receiptHasUnknownFate(receipt)
+    ? [t("orchPanel.errorUnknownTitle"), receipt.reason].filter(Boolean).join(": ")
+    : runtimeReceiptStatusText(t, receipt);
+  const uncertainControls = (receipt: RuntimeReceipt) => (
+    <span className="flex min-w-0 flex-wrap items-center justify-end gap-1.5" data-operation={receipt.operationId}>
+      <span role="status" className="text-caption text-warning">{t("orchPanel.errorUnknownTitle")}</span>
+      {!receipt.operationId.startsWith(UNCONFIRMED_RECEIPT_PREFIX) ? <>
+        <button type="button" data-receipt-uncertain-retry disabled={actionsDisabled} className="min-h-11 rounded-full border border-border px-3" onClick={() => onRetry(receipt, "uncertain")}>{t("runtime.receipt.retry")}</button>
+        {onDiscard ? <button type="button" data-receipt-discard disabled={actionsDisabled} className="min-h-11 rounded-full border border-border px-3" onClick={() => onDiscard(receipt)}>{t("runtime.receipt.discard")}</button> : null}
+      </> : null}
+    </span>
+  );
   const supersededStatusLabels = (attempts: RuntimeReceipt[]): string[] => {
     const counts = new Map<string, number>();
     for (const attempt of attempts.slice(1)) {
-      const label = runtimeReceiptStatusText(t, attempt);
+      const label = receiptStatusText(attempt);
       counts.set(label, (counts.get(label) ?? 0) + 1);
     }
     return [...counts].map(([label, count]) => (count > 1 ? `${label} ×${count}` : label));
   };
-  const standaloneReceipts = visibleStandaloneReceipts(receipts, dismissed);
+  const standaloneReceipts = [
+    ...visibleStandaloneReceipts(ordinaryReceipts, dismissed),
+    ...visibleStandaloneReceipts(unknownReceipts),
+  ];
   /* #1362: a message receipt with no text echo used to render one standalone
      pill per attempt — three retries, three full-width pills, each carrying
      the whole sentence. Settled message failures belong to the notice and the
      history under it now; only still-moving and non-message operations keep a
      standalone chip. Textless failures with one cause share one history row. */
   const textlessProblems = standaloneReceipts
-    .filter((receipt) => isMessage(receipt) && deliveryProblem(receipt.status))
+    .filter((receipt) => isMessage(receipt) && (deliveryProblem(receipt.status) || receiptHasUnknownFate(receipt)))
     .sort((left, right) => Date.parse(right.at) - Date.parse(left.at));
   const standaloneChips = standaloneReceipts.filter((receipt) => !textlessProblems.includes(receipt));
   const textlessRows = textlessProblems.reduce<RuntimeReceipt[][]>((rows, receipt) => {
     const last = rows[rows.length - 1];
-    if (last && failureCauseKey(last[0]!.reason) === failureCauseKey(receipt.reason)) last.push(receipt);
+    // Each unknown operation needs its own original-identity recovery controls.
+    if (last && !receiptHasUnknownFate(last[0]!) && !receiptHasUnknownFate(receipt)
+      && failureCauseKey(last[0]!.reason) === failureCauseKey(receipt.reason)) last.push(receipt);
     else rows.push([receipt]);
     return rows;
   }, []);
@@ -366,10 +410,12 @@ export function RuntimeComposerReceipts({
      history below keeps the detail — the notice is its disclosure, not a copy. */
   const notice = deliveryNoticeRun(attemptGroups, textlessProblems);
   const noticeFailure = notice ? describeReceiptFailure(t, notice.current.reason) : null;
+  const noticeUnknown = notice ? receiptHasUnknownFate(notice.current) : false;
+  const noticeLabel = t(noticeUnknown ? "orchPanel.errorUnknownTitle" : "composer.receiptFailed");
   const noticeLine = notice
     ? noticeFailure?.cause
-      ? `${t("composer.receiptFailed")} — ${noticeFailure.cause}`
-      : t("composer.receiptFailed")
+      ? `${noticeLabel} — ${noticeFailure.cause}`
+      : noticeLabel
     : null;
   const noticeAttemptLabel = notice && notice.attempts.length > 1
     ? t("runtime.receipt.attemptCount", { count: notice.attempts.length })
@@ -399,7 +445,7 @@ export function RuntimeComposerReceipts({
      count badge speaks only for deliveries that went terminally uncertain. */
   const problemBadgeCount = notice ? uncertainCurrent.length : problemReceipts.length;
   const busyRetry = pendingReceipts.some((receipt) => typeof receipt.reason === "string" && RECOVERABLE_BUSY_RETRY_REASONS.has(receipt.reason));
-  const receiptSummaryLabel = t("runtime.receipt.summary", { count: visibleAttempts.length });
+  const receiptSummaryLabel = t("runtime.receipt.summary", { count: visibleAttempts.length + textlessProblems.length });
   const disclosureLabel = t(detailsOpen ? "runtime.receipt.hideDetails" : "runtime.receipt.showDetails");
   const summaryAriaLabel = noticeLine
     ? `${disclosureLabel}. ${noticeLine}${noticeAttemptLabel ? `. ${noticeAttemptLabel}` : ""}`
@@ -448,7 +494,7 @@ export function RuntimeComposerReceipts({
                     data-delivery-notice-cause
                     title={noticeFailure?.full ?? undefined}
                   >
-                    <span className="font-semibold text-danger">{t("composer.receiptFailed")}</span>
+                    <span className="font-semibold text-danger">{noticeLabel}</span>
                     {noticeFailure?.cause ? <span className="text-secondary">{` — ${noticeFailure.cause}`}</span> : null}
                   </span>
                   {/* Counters are plain muted text, never badges (design rule 5). */}
@@ -467,9 +513,9 @@ export function RuntimeComposerReceipts({
                   <span
                     className="min-w-[3rem] flex-1 truncate text-right text-muted"
                     data-receipt-preview
-                    title={visibleAttempts[0]!.text ?? undefined}
+                    title={visibleAttempts[0]?.text ?? undefined}
                   >
-                    {visibleAttempts[0]!.text}
+                    {visibleAttempts[0]?.text}
                   </span>
                 </>
               )}
@@ -508,7 +554,7 @@ export function RuntimeComposerReceipts({
                   failed = danger + retry icon-button). A button carries its own
                   activation, so a click here never toggles the disclosure; the
                   explicit preventDefault says so in DOMs that toggle on bubble. */}
-              {notice && (noticeRetryable || onDismiss) ? (
+              {notice && (noticeRetryable || (onDismiss && !noticeUnknown)) ? (
                 <span className="-mr-1 flex shrink-0 items-center sm:mr-0" data-delivery-notice-actions>
                   {noticeRetryable ? (
                     <button
@@ -530,7 +576,7 @@ export function RuntimeComposerReceipts({
                   {/* Dismissing the notice clears its whole group: every settled
                       attempt it counted (issue #264 rule 3 — a still-moving
                       attempt is never hidden). */}
-                  {onDismiss ? (
+                  {onDismiss && !noticeUnknown ? (
                     <button
                       type="button"
                       data-delivery-notice-dismiss
@@ -540,7 +586,7 @@ export function RuntimeComposerReceipts({
                       onClick={(event) => {
                         event.preventDefault();
                         event.stopPropagation();
-                        onDismiss(notice.dismissIds);
+                        onDismiss(notice.dismissIds.filter((id) => !unknownReceipts.some((receipt) => receipt.operationId === id)));
                       }}
                     >
                       <X className="h-3 w-3" aria-hidden />
@@ -575,7 +621,8 @@ export function RuntimeComposerReceipts({
                 const failed = receipt.status === "failed";
                 const pending = !receiptIsTerminal(receipt.status);
                 const wait = waitFor(group);
-                const uncertain = wait?.phase === "uncertain";
+                const unknownFate = receiptHasUnknownFate(receipt);
+                const uncertain = unknownFate || wait?.phase === "uncertain";
                 const serverBacked = !receipt.operationId.startsWith(UNCONFIRMED_RECEIPT_PREFIX);
                 const exitable = uncertain && serverBacked;
                 const discardable = serverBacked
@@ -612,7 +659,7 @@ export function RuntimeComposerReceipts({
                           <span className="sr-only">{t("runtime.receipt.attemptCount", { count: group.attempts.length })}</span>
                         </Badge>
                       ) : null}
-                      <ReceiptChip
+                      {unknownFate ? uncertainControls(receipt) : <ReceiptChip
                         receipt={receipt}
                         wait={wait}
                         actionsDisabled={actionsDisabled}
@@ -623,13 +670,13 @@ export function RuntimeComposerReceipts({
                             : undefined}
                         onEdit={editable(receipt) ? () => onEdit(receipt) : undefined}
                         onDiscard={discardable && onDiscard ? () => onDiscard(receipt) : undefined}
-                      />
+                      />}
                       {/* A settled problem is dismissible (issue #264 rule 3):
                           the dismissal records every settled attempt of the
                           row and persists, while a still-moving attempt in the
                           group keeps rendering — dismissal never hides live
                           delivery truth. */}
-                      {onDismiss && deliveryProblem(receipt.status) ? (
+                      {onDismiss && !receiptHasUnknownFate(receipt) && deliveryProblem(receipt.status) ? (
                         <button
                           type="button"
                           aria-label={t("runtime.receipt.dismiss")}
@@ -668,7 +715,7 @@ export function RuntimeComposerReceipts({
                         className="min-w-0 max-w-full text-right text-caption text-muted"
                         data-receipt-uncertain-why
                       >
-                        {deliveryUncertainWhy(t, wait!)}
+                        {unknownFate ? receipt.reason : deliveryUncertainWhy(t, wait!)}
                       </span>
                     ) : null}
                     {history.length ? (
@@ -705,12 +752,15 @@ export function RuntimeComposerReceipts({
                         <span className="sr-only">{t("runtime.receipt.attemptCount", { count: bucket.length })}</span>
                       </Badge>
                     ) : null}
-                    <ReceiptChip
+                    {receiptHasUnknownFate(receipt) ? uncertainControls(receipt) : <ReceiptChip
                       receipt={receipt}
                       actionsDisabled={actionsDisabled}
                       onRetry={receipt.status === "failed" ? () => retryFailed(receipt) : undefined}
-                    />
-                    {onDismiss ? (
+                    />}
+                    {receiptHasUnknownFate(receipt) && receipt.reason ? (
+                      <span className="w-full break-words text-right text-caption text-muted" data-receipt-uncertain-why>{receipt.reason}</span>
+                    ) : null}
+                    {onDismiss && !receiptHasUnknownFate(receipt) && receiptIsTerminal(receipt.status) ? (
                       <button
                         type="button"
                         aria-label={t("runtime.receipt.dismiss")}
@@ -741,13 +791,15 @@ export function RuntimeComposerReceipts({
             {` ${[
               ...attemptGroups.map((group) => {
                 const wait = waitFor(group);
-                const current = (wait && deliveryWaitText(t, wait, group.current.queuePosition))
-                  ?? runtimeReceiptStatusText(t, group.current);
+                const current = receiptHasUnknownFate(group.current)
+                  ? receiptStatusText(group.current)
+                  : (wait && deliveryWaitText(t, wait, group.current.queuePosition))
+                    ?? receiptStatusText(group.current);
                 return [current, ...supersededStatusLabels(group.attempts)].join(" · ");
               }),
               ...textlessRows.map((bucket) => (bucket.length > 1
-                ? `${runtimeReceiptStatusText(t, bucket[0]!)} ×${bucket.length}`
-                : runtimeReceiptStatusText(t, bucket[0]!))),
+                ? `${receiptStatusText(bucket[0]!)} ×${bucket.length}`
+                : receiptStatusText(bucket[0]!))),
             ].join(". ")}.`}
             {busyRetry ? ` ${t("runtime.receipt.busyRetry")}` : null}
           </span>
@@ -763,7 +815,7 @@ export function RuntimeComposerReceipts({
               onRetry={isMessage(receipt) && failed ? () => retryFailed(receipt) : undefined}
               onEdit={editable(receipt) ? () => onEdit(receipt) : undefined}
             />
-            {onDismiss && deliveryProblem(receipt.status) ? (
+            {onDismiss && !receiptHasUnknownFate(receipt) && deliveryProblem(receipt.status) ? (
               <button
                 type="button"
                 aria-label={t("runtime.receipt.dismiss")}
@@ -853,6 +905,7 @@ interface PersistedPendingDelivery {
   images?: unknown;
   runtime?: unknown;
   runtimeCaptured?: unknown;
+  selectedContext?: unknown;
   reconciling?: unknown;
   payloadComplete?: unknown;
   operationId?: unknown;
@@ -956,12 +1009,14 @@ export function readPendingDeliveries(id: string): PendingDelivery[] {
       .slice(0, PENDING_DELIVERY_LIMIT)
       .map((entry) => {
         const images = persistedImages(entry.images);
-        const payloadComplete = images !== null && entry.payloadComplete !== false;
+        const selectedContext = parseSelectedContextRef(entry.selectedContext);
+        const payloadComplete = images !== null && selectedContext !== null && entry.payloadComplete !== false;
         const runtime = persistedRuntime(entry.runtime);
         return {
           key: entry.key,
           text: entry.text,
           images: images ?? [],
+          ...(selectedContext ? { selectedContext } : {}),
           ...(runtime ? { runtime } : {}),
           ...(entry.runtimeCaptured === true ? { runtimeCaptured: true as const } : {}),
           ...(payloadComplete ? {} : { payloadComplete: false as const }),
@@ -977,7 +1032,7 @@ export function readPendingDeliveries(id: string): PendingDelivery[] {
 export function writePendingDeliveries(id: string, pending: readonly PendingDelivery[]): void {
   try {
     if (pending.length) {
-      sessionStorage.setItem(pendingSendKey(id), JSON.stringify(pending.map(({ key, text, images, files, runtime, runtimeCaptured, reconciling, payloadComplete, operationId }) => ({
+      sessionStorage.setItem(pendingSendKey(id), JSON.stringify(pending.map(({ key, text, images, files, runtime, runtimeCaptured, selectedContext, reconciling, payloadComplete, operationId }) => ({
         key,
         text,
         images: images.map(({ id: imageId, base64, mime }) => ({
@@ -987,6 +1042,7 @@ export function writePendingDeliveries(id: string, pending: readonly PendingDeli
         })),
         ...(runtime ? { runtime } : {}),
         ...(runtimeCaptured ? { runtimeCaptured: true } : {}),
+        ...(selectedContext ? { selectedContext } : {}),
         ...(reconciling ? { reconciling: true } : {}),
         /* A generation whose files live only in memory is observable for late
            settlement but never lends its key to a replay (#1224). */
@@ -1514,7 +1570,7 @@ export function TmuxComposerCore({
      the editable draft — that draft was already cleared at submit time and
      anything in it now belongs to the next message. */
   const outboxKeys = useRef<Set<string>>(new Set());
-  const [immediateRuntimeReceipts, setImmediateRuntimeReceipts] = useState<RuntimeReceipt[]>([]);
+  const [immediateRuntimeReceipts, setImmediateRuntimeReceipts] = useState<RuntimeReceipt[]>(() => readRecoveryReceipts(cardId));
   const [reconcilingSend, setReconcilingSend] = useState(() =>
     typeof window !== "undefined" && readPendingDeliveries(cardId).some((entry) => entry.reconciling));
   const [replayGenerationAvailable, setReplayGenerationAvailable] = useState(() =>
@@ -1568,7 +1624,21 @@ export function TmuxComposerCore({
   /* Durable receipts for this session from the runtime bus (empty while the bus
      is disabled or the session is legacy/unhosted). */
   const runtimeReceipts = runtimeDependencies.useRuntimeReceiptsForArtifact(file.path, cardId);
-  const displayedRuntimeReceipts = mergeRuntimeReceipts(runtimeReceipts, immediateRuntimeReceipts);
+  const displayedRuntimeReceipts = mergeRuntimeReceipts(runtimeReceipts.filter((receipt) => receipt.conversationId === cardId), mergeRuntimeReceipts(
+    [...immediateRuntimeReceipts.filter((receipt) => receipt.conversationId === cardId), ...readRecoveryReceipts(cardId)],
+    outbox.flatMap((entry) => entry.deliveryReceipt?.conversationId === cardId
+      && (entry.deliveryReceipt.idempotencyKey === entry.id || retryParentOperationId(entry.deliveryReceipt)) ? [entry.deliveryReceipt] : []),
+  )).map((receipt) => {
+    const entry = outbox.find((entry) => entry.deliveryUncertain
+      && (entry.id === receipt.idempotencyKey || entry.deliveryReceipt?.operationId === receipt.operationId));
+    const priorSafeAttempt = entry?.deliveryReceipt?.resend === "safe"
+      && receipt.operationId === entry.deliveryReceipt.operationId
+      && receipt.revision === entry.deliveryReceipt.revision;
+    const unresolved = priorSafeAttempt || receipt.status === "pending" || receipt.status === "applying"
+      || receipt.status === "queued" || receipt.status === "delivering" || receipt.status === "uncertain"
+      || (receipt.status === "failed" && receipt.resend !== "safe" && receipt.reason !== "delivery-discarded");
+    return entry && unresolved ? { ...receipt, resend: "verify-first" as const, reason: receipt.reason ?? entry.deliveryReceipt?.reason } : receipt;
+  });
   /* #691 §4 — THE RECEIPT-STREAM CONSUMER for parked bridge batches.
      A structured send can answer `pending` and settle minutes later on this stream,
      by which time the closure that drained the batch is gone. Watching the receipts
@@ -1632,6 +1702,14 @@ export function TmuxComposerCore({
   );
 
   const persistPendingDeliveries = (next: PendingDelivery[]) => {
+    /* Admission releases the local snapshot. A later safe-failure receipt
+       cannot recreate its bytes, runtime selection or selected context. Fence
+       local replay before releasing it; the operation still owns recovery. */
+    for (const previous of pendingDeliveries.current) {
+      if (!next.some((entry) => entry.key === previous.key)) {
+        updateOutbox(cardId, previous.key, { originalOperationOnly: true });
+      }
+    }
     pendingDeliveries.current = next;
     setReplayGenerationAvailable(next.some((entry) => entry.payloadComplete !== false));
     writePendingDeliveries(cardId, next);
@@ -1664,17 +1742,14 @@ export function TmuxComposerCore({
     setReconcilingSend(receiptReconciliations.current.size > 0);
   };
 
-  /* The local reconciliation window closed without a durable admission or
-     terminal receipt. Release the composer for an explicit same-key retry.
-     Preserve the generation, its idempotency key, and its attachments. The
-     durable receipt stream continues observing: a late admission clears the
-     draft through settlePendingDeliveries, and a terminal failure surfaces
-     Retry. This path performs no automatic actuation. */
+  /* The reconciliation window closed without authoritative evidence. Release
+     the composer while preserving the generation, key and attachments. Local
+     replay stays blocked until affirmative rejection; a real original receipt
+     supplies recovery controls. Late admission still settles the draft. */
   const releaseReconciliationToRetry = (clientMessageId: string) => {
     receiptReconciliations.current.delete(clientMessageId);
-    /* Drop the reconciling marker so a remount exposes a recoverable retry.
-       Keep the generation so a late receipt can settle it and the key remains
-       replayable. */
+    /* Drop the polling marker while retaining the unresolved generation for
+       late receipt reconciliation across remount. */
     persistPendingDeliveries(pendingDeliveries.current.map((entry) =>
       entry.key === clientMessageId
         ? releasePendingReconciliation(entry)
@@ -1722,6 +1797,7 @@ export function TmuxComposerCore({
         releaseReconciliationToRetry(clientMessageId);
         return;
       }
+      if (receipt.conversationId !== cardId || receipt.idempotencyKey !== clientMessageId) return;
       setImmediateRuntimeReceipts((current) => [
         receipt,
         ...current.filter((candidate) => candidate.operationId !== receipt.operationId),
@@ -1742,12 +1818,18 @@ export function TmuxComposerCore({
     adoptComposerState(file.path, cardId);
     adoptOutbox(file.path, cardId);
     setSent(readSent(cardId));
-    setImmediateRuntimeReceipts([]);
+    setImmediateRuntimeReceipts(readRecoveryReceipts(cardId));
     setDismissedReceiptIds(readDismissedReceipts(cardId));
     for (const controller of receiptReconciliations.current.values()) controller.abort();
     receiptReconciliations.current.clear();
     const restoredPending = readPendingDeliveries(cardId);
     pendingDeliveries.current = restoredPending;
+    /* These generations already left the draft when enqueued. Restore their
+       ownership before late receipts can settle text typed after remount. */
+    outboxKeys.current = new Set(readOutbox(cardId).map((entry) => entry.id));
+    for (const entry of restoredPending) {
+      if (entry.payloadComplete === false) updateOutbox(cardId, entry.key, { originalOperationOnly: true });
+    }
     setReplayGenerationAvailable(restoredPending.some((entry) => entry.payloadComplete !== false));
     runtimeSendSnapshots.current = new Map();
     /* Replay ownership survives independently from the editable draft: an
@@ -1885,8 +1967,9 @@ export function TmuxComposerCore({
     for (const entry of outbox) {
       if (entry.launchOwned) continue;
       const receipt = displayedRuntimeReceipts.find((candidate) =>
-        candidate.idempotencyKey === entry.id
-        && (receiptIsAdmitted(candidate.status) || receiptIsTerminal(candidate.status)));
+        (candidate.idempotencyKey === entry.id || candidate.operationId === (entry.deliveryReceipt?.operationId ?? entry.operationId)
+          || (entry.deliveryReceipt && ((!entry.deliveryUncertain && !receiptHasUnknownFate(entry.deliveryReceipt)) || (entry.deliveryReceipt as ObservedRuntimeReceipt).retryAuthorized)
+            && retryParentOperationId(candidate) === entry.deliveryReceipt.operationId)));
       if (!receipt) continue;
       const patch = outboxReceiptPatch(entry, receipt.status, receipt, nowMs());
       if (!patch) continue;
@@ -2031,6 +2114,15 @@ export function TmuxComposerCore({
       return;
     }
     if (structuredSession && requestedImages.length && !attachments.validate()) return;
+    /* Capacity is a pre-flight refusal like the others (#1538): the bounded
+       queue compacts settled history only, so when every slot still holds an
+       unresolved operation the new submission is refused HERE — the
+       draft and its attachments stay in the composer, nothing is minted,
+       nothing dispatches. The store below re-checks under the same rule. */
+    if (!outboxCanAdmit(readOutbox(cardId))) {
+      setStatus({ kind: "err", text: t("composer.outboxFull") });
+      return;
+    }
     /* Every queued submission is its own logical generation and mints its own
        fresh key at the moment it enters the queue. Replay identity lives on
        the durable outbox entry (its id IS the key), never on composer state a
@@ -2040,7 +2132,7 @@ export function TmuxComposerCore({
     outboxImages.current.set(clientMessageId, requestedImages);
     if (requestedFiles.length) outboxFiles.current.set(clientMessageId, requestedFiles);
     outboxKeys.current.add(clientMessageId);
-    enqueueOutbox(cardId, {
+    const admitted = enqueueOutbox(cardId, {
       id: clientMessageId,
       text: requestedText,
       images: requestedImages.length,
@@ -2055,6 +2147,13 @@ export function TmuxComposerCore({
          fresh bubble — only its own later echo does. */
       echoBaseline: transcriptEchoCount(cardId, requestedText),
     });
+    if (!admitted) {
+      outboxImages.current.delete(clientMessageId);
+      outboxFiles.current.delete(clientMessageId);
+      outboxKeys.current.delete(clientMessageId);
+      setStatus({ kind: "err", text: t("composer.outboxFull") });
+      return;
+    }
     if (!preserveDraft) {
       setText("");
       attachments.clearAll();
@@ -2085,6 +2184,7 @@ export function TmuxComposerCore({
          like an in-flight delivery otherwise. */
       updateOutbox(cardId, outboxId, {
         state,
+        ...(state === "delivered" ? { deliveryUncertain: undefined, deliveryReceipt: undefined } : {}),
         settledAt: nowMs(),
         awaitingTurn,
         ...(error ? { error } : {}),
@@ -2094,6 +2194,16 @@ export function TmuxComposerCore({
         outboxImages.current.delete(outboxId);
         outboxFiles.current.delete(outboxId);
       }
+    };
+    const receiptBeforeAttempt = outboxId ? readOutbox(cardId).find((entry) => entry.id === outboxId)?.deliveryReceipt : undefined;
+    const markOutboxUnknown = () => {
+      if (!outboxId) return;
+      const entry = readOutbox(cardId).find((entry) => entry.id === outboxId);
+      if (!entry || entry.state === "delivered" || (entry.deliveryReceipt?.resend === "safe"
+        && (!receiptBeforeAttempt || entry.deliveryReceipt.operationId !== receiptBeforeAttempt.operationId
+          || entry.deliveryReceipt.revision > receiptBeforeAttempt.revision))
+        || entry.deliveryReceipt?.reason === "delivery-discarded") return;
+      updateOutbox(cardId, outboxId, { state: "delivering", deliveryUncertain: true });
     };
     const settleOutboxFromReceipt = (receipt: RuntimeReceipt) => {
       /* The late admission: a send that answered `pending` and settled on the receipt
@@ -2127,7 +2237,7 @@ export function TmuxComposerCore({
        now, so the operator moving the board a moment later cannot rewrite the
        admitted turn. A replay reuses the generation's original reference for
        the same reason it replays the original bytes. */
-    const selectedContext = replayGeneration?.selectedContext ?? viewerSelectedContext();
+    const selectedContext = replayGeneration ? replayGeneration.selectedContext : viewerSelectedContext();
     /* #691 §4, the no-call path: a turn is opening, so whatever the manager
        reported while nothing was live rides in with it. Never on a replay — a
        retained generation replays its original bytes under its original key, and
@@ -2290,7 +2400,7 @@ export function TmuxComposerCore({
         persistSent([...prior, entry].slice(-SENT_LIMIT));
       }
       const attempt = pendingDeliveries.current.find((candidate) => candidate.key === clientMessageId);
-      persistPendingDeliveries(pendingDeliveries.current.filter((candidate) => candidate.key !== clientMessageId));
+      if (!held) persistPendingDeliveries(pendingDeliveries.current.filter((candidate) => candidate.key !== clientMessageId));
       setImmediateRuntimeReceipts((current) => current.filter((candidate) =>
         candidate.idempotencyKey !== clientMessageId
         && candidate.operationId !== unconfirmedReceiptOperationId(clientMessageId)));
@@ -2336,6 +2446,11 @@ export function TmuxComposerCore({
     const responseEpoch = legacyResponseEpoch.current;
     let admissionRequest: Promise<ComposerSendResult> | null = null;
     try {
+      /* The wire fence (#1538): stamped on the durable entry in the same tick
+         the request is created, before anything can await. A reload while the
+         response is still pending then hydrates this entry as a possible
+         dispatch instead of replaying it or presenting it as failed. */
+      if (outboxId && reachesWire) updateOutbox(cardId, outboxId, { dispatchedAt: nowMs() });
       admissionRequest = Promise.resolve(structuredSession
         ? !reachesWire
           ? { ok: false, structured: true, error: structuredImagesReason }
@@ -2358,6 +2473,8 @@ export function TmuxComposerCore({
               error: result.error,
               status: result.status,
               receipt: result.receipt,
+              operationId: result.operationId,
+              held: result.held,
               outcome: (result.receipt?.status === "delivering" || result.receipt?.status === "delivered"
                 ? result.receipt.status
                 : "queued") as "delivering" | "delivered" | "queued",
@@ -2385,7 +2502,18 @@ export function TmuxComposerCore({
             const body = await response.json() as ComposerSendResult;
             return { ...body, status: response.status, ok: response.ok && body.ok === true };
           }));
-      const json = await withComposerAdmissionDeadline(admissionRequest, admissionTiming.admissionDeadlineMs);
+      let json = await withComposerAdmissionDeadline(admissionRequest, admissionTiming.admissionDeadlineMs);
+      if (json.receipt && (json.receipt.conversationId !== cardId
+        || json.receipt.idempotencyKey !== clientMessageId
+        || (json.operationId && json.receipt.operationId !== json.operationId))) {
+        json = { ...json, ok: false, receipt: undefined, operationId: undefined, held: undefined,
+          error: "receipt-identity-mismatch" };
+      }
+      if (json.operationId) {
+        if (outboxId) updateOutbox(cardId, outboxId, { operationId: json.operationId });
+        persistPendingDeliveries(pendingDeliveries.current.map((entry) =>
+          entry.key === clientMessageId ? { ...entry, operationId: json.operationId } : entry));
+      }
       /* #691 §4 — the bridge cursor moves only on DURABLE admission.
          `json.ok` is not that: a structured send answers ok with a receipt that may
          still be `pending`, which the server has not committed to holding. So the
@@ -2445,19 +2573,19 @@ export function TmuxComposerCore({
         }
         /* The earliest attempt per key is the immutable record of what the
            server may have accepted: a retry never overwrites it, and a
-           definitive 4xx rejection (e.g. a changed-payload 409) keeps no
-           entry — only a lost response (network/5xx) or an explicitly
-           still-moving receipt does. */
-        const possiblyAccepted = !receiptIsTerminal(json.receipt?.status ?? "pending")
-          && (json.status === undefined || json.status >= 500);
-        if (!possiblyAccepted && recordedThisAttempt) {
+           outbox retains this snapshot for any permitted same-key retry.
+           Direct submissions can release a proven pre-dispatch rejection. */
+        const possiblyAccepted = json.error === "receipt-identity-mismatch" || Boolean(json.receipt && receiptHasUnknownFate(json.receipt)) || !receiptIsTerminal(json.receipt?.status ?? "pending")
+          && (json.status === undefined || json.status >= 500 || json.status === 409);
+        if (!possiblyAccepted && recordedThisAttempt && !outboxId) {
           persistPendingDeliveries(pendingDeliveries.current.filter((entry) => entry.key !== clientMessageId));
         }
         // A hard failure keeps the draft text (never cleared) so the message is
         // not lost; the error is announced by the composer's live status region.
-        // A queued submission keeps its own bubble instead, marked undelivered
-        // with a cancel — the text is never silently dropped either way.
-        settleOutbox("failed", json.error ?? t("common.failedSend"));
+        // A queued submission retains its bubble and the receipt evidence.
+        if (json.receipt) settleOutboxFromReceipt(json.receipt);
+        else if (possiblyAccepted && outboxId) markOutboxUnknown();
+        else settleOutbox("failed", json.error ?? t("common.failedSend"));
         setStatus({ kind: "err", text: json.error ?? t("common.failedSend") });
         return;
       }
@@ -2466,12 +2594,30 @@ export function TmuxComposerCore({
           json.receipt!,
           ...current.filter((receipt) => receipt.operationId !== json.receipt!.operationId),
         ].slice(0, 8));
+        // Pending is not durable admission. Retain the immutable generation
+        // until a later receipt authoritatively resolves this operation.
+        if (json.receipt.status === "pending") {
+          settleOutboxFromReceipt(json.receipt);
+          return;
+        }
         const attempt = pendingDeliveries.current.find((entry) => entry.key === clientMessageId);
         persistPendingDeliveries(pendingDeliveries.current.filter((entry) => entry.key !== clientMessageId));
         if (idempotencyKey.current === clientMessageId) idempotencyKey.current = mintIdempotencyKey();
         settleGeneration(payloadText, attempt?.images ?? sentImages, attempt?.files ?? sentFiles);
         settleOutboxFromReceipt(json.receipt);
         if (!outboxId) inputRef.current?.focus();
+        return;
+      }
+      if (json.structured) {
+        if (json.held && json.operationId && outboxId) {
+          const entry = readOutbox(cardId).find((candidate) => candidate.id === outboxId);
+          if (entry && entry.state !== "delivered" && !entry.deliveryUncertain
+            && entry.deliveryReceipt?.reason !== "delivery-discarded") {
+            updateOutbox(cardId, outboxId, { state: "delivering", acceptedHeld: true, operationId: json.operationId });
+          }
+          return;
+        }
+        markOutboxUnknown();
         return;
       }
       settleLegacySuccess(json);
@@ -2488,12 +2634,14 @@ export function TmuxComposerCore({
             ? t("composer.admissionTimedOut")
             : t("common.serverUnavailable"),
         });
-        if (!(error instanceof ComposerAdmissionTimeoutError)) settleOutbox("failed", t("common.serverUnavailable"));
+        markOutboxUnknown();
         if (error instanceof ComposerAdmissionTimeoutError) {
           persistPendingDeliveries(pendingDeliveries.current.map((entry) =>
             entry.key === clientMessageId ? { ...entry, reconciling: true } : entry));
           const lateReceipt = admissionRequest?.then((result) => {
             const receipt = result.receipt;
+            if (receipt && (receipt.conversationId !== cardId || receipt.idempotencyKey !== clientMessageId
+              || (result.operationId && result.operationId !== receipt.operationId))) return null;
             if (receipt && (receiptIsAdmitted(receipt.status) || receiptIsTerminal(receipt.status))) {
               return (receipt.kind === "send" || receipt.kind === "steer")
                 && !receipt.text && payloadText.trim()
@@ -2526,17 +2674,38 @@ export function TmuxComposerCore({
     void send(claimed.text, { clientMessageId: claimed.id }, claimed.id);
   };
 
-  const rememberRuntimeReceipt = (receipt: RuntimeReceipt) => {
-    setImmediateRuntimeReceipts((current) => [
-      receipt,
-      ...current.filter((candidate) => candidate.operationId !== receipt.operationId),
-    ].slice(0, 8));
+  const rememberRuntimeReceipt = (receipt: RuntimeReceipt, original: RuntimeReceipt, allowRetryLeaf = false, responseOperationId?: string) => {
+    const sameOperation = receipt.idempotencyKey === original.idempotencyKey && receipt.operationId === original.operationId;
+    const retryLeaf = allowRetryLeaf && !receiptHasUnknownFate(original)
+      && retryParentOperationId(receipt) === original.operationId;
+    if (receipt.conversationId !== original.conversationId || receipt.conversationId !== cardId
+      || (!sameOperation && !retryLeaf)
+      || (responseOperationId && responseOperationId !== receipt.operationId && !retryLeaf)) return false;
+    const stored = readRecoveryReceipts(cardId);
+    const observed: ObservedRuntimeReceipt = { ...receipt,
+      observationOrder: 1 + Math.max(0, ...[...stored, original].filter((candidate) => candidate.operationId === receipt.operationId)
+        .map((candidate) => (candidate as ObservedRuntimeReceipt).observationOrder ?? 0)),
+      text: receipt.text ?? original.text,
+      observedJournalRevision: Math.max(original.revision, (original as ObservedRuntimeReceipt).observedJournalRevision ?? 0,
+        ...runtimeReceipts.filter((candidate) => candidate.operationId === receipt.operationId).map((candidate) => candidate.revision)),
+    };
+    // Persist operation evidence even when the submission came from another
+    // tab or device and this composer has never owned a local outbox entry.
+    const persisted = mergeRuntimeReceipts(stored, [observed]);
+    writeRecoveryReceipts(cardId, persisted);
+    setImmediateRuntimeReceipts((current) => mergeRuntimeReceipts(current, persisted));
+    return true;
   };
 
   const retryRuntimeReceipt = async (receipt: RuntimeReceipt, mode?: "uncertain") => {
     if (busy || voiceSending) return;
     setBusy(true);
     setStatus(null);
+    if (mode !== "uncertain" && !receiptHasAbsorbingOutcome(receipt)) {
+      // Starting an authorized later attempt consumes the old safe proof before
+      // dispatch. A lost response must survive remount as unknown.
+      rememberRuntimeReceipt({ ...receipt, status: "uncertain", resend: "verify-first", retryAuthorized: true } as ObservedRuntimeReceipt, receipt);
+    }
     try {
       const response = await fetch(`/api/runtime/operations/${encodeURIComponent(receipt.operationId)}`, mode === "uncertain"
         ? {
@@ -2545,9 +2714,9 @@ export function TmuxComposerCore({
             body: JSON.stringify({ action: "retry-uncertain" }),
           }
         : { method: "POST" });
-      const body = (await response.json().catch(() => ({}))) as { receipt?: RuntimeReceipt; error?: string };
-      if (body.receipt) rememberRuntimeReceipt(body.receipt);
-      if (!response.ok || !body.receipt) {
+      const body = (await response.json().catch(() => ({}))) as { operationId?: string; receipt?: RuntimeReceipt; error?: string };
+      const accepted = body.receipt && rememberRuntimeReceipt(body.receipt, receipt, mode !== "uncertain", body.operationId);
+      if (!response.ok || !accepted) {
         setStatus({ kind: "err", text: body.error ?? t("common.failedSend") });
         return;
       }
@@ -2564,9 +2733,9 @@ export function TmuxComposerCore({
     setStatus(null);
     try {
       const response = await fetch(`/api/runtime/operations/${encodeURIComponent(receipt.operationId)}`, { method: "DELETE" });
-      const body = (await response.json().catch(() => ({}))) as { receipt?: RuntimeReceipt; error?: string };
-      if (body.receipt) rememberRuntimeReceipt(body.receipt);
-      if (!response.ok || !body.receipt) {
+      const body = (await response.json().catch(() => ({}))) as { operationId?: string; receipt?: RuntimeReceipt; error?: string };
+      const accepted = body.receipt && rememberRuntimeReceipt(body.receipt, receipt, false, body.operationId);
+      if (!response.ok || !accepted) {
         setStatus({ kind: "err", text: body.error ?? t("common.failedSend") });
         return;
       }

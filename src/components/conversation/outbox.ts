@@ -21,7 +21,7 @@
 
 import { useSyncExternalStore } from "react";
 
-import { receiptIsAdmitted, receiptIsTerminal, type ReceiptStatus } from "@/components/runtime/runtimeModel";
+import { receiptIsAdmitted, receiptIsTerminal, type ReceiptStatus, type RuntimeReceipt } from "@/components/runtime/runtimeModel";
 
 export type OutboxState = "queued" | "delivering" | "delivered" | "failed";
 
@@ -46,6 +46,19 @@ export interface OutboxEntry {
   /** Submission moment (ms). Ordering and history navigation read this. */
   at: number;
   state: OutboxState;
+  /** Possible dispatch without affirmative arrival evidence; never locally replay. */
+  deliveryUncertain?: true;
+  /** The moment this attempt was handed to the wire (ms). Written by the
+      composer immediately before the request leaves and cleared by the next
+      claim, so a reload while the response is still pending can tell a
+      possible dispatch from an entry that was claimed but never sent. */
+  dispatchedAt?: number;
+  /** Original-operation evidence retained across reload and receipt-tail eviction. */
+  deliveryReceipt?: RuntimeReceipt;
+  /** Admission identity when the HTTP response has no receipt yet. */
+  operationId?: string;
+  /** Server-owned held admission; await its receipt without local replay. */
+  acceptedHeld?: true;
   /** Moment the entry left `queued`/`delivering` (ms), for the hard-cap TTL. */
   settledAt?: number;
   /** Receipt-driven delivery has its own clock authority. Unknown receipt
@@ -64,6 +77,8 @@ export interface OutboxEntry {
       (previews are memory-only). The entry is held back rather than delivered
       text-only, and says so, so no attachment is ever silently dropped. */
   needsReattach?: true;
+  /** Exact local replay payload is unavailable; recover through the original operation. */
+  originalOperationOnly?: true;
   /** The initial launch prompt (issue #561/#569): the SPAWN delivers it, not the
       composer. It renders as the conversation's first optimistic user bubble but
       is never dispatched by the composer's queue and never blocks the serial
@@ -183,57 +198,88 @@ export function outboxStateForReceiptStatus(status: ReceiptStatus): OutboxState 
   }
 }
 
-/**
- * The bubble patch a durable receipt implies for an entry, or `null` when it
- * implies nothing.
- *
- * The state alone cannot decide this (issue #1213): `pending`, `queued`,
- * `delivering`, `applying` and `uncertain` all project to ONE `delivering`
- * bubble, so a send being parked at a turn boundary — and a parked send being
- * taken off the park and put on the wire — are invisible to a state comparison,
- * and those are precisely the two transitions whose WORDING has to change. The
- * turn-boundary flag is therefore part of the comparison, not just the patch.
- *
- * A failed bubble still only advances on PROVEN admission: never on another
- * failure, and never to `delivering` off an unproven receipt.
- */
+/** Unknown fate is independent of the server's terminal failure classification. */
+export function receiptHasUnknownFate(receipt: Pick<RuntimeReceipt, "status" | "resend" | "reason">): boolean {
+  return outboxStateForReceiptStatus(receipt.status) !== "delivered"
+    && receipt.reason !== "delivery-discarded"
+    && (receipt.status === "uncertain" || receipt.resend === "verify-first");
+}
+
+/** Arrival and explicit discard permanently settle an immutable operation.
+ * Settlement fallback receipts and journal receipts have independent revisions. */
+export function receiptHasAbsorbingOutcome(receipt: Pick<RuntimeReceipt, "status" | "reason">): boolean {
+  return outboxStateForReceiptStatus(receipt.status) === "delivered" || receipt.reason === "delivery-discarded";
+}
+
+/** Client observation boundary, separate from the producer's revision counter.
+ * A validated operation response supersedes journal observations already seen;
+ * a later journal revision may describe a new attempt. Never send this field. */
+export type ObservedRuntimeReceipt = RuntimeReceipt & { observedJournalRevision?: number; observationOrder?: number; retryAuthorized?: true };
+
+export function receiptEvidenceOrder(left: RuntimeReceipt, right: RuntimeReceipt): number {
+  const observedRevision = (receipt: ObservedRuntimeReceipt) => Math.max(receipt.revision, receipt.observedJournalRevision ?? 0);
+  return Number(receiptHasAbsorbingOutcome(right)) - Number(receiptHasAbsorbingOutcome(left))
+    || observedRevision(right) - observedRevision(left)
+    || ((right as ObservedRuntimeReceipt).observationOrder ?? 0) - ((left as ObservedRuntimeReceipt).observationOrder ?? 0)
+    || Number((right as ObservedRuntimeReceipt).observedJournalRevision !== undefined) - Number((left as ObservedRuntimeReceipt).observedJournalRevision !== undefined)
+    || Date.parse(right.at) - Date.parse(left.at);
+}
+
+/** Project receipt evidence without turning an unknown outcome into a replayable failure. */
 export function outboxReceiptPatch(
-  entry: Pick<OutboxEntry, "state" | "awaitingTurn"> & Partial<Pick<OutboxEntry, "at" | "settledAt" | "receiptSettlement">>,
+  entry: Pick<OutboxEntry, "state" | "awaitingTurn"> & Partial<OutboxEntry>,
   status: ReceiptStatus,
-  receipt?: { at: string; admittedAt?: string },
+  receipt?: { at: string; admittedAt?: string } & Partial<RuntimeReceipt>,
   nowMs?: number,
-): ({ state: OutboxState; awaitingTurn?: true } & Partial<Pick<OutboxEntry, "settledAt" | "receiptSettlement">>) | null {
-  /* Only a receipt that PROVES admission or settlement says anything about a
-     bubble. `pending`, `applying` and `uncertain` are the request path still
-     working, or an admission nobody confirmed: the bubble already reads
-     `delivering`, and letting them move a `failed` one would claim exactly the
-     admission that was never established. */
-  if (!receiptIsAdmitted(status) && !receiptIsTerminal(status)) return null;
-  const state = outboxStateForReceiptStatus(status);
-  const awaitingTurn = outboxAwaitsTurnBoundary(status);
-  if (entry.state === "delivered" && (state !== "delivered" || !receipt)) return null;
-  if (receipt && state === "delivered") {
-    // A terminal journal transition stamps `at` once. An incomplete or repeated
-    // projection cannot replace a known authoritative settlement or extend TTL.
-    if (entry.state === "delivered" && entry.receiptSettlement === "known"
-      && Number.isFinite(entry.settledAt)) return null;
-    const settledAt = authoritativeReceiptTime(receipt, entry.at, nowMs);
-    const receiptSettlement = settledAt === undefined ? "unknown" : "known";
-    if (entry.state === state && entry.receiptSettlement === receiptSettlement
-      && entry.settledAt === settledAt) return null;
-    return { state, awaitingTurn, settledAt, receiptSettlement };
-  }
-  if (state === entry.state && awaitingTurn === entry.awaitingTurn) return null;
-  /* A failed bubble is never re-churned by another failure; it only advances on
-     the proven admission or delivery above. */
-  if (entry.state === "failed" && state === "failed") return null;
-  return {
-    state, awaitingTurn,
-    ...(receipt ? {
-      settledAt: receiptIsTerminal(status) ? authoritativeReceiptTime(receipt, entry.at, nowMs) : undefined,
-      receiptSettlement: undefined,
-    } : {}),
+): Partial<OutboxEntry> | null {
+  const previous = entry.deliveryReceipt;
+  const retryParent = (receipt as (Partial<RuntimeReceipt> & { retryOfOperationId?: string }) | undefined)?.retryOfOperationId;
+  const linkedRetry = previous && ((!entry.deliveryUncertain && !receiptHasUnknownFate(previous)) || (previous as ObservedRuntimeReceipt).retryAuthorized)
+    && retryParent === previous.operationId;
+  const currentOperation = previous && receipt?.operationId === previous.operationId
+    && receipt.idempotencyKey === previous.idempotencyKey;
+  if (receipt?.idempotencyKey && entry.id && receipt.idempotencyKey !== entry.id && !linkedRetry && !currentOperation) return null;
+  const unknown = receiptHasUnknownFate({ ...receipt, status });
+  if (!unknown && !(status === "pending" && receipt?.operationId) && !receiptIsAdmitted(status) && !receiptIsTerminal(status)) return null;
+  if (entry.state === "delivered" && (outboxStateForReceiptStatus(status) !== "delivered" || !receipt)) return null;
+  if (previous && receipt?.operationId === previous.operationId
+    && receiptHasAbsorbingOutcome(previous) && !receiptHasAbsorbingOutcome({ ...receipt, status })) return null;
+  if (previous && receipt?.operationId === previous.operationId
+    && !receiptHasAbsorbingOutcome({ ...receipt, status })
+    && typeof receipt.revision === "number" && receiptEvidenceOrder(previous, { ...receipt, status } as RuntimeReceipt) < 0) return null;
+  if (previous && receipt?.operationId === previous.operationId && receipt.revision === previous.revision
+    && ((receipt as ObservedRuntimeReceipt).observationOrder ?? 0) === ((previous as ObservedRuntimeReceipt).observationOrder ?? 0)
+    && (previous.status === "failed" || previous.status === "rejected") && previous.resend === "safe"
+    && (entry.state === "queued" || entry.state === "delivering")) return null;
+  // Moving/error observations cannot erase uncertainty. Only arrival, a proven
+  // safe rejection, or the explicit original-operation discard resolves it.
+  const success = outboxStateForReceiptStatus(status) === "delivered";
+  const definitive = receipt?.reason === "delivery-discarded"
+    || (!unknown && (status === "rejected" || (status === "failed" && receipt?.resend === "safe")));
+  const deliveryUncertain = unknown || (entry.deliveryUncertain && !success && !definitive) ? true : undefined;
+  const state = deliveryUncertain ? "delivering" : outboxStateForReceiptStatus(status);
+  const patch: Partial<OutboxEntry> = {
+    state, deliveryUncertain, acceptedHeld: undefined,
+    awaitingTurn: deliveryUncertain ? undefined : outboxAwaitsTurnBoundary(status),
+    ...(receipt?.operationId ? { deliveryReceipt: (deliveryUncertain
+      ? { ...receipt, resend: "verify-first", reason: receipt.reason ?? previous?.reason }
+      : receipt) as RuntimeReceipt } : {}),
   };
+  if (deliveryUncertain) {
+    patch.heldForSwitch = undefined;
+    patch.settledAt = undefined;
+    patch.receiptSettlement = undefined;
+  } else if (receipt && state === "delivered") {
+    if (entry.state !== "delivered" || entry.receiptSettlement !== "known" || !Number.isFinite(entry.settledAt)) {
+      patch.settledAt = authoritativeReceiptTime(receipt, entry.at, nowMs);
+      patch.receiptSettlement = patch.settledAt === undefined ? "unknown" : "known";
+    }
+    patch.error = undefined;
+  } else if (receipt) {
+    patch.settledAt = receiptIsTerminal(status) ? authoritativeReceiptTime(receipt, entry.at, nowMs) : undefined;
+    patch.receiptSettlement = undefined;
+  }
+  return Object.entries(patch).some(([key, value]) => JSON.stringify(entry[key as keyof OutboxEntry]) !== JSON.stringify(value)) ? patch : null;
 }
 
 /** The journal emits UTC ISO transition stamps. Reject malformed, future, or
@@ -259,7 +305,11 @@ function authoritativeReceiptTime(
 }
 
 /** Bounded per conversation: the queue is working state plus recent history for
-    ArrowUp/ArrowDown, never an archive (the transcript is the archive). */
+    ArrowUp/ArrowDown, never an archive (the transcript is the archive). The
+    bound is enforced on ADMISSION of a new submission: settled history is
+    compacted first, an unresolved operation is never evicted, and when every
+    slot holds an unresolved operation a new submission is refused before its
+    draft leaves the composer (see {@link outboxCanAdmit}). */
 export const OUTBOX_LIMIT = 32;
 /** A delivered entry stops rendering once the transcript grew past its
     delivery moment: newer transcript records prove the agent has moved on, so
@@ -379,7 +429,7 @@ function persistedQueue(cardId: string): readonly OutboxEntry[] {
   try {
     const raw = JSON.parse(sessionStorage.getItem(storageKey(cardId)) ?? "[]") as unknown;
     if (!Array.isArray(raw)) return EMPTY;
-    return raw.filter(isEntry).slice(-OUTBOX_LIMIT).map((rawEntry) => {
+    return compactOutboxQueue(raw.filter(isEntry)).kept.map((rawEntry) => {
       const entry = normalizeOutboxOwner(rawEntry);
       const images = typeof entry.images === "number" ? entry.images : 0;
       const files = typeof entry.files === "number" ? entry.files : 0;
@@ -392,13 +442,27 @@ function persistedQueue(cardId: string): readonly OutboxEntry[] {
          survives a refresh exactly as it was (never re-dispatched, never
          re-queued) until its transcript echo or live adoption retires it. */
       if (entry.launchOwned) return counted;
+      /* Receipt metadata cannot reconstruct the original runtime/context or
+         attachment bytes. Recovery remains on the server-owned operation. */
+      if (entry.originalOperationOnly || entry.deliveryReceipt || entry.acceptedHeld) return { ...counted, originalOperationOnly: true };
+      if (entry.deliveryUncertain) return counted;
+      /* The request left this browser and no response settled it before the
+         refresh: the server may hold the message. That is a possible dispatch
+         (#1538), so the entry keeps its state, key and payload counts and is
+         marked unknown until an authoritative receipt resolves it. Neither a
+         local replay nor a failed/cancel presentation is honest here. A
+         switch-held entry is different: its response DID arrive and parked
+         it, and its level-triggered release below still owns it. */
+      if (entry.state === "delivering" && entry.dispatchedAt !== undefined && !entry.heldForSwitch) {
+        return { ...counted, deliveryUncertain: true as const };
+      }
       const unsettled = entry.state === "delivering" || entry.state === "queued";
-      /* A `delivering` entry recorded before a refresh has no owner in this
-         mount: it returns to the queue so the serial dispatcher replays it
-         under its original idempotency key rather than stranding it. An entry
-         that carried ATTACHMENTS cannot be replayed — image or document, the
-         bytes were memory-only — so it is held for the operator instead of
-         being delivered without them (#1224). */
+      /* A `delivering` entry that was claimed but never handed to the wire
+         has no owner in this mount: it returns to the queue so the serial
+         dispatcher replays it under its original idempotency key rather than
+         stranding it. An entry that carried ATTACHMENTS cannot be replayed —
+         image or document, the bytes were memory-only — so it is held for the
+         operator instead of being delivered without them (#1224). */
       if (unsettled && images + files > 0) {
         return { ...counted, state: "failed" as const, needsReattach: true as const };
       }
@@ -666,13 +730,75 @@ function occurrenceTombstone(entry: OutboxEntry): PersistedOccurrenceTombstone |
   };
 }
 
-/** Compact recent queue/history while preserving older terminal occurrence owners. */
+/**
+ * Whether an entry is still the operator's to see through (#1538). Anything
+ * in flight (`queued`/`delivering`, including held and turn-boundary parking),
+ * anything actionable (`failed`: local retry/cancel or original-operation
+ * recovery/discard) and any possibly-dispatched submission whose fate is still
+ * unknown is unresolved. It carries the only copy of the submission's
+ * immutable payload, key and receipt evidence, so recent-history compaction
+ * must never evict it. Everything else is disposable history: delivered rows,
+ * rows retired by their transcript echo, rows whose turn already started or
+ * was adopted live, and launch rows, which the spawn owns through the
+ * current-launch record.
+ */
+export function outboxEntryUnresolved(entry: OutboxEntry): boolean {
+  if (entry.launchOwned) return false;
+  if (entry.retiredEchoId || entry.adoptedAt !== undefined || entry.responseStartedAt !== undefined) return false;
+  if (entry.state === "queued" || entry.state === "delivering") return true;
+  /* A failed row is actionable (retry/cancel or original-operation recovery)
+     unless its operation was explicitly discarded: that outcome is absorbing,
+     the row keeps only a Remove control, and it is history like a delivered row. */
+  if (entry.state === "failed") return !(entry.deliveryReceipt && receiptHasAbsorbingOutcome(entry.deliveryReceipt));
+  return entry.deliveryUncertain === true;
+}
+
+/**
+ * Bound a queue to {@link OUTBOX_LIMIT} by evicting the OLDEST settled entries
+ * first, in queue order. Unresolved entries are never evicted, so a queue whose
+ * unresolved population alone exceeds the limit is returned intact; only
+ * {@link enqueueOutbox} adds operator submissions, and it refuses admission in
+ * that state instead of compacting. Relative order of the kept entries is
+ * preserved.
+ */
+export function compactOutboxQueue(
+  queue: readonly OutboxEntry[],
+): { kept: OutboxEntry[]; evicted: OutboxEntry[] } {
+  let overflow = queue.length - OUTBOX_LIMIT;
+  if (overflow <= 0) return { kept: [...queue], evicted: [] };
+  const kept: OutboxEntry[] = [];
+  const evicted: OutboxEntry[] = [];
+  for (const entry of queue) {
+    if (overflow > 0 && !outboxEntryUnresolved(entry)) {
+      evicted.push(entry);
+      overflow -= 1;
+      continue;
+    }
+    kept.push(entry);
+  }
+  return { kept, evicted };
+}
+
+/**
+ * Whether one more operator submission may enter the queue without evicting an
+ * unresolved operation: there is a free slot, or a settled entry that
+ * compaction can retire. False means every slot holds an unresolved operation;
+ * the composer must refuse the submission BEFORE clearing the draft or its
+ * attachments, and the operator frees a slot by resolving, retrying, recovering
+ * or removing one of the existing entries.
+ */
+export function outboxCanAdmit(queue: readonly OutboxEntry[]): boolean {
+  if (queue.length < OUTBOX_LIMIT) return true;
+  return queue.some((entry) => !outboxEntryUnresolved(entry));
+}
+
+/** Compact recent queue/history while preserving older terminal occurrence owners
+    and every unresolved operation. */
 function writeBounded(cardId: string, queue: readonly OutboxEntry[]): void {
-  const overflow = Math.max(0, queue.length - OUTBOX_LIMIT);
-  if (overflow > 0) {
-    for (const entry of queue.slice(0, overflow)) recordCurrentLaunchEntry(cardId, entry);
-    const additions = queue
-      .slice(0, overflow)
+  const { kept, evicted } = compactOutboxQueue(queue);
+  if (evicted.length) {
+    for (const entry of evicted) recordCurrentLaunchEntry(cardId, entry);
+    const additions = evicted
       .map(occurrenceTombstone)
       .filter((entry): entry is PersistedOccurrenceTombstone => entry !== null);
     if (additions.length) {
@@ -682,7 +808,7 @@ function writeBounded(cardId: string, queue: readonly OutboxEntry[]): void {
       );
     }
   }
-  write(cardId, queue.slice(-OUTBOX_LIMIT));
+  write(cardId, kept);
 }
 
 /** The queue for a conversation, hydrating from sessionStorage on first read. */
@@ -695,8 +821,17 @@ export function readOutbox(cardId: string): readonly OutboxEntry[] {
   return restored;
 }
 
-/** Submit a draft into the queue. Returns the entry the dispatcher will send. */
-export function enqueueOutbox(cardId: string, entry: Omit<OutboxEntry, "state">): OutboxEntry {
+/**
+ * Submit a draft into the queue. Returns the entry the dispatcher will send, or
+ * `null` when the queue is at capacity with only unresolved operations
+ * ({@link outboxCanAdmit}): admitting would evict one of them, so the
+ * submission is refused and the queue is left untouched. Callers check
+ * admission before discarding the draft; the `null` is the store's own fence
+ * against a stale caller.
+ */
+export function enqueueOutbox(cardId: string, entry: Omit<OutboxEntry, "state">): OutboxEntry | null {
+  const current = readOutbox(cardId).filter((item) => item.id !== entry.id);
+  if (!outboxCanAdmit(current)) return null;
   const key = echoKey(entry.echoText ?? entry.text);
   const baselineIds = entry.echoBaselineIds
     ?? readEchoLedger(cardId).filter((echo) => echo.key === key).map((echo) => echo.id);
@@ -706,7 +841,7 @@ export function enqueueOutbox(cardId: string, entry: Omit<OutboxEntry, "state">)
     ...(baselineIds.length ? { echoBaselineIds: baselineIds } : {}),
     state: "queued",
   };
-  writeBounded(cardId, [...readOutbox(cardId).filter((item) => item.id !== entry.id), queued]);
+  writeBounded(cardId, [...current, queued]);
   return queued;
 }
 
@@ -995,7 +1130,7 @@ export function releaseHeldOutbox(cardId: string, except?: ReadonlySet<string>):
   const queue = readOutbox(cardId);
   const released: string[] = [];
   const next = queue.map((entry) => {
-    if (!entry.heldForSwitch || entry.state !== "delivering") return entry;
+    if (entry.deliveryUncertain || !entry.heldForSwitch || entry.state !== "delivering") return entry;
     if (entry.retiredEchoId || entry.responseStartedAt !== undefined) return entry;
     if (except?.has(entry.id)) return entry;
     released.push(entry.id);
@@ -1010,7 +1145,7 @@ export function releaseHeldOutbox(cardId: string, except?: ReadonlySet<string>):
 /** Remove an entry outright — the operator cancelled a message that never left. */
 export function cancelOutbox(cardId: string, id: string): void {
   const queue = readOutbox(cardId);
-  const next = queue.filter((entry) => entry.id !== id);
+  const next = queue.filter((entry) => entry.id !== id || entry.deliveryUncertain);
   if (next.length !== queue.length) write(cardId, next);
 }
 
@@ -1024,7 +1159,7 @@ export function cancelOutbox(cardId: string, id: string): void {
 export function retryOutbox(cardId: string, id: string): void {
   const queue = readOutbox(cardId);
   const entry = queue.find((item) => item.id === id);
-  if (!entry || entry.state !== "failed" || entry.needsReattach) return;
+  if (!entry || entry.deliveryUncertain || entry.deliveryReceipt?.reason === "delivery-discarded" || entry.state !== "failed" || entry.needsReattach || entry.originalOperationOnly) return;
   write(cardId, queue.map((item) => (item.id === id ? { ...item, state: "queued", error: undefined } : item)));
 }
 
@@ -1177,7 +1312,9 @@ function reconcileEchoRetirements(
       retiredEchoId: entry.retiredEchoId,
       launchOwned: entry.launchOwned,
     })),
-    ...queue.map((entry) => ({
+    // Text-only echoes cannot identify an unresolved original operation.
+    // Its receipt or causally bound assistant turn must settle it first.
+    ...queue.filter((entry) => !entry.deliveryUncertain).map((entry) => ({
       type: "queue" as const,
       id: entry.id,
       at: entry.at,
@@ -1392,6 +1529,10 @@ export function visibleOutbox(
        which for a role launch is the scaffold-plus-draft carried on `echoText`,
        not the raw draft it displays (issue #615). */
     const key = echoKey(entry.echoText ?? entry.text);
+    if (entry.deliveryUncertain && entry.responseStartedAt === undefined && entry.adoptedAt === undefined) {
+      visible.push(entry);
+      continue;
+    }
     if (entry.retiredEchoId) {
       const floor = Math.max(entry.echoBaseline ?? 0, consumed.get(key) ?? 0);
       consumed.set(key, floor + 1);
@@ -1443,7 +1584,7 @@ export function outboxHistory(queue: readonly OutboxEntry[]): string[] {
     composer, so it neither dispatches nor blocks the drain (round-1 P1#2/#4). */
 export function nextDispatch(queue: readonly OutboxEntry[]): OutboxEntry | null {
   if (queue.some((entry) => entry.state === "delivering" && !entry.launchOwned)) return null;
-  return queue.find((entry) => entry.state === "queued") ?? null;
+  return queue.find((entry) => entry.state === "queued" && !entry.originalOperationOnly) ?? null;
 }
 
 /** Atomically claim one queued entry before any asynchronous wire work starts. */
@@ -1451,8 +1592,11 @@ export function claimOutboxDispatch(cardId: string, id: string): OutboxEntry | n
   const queue = readOutbox(cardId);
   if (queue.some((entry) => entry.state === "delivering" && !entry.launchOwned)) return null;
   const entry = queue.find((candidate) => candidate.id === id);
-  if (!entry || entry.state !== "queued") return null;
+  if (!entry || entry.state !== "queued" || entry.originalOperationOnly) return null;
+  /* The wire fence belongs to one attempt. A replay starts unfenced so that a
+     refresh between this claim and the request still replays it. */
   const claimed: OutboxEntry = { ...entry, state: "delivering" };
+  delete claimed.dispatchedAt;
   write(cardId, queue.map((candidate) => candidate.id === id ? claimed : candidate));
   return claimed;
 }

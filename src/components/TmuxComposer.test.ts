@@ -519,6 +519,7 @@ test("pending generations persist immutable image snapshots per conversation and
       key: `key-${index}`,
       text: `ask ${index}`,
       images: index === 0 ? [pendingImage("a")] : [],
+      selectedContext: { version: 1, state: "none", capturedAt: "2026-09-05T12:00:00.000Z" },
       ...(index === 0 ? {
         runtime: { model: "gpt-5.6-sol", effort: "high", fast: true },
         runtimeCaptured: true as const,
@@ -539,6 +540,7 @@ test("pending generations persist immutable image snapshots per conversation and
       runtime: { model: "gpt-5.6-sol", effort: "high", fast: true },
       runtimeCaptured: true,
       operationId: "op-key-0",
+      selectedContext: { version: 1, state: "none", capturedAt: "2026-09-05T12:00:00.000Z" },
     });
     writePendingDeliveries("conv-persist", []);
     expect(readPendingDeliveries("conv-persist")).toEqual([]);

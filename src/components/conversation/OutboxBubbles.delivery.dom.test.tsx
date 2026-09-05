@@ -168,7 +168,7 @@ test("#1213 an admission the request path never confirmed leaves the bubble alon
   /* `pending`, `applying` and `uncertain` prove nothing about a hand-over, so
      none of them may write a turn boundary onto the bubble — that flag is a
      claim about where the message IS. */
-  for (const status of ["pending", "applying", "uncertain"] as const) {
+  for (const status of ["pending", "applying"] as const) {
     expect(outboxReceiptPatch({ state: "delivering" }, status)).toBeNull();
     expect(outboxReceiptPatch({ state: "delivering", awaitingTurn: true }, status)).toBeNull();
   }

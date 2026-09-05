@@ -351,7 +351,7 @@ test("structured recovery state is bounded and exposes retry details", async () 
   await act(async () => {
     finishRecovery({
       ok: false,
-      status: 503,
+      status: 400,
       json: async () => ({ error: "recovery attempt failed; retry is available" }),
     } as Response);
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -369,7 +369,7 @@ test("a same-key retry re-sends the ORIGINAL runtime snapshot even after the sel
   localStorage.setItem("llvAgentRuntime:conv-snapshot:profile", JSON.stringify({ effort: "ultra" }));
   const sends: SendBody[] = [];
   mockWire(sends, [
-    () => ({ status: 502, json: { error: "wire down" } }), // retryable: key survives
+    () => ({ status: 400, json: { error: "pre-dispatch validation rejected" } }), // retryable: key survives
     delivered,
   ]);
 
@@ -407,7 +407,7 @@ test("a remounted same-key retry restores the original runtime snapshot", async 
   localStorage.setItem("llvAgentRuntime:conv-snapshot:profile", JSON.stringify({ effort: "ultra" }));
   const sends: SendBody[] = [];
   mockWire(sends, [
-    () => ({ status: 502, json: { error: "wire down" } }),
+    () => ({ status: 400, json: { error: "pre-dispatch validation rejected" } }),
     delivered,
   ]);
 
@@ -465,7 +465,7 @@ test("the scoped runtime seam leaks nothing: another conversation resolves the r
 test("a send with no explicit selection rides no runtime override, on first attempt and on retry", async () => {
   const sends: SendBody[] = [];
   mockWire(sends, [
-    () => ({ status: 502, json: { error: "wire down" } }),
+    () => ({ status: 400, json: { error: "pre-dispatch validation rejected" } }),
     delivered,
   ]);
 
