@@ -78,11 +78,13 @@ import { writeProfile } from "./runtimeProfile";
 import { enqueueOutbox, updateOutbox, visibleOutbox, readOutbox, resetOutboxForTests, retryOutbox, cancelOutbox } from "./conversation/outbox";
 
 let snapshotReceipts: RuntimeReceipt[] = [];
+let realReceiptHook = false;
 
 const realFetch = globalThis.fetch;
 
 beforeEach(() => {
   snapshotReceipts = [];
+  realReceiptHook = false;
   setLogFeedDependenciesForTests({ useLogTail: () => ({ lines: [], linesStart: 0, size: 0, loading: false, error: null, tickTime: null, paused: false, setPaused() {}, clear() {}, hasMore: false, loadingOlder: false, loadOlder: async () => 0, prependGen: 0 }) });
   setRuntimeUiEnabledForTests(false);
   setTmuxComposerRuntimeDependenciesForTests({
@@ -100,7 +102,7 @@ beforeEach(() => {
     },
     useRuntimeReceiptsForArtifact: (path, conversationId) => {
       const real = useRuntimeReceiptsForArtifact(path, conversationId);
-      return path === "/codex-snapshot.jsonl" || conversationId === "conv-snapshot" ? snapshotReceipts : real;
+      return !realReceiptHook && (path === "/codex-snapshot.jsonl" || conversationId === "conv-snapshot") ? snapshotReceipts : real;
     },
   });
 });
@@ -209,7 +211,7 @@ test("captured verify-first receipt stays unknown in mounted composer and feed w
   try {
     const bubble = host.querySelector("[data-outbox-entry]")!;
     expect(bubble.textContent).toContain("outcome is unknown");
-    expect(host.textContent).not.toContain("Not delivered");
+    expect(host.textContent).not.toMatch(/not delivered/i);
     expect(bubble.querySelector("[data-outbox-retry], [data-outbox-cancel]")).toBeNull();
     retryOutbox(file.conversationId!, captured.idempotencyKey);
     expect(readOutbox(file.conversationId!)[0]?.state).toBe("delivering");
@@ -217,6 +219,71 @@ test("captured verify-first receipt stays unknown in mounted composer and feed w
   } finally { await act(async () => root.unmount()); }
 });
 
+
+test.each(["failed", "uncertain"] as const)("textless %s receipt polling and remount retain unknown history, announcement and original controls", async status => {
+  const calls: { url: string; method?: string; body?: string }[] = [];
+  let receipt: RuntimeReceipt = { ...captured, status, text: undefined };
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    if (url.includes("/api/runtime/operations/")) {
+      calls.push({ url, method: init?.method, body: init?.body as string });
+      return Response.json({ receipt });
+    }
+    if (init?.method === "POST" && (url === "/api/runtime/send" || url === "/api/tmux")) calls.push({ url, method: init.method, body: init.body as string });
+    return new Response("{}", { status: 404 });
+  }) as typeof fetch;
+  const { createRuntimeBus, setRuntimeBusForTests } = await import("@/hooks/runtimeBus");
+  let snapshotSeq = 1;
+  let polls = 0;
+  const bus = createRuntimeBus({
+    fetch: async () => {
+      polls++;
+      return Response.json({ schemaVersion: 1, snapshotSeq, retentionFloorSeq: 0,
+        runtime: { hostEpoch: 1, health: "ready" }, filesRevision: 1, sessions: [{ ...structuredView.session, artifactPath: file.path, attentionIds: [], revision: snapshotSeq, turn: "idle", recentReceipts: [receipt] }], attentions: [],
+        recentOperations: [receipt], edges: [], flows: [], workflows: [], tasks: [] });
+    },
+    createEventSource: () => ({ onopen: null, onerror: null, onmessage: null, close() {}, addEventListener() {} }),
+    now: Date.now, setTimeout, clearTimeout, setInterval, clearInterval,
+  });
+  realReceiptHook = true;
+  setRuntimeBusForTests(bus);
+  bus.start();
+  await settle(() => {});
+  let mounted = await renderInto(surface());
+  const check = () => {
+
+    expect(mounted.host.textContent).not.toMatch(/not delivered/i);
+    expect(mounted.host.querySelector("[data-runtime-receipt-status]")?.textContent).toMatch(/outcome is unknown/i);
+    const row = mounted.host.querySelector("[data-receipt-standalone-row]")!;
+    expect(row.textContent).toMatch(/outcome is unknown/i);
+    expect(row.textContent).toContain(captured.reason!);
+    expect(row.querySelector("[data-receipt-discard]")?.textContent).toBe("Discard");
+    expect(row.querySelector("[data-operation]")?.getAttribute("data-operation")).toBe(captured.operationId);
+    expect(row.querySelector("[data-receipt-edit], [data-outbox-retry], [data-outbox-cancel]")).toBeNull();
+  };
+  try {
+    check();
+    // A new receipt snapshot from polling keeps the optional echo absent.
+    receipt = { ...receipt, revision: 5 };
+    snapshotSeq++;
+    await act(async () => { expect(await bus.refresh()).toBe(true); });
+    expect(polls).toBeGreaterThanOrEqual(2);
+    check();
+    await act(async () => mounted.root.unmount());
+    resetOutboxForTests();
+    mounted = await renderInto(surface());
+    check();
+    const details = mounted.host.querySelector<HTMLDetailsElement>("details[data-runtime-receipt-stack]")!;
+    await settle(() => { details.open = true; details.dispatchEvent(new dom.Event("toggle") as unknown as Event); });
+    await settle(() => mounted.host.querySelector<HTMLButtonElement>("[data-receipt-uncertain-retry]")!.click());
+    expect(calls).toEqual([{ url: `/api/runtime/operations/${captured.operationId}`, method: "POST", body: JSON.stringify({ action: "retry-uncertain" }) }]);
+    receipt = { ...receipt, status: "failed", revision: 6, reason: "delivery-discarded", resend: "not-needed" };
+    await settle(() => mounted.host.querySelector<HTMLButtonElement>("[data-receipt-discard]")!.click());
+    expect(calls[1]).toEqual({ url: `/api/runtime/operations/${captured.operationId}`, method: "DELETE", body: undefined });
+    expect(mounted.host.querySelector("[data-receipt-discard], [data-receipt-uncertain-retry]")).toBeNull();
+    expect(calls).toHaveLength(2);
+  } finally { await act(async () => mounted.root.unmount()); bus.stop(); }
+});
 
 test("uncertainty survives reload, conversation switches, and late errors; actions use the original operation", async () => {
   const calls: { url: string; method?: string; body?: string }[] = [];
@@ -241,6 +308,8 @@ test("uncertainty survives reload, conversation switches, and late errors; actio
   try {
     expect(mounted.host.textContent).toContain("outcome is unknown");
     expect(readOutbox(file.conversationId!)[0]?.deliveryReceipt?.operationId).toBe(captured.operationId);
+    expect(mounted.host.textContent).not.toMatch(/not delivered/i);
+    expect(mounted.host.querySelector("[data-runtime-receipt-status]")?.textContent).toMatch(/outcome is unknown/i);
     await settle(() => { retryOutbox(file.conversationId!, captured.idempotencyKey); cancelOutbox(file.conversationId!, captured.idempotencyKey); });
     expect(calls).toHaveLength(0);
     const other = { ...file, path: "/other.jsonl", conversationId: "other-conversation" };
@@ -369,7 +438,7 @@ test.skipIf(!process.env.LLV_UNCERTAINTY_BROWSER)("390/430 mounted uncertainty h
     import {enqueueOutbox,updateOutbox} from './src/components/conversation/outbox';
     const file=${JSON.stringify(file)}, receipt=${JSON.stringify(captured)}, view=${JSON.stringify(structuredView)};
     setRuntimeUiEnabledForTests(false);
-    setTmuxComposerRuntimeDependenciesForTests({useAgentCapabilities:()=>({caps:capabilitiesFor(file,view,{runtimeEnabled:true}),runtime:view,structuredSession:view,runtimeEnabled:true,attachMode:attachModeFor(file,view,{runtimeEnabled:true})}),useRuntimeReceiptsForArtifact:()=>[receipt]});
+    setTmuxComposerRuntimeDependenciesForTests({useAgentCapabilities:()=>({caps:capabilitiesFor(file,view,{runtimeEnabled:true}),runtime:view,structuredSession:view,runtimeEnabled:true,attachMode:attachModeFor(file,view,{runtimeEnabled:true})}),useRuntimeReceiptsForArtifact:()=>[{...receipt,text:undefined}]});
     setLogFeedDependenciesForTests({useLogTail:()=>({lines:[],linesStart:0,size:0,loading:false,error:null,tickTime:null,paused:false,setPaused(){},clear(){},hasMore:false,loadingOlder:false,loadOlder:async()=>0,prependGen:0})});
     enqueueOutbox(file.conversationId,{id:receipt.idempotencyKey,text:receipt.text,images:0,at:Date.parse(receipt.admittedAt)});
     updateOutbox(file.conversationId,receipt.idempotencyKey,{state:'delivering'});
@@ -411,6 +480,13 @@ test.skipIf(!process.env.LLV_UNCERTAINTY_BROWSER)("390/430 mounted uncertainty h
       const retry = page.locator('[data-receipt-uncertain-retry]');
       await retry.waitFor();
       expect(await retry.innerText()).toBe("Retry");
+      expect(await page.locator('[data-runtime-receipt-status]').textContent()).toMatch(/outcome is unknown/i);
+      expect(await page.locator('body').textContent()).not.toMatch(/not delivered/i);
+      const discard = page.locator('[data-receipt-discard]');
+      expect(await discard.innerText()).toBe("Discard");
+      expect((await discard.boundingBox())!.height).toBeGreaterThanOrEqual(43.99);
+      await discard.focus();
+      expect(await discard.evaluate(el => document.activeElement === el)).toBe(true);
       const bounds = await retry.boundingBox();
       expect(bounds!.height).toBeGreaterThanOrEqual(43.99);
       await retry.focus();
@@ -421,9 +497,12 @@ test.skipIf(!process.env.LLV_UNCERTAINTY_BROWSER)("390/430 mounted uncertainty h
       await retry.click();
       await page.waitForTimeout(50);
       expect(actions.at(-1)).toEqual({ method: "POST", path: `/api/runtime/operations/${captured.operationId}`, body: JSON.stringify({ action: "retry-uncertain" }) });
+      await discard.click();
+      await page.waitForTimeout(50);
+      expect(actions.at(-1)).toEqual({ method: "DELETE", path: `/api/runtime/operations/${captured.operationId}`, body: "" });
       await page.close();
     }
-    expect(actions).toHaveLength(2);
+    expect(actions).toHaveLength(4);
   } finally { await browser.close(); server.stop(true); }
 });
 
@@ -437,6 +516,8 @@ test("non-2xx original receipt retains identity and verify-first evidence throug
     await settle(() => composerControls(mounted.host).submit());
     expect(sends).toHaveLength(1);
     expect(readOutbox(file.conversationId!)[0]?.deliveryReceipt?.operationId).toBe(captured.operationId);
+    expect(mounted.host.textContent).not.toMatch(/not delivered/i);
+    expect(mounted.host.querySelector("[data-runtime-receipt-status]")?.textContent).toMatch(/outcome is unknown/i);
     expect(readOutbox(file.conversationId!)[0]?.deliveryReceipt?.resend).toBe("verify-first");
     expect(mounted.host.querySelector("[data-outbox-entry]")?.textContent).toContain("outcome is unknown");
     expect(readOutbox(file.conversationId!)[0]?.deliveryReceipt?.reason).toBe(captured.reason);
@@ -444,6 +525,8 @@ test("non-2xx original receipt retains identity and verify-first evidence throug
     resetOutboxForTests();
     mounted = await renderInto(surface());
     expect(readOutbox(file.conversationId!)[0]?.deliveryReceipt?.operationId).toBe(captured.operationId);
+    expect(mounted.host.textContent).not.toMatch(/not delivered/i);
+    expect(mounted.host.querySelector("[data-runtime-receipt-status]")?.textContent).toMatch(/outcome is unknown/i);
     await settle(() => {
       retryOutbox(file.conversationId!, sends[0]!.idempotencyKey);
       cancelOutbox(file.conversationId!, sends[0]!.idempotencyKey);

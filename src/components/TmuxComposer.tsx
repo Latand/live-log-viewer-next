@@ -339,10 +339,22 @@ export function RuntimeComposerReceipts({
     admittedAt: group.current.admittedAt ?? group.current.at,
     nowMs: now,
   });
+  const receiptStatusText = (receipt: RuntimeReceipt): string => receiptHasUnknownFate(receipt)
+    ? [t("orchPanel.errorUnknownTitle"), receipt.reason].filter(Boolean).join(": ")
+    : runtimeReceiptStatusText(t, receipt);
+  const uncertainControls = (receipt: RuntimeReceipt) => (
+    <span className="flex min-w-0 flex-wrap items-center justify-end gap-1.5" data-operation={receipt.operationId}>
+      <span role="status" className="text-caption text-warning">{t("orchPanel.errorUnknownTitle")}</span>
+      {!receipt.operationId.startsWith(UNCONFIRMED_RECEIPT_PREFIX) ? <>
+        <button type="button" data-receipt-uncertain-retry disabled={actionsDisabled} className="min-h-11 rounded-full border border-border px-3" onClick={() => onRetry(receipt, "uncertain")}>{t("runtime.receipt.retry")}</button>
+        {onDiscard ? <button type="button" data-receipt-discard disabled={actionsDisabled} className="min-h-11 rounded-full border border-border px-3" onClick={() => onDiscard(receipt)}>{t("runtime.receipt.discard")}</button> : null}
+      </> : null}
+    </span>
+  );
   const supersededStatusLabels = (attempts: RuntimeReceipt[]): string[] => {
     const counts = new Map<string, number>();
     for (const attempt of attempts.slice(1)) {
-      const label = runtimeReceiptStatusText(t, attempt);
+      const label = receiptStatusText(attempt);
       counts.set(label, (counts.get(label) ?? 0) + 1);
     }
     return [...counts].map(([label, count]) => (count > 1 ? `${label} ×${count}` : label));
@@ -354,12 +366,14 @@ export function RuntimeComposerReceipts({
      history under it now; only still-moving and non-message operations keep a
      standalone chip. Textless failures with one cause share one history row. */
   const textlessProblems = standaloneReceipts
-    .filter((receipt) => isMessage(receipt) && deliveryProblem(receipt.status))
+    .filter((receipt) => isMessage(receipt) && (deliveryProblem(receipt.status) || receiptHasUnknownFate(receipt)))
     .sort((left, right) => Date.parse(right.at) - Date.parse(left.at));
   const standaloneChips = standaloneReceipts.filter((receipt) => !textlessProblems.includes(receipt));
   const textlessRows = textlessProblems.reduce<RuntimeReceipt[][]>((rows, receipt) => {
     const last = rows[rows.length - 1];
-    if (last && failureCauseKey(last[0]!.reason) === failureCauseKey(receipt.reason)) last.push(receipt);
+    // Each unknown operation needs its own original-identity recovery controls.
+    if (last && !receiptHasUnknownFate(last[0]!) && !receiptHasUnknownFate(receipt)
+      && failureCauseKey(last[0]!.reason) === failureCauseKey(receipt.reason)) last.push(receipt);
     else rows.push([receipt]);
     return rows;
   }, []);
@@ -405,7 +419,7 @@ export function RuntimeComposerReceipts({
      count badge speaks only for deliveries that went terminally uncertain. */
   const problemBadgeCount = notice ? uncertainCurrent.length : problemReceipts.length;
   const busyRetry = pendingReceipts.some((receipt) => typeof receipt.reason === "string" && RECOVERABLE_BUSY_RETRY_REASONS.has(receipt.reason));
-  const receiptSummaryLabel = t("runtime.receipt.summary", { count: visibleAttempts.length });
+  const receiptSummaryLabel = t("runtime.receipt.summary", { count: visibleAttempts.length + textlessProblems.length });
   const disclosureLabel = t(detailsOpen ? "runtime.receipt.hideDetails" : "runtime.receipt.showDetails");
   const summaryAriaLabel = noticeLine
     ? `${disclosureLabel}. ${noticeLine}${noticeAttemptLabel ? `. ${noticeAttemptLabel}` : ""}`
@@ -473,9 +487,9 @@ export function RuntimeComposerReceipts({
                   <span
                     className="min-w-[3rem] flex-1 truncate text-right text-muted"
                     data-receipt-preview
-                    title={visibleAttempts[0]!.text ?? undefined}
+                    title={visibleAttempts[0]?.text ?? undefined}
                   >
-                    {visibleAttempts[0]!.text}
+                    {visibleAttempts[0]?.text}
                   </span>
                 </>
               )}
@@ -619,13 +633,7 @@ export function RuntimeComposerReceipts({
                           <span className="sr-only">{t("runtime.receipt.attemptCount", { count: group.attempts.length })}</span>
                         </Badge>
                       ) : null}
-                      {unknownFate ? <span className="flex min-w-0 flex-wrap items-center justify-end gap-1.5" data-operation={receipt.operationId}>
-                        <span role="status" className="text-caption text-warning">{t("orchPanel.errorUnknownTitle")}</span>
-                        {serverBacked ? <>
-                          <button type="button" data-receipt-uncertain-retry disabled={actionsDisabled} className="min-h-11 rounded-full border border-border px-3" onClick={() => onRetry(receipt, "uncertain")}>{t("runtime.receipt.retry")}</button>
-                          {onDiscard ? <button type="button" data-receipt-discard disabled={actionsDisabled} className="min-h-11 rounded-full border border-border px-3" onClick={() => onDiscard(receipt)}>{t("runtime.receipt.discard")}</button> : null}
-                        </> : null}
-                      </span> : <ReceiptChip
+                      {unknownFate ? uncertainControls(receipt) : <ReceiptChip
                         receipt={receipt}
                         wait={wait}
                         actionsDisabled={actionsDisabled}
@@ -718,12 +726,15 @@ export function RuntimeComposerReceipts({
                         <span className="sr-only">{t("runtime.receipt.attemptCount", { count: bucket.length })}</span>
                       </Badge>
                     ) : null}
-                    <ReceiptChip
+                    {receiptHasUnknownFate(receipt) ? uncertainControls(receipt) : <ReceiptChip
                       receipt={receipt}
                       actionsDisabled={actionsDisabled}
                       onRetry={receipt.status === "failed" ? () => retryFailed(receipt) : undefined}
-                    />
-                    {onDismiss ? (
+                    />}
+                    {receiptHasUnknownFate(receipt) && receipt.reason ? (
+                      <span className="w-full break-words text-right text-caption text-muted" data-receipt-uncertain-why>{receipt.reason}</span>
+                    ) : null}
+                    {onDismiss && receiptIsTerminal(receipt.status) ? (
                       <button
                         type="button"
                         aria-label={t("runtime.receipt.dismiss")}
@@ -754,13 +765,15 @@ export function RuntimeComposerReceipts({
             {` ${[
               ...attemptGroups.map((group) => {
                 const wait = waitFor(group);
-                const current = (wait && deliveryWaitText(t, wait, group.current.queuePosition))
-                  ?? runtimeReceiptStatusText(t, group.current);
+                const current = receiptHasUnknownFate(group.current)
+                  ? receiptStatusText(group.current)
+                  : (wait && deliveryWaitText(t, wait, group.current.queuePosition))
+                    ?? receiptStatusText(group.current);
                 return [current, ...supersededStatusLabels(group.attempts)].join(" · ");
               }),
               ...textlessRows.map((bucket) => (bucket.length > 1
-                ? `${runtimeReceiptStatusText(t, bucket[0]!)} ×${bucket.length}`
-                : runtimeReceiptStatusText(t, bucket[0]!))),
+                ? `${receiptStatusText(bucket[0]!)} ×${bucket.length}`
+                : receiptStatusText(bucket[0]!))),
             ].join(". ")}.`}
             {busyRetry ? ` ${t("runtime.receipt.busyRetry")}` : null}
           </span>
