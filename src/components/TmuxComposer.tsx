@@ -35,6 +35,7 @@ import {
   markOutboxResponded,
   outboxHistory,
   outboxReceiptPatch,
+  receiptHasUnknownFate,
   readOutbox,
   rebindOutboxEchoText,
   releaseHeldOutbox,
@@ -315,6 +316,7 @@ export function RuntimeComposerReceipts({
   const isMessage = (receipt: RuntimeReceipt) => receipt.kind === "send" || receipt.kind === "steer";
   const editable = (receipt: RuntimeReceipt) => isMessage(receipt)
     && (receipt.status === "failed" || receipt.status === "rejected")
+    && !receiptHasUnknownFate(receipt)
     && typeof receipt.text === "string"
     && receipt.text.length > 0
     && receipt.text.length < 240;
@@ -366,10 +368,12 @@ export function RuntimeComposerReceipts({
      history below keeps the detail — the notice is its disclosure, not a copy. */
   const notice = deliveryNoticeRun(attemptGroups, textlessProblems);
   const noticeFailure = notice ? describeReceiptFailure(t, notice.current.reason) : null;
+  const noticeUnknown = notice ? receiptHasUnknownFate(notice.current) : false;
+  const noticeLabel = t(noticeUnknown ? "orchPanel.errorUnknownTitle" : "composer.receiptFailed");
   const noticeLine = notice
     ? noticeFailure?.cause
-      ? `${t("composer.receiptFailed")} — ${noticeFailure.cause}`
-      : t("composer.receiptFailed")
+      ? `${noticeLabel} — ${noticeFailure.cause}`
+      : noticeLabel
     : null;
   const noticeAttemptLabel = notice && notice.attempts.length > 1
     ? t("runtime.receipt.attemptCount", { count: notice.attempts.length })
@@ -448,7 +452,7 @@ export function RuntimeComposerReceipts({
                     data-delivery-notice-cause
                     title={noticeFailure?.full ?? undefined}
                   >
-                    <span className="font-semibold text-danger">{t("composer.receiptFailed")}</span>
+                    <span className="font-semibold text-danger">{noticeLabel}</span>
                     {noticeFailure?.cause ? <span className="text-secondary">{` — ${noticeFailure.cause}`}</span> : null}
                   </span>
                   {/* Counters are plain muted text, never badges (design rule 5). */}
@@ -575,7 +579,8 @@ export function RuntimeComposerReceipts({
                 const failed = receipt.status === "failed";
                 const pending = !receiptIsTerminal(receipt.status);
                 const wait = waitFor(group);
-                const uncertain = wait?.phase === "uncertain";
+                const unknownFate = receiptHasUnknownFate(receipt);
+                const uncertain = unknownFate || wait?.phase === "uncertain";
                 const serverBacked = !receipt.operationId.startsWith(UNCONFIRMED_RECEIPT_PREFIX);
                 const exitable = uncertain && serverBacked;
                 const discardable = serverBacked
@@ -612,7 +617,13 @@ export function RuntimeComposerReceipts({
                           <span className="sr-only">{t("runtime.receipt.attemptCount", { count: group.attempts.length })}</span>
                         </Badge>
                       ) : null}
-                      <ReceiptChip
+                      {unknownFate ? <span className="flex min-w-0 flex-wrap items-center justify-end gap-1.5" data-operation={receipt.operationId}>
+                        <span role="status" className="text-caption text-warning">{t("orchPanel.errorUnknownTitle")}</span>
+                        {serverBacked ? <>
+                          <button type="button" data-receipt-uncertain-retry disabled={actionsDisabled} className="min-h-11 rounded-full border border-border px-3" onClick={() => onRetry(receipt, "uncertain")}>{t("runtime.receipt.retry")}</button>
+                          {onDiscard ? <button type="button" data-receipt-discard disabled={actionsDisabled} className="min-h-11 rounded-full border border-border px-3" onClick={() => onDiscard(receipt)}>{t("runtime.receipt.discard")}</button> : null}
+                        </> : null}
+                      </span> : <ReceiptChip
                         receipt={receipt}
                         wait={wait}
                         actionsDisabled={actionsDisabled}
@@ -623,7 +634,7 @@ export function RuntimeComposerReceipts({
                             : undefined}
                         onEdit={editable(receipt) ? () => onEdit(receipt) : undefined}
                         onDiscard={discardable && onDiscard ? () => onDiscard(receipt) : undefined}
-                      />
+                      />}
                       {/* A settled problem is dismissible (issue #264 rule 3):
                           the dismissal records every settled attempt of the
                           row and persists, while a still-moving attempt in the
@@ -668,7 +679,7 @@ export function RuntimeComposerReceipts({
                         className="min-w-0 max-w-full text-right text-caption text-muted"
                         data-receipt-uncertain-why
                       >
-                        {deliveryUncertainWhy(t, wait!)}
+                        {unknownFate ? receipt.reason : deliveryUncertainWhy(t, wait!)}
                       </span>
                     ) : null}
                     {history.length ? (
@@ -1568,7 +1579,17 @@ export function TmuxComposerCore({
   /* Durable receipts for this session from the runtime bus (empty while the bus
      is disabled or the session is legacy/unhosted). */
   const runtimeReceipts = runtimeDependencies.useRuntimeReceiptsForArtifact(file.path, cardId);
-  const displayedRuntimeReceipts = mergeRuntimeReceipts(runtimeReceipts, immediateRuntimeReceipts);
+  const displayedRuntimeReceipts = mergeRuntimeReceipts(runtimeReceipts, mergeRuntimeReceipts(
+    immediateRuntimeReceipts.filter((receipt) => receipt.conversationId === cardId),
+    outbox.flatMap((entry) => entry.deliveryReceipt ? [entry.deliveryReceipt] : []),
+  )).map((receipt) => {
+    const entry = outbox.find((entry) => entry.deliveryUncertain
+      && (entry.id === receipt.idempotencyKey || entry.deliveryReceipt?.operationId === receipt.operationId));
+    const unresolved = receipt.status === "pending" || receipt.status === "applying"
+      || receipt.status === "queued" || receipt.status === "delivering" || receipt.status === "uncertain"
+      || (receipt.status === "failed" && receipt.resend !== "safe" && receipt.reason !== "delivery-discarded");
+    return entry && unresolved ? { ...receipt, resend: "verify-first" as const, reason: receipt.reason ?? entry.deliveryReceipt?.reason } : receipt;
+  });
   /* #691 §4 — THE RECEIPT-STREAM CONSUMER for parked bridge batches.
      A structured send can answer `pending` and settle minutes later on this stream,
      by which time the closure that drained the batch is gone. Watching the receipts
@@ -1885,8 +1906,7 @@ export function TmuxComposerCore({
     for (const entry of outbox) {
       if (entry.launchOwned) continue;
       const receipt = displayedRuntimeReceipts.find((candidate) =>
-        candidate.idempotencyKey === entry.id
-        && (receiptIsAdmitted(candidate.status) || receiptIsTerminal(candidate.status)));
+        (candidate.idempotencyKey === entry.id || candidate.operationId === entry.deliveryReceipt?.operationId));
       if (!receipt) continue;
       const patch = outboxReceiptPatch(entry, receipt.status, receipt, nowMs());
       if (!patch) continue;
@@ -2085,6 +2105,7 @@ export function TmuxComposerCore({
          like an in-flight delivery otherwise. */
       updateOutbox(cardId, outboxId, {
         state,
+        ...(state === "delivered" ? { deliveryUncertain: undefined } : {}),
         settledAt: nowMs(),
         awaitingTurn,
         ...(error ? { error } : {}),
@@ -2094,6 +2115,13 @@ export function TmuxComposerCore({
         outboxImages.current.delete(outboxId);
         outboxFiles.current.delete(outboxId);
       }
+    };
+    const markOutboxUnknown = () => {
+      if (!outboxId) return;
+      const entry = readOutbox(cardId).find((entry) => entry.id === outboxId);
+      if (!entry || entry.state === "delivered" || entry.deliveryReceipt?.resend === "safe"
+        || entry.deliveryReceipt?.reason === "delivery-discarded") return;
+      updateOutbox(cardId, outboxId, { state: "delivering", deliveryUncertain: true });
     };
     const settleOutboxFromReceipt = (receipt: RuntimeReceipt) => {
       /* The late admission: a send that answered `pending` and settled on the receipt
@@ -2445,19 +2473,19 @@ export function TmuxComposerCore({
         }
         /* The earliest attempt per key is the immutable record of what the
            server may have accepted: a retry never overwrites it, and a
-           definitive 4xx rejection (e.g. a changed-payload 409) keeps no
-           entry — only a lost response (network/5xx) or an explicitly
-           still-moving receipt does. */
-        const possiblyAccepted = !receiptIsTerminal(json.receipt?.status ?? "pending")
+           outbox retains this snapshot for any permitted same-key retry.
+           Direct submissions can release a proven pre-dispatch rejection. */
+        const possiblyAccepted = Boolean(json.receipt && receiptHasUnknownFate(json.receipt)) || !receiptIsTerminal(json.receipt?.status ?? "pending")
           && (json.status === undefined || json.status >= 500);
-        if (!possiblyAccepted && recordedThisAttempt) {
+        if (!possiblyAccepted && recordedThisAttempt && !outboxId) {
           persistPendingDeliveries(pendingDeliveries.current.filter((entry) => entry.key !== clientMessageId));
         }
         // A hard failure keeps the draft text (never cleared) so the message is
         // not lost; the error is announced by the composer's live status region.
-        // A queued submission keeps its own bubble instead, marked undelivered
-        // with a cancel — the text is never silently dropped either way.
-        settleOutbox("failed", json.error ?? t("common.failedSend"));
+        // A queued submission retains its bubble and the receipt evidence.
+        if (json.receipt) settleOutboxFromReceipt(json.receipt);
+        else if (possiblyAccepted && outboxId) markOutboxUnknown();
+        else settleOutbox("failed", json.error ?? t("common.failedSend"));
         setStatus({ kind: "err", text: json.error ?? t("common.failedSend") });
         return;
       }
@@ -2474,6 +2502,10 @@ export function TmuxComposerCore({
         if (!outboxId) inputRef.current?.focus();
         return;
       }
+      if (json.structured) {
+        markOutboxUnknown();
+        return;
+      }
       settleLegacySuccess(json);
     } catch (error) {
       /* The request died on the wire AFTER the server may have accepted it.
@@ -2488,7 +2520,7 @@ export function TmuxComposerCore({
             ? t("composer.admissionTimedOut")
             : t("common.serverUnavailable"),
         });
-        if (!(error instanceof ComposerAdmissionTimeoutError)) settleOutbox("failed", t("common.serverUnavailable"));
+        markOutboxUnknown();
         if (error instanceof ComposerAdmissionTimeoutError) {
           persistPendingDeliveries(pendingDeliveries.current.map((entry) =>
             entry.key === clientMessageId ? { ...entry, reconciling: true } : entry));

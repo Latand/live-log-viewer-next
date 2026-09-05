@@ -1886,3 +1886,20 @@ describe("authoritative receipt settlement", () => {
     expect(visibleOutbox([{ ...entry, ...patch }], echoes(), now + OUTBOX_DELIVERED_TTL_MS, null, now)).toHaveLength(1);
   });
 });
+
+
+test("authoritative success overrides contradictory retry guidance and keeps its original clock", () => {
+  const at = 1_800_000_000_000;
+  const entry: OutboxEntry = { id: "key", text: "message", images: 0, at, state: "delivering", deliveryUncertain: true };
+  const receipt = { at: new Date(at + 100).toISOString(), resend: "verify-first" as const };
+  const patch = outboxReceiptPatch(entry, "delivered", receipt, at + 1000)!;
+  expect(patch.state).toBe("delivered");
+  expect(patch.deliveryUncertain).toBeUndefined();
+  expect(patch.settledAt).toBe(at + 100);
+  expect(outboxReceiptPatch({ ...entry, ...patch }, "uncertain", receipt, at + 2000)).toBeNull();
+});
+
+test("an unchanged safe failure cannot undo the operator's explicit same-key retry", () => {
+  const receipt = { operationId: "operation-safe", idempotencyKey: "key", conversationId: "conversation", kind: "send" as const, status: "failed" as const, resend: "safe" as const, revision: 1, at: "2026-09-05T08:00:00.000Z" };
+  expect(outboxReceiptPatch({ state: "queued", deliveryReceipt: receipt }, "failed", receipt)).toBeNull();
+});

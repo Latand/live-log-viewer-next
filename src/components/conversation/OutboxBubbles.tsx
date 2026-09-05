@@ -58,6 +58,11 @@ function stateChip(
      follow — while a second statement elsewhere would put this message back on
      the card twice. A settled entry keeps its own word: a failure must stay a
      failure, with its retry. */
+  if (entry.deliveryUncertain) return {
+    label: t("orchPanel.errorUnknownTitle"),
+    icon: <TriangleAlert className="h-3 w-3 shrink-0" aria-hidden />,
+    className: "text-warning", wait: "uncertain",
+  };
   const held = switchHold && (entry.state === "delivering" || entry.state === "queued");
   if (held) {
     return {
@@ -159,7 +164,7 @@ export function OutboxBubblesView({
             {...(chip.wait ? { "data-outbox-wait": chip.wait } : {})}
             className="group/msg my-3 flex items-start justify-end gap-1.5"
           >
-            <div className="flex max-w-[75%] flex-col items-end gap-1">
+            <div className="flex min-w-0 max-w-[75%] flex-col items-end gap-1">
               <div className="w-full whitespace-pre-wrap break-words rounded-surface bg-user px-4 py-2.5 opacity-80">
                 {/* The same markdown grammar the transcript's own user bubble
                     uses, so nothing changes appearance when it replaces this
@@ -176,9 +181,9 @@ export function OutboxBubblesView({
                   </span>
                 ) : null}
               </div>
-              <div className={`flex items-center gap-1 text-caption font-semibold ${chip.className}`}>
+              <div className={`flex max-w-full items-center gap-1 text-caption font-semibold ${chip.className}`}>
                 {chip.icon}
-                <span data-outbox-status className="min-w-0 truncate">{chip.label}</span>
+                <span data-outbox-status title={entry.deliveryReceipt?.reason ?? undefined} className="min-w-0 whitespace-normal break-words">{chip.label}</span>
                 {/* A failed message that carried its payload can be retried in
                     place: the entry re-queues under its ORIGINAL idempotency key,
                     so the dispatcher replays it idempotently (round-1 P1#4).
@@ -186,7 +191,7 @@ export function OutboxBubblesView({
                     `retryOutbox` refuses anything but `failed`, and re-queueing
                     it locally would not touch the journaled send the server is
                     still holding (issue #1213). */}
-                {entry.state === "failed" && !entry.needsReattach ? (
+                {!entry.deliveryUncertain && entry.deliveryReceipt?.reason !== "delivery-discarded" && entry.state === "failed" && !entry.needsReattach ? (
                   <button
                     type="button"
                     data-outbox-retry={entry.id}
@@ -202,7 +207,7 @@ export function OutboxBubblesView({
                     back — cancelling a delivering send would be a lie, and
                     dropping the bubble would leave the server still holding a
                     message the operator believes is gone. */}
-                {entry.state === "queued" || entry.state === "failed" ? (
+                {!entry.deliveryUncertain && (entry.state === "queued" || entry.state === "failed") ? (
                   <button
                     type="button"
                     data-outbox-cancel={entry.id}
