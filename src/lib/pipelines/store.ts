@@ -7,7 +7,7 @@ import { canonicalProject } from "@/lib/projects/aliases";
 import { effortScale } from "@/lib/agent/efforts";
 import { normalizeClaudeLaunchModel } from "@/lib/agent/models";
 import { MAX_SCAFFOLD_LENGTH } from "@/lib/roles/store";
-import { initializeStateCollections, SqliteStateCollection, type StateCollectionSeed } from "@/lib/state/sqliteStateStore";
+import { initializeStateCollections, readStateCollectionsRows, SqliteStateCollection, type StateCollectionSeed } from "@/lib/state/sqliteStateStore";
 import type { BoardTask } from "@/lib/tasks/types";
 
 import { MAX_FAIL_EDGE_ROUNDS, MAX_PIPELINE_STAGES, MAX_STAGE_OUTPUTS } from "./limits";
@@ -40,11 +40,11 @@ function atomicWriteJson(filePath: string, value: unknown): void {
   fs.writeFileSync(temp, JSON.stringify(value, null, 2) + "\n", "utf8");
   fs.renameSync(temp, filePath);
 }
-function readJson(filePath: string): unknown | null {
+function readJson(filePath: string): unknown {
   try {
     return JSON.parse(fs.readFileSync(filePath, "utf8")) as unknown;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
     throw new PipelineStoreError(`could not read pipeline registry: ${filePath}`, { cause: error });
   }
 }
@@ -169,8 +169,24 @@ function isAttempt(value: unknown, index: number): boolean {
     isNullableString(attempt.output) &&
     isVerdict(attempt.verdict) &&
     isNullableString(attempt.error) &&
-    isVerdictRecovery(attempt.verdictRecovery)
+    isVerdictRecovery(attempt.verdictRecovery) &&
+    isUnresolvedTermination(attempt.unresolvedTermination)
   );
+}
+
+function isUnresolvedTermination(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return typeof record.error === "string"
+    && typeof record.recordedAt === "string"
+    && Array.isArray(record.survivors)
+    && record.survivors.every((survivor) => survivor !== null
+      && typeof survivor === "object"
+      && Number.isSafeInteger((survivor as { pid: unknown }).pid)
+      && isNullableString((survivor as { startIdentity: unknown }).startIdentity)
+      && ((survivor as { bootEpoch: unknown }).bootEpoch === undefined
+        || isNullableString((survivor as { bootEpoch: unknown }).bootEpoch)));
 }
 
 function isRun(value: unknown): value is Pipeline["runs"][number] {
@@ -494,9 +510,32 @@ export function loadPipelines(): Pipeline[] {
   return pipelineStore().snapshot();
 }
 
-function parsePipelinesFile(filename: string, lenient: boolean): Pipeline[] {
+/** Startup needs fresh, complete authority, including cold records. Read both
+    collections in one SQLite snapshot without projection caches or lenient
+    archive decoding. Before cutover, validate the legacy sources in memory;
+    this evidence read never migrates or rewrites an unreadable source. */
+export function loadPipelinesForStartup(): Pipeline[] {
+  const collections = readStateCollectionsRows(stateDatabaseFile(), ["pipelines", "pipelines_archive"]);
+  const active = collections.get("pipelines");
+  const archived = collections.get("pipelines_archive");
+  if ((active === null) !== (archived === null)) {
+    throw new PipelineStoreError("pipeline startup collections are incomplete");
+  }
+  const records = active === null && archived === null
+    ? [...parsePipelinesFile(pipelinesFile(), false, true), ...parsePipelinesFile(pipelinesArchiveFile(), false, true)]
+    : [...(active ?? []), ...(archived ?? [])];
+  if (!records.every(isPipeline)) throw new PipelineStoreError("pipeline registry contains malformed records");
+  if (new Set(records.map((record) => record.id)).size !== records.length) {
+    throw new PipelineStoreError("pipeline startup records have contradictory identities");
+  }
+  return records.map(reviveLoadedPipeline);
+}
+
+function parsePipelinesFile(filename: string, lenient: boolean, strictPresence = false): Pipeline[] {
   const raw = readJson(filename);
-  if (raw === null) return [];
+  // Ordinary legacy readers historically accept null as empty. Startup must
+  // distinguish that malformed content from positive missing-file evidence.
+  if (raw === undefined || (raw === null && !strictPresence)) return [];
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     if (lenient) return [];
     throw new PipelineStoreError("pipeline registry must be an object");
@@ -593,6 +632,9 @@ function reviveLoadedPipeline(pipeline: Pipeline): Pipeline {
             verdict: attempt.verdict ?? null,
             error: attempt.error ?? null,
             verdictRecovery: attempt.verdictRecovery ? { ...attempt.verdictRecovery } : undefined,
+            unresolvedTermination: attempt.unresolvedTermination
+              ? { ...attempt.unresolvedTermination, survivors: attempt.unresolvedTermination.survivors.map((survivor) => ({ ...survivor })) }
+              : undefined,
           }))
         : [],
     })),
@@ -742,6 +784,28 @@ export async function withPipelineControllerMutation<T>(
   }) => Promise<T> | T,
 ): Promise<T> {
   return pipelineStore().mutate(mutate, undefined, true);
+}
+
+/** Hold the existing cross-process mutation lease through startup admission.
+ * Unavailable state or authority permits only the caller's deferred path.
+ * Never reinterpret a failure inside admission as permission to run it again.
+ */
+export async function withPipelineStartupAdmission<T>(
+  admit: (available: boolean) => Promise<T>,
+): Promise<T> {
+  let entered = false;
+  try {
+    // Refuse malformed legacy archives before the ordinary store can migrate
+    // them leniently. Admission rereads under the lease before any effects.
+    loadPipelinesForStartup();
+    return await withPipelineMutation(() => {
+      entered = true;
+      return admit(true);
+    });
+  } catch (error) {
+    if (entered) throw error;
+    return admit(false);
+  }
 }
 
 export function savePipelines(pipelines: Pipeline[]): void {
