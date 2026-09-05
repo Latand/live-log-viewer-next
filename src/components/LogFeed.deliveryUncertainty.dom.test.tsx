@@ -934,10 +934,11 @@ test("safe recovery accepts the producer's linked retry projection and settles o
 test.each([
   { outcome: "delivered", local: false, text: undefined },
   { outcome: "discarded", local: false, text: "" },
+  { outcome: "delivered", local: false, text: undefined, churn: true },
   { outcome: "safe", local: false, text: undefined },
   { outcome: "safe", local: true, text: captured.text },
   { outcome: "safe", local: false, text: undefined, newerJournal: true },
-])("producer recovery persists across journal polling, switches and remount (%j)", async ({ outcome, local, text, newerJournal = false }) => {
+])("producer recovery persists across journal polling, switches and remount (%j)", async ({ outcome, local, text, newerJournal = false, churn = false }) => {
   const { createRuntimeBus, setRuntimeBusForTests } = await import("@/hooks/runtimeBus");
   const original = { ...captured, text };
   const listeners = new Map<string, (event: { data: string }) => void>();
@@ -963,11 +964,18 @@ test.each([
   expect(settlement.revision).toBe(1);
   expect(original.revision).toBe(4);
   const calls: string[] = [];
+  const newSends: string[] = [];
   globalThis.fetch = (async (input, init) => {
     if (String(input) === `/api/runtime/operations/${original.operationId}`) {
       calls.push(init?.method ?? "GET");
       if (calls.length > 1) throw new Error("Response lost after retry dispatch");
       return Response.json({ operationId: original.operationId, receipt: settlement });
+    }
+    if (churn && String(input) === "/api/runtime/send") {
+      const body = JSON.parse(String(init?.body));
+      newSends.push(body.idempotencyKey);
+      const operationId = `later-operation-${newSends.length}`;
+      return Response.json({ operationId, receipt: { ...settlement, operationId, idempotencyKey: body.idempotencyKey, text: body.text } });
     }
     if (init?.method === "POST" && ["/api/runtime/send", "/api/tmux"].includes(String(input))) calls.push(`unexpected:${String(input)}`);
     return new Response("{}", { status: 404 });
@@ -1003,6 +1011,18 @@ test.each([
     resetOutboxForTests();
     mounted = await renderInto(surface());
     assertSettled();
+    if (churn) {
+      for (let index = 0; index < 9; index++) {
+        const controls = composerControls(mounted.host);
+        await settle(() => controls.type(`Independent later submission ${index}`));
+        await settle(() => controls.submit());
+        await settle(() => {});
+      }
+      expect(newSends).toHaveLength(9);
+      expect(new Set(newSends).size).toBe(9);
+      expect(newSends).not.toContain(original.idempotencyKey);
+      expect(Boolean(mounted.host.querySelector(`[data-operation="${original.operationId}"] [data-receipt-uncertain-retry]`))).toBe(false);
+    }
     if (newerJournal) {
       (listeners.get("runtime") ?? source.onmessage)!({ data: JSON.stringify({ schemaVersion: 1, seq: 3, eventId: "newer-attempt-event",
         scope: { type: "operation", id: original.operationId }, revision: 5, kind: "receipt", payload: { ...original, revision: 5 } }) });

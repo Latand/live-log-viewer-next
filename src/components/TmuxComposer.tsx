@@ -1620,7 +1620,7 @@ export function TmuxComposerCore({
      is disabled or the session is legacy/unhosted). */
   const runtimeReceipts = runtimeDependencies.useRuntimeReceiptsForArtifact(file.path, cardId);
   const displayedRuntimeReceipts = mergeRuntimeReceipts(runtimeReceipts.filter((receipt) => receipt.conversationId === cardId), mergeRuntimeReceipts(
-    immediateRuntimeReceipts.filter((receipt) => receipt.conversationId === cardId),
+    [...immediateRuntimeReceipts.filter((receipt) => receipt.conversationId === cardId), ...readRecoveryReceipts(cardId)],
     outbox.flatMap((entry) => entry.deliveryReceipt?.conversationId === cardId
       && (entry.deliveryReceipt.idempotencyKey === entry.id || retryParentOperationId(entry.deliveryReceipt)) ? [entry.deliveryReceipt] : []),
   )).map((receipt) => {
