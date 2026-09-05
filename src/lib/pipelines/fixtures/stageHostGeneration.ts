@@ -18,8 +18,15 @@
  *            controlled child and recorded through the registry's claim
  *            writers, exactly as `adoptClaudeRegistryHosts` does. The filter,
  *            the demotion of skipped rows, the transcript refresh and the
- *            delivery-controller binding are the real ones. Stays alive
- *            afterwards, as the generation that now owns what it adopted.
+ *            delivery-controller binding are the real ones, and so is the
+ *            boot's retry loop (`runStructuredHostStartup`) around the pass.
+ *            Stays alive afterwards, as the generation that now owns what it
+ *            adopted. When the lane directory holds a `startup-reprobe`
+ *            marker, the deferred-evidence re-probe timer is live in this
+ *            generation and every later completed pass is reported as one
+ *            more JSON line; without the marker the timer is inert, so a
+ *            generation another case keeps alive re-hosts nothing behind
+ *            its back.
  *
  * Every controlled child is `sh -c 'exec sleep 300'`, detached, leading its
  * own process group. Nothing here is told apart by argv.
@@ -38,7 +45,9 @@ import { AgentRegistry, type AgentRegistryEntry, type ProcessIdentity } from "@/
 import { sessionKeyId } from "@/lib/agent/sessionKey";
 import { captureProcessIdentity } from "@/lib/processIdentity";
 import { createFakeDeliveryLedger, FakeEngineHost } from "@/lib/runtime/fixtures/fakeEngineHost";
-import { adoptStructuredHostsAtStartup } from "@/lib/runtime/startup";
+import { adoptStructuredHostsAtStartup, structuredStartupDeferral, structuredStartupHosts } from "@/lib/runtime/startup";
+import { structuredStartupAxis } from "@/lib/runtime/startupStatus";
+import { runStructuredHostStartup } from "@/lib/viewerInstrumentation";
 
 const [mode, registryPath, laneDirectory, hostShape = "single"] = process.argv.slice(2);
 if ((mode !== "spawn" && mode !== "adopt") || !registryPath || !laneDirectory || (hostShape !== "single" && hostShape !== "tree")) {
@@ -133,7 +142,10 @@ if (mode === "spawn") {
 } else {
   const adopted: Array<{ key: string; host: ProcessIdentity }> = [];
   const considered: string[] = [];
-  let deferred: string | null = null;
+  let passes = 0;
+  let failure: string | null = null;
+  let retryScheduledMs: number | null = null;
+  const reprobe = fs.existsSync(path.join(laneDirectory, "startup-reprobe"));
   const pauseAt = async (phase: string) => {
     const barrier = path.join(laneDirectory, `startup-pause-${phase}`);
     if (!fs.existsSync(barrier)) return;
@@ -144,7 +156,7 @@ if (mode === "spawn") {
     }
     throw new Error(`startup ${phase} barrier timed out`);
   };
-  const hosts = await adoptStructuredHostsAtStartup({
+  const dependencies: Parameters<typeof adoptStructuredHostsAtStartup>[0] = {
     registry,
     ...(fs.existsSync(path.join(laneDirectory, "startup-pause-refresh"))
       ? { refreshTranscriptState: async () => { await pauseAt("refresh"); return new Set<string>(); } }
@@ -152,6 +164,7 @@ if (mode === "spawn") {
     adopt: async () => [],
     /* The one substitution: the CLI launch. Selection is the product's. */
     adoptClaude: async (received, _optionsFor, _env, shouldAdopt = () => true) => {
+      passes += 1;
       await pauseAt("admission");
       const rows = Object.values(received.readOnlySnapshot().entries).filter((entry: AgentRegistryEntry) =>
         entry.key.engine === "claude" && entry.structuredHost?.kind === "claude-broker");
@@ -176,21 +189,41 @@ if (mode === "spawn") {
       }
       return result;
     },
-  }).catch((error: unknown) => {
-    if (!(error instanceof Error) || !error.message.startsWith("pipeline startup evidence is unresolved")) throw error;
-    deferred = error.message;
-    return [];
-  });
-  report({
-    deferred,
+    /* The deferred-evidence re-probe timer, live only where a case asks. */
+    schedule: (callback, delayMs) => reprobe ? setTimeout(callback, delayMs) : { unref() {} },
+  };
+  /* The boot's own retry loop, with its retry timer recorded instead of run:
+     a pass that fails here is reported as the boot the Viewer would see. */
+  await runStructuredHostStartup(
+    () => adoptStructuredHostsAtStartup(dependencies),
+    (...args: unknown[]) => {
+      const error = args.find((value): value is Error => value instanceof Error);
+      if (error) failure = error.message;
+    },
+    { schedule: (_callback, delayMs) => { retryScheduledMs = delayMs; return { unref() {} }; } },
+  );
+  const reportPass = () => report({
+    deferred: structuredStartupDeferral()?.message ?? failure,
     adopted,
     considered,
-    published: hosts.map((item) => sessionKeyId(item.key)),
+    passes,
+    startup: { axis: structuredStartupAxis(), retryScheduledMs },
+    published: structuredStartupHosts().map((item) => sessionKeyId(item.key)),
     entries: Object.fromEntries(Object.values(registry.readOnlySnapshot().entries).map((entry) => [
       sessionKeyId(entry.key),
       { status: entry.status, claimOwner: entry.claimOwner, process: entry.structuredHost?.process ?? null },
     ])),
   });
+  reportPass();
+  if (reprobe) {
+    /* Each completed pass publishes a fresh host list; one line per completion. */
+    let published = structuredStartupHosts();
+    setInterval(() => {
+      if (structuredStartupHosts() === published) return;
+      published = structuredStartupHosts();
+      reportPass();
+    }, 25);
+  }
 }
 
 /* Stay the generation that owns what it wrote, until the test ends it. */

@@ -189,10 +189,14 @@ type AdoptReport = {
   generation: ProcessIdentity;
   adopted: Array<{ key: string; host: ProcessIdentity }>;
   considered: string[];
+  passes: number;
+  startup: { axis: "ready" | "failed" | "pending" | null; retryScheduledMs: number | null };
   published: string[];
   entries: Record<string, { status: string; claimOwner: string | null; process: ProcessIdentity | null }>;
 };
-type Generation<Report> = Tracked & { report: Report };
+/** `report` is the first line the generation wrote; `reports` keeps every
+    line, so a generation that completes a later pass is read the same way. */
+type Generation<Report> = Tracked & { report: Report; reports: Report[] };
 
 async function generation<Report extends { generation: ProcessIdentity }>(
   mode: "spawn" | "adopt",
@@ -207,18 +211,25 @@ async function generation<Report extends { generation: ProcessIdentity }>(
   if (child.pid === undefined) throw new Error("generation did not start");
   const errors: string[] = [];
   child.stderr?.on("data", (chunk) => errors.push(String(chunk)));
+  const reports: Report[] = [];
   const report = await new Promise<Report>((resolve, reject) => {
     let buffered = "";
     child.stdout?.on("data", (chunk) => {
       buffered += String(chunk);
-      const line = buffered.split("\n").find((candidate) => candidate.trim().startsWith("{"));
-      if (line) resolve(JSON.parse(line) as Report);
+      const lines = buffered.split("\n");
+      buffered = lines.pop() ?? "";
+      for (const line of lines) {
+        if (!line.trim().startsWith("{")) continue;
+        const parsed = JSON.parse(line) as Report;
+        reports.push(parsed);
+        resolve(parsed);
+      }
     });
     child.once("exit", (code) => reject(new Error(`generation ${mode} exited with ${code} before reporting:\n${errors.join("")}`)));
   });
   const created = track(child.pid, report.generation);
   expect(report.generation.pid).toBe(child.pid);
-  return Object.assign(created, { report });
+  return Object.assign(created, { report, reports });
 }
 
 /* ---------- lane fixture ---------- */
@@ -1031,6 +1042,67 @@ test("startup defers a running attempt with an unverifiable survivor until posit
   const recovered = await successor(current);
   expect(recovered.report.deferred).toBeNull();
   expect(recovered.report.adopted).toHaveLength(1);
+  expect((await closeOverHttp(pipeline.id)).status).toBe(200);
+});
+
+
+test("a deferred lane completes the boot once: an unrelated pending launch is reconciled, the axis is ready, and the same generation admits the lane only after positive death (#1501)", async () => {
+  const current = await lane("tree");
+  const survivor = current.descendant!;
+  const pipeline = pipelineFor(current, { attemptState: "running" });
+  expect((await closeWithTermination(pipeline.id, {
+    signal: (pid, value) => {
+      if (pid === survivor.pid) throw Object.assign(new Error("refused"), { code: "EPERM" });
+      realKill.call(process, pid, value);
+    }, deadlineMs: 100, graceMs: 20,
+  })).status).toBe(409);
+  const record = pipelineRecord(pipeline.id);
+  record.runs[0]!.attempts[0]!.unresolvedTermination!.survivors[0]!.bootEpoch = null;
+  savePipelines(loadPipelines().map((item) => item.id === pipeline.id ? record : item));
+  await current.incumbent.end();
+  holdWork(current);
+  const before = current.entry()!;
+  /* Conversation B: a launch an earlier generation accepted and never carried
+     to a host — the receipt startup's pending-spawn recovery owes a verdict. */
+  const pending = current.registry.beginSpawnRequest({
+    engine: "claude", cwd: current.directory, transport: "structured", accountId: null,
+    launchProfile: { title: "unrelated pending launch" },
+  });
+  if (pending.kind !== "created") throw new Error("pending launch receipt was unavailable");
+  const receiptB = () => current.registry.readOnlySnapshot().receipts[pending.receipt.launchId]!;
+  expect(receiptB().state).toBe("starting");
+  fs.writeFileSync(path.join(current.directory, "startup-reprobe"), "live");
+
+  const booted = await successor(current);
+
+  /* One completed pass: the boot is ready and scheduled no retry; A is
+     deferred exactly as before; B's recovery ran in the same boot. */
+  expect(booted.report.deferred).toContain("pipeline startup evidence is unresolved");
+  expect(booted.report.startup).toEqual({ axis: "ready", retryScheduledMs: null });
+  expect(booted.report.passes).toBe(1);
+  expect(booted.report.adopted).toEqual([]);
+  expect(current.entry()).toEqual(before);
+  expect(receiptB().state).toBe("failed");
+  expect(receiptB().error).toContain("interrupted before runtime admission");
+  /* Past the boot retry loop's one-second ceiling: no second pass ran while
+     the survivor merely stayed alive, and the row is still untouched. */
+  await Bun.sleep(1_500);
+  expect(booted.reports).toHaveLength(1);
+  expect(booted.report.passes).toBe(1);
+  expect(current.entry()).toEqual(before);
+  expect(survivor.alive()).toBeTrue();
+
+  await survivor.end();
+  await settles(() => booted.reports.length >= 2, "deferred lane admission by the running generation", 2_000);
+  const admitted = booted.reports[1]!;
+  for (const adopted of admitted.adopted) track(adopted.host.pid, adopted.host);
+  expect(admitted.deferred).toBeNull();
+  expect(admitted.passes).toBe(2);
+  expect(admitted.adopted.map((item) => item.key)).toEqual([sessionKeyId(current.key)]);
+  expect(admitted.published).toEqual([sessionKeyId(current.key)]);
+  expect(current.entry()).toMatchObject({ status: "live", claimOwner: `structured-host:${JSON.stringify(booted.identity)}` });
+  expect(current.hostedBy()).toEqual(admitted.adopted[0]!.host);
+  expect(booted.alive()).toBeTrue();
   expect((await closeOverHttp(pipeline.id)).status).toBe(200);
 });
 

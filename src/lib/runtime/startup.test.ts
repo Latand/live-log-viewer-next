@@ -34,7 +34,7 @@ import {
 } from "./registry";
 import { deliverHeldStructuredMessage, enqueueStructuredMessage } from "./structuredMessageDelivery";
 import { didStructuredHostStartupFail, structuredStartupStatus } from "./startupStatus";
-import { adoptStructuredHostsAtStartup, structuredStartupHosts, type StructuredStartupDependencies } from "./startup";
+import { adoptStructuredHostsAtStartup, structuredStartupDeferral, structuredStartupHosts, type StructuredStartupDependencies } from "./startup";
 import { beginLegacySpawnFixture } from "@/lib/agent/registryTestFixtures";
 
 function runtimeClient(journal: RuntimeJournal): RuntimeHostClient {
@@ -4446,7 +4446,7 @@ test("startup settles a delivered pipeline retry and collapses its rebooted pred
 });
 
 
-test("deferred pipeline evidence preserves both engines while unrelated startup proceeds, then rereads (#1501)", async () => {
+test("deferred pipeline evidence completes the pass with both engines retained, reconciles pending spawns outside the fence, and re-probes only the evidence until it moves (#1501)", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-startup-pipeline-deferred-"));
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
   const blocked = ["claude", "codex"].map((engine, index) => addStructuredRestartConversation(registry, directory, {
@@ -4458,8 +4458,20 @@ test("deferred pipeline evidence preserves both engines while unrelated startup 
   });
   const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
   const client = runtimeJournalClient(journal);
-  let deferred = new Set(blocked.map((item) => item.conversation.id));
+  /* Two launches accepted before this boot and never carried to a host: one
+     reserved for a fenced pipeline conversation, one for nobody in particular. */
+  const receiptFor = (title: string) => {
+    const begun = registry.beginSpawnRequest({ engine: "claude", cwd: directory, transport: "structured", accountId: null, launchProfile: { title } });
+    if (begun.kind !== "created") throw new Error(`${title} receipt was unavailable`);
+    return begun.receipt.launchId;
+  };
+  const fencedLaunch = receiptFor("fenced pending launch");
+  const freeLaunch = receiptFor("unrelated pending launch");
+  const receiptState = (launchId: string) => registry.readOnlySnapshot().receipts[launchId]!.state;
+  const fencedConversationId = registry.readOnlySnapshot().receipts[fencedLaunch]!.conversationId;
+  let deferred = new Set([...blocked.map((item) => item.conversation.id), fencedConversationId]);
   const selected: string[] = [];
+  const scheduled: Array<{ callback: () => void; delayMs: number }> = [];
   const adopt: NonNullable<Parameters<typeof adoptStructuredHostsAtStartup>[0]>["adopt"] = async (received, _options, _env, filter = () => true) => {
     for (const entry of Object.values(received.readOnlySnapshot().entries)) {
       if (entry.structuredHost && filter(entry)) selected.push(entry.key.sessionId);
@@ -4470,19 +4482,69 @@ test("deferred pipeline evidence preserves both engines while unrelated startup 
     registry, client, refreshTranscriptState: async () => new Set<string>(),
     pipelineEvidence: () => ({ settled: new Set<string>(), deferred }),
     adopt, adoptClaude: adopt as never,
+    schedule: (callback: () => void, delayMs: number) => { scheduled.push({ callback, delayMs }); return { unref() {} }; },
   };
-  try {
-    await expect(adoptStructuredHostsAtStartup(dependencies)).rejects.toThrow("pipeline startup evidence is unresolved");
-    expect(new Set(selected)).toEqual(new Set([unrelated.conversation.generations.at(-1)!.id]));
+  const until = async (predicate: () => boolean, what: string) => {
+    for (let attempt = 0; attempt < 400; attempt += 1) {
+      if (predicate()) return;
+      await Bun.sleep(5);
+    }
+    throw new Error(`${what} did not settle`);
+  };
+  const retainedRows = () => {
     for (const item of blocked) {
       expect(registry.conversation(item.conversation.id)?.turn.state).toBe("busy");
       const generation = item.conversation.generations.at(-1)!;
       expect(registry.readOnlySnapshot().entries[`${item.conversation.engine}:${generation.id}`]!.status).toBe("live");
     }
+  };
+  try {
+    /* The pass completes: unrelated work proceeds, the fenced rows are
+       retained, and a fenced launch receipt holds the whole recovery back. */
+    await adoptStructuredHostsAtStartup(dependencies);
+    expect(new Set(selected)).toEqual(new Set([unrelated.conversation.generations.at(-1)!.id]));
+    retainedRows();
+    expect(structuredStartupDeferral()).toEqual({
+      hostKeys: blocked.map((item) => `${item.conversation.engine}:${item.conversation.generations.at(-1)!.id}`),
+      fencedReceipts: 1,
+      message: "pipeline startup evidence is unresolved; deferred 2 host(s) and 1 pending launch receipt(s)",
+      nextProbeMs: 1_000,
+    });
+    expect(receiptState(fencedLaunch)).toBe("starting");
+    expect(receiptState(freeLaunch)).toBe("starting");
+    expect(scheduled.map((item) => item.delayMs)).toEqual([1_000]);
+
+    /* Unchanged evidence: the probe backs off and no pass runs. */
+    selected.length = 0;
+    scheduled.shift()!.callback();
+    expect(selected).toEqual([]);
+    expect(scheduled.map((item) => item.delayMs)).toEqual([2_000]);
+    expect(structuredStartupDeferral()?.nextProbeMs).toBe(2_000);
+    retainedRows();
+
+    /* The fenced launch's pipeline is released while the survivors remain:
+       the evidence moved, so one pass runs, recovery settles both receipts,
+       the two rows stay retained and the cadence starts over for them. */
+    deferred = new Set(blocked.map((item) => item.conversation.id));
+    scheduled.shift()!.callback();
+    await until(() => structuredStartupDeferral()?.fencedReceipts === 0, "the re-probe pass");
+    expect(new Set(selected)).toEqual(new Set([unrelated.conversation.generations.at(-1)!.id]));
+    retainedRows();
+    expect(receiptState(fencedLaunch)).toBe("failed");
+    expect(receiptState(freeLaunch)).toBe("failed");
+    expect(structuredStartupDeferral()).toMatchObject({
+      message: "pipeline startup evidence is unresolved; deferred 2 host(s)",
+      nextProbeMs: 1_000,
+    });
+    expect(scheduled.map((item) => item.delayMs)).toEqual([1_000]);
+
+    /* Positive death: the pass admits every row and the probe ends. */
     deferred = new Set();
     selected.length = 0;
-    await adoptStructuredHostsAtStartup(dependencies);
+    scheduled.shift()!.callback();
+    await until(() => structuredStartupDeferral() === null, "the admitting pass");
     expect(new Set(selected).size).toBe(3);
+    expect(scheduled).toEqual([]);
   } finally {
     await bindStructuredDeliveryQueue([], { registry, client: null });
     journal.close();

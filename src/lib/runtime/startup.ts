@@ -5,7 +5,7 @@ import { accountManager } from "@/lib/accounts/manager";
 import { claudeSettingsPath } from "@/lib/accounts/claude";
 import { turnStateFromRecords } from "@/lib/accounts/migration/turnState";
 import { launchProfileEngineReadOnly, type ViewerConversationId } from "@/lib/accounts/migration/contracts";
-import { agentRegistry, type AgentRegistry, type AgentRegistryEntry, type ProcessIdentity, type RegistryFile } from "@/lib/agent/registry";
+import { agentRegistry, type AgentRegistry, type AgentRegistryEntry, type ProcessIdentity, type RegistryFile, type SpawnReceipt } from "@/lib/agent/registry";
 import { effectiveClaudePermissionMode } from "@/lib/agent/cli";
 import { sessionKeyId, type SessionKey } from "@/lib/agent/sessionKey";
 import { activeOrchestratorSeats, type OrchestratorSeat } from "@/lib/orchestrator/seats";
@@ -44,6 +44,34 @@ let retryAdoptedHosts: AdoptedStructuredHost[] = [];
 /* The startup retry loop re-enters every second at its ceiling, and a Viewer
    with no runtime socket defers on every pass; one line per boot says it. */
 let deferredAdoptionLogged = false;
+
+/** Rows a completed pass left exactly as they were because their pipeline's
+    evidence (an alive or unverifiable survivor, an unreadable record) does not
+    yet admit a replacement. The pass itself is complete: the boot is ready,
+    every unrelated host is published and pending-spawn recovery has run. What
+    remains is a re-probe of this evidence alone, on a bounded backoff, and the
+    adoption pass runs again only when that evidence has changed. */
+interface DeferredStructuredStartup {
+  hostKeys: readonly string[];
+  conversationIds: ReadonlySet<string>;
+  fencedReceipts: number;
+  message: string;
+  delayMs: number;
+}
+const DEFERRED_STARTUP_REPROBE_INITIAL_MS = 1_000;
+const DEFERRED_STARTUP_REPROBE_MAX_MS = 30_000;
+let deferredStartup: DeferredStructuredStartup | null = null;
+
+export function structuredStartupDeferral(): {
+  hostKeys: readonly string[];
+  fencedReceipts: number;
+  message: string;
+  nextProbeMs: number;
+} | null {
+  if (!deferredStartup) return null;
+  const { hostKeys, fencedReceipts, message, delayMs } = deferredStartup;
+  return { hostKeys, fencedReceipts, message, nextProbeMs: delayMs };
+}
 
 function retainAdoptedHosts(
   retained: readonly AdoptedStructuredHost[],
@@ -771,6 +799,9 @@ export interface StructuredStartupDependencies {
   /** Settled stages and conversations deferred by unavailable pipeline state
       or unresolved survivors. Defaults to reading active and archived records. */
   pipelineEvidence?: (registry: AgentRegistry) => PipelineStartupEvidence;
+  /** Timer behind the deferred-evidence re-probe. Defaults to an unref'd
+      setTimeout, so the re-probe never holds a Viewer that is shutting down. */
+  schedule?: (callback: () => void, delayMs: number) => { unref?(): void };
   orchestratorSeats?: typeof activeOrchestratorSeats;
   /** Reconciles transcript state, answering which conversations it could not
       read. A stub that answers nothing reports nothing unreadable. */
@@ -1078,17 +1109,124 @@ export async function adoptStructuredHostsAtStartup(
       );
       await kickStructuredDeliveryQueue();
     }
-    if (deferredHostKeys.size > 0) {
+    /* A pending launch receipt reserved for a fenced pipeline conversation is
+       provisioning for that pipeline: replaying it would seat a writer beside
+       the survivor, and settling it would move the attempt's evidence. Recovery
+       is the one place that does either, so while such a receipt exists the
+       whole of it waits for the re-probe; without one it runs now, so an
+       unrelated lane's queued or superseded launch is reconciled by this boot
+       whatever another pipeline's survivor is doing. */
+    const fencedReceipts = fencedPendingSpawnReceipts(registry, pipelineEvidence.deferred);
+    if (client && fencedReceipts.length === 0) await recoverPendingStructuredSpawns(registry, client);
+    adoptedHosts = nextAdoptedHosts;
+    if (deferredHostKeys.size > 0 || fencedReceipts.length > 0) {
+      /* The rows are retained exactly as a retry would retain them: the next
+         pass continues through the hosts this one published. The pass itself
+         completes — throwing here made the boot's retry loop rerun the whole
+         adoption every second for as long as one stray process lived, kept the
+         startup axis failed and never reached pending-spawn recovery. */
       retryAdoptedHosts = nextAdoptedHosts;
       retryOrchestratorRecoveries = [...orchestratorRecoveries];
-      throw new Error(`pipeline startup evidence is unresolved; deferred ${deferredHostKeys.size} host(s)`);
+      rememberDeferredStructuredStartup(dependencies, registry, [...deferredHostKeys], pipelineEvidence.deferred, fencedReceipts.length);
+      return adoptedHosts;
     }
-    if (client) await recoverPendingStructuredSpawns(registry, client);
-    adoptedHosts = nextAdoptedHosts;
     retryAdoptedHosts = [];
     retryOrchestratorRecoveries = [];
+    if (deferredStartup) {
+      console.error("[structured hosts] deferred pipeline rows admitted", { hosts: deferredStartup.hostKeys });
+      deferredStartup = null;
+    }
     return adoptedHosts;
   });
+}
+
+/** Launch receipts still on their way to a host whose reserved conversation
+    the pipeline evidence fences. Settled, failed and conflicted receipts are
+    history; everything else is provisioning the fence covers. */
+function fencedPendingSpawnReceipts(registry: AgentRegistry, deferred: ReadonlySet<string>): SpawnReceipt[] {
+  if (deferred.size === 0) return [];
+  return Object.values(registry.readOnlySnapshot().receipts).filter((receipt) =>
+    receipt.state !== "completed"
+    && receipt.state !== "failed"
+    && receipt.state !== "conflicted"
+    && deferred.has(registry.canonicalConversationId(receipt.conversationId)));
+}
+
+function rememberDeferredStructuredStartup(
+  dependencies: StructuredStartupDependencies,
+  registry: AgentRegistry,
+  hostKeys: readonly string[],
+  conversationIds: ReadonlySet<string>,
+  fencedReceipts: number,
+): void {
+  const message = `pipeline startup evidence is unresolved; deferred ${hostKeys.length} host(s)`
+    + (fencedReceipts > 0 ? ` and ${fencedReceipts} pending launch receipt(s)` : "");
+  const previous = deferredStartup;
+  /* Unchanged evidence keeps growing the backoff; evidence that moved (a row
+     admitted, another fenced) starts the cadence over for what is left. */
+  const sameEvidence = previous !== null
+    && previous.conversationIds.size === conversationIds.size
+    && [...conversationIds].every((id) => previous.conversationIds.has(id))
+    && previous.fencedReceipts === fencedReceipts;
+  const delayMs = sameEvidence
+    ? Math.min(previous.delayMs * 2, DEFERRED_STARTUP_REPROBE_MAX_MS)
+    : DEFERRED_STARTUP_REPROBE_INITIAL_MS;
+  const state: DeferredStructuredStartup = {
+    hostKeys, conversationIds: new Set(conversationIds), fencedReceipts, message, delayMs,
+  };
+  deferredStartup = state;
+  if (!sameEvidence) console.error(`[structured hosts] ${message}; re-probing the evidence`, { hosts: hostKeys, nextProbeMs: delayMs });
+  scheduleDeferredStartupReprobe(dependencies, registry, state);
+}
+
+function scheduleDeferredStartupReprobe(
+  dependencies: StructuredStartupDependencies,
+  registry: AgentRegistry,
+  state: DeferredStructuredStartup,
+): void {
+  const schedule = dependencies.schedule ?? ((callback, delayMs) => setTimeout(callback, delayMs));
+  schedule(() => {
+    /* A later pass replaced this deferral; its own timer carries it. */
+    if (deferredStartup !== state) return;
+    void reprobeDeferredStructuredStartup(dependencies, registry, state);
+  }, state.delayMs).unref?.();
+}
+
+/** The re-probe reads the pipeline evidence alone — the survivor identities
+    and the record — and reruns the adoption pass only when that evidence no
+    longer fences everything it fenced before. Nothing else about the boot is
+    repeated while a stray process merely stays alive. */
+async function reprobeDeferredStructuredStartup(
+  dependencies: StructuredStartupDependencies,
+  registry: AgentRegistry,
+  state: DeferredStructuredStartup,
+): Promise<void> {
+  let unchanged = true;
+  try {
+    const evidence = (dependencies.pipelineEvidence ?? pipelineStartupEvidence)(registry);
+    unchanged = [...state.conversationIds].every((id) => evidence.deferred.has(id))
+      && fencedPendingSpawnReceipts(registry, evidence.deferred).length >= state.fencedReceipts;
+  } catch (error) {
+    console.error("[structured hosts] deferred pipeline evidence probe failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+  if (unchanged) {
+    state.delayMs = Math.min(state.delayMs * 2, DEFERRED_STARTUP_REPROBE_MAX_MS);
+    scheduleDeferredStartupReprobe(dependencies, registry, state);
+    return;
+  }
+  try {
+    await adoptStructuredHostsAtStartup(dependencies);
+  } catch (error) {
+    console.error("[structured hosts] deferred pipeline adoption pass failed; re-probing", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    if (deferredStartup === state) {
+      state.delayMs = Math.min(state.delayMs * 2, DEFERRED_STARTUP_REPROBE_MAX_MS);
+      scheduleDeferredStartupReprobe(dependencies, registry, state);
+    }
+  }
 }
 
 export function structuredStartupHosts(): readonly AdoptedStructuredHost[] {

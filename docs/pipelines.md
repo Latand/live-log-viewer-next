@@ -121,12 +121,18 @@ acknowledgement cannot clear that evidence.
 Startup defers pipeline conversations when their pipeline records cannot be read
 or an earlier termination has unresolved survivors. Pending work does not bypass
 this fence. Deferred rows retain their recovery evidence and are excluded from
-launch and skipped-host demotion. Startup retries the read and process probes;
-a replacement becomes eligible only after the evidence permits it under the
-existing adoption rules. Startup reads this evidence after transcript refresh and
-holds the existing pipeline mutation lease through adoption, demotion and
-publication. A concurrent close either publishes its survivors before that read,
-or waits and checks the host that startup publishes.
+launch and skipped-host demotion. The startup pass still completes: the boot
+reads ready, every unrelated host is published, and pending-spawn recovery runs
+in the same pass unless a pending launch receipt is reserved for a fenced
+pipeline conversation, in which case the whole recovery waits with the rows.
+What startup repeats is the evidence read alone (the pipeline record and the
+survivor process probes), on a backoff from one second to thirty; the adoption
+pass runs again only when that evidence has moved, and a replacement becomes
+eligible only after the evidence permits it under the existing adoption rules.
+Startup reads this evidence after transcript refresh and holds the existing
+pipeline mutation lease through adoption, demotion and publication. A concurrent
+close either publishes its survivors before that read, or waits and checks the
+host that startup publishes.
 
 Retry, skip and subsequent pipeline ticks also check survivors on every retained
 attempt, including older generations, before resetting a worktree, advancing or
