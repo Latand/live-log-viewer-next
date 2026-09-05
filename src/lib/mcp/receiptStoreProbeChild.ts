@@ -79,6 +79,9 @@ interface HttpHostControl {
   /** Replace an actual handler answer after its effects with a proxy error. */
   lostStatus?: number;
   lostJson?: boolean;
+  /** Lose the held response after a concurrent recovery has completed. */
+  lateUnreadableStatus?: number;
+  settleWriter?: boolean;
   /** Replace the admitted handler's response with incomplete or contradictory JSON. */
   replacedAnswer?: Record<string, unknown>;
 }
@@ -200,6 +203,13 @@ async function runHttpHost(configPath: string): Promise<void> {
         conversationId: input.receipt.conversationId,
         clientAttemptId: input.receipt.clientAttemptId,
       });
+      if (control().settleWriter) {
+        agentRegistry().completeSpawn(input.receipt.launchId, {
+          key: { engine: "codex", sessionId: input.receipt.launchId },
+          artifactPath: transcriptPath, cwd: config.transcriptRoot, accountId: null,
+          status: "idle", host: null, claimEpoch: 0, claimOwner: null, pendingAction: null,
+        });
+      }
       return spawnResponseForReceipt(input.receipt as never, transcriptPath, { structured: true });
     },
   };
@@ -238,6 +248,7 @@ async function runHttpHost(configPath: string): Promise<void> {
         marker("accepted");
         if (current.mode === "lose") return new Promise<Response>(() => {});
         await awaitFile(path.join(config.markerDir, "release"));
+        if (current.lateUnreadableStatus) return new Response("response lost", { status: current.lateUnreadableStatus });
         if (current.lateVerdict) {
           let admitted: Record<string, unknown> = {};
           try {

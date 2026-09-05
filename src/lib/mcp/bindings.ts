@@ -1048,14 +1048,12 @@ async function spawnAgent(args: McpToolArgs, control: ViewerControlDependencies,
 
 /**
  * The exact client message key a send hands the conversation-host route
- * (#1490). The route keeps the first 128 characters of what it is given, so a
- * longer clientRequestId is bounded HERE, deterministically, rather than
- * truncated there where two long keys with one prefix would collide.
+ * (#1490). The route keeps the first 128 characters of what it is given, so
+ * every clientRequestId is hashed into a bounded key. No raw input shares
+ * the generated namespace. Recovery always uses the already persisted key.
  */
 export function sendDownstreamKey(clientRequestId: string): string {
-  return clientRequestId.length <= 128
-    ? clientRequestId
-    : `mcp_send_${crypto.createHash("sha256").update(clientRequestId).digest("hex").slice(0, 32)}`;
+  return `mcp_send_${crypto.createHash("sha256").update(clientRequestId).digest("hex")}`;
 }
 
 async function sendMessage(
@@ -3894,7 +3892,7 @@ function bindSpawn(args: McpToolArgs, dependencies: ViewerMcpDomainDependencies)
   return {
     caller: recoveryCaller(dependencies),
     target: { project: spawnTargetProject(args, cwd), identity: cwd },
-    downstreamKey: spawnAttemptId(requestId(args)),
+    downstreamKey: `mcp_spawn_${crypto.createHash("sha256").update(requestId(args)).digest("hex")}`,
   };
 }
 
@@ -3904,6 +3902,7 @@ async function recoverSend(
   binding: McpRequestBinding,
   legacy: boolean,
   dependencies: ViewerMcpDomainDependencies,
+  args?: McpToolArgs,
 ): Promise<McpRecoveryEvidence> {
   /* A send carries no durable sender identity of its own, so a claim made
      before bindings existed has no evidence that establishes its owner. */
@@ -3914,13 +3913,16 @@ async function recoverSend(
     return { outcome: "unknown", evidence: "none", reason: "the bound target names no conversation", ids: {} };
   }
   const ports: SendSettlementPorts = dependencies.sendSettlementPorts?.() ?? {};
-  const found = await resolveOriginalSend({ conversationId: binding.target.identity, clientMessageId: binding.downstreamKey }, ports);
+  const found = await resolveOriginalSend({ conversationId: binding.target.identity, clientMessageId: binding.downstreamKey, ...(typeof args?.text === "string" ? { text: args.text } : {}) }, ports);
   if (found.kind === "unreadable") {
     return { outcome: "unknown", evidence: "delivery-record", reason: `the delivery record could not be read: ${found.reason}`, ids: {} };
   }
   if (found.kind === "absent") return { outcome: "unknown", evidence: "none", reason: RECOVERY_ABSENT_REASON, ids: {} };
   if (found.kind === "unresolved") {
     return { outcome: "unknown", evidence: "none", reason: "the bound target names no conversation the registry knows, so no delivery record can be matched to it", ids: {} };
+  }
+  if (found.kind === "contradictory") {
+    return { outcome: "unknown", evidence: "delivery-record", reason: "the delivery payload contradicts the bound request", ids: {}, ownership: "unknown" };
   }
   if (found.kind === "ambiguous") {
     return { outcome: "unknown", evidence: "delivery-record", reason: "more than one delivery operation claims this key; the match is ambiguous", ids: {} };
@@ -3961,6 +3963,7 @@ async function recoverSpawn(
   binding: McpRequestBinding,
   legacy: boolean,
   dependencies: ViewerMcpDomainDependencies,
+  args?: McpToolArgs,
 ): Promise<McpRecoveryEvidence> {
   let snapshot: RegistrySnapshot;
   try {
@@ -3968,7 +3971,8 @@ async function recoverSpawn(
   } catch (error) {
     return { outcome: "unknown", evidence: "spawn-receipt", reason: `the launch record could not be read: ${error instanceof Error ? error.message : String(error)}`, ids: {} };
   }
-  const receipts = Object.values(snapshot.receipts).filter((receipt) => receipt.clientAttemptId === binding.downstreamKey);
+  const key = legacy ? spawnAttemptId(binding.clientRequestId) : binding.downstreamKey;
+  const receipts = Object.values(snapshot.receipts).filter((receipt) => receipt.clientAttemptId === key);
   if (receipts.length === 0) {
     return { outcome: "unknown", evidence: "none", reason: RECOVERY_ABSENT_REASON, ids: {}, ...(legacy ? { ownership: "unknown" as const } : {}) };
   }
@@ -3981,6 +3985,11 @@ async function recoverSpawn(
     : undefined;
   if (legacy && ownership !== "established") {
     return { outcome: "unknown", evidence: "legacy-receipt-unbound", reason: "no durable evidence establishes the owner of this launch", ids: {}, ownership: "unknown" };
+  }
+  if ((receipt.parentConversationId !== null && receipt.parentConversationId !== binding.caller.conversationId)
+    || (binding.target.identity && path.resolve(receipt.cwd) !== binding.target.identity)
+    || (typeof args?.prompt === "string" && receipt.launchDisplay && receipt.launchDisplay.prompt !== args.prompt)) {
+    return { outcome: "unknown", evidence: "spawn-receipt", reason: "the durable launch owner or payload contradicts the bound request", ids: {}, ownership: "unknown" };
   }
   const ids: Record<string, string> = {
     launchId: receipt.launchId,
@@ -4025,11 +4034,11 @@ export function viewerMcpRecoverableTools(
   return {
     spawn_agent: {
       bind: (args) => bindSpawn(args, domainDependencies),
-      recover: (binding, options) => recoverSpawn(binding, options.legacy, domainDependencies),
+      recover: (binding, options) => recoverSpawn(binding, options.legacy, domainDependencies, options.args),
     },
     send_message: {
       bind: (args) => bindSend(args, domainDependencies),
-      recover: (binding, options) => recoverSend(binding, options.legacy, domainDependencies),
+      recover: (binding, options) => recoverSend(binding, options.legacy, domainDependencies, options.args),
     },
   };
 }

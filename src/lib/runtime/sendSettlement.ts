@@ -9,6 +9,7 @@ import {
 import { sessionKeyId } from "@/lib/agent/sessionKey";
 import type { HeldDelivery, ViewerConversationId } from "@/lib/accounts/migration/contracts";
 
+import { structuredContentDigest } from "./structuredContent";
 import { runtimeHostClient, type RuntimeHostClient } from "./client";
 import {
   RUNTIME_DELIVERY_DISCARDED_REASON,
@@ -668,13 +669,16 @@ export interface OriginalSendBinding {
   conversationId: string;
   /** The exact `clientMessageId` the send route was handed. */
   clientMessageId: string;
+  /** Original text, when the caller has already verified its argument digest. */
+  text?: string;
 }
 
 export type OriginalSendLookup =
   | { kind: "found"; operationId: string; deliveryId: string | null; receipt: SendReceipt; reservationState: HeldDelivery["state"] | null }
   | { kind: "absent" }
   | { kind: "ambiguous"; operationIds: string[] }
-  | { kind: "unresolved" };
+  | { kind: "unresolved" }
+  | { kind: "contradictory" };
 
 export function lookupOriginalSend(file: RegistryFile, binding: OriginalSendBinding): OriginalSendLookup {
   const lookup = readOnlyConversationLookupFromSnapshot(file);
@@ -702,9 +706,20 @@ export function lookupOriginalSend(file: RegistryFile, binding: OriginalSendBind
   if (operations.size === 0) return { kind: "absent" };
   if (operations.size > 1) return { kind: "ambiguous", operationIds: [...operations.keys()].sort() };
   const [[operationId, deliveryId]] = [...operations.entries()];
+  const reservation = deliveryId ? file.heldDeliveries[deliveryId] : undefined;
+  const owner = file.deliveryOperationOwners[operationId];
+  if ((owner && (!matches(owner.conversationId) || owner.clientMessageId !== binding.clientMessageId
+      || owner.deliveryId !== deliveryId || owner.retryOfOperationId))
+    || (reservation && (!matches(reservation.conversationId) || reservation.clientMessageId !== binding.clientMessageId
+      || reservation.command.operationId !== operationId))) return { kind: "contradictory" };
   const receipt = sendReceiptFor(file, operationId);
   if (!receipt) return { kind: "absent" };
-  const reservation = deliveryId ? file.heldDeliveries[deliveryId] : undefined;
+  if (binding.text !== undefined) {
+    const expected = structuredContentDigest({ text: binding.text, images: [] });
+    if ((reservation?.text && reservation.text !== binding.text)
+      || (reservation?.contentDigest && reservation.contentDigest !== expected)
+      || (owner?.contentDigest && owner.contentDigest !== expected)) return { kind: "contradictory" };
+  }
   return { kind: "found", operationId, deliveryId: reservation ? deliveryId : null, receipt, reservationState: reservation?.state ?? null };
 }
 
@@ -713,7 +728,8 @@ export type OriginalSendEvidence =
   | { kind: "absent" }
   | { kind: "ambiguous"; operationIds: string[] }
   | { kind: "unresolved" }
-  | { kind: "unreadable"; reason: string };
+  | { kind: "unreadable"; reason: string }
+  | { kind: "contradictory" };
 
 /**
  * The CURRENT answer for one found operation, projected without writing.

@@ -1860,7 +1860,7 @@ export interface McpRecoverableTool {
   bind(args: McpToolArgs): McpRequestBindingInput | Promise<McpRequestBindingInput>;
   /** Read-only: what the downstream durable records say about this binding.
       Must never dispatch, enqueue, retry, withdraw or spawn. */
-  recover(binding: McpRequestBinding, options: { legacy: boolean; context?: McpToolCallContext }): Promise<McpRecoveryEvidence>;
+  recover(binding: McpRequestBinding, options: { legacy: boolean; context?: McpToolCallContext; args?: McpToolArgs }): Promise<McpRecoveryEvidence>;
 }
 
 /**
@@ -2107,12 +2107,22 @@ export function createMcpToolService(
         /* Downstream evidence that has failed to be read is unknown too, with
            the cause on the answer, and never a thrown error. */
         const readEvidence = (bound: McpRequestBinding, legacy: boolean): Promise<McpRecoveryEvidence> =>
-          tool.recover(bound, { legacy, context }).catch((cause: unknown): McpRecoveryEvidence => ({
+          tool.recover(bound, { legacy, context, args: digestArgs }).catch((cause: unknown): McpRecoveryEvidence => ({
             outcome: "unknown",
             evidence: "none",
             reason: cause instanceof Error ? cause.message : String(cause),
             ids: {},
           }));
+        const terminalResult = (result: McpToolResult | null | undefined): result is McpToolResult => Boolean(result && (result.ok
+          ? result.outcome === "settled" || result.settled === true
+            || (typedTool === "spawn_agent" && result.state === "settled")
+          : result.details?.outcome === "settled"));
+        const readableStoredResult = async (): Promise<McpToolResult | null> => {
+          const current = await store.lookup(key);
+          if (!current?.result || current.digest !== digest || !current.binding
+            || !sameCaller(current.binding.caller, binding.caller)) return null;
+          return current.result;
+        };
         /* Terminal downstream evidence becomes the row's answer, written
            conditionally: the first terminal answer wins, so a dispatch error
            that arrives after the work was proven delivered — or a late
@@ -2124,14 +2134,42 @@ export function createMcpToolService(
           replayed: boolean,
           original?: McpToolResult | null,
         ): Promise<McpToolResult> => {
-          const answer = recoveryAnswer(typedTool, requestId, evidence, replayed, original);
-          if (evidence.outcome !== "settled" || original) return answer;
+          // Read again after the evidence lookup: another process may have
+          // settled the operation while this read was pending or unavailable.
+          let current: McpReceiptRecord | null;
+          try {
+            current = await store.lookup(key);
+          } catch (cause) {
+            return unreadableReceipt(cause, replayed);
+          }
+          if (current?.binding && !sameCaller(current.binding.caller, binding.caller)) return notPermitted();
+          if (current && current.digest !== digest) return notPermitted();
+          // Contradictory ownership never licenses disclosure of cached IDs.
+          if (evidence.ownership === "unknown") return recoveryAnswer(typedTool, requestId, evidence, replayed);
+          const previous = current?.result ?? original;
+          if (terminalResult(previous)) return {
+            ...previous,
+            ...(recoveryOnly && previous.ok ? {
+              recovered: true, outcome: "settled", evidence: "mcp-receipt", nextAction: "follow-disposition",
+              ...(!previous.recovered ? {
+                original: previous,
+                state: typedTool === "send_message" ? "delivered" : "completed",
+                ...(typedTool === "send_message" ? { resend: "not-needed", duplicateRisk: false } : {}),
+              } : {}),
+            } : {}),
+            replayed: true,
+          };
+          const answer = recoveryAnswer(typedTool, requestId, evidence, replayed, previous);
+          if (evidence.outcome !== "settled" || previous) return answer;
           let stored: McpToolResult;
           try {
             stored = await store.settle(key, digest, answer, "settled");
           } catch {
-            /* The row would not take it; the evidence still stands as the
-               answer, and the next lookup reads the same evidence again. */
+            // A failed write can race a successful terminal recovery.
+            try {
+              const current = await readableStoredResult();
+              if (terminalResult(current)) return { ...current, replayed: true };
+            } catch { /* The independently read evidence remains available. */ }
             return answer;
           }
           return stored === answer ? answer : { ...stored, replayed: true };
@@ -2143,7 +2181,7 @@ export function createMcpToolService(
                to come from the downstream record itself or not at all. The
                row stays intact either way; what it holds is disclosed only to
                a caller the durable evidence names as its owner. */
-            const evidence = await tool.recover(binding, { legacy: true, context });
+            const evidence = await tool.recover(binding, { legacy: true, context, args: digestArgs });
             if (evidence.ownership !== "established") {
               outcome = "failure";
               return recoveryAnswer(typedTool, requestId, {
@@ -2327,19 +2365,10 @@ export function createMcpToolService(
           );
           if (!proven) {
             outcome = context.signal?.aborted ? "cancelled" : "failure";
-            // A concurrent recovery may already have established termination.
-            // Preserve that result even if the downstream read is now unavailable.
-            let current: McpReceiptRecord | null;
-            try {
-              current = await store.lookup(key);
-            } catch (cause) {
-              return unreadableReceipt(cause, false);
-            }
-            if (current?.result) return { ...current.result, replayed: true };
             const message = error instanceof Error ? error.message : String(error);
             const evidence = await readEvidence(binding, false);
             const uncertain: McpRecoveryEvidence = evidence.outcome === "unknown"
-              ? { ...evidence, reason: `${message}; ${evidence.reason ?? "no durable evidence of the request was found yet"}`, ids: { ...stringIds(refusal), ...evidence.ids } }
+              ? { ...evidence, reason: `${message}; ${evidence.reason ?? "no durable evidence of the request was found yet"}`, ids: evidence.ownership === "unknown" ? {} : { ...stringIds(refusal), ...evidence.ids } }
               : evidence;
             return answerFromEvidence(uncertain, false);
           }
@@ -2374,6 +2403,10 @@ export function createMcpToolService(
              `dispatching`, and every later call under the key reads the
              downstream evidence, which is what this answer was made from. */
           phaseDurations.completion = performance.now() - completionStartedAt;
+          try {
+            const current = await readableStoredResult();
+            if (terminalResult(current)) return { ...current, replayed: true };
+          } catch { /* The original response remains independently available. */ }
           return settled;
         }
         phaseDurations.completion = performance.now() - completionStartedAt;

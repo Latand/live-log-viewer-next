@@ -550,7 +550,7 @@ test("runtime-bound MCP tools use the live Viewer control surface", async () => 
   ]);
   expect(requests[0]?.body.clientAttemptId).toBe("spawn-http-control");
   expect(requests[0]?.body.mcpServers).toEqual(["viewer", "agent-browser"]);
-  expect(requests[1]?.body.clientMessageId).toBe("send-http-control");
+  expect(requests[1]?.body.clientMessageId).toBe(sendDownstreamKey("send-http-control"));
   expect(requests[1]?.body.text).toBe(exactMessage);
   expect(requests[1]?.headers?.[VIEWER_SPAWN_CAPABILITY_HEADER]).toBe("c".repeat(43));
   expect(requests[2]?.body.idempotencyKey).toBe("deploy-http-control");
@@ -2838,7 +2838,8 @@ test("send and spawn bindings dispatch through the single-attempt seam with the 
   expect(sendDownstreamKey(longKey).length).toBeLessThanOrEqual(128);
   expect(sendDownstreamKey(longKey)).toBe(sendDownstreamKey(longKey));
   expect(sendDownstreamKey(longKey)).not.toBe(sendDownstreamKey(`${longKey}x`));
-  expect(sendDownstreamKey("short-key")).toBe("short-key");
+  expect(sendDownstreamKey("short-key")).not.toBe("short-key");
+  expect(sendDownstreamKey(sendDownstreamKey(longKey))).not.toBe(sendDownstreamKey(longKey));
 });
 
 test("bind resolves caller and target server-side, never from the arguments", async () => {
@@ -2892,12 +2893,12 @@ test("bind resolves caller and target server-side, never from the arguments", as
   expect(send).toMatchObject({
     caller: { kind: "worker", conversationId: callerA.id, project: projectA },
     target: { identity: recipient.id },
-    downstreamKey: "bind-request-1",
+    downstreamKey: sendDownstreamKey("bind-request-1"),
   });
   expect(await tools.send_message!.bind({ clientRequestId: "unindexed", transcriptPath: path.join(sandbox, "late.jsonl"), text: "hi" }))
     .toMatchObject({ target: { identity: path.join(sandbox, "late.jsonl") } });
   const spawn = await tools.spawn_agent!.bind({ clientRequestId: "bind-request-1", cwd: sandbox, "prompt": "go", title: "Bind launch", ...forged });
-  expect(spawn).toMatchObject({ caller: { kind: "worker", conversationId: callerA.id, project: projectA }, target: { identity: sandbox }, downstreamKey: "bind-request-1" });
+  expect(spawn).toMatchObject({ caller: { kind: "worker", conversationId: callerA.id, project: projectA }, target: { identity: sandbox }, downstreamKey: expect.stringMatching(/^mcp_spawn_[0-9a-f]{64}$/) });
   expect(typeof spawn.target.project).toBe("string");
   /* The target project is the launch directory's and nothing the arguments
      say: a supplied `project` may only repeat it. A contradiction — another
@@ -2917,7 +2918,7 @@ test("bind resolves caller and target server-side, never from the arguments", as
     expect((error as McpToolRefusal).details).toMatchObject({ code: "invalid_request", status: 400, canonicalProject: canonical });
   }
   expect(await tools.spawn_agent!.bind({ clientRequestId: "x".repeat(200), cwd: sandbox, "prompt": "go", title: "Bind launch" }))
-    .toMatchObject({ downstreamKey: expect.stringMatching(/^mcp_[0-9a-f]{24}$/) });
+    .toMatchObject({ downstreamKey: expect.stringMatching(/^mcp_spawn_[0-9a-f]{64}$/) });
   /* Another authenticated conversation binds to ITS project: a replay from a
      caller whose project differs is what the service then refuses. */
   authority = { kind: "worker", conversationId: callerB.id, role: "builder" };
@@ -2990,6 +2991,10 @@ test("send recovery maps the durable delivery record to the closed outcome set",
   registry.recordDeliveryOutcome(reservation.id, "failed", SEND_UNVERIFIED_REASON, "unverified");
   expect(await recover(...binding("legacy-key"))).toMatchObject({ outcome: "settled", reason: SEND_UNVERIFIED_REASON, facts: { state: "failed", resend: "verify-first", duplicateRisk: true } });
 
+  const [payloadBinding] = binding("accepted-key");
+  expect(await recover(payloadBinding, { legacy: false, args: { text: "another caller payload" } }))
+    .toMatchObject({ outcome: "unknown", ids: {}, ownership: "unknown" });
+
   /* A target bound to a path the registry never resolved matches no record:
      one or many operations under the key, none is disclosed. */
   const [byPath, pathOptions] = binding("accepted-key");
@@ -3047,7 +3052,12 @@ test("spawn recovery maps the launch receipt to the closed outcome set and estab
   });
   if (begun.kind !== "created") throw new Error("fixture receipt was not created");
   const ids = { launchId: begun.receipt.launchId, conversationId: begun.receipt.conversationId };
-  expect(await recover(...binding("child_attempt_1"))).toMatchObject({ outcome: "accepted", evidence: "spawn-receipt", ids, facts: { state: "starting" } });
+  expect(await recover(...binding("child_attempt_1", false, parent.conversationId))).toMatchObject({ outcome: "accepted", evidence: "spawn-receipt", ids, facts: { state: "starting" } });
+
+  expect(await recover(...binding("child_attempt_1"))).toMatchObject({ outcome: "unknown", ids: {}, ownership: "unknown" });
+  const [ownedBinding] = binding("child_attempt_1", false, parent.conversationId);
+  expect(await recover({ ...ownedBinding, target: { project: null, identity: path.join(sandbox, "elsewhere") } }, { legacy: false }))
+    .toMatchObject({ outcome: "unknown", ids: {}, ownership: "unknown" });
 
   /* Legacy ownership: only the durable parent edge establishes it. */
   const owned = await recover(...binding("child_attempt_1", true, parent.conversationId));
@@ -3057,7 +3067,7 @@ test("spawn recovery maps the launch receipt to the closed outcome set and estab
   expect(JSON.stringify(notOwned)).not.toContain(ids.launchId);
 
   registry.failStructuredSpawn(ids.launchId, "structured spawn transport failed: fixture");
-  expect(await recover(...binding("child_attempt_1"))).toMatchObject({ outcome: "settled", ids, facts: { state: "failed", launched: false }, reason: expect.stringContaining("fixture") });
+  expect(await recover(...binding("child_attempt_1", false, parent.conversationId))).toMatchObject({ outcome: "settled", ids, facts: { state: "failed", launched: false }, reason: expect.stringContaining("fixture") });
 
   const broken = viewerMcpRecoverableTools({ registrySnapshot: () => { throw new Error("registry unreadable"); } } as never);
   expect(await broken.spawn_agent!.recover(...binding("child_attempt_1"))).toMatchObject({ outcome: "unknown", evidence: "spawn-receipt", reason: expect.stringContaining("registry unreadable") });

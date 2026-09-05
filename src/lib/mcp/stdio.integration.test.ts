@@ -1,5 +1,8 @@
 import { afterEach, expect, test } from "bun:test";
 import fs from "node:fs";
+import crypto from "node:crypto";
+
+const downstream = (tool: string, key: string) => `mcp_${tool === "send_message" ? "send" : "spawn"}_${crypto.createHash("sha256").update(key).digest("hex")}`;
 import os from "node:os";
 import path from "node:path";
 
@@ -213,7 +216,7 @@ test("a packaged MCP spawn is dispatched once: a Viewer restart mid-request answ
       details: { outcome: "unknown", nextAction: "original-key-lookup" },
     });
     /* The restarted Viewer never received the lost request again. */
-    expect(restartedKeys).not.toContain("restart-during");
+    expect(restartedKeys).not.toContain(downstream("spawn_agent", "restart-during"));
 
     /* A repeat under the key, explicit or ordinary, is a READ of the durable
        record — which holds no launch receipt for it, so the fate stays
@@ -222,24 +225,24 @@ test("a packaged MCP spawn is dispatched once: a Viewer restart mid-request answ
       const lookup = await callSpawn(session.client, "restart-during", extra);
       expect(lookup.structuredContent).toMatchObject({ ok: false, code: "outcome_unknown", retryable: false, replayed: true, details: { outcome: "unknown", nextAction: "original-key-lookup" } });
     }
-    expect(restartedKeys).not.toContain("restart-during");
+    expect(restartedKeys).not.toContain(downstream("spawn_agent", "restart-during"));
 
     /* A bodiless proxy status proves nothing about the upstream: unknown, one POST. */
     transientProxyFailures = 1;
     expect((await callSpawn(session.client, "restart-proxy-gap")).structuredContent)
       .toMatchObject({ ok: false, code: "outcome_unknown" });
-    expect(restartedKeys.filter((key) => key === "restart-proxy-gap")).toHaveLength(1);
+    expect(restartedKeys.filter((key) => key === downstream("spawn_agent", "restart-proxy-gap"))).toHaveLength(1);
 
     /* A response body cut after the request was accepted: unknown, one POST. */
     breakResponseBody = true;
     expect((await callSpawn(session.client, "restart-cut-body")).structuredContent)
       .toMatchObject({ ok: false, code: "outcome_unknown" });
-    expect(restartedKeys.filter((key) => key === "restart-cut-body")).toHaveLength(1);
+    expect(restartedKeys.filter((key) => key === downstream("spawn_agent", "restart-cut-body"))).toHaveLength(1);
 
     /* An ordinary call still dispatches once and answers normally. */
     expect((await callSpawn(session.client, "restart-after")).structuredContent)
       .toMatchObject({ ok: true, conversationId: "conversation_after_restart" });
-    expect(restartedKeys.filter((key) => key === "restart-after")).toHaveLength(1);
+    expect(restartedKeys.filter((key) => key === downstream("spawn_agent", "restart-after"))).toHaveLength(1);
 
     await restartedViewer.stop(true);
     restartedViewer = null;
@@ -529,7 +532,7 @@ test("send: acceptance, lost response, original-key recovery — one recipient d
 
     /* Exactly one recipient delivery and one reservation for the key. */
     expect(fixture.effects().filter((effect) => effect.kind === "recipient")).toHaveLength(1);
-    const reservations = Object.values(fixture.registryFile().heldDeliveries).filter((delivery) => delivery.clientMessageId === "send-lost-1");
+    const reservations = Object.values(fixture.registryFile().heldDeliveries).filter((delivery) => delivery.clientMessageId === downstream("send_message", "send-lost-1"));
     expect(reservations).toHaveLength(1);
   } finally {
     await mcp.close();
@@ -565,7 +568,7 @@ test("spawn: acceptance, lost response, original-key recovery — one launch, on
     expect(afterRestart).toMatchObject({ ok: true, launchId: launched[0]!.launchId });
 
     expect(fixture.effects().filter((effect) => effect.kind === "writer")).toHaveLength(1);
-    const receipts = Object.values(fixture.registryFile().receipts).filter((receipt) => receipt.clientAttemptId === "spawn-lost-1");
+    const receipts = Object.values(fixture.registryFile().receipts).filter((receipt) => receipt.clientAttemptId === downstream("spawn_agent", "spawn-lost-1"));
     expect(receipts).toHaveLength(1);
     expect(new Set(receipts.map((receipt) => receipt.conversationId)).size).toBe(1);
   } finally {
@@ -657,7 +660,7 @@ test("network failure without dispatch proof stays unknown and never redelivers;
     expect(await call(mcp, "spawn_agent", spawnArguments(fixture, "spawn-rejected-1", { cwd: path.join(fixture.sandbox, "missing") })))
       .toMatchObject({ ok: false, replayed: true, details: { outcome: "unknown" } });
     expect(fixture.effects()).toHaveLength(0);
-    expect(Object.values(fixture.registryFile().receipts).filter((receipt) => receipt.clientAttemptId === "spawn-rejected-1")).toHaveLength(0);
+    expect(Object.values(fixture.registryFile().receipts).filter((receipt) => receipt.clientAttemptId === downstream("spawn_agent", "spawn-rejected-1"))).toHaveLength(0);
 
     await host.kill();
     const disconnected = await call(mcp, "spawn_agent", spawnArguments(fixture, "spawn-unconnected"));
@@ -673,10 +676,10 @@ test("network failure without dispatch proof stays unknown and never redelivers;
     expect(fixture.effects()).toHaveLength(0);
     const arrived = await call(mcp, "send_message", sendArguments(fixture, "send-never-1"));
     expect(arrived).toMatchObject({ ok: true, replayed: false, outcome: "delivered" });
-    expect(fixture.effects().filter((effect) => effect.kind === "recipient" && effect.clientMessageId === "send-never-1")).toHaveLength(1);
+    expect(fixture.effects().filter((effect) => effect.kind === "recipient" && effect.clientMessageId === downstream("send_message", "send-never-1"))).toHaveLength(1);
     expect(await call(mcp, "send_message", sendArguments(fixture, "send-never-1", { recoveryOnly: true })))
       .toMatchObject({ ok: true, outcome: "settled", operationId: arrived.operationId, state: "delivered" });
-    expect(fixture.effects().filter((effect) => effect.kind === "recipient" && effect.clientMessageId === "send-never-1")).toHaveLength(1);
+    expect(fixture.effects().filter((effect) => effect.kind === "recipient" && effect.clientMessageId === downstream("send_message", "send-never-1"))).toHaveLength(1);
   } finally {
     await mcp.close();
     await host.stop();
@@ -714,9 +717,9 @@ test("spoofing and concurrency: another caller, a changed payload, and two proce
       expect(refused).toMatchObject({ ok: false, code: "caller_unidentified", replayed: false });
       expect(refused.details).toBeUndefined();
     }
-    expect(fixture.effects().filter((effect) => String(effect.clientMessageId ?? effect.clientAttemptId).includes("anonymous"))).toHaveLength(0);
+    expect(fixture.effects().filter((effect) => [downstream("send_message", "send-anonymous-1"), downstream("spawn_agent", "spawn-anonymous-1")].includes(String(effect.clientMessageId ?? effect.clientAttemptId)))).toHaveLength(0);
     expect(fixture.responses().filter((response) => response.body.includes("anonymous"))).toHaveLength(0);
-    expect(Object.values(fixture.registryFile().receipts).filter((receipt) => receipt.clientAttemptId === "spawn-anonymous-1")).toHaveLength(0);
+    expect(Object.values(fixture.registryFile().receipts).filter((receipt) => receipt.clientAttemptId === downstream("spawn_agent", "spawn-anonymous-1"))).toHaveLength(0);
 
     /* The owner with a changed payload is a conflict, not a second send. */
     expect(await call(owner, "send_message", sendArguments(fixture, "send-owned-1", { text: "changed" })))
@@ -736,7 +739,7 @@ test("spoofing and concurrency: another caller, a changed payload, and two proce
     const operationIds = new Set(race.map((answer) => answer.operationId));
     expect(operationIds.size).toBe(1);
     expect(race.filter((answer) => answer.replayed === false)).toHaveLength(1);
-    expect(fixture.effects().filter((effect) => effect.kind === "recipient" && effect.clientMessageId === "send-race-1")).toHaveLength(1);
+    expect(fixture.effects().filter((effect) => effect.kind === "recipient" && effect.clientMessageId === downstream("send_message", "send-race-1"))).toHaveLength(1);
   } finally {
     await owner.close();
     await stranger.close();
@@ -797,9 +800,9 @@ test("send: admitted, response lost BEFORE the recipient acts, original-key reco
 
     const deliveries = fixture.effects().filter((effect) => effect.kind === "recipient");
     expect(deliveries).toHaveLength(1);
-    expect(deliveries[0]).toMatchObject({ clientMessageId: "send-barrier-1", operationId });
-    expect(Object.values(fixture.registryFile().heldDeliveries).filter((delivery) => delivery.clientMessageId === "send-barrier-1")).toHaveLength(1);
-    expect(fixture.responses().filter((response) => response.pathname === "/api/tmux" && response.body.includes("send-barrier-1"))).toHaveLength(1);
+    expect(deliveries[0]).toMatchObject({ clientMessageId: downstream("send_message", "send-barrier-1"), operationId });
+    expect(Object.values(fixture.registryFile().heldDeliveries).filter((delivery) => delivery.clientMessageId === downstream("send_message", "send-barrier-1"))).toHaveLength(1);
+    expect(fixture.responses().filter((response) => response.pathname === "/api/tmux" && response.body.includes(operationId))).toHaveLength(1);
   } finally {
     await mcp.close();
     await host.stop();
@@ -850,8 +853,8 @@ test("spawn: admitted, response lost BEFORE the writer acts, original-key recove
 
     const launches = fixture.effects().filter((effect) => effect.kind === "writer");
     expect(launches).toHaveLength(1);
-    expect(launches[0]).toMatchObject({ launchId, conversationId, clientAttemptId: "spawn-barrier-1" });
-    const receipts = Object.values(fixture.registryFile().receipts).filter((receipt) => receipt.clientAttemptId === "spawn-barrier-1");
+    expect(launches[0]).toMatchObject({ launchId, conversationId, clientAttemptId: downstream("spawn_agent", "spawn-barrier-1") });
+    const receipts = Object.values(fixture.registryFile().receipts).filter((receipt) => receipt.clientAttemptId === downstream("spawn_agent", "spawn-barrier-1"));
     expect(receipts).toHaveLength(1);
     expect(String(receipts[0]?.conversationId)).toBe(conversationId);
     expect(fixture.responses().filter((response) => response.pathname === "/api/spawn" && response.body.includes(launchId))).toHaveLength(1);
@@ -925,7 +928,7 @@ test("send: a delayed 409 after recovery already proved delivery never regresses
 
     const deliveries = fixture.effects().filter((effect) => effect.kind === "recipient");
     expect(deliveries).toHaveLength(1);
-    expect(deliveries[0]).toMatchObject({ clientMessageId: "send-late-verdict-1", operationId });
+    expect(deliveries[0]).toMatchObject({ clientMessageId: downstream("send_message", "send-late-verdict-1"), operationId });
     expect(fixture.responses().filter((response) => response.pathname === "/api/tmux")).toHaveLength(1);
   } finally {
     await original.close();
@@ -1017,7 +1020,7 @@ for (const tool of ["send_message", "spawn_agent"] as const) {
           }
           expect(fixture.effects()).toHaveLength(before + 1);
           if (tool === "spawn_agent") {
-            const receipts = Object.values(fixture.registryFile().receipts).filter((receipt) => receipt.clientAttemptId === key);
+            const receipts = Object.values(fixture.registryFile().receipts).filter((receipt) => receipt.clientAttemptId === downstream("spawn_agent", key));
             expect(receipts).toHaveLength(1);
             expect(receipts[0]).toMatchObject({ conversationId: effect.conversationId });
           }
@@ -1124,11 +1127,11 @@ for (const { tool, idBearingError } of (["send_message", "spawn_agent"] as const
         }
         expect(fixture.effects()).toHaveLength(before + 1);
         if (tool === "spawn_agent") {
-          const receipts = Object.values(fixture.registryFile().receipts).filter((receipt) => receipt.clientAttemptId === key);
+          const receipts = Object.values(fixture.registryFile().receipts).filter((receipt) => receipt.clientAttemptId === downstream("spawn_agent", key));
           expect(receipts).toHaveLength(1);
           expect(receipts[0]).toMatchObject(ids);
         } else {
-          const deliveries = Object.values(fixture.registryFile().heldDeliveries).filter((delivery) => delivery.clientMessageId === key);
+          const deliveries = Object.values(fixture.registryFile().heldDeliveries).filter((delivery) => delivery.clientMessageId === downstream("send_message", key));
           expect(deliveries).toHaveLength(1);
         }
       }
@@ -1137,4 +1140,156 @@ for (const { tool, idBearingError } of (["send_message", "spawn_agent"] as const
       await host.stop();
     }
   }, 120_000);
+}
+
+for (const tool of ["send_message", "spawn_agent"] as const) {
+  test(`${tool}: constructed downstream keys cannot alias another caller and payload across restart`, async () => {
+    const fixture = await causalFixture("llv-1490-key-collision-");
+    let host = await fixture.startHost();
+    let owner = await fixture.mcp();
+    let other = await fixture.mcp({ caller: "other" });
+    try {
+      fixture.control({ mode: "respond" });
+      const longKey = "collision-original-key-".repeat(20);
+      const oldGenerated = tool === "send_message"
+        ? `mcp_send_${crypto.createHash("sha256").update(longKey).digest("hex").slice(0, 32)}`
+        : `mcp_${crypto.createHash("sha256").update(longKey).digest("hex").slice(0, 24)}`;
+      const argumentsFor = (key: string, payload: string) => tool === "send_message"
+        ? sendArguments(fixture, key, { text: payload })
+        : spawnArguments(fixture, key, { prompt: payload });
+      const originalArgs = argumentsFor(longKey, "original payload");
+      const first = await call(owner, tool, originalArgs);
+      const id = tool === "send_message" ? "operationId" : "launchId";
+      expect(first.ok).toBe(true);
+      const attempts: { args: Record<string, unknown>; result: Record<string, unknown> }[] = [];
+      for (const key of [oldGenerated, downstream(tool, longKey)]) {
+        const args = argumentsFor(key, `different payload ${key}`);
+        const result = await call(other, tool, args);
+        expect(result.ok).toBe(true);
+        expect(result[id]).not.toBe(first[id]);
+        expect(JSON.stringify(result)).not.toContain(String(first[id]));
+        attempts.push({ args, result });
+      }
+      expect(fixture.effects()).toHaveLength(3);
+      await owner.close();
+      await other.close();
+      await host.kill();
+      host = await fixture.startHost();
+      owner = await fixture.mcp();
+      other = await fixture.mcp({ caller: "other" });
+      for (const { args, result } of attempts) {
+        for (const recoveryOnly of [true, false]) {
+          const recovered = await call(other, tool, { ...args, recoveryOnly });
+          expect(recovered).toMatchObject({ ok: true, [id]: result[id] });
+          expect(JSON.stringify(recovered)).not.toContain(String(first[id]));
+        }
+      }
+      expect(await call(owner, tool, { ...originalArgs, recoveryOnly: true })).toMatchObject({ ok: true, [id]: first[id] });
+      expect(fixture.effects()).toHaveLength(3);
+      expect(fixture.responses()).toHaveLength(3);
+    } finally {
+      await owner.close();
+      await other.close();
+      await host.stop();
+    }
+  }, 40_000);
+}
+
+for (const tool of ["send_message", "spawn_agent"] as const) {
+  for (const loss of ["timeout", "reset"] as const) {
+    test(`${tool}: terminal recovery survives a delayed ${loss}, missing downstream evidence and restart`, async () => {
+      const fixture = await causalFixture("llv-1490-terminal-loss-");
+      let host = await fixture.startHost();
+      let original = await fixture.mcp();
+      const observer = await fixture.mcp();
+      try {
+        fixture.control({ mode: "hold", lateUnreadableStatus: 408, settleWriter: true });
+        const args = tool === "send_message" ? sendArguments(fixture, "terminal-loss") : spawnArguments(fixture, "terminal-loss");
+        const held = call(original, tool, args);
+        await fixture.marker("accepted");
+        const recovered = await call(observer, tool, { ...args, recoveryOnly: true });
+        const effect = fixture.effects()[0]!;
+        const ids = tool === "send_message"
+          ? { operationId: effect.operationId }
+          : { launchId: effect.launchId, conversationId: effect.conversationId };
+        expect(recovered).toMatchObject({ ok: true, outcome: "settled", ...ids });
+        // Remove only the fixture operation evidence. Caller authority and the
+        // readable MCP receipt remain intact, as in the independent probe.
+        const registryPath = path.join(fixture.state, "agent-registry.json");
+        const registry = JSON.parse(fs.readFileSync(registryPath, "utf8"));
+        if (tool === "send_message") {
+          registry.heldDeliveries = {};
+          registry.deliveryOperationOwners = {};
+        } else delete registry.receipts[String(effect.launchId)];
+        fs.writeFileSync(registryPath, JSON.stringify(registry));
+        if (loss === "reset") await host.kill();
+        else fixture.release();
+        expect(await held).toMatchObject({ ok: true, outcome: "settled", ...ids });
+        expect(fixture.effects()).toHaveLength(1);
+        await original.close();
+        if (loss !== "reset") await host.kill();
+        fixture.control({ mode: "respond" });
+        host = await fixture.startHost();
+        original = await fixture.mcp();
+        for (const recoveryOnly of [true, false]) expect(await call(original, tool, { ...args, recoveryOnly })).toMatchObject({ ok: true, outcome: "settled", ...ids });
+        expect(fixture.effects()).toHaveLength(1);
+        expect(fixture.responses()).toHaveLength(1);
+      } finally {
+        await original.close();
+        await observer.close();
+        await host.stop();
+      }
+    }, 40_000);
+  }
+}
+
+for (const tool of ["send_message", "spawn_agent"] as const) {
+  test(`${tool}: a persisted colliding key never discloses contradictory downstream evidence`, async () => {
+    const fixture = await causalFixture("llv-1490-persisted-collision-");
+    let host = await fixture.startHost();
+    const owner = await fixture.mcp();
+    let other = await fixture.mcp({ caller: "other" });
+    try {
+      const makeArgs = (key: string, payload: string) => tool === "send_message"
+        ? sendArguments(fixture, key, { text: payload }) : spawnArguments(fixture, key, { prompt: payload });
+      const first = await call(owner, tool, makeArgs("persisted-original", "first payload"));
+      expect(first.ok).toBe(true);
+      fixture.control({ mode: "hold-before" });
+      const args = makeArgs("persisted-other", "another payload");
+      const pending = call(other, tool, args);
+      await fixture.marker("reached");
+      await host.kill();
+      expect(await pending).toMatchObject({ ok: false, code: "outcome_unknown" });
+      await other.close();
+      // Model an open claim written by the old passthrough/hash mapping.
+      // Its authenticated caller and argument digest remain those of B.
+      const database = new Database(path.join(fixture.state, "mcp-receipts.sqlite"), { strict: true });
+      const readBinding = (key: string) => JSON.parse((database.query("SELECT binding_json FROM mcp_receipts WHERE receipt_key = ?").get(`${tool}:${key}`) as { binding_json: string }).binding_json);
+      const oldKey = readBinding("persisted-original").downstreamKey;
+      const binding = readBinding("persisted-other");
+      binding.downstreamKey = oldKey;
+      database.query("UPDATE mcp_receipts SET binding_json = ? WHERE receipt_key = ?").run(JSON.stringify(binding), `${tool}:persisted-other`);
+      database.close();
+      fixture.control({ mode: "respond" });
+      host = await fixture.startHost();
+      other = await fixture.mcp({ caller: "other" });
+      for (const recoveryOnly of [true, false]) {
+        const result = await call(other, tool, { ...args, recoveryOnly });
+        expect(result).toMatchObject({ ok: false, code: "outcome_unknown", details: { nextAction: "original-key-lookup" } });
+        const id = tool === "send_message" ? first.operationId : first.launchId;
+        expect(JSON.stringify(result)).not.toContain(String(id));
+      }
+      expect(fixture.effects()).toHaveLength(1);
+      expect(fixture.responses()).toHaveLength(1);
+      const reopened = new Database(path.join(fixture.state, "mcp-receipts.sqlite"), { strict: true });
+      const row = reopened.query("SELECT binding_json, result_json FROM mcp_receipts WHERE receipt_key = ?").get(`${tool}:persisted-other`) as { binding_json: string; result_json: string | null };
+      expect(JSON.parse(row.binding_json).downstreamKey).toBe(oldKey);
+      expect(row.result_json).toBeNull();
+      reopened.close();
+    } finally {
+      await owner.close();
+      await other.close();
+      await host.stop();
+    }
+  }, 40_000);
 }

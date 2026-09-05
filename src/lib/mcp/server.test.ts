@@ -2114,7 +2114,7 @@ describe("original-key recovery (#1490)", () => {
     const reopened = new SqliteMcpReceiptStore(filename);
     const restarted = recoveryHarness(OWNER, reopened, { evidence: { outcome: "unknown", evidence: "none", reason: "gone", ids: {} } });
     expect(await restarted.service.callTool("send_message", SEND)).toMatchObject({ ok: true, outcome: "settled", state: "delivered", resend: "not-needed", replayed: true });
-    expect(await restarted.service.callTool("send_message", { ...SEND, recoveryOnly: true })).toMatchObject({ ok: false, code: "outcome_unknown", details: { original: { ok: true, state: "delivered" } } });
+    expect(await restarted.service.callTool("send_message", { ...SEND, recoveryOnly: true })).toMatchObject({ ok: true, outcome: "settled", state: "delivered", operationId: "op_late_error" });
     expect(restarted.bindingCalls).toHaveLength(0);
     reopened.close();
   });
@@ -2430,3 +2430,83 @@ describe("original-key recovery (#1490)", () => {
     expect(service.callTool("send_message", SEND)).rejects.toThrow("cannot recover send_message");
   });
 });
+
+for (const tool of ["send_message", "spawn_agent"] as const) {
+  for (const response of ["timeout", "reset", "error", "success", "recovery", "not-executed", "write-failure"] as const) {
+    test(`${tool}: delayed ${response} preserves concurrently stored terminal evidence and IDs`, async () => {
+      const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-terminal-race-"));
+      scratch.push(directory);
+      const filename = path.join(directory, "receipts.sqlite");
+      const first = new SqliteMcpReceiptStore(filename);
+      const second = new SqliteMcpReceiptStore(filename);
+      let release!: () => void;
+      let reached!: () => void;
+      const held = new Promise<void>((resolve) => { release = resolve; });
+      const entered = new Promise<void>((resolve) => { reached = resolve; });
+      const args = tool === "send_message" ? SEND : SPAWN;
+      const ids: Record<string, string> = tool === "send_message" ? { operationId: "op_terminal" } : { launchId: "launch_terminal", conversationId: "conversation_terminal" };
+      const terminal: McpRecoveryEvidence = { outcome: "settled", evidence: "durable-fixture", reason: null, ids, facts: { state: tool === "send_message" ? "delivered" : "completed" } };
+      const original = recoveryHarness(OWNER, first, {
+        bindingImpl: async () => {
+          reached();
+          await held;
+          if (response === "success" || response === "write-failure") return { ...ids, outcome: "queued" };
+          if (response === "not-executed") throw new McpDispatchNotExecutedError("late refusal");
+          if (response === "error") throw new McpDispatchVerdictError("late error", { status: 503, ...ids });
+          throw new McpDispatchUncertainError(response);
+        },
+      });
+      const observer = recoveryHarness(OWNER, second, { evidence: terminal });
+      try {
+        const pending = original.service.callTool(tool, args);
+        await entered;
+        expect(await observer.service.callTool(tool, { ...args, recoveryOnly: true })).toMatchObject({ ok: true, outcome: "settled", ...ids });
+        // The original's evidence reader has only unknown. Terminal state must
+        // survive both an explicit lookup and every delayed response class.
+        if (response === "recovery") {
+          expect(await original.service.callTool(tool, { ...args, recoveryOnly: true })).toMatchObject({ ok: true, outcome: "settled", ...ids });
+        }
+        if (response === "write-failure") first.settle = () => { throw new Error("receipt write unavailable"); };
+        release();
+        expect(await pending).toMatchObject({ ok: true, outcome: "settled", ...ids });
+        expect(original.bindingCalls).toHaveLength(1);
+        expect(observer.bindingCalls).toHaveLength(0);
+      } finally {
+        release();
+        first.close();
+        second.close();
+      }
+      const reopened = new SqliteMcpReceiptStore(filename);
+      try {
+        const restarted = recoveryHarness(OWNER, reopened);
+        for (const recoveryOnly of [true, false]) expect(await restarted.service.callTool(tool, { ...args, recoveryOnly })).toMatchObject({ ok: true, outcome: "settled", ...ids });
+        expect(restarted.bindingCalls).toHaveLength(0);
+      } finally { reopened.close(); }
+    });
+  }
+}
+
+for (const tool of ["send_message", "spawn_agent"] as const) {
+  test(`${tool}: a pending evidence read cannot hide terminal recovery committed before that read returns`, async () => {
+    let release!: () => void;
+    let reached!: () => void;
+    const waiting = new Promise<void>((resolve) => { reached = resolve; });
+    const heldEvidence = new Promise<McpRecoveryEvidence>((resolve) => {
+      release = () => resolve({ outcome: "unknown", evidence: "none", reason: null, ids: {} });
+    });
+    const store = new MemoryMcpReceiptStore();
+    const args = tool === "send_message" ? SEND : SPAWN;
+    const original = recoveryHarness(OWNER, store, {
+      bindingImpl: async () => { reached(); throw new McpDispatchUncertainError("reset"); },
+      evidence: heldEvidence as unknown as McpRecoveryEvidence,
+    });
+    const pending = original.service.callTool(tool, args);
+    await waiting;
+    const observer = recoveryHarness(OWNER, store, { evidence: { outcome: "settled", evidence: "durable-fixture", reason: null, ids: { operationId: "op_read_race" } } });
+    expect(await observer.service.callTool(tool, { ...args, recoveryOnly: true })).toMatchObject({ ok: true, outcome: "settled", operationId: "op_read_race" });
+    release();
+    expect(await pending).toMatchObject({ ok: true, outcome: "settled", operationId: "op_read_race" });
+    expect(original.bindingCalls).toHaveLength(1);
+    expect(observer.bindingCalls).toHaveLength(0);
+  });
+}

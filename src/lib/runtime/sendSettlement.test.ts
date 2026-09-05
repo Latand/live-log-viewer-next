@@ -1395,3 +1395,25 @@ test("the original-key lookup is read-only: past the deadline, without a journal
     active.close();
   }
 });
+
+test("original-key payload checks survive delivery text removal and reservation compaction", async () => {
+  const active = fixture("original-key-payload");
+  try {
+    const accepted = acceptSend(active, { clientMessageId: "payload-key", operationId: "op_payload" });
+    const file = active.registry.readOnlySnapshot();
+    const text = file.heldDeliveries[accepted.deliveryId]!.text;
+    const binding = { conversationId: active.conversationId, clientMessageId: "payload-key", text };
+    expect(lookupOriginalSend(file, binding)).toMatchObject({ kind: "found" });
+    const contradictory = structuredClone(file);
+    contradictory.deliveryOperationOwners[accepted.operationId]!.conversationId = "conversation_elsewhere";
+    expect(lookupOriginalSend(contradictory, binding)).toEqual({ kind: "contradictory" });
+    expect(lookupOriginalSend(file, { ...binding, text: "another payload" })).toEqual({ kind: "contradictory" });
+    active.registry.recordDeliveryOutcome(accepted.deliveryId, "delivered", null, "delivered");
+    const delivered = active.registry.readOnlySnapshot();
+    expect(delivered.heldDeliveries[accepted.deliveryId]!.text).toBe("");
+    expect(lookupOriginalSend(delivered, binding)).toMatchObject({ kind: "found" });
+    delete delivered.heldDeliveries[accepted.deliveryId];
+    expect(lookupOriginalSend(delivered, binding)).toMatchObject({ kind: "found" });
+    expect(lookupOriginalSend(delivered, { ...binding, text: "another payload" })).toEqual({ kind: "contradictory" });
+  } finally { active.close(); }
+});
