@@ -586,9 +586,15 @@ export function ComposerBar({
             <button
               type="button"
               onClick={onSendBlockedRecover}
-              className="inline-flex min-h-8 shrink-0 items-center gap-1 rounded-control border border-border bg-card px-2 text-caption font-semibold text-primary hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              className={isMobile
+                ? "group inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-control text-caption font-semibold text-primary hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                : "inline-flex min-h-8 shrink-0 items-center gap-1 rounded-control border border-border bg-card px-2 text-caption font-semibold text-primary hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"}
             >
-              {t("deadHost.recheck")}
+              {isMobile ? (
+                <span className="inline-flex h-8 items-center rounded-control border border-border bg-card px-2 group-hover:border-accent/45">
+                  {t("deadHost.recheck")}
+                </span>
+              ) : t("deadHost.recheck")}
             </button>
           ) : null}
         </span>
