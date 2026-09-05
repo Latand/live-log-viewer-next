@@ -4142,7 +4142,13 @@ test("startup keeps a delivered spawn host dead while settling its receipt", asy
     status: "delivered",
     reason: null,
   });
-  await expect(client.retryOperation(begun.receipt.launchId)).rejects.toThrow("only failed runtime operations can retry");
+  const receiptBeforeRetry = await client.operationStatus(begun.receipt.launchId);
+  const effectsBeforeRetry = await client.effectBatch(["runtime.spawn", "runtime.send", "runtime.steer"]);
+  /* Spawn is never retryable through delivery retry. The journal checks that
+     command kind before status, so this refusal must preserve settlement. */
+  await expect(client.retryOperation(begun.receipt.launchId)).rejects.toThrow(/^runtime operation does not support retry$/);
+  expect(await client.operationStatus(begun.receipt.launchId)).toEqual(receiptBeforeRetry);
+  expect(await client.effectBatch(["runtime.spawn", "runtime.send", "runtime.steer"])).toEqual(effectsBeforeRetry);
   expect(journal.snapshot().sessions.find((session) => session.conversationId === begun.receipt.conversationId)).toMatchObject({
     host: "dead",
     activeTurnId: null,
