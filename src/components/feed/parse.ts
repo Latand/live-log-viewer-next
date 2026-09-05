@@ -242,6 +242,13 @@ export type CmdGroupItem = {
     prove nothing beyond the row being one. Nothing about the transcript
     changes: this kind exists only between the resolver and the card. */
 export type MandateItem = { kind: "mandate"; ts: unknown; text: string; mandate: MandateDelivery };
+export interface ReasoningMember {
+  sourceId: string;
+  anchorKey: string;
+  text: string;
+  availability: "available" | "unavailable";
+}
+
 export type Item =
   | { kind: "prose"; ts: unknown; text: string; engine: "codex" | "claude" | "openclaw"; sourceId?: string }
   | { kind: "user"; ts: unknown; text: string; selectedContext?: SelectedContextRef }
@@ -256,7 +263,7 @@ export type Item =
   | TranscriptRecordItem
   | Tmsg
   | { kind: "tnote"; text: string }
-  | { kind: "think"; text: string; sourceId?: string }
+  | { kind: "think"; text: string; sourceId?: string; availability?: "available" | "unavailable"; members?: ReasoningMember[] }
   | { kind: "image"; media: string; data: string; w?: number; h?: number; bytes?: number }
   | { kind: "inbox-image"; name: string; path: string }
   | { kind: "blob"; bytes: number; text: string; sourceId?: string }
@@ -1234,6 +1241,7 @@ interface StoredEntry {
   /** Initial source line. A later echo can move `src`; crossing that seam
       requires a fresh window parse to preserve one-shot ordering. */
   bornSrc: number;
+  reasoningBoundary: number;
   /** Absolute index of the source line, for window-slide eviction. */
   src: number;
   item: Item;
@@ -1308,6 +1316,9 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
   const jsonl = cfg.fmt === "claude" || cfg.fmt === "codex" || cfg.fmt === "openclaw";
 
   const entries: StoredEntry[] = [];
+  let reasoningBoundary = 0;
+  let reasoningTurnId = "";
+  const reasoningSeqs = new Map<string, number>();
   const calls = new Map<string, CallRec>();
   const sessionOwners = new Map<string, SessionOwner>();
   const sessionIdentity = (value: unknown): { label?: string; owner: SessionOwner } | undefined => {
@@ -1380,7 +1391,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
   const entryIndex = (seq: number): number => (entries.length ? seq - entries[0].seq : -1);
 
   const push = (item: Item): number => {
-    entries.push({ seq: pushSeq, bornSrc: curSrc, src: curSrc, item });
+    entries.push({ seq: pushSeq, bornSrc: curSrc, src: curSrc, reasoningBoundary, item });
     snapshot = null;
     return pushSeq++;
   };
@@ -1924,8 +1935,28 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
   };
   const addThink = (text: string, sourceId?: string) => {
     const normalized = text.trim();
+    if (sourceId) {
+      const seq = reasoningSeqs.get(sourceId);
+      const idx = seq === undefined ? -1 : entryIndex(seq);
+      const previous = idx >= 0 ? entries[idx] : undefined;
+      if (previous?.item.kind === "think") {
+        // Track the last echo for window eviction, while bornSrc remains the
+        // stable anchor. Sliding across an echo seam reparses the new window.
+        entries[idx] = { ...previous, src: curSrc };
+        // Empty completions and mirrors cannot erase exposed text. Enrichment
+        // keeps the original source position and React row identity.
+        if (normalized && !previous.item.text) {
+          entries[idx] = { ...previous, src: curSrc, item: { ...previous.item, text: normalized, availability: "available" } };
+          snapshot = null;
+        }
+        return true;
+      }
+      reasoningSeqs.set(sourceId, push({ kind: "think", text: normalized, sourceId,
+        availability: normalized ? "available" : "unavailable" }));
+      return true;
+    }
     if (!normalized) return false;
-    push({ kind: "think", text: normalized, ...(sourceId ? { sourceId } : {}) });
+    push({ kind: "think", text: normalized });
     return true;
   };
   const addRecord = (ts: unknown, recordType: string, value: unknown) => {
@@ -2078,6 +2109,9 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     const kind = codexThreadItemKind(item.type);
     const id = textPart(item.id) || "plain-" + pushSeq + "-" + String(timing.ts ?? "");
     const toolKind = ["functioncalloutput", "commandexecution", "filechange", "mcptoolcall", "dynamictoolcall", "collabagenttoolcall", "websearch", "imageview", "imagegeneration", "extension"].includes(kind);
+    // Use the renderer's tool families for every lifecycle/envelope form.
+    // A completion can update an earlier slot without appending a tool row.
+    if (toolKind) reasoningBoundary += 1;
     if (lifecycle === "itemdelta" || (lifecycle === "itemstarted" && !toolKind)) {
       addSvc(`${textPart(item.type) || "item"} ${lifecycle}`);
       return true;
@@ -2106,7 +2140,9 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       return true;
     }
     if (kind === "reasoning") {
-      const envelopeText = [textPart(item.summary_text), textPart(item.raw_content)]
+      const exposedField = (value: unknown): string => typeof value === "string" ? value
+        : Array.isArray(value) ? value.map((part) => typeof part === "string" ? part : textPart(rec(part).text)).filter(Boolean).join("\n") : "";
+      const envelopeText = [exposedField(item.summary_text), exposedField(item.raw_content)]
         .filter((part, index, parts) => Boolean(part.trim()) && parts.indexOf(part) === index)
         .join("\n");
       const text = [...arr(item.summary), ...arr(item.content)].map((part) => textPart(part.text)).filter(Boolean).join("\n")
@@ -2115,8 +2151,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
         || envelopeText
         || textPart(item.text);
       const sourceId = textPart(item.id) || undefined;
-      const settled = addThink(text, sourceId)
-        || Boolean(assistantShape === "event-agent" && sourceId && addThink(tr("render.reasoning"), sourceId));
+      const settled = addThink(text, sourceId);
       if (!settled) addSvc("reasoning");
       return true;
     }
@@ -2427,6 +2462,24 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
   const renderCodex = (obj: Record<string, unknown>) => {
     const p = rec(obj.payload);
     const ts = obj.timestamp;
+    // Hidden lifecycle records must still separate adjacent reasoning runs.
+    const turnId = textPart(p.turn_id) || textPart(p.turnId);
+    if (turnId && reasoningTurnId && turnId !== reasoningTurnId) reasoningBoundary += 1;
+    if (turnId) reasoningTurnId = turnId;
+    const boundaryType = codexThreadItemKind(p.type);
+    if (obj.type === "turn_context" || obj.type === "compacted") reasoningBoundary += 1;
+    const semanticKind = codexThreadItemKind(rec(p.item).type) || boundaryType;
+    // Messages and legacy Responses tools can reconcile into earlier rows.
+    // Thread-item tool boundaries are handled by renderCodexThreadItem itself.
+    if (["message", "usermessage", "agentmessage", "functioncall", "functioncalloutput", "customtoolcall",
+      "customtoolcalloutput"].includes(semanticKind)) reasoningBoundary += 1;
+    // These event records describe tool activity even when their display is
+    // service-only. Bookkeeping such as token_count does not split a run.
+    if (obj.type === "event_msg" && ["mcptoolcallbegin", "mcptoolcallend", "websearchend", "patchapplyend",
+      "commandexecutionoutputdelta", "filechangeoutputdelta", "filechangepatchupdated"].includes(boundaryType)) reasoningBoundary += 1;
+    if (["taskstarted", "taskcomplete", "turnstarted", "turncompleted", "turnaborted", "contextcompacted"].includes(boundaryType)) {
+      reasoningBoundary += 1;
+    }
     if (obj.type === "event_msg") {
       if (p.type === "user_message" && p.message) return addCodexEventUser(ts, textPart(p.message));
       const lifecycle = codexThreadItemKind(p.type);
@@ -2831,7 +2884,10 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     push({ kind: "raw", text: redactSecrets(line), err: /error|failed|traceback|exception/i.test(line) });
   };
   const consume = (line: string) => {
-    if (lineFilter && !line.toLowerCase().includes(lineFilter)) return;
+    if (lineFilter && !line.toLowerCase().includes(lineFilter)) {
+      reasoningBoundary += 1;
+      return;
+    }
     if (jsonl) {
       try {
         const obj = JSON.parse(line);
@@ -2857,6 +2913,9 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
 
   const reset = () => {
     entries.length = 0;
+    reasoningBoundary = 0;
+    reasoningTurnId = "";
+    reasoningSeqs.clear();
     calls.clear();
     sessionOwners.clear();
     tmsgSeqs.clear();
@@ -2892,6 +2951,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     while (entries.length && entries[0].src < start) {
       const gone = entries.shift()!;
       snapshot = null;
+      if (gone.item.kind === "think" && gone.item.sourceId) reasoningSeqs.delete(gone.item.sourceId);
       if (gone.item.kind === "tool") {
         const callRec = calls.get(gone.item.id);
         /* A later tool_result for an evicted call now falls back to the svc
@@ -2953,6 +3013,22 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     let i = 0;
     while (i < entries.length) {
       const head = entries[i];
+      if (head.item.kind === "think" && head.item.sourceId) {
+        const members: ReasoningMember[] = [];
+        let j = i;
+        while (j < entries.length) {
+          const cur = entries[j];
+          if (cur.item.kind !== "think" || !cur.item.sourceId || cur.reasoningBoundary !== head.reasoningBoundary) break;
+          members.push({ sourceId: cur.item.sourceId, anchorKey: anchorKey({ ...cur, src: cur.bornSrc }, "row"), text: cur.item.text,
+            availability: cur.item.text ? "available" : "unavailable" });
+          j += 1;
+        }
+        const text = members.map((member) => member.text).filter(Boolean).join("\n\n");
+        out.push({ anchorKey: members[0].anchorKey, key: String(head.seq),
+          item: { ...head.item, text, members, availability: text ? "available" : "unavailable" } });
+        i = j;
+        continue;
+      }
       if (!foldableTool(head.item)) {
         out.push({
           anchorKey: anchorKey(head, "row"),

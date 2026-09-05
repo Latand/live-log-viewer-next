@@ -1149,6 +1149,10 @@ export const uk: Record<keyof typeof en, Message> = {
   "render.delivered": "доставлено",
   "render.notDelivered": "не доставлено",
   "render.reasoning": "міркування агента",
+  "render.reasoningGroup": "Міркування · {count}",
+  "render.reasoningAvailable": "Текст доступний",
+  "render.reasoningUnavailable": "Текст відсутній",
+  "render.reasoningNotProvided": "Доступний текст міркувань не надано.",
 
   // feed/tool events (issue #9)
   "tools.read": "Читання",
@@ -2288,6 +2292,7 @@ export const uk: Record<keyof typeof en, Message> = {
 
   /* Постійний оверлей кореневої розмови (#691) і передача фокуса (#688). */
 
+  "attention.arrival": "Оркестратор перемістив вас сюди: {reason}",
   "attention.return": "Назад, де ви були",
   "attention.returnLine": "Повернутися туди, де ви були",
 

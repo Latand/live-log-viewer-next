@@ -1199,6 +1199,10 @@ export const en = {
   "render.delivered": "delivered",
   "render.notDelivered": "not delivered",
   "render.reasoning": "agent reasoning",
+  "render.reasoningGroup": "Reasoning · {count}",
+  "render.reasoningAvailable": "Text available",
+  "render.reasoningUnavailable": "Text unavailable",
+  "render.reasoningNotProvided": "No reasoning text was provided.",
 
   // feed/tool events (issue #9)
   "tools.read": "Read",
@@ -2358,6 +2362,7 @@ export const en = {
   /* The persistent root-conversation overlay (#691) and the focus handoff it
      surfaces (#688). */
 
+  "attention.arrival": "Orchestrator moved you here: {reason}",
   "attention.return": "Back to where you were",
   "attention.returnLine": "Go back to where you were",
 
