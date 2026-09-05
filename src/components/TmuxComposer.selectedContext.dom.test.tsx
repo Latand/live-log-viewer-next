@@ -101,10 +101,13 @@ function stubFetch(): void {
       return json({ seat: null, pending: null, exists: false });
     }
     if (url === "/api/runtime/send") {
-      const body = JSON.parse(String(init?.body ?? "{}")) as { text?: string; selectedContext?: SelectedContextRef };
+      const body = JSON.parse(String(init?.body ?? "{}")) as { text?: string; selectedContext?: SelectedContextRef; conversationId: string; idempotencyKey: string };
       sent.push({ text: body.text ?? "", selectedContext: body.selectedContext });
       duringSend?.();
-      return json({ operationId: "op-1", receipt: { status: "delivered", operationId: "op-1" } });
+      const operationId = `op-${sent.length}`;
+      return json({ operationId, receipt: { status: "delivered", operationId,
+        conversationId: body.conversationId, idempotencyKey: body.idempotencyKey,
+        kind: "send", text: body.text, at: new Date().toISOString(), revision: 1 } });
     }
     return json({});
   }) as unknown as typeof fetch;
