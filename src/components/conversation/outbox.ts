@@ -208,7 +208,7 @@ export function outboxReceiptPatch(
   if (previous && receipt?.operationId === previous.operationId
     && typeof receipt.revision === "number" && receipt.revision < previous.revision) return null;
   if (previous && receipt?.operationId === previous.operationId && receipt.revision === previous.revision
-    && previous.status === "failed" && previous.resend === "safe"
+    && (previous.status === "failed" || previous.status === "rejected") && previous.resend === "safe"
     && (entry.state === "queued" || entry.state === "delivering") && !entry.deliveryUncertain) return null;
   // Moving/error observations cannot erase uncertainty. Only arrival, a proven
   // safe rejection, or the explicit original-operation discard resolves it.

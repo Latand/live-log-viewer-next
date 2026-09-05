@@ -1899,7 +1899,7 @@ test("authoritative success overrides contradictory retry guidance and keeps its
   expect(outboxReceiptPatch({ ...entry, ...patch }, "uncertain", receipt, at + 2000)).toBeNull();
 });
 
-test("an unchanged safe failure cannot undo the operator's explicit same-key retry", () => {
-  const receipt = { operationId: "operation-safe", idempotencyKey: "key", conversationId: "conversation", kind: "send" as const, status: "failed" as const, resend: "safe" as const, revision: 1, at: "2026-09-05T08:00:00.000Z" };
-  expect(outboxReceiptPatch({ state: "queued", deliveryReceipt: receipt }, "failed", receipt)).toBeNull();
+test.each(["failed", "rejected"] as const)("an unchanged safe %s cannot undo the operator's explicit same-key retry", (status) => {
+  const receipt = { operationId: "operation-safe", idempotencyKey: "key", conversationId: "conversation", kind: "send" as const, status, resend: "safe" as const, revision: 1, at: "2026-09-05T08:00:00.000Z" };
+  expect(outboxReceiptPatch({ state: "queued", deliveryReceipt: receipt }, status, receipt)).toBeNull();
 });

@@ -487,7 +487,10 @@ test.each(["queued", "failed", "network"])("late %s send callback cannot reverse
 
 test("non-2xx definitive pre-dispatch failure keeps safe retry controls", async () => {
   const sends: SendBody[] = [];
-  mockWire(sends, [body => ({ status: 400, json: { receipt: { ...captured, idempotencyKey: body.idempotencyKey, status: "rejected", resend: "safe", reason: "Rejected before dispatch" }, error: "Rejected before dispatch" } })]);
+  mockWire(sends, [
+    body => ({ status: 400, json: { receipt: { ...captured, idempotencyKey: body.idempotencyKey, status: "rejected", resend: "safe", reason: "Rejected before dispatch" }, error: "Rejected before dispatch" } }),
+    body => ({ status: 200, json: { receipt: { ...captured, idempotencyKey: body.idempotencyKey, status: "queued", resend: undefined, reason: undefined, revision: 5 } } }),
+  ]);
   const mounted = await renderInto(surface());
   try {
     await settle(() => composerControls(mounted.host).type(captured.text!));
@@ -496,5 +499,9 @@ test("non-2xx definitive pre-dispatch failure keeps safe retry controls", async 
     expect(readOutbox(file.conversationId!)[0]?.deliveryUncertain).toBeUndefined();
     expect(mounted.host.querySelector("[data-outbox-retry]")).not.toBeNull();
     expect(sends).toHaveLength(1);
+    await settle(() => mounted.host.querySelector<HTMLButtonElement>("[data-outbox-retry]")!.click());
+    expect(sends).toHaveLength(2);
+    expect(sends[1]).toEqual(sends[0]);
+    expect(readOutbox(file.conversationId!)[0]?.state).toBe("delivering");
   } finally { await act(async () => mounted.root.unmount()); }
 });
