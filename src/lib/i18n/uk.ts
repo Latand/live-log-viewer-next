@@ -1149,6 +1149,10 @@ export const uk: Record<keyof typeof en, Message> = {
   "render.delivered": "доставлено",
   "render.notDelivered": "не доставлено",
   "render.reasoning": "міркування агента",
+  "render.reasoningGroup": "Міркування · {count}",
+  "render.reasoningAvailable": "Текст доступний",
+  "render.reasoningUnavailable": "Текст відсутній",
+  "render.reasoningNotProvided": "Доступний текст міркувань не надано.",
 
   // feed/tool events (issue #9)
   "tools.read": "Читання",

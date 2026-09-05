@@ -1,10 +1,11 @@
 import { beforeEach, expect, test } from "bun:test";
 import { Window } from "happy-dom";
 
-import type { FeedEntry } from "@/components/feed/parse";
+import { createFeedSession, type FeedEntry } from "@/components/feed/parse";
 import type { RuntimeLiveTurn } from "@/lib/runtime/liveTurn";
 
 import {
+  enrichCanonicalReasoning,
   adoptCanonicalAssistantClaims,
   publishCanonicalAssistantClaims,
   readCanonicalAssistantClaims,
@@ -193,4 +194,49 @@ test("issue 1100: a folded tool run claims every member call, and the #674 fence
   expect([...readCanonicalAssistantClaims("conversation-group")]).toEqual(["toolu_1", "toolu_2", "uuid-later"]);
   expect(visibleRuntimeLiveTurnItems(live, [group, prose], readCanonicalAssistantClaims("conversation-group"), "running").map((item) => item.itemId))
     .toEqual(["toolu_fresh"]);
+});
+
+
+test("reasoning group claims every member and immutably retains supplied text in source order", () => {
+  const records = Array.from({ length: 20 }, (_, i) => JSON.stringify({ type: "event_msg", payload: {
+    type: "item_completed", item: { type: "Reasoning", id: `member-${i}`, summary_text: [], raw_content: [] },
+  } }));
+  const feed = createFeedSession({ engine: "codex", fmt: "codex", showSvc: false, lineFilter: "" }).feed(records, 0, false).items;
+  const live: RuntimeLiveTurn = { turnId: "turn-reasoning", text: "", items: [
+    { itemId: "member-12", text: "Actual supplied summary", phase: "awaiting-echo", startedAt: null, completedAt: null },
+    { itemId: "unrelated", text: "Other response", phase: "awaiting-echo", startedAt: null, completedAt: null },
+  ] };
+  const before = JSON.stringify(feed);
+  const enriched = enrichCanonicalReasoning(feed, live);
+  expect(JSON.stringify(feed)).toBe(before);
+  expect(enriched).toHaveLength(1);
+  expect(enriched[0].key).toBe(feed[0].key);
+  expect(enriched[0].anchorKey).toBe(feed[0].anchorKey);
+  const item = enriched[0].item;
+  if (item.kind !== "think") throw new Error("expected reasoning");
+  expect(item.members?.[12]).toMatchObject({ sourceId: "member-12", text: "Actual supplied summary", availability: "available" });
+  expect(item.text).toBe("Actual supplied summary");
+  expect(enrichCanonicalReasoning(feed, null, enriched)).toEqual(enriched);
+  expect(visibleRuntimeLiveTurnItems(live, enriched).map((item) => item.itemId)).toEqual(["unrelated"]);
+  publishCanonicalAssistantClaims("reasoning-claims", enriched);
+  expect([...readCanonicalAssistantClaims("reasoning-claims")]).toEqual(Array.from({ length: 20 }, (_, i) => `member-${i}`));
+  expect(enrichCanonicalReasoning(feed, null)).toBe(feed);
+  expect(enrichCanonicalReasoning([], null, enriched)).toEqual([]);
+});
+
+test("supplied reasoning streaming text renders once; native text and other item kinds remain authoritative", () => {
+  const member = { sourceId: "reason", anchorKey: "row:1:0", text: "", availability: "unavailable" as const };
+  const feed: FeedEntry[] = [{ key: "1", anchorKey: "row:1:0", item: { kind: "think", text: "", members: [member] } }];
+  const live: RuntimeLiveTurn = { turnId: "turn", text: "", items: [
+    { itemId: "reason", text: "Real delta", phase: "streaming", startedAt: null, completedAt: null },
+  ] };
+  const enriched = enrichCanonicalReasoning(feed, live);
+  expect(visibleRuntimeLiveTurnItems(live, enriched, undefined, "running")).toEqual([]);
+  const native: FeedEntry[] = [{ ...feed[0], item: { kind: "think", text: "Native summary", members: [{ ...member, text: "Native summary", availability: "available" }] } }];
+  expect(enrichCanonicalReasoning(native, live, enriched)).toBe(native);
+  expect(visibleRuntimeLiveTurnItems(live, native, undefined, "running")).toEqual([]);
+  const prose: FeedEntry[] = [{ key: "1", anchorKey: "row:1:0", item: { kind: "prose", sourceId: "reason", text: "", ts: null, engine: "codex" } }];
+  expect(enrichCanonicalReasoning(prose, live)).toBe(prose);
+  const moved: FeedEntry[] = [{ ...feed[0], item: { kind: "think", text: "", members: [{ ...member, anchorKey: "row:99:0" }] } }];
+  expect(enrichCanonicalReasoning(moved, null, enriched)).toBe(moved);
 });

@@ -17,10 +17,11 @@ const plainFile = { path: "/tmp/x.output", engine: "codex", fmt: "plain", activi
    which differ between a windowed parse and a start-0 one-shot for the same
    logical line. Both are opaque provenance tokens; normalize them out before
    structural comparison. */
-function normalize(items: Item[]): unknown {
+function normalize(items: Item[], start = 0): unknown {
   return JSON.parse(
     JSON.stringify(items, (key, value) => {
       if (key === "srcCall" || key === "srcResult") return 0;
+      if (key === "anchorKey" && typeof value === "string") return value.replace(/^row:(\d+):/, (_, src) => `row:${Number(src) - start}:`);
       return typeof value === "string" && (key === "id" || key === "ids") ? value.replace(/^plain-\d+-/, "plain-N-") : value;
     }),
   );
@@ -50,7 +51,7 @@ function assertParity(file: FileEntry, lines: string[], opts: { cap?: number; ch
     }
     const incremental = session.feed(window, start, live);
     const oneShot = buildFeed(liveFile, window, showSvc, "");
-    expect(normalize(incremental.items.map((entry) => entry.item))).toEqual(normalize(oneShot.items));
+    expect(normalize(incremental.items.map((entry) => entry.item), start)).toEqual(normalize(oneShot.items));
     expect(incremental.hiddenServiceCount).toBe(oneShot.hiddenServiceCount);
   }
   return session;
@@ -2056,7 +2057,7 @@ describe("Codex item_completed envelope generation", () => {
   test("collapses an identified envelope Reasoning item whose text fields are empty", () => {
     const feed = buildFeed(codexFile, [fixture[0]], false, "");
 
-    expect(feed.items).toEqual([{ kind: "think", text: "agent reasoning", sourceId: "reasoning-envelope" }]);
+    expect(feed.items).toMatchObject([{ kind: "think", text: "", availability: "unavailable", sourceId: "reasoning-envelope", members: [{ sourceId: "reasoning-envelope", text: "" }] }]);
     expect(feed.hiddenServiceCount).toBe(0);
   });
 
@@ -2563,5 +2564,92 @@ describe("tool results carry their images (#1498)", () => {
     ]);
     expect(read?.outputPreview).toContain("1999x1161 frame, captured at 100%");
     assertParity(claudeFile, lines, { chunks: [1] });
+  });
+});
+
+
+describe("compact identified reasoning (#1534)", () => {
+  const reasoning = (id: string, text = "", turnId = "turn-a") => JSON.stringify({
+    type: "event_msg", payload: { type: "item_completed", turn_id: turnId,
+      item: { type: "Reasoning", id, summary_text: text || [], raw_content: [] } },
+  });
+  const mirror = (id: string, text = "") => JSON.stringify({
+    type: "response_item", payload: { type: "reasoning", id,
+      summary: text ? [{ type: "summary_text", text }] : [], encrypted_content: "opaque-fixture" },
+  });
+  const session = () => createFeedSession({ engine: "codex", fmt: "codex", showSvc: false, lineFilter: "" });
+
+  test("40 envelopes and mirrors retain 20 identities and anchors in one unavailable group", () => {
+    const lines = Array.from({ length: 20 }, (_, i) => [reasoning(`reason-${i}`), mirror(`reason-${i}`)]).flat();
+    const parser = session();
+    const live = parser.feed(lines, 100, true);
+    expect(live.items).toHaveLength(1);
+    const item = live.items[0].item;
+    expect(item).toMatchObject({ kind: "think", availability: "unavailable", text: "" });
+    if (item.kind !== "think") throw new Error("missing reasoning");
+    expect(item.members?.map((member) => member.sourceId)).toEqual(Array.from({ length: 20 }, (_, i) => `reason-${i}`));
+    expect(item.members?.map((member) => member.anchorKey)).toEqual(Array.from({ length: 20 }, (_, i) => `row:${100 + i * 2}:0`));
+    expect(parser.feed(lines, 100, false).items).toEqual(live.items);
+  });
+
+  test("same-ID delivered text upgrades in place and survives empty mirrors and replay", () => {
+    const parser = session();
+    const lines = [reasoning("first"), reasoning("second")];
+    const before = parser.feed(lines, 0, true);
+    lines.push(mirror("first", "Actual exposed summary"), mirror("first"), reasoning("second", "Actual exposed summary"));
+    const after = parser.feed(lines, 0, false);
+    expect(after.items).toHaveLength(1);
+    expect(after.items[0].anchorKey).toBe(before.items[0].anchorKey);
+    expect(after.items[0].key).toBe(before.items[0].key);
+    expect(after.items[0].item).toMatchObject({ availability: "available", members: [
+      { sourceId: "first", text: "Actual exposed summary", availability: "available" },
+      { sourceId: "second", text: "Actual exposed summary", availability: "available" },
+    ] });
+    expect(before.items[0].item).toMatchObject({ availability: "unavailable" });
+    expect(parser.feed(lines, 0, false)).toEqual(after);
+    expect(session().feed(lines, 0, false).items.map(({ item }) => item)).toEqual(after.items.map(({ item }) => item));
+  });
+
+  test("native exposed array text is readable and opaque content never becomes text", () => {
+    const native = JSON.stringify({ type: "event_msg", payload: { type: "item_completed", item: {
+      type: "Reasoning", id: "arrays", summary_text: ["First paragraph", { text: "Second paragraph" }], raw_content: [],
+      encrypted_content: "opaque-fixture",
+    } } });
+    const item = session().feed([native, mirror("arrays")], 0, false).items[0].item;
+    expect(item).toMatchObject({ text: "First paragraph\nSecond paragraph", availability: "available" });
+    expect(JSON.stringify(item)).not.toContain("opaque-fixture");
+  });
+
+  test("filtered message and hidden turn context still separate runs", () => {
+    const filtered = createFeedSession({ engine: "codex", fmt: "codex", showSvc: false, lineFilter: "reasoning" });
+    const lines = [reasoning("one"), JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "Next task" } }), reasoning("two")];
+    expect(filtered.feed(lines, 0, false).items).toHaveLength(2);
+    expect(session().feed([reasoning("one"), JSON.stringify({ type: "turn_context", payload: {} }), reasoning("two")], 0, false).items).toHaveLength(2);
+  });
+
+  test("a result attached to an earlier tool still separates the reasoning around it", () => {
+    const call = JSON.stringify({ type: "response_item", payload: { type: "function_call", call_id: "earlier-tool", name: "exec_command", arguments: "{}" } });
+    const result = JSON.stringify({ type: "response_item", payload: { type: "function_call_output", call_id: "earlier-tool", output: "done" } });
+    const rows = session().feed([call, reasoning("before"), result, reasoning("after")], 0, false).items;
+    expect(rows.filter(({ item }) => item.kind === "think")).toHaveLength(2);
+  });
+
+  for (const boundary of [
+    { type: "event_msg", payload: { type: "task_started" } },
+    { type: "event_msg", payload: { type: "turn_aborted" } },
+    { type: "event_msg", payload: { type: "turn_completed" } },
+    { type: "event_msg", payload: { type: "context_compacted" } },
+    { type: "event_msg", payload: { type: "agent_message", message: "Commentary" } },
+    { type: "response_item", payload: { type: "message", role: "assistant", phase: "final_answer", content: [{ type: "output_text", text: "Final" }] } },
+    { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "Next task" }] } },
+    { type: "response_item", payload: { type: "function_call", call_id: "tool-boundary", name: "exec_command", arguments: "{}" } },
+  ]) {
+    test(`splits at ${boundary.payload.type} even with hidden service rows`, () => {
+      const rows = session().feed([reasoning("before"), JSON.stringify(boundary), reasoning("after")], 0, false).items;
+      expect(rows.filter(({ item }) => item.kind === "think")).toHaveLength(2);
+    });
+  }
+  test("different native turn identities split adjacent reasoning", () => {
+    expect(session().feed([reasoning("one", "", "turn-a"), reasoning("two", "", "turn-b")], 0, false).items).toHaveLength(2);
   });
 });
