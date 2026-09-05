@@ -48,6 +48,9 @@ export interface OutboxEntry {
   state: OutboxState;
   /** Moment the entry left `queued`/`delivering` (ms), for the hard-cap TTL. */
   settledAt?: number;
+  /** Receipt-driven delivery has its own clock authority. Unknown receipt
+      time must never fall back to submission time, including after reload. */
+  receiptSettlement?: "known" | "unknown";
   /** Assistant output began for the turn created by this submission. This is
       causal delivery proof and permanently retires the optimistic bubble. */
   responseStartedAt?: number;
@@ -195,9 +198,11 @@ export function outboxStateForReceiptStatus(status: ReceiptStatus): OutboxState 
  * failure, and never to `delivering` off an unproven receipt.
  */
 export function outboxReceiptPatch(
-  entry: Pick<OutboxEntry, "state" | "awaitingTurn">,
+  entry: Pick<OutboxEntry, "state" | "awaitingTurn"> & Partial<Pick<OutboxEntry, "at" | "settledAt" | "receiptSettlement">>,
   status: ReceiptStatus,
-): { state: OutboxState; awaitingTurn?: true } | null {
+  receipt?: { at: string; admittedAt?: string },
+  nowMs?: number,
+): ({ state: OutboxState; awaitingTurn?: true } & Partial<Pick<OutboxEntry, "settledAt" | "receiptSettlement">>) | null {
   /* Only a receipt that PROVES admission or settlement says anything about a
      bubble. `pending`, `applying` and `uncertain` are the request path still
      working, or an admission nobody confirmed: the bubble already reads
@@ -206,11 +211,51 @@ export function outboxReceiptPatch(
   if (!receiptIsAdmitted(status) && !receiptIsTerminal(status)) return null;
   const state = outboxStateForReceiptStatus(status);
   const awaitingTurn = outboxAwaitsTurnBoundary(status);
+  if (entry.state === "delivered" && (state !== "delivered" || !receipt)) return null;
+  if (receipt && state === "delivered") {
+    // A terminal journal transition stamps `at` once. An incomplete or repeated
+    // projection cannot replace a known authoritative settlement or extend TTL.
+    if (entry.state === "delivered" && entry.receiptSettlement === "known"
+      && Number.isFinite(entry.settledAt)) return null;
+    const settledAt = authoritativeReceiptTime(receipt, entry.at, nowMs);
+    const receiptSettlement = settledAt === undefined ? "unknown" : "known";
+    if (entry.state === state && entry.receiptSettlement === receiptSettlement
+      && entry.settledAt === settledAt) return null;
+    return { state, awaitingTurn, settledAt, receiptSettlement };
+  }
   if (state === entry.state && awaitingTurn === entry.awaitingTurn) return null;
   /* A failed bubble is never re-churned by another failure; it only advances on
      the proven admission or delivery above. */
   if (entry.state === "failed" && state === "failed") return null;
-  return { state, awaitingTurn };
+  return {
+    state, awaitingTurn,
+    ...(receipt ? {
+      settledAt: receiptIsTerminal(status) ? authoritativeReceiptTime(receipt, entry.at, nowMs) : undefined,
+      receiptSettlement: undefined,
+    } : {}),
+  };
+}
+
+/** The journal emits UTC ISO transition stamps. Reject malformed, future, or
+    causally stale times; admission is only a lower bound, never delivery proof.
+    Old but valid terminal evidence is retained verbatim, even beyond the TTL. */
+function authoritativeReceiptTime(
+  receipt: { at: string; admittedAt?: string },
+  submittedAt: number | undefined,
+  nowMs: number | undefined,
+): number | undefined {
+  const parse = (value: unknown): number | undefined => {
+    if (typeof value !== "string") return undefined;
+    const time = Date.parse(value);
+    return Number.isFinite(time) && new Date(time).toISOString() === value ? time : undefined;
+  };
+  const time = parse(receipt.at);
+  const admittedAt = parse(receipt.admittedAt);
+  if (time === undefined || nowMs === undefined || submittedAt === undefined
+    || !Number.isFinite(nowMs) || !Number.isFinite(submittedAt)
+    || time > nowMs || time < submittedAt
+    || (receipt.admittedAt !== undefined && (admittedAt === undefined || time < admittedAt))) return undefined;
+  return time;
 }
 
 /** Bounded per conversation: the queue is working state plus recent history for
@@ -1363,13 +1408,15 @@ export function visibleOutbox(
     }
     if (entry.adoptedAt !== undefined) continue;
     if (entry.responseStartedAt !== undefined) continue;
-    if (entry.state === "delivered") {
-      const settledAt = entry.settledAt ?? entry.at;
-      if (nowMs - settledAt >= OUTBOX_DELIVERED_TTL_MS) continue;
-      if (
-        newestTranscriptAtMs !== undefined
-        && newestTranscriptAtMs >= settledAt + OUTBOX_MTIME_GRACE_MS
-      ) continue;
+    if (entry.state === "delivered" && entry.receiptSettlement !== "unknown") {
+      const settledAt = entry.receiptSettlement === "known" ? entry.settledAt : entry.settledAt ?? entry.at;
+      if (settledAt !== undefined && Number.isFinite(settledAt)) {
+        if (nowMs - settledAt >= OUTBOX_DELIVERED_TTL_MS) continue;
+        if (
+          newestTranscriptAtMs !== undefined
+          && newestTranscriptAtMs >= settledAt + OUTBOX_MTIME_GRACE_MS
+        ) continue;
+      }
     }
     visible.push(entry);
   }
