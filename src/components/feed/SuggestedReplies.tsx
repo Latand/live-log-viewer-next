@@ -13,7 +13,7 @@ import {
 } from "@/lib/suggestions/types";
 import type { FileEntry } from "@/lib/types";
 
-import { enqueueOutbox, type OutboxEntry } from "../conversation/outbox";
+import { enqueueOutbox, outboxCanAdmit, useOutbox, type OutboxEntry } from "../conversation/outbox";
 import { mintIdempotencyKey } from "../runtime/runtimeModel";
 import { appendComposerDraft } from "../TmuxComposer";
 import type { FeedEntry } from "./parse";
@@ -232,6 +232,13 @@ export function SuggestedReplies({ file, revision, items, outbox, floating = fal
   /* The set a phone chip already sent from: gone the instant it was tapped,
      ahead of any echo or outbox read. */
   const [sentSetId, setSentSetId] = useState<string | null>(null);
+  /* The set whose chip the queue REFUSED (#1538): every slot held an
+     operation the operator still has to resolve, so nothing was sent and the
+     chips stay. The notice reads off the live queue, so it goes the moment a
+     slot is freed. */
+  const [refusedSetId, setRefusedSetId] = useState<string | null>(null);
+  const cardId = conversationIdentity(file);
+  const queue = useOutbox(cardId);
   const answeredAt = latestOperatorMessageAt(items, outbox);
   const offeredAt = set ? Date.parse(set.at) : Number.NaN;
   const answered = Boolean(set) && Number.isFinite(offeredAt) && answeredAt !== null && answeredAt > offeredAt;
@@ -262,13 +269,15 @@ export function SuggestedReplies({ file, revision, items, outbox, floating = fal
   }, [isMobile, pendingToolUseId, setId, conversationId]);
 
   if (!set || answered || sentSetId === set.setId) return null;
-  const cardId = conversationIdentity(file);
+  const queueFull = refusedSetId === set.setId && !outboxCanAdmit(queue);
   const sendFromPhone = (text: string) => {
     const pending = file.pendingQuestion;
     if (pending && pending.kind === "question" && pending.paneTarget !== null) {
       void answerPendingQuestionWithText(pending, text);
-    } else {
-      enqueueOutbox(cardId, { id: mintIdempotencyKey(), text, images: 0, at: Date.now() });
+    } else if (!enqueueOutbox(cardId, { id: mintIdempotencyKey(), text, images: 0, at: Date.now() })) {
+      /* Refused, not sent: the chip stays tappable and the reply is not lost. */
+      setRefusedSetId(set.setId);
+      return;
     }
     setSentSetId(set.setId);
     if (conversationId && cache.get(conversationId)?.setId === set.setId) cache.set(conversationId, null);
@@ -302,6 +311,11 @@ export function SuggestedReplies({ file, revision, items, outbox, floating = fal
             </span>
           </button>
         ))}
+        {queueFull ? (
+          <span data-reply-suggestions-status role="status" className="shrink-0 px-2 text-label text-danger">
+            {t("composer.outboxFull")}
+          </span>
+        ) : null}
       </div>
     );
   }

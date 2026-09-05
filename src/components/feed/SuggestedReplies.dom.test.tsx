@@ -6,6 +6,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { en } from "@/lib/i18n/en";
 import { uk } from "@/lib/i18n/uk";
 import { setLocale } from "@/lib/i18n";
+import { MOBILE_LAYOUT_QUERY } from "@/lib/attention/eligibility";
 import type { FileEntry } from "@/lib/types";
 
 /*
@@ -19,9 +20,13 @@ import type { FileEntry } from "@/lib/types";
  * nothing sent.
  */
 
+/* The phone branch of the row is the one that SENDS on tap (#1439 lane 4); the
+   flag answers the shell's own layout query so one case can drive it here. */
+let narrowViewport = false;
+
 const dom = new Window({ url: "http://localhost/" });
 dom.matchMedia = ((query: string) => ({
-  matches: false,
+  matches: String(query) === MOBILE_LAYOUT_QUERY ? narrowViewport : false,
   media: String(query),
   onchange: null,
   addEventListener() {},
@@ -51,6 +56,7 @@ Object.assign(globalThis, {
 
 const { SuggestedReplies } = await import("./SuggestedReplies");
 const { TmuxComposer } = await import("../TmuxComposer");
+const { OUTBOX_LIMIT, cancelOutbox, enqueueOutbox, readOutbox, resetOutboxForTests } = await import("../conversation/outbox");
 
 const CONVERSATION = "conversation_seat";
 const SET_AT = "2026-08-26T10:00:00.000Z";
@@ -91,6 +97,8 @@ afterEach(() => {
   readFails = false;
   deferSuggestionReads = false;
   deferredSuggestionReads.length = 0;
+  narrowViewport = false;
+  resetOutboxForTests();
   setLocale("en");
 });
 
@@ -307,4 +315,44 @@ test("a conversation with no set renders nothing at all", async () => {
 
   expect(host.querySelector("[data-reply-suggestions]")).toBeNull();
   expect(requests.some((entry) => entry.url.includes("conversation_quiet"))).toBe(true);
+});
+
+test("phone: a chip tapped into a queue full of unresolved operations is refused, and the row stays", async () => {
+  narrowViewport = true;
+  /* #1538: every slot holds an operation the operator still has to resolve, so
+     admitting one more would evict one of them. The store refuses; the chip
+     must not pretend it sent. */
+  const conversation = "conversation_full_queue";
+  served = { set: { conversationId: conversation, setId: "rsg_full", at: SET_AT, origin: { kind: "manager", conversationId: conversation, role: "orchestrator" }, replies: drafts } };
+  for (let index = 0; index < OUTBOX_LIMIT; index += 1) {
+    expect(enqueueOutbox(conversation, { id: `op_full_${index}`, text: `earlier ${index}`, images: 0, at: 1_000 + index })).not.toBeNull();
+  }
+  const before = readOutbox(conversation).map((entry) => entry.id);
+  expect(before).toHaveLength(OUTBOX_LIMIT);
+
+  const host = mount(<SuggestedReplies file={file(conversation)} revision="full" />);
+  await settle(host, "[data-reply-suggestion]", drafts.length);
+  expect(host.querySelector("[data-mobile-chips]")).toBeTruthy();
+
+  const chip = host.querySelectorAll("[data-reply-suggestion]")[1] as HTMLButtonElement;
+  flushSync(() => { chip.click(); });
+
+  /* The queue is exactly what it was: nothing admitted, nothing evicted. */
+  expect(readOutbox(conversation).map((entry) => entry.id)).toEqual(before);
+  /* The chips are still there to tap again, and the row says why the tap
+     did not send, in the composer's own words. */
+  expect(host.querySelectorAll("[data-reply-suggestion]")).toHaveLength(drafts.length);
+  expect(host.querySelector("[data-reply-suggestions-status]")?.textContent).toBe(en["composer.outboxFull"]);
+  expect(sessionStorage.getItem(`llvDraft:${conversation}`)).toBeNull();
+
+  /* Removing one unresolved operation frees a slot; the same chip now sends
+     and the row retires as on any accepted tap. */
+  cancelOutbox(conversation, before[0]!);
+  await settle(host, "[data-reply-suggestions-status]", 0);
+  flushSync(() => { (host.querySelectorAll("[data-reply-suggestion]")[1] as HTMLButtonElement).click(); });
+  const after = readOutbox(conversation);
+  expect(after).toHaveLength(OUTBOX_LIMIT);
+  expect(after.at(-1)).toMatchObject({ text: drafts[1]!.text, state: "queued", images: 0 });
+  expect(after.some((entry) => entry.id === before[0])).toBe(false);
+  expect(host.querySelector("[data-reply-suggestions]")).toBeNull();
 });
