@@ -73,9 +73,9 @@ const structuredView: RuntimeSessionView = {
 
 import { LogFeed } from "./LogFeed";
 import { setLogFeedDependenciesForTests } from "./logFeedDependencies";
-import { TmuxComposer } from "./TmuxComposer";
+import { TmuxComposer, RuntimeComposerReceipts } from "./TmuxComposer";
 import { writeProfile } from "./runtimeProfile";
-import { enqueueOutbox, updateOutbox, visibleOutbox, readOutbox, resetOutboxForTests, retryOutbox, cancelOutbox } from "./conversation/outbox";
+import { enqueueOutbox, updateOutbox, visibleOutbox, readOutbox, resetOutboxForTests, retryOutbox, cancelOutbox, publishTranscriptEchoes } from "./conversation/outbox";
 
 let snapshotReceipts: RuntimeReceipt[] = [];
 let realReceiptHook = false;
@@ -285,6 +285,110 @@ test.each(["failed", "uncertain"] as const)("textless %s receipt polling and rem
   } finally { await act(async () => mounted.root.unmount()); bus.stop(); }
 });
 
+test("repeated operation records share one recovery row across text changes and stale dismissals", async () => {
+  const actions: string[] = [];
+  let receipts: RuntimeReceipt[] = [
+    { ...captured, revision: 2, text: "older summary" },
+    { ...captured, revision: 4, text: undefined },
+    { ...captured, revision: 3, text: "" },
+  ];
+  const render = () => <RuntimeComposerReceipts receipts={receipts} dismissed={new Set([captured.operationId])}
+    onRetry={(receipt, mode) => actions.push(`${receipt.operationId}:${mode}`)}
+    onDiscard={receipt => actions.push(`${receipt.operationId}:discard`)} onEdit={() => actions.push("edit")}
+    onDismiss={() => actions.push("dismiss")} />;
+  const mounted = await renderInto(render());
+  try {
+    expect(mounted.host.querySelectorAll("[data-receipt-uncertain-retry]")).toHaveLength(1);
+    expect(mounted.host.querySelectorAll("[data-receipt-discard]")).toHaveLength(1);
+    expect(mounted.host.querySelectorAll("[data-receipt-dismiss], [data-delivery-notice-dismiss]")).toHaveLength(0);
+    await settle(() => mounted.host.querySelector<HTMLButtonElement>("[data-receipt-uncertain-retry]")!.click());
+    await settle(() => mounted.host.querySelector<HTMLButtonElement>("[data-receipt-discard]")!.click());
+    expect(actions).toEqual([`${captured.operationId}:uncertain`, `${captured.operationId}:discard`]);
+    receipts = [{ ...captured, revision: 5, status: "delivered", resend: "not-needed" }, ...receipts];
+    await settle(() => mounted.root.render(render()));
+    expect(mounted.host.querySelectorAll("[data-receipt-uncertain-retry], [data-receipt-discard]")).toHaveLength(0);
+  } finally { await act(async () => mounted.root.unmount()); }
+});
+
+test.each([captured.text, "", undefined].flatMap(text => ["delivered", "discarded"].map(terminal => ({ text, terminal }))))("each original operation keeps one recovery row through polling and remount (%j)", async ({ text, terminal }) => {
+  const original = { ...captured, text };
+  const sibling = { ...original, operationId: "independent-operation", idempotencyKey: "independent-key", at: "2026-09-05T08:01:00.000Z" };
+  let receipts: RuntimeReceipt[] = [original, sibling, { ...original, revision: 3, status: "delivering" }];
+  const calls: { url: string; method?: string; body?: string }[] = [];
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    if (url === "/api/tmux/targets") return Response.json({ targets: {} });
+    if (init?.method === "POST" || init?.method === "DELETE") {
+      calls.push({ url, method: init.method, body: init.body as string });
+      const current = receipts.find(receipt => url.endsWith(receipt.operationId))!;
+      return Response.json({ receipt: init.method === "DELETE"
+        ? { ...current, revision: 8, status: "failed", reason: "delivery-discarded", resend: "not-needed" }
+        : current });
+    }
+    return new Response("{}", { status: 404 });
+  }) as typeof fetch;
+  const { createRuntimeBus, setRuntimeBusForTests } = await import("@/hooks/runtimeBus");
+  let seq = 1;
+  const bus = createRuntimeBus({
+    fetch: async () => Response.json({ schemaVersion: 1, snapshotSeq: seq, retentionFloorSeq: 0,
+      runtime: { hostEpoch: 1, health: "ready" }, filesRevision: 1,
+      sessions: [{ ...structuredView.session, artifactPath: file.path, attentionIds: [], revision: seq, turn: "idle", recentReceipts: receipts }],
+      attentions: [], recentOperations: receipts, edges: [], flows: [], workflows: [], tasks: [] }),
+    createEventSource: () => ({ onopen: null, onerror: null, onmessage: null, close() {}, addEventListener() {} }),
+    now: Date.now, setTimeout, clearTimeout, setInterval, clearInterval,
+  });
+  realReceiptHook = true;
+  setRuntimeBusForTests(bus);
+  bus.start();
+  await settle(() => {});
+  for (const receipt of [original, sibling]) {
+    enqueueOutbox(file.conversationId!, { id: receipt.idempotencyKey, text: text ?? "", images: 0, at: Date.parse(receipt.admittedAt!) });
+    updateOutbox(file.conversationId!, receipt.idempotencyKey, { state: "delivering", deliveryUncertain: true, deliveryReceipt: receipt });
+  }
+  let mounted = await renderInto(surface());
+  const check = (ids: string[]) => {
+    const controls = [...mounted.host.querySelectorAll("[data-operation]:has([data-receipt-uncertain-retry])")];
+    expect(controls.map(node => node.getAttribute("data-operation")).sort()).toEqual([...ids].sort());
+    for (const control of controls) {
+      expect(control.textContent).toMatch(/outcome is unknown/i);
+      expect(control.querySelector("[data-receipt-uncertain-retry]")).not.toBeNull();
+      expect(control.querySelector("[data-receipt-discard]")?.textContent).toBe("Discard");
+    }
+    for (const bubble of mounted.host.querySelectorAll('[data-outbox-wait="uncertain"]')) {
+      expect(bubble.querySelectorAll("[data-outbox-retry], [data-outbox-cancel]")).toHaveLength(0);
+    }
+    expect(mounted.host.querySelector("[data-runtime-receipt-status]")?.textContent).toMatch(/outcome is unknown/i);
+  };
+  try {
+    check([original.operationId, sibling.operationId]);
+    for (const receipt of [original, sibling]) {
+      await settle(() => mounted.host.querySelector<HTMLButtonElement>(`[data-operation="${receipt.operationId}"] [data-receipt-uncertain-retry]`)!.click());
+    }
+    expect(calls).toEqual([original, sibling].map(receipt => ({ url: `/api/runtime/operations/${receipt.operationId}`, method: "POST", body: JSON.stringify({ action: "retry-uncertain" }) })));
+    receipts = [{ ...sibling, revision: 6, status: terminal === "delivered" ? "delivered" : "failed", resend: "not-needed", reason: terminal === "discarded" ? "delivery-discarded" : undefined }, original, { ...original, revision: 2, status: "pending" }];
+    seq++;
+    await act(async () => { await bus.refresh(); await new Promise(resolve => setTimeout(resolve, 30)); });
+    expect(bus.getState().store.sessions[file.conversationId!]?.recentReceipts[0]?.revision).toBe(6);
+    await settle(() => {});
+    check([original.operationId]);
+    if (text && terminal === "delivered") {
+      await settle(() => publishTranscriptEchoes(file.conversationId!, [{ id: "independent-native-echo", text }]));
+      expect(visibleOutbox(readOutbox(file.conversationId!), new Map([[text, 1]]), Date.now()).some(entry => entry.id === original.idempotencyKey)).toBe(true);
+    }
+    await act(async () => mounted.root.unmount());
+    resetOutboxForTests();
+    mounted = await renderInto(surface());
+    check([original.operationId]);
+    await settle(() => mounted.host.querySelector<HTMLButtonElement>(`[data-operation="${original.operationId}"] [data-receipt-discard]`)!.click());
+    expect(calls[2]).toEqual({ url: `/api/runtime/operations/${original.operationId}`, method: "DELETE", body: undefined });
+    expect(mounted.host.querySelectorAll("[data-receipt-uncertain-retry], [data-receipt-discard]")).toHaveLength(0);
+    seq++;
+    await act(async () => { await bus.refresh(); await new Promise(resolve => setTimeout(resolve, 30)); });
+    expect(mounted.host.querySelectorAll("[data-receipt-uncertain-retry], [data-receipt-discard]")).toHaveLength(0);
+    expect(calls).toHaveLength(3);
+  } finally { await act(async () => mounted.root.unmount()); bus.stop(); }
+});
+
 test("uncertainty survives reload, conversation switches, and late errors; actions use the original operation", async () => {
   const calls: { url: string; method?: string; body?: string }[] = [];
   let actionReceipt = { ...captured, revision: 5 };
@@ -438,7 +542,12 @@ test.skipIf(!process.env.LLV_UNCERTAINTY_BROWSER)("390/430 mounted uncertainty h
     import {enqueueOutbox,updateOutbox} from './src/components/conversation/outbox';
     const file=${JSON.stringify(file)}, receipt=${JSON.stringify(captured)}, view=${JSON.stringify(structuredView)};
     setRuntimeUiEnabledForTests(false);
-    setTmuxComposerRuntimeDependenciesForTests({useAgentCapabilities:()=>({caps:capabilitiesFor(file,view,{runtimeEnabled:true}),runtime:view,structuredSession:view,runtimeEnabled:true,attachMode:attachModeFor(file,view,{runtimeEnabled:true})}),useRuntimeReceiptsForArtifact:()=>[{...receipt,text:undefined}]});
+    setTmuxComposerRuntimeDependenciesForTests({useAgentCapabilities:()=>({caps:capabilitiesFor(file,view,{runtimeEnabled:true}),runtime:view,structuredSession:view,runtimeEnabled:true,attachMode:attachModeFor(file,view,{runtimeEnabled:true})}),useRuntimeReceiptsForArtifact:()=>[
+      {...receipt,text:undefined},
+      {...receipt,operationId:'same-text-a',idempotencyKey:'same-key-a'},
+      {...receipt,operationId:'same-text-b',idempotencyKey:'same-key-b'},
+      {...receipt,operationId:'later-success',idempotencyKey:'later-key',status:'delivered',resend:'not-needed',at:'2026-09-05T08:02:00.000Z'}
+    ]});
     setLogFeedDependenciesForTests({useLogTail:()=>({lines:[],linesStart:0,size:0,loading:false,error:null,tickTime:null,paused:false,setPaused(){},clear(){},hasMore:false,loadingOlder:false,loadOlder:async()=>0,prependGen:0})});
     enqueueOutbox(file.conversationId,{id:receipt.idempotencyKey,text:receipt.text,images:0,at:Date.parse(receipt.admittedAt)});
     updateOutbox(file.conversationId,receipt.idempotencyKey,{state:'delivering'});
@@ -477,12 +586,14 @@ test.skipIf(!process.env.LLV_UNCERTAINTY_BROWSER)("390/430 mounted uncertainty h
       await page.locator('[data-outbox-wait="uncertain"]').waitFor();
       expect(await page.locator('[data-outbox-retry], [data-outbox-cancel]').count()).toBe(0);
       await page.locator('details[data-runtime-receipt-stack] > summary').click();
-      const retry = page.locator('[data-receipt-uncertain-retry]');
+      expect(await page.locator('[data-receipt-uncertain-retry]').count()).toBe(3);
+      expect(await page.locator('[data-receipt-discard]').count()).toBe(3);
+      const retry = page.locator(`[data-operation="${captured.operationId}"] [data-receipt-uncertain-retry]`);
       await retry.waitFor();
       expect(await retry.innerText()).toBe("Retry");
       expect(await page.locator('[data-runtime-receipt-status]').textContent()).toMatch(/outcome is unknown/i);
       expect(await page.locator('body').textContent()).not.toMatch(/not delivered/i);
-      const discard = page.locator('[data-receipt-discard]');
+      const discard = page.locator(`[data-operation="${captured.operationId}"] [data-receipt-discard]`);
       expect(await discard.innerText()).toBe("Discard");
       expect((await discard.boundingBox())!.height).toBeGreaterThanOrEqual(43.99);
       await discard.focus();

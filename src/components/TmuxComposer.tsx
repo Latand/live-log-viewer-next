@@ -294,11 +294,17 @@ export function RuntimeComposerReceipts({
   const { t } = useLocale();
   const statusId = useId();
   const [detailsOpen, setDetailsOpen] = useState(false);
-  /* Visibility and grouping live in the delivery-state model (issue #264):
-     resolved successes render nothing (the feed bubble is the receipt), a
-     group superseded by a successful resend of the same text goes quiet, and
-     dismissed settled problems stay dismissed. */
-  const attemptGroups = deliveryAttemptGroups(receipts, dismissed);
+  // Current original-operation evidence must survive text-based history folding.
+  // Repeated snapshots share one row; a different operation cannot resolve it.
+  const currentReceipts = mergeRuntimeReceipts(receipts, []);
+  const unknownReceipts = currentReceipts.filter(receiptHasUnknownFate);
+  const ordinaryReceipts = currentReceipts.filter((receipt) => !receiptHasUnknownFate(receipt));
+  const attemptGroups = [
+    ...deliveryAttemptGroups(ordinaryReceipts, dismissed),
+    ...unknownReceipts
+      .filter((receipt) => (receipt.kind === "send" || receipt.kind === "steer") && Boolean(receipt.text))
+      .map((receipt) => ({ current: receipt, attempts: [receipt] })),
+  ].sort((left, right) => Date.parse(right.current.at) - Date.parse(left.current.at));
   const visibleAttempts = attemptGroups.flatMap((group) => group.attempts);
   /* A wait only becomes news by getting older, and nothing else re-renders this
      row while a message is parked at a turn boundary. One local interval, no
@@ -359,7 +365,10 @@ export function RuntimeComposerReceipts({
     }
     return [...counts].map(([label, count]) => (count > 1 ? `${label} ×${count}` : label));
   };
-  const standaloneReceipts = visibleStandaloneReceipts(receipts, dismissed);
+  const standaloneReceipts = [
+    ...visibleStandaloneReceipts(ordinaryReceipts, dismissed),
+    ...visibleStandaloneReceipts(unknownReceipts),
+  ];
   /* #1362: a message receipt with no text echo used to render one standalone
      pill per attempt — three retries, three full-width pills, each carrying
      the whole sentence. Settled message failures belong to the notice and the
@@ -528,7 +537,7 @@ export function RuntimeComposerReceipts({
                   failed = danger + retry icon-button). A button carries its own
                   activation, so a click here never toggles the disclosure; the
                   explicit preventDefault says so in DOMs that toggle on bubble. */}
-              {notice && (noticeRetryable || onDismiss) ? (
+              {notice && (noticeRetryable || (onDismiss && !noticeUnknown)) ? (
                 <span className="-mr-1 flex shrink-0 items-center sm:mr-0" data-delivery-notice-actions>
                   {noticeRetryable ? (
                     <button
@@ -550,7 +559,7 @@ export function RuntimeComposerReceipts({
                   {/* Dismissing the notice clears its whole group: every settled
                       attempt it counted (issue #264 rule 3 — a still-moving
                       attempt is never hidden). */}
-                  {onDismiss ? (
+                  {onDismiss && !noticeUnknown ? (
                     <button
                       type="button"
                       data-delivery-notice-dismiss
@@ -560,7 +569,7 @@ export function RuntimeComposerReceipts({
                       onClick={(event) => {
                         event.preventDefault();
                         event.stopPropagation();
-                        onDismiss(notice.dismissIds);
+                        onDismiss(notice.dismissIds.filter((id) => !unknownReceipts.some((receipt) => receipt.operationId === id)));
                       }}
                     >
                       <X className="h-3 w-3" aria-hidden />
@@ -650,7 +659,7 @@ export function RuntimeComposerReceipts({
                           row and persists, while a still-moving attempt in the
                           group keeps rendering — dismissal never hides live
                           delivery truth. */}
-                      {onDismiss && deliveryProblem(receipt.status) ? (
+                      {onDismiss && !receiptHasUnknownFate(receipt) && deliveryProblem(receipt.status) ? (
                         <button
                           type="button"
                           aria-label={t("runtime.receipt.dismiss")}
@@ -734,7 +743,7 @@ export function RuntimeComposerReceipts({
                     {receiptHasUnknownFate(receipt) && receipt.reason ? (
                       <span className="w-full break-words text-right text-caption text-muted" data-receipt-uncertain-why>{receipt.reason}</span>
                     ) : null}
-                    {onDismiss && receiptIsTerminal(receipt.status) ? (
+                    {onDismiss && !receiptHasUnknownFate(receipt) && receiptIsTerminal(receipt.status) ? (
                       <button
                         type="button"
                         aria-label={t("runtime.receipt.dismiss")}
@@ -789,7 +798,7 @@ export function RuntimeComposerReceipts({
               onRetry={isMessage(receipt) && failed ? () => retryFailed(receipt) : undefined}
               onEdit={editable(receipt) ? () => onEdit(receipt) : undefined}
             />
-            {onDismiss && deliveryProblem(receipt.status) ? (
+            {onDismiss && !receiptHasUnknownFate(receipt) && deliveryProblem(receipt.status) ? (
               <button
                 type="button"
                 aria-label={t("runtime.receipt.dismiss")}

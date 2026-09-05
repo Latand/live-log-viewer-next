@@ -1186,7 +1186,9 @@ function reconcileEchoRetirements(
       retiredEchoId: entry.retiredEchoId,
       launchOwned: entry.launchOwned,
     })),
-    ...queue.map((entry) => ({
+    // Text-only echoes cannot identify an unresolved original operation.
+    // Its receipt or causally bound assistant turn must settle it first.
+    ...queue.filter((entry) => !entry.deliveryUncertain).map((entry) => ({
       type: "queue" as const,
       id: entry.id,
       at: entry.at,
@@ -1401,6 +1403,10 @@ export function visibleOutbox(
        which for a role launch is the scaffold-plus-draft carried on `echoText`,
        not the raw draft it displays (issue #615). */
     const key = echoKey(entry.echoText ?? entry.text);
+    if (entry.deliveryUncertain && entry.responseStartedAt === undefined && entry.adoptedAt === undefined) {
+      visible.push(entry);
+      continue;
+    }
     if (entry.retiredEchoId) {
       const floor = Math.max(entry.echoBaseline ?? 0, consumed.get(key) ?? 0);
       consumed.set(key, floor + 1);
