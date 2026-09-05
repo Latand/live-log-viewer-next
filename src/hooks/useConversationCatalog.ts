@@ -123,14 +123,16 @@ export function useConversationCatalog({
     }, delay);
     return () => {
       window.clearTimeout(timer);
+      // Home retains its project snapshots; legacy consumers re-read on reopen.
+      if (scopeKey === undefined) cache.current.delete(key);
       if (flight.current?.key === key) {
         flight.current.controller.abort();
         flight.current = null;
       }
     };
-  }, [key, query, enabled, request]);
+  }, [key, query, enabled, request, scopeKey]);
 
-  const page = cache.current.get(key);
+  const page = enabled || scopeKey !== undefined ? cache.current.get(key) : undefined;
   const loading = enabled && (!page || flight.current?.key === key);
   const loadMore = useCallback(() => {
     const current = cache.current.get(key);

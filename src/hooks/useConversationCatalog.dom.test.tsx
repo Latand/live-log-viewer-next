@@ -19,7 +19,7 @@ const answer = (index: number, items: FileEntry[], nextCursor: string | null, st
   requests[index]!.resolve(new Response(JSON.stringify({ items, nextCursor, total: 45 }), { status }));
 };
 function render(next: typeof props) { props = next; flushSync(() => root.render(<Harness />)); }
-async function start(next: typeof props = { project: "a", pageSize: 20 }) {
+async function start(next: typeof props = { project: "a", pageSize: 20, scopeKey: "home" }) {
   requests.length = 0;
   root = createRoot(dom.document.createElement("div") as unknown as HTMLElement);
   render(next); await tick();
@@ -73,8 +73,8 @@ test("append failure retries same cursor; expiry retains rows until explicit coh
 test("A to B to A rejects late aborted pages and preserves A's chain", async () => {
   await start(); answer(0, [row("a")], "a20"); await tick();
   result.loadMore(); await tick();
-  render({ project: "b", pageSize: 20 }); await tick();
-  render({ project: "a", pageSize: 20 }); await tick();
+  render({ ...props, project: "b", pageSize: 20 }); await tick();
+  render({ project: "a", pageSize: 20, scopeKey: "home" }); await tick();
   expect(requests[1]!.signal.aborted).toBe(true);
   answer(1, [row("stale-a")], null); answer(2, [row("b")], null); await tick();
   expect(result.items.map((x) => x.path)).toEqual(["a"]);
@@ -83,7 +83,7 @@ test("A to B to A rejects late aborted pages and preserves A's chain", async () 
 });
 
 test("collapse/reopen preserves pages; empty hydrated page continues; desktop defaults to forty", async () => {
-  await start({ project: "desktop" });
+  await start({ project: "desktop", scopeKey: "home" });
   expect(requests[0]!.url.searchParams.get("limit")).toBe("40");
   answer(0, [], "empty-next"); await tick();
   render({ ...props, enabled: false }); await tick(); render({ ...props, enabled: true }); await tick();
@@ -95,7 +95,7 @@ test("collapse/reopen preserves pages; empty hydrated page continues; desktop de
 
 test("query debounce fences old scope immediately and page size owns a distinct chain", async () => {
   await start();
-  render({ project: undefined, query: "search", pageSize: 20 });
+  render({ ...props, project: undefined, query: "search", pageSize: 20 });
   answer(0, [row("wrong")], null); await tick();
   expect(result.items).toHaveLength(0);
   await new Promise((r) => setTimeout(r, 260));
@@ -133,4 +133,18 @@ test("identical global queries retain separate snapshots for their owning Home p
   render({ ...props, scopeKey: "a" }); await tick();
   expect(result.items[0]!.path).toBe("a-snapshot");
   expect(result.nextCursor).toBe("a20");
+});
+
+
+test("legacy consumers keep forty-entry fresh reads on reopen", async () => {
+  await start({ project: "desktop" });
+  expect(requests[0]!.url.searchParams.get("limit")).toBe("40");
+  answer(0, [row("old")], "old-next"); await tick();
+  render({ ...props, enabled: false }); await tick();
+  expect(result.items).toHaveLength(0);
+  render({ ...props, enabled: true }); await tick();
+  expect(requests).toHaveLength(2);
+  expect(requests[1]!.url.searchParams.has("cursor")).toBe(false);
+  answer(1, [row("new")], null); await tick();
+  expect(result.items[0]!.path).toBe("new");
 });
