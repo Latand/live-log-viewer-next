@@ -55,7 +55,7 @@ afterEach(() => {
   setLocale("en");
 });
 
-function Harness() {
+function Harness({ onRecover }: { onRecover?: () => void } = {}) {
   const composer = useComposer({ initialText: () => "", persistText: () => {}, submit: () => {} });
   return <ComposerBar
     composer={composer}
@@ -68,6 +68,8 @@ function Harness() {
     sendIdleClassName="bg-accent"
     imageDisabled
     imageDisabledReason="Capability unavailable"
+    sendDisabledReason={onRecover ? "Resolving conversation host…" : undefined}
+    onSendBlockedRecover={onRecover}
   />;
 }
 
@@ -481,4 +483,25 @@ test("attachment preview copy remains accurate for structured and tmux delivery 
     flushSync(() => root.unmount());
     host.remove();
   }
+});
+
+test("desktop blocked-send recovery keeps its compact control and invokes recovery once", () => {
+  let recovered = 0;
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  flushSync(() => root.render(<Harness onRecover={() => { recovered += 1; }} />));
+  const reason = host.querySelector('[data-testid="composer-send-blocked"]')!;
+  const recover = reason.querySelector("button") as HTMLButtonElement;
+  expect(reason.textContent).toContain("Resolving conversation host…");
+  expect(recover.textContent).toBe("Re-check");
+  expect(recover.type).toBe("button");
+  expect(recover.className).toContain("min-h-8");
+  expect(recover.className).not.toContain("min-h-11");
+  expect(recover.className).not.toContain("min-w-11");
+  expect(recover.className).toContain("bg-card");
+  expect(recover.children).toHaveLength(0);
+  flushSync(() => recover.click());
+  expect(recovered).toBe(1);
+  flushSync(() => root.unmount());
 });
