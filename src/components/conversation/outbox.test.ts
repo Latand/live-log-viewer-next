@@ -20,6 +20,7 @@ import {
   readOutbox,
   resetOutboxForTests,
   retireLaunchOutboxOnAdoption,
+  retryOutbox,
   seedLaunchOutbox,
   settleLaunchOutboxDelivered,
   settleLaunchOutboxFailed,
@@ -1821,7 +1822,7 @@ test("adoption moves a queue onto the materialized conversation identity idempot
   expect(readOutbox("conversation_live")).toHaveLength(1);
 });
 
-test("an image-bearing entry that could not survive a refresh is held for re-attachment, not sent blind", () => {
+test("an image-bearing entry claimed but never handed to the wire is held for re-attachment, not sent blind", () => {
   enqueueOutbox("conv", { id: "k1", text: "see screenshot", images: 2, at: Date.now() });
   updateOutbox("conv", "k1", { state: "delivering" });
   /* A refresh: module state is gone, only sessionStorage remains. */
@@ -1833,7 +1834,7 @@ test("an image-bearing entry that could not survive a refresh is held for re-att
   expect(nextDispatch(restored)).toBeNull();
 });
 
-test("a file-bearing entry is held for re-attachment too, not delivered without its document", () => {
+test("a file-bearing entry claimed but never handed to the wire is held for re-attachment too, not delivered without its document", () => {
   /* #1224: a document's bytes are memory-only for the same reason an image's
      are. An entry that carried one must not be replayed as bare text, and an
      attachment-only submission must not be cancelled out of the queue —
@@ -1847,13 +1848,69 @@ test("a file-bearing entry is held for re-attachment too, not delivered without 
   expect(nextDispatch(restored)).toBeNull();
 });
 
-test("a text-only delivering entry returns to the queue for replay after a refresh", () => {
+test("a text-only entry claimed but never handed to the wire returns to the queue for replay after a refresh", () => {
   submit("conv", "k1", "text only");
   updateOutbox("conv", "k1", { state: "delivering" });
   resetOutboxForTests();
   const restored = readOutbox("conv");
   expect(restored[0]!.state).toBe("queued");
   expect(nextDispatch(restored)?.id).toBe("k1");
+});
+
+
+describe("issue 1538: possible dispatch survives a refresh", () => {
+  const onWire = (images = 0, files = 0) => {
+    enqueueOutbox("conv", { id: "k1", text: "handed to the wire", images, ...(files ? { files } : {}), at: Date.now() });
+    updateOutbox("conv", "k1", { state: "delivering", dispatchedAt: Date.now() });
+    resetOutboxForTests();
+    return readOutbox("conv")[0]!;
+  };
+
+  test.each([[0, 0], [2, 0], [0, 1], [1, 1]])("an entry handed to the wire hydrates as unknown, never replayed or held (images=%i files=%i)", (images, files) => {
+    const restored = onWire(images, files);
+    expect(restored).toMatchObject({ id: "k1", text: "handed to the wire", images, state: "delivering", deliveryUncertain: true });
+    expect(restored.files ?? 0).toBe(files);
+    expect(restored.needsReattach).toBeUndefined();
+    /* The serial slot stays taken: nothing dispatches until the original settles. */
+    expect(nextDispatch(readOutbox("conv"))).toBeNull();
+    retryOutbox("conv", "k1");
+    cancelOutbox("conv", "k1");
+    expect(readOutbox("conv")[0]).toEqual(restored);
+  });
+
+  test("a genuinely unsent entry behind the possible dispatch keeps its queue place and cancel", () => {
+    enqueueOutbox("conv", { id: "k1", text: "handed to the wire", images: 0, at: 1_000 });
+    updateOutbox("conv", "k1", { state: "delivering", dispatchedAt: 1_001 });
+    enqueueOutbox("conv", { id: "k2", text: "still local", images: 0, at: 1_002 });
+    resetOutboxForTests();
+    expect(readOutbox("conv").map((entry) => [entry.id, entry.state])).toEqual([["k1", "delivering"], ["k2", "queued"]]);
+    expect(nextDispatch(readOutbox("conv"))).toBeNull();
+    updateOutbox("conv", "k1", outboxReceiptPatch(readOutbox("conv")[0]!, "delivered", { at: new Date(1_500).toISOString(), operationId: "operation-k1", idempotencyKey: "k1" }, 2_000)!);
+    expect(nextDispatch(readOutbox("conv"))?.id).toBe("k2");
+    cancelOutbox("conv", "k2");
+    expect(readOutbox("conv").some((entry) => entry.id === "k2")).toBe(false);
+  });
+
+  test("a claim takes the wire fence of an earlier attempt with it", () => {
+    enqueueOutbox("conv", { id: "k1", text: "second attempt", images: 0, at: Date.now() });
+    updateOutbox("conv", "k1", { state: "failed", dispatchedAt: Date.now(), error: "500" });
+    retryOutbox("conv", "k1");
+    const claimed = claimOutboxDispatch("conv", "k1")!;
+    expect(claimed.state).toBe("delivering");
+    expect(claimed.dispatchedAt).toBeUndefined();
+    /* Claimed but not yet on the wire when the refresh hit: replay is safe. */
+    resetOutboxForTests();
+    expect(readOutbox("conv")[0]).toMatchObject({ id: "k1", state: "queued" });
+    expect(readOutbox("conv")[0]!.deliveryUncertain).toBeUndefined();
+  });
+
+  test("a switch-held entry keeps its level-triggered release across a refresh", () => {
+    enqueueOutbox("conv", { id: "k1", text: "held for the successor", images: 0, at: Date.now() });
+    updateOutbox("conv", "k1", { state: "delivering", dispatchedAt: Date.now(), heldForSwitch: true });
+    resetOutboxForTests();
+    expect(readOutbox("conv")[0]).toMatchObject({ id: "k1", state: "queued", heldForSwitch: true });
+    expect(readOutbox("conv")[0]!.deliveryUncertain).toBeUndefined();
+  });
 });
 
 

@@ -1372,6 +1372,113 @@ for (const laterDraft of ["pending immutable request", "pending immutable reques
 
 }
 
+for (const attachment of ["none", "image", "document"] as const) {
+  test(`issue 1538: producer-admitted ${attachment} send with its response still on the wire hydrates as unknown, sends once and settles by its receipt`, async () => {
+    const { RuntimeJournal } = await import("@/runtime-host/journal");
+    const { runtimeImageRefsForUploads } = await import("@/lib/runtime/runtimeImageStore");
+    const previousReader = globalThis.FileReader;
+    globalThis.FileReader = class extends ImmediateFileReader {
+      readAsDataURL(): void {
+        this.result = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aXioAAAAASUVORK5CYII=";
+        queueMicrotask(() => this.onload?.());
+      }
+    } as unknown as typeof FileReader;
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "inflight-producer-"));
+    const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { structuredHosts: true });
+    journal.append({ kind: "session-status", scope: { type: "session", id: file.conversationId! }, payload: {
+      conversationId: file.conversationId!, sessionKey: { engine: "codex", sessionId: "session-inflight" },
+      hostKind: "codex-app-server", host: "hosted", turn: "idle", provenance: "structured",
+      capabilities: { steer: true, structuredAttention: true, imageInput: { supported: true } },
+    } });
+    const sends: SendBody[] = [];
+    const admitted: RuntimeReceipt[] = [];
+    const withheld: Array<() => void> = [];
+    globalThis.fetch = (async (input, init) => {
+      const url = String(input);
+      if (url === "/api/tmux/targets") return Response.json({ targets: {} });
+      if (url !== "/api/runtime/send") return new Response("{}", { status: 404 });
+      const body = JSON.parse(String(init?.body)) as SendBody & { conversationId: string };
+      sends.push(body);
+      /* The producer admits the operation durably. The response that carries
+         its receipt is withheld, so the mount that sent it never learns. */
+      const result = journal.executeOperation({ ...body, images: runtimeImageRefsForUploads(body.images ?? []), kind: "send", operationId: `operation-inflight-${sends.length}` });
+      admitted.push(result.receipt);
+      return await new Promise<Response>((resolve) => withheld.push(() =>
+        resolve(Response.json({ operationId: result.operationId, receipt: result.receipt }, { status: 202 }))));
+    }) as typeof fetch;
+    writeProfile(file, { effort: "high", fast: false });
+    let mounted = await renderInto(surface());
+    try {
+      await settle(() => composerControls(mounted.host).type("response still on the wire"));
+      if (attachment === "image") await pasteImage(mounted.host, "inflight-image");
+      if (attachment === "document") {
+        const textarea = mounted.host.querySelector("textarea")!;
+        const propsKey = Object.keys(textarea).find(key => key.startsWith("__reactProps$"))!;
+        const props = (textarea as unknown as Record<string, { onDrop(event: unknown): void }>)[propsKey]!;
+        await settle(() => props.onDrop({ dataTransfer: { files: [new dom.File(["document"], "inflight.pdf", { type: "application/pdf" })] }, preventDefault() {}, stopPropagation() {} }));
+      }
+      await settle(() => composerControls(mounted.host).submit());
+      expect(sends).toHaveLength(1);
+      expect(admitted[0]?.status).toBe("queued");
+      const original = structuredClone(sends[0]!);
+      expect(original.images?.length ?? 0).toBe(attachment === "image" ? 1 : 0);
+      expect((original as SendBody & { files?: unknown[] }).files?.length ?? 0).toBe(attachment === "document" ? 1 : 0);
+      /* A second message queued behind the in-flight one has genuinely not left. */
+      await settle(() => composerControls(mounted.host).type("queued behind it"));
+      await settle(() => composerControls(mounted.host).submit());
+      expect(sends).toHaveLength(1);
+      expect(readOutbox(file.conversationId!).map(entry => entry.state)).toEqual(["delivering", "queued"]);
+      const behindId = readOutbox(file.conversationId!)[1]!.id;
+      await act(async () => mounted.root.unmount());
+      resetOutboxForTests();
+      writeProfile(file, { effort: "low", fast: true });
+      mounted = await renderInto(surface());
+      await settle(() => {});
+      /* One request in total: the possible dispatch is neither replayed nor failed. */
+      expect(sends).toEqual([original]);
+      const [inflight, behind] = readOutbox(file.conversationId!);
+      expect(inflight).toMatchObject({ id: original.idempotencyKey, text: "response still on the wire", images: attachment === "image" ? 1 : 0, state: "delivering", deliveryUncertain: true });
+      expect(inflight!.files ?? 0).toBe(attachment === "document" ? 1 : 0);
+      expect(inflight!.needsReattach).toBeUndefined();
+      expect(behind).toMatchObject({ id: behindId, text: "queued behind it", state: "queued" });
+      const inflightRow = mounted.host.querySelector(`[data-outbox-entry="${original.idempotencyKey}"]`)!;
+      expect(inflightRow.textContent).toContain("outcome is unknown");
+      expect(inflightRow.querySelector("[data-outbox-retry], [data-outbox-cancel]")).toBeNull();
+      const behindRow = mounted.host.querySelector(`[data-outbox-entry="${behindId}"]`)!;
+      expect(behindRow.querySelector("[data-outbox-cancel]")).not.toBeNull();
+      /* Ordinary local controls stay refused for the unknown original. */
+      await settle(() => retryOutbox(file.conversationId!, original.idempotencyKey));
+      await settle(() => cancelOutbox(file.conversationId!, original.idempotencyKey));
+      expect(sends).toEqual([original]);
+      expect(readOutbox(file.conversationId!)[0]).toEqual(inflight!);
+      await settle(() => composerControls(mounted.host).type("later draft"));
+      await pasteImage(mounted.host, "later-image");
+      /* The original operation settles authoritatively. The genuinely unsent
+         successor takes the freed slot under its own key. */
+      journal.transitionOperation("operation-inflight-1", "delivering");
+      snapshotReceipts = [journal.transitionOperation("operation-inflight-1", "delivered").receipt];
+      await settle(() => mounted.root.render(surface()));
+      const settled = readOutbox(file.conversationId!).find(entry => entry.id === original.idempotencyKey);
+      expect(settled).toMatchObject({ state: "delivered" });
+      expect(settled?.deliveryUncertain).toBeUndefined();
+      expect(sends).toHaveLength(2);
+      expect(sends[0]).toEqual(original);
+      expect(sends[1]).toMatchObject({ idempotencyKey: behindId, text: "queued behind it" });
+      expect(mounted.host.querySelector<HTMLTextAreaElement>("textarea")!.value).toBe("later draft");
+      expect(mounted.host.querySelectorAll("img")).toHaveLength(1);
+    } finally {
+      for (const reply of withheld) reply();
+      await settle(() => {});
+      await act(async () => mounted.root.unmount());
+      journal.close();
+      globalThis.FileReader = previousReader;
+    }
+  });
+}
+
 for (const emptySelection of [false, true]) {
   test.each([false, true])("receiptless safe retry preserves selected context empty=" + emptySelection + " remount=%s", async remount => {
     const { viewBus } = await import("@/hooks/viewPresenceBus");

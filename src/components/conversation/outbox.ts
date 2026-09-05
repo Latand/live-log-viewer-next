@@ -48,6 +48,11 @@ export interface OutboxEntry {
   state: OutboxState;
   /** Possible dispatch without affirmative arrival evidence; never locally replay. */
   deliveryUncertain?: true;
+  /** The moment this attempt was handed to the wire (ms). Written by the
+      composer immediately before the request leaves and cleared by the next
+      claim, so a reload while the response is still pending can tell a
+      possible dispatch from an entry that was claimed but never sent. */
+  dispatchedAt?: number;
   /** Original-operation evidence retained across reload and receipt-tail eviction. */
   deliveryReceipt?: RuntimeReceipt;
   /** Admission identity when the HTTP response has no receipt yet. */
@@ -441,13 +446,23 @@ function persistedQueue(cardId: string): readonly OutboxEntry[] {
          attachment bytes. Recovery remains on the server-owned operation. */
       if (entry.originalOperationOnly || entry.deliveryReceipt || entry.acceptedHeld) return { ...counted, originalOperationOnly: true };
       if (entry.deliveryUncertain) return counted;
+      /* The request left this browser and no response settled it before the
+         refresh: the server may hold the message. That is a possible dispatch
+         (#1538), so the entry keeps its state, key and payload counts and is
+         marked unknown until an authoritative receipt resolves it. Neither a
+         local replay nor a failed/cancel presentation is honest here. A
+         switch-held entry is different: its response DID arrive and parked
+         it, and its level-triggered release below still owns it. */
+      if (entry.state === "delivering" && entry.dispatchedAt !== undefined && !entry.heldForSwitch) {
+        return { ...counted, deliveryUncertain: true as const };
+      }
       const unsettled = entry.state === "delivering" || entry.state === "queued";
-      /* A `delivering` entry recorded before a refresh has no owner in this
-         mount: it returns to the queue so the serial dispatcher replays it
-         under its original idempotency key rather than stranding it. An entry
-         that carried ATTACHMENTS cannot be replayed — image or document, the
-         bytes were memory-only — so it is held for the operator instead of
-         being delivered without them (#1224). */
+      /* A `delivering` entry that was claimed but never handed to the wire
+         has no owner in this mount: it returns to the queue so the serial
+         dispatcher replays it under its original idempotency key rather than
+         stranding it. An entry that carried ATTACHMENTS cannot be replayed —
+         image or document, the bytes were memory-only — so it is held for the
+         operator instead of being delivered without them (#1224). */
       if (unsettled && images + files > 0) {
         return { ...counted, state: "failed" as const, needsReattach: true as const };
       }
@@ -1578,7 +1593,10 @@ export function claimOutboxDispatch(cardId: string, id: string): OutboxEntry | n
   if (queue.some((entry) => entry.state === "delivering" && !entry.launchOwned)) return null;
   const entry = queue.find((candidate) => candidate.id === id);
   if (!entry || entry.state !== "queued" || entry.originalOperationOnly) return null;
+  /* The wire fence belongs to one attempt. A replay starts unfenced so that a
+     refresh between this claim and the request still replays it. */
   const claimed: OutboxEntry = { ...entry, state: "delivering" };
+  delete claimed.dispatchedAt;
   write(cardId, queue.map((candidate) => candidate.id === id ? claimed : candidate));
   return claimed;
 }

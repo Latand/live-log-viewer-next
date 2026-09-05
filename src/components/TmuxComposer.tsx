@@ -2446,6 +2446,11 @@ export function TmuxComposerCore({
     const responseEpoch = legacyResponseEpoch.current;
     let admissionRequest: Promise<ComposerSendResult> | null = null;
     try {
+      /* The wire fence (#1538): stamped on the durable entry in the same tick
+         the request is created, before anything can await. A reload while the
+         response is still pending then hydrates this entry as a possible
+         dispatch instead of replaying it or presenting it as failed. */
+      if (outboxId && reachesWire) updateOutbox(cardId, outboxId, { dispatchedAt: nowMs() });
       admissionRequest = Promise.resolve(structuredSession
         ? !reachesWire
           ? { ok: false, structured: true, error: structuredImagesReason }
