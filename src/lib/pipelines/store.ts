@@ -7,7 +7,7 @@ import { canonicalProject } from "@/lib/projects/aliases";
 import { effortScale } from "@/lib/agent/efforts";
 import { normalizeClaudeLaunchModel } from "@/lib/agent/models";
 import { MAX_SCAFFOLD_LENGTH } from "@/lib/roles/store";
-import { initializeStateCollections, SqliteStateCollection, type StateCollectionSeed } from "@/lib/state/sqliteStateStore";
+import { initializeStateCollections, readStateCollectionsRows, SqliteStateCollection, type StateCollectionSeed } from "@/lib/state/sqliteStateStore";
 import type { BoardTask } from "@/lib/tasks/types";
 
 import { MAX_FAIL_EDGE_ROUNDS, MAX_PIPELINE_STAGES, MAX_STAGE_OUTPUTS } from "./limits";
@@ -510,6 +510,27 @@ export function loadPipelines(): Pipeline[] {
   return pipelineStore().snapshot();
 }
 
+/** Startup needs fresh, complete authority, including cold records. Read both
+    collections in one SQLite snapshot without projection caches or lenient
+    archive decoding. Before cutover, validate the legacy sources in memory;
+    this evidence read never migrates or rewrites an unreadable source. */
+export function loadPipelinesForStartup(): Pipeline[] {
+  const collections = readStateCollectionsRows(stateDatabaseFile(), ["pipelines", "pipelines_archive"]);
+  const active = collections.get("pipelines");
+  const archived = collections.get("pipelines_archive");
+  if ((active === null) !== (archived === null)) {
+    throw new PipelineStoreError("pipeline startup collections are incomplete");
+  }
+  const records = active === null && archived === null
+    ? [...parsePipelinesFile(pipelinesFile(), false), ...parsePipelinesFile(pipelinesArchiveFile(), false)]
+    : [...(active ?? []), ...(archived ?? [])];
+  if (!records.every(isPipeline)) throw new PipelineStoreError("pipeline registry contains malformed records");
+  if (new Set(records.map((record) => record.id)).size !== records.length) {
+    throw new PipelineStoreError("pipeline startup records have contradictory identities");
+  }
+  return records.map(reviveLoadedPipeline);
+}
+
 function parsePipelinesFile(filename: string, lenient: boolean): Pipeline[] {
   const raw = readJson(filename);
   if (raw === null) return [];
@@ -772,6 +793,9 @@ export async function withPipelineStartupAdmission<T>(
 ): Promise<T> {
   let entered = false;
   try {
+    // Refuse malformed legacy archives before the ordinary store can migrate
+    // them leniently. Admission rereads under the lease before any effects.
+    loadPipelinesForStartup();
     return await withPipelineMutation(() => {
       entered = true;
       return admit(true);

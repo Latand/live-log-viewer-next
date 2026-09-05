@@ -1,9 +1,10 @@
+import { Database } from "bun:sqlite";
 import { expect, test } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { archiveSettledPipelines, buildPipeline, checkpointPipelineRollbackMirrorsForDemotion, findPipelineRecord, loadArchivedPipelines, loadPipelines, PIPELINES_SCHEMA_VERSION, savePipelines, withPipelineMutation } from "./store";
+import { archiveSettledPipelines, buildPipeline, checkpointPipelineRollbackMirrorsForDemotion, findPipelineRecord, loadPipelinesForStartup, loadArchivedPipelines, loadPipelines, PIPELINES_SCHEMA_VERSION, savePipelines, withPipelineMutation, withPipelineStartupAdmission } from "./store";
 import type { Pipeline, PipelineStage } from "./types";
 
 const ARCHIVE_CHILD = path.join(import.meta.dir, "archive.sqliteChild.ts");
@@ -549,6 +550,75 @@ test("pipeline archival rolls back failures and publishes one cross-collection s
     if (exit !== 0) throw new Error(`archive child failed: ${await new Response(child.stderr).text()}`);
     expect(loadPipelines()).toEqual([]);
     expect(loadArchivedPipelines().map((pipeline) => pipeline.id)).toEqual([settled.id]);
+  } finally {
+    if (previous === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previous;
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
+
+test.each(["pipelines", "pipelines_archive"])("startup strictly rereads %s despite warm caches and preserves corrupt rows", async (collection) => {
+  const previous = process.env.LLV_STATE_DIR;
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-startup-evidence-"));
+  process.env.LLV_STATE_DIR = sandbox;
+  let db: Database | undefined;
+  try {
+    const pipeline = buildPipeline({
+      id: "aaaa0001", task: "startup evidence", project: "viewer", repoDir: "/repo",
+      stages: [{ id: "build", kind: "run", prompt: "build", next: null, effectiveRole: { roleId: null, engine: "codex", model: "gpt-5.6-sol", effort: "medium", access: "read-write", promptScaffold: null } }],
+      srcPath: null, srcConversationId: null, now: "2026-07-01T00:00:00.000Z",
+    });
+    pipeline.state = "closed";
+    pipeline.closedAt = pipeline.createdAt;
+    pipeline.cursor = null;
+    savePipelines([pipeline]);
+    if (collection === "pipelines_archive") await archiveSettledPipelines(Date.parse("2026-08-05T00:00:00.000Z"));
+    expect(loadPipelinesForStartup()).toHaveLength(1);
+    loadPipelines();
+    db = new Database(path.join(sandbox, "state.sqlite"));
+    const read = () => db!.query("SELECT value_json FROM state_rows WHERE collection=? AND row_key=?").get(collection, pipeline.id) as { value_json: string };
+    const original = read().value_json;
+    for (const corrupt of ["{broken", JSON.stringify({ ...pipeline, runs: null })]) {
+      db.query("UPDATE state_rows SET value_json=? WHERE collection=? AND row_key=?").run(corrupt, collection, pipeline.id);
+      expect(() => loadPipelinesForStartup()).toThrow();
+      expect(read().value_json).toBe(corrupt);
+      db.query("UPDATE state_rows SET value_json=? WHERE collection=? AND row_key=?").run(original, collection, pipeline.id);
+      expect(loadPipelinesForStartup()).toHaveLength(1);
+    }
+    if (collection === "pipelines_archive") {
+      db.query("UPDATE state_rows SET value_json=? WHERE collection=? AND row_key=?").run("{broken", collection, pipeline.id);
+      expect(loadArchivedPipelines()).toEqual([]);
+      expect(read().value_json).toBe("{broken");
+    } else {
+      db.query("INSERT INTO state_rows (collection,row_key,value_json,row_order,row_revision,controller_active) VALUES ('pipelines_archive',?,?,?,?,0)").run(pipeline.id, original, 0, 1);
+      expect(() => loadPipelinesForStartup()).toThrow("contradictory identities");
+      expect(read().value_json).toBe(original);
+    }
+  } finally {
+    db?.close();
+    if (previous === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previous;
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
+
+test("startup preserves malformed legacy archive evidence before migration", async () => {
+  const previous = process.env.LLV_STATE_DIR;
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-startup-legacy-"));
+  process.env.LLV_STATE_DIR = sandbox;
+  const archive = path.join(sandbox, "pipelines-archive.json");
+  try {
+    for (const corrupt of ["{broken", JSON.stringify({ schemaVersion: PIPELINES_SCHEMA_VERSION, pipelines: [{}] })]) {
+      fs.writeFileSync(archive, corrupt);
+      expect(await withPipelineStartupAdmission(async (available) => available)).toBeFalse();
+      expect(fs.readFileSync(archive, "utf8")).toBe(corrupt);
+      expect(fs.existsSync(path.join(sandbox, "state.sqlite"))).toBeFalse();
+    }
+    fs.writeFileSync(archive, JSON.stringify({ schemaVersion: PIPELINES_SCHEMA_VERSION, pipelines: [] }));
+    expect(await withPipelineStartupAdmission(async (available) => available)).toBeTrue();
+    expect(loadPipelinesForStartup()).toEqual([]);
   } finally {
     if (previous === undefined) delete process.env.LLV_STATE_DIR;
     else process.env.LLV_STATE_DIR = previous;

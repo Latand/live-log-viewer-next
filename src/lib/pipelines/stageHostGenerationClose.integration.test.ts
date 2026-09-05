@@ -1271,3 +1271,106 @@ test("ticks defer worktree provisioning until an earlier partial tree is positiv
   await tickPipelines([], ports);
   expect(commands.length).toBeGreaterThan(0);
 });
+
+test.each(["{broken", JSON.stringify({ runs: [] })])("malformed archive %s defers startup and recovers on a successful reread (#1501)", async (corrupt) => {
+  const current = await lane();
+  const pipeline = pipelineFor(current);
+  pipeline.state = "closed";
+  pipeline.cursor = null;
+  pipeline.closedAt = new Date(Date.now() - 5 * 86400000).toISOString();
+  pipeline.hiddenAt = pipeline.closedAt;
+  savePipelines(loadPipelines().map((record) => record.id === pipeline.id ? pipeline : record));
+  const { archiveSettledPipelines } = await import("./store");
+  await archiveSettledPipelines();
+  await loseIncumbent(current);
+  const before = current.entry()!;
+  const db = new Database(path.join(isolatedEnvironment.LLV_STATE_DIR, "state.sqlite"));
+  const row = db.query("SELECT value_json FROM state_rows WHERE collection='pipelines_archive' AND row_key=?").get(pipeline.id) as { value_json: string };
+  expect(row).not.toBeNull();
+  db.query("UPDATE state_rows SET value_json=? WHERE collection='pipelines_archive' AND row_key=?").run(corrupt, pipeline.id);
+  try {
+    for (const pending of [false, true]) {
+      if (pending) holdWork(current);
+      const result = await successor(current);
+      expect(result.report.adopted).toEqual([]);
+      expect(result.report.deferred).not.toBeNull();
+      expect(current.entry()).toEqual(before);
+      expect(signals).toEqual([]);
+      expect(db.query("SELECT value_json FROM state_rows WHERE collection='pipelines_archive' AND row_key=?").get(pipeline.id)).toEqual({ value_json: corrupt });
+      await result.end();
+    }
+    const unrelated = await lane();
+    await loseIncumbent(unrelated);
+    const unrelatedStartup = await successor(unrelated);
+    expect(unrelatedStartup.report.adopted).toHaveLength(1);
+    expect(unrelatedStartup.report.deferred).toBeNull();
+    await unrelatedStartup.end();
+    setAgentRegistryForTests(current.registry);
+  } finally {
+    db.query("UPDATE state_rows SET value_json=? WHERE collection='pipelines_archive' AND row_key=?").run(row.value_json, pipeline.id);
+    db.close();
+  }
+  const recovered = await successor(current);
+  expect(recovered.report.deferred).toBeNull();
+  expect(recovered.report.adopted).toHaveLength(1);
+});
+
+test("an older attempt survivor fences every pipeline conversation until positive death (#1501)", async () => {
+  const a = await lane("tree");
+  const pipeline = pipelineFor(a);
+  const survivor = a.descendant!;
+  const genB = await generation<SpawnReport>("spawn", a);
+  const keyB = { engine: "claude" as const, sessionId: genB.report.sessionId };
+  const b: Lane = {
+    ...a, incumbent: genB, hostA: track(genB.report.host.pid, genB.report.host), descendant: null,
+    conversationId: genB.report.conversationId, launchId: genB.report.launchId, key: keyB,
+    transcriptPath: genB.report.transcriptPath,
+    entry: () => a.registry.readOnlySnapshot().entries[sessionKeyId(keyB)],
+    hostedBy: () => a.registry.readOnlySnapshot().entries[sessionKeyId(keyB)]?.structuredHost?.process ?? null,
+  };
+  // Both attempts share the same durable registry and pipeline record.
+  const second = pipelineFor(b, { attemptState: "running" });
+  const record = pipelineRecord(pipeline.id);
+  record.runs[0]!.attempts.push({ ...second.runs[0]!.attempts[0]!, n: 2 });
+  record.state = "running";
+  savePipelines(loadPipelines().filter((item) => item.id !== second.id).map((item) => item.id === pipeline.id ? record : item));
+  b.registry.rememberMembership(b.conversationId, {
+    kind: "pipeline", containerId: pipeline.id, role: "builder", slot: "build:2",
+    stageId: "build", stageOrder: 0, round: 2, parentConversationId: null,
+  });
+  expect((await closeWithTermination(pipeline.id, {
+    signal: (pid, value) => {
+      if (pid === survivor.pid || Math.abs(pid) === b.hostA.pid) throw Object.assign(new Error("refused"), { code: "EPERM" });
+      realKill.call(process, pid, value);
+    }, deadlineMs: 100, graceMs: 20,
+  })).status).toBe(409);
+  expect(a.hostA.alive()).toBeFalse();
+  expect(b.hostA.alive()).toBeTrue();
+  await loseIncumbent(b);
+  await a.incumbent.end();
+  signals.length = 0;
+  const beforeB = b.entry();
+  for (const unknown of [false, false, true]) {
+    if (unknown) {
+      const stored = pipelineRecord(pipeline.id);
+      stored.runs[0]!.attempts[0]!.unresolvedTermination!.survivors[0]!.bootEpoch = null;
+      savePipelines(loadPipelines().map((item) => item.id === pipeline.id ? stored : item));
+      holdWork(b);
+    }
+    const before = pipelineRecord(pipeline.id);
+    const result = await successor(b);
+    expect(result.report.adopted).toEqual([]);
+    expect(result.report.deferred).not.toBeNull();
+    expect(b.entry()).toEqual(beforeB);
+    expect(pipelineRecord(pipeline.id)).toEqual(before);
+    expect(survivor.alive()).toBeTrue();
+    expect(signals).toEqual([]);
+    await result.end();
+  }
+  await survivor.end();
+  expect(processIdentityStatus(survivor.identity)).toBe("dead");
+  const recovered = await successor(b);
+  expect(recovered.report.deferred).toBeNull();
+  expect(recovered.report.adopted).toHaveLength(1);
+  expect((await closeOverHttp(pipeline.id)).status).toBe(200);
+});

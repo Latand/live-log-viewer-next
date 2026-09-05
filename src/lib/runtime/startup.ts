@@ -13,7 +13,7 @@ import { processIdentityMayOwn, processIdentityStatus } from "@/lib/processIdent
 import { assertDarwinStructuredRuntime } from "@/lib/proc/darwinIdentity";
 import { readStableTailRecords } from "@/lib/scanner/activity";
 import { withoutWakatimeCredential } from "@/lib/wakatime/credential";
-import { loadArchivedPipelines, loadPipelines, withPipelineStartupAdmission } from "@/lib/pipelines/store";
+import { loadPipelinesForStartup, withPipelineStartupAdmission } from "@/lib/pipelines/store";
 
 import {
   adoptClaudeRegistryHosts,
@@ -721,7 +721,7 @@ function pipelineStartupEvidence(registry: AgentRegistry, available = true): Pip
   let pipelines;
   try {
     if (!available) throw new Error("pipeline admission authority is unavailable");
-    pipelines = [...loadPipelines(), ...loadArchivedPipelines()];
+    pipelines = loadPipelinesForStartup();
   } catch (error) {
     console.error("[structured hosts] pipeline registry unreadable; deferring pipeline adoption", {
       error: error instanceof Error ? error.message : String(error),
@@ -733,13 +733,26 @@ function pipelineStartupEvidence(registry: AgentRegistry, available = true): Pip
     }
     return { settled, deferred };
   }
+  const memberships = registry.readOnlySnapshot().memberships;
   for (const pipeline of pipelines) {
+    const attempts = pipeline.runs.flatMap((run) => run.attempts);
+    const blocked = attempts.some((attempt) => attempt.unresolvedTermination?.survivors
+      .some((identity) => processIdentityStatus(identity) !== "dead"));
+    // A survivor from any attempt fences every writer in the same pipeline.
+    // Memberships also retain conversations absent from an older attempt row.
+    if (blocked) {
+      for (const [id, entries] of Object.entries(memberships)) {
+        if (entries.some((entry) => entry.kind === "pipeline" && entry.containerId === pipeline.id)) {
+          deferred.add(registry.canonicalConversationId(id as ViewerConversationId));
+        }
+      }
+    }
     for (const run of pipeline.runs) {
       for (const attempt of run.attempts) {
         if (!attempt.conversationId?.startsWith("conversation_")) continue;
         const id = registry.canonicalConversationId(attempt.conversationId as ViewerConversationId);
         if (SETTLED_STAGE_ATTEMPT_STATES.has(attempt.state)) settled.add(id);
-        if (attempt.unresolvedTermination?.survivors.some((identity) => processIdentityStatus(identity) !== "dead")) {
+        if (blocked) {
           deferred.add(id);
         }
       }
