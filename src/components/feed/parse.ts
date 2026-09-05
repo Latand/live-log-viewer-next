@@ -2109,6 +2109,9 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     const kind = codexThreadItemKind(item.type);
     const id = textPart(item.id) || "plain-" + pushSeq + "-" + String(timing.ts ?? "");
     const toolKind = ["functioncalloutput", "commandexecution", "filechange", "mcptoolcall", "dynamictoolcall", "collabagenttoolcall", "websearch", "imageview", "imagegeneration", "extension"].includes(kind);
+    // Use the renderer's tool families for every lifecycle/envelope form.
+    // A completion can update an earlier slot without appending a tool row.
+    if (toolKind) reasoningBoundary += 1;
     if (lifecycle === "itemdelta" || (lifecycle === "itemstarted" && !toolKind)) {
       addSvc(`${textPart(item.type) || "item"} ${lifecycle}`);
       return true;
@@ -2466,10 +2469,14 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     const boundaryType = codexThreadItemKind(p.type);
     if (obj.type === "turn_context" || obj.type === "compacted") reasoningBoundary += 1;
     const semanticKind = codexThreadItemKind(rec(p.item).type) || boundaryType;
+    // Messages and legacy Responses tools can reconcile into earlier rows.
+    // Thread-item tool boundaries are handled by renderCodexThreadItem itself.
     if (["message", "usermessage", "agentmessage", "functioncall", "functioncalloutput", "customtoolcall",
-      "customtoolcalloutput", "commandexecution", "filechange", "mcptoolcall", "dynamictoolcall", "extension",
-      "collabagenttoolcall", "websearch", "imageview", "imagegeneration", "mcptoolcallbegin", "mcptoolcallend",
-      "commandexecutionoutputdelta", "filechangeoutputdelta"].includes(semanticKind)) reasoningBoundary += 1;
+      "customtoolcalloutput"].includes(semanticKind)) reasoningBoundary += 1;
+    // These event records describe tool activity even when their display is
+    // service-only. Bookkeeping such as token_count does not split a run.
+    if (obj.type === "event_msg" && ["mcptoolcallbegin", "mcptoolcallend", "websearchend", "patchapplyend",
+      "commandexecutionoutputdelta", "filechangeoutputdelta", "filechangepatchupdated"].includes(boundaryType)) reasoningBoundary += 1;
     if (["taskstarted", "taskcomplete", "turnstarted", "turncompleted", "turnaborted", "contextcompacted"].includes(boundaryType)) {
       reasoningBoundary += 1;
     }
