@@ -803,13 +803,18 @@ async function stopStageHostByRecordedIdentity(
   return refused(`${outcome.error} (pid ${ref.pid}${named}); ${generation}`);
 }
 
+function terminationIdentityStatus(identity: PipelineUnresolvedTermination["survivors"][number]) {
+  try { return processIdentityStatus(identity); }
+  catch { return "unverified" as const; }
+}
+
 function rememberUnresolvedTermination(
   attempt: PipelineStageAttempt,
   result: Extract<PipelineStageStopResult, { outcome: "unresolved" }>,
   recordedAt: string,
 ): void {
   const survivors = [...(attempt.unresolvedTermination?.survivors ?? []), ...result.survivors]
-    .filter((survivor) => processIdentityStatus(survivor) !== "dead");
+    .filter((survivor) => terminationIdentityStatus(survivor) !== "dead");
   const unique = new Map(survivors.map((survivor) => [
     JSON.stringify([survivor.pid, survivor.startIdentity, survivor.bootEpoch ?? null]), survivor,
   ]));
@@ -826,9 +831,9 @@ function unresolvedTerminationRefusal(attempt: PipelineStageAttempt): string | n
   const record = attempt.unresolvedTermination;
   if (!record) return null;
   const standing: string[] = [];
-  record.survivors = record.survivors.filter((survivor) => processIdentityStatus(survivor) !== "dead");
+  record.survivors = record.survivors.filter((survivor) => terminationIdentityStatus(survivor) !== "dead");
   for (const survivor of record.survivors) {
-    const status = processIdentityStatus(survivor);
+    const status = terminationIdentityStatus(survivor);
     if (status === "dead") continue;
     standing.push(`pid ${survivor.pid} ${status === "alive" ? "is still running" : "cannot be verified"}`);
   }
@@ -837,6 +842,17 @@ function unresolvedTerminationRefusal(attempt: PipelineStageAttempt): string | n
     return null;
   }
   return `an earlier stop left authorized processes it could not end (${record.error}); ${standing.join(", ")}`;
+}
+
+/** Older attempts can retain descendants after a replacement becomes current. */
+function pipelineSurvivorRefusal(pipeline: Pipeline): { error: string; status: number } | null {
+  for (const run of pipeline.runs) {
+    for (const attempt of run.attempts) {
+      const error = unresolvedTerminationRefusal(attempt);
+      if (error) return { error, status: 409 };
+    }
+  }
+  return null;
 }
 
 export function defaultPipelinePorts(
@@ -3255,7 +3271,8 @@ export async function tickPipelines(entries: FileEntry[], ports: PipelinePorts =
         pipelineChanged = reconcileBoundReviewFlow(pipeline, ports, persistPipeline) || pipelineChanged;
         pipelineChanged = await reconcileUnconfirmedHosts(pipeline, ports) || pipelineChanged;
         pipelineChanged = await reconcileTerminalStageHosts(pipeline, ports) || pipelineChanged;
-        if (!TERMINAL_STATES.has(pipeline.state) && pipeline.state !== "paused" && pipeline.state !== "needs_decision") {
+        if (!TERMINAL_STATES.has(pipeline.state) && pipeline.state !== "paused" && pipeline.state !== "needs_decision"
+          && !pipelineSurvivorRefusal(pipeline)) {
           pipelineChanged = await tickPipeline(
             pipeline,
             entries,
@@ -4327,6 +4344,8 @@ export async function patchPipeline(
       pipeline.stateDetail = pauseResumeDetail("resumed", actor);
       if (flow?.state === "paused") ports.patchFlow(flow.id, "resume", undefined, actor);
     } else if (req.action === "retry-stage") {
+      const survivorRefusal = pipelineSurvivorRefusal(pipeline);
+      if (survivorRefusal) return survivorRefusal;
       if (pipeline.state !== "needs_decision") return { error: "pipeline does not have a stage awaiting retry", status: 409 };
       const recoveryRefusal = verdictRecoveryResetRefusal(pipeline, attempt, ports);
       if (recoveryRefusal) return recoveryRefusal;
@@ -4436,6 +4455,8 @@ export async function patchPipeline(
       pipeline.pausedState = null;
       pipeline.stateDetail = null;
     } else if (req.action === "skip-stage") {
+      const survivorRefusal = pipelineSurvivorRefusal(pipeline);
+      if (survivorRefusal) return survivorRefusal;
       if (pipeline.state !== "needs_decision" || !stage) return { error: "pipeline does not have a stage awaiting a decision", status: 409 };
       const recoveryRefusal = verdictRecoveryResetRefusal(pipeline, attempt, ports);
       if (recoveryRefusal) return recoveryRefusal;

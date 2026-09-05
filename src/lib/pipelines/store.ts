@@ -763,6 +763,25 @@ export async function withPipelineControllerMutation<T>(
   return pipelineStore().mutate(mutate, undefined, true);
 }
 
+/** Hold the existing cross-process mutation lease through startup admission.
+ * Unavailable state or authority permits only the caller's deferred path.
+ * Never reinterpret a failure inside admission as permission to run it again.
+ */
+export async function withPipelineStartupAdmission<T>(
+  admit: (available: boolean) => Promise<T>,
+): Promise<T> {
+  let entered = false;
+  try {
+    return await withPipelineMutation(() => {
+      entered = true;
+      return admit(true);
+    });
+  } catch (error) {
+    if (entered) throw error;
+    return admit(false);
+  }
+}
+
 export function savePipelines(pipelines: Pipeline[]): void {
   pipelineStore().replaceSync(pipelines);
 }

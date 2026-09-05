@@ -134,11 +134,25 @@ if (mode === "spawn") {
   const adopted: Array<{ key: string; host: ProcessIdentity }> = [];
   const considered: string[] = [];
   let deferred: string | null = null;
+  const pauseAt = async (phase: string) => {
+    const barrier = path.join(laneDirectory, `startup-pause-${phase}`);
+    if (!fs.existsSync(barrier)) return;
+    fs.writeFileSync(`${barrier}.reached`, "ready");
+    for (let i = 0; i < 2000; i += 1) {
+      if (fs.existsSync(`${barrier}.release`)) return;
+      await Bun.sleep(5);
+    }
+    throw new Error(`startup ${phase} barrier timed out`);
+  };
   const hosts = await adoptStructuredHostsAtStartup({
     registry,
+    ...(fs.existsSync(path.join(laneDirectory, "startup-pause-refresh"))
+      ? { refreshTranscriptState: async () => { await pauseAt("refresh"); return new Set<string>(); } }
+      : {}),
     adopt: async () => [],
     /* The one substitution: the CLI launch. Selection is the product's. */
     adoptClaude: async (received, _optionsFor, _env, shouldAdopt = () => true) => {
+      await pauseAt("admission");
       const rows = Object.values(received.readOnlySnapshot().entries).filter((entry: AgentRegistryEntry) =>
         entry.key.engine === "claude" && entry.structuredHost?.kind === "claude-broker");
       const result: Array<{ key: AgentRegistryEntry["key"]; host: never }> = [];

@@ -13,7 +13,7 @@ import { processIdentityMayOwn, processIdentityStatus } from "@/lib/processIdent
 import { assertDarwinStructuredRuntime } from "@/lib/proc/darwinIdentity";
 import { readStableTailRecords } from "@/lib/scanner/activity";
 import { withoutWakatimeCredential } from "@/lib/wakatime/credential";
-import { loadArchivedPipelines, loadPipelines } from "@/lib/pipelines/store";
+import { loadArchivedPipelines, loadPipelines, withPipelineStartupAdmission } from "@/lib/pipelines/store";
 
 import {
   adoptClaudeRegistryHosts,
@@ -715,11 +715,12 @@ interface PipelineStartupEvidence {
 /** Pipeline attempts determine whether startup may create another writer.
     A failed read retains pipeline members without launch or demotion; a
     captured survivor blocks even pending work until its identity is dead. */
-function pipelineStartupEvidence(registry: AgentRegistry): PipelineStartupEvidence {
+function pipelineStartupEvidence(registry: AgentRegistry, available = true): PipelineStartupEvidence {
   const settled = new Set<string>();
   const deferred = new Set<string>();
   let pipelines;
   try {
+    if (!available) throw new Error("pipeline admission authority is unavailable");
     pipelines = [...loadPipelines(), ...loadArchivedPipelines()];
   } catch (error) {
     console.error("[structured hosts] pipeline registry unreadable; deferring pipeline adoption", {
@@ -780,10 +781,6 @@ export async function adoptStructuredHostsAtStartup(
   const registry = dependencies.registry ?? agentRegistry();
   const client = dependencies.client === undefined ? runtimeHostClient() : dependencies.client;
   const orchestratorSeats = dependencies.orchestratorSeats ?? activeOrchestratorSeats;
-  const pipelineEvidence = (dependencies.pipelineEvidence ?? pipelineStartupEvidence)(registry);
-  const deferredHostKeys = new Set(Object.values(registry.readOnlySnapshot().conversations)
-    .filter((conversation) => pipelineEvidence.deferred.has(registry.canonicalConversationId(conversation.id)))
-    .flatMap((conversation) => conversation.generations.map((generation) => sessionKeyId({ engine: conversation.engine, sessionId: generation.id }))));
   /* Capture hosted seat ownership before any awaited startup work can refresh
      a terminal transcript or reconcile away the predecessor host wrapper. */
   const orchestratorRecoveries = mergeOrchestratorRestartRecoveries(
@@ -811,263 +808,274 @@ export async function adoptStructuredHostsAtStartup(
   });
   const unreadableTranscripts = await (dependencies.refreshTranscriptState ?? refreshStructuredTranscriptState)(registry)
     ?? new Set<string>();
-  let orchestratorHostKeys = currentOrchestratorRestartRecoveryHostKeys(
-    registry,
-    orchestratorRecoveries,
-    orchestratorSeats(),
-  );
-  let nextAdoptedHosts = await revalidateRetainedStartupHosts(
-    registry,
-    retryAdoptedHosts,
-    registry.readOnlySnapshot(),
-    orchestratorHostKeys,
-  );
-  rememberStructuredStartupRetry(nextAdoptedHosts, orchestratorRecoveries);
-  registry.drainDeadSupersededHeldDeliveries();
-  /* Pending work makes a terminal conversation adoption-eligible. Clear any
-     provably dead wrapper before that decision so its stale writer fence
-     cannot block the startup recovery path. */
-  reconcileDeadStructuredRegistryHosts(registry, (entry) => orchestratorHostKeys.has(sessionKeyId(entry.key)) || deferredHostKeys.has(sessionKeyId(entry.key)));
-  const signals = await structuredStartupSignals(registry, client);
-  const shouldAdopt = structuredStartupAdoptionFilter(
-    registry,
-    signals,
-    registry.readOnlySnapshot(),
-    orchestratorRecoveriesByHostKey,
-    orchestratorSeats,
-    unreadableTranscripts,
-    pipelineEvidence.settled,
-    pipelineEvidence.deferred,
-  );
-  const adoptionCandidates = Object.values(registry.readOnlySnapshot().entries).filter((entry) =>
-    entry.structuredHost && shouldAdopt(entry));
-  /* Nothing is launched that this pass cannot hand to a delivery controller.
-     `controllerBoundEarly` is exactly "this pass has a runtime client", and it
-     is also the condition on the claim assertion below — so without one, the
-     loops that follow would start CLI processes, no publication would claim
-     them, and the pass would still answer "adopted" because the only check that
-     would have caught it is behind the same condition (#1282). So this pass
-     defers its adoption: nothing is launched, the boot's own recovery evidence
-     and retained hosts are kept for the next attempt, and the startup retry
-     loop runs the pass again once a client exists. */
-  if (!controllerBoundEarly && adoptionCandidates.length > 0) {
-    retryAdoptedHosts = nextAdoptedHosts;
-    retryOrchestratorRecoveries = [...orchestratorRecoveries];
-    const keys = adoptionCandidates.map((entry) => sessionKeyId(entry.key));
-    if (!deferredAdoptionLogged) {
-      deferredAdoptionLogged = true;
-      console.error("[structured hosts] deferring adoption until a delivery controller can claim it", { keys });
-    }
-    throw new RuntimeHostUnavailableError(
-      `structured delivery controller is unavailable; deferred adoption of ${keys.length} host(s): ${keys.join(", ")}`,
+  /* Close persists survivors under this same lease. Read after refresh and
+     hold admission through launch, demotion and publication, so no awaited
+     adoption step can race a partial termination's durable evidence. */
+  return withPipelineStartupAdmission(async (available) => {
+    const pipelineEvidence = available
+      ? (dependencies.pipelineEvidence ?? pipelineStartupEvidence)(registry)
+      : pipelineStartupEvidence(registry, false);
+    const deferredHostKeys = new Set(Object.values(registry.readOnlySnapshot().conversations)
+      .filter((conversation) => pipelineEvidence.deferred.has(registry.canonicalConversationId(conversation.id)))
+      .flatMap((conversation) => conversation.generations.map((generation) => sessionKeyId({ engine: conversation.engine, sessionId: generation.id }))));
+    let orchestratorHostKeys = currentOrchestratorRestartRecoveryHostKeys(
+      registry,
+      orchestratorRecoveries,
+      orchestratorSeats(),
     );
-  }
-  const codexCandidateCount = adoptionCandidates.filter((entry) => entry.key.engine === "codex").length;
-  const claudeCandidateCount = adoptionCandidates.length - codexCandidateCount;
-  let totalHosts = adoptionCandidates.length;
-  let completedHosts = 0;
-  const reportProgress = (phase: StructuredHostStartupPhase) => {
-    markStructuredHostStartupProgress({ phase, completedHosts, totalHosts });
-  };
-  reportProgress("adopting Codex hosts");
-  const resolveCodexOwner = dependencies.resolveCodexOwner ?? ((entry: AgentRegistryEntry) =>
-    accountManager.resolveTranscriptOwner("codex", entry.artifactPath));
-  const resolveClaudeOwner = dependencies.resolveClaudeOwner ?? ((entry: AgentRegistryEntry) =>
-    accountManager.resolveTranscriptOwner("claude", entry.artifactPath));
-  const startupEnvironment = withoutWakatimeCredential(process.env);
-  const codex = await (dependencies.adopt ?? adoptCodexRegistryHosts)(
-    registry,
-    (entry) => {
-      const owner = resolveCodexOwner(entry);
-      const capability = registry.rotateSpawnCapabilityForPath(entry.artifactPath);
-      const access = materializeStructuredHostAccess(
-        structuredHostAccessPolicy(entry.launchProfile),
-        startupEnvironment,
-        capability,
+    let nextAdoptedHosts = await revalidateRetainedStartupHosts(
+      registry,
+      retryAdoptedHosts,
+      registry.readOnlySnapshot(),
+      orchestratorHostKeys,
+    );
+    rememberStructuredStartupRetry(nextAdoptedHosts, orchestratorRecoveries);
+    registry.drainDeadSupersededHeldDeliveries();
+    /* Pending work makes a terminal conversation adoption-eligible. Clear any
+       provably dead wrapper before that decision so its stale writer fence
+       cannot block the startup recovery path. */
+    reconcileDeadStructuredRegistryHosts(registry, (entry) => orchestratorHostKeys.has(sessionKeyId(entry.key)) || deferredHostKeys.has(sessionKeyId(entry.key)));
+    const signals = await structuredStartupSignals(registry, client);
+    const shouldAdopt = structuredStartupAdoptionFilter(
+      registry,
+      signals,
+      registry.readOnlySnapshot(),
+      orchestratorRecoveriesByHostKey,
+      orchestratorSeats,
+      unreadableTranscripts,
+      pipelineEvidence.settled,
+      pipelineEvidence.deferred,
+    );
+    const adoptionCandidates = Object.values(registry.readOnlySnapshot().entries).filter((entry) =>
+      entry.structuredHost && shouldAdopt(entry));
+    /* Nothing is launched that this pass cannot hand to a delivery controller.
+       `controllerBoundEarly` is exactly "this pass has a runtime client", and it
+       is also the condition on the claim assertion below — so without one, the
+       loops that follow would start CLI processes, no publication would claim
+       them, and the pass would still answer "adopted" because the only check that
+       would have caught it is behind the same condition (#1282). So this pass
+       defers its adoption: nothing is launched, the boot's own recovery evidence
+       and retained hosts are kept for the next attempt, and the startup retry
+       loop runs the pass again once a client exists. */
+    if (!controllerBoundEarly && adoptionCandidates.length > 0) {
+      retryAdoptedHosts = nextAdoptedHosts;
+      retryOrchestratorRecoveries = [...orchestratorRecoveries];
+      const keys = adoptionCandidates.map((entry) => sessionKeyId(entry.key));
+      if (!deferredAdoptionLogged) {
+        deferredAdoptionLogged = true;
+        console.error("[structured hosts] deferring adoption until a delivery controller can claim it", { keys });
+      }
+      throw new RuntimeHostUnavailableError(
+        `structured delivery controller is unavailable; deferred adoption of ${keys.length} host(s): ${keys.join(", ")}`,
       );
-      return {
-        cwd: entry.cwd,
-        codexHome: owner?.home,
-        fileAuthCredentials: owner?.kind === "managed",
-        model: entry.launchProfile?.model ?? undefined,
-        effort: entry.launchProfile?.effort ?? undefined,
-        allowSubagents: entry.launchProfile?.allowSubagents ?? false,
-        mcpServers: entry.launchProfile?.mcpServers ?? ["viewer"],
-        /* Re-adoption replays the durable grant (issue #687) — a session never
-           gains or loses Computer Use by being picked up again at startup. */
-        plugins: entry.launchProfile?.plugins ?? [],
-        ...access.codex,
-        ...access.host,
-        env: access.env,
-      };
-    },
-    startupEnvironment,
-    shouldAdopt,
-    () => {
-      completedHosts += 1;
-      totalHosts = Math.max(totalHosts, completedHosts);
-      reportProgress("adopting Codex hosts");
-    },
-  );
-  completedHosts = Math.max(completedHosts, codexCandidateCount);
-  nextAdoptedHosts = retainAdoptedHosts(nextAdoptedHosts, codex);
-  rememberStructuredStartupRetry(nextAdoptedHosts, orchestratorRecoveries);
-  reportProgress("adopting Claude hosts");
-  const claude = await (dependencies.adoptClaude ?? adoptClaudeRegistryHosts)(
-    registry,
-    (entry) => {
-      const owner = resolveClaudeOwner(entry);
-      const capability = registry.rotateSpawnCapabilityForPath(entry.artifactPath);
-      const env = withoutWakatimeCredential(owner?.env ?? startupEnvironment);
-      const access = materializeStructuredHostAccess(
-        structuredHostAccessPolicy(entry.launchProfile),
-        env,
-        capability,
-      );
-      return {
-        cwd: entry.cwd,
-        claudeConfigDir: owner?.kind === "managed" ? owner.home : undefined,
-        claudeProjectsDir: owner?.transcriptRoot,
-        spawnPolicyBaseSettingsPath: owner?.kind === "managed" ? claudeSettingsPath() : null,
-        allowSubagents: entry.launchProfile?.allowSubagents ?? false,
-        mcpServers: entry.launchProfile?.mcpServers ?? ["viewer"],
-        mcpStatePath: owner?.kind === "managed"
-          ? path.join(owner.home, ".claude.json")
-          : owner ? path.join(path.dirname(owner.home), ".claude.json") : undefined,
-        readOnly: launchProfileEngineReadOnly(entry.launchProfile),
-        restricted: entry.launchProfile?.sandbox === "restricted",
-        env: access.env,
-        ...access.host,
-        model: entry.launchProfile?.model ?? undefined,
-        effort: entry.launchProfile?.effort ?? undefined,
-        permissionMode: effectiveClaudePermissionMode(entry.launchProfile ?? {}),
-      };
-    },
-    startupEnvironment,
-    shouldAdopt,
-    () => {
-      completedHosts += 1;
-      totalHosts = Math.max(totalHosts, completedHosts);
-      reportProgress("adopting Claude hosts");
-    },
-  );
-  completedHosts = Math.max(completedHosts, codexCandidateCount + claudeCandidateCount);
-  nextAdoptedHosts = retainAdoptedHosts(nextAdoptedHosts, claude);
-  rememberStructuredStartupRetry(nextAdoptedHosts, orchestratorRecoveries);
-  assertEligibleHostsResolved(
-    registry,
-    shouldAdopt,
-    nextAdoptedHosts,
-    (key) => key.engine === "codex" ? dependencies.adopt === undefined : dependencies.adoptClaude === undefined,
-    dependencies.hostClaimed,
-  );
-  reportProgress("reconciling structured hosts");
-  orchestratorHostKeys = currentOrchestratorRestartRecoveryHostKeys(
-    registry,
-    orchestratorRecoveries,
-    orchestratorSeats(),
-  );
-  nextAdoptedHosts = await revalidateRetainedStartupHosts(
-    registry,
-    nextAdoptedHosts,
-    registry.readOnlySnapshot(),
-    orchestratorHostKeys,
-  );
-  rememberStructuredStartupRetry(nextAdoptedHosts, orchestratorRecoveries);
-  const candidateHostKeys = new Set(nextAdoptedHosts.map((item) => sessionKeyId(item.key)));
-  const shouldRetainCandidateOrAdopt: StructuredHostAdoptionFilter = (entry) =>
-    candidateHostKeys.has(sessionKeyId(entry.key))
-    /* A row this boot could not read a transcript for is left exactly as it
-       was. The demotion below retires a skipped row — it releases the endpoint,
-       clears the active turn and can signal an unclaimable Claude orphan — and
-       an unreadable tail is no more grounds for that than it is for a launch
-       (#1281). Whatever can read the artifact next decides. */
-    || deferredHostKeys.has(sessionKeyId(entry.key))
-    || unreadableTranscripts.has(sessionKeyId(entry.key))
-    || shouldAdopt(entry);
-  const candidateCodexHosts = nextAdoptedHosts.filter(
-    (item): item is AdoptedCodexHost => item.key.engine === "codex"
-      && !orchestratorHostKeys.has(sessionKeyId(item.key)),
-  );
-  const existingCodexContinuations = client
-    ? await interruptedCodexContinuations(registry, client, candidateCodexHosts)
-    : new Map<string, RuntimeOperationResult>();
-  await demoteSkippedStructuredRegistryHosts(registry, shouldRetainCandidateOrAdopt);
-  const publicationSnapshot = registry.readOnlySnapshot();
-  orchestratorHostKeys = currentOrchestratorRestartRecoveryHostKeys(
-    registry,
-    orchestratorRecoveries,
-    orchestratorSeats(),
-    publicationSnapshot,
-  );
-  nextAdoptedHosts = await revalidateRetainedStartupHosts(
-    registry,
-    nextAdoptedHosts,
-    publicationSnapshot,
-    orchestratorHostKeys,
-  );
-  rememberStructuredStartupRetry(nextAdoptedHosts, orchestratorRecoveries);
-  const finalShouldAdopt = structuredStartupAdoptionFilter(
-    registry,
-    signals,
-    publicationSnapshot,
-    orchestratorRecoveriesByHostKey,
-    orchestratorSeats,
-    unreadableTranscripts,
-    pipelineEvidence.settled,
-    pipelineEvidence.deferred,
-  );
-  const finalHostKeys = new Set(nextAdoptedHosts.map((item) => sessionKeyId(item.key)));
-  const shouldPublish: StructuredHostAdoptionFilter = (entry) =>
-    finalHostKeys.has(sessionKeyId(entry.key)) || finalShouldAdopt(entry);
-  const interruptedCodex = interruptedCodexConversations(
-    registry,
-    shouldPublish,
-    signals.hostedRunningConversationIds,
-    unreadableTranscripts,
-    publicationSnapshot,
-  );
-  const finalCodexHosts = nextAdoptedHosts.filter(
-    (item): item is AdoptedCodexHost => item.key.engine === "codex"
-      && !orchestratorHostKeys.has(sessionKeyId(item.key)),
-  );
-  reportProgress("finalizing structured delivery");
-  /* `controllerBoundEarly` is exactly "this pass has a runtime client", so the
-     only way past it is a viewer that cannot host at all. Rebinding there would
-     retire a publication this pass has no client to replace — and every spawn
-     in the process would fail until some later pass rebound it (#1191). */
-  if (controllerBoundEarly) {
-    await completeStructuredDeliveryQueueStartup(nextAdoptedHosts);
-    assertAdoptedHostsAreClaimed(nextAdoptedHosts, dependencies.hostClaimed);
-  }
-  await enqueueOrchestratorRestartRecoveries(
-    registry,
-    client,
-    orchestratorRecoveries.filter((target) => !deferredHostKeys.has(target.hostKey)),
-    finalHostKeys,
-    orchestratorSeats,
-  );
-  if (client) {
-    await enqueueInterruptedCodexContinuations(
+    }
+    const codexCandidateCount = adoptionCandidates.filter((entry) => entry.key.engine === "codex").length;
+    const claudeCandidateCount = adoptionCandidates.length - codexCandidateCount;
+    let totalHosts = adoptionCandidates.length;
+    let completedHosts = 0;
+    const reportProgress = (phase: StructuredHostStartupPhase) => {
+      markStructuredHostStartupProgress({ phase, completedHosts, totalHosts });
+    };
+    reportProgress("adopting Codex hosts");
+    const resolveCodexOwner = dependencies.resolveCodexOwner ?? ((entry: AgentRegistryEntry) =>
+      accountManager.resolveTranscriptOwner("codex", entry.artifactPath));
+    const resolveClaudeOwner = dependencies.resolveClaudeOwner ?? ((entry: AgentRegistryEntry) =>
+      accountManager.resolveTranscriptOwner("claude", entry.artifactPath));
+    const startupEnvironment = withoutWakatimeCredential(process.env);
+    const codex = await (dependencies.adopt ?? adoptCodexRegistryHosts)(
+      registry,
+      (entry) => {
+        const owner = resolveCodexOwner(entry);
+        const capability = registry.rotateSpawnCapabilityForPath(entry.artifactPath);
+        const access = materializeStructuredHostAccess(
+          structuredHostAccessPolicy(entry.launchProfile),
+          startupEnvironment,
+          capability,
+        );
+        return {
+          cwd: entry.cwd,
+          codexHome: owner?.home,
+          fileAuthCredentials: owner?.kind === "managed",
+          model: entry.launchProfile?.model ?? undefined,
+          effort: entry.launchProfile?.effort ?? undefined,
+          allowSubagents: entry.launchProfile?.allowSubagents ?? false,
+          mcpServers: entry.launchProfile?.mcpServers ?? ["viewer"],
+          /* Re-adoption replays the durable grant (issue #687) — a session never
+             gains or loses Computer Use by being picked up again at startup. */
+          plugins: entry.launchProfile?.plugins ?? [],
+          ...access.codex,
+          ...access.host,
+          env: access.env,
+        };
+      },
+      startupEnvironment,
+      shouldAdopt,
+      () => {
+        completedHosts += 1;
+        totalHosts = Math.max(totalHosts, completedHosts);
+        reportProgress("adopting Codex hosts");
+      },
+    );
+    completedHosts = Math.max(completedHosts, codexCandidateCount);
+    nextAdoptedHosts = retainAdoptedHosts(nextAdoptedHosts, codex);
+    rememberStructuredStartupRetry(nextAdoptedHosts, orchestratorRecoveries);
+    reportProgress("adopting Claude hosts");
+    const claude = await (dependencies.adoptClaude ?? adoptClaudeRegistryHosts)(
+      registry,
+      (entry) => {
+        const owner = resolveClaudeOwner(entry);
+        const capability = registry.rotateSpawnCapabilityForPath(entry.artifactPath);
+        const env = withoutWakatimeCredential(owner?.env ?? startupEnvironment);
+        const access = materializeStructuredHostAccess(
+          structuredHostAccessPolicy(entry.launchProfile),
+          env,
+          capability,
+        );
+        return {
+          cwd: entry.cwd,
+          claudeConfigDir: owner?.kind === "managed" ? owner.home : undefined,
+          claudeProjectsDir: owner?.transcriptRoot,
+          spawnPolicyBaseSettingsPath: owner?.kind === "managed" ? claudeSettingsPath() : null,
+          allowSubagents: entry.launchProfile?.allowSubagents ?? false,
+          mcpServers: entry.launchProfile?.mcpServers ?? ["viewer"],
+          mcpStatePath: owner?.kind === "managed"
+            ? path.join(owner.home, ".claude.json")
+            : owner ? path.join(path.dirname(owner.home), ".claude.json") : undefined,
+          readOnly: launchProfileEngineReadOnly(entry.launchProfile),
+          restricted: entry.launchProfile?.sandbox === "restricted",
+          env: access.env,
+          ...access.host,
+          model: entry.launchProfile?.model ?? undefined,
+          effort: entry.launchProfile?.effort ?? undefined,
+          permissionMode: effectiveClaudePermissionMode(entry.launchProfile ?? {}),
+        };
+      },
+      startupEnvironment,
+      shouldAdopt,
+      () => {
+        completedHosts += 1;
+        totalHosts = Math.max(totalHosts, completedHosts);
+        reportProgress("adopting Claude hosts");
+      },
+    );
+    completedHosts = Math.max(completedHosts, codexCandidateCount + claudeCandidateCount);
+    nextAdoptedHosts = retainAdoptedHosts(nextAdoptedHosts, claude);
+    rememberStructuredStartupRetry(nextAdoptedHosts, orchestratorRecoveries);
+    assertEligibleHostsResolved(
+      registry,
+      shouldAdopt,
+      nextAdoptedHosts,
+      (key) => key.engine === "codex" ? dependencies.adopt === undefined : dependencies.adoptClaude === undefined,
+      dependencies.hostClaimed,
+    );
+    reportProgress("reconciling structured hosts");
+    orchestratorHostKeys = currentOrchestratorRestartRecoveryHostKeys(
+      registry,
+      orchestratorRecoveries,
+      orchestratorSeats(),
+    );
+    nextAdoptedHosts = await revalidateRetainedStartupHosts(
+      registry,
+      nextAdoptedHosts,
+      registry.readOnlySnapshot(),
+      orchestratorHostKeys,
+    );
+    rememberStructuredStartupRetry(nextAdoptedHosts, orchestratorRecoveries);
+    const candidateHostKeys = new Set(nextAdoptedHosts.map((item) => sessionKeyId(item.key)));
+    const shouldRetainCandidateOrAdopt: StructuredHostAdoptionFilter = (entry) =>
+      candidateHostKeys.has(sessionKeyId(entry.key))
+      /* A row this boot could not read a transcript for is left exactly as it
+         was. The demotion below retires a skipped row — it releases the endpoint,
+         clears the active turn and can signal an unclaimable Claude orphan — and
+         an unreadable tail is no more grounds for that than it is for a launch
+         (#1281). Whatever can read the artifact next decides. */
+      || deferredHostKeys.has(sessionKeyId(entry.key))
+      || unreadableTranscripts.has(sessionKeyId(entry.key))
+      || shouldAdopt(entry);
+    const candidateCodexHosts = nextAdoptedHosts.filter(
+      (item): item is AdoptedCodexHost => item.key.engine === "codex"
+        && !orchestratorHostKeys.has(sessionKeyId(item.key)),
+    );
+    const existingCodexContinuations = client
+      ? await interruptedCodexContinuations(registry, client, candidateCodexHosts)
+      : new Map<string, RuntimeOperationResult>();
+    await demoteSkippedStructuredRegistryHosts(registry, shouldRetainCandidateOrAdopt);
+    const publicationSnapshot = registry.readOnlySnapshot();
+    orchestratorHostKeys = currentOrchestratorRestartRecoveryHostKeys(
+      registry,
+      orchestratorRecoveries,
+      orchestratorSeats(),
+      publicationSnapshot,
+    );
+    nextAdoptedHosts = await revalidateRetainedStartupHosts(
+      registry,
+      nextAdoptedHosts,
+      publicationSnapshot,
+      orchestratorHostKeys,
+    );
+    rememberStructuredStartupRetry(nextAdoptedHosts, orchestratorRecoveries);
+    const finalShouldAdopt = structuredStartupAdoptionFilter(
+      registry,
+      signals,
+      publicationSnapshot,
+      orchestratorRecoveriesByHostKey,
+      orchestratorSeats,
+      unreadableTranscripts,
+      pipelineEvidence.settled,
+      pipelineEvidence.deferred,
+    );
+    const finalHostKeys = new Set(nextAdoptedHosts.map((item) => sessionKeyId(item.key)));
+    const shouldPublish: StructuredHostAdoptionFilter = (entry) =>
+      finalHostKeys.has(sessionKeyId(entry.key)) || finalShouldAdopt(entry);
+    const interruptedCodex = interruptedCodexConversations(
+      registry,
+      shouldPublish,
+      signals.hostedRunningConversationIds,
+      unreadableTranscripts,
+      publicationSnapshot,
+    );
+    const finalCodexHosts = nextAdoptedHosts.filter(
+      (item): item is AdoptedCodexHost => item.key.engine === "codex"
+        && !orchestratorHostKeys.has(sessionKeyId(item.key)),
+    );
+    reportProgress("finalizing structured delivery");
+    /* `controllerBoundEarly` is exactly "this pass has a runtime client", so the
+       only way past it is a viewer that cannot host at all. Rebinding there would
+       retire a publication this pass has no client to replace — and every spawn
+       in the process would fail until some later pass rebound it (#1191). */
+    if (controllerBoundEarly) {
+      await completeStructuredDeliveryQueueStartup(nextAdoptedHosts);
+      assertAdoptedHostsAreClaimed(nextAdoptedHosts, dependencies.hostClaimed);
+    }
+    await enqueueOrchestratorRestartRecoveries(
       registry,
       client,
-      finalCodexHosts,
-      interruptedCodex,
-      existingCodexContinuations,
-      signals.pendingCodexContinuationConversationIds,
+      orchestratorRecoveries.filter((target) => !deferredHostKeys.has(target.hostKey)),
+      finalHostKeys,
+      orchestratorSeats,
     );
-    await kickStructuredDeliveryQueue();
-  }
-  if (deferredHostKeys.size > 0) {
-    retryAdoptedHosts = nextAdoptedHosts;
-    retryOrchestratorRecoveries = [...orchestratorRecoveries];
-    throw new Error(`pipeline startup evidence is unresolved; deferred ${deferredHostKeys.size} host(s)`);
-  }
-  if (client) await recoverPendingStructuredSpawns(registry, client);
-  adoptedHosts = nextAdoptedHosts;
-  retryAdoptedHosts = [];
-  retryOrchestratorRecoveries = [];
-  return adoptedHosts;
+    if (client) {
+      await enqueueInterruptedCodexContinuations(
+        registry,
+        client,
+        finalCodexHosts,
+        interruptedCodex,
+        existingCodexContinuations,
+        signals.pendingCodexContinuationConversationIds,
+      );
+      await kickStructuredDeliveryQueue();
+    }
+    if (deferredHostKeys.size > 0) {
+      retryAdoptedHosts = nextAdoptedHosts;
+      retryOrchestratorRecoveries = [...orchestratorRecoveries];
+      throw new Error(`pipeline startup evidence is unresolved; deferred ${deferredHostKeys.size} host(s)`);
+    }
+    if (client) await recoverPendingStructuredSpawns(registry, client);
+    adoptedHosts = nextAdoptedHosts;
+    retryAdoptedHosts = [];
+    retryOrchestratorRecoveries = [];
+    return adoptedHosts;
+  });
 }
 
 export function structuredStartupHosts(): readonly AdoptedStructuredHost[] {

@@ -1121,3 +1121,153 @@ test.each(["shared host", "expired budget"])("%s cannot skip an attempt's durabl
   await survivor.end();
   expect((await closeOverHttp(pipeline.id)).status).toBe(200);
 });
+
+
+test("an authority read exception after TERM preserves survivors through HTTP close and restart (#1501)", async () => {
+  const current = await lane("tree");
+  const survivor = current.descendant!;
+  const pipeline = pipelineFor(current);
+  const snapshot = current.registry.readOnlySnapshot.bind(current.registry);
+  let failedRead = false;
+  process.kill = ((pid: number, signal?: NodeJS.Signals) => {
+    signals.push({ pid, signal });
+    if (pid === survivor.pid) throw Object.assign(new Error("refused"), { code: "EPERM" });
+    const result = realKill.call(process, pid, signal);
+    if (signal === "SIGTERM" && Math.abs(pid) === current.hostA.pid) {
+      current.registry.readOnlySnapshot = () => {
+        failedRead = true;
+        throw new Error("authority read unavailable");
+      };
+    }
+    return result;
+  }) as typeof process.kill;
+  let closed: CloseAnswer;
+  try { closed = await closeOverHttp(pipeline.id); }
+  finally { current.registry.readOnlySnapshot = snapshot; }
+  expect(failedRead).toBeTrue();
+  expect(closed.status).toBe(409);
+  expect(closed.close!.stillRunning[0]!.error).toContain("evidence became unavailable");
+  await settles(() => !current.hostA.alive(), "root exit");
+  expect(survivor.alive()).toBeTrue();
+  expect(pipelineRecord(pipeline.id).runs[0]!.attempts[0]!.unresolvedTermination?.survivors).toContainEqual(survivor.identity);
+  signals.length = 0;
+  expect((await closeOverHttp(pipeline.id)).status).toBe(409);
+  expect(signals).toEqual([]);
+  await current.incumbent.end();
+  holdWork(current);
+  expect((await successor(current)).report.adopted).toEqual([]);
+  await survivor.end();
+  expect((await closeOverHttp(pipeline.id)).status).toBe(200);
+});
+
+test("startup rereads after transcript refresh and defers a concurrently persisted partial close (#1501)", async () => {
+  const current = await lane("tree");
+  const pipeline = pipelineFor(current);
+  const survivor = current.descendant!;
+  await current.incumbent.end();
+  holdWork(current);
+  const barrier = path.join(current.directory, "startup-pause-refresh");
+  fs.writeFileSync(barrier, "pause");
+  const boot = successor(current);
+  await settles(() => fs.existsSync(`${barrier}.reached`), "startup refresh pause");
+  const closed = await closeWithTermination(pipeline.id, {
+    signal: (pid, value) => {
+      if (pid === survivor.pid) throw Object.assign(new Error("refused"), { code: "EPERM" });
+      realKill.call(process, pid, value);
+    }, deadlineMs: 100, graceMs: 20,
+  });
+  expect(closed.status).toBe(409);
+  fs.writeFileSync(`${barrier}.release`, "continue");
+  const booted = await boot;
+  expect(booted.report.adopted).toEqual([]);
+  expect(booted.report.deferred).not.toBeNull();
+  expect(survivor.alive()).toBeTrue();
+  await booted.end();
+  await survivor.end();
+  expect((await successor(current)).report.adopted).toHaveLength(1);
+});
+
+test("startup admission holds the pipeline lease until its replacement is published (#1501)", async () => {
+  const current = await lane();
+  const pipeline = pipelineFor(current);
+  await loseIncumbent(current);
+  holdWork(current);
+  const barrier = path.join(current.directory, "startup-pause-admission");
+  fs.writeFileSync(barrier, "pause");
+  const boot = successor(current);
+  await settles(() => fs.existsSync(`${barrier}.reached`), "startup admission pause");
+  let closeSettled = false;
+  const close = closeOverHttp(pipeline.id).then((value) => { closeSettled = true; return value; });
+  await Bun.sleep(100);
+  expect(closeSettled).toBeFalse();
+  fs.writeFileSync(`${barrier}.release`, "continue");
+  const booted = await boot;
+  expect(booted.report.adopted).toHaveLength(1);
+  expect((await close).status).toBe(200);
+  expect(processIdentityStatus(booted.report.adopted[0]!.host)).toBe("dead");
+});
+
+test.each(["retry-stage", "skip-stage"] as const)("%s checks older attempt survivors before any reset or advancement (#1501)", async (action) => {
+  const current = await lane("tree");
+  const pipeline = pipelineFor(current);
+  const survivor = current.descendant!;
+  expect((await closeWithTermination(pipeline.id, {
+    signal: (pid, value) => {
+      if (pid === survivor.pid) throw Object.assign(new Error("refused"), { code: "EPERM" });
+      realKill.call(process, pid, value);
+    }, deadlineMs: 100, graceMs: 20,
+  })).status).toBe(409);
+  const record = pipelineRecord(pipeline.id);
+  const newer = structuredClone(record.runs[0]!.attempts[0]!);
+  newer.n = 2;
+  delete newer.unresolvedTermination;
+  record.runs[0]!.attempts.push(newer);
+  savePipelines(loadPipelines().map((item) => item.id === pipeline.id ? record : item));
+  const commands: string[] = [];
+  const ports = { ...defaultPipelinePorts(), exec: (command: string, args: string[]) => {
+    commands.push([command, ...args].join(" "));
+    return { code: 0, stdout: "", stderr: "" };
+  } };
+  for (const unknown of [false, true]) {
+    if (unknown) {
+      const stored = pipelineRecord(pipeline.id);
+      stored.runs[0]!.attempts[0]!.unresolvedTermination!.survivors[0]!.bootEpoch = null;
+      savePipelines(loadPipelines().map((item) => item.id === pipeline.id ? stored : item));
+    }
+    const before = pipelineRecord(pipeline.id);
+    expect((await patchPipeline(pipeline.id, { action }, ports)).status).toBe(409);
+    expect(commands).toEqual([]);
+    expect(pipelineRecord(pipeline.id)).toEqual(before);
+    expect(survivor.alive()).toBeTrue();
+  }
+  await survivor.end();
+  expect((await closeOverHttp(pipeline.id)).status).toBe(200);
+});
+
+
+test("ticks defer worktree provisioning until an earlier partial tree is positively dead (#1501)", async () => {
+  const current = await lane("tree");
+  const pipeline = pipelineFor(current);
+  const survivor = current.descendant!;
+  expect((await closeWithTermination(pipeline.id, {
+    signal: (pid, value) => {
+      if (pid === survivor.pid) throw Object.assign(new Error("refused"), { code: "EPERM" });
+      realKill.call(process, pid, value);
+    }, deadlineMs: 100, graceMs: 20,
+  })).status).toBe(409);
+  const record = pipelineRecord(pipeline.id);
+  record.state = "provisioning";
+  savePipelines(loadPipelines().map((item) => item.id === pipeline.id ? record : item));
+  const commands: string[] = [];
+  const ports = { ...defaultPipelinePorts(), exec: (command: string, args: string[]) => {
+    commands.push([command, ...args].join(" "));
+    return { code: 1, stdout: "", stderr: "controlled command boundary" };
+  } };
+  await tickPipelines([], ports);
+  expect(commands).toEqual([]);
+  expect(pipelineRecord(pipeline.id).state).toBe("provisioning");
+  expect(survivor.alive()).toBeTrue();
+  await survivor.end();
+  await tickPipelines([], ports);
+  expect(commands.length).toBeGreaterThan(0);
+});

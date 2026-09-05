@@ -485,7 +485,10 @@ export async function terminateStructuredHostTree(
   let terminationStarted = false;
   const partialEvidence = () => {
     if (!terminationStarted) return { survivors: [] as ProcessIdentity[] };
-    const survivors = [...identities.values()].filter((identity) => processIdentityStatus(identity, identityProbe) !== "dead");
+    const survivors = [...identities.values()].filter((identity) => {
+      try { return processIdentityStatus(identity, identityProbe) !== "dead"; }
+      catch { return true; }
+    });
     return { survivors, terminationStarted: true as const };
   };
   const identityRefusal = (): Extract<StructuredHostTerminationOutcome, { ok: false }> | null => {
@@ -523,98 +526,109 @@ export async function terminateStructuredHostTree(
      which is why the process this kill was authorized for goes with the ask.
      False means nothing the runtime holds is ours to end through it: the
      released/orphaned case, which only the process group reaches. */
-  const refusedBeforeRuntime = authorityRefusal();
-  if (refusedBeforeRuntime) return refusedBeforeRuntime;
-  let via: "runtime" | "process-group" = "process-group";
-  let runtimeFailure = false;
-  if (key) {
-    terminationStarted = true;
-    try {
-      if (await terminateOwned(key, expected)) via = "runtime";
-    } catch {
-      runtimeFailure = true;
-      const changed = identityRefusal();
-      if (changed) return changed;
+  try {
+    const refusedBeforeRuntime = authorityRefusal();
+    if (refusedBeforeRuntime) return refusedBeforeRuntime;
+    let via: "runtime" | "process-group" = "process-group";
+    let runtimeFailure = false;
+    if (key) {
+      terminationStarted = true;
+      try {
+        if (await terminateOwned(key, expected)) via = "runtime";
+      } catch {
+        runtimeFailure = true;
+        const changed = identityRefusal();
+        if (changed) return changed;
+      }
     }
-  }
 
-  /* The runtime path may await health/release work. The pid must cross the
-     kernel identity fence again after that boundary: a session key may have
-     been rebound while we waited, and a recycled group leader must never
-     receive the fallback signal. The caller's authority crosses it too. */
-  const changedAfterRuntime = identityRefusal();
-  if (changedAfterRuntime) return changedAfterRuntime;
-  const refusedAfterRuntime = authorityRefusal();
-  if (refusedAfterRuntime) return refusedAfterRuntime;
+    /* The runtime path may await health/release work. The pid must cross the
+       kernel identity fence again after that boundary: a session key may have
+       been rebound while we waited, and a recycled group leader must never
+       receive the fallback signal. The caller's authority crosses it too. */
+    const changedAfterRuntime = identityRefusal();
+    if (changedAfterRuntime) return changedAfterRuntime;
+    const refusedAfterRuntime = authorityRefusal();
+    if (refusedAfterRuntime) return refusedAfterRuntime;
 
-  const refusals: string[] = [];
-  const signalOnce = (target: number, value: NodeJS.Signals) => {
-    terminationStarted = true;
-    try {
-      signal(target, value);
-    } catch (error) {
-      const code = signalErrorCode(error);
-      /* ESRCH is the process exiting between the check and the signal. */
-      if (code !== "ESRCH") refusals.push(`${value} on ${target < 0 ? `group ${-target}` : target}: ${code ?? "failed"}`);
-    }
-  };
-  /* Exactly one signal per process: the group signal already reaches every
-     member, so only the descendants that left it (a child that called
-     setsid, a reparented grandchild) are signalled individually. */
-  const sweep = (value: NodeJS.Signals): Extract<StructuredHostTerminationOutcome, { ok: false }> | null => {
-    const changed = identityRefusal();
-    if (changed) return changed;
-    const refused = authorityRefusal();
-    if (refused) return refused;
-    const standing = survivors();
-    if (groupLeader !== null && standing.some((candidate) => groupOf(candidate) === groupLeader)) {
-      signalOnce(-groupLeader, value);
-    }
-    for (const candidate of standing) {
-      if (groupLeader !== null && groupOf(candidate) === groupLeader) continue;
+    const refusals: string[] = [];
+    const signalOnce = (target: number, value: NodeJS.Signals) => {
+      terminationStarted = true;
+      try {
+        signal(target, value);
+      } catch (error) {
+        const code = signalErrorCode(error);
+        /* ESRCH is the process exiting between the check and the signal. */
+        if (code !== "ESRCH") refusals.push(`${value} on ${target < 0 ? `group ${-target}` : target}: ${code ?? "failed"}`);
+      }
+    };
+    /* Exactly one signal per process: the group signal already reaches every
+       member, so only the descendants that left it (a child that called
+       setsid, a reparented grandchild) are signalled individually. */
+    const sweep = (value: NodeJS.Signals): Extract<StructuredHostTerminationOutcome, { ok: false }> | null => {
       const changed = identityRefusal();
       if (changed) return changed;
       const refused = authorityRefusal();
       if (refused) return refused;
-      signalOnce(candidate, value);
-    }
-    return null;
-  };
+      const standing = survivors();
+      if (groupLeader !== null && standing.some((candidate) => groupOf(candidate) === groupLeader)) {
+        signalOnce(-groupLeader, value);
+      }
+      for (const candidate of standing) {
+        if (groupLeader !== null && groupOf(candidate) === groupLeader) continue;
+        const changed = identityRefusal();
+        if (changed) return changed;
+        const refused = authorityRefusal();
+        if (refused) return refused;
+        signalOnce(candidate, value);
+      }
+      return null;
+    };
 
-  const changedBeforeTerm = sweep("SIGTERM");
-  if (changedBeforeTerm) return changedBeforeTerm;
-  const startedAt = Date.now();
-  let escalated = false;
-  while (survivors().length > 0) {
-    const elapsed = Date.now() - startedAt;
-    if (elapsed >= deadlineMs) break;
-    if (!escalated && elapsed >= graceMs) {
-      escalated = true;
-      const changedBeforeKill = sweep("SIGKILL");
-      if (changedBeforeKill) return changedBeforeKill;
+    const changedBeforeTerm = sweep("SIGTERM");
+    if (changedBeforeTerm) return changedBeforeTerm;
+    const startedAt = Date.now();
+    let escalated = false;
+    while (survivors().length > 0) {
+      const elapsed = Date.now() - startedAt;
+      if (elapsed >= deadlineMs) break;
+      if (!escalated && elapsed >= graceMs) {
+        escalated = true;
+        const changedBeforeKill = sweep("SIGKILL");
+        if (changedBeforeKill) return changedBeforeKill;
+      }
+      await sleep(TERMINATION_POLL_MS);
     }
-    await sleep(TERMINATION_POLL_MS);
-  }
 
-  const changedBeforeResult = identityRefusal();
-  if (changedBeforeResult) return changedBeforeResult;
-  const remaining = survivors();
-  if (remaining.length > 0 || refusals.length > 0) {
-    /* Partial is not success: the registry row keeps describing the host that
-       is still running, and the target keeps its authority for a retry. */
-    let error: string;
-    if (runtimeFailure) error = "the runtime host termination failed and the process tree survived";
-    else if (refusals.length > 0) error = `the kill was refused (${refusals[0]})`;
-    else error = `${remaining.length} process${remaining.length === 1 ? "" : "es"} outlived the kill`;
+    const changedBeforeResult = identityRefusal();
+    if (changedBeforeResult) return changedBeforeResult;
+    const remaining = survivors();
+    if (remaining.length > 0 || refusals.length > 0) {
+      /* Partial is not success: the registry row keeps describing the host that
+         is still running, and the target keeps its authority for a retry. */
+      let error: string;
+      if (runtimeFailure) error = "the runtime host termination failed and the process tree survived";
+      else if (refusals.length > 0) error = `the kill was refused (${refusals[0]})`;
+      else error = `${remaining.length} process${remaining.length === 1 ? "" : "es"} outlived the kill`;
+      return {
+        ok: false,
+        status: 500,
+        error,
+        remaining,
+        ...partialEvidence(),
+      };
+    }
+    /* The runtime path already retired the row as part of its own lifecycle. */
+    if (key && via !== "runtime") retire(key, expected);
+    return { ok: true, via, pids: tree };
+  } catch (error) {
+    const evidence = partialEvidence();
     return {
       ok: false,
-      status: 500,
-      error,
-      remaining,
-      ...partialEvidence(),
+      status: 409,
+      error: `termination evidence became unavailable: ${error instanceof Error ? error.message : String(error)}`,
+      remaining: evidence.survivors.map((identity) => identity.pid),
+      ...evidence,
     };
   }
-  /* The runtime path already retired the row as part of its own lifecycle. */
-  if (key && via !== "runtime") retire(key, expected);
-  return { ok: true, via, pids: tree };
 }

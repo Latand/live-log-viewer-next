@@ -859,3 +859,31 @@ test("identity loss after TERM retains other captured survivors and sends no fur
     survivors: [{ pid: 8201, startIdentity: "8201:start" }],
   });
 });
+
+
+test.each(["identity", "sleep"])("%s exceptions after TERM retain the captured tree without another signal (#1501)", async (fault) => {
+  let started = false;
+  const sent: Array<[number, NodeJS.Signals]> = [];
+  const outcome = await terminateStructuredHostTree(ref({ pid: 8300, startIdentity: "8300:start", sessionId: CLAUDE_SESSION }), {
+    processIdentity: (pid) => {
+      if (started && fault === "identity") throw new Error("identity unavailable");
+      return `${pid}:start`;
+    },
+    pidAlive: () => true,
+    ppidMap: () => new Map([[8301, 8300]]),
+    processGroupId: () => null,
+    protectedPids: () => new Set(),
+    terminateOwnedHost: async () => false,
+    signal: (pid, value) => { sent.push([pid, value]); started = true; },
+    sleep: async () => { throw new Error("wait interrupted"); },
+    retireRegistryEntry: () => { throw new Error("must not retire"); },
+  });
+  expect(sent.every(([, value]) => value === "SIGTERM")).toBeTrue();
+  expect(outcome).toMatchObject({
+    ok: false, status: 409, terminationStarted: true,
+    survivors: [
+      { pid: 8300, startIdentity: "8300:start" },
+      { pid: 8301, startIdentity: "8301:start" },
+    ],
+  });
+});

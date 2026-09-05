@@ -108,7 +108,8 @@ After a Viewer restart, startup adoption consults the pipeline record before re-
 
 A partial close retains the PID, process start identity and boot epoch of every
 captured survivor on the attempt. Authority or identity loss after termination
-starts preserves this evidence. Later partial stops merge survivors across host
+starts preserves this evidence, including exceptions from authority or process
+probes. Later partial stops merge survivors across host
 generations; only a positive death observation removes an identity. A dead root
 or terminal transcript cannot settle a close while any recorded survivor remains
 alive or unverifiable. Retained identities provide evidence for refusing a close;
@@ -122,7 +123,15 @@ or an earlier termination has unresolved survivors. Pending work does not bypass
 this fence. Deferred rows retain their recovery evidence and are excluded from
 launch and skipped-host demotion. Startup retries the read and process probes;
 a replacement becomes eligible only after the evidence permits it under the
-existing adoption rules.
+existing adoption rules. Startup reads this evidence after transcript refresh and
+holds the existing pipeline mutation lease through adoption, demotion and
+publication. A concurrent close either publishes its survivors before that read,
+or waits and checks the host that startup publishes.
+
+Retry, skip and subsequent pipeline ticks also check survivors on every retained
+attempt, including older generations, before resetting a worktree, advancing or
+creating another stage writer. Alive or unavailable identities refuse these
+actions with no reset or launch.
 
 When a park happened before the stage produced a verdict, `retry-stage` and `skip-stage` refuse with 409 while the attempt's pane still hosts a live agent — resetting the worktree under a mid-turn agent would let its strays land in the next stage commit. Wait for the agent to exit or kill the pane, then retry.
 
