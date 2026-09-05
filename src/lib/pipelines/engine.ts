@@ -3265,10 +3265,15 @@ export async function tickPipelines(entries: FileEntry[], ports: PipelinePorts =
         pipelineChanged = reconcilePendingPipelineAdoptions(pipeline, ports) || pipelineChanged;
         pipelineChanged = await reconcileHistoricalAttempts(pipeline, entries, ports) || pipelineChanged;
         pipelineChanged = rebindPipelineAttemptPaths(pipeline, ports) || pipelineChanged;
-        pipelineChanged = await reconcileExhaustedVerdictRecovery(pipeline, ports, persistPipeline) || pipelineChanged;
-        pipelineChanged = reconcileParkedVerdictMiss(pipeline, ports) || pipelineChanged;
-        pipelineChanged = reconcileParkedStructuredSpawn(pipeline, ports) || pipelineChanged;
-        pipelineChanged = reconcileBoundReviewFlow(pipeline, ports, persistPipeline) || pipelineChanged;
+        // Evidence above may be synchronized while a stop remains unresolved.
+        // Recovery below can advance the cursor, publish a verdict or resume a
+        // flow, so it needs the same pipeline-wide admission as ordinary ticks.
+        if (!pipelineSurvivorRefusal(pipeline)) {
+          pipelineChanged = await reconcileExhaustedVerdictRecovery(pipeline, ports, persistPipeline) || pipelineChanged;
+          pipelineChanged = reconcileParkedVerdictMiss(pipeline, ports) || pipelineChanged;
+          pipelineChanged = reconcileParkedStructuredSpawn(pipeline, ports) || pipelineChanged;
+          pipelineChanged = reconcileBoundReviewFlow(pipeline, ports, persistPipeline) || pipelineChanged;
+        }
         pipelineChanged = await reconcileUnconfirmedHosts(pipeline, ports) || pipelineChanged;
         pipelineChanged = await reconcileTerminalStageHosts(pipeline, ports) || pipelineChanged;
         if (!TERMINAL_STATES.has(pipeline.state) && pipeline.state !== "paused" && pipeline.state !== "needs_decision"

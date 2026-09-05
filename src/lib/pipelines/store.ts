@@ -40,11 +40,11 @@ function atomicWriteJson(filePath: string, value: unknown): void {
   fs.writeFileSync(temp, JSON.stringify(value, null, 2) + "\n", "utf8");
   fs.renameSync(temp, filePath);
 }
-function readJson(filePath: string): unknown | null {
+function readJson(filePath: string): unknown {
   try {
     return JSON.parse(fs.readFileSync(filePath, "utf8")) as unknown;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
     throw new PipelineStoreError(`could not read pipeline registry: ${filePath}`, { cause: error });
   }
 }
@@ -522,7 +522,7 @@ export function loadPipelinesForStartup(): Pipeline[] {
     throw new PipelineStoreError("pipeline startup collections are incomplete");
   }
   const records = active === null && archived === null
-    ? [...parsePipelinesFile(pipelinesFile(), false), ...parsePipelinesFile(pipelinesArchiveFile(), false)]
+    ? [...parsePipelinesFile(pipelinesFile(), false, true), ...parsePipelinesFile(pipelinesArchiveFile(), false, true)]
     : [...(active ?? []), ...(archived ?? [])];
   if (!records.every(isPipeline)) throw new PipelineStoreError("pipeline registry contains malformed records");
   if (new Set(records.map((record) => record.id)).size !== records.length) {
@@ -531,9 +531,11 @@ export function loadPipelinesForStartup(): Pipeline[] {
   return records.map(reviveLoadedPipeline);
 }
 
-function parsePipelinesFile(filename: string, lenient: boolean): Pipeline[] {
+function parsePipelinesFile(filename: string, lenient: boolean, strictPresence = false): Pipeline[] {
   const raw = readJson(filename);
-  if (raw === null) return [];
+  // Ordinary legacy readers historically accept null as empty. Startup must
+  // distinguish that malformed content from positive missing-file evidence.
+  if (raw === undefined || (raw === null && !strictPresence)) return [];
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     if (lenient) return [];
     throw new PipelineStoreError("pipeline registry must be an object");

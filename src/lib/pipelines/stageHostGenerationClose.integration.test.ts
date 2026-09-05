@@ -1374,3 +1374,155 @@ test("an older attempt survivor fences every pipeline conversation until positiv
   expect(recovered.report.adopted).toHaveLength(1);
   expect((await closeOverHttp(pipeline.id)).status).toBe(200);
 });
+
+
+test.each(["pass", "fail"] as const)("late %s verdict recovery waits for every retained survivor (#1501)", async (status) => {
+  const current = await lane("tree");
+  const pipeline = pipelineFor(current);
+  const survivor = current.descendant!;
+  expect((await closeWithTermination(pipeline.id, {
+    signal: (pid, value) => {
+      if (pid === survivor.pid) throw Object.assign(new Error("refused"), { code: "EPERM" });
+      realKill.call(process, pid, value);
+    }, deadlineMs: 100, graceMs: 20,
+  })).status).toBe(409);
+  const record = pipelineRecord(pipeline.id);
+  record.stages.push({ ...record.stages[0]!, id: "recover", onFail: undefined, next: null });
+  record.runs.push({ stageId: "recover", attempts: [] });
+  record.stages[0]!.onFail = { to: "recover", maxRounds: 1 };
+  const attempt = record.runs[0]!.attempts[0]!;
+  attempt.state = "needs_decision";
+  attempt.startedAt = new Date(Date.now() - 5_000).toISOString();
+  attempt.verdictRecovery = { state: "exhausted", checks: 3, maxChecks: 3, startedAt: NOW(), lastCheckedAt: NOW(), nextCheckAt: null, reason: "late verdict", messageTs: null };
+  savePipelines(loadPipelines().map((item) => item.id === pipeline.id ? record : item));
+  const text = `late result\n\x60\x60\x60json\n${JSON.stringify({ status, findings: status === "fail" ? ["repair required"] : [], confidence: 0.9 })}\n\x60\x60\x60`;
+  fs.appendFileSync(current.transcriptPath, `${JSON.stringify({ type: "assistant", timestamp: NOW(), message: { role: "assistant", content: [{ type: "text", text }], stop_reason: "end_turn" } })}\n`);
+  const commands: string[] = [];
+  const ports = { ...defaultPipelinePorts(), exec: (command: string, args: string[]) => {
+    commands.push([command, ...args].join(" "));
+    return { code: 1, stdout: "", stderr: "controlled publication boundary" };
+  } };
+  expect((await ports.durableTurnEvidence("claude", current.transcriptPath))?.turn).toBe("terminal");
+  signals.length = 0;
+  for (const unknown of [false, false, true]) {
+    if (unknown) {
+      const stored = pipelineRecord(pipeline.id);
+      stored.runs[0]!.attempts[0]!.unresolvedTermination!.survivors[0]!.bootEpoch = null;
+      savePipelines(loadPipelines().map((item) => item.id === pipeline.id ? stored : item));
+    }
+    const before = pipelineRecord(pipeline.id);
+    await tickPipelines([], ports);
+    const after = pipelineRecord(pipeline.id);
+    expect(after.cursor).toEqual(before.cursor);
+    expect(after.state).toBe("needs_decision");
+    expect(after.runs[0]!.attempts[0]!.verdict).toBeNull();
+    expect(after.runs[0]!.attempts[0]!.verdictRecovery).toEqual(before.runs[0]!.attempts[0]!.verdictRecovery);
+    expect(after.runs[0]!.attempts[0]!.unresolvedTermination).toEqual(before.runs[0]!.attempts[0]!.unresolvedTermination);
+    expect(commands).toEqual([]);
+    expect(signals).toEqual([]);
+    expect(survivor.alive()).toBeTrue();
+  }
+  await survivor.end();
+  await tickPipelines([], ports);
+  const recovered = pipelineRecord(pipeline.id);
+  expect(recovered.runs[0]!.attempts[0]!.verdict?.status).toBe(status);
+  expect(recovered.runs[0]!.attempts[0]!.unresolvedTermination).toBeUndefined();
+  if (status === "fail") expect(recovered.cursor?.stageId).toBe("recover");
+  else expect(commands.length).toBeGreaterThan(0);
+});
+
+test("bound flow recovery keeps evidence synchronization but defers resume until positive death (#1501)", async () => {
+  const current = await lane("tree");
+  const pipeline = pipelineFor(current);
+  const survivor = current.descendant!;
+  expect((await closeWithTermination(pipeline.id, {
+    signal: (pid, value) => {
+      if (pid === survivor.pid) throw Object.assign(new Error("refused"), { code: "EPERM" });
+      realKill.call(process, pid, value);
+    }, deadlineMs: 100, graceMs: 20,
+  })).status).toBe(409);
+  const record = pipelineRecord(pipeline.id);
+  record.stages.push({ id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "review", next: null,
+    effectiveRole: { ...effectiveRole, roleId: "reviewer", access: "read-only" } });
+  const error = "structured resume host claim is unavailable";
+  record.stages[0]!.next = "review";
+  record.runs.push({ stageId: "review", attempts: [{ ...structuredClone(record.runs[0]!.attempts[0]!),
+    effectiveRole: record.stages[1]!.effectiveRole, state: "needs_decision", flowId: "survivor-flow", unresolvedTermination: undefined,
+    error: `review flow paused in relaying: ${error}` }] });
+  record.runs[0]!.attempts[0]!.state = "passed";
+  record.cursor = { stageId: "review", state: "reviewing", input: null, activatedBy: null };
+  savePipelines(loadPipelines().map((item) => item.id === pipeline.id ? record : item));
+  const role = { engine: "claude" as const, model: null, effort: null };
+  const flow: import("@/lib/flows/types").Flow = {
+    id: "survivor-flow", template: "implement-review-loop", project: "viewer-fixture", cwd: current.directory,
+    implementerPath: current.transcriptPath, roles: { implementer: role, reviewer: role }, baseRef: "0".repeat(40),
+    baseMode: "head", mode: "auto", reviewerMode: "headless", roundLimit: 3,
+    state: "paused", pausedState: "relaying", stateDetail: error, createdAt: NOW(), closedAt: null,
+    rounds: [{ n: 1, reviewerPath: current.transcriptPath, reviewerConversationId: current.conversationId,
+      findingsPath: null, triggeredBy: "button", readyNote: null, verdict: "REQUEST_CHANGES", findingsCount: 1,
+      startedAt: NOW(), reviewedAt: NOW(), relayedAt: null, relayStartedAt: NOW(), error }],
+  };
+  const patches: string[] = [];
+  const ports = { ...defaultPipelinePorts(), getFlow: (id: string) => id === flow.id ? flow : null,
+    patchFlow: (id: string, action: string) => {
+      patches.push(`${id}:${action}`);
+      flow.state = "relaying"; flow.pausedState = null; flow.stateDetail = null;
+      return {};
+    } };
+  signals.length = 0;
+  for (const unknown of [false, false, true]) {
+    if (unknown) {
+      const stored = pipelineRecord(pipeline.id);
+      stored.runs[0]!.attempts[0]!.unresolvedTermination!.survivors[0]!.bootEpoch = null;
+      savePipelines(loadPipelines().map((item) => item.id === pipeline.id ? stored : item));
+    }
+    await tickPipelines([], ports);
+    const after = pipelineRecord(pipeline.id);
+    expect(after.state).toBe("needs_decision");
+    expect(after.cursor).toEqual(record.cursor);
+    expect(after.runs[1]!.attempts[0]!.reviewFlowSync?.relayState).toBe("paused");
+    expect(after.runs[0]!.attempts[0]!.unresolvedTermination?.survivors).toHaveLength(1);
+    expect(patches).toEqual([]);
+    expect(signals).toEqual([]);
+    expect(survivor.alive()).toBeTrue();
+  }
+  await survivor.end();
+  await tickPipelines([], ports);
+  expect(patches).toEqual([`${flow.id}:resume`]);
+  expect(pipelineRecord(pipeline.id).state).toBe("running");
+});
+
+test.each(["pipelines.json", "pipelines-archive.json"])("null legacy %s defers startup without migration and recovers on reread (#1501)", async (filename) => {
+  const current = await lane();
+  const pipeline = pipelineFor(current);
+  await loseIncumbent(current);
+  const legacy = fs.mkdtempSync(path.join(isolated, "legacy-null-"));
+  const file = path.join(legacy, filename);
+  fs.writeFileSync(file, "null");
+  const previous = process.env.LLV_STATE_DIR;
+  const previousGeneration = generationEnvironment.LLV_STATE_DIR;
+  process.env.LLV_STATE_DIR = legacy;
+  generationEnvironment.LLV_STATE_DIR = legacy;
+  try {
+    const before = current.entry();
+    for (const pending of [false, true]) {
+      if (pending) holdWork(current);
+      const blocked = await successor(current);
+      expect(blocked.report.adopted).toEqual([]);
+      expect(blocked.report.published).toEqual([]);
+      expect(blocked.report.deferred).not.toBeNull();
+      expect(current.entry()).toEqual(before);
+      expect(fs.readFileSync(file, "utf8")).toBe("null");
+      expect(fs.existsSync(path.join(legacy, "state.sqlite"))).toBeFalse();
+      await blocked.end();
+    }
+    const { PIPELINES_SCHEMA_VERSION } = await import("./store");
+    fs.writeFileSync(file, JSON.stringify({ schemaVersion: PIPELINES_SCHEMA_VERSION, pipelines: [pipeline] }));
+    const recovered = await successor(current);
+    expect(recovered.report.deferred).toBeNull();
+    expect(recovered.report.adopted).toHaveLength(1);
+  } finally {
+    process.env.LLV_STATE_DIR = previous;
+    generationEnvironment.LLV_STATE_DIR = previousGeneration;
+  }
+});

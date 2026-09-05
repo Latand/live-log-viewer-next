@@ -604,18 +604,25 @@ test.each(["pipelines", "pipelines_archive"])("startup strictly rereads %s despi
 });
 
 
-test("startup preserves malformed legacy archive evidence before migration", async () => {
+test.each(["pipelines.json", "pipelines-archive.json"])("startup preserves malformed legacy %s evidence before migration", async (filename) => {
   const previous = process.env.LLV_STATE_DIR;
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-startup-legacy-"));
   process.env.LLV_STATE_DIR = sandbox;
-  const archive = path.join(sandbox, "pipelines-archive.json");
+  const archive = path.join(sandbox, filename);
   try {
-    for (const corrupt of ["{broken", JSON.stringify({ schemaVersion: PIPELINES_SCHEMA_VERSION, pipelines: [{}] })]) {
+    expect(loadPipelinesForStartup()).toEqual([]); // ENOENT is valid empty evidence.
+    for (const corrupt of ["null", "false", "[]", "{broken", JSON.stringify({ schemaVersion: PIPELINES_SCHEMA_VERSION, pipelines: [{}] })]) {
       fs.writeFileSync(archive, corrupt);
       expect(await withPipelineStartupAdmission(async (available) => available)).toBeFalse();
       expect(fs.readFileSync(archive, "utf8")).toBe(corrupt);
       expect(fs.existsSync(path.join(sandbox, "state.sqlite"))).toBeFalse();
     }
+    fs.renameSync(archive, `${archive}.saved`);
+    fs.mkdirSync(archive); // A read error is not absence.
+    expect(await withPipelineStartupAdmission(async (available) => available)).toBeFalse();
+    expect(fs.statSync(archive).isDirectory()).toBeTrue();
+    expect(fs.existsSync(path.join(sandbox, "state.sqlite"))).toBeFalse();
+    fs.renameSync(archive, `${archive}.unreadable`);
     fs.writeFileSync(archive, JSON.stringify({ schemaVersion: PIPELINES_SCHEMA_VERSION, pipelines: [] }));
     expect(await withPipelineStartupAdmission(async (available) => available)).toBeTrue();
     expect(loadPipelinesForStartup()).toEqual([]);
@@ -624,4 +631,14 @@ test("startup preserves malformed legacy archive evidence before migration", asy
     else process.env.LLV_STATE_DIR = previous;
     fs.rmSync(sandbox, { recursive: true, force: true });
   }
+});
+
+
+test.each(["pipelines.json", "pipelines-archive.json"])("ordinary legacy %s reads retain null-as-empty compatibility", (filename) => {
+  sandboxed((sandbox) => {
+    fs.writeFileSync(path.join(sandbox, filename), "null");
+    expect(() => loadPipelinesForStartup()).toThrow("must be an object");
+    expect(filename === "pipelines.json" ? loadPipelines() : loadArchivedPipelines()).toEqual([]);
+    expect(fs.readFileSync(path.join(sandbox, filename), "utf8")).toBe("null");
+  });
 });
