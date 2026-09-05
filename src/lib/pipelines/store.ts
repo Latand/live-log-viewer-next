@@ -169,8 +169,24 @@ function isAttempt(value: unknown, index: number): boolean {
     isNullableString(attempt.output) &&
     isVerdict(attempt.verdict) &&
     isNullableString(attempt.error) &&
-    isVerdictRecovery(attempt.verdictRecovery)
+    isVerdictRecovery(attempt.verdictRecovery) &&
+    isUnresolvedTermination(attempt.unresolvedTermination)
   );
+}
+
+function isUnresolvedTermination(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return typeof record.error === "string"
+    && typeof record.recordedAt === "string"
+    && Array.isArray(record.survivors)
+    && record.survivors.every((survivor) => survivor !== null
+      && typeof survivor === "object"
+      && Number.isSafeInteger((survivor as { pid: unknown }).pid)
+      && isNullableString((survivor as { startIdentity: unknown }).startIdentity)
+      && ((survivor as { bootEpoch: unknown }).bootEpoch === undefined
+        || isNullableString((survivor as { bootEpoch: unknown }).bootEpoch)));
 }
 
 function isRun(value: unknown): value is Pipeline["runs"][number] {
@@ -593,6 +609,9 @@ function reviveLoadedPipeline(pipeline: Pipeline): Pipeline {
             verdict: attempt.verdict ?? null,
             error: attempt.error ?? null,
             verdictRecovery: attempt.verdictRecovery ? { ...attempt.verdictRecovery } : undefined,
+            unresolvedTermination: attempt.unresolvedTermination
+              ? { ...attempt.unresolvedTermination, survivors: attempt.unresolvedTermination.survivors.map((survivor) => ({ ...survivor })) }
+              : undefined,
           }))
         : [],
     })),

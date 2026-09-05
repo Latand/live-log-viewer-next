@@ -31,6 +31,7 @@ import {
   type StructuredHostTerminationDependencies,
 } from "@/lib/runtime/structuredHostControl";
 import { redactBounded } from "@/lib/monitor/redact";
+import { processIdentityStatus } from "@/lib/processIdentity";
 import { parseReview, type ReviewFinding } from "@/lib/review";
 import { spawnStructuredConversation } from "@/lib/runtime/structuredSpawn";
 import { projectForCwd } from "@/lib/scanner/describe";
@@ -79,6 +80,7 @@ import type {
   PipelineStageAttempt,
   PipelineTerminalReap,
   PipelineUnconfirmedHost,
+  PipelineUnresolvedTermination,
 } from "./types";
 import { parseStageVerdict, stageVerdictRejectionReason, type ParsedStageVerdict } from "./verdict";
 
@@ -111,6 +113,12 @@ export type PipelineStageStopResult =
       `detail` names the evidence when the stop went around the runtime. */
   | { outcome: "stopped"; detail?: string }
   | { outcome: "not-running" }
+  /** A signal was sent and the authorized tree did not all go (#1501): a
+      survivor, or a refused signal (EPERM). Typed apart from `failed` because
+      no evidence about the registry row or the transcript may terminalize
+      the attempt over it — the processes named in `survivors` are still the
+      attempt's, and only their proven death releases it. */
+  | { outcome: "unresolved"; error: string; survivors: PipelineUnresolvedTermination["survivors"] }
   /** The kill was accepted (a `queued` receipt is the normal first answer) but
       termination was not evidenced inside the confirmation budget. The host may
       still be alive, so a close carrying one of these never claims a clean stop. */
@@ -702,18 +710,23 @@ const NO_CONTROL_CHANNEL = "this process has no structured control channel (LLV_
  *
  * The authority comes from the durable registry row and nothing else: the
  * engine process the Viewer recorded (pid, start identity, boot epoch) and the
- * generation that claimed it. It is bound to the attempt before anything is
- * signalled — the attempt's conversation must be the one the row is the
- * current generation of, and the attempt's launch receipt must name that same
- * conversation — then re-validated for a seat at the moment of the kill, and
- * ended through the same identity-fenced termination the resources rail uses,
- * which signals exactly once per pid and reports survivors as failure.
+ * generation that claimed it. It is bound to the attempt affirmatively before
+ * anything is signalled — the attempt must name a conversation the row is the
+ * current generation of, and the attempt's launch must have a receipt naming
+ * that same conversation; an attempt with no launch, or a launch with no
+ * receipt, is unresolved and gets no signal. The same authority (row still
+ * naming this process, still this conversation, no orchestrator seat) is asked
+ * again after every await inside the termination and one step before each
+ * signal, and the host is ended through the same identity-fenced termination
+ * the resources rail uses, which signals exactly once per pid.
  *
  * Every refusal here is a `failed` stop with no signal sent: a missing or
- * contradictory fact never becomes a kill. The row is retired only by the
- * termination itself, and only once the tree is proven gone, so a survivor
- * or an EPERM leaves the row, the attempt and the pipeline exactly as they
- * were for the next close.
+ * contradictory fact never becomes a kill. A signal that was sent and did not
+ * end the whole authorized tree — a survivor, an EPERM — is `unresolved`, with
+ * each survivor's identity, and the close keeps that record on the attempt so
+ * no later evidence about the row or the transcript can terminalize it while
+ * one of them is still that process. The row is retired only by the
+ * termination itself, and only once the tree is proven gone.
  */
 async function stopStageHostByRecordedIdentity(
   target: PipelineStageHostRef,
@@ -721,42 +734,95 @@ async function stopStageHostByRecordedIdentity(
   termination: StructuredHostTerminationDependencies,
 ): Promise<PipelineStageStopResult> {
   const registry = agentRegistry();
-  const bound = (reason: string): PipelineStageStopResult => ({
+  const refused = (reason: string): PipelineStageStopResult => ({
     outcome: "failed",
-    error: `contradictory ownership: ${reason}; nothing was signalled; ${NO_CONTROL_CHANNEL}`,
+    error: `${reason}; nothing was signalled; ${NO_CONTROL_CHANNEL}`,
   });
-  if (target.conversationId?.startsWith("conversation_")
-    && registry.canonicalConversationId(target.conversationId as ViewerConversationId) !== probe.conversationId) {
-    return bound(`the attempt names ${target.conversationId} but the registry resolves its transcript to ${probe.conversationId}`);
+  if (!target.conversationId?.startsWith("conversation_")) {
+    return refused("unresolved ownership: the attempt records no conversation id to bind the host to");
   }
-  if (target.launchId) {
-    const receipt = registry.readOnlySnapshot().receipts[target.launchId] ?? null;
-    if (receipt && registry.canonicalConversationId(receipt.conversationId) !== probe.conversationId) {
-      return bound(`the attempt's launch receipt names ${receipt.conversationId}, not ${probe.conversationId}`);
-    }
+  if (registry.canonicalConversationId(target.conversationId as ViewerConversationId) !== probe.conversationId) {
+    return refused(`contradictory ownership: the attempt names ${target.conversationId} but the registry resolves its transcript to ${probe.conversationId}`);
+  }
+  if (!target.launchId) {
+    return refused("unresolved ownership: the attempt records no launch identity, so the host cannot be bound to a Viewer launch");
+  }
+  const receipt = registry.readOnlySnapshot().receipts[target.launchId] ?? null;
+  if (!receipt) {
+    return refused(`unresolved ownership: no launch receipt exists for launch ${target.launchId}`);
+  }
+  if (!receipt.conversationId || registry.canonicalConversationId(receipt.conversationId) !== probe.conversationId) {
+    return refused(`contradictory ownership: the attempt's launch receipt names ${receipt.conversationId ?? "no conversation"}, not ${probe.conversationId}`);
   }
   const built = structuredHostKillRefFromRegistry(probe.key);
   const generation = describeStructuredHostOwnerGeneration(built.owner);
   if (!built.ok) {
-    return { outcome: "failed", error: `${built.error}; nothing was signalled; ${generation}; ${NO_CONTROL_CHANNEL}` };
+    return refused(`${built.error}; ${generation}`);
   }
   const { ref } = built;
-  const refusal = structuredHostKillRefusal(ref, { kind: "row" }, false);
+  /* Asked now, and again by the termination after each await and before each
+     signal: the row must still name this exact process as this conversation's
+     current host, and the conversation must not hold an orchestrator seat. */
+  const authorize = (): { status: 403 | 409; error: string } | null => {
+    const current = structuredHostKillRefFromRegistry(probe.key);
+    if (!current.ok) return { status: 409, error: `authority lost before signalling: ${current.error}` };
+    if (current.ref.pid !== ref.pid
+      || current.ref.startIdentity !== ref.startIdentity
+      || current.ref.bootEpoch !== ref.bootEpoch) {
+      return { status: 409, error: `authority lost before signalling: the registry row now names pid ${current.ref.pid}, not pid ${ref.pid}` };
+    }
+    if (current.ref.conversationId !== ref.conversationId) {
+      return { status: 409, error: `authority lost before signalling: the registry row is now the current generation of ${current.ref.conversationId}` };
+    }
+    return structuredHostKillRefusal(current.ref, { kind: "row" }, false);
+  };
+  const refusal = authorize();
   if (refusal) {
-    return { outcome: "failed", error: `${refusal.error} (pid ${ref.pid}); nothing was signalled; ${generation}; ${NO_CONTROL_CHANNEL}` };
+    return refused(`${refusal.error} (pid ${ref.pid}); ${generation}`);
   }
-  const outcome = await terminateStructuredHostTree(ref, termination);
+  const outcome = await terminateStructuredHostTree(ref, { ...termination, authorize });
   if (outcome.ok) {
     return {
       outcome: "stopped",
       detail: `ended host pid ${ref.pid} by its recorded identity (${outcome.via}); ${generation}; ${NO_CONTROL_CHANNEL}`,
     };
   }
-  const survivors = outcome.remaining.length > 0 ? `; still running: ${outcome.remaining.join(", ")}` : "";
-  return {
-    outcome: "failed",
-    error: `${outcome.error} (pid ${ref.pid}${survivors}); ${generation}; ${NO_CONTROL_CHANNEL}`,
-  };
+  const named = outcome.remaining.length > 0 ? `; still running: ${outcome.remaining.join(", ")}` : "";
+  if (outcome.status === 500) {
+    /* A signal went out and the tree is not all gone. Survivors keep their
+       identity so the attempt stays refusable by proof, not by pid. */
+    const survivors: PipelineUnresolvedTermination["survivors"] = outcome.survivors.length > 0
+      ? outcome.survivors.map((survivor) => ({ pid: survivor.pid, startIdentity: survivor.startIdentity, bootEpoch: survivor.bootEpoch ?? null }))
+      : outcome.remaining.map((pid) => ({ pid, startIdentity: null }));
+    return {
+      outcome: "unresolved",
+      error: `${outcome.error} (pid ${ref.pid}${named}); ${generation}; ${NO_CONTROL_CHANNEL}`,
+      survivors,
+    };
+  }
+  return refused(`${outcome.error} (pid ${ref.pid}${named}); ${generation}`);
+}
+
+/**
+ * Whether an attempt still carries survivors of an earlier stop that are not
+ * proven gone (#1501). Alive or unverifiable means the attempt cannot be
+ * terminalized by any other evidence; every survivor proven dead by identity
+ * clears the record. Never signals anything.
+ */
+function unresolvedTerminationRefusal(attempt: PipelineStageAttempt): string | null {
+  const record = attempt.unresolvedTermination;
+  if (!record) return null;
+  const standing: string[] = [];
+  for (const survivor of record.survivors) {
+    const status = processIdentityStatus(survivor);
+    if (status === "dead") continue;
+    standing.push(`pid ${survivor.pid} ${status === "alive" ? "is still running" : "cannot be verified"}`);
+  }
+  if (standing.length === 0) {
+    delete attempt.unresolvedTermination;
+    return null;
+  }
+  return `an earlier stop left authorized processes it could not end (${record.error}); ${standing.join(", ")}; nothing was signalled`;
 }
 
 export function defaultPipelinePorts(
@@ -2284,10 +2350,10 @@ async function tickRunStage(
       paneId: attempt.paneId,
       ...(attempt.historical ? { adopted: true as const } : {}),
     });
-    if (stopped.outcome === "failed" || stopped.outcome === "unconfirmed") {
-      pipeline.stateDetail = stopped.outcome === "failed"
-        ? `automatic recovery could not retire the unavailable stage host: ${stopped.error}`
-        : "automatic recovery is waiting for the unavailable stage host to terminate";
+    if (stopped.outcome === "failed" || stopped.outcome === "unresolved" || stopped.outcome === "unconfirmed") {
+      pipeline.stateDetail = stopped.outcome === "unconfirmed"
+        ? "automatic recovery is waiting for the unavailable stage host to terminate"
+        : `automatic recovery could not retire the unavailable stage host: ${stopped.error}`;
       ports.scheduleTick?.(1_000);
       return;
     }
@@ -3118,7 +3184,7 @@ async function reconcileTerminalStageHosts(pipeline: Pipeline, ports: PipelinePo
       settledAttempts.add(attemptKey);
     }
     else if (result.outcome === "unconfirmed") survivors.push({ ...target, operationId: result.operationId, detail: result.detail });
-    else if (result.outcome === "failed") survivors.push({ ...target, operationId: null, detail: result.error });
+    else if (result.outcome === "failed" || result.outcome === "unresolved") survivors.push({ ...target, operationId: null, detail: result.error });
   }
   reap.lastAt = ports.now();
   reap.settledAttempts = [...settledAttempts];
@@ -4523,6 +4589,20 @@ export async function patchPipeline(
           break;
         }
         const result = await ports.stopStageAgent(target);
+        if (result.outcome === "unresolved") {
+          /* A signal was sent and the authorized tree did not all go. The
+             survivors ride the attempt with their identities: from here no
+             close may terminalize it on row or transcript evidence until each
+             of them is proven gone (#1501). */
+          candidate.attempt.unresolvedTermination = { survivors: result.survivors, error: result.error, recordedAt: ports.now() };
+          close.stillRunning.push({ ...target, error: result.error });
+          continue;
+        }
+        const unresolved = unresolvedTerminationRefusal(candidate.attempt);
+        if (unresolved && result.outcome !== "unconfirmed") {
+          close.stillRunning.push({ ...target, error: unresolved });
+          continue;
+        }
         if (result.outcome === "stopped") {
           close.stopped.push(target);
           if (result.detail) close.notes.push({ ...target, detail: result.detail });

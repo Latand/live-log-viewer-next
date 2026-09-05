@@ -13,6 +13,7 @@ import { processIdentityMayOwn } from "@/lib/processIdentity";
 import { assertDarwinStructuredRuntime } from "@/lib/proc/darwinIdentity";
 import { readStableTailRecords } from "@/lib/scanner/activity";
 import { withoutWakatimeCredential } from "@/lib/wakatime/credential";
+import { loadArchivedPipelines, loadPipelines } from "@/lib/pipelines/store";
 
 import {
   adoptClaudeRegistryHosts,
@@ -643,6 +644,7 @@ function structuredStartupAdoptionFilter(
   orchestratorRecoveries: ReadonlyMap<string, readonly OrchestratorRestartRecoveryTarget[]> = new Map(),
   orchestratorSeats: () => OrchestratorSeat[] = activeOrchestratorSeats,
   unreadableTranscriptHostKeys: ReadonlySet<string> = new Set(),
+  settledStageConversationIds: ReadonlySet<string> = new Set(),
 ): StructuredHostAdoptionFilter {
   const conversationsByCurrentEntry = new Map(Object.values(snapshot.conversations).flatMap((conversation) => {
     const generation = conversation.generations.at(-1);
@@ -672,6 +674,13 @@ function structuredStartupAdoptionFilter(
       || entry.pendingAction === "handoff";
     if (hasPendingWork) return true;
     if (conversation.turn.state === "terminal") return false;
+    /* A stage attempt the pipeline has already settled has no controller
+       left to drive it: no verdict will be accepted and no next stage will
+       spawn, so re-hosting it on the strength of its turn claim alone starts
+       an agent the product runs but will not listen to (#1501). Work owed to
+       it — a held delivery, a pending operation — was answered above and
+       still hosts it; the turn claim by itself does not. */
+    if (settledStageConversationIds.has(conversationId)) return false;
     /* Past this point the only thing left arguing for a launch is the turn the
        row claims is unfinished. When this boot could not read the transcript,
        that claim rests on a word nothing has confirmed since the last writer
@@ -694,6 +703,38 @@ function structuredStartupAdoptionFilter(
   };
 }
 
+const SETTLED_STAGE_ATTEMPT_STATES = new Set(["passed", "failed", "needs_decision", "skipped"]);
+
+/**
+ * Every conversation a pipeline stage attempt was launched for and has since
+ * settled, by canonical id (#1501). The pipeline record is the authority on
+ * whether a stage is still being driven; the registry row only knows whether
+ * the turn looked unfinished when its last writer left. An unreadable
+ * pipeline registry contributes nothing rather than blocking the boot.
+ */
+function settledPipelineStageConversationIds(registry: AgentRegistry): ReadonlySet<string> {
+  const settled = new Set<string>();
+  let pipelines;
+  try {
+    pipelines = [...loadPipelines(), ...loadArchivedPipelines()];
+  } catch (error) {
+    console.error("[structured hosts] pipeline registry unreadable; startup adoption cannot consult stage state", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return settled;
+  }
+  for (const pipeline of pipelines) {
+    for (const run of pipeline.runs) {
+      for (const attempt of run.attempts) {
+        if (!SETTLED_STAGE_ATTEMPT_STATES.has(attempt.state)) continue;
+        if (!attempt.conversationId?.startsWith("conversation_")) continue;
+        settled.add(registry.canonicalConversationId(attempt.conversationId as ViewerConversationId));
+      }
+    }
+  }
+  return settled;
+}
+
 export interface StructuredStartupDependencies {
   registry?: AgentRegistry;
   client?: RuntimeHostClient | null;
@@ -701,6 +742,9 @@ export interface StructuredStartupDependencies {
   liveness?: TurnLivenessDependencies;
   /** Whether the delivery controller resolves a host this pass adopted. */
   hostClaimed?: (key: SessionKey) => boolean;
+  /** Canonical ids of conversations whose pipeline stage attempt has settled
+      (#1501). Defaults to reading the pipeline registry and its archive. */
+  settledStageConversations?: (registry: AgentRegistry) => ReadonlySet<string>;
   orchestratorSeats?: typeof activeOrchestratorSeats;
   /** Reconciles transcript state, answering which conversations it could not
       read. A stub that answers nothing reports nothing unreadable. */
@@ -769,6 +813,7 @@ export async function adoptStructuredHostsAtStartup(
      cannot block the startup recovery path. */
   reconcileDeadStructuredRegistryHosts(registry, (entry) => orchestratorHostKeys.has(sessionKeyId(entry.key)));
   const signals = await structuredStartupSignals(registry, client);
+  const settledStageConversations = (dependencies.settledStageConversations ?? settledPipelineStageConversationIds)(registry);
   const shouldAdopt = structuredStartupAdoptionFilter(
     registry,
     signals,
@@ -776,6 +821,7 @@ export async function adoptStructuredHostsAtStartup(
     orchestratorRecoveriesByHostKey,
     orchestratorSeats,
     unreadableTranscripts,
+    settledStageConversations,
   );
   const adoptionCandidates = Object.values(registry.readOnlySnapshot().entries).filter((entry) =>
     entry.structuredHost && shouldAdopt(entry));
@@ -951,6 +997,7 @@ export async function adoptStructuredHostsAtStartup(
     orchestratorRecoveriesByHostKey,
     orchestratorSeats,
     unreadableTranscripts,
+    settledStageConversations,
   );
   const finalHostKeys = new Set(nextAdoptedHosts.map((item) => sessionKeyId(item.key)));
   const shouldPublish: StructuredHostAdoptionFilter = (entry) =>

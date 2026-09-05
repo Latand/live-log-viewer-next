@@ -480,6 +480,83 @@ test("a refused signal is a failure, not a success, and the registry row stays",
   expect(retired).toEqual([]);
 });
 
+test("a refused signal reports each survivor with the identity it carried (#1501)", async () => {
+  const outcome = await terminateStructuredHostTree(
+    ref({ pid: 6_100, startIdentity: "6100:start", sessionId: CLAUDE_SESSION }),
+    {
+      processIdentity: (pid) => `${pid}:start`,
+      pidAlive: () => true,
+      ppidMap: () => new Map([[6_101, 6_100]]),
+      processGroupId: () => 6_100,
+      protectedPids: () => new Set(),
+      signal: () => { throw Object.assign(new Error("operation not permitted"), { code: "EPERM" }); },
+      retireRegistryEntry: () => {},
+      terminateOwnedHost: async () => false,
+      graceMs: 0,
+      deadlineMs: 0,
+      sleep: async () => {},
+    },
+  );
+
+  expect(outcome).toMatchObject({
+    ok: false,
+    status: 500,
+    remaining: [6_100, 6_101],
+    survivors: [
+      { pid: 6_100, startIdentity: "6100:start", bootEpoch: BOOT_EPOCH },
+      { pid: 6_101, startIdentity: "6101:start", bootEpoch: BOOT_EPOCH },
+    ],
+  });
+});
+
+test("the caller's authority is asked after the runtime boundary and before each signal, and a refusal there sends nothing (#1501)", async () => {
+  const asked: string[] = [];
+  const signalled: Array<[number, string]> = [];
+  let alive = true;
+  let runtimeAwaited = false;
+  const run = (refuseAt: number | null) => (runtimeAwaited = false, terminateStructuredHostTree(
+    ref({ pid: 6_200, startIdentity: "6200:start", sessionId: CLAUDE_SESSION }),
+    {
+      processIdentity: (pid) => `${pid}:start`,
+      pidAlive: () => alive,
+      ppidMap: () => new Map(),
+      processGroupId: () => 6_200,
+      protectedPids: () => new Set(),
+      signal: (pid, signal) => { signalled.push([pid, signal]); },
+      retireRegistryEntry: () => {},
+      terminateOwnedHost: async () => { runtimeAwaited = true; return false; },
+      authorize: () => {
+        asked.push(runtimeAwaited ? `after-runtime:${signalled.length}` : "before-runtime");
+        return asked.length === refuseAt ? { status: 409, error: "a seat was taken while the kill awaited the runtime" } : null;
+      },
+      graceMs: 0,
+      deadlineMs: 1_000,
+      sleep: async () => {},
+    },
+  ));
+
+  /* Refused on the check that follows the runtime await: no signal at all. */
+  const refusedAfterRuntime = await run(2);
+  expect(refusedAfterRuntime).toMatchObject({ ok: false, status: 409, error: "a seat was taken while the kill awaited the runtime", remaining: [6_200] });
+  expect(signalled).toEqual([]);
+  expect(asked).toEqual(["before-runtime", "after-runtime:0"]);
+
+  /* Refused on the check before the escalation: TERM went out once, KILL never. */
+  asked.length = 0;
+  const refusedBeforeKill = await run(4);
+  expect(refusedBeforeKill).toMatchObject({ ok: false, status: 409 });
+  expect(signalled).toEqual([[-6_200, "SIGTERM"]]);
+  expect(asked).toEqual(["before-runtime", "after-runtime:0", "after-runtime:0", "after-runtime:1"]);
+
+  /* Never refused: the ladder completes once the process is gone. */
+  asked.length = 0;
+  signalled.length = 0;
+  alive = false;
+  const completed = await run(null);
+  expect(completed).toMatchObject({ ok: true, via: "already-exited" });
+  expect(signalled).toEqual([]);
+});
+
 test("a process that outlives the whole ladder is reported, not called killed", async () => {
   const retired: SessionKey[] = [];
 

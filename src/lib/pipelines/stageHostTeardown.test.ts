@@ -46,6 +46,7 @@ type Registry = InstanceType<typeof AgentRegistry>;
 function hostedConversation(options: { status?: "live" | "dead"; hosted?: boolean; pane?: TmuxHostEvidence | null } = {}): {
   registry: Registry;
   conversationId: string;
+  launchId: string;
   path: string;
   key: { engine: "codex"; sessionId: string };
 } {
@@ -83,7 +84,7 @@ function hostedConversation(options: { status?: "live" | "dead"; hosted?: boolea
   if (!entry) throw new Error("registry fixture did not record the session entry");
   expect(entry.status).toBe(options.status ?? "live");
   setAgentRegistryForTests(registry);
-  return { registry, conversationId: begun.receipt.conversationId, path: pathname, key: { engine: "codex", sessionId: id } };
+  return { registry, conversationId: begun.receipt.conversationId, launchId: begun.receipt.launchId, path: pathname, key: { engine: "codex", sessionId: id } };
 }
 
 function target(conversationId: string | null, agentPath: string | null = null) {
@@ -242,16 +243,17 @@ test("a refused kill surfaces the still-running host instead of claiming a stop 
 });
 
 /* #1501: the typed "no control channel" answer is the one refusal the stop
-   may act on by itself, from the registry row's recorded identity. The
-   fixture row here names this test process without a boot epoch, so the
-   fallback must refuse by name and signal nothing; the full process cases run
-   in stageHostGenerationClose.integration.test.ts. */
+   may act on by itself, from the registry row's recorded identity — and only
+   for an attempt affirmatively bound to that row through its launch receipt.
+   The fixture row here names this test process without a boot epoch, so a
+   bound attempt is refused by name and signals nothing; the full process cases
+   run in stageHostGenerationClose.integration.test.ts. */
 test("a typed no-channel answer enters the identity path, which refuses an incomplete row without a signal (#1501)", async () => {
   const fixture = hostedConversation();
   killResult = { status: 503, body: { error: "structured runtime host is unavailable", code: "runtime-host-unavailable" } };
   let signalled = 0;
 
-  const result = await stopPipelineStageAgent(target(fixture.conversationId), {
+  const result = await stopPipelineStageAgent({ ...target(fixture.conversationId), launchId: fixture.launchId }, {
     termination: { signal: () => { signalled += 1; } },
   });
 
@@ -262,6 +264,24 @@ test("a typed no-channel answer enters the identity path, which refuses an incom
   expect(error).toContain("no structured control channel");
   expect(signalled).toBe(0);
   expect(killed).toHaveLength(1);
+  setAgentRegistryForTests(null);
+});
+
+test("an attempt with no launch identity, or a launch with no receipt, is unresolved ownership: no signal (#1501)", async () => {
+  const fixture = hostedConversation();
+  killResult = { status: 503, body: { error: "structured runtime host is unavailable", code: "runtime-host-unavailable" } };
+  let signalled = 0;
+  const termination = { signal: () => { signalled += 1; } };
+
+  const unlaunched = await stopPipelineStageAgent(target(fixture.conversationId), { termination });
+  expect(unlaunched).toMatchObject({ outcome: "failed" });
+  expect((unlaunched as { error: string }).error).toContain("records no launch identity");
+
+  const unreceipted = await stopPipelineStageAgent({ ...target(fixture.conversationId), launchId: "launch_never_recorded" }, { termination });
+  expect(unreceipted).toMatchObject({ outcome: "failed" });
+  expect((unreceipted as { error: string }).error).toContain("no launch receipt exists");
+
+  expect(signalled).toBe(0);
   setAgentRegistryForTests(null);
 });
 

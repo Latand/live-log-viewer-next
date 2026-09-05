@@ -1503,6 +1503,45 @@ test("startup adoption boots one live unfinished host across terminal history", 
   fs.rmSync(directory, { recursive: true, force: true });
 });
 
+/* #1501: the pipeline record outranks a row's unfinished-turn claim. A
+   conversation whose stage attempt has settled is not re-hosted for that
+   claim alone; work owed to it still is. */
+test("startup adoption does not re-host a settled stage attempt on its unfinished-turn claim alone (#1501)", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-settled-stage-"));
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const settledSessionId = "11111111-1111-0111-0111-111111111111";
+  const drivenSessionId = "22222222-2222-0222-0222-222222222222";
+  const owedSessionId = "33333333-3333-0333-0333-333333333333";
+  const settled = addStructuredRestartConversation(registry, directory, { engine: "claude", sessionId: settledSessionId, status: "live", turn: "busy", activeTurnRef: "turn-settled" });
+  addStructuredRestartConversation(registry, directory, { engine: "claude", sessionId: drivenSessionId, status: "live", turn: "busy", activeTurnRef: "turn-driven" });
+  const owed = addStructuredRestartConversation(registry, directory, { engine: "claude", sessionId: owedSessionId, status: "live", turn: "busy", activeTurnRef: "turn-owed" });
+  registry.holdDelivery(owed.conversation.id, "answer this when you are back", "owed-held-send", "text", [], null, { operationId: "owed-held-send-op", kind: "send", policy: "queue", turnId: null });
+  const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeJournalClient(journal);
+  const attempts: string[] = [];
+
+  await adoptStructuredHostsAtStartup({
+    registry,
+    client,
+    settledStageConversations: () => new Set([settled.conversation.id, owed.conversation.id]),
+    adopt: async () => [],
+    adoptClaude: async (received, _optionsFor, _env, shouldAdopt = () => true) => {
+      for (const entry of Object.values(received.snapshot().entries)) {
+        if (entry.key.engine === "claude" && entry.structuredHost && shouldAdopt(entry)) attempts.push(entry.key.sessionId);
+      }
+      return [];
+    },
+  });
+
+  expect(attempts.sort()).toEqual([drivenSessionId, owedSessionId].sort());
+  /* The skipped settled row is demoted like any other row adoption refused. */
+  expect(registry.readOnlySnapshot().entries[`claude:${settledSessionId}`]).toMatchObject({ status: "dead" });
+
+  await bindStructuredDeliveryQueue([], { registry, client: null });
+  journal.close();
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
 test("unknown Codex durable state continues when the structured host retains an active turn", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-codex-unknown-active-turn-"));
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
