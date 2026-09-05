@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 
 import { isTaskAttachment } from "./attachments";
+import { taskRevision } from "./revision";
 import { isoNow } from "./helpers";
 import type { AssignmentRef, BoardTask, TaskAttachment, TaskAssignment, TaskSource, TaskStatus } from "./types";
 
@@ -11,9 +12,11 @@ export const TASKS_PER_PROJECT_LIMIT = 300;
     can mint a twin (documented, durability beyond the cap is deferred). */
 export const RECENT_CREATES_CAP = 100;
 
+export type TaskRefusal = { ok: false; error: string; status: number; code?: string; field?: string };
+
 export type TaskCommandResult =
   | { ok: true; tasks: BoardTask[]; task: BoardTask }
-  | { ok: false; error: string; status: number };
+  | TaskRefusal;
 
 /** A `clientRequestId → taskId` receipt, persisted in `tasks.json` so a replay
     survives a server restart. Oldest entries evict past {@link RECENT_CREATES_CAP}. */
@@ -24,7 +27,7 @@ export interface RecentCreate {
 
 export type CreateTaskResult =
   | { ok: true; tasks: BoardTask[]; task: BoardTask; recentCreates: RecentCreate[]; replay: boolean }
-  | { ok: false; error: string; status: number };
+  | TaskRefusal;
 
 export interface CreateTaskInput {
   project?: unknown;
@@ -39,6 +42,8 @@ export interface CreateTaskInput {
 }
 
 export interface PatchTaskInput {
+  expectedProject?: unknown;
+  expectedRevision?: unknown;
   text?: unknown;
   status?: unknown;
   placement?: unknown;
@@ -67,6 +72,12 @@ function normalizeProject(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const project = value.trim();
   return project ? project : null;
+}
+
+function positionError(value: unknown): TaskRefusal {
+  const pos = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+  const field = !pos ? "pos" : typeof pos.x !== "number" || !Number.isFinite(pos.x) ? "pos.x" : "pos.y";
+  return { ok: false, error: `${field} must be ${field === "pos" ? "an object with finite x and y" : "a finite number"}`, status: 400, code: "TASK_INVALID_FIELD", field };
 }
 
 function normalizePos(value: unknown): { x: number; y: number } | null {
@@ -112,7 +123,7 @@ function normalizeDue(dueAt: unknown, dueTz: unknown): DueResult {
   return { ok: true, dueAt: new Date(parsed).toISOString(), dueTz };
 }
 
-type AttachmentsResult = { ok: true; attachments?: TaskAttachment[] } | { ok: false; error: string; status: number };
+type AttachmentsResult = { ok: true; attachments?: TaskAttachment[] } | TaskRefusal;
 
 function normalizeAttachments(value: unknown, exists: (att: TaskAttachment) => boolean): AttachmentsResult {
   if (value === undefined || value === null) return { ok: true };
@@ -175,17 +186,16 @@ export function createTask(
   }
 
   const pos = normalizePos(input.pos);
-  const posGiven = input.pos !== undefined && input.pos !== null;
-  if (posGiven && !pos) return { ok: false, error: "invalid task position", status: 400 };
+  if (Object.hasOwn(input, "pos") && !pos) return positionError(input.pos);
   /* Placement omitted stays back-compatible: a `pos` means `pinned`, none is an
      error (the legacy create path always sent a pos). */
   const placement = normalizePlacement(input.placement) ?? (pos ? "pinned" : null);
   if (input.placement !== undefined && placement === null) {
     return { ok: false, error: "invalid placement", status: 400 };
   }
-  if (placement === "pinned" && !pos) return { ok: false, error: "task position is required", status: 400 };
-  if (placement === "unplaced" && pos) return { ok: false, error: "unplaced task must not carry a position", status: 400 };
-  if (placement === null) return { ok: false, error: "task position is required", status: 400 };
+  if (placement === "pinned" && !pos) return { ok: false, error: "task position is required", status: 400, code: "TASK_INVALID_FIELD", field: "pos" };
+  if (placement === "unplaced" && pos) return { ok: false, error: "unplaced task must not carry a position", status: 400, code: "TASK_INVALID_FIELD", field: "pos" };
+  if (placement === null) return { ok: false, error: "task position is required", status: 400, code: "TASK_INVALID_FIELD", field: "pos" };
 
   const due = normalizeDue(input.dueAt, input.dueTz);
   if (!due.ok) return { ok: false, error: due.error, status: 400 };
@@ -221,10 +231,24 @@ export function createTask(
   return { ok: true, tasks: [...existing, task], task, recentCreates: nextRecent, replay: false };
 }
 
-export function patchTask(existing: BoardTask[], id: string, input: PatchTaskInput, now = isoNow()): TaskCommandResult {
+export function patchTask(existing: BoardTask[], id: string, input: PatchTaskInput, now = isoNow(), options: { requirePlacementGuards?: boolean } = {}): TaskCommandResult {
   const index = existing.findIndex((task) => task.id === id);
   if (index < 0) return { ok: false, error: "task not found", status: 404 };
   const task = existing[index]!;
+  const guardRequired = options.requirePlacementGuards && (Object.hasOwn(input, "pos") || Object.hasOwn(input, "placement"));
+  if (guardRequired || Object.hasOwn(input, "expectedProject") || Object.hasOwn(input, "expectedRevision")) {
+    for (const field of ["expectedProject", "expectedRevision"] as const) {
+      if (typeof input[field] !== "string" || !input[field].trim()) {
+        return { ok: false, status: 400, code: "TASK_INVALID_FIELD", field, error: `${field} must be a non-empty string copied from the current task` };
+      }
+    }
+    if (input.expectedProject !== task.project) {
+      return { ok: false, status: 409, code: "TASK_PROJECT_MISMATCH", field: "expectedProject", error: "expectedProject does not match the current task project; read the task and reconsider the request" };
+    }
+    if (input.expectedRevision !== taskRevision(task)) {
+      return { ok: false, status: 409, code: "TASK_REVISION_MISMATCH", field: "expectedRevision", error: "expectedRevision is stale; read the task and reconsider the request" };
+    }
+  }
   const patch: Partial<BoardTask> = {};
 
   if (Object.hasOwn(input, "text")) {
@@ -240,7 +264,7 @@ export function patchTask(existing: BoardTask[], id: string, input: PatchTaskInp
   }
   if (Object.hasOwn(input, "pos")) {
     const pos = normalizePos(input.pos);
-    if (!pos) return { ok: false, error: "invalid task position", status: 400 };
+    if (!pos) return positionError(input.pos);
     /* A pos always pins: place-on-map and free drags both land here, so an
        unplaced task that gets a position becomes pinned in the same PATCH, and
        the collision pass then leaves it exactly where the user dropped it. */
@@ -252,7 +276,7 @@ export function patchTask(existing: BoardTask[], id: string, input: PatchTaskInp
     if (!placement) return { ok: false, error: "invalid placement", status: 400 };
     /* Pinned needs a position: either supplied in this PATCH or already held. */
     if (placement === "pinned" && !patch.pos && !task.pos) {
-      return { ok: false, error: "task position is required", status: 400 };
+      return { ok: false, error: "task position is required", status: 400, code: "TASK_INVALID_FIELD", field: "pos" };
     }
     patch.placement = placement;
   }

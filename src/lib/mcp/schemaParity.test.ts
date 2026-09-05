@@ -847,3 +847,30 @@ test("spawn_agent and send_message publish recoveryOnly and the recovery contrac
     await server.close();
   }
 });
+
+
+test("task coordinates publish finite axes and retain pinned-update position semantics", async () => {
+  await withProtocolClient(inertBindings(), async client => {
+    const listed = await client.listTools();
+    for (const name of ["create_task", "update_task"] as const) {
+      const tool = listed.tools.find(t => t.name === name)!;
+      const pos = tool.inputSchema.properties!.pos as { required: string[]; properties: Record<string, { type: string }> };
+      expect(pos.required.slice().sort()).toEqual(["x", "y"]);
+      expect(pos.properties.x.type).toBe("number");
+      expect(pos.properties.y.type).toBe("number");
+      expect(tool.inputSchema.required).not.toContain("pos");
+      expect(tool.inputSchema.required?.slice().sort()).toEqual(name === "create_task" ? ["clientRequestId", "project", "text"] : ["clientRequestId", "taskId"]);
+      for (const invalid of [null, {}, { x: 1 }, { y: 2 }, { x: "1", y: 2 }, { x: Infinity, y: 0 }, { x: NaN, y: 0 }]) {
+        const args = { clientRequestId: "invalid-coordinate", project: "fixture-project", text: "task", taskId: "task-fixture", pos: invalid };
+        const parsed = TOOL_INPUT_SCHEMAS[name].safeParse(args);
+        expect(parsed.success).toBe(false);
+        expect(parsed.error?.issues.some(issue => issue.path[0] === "pos")).toBe(true);
+        const result = await client.callTool({ name, arguments: args });
+        expect(result.isError).toBe(true);
+        expect(JSON.stringify(result.content)).toContain("pos");
+        expect(result.structuredContent).toMatchObject({ ok: false, code: "TASK_INVALID_FIELD", retryable: false });
+      }
+    }
+    expect(TOOL_INPUT_SCHEMAS.update_task.safeParse({ clientRequestId: "retain-position", taskId: "task-fixture", placement: "pinned", expectedProject: "fixture-project", expectedRevision: "opaque" }).success).toBe(true);
+  });
+});

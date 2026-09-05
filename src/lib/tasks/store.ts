@@ -6,11 +6,25 @@ import { statePath } from "@/lib/configDir";
 import { canonicalProject } from "@/lib/projects/aliases";
 import { withFileTransactionSync } from "@/lib/state/fileTransaction";
 
+import { snapshotTasks, stampTaskRevisions, taskRevision } from "./revision";
 import { isTaskAttachment } from "./attachments";
 import type { RecentCreate } from "./commands";
 import type { AssignmentState, BoardTask, TaskAssignment, TaskPlacement, TaskSource, TaskStatus } from "./types";
 
 export const TASKS_FILE = statePath("tasks.json");
+
+// Keep untouched legacy rows exactly as stored, including extension fields and
+// omitted placement/revision. Response coercion must not migrate other rows.
+const persistedRows = new WeakMap<BoardTask, unknown>();
+function committedRows(tasks: BoardTask[], before: ReturnType<typeof snapshotTasks>, replacements: boolean): unknown[] {
+  for (const task of tasks) task.project = canonicalProject(task.project);
+  stampTaskRevisions(tasks, before, replacements);
+  return tasks.map(task => {
+    const prior = before.get(task.id);
+    return prior && taskRevision(task) === prior.revision && persistedRows.has(prior.ref)
+      ? persistedRows.get(prior.ref) : task;
+  });
+}
 
 type TasksFile = { tasks?: unknown; recentCreates?: unknown };
 
@@ -30,8 +44,9 @@ function atomicWriteJson(filePath: string, value: unknown): void {
 function readJson(filePath: string): unknown {
   try {
     return JSON.parse(fs.readFileSync(filePath, "utf8")) as unknown;
-  } catch {
-    return null;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
   }
 }
 
@@ -121,7 +136,8 @@ function coerceTask(value: unknown): BoardTask | null {
   const hasPos = isFinitePos(raw.pos);
   const placement: TaskPlacement = isPlacement(raw.placement) ? raw.placement : hasPos ? "pinned" : "unplaced";
   const pinned = placement === "pinned" && hasPos;
-  return {
+  const task: BoardTask = {
+    ...raw,
     id: raw.id!,
     project: canonicalProject(raw.project!),
     status: raw.status!,
@@ -135,6 +151,9 @@ function coerceTask(value: unknown): BoardTask | null {
     createdAt: raw.createdAt!,
     updatedAt: raw.updatedAt!,
   };
+  if (!pinned) delete task.pos;
+  try { Object.assign(task, { revision: taskRevision(task) }); } catch { return null; }
+  return task;
 }
 
 export function isTask(value: unknown): value is BoardTask {
@@ -151,13 +170,22 @@ export function loadTasks(filePath = TASKS_FILE): BoardTask[] {
   return loadTasksFile(filePath).tasks;
 }
 
-/** The whole persisted file, with legacy rows coerced and receipts filtered. */
+/** Read without writes; malformed existing state refuses instead of dropping rows. */
 export function loadTasksFile(filePath = TASKS_FILE): TasksFileState {
-  const raw = readJson(filePath) as TasksFile | null;
-  const tasks = Array.isArray(raw?.tasks)
-    ? raw.tasks.map(coerceTask).filter((task): task is BoardTask => task !== null)
-    : [];
-  const recentCreates = Array.isArray(raw?.recentCreates) ? raw.recentCreates.filter(isRecentCreate) : [];
+  const raw = readJson(filePath) as TasksFile | undefined;
+  if (raw === undefined) return { tasks: [], recentCreates: [] };
+  if (!raw || !Array.isArray(raw.tasks)) throw new Error("invalid persisted task state");
+  const tasks = raw.tasks.map(value => {
+    const task = coerceTask(value);
+    if (!task) throw new Error("invalid persisted task row");
+    persistedRows.set(task, value);
+    return task;
+  });
+  if (new Set(tasks.map(task => task.id)).size !== tasks.length) throw new Error("duplicate persisted task id");
+  if (raw.recentCreates !== undefined && (!Array.isArray(raw.recentCreates) || !raw.recentCreates.every(isRecentCreate))) {
+    throw new Error("invalid persisted task receipts");
+  }
+  const recentCreates = (raw.recentCreates ?? []) as RecentCreate[];
   return { tasks, recentCreates };
 }
 
@@ -165,14 +193,16 @@ export function saveTasks(tasks: BoardTask[], filePath = TASKS_FILE): void {
   withFileTransactionSync(filePath, "task state is busy", () => {
     /* Preserve the idempotency receipts a tasks-only save (patch/delete/send)
        doesn't touch, so a create replay still resolves after them. */
-    const { recentCreates } = loadTasksFile(filePath);
-    atomicWriteJson(filePath, recentCreates.length ? { tasks, recentCreates } : { tasks });
+    const { tasks: current, recentCreates } = loadTasksFile(filePath);
+    const rows = committedRows(tasks, snapshotTasks(current), false);
+    atomicWriteJson(filePath, recentCreates.length ? { tasks: rows, recentCreates } : { tasks: rows });
   });
 }
 
 export function saveTasksFile(state: TasksFileState, filePath = TASKS_FILE): void {
   withFileTransactionSync(filePath, "task state is busy", () => {
-    atomicWriteJson(filePath, state.recentCreates.length ? { tasks: state.tasks, recentCreates: state.recentCreates } : { tasks: state.tasks });
+    const rows = committedRows(state.tasks, snapshotTasks(loadTasksFile(filePath).tasks), false);
+    atomicWriteJson(filePath, state.recentCreates.length ? { tasks: rows, recentCreates: state.recentCreates } : { tasks: rows });
   });
 }
 
@@ -187,11 +217,13 @@ export function mutateTasks<R>(
 ): R {
   return withFileTransactionSync(filePath, "task state is busy", () => {
     const current = loadTasksFile(filePath);
+    const before = snapshotTasks(current.tasks);
     const outcome = mutate(current.tasks);
     if (outcome.tasks) {
+      const rows = committedRows(outcome.tasks, before, true);
       atomicWriteJson(filePath, current.recentCreates.length
-        ? { tasks: outcome.tasks, recentCreates: current.recentCreates }
-        : { tasks: outcome.tasks });
+        ? { tasks: rows, recentCreates: current.recentCreates }
+        : { tasks: rows });
     }
     return outcome.result;
   });
@@ -208,11 +240,14 @@ export function mutateTasksFile<R>(
   filePath = TASKS_FILE,
 ): R {
   return withFileTransactionSync(filePath, "task state is busy", () => {
-    const outcome = mutate(loadTasksFile(filePath));
+    const current = loadTasksFile(filePath);
+    const before = snapshotTasks(current.tasks);
+    const outcome = mutate(current);
     if (outcome.state) {
+      const rows = committedRows(outcome.state.tasks, before, true);
       atomicWriteJson(filePath, outcome.state.recentCreates.length
-        ? { tasks: outcome.state.tasks, recentCreates: outcome.state.recentCreates }
-        : { tasks: outcome.state.tasks });
+        ? { tasks: rows, recentCreates: outcome.state.recentCreates }
+        : { tasks: rows });
     }
     return outcome.result;
   });
