@@ -1698,6 +1698,14 @@ export function TmuxComposerCore({
   );
 
   const persistPendingDeliveries = (next: PendingDelivery[]) => {
+    /* Admission releases the local snapshot. A later safe-failure receipt
+       cannot recreate its bytes, runtime selection or selected context. Fence
+       local replay before releasing it; the operation still owns recovery. */
+    for (const previous of pendingDeliveries.current) {
+      if (!next.some((entry) => entry.key === previous.key)) {
+        updateOutbox(cardId, previous.key, { originalOperationOnly: true });
+      }
+    }
     pendingDeliveries.current = next;
     setReplayGenerationAvailable(next.some((entry) => entry.payloadComplete !== false));
     writePendingDeliveries(cardId, next);

@@ -72,6 +72,8 @@ export interface OutboxEntry {
       (previews are memory-only). The entry is held back rather than delivered
       text-only, and says so, so no attachment is ever silently dropped. */
   needsReattach?: true;
+  /** Exact local replay payload is unavailable; recover through the original operation. */
+  originalOperationOnly?: true;
   /** The initial launch prompt (issue #561/#569): the SPAWN delivers it, not the
       composer. It renders as the conversation's first optimistic user bubble but
       is never dispatched by the composer's queue and never blocks the serial
@@ -434,7 +436,11 @@ function persistedQueue(cardId: string): readonly OutboxEntry[] {
       /* The initial launch prompt is owned by the spawn, not the composer: it
          survives a refresh exactly as it was (never re-dispatched, never
          re-queued) until its transcript echo or live adoption retires it. */
-      if (entry.launchOwned || entry.deliveryUncertain || entry.deliveryReceipt || entry.acceptedHeld) return counted;
+      if (entry.launchOwned) return counted;
+      /* Receipt metadata cannot reconstruct the original runtime/context or
+         attachment bytes. Recovery remains on the server-owned operation. */
+      if (entry.deliveryReceipt || entry.acceptedHeld) return { ...counted, originalOperationOnly: true };
+      if (entry.deliveryUncertain) return counted;
       const unsettled = entry.state === "delivering" || entry.state === "queued";
       /* A `delivering` entry recorded before a refresh has no owner in this
          mount: it returns to the queue so the serial dispatcher replays it
@@ -1138,7 +1144,7 @@ export function cancelOutbox(cardId: string, id: string): void {
 export function retryOutbox(cardId: string, id: string): void {
   const queue = readOutbox(cardId);
   const entry = queue.find((item) => item.id === id);
-  if (!entry || entry.deliveryUncertain || entry.deliveryReceipt?.reason === "delivery-discarded" || entry.state !== "failed" || entry.needsReattach) return;
+  if (!entry || entry.deliveryUncertain || entry.deliveryReceipt?.reason === "delivery-discarded" || entry.state !== "failed" || entry.needsReattach || entry.originalOperationOnly) return;
   write(cardId, queue.map((item) => (item.id === id ? { ...item, state: "queued", error: undefined } : item)));
 }
 

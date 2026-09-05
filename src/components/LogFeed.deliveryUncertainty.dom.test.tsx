@@ -1213,3 +1213,90 @@ test("issue 1538: exhausted unresolved capacity refuses the new submission befor
     expect(sends).toHaveLength(1);
   } finally { await act(async () => mounted.root.unmount()); }
 });
+
+
+for (const initialState of ["in-flight", "failed"] as const) {
+  for (const remount of [false, true]) {
+    test(`admitted payload stays server-owned after ${initialState}, safe recovery and remount=${remount}`, async () => {
+      const sends: SendBody[] = [];
+      const actions: (string | undefined)[] = [];
+      const { runtimePresentationReceipt } = await import("@/lib/runtime/contracts");
+      let safe: RuntimeReceipt;
+      globalThis.fetch = (async (input, init) => {
+        const url = String(input);
+        if (url === "/api/runtime/send") {
+          const body = JSON.parse(String(init?.body)) as SendBody;
+          sends.push(body);
+          return Response.json({ operationId: captured.operationId, receipt: runtimeReceiptForSend({
+            operationId: captured.operationId, clientMessageId: body.idempotencyKey,
+            conversationId: file.conversationId!, kind: "send", state: initialState,
+            reason: initialState === "failed" ? "recipient evidence unavailable" : "accepted",
+            resend: initialState === "failed" ? "verify-first" : null,
+            acceptedAt: captured.admittedAt, settledAt: initialState === "failed" ? captured.at : null,
+          } as SendReceipt) }, { status: initialState === "failed" ? 200 : 202 });
+        }
+        if (url === `/api/runtime/operations/${captured.operationId}`) {
+          actions.push(init?.body as string | undefined);
+          safe = runtimeReceiptForSend({ operationId: captured.operationId,
+            clientMessageId: sends[0]!.idempotencyKey, conversationId: file.conversationId!,
+            kind: "send", state: "failed", reason: "pre-dispatch rejection", resend: "safe",
+            acceptedAt: captured.admittedAt, settledAt: captured.at,
+          } as SendReceipt);
+          const receipt = actions.length === 1 ? safe : runtimePresentationReceipt({
+            ...safe, operationId: "payload-retry-leaf", idempotencyKey: "payload-retry-key",
+            retryOfOperationId: safe.operationId, presentationOperationId: safe.operationId,
+            presentationRevision: 5, revision: 1, status: "delivered", resend: "not-needed",
+          });
+          return Response.json({ operationId: receipt.operationId, receipt });
+        }
+        return new Response("{}", { status: 404 });
+      }) as typeof fetch;
+      writeProfile(file, { effort: "high", fast: false });
+      let mounted = await renderInto(surface());
+      try {
+        await settle(() => composerControls(mounted.host).type("immutable attachment request"));
+        await pasteImage(mounted.host, "original-image");
+        const textarea = mounted.host.querySelector("textarea")!;
+        const propsKey = Object.keys(textarea).find(key => key.startsWith("__reactProps$"))!;
+        const props = (textarea as unknown as Record<string, { onDrop(event: unknown): void }>)[propsKey]!;
+        await settle(() => props.onDrop({
+          dataTransfer: { files: [new dom.File(["original document"], "original.pdf", { type: "application/pdf" })] },
+          preventDefault() {}, stopPropagation() {},
+        }));
+        await settle(() => composerControls(mounted.host).submit());
+        expect(sends).toHaveLength(1);
+        expect(sends[0]!.images).toHaveLength(1);
+        expect((sends[0] as SendBody & { files: unknown[] }).files).toHaveLength(1);
+        const originalWire = structuredClone(sends[0]);
+        snapshotReceipts = [{ ...captured, idempotencyKey: sends[0]!.idempotencyKey }];
+        await settle(() => mounted.root.render(surface()));
+        if (remount) {
+          await act(async () => mounted.root.unmount());
+          /* Existing sessions were persisted before this fence existed. */
+          const storageKey = `llvOutbox:${file.conversationId}`;
+          const legacyRows = JSON.parse(sessionStorage.getItem(storageKey)!) as { originalOperationOnly?: true }[];
+          for (const row of legacyRows) delete row.originalOperationOnly;
+          sessionStorage.setItem(storageKey, JSON.stringify(legacyRows));
+          resetOutboxForTests();
+          mounted = await renderInto(surface());
+        }
+        writeProfile(file, { effort: "low", fast: true });
+        await settle(() => composerControls(mounted.host).type("later draft"));
+        await pasteImage(mounted.host, "later-image");
+        await settle(() => mounted.host.querySelector<HTMLButtonElement>("[data-receipt-uncertain-retry]")!.click());
+        const safeEntry = readOutbox(file.conversationId!).find(entry => entry.id === sends[0]!.idempotencyKey)!;
+        expect(safeEntry.deliveryReceipt?.resend).toBe("safe");
+        expect(mounted.host.querySelectorAll("[data-outbox-retry]").length).toBe(0);
+        await settle(() => retryOutbox(file.conversationId!, safeEntry.id));
+        expect(readOutbox(file.conversationId!).find(entry => entry.id === safeEntry.id)).toEqual(safeEntry);
+        expect(sends).toEqual([originalWire]);
+        await settle(() => mounted.host.querySelector<HTMLButtonElement>("[data-delivery-notice-retry]")!.click());
+        expect(actions).toEqual([JSON.stringify({ action: "retry-uncertain" }), undefined]);
+        expect(readOutbox(file.conversationId!).find(entry => entry.id === safeEntry.id)?.state).toBe("delivered");
+        expect(sends).toEqual([originalWire]);
+        expect(mounted.host.querySelector<HTMLTextAreaElement>("textarea")!.value).toBe("later draft");
+        expect(mounted.host.querySelectorAll("img")).toHaveLength(1);
+      } finally { await act(async () => mounted.root.unmount()); }
+    });
+  }
+}

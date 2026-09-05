@@ -332,10 +332,10 @@ test("unmount commit invalidates a delayed legacy success before passive cleanup
   }
 });
 
-test("expiry preserves the generation until affirmative rejection permits same-key retry", async () => {
-  setLocale("en");
+test.each(["en", "uk"] as const)("expiry preserves the generation until affirmative rejection permits same-key retry (%s)", async (locale) => {
+  setLocale(locale);
   mobileViewport = false;
-  const conversationId = "conv-expiry-recover";
+  const conversationId = `conv-expiry-recover-${locale}`;
   const prompt = "confirm the deploy went out";
   const sentKeys: string[] = [];
   const sentRuntimes: { model?: string; effort?: string; fast?: boolean }[] = [];
@@ -388,8 +388,12 @@ test("expiry preserves the generation until affirmative rejection permits same-k
     await untilSendEnabled(host);
     expect(sentKeys).toHaveLength(1);
     expect(textarea.value).toBe("");
-    /* Accurate, recoverable wording for the expired-window state. */
-    expect(host.textContent).toContain(translate("en", "composer.deliveryUnconfirmed"));
+    /* Assert the actual rendered instruction: re-submitting creates a new key. */
+    const guidance = host.querySelector('[data-testid="composer-status"]')?.textContent;
+    expect(guidance).toBe(locale === "en"
+      ? "Delivery couldn't be confirmed. Your message is preserved. Check its delivery status before trying again."
+      : "Не вдалося підтвердити доставку. Повідомлення збережено. Перевірте стан його доставки перед повторною спробою.");
+    expect(guidance).not.toMatch(/send again|same message key|надішліть ще раз|той самий ключ/i);
     /* One durable, honest receipt row for the preserved generation. */
     expect(host.querySelectorAll('[data-operation^="composer-unconfirmed:"] > [role="status"]')).toHaveLength(1);
     expect(host.querySelector("[data-receipt-preview]")?.textContent).toBe(prompt);

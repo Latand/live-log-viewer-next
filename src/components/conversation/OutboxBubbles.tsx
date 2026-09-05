@@ -196,7 +196,7 @@ export function OutboxBubblesView({
                     `retryOutbox` refuses anything but `failed`, and re-queueing
                     it locally would not touch the journaled send the server is
                     still holding (issue #1213). */}
-                {!entry.deliveryUncertain && entry.deliveryReceipt?.reason !== "delivery-discarded" && entry.state === "failed" && !entry.needsReattach ? (
+                {!entry.deliveryUncertain && entry.deliveryReceipt?.reason !== "delivery-discarded" && entry.state === "failed" && !entry.needsReattach && !entry.originalOperationOnly ? (
                   <button
                     type="button"
                     data-outbox-retry={entry.id}
