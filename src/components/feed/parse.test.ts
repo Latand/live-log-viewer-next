@@ -1082,6 +1082,65 @@ describe("Codex assistant prose coalescing", () => {
   });
 });
 
+describe("Codex token usage service visibility (#1523)", () => {
+  const usage = JSON.stringify({
+    timestamp: "2026-09-01T05:00:06.002Z",
+    type: "token_usage_record",
+    payload: { input_tokens: 12, output_tokens: 5 },
+  });
+  const tokenCount = JSON.stringify({ type: "event_msg", payload: { type: "token_count", info: { total_tokens: 17 } } });
+  const unknown = JSON.stringify({ type: "future_record", payload: { detail: "inspectable" } });
+
+  test("hides known usage and counts it alongside token_count while retaining unknown records", () => {
+    const session = createFeedSession({ engine: "codex", fmt: "codex", showSvc: false, lineFilter: "" });
+    const hidden = session.feed([usage], 0, false);
+    expect(hidden.items).toEqual([]);
+    expect(hidden.hiddenServiceCount).toBe(1);
+
+    const mixed = session.feed([usage, tokenCount, unknown], 0, false);
+    expect(mixed.items.map((entry) => entry.item)).toEqual([
+      expect.objectContaining({ kind: "record", recordType: "future_record" }),
+    ]);
+    expect(mixed.hiddenServiceCount).toBe(2);
+    expect(session.feed([usage, tokenCount, unknown], 0, false)).toBe(mixed);
+    const trimmed = session.feed([unknown], 2, false);
+    expect(trimmed.hiddenServiceCount).toBe(0);
+    expect(trimmed.items).toHaveLength(1);
+  });
+
+  test("keeps the inspectable redacted usage payload when services are enabled", () => {
+    const feed = buildFeed(codexFile, [usage, tokenCount, unknown], true, "");
+    expect(feed.hiddenServiceCount).toBe(0);
+    expect(feed.items).toEqual([
+      expect.objectContaining({ kind: "record", recordType: "token_usage_record", body: expect.stringContaining('"input_tokens": "[redacted]"') }),
+      expect.objectContaining({ kind: "svc", text: "token_count" }),
+      expect.objectContaining({ kind: "record", recordType: "future_record" }),
+    ]);
+    expect(feed.items[0]).toMatchObject({ body: expect.stringContaining('"output_tokens": "[redacted]"') });
+  });
+
+  test("preserves mirrored tools and final prose across incremental live and completed feeds", () => {
+    const fixture = fixtureLines("codex-turn-chronology-0.151.jsonl");
+    const lines = [...fixture.slice(0, -1), usage, unknown, fixture[fixture.length - 1]];
+    for (const showSvc of [false, true]) {
+      const session = assertParity(codexFile, lines, { chunks: [1], live: true, showSvc });
+      const completed = session.feed(lines, 0, false);
+      const items = completed.items.map((entry) => entry.item);
+      expect(items).toEqual(buildFeed(codexFile, lines, showSvc, "").items);
+      expect(items.flatMap((item) => {
+        if (item.kind === "prose") return [item.text];
+        if (item.kind === "tool") return [item.id];
+        if (item.kind === "cmd-group") return item.calls.map((call) => call.id);
+        return [];
+      })).toEqual(["Inspecting the parser first.", "command-first", "command-second", "The task is complete."]);
+      expect(items.filter((item) => item.kind === "record").map((item) => item.recordType))
+        .toEqual(showSvc ? ["token_usage_record", "future_record"] : ["future_record"]);
+      expect(completed.hiddenServiceCount).toBe(buildFeed(codexFile, fixture, showSvc, "").hiddenServiceCount + (showSvc ? 0 : 1));
+      assertParity(codexFile, lines, { chunks: [1, 3], cap: 4, live: true, showSvc });
+    }
+  });
+});
+
 describe("Codex functions.exec orchestration", () => {
   const orch = (input: string, callId: string, ts = "t") =>
     JSON.stringify({ type: "response_item", timestamp: ts, payload: { type: "custom_tool_call", id: "ctc-" + callId, call_id: callId, name: "exec", status: "completed", input } });
