@@ -34,7 +34,7 @@ import {
 } from "./registry";
 import { deliverHeldStructuredMessage, enqueueStructuredMessage } from "./structuredMessageDelivery";
 import { didStructuredHostStartupFail, structuredStartupStatus } from "./startupStatus";
-import { adoptStructuredHostsAtStartup, structuredStartupHosts, type StructuredStartupDependencies } from "./startup";
+import { adoptStructuredHostsAtStartup, structuredStartupDeferral, structuredStartupHosts, type StructuredStartupDependencies } from "./startup";
 import { beginLegacySpawnFixture } from "@/lib/agent/registryTestFixtures";
 
 function runtimeClient(journal: RuntimeJournal): RuntimeHostClient {
@@ -1500,6 +1500,45 @@ test("startup adoption boots one live unfinished host across terminal history", 
 
   expect(await startupAdoptionAttempts(registry)).toEqual([`codex:${liveSessionId}`]);
 
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
+/* #1501: the pipeline record outranks a row's unfinished-turn claim. A
+   conversation whose stage attempt has settled is not re-hosted for that
+   claim alone; work owed to it still is. */
+test("startup adoption does not re-host a settled stage attempt on its unfinished-turn claim alone (#1501)", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-settled-stage-"));
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const settledSessionId = "11111111-1111-0111-0111-111111111111";
+  const drivenSessionId = "22222222-2222-0222-0222-222222222222";
+  const owedSessionId = "33333333-3333-0333-0333-333333333333";
+  const settled = addStructuredRestartConversation(registry, directory, { engine: "claude", sessionId: settledSessionId, status: "live", turn: "busy", activeTurnRef: "turn-settled" });
+  addStructuredRestartConversation(registry, directory, { engine: "claude", sessionId: drivenSessionId, status: "live", turn: "busy", activeTurnRef: "turn-driven" });
+  const owed = addStructuredRestartConversation(registry, directory, { engine: "claude", sessionId: owedSessionId, status: "live", turn: "busy", activeTurnRef: "turn-owed" });
+  registry.holdDelivery(owed.conversation.id, "answer this when you are back", "owed-held-send", "text", [], null, { operationId: "owed-held-send-op", kind: "send", policy: "queue", turnId: null });
+  const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeJournalClient(journal);
+  const attempts: string[] = [];
+
+  await adoptStructuredHostsAtStartup({
+    registry,
+    client,
+    pipelineEvidence: () => ({ settled: new Set([settled.conversation.id, owed.conversation.id]), deferred: new Set() }),
+    adopt: async () => [],
+    adoptClaude: async (received, _optionsFor, _env, shouldAdopt = () => true) => {
+      for (const entry of Object.values(received.snapshot().entries)) {
+        if (entry.key.engine === "claude" && entry.structuredHost && shouldAdopt(entry)) attempts.push(entry.key.sessionId);
+      }
+      return [];
+    },
+  });
+
+  expect(attempts.sort()).toEqual([drivenSessionId, owedSessionId].sort());
+  /* The skipped settled row is demoted like any other row adoption refused. */
+  expect(registry.readOnlySnapshot().entries[`claude:${settledSessionId}`]).toMatchObject({ status: "dead" });
+
+  await bindStructuredDeliveryQueue([], { registry, client: null });
+  journal.close();
   fs.rmSync(directory, { recursive: true, force: true });
 });
 
@@ -4103,7 +4142,13 @@ test("startup keeps a delivered spawn host dead while settling its receipt", asy
     status: "delivered",
     reason: null,
   });
-  await expect(client.retryOperation(begun.receipt.launchId)).rejects.toThrow("only failed runtime operations can retry");
+  const receiptBeforeRetry = await client.operationStatus(begun.receipt.launchId);
+  const effectsBeforeRetry = await client.effectBatch(["runtime.spawn", "runtime.send", "runtime.steer"]);
+  /* Spawn is never retryable through delivery retry. The journal checks that
+     command kind before status, so this refusal must preserve settlement. */
+  await expect(client.retryOperation(begun.receipt.launchId)).rejects.toThrow(/^runtime operation does not support retry$/);
+  expect(await client.operationStatus(begun.receipt.launchId)).toEqual(receiptBeforeRetry);
+  expect(await client.effectBatch(["runtime.spawn", "runtime.send", "runtime.steer"])).toEqual(effectsBeforeRetry);
   expect(journal.snapshot().sessions.find((session) => session.conversationId === begun.receipt.conversationId)).toMatchObject({
     host: "dead",
     activeTurnId: null,
@@ -4398,4 +4443,111 @@ test("startup settles a delivered pipeline retry and collapses its rebooted pred
   await bindStructuredDeliveryQueue([], { registry, client: null });
   journal.close();
   fs.rmSync(directory, { recursive: true, force: true });
+});
+
+
+test("deferred pipeline evidence completes the pass with both engines retained, reconciles pending spawns outside the fence, and re-probes only the evidence until it moves (#1501)", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-startup-pipeline-deferred-"));
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const blocked = ["claude", "codex"].map((engine, index) => addStructuredRestartConversation(registry, directory, {
+    engine: engine as "claude" | "codex", sessionId: `00000000-0000-0000-0000-00000000000${index + 1}`,
+    status: "live", turn: "busy", activeTurnRef: "unfinished",
+  }));
+  const unrelated = addStructuredRestartConversation(registry, directory, {
+    engine: "claude", sessionId: "00000000-0000-0000-0000-000000000003", status: "live", turn: "busy", activeTurnRef: "unfinished",
+  });
+  const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeJournalClient(journal);
+  /* Two launches accepted before this boot and never carried to a host: one
+     reserved for a fenced pipeline conversation, one for nobody in particular. */
+  const receiptFor = (title: string) => {
+    const begun = registry.beginSpawnRequest({ engine: "claude", cwd: directory, transport: "structured", accountId: null, launchProfile: { title } });
+    if (begun.kind !== "created") throw new Error(`${title} receipt was unavailable`);
+    return begun.receipt.launchId;
+  };
+  const fencedLaunch = receiptFor("fenced pending launch");
+  const freeLaunch = receiptFor("unrelated pending launch");
+  const receiptState = (launchId: string) => registry.readOnlySnapshot().receipts[launchId]!.state;
+  const fencedConversationId = registry.readOnlySnapshot().receipts[fencedLaunch]!.conversationId;
+  let deferred = new Set([...blocked.map((item) => item.conversation.id), fencedConversationId]);
+  const selected: string[] = [];
+  const scheduled: Array<{ callback: () => void; delayMs: number }> = [];
+  const adopt: NonNullable<Parameters<typeof adoptStructuredHostsAtStartup>[0]>["adopt"] = async (received, _options, _env, filter = () => true) => {
+    for (const entry of Object.values(received.readOnlySnapshot().entries)) {
+      if (entry.structuredHost && filter(entry)) selected.push(entry.key.sessionId);
+    }
+    return [];
+  };
+  const dependencies = {
+    registry, client, refreshTranscriptState: async () => new Set<string>(),
+    pipelineEvidence: () => ({ settled: new Set<string>(), deferred }),
+    adopt, adoptClaude: adopt as never,
+    schedule: (callback: () => void, delayMs: number) => { scheduled.push({ callback, delayMs }); return { unref() {} }; },
+  };
+  const until = async (predicate: () => boolean, what: string) => {
+    for (let attempt = 0; attempt < 400; attempt += 1) {
+      if (predicate()) return;
+      await Bun.sleep(5);
+    }
+    throw new Error(`${what} did not settle`);
+  };
+  const retainedRows = () => {
+    for (const item of blocked) {
+      expect(registry.conversation(item.conversation.id)?.turn.state).toBe("busy");
+      const generation = item.conversation.generations.at(-1)!;
+      expect(registry.readOnlySnapshot().entries[`${item.conversation.engine}:${generation.id}`]!.status).toBe("live");
+    }
+  };
+  try {
+    /* The pass completes: unrelated work proceeds, the fenced rows are
+       retained, and a fenced launch receipt holds the whole recovery back. */
+    await adoptStructuredHostsAtStartup(dependencies);
+    expect(new Set(selected)).toEqual(new Set([unrelated.conversation.generations.at(-1)!.id]));
+    retainedRows();
+    expect(structuredStartupDeferral()).toEqual({
+      hostKeys: blocked.map((item) => `${item.conversation.engine}:${item.conversation.generations.at(-1)!.id}`),
+      fencedReceipts: 1,
+      message: "pipeline startup evidence is unresolved; deferred 2 host(s) and 1 pending launch receipt(s)",
+      nextProbeMs: 1_000,
+    });
+    expect(receiptState(fencedLaunch)).toBe("starting");
+    expect(receiptState(freeLaunch)).toBe("starting");
+    expect(scheduled.map((item) => item.delayMs)).toEqual([1_000]);
+
+    /* Unchanged evidence: the probe backs off and no pass runs. */
+    selected.length = 0;
+    scheduled.shift()!.callback();
+    expect(selected).toEqual([]);
+    expect(scheduled.map((item) => item.delayMs)).toEqual([2_000]);
+    expect(structuredStartupDeferral()?.nextProbeMs).toBe(2_000);
+    retainedRows();
+
+    /* The fenced launch's pipeline is released while the survivors remain:
+       the evidence moved, so one pass runs, recovery settles both receipts,
+       the two rows stay retained and the cadence starts over for them. */
+    deferred = new Set(blocked.map((item) => item.conversation.id));
+    scheduled.shift()!.callback();
+    await until(() => structuredStartupDeferral()?.fencedReceipts === 0, "the re-probe pass");
+    expect(new Set(selected)).toEqual(new Set([unrelated.conversation.generations.at(-1)!.id]));
+    retainedRows();
+    expect(receiptState(fencedLaunch)).toBe("failed");
+    expect(receiptState(freeLaunch)).toBe("failed");
+    expect(structuredStartupDeferral()).toMatchObject({
+      message: "pipeline startup evidence is unresolved; deferred 2 host(s)",
+      nextProbeMs: 1_000,
+    });
+    expect(scheduled.map((item) => item.delayMs)).toEqual([1_000]);
+
+    /* Positive death: the pass admits every row and the probe ends. */
+    deferred = new Set();
+    selected.length = 0;
+    scheduled.shift()!.callback();
+    await until(() => structuredStartupDeferral() === null, "the admitting pass");
+    expect(new Set(selected).size).toBe(3);
+    expect(scheduled).toEqual([]);
+  } finally {
+    await bindStructuredDeliveryQueue([], { registry, client: null });
+    journal.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });

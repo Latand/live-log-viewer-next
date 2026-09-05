@@ -560,6 +560,21 @@ test("structured kill enters the durable runtime command channel", async () => {
   expect(kicks).toBe(1);
 });
 
+test("a caller with no control channel gets the typed unavailable answer, and no command is sent (#1501)", async () => {
+  const fixture = structuredConversation();
+
+  const result = await dispatchStructuredControl({ path: fixture.path, conversationId: "", action: "kill" }, {
+    registry: fixture.registry,
+    client: null,
+    enabled: () => true,
+  });
+
+  expect(result).toEqual({
+    status: 503,
+    body: { error: "structured runtime host is unavailable", code: "runtime-host-unavailable" },
+  });
+});
+
 function terminateStructuredFixture(fixture: { registry: AgentRegistry; conversationId: string }): void {
   const conversation = fixture.registry.conversation(fixture.conversationId as `conversation_${string}`)!;
   const generation = conversation.generations.at(-1)!;

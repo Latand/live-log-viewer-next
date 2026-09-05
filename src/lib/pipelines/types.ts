@@ -196,6 +196,18 @@ export type PipelineStageAttempt = {
   error: string | null;
   /** Bounded, append-only reconciliation receipt for terminal parser misses. */
   verdictRecovery?: PipelineVerdictRecovery;
+  /** What a close could prove it did not finish (#1501): the authorized host
+      processes still unresolved across identity-bound stops, each with the
+      kernel identity it carried. While one of them is still that process, no
+      close may terminalize this attempt, however dead the registry row looks;
+      the record is cleared once every one is proven gone. */
+  unresolvedTermination?: PipelineUnresolvedTermination;
+};
+
+export type PipelineUnresolvedTermination = {
+  survivors: Array<{ pid: number; startIdentity: string | null; bootEpoch?: string | null }>;
+  error: string;
+  recordedAt: string;
 };
 
 export type PipelineStageRun = {

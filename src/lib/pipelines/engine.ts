@@ -11,7 +11,7 @@ import { freshSpecFor } from "@/lib/agent/cli";
 import { agentRegistry, identityMaterializationFence, type DurableMembershipInput, type TmuxHostEvidence } from "@/lib/agent/registry";
 import { forEachCooperatively } from "@/lib/cooperative";
 import { transcriptAllowed } from "@/lib/agent/spawnParent";
-import { sessionKeyFromTranscript, sessionKeyId } from "@/lib/agent/sessionKey";
+import { sessionKeyFromTranscript, sessionKeyId, type SessionKey } from "@/lib/agent/sessionKey";
 import { headCwd } from "@/lib/agent/transcript";
 import { MAX_FLOW_NOTE_LENGTH, closeFlow, createFlowFromRequest, isRecoverableLegacyRelayFailurePause, patchFlow } from "@/lib/flows/commands";
 import { lastAssistantMessage, readFindingsFile } from "@/lib/flows/findings";
@@ -22,7 +22,16 @@ import { isRuntimeHostTransportFailure, runtimeHostClient, type RuntimeHostClien
 import { structuredHostsEnabled, supervisedRuntimeHostUnavailableReason } from "@/lib/runtime/flags";
 import { conversationTurnLiveness, type TurnLivenessDependencies } from "@/lib/runtime/liveness";
 import { structuredDeliveryPublicationState } from "@/lib/runtime/structuredDeliveryController";
+import { RUNTIME_HOST_UNAVAILABLE_CODE } from "@/lib/runtime/structuredControls";
+import {
+  describeStructuredHostOwnerGeneration,
+  structuredHostKillRefFromRegistry,
+  structuredHostKillRefusal,
+  terminateStructuredHostTree,
+  type StructuredHostTerminationDependencies,
+} from "@/lib/runtime/structuredHostControl";
 import { redactBounded } from "@/lib/monitor/redact";
+import { processIdentityStatus } from "@/lib/processIdentity";
 import { parseReview, type ReviewFinding } from "@/lib/review";
 import { spawnStructuredConversation } from "@/lib/runtime/structuredSpawn";
 import { projectForCwd } from "@/lib/scanner/describe";
@@ -71,6 +80,7 @@ import type {
   PipelineStageAttempt,
   PipelineTerminalReap,
   PipelineUnconfirmedHost,
+  PipelineUnresolvedTermination,
 } from "./types";
 import { parseStageVerdict, stageVerdictRejectionReason, type ParsedStageVerdict } from "./verdict";
 
@@ -93,12 +103,22 @@ export type PipelineStageHostRef = {
   /** Set for a conversation a stage agent spawned and the pipeline adopted, so
       the report distinguishes it from the stage's own launch. */
   adopted?: true;
+  /** The attempt's immutable launch identity. A stop that has to act on the
+      registry row alone (#1501) binds the row to this launch's receipt. */
+  launchId?: string | null;
 };
 
 export type PipelineStageStopResult =
-  /** Termination is evidenced: the kill was delivered, or the host is gone. */
-  | { outcome: "stopped" }
+  /** Termination is evidenced: the kill was delivered, or the host is gone.
+      `detail` names the evidence when the stop went around the runtime. */
+  | { outcome: "stopped"; detail?: string }
   | { outcome: "not-running" }
+  /** Termination was attempted and the authorized tree is unresolved (#1501):
+      a survivor, refused signal, or lost authority. Typed apart from `failed` because
+      no evidence about the registry row or the transcript may terminalize
+      the attempt over it — the processes named in `survivors` are still the
+      attempt's, and only their proven death releases it. */
+  | { outcome: "unresolved"; error: string; survivors: PipelineUnresolvedTermination["survivors"] }
   /** The kill was accepted (a `queued` receipt is the normal first answer) but
       termination was not evidenced inside the confirmation budget. The host may
       still be alive, so a close carrying one of these never claims a clean stop. */
@@ -488,6 +508,9 @@ const KILL_REFUSED_STATES = new Set(["failed", "rejected"]);
 
 export type StageStopProbes = {
   client?: RuntimeHostClient | null;
+  /** Injected into the identity-bound termination a socketless caller falls
+      back to (#1501); production uses the real kernel probes and signals. */
+  termination?: StructuredHostTerminationDependencies;
   action?: (request: {
     conversationId: string;
     transcriptPath: string;
@@ -521,6 +544,8 @@ export type StageStopProbes = {
 type StageHostProbe = {
   conversationId: ViewerConversationId;
   transcriptPath: string;
+  /** The conversation's current generation: the one registry row a stop may act on. */
+  key: SessionKey;
   resident(): boolean;
   /** Durable tmux evidence recorded for this session, if any. It is the only
       thing that can identify a stored pane id as still being this agent's. */
@@ -543,6 +568,7 @@ async function stageHostProbe(target: PipelineStageHostRef): Promise<StageHostPr
   return {
     conversationId: conversation.id,
     transcriptPath: generation.path,
+    key: { engine: conversation.engine, sessionId: generation.id },
     /* Re-read every call: the registry read cache invalidates on the file
        signature, so a teardown written by the host process is visible here. */
     resident: () => {
@@ -625,7 +651,10 @@ export async function stopPipelineStageAgent(
       return applyConversationAction(request);
     });
     const result = await applyAction({ conversationId, transcriptPath, action: "kill" });
-    const body = result.body as { ok?: boolean; error?: string; operationId?: string; receipt?: { status?: string } };
+    const body = result.body as { ok?: boolean; error?: string; code?: string; operationId?: string; receipt?: { status?: string } };
+    if (result.status === 503 && body.code === RUNTIME_HOST_UNAVAILABLE_CODE) {
+      return await stopStageHostByRecordedIdentity(target, probe, probes.termination ?? {});
+    }
     if (result.status >= 400 || body.ok !== true) {
       return { outcome: "failed", error: body.error ?? `stage host kill was refused with status ${result.status}` };
     }
@@ -665,6 +694,165 @@ export async function stopPipelineStageAgent(
   } catch (error) {
     return { outcome: "failed", error: error instanceof Error ? error.message : String(error) };
   }
+}
+
+/** Why this process could not use the runtime command channel; every report
+    the identity path produces ends with it, so the operator can tell a
+    socketless caller from a host that answered. */
+const NO_CONTROL_CHANNEL = "this process has no structured control channel (LLV_RUNTIME_HOST_SOCKET is unset), so no runtime host generation could be asked";
+
+/**
+ * Ends a stage host from a process that has no channel to any runtime host
+ * generation (#1501): the MCP host process, which answered every close of a
+ * parked lane with "structured runtime host is unavailable" while the host it
+ * could see kept burning quota under a Viewer generation the record no longer
+ * named.
+ *
+ * The authority comes from the durable registry row and nothing else: the
+ * engine process the Viewer recorded (pid, start identity, boot epoch) and the
+ * generation that claimed it. It is bound to the attempt affirmatively before
+ * anything is signalled — the attempt must name a conversation the row is the
+ * current generation of, and the attempt's launch must have a receipt naming
+ * that same conversation; an attempt with no launch, or a launch with no
+ * receipt, is unresolved and gets no signal. The same authority (row still
+ * naming this process, still this conversation, no orchestrator seat) is asked
+ * again after every await inside the termination and one step before each
+ * signal, and the host is ended through the same identity-fenced termination
+ * the resources rail uses, which signals exactly once per pid.
+ *
+ * A refusal before termination starts is a `failed` stop with no signal sent.
+ * Once termination starts, a survivor, an EPERM, or lost authority is
+ * `unresolved`, with
+ * each survivor's identity, and the close keeps that record on the attempt so
+ * no later evidence about the row or the transcript can terminalize it while
+ * one of them is still that process. The row is retired only by the
+ * termination itself, and only once the tree is proven gone.
+ */
+async function stopStageHostByRecordedIdentity(
+  target: PipelineStageHostRef,
+  probe: StageHostProbe,
+  termination: StructuredHostTerminationDependencies,
+): Promise<PipelineStageStopResult> {
+  const registry = agentRegistry();
+  const refused = (reason: string): PipelineStageStopResult => ({
+    outcome: "failed",
+    error: `${reason}; nothing was signalled; ${NO_CONTROL_CHANNEL}`,
+  });
+  if (!target.conversationId?.startsWith("conversation_")) {
+    return refused("unresolved ownership: the attempt records no conversation id to bind the host to");
+  }
+  if (registry.canonicalConversationId(target.conversationId as ViewerConversationId) !== probe.conversationId) {
+    return refused(`contradictory ownership: the attempt names ${target.conversationId} but the registry resolves its transcript to ${probe.conversationId}`);
+  }
+  if (!target.launchId) {
+    return refused("unresolved ownership: the attempt records no launch identity, so the host cannot be bound to a Viewer launch");
+  }
+  const receipt = registry.readOnlySnapshot().receipts[target.launchId] ?? null;
+  if (!receipt) {
+    return refused(`unresolved ownership: no launch receipt exists for launch ${target.launchId}`);
+  }
+  if (!receipt.conversationId || registry.canonicalConversationId(receipt.conversationId) !== probe.conversationId) {
+    return refused(`contradictory ownership: the attempt's launch receipt names ${receipt.conversationId ?? "no conversation"}, not ${probe.conversationId}`);
+  }
+  const built = structuredHostKillRefFromRegistry(probe.key);
+  const generation = describeStructuredHostOwnerGeneration(built.owner);
+  if (!built.ok) {
+    return refused(`${built.error}; ${generation}`);
+  }
+  const { ref } = built;
+  /* Asked now, and again by the termination after each await and before each
+     signal: the row must still name this exact process as this conversation's
+     current host, and the conversation must not hold an orchestrator seat. */
+  const authorize = (): { status: 403 | 409; error: string } | null => {
+    const current = structuredHostKillRefFromRegistry(probe.key);
+    if (!current.ok) return { status: 409, error: `authority lost before signalling: ${current.error}` };
+    if (current.ref.pid !== ref.pid
+      || current.ref.startIdentity !== ref.startIdentity
+      || current.ref.bootEpoch !== ref.bootEpoch) {
+      return { status: 409, error: `authority lost before signalling: the registry row now names pid ${current.ref.pid}, not pid ${ref.pid}` };
+    }
+    if (current.ref.conversationId !== ref.conversationId) {
+      return { status: 409, error: `authority lost before signalling: the registry row is now the current generation of ${current.ref.conversationId}` };
+    }
+    return structuredHostKillRefusal(current.ref, { kind: "row" }, false);
+  };
+  const refusal = authorize();
+  if (refusal) {
+    return refused(`${refusal.error} (pid ${ref.pid}); ${generation}`);
+  }
+  const outcome = await terminateStructuredHostTree(ref, { ...termination, authorize });
+  if (outcome.ok) {
+    return {
+      outcome: "stopped",
+      detail: `ended host pid ${ref.pid} by its recorded identity (${outcome.via}); ${generation}; ${NO_CONTROL_CHANNEL}`,
+    };
+  }
+  const named = outcome.remaining.length > 0 ? `; still running: ${outcome.remaining.join(", ")}` : "";
+  if (outcome.terminationStarted || outcome.status === 500) {
+    /* Termination may have effects even when a later authority check refuses.
+       Keep captured identities until their death is proven. */
+    const survivors: PipelineUnresolvedTermination["survivors"] = outcome.terminationStarted || outcome.survivors.length > 0
+      ? outcome.survivors.map((survivor) => ({ pid: survivor.pid, startIdentity: survivor.startIdentity, bootEpoch: survivor.bootEpoch ?? null }))
+      : outcome.remaining.map((pid) => ({ pid, startIdentity: null }));
+    return {
+      outcome: "unresolved",
+      error: `${outcome.error} (pid ${ref.pid}${named}); ${generation}; ${NO_CONTROL_CHANNEL}`,
+      survivors,
+    };
+  }
+  return refused(`${outcome.error} (pid ${ref.pid}${named}); ${generation}`);
+}
+
+function terminationIdentityStatus(identity: PipelineUnresolvedTermination["survivors"][number]) {
+  try { return processIdentityStatus(identity); }
+  catch { return "unverified" as const; }
+}
+
+function rememberUnresolvedTermination(
+  attempt: PipelineStageAttempt,
+  result: Extract<PipelineStageStopResult, { outcome: "unresolved" }>,
+  recordedAt: string,
+): void {
+  const survivors = [...(attempt.unresolvedTermination?.survivors ?? []), ...result.survivors]
+    .filter((survivor) => terminationIdentityStatus(survivor) !== "dead");
+  const unique = new Map(survivors.map((survivor) => [
+    JSON.stringify([survivor.pid, survivor.startIdentity, survivor.bootEpoch ?? null]), survivor,
+  ]));
+  attempt.unresolvedTermination = { survivors: [...unique.values()], error: result.error, recordedAt };
+}
+
+/**
+ * Whether an attempt still carries survivors of an earlier stop that are not
+ * proven gone (#1501). Alive or unverifiable means the attempt cannot be
+ * terminalized by any other evidence; every survivor proven dead by identity
+ * clears the record. Never signals anything.
+ */
+function unresolvedTerminationRefusal(attempt: PipelineStageAttempt): string | null {
+  const record = attempt.unresolvedTermination;
+  if (!record) return null;
+  const standing: string[] = [];
+  record.survivors = record.survivors.filter((survivor) => terminationIdentityStatus(survivor) !== "dead");
+  for (const survivor of record.survivors) {
+    const status = terminationIdentityStatus(survivor);
+    if (status === "dead") continue;
+    standing.push(`pid ${survivor.pid} ${status === "alive" ? "is still running" : "cannot be verified"}`);
+  }
+  if (standing.length === 0) {
+    delete attempt.unresolvedTermination;
+    return null;
+  }
+  return `an earlier stop left authorized processes it could not end (${record.error}); ${standing.join(", ")}`;
+}
+
+/** Older attempts can retain descendants after a replacement becomes current. */
+function pipelineSurvivorRefusal(pipeline: Pipeline): { error: string; status: number } | null {
+  for (const run of pipeline.runs) {
+    for (const attempt of run.attempts) {
+      const error = unresolvedTerminationRefusal(attempt);
+      if (error) return { error, status: 409 };
+    }
+  }
+  return null;
 }
 
 export function defaultPipelinePorts(
@@ -2192,10 +2380,11 @@ async function tickRunStage(
       paneId: attempt.paneId,
       ...(attempt.historical ? { adopted: true as const } : {}),
     });
-    if (stopped.outcome === "failed" || stopped.outcome === "unconfirmed") {
-      pipeline.stateDetail = stopped.outcome === "failed"
-        ? `automatic recovery could not retire the unavailable stage host: ${stopped.error}`
-        : "automatic recovery is waiting for the unavailable stage host to terminate";
+    if (stopped.outcome === "unresolved") rememberUnresolvedTermination(attempt, stopped, ports.now());
+    if (stopped.outcome === "failed" || stopped.outcome === "unresolved" || stopped.outcome === "unconfirmed") {
+      pipeline.stateDetail = stopped.outcome === "unconfirmed"
+        ? "automatic recovery is waiting for the unavailable stage host to terminate"
+        : `automatic recovery could not retire the unavailable stage host: ${stopped.error}`;
       ports.scheduleTick?.(1_000);
       return;
     }
@@ -2992,7 +3181,7 @@ async function reconcileTerminalStageHosts(pipeline: Pipeline, ports: PipelinePo
   const survivors: Array<PipelineStageHostRef & { operationId: string | null; detail: string }> = [];
   let attempted = false;
   let deferred = false;
-  for (const [index, { target }] of candidates.entries()) {
+  for (const [index, { target, attempt }] of candidates.entries()) {
     const attemptKey = `${target.stageId}:${target.attempt}`;
     if (ports.monotonicNow() >= deadline) {
       deferred = true;
@@ -3008,6 +3197,12 @@ async function reconcileTerminalStageHosts(pipeline: Pipeline, ports: PipelinePo
       }
       break;
     }
+    const unresolved = unresolvedTerminationRefusal(attempt);
+    if (unresolved) {
+      attempted = true;
+      survivors.push({ ...target, operationId: null, detail: unresolved });
+      continue;
+    }
     if (!(await ports.stageHostResident(target))) {
       settledAttempts.add(attemptKey);
       continue;
@@ -3021,12 +3216,13 @@ async function reconcileTerminalStageHosts(pipeline: Pipeline, ports: PipelinePo
     }
     attempted = true;
     const result = await ports.stopStageAgent(target);
+    if (result.outcome === "unresolved") rememberUnresolvedTermination(attempt, result, ports.now());
     if (result.outcome === "stopped") {
       reap.stopped += 1;
       settledAttempts.add(attemptKey);
     }
     else if (result.outcome === "unconfirmed") survivors.push({ ...target, operationId: result.operationId, detail: result.detail });
-    else if (result.outcome === "failed") survivors.push({ ...target, operationId: null, detail: result.error });
+    else if (result.outcome === "failed" || result.outcome === "unresolved") survivors.push({ ...target, operationId: null, detail: result.error });
   }
   reap.lastAt = ports.now();
   reap.settledAttempts = [...settledAttempts];
@@ -3069,13 +3265,19 @@ export async function tickPipelines(entries: FileEntry[], ports: PipelinePorts =
         pipelineChanged = reconcilePendingPipelineAdoptions(pipeline, ports) || pipelineChanged;
         pipelineChanged = await reconcileHistoricalAttempts(pipeline, entries, ports) || pipelineChanged;
         pipelineChanged = rebindPipelineAttemptPaths(pipeline, ports) || pipelineChanged;
-        pipelineChanged = await reconcileExhaustedVerdictRecovery(pipeline, ports, persistPipeline) || pipelineChanged;
-        pipelineChanged = reconcileParkedVerdictMiss(pipeline, ports) || pipelineChanged;
-        pipelineChanged = reconcileParkedStructuredSpawn(pipeline, ports) || pipelineChanged;
-        pipelineChanged = reconcileBoundReviewFlow(pipeline, ports, persistPipeline) || pipelineChanged;
+        // Evidence above may be synchronized while a stop remains unresolved.
+        // Recovery below can advance the cursor, publish a verdict or resume a
+        // flow, so it needs the same pipeline-wide admission as ordinary ticks.
+        if (!pipelineSurvivorRefusal(pipeline)) {
+          pipelineChanged = await reconcileExhaustedVerdictRecovery(pipeline, ports, persistPipeline) || pipelineChanged;
+          pipelineChanged = reconcileParkedVerdictMiss(pipeline, ports) || pipelineChanged;
+          pipelineChanged = reconcileParkedStructuredSpawn(pipeline, ports) || pipelineChanged;
+          pipelineChanged = reconcileBoundReviewFlow(pipeline, ports, persistPipeline) || pipelineChanged;
+        }
         pipelineChanged = await reconcileUnconfirmedHosts(pipeline, ports) || pipelineChanged;
         pipelineChanged = await reconcileTerminalStageHosts(pipeline, ports) || pipelineChanged;
-        if (!TERMINAL_STATES.has(pipeline.state) && pipeline.state !== "paused" && pipeline.state !== "needs_decision") {
+        if (!TERMINAL_STATES.has(pipeline.state) && pipeline.state !== "paused" && pipeline.state !== "needs_decision"
+          && !pipelineSurvivorRefusal(pipeline)) {
           pipelineChanged = await tickPipeline(
             pipeline,
             entries,
@@ -3807,6 +4009,7 @@ function launchedStageHosts(pipeline: Pipeline): StageHostCandidate[] {
           agentPath: attempt.agentPath,
           paneId: attempt.paneId,
           ...(attempt.historical ? { adopted: true as const } : {}),
+          launchId: attempt.launchId,
         },
         /* Same reading orphanAgentPane uses: a verdict or a completion stamp
            means the turn ended, so what is left in the pane is an idle CLI. A
@@ -4146,6 +4349,8 @@ export async function patchPipeline(
       pipeline.stateDetail = pauseResumeDetail("resumed", actor);
       if (flow?.state === "paused") ports.patchFlow(flow.id, "resume", undefined, actor);
     } else if (req.action === "retry-stage") {
+      const survivorRefusal = pipelineSurvivorRefusal(pipeline);
+      if (survivorRefusal) return survivorRefusal;
       if (pipeline.state !== "needs_decision") return { error: "pipeline does not have a stage awaiting retry", status: 409 };
       const recoveryRefusal = verdictRecoveryResetRefusal(pipeline, attempt, ports);
       if (recoveryRefusal) return recoveryRefusal;
@@ -4255,6 +4460,8 @@ export async function patchPipeline(
       pipeline.pausedState = null;
       pipeline.stateDetail = null;
     } else if (req.action === "skip-stage") {
+      const survivorRefusal = pipelineSurvivorRefusal(pipeline);
+      if (survivorRefusal) return survivorRefusal;
       if (pipeline.state !== "needs_decision" || !stage) return { error: "pipeline does not have a stage awaiting a decision", status: 409 };
       const recoveryRefusal = verdictRecoveryResetRefusal(pipeline, attempt, ports);
       if (recoveryRefusal) return recoveryRefusal;
@@ -4430,8 +4637,24 @@ export async function patchPipeline(
           break;
         }
         const result = await ports.stopStageAgent(target);
-        if (result.outcome === "stopped") close.stopped.push(target);
-        else if (result.outcome === "failed") {
+        if (result.outcome === "unresolved") {
+          /* A signal was sent and the authorized tree did not all go. The
+             survivors ride the attempt with their identities: from here no
+             close may terminalize it on row or transcript evidence until each
+             of them is proven gone (#1501). */
+          rememberUnresolvedTermination(candidate.attempt, result, ports.now());
+          close.stillRunning.push({ ...target, error: unresolvedTerminationRefusal(candidate.attempt) ?? result.error });
+          continue;
+        }
+        const unresolved = unresolvedTerminationRefusal(candidate.attempt);
+        if (unresolved) {
+          close.stillRunning.push({ ...target, error: unresolved });
+          continue;
+        }
+        if (result.outcome === "stopped") {
+          close.stopped.push(target);
+          if (result.detail) close.notes.push({ ...target, detail: result.detail });
+        } else if (result.outcome === "failed") {
           const evidence = await closeStopFailureEvidence(candidate, ports);
           if (evidence) {
             const detail = `stop failed with "${result.error}"; terminalized from ${evidence}`;
@@ -4458,6 +4681,18 @@ export async function patchPipeline(
         } else {
           close.alreadyStopped.push(target);
           terminalizeAttemptForClose(candidate, "the stage host was already absent when the pipeline closed", ports);
+        }
+      }
+      /* Host deduplication and the teardown deadline can skip an attempt's
+         stop call. Its durable survivors still veto terminalization. */
+      for (const run of pipeline.runs) {
+        for (const pending of run.attempts) {
+          const unresolved = unresolvedTerminationRefusal(pending);
+          if (!unresolved || close.stillRunning.some((item) => item.stageId === run.stageId && item.attempt === pending.n)) continue;
+          close.stillRunning.push({
+            stageId: run.stageId, attempt: pending.n, conversationId: pending.conversationId,
+            agentPath: pending.agentPath, paneId: pending.paneId, error: unresolved,
+          });
         }
       }
       close.worktree = closeWorktreeReport(pipeline, ports);
