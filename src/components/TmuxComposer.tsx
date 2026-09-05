@@ -37,6 +37,8 @@ import {
   outboxReceiptPatch,
   receiptHasUnknownFate,
   receiptHasAbsorbingOutcome,
+  receiptEvidenceOrder,
+  type ObservedRuntimeReceipt,
   readOutbox,
   rebindOutboxEchoText,
   releaseHeldOutbox,
@@ -163,6 +165,21 @@ const PANE_TTL_MS = 10 * 60_000;
 const RECOVERABLE_BUSY_RETRY_REASONS = new Set(["delivery-auto-retry", "interrupt-auto-retry"]);
 const sentKey = (id: string) => "llvSent:" + id;
 
+const recoveryReceiptsKey = (id: string) => "llvRecoveryReceipts:" + id;
+function readRecoveryReceipts(id: string): RuntimeReceipt[] {
+  try {
+    const value: unknown = JSON.parse(sessionStorage.getItem(recoveryReceiptsKey(id)) ?? "[]");
+    return Array.isArray(value) ? value.filter((receipt): receipt is RuntimeReceipt =>
+      receipt && receipt.conversationId === id && typeof receipt.operationId === "string"
+      && typeof receipt.idempotencyKey === "string" && typeof receipt.revision === "number"
+      && typeof receipt.status === "string" && typeof receipt.at === "string") : [];
+  } catch { return []; }
+}
+function writeRecoveryReceipts(id: string, receipts: RuntimeReceipt[]): void {
+  try { sessionStorage.setItem(recoveryReceiptsKey(id), JSON.stringify(receipts.slice(0, 512))); }
+  catch { /* Keep in-memory evidence if session storage is unavailable. */ }
+}
+
 export function deliveryAttemptKey(current: string, stored?: string): string {
   return stored || current;
 }
@@ -187,9 +204,7 @@ export function mergeRuntimeReceipts(
     operationsByIdempotencyKey.set(receipt.idempotencyKey, operations);
   }
   const revisionOrder = (left: RuntimeReceipt, right: RuntimeReceipt) =>
-    Number(receiptHasAbsorbingOutcome(right)) - Number(receiptHasAbsorbingOutcome(left))
-      || right.revision - left.revision
-      || Date.parse(right.at) - Date.parse(left.at)
+    receiptEvidenceOrder(left, right)
       || left.operationId.localeCompare(right.operationId)
       || left.idempotencyKey.localeCompare(right.idempotencyKey);
   /* Terminal arrival/discard survives independent settlement/journal revision
@@ -1550,7 +1565,7 @@ export function TmuxComposerCore({
      the editable draft — that draft was already cleared at submit time and
      anything in it now belongs to the next message. */
   const outboxKeys = useRef<Set<string>>(new Set());
-  const [immediateRuntimeReceipts, setImmediateRuntimeReceipts] = useState<RuntimeReceipt[]>([]);
+  const [immediateRuntimeReceipts, setImmediateRuntimeReceipts] = useState<RuntimeReceipt[]>(() => readRecoveryReceipts(cardId));
   const [reconcilingSend, setReconcilingSend] = useState(() =>
     typeof window !== "undefined" && readPendingDeliveries(cardId).some((entry) => entry.reconciling));
   const [replayGenerationAvailable, setReplayGenerationAvailable] = useState(() =>
@@ -1790,7 +1805,7 @@ export function TmuxComposerCore({
     adoptComposerState(file.path, cardId);
     adoptOutbox(file.path, cardId);
     setSent(readSent(cardId));
-    setImmediateRuntimeReceipts([]);
+    setImmediateRuntimeReceipts(readRecoveryReceipts(cardId));
     setDismissedReceiptIds(readDismissedReceipts(cardId));
     for (const controller of receiptReconciliations.current.values()) controller.abort();
     receiptReconciliations.current.clear();
@@ -1934,7 +1949,7 @@ export function TmuxComposerCore({
       if (entry.launchOwned) continue;
       const receipt = displayedRuntimeReceipts.find((candidate) =>
         (candidate.idempotencyKey === entry.id || candidate.operationId === (entry.deliveryReceipt?.operationId ?? entry.operationId)
-          || (entry.deliveryReceipt && !entry.deliveryUncertain && !receiptHasUnknownFate(entry.deliveryReceipt)
+          || (entry.deliveryReceipt && ((!entry.deliveryUncertain && !receiptHasUnknownFate(entry.deliveryReceipt)) || (entry.deliveryReceipt as ObservedRuntimeReceipt).retryAuthorized)
             && retryParentOperationId(candidate) === entry.deliveryReceipt.operationId)));
       if (!receipt) continue;
       const patch = outboxReceiptPatch(entry, receipt.status, receipt, nowMs());
@@ -2620,10 +2635,19 @@ export function TmuxComposerCore({
     if (receipt.conversationId !== original.conversationId || receipt.conversationId !== cardId
       || (!sameOperation && !retryLeaf)
       || (responseOperationId && responseOperationId !== receipt.operationId && !retryLeaf)) return false;
-    setImmediateRuntimeReceipts((current) => [
-      receipt,
-      ...current.filter((candidate) => candidate.operationId !== receipt.operationId),
-    ].slice(0, 8));
+    const stored = readRecoveryReceipts(cardId);
+    const observed: ObservedRuntimeReceipt = { ...receipt,
+      observationOrder: 1 + Math.max(0, ...[...stored, original].filter((candidate) => candidate.operationId === receipt.operationId)
+        .map((candidate) => (candidate as ObservedRuntimeReceipt).observationOrder ?? 0)),
+      text: receipt.text ?? original.text,
+      observedJournalRevision: Math.max(original.revision, (original as ObservedRuntimeReceipt).observedJournalRevision ?? 0,
+        ...runtimeReceipts.filter((candidate) => candidate.operationId === receipt.operationId).map((candidate) => candidate.revision)),
+    };
+    // Persist operation evidence even when the submission came from another
+    // tab or device and this composer has never owned a local outbox entry.
+    const persisted = mergeRuntimeReceipts(stored, [observed]);
+    writeRecoveryReceipts(cardId, persisted);
+    setImmediateRuntimeReceipts((current) => mergeRuntimeReceipts(current, persisted));
     return true;
   };
 
@@ -2631,6 +2655,11 @@ export function TmuxComposerCore({
     if (busy || voiceSending) return;
     setBusy(true);
     setStatus(null);
+    if (mode !== "uncertain" && !receiptHasAbsorbingOutcome(receipt)) {
+      // Starting an authorized later attempt consumes the old safe proof before
+      // dispatch. A lost response must survive remount as unknown.
+      rememberRuntimeReceipt({ ...receipt, status: "uncertain", resend: "verify-first", retryAuthorized: true } as ObservedRuntimeReceipt, receipt);
+    }
     try {
       const response = await fetch(`/api/runtime/operations/${encodeURIComponent(receipt.operationId)}`, mode === "uncertain"
         ? {

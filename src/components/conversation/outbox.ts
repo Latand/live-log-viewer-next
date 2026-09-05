@@ -204,6 +204,20 @@ export function receiptHasAbsorbingOutcome(receipt: Pick<RuntimeReceipt, "status
   return outboxStateForReceiptStatus(receipt.status) === "delivered" || receipt.reason === "delivery-discarded";
 }
 
+/** Client observation boundary, separate from the producer's revision counter.
+ * A validated operation response supersedes journal observations already seen;
+ * a later journal revision may describe a new attempt. Never send this field. */
+export type ObservedRuntimeReceipt = RuntimeReceipt & { observedJournalRevision?: number; observationOrder?: number; retryAuthorized?: true };
+
+export function receiptEvidenceOrder(left: RuntimeReceipt, right: RuntimeReceipt): number {
+  const observedRevision = (receipt: ObservedRuntimeReceipt) => Math.max(receipt.revision, receipt.observedJournalRevision ?? 0);
+  return Number(receiptHasAbsorbingOutcome(right)) - Number(receiptHasAbsorbingOutcome(left))
+    || observedRevision(right) - observedRevision(left)
+    || ((right as ObservedRuntimeReceipt).observationOrder ?? 0) - ((left as ObservedRuntimeReceipt).observationOrder ?? 0)
+    || Number((right as ObservedRuntimeReceipt).observedJournalRevision !== undefined) - Number((left as ObservedRuntimeReceipt).observedJournalRevision !== undefined)
+    || Date.parse(right.at) - Date.parse(left.at);
+}
+
 /** Project receipt evidence without turning an unknown outcome into a replayable failure. */
 export function outboxReceiptPatch(
   entry: Pick<OutboxEntry, "state" | "awaitingTurn"> & Partial<OutboxEntry>,
@@ -213,7 +227,7 @@ export function outboxReceiptPatch(
 ): Partial<OutboxEntry> | null {
   const previous = entry.deliveryReceipt;
   const retryParent = (receipt as (Partial<RuntimeReceipt> & { retryOfOperationId?: string }) | undefined)?.retryOfOperationId;
-  const linkedRetry = previous && !entry.deliveryUncertain && !receiptHasUnknownFate(previous)
+  const linkedRetry = previous && ((!entry.deliveryUncertain && !receiptHasUnknownFate(previous)) || (previous as ObservedRuntimeReceipt).retryAuthorized)
     && retryParent === previous.operationId;
   const currentOperation = previous && receipt?.operationId === previous.operationId
     && receipt.idempotencyKey === previous.idempotencyKey;
@@ -225,8 +239,9 @@ export function outboxReceiptPatch(
     && receiptHasAbsorbingOutcome(previous) && !receiptHasAbsorbingOutcome({ ...receipt, status })) return null;
   if (previous && receipt?.operationId === previous.operationId
     && !receiptHasAbsorbingOutcome({ ...receipt, status })
-    && typeof receipt.revision === "number" && receipt.revision < previous.revision) return null;
+    && typeof receipt.revision === "number" && receiptEvidenceOrder(previous, { ...receipt, status } as RuntimeReceipt) < 0) return null;
   if (previous && receipt?.operationId === previous.operationId && receipt.revision === previous.revision
+    && ((receipt as ObservedRuntimeReceipt).observationOrder ?? 0) === ((previous as ObservedRuntimeReceipt).observationOrder ?? 0)
     && (previous.status === "failed" || previous.status === "rejected") && previous.resend === "safe"
     && (entry.state === "queued" || entry.state === "delivering")) return null;
   // Moving/error observations cannot erase uncertainty. Only arrival, a proven

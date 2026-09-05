@@ -930,3 +930,101 @@ test("safe recovery accepts the producer's linked retry projection and settles o
     expect(calls).toEqual(["POST"]);
   } finally { await act(async () => mounted.root.unmount()); }
 });
+
+test.each([
+  { outcome: "delivered", local: false, text: undefined },
+  { outcome: "discarded", local: false, text: "" },
+  { outcome: "safe", local: false, text: undefined },
+  { outcome: "safe", local: true, text: captured.text },
+  { outcome: "safe", local: false, text: undefined, newerJournal: true },
+])("producer recovery persists across journal polling, switches and remount (%j)", async ({ outcome, local, text, newerJournal = false }) => {
+  const { createRuntimeBus, setRuntimeBusForTests } = await import("@/hooks/runtimeBus");
+  const original = { ...captured, text };
+  const listeners = new Map<string, (event: { data: string }) => void>();
+  const source = { onopen: null, onerror: null, onmessage: null as null | ((event: { data: string }) => void), close() {},
+    addEventListener(name: string, listener: (event: { data: string }) => void) { listeners.set(name, listener); } };
+  const bus = createRuntimeBus({
+    fetch: async () => Response.json({ schemaVersion: 1, snapshotSeq: 1, retentionFloorSeq: 0,
+      runtime: { hostEpoch: 1, health: "ready" }, filesRevision: 1,
+      sessions: [{ ...structuredView.session, artifactPath: file.path, attentionIds: [], revision: 1,
+        turn: "idle", recentReceipts: [original] }],
+      attentions: [], recentOperations: [original], edges: [], flows: [], workflows: [], tasks: [] }),
+    createEventSource: () => source,
+    now: Date.now, setTimeout, clearTimeout, setInterval, clearInterval,
+  });
+  realReceiptHook = true;
+  setRuntimeBusForTests(bus);
+  bus.start();
+  await settle(() => {});
+  const settlement = runtimeReceiptForSend({ operationId: original.operationId, conversationId: original.conversationId,
+    clientMessageId: original.idempotencyKey, kind: "send", state: outcome === "delivered" ? "delivered" : "failed",
+    reason: outcome === "discarded" ? "delivery-discarded" : null, acceptedAt: original.admittedAt!,
+    settledAt: original.at, duplicateRisk: false, resend: outcome === "safe" ? "safe" : "not-needed", evidence: "delivery-record" });
+  expect(settlement.revision).toBe(1);
+  expect(original.revision).toBe(4);
+  const calls: string[] = [];
+  globalThis.fetch = (async (input, init) => {
+    if (String(input) === `/api/runtime/operations/${original.operationId}`) {
+      calls.push(init?.method ?? "GET");
+      if (calls.length > 1) throw new Error("Response lost after retry dispatch");
+      return Response.json({ operationId: original.operationId, receipt: settlement });
+    }
+    if (init?.method === "POST" && ["/api/runtime/send", "/api/tmux"].includes(String(input))) calls.push(`unexpected:${String(input)}`);
+    return new Response("{}", { status: 404 });
+  }) as typeof fetch;
+  if (local) {
+    enqueueOutbox(file.conversationId!, { id: original.idempotencyKey, text: text!, images: 0, at: Date.parse(original.admittedAt!) });
+    updateOutbox(file.conversationId!, original.idempotencyKey, { state: "delivering" });
+  }
+  let mounted = await renderInto(surface());
+  const assertSettled = () => {
+    expect(Boolean(mounted.host.querySelector("[data-receipt-uncertain-retry], [data-receipt-discard]"))).toBe(false);
+    if (local) {
+      expect(readOutbox(file.conversationId!)[0]?.state).toBe("failed");
+      expect(readOutbox(file.conversationId!)[0]?.deliveryUncertain).toBeUndefined();
+      expect(readOutbox(file.conversationId!)[0]?.deliveryReceipt?.revision).toBe(1);
+    } else expect(readOutbox(file.conversationId!)).toHaveLength(0);
+  };
+  try {
+    await settle(() => mounted.host.querySelector<HTMLButtonElement>(outcome === "discarded"
+      ? "[data-receipt-discard]" : "[data-receipt-uncertain-retry]")!.click());
+    assertSettled();
+    // An older journal event is rejected by real ingestion, not a mocked hook.
+    (listeners.get("runtime") ?? source.onmessage)!({ data: JSON.stringify({ schemaVersion: 1, seq: 2, eventId: "older-recovery-event",
+      scope: { type: "operation", id: original.operationId }, revision: 3, kind: "receipt", payload: { ...original, revision: 3 } }) });
+    await settle(() => {});
+    expect(bus.getState().store.operations[original.operationId]?.revision).toBe(4);
+    assertSettled();
+    await settle(() => mounted.root.render(<TmuxComposer file={{ ...file, path: "/other.jsonl", conversationId: "other-conversation" }} />));
+    expect(mounted.host.querySelector(`[data-operation="${original.operationId}"]`)).toBeNull();
+    await settle(() => mounted.root.render(surface()));
+    assertSettled();
+    await act(async () => mounted.root.unmount());
+    resetOutboxForTests();
+    mounted = await renderInto(surface());
+    assertSettled();
+    if (newerJournal) {
+      (listeners.get("runtime") ?? source.onmessage)!({ data: JSON.stringify({ schemaVersion: 1, seq: 3, eventId: "newer-attempt-event",
+        scope: { type: "operation", id: original.operationId }, revision: 5, kind: "receipt", payload: { ...original, revision: 5 } }) });
+      expect(bus.getState().store.operations[original.operationId]?.revision).toBe(5);
+      // The real bus batches subscriber notifications over one 16ms frame.
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 16)); });
+      expect(Boolean(mounted.host.querySelector("[data-receipt-uncertain-retry]"))).toBe(true);
+      await act(async () => mounted.root.unmount());
+      mounted = await renderInto(surface());
+      expect(Boolean(mounted.host.querySelector("[data-receipt-uncertain-retry]"))).toBe(true);
+    } else if (outcome === "safe") {
+      // Explicitly starting another attempt consumes the safe proof. Its lost
+      // response cannot restore ordinary retry, including after remount.
+      await settle(() => mounted.host.querySelector<HTMLButtonElement>("[data-delivery-notice-retry]")!.click());
+      expect(mounted.host.querySelector("[data-receipt-uncertain-retry]")).not.toBeNull();
+      expect(mounted.host.querySelector("[data-outbox-retry]")).toBeNull();
+      await act(async () => mounted.root.unmount());
+      resetOutboxForTests();
+      mounted = await renderInto(surface());
+      expect(mounted.host.querySelector("[data-receipt-uncertain-retry]")).not.toBeNull();
+      expect(mounted.host.querySelector("[data-outbox-retry]")).toBeNull();
+    }
+    expect(calls).toEqual(outcome === "safe" && !newerJournal ? ["POST", "POST"] : [outcome === "discarded" ? "DELETE" : "POST"]);
+  } finally { bus.stop(); await act(async () => mounted.root.unmount()); }
+});

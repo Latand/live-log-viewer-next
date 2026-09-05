@@ -1903,3 +1903,20 @@ test.each(["failed", "rejected"] as const)("an unchanged safe %s cannot undo the
   const receipt = { operationId: "operation-safe", idempotencyKey: "key", conversationId: "conversation", kind: "send" as const, status, resend: "safe" as const, revision: 1, at: "2026-09-05T08:00:00.000Z" };
   expect(outboxReceiptPatch({ state: "queued", deliveryReceipt: receipt }, status, receipt)).toBeNull();
 });
+
+
+test("validated safe evidence crosses revision domains only through its observed journal boundary", () => {
+  const unknown = { operationId: "original", idempotencyKey: "key", conversationId: "conversation", kind: "send" as const,
+    status: "failed" as const, resend: "verify-first" as const, revision: 4, at: "2026-09-05T08:00:00.000Z" };
+  const entry = { id: "key", state: "delivering" as const, deliveryUncertain: true as const, deliveryReceipt: unknown };
+  const safe = { ...unknown, revision: 1, resend: "safe" as const };
+  // An unmarked lower journal revision remains stale.
+  expect(outboxReceiptPatch(entry, "failed", safe)).toBeNull();
+  const observed = { ...safe, observedJournalRevision: 4, observationOrder: 1 };
+  const patch = outboxReceiptPatch(entry, "failed", observed)!;
+  expect(patch.state).toBe("failed");
+  expect(patch.deliveryUncertain).toBeUndefined();
+  expect(patch.deliveryReceipt?.revision).toBe(1);
+  expect(outboxReceiptPatch({ ...entry, ...patch }, "failed", unknown)).toBeNull();
+  expect(outboxReceiptPatch({ ...entry, ...patch }, "failed", { ...unknown, revision: 5 })?.deliveryUncertain).toBe(true);
+});
