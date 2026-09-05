@@ -1152,7 +1152,7 @@ async function createBoardTask(args: McpToolArgs): Promise<McpToolPayload> {
       result: outcome,
     };
   });
-  if (!result.ok) throw new Error(result.error);
+  if (!result.ok) throw new McpToolRefusal(result.error, { code: result.code ?? (result.status === 404 ? "TASK_NOT_FOUND" : "TASK_INVALID_FIELD"), field: result.field, status: result.status });
   return { taskId: result.task.id, task: result.task, replay: result.replay };
 }
 
@@ -1160,10 +1160,10 @@ async function updateBoardTask(args: McpToolArgs): Promise<McpToolPayload> {
   const taskId = required(args, "taskId");
   const patch = withoutKeys(args, ["taskId", "clientRequestId"]);
   const result = mutateTasks((tasks) => {
-    const outcome = patchTask(tasks, taskId, patch as PatchTaskInput);
+    const outcome = patchTask(tasks, taskId, patch as PatchTaskInput, undefined, { requirePlacementGuards: true });
     return { tasks: outcome.ok ? outcome.tasks : undefined, result: outcome };
   });
-  if (!result.ok) throw new Error(result.error);
+  if (!result.ok) throw new McpToolRefusal(result.error, { code: result.code ?? (result.status === 404 ? "TASK_NOT_FOUND" : "TASK_INVALID_FIELD"), field: result.field, status: result.status });
   return { taskId, task: result.task };
 }
 
