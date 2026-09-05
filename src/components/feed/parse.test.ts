@@ -17,10 +17,11 @@ const plainFile = { path: "/tmp/x.output", engine: "codex", fmt: "plain", activi
    which differ between a windowed parse and a start-0 one-shot for the same
    logical line. Both are opaque provenance tokens; normalize them out before
    structural comparison. */
-function normalize(items: Item[]): unknown {
+function normalize(items: Item[], start = 0): unknown {
   return JSON.parse(
     JSON.stringify(items, (key, value) => {
       if (key === "srcCall" || key === "srcResult") return 0;
+      if (key === "anchorKey" && typeof value === "string") return value.replace(/^row:(\d+):/, (_, src) => `row:${Number(src) - start}:`);
       return typeof value === "string" && (key === "id" || key === "ids") ? value.replace(/^plain-\d+-/, "plain-N-") : value;
     }),
   );
@@ -50,7 +51,7 @@ function assertParity(file: FileEntry, lines: string[], opts: { cap?: number; ch
     }
     const incremental = session.feed(window, start, live);
     const oneShot = buildFeed(liveFile, window, showSvc, "");
-    expect(normalize(incremental.items.map((entry) => entry.item))).toEqual(normalize(oneShot.items));
+    expect(normalize(incremental.items.map((entry) => entry.item), start)).toEqual(normalize(oneShot.items));
     expect(incremental.hiddenServiceCount).toBe(oneShot.hiddenServiceCount);
   }
   return session;
@@ -2056,7 +2057,7 @@ describe("Codex item_completed envelope generation", () => {
   test("collapses an identified envelope Reasoning item whose text fields are empty", () => {
     const feed = buildFeed(codexFile, [fixture[0]], false, "");
 
-    expect(feed.items).toEqual([{ kind: "think", text: "agent reasoning", sourceId: "reasoning-envelope" }]);
+    expect(feed.items).toMatchObject([{ kind: "think", text: "", availability: "unavailable", sourceId: "reasoning-envelope", members: [{ sourceId: "reasoning-envelope", text: "" }] }]);
     expect(feed.hiddenServiceCount).toBe(0);
   });
 
@@ -2563,5 +2564,204 @@ describe("tool results carry their images (#1498)", () => {
     ]);
     expect(read?.outputPreview).toContain("1999x1161 frame, captured at 100%");
     assertParity(claudeFile, lines, { chunks: [1] });
+  });
+});
+
+
+describe("compact identified reasoning (#1534)", () => {
+  const reasoning = (id: string, text = "", turnId = "turn-a") => JSON.stringify({
+    type: "event_msg", payload: { type: "item_completed", turn_id: turnId,
+      item: { type: "Reasoning", id, summary_text: text || [], raw_content: [] } },
+  });
+  const mirror = (id: string, text = "") => JSON.stringify({
+    type: "response_item", payload: { type: "reasoning", id,
+      summary: text ? [{ type: "summary_text", text }] : [], encrypted_content: "opaque-fixture" },
+  });
+  const session = () => createFeedSession({ engine: "codex", fmt: "codex", showSvc: false, lineFilter: "" });
+
+  test("40 envelopes and mirrors retain 20 identities and anchors in one unavailable group", () => {
+    const lines = Array.from({ length: 20 }, (_, i) => [reasoning(`reason-${i}`), mirror(`reason-${i}`)]).flat();
+    const parser = session();
+    const live = parser.feed(lines, 100, true);
+    expect(live.items).toHaveLength(1);
+    const item = live.items[0].item;
+    expect(item).toMatchObject({ kind: "think", availability: "unavailable", text: "" });
+    if (item.kind !== "think") throw new Error("missing reasoning");
+    expect(item.members?.map((member) => member.sourceId)).toEqual(Array.from({ length: 20 }, (_, i) => `reason-${i}`));
+    expect(item.members?.map((member) => member.anchorKey)).toEqual(Array.from({ length: 20 }, (_, i) => `row:${100 + i * 2}:0`));
+    expect(parser.feed(lines, 100, false).items).toEqual(live.items);
+  });
+
+  test("same-ID delivered text upgrades in place and survives empty mirrors and replay", () => {
+    const parser = session();
+    const lines = [reasoning("first"), reasoning("second")];
+    const before = parser.feed(lines, 0, true);
+    lines.push(mirror("first", "Actual exposed summary"), mirror("first"), reasoning("second", "Actual exposed summary"));
+    const after = parser.feed(lines, 0, false);
+    expect(after.items).toHaveLength(1);
+    expect(after.items[0].anchorKey).toBe(before.items[0].anchorKey);
+    expect(after.items[0].key).toBe(before.items[0].key);
+    expect(after.items[0].item).toMatchObject({ availability: "available", members: [
+      { sourceId: "first", text: "Actual exposed summary", availability: "available" },
+      { sourceId: "second", text: "Actual exposed summary", availability: "available" },
+    ] });
+    expect(before.items[0].item).toMatchObject({ availability: "unavailable" });
+    expect(parser.feed(lines, 0, false)).toEqual(after);
+    expect(session().feed(lines, 0, false).items.map(({ item }) => item)).toEqual(after.items.map(({ item }) => item));
+  });
+
+  test("native exposed array text is readable and opaque content never becomes text", () => {
+    const native = JSON.stringify({ type: "event_msg", payload: { type: "item_completed", item: {
+      type: "Reasoning", id: "arrays", summary_text: ["First paragraph", { text: "Second paragraph" }], raw_content: [],
+      encrypted_content: "opaque-fixture",
+    } } });
+    const item = session().feed([native, mirror("arrays")], 0, false).items[0].item;
+    expect(item).toMatchObject({ text: "First paragraph\nSecond paragraph", availability: "available" });
+    expect(JSON.stringify(item)).not.toContain("opaque-fixture");
+  });
+
+  test("filtered message and hidden turn context still separate runs", () => {
+    const filtered = createFeedSession({ engine: "codex", fmt: "codex", showSvc: false, lineFilter: "reasoning" });
+    const lines = [reasoning("one"), JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "Next task" } }), reasoning("two")];
+    expect(filtered.feed(lines, 0, false).items).toHaveLength(2);
+    expect(session().feed([reasoning("one"), JSON.stringify({ type: "turn_context", payload: {} }), reasoning("two")], 0, false).items).toHaveLength(2);
+  });
+
+  test("a result attached to an earlier tool still separates the reasoning around it", () => {
+    const call = JSON.stringify({ type: "response_item", payload: { type: "function_call", call_id: "earlier-tool", name: "exec_command", arguments: "{}" } });
+    const result = JSON.stringify({ type: "response_item", payload: { type: "function_call_output", call_id: "earlier-tool", output: "done" } });
+    const rows = session().feed([call, reasoning("before"), result, reasoning("after")], 0, false).items;
+    expect(rows.filter(({ item }) => item.kind === "think")).toHaveLength(2);
+  });
+
+  test("Extension completion separates reasoning while retaining the earlier tool slot", () => {
+    const extension = (type: string) => JSON.stringify({ type: "event_msg", payload: {
+      type, turn_id: "turn-a", item: { type: "Extension", id: "extension-a",
+        kind: "search", action: "lookup", query: "fixture", results: type === "item_completed" ? "done" : "" },
+    } });
+    const lines = [extension("item_started"), reasoning("before"), extension("item_completed"), reasoning("after")];
+    const parser = session();
+    const before = parser.feed(lines.slice(0, 2), 0, true);
+    const live = parser.feed(lines, 0, true);
+    expect(live.items.map(({ item }) => item.kind)).toEqual(["tool", "think", "think"]);
+    expect(live.items[0].key).toBe(before.items[0].key);
+    expect(live.items[0].item).toMatchObject({ kind: "tool", id: "extension-a", tool: "Extension", status: "ok", outputPreview: '"done"' });
+    expect(live.items.slice(1).map(({ item }) => item.kind === "think" ? item.members : [])).toEqual([
+      [{ sourceId: "before", anchorKey: "row:1:0", text: "", availability: "unavailable" }],
+      [{ sourceId: "after", anchorKey: "row:3:0", text: "", availability: "unavailable" }],
+    ]);
+    expect(parser.feed(lines, 0, false).items).toEqual(live.items);
+    expect(session().feed(lines, 0, false).items).toEqual(live.items);
+    assertParity(codexFile, lines, { chunks: [1] });
+  });
+
+  const fixtureLines = (name: string) => readFileSync(join(import.meta.dir, "fixtures", name), "utf8").trim().split("\n");
+  const auditLines = fixtureLines("codex-payload-audit.jsonl");
+  const threadLines = [
+    ...fixtureLines("codex-thread-items-0.151.jsonl"),
+    ...fixtureLines("codex-item-completed-envelope.jsonl"),
+  ];
+  const toolTypes = ["FileChange", "fileChange", "commandExecution", "CommandExecution", "functionCallOutput",
+    "mcpToolCall", "McpToolCall", "dynamicToolCall", "collabAgentToolCall", "webSearch", "imageView", "imageGeneration", "Extension"];
+  const toolFixtures = threadLines.filter((line) => {
+    const p = JSON.parse(line).payload;
+    return toolTypes.includes(p.item?.type ?? p.type);
+  });
+
+  // Keep the existing audit fixture forms, including all four web actions and
+  // the patch's add/delete/update map. No synthetic replacement envelopes.
+  const completions = [
+    ...auditLines.filter((line) => ["web_search_end", "patch_apply_end", "mcp_tool_call_end",
+      "custom_tool_call_output", "function_call_output", "tool_search_call", "tool_search_output"].includes(JSON.parse(line).payload?.type)),
+    ...toolFixtures,
+    ...["mcp_tool_call_begin", "command_execution_output_delta", "file_change_output_delta", "file_change_patch_updated"]
+      .map((type) => JSON.stringify({ type: "event_msg", payload: { type, call_id: "earlier", delta: "tool update" } })),
+  ];
+  for (const [index, completion] of completions.entries()) {
+    const p = JSON.parse(completion).payload;
+    test(`semantic tool fixture ${index}: ${p.item?.type ?? p.type} preserves both runs and anchors`, () => {
+      const turnId = p.turn_id ?? "turn-a";
+      const lines = [reasoning("a", "Before", turnId), mirror("a"), completion,
+        reasoning("b", "After", turnId), mirror("b"), reasoning("c", "Adjacent", turnId)];
+      const parser = session();
+      for (let n = 1; n <= lines.length; n++) parser.feed(lines.slice(0, n), 0, true);
+      const live = parser.feed(lines, 0, true);
+      const groups = live.items.filter(({ item }) => item.kind === "think");
+      expect(groups.map(({ item }) => item.kind === "think" ? item.members : [])).toEqual([
+        [{ sourceId: "a", anchorKey: "row:0:0", text: "Before", availability: "available" }],
+        [{ sourceId: "b", anchorKey: "row:3:0", text: "After", availability: "available" },
+          { sourceId: "c", anchorKey: "row:5:0", text: "Adjacent", availability: "available" }],
+      ]);
+      expect(parser.feed(lines, 0, false).items).toEqual(live.items);
+      expect(session().feed(lines, 0, false).items).toEqual(live.items);
+      assertParity(codexFile, lines, { chunks: [1], live: true });
+    });
+  }
+
+  // Every renderer-recognized tool family can complete by updating an earlier
+  // slot. Exercise lifecycle and nested/direct response forms at that seam.
+  for (const fixture of toolFixtures) {
+    const record = JSON.parse(fixture);
+    const original = record.payload.item ?? record.payload;
+    for (const form of ["event", "nested", "direct"] as const) {
+      test(`${original.type} ${form} completion retains its earlier tool slot`, () => {
+        const item = { ...original, id: "earlier-tool" };
+        const started = JSON.stringify({ type: "event_msg", payload: { type: "item_started", item: { ...item, status: "inProgress" } } });
+        const completed = JSON.stringify(form === "event"
+          ? { type: "event_msg", payload: { type: "item_completed", item } }
+          : { type: "response_item", payload: form === "nested" ? { item } : item });
+        const lines = [started, reasoning("a"), completed, reasoning("b"), reasoning("c")];
+        const parser = session();
+        const before = parser.feed(lines.slice(0, 2), 0, true);
+        const live = parser.feed(lines, 0, true);
+        expect(live.items.map(({ item }) => item.kind)).toEqual(["tool", "think", "think"]);
+        expect(live.items[0].key).toBe(before.items[0].key);
+        expect(live.items[0].item).toMatchObject({ kind: "tool", id: "earlier-tool", status: "ok" });
+        expect(live.items.slice(1).map(({ item }) => item.kind === "think" ? item.members?.map(({ sourceId, anchorKey }) => ({ sourceId, anchorKey })) : [])).toEqual([
+          [{ sourceId: "a", anchorKey: "row:1:0" }],
+          [{ sourceId: "b", anchorKey: "row:3:0" }, { sourceId: "c", anchorKey: "row:4:0" }],
+        ]);
+        expect(parser.feed(lines, 0, false).items).toEqual(live.items);
+        expect(session().feed(lines, 0, false).items).toEqual(live.items);
+      });
+    }
+  }
+
+  for (const service of auditLines.filter((line) => {
+    const obj = JSON.parse(line);
+    return ["world_state", "inter_agent_communication_metadata"].includes(obj.type)
+      || ["token_count", "thread_settings_applied", "sub_agent_activity"].includes(obj.payload?.type);
+  })) {
+    test(`nonsemantic service ${JSON.parse(service).payload?.type ?? JSON.parse(service).type} retains adjacent compaction`, () => {
+      const lines = [reasoning("a"), service, mirror("a"), reasoning("b")];
+      const parser = session();
+      parser.feed(lines.slice(0, 2), 0, true);
+      const live = parser.feed(lines, 0, true);
+      expect(live.items).toHaveLength(1);
+      expect(live.items[0].item).toMatchObject({ kind: "think", members: [
+        { sourceId: "a", anchorKey: "row:0:0" }, { sourceId: "b", anchorKey: "row:3:0" },
+      ] });
+      expect(parser.feed(lines, 0, false).items).toEqual(live.items);
+      expect(session().feed(lines, 0, false).items).toEqual(live.items);
+    });
+  }
+
+  for (const boundary of [
+    { type: "event_msg", payload: { type: "task_started" } },
+    { type: "event_msg", payload: { type: "turn_aborted" } },
+    { type: "event_msg", payload: { type: "turn_completed" } },
+    { type: "event_msg", payload: { type: "context_compacted" } },
+    { type: "event_msg", payload: { type: "agent_message", message: "Commentary" } },
+    { type: "response_item", payload: { type: "message", role: "assistant", phase: "final_answer", content: [{ type: "output_text", text: "Final" }] } },
+    { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "Next task" }] } },
+    { type: "response_item", payload: { type: "function_call", call_id: "tool-boundary", name: "exec_command", arguments: "{}" } },
+  ]) {
+    test(`splits at ${boundary.payload.type} even with hidden service rows`, () => {
+      const rows = session().feed([reasoning("before"), JSON.stringify(boundary), reasoning("after")], 0, false).items;
+      expect(rows.filter(({ item }) => item.kind === "think")).toHaveLength(2);
+    });
+  }
+  test("different native turn identities split adjacent reasoning", () => {
+    expect(session().feed([reasoning("one", "", "turn-a"), reasoning("two", "", "turn-b")], 0, false).items).toHaveLength(2);
   });
 });

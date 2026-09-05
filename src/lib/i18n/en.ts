@@ -1199,6 +1199,10 @@ export const en = {
   "render.delivered": "delivered",
   "render.notDelivered": "not delivered",
   "render.reasoning": "agent reasoning",
+  "render.reasoningGroup": "Reasoning · {count}",
+  "render.reasoningAvailable": "Text available",
+  "render.reasoningUnavailable": "Text unavailable",
+  "render.reasoningNotProvided": "No reasoning text was provided.",
 
   // feed/tool events (issue #9)
   "tools.read": "Read",
