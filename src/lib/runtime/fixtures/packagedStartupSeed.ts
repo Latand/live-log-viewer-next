@@ -6,7 +6,6 @@ import { claudeTranscriptPath } from "@/lib/agent/transcript";
 import { RuntimeJournal } from "@/runtime-host/journal";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { captureProcessIdentity } from "@/lib/processIdentity";
-import { PROMOTED_SERVING_TIMEOUT_MS, VERIFY_PROMOTED_ACTION_TIMEOUT_MS } from "@/runtime-host/deploymentHotState";
 function fixtureSessionId(index: number): string {
   return index < 6 ? `00000000-0000-4000-8000-${String(index).padStart(12, "0")}` : `history_${index}`;
 }
@@ -195,7 +194,8 @@ function fixture(failedCount: number, fullHistory = false) {
     externalKeys.map((key) => [key, registry.readOnlySnapshot().entries[key]]),
   )));
   fs.writeFileSync(path.join(directory, "rehearsal-budgets.json"), JSON.stringify({
-    serving: PROMOTED_SERVING_TIMEOUT_MS, action: VERIFY_PROMOTED_ACTION_TIMEOUT_MS,
+    // Bound this rehearsal observation, not production serving readiness.
+    serving: 300_000, action: 360_000,
   }));
   console.log(JSON.stringify({ counts: Object.fromEntries((["conversations", "entries", "receipts", "heldDeliveries"] as const).map(k => [k, Object.keys(data[k]).length])) }));
   registry.checkpointRollbackMirrorForDemotion();

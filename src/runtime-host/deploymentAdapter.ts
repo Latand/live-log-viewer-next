@@ -23,7 +23,7 @@ import { withoutWakatimeCredential } from "@/lib/wakatime/credential";
 
 import type { ViewerDeploymentAdapter } from "./deployment";
 import { candidateLogExcerpt } from "./deploymentHealth";
-import { PROMOTE_ACTION_TIMEOUT_MS, VERIFY_PROMOTED_ACTION_TIMEOUT_MS } from "./deploymentHotState";
+import { PROMOTE_ACTION_TIMEOUT_MS } from "./deploymentHotState";
 import type { McpHealthProbeAdmissions } from "./mcpHealthProbeAdmission";
 import {
   createMcpHealthProbeAdmissionChannel,
@@ -32,10 +32,10 @@ import {
 import { runtimeHostSuccessorName } from "./hostSuccessor";
 import { parseRuntimeHostHandoffEvidence } from "./runtimeHostStartup";
 
-type CommandRunner = (action: string, input: Record<string, unknown>) => Promise<unknown>;
+type CommandRunner = (action: string, input: Record<string, unknown>, signal?: AbortSignal) => Promise<unknown>;
 type AdapterAction = "resolve-revision" | "build-candidate" | "start-candidate" | "current-release" | "current-mcp-runtime" | "reconcile-mcp-runtime" | "verify-candidate" | "promote" | "verify-promoted" | "rollback" | "retire" | "retain-only" | "stage-host-successor" | "verify-host-successor" | "complete-host-handoff";
 
-const ACTION_TIMEOUTS: Record<AdapterAction, number> = {
+const ACTION_TIMEOUTS: Record<AdapterAction, number | null> = {
   "resolve-revision": 110_000,
   "build-candidate": 30 * 60_000,
   "start-candidate": 60_000,
@@ -50,7 +50,7 @@ const ACTION_TIMEOUTS: Record<AdapterAction, number> = {
      contains, so the adapter reports its own named reason instead of being
      killed mid-wait and leaving the operator a bare phase string. */
   promote: PROMOTE_ACTION_TIMEOUT_MS,
-  "verify-promoted": VERIFY_PROMOTED_ACTION_TIMEOUT_MS,
+  "verify-promoted": null,
   rollback: 90_000,
   retire: 60_000,
   "retain-only": 60_000,
@@ -84,7 +84,7 @@ export interface HostCommandViewerDeploymentAdapterOptions {
   stateFile?: string;
   log?(...args: unknown[]): void;
   phaseLogIntervalMs?: number;
-  timeouts?: Partial<Record<AdapterAction, number>>;
+  timeouts?: Partial<Record<AdapterAction, number | null>>;
   proc?: ProcBackend;
   mcpHealthProbeAdmissions?: Pick<McpHealthProbeAdmissions, "issue" | "consume" | "revoke">;
 }
@@ -442,7 +442,11 @@ function reconciliation(value: unknown): ViewerMcpRuntimeReconciliation | null {
  * selects a command, executable, shell fragment, or Docker argument.
  */
 export class HostCommandViewerDeploymentAdapter implements ViewerDeploymentAdapter {
-  constructor(private readonly run: CommandRunner, private readonly reconcileProcess: () => Promise<void> = async () => {}) {}
+  constructor(
+    private readonly run: CommandRunner,
+    private readonly reconcileProcess: () => Promise<void> = async () => {},
+    readonly servingProgress: () => string | null = () => null,
+  ) {}
 
   static fromExecutable(executable: string, options: HostCommandViewerDeploymentAdapterOptions = {}): HostCommandViewerDeploymentAdapter {
     if (!executable.startsWith("/")) throw new Error("viewer deployment adapter path must be absolute");
@@ -467,8 +471,10 @@ export class HostCommandViewerDeploymentAdapter implements ViewerDeploymentAdapt
       action: AdapterAction,
       input: Record<string, unknown>,
       healthAdmissions?: Pick<McpHealthProbeAdmissions, "consume">,
+      signal?: AbortSignal,
     ): Promise<unknown> => {
-      const timeoutMs = Math.max(1, timeouts[action]);
+      signal?.throwIfAborted();
+      const timeoutMs = timeouts[action] === null ? null : Math.max(1, timeouts[action]!);
       const admissionChannel = healthAdmissions
         ? await createMcpHealthProbeAdmissionChannel()
         : null;
@@ -486,7 +492,7 @@ export class HostCommandViewerDeploymentAdapter implements ViewerDeploymentAdapt
             LLV_DEPLOYMENT_ADAPTER_PHASE_FILE: phaseFile,
             /* #1216: the deadline this host will enforce, so the adapter can
                fit its own waits inside it instead of being killed mid-wait. */
-            LLV_DEPLOYMENT_ADAPTER_ACTION_DEADLINE_MS: String(timeoutMs),
+            LLV_DEPLOYMENT_ADAPTER_ACTION_DEADLINE_MS: timeoutMs === null ? "unbounded" : String(timeoutMs),
           },
           detached: true,
         });
@@ -537,6 +543,7 @@ export class HostCommandViewerDeploymentAdapter implements ViewerDeploymentAdapt
       const stdoutPromise = readStream(child.stdout);
       const stderrPromise = readStream(child.stderr);
       let timer: ReturnType<typeof setTimeout> | null = null;
+      let onAbort: (() => void) | undefined;
       /* #1216: a deployment used to leave no trace in the runtime-host log, so
          a promote that stalled was invisible next to the journal maintenance
          chatter. Phase transitions are the adapter's own progress report. */
@@ -551,12 +558,18 @@ export class HostCommandViewerDeploymentAdapter implements ViewerDeploymentAdapt
       try {
         const outcome = await Promise.race([
           exitPromise.then((exitCode) => ({ type: "exit" as const, exitCode })),
-          new Promise<{ type: "timeout" }>((resolve) => { timer = setTimeout(() => resolve({ type: "timeout" }), timeoutMs); }),
+          ...(timeoutMs === null ? [] : [new Promise<{ type: "timeout" }>((resolve) => { timer = setTimeout(() => resolve({ type: "timeout" }), timeoutMs); })]),
+          new Promise<{ type: "cancelled" }>((resolve) => {
+            onAbort = () => resolve({ type: "cancelled" });
+            if (signal?.aborted) onAbort();
+            else signal?.addEventListener("abort", onAbort, { once: true });
+          }),
         ]);
-        if (outcome.type === "timeout") {
+        if (outcome.type === "timeout" || outcome.type === "cancelled") {
           await terminateAdapterProcess(record, proc);
           await exitPromise;
           await Promise.all([stdoutPromise, stderrPromise]);
+          if (outcome.type === "cancelled") throw signal?.reason ?? new Error("serving verification cancelled by operator");
           const phase = readAdapterPhase(phaseFile, action) ?? "waiting for the adapter process";
           throw new Error(`deployment adapter ${action} timed out while ${phase}`);
         }
@@ -566,26 +579,29 @@ export class HostCommandViewerDeploymentAdapter implements ViewerDeploymentAdapt
         catch { throw new Error(`deployment adapter ${action} returned invalid JSON`); }
       } finally {
         if (timer) clearTimeout(timer);
+        if (onAbort) signal?.removeEventListener("abort", onAbort);
         clearInterval(phaseLog);
         closeHealthAdmission?.();
         clearProcessRecord(stateFile, record);
         fs.rmSync(phaseFile, { force: true });
       }
     };
-    const run: CommandRunner = async (rawAction, input) => {
+    const run: CommandRunner = async (rawAction, input, signal) => {
       const action = rawAction as AdapterAction;
       await reconcile();
       if (!MCP_HEALTH_PROBE_ACTIONS.has(action) || !options.mcpHealthProbeAdmissions) {
-        return runAction(action, input);
+        return runAction(action, input, undefined, signal);
       }
       const healthProbeCapability = options.mcpHealthProbeAdmissions.issue();
       try {
-        return await runAction(action, { ...input, healthProbeCapability }, options.mcpHealthProbeAdmissions);
+        return await runAction(action, { ...input, healthProbeCapability }, options.mcpHealthProbeAdmissions, signal);
       } finally {
         options.mcpHealthProbeAdmissions.revoke(healthProbeCapability);
       }
     };
-    return new HostCommandViewerDeploymentAdapter(run, reconcile);
+    return new HostCommandViewerDeploymentAdapter(run, reconcile, () =>
+      readProcessRecord(stateFile)?.action === "verify-promoted"
+        ? readAdapterPhase(phaseFile, "verify-promoted") : null);
   }
 
   reconcile(): Promise<void> { return this.reconcileProcess(); }
@@ -629,8 +645,8 @@ export class HostCommandViewerDeploymentAdapter implements ViewerDeploymentAdapt
     return publication(await this.run("promote", { candidate }));
   }
 
-  async verifyPromoted(candidate: ViewerReleaseIdentity): Promise<ViewerHealthEvidence> {
-    return evidence(await this.run("verify-promoted", { candidate }));
+  async verifyPromoted(candidate: ViewerReleaseIdentity, signal?: AbortSignal): Promise<ViewerHealthEvidence> {
+    return evidence(await this.run("verify-promoted", { candidate }, signal));
   }
 
   async rollback(
