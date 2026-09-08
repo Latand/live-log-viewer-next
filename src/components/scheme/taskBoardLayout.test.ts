@@ -83,3 +83,24 @@ test("one task's thousand assignments retain a bounded summary footprint", () =>
   expect(task.assignments.length).toBe(1000);
   expect(displayedTaskHeight(task)).toBeLessThan(500);
 });
+
+
+test("pipeline-only one/two-stage envelopes follow displayed children at 34%", () => {
+  const { base } = fixture(4);
+  base.groups = [[0,1],[2],[3]].map((indices, i) => ({ key: `group::pipeline::p${i}`, kind: "pipeline", id: `p${i}`, label: "A long pipeline goal with a decision", hue: 120, members: indices.map(index => base.nodes[index].file.path), x: i * 1400, y: 0, w: 1300, h: 1800 }));
+  const projection = projectTaskWorkflows([], [], [], base.nodes.map(node => node.file));
+  for (const width of [1032,1192,1672]) {
+    const scene = layoutTaskBoard(base, [], projection, .34, null, new Set(), { viewportWidth: width });
+    expect(scene.shown.size).toBe(4);
+    for (const group of scene.layout.groups) {
+      expect(group.h * .34).toBeCloseTo(240);
+      for (const key of group.members) {
+        const child = scene.layout.byPath.get(key)!;
+        expect(child.h * .34).toBeCloseTo(160);
+        expect(child.y).toBeGreaterThan(group.y);
+        expect(child.y + child.h).toBeLessThan(group.y + group.h);
+      }
+    }
+    for (let i=0;i<scene.layout.groups.length;i++) for(let j=i+1;j<scene.layout.groups.length;j++) expect(overlaps(scene.layout.groups[i],scene.layout.groups[j])).toBe(false);
+  }
+});

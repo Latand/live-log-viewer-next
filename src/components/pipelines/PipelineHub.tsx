@@ -30,12 +30,14 @@ export function PipelineHub({
   y,
   interactive,
   moveTransition,
+  semanticZoom = false,
 }: {
   pipeline: Pipeline;
   x: number;
   y: number;
   interactive: boolean;
   moveTransition: string;
+  semanticZoom?: boolean;
 }) {
   const { t } = useLocale();
   const [open, setOpen] = useState(false);
@@ -82,7 +84,7 @@ export function PipelineHub({
   return (
     <div
       className={`absolute left-0 top-0 ${open ? "z-30" : "z-[5]"} ${interactive ? "" : "pointer-events-none"}`}
-      style={{ transform: `translate(${x}px, ${y}px)`, transition: moveTransition }}
+      style={{ transform: `translate(${x}px, ${y}px)${semanticZoom ? " scale(var(--inv-z, 1))" : ""}`, transition: moveTransition, transformOrigin: "top left" }}
       onKeyDown={(event) => {
         if (event.key !== "Escape" || !open) return;
         event.stopPropagation();
