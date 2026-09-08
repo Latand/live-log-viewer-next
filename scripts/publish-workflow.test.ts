@@ -332,6 +332,7 @@ test("publication captures the integrity printed for the exact tarball and tag",
       NPM_TEST_BUN: process.execPath,
       NPM_TEST_CALLS: calls,
       NPM_TEST_TARBALL: tarball,
+      RUNNER_TEMP: directory,
     },
     stderr: "pipe",
     stdout: "pipe",
@@ -343,9 +344,7 @@ test("publication captures the integrity printed for the exact tarball and tag",
     "integrity=sha512-fixture-integrity",
     "tag=latest",
   ]);
-  expect(result.stdout.toString()).toContain(
-    '"integrity":"sha512-fixture-integrity"',
-  );
+  expect(result.stdout.toString()).toBe("");
   expect(result.stderr.toString()).toBe("");
 });
 

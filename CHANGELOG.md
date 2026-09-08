@@ -7,225 +7,66 @@ guarantees for the 1.x series.
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-09-08
+
 ### Added
-- The Viewer installs and runs on native Windows, with the process backend,
-  paths, termination and CLI that requires (#1201, phase 1 of the merged
-  `docs/design/windows-support.md`). The `os` field no longer refuses a Windows
-  install. Process discovery gets a third backend beside `/proc` and
-  `ps`/`lsof`: one `Get-CimInstance Win32_Process` snapshot per five seconds for
-  pids, lineage, command lines and working set, and two values read from the
-  kernel through FFI — the process creation time, which is the identity token,
-  and each agent's working directory, read out of its own process parameters
-  because Windows has no other route to it and a process with no known working
-  directory is not shown at all. Identity is what pid reuse makes load-bearing
-  here, and Windows reuses a pid within seconds, so it comes from
-  `GetProcessTimes` rather than from anything that merely differs between two
-  processes. Termination replaces the process-group signal with a walk of the
-  parent tree, descendants first, each member's identity re-checked immediately
-  before it is killed; a parent link whose parent started after its own child is
-  dropped as the stale link it is. The runtime host listens on a named pipe
-  instead of a Unix socket, and its singleton fence keeps its file and its
-  kernel-released lock by way of `LockFileEx`. `HOME` is ignored on Windows,
-  where it is not a Windows variable and a Git Bash value resolves to nothing.
-  The CLI opens a browser through `rundll32` with no shell in the way.
-
-  Nobody working on this repository has a Windows machine, so none of the above
-  is a claim: a new `platform-tests.yml` runs the process backend, the endpoint,
-  the fence, the tree kill, the path handling and the launcher on
-  `windows-latest`, refuses a runner that is not Windows, and fails when any
-  kernel reader returns nothing — the same shape as the `macos-identity` job
-  that exists because nobody here has a Mac. Its Ubuntu leg runs the identical
-  file list, which is what makes "Linux is unchanged" witnessed rather than
-  asserted. What Windows does not get in this phase is written down in the
-  README, including the two grouping recognisers that stop resolving a
-  repository there and what they resolve to instead. The job earned its keep
-  immediately: it caught the fence refusing to create its own file on a fresh
-  machine, a process identity that outlived the process it named, and a CLI that
-  could not find its own server from a checkout.
-- The Viewer ticks the orchestrator seat, so a rotation stops dropping the
-  monitor (#1245). The monitor that had been driving orchestrator sessions was
-  never a feature: it was a schedule an agent armed inside its own session, so
-  nothing was written to disk, it died with the session, and every rotation
-  silently dropped it — a successor started with no tick and no way to know one
-  was missing. The clock now lives in the release that owns traffic, beside the
-  controllers that already reconcile flows and retire hosts. A cheap check every
-  few minutes reads durable state only — the seat, the open lanes, the board,
-  the lifecycle journal past the seat's own cursor — and answers one of
-  `wake`, `quiet`, `proactive`, `no-seat` or `skipped`; the model runs only on a
-  wake, at most once an hour per project. Every check appends one sanitized line
-  to `state/seat-tick/runs.ndjson`, so "no line" means "no check" and the
-  absence of a tick is a readable fact rather than a silence. A tick that lands
-  while the seat's turn is genuinely progressing is dropped, never queued.
-
-### Changed
-- The orchestrator mandate is at v11: the Viewer owns the clock, a seat never
-  schedules itself, and a seat still holding a schedule drops it in the turn the
-  mandate lands in rather than waiting to observe the replacement work (#1245).
-  Waiting cannot work — a seat's own schedule keeps its turn open, so the
-  Viewer's tick finds it busy and drops every check, and the two mechanisms
-  deadlock. The handover paragraph is delivered with every mandate, whatever
-  version the seat carries: a rotation hands the successor the incumbent's
-  mandate and version, and a bespoke mandate never had the paragraph at all, so
-  the seats most likely to be holding a schedule are exactly the ones a
-  versioned-default-only paragraph would never reach. It is appended at most
-  once, so a re-delivery after a host death reads the same. The checked-in
-  conveyor playbook says the same thing the mandate does — it used to tell the
-  seat to self-pace with wakeup checkpoints, which made the rule unenforceable
-  by contradiction.
-- Automatic host retirement ends a rotated-away orchestrator (#1245). Rotation
-  revokes authority and nothing else, so a predecessor kept its host — and,
-  while it was ticking itself, kept its transcript warm enough to clear the idle
-  threshold forever, staying alive by the activity that should have disqualified
-  it. The retirement predicate now tells a revoked seat from a live one and
-  waives the idle threshold for it. A durable revocation stands on its own: a
-  later designation that failed terminally stops masking it, and the standing
-  follows an identity through a migration alias, so neither a failed
-  re-designation nor a migrated id leaves a revoked seat protected. Everything
-  protecting work in flight is unchanged: the turn still has to settle,
-  questions still have to be answered, the queue still has to drain.
+- Mobile navigation, conversation controls, account limits and attention sheets,
+  with readable tool runs and recovery actions (#1439).
+- Board task layouts, dormant conversation readers and tool chronology (#1564).
+- MCP recovery of send/spawn outcomes under the original request key, and
+  project/revision-fenced task positioning (#1536, #1545).
+- Native Windows process and runtime-host support (#1201), with platform CI.
+  See the README for platform limitations.
 
 ### Fixed
-- Card activity now uses the structured turn-liveness evidence that governs
-  recovery (#1296). A verified process with an open turn stays `live` only while
-  transcript writes or recent CPU movement show progress; the measured flat
-  100-second window projects `stalled`, and a recorded pid that has exited no
-  longer projects `running`. The hand-over now releases registered structured
-  engines before the incumbent Viewer exits. The target switch activates the
-  candidate first; its adopter refuses the still-live engine process before it
-  examines the separate Viewer writer claim. The incumbent previously reached
-  its demotion poll, checkpointed state, and exited without calling the engine
-  lifecycle, leaving the detached child alive in the host namespace. Demotion
-  now records an exact PID/start-identity handoff, releases all registered hosts
-  in one bounded window, and leaves the candidate's startup retry to publish one
-  replacement. The hand-off marker carries its writer epoch, so a delayed
-  incumbent state update cannot acknowledge its own release. A sliding CPU
-  window also keeps recent work live across ordinary polls until a later full
-  window supersedes that evidence. A CPU-flat stage is likewise terminated and
-  retired through its exact structured identity before the pipeline marks it
-  retryable.
-- The documented release path works as written (#1309). The deploy protocol
-  named a wrapper command that is not installed on this machine and a
-  fast-forward-only pull before the release, and the pull was wrong in its own
-  right: `scripts/rebuild.sh` reads nothing from the working tree — it posts a
-  revision, and the runtime host builds that revision from its own canonical Git
-  mirror — so the pull only disturbed whatever branch the operator had checked
-  out. Every place that documents the release now names the plain
-  `scripts/rebuild.sh` invocation from any checkout, a worktree included, and
-  says where the revision is built from. The script itself advertised, defaulted
-  to and validated `origin/main` as a CLI sentinel, then resolved it before
-  posting because `POST /api/runtime/deployments` accepts no such `revision`
-  value. It now takes a full commit SHA in either case or, when no argument or
-  `LLV_DEPLOY_REVISION` override is present, resolves the canonical
-  `refs/heads/main` tip. Explicit SHAs are posted lowercase, and `git ls-remote`
-  fetches nothing into the checkout and moves no ref in it. The refusal also used
-  to arrive underneath `deployment key: …`, so a request that deployed nothing
-  read like a deployment that had started: nothing that reads as a started
-  deployment is printed now until the endpoint has returned a valid receipt, and
-  a refused request prints its error and exits non-zero.
-- Whether a turn is being worked on is decided from evidence, so a redeploy no
-  longer strands a lane nothing can recover (#1281, #1282, #1276). `live`,
-  `idle` and `busy` are inherited words: a turn severed mid-flight kept reading
-  busy forever, and a step that legitimately takes ten minutes read stalled. The
-  decision now names what it read — the last transcript event and its kind, the
-  artifact's own clock, whether the process the registry believes owns the turn
-  still exists and is still that process, the CPU it has consumed since its own
-  launch, and how long a delivery has been outstanding for it. A host writing or
-  burning CPU is working however long the gap between messages; a host that has
-  written nothing and burned none since its own launch, under a turn it
-  inherited, is severed. Everything else answers `unknown`, and `unknown`
-  authorises nothing. A transcript that cannot be read — corrupt, truncated,
-  missing, or growing under the read — is answered before anything else is
-  looked at, the recorded process included: a pid that is gone proves that pid
-  is not running, which is just as true of a turn that finished hours ago under
-  a row nobody updated as of one cut off mid-work, and only the transcript tells
-  those apart. The cost of guessing is not symmetric — a kill lands the same way
-  either way, but a retry re-runs work that may already be complete and a
-  continuation nudge re-prompts a seat about a turn that is over — so the
-  reading stops there and consumers are handed `unknown`. The registry's own
-  `busy` or `terminal` word is never borrowed to fill the gap, and a pid whose
-  recorded start identity cannot be revalidated is not evidence about the
-  process the row was written about either. Two consequences follow. A pipeline stage whose host
-  is proven severed leaves `running`, so `retry-stage` works without closing the
-  pipeline — and a stage whose evidence is unreadable keeps its attempt instead.
-  A kill on a host no delivery controller owns reaps the recorded process —
-  fenced on its start identity, and only once the evidence says severed — so the
-  registry row can retire instead of refusing forever and blocking every message
-  queued behind it; an interrupt in the same state settles rather than holding
-  its conversation's drain open.
-- A Viewer restart messages only the orchestrator seats whose own turn was
-  severed (#1276). The predicate was `live` or `idle`, and `idle` meant every
-  dormant project was re-hosted and spent a paid turn answering "no change" on
-  every redeploy — eleven seats, eleven hosts, eleven turns, and fresh activity
-  stamped on projects nobody had touched in days. A seat is now nudged only when
-  the evidence says a turn of its own was cut off, the surviving message names
-  that turn by its last transcript event, and an idle seat gets no message and
-  no process. The message no longer asks the seat to "re-arm any scheduled
-  work": since #1245 the Viewer owns the clock, and a durable agent-managed
-  monitor record is tracked in #1280.
-- A boot that cannot read a transcript starts nothing and retires nothing for it
-  (#1281). A tail read that comes back uncertain makes no observation, so the
-  conversation kept the turn word the last writer left on the row — and that
-  word launched a CLI process for the turn and, on Codex, spent a paid
-  continuation telling the seat to resume it, for a turn that may have ended
-  long ago. Such a row is now left exactly as it is: no host is launched from
-  it, no continuation is sent, and it is held out of the demotion that retires
-  skipped hosts, so whatever can read the artifact next is what decides. Work
-  that is owed regardless still boots its host — a held delivery or a pending
-  runtime operation is evidence of its own.
-- Startup launches no structured host it cannot hand to a delivery controller
-  (#1282). A pass with no runtime client has no publication to claim what it
-  starts, and the check that catches an unclaimed host was behind that same
-  condition, so such a pass adopted hosts and reported success while nothing
-  owned them. Such a pass now defers its adoption: nothing is launched, the
-  boot's own recovery evidence is kept, and the startup retry loop runs the pass
-  again once a client exists. A host adopted by a pass that did have one, but
-  which the controller never claimed, still fails the pass instead of being left
-  running with no owner. And a startup completion that resumes
-  inside a generation the publication has already left now hands its hosts to
-  the successor; it used to answer "done" and register nothing, which is how a
-  launched host ends up parked in `epoll_wait` for half an hour while every
-  recovery verb is refused.
-- The macOS argv reader's live-child test waits for the child to announce its
-  exec before it reads. A pid exists before the image it will run does, and
-  until the exec lands the kernel has no argument record for that image to hand
-  back — the window the Claude login fence already polls through. The test read
-  the moment `spawn` returned, so it asserted the result of a race, and one CI
-  attempt lost it while the next attempt on the identical commit won: a red the
-  tree could not explain. The read now happens after a byte only the executed
-  script can have written. What the test requires is unchanged — one read, the
-  exact exec-time argv of a live child, and `null` once that child is gone.
+- Claude authentication recognizes account-scoped macOS Keychain credentials
+  when a credentials JSON file is absent. Login completion, discovery and
+  admission share credential evidence while preserving account isolation and
+  file safety checks (#1550, #1551).
+- Startup recovery shares historical snapshots, preserves adopted writers and
+  progress, and quiesces before rollback. Serving readiness works through
+  trusted gateways (#1553, #1554, #1556, #1567).
+- Uncertain delivery keeps its original identity and recovery controls; closing
+  a pipeline preserves survivor evidence until process death is established
+  (#1539, #1540).
+- Feed scroll anchoring survives asynchronous prepends, adjacent reasoning stays
+  readable, and phone recovery controls remain reachable (#1532, #1535, #1522).
+- Connection-based access checks and authenticated gateway handling protect
+  remote access while allowing token-free localhost (#1503, #1549).
+- Monitor accounting records owned-child outcomes across wakes (#1544).
 
-### Removed
-- The conversation monitor's standalone CLI driver, its HTTP client and its
-  cross-process lock (#1245): `scripts/conversation-monitor.ts`, `httpViewerApi`
-  and `POST /api/monitor/lock`. They existed for an external process on a
-  crontab that was never written on any machine, and one clock in one process
-  needs no lock. The classification the CLI drove — evidence, GitHub
-  correlation, the stall rule, board cards, redaction and the audit journal — is
-  kept and is what the seat tick reuses; the operator-request transcript scan is
-  kept in the tree, undriven, and now requires a caller to supply its own
-  single-flight admission. `GET /api/monitor/runs` is unchanged.
+### Upgrade and verification
+- Install with `npx agent-log-viewer@1.1.0 --no-open`. Node 20.9 or later and
+  Bun 1.4.0 or later are required; the launcher runs the server under Bun.
+- Package and CLI names, configuration paths and compatibility identifiers stay
+  unchanged. This release packages source through `84885e71`; publication does
+  not perform a Viewer deployment.
+- Release startup verification runs on Linux with private home, state and port.
+  Native macOS browser login and a user's real Keychain remain untested by this
+  release smoke. Platform CI and synthetic credential tests have narrower scope.
 
-### Fixed
-- A review relay held on a provider limit now waits a wait that ends, and stops
-  waiting when the provider said to retry (#611). Two gaps were left by the
-  first fix. An account whose window reads spent with no reset the provider
-  named was reported as no park at all, so recovery handed the live owned host
-  back publish-ready and the relay enqueued into an account that could not start
-  the turn — the original incident, reproduced by the one reading nobody can put
-  a clock on. It is now reported as a park in its own right: nothing is
-  enqueued, nothing is dropped, no retry budget is spent, the host keeps its
-  process and its claim and the relay keeps the identity it would have been sent
-  under — and the wait is bounded by the evidence that justified it. The reading
-  only speaks for one freshness horizon, so the park names that instant as its
-  recheck and lapses there on its own unless a fresher reading renews it against
-  new evidence. The board says which account it waits on, that the reset is
-  unknown, and when the account is looked at again, instead of showing a reset
-  time nobody gave. And publish readiness no longer borrows the sixty-second
-  grace that exists for liveness classification: it resumes at the provider's
-  own deadline, where before a probe one millisecond past it was answered with a
-  hold whose deadline had already passed, and every tick for the next minute
-  re-decided the same hold.
+## [1.0.3] — 2026-08-28
+
+- Added the Darwin process-identity implementation used by the Claude login
+  fence (#1258). Account-scoped Keychain recognition follows in 1.1.0.
+- Included Viewer-owned orchestrator ticks and structured-host retirement
+  (#1252, #1237).
+
+## [1.0.2] — 2026-08-25
+
+- The packaged CLI supervises its runtime host, enabling structured operation
+  from an npm installation (#1175).
+- Structured spawns provision Viewer MCP and receive updated orchestrator
+  onboarding (#1173, #1174).
+
+## [1.0.1] — 2026-08-25
+
+- Shipped standalone worker bundles required by npm installations (#1157).
+- Included conversation-generation archiving, bounded runtime snapshots and
+  per-project orchestrator panel state (#1144, #1147, #1150).
+
+The 1.0.1–1.0.3 entries reconcile existing immutable npm releases and git tags.
+They are summaries; the comparison links retain each release's complete history.
 
 ## [1.0.0] — 2026-07-31
 
@@ -702,7 +543,11 @@ Initial public release, packaged as `agent-log-viewer` with a `bunx` CLI.
 - Implement→review flows with fresh headless reviewer rounds.
 - Remote access over Tailscale behind a token gate.
 
-[Unreleased]: https://github.com/Latand/live-log-viewer-next/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/Latand/live-log-viewer-next/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/Latand/live-log-viewer-next/compare/v1.0.3...v1.1.0
+[1.0.3]: https://github.com/Latand/live-log-viewer-next/compare/v1.0.2...v1.0.3
+[1.0.2]: https://github.com/Latand/live-log-viewer-next/compare/v1.0.1...v1.0.2
+[1.0.1]: https://github.com/Latand/live-log-viewer-next/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/Latand/live-log-viewer-next/compare/v0.11.7...v1.0.0
 [0.11.2]: https://github.com/Latand/live-log-viewer-next/compare/v0.11.1...v0.11.2
 [0.11.1]: https://github.com/Latand/live-log-viewer-next/compare/v0.10.0...v0.11.1
