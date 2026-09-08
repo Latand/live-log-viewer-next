@@ -3278,3 +3278,22 @@ test("original-key reconciliation does not redispatch a refused tick while the s
   expect(busy.sent).toEqual([]);
   expect(fixture.acknowledged()).toEqual([]);
 });
+
+
+test("rotation during recovery liveness prevents predecessor redispatch", async () => {
+  const fixture = childFixture("recovery-liveness-rotation");
+  setAgentRegistryForTests(fixture.registry);
+  fixture.spawn({ title: "owed worker", turn: "terminal" });
+  fixture.seed();
+  await runSeatTickCheck(fixture.project, childRig(fixture, { realWakeState: true, deliverWith: refuseBeforeReservation(503) }).deps);
+  const next = childRig(fixture, { realWakeState: true, now: fixture.now + 5 * MINUTE });
+  const liveness = next.deps.sources!.liveness;
+  next.deps.sources!.liveness = async (request) => {
+    const rows = await liveness(request);
+    next.seat = null;
+    return rows;
+  };
+  await runSeatTickCheck(fixture.project, next.deps);
+  expect(next.sent).toEqual([]);
+  expect(fixture.acknowledged()).toEqual([]);
+});

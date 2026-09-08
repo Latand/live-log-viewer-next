@@ -494,6 +494,8 @@ async function reconcileOutstandingWake(context: {
       if (wake.dispatch?.state === "refused") accounting.settleAbsent(wake);
       return accounting.readState();
     }
+    const freshAuthority = context.sources.seatFor(context.project).active;
+    if (!freshAuthority || freshAuthority.conversationId !== wake.conversationId || freshAuthority.seatEpoch !== wake.seatEpoch) return state;
     const token = accounting.beginDispatch(wake);
     state = accounting.readState();
     if (!token) return state;
