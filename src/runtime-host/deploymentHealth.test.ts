@@ -19,7 +19,6 @@ import {
   markStructuredHostStartupReady,
 } from "@/lib/runtime/startupStatus";
 import { RuntimeJournal } from "@/runtime-host/journal";
-import { PROMOTED_SERVING_TIMEOUT_MS, VERIFY_PROMOTED_ACTION_TIMEOUT_MS } from "./deploymentHotState";
 
 import {
   candidateLogExcerpt,
@@ -103,21 +102,20 @@ test("candidate readiness stops immediately after container exit", async () => {
   expect(sleeps).toBe(0);
 });
 
-test("promoted serving can finish beyond the former deadline but still has a wall-clock bound", async () => {
+test("explicitly bounded readiness callers retain their wall-clock bound", async () => {
   let now = 0;
   const probe = (readyAt: number) => waitForViewerReadiness({
     endpoint: "http://127.0.0.1:18001", inspect: async () => "running",
     probe: async () => evidence(now >= readyAt),
     now: () => now, sleep: async (delay) => { now += delay; },
-    timeoutMs: PROMOTED_SERVING_TIMEOUT_MS,
+    timeoutMs: 300_000,
   });
   expect((await probe(200_000)).ok).toBe(true);
   expect(now).toBe(200_000);
   now = 0;
   const timedOut = await probe(Infinity);
   expect(timedOut.ok).toBe(false);
-  expect(now).toBe(PROMOTED_SERVING_TIMEOUT_MS);
-  expect(VERIFY_PROMOTED_ACTION_TIMEOUT_MS).toBe(PROMOTED_SERVING_TIMEOUT_MS + 60_000);
+  expect(now).toBe(300_000);
 });
 
 test("health request plan exercises remote authorization and rejection", () => {
@@ -475,4 +473,49 @@ test("a tokenless readiness plan still requires a plain 200 on root", () => {
   expect(plan.unauthorized).toBeNull();
   expect(proxy(new NextRequest(plan.root.url, { headers: plan.root.headers }))
     .headers.get("x-middleware-next")).toBe("1");
+});
+
+
+test("serving readiness can wait beyond all former total limits", async () => {
+  let now = 0;
+  const result = await waitForViewerReadiness({
+    endpoint: "http://127.0.0.1:18001", timeoutMs: null,
+    inspect: async () => "running", now: () => now,
+    probe: async () => evidence(now >= 900_000),
+    sleep: async (delay) => { now += delay; },
+  });
+  expect(result.ok).toBe(true);
+  expect(now).toBe(900_000);
+});
+
+
+test("unbounded readiness ends on candidate exit or explicit cancellation", async () => {
+  let checks = 0;
+  const result = await waitForViewerReadiness({
+    endpoint: "http://127.0.0.1:18001", timeoutMs: null,
+    inspect: async () => ++checks === 3 ? "exited" : "running",
+    probe: async () => evidence(false), sleep: async () => {},
+  });
+  expect(result).toMatchObject({ ok: false, processReady: false, detail: "candidate container exited before readiness" });
+  const abort = new AbortController();
+  await expect(waitForViewerReadiness({
+    endpoint: "http://127.0.0.1:18001", timeoutMs: null, signal: abort.signal,
+    inspect: async () => "running",
+    probe: async () => { abort.abort(new Error("operator cancelled")); return evidence(true); },
+  })).rejects.toThrow("operator cancelled");
+});
+
+
+test("transient inspection and probe errors keep serving pending", async () => {
+  let inspections = 0;
+  let probes = 0;
+  const progress: string[] = [];
+  const result = await waitForViewerReadiness({
+    endpoint: "http://127.0.0.1:18001", timeoutMs: null,
+    inspect: async () => { if (++inspections === 1) throw new Error("Docker unavailable"); return "running"; },
+    probe: async () => { if (++probes === 1) throw new Error("network unavailable"); return evidence(true); },
+    sleep: async () => {}, reportPending: (detail) => progress.push(detail),
+  });
+  expect(result.ok).toBe(true);
+  expect(progress).toEqual(["candidate inspection unavailable: Docker unavailable", "candidate probe unavailable: network unavailable"]);
 });

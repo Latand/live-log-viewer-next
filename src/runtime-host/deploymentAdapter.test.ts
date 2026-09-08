@@ -644,3 +644,22 @@ test("post-promotion deadline reports serving readiness and host adoption progre
     "deployment adapter verify-promoted timed out while waiting for promoted Viewer serving readiness - adoption 7 of 19 - adopting Claude hosts",
   );
 });
+
+
+test("serving action has no default total deadline and cancellation joins its process", async () => {
+  const fixture = sleepingAdapter("waiting for serving readiness");
+  const source = fs.readFileSync(fixture.executable, "utf8");
+  fs.writeFileSync(fixture.executable, source.replace("#!/bin/sh", '#!/bin/sh\n[ "$LLV_DEPLOYMENT_ADAPTER_ACTION_DEADLINE_MS" = unbounded ] || exit 91'));
+  const abort = new AbortController();
+  const adapter = HostCommandViewerDeploymentAdapter.fromExecutable(fixture.executable, { stateFile: fixture.stateFile });
+  const pending = adapter.verifyPromoted({ image: "viewer:test", container: "candidate", endpoint: "http://127.0.0.1:18001", revision: "a".repeat(40) }, abort.signal);
+  const outcome = pending.then(() => null, (error: unknown) => error);
+  for (let i = 0; i < 100 && !fs.existsSync(fixture.stateFile); i++) await Bun.sleep(5);
+  const record = JSON.parse(fs.readFileSync(fixture.stateFile, "utf8"));
+  await Bun.sleep(30);
+  expect(processGroupAlive(record.pid)).toBe(true);
+  abort.abort(new Error("operator cancelled"));
+  expect(String(await outcome)).toContain("operator cancelled");
+  expect(processGroupAlive(record.pid)).toBe(false);
+  expect(fs.existsSync(fixture.stateFile)).toBe(false);
+});

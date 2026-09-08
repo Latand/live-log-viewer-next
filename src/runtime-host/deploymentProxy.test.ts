@@ -10,6 +10,8 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { NextRequest } from "next/server";
 
+import { viewerHealthRequestPlan } from "./deploymentHealth";
+
 import { proxy as viewerGate } from "@/proxy";
 
 import { viewerComposeSnapshotPath } from "./deploymentArtifacts";
@@ -597,4 +599,17 @@ test("without a release target the local entry answers 503 and stays up", async 
     await close(local);
     await fs.rm(stateDir, { recursive: true, force: true });
   }
+});
+
+
+test("serving rejection probe remains unauthenticated through the trusted gateway", async () => {
+  const entry = await gateway();
+  try {
+    const endpoint = `http://127.0.0.1:${entry.localPort}`;
+    const plan = viewerHealthRequestPlan(endpoint, entry.token);
+    const authorized = await fetch(plan.root.url, { headers: plan.root.headers });
+    const rejected = await fetch(plan.unauthorized!.url, { headers: plan.unauthorized!.headers });
+    expect(authorized.status).toBe(200);
+    expect(rejected.status).toBe(403);
+  } finally { await entry.close(); }
 });

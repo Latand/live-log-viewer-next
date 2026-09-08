@@ -36,6 +36,7 @@ export interface RuntimeHostHandoffContext {
 }
 
 export interface ViewerDeploymentAdapter {
+  servingProgress?(): string | null;
   /** Durably stages the candidate image as the successor runtime-host
       generation: a dockerd-owned successor container waiting on the singleton
       fence, the service image tag repointed, the release record written, and
@@ -56,7 +57,7 @@ export interface ViewerDeploymentAdapter {
   reconcileMcpRuntime(revision: string): Promise<ViewerMcpRuntimeReconciliation | null>;
   verifyCandidate(candidate: ViewerReleaseIdentity): Promise<ViewerHealthEvidence>;
   promote(candidate: ViewerReleaseIdentity): Promise<ViewerMcpRuntimePublicationEvidence>;
-  verifyPromoted(candidate: ViewerReleaseIdentity): Promise<ViewerHealthEvidence>;
+  verifyPromoted(candidate: ViewerReleaseIdentity, signal?: AbortSignal): Promise<ViewerHealthEvidence>;
   rollback(
     previous: ViewerReleaseIdentity,
     candidate: ViewerReleaseIdentity,
@@ -122,7 +123,10 @@ function mcpRuntimeStatusWithHealth(status: ViewerDeploymentStatus, evidence: Vi
   return evidence.mcpRuntime ? { ...runtime, health: [...runtime.health, evidence.mcpRuntime] } : runtime;
 }
 
+const SERVING_CANCELLED = "serving verification cancelled by operator";
+
 export class ViewerDeploymentCoordinator {
+  private readonly servingWaits = new Map<string, AbortController>();
   private readonly tasks = new Map<string, Promise<void>>();
   private admissionQueue: Promise<void> = Promise.resolve();
   private readonly defaultRevision: string;
@@ -148,6 +152,21 @@ export class ViewerDeploymentCoordinator {
 
   async requestViewerDeployment(request: ViewerDeploymentRequest): Promise<ViewerDeploymentReceipt> {
     return this.runAdmissionExclusive(() => this.admit(request));
+  }
+
+  cancelViewerDeployment(deploymentId: string): ViewerDeploymentStatus | null {
+    const status = this.journal.viewerDeployment(deploymentId);
+    if (!status) return null;
+    if (status.error === SERVING_CANCELLED) return status;
+    const wait = this.servingWaits.get(deploymentId);
+    if (status.phase !== "post-promotion-health" || status.terminal || !wait) {
+      throw new Error("deployment is not waiting for serving readiness");
+    }
+    // Persist intent before interrupting the probe. Recovery honors the same
+    // intent after reconciling the old adapter; rollback still owns cleanup.
+    const cancelled = this.journal.updateViewerDeployment(deploymentId, { error: SERVING_CANCELLED });
+    wait.abort(new Error(SERVING_CANCELLED));
+    return cancelled;
   }
 
   private async admit(request: ViewerDeploymentRequest): Promise<ViewerDeploymentReceipt> {
@@ -194,7 +213,10 @@ export class ViewerDeploymentCoordinator {
   }
 
   readViewerDeployment(deploymentId: string): ViewerDeploymentStatus | null {
-    return this.journal.viewerDeployment(deploymentId);
+    const status = this.journal.viewerDeployment(deploymentId);
+    if (!status || status.terminal || status.phase !== "post-promotion-health") return status;
+    const servingProgress = this.adapter.servingProgress?.();
+    return servingProgress ? { ...status, servingProgress } : status;
   }
 
   recordMcpRuntimeReconciliation(reconciliation: ViewerMcpRuntimeReconciliation): ViewerDeploymentStatus | null {
@@ -359,7 +381,16 @@ export class ViewerDeploymentCoordinator {
         }
         if (status.phase === "post-promotion-health") {
           if (!status.candidate) throw new Error("candidate identity is missing");
-          const evidence = await this.adapter.verifyPromoted(status.candidate);
+          if (status.error === SERVING_CANCELLED) throw new Error(SERVING_CANCELLED);
+          const wait = new AbortController();
+          this.servingWaits.set(status.deploymentId, wait);
+          let evidence: ViewerHealthEvidence;
+          try {
+            evidence = await this.adapter.verifyPromoted(status.candidate, wait.signal);
+            wait.signal.throwIfAborted();
+          } finally {
+            this.servingWaits.delete(status.deploymentId);
+          }
           const health = [...status.health, evidence];
           if (evidence.ok) {
             if (!status.previous) throw new Error("previous release identity is missing");

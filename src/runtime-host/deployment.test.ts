@@ -1,3 +1,6 @@
+import { NextRequest } from "next/server";
+import { DELETE as cancelDeploymentRoute } from "@/app/api/runtime/deployments/[deploymentId]/route";
+
 import { afterEach, expect, test } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
@@ -73,6 +76,7 @@ class FakeDeploymentAdapter implements ViewerDeploymentAdapter {
   verifyHostFailure: Error | null = null;
   promoteFailure: Error | null = null;
   hotStateHandOver: string | null = null;
+  servingProgress(): string | null { return "waiting for serving readiness; HTTP rejection pending"; }
   calls: string[] = [];
 
   async reconcile(): Promise<void> { this.calls.push("reconcile"); }
@@ -170,7 +174,7 @@ class FakeDeploymentAdapter implements ViewerDeploymentAdapter {
       ...(this.hotStateHandOver ? { hotStateHandOver: this.hotStateHandOver } : {}),
     };
   }
-  async verifyPromoted(candidate: ViewerReleaseIdentity): Promise<ViewerHealthEvidence> { this.calls.push(`verify-promoted:${candidate.container}`); return this.promotedHealth; }
+  async verifyPromoted(candidate: ViewerReleaseIdentity, _signal?: AbortSignal): Promise<ViewerHealthEvidence> { this.calls.push(`verify-promoted:${candidate.container}`); return this.promotedHealth; }
   async rollback(previous: ViewerReleaseIdentity, candidate: ViewerReleaseIdentity): Promise<ViewerMcpRuntimePublicationEvidence> {
     this.calls.push(`rollback:${candidate.container}`);
     this.current = previous;
@@ -1042,3 +1046,49 @@ test("Viewer socket admission outlives the ordinary client timeout during delaye
 function stableEndpointForTest(): string {
   return "http://127.0.0.1:8898";
 }
+
+
+test("explicit serving cancellation stays pending until the verifier settles, then rolls back", async () => {
+  const filename = journalFile("serving-cancel");
+  const store = new RuntimeJournal(filename);
+  const adapter = new FakeDeploymentAdapter();
+  let releaseProbe!: () => void;
+  let entered!: () => void;
+  const started = new Promise<void>((resolve) => { entered = resolve; });
+  const joined = new Promise<void>((resolve) => { releaseProbe = resolve; });
+  adapter.verifyPromoted = async (_candidate, signal) => {
+    entered();
+    await joined;
+    signal?.throwIfAborted();
+    return adapter.promotedHealth;
+  };
+  const coordinator = new ViewerDeploymentCoordinator(store, adapter, { pid: process.pid, startIdentity: "test" });
+  const receipt = await coordinator.requestViewerDeployment({ revision: "a".repeat(40), idempotencyKey: "cancel-serving" });
+  await started;
+  expect(coordinator.readViewerDeployment(receipt.deploymentId)?.servingProgress).toContain("HTTP rejection pending");
+  const socketPath = path.join(path.dirname(filename), "cancel.sock");
+  const server = serveRuntimeHost(socketPath, new RuntimeHost(store, undefined, coordinator));
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  const previousSocket = process.env.LLV_RUNTIME_HOST_SOCKET;
+  process.env.LLV_RUNTIME_HOST_SOCKET = socketPath;
+  try {
+    const context = { params: Promise.resolve({ deploymentId: receipt.deploymentId }) };
+    const denied = await cancelDeploymentRoute(new NextRequest("http://127.0.0.1/api/runtime/deployments/test", { method: "DELETE", headers: { host: "127.0.0.1", origin: "https://example.invalid" } }), context);
+    expect(denied.status).toBe(403);
+    expect(coordinator.readViewerDeployment(receipt.deploymentId)?.error).toBeNull();
+    const response = await cancelDeploymentRoute(new NextRequest("http://127.0.0.1/api/runtime/deployments/test", { method: "DELETE", headers: { host: "127.0.0.1" } }), context);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ phase: "post-promotion-health", terminal: false, error: "serving verification cancelled by operator" });
+  } finally {
+    if (previousSocket === undefined) delete process.env.LLV_RUNTIME_HOST_SOCKET;
+    else process.env.LLV_RUNTIME_HOST_SOCKET = previousSocket;
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+  expect(coordinator.cancelViewerDeployment(receipt.deploymentId)?.terminal).toBe(false);
+  expect(adapter.calls.some((call) => call.startsWith("rollback:"))).toBe(false);
+  releaseProbe();
+  const terminal = await coordinator.waitForDeployment(receipt.deploymentId);
+  expect(terminal).toMatchObject({ phase: "rolled-back", terminal: true, error: "serving verification cancelled by operator" });
+  expect(coordinator.cancelViewerDeployment(receipt.deploymentId)).toEqual(terminal);
+  store.close();
+});
