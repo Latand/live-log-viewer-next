@@ -20,9 +20,11 @@ function subscribe(onChange: () => void) {
     gets the shell too: the shell swaps the rail for the project sheet and the
     scheme for the single-conversation focus layout. Server render assumes
     desktop. */
-export function useIsMobile(): boolean {
+const noSubscription = () => () => {};
+
+export function useIsMobile(active = true): boolean {
   return useSyncExternalStore(
-    subscribe,
+    active ? subscribe : noSubscription,
     () => window.matchMedia(QUERY).matches,
     () => false,
   );

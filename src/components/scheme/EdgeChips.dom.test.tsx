@@ -53,8 +53,8 @@ test("renders bounded chips, opens overflow, and fits the chosen cluster", () =>
   const fitted: string[] = [];
   const host = mount((rect) => fitted.push(`${rect.x}:${rect.y}`));
 
-  expect(host.querySelectorAll("[data-edge-chip]")).toHaveLength(4);
-  const more = host.querySelector('button[aria-label="Show 2 more off-screen clusters"]') as HTMLButtonElement;
+  expect(host.querySelectorAll("[data-edge-chip]")).toHaveLength(1);
+  const more = host.querySelector('button[aria-label="Show 5 more off-screen clusters"]') as HTMLButtonElement;
   expect(more).toBeTruthy();
   flushSync(() => more.click());
   const item = Array.from(host.querySelectorAll("[data-overflow-chip]")).find((node) => node.textContent?.includes("Cluster 4")) as HTMLButtonElement;
@@ -67,7 +67,7 @@ test("renders bounded chips, opens overflow, and fits the chosen cluster", () =>
 
 test("the overflow is a truthful disclosure: no menu roles, expanded state wired to its list (round-1 finding 3)", () => {
   const host = mount();
-  const more = host.querySelector('button[aria-label="Show 2 more off-screen clusters"]') as HTMLButtonElement;
+  const more = host.querySelector('button[aria-label="Show 5 more off-screen clusters"]') as HTMLButtonElement;
   expect(more.getAttribute("aria-expanded")).toBe("false");
   expect(more.hasAttribute("aria-haspopup")).toBe(false);
 
@@ -81,12 +81,12 @@ test("the overflow is a truthful disclosure: no menu roles, expanded state wired
      semantics the widget doesn't implement. */
   expect(host.querySelector('[role="menu"]')).toBeNull();
   expect(host.querySelector('[role="menuitem"]')).toBeNull();
-  expect(list.querySelectorAll("button")).toHaveLength(2);
+  expect(list.querySelectorAll("button")).toHaveLength(5);
 });
 
 test("Escape closes the open overflow and returns focus to its trigger", () => {
   const host = mount();
-  const more = host.querySelector('button[aria-label="Show 2 more off-screen clusters"]') as HTMLButtonElement;
+  const more = host.querySelector('button[aria-label="Show 5 more off-screen clusters"]') as HTMLButtonElement;
   flushSync(() => more.click());
   const item = host.querySelector("[data-overflow-chip]") as HTMLButtonElement;
   expect(item).toBeTruthy();
@@ -102,7 +102,7 @@ test("Escape closes the open overflow and returns focus to its trigger", () => {
 
 test("a press outside the open overflow dismisses it", () => {
   const host = mount();
-  const more = host.querySelector('button[aria-label="Show 2 more off-screen clusters"]') as HTMLButtonElement;
+  const more = host.querySelector('button[aria-label="Show 5 more off-screen clusters"]') as HTMLButtonElement;
   flushSync(() => more.click());
   expect(host.querySelector("[data-overflow-chip]")).toBeTruthy();
 
@@ -157,7 +157,7 @@ test("opens the «+N» list inward from its edge, width-constrained and clamped 
      computed inline geometry (a right offset, a bounded width and max-height),
      and reconstructing its box from the anchor proves it stays on-board. */
   const host = mount();
-  const more = host.querySelector('button[aria-label="Show 2 more off-screen clusters"]') as HTMLButtonElement;
+  const more = host.querySelector('button[aria-label="Show 5 more off-screen clusters"]') as HTMLButtonElement;
   flushSync(() => more.click());
   const listEl = host.querySelector("[data-overflow-list]") as HTMLElement;
   expect(listEl).toBeTruthy();

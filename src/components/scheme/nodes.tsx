@@ -1,7 +1,7 @@
 "use client";
 
 import { Check, Layers } from "lucide-react";
-import { memo, useCallback, useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useState, type ComponentProps } from "react";
 
 import { ChevronRight } from "@/components/icons";
 import { conversationIdentity } from "@/lib/accounts/identity";
@@ -13,6 +13,8 @@ import type { BoardTask } from "@/lib/tasks/types";
 import { useRuntimeSelector } from "@/hooks/useRuntime";
 import { deriveSessionState, hasBlockingAttention, runtimeActivity } from "@/components/runtime/runtimeModel";
 
+import { NativeConversationPane } from "./NativeConversationPane";
+import { DormantView } from "@/components/conversation/DormantView";
 import { BranchPane, kindLabel } from "@/components/BranchPane";
 import { DraftAgentPane } from "@/components/DraftAgentPane";
 import { FlowDialog } from "@/components/flows/FlowDialog";
@@ -153,7 +155,7 @@ export const EdgesLayer = memo(function EdgesLayer({
         const x1 = badgeAnchor?.x ?? edge.x1;
         const y1 = badgeAnchor?.y ?? edge.y1;
         const lift = Math.max(36, (edge.y2 - y1) * 0.5);
-        const curve = `M ${x1} ${y1} C ${x1} ${y1 + lift}, ${edge.x2} ${edge.y2 - lift}, ${edge.x2} ${edge.y2 - 7}`;
+        const curve = edge.route ?? `M ${x1} ${y1} C ${x1} ${y1 + lift}, ${edge.x2} ${edge.y2 - lift}, ${edge.x2} ${edge.y2 - 7}`;
         const head = `M ${edge.x2 - 5} ${edge.y2 - 9} L ${edge.x2 + 5} ${edge.y2 - 9} L ${edge.x2} ${edge.y2 - 1} Z`;
         /* Ancestors the edge spans without drawing them (issue #828): the arrow
            still runs parent → child, and the marker says how many generations
@@ -429,7 +431,9 @@ export const AgentLinksLayer = memo(function AgentLinksLayer({
 export const GroupsLayer = memo(function GroupsLayer({
   groups,
   interactive,
+  onOpenTaskHistory,
 }: {
+  onOpenTaskHistory?: (id: string) => void;
   groups: SchemeGroup[];
   /** Passive on the hand-tool, during a selection session and on the lite map:
       the halos still render, but the header chip stops opening the panel. */
@@ -457,6 +461,7 @@ export const GroupsLayer = memo(function GroupsLayer({
           <div
             key={group.key}
             data-scheme-group={group.kind}
+            data-scheme-group-id={group.key}
             data-pipeline-draft={draft || undefined}
             className="pointer-events-none absolute"
             style={{ left: group.x, top: group.y, width: group.w, height: group.h, transition: GROUP_MOVE_TRANSITION }}
@@ -497,9 +502,9 @@ export const GroupsLayer = memo(function GroupsLayer({
               aria-expanded={open}
               aria-haspopup="dialog"
               disabled={!interactive}
-              onClick={() => setOpenId((value) => (value === group.id ? null : group.id))}
+              onClick={() => group.taskId ? onOpenTaskHistory?.(group.taskId) : setOpenId((value) => (value === group.id ? null : group.id))}
             >
-              <span aria-hidden>{group.kind === "pipeline" ? "⇢" : "⟳"}</span>
+              <span aria-hidden>{group.kind === "task" ? "▤" : group.kind === "pipeline" ? "⇢" : "⟳"}</span>
               <span className="truncate">{group.label}</span>
               {group.pipeline ? (
                 <>
@@ -739,7 +744,7 @@ export function LiteNodeShell({ node, ringed, dimmed, flow }: { node: SchemeNode
         </div>
       </div>
       {flow ? <RoleTag role="implementer" active={activeLoopRole(flow) === "implementer"} /> : null}
-      <FarLabel file={node.file} />
+      {node.presentation ? null : <FarLabel file={node.file} />}
     </div>
   );
 }
@@ -939,7 +944,8 @@ function SelectionCheck({
    card changed — ring, dim, node geometry, flow/pipeline attachment. Every
    callback and collection it receives is identity-stable across a NodesLayer
    render for that to hold (see the useCallback/EMPTY_* constants there). */
-const NodeShell = memo(function NodeShell({
+const NodeChrome = memo(function NodeChrome({
+  nativeSlot,
   node,
   ringed,
   marked,
@@ -971,6 +977,7 @@ const NodeShell = memo(function NodeShell({
   badgeAnchors,
   trayApi,
 }: {
+  nativeSlot: (node: HTMLDivElement | null) => void;
   node: SchemeNode;
   ringed: boolean;
   /** Member of the selection session: checkmark badge + exempt from dimming. */
@@ -1144,23 +1151,10 @@ const NodeShell = memo(function NodeShell({
         </>
       ) : null}
       <div className={`relative z-[1] flex h-full ${ringed ? "rounded-[10px] ring-2 ring-accent/60 ring-offset-2 ring-offset-canvas" : ""}`}>
-        <BranchPane
-          file={node.file}
-          tasks={node.tasks}
-          isRoot={node.isRoot}
-          dormant={dormant}
-          showFavorite
-          /* A live stage pane is titled by its place in the chain, not by the
-             first line of its prompt — every stage prompt opens with the same
-             shared preamble, so prompt-derived titles named every pane on the
-             board identically (#658). */
-          titleOverride={stagePaneTitleOf(t, pipelineStage)}
-          onClose={() => onClose(node.file.path)}
-          onToggleExpand={() => onExpand(node.file.path)}
-          onSpawnRetry={onSpawnRetry}
-          relatedTasks={relatedTasks}
-          onOpenTask={onOpenTask}
-        />
+        {node.presentation === "summary" ? <button data-scheme-ui className="flex h-full w-full flex-col items-start justify-center gap-3 rounded-xl border border-border bg-card p-5 text-left" style={{fontSize:16*(node.readerScale??1)}} onClick={() => onSelect(node.file)}>
+          <strong>{cleanTitle(node.file.title,90)}</strong><span>{kindLabel(t,node.file.kind)} · {node.file.activity}</span>
+        </button> : null}
+        <div ref={nativeSlot} className="absolute left-0 top-0 flex min-h-0 min-w-0" style={{width:node.w/(node.readerScale??1),height:node.h/(node.readerScale??1),transform:`scale(${node.readerScale??1})`,transformOrigin:"top left",display:node.presentation === "summary" ? "none" : undefined}} />
       </div>
       <SubagentBadges
         conversationId={conversationIdentity(node.file)}
@@ -1187,7 +1181,7 @@ const NodeShell = memo(function NodeShell({
         ) : null;
       })()}
       {flow ? <RoleTag role="implementer" active={activeLoopRole(flow) === "implementer"} /> : null}
-      <FarLabel file={node.file} />
+      {node.presentation ? null : <FarLabel file={node.file} />}
       {/* The handoff handle pinned outside the card's bottom-left corner —
           where child arrows start; a click hangs a draft conversation below. */}
       {onHandoff && canHandoff(node.file) ? <HandoffHandle file={node.file} onHandoff={() => onHandoff(node.file)} /> : null}
@@ -1212,6 +1206,39 @@ const NodeShell = memo(function NodeShell({
       ) : null}
     </div>
   );
+});
+
+type NativeNodeProps = Omit<ComponentProps<typeof NodeChrome>, "nativeSlot"> & {
+  visible: boolean;
+  fullWindowPlace: HTMLElement | null;
+  autoEditToken?: number;
+  onCollapse: () => void;
+};
+const NodeShell = memo(function NodeShell(props: NativeNodeProps) {
+  const { t } = useLocale();
+  const [place, setPlace] = useState<HTMLDivElement | null>(null);
+  const [warmed, setWarmed] = useState(false);
+  const active = Boolean(props.fullWindowPlace) || (props.visible && (props.node.presentation ? props.node.presentation === "native" : !props.dormant));
+  useEffect(() => { if (active) setWarmed(true); }, [active]);
+  const expanded = Boolean(props.fullWindowPlace);
+  return <>
+    <DormantView active={props.visible}>
+      <NodeChrome {...props} nativeSlot={setPlace} />
+    </DormantView>
+    {(warmed || active) && <NativeConversationPane
+      active={active} place={place} fullWindowPlace={props.fullWindowPlace}
+      file={props.node.file} tasks={props.node.tasks} isRoot={props.node.isRoot}
+      showFavorite expanded={expanded} autoEditToken={props.autoEditToken}
+      titleOverride={props.autoEditToken ? undefined : stagePaneTitleOf(t, props.pipelineStage)}
+      onClose={() => props.onClose(props.node.file.path)}
+      onToggleExpand={() => expanded ? props.onCollapse() : props.onExpand(props.node.file.path)}
+      onSpawnRetry={props.onSpawnRetry} relatedTasks={props.relatedTasks}
+      onOpenTask={props.onOpenTask ? task => {if(expanded)props.onCollapse();props.onOpenTask!(task);} : undefined}
+    />}
+  </>;
+}, (before, after) => {
+  if (!before.visible && !after.visible && !before.fullWindowPlace && !after.fullWindowPlace) return true;
+  return Object.keys(after).every(key => Object.is(before[key as keyof NativeNodeProps], after[key as keyof NativeNodeProps]));
 });
 
 /** A conversation draft as a scheme citizen: positioned like a fresh root node. */
@@ -1487,6 +1514,11 @@ function DeckShell({
 
 export const NodesLayer = memo(function NodesLayer({
   layout,
+  visiblePaths,
+  expandedPath,
+  fullWindowPlace,
+  autoEditToken,
+  onCollapse,
   project,
   files,
   interactive,
@@ -1518,6 +1550,11 @@ export const NodesLayer = memo(function NodesLayer({
   onToggleMember,
   onPipelineCreated,
 }: {
+  visiblePaths?: ReadonlySet<string>;
+  expandedPath?: string | null;
+  fullWindowPlace?: HTMLElement | null;
+  autoEditToken?: number;
+  onCollapse?: () => void;
   layout: SchemeLayout;
   project: string;
   files: FileEntry[];
@@ -1633,26 +1670,25 @@ export const NodesLayer = memo(function NodesLayer({
       className={`${interactive ? "" : "pointer-events-none select-none"} ${session ? "scheme-session" : ""}`.trim() || undefined}
     >
       {stacksInDomOrder.map((stack) => (
-        <MiniStackShell key={stack.key} stack={stack} dimmed={stackDimmed(stack)} onSelect={onSelect} />
+        <DormantView key={stack.key} active={visiblePaths?.has(stack.key) ?? true}><MiniStackShell stack={stack} dimmed={stackDimmed(stack)} onSelect={onSelect} /></DormantView>
       ))}
       {decksInDomOrder.map((deck) =>
         lite ? (
           <LiteDeckShell key={deck.key} deck={deck} dimmed={deckDimmed(deck)} />
         ) : (
-          <DeckShell
-            key={deck.key}
+          <DormantView key={deck.key} active={visiblePaths?.has(deck.key) ?? true}><DeckShell
             deck={deck}
             focus={deckFocus}
             dimmed={deckDimmed(deck)}
             dormant={dormant}
             groupLabel={files.find((entry) => entry.path === deck.flow.implementerPath)?.title}
-          />
+          /></DormantView>
         ),
       )}
       {/* Placeholder windows for planned pipeline stages (issue #196): dashed
           chat-window shells the live stage windows replace in place. */}
       {slotsInDomOrder.map((slot) => (
-        <StageSlotShell key={slot.key} slot={slot} lite={lite} dimmed={attentionPaths !== null} files={files} onSelect={onSelect} />
+        <DormantView key={slot.key} active={visiblePaths?.has(slot.key) ?? true}><StageSlotShell slot={slot} lite={lite} dimmed={attentionPaths !== null} files={files} onSelect={onSelect} /></DormantView>
       ))}
       {draftsInDomOrder.map((draft) =>
         lite ? (
@@ -1688,7 +1724,11 @@ export const NodesLayer = memo(function NodesLayer({
           />
         ) : (
           <NodeShell
-            key={node.file.path}
+            key={conversationIdentity(node.file)}
+            visible={visiblePaths?.has(node.file.path) ?? true}
+            fullWindowPlace={expandedPath === node.file.path ? fullWindowPlace ?? null : null}
+            autoEditToken={expandedPath === node.file.path ? autoEditToken : undefined}
+            onCollapse={onCollapse ?? (() => {})}
             node={node}
             ringed={session ? multi.has(node.file.path) : selected === node.file.path || focus === node.file.path}
             marked={session && multi.has(node.file.path)}

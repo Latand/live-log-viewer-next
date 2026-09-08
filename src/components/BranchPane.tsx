@@ -113,6 +113,8 @@ function LastActivity({ file }: { file: FileEntry }) {
 }
 
 interface Props {
+  /** A board-owned composer retains its delivery controller outside the view. */
+  composerMount?: (node: HTMLDivElement | null) => void;
   file: FileEntry;
   /** Background tasks attached to this column as collapsed rows. */
   tasks: FileEntry[];
@@ -174,7 +176,7 @@ interface Props {
   titleOverride?: string;
 }
 
-export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noComposer, banner, headerActions, onToggleExpand, expanded, dormant, autoEditToken, showFavorite, onSpawnRetry, relatedTasks, onOpenTask, titleOverride }: Props) {
+export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noComposer, banner, headerActions, onToggleExpand, expanded, dormant, autoEditToken, showFavorite, onSpawnRetry, relatedTasks, onOpenTask, titleOverride, composerMount }: Props) {
   const { t } = useLocale();
   const isMobile = useIsMobile();
   const paneRef = useRef<HTMLElement | null>(null);
@@ -476,6 +478,7 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
             (the dormant-node contract): the strip returns on activation, and
             active review panes keep it regardless of `noComposer`. */}
         {dormant || isMobile ? null : <AgentControlStrip file={file} />}
+        {composerMount && !superseded ? <div ref={composerMount} className="contents" /> : null}
         {noComposer || superseded ? null : <TmuxComposer file={file} pollPaused={feedPaused} deadHost={deadHost} sendBlockedReason={sendBlockedReason} />}
       </section>
     </div>

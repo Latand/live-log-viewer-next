@@ -67,7 +67,7 @@ export const TaskEdgesLayer = memo(function TaskEdgesLayer({
         const midX = route.mid.x;
         const midY = route.mid.y;
         return (
-          <g key={edge.key} opacity={opacity}>
+          <g key={edge.key} opacity={opacity} data-task-edge={edge.key} data-task-edge-target={edge.path} data-task-edge-source={edge.taskId}>
             <path
               d={curve}
               style={{ d: `path("${curve}")`, transition: `d ${MOVE_MS}ms ${MOVE_EASE}` } as React.CSSProperties}

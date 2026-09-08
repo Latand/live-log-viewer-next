@@ -5,7 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { Camera } from "./Minimap";
 import { stackItemAt, type SchemeLayout, type SchemeRect } from "./layout";
 
-const MIN_Z = 0.12;
+const MIN_Z = 0.07;
 const MAX_Z = 1.6;
 /* At least this much of the world stays inside the viewport when panning. */
 const EDGE_KEEP = 120;

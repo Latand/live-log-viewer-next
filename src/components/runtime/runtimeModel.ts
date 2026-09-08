@@ -564,7 +564,9 @@ function reduceKnown(store: RuntimeStore, env: RuntimeEnvelope, revision: number
             turnId,
             p.item,
             phase,
-            null,
+            // Ordering evidence for the tail fence; LiveTurnRows does not
+            // display this transport timing as tool duration.
+            env.occurredAt ?? env.recordedAt ?? null,
           ),
           voiceDeliveries: phase === "completed"
             && typeof voiceResponse?.responseId === "string"

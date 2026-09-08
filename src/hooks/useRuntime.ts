@@ -78,7 +78,7 @@ export function useRuntimeSelector<T>(
  * until slice-one is switched on. Starts the singleton on first mount and
  * leaves it running for the tab (other consumers share it).
  */
-export function useRuntimeBusState(): RuntimeBusState {
+export function useRuntimeBusState(active = true): RuntimeBusState {
   const enabled = isRuntimeUiEnabled();
   const bus: RuntimeBus | null = enabled && typeof window !== "undefined" ? getRuntimeBus() : null;
 
@@ -87,8 +87,8 @@ export function useRuntimeBusState(): RuntimeBusState {
   }, [bus]);
 
   const subscribe = useCallback(
-    (listener: () => void) => (bus ? bus.subscribe(listener) : () => {}),
-    [bus],
+    (listener: () => void) => (bus && active ? bus.subscribe(listener) : () => {}),
+    [bus, active],
   );
   const getSnapshot = useCallback(() => (bus ? bus.getState() : INERT), [bus]);
   return useSyncExternalStore(subscribe, getSnapshot, () => INERT);
