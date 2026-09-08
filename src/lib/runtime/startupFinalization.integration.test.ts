@@ -26,6 +26,7 @@ const { RuntimeJournal } = await import("@/runtime-host/journal");
 const { adoptStructuredHostsAtStartup } = await import("./startup");
 const { bindStructuredDeliveryQueue } = await import("./structuredDeliveryController");
 const { runStructuredHostStartup } = await import("@/lib/viewerInstrumentation");
+const { checkpointHotStateRollbackMirrorsForDemotion } = await import("@/lib/viewerInstrumentation");
 const { recoverPendingStructuredSpawns, reconcileStructuredSpawnReplay } = await import("./structuredSpawn");
 const { captureProcessIdentity } = await import("@/lib/processIdentity");
 const { structuredStartupStatus } = await import("./startupStatus");
@@ -261,6 +262,71 @@ test("startup exposes the retaining fallback await without releasing admission b
   }
 }, 60_000);
 
+test("rollback checkpoint yields to the full startup admission owner", async () => {
+  const f = fixture(1, true);
+  let entered!: () => void;
+  const publishing = new Promise<void>((resolve) => { entered = resolve; });
+  let released!: () => void;
+  const response = new Promise<void>((resolve) => { released = resolve; });
+  let first = true;
+  const client: RuntimeHostClient = { ...f.client, append: async (event) => {
+    if (first) { first = false; entered(); await response; }
+    return f.client.append(event);
+  } };
+  const startup = runStructuredHostStartup(() => adoptStructuredHostsAtStartup({ registry: f.registry, client }), () => {}, { waitUntilReady: true });
+  await publishing;
+  let replySettled = false;
+  const timer = setTimeout(() => { replySettled = true; released(); }, 50);
+  try {
+    await checkpointHotStateRollbackMirrorsForDemotion();
+    expect(replySettled).toBe(true);
+    await startup;
+  } finally {
+    clearTimeout(timer);
+    released();
+    await startup;
+    await bindStructuredDeliveryQueue([], { registry: f.registry, client: null });
+    f.journal.close();
+  }
+}, 60_000);
+
+test("retirement joins historical publications before releasing admission and never publishes ready", async () => {
+  const f = fixture(2, true);
+  const abort = new AbortController();
+  const check = () => abort.signal.throwIfAborted();
+  let entered!: () => void;
+  const publishing = new Promise<void>((resolve) => { entered = resolve; });
+  let release!: () => void;
+  const response = new Promise<void>((resolve) => { release = resolve; });
+  let requests = 0;
+  const client: RuntimeHostClient = { ...f.client, append: async (event) => {
+    requests += 1;
+    const result = await f.client.append(event);
+    entered();
+    await response;
+    return result;
+  } };
+  let settled = false;
+  const startup = runStructuredHostStartup(() => adoptStructuredHostsAtStartup({ registry: f.registry, client, assertActive: check }), () => {}, { waitUntilReady: true, signal: abort.signal })
+    .then(() => { throw new Error("retired startup reported ready"); }, () => { settled = true; });
+  await publishing;
+  const before = structuredClone(f.registry.readOnlySnapshot().receipts);
+  abort.abort(new Error("fixture retirement"));
+  await Bun.sleep(20);
+  expect(settled).toBe(false);
+  const started = requests;
+  release();
+  await startup;
+  await checkpointHotStateRollbackMirrorsForDemotion();
+  await Bun.sleep(50);
+  expect(requests).toBe(started);
+  expect(requests).toBeLessThanOrEqual(16);
+  expect(structuredStartupStatus()?.state).toBe("failed");
+  expect(f.registry.readOnlySnapshot().receipts).toEqual(before);
+  await bindStructuredDeliveryQueue([], { registry: f.registry, client: null });
+  f.journal.close();
+}, 30_000);
+
 test("pending launches ignore a historical snapshot supplier", async () => {
   const f = fixture(0);
   const begun = f.registry.beginSpawnRequest({
@@ -370,7 +436,7 @@ test.each([["codex", false], ["codex", true], ["claude", false], ["claude", true
 });
 
 
-test("the full retained history completes within the unchanged promoted-verification deadline", async () => {
+test("the full retained history completes within the promoted serving budget", async () => {
   const f = fixture(672, true);
   const initial = f.registry.readOnlySnapshot();
   expect(Object.keys(initial.receipts)).toHaveLength(6623);
@@ -410,7 +476,7 @@ test("the full retained history completes within the unchanged promoted-verifica
     }), () => {}, { waitUntilReady: true });
     const elapsedMs = performance.now() - started;
     console.log(JSON.stringify({ history: { receipts: 6623, conversations: 8078, entries: 5188 }, counts, elapsedMs }));
-    // deploymentAdapter's existing verify-promoted action budget, unchanged.
+    // Keep the optimization below the old deadline despite the new headroom.
     expect(elapsedMs).toBeLessThan(120_000);
     expect(counts.snapshot).toBe(4);
     expect(counts.append).toBeGreaterThan(4300);

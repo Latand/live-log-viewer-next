@@ -19,6 +19,7 @@ import {
   markStructuredHostStartupReady,
 } from "@/lib/runtime/startupStatus";
 import { RuntimeJournal } from "@/runtime-host/journal";
+import { PROMOTED_SERVING_TIMEOUT_MS, VERIFY_PROMOTED_ACTION_TIMEOUT_MS } from "./deploymentHotState";
 
 import {
   candidateLogExcerpt,
@@ -102,6 +103,23 @@ test("candidate readiness stops immediately after container exit", async () => {
   expect(sleeps).toBe(0);
 });
 
+test("promoted serving can finish beyond the former deadline but still has a wall-clock bound", async () => {
+  let now = 0;
+  const probe = (readyAt: number) => waitForViewerReadiness({
+    endpoint: "http://127.0.0.1:18001", inspect: async () => "running",
+    probe: async () => evidence(now >= readyAt),
+    now: () => now, sleep: async (delay) => { now += delay; },
+    timeoutMs: PROMOTED_SERVING_TIMEOUT_MS,
+  });
+  expect((await probe(200_000)).ok).toBe(true);
+  expect(now).toBe(200_000);
+  now = 0;
+  const timedOut = await probe(Infinity);
+  expect(timedOut.ok).toBe(false);
+  expect(now).toBe(PROMOTED_SERVING_TIMEOUT_MS);
+  expect(VERIFY_PROMOTED_ACTION_TIMEOUT_MS).toBe(PROMOTED_SERVING_TIMEOUT_MS + 60_000);
+});
+
 test("health request plan exercises remote authorization and rejection", () => {
   process.env.LLV_TOKEN = "viewer-token";
   const plan = viewerHealthRequestPlan("http://127.0.0.1:18001", "viewer-token");
@@ -157,6 +175,7 @@ test("deployment capability publishes bounded structured-host adoption progress"
     });
     const response = deploymentCapability();
     const body = await response.text();
+    expect(viewerDeploymentReleaseReady(response.status, body)).toBe(false);
 
     expect(viewerDeploymentStructuredHostStartup(response.status, body)).toMatchObject({
       state: "pending",

@@ -358,6 +358,12 @@ export function checkpointWorkflowRollbackMirrorForDemotion(): number {
   });
 }
 
+export async function checkpointWorkflowRollbackMirrorForDemotionAsync(): Promise<number> {
+  return workflowStore().checkpointMirrorForDemotionAsync((workflows, revision) => {
+    atomicWriteJson(workflowsFile(), { _sqliteRevision: revision, workflows });
+  });
+}
+
 function reconcileWorkflowPath(
   value: { path: string | null; conversationId: string | null | undefined },
   registry: ConversationLookup,

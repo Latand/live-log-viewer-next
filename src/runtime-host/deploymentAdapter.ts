@@ -23,7 +23,7 @@ import { withoutWakatimeCredential } from "@/lib/wakatime/credential";
 
 import type { ViewerDeploymentAdapter } from "./deployment";
 import { candidateLogExcerpt } from "./deploymentHealth";
-import { PROMOTE_ACTION_TIMEOUT_MS } from "./deploymentHotState";
+import { PROMOTE_ACTION_TIMEOUT_MS, VERIFY_PROMOTED_ACTION_TIMEOUT_MS } from "./deploymentHotState";
 import type { McpHealthProbeAdmissions } from "./mcpHealthProbeAdmission";
 import {
   createMcpHealthProbeAdmissionChannel,
@@ -50,7 +50,7 @@ const ACTION_TIMEOUTS: Record<AdapterAction, number> = {
      contains, so the adapter reports its own named reason instead of being
      killed mid-wait and leaving the operator a bare phase string. */
   promote: PROMOTE_ACTION_TIMEOUT_MS,
-  "verify-promoted": 120_000,
+  "verify-promoted": VERIFY_PROMOTED_ACTION_TIMEOUT_MS,
   rollback: 90_000,
   retire: 60_000,
   "retain-only": 60_000,

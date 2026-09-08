@@ -349,6 +349,12 @@ export function checkpointFlowRollbackMirrorForDemotion(): number {
   });
 }
 
+export async function checkpointFlowRollbackMirrorForDemotionAsync(): Promise<number> {
+  return flowStore().checkpointMirrorForDemotionAsync((flows, revision) => {
+    atomicWriteJson(flowsFile(), { schemaVersion: FLOWS_SCHEMA_VERSION, _sqliteRevision: revision, flows });
+  });
+}
+
 function reconcileFlowImplementer(flow: Flow, registry: ConversationLookup): boolean {
   if (flow.implementerConversationId?.startsWith("conversation_")) {
     const current = registry.conversation(flow.implementerConversationId as `conversation_${string}`)?.generations.at(-1)?.path;

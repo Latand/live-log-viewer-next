@@ -3,6 +3,7 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { processIdentityStatus } from "../src/lib/processIdentity";
 
 import type {
   ViewerHealthEvidence,
@@ -81,6 +82,8 @@ import {
   INCUMBENT_RELEASE_POLL_MS,
   INCUMBENT_RELEASE_TIMEOUT_MS,
   PROMOTE_ACTION_TIMEOUT_MS,
+  PROMOTED_SERVING_TIMEOUT_MS,
+  VERIFY_PROMOTED_ACTION_TIMEOUT_MS,
 } from "../src/runtime-host/deploymentHotState";
 import {
   candidateLogExcerpt,
@@ -563,7 +566,12 @@ async function verifyViewer(
     endpoint,
     inspect: () => containerState(candidate.container),
     probe: () => probeRoutes(candidate, endpoint, expectedAssetsEndpoint, reportPhase),
-    ...(expectedAssetsEndpoint ? { maxAttempts: 90 } : {}),
+    ...(expectedAssetsEndpoint ? {
+      // Fit inside the actual host deadline, including shortened rehearsal
+      // budgets, instead of retaining a shorter attempt-count ceiling.
+      timeoutMs: Math.min(PROMOTED_SERVING_TIMEOUT_MS,
+        Math.max(1, Number(process.env.LLV_DEPLOYMENT_ADAPTER_ACTION_DEADLINE_MS || VERIFY_PROMOTED_ACTION_TIMEOUT_MS) - 60_000)),
+    } : {}),
   });
   if (evidence.ok) return evidence;
   const containerLog = await candidateContainerLog(candidate.container);
@@ -952,6 +960,20 @@ async function checkpointHotStateFence(
   request: HotStateAuthority,
   revision: string,
 ): Promise<HotStateAuthority> {
+  if (request.activationOwner) {
+    const started = Date.now();
+    for (;;) {
+      const current = readHotStateAuthority(stateDir);
+      if (!current || current.mode !== "fencing" || current.epoch !== request.epoch
+        || current.releaseRevision !== revision) throw new Error("hot-state fence changed while awaiting Viewer quiescence");
+      if (current.checkpoint) return current;
+      // Only positive death permits the adapter to checkpoint for the Viewer.
+      // A live or unreadable identity keeps its startup/release barrier.
+      if (processIdentityStatus(request.activationOwner) === "dead") break;
+      if (Date.now() - started >= 30_000) throw new Error("Viewer did not acknowledge hot-state quiescence within 30000 ms");
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    }
+  }
   const previousExplicitRevision = process.env[HOT_STATE_RELEASE_REVISION_ENV];
   process.env[HOT_STATE_RELEASE_REVISION_ENV] = revision;
   try {

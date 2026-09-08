@@ -9,7 +9,7 @@ import { agentRegistry, type AgentRegistry, type AgentRegistryEntry, type Proces
 import { effectiveClaudePermissionMode } from "@/lib/agent/cli";
 import { sessionKeyId, type SessionKey } from "@/lib/agent/sessionKey";
 import { activeOrchestratorSeats, type OrchestratorSeat } from "@/lib/orchestrator/seats";
-import { processIdentityMayOwn, processIdentityStatus } from "@/lib/processIdentity";
+import { captureProcessIdentity, processIdentityMayOwn, processIdentityStatus } from "@/lib/processIdentity";
 import { assertDarwinStructuredRuntime } from "@/lib/proc/darwinIdentity";
 import { readStableTailRecords } from "@/lib/scanner/activity";
 import { withoutWakatimeCredential } from "@/lib/wakatime/credential";
@@ -560,7 +560,7 @@ function persistedTurnState(
  * to tell it to continue, which is a status word deciding a paid turn on a
  * transcript nobody in this process has managed to read.
  */
-async function refreshStructuredTranscriptState(registry: AgentRegistry): Promise<ReadonlySet<string>> {
+async function refreshStructuredTranscriptState(registry: AgentRegistry, assertActive: () => void = () => {}): Promise<ReadonlySet<string>> {
   const snapshot = registry.readOnlySnapshot();
   const observedAt = new Date().toISOString();
   const candidates = Object.values(snapshot.conversations).flatMap((conversation) => {
@@ -602,6 +602,7 @@ async function refreshStructuredTranscriptState(registry: AgentRegistry): Promis
     },
   );
   await Promise.all(workers);
+  assertActive();
   if (observations.length > 0) registry.reconcileConversations(observations);
   return unreadable;
 }
@@ -790,6 +791,8 @@ function pipelineStartupEvidence(registry: AgentRegistry, available = true): Pip
 }
 
 export interface StructuredStartupDependencies {
+  /** Release retirement stops at awaited phase boundaries while retaining admission. */
+  assertActive?: () => void;
   registry?: AgentRegistry;
   client?: RuntimeHostClient | null;
   /** Process and transcript readers behind the restart-recovery evidence. */
@@ -821,6 +824,8 @@ export interface StructuredStartupDependencies {
 export async function adoptStructuredHostsAtStartup(
   dependencies: StructuredStartupDependencies = {},
 ): Promise<AdoptedStructuredHost[]> {
+  const assertActive = dependencies.assertActive ?? (() => {});
+  assertActive();
   assertDarwinStructuredRuntime();
   const registry = dependencies.registry ?? agentRegistry();
   const client = dependencies.client === undefined ? runtimeHostClient() : dependencies.client;
@@ -850,12 +855,16 @@ export async function adoptStructuredHostsAtStartup(
     completedHosts: 0,
     totalHosts: null,
   });
-  const unreadableTranscripts = await (dependencies.refreshTranscriptState ?? refreshStructuredTranscriptState)(registry)
+  const unreadableTranscripts = await (dependencies.refreshTranscriptState
+    ? dependencies.refreshTranscriptState(registry)
+    : refreshStructuredTranscriptState(registry, assertActive))
     ?? new Set<string>();
   /* Close persists survivors under this same lease. Read after refresh and
      hold admission through launch, demotion and publication, so no awaited
      adoption step can race a partial termination's durable evidence. */
+  assertActive();
   return withPipelineStartupAdmission(async (available) => {
+    assertActive();
     const pipelineEvidence = available
       ? (dependencies.pipelineEvidence ?? pipelineStartupEvidence)(registry)
       : pipelineStartupEvidence(registry, false);
@@ -880,7 +889,7 @@ export async function adoptStructuredHostsAtStartup(
        cannot block the startup recovery path. */
     reconcileDeadStructuredRegistryHosts(registry, (entry) => orchestratorHostKeys.has(sessionKeyId(entry.key)) || deferredHostKeys.has(sessionKeyId(entry.key)));
     const signals = await structuredStartupSignals(registry, client);
-    const shouldAdopt = structuredStartupAdoptionFilter(
+    const eligible = structuredStartupAdoptionFilter(
       registry,
       signals,
       registry.readOnlySnapshot(),
@@ -890,6 +899,12 @@ export async function adoptStructuredHostsAtStartup(
       pipelineEvidence.settled,
       pipelineEvidence.deferred,
     );
+    const shouldAdopt: StructuredHostAdoptionFilter = (entry) => {
+      // Let an adopter return the handles it already created. Throwing from
+      // its per-row progress callback would discard that partial result.
+      try { assertActive(); } catch { return false; }
+      return eligible(entry);
+    };
     const adoptionCandidates = Object.values(registry.readOnlySnapshot().entries).filter((entry) =>
       entry.structuredHost && shouldAdopt(entry));
     /* Nothing is launched that this pass cannot hand to a delivery controller.
@@ -918,6 +933,7 @@ export async function adoptStructuredHostsAtStartup(
     let totalHosts = adoptionCandidates.length;
     let completedHosts = 0;
     const reportProgress = (phase: StructuredHostStartupPhase) => {
+      assertActive();
       markStructuredHostStartupProgress({ phase, completedHosts, totalHosts });
     };
     reportProgress("adopting Codex hosts");
@@ -957,7 +973,7 @@ export async function adoptStructuredHostsAtStartup(
       () => {
         completedHosts += 1;
         totalHosts = Math.max(totalHosts, completedHosts);
-        reportProgress("adopting Codex hosts");
+        markStructuredHostStartupProgress({ phase: "adopting Codex hosts", completedHosts, totalHosts });
       },
     );
     completedHosts = Math.max(completedHosts, codexCandidateCount);
@@ -999,7 +1015,7 @@ export async function adoptStructuredHostsAtStartup(
       () => {
         completedHosts += 1;
         totalHosts = Math.max(totalHosts, completedHosts);
-        reportProgress("adopting Claude hosts");
+        markStructuredHostStartupProgress({ phase: "adopting Claude hosts", completedHosts, totalHosts });
       },
     );
     completedHosts = Math.max(completedHosts, codexCandidateCount + claudeCandidateCount);
@@ -1088,7 +1104,7 @@ export async function adoptStructuredHostsAtStartup(
        retire a publication this pass has no client to replace — and every spawn
        in the process would fail until some later pass rebound it (#1191). */
     if (controllerBoundEarly) {
-      await completeStructuredDeliveryQueueStartup(nextAdoptedHosts, reportProgress);
+      await completeStructuredDeliveryQueueStartup(nextAdoptedHosts, reportProgress, assertActive);
       assertAdoptedHostsAreClaimed(nextAdoptedHosts, dependencies.hostClaimed);
     }
     reportProgress("recovering orchestrator deliveries");
@@ -1122,8 +1138,9 @@ export async function adoptStructuredHostsAtStartup(
     const fencedReceipts = fencedPendingSpawnReceipts(registry, pipelineEvidence.deferred);
     if (client && fencedReceipts.length === 0) {
       reportProgress("recovering pending spawns");
-      await recoverPendingStructuredSpawns(registry, client);
+      await recoverPendingStructuredSpawns(registry, client, { assertActive });
     }
+    assertActive();
     adoptedHosts = nextAdoptedHosts;
     if (deferredHostKeys.size > 0 || fencedReceipts.length > 0) {
       /* The rows are retained exactly as a retry would retain them: the next
@@ -1194,6 +1211,7 @@ function scheduleDeferredStartupReprobe(
   schedule(() => {
     /* A later pass replaced this deferral; its own timer carries it. */
     if (deferredStartup !== state) return;
+    try { dependencies.assertActive?.(); } catch { return; }
     void reprobeDeferredStructuredStartup(dependencies, registry, state);
   }, state.delayMs).unref?.();
 }
@@ -1237,4 +1255,26 @@ async function reprobeDeferredStructuredStartup(
 
 export function structuredStartupHosts(): readonly AdoptedStructuredHost[] {
   return adoptedHosts;
+}
+
+/** Quiesced startup may have created hosts before reaching controller
+ * registration. They belong to this boot and must also cross the release
+ * boundary before its mirror acknowledgement. External workers never enter
+ * these retained handle sets. */
+export async function releaseUnpublishedStartupHostsForDemotion(): Promise<void> {
+  const registry = agentRegistry();
+  const unpublished = retainAdoptedHosts(adoptedHosts, retryAdoptedHosts)
+    .filter((item) => !hasStructuredDeliveryHost(item.key));
+  const outcomes = await Promise.allSettled(unpublished.map(async ({ key, host }) => {
+    const state = await host.health();
+    if ((state.status !== "active" && state.status !== "attention")
+      || state.pid === null || state.processStartIdentity === null) return;
+    const identity = captureProcessIdentity(state.pid, undefined, state.processStartIdentity);
+    if (!registry.markStructuredHostHandoff(key, identity)) {
+      throw new Error("unpublished startup host changed before release handover");
+    }
+    await host.release();
+  }));
+  const failures = outcomes.flatMap((outcome) => outcome.status === "rejected" ? [outcome.reason] : []);
+  if (failures.length) throw new AggregateError(failures, "unpublished startup hosts did not quiesce");
 }
