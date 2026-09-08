@@ -102,7 +102,7 @@ function input(over: Partial<SeatTickCheckInput> = {}): SeatTickCheckInput {
     children: [],
     childrenUnavailable: null,
     changeFingerprint: "fp-1",
-    state: emptySeatTickState(),
+    state: { ...emptySeatTickState(), turnIdleSince: new Date(NOW - 61 * MINUTE).toISOString() },
     policy: DEFAULT_SEAT_TICK_POLICY,
     /* The default a project nobody configured reads (#1275): every case below
        that does not say otherwise is the tick exactly as it shipped. */
@@ -125,7 +125,7 @@ function child(over: Partial<SeatTickChildInput> = {}): SeatTickChildInput {
 }
 
 function stateWith(over: Partial<SeatTickProjectState>): SeatTickProjectState {
-  return { ...emptySeatTickState(), ...over };
+  return { ...emptySeatTickState(), turnIdleSince: over.lastWakeAt ?? new Date(NOW - 61 * MINUTE).toISOString(), ...over };
 }
 
 /** The reasons a verdict carries, or none for every verdict that is not a wake. */
@@ -242,13 +242,11 @@ test("a lane with no activity verdict at all is never called stalled", () => {
   expect(decision.state.stalledSeen).toEqual([]);
 });
 
-/* A terminal lane event leads the next wake; it never raises an early one. The
-   hourly bound has no exempt reason kind, because a reason allowed to jump it
-   would make the ADR's cost argument describe a different system. */
-test("a terminal lane event leads the next wake rather than raising one early", () => {
+// Actionable events bypass the countdown while preserving the final idle fence.
+test("a terminal lane event bypasses the idle countdown", () => {
   const args = { events: [event()], pipelines: [lane()] };
   const early = seatTickDecision(input({ ...args, state: stateWith({ lastWakeAt: new Date(NOW - MINUTE).toISOString() }) }));
-  expect(early.verdict.kind).toBe("quiet");
+  expect(reasonsOf(early.verdict)).toContain("lane-event");
 
   const due = seatTickDecision(input({ ...args, state: stateWith({ lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString() }) }));
   expect(reasonsOf(due.verdict)).toEqual(["lane-event"]);
@@ -341,7 +339,7 @@ test("the seal stops at the first event that is still owed", () => {
   expect(decision.state.eventsThrough).toBe(61);
   expect(reasonsOf(decision.verdict)).toEqual(["lane-event"]);
   /* And only a landing takes the cursor past the live one. */
-  expect(seatTickWakeCommit(decision.state, plan(decision.verdict, "fp-1", 63), NOW).eventsThrough).toBe(63);
+  expect(seatTickWakeCommit(decision.state, plan(decision.verdict, "fp-1", 63), NOW).eventsThrough).toBe(62);
 });
 
 /* A skipped check remembers nothing — including this. The turn it landed behind
@@ -403,12 +401,12 @@ test("a merged batch goes quiet on its own", () => {
 
 /* It is a reason, never a route around the bound: the hourly interval applies
    to it exactly as it applies to a terminal lane event. */
-test("an unmerged pull request waits out the wake interval like every other reason", () => {
+test("a newly observed unmerged pull request bypasses the idle countdown", () => {
   const decision = seatTickDecision(input({
     pullRequests: [pullRequest()],
     state: stateWith({ lastWakeAt: new Date(NOW - MINUTE).toISOString() }),
   }));
-  expect(decision.verdict.kind).toBe("quiet");
+  expect(reasonsOf(decision.verdict)).toContain("unmerged-pr");
 });
 
 /* And the retry guard applies to it too, so a pull request nobody merges stops
@@ -418,6 +416,7 @@ test("an unmerged pull request that has stopped producing change is held by the 
     pullRequests: [pullRequest()],
     state: stateWith({
       lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString(),
+      lastActionableKeys: (seatTickDecision(input({ pullRequests: [pullRequest()] })).verdict as Extract<SeatTickVerdict, { kind: "wake" }>).actionableKeys,
       lastWakeFingerprint: "fp-1",
       wakesWithoutChange: { "unmerged-pr": 2 },
     }),
@@ -823,13 +822,13 @@ test("a signal alone is agenda enough for the interval to wake", () => {
   expect(reasonsOf(decision.verdict)).toEqual(["interval"]);
 });
 
-test("standing reasons wait out the wake interval instead of firing every five minutes", () => {
+test("new actionable obligations bypass the idle interval", () => {
   const decision = seatTickDecision(input({
     pipelines: [lane({ state: "inert" })],
     tasks: [card()],
     state: stateWith({ lastWakeAt: new Date(NOW - 10 * MINUTE).toISOString(), stalledSeen: ["pipeline_a1"] }),
   }));
-  expect(decision.verdict.kind).toBe("quiet");
+  expect(decision.verdict.kind).toBe("wake");
 });
 
 test("a wake carries at most five items and reports the rest as deferred", () => {
@@ -1165,10 +1164,10 @@ test("a failed launch is a terminal child too, and the reason says so (#1465)", 
   expect(decision.verdict).toMatchObject({ reasons: [{ kind: "child-terminal", detail: "a spawned child failed and its outcome is unharvested" }] });
 });
 
-test("a terminal child waits out the wake interval like every other reason (#1465)", () => {
+test("a newly completed child bypasses the idle countdown (#1465)", () => {
   const finished = child({ status: "terminal", outcome: "finished", terminalAt: new Date(NOW - 20 * MINUTE).toISOString() });
   const decision = seatTickDecision(input({ children: [finished], state: stateWith({ lastWakeAt: new Date(NOW - 5 * MINUTE).toISOString() }) }));
-  expect(decision.verdict).toEqual({ kind: "quiet", detail: "nothing owed" });
+  expect(reasonsOf(decision.verdict)).toContain("child-terminal");
 });
 
 test("terminal children are named oldest outcome first, and the plan records only the ones the wake carries (#1465)", () => {
@@ -1316,8 +1315,79 @@ test("a child-terminal reason that stops producing change is held by the retry g
   const finished = child({ status: "terminal", outcome: "finished", terminalAt: new Date(NOW - 20 * MINUTE).toISOString() });
   const decision = seatTickDecision(input({
     children: [finished],
-    state: stateWith({ ...OVERDUE_STATE, lastWakeFingerprint: "fp-1", wakesWithoutChange: { "child-terminal": 2 } }),
+    state: stateWith({ ...OVERDUE_STATE, lastActionableKeys: (seatTickDecision(input({ children: [finished] })).verdict as Extract<SeatTickVerdict, { kind: "wake" }>).actionableKeys, lastWakeFingerprint: "fp-1", wakesWithoutChange: { "child-terminal": 2 } }),
   }));
   expect(decision.verdict).toEqual({ kind: "quiet", detail: "every wake reason is held by the retry guard" });
   expect(decision.cards.map((entry) => entry.ref)).toEqual(["seat-tick-stuck-child-terminal"]);
+});
+
+
+test("empty pending work starts a full interval at settlement", () => {
+  const first = seatTickDecision(input({ pipelines: [lane()], state: stateWith({ lastWakeAt: new Date(NOW - 10 * 60 * MINUTE).toISOString(), turnIdleSince: null }) }));
+  expect(first.verdict.kind).toBe("quiet");
+  expect(first.state).toMatchObject({ turnIdleSince: new Date(NOW).toISOString() });
+  const before = seatTickDecision(input({ now: NOW + 59 * MINUTE, pipelines: [lane()], state: first.state }));
+  expect(before.verdict.kind).toBe("quiet");
+  const due = seatTickDecision(input({ now: NOW + 60 * MINUTE, pipelines: [lane()], state: before.state }));
+  expect(reasonsOf(due.verdict)).toContain("interval");
+});
+
+test("busy work prepares actionable messages and settlement drains them without an interval", () => {
+  const busy = seatTickDecision(input({ seat: seat({ turn: "busy", activity: { lifecycle: "waiting", reason: "provider_throttled", turnState: "busy" } }),
+    tasks: [card()], state: stateWith({ lastWakeAt: new Date(NOW).toISOString() }) }));
+  expect(busy.verdict.kind).toBe("skipped");
+  expect(busy.state).toMatchObject({ turnIdleSince: null, pendingWork: { items: expect.arrayContaining([expect.objectContaining({ kind: "task" })]) } });
+  const settled = seatTickDecision(input({ tasks: [card()], state: busy.state }));
+  expect(reasonsOf(settled.verdict)).toContain("unstarted-task");
+});
+
+test("a genuine event during the idle countdown bypasses its remaining interval", () => {
+  const first = seatTickDecision(input({ pipelines: [lane()], state: stateWith({ lastWakeAt: new Date(NOW).toISOString() }) }));
+  const next = seatTickDecision(input({ now: NOW + MINUTE, pipelines: [lane()], events: [event()], state: first.state }));
+  expect(reasonsOf(next.verdict)).toContain("lane-event");
+});
+
+
+test("restart retains a continuous idle deadline and a changed generation starts a full interval", () => {
+  const state = stateWith({ turnIdleSince: new Date(NOW - 30 * MINUTE).toISOString(), idleRuntime: { generation: "native-one", cursor: 12 } });
+  const current = seat({ runtimeState: "idle", runtimeGeneration: "native-one", runtimeCursor: 12 });
+  const first = seatTickDecision(input({ seat: current, pipelines: [lane()], state }));
+  expect(first.state.turnIdleSince).toBe(state.turnIdleSince);
+  const changed = seatTickDecision(input({ seat: { ...current, runtimeGeneration: "native-two" }, pipelines: [lane()], state: first.state }));
+  expect(changed.verdict.kind).toBe("quiet");
+  expect(changed.state.turnIdleSince).toBe(new Date(NOW).toISOString());
+  const missedTurn = seatTickDecision(input({ seat: { ...current, runtimeCursor: 20 }, pipelines: [lane()], state: first.state }));
+  expect(missedTurn.state.turnIdleSince).toBe(new Date(NOW).toISOString());
+});
+
+test("a bounded wake acknowledges only the actionable events it actually carries", () => {
+  const events = Array.from({ length: 7 }, (_, index) => event({ seq: index + 1, summary: `outcome ${index + 1}` }));
+  const first = seatTickDecision(input({ events, pipelines: [lane()], state: stateWith({ eventsThrough: 0, turnIdleSince: null }) }));
+  const commit = seatTickWakeCommitPlan(first.verdict, { fingerprint: "events", eventsThrough: 7, unreadEvents: events })!;
+  expect(commit.eventsThrough).toBe(5);
+  const landed = seatTickWakeCommit(first.state, commit, NOW);
+  const second = seatTickDecision(input({ events: events.filter((event) => event.seq > landed.eventsThrough!), pipelines: [lane()], state: landed }));
+  expect(second.verdict).toMatchObject({ kind: "wake", items: [{ eventSeq: 6 }, { eventSeq: 7 }] });
+});
+
+
+test("a newer busy runtime boundary defeats an older idle observation", () => {
+  const decision = seatTickDecision(input({ seat: seat({ runtimeState: "idle", runtimeGeneration: "native", runtimeCursor: 1 }),
+    tasks: [card()], state: stateWith({ turnBoundary: { generation: "native", turnId: "new-turn", seq: 2, state: "busy", at: new Date(NOW).toISOString() } }) }));
+  expect(decision.verdict.kind).toBe("skipped");
+  expect(decision.state.turnIdleSince).toBeNull();
+  expect(decision.state.pendingWork?.items).toHaveLength(1);
+});
+
+
+test("a reclaimed owner preserves the settled idle countdown while unobservable ownership does not", () => {
+  const state = stateWith({ turnIdleSince: new Date(NOW - 30 * MINUTE).toISOString() });
+  const reclaimed = seat({ runtimeState: "unknown", activity: { lifecycle: "gone", reason: "host_gone_turn_settled", turnState: "idle" } });
+  const waiting = seatTickDecision(input({ seat: reclaimed, pipelines: [lane()], state }));
+  expect(waiting.state.turnIdleSince).toBe(state.turnIdleSince);
+  const due = seatTickDecision(input({ seat: reclaimed, pipelines: [lane()], state: waiting.state, now: NOW + 30 * MINUTE }));
+  expect(reasonsOf(due.verdict)).toContain("interval");
+  const unknown = seatTickDecision(input({ seat: { ...reclaimed, activity: { lifecycle: "gone", reason: "launch_unproven_expired", turnState: "unknown" } }, pipelines: [lane()], state }));
+  expect(unknown.verdict.kind).toBe("skipped");
+  expect(unknown.state.turnIdleSince).toBeNull();
 });

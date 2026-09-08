@@ -1,3 +1,4 @@
+import { requestSeatTick } from "@/lib/monitor/seatTickSignal";
 import crypto from "node:crypto";
 import fs from "node:fs";
 
@@ -249,6 +250,9 @@ export function appendLifecycleEvents(inputs: LifecycleEventInput[]): { appended
       file.retired = [...file.retired, ...trimmed.map((event) => event.id)].slice(-RETIRED_ID_CAPACITY);
     }
     writeJournalFile(file);
+    for (const project of new Set(appended.map((event) => event.project).filter((value): value is string => Boolean(value)))) {
+      requestSeatTick({ project });
+    }
     return { appended, skipped };
   });
 }

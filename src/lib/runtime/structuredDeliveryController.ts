@@ -1,3 +1,5 @@
+import { requestSeatTick } from "@/lib/monitor/seatTickSignal";
+import { conversationProjectKey } from "@/lib/accounts/conversationProject";
 import crypto from "node:crypto";
 
 import { requestAccountMigrationTick } from "@/lib/accounts/migration/controllerSignal";
@@ -875,9 +877,25 @@ export async function bindStructuredDeliveryQueue(
     if (abandoned()) return async () => {};
     if (superseded()) return await registerThroughSuccessor(item, ownsOperation);
     const observable = item.host as ObservableEngineHost;
+    const entry = entryForHost(registry, item);
+    const conversationId = entry ? conversationIdForEntry(registry, entry) : null;
+    const project = conversationProjectKey(null, entry?.launchProfile, { cwd: entry?.cwd });
+    let observedTurn: string | null = null;
     let deliveryState = deliveryStateKey(initialState);
     let projectedState = hostProjectionKey(initialState);
     const unsubscribe = observable.onStateChange((state) => {
+      if (conversationId) {
+        if (state.activeTurnRef && state.activeTurnRef !== observedTurn) {
+          observedTurn = state.activeTurnRef;
+          requestSeatTick({ project, conversationId, boundary: { generation: item.key.sessionId, turnId: observedTurn,
+            seq: state.eventCursor, state: "busy", at: new Date().toISOString() } });
+        } else if (state.status === "idle" && observedTurn) {
+          const ended = observedTurn;
+          observedTurn = null;
+          requestSeatTick({ project, conversationId, boundary: { generation: item.key.sessionId, turnId: ended,
+            seq: state.eventCursor, state: "settled", at: new Date().toISOString() } });
+        }
+      }
       const nextDeliveryState = deliveryStateKey(state);
       const nextProjectedState = hostProjectionKey(state);
       const previous = publishChains.get(key) ?? Promise.resolve();
@@ -890,12 +908,11 @@ export async function bindStructuredDeliveryQueue(
           if (nextDeliveryState === deliveryState) return;
           deliveryState = nextDeliveryState;
           requestDrain();
+          requestSeatTick({ project, ...(conversationId ? { conversationId } : {}) });
         })
         .catch(() => { console.error("[structured delivery] host state sync failed"); });
       publishChains.set(key, next);
     });
-    const entry = entryForHost(registry, item);
-    const conversationId = entry ? conversationIdForEntry(registry, entry) : null;
     const events = item.host.attach(acknowledgedEventCursor)[Symbol.asyncIterator]();
     let eventsStopped = false;
     void (async () => {
@@ -908,6 +925,9 @@ export async function bindStructuredDeliveryQueue(
         while (!eventsStopped) {
           try {
             await client.append(projected);
+            if (next.value.kind === "turn-started" || next.value.kind === "turn-ended") {
+              requestSeatTick({ project, conversationId });
+            }
             break;
           } catch {
             await new Promise<void>((resolve) => setTimeout(resolve, 100));

@@ -5203,12 +5203,11 @@ test("concurrent idle sends reserve only one pending start and duplicate keys jo
 });
 
 
-test("an old completion cannot make an interrupted current turn eligible for a tick", async () => {
+test("an old completion cannot make an open current turn eligible for a tick", async () => {
   const server = new FakeAppServer();
   const host = await CodexAppServerHost.start({ cwd: "/repo", eventStore: new MemoryEventStore(), spawnProcess: fakeSpawn(server) });
   try {
     await host.send({ id: "operator-turn", text: "work" });
-    server.notify("turn/completed", { threadId: host.identity.threadId, turn: { id: "turn-1", status: "interrupted" } });
     server.notify("turn/completed", { threadId: host.identity.threadId, turn: { id: "old-turn", status: "completed" } });
     await Bun.sleep(0);
     expect(await host.send({ id: "tick", text: "check", expectedTurnId: null, origin: { kind: "agent", role: "seat-tick" } }))

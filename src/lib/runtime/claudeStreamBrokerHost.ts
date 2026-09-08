@@ -828,7 +828,7 @@ export class ClaudeStreamBrokerHost implements EngineHost {
         : null;
       const recovered = started?.kind === "turn-started" && started.turnId === this.recoveredIdleTurnId;
       if ((!started && !this.idleTickHistoryKnown)
-        || (started && !recovered && (completed?.kind !== "turn-ended" || completed.status !== "completed"))) {
+        || (started && !recovered && completed?.kind !== "turn-ended")) {
         return { outcome: "rejected", reason: "stale-turn" };
       }
     }

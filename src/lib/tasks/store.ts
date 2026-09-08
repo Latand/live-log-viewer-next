@@ -1,3 +1,4 @@
+import { requestSeatTick } from "@/lib/monitor/seatTickSignal";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -35,10 +36,24 @@ export interface TasksFileState {
 }
 
 function atomicWriteJson(filePath: string, value: unknown): void {
+  const prior = readJson(filePath) as { tasks?: BoardTask[] } | undefined;
+  const previous = new Map((prior?.tasks ?? []).map((task) => [task.id, { project: task.project, revision: taskRevision(task) }]));
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   const tmp = path.join(path.dirname(filePath), `.${path.basename(filePath)}.${process.pid}.${crypto.randomUUID()}.tmp`);
   fs.writeFileSync(tmp, JSON.stringify(value, null, 2) + "\n", "utf8");
   fs.renameSync(tmp, filePath);
+  const next = value as { tasks?: BoardTask[] };
+  const changed = new Set<string>();
+  for (const task of next.tasks ?? []) {
+    const before = previous.get(task.id);
+    if (!before || before.revision !== taskRevision(task)) {
+      if (before?.project) changed.add(before.project);
+      if (task.project) changed.add(task.project);
+    }
+    previous.delete(task.id);
+  }
+  for (const removed of previous.values()) if (removed.project) changed.add(removed.project);
+  for (const project of changed) requestSeatTick({ project });
 }
 
 function readJson(filePath: string): unknown {

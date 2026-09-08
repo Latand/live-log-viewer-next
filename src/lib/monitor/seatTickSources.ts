@@ -44,8 +44,6 @@ import {
   SEAT_TICK_WAKE_INTERVAL_MS,
   seatTickSourceGapAfterFailure,
   seatTickSourceRetryDue,
-  seatTickWakeDue,
-  seatTurnProgressing,
 } from "./seatTick";
 import { effectiveSeatTickSettings, readSeatTickSettings, type SeatTickSettings } from "./seatTickSettings";
 import type { PipelineSummary, TaskSummary } from "./viewerApi";
@@ -268,6 +266,7 @@ export interface SeatTickSources {
   registry: () => ReturnType<typeof agentRegistry>;
   /** The registry's own activity verdict — `agent_activity`'s answer, which is
       the only thing this module is allowed to call a stall. */
+  seatRuntime?: (conversationId: string) => Promise<{ state: "idle" | "busy" | "unknown"; generation?: string; cursor?: number; turnId?: string | null }>;
   liveness: (request: { project?: string; conversationId?: string; stallAfterMs: number; limit: number }) => Promise<AgentLivenessRecord[]>;
   /** The lifecycle journal, read whole and paged in-process, so the tick's own
       cursor decides what is unread rather than a cursor that advanced at poll
@@ -310,6 +309,14 @@ export function defaultSeatTickSources(): SeatTickSources {
     archivedPipelines: () => loadArchivedPipelines(),
     tasks: () => loadTasks(),
     registry: () => agentRegistry(),
+    seatRuntime: async (conversationId) => {
+      const { structuredDeliveryHostForConversation } = await import("@/lib/runtime/structuredDeliveryController");
+      const host = structuredDeliveryHostForConversation(conversationId);
+      if (!host) return { state: "unknown" };
+      const health = await host.health();
+      return { state: health.status === "idle" && health.activeTurnRef === null && health.pendingAttention.length === 0
+        ? "idle" : health.status === "active" || health.status === "attention" ? "busy" : "unknown", generation: health.sessionKey, cursor: health.eventCursor, turnId: health.activeTurnRef };
+    },
     liveness: async (request) => {
       const snapshot = await agentLivenessSnapshot({
         ...(request.conversationId ? { conversationId: request.conversationId } : {}),
@@ -475,7 +482,14 @@ export async function seatInput(project: string, policy: Pick<SeatTickPolicy, "s
       activity = null;
     }
   }
-  return { conversationId: seat.conversationId, seatEpoch: seat.seatEpoch, path: seat.path, turn, activity };
+  let runtime: Awaited<ReturnType<NonNullable<SeatTickSources["seatRuntime"]>>> | undefined;
+  if (sources.seatRuntime) {
+    try { runtime = await sources.seatRuntime(seat.conversationId); }
+    catch { runtime = { state: "unknown" }; }
+  }
+  return { conversationId: seat.conversationId, seatEpoch: seat.seatEpoch, path: seat.path, turn, activity,
+    ...(runtime ? { runtimeState: runtime.state, runtimeGeneration: runtime.generation, runtimeCursor: runtime.cursor, runtimeTurnId: runtime.turnId } : {}) };
+
 }
 
 function signals(project: string, seat: SeatTickSeatInput | null, sources: SeatTickSources): SeatTickSignalInput[] {
@@ -708,7 +722,6 @@ interface PullRequestEvidence {
 async function unmergedPullRequests(context: {
   project: string;
   seat: SeatTickSeatInput | null;
-  wakeDue: boolean;
   enabled: boolean;
   now: number;
   wakeIntervalMs: number;
@@ -720,14 +733,9 @@ async function unmergedPullRequests(context: {
      left exactly as it stands. A gate is a statement about this check, never
      about whether the source can be read. */
   const unasked: PullRequestEvidence = { pullRequests: [], unavailable: null, gap: context.gap };
-  if (!context.wakeDue || !context.enabled) return unasked;
-  /* The other two ways a check can be unable to raise any reason at all: a
-     project with nobody to wake ends in `no-seat`, and a seat whose turn is
-     genuinely moving ends in `skipped`, both before a wake reason is composed.
-     Without this clause a seat that stays busy for hours pays a `gh` subprocess
-     every five minutes for the whole turn, to answer a question that check was
-     never going to ask. */
-  if (!context.seat || seatTurnProgressing(context.seat)) return unasked;
+  if (!context.enabled) return unasked;
+  // Busy seats still collect current obligations. The controller owns admission.
+  if (!context.seat) return unasked;
 
   const at = new Date(context.now).toISOString();
   const failed = (kind: SeatTickPullRequestGap): PullRequestEvidence => ({
@@ -1234,11 +1242,6 @@ export async function gatherSeatTickInput(
   const { pullRequests, unavailable: pullRequestsUnavailable, gap: pullRequestGap } = await unmergedPullRequests({
     project: canonical,
     seat,
-    /* The same clause the decision applies, asked here because the read behind
-       it is a subprocess: a reason that cannot be raised this check is a reason
-       whose evidence is not worth fetching. The decision applies the bound
-       again on its own terms — this is a cost gate, never the bound itself. */
-    wakeDue: seatTickWakeDue(state.lastWakeAt, now, settings.wakeIntervalMs),
     enabled: settings.enabled,
     now,
     wakeIntervalMs: settings.wakeIntervalMs,
@@ -1246,6 +1249,7 @@ export async function gatherSeatTickInput(
     sources,
   });
 
+  const current = state.accounting ? new SeatTickAccounting(state.accounting.filename, canonical).readState() : null;
   return {
     project: canonical,
     now,
@@ -1266,7 +1270,8 @@ export async function gatherSeatTickInput(
        is what attempted the read, so the gather is what records what became of
        it, and the decision reads that row to know whether this is the outage
        worth putting on the board. */
-    state: { ...state, eventsThrough: cursor, pullRequestGap, childrenGap, harvestedChildren, accounting: state.accounting ? new SeatTickAccounting(state.accounting.filename, canonical).readState().accounting : undefined },
+    state: { ...state, ...(current ? { turnBoundary: current.turnBoundary, turnIdleSince: current.turnIdleSince, idleRuntime: current.idleRuntime } : {}),
+      eventsThrough: cursor, pullRequestGap, childrenGap, harvestedChildren, accounting: current?.accounting },
     policy,
     settings,
   };

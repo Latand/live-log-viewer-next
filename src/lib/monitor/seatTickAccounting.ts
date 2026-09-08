@@ -22,7 +22,7 @@ export type AccountingOwner = Base & { kind: "owner"; conversationId: string; ep
     row's own pointer, so a ticket moves in one keyed transaction. */
 export type AccountingChild = Base & { kind: "child"; identity: string; rowKey: string; owner: string; launchId: string; input: SeatTickChildInput; generationIndex: number; runningKey: string | null; pollKey: string | null };
 export type AccountingSource = Base & { kind: "source"; identity: string; child: string; engine: string; generation: string; legacyBoundary?: { identity: string; bytes: number }; cursor: LedgerCursor };
-export type AccountingOutcome = Base & { kind: "outcome"; identity: string; child: string; tuple: string[]; input: SeatTickChildInput; status: "owed" | "acknowledged"; landingKey: string | null; readyKey: string; gap: string | null };
+export type AccountingOutcome = Base & { observedAtSequence?: number; kind: "outcome"; identity: string; child: string; tuple: string[]; input: SeatTickChildInput; status: "owed" | "acknowledged"; landingKey: string | null; readyKey: string; gap: string | null };
 type Ticket = Base & { kind: "poll" | "ready" | "owner-poll" | "running"; target: string };
 /** Where a ticket enters its queue (#1465). The queues are FIFO by sequence;
     a `head` ticket sorts before every `tail` one, in sequence among heads, so
@@ -30,7 +30,7 @@ type Ticket = Base & { kind: "poll" | "ready" | "owner-poll" | "running"; target
     just found, a ledger the budget cut — is read by the next visit rather
     than after every cold child ahead of it. */
 export type TicketPosition = "head" | "tail";
-type Legacy = Base & { kind: "legacy"; conversationId: string; reconciled: boolean };
+type Legacy = Base & { landedThrough?: number; kind: "legacy"; conversationId: string; reconciled: boolean };
 export type AccountingRow = AccountingProject | AccountingOwner | AccountingChild | AccountingSource | AccountingOutcome | Ticket | Legacy;
 type Transaction = Parameters<Parameters<SqliteStateCollection<AccountingRow>["boundedPatch"]>[1]>[0];
 /** How a prepared attempt ends (#1465). `landed` acknowledges what it named
@@ -84,6 +84,15 @@ function decodeAccountingRow(raw: unknown): AccountingRow | null {
         const value = state[name];
         if (value !== null && (typeof value !== "string" || !Number.isFinite(Date.parse(value)))) return null;
       }
+      if (state.wakeAttempt !== undefined && !integer(state.wakeAttempt)) return null;
+      if (state.turnIdleSince !== undefined && state.turnIdleSince !== null
+        && (typeof state.turnIdleSince !== "string" || !Number.isFinite(Date.parse(state.turnIdleSince)))) return null;
+      if (state.lastActionableKeys !== undefined && (!Array.isArray(state.lastActionableKeys) || !state.lastActionableKeys.every(string))) return null;
+      if (state.idleRuntime !== undefined && state.idleRuntime !== null
+        && (!string(state.idleRuntime.generation) || !integer(state.idleRuntime.cursor))) return null;
+      if (state.turnBoundary !== undefined && state.turnBoundary !== null
+        && (!string(state.turnBoundary.generation) || !string(state.turnBoundary.turnId) || !integer(state.turnBoundary.seq)
+          || !["busy", "settled"].includes(state.turnBoundary.state) || !Number.isFinite(Date.parse(state.turnBoundary.at)))) return null;
       if (state.eventsThrough !== null && !integer(state.eventsThrough)) return null;
       if (!Array.isArray(state.harvestedChildren) || state.harvestedChildren.length !== 0
         || !Array.isArray(state.lastWakeReasons) || !Array.isArray(state.stalledSeen)
@@ -466,7 +475,7 @@ export class SeatTickAccounting {
         const input: SeatTickChildInput = { ...child.input, status: "terminal", outcome: result, outcomeId: identity };
         const readyKey = key("ready", this.project, String(row.sequence + 1).padStart(16, "0"));
         this.ticket(tx, row, "ready", id);
-        tx.put({ ...this.base("outcome", identity), kind: "outcome", identity, child: child.key, tuple, input, status: "owed", landingKey: null, readyKey,
+        tx.put({ ...this.base("outcome", identity), kind: "outcome", observedAtSequence: row.sequence, identity, child: child.key, tuple, input, status: "owed", landingKey: null, readyKey,
           gap: legacy && (failure || !source?.legacyBoundary || outcomes[index]!.endOffset <= source.legacyBoundary.bytes) ? "legacy-delivery-ambiguous" : null });
       });
       if (source) tx.put(source);
@@ -527,6 +536,11 @@ export class SeatTickAccounting {
       if (ticket.kind !== "ready") throw new Error("invalid ready ticket");
       const outcome = this.get(ticket.target);
       if (!outcome || outcome.kind !== "outcome") throw new Error("missing outcome");
+      const legacy = this.get(key("legacy", this.project, outcome.input.conversationId));
+      if (legacy?.kind === "legacy" && legacy.landedThrough !== undefined
+        && (outcome.observedAtSequence === undefined || outcome.observedAtSequence <= legacy.landedThrough)) {
+        outcome.gap = "legacy-delivery-ambiguous";
+      }
       if (outcome.status === "owed" && outcome.gap) this.defer(outcome);
       return outcome.status === "owed" && !outcome.gap ? [outcome] : [];
     });
@@ -536,6 +550,7 @@ export class SeatTickAccounting {
       const held = tx.get(outcome.key);
       if (!held || held.kind !== "outcome" || held.status !== "owed" || held.readyKey !== outcome.readyKey) return;
       tx.delete(held.readyKey);
+      held.gap = held.gap ?? outcome.gap;
       held.readyKey = key("ready", this.project, String(row.sequence + 1).padStart(16, "0"));
       this.ticket(tx, row, "ready", held.key);
       tx.put(held);
@@ -613,7 +628,7 @@ export class SeatTickAccounting {
           // A legacy prepared wake names conversations. Landing preserves that
           // positive evidence without attributing it to a guessed turn.
           if (!id.startsWith("conversation_")) throw new Error("missing frozen outcome");
-          tx.put({ ...this.base("legacy", id), kind: "legacy", conversationId: id, reconciled: true });
+          tx.put({ ...this.base("legacy", id), kind: "legacy", conversationId: id, reconciled: true, landedThrough: row.sequence });
           continue;
         }
         if (outcome.kind !== "outcome") throw new Error("invalid frozen outcome");
@@ -621,7 +636,7 @@ export class SeatTickAccounting {
         tx.delete(outcome.readyKey);
       }
       const current = disposition === "landed" ? seatTickWakeCommit(row.state, wake.commit, Date.parse(state.lastWakeAt!)) : row.state;
-      row.state = { ...current, accounting: undefined, harvestedChildren: [], outstandingWake: null };
+      row.state = { ...current, ...(disposition === "unsent" ? { wakeAttempt: (row.state.wakeAttempt ?? 0) + 1 } : {}), accounting: undefined, harvestedChildren: [], outstandingWake: null };
       return true;
     });
   }

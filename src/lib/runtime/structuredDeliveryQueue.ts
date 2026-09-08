@@ -1,3 +1,4 @@
+import { EngineRequestRefusedError } from "./engineHost";
 import { parseSelectedContextRef, type SelectedContextRef } from "@/lib/selection/selectedContext";
 
 import { parseMessageOrigin, type MessageOrigin } from "./messageOrigin";
@@ -905,6 +906,10 @@ export class StructuredDeliveryQueue {
         receipt = effect.policy === "idle-only" ? await host.send(entry) : await sendWithReadRetry(host, entry);
       } catch (error) {
         const reason = failureReason(error);
+        if (error instanceof EngineRequestRefusedError) {
+          await this.transitionUnlessSettled(effect.operationId, "failed", { reason });
+          continue;
+        }
         /* The one resend below is allowed only where the host is READ to be
            alive, so an unreadable state is grouped with the host being gone:
            the grouping that resends nothing. It costs a drain pass on a

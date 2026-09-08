@@ -1,3 +1,4 @@
+import { EngineRequestRefusedError } from "./engineHost";
 import { spawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from "node:child_process";
 import { createHash, type Hash } from "node:crypto";
@@ -1088,7 +1089,7 @@ function threadStatus(value: unknown): ThreadStatus | null {
 
 /** One stdio app-server owner with replayable, multi-subscriber event fan-out. */
 /** A correlated JSON-RPC error response proves that this request was refused. */
-class CodexRpcRefusal extends Error {}
+class CodexRpcRefusal extends EngineRequestRefusedError {}
 
 export class CodexAppServerHost implements EngineHost {
   readonly identity: CodexThreadIdentity;
@@ -1487,7 +1488,7 @@ export class CodexAppServerHost implements EngineHost {
         : null;
       const recovered = started?.kind === "turn-started" && started.turnId === this.recoveredIdleTurnId;
       if ((!started && !this.idleTickHistoryKnown)
-        || (started && !recovered && (completed?.kind !== "turn-ended" || completed.status !== "completed"))) {
+        || (started && !recovered && completed?.kind !== "turn-ended")) {
         return { outcome: "rejected", reason: "stale-turn" };
       }
     }

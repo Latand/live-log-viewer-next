@@ -1,3 +1,4 @@
+import { registerSeatTickKick, type SeatTickSignal } from "./seatTickSignal";
 import crypto from "node:crypto";
 import { SeatTickAccounting } from "./seatTickAccounting";
 
@@ -74,9 +75,8 @@ import type {
  *   waiting, delivered after all, or settled unsent. That one question answers
  *   both halves of the tick's accounting — when a stamp may move, and what a
  *   revocation has to reach — so the two cannot drift apart.
- * - It queued its fires and then double-fired into a finished turn. Here a seat
- *   whose turn is genuinely progressing is skipped and the tick is dropped;
- *   nothing is ever held.
+ * - Busy seats retain refreshable actionable work without input. A matching
+ *   idle boundary drains that work or starts the configured idle countdown.
  * - Its empty log was equally consistent with perfect operation and with total
  *   failure. Here every check leaves a line, including a check that threw.
  */
@@ -324,13 +324,14 @@ function wakeClientMessageId(
   project: string,
   seatEpoch: number,
   verdict: SeatTickVerdict,
-  context: { fingerprint: string; lastWakeAt: string | null; monitorPrompt: string | null },
+  context: { fingerprint: string; lastWakeAt: string | null; monitorPrompt: string | null; attempt?: number },
 ): string {
   const shape = verdict.kind === "wake"
     ? verdict.reasons.map((reason) => reason.kind).sort().join(",")
     : "proposal";
   return `seat-tick:${project}:${seatEpoch}:${context.lastWakeAt ?? "first"}:${shape}:${context.fingerprint}`
-    + wakePromptIdentity(context.monitorPrompt);
+    + wakePromptIdentity(context.monitorPrompt)
+    + (context.attempt ? `:attempt-${context.attempt}` : "");
 }
 
 /**
@@ -555,7 +556,7 @@ async function reconcileOutstandingWake(context: {
   const next: SeatTickProjectState = settlement.row === "commit"
     ? seatTickWakeCommit(state, wake.commit, context.now)
     : settlement.row === "clear"
-      ? { ...state, outstandingWake: null }
+      ? { ...state, outstandingWake: null, wakeAttempt: (state.wakeAttempt ?? 0) + 1 }
       : state;
 
   context.appendRecord({
@@ -681,6 +682,10 @@ async function check(
   }
 
   let state = decision.state;
+  if (state.pendingWork) state.pendingWork = { ...state.pendingWork, text: seatTickWakeMessage({
+    project: input.project, reasons: state.pendingWork.reasons, items: state.pendingWork.items,
+    deferred: state.pendingWork.deferred, signals: input.signals, monitorPrompt: input.settings.monitorPrompt,
+  }) };
   for (const card of decision.cards) {
     let carded = false;
     try {
@@ -707,6 +712,7 @@ async function check(
   if ((verdict.kind === "wake" || verdict.kind === "proactive") && input.seat) {
     const clientMessageId = wakeClientMessageId(input.project, input.seat.seatEpoch, verdict, {
       fingerprint: input.changeFingerprint,
+      attempt: input.state.wakeAttempt,
       lastWakeAt: input.state.lastWakeAt,
       /* The same row the message below reads its prompt from, read once: the
          identity and the text have to move together or they are exactly the
@@ -761,6 +767,7 @@ async function check(
     const commit = seatTickWakeCommitPlan(verdict, {
       fingerprint: input.changeFingerprint,
       eventsThrough: input.events.at(-1)?.seq ?? state.eventsThrough ?? 0,
+      unreadEvents: input.events,
       terminalChildren,
     });
     if (rotated) {
@@ -841,6 +848,11 @@ async function check(
   }
 
   writeState(input.project, state);
+  const persisted = readState(input.project);
+  const since = persisted.turnIdleSince ? Date.parse(persisted.turnIdleSince) : NaN;
+  tickHost.__llvSeatTickDeadline?.(input.project,
+    input.settings.enabled && !persisted.pendingWork && !persisted.outstandingWake && Number.isFinite(since)
+      ? since + input.settings.wakeIntervalMs : null);
   const record: SeatTickRunRecord = {
     schemaVersion: 1,
     at,
@@ -951,9 +963,27 @@ export async function reconcileSeatTick(dependencies: SeatTickControllerDependen
   return records;
 }
 
+/** Runtime notifications can change timing only for the current seat generation. */
+export function recordSeatTickBoundary(project: string, signal: SeatTickSignal, sources = defaultSeatTickSources(),
+  ports: Pick<SeatTickControllerDependencies, "readState" | "writeState"> = {}): void {
+  if (!signal.boundary || !signal.conversationId) return;
+  const seat = sources.seatFor(project).active;
+  if (!seat || seat.conversationId !== signal.conversationId) return;
+  const conversation = sources.registry().conversation(seat.conversationId as never);
+  if (conversation?.generations.at(-1)?.id !== signal.boundary.generation) return;
+  const state = seatTickStateForEpoch((ports.readState ?? readSeatTickState)(project), seat.seatEpoch);
+  const previous = state.turnBoundary;
+  const next = signal.boundary;
+  if (previous?.generation === next.generation && previous.seq >= next.seq) return;
+  if (next.state === "settled" && (previous?.generation !== next.generation || previous.turnId !== next.turnId)) return;
+  (ports.writeState ?? writeSeatTickState)(project, { ...state, turnBoundary: next, turnIdleSince: next.state === "settled" ? next.at : null });
+}
+
 const tickHost = globalThis as typeof globalThis & {
   __llvSeatTickTimer?: ReturnType<typeof setInterval>;
   __llvSeatTickRunning?: boolean;
+  __llvSeatTickDeadline?: (project: string, deadline: number | null) => void;
+  __llvSeatTickCleanup?: () => void;
 };
 
 /**
@@ -976,7 +1006,10 @@ const tickHost = globalThis as typeof globalThis & {
  */
 export function startSeatTick(ports: {
   scheduleInterval?: (callback: () => void, delayMs: number) => ReturnType<typeof setInterval>;
-  sweep?: () => Promise<unknown>;
+  sweep?: (project?: string) => Promise<unknown>;
+  scheduleDeadline?: (callback: () => void, delayMs: number) => ReturnType<typeof setTimeout>;
+  now?: () => number;
+  boundary?: (project: string, signal: SeatTickSignal) => void;
   policy?: SeatTickPolicy | null;
   log?: (line: string) => void;
   appendRecord?: typeof appendSeatTickRecord;
@@ -1011,17 +1044,75 @@ export function startSeatTick(ports: {
     return false;
   }
   const schedule = ports.scheduleInterval ?? ((callback, delayMs) => setInterval(callback, delayMs));
-  const sweep = ports.sweep ?? (() => reconcileSeatTick());
+  const sweep = ports.sweep ?? (async (project?: string) => {
+    if (!project) return reconcileSeatTick();
+    if (await releaseOwnsTraffic()) return runSeatTickCheck(project);
+  });
+  const now = ports.now ?? Date.now;
+  const scheduleDeadline = ports.scheduleDeadline ?? ((callback, delay) => setTimeout(callback, delay));
+  const pending = new Set<string>();
+  const deadlines = new Map<string, number>();
+  let deadlineTimer: ReturnType<typeof setTimeout> | null = null;
+  let scheduled = false;
+  let stopped = false;
+  const request = (project?: string) => {
+    if (stopped) return;
+    pending.add(project ?? "");
+    if (scheduled || tickHost.__llvSeatTickRunning) return;
+    scheduled = true;
+    queueMicrotask(() => {
+      scheduled = false;
+      if (stopped || tickHost.__llvSeatTickRunning) return;
+      const project = pending.has("") ? "" : pending.values().next().value;
+      if (project === undefined) return;
+      if (project === "") pending.clear(); else pending.delete(project);
+      tickHost.__llvSeatTickRunning = true;
+      void Promise.resolve(sweep(project || undefined))
+        .catch((error) => console.error("[seat tick] requested check failed", error instanceof Error ? error.name : "unknown"))
+        .finally(() => {
+          if (stopped) return;
+          tickHost.__llvSeatTickRunning = false;
+          if (pending.size) request(pending.values().next().value || undefined);
+        });
+    });
+  };
+  const arm = () => {
+    if (deadlineTimer) clearTimeout(deadlineTimer);
+    deadlineTimer = null;
+    if (stopped || deadlines.size === 0) return;
+    const deadline = Math.min(...deadlines.values());
+    deadlineTimer = scheduleDeadline(() => {
+      deadlineTimer = null;
+      for (const [project, due] of deadlines) if (due <= now()) { deadlines.delete(project); request(project); }
+      arm();
+    }, Math.max(1, deadline - now()));
+    deadlineTimer.unref?.();
+  };
+  tickHost.__llvSeatTickDeadline = (project, deadline) => {
+    if (deadline !== null && deadline > now()) deadlines.set(project, deadline);
+    else deadlines.delete(project);
+    arm();
+  };
+  registerSeatTickKick((signal) => {
+    if (signal.project) {
+      (ports.boundary ?? recordSeatTickBoundary)(signal.project, signal);
+      if (signal.boundary?.state === "busy") tickHost.__llvSeatTickDeadline?.(signal.project, null);
+      request(signal.project);
+    } else request();
+  });
+  tickHost.__llvSeatTickCleanup = () => {
+    stopped = true;
+    registerSeatTickKick(null);
+    if (deadlineTimer) clearTimeout(deadlineTimer);
+    deadlines.clear();
+    pending.clear();
+    tickHost.__llvSeatTickDeadline = undefined;
+  };
   const timer = schedule(() => {
-    /* A check that outran its interval drops the next one rather than stacking
-       it. A tick that would land behind the one before it is stale by
-       construction, and staleness is the whole reason nothing is queued. */
-    if (tickHost.__llvSeatTickRunning) return;
-    tickHost.__llvSeatTickRunning = true;
-    void Promise.resolve(sweep())
-      .catch((error) => console.error("[seat tick] sweep failed", error instanceof Error ? error.name : "unknown"))
-      .finally(() => { tickHost.__llvSeatTickRunning = false; });
+    if (!tickHost.__llvSeatTickRunning) request();
   }, policy.checkIntervalMs);
+  // Recover durable pending work and countdowns on boot through this same controller.
+  if (!ports.sweep) request();
   timer.unref?.();
   tickHost.__llvSeatTickTimer = timer;
   return true;
@@ -1030,6 +1121,8 @@ export function startSeatTick(ports: {
 /** Test seam: the timer is process-global, so a suite must be able to start
     from an unstarted one without reaching into module internals. */
 export function stopSeatTick(): void {
+  tickHost.__llvSeatTickCleanup?.();
+  tickHost.__llvSeatTickCleanup = undefined;
   const timer = tickHost.__llvSeatTickTimer;
   if (timer) clearInterval(timer);
   tickHost.__llvSeatTickTimer = undefined;

@@ -4211,3 +4211,40 @@ test("a real executor killed after the engine write leaves one actuation and an 
     reopened.close();
   }
 });
+
+
+test("owned host turn boundaries notify the seat controller and active item updates do not settle it", async () => {
+  const { registerSeatTickKick } = await import("@/lib/monitor/seatTickSignal");
+  const directory = path.join(sandbox, "seat-boundary-notifications");
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const artifactPath = path.join(directory, "notification-session.jsonl");
+  const profile = emptyLaunchProfile({ cwd: directory, project: "fixture-project" });
+  registry.reconcileConversations([{ engine: "codex", path: artifactPath, accountId: null, launchProfile: profile,
+    turn: { state: "idle", source: "assistant", terminalAt: null }, observedAt: new Date().toISOString() }]);
+  registry.upsert({ key: { engine: "codex", sessionId: "notification-session" }, artifactPath, cwd: directory, accountId: null,
+    launchProfile: profile, status: "live", host: null, structuredHost: { kind: "codex-app-server", endpoint: "fake:seat",
+      process: null, eventCursor: 0, protocolVersion: "test", writerClaimEpoch: 0, activeTurnRef: null, pendingAttention: [], activeFlags: [] },
+    claimEpoch: 0, claimOwner: null, pendingAction: null });
+  const state: HostState = { status: "idle", sessionKey: "notification-session", endpoint: "fake:seat", pid: null,
+    processStartIdentity: null, eventCursor: 0, protocolVersion: "test", activeTurnRef: null, pendingAttention: [], activeFlags: [], account: null };
+  const fixture = statefulObservableFakeHost(state);
+  const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
+  const signals: Array<import("@/lib/monitor/seatTickSignal").SeatTickSignal> = [];
+  registerSeatTickKick((signal) => signals.push(signal));
+  try {
+    await bindStructuredDeliveryQueue([{ key: { engine: "codex", sessionId: "notification-session" }, host: fixture.host }], { registry, client: runtimeJournalClient(journal) });
+    fixture.setState({ ...state, status: "active", activeTurnRef: "work-turn", eventCursor: 1 });
+    fixture.setState({ ...state, status: "active", activeTurnRef: "work-turn", eventCursor: 2 });
+    expect(signals.flatMap((signal) => signal.boundary ? [signal.boundary.state] : [])).toEqual(["busy"]);
+    fixture.setState({ ...state, status: "idle", eventCursor: 3 });
+    expect(signals.flatMap((signal) => signal.boundary ? [signal.boundary.state] : [])).toEqual(["busy", "settled"]);
+    expect(signals.find((signal) => signal.boundary?.state === "settled")).toMatchObject({ project: "fixture-project",
+      boundary: { generation: "notification-session", turnId: "work-turn", seq: 3 } });
+    await waitForCondition(() => signals.filter((signal) => !signal.boundary).length >= 2);
+    expect(journal.snapshot().sessions[0]).toMatchObject({ turn: "idle", activeTurnId: null });
+  } finally {
+    registerSeatTickKick(null);
+    await bindStructuredDeliveryQueue([], { registry, client: null });
+    journal.close();
+  }
+});
