@@ -51,7 +51,7 @@ export interface TaskWorkflowProjection {
  * execution relation. A manager who created two pipelines does not merge their
  * task histories. All attempts remain evidence, including unresolved launches. */
 export function projectTaskWorkflows(
-  tasks: readonly BoardTask[], pipelines: readonly Pipeline[], flows: readonly Flow[], files: readonly FileEntry[],
+  tasks: readonly BoardTask[], pipelines: readonly Pipeline[], flows: readonly Flow[], files: readonly FileEntry[], project?: string,
 ): TaskWorkflowProjection {
   const byPath = new Map(files.map(file => [file.path, file]));
   const byConversation = new Map<string, FileEntry>();
@@ -132,24 +132,28 @@ export function projectTaskWorkflows(
       unresolved: references.filter(r => !r.file && r.kind !== "planned").length,
       reviews: references.filter(r => r.kind === "review" || (r.kind === "attempt" && r.role === "reviewer" && !r.flowId)).length };
   });
-  const unlinkedReferences = pipelines.filter(p => !usedPipelines.has(p.id)).flatMap(p => pipelineRefs.get(p.id)!);
-  for (const flow of flows.filter(f => !usedFlows.has(f.id))) for (const round of flow.rounds) unlinkedReferences.push(ref({
+  const inProject = (file: FileEntry) => !project || (file.project || "other") === project;
+  const unlinkedPipelines = pipelines.filter(p => !usedPipelines.has(p.id) && (!project || p.project === project
+    || pipelineRefs.get(p.id)!.some(r => r.file && inProject(r.file))));
+  const unlinkedFlows = flows.filter(f => !usedFlows.has(f.id) && (!project || f.project === project
+    || Boolean(resolve(f.implementerConversationId, f.implementerPath) && inProject(resolve(f.implementerConversationId, f.implementerPath)!))));
+  const unlinkedReferences = unlinkedPipelines.flatMap(p => pipelineRefs.get(p.id)!);
+  for (const flow of unlinkedFlows) for (const round of flow.rounds) unlinkedReferences.push(ref({
     key: `flow:${flow.id}:${round.n}:${round.reviewerBindingId ?? "original"}`, kind: "review", role: "reviewer",
     state: round.verdict ?? (round.terminalAt ? "unresolved" : "reviewing"), flowId: flow.id, round: round.n,
     conversationId: round.reviewerConversationId ?? null, path: round.reviewerPath, reviewedSha: round.reviewHeadSha ?? null,
     verdict: round.verdict, findingsCount: round.findingsCount, error: round.error,
   }));
   const represented = new Set(unlinkedReferences.flatMap(r => r.file ? [conversationIdentity(r.file)] : []));
-  for (const file of files) if (!usedWorkers.has(conversationIdentity(file)) && !represented.has(conversationIdentity(file))) {
+  for (const file of files) if (inProject(file) && !usedWorkers.has(conversationIdentity(file)) && !represented.has(conversationIdentity(file))) {
     represented.add(conversationIdentity(file));
     unlinkedReferences.push(ref({ key: `unlinked:${conversationIdentity(file)}`, kind: "assignment", role: "worker",
       state: file.activity, conversationId: file.conversationId ?? null, path: file.path }));
   }
   return {
     tasks: projected, unlinkedReferences,
-    unlinkedPipelines: pipelines.filter(p => !usedPipelines.has(p.id)),
-    unlinkedFlows: flows.filter(f => !usedFlows.has(f.id)),
-    unlinkedWorkers: [...new Map(files.filter(f => !usedWorkers.has(conversationIdentity(f)))
-      .map(f => [conversationIdentity(f), resolve(f.conversationId, f.path)!])).values()],
+    unlinkedPipelines,
+    unlinkedFlows,
+    unlinkedWorkers: [...new Map(unlinkedReferences.flatMap(r => r.file ? [[conversationIdentity(r.file), r.file] as const] : [])).values()],
   };
 }

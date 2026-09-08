@@ -86,3 +86,16 @@ test("embedded review rounds preserve their own SHA, verdict and binding", () =>
   expect(result.tasks[0].references.at(-1)?.state).toBe("unresolved");
   expect(result.unlinkedFlows).toHaveLength(0);
 });
+
+test("unlinked history is project-scoped while explicit cross-project workers remain reachable", () => {
+  const local = file("local"), other = file("other", "fixtures/other.jsonl", { project: "other-project" });
+  const foreignPipeline = pipeline("foreign", [attempt(1, { conversationId: "other", agentPath: other.path })], { project: "other-project", taskIds: [] });
+  const result = projectTaskWorkflows([task()], [foreignPipeline], [], [local, other], "project");
+  expect(result.unlinkedWorkers).toEqual([local]);
+  expect(result.unlinkedPipelines).toHaveLength(0);
+  expect(result.unlinkedReferences.map(r => r.file)).toEqual([local]);
+  foreignPipeline.taskIds = ["task-a"];
+  const linked = projectTaskWorkflows([task()], [foreignPipeline], [], [local, other], "project");
+  expect(linked.tasks[0].workers).toEqual([other]);
+  expect(linked.unlinkedWorkers).toEqual([local]);
+});

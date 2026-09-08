@@ -2693,7 +2693,7 @@ export const en = {
   "taskHistory.title": "Task history",
   "taskHistory.close": "Close task history",
   "taskHistory.task": "Task",
-  "taskHistory.unlinked": "Unlinked conversations",
+  "taskHistory.unlinked": "Unlinked work",
   "taskHistory.counts": "{workers} workers · {reviews} reviews · {executions} executions",
   "taskHistory.requirement": "Original requirement",
   "taskHistory.explicit": "Recorded task membership",

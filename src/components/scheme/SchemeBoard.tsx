@@ -237,7 +237,7 @@ export function SchemeBoard({
   const mapMode = Boolean(onNodePick);
   const [historyOpen, setHistoryOpen] = useState(false);
   const closeHistory = useCallback(() => setHistoryOpen(false), []);
-  const workflowModel = useMemo(() => historyOpen && !mapMode ? projectTaskWorkflows(allTasks, pipelines, flows, files) : null, [historyOpen, mapMode, allTasks, pipelines, flows, files]);
+  const workflowModel = useMemo(() => historyOpen && !mapMode ? projectTaskWorkflows(allTasks, pipelines, flows, files, project) : null, [historyOpen, mapMode, allTasks, pipelines, flows, files, project]);
   const [selected, setSelected] = useState<string | null>(null);
   const [badgeAnchorRevision, setBadgeAnchorRevision] = useState(0);
   const badgeAnchors = useMemo(

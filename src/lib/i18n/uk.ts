@@ -2605,7 +2605,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "taskHistory.title": "Історія задач",
   "taskHistory.close": "Закрити історію задач",
   "taskHistory.task": "Задача",
-  "taskHistory.unlinked": "Розмови без прив’язки",
+  "taskHistory.unlinked": "Робота без прив’язки",
   "taskHistory.counts": "Виконавців: {workers} · перевірок: {reviews} · виконань: {executions}",
   "taskHistory.requirement": "Початкова вимога",
   "taskHistory.explicit": "Записана прив’язка до задачі",

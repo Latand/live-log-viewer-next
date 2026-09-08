@@ -4,7 +4,7 @@ Stage status: incomplete. This patch adds production task-history navigation and
 
 ## Production change
 
-The Scheme board toolbar opens task history. A task retains its assignments, every attempt of each explicitly linked execution, planned stages, embedded review rounds and returned findings. Missing launches and transcripts stay visible without an invented open action. Direct worker assignments can establish a relation; a shared manager or matching title cannot. Completed tasks remain inspectable. Publication and merge evidence retain their own recorded state, and missing release associations are labelled.
+The Scheme board toolbar opens task history. A task retains its assignments, every attempt of each explicitly linked execution, planned stages, embedded review rounds and returned findings. Missing launches and transcripts stay visible without an invented open action. Direct worker assignments can establish a relation; a shared manager or matching title cannot. Completed tasks remain inspectable. Unlinked work is scoped to the active project; explicit task references can still reach a worker in another project. Publication and merge evidence retain their own recorded state, and missing release associations are labelled.
 
 The history list renders at most thirty records per page. The last of one thousand workers is reachable. Opening a record uses the existing native conversation navigation. Both supported locales carry the new labels.
 
@@ -38,7 +38,7 @@ Each wrapper workload also ingests 100 messages and idles for 21 seconds. These 
 
 ## Executed checks
 
-- 43 focused tests across task projection, paginated history, existing board camera/selection and locale coverage: passed, 5,156 assertions.
+- 44 focused tests across task projection, paginated history, existing board camera/selection and locale coverage: passed, 5,161 assertions.
 - Adopted layout: 1,596 containment/collision cases and 4,240 pin cases, including aggregate task pins: passed.
 - Retained-predecessor/adopted-correction browser regression: both expected outcomes reproduced; before/after screenshots inspected visually.
 - Production Viewer, SchemeBoard, task panel, useLogTail and logBus: native navigation and actual polling callsites exercised at 1280, 1440 and 1920 pixels, light and dark. HTTP responses were synthetic; the runtime bus was disabled. Six cases passed with no browser errors.
