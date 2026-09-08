@@ -281,3 +281,29 @@ test("paused flow refuses new decisions and preserves pending decisions until re
   expect((await tick()).state).toBe("paused");
   expect(loadFlows()[0]?.agentDecisions?.[0]?.disposition).toBe("accepted");
 });
+
+
+test("legacy readiness followed by abort never schedules review", async () => {
+  record("agent_message", { message: "REVIEW_READY: interrupted repair" });
+  record("turn_aborted");
+  const entry = { path: transcript, activity: "live" } as FileEntry;
+  await tickFlow(flow, [entry], new Map([[transcript, entry]]), () => {});
+  expect(flow.rounds).toHaveLength(0);
+  expect(flow.state).not.toBe("spawning");
+});
+
+for (const previous of ["previous answer", "REVIEW_READY: previous work"]) {
+  test(`silent completion after an older ${previous} requires a current decision`, async () => {
+    fs.writeFileSync(transcript, [
+      { timestamp: previous.startsWith("REVIEW_READY") ? "2026-09-08T09:15:00Z" : "2026-09-08T09:00:00Z", type: "event_msg", payload: { type: "task_complete", turn_id: "old", last_agent_message: previous } },
+      { timestamp: "2026-09-08T09:20:00Z", type: "event_msg", payload: { type: "task_started", turn_id: "current" } },
+      { timestamp: "2026-09-08T09:33:00Z", type: "event_msg", payload: { type: "task_complete", turn_id: "current" } },
+    ].map((item) => JSON.stringify(item)).join("\n") + "\n");
+    flow.createdAt = "2026-09-08T09:10:00Z";
+    const entry = { path: transcript } as FileEntry;
+    await tickFlow(flow, [entry], new Map([[transcript, entry]]), () => {});
+    expect(flow.state).toBe("needs_decision");
+    expect(flow.decisionRequired).toBe(true);
+    expect(flow.rounds).toHaveLength(0);
+  });
+}

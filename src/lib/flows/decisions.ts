@@ -14,6 +14,25 @@ export async function flowTurn(flow: Flow) {
   if (read.integrity !== "complete") return null;
   const engine = flow.roles.implementer.engine;
   const turn = turnStateFromRecords(read.records, engine);
+  // A silent completed turn must not inherit prose from a previous turn.
+  let start = 0;
+  let sawCompletion = false;
+  for (let index = read.records.length - 1; index >= 0; index--) {
+    const record = read.records[index]!;
+    const payload = record.payload as Record<string, unknown> | undefined;
+    if (engine === "codex") {
+      if (["task_started", "turn_started", "user_message"].includes(String(payload?.type))) { start = index; break; }
+      if (["task_complete", "turn_complete", "turn_completed", "turn_aborted"].includes(String(payload?.type))) {
+        if (sawCompletion) { start = index + 1; break; }
+        sawCompletion = true;
+      }
+    } else if (record.type === "user") {
+      const message = record.message as { content?: unknown } | undefined;
+      if (Array.isArray(message?.content) && message.content.some((part) => part?.type === "tool_result")) continue;
+      start = index;
+      break;
+    }
+  }
   const terminal = [...read.records].reverse().find((record) => {
     const payload = record.payload as Record<string, unknown> | undefined;
     return engine === "codex"
@@ -43,7 +62,7 @@ export async function flowTurn(flow: Flow) {
     state: turn.state,
     successful,
     terminalAt: turn.terminalAt,
-    message: lastAssistantMessageFromRecords(read.records, engine === "codex" ? "codex-sessions" : "claude-projects", 0),
+    message: lastAssistantMessageFromRecords(read.records.slice(start), engine === "codex" ? "codex-sessions" : "claude-projects", 0),
   };
 }
 

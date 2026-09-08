@@ -2,7 +2,6 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-import { durableStageTurnEvidence } from "@/lib/pipelines/durableEvidence";
 import { loadPipelines } from "@/lib/pipelines/store";
 import { freshSpecFor, resumeSpecFor } from "@/lib/agent/cli";
 import { accountManager, resolveResumeAccountId } from "@/lib/accounts/manager";
@@ -127,8 +126,8 @@ export function lastRound(flow: Flow): Round | null {
   return flow.rounds.at(-1) ?? null;
 }
 
-function detectReadyMarker(flow: Flow, evidence: Awaited<ReturnType<typeof durableStageTurnEvidence>>): string | null {
-  if (evidence?.turn !== "terminal" || evidence.terminalProviderMessage) return null;
+function detectReadyMarker(flow: Flow, evidence: Awaited<ReturnType<typeof flowTurn>>): string | null {
+  if (evidence?.state !== "terminal" || !evidence.successful) return null;
   const message = evidence.message;
   if (!message) return null;
   const lastStarted = Math.max(...flow.rounds.map((round) => unixMs(round.startedAt)), unixMs(flow.createdAt));
@@ -1105,7 +1104,7 @@ export async function tickFlow(
   }
 
   if (flow.state === "waiting_ready" || flow.state === "fixing") {
-    const evidence = await durableStageTurnEvidence(flow.roles.implementer.engine, implementer.path);
+    const evidence = await flowTurn(flow);
     const note = detectReadyMarker(flow, evidence);
     if (note !== null) {
       if (flow.roundLimit > 0 && flow.rounds.length >= flow.roundLimit) {
@@ -1128,9 +1127,8 @@ export async function tickFlow(
       }
     } else {
       const boundary = Math.max(unixMs(flow.createdAt), ...flow.rounds.map((item) => unixMs(item.relayedAt ?? item.startedAt)));
-      const completedAt = evidence?.message?.ts ?? evidence?.terminalProviderMessage?.ts
-        ?? (evidence?.turn === "terminal" ? Date.parse((await flowTurn(flow))?.terminalAt ?? "") : 0);
-      if (evidence?.turn === "terminal" && (!Number.isFinite(completedAt) || completedAt > boundary)) {
+      const completedAt = Date.parse(evidence?.terminalAt ?? "");
+      if (evidence?.state === "terminal" && (!Number.isFinite(completedAt) || completedAt > boundary)) {
         flow.decisionRequired = true;
         markNeedsDecision(flow, "completed implementer turn requires an explicit agent decision or legacy REVIEW_READY handoff");
       }
