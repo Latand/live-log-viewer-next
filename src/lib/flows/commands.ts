@@ -400,6 +400,7 @@ export function patchFlow(
   req: PatchFlowRequest,
   actor: PauseResumeActor | null = OPERATOR_PAUSE_RESUME_ACTOR,
 ): { flow?: Flow; error?: string; status?: number } {
+  if (req.action === "agent-decision") return { error: "agent decisions require the authenticated MCP owner contract", status: 403 };
   const flows = loadFlows();
   const flow = flows.find((item) => item.id === id);
   if (!flow) return { error: "flow not found", status: 404 };

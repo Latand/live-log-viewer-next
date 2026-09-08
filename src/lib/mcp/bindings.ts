@@ -2671,11 +2671,14 @@ function listFlows(args: McpToolArgs, dependencies: ViewerMcpDomainDependencies)
   return redactPayload({ count: flows.length, flows });
 }
 
-function getFlow(args: McpToolArgs, dependencies: ViewerMcpDomainDependencies): McpToolPayload {
+async function getFlow(args: McpToolArgs, dependencies: ViewerMcpDomainDependencies): Promise<McpToolPayload> {
   const flowId = required(args, "flowId");
   const flow = dependencies.getFlowsWithPresets().flows.find((candidate) => candidate.id === flowId);
   if (!flow) throw new Error("flow not found");
-  return redactPayload({ flowId, flow });
+  const { flowDecisionContext } = await import("@/lib/flows/decisions");
+  const caller = attributionOf(dependencies);
+  return redactPayload({ flowId, flow, ...(caller.conversationId && caller.conversationId === flow.implementerConversationId
+    ? { decisionContext: await flowDecisionContext(flow) } : {}) });
 }
 
 function mutationReceipt(operationId: string): { operationId: string; receipt: { operationId: string; status: "delivered" } } {
@@ -2685,6 +2688,15 @@ function mutationReceipt(operationId: string): { operationId: string; receipt: {
 async function flowAction(args: McpToolArgs, dependencies: ViewerMcpDomainDependencies): Promise<McpToolPayload> {
   const flowId = required(args, "flowId");
   const action = required(args, "action");
+  if (action === "agent-decision") {
+    const { submitFlowDecision } = await import("@/lib/flows/decisions");
+    const { flowDecisionRequestSchema } = await import("@/lib/flows/decisionSchema");
+    const request = flowDecisionRequestSchema.parse(args);
+    const caller = attributionOf(dependencies);
+    const result = await submitFlowDecision(request, caller.kind === "unidentified" ? null : caller.conversationId);
+    return redactPayload({ ...result, outcome: result.decision.disposition === "accepted" ? "accepted" : "settled",
+      nextAction: result.decision.disposition === "accepted" ? "original-key-lookup" : "follow-disposition" });
+  }
   const request = withoutKeys(args, ["flowId", "clientRequestId"]) as PatchFlowRequest;
   const result = action === "cancel-round"
     ? await dependencies.cancelRound(flowId)

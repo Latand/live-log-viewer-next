@@ -2817,3 +2817,14 @@ test("#1279: a binding record the reviewer launch cannot read parks the flow rat
     fs.rmSync(bindingRecordPath(), { force: true });
   }
 });
+
+
+test("completed fix uses durable evidence despite a stale busy scanner projection", async () => {
+  const entry = writeCodexEntry("completed-fix-stale.jsonl", {}, Date.now() / 1000);
+  fs.appendFileSync(entry.path, JSON.stringify({ type: "event_msg", timestamp: "2026-09-08T09:33:00.198Z", payload: { type: "task_complete", last_agent_message: "REVIEW_READY: repaired" } }) + "\n");
+  entry.size = fs.statSync(entry.path).size;
+  entry.activity = "live";
+  const flow = raceFlow({ implementerPath: entry.path, state: "fixing", createdAt: "2026-09-08T09:00:00Z", rounds: [] });
+  await tickFlow(flow, [entry], new Map([[entry.path, entry]]), () => {});
+  expect(flow.state).toBe("spawning");
+});
