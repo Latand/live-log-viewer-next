@@ -6,7 +6,7 @@ import { createRoot, type Root } from "react-dom/client";
 import type { FileEntry } from "@/lib/types";
 import { setLocale } from "@/lib/i18n";
 import { appendRuntimeLiveTurnDelta, projectRuntimeLiveTurnItem, type RuntimeLiveTurn } from "@/lib/runtime/liveTurn";
-import { emptyStore, type RuntimeSession } from "@/components/runtime/runtimeModel";
+import { applyEvent, emptyStore, type RuntimeSession, type RuntimeEnvelope } from "@/components/runtime/runtimeModel";
 
 /**
  * Issue #1100: the FIRST live turn of a freshly spawned conversation. The
@@ -299,4 +299,34 @@ test("issue 1100 review: the status bar names the newest RUNNING tool, not a lat
   expect(liveRows(host)).toEqual(["tool:toolu_sleep:run", "tool:toolu_read_2:ok"]);
   const bar = host.querySelector<HTMLElement>('[data-turn-status="running"]');
   expect(bar?.textContent).toContain("running sleep");
+});
+
+
+test("issue 1565: streamed old tools leave the tail when a later turn owns the transcript window", () => {
+  let store = emptyStore();
+  const scope = { type: "session" as const, id: CONVERSATION_ID };
+  const ingest = (kind: string, payload: Record<string, unknown>, at: string, recordedOnly = false) => {
+    const revision = (store.scopeHeads[`session:${CONVERSATION_ID}`] ?? 0) + 1;
+    const result = applyEvent(store, { schemaVersion: 1, seq: revision, eventId: `event-${revision}`, scope,
+      revision, kind, payload, ...(recordedOnly ? {} : { occurredAt: at }), recordedAt: at } as RuntimeEnvelope);
+    if (result.outcome !== "applied") throw Error(result.outcome);
+    store = result.store;
+  };
+  ingest("session-status", { ...session, liveTurn: null }, AT(0));
+  for (const [id, second, recordedOnly] of [["old-mcp", 2, false], ["old-command", 3, true]] as const) {
+    ingest("item", { conversationId: CONVERSATION_ID, turnId: "earlier-turn", phase: "completed",
+      item: { type: "mcpToolCall", id, server: "viewer", tool: "board_snapshot", arguments: { clientRequestId: id }, status: "completed" } }, AT(second), recordedOnly);
+  }
+  sessionState.session = store.sessions[CONVERSATION_ID];
+  const first = render();
+  expect(first.host.querySelectorAll("[data-live-tool]").length).toBe(2);
+  flushSync(() => first.root.unmount()); roots.delete(first.root); first.host.remove();
+  ingest("item", { conversationId: CONVERSATION_ID, turnId: "later-turn", phase: "started",
+    item: { type: "commandExecution", id: "current-command", command: "echo current", status: "inProgress" } }, AT(20));
+  sessionState.session = store.sessions[CONVERSATION_ID];
+  tailState.lines = [JSON.stringify({ type: "assistant", uuid: "later-reply", timestamp: AT(10),
+    message: { role: "assistant", content: [{ type: "text", text: "Later turn response" }] } })];
+  const { host } = render();
+  expect(host.textContent).toContain("Later turn response");
+  expect([...host.querySelectorAll("[data-live-turn-item-id]")].map(row => row.getAttribute("data-live-turn-item-id"))).toEqual(["current-command"]);
 });

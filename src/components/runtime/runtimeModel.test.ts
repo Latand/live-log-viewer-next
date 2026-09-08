@@ -202,7 +202,7 @@ describe("live turn delta buffering", () => {
     expect(store.sessions["conv_a"]?.liveTurn?.text).toBe("Tests pass.");
   });
 
-  test("runtime envelope timestamps do not become live tool timestamps", () => {
+  test("runtime item envelopes retain timing for stale-overlay reconciliation", () => {
     let store = installSnapshot(snapshot());
     store = apply(store, env("turn-started", { type: "session", id: "conv_a" }, 4, { conversationId: "conv_a", turnId: "t1" }));
     store = apply(store, {
@@ -221,8 +221,8 @@ describe("live turn delta buffering", () => {
     });
 
     expect(store.sessions["conv_a"]?.liveTurn?.items?.[0]).toMatchObject({
-      startedAt: null,
-      completedAt: null,
+      startedAt: "2040-01-01T00:00:00.000Z",
+      completedAt: "2040-01-01T12:00:00.000Z",
       tool: { status: "ok" },
     });
   });
