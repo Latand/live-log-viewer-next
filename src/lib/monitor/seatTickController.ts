@@ -21,7 +21,7 @@ import { openIssuesForProposal, type ProposalIssue } from "./githubEvidence";
 import { appendSeatTickRecord } from "./journalStore";
 import { redactBounded, redactMonitorText } from "./redact";
 import { seatTickProposalMessage, seatTickWakeMessage } from "./report";
-import { SEAT_TICK_WAKE_INTERVAL_MS, seatTickDecision, seatTickPolicy, seatTickWakeCommit, seatTickWakeCommitPlan } from "./seatTick";
+import { DEFAULT_SEAT_TICK_POLICY, SEAT_TICK_WAKE_INTERVAL_MS, seatTurnProgressing, seatTickDecision, seatTickPolicy, seatTickWakeCommit, seatTickWakeCommitPlan } from "./seatTick";
 import { effectiveSeatTickSettings, seatTickSettingsAfterLapse, writeSeatTickSettings } from "./seatTickSettings";
 import { readSeatTickState, seatTickStateForEpoch, writeSeatTickState } from "./seatTickState";
 import {
@@ -29,6 +29,7 @@ import {
   gatherSeatTickInput,
   repoDirForProject,
   seatTickProjects,
+  seatInput,
   type SeatTickSources,
   type SeatTickWakeState,
 } from "./seatTickSources";
@@ -289,7 +290,7 @@ function deliveryOutcomeLabel(outcome: DeliveryOutcome): string {
 }
 
 function verdictDetail(verdict: SeatTickVerdict): string | null {
-  if (verdict.kind === "skipped") return "the seat's turn is progressing; the tick is dropped, never queued";
+  if (verdict.kind === "skipped") return "the seat is busy or idle is unproven; this tick is skipped and obligations remain owed";
   if (verdict.kind === "wake") {
     /* The gap is journaled beside the reasons, not in place of them (#1298):
        a wake that went out over an unreadable source has to be readable back
@@ -486,6 +487,13 @@ async function reconcileOutstandingWake(context: {
     if (!authority || authority.conversationId !== wake.conversationId || authority.seatEpoch !== wake.seatEpoch) return state;
     const accounting = state.accounting ? new SeatTickAccounting(state.accounting.filename, context.project) : null;
     if (!accounting) return state;
+    // Reconciliation runs before the ordinary pre-check. It must not send into
+    // active work either; only a proven pre-reservation refusal can be cleared.
+    const currentTurn = await seatInput(context.project, DEFAULT_SEAT_TICK_POLICY, context.sources);
+    if (!currentTurn || seatTurnProgressing(currentTurn)) {
+      if (wake.dispatch?.state === "refused") accounting.settleAbsent(wake);
+      return accounting.readState();
+    }
     const token = accounting.beginDispatch(wake);
     state = accounting.readState();
     if (!token) return state;
@@ -493,7 +501,7 @@ async function reconcileOutstandingWake(context: {
     let outcome: DeliveryOutcome | null = null;
     try {
       outcome = await context.deliver({ pid: null, path: authority.path ?? context.seat?.path ?? "", conversationId: wake.conversationId,
-        clientMessageId: wake.clientMessageId, text: wake.text!, images: [], origin: { kind: "agent", role: "seat-tick" } });
+        clientMessageId: wake.clientMessageId, text: wake.text!, images: [], policy: "idle-only", origin: { kind: "agent", role: "seat-tick" } });
       redispatched = deliveryOutcomeLabel(outcome);
     } catch {
       redispatched = "unreturned";
@@ -794,7 +802,7 @@ async function check(
           try {
             if (accounting && !token) throw new Error("wake dispatch already claimed");
             outcome = await deliver({ pid: null, path: authority.path ?? input.seat.path ?? "", conversationId: authority.conversationId,
-              clientMessageId, text, images: [], origin: { kind: "agent", role: "seat-tick" } });
+              clientMessageId, text, images: [], policy: "idle-only", origin: { kind: "agent", role: "seat-tick" } });
             delivery = { clientMessageId, outcome: deliveryOutcomeLabel(outcome) };
           } catch {
             delivery = { clientMessageId, outcome: "unreturned" };

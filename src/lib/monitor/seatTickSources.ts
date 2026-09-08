@@ -460,20 +460,18 @@ async function laneActivity(project: string, policy: SeatTickPolicy, sources: Se
  * signalled. Targeted by conversation id, the way `get_orchestrator` asks it —
  * the targeted branch resolves one transcript and never sweeps the catalog.
  */
-async function seatInput(project: string, policy: SeatTickPolicy, sources: SeatTickSources): Promise<SeatTickSeatInput | null> {
+export async function seatInput(project: string, policy: Pick<SeatTickPolicy, "stallAfterMs">, sources: SeatTickSources): Promise<SeatTickSeatInput | null> {
   const seat = sources.seatFor(project).active;
   if (!seat?.conversationId) return null;
   const conversation = sources.registry().seatTickConversation(seat.conversationId);
   const turn = conversation?.turn.state ?? "unknown";
   let activity: SeatTickActivity | null = null;
-  if (turn === "busy") {
+  if (turn !== "unknown") {
     try {
       const rows = await sources.liveness({ conversationId: seat.conversationId, stallAfterMs: policy.stallAfterMs, limit: 1 });
-      activity = activityOf(rows[0]);
+      activity = activityOf(rows.find((row) => row.conversationId === seat.conversationId));
     } catch {
-      /* An unanswerable liveness read says nothing. The decision treats an
-         absent verdict as "not provably progressing", so the tick keeps working
-         rather than waiting behind a turn it cannot see. */
+      // Missing liveness cannot override the registry turn fence.
       activity = null;
     }
   }

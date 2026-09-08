@@ -250,32 +250,12 @@ function dischargedThrough(events: readonly SeatTickEventInput[], cursor: number
   return sealed;
 }
 
-/**
- * Whether the seat's turn is genuinely progressing, which is the only thing
- * that earns a dropped tick.
- *
- * The dead-host-over-an-open-turn case is why this is a positive test rather
- * than `turn === "busy"`. A seat whose host died mid-turn keeps a `busy` turn
- * on the registry forever, so a plain busy check skipped that seat at every
- * five-minute check for as long as the record stood — a permanent silence
- * produced by exactly the condition the wake exists to clear. Here the registry
- * decides: `running`, `waiting` under a turn the transcript still shows open (a
- * provider retry deadline) and `starting` (inside the launch grace, which
- * expires into `stalled` or `gone` on its own) are progress; everything else,
- * absent verdicts included, is not.
- */
+/** Protect an open or unobservable turn. Silence never establishes completion. */
 export function seatTurnProgressing(seat: SeatTickSeatInput): boolean {
-  if (seat.turn !== "busy") return false;
+  if (seat.turn !== "idle" && seat.turn !== "terminal") return true;
   const activity = seat.activity;
-  if (!activity) return false;
-  /* `waiting` covers two different seats. One is a turn held open by a provider
-     retry deadline, which is progress. The other is `host_alive_turn_idle`: the
-     transcript says the turn SETTLED and only the registry's record still calls
-     it open — a seat sitting available, which the tick then skipped at every
-     check for as long as the stale record stood (#1262). The evidence the
-     verdict came from decides between them. */
-  if (activity.lifecycle === "waiting") return activity.turnState === "busy";
-  return activity.lifecycle === "running" || activity.lifecycle === "starting";
+  return !activity || activity.turnState !== "idle"
+    || activity.lifecycle === "running" || activity.lifecycle === "starting" || activity.lifecycle === "stalled";
 }
 
 /**

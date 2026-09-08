@@ -245,9 +245,9 @@ function harness(options: {
         livenessReads.push({ ...(request.project ? { project: request.project } : {}), ...(request.conversationId ? { conversationId: request.conversationId } : {}) });
         const child = request.conversationId ? options.childActivity?.[request.conversationId] : undefined;
         if (child) return [{ conversationId: request.conversationId, lifecycle: "running", reason: "host_alive_turn_active", turnState: "busy", ...child } as AgentLivenessRecord];
-        return request.conversationId && options.seatActivity
-          ? [{ lifecycle: "running", reason: "host_alive_turn_active", ...options.seatActivity } as AgentLivenessRecord]
-          : [];
+        if (!request.conversationId) return [];
+        if (options.seatActivity === null) return [];
+        return [{ conversationId: request.conversationId, lifecycle: "waiting", reason: "host_alive_turn_idle", turnState: "idle", ...options.seatActivity } as AgentLivenessRecord];
       },
       lifecycleJournal: () => ({ version: 1, lastSeq: options.events?.at(-1)?.seq ?? 0, events: options.events ?? [], retired: [] }),
       latestDeployment: () => ({ state: "unreadable", error: "no ledger" }) as never,
@@ -1441,9 +1441,8 @@ test("a seat mid-turn is skipped without a send and without consuming the event 
   expect(rig.sent).toEqual([]);
 });
 
-/* And the seat whose own host died under an open turn: the registry still says
-   `busy`, so the rule this replaces would have dropped every tick forever. */
-test("a busy seat the registry reports stalled is woken, which is what resumes its host", async () => {
+// Recovery of an open turn belongs to its owner; a tick cannot force completion.
+test("a busy seat stays protected when its host is reported stalled", async () => {
   const rig = harness({
     turn: "busy",
     seatActivity: { lifecycle: "stalled", reason: "host_gone_turn_open" },
@@ -1451,8 +1450,8 @@ test("a busy seat the registry reports stalled is woken, which is what resumes i
     state: OVERDUE,
   });
   const record = await runSeatTickCheck(PROJECT, rig.deps);
-  expect(record!.verdict).toBe("wake");
-  expect(rig.sent).toHaveLength(1);
+  expect(record!.verdict).toBe("skipped");
+  expect(rig.sent).toHaveLength(0);
 });
 
 test("open work with nobody seated raises the orchestrator card and wakes nothing", async () => {
@@ -1815,6 +1814,8 @@ function childFixture(name: string, gitRepository = false, sqliteMode: "sqlite" 
   const registry = new AgentRegistry(path.join(dir, "agent-registry.json"), () => false, undefined, { sqliteMode, onSqliteRowPayloadRead: onRead });
   const seatPath = path.join(dir, `${crypto.randomUUID()}.jsonl`);
   const seatConversation = registry.ensureConversation("claude", seatPath, null);
+  registry.reconcileConversations([{ engine: "claude", path: seatPath, accountId: null,
+    launchProfile: emptyLaunchProfile({ cwd }), turn: { state: "idle", source: "assistant", terminalAt: new Date().toISOString() }, observedAt: new Date().toISOString() }]);
   const project = projectForCwd(cwd);
   if (!project) throw new Error("fixture cwd resolves to no project");
   const now = Date.now() + 3 * MINUTE;
@@ -1917,7 +1918,7 @@ test("a running spawned child with no lane is open work, and the interval wake n
   /* A live turn the liveness plane calls running is not a stall, however long
      it has been open. */
   expect(rig.cards).toEqual([]);
-  expect(rig.liveness).toEqual([{ conversationId: child.id }]);
+  expect(rig.liveness).toEqual([{ conversationId: fixture.seat.conversationId }, { conversationId: child.id }]);
 });
 
 test("a finished child is harvested by exactly one wake, across ticks, a fresh controller and a rotation (#1465)", async () => {
@@ -1964,7 +1965,7 @@ test("a child whose host was released after a settled turn is finished, and harv
   expect(rig.sent[0]!.text).toContain(`[child] ${child.id}`);
   expect(fixture.acknowledged()).toEqual([child.id]);
   /* No liveness read for a turn the registry says has settled. */
-  expect(rig.liveness).toEqual([]);
+  expect(rig.liveness).toEqual([{ conversationId: fixture.seat.conversationId }]);
 });
 
 test("a launch that failed before it ran is a terminal child with a failed outcome, harvested once (#1465)", async () => {
@@ -2502,7 +2503,7 @@ test("cross-project, pipeline-owned, engine-native and unrelated conversations a
   const record = await runSeatTickCheck(fixture.project, rig.deps);
   expect(record).toMatchObject({ verdict: "quiet", detail: "the board is done and the proposal slot is not due" });
   expect(rig.sent).toEqual([]);
-  expect(rig.liveness).toEqual([]);
+  expect(rig.liveness).toEqual([{ conversationId: fixture.seat.conversationId }]);
 });
 
 test("a child the registry cannot place is unknown: not open work, not harvested, and said so (#1465)", async () => {
@@ -2547,7 +2548,7 @@ test("a busy child whose host is gone is a stall the registry can see, reported 
   const record = await runSeatTickCheck(fixture.project, first.deps);
   /* Open work, so the interval wakes; the stall waits for its second check. */
   expect(record).toMatchObject({ verdict: "wake", reasons: ["interval"] });
-  expect(first.liveness).toEqual([]);
+  expect(first.liveness).toEqual([{ conversationId: fixture.seat.conversationId }]);
   expect(fixture.row().stalledSeen).toEqual([`child:${child.id}`]);
   const second = childRig(fixture, { now: fixture.now + 61 * MINUTE });
   const stalled = await runSeatTickCheck(fixture.project, second.deps);
@@ -2569,7 +2570,7 @@ test("the projection uses bounded keyed registry reads and targeted liveness wit
   expect(rig.snapshots).toBe(0);
   /* Liveness is asked by id, for the one child whose turn is open, and never
      project-wide: there is no lane to sweep for. */
-  expect(rig.liveness).toEqual([{ conversationId: busy.id }]);
+  expect(rig.liveness).toEqual([{ conversationId: fixture.seat.conversationId }, { conversationId: busy.id }]);
   expect(rig.liveness.some((read) => read.project)).toBe(false);
   /* The fixture wrote no transcript; nothing here could have read one. */
   expect(fs.existsSync(busy.path)).toBe(false);
@@ -2715,6 +2716,8 @@ test("first tick after rotation discovers predecessor children from committed re
   const abandoned = fixture.registry.ensureConversation("claude", path.join(fixture.dir, `${crypto.randomUUID()}.jsonl`), null);
   fixture.spawn({ title: "abandoned pending seat worker", turn: "terminal", parent: abandoned.id });
   const successor = fixture.registry.ensureConversation("claude", path.join(fixture.dir, `${crypto.randomUUID()}.jsonl`), null);
+  fixture.registry.reconcileConversations([{ engine: "claude", path: successor.generations[0]!.path!, accountId: null,
+    launchProfile: emptyLaunchProfile({ cwd: fixture.cwd }), turn: { state: "idle", source: "assistant", terminalAt: new Date().toISOString() }, observedAt: new Date().toISOString() }]);
   fixture.seed();
   const file = statePath("orchestrator-seats.json");
   const before = fs.existsSync(file) ? fs.readFileSync(file) : null;
@@ -2908,22 +2911,22 @@ test("a stall on the twelfth of twelve running children is reported within two s
 
   const first = childRig(fixture, { childActivity: activity });
   expect(await runSeatTickCheck(fixture.project, first.deps)).toMatchObject({ verdict: "wake", reasons: ["interval"] });
-  expect(first.liveness.map((read) => read.conversationId)).toEqual(ids.slice(0, 8));
+  expect(first.liveness.filter((read) => read.conversationId !== fixture.seat.conversationId).map((read) => read.conversationId)).toEqual(ids.slice(0, 8));
   expect(fixture.row().stalledSeen).toEqual([]);
 
   const second = childRig(fixture, { childActivity: activity, now: fixture.now + 61 * MINUTE });
   expect(await runSeatTickCheck(fixture.project, second.deps)).toMatchObject({ verdict: "wake", reasons: ["interval"] });
-  expect(second.liveness.map((read) => read.conversationId)).toEqual(ids.slice(4, 12));
+  expect(second.liveness.filter((read) => read.conversationId !== fixture.seat.conversationId).map((read) => read.conversationId)).toEqual(ids.slice(4, 12));
   expect(fixture.row().stalledSeen).toEqual([`child:${twelfth.id}`]);
 
   const third = childRig(fixture, { childActivity: activity, now: fixture.now + 122 * MINUTE });
   const stalled = await runSeatTickCheck(fixture.project, third.deps);
-  expect(third.liveness.map((read) => read.conversationId)).toEqual([...ids.slice(8, 12), ...ids.slice(0, 4)]);
+  expect(third.liveness.filter((read) => read.conversationId !== fixture.seat.conversationId).map((read) => read.conversationId)).toEqual([...ids.slice(8, 12), ...ids.slice(0, 4)]);
   expect(stalled).toMatchObject({ verdict: "wake", reasons: ["stalled"] });
   expect(stalled!.detail).toContain(`child ${twelfth.id} runs a turn the registry reports stalled (host_alive_transcript_silent)`);
   expect(third.sent[0]!.text).toContain(`[child] ${twelfth.id}`);
-  /* Every check observed a bounded window and asked liveness for it alone. */
-  for (const rig of [first, second, third]) expect(rig.liveness).toHaveLength(8);
+  /* Every check reads the seat and a bounded window of eight children. */
+  for (const rig of [first, second, third]) expect(rig.liveness).toHaveLength(9);
 });
 
 /* A registry without an indexed lineage projection reads the seat and names
@@ -2994,6 +2997,8 @@ test("a returned 409 or 503 refusal is fenced across rotation and the successor 
     expect(original.operationId).toBeNull();
     expect(await resolveOriginalSend({ conversationId: original.conversationId, clientMessageId: original.clientMessageId }, { registry: fixture.registry, client: null })).toEqual({ kind: "absent" });
     const successor = fixture.registry.ensureConversation("claude", path.join(fixture.dir, `${crypto.randomUUID()}.jsonl`), null);
+    fixture.registry.reconcileConversations([{ engine: "claude", path: successor.generations[0]!.path!, accountId: null,
+      launchProfile: emptyLaunchProfile({ cwd: fixture.cwd }), turn: { state: "idle", source: "assistant", terminalAt: new Date().toISOString() }, observedAt: new Date().toISOString() }]);
     const seat = { conversationId: successor.id, seatEpoch: 8, path: successor.generations[0]!.path };
     const next = childRig(fixture, { realWakeState: true, seat, now: fixture.now + 5 * MINUTE, deliverWith: async (message) => {
       expect(fixture.acknowledged()).toEqual([]);
@@ -3037,6 +3042,8 @@ test("a paused old lookup cannot dispatch after a successor replaces the refused
   } } });
   await waiting;
   const successor = fixture.registry.ensureConversation("claude", path.join(fixture.dir, `${crypto.randomUUID()}.jsonl`), null);
+  fixture.registry.reconcileConversations([{ engine: "claude", path: successor.generations[0]!.path!, accountId: null,
+    launchProfile: emptyLaunchProfile({ cwd: fixture.cwd }), turn: { state: "idle", source: "assistant", terminalAt: new Date().toISOString() }, observedAt: new Date().toISOString() }]);
   const next = childRig(fixture, { realWakeState: true, seat: { conversationId: successor.id, seatEpoch: 8, path: null }, now: fixture.now + 6 * MINUTE });
   await runSeatTickCheck(fixture.project, next.deps);
   expect(next.sent).toHaveLength(1);
@@ -3227,3 +3234,47 @@ test("new-child discovery runs during historical bootstrap and keeps every older
   const completedOwner = accounting.page("owner", 1)[0]!;
   expect(completedOwner.kind === "owner" && completedOwner.bootstrap).toBeUndefined();
 }, 30_000);
+
+// September idle-only directive: silence and absent lifecycle evidence do not end a turn.
+for (const activity of [null, { lifecycle: "stalled" as const, turnState: "busy" as const }, { lifecycle: "gone" as const, turnState: "busy" as const }]) {
+  test(`idle-only tick preserves an open turn with ${activity?.lifecycle ?? "missing"} evidence`, async () => {
+    const h = harness({ turn: "busy", seatActivity: activity, tasks: [{ id: "actionable-task", status: "assigned" }], state: OVERDUE });
+    const record = await runSeatTickCheck(PROJECT, h.deps);
+    expect(h.sent).toHaveLength(0);
+    expect(record?.verdict).toBe("skipped");
+    expect(h.written.at(-1)?.lastWakeAt).toBe(OVERDUE.lastWakeAt);
+  });
+}
+
+
+test("resumed work under a completed pipeline defers an actionable event until settlement", async () => {
+  const first = harness({ turn: "idle", seatActivity: { lifecycle: "running", turnState: "busy", reason: "host_alive_turn_active" },
+    pipelines: [{ id: "old-pipeline", state: "completed", createdAt: new Date(NOW - 60 * MINUTE).toISOString(), movedAt: null }],
+    tasks: [{ id: "new-obligation", status: "assigned" }], events: [terminalEvent(44)], state: { ...OVERDUE, eventsThrough: 12 } });
+  expect(await runSeatTickCheck(PROJECT, first.deps)).toMatchObject({ verdict: "skipped", eventsThrough: 12 });
+  expect(first.sent).toEqual([]);
+  const settled = harness({ tasks: [{ id: "new-obligation", status: "assigned" }], events: [terminalEvent(44)], state: first.written.at(-1) });
+  expect(await runSeatTickCheck(PROJECT, settled.deps)).toMatchObject({ verdict: "wake" });
+  expect(settled.sent).toHaveLength(1);
+  expect(settled.sent[0]!.policy).toBe("idle-only");
+});
+
+test("an unreadable idle-seat activity check generates no routine input", async () => {
+  const h = harness({ turn: "idle", seatActivity: null, tasks: [{ id: "new-obligation", status: "assigned" }], state: OVERDUE });
+  expect(await runSeatTickCheck(PROJECT, h.deps)).toMatchObject({ verdict: "skipped" });
+  expect(h.sent).toEqual([]);
+});
+
+
+test("original-key reconciliation does not redispatch a refused tick while the seat works", async () => {
+  const fixture = childFixture("busy-original-key");
+  setAgentRegistryForTests(fixture.registry);
+  fixture.spawn({ title: "owed worker", turn: "terminal" });
+  fixture.seed();
+  await runSeatTickCheck(fixture.project, childRig(fixture, { realWakeState: true, deliverWith: refuseBeforeReservation(503) }).deps);
+  expect(fixture.row().outstandingWake).not.toBeNull();
+  const busy = childRig(fixture, { realWakeState: true, seatActivity: { lifecycle: "running", turnState: "busy", reason: "host_alive_turn_active" }, now: fixture.now + 5 * MINUTE });
+  await runSeatTickCheck(fixture.project, busy.deps);
+  expect(busy.sent).toEqual([]);
+  expect(fixture.acknowledged()).toEqual([]);
+});

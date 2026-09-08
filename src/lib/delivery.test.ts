@@ -1452,3 +1452,23 @@ test("message-triggered relaunches carry the stored MCP grant on both the direct
     { path: rootPath, mcpServers: ["viewer"] },
   ]);
 });
+
+
+test("idle-only delivery preserves policy and uncertain original operation identity", async () => {
+  const registry = new AgentRegistry(path.join(SANDBOX, "idle-only-registry.json"));
+  const pathname = path.join(SANDBOX, `${crypto.randomUUID()}.jsonl`);
+  const conversation = registry.ensureConversation("codex", pathname, null);
+  registry.reconcileConversations([{ engine: "codex", path: pathname, accountId: null,
+    launchProfile: emptyLaunchProfile(), turn: { state: "idle", source: "assistant", terminalAt: new Date().toISOString() }, observedAt: new Date().toISOString() }]);
+  setAgentRegistryForTests(registry);
+  const result = await deliverConversationMessage({ pid: null, path: pathname, conversationId: conversation.id,
+    clientMessageId: "tick-key", text: "check", images: [], policy: "idle-only", origin: { kind: "agent", role: "seat-tick" } }, {
+    recover: async () => ({ target: null, path: pathname, conversationId: conversation.id, spawned: false }),
+    enqueueStructured: async (request) => {
+      expect(request.policy).toBe("idle-only");
+      expect(request.clientMessageId).toBe("tick-key");
+      return { ok: false, structured: true, outcome: "failed", error: "reply lost", status: 503, operationId: "tick-operation", transportUncertain: true };
+    },
+  });
+  expect(result).toMatchObject({ ok: false, operationId: "tick-operation", resend: "verify-first", actuation: "started" });
+});

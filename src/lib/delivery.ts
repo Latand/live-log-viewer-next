@@ -633,6 +633,7 @@ export async function killConversation(filePath: string, overrides: KillConversa
 }
 
 export interface ConversationMessage {
+  policy?: "idle-only";
   pid: number | null;
   path: string;
   conversationId?: string | null;
@@ -686,6 +687,9 @@ export async function deliverConversationMessage(message: ConversationMessage, o
     : registry.conversationForPath(message.path);
   const rejected = supersededRejection(registry, conversation);
   if (rejected) return rejected;
+  if (message.policy === "idle-only" && conversation?.turn.state !== "idle" && conversation?.turn.state !== "terminal") {
+    return failure("idle-only delivery requires a completed idle turn", 409);
+  }
   if (conversation) {
     try {
       const recovered = await (overrides.recover ?? recoverDeadStructuredConversation)(
@@ -702,11 +706,16 @@ export async function deliverConversationMessage(message: ConversationMessage, o
           text,
           hasImages: images.length > 0,
           ...(message.origin ? { origin: message.origin } : {}),
+          ...(message.policy ? { policy: message.policy } : {}),
         }, {
           registry: () => registry,
         });
         if (!structured) return failure("structured delivery ownership is unavailable", 503);
-        if (!structured.ok) return failure(structured.error, structured.status);
+        if (!structured.ok) return {
+          ...failure(structured.error, structured.status),
+          ...(structured.operationId ? { operationId: structured.operationId } : {}),
+          ...(structured.transportUncertain ? { resend: "verify-first" as const, actuation: "started" as const } : {}),
+        };
         if (structured.outcome === "held") {
           return {
             ok: true,
@@ -732,6 +741,9 @@ export async function deliverConversationMessage(message: ConversationMessage, o
     }
   }
   let filePath = conversation?.generations.at(-1)?.path ?? message.path;
+  // Automatic input requires the structured host's final idle fence.
+  if (message.policy === "idle-only") return failure("idle-only delivery requires a structured host", 409);
+
   let deliveryId: string | null = null;
   let acceptedOperationId: string | null = null;
   if (conversation && !message.reservedDeliveryId) {

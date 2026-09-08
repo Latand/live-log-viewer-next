@@ -746,6 +746,7 @@ export class ClaudeStreamBrokerHost implements EngineHost {
         ? options.readTranscript(options.cwd, sessionId)
         : defaultTranscriptUsers(options.cwd, sessionId, options.claudeProjectsDir));
       host.emit({ kind: "session-status", status: "idle" });
+      host.idleTickHistoryKnown = !resume;
       return host;
     } catch (error) {
       try {
@@ -790,6 +791,8 @@ export class ClaudeStreamBrokerHost implements EngineHost {
     };
   }
 
+  private idleTickHistoryKnown = false;
+
   async send(entry: QueueEntry): Promise<DeliveryReceipt> {
     if (this.unavailable()) return { outcome: "rejected", reason: "dead-host" };
     if (!entry.id) throw new Error("queue entry id is required");
@@ -806,6 +809,23 @@ export class ClaudeStreamBrokerHost implements EngineHost {
     }
     const existingPending = this.pendingDeliveries.get(entry.id);
     if (existingPending) return existingPending.promise;
+    if (duplicate && normalized.origin?.kind === "agent" && normalized.origin.role === "seat-tick") {
+      throw new Error("original tick delivery is unresolved");
+    }
+    if (!duplicate && normalized.expectedTurnId === null
+      && (this.currentState().status !== "idle" || [...this.compactions.values()].some((compaction) => !compaction.settled))) {
+      return { outcome: "rejected", reason: "stale-turn" };
+    }
+    if (!duplicate && normalized.origin?.kind === "agent" && normalized.origin.role === "seat-tick") {
+      const started = this.events.findLast((event) => event.kind === "turn-started");
+      const completed = started?.kind === "turn-started"
+        ? this.events.findLast((event) => event.kind === "turn-ended" && event.turnId === started.turnId)
+        : null;
+      if ((!started && !this.idleTickHistoryKnown)
+        || (started && (completed?.kind !== "turn-ended" || completed.status !== "completed"))) {
+        return { outcome: "rejected", reason: "stale-turn" };
+      }
+    }
     const blocks: JsonObject[] = normalized.content.images.map((image) => ({
       type: "image",
       source: {

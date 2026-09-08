@@ -2252,3 +2252,31 @@ describe("issue 367 concurrent launch admission", () => {
     }
   });
 });
+
+
+test("idle-only Claude tick preserves a working turn through tool wait and starts after completion", async () => {
+  const ledger = new RecordingDeliveryLedger();
+  const child = new FakeClaude(ledger);
+  const host = await ClaudeStreamBrokerHost.start({ cwd: "/repo", eventStore: new MemoryEventStore(), deliveryLedger: ledger,
+    readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max", version: "2.1.197" }), spawnProcess: fakeSpawn(child, {}) });
+  try {
+    const working = host.send({ id: "operator-turn", text: "work" });
+    child.emitJson({ type: "user", isReplay: true, session_id: host.identity.sessionId, message: { role: "user", content: [{ type: "text", text: "work" }] } });
+    await working;
+    child.emitJson({ type: "assistant", session_id: host.identity.sessionId,
+      message: { role: "assistant", content: [{ type: "tool_use", id: "awaited-tool", name: "Bash", input: { command: "fixture-only" } }] } });
+    const tick = { id: "automatic-tick", text: "check", expectedTurnId: null, origin: { kind: "agent" as const, role: "seat-tick" } };
+    expect(await host.send(tick)).toEqual({ outcome: "rejected", reason: "stale-turn" });
+    expect(child.inputs.filter((input) => input.type === "user")).toHaveLength(1);
+    expect(child.signals).toEqual([]);
+    child.emitJson({ type: "user", session_id: host.identity.sessionId,
+      message: { role: "user", content: [{ type: "tool_result", tool_use_id: "awaited-tool", content: "done" }] } });
+    expect(await host.send(tick)).toEqual({ outcome: "rejected", reason: "stale-turn" });
+    child.emitJson({ type: "result", subtype: "success", session_id: host.identity.sessionId, result: "done" });
+    await waitUntilIdle(host);
+    const wake = host.send(tick);
+    child.emitJson({ type: "user", isReplay: true, session_id: host.identity.sessionId, message: { role: "user", content: [{ type: "text", text: "check" }] } });
+    expect(await wake).toEqual({ outcome: "turn-started", turnId: "automatic-tick" });
+    expect(child.inputs.filter((input) => input.type === "user")).toHaveLength(2);
+  } finally { await host.release(); }
+});

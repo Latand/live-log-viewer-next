@@ -89,7 +89,7 @@ interface SendEffect {
   content: StructuredMessageContent;
   contentDigest: string;
   turnId?: string | null;
-  policy?: "queue" | "steer-if-active" | "interrupt-active";
+  policy?: "queue" | "idle-only" | "steer-if-active" | "interrupt-active";
   kind: "send" | "steer";
   runtime?: RuntimeSendSettings;
   /** #844: the selected-card reference the operator submitted with. Replayed
@@ -227,7 +227,8 @@ function sendEffect(effect: StructuredDeliveryEffect): SendEffect | null {
   const turnId = typeof effect.payload.turnId === "string" || effect.payload.turnId === null
     ? effect.payload.turnId
     : undefined;
-  const policy = effect.payload.policy === "queue"
+  const storedPolicy = effect.payload.policy === "idle-only"
+    || effect.payload.policy === "queue"
     || effect.payload.policy === "steer-if-active"
     || effect.payload.policy === "interrupt-active"
     ? effect.payload.policy
@@ -237,6 +238,9 @@ function sendEffect(effect: StructuredDeliveryEffect): SendEffect | null {
      message must never be stranded by its own provenance. */
   const selectedContext = parseSelectedContextRef(effect.payload.selectedContext);
   const origin = parseMessageOrigin(effect.payload.origin);
+  // Retained ticks admitted by older releases receive the same protection.
+  const policy = origin?.kind === "agent" && origin.role === "seat-tick" ? "idle-only" : storedPolicy;
+  if (effect.payload.policy !== undefined && !policy) return null;
   return {
     operationId,
     conversationId,
@@ -786,6 +790,10 @@ export class StructuredDeliveryQueue {
       }
       const host = this.resolveHost(effect.conversationId);
       if (!host) {
+        if (effect.policy === "idle-only") {
+          await this.transitionUnlessSettled(effect.operationId, "failed", { reason: "idle-only-not-admitted" });
+          continue;
+        }
         if (!await this.transitionUnlessSettled(effect.operationId, "queued", { reason: "dead-host" })) continue;
         await this.recoverUnavailableHost(effect);
         return true;
@@ -798,6 +806,10 @@ export class StructuredDeliveryQueue {
       if (!state.readable) return this.fenceUnavailable();
       const health = state.value;
       if (health.status === "dead" || health.status === "unhosted") {
+        if (effect.policy === "idle-only") {
+          await this.transitionUnlessSettled(effect.operationId, "failed", { reason: "idle-only-not-admitted" });
+          continue;
+        }
         if (!await this.transitionUnlessSettled(effect.operationId, "queued", { reason: "dead-host" })) continue;
         await this.recoverUnavailableHost(effect);
         return true;
@@ -810,6 +822,10 @@ export class StructuredDeliveryQueue {
       const shouldInterrupt = replacementIsActive
         && (effect.turnId === undefined || effect.turnId === health.activeTurnRef)
         && !this.interruptAcknowledged.has(effect.operationId);
+      if (effect.policy === "idle-only" && (health.status !== "idle" || health.activeTurnRef !== null || health.pendingAttention.length > 0)) {
+        await this.transitionUnlessSettled(effect.operationId, "failed", { reason: "idle-only-not-admitted" });
+        continue;
+      }
       if (health.status !== "idle" && !maySteer && !shouldInterrupt) return true;
       if (health.status === "idle") this.interruptAcknowledged.delete(effect.operationId);
       const deliveryFence = shouldInterrupt
@@ -825,7 +841,7 @@ export class StructuredDeliveryQueue {
         contentDigest: effect.contentDigest,
         text: effect.content.text,
         images: effect.content.images,
-        expectedTurnId: effect.policy === "interrupt-active" ? null : deliveryFence,
+        expectedTurnId: effect.policy === "interrupt-active" || effect.policy === "idle-only" ? null : deliveryFence,
         ...(effect.runtime ? { runtime: effect.runtime } : {}),
         ...(effect.selectedContext ? { selectedContext: effect.selectedContext } : {}),
         ...(effect.origin ? { origin: effect.origin } : {}),
@@ -886,7 +902,7 @@ export class StructuredDeliveryQueue {
       }
       let receipt;
       try {
-        receipt = await sendWithReadRetry(host, entry);
+        receipt = effect.policy === "idle-only" ? await host.send(entry) : await sendWithReadRetry(host, entry);
       } catch (error) {
         const reason = failureReason(error);
         /* The one resend below is allowed only where the host is READ to be
@@ -898,7 +914,7 @@ export class StructuredDeliveryQueue {
         const hostIsGone = !afterFailure.readable
           || afterFailure.value.status === "dead"
           || afterFailure.value.status === "unhosted";
-        if (!hostIsGone && isThreadReadTimeout(error)) {
+        if (effect.policy !== "idle-only" && !hostIsGone && isThreadReadTimeout(error)) {
           /* The one resend this path issues, and the host dedupes it by
              queue-entry id: it reads the thread back and returns the confirmed
              receipt rather than writing a second message. Its own operation is
@@ -932,6 +948,10 @@ export class StructuredDeliveryQueue {
         continue;
       }
       if (receipt.outcome === "rejected") {
+        if (effect.policy === "idle-only") {
+          await this.transitionUnlessSettled(effect.operationId, "failed", { reason: "idle-only-not-admitted" });
+          continue;
+        }
         if (receipt.reason === "stale-turn") {
           if (effect.kind === "send" && effect.policy !== "steer-if-active") {
             await this.transitionUnlessSettled(effect.operationId, "queued", { reason: receipt.reason });

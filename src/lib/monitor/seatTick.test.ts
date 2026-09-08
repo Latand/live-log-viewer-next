@@ -38,7 +38,7 @@ const CONVERSATION = ["conversation", "0f4c21b7729fbc9e"].join("_");
 const MINUTE = 60_000;
 
 function seat(over: Partial<SeatTickSeatInput> = {}): SeatTickSeatInput {
-  return { conversationId: CONVERSATION, seatEpoch: 7, path: null, turn: "idle", activity: null, ...over };
+  return { conversationId: CONVERSATION, seatEpoch: 7, path: null, turn: "idle", activity: { lifecycle: "waiting", reason: "host_alive_turn_idle", turnState: "idle" }, ...over };
 }
 
 function lane(over: Partial<SeatTickPipelineInput> = {}): SeatTickPipelineInput {
@@ -164,50 +164,17 @@ test("a seat whose turn is genuinely moving is skipped, not queued", () => {
   expect(decision.state.lastCheckAt).toBe(new Date(NOW).toISOString());
 });
 
-/* The permanent skip this replaces: a seat whose host died mid-turn keeps a
-   `busy` turn on the registry for as long as the record stands, so a plain busy
-   check dropped every tick forever — silenced by exactly the condition the wake
-   exists to clear. */
-test("a busy seat the registry reports stalled is no longer skipped, so the skip terminates", () => {
-  const stalledSeat = seat({ turn: "busy", activity: { lifecycle: "stalled", reason: "host_gone_turn_open" } });
-  const decision = seatTickDecision(input({
-    seat: stalledSeat,
-    pipelines: [lane()],
-    signals: [{ id: "seat-host", label: "the seat's own turn is stalled" }],
-    state: stateWith({ lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString() }),
-  }));
-  expect(seatTurnProgressing(stalledSeat)).toBe(false);
-  expect(decision.verdict.kind).toBe("wake");
-  expect(reasonsOf(decision.verdict)).toEqual(["interval"]);
-});
-
-test("a busy seat the liveness plane cannot answer for is not skipped either — absence is not progress", () => {
-  expect(seatTurnProgressing(seat({ turn: "busy", activity: null }))).toBe(false);
-  expect(seatTurnProgressing(seat({ turn: "busy", activity: { lifecycle: "gone", reason: "host_gone_turn_settled" } }))).toBe(false);
-  expect(seatTurnProgressing(seat({ turn: "busy", activity: { lifecycle: "waiting", reason: "provider_throttled", turnState: "busy" } }))).toBe(true);
-  expect(seatTurnProgressing(seat({ turn: "busy", activity: { lifecycle: "starting", reason: "launch_unproven" } }))).toBe(true);
-  expect(seatTurnProgressing(seat({ turn: "idle", activity: { lifecycle: "running", reason: "host_alive_turn_active" } }))).toBe(false);
-});
-
-/* #1262: the registry's turn record and the transcript's own turn are two
-   different facts, and the tick read them as one. A seat that finished its turn
-   leaves the registry record open for a while; the liveness verdict for it is
-   `waiting` (`host_alive_turn_idle`), which the tick counted as progress — so
-   an available seat was skipped at every check for as long as the stale record
-   stood, and could not be woken at all. Only the turn a retry deadline is
-   holding open is progress. */
-test("a seat whose turn the transcript says settled is available, not progressing", () => {
-  const settled = seat({ turn: "busy", activity: { lifecycle: "waiting", reason: "host_alive_turn_idle", turnState: "idle" } });
-  expect(seatTurnProgressing(settled)).toBe(false);
-  expect(seatTurnProgressing(seat({ turn: "busy", activity: { lifecycle: "waiting", reason: "provider_throttled", turnState: "busy" } }))).toBe(true);
-  /* An unstated turn is not a turn anybody proved open. */
-  expect(seatTurnProgressing(seat({ turn: "busy", activity: { lifecycle: "waiting", reason: "host_alive_turn_idle" } }))).toBe(false);
-  const decision = seatTickDecision(input({
-    seat: settled,
-    pipelines: [lane()],
-    state: stateWith({ lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString() }),
-  }));
-  expect(decision.verdict.kind).toBe("wake");
+test("open, unknown, and contradictory seat turns stay protected", () => {
+  for (const turn of ["busy", "unknown"] as const) {
+    for (const activity of [null, { lifecycle: "stalled" as const, reason: "host_gone_turn_open" },
+      { lifecycle: "waiting" as const, reason: "host_alive_turn_idle", turnState: "idle" as const }]) {
+      const target = seat({ turn, activity });
+      expect(seatTurnProgressing(target)).toBe(true);
+      expect(seatTickDecision(input({ seat: target, pipelines: [lane()], state: stateWith(OVERDUE_STATE) })).verdict.kind).toBe("skipped");
+    }
+  }
+  expect(seatTurnProgressing(seat({ activity: { lifecycle: "running", reason: "host_alive_turn_active", turnState: "busy" } }))).toBe(true);
+  expect(seatTurnProgressing(seat())).toBe(false);
 });
 
 test("a healthy moving board is quiet and produces nothing operator-visible", () => {
@@ -1140,40 +1107,13 @@ test("the wake interval is a constant no environment can set", () => {
 
 const ALIVE = { host: { state: "alive" as const }, stallAfterMs: DEFAULT_SEAT_TICK_POLICY.stallAfterMs };
 
-test("the stall threshold catches a silent open turn, and never a long busy one", () => {
-  /* CAUGHT: six hours open, nothing written for 41 minutes past a 40-minute
-     threshold. The registry calls it stalled, so the tick stops treating the
-     turn as progress and the seat becomes reachable again. */
-  const silent = evaluateLiveness({ ...ALIVE, turnState: "busy", silentForMs: 41 * MINUTE });
-  expect(silent).toEqual({ lifecycle: "stalled", reason: "host_alive_transcript_silent" });
-  expect(seatTurnProgressing(seat({ turn: "busy", activity: { lifecycle: silent.lifecycle, reason: silent.reason } }))).toBe(false);
-
-  /* NOT CAUGHT, and this is the blind spot: the same six-hour turn, writing a
-     tool call thirty seconds ago. Silence is zero, so it reads `running`, the
-     tick calls it progress and drops its check — at every check, for as long
-     as the seat keeps writing. Duration is not an input anywhere on this path,
-     so no threshold on this surface can fire on it. */
-  const busy = evaluateLiveness({ ...ALIVE, turnState: "busy", silentForMs: 30_000 });
-  expect(busy).toEqual({ lifecycle: "running", reason: "host_alive_turn_active" });
-  expect(seatTurnProgressing(seat({ turn: "busy", activity: { lifecycle: busy.lifecycle, reason: busy.reason } }))).toBe(true);
-  expect(seatTickDecision(input({ seat: seat({ turn: "busy", activity: { lifecycle: busy.lifecycle, reason: busy.reason } }), pipelines: [lane()] })).verdict)
-    .toEqual({ kind: "skipped", reason: "seat-busy" });
-
-  /* That is the property "never interrupt a working seat" being kept, and it
-     is worth keeping — a seat writing every thirty seconds IS working, and the
-     Viewer cannot tell an eight-hour merge queue from a self-inflicted loop by
-     looking at the transcript clock. What it costs is that a seat which keeps
-     itself busy on purpose is unreachable, which is exactly the deadlock the
-     session cron produced. The answer is upstream of this surface: mandate v11
-     tells the seat to stop doing it, and the revoked-seat retirement ends a
-     predecessor that will not. */
-
-  /* The one case that is NOT a blind spot: a dead host holding an open turn
-     forever. Caught whatever the transcript clock says, which is why the skip
-     terminates rather than waiting behind a turn nothing can finish. */
-  const zombie = evaluateLiveness({ host: { state: "gone" }, turnState: "busy", silentForMs: 0, stallAfterMs: ALIVE.stallAfterMs });
-  expect(zombie).toEqual({ lifecycle: "stalled", reason: "host_gone_turn_open" });
-  expect(seatTurnProgressing(seat({ turn: "busy", activity: { lifecycle: zombie.lifecycle, reason: zombie.reason } }))).toBe(false);
+test("both stalled and working open turns stay protected regardless of silence", () => {
+  for (const silentForMs of [30_000, 41 * MINUTE]) {
+    const activity = evaluateLiveness({ ...ALIVE, turnState: "busy", silentForMs });
+    expect(seatTurnProgressing(seat({ turn: "busy", activity }))).toBe(true);
+  }
+  const gone = evaluateLiveness({ host: { state: "gone" }, turnState: "busy", silentForMs: 0, stallAfterMs: ALIVE.stallAfterMs });
+  expect(seatTurnProgressing(seat({ turn: "busy", activity: gone }))).toBe(true);
 });
 
 test("the stall threshold the tick configures is the one the liveness read applies", () => {

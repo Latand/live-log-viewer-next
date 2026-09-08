@@ -194,7 +194,7 @@ function sources(over: {
       if (over.livenessThrows) throw new Error("the liveness plane is unavailable");
       const childRow = request.conversationId ? over.childRows?.[request.conversationId] : undefined;
       if (childRow) return [childRow];
-      return request.conversationId ? over.seatRows ?? [] : over.laneRows ?? [];
+      return request.conversationId ? over.seatRows ?? [livenessRow({ conversationId: request.conversationId, lifecycle: "waiting", reason: "host_alive_turn_idle", turnState: "idle" })] : over.laneRows ?? [];
     },
     lifecycleJournal: () => journal(over.events ?? []),
     latestDeployment: () => over.latestDeployment ?? ({ state: "unreadable", error: "no ledger" }) as never,
@@ -246,14 +246,12 @@ test("the tick's stall threshold is what the liveness read is asked for", async 
   ]);
 });
 
-/* A settled turn is never skipped and never signalled, so nothing reads its
-   verdict — and a transcript tail per project per five minutes is not a read
-   worth taking for an answer nobody consults. */
-test("a seat whose turn has settled is not asked for a verdict at all", async () => {
+// Registry idle can lag a newly resumed turn; always cross-check current activity.
+test("a registry-idle seat is checked for a newer active turn", async () => {
   const calls: { project?: string; conversationId?: string; stallAfterMs: number }[] = [];
   const input = await gather({ laneRows: [livenessRow()], livenessCalls: calls });
-  expect(calls.some((call) => call.conversationId)).toBe(false);
-  expect(input.seat!.activity).toBeNull();
+  expect(calls.some((call) => call.conversationId)).toBe(true);
+  expect(input.seat!.activity).toMatchObject({ turnState: "idle" });
 });
 
 test("a lane the liveness plane says nothing about carries no verdict, and is therefore never stalled", async () => {

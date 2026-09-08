@@ -313,7 +313,7 @@ export interface DurableQuotaObservation {
 export interface HeldDeliveryCommand {
   operationId: string;
   kind: "send" | "steer";
-  policy: "queue" | "steer-if-active" | "interrupt-active";
+  policy: "queue" | "idle-only" | "steer-if-active" | "interrupt-active";
   turnId?: string | null;
   /** Message authorship stamped at admission (#1117), persisted on the held
       record so a migration-held delivery replays with the same attribution.

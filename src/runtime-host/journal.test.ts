@@ -3318,3 +3318,25 @@ test("issue 1100: tool items project into the session's live turn on both lifecy
   expect(reopened.snapshot().sessions.find((session) => session.conversationId === "conversation_tools")?.liveTurn?.items).toHaveLength(3);
   reopened.close();
 });
+
+
+test("idle-only policy and original key survive restart and busy admission is refused", () => {
+  const dir = sandbox("idle-only-restart");
+  const filename = path.join(dir, "events.sqlite");
+  let journal = new RuntimeJournal(filename, { structuredHosts: true, now: () => 100 });
+  const session = { conversationId: "seat", sessionKey: { engine: "codex" as const, sessionId: "seat-thread" },
+    hostKind: "codex-app-server", host: "hosted", turn: "idle", provenance: "structured", activeTurnId: null,
+    capabilities: { steer: true, structuredAttention: true } };
+  journal.append({ scope: runtimeScope("session", "seat"), kind: "session-status", payload: session });
+  const command = { kind: "send" as const, operationId: "tick-operation", idempotencyKey: "tick-key", conversationId: "seat", text: "check", policy: "idle-only" as const };
+  const first = journal.executeOperation(command);
+  expect(first.receipt.status).toBe("queued");
+  journal.close();
+  journal = new RuntimeJournal(filename, { structuredHosts: true, now: () => 200 });
+  expect(journal.executeOperation(command).receipt.operationId).toBe("tick-operation");
+  expect(journal.effectBatch()[0]!.payload).toMatchObject({ policy: "idle-only", operationId: "tick-operation" });
+  journal.append({ scope: runtimeScope("session", "seat"), kind: "session-status", payload: { ...session, turn: "running", activeTurnId: "operator-turn" } });
+  expect(journal.executeOperation({ ...command, operationId: "tick-late", idempotencyKey: "tick-late-key" }).receipt.status).toBe("rejected");
+  expect(journal.effectBatch()).toHaveLength(1);
+  journal.close();
+});
