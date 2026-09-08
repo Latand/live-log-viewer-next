@@ -9,7 +9,7 @@ export type { SchemeRect } from "./layout";
 
 /** A task that owns a board position — `unplaced` tasks are filtered out before
     any geometry runs, so every card the board draws is a `PlacedTask`. */
-export type PlacedTask = BoardTask & { pos: { x: number; y: number } };
+export type PlacedTask = BoardTask & { displayScale?: number; pos: { x: number; y: number } };
 
 /** True for tasks the board should render (pinned with a usable position). */
 export function isPlacedTask(task: BoardTask): task is PlacedTask {
@@ -146,8 +146,15 @@ export function taskBoxHeight(task: Pick<BoardTask, "text" | "assignments" | "so
 }
 
 /** World-space box of a task card, including its action-row reservation. */
-export function taskRect(task: Pick<PlacedTask, "pos" | "text" | "assignments" | "source">, expanded = false): SchemeRect {
-  return { x: task.pos.x, y: task.pos.y, w: TASK_W, h: taskBoxHeight(task, expanded) };
+/** Task-board summaries cap assignment rows; complete history stays reachable. */
+export function displayedTaskHeight(task: Pick<PlacedTask, "text" | "assignments" | "source" | "displayScale">, expanded = false): number {
+  if (!task.displayScale || task.assignments.length <= 3) return taskBoxHeight(task, expanded);
+  return taskBoxHeight({...task,assignments:task.assignments.slice(0,3)},expanded)+28;
+}
+
+export function taskRect(task: Pick<PlacedTask, "pos" | "text" | "assignments" | "source" | "displayScale">, expanded = false): SchemeRect {
+  const scale = task.displayScale ?? 1;
+  return { x: task.pos.x, y: task.pos.y, w: TASK_W * scale, h: displayedTaskHeight(task, expanded) * scale };
 }
 
 export function rectCenter(rect: SchemeRect): { x: number; y: number } {
@@ -700,7 +707,10 @@ export interface TaskEdgeObstacle extends SchemeRect {
 }
 
 function rectOwnsEndpoint(rect: SchemeRect, edge: Pick<TaskEdgeGeom, "x1" | "y1" | "x2" | "y2">): boolean {
-  const inside = (x: number, y: number) => x >= rect.x && x <= rect.x + rect.w && y >= rect.y && y <= rect.y + rect.h;
+  // Rect anchors and inverse-zoom footprints can differ by one floating-point
+  // rounding step. The endpoint still belongs to that displayed boundary.
+  const epsilon = 1e-6;
+  const inside = (x: number, y: number) => x >= rect.x - epsilon && x <= rect.x + rect.w + epsilon && y >= rect.y - epsilon && y <= rect.y + rect.h + epsilon;
   return inside(edge.x1, edge.y1) || inside(edge.x2, edge.y2);
 }
 

@@ -1,75 +1,64 @@
-# Task history integration checkpoint
+# Production task board and tool chronology
 
-Stage status: incomplete. This patch adds production task-history navigation and preserves a corrected board artifact. The complete production board redesign required by #1453, #1446 and #1546 remains open.
+The board now lays out recorded task membership with native conversation readers, dynamic group envelopes and routed edges. Task history keeps completed tasks, failed/pathless launches, planned stages, review findings and every recorded worker reachable. Existing pipeline and flow controls open from that history.
 
-## Production change
+A warmed conversation keeps one native reader and composer through board/full-window navigation. Hidden presentation disconnects its subscriptions and effects; the delivery controller remains mounted and receives receipt/outbox changes. The outer memo boundary retains stable hidden props. Camera pans query geometry without waking hidden readers. Scanner generation changes still reach the durable composer owner. It derives dead-host and disabled-send guards from its own capability snapshot, including terminal supersedence; a pane prop is not required to enforce them. A red/green mounted regression covers this integration seam.
 
-The Scheme board toolbar opens task history. A task retains its assignments, every attempt of each explicitly linked execution, planned stages, embedded review rounds and returned findings. Missing launches and transcripts stay visible without an invented open action. Direct worker assignments can establish a relation; a shared manager or matching title cannot. Completed tasks remain inspectable. Unlinked work is scoped to the active project; explicit task references can still reach a worker in another project. Publication and merge evidence retain their own recorded state, and missing release associations are labelled.
+Task pins are applied at overview scale, including 7%. Drag previews and commits share the collision decision. Existing conflicting pins remain unchanged and expose their targets; an infeasible reader expansion uses the full-window owner. Card footprints, group bounds, hit targets and edge endpoints share the final layout.
 
-The history list renders at most thirty records per page. The last of one thousand workers is reachable. Opening a record uses the existing native conversation navigation. Both supported locales carry the new labels.
+## Chronology repair (#1565)
 
-Source ownership in this change:
+The frontend runtime reducer discarded item-envelope timestamps. Calls outside the bounded canonical transcript window therefore lost both identity claims and the time evidence needed to retire them. The reducer now retains occurrence/recording time for reconciliation. Live tool rows continue to omit transport-derived clocks and durations.
 
-- `src/components/tasks/taskWorkflowModel.ts` and its focused test.
-- `src/components/tasks/TaskWorkflowPanel.tsx` and its focused DOM test.
-- `src/components/scheme/SchemeBoard.tsx`: toolbar and panel integration.
-- `src/lib/i18n/en.ts` and `uk.ts`: frontend labels.
-- This design directory: adopted artifact and bounded browser checks.
+The operator screenshot was inspected visually. Viewer normalized messages place its old calls in an earlier turn. A private replay joins 67 real item envelopes with the later canonical user/reply/two-action window: exact main leaves 23 stale tool rows; the corrected reducer leaves zero. A mounted LogFeed regression separately proves first-turn visibility, older-row retirement and preservation of a current running call. The original records and screenshots remain private.
 
-No runtime, backend, host or deployment source is changed. Task-history projection runs only while its panel is open; camera-only updates retain the panel’s stable props.
+An August 31 review had already identified this timestamp regression. Its later builder kept the null-timestamp assertion, which reached main. This change preserves the original display-time restriction while restoring the internal ordering evidence that review requested.
 
-## Recovered evidence and artifact adoption
+## Ownership and source manifest
 
-The existing task and canonical issues were read through their current APIs. Five initial transcript queries covered board workflow, NativeSlot, revision 3, the verifier and the task. The initial name-based project filters returned no hits; unscoped results supplied the actual project key. The original critic and latest independent verifier were read through Viewer conversation_messages, including the September 8 00:49 and 00:51 messages and completed command evidence. The recovered workflow model in the adjacent design directory supplies the production projection rules. A follow-up VoiceComposerHost search found an older primary-place placeholder race; current voiceSlots already binds props to the selected place. That correction does not establish hidden delivery/view separation.
+Product changes are confined to frontend components/hooks, locale strings and focused tests. Runtime host, server parser, deployment and automation persistence files are unchanged. `SOURCE-HASHES.json` lists the complete source delta against base `88e5a9508be2802266734056d6436f3168201cad`, excluding the manifest itself. The preceding builder commit is `5b60ad910b2ed41862a6c29ac26276a9f7046d81`.
 
-Every entry of the predecessor revision-3 manifest matched: 27 source entries and 89 evidence entries. Its manifest SHA-256 was `d52b322d49fd47894c72bd41a0d314044f1e99c1bcf7e180301bf313d75bbc5e`. Originals and old worktrees remain untouched. `artifact/ADOPTED-HASHES.json` records the selected sources at adoption, before corrections.
-
-The adopted artifact adds an outer memoization boundary that freezes hidden NativeSlot props, excludes offscreen summaries before building their elements, and respects existing pins in aggregate placement. The independent probe counts the outer wrapper and summary functions directly. It rebuilds the retained predecessor into a separate output directory for the red comparison.
-
-| Artifact workload | Retained predecessor | Adopted correction |
-| --- | --- | --- |
-| 24 conversations, 20 pans | 480 hidden wrapper entries | 0 |
-| 100 conversations, 20 pans | 2,000 hidden wrapper entries | 0 |
-| 1,000 conversations, 20 pans | 20,000 hidden wrapper entries | 0 |
-| Offscreen rich summary, 20 pans | 20 summary calls | 0 |
-| Aggregate task drag, requested 70 × 35 px | 0 × 0 px displayed movement | 70 × 35 px |
-
-Each wrapper workload also ingests 100 messages and idles for 21 seconds. These measurements use the artifact's sample transport. They do not establish production subscription, delivery or deployment behavior. The larger artifact fixtures retain six tasks; the pure production-model tests separately exercise 1,000 workers across 250 tasks.
+The interrupted builder's scoped dirty files were copied into the successor checkout. Its worktree, the earlier prototype, transcripts and screenshots were preserved. The September 8 operator amendment requires working alone and no additional independent review. No review worker, merge or deployment was started here.
 
 ## Executed checks
 
-- 44 focused tests across task projection, paginated history, existing board camera/selection and locale coverage: passed, 5,161 assertions.
-- Adopted layout: 1,596 containment/collision cases and 4,240 pin cases, including aggregate task pins: passed.
-- Retained-predecessor/adopted-correction browser regression: both expected outcomes reproduced; before/after screenshots inspected visually.
-- Production Viewer, SchemeBoard, task panel, useLogTail and logBus: native navigation and actual polling callsites exercised at 1280, 1440 and 1920 pixels, light and dark. HTTP responses were synthetic; the runtime bus was disabled. Six cases passed with no browser errors.
-- Whole-repository TypeScript produced the same 12 diagnostics on the research HEAD and this change with the same installed dependencies: missing PDF dependency/types and existing account-test/runtime-host type errors. It is not a green TypeScript gate. No diagnostics remain in the changed source or adopted artifact.
-- Whole-diff privacy gate from `88e5a9508be2802266734056d6436f3168201cad`, including commit checks: passed.
-- Adopted browser geometry/arrow matrix: 276 cases passed. Nine native artifact behavior groups passed, including retained draft/selection/scroll anchor and controlled original-key delivery.
-- Production CSS was generated from the current source for those frames. The visual pass found a minimap overlap; the corrected panel sits below the attention control and above the minimap.
+All commands use private HOME, XDG_CONFIG_HOME, LLV_STATE_DIR, CODEX_HOME, CLAUDE_CONFIG_DIR and a short TMPDIR. Browser transport blocks external requests and exercises actual production Viewer, SchemeBoard, BranchPane, LogFeed, logBus/useLogTail, runtimeBus and TmuxComposer/outbox modules with controlled endpoint responses. These are local production-component checks; no live agent is sent a message.
 
-The test environment isolates HOME, XDG_CONFIG_HOME, LLV_STATE_DIR, CODEX_HOME, CLAUDE_CONFIG_DIR and a short TMPDIR. Evidence remains outside publication surfaces or under ignored `artifact/out/` and `artifact/assets/` directories. No live lifecycle action or deployment was executed.
+| Check | Result |
+| --- | --- |
+| Geometry / workflow / handoff unit files | 60 passed |
+| Board camera, selection, continuation chips and task-history DOM | 24 passed |
+| Task-card controls | 15 passed |
+| Composer original-key retry/remount, readiness and hoisted capability guards | 11 passed |
+| Chronology reducer, mounted feed and tool timing display | 40 passed |
+| Voice owner and composer viewport/dictation | 22 passed |
+| Log tail, runtime bus and durable outbox | 112 passed |
+| Original-scene DOM geometry | 420 cases, zero failures |
+| Multi-task DOM geometry | 2,016 cases, zero failures; 24 readers × 14 zooms × three widths × two themes |
+| Dormancy and delivery at 24 / 100 / 1,000 conversations | Three warmed readers; 20 pans, 100 incoming messages, 21 seconds idle; zero hidden wrapper/pane/header/feed/source-parser/log-callback/timer/DOM changes |
+| Hidden full-window siblings and aggregate readers | Zero per-reader UI changes while 100 messages arrive and 21 seconds elapse in each mode |
+| Hidden receipt transitions | Queued → uncertain → delivered, one original key, one transport attempt; unknown retains outbox identity; reentry restores draft selection and scroll anchor |
+| Exact-main production negative control | 48 hidden native updates at 24 conversations |
+| Preserved prototype negative controls | 480 / 2,000 / 20,000 hidden wrapper entries; 20 hidden summary parses; saved 7% pin has zero displayed displacement |
+| Failed pin persistence | Display restores its prior coordinate and exposes the save error |
+| Worker reachability | Last worker opened in all 6 / 25 / 250 task groups at 24 / 100 / 1,000 conversations |
+| Production 7% pin | Display moved 70 × 35 CSS px; persisted world coordinate survives zoom and reload |
+| TypeScript | Current source and exact exported base both exit 0 with the same installed dependencies |
+| Production build | `bun run build` passed, including Next TypeScript and MCP bundle |
 
-## Unfinished acceptance
+The earlier twelve diagnostics comprised four missing `pdfjs-dist` imports, one consequent PDF task-null diagnostic, six readonly `fs.lstatSync` assignments in account tests, and one EventEmitter `once` import diagnostic. None is changed by the frontend delta. All twelve disappear on both exact base and candidate with TypeScript 5.9.3, Node declarations 26.4.0 and pdfjs-dist 6.2.108. The earlier installation was incomplete; this run does not attribute each vanished diagnostic to a specific dependency change. No out-of-scope source repair was needed. The pan probe records twenty frame delays per scale. Candidate median/p95 were 15/15.5 ms, 13.4/14.1 ms and 19.5/39.3 ms at 24/100/1,000 conversations on a concurrently used machine. The exact-main 1,000-conversation page did not finish readiness within the existing 30-second browser deadline, so no comparable baseline timing or speedup is claimed at that scale. The CSS optimizer emits its existing `::highlight(tts-karaoke)` warning; compilation succeeds.
 
-1. The corrected graph layout and native-owner boundary are still confined to the artifact. Production SchemeBoard continues to render its existing graph. The new history panel is one integrated frontend slice.
-2. Production hidden-work instrumentation and suppression are unfinished. `VoiceComposerHost` retains a composer without a card only for a live voice call; withdrawing the card slot can unmount its composer. Receipt reconciliation and dispatch effects still live in TmuxComposerCore. Applying Activity around the native card without separating those responsibilities would not prove durable delivery continuity.
-3. Production full-window rendering still creates another BranchPane. The retained single-owner portal, draft/selection/anchor restoration and original-key accepted/unknown/terminal tests have artifact evidence only.
-4. Production aggregate pins, dynamic group footprints, sibling separation, arrow endpoints and keyboard/Return behavior need the integrated geometry and real-component matrix. No complete-board performance claim is made here.
-5. The current task schema has no general typed successor, PR or deployment association. The initial history view uses recorded task/attempt/flow relations. Complete historical associations require the automation/API owner to add revision-fenced relation evidence through #1446. Backend ownership remains external to this change.
+Reproducible browser entry points:
 
-These gaps prevent stage approval and prevent declaring the redesign ready for deployment.
+- `BOARD_PRODUCTION=1 BOARD_COUNTERS=1 BOARD_BUILD_OUT=<private-output> bun docs/design/task-board-integration/artifact/build-renderer.mjs`
+- `BOARD_PRODUCTION=1 BOARD_RUNTIME=1 BOARD_SCENE=multi-1000 BOARD_BUNDLE=<private-output>/viewer.js node docs/design/task-board-integration/artifact/verify-production-board.mjs`
+- `BOARD_PRODUCTION=1 BOARD_BUNDLE=<private-output>/viewer.js node docs/design/task-board-integration/artifact/verify-production-geometry.mjs`
+- `BOARD_PRODUCTION=1 BOARD_BUNDLE=<private-output>/viewer.js node docs/design/task-board-integration/artifact/verify-production-navigation.mjs`
 
-## Repeatable checks
+Set BOARD_CHROME to an installed Chromium executable and BOARD_REPORT_OUT to a persistent private report directory. BOARD_SOURCE_ROOT allows a separately exported exact base; BOARD_ARTIFACT_ROOT with a separate output reads the retained prototype. The builder compiles production CSS from that source. Counter probes instrument module entries without replacing production subscriptions or delivery logic.
 
-Run the named tests with the isolated environment described above:
+## Evidence limits
 
-```sh
-bun test src/components/tasks/taskWorkflowModel.test.ts src/components/tasks/TaskWorkflowPanel.dom.test.tsx src/components/scheme/SchemeBoard.camera.dom.test.tsx src/components/scheme/SchemeBoard.selection.dom.test.tsx src/lib/i18n/i18n.test.ts
-bun docs/design/task-board-integration/artifact/verify-layout.ts
-BOARD_COUNTERS=1 bun docs/design/task-board-integration/artifact/build-renderer.mjs
-node docs/design/task-board-integration/artifact/verify-residual.mjs
-```
+Historical successor/PR/release associations that were never persisted cannot be reconstructed authoritatively by this frontend. The task projection uses recorded relations and labels missing or unlinked evidence; it does not parse titles or verdict prose into membership. Durable typed relations remain owned by the automation/API lane described in `../task-workflow-model/INTEGRATION.md`.
 
-The browser harness requires BOARD_CHROME to name an installed Chromium executable. Set BOARD_ARTIFACT_ROOT to the retained predecessor and BOARD_BUILD_OUT to a separate evidence directory to build the red subject; pass that bundle through BOARD_BUNDLE with BOARD_EXPECT_RED=1. Never select an output inside the original artifact.
-
-BOARD_PRODUCTION=1 omits the board substitution, memory-log hook and composer admission substitution. Its browser check uses the real production modules with fixture HTTP responses. Generate `artifact/assets/production.css` from `src/app/globals.css` using the repository PostCSS/Tailwind configuration before running `verify-production-history.mjs`. Runtime transport coverage remains an explicit unfinished gate.
+Local Chromium checks do not establish production deployment, a real host restart, cross-browser or physical input-device behavior. Existing outbox/runtime tests cover restart/remount and stale-response predicates under isolation. Root owns combined release qualification and deployment. Prototype counts and production-component counts are reported separately.

@@ -135,6 +135,8 @@ export interface NodeAncestry {
 }
 
 export interface SchemeNode extends SchemeRect {
+  presentation?: "native" | "summary";
+  readerScale?: number;
   file: FileEntry;
   /** Live background tasks docked inside the pane as collapsed strips. */
   tasks: FileEntry[];
@@ -159,6 +161,8 @@ export interface DraftNode extends SchemeRect {
 }
 
 export interface SchemeEdge {
+  route?: string;
+  routeCrosses?: boolean;
   to: string;
   /** Board key the edge leaves — the PARENT side. Present on every lineage
       edge (issue #828) so direction is carried by the model, not inferred from

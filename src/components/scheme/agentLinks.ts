@@ -251,7 +251,8 @@ export function deriveFlowLinks(flows: Flow[], anchorOf: (pathOrKey: string) => 
 /** A group's membership + identity, before geometry (owned by the layout). */
 export interface SchemeGroupSpec {
   key: string;
-  kind: "flow" | "pipeline";
+  kind: "flow" | "pipeline" | "task";
+  taskId?: string;
   /** The flow or pipeline id — stable across polls, seeds the halo hue. */
   id: string;
   /** Deterministic hue [0,360): a distinct, reload-stable tint per group. */

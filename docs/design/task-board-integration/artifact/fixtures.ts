@@ -125,6 +125,24 @@ export const taskFixtures = nodes.filter(n => n.kind === 'task').map(n => ({
 }));
 const largeScenes = new Map<string, {nodes:WorkNode[];edges:WorkEdge[];groups:typeof groups}>();
 export function fixtureScene(mode: string) {
+  if (/^multi-(24|100|1000)$/.test(mode)) {
+    if(largeScenes.has(mode))return largeScenes.get(mode)!;
+    const count=Number(mode.split('-')[1]);
+    const result:{nodes:WorkNode[];edges:WorkEdge[];groups:typeof groups}={nodes:[],edges:[],groups:[]};
+    for(let i=0;i<count;i++){
+      const group='multi-task-'+Math.floor(i/4),taskId=group+'-task';
+      if(i%4===0){
+        result.groups.push({id:group,label:'Production task '+Math.floor(i/4),note:'',x:(i%12)*800,y:Math.floor(i/12)*1800,w:2600,h:1600,tone:'running'});
+        result.nodes.push({id:taskId,kind:'task',title:'Production task '+Math.floor(i/4),role:'Task',status:'running',x:(i%12)*800,y:Math.floor(i/12)*1800,group,detail:'Synthetic production acceptance task'});
+      }
+      const id=mode+'-worker-'+i,n=conversation(id,'Production worker '+i,i%4===1?'Review':'Build','running',(i%12)*800,Math.floor(i/12)*1800+400,group,'Synthetic representative work');
+      n.file!.parent=null;n.file!.durableLineage={...n.file!.durableLineage!,parentConversationId:null};
+      result.nodes.push(n);result.edges.push({from:taskId,to:id,label:'assigned'});
+      transcript.set(n.file!.path,[line('user','Production input '+i,0),line('assistant','Production **rich result** '+i+' with source context. '.repeat(80),1)]);
+    }
+    largeScenes.set(mode,result);return result;
+  }
+
   if(mode==='scale-100'||mode==='scale-1000'){
     if(largeScenes.has(mode))return largeScenes.get(mode)!;
     const count=mode==='scale-100'?100:1000;
@@ -160,6 +178,7 @@ export function latestSummary(n: WorkNode) {
 }
 
 if(typeof window!=='undefined') (window as any).__fixtureSource={
+  replace:(path:string,lines:string[])=>{transcript.set(path,lines);window.dispatchEvent(new CustomEvent('sample-transcript',{detail:path}));},
   append:appendMessage, lines:(path:string)=>transcript.get(path),
   receipt:(key:string,state:string)=>{const store=(window as any).__durableFixture??={messages:{},receipts:{}};store.receipts[key]=state;}
 };

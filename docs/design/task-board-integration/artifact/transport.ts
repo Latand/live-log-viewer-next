@@ -13,10 +13,26 @@ class MemoryStorage {
 }
 export function installMemoryTransport() {
   selectFixtureScene(new URLSearchParams(location.search).get('scene') ?? 'workspace');
-  const storage = new MemoryStorage();
+  const production=new URLSearchParams(location.search).has('production');
+  const storage = production ? window.localStorage : new MemoryStorage();
+  const savedTasks=production ? JSON.parse(storage.getItem('fixture-task-positions')??'{}') : {};
+  for(const task of taskFixtures)if(savedTasks[task.id])Object.assign(task,savedTasks[task.id]);
+  const runtimeMode=new URLSearchParams(location.search).get('runtime')==='1';
+  if(runtimeMode)storage.setItem('llv_runtime_ui','1');
+  const runtimeSources=new Set<any>();let runtimeSeq=0;
+  if(runtimeMode)setInterval(()=>{for(const source of runtimeSources)source.dispatchEvent(new Event("heartbeat"));},5000);
+  const runtimeSessions=files.map(file=>({conversationId:file.conversationId,sessionKey:{engine:'codex',sessionId:file.conversationId},hostKind:'codex-app-server',host:'hosted',turn:'idle',provenance:'structured',revision:1,attentionIds:[],recentReceipts:[] as any[],accountId:null,parentConversationId:null,flowId:null,workflowId:null,cwd:'/fixture/workspace',artifactPath:file.path,capabilities:{steer:true,structuredAttention:true},activeTurnId:null}));
+  const runtimeOperations=new Map<string,any>();
+  const runtimeEvent=(kind:string,payload:any,occurredAt:string)=>{
+    const session=runtimeSessions.find(s=>s.conversationId===payload.conversationId);
+    if(!session)throw Error('Unknown fixture conversation');
+    const envelope={schemaVersion:1,seq:++runtimeSeq,eventId:'fixture-'+runtimeSeq,scope:{type:'session',id:session.conversationId},revision:++session.revision,kind,payload,occurredAt,recordedAt:occurredAt};
+    for(const source of runtimeSources)source.onmessage?.({data:JSON.stringify(envelope)});
+  };
+  const runtimeReceipt=(key:string,status:string)=>{const operation=runtimeOperations.get(key);if(!operation)throw Error('Unknown operation');const receipt={operationId:'operation_'+key,idempotencyKey:key,conversationId:operation.conversationId,kind:'send',status,text:operation.text,at:new Date().toISOString(),revision:++operation.revision,resend:'verify-first'};operation.receipt=receipt;const session=runtimeSessions.find(s=>s.conversationId===operation.conversationId)!;session.recentReceipts=[receipt];const envelope={schemaVersion:1,seq:++runtimeSeq,eventId:'fixture-'+runtimeSeq,scope:{type:'operation',id:receipt.operationId},revision:receipt.revision,kind:'receipt',payload:receipt};for(const source of runtimeSources)source.onmessage?.({data:JSON.stringify(envelope)});return receipt;};
   storage.setItem('llvProject', PROJECT); storage.setItem('llv_lang', 'en');
-  Object.defineProperty(window, 'localStorage', { value: storage });
-  Object.defineProperty(window, 'sessionStorage', { value: new MemoryStorage() });
+  if(!production){Object.defineProperty(window, 'localStorage', { value: storage });
+  Object.defineProperty(window, 'sessionStorage', { value: new MemoryStorage() });}
   (window as any).process = { env: { NODE_ENV: 'production', NEXT_PUBLIC_RUNTIME_UI: '0' } };
   const theme = new URLSearchParams(location.search).get('theme') === 'dark' ? 'dark' : 'light';
   document.documentElement.dataset.theme = theme;
@@ -50,6 +66,19 @@ export function installMemoryTransport() {
         const start=Math.max(0,r.offset??0);
         return [r.id,{start,offset:bytes.length,size:bytes.length,data:new TextDecoder().decode(bytes.slice(start))}];
       }))});
+    }
+    if(runtimeMode && url.pathname==='/api/runtime/snapshot')return response({schemaVersion:1,snapshotSeq:runtimeSeq,retentionFloorSeq:0,runtime:{hostEpoch:1,health:'ready'},structuredHostsEnabled:true,filesRevision:1,sessions:runtimeSessions,attentions:[],recentOperations:[...runtimeOperations.values()].flatMap(op=>op.receipt?[op.receipt]:[]),edges:[],flows:[],workflows:[],tasks:[]});
+    if(runtimeMode && url.pathname==='/api/runtime/send'){
+      const body=JSON.parse(String(init?.body));const key=body.idempotencyKey;
+      const operation=runtimeOperations.get(key)??{...body,revision:0,attempts:0};operation.attempts++;runtimeOperations.set(key,operation);
+      const receipt=runtimeReceipt(key,'queued');return response({ok:true,operationId:receipt.operationId,receipt});
+    }
+    if(url.pathname.startsWith('/api/tasks/') && method==='PATCH'){
+      const id=url.pathname.split('/').at(-1),index=taskFixtures.findIndex(t=>t.id===id);
+      if(index<0)return response({error:'Unknown fixture task'},404);
+      const patch=JSON.parse(String(init?.body));taskFixtures[index]={...taskFixtures[index],...patch,...(patch.pos?{placement:'pinned'}:{}),updatedAt:new Date().toISOString()};
+      storage.setItem('fixture-task-positions',JSON.stringify(Object.fromEntries(taskFixtures.filter(t=>t.placement==='pinned').map(t=>[t.id,{pos:t.pos,placement:t.placement}]))));
+      return response({task:taskFixtures[index]});
     }
     if (url.pathname === '/api/files') return response({ files, tasks: taskFixtures, flows: [], pipelines: [], workflows: [], projectCatalog: [], projectAliases: {}, projectDisplayNames: { [PROJECT]: 'Workspace' }, projectCwds: { [PROJECT]: '/fixture/workspace' }, crownedProjects: [], conversationAliases: {}, launchRoutes: {}, systemHealth: { tmux: { status: 'healthy' } } });
     if (url.pathname === '/api/board') {
@@ -94,16 +123,18 @@ export function installMemoryTransport() {
   }) as typeof fetch;
   class InertEventSource extends EventTarget {
     static CONNECTING = 0; static OPEN = 1; static CLOSED = 2;
+    subscriptions: {id:string;path:string;offset:number}[]=[];
+    publish = (event?: Event) => { if(this.readyState===2)return; const changed=(event as CustomEvent<string>|undefined)?.detail;for(const sub of this.subscriptions){if(changed && changed!==sub.path)continue;const bytes=new TextEncoder().encode((transcript.get(sub.path)??[]).join("\n")+"\n");const start=Math.max(0,sub.offset);sub.offset=bytes.length;this.dispatchEvent(new MessageEvent("chunk",{data:JSON.stringify({id:sub.id,chunk:{start,offset:bytes.length,size:bytes.length,data:new TextDecoder().decode(bytes.slice(start))}})}));}};
     readyState = 1; onopen: any; onmessage: any; onerror: any; url: string;
-    constructor(url: string) { super(); this.url = String(url); queueMicrotask(() => { const event = new Event('open'); this.dispatchEvent(event); this.onopen?.(event); }); }
-    close() { this.readyState = 2; }
+    constructor(url: string) { super(); this.url = String(url); if(this.url.startsWith('/api/runtime/stream'))runtimeSources.add(this); queueMicrotask(() => { const event = new Event('open'); this.dispatchEvent(event); this.onopen?.(event); if(this.url.startsWith('/api/logs/stream')){this.subscriptions=JSON.parse(new URL(this.url,location.href).searchParams.get('subs')??'[]');window.addEventListener('sample-transcript',this.publish);this.publish();} }); }
+    close() { this.readyState = 2; runtimeSources.delete(this);window.removeEventListener('sample-transcript',this.publish); }
   }
-  Object.defineProperty(window, 'EventSource', { value: new URLSearchParams(location.search).has('production') ? undefined : InertEventSource });
+  Object.defineProperty(window, 'EventSource', { value: runtimeMode ? InertEventSource : new URLSearchParams(location.search).has('production') ? undefined : InertEventSource });
   Object.defineProperty(window, 'WebSocket', { value: class { constructor() { throw new Error('Sockets disabled in preview'); } } });
   Object.defineProperty(window, 'XMLHttpRequest', { value: class { open() { throw new Error('XHR disabled in preview'); } } });
   Object.defineProperty(navigator, 'sendBeacon', { value: () => false });
   if (navigator.serviceWorker) Object.defineProperty(navigator.serviceWorker, 'register', { value: async () => { throw new Error('Service workers disabled in preview'); } });
-  (window as any).__sampleTransport = { calls, storage,
+  (window as any).__sampleTransport = { calls, storage, runtimeReceipt, runtimeEvent, runtimeOperations:()=>[...runtimeOperations.entries()], tasks:()=>taskFixtures,
     manualDelivery:(value:boolean)=>{manualDelivery=value;},settle:settleOperation,
     operations:()=>[...operations.values()].map(({resolve,completion,...row})=>row)
   };

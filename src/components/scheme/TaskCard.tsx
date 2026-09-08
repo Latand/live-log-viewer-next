@@ -17,7 +17,7 @@ import { activityDot, cleanTitle, engineBadge, engineBadgeFor } from "@/componen
 import type { Camera } from "./Minimap";
 import { MOVE_EASE, MOVE_MS } from "./nodes";
 import { assignmentAgentState, assignmentOpenable } from "./assignmentState";
-import { TASK_W, taskCardExpandable, taskRect, type PlacedTask, type SchemeRect } from "./taskGeometry";
+import { TASK_W, displayedTaskHeight, taskCardExpandable, taskRect, type PlacedTask, type SchemeRect } from "./taskGeometry";
 
 const TITLE_CLAMP_CLASS = "line-clamp-2";
 const PREVIEW_CLAMP_CLASS = "line-clamp-3";
@@ -43,6 +43,8 @@ function commitUnlessWindowBlur(el: HTMLTextAreaElement | null, commit: () => vo
 }
 
 export interface TaskCardHandlers {
+  history?: (task: PlacedTask) => void;
+  legalDrop?: (task: PlacedTask, point: {x:number;y:number}) => {x:number;y:number};
   patch: (id: string, patch: { text?: string; status?: BoardTask["status"]; pos?: { x: number; y: number } }) => Promise<string | null>;
   remove: (id: string) => void;
   /** Handoff into a running agent: drops the task text into that pane's
@@ -415,7 +417,8 @@ export const TaskCard = memo(function TaskCard({
     if (!start.moved && Math.hypot(dx, dy) < 4) return;
     start.moved = true;
     const z = camRef.current?.z ?? 1;
-    setDrag({ x: start.ox + dx / z, y: start.oy + dy / z });
+    const point = { x: start.ox + dx / z, y: start.oy + dy / z };
+    setDrag(handlers.legalDrop?.(task, point) ?? point);
   };
   const onPointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
     const start = dragRef.current;
@@ -423,10 +426,11 @@ export const TaskCard = memo(function TaskCard({
     if (!start) return;
     if (start.moved) {
       const z = camRef.current?.z ?? 1;
-      const dropped = {
+      const requested = {
         x: Math.round(start.ox + (event.clientX - start.sx) / z),
         y: Math.round(start.oy + (event.clientY - start.sy) / z),
       };
+      const dropped = handlers.legalDrop?.(task, requested) ?? requested;
       setDrag(null);
       setLocalPos({ ...dropped, seen: task.updatedAt });
       /* A failed save snaps the card back to its persisted coordinates —
@@ -517,8 +521,10 @@ export const TaskCard = memo(function TaskCard({
       data-scheme-task={task.id}
       className={`group absolute pb-9 ${lifted ? "z-30" : "z-[4]"}`}
       style={{
-        transform: `translate(${pos.x}px, ${pos.y}px)`,
+        transform: `translate(${pos.x}px, ${pos.y}px)${task.displayScale && task.displayScale !== 1 ? ` scale(${task.displayScale})` : ""}`,
+        transformOrigin: "top left",
         width: TASK_W,
+        height: task.displayScale ? displayedTaskHeight(task, expanded) : undefined,
         transition: drag ? undefined : `transform ${MOVE_MS}ms ${MOVE_EASE}`,
       }}
       onPointerDown={onPointerDown}
@@ -596,7 +602,7 @@ export const TaskCard = memo(function TaskCard({
         {task.source || task.assignments.length ? (
           <div className="flex flex-col gap-1 px-2 pb-2">
             <SourceChip task={task} file={task.source ? (byPath.get(task.source.path) ?? null) : null} onOpen={handlers.openAgent} />
-            {task.assignments.map((assignment, index) => (
+            {(task.displayScale ? task.assignments.slice(0,3) : task.assignments).map((assignment, index) => (
               <AssignmentChip
                 key={
                   assignment.launchId ??
@@ -611,6 +617,7 @@ export const TaskCard = memo(function TaskCard({
                 onOpen={handlers.openAgent}
               />
             ))}
+            {task.displayScale && task.assignments.length > 3 ? <button className="h-7 text-left text-xs font-semibold text-accent" onClick={() => handlers.history?.(task)}>{t("taskHistory.moreWorkers",{count:task.assignments.length-3})}</button> : null}
           </div>
         ) : null}
         {!editing && expandable ? (

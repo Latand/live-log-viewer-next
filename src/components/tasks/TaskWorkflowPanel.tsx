@@ -3,6 +3,8 @@
 import { ArrowUpRight, ChevronLeft, ChevronRight, Search, X } from "lucide-react";
 import { memo, useMemo, useState } from "react";
 import { useLocale } from "@/lib/i18n";
+import type { Flow } from "@/lib/flows/types";
+import type { Pipeline } from "@/lib/pipelines/types";
 import type { FileEntry } from "@/lib/types";
 import { cleanTitle } from "@/components/utils";
 import { taskTitle } from "./taskModel";
@@ -12,13 +14,16 @@ const PAGE = 30;
 
 /** Task history is a bounded navigation surface over recorded relationships.
  * It never starts, retries, edits, or settles an execution. */
-export const TaskWorkflowPanel = memo(function TaskWorkflowPanel({ model, onOpen, onClose }: {
+export const TaskWorkflowPanel = memo(function TaskWorkflowPanel({ model, onOpen, onClose, onOpenPipeline, onOpenFlow, initialTaskId = null }: {
+  initialTaskId?: string | null;
+  onOpenPipeline?: (pipeline: Pipeline) => void;
+  onOpenFlow?: (flow: Flow) => void;
   model: TaskWorkflowProjection;
   onOpen: (file: FileEntry) => void;
   onClose: () => void;
 }) {
   const { t } = useLocale();
-  const [selected, setSelected] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string | null>(initialTaskId);
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(0);
   const task = model.tasks.find(item => item.task.id === selected);
@@ -47,11 +52,12 @@ export const TaskWorkflowPanel = memo(function TaskWorkflowPanel({ model, onOpen
         <p className="mt-2 text-xs text-muted">{task.task.status} · {t("taskHistory.counts", { workers: task.workers.length, reviews: task.reviews, executions: task.executions.length })}</p>
         <details className="my-4 text-sm"><summary className="cursor-pointer">{t("taskHistory.requirement")}</summary><p className="mt-2 whitespace-pre-wrap">{task.task.text}</p></details>
         {task.executions.map(execution => <section key={execution.pipeline.id} className="mb-3 border-l-2 border-border pl-3 text-xs">
-          <strong className="block text-sm">{execution.pipeline.task}</strong>
+          {onOpenPipeline ? <button className="flex w-full items-center justify-between text-left text-sm font-semibold hover:text-accent" onClick={() => onOpenPipeline(execution.pipeline)} aria-label={t("groupOverride.pipelineTitle",{name:execution.pipeline.task})}>{execution.pipeline.task}<ArrowUpRight size={14} /></button> : <strong className="block text-sm">{execution.pipeline.task}</strong>}
           <p className="mt-1 text-muted">{execution.pipeline.state} · {t(`taskHistory.${execution.basis}`)}</p>
           {execution.pipeline.stateDetail && <p className="mt-1 text-danger">{execution.pipeline.stateDetail}</p>}
           <p className="mt-1">{execution.pipeline.publishedCommit ? t("taskHistory.published", { sha: execution.pipeline.publishedCommit.slice(0, 12) }) : t("taskHistory.unpublished")}</p>
         </section>)}
+        {onOpenFlow && task.flows.map(flow => <button key={flow.id} className="mb-2 flex w-full items-center justify-between text-left text-xs hover:text-accent" onClick={() => onOpenFlow(flow)}>{t("taskHistory.reviewFlow")} · {flow.state}<ArrowUpRight size={14} /></button>)}
         {task.flows.filter(flow => flow.mergeEvidence).map(flow => <p key={flow.id} className="my-2 text-xs">
           {flow.mergeEvidence?.mergedAt ? t("taskHistory.merged") : t("taskHistory.mergeUnrecorded")}
           {flow.mergeEvidence?.headSha ? ` · ${flow.mergeEvidence.headSha.slice(0, 12)}` : ""}
@@ -67,7 +73,7 @@ export const TaskWorkflowPanel = memo(function TaskWorkflowPanel({ model, onOpen
       <div data-task-history-rows>
         {matching.length === 0 && <p className="py-4 text-sm text-muted">{t("taskHistory.empty")}</p>}
         {matching.slice(currentPage * PAGE, (currentPage + 1) * PAGE).map(row => <section key={row.key} className="border-t border-border py-3 text-xs" data-work-reference={row.key}>
-          {row.file ? <button className="flex min-h-9 w-full items-center justify-between gap-2 text-left text-sm font-semibold hover:text-accent" onClick={() => { onClose(); onOpen(row.file!); }}>
+          {row.file ? <button data-conversation-path={row.file.path} className="flex min-h-9 w-full items-center justify-between gap-2 text-left text-sm font-semibold hover:text-accent" onClick={() => { onClose(); onOpen(row.file!); }}>
             {cleanTitle(row.file.title)}<ArrowUpRight size={15} className="shrink-0" />
           </button> : <strong className="block text-sm">{row.kind === "planned" ? t("taskHistory.planned") : row.path ? t("taskHistory.unavailable") : t("taskHistory.unresolved")}</strong>}
           <p className="mt-1 text-muted">{row.role} · {row.kind === "assignment" ? t("taskHistory.assignmentState", { state: row.state }) : row.state}{row.stageId ? ` · ${row.stageId}` : ""}{row.attempt ? ` · ${t("taskHistory.attempt", { count: row.attempt })}` : ""}</p>

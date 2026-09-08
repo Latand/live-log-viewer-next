@@ -2690,6 +2690,8 @@ export const en = {
   "mobile2.pipeline.openAttempt": "Open the transcript of attempt {n}",
   "mobile2.pipeline.reviewTranscript": "review transcript · round {n}",
   "mobile2.pipeline.openReviewTranscript": "Open the review transcript of round {n}",
+  "taskHistory.moreWorkers": "{count} more workers · open history",
+  "taskHistory.pinConflict": "Saved positions overlap. Move a task to separate them.",
   "taskHistory.title": "Task history",
   "taskHistory.close": "Close task history",
   "taskHistory.task": "Task",

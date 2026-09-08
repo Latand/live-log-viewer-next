@@ -12,3 +12,7 @@ installMemoryTransport();
 const { createRoot } = await import('react-dom/client');
 const { Viewer } = await import('@/components/Viewer');
 createRoot(document.getElementById('root')!).render(<Viewer />);
+
+const { readOutbox } = await import('@/components/conversation/outbox');
+const { getRuntimeBus } = await import('@/hooks/runtimeBus');
+(window as any).__productionDelivery = {readOutbox, runtime:()=>getRuntimeBus().getState()};

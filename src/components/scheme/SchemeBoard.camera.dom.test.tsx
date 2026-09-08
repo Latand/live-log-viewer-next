@@ -10,7 +10,13 @@ import { SchemeBoard } from "./SchemeBoard";
 
 const dom = new Window();
 class TestResizeObserver {
-  observe() {}
+  constructor(private callback: () => void) {}
+  observe(element: HTMLElement) {
+    if (element.getAttribute('aria-label')?.startsWith('Agent board')) {
+      Object.defineProperty(element, 'getBoundingClientRect', { configurable: true, value: () => ({ x:0,y:0,left:0,top:0,right:1400,bottom:900,width:1400,height:900,toJSON() {} }) });
+      queueMicrotask(this.callback);
+    }
+  }
   unobserve() {}
   disconnect() {}
 }
@@ -464,7 +470,7 @@ test("a pane's reserved relation strip opens the assigned task without floating 
           createdAt: "2026-07-18T00:00:00.000Z", updatedAt: "2026-07-18T00:00:00.000Z",
         }]}
         drafts={[]}
-        focus={null}
+        focus={agent.path}
         onSelect={() => {}}
         onOpenTask={(task) => openedTasks.push(task.id)}
         onClose={() => {}}
@@ -536,5 +542,5 @@ test("an assignment chip opens the current conversation generation and centers i
 
   expect(selected).toEqual(["/agent-current"]);
   expect(world.style.transform).not.toBe(before);
-  expect(world.style.transform).toContain("scale(0.75)");
+  expect(world.style.transform).toContain("scale(1)");
 });

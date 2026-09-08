@@ -2602,6 +2602,8 @@ export const uk: Record<keyof typeof en, Message> = {
   "mobile2.pipeline.openAttempt": "Відкрити транскрипт спроби {n}",
   "mobile2.pipeline.reviewTranscript": "транскрипт рев’ю · раунд {n}",
   "mobile2.pipeline.openReviewTranscript": "Відкрити транскрипт рев’ю раунду {n}",
+  "taskHistory.moreWorkers": "Ще {count} виконавців · відкрити історію",
+  "taskHistory.pinConflict": "Збережені позиції перекриваються. Перемістіть завдання, щоб розділити їх.",
   "taskHistory.title": "Історія задач",
   "taskHistory.close": "Закрити історію задач",
   "taskHistory.task": "Задача",

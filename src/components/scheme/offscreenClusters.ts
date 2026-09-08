@@ -104,7 +104,7 @@ export function chipRevealWidth(
    EdgeChips, in screen space. Reserves the *fully-revealed* width (not the
    resting pill) so a chip whose unfurled label would paint over a conversation
    surface folds into the edge disclosure before it can reveal (issue #474). */
-function chipBox(chip: Omit<ClusterChip, "cluster">, w: number): SchemeRect {
+export function chipBox(chip: Omit<ClusterChip, "cluster">, w: number): SchemeRect {
   if (chip.edge === "left") return { x: chip.x, y: chip.y - CHIP_H / 2, w, h: CHIP_H };
   if (chip.edge === "right") return { x: chip.x - w, y: chip.y - CHIP_H / 2, w, h: CHIP_H };
   if (chip.edge === "top") return { x: chip.x - w / 2, y: chip.y, w, h: CHIP_H };
@@ -319,6 +319,7 @@ export function offscreenClusterChips(
     .filter((cluster) => !intersects(cluster.rect, viewport))
     .sort((a, b) => b.priority - a.priority || a.key.localeCompare(b.key));
   const visible: ClusterChip[] = [];
+  const occupied = [...obstacles];
   const overflow: ClusterChip[] = [];
   const counts = new Map<ChipEdge, number>();
   for (const cluster of sorted) {
@@ -340,8 +341,9 @@ export function offscreenClusterChips(
     const count = counts.get(chip.edge) ?? 0;
     const fitsViewport = revealWidth >= fullWidth;
     const box = chipBox(chip, fullWidth);
-    if (count < perEdgeCap && fitsViewport && !obstacles.some((obstacle) => intersects(box, obstacle))) {
+    if (count < perEdgeCap && fitsViewport && !occupied.some((obstacle) => intersects(box, obstacle))) {
       visible.push(chip);
+      occupied.push(box);
       counts.set(chip.edge, count + 1);
     } else {
       overflow.push(chip);

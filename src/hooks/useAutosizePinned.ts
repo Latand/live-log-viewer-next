@@ -5,6 +5,8 @@ import { useLayoutEffect } from "react";
 import { caretAtEnd, clampHeight, shouldPin } from "@/lib/composerScroll";
 
 export interface AutosizePinnedOptions {
+  /** Delivery owners can retain their field while its view is dormant. */
+  active?: boolean;
   /** Maximum field height in pixels; beyond it the field scrolls internally. */
   maxPx: number;
   /** Minimum field height in pixels (a multi-line default before any text). */
@@ -28,9 +30,10 @@ export interface AutosizePinnedOptions {
 export function useAutosizePinned(
   ref: React.RefObject<HTMLTextAreaElement | null>,
   value: string,
-  { maxPx, minPx = 0, pinned }: AutosizePinnedOptions,
+  { maxPx, minPx = 0, pinned, active = true }: AutosizePinnedOptions,
 ): void {
   useLayoutEffect(() => {
+    if (!active) return;
     const el = ref.current;
     if (!el) return;
     /* Collapsing to 0 before measuring lets the field shrink back when text is
@@ -45,5 +48,5 @@ export function useAutosizePinned(
     } else {
       el.scrollTop = prevTop;
     }
-  }, [ref, value, maxPx, minPx, pinned]);
+  }, [ref, value, maxPx, minPx, pinned, active]);
 }

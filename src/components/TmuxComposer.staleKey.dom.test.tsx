@@ -12,7 +12,7 @@
  * bytes exactly; an edited resend is a new message under a new key.
  */
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { act } from "react";
+import { act, useSyncExternalStore } from "react";
 import { installActEnv } from "@/test-helpers/actEnv";
 import { Window } from "happy-dom";
 import { createRoot, type Root } from "react-dom/client";
@@ -70,12 +70,16 @@ import { readOutbox, resetOutboxForTests, retryOutbox } from "./conversation/out
 
 const realFetch = globalThis.fetch;
 
+const runtimeListeners = new Set<() => void>();
+const subscribeRuntime = (listener: () => void) => {runtimeListeners.add(listener);return () => {runtimeListeners.delete(listener);};};
+function useReceipts() {return useSyncExternalStore(subscribeRuntime,()=>structuredView.receipts,()=>structuredView.receipts);}
+
 beforeEach(() => {
   structuredView.receipts = [];
   installTmuxComposerRuntimeForTests({
-    useRuntimeView: (candidate) => candidate.conversationId === "conv-stale-key" ? structuredView : null,
+    useRuntimeView: (candidate) => {useReceipts();return candidate.conversationId === "conv-stale-key" ? structuredView : null;},
     refreshRuntime: async () => true,
-    useRuntimeReceipts: () => structuredView.receipts,
+    useRuntimeReceipts: useReceipts,
   });
 });
 
@@ -199,7 +203,7 @@ test("a remount cannot stamp a stale unresolved generation's key onto the operat
   expect(queued.id).not.toBe(sends[0]!.idempotencyKey);
   expect(queued.state).toBe("queued");
   structuredView.receipts = [delivered(sends[0]!).json.receipt as RuntimeSessionView["receipts"][number]];
-  await settle(() => root.render(<TmuxComposer file={file} />));
+  await settle(() => {for (const listener of runtimeListeners) listener();});
   expect(sends).toHaveLength(2);
   expect(sends[1]!.text).toBe("a brand new message");
   expect(sends[1]!.idempotencyKey).not.toBe(sends[0]!.idempotencyKey);

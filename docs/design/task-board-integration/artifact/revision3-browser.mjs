@@ -6,7 +6,8 @@ import assert from 'node:assert/strict';
 const here=path.dirname(new URL(import.meta.url).pathname);
 const require=createRequire(path.resolve('../live-log-viewer-next/node_modules/_preview.cjs'));
 const {chromium}=require('playwright-core');
-export const out=path.join(here,'out/revision3');
+export const out=process.env.BOARD_REPORT_OUT ?? path.join(here,'out/revision3');
+fs.mkdirSync(out,{recursive:true});
 export const browser=await chromium.launch({headless:true,executablePath:process.env.BOARD_CHROME,args:['--no-sandbox']});
 export async function pageFor(scene='workspace',width=1440,height=900,theme='light'){
   const page=await browser.newPage({viewport:{width,height},colorScheme:theme});
@@ -33,8 +34,8 @@ export async function pageFor(scene='workspace',width=1440,height=900,theme='lig
     assert(p===process.env.BOARD_BUNDLE||p.startsWith(here+'/'));
     await route.fulfill({status:200,contentType:f.endsWith('.js')?'application/javascript':f.endsWith('.css')?'text/css':f.endsWith('.woff2')?'font/woff2':'text/html',body:fs.readFileSync(p)});
   });
-  await page.goto('http://artifact.invalid/?scene='+scene+'&theme='+theme+(process.env.BOARD_PRODUCTION==='1'?'&production=1':''),{waitUntil:'networkidle'});
-  if(process.env.BOARD_PRODUCTION==='1') await page.waitForSelector('[data-scheme-ui]');
+  await page.goto('http://artifact.invalid/?scene='+scene+'&theme='+theme+(process.env.BOARD_PRODUCTION==='1'?'&production=1':'')+(process.env.BOARD_RUNTIME==='1'?'&runtime=1':''),{waitUntil:'networkidle'});
+  if(process.env.BOARD_PRODUCTION==='1') await page.waitForSelector('[aria-label^="Agent board"]');
   else await page.waitForFunction(()=>window.__boardPreview?.snapshot().size.w>0);
   return page;
 }

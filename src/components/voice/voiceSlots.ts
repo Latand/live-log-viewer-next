@@ -85,6 +85,7 @@ export function getServerVoiceSlot(): null {
     render, because `file` is a fresh snapshot each board poll; retained after the
     card unmounts so a mid-call composer keeps working with the last-known view. */
 export interface VoiceComposerCardProps {
+  viewActive?: boolean;
   file: FileEntry;
   pollPaused: boolean;
   deadHost: boolean;

@@ -1,7 +1,7 @@
 "use client";
 
 import { BoxSelect, History, Focus, Hand, Maximize2, Minus, MousePointer2, Plus, StickyNote } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { useBoardState } from "@/hooks/useBoardState";
 import { cameraToPresence, orderedSelection, schemeFocusedPath, schemeVisiblePaths, viewBus } from "@/hooks/viewPresenceBus";
@@ -14,7 +14,10 @@ import { MAX_VISIBLE_PATHS } from "@/lib/view/types";
 
 import { appendComposerDraft } from "@/components/TmuxComposer";
 import { conversationIdentity } from "@/lib/accounts/identity";
-import { BranchPane } from "@/components/BranchPane";
+import { layoutTaskBoard, legalTaskDrop } from "./taskBoardLayout";
+import { GroupOverridePanel } from "./GroupOverridePanel";
+import { PipelineEditor } from "@/components/pipelines/PipelineEditor";
+import { createVisibilityIndex } from "./visibilityIndex";
 import { flowByImplementer } from "@/components/flows/flowModel";
 import type { BranchGroup } from "@/components/projectModel";
 import { deleteTask, handoffTask, unassignTask, updateTask } from "@/components/tasks/taskApi";
@@ -235,9 +238,19 @@ export function SchemeBoard({
 }: Props) {
   const { t } = useLocale();
   const mapMode = Boolean(onNodePick);
+  const [controlsFlowId, setControlsFlowId] = useState<string | null>(null);
+  const controlsFlow = flows.find(flow => flow.id === controlsFlowId);
+  const openFlowControls = useCallback((flow: Flow) => {setControlsFlowId(flow.id);setControlsPipelineId(null);}, []);
+  const [controlsPipelineId, setControlsPipelineId] = useState<string | null>(null);
+  const controlsPipeline = pipelines.find(pipeline => pipeline.id === controlsPipelineId);
+  const openPipelineControls = useCallback((pipeline: Pipeline) => {setControlsPipelineId(pipeline.id);setControlsFlowId(null);}, []);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyTaskId, setHistoryTaskId] = useState<string | null>(null);
+  const openTaskHistory = useCallback((id: string) => {setHistoryTaskId(id);setHistoryOpen(true);}, []);
+  const [layoutZoom, setLayoutZoom] = useState(.5);
+  const [layoutViewportWidth, setLayoutViewportWidth] = useState(1400);
   const closeHistory = useCallback(() => setHistoryOpen(false), []);
-  const workflowModel = useMemo(() => historyOpen && !mapMode ? projectTaskWorkflows(allTasks, pipelines, flows, files, project) : null, [historyOpen, mapMode, allTasks, pipelines, flows, files, project]);
+  const workflowModel = useMemo(() => projectTaskWorkflows(allTasks, pipelines, flows, files, project), [allTasks, pipelines, flows, files, project]);
   const [selected, setSelected] = useState<string | null>(null);
   const [badgeAnchorRevision, setBadgeAnchorRevision] = useState(0);
   const badgeAnchors = useMemo(
@@ -321,7 +334,7 @@ export function SchemeBoard({
   /* Node identities carry over from the previous layout wherever the node
      is unchanged (#1432), so a relayout that moved nothing re-renders no card. */
   const previousLayoutRef = useRef<SchemeLayout | null>(null);
-  const layout = useMemo(() => {
+  const authoredLayout = useMemo(() => {
     const built = reconcileLayoutNodes(
       previousLayoutRef.current,
       buildSchemeLayout(groups, manual, files, layoutFlows, drafts, pipelines, surfacePipelines, favorites, isolatedManualPaths, boardTasks, textExpandedIds, { now }),
@@ -329,6 +342,11 @@ export function SchemeBoard({
     previousLayoutRef.current = built;
     return built;
   }, [groups, manual, files, layoutFlows, drafts, pipelines, surfacePipelines, favorites, isolatedManualPaths, boardTasks, textExpandedIds, now]);
+
+  const taskScene = useMemo(() => !mapMode && boardTasks.some(task => task.assignments.length || workflowModel.tasks.find(workflow => workflow.task.id === task.id)?.executions.length)
+    ? layoutTaskBoard(authoredLayout, boardTasks, workflowModel, layoutZoom, selected, textExpandedIds, {viewportWidth:layoutViewportWidth}) : null,
+    [mapMode, authoredLayout, boardTasks, workflowModel, layoutZoom, layoutViewportWidth, selected, textExpandedIds]);
+  const layout = taskScene?.layout ?? authoredLayout;
 
   /* NO PRUNING HERE (#771). The selection outlives this view, so dropping a path
      because THIS layout does not place it would delete the operator's selection
@@ -395,6 +413,9 @@ export function SchemeBoard({
      persisted, gone on reload; the board underneath stays mounted, so camera,
      selection and column prefs survive the round trip untouched. */
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [fullWindowPlace, setFullWindowPlace] = useState<HTMLDivElement | null>(null);
+  const collapseNative = useCallback(() => setExpanded(null), []);
+  useLayoutEffect(() => {if(taskScene?.fallbackReader)setExpanded(taskScene.fallbackReader);}, [taskScene?.fallbackReader]);
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     setExpanded(null);
@@ -624,11 +645,11 @@ export function SchemeBoard({
   );
   const placedTasks = useMemo(
     () =>
-      boardTasks.map((task) => {
+      (taskScene?.tasks ?? boardTasks).map((task) => {
         const spot = regionTaskPos.get(task.id) ?? placement.get(task.id);
         return spot && (spot.x !== task.pos.x || spot.y !== task.pos.y) ? { ...task, pos: spot } : task;
       }),
-    [boardTasks, regionTaskPos, placement],
+    [boardTasks, taskScene, regionTaskPos, placement],
   );
   /* Camera-facing rects: focus glides and map taps resolve task keys. */
   const taskRects = useMemo(
@@ -639,7 +660,11 @@ export function SchemeBoard({
     () => new Map(placedTasks.map((task) => [`task::${task.id}`, taskTitle(task.text) || t("tasks.untitled")] as const)),
     [placedTasks, t],
   );
-  const taskTargetIndex = useMemo(() => buildTaskTargetIndex(layout, flows, files), [layout, flows, files]);
+  const taskTargetIndex = useMemo(() => {
+    const index=buildTaskTargetIndex(layout,flows,files);
+    if(taskScene?.aggregate) for(const group of layout.groups) if(group.taskId) for(const key of group.members) index.delete(key);
+    return index;
+  }, [layout, flows, files, taskScene]);
   const taskEdges = useMemo(
     () => buildTaskEdges(placedTasks, taskTargetIndex, textExpandedIds, files),
     [placedTasks, taskTargetIndex, textExpandedIds, files],
@@ -778,6 +803,8 @@ export function SchemeBoard({
     onZoomKey: navZoomRef,
     onFit: announceFit,
   });
+
+  useLayoutEffect(() => {setLayoutZoom(cam.z);setLayoutViewportWidth(vp.w);}, [cam.z,vp.w]);
 
   /* #688: the board half of a focus handoff. The index is rebuilt from the
      layout on every relayout on purpose — an accepted request resolves its
@@ -931,7 +958,11 @@ export function SchemeBoard({
     if (!activeBuilderPipelineId || mapMode) return;
     if (builderRevealed.current === activeBuilderPipelineId) return;
     const group = layout.groups.find((candidate) => candidate.kind === "pipeline" && candidate.id === activeBuilderPipelineId);
-    if (!group) return;
+    if (!group) {
+      const linked = workflowModel.tasks.some(task => task.executions.some(execution => execution.pipeline.id === activeBuilderPipelineId));
+      if (linked) {setControlsPipelineId(activeBuilderPipelineId);builderRevealed.current=activeBuilderPipelineId;handleBuilderOpened();}
+      return;
+    }
     builderRevealed.current = activeBuilderPipelineId;
     clearSession();
     setMode("select");
@@ -1065,8 +1096,15 @@ export function SchemeBoard({
     taskTargetIndexRef.current = taskTargetIndex;
   }, [taskTargetIndex]);
 
+  const taskSceneRef = useRef(taskScene);
+  useLayoutEffect(() => {taskSceneRef.current=taskScene;},[taskScene]);
   const taskHandlers = useMemo<TaskCardHandlers>(
     () => ({
+      history: (task) => openTaskHistory(task.id),
+      legalDrop: (task, point) => {
+        const scene=taskSceneRef.current;
+        return scene ? legalTaskDrop(task,point,scene.layout.groups,new Set(scene.tasks.filter(card=>card.placement==="pinned").map(card=>card.id))) : point;
+      },
       patch: async (id, patch) => {
         const error = await updateTask(id, patch);
         if (error) pushTaskToast("err", error);
@@ -1143,6 +1181,16 @@ export function SchemeBoard({
     setDormant((prev) => (prev ? cam.z < DORMANT_EXIT_Z : cam.z < DORMANT_ENTER_Z));
   }, [cam.z]);
 
+  const visibilityIndex = useMemo(() => createVisibilityIndex([...layout.byPath].filter(([id]) => !taskScene || taskScene.shown.has(id)).map(([id, rect]) => ({ ...rect, id }))), [layout.nodes, taskScene]);
+  const previousVisible = useRef<ReadonlySet<string>>(new Set());
+  const visibleNativePaths = useMemo(() => {
+    const next = expanded ? new Set([expanded]) : visibilityIndex({ x: -cam.x / cam.z, y: -cam.y / cam.z, w: vp.w / cam.z, h: vp.h / cam.z });
+    const previous = previousVisible.current;
+    if (next.size === previous.size && [...next].every(path => previous.has(path))) return previous;
+    previousVisible.current = next;
+    return next;
+  }, [visibilityIndex, expanded, cam.x, cam.y, cam.z, vp.w, vp.h]);
+
   const tile = gridTilePx(cam.z);
 
   return (
@@ -1199,22 +1247,24 @@ export function SchemeBoard({
       <div
         key={project}
         className={`absolute left-0 top-0 ${panning ? "scheme-panning" : ""}`}
+        data-atomic-task-layout={taskScene ? "" : undefined}
         style={
           {
             width: layout.width,
             height: layout.height,
             transform: `translate(${cam.x}px, ${cam.y}px) scale(${cam.z})`,
             transformOrigin: "0 0",
-            transition: glide ? `transform .45s ${MOVE_EASE}` : undefined,
+            transition: !taskScene && glide ? `transform .45s ${MOVE_EASE}` : undefined,
             willChange: "transform",
             "--inv-z": String(1 / cam.z),
             "--label-o": cam.z < LABEL_Z ? "1" : "0",
           } as React.CSSProperties
         }
       >
+        {taskScene ? <style>{`[data-atomic-task-layout] [data-scheme-node], [data-atomic-task-layout] [data-scheme-task], [data-atomic-task-layout] [data-scheme-group], [data-atomic-task-layout] svg path, [data-atomic-task-layout] svg circle { transition: none !important; animation: none !important; }`}</style> : null}
         {/* Group halos sit behind every edge and card so a running flow/pipeline
             reads as one framed region; the label chip stays live off the map. */}
-        <GroupsLayer groups={layout.groups} interactive={!mapMode && !handLike && !session} />
+        <GroupsLayer onOpenTaskHistory={openTaskHistory} groups={layout.groups} interactive={!mapMode && !handLike && !session} />
         <EdgesLayer edges={layout.edges} badgeAnchors={badgeAnchors} badgeAnchorRevision={badgeAnchorRevision} width={layout.width} height={layout.height} />
         <LoopsLayer loops={layout.loops} width={layout.width} height={layout.height} />
         {/* Rails/badges stay passive on the map, but the pipeline hub keeps its
@@ -1223,6 +1273,11 @@ export function SchemeBoard({
         <AgentLinksLayer links={layout.links} byPath={layout.byPath} obstacles={railObstacles} interactive={!mapMode && !handLike && !session} hubInteractive={!handLike && !session} width={layout.width} height={layout.height} />
         <NodesLayer
           layout={layout}
+          visiblePaths={visibleNativePaths}
+          expandedPath={expandedNode?.file.path}
+          fullWindowPlace={fullWindowPlace}
+          autoEditToken={expandedNode ? autoEditTokenFor(renameRequest, expandedNode.file.path) : undefined}
+          onCollapse={collapseNative}
           project={project}
           files={files}
           interactive={!handLike && !session}
@@ -1396,7 +1451,10 @@ export function SchemeBoard({
         />
       ) : null}
 
-      {workflowModel && <TaskWorkflowPanel model={workflowModel} onOpen={stableSelect} onClose={closeHistory} />}
+      {taskScene?.conflicts.length ? <details data-pin-conflicts className="absolute bottom-14 left-3 z-30 max-w-sm rounded border border-warning bg-card p-3 text-xs"><summary>{t("taskHistory.pinConflict")}</summary>{taskScene.conflicts.map(([a,b],i)=><p key={i}>{[a,b].map(key=><button key={key} className="m-1 underline" onClick={()=>openTaskHistory(key.replace("group::task::",""))}>{layout.groups.find(group=>group.key===key)?.label ?? key}</button>)}</p>)}</details> : null}
+      {controlsFlow ? <div className="absolute right-3 top-3 z-[60]"><GroupOverridePanel group={{key:controlsFlow.id,id:controlsFlow.id,kind:"flow",flow:controlsFlow,label:t("taskHistory.reviewFlow"),hue:0,members:[],x:0,y:0,w:0,h:0}} onClose={() => setControlsFlowId(null)} /></div> : null}
+      {controlsPipeline ? <div className="absolute inset-y-3 right-3 z-[60] overflow-auto rounded-xl border border-border bg-card p-2 shadow-2"><PipelineEditor pipeline={controlsPipeline} label={controlsPipeline.task} onClose={() => setControlsPipelineId(null)} /></div> : null}
+      {historyOpen && <TaskWorkflowPanel key={historyTaskId} initialTaskId={historyTaskId} model={workflowModel} onOpenPipeline={openPipelineControls} onOpenFlow={openFlowControls} onOpen={stableSelect} onClose={closeHistory} />}
 
       <Minimap
         layout={layout}
@@ -1433,25 +1491,7 @@ export function SchemeBoard({
           aria-modal="true"
           aria-label={stageTitle ?? cleanTitle(expandedNode.file.title, 90)}
         >
-          <BranchPane
-            /* Not keyed by identity: SessionTitle resets its own edit state on a
-               real A→B switch (and preserves it across conversation-id enrichment
-               or succession), so a key here would only cause spurious remounts —
-               and replay a retained F2 token — when a poll fills in identity. */
-            file={expandedNode.file}
-            tasks={expandedNode.tasks}
-            isRoot={expandedNode.isRoot}
-            expanded
-            showFavorite
-            titleOverride={stageTitle}
-            onToggleExpand={() => setExpanded(null)}
-            autoEditToken={renameToken}
-            onSpawnRetry={onSpawnRetry ? stableSpawnRetry : undefined}
-            relatedTasks={relatedTasksByPath.get(expandedNode.file.path)}
-            /* Opening a task from the full-window conversation returns to the
-               board first — the card the camera centers must be visible. */
-            onOpenTask={onOpenTask ? (task) => { setExpanded(null); stableOpenTask(task); } : undefined}
-          />
+          <div ref={setFullWindowPlace} className="flex min-h-0 min-w-0 flex-1" />
         </div>
       );
     })() : null}
