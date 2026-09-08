@@ -1,0 +1,28 @@
+{
+  "checkedAt": "2026-09-08T04:59:26.982742+00:00",
+  "viewerBase": "88e5a9508be2802266734056d6436f3168201cad",
+  "scope": "entire candidate diff from merge base plus staged and untracked files; no --paths filter",
+  "privacyGateCommand": "bun scripts/privacy-publication-gate.ts --base 88e5a9508be2802266734056d6436f3168201cad --check-commits",
+  "privacyGateExitCode": 0,
+  "privacyGateOutput": "PRIVACY GATE: PASS",
+  "trackedScratchCacheFiles": 0,
+  "probeCases": 46,
+  "probeAssertions": 15,
+  "focusedEvidenceTests": 11,
+  "sourceInputsVerified": 119,
+  "jsonAndPythonSyntax": "pass",
+  "selfReview": "complete; three reviewed findings corrected; product integration remains future work",
+  "hostedCI": "reported on the correction PR at its exact head after publication",
+  "limitations": [
+    "No product runtime changes or product suites",
+    "No live-model, compaction, attachments or full Viewer acceptance claim"
+  ],
+  "publishedIntegrationIssues": [
+    1557,
+    1558,
+    1559,
+    1560,
+    1561
+  ],
+  "trackedArtifactFiles": 16
+}

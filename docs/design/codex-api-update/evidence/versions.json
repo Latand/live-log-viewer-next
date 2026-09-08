@@ -1,0 +1,24 @@
+{
+  "observedDate": "2026-09-08",
+  "cliVersion": "0.153.4",
+  "binarySha256": "56ef98ab4032d317ab26e9b5e5a175650717351edb16ed9cde0cb6d1734d62da",
+  "binaryPackage": "@openai/codex-linux-x64",
+  "stableRelease": {
+    "tag": "rust-v0.153.4",
+    "publishedAt": "2026-09-04T23:25:48Z",
+    "commit": "3d2ee51ca2d5db578f328aa75e20aa22c0197c9a"
+  },
+  "upstreamMain": {
+    "commit": "54e04f25dbfe342bf84809d1880dbca32cb43cf6",
+    "committedAt": "2026-09-08T04:47:42Z"
+  },
+  "prerelease": {
+    "tag": "rust-v0.154.0-alpha.6",
+    "publishedAt": "2026-09-07T18:03:36Z",
+    "executed": false
+  },
+  "viewerHead": "88e5a9508be2802266734056d6436f3168201cad",
+  "revalidatedAt": "2026-09-08T04:55:13.149504+00:00",
+  "previousReviewedMain": "530383e36de9c74cd79177a0c31d35609019134f",
+  "sourceComparison": "119 schema/source inputs byte-identical to reviewed pins; current main commit refreshed"
+}
