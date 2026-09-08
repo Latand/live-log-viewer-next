@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
+import { useCollapsedTools } from "../toolDisclosure";
 
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { getLocale } from "@/lib/i18n";
@@ -276,13 +277,17 @@ export function ToolLine({
   className = "",
   index,
   nested = false,
+  children,
 }: {
   event: ToolEvent;
   showTime?: boolean;
   className?: string;
   index?: number;
   nested?: boolean;
+  children?: ReactNode;
 }) {
+  const collapsed = useCollapsedTools();
+  const [manualOpen, setManualOpen] = useState(false);
   const [mounted, setMounted] = useState(event.open);
   const isMobile = useIsMobile();
   /* Mobile v2 (#1439, lane 4; README §2.6): on the phone a tool line is one
@@ -291,7 +296,7 @@ export function ToolLine({
      is what opens it, and the body is mounted only while it is open, so a
      phone transcript never carries a diff it did not ask for. */
   const [phoneOpen, setPhoneOpen] = useState(false);
-  const open = isMobile ? phoneOpen : event.open;
+  const open = collapsed ? manualOpen : isMobile ? phoneOpen : event.open;
   const time = isMobile ? mobileClock(event.ts) : hhmm(event.ts);
   const durationMs = toolDurationMs(event);
   const duration = durationMs === undefined ? "" : formatDuration(durationMs);
@@ -303,6 +308,7 @@ export function ToolLine({
       open={open}
       onToggle={(e) => {
         const next = e.currentTarget.open;
+        if (collapsed) setManualOpen(next);
         if (isMobile) setPhoneOpen(next);
         if (next) setMounted(true);
       }}
@@ -339,7 +345,7 @@ export function ToolLine({
         {duration ? <span className="shrink-0 text-caption tabular-nums text-muted">{duration}</span> : null}
         {showTime && time ? <span className="shrink-0 text-caption tabular-nums text-muted">{time}</span> : null}
       </summary>
-      {(isMobile ? phoneOpen : mounted) ? <ToolBody event={event} /> : null}
+      {(collapsed ? manualOpen : isMobile ? phoneOpen : mounted) ? <><ToolBody event={event} />{children}</> : null}
     </details>
   );
 }

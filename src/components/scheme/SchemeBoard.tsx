@@ -343,7 +343,7 @@ export function SchemeBoard({
     return built;
   }, [groups, manual, files, layoutFlows, drafts, pipelines, surfacePipelines, favorites, isolatedManualPaths, boardTasks, textExpandedIds, now]);
 
-  const taskScene = useMemo(() => !mapMode && boardTasks.some(task => task.assignments.length || workflowModel.tasks.find(workflow => workflow.task.id === task.id)?.executions.length)
+  const taskScene = useMemo(() => !mapMode && (authoredLayout.groups.some(group => group.kind === "pipeline") || boardTasks.some(task => task.assignments.length || workflowModel.tasks.find(workflow => workflow.task.id === task.id)?.executions.length))
     ? layoutTaskBoard(authoredLayout, boardTasks, workflowModel, layoutZoom, selected, textExpandedIds, {viewportWidth:layoutViewportWidth}) : null,
     [mapMode, authoredLayout, boardTasks, workflowModel, layoutZoom, layoutViewportWidth, selected, textExpandedIds]);
   const layout = taskScene?.layout ?? authoredLayout;
@@ -1270,7 +1270,7 @@ export function SchemeBoard({
         {/* Rails/badges stay passive on the map, but the pipeline hub keeps its
             tap target there — the mobile lite map reaches pipeline controls only
             through it (#93 §2.3). */}
-        <AgentLinksLayer links={layout.links} byPath={layout.byPath} obstacles={railObstacles} interactive={!mapMode && !handLike && !session} hubInteractive={!handLike && !session} width={layout.width} height={layout.height} />
+        <AgentLinksLayer semanticZoom={Boolean(taskScene)} links={layout.links} byPath={layout.byPath} obstacles={railObstacles} interactive={!mapMode && !handLike && !session} hubInteractive={!handLike && !session} width={layout.width} height={layout.height} />
         <NodesLayer
           layout={layout}
           visiblePaths={visibleNativePaths}

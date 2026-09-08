@@ -25,7 +25,8 @@ export async function pageFor(scene='workspace',width=1440,height=900,theme='lig
     window.__longTasks=[];
     new PerformanceObserver(list=>window.__longTasks.push(...list.getEntries().map(e=>e.duration))).observe({type:'longtask',buffered:true});
   });
-  page.errors=[];page.on('pageerror',e=>page.errors.push(e.message));
+  page.setDefaultTimeout(30000);
+  page.errors=[];page.on('pageerror',e=>{page.errors.push(e.message);console.error(e.message);});
   await page.route('**/*',async route=>{
     const u=new URL(route.request().url());
     if(u.origin!=='http://artifact.invalid')throw Error('Unexpected network '+u.origin);

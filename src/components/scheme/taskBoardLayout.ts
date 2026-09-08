@@ -78,15 +78,18 @@ export function layoutTaskBoard(base: SchemeLayout, tasks: readonly PlacedTask[]
   for (const key of byPath.keys()) if (!claimed.has(key)) units.push({ group: null, keys: [key], locked: key.startsWith("task::") && taskById.get(key.slice(6))?.placement === "pinned" });
   const occupied: SchemeRect[] = [], conflicts: string[][] = [];
   const positions = new Map<string, SchemeRect>();
-  const pad = 32 / z, heading = 112 / z, gap = 48 / z;
+  const pad = 32 / z;
   const ordered = units.sort((a, b) => Number(b.locked) - Number(a.locked));
   for (let index = 0; index < ordered.length; index++) {
     const unit = ordered[index], taskKey = unit.keys.find(key => key.startsWith("task::"));
+    const pipeline = unit.group?.kind === "pipeline";
+    const heading = (pipeline ? 48 : 112) / z;
+    const gap = (pipeline ? 144 : 48) / z;
     const keys = aggregate && taskKey ? [taskKey] : unit.keys;
     const outerColumns = aggregate ? Math.max(1, Math.floor(viewportWidth / 508)) : 1;
     const origin = unit.locked && taskKey ? byPath.get(taskKey)! : { x: (index % outerColumns) * 508 / z, y: Math.floor(index / outerColumns) * (aggregate ? 350 : 200) / z };
     const widest = Math.max(...keys.filter(key => key !== taskKey).map(key => byPath.get(key)!.w * z), 320);
-    const columns = Math.max(1, Math.min(3, Math.floor((viewportWidth - 64) / (widest + 48))));
+    const columns = Math.max(1, Math.min(3, Math.floor((viewportWidth - 64) / (widest + gap * z))));
     let x = origin.x, y = origin.y, rowH = 0, column = 0;
     for (const key of keys) {
       const rect = byPath.get(key)!;
@@ -99,9 +102,9 @@ export function layoutTaskBoard(base: SchemeLayout, tasks: readonly PlacedTask[]
     const initial = { ...envelope };
     if (!unit.locked) {
       for (let pass = 0; pass <= occupied.length; pass++) {
-        const collision = occupied.find(rect => overlaps(envelope, rect, gap));
+        const collision = occupied.find(rect => overlaps(envelope, rect, 48 / z));
         if (!collision) break;
-        envelope.y = collision.y + collision.h + gap;
+        envelope.y = collision.y + collision.h + 48 / z;
       }
     } else {
       for (const [key, rect] of positions) if (overlaps(envelope, rect)) conflicts.push([key, unit.group?.key ?? unit.keys[0]]);

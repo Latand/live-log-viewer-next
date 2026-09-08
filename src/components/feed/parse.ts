@@ -55,9 +55,10 @@ export type NestedCall = {
   family: ToolFamily;
   icon: GlyphName;
   summary: string;
+  children?: NestedCall[];
 };
 
-/** The two-level orchestration detail of a `functions.exec` record. */
+/** Parsed orchestration detail, including statically known nested exec inputs. */
 export type Orchestration = { source: string; sourceTruncated: boolean; calls: NestedCall[] };
 
 /** A `ScheduleWakeup` call, resolved for the dedicated countdown card.
@@ -1136,7 +1137,7 @@ function batchCommands(fullInput: string): string[] {
  * the full source and raw record expose the ground truth at level 2. Returns
  * null for a plain custom tool, which keeps rendering as one generic row.
  */
-function parseOrchestration(input: string): {
+function parseOrchestration(input: string, depth = 0): {
   overlay: Partial<ToolEvent>;
   body?: Orchestration;
   diff?: DiffModel;
@@ -1145,16 +1146,21 @@ function parseOrchestration(input: string): {
   if (!input || !/\btools\.[A-Za-z_]\w*\s*\(/.test(input)) return null;
   const calls: NestedCall[] = [];
   let concreteInteractive: { tool: "wait" | "write_stdin"; args: Record<string, unknown> } | undefined;
-  ORCH_CALL_RE.lastIndex = 0;
+  const callPattern = new RegExp(ORCH_CALL_RE.source, "g");
   let match: RegExpExecArray | null;
-  while ((match = ORCH_CALL_RE.exec(input)) && calls.length < ORCH_MAX_CALLS) {
+  while ((match = callPattern.exec(input)) && calls.length < ORCH_MAX_CALLS) {
     const method = match[1];
     const open = match.index + match[0].length - 1; // the '(' at the end of the match
     const argsSrc = sliceCallArgs(input, open);
     const tool = ORCH_METHOD_TOOL[method] ?? method;
     const args = orchCallArgs(tool, argsSrc, input);
     const s = summarizeTool(tool, args, "codex");
-    calls.push({ id: `${method}#${calls.length}`, tool: method, family: s.family, icon: s.icon, summary: s.summary });
+    // Only a literal exec input establishes another level. Dynamic arguments
+    // stay at their known summary; source text is never evaluated.
+    const nestedSource = method === "exec" ? decodeJsString(resolveField(argsSrc, input, ["input"]) || positionalLiteral(argsSrc)) : "";
+    const children = nestedSource && depth < 8 ? parseOrchestration(nestedSource, depth + 1)?.body?.calls : undefined;
+    calls.push({ id: `${method}#${calls.length}`, tool: method, family: s.family, icon: s.icon, summary: s.summary, ...(children?.length ? { children } : {}) });
+    if (method === "exec") callPattern.lastIndex = open + argsSrc.length + 2;
     if (tool === "wait" || tool === "write_stdin") {
       const concreteSession = objFieldIsConcreteScalar(argsSrc, ["session_id", "cell_id"]);
       const concreteInput = tool === "wait" || objFieldIsConcreteScalar(argsSrc, ["chars"]);

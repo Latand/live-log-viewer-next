@@ -97,9 +97,8 @@ export const GROUP_MOVE_TRANSITION = `left ${MOVE_MS}ms ${MOVE_EASE}, top ${MOVE
 /* The group label counter-scales with the inverse zoom so it holds a CONSTANT
    on-screen size at ANY zoom — including the 0.12 map minimum, where the old
    min(…, 2.6) cap shrank it to ~3px (issue #118 AC3 / review). Uncapped on
-   purpose: group halos are few and spread across the board, so the far-zoom
-   overlap that node FarLabels cap for is not a concern here. Padding, border and
-   max-width are expressed in em below so they scale with the font too. */
+   purpose: essential text stays readable. Each header is also constrained to
+   its own envelope, including adjacent one-stage pipelines. */
 export const GROUP_LABEL_BASE_PX = 11;
 /** Inverse-zoom ceiling on the counter-scaling. Infinity = never cap, so the
     label stays a fixed on-screen size down to the minimum zoom. A finite value
@@ -315,6 +314,7 @@ export const AgentLinksLayer = memo(function AgentLinksLayer({
   hubInteractive = interactive,
   width,
   height,
+  semanticZoom = false,
 }: {
   links: AgentLink[];
   byPath: Map<string, SchemeRect>;
@@ -329,6 +329,7 @@ export const AgentLinksLayer = memo(function AgentLinksLayer({
   hubInteractive?: boolean;
   width: number;
   height: number;
+  semanticZoom?: boolean;
 }) {
   if (!links.length) return null;
   /* Anchor-only pipeline links carry a hub but no rail (from === to), so they are
@@ -377,6 +378,7 @@ export const AgentLinksLayer = memo(function AgentLinksLayer({
                   fill="none"
                   stroke={color}
                   strokeWidth={2.5}
+                  vectorEffect={semanticZoom ? "non-scaling-stroke" : undefined}
                   strokeLinecap="round"
                   strokeDasharray={failEdge ? "6 6" : link.pipeline!.tone === "dim" ? "5 7" : undefined}
                 />
@@ -400,9 +402,9 @@ export const AgentLinksLayer = memo(function AgentLinksLayer({
           const x = link.pipeline.anchorOnly ? from.x + from.w / 2 : geom?.mid.x ?? from.x + from.w / 2;
           const y = link.pipeline.anchorOnly ? from.y : geom?.mid.y ?? from.y;
           if (link.pipeline.hub) {
-            return <PipelineHub key={link.key} pipeline={link.pipeline.pipeline} x={x} y={y} interactive={hubInteractive} moveTransition={MOVE_TRANSITION} />;
+            return <PipelineHub key={link.key} pipeline={link.pipeline.pipeline} x={x} y={y} interactive={hubInteractive} moveTransition={MOVE_TRANSITION} semanticZoom={semanticZoom} />;
           }
-          return <PipelineEdgeBadge key={link.key} index={link.pipeline.index} total={link.pipeline.total} color={PIPELINE_RAIL_COLOR[link.pipeline.tone]} x={x} y={y} moveTransition={MOVE_TRANSITION} />;
+          return <PipelineEdgeBadge key={link.key} index={link.pipeline.index} total={link.pipeline.total} color={PIPELINE_RAIL_COLOR[link.pipeline.tone]} x={x} y={y} moveTransition={MOVE_TRANSITION} semanticZoom={semanticZoom} />;
         }
         if (!link.flow) return null;
         /* Corridor midpoint of the pair, level with the cycle arcs' center. */
@@ -498,7 +500,7 @@ export const GroupsLayer = memo(function GroupsLayer({
               }`}
               /* Font fully counter-scaled (constant on-screen at any zoom); border
                  and padding are in em so the whole chip holds its on-screen size. */
-              style={{ borderColor: color, color, borderWidth: "0.18em", borderStyle: draft ? "dashed" : "solid", fontSize: groupLabelFontSize() }}
+              style={{ maxWidth: "min(26em, calc(100% - 40px))", borderColor: color, color, borderWidth: "0.18em", borderStyle: draft ? "dashed" : "solid", fontSize: groupLabelFontSize() }}
               aria-expanded={open}
               aria-haspopup="dialog"
               disabled={!interactive}
@@ -547,12 +549,12 @@ export const GroupsLayer = memo(function GroupsLayer({
 });
 
 /** A non-hub pipeline edge's marker: the stage index it hands off into. */
-function PipelineEdgeBadge({ index, total, color, x, y, moveTransition }: { index: number; total: number; color: string; x: number; y: number; moveTransition: string }) {
+function PipelineEdgeBadge({ index, total, color, x, y, moveTransition, semanticZoom }: { index: number; total: number; color: string; x: number; y: number; moveTransition: string; semanticZoom?: boolean }) {
   return (
     <div
       data-scheme-ui
       className="pointer-events-none absolute left-0 top-0 z-[4] inline-flex h-[18px] -translate-x-1/2 -translate-y-1/2 items-center gap-0.5 rounded-full border bg-card px-1.5 text-[9.5px] font-bold shadow-1"
-      style={{ transform: `translate(${x}px, ${y}px) translate(-50%, -50%)`, transition: moveTransition, borderColor: color, color }}
+      style={{ transform: `translate(${x}px, ${y}px)${semanticZoom ? " scale(var(--inv-z, 1))" : ""} translate(-50%, -50%)`, transformOrigin: "top left", transition: moveTransition, borderColor: color, color }}
       aria-hidden
     >
       <span>›</span>
@@ -1073,6 +1075,8 @@ const NodeChrome = memo(function NodeChrome({
       <AncestryChip ancestry={node.ancestry} />
       {pipelineStage ? (
         <span
+          data-pipeline-stage-label
+          style={node.presentation ? { fontSize: "calc(10.5px * var(--inv-z, 1))", height: "2.3em", paddingInline: ".75em", gap: ".5em", top: "-1.15em", right: "1em" } : undefined}
           className="pointer-events-none absolute -top-3 right-3 z-[7] inline-flex h-6 max-w-[78%] items-center gap-1.5 rounded-full border border-accent/35 bg-card px-2 text-[10.5px] font-bold text-accent shadow-1"
           title={stageChipLabel(t, pipelineStage.stage)}
         >
@@ -1151,8 +1155,10 @@ const NodeChrome = memo(function NodeChrome({
         </>
       ) : null}
       <div className={`relative z-[1] flex h-full ${ringed ? "rounded-[10px] ring-2 ring-accent/60 ring-offset-2 ring-offset-canvas" : ""}`}>
-        {node.presentation === "summary" ? <button data-scheme-ui className="flex h-full w-full flex-col items-start justify-center gap-3 rounded-xl border border-border bg-card p-5 text-left" style={{fontSize:16*(node.readerScale??1)}} onClick={() => onSelect(node.file)}>
-          <strong>{cleanTitle(node.file.title,90)}</strong><span>{kindLabel(t,node.file.kind)} · {node.file.activity}</span>
+        {node.presentation === "summary" ? <button data-scheme-ui className="relative h-full w-full rounded-xl border border-border bg-card text-left" onClick={() => onSelect(node.file)}>
+          <div className="absolute left-0 top-0 flex flex-col items-start justify-center gap-3 p-5 text-ui" style={{ width: node.w / (node.readerScale ?? 1), height: node.h / (node.readerScale ?? 1), transform: `scale(${node.readerScale ?? 1})`, transformOrigin: "top left" }}>
+            <strong className="line-clamp-3">{cleanTitle(node.file.title,90)}</strong><CardStatusBadge file={node.file} />
+          </div>
         </button> : null}
         <div ref={nativeSlot} className="absolute left-0 top-0 flex min-h-0 min-w-0" style={{width:node.w/(node.readerScale??1),height:node.h/(node.readerScale??1),transform:`scale(${node.readerScale??1})`,transformOrigin:"top left",display:node.presentation === "summary" ? "none" : undefined}} />
       </div>
