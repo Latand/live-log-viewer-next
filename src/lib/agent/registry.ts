@@ -7,6 +7,7 @@ import { statePath } from "@/lib/configDir";
 import {
   captureProcessIdentity,
   processIdentityMayOwn,
+  processIdentityStatus,
   sameRecordedProcessIdentity,
   type ProcessIdentity,
 } from "@/lib/processIdentity";
@@ -163,6 +164,19 @@ export interface AgentRegistryEntry {
   pendingAction: "spawn" | "resume" | "handoff" | null;
   structuredHostOperationId?: string | null;
   updatedAt: string;
+}
+
+function hasCompleteProcessIdentity(identity: ProcessIdentity | null): identity is ProcessIdentity & {
+  startIdentity: string;
+  bootEpoch: string;
+} {
+  return identity !== null
+    && Number.isSafeInteger(identity.pid)
+    && identity.pid > 0
+    && typeof identity.startIdentity === "string"
+    && identity.startIdentity.length > 0
+    && typeof identity.bootEpoch === "string"
+    && identity.bootEpoch.length > 0;
 }
 
 /** Complete durable input for an explicit-account launch waiting on a known
@@ -5097,11 +5111,19 @@ export class AgentRegistry {
         || (receipt.artifactPath && receipt.artifactPath !== candidate.artifactPath)) {
         return { kind: "conflict", receipt: clone(receipt), code: "spawn_identity_conflict" };
       }
+      /* A route-recovered launch is terminal. Preserve only a handoff marker
+         that the incumbent writer deliberately set; every other action was
+         the launch's own stale publication marker and must not make the
+         completed host look as though it is still registering. */
+      const settledCandidate = {
+        ...candidate,
+        pendingAction: storedEvidence?.pendingAction === "handoff" ? "handoff" as const : null,
+      };
       if (receipt.state === "failed") {
         receipt.state = receipt.key ? "path-pending" : "starting";
         receipt.error = null;
       }
-      return this.settleSpawnInFile(file, launchId, candidate, "route-recovered");
+      return this.settleSpawnInFile(file, launchId, settledCandidate, "route-recovered");
     });
   }
 
@@ -5600,6 +5622,63 @@ export class AgentRegistry {
         const key = Object.values(file.entries).find((entry) => entry.artifactPath === receipt.artifactPath)?.key;
         if (key && liveIds.has(sessionKeyId(key))) receipt.state = "completed";
       }
+    });
+  }
+
+  /** Repairs only historical structured rows whose completed launch receipt
+      proves the exact current generation and whose full recorded ownership is
+      still live. This is intentionally a startup-only repair: an incomplete,
+      mismatched, handoff, or unverifiable row remains untouched. */
+  repairCompletedStructuredSpawnMarkers(): number {
+    const canRepair = (file: RegistryFile, entry: AgentRegistryEntry): boolean => {
+      if (entry.pendingAction !== "spawn"
+        || typeof entry.structuredHostOperationId !== "string"
+        || entry.host !== null
+        || entry.status === "dead"
+        || entry.status === "unhosted") return false;
+      const receipt = file.receipts[entry.structuredHostOperationId];
+      const host = entry.structuredHost;
+      const process = host?.process ?? null;
+      const owner = structuredClaimIdentity(entry.claimOwner ?? "");
+      if (!receipt
+        || receipt.state !== "completed"
+        || receipt.transport !== "structured"
+        || receipt.engine !== entry.key.engine
+        || receipt.cwd !== entry.cwd
+        || receipt.accountId !== entry.accountId
+        || !receipt.key
+        || sessionKeyId(receipt.key) !== sessionKeyId(entry.key)
+        || receipt.artifactPath !== entry.artifactPath
+        || !host
+        || host.writerClaimEpoch !== entry.claimEpoch
+        || !process
+        || !owner
+        || !hasCompleteProcessIdentity(process)
+        || !hasCompleteProcessIdentity(owner)) return false;
+      const conversation = Object.values(file.conversations).find((candidate) =>
+        candidate.engine === entry.key.engine
+          && candidate.generations.at(-1)?.id === entry.key.sessionId
+          && !candidate.supersededBy);
+      if (!conversation || resolveConversationAlias(file, receipt.conversationId) !== conversation.id) return false;
+      /* `ownerAlive` is the registry's injected may-own fence. The status
+         checks add the stronger current identity proof, so PID-only or
+         otherwise unverifiable evidence cannot authorize a marker clear. */
+      return processIdentityStatus(process) === "alive"
+        && processIdentityStatus(owner) === "alive"
+        && this.ownerAlive(process)
+        && this.ownerAlive(owner);
+    };
+    const snapshot = this.readOnlySnapshot();
+    if (!Object.values(snapshot.entries).some((entry) => canRepair(snapshot, entry))) return 0;
+    return this.mutate((file) => {
+      let repaired = 0;
+      for (const entry of Object.values(file.entries)) {
+        if (!canRepair(file, entry)) continue;
+        entry.pendingAction = null;
+        entry.updatedAt = now();
+        repaired += 1;
+      }
+      return repaired;
     });
   }
 

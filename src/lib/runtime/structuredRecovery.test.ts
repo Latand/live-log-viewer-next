@@ -905,6 +905,74 @@ test("live structured ownership prevents a duplicate recovery host", async () =>
   expect(spawnCalls).toBe(0);
 });
 
+test("a live owner with a pending action stays synchronizing and never spawns a successor", async () => {
+  const sessionId = crypto.randomUUID();
+  const cwd = path.join(sandbox, `live-pending-${sessionId}`);
+  const artifactPath = path.join(cwd, `${sessionId}.jsonl`);
+  fs.mkdirSync(cwd, { recursive: true });
+  fs.writeFileSync(artifactPath, "");
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const conversation = registry.ensureConversation("codex", artifactPath, "pending-account");
+  registry.upsert({
+    key: { engine: "codex", sessionId },
+    artifactPath,
+    cwd,
+    accountId: "pending-account",
+    launchProfile: emptyLaunchProfile({ cwd }),
+    status: "idle",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "stdio:live-pending",
+      /* PID-only evidence is unverified, so it must remain fenced. */
+      process: { pid: process.pid, startIdentity: null },
+      eventCursor: 3,
+      protocolVersion: "v2",
+      writerClaimEpoch: 4,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 4,
+    claimOwner: `structured-host:${JSON.stringify({ pid: process.pid, startIdentity: null })}`,
+    pendingAction: "spawn",
+  });
+  let spawnCalls = 0;
+  let recoveryError: unknown = null;
+
+  try {
+    await recoverDeadStructuredConversation({ path: artifactPath, conversationId: conversation.id }, {
+      registry,
+      client: {} as RuntimeHostClient,
+      transport: () => "structured",
+      resolveAccount: () => ({
+        engine: "codex",
+        accountId: "pending-account",
+        kind: "managed",
+        home: cwd,
+        transcriptRoot: cwd,
+        env: { NODE_ENV: "test" },
+      }),
+      spawn: async () => {
+        spawnCalls += 1;
+        throw new Error("the live owner must block successor admission");
+      },
+    });
+  } catch (error) {
+    recoveryError = error;
+  }
+
+  expect(recoveryError).toEqual(expect.objectContaining({ message: expect.stringContaining("synchronizing") }));
+  expect(spawnCalls).toBe(0);
+  expect(registry.readOnlySnapshot().entries[`codex:${sessionId}`]).toMatchObject({
+    claimOwner: `structured-host:${JSON.stringify({ pid: process.pid, startIdentity: null })}`,
+    pendingAction: "spawn",
+  });
+  expect(Object.values(registry.snapshot().receipts).filter((receipt) =>
+    receipt.conversationId === conversation.id && receipt.purpose === "resume-successor",
+  )).toHaveLength(0);
+});
+
 test("issue 611: a live host parked behind a provider limit is held, not published and not replaced", async () => {
   const sessionId = crypto.randomUUID();
   const cwd = path.join(sandbox, `parked-${sessionId}`);
