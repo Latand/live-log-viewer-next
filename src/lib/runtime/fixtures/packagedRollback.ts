@@ -1,42 +1,38 @@
 import fs from "node:fs";
-import { captureProcessIdentity } from "@/lib/processIdentity";
 import path from "node:path";
-import { RuntimeJournal } from "@/runtime-host/journal";
-import { ViewerDeploymentCoordinator } from "@/runtime-host/deployment";
-import { HostCommandViewerDeploymentAdapter } from "@/runtime-host/deploymentAdapter";
-import type { ViewerReleaseIdentity, ViewerHealthEvidence } from "@/lib/runtime/contracts";
 
-// Build/container setup is supplied by the Python harness. The promoted
-// verification deadline, adapter child, rollback and terminal ledger are real.
+// Admission and terminal observation use the real isolated Viewer API. The
+// runtime host owns its frozen coordinator, executable adapter and deadlines.
 const directory = process.env.LLV_STATE_DIR!;
-const input = JSON.parse(fs.readFileSync(path.join(directory, "rehearsal-release.json"), "utf8")) as {
-  candidate: ViewerReleaseIdentity; previous: ViewerReleaseIdentity; actionTimeoutMs?: number;
-};
-const adapter = HostCommandViewerDeploymentAdapter.fromExecutable(path.resolve("scripts/runtime-host-viewer-adapter.ts"), {
-  ...(input.actionTimeoutMs ? { timeouts: { "verify-promoted": input.actionTimeoutMs } } : {}),
-});
-Object.assign(adapter, {
-  reconcile: async () => {},
-  resolveRevision: async () => input.candidate.revision,
-  buildCandidate: async () => input.candidate,
-  startCandidate: async () => {},
-  currentRelease: async () => input.previous,
-  currentMcpRuntime: async () => input.previous.mcpRuntime!,
-  verifyCandidate: async (): Promise<ViewerHealthEvidence> => ({
-    checkedAt: new Date().toISOString(), endpoint: input.candidate.endpoint,
-    processReady: true, rootStatus: 200, authenticatedStatus: null,
-    unauthorizedStatus: null, assets: [], ok: true,
-    detail: "Prechecks are fixture setup; this rehearsal qualifies startup and rollback only.",
-  }),
-  promote: async () => ({ ...input.candidate.mcpRuntime!, action: "activate", publishedAt: new Date().toISOString(), durable: true }),
-  retire: async () => {},
-  retainOnly: async () => {},
-});
-const journal = new RuntimeJournal(path.join(directory, "rollback-rehearsal.sqlite"));
-const coordinator = new ViewerDeploymentCoordinator(journal, adapter, captureProcessIdentity(process.pid));
-const receipt = await coordinator.requestViewerDeployment({ revision: input.candidate.revision, idempotencyKey: "packaged-timeout-rollback" });
-const terminal = await coordinator.waitForDeployment(receipt.deploymentId);
-fs.writeFileSync(path.join(directory, "rollback-terminal.json"), JSON.stringify(terminal));
-journal.close();
-console.log(JSON.stringify({ phase: terminal?.phase, terminal: terminal?.terminal, error: terminal?.error }));
-process.exit(terminal?.phase === "rolled-back" && terminal.terminal ? 0 : 1);
+const port = process.env.LLV_PACKAGED_DEPLOYMENT_PORT;
+if (!port) throw new Error("isolated deployment front port is required");
+const url = `http://127.0.0.1:${port}/api/runtime/deployments`;
+const started = Date.now();
+let deploymentId: string | null = null;
+while (Date.now() - started < 30_000) {
+  try {
+    const response = await fetch(url, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ revision: "a".repeat(40), idempotencyKey: "packaged-incumbent-timeout" }),
+      signal: AbortSignal.timeout(3_000),
+    });
+    const receipt = await response.json() as { deploymentId?: string };
+    if (response.ok && receipt.deploymentId) { deploymentId = receipt.deploymentId; break; }
+  } catch { /* Retry the same admission key while the isolated Viewer boots. */ }
+  await Bun.sleep(250);
+}
+if (!deploymentId) throw new Error("isolated Viewer API admission unavailable");
+while (Date.now() - started < 240_000) {
+  try {
+    const response = await fetch(`${url}/${deploymentId}`, { signal: AbortSignal.timeout(3_000) });
+    const status = await response.json() as Record<string, unknown>;
+    const deployment = (status.deployment ?? status) as { terminal?: boolean; phase?: string };
+    if (response.ok && deployment.terminal) {
+      fs.writeFileSync(path.join(directory, "rollback-terminal.json"), JSON.stringify(deployment));
+      console.log(JSON.stringify(deployment));
+      process.exit(deployment.phase === "rolled-back" ? 0 : 1);
+    }
+  } catch { /* Keep observing the original request through transient reads. */ }
+  await Bun.sleep(250);
+}
+throw new Error("isolated deployment did not terminate");

@@ -9,6 +9,7 @@ import argparse
 import collections
 import json
 import hashlib
+import http.server
 import os
 from pathlib import Path
 import socket
@@ -26,7 +27,7 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--viewer", type=Path, required=True, help="immutable standalone package")
 parser.add_argument("--runtime-source", type=Path, required=True, help="exact incumbent runtime-host source tree")
 parser.add_argument("--bun", type=Path, required=True)
-parser.add_argument("--verify-timeout-ms", type=int, help="shorten only the rehearsal adapter deadline for a deterministic timeout")
+parser.add_argument("--verify-timeout-ms", type=int, help="incumbent API rollback retains its actual 120000 ms deadline")
 parser.add_argument("--hold-startup-ms", type=int, default=0, help="withhold historical responses until this elapsed startup time")
 parser.add_argument("--rollback", action="store_true", help="hold historical publication through the real serving-verification verify-promoted deadline, then exercise rollback")
 parser.add_argument("--codex-only", action="store_true", help="narrower contention control; does not qualify mixed-provider preservation")
@@ -36,6 +37,24 @@ args = parser.parse_args()
 assert 0 <= args.snapshot_delay_ms <= 3000 and 0 <= args.rpc_delay_ms <= 5
 repo = Path(__file__).resolve().parents[1]
 viewer, runtime_source, bun = args.viewer.resolve(), args.runtime_source.resolve(), args.bun.resolve()
+incumbent_revision = "bdf4b85658802c2e1765382c5aef04a6585980a7"
+if args.rollback:
+    if args.verify_timeout_ms not in (None, 120000):
+        parser.error("incumbent API rollback requires the unchanged 120000 ms action deadline")
+    # Freeze every executable/source dependency, including the coordinator and
+    # adapter imports. A current-tree adapter cannot qualify an old-host run.
+    manifest = subprocess.check_output(["git", "ls-tree", "-rz", incumbent_revision], cwd=repo)
+    for entry in manifest.split(b"\0"):
+        if not entry:
+            continue
+        metadata, filename = entry.split(b"\t", 1)
+        filename = filename.decode()
+        if not (filename.startswith(("src/", "scripts/", "bin/")) or filename in ("tsconfig.json", "package.json", "bun.lock")):
+            continue
+        data = (runtime_source / filename).read_bytes()
+        actual = hashlib.sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest()
+        if actual != metadata.decode().split()[2]:
+            raise RuntimeError(f"incumbent source differs from frozen revision: {filename}")
 assert subprocess.check_output([str(bun), "--version"], text=True).strip() == "1.4.0"
 for file in [viewer / "server.js", viewer / "bin/mcp-server.mjs", viewer / "dist/mcp-server.mjs", runtime_source / "src/runtime-host/main.ts"]:
     assert file.is_file(), f"missing packaged prerequisite: {file.name}"
@@ -161,7 +180,17 @@ with socket.socket() as reserved:
     port = reserved.getsockname()[1]
 env.update({"PORT": str(port), "HOSTNAME": "127.0.0.1", "LLV_VIEWER_PORT": str(port), "LLV_RUNTIME_HOST_SOCKET": real_socket})
 logs = [open(root / "host.log", "w"), open(root / "viewer.log", "w")]
-host = subprocess.Popen([str(bun), "src/runtime-host/main.ts"], cwd=runtime_source, env=env, stdout=logs[0], stderr=subprocess.STDOUT)
+host_env = dict(env)
+if args.rollback:
+    with socket.socket() as reserved:
+        reserved.bind(("127.0.0.1", 0))
+        front_port = reserved.getsockname()[1]
+    host_env.update({
+        "LLV_VIEWER_PORT": str(front_port), "LLV_VIEWER_DEPLOYMENTS": "1",
+        "LLV_VIEWER_DEPLOY_ADAPTER": str(repo / "src/lib/runtime/fixtures/packagedIncumbentAdapter.py"),
+        "LLV_PACKAGED_RUNTIME_SOURCE": str(runtime_source), "LLV_PACKAGED_BUN": str(bun),
+    })
+host = subprocess.Popen([str(bun), "src/runtime-host/main.ts"], cwd=runtime_source, env=host_env, stdout=logs[0], stderr=subprocess.STDOUT)
 for _ in range(100):
     if Path(real_socket).exists():
         break
@@ -172,6 +201,23 @@ env["LLV_RUNTIME_HOST_SOCKET"] = relay_socket
 previous_app = None
 rollback_driver = None
 if args.rollback:
+    # Force the real incumbent verifier's outer timeout. Direct candidate and
+    # restored endpoints remain real Viewers; only this serving probe is held.
+    class SlowServing(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            time.sleep(35)
+            try:
+                self.send_response(503)
+                self.end_headers()
+            except OSError:
+                pass
+
+        def log_message(self, *_):
+            pass
+
+    slow = http.server.ThreadingHTTPServer(("127.0.0.1", 0), SlowServing)
+    threading.Thread(target=slow.serve_forever, daemon=True).start()
+    (root / "state/slow-port").write_text(str(slow.server_port))
     with socket.socket() as reserved:
         reserved.bind(("127.0.0.1", 0))
         previous_port = reserved.getsockname()[1]
@@ -203,12 +249,15 @@ app = subprocess.Popen([str(bun), str(viewer / "server.js")], cwd=viewer, env=en
 started = time.monotonic()
 if args.rollback:
     logs.append(open(root / "rollback.log", "w"))
-    rollback_driver = subprocess.Popen([str(bun), "src/lib/runtime/fixtures/packagedRollback.ts"], cwd=repo, env=env, stdout=logs[-1], stderr=subprocess.STDOUT)
+    driver_env = dict(env, LLV_PACKAGED_DEPLOYMENT_PORT=str(front_port))
+    rollback_driver = subprocess.Popen([str(bun), "src/lib/runtime/fixtures/packagedRollback.ts"], cwd=repo, env=driver_env, stdout=logs[-1], stderr=subprocess.STDOUT)
 result = {"ready": False, "deadlineMs": budgets["serving"], "snapshotDelayMs": args.snapshot_delay_ms, "rpcDelayMs": args.rpc_delay_ms}
 if args.rollback:
     # The real verify action and rollback action each retain a hard deadline.
     # Include one bounded capability observation after the terminal write.
-    result["rollbackBoundMs"] = (args.verify_timeout_ms or budgets["action"]) + 90_000 + 5_000
+    result["rollbackBoundMs"] = 120_000 + 90_000 + 5_000
+    result["incumbentRevision"] = incumbent_revision
+    result["deploymentAdmission"] = "Viewer API"
 expected_keys = [("claude" if not args.codex_only and i >= 3 else "codex") + ":00000000-0000-4000-8000-" + str(i).zfill(12) for i in range(6)]
 before_claims = None
 

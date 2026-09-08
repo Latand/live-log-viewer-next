@@ -35,9 +35,9 @@ function viewerReleaseStartupState(
 /* The deployment readiness gate probes this route with a 5s budget. It reads
    two small handoff records and still avoids instantiating the agent registry,
    whose first probe would otherwise pay a multi-MB parse. The activation gate
-   remains compatible with the deployed predecessor adapter. Structured-host
-   recovery is reported independently because it may continue after serving
-   readiness. */
+   remains compatible with the deployed predecessor adapter. Its serving
+   verifier reads releaseReady, so that existing signal also covers structured
+   startup. Passive candidates retain their pre-promotion health semantics. */
 export function GET(): Response {
   const startup = viewerReleaseStartupState();
   if (!startup.activationReady) {
@@ -48,11 +48,14 @@ export function GET(): Response {
   }
   const structuredHostStartup = structuredStartupStatus();
   const structuredDeliveryController = structuredDeliveryControllerReadiness();
+  const releaseReady = startup.releaseReady && (!startup.servesTraffic
+    || ((structuredHostStartup === null || structuredHostStartup.state === "ready")
+      && structuredDeliveryController !== "unavailable"));
   if (startup.servesTraffic && structuredDeliveryController === "unavailable") {
     return Response.json(
       {
         error: "structured delivery controller is unavailable",
-        releaseReady: startup.releaseReady,
+        releaseReady,
         structuredDeliveryController,
         structuredHostStartup,
       },
@@ -63,7 +66,7 @@ export function GET(): Response {
     return Response.json(
       {
         error: "structured host startup adoption is retrying after a failed pass",
-        releaseReady: startup.releaseReady,
+        releaseReady,
         structuredDeliveryController,
         structuredHostStartup,
       },
@@ -75,7 +78,7 @@ export function GET(): Response {
       capability: "viewer-deployments",
       version: 1,
       registryBackendMode: sqliteModeFromEnvironment(),
-      releaseReady: startup.releaseReady,
+      releaseReady,
       structuredDeliveryController,
       structuredHostStartup,
     },

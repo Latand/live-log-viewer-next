@@ -1,5 +1,92 @@
 # Startup and rollback verification for #1552
 
+## Incumbent compatibility follow-up
+
+Status: **incomplete; deployment bootstrap remains blocked**. This follow-up
+builds on `dcd5f0f12e90d84d4ad787f4da353e7723edaf56`. The retained independent
+review identified two P1 compatibility failures against incumbent
+`bdf4b85658802c2e1765382c5aef04a6585980a7`.
+
+The candidate capability now reports `releaseReady: false` while its serving
+structured startup is pending or failed, or its delivery controller is
+unavailable. Passive candidate health and hot-state activation remain available.
+The regression uses verbatim frozen incumbent consumers; the independent
+packaged check also imports the complete original module from the frozen tree.
+The original response failed this check; the repaired response passes.
+
+The rollback defect remains unresolved. The frozen adapter writes a fence that
+drops `activationOwner`, then starts its own checkpoints without waiting for
+Viewer acknowledgement or positive owner death. The candidate's monitor and
+the adapter therefore run concurrently. Candidate-only owner metadata cannot
+make that older consumer wait. Keeping a startup lease until owned hosts finish
+releasing would cover a subset of startup interleavings; it would not establish
+an acknowledgement barrier for rollback after startup finishes or between
+startup attempts. No such partial timing workaround was introduced.
+
+The rehearsal now drives rollback through the isolated Viewer API and actual
+incumbent host, coordinator and executable adapter. Before starting processes it
+checks all incumbent source, scripts, launchers and configuration against the
+pinned Git object. Supplying successor source is a tested rejection. The old
+in-process coordinator fixture has been removed from the execution path.
+Container/build/precheck/promotion setup remains a fixture. A deliberately slow
+serving endpoint forces the incumbent's actual 120-second action timeout;
+rollback retains its actual 90-second limit. This qualifies rollback behavior
+and does not establish a complete successful deployment or host succession.
+
+Fresh verification:
+
+- 476 targeted tests passed: the previous 475 tests plus the capability
+  regression below. Nonincremental TypeScript, standalone Viewer/MCP build and
+  whole-diff privacy with commit/known-value checks passed. Separate runtime-host
+  succession took 503 ms; both endpoints answered 27/27 probes over 15 seconds.
+- Frozen-incumbent baseline API timeout: terminal failed at 129.111 seconds with
+  `agent registry rollback mirror did not converge after 2 attempts`; candidate
+  remained alive and the target was not restored. Six original provider inputs,
+  pending keys/payloads and both external workers were preserved.
+- Repaired candidate through the stable Viewer API: terminal failed at 127.641
+  seconds with the same rollback convergence error; candidate exit and target
+  restoration remain unproven. All six original inputs, pending key/payload,
+  deferred spawn and both external workers were preserved; zero late historical
+  publications or candidate mutations were observed. This remains a failing gate.
+- Repaired packaged ordinary startup, no injected delay: ready at 53.461 seconds,
+  six original sends delivered with exact provider matches, six hosted writers
+  retained, pipeline creation passed, deferred spawn and both external workers
+  preserved. Both actual verifier modules rejected all 145 pending samples and
+  accepted the final ready sample. This measures startup, not deployment succession.
+- The previous ordinary review measured 43.732 seconds. Both ordinary results fit
+  the incumbent's 120-second limit. The historical 158.087-second run below includes
+  an intentional 135-second hold and does not establish unavoidable startup time.
+
+The fresh 2,568-file package manifest digest is
+`e110db8ed152d878e2dc0d14d13a4e741564b9a511728510574ac4559548edc6`.
+
+For incumbent rollback, export the pinned tree to a new directory, supply its
+frozen dependencies, then run:
+
+```sh
+python3 scripts/verify-packaged-startup.py --viewer "$PACKAGE" \
+  --runtime-source "$FROZEN_INCUMBENT" --bun "$BUN" --rollback
+```
+
+The runtime source must match the pinned incumbent. Keep the retained source,
+packages and run evidence. A complete old-host to new-Viewer/runtime success
+and forced-timeout rollback proof, followed by fresh independent review, are
+still required before `DEPLOY_BOOTSTRAP_PROVEN` or release readiness.
+
+Additional manifest entries:
+
+- `src/app/api/runtime/deployments/capabilities/v1/route.ts`
+- `src/app/api/runtime/deployments/capabilities/v1/route.test.ts` (one regression)
+- `src/runtime-host/fixtures/incumbentDeploymentHealth.ts`
+- `src/lib/runtime/fixtures/packagedIncumbentAdapter.py`
+
+## Retained predecessor evidence
+
+The following measurements describe the previous head and its successor-adapter
+rehearsal. They do not qualify the frozen incumbent. The follow-up above supersedes
+its bootstrap assessment.
+
+
 Base: `88e5a9508be2802266734056d6436f3168201cad`.
 The preserved implementation commit is `aff60edc251ede29190b7ca687aceb2f87fa44ac`.
 The successor adopted that commit by fast-forward. The original checkout was clean and was left unchanged. The successor adds provider-side delivery evidence, an explicit rollback wall-clock bound, and a regression for partial host registration.
@@ -60,14 +147,6 @@ Provider evidence matches each of the six immutable journal requests to one obse
 Forced rollback uses the actual coordinator, command adapter, authority, journal, checkpoint and restored standalone Viewer. Container inspection and candidate prechecks are fixture setup. Its 120-second action limit produces a 60-second inner serving limit; terminal rollback must occur within the action limit plus the existing 90-second rollback limit and a 5-second observation allowance. Candidate clean exit and restored readiness are independent assertions. Teardown may force only an exact private runtime-host child after all preservation observations; that is recorded separately and does not establish graceful production host shutdown.
 
 This evidence does not qualify a container image, live provider authentication, or production deployment. Root owns those release checks and one fresh independent review.
-
-## Bootstrap blocker
-
-The incumbent runtime host still has its old 120-second verify-promoted deadline loaded. The new 360-second value becomes effective only when a new host generation runs. `deploy_exact_sha` delegates to that incumbent; its host-handoff phase follows promoted verification. A larger deadline in candidate source therefore cannot bootstrap itself.
-
-Current source and `docs/docker.md` provide `bun scripts/bootstrap-runtime-host.ts <exact-main-sha>` with plan, `--stage`, and `--hand-over` modes. The 13 bootstrap and 36 successor tests passed. This path stages a parked successor and explicitly stops the predecessor runtime-host container. It is a production lifecycle action beyond this builder's authorization. The image-build path also removes its own canonical bootstrap worktree, so the preservation restriction must be accounted for before selecting it. No bootstrap command was executed against production.
-
-No bootstrap path through the currently exposed `deploy_exact_sha` capability that avoids this lifecycle boundary has been established. This remains a release blocker requiring the root orchestrator's decision. A successful isolated rehearsal does not waive it. After a supported bootstrap, root must verify the exact merged runtime-host revision and then perform the ordinary exact-SHA deployment and live continuity checks. Existing pending operator sends and launches remain untouched.
 
 ## Targeted tests
 
