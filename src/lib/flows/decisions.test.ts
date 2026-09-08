@@ -181,6 +181,26 @@ test("atomic receipt survives a stale controller save", async () => {
   expect(loadFlows()[0]?.agentDecisions).toHaveLength(1);
 });
 
+test("a budget change racing completion discards the stale transition and retries acceptance", async () => {
+  const { newRound } = await import("./engine");
+  flow.rounds = [newRound(flow, "button", null)];
+  saveFlows([flow]);
+  request = { ...request, round: 1, expectedRevision: loadFlows()[0]!.revision! };
+  await submitFlowDecision(request, owner);
+  const stale = loadFlows()[0]!;
+  const base = flowTickBase([stale]);
+  const current = loadFlows()[0]!;
+  current.roundLimit = 1;
+  saveFlows([current]);
+  record("task_complete", { last_agent_message: "ready" });
+  await tickFlow(stale, [], new Map(), () => {});
+  expect(stale.state).toBe("spawning");
+  persistTickFlows([stale], base);
+  expect(loadFlows()[0]?.agentDecisions?.[0]?.disposition).toBe("accepted");
+  expect(loadFlows()[0]?.rounds).toHaveLength(1);
+  expect((await tick()).state).toBe("needs_decision");
+});
+
 test("pipeline context requires exact current stage attempt and refuses omission/rotation", () => {
   const stage = { pipelineId: "pipeline-fixture", stageId: "review", attempt: 1 };
   const pipeline = { id: stage.pipelineId, state: "running", cursor: { stageId: stage.stageId }, runs: [{ stageId: stage.stageId, attempts: [{ n: 1, flowId: flow.id }] }] } as Pipeline;

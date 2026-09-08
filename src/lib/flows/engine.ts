@@ -1409,14 +1409,19 @@ export function persistTickFlows(
       if (!start) continue;
       /* The tick touched nothing on this flow → whatever is on disk now wins. */
       if (JSON.stringify(tick) === start.snapshot) continue;
+      const baseFlow = JSON.parse(start.snapshot) as Flow;
+      /* Decision consumption has no external effects. If any flow revision
+         changed while its transcript was read, retain acceptance and retry
+         against that revision (including a reduced round budget/manual mode). */
+      if (JSON.stringify(tick.agentDecisions) !== JSON.stringify(baseFlow.agentDecisions)
+        && diskFlow.revision !== baseFlow.revision) continue;
       const takenOver =
-        JSON.stringify(diskFlow.agentDecisions) !== JSON.stringify((JSON.parse(start.snapshot) as Flow).agentDecisions) ||
+        JSON.stringify(diskFlow.agentDecisions) !== JSON.stringify(baseFlow.agentDecisions) ||
         diskFlow.state !== start.state ||
         diskFlow.rounds.length !== start.roundsLen ||
         diskFlow.closedAt !== start.closedAt;
       if (takenOver) {
         if (diskFlow.state !== "paused" && diskFlow.state !== "closed") continue;
-        const baseFlow = JSON.parse(start.snapshot) as Flow;
         const settledByRound = new Map(tick.rounds.flatMap((round) => {
           const baseRound = baseFlow.rounds.find((item) => item.n === round.n);
           return baseRound?.relayedAt == null && round.relayDelivery && round.relayedAt
@@ -1444,7 +1449,6 @@ export function persistTickFlows(
          difference on disk is a concurrent set-roles that must survive. When the tick
          DID change it (e.g. issue #117 retry nulls it to re-pick an account), the
          tick's value wins. */
-      const baseFlow = JSON.parse(start.snapshot) as Flow;
       const rounds = tick.rounds.map((round, index) => {
         const diskRound = diskFlow.rounds[index];
         const baseRound = baseFlow.rounds[index];
