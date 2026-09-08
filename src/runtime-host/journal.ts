@@ -1,3 +1,7 @@
+import type { RuntimeCanonicalDeliveryBinding } from "@/lib/runtime/contracts";
+import path from "node:path";
+import { decodeCodexStructuredUserText } from "@/lib/runtime/codexStructuredUserText";
+import { normalizeQueueEntry, type QueueEntry } from "@/lib/runtime/engineHost";
 import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from "node:crypto";
 import fs from "node:fs";
 
@@ -572,6 +576,98 @@ export class RuntimeJournal {
       receipt = byOperationId.get(child)!;
     }
     return { operationId: currentOperationId, receipt, replayed: currentOperationId !== operationId };
+  }
+
+  /** Reconcile one uncertain original operation from owned, canonical evidence.
+      No send, retry, host control, or outbox activation is performed here. */
+  async reconcileCanonicalDelivery(operationId: string, readCanonical = async (pathname: string, entry: QueueEntry) => {
+    const { readCanonicalCodexDelivery } = await import("@/lib/runtime/codexAppServerHost");
+    return readCanonicalCodexDelivery(pathname, entry);
+  }, expected?: RuntimeCanonicalDeliveryBinding): Promise<RuntimeOperationResult> {
+    this.assertHealthy();
+    const openingHostEpoch = this.meta("host_epoch");
+    const opening = this.db.query<{ request_json: string; request_hash: string; receipt_json: string }, [string]>(
+      "SELECT request_json, request_hash, receipt_json FROM operations WHERE operation_id = ?").get(operationId);
+    if (!opening) throw new Error("runtime operation is unknown");
+    const command = JSON.parse(opening.request_json) as RuntimeOperationCommand;
+    const receipt = JSON.parse(opening.receipt_json) as RuntimeOperationReceipt;
+    if (command.kind !== "send" && command.kind !== "steer") throw new Error("canonical delivery reconciliation requires a send");
+    if (receipt.status === "delivered") {
+      if (expected && (expected.conversationId !== receipt.conversationId || expected.idempotencyKey !== receipt.idempotencyKey
+        || expected.contentDigest !== receipt.canonicalDelivery?.contentDigest)) throw new Error("original delivery binding does not match the journal");
+      return { operationId, receipt, replayed: true };
+    }
+    if (receipt.status !== "uncertain") throw new Error("canonical delivery reconciliation requires an uncertain original operation");
+    const admission = this.db.query<{ seq: number }, [string]>(
+      "SELECT seq FROM events WHERE scope = ? ORDER BY revision ASC LIMIT 1").get(`operation:${operationId}`);
+    if (!admission) throw new Error("canonical delivery evidence is unavailable");
+    // A bounded historical window. Absence beyond it remains unknown.
+    const echoes = this.db.query<{ seq: number; payload_json: string; producer_key: string | null }, [number, number, string]>(
+      "SELECT seq, payload_json, producer_key FROM events NOT INDEXED WHERE seq BETWEEN ? AND ? AND scope = ? AND kind = 'item' ORDER BY seq LIMIT 256"
+    ).all(admission.seq, admission.seq + 50_000, `session:${command.conversationId}`);
+    const dedup = createHash("sha256").update(operationId).digest("hex");
+    const entry = normalizeQueueEntry({ id: operationId, text: command.text, images: command.images, contentDigest: command.contentDigest,
+      ...(command.selectedContext ? { selectedContext: command.selectedContext } : {}) });
+    if (expected && (expected.conversationId !== command.conversationId || expected.idempotencyKey !== command.idempotencyKey
+      || expected.contentDigest !== entry.contentDigest)) throw new Error("original delivery binding does not match the journal");
+    const contextsEqual = (left: unknown, right: unknown) => stableJson(left ?? null) === stableJson(right ?? null);
+    const candidates = new Map<string, { turnId: string; generation: string; pathname: string; seq: number }>();
+    for (const echo of echoes) {
+      const payload = JSON.parse(echo.payload_json) as { turnId?: unknown; item?: { type?: unknown; clientId?: unknown; content?: unknown } };
+      if (payload.item?.type !== "userMessage" || payload.item.clientId !== operationId || typeof payload.turnId !== "string") continue;
+      const content = payload.item.content;
+      if (!Array.isArray(content)) continue;
+      const wire = content.map((part) => typeof part?.text === "string" ? part.text : "").join("");
+      const decoded = decodeCodexStructuredUserText(wire);
+      if (decoded.deliveryDedup !== dedup || decoded.text !== command.text
+        || (decoded.contentDigest !== null && decoded.contentDigest !== entry.contentDigest)
+        || !contextsEqual(decoded.selectedContext, command.selectedContext)) continue;
+      const metadata = this.db.query<{ payload_json: string }, [string, number]>(
+        "SELECT payload_json FROM events WHERE scope = ? AND kind = 'session-status' AND seq <= ? ORDER BY revision DESC LIMIT 1"
+      ).get(`session:${command.conversationId}`, echo.seq);
+      if (!metadata) continue;
+      const session = JSON.parse(metadata.payload_json) as { sessionKey?: { engine?: unknown; sessionId?: unknown }; artifactPath?: unknown };
+      const generation = session.sessionKey?.sessionId;
+      if (session.sessionKey?.engine !== "codex" || typeof generation !== "string" || typeof session.artifactPath !== "string"
+        || !path.isAbsolute(session.artifactPath) || !echo.producer_key?.startsWith(`engine-host:codex:${generation}:`)) continue;
+      candidates.set(`${generation}:${payload.turnId}`, { turnId: payload.turnId, generation, pathname: session.artifactPath, seq: echo.seq });
+    }
+    if (candidates.size !== 1) throw new Error("canonical delivery binding is missing or ambiguous");
+    const evidence = [...candidates.values()][0]!;
+    if (!await readCanonical(evidence.pathname, { ...entry, text: entry.content.text })) throw new Error("canonical delivery is unproven");
+    this.assertHealthy();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      if (this.meta("host_epoch") !== openingHostEpoch) throw new Error("runtime host changed before canonical reconciliation");
+      const current = this.db.query<{ request_hash: string; receipt_json: string }, [string]>(
+        "SELECT request_hash, receipt_json FROM operations WHERE operation_id = ?").get(operationId);
+      if (!current || current.request_hash !== opening.request_hash) throw new Error("original operation binding changed");
+      const previous = JSON.parse(current.receipt_json) as RuntimeOperationReceipt;
+      if (previous.status === "delivered") {
+        this.db.exec("COMMIT");
+        return { operationId, receipt: previous, replayed: true };
+      }
+      if (previous.status !== "uncertain" || previous.revision !== receipt.revision
+        || this.db.query("SELECT winner FROM delivery_operation_actions WHERE operation_id = ?").get(operationId)) {
+        throw new Error("original delivery moved before canonical reconciliation");
+      }
+      const next: RuntimeOperationReceipt = { ...previous, status: "delivered", reason: null, resend: "not-needed", queuePosition: null,
+        turnId: evidence.turnId, at: new Date(this.now()).toISOString(), revision: previous.revision + 1,
+        canonicalDelivery: { contentDigest: entry.contentDigest, generation: evidence.generation, eventSeq: evidence.seq } };
+      const event = this.appendInTransaction(normalizeRuntimeEventInput({ scope: { type: "operation", id: operationId }, kind: "receipt", operationId,
+        producer: { kind: "runtime-effect", eventKey: `operation:${operationId}:canonical-delivery`, hostEpoch: Number(this.meta("host_epoch")) },
+        payload: next as unknown as Record<string, unknown> }));
+      const committed = { ...next, revision: event.revision };
+      this.upsertEntity("operation", operationId, event.revision, committed, event.seq);
+      this.db.query("UPDATE operations SET receipt_json = ?, event_seq = ? WHERE operation_id = ?").run(stableJson(committed), event.seq, operationId);
+      this.db.query("UPDATE outbox SET state = 'completed', payload_json = '{}' WHERE id = ?").run(`effect:${operationId}`);
+      this.db.exec("COMMIT");
+      this.notifyWaiters();
+      return { operationId, receipt: committed, replayed: false };
+    } catch (error) {
+      try { this.db.exec("ROLLBACK"); } catch {}
+      throw error;
+    }
   }
 
   completeOperation(

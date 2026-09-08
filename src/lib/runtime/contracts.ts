@@ -164,6 +164,8 @@ export interface RuntimeAttention {
 
 export interface RuntimeOperationReceipt {
   operationId: string;
+  /** Original-key delivery established by canonical content, without replay. */
+  canonicalDelivery?: { contentDigest: string; generation: string; eventSeq: number };
   /** The terminal attempt this operation replaces, when it was created by Retry. */
   retryOfOperationId?: string | null;
   /** Stable reducer identity used to replace the visible retry ancestor. */
@@ -196,6 +198,12 @@ export interface RuntimeOperationReceipt {
   revision: number;
 }
 export type RuntimeReceipt = RuntimeOperationReceipt;
+
+export interface RuntimeCanonicalDeliveryBinding {
+  conversationId: string;
+  idempotencyKey: string;
+  contentDigest: string;
+}
 
 export interface RuntimeTransitionOptions {
   /** Compare-and-set fence evaluated inside the journal write transaction. */
@@ -725,7 +733,7 @@ export interface RuntimeReplay {
 
 export interface RuntimeSocketRequest {
   id: string;
-  method: "runtime-host-health" | "snapshot" | "events" | "wait" | "append" | "operation" | "command" | "operation-status" | "operation-delivery-action" | "operation-retry" | "effect-batch" | "operation-transition" | "producer-cursor" | "viewer-deployment-request" | "viewer-deployment-read" | "viewer-deployment-cancel" | "mcp-health-probe-admission";
+  method: "runtime-host-health" | "snapshot" | "events" | "wait" | "append" | "operation" | "command" | "operation-status" | "operation-delivery-action" | "operation-retry" | "operation-reconcile-delivery" | "effect-batch" | "operation-transition" | "producer-cursor" | "viewer-deployment-request" | "viewer-deployment-read" | "viewer-deployment-cancel" | "mcp-health-probe-admission";
   params?: Record<string, unknown>;
 }
 
