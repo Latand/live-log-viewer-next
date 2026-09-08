@@ -205,21 +205,21 @@ test("the source chip opens the originating conversation and disables truthfully
     source: { path: "/origin.jsonl", ts: null, text: "captured", fingerprint: "f1", engine: "codex" },
   });
   const live = render(sourced, { files: [origin] });
-  const open = live.host.querySelector("[data-task-open-source]") as HTMLButtonElement;
+  const open = live.host.querySelector("[data-task-source-navigation]") as HTMLButtonElement;
   expect(open.disabled).toBe(false);
-  expect(open.getAttribute("aria-label")).toBe("Open source conversation Origin conversation");
+  expect(open.getAttribute("aria-label")).toBe("Open originating conversation Origin conversation");
   open.click();
   expect(live.calls.opened.map((entry) => entry.path)).toEqual(["/origin.jsonl"]);
 
   const gone = render(sourced, { files: [] });
-  const unavailable = gone.host.querySelector("[data-task-open-source]") as HTMLButtonElement;
+  const unavailable = gone.host.querySelector("[data-task-source-navigation]") as HTMLButtonElement;
   /* Truthful accessibility (issue #292 fresh review): the control stays in the
      tab order and announces *why* it can't open, instead of vanishing from
      keyboard and screen-reader reach behind a native `disabled`. */
   expect(unavailable.disabled).toBe(false);
   expect(unavailable.getAttribute("aria-disabled")).toBe("true");
   expect(unavailable.getAttribute("aria-label")).toBe(
-    "Open source conversation origin.jsonl — unavailable: the source conversation is not on the board",
+    "Open originating conversation origin.jsonl — unavailable: the source conversation is not on the board",
   );
   expect(unavailable.title).toBe("the source conversation is not on the board");
   unavailable.click();

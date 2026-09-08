@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
+import { memo, useCallback, useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 
 import { ArrowRight, ArrowUpToLine, Check, ChevronRight, Loader2, Play, X } from "@/components/icons";
@@ -23,6 +23,7 @@ import { getLocale, useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 import type { RuntimeReceipt } from "@/components/runtime/runtimeModel";
 
+import { DormantView } from "./conversation/DormantView";
 import { ComposerBar, composerSlotKind, type ComposerSlotKind } from "./ComposerBar";
 import { chatState } from "./mobile/mobileChatState";
 import { SelectedContextBadge } from "./SelectedContextBadge";
@@ -1357,6 +1358,8 @@ export function structuredComposerSession(runtimeSession: RuntimeSessionView | n
 }
 
 export interface TmuxComposerProps {
+  /** Suspend presentation while its delivery controller remains mounted. */
+  viewActive?: boolean;
   file: FileEntry;
   pollPaused?: boolean;
   deadHost?: boolean;
@@ -1375,6 +1378,12 @@ export interface TmuxComposerProps {
       remount could take the form out from under the operator. */
   primaryPlace?: boolean;
 }
+
+function ComposerContextBadge() {
+  const context=useViewerSelectedContext();
+  return context.state === "selected" ? <div className="flex justify-end"><SelectedContextBadge reference={context} /></div> : null;
+}
+
 
 /**
  * Chat-style composer pinned under the feed. A live pane gets the text typed
@@ -1417,12 +1426,13 @@ function VoiceComposerCardSlot({ cardId, composerProps, primary }: { cardId: str
   useEffect(() => {
     publishVoiceComposerCardProps(cardId, placeId, {
       file: composerProps.file,
+      viewActive: composerProps.viewActive ?? true,
       pollPaused: composerProps.pollPaused ?? false,
       deadHost: composerProps.deadHost ?? false,
       sendBlockedReason: composerProps.sendBlockedReason ?? null,
       placeholder: composerProps.placeholder,
     });
-  }, [cardId, composerProps.deadHost, composerProps.file, composerProps.placeholder, composerProps.pollPaused, composerProps.sendBlockedReason, placeId]);
+  }, [cardId, composerProps.deadHost, composerProps.file, composerProps.placeholder, composerProps.pollPaused, composerProps.sendBlockedReason, composerProps.viewActive, placeId]);
   return <div ref={publishNode} data-testid="voice-composer-card-slot" className="contents" />;
 }
 
@@ -1433,13 +1443,14 @@ function VoiceComposerCardSlot({ cardId, composerProps, primary }: { cardId: str
  * that keeps everything mounted while no card is on screen. State never lives in
  * the portal target; moving containment moves DOM, not lifetimes.
  */
-export function TmuxComposerCore({
+export const TmuxComposerCore = memo(function TmuxComposerCore({
   file,
   pollPaused = false,
-  deadHost = false,
+  deadHost: paneDeadHost = false,
   sendBlockedReason = null,
   placeholder,
   dockNode,
+  viewActive = true,
 }: TmuxComposerProps & {
   /** Absent: render the form inline (the card owns the composer, as ever).
       A node: portal the form there. Null: keep the form mounted but hidden. */
@@ -1460,6 +1471,7 @@ export function TmuxComposerCore({
   // scanner-shaped subagent, a shell task) means this surface exposes no message
   // path at all, so the whole composer stands down below (finding 2).
   const { caps, structuredSession } = runtimeDependencies.useAgentCapabilities(file);
+  const deadHost = paneDeadHost || caps.surface === "dead";
   const voiceEnabled = cardId.startsWith("conversation_")
     && structuredSession?.session.hostKind === "codex-app-server"
     && structuredSession.session.host === "hosted";
@@ -1532,17 +1544,18 @@ export function TmuxComposerCore({
     /* Queue-first (issue #561): a submitted message lives in the durable
        outbox, so the field never locks behind an in-flight delivery. */
     holdInputWhileBusy: false,
+    viewActive,
   });
   /* Pulls the bridge inbox once, at the start of a turn, and only for the voice
      conversation. Returns "" for every other card and whenever nothing is pending. */
   const drainBridgeTurnStart = useBridgeTurnStartDrain(voiceEnabled, { conversationId: cardId });
   const { text, textRef, setText, setTextState, inputRef, setStatus, busy, setBusy, voiceSending, attachments } = composer;
   const attachmentDraftHydrated = useRef(false);
-  const isMobile = useIsMobile();
+  const isMobile = useIsMobile(viewActive);
   /* The runtime's own connection, for the phone's Queue slot (§4.2): while the
      bus is off this reads inert, so nothing changes on the landing-disabled
      path. */
-  const runtimeBus = useRuntimeBusState();
+  const runtimeBus = useRuntimeBusState(viewActive);
   const runtimeOffline = runtimeBus.enabled && runtimeBus.connection === "offline";
   /* One in-flight slot action at a time — Stop or Respawn. */
   const [slotBusy, setSlotBusy] = useState(false);
@@ -2034,6 +2047,7 @@ export function TmuxComposerCore({
      resolve on the successor, not this predecessor, so only an explicit
      resolve/dismiss removes them. */
   useEffect(() => {
+    if (!viewActive) return;
     const prune = () =>
       setSent((prev) => {
         const next = prev.filter((entry) => {
@@ -2047,15 +2061,7 @@ export function TmuxComposerCore({
     prune();
     const timer = setInterval(prune, 5_000);
     return () => clearInterval(timer);
-  }, [file.mtime, cardId]);
-
-  /* #844: the PREVIEW read — it follows the selection as the operator moves it.
-     Above the capability early-returns below, because a hook may not be called
-     conditionally; the badge it feeds is rendered only when there is a card to
-     name. The submission itself re-reads the bus synchronously inside `send`, so
-     what rides the wire is decided at the submission instant rather than by
-     whatever this render closed over. */
-  const liveSelectedContext = useViewerSelectedContext();
+  }, [file.mtime, cardId, viewActive]);
 
   // A surface whose Send capability is hidden exposes NO message surface — no
   // Send, quick-ack, mic, or image path, and fires zero requests. This gates the
@@ -2074,7 +2080,9 @@ export function TmuxComposerCore({
      resolving reason (so no /api/tmux POST can fire even without the pane's
      prop), and keeps the Re-check recovery route (issue #499 round 2). */
   const unresolvedOwnership = caps.surface === "unresolved";
-  const effectiveSendBlockedReason = sendBlockedReason ?? (unresolvedOwnership ? t("strip.resolving") : null);
+  const effectiveSendBlockedReason = sendBlockedReason
+    ?? (!deadHost && caps.controls.send.state === "disabled" ? t(caps.controls.send.reason) : null)
+    ?? (unresolvedOwnership ? t("strip.resolving") : null);
   const spawnMode = target === null && !structuredSession && !unresolvedOwnership;
   const relayMode = spawnMode && file.root === "claude-projects" && file.kind === "subagent";
 
@@ -3012,24 +3020,13 @@ export function TmuxComposerCore({
           adoption flap, a pane-target flap hiding the composer), so its
           deletion pass can still see who held focus. */}
       <ComposerFocusContinuity claimKeys={[cardId, file.path]} />
-      {/* Drains the outbox one message at a time (issue #561). Renders nothing;
-          the queued bubbles themselves live in the feed above. */}
-      <OutboxDispatcher
-        entries={outbox}
-        ready={!busy && !voiceSending && !reconcilingSend}
-        onDispatch={dispatchQueued}
-      />
       {/* #844: what the NEXT turn will point at, shown before the operator
           commits to it. Only when a card is actually selected — an explicit
           empty selection is an answer worth persisting on the sent record, but a
           permanent "nothing selected" chip over every composer in the app is
           noise. The transcript row renders the same badge from the same
           component afterwards, so the before and after can be compared. */}
-      {liveSelectedContext.state === "selected" ? (
-        <div className="flex justify-end">
-          <SelectedContextBadge reference={liveSelectedContext} />
-        </div>
-      ) : null}
+      <ComposerContextBadge />
       {/* Proactive hold hint: while the card is switching accounts, the next
           send is queued for the successor rather than delivered live. Shown
           identically under the desktop and mobile composers. */}
@@ -3138,9 +3135,11 @@ export function TmuxComposerCore({
   /* Inline for a card that owns its composer; portalled into the card's slot for
      a hoisted one; parked hidden — mounted, draining, recording — when the card
      is gone mid-call. The `hidden` container is what keeps a dictation, a staged
-     image's object URL and the outbox dispatcher alive across board navigation. */
-  if (dockNode === undefined) return body;
-  return dockNode
-    ? createPortal(body, dockNode)
-    : <div hidden data-testid="voice-composer-parked">{body}</div>;
-}
+     image's object URL alive across board navigation. The dispatcher below
+     remains outside the dormant presentation boundary. */
+  const view = <DormantView active={viewActive}>{body}</DormantView>;
+  return <>
+    <OutboxDispatcher entries={outbox} ready={!busy && !voiceSending && !reconcilingSend} onDispatch={dispatchQueued} />
+    {dockNode === undefined ? view : dockNode ? createPortal(view, dockNode) : <div hidden data-testid="voice-composer-parked">{view}</div>}
+  </>;
+});
