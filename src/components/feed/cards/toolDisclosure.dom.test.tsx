@@ -119,4 +119,11 @@ test("standalone default-open call and functions.exec children disclose one leve
   expect(h.textContent).toContain("deep leaf");
   rerender(node);
   expect((nested as HTMLDetailsElement).open).toBe(true);
+  const parent = event.orchestration.calls[0];
+  const arrived = { ...event, orchestration: { ...event.orchestration, calls: [{ ...parent, children: [...parent.children, { ...parent.children[0], id: "new-leaf", summary: "new nested arrival" }] }] } };
+  rerender(<ToolDisclosurePolicy value="collapsed"><ToolCard event={arrived} /></ToolDisclosurePolicy>);
+  expect((nested as HTMLDetailsElement).open).toBe(true);
+  expect((nested.querySelector("details") as HTMLDetailsElement).open).toBe(true);
+  expect((nested.querySelectorAll("details")[1] as HTMLDetailsElement).open).toBe(false);
+  expect(h.textContent).not.toContain("new nested arrival");
 });
