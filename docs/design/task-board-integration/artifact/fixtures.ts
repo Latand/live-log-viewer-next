@@ -118,6 +118,7 @@ export function appendMessage(path: string, role: string, text: string) {
   }
 }
 
+export const pipelineFixtures: any[] = [];
 export const taskFixtures = nodes.filter(n => n.kind === 'task').map(n => ({
   id: n.id, project: PROJECT, status: n.status === 'done' ? 'done' : 'assigned', text: `${n.title}\n${n.detail}`,
   placement: 'auto', pos: { x: n.x, y: n.y }, source: null, createdAt: new Date(now).toISOString(), updatedAt: new Date(now).toISOString(),
@@ -161,11 +162,29 @@ export function fixtureScene(mode: string) {
 }
 export function selectFixtureScene(mode: string) {
   const scene = fixtureScene(mode);
+  pipelineFixtures.length = 0;
+  if (mode === 'pipelines') {
+    const workers = scene.nodes.filter(n => n.file).slice(0, 4);
+    files.splice(0, files.length, ...workers.map(n => ({ ...n.file!, parent: null, durableLineage: { ...n.file!.durableLineage!, parentConversationId: null } })));
+    taskFixtures.length = 0;
+    const role = { roleId: null, engine: 'codex', model: null, effort: null, access: 'read-write', promptScaffold: null };
+    for (const [index, count] of [2, 1, 1].entries()) {
+      const offset = index === 0 ? 0 : index + 1;
+      const stages = Array.from({ length: count }, (_, i) => ({ id: i === 0 ? 'build' : 'review', kind: 'run', prompt: '', next: i + 1 < count ? 'review' : null, role: { roleId: i === 0 ? 'builder' : 'reviewer' }, effectiveRole: { ...role, roleId: i === 0 ? 'builder' : 'reviewer' } }));
+      pipelineFixtures.push({ id: 'pipeline-fixture-' + index, task: ['Validate idle scheduling and preserve queued delivery evidence', 'Publish the verified package and preserve release history', 'Prepare runtime deployment and verify release continuity'][index], project: PROJECT, repoDir: '/fixture/repo', worktreeDir: '/fixture/worktree', branch: 'fixture', baseBranch: 'main', baseRef: 'a', lastPassedCommit: 'a', stages, taskIds: [], runs: stages.map((stage, i) => ({ stageId: stage.id, attempts: [{ n: 1, effectiveRole: role, launchId: null, sessionId: null, paneId: null, startedAt: new Date(now).toISOString(), completedAt: null, input: null, activatedBy: null, output: null, verdict: null, error: null, state: 'needs_decision', agentPath: files[offset+i].path, conversationId: files[offset+i].conversationId, flowId: null }] })), cursor: { stageId: stages.at(-1)!.id, state: 'needs_decision', input: null, activatedBy: null }, state: 'needs_decision', pausedState: null, stateDetail: null, srcPath: null, srcConversationId: null, createdAt: new Date(now).toISOString(), closedAt: null });
+    }
+    return;
+  }
   files.splice(0, files.length, ...scene.nodes.flatMap(n => n.file ? [n.file] : []));
   taskFixtures.splice(0, taskFixtures.length, ...scene.nodes.filter(n => n.kind === 'task').map(n => ({
     id: n.id, project: PROJECT, status: n.status === 'done' ? 'done' : 'assigned', text: `${n.title}\n${n.detail}`, placement: 'auto', pos: { x: n.x, y: n.y }, source: null,
     createdAt: new Date(now).toISOString(), updatedAt: new Date(now).toISOString(), assignments: scene.nodes.filter(worker=>worker.group===n.group&&worker.file).map(worker=>({path:worker.file!.path,conversationId:worker.file!.conversationId!,panePid:null,state:'delivered',error:null,at:new Date(now).toISOString()})),
   })));
+  if (mode === 'tools') {
+    const stamp = new Date().toISOString();
+    const inner = 'await tools.exec_command({cmd:"nested leaf command"})';
+    transcript.set(files[0].path, [line('user', 'Inspect tool disclosure in both surfaces.', 0), ...[0,1].map(i => JSON.stringify({type:'response_item',timestamp:stamp,payload:{type:'custom_tool_call',call_id:'call-'+i,name:'exec',input:i===0?`await tools.exec(${JSON.stringify(inner)})`:'await tools.exec_command({cmd:"arrival 1"})'}}))]);
+  }
   window.dispatchEvent(new Event('llv:files-changed'));
 }
 export function latestSummary(n: WorkNode) {

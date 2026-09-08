@@ -1,6 +1,9 @@
 "use client";
 
+import { useState } from "react";
+
 import { GlyphIcon } from "../../icons";
+import { useCollapsedTools } from "../toolDisclosure";
 import { tr, type NestedCall, type Orchestration } from "../parse";
 
 /* One inner operation of a functions.exec record: its icon and target/command
@@ -9,10 +12,19 @@ import { tr, type NestedCall, type Orchestration } from "../parse";
    fully visible. The transcript stores the combined result on the outer event
    and omits per-call status/output, so each child shows parsed data only. */
 function NestedRow({ call }: { call: NestedCall }) {
+  const collapsed = useCollapsedTools();
+  const [open, setOpen] = useState(false);
+  if (collapsed) return (
+    <details open={open} onToggle={event => setOpen(event.currentTarget.open)} className="min-w-0 py-0.5 text-ui text-secondary">
+      <summary className="cursor-pointer [overflow-wrap:anywhere]">{call.tool}</summary>
+      {open ? <div className="ml-4 [overflow-wrap:anywhere]">{call.summary}{call.children?.map(child => <NestedRow key={child.id} call={child} />)}</div> : null}
+    </details>
+  );
   return (
     <div className="flex items-start gap-2 py-0.5 font-mono text-[11.5px] text-secondary">
       <GlyphIcon name={call.icon} className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted" />
       <span className="min-w-0 flex-1 [overflow-wrap:anywhere]">{call.summary}</span>
+      {call.children?.map(child => <NestedRow key={child.id} call={child} />)}
     </div>
   );
 }

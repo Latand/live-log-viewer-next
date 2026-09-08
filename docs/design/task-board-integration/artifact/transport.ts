@@ -1,4 +1,4 @@
-import { PROJECT, files, taskFixtures, appendMessage, selectFixtureScene, transcript } from './fixtures';
+import { PROJECT, files, taskFixtures, pipelineFixtures, appendMessage, selectFixtureScene, transcript } from './fixtures';
 import { whenVisible } from './memory-log';
 import { applyBoardMutations } from '@/lib/board/mutations';
 export const calls: { path: string; method: string; result: string }[] = [];
@@ -80,7 +80,7 @@ export function installMemoryTransport() {
       storage.setItem('fixture-task-positions',JSON.stringify(Object.fromEntries(taskFixtures.filter(t=>t.placement==='pinned').map(t=>[t.id,{pos:t.pos,placement:t.placement}]))));
       return response({task:taskFixtures[index]});
     }
-    if (url.pathname === '/api/files') return response({ files, tasks: taskFixtures, flows: [], pipelines: [], workflows: [], projectCatalog: [], projectAliases: {}, projectDisplayNames: { [PROJECT]: 'Workspace' }, projectCwds: { [PROJECT]: '/fixture/workspace' }, crownedProjects: [], conversationAliases: {}, launchRoutes: {}, systemHealth: { tmux: { status: 'healthy' } } });
+    if (url.pathname === '/api/files') return response({ files, tasks: taskFixtures, flows: [], pipelines: pipelineFixtures, workflows: [], projectCatalog: [], projectAliases: {}, projectDisplayNames: { [PROJECT]: 'Workspace' }, projectCwds: { [PROJECT]: '/fixture/workspace' }, crownedProjects: [], conversationAliases: {}, launchRoutes: {}, systemHealth: { tmux: { status: 'healthy' } } });
     if (url.pathname === '/api/board') {
       if (method === 'PATCH') {
         const body = JSON.parse(String(init?.body ?? '{}'));
@@ -90,10 +90,16 @@ export function installMemoryTransport() {
       }
       return response({ board, applied: true });
     }
+    if (url.pathname === '/api/pipelines') return response({ pipelines: pipelineFixtures });
     if (url.pathname === '/api/attention') return response({ live: [], history: [] });
     if (url.pathname === '/api/tts/backend') return response({ backend: null, options: [] });
     if (url.pathname === '/api/accounts') return response({ active: null, accounts: [], claude: { accounts: [], active: null } });
     if (url.pathname === '/api/limits') return response({ claude: null, codex: null, claudeAccountId: null, codexAccountId: null, provenance: { claude: { source: 'unavailable', reason: null, staleSince: null }, codex: { source: 'unavailable', reason: null, staleSince: null } } });
+    if (new URLSearchParams(location.search).get('scene') === 'tools') {
+      const file = files[0];
+      if (url.pathname === '/api/orchestrator/seat/status') return response({ project: PROJECT, designated: true, conversationId: file.conversationId, transcriptPath: file.path, engine: 'codex', liveness: { lifecycle: 'running', hostState: 'alive' } });
+      if (url.pathname === '/api/orchestrator/seat') return response({ exists: true, pending: null, seat: { project: PROJECT, seatEpoch: 1, conversationId: file.conversationId, path: file.path, mandate: 'Coordinate the synthetic workspace', state: 'active', intent: { clientRequestId: 'fixture-seat', mode: 'existing', launchId: null, error: null }, designatedAt: new Date().toISOString(), activatedAt: new Date().toISOString() } });
+    }
     if (url.pathname.includes('orchestrator')) return response({ seat: null, pending: null, exists: false, incumbent: null });
     if (url.pathname === '/api/tmux/targets' && method === 'POST') {
       const body = JSON.parse(String(init?.body ?? '{}'));
