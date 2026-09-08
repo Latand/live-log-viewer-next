@@ -1,6 +1,6 @@
 "use client";
 
-import { BoxSelect, Focus, Hand, Maximize2, Minus, MousePointer2, Plus, StickyNote } from "lucide-react";
+import { BoxSelect, History, Focus, Hand, Maximize2, Minus, MousePointer2, Plus, StickyNote } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useBoardState } from "@/hooks/useBoardState";
@@ -19,6 +19,8 @@ import { flowByImplementer } from "@/components/flows/flowModel";
 import type { BranchGroup } from "@/components/projectModel";
 import { deleteTask, handoffTask, unassignTask, updateTask } from "@/components/tasks/taskApi";
 import { taskRelationsByPath } from "@/components/tasks/taskRelations";
+import { TaskWorkflowPanel } from "@/components/tasks/TaskWorkflowPanel";
+import { projectTaskWorkflows } from "@/components/tasks/taskWorkflowModel";
 import { taskTitle } from "@/components/tasks/taskModel";
 import { pushTaskToast } from "@/components/tasks/taskToast";
 import { cleanTitle } from "@/components/utils";
@@ -233,6 +235,9 @@ export function SchemeBoard({
 }: Props) {
   const { t } = useLocale();
   const mapMode = Boolean(onNodePick);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const closeHistory = useCallback(() => setHistoryOpen(false), []);
+  const workflowModel = useMemo(() => historyOpen && !mapMode ? projectTaskWorkflows(allTasks, pipelines, flows, files) : null, [historyOpen, mapMode, allTasks, pipelines, flows, files]);
   const [selected, setSelected] = useState<string | null>(null);
   const [badgeAnchorRevision, setBadgeAnchorRevision] = useState(0);
   const badgeAnchors = useMemo(
@@ -1353,6 +1358,9 @@ export function SchemeBoard({
             <ToolButton active={taskTool} title={t("tasks.tool")} onClick={() => setTaskTool(!taskTool)}>
               <StickyNote className="h-4 w-4" aria-hidden />
             </ToolButton>
+            <ToolButton active={historyOpen} title={t("taskHistory.title")} onClick={() => setHistoryOpen(value => !value)}>
+              <History className="h-4 w-4" aria-hidden />
+            </ToolButton>
             <div className="mx-0.5 h-5 w-px bg-border" aria-hidden />
           </>
         )}
@@ -1387,6 +1395,8 @@ export function SchemeBoard({
           onExit={clearSession}
         />
       ) : null}
+
+      {workflowModel && <TaskWorkflowPanel model={workflowModel} onOpen={stableSelect} onClose={closeHistory} />}
 
       <Minimap
         layout={layout}
