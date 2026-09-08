@@ -250,12 +250,14 @@ function dischargedThrough(events: readonly SeatTickEventInput[], cursor: number
   return sealed;
 }
 
-/** Protect an open or unobservable turn. Silence never establishes completion. */
+/** Admission to the existing recovery path; the owned host still fences input. */
 export function seatTurnProgressing(seat: SeatTickSeatInput): boolean {
-  if (seat.turn !== "idle" && seat.turn !== "terminal") return true;
   const activity = seat.activity;
-  return !activity || activity.turnState !== "idle"
-    || activity.lifecycle === "running" || activity.lifecycle === "starting" || activity.lifecycle === "stalled";
+  if (!activity || activity.turnState === undefined || activity.turnState === "unknown") return true;
+  if (activity.lifecycle === "starting" || activity.lifecycle === "running") return true;
+  if (activity.turnState === "idle") return false;
+  // Silence under a live or unobservable turn does not authorize intervention.
+  return !(activity.lifecycle === "stalled" && activity.reason === "host_gone_turn_open");
 }
 
 /**

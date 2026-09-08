@@ -747,6 +747,10 @@ export class ClaudeStreamBrokerHost implements EngineHost {
         : defaultTranscriptUsers(options.cwd, sessionId, options.claudeProjectsDir));
       host.emit({ kind: "session-status", status: "idle" });
       host.idleTickHistoryKnown = !resume;
+      if (resume) {
+        const previous = host.events.findLast((event) => event.kind === "turn-started");
+        host.recoveredIdleTurnId = previous?.kind === "turn-started" ? previous.turnId : null;
+      }
       return host;
     } catch (error) {
       try {
@@ -792,6 +796,7 @@ export class ClaudeStreamBrokerHost implements EngineHost {
   }
 
   private idleTickHistoryKnown = false;
+  private recoveredIdleTurnId: string | null = null;
 
   async send(entry: QueueEntry): Promise<DeliveryReceipt> {
     if (this.unavailable()) return { outcome: "rejected", reason: "dead-host" };
@@ -821,8 +826,9 @@ export class ClaudeStreamBrokerHost implements EngineHost {
       const completed = started?.kind === "turn-started"
         ? this.events.findLast((event) => event.kind === "turn-ended" && event.turnId === started.turnId)
         : null;
+      const recovered = started?.kind === "turn-started" && started.turnId === this.recoveredIdleTurnId;
       if ((!started && !this.idleTickHistoryKnown)
-        || (started && (completed?.kind !== "turn-ended" || completed.status !== "completed"))) {
+        || (started && !recovered && (completed?.kind !== "turn-ended" || completed.status !== "completed"))) {
         return { outcome: "rejected", reason: "stale-turn" };
       }
     }
@@ -1115,7 +1121,9 @@ export class ClaudeStreamBrokerHost implements EngineHost {
         this.attentions.clear();
       }
     }
-    if (restoredTurn) this.emit({ kind: "turn-ended", turnId: restoredTurn, status: "error" });
+    if (restoredTurn) {
+      this.emit({ kind: "turn-ended", turnId: restoredTurn, status: "error" });
+    }
     for (const attentionId of this.attentions.keys()) {
       this.emit({ kind: "attention-resolved", id: attentionId, resolution: "host-restarted" });
     }

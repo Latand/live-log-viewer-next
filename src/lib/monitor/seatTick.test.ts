@@ -166,8 +166,7 @@ test("a seat whose turn is genuinely moving is skipped, not queued", () => {
 
 test("open, unknown, and contradictory seat turns stay protected", () => {
   for (const turn of ["busy", "unknown"] as const) {
-    for (const activity of [null, { lifecycle: "stalled" as const, reason: "host_gone_turn_open" },
-      { lifecycle: "waiting" as const, reason: "host_alive_turn_idle", turnState: "idle" as const }]) {
+    for (const activity of [null, { lifecycle: "stalled" as const, reason: "host_gone_turn_open" }]) {
       const target = seat({ turn, activity });
       expect(seatTurnProgressing(target)).toBe(true);
       expect(seatTickDecision(input({ seat: target, pipelines: [lane()], state: stateWith(OVERDUE_STATE) })).verdict.kind).toBe("skipped");
@@ -1113,7 +1112,7 @@ test("both stalled and working open turns stay protected regardless of silence",
     expect(seatTurnProgressing(seat({ turn: "busy", activity }))).toBe(true);
   }
   const gone = evaluateLiveness({ host: { state: "gone" }, turnState: "busy", silentForMs: 0, stallAfterMs: ALIVE.stallAfterMs });
-  expect(seatTurnProgressing(seat({ turn: "busy", activity: gone }))).toBe(true);
+  expect(seatTurnProgressing(seat({ turn: "busy", activity: { ...gone, turnState: "busy" } }))).toBe(false);
 });
 
 test("the stall threshold the tick configures is the one the liveness read applies", () => {

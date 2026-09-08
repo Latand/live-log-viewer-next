@@ -2280,3 +2280,22 @@ test("idle-only Claude tick preserves a working turn through tool wait and start
     expect(child.inputs.filter((input) => input.type === "user")).toHaveLength(2);
   } finally { await host.release(); }
 });
+
+
+test("a recovered Claude seat accepts a fenced wake after its dead predecessor", async () => {
+  const sessionId = "recovered-claude-seat";
+  const store = new MemoryEventStore();
+  store.append(sessionId, { kind: "turn-started", turnId: "old-turn", seq: 1 });
+  store.append(sessionId, { kind: "session-status", status: "dead", seq: 2 });
+  const ledger = new RecordingDeliveryLedger();
+  const child = new FakeClaude(ledger);
+  const host = await ClaudeStreamBrokerHost.adopt(sessionId, { cwd: "/repo", eventStore: store, deliveryLedger: ledger,
+    readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }), readTranscript: () => [], spawnProcess: fakeSpawn(child, {}) });
+  try {
+    expect(await host.health()).toMatchObject({ status: "idle", activeTurnRef: null });
+    const sent = host.send({ id: "recovery-wake", text: "owed work", expectedTurnId: null, origin: { kind: "agent", role: "seat-tick" } });
+    child.emitJson({ type: "user", isReplay: true, session_id: sessionId, message: { role: "user", content: [{ type: "text", text: "owed work" }] } });
+    expect(await sent).toMatchObject({ outcome: "turn-started" });
+    expect(child.inputs.filter((input) => input.type === "user")).toHaveLength(1);
+  } finally { await host.release(); }
+});

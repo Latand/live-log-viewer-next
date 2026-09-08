@@ -1442,16 +1442,16 @@ test("a seat mid-turn is skipped without a send and without consuming the event 
 });
 
 // Recovery of an open turn belongs to its owner; a tick cannot force completion.
-test("a busy seat stays protected when its host is reported stalled", async () => {
+test("a dead open seat reaches recovery without an interrupt policy", async () => {
   const rig = harness({
     turn: "busy",
-    seatActivity: { lifecycle: "stalled", reason: "host_gone_turn_open" },
+    seatActivity: { lifecycle: "stalled", reason: "host_gone_turn_open", turnState: "busy" },
     pipelines: OPEN_LANE,
     state: OVERDUE,
   });
   const record = await runSeatTickCheck(PROJECT, rig.deps);
-  expect(record!.verdict).toBe("skipped");
-  expect(rig.sent).toHaveLength(0);
+  expect(record!.verdict).toBe("wake");
+  expect(rig.sent).toHaveLength(1);
 });
 
 test("open work with nobody seated raises the orchestrator card and wakes nothing", async () => {
@@ -3296,4 +3296,16 @@ test("rotation during recovery liveness prevents predecessor redispatch", async 
   await runSeatTickCheck(fixture.project, next.deps);
   expect(next.sent).toEqual([]);
   expect(fixture.acknowledged()).toEqual([]);
+});
+
+
+for (const activity of [
+  { lifecycle: "stalled" as const, reason: "host_gone_turn_open" as const, turnState: "busy" as const },
+  { lifecycle: "waiting" as const, reason: "host_alive_turn_idle" as const, turnState: "idle" as const },
+]) test(`owed work reaches fenced recovery for ${activity.reason}`, async () => {
+  const h = harness({ turn: "busy", seatActivity: activity, tasks: [{ id: "owed-task", status: "assigned" }], state: OVERDUE });
+  const record = await runSeatTickCheck(PROJECT, h.deps);
+  expect(record?.verdict).toBe("wake");
+  expect(h.sent).toHaveLength(1);
+  expect(h.sent[0]!.policy).toBe("idle-only");
 });

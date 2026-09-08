@@ -687,9 +687,8 @@ export async function deliverConversationMessage(message: ConversationMessage, o
     : registry.conversationForPath(message.path);
   const rejected = supersededRejection(registry, conversation);
   if (rejected) return rejected;
-  if (message.policy === "idle-only" && conversation?.turn.state !== "idle" && conversation?.turn.state !== "terminal") {
-    return failure("idle-only delivery requires a completed idle turn", 409);
-  }
+  // Registry turns can outlive their owner. Existing recovery reconciles the
+  // owner; idle-only journal admission and the host fence decide whether input is safe.
   if (conversation) {
     try {
       const recovered = await (overrides.recover ?? recoverDeadStructuredConversation)(

@@ -1087,6 +1087,9 @@ function threadStatus(value: unknown): ThreadStatus | null {
 }
 
 /** One stdio app-server owner with replayable, multi-subscriber event fan-out. */
+/** A correlated JSON-RPC error response proves that this request was refused. */
+class CodexRpcRefusal extends Error {}
+
 export class CodexAppServerHost implements EngineHost {
   readonly identity: CodexThreadIdentity;
 
@@ -1329,7 +1332,11 @@ export class CodexAppServerHost implements EngineHost {
       provisional.flushPreRestoreEvents();
       provisional.flushPreRestoreMessages(threadId ? result : null);
       if (threadId) provisional.reconcileThreadHistory(result);
+      const oldStartedTurn = provisional.events.findLast((event) => event.kind === "turn-started");
       provisional.reconcileAfterOpen(threadStatus(result), resumedActiveTurnId(result));
+      if (threadId && threadStatus(result)?.type === "idle" && !provisional.activeTurnId) {
+        provisional.recoveredIdleTurnId = oldStartedTurn?.kind === "turn-started" ? oldStartedTurn.turnId : null;
+      }
       provisional.endBufferedNotificationReconciliation();
       provisional.idleTickHistoryKnown = !threadId || Array.isArray(record(record(result)?.thread)?.turns);
       return provisional;
@@ -1419,7 +1426,9 @@ export class CodexAppServerHost implements EngineHost {
   }
 
   private idleTickHistoryKnown = false;
-  private pendingTurnStart: string | null = null;
+  private pendingTurnStart: { operationId: string; rpcId: number; entry: QueueEntry } | null = null;
+  private readonly settledTurnStartResponses = new Set<number>();
+  private recoveredIdleTurnId: string | null = null;
   private readonly sending = new Map<string, { fingerprint: string; promise: Promise<DeliveryReceipt> }>();
 
   send(entry: QueueEntry): Promise<DeliveryReceipt> {
@@ -1466,7 +1475,7 @@ export class CodexAppServerHost implements EngineHost {
     if (this.dead || this.releasing || this.released || !this.writerFenceAllowsActuation()) {
       return { outcome: "rejected", reason: "dead-host" };
     }
-    if (this.pendingTurnStart === entry.id) throw new Error("original turn start is unresolved");
+    if (this.pendingTurnStart?.operationId === entry.id) throw new Error("original turn start is unresolved");
     if (this.pendingTurnStart || (entry.expectedTurnId === null
       && (this.currentState().status !== "idle" || this.pendingCompactions.size > 0))) {
       return { outcome: "rejected", reason: "stale-turn" };
@@ -1476,8 +1485,9 @@ export class CodexAppServerHost implements EngineHost {
       const completed = started?.kind === "turn-started"
         ? this.events.findLast((event) => event.kind === "turn-ended" && event.turnId === started.turnId)
         : null;
+      const recovered = started?.kind === "turn-started" && started.turnId === this.recoveredIdleTurnId;
       if ((!started && !this.idleTickHistoryKnown)
-        || (started && (completed?.kind !== "turn-ended" || completed.status !== "completed"))) {
+        || (started && !recovered && (completed?.kind !== "turn-ended" || completed.status !== "completed"))) {
         return { outcome: "rejected", reason: "stale-turn" };
       }
     }
@@ -1535,16 +1545,25 @@ export class CodexAppServerHost implements EngineHost {
       : undefined;
     const effort = perTurnEffort ?? this.effort;
     // Reserve synchronously before the RPC write; a lost answer keeps this fence.
-    this.pendingTurnStart = entry.id;
-    const result = await this.rpc("turn/start", {
-      threadId: this.identity.threadId,
-      ...(effort ? { effort } : {}),
-      input,
-      clientUserMessageId: entry.id,
-    });
+    this.pendingTurnStart = { operationId: entry.id, rpcId: this.nextRpcId, entry };
+    let result: unknown;
+    try {
+      result = await this.rpc("turn/start", {
+        threadId: this.identity.threadId,
+        ...(effort ? { effort } : {}),
+        input,
+        clientUserMessageId: entry.id,
+      });
+    } catch (error) {
+      if (error instanceof CodexRpcRefusal && this.pendingTurnStart?.operationId === entry.id) {
+        this.pendingTurnStart = null;
+        this.notifyStateListeners();
+      }
+      throw error;
+    }
     const turnId = turnIdFromResult(result, "turn/start");
     if (!this.events.some((event) => event.kind === "turn-ended" && event.turnId === turnId)) this.activeTurnId = turnId;
-    this.pendingTurnStart = null;
+    if (this.pendingTurnStart?.operationId === entry.id) this.pendingTurnStart = null;
     this.notifyStateListeners();
     return this.awaitDeliveryConfirmation(entry, { outcome: "turn-started", turnId });
   }
@@ -2852,6 +2871,27 @@ export class CodexAppServerHost implements EngineHost {
     return confirmed.receipt;
   }
 
+  private settleConfirmedTurnStart(): void {
+    const start = this.pendingTurnStart;
+    if (!start) return;
+    const confirmation = this.confirmedDeliveries.get(start.operationId);
+    if (!confirmation) return;
+    let receipt: DeliveryReceipt;
+    try { receipt = this.confirmedReceipt(start.entry, confirmation); }
+    catch { return; }
+    if (receipt.outcome === "rejected"
+      || !this.events.some((event) => event.kind === "turn-ended" && event.turnId === receipt.turnId)) return;
+    const request = this.pending.get(start.rpcId);
+    this.pendingTurnStart = null;
+    if (request) {
+      this.pending.delete(start.rpcId);
+      clearTimeout(request.timer);
+      this.settledTurnStartResponses.add(start.rpcId);
+      request.resolve({ turn: { id: receipt.turnId } });
+    }
+    this.notifyStateListeners();
+  }
+
   private rememberConfirmedDelivery(turnId: string, value: unknown): void {
     const item = record(value);
     if (!item || stringField(item, "type") !== "userMessage") return;
@@ -2869,6 +2909,7 @@ export class CodexAppServerHost implements EngineHost {
       contentDigest: previous && (previous.text !== text || previous.contentDigest !== contentDigest) ? null : contentDigest,
     };
     this.confirmedDeliveries.set(clientId, confirmed);
+    this.settleConfirmedTurnStart();
     if (!pending) return;
     this.pendingDeliveries.delete(clientId);
     clearTimeout(pending.timer);
@@ -3224,12 +3265,13 @@ export class CodexAppServerHost implements EngineHost {
       if (typeof id !== "number") return this.fail(new Error("Codex app-server response id is invalid"));
       this.replayEnvelopeRequestIds.delete(id);
       const pending = this.pending.get(id);
+      if (!pending && this.settledTurnStartResponses.delete(id)) return;
       if (!pending && this.consumeLateThreadReadResponse(id)) return;
       if (!pending) return this.fail(new Error("Codex app-server response has no matching request"));
       this.pending.delete(id);
       clearTimeout(pending.timer);
       const error = record(message.error);
-      if (error) pending.reject(new Error(`Codex app-server request failed: ${safeError(error.message ?? "unknown error")}`));
+      if (error) pending.reject(new CodexRpcRefusal(`Codex app-server request failed: ${safeError(error.message ?? "unknown error")}`));
       else pending.resolve(message.result);
       return;
     }
@@ -3415,6 +3457,7 @@ export class CodexAppServerHost implements EngineHost {
         this.voiceStreams.delete(turnId);
       }
       this.emit({ kind: "turn-ended", turnId, status });
+      this.settleConfirmedTurnStart();
       this.settlePendingCompactionsFromTerminalTurn(turn, status);
       return;
     }
