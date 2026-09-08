@@ -973,6 +973,71 @@ test("a live owner with a pending action stays synchronizing and never spawns a 
   )).toHaveLength(0);
 });
 
+test("a terminal row with a live or unverifiable process still takes the successor path", async () => {
+  const sessionId = crypto.randomUUID();
+  const cwd = path.join(sandbox, `terminal-live-${sessionId}`);
+  const artifactPath = path.join(cwd, `${sessionId}.jsonl`);
+  fs.mkdirSync(cwd, { recursive: true });
+  fs.writeFileSync(artifactPath, "");
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const conversation = registry.ensureConversation("codex", artifactPath, "terminal-account");
+  registry.upsert({
+    key: { engine: "codex", sessionId },
+    artifactPath,
+    cwd,
+    accountId: "terminal-account",
+    launchProfile: emptyLaunchProfile({ cwd }),
+    status: "dead",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "stdio:terminal-live",
+      process: { pid: process.pid, startIdentity: null },
+      eventCursor: 5,
+      protocolVersion: "v2",
+      writerClaimEpoch: 2,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 2,
+    claimOwner: `structured-host:${JSON.stringify({ pid: process.pid, startIdentity: null })}`,
+    pendingAction: null,
+  });
+  let spawnCalls = 0;
+
+  const recovered = await recoverDeadStructuredConversation({ path: artifactPath, conversationId: conversation.id }, {
+    registry,
+    client: {} as RuntimeHostClient,
+    transport: () => "structured",
+    resolveAccount: () => ({
+      engine: "codex",
+      accountId: "terminal-account",
+      kind: "managed",
+      home: cwd,
+      transcriptRoot: cwd,
+      env: { NODE_ENV: "test" },
+    }),
+    spawn: async (input) => {
+      spawnCalls += 1;
+      return {
+        ok: true,
+        target: null,
+        path: artifactPath,
+        launchId: input.receipt.launchId,
+        conversationId: conversation.id,
+        launched: true,
+        retrySafe: false,
+        initialMessage: "delivered" as const,
+        state: "settled" as const,
+      };
+    },
+  });
+
+  expect(recovered).toMatchObject({ conversationId: conversation.id, spawned: true });
+  expect(spawnCalls).toBe(1);
+});
+
 test("issue 611: a live host parked behind a provider limit is held, not published and not replaced", async () => {
   const sessionId = crypto.randomUUID();
   const cwd = path.join(sandbox, `parked-${sessionId}`);

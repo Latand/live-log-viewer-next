@@ -18,6 +18,16 @@ function registry(ownerAlive: (owner: { pid: number; startIdentity: string | nul
   return withLegacySpawnFixtureTitles(new AgentRegistry(path.join(dir, "agent-registry.json"), ownerAlive));
 }
 
+function jsonRegistry(ownerAlive: (owner: { pid: number; startIdentity: string | null }) => boolean = () => true) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-json-"));
+  return withLegacySpawnFixtureTitles(new AgentRegistry(
+    path.join(dir, "agent-registry.json"),
+    ownerAlive,
+    undefined,
+    { sqliteMode: "off" },
+  ));
+}
+
 function spawnEntry(pathname: string, accountId = "terra") {
   return {
     key: { engine: "codex" as const, sessionId: pathname.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i)?.[0] ?? "019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326" },
@@ -76,9 +86,26 @@ function structuredLaunchFixture(store: AgentRegistry, pendingAction: "spawn" | 
   if (store.stageStructuredSpawn(begun.receipt.launchId, entry).kind !== "settled") {
     throw new Error("expected structured launch staging to settle");
   }
-  const recovered = store.recoverStructuredSpawnFromEvidence(begun.receipt.launchId, {
-    ...entry,
+  const evidence = {
+    key: entry.key,
+    artifactPath: entry.artifactPath,
+    cwd: entry.cwd,
+    accountId: entry.accountId,
+    launchProfile: entry.launchProfile,
+    status: entry.status,
+    host: entry.host,
+    structuredHost: {
+      ...entry.structuredHost,
+      endpoint: "runtime:reconciled",
+      process: null,
+      writerClaimEpoch: 0,
+    },
+    claimEpoch: 0,
+    claimOwner: null,
     pendingAction: null,
+  };
+  const recovered = store.recoverStructuredSpawnFromEvidence(begun.receipt.launchId, {
+    ...evidence,
   });
   if (recovered.kind !== "settled") throw new Error("expected structured launch recovery to settle");
   return { artifactPath, conversationId: begun.receipt.conversationId, receipt: recovered.receipt, entry: recovered.entry };
@@ -835,19 +862,22 @@ describe("agent registry", () => {
   });
 
   test("route-recovered structured settlement clears spawn but preserves handoff", () => {
-    const spawned = structuredLaunchFixture(registry(), "spawn");
+    const spawned = structuredLaunchFixture(jsonRegistry(), "spawn");
     expect(spawned.receipt).toMatchObject({ state: "completed", completionMode: "route-recovered" });
     expect(spawned.entry.pendingAction).toBeNull();
+    expect(spawned.entry.structuredHostOperationId).toBe(spawned.receipt.launchId);
 
-    const handoff = structuredLaunchFixture(registry(), "handoff");
+    const handoff = structuredLaunchFixture(jsonRegistry(), "handoff");
     expect(handoff.receipt).toMatchObject({ state: "completed", completionMode: "route-recovered" });
     expect(handoff.entry.pendingAction).toBe("handoff");
   });
 
   test("startup repair clears only an exact completed structured launch marker", () => {
-    const store = registry();
+    const store = jsonRegistry();
     const fixture = structuredLaunchFixture(store, "spawn");
-    store.upsert({ ...fixture.entry, pendingAction: "spawn" });
+    const legacyEntry = { ...fixture.entry };
+    delete legacyEntry.structuredHostOperationId;
+    store.upsert({ ...legacyEntry, pendingAction: "spawn" });
     expect(conversationDeliverabilityFromRecord(store.snapshot(), { conversationId: fixture.conversationId })).toMatchObject({
       condition: "synchronizing",
       deliverable: false,
@@ -863,15 +893,19 @@ describe("agent registry", () => {
   });
 
   test("startup repair preserves handoff, unknown identity, wrong receipt, and stale generation rows", () => {
-    const store = registry();
+    const store = jsonRegistry();
     const handoff = structuredLaunchFixture(store, "handoff");
     const unknown = structuredLaunchFixture(store, "spawn");
     const wrong = structuredLaunchFixture(store, "spawn");
     const stale = structuredLaunchFixture(store, "spawn");
 
-    store.upsert({ ...handoff.entry, pendingAction: "handoff" });
+    const legacyHandoff = { ...handoff.entry };
+    delete legacyHandoff.structuredHostOperationId;
+    store.upsert({ ...legacyHandoff, pendingAction: "handoff" });
+    const legacyUnknown = { ...unknown.entry };
+    delete legacyUnknown.structuredHostOperationId;
     store.upsert({
-      ...unknown.entry,
+      ...legacyUnknown,
       pendingAction: "spawn",
       structuredHost: {
         ...unknown.entry.structuredHost!,
@@ -892,7 +926,9 @@ describe("agent registry", () => {
       archivedAt: null,
     });
     fs.writeFileSync(store.filename, `${JSON.stringify(snapshot, null, 2)}\n`);
-    store.upsert({ ...stale.entry, pendingAction: "spawn" });
+    const legacyStale = { ...stale.entry };
+    delete legacyStale.structuredHostOperationId;
+    store.upsert({ ...legacyStale, pendingAction: "spawn" });
 
     expect(store.repairCompletedStructuredSpawnMarkers()).toBe(0);
     expect(store.readOnlySnapshot().entries[`codex:${handoff.entry.key.sessionId}`]?.pendingAction).toBe("handoff");
@@ -900,11 +936,40 @@ describe("agent registry", () => {
     expect(store.readOnlySnapshot().entries[`codex:${wrong.entry.key.sessionId}`]?.pendingAction).toBe("spawn");
     expect(store.readOnlySnapshot().entries[`codex:${stale.entry.key.sessionId}`]?.pendingAction).toBe("spawn");
 
-    const ownerRejectedStore = registry(() => false);
+    const ownerRejectedStore = jsonRegistry(() => false);
     const ownerRejected = structuredLaunchFixture(ownerRejectedStore, "spawn");
-    ownerRejectedStore.upsert({ ...ownerRejected.entry, pendingAction: "spawn" });
+    const legacyOwnerRejected = { ...ownerRejected.entry };
+    delete legacyOwnerRejected.structuredHostOperationId;
+    ownerRejectedStore.upsert({ ...legacyOwnerRejected, pendingAction: "spawn" });
     expect(ownerRejectedStore.repairCompletedStructuredSpawnMarkers()).toBe(0);
     expect(ownerRejectedStore.readOnlySnapshot().entries[`codex:${ownerRejected.entry.key.sessionId}`]?.pendingAction).toBe("spawn");
+  });
+
+  test("legacy startup repair leaves an ambiguous receipt set untouched", () => {
+    const store = jsonRegistry();
+    const fixture = structuredLaunchFixture(store, "spawn");
+    const duplicate = store.beginSpawnRequest({
+      engine: "codex",
+      cwd: fixture.entry.cwd,
+      accountId: fixture.entry.accountId,
+      transport: "structured",
+      conversationId: fixture.conversationId,
+      expectedArtifactPath: fixture.artifactPath,
+      launchProfile: fixture.entry.launchProfile,
+    });
+    if (duplicate.kind !== "created") throw new Error("expected a duplicate launch receipt");
+    const settled = store.settleSpawn(duplicate.receipt.launchId, {
+      ...fixture.entry,
+      structuredHostOperationId: duplicate.receipt.launchId,
+      pendingAction: null,
+    });
+    if (settled.kind !== "settled") throw new Error("expected the duplicate launch to settle");
+    const legacyEntry = { ...settled.entry };
+    delete legacyEntry.structuredHostOperationId;
+    store.upsert({ ...legacyEntry, pendingAction: "spawn" });
+
+    expect(store.repairCompletedStructuredSpawnMarkers()).toBe(0);
+    expect(store.readOnlySnapshot().entries[`codex:${fixture.entry.key.sessionId}`]?.pendingAction).toBe("spawn");
   });
 
   test("an observed account-home Claude session recovers a pane-bound late-readiness failure", () => {

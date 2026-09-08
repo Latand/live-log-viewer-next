@@ -96,8 +96,9 @@ interface RecoveryCandidate {
   project: string | null;
   parentConversationId: ViewerConversationId | null;
   spec: ResumeSpec;
-  /** A recorded structured process is alive or unverifiable, so recovery must
-      not issue a successor spawn while the durable row is unsettled. */
+  /** A non-terminal row's recorded structured process is alive or
+      unverifiable, so recovery must not issue a successor spawn while the
+      durable row is unsettled. */
   hostProcessLive: boolean;
   /** The registered host is process-alive, claim-owned and not terminal. */
   hostLive: boolean;
@@ -136,7 +137,8 @@ function candidateFor(
      including conversations that predate registry entries. A verified live
      tmux owner returned above keeps ownership until that process exits. */
   const terminal = entry?.status === "dead" || entry?.status === "unhosted";
-  const hostProcessLive = Boolean(structuredHostProcessAlive(entry?.structuredHost?.process ?? null));
+  const hostProcessLive = Boolean(!terminal
+    && structuredHostProcessAlive(entry?.structuredHost?.process ?? null));
   const hostLive = Boolean(hostProcessLive
     && entry?.claimOwner
     && entry.pendingAction === null

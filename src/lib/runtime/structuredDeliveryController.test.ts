@@ -87,12 +87,31 @@ test("startup adoption repairs a stale completed structured launch before draini
   if (registry.stageStructuredSpawn(begun.receipt.launchId, entry).kind !== "settled") {
     throw new Error("expected structured launch staging to settle");
   }
-  const recovered = registry.recoverStructuredSpawnFromEvidence(begun.receipt.launchId, {
-    ...entry,
+  const evidence = {
+    key: entry.key,
+    artifactPath: entry.artifactPath,
+    cwd: entry.cwd,
+    accountId: entry.accountId,
+    launchProfile: entry.launchProfile,
+    status: entry.status,
+    host: entry.host,
+    structuredHost: {
+      ...entry.structuredHost,
+      endpoint: "runtime:reconciled",
+      process: null,
+      writerClaimEpoch: 0,
+    },
+    claimEpoch: 0,
+    claimOwner: null,
     pendingAction: null,
+  };
+  const recovered = registry.recoverStructuredSpawnFromEvidence(begun.receipt.launchId, {
+    ...evidence,
   });
   if (recovered.kind !== "settled") throw new Error("expected structured launch recovery to settle");
-  registry.upsert({ ...recovered.entry, pendingAction: "spawn" });
+  const legacyEntry = { ...recovered.entry };
+  delete legacyEntry.structuredHostOperationId;
+  registry.upsert({ ...legacyEntry, pendingAction: "spawn" });
 
   expect(conversationDeliverabilityFromRecord(registry.snapshot(), {
     conversationId: begun.receipt.conversationId,
