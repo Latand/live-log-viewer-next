@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { withFileTransactionSync } from "./fileTransaction";
+import { captureProcessIdentity, processIdentityStatus, sameRecordedProcessIdentity, type ProcessIdentity } from "@/lib/processIdentity";
 
 export const HOT_STATE_BACKEND = "sqlite-v1" as const;
 export const HOT_STATE_AUTHORITY_FILENAME = "hot-state-authority.json";
@@ -28,6 +29,9 @@ export interface HotStateAuthority {
   updatedAt: string;
   activationReadyAt?: string;
   releaseReadyAt?: string;
+  /** The Viewer that must finish startup and release its hosts before a live
+   * generation can acknowledge its rollback mirror. Older records omit it. */
+  activationOwner?: ProcessIdentity;
   checkpoint?: HotStateCheckpoint;
 }
 
@@ -69,6 +73,11 @@ function parseAuthority(value: unknown): HotStateAuthority | null {
     || (authority.activationReadyAt !== undefined && typeof authority.activationReadyAt !== "string")
     || (authority.releaseReadyAt !== undefined && typeof authority.releaseReadyAt !== "string")
     || (authority.releaseReadyAt !== undefined && authority.activationReadyAt === undefined)
+    || (authority.activationOwner !== undefined && (
+      !authority.activationOwner || !Number.isSafeInteger(authority.activationOwner.pid)
+      || authority.activationOwner.pid <= 0
+      || (authority.activationOwner.startIdentity !== null && typeof authority.activationOwner.startIdentity !== "string")
+      || (authority.activationOwner.bootEpoch !== undefined && authority.activationOwner.bootEpoch !== null && typeof authority.activationOwner.bootEpoch !== "string")))
     || (authority.checkpoint !== undefined && !validCheckpoint(authority.checkpoint))) return null;
   return authority as HotStateAuthority;
 }
@@ -195,6 +204,7 @@ function writeHotStateAuthority(
     epoch?: number;
     activationReadyAt?: string;
     releaseReadyAt?: string;
+    activationOwner?: ProcessIdentity;
   } = {},
 ): HotStateAuthority {
   if (options.releaseReadyAt && !options.activationReadyAt) {
@@ -209,6 +219,9 @@ function writeHotStateAuthority(
     ...(options.activationReadyAt ? { activationReadyAt: options.activationReadyAt } : {}),
     ...(options.releaseReadyAt ? { releaseReadyAt: options.releaseReadyAt } : {}),
     ...(options.checkpoint ? { checkpoint: options.checkpoint } : {}),
+    ...(options.activationOwner ? { activationOwner: options.activationOwner }
+      : mode === "fencing" && previous?.releaseRevision === releaseRevision && previous.activationOwner
+        ? { activationOwner: previous.activationOwner } : {}),
   };
   if (!Number.isInteger(authority.epoch) || authority.epoch < 1) throw new Error("hot-state authority epoch is invalid");
   if (previous && authority.epoch < previous.epoch) throw new Error("hot-state authority epoch cannot regress");
@@ -220,7 +233,7 @@ export function publishHotStateAuthority(
   directory: string,
   mode: HotStateAuthorityMode,
   releaseRevision: string | null,
-  options: { checkpoint?: HotStateCheckpoint; epoch?: number; activationReadyAt?: string; releaseReadyAt?: string } = {},
+  options: { checkpoint?: HotStateCheckpoint; epoch?: number; activationReadyAt?: string; releaseReadyAt?: string; activationOwner?: ProcessIdentity } = {},
 ): HotStateAuthority {
   if (releaseRevision !== null && !validRevision(releaseRevision)) throw new Error("hot-state release revision is invalid");
   return withFileTransactionSync(authorityFile(directory), "hot-state authority is busy", () =>
@@ -247,6 +260,7 @@ export function restoreHotStateAuthority(
         ...(authority?.checkpoint ? { checkpoint: authority.checkpoint } : {}),
         ...(authority?.activationReadyAt ? { activationReadyAt: authority.activationReadyAt } : {}),
         ...(authority?.releaseReadyAt ? { releaseReadyAt: authority.releaseReadyAt } : {}),
+        ...(authority?.activationOwner ? { activationOwner: authority.activationOwner } : {}),
         epoch: current!.epoch + 1,
       },
     );
@@ -266,6 +280,11 @@ export function acknowledgeHotStateFence(
       || current.releaseRevision !== request.releaseRevision
       || current.checkpoint) {
       throw new Error("hot-state fence request changed before checkpoint acknowledgement");
+    }
+    if (current.activationOwner
+      && !sameRecordedProcessIdentity(captureProcessIdentity(process.pid), current.activationOwner)
+      && processIdentityStatus(current.activationOwner) !== "dead") {
+      throw new Error("live Viewer must acknowledge its own hot-state fence");
     }
     return writeHotStateAuthority(directory, current, "fencing", current.releaseRevision, {
       epoch: current.epoch,
@@ -301,6 +320,7 @@ export function markHotStateActivationReady(
     return writeHotStateAuthority(directory, current, "sqlite", current.releaseRevision, {
       epoch: current.epoch,
       activationReadyAt: new Date().toISOString(),
+      activationOwner: captureProcessIdentity(process.pid),
     });
   });
 }
@@ -320,6 +340,7 @@ export function markViewerReleaseReady(
     return writeHotStateAuthority(directory, current, "sqlite", current.releaseRevision, {
       epoch: current.epoch,
       activationReadyAt: current.activationReadyAt,
+      ...(current.activationOwner ? { activationOwner: current.activationOwner } : {}),
       releaseReadyAt: new Date().toISOString(),
     });
   });

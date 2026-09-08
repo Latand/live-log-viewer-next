@@ -29,6 +29,9 @@ interface StructuredOperationStatus {
 }
 
 export interface StructuredDeliveryQueuePort {
+  /** Startup owns recovery for hosts it has not registered yet. Leave their
+   * original operations pending while already registered hosts keep serving. */
+  deferTarget?(conversationId: string): boolean;
   effects(kinds?: readonly string[], afterEventSeq?: number): Promise<StructuredDeliveryEffect[]>;
   transition(
     operationId: string,
@@ -625,6 +628,7 @@ export class StructuredDeliveryQueue {
     const targets: Array<[string, () => Promise<boolean>]> = [...conversationIds].map((conversationId) => [
       conversationId,
       async () => {
+        if (this.port.deferTarget?.(conversationId)) return true;
         for (const prepare of targetPreparations.get(conversationId) ?? []) await prepare();
         return this.drainTarget(grouped.get(conversationId) ?? []);
       },

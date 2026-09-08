@@ -20,6 +20,14 @@ import type { ViewerCandidateContainerState } from "./deploymentHealth";
  * the deadline it runs under (fitHandOverBudgets) rather than trusted. */
 export const HOT_STATE_ACTIVATION_TIMEOUT_MS = 180_000;
 export const HOT_STATE_ACTIVATION_POLL_MS = 250;
+/** Temporary headroom for full startup recovery (#1552): the measured
+ * historical phases alone took 156s, before adoption and publication. Five
+ * minutes includes that work plus adoption and a bounded margin while the
+ * historical work is reduced. Only promoted serving verification uses this. */
+export const PROMOTED_SERVING_TIMEOUT_MS = 300_000;
+/** Allow the final bounded HTTP probe and the 15s MCP probe to report inside
+ * the host's action deadline. The host remains the hard outer stop. */
+export const VERIFY_PROMOTED_ACTION_TIMEOUT_MS = PROMOTED_SERVING_TIMEOUT_MS + 60_000;
 /** The demoted incumbent sees the flipped target on its own 250ms poll,
     checkpoints its rollback mirrors and exits, so a release that has not
     happened within this budget is not going to happen inside the promote — and

@@ -15,49 +15,68 @@ import {
   viewerDeploymentReleaseReady,
 } from "@/runtime-host/deploymentHealth";
 
+import {
+  markStructuredDeliveryControllerReady,
+  markStructuredDeliveryControllerUnavailable,
+  markStructuredHostStartupFailed,
+  markStructuredHostStartupReady,
+} from "@/lib/runtime/startupStatus";
+
+import * as incumbent from "@/runtime-host/fixtures/incumbentDeploymentHealth";
+
 import { GET } from "./route";
 
-test("the deployed predecessor adapter can pass after activation while a new adapter waits for full startup", async () => {
-  const previous = process.env.LLV_STATE_DIR;
-  const previousPort = process.env.PORT;
-  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-hot-state-capability-"));
+test("both verifier generations wait for serving startup while passive prechecks remain available", async () => {
+  const previous = { state: process.env.LLV_STATE_DIR, port: process.env.PORT, hosts: process.env.LLV_STRUCTURED_HOSTS };
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-startup-capability-"));
   process.env.LLV_STATE_DIR = sandbox;
+  process.env.LLV_STRUCTURED_HOSTS = "1";
   const revision = "a".repeat(40);
-  const target = {
-    endpoint: "http://127.0.0.1:19001",
-    revision,
-    hotStateBackend: HOT_STATE_BACKEND,
+  fs.writeFileSync(path.join(sandbox, "viewer-release.json"), JSON.stringify({
+    endpoint: "http://127.0.0.1:19001", revision, hotStateBackend: HOT_STATE_BACKEND,
+  }));
+  const probe = async (ready: boolean, status = 200, promoted = true) => {
+    const response = GET();
+    const text = await response.text();
+    expect(response.status).toBe(status);
+    expect(JSON.parse(text).releaseReady).toBe(ready);
+    expect(incumbent.viewerDeploymentReleaseReady(response.status, text)).toBe(ready);
+    if (promoted) expect(viewerDeploymentReleaseReady(response.status, text)).toBe(ready);
+    else expect(hasViewerDeploymentCapability(response.status, text)).toBe(true);
   };
   try {
-    fs.writeFileSync(path.join(sandbox, "viewer-release.json"), JSON.stringify({
-      endpoint: target.endpoint,
-      revision,
-    }));
-    process.env.PORT = "19001";
-    expect(GET().status).toBe(200);
-    fs.writeFileSync(path.join(sandbox, "viewer-release.json"), JSON.stringify(target));
     process.env.PORT = "19002";
-    expect(GET().status).toBe(200);
+    markStructuredDeliveryControllerUnavailable();
+    markStructuredHostStartupFailed();
+    await probe(true, 200, false);
     process.env.PORT = "19001";
     expect(GET().status).toBe(503);
-    const authority = publishHotStateAuthority(sandbox, "sqlite", revision);
-    expect(GET().status).toBe(503);
-    const activated = markHotStateActivationReady(sandbox, authority);
-    for (let startupPoll = 0; startupPoll < 31; startupPoll += 1) {
-      const predecessorResponse = GET();
-      const predecessorBody = await predecessorResponse.text();
-      expect(predecessorResponse.status).toBe(200);
-      expect(hasViewerDeploymentCapability(predecessorResponse.status, predecessorBody)).toBe(true);
-      expect(viewerDeploymentReleaseReady(predecessorResponse.status, predecessorBody)).toBe(false);
-    }
+    const activated = markHotStateActivationReady(sandbox, publishHotStateAuthority(sandbox, "sqlite", revision));
+    markStructuredDeliveryControllerReady();
+    // Restore the actual not-yet-started state, including its pending default.
+    const state = process as typeof process & {
+      __llvStructuredHostStartupFailed?: boolean;
+      __llvStructuredHostStartupProgress?: unknown;
+    };
+    delete state.__llvStructuredHostStartupFailed;
+    delete state.__llvStructuredHostStartupProgress;
+    await probe(false); // Activation can complete before serving readiness.
     markViewerReleaseReady(sandbox, activated);
-    const completeResponse = GET();
-    expect(viewerDeploymentReleaseReady(completeResponse.status, await completeResponse.text())).toBe(true);
+    await probe(false); // The incumbent reads releaseReady, ignoring startup.
+    markStructuredHostStartupReady();
+    await probe(true);
+    markStructuredDeliveryControllerUnavailable();
+    await probe(false, 503);
+    markStructuredDeliveryControllerReady();
+    markStructuredHostStartupFailed();
+    await probe(false, 503);
+    process.env.LLV_STRUCTURED_HOSTS = "0";
+    await probe(true);
   } finally {
-    if (previousPort === undefined) delete process.env.PORT;
-    else process.env.PORT = previousPort;
-    if (previous === undefined) delete process.env.LLV_STATE_DIR;
-    else process.env.LLV_STATE_DIR = previous;
-    fs.rmSync(sandbox, { recursive: true, force: true });
+    for (const [key, value] of Object.entries({ LLV_STATE_DIR: previous.state, PORT: previous.port, LLV_STRUCTURED_HOSTS: previous.hosts })) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+    markStructuredHostStartupReady();
+    markStructuredDeliveryControllerUnavailable();
   }
 });

@@ -860,6 +860,22 @@ export class SqliteStateCollection<T> {
     throw new Error(`${this.options.collection} rollback checkpoint did not converge`);
   }
 
+  async checkpointMirrorForDemotionAsync(write: (records: readonly T[], revision: number) => void, maxAttempts = 2): Promise<number> {
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      const lease = await this.acquireLease();
+      let revision: number;
+      try {
+        const records = this.snapshot();
+        revision = this.revision();
+        write(records, revision);
+      } finally {
+        await this.releaseLease(lease);
+      }
+      if (this.revision() === revision) return revision;
+    }
+    throw new Error(`${this.options.collection} rollback checkpoint did not converge`);
+  }
+
   private collectionMeta(db = this.readDb): CollectionMeta | null {
     return db.query<CollectionMeta, [string]>(
       "SELECT revision, schema_version, change_floor FROM state_collections WHERE collection = ?",

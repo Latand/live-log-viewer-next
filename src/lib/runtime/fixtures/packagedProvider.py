@@ -6,6 +6,11 @@ from pathlib import Path
 def emit(value):
     print(json.dumps(value), flush=True)
 
+def record_delivery(engine, session, content, client_id=None):
+    # Independent provider-side evidence, written before the acknowledgement.
+    with open(Path(os.environ["LLV_STATE_DIR"]) / "provider-deliveries.jsonl", "a") as log:
+        log.write(json.dumps({"engine": engine, "session": session, "content": content, "clientId": client_id}) + "\n")
+
 if "auth" in sys.argv and "status" in sys.argv:
     emit({"loggedIn": True, "authMethod": "claude.ai", "subscriptionType": "max"})
     sys.exit(0)
@@ -17,6 +22,7 @@ for line in sys.stdin:
     message = json.loads(line)
     if claude:
         if message.get("type") == "user":
+            record_delivery("claude", thread, message["message"]["content"])
             emit({**message, "isReplay": True})
             emit({"type": "result", "subtype": "success", "session_id": thread})
         continue
@@ -43,6 +49,7 @@ for line in sys.stdin:
     elif method == "thread/turns/list":
         result = {"data": [], "nextCursor": None, "backwardsCursor": None}
     elif method == "turn/start":
+        record_delivery("codex", thread, params.get("input", []), params.get("clientUserMessageId"))
         result = {"turn": {"id": "fixture-turn"}}
     emit({"jsonrpc": "2.0", "id": message["id"], "result": result})
     if method == "turn/start":

@@ -8,6 +8,7 @@ import { expect, spyOn, test } from "bun:test";
 import { checkpointFlowRollbackMirrorForDemotion, loadFlows, saveFlows, withFlowMutation } from "@/lib/flows/store";
 import type { Flow } from "@/lib/flows/types";
 import { procBackend } from "@/lib/proc";
+import { captureProcessIdentity } from "@/lib/processIdentity";
 import { buildPipeline, loadArchivedPipelines, loadPipelines } from "@/lib/pipelines/store";
 import type { PipelineStage } from "@/lib/pipelines/types";
 import { buildWorkflow, loadWorkflows, normalizeTemplate } from "@/lib/workflows/store";
@@ -34,6 +35,34 @@ const CHILD = path.join(import.meta.dir, "hotStateStores.sqliteChild.ts");
 const MIRROR_CHILD = path.join(import.meta.dir, "hotStateMirror.sqliteChild.ts");
 const SNAPSHOT_CHILD = path.join(import.meta.dir, "hotStateSnapshot.sqliteChild.ts");
 const AUTHORITY_CHILD = path.join(import.meta.dir, "hotStateAuthority.sqliteChild.ts");
+
+test("a live or unverifiable activation owner alone can acknowledge its fence; positive death admits fallback", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "hot-owner-"));
+  const worker = Bun.spawn([process.execPath, "-e", "for await (const chunk of process.stdin) { void chunk; }"], {
+    env: { ...process.env }, stdin: "pipe", stdout: "ignore", stderr: "ignore",
+  });
+  const revisions = { flows: 0, pipelines: 0, pipelinesArchive: 0, workflows: 0 };
+  try {
+    const owner = captureProcessIdentity(worker.pid);
+    expect(owner.startIdentity).toBeTruthy();
+    const active = publishHotStateAuthority(directory, "sqlite", "a".repeat(40), { activationOwner: owner });
+    const fence = publishHotStateAuthority(directory, "fencing", active.releaseRevision);
+    expect(fence.activationOwner).toEqual(owner);
+    expect(() => acknowledgeHotStateFence(directory, fence, revisions)).toThrow("live Viewer must acknowledge");
+    expect(readHotStateAuthority(directory)?.checkpoint).toBeUndefined();
+    const unknown = publishHotStateAuthority(directory, "fencing", active.releaseRevision, {
+      activationOwner: { ...owner, startIdentity: null },
+    });
+    expect(() => acknowledgeHotStateFence(directory, unknown, revisions)).toThrow("live Viewer must acknowledge");
+    worker.stdin.end();
+    await worker.exited;
+    expect(acknowledgeHotStateFence(directory, unknown, revisions).checkpoint?.revisions).toEqual(revisions);
+  } finally {
+    worker.stdin.end();
+    await worker.exited;
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 function sampleFlow(id: string, stateDetail: string | null = null): Flow {
   return {
