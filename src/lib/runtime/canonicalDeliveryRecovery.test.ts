@@ -19,7 +19,7 @@ function fixture() {
   const registry = new AgentRegistry(path.join(directory, "registry.json"));
   const conversation = registry.ensureConversation("codex", transcript, null);
   const filename = path.join(directory, "runtime.sqlite");
-  let journal = new RuntimeJournal(filename, { structuredHosts: true });
+  let journal = new RuntimeJournal(filename, { structuredHosts: true, maxEvents: 100_000 });
   const operationId = "original-operation";
   const clientKey = "original-client-key";
   const text = "[viewer context — selected reviewer]\nOriginal т instruction 🎯";
@@ -56,7 +56,7 @@ function fixture() {
   }), operationId, { enabled: () => true, registry: () => registry, client: () => client, kick: () => { kicks++; } });
   return { directory, transcript, filename, registry, conversation, operationId, clientKey, command, contentDigest, selectedContext, wire, dedup, text,
     journal: () => journal, client, echo, write, request, kicks: () => kicks,
-    restart: () => { journal.close(); journal = new RuntimeJournal(filename, { structuredHosts: true }); },
+    restart: () => { journal.close(); journal = new RuntimeJournal(filename, { structuredHosts: true, maxEvents: 100_000 }); },
     close: () => { journal.close(); fs.rmSync(directory, { recursive: true, force: true }); },
   };
 }
@@ -175,5 +175,76 @@ test("verified delivered truth is not downgraded by a stale uncertain journal an
     expect(await resolveOriginalSend({ conversationId: f.conversation.id, clientMessageId: f.clientKey }, { registry: f.registry, client }))
       .toMatchObject({ current: { readable: true, value: { state: "delivered" } } });
     expect(reads).toBe(0);
+  } finally { f.close(); }
+});
+
+
+test("recovery refuses an incomplete 256-item journal window", async () => {
+  const f = fixture();
+  try {
+    for (let index = 0; index < 255; index++) f.journal().append({ scope: { type: "session", id: f.conversation.id }, kind: "item",
+      payload: { conversationId: f.conversation.id, turnId: "noise", phase: "completed", item: { type: "userMessage", clientId: `unrelated-${index}`, content: [] } } });
+    f.echo("conflicting-turn", f.wire, 999);
+    await expect(f.journal().reconcileCanonicalDelivery(f.operationId)).rejects.toThrow();
+    expect(f.journal().operationResult(f.operationId)?.receipt.status).toBe("uncertain");
+    expect(f.journal().effectBatch()).toEqual([]);
+  } finally { f.close(); }
+});
+
+test("recovery refuses an incomplete 50000-sequence journal window", async () => {
+  const f = fixture();
+  try {
+    for (let index = 0; index < 50_001; index++) f.journal().append({ scope: { type: "session", id: "noise" }, kind: "item", payload: { index } });
+    f.echo("conflicting-turn", f.wire, 999);
+    await expect(f.journal().reconcileCanonicalDelivery(f.operationId)).rejects.toThrow();
+    expect(f.journal().operationResult(f.operationId)?.receipt.status).toBe("uncertain");
+  } finally { f.close(); }
+}, 90_000);
+
+test("a conflicting turn arriving during canonical verification prevents settlement", async () => {
+  const f = fixture();
+  try {
+    await expect(f.journal().reconcileCanonicalDelivery(f.operationId, async (pathname, entry) => {
+      const proof = await readCanonicalCodexDelivery(pathname, entry);
+      f.echo("late-conflicting-turn", f.wire, 2);
+      return proof;
+    })).rejects.toThrow();
+    expect(f.journal().operationResult(f.operationId)?.receipt.status).toBe("uncertain");
+    expect(f.journal().effectBatch()).toEqual([]);
+  } finally { f.close(); }
+});
+
+test("a supplied digest cannot replace verification of the actual canonical text", async () => {
+  const f = fixture();
+  try {
+    f.write(encodeCodexStructuredUserText("different instruction", f.contentDigest, f.selectedContext, { kind: "operator" }, f.dedup));
+    await expect(f.journal().reconcileCanonicalDelivery(f.operationId)).rejects.toThrow();
+    expect(f.journal().operationResult(f.operationId)?.receipt.status).toBe("uncertain");
+  } finally { f.close(); }
+});
+
+test("recovery checks collisions before the canonical 16 MiB tail", async () => {
+  const f = fixture();
+  try {
+    f.write(encodeCodexStructuredUserText("different instruction", undefined, f.selectedContext, { kind: "operator" }, f.dedup));
+    fs.appendFileSync(f.transcript, JSON.stringify({ type: "event_msg", payload: { type: "agent_message", message: "x".repeat(17 * 1024 * 1024) } }) + "\n");
+    fs.appendFileSync(f.transcript, JSON.stringify({ type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: f.wire }] } }) + "\n");
+    await expect(f.journal().reconcileCanonicalDelivery(f.operationId)).rejects.toThrow();
+    expect(f.journal().operationResult(f.operationId)?.receipt.status).toBe("uncertain");
+  } finally { f.close(); }
+});
+
+
+test("canonical evidence appended during verification prevents settlement", async () => {
+  const f = fixture();
+  try {
+    await expect(f.journal().reconcileCanonicalDelivery(f.operationId, async (pathname, entry) => {
+      const proof = await readCanonicalCodexDelivery(pathname, entry);
+      fs.appendFileSync(pathname, JSON.stringify({ type: "response_item", payload: { type: "message", role: "user",
+        content: [{ type: "input_text", text: encodeCodexStructuredUserText("conflicting instruction", undefined, f.selectedContext, { kind: "operator" }, f.dedup) }] } }) + "\n");
+      return proof;
+    })).rejects.toThrow();
+    expect(f.journal().operationResult(f.operationId)?.receipt.status).toBe("uncertain");
+    expect(f.journal().effectBatch()).toEqual([]);
   } finally { f.close(); }
 });

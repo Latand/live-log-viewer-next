@@ -598,13 +598,22 @@ export class RuntimeJournal {
       return { operationId, receipt, replayed: true };
     }
     if (receipt.status !== "uncertain") throw new Error("canonical delivery reconciliation requires an uncertain original operation");
-    const admission = this.db.query<{ seq: number }, [string]>(
-      "SELECT seq FROM events WHERE scope = ? ORDER BY revision ASC LIMIT 1").get(`operation:${operationId}`);
-    if (!admission) throw new Error("canonical delivery evidence is unavailable");
+    const admission = this.db.query<{ seq: number; revision: number }, [string]>(
+      "SELECT seq, revision FROM events WHERE scope = ? ORDER BY revision ASC LIMIT 1").get(`operation:${operationId}`);
+    if (!admission || admission.revision !== 1) throw new Error("canonical delivery evidence is unavailable");
+    const evidenceScope = `session:${command.conversationId}`;
+    const evidenceHead = () => this.db.query<{ seq: number }, [string]>(
+      "SELECT seq FROM events WHERE scope = ? ORDER BY revision DESC LIMIT 1").get(evidenceScope)?.seq;
+    const openingEvidenceHead = evidenceHead();
+    const openingAnchor = this.meta("anchor_seq");
+    if (openingEvidenceHead === undefined || openingEvidenceHead > admission.seq + 50_000) {
+      throw new Error("canonical delivery journal coverage is incomplete");
+    }
     // A bounded historical window. Absence beyond it remains unknown.
     const echoes = this.db.query<{ seq: number; payload_json: string; producer_key: string | null }, [number, number, string]>(
-      "SELECT seq, payload_json, producer_key FROM events NOT INDEXED WHERE seq BETWEEN ? AND ? AND scope = ? AND kind = 'item' ORDER BY seq LIMIT 256"
+      "SELECT seq, payload_json, producer_key FROM events NOT INDEXED WHERE seq BETWEEN ? AND ? AND scope = ? AND kind = 'item' ORDER BY seq LIMIT 257"
     ).all(admission.seq, admission.seq + 50_000, `session:${command.conversationId}`);
+    if (echoes.length > 256) throw new Error("canonical delivery journal coverage is incomplete");
     const dedup = createHash("sha256").update(operationId).digest("hex");
     const entry = normalizeQueueEntry({ id: operationId, text: command.text, images: command.images, contentDigest: command.contentDigest,
       ...(command.selectedContext ? { selectedContext: command.selectedContext } : {}) });
@@ -634,11 +643,20 @@ export class RuntimeJournal {
     }
     if (candidates.size !== 1) throw new Error("canonical delivery binding is missing or ambiguous");
     const evidence = [...candidates.values()][0]!;
+    const canonicalRevision = () => {
+      const stat = fs.statSync(evidence.pathname, { bigint: true });
+      return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
+    };
+    const openingCanonicalRevision = canonicalRevision();
     if (!await readCanonical(evidence.pathname, { ...entry, text: entry.content.text })) throw new Error("canonical delivery is unproven");
     this.assertHealthy();
     this.db.exec("BEGIN IMMEDIATE");
     try {
       if (this.meta("host_epoch") !== openingHostEpoch) throw new Error("runtime host changed before canonical reconciliation");
+      if (evidenceHead() !== openingEvidenceHead || this.meta("anchor_seq") !== openingAnchor
+        || canonicalRevision() !== openingCanonicalRevision) {
+        throw new Error("canonical delivery evidence changed before reconciliation");
+      }
       const current = this.db.query<{ request_hash: string; receipt_json: string }, [string]>(
         "SELECT request_hash, receipt_json FROM operations WHERE operation_id = ?").get(operationId);
       if (!current || current.request_hash !== opening.request_hash) throw new Error("original operation binding changed");

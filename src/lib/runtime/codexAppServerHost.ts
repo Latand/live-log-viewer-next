@@ -506,7 +506,7 @@ function codexDeliveryDedup(operationId: string): string {
   return createHash("sha256").update(operationId).digest("hex");
 }
 type RolloutStructuredUserDelivery =
-  | { payloadKind: "text" | "content"; payloadDigest: string; contextDigest?: string }
+  | { payloadKind: "text" | "content"; payloadDigest: string; textDigest: string; contextDigest?: string }
   | { payloadKind: "conflict"; payloadDigest: null };
 
 interface RolloutTurnsCacheEntry {
@@ -540,16 +540,17 @@ function rememberRolloutStructuredUser(
   if (!decoded.deliveryDedup) return;
   const current = deliveries.get(decoded.deliveryDedup);
   const contextDigest = createHash("sha256").update(JSON.stringify(decoded.selectedContext)).digest("hex");
+  const textDigest = createHash("sha256").update(decoded.text).digest("hex");
   const observed: RolloutStructuredUserDelivery = decoded.contentDigest
-    ? { payloadKind: "content", payloadDigest: decoded.contentDigest, contextDigest }
-    : { payloadKind: "text", payloadDigest: createHash("sha256").update(decoded.text).digest("hex"), contextDigest };
+    ? { payloadKind: "content", payloadDigest: decoded.contentDigest, textDigest, contextDigest }
+    : { payloadKind: "text", payloadDigest: textDigest, textDigest, contextDigest };
   if (!current) {
     deliveries.set(decoded.deliveryDedup, observed);
     return;
   }
   if (current.payloadKind === "conflict") return;
   if (current.payloadKind !== observed.payloadKind || current.payloadDigest !== observed.payloadDigest
-    || current.contextDigest !== observed.contextDigest) {
+    || current.contextDigest !== observed.contextDigest || current.textDigest !== observed.textDigest) {
     deliveries.set(decoded.deliveryDedup, { payloadKind: "conflict", payloadDigest: null });
   }
 }
@@ -920,7 +921,8 @@ function rolloutDeliveryReceipt(
       .digest("hex");
   }
   const contextDigest = createHash("sha256").update(JSON.stringify(parseSelectedContextRef(entry.selectedContext))).digest("hex");
-  if (!payloadMatches || (delivery.payloadKind !== "conflict" && delivery.contextDigest !== contextDigest)) {
+  if (!payloadMatches || (delivery.payloadKind !== "conflict" && (delivery.contextDigest !== contextDigest
+    || delivery.textDigest !== createHash("sha256").update(entry.text ?? entry.content?.text ?? "").digest("hex")))) {
     throw new Error("Codex queue entry id belongs to a different payload");
   }
   /* The legacy `event_msg/user_message` record carries no turn id. Its durable
@@ -2765,7 +2767,7 @@ export class CodexAppServerHost implements EngineHost {
       catch (error) {
         // A damaged transport echo cannot overrule matching canonical evidence.
         // Missing, ambiguous or different canonical payloads keep the refusal.
-        const canonical = await rolloutConfirmedDelivery(this.identity.path, entry);
+        const canonical = this.identity.path ? await readCanonicalCodexDelivery(this.identity.path, entry) : null;
         if (!canonical) throw error;
         this.confirmedDeliveries.set(entry.id, { receipt: canonical, text: entry.text ?? null, contentDigest: entry.contentDigest ?? null });
         return canonical;
@@ -2832,9 +2834,8 @@ export class CodexAppServerHost implements EngineHost {
     entry: QueueEntry,
     confirmed: { receipt: DeliveryReceipt; text: string | null; contentDigest: string | null },
   ): DeliveryReceipt {
-    const payloadMatches = confirmed.contentDigest
-      ? confirmed.contentDigest === entry.contentDigest
-      : confirmed.text === entry.text;
+    const payloadMatches = confirmed.text === entry.text
+      && (!confirmed.contentDigest || confirmed.contentDigest === entry.contentDigest);
     if (!payloadMatches) {
       throw new Error("Codex queue entry id belongs to a different payload");
     }
@@ -2853,7 +2854,7 @@ export class CodexAppServerHost implements EngineHost {
     const previous = this.confirmedDeliveries.get(clientId);
     const pending = this.pendingDeliveries.get(clientId);
     const mismatch = Boolean(previous && (previous.text !== text || previous.contentDigest !== contentDigest))
-      || Boolean(pending && (contentDigest ? contentDigest !== pending.contentDigest : text !== pending.text));
+      || Boolean(pending && (text !== pending.text || (contentDigest !== null && contentDigest !== pending.contentDigest)));
     const confirmed = {
       receipt: previous?.receipt ?? pending?.receipt ?? { outcome: "turn-started" as const, turnId },
       text: mismatch ? null : text,
@@ -3542,5 +3543,9 @@ export class CodexAppServerHost implements EngineHost {
 
 export async function readCanonicalCodexDelivery(pathname: string, entry: QueueEntry): Promise<DeliveryReceipt | null> {
   const normalized = normalizeQueueEntry(entry);
-  return await rolloutConfirmedDelivery(pathname, { ...entry, text: normalized.content.text, content: normalized.content, contentDigest: normalized.contentDigest });
+  const index = await rolloutDeliveryIndexFromDisk(pathname);
+  if (index.readState === "unavailable" || index.scanOffset !== index.size) {
+    throw new Error("Canonical delivery evidence coverage is incomplete");
+  }
+  return rolloutDeliveryReceipt({ ...entry, text: normalized.content.text, content: normalized.content, contentDigest: normalized.contentDigest }, index.deliveries.get(codexDeliveryDedup(entry.id)));
 }
