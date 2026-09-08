@@ -5,7 +5,7 @@ import path from "node:path";
 import { afterAll, expect, test } from "bun:test";
 import { NextRequest } from "next/server";
 
-import { executeSpawnAdmissionValidation } from "@/app/api/spawn/validate/route";
+import { executeSpawnAdmissionValidation } from "@/lib/agent/spawnAdmissionValidation";
 import { AgentRegistry } from "@/lib/agent/registry";
 import { readSpawnAdmissionFence } from "@/lib/agent/spawnAdmission";
 import { executeSpawnRequest, type SpawnCommandDependencies } from "@/lib/agent/spawnCommand";
