@@ -286,16 +286,16 @@ function SourceChip({ task, file, onOpen }: { task: BoardTask; file: FileEntry |
         icon={<Crosshair className="h-3 w-3" aria-hidden />}
         ariaLabel={
           file
-            ? t("tasks.openSourceAria", { title })
-            : t("tasks.openSourceUnavailableAria", { title, reason: t("tasks.sourceGone") })
+            ? t("tasks.sourceNavigateAria", { title })
+            : t("tasks.sourceUnavailableAria", { title, reason: t("tasks.sourceGone") })
         }
-        title={file ? t("tasks.openSource") : t("tasks.sourceGone")}
+        title={file ? t("tasks.sourceNavigate") : t("tasks.sourceGone")}
         hoverClass="hover:bg-black/5 hover:text-accent"
         disabled={!file}
         onClick={() => {
           if (file) onOpen(file);
         }}
-        dataAttr="data-task-open-source"
+        dataAttr="data-task-source-navigation"
       />
     </span>
   );

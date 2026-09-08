@@ -51,7 +51,8 @@
   "src/components/scheme/SchemeBoard.camera.dom.test.tsx": "cdb5d5f3d61377fa62632ed25f406db0d53129ea5d7acb7ac544ee36dd7bf537",
   "src/components/scheme/SchemeBoard.selection.dom.test.tsx": "206add1cd7ff2bee1301af2a12b90213837cf743da2829afd97f7ef5e4636b02",
   "src/components/scheme/SchemeBoard.tsx": "fad1210f35caa836483c139b1133afc5ddf50a03c36396cc85afe261487dc4ae",
-  "src/components/scheme/TaskCard.tsx": "650a9b5aa022802f3441befc516da40361da55e2ab0c6d0324bfc5240e4bb6f2",
+  "src/components/scheme/TaskCard.dom.test.tsx": "201c00ba7ec456e1deee82891c9e49025b3942146ba17fbad1a03733d14c086f",
+  "src/components/scheme/TaskCard.tsx": "7c547f8d46d1f97c8d7882d9a76f7bedbcdd10f31a957c556d7a8dd165efff5e",
   "src/components/scheme/TaskEdgesLayer.tsx": "bbaae4acaa482d1897144c63f7db61b2756e0279c93758b8885ed7edc32f662a",
   "src/components/scheme/agentLinks.ts": "1ec9ec011f09c2fc9a4e40e193105cf37773b68db0f501752a70ac0637b1d748",
   "src/components/scheme/layout.ts": "2c21fde0f98d792cbfa6fd849a29788f7e4988bd6a8bbb9f82368ef3858af8f2",
@@ -73,6 +74,6 @@
   "src/hooks/useComposer.ts": "0aab6168b5c4c7789ebb1ffe14d1e00abdbde13ee06385fbb069ada755999516",
   "src/hooks/useIsMobile.ts": "1ac9a1e2e9ed93caae12dc88550d0638ddca97798795ae836cc675bee67feeaf",
   "src/hooks/useRuntime.ts": "6dc83541231365236adc91317e247a82db48dccb860d252c905ad71371ef8fe9",
-  "src/lib/i18n/en.ts": "f84ab031a3bd0174ad1169f27a284e42d435a1cf47873d1d104c1020049c3820",
-  "src/lib/i18n/uk.ts": "8a9eba32850cd72ee660adefaa09d0c349736db5db78fa501e6f12046b970a35"
+  "src/lib/i18n/en.ts": "c9f85b4bc2eca39c50dabe635a94d4b1b0271724e629e6b8b9a6ad3b17efce37",
+  "src/lib/i18n/uk.ts": "dff23e2d45e4adf6938969310df5cc21d7a72d4c153be00fcc3c68043d0a0a4b"
 }
