@@ -1996,6 +1996,21 @@ describe("original-key recovery (#1490)", () => {
       operationId: "op_lineage",
     });
 
+    /* A row claimed by the successor stays owned by that successor. Its
+       predecessor may recover rows it originally claimed, while a reverse
+       lookup cannot widen authority to the successor's live work. */
+    const successorOwned = recoveryHarness(successor.caller, store, {
+      bindingImpl: async () => ({ operationId: "op_successor_owned", outcome: "queued" }),
+    });
+    const successorOwnedArgs = { ...SPAWN, clientRequestId: "successor-owned-1" };
+    expect(await successorOwned.service.callTool("spawn_agent", successorOwnedArgs)).toMatchObject({ ok: true, operationId: "op_successor_owned" });
+    const predecessorLookup = recoveryHarness(OWNER, store);
+    expect(await predecessorLookup.service.callTool("spawn_agent", { ...successorOwnedArgs, recoveryOnly: true })).toMatchObject({
+      ok: false,
+      code: "recovery_not_permitted",
+    });
+    expect(predecessorLookup.recoverCalls).toHaveLength(0);
+
     const unrelated = recoveryHarness({
       kind: "worker",
       conversationId: "conversation_unrelated",

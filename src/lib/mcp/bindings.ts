@@ -872,7 +872,7 @@ export const productionDomainDependencies: ViewerMcpDomainDependencies = {
   validateSpawnAdmission: (body, context) => productionViewerControlDependencies().post(
     "/api/spawn/validate",
     body,
-    callerCapabilityHeaders(),
+    spawnControlHeaders(),
     context,
   ),
   recoveryPredecessors: productionRecoveryPredecessors,
@@ -1070,10 +1070,7 @@ async function spawnAgent(args: McpToolArgs, control: ViewerControlDependencies,
       );
     }
   }
-  const result = await dispatchControl(control)("/api/spawn", spawnDispatchBody(args, clientAttemptId), {
-    ...internalServiceHeaders("mcp"),
-    [VIEWER_SPAWN_CAPABILITY_HEADER]: ensureOperatorSpawnCapability(),
-  });
+  const result = await dispatchControl(control)("/api/spawn", spawnDispatchBody(args, clientAttemptId), spawnControlHeaders());
   // A readable body alone establishes no acceptance. Validate the fields
   // this binding publishes before the service can persist a successful replay.
   if (!text(result.launchId) || !text(result.conversationId)
@@ -2181,6 +2178,16 @@ async function bridgeDirective(args: McpToolArgs, control: ViewerControlDependen
     effect that must replay with its parent call. */
 function derivedRequestId(base: string, suffix: string): string {
   return spawnAttemptId(`${base}:${suffix}`);
+}
+
+/** The capability used by both the spawn dispatch and its admission probe.
+    Keeping these control calls on one header path prevents a future route
+    authentication change from admitting the dispatch while refusing recovery. */
+function spawnControlHeaders(): Record<string, string> {
+  return {
+    ...internalServiceHeaders("mcp"),
+    [VIEWER_SPAWN_CAPABILITY_HEADER]: ensureOperatorSpawnCapability(),
+  };
 }
 
 /**

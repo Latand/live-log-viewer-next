@@ -3154,6 +3154,7 @@ test("spawn binding derives predecessor lineage from the active same-project sea
   process.env.LLV_STATE_DIR = sandbox;
   const predecessor = "conversation_predecessor";
   const successor = "conversation_successor";
+  const finalSuccessor = "conversation_final_successor";
   const first = beginOrchestratorSeatIntent({
     project: "proj-a",
     mandate: "old mandate",
@@ -3182,13 +3183,41 @@ test("spawn binding derives predecessor lineage from the active same-project sea
     conversationId: successor,
     path: "/repo/successor.jsonl",
   }).kind).toBe("activated");
+  const third = beginOrchestratorSeatIntent({
+    project: "proj-a",
+    mandate: "final mandate",
+    clientRequestId: "seat-lineage-final",
+    mode: "existing",
+    conversationId: finalSuccessor,
+  });
+  expect(third.kind).toBe("begun");
+  expect(completeOrchestratorSeatIntent({
+    project: "proj-a",
+    clientRequestId: "seat-lineage-final",
+    conversationId: finalSuccessor,
+    path: "/repo/final.jsonl",
+  }).kind).toBe("activated");
+  const otherProjectSeat = beginOrchestratorSeatIntent({
+    project: "proj-b",
+    mandate: "other project mandate",
+    clientRequestId: "seat-lineage-other-project",
+    mode: "existing",
+    conversationId: "conversation_other_project",
+  });
+  expect(otherProjectSeat.kind).toBe("begun");
+  expect(completeOrchestratorSeatIntent({
+    project: "proj-b",
+    clientRequestId: "seat-lineage-other-project",
+    conversationId: "conversation_other_project",
+    path: "/other-project/current.jsonl",
+  }).kind).toBe("activated");
 
   const base = new AgentRegistry(path.join(sandbox, "registry.json"), undefined, undefined, { sqliteMode: "off" }).readOnlySnapshot();
   const snapshot = {
     ...base,
     conversations: {
-      [successor]: {
-        id: successor,
+      [finalSuccessor]: {
+        id: finalSuccessor,
         engine: "codex",
         generations: [],
         continuityPaths: [],
@@ -3208,7 +3237,7 @@ test("spawn binding derives predecessor lineage from the active same-project sea
   } as never;
   const recoverable = viewerMcpRecoverableTools({
     registrySnapshot: () => snapshot,
-    attentionAuthority: () => ({ kind: "worker", conversationId: successor, role: null }),
+    attentionAuthority: () => ({ kind: "worker", conversationId: finalSuccessor, role: null }),
   } as never);
   const binding = recoverable.spawn_agent!.bind({
     clientRequestId: "seat-lineage-bind",
@@ -3219,9 +3248,9 @@ test("spawn binding derives predecessor lineage from the active same-project sea
   expect(binding).toMatchObject({
     caller: {
       kind: "worker",
-      conversationId: successor,
+      conversationId: finalSuccessor,
       project: "proj-a",
-      predecessors: [predecessor],
+      predecessors: [successor, predecessor],
     },
   });
 });

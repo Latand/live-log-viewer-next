@@ -5,13 +5,16 @@ import path from "node:path";
 import { afterAll, expect, test } from "bun:test";
 import { NextRequest } from "next/server";
 
+import { POST as spawnAdmissionPost } from "@/app/api/spawn/validate/route";
 import { executeSpawnAdmissionValidation } from "@/lib/agent/spawnAdmissionValidation";
 import { AgentRegistry } from "@/lib/agent/registry";
 import { readSpawnAdmissionFence } from "@/lib/agent/spawnAdmission";
+import { VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/spawnPolicy";
 import { executeSpawnRequest, type SpawnCommandDependencies } from "@/lib/agent/spawnCommand";
 import type { RuntimeHostClient } from "@/lib/runtime/client";
 
 import {
+  productionDomainDependencies,
   viewerMcpBindings,
   viewerMcpRecoverableTools,
   type ViewerControlDependencies,
@@ -21,11 +24,16 @@ import {
   createMcpToolService,
   McpDispatchVerdictError,
   MemoryMcpReceiptStore,
+  SqliteMcpReceiptStore,
+  type McpRecoveryReceiptStore,
+  type McpRequestBinding,
   type McpToolCallContext,
 } from "./server";
 
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-spawn-recovery-integration-"));
 const previousStateDir = process.env.LLV_STATE_DIR;
+const previousHome = process.env.HOME;
+const previousConfigHome = process.env.XDG_CONFIG_HOME;
 const previousTransport = process.env.LLV_SPAWN_TRANSPORT;
 const previousStructuredHosts = process.env.LLV_STRUCTURED_HOSTS;
 const previousRuntimeEvents = process.env.LLV_RUNTIME_EVENTS;
@@ -35,6 +43,8 @@ const previousCodexBinary = process.env.LLV_CODEX_BINARY;
 const codexBinary = path.join(sandbox, "codex-list");
 fs.writeFileSync(codexBinary, "#!/bin/sh\nprintf '[]'\n", { mode: 0o700 });
 process.env.LLV_STATE_DIR = path.join(sandbox, "state");
+process.env.HOME = path.join(sandbox, "home");
+process.env.XDG_CONFIG_HOME = path.join(sandbox, "config");
 process.env.LLV_SPAWN_TRANSPORT = "structured";
 process.env.LLV_STRUCTURED_HOSTS = "1";
 process.env.LLV_RUNTIME_EVENTS = "1";
@@ -45,6 +55,10 @@ process.env.LLV_CODEX_BINARY = codexBinary;
 afterAll(() => {
   if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
   else process.env.LLV_STATE_DIR = previousStateDir;
+  if (previousHome === undefined) delete process.env.HOME;
+  else process.env.HOME = previousHome;
+  if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+  else process.env.XDG_CONFIG_HOME = previousConfigHome;
   if (previousTransport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
   else process.env.LLV_SPAWN_TRANSPORT = previousTransport;
   if (previousStructuredHosts === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
@@ -136,7 +150,7 @@ function routeControl(dependencies: SpawnCommandDependencies, dispatches: { coun
 
 function service(
   registry: AgentRegistry,
-  store: MemoryMcpReceiptStore,
+  store: McpRecoveryReceiptStore,
   control: ViewerControlDependencies,
   domain: ViewerMcpDomainDependencies,
 ) {
@@ -186,7 +200,7 @@ test("a real post-wire HTTP 400 is fenced once and an existing stranded claim re
   expect(liveDispatches.count).toBe(1);
 
   const historicalDispatches = { count: 0 };
-  const historicalStore = new MemoryMcpReceiptStore();
+  const historicalStore = new SqliteMcpReceiptStore(path.join(sandbox, "historical-receipts.sqlite"));
   const oldControl: ViewerControlDependencies = {
     post: async () => { throw new Error("unexpected old control call"); },
     dispatch: async (_pathname, _body, _headers, context) => {
@@ -231,4 +245,55 @@ test("a real post-wire HTTP 400 is fenced once and an existing stranded claim re
   expect(closed?.binding).toEqual(stranded?.binding);
   expect(registry.readOnlySnapshot().receipts).toEqual({});
   expect(readSpawnAdmissionFence(downstreamKey)).toMatchObject({ status: 400 });
+  historicalStore.close();
+});
+
+test("production recovery probes the exported validate route over HTTP with the dispatch capability", async () => {
+  const cwd = path.join(sandbox, "http-probe-dir");
+  fs.mkdirSync(cwd, { recursive: true });
+  const registry = new AgentRegistry(path.join(sandbox, `registry-${crypto.randomUUID()}.json`), undefined, undefined, { sqliteMode: "off" });
+  const requests: { pathname: string; capability: string | null }[] = [];
+  const viewer = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: async (request) => {
+      requests.push({
+        pathname: new URL(request.url).pathname,
+        capability: request.headers.get(VIEWER_SPAWN_CAPABILITY_HEADER),
+      });
+      return spawnAdmissionPost.withDependencies(
+        new NextRequest(request),
+        { registry: () => registry },
+      );
+    },
+  });
+  const previousControlUrl = process.env.LLV_VIEWER_CONTROL_URL;
+  process.env.LLV_VIEWER_CONTROL_URL = viewer.url.origin;
+  try {
+    const args = spawnArgs("spawn_post_wire_http_1", cwd);
+    const tools = viewerMcpRecoverableTools({
+      ...productionDomainDependencies,
+      registrySnapshot: () => registry.readOnlySnapshot(),
+      attentionAuthority: () => ({ kind: "root", conversationId: null, role: null }),
+      recoveryPredecessors: () => [],
+    });
+    const bindingInput = await tools.spawn_agent!.bind(args);
+    const binding: McpRequestBinding = {
+      ...bindingInput,
+      version: 1,
+      toolName: "spawn_agent",
+      clientRequestId: String(args.clientRequestId),
+      owner: { pid: process.pid, startIdentity: null },
+      claimedAt: new Date().toISOString(),
+    };
+    const recovered = await tools.spawn_agent!.recover(binding, { legacy: false, args });
+    expect(recovered).toMatchObject({ outcome: "not-executed", evidence: "spawn-admission-fence" });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({ pathname: "/api/spawn/validate", capability: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/) });
+    expect(readSpawnAdmissionFence(binding.downstreamKey)).toMatchObject({ status: 400 });
+  } finally {
+    viewer.stop(true);
+    if (previousControlUrl === undefined) delete process.env.LLV_VIEWER_CONTROL_URL;
+    else process.env.LLV_VIEWER_CONTROL_URL = previousControlUrl;
+  }
 });

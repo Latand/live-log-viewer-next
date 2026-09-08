@@ -241,12 +241,30 @@ export async function executeSpawnRequest(
   const lineageError = agentSpawnLineageError(req, body);
   if (lineageError) return NextResponse.json({ error: lineageError }, { status: 400 });
   const agentInitiated = isAgentInitiatedSpawn(req);
+  let registryForCaller: ReturnType<SpawnCommandDependencies["registry"]> | null = null;
+  let authenticatedCaller: AuthenticatedSpawnCaller | null = null;
+  let authenticatedCallerError: { error: string; status?: number } | null = null;
+  if (agentInitiated) {
+    try {
+      registryForCaller = dependencies.registry();
+      const caller = authenticatedAgentSpawnCaller(req, body.src, registryForCaller);
+      if ("error" in caller) authenticatedCallerError = caller;
+      else authenticatedCaller = caller;
+    } catch (error) {
+      authenticatedCallerError = {
+        error: error instanceof Error ? error.message : String(error),
+        status: 503,
+      };
+    }
+  }
   if (body.allowSubagents !== undefined && typeof body.allowSubagents !== "boolean") {
     return NextResponse.json({ error: "allowSubagents must be a boolean" }, { status: 400 });
   }
   const role = resolveSpawnRole(body);
   if (!role.ok) {
-    fenceSpawnAdmissionRejection(body as Record<string, unknown>, 400, role.error, dependencies);
+    if (!authenticatedCallerError) {
+      fenceSpawnAdmissionRejection(body as Record<string, unknown>, 400, role.error, dependencies);
+    }
     return NextResponse.json({ error: role.error }, { status: 400 });
   }
   if (role.value?.role === "reviewer" && (typeof body.reviews !== "string" || !body.reviews.trim())) {
@@ -327,7 +345,7 @@ export async function executeSpawnRequest(
     }
   }
 
-  const registry = dependencies.registry();
+  const registry = registryForCaller ?? dependencies.registry();
   const clientAttemptId = typeof body.clientAttemptId === "string" ? body.clientAttemptId : null;
   const existingAttempt = clientAttemptId ? registry.spawnReceiptForClientAttempt(clientAttemptId) : null;
   if (!explicitTitle && !existingAttempt) {
@@ -340,11 +358,8 @@ export async function executeSpawnRequest(
     return NextResponse.json({ error: SPAWN_TITLE_REQUIRED_ERROR }, { status: 400 });
   }
 
-  let authenticatedCaller: AuthenticatedSpawnCaller | null = null;
-  if (agentInitiated) {
-    const caller = authenticatedAgentSpawnCaller(req, body.src, registry);
-    if ("error" in caller) return NextResponse.json({ error: caller.error }, { status: caller.status ?? 403 });
-    authenticatedCaller = caller;
+  if (agentInitiated && authenticatedCallerError) {
+    return NextResponse.json({ error: authenticatedCallerError.error }, { status: authenticatedCallerError.status ?? 403 });
   }
   if (agentInitiated && body.allowSubagents === true && authenticatedCaller?.kind !== "operator") {
     return NextResponse.json({ error: "allowSubagents requires an authenticated Viewer operator spawn" }, { status: 403 });

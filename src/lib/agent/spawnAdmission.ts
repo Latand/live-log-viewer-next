@@ -121,7 +121,7 @@ function normalizeSpawnAdmissionFence(value: unknown, key: string): SpawnAdmissi
   };
 }
 
-function readSpawnAdmissionFenceFile(): SpawnAdmissionFenceFile {
+function readSpawnAdmissionFenceFile(requestedClientAttemptId?: string): SpawnAdmissionFenceFile {
   let raw: string;
   try {
     raw = fs.readFileSync(spawnAdmissionFencePath(), "utf8");
@@ -144,7 +144,15 @@ function readSpawnAdmissionFenceFile(): SpawnAdmissionFenceFile {
   }
   const fences: Record<string, SpawnAdmissionFence> = {};
   for (const [key, value] of Object.entries((parsed as { fences: Record<string, unknown> }).fences)) {
-    fences[key] = normalizeSpawnAdmissionFence(value, key);
+    try {
+      fences[key] = normalizeSpawnAdmissionFence(value, key);
+    } catch (error) {
+      /* A damaged entry must still make recovery of that exact key unknown.
+         An unrelated damaged key has no bearing on this lookup and must not
+         turn every new reservation into a 500. A later atomic write drops the
+         unusable entry from the normalized file. */
+      if (key === requestedClientAttemptId) throw error;
+    }
   }
   return { version: 1, fences };
 }
@@ -161,7 +169,7 @@ function writeSpawnAdmissionFenceFile(file: SpawnAdmissionFenceFile): void {
     original outcome unknown. */
 export function readSpawnAdmissionFence(clientAttemptId: string): SpawnAdmissionFence | null {
   if (!validClientAttemptId(clientAttemptId)) return null;
-  return readSpawnAdmissionFenceFile().fences[clientAttemptId] ?? null;
+  return readSpawnAdmissionFenceFile(clientAttemptId).fences[clientAttemptId] ?? null;
 }
 
 /** Atomically persist a validation refusal only when no downstream launch
@@ -182,7 +190,7 @@ export function recordSpawnAdmissionRejection(input: {
   return withAccountMutationLock(() => {
     const existingReceipt = currentReceipt();
     if (existingReceipt) return { kind: "existing-receipt", receipt: existingReceipt };
-    const file = readSpawnAdmissionFenceFile();
+    const file = readSpawnAdmissionFenceFile(input.clientAttemptId);
     const existing = file.fences[input.clientAttemptId];
     const requestDigest = input.requestDigest.toLowerCase();
     if (existing) {

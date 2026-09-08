@@ -44,7 +44,7 @@ afterAll(() => {
   fs.rmSync(sandbox, { recursive: true, force: true });
 });
 
-function request(body: Record<string, unknown>): NextRequest {
+function request(body: Record<string, unknown>, headers: Record<string, string> = {}): NextRequest {
   return new NextRequest("http://127.0.0.1:8898/api/spawn/validate", {
     method: "POST",
     headers: {
@@ -52,12 +52,13 @@ function request(body: Record<string, unknown>): NextRequest {
       host: "127.0.0.1:8898",
       "sec-fetch-site": "same-origin",
       "content-type": "application/json",
+      ...headers,
     },
     body: JSON.stringify(body),
   });
 }
 
-function spawnRequest(body: Record<string, unknown>): NextRequest {
+function spawnRequest(body: Record<string, unknown>, headers: Record<string, string> = {}): NextRequest {
   return new NextRequest("http://127.0.0.1:8898/api/spawn", {
     method: "POST",
     headers: {
@@ -65,6 +66,7 @@ function spawnRequest(body: Record<string, unknown>): NextRequest {
       host: "127.0.0.1:8898",
       "sec-fetch-site": "same-origin",
       "content-type": "application/json",
+      ...headers,
     },
     body: JSON.stringify(body),
   });
@@ -158,6 +160,55 @@ test("an admissible validation result leaves the key unfenced", async () => {
 
   expect(await response.json()).toEqual({ admissible: true, fenced: false });
   expect(readSpawnAdmissionFence(clientAttemptId)).toBeNull();
+});
+
+test("an unauthenticated agent refusal does not burn its downstream key", async () => {
+  const cwd = path.join(sandbox, "unauthenticated-agent-dir");
+  fs.mkdirSync(cwd, { recursive: true });
+  const store = new AgentRegistry(path.join(sandbox, `registry-${crypto.randomUUID()}.json`), undefined, undefined, { sqliteMode: "off" });
+  const body = {
+    title: "Unauthenticated refused deployer",
+    role: "deployer",
+    roleParams: { sha: "d".repeat(40), pr: "26" },
+    cwd,
+    ["prompt"]: "launch the dev deployer",
+    clientAttemptId: "spawn_admission_unauth_1",
+  };
+
+  const validation = await POST.withDependencies(request(body, { "sec-fetch-site": "none" }), { registry: () => store });
+  expect(validation.status).toBe(403);
+  expect(readSpawnAdmissionFence(body.clientAttemptId)).toBeNull();
+
+  const route = await spawnPost.withDependencies(spawnRequest(body, { "sec-fetch-site": "none" }), {
+    registry: () => store,
+  } as Parameters<typeof spawnPost.withDependencies>[1]);
+  expect(route.status).toBe(400);
+  expect(await route.json()).toEqual({ error: "deployer requires confirm: deploy" });
+  expect(readSpawnAdmissionFence(body.clientAttemptId)).toBeNull();
+});
+
+test("a malformed unrelated fence entry does not block a new refusal fence", async () => {
+  const cwd = path.join(sandbox, "malformed-entry-dir");
+  fs.mkdirSync(cwd, { recursive: true });
+  const store = new AgentRegistry(path.join(sandbox, `registry-${crypto.randomUUID()}.json`), undefined, undefined, { sqliteMode: "off" });
+  const fenceFile = path.join(process.env.LLV_STATE_DIR!, "spawn-admission-fences.json");
+  fs.mkdirSync(path.dirname(fenceFile), { recursive: true });
+  fs.writeFileSync(fenceFile, JSON.stringify({ version: 1, fences: {
+    spawn_admission_malformed_1: null,
+  } }) + "\n");
+  expect(() => readSpawnAdmissionFence("spawn_admission_malformed_1")).toThrow("invalid spawn admission fence");
+  const body = {
+    title: "Refusal beside damaged history",
+    role: "deployer",
+    roleParams: { sha: "e".repeat(40), pr: "26" },
+    cwd,
+    ["prompt"]: "launch the dev deployer",
+    clientAttemptId: "spawn_admission_recover_1",
+  };
+
+  const response = await POST.withDependencies(request(body), { registry: () => store });
+  expect(await response.json()).toMatchObject({ admissible: false, fenced: true, status: 400 });
+  expect(readSpawnAdmissionFence(body.clientAttemptId)).toMatchObject({ clientAttemptId: body.clientAttemptId });
 });
 
 test("an engine override refusal uses the same request-bound fence", async () => {
