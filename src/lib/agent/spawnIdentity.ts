@@ -32,6 +32,13 @@ export function spawnContentDigest(input: unknown): string {
   return digest(input);
 }
 
+/** Digest of the exact JSON body presented to the spawn admission route. The
+    downstream admission fence compares this identity before it can close a
+    stranded MCP claim, so a changed body cannot inherit the old refusal. */
+export function spawnAdmissionBodyDigest(input: unknown): string {
+  return digest(input);
+}
+
 export function spawnParentSelector(body: { src?: unknown; parent?: unknown; parentConversationId?: unknown }): SpawnParentSelector {
   if (typeof body.parentConversationId === "string") return { conversationId: body.parentConversationId };
   if (typeof body.parent === "string") return { path: body.parent };

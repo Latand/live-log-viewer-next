@@ -18,10 +18,18 @@ import { codexModelSupportsImages, defaultModelFor, modelFromBody, validateLaunc
 import { directOperatorActivityAuthority } from "@/lib/agent/operatorAuthority";
 import { resolveSpawnRole } from "@/lib/roles/registry";
 import { assertDarwinStructuredRuntime } from "@/lib/proc/darwinIdentity";
-import { spawnContentDigest, spawnParentSelector, spawnRequestDigests } from "@/lib/agent/spawnIdentity";
+import { spawnAdmissionBodyDigest, spawnContentDigest, spawnParentSelector, spawnRequestDigests } from "@/lib/agent/spawnIdentity";
 import { sessionKeyFromTranscript, sessionKeyId } from "@/lib/agent/sessionKey";
 import { resolveSpawnLineage, SpawnParentError } from "@/lib/agent/spawnParent";
-import { SpawnAdmissionError, isSpawnDeniedRole } from "@/lib/agent/spawnAdmission";
+import {
+  SpawnAdmissionError,
+  SpawnAdmissionFenceConflictError,
+  SpawnAdmissionFenceError,
+  isSpawnDeniedRole,
+  readSpawnAdmissionFence,
+  recordSpawnAdmissionRejection,
+  type SpawnAdmissionFenceResult,
+} from "@/lib/agent/spawnAdmission";
 import { spawnRejectionResponse, spawnReplayStatus, spawnResponseForReceipt, type SpawnResponse } from "@/lib/agent/spawnResponse";
 import { applyClaudeSpawnPolicy, prepareManagedClaudeSpawnHome } from "@/lib/agent/spawnPolicy";
 import { resolveSpawnedTranscriptPath } from "@/lib/agent/spawnedTranscript";
@@ -124,6 +132,29 @@ export const productionSpawnCommandDependencies: SpawnCommandDependencies = {
   recordOperatorActivity: recordDirectOperatorWakatimeActivity,
 };
 
+/** Record a request-bound pre-reservation refusal. The shared durable fence is
+    the authoritative downstream evidence; if it cannot be written, recovery
+    must retain unknown rather than trusting the HTTP error. */
+export function fenceSpawnAdmissionRejection(
+  body: Record<string, unknown>,
+  status: number,
+  error: string,
+  dependencies: Pick<SpawnCommandDependencies, "registry">,
+): SpawnAdmissionFenceResult | null {
+  const clientAttemptId = typeof body.clientAttemptId === "string" ? body.clientAttemptId : null;
+  if (!clientAttemptId || !/^[A-Za-z0-9_-]{8,128}$/.test(clientAttemptId)) return null;
+  try {
+    return recordSpawnAdmissionRejection({
+      clientAttemptId,
+      requestDigest: spawnAdmissionBodyDigest(body),
+      status,
+      error,
+    }, () => dependencies.registry().spawnReceiptForClientAttempt(clientAttemptId));
+  } catch {
+    return null;
+  }
+}
+
 interface SuggestResponse {
   dirs: string[];
   /** Working directory of the `src` transcript when one was requested. */
@@ -214,7 +245,10 @@ export async function executeSpawnRequest(
     return NextResponse.json({ error: "allowSubagents must be a boolean" }, { status: 400 });
   }
   const role = resolveSpawnRole(body);
-  if (!role.ok) return NextResponse.json({ error: role.error }, { status: 400 });
+  if (!role.ok) {
+    fenceSpawnAdmissionRejection(body as Record<string, unknown>, 400, role.error, dependencies);
+    return NextResponse.json({ error: role.error }, { status: 400 });
+  }
   if (role.value?.role === "reviewer" && (typeof body.reviews !== "string" || !body.reviews.trim())) {
     return NextResponse.json({ error: "reviewer requires reviews" }, { status: 400 });
   }
@@ -734,6 +768,19 @@ export async function executeSpawnRequest(
       ? body.accountId
       : account.accountId;
     const begun = await withAccountMutationLockAsync(async () => {
+      if (!existingAttempt && clientAttemptId) {
+        /* The validation endpoint may have fenced this exact downstream key
+           while an older request was between validation and reservation. Both
+           checks run under the same account lock, so a fence either precedes
+           this reservation or observes the receipt that won before it. */
+        const admissionFence = readSpawnAdmissionFence(clientAttemptId);
+        if (admissionFence) {
+          if (admissionFence.requestDigest === spawnAdmissionBodyDigest(body as Record<string, unknown>)) {
+            throw new SpawnAdmissionFenceError(admissionFence);
+          }
+          throw new SpawnAdmissionFenceConflictError();
+        }
+      }
       if (!existingAttempt) {
         const current = dependencies.resolveSpawnAccount(engine, account.accountId);
         if (current.accountId !== account.accountId || current.kind !== account.kind) {
@@ -1051,6 +1098,8 @@ export async function executeSpawnRequest(
       deleteInboxImages(imagePaths);
     }
     if (error instanceof SpawnParentError) return NextResponse.json({ error: error.message }, { status: error.status });
+    if (error instanceof SpawnAdmissionFenceConflictError) return NextResponse.json({ error: error.message }, { status: 409 });
+    if (error instanceof SpawnAdmissionFenceError) return NextResponse.json({ error: error.fence.error, code: "spawn_admission_refused" }, { status: error.fence.status });
     /* Typed terminal admission rejection (#393): the durable receipt already
        exists and no transcript or process was created. */
     if (error instanceof SpawnAdmissionError) return NextResponse.json(spawnRejectionResponse(error), { status: 403 });
