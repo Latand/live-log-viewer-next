@@ -83,6 +83,7 @@ relay_errors = []
 fence_seen = threading.Event()
 held_historical = 0
 late_startup_publications = 0
+late_candidate_mutations = 0
 listener = socket.socket(socket.AF_UNIX)
 listener.bind(relay_socket)
 listener.listen()
@@ -90,12 +91,18 @@ listener.settimeout(.2)
 stopping = threading.Event()
 
 def forward(peer):
-    global held_historical, late_startup_publications
+    global held_historical, late_startup_publications, late_candidate_mutations
     try:
         peer_pid = struct.unpack("3i", peer.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))[0]
         request = peer.makefile("rb").readline()
         decoded = json.loads(request)
         method = decoded["method"]
+        if args.rollback and peer_pid == app.pid and method in ("append", "command", "operation", "operation-transition"):
+            authority_path = root / "state/hot-state-authority.json"
+            authority = json.loads(authority_path.read_text()) if authority_path.exists() else {}
+            if authority.get("checkpoint") or authority.get("releaseRevision") != "a" * 40:
+                with metrics_lock:
+                    late_candidate_mutations += 1
         event = decoded.get("params", {}).get("event", {})
         conversation = event.get("scope", {}).get("id", "")
         history_index = int(conversation.removeprefix("conversation_history_")) if conversation.startswith("conversation_history_") else -1
@@ -198,6 +205,10 @@ if args.rollback:
     logs.append(open(root / "rollback.log", "w"))
     rollback_driver = subprocess.Popen([str(bun), "src/lib/runtime/fixtures/packagedRollback.ts"], cwd=repo, env=env, stdout=logs[-1], stderr=subprocess.STDOUT)
 result = {"ready": False, "deadlineMs": budgets["serving"], "snapshotDelayMs": args.snapshot_delay_ms, "rpcDelayMs": args.rpc_delay_ms}
+if args.rollback:
+    # The real verify action and rollback action each retain a hard deadline.
+    # Include one bounded capability observation after the terminal write.
+    result["rollbackBoundMs"] = (args.verify_timeout_ms or budgets["action"]) + 90_000 + 5_000
 expected_keys = [("claude" if not args.codex_only and i >= 3 else "codex") + ":00000000-0000-4000-8000-" + str(i).zfill(12) for i in range(6)]
 before_claims = None
 
@@ -293,6 +304,42 @@ finally:
     with sqlite3.connect(f"file:{root / 'state/runtime-events.sqlite'}?mode=ro", uri=True) as db:
         pending_after = db.execute("SELECT operation_id,idempotency_key,request_json FROM operations WHERE idempotency_key LIKE 'queued-startup-%' ORDER BY idempotency_key").fetchall()
     result["pendingIdentitiesPreserved"] = pending_before == pending_after
+    # Match the original durable request to exactly one actual provider input.
+    # Claude's wire protocol carries no client key, so its unique fixture text
+    # and session bind that input to the unchanged original journal request.
+    delivery_log = root / "state/provider-deliveries.jsonl"
+    observed = [json.loads(line) for line in delivery_log.read_text().splitlines()] if delivery_log.exists() else []
+    expected = []
+    for operation_id, key, request_json in pending_before:
+        request = json.loads(request_json)
+        index = int(key.removeprefix("queued-startup-"))
+        engine, session = expected_keys[index].split(":", 1)
+        wire_text = request["text"]
+        if engine == "codex":
+            wire_text = f"<!-- llv:structured-user dedup={hashlib.sha256(operation_id.encode()).hexdigest()} -->\n{wire_text}"
+        expected.append({"engine": engine, "session": session, "text": wire_text,
+                         "clientId": operation_id if engine == "codex" else None})
+    actual = [{"engine": item["engine"], "session": item["session"],
+               "text": "".join(block.get("text", "") for block in item["content"] if block.get("type") in ("text", "input_text")),
+               "clientId": item["clientId"]} for item in observed]
+    # Retained unfinished Codex turns can also receive the explicit startup
+    # continuation. Account for its exact wire contract separately; never
+    # discard an unknown input or count a continuation as an original send.
+    continuations = []
+    original_inputs = []
+    for item in actual:
+        client_id = item["clientId"] or ""
+        prefix = f"recovery-continuation-{item['session']}-"
+        continuation_text = f"<!-- llv:structured-user dedup={hashlib.sha256(client_id.encode()).hexdigest()} -->\nContinue the interrupted turn from the transcript."
+        if item["engine"] == "codex" and client_id.startswith(prefix) and client_id[len(prefix):].isdigit() and item["text"] == continuation_text:
+            continuations.append(item)
+        else:
+            original_inputs.append(item)
+    result["originalProviderInputsMatched"] = sorted(original_inputs, key=lambda item: item["session"]) == sorted(expected, key=lambda item: item["session"])
+    result["originalProviderInputCount"] = len(original_inputs)
+    result["recoveryContinuationCount"] = len(continuations)
+    result["providerInputCount"] = len(actual)
+    (root / "provider-input-evidence.json").write_text(json.dumps({"expected": expected, "actual": actual}, indent=2))
     # Only child handles created above; no process enumeration or live signals.
     # End application clients before asking the host to drain its listeners.
     for label, child in [("candidate", app), ("previous", previous_app), ("driver", rollback_driver), ("host", host)]:
@@ -316,11 +363,12 @@ finally:
     with metrics_lock:
         result["heldHistoricalResponses"] = held_historical
         result["lateStartupPublications"] = late_startup_publications
+        result["lateCandidateMutations"] = late_candidate_mutations
         result["rpc"] = dict(metrics)
         result["relayErrors"] = dict(collections.Counter(relay_errors))
     (root / "result.json").write_text(json.dumps(result, indent=2))
     print(json.dumps(result), flush=True)
-preserved = result.get("pendingSpawnPreserved") is True and not result.get("unsettledPrivateChildren") and result.get("externalStatePreserved") is True and result.get("externalWorkersAlive") == [True, True] and result.get("pendingIdentitiesPreserved") is True
+preserved = result.get("originalProviderInputsMatched") is True and result.get("lateCandidateMutations") == 0 and result.get("pendingSpawnPreserved") is True and not result.get("unsettledPrivateChildren") and result.get("externalStatePreserved") is True and result.get("externalWorkersAlive") == [True, True] and result.get("pendingIdentitiesPreserved") is True
 if args.rollback:
-    raise SystemExit(0 if preserved and result.get("terminalPhase") == "rolled-back" and result.get("terminal") is True and result.get("targetRestored") is True and result.get("candidateExit") == 0 and result.get("orphanReady") is False and "timed out" in (result.get("rollbackError") or "") and result.get("heldHistoricalResponses", 0) > 0 and result.get("lateStartupPublications") == 0 and result.get("restoredReady") is True and result.get("restoredQueuedSends") == {"delivered": 6} else 1)
+    raise SystemExit(0 if preserved and result.get("elapsedMs", float("inf")) < result["rollbackBoundMs"] and result.get("terminalPhase") == "rolled-back" and result.get("terminal") is True and result.get("targetRestored") is True and result.get("candidateExit") == 0 and result.get("orphanReady") is False and "timed out" in (result.get("rollbackError") or "") and result.get("heldHistoricalResponses", 0) > 0 and result.get("lateStartupPublications") == 0 and result.get("restoredReady") is True and result.get("restoredQueuedSends") == {"delivered": 6} else 1)
 raise SystemExit(0 if preserved and result.get("queuedSends") == {"delivered": 6} and result.get("ready") and result["elapsedMs"] < result["deadlineMs"] and result.get("hosted") == 6 and result.get("ownershipPreserved") is True and result.get("creation", {}).get("created") else 1)

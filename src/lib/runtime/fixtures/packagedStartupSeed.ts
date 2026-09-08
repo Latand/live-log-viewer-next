@@ -211,7 +211,7 @@ function fixture(failedCount: number, fullHistory = false) {
   }
   for (let i = 0; i < 6; i++) journal.executeOperation({
     kind: "send", conversationId: `conversation_history_${i}`, idempotencyKey: `queued-startup-${i}`,
-    text: "Synthetic queued startup message", policy: "queue",
+    text: `Synthetic queued startup message queued-startup-${i}`, policy: "queue",
   });
   journal.close();
   // Retained legacy rows precede live-turn bounding. Recreate sizes with fresh
