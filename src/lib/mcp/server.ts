@@ -377,6 +377,8 @@ export interface McpRequestCaller {
   kind: "root" | "worker" | "unidentified";
   conversationId: string | null;
   project: string | null;
+  /** Server-derived predecessor seats that the current caller may recover. */
+  predecessors?: string[];
 }
 
 export interface McpRequestTarget {
@@ -482,7 +484,7 @@ function terminalReceiptResult(result: McpToolResult | null | undefined): result
   return Boolean(result && (result.ok
     ? result.outcome === "settled" || result.settled === true
       || (result.toolName === "spawn_agent" && result.state === "settled")
-    : result.details?.outcome === "settled"));
+    : result.details?.outcome === "settled" || result.details?.outcome === "not-executed"));
 }
 
 function receiptSettlement(
@@ -495,7 +497,7 @@ function receiptSettlement(
   if (receipt.recoveryResult) return { receipt, result: receipt.recoveryResult };
   if (receipt.result) {
     if (recovery && !terminalReceiptResult(receipt.result) && receipt.stage !== "not-executed") {
-      return { receipt: { ...receipt, recoveryResult: result }, result };
+      return { receipt: { ...receipt, recoveryResult: result, stage }, result };
     }
     return { receipt, result: receipt.result };
   }
@@ -647,7 +649,11 @@ export function validRequestBinding(value: unknown, toolName?: McpToolName, requ
   if (typeof value.claimedAt !== "string") return false;
   const { caller, target, owner } = value;
   if (!isRecord(caller) || !["root", "worker", "unidentified"].includes(String(caller.kind))
-    || !nullableString(caller.conversationId) || !nullableString(caller.project)) return false;
+    || !nullableString(caller.conversationId) || !nullableString(caller.project)
+    || (caller.predecessors !== undefined
+      && (!Array.isArray(caller.predecessors)
+        || caller.predecessors.length > 32
+        || caller.predecessors.some((predecessor) => typeof predecessor !== "string" || !/^conversation_[A-Za-z0-9_-]{1,128}$/.test(predecessor))))) return false;
   if (!isRecord(target) || !nullableString(target.project) || !nullableString(target.identity)) return false;
   if (!isRecord(owner) || typeof owner.pid !== "number" || !nullableString(owner.startIdentity)) return false;
   return true;
@@ -1970,8 +1976,9 @@ export class McpDispatchVerdictError extends McpToolRefusal {
 
 function sameCaller(recorded: McpRequestCaller, current: McpRequestCaller): boolean {
   return recorded.kind === current.kind
-    && recorded.conversationId === current.conversationId
-    && recorded.project === current.project;
+    && recorded.project === current.project
+    && (recorded.conversationId === current.conversationId
+      || (recorded.conversationId !== null && (current.predecessors ?? []).includes(recorded.conversationId)));
 }
 
 function identifiedCaller(caller: McpRequestCaller): boolean {
@@ -2238,10 +2245,16 @@ export function createMcpToolService(
             replayed: true,
           };
           const answer = recoveryAnswer(typedTool, requestId, evidence, replayed, previous);
-          if (evidence.outcome !== "settled") return answer;
+          if (evidence.outcome !== "settled" && evidence.outcome !== "not-executed") return answer;
           let stored: McpToolResult;
           try {
-            stored = await store.settle(key, digest, answer, "settled", true);
+            stored = await store.settle(
+              key,
+              digest,
+              answer,
+              evidence.outcome === "not-executed" ? "not-executed" : "settled",
+              true,
+            );
           } catch {
             // A failed write can race a successful terminal recovery.
             try {
@@ -2284,6 +2297,10 @@ export function createMcpToolService(
           if (record.digest !== digest) {
             outcome = "conflict";
             return failure(typedTool, requestId, "idempotency_conflict", "clientRequestId was already used with different arguments", false, true);
+          }
+          if (record.recoveryResult && record.stage === "not-executed") {
+            outcome = "replay";
+            return { ...record.recoveryResult, replayed: true };
           }
           if (record.result && (!recoveryOnly || record.stage === "not-executed")) {
             outcome = "replay";

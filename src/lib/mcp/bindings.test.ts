@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -14,6 +15,7 @@ import { CORPUS_BODY_MARKERS, pipelineCorpus } from "@/lib/pipelines/fixtures/co
 import type { Pipeline } from "@/lib/pipelines/types";
 import { listRoles } from "@/lib/roles/registry";
 import type { RoleDefinition } from "@/lib/roles/types";
+import { beginOrchestratorSeatIntent, completeOrchestratorSeatIntent } from "@/lib/orchestrator/seats";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
 
@@ -22,7 +24,9 @@ import { queryLifecycleEvents } from "@/lib/lifecycle/journal";
 import { productionLivenessSources } from "@/lib/lifecycle/liveness";
 import { refreshLifecycleJournal } from "@/lib/lifecycle/projector";
 
-import { defaultMcpSpawnRoleParams, viewerMcpBindings } from "./bindings";
+import { defaultMcpSpawnRoleParams, spawnDispatchBody, viewerMcpBindings } from "./bindings";
+import type { SpawnAdmissionFence } from "@/lib/agent/spawnAdmission";
+import { spawnAdmissionBodyDigest } from "@/lib/agent/spawnIdentity";
 import { SEAT_TICK_PROMPT_LIMIT } from "@/lib/monitor/seatTickSettings";
 import {
   createMcpToolService,
@@ -3071,6 +3075,184 @@ test("spawn recovery maps the launch receipt to the closed outcome set and estab
 
   const broken = viewerMcpRecoverableTools({ registrySnapshot: () => { throw new Error("registry unreadable"); } } as never);
   expect(await broken.spawn_agent!.recover(...binding("child_attempt_1"))).toMatchObject({ outcome: "unknown", evidence: "spawn-receipt", reason: expect.stringContaining("registry unreadable") });
+});
+
+test("spawn recovery requires an exact durable admission fence and keeps a bare refusal unknown", async () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-spawn-admission-fence-"));
+  sandboxes.push(sandbox);
+  process.env.LLV_STATE_DIR = sandbox;
+  const registry = new AgentRegistry(path.join(sandbox, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const args = {
+    clientRequestId: "spawn-admission-fence-1",
+    cwd: sandbox,
+    ["prompt"]: "launch the deployer",
+    title: "Admission fence fixture",
+    role: "deployer",
+    roleParams: { sha: "a".repeat(40), pr: "26" },
+  };
+  const downstreamKey = `mcp_spawn_${crypto.createHash("sha256").update(args.clientRequestId).digest("hex")}`;
+  const body = spawnDispatchBody(args, downstreamKey);
+  const binding = {
+    version: 1,
+    toolName: "spawn_agent",
+    clientRequestId: args.clientRequestId,
+    caller: { kind: "worker", conversationId: "conversation_caller", project: null },
+    target: { project: null, identity: sandbox },
+    downstreamKey,
+    owner: { pid: process.pid, startIdentity: null },
+    claimedAt: new Date().toISOString(),
+  } as never;
+  let fence: SpawnAdmissionFence | null = null;
+  let probes = 0;
+  const recoverable = viewerMcpRecoverableTools({
+    registrySnapshot: () => registry.readOnlySnapshot(),
+    readSpawnAdmissionFence: () => fence,
+    validateSpawnAdmission: async (actual: Record<string, unknown>) => {
+      probes += 1;
+      expect(actual).toEqual(body);
+      fence = {
+        version: 1,
+        clientAttemptId: downstreamKey,
+        requestDigest: spawnAdmissionBodyDigest(actual),
+        status: 400,
+        error: "deployer requires confirm: deploy",
+        rejectedAt: "2026-09-08T12:00:00.000Z",
+      };
+      return { admissible: false, fenced: true };
+    },
+  } as never);
+
+  const first = await recoverable.spawn_agent!.recover(binding, { legacy: false, args });
+  expect(first).toMatchObject({
+    outcome: "not-executed",
+    evidence: "spawn-admission-fence",
+    reason: "deployer requires confirm: deploy",
+    facts: { status: 400 },
+  });
+  expect(probes).toBe(1);
+  expect(registry.readOnlySnapshot().receipts).toEqual({});
+
+  const replay = await recoverable.spawn_agent!.recover(binding, { legacy: false, args });
+  expect(replay).toMatchObject({ outcome: "not-executed", evidence: "spawn-admission-fence" });
+  expect(probes).toBe(1);
+
+  const bareRefusal = viewerMcpRecoverableTools({
+    registrySnapshot: () => registry.readOnlySnapshot(),
+    readSpawnAdmissionFence: () => null,
+    validateSpawnAdmission: async () => ({ admissible: false, fenced: false }),
+  } as never);
+  expect(await bareRefusal.spawn_agent!.recover(binding, { legacy: false, args })).toMatchObject({
+    outcome: "unknown",
+    evidence: "none",
+    reason: expect.stringContaining("atomic downstream fence"),
+  });
+});
+
+test("spawn binding derives predecessor lineage from the active same-project seat", async () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-spawn-seat-lineage-"));
+  sandboxes.push(sandbox);
+  process.env.LLV_STATE_DIR = sandbox;
+  const predecessor = "conversation_predecessor";
+  const successor = "conversation_successor";
+  const finalSuccessor = "conversation_final_successor";
+  const first = beginOrchestratorSeatIntent({
+    project: "proj-a",
+    mandate: "old mandate",
+    clientRequestId: "seat-lineage-old",
+    mode: "existing",
+    conversationId: predecessor,
+  });
+  expect(first.kind).toBe("begun");
+  expect(completeOrchestratorSeatIntent({
+    project: "proj-a",
+    clientRequestId: "seat-lineage-old",
+    conversationId: predecessor,
+    path: "/repo/predecessor.jsonl",
+  }).kind).toBe("activated");
+  const second = beginOrchestratorSeatIntent({
+    project: "proj-a",
+    mandate: "new mandate",
+    clientRequestId: "seat-lineage-new",
+    mode: "existing",
+    conversationId: successor,
+  });
+  expect(second.kind).toBe("begun");
+  expect(completeOrchestratorSeatIntent({
+    project: "proj-a",
+    clientRequestId: "seat-lineage-new",
+    conversationId: successor,
+    path: "/repo/successor.jsonl",
+  }).kind).toBe("activated");
+  const third = beginOrchestratorSeatIntent({
+    project: "proj-a",
+    mandate: "final mandate",
+    clientRequestId: "seat-lineage-final",
+    mode: "existing",
+    conversationId: finalSuccessor,
+  });
+  expect(third.kind).toBe("begun");
+  expect(completeOrchestratorSeatIntent({
+    project: "proj-a",
+    clientRequestId: "seat-lineage-final",
+    conversationId: finalSuccessor,
+    path: "/repo/final.jsonl",
+  }).kind).toBe("activated");
+  const otherProjectSeat = beginOrchestratorSeatIntent({
+    project: "proj-b",
+    mandate: "other project mandate",
+    clientRequestId: "seat-lineage-other-project",
+    mode: "existing",
+    conversationId: "conversation_other_project",
+  });
+  expect(otherProjectSeat.kind).toBe("begun");
+  expect(completeOrchestratorSeatIntent({
+    project: "proj-b",
+    clientRequestId: "seat-lineage-other-project",
+    conversationId: "conversation_other_project",
+    path: "/other-project/current.jsonl",
+  }).kind).toBe("activated");
+
+  const base = new AgentRegistry(path.join(sandbox, "registry.json"), undefined, undefined, { sqliteMode: "off" }).readOnlySnapshot();
+  const snapshot = {
+    ...base,
+    conversations: {
+      [finalSuccessor]: {
+        id: finalSuccessor,
+        engine: "codex",
+        generations: [],
+        continuityPaths: [],
+        abandonedContinuityPaths: [],
+        providerForkPaths: [],
+        projectOwnership: { project: "proj-a", source: "operator", setAt: "2026-09-08T12:00:00.000Z", operationId: "seat-lineage" },
+        migration: null,
+        migrationOptOut: null,
+        supersededBy: null,
+        agentRole: null,
+        delegationDepth: null,
+        turn: { state: "idle", source: "unknown", terminalAt: null, observedAt: null },
+        createdAt: "2026-09-08T12:00:00.000Z",
+        updatedAt: "2026-09-08T12:00:00.000Z",
+      },
+    },
+  } as never;
+  const recoverable = viewerMcpRecoverableTools({
+    registrySnapshot: () => snapshot,
+    attentionAuthority: () => ({ kind: "worker", conversationId: finalSuccessor, role: null }),
+  } as never);
+  const binding = recoverable.spawn_agent!.bind({
+    clientRequestId: "seat-lineage-bind",
+    cwd: "/repo",
+    ["prompt"]: "inspect",
+    title: "Seat lineage",
+  });
+  expect(binding).toMatchObject({
+    caller: {
+      kind: "worker",
+      conversationId: finalSuccessor,
+      project: "proj-a",
+      predecessors: [successor, predecessor],
+    },
+  });
 });
 
 
