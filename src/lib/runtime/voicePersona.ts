@@ -11,18 +11,28 @@ import { configFilePath } from "@/lib/configDir";
  * non-Latin spelling here would nudge the spoken locale exactly the way a
  * non-English prompt body does — the defect this file already guards against,
  * arriving through the one token that used to be exempt from the guard. English
- * only therefore covers the name too, and {@link DEFAULT_VOICE_PERSONA} carries
+ * only therefore covers the name too, and {@link COORDINATOR_VOICE_PERSONA} carries
  * no non-Latin token at all. A caller that needs the name in another script gets
  * it the same way it gets any other wording change: the operator override.
  */
 export const PERSONA_NAME = "Alik";
 
 /**
- * How the voice agent should sound, injected as the call's first thread item.
+ * Which persona a starting call is given.
+ *
+ * `coordinator` is a ROLE and replaces whatever the session thought it was;
+ * `modality` assigns nothing and states that the existing role survives. The
+ * choice is made per call by {@link voicePersonaVariantFor}, never by the caller
+ * asking for one.
+ */
+export type VoicePersonaVariant = "coordinator" | "modality";
+
+/**
+ * How a spoken call sounds, and nothing about who is on it.
  *
  * A realtime call inherits the thread's own instructions, which are written for
  * a text agent: they assume markdown, long structured answers, and identifiers
- * the reader can scan back over. Spoken aloud all three fail. This item is the
+ * the reader can scan back over. Spoken aloud all three fail. This text is the
  * one chance to say so before the operator's first word.
  *
  * It also carries the character: warm, curious, dry, argues once and then does
@@ -36,9 +46,12 @@ export const PERSONA_NAME = "Alik";
  * choice at runtime, where the prompt hands it to the operator's locale and to
  * whatever they actually speak. The name is English for the same reason.
  *
- * Editable without a deploy — see {@link voicePersona}.
+ * DELIBERATELY ROLE-FREE. Not one sentence here says what the session is
+ * responsible for, which is what makes it safe to put in front of a conversation
+ * that already has a role. Everything that assigns duties lives in a `## Work`
+ * section, and there is one per variant below.
  */
-export const DEFAULT_VOICE_PERSONA = `Your name is ${PERSONA_NAME}. You are the voice coordinator: you speak aloud and you run the work of other agents.
+const SPOKEN_DELIVERY = `
 
 ## Language
 
@@ -89,9 +102,18 @@ No flattery and no going along. Agreement for its own sake is a lie. When the da
 You are an assistant with a personality. You are not a character from a series and you are not a person. The name is just a name. Asked directly, answer directly, in one sentence, without playing along. Do not impersonate anyone and do not quote lines from films, books or series.
 
 Never use the construction "not X, but Y" — say it straight.
+`;
 
-## Work
-
+/**
+ * The mandate of a session whose ONLY job is the call (#691 §4).
+ *
+ * This is a role, and a total one: it says the session talks to nobody but the
+ * user, owns no board tool, and relays everything onward. That is right for a
+ * session created to be the voice front and catastrophic for any other, which is
+ * why it is reachable only through {@link voicePersonaVariantFor} naming an
+ * explicitly-created coordinator.
+ */
+const COORDINATOR_WORK = `
 You are the only agent the user talks to, and you do not touch the board yourself. There is a manager for that: it owns tasks, pipelines, pull requests, workers and deploys. You relay what the user wants to it, and you tell the user what comes back. You have no tools for spawning agents, editing tasks or deploying, and asking for them is not the move — relaying is.
 
 Relay with bridge_directive. Pass the current turn id and the index of this instruction within the turn, and the user's intent in plain words. The recipient is resolved for you; you never name it. If a call fails and you retry, reuse the same turn id and index — that is what stops one instruction arriving twice.
@@ -109,6 +131,61 @@ While a worker runs, say briefly what is happening. Two minutes of silence sound
 Do not ask permission for what you can check yourself.
 
 Stay silent until you are spoken to: this text is context, and there is nothing here to greet.`;
+
+/**
+ * What voice changes for a session that already has a role: how it hears and how
+ * it answers, and nothing else (#1615).
+ *
+ * The operator enabled voice on their orchestrator's conversation and the call
+ * start wrote {@link COORDINATOR_WORK} into that thread. The seat read it,
+ * concluded it was now a relay with no board tools, and relayed its own work to
+ * "the manager" — which `bridge_directive` resolves from the designation record,
+ * so the instruction arrived back at the seat that sent it. It then declined the
+ * work it was holding, while the Viewer still showed it as the manager.
+ *
+ * So this section assigns nothing and removes nothing. It states that the role,
+ * the authority, the seat, the tools and the pending work are untouched, and it
+ * says so explicitly enough to outrank a coordinator item a thread may already
+ * carry from a call taken before this fix — an injected item cannot be withdrawn
+ * from an append-only transcript, so the correction has to be louder than it.
+ */
+const MODALITY_WORK = `
+Voice changes how you hear and how you answer while a call is live. It changes nothing else.
+
+The delivery rules above are about speaking. This text stays in the thread after the call ends, so when you are writing rather than speaking, write the way you always have.
+
+Your role in this conversation is exactly what it was a moment ago: the same instructions, the same authority, the same seat, the same tools, the same pending work, the same agents to run. Nothing here removes a tool you have or moves your responsibilities to anyone else.
+
+If something earlier in this thread cast you as a relay — that your only job is to speak, that the board belongs to someone else, that the tools you can see are not yours to use — it was written for a session created to be nothing but a voice front. It was not written for you, and it does not apply here. Your own instructions stand.
+
+Do the work yourself. You are being spoken to because you are the one holding it.
+
+Do not relay your own work with bridge_directive. That tool addresses the project's designated orchestrator, so when you are that orchestrator it hands the instruction back to you and the request goes nowhere. Use it only to reach an orchestrator that is not you.
+
+A spoken request is an ordinary request. Take it with the authority you already have, do the work, and say out loud what came of it.
+
+Stay silent until you are spoken to: this text is context, and there is nothing here to greet.`;
+
+/** The identity line, which is the only thing the two variants disagree on
+    before their `## Work` sections. */
+const COORDINATOR_IDENTITY = `Your name is ${PERSONA_NAME}. You are the voice coordinator: you speak aloud and you run the work of other agents.`;
+
+/** The same spoken name, and no claim about the role behind it. The operator
+    hears one voice either way; what differs is what that voice is allowed to
+    say it is responsible for. */
+const MODALITY_IDENTITY = `Your name is ${PERSONA_NAME} when you speak aloud. Speaking is how you hear this conversation and how you answer in it.`;
+
+/** Injected as the call's first thread item for a session created to BE the
+    voice front. Editable without a deploy — see {@link voicePersona}. */
+export const COORDINATOR_VOICE_PERSONA = `${COORDINATOR_IDENTITY}${SPOKEN_DELIVERY}
+## Work
+${COORDINATOR_WORK}`;
+
+/** Injected for every other session: the spoken-delivery rules, and an explicit
+    statement that the session's existing role survives the call. */
+export const MODALITY_VOICE_PERSONA = `${MODALITY_IDENTITY}${SPOKEN_DELIVERY}
+## Work
+${MODALITY_WORK}`;
 
 /** Operator override, resolved once per thread; edits apply when a new thread starts. */
 export const VOICE_PERSONA_FILE = "prompts/voice-persona.md";
@@ -159,38 +236,88 @@ function isCanonicalVoicePersonaRecord(line: Buffer, itemId: string): boolean {
 }
 
 /**
- * The persona text for a starting call: the operator's override when the file
- * exists and holds anything, otherwise {@link DEFAULT_VOICE_PERSONA}. The host
- * invokes this resolver only while the thread has no canonical persona item,
- * so that thread keeps its resolved wording and a new thread picks up edits.
+ * The persona text for a starting call.
+ *
+ * The COORDINATOR variant honours the operator's override file, exactly as it
+ * always has. The MODALITY variant does not, and that is the point: an override
+ * is a wholesale replacement written for the voice front — coordinator-shaped by
+ * construction — so applying it to a session that already has a role would
+ * reintroduce this defect through the operator's own file. It keeps the
+ * built-in text, which assigns nothing.
+ *
+ * The host invokes this resolver only while the thread has no canonical persona
+ * item for the resolved variant, so an established thread keeps its wording and
+ * a new one picks up edits.
  */
-export function voicePersona(readFile: (path: string) => string = (target) => fs.readFileSync(target, "utf8")): string {
+export function voicePersona(
+  variant: VoicePersonaVariant,
+  readFile: (path: string) => string = (target) => fs.readFileSync(target, "utf8"),
+): string {
+  let override = "";
   try {
-    const override = readFile(configFilePath(path.join(...VOICE_PERSONA_FILE.split("/")))).trim();
-    if (override) return override;
+    override = readFile(configFilePath(path.join(...VOICE_PERSONA_FILE.split("/")))).trim();
   } catch {
     /* no override on disk — the built-in persona stands */
   }
-  return DEFAULT_VOICE_PERSONA;
+  if (variant !== "coordinator") {
+    /* SAY SO. The override file is the documented customization point, and after
+       the variant split it reaches the coordinator alone — so an operator who
+       edits it to change how the voice SOUNDS would otherwise watch every
+       non-root call ignore them with no way to find out why. Once per process,
+       and only when a file actually exists to be ignored. */
+    if (override && !warnedModalityOverrideIgnored) {
+      warnedModalityOverrideIgnored = true;
+      console.warn(
+        `[voice persona] ${VOICE_PERSONA_FILE} is a wholesale replacement written for the voice coordinator, `
+        + "so it is not applied to a conversation that already has a role; that call uses the built-in "
+        + "modality persona, which carries the same spoken-delivery rules.",
+      );
+    }
+    return MODALITY_VOICE_PERSONA;
+  }
+  return override || COORDINATOR_VOICE_PERSONA;
 }
 
-function voicePersonaBootstrapDigest(threadId: string): string {
-  return createHash("sha256")
+/** One diagnostic per process: this resolves on every persona bootstrap, and a
+    line per call would bury the one that matters. */
+let warnedModalityOverrideIgnored = false;
+
+/** Tests only. */
+export function resetVoicePersonaOverrideWarningForTest(): void {
+  warnedModalityOverrideIgnored = false;
+}
+
+/**
+ * The bootstrap digest, which the variant is part of.
+ *
+ * The COORDINATOR digest is byte-for-byte the one that shipped, so every thread
+ * that has already taken a coordinator item is still recognized and takes no
+ * second one. The MODALITY digest is deliberately different: the item id is the
+ * idempotency receipt, so sharing it would make a thread that was demoted before
+ * this fix look already-bootstrapped and leave it demoted for the rest of its
+ * life. A distinct id is what lets the correction land.
+ */
+function voicePersonaBootstrapDigest(threadId: string, variant: VoicePersonaVariant): string {
+  const digest = createHash("sha256")
     .update("voice-persona-bootstrap\0", "utf8")
-    .update(threadId, "utf8")
-    .digest("hex");
+    .update(threadId, "utf8");
+  if (variant !== "coordinator") digest.update("\0modality", "utf8");
+  return digest.digest("hex");
 }
 
-/** Provider-invalid identity emitted before #870, used only to recognize an existing row. */
+/** Provider-invalid identity emitted before #870, used only to recognize an existing
+    row. Coordinator-only: no thread ever received a modality item under it. */
 export function legacyVoicePersonaBootstrapItemId(threadId: string): string {
-  return `msg_voice_persona_${voicePersonaBootstrapDigest(threadId)}`;
+  return `msg_voice_persona_${voicePersonaBootstrapDigest(threadId, "coordinator")}`;
 }
 
-/** Stable canonical identity shared by every WebRTC attempt on one thread. */
+/** Stable canonical identity shared by every WebRTC attempt on one thread at one
+    variant. */
 export function voicePersonaBootstrapIdentity(
   threadId: string,
+  variant: VoicePersonaVariant,
 ): VoicePersonaBootstrapIdentity {
-  const digest = voicePersonaBootstrapDigest(threadId).slice(0, VOICE_PERSONA_ID_DIGEST_HEX);
+  const digest = voicePersonaBootstrapDigest(threadId, variant).slice(0, VOICE_PERSONA_ID_DIGEST_HEX);
   const receiptId = `voice_persona_${digest}`;
   const itemId = `msg_${receiptId}`;
   return { receiptId, itemId };
@@ -199,9 +326,10 @@ export function voicePersonaBootstrapIdentity(
 /** Canonical developer item resolved once after its identity is known absent. */
 export function voicePersonaBootstrap(
   identity: VoicePersonaBootstrapIdentity,
+  variant: VoicePersonaVariant,
   readFile?: (path: string) => string,
 ): VoicePersonaBootstrap {
-  const text = voicePersona(readFile);
+  const text = voicePersona(variant, readFile);
   return {
     item: {
       type: "message",
