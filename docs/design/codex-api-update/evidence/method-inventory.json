@@ -1,0 +1,2351 @@
+{
+  "observedDate": "2026-09-08",
+  "installed": "0.153.4",
+  "viewerHead": "88e5a9508be2802266734056d6436f3168201cad",
+  "releaseCommit": "3d2ee51ca2d5db578f328aa75e20aa22c0197c9a",
+  "upstreamMain": "54e04f25dbfe342bf84809d1880dbca32cb43cf6",
+  "defaultMethods": 99,
+  "experimentalAdditionalMethods": 56,
+  "defaultMethodsAddedSince0151": [
+    "plugin/reconcile"
+  ],
+  "defaultMethodsRemovedSince0151": [],
+  "defaultMethodsAddedOnMain": [],
+  "methods": [
+    {
+      "method": "initialize",
+      "schemaTier": "default",
+      "paramsType": "InitializeParams",
+      "required": [
+        "clientInfo"
+      ],
+      "fields": [
+        "capabilities",
+        "clientInfo"
+      ],
+      "viewerLiteralReferences": [
+        "src/lib/accounts/codexAppServer.ts:278",
+        "src/lib/runtime/codexAppServerHost.ts:1276"
+      ],
+      "disposition": "Connection identity and capability admission"
+    },
+    {
+      "method": "server/diagnostics",
+      "schemaTier": "experimental",
+      "paramsType": "ServerDiagnosticsParams",
+      "required": [],
+      "fields": [],
+      "viewerLiteralReferences": [],
+      "disposition": "Optional content-free diagnostics; no replacement lifecycle authority"
+    },
+    {
+      "method": "thread/start",
+      "schemaTier": "default",
+      "paramsType": "ThreadStartParams",
+      "required": [],
+      "fields": [
+        "allowProviderModelFallback",
+        "approvalPolicy",
+        "approvalsReviewer",
+        "baseInstructions",
+        "config",
+        "cwd",
+        "developerInstructions",
+        "dynamicTools",
+        "environments",
+        "ephemeral",
+        "experimentalRawEvents",
+        "historyMode",
+        "mockExperimentalField",
+        "model",
+        "modelProvider",
+        "multiAgentMode",
+        "permissions",
+        "personality",
+        "projectId",
+        "runtimeWorkspaceRoots",
+        "sandbox",
+        "selectedCapabilityRoots",
+        "serviceName",
+        "serviceTier",
+        "sessionStartSource",
+        "threadSource"
+      ],
+      "viewerLiteralReferences": [
+        "src/lib/runtime/codexAppServerHost.ts:355"
+      ],
+      "disposition": "History, input, lifecycle, goals, and metadata; see compatibility matrix"
+    },
+    {
+      "method": "thread/resume",
+      "schemaTier": "default",
+      "paramsType": "ThreadResumeParams",
+      "required": [
+        "threadId"
+      ],
+      "fields": [
+        "approvalPolicy",
+        "approvalsReviewer",
+        "baseInstructions",
+        "config",
+        "cwd",
+        "developerInstructions",
+        "excludeTurns",
+        "history",
+        "initialTurnsPage",
+        "model",
+        "modelProvider",
+        "path",
+        "permissions",
+        "personality",
+        "runtimeWorkspaceRoots",
+        "sandbox",
+        "serviceTier",
+        "threadId"
+      ],
+      "viewerLiteralReferences": [
+        "src/lib/accounts/codexAppServer.ts:409",
+        "src/lib/runtime/codexAppServerHost.ts:329"
+      ],
+      "disposition": "History, input, lifecycle, goals, and metadata; see compatibility matrix"
+    },
+    {
+      "method": "thread/fork",
+      "schemaTier": "default",
+      "paramsType": "ThreadForkParams",
+      "required": [
+        "threadId"
+      ],
+      "fields": [
+        "approvalPolicy",
+        "approvalsReviewer",
+        "baseInstructions",
+        "beforeTurnId",
+        "config",
+        "cwd",
+        "deferGoalContinuation",
+        "developerInstructions",
+        "ephemeral",
+        "excludeTurns",
+        "lastTurnId",
+        "model",
+        "modelProvider",
+        "path",
+        "permissions",
+        "runtimeWorkspaceRoots",
+        "sandbox",
+        "serviceTier",
+        "threadId",
+        "threadSource"
+      ],
+      "viewerLiteralReferences": [
+        "src/lib/accounts/codexAppServer.ts:371"
+      ],
+      "disposition": "History, input, lifecycle, goals, and metadata; see compatibility matrix"
+    },
+    {
+      "method": "thread/archive",
+      "schemaTier": "default",
+      "paramsType": "ThreadArchiveParams",
+      "required": [
+        "threadId"
+      ],
+      "fields": [
+        "threadId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "History, input, lifecycle, goals, and metadata; see compatibility matrix"
+    },
+    {
+      "method": "thread/delete",
+      "schemaTier": "default",
+      "paramsType": "ThreadDeleteParams",
+      "required": [
+        "threadId"
+      ],
+      "fields": [
+        "threadId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "History, input, lifecycle, goals, and metadata; see compatibility matrix"
+    },
+    {
+      "method": "thread/unsubscribe",
+      "schemaTier": "default",
+      "paramsType": "ThreadUnsubscribeParams",
+      "required": [
+        "threadId"
+      ],
+      "fields": [
+        "threadId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "History, input, lifecycle, goals, and metadata; see compatibility matrix"
+    },
+    {
+      "method": "thread/increment_elicitation",
+      "schemaTier": "experimental",
+      "paramsType": "ThreadIncrementElicitationParams",
+      "required": [
+        "threadId"
+      ],
+      "fields": [
+        "threadId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "History, input, lifecycle, goals, and metadata; see compatibility matrix"
+    },
+    {
+      "method": "thread/decrement_elicitation",
+      "schemaTier": "experimental",
+      "paramsType": "ThreadDecrementElicitationParams",
+      "required": [
+        "threadId"
+      ],
+      "fields": [
+        "threadId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "History, input, lifecycle, goals, and metadata; see compatibility matrix"
+    },
+    {
+      "method": "thread/name/set",
+      "schemaTier": "default",
+      "paramsType": "ThreadSetNameParams",
+      "required": [
+        "name",
+        "threadId"
+      ],
+      "fields": [
+        "name",
+        "threadId"
+      ],
+      "viewerLiteralReferences": [
+        "src/lib/accounts/codexAppServer.ts:431"
+      ],
+      "disposition": "History, input, lifecycle, goals, and metadata; see compatibility matrix"
+    },
+    {
+      "method": "thread/goal/set",
+      "schemaTier": "default",
+      "paramsType": "ThreadGoalSetParams",
+      "required": [
+        "threadId"
+      ],
+      "fields": [
+        "objective",
+        "status",
+        "threadId",
+        "tokenBudget"
+      ],
+      "viewerLiteralReferences": [
+        "src/lib/accounts/codexAppServer.ts:435"
+      ],
+      "disposition": "History, input, lifecycle, goals, and metadata; see compatibility matrix"
+    },
+    {
+      "method": "thread/goal/get",
+      "schemaTier": "default",
+      "paramsType": "ThreadGoalGetParams",
+      "required": [
+        "threadId"
+      ],
+      "fields": [
+        "threadId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "History, input, lifecycle, goals, and metadata; see compatibility matrix"
+    },
+    {
+      "method": "thread/goal/clear",
+      "schemaTier": "default",
+      "paramsType": "ThreadGoalClearParams",
+      "required": [
+        "threadId"
+      ],
+      "fields": [
+        "threadId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "History, input, lifecycle, goals, and metadata; see compatibility matrix"
+    },
+    {
+      "method": "thread/queue/add",
+      "schemaTier": "experimental",
+      "paramsType": "ThreadQueueAddParams",
+      "required": [
+        "clientUserMessageId",
+        "input",
+        "threadId"
+      ],
+      "fields": [
+        "clientUserMessageId",
+        "input",
+        "threadId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "History, input, lifecycle, goals, and metadata; see compatibility matrix"
+    },
+    {
+      "method": "thread/queue/list",
+      "schemaTier": "experimental",
+      "paramsType": "ThreadQueueListParams",
+      "required": [
+        "threadId"
+      ],
+      "fields": [
+        "cursor",
+        "limit",
+        "threadId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "History, input, lifecycle, goals, and metadata; see compatibility matrix"
+    },
+    {
+      "method": "thread/queue/update",
+      "schemaTier": "experimental",
+      "paramsType": "ThreadQueueUpdateParams",
+      "required": [
+        "input",
+        "queuedSubmissionId",
+        "threadId"
+      ],
+      "fields": [
+        "input",
+        "queuedSubmissionId",
+        "threadId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "History, input, lifecycle, goals, and metadata; see compatibility matrix"
+    },
+    {
+      "method": "thread/queue/delete",
+      "schemaTier": "experimental",
+      "paramsType": "ThreadQueueDeleteParams",
+      "required": [
+        "queuedSubmissionId",
+        "threadId"
+      ],
+      "fields": [
+        "queuedSubmissionId",
+        "threadId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "History, input, lifecycle, goals, and metadata; see compatibility matrix"
+    },
+    {
+      "method": "thread/queue/reorder",
+      "schemaTier": "experimental",
+      "paramsType": "ThreadQueueReorderParams",
+      "required": [
+        "queuedSubmissionIds",
+        "threadId"
+      ],
+      "fields": [
+        "queuedSubmissionIds",
+        "threadId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "History, input, lifecycle, goals, and metadata; see compatibility matrix"
+    },
+    {
+      "method": "thread/queue/start",
+      "schemaTier": "experimental",
+      "paramsType": "ThreadQueueStartParams",
+      "required": [
+        "threadId"
+      ],
+      "fields": [
+        "queuedSubmissionId",
+        "threadId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "History, input, lifecycle, goals, and metadata; see compatibility matrix"
+    },
+    {
+      "method": "thread/metadata/update",
+      "schemaTier": "default",
+      "paramsType": "ThreadMetadataUpdateParams",
+      "required": [
+        "threadId"
+      ],
+      "fields": [
+        "gitInfo",
+        "projectId",
+        "threadId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "History, input, lifecycle, goals, and metadata; see compatibility matrix"
+    },
+    {
+      "method": "thread/section/move",
+      "schemaTier": "default",
+      "paramsType": "ThreadSectionMoveParams",
+      "required": [
+        "sectionId",
+        "threadId"
+      ],
+      "fields": [
+        "beforeThreadId",
+        "sectionId",
+        "threadId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "History, input, lifecycle, goals, and metadata; see compatibility matrix"
+    },
+    {
+      "method": "thread/settings/update",
+      "schemaTier": "experimental",
+      "paramsType": "ThreadSettingsUpdateParams",
+      "required": [
+        "threadId"
+      ],
+      "fields": [
+        "approvalPolicy",
+        "approvalsReviewer",
+        "collaborationMode",
+        "cwd",
+        "effort",
+        "model",
+        "multiAgentMode",
+        "permissions",
+        "personality",
+        "sandboxPolicy",
+        "serviceTier",
+        "summary",
+        "threadId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "History, input, lifecycle, goals, and metadata; see compatibility matrix"
+    },
+    {
+      "method": "thread/memoryMode/set",
+      "schemaTier": "experimental",
+      "paramsType": "ThreadMemoryModeSetParams",
+      "required": [
+        "mode",
+        "threadId"
+      ],
+      "fields": [
+        "mode",
+        "threadId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "History, input, lifecycle, goals, and metadata; see compatibility matrix"
+    },
+    {
+      "method": "memory/reset",
+      "schemaTier": "experimental",
+      "paramsType": "",
+      "required": [],
+      "fields": [],
+      "viewerLiteralReferences": [],
+      "disposition": "Deferred: global reset is destructive and unrelated to message delivery"
+    },
+    {
+      "method": "thread/unarchive",
+      "schemaTier": "default",
+      "paramsType": "ThreadUnarchiveParams",
+      "required": [
+        "threadId"
+      ],
+      "fields": [
+        "threadId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "History, input, lifecycle, goals, and metadata; see compatibility matrix"
+    },
+    {
+      "method": "thread/compact/start",
+      "schemaTier": "default",
+      "paramsType": "ThreadCompactStartParams",
+      "required": [
+        "threadId"
+      ],
+      "fields": [
+        "threadId"
+      ],
+      "viewerLiteralReferences": [
+        "src/lib/runtime/codexAppServerHost.ts:363"
+      ],
+      "disposition": "History, input, lifecycle, goals, and metadata; see compatibility matrix"
+    },
+    {
+      "method": "thread/shellCommand",
+      "schemaTier": "default",
+      "paramsType": "ThreadShellCommandParams",
+      "required": [
+        "command",
+        "threadId"
+      ],
+      "fields": [
+        "command",
+        "threadId",
+        "timeoutMs"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "History, input, lifecycle, goals, and metadata; see compatibility matrix"
+    },
+    {
+      "method": "thread/approveGuardianDeniedAction",
+      "schemaTier": "default",
+      "paramsType": "ThreadApproveGuardianDeniedActionParams",
+      "required": [
+        "event",
+        "threadId"
+      ],
+      "fields": [
+        "event",
+        "threadId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "History, input, lifecycle, goals, and metadata; see compatibility matrix"
+    },
+    {
+      "method": "thread/backgroundTerminals/clean",
+      "schemaTier": "experimental",
+      "paramsType": "ThreadBackgroundTerminalsCleanParams",
+      "required": [
+        "threadId"
+      ],
+      "fields": [
+        "threadId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "History, input, lifecycle, goals, and metadata; see compatibility matrix"
+    },
+    {
+      "method": "thread/backgroundTerminals/list",
+      "schemaTier": "experimental",
+      "paramsType": "ThreadBackgroundTerminalsListParams",
+      "required": [
+        "threadId"
+      ],
+      "fields": [
+        "cursor",
+        "limit",
+        "threadId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "History, input, lifecycle, goals, and metadata; see compatibility matrix"
+    },
+    {
+      "method": "thread/backgroundTerminals/terminate",
+      "schemaTier": "experimental",
+      "paramsType": "ThreadBackgroundTerminalsTerminateParams",
+      "required": [
+        "processId",
+        "threadId"
+      ],
+      "fields": [
+        "processId",
+        "threadId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "History, input, lifecycle, goals, and metadata; see compatibility matrix"
+    },
+    {
+      "method": "thread/rollback",
+      "schemaTier": "default",
+      "paramsType": "ThreadRollbackParams",
+      "required": [
+        "numTurns",
+        "threadId"
+      ],
+      "fields": [
+        "numTurns",
+        "threadId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "History, input, lifecycle, goals, and metadata; see compatibility matrix"
+    },
+    {
+      "method": "thread/revert",
+      "schemaTier": "default",
+      "paramsType": "ThreadRevertParams",
+      "required": [
+        "beforeTurnId",
+        "threadId"
+      ],
+      "fields": [
+        "beforeTurnId",
+        "threadId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "History, input, lifecycle, goals, and metadata; see compatibility matrix"
+    },
+    {
+      "method": "thread/list",
+      "schemaTier": "default",
+      "paramsType": "ThreadListParams",
+      "required": [],
+      "fields": [
+        "ancestorThreadId",
+        "archived",
+        "cursor",
+        "cwd",
+        "limit",
+        "modelProviders",
+        "parentThreadId",
+        "projectId",
+        "searchTerm",
+        "sectionId",
+        "sortDirection",
+        "sortKey",
+        "sourceKinds",
+        "useStateDbOnly"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "History, input, lifecycle, goals, and metadata; see compatibility matrix"
+    },
+    {
+      "method": "project/list",
+      "schemaTier": "experimental",
+      "paramsType": "ProjectListParams",
+      "required": [],
+      "fields": [
+        "cursor",
+        "limit",
+        "sortDirection",
+        "sortKey"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Deferred: preserve Viewer project/worktree grouping"
+    },
+    {
+      "method": "project/read",
+      "schemaTier": "experimental",
+      "paramsType": "ProjectReadParams",
+      "required": [
+        "projectId"
+      ],
+      "fields": [
+        "projectId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Deferred: preserve Viewer project/worktree grouping"
+    },
+    {
+      "method": "project/create",
+      "schemaTier": "experimental",
+      "paramsType": "ProjectCreateParams",
+      "required": [
+        "idempotencyKey",
+        "name",
+        "roots"
+      ],
+      "fields": [
+        "idempotencyKey",
+        "metadata",
+        "name",
+        "roots"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Deferred: preserve Viewer project/worktree grouping"
+    },
+    {
+      "method": "project/import",
+      "schemaTier": "experimental",
+      "paramsType": "ProjectImportParams",
+      "required": [
+        "idempotencyKey",
+        "name",
+        "roots"
+      ],
+      "fields": [
+        "idempotencyKey",
+        "metadata",
+        "name",
+        "roots",
+        "threads"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Deferred: preserve Viewer project/worktree grouping"
+    },
+    {
+      "method": "project/update",
+      "schemaTier": "experimental",
+      "paramsType": "ProjectUpdateParams",
+      "required": [
+        "projectId"
+      ],
+      "fields": [
+        "metadata",
+        "name",
+        "projectId",
+        "roots"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Deferred: preserve Viewer project/worktree grouping"
+    },
+    {
+      "method": "project/move",
+      "schemaTier": "experimental",
+      "paramsType": "ProjectMoveParams",
+      "required": [
+        "projectId"
+      ],
+      "fields": [
+        "beforeProjectId",
+        "projectId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Deferred: preserve Viewer project/worktree grouping"
+    },
+    {
+      "method": "project/delete",
+      "schemaTier": "experimental",
+      "paramsType": "ProjectDeleteParams",
+      "required": [
+        "projectId"
+      ],
+      "fields": [
+        "projectId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Deferred: preserve Viewer project/worktree grouping"
+    },
+    {
+      "method": "threadSection/list",
+      "schemaTier": "default",
+      "paramsType": "ThreadSectionListParams",
+      "required": [],
+      "fields": [
+        "cursor",
+        "limit"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Deferred: Viewer already owns board organization"
+    },
+    {
+      "method": "threadSection/create",
+      "schemaTier": "default",
+      "paramsType": "ThreadSectionCreateParams",
+      "required": [
+        "name"
+      ],
+      "fields": [
+        "appearance",
+        "name"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Deferred: Viewer already owns board organization"
+    },
+    {
+      "method": "threadSection/update",
+      "schemaTier": "default",
+      "paramsType": "ThreadSectionUpdateParams",
+      "required": [
+        "name",
+        "sectionId"
+      ],
+      "fields": [
+        "appearance",
+        "name",
+        "sectionId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Deferred: Viewer already owns board organization"
+    },
+    {
+      "method": "threadSection/delete",
+      "schemaTier": "default",
+      "paramsType": "ThreadSectionDeleteParams",
+      "required": [
+        "sectionId"
+      ],
+      "fields": [
+        "sectionId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Deferred: Viewer already owns board organization"
+    },
+    {
+      "method": "thread/search",
+      "schemaTier": "experimental",
+      "paramsType": "ThreadSearchParams",
+      "required": [
+        "searchTerm"
+      ],
+      "fields": [
+        "archived",
+        "cursor",
+        "limit",
+        "searchTerm",
+        "sortDirection",
+        "sortKey",
+        "sourceKinds"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "History, input, lifecycle, goals, and metadata; see compatibility matrix"
+    },
+    {
+      "method": "thread/searchOccurrences",
+      "schemaTier": "experimental",
+      "paramsType": "ThreadSearchOccurrencesParams",
+      "required": [
+        "searchTerm",
+        "threadId"
+      ],
+      "fields": [
+        "cursor",
+        "limit",
+        "searchTerm",
+        "threadId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "History, input, lifecycle, goals, and metadata; see compatibility matrix"
+    },
+    {
+      "method": "thread/loaded/list",
+      "schemaTier": "default",
+      "paramsType": "ThreadLoadedListParams",
+      "required": [],
+      "fields": [
+        "cursor",
+        "limit"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "History, input, lifecycle, goals, and metadata; see compatibility matrix"
+    },
+    {
+      "method": "thread/read",
+      "schemaTier": "default",
+      "paramsType": "ThreadReadParams",
+      "required": [
+        "threadId"
+      ],
+      "fields": [
+        "includeTurns",
+        "threadId"
+      ],
+      "viewerLiteralReferences": [
+        "src/lib/accounts/codexAppServer.ts:424",
+        "src/lib/runtime/codexAppServerHost.ts:329"
+      ],
+      "disposition": "History, input, lifecycle, goals, and metadata; see compatibility matrix"
+    },
+    {
+      "method": "thread/turns/list",
+      "schemaTier": "default",
+      "paramsType": "ThreadTurnsListParams",
+      "required": [
+        "threadId"
+      ],
+      "fields": [
+        "cursor",
+        "itemsView",
+        "limit",
+        "sortDirection",
+        "threadId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "History, input, lifecycle, goals, and metadata; see compatibility matrix"
+    },
+    {
+      "method": "thread/items/list",
+      "schemaTier": "default",
+      "paramsType": "ThreadItemsListParams",
+      "required": [
+        "threadId"
+      ],
+      "fields": [
+        "cursor",
+        "limit",
+        "sortDirection",
+        "threadId",
+        "turnId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "History, input, lifecycle, goals, and metadata; see compatibility matrix"
+    },
+    {
+      "method": "thread/inject_items",
+      "schemaTier": "default",
+      "paramsType": "ThreadInjectItemsParams",
+      "required": [
+        "items",
+        "threadId"
+      ],
+      "fields": [
+        "items",
+        "threadId"
+      ],
+      "viewerLiteralReferences": [
+        "src/lib/runtime/codexAppServerHost.ts:362"
+      ],
+      "disposition": "History, input, lifecycle, goals, and metadata; see compatibility matrix"
+    },
+    {
+      "method": "skills/list",
+      "schemaTier": "default",
+      "paramsType": "SkillsListParams",
+      "required": [],
+      "fields": [
+        "cwds",
+        "forceReload"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Use existing skill discovery; refresh configuration through controlled account scope"
+    },
+    {
+      "method": "skills/extraRoots/set",
+      "schemaTier": "default",
+      "paramsType": "SkillsExtraRootsSetParams",
+      "required": [
+        "extraRoots"
+      ],
+      "fields": [
+        "extraRoots"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Use existing skill discovery; refresh configuration through controlled account scope"
+    },
+    {
+      "method": "hooks/list",
+      "schemaTier": "default",
+      "paramsType": "HooksListParams",
+      "required": [],
+      "fields": [
+        "cwds"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Discovery useful for explaining tool actions; do not change policy implicitly"
+    },
+    {
+      "method": "marketplace/add",
+      "schemaTier": "default",
+      "paramsType": "MarketplaceAddParams",
+      "required": [
+        "source"
+      ],
+      "fields": [
+        "refName",
+        "source",
+        "sparsePaths"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Deferred: installation has separate user intent and source policy"
+    },
+    {
+      "method": "marketplace/remove",
+      "schemaTier": "default",
+      "paramsType": "MarketplaceRemoveParams",
+      "required": [
+        "marketplaceName"
+      ],
+      "fields": [
+        "marketplaceName"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Deferred: installation has separate user intent and source policy"
+    },
+    {
+      "method": "marketplace/upgrade",
+      "schemaTier": "default",
+      "paramsType": "MarketplaceUpgradeParams",
+      "required": [],
+      "fields": [
+        "marketplaceName"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Deferred: installation has separate user intent and source policy"
+    },
+    {
+      "method": "plugin/list",
+      "schemaTier": "default",
+      "paramsType": "PluginListParams",
+      "required": [],
+      "fields": [
+        "cwds",
+        "forceRefetch",
+        "marketplaceKinds"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Read/reconcile can explain stale tools; installations remain explicit"
+    },
+    {
+      "method": "plugin/search",
+      "schemaTier": "experimental",
+      "paramsType": "PluginSearchParams",
+      "required": [
+        "searchTerm"
+      ],
+      "fields": [
+        "cursor",
+        "cwds",
+        "limit",
+        "scope",
+        "searchTerm"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Read/reconcile can explain stale tools; installations remain explicit"
+    },
+    {
+      "method": "plugin/installed",
+      "schemaTier": "default",
+      "paramsType": "PluginInstalledParams",
+      "required": [],
+      "fields": [
+        "cwds",
+        "installSuggestionPluginNames"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Read/reconcile can explain stale tools; installations remain explicit"
+    },
+    {
+      "method": "plugin/reconcile",
+      "schemaTier": "default",
+      "paramsType": "PluginReconcileParams",
+      "required": [],
+      "fields": [
+        "reason"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Read/reconcile can explain stale tools; installations remain explicit"
+    },
+    {
+      "method": "plugin/read",
+      "schemaTier": "default",
+      "paramsType": "PluginReadParams",
+      "required": [
+        "pluginName"
+      ],
+      "fields": [
+        "marketplacePath",
+        "pluginName",
+        "remoteMarketplaceName"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Read/reconcile can explain stale tools; installations remain explicit"
+    },
+    {
+      "method": "plugin/skill/read",
+      "schemaTier": "default",
+      "paramsType": "PluginSkillReadParams",
+      "required": [
+        "remoteMarketplaceName",
+        "remotePluginId",
+        "skillName"
+      ],
+      "fields": [
+        "remoteMarketplaceName",
+        "remotePluginId",
+        "skillName"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Read/reconcile can explain stale tools; installations remain explicit"
+    },
+    {
+      "method": "plugin/share/save",
+      "schemaTier": "default",
+      "paramsType": "PluginShareSaveParams",
+      "required": [
+        "pluginPath"
+      ],
+      "fields": [
+        "discoverability",
+        "pluginPath",
+        "remotePluginId",
+        "shareTargets"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Read/reconcile can explain stale tools; installations remain explicit"
+    },
+    {
+      "method": "plugin/share/updateTargets",
+      "schemaTier": "default",
+      "paramsType": "PluginShareUpdateTargetsParams",
+      "required": [
+        "discoverability",
+        "remotePluginId",
+        "shareTargets"
+      ],
+      "fields": [
+        "discoverability",
+        "remotePluginId",
+        "shareTargets"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Read/reconcile can explain stale tools; installations remain explicit"
+    },
+    {
+      "method": "plugin/share/list",
+      "schemaTier": "default",
+      "paramsType": "PluginShareListParams",
+      "required": [],
+      "fields": [],
+      "viewerLiteralReferences": [],
+      "disposition": "Read/reconcile can explain stale tools; installations remain explicit"
+    },
+    {
+      "method": "plugin/share/checkout",
+      "schemaTier": "default",
+      "paramsType": "PluginShareCheckoutParams",
+      "required": [
+        "remotePluginId"
+      ],
+      "fields": [
+        "remotePluginId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Read/reconcile can explain stale tools; installations remain explicit"
+    },
+    {
+      "method": "plugin/share/delete",
+      "schemaTier": "default",
+      "paramsType": "PluginShareDeleteParams",
+      "required": [
+        "remotePluginId"
+      ],
+      "fields": [
+        "remotePluginId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Read/reconcile can explain stale tools; installations remain explicit"
+    },
+    {
+      "method": "app/read",
+      "schemaTier": "default",
+      "paramsType": "AppsReadParams",
+      "required": [
+        "appIds"
+      ],
+      "fields": [
+        "appIds",
+        "includeTools",
+        "threadId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Expose account-scoped tool availability through existing capabilities"
+    },
+    {
+      "method": "app/list",
+      "schemaTier": "default",
+      "paramsType": "AppsListParams",
+      "required": [],
+      "fields": [
+        "cursor",
+        "forceRefetch",
+        "limit",
+        "threadId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Expose account-scoped tool availability through existing capabilities"
+    },
+    {
+      "method": "app/installed",
+      "schemaTier": "default",
+      "paramsType": "AppsInstalledParams",
+      "required": [],
+      "fields": [
+        "forceRefresh",
+        "threadId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Expose account-scoped tool availability through existing capabilities"
+    },
+    {
+      "method": "fs/readFile",
+      "schemaTier": "default",
+      "paramsType": "FsReadFileParams",
+      "required": [
+        "path"
+      ],
+      "fields": [
+        "path"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Deferred: existing Viewer file access; avoid a second mutation surface"
+    },
+    {
+      "method": "fs/writeFile",
+      "schemaTier": "default",
+      "paramsType": "FsWriteFileParams",
+      "required": [
+        "dataBase64",
+        "path"
+      ],
+      "fields": [
+        "dataBase64",
+        "path"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Deferred: existing Viewer file access; avoid a second mutation surface"
+    },
+    {
+      "method": "fs/createDirectory",
+      "schemaTier": "default",
+      "paramsType": "FsCreateDirectoryParams",
+      "required": [
+        "path"
+      ],
+      "fields": [
+        "path",
+        "recursive"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Deferred: existing Viewer file access; avoid a second mutation surface"
+    },
+    {
+      "method": "fs/getMetadata",
+      "schemaTier": "default",
+      "paramsType": "FsGetMetadataParams",
+      "required": [
+        "path"
+      ],
+      "fields": [
+        "path"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Deferred: existing Viewer file access; avoid a second mutation surface"
+    },
+    {
+      "method": "fs/readDirectory",
+      "schemaTier": "default",
+      "paramsType": "FsReadDirectoryParams",
+      "required": [
+        "path"
+      ],
+      "fields": [
+        "path"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Deferred: existing Viewer file access; avoid a second mutation surface"
+    },
+    {
+      "method": "fs/remove",
+      "schemaTier": "default",
+      "paramsType": "FsRemoveParams",
+      "required": [
+        "path"
+      ],
+      "fields": [
+        "force",
+        "path",
+        "recursive"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Deferred: existing Viewer file access; avoid a second mutation surface"
+    },
+    {
+      "method": "fs/copy",
+      "schemaTier": "default",
+      "paramsType": "FsCopyParams",
+      "required": [
+        "destinationPath",
+        "sourcePath"
+      ],
+      "fields": [
+        "destinationPath",
+        "recursive",
+        "sourcePath"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Deferred: existing Viewer file access; avoid a second mutation surface"
+    },
+    {
+      "method": "fs/watch",
+      "schemaTier": "default",
+      "paramsType": "FsWatchParams",
+      "required": [
+        "path",
+        "watchId"
+      ],
+      "fields": [
+        "path",
+        "watchId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Deferred: existing Viewer file access; avoid a second mutation surface"
+    },
+    {
+      "method": "fs/unwatch",
+      "schemaTier": "default",
+      "paramsType": "FsUnwatchParams",
+      "required": [
+        "watchId"
+      ],
+      "fields": [
+        "watchId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Deferred: existing Viewer file access; avoid a second mutation surface"
+    },
+    {
+      "method": "skills/config/write",
+      "schemaTier": "default",
+      "paramsType": "SkillsConfigWriteParams",
+      "required": [
+        "enabled"
+      ],
+      "fields": [
+        "enabled",
+        "name",
+        "path"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Use existing skill discovery; refresh configuration through controlled account scope"
+    },
+    {
+      "method": "plugin/install",
+      "schemaTier": "default",
+      "paramsType": "PluginInstallParams",
+      "required": [
+        "pluginName"
+      ],
+      "fields": [
+        "installAttemptId",
+        "marketplacePath",
+        "pluginName",
+        "remoteMarketplaceName"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Read/reconcile can explain stale tools; installations remain explicit"
+    },
+    {
+      "method": "plugin/uninstall",
+      "schemaTier": "default",
+      "paramsType": "PluginUninstallParams",
+      "required": [
+        "pluginId"
+      ],
+      "fields": [
+        "pluginId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Read/reconcile can explain stale tools; installations remain explicit"
+    },
+    {
+      "method": "turn/start",
+      "schemaTier": "default",
+      "paramsType": "TurnStartParams",
+      "required": [
+        "input",
+        "threadId"
+      ],
+      "fields": [
+        "additionalContext",
+        "approvalPolicy",
+        "approvalsReviewer",
+        "clientUserMessageId",
+        "collaborationMode",
+        "cwd",
+        "cyberAccessProgram",
+        "effort",
+        "environments",
+        "input",
+        "model",
+        "multiAgentMode",
+        "outputSchema",
+        "permissions",
+        "personality",
+        "responsesapiClientMetadata",
+        "runtimeWorkspaceRoots",
+        "sandboxPolicy",
+        "serviceTier",
+        "serviceTierForTurn",
+        "summary",
+        "threadId",
+        "toolOutput",
+        "turnTrigger"
+      ],
+      "viewerLiteralReferences": [
+        "src/lib/runtime/codexAppServerHost.ts:357"
+      ],
+      "disposition": "Generation, steering, interruption, and settings; see compatibility matrix"
+    },
+    {
+      "method": "turn/settings/update",
+      "schemaTier": "experimental",
+      "paramsType": "TurnSettingsUpdateParams",
+      "required": [
+        "threadId",
+        "turnId"
+      ],
+      "fields": [
+        "approvalsReviewer",
+        "effort",
+        "model",
+        "serviceTier",
+        "summary",
+        "threadId",
+        "turnId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Generation, steering, interruption, and settings; see compatibility matrix"
+    },
+    {
+      "method": "turn/steer",
+      "schemaTier": "default",
+      "paramsType": "TurnSteerParams",
+      "required": [
+        "expectedTurnId",
+        "input",
+        "threadId"
+      ],
+      "fields": [
+        "additionalContext",
+        "clientUserMessageId",
+        "expectedTurnId",
+        "input",
+        "responsesapiClientMetadata",
+        "threadId"
+      ],
+      "viewerLiteralReferences": [
+        "src/lib/runtime/codexAppServerHost.ts:358"
+      ],
+      "disposition": "Generation, steering, interruption, and settings; see compatibility matrix"
+    },
+    {
+      "method": "turn/interrupt",
+      "schemaTier": "default",
+      "paramsType": "TurnInterruptParams",
+      "required": [
+        "threadId",
+        "turnId"
+      ],
+      "fields": [
+        "threadId",
+        "turnId"
+      ],
+      "viewerLiteralReferences": [
+        "src/lib/runtime/codexAppServerHost.ts:359"
+      ],
+      "disposition": "Generation, steering, interruption, and settings; see compatibility matrix"
+    },
+    {
+      "method": "thread/realtime/start",
+      "schemaTier": "experimental",
+      "paramsType": "ThreadRealtimeStartParams",
+      "required": [
+        "outputModality",
+        "threadId"
+      ],
+      "fields": [
+        "clientManagedHandoffs",
+        "codexResponseHandoffChannelPrefixes",
+        "codexResponseHandoffMode",
+        "codexResponseItemPrefix",
+        "codexResponsesAsItems",
+        "delegationAckFiller",
+        "flushTranscriptTailOnSessionEnd",
+        "includeStartupContext",
+        "initialItems",
+        "model",
+        "outputModality",
+        "prompt",
+        "realtimeEndInstructions",
+        "realtimeSessionId",
+        "realtimeStartInstructions",
+        "threadId",
+        "transport",
+        "version",
+        "voice"
+      ],
+      "viewerLiteralReferences": [
+        "src/lib/runtime/codexAppServerHost.ts:360"
+      ],
+      "disposition": "History, input, lifecycle, goals, and metadata; see compatibility matrix"
+    },
+    {
+      "method": "thread/realtime/appendAudio",
+      "schemaTier": "experimental",
+      "paramsType": "ThreadRealtimeAppendAudioParams",
+      "required": [
+        "audio",
+        "threadId"
+      ],
+      "fields": [
+        "audio",
+        "threadId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "History, input, lifecycle, goals, and metadata; see compatibility matrix"
+    },
+    {
+      "method": "thread/realtime/appendText",
+      "schemaTier": "experimental",
+      "paramsType": "ThreadRealtimeAppendTextParams",
+      "required": [
+        "text",
+        "threadId"
+      ],
+      "fields": [
+        "role",
+        "text",
+        "threadId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "History, input, lifecycle, goals, and metadata; see compatibility matrix"
+    },
+    {
+      "method": "thread/realtime/appendSpeech",
+      "schemaTier": "experimental",
+      "paramsType": "ThreadRealtimeAppendSpeechParams",
+      "required": [
+        "text",
+        "threadId"
+      ],
+      "fields": [
+        "text",
+        "threadId"
+      ],
+      "viewerLiteralReferences": [
+        "src/lib/runtime/codexAppServerHost.ts:2003"
+      ],
+      "disposition": "History, input, lifecycle, goals, and metadata; see compatibility matrix"
+    },
+    {
+      "method": "thread/realtime/stop",
+      "schemaTier": "experimental",
+      "paramsType": "ThreadRealtimeStopParams",
+      "required": [
+        "threadId"
+      ],
+      "fields": [
+        "threadId"
+      ],
+      "viewerLiteralReferences": [
+        "src/lib/runtime/codexAppServerHost.ts:361"
+      ],
+      "disposition": "History, input, lifecycle, goals, and metadata; see compatibility matrix"
+    },
+    {
+      "method": "thread/timeline/list",
+      "schemaTier": "experimental",
+      "paramsType": "ThreadTimelineListParams",
+      "required": [
+        "threadId"
+      ],
+      "fields": [
+        "cursor",
+        "limit",
+        "threadId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "History, input, lifecycle, goals, and metadata; see compatibility matrix"
+    },
+    {
+      "method": "thread/realtime/listVoices",
+      "schemaTier": "experimental",
+      "paramsType": "ThreadRealtimeListVoicesParams",
+      "required": [],
+      "fields": [],
+      "viewerLiteralReferences": [],
+      "disposition": "History, input, lifecycle, goals, and metadata; see compatibility matrix"
+    },
+    {
+      "method": "review/start",
+      "schemaTier": "default",
+      "paramsType": "ReviewStartParams",
+      "required": [
+        "target",
+        "threadId"
+      ],
+      "fields": [
+        "delivery",
+        "target",
+        "threadId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Deferred: preserve visible Viewer review stages and independent reviewer contract"
+    },
+    {
+      "method": "model/list",
+      "schemaTier": "default",
+      "paramsType": "ModelListParams",
+      "required": [],
+      "fields": [
+        "cursor",
+        "includeHidden",
+        "limit"
+      ],
+      "viewerLiteralReferences": [
+        "src/lib/runtime/codexAppServerHost.ts:1290"
+      ],
+      "disposition": "Read model capabilities; preserve explicitly selected model"
+    },
+    {
+      "method": "modelProvider/capabilities/read",
+      "schemaTier": "default",
+      "paramsType": "ModelProviderCapabilitiesReadParams",
+      "required": [],
+      "fields": [],
+      "viewerLiteralReferences": [],
+      "disposition": "Read capability/auth status; never infer subscription eligibility"
+    },
+    {
+      "method": "experimentalFeature/list",
+      "schemaTier": "default",
+      "paramsType": "ExperimentalFeatureListParams",
+      "required": [],
+      "fields": [
+        "cursor",
+        "limit",
+        "threadId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Read supported feature state; avoid blanket enablement"
+    },
+    {
+      "method": "permissionProfile/list",
+      "schemaTier": "default",
+      "paramsType": "PermissionProfileListParams",
+      "required": [],
+      "fields": [
+        "cursor",
+        "cwd",
+        "limit"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Read named permission profiles; retain access/sandbox distinction"
+    },
+    {
+      "method": "experimentalFeature/enablement/set",
+      "schemaTier": "default",
+      "paramsType": "ExperimentalFeatureEnablementSetParams",
+      "required": [
+        "enablement"
+      ],
+      "fields": [
+        "enablement"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Read supported feature state; avoid blanket enablement"
+    },
+    {
+      "method": "remoteControl/enable",
+      "schemaTier": "experimental",
+      "paramsType": "",
+      "required": [],
+      "fields": [],
+      "viewerLiteralReferences": [],
+      "disposition": "Deferred: keep Viewer the single operator management surface"
+    },
+    {
+      "method": "remoteControl/disable",
+      "schemaTier": "experimental",
+      "paramsType": "",
+      "required": [],
+      "fields": [],
+      "viewerLiteralReferences": [],
+      "disposition": "Deferred: keep Viewer the single operator management surface"
+    },
+    {
+      "method": "remoteControl/status/read",
+      "schemaTier": "experimental",
+      "paramsType": "",
+      "required": [],
+      "fields": [],
+      "viewerLiteralReferences": [],
+      "disposition": "Deferred: keep Viewer the single operator management surface"
+    },
+    {
+      "method": "remoteControl/pairing/start",
+      "schemaTier": "experimental",
+      "paramsType": "RemoteControlPairingStartParams",
+      "required": [],
+      "fields": [
+        "manualCode"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Deferred: keep Viewer the single operator management surface"
+    },
+    {
+      "method": "remoteControl/pairing/status",
+      "schemaTier": "experimental",
+      "paramsType": "RemoteControlPairingStatusParams",
+      "required": [],
+      "fields": [
+        "manualPairingCode",
+        "pairingCode"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Deferred: keep Viewer the single operator management surface"
+    },
+    {
+      "method": "remoteControl/client/list",
+      "schemaTier": "experimental",
+      "paramsType": "RemoteControlClientsListParams",
+      "required": [
+        "environmentId"
+      ],
+      "fields": [
+        "cursor",
+        "environmentId",
+        "limit",
+        "order"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Deferred: keep Viewer the single operator management surface"
+    },
+    {
+      "method": "remoteControl/client/revoke",
+      "schemaTier": "experimental",
+      "paramsType": "RemoteControlClientsRevokeParams",
+      "required": [
+        "clientId",
+        "environmentId"
+      ],
+      "fields": [
+        "clientId",
+        "environmentId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Deferred: keep Viewer the single operator management surface"
+    },
+    {
+      "method": "collaborationMode/list",
+      "schemaTier": "experimental",
+      "paramsType": "CollaborationModeListParams",
+      "required": [],
+      "fields": [],
+      "viewerLiteralReferences": [],
+      "disposition": "Read-only discovery for supported mode controls"
+    },
+    {
+      "method": "mock/experimentalMethod",
+      "schemaTier": "experimental",
+      "paramsType": "MockExperimentalMethodParams",
+      "required": [],
+      "fields": [
+        "value"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Test-only; never expose"
+    },
+    {
+      "method": "environment/add",
+      "schemaTier": "experimental",
+      "paramsType": "EnvironmentAddParams",
+      "required": [
+        "environmentId",
+        "execServerUrl"
+      ],
+      "fields": [
+        "connectTimeoutMs",
+        "environmentId",
+        "execServerUrl"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Deferred: remote executor environments need a separate product requirement"
+    },
+    {
+      "method": "environment/info",
+      "schemaTier": "experimental",
+      "paramsType": "EnvironmentInfoParams",
+      "required": [
+        "environmentId"
+      ],
+      "fields": [
+        "environmentId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Deferred: remote executor environments need a separate product requirement"
+    },
+    {
+      "method": "environment/status",
+      "schemaTier": "experimental",
+      "paramsType": "EnvironmentStatusParams",
+      "required": [
+        "environmentId"
+      ],
+      "fields": [
+        "environmentId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Deferred: remote executor environments need a separate product requirement"
+    },
+    {
+      "method": "mcpServer/oauth/login",
+      "schemaTier": "default",
+      "paramsType": "McpServerOauthLoginParams",
+      "required": [
+        "name"
+      ],
+      "fields": [
+        "clientRegistration",
+        "name",
+        "scopes",
+        "threadId",
+        "timeoutSecs"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Account-scoped tool/auth health; event streams remain experimental"
+    },
+    {
+      "method": "config/mcpServer/reload",
+      "schemaTier": "default",
+      "paramsType": "",
+      "required": [],
+      "fields": [],
+      "viewerLiteralReferences": [],
+      "disposition": "Retain managed account configuration ownership"
+    },
+    {
+      "method": "mcpServerStatus/list",
+      "schemaTier": "default",
+      "paramsType": "ListMcpServerStatusParams",
+      "required": [],
+      "fields": [
+        "cursor",
+        "detail",
+        "limit",
+        "threadId"
+      ],
+      "viewerLiteralReferences": [
+        "src/lib/runtime/codexAppServerHost.ts:1358"
+      ],
+      "disposition": "Deferred: no current requirement"
+    },
+    {
+      "method": "mcpServer/resource/read",
+      "schemaTier": "default",
+      "paramsType": "McpResourceReadParams",
+      "required": [
+        "server",
+        "uri"
+      ],
+      "fields": [
+        "connectorId",
+        "originCallId",
+        "server",
+        "threadId",
+        "uri"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Account-scoped tool/auth health; event streams remain experimental"
+    },
+    {
+      "method": "mcpServer/event/stream/start",
+      "schemaTier": "experimental",
+      "paramsType": "McpServerEventStreamStartParams",
+      "required": [
+        "arguments",
+        "name",
+        "server",
+        "subscriptionId",
+        "threadId"
+      ],
+      "fields": [
+        "_meta",
+        "arguments",
+        "name",
+        "server",
+        "subscriptionId",
+        "threadId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Account-scoped tool/auth health; event streams remain experimental"
+    },
+    {
+      "method": "mcpServer/event/stream/stop",
+      "schemaTier": "experimental",
+      "paramsType": "McpServerEventStreamStopParams",
+      "required": [
+        "subscriptionId"
+      ],
+      "fields": [
+        "subscriptionId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Account-scoped tool/auth health; event streams remain experimental"
+    },
+    {
+      "method": "mcpServer/tool/call",
+      "schemaTier": "default",
+      "paramsType": "McpServerToolCallParams",
+      "required": [
+        "server",
+        "threadId",
+        "tool"
+      ],
+      "fields": [
+        "_meta",
+        "arguments",
+        "server",
+        "threadId",
+        "tool"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Account-scoped tool/auth health; event streams remain experimental"
+    },
+    {
+      "method": "windowsSandbox/setupStart",
+      "schemaTier": "default",
+      "paramsType": "WindowsSandboxSetupStartParams",
+      "required": [
+        "mode"
+      ],
+      "fields": [
+        "cwd",
+        "mode"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Platform-specific readiness; no Linux implementation work"
+    },
+    {
+      "method": "windowsSandbox/readiness",
+      "schemaTier": "default",
+      "paramsType": "",
+      "required": [],
+      "fields": [],
+      "viewerLiteralReferences": [],
+      "disposition": "Platform-specific readiness; no Linux implementation work"
+    },
+    {
+      "method": "account/login/start",
+      "schemaTier": "default",
+      "paramsType": "LoginAccountParams",
+      "required": [],
+      "fields": [],
+      "viewerLiteralReferences": [
+        "src/lib/accounts/codexAppServer.ts:324"
+      ],
+      "disposition": "Existing subscription account flow; spending and outbound messages require explicit intent"
+    },
+    {
+      "method": "account/bedrock/discover",
+      "schemaTier": "experimental",
+      "paramsType": "BedrockDiscoverParams",
+      "required": [],
+      "fields": [],
+      "viewerLiteralReferences": [],
+      "disposition": "Existing subscription account flow; spending and outbound messages require explicit intent"
+    },
+    {
+      "method": "account/bedrock/setup",
+      "schemaTier": "experimental",
+      "paramsType": "BedrockSetupParams",
+      "required": [],
+      "fields": [],
+      "viewerLiteralReferences": [],
+      "disposition": "Existing subscription account flow; spending and outbound messages require explicit intent"
+    },
+    {
+      "method": "account/login/cancel",
+      "schemaTier": "default",
+      "paramsType": "CancelLoginAccountParams",
+      "required": [
+        "loginId"
+      ],
+      "fields": [
+        "loginId"
+      ],
+      "viewerLiteralReferences": [
+        "src/lib/accounts/codexAppServer.ts:334"
+      ],
+      "disposition": "Existing subscription account flow; spending and outbound messages require explicit intent"
+    },
+    {
+      "method": "account/logout",
+      "schemaTier": "default",
+      "paramsType": "",
+      "required": [],
+      "fields": [],
+      "viewerLiteralReferences": [],
+      "disposition": "Existing subscription account flow; spending and outbound messages require explicit intent"
+    },
+    {
+      "method": "account/rateLimits/read",
+      "schemaTier": "default",
+      "paramsType": "",
+      "required": [],
+      "fields": [],
+      "viewerLiteralReferences": [
+        "src/lib/accounts/codexAppServer.ts:342"
+      ],
+      "disposition": "Existing subscription account flow; spending and outbound messages require explicit intent"
+    },
+    {
+      "method": "account/rateLimitResetCredit/consume",
+      "schemaTier": "default",
+      "paramsType": "ConsumeAccountRateLimitResetCreditParams",
+      "required": [
+        "idempotencyKey"
+      ],
+      "fields": [
+        "creditId",
+        "idempotencyKey"
+      ],
+      "viewerLiteralReferences": [
+        "src/lib/accounts/codexAppServer.ts:360"
+      ],
+      "disposition": "Existing subscription account flow; spending and outbound messages require explicit intent"
+    },
+    {
+      "method": "account/usage/read",
+      "schemaTier": "default",
+      "paramsType": "",
+      "required": [],
+      "fields": [],
+      "viewerLiteralReferences": [],
+      "disposition": "Existing subscription account flow; spending and outbound messages require explicit intent"
+    },
+    {
+      "method": "account/workspaceMessages/read",
+      "schemaTier": "default",
+      "paramsType": "",
+      "required": [],
+      "fields": [],
+      "viewerLiteralReferences": [],
+      "disposition": "Existing subscription account flow; spending and outbound messages require explicit intent"
+    },
+    {
+      "method": "account/sendAddCreditsNudgeEmail",
+      "schemaTier": "default",
+      "paramsType": "SendAddCreditsNudgeEmailParams",
+      "required": [
+        "creditType"
+      ],
+      "fields": [
+        "creditType"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Existing subscription account flow; spending and outbound messages require explicit intent"
+    },
+    {
+      "method": "feedback/upload",
+      "schemaTier": "default",
+      "paramsType": "FeedbackUploadParams",
+      "required": [
+        "classification"
+      ],
+      "fields": [
+        "classification",
+        "extraLogFiles",
+        "includeLogs",
+        "reason",
+        "tags",
+        "threadId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Deferred: diagnostic upload is an external publication action"
+    },
+    {
+      "method": "command/exec",
+      "schemaTier": "default",
+      "paramsType": "CommandExecParams",
+      "required": [
+        "command"
+      ],
+      "fields": [
+        "command",
+        "cwd",
+        "disableOutputCap",
+        "disableTimeout",
+        "env",
+        "outputBytesCap",
+        "permissionProfile",
+        "processId",
+        "sandboxPolicy",
+        "size",
+        "streamStdin",
+        "streamStdoutStderr",
+        "timeoutMs",
+        "tty"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Deferred: existing tool and runtime ownership controls"
+    },
+    {
+      "method": "command/exec/write",
+      "schemaTier": "default",
+      "paramsType": "CommandExecWriteParams",
+      "required": [
+        "processId"
+      ],
+      "fields": [
+        "closeStdin",
+        "deltaBase64",
+        "processId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Deferred: existing tool and runtime ownership controls"
+    },
+    {
+      "method": "command/exec/terminate",
+      "schemaTier": "default",
+      "paramsType": "CommandExecTerminateParams",
+      "required": [
+        "processId"
+      ],
+      "fields": [
+        "processId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Deferred: existing tool and runtime ownership controls"
+    },
+    {
+      "method": "command/exec/resize",
+      "schemaTier": "default",
+      "paramsType": "CommandExecResizeParams",
+      "required": [
+        "processId",
+        "size"
+      ],
+      "fields": [
+        "processId",
+        "size"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Deferred: existing tool and runtime ownership controls"
+    },
+    {
+      "method": "process/spawn",
+      "schemaTier": "experimental",
+      "paramsType": "ProcessSpawnParams",
+      "required": [
+        "command",
+        "cwd",
+        "processHandle"
+      ],
+      "fields": [
+        "command",
+        "cwd",
+        "env",
+        "outputBytesCap",
+        "processHandle",
+        "size",
+        "streamStdin",
+        "streamStdoutStderr",
+        "timeoutMs",
+        "tty"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Deferred: experimental process control would expand lifecycle authority"
+    },
+    {
+      "method": "process/writeStdin",
+      "schemaTier": "experimental",
+      "paramsType": "ProcessWriteStdinParams",
+      "required": [
+        "processHandle"
+      ],
+      "fields": [
+        "closeStdin",
+        "deltaBase64",
+        "processHandle"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Deferred: experimental process control would expand lifecycle authority"
+    },
+    {
+      "method": "process/kill",
+      "schemaTier": "experimental",
+      "paramsType": "ProcessKillParams",
+      "required": [
+        "processHandle"
+      ],
+      "fields": [
+        "processHandle"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Deferred: experimental process control would expand lifecycle authority"
+    },
+    {
+      "method": "process/resizePty",
+      "schemaTier": "experimental",
+      "paramsType": "ProcessResizePtyParams",
+      "required": [
+        "processHandle",
+        "size"
+      ],
+      "fields": [
+        "processHandle",
+        "size"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Deferred: experimental process control would expand lifecycle authority"
+    },
+    {
+      "method": "config/read",
+      "schemaTier": "default",
+      "paramsType": "ConfigReadParams",
+      "required": [],
+      "fields": [
+        "cwd",
+        "includeLayers"
+      ],
+      "viewerLiteralReferences": [
+        "src/lib/accounts/codexAppServer.ts:389",
+        "src/lib/runtime/codexAppServerHost.ts:1299"
+      ],
+      "disposition": "Retain managed account configuration ownership"
+    },
+    {
+      "method": "externalAgentConfig/detect",
+      "schemaTier": "default",
+      "paramsType": "ExternalAgentConfigDetectParams",
+      "required": [],
+      "fields": [
+        "cwds",
+        "includeHome",
+        "maxSessionAgeDays",
+        "maxSessions",
+        "migrationSource",
+        "source"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Deferred: importing history/configuration is a separate user action"
+    },
+    {
+      "method": "externalAgentConfig/import",
+      "schemaTier": "default",
+      "paramsType": "ExternalAgentConfigImportParams",
+      "required": [
+        "migrationItems"
+      ],
+      "fields": [
+        "migrationItems",
+        "migrationSource",
+        "providerId",
+        "source"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Deferred: importing history/configuration is a separate user action"
+    },
+    {
+      "method": "externalAgentConfig/import/recordHistory",
+      "schemaTier": "default",
+      "paramsType": "ExternalAgentConfigImportHistoryRecordParams",
+      "required": [
+        "itemTypeResults",
+        "providerId"
+      ],
+      "fields": [
+        "itemTypeResults",
+        "providerId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Deferred: importing history/configuration is a separate user action"
+    },
+    {
+      "method": "externalAgentConfig/import/readHistories",
+      "schemaTier": "default",
+      "paramsType": "",
+      "required": [],
+      "fields": [],
+      "viewerLiteralReferences": [],
+      "disposition": "Deferred: importing history/configuration is a separate user action"
+    },
+    {
+      "method": "config/value/write",
+      "schemaTier": "default",
+      "paramsType": "ConfigValueWriteParams",
+      "required": [
+        "keyPath",
+        "mergeStrategy",
+        "value"
+      ],
+      "fields": [
+        "expectedVersion",
+        "filePath",
+        "keyPath",
+        "mergeStrategy",
+        "value"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Retain managed account configuration ownership"
+    },
+    {
+      "method": "config/batchWrite",
+      "schemaTier": "default",
+      "paramsType": "ConfigBatchWriteParams",
+      "required": [
+        "edits"
+      ],
+      "fields": [
+        "edits",
+        "expectedVersion",
+        "filePath",
+        "reloadUserConfig"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Retain managed account configuration ownership"
+    },
+    {
+      "method": "configRequirements/read",
+      "schemaTier": "default",
+      "paramsType": "",
+      "required": [],
+      "fields": [],
+      "viewerLiteralReferences": [],
+      "disposition": "Read effective requirements before offering restricted settings"
+    },
+    {
+      "method": "account/read",
+      "schemaTier": "default",
+      "paramsType": "GetAccountParams",
+      "required": [],
+      "fields": [
+        "refreshToken"
+      ],
+      "viewerLiteralReferences": [
+        "src/lib/accounts/codexAppServer.ts:312",
+        "src/lib/runtime/codexAppServerHost.ts:1282"
+      ],
+      "disposition": "Existing subscription account flow; spending and outbound messages require explicit intent"
+    },
+    {
+      "method": "fuzzyFileSearch",
+      "schemaTier": "default",
+      "paramsType": "FuzzyFileSearchParams",
+      "required": [
+        "query",
+        "roots"
+      ],
+      "fields": [
+        "cancellationToken",
+        "query",
+        "roots"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Optional mention picker; existing UI remains owner"
+    },
+    {
+      "method": "fuzzyFileSearch/sessionStart",
+      "schemaTier": "experimental",
+      "paramsType": "FuzzyFileSearchSessionStartParams",
+      "required": [
+        "roots",
+        "sessionId"
+      ],
+      "fields": [
+        "roots",
+        "sessionId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Optional mention picker; existing UI remains owner"
+    },
+    {
+      "method": "fuzzyFileSearch/sessionUpdate",
+      "schemaTier": "experimental",
+      "paramsType": "FuzzyFileSearchSessionUpdateParams",
+      "required": [
+        "query",
+        "sessionId"
+      ],
+      "fields": [
+        "query",
+        "sessionId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Optional mention picker; existing UI remains owner"
+    },
+    {
+      "method": "fuzzyFileSearch/sessionStop",
+      "schemaTier": "experimental",
+      "paramsType": "FuzzyFileSearchSessionStopParams",
+      "required": [
+        "sessionId"
+      ],
+      "fields": [
+        "sessionId"
+      ],
+      "viewerLiteralReferences": [],
+      "disposition": "Optional mention picker; existing UI remains owner"
+    }
+  ]
+}

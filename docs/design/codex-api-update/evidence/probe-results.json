@@ -1,0 +1,1634 @@
+{
+  "cli": "codex-cli 0.153.4",
+  "backend": "local synthetic SSE; no credentials; no external model requests",
+  "cases": [
+    {
+      "name": "initialize",
+      "threadId": null,
+      "response": {
+        "id": 1,
+        "result": {
+          "userAgent": "isolated_contract_probe/0.153.4 (Arch Linux Rolling Release; x86_64) unknown (isolated_contract_probe; 1)",
+          "codexHome": "$PROBE/codex_home",
+          "platformFamily": "unix",
+          "platformOs": "linux"
+        }
+      }
+    },
+    {
+      "name": "account_without_credentials",
+      "threadId": null,
+      "response": {
+        "id": 2,
+        "result": {
+          "account": null,
+          "requiresOpenaiAuth": false
+        }
+      }
+    },
+    {
+      "name": "thread_start",
+      "threadId": null,
+      "response": {
+        "id": 3,
+        "result": {
+          "thread": {
+            "id": "thread-a",
+            "extra": null,
+            "sessionId": "thread-a",
+            "forkedFromId": null,
+            "parentThreadId": null,
+            "preview": "",
+            "ephemeral": false,
+            "section": null,
+            "sectionEnteredAt": null,
+            "projectId": null,
+            "historyMode": "paginated",
+            "modelProvider": "probe",
+            "model": "probe-model",
+            "reasoningEffort": null,
+            "createdAt": 1788843381,
+            "updatedAt": 1788843381,
+            "recencyAt": 1788843381,
+            "status": {
+              "type": "idle"
+            },
+            "path": "$PROBE/codex_home/sessions/2026/09/08/rollout-2026-09-08T07-56-21-thread-a.jsonl",
+            "cwd": "$PROBE/workspace",
+            "cliVersion": "0.153.4",
+            "source": "vscode",
+            "canAcceptDirectInput": true,
+            "threadSource": null,
+            "agentNickname": null,
+            "agentRole": null,
+            "gitInfo": "$REDACTED",
+            "name": null,
+            "turns": []
+          },
+          "model": "probe-model",
+          "modelProvider": "probe",
+          "serviceTier": null,
+          "cwd": "$PROBE/workspace",
+          "runtimeWorkspaceRoots": [
+            "$PROBE/workspace"
+          ],
+          "instructionSources": [],
+          "approvalPolicy": "never",
+          "approvalsReviewer": "user",
+          "sandbox": {
+            "type": "readOnly",
+            "networkAccess": false
+          },
+          "activePermissionProfile": null,
+          "reasoningEffort": null,
+          "multiAgentMode": "explicitRequestOnly"
+        }
+      }
+    },
+    {
+      "name": "inject_idle_stable_handshake",
+      "threadId": "thread-a",
+      "response": {
+        "id": 4,
+        "result": {}
+      }
+    },
+    {
+      "name": "inject_empty",
+      "threadId": "thread-a",
+      "response": {
+        "error": {
+          "code": -32600,
+          "message": "items must not be empty"
+        },
+        "id": 5
+      }
+    },
+    {
+      "name": "inject_malformed",
+      "threadId": "thread-a",
+      "response": {
+        "error": {
+          "code": -32600,
+          "message": "items[0] is not a valid response item: missing field `content`"
+        },
+        "id": 6
+      }
+    },
+    {
+      "name": "idle_inject_events",
+      "threadId": "thread-a",
+      "response": [
+        "remoteControl/status/changed",
+        "thread/started"
+      ]
+    },
+    {
+      "name": "idle_inject_backend_requests",
+      "threadId": "thread-a",
+      "response": 0
+    },
+    {
+      "name": "queue_without_experimental",
+      "threadId": "thread-a",
+      "response": {
+        "error": {
+          "code": -32600,
+          "message": "thread/queue/list requires experimentalApi capability"
+        },
+        "id": 7
+      }
+    },
+    {
+      "name": "steer_idle",
+      "threadId": "thread-a",
+      "response": {
+        "error": {
+          "code": -32600,
+          "message": "no active turn to steer"
+        },
+        "id": 8
+      }
+    },
+    {
+      "name": "inject_repeated_same_item_id",
+      "threadId": "thread-a",
+      "response": {
+        "id": 9,
+        "result": {}
+      }
+    },
+    {
+      "name": "thread_read_include_turns",
+      "threadId": "thread-a",
+      "response": {
+        "id": 10,
+        "result": {
+          "thread": {
+            "id": "thread-a",
+            "extra": null,
+            "sessionId": "thread-a",
+            "forkedFromId": null,
+            "parentThreadId": null,
+            "preview": "",
+            "ephemeral": false,
+            "section": null,
+            "sectionEnteredAt": null,
+            "projectId": null,
+            "historyMode": "paginated",
+            "modelProvider": "probe",
+            "model": "probe-model",
+            "reasoningEffort": null,
+            "createdAt": 1788843381,
+            "updatedAt": 1788843382,
+            "recencyAt": 1788843381,
+            "status": {
+              "type": "idle"
+            },
+            "path": "$PROBE/codex_home/sessions/2026/09/08/rollout-2026-09-08T07-56-21-thread-a.jsonl",
+            "cwd": "$PROBE/workspace",
+            "cliVersion": "0.153.4",
+            "source": "vscode",
+            "canAcceptDirectInput": true,
+            "threadSource": null,
+            "agentNickname": null,
+            "agentRole": null,
+            "gitInfo": "$REDACTED",
+            "name": null,
+            "turns": []
+          }
+        }
+      }
+    },
+    {
+      "name": "thread_turns_list",
+      "threadId": "thread-a",
+      "response": {
+        "id": 11,
+        "result": {
+          "data": [],
+          "nextCursor": null,
+          "backwardsCursor": null
+        }
+      }
+    },
+    {
+      "name": "resume",
+      "threadId": "thread-a",
+      "response": {
+        "id": 2,
+        "result": {
+          "thread": {
+            "id": "thread-a",
+            "extra": null,
+            "sessionId": "thread-a",
+            "forkedFromId": null,
+            "parentThreadId": null,
+            "preview": "",
+            "ephemeral": false,
+            "section": null,
+            "sectionEnteredAt": null,
+            "projectId": null,
+            "historyMode": "paginated",
+            "modelProvider": "probe",
+            "model": "probe-model",
+            "reasoningEffort": null,
+            "createdAt": 1788843381,
+            "updatedAt": 1788843382,
+            "recencyAt": 1788843381,
+            "status": {
+              "type": "idle"
+            },
+            "path": "$PROBE/codex_home/sessions/2026/09/08/rollout-2026-09-08T07-56-21-thread-a.jsonl",
+            "cwd": "$PROBE/workspace",
+            "cliVersion": "0.153.4",
+            "source": "vscode",
+            "canAcceptDirectInput": true,
+            "threadSource": null,
+            "agentNickname": null,
+            "agentRole": null,
+            "gitInfo": "$REDACTED",
+            "name": null,
+            "turns": []
+          },
+          "model": "probe-model",
+          "modelProvider": "probe",
+          "serviceTier": null,
+          "cwd": "$PROBE/workspace",
+          "runtimeWorkspaceRoots": [
+            "$PROBE/workspace"
+          ],
+          "instructionSources": [],
+          "approvalPolicy": "never",
+          "approvalsReviewer": "user",
+          "sandbox": {
+            "type": "readOnly",
+            "networkAccess": false
+          },
+          "activePermissionProfile": null,
+          "reasoningEffort": null,
+          "multiAgentMode": "explicitRequestOnly",
+          "initialTurnsPage": null,
+          "turnsBackwardsCursor": null,
+          "itemsBackwardsCursor": null
+        }
+      }
+    },
+    {
+      "name": "turn_start_idle",
+      "threadId": "thread-a",
+      "response": {
+        "id": 3,
+        "result": {
+          "turn": {
+            "id": "fixture-id-004",
+            "items": [],
+            "itemsView": "notLoaded",
+            "status": "inProgress",
+            "error": null,
+            "startedAt": null,
+            "completedAt": null,
+            "durationMs": null
+          }
+        }
+      }
+    },
+    {
+      "name": "first_backend_request",
+      "threadId": "thread-a",
+      "response": {
+        "count": 1,
+        "input": [
+          {
+            "type": "message",
+            "role": "user",
+            "content": [
+              {
+                "type": "input_text",
+                "text": "probe-idle-context"
+              }
+            ]
+          },
+          {
+            "type": "message",
+            "role": "user",
+            "content": [
+              {
+                "type": "input_text",
+                "text": "probe-idle-context"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "inject_active",
+      "threadId": "thread-a",
+      "response": {
+        "id": 4,
+        "result": {}
+      }
+    },
+    {
+      "name": "steer_stale",
+      "threadId": "thread-a",
+      "response": {
+        "error": {
+          "code": -32600,
+          "message": "expected active turn id `stale` but found `fixture-id-004`"
+        },
+        "id": 5
+      }
+    },
+    {
+      "name": "steer_matching",
+      "threadId": "thread-a",
+      "response": {
+        "id": 6,
+        "result": {
+          "turnId": "fixture-id-004"
+        }
+      }
+    },
+    {
+      "name": "turn_start_while_active",
+      "threadId": "thread-a",
+      "response": {
+        "id": 7,
+        "result": {
+          "turn": {
+            "id": "fixture-id-004",
+            "items": [],
+            "itemsView": "notLoaded",
+            "status": "inProgress",
+            "error": null,
+            "startedAt": null,
+            "completedAt": null,
+            "durationMs": null
+          }
+        }
+      }
+    },
+    {
+      "name": "queue_add_active",
+      "threadId": "thread-a",
+      "response": {
+        "id": 8,
+        "result": {
+          "queuedSubmission": {
+            "id": "fixture-id-005",
+            "input": [
+              {
+                "type": "text",
+                "text": "probe-queued-input",
+                "text_elements": []
+              }
+            ],
+            "clientUserMessageId": "probe-queue-id"
+          }
+        }
+      }
+    },
+    {
+      "name": "queue_repeat_same_client_id",
+      "threadId": "thread-a",
+      "response": {
+        "id": 9,
+        "result": {
+          "queuedSubmission": {
+            "id": "fixture-id-006",
+            "input": [
+              {
+                "type": "text",
+                "text": "probe-queued-input",
+                "text_elements": []
+              }
+            ],
+            "clientUserMessageId": "probe-queue-id"
+          }
+        }
+      }
+    },
+    {
+      "name": "queue_repeat_changed_payload",
+      "threadId": "thread-a",
+      "response": {
+        "id": 10,
+        "result": {
+          "queuedSubmission": {
+            "id": "fixture-id-007",
+            "input": [
+              {
+                "type": "text",
+                "text": "different",
+                "text_elements": []
+              }
+            ],
+            "clientUserMessageId": "probe-queue-id"
+          }
+        }
+      }
+    },
+    {
+      "name": "queue_list_active",
+      "threadId": "thread-a",
+      "response": {
+        "id": 11,
+        "result": {
+          "data": [
+            {
+              "id": "fixture-id-005",
+              "input": [
+                {
+                  "type": "text",
+                  "text": "probe-queued-input",
+                  "text_elements": []
+                }
+              ],
+              "clientUserMessageId": "probe-queue-id"
+            },
+            {
+              "id": "fixture-id-006",
+              "input": [
+                {
+                  "type": "text",
+                  "text": "probe-queued-input",
+                  "text_elements": []
+                }
+              ],
+              "clientUserMessageId": "probe-queue-id"
+            },
+            {
+              "id": "fixture-id-007",
+              "input": [
+                {
+                  "type": "text",
+                  "text": "different",
+                  "text_elements": []
+                }
+              ],
+              "clientUserMessageId": "probe-queue-id"
+            }
+          ],
+          "nextCursor": null
+        }
+      }
+    },
+    {
+      "name": "queue_start_active",
+      "threadId": "thread-a",
+      "response": {
+        "error": {
+          "code": -32600,
+          "message": "thread already has an active or pending turn"
+        },
+        "id": 12
+      }
+    },
+    {
+      "name": "interrupt",
+      "threadId": "thread-a",
+      "response": {
+        "id": 13,
+        "result": {}
+      }
+    },
+    {
+      "name": "queue_after_interrupt",
+      "threadId": "thread-a",
+      "response": {
+        "id": 14,
+        "result": {
+          "data": [
+            {
+              "id": "fixture-id-005",
+              "input": [
+                {
+                  "type": "text",
+                  "text": "probe-queued-input",
+                  "text_elements": []
+                }
+              ],
+              "clientUserMessageId": "probe-queue-id"
+            },
+            {
+              "id": "fixture-id-006",
+              "input": [
+                {
+                  "type": "text",
+                  "text": "probe-queued-input",
+                  "text_elements": []
+                }
+              ],
+              "clientUserMessageId": "probe-queue-id"
+            },
+            {
+              "id": "fixture-id-007",
+              "input": [
+                {
+                  "type": "text",
+                  "text": "different",
+                  "text_elements": []
+                }
+              ],
+              "clientUserMessageId": "probe-queue-id"
+            }
+          ],
+          "nextCursor": null
+        }
+      }
+    },
+    {
+      "name": "events",
+      "threadId": "thread-a",
+      "response": [
+        {
+          "method": "thread/status/changed",
+          "params": {
+            "threadId": "thread-a",
+            "status": {
+              "type": "idle"
+            }
+          },
+          "emittedAtMs": 1788843382321
+        },
+        {
+          "method": "thread/goal/cleared",
+          "params": {
+            "threadId": "thread-a"
+          },
+          "emittedAtMs": 1788843382323
+        },
+        {
+          "method": "warning",
+          "params": {
+            "threadId": "thread-a",
+            "message": "Model metadata for `probe-model` not found. Defaulting to fallback metadata; this can degrade performance and cause issues."
+          },
+          "emittedAtMs": 1788843382326
+        },
+        {
+          "method": "thread/status/changed",
+          "params": {
+            "threadId": "thread-a",
+            "status": {
+              "type": "active",
+              "activeFlags": []
+            }
+          },
+          "emittedAtMs": 1788843382329
+        },
+        {
+          "method": "turn/started",
+          "params": {
+            "threadId": "thread-a",
+            "turn": {
+              "id": "fixture-id-004",
+              "items": [],
+              "itemsView": "notLoaded",
+              "status": "inProgress",
+              "error": null,
+              "startedAt": 1788843382,
+              "completedAt": null,
+              "durationMs": null
+            }
+          },
+          "emittedAtMs": 1788843382329
+        },
+        {
+          "method": "item/started",
+          "params": {
+            "item": {
+              "type": "userMessage",
+              "id": "fixture-id-008",
+              "clientId": "probe-active",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "probe-active-turn",
+                  "text_elements": []
+                }
+              ]
+            },
+            "threadId": "thread-a",
+            "turnId": "fixture-id-004",
+            "startedAtMs": 1788843382344
+          },
+          "emittedAtMs": 1788843382345
+        },
+        {
+          "method": "item/completed",
+          "params": {
+            "item": {
+              "type": "userMessage",
+              "id": "fixture-id-008",
+              "clientId": "probe-active",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "probe-active-turn",
+                  "text_elements": []
+                }
+              ]
+            },
+            "threadId": "thread-a",
+            "turnId": "fixture-id-004",
+            "completedAtMs": 1788843382344
+          },
+          "emittedAtMs": 1788843382347
+        },
+        {
+          "method": "thread/queue/changed",
+          "params": {
+            "threadId": "thread-a"
+          },
+          "emittedAtMs": 1788843382431
+        },
+        {
+          "method": "thread/queue/changed",
+          "params": {
+            "threadId": "thread-a"
+          },
+          "emittedAtMs": 1788843382431
+        },
+        {
+          "method": "thread/queue/changed",
+          "params": {
+            "threadId": "thread-a"
+          },
+          "emittedAtMs": 1788843382432
+        },
+        {
+          "method": "thread/status/changed",
+          "params": {
+            "threadId": "thread-a",
+            "status": {
+              "type": "idle"
+            }
+          },
+          "emittedAtMs": 1788843382441
+        },
+        {
+          "method": "turn/completed",
+          "params": {
+            "threadId": "thread-a",
+            "turn": {
+              "id": "fixture-id-004",
+              "items": [],
+              "itemsView": "notLoaded",
+              "status": "interrupted",
+              "error": null,
+              "startedAt": 1788843382,
+              "completedAt": 1788843382,
+              "durationMs": 114
+            }
+          },
+          "emittedAtMs": 1788843382441
+        }
+      ]
+    },
+    {
+      "name": "queue_cold_list",
+      "threadId": "thread-a",
+      "response": {
+        "id": 2,
+        "result": {
+          "data": [
+            {
+              "id": "fixture-id-005",
+              "input": [
+                {
+                  "type": "text",
+                  "text": "probe-queued-input",
+                  "text_elements": []
+                }
+              ],
+              "clientUserMessageId": "probe-queue-id"
+            },
+            {
+              "id": "fixture-id-006",
+              "input": [
+                {
+                  "type": "text",
+                  "text": "probe-queued-input",
+                  "text_elements": []
+                }
+              ],
+              "clientUserMessageId": "probe-queue-id"
+            },
+            {
+              "id": "fixture-id-007",
+              "input": [
+                {
+                  "type": "text",
+                  "text": "different",
+                  "text_elements": []
+                }
+              ],
+              "clientUserMessageId": "probe-queue-id"
+            }
+          ],
+          "nextCursor": null
+        }
+      }
+    },
+    {
+      "name": "cold_resume",
+      "threadId": "thread-a",
+      "response": {
+        "id": 3,
+        "result": {
+          "thread": {
+            "id": "thread-a",
+            "extra": null,
+            "sessionId": "thread-a",
+            "forkedFromId": null,
+            "parentThreadId": null,
+            "preview": "probe-active-turn",
+            "ephemeral": false,
+            "section": null,
+            "sectionEnteredAt": null,
+            "projectId": null,
+            "historyMode": "paginated",
+            "modelProvider": "probe",
+            "model": "probe-model",
+            "reasoningEffort": null,
+            "createdAt": 1788843381,
+            "updatedAt": 1788843382,
+            "recencyAt": 1788843382,
+            "status": {
+              "type": "idle"
+            },
+            "path": "$PROBE/codex_home/sessions/2026/09/08/rollout-2026-09-08T07-56-21-thread-a.jsonl",
+            "cwd": "$PROBE/workspace",
+            "cliVersion": "0.153.4",
+            "source": "vscode",
+            "canAcceptDirectInput": true,
+            "threadSource": null,
+            "agentNickname": null,
+            "agentRole": null,
+            "gitInfo": "$REDACTED",
+            "name": null,
+            "turns": []
+          },
+          "model": "probe-model",
+          "modelProvider": "probe",
+          "serviceTier": null,
+          "cwd": "$PROBE/workspace",
+          "runtimeWorkspaceRoots": [
+            "$PROBE/workspace"
+          ],
+          "instructionSources": [],
+          "approvalPolicy": "never",
+          "approvalsReviewer": "user",
+          "sandbox": {
+            "type": "readOnly",
+            "networkAccess": false
+          },
+          "activePermissionProfile": null,
+          "reasoningEffort": null,
+          "multiAgentMode": "explicitRequestOnly",
+          "initialTurnsPage": null,
+          "turnsBackwardsCursor": "{\"requestedThreadId\":\"thread-a\",\"rolloutOrdinal\":7,\"includeAnchor\":true,\"scope\":{\"kind\":\"turns\"}}",
+          "itemsBackwardsCursor": "{\"requestedThreadId\":\"thread-a\",\"rolloutOrdinal\":10,\"includeAnchor\":true,\"scope\":{\"kind\":\"itemsByCreatedAtOrdinal\"}}"
+        }
+      }
+    },
+    {
+      "name": "cold_resume_events",
+      "threadId": "thread-a",
+      "response": [
+        {
+          "method": "thread/status/changed",
+          "params": {
+            "threadId": "thread-a",
+            "status": {
+              "type": "idle"
+            }
+          },
+          "emittedAtMs": 1788843383013
+        },
+        {
+          "method": "thread/goal/cleared",
+          "params": {
+            "threadId": "thread-a"
+          },
+          "emittedAtMs": 1788843383015
+        }
+      ]
+    },
+    {
+      "name": "queue_after_cold_resume",
+      "threadId": "thread-a",
+      "response": {
+        "id": 4,
+        "result": {
+          "data": [
+            {
+              "id": "fixture-id-005",
+              "input": [
+                {
+                  "type": "text",
+                  "text": "probe-queued-input",
+                  "text_elements": []
+                }
+              ],
+              "clientUserMessageId": "probe-queue-id"
+            },
+            {
+              "id": "fixture-id-006",
+              "input": [
+                {
+                  "type": "text",
+                  "text": "probe-queued-input",
+                  "text_elements": []
+                }
+              ],
+              "clientUserMessageId": "probe-queue-id"
+            },
+            {
+              "id": "fixture-id-007",
+              "input": [
+                {
+                  "type": "text",
+                  "text": "different",
+                  "text_elements": []
+                }
+              ],
+              "clientUserMessageId": "probe-queue-id"
+            }
+          ],
+          "nextCursor": null
+        }
+      }
+    },
+    {
+      "name": "backend_request_count",
+      "threadId": "thread-a",
+      "response": 1
+    },
+    {
+      "name": "second_thread_injection",
+      "threadId": "thread-b",
+      "response": {
+        "id": 6,
+        "result": {}
+      }
+    },
+    {
+      "name": "queue_add_unloaded",
+      "threadId": "thread-b",
+      "response": {
+        "id": 2,
+        "result": {
+          "queuedSubmission": {
+            "id": "fixture-id-009",
+            "input": [
+              {
+                "type": "text",
+                "text": "probe-cold-queue",
+                "text_elements": []
+              }
+            ],
+            "clientUserMessageId": "probe-cold-queue"
+          }
+        }
+      }
+    },
+    {
+      "name": "unloaded_metadata",
+      "threadId": "thread-b",
+      "response": {
+        "id": 3,
+        "result": {
+          "thread": {
+            "id": "thread-b",
+            "extra": null,
+            "sessionId": "thread-b",
+            "forkedFromId": null,
+            "parentThreadId": null,
+            "preview": "",
+            "ephemeral": false,
+            "section": null,
+            "sectionEnteredAt": null,
+            "projectId": null,
+            "historyMode": "paginated",
+            "modelProvider": "probe",
+            "model": "probe-model",
+            "reasoningEffort": null,
+            "createdAt": 1788843383,
+            "updatedAt": 1788843383,
+            "recencyAt": 1788843383,
+            "status": {
+              "type": "notLoaded"
+            },
+            "path": "$PROBE/codex_home/sessions/2026/09/08/rollout-2026-09-08T07-56-23-thread-b.jsonl",
+            "cwd": "$PROBE/workspace",
+            "cliVersion": "0.153.4",
+            "source": "vscode",
+            "canAcceptDirectInput": null,
+            "threadSource": null,
+            "agentNickname": null,
+            "agentRole": null,
+            "gitInfo": "$REDACTED",
+            "name": null,
+            "turns": []
+          }
+        }
+      }
+    },
+    {
+      "name": "normal_cold_resume",
+      "threadId": "thread-b",
+      "response": {
+        "id": 4,
+        "result": {
+          "thread": {
+            "id": "thread-b",
+            "extra": null,
+            "sessionId": "thread-b",
+            "forkedFromId": null,
+            "parentThreadId": null,
+            "preview": "",
+            "ephemeral": false,
+            "section": null,
+            "sectionEnteredAt": null,
+            "projectId": null,
+            "historyMode": "paginated",
+            "modelProvider": "probe",
+            "model": "probe-model",
+            "reasoningEffort": null,
+            "createdAt": 1788843383,
+            "updatedAt": 1788843383,
+            "recencyAt": 1788843383,
+            "status": {
+              "type": "idle"
+            },
+            "path": "$PROBE/codex_home/sessions/2026/09/08/rollout-2026-09-08T07-56-23-thread-b.jsonl",
+            "cwd": "$PROBE/workspace",
+            "cliVersion": "0.153.4",
+            "source": "vscode",
+            "canAcceptDirectInput": true,
+            "threadSource": null,
+            "agentNickname": null,
+            "agentRole": null,
+            "gitInfo": "$REDACTED",
+            "name": null,
+            "turns": []
+          },
+          "model": "probe-model",
+          "modelProvider": "probe",
+          "serviceTier": null,
+          "cwd": "$PROBE/workspace",
+          "runtimeWorkspaceRoots": [
+            "$PROBE/workspace"
+          ],
+          "instructionSources": [],
+          "approvalPolicy": "never",
+          "approvalsReviewer": "user",
+          "sandbox": {
+            "type": "readOnly",
+            "networkAccess": false
+          },
+          "activePermissionProfile": null,
+          "reasoningEffort": null,
+          "multiAgentMode": "explicitRequestOnly",
+          "initialTurnsPage": null,
+          "turnsBackwardsCursor": null,
+          "itemsBackwardsCursor": null
+        }
+      }
+    },
+    {
+      "name": "normal_cold_resume_events",
+      "threadId": "thread-b",
+      "response": [
+        {
+          "method": "thread/status/changed",
+          "params": {
+            "threadId": "thread-b",
+            "status": {
+              "type": "idle"
+            }
+          },
+          "emittedAtMs": 1788843383720
+        },
+        {
+          "method": "thread/goal/cleared",
+          "params": {
+            "threadId": "thread-b"
+          },
+          "emittedAtMs": 1788843383721
+        },
+        {
+          "method": "warning",
+          "params": {
+            "threadId": "thread-b",
+            "message": "Model metadata for `probe-model` not found. Defaulting to fallback metadata; this can degrade performance and cause issues."
+          },
+          "emittedAtMs": 1788843383723
+        },
+        {
+          "method": "thread/queue/changed",
+          "params": {
+            "threadId": "thread-b"
+          },
+          "emittedAtMs": 1788843383723
+        },
+        {
+          "method": "thread/status/changed",
+          "params": {
+            "threadId": "thread-b",
+            "status": {
+              "type": "active",
+              "activeFlags": []
+            }
+          },
+          "emittedAtMs": 1788843383725
+        },
+        {
+          "method": "turn/started",
+          "params": {
+            "threadId": "thread-b",
+            "turn": {
+              "id": "fixture-id-010",
+              "items": [],
+              "itemsView": "notLoaded",
+              "status": "inProgress",
+              "error": null,
+              "startedAt": 1788843383,
+              "completedAt": null,
+              "durationMs": null
+            }
+          },
+          "emittedAtMs": 1788843383725
+        },
+        {
+          "method": "item/started",
+          "params": {
+            "item": {
+              "type": "userMessage",
+              "id": "fixture-id-011",
+              "clientId": "probe-cold-queue",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "probe-cold-queue",
+                  "text_elements": []
+                }
+              ]
+            },
+            "threadId": "thread-b",
+            "turnId": "fixture-id-010",
+            "startedAtMs": 1788843383740
+          },
+          "emittedAtMs": 1788843383740
+        },
+        {
+          "method": "item/completed",
+          "params": {
+            "item": {
+              "type": "userMessage",
+              "id": "fixture-id-011",
+              "clientId": "probe-cold-queue",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "probe-cold-queue",
+                  "text_elements": []
+                }
+              ]
+            },
+            "threadId": "thread-b",
+            "turnId": "fixture-id-010",
+            "completedAtMs": 1788843383740
+          },
+          "emittedAtMs": 1788843383743
+        }
+      ]
+    },
+    {
+      "name": "normal_cold_resume_queue",
+      "threadId": "thread-b",
+      "response": {
+        "id": 5,
+        "result": {
+          "data": [],
+          "nextCursor": null
+        }
+      }
+    },
+    {
+      "name": "queue_add_idle",
+      "threadId": "thread-c",
+      "response": {
+        "id": 7,
+        "result": {
+          "queuedSubmission": {
+            "id": "fixture-id-012",
+            "input": [
+              {
+                "type": "text",
+                "text": "probe-idle-queue",
+                "text_elements": []
+              }
+            ],
+            "clientUserMessageId": "probe-idle-queue"
+          }
+        }
+      }
+    },
+    {
+      "name": "idle_queue_list",
+      "threadId": "thread-c",
+      "response": {
+        "id": 8,
+        "result": {
+          "data": [],
+          "nextCursor": null
+        }
+      }
+    },
+    {
+      "name": "idle_queue_events",
+      "threadId": "thread-c",
+      "response": [
+        {
+          "method": "thread/started",
+          "params": {
+            "thread": {
+              "id": "thread-c",
+              "extra": null,
+              "sessionId": "thread-c",
+              "forkedFromId": null,
+              "parentThreadId": null,
+              "preview": "",
+              "ephemeral": false,
+              "section": null,
+              "sectionEnteredAt": null,
+              "projectId": null,
+              "historyMode": "paginated",
+              "modelProvider": "probe",
+              "model": "probe-model",
+              "reasoningEffort": null,
+              "createdAt": 1788843385,
+              "updatedAt": 1788843385,
+              "recencyAt": 1788843385,
+              "status": {
+                "type": "idle"
+              },
+              "path": "$PROBE/codex_home/sessions/2026/09/08/rollout-2026-09-08T07-56-25-thread-c.jsonl",
+              "cwd": "$PROBE/workspace",
+              "cliVersion": "0.153.4",
+              "source": "vscode",
+              "canAcceptDirectInput": true,
+              "threadSource": null,
+              "agentNickname": null,
+              "agentRole": null,
+              "gitInfo": "$REDACTED",
+              "name": null,
+              "turns": []
+            }
+          },
+          "emittedAtMs": 1788843385755
+        },
+        {
+          "method": "thread/queue/changed",
+          "params": {
+            "threadId": "thread-c"
+          },
+          "emittedAtMs": 1788843385756
+        },
+        {
+          "method": "warning",
+          "params": {
+            "threadId": "thread-c",
+            "message": "Model metadata for `probe-model` not found. Defaulting to fallback metadata; this can degrade performance and cause issues."
+          },
+          "emittedAtMs": 1788843385758
+        },
+        {
+          "method": "thread/queue/changed",
+          "params": {
+            "threadId": "thread-c"
+          },
+          "emittedAtMs": 1788843385759
+        },
+        {
+          "method": "thread/status/changed",
+          "params": {
+            "threadId": "thread-c",
+            "status": {
+              "type": "active",
+              "activeFlags": []
+            }
+          },
+          "emittedAtMs": 1788843385762
+        },
+        {
+          "method": "turn/started",
+          "params": {
+            "threadId": "thread-c",
+            "turn": {
+              "id": "fixture-id-013",
+              "items": [],
+              "itemsView": "notLoaded",
+              "status": "inProgress",
+              "error": null,
+              "startedAt": 1788843385,
+              "completedAt": null,
+              "durationMs": null
+            }
+          },
+          "emittedAtMs": 1788843385762
+        },
+        {
+          "method": "item/started",
+          "params": {
+            "item": {
+              "type": "userMessage",
+              "id": "fixture-id-014",
+              "clientId": "probe-idle-queue",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "probe-idle-queue",
+                  "text_elements": []
+                }
+              ]
+            },
+            "threadId": "thread-c",
+            "turnId": "fixture-id-013",
+            "startedAtMs": 1788843385780
+          },
+          "emittedAtMs": 1788843385780
+        },
+        {
+          "method": "item/completed",
+          "params": {
+            "item": {
+              "type": "userMessage",
+              "id": "fixture-id-014",
+              "clientId": "probe-idle-queue",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "probe-idle-queue",
+                  "text_elements": []
+                }
+              ]
+            },
+            "threadId": "thread-c",
+            "turnId": "fixture-id-013",
+            "completedAtMs": 1788843385780
+          },
+          "emittedAtMs": 1788843385782
+        }
+      ]
+    },
+    {
+      "name": "earlier_scenario_unchanged",
+      "threadId": "thread-c",
+      "response": true
+    },
+    {
+      "name": "turns_pagination_after_input",
+      "threadId": "thread-a",
+      "response": {
+        "id": 9,
+        "result": {
+          "data": [
+            {
+              "id": "fixture-id-004",
+              "items": [
+                {
+                  "type": "userMessage",
+                  "id": "fixture-id-008",
+                  "clientId": "probe-active",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "probe-active-turn",
+                      "text_elements": []
+                    }
+                  ]
+                }
+              ],
+              "itemsView": "summary",
+              "status": "interrupted",
+              "error": null,
+              "startedAt": 1788843382,
+              "completedAt": 1788843382,
+              "durationMs": 114
+            }
+          ],
+          "nextCursor": null,
+          "backwardsCursor": "{\"requestedThreadId\":\"thread-a\",\"rolloutOrdinal\":7,\"includeAnchor\":true,\"scope\":{\"kind\":\"turns\"}}"
+        }
+      }
+    },
+    {
+      "name": "items_pagination_after_input",
+      "threadId": "thread-a",
+      "response": {
+        "id": 10,
+        "result": {
+          "data": [
+            {
+              "turnId": "fixture-id-004",
+              "item": {
+                "type": "userMessage",
+                "id": "fixture-id-008",
+                "clientId": "probe-active",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "probe-active-turn",
+                    "text_elements": []
+                  }
+                ]
+              }
+            }
+          ],
+          "nextCursor": null,
+          "backwardsCursor": "{\"requestedThreadId\":\"thread-a\",\"rolloutOrdinal\":10,\"includeAnchor\":true,\"scope\":{\"kind\":\"itemsByCreatedAtOrdinal\"}}"
+        }
+      }
+    },
+    {
+      "name": "canonical_marker_records",
+      "threadId": null,
+      "response": [
+        {
+          "threadId": "thread-a",
+          "transcript": "thread-a-rollout",
+          "record": {
+            "timestamp": "2026-09-08T04:56:21.963Z",
+            "ordinal": 5,
+            "type": "response_item",
+            "payload": {
+              "type": "message",
+              "id": "probe-context",
+              "role": "user",
+              "content": [
+                {
+                  "type": "input_text",
+                  "text": "probe-idle-context"
+                }
+              ],
+              "internal_chat_message_metadata_passthrough": {
+                "turn_id": "auto-compact-0",
+                "create_time": 1788843381.9632366,
+                "content_item_kinds": [
+                  "unknown"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "threadId": "thread-a",
+          "transcript": "thread-a-rollout",
+          "record": {
+            "timestamp": "2026-09-08T04:56:22.120Z",
+            "ordinal": 6,
+            "type": "response_item",
+            "payload": {
+              "type": "message",
+              "id": "probe-context",
+              "role": "user",
+              "content": [
+                {
+                  "type": "input_text",
+                  "text": "probe-idle-context"
+                }
+              ],
+              "internal_chat_message_metadata_passthrough": {
+                "turn_id": "auto-compact-1",
+                "create_time": 1788843382.1203601,
+                "content_item_kinds": [
+                  "unknown"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "threadId": "thread-a",
+          "transcript": "thread-a-rollout",
+          "record": {
+            "timestamp": "2026-09-08T04:56:22.344Z",
+            "ordinal": 9,
+            "type": "response_item",
+            "payload": {
+              "type": "message",
+              "id": "msg_fixture-id-015",
+              "role": "user",
+              "content": [
+                {
+                  "type": "input_text",
+                  "text": "probe-active-turn"
+                }
+              ],
+              "internal_chat_message_metadata_passthrough": {
+                "turn_id": "fixture-id-004",
+                "create_time": 1788843382.3440988,
+                "content_item_kinds": [
+                  "user.text"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "threadId": "thread-a",
+          "transcript": "thread-a-rollout",
+          "record": {
+            "timestamp": "2026-09-08T04:56:22.344Z",
+            "ordinal": 10,
+            "type": "event_msg",
+            "payload": {
+              "type": "item_completed",
+              "thread_id": "thread-a",
+              "turn_id": "fixture-id-004",
+              "item": {
+                "type": "UserMessage",
+                "id": "fixture-id-008",
+                "client_id": "probe-active",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "probe-active-turn",
+                    "text_elements": []
+                  }
+                ]
+              },
+              "started_at_ms": 1788843382344,
+              "completed_at_ms": 1788843382344
+            }
+          }
+        },
+        {
+          "threadId": "thread-b",
+          "transcript": "thread-b-rollout",
+          "record": {
+            "timestamp": "2026-09-08T04:56:23.554Z",
+            "ordinal": 5,
+            "type": "response_item",
+            "payload": {
+              "type": "message",
+              "id": "probe-context",
+              "role": "user",
+              "content": [
+                {
+                  "type": "input_text",
+                  "text": "probe-idle-context"
+                }
+              ],
+              "internal_chat_message_metadata_passthrough": {
+                "turn_id": "auto-compact-0",
+                "create_time": 1788843383.5540788,
+                "content_item_kinds": [
+                  "unknown"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "threadId": "thread-b",
+          "transcript": "thread-b-rollout",
+          "record": {
+            "timestamp": "2026-09-08T04:56:23.740Z",
+            "ordinal": 8,
+            "type": "response_item",
+            "payload": {
+              "type": "message",
+              "id": "msg_fixture-id-016",
+              "role": "user",
+              "content": [
+                {
+                  "type": "input_text",
+                  "text": "probe-cold-queue"
+                }
+              ],
+              "internal_chat_message_metadata_passthrough": {
+                "turn_id": "fixture-id-010",
+                "create_time": 1788843383.7399948,
+                "content_item_kinds": [
+                  "user.text"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "threadId": "thread-b",
+          "transcript": "thread-b-rollout",
+          "record": {
+            "timestamp": "2026-09-08T04:56:23.740Z",
+            "ordinal": 9,
+            "type": "event_msg",
+            "payload": {
+              "type": "item_completed",
+              "thread_id": "thread-b",
+              "turn_id": "fixture-id-010",
+              "item": {
+                "type": "UserMessage",
+                "id": "fixture-id-011",
+                "client_id": "probe-cold-queue",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "probe-cold-queue",
+                    "text_elements": []
+                  }
+                ]
+              },
+              "started_at_ms": 1788843383740,
+              "completed_at_ms": 1788843383740
+            }
+          }
+        },
+        {
+          "threadId": "thread-c",
+          "transcript": "thread-c-rollout",
+          "record": {
+            "timestamp": "2026-09-08T04:56:25.780Z",
+            "ordinal": 6,
+            "type": "response_item",
+            "payload": {
+              "type": "message",
+              "id": "msg_fixture-id-017",
+              "role": "user",
+              "content": [
+                {
+                  "type": "input_text",
+                  "text": "probe-idle-queue"
+                }
+              ],
+              "internal_chat_message_metadata_passthrough": {
+                "turn_id": "fixture-id-013",
+                "create_time": 1788843385.7802455,
+                "content_item_kinds": [
+                  "user.text"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "threadId": "thread-c",
+          "transcript": "thread-c-rollout",
+          "record": {
+            "timestamp": "2026-09-08T04:56:25.780Z",
+            "ordinal": 7,
+            "type": "event_msg",
+            "payload": {
+              "type": "item_completed",
+              "thread_id": "thread-c",
+              "turn_id": "fixture-id-013",
+              "item": {
+                "type": "UserMessage",
+                "id": "fixture-id-014",
+                "client_id": "probe-idle-queue",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "probe-idle-queue",
+                    "text_elements": []
+                  }
+                ]
+              },
+              "started_at_ms": 1788843385780,
+              "completed_at_ms": 1788843385780
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "threads": {
+    "injection": "thread-a",
+    "cold": "thread-b",
+    "idle": "thread-c"
+  },
+  "assertions": {
+    "injection_available_without_experimental": true,
+    "idle_injection_does_not_request_model": true,
+    "queue_requires_experimental": true,
+    "repeated_queue_key_is_not_deduplicated": true,
+    "active_queue_start_refused": true,
+    "interrupt_retains_queue": true,
+    "restart_retains_queue": true,
+    "matching_steer_returns_current_turn": true,
+    "start_while_active_returns_current_turn": true,
+    "cold_resume_dispatches_normal_queue": true,
+    "idle_add_dispatches_automatically": true,
+    "earlier_scenario_unchanged": true,
+    "original_thread_has_two_injections": true,
+    "second_thread_has_one_injection": true,
+    "idle_injection_reaches_next_request": true
+  }
+}
