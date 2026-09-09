@@ -171,7 +171,7 @@ const COORDINATOR_IDENTITY = `Your name is ${PERSONA_NAME}. You are the voice co
 /** The same spoken name, and no claim about the role behind it. The operator
     hears one voice either way; what differs is what that voice is allowed to
     say it is responsible for. */
-const MODALITY_IDENTITY = `Your name is ${PERSONA_NAME} when you speak aloud. Speaking is a way in and out of this conversation, not a new job.`;
+const MODALITY_IDENTITY = `Your name is ${PERSONA_NAME} when you speak aloud. Speaking is how you hear this conversation and how you answer in it.`;
 
 /** Injected as the call's first thread item for a session created to BE the
     voice front. Editable without a deploy — see {@link voicePersona}. */

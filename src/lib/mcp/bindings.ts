@@ -2152,12 +2152,12 @@ async function bridgeDirective(args: McpToolArgs, control: ViewerControlDependen
      which is the cause. This is the tool refusing to close the circle whatever it
      is told — by an operator override, by a thread still carrying the old item, or
      by a later prompt edit. The refusal SAYS WHAT TO DO INSTEAD, because an agent
-     that believes it must delegate and is merely blocked will keep retrying. */
-  /* Attribution reads process ancestry and can fault. When it does, this guard
-     stands down rather than refusing every relay: it is the SECOND layer, behind
-     the persona that no longer asks a seat to relay at all, and a defence in
-     depth that breaks the ordinary path when its input is unavailable is worse
-     than the loop it prevents. */
+     that believes it must delegate and is merely blocked will keep retrying.
+
+     Attribution reads process ancestry and can fault. When it does, this stands
+     down rather than refusing every relay: a defence in depth that breaks the
+     ordinary path when its own input is unavailable is worse than the loop it
+     prevents, and the persona is the layer that stops this being reached. */
   let callerConversationId: string | null = null;
   try {
     callerConversationId = attributionOf(dependencies).conversationId;
