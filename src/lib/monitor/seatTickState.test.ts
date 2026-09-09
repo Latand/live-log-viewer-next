@@ -323,3 +323,44 @@ test("falsy malformed legacy outstanding values keep migration blocked", () => {
     expect(readSeatTickState("viewer", file).accounting?.gap).toBe("legacy-outstanding-unreadable");
   }
 });
+
+/* A retired attempt (#1594) belongs to the seat that has been replaced, and the
+   only thing still asking its holder what became of it is this project's check.
+   A rotation that dropped it would leave the obligation addressed to nobody —
+   the same reason the outstanding one survives. */
+test("attempts retired to a superseded seat survive the rotation and read back whole", () => {
+  const retired = {
+    wake: { ...row.outstandingWake, clientMessageId: "seat-tick:viewer:6:first:interval:fp-0", seatEpoch: 6,
+      operationId: null, text: "the predecessor's wake", preparedAt: "2026-08-28T10:00:00.000Z",
+      dispatch: { token: "dispatch-token", state: "refused" as const } },
+    retiredAt: "2026-08-28T11:30:00.000Z",
+    supersededBy: { conversationId: CONVERSATION, seatEpoch: 7 },
+  };
+  const file = path.join(SANDBOX, "retired.json");
+  writeSeatTickState("viewer", { ...row, retiredWakes: [retired] }, file);
+  expect(readSeatTickState("viewer", file).retiredWakes).toEqual([retired]);
+  expect(seatTickStateForEpoch(readSeatTickState("viewer", file), 8).retiredWakes).toEqual([retired]);
+});
+
+/* Every row written before the slot existed carries no such field, and that is
+   exactly what those rows mean: nothing has been retired. An entry that cannot
+   name the seat that superseded it is dropped instead — that seat is the whole
+   warrant for the fence having been released, so an entry without it is not
+   evidence of anything. */
+test("a legacy row reads as nothing retired, and an entry with no proof is dropped", () => {
+  const file = path.join(SANDBOX, "retired-legacy.json");
+  const { retiredWakes: _omitted, ...legacy } = { ...row, retiredWakes: [] };
+  fs.writeFileSync(file, JSON.stringify({ version: 2, projects: { viewer: legacy } }));
+  expect(readSeatTickState("viewer", file).retiredWakes).toEqual([]);
+
+  const unproven = path.join(SANDBOX, "retired-unproven.json");
+  fs.writeFileSync(unproven, JSON.stringify({
+    version: 2,
+    projects: { viewer: { ...row, retiredWakes: [
+      { wake: row.outstandingWake, retiredAt: "2026-08-28T11:30:00.000Z" },
+      { wake: row.outstandingWake, retiredAt: "whenever", supersededBy: { conversationId: CONVERSATION, seatEpoch: 8 } },
+      { retiredAt: "2026-08-28T11:30:00.000Z", supersededBy: { conversationId: CONVERSATION, seatEpoch: 8 } },
+    ] } },
+  }));
+  expect(readSeatTickState("viewer", unproven).retiredWakes).toEqual([]);
+});

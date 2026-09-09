@@ -613,6 +613,44 @@ export interface SeatTickOutstandingWake {
   dispatch?: { token: string; state: "active" | "refused" | "returned" };
 }
 
+/**
+ * A prepared attempt the project's seat has outlived (#1594).
+ *
+ * The fence an outstanding attempt puts on the next wake exists so that two
+ * wakes are never in flight to ONE seat. Once the project's seat has been
+ * superseded — a different conversation, at a strictly higher epoch — that
+ * reason is spent: the kept attempt is addressed to a conversation that is no
+ * longer the seat, and two wakes to two different seats are not a duplicate.
+ * Before this existed, an attempt whose holder could never answer better than
+ * `uncertain` withheld every later wake for the project for as long as the row
+ * lived, which is a tick that has silently stopped.
+ *
+ * So the obligation is moved rather than ended. Everything that made it an
+ * obligation travels with it — its key, its payload, its landing plan, its
+ * dispatch record — and every check still asks its holder what became of it,
+ * still tries to take it back while the holder has it, and still carries the
+ * wait on the board. Two things it can no longer do: fence the successor's
+ * wake, and credit anything. A landing observed here landed on a seat the
+ * project has replaced, so no stamp moves, no cursor moves and no child is
+ * acknowledged on it — every obligation it named is still owed, and the
+ * successor's own wake is what carries it.
+ */
+export interface SeatTickRetiredWake {
+  /** The attempt exactly as the row held it, key and payload unchanged. */
+  wake: SeatTickOutstandingWake;
+  /** When the check that proved the supersession moved it here. */
+  retiredAt: string;
+  /** The seat whose existence is the proof. Recorded because "the fence was
+      released" is a claim, and this is the evidence behind it. */
+  supersededBy: { conversationId: string; seatEpoch: number };
+}
+
+/** Retired attempts one project's row may carry (#1594). Reached only by a
+    project that rotates its seat faster than its holders settle, and a row at
+    the bound refuses further retirement — keeping the fence, which is the
+    behaviour that stands today — rather than discarding an obligation. */
+export const SEAT_TICK_RETIRED_WAKE_LIMIT = 20;
+
 /** Project tick state; SQLite accounting owns persistence and legacy migration. */
 export interface SeatTickProjectState {
   accounting?: { filename: string; revision: number; gap: string | null };
@@ -664,6 +702,10 @@ export interface SeatTickProjectState {
       addressed to. Survives a rotation precisely so the successor's first check
       can revoke what is still waiting for the predecessor. */
   outstandingWake: SeatTickOutstandingWake | null;
+  /** Attempts a superseded seat left behind (#1594). They fence nothing and
+      credit nothing; they are still asked after, still taken back where that
+      is still possible, and still carried on the board. */
+  retiredWakes: SeatTickRetiredWake[];
   /** The pull-request source's unbroken run of failures (#1298), or null while
       it is answering. Cleared by an answer and by nothing else. */
   pullRequestGap: SeatTickSourceGap | null;
@@ -815,7 +857,9 @@ export interface SeatTickDecision {
     (`dropped`), or it ended the send without proving arrival either way
     (`uncertain`, #1465): the attempt is kept under its original key, nothing
     it carried is acknowledged, no wake replaces it, and the board carries the
-    wait. */
+    wait. `retired` is the sixth (#1594): the seat the attempt was addressed to
+    has been superseded, so the attempt stops fencing the successor's wake and
+    goes on being reconciled as an obligation of the seat that is gone. */
 export type SeatTickVerdictKind =
   | SeatTickVerdict["kind"]
   /** A check that threw outright, which the decision never gets to see. The
@@ -826,7 +870,8 @@ export type SeatTickVerdictKind =
   | "revoked"
   | "landed"
   | "dropped"
-  | "uncertain";
+  | "uncertain"
+  | "retired";
 
 /**
  * One audited check. Like {@link MonitorRunRecord} it carries no transcript
@@ -863,6 +908,7 @@ export function emptySeatTickState(): SeatTickProjectState {
     lastWakeFingerprint: null,
     eventsThrough: null,
     outstandingWake: null,
+    retiredWakes: [],
     pullRequestGap: null,
     childrenGap: null,
     harvestedChildren: [],

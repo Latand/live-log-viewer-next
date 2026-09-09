@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { RUNNING_PAGE, RUNNING_ROTATE, SeatTickAccounting } from "./seatTickAccounting";
-import { emptySeatTickState, type SeatTickChildInput } from "./types";
+import { emptySeatTickState, SEAT_TICK_RETIRED_WAKE_LIMIT, type SeatTickChildInput } from "./types";
 
 const CONVERSATION = ["conversation", "seat"].join("_");
 
@@ -307,5 +307,84 @@ test("cold FIFO visits remain reserved beside a full priority backlog", () => {
       }
     }
     expect(seen.size).toBe(20);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+/* Retirement (#1594) moves an attempt out of the fence and nowhere else. It is
+   still the same attempt — key, payload, landing plan, dispatch record — and it
+   is now the replaced seat's obligation rather than a hold on the successor's
+   wake. */
+test("an attempt retired to a superseded seat keeps everything except its fence", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "seat-accounting-retire-"));
+  try {
+    const accounting = new SeatTickAccounting(path.join(dir, "state.sqlite"), "project");
+    accounting.initialize(emptySeatTickState(), null);
+    const wake = { clientMessageId: "original", conversationId: CONVERSATION, seatEpoch: 140, operationId: null,
+      text: "frozen payload", preparedAt: "2026-09-08T05:14:24.000Z",
+      commit: { proposal: false, reasons: [], fingerprint: "fp-1", eventsThrough: 7, children: [] } };
+    expect(accounting.prepare(accounting.readState(), wake)).toBe(true);
+    const token = accounting.beginDispatch(accounting.readState().outstandingWake!)!;
+    accounting.returnedDispatch("original", token, true);
+    const held = accounting.readState().outstandingWake!;
+    expect(held.dispatch).toMatchObject({ state: "refused" });
+
+    const supersededBy = { conversationId: CONVERSATION, seatEpoch: 155 };
+    expect(accounting.retire({ ...held, clientMessageId: "another" }, "2026-09-09T15:47:00.000Z", supersededBy)).toBe(false);
+    expect(accounting.retire(held, "2026-09-09T15:47:00.000Z", supersededBy)).toBe(true);
+    const retired = accounting.readState();
+    expect(retired.outstandingWake).toBeNull();
+    expect(retired.retiredWakes).toEqual([{ wake: held, retiredAt: "2026-09-09T15:47:00.000Z", supersededBy }]);
+
+    /* The one thing it can never do again is enter transport: the admission
+       fence claims the OUTSTANDING attempt, which this is no longer, and
+       neither ending that could release one applies to it. */
+    expect(accounting.beginDispatch(held)).toBeNull();
+    expect(accounting.settleAbsent(held)).toBe(false);
+    expect(accounting.settle("original", retired, "unsent")).toBe(false);
+    expect(accounting.readState().retiredWakes).toHaveLength(1);
+
+    /* The successor prepares against an empty fence, and its attempt and the
+       retired one are accounted for separately. */
+    expect(accounting.prepare(accounting.readState(), { ...wake, clientMessageId: "successor", seatEpoch: 155 })).toBe(true);
+    expect(accounting.settleRetired("original")).toBe(true);
+    expect(accounting.settleRetired("original")).toBe(false);
+    expect(accounting.readState().retiredWakes).toEqual([]);
+    expect(accounting.readState().outstandingWake).toMatchObject({ clientMessageId: "successor" });
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+/* Two bounds on the move. A transport call that was still out when the seat was
+   superseded reports back to wherever its attempt now is, or the retired entry
+   would claim a call is in flight for as long as the row lives. And a row that
+   has reached its retention bound refuses to retire another — keeping the
+   fence, which is what the tick did before any of this, rather than discarding
+   an obligation to make room. */
+test("a transport return follows a retired attempt, and the retention bound refuses the next one", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "seat-accounting-retire-bound-"));
+  try {
+    const accounting = new SeatTickAccounting(path.join(dir, "state.sqlite"), "project");
+    accounting.initialize(emptySeatTickState(), null);
+    const supersededBy = { conversationId: CONVERSATION, seatEpoch: 999 };
+    const attempt = (n: number) => ({ clientMessageId: `attempt-${n}`, conversationId: CONVERSATION, seatEpoch: n, operationId: null,
+      text: "frozen payload", preparedAt: "2026-09-08T05:14:24.000Z",
+      commit: { proposal: false, reasons: [], fingerprint: `fp-${n}`, eventsThrough: n, children: [] } });
+
+    expect(accounting.prepare(accounting.readState(), attempt(0))).toBe(true);
+    const token = accounting.beginDispatch(accounting.readState().outstandingWake!)!;
+    expect(accounting.retire(accounting.readState().outstandingWake!, "2026-09-09T15:47:00.000Z", supersededBy)).toBe(true);
+    accounting.returnedDispatch("attempt-0", token, true);
+    expect(accounting.readState().retiredWakes[0]!.wake.dispatch).toEqual({ token, state: "refused" });
+
+    for (let n = 1; n < SEAT_TICK_RETIRED_WAKE_LIMIT; n++) {
+      expect(accounting.prepare(accounting.readState(), attempt(n))).toBe(true);
+      expect(accounting.retire(accounting.readState().outstandingWake!, "2026-09-09T15:47:00.000Z", supersededBy)).toBe(true);
+    }
+    expect(accounting.readState().retiredWakes).toHaveLength(SEAT_TICK_RETIRED_WAKE_LIMIT);
+
+    const overflow = attempt(SEAT_TICK_RETIRED_WAKE_LIMIT);
+    expect(accounting.prepare(accounting.readState(), overflow)).toBe(true);
+    expect(accounting.retire(accounting.readState().outstandingWake!, "2026-09-09T15:47:00.000Z", supersededBy)).toBe(false);
+    expect(accounting.readState().outstandingWake).toMatchObject({ clientMessageId: overflow.clientMessageId });
+    expect(accounting.readState().retiredWakes).toHaveLength(SEAT_TICK_RETIRED_WAKE_LIMIT);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });

@@ -3,7 +3,7 @@ import fs from "node:fs";
 import { initializeStateCollections, SqliteStateCollection } from "@/lib/state/sqliteStateStore";
 import { seatTickWakeCommit } from "./seatTick";
 import type { SeatChildrenAnchor } from "@/lib/agent/registry";
-import { emptySeatTickState, type SeatTickChildInput, type SeatTickProjectState, type SeatTickOutstandingWake } from "./types";
+import { emptySeatTickState, SEAT_TICK_RETIRED_WAKE_LIMIT, type SeatTickChildInput, type SeatTickProjectState, type SeatTickOutstandingWake, type SeatTickRetiredWake } from "./types";
 import { emptyLedgerCursor, type LedgerCursor, type LedgerOutcome } from "./seatTickChildLedger";
 
 type Base = { key: string; schemaVersion: 1; project: string };
@@ -88,16 +88,33 @@ function decodeAccountingRow(raw: unknown): AccountingRow | null {
       if (!Array.isArray(state.harvestedChildren) || state.harvestedChildren.length !== 0
         || !Array.isArray(state.lastWakeReasons) || !Array.isArray(state.stalledSeen)
         || !state.wakesWithoutChange || typeof state.wakesWithoutChange !== "object") return null;
+      const validWake = (wake: SeatTickOutstandingWake | null | undefined): boolean => {
+        if (!wake || !string(wake.clientMessageId) || !string(wake.conversationId)
+          || !integer(wake.seatEpoch) || !nullableString(wake.operationId) || !wake.commit
+          || typeof wake.commit.proposal !== "boolean" || !string(wake.commit.fingerprint)
+          || !integer(wake.commit.eventsThrough) || !Array.isArray(wake.commit.reasons)
+          || !Array.isArray(wake.commit.children) || !wake.commit.children.every(string)
+          || (wake.preparedAt !== undefined && !string(wake.preparedAt))) return false;
+        return wake.dispatch === undefined || (!!wake.dispatch && string(wake.dispatch.token)
+          && ["active", "refused", "returned"].includes(wake.dispatch.state));
+      };
       const wake = state.outstandingWake;
-      if (wake !== null && (!wake || !string(wake.clientMessageId) || !string(wake.conversationId)
-        || !integer(wake.seatEpoch) || !nullableString(wake.operationId) || !wake.commit
-        || typeof wake.commit.proposal !== "boolean" || !string(wake.commit.fingerprint)
-        || !integer(wake.commit.eventsThrough) || !Array.isArray(wake.commit.reasons)
-        || !Array.isArray(wake.commit.children) || !wake.commit.children.every(string)
-        || (wake.preparedAt !== undefined && !string(wake.preparedAt)))) return null;
-      if (wake?.dispatch !== undefined && (!wake.dispatch || !string(wake.dispatch.token)
-        || !["active", "refused", "returned"].includes(wake.dispatch.state))) return null;
+      if (wake !== null && !validWake(wake)) return null;
       if (row.ownerScan !== undefined && (!row.ownerScan || !string(row.ownerScan.identity) || typeof row.ownerScan.gap !== "boolean")) return null;
+      /* Retired attempts (#1594) are absent on every row written before the
+         slot existed, and absent is exactly what those rows mean: nothing has
+         been retired. Reading them back as an empty list is the migration. */
+      const retired = state.retiredWakes;
+      if (retired === undefined) return { ...row, state: { ...state, retiredWakes: [] } };
+      /* The retention bound is the WRITER's (see `retire`), and is deliberately
+         not re-asserted here: a row that a future, smaller bound would exceed
+         is still a row full of obligations, and refusing to read it would take
+         the whole project's tick down rather than let it work them off. */
+      if (!Array.isArray(retired)) return null;
+      for (const entry of retired) {
+        if (!entry || typeof entry !== "object" || !validWake(entry.wake) || !string(entry.retiredAt)
+          || !entry.supersededBy || !string(entry.supersededBy.conversationId) || !integer(entry.supersededBy.seatEpoch)) return null;
+      }
       return row;
     }
     case "owner": {
@@ -578,7 +595,20 @@ export class SeatTickAccounting {
       const wake = row.state.outstandingWake;
       if (wake?.clientMessageId === expectedKey && wake.dispatch?.token === token && wake.dispatch.state === "active") {
         row.state.outstandingWake = { ...wake, dispatch: { token, state: refused ? "refused" : "returned" } };
+        return;
       }
+      /* The seat may have been superseded while this call was still out, which
+         moves the attempt to the retired slot (#1594). What the call returned
+         is a fact about the attempt, so it is recorded wherever the attempt now
+         is; dropping it would leave a retired entry claiming a transport call
+         is still in flight for as long as the row lives. */
+      const retired = row.state.retiredWakes ?? [];
+      const index = retired.findIndex((entry) => entry.wake.clientMessageId === expectedKey
+        && entry.wake.dispatch?.token === token && entry.wake.dispatch.state === "active");
+      if (index < 0) return;
+      const next = [...retired];
+      next[index] = { ...next[index]!, wake: { ...next[index]!.wake, dispatch: { token, state: refused ? "refused" : "returned" } } };
+      row.state = { ...row.state, retiredWakes: next };
     });
   }
   cancelUndispatched(expected: SeatTickOutstandingWake): boolean {
@@ -597,6 +627,41 @@ export class SeatTickAccounting {
       if (!wake || wake.clientMessageId !== expected.clientMessageId || wake.operationId || !wake.text
         || wake.dispatch?.state !== "refused" || wake.dispatch.token !== expected.dispatch?.token) return false;
       row.state.outstandingWake = null;
+      return true;
+    });
+  }
+  /**
+   * Move the outstanding attempt to the retired slot (#1594).
+   *
+   * The attempt is taken from the ROW rather than from `expected`, so a
+   * dispatch state another transaction recorded between the read and here
+   * travels with it. Nothing else about it changes: same key, same payload,
+   * same landing plan. What changes is that it no longer fences the next wake.
+   *
+   * Refused when the row moved on to another attempt, and refused at the bound
+   * — a project that has reached it keeps the fence, which is what the tick did
+   * before this existed, rather than discarding an obligation to make room.
+   */
+  retire(expected: SeatTickOutstandingWake, retiredAt: string, supersededBy: SeatTickRetiredWake["supersededBy"]): boolean {
+    return this.mutate((tx, row) => {
+      const wake = row.state.outstandingWake;
+      if (!wake || wake.clientMessageId !== expected.clientMessageId) return false;
+      const retired = row.state.retiredWakes ?? [];
+      if (retired.length >= SEAT_TICK_RETIRED_WAKE_LIMIT) return false;
+      row.state = { ...row.state, outstandingWake: null, retiredWakes: [...retired, { wake, retiredAt, supersededBy }] };
+      return true;
+    });
+  }
+  /** End a retired attempt, once its holder has accounted for it (#1594). It
+      touches nothing else on the row: a retired attempt credits no stamp, no
+      cursor and no child whatever became of it, because whatever became of it
+      happened to a seat this project has replaced. */
+  settleRetired(clientMessageId: string): boolean {
+    return this.mutate((tx, row) => {
+      const retired = row.state.retiredWakes ?? [];
+      const next = retired.filter((entry) => entry.wake.clientMessageId !== clientMessageId);
+      if (next.length === retired.length) return false;
+      row.state = { ...row.state, retiredWakes: next };
       return true;
     });
   }

@@ -6,10 +6,12 @@ import { statePath } from "@/lib/configDir";
 
 import {
   emptySeatTickState,
+  SEAT_TICK_RETIRED_WAKE_LIMIT,
   SEAT_TICK_WAKE_REASON_KINDS,
   type SeatTickOutstandingWake,
   type SeatTickProjectState,
   type SeatTickPullRequestGap,
+  type SeatTickRetiredWake,
   type SeatTickSourceGap,
   type SeatTickWakeCommit,
   type SeatTickWakeReasonKind,
@@ -106,6 +108,32 @@ function normalizeOutstandingWake(value: unknown): SeatTickOutstandingWake | nul
   };
 }
 
+/**
+ * Attempts a superseded seat left behind (#1594).
+ *
+ * Absent on every legacy row, and absent reads as none — a row written before
+ * the slot existed had nowhere to put one. An entry missing its proof is
+ * dropped rather than half-trusted: the superseding seat is the whole warrant
+ * for the fence having been released, and an entry that cannot say which seat
+ * that was is not evidence of anything. Dropping it costs nothing the journal
+ * has not already recorded, and the bound is applied here so a row that grew
+ * past it elsewhere is read back inside it.
+ */
+function normalizeRetiredWakes(value: unknown): SeatTickRetiredWake[] {
+  return (Array.isArray(value) ? value : []).flatMap((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+    const raw = entry as Record<string, unknown>;
+    const wake = normalizeOutstandingWake(raw.wake);
+    const retiredAt = isoOrNull(raw.retiredAt);
+    const by = raw.supersededBy as Record<string, unknown> | undefined;
+    if (!wake || !retiredAt || !by || typeof by !== "object") return [];
+    const conversationId = typeof by.conversationId === "string" ? by.conversationId : "";
+    const seatEpoch = by.seatEpoch;
+    if (!conversationId || typeof seatEpoch !== "number" || !Number.isSafeInteger(seatEpoch)) return [];
+    return [{ wake, retiredAt, supersededBy: { conversationId, seatEpoch } }];
+  }).slice(0, SEAT_TICK_RETIRED_WAKE_LIMIT);
+}
+
 const PULL_REQUEST_GAPS: SeatTickPullRequestGap[] = ["timed-out", "command-failed", "malformed-output", "lanes-unreadable"];
 
 /**
@@ -156,6 +184,7 @@ function normalizeRow(value: unknown, legacy: boolean): SeatTickProjectState {
     lastWakeFingerprint: typeof raw.lastWakeFingerprint === "string" ? raw.lastWakeFingerprint.slice(0, 200) : null,
     eventsThrough: eventsThrough(raw, legacy),
     outstandingWake: normalizeOutstandingWake(raw.outstandingWake),
+    retiredWakes: normalizeRetiredWakes(raw.retiredWakes),
     pullRequestGap: normalizeSourceGap(raw.pullRequestGap),
     /* No legacy row ever carried a children run: the source and its row are
        both #1465, and the SQLite store is the only place they have lived. */
@@ -203,7 +232,9 @@ function readFile(filePath: string): SeatTickStateFile {
  * - The outstanding wake, which is a payload the runtime is still holding for
  *   the PREDECESSOR. It survives so the successor's first check is what takes
  *   it back; dropping it here would leave it addressed to a seat nothing is
- *   watching any more.
+ *   watching any more. Its retired siblings (#1594) survive for exactly that
+ *   reason and no other: they no longer fence anything, and the only thing
+ *   still asking their holders what became of them is this project's check.
  * - The run of failures of an evidence source (#1298), which is a fact about
  *   `gh` and the machine it runs on. A rotation does not fix a missing
  *   credential, so clearing it here would re-report the same outage to the
@@ -224,6 +255,7 @@ export function seatTickStateForEpoch(row: SeatTickProjectState, seatEpoch: numb
     lastWakeAt: row.lastWakeAt,
     lastProposalAt: row.lastProposalAt,
     outstandingWake: row.outstandingWake,
+    retiredWakes: row.retiredWakes ?? [],
     pullRequestGap: row.pullRequestGap,
     childrenGap: row.childrenGap,
     harvestedChildren: row.harvestedChildren,
