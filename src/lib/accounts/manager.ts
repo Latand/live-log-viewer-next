@@ -114,10 +114,15 @@ export async function resolveHealthySpawnAccount(
   /* The automatic answer is also the FALLBACK the branches below reach for when
      a named account turns out not to exist. On a record nobody could read there
      is no such answer: the pool was invisible, so falling back would be the
-     machine picking with the fence unread. */
-  const active = automatic.kind === "available" && !recordUnreadable
-    ? automatic.accountId ?? undefined
-    : undefined;
+     machine picking with the fence unread.
+
+     `hasAutomatic` is separate from `active` because `available` with a NULL
+     account is a real answer — an unbound project with nothing routed, where
+     the fallback is the engine's own default and `contextForSpawn(undefined)`
+     is how this seam has always resolved it. Reading a missing id as a missing
+     ANSWER would turn that into a throw. */
+  const hasAutomatic = automatic.kind === "available" && !recordUnreadable;
+  const active = hasAutomatic ? automatic.accountId ?? undefined : undefined;
   const routed = named ?? active;
   const missingRequested = classifySpawnAccountAdmission({
     enabled: false,
@@ -135,7 +140,7 @@ export async function resolveHealthySpawnAccount(
          account to fall back to either — so there is nothing left to launch on
          that this project's binding permits, and the original failure stands
          rather than being answered with an account outside the pool. */
-      if (active === undefined) throw error;
+      if (!hasAutomatic) throw error;
       return { ...contextForSpawn(engine, active), requestedAdmission: missingRequested };
     }
   }

@@ -358,6 +358,24 @@ test("a damaged binding record refuses the AUTOMATIC pick and stands out of an e
   expect((await resolveHealthySpawnAccount("codex", spare, ATLAS)).accountId).toBe(spare);
 });
 
+test("an unbound project with nothing routed keeps the engine-default fallback for a named account that is gone", async () => {
+  /* `available` with a NULL account id is a real answer, not a missing one: no
+     pool, no routing, and the fallback IS the engine's own default. Reading the
+     absent id as an absent ANSWER turns this into a throw — which is what the
+     record-unreadable guard beside it must not reach past. */
+  /* Its OWN registry file: the shared one carries routing written by the tests
+     above, and routing is exactly what must be absent here. */
+  const registry = new AgentRegistry(path.join(SANDBOX, "unrouted-registry.json"), undefined, undefined, { sqliteMode: "off" });
+  setAgentRegistryForTests(registry);
+  expect(registry.engineRouting("codex").activeAccountId).toBeNull();
+  fs.rmSync(RECORD, { force: true });
+
+  const resolved = await resolveHealthySpawnAccount("codex", "codex-account-that-was-deleted", ATLAS);
+  expect(listCodexAccounts().some((account) => account.id === resolved.accountId)).toBe(true);
+  /* And it says so: the account the request named was not the one it got. */
+  expect(resolved.requestedAdmission).toBeDefined();
+});
+
 test("a damaged record leaves a named account that does NOT exist with nowhere to fall back to", async () => {
   /* The fallback below the named account is the AUTOMATIC pick, and on an
      unreadable record there isn't one. Falling back here would be the machine
