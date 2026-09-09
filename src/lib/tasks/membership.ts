@@ -41,6 +41,10 @@ export interface MembershipInput {
   identity: MembershipIdentity;
   /** Explicit targets from a task-local launch: all must exist, none is created. */
   explicitTaskIds?: readonly string[];
+  /** Participants whose recorded membership this launch joins (a reviewer joins
+      the work it reviews). When none holds a task, the fallback placeholder
+      binds them beside the launch itself. */
+  inherit?: readonly MembershipIdentity[];
 }
 
 export type MembershipResult =
@@ -53,11 +57,47 @@ function normalizeTitle(title: string | null | undefined): string {
   return first.length > PLACEHOLDER_TITLE_LIMIT ? `${first.slice(0, PLACEHOLDER_TITLE_LIMIT - 1).trimEnd()}…` : first;
 }
 
-function sameIdentity(assignment: TaskAssignment, identity: MembershipIdentity): boolean {
+/** Whether an assignment records this identity. The canonical conversation id
+    decides first: a resume successor carries a new launch id for the same
+    conversation and must find the membership that conversation already holds.
+    Launch and attempt keys decide for rows that predate the conversation id;
+    the transcript path is the last resort for legacy rows. */
+export function assignmentHoldsIdentity(assignment: TaskAssignment, identity: MembershipIdentity): boolean {
+  if (identity.conversationId && assignment.conversationId) return assignment.conversationId === identity.conversationId;
   if (identity.launchId && assignment.launchId) return assignment.launchId === identity.launchId;
   if (identity.clientAttemptId && assignment.clientAttemptId) return assignment.clientAttemptId === identity.clientAttemptId;
-  if (identity.conversationId && assignment.conversationId) return assignment.conversationId === identity.conversationId;
   return Boolean(identity.path) && assignment.path === identity.path;
+}
+
+const sameIdentity = assignmentHoldsIdentity;
+
+/** The identity an existing assignment row stands for, or null for a row that
+    names no launch, conversation or transcript (a pane-only spawn marker). */
+export function assignmentIdentity(assignment: TaskAssignment): MembershipIdentity | null {
+  const identity: MembershipIdentity = {
+    launchId: assignment.launchId ?? null,
+    clientAttemptId: assignment.clientAttemptId ?? null,
+    conversationId: assignment.conversationId ?? null,
+    path: assignment.path ?? null,
+    engine: assignment.engine ?? null,
+    accountId: assignment.accountId ?? null,
+  };
+  return hasIdentity(identity) ? identity : null;
+}
+
+/** The admission origin a replacement placeholder for this row carries: the
+    launch's durable key when the row came from a Viewer launch, so a replay of
+    that launch converges on the replacement; otherwise the conversation. */
+export function assignmentAdmissionOrigin(assignment: TaskAssignment): Pick<TaskOrigin, "kind" | "key"> | null {
+  const launchKey = assignment.clientAttemptId ?? assignment.launchId;
+  if (launchKey) return { kind: "launch", key: launchKey };
+  const conversationKey = assignment.conversationId ?? assignment.path;
+  return conversationKey ? { kind: "conversation", key: conversationKey } : null;
+}
+
+/** Whether any task still records a live (non-failed) assignment for the identity. */
+export function identityHeldBy(tasks: readonly BoardTask[], identity: MembershipIdentity): boolean {
+  return tasks.some((task) => task.assignments.some((assignment) => assignment.state !== "failed" && sameIdentity(assignment, identity)));
 }
 
 /** Upserts one assignment that carries the identity. An existing assignment
@@ -112,7 +152,9 @@ function hasIdentity(identity: MembershipIdentity): boolean {
  * Resolve or create the task(s) a conversation/launch belongs to and record the
  * assignment, purely over a task snapshot. Resolution order: explicit targets;
  * the task whose origin key matches; a task already holding a canonical
- * assignment for the identity; otherwise one new placeholder. The placeholder
+ * assignment for the identity (the conversation id first, so a resume
+ * successor keeps its conversation's task); a task held by a participant the
+ * launch inherits from; otherwise one new placeholder. The placeholder
  * is exempt from the user-facing per-project task limit: membership is
  * mandatory, and refusing it would leave an agent outside every task.
  */
@@ -158,12 +200,25 @@ export function ensureTaskMembership(existing: readonly BoardTask[], input: Memb
     return { ok: true, tasks: changed ? tasks : existing.slice(), taskIds: [tasks[byOrigin]!.id], created: [], changed };
   }
 
+  /* Membership follows the conversation, whatever project the launch directory
+     derives: a resume from another checkout keeps its conversation's task. */
   const held = tasks
     .map((task, index) => ({ task, index }))
-    .filter(({ task }) => task.project === project && task.assignments.some((assignment) => assignment.state !== "failed" && sameIdentity(assignment, input.identity)));
+    .filter(({ task }) => task.assignments.some((assignment) => assignment.state !== "failed" && sameIdentity(assignment, input.identity)));
   if (held.length) {
     for (const { index } of held) commit(index, upsertLinked(tasks[index]!, input.identity, now));
     return { ok: true, tasks: changed ? tasks : existing.slice(), taskIds: held.map(({ task }) => task.id), created: [], changed };
+  }
+
+  /* A participant this launch joins (the implementer a reviewer reviews)
+     already holds a task: the launch joins that membership. */
+  const inherit = (input.inherit ?? []).filter(hasIdentity);
+  const inherited = tasks
+    .map((task, index) => ({ task, index }))
+    .filter(({ task }) => inherit.some((identity) => task.assignments.some((assignment) => assignment.state !== "failed" && sameIdentity(assignment, identity))));
+  if (inherited.length) {
+    for (const { index } of inherited) commit(index, upsertLinked(tasks[index]!, input.identity, now));
+    return { ok: true, tasks: changed ? tasks : existing.slice(), taskIds: inherited.map(({ task }) => task.id), created: [], changed };
   }
 
   const id = deps.id?.() ?? crypto.randomUUID();
@@ -181,8 +236,12 @@ export function ensureTaskMembership(existing: readonly BoardTask[], input: Memb
     createdAt: now,
     updatedAt: now,
   };
-  const bound = upsertLinked(placeholder, input.identity, now);
-  tasks = [...tasks, bound.task];
+  /* Every recorded participant is bound in the same transaction, so the
+     fallback names the whole exchange (implementer and reviewer), never the
+     reviewer alone. */
+  let bound = upsertLinked(placeholder, input.identity, now).task;
+  for (const identity of inherit) bound = upsertLinked(bound, identity, now).task;
+  tasks = [...tasks, bound];
   return { ok: true, tasks, taskIds: [id], created: [id], changed: true };
 }
 

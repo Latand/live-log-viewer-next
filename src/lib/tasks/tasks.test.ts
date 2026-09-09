@@ -6,6 +6,7 @@ import { describe, expect, test } from "bun:test";
 
 import { applyAssignmentPatches, assignmentRefFromBody, createTask, deleteTask, mergeAssignments, patchTask, pinnedAccountId, removeAssignment, TASKS_PER_PROJECT_LIMIT } from "./commands";
 import { firstLineTitle } from "./helpers";
+import { ensureTaskMembership } from "./membership";
 import { reconcileTasks } from "./reconcile";
 import { assembleSendResults } from "./send";
 import { isTask, loadTasks, mutateTasks, saveTasks } from "./store";
@@ -529,4 +530,78 @@ test("placement guards leave unrelated content callers compatible and validate a
     expect(patchTask([original], original.id, { pos })).toMatchObject({ ok: false, code: "TASK_INVALID_FIELD" });
   }
   expect(original).toEqual(task());
+});
+
+describe("last membership on unlink and delete (#1586)", () => {
+  const deps = { now: () => "2026-09-09T12:00:00.000Z", id: () => "replacement-1" };
+  const launched = (): BoardTask => task({
+    id: "titled",
+    text: "Operator titled task",
+    assignments: [
+      { launchId: "launch-1", clientAttemptId: "attempt-1", path: "/a.jsonl", conversationId: "conversation-a", panePid: null, state: "delivered", error: null, at: "old", engine: "claude" },
+      { path: "/b.jsonl", conversationId: "conversation-b", panePid: null, state: "handoff", error: null, at: "old" },
+    ],
+  });
+
+  test("unlinking a conversation's last membership binds a replacement placeholder under the launch's admission key in the same snapshot", () => {
+    const result = removeAssignment([launched()], "titled", { conversationId: "conversation-a" }, "now", deps);
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.error);
+    expect(result.task.assignments.map((item) => item.conversationId)).toEqual(["conversation-b"]);
+    expect(result.tasks.length).toBe(2);
+    const replacement = result.tasks.find((item) => item.id === "replacement-1")!;
+    expect(replacement).toMatchObject({ project: "proj", text: "Untitled task", origin: { kind: "launch", key: "attempt-1", refinement: "pending" } });
+    expect(replacement.assignments).toEqual([expect.objectContaining({ launchId: "launch-1", clientAttemptId: "attempt-1", conversationId: "conversation-a", path: "/a.jsonl", state: "linked", engine: "claude" })]);
+    /* A replay of that launch's admission converges on the replacement. */
+    const replay = ensureTaskMembership(result.tasks, { project: "proj", origin: { kind: "launch", key: "attempt-1" }, identity: { clientAttemptId: "attempt-1", launchId: "launch-1", conversationId: "conversation-a" } }, deps);
+    expect(replay.ok && replay.taskIds).toEqual(["replacement-1"]);
+    expect(replay.ok && replay.created).toEqual([]);
+    /* A handoff-only row is keyed by its conversation. */
+    const handoff = removeAssignment(result.tasks, "titled", "/b.jsonl", "now", { ...deps, id: () => "replacement-2" });
+    if (!handoff.ok) throw new Error(handoff.error);
+    expect(handoff.tasks.find((item) => item.id === "replacement-2")!.origin).toEqual({ kind: "conversation", key: "conversation-b", refinement: "pending" });
+  });
+
+  test("a conversation still linked elsewhere, or a failed row, needs no replacement", () => {
+    const other = task({ id: "other", assignments: [{ path: "/elsewhere.jsonl", conversationId: "conversation-a", panePid: null, state: "linked", error: null, at: "old" }] });
+    const result = removeAssignment([launched(), other], "titled", { conversationId: "conversation-a" }, "now", deps);
+    if (!result.ok) throw new Error(result.error);
+    expect(result.tasks.map((item) => item.id)).toEqual(["titled", "other"]);
+    const failed = task({ id: "failed-only", assignments: [{ launchId: "launch-f", path: null, conversationId: null, panePid: null, state: "failed", error: "died", at: "old" }] });
+    const removedFailed = removeAssignment([failed], "failed-only", { launchId: "launch-f" }, "now", deps);
+    if (!removedFailed.ok) throw new Error(removedFailed.error);
+    expect(removedFailed.tasks.length).toBe(1);
+  });
+
+  test("unlinking a conversation from the placeholder that is its own admission is refused, and nothing changes", () => {
+    const placeholder = task({
+      id: "own",
+      text: "Untitled task",
+      origin: { kind: "launch", key: "attempt-1", refinement: "pending" },
+      assignments: [{ launchId: "launch-1", clientAttemptId: "attempt-1", path: null, conversationId: "conversation-a", panePid: null, state: "linked", error: null, at: "old" }],
+    });
+    const result = removeAssignment([placeholder], "own", { launchId: "launch-1" }, "now", deps);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.status).toBe(409);
+  });
+
+  test("deleting a populated task binds every conversation it alone held to a replacement in the same snapshot", () => {
+    let serial = 0;
+    const ids = { ...deps, id: () => `replacement-${(serial += 1)}` };
+    const other = task({ id: "other", assignments: [{ path: "/b.jsonl", conversationId: "conversation-b", panePid: null, state: "linked", error: null, at: "old" }] });
+    const result = deleteTask([launched(), other], "titled", ids);
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.error);
+    expect(result.replacements).toEqual(["replacement-1"]);
+    expect(result.tasks.map((item) => item.id)).toEqual(["other", "replacement-1"]);
+    expect(result.tasks[1]!).toMatchObject({ origin: { kind: "launch", key: "attempt-1", refinement: "pending" } });
+    expect(result.tasks[1]!.assignments.map((item) => item.conversationId)).toEqual(["conversation-a"]);
+    /* Deleting the placeholder itself yields one under the same key, so the
+       launch's replay still converges. */
+    const again = deleteTask(result.tasks, "replacement-1", ids);
+    if (!again.ok) throw new Error(again.error);
+    expect(again.replacements).toEqual(["replacement-2"]);
+    expect(again.tasks.find((item) => item.id === "replacement-2")!.origin).toEqual({ kind: "launch", key: "attempt-1", refinement: "pending" });
+    expect(deleteTask([], "missing")).toMatchObject({ ok: false, status: 404 });
+  });
 });

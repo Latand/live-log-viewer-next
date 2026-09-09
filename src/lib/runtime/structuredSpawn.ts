@@ -25,6 +25,7 @@ import { captureProcessIdentity } from "@/lib/processIdentity";
 import { signalProcessGroup } from "@/lib/processGroup";
 import { hasUserAuthoredMessage } from "@/lib/session/reader";
 import { buildImagePayload, deleteInboxImages, spawnAgentWithPrompt } from "@/lib/tmux";
+import { admitRecoveredLaunch } from "@/lib/tasks/launchMembership";
 import { hardenedRedact } from "@/lib/view/compactText";
 
 import { ClaudeStreamBrokerHost } from "./claudeStreamBrokerHost";
@@ -716,6 +717,17 @@ async function actuateQueuedPinnedSpawn(
   const claimedQueue = queuedPinnedSpawnForReceipt(admissionClaim.receipt);
   if (!claimedQueue) {
     return failQueuedPinnedSpawn(registry, admissionClaim.receipt, "queued pinned spawn lost its durable admission payload");
+  }
+  /* This is the receipt's first execution: the queue held it before any
+     process existed. Its task membership (#1586) is a prerequisite of that
+     execution the same way it is at reservation — a receipt queued before the
+     rule, or whose task was deleted while it waited, is bound now, and a store
+     that cannot record the membership fails the launch instead of starting an
+     agent outside every task. */
+  try {
+    admitRecoveredLaunch(admissionClaim.receipt);
+  } catch (error) {
+    return failQueuedPinnedSpawn(registry, admissionClaim.receipt, structuredSpawnFailureReason(error));
   }
   let account: AccountContext;
   let admission: SpawnAccountAdmission;

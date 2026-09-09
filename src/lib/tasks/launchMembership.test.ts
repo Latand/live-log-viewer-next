@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 
 import type { MembershipInput, MembershipResult } from "./membership";
-import { admitReservedLaunch, LaunchMembershipError, launchMembershipInput, type LaunchMembershipPorts } from "./launchMembership";
+import { admitRecoveredLaunch, admitReservedLaunch, LaunchMembershipError, launchMembershipInput, type LaunchMembershipPorts } from "./launchMembership";
 
 /**
  * The shared launch boundary: every reserved receipt commits its membership
@@ -63,4 +63,45 @@ test("a failed commit retires the receipt and aborts with the refusal's status; 
   );
   expect(result.ok && result.taskIds).toEqual(["fallback"]);
   expect(commits.map((input) => input.origin)).toEqual([{ kind: "launch", key: "launch-1" }, { kind: "pipeline", key: "p9" }]);
+});
+
+test("explicit task targets ride on the reservation: the launch joins them in their own project and never falls back", () => {
+  const dedicated = launchMembershipInput({ engine: "claude", cwd: "/scratch-checkout", clientAttemptId: "task_abc", taskIds: ["task-7"] }, receipt, noPipelines, projectFor);
+  expect(dedicated).toEqual({ project: "", origin: { kind: "launch", key: "task_abc" }, title: null, identity: { launchId: "launch-1", conversationId: "conversation_one", clientAttemptId: "task_abc", engine: "claude" }, explicitTaskIds: ["task-7"] });
+  const commits: MembershipInput[] = [];
+  let thrown: unknown;
+  try {
+    admitReservedLaunch({ engine: "claude", cwd: "/repo", clientAttemptId: "task_abc", taskIds: ["gone"] }, receipt, () => undefined, ports((input) => {
+      commits.push(input);
+      return { ok: false, error: "task gone is not available", status: 404 };
+    }));
+  } catch (error) {
+    thrown = error;
+  }
+  expect((thrown as LaunchMembershipError).status).toBe(404);
+  expect(commits.length).toBe(1);
+});
+
+test("a reviewer inherits the reviewed conversation's task: flow rounds keep the flow fallback origin, role launches keep the launch key", () => {
+  const flow = launchMembershipInput({ engine: "codex", cwd: "/repo", clientAttemptId: "flow_f1_x", origin: { kind: "container", container: "flow", containerId: "f1" }, reviewsConversationId: "conversation_impl", parentArtifactPath: "/sessions/impl.jsonl" }, receipt, noPipelines, projectFor);
+  expect(flow.origin).toEqual({ kind: "flow", key: "f1" });
+  expect(flow.inherit).toEqual([{ conversationId: "conversation_impl", path: "/sessions/impl.jsonl" }]);
+  const role = launchMembershipInput({ engine: "claude", cwd: "/repo", clientAttemptId: "a1", reviewsConversationId: "conversation_impl" }, receipt, noPipelines, projectFor);
+  expect(role.origin).toEqual({ kind: "launch", key: "a1" });
+  expect(role.inherit).toEqual([{ conversationId: "conversation_impl", path: null }]);
+  expect(launchMembershipInput({ engine: "claude", cwd: "/repo", clientAttemptId: "a2" }, receipt, noPipelines, projectFor).inherit).toBeUndefined();
+});
+
+test("a recovered receipt re-establishes membership from its durable fields before its first execution", () => {
+  const commits: MembershipInput[] = [];
+  const result = admitRecoveredLaunch(
+    { launchId: "launch-q", conversationId: "conversation_q", engine: "claude", cwd: "/repo", clientAttemptId: "attempt-q", explicitProject: "chosen", launchProfile: { title: "Queued until later" }, launchDisplay: { prompt: "Continue the queued work" } },
+    ports((input) => { commits.push(input); return { ok: true, tasks: [], taskIds: ["held"], created: [], changed: false }; }),
+  );
+  expect(result.ok && result.taskIds).toEqual(["held"]);
+  expect(commits).toEqual([{ project: "chosen", origin: { kind: "launch", key: "attempt-q" }, title: "Queued until later", identity: { launchId: "launch-q", conversationId: "conversation_q", clientAttemptId: "attempt-q", engine: "claude" } }]);
+  expect(() => admitRecoveredLaunch(
+    { launchId: "launch-q", conversationId: "conversation_q", engine: "claude", cwd: "/repo", clientAttemptId: null, explicitProject: null, launchProfile: {}, launchDisplay: null },
+    ports(() => { throw new Error("EISDIR: illegal operation on a directory"); }),
+  )).toThrow(LaunchMembershipError);
 });

@@ -386,6 +386,9 @@ export interface SpawnRequest {
       that writes the receipt; operator/external origins are depth-0 roots and
       successor origins are exempt identity-preserving relaunches. */
   origin?: SpawnOrigin;
+  /** Explicit task targets of a task-local launch (#1586). Their membership is
+      committed at the receipt reservation; a missing target aborts the launch. */
+  taskIds?: readonly string[] | null;
 }
 
 export class SpawnChildLimitError extends Error {

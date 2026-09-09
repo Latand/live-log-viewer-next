@@ -256,3 +256,46 @@ test("the first-action refinement names a pending placeholder once: replay retur
   expect(long.ok && long.tasks[0]!.text.length).toBe(80);
   expect(refineTask(tasks, { callerConversationId: "conversation_agent", text: "   " }).ok).toBe(false);
 });
+
+test("a resume successor keeps its conversation's task: the new launch id resolves by the canonical conversation id, and the original launch record stays", () => {
+  const first = ensureTaskMembership([], { project: "fixture", origin: { kind: "launch", key: "attempt-r" }, title: "Resume me", identity: { clientAttemptId: "attempt-r", launchId: "launch-r1", conversationId: "conversation_r", engine: "codex" } }, deps);
+  if (!first.ok) throw new Error(first.error);
+  /* The successor reserves a fresh launch id (no client attempt) for the same
+     conversation, from a checkout the scanner files under another project. */
+  const resumed = ensureTaskMembership(first.tasks, { project: "other-checkout", origin: { kind: "launch", key: "launch-r2" }, identity: { launchId: "launch-r2", conversationId: "conversation_r", engine: "codex" } }, deps);
+  if (!resumed.ok) throw new Error(resumed.error);
+  expect(resumed.created).toEqual([]);
+  expect(resumed.taskIds).toEqual(first.taskIds);
+  expect(resumed.tasks.length).toBe(1);
+  expect(resumed.tasks[0]!.assignments).toEqual([expect.objectContaining({ launchId: "launch-r1", clientAttemptId: "attempt-r", conversationId: "conversation_r", state: "linked" })]);
+  /* Replaying the successor's own reservation converges the same way. */
+  const replay = ensureTaskMembership(resumed.tasks, { project: "fixture", origin: { kind: "launch", key: "launch-r2" }, identity: { launchId: "launch-r2", conversationId: "conversation_r" } }, deps);
+  expect(replay.ok && replay.changed).toBe(false);
+  expect(replay.ok && replay.taskIds).toEqual(first.taskIds);
+});
+
+test("a reviewer joins the task the reviewed implementer holds; without one, the flow fallback binds implementer and reviewer together", () => {
+  const implementer = { conversationId: "conversation_impl", path: "/fixture/impl.jsonl" };
+  const held = ensureTaskMembership([], { project: "fixture", origin: { kind: "conversation", key: implementer.conversationId }, title: "Ship the thing", identity: implementer }, deps);
+  if (!held.ok) throw new Error(held.error);
+  const reviewer = ensureTaskMembership(held.tasks, { project: "fixture", origin: { kind: "flow", key: "flow-1" }, identity: { launchId: "launch-rev-1", conversationId: "conversation_rev1", clientAttemptId: "flow_flow-1_a" }, inherit: [implementer] }, deps);
+  if (!reviewer.ok) throw new Error(reviewer.error);
+  expect(reviewer.created).toEqual([]);
+  expect(reviewer.taskIds).toEqual(held.taskIds);
+  expect(reviewer.tasks[0]!.assignments.map((assignment) => assignment.conversationId)).toEqual(["conversation_impl", "conversation_rev1"]);
+  /* Round two of the same flow lands in the same task. */
+  const second = ensureTaskMembership(reviewer.tasks, { project: "fixture", origin: { kind: "flow", key: "flow-1" }, identity: { launchId: "launch-rev-2", conversationId: "conversation_rev2", clientAttemptId: "flow_flow-1_b" }, inherit: [implementer] }, deps);
+  expect(second.ok && second.taskIds).toEqual(held.taskIds);
+  expect(second.ok && second.tasks.length).toBe(1);
+
+  /* An implementer nobody admitted yet: the fallback names the whole exchange. */
+  const orphan = { conversationId: "conversation_legacy", path: "/fixture/legacy.jsonl" };
+  const fallback = ensureTaskMembership([], { project: "fixture", origin: { kind: "flow", key: "flow-2" }, title: "Review flow", identity: { launchId: "launch-rev-3", conversationId: "conversation_rev3" }, inherit: [orphan] }, deps);
+  if (!fallback.ok) throw new Error(fallback.error);
+  expect(fallback.created.length).toBe(1);
+  expect(fallback.tasks[0]!.origin).toEqual({ kind: "flow", key: "flow-2", refinement: "pending" });
+  expect(fallback.tasks[0]!.assignments.map((assignment) => [assignment.conversationId, assignment.state])).toEqual([["conversation_rev3", "linked"], ["conversation_legacy", "linked"]]);
+  const later = ensureTaskMembership(fallback.tasks, { project: "fixture", origin: { kind: "flow", key: "flow-2" }, identity: { launchId: "launch-rev-4", conversationId: "conversation_rev4" }, inherit: [orphan] }, deps);
+  expect(later.ok && later.created).toEqual([]);
+  expect(later.ok && later.tasks.length).toBe(1);
+});

@@ -16,7 +16,7 @@ import { freshSpecFor, type AgentEngine } from "@/lib/agent/cli";
 import { directOperatorActivityAuthority } from "@/lib/agent/operatorAuthority";
 import { reasoningFromBody } from "@/lib/agent/efforts";
 import { modelFromBody, validateLaunchModel } from "@/lib/agent/models";
-import { agentRegistry, type AgentRegistry, type SpawnReceipt } from "@/lib/agent/registry";
+import { agentRegistry, type AgentRegistry, type SpawnBeginResult, type SpawnReceipt } from "@/lib/agent/registry";
 import { sessionKeyFromTranscript } from "@/lib/agent/sessionKey";
 import { spawnResponseForReceipt, type SpawnResponse as AgentSpawnResponse } from "@/lib/agent/spawnResponse";
 import { resolveSpawnedTranscriptPath } from "@/lib/agent/spawnedTranscript";
@@ -26,6 +26,7 @@ import { ensureTaskPipelineForAssignment } from "@/lib/pipelines/engine";
 import { attachmentPath } from "@/lib/tasks/attachments";
 import { applyAssignmentPatches, pinnedAccountId, type AssignmentPatch, type TaskCommandResult } from "@/lib/tasks/commands";
 import { isoNow } from "@/lib/tasks/helpers";
+import { LaunchMembershipError } from "@/lib/tasks/launchMembership";
 import { loadTasks, mutateTasks } from "@/lib/tasks/store";
 import type { BoardTask, TaskAssignment } from "@/lib/tasks/types";
 import { isGenericSessionTitle } from "@/lib/title";
@@ -325,18 +326,28 @@ async function postTaskSpawn(
       title: taskTitle && !isGenericSessionTitle(taskTitle) ? taskTitle : `Task ${task.id}`,
     }),
   };
-  const begun = registry.beginSpawnRequest({
-    engine,
-    cwd: cwdResult.cwd,
-    transport: "tmux",
-    accountId: account.accountId,
-    accountPin,
-    origin: { kind: "operator" },
-    ownStartingActuation: true,
-    launchProfile: spec.launchProfile,
-    clientAttemptId,
-    requestDigest: taskRequestDigest(task, shape),
-  });
+  /* The target task travels with the reservation (#1586): the registry commits
+     this launch's membership in that task at the receipt, so no fallback task
+     is minted and a missing target aborts the launch before any actuation. */
+  let begun: SpawnBeginResult;
+  try {
+    begun = registry.beginSpawnRequest({
+      engine,
+      cwd: cwdResult.cwd,
+      transport: "tmux",
+      accountId: account.accountId,
+      accountPin,
+      origin: { kind: "operator" },
+      ownStartingActuation: true,
+      launchProfile: spec.launchProfile,
+      clientAttemptId,
+      requestDigest: taskRequestDigest(task, shape),
+      taskIds: [task.id],
+    });
+  } catch (error) {
+    if (error instanceof LaunchMembershipError) return NextResponse.json({ error: error.message }, { status: error.status });
+    throw error;
+  }
   if (begun.kind === "conflict") {
     return NextResponse.json({ error: "task spawn attempt conflicts with its original request" }, { status: 409 });
   }
