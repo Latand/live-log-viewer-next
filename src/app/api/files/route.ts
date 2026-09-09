@@ -4,6 +4,7 @@ import fs from "node:fs";
 import { agentRegistry } from "@/lib/agent/registry";
 import { statePath } from "@/lib/configDir";
 import { readStateCollectionRevision } from "@/lib/state/sqliteStateStore";
+import { ensureEmptyTaskBoardVisibilityMigration } from "@/lib/tasks/boardVisibilityMigration";
 import { buildFilesResponse } from "./response";
 import { cachedFileScan } from "@/lib/scanner/scanCache";
 import { buildFilesResponseInWorker, filesResponseWorkerEnabled } from "@/lib/scanner/filesResponseWorker";
@@ -320,6 +321,11 @@ function applyScanHeaders(response: Response, scan: CachedScan, projectionTiming
 }
 
 export async function GET(request: Request): Promise<Response> {
+  /* One-time, in the long-lived server process rather than in the per-request
+     response worker: the guard there would be re-armed on every spawn, and the
+     board must not pay a task-file transaction per poll. The board reads its
+     tasks from this route, so the migration runs before the first read. */
+  ensureEmptyTaskBoardVisibilityMigration();
   const requiredRevision = generationHeader(request, "x-llv-files-revision");
   const requiredGeneration = generationHeader(request, "x-llv-files-generation");
   const url = new URL(request.url);

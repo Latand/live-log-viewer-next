@@ -1,6 +1,6 @@
 "use client";
 
-import { Crown, MapPin } from "lucide-react";
+import { Crown, EyeOff, MapPin, Rows3 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Link2, X } from "@/components/icons";
@@ -8,13 +8,14 @@ import { activityDot, cleanTitle, fmtAge } from "@/components/utils";
 import { useTaskDraft } from "@/hooks/useTaskDraft";
 import { projectDisplayName } from "@/lib/displayNames";
 import { getLocale, useLocale } from "@/lib/i18n";
+import { taskHasAgents, taskShowsOnBoard } from "@/lib/tasks/boardVisibility";
 import { formatDue, isOverdue } from "@/lib/tasks/helpers";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
 
 import { type FavoriteRow } from "@/components/favorites/favoriteRows";
 
-import { createTask } from "./taskApi";
+import { createTask, updateTask } from "./taskApi";
 import { TaskComposer } from "./TaskComposer";
 import { TASK_TONES, taskTitle } from "./taskModel";
 
@@ -239,6 +240,7 @@ export function TaskPanel({
           rows.map((task) => {
             const tone = TASK_TONES[task.status];
             const unplaced = task.placement === "unplaced" || !task.pos;
+            const onBoard = taskShowsOnBoard(task);
             const dueOverdue = task.dueAt ? isOverdue(task.dueAt) : false;
             return (
               <div
@@ -282,6 +284,29 @@ export function TaskPanel({
                     <span>{fmtAge(new Date(task.updatedAt).getTime() / 1000)}</span>
                   </span>
                 </button>
+                {/* Band membership (reversible, never a delete). The flag only
+                    governs EMPTY tasks, so the control appears only where it
+                    does something: a task holding an agent draws its band
+                    whatever the flag says, and offering to hide it would lie. */}
+                {taskHasAgents(task) ? null : (
+                  <div className="flex items-center gap-1.5 pl-0.5">
+                    {onBoard ? null : (
+                      <span className="rounded-full bg-sunken px-1.5 py-0.5 text-[9px] font-bold text-muted">{t("tasks.offBoard")}</span>
+                    )}
+                    <button
+                      type="button"
+                      data-task-board-toggle={task.id}
+                      data-task-board-state={onBoard ? "shown" : "hidden"}
+                      className="inline-flex items-center gap-0.5 rounded-[6px] border border-border px-1.5 py-0.5 text-[9.5px] font-bold text-muted hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                      title={t(onBoard ? "tasks.removeFromBoardTitle" : "tasks.showOnBoardTitle")}
+                      onClick={() => { void updateTask(task.id, { board: onBoard ? "hidden" : "shown" }); }}
+                    >
+                      {onBoard
+                        ? <><EyeOff className="h-2.5 w-2.5" aria-hidden /> {t("tasks.removeFromBoard")}</>
+                        : <><Rows3 className="h-2.5 w-2.5" aria-hidden /> {t("tasks.showOnBoard")}</>}
+                    </button>
+                  </div>
+                )}
                 {unplaced ? (
                   <div className="flex items-center gap-1.5 pl-0.5">
                     <span className="rounded-full bg-sunken px-1.5 py-0.5 text-[9px] font-bold text-warning">{t("tasks.unplaced")}</span>

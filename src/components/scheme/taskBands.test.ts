@@ -176,7 +176,7 @@ test("a frozen order keeps known bands in place and appends newcomers by rank", 
   expect(applyBandOrder(ranked, null).map((band) => band.id)).toEqual(["task:b", "task:a", "task:c"]);
 });
 
-test("bands stack full-width at every mode and width; members, mirrors and +Agent stay inside without overlap", () => {
+test("bands stack at content width at every mode and width; members, mirrors and +Agent stay inside without overlap", () => {
   const files = Array.from({ length: 30 }, (_, index) => file(index, index % 3 === 0 ? "busy" : null));
   const tasks = [
     task("dense", "2026-01-01T00:00:00Z", files.slice(0, 24)),
@@ -195,7 +195,11 @@ test("bands stack full-width at every mode and width; members, mirrors and +Agen
       for (const band of scene.bands) {
         const { rect, header, addAgent } = band.geometry;
         expect(rect.x).toBeCloseTo(gutter, 6);
-        expect(rect.w * zoom).toBeCloseTo(viewportWidth - (viewportWidth < 1024 ? BAND.gutterNarrow : BAND.gutter) * 2, 6);
+        /* Compact geometry: a band is as wide as its content, floored so its
+           header stays readable and ceilinged at the available width. */
+        const available = viewportWidth - (viewportWidth < 1024 ? BAND.gutterNarrow : BAND.gutter) * 2;
+        expect(rect.w * zoom).toBeLessThanOrEqual(available + 0.001);
+        expect(rect.w * zoom).toBeGreaterThanOrEqual(Math.min(available, BAND.minBandW) - 0.001);
         expect(rect.y).toBeGreaterThanOrEqual(previousBottom - 0.001);
         previousBottom = rect.y + rect.h;
         expect(header.h * zoom).toBeCloseTo(BAND.header, 6);
@@ -399,4 +403,76 @@ test("a container halo stays inside its own band: a stage worker assigned to ano
   expect(halo.y < olderBand.geometry.rect.y + olderBand.geometry.rect.h && halo.y + halo.h > olderBand.geometry.rect.y && olderBand.geometry.rect.y < pipelineBand.geometry.rect.y).toBe(false);
   /* The halo wraps the stage placed here plus the mirror of the stage hosted elsewhere. */
   expect(halo.members.sort()).toEqual([files[0]!.path, pipelineBand.mirrors[0]!.key].sort());
+});
+
+
+test("a hidden EMPTY task draws no band; a hidden task holding an agent still does (#1614 item 1)", () => {
+  const files = [file(0, "busy"), file(1)];
+  const layout = base(files);
+  const withAgent = task("staffed", "2026-01-01T00:00:00Z", [files[0]!]);
+  const all = [
+    { ...withAgent, board: "hidden" as const },
+    { ...task("empty", "2026-01-02T00:00:00Z", []), board: "hidden" as const },
+    task("still-visible", "2026-01-03T00:00:00Z", []),
+    { ...task("restored", "2026-01-04T00:00:00Z", []), board: "shown" as const },
+  ];
+  const bands = buildTaskBands(layout, sources(all, files));
+  const taskIds = bands.filter((band) => band.origin === "task").map((band) => band.task!.id).sort();
+  /* The hidden EMPTY band is the only one that disappears. The hidden band
+     holding an agent keeps its members — hiding must never strand a live
+     conversation off the board. */
+  expect(taskIds).toEqual(["restored", "staffed", "still-visible"]);
+  expect(bands.find((band) => band.task?.id === "staffed")!.members.map((member) => member.key)).toContain(files[0]!.path);
+});
+
+test("emptiness is read from the task's own assignments, not from what this viewport holds (#1614 item 1)", () => {
+  /* The task's agent is recorded but its transcript is not in this scan — the
+     board is paged, or the conversation belongs to another project. A viewport
+     test would call this task empty and hide it; a durable one keeps it. */
+  const layout = base([file(0)]);
+  const hidden = { ...task("offscreen-agent", "2026-01-01T00:00:00Z", [file(9)]), board: "hidden" as const };
+  const band = buildTaskBands(layout, sources([hidden], [file(0)])).find((entry) => entry.task?.id === "offscreen-agent");
+  expect(band).toBeDefined();
+  /* It draws its band even though this layout placed none of its members. */
+  expect(band!.conversations).toBe(0);
+});
+
+test("a launch this session started keeps its hidden task on the board before the assignment persists", () => {
+  const files = [file(0, "busy")];
+  const layout = base(files);
+  const hidden = { ...task("provisional", "2026-01-01T00:00:00Z", []), board: "hidden" as const };
+  const provisionalMemberships = new Map([[files[0]!.conversationId!, "provisional"]]);
+  const band = buildTaskBands(layout, { ...sources([hidden], files), provisionalMemberships })
+    .find((entry) => entry.task?.id === "provisional");
+  expect(band).toBeDefined();
+  expect(band!.members.map((member) => member.key)).toEqual([files[0]!.path]);
+});
+
+test("an empty band ends at its content instead of ruling a line across the canvas (#1614 item 2)", () => {
+  const files = Array.from({ length: 8 }, (_, index) => file(index));
+  const layout = base(files);
+  const bands = rankBands(buildTaskBands(layout, sources([
+    task("empty", "2026-01-01T00:00:00Z", []),
+    task("one", "2026-01-02T00:00:00Z", [files[0]!]),
+    task("many", "2026-01-03T00:00:00Z", files.slice(1)),
+  ], files)));
+  for (const [viewportWidth, zoom] of [[1440, 1], [1440, 1.6], [1920, 1], [1280, 0.5]] as const) {
+    const scene = layoutTaskBands(layout, bands, { zoom, mode: bandModeFor(zoom, null), viewportWidth, reader: null });
+    const widthOf = (id: string) => scene.bands.find((band) => band.task?.id === id)!.geometry.rect.w * zoom;
+    const available = viewportWidth - BAND.gutter * 2;
+    /* The whole complaint: an empty band used to be exactly as wide as a band
+       holding eight conversations. Now it is strictly narrower, and narrower
+       than the canvas, while staying wide enough to read its own header. */
+    expect(widthOf("empty")).toBeLessThan(available);
+    expect(widthOf("empty")).toBeLessThan(widthOf("many"));
+    expect(widthOf("empty")).toBeLessThanOrEqual(widthOf("one"));
+    expect(widthOf("empty")).toBeGreaterThanOrEqual(Math.min(available, BAND.minBandW) - 0.001);
+    /* A populated band grows to hold its members and stops at the ceiling. The
+       slack it leaves is never more than the next tile it could not fit, so
+       narrowing costs no row and no member is pushed out of view. */
+    expect(widthOf("many")).toBeLessThanOrEqual(available + 0.001);
+    expect(widthOf("many")).toBeGreaterThan(widthOf("one"));
+    const tile = (scene.mode === "overview" ? BAND.chipW : BAND.summaryW) + BAND.tileGap;
+    expect(available - widthOf("many")).toBeLessThan(tile + 0.001);
+  }
 });

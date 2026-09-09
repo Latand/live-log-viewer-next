@@ -9,7 +9,7 @@ import { withFileTransactionSync } from "@/lib/state/fileTransaction";
 import { snapshotTasks, stampTaskRevisions, taskRevision } from "./revision";
 import { isTaskAttachment } from "./attachments";
 import type { RecentCreate } from "./commands";
-import type { AssignmentState, BoardTask, TaskAssignment, TaskPlacement, TaskSource, TaskStatus, TaskOrigin } from "./types";
+import type { AssignmentState, BoardTask, TaskAssignment, TaskBoardVisibility, TaskPlacement, TaskSource, TaskStatus, TaskOrigin } from "./types";
 
 export const TASKS_FILE = statePath("tasks.json");
 
@@ -26,12 +26,21 @@ function committedRows(tasks: BoardTask[], before: ReturnType<typeof snapshotTas
   });
 }
 
-type TasksFile = { tasks?: unknown; recentCreates?: unknown };
+type TasksFile = { tasks?: unknown; recentCreates?: unknown; migrations?: unknown };
+
+/** One-time state transitions already applied to this file, by name → ISO
+    instant. A name present here is never re-applied, so a migration that the
+    operator has since reversed by hand stays reversed. */
+export type TaskMigrations = Record<string, string>;
 
 /** The whole persisted state: the task list plus the create-idempotency map. */
 export interface TasksFileState {
   tasks: BoardTask[];
   recentCreates: RecentCreate[];
+  /** Always present on a read. A writer that omits it keeps whatever the file
+      already records, so a caller that only means to change tasks can never
+      erase a migration marker and cause a one-time transition to run twice. */
+  migrations?: TaskMigrations;
 }
 
 function atomicWriteJson(filePath: string, value: unknown): void {
@@ -106,6 +115,15 @@ function isPlacement(value: unknown): value is TaskPlacement {
   return value === "pinned" || value === "unplaced" || value === "auto";
 }
 
+function isBoardVisibility(value: unknown): value is TaskBoardVisibility {
+  return value === "shown" || value === "hidden";
+}
+
+function isMigrations(value: unknown): value is TaskMigrations {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  return Object.values(value as Record<string, unknown>).every((at) => typeof at === "string");
+}
+
 /** Optional deadline is both-or-neither and both strings. */
 function validDue(task: Partial<BoardTask>): boolean {
   const hasAt = task.dueAt !== undefined;
@@ -140,6 +158,7 @@ function coerceTask(value: unknown): BoardTask | null {
     raw.assignments.every(isTaskAssignment) &&
     (raw.source === undefined || isTaskSource(raw.source)) &&
     (raw.origin === undefined || isTaskOrigin(raw.origin)) &&
+    (raw.board === undefined || isBoardVisibility(raw.board)) &&
     typeof raw.createdAt === "string" &&
     typeof raw.updatedAt === "string";
   if (!structural) return null;
@@ -160,6 +179,7 @@ function coerceTask(value: unknown): BoardTask | null {
     assignments: raw.assignments!,
     ...(raw.source !== undefined ? { source: raw.source } : {}),
     ...(raw.origin !== undefined ? { origin: raw.origin } : {}),
+    ...(raw.board !== undefined ? { board: raw.board } : {}),
     createdAt: raw.createdAt!,
     updatedAt: raw.updatedAt!,
   };
@@ -185,7 +205,7 @@ export function loadTasks(filePath = TASKS_FILE): BoardTask[] {
 /** Read without writes; malformed existing state refuses instead of dropping rows. */
 export function loadTasksFile(filePath = TASKS_FILE): TasksFileState {
   const raw = readJson(filePath) as TasksFile | undefined;
-  if (raw === undefined) return { tasks: [], recentCreates: [] };
+  if (raw === undefined) return { tasks: [], recentCreates: [], migrations: {} };
   if (!raw || !Array.isArray(raw.tasks)) throw new Error("invalid persisted task state");
   const tasks = raw.tasks.map(value => {
     const task = coerceTask(value);
@@ -198,23 +218,35 @@ export function loadTasksFile(filePath = TASKS_FILE): TasksFileState {
     throw new Error("invalid persisted task receipts");
   }
   const recentCreates = (raw.recentCreates ?? []) as RecentCreate[];
-  return { tasks, recentCreates };
+  if (raw.migrations !== undefined && !isMigrations(raw.migrations)) throw new Error("invalid persisted task migrations");
+  return { tasks, recentCreates, migrations: { ...((raw.migrations ?? {}) as TaskMigrations) } };
+}
+
+/** The persisted body: optional sections stay omitted while empty so an
+    untouched legacy file keeps its exact shape. */
+function fileBody(rows: unknown[], recentCreates: RecentCreate[], migrations: TaskMigrations = {}): unknown {
+  return {
+    tasks: rows,
+    ...(recentCreates.length ? { recentCreates } : {}),
+    ...(Object.keys(migrations).length ? { migrations } : {}),
+  };
 }
 
 export function saveTasks(tasks: BoardTask[], filePath = TASKS_FILE): void {
   withFileTransactionSync(filePath, "task state is busy", () => {
     /* Preserve the idempotency receipts a tasks-only save (patch/delete/send)
        doesn't touch, so a create replay still resolves after them. */
-    const { tasks: current, recentCreates } = loadTasksFile(filePath);
+    const { tasks: current, recentCreates, migrations } = loadTasksFile(filePath);
     const rows = committedRows(tasks, snapshotTasks(current), false);
-    atomicWriteJson(filePath, recentCreates.length ? { tasks: rows, recentCreates } : { tasks: rows });
+    atomicWriteJson(filePath, fileBody(rows, recentCreates, migrations));
   });
 }
 
 export function saveTasksFile(state: TasksFileState, filePath = TASKS_FILE): void {
   withFileTransactionSync(filePath, "task state is busy", () => {
-    const rows = committedRows(state.tasks, snapshotTasks(loadTasksFile(filePath).tasks), false);
-    atomicWriteJson(filePath, state.recentCreates.length ? { tasks: rows, recentCreates: state.recentCreates } : { tasks: rows });
+    const persisted = loadTasksFile(filePath);
+    const rows = committedRows(state.tasks, snapshotTasks(persisted.tasks), false);
+    atomicWriteJson(filePath, fileBody(rows, state.recentCreates, state.migrations ?? persisted.migrations));
   });
 }
 
@@ -233,9 +265,7 @@ export function mutateTasks<R>(
     const outcome = mutate(current.tasks);
     if (outcome.tasks) {
       const rows = committedRows(outcome.tasks, before, true);
-      atomicWriteJson(filePath, current.recentCreates.length
-        ? { tasks: rows, recentCreates: current.recentCreates }
-        : { tasks: rows });
+      atomicWriteJson(filePath, fileBody(rows, current.recentCreates, current.migrations));
     }
     return outcome.result;
   });
@@ -257,9 +287,7 @@ export function mutateTasksFile<R>(
     const outcome = mutate(current);
     if (outcome.state) {
       const rows = committedRows(outcome.state.tasks, before, true);
-      atomicWriteJson(filePath, outcome.state.recentCreates.length
-        ? { tasks: rows, recentCreates: outcome.state.recentCreates }
-        : { tasks: rows });
+      atomicWriteJson(filePath, fileBody(rows, outcome.state.recentCreates, outcome.state.migrations ?? current.migrations));
     }
     return outcome.result;
   });

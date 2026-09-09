@@ -4,7 +4,7 @@ import { isTaskAttachment } from "./attachments";
 import { taskRevision } from "./revision";
 import { isoNow } from "./helpers";
 import { assignmentAdmissionOrigin, assignmentIdentity, ensureTaskMembership, identityHeldBy, type MembershipIdentity } from "./membership";
-import type { AssignmentRef, BoardTask, TaskAttachment, TaskAssignment, TaskSource, TaskStatus } from "./types";
+import type { AssignmentRef, BoardTask, TaskAttachment, TaskAssignment, TaskBoardVisibility, TaskSource, TaskStatus } from "./types";
 
 export const TASK_TEXT_LIMIT = 6000;
 export const TASKS_PER_PROJECT_LIMIT = 300;
@@ -51,6 +51,7 @@ export interface PatchTaskInput {
   pos?: unknown;
   dueAt?: unknown;
   dueTz?: unknown;
+  board?: unknown;
 }
 
 /** Injected so the pure command can ask the store whether an attachment ref's
@@ -91,6 +92,10 @@ function normalizePos(value: unknown): { x: number; y: number } | null {
 
 function normalizeStatus(value: unknown): TaskStatus | null {
   return value === "inbox" || value === "assigned" || value === "blocked" || value === "done" ? value : null;
+}
+
+function normalizeBoardVisibility(value: unknown): TaskBoardVisibility | null {
+  return value === "shown" || value === "hidden" ? value : null;
 }
 
 /** Client-writable placement values; `auto` is server-reserved (#17). */
@@ -276,6 +281,13 @@ export function patchTask(existing: BoardTask[], id: string, input: PatchTaskInp
        the collision pass then leaves it exactly where the user dropped it. */
     patch.pos = pos;
     patch.placement = "pinned";
+  }
+  /* Board membership of the band. Reversible either way, never a delete: the
+     task keeps its row, its assignments and its place in the task list. */
+  if (Object.hasOwn(input, "board")) {
+    const board = normalizeBoardVisibility(input.board);
+    if (!board) return { ok: false, error: "invalid board visibility", status: 400, code: "TASK_INVALID_FIELD", field: "board" };
+    patch.board = board;
   }
   if (Object.hasOwn(input, "placement")) {
     const placement = normalizePlacement(input.placement);

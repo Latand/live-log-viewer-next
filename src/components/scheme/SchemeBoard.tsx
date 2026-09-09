@@ -1274,6 +1274,12 @@ export function SchemeBoard({
   const bandCycleStatus = useCallback((task: BoardTask) => {
     void taskHandlers.patch(task.id, { status: nextTaskStatus(task.status) });
   }, [taskHandlers]);
+  /* Take an empty task's band off the board. Never a delete: the row, its text
+     and its history stay, the task list keeps listing it, and «show on board»
+     there brings the band back. */
+  const bandRemoveFromBoard = useCallback((task: BoardTask) => {
+    void updateTask(task.id, { board: "hidden" });
+  }, []);
   /* Opening a shared conversation from a mirror hosts its reader in that band
      (the mirror's slot becomes the member's) and selects it; the canonical band
      shows the reference tile in return. No camera move: the surface appears
@@ -1404,7 +1410,12 @@ export function SchemeBoard({
             bands={taskScene.bands}
             mode={taskScene.mode}
             scale={taskScene.scale}
-            interactive={!mapMode && !handLike && !session}
+            /* Band chrome stays live on the hand tool. Only the controls
+               themselves take pointer events (`data-scheme-ui`, which
+               `onPointerDown` already refuses to start a pan on), so the rest
+               of the header still pans — but Details, «+ Agent» and the status
+               pill answer a click in both tools instead of only in select. */
+            interactive={!mapMode && !session}
             selectedKey={selected}
             mirrorRects={taskScene.mirrorRects}
             continuations={taskScene.continuations}
@@ -1412,6 +1423,7 @@ export function SchemeBoard({
             onAddAgent={bandAddAgent}
             onOpenDetails={bandDetails}
             onCycleStatus={bandCycleStatus}
+            onRemoveFromBoard={bandRemoveFromBoard}
             onSelectMirror={bandSelectMirror}
             onFollowContinuation={followContinuation}
           />

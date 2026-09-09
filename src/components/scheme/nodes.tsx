@@ -143,8 +143,16 @@ export const EdgesLayer = memo(function EdgesLayer({
   height: number;
 }) {
   void badgeAnchorRevision;
+  /* Decorative, and stacked above the band chrome. An `<svg>` root is a
+     replaced element: with the default `pointer-events: auto` its whole box is
+     hit-testable, so this full-canvas overlay swallowed every click meant for a
+     band's Details, «+ Agent» or status pill — the controls were live and
+     correctly placed, and nothing reached them. `aria-hidden` decoration must
+     never take pointer input; the same holds for `LoopsLayer` and the pipeline
+     rails below. Interactive parts (the flow hub, edge chips) live outside
+     these SVGs precisely so they keep their own targets. */
   return (
-    <svg width={width} height={height} className="absolute left-0 top-0" aria-hidden>
+    <svg width={width} height={height} className="pointer-events-none absolute left-0 top-0" aria-hidden>
       {edges.map((edge) => {
         /* Hover expansion grows rightward while this anchor stays frozen at the
            original 30px circle center, keeping the structural arrow steady. */
@@ -258,7 +266,7 @@ function loopArrowHead(x: number, y: number, angle: number): string {
 export const LoopsLayer = memo(function LoopsLayer({ loops, width, height }: { loops: FlowLoop[]; width: number; height: number }) {
   if (!loops.length) return null;
   return (
-    <svg width={width} height={height} className="absolute left-0 top-0" aria-hidden>
+    <svg width={width} height={height} className="pointer-events-none absolute left-0 top-0" aria-hidden>
       {loops.map((loop) => {
         const leg = activeLoopLeg(loop.flow);
         const yTop = loop.y + LOOP_ARC_TOP;
@@ -359,7 +367,7 @@ export const AgentLinksLayer = memo(function AgentLinksLayer({
   return (
     <>
       {pipelineLinks.length ? (
-        <svg width={width} height={height} className="absolute left-0 top-0" aria-hidden>
+        <svg width={width} height={height} className="pointer-events-none absolute left-0 top-0" aria-hidden>
           {pipelineLinks.map((link) => {
             const geom = railByKey.get(link.key)!;
             const color = PIPELINE_RAIL_COLOR[link.pipeline!.tone];
