@@ -7,6 +7,8 @@ import { describe, expect, spyOn, test } from "bun:test";
 import { AgentRegistry, conversationLookupFromSnapshot, CORRUPT_HELD_DELIVERY_IMAGES_ERROR, DeliveryReservationConflictError, SPAWN_STARTING_ADMISSION_LEASE_MS, SupersedenceConflictError } from "@/lib/agent/registry";
 import { withLegacySpawnFixtureTitles } from "@/lib/agent/registryTestFixtures";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
+import { conversationDeliverabilityFromRecord } from "@/lib/conversation/deliverability";
+import { captureProcessIdentity } from "@/lib/processIdentity";
 import { structuredContent } from "@/lib/runtime/structuredContent";
 
 const KEY = { engine: "codex" as const, sessionId: "019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326" };
@@ -14,6 +16,16 @@ const KEY = { engine: "codex" as const, sessionId: "019f4906-3f67-\x37b72-9fbc-9
 function registry(ownerAlive: (owner: { pid: number; startIdentity: string | null }) => boolean = () => true) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-"));
   return withLegacySpawnFixtureTitles(new AgentRegistry(path.join(dir, "agent-registry.json"), ownerAlive));
+}
+
+function jsonRegistry(ownerAlive: (owner: { pid: number; startIdentity: string | null }) => boolean = () => true) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-json-"));
+  return withLegacySpawnFixtureTitles(new AgentRegistry(
+    path.join(dir, "agent-registry.json"),
+    ownerAlive,
+    undefined,
+    { sqliteMode: "off" },
+  ));
 }
 
 function spawnEntry(pathname: string, accountId = "terra") {
@@ -28,6 +40,75 @@ function spawnEntry(pathname: string, accountId = "terra") {
     claimOwner: null,
     pendingAction: null,
   };
+}
+
+function structuredLaunchFixture(store: AgentRegistry, pendingAction: "spawn" | "handoff" = "spawn") {
+  const sessionId = crypto.randomUUID();
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-1583-registry-"));
+  const artifactPath = path.join(directory, `${sessionId}.jsonl`);
+  fs.writeFileSync(artifactPath, "");
+  const profile = emptyLaunchProfile({ cwd: directory, title: "Issue 1583 registry fixture" });
+  const begun = store.beginSpawnRequest({
+    engine: "codex",
+    cwd: directory,
+    accountId: "default",
+    transport: "structured",
+    expectedArtifactPath: artifactPath,
+    launchProfile: profile,
+  });
+  if (begun.kind !== "created") throw new Error("expected a structured launch receipt");
+  const owner = captureProcessIdentity(process.pid);
+  const key = { engine: "codex" as const, sessionId };
+  const entry = {
+    key,
+    artifactPath,
+    cwd: directory,
+    accountId: "default",
+    launchProfile: profile,
+    status: "idle" as const,
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server" as const,
+      endpoint: "stdio:issue-1583",
+      process: owner,
+      eventCursor: 7,
+      protocolVersion: "v2",
+      writerClaimEpoch: 1,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 1,
+    claimOwner: `structured-host:${JSON.stringify(owner)}`,
+    pendingAction,
+    structuredHostOperationId: begun.receipt.launchId,
+  };
+  if (store.stageStructuredSpawn(begun.receipt.launchId, entry).kind !== "settled") {
+    throw new Error("expected structured launch staging to settle");
+  }
+  const evidence = {
+    key: entry.key,
+    artifactPath: entry.artifactPath,
+    cwd: entry.cwd,
+    accountId: entry.accountId,
+    launchProfile: entry.launchProfile,
+    status: entry.status,
+    host: entry.host,
+    structuredHost: {
+      ...entry.structuredHost,
+      endpoint: "runtime:reconciled",
+      process: null,
+      writerClaimEpoch: 0,
+    },
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  };
+  const recovered = store.recoverStructuredSpawnFromEvidence(begun.receipt.launchId, {
+    ...evidence,
+  });
+  if (recovered.kind !== "settled") throw new Error("expected structured launch recovery to settle");
+  return { artifactPath, conversationId: begun.receipt.conversationId, receipt: recovered.receipt, entry: recovered.entry };
 }
 
 describe("agent registry", () => {
@@ -778,6 +859,117 @@ describe("agent registry", () => {
     expect(route.kind).toBe("settled");
     expect(route.receipt.state).toBe("completed");
     expect(route.receipt.completionMode).toBe("route-recovered");
+  });
+
+  test("route-recovered structured settlement clears spawn but preserves handoff", () => {
+    const spawned = structuredLaunchFixture(jsonRegistry(), "spawn");
+    expect(spawned.receipt).toMatchObject({ state: "completed", completionMode: "route-recovered" });
+    expect(spawned.entry.pendingAction).toBeNull();
+    expect(spawned.entry.structuredHostOperationId).toBe(spawned.receipt.launchId);
+
+    const handoff = structuredLaunchFixture(jsonRegistry(), "handoff");
+    expect(handoff.receipt).toMatchObject({ state: "completed", completionMode: "route-recovered" });
+    expect(handoff.entry.pendingAction).toBe("handoff");
+  });
+
+  test("startup repair clears only an exact completed structured launch marker", () => {
+    const store = jsonRegistry();
+    const fixture = structuredLaunchFixture(store, "spawn");
+    const legacyEntry = { ...fixture.entry };
+    delete legacyEntry.structuredHostOperationId;
+    store.upsert({ ...legacyEntry, pendingAction: "spawn" });
+    expect(conversationDeliverabilityFromRecord(store.snapshot(), { conversationId: fixture.conversationId })).toMatchObject({
+      condition: "synchronizing",
+      deliverable: false,
+    });
+
+    expect(store.repairCompletedStructuredSpawnMarkers()).toBe(1);
+    expect(store.readOnlySnapshot().entries[`codex:${fixture.entry.key.sessionId}`]?.pendingAction).toBeNull();
+    expect(conversationDeliverabilityFromRecord(store.snapshot(), { conversationId: fixture.conversationId })).toMatchObject({
+      condition: "deliverable",
+      deliverable: true,
+    });
+    expect(store.repairCompletedStructuredSpawnMarkers()).toBe(0);
+  });
+
+  test("startup repair preserves handoff, unknown identity, wrong receipt, and stale generation rows", () => {
+    const store = jsonRegistry();
+    const handoff = structuredLaunchFixture(store, "handoff");
+    const unknown = structuredLaunchFixture(store, "spawn");
+    const wrong = structuredLaunchFixture(store, "spawn");
+    const stale = structuredLaunchFixture(store, "spawn");
+
+    const legacyHandoff = { ...handoff.entry };
+    delete legacyHandoff.structuredHostOperationId;
+    store.upsert({ ...legacyHandoff, pendingAction: "handoff" });
+    const legacyUnknown = { ...unknown.entry };
+    delete legacyUnknown.structuredHostOperationId;
+    store.upsert({
+      ...legacyUnknown,
+      pendingAction: "spawn",
+      structuredHost: {
+        ...unknown.entry.structuredHost!,
+        process: { pid: process.pid, startIdentity: null },
+      },
+    });
+    store.upsert({ ...wrong.entry, pendingAction: "spawn", structuredHostOperationId: handoff.receipt.launchId });
+
+    const snapshot = store.snapshot();
+    const staleConversation = snapshot.conversations[stale.conversationId]!;
+    const nextSessionId = crypto.randomUUID();
+    const nextPath = path.join(path.dirname(stale.artifactPath), `${nextSessionId}.jsonl`);
+    staleConversation.generations.push({
+      ...staleConversation.generations.at(-1)!,
+      id: nextSessionId,
+      path: nextPath,
+      createdAt: new Date().toISOString(),
+      archivedAt: null,
+    });
+    fs.writeFileSync(store.filename, `${JSON.stringify(snapshot, null, 2)}\n`);
+    const legacyStale = { ...stale.entry };
+    delete legacyStale.structuredHostOperationId;
+    store.upsert({ ...legacyStale, pendingAction: "spawn" });
+
+    expect(store.repairCompletedStructuredSpawnMarkers()).toBe(0);
+    expect(store.readOnlySnapshot().entries[`codex:${handoff.entry.key.sessionId}`]?.pendingAction).toBe("handoff");
+    expect(store.readOnlySnapshot().entries[`codex:${unknown.entry.key.sessionId}`]?.pendingAction).toBe("spawn");
+    expect(store.readOnlySnapshot().entries[`codex:${wrong.entry.key.sessionId}`]?.pendingAction).toBe("spawn");
+    expect(store.readOnlySnapshot().entries[`codex:${stale.entry.key.sessionId}`]?.pendingAction).toBe("spawn");
+
+    const ownerRejectedStore = jsonRegistry(() => false);
+    const ownerRejected = structuredLaunchFixture(ownerRejectedStore, "spawn");
+    const legacyOwnerRejected = { ...ownerRejected.entry };
+    delete legacyOwnerRejected.structuredHostOperationId;
+    ownerRejectedStore.upsert({ ...legacyOwnerRejected, pendingAction: "spawn" });
+    expect(ownerRejectedStore.repairCompletedStructuredSpawnMarkers()).toBe(0);
+    expect(ownerRejectedStore.readOnlySnapshot().entries[`codex:${ownerRejected.entry.key.sessionId}`]?.pendingAction).toBe("spawn");
+  });
+
+  test("legacy startup repair leaves an ambiguous receipt set untouched", () => {
+    const store = jsonRegistry();
+    const fixture = structuredLaunchFixture(store, "spawn");
+    const duplicate = store.beginSpawnRequest({
+      engine: "codex",
+      cwd: fixture.entry.cwd,
+      accountId: fixture.entry.accountId,
+      transport: "structured",
+      conversationId: fixture.conversationId,
+      expectedArtifactPath: fixture.artifactPath,
+      launchProfile: fixture.entry.launchProfile,
+    });
+    if (duplicate.kind !== "created") throw new Error("expected a duplicate launch receipt");
+    const settled = store.settleSpawn(duplicate.receipt.launchId, {
+      ...fixture.entry,
+      structuredHostOperationId: duplicate.receipt.launchId,
+      pendingAction: null,
+    });
+    if (settled.kind !== "settled") throw new Error("expected the duplicate launch to settle");
+    const legacyEntry = { ...settled.entry };
+    delete legacyEntry.structuredHostOperationId;
+    store.upsert({ ...legacyEntry, pendingAction: "spawn" });
+
+    expect(store.repairCompletedStructuredSpawnMarkers()).toBe(0);
+    expect(store.readOnlySnapshot().entries[`codex:${fixture.entry.key.sessionId}`]?.pendingAction).toBe("spawn");
   });
 
   test("an observed account-home Claude session recovers a pane-bound late-readiness failure", () => {
