@@ -136,12 +136,28 @@ export function turnStateFromRecords(records: RecordLike[], engine: TranscriptEn
       const type = stringValue(payload.type);
       if (!type) continue;
       if (type === "task_started" || type === "turn_started" || type === "user_message") {
+        /* A re-hosted continuation starts a fresh provider turn. Tool calls
+           from the interrupted turn have no future output, so carrying them
+           forward would make every later completion look premature. */
+        openTools.clear();
+        anonymousTools = 0;
         turnOpen = true;
         terminalAt = null;
         terminalSeen = false;
         continue;
       }
-      if (type === "task_complete" || type === "turn_complete" || type === "turn_completed" || type === "turn_aborted") {
+      if (type === "turn_aborted") {
+        /* Abort is itself the terminal boundary. Any tools still in the
+           ledger belong to the aborted turn and late results must not reopen
+           it or affect a later turn. */
+        openTools.clear();
+        anonymousTools = 0;
+        turnOpen = false;
+        terminalAt = timestamp(record);
+        terminalSeen = true;
+        continue;
+      }
+      if (type === "task_complete" || type === "turn_complete" || type === "turn_completed") {
         if (openTools.size === 0 && anonymousTools === 0) {
           turnOpen = false;
           terminalAt = timestamp(record);
@@ -160,8 +176,9 @@ export function turnStateFromRecords(records: RecordLike[], engine: TranscriptEn
       if (!isTool) continue;
       const id = stringValue(payload.call_id) ?? stringValue(payload.callId) ?? stringValue(payload.id);
       if (isOutput) {
-        if (id) openTools.delete(id);
-        else if (anonymousTools > 0) anonymousTools -= 1;
+        const matched = id ? openTools.delete(id) : anonymousTools > 0;
+        if (!matched) continue;
+        if (!id) anonymousTools -= 1;
       } else if (id) {
         openTools.add(id);
       } else {

@@ -92,6 +92,20 @@ test("a Codex task_complete transcript yields terminal evidence with the final a
   expect(evidence!.message!.ts).toBe(Date.parse("2026-07-18T11:05:00.000Z"));
 });
 
+test("a re-hosted Codex continuation settles after a tool call cut off in the prior turn (#1589)", async () => {
+  const file = writeTranscript("codex-rehosted-continuation.jsonl", [
+    { timestamp: "2026-09-09T05:36:42.000Z", type: "response_item", payload: { type: "function_call", call_id: "old-tool" } },
+    { timestamp: "2026-09-09T05:38:44.000Z", type: "event_msg", payload: { type: "task_started", turn_id: "continued-turn" } },
+    { timestamp: "2026-09-09T05:40:17.000Z", type: "event_msg", payload: { type: "agent_message", message: PASS_TEXT } },
+    { timestamp: "2026-09-09T05:40:18.000Z", type: "event_msg", payload: { type: "task_complete", turn_id: "continued-turn", last_agent_message: PASS_TEXT } },
+  ]);
+
+  expect(await durableStageTurnEvidence("codex", file)).toMatchObject({
+    turn: "terminal",
+    message: { text: PASS_TEXT },
+  });
+});
+
 test("a Codex turn with an open tool call is busy", async () => {
   const file = writeTranscript("codex-busy.jsonl", [
     { timestamp: "2026-07-18T11:00:00.000Z", payload: { type: "task_started" } },
