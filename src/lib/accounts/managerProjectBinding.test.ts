@@ -376,6 +376,25 @@ test("an unbound project with nothing routed keeps the engine-default fallback f
   expect(resolved.requestedAdmission).toBeDefined();
 });
 
+test("a damaged record leaves a named CLAUDE account nowhere to degrade onto either", async () => {
+  /* The Codex branch's guard has a Claude twin, and it is easy to miss: there,
+     "no pool" arrives as `allowed === null`, which is also how an UNBOUND
+     project reads — so the candidate set would quietly become every Claude
+     account, and a named-but-inadmissible one would degrade onto whichever the
+     health pass picked. The record was never read; nothing may be picked from
+     it. Both homes here carry an unusable credential, so the pass refuses
+     either way; what this asserts is which account it was ASKED about. */
+  registryWith(spare, [], claudeSpare);
+  fs.mkdirSync(STATE, { recursive: true });
+  fs.writeFileSync(RECORD, '{"schemaVersion":1,"bindings":[{"engine":"codex"', "utf8");
+
+  const refused = await resolveHealthySpawnAccount("claude", claudeReserved, ATLAS)
+    .then(() => null, (error: unknown) => error);
+  expect(refused).not.toBeNull();
+  expect((refused as { accountIds?: string[] }).accountIds).toEqual([claudeReserved]);
+  expect((refused as { accountIds?: string[] }).accountIds).not.toContain(claudeSpare);
+});
+
 test("a damaged record leaves a named account that does NOT exist with nowhere to fall back to", async () => {
   /* The fallback below the named account is the AUTOMATIC pick, and on an
      unreadable record there isn't one. Falling back here would be the machine

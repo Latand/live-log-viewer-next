@@ -828,8 +828,13 @@ export async function executeSpawnRequest(
        stopped holding. Recorded once the receipt exists, because that is the
        point past which this account is what the work runs on, and only for the
        account the request actually named: a degraded pin landed on a different
-       account and nobody chose that one. Within the pool it records nothing. */
-    if (requestedAccountId && account.accountId === requestedAccountId) {
+       account and nobody chose that one. Within the pool it records nothing.
+
+       `created` ONLY. A replay of the same `clientAttemptId` — a lost response
+       retried, an existing attempt resumed — is the same launch arriving twice,
+       not a second choice, and the journal is capped: duplicates evict the
+       older crossings it exists to keep. */
+    if (begun.kind === "created" && requestedAccountId && account.accountId === requestedAccountId) {
       attributeNamedAccountChoice({
         engine,
         project: spawnProject,

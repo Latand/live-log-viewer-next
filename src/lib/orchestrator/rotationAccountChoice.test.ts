@@ -306,11 +306,18 @@ test("a refused rotation leaves the incumbent seated and the refusal readable, w
   expect(seat.pending?.conversationId).toBeNull();
 });
 
-test("a rotation onto an unbound account is ATTRIBUTED, so the crossing is visible rather than silent", async () => {
-  /* The binding stops being a veto here, so it has to become a record: the
-     project view renders this journal beside the pool. Written by the launch
-     seam itself — `/api/spawn` — so this asserts the journal that seam appends
-     to, from the same explicit choice, with the record and the pool it read. */
+test("the crossing this rotation makes classifies as outside-pool against the real record", async () => {
+  /* WHAT THIS DOES AND DOES NOT DRIVE. The journal is appended by the launch
+     seam — `/api/spawn`, inside `executeSpawnRequest` — and this file's `spawn`
+     dependency stands in for that route, so the production call site is NOT on
+     this path and would not be missed here. `route.binding.test.ts` covers it,
+     and covers the in-pool case recording nothing.
+
+     What only this fixture has is the incident's own SHAPE: a seat rotating
+     onto an account this project's real binding record does not list. So what
+     is asserted is the classification that call site produces from it — the
+     reason, and the pool as it read at that moment — rather than the fact that
+     a rotation wrote a row. */
   seatIncumbent();
   dependencies();
   const { attributeNamedAccountChoice } = await import("@/lib/accounts/accountOverrides");

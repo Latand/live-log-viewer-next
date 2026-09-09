@@ -148,9 +148,19 @@ export async function resolveHealthySpawnAccount(
      explicit choice above already decided that. Filtering it out here would
      make the health pass answer `requestedExists: false` and quietly launch on
      the automatic account instead, which is the substitution this seam refuses
-     to make in every other branch. */
-  const accounts = listClaudeAccounts().filter((account) =>
-    allowed === null || allowed.has(account.id) || account.id === named);
+     to make in every other branch.
+
+     ON AN UNREADABLE RECORD THE NAMED ACCOUNT IS THE ONLY CANDIDATE. `allowed`
+     is null there because no pool could be READ, not because none was drawn —
+     and handing that null to the filter would put every Claude account in front
+     of the health pass, so a named-but-inadmissible account degrades onto one
+     the machine picked with the fence unread. That is the same thing the Codex
+     branch's `hasAutomatic` guard above refuses, one branch over. The choice
+     still stands; there is simply nothing behind it to fall back to. */
+  const accounts = recordUnreadable
+    ? listClaudeAccounts().filter((account) => account.id === named)
+    : listClaudeAccounts().filter((account) =>
+      allowed === null || allowed.has(account.id) || account.id === named);
   const requestedExists = named === null || accounts.some((account) => account.id === named);
   try {
     const selected = await selectHealthyClaudeAccount(

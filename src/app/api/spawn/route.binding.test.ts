@@ -71,6 +71,9 @@ async function spawn(
   /** The account the REQUEST names, when it names one — the board's launch
       draft, the orchestrator's rotate draft, `spawn_agent`. */
   requestedAccountId?: string,
+  /** A registry shared across calls, so a second request with the same
+      `clientAttemptId` is a REPLAY rather than a fresh launch. */
+  sharedStore?: InstanceType<typeof AgentRegistry>,
 ): Promise<{
   status: number;
   error: string;
@@ -82,7 +85,7 @@ async function spawn(
   projects: (string | null | undefined)[];
   receipts: number;
 }> {
-  const store = new AgentRegistry(path.join(SANDBOX, `${clientAttemptId}.json`));
+  const store = sharedStore ?? new AgentRegistry(path.join(SANDBOX, `${clientAttemptId}.json`));
   let accountResolutions = 0;
   /* Recorded inside the stub, because the route's own answer cannot show what
      it asked for — and what it asked for IS the fence at this seam. */
@@ -359,4 +362,37 @@ test("a launch onto an account the pool already contains records nothing", async
   expect(attempt.status).not.toBe(409);
   const { accountProjectOverrides } = await import("@/lib/accounts/accountOverrides");
   expect(accountProjectOverrides({ project })).toEqual([]);
+});
+
+test("a second request under the same attempt id appends no second crossing", async () => {
+  /* An idempotent retry — a lost response resent under the same
+     `clientAttemptId` — is the same launch arriving twice, not a second choice.
+     The journal is capped at 200 and drops its oldest entries, so a duplicate
+     evicts a crossing this record exists to keep.
+
+     WHAT THIS FIXTURE REACHES, stated because it is less than the guard covers:
+     the first launch here reserves its receipt (which is where the crossing is
+     recorded) and then dies further in on a stub the harness does not carry, so
+     the retry lands on the terminal-pinned-failure branch and answers 409. That
+     branch returns before the recording either way. The `begun.kind ===
+     "created"` gate in `executeSpawnRequest` is what covers the REPLAY branch,
+     which needs a first launch that settles — nothing in this file can produce
+     one. So this asserts the property, not the branch. */
+  const cwd = fs.mkdtempSync(path.join(SANDBOX, "named-replayed-"));
+  const project = projectForCwd(cwd)!;
+  fs.writeFileSync(RECORD, JSON.stringify({
+    schemaVersion: 1,
+    bindings: [{ engine: "claude", accountId: "acct-reserved", project, createdAt: "2026-09-10T00:00:00.000Z" }],
+  }), "utf8");
+  const store = new AgentRegistry(path.join(SANDBOX, "replayed-registry.json"));
+
+  const first = await spawn(cwd, "binding_named_replay_20260910", undefined, "acct-chosen-by-hand", store);
+  const second = await spawn(cwd, "binding_named_replay_20260910", undefined, "acct-chosen-by-hand", store);
+
+  /* One receipt across both requests: the second was the same launch, not a
+     new one, whichever branch answered it. */
+  expect(first.receipts).toBe(1);
+  expect(second.receipts).toBe(1);
+  const { accountProjectOverrides } = await import("@/lib/accounts/accountOverrides");
+  expect(accountProjectOverrides({ project })).toHaveLength(1);
 });

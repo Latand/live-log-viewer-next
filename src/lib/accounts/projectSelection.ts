@@ -91,21 +91,16 @@ import {
  * orchestrator's rotate draft, `spawn_agent`'s `accountId` — and the binding is
  * a default for the machine's own picks, never a veto on a person's. Such a
  * choice passes `requestedChoice: "explicit"` to `selectProjectAccount`, which
- * carries it out and reports the pool it crossed so the launch seam can
- * attribute it (`accountOverrides.ts`). Everything on the list above is
- * unchanged and still draws from the pool only.
+ * carries it out; the launch seam attributes the crossing against the record
+ * itself (`accountOverrides.ts`). Everything on the list above is unchanged and
+ * still draws from the pool only.
  */
 
 /** What #1279's rule decides for one launch, before any home or env is resolved. */
 export type ProjectAccountSelection =
   /** `accountId: null` means nothing constrained or preferred the choice, so the
-      engine's own default account stands.
-
-      `outsidePool` is present only for an EXPLICIT named choice the project's
-      pool does not contain: the choice stands (see `requestedChoice`) and the
-      pool as it read at that moment rides along, so the caller can attribute
-      the crossing rather than leave it invisible. */
-  | { kind: "available"; accountId: string | null; outsidePool?: string[] }
+      engine's own default account stands. */
+  | { kind: "available"; accountId: string | null }
   | { kind: "not_allowed"; accountId: string; allowedAccountIds: string[] }
   | { kind: "exhausted"; resetsAt: number | null; allowedAccountIds: string[] }
   | { kind: "unavailable"; allowedAccountIds: string[] };
@@ -180,10 +175,12 @@ export function selectProjectAccount(input: ProjectAccountSelectionInput): Proje
   const requestedId = input.requestedId?.trim() || null;
   if (requestedId && allowed !== null && !allowed.includes(requestedId)) {
     /* A control someone exercised is a capability, not a request the record
-       gets to veto — so it resolves, and carries the pool it crossed. */
-    if (input.requestedChoice === "explicit") {
-      return { kind: "available", accountId: requestedId, outsidePool: allowed };
-    }
+       gets to veto, so it resolves. The crossing is NOT reported back through
+       here: `attributeNamedAccountChoice` classifies it against the record at
+       the moment the launch is admitted, and that is one classifier for every
+       explicit seam — a second copy riding on this return value would be a
+       second place for the two to disagree. */
+    if (input.requestedChoice === "explicit") return { kind: "available", accountId: requestedId };
     return { kind: "not_allowed", accountId: requestedId, allowedAccountIds: allowed };
   }
   if (requestedId) return { kind: "available", accountId: requestedId };
