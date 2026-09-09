@@ -219,7 +219,7 @@ export async function executeSpawnRequest(
   const rejection = rejectCrossOrigin(req);
   if (rejection) return rejection;
 
-  let body: { engine?: unknown; model?: unknown; cwd?: unknown; prompt?: unknown; title?: unknown; images?: unknown; src?: unknown; parent?: unknown; parentConversationId?: unknown; effort?: unknown; fast?: unknown; accountId?: unknown; clientAttemptId?: unknown; role?: unknown; roleParams?: unknown; confirm?: unknown; reviews?: unknown; allowSubagents?: unknown; mcpServers?: unknown; plugins?: unknown; project?: unknown; supersedes?: unknown };
+  let body: { engine?: unknown; model?: unknown; cwd?: unknown; prompt?: unknown; title?: unknown; images?: unknown; src?: unknown; parent?: unknown; parentConversationId?: unknown; effort?: unknown; fast?: unknown; accountId?: unknown; clientAttemptId?: unknown; taskId?: unknown; role?: unknown; roleParams?: unknown; confirm?: unknown; reviews?: unknown; allowSubagents?: unknown; mcpServers?: unknown; plugins?: unknown; project?: unknown; supersedes?: unknown };
   try {
     body = (await req.json()) as typeof body;
   } catch {
@@ -561,6 +561,12 @@ export async function executeSpawnRequest(
     const launchDisplay = (!reportClassGrant && (userPrompt.trim() || images.length))
       ? { ["prompt"]: userPrompt, images: images.length, echo: prompt }
       : null;
+    /* The explicit task of a band-local «+ Agent» (#1586): the only launch
+       target the HTTP body alone knows. It rides on the reservation, where the
+       registry validates it and commits the membership in the same step it
+       uses for every other launch, so a task that does not exist aborts the
+       launch before anything is actuated. */
+    const explicitTaskIds = typeof body.taskId === "string" && body.taskId.trim() ? [body.taskId.trim()] : null;
     /* Both a runnable launch and an explicit-account preflight failure reserve
        the same durable launch identity. Keep the request assembled at this
        seam so the terminal receipt retains the lineage, origin, grants and
@@ -595,6 +601,7 @@ export async function executeSpawnRequest(
       launchProfile,
       clientAttemptId,
       requestDigest,
+      ...(explicitTaskIds ? { taskIds: explicitTaskIds } : {}),
       /* Durable launch DISPLAY payload (issue #614/#615): the RAW operator
          draft and canonical delivered echo persist through scan lag. */
       launchDisplay,

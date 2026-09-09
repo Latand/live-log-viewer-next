@@ -1,10 +1,8 @@
 import { NextRequest, type NextResponse } from "next/server";
 
-import { productionSpawnCommandDependencies, spawnSuggestions } from "@/lib/agent/spawnCommand";
+import { executeSpawnRequest, productionSpawnCommandDependencies, spawnSuggestions } from "@/lib/agent/spawnCommand";
 import type { SpawnResponse } from "@/lib/agent/spawnResponse";
 import type { ApiError } from "@/lib/types";
-
-import { executeAdmittedSpawnRequest } from "./membership";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -14,9 +12,9 @@ export async function GET(req: NextRequest) {
 }
 
 export const POST = Object.assign(
-  async (req: NextRequest): Promise<NextResponse<SpawnResponse | ApiError>> => await executeAdmittedSpawnRequest(req),
+  async (req: NextRequest): Promise<NextResponse<SpawnResponse | ApiError>> => await executeSpawnRequest(req),
   {
-    withDependencies: executeAdmittedSpawnRequest,
+    withDependencies: executeSpawnRequest,
     productionDependencies: productionSpawnCommandDependencies,
   },
 );

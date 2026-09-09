@@ -1,92 +1,107 @@
-import { expect, test } from "bun:test";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+import { afterAll, expect, test } from "bun:test";
 import { NextRequest } from "next/server";
 
 import type { AgentRegistry, SpawnBeginResult, SpawnRequest } from "@/lib/agent/registry";
-import { productionSpawnCommandDependencies } from "@/lib/agent/spawnCommand";
 
-import { admittedDependencies, admittedRegistry, executeAdmittedSpawnRequest, parseLaunchBody, type ParsedLaunch } from "./membership";
+import { POST } from "./route";
 
 /**
- * The band-local «+ Agent» names its task in the request body. That task rides
- * on the registry reservation for this request's attempt as its explicit
- * target, so the registry commits the membership in the same step it uses for
- * every launch. Nothing is committed here, and nothing else is touched.
+ * A band-local «+ Agent» (#1586) names the task it launches into, and the
+ * request body is the only place that task is known. What these pin is the one
+ * step that carries it: the task rides on the ordinary spawn request into the
+ * registry's receipt reservation, where the registry validates the target and
+ * commits the membership in the same transaction it uses for every other
+ * launch (`launchMembership.registry.test.ts` holds that half), so no agent
+ * starts outside every task and nothing is actuated before it is decided.
+ *
+ * Task ids and account names here are invented.
  */
 
-function fakeRegistry(result: SpawnBeginResult["kind"] = "created") {
-  const calls: SpawnRequest[] = [];
+const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), "llv-spawn-membership-"));
+const ORIGINAL_STATE = process.env.LLV_STATE_DIR;
+process.env.LLV_STATE_DIR = path.join(SANDBOX, "state");
+
+afterAll(() => {
+  if (ORIGINAL_STATE === undefined) delete process.env.LLV_STATE_DIR;
+  else process.env.LLV_STATE_DIR = ORIGINAL_STATE;
+  fs.rmSync(SANDBOX, { recursive: true, force: true });
+});
+
+/** The band the operator pressed «+ Agent» in. */
+const BAND = "task-band-atlas";
+
+const ACCOUNT = {
+  engine: "claude" as const,
+  accountId: "acct-atlas",
+  kind: "managed" as const,
+  home: path.join(SANDBOX, "account"),
+  transcriptRoot: path.join(SANDBOX, "projects"),
+  env: { NODE_ENV: "test" as const },
+};
+
+type SpawnRouteDependencies = NonNullable<Parameters<typeof POST.withDependencies>[1]>;
+
+/**
+ * One board launch, answered at the reservation. The reservation reports a
+ * conflict so the command stops there: what the request asked the registry to
+ * reserve is the whole of what this seam decides.
+ */
+async function launch(attempt: string, body: Record<string, unknown>, site = "same-origin"): Promise<{ status: number; reserved: SpawnRequest[] }> {
+  const reserved: SpawnRequest[] = [];
   const registry = {
     beginSpawnRequest(input: SpawnRequest): SpawnBeginResult {
-      calls.push(input);
-      return { kind: result, receipt: { launchId: "launch-1", conversationId: "conversation_one", clientAttemptId: input.clientAttemptId ?? null } } as unknown as SpawnBeginResult;
+      reserved.push(input);
+      return { kind: "conflict", receipt: { launchId: "launch-1", conversationId: "conversation_atlas", clientAttemptId: input.clientAttemptId ?? null } } as unknown as SpawnBeginResult;
     },
-    spawnReceiptForClientAttempt() { return null; },
+    spawnReceiptForClientAttempt: () => null,
   } as unknown as AgentRegistry;
-  return { registry, calls };
+  const dependencies = {
+    ...POST.productionDependencies,
+    registry: () => registry,
+    assertStructuredRuntime: () => {},
+    resolveHealthySpawnAccount: async () => ACCOUNT,
+    resolveSpawnAccount: () => ACCOUNT,
+    defer: () => {},
+  } as unknown as SpawnRouteDependencies;
+  const response = await POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
+    method: "POST",
+    headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json", "sec-fetch-site": site },
+    body: JSON.stringify({ title: "Chart the atlas", engine: "claude", model: "sonnet", cwd: SANDBOX, ["prompt"]: "chart it", clientAttemptId: attempt, ...body }),
+  }), dependencies);
+  return { status: response.status, reserved };
 }
 
-const launch: ParsedLaunch = { clientAttemptId: "attempt-1", taskId: "task-7" };
+test("the task named in the body is the launch's explicit target on the reservation", async () => {
+  const attempt = await launch("spawn_band_member", { taskId: BAND });
 
-test("the reservation for this attempt carries the request's task as its explicit target", () => {
-  const { registry, calls } = fakeRegistry();
-  const wrapped = admittedRegistry(registry, launch);
-  const begun = wrapped.beginSpawnRequest({ engine: "claude", cwd: "/repo", clientAttemptId: "attempt-1" } as SpawnRequest);
-  expect(begun.kind).toBe("created");
-  expect(calls).toEqual([{ engine: "claude", cwd: "/repo", clientAttemptId: "attempt-1", taskIds: ["task-7"] }]);
-  /* Other registry calls pass straight through. */
-  expect(wrapped.spawnReceiptForClientAttempt("x" as never)).toBeNull();
+  expect(attempt.status).toBe(409);
+  expect(attempt.reserved).toHaveLength(1);
+  expect(attempt.reserved[0]!.taskIds).toEqual([BAND]);
+  /* The launch is otherwise the one every other surface makes. */
+  expect(attempt.reserved[0]!.clientAttemptId).toBe("spawn_band_member");
 });
 
-test("a reservation for another attempt is forwarded untouched, and a request without a task wraps nothing", () => {
-  const { registry, calls } = fakeRegistry();
-  admittedRegistry(registry, launch).beginSpawnRequest({ engine: "claude", cwd: "/repo", clientAttemptId: "someone-else" } as SpawnRequest);
-  expect(calls[0]).toEqual({ engine: "claude", cwd: "/repo", clientAttemptId: "someone-else" });
-  expect(admittedRegistry(registry, { clientAttemptId: "attempt-1", taskId: null })).toBe(registry);
+test("a request that names no task, or names a blank one, reserves no target and keeps the membership the launch derives", async () => {
+  const none = await launch("spawn_band_none", {});
+  const blank = await launch("spawn_band_blank", { taskId: "   " });
+
+  expect(none.reserved[0]!.taskIds).toBeUndefined();
+  expect(blank.reserved[0]!.taskIds).toBeUndefined();
 });
 
-test("the dependencies wrapper hands the command one wrapped registry and leaves every other dependency alone", () => {
-  const { registry } = fakeRegistry();
-  const dependencies = { ...productionSpawnCommandDependencies, registry: () => registry };
-  const wrapped = admittedDependencies(dependencies, launch);
-  expect(wrapped.registry()).toBe(wrapped.registry());
-  expect(wrapped.registry()).not.toBe(registry);
-  expect(wrapped.spawnStructuredConversation).toBe(dependencies.spawnStructuredConversation);
+test("a task target is trimmed, so a padded id is the task it names", async () => {
+  const attempt = await launch("spawn_band_padded", { taskId: ` ${BAND} ` });
+
+  expect(attempt.reserved[0]!.taskIds).toEqual([BAND]);
 });
 
-test("a request without a task or an attempt key is passed through without a wrapped registry", async () => {
-  const seen: unknown[] = [];
-  const execute = async (_req: NextRequest, dependencies: unknown) => { seen.push(dependencies); return new Response(null, { status: 204 }) as never; };
-  await executeAdmittedSpawnRequest(
-    new NextRequest("http://127.0.0.1/api/spawn", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ engine: "codex", cwd: "/repo", ["prompt"]: "x", images: [] }) }),
-    productionSpawnCommandDependencies,
-    execute,
-  );
-  await executeAdmittedSpawnRequest(
-    new NextRequest("http://127.0.0.1/api/spawn", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ engine: "codex", cwd: "/repo", ["prompt"]: "x", images: [], clientAttemptId: "attempt-2" }) }),
-    productionSpawnCommandDependencies,
-    execute,
-  );
-  await executeAdmittedSpawnRequest(
-    new NextRequest("http://127.0.0.1/api/spawn", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ engine: "codex", cwd: "/repo", ["prompt"]: "x", images: [], clientAttemptId: "attempt-2", taskId: "task-9" }) }),
-    productionSpawnCommandDependencies,
-    execute,
-  );
-  expect(seen[0]).toBe(productionSpawnCommandDependencies);
-  expect(seen[1]).toBe(productionSpawnCommandDependencies);
-  expect(seen[2]).not.toBe(productionSpawnCommandDependencies);
-  expect(parseLaunchBody(null)).toBeNull();
-  expect(parseLaunchBody({ clientAttemptId: "  " })).toBeNull();
-  expect(parseLaunchBody({ clientAttemptId: "a", taskId: " t " })).toEqual({ clientAttemptId: "a", taskId: "t" });
-});
+test("a cross-site request is refused before any reservation", async () => {
+  const attempt = await launch("spawn_band_cross", { taskId: BAND }, "cross-site");
 
-test("a cross-site request is rejected by the command before any reservation", async () => {
-  const request = new NextRequest("http://127.0.0.1/api/spawn", {
-    method: "POST",
-    headers: { "content-type": "application/json", origin: "https://evil.example", host: "127.0.0.1", "sec-fetch-site": "cross-site" },
-    body: JSON.stringify({ engine: "claude", cwd: "/repo", ["prompt"]: "x", images: [], clientAttemptId: "attempt-cross", taskId: "task-1" }),
-  });
-  const { registry, calls } = fakeRegistry();
-  const response = await executeAdmittedSpawnRequest(request, { ...productionSpawnCommandDependencies, registry: () => registry });
-  expect(response.status).toBe(403);
-  expect(calls).toEqual([]);
+  expect(attempt.status).toBe(403);
+  expect(attempt.reserved).toEqual([]);
 });
