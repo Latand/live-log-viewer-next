@@ -340,6 +340,39 @@ test("a live agent deep in a tool stretch is running: freshness is the newest RE
   expect(snapshot.stalledCount).toBe(0);
 });
 
+test("a Codex turn re-hosted after a severed tool call reports turnState idle (#1589)", async () => {
+  const dir = sandbox();
+  const agentPath = path.join(dir, "session-rehosted.jsonl");
+  const rows = [
+    { type: "response_item", timestamp: new Date(NOW - 240_000).toISOString(), payload: { type: "function_call", call_id: "cut-off-by-the-restart" } },
+    { type: "event_msg", timestamp: new Date(NOW - 120_000).toISOString(), payload: { type: "task_started", turn_id: "continued-turn" } },
+    { type: "event_msg", timestamp: new Date(NOW - 31_000).toISOString(), payload: { type: "agent_message", message: "finished" } },
+    { type: "event_msg", timestamp: new Date(NOW - 30_000).toISOString(), payload: { type: "task_complete", turn_id: "continued-turn" } },
+  ];
+  fs.writeFileSync(agentPath, rows.map((row) => JSON.stringify(row)).join("\n") + "\n", "utf8");
+
+  /* The production evidence path, read for real: the severed call used to keep
+     this turn `busy` forever, which is what `agent_activity` reported while the
+     stage sat stranded. */
+  const evidence = await readLivenessTranscriptEvidence("codex", agentPath);
+  expect(evidence).toMatchObject({ turn: "idle", lastRecordTs: NOW - 30_000 });
+
+  const registry = {
+    entries: { "codex:session-rehosted": structuredEntry(agentPath, 4243) },
+    conversations: {},
+  } as unknown as RegistryFile;
+  const snapshot = await agentLivenessSnapshot({}, sources({
+    probe: { now: () => NOW, pidAlive: () => true, processIdentity: () => "start-token-of-a-dead-host" },
+    listFiles: async () => [fileEntry({ path: agentPath, mtime: (NOW - 30_000) / 1000 })],
+    registrySnapshot: () => registry,
+    pipelines: () => [],
+    transcriptEvidence: readLivenessTranscriptEvidence,
+  }));
+
+  expect(snapshot.conversations[0]).toMatchObject({ turnState: "idle", lifecycle: "waiting", reason: "host_alive_turn_idle" });
+  expect(snapshot.stalledCount).toBe(0);
+});
+
 test("a single-conversation query does no inventory sweep and reads the tail once (#645)", async () => {
   const agentPath = "/transcripts/named-session.jsonl";
   const described: string[] = [];

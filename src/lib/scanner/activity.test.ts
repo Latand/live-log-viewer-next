@@ -129,6 +129,50 @@ describe("turnStateFromRecords (codex)", () => {
     const records = [payload("task_complete"), payload("token_count"), payload("reasoning")];
     expect(turnStateFromRecords(records, "codex")).toBe("done");
   });
+
+  test("a tool call cut off before the continuation turn no longer holds the projection open (#1589)", () => {
+    /* The incident tail: a function_call the restart severed, then the
+       re-hosted continuation's own completed turn. `agent_activity` reads
+       turnState off this same projection, so `done` here is what makes it
+       report idle instead of a stage that never settles. */
+    const pathname = path.join(sandbox, "codex-rehosted-continuation.jsonl");
+    const records = [
+      { type: "response_item", timestamp: "2026-09-09T05:36:42.000Z", payload: { type: "function_call", call_id: "cut-off-by-the-restart" } },
+      { type: "event_msg", timestamp: "2026-09-09T05:38:45.000Z", payload: { type: "task_started", turn_id: "continued-turn" } },
+      { type: "event_msg", timestamp: "2026-09-09T05:40:17.000Z", payload: { type: "agent_message", message: "finished" } },
+      { type: "event_msg", timestamp: "2026-09-09T05:40:18.000Z", payload: { type: "task_complete", turn_id: "continued-turn" } },
+    ];
+    fs.writeFileSync(pathname, records.map((record) => JSON.stringify(record)).join("\n") + "\n");
+    const aged = Date.now() / 1000 - 3_600;
+    fs.utimesSync(pathname, aged, aged);
+    const stat = fs.statSync(pathname);
+
+    expect(turnStateFromRecords(records, "codex")).toBe("done");
+    expect(activityVerdict("codex-sessions", pathname, stat.mtimeMs / 1000, stat.size)).toMatchObject({
+      state: "idle",
+      reason: "jsonl_turn_completed",
+      complete: true,
+    });
+  });
+
+  test("a truncated window whose only tool evidence is an unmatched output stays open (#1589)", () => {
+    /* The other half of the same guard: nothing in this window is a boundary,
+       so the projection must keep the turn open rather than fall through to
+       the mtime heuristics. */
+    const pathname = path.join(sandbox, "codex-truncated-tool-output.jsonl");
+    const records = [
+      { type: "response_item", timestamp: "2026-09-09T07:00:00.000Z", payload: { type: "custom_tool_call_output", call_id: "call-above-the-window", output: "x" } },
+      { type: "event_msg", timestamp: "2026-09-09T07:00:01.000Z", payload: { type: "token_count" } },
+    ];
+    fs.writeFileSync(pathname, records.map((record) => JSON.stringify(record)).join("\n") + "\n");
+    const stat = fs.statSync(pathname);
+
+    expect(turnStateFromRecords(records, "codex")).toBe("busy");
+    expect(activityVerdict("codex-sessions", pathname, stat.mtimeMs / 1000, stat.size)).toMatchObject({
+      state: "live",
+      reason: "jsonl_turn_open",
+    });
+  });
 });
 
 describe("readStableTailRecords", () => {
