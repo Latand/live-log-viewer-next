@@ -316,6 +316,20 @@ test("dead pinned receipts block neither their own account nor any other (issue 
   expect(accountRemovalBlockers("codex", "other", DAYS_LATER)).toEqual([]);
 });
 
+/* The opposite guard of the case above. Dropping the probe-free pin claim may
+   not cost a pinned launch its blocker while that launch is still real: inside
+   the unproven-launch grace the fall-through to `receiptIsLive` must keep
+   blocking the account the pin names — and only that account. Turning the
+   fall-through into a `continue` would make removal race a live launch. */
+test("a pinned receipt still inside its launch blocks the account it names, and only that one", () => {
+  const store = registry();
+  const begun = beginLegacySpawnFixture(store, { engine: "codex", cwd: "/repo", accountId: "work", accountPin: true });
+  if (begun.kind !== "created") throw new Error("expected a launch receipt");
+
+  expect(accountRemovalBlockers("codex", "work")).toEqual(["live_sessions"]);
+  expect(accountRemovalBlockers("codex", "other")).toEqual([]);
+});
+
 test("dead history plus stale starting entries and receipts no longer block removal (issue #643)", () => {
   const store = registry();
   // Production shape: ~dozens of historical conversations whose latest generation
