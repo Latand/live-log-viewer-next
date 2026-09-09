@@ -564,6 +564,8 @@ export function layoutTaskBands(base: SchemeLayout, orderedBands: readonly TaskB
      the band has not been given yet would wrap a row that fits. */
   const maxInnerW = maxBandW - pad * 2;
   const minBandW = Math.min(maxBandW, BAND.minBandW * s);
+  const innerX0 = gutter + pad;
+  const innerRight = gutter + maxBandW - pad;
 
   const baseRect = new Map<string, SchemeRect>();
   for (const node of base.nodes) baseRect.set(node.file.path, node);
@@ -625,8 +627,6 @@ export function layoutTaskBands(base: SchemeLayout, orderedBands: readonly TaskB
     }
     items.push({ key: `add::${band.id}`, w: BAND.addW * s, h: (mode === "overview" ? BAND.chipH : BAND.addH) * s, kind: "add" });
 
-    const innerX0 = gutter + pad;
-    const innerRight = gutter + maxBandW - pad;
     let x = innerX0;
     let y = cursorY + headerH + pad;
     let rowH = 0;
