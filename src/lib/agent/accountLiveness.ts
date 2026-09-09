@@ -234,8 +234,16 @@ export function accountHasLiveSessions(
     if (entryIsLive(entry, probe)) return true;
   }
   for (const receipt of Object.values(file.receipts)) {
-    if (receipt.engine !== engine || !owned(receipt.accountId) && receipt.accountPin !== true) continue;
-    if (receipt.accountPin === true && OPEN_RECEIPT_STATES.has(receipt.state)) return true;
+    /* A pin that is still queued for account capacity is durable in-flight work
+       with nothing to probe yet: it will actuate on the account it names, so it
+       outranks liveness until its receipt settles. A pin WITHOUT a queued spawn
+       records only which account a launch would have used — it is no evidence
+       that anything runs, and treating it as such let receipts abandoned in an
+       open state weeks ago block removal for ever, on their own account and on
+       every other account of the engine (issue #1595). */
+    const queuedPin = receipt.accountPin === true && receipt.queuedPinnedSpawn !== null;
+    if (receipt.engine !== engine || !owned(receipt.accountId) && !queuedPin) continue;
+    if (queuedPin && OPEN_RECEIPT_STATES.has(receipt.state)) return true;
     if (receiptIsLive(file, receipt, probe)) return true;
   }
   return false;
