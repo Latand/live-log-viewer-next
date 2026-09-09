@@ -26,7 +26,10 @@ import { commitTaskMembership, type MembershipIdentity, type MembershipInput, ty
 
 export interface ReservedLaunch {
   engine: string;
-  cwd: string;
+  /** The launch directory, when the launch records one. A conversation the
+      Viewer adopted rather than spawned carries an empty durable profile, so a
+      resume successor reaches this reservation naming no directory at all. */
+  cwd: string | undefined;
   clientAttemptId?: string | null;
   explicitProject?: string | null;
   launchProfile?: { title?: string | null } | null;
@@ -69,7 +72,7 @@ export function launchMembershipInput(
   projectForCwd: (cwd: string) => string | null,
 ): MembershipInput {
   const identity = { launchId: receipt.launchId, conversationId: receipt.conversationId, clientAttemptId: launch.clientAttemptId ?? null, engine: engineOf(launch.engine) };
-  const project = launch.explicitProject?.trim() || projectForCwd(launch.cwd) || "other";
+  const project = launch.explicitProject?.trim() || projectForCwd(launch.cwd ?? "") || "other";
   const title = launch.launchProfile?.title?.trim() || launch.launchDisplay?.prompt || null;
   const launchOrigin = { kind: "launch" as const, key: launch.clientAttemptId ?? receipt.launchId };
   const explicit = (launch.taskIds ?? []).filter((id) => id.trim());
@@ -152,7 +155,9 @@ export function admitReservedLaunch(
     reserved launch is recovered for its first execution. */
 export interface RecoverableReceipt extends ReservedReceipt {
   engine: string;
-  cwd: string;
+  /** Absent for the same reason as {@link ReservedLaunch.cwd}: the reservation
+      recorded whatever directory the launch named, which may be none. */
+  cwd: string | undefined;
   clientAttemptId: string | null;
   explicitProject: string | null;
   launchProfile: { title?: string | null };

@@ -106,6 +106,19 @@ test("a recovered receipt re-establishes membership from its durable fields befo
   )).toThrow(LaunchMembershipError);
 });
 
+test("a launch that names no directory still admits, and the project derivation is never handed a missing cwd", () => {
+  const asked: string[] = [];
+  const derive = (cwd: string) => { asked.push(cwd); return cwd.trim() ? `derived:${cwd}` : null; };
+  const adopted = launchMembershipInput({ engine: "claude", cwd: undefined, clientAttemptId: null, purpose: "resume-successor" }, receipt, noPipelines, derive);
+  expect(asked).toEqual([""]);
+  expect(adopted.project).toBe("other");
+  const recovered = admitRecoveredLaunch(
+    { launchId: "launch-r", conversationId: "conversation_r", engine: "claude", cwd: undefined, clientAttemptId: null, explicitProject: null, launchProfile: {}, launchDisplay: null },
+    { commit: (input) => ({ ok: true, tasks: [], taskIds: [input.project], created: [], changed: false }), pipelineTaskIds: noPipelines, projectForCwd: derive },
+  );
+  expect(recovered.ok && recovered.taskIds).toEqual(["other"]);
+});
+
 test("an agent-initiated child inherits its parent's task; a flow reviewer names the implementer once even though it is parent and reviewed", () => {
   const child = launchMembershipInput({ engine: "claude", cwd: "/repo", clientAttemptId: "child-1", parentConversationId: "conversation_parent", parentArtifactPath: "/sessions/parent.jsonl", origin: { kind: "agent" } }, receipt, noPipelines, projectFor);
   expect(child.origin).toEqual({ kind: "launch", key: "child-1" });
