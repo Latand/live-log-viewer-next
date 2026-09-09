@@ -7,6 +7,7 @@ import { statePath } from "@/lib/configDir";
 import {
   captureProcessIdentity,
   processIdentityMayOwn,
+  processIdentityStatus,
   sameRecordedProcessIdentity,
   type ProcessIdentity,
 } from "@/lib/processIdentity";
@@ -164,6 +165,19 @@ export interface AgentRegistryEntry {
   pendingAction: "spawn" | "resume" | "handoff" | null;
   structuredHostOperationId?: string | null;
   updatedAt: string;
+}
+
+function hasCompleteProcessIdentity(identity: ProcessIdentity | null): identity is ProcessIdentity & {
+  startIdentity: string;
+  bootEpoch: string;
+} {
+  return identity !== null
+    && Number.isSafeInteger(identity.pid)
+    && identity.pid > 0
+    && typeof identity.startIdentity === "string"
+    && identity.startIdentity.length > 0
+    && typeof identity.bootEpoch === "string"
+    && identity.bootEpoch.length > 0;
 }
 
 /** Complete durable input for an explicit-account launch waiting on a known
@@ -5101,25 +5115,37 @@ export class AgentRegistry {
          registry remains authoritative for an active writer claim. Merge the
          live claim inside this mutation so synthesized evidence cannot clear
          ownership between its read and late-success settlement. */
-      const candidate = evidence && storedEvidence
-        && (storedEvidence.structuredHost?.process || storedEvidence.claimOwner) ? {
+      const candidate = evidence && storedEvidence ? {
         ...evidence,
-        host: storedEvidence.host,
-        structuredHost: storedEvidence.structuredHost,
-        claimEpoch: storedEvidence.claimEpoch,
-        claimOwner: storedEvidence.claimOwner,
-        pendingAction: storedEvidence.pendingAction,
+        ...(storedEvidence.structuredHostOperationId !== undefined
+          ? { structuredHostOperationId: storedEvidence.structuredHostOperationId }
+          : {}),
+        ...(storedEvidence.structuredHost?.process || storedEvidence.claimOwner ? {
+          host: storedEvidence.host,
+          structuredHost: storedEvidence.structuredHost,
+          claimEpoch: storedEvidence.claimEpoch,
+          claimOwner: storedEvidence.claimOwner,
+          pendingAction: storedEvidence.pendingAction,
+        } : {}),
       } : evidence ?? storedEvidence;
       if (!candidate
         || (receipt.key && sessionKeyId(receipt.key) !== sessionKeyId(candidate.key))
         || (receipt.artifactPath && receipt.artifactPath !== candidate.artifactPath)) {
         return { kind: "conflict", receipt: clone(receipt), code: "spawn_identity_conflict" };
       }
+      /* A route-recovered launch is terminal. Preserve only a handoff marker
+         that the incumbent writer deliberately set; every other action was
+         the launch's own stale publication marker and must not make the
+         completed host look as though it is still registering. */
+      const settledCandidate = {
+        ...candidate,
+        pendingAction: storedEvidence?.pendingAction === "handoff" ? "handoff" as const : null,
+      };
       if (receipt.state === "failed") {
         receipt.state = receipt.key ? "path-pending" : "starting";
         receipt.error = null;
       }
-      return this.settleSpawnInFile(file, launchId, candidate, "route-recovered");
+      return this.settleSpawnInFile(file, launchId, settledCandidate, "route-recovered");
     });
   }
 
@@ -5618,6 +5644,67 @@ export class AgentRegistry {
         const key = Object.values(file.entries).find((entry) => entry.artifactPath === receipt.artifactPath)?.key;
         if (key && liveIds.has(sessionKeyId(key))) receipt.state = "completed";
       }
+    });
+  }
+
+  /** Repairs only historical structured rows whose completed launch receipt
+      proves the exact current generation and whose full recorded ownership is
+      still live. This is intentionally a startup-only repair: an incomplete,
+      mismatched, handoff, or unverifiable row remains untouched. */
+  repairCompletedStructuredSpawnMarkers(): number {
+    const canRepair = (file: RegistryFile, entry: AgentRegistryEntry): boolean => {
+      if (entry.pendingAction !== "spawn"
+        || entry.host !== null
+        || entry.status === "dead"
+        || entry.status === "unhosted") return false;
+      const receiptCandidates = entry.structuredHostOperationId == null
+        ? Object.values(file.receipts)
+        : [file.receipts[entry.structuredHostOperationId]].filter((receipt): receipt is SpawnReceipt => Boolean(receipt));
+      const matchingReceipts = receiptCandidates.filter((receipt) =>
+        receipt.state === "completed"
+          && receipt.transport === "structured"
+          && receipt.purpose === "launch"
+          && receipt.engine === entry.key.engine
+          && receipt.cwd === entry.cwd
+          && receipt.accountId === entry.accountId
+          && receipt.key !== null
+          && sessionKeyId(receipt.key) === sessionKeyId(entry.key)
+          && receipt.artifactPath === entry.artifactPath);
+      if (matchingReceipts.length !== 1) return false;
+      const receipt = matchingReceipts[0]!;
+      const host = entry.structuredHost;
+      const process = host?.process ?? null;
+      const owner = structuredClaimIdentity(entry.claimOwner ?? "");
+      if (!host
+        || host.writerClaimEpoch !== entry.claimEpoch
+        || !process
+        || !owner
+        || !hasCompleteProcessIdentity(process)
+        || !hasCompleteProcessIdentity(owner)) return false;
+      const conversation = Object.values(file.conversations).find((candidate) =>
+        candidate.engine === entry.key.engine
+          && candidate.generations.at(-1)?.id === entry.key.sessionId
+          && !candidate.supersededBy);
+      if (!conversation || resolveConversationAlias(file, receipt.conversationId) !== conversation.id) return false;
+      /* `ownerAlive` is the registry's injected may-own fence. The status
+         checks add the stronger current identity proof, so PID-only or
+         otherwise unverifiable evidence cannot authorize a marker clear. */
+      return processIdentityStatus(process) === "alive"
+        && processIdentityStatus(owner) === "alive"
+        && this.ownerAlive(process)
+        && this.ownerAlive(owner);
+    };
+    const snapshot = this.readOnlySnapshot();
+    if (!Object.values(snapshot.entries).some((entry) => canRepair(snapshot, entry))) return 0;
+    return this.mutate((file) => {
+      let repaired = 0;
+      for (const entry of Object.values(file.entries)) {
+        if (!canRepair(file, entry)) continue;
+        entry.pendingAction = null;
+        entry.updatedAt = now();
+        repaired += 1;
+      }
+      return repaired;
     });
   }
 

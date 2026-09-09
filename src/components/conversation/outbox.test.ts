@@ -1884,8 +1884,17 @@ describe("issue 1538: possible dispatch survives a refresh", () => {
     enqueueOutbox("conv", { id: "k2", text: "still local", images: 0, at: 1_002 });
     resetOutboxForTests();
     expect(readOutbox("conv").map((entry) => [entry.id, entry.state])).toEqual([["k1", "delivering"], ["k2", "queued"]]);
-    expect(nextDispatch(readOutbox("conv"))).toBeNull();
+    /* k1 keeps its place, its key and its unknown fate — it is never replayed
+       and never presented as settled. What it does NOT keep is this browser's
+       wire fence. Holding it bounds nothing: a request that died before
+       admission has no operation, so no receipt can ever arrive to settle k1,
+       and every message the operator writes afterwards would queue behind it
+       for the rest of the conversation. k2 stays sendable. */
+    expect(nextDispatch(readOutbox("conv"))?.id).toBe("k2");
+    expect(readOutbox("conv")[0]).toMatchObject({ id: "k1", state: "delivering", deliveryUncertain: true });
     updateOutbox("conv", "k1", outboxReceiptPatch(readOutbox("conv")[0]!, "delivered", { at: new Date(1_500).toISOString(), operationId: "operation-k1", idempotencyKey: "k1" }, 2_000)!);
+    /* A genuine late receipt still settles the original. */
+    expect(readOutbox("conv")[0]!.state).toBe("delivered");
     expect(nextDispatch(readOutbox("conv"))?.id).toBe("k2");
     cancelOutbox("conv", "k2");
     expect(readOutbox("conv").some((entry) => entry.id === "k2")).toBe(false);
