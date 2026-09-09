@@ -2181,11 +2181,21 @@ test("mixed controller waits publish only the current busy retry time", async ()
   const firstRetryAfter = pipeline.runs[0]!.attempts[0]!.controllerWait!.retryAfter;
   expect(pipeline.stateDetail).toContain(firstRetryAfter);
 
+  Object.assign(h.ports, { structuredDeliveryPublication: () => "rebinding" as const });
+  advance(scheduled.at(-1)!);
+  await tickPipelines([], h.ports);
+  pipeline = loadPipelines()[0]!;
+  const rebindingRetryAfter = pipeline.runs[0]!.attempts[0]!.controllerWait!.retryAfter;
+  expect(rebindingRetryAfter).not.toBe(firstRetryAfter);
+  expect(pipeline.stateDetail).toBeNull();
+  expect(spawnCalls).toBe(1);
+
+  Object.assign(h.ports, { structuredDeliveryPublication: () => "ready" as const });
   advance(scheduled.at(-1)!);
   await tickPipelines([], h.ports);
   pipeline = loadPipelines()[0]!;
   const controllerRetryAfter = pipeline.runs[0]!.attempts[0]!.controllerWait!.retryAfter;
-  expect(controllerRetryAfter).not.toBe(firstRetryAfter);
+  expect(controllerRetryAfter).not.toBe(rebindingRetryAfter);
   expect(pipeline.stateDetail).toBeNull();
 
   advance(scheduled.at(-1)!);
@@ -2268,7 +2278,7 @@ test("a due busy wait survives a restarted controller race with one fresh host c
   }
 
   expect(scheduled).toEqual([1_000]);
-  expect(fs.readFileSync(claimsPath, "utf8").trim().split("\\n")).toHaveLength(1);
+  expect(fs.readFileSync(claimsPath, "utf8").trim().split("\n")).toHaveLength(1);
   const raced = loadPipelines()[0]!;
   expect(raced).toMatchObject({
     state: "running",

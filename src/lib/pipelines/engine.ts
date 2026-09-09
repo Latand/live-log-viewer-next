@@ -2120,6 +2120,7 @@ async function tickRunStage(
        engine launch before it can fail. */
     if (publication === "rebinding") {
       if (bookControllerWaitRound(attempt, activationNow, activationNow, ports) === "waiting") {
+        syncControllerWaitStateDetail(pipeline, attempt, null);
         persist();
         return;
       }
@@ -2232,11 +2233,7 @@ async function tickRunStage(
         }
         attempt.state = "pending";
         setCursorState(pipeline, stage.id, "pending");
-        if (isAccountMutationContention(controllerFailure)) {
-          pipeline.stateDetail = `stage spawn deferred: ${controllerFailureReason(controllerFailure)}; retry at ${attempt.controllerWait!.retryAfter}`;
-        } else if (pipeline.stateDetail?.startsWith("stage spawn deferred: ")) {
-          pipeline.stateDetail = null;
-        }
+        syncControllerWaitStateDetail(pipeline, attempt, controllerFailure);
         persist();
         return;
       }
@@ -3041,6 +3038,19 @@ function isAccountMutationContention(failure: string): boolean {
 
 function controllerFailureReason(failure: string): string {
   return failure.replace(/; retry shortly$/, "");
+}
+
+function syncControllerWaitStateDetail(
+  pipeline: Pipeline,
+  attempt: PipelineStageAttempt,
+  failure: string | null,
+): void {
+  const retryAfter = attempt.controllerWait?.retryAfter;
+  if (failure !== null && isAccountMutationContention(failure) && retryAfter !== undefined) {
+    pipeline.stateDetail = `stage spawn deferred: ${controllerFailureReason(failure)}; retry at ${retryAfter}`;
+  } else if (pipeline.stateDetail?.startsWith("stage spawn deferred: ")) {
+    pipeline.stateDetail = null;
+  }
 }
 
 function isTransientStructuredSpawnFailure(failure: string): boolean {
