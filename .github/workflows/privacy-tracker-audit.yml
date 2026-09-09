@@ -43,10 +43,28 @@ jobs:
 
       # A stalled apt mirror hung this step for 20+ minutes three times on
       # 2026-09-02 (#1456): fail fast with a hard timeout and one retry.
+      #
+      # The runner image also configures third-party apt sources this job never
+      # installs from. On 2026-09-09 Google's Chrome index served a Packages.gz
+      # that did not match the hash its own InRelease declared, and `apt-get
+      # update` fails as a whole when a single source fails, so both privacy
+      # jobs died before their gate ran, on every branch (#1605). All four
+      # packages come from the Ubuntu archives, so the update reads those
+      # sources alone and an index nothing here installs from can no longer
+      # block publication. Every apt error still fails the step, and a package
+      # missing from the Ubuntu archives still fails the install.
       - name: Install media inspection tools
         timeout-minutes: 4
         run: |
+          # Ubuntu 24.04 runner images keep the archives in deb822 form under
+          # sources.list.d; 22.04 and earlier keep them in sources.list.
+          ubuntu_sources="$(mktemp -d)"
+          if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
+            cp /etc/apt/sources.list.d/ubuntu.sources "$ubuntu_sources/"
+          fi
           APT_OPTS='-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30'
+          APT_OPTS="$APT_OPTS -o Dir::Etc::sourcelist=/etc/apt/sources.list"
+          APT_OPTS="$APT_OPTS -o Dir::Etc::sourceparts=$ubuntu_sources"
           for attempt in 1 2; do
             if sudo apt-get $APT_OPTS update \
               && sudo apt-get $APT_OPTS install --yes ffmpeg tesseract-ocr tesseract-ocr-eng tesseract-ocr-ukr; then
