@@ -255,6 +255,28 @@ async function panToFirstBand(page: Page): Promise<void> {
   }
 }
 
+/** Bring the open draft pane into the frame. The dense band's «+ Agent» sits
+    far below the fold, so the pane it opens is seated where its band is — above
+    the camera — and a frame taken from where the camera stands shows the
+    neighbouring band instead of the pane it is cited for. The measurement is
+    taken after this pan, so the numbers and the frame describe one view. */
+async function panToDraft(page: Page): Promise<void> {
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    const delta = await page.evaluate(() => {
+      const viewport = document.querySelector('[aria-label^="Agent board"]')!.getBoundingClientRect();
+      const draft = document.querySelector<HTMLElement>('[data-scheme-node^="draft::"]');
+      return draft ? draft.getBoundingClientRect().y - viewport.y - 48 : null;
+    });
+    if (delta === null || Math.abs(delta) < 2) return;
+    await page.evaluate((deltaY) => {
+      const viewport = document.querySelector('[aria-label^="Agent board"]')! as HTMLElement;
+      const box = viewport.getBoundingClientRect();
+      viewport.dispatchEvent(new WheelEvent("wheel", { deltaY, ctrlKey: false, bubbles: true, cancelable: true, clientX: box.x + box.width * 0.6, clientY: box.y + box.height * 0.6 }));
+    }, delta);
+    await page.waitForTimeout(120);
+  }
+}
+
 /** Ctrl+wheel exactly like a trackpad pinch: the camera's own handler reads it. */
 async function zoomTo(page: Page, target: number): Promise<number> {
   for (let attempt = 0; attempt < 6; attempt += 1) {
@@ -424,6 +446,7 @@ async function main(): Promise<void> {
                   document.querySelector<HTMLButtonElement>(`[data-scheme-band-task="${taskId}"] [data-scheme-band-add]`)!.click();
                 }, denseTask.id);
                 await page.waitForTimeout(600);
+                await panToDraft(page);
                 const fit = await page.evaluate(() => {
                   const viewport = document.querySelector('[aria-label^="Agent board"]')!.getBoundingClientRect();
                   const draft = document.querySelector<HTMLElement>('[data-scheme-node^="draft::"]');
@@ -447,6 +470,7 @@ async function main(): Promise<void> {
                    than the pane's natural 600px: the pane is scaled to fit. */
                 await page.setViewportSize({ width: 1024, height: 768 });
                 await page.waitForTimeout(500);
+                await panToDraft(page);
                 const narrow = await page.evaluate(() => {
                   const viewport = document.querySelector('[aria-label^="Agent board"]')!.getBoundingClientRect();
                   const draft = document.querySelector<HTMLElement>('[data-scheme-node^="draft::"]');
