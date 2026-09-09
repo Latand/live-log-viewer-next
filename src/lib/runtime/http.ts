@@ -15,7 +15,7 @@ import { parseRuntimeCommand } from "./commands";
 import { runtimePresentationReceipt, type RuntimeOperationKind } from "./contracts";
 import { runtimeEventsEnabled, runtimeEventsRolledBack, structuredHostsEnabled, RUNTIME_PLANE_ABSENT } from "./flags";
 import { readEvidence, type Evidence } from "./evidence";
-import { journalVerdict, resolveSendReceipt, runtimeReceiptForSend, SEND_DISCARDED_REASON, sendReceiptFor, type SendReceipt } from "./sendSettlement";
+import { canonicalReceiptMatches, journalVerdict, resolveSendReceipt, runtimeReceiptForSend, SEND_DISCARDED_REASON, sendReceiptFor, type SendReceipt } from "./sendSettlement";
 import { republishStructuredDeliveryHost } from "./structuredDeliveryController";
 import { recoverDeadStructuredConversation } from "./structuredRecovery";
 import { enqueueStructuredMessage } from "./structuredMessageDelivery";
@@ -569,7 +569,7 @@ export async function handleRuntimeRetry(
   if (!client) return NextResponse.json({ error: "runtime host socket is unavailable" }, { status: 503 });
   try {
     let nextIdempotencyKey: string | undefined;
-    let action: "retry-uncertain" | undefined;
+    let action: "retry-uncertain" | "reconcile-delivery" | undefined;
     const rawBody = await request.text();
     if (rawBody.trim()) {
       let value: { idempotencyKey?: unknown; action?: unknown };
@@ -592,10 +592,13 @@ export async function handleRuntimeRetry(
         nextIdempotencyKey = value.idempotencyKey;
       }
       if (value.action !== undefined) {
-        if (value.action !== "retry-uncertain") {
+        if (value.action !== "retry-uncertain" && value.action !== "reconcile-delivery") {
           return NextResponse.json({ error: "runtime retry action is invalid" }, { status: 400 });
         }
         action = value.action;
+      }
+      if (action === "reconcile-delivery" && Object.keys(value).some((key) => key !== "action")) {
+        return NextResponse.json({ error: "canonical reconciliation accepts only the original operation identity" }, { status: 400 });
       }
       if (action && nextIdempotencyKey) {
         return NextResponse.json({ error: "uncertain retry keeps the original idempotency key" }, { status: 400 });
@@ -618,6 +621,7 @@ export async function handleRuntimeRetry(
       return NextResponse.json({ error: "runtime operation does not support retry" }, { status: 409 });
     }
     if (previous.receipt.status === "failed" && previous.receipt.reason === SEND_DISCARDED_REASON) {
+      if (action === "reconcile-delivery") return NextResponse.json({ error: "discarded delivery cannot be reconciled" }, { status: 409 });
       const claim = await client.claimDeliveryAction(previous.operationId, "retry");
       return NextResponse.json({
         error: `runtime delivery ${claim.winner} already won; retry refused`,
@@ -626,6 +630,26 @@ export async function handleRuntimeRetry(
     const registry = (dependencies.registry ?? agentRegistry)();
     const deliverySnapshot = registry.readOnlySnapshot();
     const deliveryRecord = sendReceiptFor(deliverySnapshot, previous.operationId);
+    if (action === "reconcile-delivery") {
+      if (previous.operationId !== operationId || !deliveryRecord
+        || (deliveryRecord.state === "failed" && deliveryRecord.resend !== "verify-first")) {
+        return NextResponse.json({ error: "canonical reconciliation requires the original unresolved delivery" }, { status: 409 });
+      }
+      if (!client.reconcileDelivery) return NextResponse.json({ error: "canonical delivery reconciliation is unavailable" }, { status: 503 });
+      const owner = deliverySnapshot.deliveryOperationOwners[operationId];
+      if (!owner?.contentDigest || owner.clientMessageId !== previous.receipt.idempotencyKey
+        || deliveryRecord.conversationId !== previous.receipt.conversationId) {
+        return NextResponse.json({ error: "original delivery binding is inconsistent" }, { status: 409 });
+      }
+      const result = await client.reconcileDelivery(operationId, { conversationId: previous.receipt.conversationId,
+        idempotencyKey: owner.clientMessageId!, contentDigest: owner.contentDigest });
+      if (!canonicalReceiptMatches(deliverySnapshot, operationId, deliveryRecord, result.receipt)) {
+        return NextResponse.json({ error: "canonical delivery proof does not match the original binding" }, { status: 409 });
+      }
+      registry.recordDeliveryOutcomeForOperation(deliveryRecord.conversationId as `conversation_${string}`, operationId, "delivered", null, "delivered");
+      const send = await resolveSendReceipt(operationId, { registry, client });
+      return NextResponse.json({ operationId, receipt: runtimePresentationReceipt(result.receipt), send });
+    }
     if (previous.operationId === operationId
       && previous.receipt.status !== "failed"
       && previous.receipt.status !== "rejected"

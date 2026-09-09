@@ -1,3 +1,4 @@
+import type { RuntimeCanonicalDeliveryBinding } from "./contracts";
 import net from "node:net";
 
 import type { RuntimeDeliveryAction, RuntimeDeliveryActionClaim, RuntimeEventInput, RuntimeOperationCommand, RuntimeOperationResult, RuntimePendingEffect, RuntimeReceiptStatus, RuntimeReplay, RuntimeRetryOptions, RuntimeSnapshot, RuntimeSocketRequest, RuntimeSocketResponse, RuntimeTransitionOptions, ViewerDeploymentReceipt, ViewerDeploymentRequest, ViewerDeploymentStatus } from "./contracts";
@@ -93,6 +94,7 @@ export interface RuntimeHostClient {
   operationStatus(operationId: string, options?: { currentRetryLeaf?: boolean }): Promise<RuntimeOperationResult | null>;
   claimDeliveryAction(operationId: string, action: RuntimeDeliveryAction): Promise<RuntimeDeliveryActionClaim>;
   retryOperation(operationId: string, nextIdempotencyKey?: string, options?: RuntimeRetryOptions): Promise<RuntimeOperationResult>;
+  reconcileDelivery?(operationId: string, expected: RuntimeCanonicalDeliveryBinding): Promise<RuntimeOperationResult>;
   producerCursor(producerKind: string, eventKeyPrefix: string): Promise<number>;
   effectBatch(kinds?: readonly string[], afterEventSeq?: number): Promise<RuntimePendingEffect[]>;
   transitionOperation(
@@ -138,6 +140,9 @@ export class UnixRuntimeHostClient implements RuntimeHostClient {
         ? { requireHostedConversationId: options.requireHostedConversationId }
         : {}),
     }) as Promise<RuntimeOperationResult>;
+  }
+  reconcileDelivery(operationId: string, expected: RuntimeCanonicalDeliveryBinding): Promise<RuntimeOperationResult> {
+    return this.call("operation-reconcile-delivery", { operationId, expected }) as Promise<RuntimeOperationResult>;
   }
   producerCursor(producerKind: string, eventKeyPrefix: string): Promise<number> { return this.call("producer-cursor", { producerKind, eventKeyPrefix }) as Promise<number>; }
   effectBatch(kinds?: readonly string[], afterEventSeq = 0): Promise<RuntimePendingEffect[]> {

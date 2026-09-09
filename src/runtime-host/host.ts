@@ -126,6 +126,13 @@ export class RuntimeHost {
           String(request.params?.operationId ?? ""),
           action,
         );
+      } else if (request.method === "operation-reconcile-delivery") {
+        if (!this.structuredHosts) throw new Error("structured hosts are disabled");
+        const expected = request.params?.expected as { conversationId?: unknown; idempotencyKey?: unknown; contentDigest?: unknown } | undefined;
+        if (!expected || typeof expected.conversationId !== "string" || typeof expected.idempotencyKey !== "string"
+          || typeof expected.contentDigest !== "string" || !/^[a-f0-9]{64}$/.test(expected.contentDigest)) throw new Error("canonical delivery binding is invalid");
+        result = await this.journal.reconcileCanonicalDelivery(String(request.params?.operationId ?? ""), undefined,
+          { conversationId: expected.conversationId, idempotencyKey: expected.idempotencyKey, contentDigest: expected.contentDigest });
       } else if (request.method === "operation-retry") {
         if (!this.structuredHosts) throw new Error("structured hosts are disabled");
         const nextIdempotencyKey = request.params?.nextIdempotencyKey;

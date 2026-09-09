@@ -5158,3 +5158,89 @@ test("a host with no live call releases without a stray hangup", async () => {
   await host.release();
   expect(server.requests.some((request) => request.method === "thread/realtime/stop")).toBe(false);
 });
+
+
+test("UTF-8 split inside a completed user echo preserves the original payload and receipt", async () => {
+  const server = new FakeAppServer();
+  server.autoCompleteUserMessage = false;
+  const host = await CodexAppServerHost.start({ cwd: "/repo", eventStore: new MemoryEventStore(), spawnProcess: fakeSpawn(server) });
+  try {
+    const text = "A multiline instruction\nUnicode: т 🎯 漢字";
+    const sent = host.send({ id: "utf8-original-operation", text });
+    const outcome = sent.then((receipt) => ({ receipt }), (error: Error) => ({ error: error.message }));
+    await waitForCondition(() => server.requests.some((request) => request.method === "turn/start"), "start must reach fixture");
+    const request = server.requests.find((request) => request.method === "turn/start")!;
+    const content = (request.params as { input: unknown[] }).input;
+    const params = { threadId: host.identity.threadId, turnId: "turn-1",
+      item: { type: "userMessage", clientId: "utf8-original-operation", content } };
+    server.notify("item/started", params);
+    const frame = Buffer.from(JSON.stringify({ jsonrpc: "2.0", method: "item/completed", params }) + "\n");
+    const split = frame.indexOf(Buffer.from("т")) + 1;
+    expect(split).toBeGreaterThan(0);
+    server.stdout.write(frame.subarray(0, split));
+    server.stdout.write(frame.subarray(split));
+    expect(await outcome).toEqual({ receipt: { outcome: "turn-started", turnId: "turn-1" } });
+    expect(server.requests.filter((request) => request.method === "turn/start")).toHaveLength(1);
+  } finally { await host.release(); }
+});
+
+
+test("a poisoned confirmation cache needs exact canonical proof and never accepts a changed payload", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-canonical-repair-"));
+  const server = new FakeAppServer();
+  server.threadPath = path.join(directory, "thread.jsonl");
+  server.autoCompleteUserMessage = false;
+  const host = await CodexAppServerHost.start({ cwd: "/repo", eventStore: new MemoryEventStore(), spawnProcess: fakeSpawn(server) });
+  const entry = { id: "original-operation", text: "Original т instruction" };
+  try {
+    const send = host.send(entry).then((receipt) => ({ receipt }), (error: Error) => ({ error: error.message }));
+    await waitForCondition(() => server.requests.some((request) => request.method === "turn/start"), "start reaches fixture");
+    server.notify("item/completed", { threadId: host.identity.threadId, turnId: "turn-1",
+      item: { type: "userMessage", clientId: entry.id, content: [{ type: "text", text: encodeCodexStructuredUserText("Original �� instruction", undefined, undefined, undefined, deliveryDedup(entry.id)) }] } });
+    expect(await send).toHaveProperty("error");
+    await expect(host.send({ ...entry, text: "Original �� instruction" })).rejects.toThrow("different payload");
+    fs.writeFileSync(server.threadPath, JSON.stringify({ type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text",
+      text: encodeCodexStructuredUserText(entry.text, undefined, undefined, undefined, deliveryDedup(entry.id)) }] } }) + "\n");
+    expect(await host.send(entry)).toMatchObject({ outcome: "turn-started" });
+    await expect(host.send({ ...entry, text: "changed instruction" })).rejects.toThrow("different payload");
+    expect(server.requests.filter((request) => request.method === "turn/start")).toHaveLength(1);
+  } finally { await host.release(); fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
+
+for (const character of ["т", "漢", "🎯"]) test(`every UTF-8 split of ${character} preserves selected-context receipt identity`, async () => {
+  for (let offset = 1; offset < Buffer.byteLength(character); offset++) {
+    const server = new FakeAppServer();
+    server.autoCompleteUserMessage = false;
+    const host = await CodexAppServerHost.start({ cwd: "/repo", eventStore: new MemoryEventStore(), spawnProcess: fakeSpawn(server) });
+    try {
+      const entry = { id: `split-operation-${offset}`, text: `before ${character} after`, selectedContext: {
+        version: 1 as const, state: "selected" as const, conversationId: ["conversation", "selected"].join("_"), capturedAt: "2026-09-08T09:21:00.000Z" } };
+      const sent = host.send(entry);
+      await waitForCondition(() => server.requests.some((request) => request.method === "turn/start"), "start reaches fixture");
+      const request = server.requests.find((request) => request.method === "turn/start")!;
+      const frame = Buffer.from(JSON.stringify({ jsonrpc: "2.0", method: "item/completed", params: { threadId: host.identity.threadId,
+        turnId: "turn-1", item: { type: "userMessage", clientId: entry.id, content: (request.params as { input: unknown[] }).input } } }) + "\n");
+      const split = frame.indexOf(Buffer.from(character)) + offset;
+      server.stdout.write(frame.subarray(0, split));
+      server.stdout.write(frame.subarray(split));
+      expect(await sent).toMatchObject({ outcome: "turn-started" });
+      expect(await host.send(entry)).toMatchObject({ outcome: "turn-started" });
+      expect(server.requests.filter((request) => request.method === "turn/start")).toHaveLength(1);
+    } finally { await host.release(); }
+  }
+});
+
+test("stdout EOF flushes an incomplete UTF-8 frame as unverified without a delivery receipt", async () => {
+  const server = new FakeAppServer();
+  server.autoCompleteUserMessage = false;
+  const host = await CodexAppServerHost.start({ cwd: "/repo", eventStore: new MemoryEventStore(), spawnProcess: fakeSpawn(server) });
+  try {
+    const result = host.send({ id: "partial-operation", text: "т" }).then(() => "delivered", () => "unverified");
+    await waitForCondition(() => server.requests.some((request) => request.method === "turn/start"), "start reaches fixture");
+    const partial = Buffer.concat([Buffer.from('{"incomplete":"'), Buffer.from("т").subarray(0, 1)]);
+    server.stdout.end(partial);
+    expect(await result).toBe("unverified");
+    expect((await host.health()).status).toBe("dead");
+  } finally { await host.release(); }
+});

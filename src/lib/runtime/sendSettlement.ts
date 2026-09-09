@@ -539,18 +539,25 @@ export async function resolveSendReceipt(
 ): Promise<SendReceipt | null> {
   const registry = ports.registry ?? agentRegistry();
   const projected = sendReceiptFor(registry.readOnlySnapshot(), operationId);
-  if (!projected || projected.state !== "in-flight") return projected;
+  if (!projected) return projected;
+  const terminalUnknown = projected.state === "failed" && projected.resend === "verify-first";
+  if (projected.state !== "in-flight" && !terminalUnknown) return projected;
   const client = ports.client === undefined ? runtimeHostClient() : ports.client;
   /* The journal read, keeping whether it happened at all. A socket that is not
      there is the runtime host being unreachable, which is the same answer as a
      read that threw: nothing was asked, so nothing was learned. */
   const journal = client
     ? await readEvidence(
-      () => client.operationStatus(operationId, { currentRetryLeaf: true }),
+      () => client.operationStatus(operationId, { currentRetryLeaf: !terminalUnknown }),
       "runtime host is unavailable",
     )
     : unreadableEvidence("runtime host socket is unavailable");
   const receipt = journal.readable ? journal.value?.receipt ?? null : null;
+  if (terminalUnknown) {
+    if (!receipt || !canonicalReceiptMatches(registry.readOnlySnapshot(), operationId, projected, receipt)) return projected;
+    registry.recordDeliveryOutcomeForOperation(projected.conversationId as `conversation_${string}`, operationId, "delivered", null, "delivered");
+    return { ...projected, state: "delivered", reason: null, duplicateRisk: false, resend: "not-needed", settledAt: receipt.at, evidence: "delivery-journal" };
+  }
   const status = receipt?.status ?? null;
   const verdict = journalVerdict(status, receipt?.reason);
   if (verdict) return settleProjection(registry, operationId, projected, verdict);
@@ -731,30 +738,39 @@ export type OriginalSendEvidence =
   | { kind: "unreadable"; reason: string }
   | { kind: "contradictory" };
 
-/**
- * The CURRENT answer for one found operation, projected without writing.
- *
- * A durable record that is already terminal is the answer. One still in flight
- * is checked against the journal's current retry leaf, and a terminal verdict
- * there is REPORTED — never written back onto the reservation, never fenced,
- * never aged past a deadline. A journal that cannot be read leaves the durable
- * projection standing and says so. Where {@link resolveSendReceipt} may end a
- * send, this only looks at it.
- */
+/** Match the journal's canonical proof to the registry's immutable owner binding. */
+export function canonicalReceiptMatches(
+  file: RegistryFile, operationId: string, projected: SendReceipt, receipt: RuntimeOperationReceipt,
+): boolean {
+  const owner = file.deliveryOperationOwners[operationId];
+  return receipt.status === "delivered" && receipt.operationId === operationId
+    && receipt.conversationId === projected.conversationId && Boolean(receipt.canonicalDelivery)
+    && Boolean(owner && owner.clientMessageId === receipt.idempotencyKey
+      && owner.contentDigest === receipt.canonicalDelivery!.contentDigest);
+}
+
+/** Read current truth without writes. Only bound canonical proof can supersede
+    an unverified terminal projection; delivered truth remains absorbing. */
 async function projectCurrentSend(
   projected: SendReceipt,
   operationId: string,
   ports: SendSettlementPorts,
 ): Promise<Evidence<SendReceipt>> {
-  if (projected.state !== "in-flight") return { readable: true, value: projected };
+  const terminalUnknown = projected.state === "failed" && projected.resend === "verify-first";
+  if (projected.state !== "in-flight" && !terminalUnknown) return { readable: true, value: projected };
   const client = ports.client === undefined ? runtimeHostClient() : ports.client;
   if (!client) return { readable: true, value: { ...projected, evidence: "delivery-record" } };
   const journal = await readEvidence(
-    () => client.operationStatus(operationId, { currentRetryLeaf: true }),
+    () => client.operationStatus(operationId, { currentRetryLeaf: !terminalUnknown }),
     "runtime host is unavailable",
   );
   if (!journal.readable) return journal;
   const receipt = journal.value?.receipt ?? null;
+  if (terminalUnknown) {
+    const registry = ports.registry ?? agentRegistry();
+    if (!receipt || !canonicalReceiptMatches(registry.readOnlySnapshot(), operationId, projected, receipt)) return { readable: true, value: projected };
+    return { readable: true, value: { ...projected, state: "delivered", reason: null, duplicateRisk: false, resend: "not-needed", settledAt: receipt.at, evidence: "delivery-journal" } };
+  }
   const verdict = journalVerdict(receipt?.status ?? null, receipt?.reason);
   if (!verdict) return { readable: true, value: { ...projected, evidence: "delivery-journal" } };
   if (verdict.state === "delivered") {
