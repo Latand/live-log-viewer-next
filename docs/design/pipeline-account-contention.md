@@ -129,7 +129,7 @@ test("a stage spawn that meets a busy account lock waits inside its attempt and 
 });
 ```
 
-A second engine test covers exhaustion: the port throws the busy error on every call, the clock advances past the 30 s budget, and the pipeline parks with `stage spawn failed after N retries over Ss: account mutation is busy in this process; retry shortly`, `attempt.state: needs_decision`, still `launchId: null`, and no further scheduled tick. That is today's terminal shape with an honest sentence in front of it.
+A second engine test covers exhaustion: the port throws the busy error on every call, the clock advances past the 30 s budget, and the pipeline parks with `stage spawn failed after N retries over Ss: account mutation is busy in this process`, `attempt.state: needs_decision`, still `launchId: null`, and no further scheduled tick. That is today's terminal shape with an honest sentence in front of it.
 
 A third covers the cross-process wording: `new Error("account mutation is busy; retry shortly")` (what `acquireAsync` throws after its own 10 s at `accountMutation.ts:263`) is classified the same way. The classifier keys on the sentence prefix, not the class, because that variant is a plain `Error`.
 
