@@ -3314,7 +3314,7 @@ test("a wake stranded by a replaced seat is retired, and the successor's own wak
      carrying the proof that licensed the move. */
   const retired = fixture.row().retiredWakes;
   expect(retired).toHaveLength(1);
-  expect(retired[0]!.wake).toEqual(fixture.row().retiredWakes[0]!.wake);
+  expect(retired[0]!.wake).toEqual({ ...stranded, preparedAt: retired[0]!.wake.preparedAt });
   expect(retired[0]!.wake).toMatchObject({ clientMessageId: stranded.clientMessageId, seatEpoch: 140, operationId: null,
     text: stranded.text, commit: stranded.commit, dispatch: { state: "refused" } });
   expect(retired[0]!.supersededBy).toEqual({ conversationId: successor.conversationId, seatEpoch: 155 });
@@ -3482,7 +3482,7 @@ test("a retired attempt outliving the wake interval is carded once, under its ow
   const seat = { conversationId: SUCCESSOR, seatEpoch: 8, path: null };
   const rig = harness({ seat, pipelines: OPEN_LANE, state: { ...RECENT, seatEpoch: 8, retiredWakes: [entry] }, wakeState: "uncertain" });
   await runSeatTickCheck(PROJECT, rig.deps);
-  expect(rig.cards.map((entry_) => entry_.card)).toMatchObject([{ ref: "seat-tick-wake-unresolved", kind: "wake-unresolved", instance: entry.wake.clientMessageId }]);
+  expect(rig.cards.map((raised) => raised.card)).toMatchObject([{ ref: "seat-tick-wake-unresolved", kind: "wake-unresolved", instance: entry.wake.clientMessageId }]);
   expect(rig.cards[0]!.card.detail).toContain('last answered "uncertain"');
   expect(rig.cards[0]!.card.detail).toContain("never re-sent");
   expect(rig.cards[0]!.card.detail).toContain("no longer holds back this project's wakes");
