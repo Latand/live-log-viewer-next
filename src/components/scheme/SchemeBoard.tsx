@@ -878,10 +878,15 @@ export function SchemeBoard({
       setSelectingText(Boolean(selection && selection.rangeCount > 0 && !selection.isCollapsed && selection.anchorNode && root.contains(selection.anchorNode)));
     };
     document.addEventListener("selectionchange", onSelectionChange);
-    const observer = typeof MutationObserver === "undefined"
-      ? null
-      : new MutationObserver(() => setDisclosureOpen(root.querySelector(OPEN_DISCLOSURE) !== null));
+    const readDisclosure = () => setDisclosureOpen(root.querySelector(OPEN_DISCLOSURE) !== null);
+    const observer = typeof MutationObserver === "undefined" ? null : new MutationObserver(readDisclosure);
     observer?.observe(root, { subtree: true, childList: true, attributes: true, attributeFilter: ["aria-expanded", "open"] });
+    /* An observer only reports what changes AFTER it attaches. A disclosure or
+       menu that is already open when this effect re-attaches (the map-mode
+       crossing) would otherwise hold nothing until some unrelated mutation
+       fired, so the reading is taken once here, at attach. */
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- the attach-time reading of a state the observer reports from then on
+    readDisclosure();
     return () => {
       document.removeEventListener("selectionchange", onSelectionChange);
       observer?.disconnect();

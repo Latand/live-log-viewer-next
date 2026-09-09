@@ -30,6 +30,31 @@ class TestResizeObserver {
   unobserve() {}
   disconnect() {}
 }
+/* happy-dom 20.10.6 holds a mutation observer's callback only inside a
+   `WeakRef` (`MutationObserverListener`), and nothing else in the library
+   references it, so the first garbage collection after `observe()` silences
+   that observer permanently — under Bun that lands right after its first
+   delivery. A browser keeps reporting to an observer until it is disconnected,
+   and the board defers rank moves on the SECOND report (a disclosure opened
+   after the effect attached). The harness therefore hands happy-dom a
+   non-collecting reference for the duration of `observe()`; every other part
+   of its mutation machinery — subtree, childList, attribute filter,
+   disconnect — is the library's own. */
+class StrongRef<T> {
+  constructor(private readonly value: T) {}
+  deref(): T { return this.value; }
+}
+class TestMutationObserver extends dom.MutationObserver {
+  observe(...args: Parameters<InstanceType<typeof dom.MutationObserver>["observe"]>) {
+    const collecting = globalThis.WeakRef;
+    (globalThis as unknown as { WeakRef: unknown }).WeakRef = StrongRef;
+    try {
+      super.observe(...args);
+    } finally {
+      (globalThis as unknown as { WeakRef: unknown }).WeakRef = collecting;
+    }
+  }
+}
 (dom as unknown as { matchMedia: (query: string) => unknown }).matchMedia = () => ({
   matches: false, media: "", addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {}, onchange: null, dispatchEvent: () => false,
 });
@@ -51,7 +76,7 @@ Object.assign(globalThis, {
   sessionStorage: dom.sessionStorage,
   localStorage: dom.localStorage,
   ResizeObserver: TestResizeObserver,
-  MutationObserver: dom.MutationObserver,
+  MutationObserver: TestMutationObserver,
   IntersectionObserver: undefined,
   requestAnimationFrame: requestFrame,
   cancelAnimationFrame: (id: number) => dom.clearTimeout(id as never),
