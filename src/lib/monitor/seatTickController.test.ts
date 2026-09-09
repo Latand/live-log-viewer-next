@@ -3520,3 +3520,34 @@ test("a retirement line reads back from the seat tick journal (#1594)", () => {
   appendSeatTickRecord(record, file);
   expect(readSeatTickRecords(10, file)).toEqual([record]);
 });
+
+/* The one way retirement could put two wakes in front of one seat: a seat
+   re-designated BACK onto the conversation an earlier attempt was retired
+   against. That conversation is the seat again, so the fence is owed to it
+   again — and it is owed by the retired attempt, exactly as it would be by an
+   outstanding one. */
+test("a seat re-designated onto a conversation a retired attempt still names is fenced again (#1594)", async () => {
+  const entry = retiredEntry();
+  const rig = harness({
+    /* The retired attempt's own conversation, seated again at a higher epoch. */
+    seat: { conversationId: CONVERSATION, seatEpoch: 9, path: null },
+    pipelines: OPEN_LANE,
+    state: { ...OVERDUE, seatEpoch: 9, retiredWakes: [entry] },
+    wakeState: "uncertain",
+  });
+  const record = await runSeatTickCheck(PROJECT, rig.deps);
+  expect(rig.sent).toEqual([]);
+  expect(record).toMatchObject({ verdict: "wake", delivery: { outcome: "deferred-outstanding" } });
+  expect(rig.written.at(-1)!.retiredWakes).toEqual([entry]);
+
+  /* And a project whose seat is anywhere else is not fenced by it. */
+  const elsewhere = harness({
+    seat: { conversationId: SUCCESSOR, seatEpoch: 9, path: null },
+    pipelines: OPEN_LANE,
+    state: { ...OVERDUE, seatEpoch: 9, retiredWakes: [entry] },
+    wakeState: "uncertain",
+  });
+  await runSeatTickCheck(PROJECT, elsewhere.deps);
+  expect(elsewhere.sent).toHaveLength(1);
+  expect(elsewhere.sent[0]!.conversationId).toBe(SUCCESSOR);
+});

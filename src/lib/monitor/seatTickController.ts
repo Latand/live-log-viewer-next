@@ -934,7 +934,16 @@ async function check(
     /* A prepared wake retains its original key and payload until settlement,
        including across prompt changes and seat rotation. */
     const outstanding = state.outstandingWake;
-    const withheld = outstanding !== null;
+    /* Retirement releases the fence because the retired attempt is addressed to
+       a conversation that is no longer the seat (#1594). A seat re-designated
+       BACK onto that conversation makes it the seat again, and the fence is
+       owed to it again: a payload still queued for it and a wake raised now
+       would both reach one seat, which is the duplicate the fence exists for.
+       So the wake this project may raise is withheld by any attempt — kept or
+       retired — addressed to the conversation about to be woken. */
+    const seatConversation = input.seat.conversationId;
+    const withheld = outstanding !== null
+      || state.retiredWakes.some((entry) => entry.wake.conversationId === seatConversation);
     /* The cursor then moves past everything this check READ, not only what
        the message listed: the terminal events are the ones carried, and the
        routine progress between them is what the seat is deliberately not
