@@ -3660,3 +3660,46 @@ test("the retired release on affirmed absence turns on the transport call, never
     expect(rig.sent).toEqual([]);
   }
 });
+
+/* The two answers the retired reconcile can meet that nothing else exercises.
+   `dropped` is the one verdict that ends an obligation on the holder's word
+   alone, and `too-late` is the answer the whole withdrawal mechanism exists to
+   be able to give — the replaced seat may have received it. */
+test("a retired attempt the holder proves it never delivered is ended, and one it was already past is kept (#1594)", async () => {
+  const seat = { conversationId: SUCCESSOR, seatEpoch: 8, path: null };
+
+  /* Proven non-delivery ends the obligation, and credits nothing on the way
+     out: the successor was never told, so everything it named is still owed. */
+  const dropped = retiredEntry({ clientMessageId: "retired-dropped" });
+  const ended = harness({
+    seat, pipelines: OPEN_LANE,
+    state: { ...RECENT, seatEpoch: 8, eventsThrough: 12, retiredWakes: [dropped] },
+    wakeState: "dropped",
+  });
+  await runSeatTickCheck(PROJECT, ended.deps);
+  const line = ended.journal.find((entry) => entry.delivery?.clientMessageId === dropped.wake.clientMessageId)!;
+  expect(line).toMatchObject({ verdict: "dropped", seatEpoch: 7, delivery: { outcome: "dropped" } });
+  expect(line.detail).toContain("remain owed");
+  expect(ended.written.at(-1)!.retiredWakes).toEqual([]);
+  expect(ended.written.at(-1)!.eventsThrough).toBe(12);
+  expect(ended.written.at(-1)!.lastWakeAt).toBe(RECENT.lastWakeAt);
+  expect(ended.sent).toEqual([]);
+
+  /* A holder already past the point of taking it back settles nothing: the
+     replaced seat may have it, so the attempt is kept and asked again. The
+     board is what carries that, once — a keep-verdict line per retained
+     attempt per check would spend the journal's history on repetition. */
+  const late = retiredEntry({ clientMessageId: "retired-too-late" });
+  const kept = harness({
+    seat, pipelines: OPEN_LANE,
+    state: { ...RECENT, seatEpoch: 8, retiredWakes: [late] },
+    wakeState: "retained", withdrawal: "too-late",
+  });
+  await runSeatTickCheck(PROJECT, kept.deps);
+  expect(kept.withdrawn.map((call) => call.wake.clientMessageId)).toEqual([late.wake.clientMessageId]);
+  expect(kept.written.at(-1)!.retiredWakes).toEqual([late]);
+  expect(kept.journal.some((entry) => entry.delivery?.clientMessageId === late.wake.clientMessageId)).toBe(false);
+  expect(kept.cards.map((raised) => raised.card.instance)).toEqual([late.wake.clientMessageId]);
+  expect(kept.cards[0]!.card.detail).toContain('last answered "retained"');
+  expect(kept.sent).toEqual([]);
+});

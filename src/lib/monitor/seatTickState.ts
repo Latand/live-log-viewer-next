@@ -118,6 +118,14 @@ function normalizeOutstandingWake(value: unknown): SeatTickOutstandingWake | nul
  * that was is not evidence of anything. Dropping it costs nothing the journal
  * has not already recorded, and the bound is applied here so a row that grew
  * past it elsewhere is read back inside it.
+ *
+ * Note what is deliberately absent: {@link SeatTickAccounting.migrateLegacy}
+ * refuses to complete when normalization drops a legacy row's outstanding
+ * attempt, so an obligation is never lost to a silent decode. There is no
+ * counterpart here because no legacy file can carry this field — it postdates
+ * the JSON writer, and every write now goes through accounting. A legacy writer
+ * that ever reappears has to bring that guard with it, or the drop above stops
+ * being free.
  */
 function normalizeRetiredWakes(value: unknown): SeatTickRetiredWake[] {
   return (Array.isArray(value) ? value : []).flatMap((entry) => {

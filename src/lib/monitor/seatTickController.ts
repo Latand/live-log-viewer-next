@@ -127,6 +127,15 @@ export const SEAT_TICK_WAKE_UNRESOLVED_REF = "seat-tick-wake-unresolved";
  * {@link SEAT_TICK_RETIRED_WAKE_LIMIT} plus the one outstanding attempt, and a
  * card re-raised for the SAME attempt still finds its own card and rewrites
  * nothing.
+ *
+ * One expected effect at the release that carries this: a card standing under
+ * the old flat ref is no longer re-found — neither by the ref nor by the create
+ * receipt, which is derived from it — so an attempt already carded is carded
+ * once more under its own ref, and the old card stays open until an operator
+ * closes it. One duplicate per attempt already unresolved at the deploy, and
+ * none afterwards. Re-finding the old ref as well would mean carrying a lookup
+ * for a shape that exists only in the board's past, which is a worse trade than
+ * one stale card.
  */
 export const seatTickWakeUnresolvedRef = (clientMessageId: string): string =>
   `${SEAT_TICK_WAKE_UNRESOLVED_REF}-${crypto.createHash("sha256").update(clientMessageId).digest("hex").slice(0, 16)}`;
@@ -468,6 +477,12 @@ async function reconcileRetiredWakes(context: {
       reason = redactMonitorText(error instanceof Error ? error.message : "unknown error");
     }
     let settlement: RetiredSettlement | null = null;
+    /* The divergence named at the outstanding path's own `landed` branch: there
+       a landing commits even when the seat has been replaced, here it credits
+       nothing. This is the safe half of the disagreement and the reason it is
+       tolerable while #1604 is open — an obligation kept owed costs the
+       successor a repeat, an obligation discharged on a seat that never held it
+       costs the successor the instruction entirely. */
     if (observed === "landed") {
       settlement = { verdict: "landed", outcome: "landed",
         detail: "a wake retired to a superseded seat was delivered to it after all; nothing it carried is credited, because the seat that received it no longer holds this project, so every obligation it named is still owed and the successor's own wake carries it" };
@@ -490,6 +505,17 @@ async function reconcileRetiredWakes(context: {
       settlement = { verdict: "revoked", outcome: "unsent",
         detail: "the layer holding a wake retired to a superseded seat affirms it holds nothing under its key and no transport call is outstanding: the attempt is released unsent, and it is never re-dispatched because the seat it was prepared for has been replaced" };
     }
+    /* An answer that settles nothing leaves the board and no journal line —
+       which is where this path parts company with the outstanding one, and on
+       purpose. There a keep-verdict (`too-late`, `unknown`, `uncertain`) writes
+       a line every check, and it can afford to: a project has at most ONE
+       outstanding attempt, so that is one extra line per check. Here a project
+       may hold {@link SEAT_TICK_RETIRED_WAKE_LIMIT} of them, and twenty lines
+       per five-minute check would evict the journal's whole
+       `SEAT_TICK_RUN_HISTORY` of history in two checks — the audit trail
+       spent on repeating what has not changed. The standing condition is the
+       card's to carry, and the retirement line already recorded what the holder
+       last answered at the moment the attempt was retired. */
     if (!settlement) {
       const preparedAt = Date.parse(wake.preparedAt ?? entry.retiredAt);
       const overdue = Number.isFinite(preparedAt) && context.now - preparedAt >= context.wakeIntervalMs;
@@ -610,6 +636,17 @@ async function reconcileOutstandingWake(context: {
   }
   let settlement: WakeSettlement | null = null;
   let redispatched: string | null = null;
+  /* A landing is asked about before a replacement, so a wake that reaches a
+     conversation the project has since replaced still commits here — the stamp,
+     the cursor and every child it named. That is not what the retired path
+     does with the same physical event (see `reconcileRetiredWakes`), and the
+     two are reachable for one attempt depending only on whether an earlier
+     check retired it first. Both readings are defensible: this one discharges
+     the obligation because SOMEONE was told, the retired one keeps it owed
+     because the successor was not, and the retired one is the safe direction —
+     at worst the successor is told again. What decides between them is a
+     question about what "told" means across a rotation, not a question about
+     this branch, so it is not settled here: #1604. */
   if (observed === "landed") {
     settlement = { verdict: "landed", outcome: "landed", row: "commit",
       detail: "a wake the delivery layer had kept reached the seat; the wake stamp and the event cursor move now, on the plan the check that raised it wrote down" };
