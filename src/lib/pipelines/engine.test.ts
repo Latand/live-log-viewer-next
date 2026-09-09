@@ -6474,6 +6474,92 @@ function readFixtures(h: ReturnType<typeof harness>, fixtures: Record<string, st
   };
 }
 
+/** The #1589 production tail, in the order the incident wrote it: a
+    `function_call` the deploy cut off mid-flight, the standing continuation
+    prompt startup delivered, and the re-hosted turn that finished with a
+    fenced verdict. */
+function severedToolTranscript(name: string): string {
+  return stageTranscript(name, [
+    { timestamp: "2026-09-09T05:36:42.000Z", type: "response_item", payload: { type: "function_call", call_id: "cut-off-by-the-restart" } },
+    { timestamp: "2026-09-09T05:38:44.000Z", type: "event_msg", payload: { type: "user_message", message: "Continue the interrupted turn from the transcript." } },
+    { timestamp: "2026-09-09T05:38:45.000Z", type: "event_msg", payload: { type: "task_started", turn_id: "continued-turn" } },
+    { timestamp: "2026-09-09T05:40:17.000Z", type: "event_msg", payload: { type: "agent_message", message: PASS_TEXT } },
+    { timestamp: "2026-09-09T05:40:18.000Z", type: "event_msg", payload: { type: "task_complete", turn_id: "continued-turn" } },
+  ]);
+}
+
+/** A tail window that begins inside an oversized tool output, so the matching
+    `function_call` and every lifecycle boundary sit above it. Everything the
+    engine can see is mid-turn — including a message that parses as a verdict. */
+function truncatedMidTurnTranscript(name: string): string {
+  return stageTranscript(name, [
+    { timestamp: "2026-09-09T08:00:00.000Z", type: "response_item", payload: { type: "function_call", call_id: "oversized" } },
+    { timestamp: "2026-09-09T08:00:01.000Z", type: "event_msg", payload: { type: "agent_reasoning", text: "r".repeat(200_000) } },
+    { timestamp: "2026-09-09T08:00:02.000Z", type: "event_msg", payload: { type: "agent_message", message: PASS_TEXT } },
+    { timestamp: "2026-09-09T08:00:03.000Z", type: "response_item", payload: { type: "custom_tool_call_output", call_id: "oversized", output: "x".repeat(40_000) } },
+    { timestamp: "2026-09-09T08:00:04.000Z", type: "event_msg", payload: { type: "token_count" } },
+  ]);
+}
+
+test("a re-hosted Codex continuation settles once and activates the next stage exactly once (#1589)", async () => {
+  const h = harness();
+  await runningStructuredStage(h);
+  h.setConversationActive(false);
+  /* Through the real projection over the real fixture, so the assertion fails
+     for the reason the incident had rather than for a hand-shaped map entry. */
+  readFixtures(h, { "/codex/stage-1.jsonl": severedToolTranscript("issue-1589-severed-tool") });
+
+  await tickPipelines([], h.ports);
+
+  const settled = loadPipelines()[0]!;
+  expect(settled.runs[0]!.attempts).toHaveLength(1);
+  expect(settled.runs[0]!.attempts[0]).toMatchObject({
+    state: "passed",
+    verdict: { status: "pass", confidence: 0.9 },
+  });
+  /* No recovery misses were spent, so nothing asked the operator anything. */
+  expect(settled.runs[0]!.attempts[0]!.verdictRecovery).toBeUndefined();
+  expect(settled).toMatchObject({ state: "running", stateDetail: null });
+  expect(settled.cursor).toMatchObject({ stageId: "build", state: "pending" });
+  expect(settled.lastPassedCommit).toBe(STAGE_HEAD);
+
+  await tickPipelines([], h.ports);
+
+  const advanced = loadPipelines()[0]!;
+  expect(advanced.runs[1]!.attempts).toHaveLength(1);
+  expect(h.calls.filter((call) => call.startsWith("spawn:"))).toHaveLength(2);
+
+  /* A third tick is the exactly-once check: no second settlement, no second
+     attempt on either stage, no second spawn. */
+  await tickPipelines([], h.ports);
+
+  const stable = loadPipelines()[0]!;
+  expect(stable.runs[0]!.attempts).toHaveLength(1);
+  expect(stable.runs[1]!.attempts).toHaveLength(1);
+  expect(h.calls.filter((call) => call.startsWith("spawn:"))).toHaveLength(2);
+  expect(stable).toMatchObject({ state: "running", stateDetail: null });
+});
+
+test("a truncated mid-turn window cannot settle a structured stage on its trailing message (#1589)", async () => {
+  const h = harness();
+  await runningStructuredStage(h);
+  h.setConversationActive(false);
+  readFixtures(h, { "/codex/stage-1.jsonl": truncatedMidTurnTranscript("issue-1589-truncated-mid-turn") });
+
+  /* The scan does have the transcript and its trailing message parses as a
+     verdict; only the busy turn projection stands between them and a
+     settlement over work that is still running. */
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+
+  const current = loadPipelines()[0]!;
+  expect(current.runs[0]!.attempts).toHaveLength(1);
+  expect(current.runs[0]!.attempts[0]).toMatchObject({ state: "running", completedAt: null });
+  expect(current.runs[1]!.attempts).toHaveLength(0);
+  expect(current.cursor?.stageId).toBe("plan");
+  expect(h.calls.filter((call) => call.startsWith("spawn:"))).toHaveLength(1);
+});
+
 function usageLimitPorts(
   h: ReturnType<typeof harness>,
   resolution: ReturnType<typeof accountManager.resolveProjectSpawn>,
