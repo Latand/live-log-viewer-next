@@ -200,6 +200,14 @@ export type RuntimeReceipt = RuntimeOperationReceipt;
 export interface RuntimeTransitionOptions {
   /** Compare-and-set fence evaluated inside the journal write transaction. */
   fromStatuses?: readonly RuntimeReceiptStatus[];
+  /** Marks a terminal transition as owed a durable projection, inside the same
+      write transaction that commits it (#1612). The caller is saying: the
+      answer to this call is what carries the outcome into the delivery record,
+      so the receipt has to outlive compaction until the projection is
+      acknowledged — the acknowledgement is the one thing that can be lost
+      while the outcome itself is already committed. A runtime host from before
+      this option ignores it and retains nothing extra. */
+  awaitProjection?: boolean;
 }
 
 export function runtimePresentationReceipt(receipt: RuntimeOperationReceipt): RuntimeOperationReceipt {
@@ -725,7 +733,7 @@ export interface RuntimeReplay {
 
 export interface RuntimeSocketRequest {
   id: string;
-  method: "runtime-host-health" | "snapshot" | "events" | "wait" | "append" | "operation" | "command" | "operation-status" | "operation-delivery-action" | "operation-retry" | "effect-batch" | "operation-transition" | "producer-cursor" | "viewer-deployment-request" | "viewer-deployment-read" | "viewer-deployment-cancel" | "mcp-health-probe-admission";
+  method: "runtime-host-health" | "snapshot" | "events" | "wait" | "append" | "operation" | "command" | "operation-status" | "operation-delivery-action" | "operation-retry" | "effect-batch" | "operation-transition" | "operation-projection-ack" | "producer-cursor" | "viewer-deployment-request" | "viewer-deployment-read" | "viewer-deployment-cancel" | "mcp-health-probe-admission";
   params?: Record<string, unknown>;
 }
 

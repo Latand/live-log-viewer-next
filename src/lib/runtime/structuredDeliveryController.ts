@@ -8,7 +8,7 @@ import { BRANCH_SHARED_HOST_ERROR, branchSharesRootHost } from "@/lib/conversati
 import { captureProcessIdentity } from "@/lib/processIdentity";
 
 import { isRuntimeHostTransportFailure, runtimeHostClient, type RuntimeHostClient } from "./client";
-import { runtimeSettingsCapability, type RuntimeEventInput, type RuntimeSession } from "./contracts";
+import { runtimeSettingsCapability, type RuntimeEventInput, type RuntimeOperationReceipt, type RuntimeSession } from "./contracts";
 import { readEvidence } from "./evidence";
 import type { EngineHost, HostState } from "./engineHost";
 import { StructuredDeliveryQueue } from "./structuredDeliveryQueue";
@@ -59,6 +59,8 @@ interface HostRegistration {
 const DELIVERY_DRAIN_COALESCE_MS = 25;
 const DELIVERY_DRAIN_MAX_BACKOFF_MS = 1_000;
 const TERMINAL_RECONCILIATION_PAGE_SIZE = 16;
+/** One socket frame's worth of acknowledgements (#1612). */
+const TERMINAL_ACKNOWLEDGEMENT_BATCH_SIZE = 128;
 const TERMINAL_RECONCILIATION_SETTLEMENT_BATCH_SIZE = 256;
 
 /* Next standalone can evaluate instrumentation and route handlers in separate
@@ -231,6 +233,152 @@ async function yieldControllerTurn(): Promise<void> {
   await new Promise<void>((resolve) => setTimeout(resolve, 0));
 }
 
+interface TerminalDeliveryOutcome {
+  conversationId: `conversation_${string}`;
+  operationId: string;
+  state: "delivered" | "failed";
+  error: string | null;
+  disposition: NonNullable<Parameters<AgentRegistry["recordDeliveryOutcomeForOperation"]>[4]>;
+  /** The durable operation the journal answered for — the retry leaf, where a
+      retry created one. Its retention is what the acknowledgement releases. */
+  receiptOperationId: string;
+}
+
+/**
+ * The one reading of a runtime receipt as a durable delivery outcome.
+ *
+ * Every repair here goes through it — the startup sweep and the drain-time
+ * repair of a lost acknowledgement — so "what does this receipt settle, and
+ * against which reservation" has one answer rather than two that can drift.
+ * It proves nothing on its own: an open status, an absent receipt, a receipt
+ * naming a different conversation all return null, and the caller leaves the
+ * record exactly as it found it.
+ */
+function terminalDeliveryOutcome(
+  registry: AgentRegistry,
+  result: { operationId: string; receipt: { status: RuntimeOperationReceipt["status"]; reason?: string | null; conversationId: string; presentationOperationId?: string } },
+  /** The reservation this receipt is being read for. `conversationId` is the
+      target it must agree with, and null where the caller came from the receipt
+      rather than from a reservation — there the registry's own (conversation,
+      operation) keying is what refuses a row under another target. */
+  expected: { conversationId: `conversation_${string}` | null; operationId: string },
+): TerminalDeliveryOutcome | null {
+  /* The same classifier the receipt query reads the journal through: what a
+     status PROVES about a send is one question with one answer, and
+     `uncertain` — the send was handed to the engine and never answered for —
+     is the one whose disposition stops a later receipt from calling a resend
+     safe (#1131). */
+  const verdict = journalVerdict(result.receipt.status, result.receipt.reason);
+  if (!verdict) return null;
+  const receiptConversationId = result.receipt.conversationId;
+  if (!receiptConversationId.startsWith("conversation_")) return null;
+  const conversationId = receiptConversationId as `conversation_${string}`;
+  if (expected.conversationId
+    && registry.canonicalConversationId(conversationId) !== registry.canonicalConversationId(expected.conversationId)) {
+    console.error("[structured delivery] terminal receipt conversation mismatch", {
+      operationId: expected.operationId,
+      deliveryConversationId: expected.conversationId,
+      receiptConversationId,
+    });
+    return null;
+  }
+  return {
+    conversationId,
+    /* The identity the reservation was made under, never the retry leaf the
+       journal answered from: the delivery record is keyed on what the operator
+       submitted. */
+    operationId: result.receipt.presentationOperationId ?? expected.operationId,
+    state: verdict.state,
+    /* The journal's own words where it has them, and the settlement's
+       where the status IS the reason. */
+    error: verdict.disposition === "unverified" ? verdict.reason : result.receipt.reason ?? null,
+    disposition: verdict.disposition,
+    receiptOperationId: result.operationId,
+  };
+}
+
+/**
+ * Releases the journal's retention of receipts whose outcome now lives in the
+ * durable delivery record (#1612).
+ *
+ * Failure is the safe direction and is therefore swallowed: the receipt stays
+ * retained, which costs one row and repairs itself at the cap, whereas a throw
+ * here would abort a drain over evidence that has already been consumed. A
+ * runtime host from before this method answers "unsupported", which is the same
+ * no-op — the retention it never took needs no release.
+ */
+async function acknowledgeTerminalProjection(
+  client: RuntimeHostClient,
+  operationIds: readonly string[],
+): Promise<void> {
+  if (operationIds.length === 0 || typeof client.acknowledgeTerminalProjection !== "function") return;
+  try {
+    for (let offset = 0; offset < operationIds.length; offset += TERMINAL_ACKNOWLEDGEMENT_BATCH_SIZE) {
+      await client.acknowledgeTerminalProjection(operationIds.slice(offset, offset + TERMINAL_ACKNOWLEDGEMENT_BATCH_SIZE));
+    }
+  } catch (error) {
+    console.error("[structured delivery] terminal projection acknowledgement failed", {
+      operationIds: operationIds.length,
+      error,
+    });
+  }
+}
+
+/**
+ * Carries the outcome of ONE operation whose transition acknowledgement was
+ * lost into its durable delivery record (#1612).
+ *
+ * It re-reads the journal rather than trusting the transition the caller
+ * believed it wrote: the whole failure is that the caller does not know what
+ * landed. An unreadable status, a receipt that is not terminal, a receipt that
+ * names another conversation, and a reservation the registry no longer has all
+ * leave the record alone — and only the first of those is a reason to ask for
+ * another pass, because the others are answers rather than outages.
+ *
+ * Returns whether the fate was established, which is a different question from
+ * whether a reservation moved: an operation with no reservation left to settle
+ * is established and acknowledged, because nothing will ever project it.
+ */
+async function projectLostTerminalAcknowledgement(
+  registry: AgentRegistry,
+  client: RuntimeHostClient,
+  operationId: string,
+): Promise<boolean> {
+  let result: Awaited<ReturnType<RuntimeHostClient["operationStatus"]>>;
+  try {
+    result = await client.operationStatus(operationId, { currentRetryLeaf: true });
+  } catch (error) {
+    console.error("[structured delivery] lost terminal acknowledgement could not be read", { operationId, error });
+    return false;
+  }
+  if (!result) {
+    /* The receipt is gone. Under this repair's own retention it cannot be gone
+       while a projection is owed, so this is a receipt that was already
+       projected, or one released past the retention cap. Absence proves
+       nothing about execution and settles nothing (#1612). */
+    return true;
+  }
+  const outcome = terminalDeliveryOutcome(registry, result, { conversationId: null, operationId });
+  if (!outcome) return true;
+  try {
+    registry.recordDeliveryOutcomeForOperation(
+      outcome.conversationId,
+      outcome.operationId,
+      outcome.state,
+      outcome.error,
+      outcome.disposition,
+    );
+  } catch (error) {
+    console.error("[structured delivery] lost terminal acknowledgement could not be projected", {
+      operationId,
+      error,
+    });
+    return false;
+  }
+  await acknowledgeTerminalProjection(client, [outcome.receiptOperationId]);
+  return true;
+}
+
 async function reconcileTerminalDeliveries(
   registry: AgentRegistry,
   client: RuntimeHostClient,
@@ -239,9 +387,13 @@ async function reconcileTerminalDeliveries(
   const unsettledDeliveries = Object.values(registry.readOnlySnapshot().heldDeliveries)
     .filter((delivery) => delivery.state === "delivery-uncertain" || delivery.state === "failed");
   const pendingOutcomes: Parameters<AgentRegistry["recordDeliveryOutcomesForOperations"]>[0][number][] = [];
-  const flushOutcomes = () => {
+  const pendingAcknowledgements: string[] = [];
+  const flushOutcomes = async () => {
     if (pendingOutcomes.length === 0) return;
     registry.recordDeliveryOutcomesForOperations(pendingOutcomes.splice(0));
+    /* Only after the settlement is durable: the journal's retention is what
+       stands in for it until then (#1612). */
+    await acknowledgeTerminalProjection(client, pendingAcknowledgements.splice(0));
   };
   for (let offset = 0; offset < unsettledDeliveries.length && isCurrent(); offset += TERMINAL_RECONCILIATION_PAGE_SIZE) {
     const page = unsettledDeliveries.slice(offset, offset + TERMINAL_RECONCILIATION_PAGE_SIZE);
@@ -249,34 +401,13 @@ async function reconcileTerminalDeliveries(
       try {
         const result = await client.operationStatus(delivery.command.operationId, { currentRetryLeaf: true });
         if (!result) return null;
-        /* The same classifier the receipt query reads the journal through:
-           what a status PROVES about a send is one question with one answer,
-           and `uncertain` — the send was handed to the engine and never
-           answered for — is the one whose disposition stops a later receipt
-           from calling a resend safe (#1131). */
-        const verdict = journalVerdict(result.receipt.status, result.receipt.reason);
-        if (!verdict) return null;
-        const receiptConversationId = result.receipt.conversationId;
-        if (!receiptConversationId.startsWith("conversation_")
-          || registry.canonicalConversationId(receiptConversationId as `conversation_${string}`)
-            !== registry.canonicalConversationId(delivery.conversationId)) {
-          console.error("[structured delivery] terminal receipt conversation mismatch", {
-            operationId: delivery.command.operationId,
-            deliveryConversationId: delivery.conversationId,
-            receiptConversationId,
-          });
-          return null;
-        }
-        if (delivery.state === "failed" && verdict.state === "failed") return null;
-        return {
-          conversationId: receiptConversationId as `conversation_${string}`,
-          operationId: result.receipt.presentationOperationId ?? delivery.command.operationId,
-          state: verdict.state,
-          /* The journal's own words where it has them, and the settlement's
-             where the status IS the reason. */
-          error: verdict.disposition === "unverified" ? verdict.reason : result.receipt.reason ?? null,
-          disposition: verdict.disposition,
-        };
+        const outcome = terminalDeliveryOutcome(registry, result, {
+          conversationId: delivery.conversationId,
+          operationId: delivery.command.operationId,
+        });
+        if (!outcome) return null;
+        if (delivery.state === "failed" && outcome.state === "failed") return null;
+        return outcome;
       } catch (error) {
         /* Scoped to this one delivery on purpose (#1131): a status that could
            not be read contributes no outcome, so the row keeps the state it
@@ -291,11 +422,12 @@ async function reconcileTerminalDeliveries(
       }
     }))).filter((outcome): outcome is NonNullable<typeof outcome> => outcome !== null);
     if (!isCurrent()) return;
-    pendingOutcomes.push(...outcomes);
-    if (pendingOutcomes.length >= TERMINAL_RECONCILIATION_SETTLEMENT_BATCH_SIZE) flushOutcomes();
+    pendingOutcomes.push(...outcomes.map(({ receiptOperationId, ...outcome }) => outcome));
+    pendingAcknowledgements.push(...outcomes.map((outcome) => outcome.receiptOperationId));
+    if (pendingOutcomes.length >= TERMINAL_RECONCILIATION_SETTLEMENT_BATCH_SIZE) await flushOutcomes();
     await yieldControllerTurn();
   }
-  if (isCurrent()) flushOutcomes();
+  if (isCurrent()) await flushOutcomes();
 }
 
 type RegistrySessionProjection = Pick<RuntimeSession,
@@ -488,8 +620,27 @@ export async function bindStructuredDeliveryQueue(
          evidence a `delivering` row is compared against before it is called
          abandoned, so a send another live executor is actuating is left to it. */
       hostClaim: structuredHostClaim(registry),
+      /* The repair for a lost terminal acknowledgement (#1612). Reading the
+         journal is what settles it, so a socket that cannot answer settles
+         nothing and says so — the queue keeps the operation and asks again on
+         its next pass. */
+      projectTerminal: async (operationId) => {
+        if (stopped || state.activeQueue !== queue) return false;
+        return projectLostTerminalAcknowledgement(registry, client, operationId);
+      },
       transition: async (operationId, status, details) => {
-        const result = await client.transitionOperation(operationId, status, details);
+        const terminal = status === "delivered" || status === "failed" || status === "uncertain";
+        /* Terminal transitions take out the journal's retention as they commit
+           (#1612): the registry write below rides on this call's ANSWER, and an
+           answer is the one part of it that can be lost while the outcome is
+           already durable. The receipt then has to outlive compaction until
+           this Viewer says the outcome reached the delivery record. */
+        const result = await client.transitionOperation(
+          operationId,
+          status,
+          details,
+          terminal ? { awaitProjection: true } : {},
+        );
         /* The three states a held delivery can settle into. `uncertain` — a
            send an executor actuated and could not answer for — settles the
            reservation HERE, at the moment the queue writes it, rather than
@@ -499,7 +650,7 @@ export async function bindStructuredDeliveryQueue(
            projection is keyed on `heldDeliveries`, which only a composer
            message ever creates, so a compact operation has no row here to
            settle (#862). */
-        if (status !== "delivered" && status !== "failed" && status !== "uncertain") return;
+        if (!terminal) return;
         const conversationId = result.receipt.conversationId;
         if (!conversationId?.startsWith("conversation_")) return;
         registry.recordDeliveryOutcomeForOperation(
@@ -513,6 +664,7 @@ export async function bindStructuredDeliveryQueue(
              own, so it carries none. */
           status === "uncertain" ? "unverified" : undefined,
         );
+        await acknowledgeTerminalProjection(client, [result.operationId]);
         if (status === "delivered" && operationId.startsWith("spawn_message_")) {
           const launchId = operationId.slice("spawn_message_".length);
           const receipt = registry.readOnlySnapshot().receipts[launchId];
