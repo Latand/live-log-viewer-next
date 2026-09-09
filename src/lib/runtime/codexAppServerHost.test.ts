@@ -147,6 +147,13 @@ class FakeAppServer extends EventEmitter {
   realtimeAppendErrorAt: number | null = null;
   responseChunkBytes: number | null = null;
   oversizedTurnStartResult = false;
+  rejectTurnStart = false;
+  holdTurnStart = false;
+  readonly heldTurnStarts: Record<string, unknown>[] = [];
+  releaseTurnStarts(): void {
+    this.holdTurnStart = false;
+    for (const message of this.heldTurnStarts.splice(0)) this.accept(message);
+  }
   readonly acceptedRealtimeSpeech: string[] = [];
   injectItemsError: string | null = null;
   injectItemsDelayMs: number | null = null;
@@ -269,6 +276,8 @@ class FakeAppServer extends EventEmitter {
       });
     }
     if (method === "turn/start") {
+      if (this.rejectTurnStart) return this.respondError(message.id, "invalid turn input");
+      if (this.holdTurnStart) { this.heldTurnStarts.push(message); return; }
       const turnId = `turn-${++this.turn}`;
       if (this.oversizedTurnStartResult) {
         return this.respond(message.id, { turn: { id: turnId }, padding: "p".repeat(26 * 1024 * 1024) });
@@ -5157,4 +5166,104 @@ test("a host with no live call releases without a stray hangup", async () => {
   });
   await host.release();
   expect(server.requests.some((request) => request.method === "thread/realtime/stop")).toBe(false);
+});
+
+
+test("idle-only tick loses a dispatch race without interrupt, steer, or user input", async () => {
+  const server = new FakeAppServer();
+  const host = await CodexAppServerHost.start({ cwd: "/repo", eventStore: new MemoryEventStore(), spawnProcess: fakeSpawn(server) });
+  try {
+    expect((await host.health()).status).toBe("idle");
+    await host.send({ id: "operator-turn", text: "continue working" });
+    const before = server.requests.filter((request) => ["turn/start", "turn/steer", "turn/interrupt"].includes(String(request.method))).length;
+    const receipt = await host.send({ id: "automatic-tick", text: "check work", expectedTurnId: null, origin: { kind: "agent", role: "seat-tick" } });
+    expect(receipt).toEqual({ outcome: "rejected", reason: "stale-turn" });
+    expect(server.requests.filter((request) => ["turn/start", "turn/steer", "turn/interrupt"].includes(String(request.method)))).toHaveLength(before);
+    expect((await host.health()).activeTurnRef).toBe("turn-1");
+  } finally { await host.release(); }
+});
+
+test("concurrent idle sends reserve only one pending start and duplicate keys join", async () => {
+  const server = new FakeAppServer();
+  const host = await CodexAppServerHost.start({ cwd: "/repo", eventStore: new MemoryEventStore(), spawnProcess: fakeSpawn(server) });
+  try {
+    const entry = { id: "first-start", text: "first", expectedTurnId: null };
+    server.holdTurnStart = true;
+    const sends = [host.send(entry), host.send(entry), host.send({ id: "second-start", text: "second", expectedTurnId: null })];
+    await Bun.sleep(0);
+    const held = server.heldTurnStarts.length;
+    server.releaseTurnStarts();
+    const receipts = await Promise.all(sends);
+    expect(held).toBe(1);
+    expect(receipts[0]).toEqual(receipts[1]);
+    expect(receipts[2]).toEqual({ outcome: "rejected", reason: "stale-turn" });
+    expect(new Set(server.requests.filter((request) => request.method === "turn/start").map((request) => request.id)).size).toBe(1);
+    expect(server.requests.filter((request) => request.method === "turn/steer")).toHaveLength(0);
+  } finally { await host.release(); }
+});
+
+
+test("an old completion cannot make an open current turn eligible for a tick", async () => {
+  const server = new FakeAppServer();
+  const host = await CodexAppServerHost.start({ cwd: "/repo", eventStore: new MemoryEventStore(), spawnProcess: fakeSpawn(server) });
+  try {
+    await host.send({ id: "operator-turn", text: "work" });
+    server.notify("turn/completed", { threadId: host.identity.threadId, turn: { id: "old-turn", status: "completed" } });
+    await Bun.sleep(0);
+    expect(await host.send({ id: "tick", text: "check", expectedTurnId: null, origin: { kind: "agent", role: "seat-tick" } }))
+      .toEqual({ outcome: "rejected", reason: "stale-turn" });
+    expect(server.requests.filter((request) => request.method === "turn/start")).toHaveLength(1);
+  } finally { await host.release(); }
+});
+
+
+test("a rejected start releases the reservation for corrected operator input", async () => {
+  const server = new FakeAppServer();
+  const host = await CodexAppServerHost.start({ cwd: "/repo", eventStore: new MemoryEventStore(), spawnProcess: fakeSpawn(server) });
+  try {
+    server.rejectTurnStart = true;
+    await expect(host.send({ id: "rejected-start", text: "invalid" })).rejects.toThrow("invalid turn input");
+    expect(await host.health()).toMatchObject({ status: "idle", activeTurnRef: null });
+    server.rejectTurnStart = false;
+    expect(await host.send({ id: "corrected-start", text: "valid" })).toMatchObject({ outcome: "turn-started" });
+  } finally { await host.release(); }
+});
+
+test("a recovered Codex seat can wake after its old open turn is authoritatively reconciled idle", async () => {
+  const threadId = "recovered-seat";
+  const store = new MemoryEventStore();
+  store.append(threadId, { kind: "turn-started", turnId: "old-open-turn", seq: 1 });
+  store.append(threadId, { kind: "session-status", status: "dead", seq: 2 });
+  const server = new FakeAppServer(threadId, threadId, false, [], { type: "idle", activeFlags: [] });
+  const host = await CodexAppServerHost.adopt(threadId, { cwd: "/repo", eventStore: store, spawnProcess: fakeSpawn(server) });
+  try {
+    expect(await host.health()).toMatchObject({ status: "idle", activeTurnRef: null });
+    expect(await host.send({ id: "recovered-tick", text: "owed work", expectedTurnId: null, origin: { kind: "agent", role: "seat-tick" } }))
+      .toMatchObject({ outcome: "turn-started" });
+  } finally { await host.release(); }
+});
+
+
+test("matching canonical completion releases a lost start acknowledgment without a duplicate write", async () => {
+  const server = new FakeAppServer();
+  const host = await CodexAppServerHost.start({ cwd: "/repo", eventStore: new MemoryEventStore(), spawnProcess: fakeSpawn(server) });
+  try {
+    server.holdTurnStart = true;
+    const original = host.send({ id: "lost-ack", text: "work", expectedTurnId: null });
+    await waitForCondition(() => server.heldTurnStarts.length === 1, "start must reach fixture");
+    expect(await host.send({ id: "blocked-followup", text: "later", expectedTurnId: null })).toEqual({ outcome: "rejected", reason: "stale-turn" });
+    const request = server.heldTurnStarts.shift()!;
+    const input = (request.params as { input: unknown[] }).input;
+    server.notify("turn/started", { threadId: host.identity.threadId, turn: { id: "settled-turn" } });
+    server.notify("item/completed", { threadId: host.identity.threadId, turnId: "settled-turn",
+      item: { type: "userMessage", id: "echo", clientId: "lost-ack", content: input } });
+    server.notify("turn/completed", { threadId: host.identity.threadId, turn: { id: "settled-turn", status: "completed" } });
+    expect(await original).toEqual({ outcome: "turn-started", turnId: "settled-turn" });
+    expect(await host.health()).toMatchObject({ status: "idle", activeTurnRef: null });
+    server.holdTurnStart = false;
+    expect(await host.send({ id: "after-settlement", text: "next", expectedTurnId: null })).toMatchObject({ outcome: "turn-started" });
+    server.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { turn: { id: "settled-turn" } } })}\n`);
+    expect((await host.health()).status).toBe("active");
+    expect(server.requests.filter((message) => message.method === "turn/start")).toHaveLength(2);
+  } finally { await host.release(); }
 });

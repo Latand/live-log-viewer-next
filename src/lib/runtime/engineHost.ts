@@ -169,3 +169,6 @@ export class StructuredHostAdoptionCleanupError<Host extends EngineHost = Engine
     this.name = "StructuredHostAdoptionCleanupError";
   }
 }
+
+/** A correlated engine response proved this input request was refused. */
+export class EngineRequestRefusedError extends Error {}

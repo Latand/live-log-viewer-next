@@ -77,7 +77,7 @@ export function parseRuntimeCommand(kind: RuntimeOperationKind, value: unknown):
     if (!imageRefs) throw new Error("images are invalid");
     const content = structuredContent(text, imageRefs);
     const policy = body.policy === undefined ? undefined : body.policy;
-    if (policy !== undefined && policy !== "queue" && policy !== "steer-if-active" && policy !== "interrupt-active") {
+    if (policy !== undefined && policy !== "queue" && policy !== "idle-only" && policy !== "steer-if-active" && policy !== "interrupt-active") {
       throw new Error("policy is invalid");
     }
     const runtime = parseRuntimeSendSettings(body.runtime);

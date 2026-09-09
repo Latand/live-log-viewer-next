@@ -212,6 +212,7 @@ export interface SeatTickWakeReason {
 
 /** One line of the wake's body. Bounded and structural — never transcript text. */
 export interface SeatTickItem {
+  eventSeq?: number;
   outcomeId?: string;
   kind: "pipeline" | "task" | "event" | "signal" | "pull-request" | "child";
   id: string;
@@ -229,6 +230,7 @@ export type SeatTickVerdict =
   | { kind: "quiet"; detail: string }
   | {
     kind: "wake";
+    actionableKeys?: string[];
     reasons: SeatTickWakeReason[];
     items: SeatTickItem[];
     deferred: number;
@@ -336,6 +338,10 @@ export interface SeatTickActivity {
 /** The active seat as the check sees it: durable identity, the registry's turn
     state for its conversation, and that turn's activity verdict. */
 export interface SeatTickSeatInput {
+  runtimeState?: "idle" | "busy" | "unknown";
+  runtimeGeneration?: string;
+  runtimeCursor?: number;
+  runtimeTurnId?: string | null;
   conversationId: string;
   seatEpoch: number;
   path: string | null;
@@ -563,6 +569,7 @@ export interface SeatTickPolicy {
  * from anything else would credit the seat with a different message.
  */
 export interface SeatTickWakeCommit {
+  actionableKeys?: string[];
   /** A proposal wake, which advances the 24-hour slot as well as the stamp. */
   proposal: boolean;
   reasons: SeatTickWakeReasonKind[];
@@ -615,6 +622,15 @@ export interface SeatTickOutstandingWake {
 
 /** Project tick state; SQLite accounting owns persistence and legacy migration. */
 export interface SeatTickProjectState {
+  /** Continuous observed idle interval; never derived from the previous wake. */
+  turnIdleSince?: string | null;
+  wakeAttempt?: number;
+
+  idleRuntime?: { generation: string; cursor: number } | null;
+  /** Prepared work remains refreshable until existing dispatch accounting freezes it. */
+  pendingWork?: { at: string; items: SeatTickItem[]; reasons: SeatTickWakeReason[]; deferred: number; text?: string } | null;
+  lastActionableKeys?: string[];
+  turnBoundary?: { generation: string; turnId: string; seq: number; state: "busy" | "settled"; at: string } | null;
   accounting?: { filename: string; revision: number; gap: string | null };
   seatEpoch: number | null;
   lastCheckAt: string | null;
@@ -853,6 +869,12 @@ export function emptySeatTickState(): SeatTickProjectState {
   return {
     seatEpoch: null,
     lastCheckAt: null,
+    turnIdleSince: null,
+    wakeAttempt: 0,
+    idleRuntime: null,
+    pendingWork: null,
+    lastActionableKeys: [],
+    turnBoundary: null,
     lastWakeAt: null,
     lastWakeReasons: [],
     wakesWithoutChange: {},

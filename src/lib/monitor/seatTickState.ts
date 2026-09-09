@@ -54,6 +54,7 @@ function normalizeWakeCommit(value: unknown): SeatTickWakeCommit | null {
     reasons: (Array.isArray(raw.reasons) ? raw.reasons : [])
       .filter((entry): entry is SeatTickWakeReasonKind => SEAT_TICK_WAKE_REASON_KINDS.includes(entry as SeatTickWakeReasonKind)),
     fingerprint: raw.fingerprint.slice(0, 200),
+    ...(Array.isArray(raw.actionableKeys) ? { actionableKeys: raw.actionableKeys.filter((key): key is string => typeof key === "string") } : {}),
     eventsThrough: raw.eventsThrough,
     /* A plan written before the harvest existed names no child, and a landing
        credited from it harvests nothing — the safe direction. */
@@ -144,6 +145,11 @@ function normalizeRow(value: unknown, legacy: boolean): SeatTickProjectState {
     seatEpoch: typeof raw.seatEpoch === "number" && Number.isSafeInteger(raw.seatEpoch) ? raw.seatEpoch : null,
     lastCheckAt: isoOrNull(raw.lastCheckAt),
     lastWakeAt: isoOrNull(raw.lastWakeAt),
+    turnIdleSince: isoOrNull(raw.turnIdleSince),
+    wakeAttempt: typeof raw.wakeAttempt === "number" && Number.isSafeInteger(raw.wakeAttempt) && raw.wakeAttempt >= 0 ? raw.wakeAttempt : 0,
+    lastActionableKeys: Array.isArray(raw.lastActionableKeys) ? raw.lastActionableKeys.filter((key): key is string => typeof key === "string") : [],
+    pendingWork: null,
+    turnBoundary: null,
     lastWakeReasons: (Array.isArray(raw.lastWakeReasons) ? raw.lastWakeReasons : [])
       .filter((entry): entry is SeatTickWakeReasonKind => SEAT_TICK_WAKE_REASON_KINDS.includes(entry as SeatTickWakeReasonKind)),
     wakesWithoutChange,
@@ -222,6 +228,7 @@ export function seatTickStateForEpoch(row: SeatTickProjectState, seatEpoch: numb
     seatEpoch,
     eventsThrough: row.eventsThrough,
     lastWakeAt: row.lastWakeAt,
+    lastActionableKeys: row.lastActionableKeys,
     lastProposalAt: row.lastProposalAt,
     outstandingWake: row.outstandingWake,
     pullRequestGap: row.pullRequestGap,

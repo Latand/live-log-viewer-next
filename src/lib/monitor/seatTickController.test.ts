@@ -19,7 +19,7 @@ const { openPullRequestsForRepo } = await import("./githubEvidence");
 const { defaultSeatTickSources, wakeStateFromRecord } = await import("./seatTickSources");
 const { resolveOriginalSend } = await import("@/lib/runtime/sendSettlement");
 const { deliverConversationMessage } = await import("@/lib/delivery");
-const { readSeatTickState, writeSeatTickState } = await import("./seatTickState");
+const { readSeatTickState, writeSeatTickState, seatTickStateForEpoch: seatTickStateForEpochForTest } = await import("./seatTickState");
 const { appendSeatTickRecord, readSeatTickRecords } = await import("./journalStore");
 const { SeatTickAccounting, outcomeIdentity } = await import("./seatTickAccounting");
 const { FileRuntimeEventStore } = await import("@/lib/runtime/eventStore");
@@ -166,7 +166,7 @@ function harness(options: {
   const result: Harness = { deps: {}, sent, journal, cards, written, withdrawn, liveness: livenessReads, snapshots: 0, seat: options.seat === undefined ? { conversationId: CONVERSATION, seatEpoch: 7, path: null } : options.seat };
   let reads = 0;
   const localStateFile = options.stateFile ?? path.join(fs.mkdtempSync(path.join(SANDBOX, "controller-state-")), "seat-tick.json");
-  if (!options.stateFile) writeSeatTickState(PROJECT, { ...emptySeatTickState(), seatEpoch: result.seat?.seatEpoch ?? null, ...options.state, accounting: undefined }, localStateFile);
+  if (!options.stateFile) writeSeatTickState(PROJECT, { ...emptySeatTickState(), seatEpoch: result.seat?.seatEpoch ?? null, turnIdleSince: options.state?.lastWakeAt ?? new Date((options.now ?? NOW) - 61 * MINUTE).toISOString(), ...options.state, accounting: undefined }, localStateFile);
 
   const pipelines = (options.pipelines ?? []).map(pipelineRecord);
   /* Lanes the hot store has already let go of: a settled record leaves after
@@ -188,7 +188,7 @@ function harness(options: {
     policy: DEFAULT_SEAT_TICK_POLICY,
     readState: (project) => {
       if (!options.stateFile && project !== PROJECT && !readSeatTickState(project, localStateFile).lastCheckAt) {
-        writeSeatTickState(project, { ...emptySeatTickState(), seatEpoch: result.seat?.seatEpoch ?? null, ...options.state, accounting: undefined }, localStateFile);
+        writeSeatTickState(project, { ...emptySeatTickState(), seatEpoch: result.seat?.seatEpoch ?? null, turnIdleSince: options.state?.lastWakeAt ?? new Date((options.now ?? NOW) - 61 * MINUTE).toISOString(), ...options.state, accounting: undefined }, localStateFile);
       }
       return readSeatTickState(project, localStateFile);
     },
@@ -245,9 +245,9 @@ function harness(options: {
         livenessReads.push({ ...(request.project ? { project: request.project } : {}), ...(request.conversationId ? { conversationId: request.conversationId } : {}) });
         const child = request.conversationId ? options.childActivity?.[request.conversationId] : undefined;
         if (child) return [{ conversationId: request.conversationId, lifecycle: "running", reason: "host_alive_turn_active", turnState: "busy", ...child } as AgentLivenessRecord];
-        return request.conversationId && options.seatActivity
-          ? [{ lifecycle: "running", reason: "host_alive_turn_active", ...options.seatActivity } as AgentLivenessRecord]
-          : [];
+        if (!request.conversationId) return [];
+        if (options.seatActivity === null) return [];
+        return [{ conversationId: request.conversationId, lifecycle: "waiting", reason: "host_alive_turn_idle", turnState: "idle", ...options.seatActivity } as AgentLivenessRecord];
       },
       lifecycleJournal: () => ({ version: 1, lastSeq: options.events?.at(-1)?.seq ?? 0, events: options.events ?? [], retired: [] }),
       latestDeployment: () => ({ state: "unreadable", error: "no ledger" }) as never,
@@ -478,7 +478,7 @@ test("the wake's identity comes from what it says, so an unlanded wake re-sends 
   await runSeatTickCheck(PROJECT, first.deps);
   const second = harness({ pipelines: OPEN_LANE, state: OVERDUE, delivery: held });
   await runSeatTickCheck(PROJECT, second.deps);
-  expect(second.sent[0]!.clientMessageId).toBe(first.sent[0]!.clientMessageId);
+  expect(second.sent[0]!.clientMessageId).toBe(first.sent[0]!.clientMessageId!);
 });
 
 /* The other half of the same key. An hourly wake on a board that has not moved
@@ -1441,12 +1441,11 @@ test("a seat mid-turn is skipped without a send and without consuming the event 
   expect(rig.sent).toEqual([]);
 });
 
-/* And the seat whose own host died under an open turn: the registry still says
-   `busy`, so the rule this replaces would have dropped every tick forever. */
-test("a busy seat the registry reports stalled is woken, which is what resumes its host", async () => {
+// Recovery of an open turn belongs to its owner; a tick cannot force completion.
+test("a dead open seat reaches recovery without an interrupt policy", async () => {
   const rig = harness({
     turn: "busy",
-    seatActivity: { lifecycle: "stalled", reason: "host_gone_turn_open" },
+    seatActivity: { lifecycle: "stalled", reason: "host_gone_turn_open", turnState: "busy" },
     pipelines: OPEN_LANE,
     state: OVERDUE,
   });
@@ -1569,11 +1568,12 @@ test("a check that outran its interval drops the next tick rather than queueing 
   });
   fire();
   fire();
+  await Promise.resolve();
   expect(sweeps).toBe(1);
   release();
-  await Promise.resolve();
-  await Promise.resolve();
+  await Bun.sleep(0);
   fire();
+  await Promise.resolve();
   expect(sweeps).toBe(2);
 });
 
@@ -1815,6 +1815,8 @@ function childFixture(name: string, gitRepository = false, sqliteMode: "sqlite" 
   const registry = new AgentRegistry(path.join(dir, "agent-registry.json"), () => false, undefined, { sqliteMode, onSqliteRowPayloadRead: onRead });
   const seatPath = path.join(dir, `${crypto.randomUUID()}.jsonl`);
   const seatConversation = registry.ensureConversation("claude", seatPath, null);
+  registry.reconcileConversations([{ engine: "claude", path: seatPath, accountId: null,
+    launchProfile: emptyLaunchProfile({ cwd }), turn: { state: "idle", source: "assistant", terminalAt: new Date().toISOString() }, observedAt: new Date().toISOString() }]);
   const project = projectForCwd(cwd);
   if (!project) throw new Error("fixture cwd resolves to no project");
   const now = Date.now() + 3 * MINUTE;
@@ -1832,6 +1834,7 @@ function childFixture(name: string, gitRepository = false, sqliteMode: "sqlite" 
         ...emptySeatTickState(),
         seatEpoch: 7,
         lastWakeAt: new Date(now - 61 * MINUTE).toISOString(),
+        turnIdleSince: new Date(now - 61 * MINUTE).toISOString(),
         /* The proposal slot is not due, so an empty board is quiet rather than
            a proposal: what these cases test is the harvest, not the slot. */
         lastProposalAt: new Date(now - MINUTE).toISOString(),
@@ -1917,7 +1920,7 @@ test("a running spawned child with no lane is open work, and the interval wake n
   /* A live turn the liveness plane calls running is not a stall, however long
      it has been open. */
   expect(rig.cards).toEqual([]);
-  expect(rig.liveness).toEqual([{ conversationId: child.id }]);
+  expect(rig.liveness).toEqual([{ conversationId: fixture.seat.conversationId }, { conversationId: child.id }]);
 });
 
 test("a finished child is harvested by exactly one wake, across ticks, a fresh controller and a rotation (#1465)", async () => {
@@ -1964,7 +1967,7 @@ test("a child whose host was released after a settled turn is finished, and harv
   expect(rig.sent[0]!.text).toContain(`[child] ${child.id}`);
   expect(fixture.acknowledged()).toEqual([child.id]);
   /* No liveness read for a turn the registry says has settled. */
-  expect(rig.liveness).toEqual([]);
+  expect(rig.liveness).toEqual([{ conversationId: fixture.seat.conversationId }]);
 });
 
 test("a launch that failed before it ran is a terminal child with a failed outcome, harvested once (#1465)", async () => {
@@ -2073,7 +2076,7 @@ test("a harvested child the seat re-instructs is owed again when it next finishe
     pendingAction: null,
   });
   const running = childRig(fixture, { now: fixture.now + 61 * MINUTE, childActivity: { [child.id]: { lifecycle: "running", reason: "host_alive_turn_active" } } });
-  expect(await runSeatTickCheck(fixture.project, running.deps)).toMatchObject({ verdict: "wake", reasons: ["interval"] });
+  expect(await runSeatTickCheck(fixture.project, running.deps)).toMatchObject({ verdict: "quiet" });
   expect(fixture.acknowledged()).toEqual([child.id]);
 
   fixture.registry.reconcileConversations([{
@@ -2442,14 +2445,15 @@ test("a child finishing while a wake is unresolved dispatches nothing, and is ha
 
   /* The holder delivers the first wake: it lands, and it credited no harvest. */
   const third = childRig(fixture, { wakeState: "landed" });
-  expect(await runSeatTickCheck(fixture.project, third.deps)).toMatchObject({ verdict: "quiet" });
+  expect(await runSeatTickCheck(fixture.project, third.deps)).toMatchObject({ verdict: "wake", reasons: ["child-terminal"] });
+  expect(third.sent[0]!.text).toContain(`[child] ${child.id}`);
   expect(third.journal[0]).toMatchObject({ verdict: "landed" });
   expect(fixture.row()).toMatchObject({ outstandingWake: null, harvestedChildren: [] });
 
-  /* The next interval carries the child. */
+  /* The refreshed pending outcome drains immediately; later checks do not repeat it. */
   const fourth = childRig(fixture, { now: fixture.now + 61 * MINUTE });
-  expect(await runSeatTickCheck(fixture.project, fourth.deps)).toMatchObject({ verdict: "wake", reasons: ["child-terminal"] });
-  expect(fourth.sent[0]!.text).toContain(`[child] ${child.id}`);
+  expect(await runSeatTickCheck(fixture.project, fourth.deps)).toMatchObject({ verdict: "quiet" });
+  expect(fourth.sent).toEqual([]);
   expect(fixture.acknowledged()).toEqual([child.id]);
 });
 
@@ -2502,7 +2506,7 @@ test("cross-project, pipeline-owned, engine-native and unrelated conversations a
   const record = await runSeatTickCheck(fixture.project, rig.deps);
   expect(record).toMatchObject({ verdict: "quiet", detail: "the board is done and the proposal slot is not due" });
   expect(rig.sent).toEqual([]);
-  expect(rig.liveness).toEqual([]);
+  expect(rig.liveness).toEqual([{ conversationId: fixture.seat.conversationId }]);
 });
 
 test("a child the registry cannot place is unknown: not open work, not harvested, and said so (#1465)", async () => {
@@ -2547,7 +2551,7 @@ test("a busy child whose host is gone is a stall the registry can see, reported 
   const record = await runSeatTickCheck(fixture.project, first.deps);
   /* Open work, so the interval wakes; the stall waits for its second check. */
   expect(record).toMatchObject({ verdict: "wake", reasons: ["interval"] });
-  expect(first.liveness).toEqual([]);
+  expect(first.liveness).toEqual([{ conversationId: fixture.seat.conversationId }]);
   expect(fixture.row().stalledSeen).toEqual([`child:${child.id}`]);
   const second = childRig(fixture, { now: fixture.now + 61 * MINUTE });
   const stalled = await runSeatTickCheck(fixture.project, second.deps);
@@ -2564,12 +2568,12 @@ test("the projection uses bounded keyed registry reads and targeted liveness wit
   fixture.seed();
   const rig = childRig(fixture, { childActivity: { [busy.id]: { lifecycle: "running", reason: "host_alive_turn_active" } } });
   const record = await runSeatTickCheck(fixture.project, rig.deps);
-  expect(record).toMatchObject({ verdict: "wake", reasons: ["child-terminal"], items: 3 });
+  expect(record).toMatchObject({ verdict: "wake", reasons: ["child-terminal"], items: 2 });
   /* The child source uses keyed projections without a registry snapshot. */
   expect(rig.snapshots).toBe(0);
   /* Liveness is asked by id, for the one child whose turn is open, and never
      project-wide: there is no lane to sweep for. */
-  expect(rig.liveness).toEqual([{ conversationId: busy.id }]);
+  expect(rig.liveness).toEqual([{ conversationId: fixture.seat.conversationId }, { conversationId: busy.id }]);
   expect(rig.liveness.some((read) => read.project)).toBe(false);
   /* The fixture wrote no transcript; nothing here could have read one. */
   expect(fs.existsSync(busy.path)).toBe(false);
@@ -2625,9 +2629,9 @@ test("a new turn discovered during an unknown send remains owed under the origin
     expect(fixture.acknowledged()).toEqual([]);
   }
   await runSeatTickCheck(fixture.project, childRig(fixture, { now: fixture.now + 61 * MINUTE, wakeState: "landed" }).deps);
-  expect(fixture.acknowledged()).toEqual([child.id]);
+  expect(fixture.acknowledged()).toEqual([child.id, child.id]);
   const final = childRig(fixture, { now: fixture.now + 122 * MINUTE });
-  expect(await runSeatTickCheck(fixture.project, final.deps)).toMatchObject({ verdict: "wake", items: 1 });
+  expect(await runSeatTickCheck(fixture.project, final.deps)).toMatchObject({ verdict: "quiet" });
   expect(fixture.acknowledged()).toEqual([child.id, child.id]);
 });
 
@@ -2715,6 +2719,8 @@ test("first tick after rotation discovers predecessor children from committed re
   const abandoned = fixture.registry.ensureConversation("claude", path.join(fixture.dir, `${crypto.randomUUID()}.jsonl`), null);
   fixture.spawn({ title: "abandoned pending seat worker", turn: "terminal", parent: abandoned.id });
   const successor = fixture.registry.ensureConversation("claude", path.join(fixture.dir, `${crypto.randomUUID()}.jsonl`), null);
+  fixture.registry.reconcileConversations([{ engine: "claude", path: successor.generations[0]!.path!, accountId: null,
+    launchProfile: emptyLaunchProfile({ cwd: fixture.cwd }), turn: { state: "idle", source: "assistant", terminalAt: new Date().toISOString() }, observedAt: new Date().toISOString() }]);
   fixture.seed();
   const file = statePath("orchestrator-seats.json");
   const before = fs.existsSync(file) ? fs.readFileSync(file) : null;
@@ -2908,22 +2914,22 @@ test("a stall on the twelfth of twelve running children is reported within two s
 
   const first = childRig(fixture, { childActivity: activity });
   expect(await runSeatTickCheck(fixture.project, first.deps)).toMatchObject({ verdict: "wake", reasons: ["interval"] });
-  expect(first.liveness.map((read) => read.conversationId)).toEqual(ids.slice(0, 8));
+  expect(first.liveness.filter((read) => read.conversationId !== fixture.seat.conversationId).map((read) => read.conversationId)).toEqual(ids.slice(0, 8));
   expect(fixture.row().stalledSeen).toEqual([]);
 
   const second = childRig(fixture, { childActivity: activity, now: fixture.now + 61 * MINUTE });
-  expect(await runSeatTickCheck(fixture.project, second.deps)).toMatchObject({ verdict: "wake", reasons: ["interval"] });
-  expect(second.liveness.map((read) => read.conversationId)).toEqual(ids.slice(4, 12));
+  expect(await runSeatTickCheck(fixture.project, second.deps)).toMatchObject({ verdict: "quiet" });
+  expect(second.liveness.filter((read) => read.conversationId !== fixture.seat.conversationId).map((read) => read.conversationId)).toEqual(ids.slice(4, 12));
   expect(fixture.row().stalledSeen).toEqual([`child:${twelfth.id}`]);
 
   const third = childRig(fixture, { childActivity: activity, now: fixture.now + 122 * MINUTE });
   const stalled = await runSeatTickCheck(fixture.project, third.deps);
-  expect(third.liveness.map((read) => read.conversationId)).toEqual([...ids.slice(8, 12), ...ids.slice(0, 4)]);
+  expect(third.liveness.filter((read) => read.conversationId !== fixture.seat.conversationId).map((read) => read.conversationId)).toEqual([...ids.slice(8, 12), ...ids.slice(0, 4)]);
   expect(stalled).toMatchObject({ verdict: "wake", reasons: ["stalled"] });
   expect(stalled!.detail).toContain(`child ${twelfth.id} runs a turn the registry reports stalled (host_alive_transcript_silent)`);
   expect(third.sent[0]!.text).toContain(`[child] ${twelfth.id}`);
-  /* Every check observed a bounded window and asked liveness for it alone. */
-  for (const rig of [first, second, third]) expect(rig.liveness).toHaveLength(8);
+  /* Every check reads the seat and a bounded window of eight children. */
+  for (const rig of [first, second, third]) expect(rig.liveness).toHaveLength(9);
 });
 
 /* A registry without an indexed lineage projection reads the seat and names
@@ -2994,6 +3000,8 @@ test("a returned 409 or 503 refusal is fenced across rotation and the successor 
     expect(original.operationId).toBeNull();
     expect(await resolveOriginalSend({ conversationId: original.conversationId, clientMessageId: original.clientMessageId }, { registry: fixture.registry, client: null })).toEqual({ kind: "absent" });
     const successor = fixture.registry.ensureConversation("claude", path.join(fixture.dir, `${crypto.randomUUID()}.jsonl`), null);
+    fixture.registry.reconcileConversations([{ engine: "claude", path: successor.generations[0]!.path!, accountId: null,
+      launchProfile: emptyLaunchProfile({ cwd: fixture.cwd }), turn: { state: "idle", source: "assistant", terminalAt: new Date().toISOString() }, observedAt: new Date().toISOString() }]);
     const seat = { conversationId: successor.id, seatEpoch: 8, path: successor.generations[0]!.path };
     const next = childRig(fixture, { realWakeState: true, seat, now: fixture.now + 5 * MINUTE, deliverWith: async (message) => {
       expect(fixture.acknowledged()).toEqual([]);
@@ -3037,6 +3045,8 @@ test("a paused old lookup cannot dispatch after a successor replaces the refused
   } } });
   await waiting;
   const successor = fixture.registry.ensureConversation("claude", path.join(fixture.dir, `${crypto.randomUUID()}.jsonl`), null);
+  fixture.registry.reconcileConversations([{ engine: "claude", path: successor.generations[0]!.path!, accountId: null,
+    launchProfile: emptyLaunchProfile({ cwd: fixture.cwd }), turn: { state: "idle", source: "assistant", terminalAt: new Date().toISOString() }, observedAt: new Date().toISOString() }]);
   const next = childRig(fixture, { realWakeState: true, seat: { conversationId: successor.id, seatEpoch: 8, path: null }, now: fixture.now + 6 * MINUTE });
   await runSeatTickCheck(fixture.project, next.deps);
   expect(next.sent).toHaveLength(1);
@@ -3227,3 +3237,212 @@ test("new-child discovery runs during historical bootstrap and keeps every older
   const completedOwner = accounting.page("owner", 1)[0]!;
   expect(completedOwner.kind === "owner" && completedOwner.bootstrap).toBeUndefined();
 }, 30_000);
+
+// September idle-only directive: silence and absent lifecycle evidence do not end a turn.
+for (const activity of [null, { lifecycle: "stalled" as const, turnState: "busy" as const }, { lifecycle: "gone" as const, turnState: "busy" as const }]) {
+  test(`idle-only tick preserves an open turn with ${activity?.lifecycle ?? "missing"} evidence`, async () => {
+    const h = harness({ turn: "busy", seatActivity: activity, tasks: [{ id: "actionable-task", status: "assigned" }], state: OVERDUE });
+    const record = await runSeatTickCheck(PROJECT, h.deps);
+    expect(h.sent).toHaveLength(0);
+    expect(record?.verdict).toBe("skipped");
+    expect(h.written.at(-1)?.lastWakeAt).toBe(OVERDUE.lastWakeAt);
+  });
+}
+
+
+test("resumed work under a completed pipeline defers an actionable event until settlement", async () => {
+  const first = harness({ turn: "idle", seatActivity: { lifecycle: "running", turnState: "busy", reason: "host_alive_turn_active" },
+    pipelines: [{ id: "old-pipeline", state: "completed", createdAt: new Date(NOW - 60 * MINUTE).toISOString(), movedAt: null }],
+    tasks: [{ id: "new-obligation", status: "assigned" }], events: [terminalEvent(44)], state: { ...OVERDUE, eventsThrough: 12 } });
+  expect(await runSeatTickCheck(PROJECT, first.deps)).toMatchObject({ verdict: "skipped", eventsThrough: 12 });
+  expect(first.sent).toEqual([]);
+  const settled = harness({ tasks: [{ id: "new-obligation", status: "assigned" }], events: [terminalEvent(44)], state: first.written.at(-1) });
+  expect(await runSeatTickCheck(PROJECT, settled.deps)).toMatchObject({ verdict: "wake" });
+  expect(settled.sent).toHaveLength(1);
+  expect(settled.sent[0]!.policy).toBe("idle-only");
+});
+
+test("an unreadable idle-seat activity check generates no routine input", async () => {
+  const h = harness({ turn: "idle", seatActivity: null, tasks: [{ id: "new-obligation", status: "assigned" }], state: OVERDUE });
+  expect(await runSeatTickCheck(PROJECT, h.deps)).toMatchObject({ verdict: "skipped" });
+  expect(h.sent).toEqual([]);
+});
+
+
+test("original-key reconciliation does not redispatch a refused tick while the seat works", async () => {
+  const fixture = childFixture("busy-original-key");
+  setAgentRegistryForTests(fixture.registry);
+  fixture.spawn({ title: "owed worker", turn: "terminal" });
+  fixture.seed();
+  await runSeatTickCheck(fixture.project, childRig(fixture, { realWakeState: true, deliverWith: refuseBeforeReservation(503) }).deps);
+  expect(fixture.row().outstandingWake).not.toBeNull();
+  const busy = childRig(fixture, { realWakeState: true, seatActivity: { lifecycle: "running", turnState: "busy", reason: "host_alive_turn_active" }, now: fixture.now + 5 * MINUTE });
+  await runSeatTickCheck(fixture.project, busy.deps);
+  expect(busy.sent).toEqual([]);
+  expect(fixture.acknowledged()).toEqual([]);
+});
+
+
+test("rotation during recovery liveness prevents predecessor redispatch", async () => {
+  const fixture = childFixture("recovery-liveness-rotation");
+  setAgentRegistryForTests(fixture.registry);
+  fixture.spawn({ title: "owed worker", turn: "terminal" });
+  fixture.seed();
+  await runSeatTickCheck(fixture.project, childRig(fixture, { realWakeState: true, deliverWith: refuseBeforeReservation(503) }).deps);
+  const next = childRig(fixture, { realWakeState: true, now: fixture.now + 5 * MINUTE });
+  const liveness = next.deps.sources!.liveness;
+  next.deps.sources!.liveness = async (request) => {
+    const rows = await liveness(request);
+    next.seat = null;
+    return rows;
+  };
+  await runSeatTickCheck(fixture.project, next.deps);
+  expect(next.sent).toEqual([]);
+  expect(fixture.acknowledged()).toEqual([]);
+});
+
+
+for (const activity of [
+  { lifecycle: "stalled" as const, reason: "host_gone_turn_open" as const, turnState: "busy" as const },
+  { lifecycle: "waiting" as const, reason: "host_alive_turn_idle" as const, turnState: "idle" as const },
+]) test(`owed work reaches fenced recovery for ${activity.reason}`, async () => {
+  const h = harness({ turn: "busy", seatActivity: activity, tasks: [{ id: "owed-task", status: "assigned" }], state: OVERDUE });
+  const record = await runSeatTickCheck(PROJECT, h.deps);
+  expect(record?.verdict).toBe("wake");
+  expect(h.sent).toHaveLength(1);
+  expect(h.sent[0]!.policy).toBe("idle-only");
+});
+
+
+async function flushSeatTickNotifications(): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    await Bun.sleep(1);
+    if (!(globalThis as { __llvSeatTickRunning?: boolean }).__llvSeatTickRunning) return;
+  }
+  throw new Error("fixture tick did not settle");
+}
+
+test("the existing controller starts a full idle countdown and cancels it during tool wait", async () => {
+  const { requestSeatTick } = await import("./seatTickSignal");
+  let now = NOW;
+  const options: Parameters<typeof harness>[0] = { pipelines: OPEN_LANE, state: { ...OVERDUE, turnIdleSince: null } };
+  const h = harness(options);
+  h.deps.sources!.now = () => now;
+  const deadlines: Array<{ run: () => void; delay: number }> = [];
+  startSeatTick({ now: () => now, boundary: () => {}, sweep: () => runSeatTickCheck(PROJECT, h.deps),
+    scheduleDeadline: (run, delay) => { deadlines.push({ run, delay }); const timer = setTimeout(() => {}, 1_000_000); timer.unref(); return timer; } });
+  requestSeatTick({ project: PROJECT });
+  await flushSeatTickNotifications();
+  expect(h.sent).toEqual([]);
+  expect(deadlines.at(-1)!.delay).toBe(60 * MINUTE);
+  const oldDeadline = deadlines.at(-1)!.run;
+  now += 59 * MINUTE;
+  options.turn = "busy";
+  options.seatActivity = { lifecycle: "waiting", reason: "provider_throttled", turnState: "busy" };
+  requestSeatTick({ project: PROJECT });
+  await flushSeatTickNotifications();
+  expect(h.written.at(-1)!.turnIdleSince).toBeNull();
+  now += MINUTE;
+  oldDeadline();
+  await flushSeatTickNotifications();
+  expect(h.sent).toEqual([]);
+  options.turn = "idle";
+  options.seatActivity = { lifecycle: "waiting", reason: "host_alive_turn_idle", turnState: "idle" };
+  requestSeatTick({ project: PROJECT });
+  await flushSeatTickNotifications();
+  expect(deadlines.at(-1)!.delay).toBe(60 * MINUTE);
+  now += 60 * MINUTE;
+  deadlines.at(-1)!.run();
+  await flushSeatTickNotifications();
+  expect(h.sent).toHaveLength(1);
+  expect(h.journal.at(-1)!.reasons).toContain("interval");
+});
+
+test("busy actionable work is prepared durably and an idle notification drains it immediately", async () => {
+  const { requestSeatTick } = await import("./seatTickSignal");
+  const options: Parameters<typeof harness>[0] = { turn: "busy", seatActivity: { lifecycle: "running", reason: "host_alive_turn_active", turnState: "busy" },
+    tasks: [{ id: "queued-task", status: "assigned" }], state: { ...RECENT, turnIdleSince: null } };
+  const h = harness(options);
+  startSeatTick({ boundary: () => {}, sweep: () => runSeatTickCheck(PROJECT, h.deps) });
+  requestSeatTick({ project: PROJECT });
+  await flushSeatTickNotifications();
+  expect(h.sent).toEqual([]);
+  expect(h.deps.readState!(PROJECT).pendingWork?.text).toContain("queued-task");
+  options.turn = "idle";
+  options.seatActivity = { lifecycle: "waiting", reason: "host_alive_turn_idle", turnState: "idle" };
+  requestSeatTick({ project: PROJECT });
+  await flushSeatTickNotifications();
+  expect(h.sent).toHaveLength(1);
+  expect(h.sent[0]!.policy).toBe("idle-only");
+  requestSeatTick({ project: PROJECT });
+  await flushSeatTickNotifications();
+  expect(h.sent).toHaveLength(1);
+});
+
+test("an actionable board event bypasses the idle timer and cancelled work is refreshed away", async () => {
+  const { requestSeatTick } = await import("./seatTickSignal");
+  const h = harness({ pipelines: OPEN_LANE, tasks: [{ id: "assigned-later", status: "inbox" }], state: { ...RECENT, turnIdleSince: null } });
+  const tasks = h.deps.sources!.tasks();
+  startSeatTick({ boundary: () => {}, sweep: () => runSeatTickCheck(PROJECT, h.deps) });
+  requestSeatTick({ project: PROJECT });
+  await flushSeatTickNotifications();
+  expect(h.sent).toEqual([]);
+  tasks[0]!.status = "assigned";
+  requestSeatTick({ project: PROJECT });
+  await flushSeatTickNotifications();
+  expect(h.sent).toHaveLength(1);
+  tasks[0]!.status = "done";
+  requestSeatTick({ project: PROJECT });
+  await flushSeatTickNotifications();
+  expect(h.deps.readState!(PROJECT).pendingWork).toBeNull();
+  expect(h.sent).toHaveLength(1);
+});
+
+
+test("only a matching owned runtime boundary arms the durable idle timer across restart", async () => {
+  const { recordSeatTickBoundary } = await import("./seatTickController");
+  const fixture = childFixture("owned-turn-boundary");
+  fixture.seed({ outstandingWake: outstandingWake() });
+  const h = childRig(fixture);
+  const generation = fixture.registry.conversation(fixture.seat.conversationId as never)!.generations.at(-1)!.id;
+    const signal = { project: fixture.project, conversationId: fixture.seat.conversationId,
+      boundary: { generation, turnId: "active-turn", seq: 1, state: "busy" as const, at: new Date(fixture.now).toISOString() } };
+    recordSeatTickBoundary(fixture.project, signal, h.deps.sources, h.deps);
+    expect(fixture.row().turnIdleSince).toBeNull();
+    recordSeatTickBoundary(fixture.project, { ...signal, boundary: { ...signal.boundary, turnId: "old-turn", seq: 2, state: "settled" } }, h.deps.sources, h.deps);
+    expect(fixture.row().turnIdleSince).toBeNull();
+    recordSeatTickBoundary(fixture.project, { ...signal, boundary: { ...signal.boundary, generation: "old-generation", seq: 2, state: "settled" } }, h.deps.sources, h.deps);
+    expect(fixture.row().turnIdleSince).toBeNull();
+    const at = new Date(fixture.now + MINUTE).toISOString();
+    recordSeatTickBoundary(fixture.project, { ...signal, boundary: { ...signal.boundary, seq: 2, state: "settled", at } }, h.deps.sources, h.deps);
+    const restarted = new SeatTickAccounting(`${fixture.stateFile}.sqlite`, fixture.project).readState();
+    expect(restarted.turnIdleSince).toBe(at);
+    expect(restarted.outstandingWake).toEqual(outstandingWake());
+    expect(seatTickStateForEpochForTest(restarted, 8).turnIdleSince).toBeNull();
+    expect(seatTickStateForEpochForTest(restarted, 8).outstandingWake).toEqual(outstandingWake());
+});
+
+
+test("a proven-unsent tick gets a fresh admission key while unknown attempts keep their original key", async () => {
+  const first = harness({ tasks: [{ id: "owed-task", status: "assigned" }], state: { ...RECENT, turnIdleSince: null },
+    delivery: { ok: true, structured: true, target: null, outcome: "queued", operationId: "old-operation" } });
+  await runSeatTickCheck(PROJECT, first.deps);
+  const original = first.written.at(-1)!;
+  const unknown = harness({ tasks: [{ id: "owed-task", status: "assigned" }], state: original, wakeState: "unknown" });
+  await runSeatTickCheck(PROJECT, unknown.deps);
+  expect(unknown.sent).toEqual([]);
+  expect(unknown.written.at(-1)!.outstandingWake?.clientMessageId).toBe(first.sent[0]!.clientMessageId!);
+  const refused = harness({ tasks: [{ id: "owed-task", status: "assigned" }], state: original, wakeState: "dropped" });
+  await runSeatTickCheck(PROJECT, refused.deps);
+  expect(refused.sent).toHaveLength(1);
+  expect(refused.sent[0]!.clientMessageId).not.toBe(first.sent[0]!.clientMessageId!);
+});
+
+
+test("a prose-derived idle projection cannot release work while the owned host is active", async () => {
+  const h = harness({ turn: "idle", tasks: [{ id: "owed-work", status: "assigned" }], state: RECENT });
+  h.deps.sources!.seatRuntime = async () => ({ state: "busy", generation: "native", cursor: 20, turnId: "working-turn" });
+  expect(await runSeatTickCheck(PROJECT, h.deps)).toMatchObject({ verdict: "skipped" });
+  expect(h.sent).toEqual([]);
+  expect(h.deps.readState!(PROJECT).pendingWork?.items).toHaveLength(1);
+});

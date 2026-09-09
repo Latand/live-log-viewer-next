@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { isTerminalHighSignalEvent } from "@/lib/lifecycle/vocabulary";
 
 import { seatTickRetryGuardRef, seatTickSourceGapRef, ORCHESTRATOR_ALERT_REF, SEAT_TICK_SETTINGS_REF } from "./cards";
@@ -250,32 +251,16 @@ function dischargedThrough(events: readonly SeatTickEventInput[], cursor: number
   return sealed;
 }
 
-/**
- * Whether the seat's turn is genuinely progressing, which is the only thing
- * that earns a dropped tick.
- *
- * The dead-host-over-an-open-turn case is why this is a positive test rather
- * than `turn === "busy"`. A seat whose host died mid-turn keeps a `busy` turn
- * on the registry forever, so a plain busy check skipped that seat at every
- * five-minute check for as long as the record stood — a permanent silence
- * produced by exactly the condition the wake exists to clear. Here the registry
- * decides: `running`, `waiting` under a turn the transcript still shows open (a
- * provider retry deadline) and `starting` (inside the launch grace, which
- * expires into `stalled` or `gone` on its own) are progress; everything else,
- * absent verdicts included, is not.
- */
+/** Admission to the existing recovery path; the owned host still fences input. */
 export function seatTurnProgressing(seat: SeatTickSeatInput): boolean {
-  if (seat.turn !== "busy") return false;
+  if (seat.runtimeState === "busy") return true;
+  if (seat.runtimeState === "idle") return false;
   const activity = seat.activity;
-  if (!activity) return false;
-  /* `waiting` covers two different seats. One is a turn held open by a provider
-     retry deadline, which is progress. The other is `host_alive_turn_idle`: the
-     transcript says the turn SETTLED and only the registry's record still calls
-     it open — a seat sitting available, which the tick then skipped at every
-     check for as long as the stale record stood (#1262). The evidence the
-     verdict came from decides between them. */
-  if (activity.lifecycle === "waiting") return activity.turnState === "busy";
-  return activity.lifecycle === "running" || activity.lifecycle === "starting";
+  if (!activity || activity.turnState === undefined || activity.turnState === "unknown") return true;
+  if (activity.lifecycle === "starting" || activity.lifecycle === "running") return true;
+  if (activity.turnState === "idle") return false;
+  // Silence under a live or unobservable turn does not authorize intervention.
+  return !(activity.lifecycle === "stalled" && activity.reason === "host_gone_turn_open");
 }
 
 /**
@@ -649,12 +634,27 @@ function decide(input: SeatTickCheckInput): SeatTickDecision {
     };
   }
 
-  /* A tick that landed after the current turn would be acting on evidence the
-     turn has already superseded. Drop it: no delivery, no cursor advance, no
-     stall memory, and the next check re-reads everything. */
-  if (seatTurnProgressing(input.seat)) {
-    return { verdict: { kind: "skipped", reason: "seat-busy" }, state: unchanged, cards: [] };
+  const newerBusyBoundary = input.state.turnBoundary?.state === "busy"
+    && input.state.turnBoundary.generation === input.seat.runtimeGeneration
+    && input.state.turnBoundary.seq >= (input.seat.runtimeCursor ?? Infinity);
+  const busy = seatTurnProgressing(input.seat) || newerBusyBoundary;
+  const reclaimedIdle = input.seat.activity?.turnState === "idle"
+    && input.seat.activity.lifecycle === "gone" && input.seat.activity.reason === "host_gone_turn_settled";
+  const idle = !busy && (input.seat.runtimeState === "idle" || reclaimedIdle
+    || (input.seat.runtimeState === undefined && input.seat.activity?.turnState === "idle"));
+  if (busy && input.seat.runtimeGeneration && input.seat.runtimeTurnId && input.seat.runtimeCursor !== undefined) {
+    unchanged.turnBoundary = { generation: input.seat.runtimeGeneration, turnId: input.seat.runtimeTurnId,
+      seq: input.seat.runtimeCursor, state: "busy", at };
   }
+  const boundary = unchanged.turnBoundary;
+  const priorRuntime = input.state.idleRuntime;
+  const runtimeChanged = input.seat.runtimeGeneration !== undefined && priorRuntime != null
+    && (priorRuntime.generation !== input.seat.runtimeGeneration || priorRuntime.cursor !== input.seat.runtimeCursor);
+  const boundaryAt = boundary?.state === "settled" && boundary.generation === input.seat.runtimeGeneration
+    && boundary.seq >= (priorRuntime?.cursor ?? 0) ? boundary.at : null;
+  unchanged.turnIdleSince = idle ? (boundaryAt ?? (runtimeChanged ? at : input.state.turnIdleSince ?? at)) : null;
+  unchanged.idleRuntime = idle && input.seat.runtimeGeneration !== undefined && input.seat.runtimeCursor !== undefined
+    ? { generation: input.seat.runtimeGeneration, cursor: input.seat.runtimeCursor } : null;
 
   /* The seal (#1285) rides on every verdict from here down, a skipped check
      excepted — that one returns above and remembers nothing, deliberately. It
@@ -664,7 +664,7 @@ function decide(input: SeatTickCheckInput): SeatTickDecision {
   const base: SeatTickProjectState = {
     ...unchanged,
     seatEpoch: input.seat.seatEpoch,
-    eventsThrough: dischargedThrough(input.events, unchanged.eventsThrough),
+    eventsThrough: busy ? unchanged.eventsThrough : dischargedThrough(input.events, unchanged.eventsThrough),
   };
   const stalled = stalledLanes(input);
   const stalledKids = stalledChildren(input);
@@ -678,7 +678,7 @@ function decide(input: SeatTickCheckInput): SeatTickDecision {
   const unstarted = input.tasks.filter((task) => isUnstarted(task, input.now, input.policy.backlogAfterMs));
   const backlog = input.tasks.filter((task) => task.status === "assigned" && !task.owned).length - unstarted.length;
   const openWork = hasOpenWork(input);
-  const wakeDue = seatTickWakeDue(input.state.lastWakeAt, input.now, input.settings.wakeIntervalMs);
+  const wakeDue = unchanged.turnIdleSince !== null && elapsed(unchanged.turnIdleSince ?? null, input.now, input.settings.wakeIntervalMs);
 
   const observed: SeatTickProjectState = { ...base, stalledSeen: stalledNow };
 
@@ -704,7 +704,9 @@ function decide(input: SeatTickCheckInput): SeatTickDecision {
 
   const laneEvents = input.events.filter(isOwedEvent);
   const candidates: SeatTickWakeReason[] = [];
-  if (wakeDue) {
+  const seatRecovery = !busy && openWork && input.seat.activity?.reason === "host_gone_turn_open";
+  if (seatRecovery) candidates.push({ kind: "stalled", detail: "the seat owner is gone over an open turn; reconcile its owner before input" });
+  {
     /* A verdict the seat cannot decide without leads the wake — and waits for
        the wake like everything else. Routine progress never wakes on its own,
        and neither does an event whose lane has finished.
@@ -769,16 +771,40 @@ function decide(input: SeatTickCheckInput): SeatTickDecision {
        and an hourly wake with an empty agenda is the burnt-quota tick this
        replaces. */
     const intervalAgenda = input.pipelines.some(isOpenLane) || input.children.some(isRunningChild) || input.signals.length > 0;
-    if (openWork && intervalAgenda && candidates.length === 0) {
+    if (wakeDue && openWork && intervalAgenda && candidates.length === 0) {
       candidates.push({ kind: "interval", detail: "the wake interval elapsed while work is open" });
     }
   }
 
+  const agenda = wakeItems({ input, stalled: persistedStalls, stalledChildren: persistedChildStalls, harvest, laneEvents, unstarted, includeInterval: false });
+  if (seatRecovery) agenda.push({ kind: "signal", id: "seat-host", label: "the seat owner is gone over an open turn" });
+  const acknowledged = new Set(input.state.lastActionableKeys ?? []);
+  const freshAgenda = agenda.filter((item) => item.kind === "event" || !acknowledged.has(actionableKey(item, input)));
+  observed.lastActionableKeys = [...acknowledged].filter((key) => agenda.some((item) => actionableKey(item, input) === key));
+  const pending = wakeDue ? agenda : freshAgenda;
+  observed.pendingWork = pending.length ? {
+    at, items: pending.slice(0, input.policy.itemsPerWake), reasons: candidates.filter((reason) => reason.kind !== "interval"),
+    deferred: Math.max(0, pending.length - input.policy.itemsPerWake),
+  } : null;
+  if (busy) return { verdict: { kind: "skipped", reason: "seat-busy" }, state: observed, cards: [] };
+  // An unchanged, already delivered obligation waits for the next idle interval.
+  if (!wakeDue && freshAgenda.length === 0) candidates.length = 0;
+
+  const wanted = new Set(pending.map((item) => item.kind));
+  if (pending.length > 0) {
+    for (let index = candidates.length - 1; index >= 0; index--) {
+      const kind = candidates[index]!.kind;
+      if ((kind === "unmerged-pr" && !wanted.has("pull-request"))
+        || (kind === "unstarted-task" && !wanted.has("task"))
+        || (kind === "lane-event" && !wanted.has("event"))
+        || (kind === "child-terminal" && !wanted.has("child"))) candidates.splice(index, 1);
+    }
+  }
   const cards: SeatTickCard[] = [];
   const reasons: SeatTickWakeReason[] = [];
   let guardHeld = 0;
   for (const reason of candidates) {
-    if (guardCount(input.state, reason.kind, input.changeFingerprint) >= input.policy.retryGuard) {
+    if (freshAgenda.length === 0 && guardCount(input.state, reason.kind, input.changeFingerprint) >= input.policy.retryGuard) {
       guardHeld += 1;
       cards.push({
         ref: seatTickRetryGuardRef(reason.kind),
@@ -822,10 +848,11 @@ function decide(input: SeatTickCheckInput): SeatTickDecision {
      The guard and the interval are untouched by any of it: the reasons here
      passed both, and a gap adds none. */
   if (reasons.length > 0) {
-    const all = wakeItems({ input, stalled: persistedStalls, stalledChildren: persistedChildStalls, harvest, laneEvents, unstarted });
+    const all = pending.length ? pending : wakeItems({ input, stalled: persistedStalls, stalledChildren: persistedChildStalls, harvest, laneEvents, unstarted });
     return {
       verdict: {
         kind: "wake",
+        actionableKeys: all.slice(0, input.policy.itemsPerWake).map((item) => actionableKey(item, input)),
         reasons,
         items: all.slice(0, input.policy.itemsPerWake),
         deferred: Math.max(0, all.length - input.policy.itemsPerWake),
@@ -866,6 +893,7 @@ function decide(input: SeatTickCheckInput): SeatTickDecision {
      that nothing is owed — each of them resting on evidence the check above
      has already shown it could read. */
   if (guardHeld > 0) {
+    state.pendingWork = null;
     return { verdict: { kind: "quiet", detail: "every wake reason is held by the retry guard" }, state: quiet(state, at), cards };
   }
 
@@ -902,11 +930,12 @@ function wakeItems(context: {
   harvest: readonly SeatTickChildInput[];
   laneEvents: readonly SeatTickEventInput[];
   unstarted: SeatTickTaskInput[];
+  includeInterval?: boolean;
 }): SeatTickItem[] {
   const { input } = context;
   const items: SeatTickItem[] = [];
   for (const event of context.laneEvents) {
-    items.push({ kind: "event", id: event.pipelineId ?? event.type, label: `${event.type}: ${event.summary}` });
+    items.push({ kind: "event", eventSeq: event.seq, id: event.pipelineId ?? event.type, label: `${event.type}: ${event.summary}` });
   }
   /* Oldest outcome first (#1465), so the per-wake bound holds back the newest
      and the child that has waited longest is harvested first. Only the items
@@ -939,6 +968,7 @@ function wakeItems(context: {
   for (const task of context.unstarted) {
     items.push({ kind: "task", id: task.id, label: `${task.title} — assigned, nothing started it` });
   }
+  if (context.includeInterval === false) return items;
   /* On an interval wake the open lanes are the agenda; they carry no reason of
      their own, so they come last and only when nothing sharper displaced them. */
   for (const pipeline of input.pipelines) {
@@ -967,11 +997,19 @@ function wakeItems(context: {
  * message raised minutes earlier would credit the seat with the wrong wake, so
  * the raising check writes the plan down and the landing applies it verbatim.
  */
+function actionableKey(item: SeatTickItem, input: SeatTickCheckInput): string {
+  const revision = item.kind === "task" ? input.tasks.find((task) => task.id === item.id)?.updatedAt
+    : item.kind === "pull-request" ? input.pullRequests.find((pr) => `#${pr.number}` === item.id)?.updatedAt
+    : null;
+  return createHash("sha256").update(JSON.stringify([item.kind, item.id, item.eventSeq, item.outcomeId, item.label, revision])).digest("hex");
+}
+
 export function seatTickWakeCommitPlan(
   verdict: SeatTickVerdict,
   context: {
     fingerprint: string;
     eventsThrough: number;
+    unreadEvents?: readonly SeatTickEventInput[];
     /** The terminal children the check saw (#1465). Only those the wake
         actually names — inside the per-wake bound — are recorded as harvested
         by its landing; a child the bound held back stays owed. */
@@ -983,7 +1021,12 @@ export function seatTickWakeCommitPlan(
   if (verdict.kind !== "wake") return null;
   const terminal = new Set(context.terminalChildren ?? []);
   const children = verdict.items.filter((item) => item.kind === "child" && terminal.has(item.outcomeId ?? item.id)).map((item) => item.outcomeId ?? item.id);
-  return { proposal: false, reasons: verdict.reasons.map((reason) => reason.kind), fingerprint, eventsThrough, children };
+  const carriedEvents = verdict.items.flatMap((item) => item.kind === "event" && item.eventSeq !== undefined ? [item.eventSeq] : []);
+  const uncarried = context.unreadEvents?.find((event) => isOwedEvent(event) && !carriedEvents.includes(event.seq));
+  const committedEventsThrough = uncarried
+    ? context.unreadEvents!.filter((event) => event.seq < uncarried.seq).at(-1)?.seq ?? 0
+    : context.unreadEvents ? eventsThrough : carriedEvents.length ? Math.min(eventsThrough, Math.max(...carriedEvents)) : eventsThrough;
+  return { proposal: false, reasons: verdict.reasons.map((reason) => reason.kind), fingerprint, eventsThrough: committedEventsThrough, children, ...(verdict.actionableKeys ? { actionableKeys: verdict.actionableKeys } : {}) };
 }
 
 /**
@@ -1013,6 +1056,9 @@ export function seatTickWakeCommit(
     return {
       ...state,
       lastWakeAt: at,
+      turnIdleSince: null,
+      turnBoundary: null,
+      pendingWork: null,
       lastProposalAt: at,
       lastWakeReasons: [],
       lastWakeFingerprint: commit.fingerprint,
@@ -1036,6 +1082,10 @@ export function seatTickWakeCommit(
   return {
     ...state,
     lastWakeAt: at,
+    turnIdleSince: null,
+    turnBoundary: null,
+    pendingWork: null,
+    lastActionableKeys: [...new Set([...(state.lastActionableKeys ?? []), ...(commit.actionableKeys ?? [])])],
     lastWakeReasons: carried,
     lastWakeFingerprint: commit.fingerprint,
     wakesWithoutChange,

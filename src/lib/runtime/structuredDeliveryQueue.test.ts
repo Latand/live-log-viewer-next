@@ -2502,3 +2502,64 @@ test("an unreadable host state issues no control at all", async () => {
   expect(answers).toEqual([]);
   expect(transitions).toEqual([]);
 });
+
+
+test("idle-only effects refuse busy admission and never interrupt or wait in the queue", async () => {
+  const transitions: Array<[string, string]> = [];
+  let writes = 0;
+  let interrupts = 0;
+  const target = host(async () => { writes++; return { outcome: "turn-started", turnId: "unexpected" }; });
+  target.health = async () => ({ ...idleState(), status: "active", activeTurnRef: "operator-turn" });
+  target.interrupt = async () => { interrupts++; };
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => [{ id: "effect:tick", kind: "runtime.send", eventSeq: 1,
+      payload: { kind: "send", operationId: "tick", conversationId: "seat", text: "check", policy: "idle-only" } }],
+    transition: async (id, status) => { transitions.push([id, status]); },
+  }, () => target);
+  await queue.drain();
+  expect(writes).toBe(0);
+  expect(interrupts).toBe(0);
+  expect(transitions).toEqual([["tick", "failed"]]);
+});
+
+test("idle-only effects carry a null fence and close proven-unsent races", async () => {
+  const transitions: Array<[string, string]> = [];
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => [{ id: "effect:tick", kind: "runtime.send", eventSeq: 1,
+      payload: { kind: "send", operationId: "tick", conversationId: "seat", text: "check", policy: "idle-only", turnId: "old-turn" } }],
+    transition: async (id, status) => { transitions.push([id, status]); },
+  }, () => host(async (entry) => {
+    expect(entry.expectedTurnId).toBeNull();
+    return { outcome: "rejected", reason: "stale-turn" };
+  }));
+  await queue.drain();
+  expect(transitions).toEqual([["tick", "delivering"], ["tick", "failed"]]);
+});
+
+
+test("a retained legacy tick cannot use its old interrupt policy after restart", async () => {
+  let interrupts = 0;
+  const target = host(async () => { throw new Error("no input expected"); });
+  target.health = async () => ({ ...idleState(), status: "active", activeTurnRef: "operator-turn" });
+  target.interrupt = async () => { interrupts++; };
+  const transitions: string[] = [];
+  const queue = new StructuredDeliveryQueue({ effects: async () => [{ id: "effect:legacy-tick", kind: "runtime.send", eventSeq: 1,
+    payload: { kind: "send", operationId: "legacy-tick", conversationId: "seat", text: "check", policy: "interrupt-active", origin: { kind: "agent", role: "seat-tick" } } }],
+    transition: async (_id, status) => { transitions.push(status); },
+  }, () => target);
+  await queue.drain();
+  expect(interrupts).toBe(0);
+  expect(transitions).toEqual(["failed"]);
+});
+
+test("a tick with a lost reply becomes uncertain without an automatic second write", async () => {
+  let writes = 0;
+  const transitions: string[] = [];
+  const queue = new StructuredDeliveryQueue({ effects: async () => [{ id: "effect:unknown-tick", kind: "runtime.send", eventSeq: 1,
+    payload: { kind: "send", operationId: "unknown-tick", conversationId: "seat", text: "check", policy: "idle-only" } }],
+    transition: async (_id, status) => { transitions.push(status); },
+  }, () => host(async () => { writes++; throw new Error("request timed out: thread/read"); }));
+  await queue.drain();
+  expect(writes).toBe(1);
+  expect(transitions).toEqual(["delivering", "uncertain"]);
+});

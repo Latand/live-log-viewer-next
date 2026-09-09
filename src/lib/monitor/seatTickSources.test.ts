@@ -194,7 +194,7 @@ function sources(over: {
       if (over.livenessThrows) throw new Error("the liveness plane is unavailable");
       const childRow = request.conversationId ? over.childRows?.[request.conversationId] : undefined;
       if (childRow) return [childRow];
-      return request.conversationId ? over.seatRows ?? [] : over.laneRows ?? [];
+      return request.conversationId ? over.seatRows ?? [livenessRow({ conversationId: request.conversationId, lifecycle: "waiting", reason: "host_alive_turn_idle", turnState: "idle" })] : over.laneRows ?? [];
     },
     lifecycleJournal: () => journal(over.events ?? []),
     latestDeployment: () => over.latestDeployment ?? ({ state: "unreadable", error: "no ledger" }) as never,
@@ -246,14 +246,12 @@ test("the tick's stall threshold is what the liveness read is asked for", async 
   ]);
 });
 
-/* A settled turn is never skipped and never signalled, so nothing reads its
-   verdict — and a transcript tail per project per five minutes is not a read
-   worth taking for an answer nobody consults. */
-test("a seat whose turn has settled is not asked for a verdict at all", async () => {
+// Registry idle can lag a newly resumed turn; always cross-check current activity.
+test("a registry-idle seat is checked for a newer active turn", async () => {
   const calls: { project?: string; conversationId?: string; stallAfterMs: number }[] = [];
   const input = await gather({ laneRows: [livenessRow()], livenessCalls: calls });
-  expect(calls.some((call) => call.conversationId)).toBe(false);
-  expect(input.seat!.activity).toBeNull();
+  expect(calls.some((call) => call.conversationId)).toBe(true);
+  expect(input.seat!.activity).toMatchObject({ turnState: "idle" });
 });
 
 test("a lane the liveness plane says nothing about carries no verdict, and is therefore never stalled", async () => {
@@ -538,7 +536,8 @@ test("moving a stale card moves the fingerprint, so the retry guard cannot outli
 
   /* And it is the movement that released it, not the guard having lapsed: the
      same guard against the state this check actually read still holds. */
-  const held = seatTickDecision({ ...moved, state: { ...moved.state, ...spent, lastWakeFingerprint: moved.changeFingerprint } });
+  const held = seatTickDecision({ ...moved, state: { ...moved.state, ...spent, turnIdleSince: new Date(NOW - 61 * 60_000).toISOString(),
+    lastActionableKeys: released.verdict.kind === "wake" ? released.verdict.actionableKeys : [], lastWakeFingerprint: moved.changeFingerprint } });
   expect(reasonsOf(held)).toEqual([]);
   expect(held.cards.map((card) => card.kind)).toEqual(["retry-guard"]);
 });
@@ -681,27 +680,27 @@ test("a hidden lane leaves no pull request behind it", async () => {
 });
 
 /* The read is a subprocess, so it happens only where a wake could come of it. */
-test("the pull request read is skipped entirely until the wake interval has elapsed", async () => {
+test("pull request obligations are collected during the idle countdown", async () => {
   const calls: { cwd: string; limit: number }[] = [];
   const early = await gather(
     { pipelines: [finishedLane()], openPullRequests: [openPullRequest()], pullRequestCalls: calls },
     withCursor(0, { lastWakeAt: new Date(NOW - 60_000).toISOString() }),
   );
-  expect(calls).toEqual([]);
-  expect(early.pullRequests).toEqual([]);
+  expect(calls).toEqual([{ cwd: "/srv/repo", limit: 60 }]);
+  expect(early.pullRequests).toHaveLength(1);
 
   await gather(
     { pipelines: [finishedLane()], openPullRequests: [openPullRequest()], pullRequestCalls: calls },
     withCursor(0, OVERDUE),
   );
-  expect(calls).toEqual([{ cwd: "/srv/repo", limit: 60 }]);
+  expect(calls).toHaveLength(2);
 });
 
 /* The same rule as the clause above, applied to the other two ways a check
    ends before any wake reason is composed. A seat mid-turn is the expensive
    one: a turn that runs for hours would otherwise pay a subprocess at every
    five-minute check for its whole length. */
-test("a check whose seat is already mid-turn asks GitHub nothing", async () => {
+test("a busy seat collects pull request obligations without dispatch", async () => {
   const calls: { cwd: string; limit: number }[] = [];
   const input = await gather(
     {
@@ -713,8 +712,9 @@ test("a check whose seat is already mid-turn asks GitHub nothing", async () => {
     },
     withCursor(0, OVERDUE),
   );
-  expect(calls).toEqual([]);
-  expect(input.pullRequests).toEqual([]);
+  expect(calls).toHaveLength(1);
+  expect(input.pullRequests).toHaveLength(1);
+  expect(seatTickDecision(input).verdict.kind).toBe("skipped");
 });
 
 test("a project with no seat to wake asks GitHub nothing", async () => {
@@ -802,13 +802,13 @@ test("once that pull request merges the same project is quiet again", async () =
 
 /* Cold storage is read only where the check has already committed to a
    subprocess, so the gates that skip `gh` skip the archive with it. */
-test("the archive is not read by a check that could raise no wake from it", async () => {
+test("archive collection during a countdown preserves the no-seat and disabled gates", async () => {
   const early: number[] = [];
   await gather(
     { pipelines: [finishedLane()], archiveCalls: early },
     withCursor(0, { lastWakeAt: new Date(NOW - 60_000).toISOString() }),
   );
-  expect(early).toEqual([]);
+  expect(early).toEqual([1]);
 
   const seated: number[] = [];
   await gather({ pipelines: [finishedLane()], archiveCalls: seated, noSeat: true }, withCursor(0, OVERDUE));
@@ -890,7 +890,7 @@ test("a successful empty answer leaves no gap behind it", async () => {
    because nothing was owed from this reason, not because something failed. */
 test("a check that asks GitHub nothing reports no gap", async () => {
   const input = await gather(
-    { pipelines: [finishedLane()], pullRequestsThrow: true },
+    { noSeat: true, pipelines: [finishedLane()], pullRequestsThrow: true },
     withCursor(0, { lastWakeAt: new Date(NOW - 60_000).toISOString() }),
   );
   expect(input.pullRequestsUnavailable).toBeNull();
@@ -1030,7 +1030,7 @@ test("a check that asks GitHub nothing leaves the run untouched", async () => {
     reported: true,
   };
   const input = await gather(
-    { pipelines: [finishedLane()], pullRequestsThrow: true },
+    { noSeat: true, pipelines: [finishedLane()], pullRequestsThrow: true },
     withCursor(0, { lastWakeAt: new Date(NOW - 60_000).toISOString(), pullRequestGap: standing }),
   );
   expect(input.pullRequestsUnavailable).toBeNull();

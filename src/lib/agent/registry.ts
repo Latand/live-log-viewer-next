@@ -1646,7 +1646,7 @@ function canonicalHeldDeliveryCommand(
   const command: HeldDeliveryCommand = {
     operationId: value?.operationId || deliveryId,
     kind: value?.kind === "steer" ? "steer" : "send",
-    policy: value?.policy === "queue" || value?.policy === "steer-if-active"
+    policy: value?.policy === "queue" || value?.policy === "idle-only" || value?.policy === "steer-if-active"
       ? value.policy
       : "interrupt-active",
   };

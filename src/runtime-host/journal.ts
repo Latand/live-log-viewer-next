@@ -1591,12 +1591,19 @@ export class RuntimeJournal {
     let reason: string | null = null;
     let turnId = "turnId" in command && typeof command.turnId === "string" ? command.turnId : session?.activeTurnId ?? null;
     let queuePosition: number | null = null;
-    if (this.structuredHosts
+    if (command.kind === "send" && command.policy === "idle-only"
+      && (!this.structuredHosts || (session?.hostKind !== "codex-app-server" && session?.hostKind !== "claude-broker"))) {
+      status = "rejected";
+      reason = "idle-only-unsupported-host";
+    } else if (this.structuredHosts
       && command.kind === "send"
       && (session?.hostKind === "codex-app-server" || session?.hostKind === "claude-broker")) {
       if (!session || session.host !== "hosted") {
         status = "rejected";
         reason = session?.host === "dead" || session?.host === "unhosted" ? "dead-host" : "no-claim";
+      } else if (command.policy === "idle-only" && (session.turn !== "idle" || session.activeTurnId !== null)) {
+        status = "rejected";
+        reason = "idle-only-not-admitted";
       } else if (command.turnId && command.turnId !== session.activeTurnId) {
         status = "rejected";
         reason = "stale-turn";
@@ -1609,6 +1616,9 @@ export class RuntimeJournal {
       if (!session || session.host !== "hosted") {
         status = "rejected";
         reason = session?.host === "dead" || session?.host === "unhosted" ? "dead-host" : "no-claim";
+      } else if (command.policy === "idle-only" && (session.turn !== "idle" || session.activeTurnId !== null)) {
+        status = "rejected";
+        reason = "idle-only-not-admitted";
       } else if (command.turnId && command.turnId !== session.activeTurnId) {
         status = "rejected";
         reason = "stale-turn";

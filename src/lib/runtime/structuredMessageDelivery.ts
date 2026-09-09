@@ -41,7 +41,7 @@ export interface StructuredMessageRequest {
   clientMessageId?: string | null;
   operationId?: string;
   kind?: "send" | "steer";
-  policy?: "queue" | "steer-if-active" | "interrupt-active";
+  policy?: "queue" | "idle-only" | "steer-if-active" | "interrupt-active";
   turnId?: string | null;
   text: string;
   images?: RuntimeImageUpload[];

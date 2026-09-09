@@ -156,3 +156,10 @@ test("runtime command parsing admits image-only content with a canonical digest"
     idempotencyKey: "send-images-invalid",
   })).toThrow("images are invalid");
 });
+
+
+test("idle-only send policy is explicit and unsupported policies refuse admission", () => {
+  const body = { conversationId: "seat", text: "check", idempotencyKey: "tick-key", policy: "idle-only" };
+  expect(parseRuntimeCommand("send", body)).toMatchObject({ policy: "idle-only" });
+  expect(() => parseRuntimeCommand("send", { ...body, policy: "unknown-policy" })).toThrow("policy is invalid");
+});
