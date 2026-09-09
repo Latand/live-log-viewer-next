@@ -1130,11 +1130,17 @@ export class CodexAppServerHost implements EngineHost {
   private readonly pendingCompactions = new Map<string, PendingCompaction>();
   private readonly realtimeDeliveries = new Map<string, RealtimeDeliveryState>();
   private readonly voiceStreams = new Map<string, VoiceStreamState>();
-  /* A host's thread id is immutable, so one memo covers its one stable persona
-     item. Successor starts join the same insertion promise. */
-  private unresolvedVoicePersonaBootstrap: VoicePersonaBootstrap | null = null;
+  /* KEYED BY VARIANT, because a thread has one identity PER VARIANT and not one
+     overall (#1615). While the coordinator persona was the only one, a single
+     boolean and a single payload were the whole memo; with two, sharing them
+     fails in both directions — a payload resolved for one variant gets injected
+     under the other's id, and one accepted variant reports the other as accepted
+     without ever injecting it, which is a false receipt that
+     `rejectStartedRealtimeContract` would otherwise have caught.
+     Successor starts of the SAME variant still join the same insertion promise. */
+  private readonly unresolvedVoicePersonaBootstrap = new Map<VoicePersonaVariant, VoicePersonaBootstrap>();
   private voicePersonaBootstrapInsertion: VoicePersonaBootstrapInsertion | null = null;
-  private voicePersonaBootstrapAccepted = false;
+  private readonly voicePersonaBootstrapAccepted = new Set<VoicePersonaVariant>();
   private readonly pendingVoiceChunks = new Map<string, string>();
   private readonly cancelledVoiceTurns = new Set<string>();
   private readonly activeRealtimeDeliveries = new Map<string, {
@@ -1915,7 +1921,7 @@ export class CodexAppServerHost implements EngineHost {
     pendingStart: PendingRealtimeStart,
   ): Promise<"accepted" | "superseded"> {
     await this.ensureCanonicalTranscriptPath();
-    while (!this.voicePersonaBootstrapAccepted) {
+    while (!this.voicePersonaBootstrapAccepted.has(variant)) {
       const active = this.voicePersonaBootstrapInsertion;
       if (active) {
         try {
@@ -1943,16 +1949,17 @@ export class CodexAppServerHost implements EngineHost {
           "legacy canonical scan unavailable; refusing insertion",
         );
       if (canonicalExists || legacyExists) {
-        this.voicePersonaBootstrapAccepted = true;
-        this.unresolvedVoicePersonaBootstrap = null;
+        this.voicePersonaBootstrapAccepted.add(variant);
+        this.unresolvedVoicePersonaBootstrap.delete(variant);
         break;
       }
       if (this.pendingRealtimeStart !== pendingStart) return "superseded";
       if (this.voicePersonaBootstrapInsertion) continue;
 
-      const bootstrap = this.unresolvedVoicePersonaBootstrap ?? voicePersonaBootstrap(identity, variant);
-      this.unresolvedVoicePersonaBootstrap = bootstrap;
-      const promise = this.insertVoicePersonaBootstrap(bootstrap, identity.itemId);
+      const bootstrap = this.unresolvedVoicePersonaBootstrap.get(variant)
+        ?? voicePersonaBootstrap(identity, variant);
+      this.unresolvedVoicePersonaBootstrap.set(variant, bootstrap);
+      const promise = this.insertVoicePersonaBootstrap(bootstrap, identity.itemId, variant);
       const insertion = { owner: pendingStart, promise };
       this.voicePersonaBootstrapInsertion = insertion;
       const clearInsertion = () => {
@@ -1988,7 +1995,11 @@ export class CodexAppServerHost implements EngineHost {
     this.identity.path = recovered.path;
   }
 
-  private async insertVoicePersonaBootstrap(bootstrap: VoicePersonaBootstrap, itemId: string): Promise<void> {
+  private async insertVoicePersonaBootstrap(
+    bootstrap: VoicePersonaBootstrap,
+    itemId: string,
+    variant: VoicePersonaVariant,
+  ): Promise<void> {
     try {
       await this.rpc("thread/inject_items", {
         threadId: this.identity.threadId,
@@ -1997,8 +2008,8 @@ export class CodexAppServerHost implements EngineHost {
     } catch (error) {
       if (!await this.scanVoicePersonaBootstrap(itemId, "recovery scan unavailable")) throw error;
     }
-    this.voicePersonaBootstrapAccepted = true;
-    this.unresolvedVoicePersonaBootstrap = null;
+    this.voicePersonaBootstrapAccepted.add(variant);
+    this.unresolvedVoicePersonaBootstrap.delete(variant);
   }
 
   private async scanVoicePersonaBootstrap(itemId: string, warning: string): Promise<boolean> {
@@ -2402,7 +2413,7 @@ export class CodexAppServerHost implements EngineHost {
       this.realtimeSessionId = null;
     }
     this.releasing = true;
-    this.unresolvedVoicePersonaBootstrap = null;
+    this.unresolvedVoicePersonaBootstrap.clear();
     this.rejectRealtimeStart(new Error("Codex app-server host released"));
     this.rejectPendingAnswers(new Error("Codex app-server host released"));
     this.rejectPendingDeliveries(new Error("Codex app-server host released"));

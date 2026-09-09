@@ -718,7 +718,7 @@ describe("CodexAppServerHost", () => {
   });
 
   test("a thread already carrying a coordinator persona still receives the modality correction", async () => {
-    /* #1600, the half that cannot be undone. A thread demoted by a call taken
+    /* #1615, the half that cannot be undone. A thread demoted by a call taken
        before this fix keeps that developer item forever — the transcript is
        append-only. What CAN happen is that the next call adds the text that
        outranks it, and that only works because the two variants own different
@@ -5145,6 +5145,89 @@ test("a cancelled persona insertion failure cannot reject the successor start", 
     expect(server.requests.filter((request) => request.method === "thread/realtime/start")).toHaveLength(1);
   } finally {
     await host.release();
+  }
+});
+
+/**
+ * One thread now has TWO persona identities, so the host's bootstrap memo is per
+ * variant or it is wrong (#1615 review, finding 1).
+ *
+ * Both fields were per-host booleans written when a thread could only ever hold
+ * one persona item. With two variants that premise fails in two directions, and
+ * each has its own test below: a stale unresolved payload puts the WRONG TEXT in
+ * the transcript, and a global accepted flag makes the host claim an item it
+ * never injected.
+ */
+test("a variant switch after a rejected insertion injects the new variant's text, not the stale payload", async () => {
+  const isolated = fs.mkdtempSync(path.join(os.tmpdir(), "llv-voice-variant-stale-"));
+  const transcriptPath = path.join(isolated, "voice-thread.jsonl");
+  fs.writeFileSync(transcriptPath, "");
+  const server = new FakeAppServer("voice-thread");
+  server.threadPath = transcriptPath;
+  server.injectItemsError = "temporary insertion refusal";
+  const host = await CodexAppServerHost.start({
+    cwd: "/repo",
+    eventStore: new MemoryEventStore(),
+    spawnProcess: fakeSpawn(server),
+  });
+  try {
+    const rejected = await host.startRealtimeWebRtc("v=0\r\na=ice-ufrag:rejected\r\n", "coordinator");
+    expect(rejected.personaBootstrap.insertion).toBe("rejected");
+
+    /* The next call resolves the OTHER variant — the fail-safe in
+       `voicePersonaVariantForConversation` answering `modality` for one start is
+       exactly how a host sees two variants in a row. */
+    server.injectItemsError = null;
+    const accepted = await host.startRealtimeWebRtc("v=0\r\na=ice-ufrag:switched\r\n", "modality");
+    expect(accepted.personaBootstrap.insertion).toBe("accepted");
+    expect(accepted.personaBootstrap.itemId)
+      .toBe(voicePersonaBootstrapIdentity("voice-thread", "modality").itemId);
+
+    /* The item that actually went to the provider must be the one the receipt
+       names, carrying the persona the receipt implies. */
+    const injected = server.requests.filter((request) => request.method === "thread/inject_items").at(-1);
+    const item = (injected?.params as { items: Array<{ id: string; content: Array<{ text: string }> }> }).items[0];
+    expect(item?.id).toBe(accepted.personaBootstrap.itemId);
+    expect(item?.content[0]?.text).toBe(voicePersona("modality"));
+    expect(item?.content[0]?.text).not.toBe(COORDINATOR_VOICE_PERSONA);
+  } finally {
+    await host.release();
+    fs.rmSync(isolated, { recursive: true, force: true });
+  }
+});
+
+test("a second variant on the same host is injected rather than reported accepted on the first one's receipt", async () => {
+  const isolated = fs.mkdtempSync(path.join(os.tmpdir(), "llv-voice-variant-second-"));
+  const transcriptPath = path.join(isolated, "voice-thread.jsonl");
+  fs.writeFileSync(transcriptPath, "");
+  const server = new FakeAppServer("voice-thread");
+  server.threadPath = transcriptPath;
+  const host = await CodexAppServerHost.start({
+    cwd: "/repo",
+    eventStore: new MemoryEventStore(),
+    spawnProcess: fakeSpawn(server),
+  });
+  try {
+    const first = await host.startRealtimeWebRtc("v=0\r\na=ice-ufrag:first\r\n", "modality");
+    expect(first.personaBootstrap.insertion).toBe("accepted");
+    await host.stopRealtime();
+
+    const second = await host.startRealtimeWebRtc("v=0\r\na=ice-ufrag:second\r\n", "coordinator");
+    expect(second.personaBootstrap.insertion).toBe("accepted");
+    expect(second.personaBootstrap.itemId)
+      .toBe(voicePersonaBootstrapIdentity("voice-thread", "coordinator").itemId);
+
+    /* An `accepted` receipt naming an item that is not in the thread is the
+       failure `rejectStartedRealtimeContract` exists to catch, reported as a
+       success instead. Both variants are now genuinely present. */
+    const attempts = server.requests.filter((request) => request.method === "thread/inject_items");
+    expect(attempts).toHaveLength(2);
+    const persisted = fs.readFileSync(transcriptPath, "utf8");
+    expect(persisted).toContain(first.personaBootstrap.itemId);
+    expect(persisted).toContain(second.personaBootstrap.itemId);
+  } finally {
+    await host.release();
+    fs.rmSync(isolated, { recursive: true, force: true });
   }
 });
 

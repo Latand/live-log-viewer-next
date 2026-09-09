@@ -2142,7 +2142,7 @@ async function bridgeDirective(args: McpToolArgs, control: ViewerControlDependen
   }
   const manager: { conversationId: string; path: string | null } = { conversationId: seat.conversationId, path: seat.path };
 
-  /* NO CIRCLES (#1600). The recipient is the project's designated orchestrator,
+  /* NO CIRCLES (#1615). The recipient is the project's designated orchestrator,
      so a caller that IS that orchestrator would relay the instruction to itself:
      the operator watched exactly this — a seat with voice enabled announced it
      would hand the finished reviews "to the manager", the directive arrived back
@@ -2166,7 +2166,7 @@ async function bridgeDirective(args: McpToolArgs, control: ViewerControlDependen
   }
   if (callerConversationId && callerConversationId === manager.conversationId) {
     throw new McpToolRefusal(
-      `you are the designated orchestrator for ${project}, so this directive would be addressed to you. Voice changes how you hear a request, not who acts on it: do this work yourself with your own tools. Relay only to an orchestrator that is not you.`,
+      `you are the designated orchestrator for ${project}, so this directive would be addressed to you. Voice changes how you hear a request. It does not change who acts on it: do this work yourself, with your own tools. Relay only to an orchestrator that is not you.`,
       { code: "directive_self_relay", project },
     );
   }

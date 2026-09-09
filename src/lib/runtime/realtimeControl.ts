@@ -107,7 +107,7 @@ export async function executeRealtimeControl(
     caller?: RealtimeCaller;
     managerConversationId?: string | null;
     operator: boolean;
-    /** Which persona a `start` bootstraps (#1600). Omitted is `modality`. */
+    /** Which persona a `start` bootstraps (#1615). Omitted is `modality`. */
     personaVariant?: VoicePersonaVariant;
   },
   dependencies: RealtimeControlDependencies = REALTIME_CONTROL_DEPENDENCIES,
@@ -157,7 +157,7 @@ export async function executeRealtimeControl(
       if (!sdp.trimStart().startsWith("v=0") || byteLength(sdp) > MAX_SDP_BYTES) {
         return { status: 400, body: { error: "a valid WebRTC SDP offer is required" } };
       }
-      /* #1600: voice is a modality, so the persona a call bootstraps is decided
+      /* #1615: voice is a modality, so the persona a call bootstraps is decided
          from WHAT THIS CONVERSATION ALREADY IS, resolved per start rather than
          cached — a seat rotation between two calls must be seen by the second.
          Absent, it is `modality`: the variant that assigns no role, because a

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
+import { NextRequest } from "next/server";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -7,10 +8,11 @@ import { agentRegistry } from "@/lib/agent/registry";
 import { beginLegacySpawnFixture } from "@/lib/agent/registryTestFixtures";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 
+import { realtimeRequestAuthority } from "./realtimeInjection";
 import { voicePersonaVariantForConversation } from "./voicePersonaMandate";
 
 /**
- * The resolver over the REAL registry (#1600).
+ * The resolver over the REAL registry (#1615).
  *
  * `voicePersonaRole.test.ts` pins the decision as a pure function; this proves the
  * production path feeds it the right facts — that "is this the voice front" is
@@ -119,5 +121,50 @@ test("the configured root conversation is honoured", () => {
 test("an unregistered or malformed conversation resolves to modality", () => {
   for (const candidate of ["conversation_missing", "not-a-conversation", "", null, undefined, 7]) {
     expect(voicePersonaVariantForConversation(candidate)).toBe("modality");
+  }
+});
+
+/* ------------------------------------------------------------------ *
+ * The wiring the route performs (#1615 review, finding 5).
+ *
+ * The route composes exactly this and passes it to `executeRealtimeControl`.
+ * Proving the resolver and proving the forwarding separately left the join
+ * untested, and the untested direction is the dangerous one: a wiring that
+ * answers `coordinator` too readily is what overwrites a live role.
+ * ------------------------------------------------------------------ */
+
+function browserRequest(): NextRequest {
+  return new NextRequest("http://127.0.0.1/api/runtime/realtime", {
+    method: "POST",
+    headers: { host: "127.0.0.1", "content-type": "application/json" },
+    body: "{}",
+  });
+}
+
+test("the request authority carries the modality persona for an ordinary conversation", () => {
+  const conversationId = spawnConversation(null);
+  const authority = realtimeRequestAuthority(browserRequest(), { action: "start", conversationId });
+  expect(authority.personaVariant).toBe("modality");
+  /* The operator's own browser presents no capability, so it holds transport. */
+  expect(authority.operator).toBeTrue();
+  expect(authority.caller).toEqual({ kind: "anonymous" });
+});
+
+test("the request authority carries the modality persona for a worker", () => {
+  const conversationId = spawnConversation("worker");
+  expect(realtimeRequestAuthority(browserRequest(), { action: "start", conversationId }).personaVariant)
+    .toBe("modality");
+});
+
+test("the request authority carries the coordinator persona only for the voice front", () => {
+  const conversationId = spawnConversation("root");
+  expect(realtimeRequestAuthority(browserRequest(), { action: "start", conversationId }).personaVariant)
+    .toBe("coordinator");
+});
+
+test("a body naming no resolvable conversation still fails safe to modality", () => {
+  for (const conversationId of ["conversation_missing", "", 42, undefined]) {
+    expect(realtimeRequestAuthority(browserRequest(), { action: "start", conversationId }).personaVariant)
+      .toBe("modality");
   }
 });

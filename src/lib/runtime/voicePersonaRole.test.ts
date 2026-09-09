@@ -6,6 +6,8 @@ import { executeRealtimeControl } from "./realtimeControl";
 import {
   COORDINATOR_VOICE_PERSONA,
   MODALITY_VOICE_PERSONA,
+  resetVoicePersonaOverrideWarningForTest,
+  VOICE_PERSONA_FILE,
   voicePersona,
   voicePersonaBootstrap,
   voicePersonaBootstrapIdentity,
@@ -13,7 +15,7 @@ import {
 import { voicePersonaVariantFor } from "./voicePersonaMandate";
 
 /**
- * Voice is a MODALITY, not a role (the #1600 regression).
+ * Voice is a MODALITY, not a role (the #1615 regression).
  *
  * The operator enabled voice on the conversation holding their project's
  * orchestrator seat. The call start injected the voice-coordinator persona as a
@@ -138,6 +140,34 @@ test("voicePersona resolves the variant it is asked for", () => {
   const nothingOnDisk = () => { throw new Error("ENOENT"); };
   expect(voicePersona("coordinator", nothingOnDisk)).toBe(COORDINATOR_VOICE_PERSONA);
   expect(voicePersona("modality", nothingOnDisk)).toBe(MODALITY_VOICE_PERSONA);
+});
+
+test("an ignored override is reported once, so the operator can find out why", () => {
+  /* Finding 4 of the #1615 review: the documented customization point silently
+     became a no-op for every non-root call. It still does not apply — a
+     coordinator-shaped wholesale override is what caused this defect — but it no
+     longer does so without saying anything. */
+  resetVoicePersonaOverrideWarningForTest();
+  const warnings: string[] = [];
+  const warn = console.warn;
+  console.warn = (...args: unknown[]) => { warnings.push(args.join(" ")); };
+  try {
+    expect(voicePersona("modality", () => "An operator's own persona.")).toBe(MODALITY_VOICE_PERSONA);
+    expect(voicePersona("modality", () => "An operator's own persona.")).toBe(MODALITY_VOICE_PERSONA);
+    /* Once per process: this resolves on every bootstrap. */
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain(VOICE_PERSONA_FILE);
+
+    /* And nothing at all when there is no override to ignore. */
+    resetVoicePersonaOverrideWarningForTest();
+    warnings.length = 0;
+    expect(voicePersona("modality", () => { throw new Error("ENOENT"); })).toBe(MODALITY_VOICE_PERSONA);
+    expect(voicePersona("modality", () => "   \n ")).toBe(MODALITY_VOICE_PERSONA);
+    expect(warnings).toEqual([]);
+  } finally {
+    console.warn = warn;
+    resetVoicePersonaOverrideWarningForTest();
+  }
 });
 
 test("an operator persona override applies to the coordinator only", () => {

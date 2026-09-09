@@ -134,7 +134,7 @@ Stay silent until you are spoken to: this text is context, and there is nothing 
 
 /**
  * What voice changes for a session that already has a role: how it hears and how
- * it answers, and nothing else (#1600).
+ * it answers, and nothing else (#1615).
  *
  * The operator enabled voice on their orchestrator's conversation and the call
  * start wrote {@link COORDINATOR_WORK} into that thread. The seat read it,
@@ -150,7 +150,9 @@ Stay silent until you are spoken to: this text is context, and there is nothing 
  * from an append-only transcript, so the correction has to be louder than it.
  */
 const MODALITY_WORK = `
-Voice changes how you hear and how you answer. It changes nothing else.
+Voice changes how you hear and how you answer while a call is live. It changes nothing else.
+
+The delivery rules above are about speaking. This text stays in the thread after the call ends, so when you are writing rather than speaking, write the way you always have.
 
 Your role in this conversation is exactly what it was a moment ago: the same instructions, the same authority, the same seat, the same tools, the same pending work, the same agents to run. Nothing here removes a tool you have or moves your responsibilities to anyone else.
 
@@ -251,14 +253,38 @@ export function voicePersona(
   variant: VoicePersonaVariant,
   readFile: (path: string) => string = (target) => fs.readFileSync(target, "utf8"),
 ): string {
-  if (variant !== "coordinator") return MODALITY_VOICE_PERSONA;
+  let override = "";
   try {
-    const override = readFile(configFilePath(path.join(...VOICE_PERSONA_FILE.split("/")))).trim();
-    if (override) return override;
+    override = readFile(configFilePath(path.join(...VOICE_PERSONA_FILE.split("/")))).trim();
   } catch {
     /* no override on disk — the built-in persona stands */
   }
-  return COORDINATOR_VOICE_PERSONA;
+  if (variant !== "coordinator") {
+    /* SAY SO. The override file is the documented customization point, and after
+       the variant split it reaches the coordinator alone — so an operator who
+       edits it to change how the voice SOUNDS would otherwise watch every
+       non-root call ignore them with no way to find out why. Once per process,
+       and only when a file actually exists to be ignored. */
+    if (override && !warnedModalityOverrideIgnored) {
+      warnedModalityOverrideIgnored = true;
+      console.warn(
+        `[voice persona] ${VOICE_PERSONA_FILE} is a wholesale replacement written for the voice coordinator, `
+        + "so it is not applied to a conversation that already has a role; that call uses the built-in "
+        + "modality persona, which carries the same spoken-delivery rules.",
+      );
+    }
+    return MODALITY_VOICE_PERSONA;
+  }
+  return override || COORDINATOR_VOICE_PERSONA;
+}
+
+/** One diagnostic per process: this resolves on every persona bootstrap, and a
+    line per call would bury the one that matters. */
+let warnedModalityOverrideIgnored = false;
+
+/** Tests only. */
+export function resetVoicePersonaOverrideWarningForTest(): void {
+  warnedModalityOverrideIgnored = false;
 }
 
 /**

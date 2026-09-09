@@ -491,7 +491,7 @@ test("a project with no VALIDATED seat refuses rather than falling back to anoth
 });
 
 /**
- * The loop the operator watched happen (#1600).
+ * The loop the operator watched happen (#1615).
  *
  * Voice was enabled on the conversation holding the seat, the call injected the
  * coordinator persona, and the seat did what it now believed it was for: it

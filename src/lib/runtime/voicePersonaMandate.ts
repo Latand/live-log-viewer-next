@@ -5,7 +5,7 @@ import type { VoicePersonaVariant } from "./voicePersona";
 
 /**
  * Whether a starting call is a new voice coordinator or an existing agent that
- * has just been given a microphone (#1600).
+ * has just been given a microphone (#1615).
  *
  * Voice is a MODALITY. Enabling it changes how a conversation hears and answers
  * and nothing else — the role, the system authority, the seat, the pending work
