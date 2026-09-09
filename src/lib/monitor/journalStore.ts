@@ -194,8 +194,9 @@ export function readRunRecords(limit: number, filePath = monitorJournalPath()): 
  * guessed both numbers from its transcript. Every check leaves a line here,
  * including a check that threw, a sweep refused for want of traffic authority
  * and every way a retained wake stops being outstanding — taken back from a
- * replaced seat, delivered by its holder after all, or settled unsent — so "no
- * line" means "no check" and the cadence is a readable fact.
+ * replaced seat, delivered by its holder after all, settled unsent, or retired
+ * to the seat that has been superseded (#1594) — so "no line" means "no check"
+ * and the cadence is a readable fact.
  * ------------------------------------------------------------------------- */
 
 /** Checks retained before the oldest are dropped. At a five-minute cadence this
@@ -215,6 +216,7 @@ const SEAT_TICK_VERDICTS: SeatTickVerdictKind[] = [
   "landed",
   "dropped",
   "uncertain",
+  "retired",
 ];
 
 export function seatTickJournalPath(): string {
