@@ -1081,6 +1081,13 @@ export async function bindStructuredDeliveryQueue(
         await successor(items, progress, assertActive);
         return;
       }
+      /* A route-recovered structured launch can predate this controller and
+         leave its own `spawn` marker behind. Repair only exact, completed,
+         live rows while this publication is active; an unavailable/shutting
+         down controller never gets to mutate the registry. Do this before
+         registering hosts so even a registration-triggered drain sees the
+         repaired durable state. */
+      registry.repairCompletedStructuredSpawnMarkers();
       progress?.("registering structured delivery hosts");
       for (const item of items) await register(item);
       assertActive();

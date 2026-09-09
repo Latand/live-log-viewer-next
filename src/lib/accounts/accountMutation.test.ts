@@ -7,6 +7,86 @@ const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-account-mutation-"));
 
 afterAll(() => fs.rmSync(sandbox, { recursive: true, force: true }));
 
+test("a real registry spawn sees same-process contention before allocating, while the async path queues", async () => {
+  const state = path.join(sandbox, "registry-contention-state");
+  const result = path.join(sandbox, "registry-contention-result.json");
+  const mutationPath = path.join(import.meta.dir, "accountMutation.ts");
+  const registryPath = path.join(import.meta.dir, "..", "agent", "registry.ts");
+  const child = Bun.spawn({
+    cmd: [process.execPath, "-e", `
+      process.env.LLV_STATE_DIR = ${JSON.stringify(state)};
+      const fs = await import("node:fs");
+      const { withAccountMutationLockAsync } = await import(${JSON.stringify(mutationPath)});
+      const { AgentRegistry } = await import(${JSON.stringify(registryPath)});
+      const registry = new AgentRegistry(
+        ${JSON.stringify(path.join(state, "agent-registry.json"))},
+        undefined,
+        undefined,
+        { sqliteMode: "off" },
+      );
+      const input = {
+        engine: "codex",
+        cwd: "/fixture-repo",
+        transport: "structured",
+        accountId: null,
+        clientAttemptId: "registry-contention-attempt",
+        launchProfile: { title: "Registry contention fixture" },
+      };
+      let releaseHolder;
+      let markStarted;
+      const started = new Promise((resolve) => { markStarted = resolve; });
+      const holder = withAccountMutationLockAsync(async () => {
+        markStarted();
+        await new Promise((resolve) => { releaseHolder = resolve; });
+      });
+      await started;
+
+      const syncStartedAt = Date.now();
+      let syncError = null;
+      try { registry.beginSpawnRequest(input); }
+      catch (error) { syncError = { name: error?.name ?? "unknown", message: String(error?.message ?? error) }; }
+      const syncElapsedMs = Date.now() - syncStartedAt;
+      const receiptsBeforeRelease = Object.keys(registry.snapshot().receipts).length;
+
+      const queued = withAccountMutationLockAsync(async () => registry.beginSpawnRequest(input));
+      setTimeout(() => releaseHolder(), 25);
+      const [, begun] = await Promise.all([holder, queued]);
+      const receiptsAfterRelease = Object.values(registry.snapshot().receipts);
+      fs.writeFileSync(${JSON.stringify(result)}, JSON.stringify({
+        syncError,
+        syncElapsedMs,
+        receiptsBeforeRelease,
+        begunKind: begun.kind,
+        receiptsAfterRelease: receiptsAfterRelease.length,
+        clientAttemptIds: receiptsAfterRelease.map((receipt) => receipt.clientAttemptId),
+      }));
+    `],
+    stdout: "ignore",
+    stderr: "pipe",
+  });
+
+  const completed = await Promise.race([
+    child.exited.then(() => true),
+    Bun.sleep(2_000).then(() => false),
+  ]);
+  if (!completed) child.kill();
+  const error = await new Response(child.stderr).text();
+
+  expect({ completed, error }).toEqual({ completed: true, error: "" });
+  expect(JSON.parse(fs.readFileSync(result, "utf8"))).toEqual({
+    syncError: {
+      name: "AccountMutationBusyError",
+      message: "account mutation is busy in this process; retry shortly",
+    },
+    syncElapsedMs: expect.any(Number),
+    receiptsBeforeRelease: 0,
+    begunKind: "created",
+    receiptsAfterRelease: 1,
+    clientAttemptIds: ["registry-contention-attempt"],
+  });
+  expect((JSON.parse(fs.readFileSync(result, "utf8")) as { syncElapsedMs: number }).syncElapsedMs).toBeLessThan(100);
+});
+
 test("same-process contenders leave an async transaction holder runnable", async () => {
   const state = path.join(sandbox, "state");
   const result = path.join(sandbox, "result.json");

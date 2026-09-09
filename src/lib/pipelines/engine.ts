@@ -2120,6 +2120,7 @@ async function tickRunStage(
        engine launch before it can fail. */
     if (publication === "rebinding") {
       if (bookControllerWaitRound(attempt, activationNow, activationNow, ports) === "waiting") {
+        syncControllerWaitStateDetail(pipeline, attempt, null);
         persist();
         return;
       }
@@ -2206,7 +2207,12 @@ async function tickRunStage(
              not a rejected launch, so it gets the wall-clock wait budget; every
              other transient keeps the two immediate handshake retries (#1056),
              which stay well inside the controller's phase deadline. */
-          if (isStructuredDeliveryControllerFailure(message)) {
+          const accountMutationContention = isAccountMutationContention(message);
+          /* A busy account error is retryable only before the registry can
+             publish a launch claim. Once a callback supplied an id, its fate
+             is unknown and the existing receipt recovery must own it. */
+          if (accountMutationContention && attempt.launchId !== null) throw error;
+          if (isStructuredDeliveryControllerFailure(message) || accountMutationContention) {
             controllerFailure = message;
             break;
           }
@@ -2227,6 +2233,7 @@ async function tickRunStage(
         }
         attempt.state = "pending";
         setCursorState(pipeline, stage.id, "pending");
+        syncControllerWaitStateDetail(pipeline, attempt, controllerFailure);
         persist();
         return;
       }
@@ -2240,7 +2247,8 @@ async function tickRunStage(
       attempt.accountId = spawned.accountId ?? attempt.accountId ?? null;
       attempt.state = "running";
       setCursorState(pipeline, stage.id, "running");
-      if (pipeline.stateDetail?.startsWith("rate limited until ")) pipeline.stateDetail = null;
+      if (pipeline.stateDetail?.startsWith("rate limited until ")
+        || pipeline.stateDetail?.startsWith("stage spawn deferred: ")) pipeline.stateDetail = null;
     } catch (error) {
       park(pipeline, error instanceof Error ? error.message : String(error), attempt);
     } finally {
@@ -3024,8 +3032,30 @@ function isStructuredDeliveryControllerFailure(failure: string): boolean {
   return failure.includes("structured delivery controller is unavailable");
 }
 
+function isAccountMutationContention(failure: string): boolean {
+  return failure.startsWith("account mutation is busy");
+}
+
+function controllerFailureReason(failure: string): string {
+  return failure.replace(/; retry shortly$/, "");
+}
+
+function syncControllerWaitStateDetail(
+  pipeline: Pipeline,
+  attempt: PipelineStageAttempt,
+  failure: string | null,
+): void {
+  const retryAfter = attempt.controllerWait?.retryAfter;
+  if (failure !== null && isAccountMutationContention(failure) && retryAfter !== undefined) {
+    pipeline.stateDetail = `stage spawn deferred: ${controllerFailureReason(failure)}; retry at ${retryAfter}`;
+  } else if (pipeline.stateDetail?.startsWith("stage spawn deferred: ")) {
+    pipeline.stateDetail = null;
+  }
+}
+
 function isTransientStructuredSpawnFailure(failure: string): boolean {
   return isStructuredDeliveryControllerFailure(failure)
+    || isAccountMutationContention(failure)
     || failure.includes("structured initial message")
     || failure.includes("runtime host request timed out");
 }
@@ -3078,7 +3108,7 @@ function bookControllerWaitRound(
 function controllerWaitParkDetail(attempt: PipelineStageAttempt, now: string, failure: string): string {
   const seconds = Math.round(controllerWaitElapsedMs(attempt, unixMs(now)) / 1_000);
   const rounds = attempt.controllerWait?.rounds ?? 0;
-  return `stage spawn failed after ${rounds} retries over ${seconds}s: ${failure}`;
+  return `stage spawn failed after ${rounds} retries over ${seconds}s: ${controllerFailureReason(failure)}`;
 }
 
 /** A stage waiting out a controller holds a pending cursor on purpose, and its

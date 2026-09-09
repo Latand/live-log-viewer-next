@@ -68,6 +68,16 @@ export interface StructuredRecoveryDependencies {
   };
 }
 
+/** A live structured process is still fenced while its durable row carries a
+    lifecycle action. Spawning a successor in that window cannot claim the
+    existing writer and would perturb the live runtime session first. */
+export class StructuredRecoverySynchronizingError extends Error {
+  constructor() {
+    super("structured recovery is synchronizing while a live host owner remains");
+    this.name = "StructuredRecoverySynchronizingError";
+  }
+}
+
 class StructuredRecoverySupersededError extends Error {
   constructor() {
     super("structured recovery operation is superseded");
@@ -86,6 +96,10 @@ interface RecoveryCandidate {
   project: string | null;
   parentConversationId: ViewerConversationId | null;
   spec: ResumeSpec;
+  /** A non-terminal row's recorded structured process is alive or
+      unverifiable, so recovery must not issue a successor spawn while the
+      durable row is unsettled. */
+  hostProcessLive: boolean;
   /** The registered host is process-alive, claim-owned and not terminal. */
   hostLive: boolean;
   /** The provider limit parking that live host's account, if any. */
@@ -123,7 +137,9 @@ function candidateFor(
      including conversations that predate registry entries. A verified live
      tmux owner returned above keeps ownership until that process exits. */
   const terminal = entry?.status === "dead" || entry?.status === "unhosted";
-  const hostLive = Boolean(structuredHostProcessAlive(entry?.structuredHost?.process ?? null)
+  const hostProcessLive = Boolean(!terminal
+    && structuredHostProcessAlive(entry?.structuredHost?.process ?? null));
+  const hostLive = Boolean(hostProcessLive
     && entry?.claimOwner
     && entry.pendingAction === null
     && !terminal);
@@ -183,6 +199,7 @@ function candidateFor(
       "transcript": generation.path,
       launchProfile: profile,
     },
+    hostProcessLive,
     hostLive,
     park: hostPark,
     publishReady,
@@ -219,6 +236,9 @@ async function recoverCandidate(
     const park = dependencies.park ?? defaultParkResolver;
     let current = candidateFor(registry, request, Boolean(ownership), park);
     if (!current) return null;
+    if (current.hostProcessLive && !current.hostLive) {
+      throw new StructuredRecoverySynchronizingError();
+    }
     /* A host wrapper can disappear before its live Viewer writer releases the
        claim. Retire that claim only through the registry's PID/start-identity
        check; a live or unverifiable host remains fenced. */
