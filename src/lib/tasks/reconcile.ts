@@ -96,7 +96,7 @@ function reconcileAssignment(
     if (successor && successor !== current.path) {
       /* A handoff that follows its agent into a resumed transcript stays a
          handoff — the routing moved, but nothing was ever auto-delivered. */
-      const state = current.state === "handoff" ? "handoff" : "delivered";
+      const state = current.state === "handoff" || current.state === "linked" ? current.state : "delivered";
       return { assignment: { ...current, path: successor, state, error: null, at }, dirty: true };
     }
     return { assignment: current, dirty };

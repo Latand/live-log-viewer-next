@@ -1730,6 +1730,9 @@ export const en = {
   "bands.derivedDraft": "New agent · named after launch",
   "bands.orderUpdated": "Order updated",
   "bands.orderUpdatedTitle": "Working counts changed while you were busy — apply the new order",
+  "bands.continuesIn": "Continues in {title}",
+  "bands.continuesFrom": "Comes from {title}",
+  "bands.crossLinks": { one: "{count} link to another task", other: "{count} links to other tasks" },
 
   // scheme/BulkActionBar (selection session)
   "bulk.selectedCount": { one: "{count} selected", other: "{count} selected" },
@@ -2216,6 +2219,7 @@ export const en = {
   "tasks.retryLaunched": "agent relaunched",
   "tasks.chipFailedTitle": "not delivered: {error}",
   "tasks.handoffChip": "routed into this agent's prompt — not sent yet",
+  "tasks.linkedChip": "linked to this task — nothing was sent",
   "tasks.detach": "detach",
   "tasks.detachAria": "Detach {title} from this task",
   "tasks.expand": "Expand task",

@@ -353,21 +353,13 @@ async function main(): Promise<void> {
           await selectNode(page, anchorNode);
           const start = await selectedHeader(page, anchorNode);
           must(start !== null, "anchor node is not visible on the board");
-          must(start!.presentation === "summary", `anchor starts as ${start!.presentation}, expected summary at 58%`);
-          /* Bands span the viewport, so a member's horizontal slot is the row
-             layout's and only moves when a mode crossing changes tile widths;
-             the vertical position is held within 2px at every step. */
-          let previous = { x: start!.x, presentation: start!.presentation };
-          const record = (label: string, after: { x: number; y: number; w: number; h: number; presentation: string | null } | null, zoom: number, reflow = false) => {
+          must(start!.presentation === "native", `anchor starts as ${start!.presentation}, expected the selected reader to be native at 58%`);
+          /* Both axes hold at every step, mode crossings and resizes included. */
+          const record = (label: string, after: { x: number; y: number; w: number; h: number; presentation: string | null } | null, zoom: number) => {
             must(after !== null, `${label}: anchor node vanished`);
-            const dy = Math.abs(after!.y - start!.y);
-            const dx = after!.x - previous.x;
-            (evidence.anchor as unknown[]).push({ label, zoom, driftY: Number(dy.toFixed(3)), dxSincePrevious: Number(dx.toFixed(3)), presentation: after!.presentation, size: { w: Number(after!.w.toFixed(1)), h: Number(after!.h.toFixed(1)) }, before: { x: start!.x, y: start!.y }, after: { x: after!.x, y: after!.y } });
-            must(dy <= 2, `${label}: selected header drifted ${dy.toFixed(2)}px vertically`);
-            /* A viewport resize re-wraps rows, so the tile may change column;
-               its vertical hold is the contract there. */
-            must(reflow || after!.presentation !== previous.presentation || Math.abs(dx) <= 2, `${label}: selected header moved ${dx.toFixed(2)}px horizontally without a mode change`);
-            previous = { x: after!.x, presentation: after!.presentation };
+            const drift = Math.hypot(after!.x - start!.x, after!.y - start!.y);
+            (evidence.anchor as unknown[]).push({ label, zoom, drift: Number(drift.toFixed(3)), presentation: after!.presentation, size: { w: Number(after!.w.toFixed(1)), h: Number(after!.h.toFixed(1)) }, before: { x: start!.x, y: start!.y }, after: { x: after!.x, y: after!.y } });
+            must(drift <= 2, `${label}: selected header drifted ${drift.toFixed(2)}px`);
           };
           const seen = new Set<string>();
           for (const zoom of [0.4, 0.22, 0.21, 0.07, 0.24, 0.58, 0.81, 0.84, 1, 0.58]) {
@@ -378,7 +370,7 @@ async function main(): Promise<void> {
             record(`wheel to ${Math.round(zoom * 100)}%`, after, actual);
             await page.screenshot({ path: path.join(OUT_DIR, `${DENSITY}-anchor-z${Math.round(zoom * 100)}.png`) });
           }
-          must(seen.has("chip") && seen.has("summary") && seen.has("native"), `anchor pass crossed presentations ${[...seen].join(",")}; expected chip, summary and native`);
+          must(seen.has("chip") && seen.has("native"), `anchor pass crossed presentations ${[...seen].join(",")}; expected chip and native`);
           evidence.anchorPresentations = [...seen];
           const zoomIn = page.locator('button[title^="Zoom in"]').first();
           const zoomOut = page.locator('button[title^="Zoom out"]').first();
@@ -391,17 +383,17 @@ async function main(): Promise<void> {
             record(`toolbar in ${cycle}`, await selectedHeader(page, anchorNode), await cameraZoom(page));
           }
           const end = await selectedHeader(page, anchorNode);
-          const cumulative = Math.abs(end!.y - start!.y);
-          must(cumulative <= 4, `cumulative vertical drift ${cumulative.toFixed(2)}px over 20 cycles`);
+          const cumulative = Math.hypot(end!.x - start!.x, end!.y - start!.y);
+          must(cumulative <= 4, `cumulative drift ${cumulative.toFixed(2)}px over 20 cycles`);
           evidence.cumulativeDrift = Number(cumulative.toFixed(3));
           /* Viewport resize reflows every band: the anchor holds. */
           await page.setViewportSize({ width: 1280, height: 800 });
           await page.waitForTimeout(400);
-          record("viewport 1440→1280", await selectedHeader(page, anchorNode), await cameraZoom(page), true);
+          record("viewport 1440→1280", await selectedHeader(page, anchorNode), await cameraZoom(page));
           await page.screenshot({ path: path.join(OUT_DIR, `${DENSITY}-anchor-resized-1280.png`) });
           await page.setViewportSize({ width: 1440, height: 900 });
           await page.waitForTimeout(400);
-          record("viewport 1280→1440", await selectedHeader(page, anchorNode), await cameraZoom(page), true);
+          record("viewport 1280→1440", await selectedHeader(page, anchorNode), await cameraZoom(page));
           /* The densest band keeps its local «+ Agent» reachable. */
           const add = page.locator(`[data-scheme-band-task="${denseTask.id}"] [data-scheme-band-add]`).first();
           must((await add.count()) === 1, "dense band has no local +Agent");

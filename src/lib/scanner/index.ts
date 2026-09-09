@@ -8,6 +8,8 @@ import { withPipelineMutation } from "../pipelines/store";
 import { notifyQuestion } from "../push";
 import { overlaySessionTitles, sessionProjectProjection } from "../session/titleProjection";
 import { tickTaskInbox } from "../tasks/inboxScanner";
+import { admitScannedConversations } from "../tasks/membership";
+import { loadPipelinesForProjection } from "../pipelines/store";
 import { panePidMap, resolveTarget } from "../tmux";
 import { tickWorkflows } from "../workflows/engine";
 import { activityVerdict, transcriptTurnResult } from "./activity";
@@ -385,4 +387,12 @@ export async function reconcileFileControllers(entries: FileEntry[]): Promise<vo
   await tickWorkflows(entries);
   await yieldToRuntime();
   tickTaskInbox(entries);
+  /* Canonical task membership (#1586): every root conversation the board draws
+     belongs to a task. Placeholders are minted here, on the durable controller
+     pass, in bounded batches — never from a read-only files GET. */
+  try {
+    admitScannedConversations(entries, loadPipelinesForProjection());
+  } catch (error) {
+    console.error("[tasks] skipping conversation admission", error);
+  }
 }

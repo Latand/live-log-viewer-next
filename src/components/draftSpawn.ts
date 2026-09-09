@@ -56,6 +56,9 @@ export interface RecoverableSpawnRequest {
   /** Stable conversation reference reviewed by a reviewer-role spawn. */
   reviews?: string;
   confirm?: string;
+  /** Task a band-local launch belongs to (#1586); the server records the
+      membership before the agent starts. */
+  taskId?: string;
 }
 
 /** The pre-title client persisted this same body without `title`. */
@@ -175,6 +178,7 @@ export function spawnRequestBody(attempt: SpawnAttempt & { request: PersistedSpa
     ...(request.role ? { role: request.role, roleParams: request.roleParams ?? {} } : {}),
     ...(request.reviews ? { reviews: request.reviews } : {}),
     ...(request.confirm ? { confirm: request.confirm } : {}),
+    ...(request.taskId ? { taskId: request.taskId } : {}),
   };
 }
 

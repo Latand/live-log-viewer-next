@@ -6,9 +6,12 @@ import type { FileEntry } from "@/lib/types";
 import { projectTaskWorkflows } from "@/components/tasks/taskWorkflowModel";
 
 import type { SchemeLayout, SchemeRect } from "./layout";
+import type { Pipeline } from "@/lib/pipelines/types";
+
 import {
   BAND,
   applyBandOrder,
+  applyHostOverrides,
   bandEdgePorts,
   bandModeFor,
   buildTaskBands,
@@ -211,7 +214,7 @@ test("bands stack full-width at every mode and width; members, mirrors and +Agen
       /* Every node is placed and screen-constant for its presentation. */
       for (const node of scene.layout.nodes) {
         expect(scene.shown.has(node.file.path)).toBe(true);
-        const expected = mode === "overview" ? "chip" : mode === "near" && node.file.path === files[5]!.path ? "native" : "summary";
+        const expected = mode === "overview" ? "chip" : node.file.path === files[5]!.path ? "native" : "summary";
         expect(node.presentation).toBe(expected);
         const width = node.w * zoom;
         if (expected === "chip") expect(width).toBeCloseTo(BAND.chipW, 6);
@@ -297,4 +300,78 @@ test("a mirror never duplicates a node key, so the layer count equals the node c
   const scene = layoutTaskBands(base(files), bands, { zoom: 0.5, mode: "intermediate", viewportWidth: 1440, reader: null });
   expect(scene.layout.nodes.length).toBe(2);
   expect(scene.mirrorRects.size).toBe(4);
+});
+
+function pipelineWith(id: string, files: readonly FileEntry[], taskIds: string[] = []): Pipeline {
+  return {
+    id, task: `Pipeline ${id}`, taskIds, project: "fixture", repoDir: "/repo", worktreeDir: `/repo-${id}`, branch: `pipeline/${id}`, baseBranch: "main", baseRef: "abc", lastPassedCommit: "abc",
+    stages: files.map((_, index) => ({ id: `stage-${index}`, kind: "run", prompt: "", next: null, effectiveRole: { roleId: "builder", engine: "codex", model: null, effort: null, access: "read-write", promptScaffold: null } })),
+    runs: files.map((file, index) => ({ stageId: `stage-${index}`, attempts: [{ n: 1, state: "running", effectiveRole: { roleId: "builder", engine: "codex", model: null, effort: null, access: "read-write", promptScaffold: null }, launchId: `launch-${id}-${index}`, conversationId: file.conversationId, sessionId: null, agentPath: file.path, paneId: null, accountId: null, usageLimitedAccounts: [], flowId: null, expectedReviewHeadSha: null, reviewHeadSha: null, startedAt: "2026-01-01T00:00:00Z", completedAt: null, input: null, activatedBy: null, output: null, verdict: null, error: null }] })),
+    cursor: { stageId: "stage-0", state: "running", input: null, activatedBy: null }, state: "running", pausedState: null, stateDetail: null, srcPath: null, srcConversationId: null, createdAt: "2026-01-01T00:00:00Z", closedAt: null,
+  } as unknown as Pipeline;
+}
+
+test("an execution related only through one matching assignment does not promote its other stages into the task", () => {
+  const files = [file(0), file(1, "busy")];
+  const tasks = [task("t", "2026-01-01T00:00:00Z", [files[0]!])];
+  const pipeline = pipelineWith("p", files);
+  const layout = base(files);
+  layout.groups = [{ key: "group::pipeline::p", kind: "pipeline", id: "p", hue: 10, members: files.map((entry) => entry.path), label: "Pipeline p", pipeline, x: 0, y: 0, w: 0, h: 0 }];
+  const projection = projectTaskWorkflows(tasks, [pipeline], [], files);
+  expect(projection.tasks[0]!.executions[0]!.basis).toBe("assignment");
+  const bands = buildTaskBands(layout, { tasks, projection, untitled: "Untitled task" });
+  const t = bands.find((band) => band.id === "task:t")!;
+  expect(t.members.map((member) => member.key)).toEqual([files[0]!.path]);
+  expect(t.working).toBe(0);
+  expect(t.groups).toEqual([]);
+  /* The busy stage worker still has a band of its own: the pipeline container. */
+  const container = bands.find((band) => band.origin === "pipeline")!;
+  expect(container.members.map((member) => member.key)).toEqual([files[1]!.path]);
+  expect(container.working).toBe(1);
+  /* An explicit binding admits every stage and owns the container. */
+  const explicit = buildTaskBands(layout, { tasks, projection: projectTaskWorkflows(tasks, [pipelineWith("p", files, ["t"])], [], files), untitled: "Untitled task" });
+  expect(explicit.find((band) => band.id === "task:t")!.members.map((member) => member.key).sort()).toEqual(files.map((entry) => entry.path).sort());
+  /* A fallback task minted for the container (origin) owns it too. */
+  const fallbackTask = { ...task("fb", "2026-01-02T00:00:00Z", files), origin: { kind: "pipeline" as const, key: "p", refinement: "titled" as const } };
+  const fallback = buildTaskBands(layout, { tasks: [fallbackTask], projection: projectTaskWorkflows([fallbackTask], [pipeline], [], files), untitled: "Untitled task" });
+  expect(fallback.find((band) => band.id === "task:fb")!.groups).toEqual(["group::pipeline::p"]);
+});
+
+test("opening a shared conversation from its mirror hosts the one surface in that band and mirrors it back in the canonical band", () => {
+  const files = [file(0, "busy"), file(1)];
+  const tasks = [task("a", "2026-01-01T00:00:00Z", files), task("b", "2026-01-02T00:00:00Z", [files[0]!])];
+  const layout = base(files);
+  const bands = rankBands(buildTaskBands(layout, sources(tasks, files)));
+  const swapped = applyHostOverrides(bands, new Map([[files[0]!.path, "task:b"]]));
+  const a = swapped.find((band) => band.id === "task:a")!;
+  const b = swapped.find((band) => band.id === "task:b")!;
+  expect(b.members.map((member) => member.key)).toEqual([files[0]!.path]);
+  expect(b.mirrors).toEqual([]);
+  expect(a.members.map((member) => member.key)).toEqual([files[1]!.path]);
+  expect(a.mirrors.map((mirror) => [mirror.ofKey, mirror.primaryBandId])).toEqual([[files[0]!.path, "task:b"]]);
+  /* Counts are unchanged and the node is still placed exactly once. */
+  expect(a.working).toBe(1);
+  expect(b.working).toBe(1);
+  const scene = layoutTaskBands(layout, bands, { zoom: 0.5, mode: "intermediate", viewportWidth: 1440, reader: null, hostOverrides: new Map([[files[0]!.path, "task:b"]]) });
+  expect(scene.bandOf.get(files[0]!.path)).toBe("task:b");
+  expect(scene.layout.nodes.length).toBe(2);
+  expect(scene.mirrorRects.size).toBe(1);
+  /* An override for a band without a mirror of that node changes nothing. */
+  expect(applyHostOverrides(bands, new Map([[files[1]!.path, "task:b"]])).map((band) => band.members.length)).toEqual(bands.map((band) => band.members.length));
+});
+
+test("a recorded relation across bands becomes a labelled continuation on both endpoints, mirrors included", () => {
+  const files = [file(0), file(1), file(2)];
+  const tasks = [task("a", "2026-01-01T00:00:00Z", [files[0]!]), task("b", "2026-01-02T00:00:00Z", [files[1]!, files[0]!])];
+  const layout = base(files, [[0, 1], [0, 2]]);
+  const bands = rankBands(buildTaskBands(layout, sources(tasks, files)));
+  const scene = layoutTaskBands(layout, bands, { zoom: 0.5, mode: "intermediate", viewportWidth: 1440, reader: null });
+  /* Node 2 inherits its parent's band a; the edge 0→1 crosses a → b. */
+  expect(scene.layout.edges.length).toBe(1);
+  const byKey = new Map(scene.continuations.map((entry) => [entry.key, entry]));
+  expect(byKey.get(files[0]!.path)!.targets).toEqual([{ key: files[1]!.path, bandId: "task:b", title: "Task b", direction: "to" }]);
+  expect(byKey.get(files[1]!.path)!.targets).toEqual([{ key: files[0]!.path, bandId: "task:a", title: "Task a", direction: "from" }]);
+  /* The mirror of node 0 inside band b points back at node 2 in band a. */
+  const mirror = bands.find((band) => band.id === "task:b")!.mirrors[0]!;
+  expect(byKey.get(mirror.key)!.targets).toEqual([{ key: files[2]!.path, bandId: "task:a", title: "Task a", direction: "to" }]);
 });

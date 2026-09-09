@@ -10,7 +10,7 @@ import { TASK_TONES } from "@/components/tasks/taskModel";
 import { cleanTitle } from "@/components/utils";
 
 import type { SchemeRect } from "./layout";
-import { BAND, type BandMirror, type BandMode, type PlacedBand } from "./taskBands";
+import { BAND, type BandContinuation, type BandMirror, type BandMode, type PlacedBand } from "./taskBands";
 
 /**
  * Band chrome of the task-centered board (#1586): one full-width surface per
@@ -30,10 +30,13 @@ export const TaskBandsLayer = memo(function TaskBandsLayer({
   interactive,
   selectedKey,
   mirrorRects,
+  continuations,
+  memberRects,
   onAddAgent,
   onOpenDetails,
   onCycleStatus,
   onSelectMirror,
+  onFollowContinuation,
 }: {
   bands: PlacedBand[];
   mode: BandMode;
@@ -42,10 +45,16 @@ export const TaskBandsLayer = memo(function TaskBandsLayer({
   interactive: boolean;
   selectedKey: string | null;
   mirrorRects: ReadonlyMap<string, SchemeRect>;
+  /** Cross-band recorded relations, attached to members and mirrors. */
+  continuations: readonly BandContinuation[];
+  /** Placed rect per board key, for chip placement under a member. */
+  memberRects: ReadonlyMap<string, SchemeRect>;
   onAddAgent: (band: PlacedBand) => void;
   onOpenDetails: (band: PlacedBand) => void;
   onCycleStatus: (task: BoardTask) => void;
   onSelectMirror: (mirror: BandMirror) => void;
+  /** Navigate to the other endpoint of a cross-band relation. */
+  onFollowContinuation: (target: { key: string; bandId: string }) => void;
 }) {
   const { t } = useLocale();
   if (!bands.length) return null;
@@ -67,6 +76,7 @@ export const TaskBandsLayer = memo(function TaskBandsLayer({
         const selectedInside = selectedKey !== null && (band.members.some((member) => member.key === selectedKey) || band.mirrors.some((mirror) => mirror.ofKey === selectedKey));
         /* Keyboard navigation lands on the band itself through its task key. */
         const headerRinged = selectedKey !== null && (selectedKey === `band::${band.id}` || (band.task !== null && selectedKey === `task::${band.task.id}`));
+        const crossLinks = continuations.filter((entry) => entry.bandId === band.id).reduce((sum, entry) => sum + entry.targets.length, 0);
         return (
           <div
             key={band.id}
@@ -133,6 +143,7 @@ export const TaskBandsLayer = memo(function TaskBandsLayer({
                 {band.unknown ? <span className="text-warning"> · {t("bands.unknown", { count: band.unknown })}</span> : null}
                 <span className="text-muted"> · {t("bands.conversations", { count: band.conversations })}</span>
                 {band.planned ? <span className="text-muted"> · {t("bands.planned", { count: band.planned })}</span> : null}
+                {mode === "overview" && crossLinks > 0 ? <span className="text-muted"> · {t("bands.crossLinks", { count: crossLinks })}</span> : null}
               </span>
               <div className="ml-auto flex shrink-0 items-center gap-2">
                 <button
@@ -184,6 +195,40 @@ export const TaskBandsLayer = memo(function TaskBandsLayer({
                     {chip ? null : <span className="truncate text-[11px] text-muted">{t("bands.sameConversation", { title: mirror.primaryTitle })}</span>}
                   </div>
                 </button>
+              );
+            })}
+            {/* Cross-band relations (#1586): a labelled continuation under the
+                member or mirror, naming the other task; following it selects
+                the other endpoint. At overview scale the band header carries
+                the count instead, chips would not fit the 8px row gap. */}
+            {mode === "overview" ? null : continuations.filter((entry) => entry.bandId === band.id).map((entry) => {
+              const at = memberRects.get(entry.key) ?? mirrorRects.get(entry.key);
+              if (!at) return null;
+              return (
+                <div
+                  key={entry.key}
+                  data-scheme-ui
+                  data-scheme-continuation={entry.key}
+                  className="absolute flex items-start gap-1"
+                  style={{ left: at.x - rect.x, top: at.y + at.h - rect.y + 4 * scale, width: at.w, height: 22 * scale }}
+                >
+                  <div className="absolute left-0 top-0 flex flex-nowrap items-center gap-1 overflow-hidden" style={{ width: at.w / scale, height: 22, transform: `scale(${scale})`, transformOrigin: "top left" }}>
+                    {entry.targets.map((target) => (
+                      <button
+                        key={`${target.direction}:${target.key}`}
+                        type="button"
+                        data-scheme-continuation-target={target.key}
+                        disabled={!interactive}
+                        title={target.direction === "to" ? t("bands.continuesIn", { title: target.title }) : t("bands.continuesFrom", { title: target.title })}
+                        className={`inline-flex h-[20px] max-w-full items-center gap-1 truncate rounded-full border border-border bg-card px-2 text-[10.5px] font-semibold text-muted shadow-1 ${interactive ? "pointer-events-auto hover:border-accent/45 hover:text-accent" : ""} focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-default`}
+                        onClick={() => onFollowContinuation({ key: target.key, bandId: target.bandId })}
+                      >
+                        <span aria-hidden className="text-accent">{target.direction === "to" ? "→" : "←"}</span>
+                        <span className="truncate">{target.title}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
               );
             })}
             {/* Local «+ Agent», right after the last member (or the next row). */}

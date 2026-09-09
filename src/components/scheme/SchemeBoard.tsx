@@ -169,9 +169,6 @@ interface Props {
   onBuilderOpened?: () => void;
   /** Draft id → band id for drafts opened from a band's local «+ Agent» (#1586). */
   draftBands?: ReadonlyMap<string, string>;
-  /** Conversation id or path → task id while a band-local launch's durable
-      assignment is still being recorded. */
-  provisionalMemberships?: ReadonlyMap<string, string>;
   /** Band-local «+ Agent»: open the launch form in this band's context. */
   onAddAgent?: (band: { id: string; task: BoardTask | null; title: string }) => void;
 }
@@ -250,7 +247,6 @@ export function SchemeBoard({
   builderPipelineId,
   onBuilderOpened,
   draftBands,
-  provisionalMemberships,
   onAddAgent,
 }: Props) {
   const { t } = useLocale();
@@ -367,27 +363,32 @@ export function SchemeBoard({
     return built;
   }, [groups, manual, files, layoutFlows, drafts, pipelines, surfacePipelines, favorites, isolatedManualPaths, boardTasks, textExpandedIds, now]);
 
-  /* Task-centered board (#1586): whenever the project has tasks, pipelines or
-     flows, every conversation is projected into a horizontal task band, stacked
-     by working count. A project of bare conversations keeps the lineage map. */
-  const bandsEnabled = !mapMode && (allTasks.length > 0 || pipelines.length > 0 || flows.length > 0);
+  /* Task-centered board (#1586): on the desktop every conversation is projected
+     into a horizontal task band, stacked by working count. The durable admission
+     pass gives each root conversation a task; a conversation the pass has not
+     reached yet is shown in a band derived from its lineage, labelled as such. */
+  const bandsEnabled = !mapMode;
   const [bandMode, setBandMode] = useState<BandMode>(() => bandModeFor(0.5, null));
   const bands = useMemo<TaskBand[]>(() => {
     if (!bandsEnabled) return [];
-    const built = buildTaskBands(authoredLayout, { tasks: mergedAllTasks, projection: workflowModel, draftBands, provisionalMemberships, untitled: t("bands.untitled"), reviewFlow: t("bands.reviewFlow") });
+    const built = buildTaskBands(authoredLayout, { tasks: mergedAllTasks, projection: workflowModel, draftBands, untitled: t("bands.untitled"), reviewFlow: t("bands.reviewFlow") });
     /* A finished task without a single member lives in the task list and its
        history, not as an empty band. */
     return built.filter((band) => band.members.length || band.mirrors.length || band.status !== "done");
-  }, [bandsEnabled, authoredLayout, mergedAllTasks, workflowModel, draftBands, provisionalMemberships, t]);
+  }, [bandsEnabled, authoredLayout, mergedAllTasks, workflowModel, draftBands, t]);
   const rankedBands = useMemo(() => rankBands(bands), [bands]);
   /* Order snapshot during an interaction: status labels update at once, rank
      moves wait for the pan/typing to end or an explicit «Order updated». */
   const [frozenOrder, setFrozenOrder] = useState<string[] | null>(null);
   const orderedBands = useMemo(() => applyBandOrder(rankedBands, frozenOrder), [rankedBands, frozenOrder]);
   const orderPending = frozenOrder !== null && orderedBands.some((band, index) => rankedBands[index]?.id !== band.id);
+  /* Which band hosts a shared conversation's one reader surface: the band the
+     operator opened it from. Session state only; the canonical membership and
+     the composer/delivery owner are untouched. */
+  const [hostOverrides, setHostOverrides] = useState<ReadonlyMap<string, string>>(() => new Map());
   const taskScene = useMemo(() => bandsEnabled
-    ? layoutTaskBands(authoredLayout, orderedBands, { zoom: layoutZoom, mode: bandMode, viewportWidth: layoutViewportWidth, reader: selected })
-    : null, [bandsEnabled, authoredLayout, orderedBands, layoutZoom, bandMode, layoutViewportWidth, selected]);
+    ? layoutTaskBands(authoredLayout, orderedBands, { zoom: layoutZoom, mode: bandMode, viewportWidth: layoutViewportWidth, reader: selected, hostOverrides })
+    : null, [bandsEnabled, authoredLayout, orderedBands, layoutZoom, bandMode, layoutViewportWidth, selected, hostOverrides]);
   const layout = taskScene?.layout ?? authoredLayout;
 
   /* NO PRUNING HERE (#771). The selection outlives this view, so dropping a path
@@ -1238,9 +1239,18 @@ export function SchemeBoard({
   const bandCycleStatus = useCallback((task: BoardTask) => {
     void taskHandlers.patch(task.id, { status: nextTaskStatus(task.status) });
   }, [taskHandlers]);
+  /* Opening a shared conversation from a mirror hosts its reader in that band
+     (the mirror's slot becomes the member's) and selects it; the canonical band
+     shows the reference tile in return. No camera move: the surface appears
+     where the operator clicked. */
   const bandSelectMirror = useCallback((mirror: BandMirror) => {
+    const bandId = taskScene?.bandOf.get(mirror.key);
+    if (bandId) setHostOverrides((previous) => { const next = new Map(previous); next.set(mirror.ofKey, bandId); return next; });
     setSelected(mirror.ofKey);
-    const rect = layout.byPath.get(mirror.ofKey);
+  }, [taskScene]);
+  const followContinuation = useCallback((target: { key: string; bandId: string }) => {
+    setSelected(target.key);
+    const rect = layout.byPath.get(target.key);
     if (rect) centerOn(rect, cam.z);
   }, [layout, centerOn, cam.z]);
 
@@ -1356,10 +1366,13 @@ export function SchemeBoard({
             interactive={!mapMode && !handLike && !session}
             selectedKey={selected}
             mirrorRects={taskScene.mirrorRects}
+            continuations={taskScene.continuations}
+            memberRects={taskScene.layout.byPath}
             onAddAgent={bandAddAgent}
             onOpenDetails={bandDetails}
             onCycleStatus={bandCycleStatus}
             onSelectMirror={bandSelectMirror}
+            onFollowContinuation={followContinuation}
           />
         ) : null}
         <GroupsLayer onOpenTaskHistory={openTaskHistory} groups={layout.groups} interactive={!mapMode && !handLike && !session} />

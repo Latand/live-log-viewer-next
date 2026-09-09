@@ -184,20 +184,14 @@ test("the selected conversation holds its screen anchor through wheel zoom, tool
   select(viewport, "/quiet-two");
   await settle();
   const start = screenOf(viewport, "/quiet-two");
-  const presentationOf = () => (host.querySelector('[data-scheme-node="/quiet-two"]') as HTMLElement).getAttribute("data-scheme-node-presentation");
-  let previous = { sx: start.sx, presentation: presentationOf() };
-  /* Bands span the viewport, so the horizontal slot of a member is the row
-     layout's (it only moves when a mode crossing changes tile widths); the
-     vertical position — the axis the operator loses their conversation on — is
-     held within 2px at every step. */
+  /* Both axes hold at every step, mode crossings included: the camera
+     translates so the selected header keeps its screen point even when the
+     row layout gives the tile another column. */
   const drift = (label: string) => {
     const now = screenOf(viewport, "/quiet-two");
-    const presentation = presentationOf();
-    const dy = Math.abs(now.sy - start.sy);
-    if (dy > 2) throw new Error(`${label}: selected header drifted ${dy.toFixed(2)}px vertically at zoom ${now.z}`);
-    if (presentation === previous.presentation && Math.abs(now.sx - previous.sx) > 2) throw new Error(`${label}: selected header moved ${(now.sx - previous.sx).toFixed(2)}px horizontally without a mode change`);
-    previous = { sx: now.sx, presentation };
-    return dy;
+    const delta = Math.hypot(now.sx - start.sx, now.sy - start.sy);
+    if (delta > 2) throw new Error(`${label}: selected header drifted ${delta.toFixed(2)}px at zoom ${now.z}`);
+    return delta;
   };
   /* Wheel zoom in, five notches, each anchored (the scale is capped, so only
      the first notch is required to move). */
@@ -237,9 +231,9 @@ test("the selected conversation holds its screen anchor through wheel zoom, tool
     await settle();
     drift(`toolbar in ${cycle}`);
   }
-  /* Twenty forward/reverse cycles: cumulative vertical drift stays under 4px. */
+  /* Twenty forward/reverse cycles: cumulative drift stays under 4px on both axes. */
   const end = screenOf(viewport, "/quiet-two");
-  expect(Math.abs(end.sy - start.sy)).toBeLessThanOrEqual(4);
+  expect(Math.hypot(end.sx - start.sx, end.sy - start.sy)).toBeLessThanOrEqual(4);
 });
 
 test("without a selection a wheel zoom keeps the pointer's world point; a pan is never undone", async () => {
@@ -253,8 +247,8 @@ test("without a selection a wheel zoom keeps the pointer's world point; a pan is
   await settle();
   const after = cameraOf(viewport);
   expect(after.z).toBeGreaterThan(before.z);
-  /* Horizontal is locked to the world's left edge in band mode; the vertical
-     pointer point is preserved. */
+  /* Zoom keeps the band's left edge in place (the world is one viewport wide);
+     the vertical pointer point is preserved. */
   expect(after.x).toBeCloseTo(0, 6);
   expect(after.y + worldUnderPointer.y * after.z).toBeCloseTo(pointer.y, 3);
   /* A selected band member does not stop a plain pan from moving the camera. */

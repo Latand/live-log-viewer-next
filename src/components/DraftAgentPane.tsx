@@ -779,6 +779,7 @@ export function DraftAgentPane({
       images: attachments.images.map((image) => ({ base64: image.base64, mime: image.mime })),
       src,
       ...(parentConversationId ? { parentConversationId } : {}),
+      ...(draftBand(draftId).startsWith("task:") ? { taskId: draftBand(draftId).slice("task:".length) } : {}),
       ...(roleId ? {
         role: roleId,
         roleParams,

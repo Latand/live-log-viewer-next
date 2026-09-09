@@ -55,7 +55,7 @@ function taskState(status: string): EvidenceState {
 function taskOwner(task: TaskSummary): string | null {
   const pipelineId = task.pipelineIds?.[0];
   if (pipelineId) return `pipeline ${pipelineId}`;
-  const assignment = task.assignments?.find((entry) => entry.state === "delivered" || entry.state === "spawning" || entry.state === "handoff");
+  const assignment = task.assignments?.find((entry) => entry.state === "delivered" || entry.state === "spawning" || entry.state === "handoff" || entry.state === "linked");
   return assignment ? "an assigned agent" : null;
 }
 

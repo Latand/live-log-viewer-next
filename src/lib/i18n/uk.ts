@@ -1672,6 +1672,9 @@ export const uk: Record<keyof typeof en, Message> = {
   "bands.derivedDraft": "Новий агент · назва після запуску",
   "bands.orderUpdated": "Порядок оновлено",
   "bands.orderUpdatedTitle": "Кількість працюючих змінилась, поки ви були зайняті — застосувати новий порядок",
+  "bands.continuesIn": "Продовжується у {title}",
+  "bands.continuesFrom": "Походить із {title}",
+  "bands.crossLinks": { one: "{count} зв’язок з іншою задачею", few: "{count} зв’язки з іншими задачами", many: "{count} зв’язків з іншими задачами", other: "{count} зв’язків з іншими задачами" },
 
   "bulk.selectedCount": { one: "Вибрано {count}", few: "Вибрано {count}", many: "Вибрано {count}", other: "Вибрано {count}" },
   "bulk.placeholder": "одне повідомлення кожному вибраному агенту…",
@@ -2144,6 +2147,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "tasks.retryLaunched": "агента перезапущено",
   "tasks.chipFailedTitle": "не доставлено: {error}",
   "tasks.handoffChip": "закинуто в промпт цього агента — ще не надіслано",
+  "tasks.linkedChip": "прив’язано до цієї задачі — нічого не надіслано",
   "tasks.detach": "відв'язати",
   "tasks.detachAria": "Відв'язати {title} від задачі",
   "tasks.expand": "Розгорнути задачу",

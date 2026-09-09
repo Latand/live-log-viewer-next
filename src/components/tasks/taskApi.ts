@@ -35,7 +35,7 @@ export interface TaskSpawnResult {
   initialMessage: "pending" | "queued" | "delivered" | "failed";
   state: "starting" | "path-pending" | "settled" | "failed" | "conflict";
   retrySafe: boolean;
-  assignment: "delivered" | "failed" | "spawning" | "handoff";
+  assignment: "delivered" | "failed" | "spawning" | "handoff" | "linked";
   error?: string;
 }
 

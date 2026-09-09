@@ -326,6 +326,12 @@ test("0 frames current work, repeated 0 escalates to all, and Shift+0 fits all d
   const key = (shiftKey = false) => window.dispatchEvent(
     new dom.KeyboardEvent("keydown", { key: "0", shiftKey, bubbles: true }) as unknown as Event,
   );
+  /* A fresh band board opens on the current-work framing itself, so move the
+     camera first; otherwise the first 0 correctly escalates straight to all. */
+  const pan = new dom.WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: 240 });
+  Object.defineProperties(pan, { clientX: { value: 600 }, clientY: { value: 400 }, ctrlKey: { value: false } });
+  flushSync(() => viewport.dispatchEvent(pan as unknown as Event));
+  await settle();
 
   flushSync(() => key());
   await settle();

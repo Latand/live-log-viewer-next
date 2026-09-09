@@ -420,7 +420,7 @@ export function applyAssignmentPatches(
   const task = existing[index]!;
   const assignments = mergeAssignments(task.assignments, patches);
   const hasOwner = assignments.some(
-    (assignment) => assignment.state === "delivered" || assignment.state === "spawning" || assignment.state === "handoff",
+    (assignment) => assignment.state === "delivered" || assignment.state === "spawning" || assignment.state === "handoff" || assignment.state === "linked",
   );
   let status = task.status;
   if (status === "inbox" || status === "assigned") {

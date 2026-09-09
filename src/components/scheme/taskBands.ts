@@ -236,7 +236,16 @@ export function buildTaskBands(base: SchemeLayout, sources: BandSources): TaskBa
     const title = taskTitle(task.text) || untitled;
     const band = makeBand({ id: `task:${task.id}`, origin: "task", task, pipeline: null, flow: null, title, status: task.status, hue: hueFromId(task.id), pinnedTop: false, createdAt: task.createdAt });
     if (workflow) {
+      /* Membership provenance: recorded assignments and explicitly bound
+         containers establish members. An execution the projection associated
+         only because one worker matched an assignment stays a relation; its
+         other stages are not promoted into this task. A container whose
+         fallback task this is (origin key) counts as explicitly bound. */
+      const canonical = workflow.references.filter((reference) => reference.kind === "assignment" && reference.file);
+      for (const reference of canonical) admit(band, reference.file!.path);
       for (const execution of workflow.executions) {
+        const bound = execution.basis === "explicit" || (task.origin?.kind === "pipeline" && task.origin.key === execution.pipeline.id);
+        if (!bound) continue;
         const group = groupFor("pipeline", execution.pipeline.id);
         own(band, group);
         for (const key of group?.members ?? []) admit(band, key);
@@ -248,12 +257,15 @@ export function buildTaskBands(base: SchemeLayout, sources: BandSources): TaskBa
           }
         }
       }
-      for (const reference of workflow.references) if (reference.file) admit(band, reference.file.path);
+      const memberPaths = new Set(band.members.filter((member) => member.file).map((member) => member.key));
       for (const flow of workflow.flows) {
+        const bound = memberPaths.has(flow.implementerPath) || (task.origin?.kind === "flow" && task.origin.key === flow.id);
+        if (!bound) continue;
         const group = groupFor("flow", flow.id);
         own(band, group);
         for (const key of group?.members ?? []) admit(band, key);
         for (const deck of base.decks) if (deck.flow.id === flow.id) admit(band, deck.key);
+        for (const reference of workflow.references) if (reference.kind === "review" && reference.flowId === flow.id && reference.file) admit(band, reference.file.path);
       }
     }
     if (provisionalMemberships?.size) {
@@ -440,6 +452,8 @@ export interface BandScene {
   scale: number;
   /** Band id per placed key, for same-band edge filtering and hit tests. */
   bandOf: Map<string, string>;
+  /** Cross-band recorded relations, per attached member/mirror. */
+  continuations: BandContinuation[];
 }
 
 export interface BandLayoutOptions {
@@ -448,6 +462,20 @@ export interface BandLayoutOptions {
   viewportWidth: number;
   /** Conversation whose reader is native in near mode. */
   reader: string | null;
+  /** Node key → band id: the operator opened that conversation's projection in
+      this band, so the one reader surface is hosted there and the canonical
+      band shows the reference tile instead. Ignored unless the band holds a
+      mirror of the node. */
+  hostOverrides?: ReadonlyMap<string, string>;
+}
+
+/** A recorded relation whose other endpoint lives in another band: shown as a
+    labelled continuation on the member it is attached to. */
+export interface BandContinuation {
+  /** Board key of the member or mirror the chip is attached to. */
+  key: string;
+  bandId: string;
+  targets: { key: string; bandId: string; title: string; direction: "to" | "from" }[];
 }
 
 function union(rects: readonly SchemeRect[]): SchemeRect {
@@ -479,8 +507,32 @@ export function bandEdgePorts(a: SchemeRect, b: SchemeRect, scale: number): { x1
  * footprint. The returned layout carries every placed surface at its final
  * rectangle, so cards, halos, hit targets and edge endpoints agree.
  */
-export function layoutTaskBands(base: SchemeLayout, bands: readonly TaskBand[], options: BandLayoutOptions): BandScene {
+/** Swap a conversation's surface into the band the operator opened it in: the
+    override band's mirror becomes the member and the canonical band keeps a
+    mirror, so the reader owner is one and the counts do not change. */
+export function applyHostOverrides(bands: readonly TaskBand[], overrides: ReadonlyMap<string, string> | undefined): TaskBand[] {
+  if (!overrides?.size) return [...bands];
+  const next = bands.map((band) => ({ ...band, members: [...band.members], mirrors: [...band.mirrors] }));
+  for (const [nodeKey, bandId] of overrides) {
+    const host = next.find((band) => band.id === bandId);
+    const source = next.find((band) => band.members.some((member) => member.key === nodeKey));
+    if (!host || !source || host === source) continue;
+    const mirrorIndex = host.mirrors.findIndex((mirror) => mirror.ofKey === nodeKey);
+    if (mirrorIndex < 0) continue;
+    const mirror = host.mirrors[mirrorIndex]!;
+    const memberIndex = source.members.findIndex((member) => member.key === nodeKey);
+    const member = source.members[memberIndex]!;
+    host.mirrors.splice(mirrorIndex, 1);
+    host.members.push(member);
+    source.members.splice(memberIndex, 1);
+    source.mirrors.push({ key: `mirror::${source.id}::${mirror.key.split("::").pop()}`, ofKey: nodeKey, file: mirror.file, primaryBandId: host.id, primaryTitle: host.title });
+  }
+  return next;
+}
+
+export function layoutTaskBands(base: SchemeLayout, orderedBands: readonly TaskBand[], options: BandLayoutOptions): BandScene {
   const { mode, viewportWidth, reader } = options;
+  const bands = applyHostOverrides(orderedBands, options.hostOverrides);
   const s = 1 / Math.max(0.07, options.zoom);
   const gutter = (viewportWidth < 1024 ? BAND.gutterNarrow : BAND.gutter) * s;
   const bandW = Math.max(BAND.nativeMinW * s, viewportWidth * s - gutter * 2);
@@ -511,7 +563,9 @@ export function layoutTaskBands(base: SchemeLayout, bands: readonly TaskBand[], 
     for (const member of band.members) {
       if (member.kind === "node") {
         const node = base.nodes.find((entry) => entry.file.path === member.key)!;
-        const presentation = mode === "overview" ? "chip" : mode === "near" && member.key === reader ? "native" : "summary";
+        /* The selected conversation reads natively from the intermediate scale
+           up: clicking a tile opens it in place, siblings stay tiles. */
+        const presentation = mode === "overview" ? "chip" : member.key === reader ? "native" : "summary";
         const w = (presentation === "chip" ? BAND.chipW : presentation === "native" ? Math.max(BAND.nativeMinW, Math.min(BAND.nativeW, innerW / s)) : BAND.summaryW) * s;
         const h = (presentation === "chip" ? BAND.chipH : presentation === "native" ? BAND.nativeH : BAND.summaryH) * s;
         items.push({ key: member.key, w, h, kind: "member", node: { ...node, presentation, readerScale: s, w, h } });
@@ -581,15 +635,47 @@ export function layoutTaskBands(base: SchemeLayout, bands: readonly TaskBand[], 
   const nodes = base.nodes.map((node) => nodeRects.get(node.file.path) ?? node);
   const rectsIn = (bandId: string, except: readonly string[]) =>
     [...placed].filter(([key]) => bandOf.get(key) === bandId && !except.includes(key)).map(([, rect]) => rect);
+  /* A node key may be represented in several bands: as its member surface and
+     as mirrors. Every representation of an endpoint gets the continuation. */
+  const representations = new Map<string, string[]>();
+  for (const key of placed.keys()) {
+    if (!key.startsWith("mirror::")) { representations.set(key, [...(representations.get(key) ?? []), key]); continue; }
+    const band = placedBands.find((entry) => entry.mirrors.some((mirror) => mirror.key === key));
+    const mirror = band?.mirrors.find((entry) => entry.key === key);
+    if (mirror) representations.set(mirror.ofKey, [...(representations.get(mirror.ofKey) ?? []), key]);
+  }
+  const titleOf = new Map(placedBands.map((band) => [band.id, band.title] as const));
+  const continuationByKey = new Map<string, BandContinuation>();
+  const continue_ = (anchorKey: string, target: { key: string; bandId: string; direction: "to" | "from" }) => {
+    const bandId = bandOf.get(anchorKey);
+    if (!bandId || bandId === target.bandId) return;
+    const entry = continuationByKey.get(anchorKey) ?? { key: anchorKey, bandId, targets: [] };
+    if (!entry.targets.some((existing) => existing.key === target.key && existing.bandId === target.bandId && existing.direction === target.direction)) {
+      entry.targets.push({ ...target, title: titleOf.get(target.bandId) ?? target.bandId });
+    }
+    continuationByKey.set(anchorKey, entry);
+  };
   const edges: SchemeEdge[] = base.edges.flatMap((edge) => {
     if (!edge.from) return [];
     const from = placed.get(edge.from);
     const to = placed.get(edge.to);
-    if (!from || !to || bandOf.get(edge.from) !== bandOf.get(edge.to)) return [];
+    if (!from || !to) return [];
+    if (bandOf.get(edge.from) !== bandOf.get(edge.to)) {
+      for (const rep of representations.get(edge.from) ?? []) continue_(rep, { key: edge.to, bandId: bandOf.get(edge.to)!, direction: "to" });
+      for (const rep of representations.get(edge.to) ?? []) continue_(rep, { key: edge.from, bandId: bandOf.get(edge.from)!, direction: "from" });
+      return [];
+    }
     const ports = bandEdgePorts(from, to, s);
     const route = routeTaskEdge(ports, rectsIn(bandOf.get(edge.from)!, [edge.from, edge.to]));
     return [{ ...edge, ...ports, route: route.d, routeCrosses: route.crosses }];
   });
+  /* Mirrors of an endpoint that shares a band with the other endpoint's member
+     still point across bands from where they stand. */
+  for (const edge of base.edges) {
+    if (!edge.from || !placed.has(edge.from) || !placed.has(edge.to)) continue;
+    for (const rep of representations.get(edge.from) ?? []) if (rep !== edge.from && bandOf.get(rep) !== bandOf.get(edge.to)) continue_(rep, { key: edge.to, bandId: bandOf.get(edge.to)!, direction: "to" });
+    for (const rep of representations.get(edge.to) ?? []) if (rep !== edge.to && bandOf.get(rep) !== bandOf.get(edge.from)) continue_(rep, { key: edge.from, bandId: bandOf.get(edge.from)!, direction: "from" });
+  }
   const groups: SchemeGroup[] = base.groups.flatMap((group) => {
     if (group.kind === "task") return [];
     const members = group.members.filter((key) => placed.has(key));
@@ -623,5 +709,5 @@ export function layoutTaskBands(base: SchemeLayout, bands: readonly TaskBand[], 
     width: viewportWidth * s,
     height: cursorY + gutter,
   };
-  return { layout, bands: placedBands, shown, mode, taskRects, mirrorRects, scale: s, bandOf };
+  return { layout, bands: placedBands, shown, mode, taskRects, mirrorRects, scale: s, bandOf, continuations: [...continuationByKey.values()] };
 }
