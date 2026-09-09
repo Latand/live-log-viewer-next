@@ -192,6 +192,44 @@ test("original-key recovery of a delivered send whose text ended in a newline re
   expect(admitted.length).toBe(admissions + 1);
 });
 
+test("recovery of an accepted send whose reservation is still live answers with the original ids", async () => {
+  /* The incident's own moment: the MCP dispatch timed out at 5 s, the send is
+     durably admitted, and nothing has settled it yet. A LIVE reservation still
+     carries the text admission stored — the trimmed form — where a delivered
+     one has blanked it, so this is the only path on which the stored-text
+     comparison decides the answer at all. */
+  const originalText = "terminal report while the reservation is live\n";
+  const admissions = admitted.length;
+  const key = sendDownstreamKey("accepted-live-reservation");
+  const response = await send(key, originalText);
+  expect(response.status).toBe(200);
+  const { operationId } = await response.json() as { operationId: string };
+
+  const reservation = Object.values(registry.readOnlySnapshot().heldDeliveries)
+    .find((held) => held.clientMessageId === key)!;
+  /* Unsettled, and holding the trimmed text against which the caller's
+     untrimmed argument is measured. */
+  expect(reservation.state).toBe("assigned");
+  expect(reservation.deliveredAt).toBeNull();
+  expect(reservation.text).toBe(originalText.trim());
+
+  const before = JSON.stringify(registry.readOnlySnapshot());
+  const recovered = await recover(bindingFor(key), { legacy: false, args: { text: originalText } });
+
+  expect(recovered.outcome).toBe("accepted");
+  expect(recovered.ids).toEqual({ operationId, conversationId: recipient.id, deliveryId: reservation.id });
+  expect(recovered.facts).toMatchObject({
+    state: "in-flight",
+    acceptedAt: reservation.assignedAt!,
+    resend: null,
+    duplicateRisk: false,
+  });
+  /* Recovery READ the record: no second copy of the message was admitted, and
+     the durable state is byte-identical to what it found. */
+  expect(admitted.length).toBe(admissions + 1);
+  expect(JSON.stringify(registry.readOnlySnapshot())).toBe(before);
+});
+
 test("leading and trailing whitespace recovers the same way, and an untouched text still does", async () => {
   const spaced = "\n  spaced report  \n";
   const spacedSend = await deliver("surrounded-report", spaced);
