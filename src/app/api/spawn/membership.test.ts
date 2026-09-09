@@ -14,19 +14,15 @@ import { admittedDependencies, admittedRegistry, executeAdmittedSpawnRequest, pa
  * membership aborts the reservation; a rejected request never reaches it.
  */
 
-function ports(): SpawnMembershipPorts & { commits: MembershipInput[]; identities: unknown[]; refuse?: MembershipResult; throwOnCommit?: boolean } {
+function ports(): SpawnMembershipPorts & { commits: MembershipInput[]; refuse?: MembershipResult; throwOnCommit?: boolean } {
   const state = {
     commits: [] as MembershipInput[],
-    identities: [] as unknown[],
     refuse: undefined as MembershipResult | undefined,
     throwOnCommit: false,
     commit(input: MembershipInput): MembershipResult {
       if (state.throwOnCommit) throw new Error("task state is busy");
       state.commits.push(input);
       return state.refuse ?? { ok: true, tasks: [], taskIds: input.explicitTaskIds ? [...input.explicitTaskIds] : ["placeholder-1"], created: input.explicitTaskIds ? [] : ["placeholder-1"], changed: true };
-    },
-    recordIdentity(taskIds: readonly string[], identity: unknown) {
-      state.identities.push({ taskIds: [...taskIds], identity });
     },
     projectForCwd: (cwd: string) => `project-for:${cwd}`,
   };
@@ -47,21 +43,20 @@ function fakeRegistry(result: SpawnBeginResult["kind"] = "created") {
   return { registry, calls };
 }
 
-test("reserving the receipt commits membership first and records the reserved identity before returning", () => {
+test("reserving the receipt commits membership first, in the launch's explicit project when it has one", () => {
   const membership = ports();
   const { registry, calls } = fakeRegistry();
   const order: string[] = [];
   const commit = membership.commit.bind(membership);
   membership.commit = (input) => { order.push("commit"); return commit(input); };
-  const record = membership.recordIdentity.bind(membership);
-  membership.recordIdentity = (ids, identity) => { order.push("identity"); record(ids, identity); };
   const wrapped = admittedRegistry(registry, launch, membership);
   const begun = wrapped.beginSpawnRequest({ engine: "claude", cwd: "/repo", clientAttemptId: "attempt-1" } as SpawnRequest);
   expect(begun.kind).toBe("created");
   expect(calls.length).toBe(1);
-  expect(order).toEqual(["commit", "identity"]);
+  expect(order).toEqual(["commit"]);
   expect(membership.commits[0]).toEqual({ project: "project-for:/repo", origin: { kind: "launch", key: "attempt-1" }, title: "Restore search results\nwith details", identity: { clientAttemptId: "attempt-1", engine: "claude" } });
-  expect(membership.identities).toEqual([{ taskIds: ["placeholder-1"], identity: { clientAttemptId: "attempt-1", launchId: "launch-1", conversationId: "conversation_one", engine: "claude" } }]);
+  wrapped.beginSpawnRequest({ engine: "claude", cwd: "/repo", clientAttemptId: "attempt-1", explicitProject: "selected-project" } as SpawnRequest);
+  expect(membership.commits[1]!.project).toBe("selected-project");
   /* Other registry calls pass straight through. */
   expect(wrapped.spawnReceiptForClientAttempt("x" as never)).toBeNull();
 });
@@ -95,7 +90,6 @@ test("a reservation for another attempt, or a conflicting one, leaves membership
   expect(membership.commits).toEqual([]);
   wrapped.beginSpawnRequest({ engine: "claude", cwd: "/repo", clientAttemptId: "attempt-1" } as SpawnRequest);
   expect(membership.commits.length).toBe(1);
-  expect(membership.identities).toEqual([]);
 });
 
 test("the dependencies wrapper hands the command one wrapped registry and leaves every other dependency alone", () => {
@@ -118,7 +112,6 @@ test("a cross-site request is rejected by the command before any membership is c
   const response = await executeAdmittedSpawnRequest(request, productionSpawnCommandDependencies, membership);
   expect(response.status).toBe(403);
   expect(membership.commits).toEqual([]);
-  expect(membership.identities).toEqual([]);
 });
 
 test("a request without an attempt key is passed through without a wrapped registry", async () => {

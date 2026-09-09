@@ -63,7 +63,9 @@ function isTaskOrigin(value: unknown): value is TaskOrigin {
   const origin = value as Partial<TaskOrigin>;
   return (origin.kind === "conversation" || origin.kind === "launch" || origin.kind === "pipeline" || origin.kind === "flow")
     && typeof origin.key === "string" && origin.key.length > 0
-    && (origin.refinement === "pending" || origin.refinement === "titled");
+    && (origin.refinement === "pending" || origin.refinement === "titled")
+    && (origin.refinedBy === undefined || typeof origin.refinedBy === "string")
+    && (origin.refinedText === undefined || typeof origin.refinedText === "string");
 }
 
 function isFinitePos(value: unknown): value is { x: number; y: number } {

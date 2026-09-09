@@ -375,3 +375,23 @@ test("a recorded relation across bands becomes a labelled continuation on both e
   const mirror = bands.find((band) => band.id === "task:b")!.mirrors[0]!;
   expect(byKey.get(mirror.key)!.targets).toEqual([{ key: files[2]!.path, bandId: "task:a", title: "Task a", direction: "to" }]);
 });
+
+test("a container halo stays inside its own band: a stage worker assigned to another task is a mirror there, never a halo across bands", () => {
+  const files = [file(0), file(1), file(2)];
+  const pipeline = pipelineWith("p", files.slice(0, 2), ["t"]);
+  /* Worker 1 is also assigned to an older task, so its surface lives there. */
+  const tasks = [task("older", "2026-01-01T00:00:00Z", [files[1]!, files[2]!]), task("t", "2026-01-02T00:00:00Z", [])];
+  const layout = base(files);
+  layout.groups = [{ key: "group::pipeline::p", kind: "pipeline", id: "p", hue: 10, members: files.slice(0, 2).map((entry) => entry.path), label: "Pipeline p", pipeline, x: 0, y: 0, w: 0, h: 0 }];
+  const bands = rankBands(buildTaskBands(layout, { tasks, projection: projectTaskWorkflows(tasks, [pipeline], [], files), untitled: "Untitled task" }));
+  const scene = layoutTaskBands(layout, bands, { zoom: 0.5, mode: "intermediate", viewportWidth: 1440, reader: null });
+  const halo = scene.layout.groups.find((group) => group.id === "p")!;
+  const pipelineBand = scene.bands.find((band) => band.id === "task:t")!;
+  const olderBand = scene.bands.find((band) => band.id === "task:older")!;
+  expect(pipelineBand.groups).toEqual(["group::pipeline::p"]);
+  const inside = (outer: SchemeRect, inner: SchemeRect) => inner.y >= outer.y - 0.001 && inner.y + inner.h <= outer.y + outer.h + 0.001 && inner.x >= outer.x - 0.001 && inner.x + inner.w <= outer.x + outer.w + 0.001;
+  expect(inside(pipelineBand.geometry.rect, halo)).toBe(true);
+  expect(halo.y < olderBand.geometry.rect.y + olderBand.geometry.rect.h && halo.y + halo.h > olderBand.geometry.rect.y && olderBand.geometry.rect.y < pipelineBand.geometry.rect.y).toBe(false);
+  /* The halo wraps the stage placed here plus the mirror of the stage hosted elsewhere. */
+  expect(halo.members.sort()).toEqual([files[0]!.path, pipelineBand.mirrors[0]!.key].sort());
+});

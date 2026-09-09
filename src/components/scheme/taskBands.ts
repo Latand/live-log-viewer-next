@@ -583,10 +583,11 @@ export function layoutTaskBands(base: SchemeLayout, orderedBands: readonly TaskB
     }
     /* A hosted pipeline/flow with none of its surfaces placed in this mode
        still reserves a label slot: its halo header carries the controls. */
-    const placedKeys = new Set(items.filter((item) => item.kind === "member").map((item) => item.key));
+    const placedKeys = new Set(items.filter((item) => item.kind === "member" || item.kind === "mirror").map((item) => item.key));
+    const mirrored = new Set(band.mirrors.map((mirror) => mirror.ofKey));
     for (const groupKey of band.groups) {
       const group = base.groups.find((entry) => entry.key === groupKey);
-      if (!group || group.members.some((key) => placedKeys.has(key))) continue;
+      if (!group || group.members.some((key) => placedKeys.has(key) || mirrored.has(key))) continue;
       items.push({ key: groupKey, w: (mode === "overview" ? BAND.chipW : BAND.containerW) * s, h: (mode === "overview" ? BAND.chipH : BAND.containerH) * s, kind: "container" });
     }
     items.push({ key: `add::${band.id}`, w: BAND.addW * s, h: (mode === "overview" ? BAND.chipH : BAND.addH) * s, kind: "add" });
@@ -676,17 +677,29 @@ export function layoutTaskBands(base: SchemeLayout, orderedBands: readonly TaskB
     for (const rep of representations.get(edge.from) ?? []) if (rep !== edge.from && bandOf.get(rep) !== bandOf.get(edge.to)) continue_(rep, { key: edge.to, bandId: bandOf.get(edge.to)!, direction: "to" });
     for (const rep of representations.get(edge.to) ?? []) if (rep !== edge.to && bandOf.get(rep) !== bandOf.get(edge.from)) continue_(rep, { key: edge.from, bandId: bandOf.get(edge.from)!, direction: "from" });
   }
+  /* A container halo is a projection inside the band that owns it: it wraps
+     the container's members placed in that band and the band's mirrors of its
+     other members, never a surface placed in a different band. */
+  const owner = new Map<string, string>();
+  for (const band of placedBands) for (const key of band.groups) owner.set(key, band.id);
   const groups: SchemeGroup[] = base.groups.flatMap((group) => {
     if (group.kind === "task") return [];
-    const members = group.members.filter((key) => placed.has(key));
-    if (!members.length) {
+    const bandId = owner.get(group.key);
+    if (!bandId) return [];
+    const band = placedBands.find((entry) => entry.id === bandId)!;
+    const memberSet = new Set(group.members);
+    const local = [
+      ...group.members.filter((key) => placed.has(key) && bandOf.get(key) === bandId),
+      ...band.mirrors.filter((mirror) => memberSet.has(mirror.ofKey) && placed.has(mirror.key)).map((mirror) => mirror.key),
+    ];
+    if (!local.length) {
       const slot = containerSlots.get(group.key);
       return slot ? [{ ...group, members: [], ...slot }] : [];
     }
-    const envelope = union(members.map((key) => placed.get(key)!));
+    const envelope = union(local.map((key) => placed.get(key)!));
     const padX = 12 * s;
     const heading = 30 * s;
-    return [{ ...group, members, x: envelope.x - padX, y: envelope.y - heading, w: envelope.w + padX * 2, h: envelope.h + heading + padX }];
+    return [{ ...group, members: local, x: envelope.x - padX, y: envelope.y - heading, w: envelope.w + padX * 2, h: envelope.h + heading + padX }];
   });
   const layout: SchemeLayout = {
     ...base,

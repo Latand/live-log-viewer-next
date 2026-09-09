@@ -173,7 +173,10 @@ export function ensureTaskMembership(existing: readonly BoardTask[], input: Memb
     status: "inbox",
     text: normalizeTitle(input.title),
     placement: "unplaced",
-    origin: { kind: input.origin.kind, key: input.origin.key, refinement: input.title?.trim() ? "titled" : "pending" },
+    /* The admission title (first prompt, pipeline goal) is a placeholder
+       title: the refinement stays pending until an agent's first action or an
+       operator edit names the task. */
+    origin: { kind: input.origin.kind, key: input.origin.key, refinement: "pending" },
     assignments: [],
     createdAt: now,
     updatedAt: now,
@@ -350,4 +353,71 @@ export function admitScannedConversations(entries: readonly FileEntry[], pipelin
     const outcome = admitConversations(tasks, plans);
     return { tasks: outcome.admitted ? outcome.tasks : undefined, result: outcome.admitted };
   }, filePath);
+}
+
+/* ------------------------------------------------------------------------- */
+/* First-action refinement                                                   */
+/* ------------------------------------------------------------------------- */
+
+export interface RefineTaskInput {
+  /** Server-derived caller identity: the conversation that holds membership. */
+  callerConversationId: string;
+  /** Optional explicit task; otherwise every pending task the caller belongs to. */
+  taskId?: string | null;
+  text: string;
+}
+
+export type RefineOutcome =
+  | { ok: true; tasks: BoardTask[]; refined: { taskId: string; result: "applied" | "replayed" | "already-named" }[] }
+  | { ok: false; error: string; status: number };
+
+const TITLE_MAX = 80;
+const DESCRIPTION_MAX_LINES = 2;
+
+/** A short first line (the title) plus at most two concise lines. */
+export function normalizeRefinement(text: string): string | null {
+  const lines = text.replace(/\r\n/g, "\n").split("\n").map((line) => line.trim()).filter(Boolean);
+  const title = lines[0];
+  if (!title) return null;
+  const shortTitle = title.length > TITLE_MAX ? `${title.slice(0, TITLE_MAX - 1).trimEnd()}…` : title;
+  const description = lines.slice(1, 1 + DESCRIPTION_MAX_LINES);
+  return [shortTitle, ...description].join("\n");
+}
+
+/**
+ * The agent's one-shot task naming (#1586). Only a conversation that holds the
+ * task's membership may refine it, exactly once per placeholder: the same
+ * caller replaying the same text gets the prior result, a different text after
+ * a refinement or an operator edit gets "already-named", and a task the caller
+ * does not belong to is refused. Nothing is created and no other field moves.
+ */
+export function refineTask(existing: readonly BoardTask[], input: RefineTaskInput, now = isoNow()): RefineOutcome {
+  const text = normalizeRefinement(input.text);
+  if (!text) return { ok: false, error: "refinement text is required", status: 400 };
+  const caller = input.callerConversationId;
+  const holds = (task: BoardTask) => task.assignments.some((assignment) => assignment.state !== "failed" && assignment.conversationId === caller);
+  let targets: BoardTask[];
+  if (input.taskId) {
+    const task = existing.find((candidate) => candidate.id === input.taskId);
+    if (!task) return { ok: false, error: "task not found", status: 404 };
+    if (!holds(task)) return { ok: false, error: "only a conversation linked to the task may refine its title", status: 403 };
+    targets = [task];
+  } else {
+    targets = existing.filter((task) => task.origin && holds(task));
+    if (!targets.length) return { ok: false, error: "the calling conversation is not linked to a task", status: 404 };
+  }
+  const tasks = existing.slice();
+  const refined: { taskId: string; result: "applied" | "replayed" | "already-named" }[] = [];
+  for (const task of targets) {
+    const index = tasks.findIndex((candidate) => candidate.id === task.id);
+    const origin = task.origin;
+    if (!origin || origin.refinement === "titled") {
+      const replay = origin?.refinedBy === caller && origin.refinedText === text;
+      refined.push({ taskId: task.id, result: replay ? "replayed" : "already-named" });
+      continue;
+    }
+    tasks[index] = { ...task, text, origin: { ...origin, refinement: "titled", refinedBy: caller, refinedText: text }, updatedAt: now };
+    refined.push({ taskId: task.id, result: "applied" });
+  }
+  return { ok: true, tasks, refined };
 }

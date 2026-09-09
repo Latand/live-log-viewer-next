@@ -256,6 +256,11 @@ export function patchTask(existing: BoardTask[], id: string, input: PatchTaskInp
     if (!text) return { ok: false, error: "task text is required", status: 400 };
     if (text.length > TASK_TEXT_LIMIT) return textLimitError();
     patch.text = text;
+    /* An operator's edit names a placeholder for good: a later agent
+       refinement returns "already named" instead of overwriting it (#1586). */
+    if (existing[index]!.origin?.refinement === "pending" && text !== existing[index]!.text) {
+      patch.origin = { ...existing[index]!.origin!, refinement: "titled" };
+    }
   }
   if (Object.hasOwn(input, "status")) {
     const status = normalizeStatus(input.status);

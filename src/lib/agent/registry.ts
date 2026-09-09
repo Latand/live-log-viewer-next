@@ -81,6 +81,7 @@ import { identityMaterializationFence } from "./identityMaterialization";
 import type { ResumePaneRecord } from "@/lib/resumePanesFile";
 import { parseMessageOrigin } from "@/lib/runtime/messageOrigin";
 import { assertStructuredTextEnvelope, parseStructuredImageRefs, structuredContent, type StructuredImageRef } from "@/lib/runtime/structuredContent";
+import { admitReservedLaunch } from "@/lib/tasks/launchMembership";
 
 export type AgentHostStatus = "starting" | "live" | "idle" | "handoff" | "unhosted" | "dead";
 
@@ -4132,7 +4133,7 @@ export class AgentRegistry {
       terminal rejection receipt when the initiating origin is a denied role
       or the child would exceed the nesting-depth ceiling. */
   beginSpawnRequest(input: SpawnRequest): SpawnBeginResult {
-    return withAccountMutationLock(() => {
+    const result = withAccountMutationLock(() => {
       if ((input.engine === "claude" || input.engine === "codex") && input.accountId && input.accountId !== "default") {
         const filename = statePath(`${input.engine}-accounts.json`);
         try {
@@ -4149,6 +4150,20 @@ export class AgentRegistry {
       }
       return result;
     });
+    /* Canonical task membership (#1586): the receipt is the last shared step
+       before any launch path actuates, and every caller has passed its own
+       admission checks to get here. Membership is committed with the reserved
+       identity now; a membership the task store cannot record retires the
+       fresh receipt and aborts the launch. A replay converges on the first
+       admission's task. */
+    if (result.kind === "created" || result.kind === "replay") {
+      admitReservedLaunch(input, result.receipt, (reason) => {
+        if (result.kind !== "created") return;
+        if (input.transport === "structured") this.failStructuredSpawn(result.receipt.launchId, reason);
+        else this.failSpawn(result.receipt.launchId, reason);
+      });
+    }
+    return result;
   }
 
   private beginSpawnRequestInFile(

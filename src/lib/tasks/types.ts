@@ -10,8 +10,13 @@ export type AssignmentState = "delivered" | "failed" | "spawning" | "handoff" | 
 export interface TaskOrigin {
   kind: "conversation" | "launch" | "pipeline" | "flow";
   key: string;
-  /** `pending` until an agent or the operator gives the placeholder a real title. */
+  /** `pending` until an agent's first-action refinement or an operator edit
+      gives the placeholder a real title. */
   refinement: "pending" | "titled";
+  /** Conversation whose one-shot refinement titled the task, and the text it
+      supplied, so a replay of the same refinement is recognised. */
+  refinedBy?: string;
+  refinedText?: string;
 }
 
 export interface TaskAssignment {

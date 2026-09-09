@@ -2900,7 +2900,9 @@ export const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
   }).passthrough(),
   update_task: z.object({
     clientRequestId: clientRequestIdSchema,
-    taskId: entityIdSchema,
+    taskId: entityIdSchema.optional().describe("Required for every update except refine; refine defaults to every pending task the calling conversation is linked to."),
+    refine: z.object({ text: z.string().trim().min(1).max(600).describe("Short human title on the first line (3–10 words), then up to two concise sentences.") }).optional()
+      .describe("First-action task naming: title the placeholder task your conversation is linked to, once. Replaying the same text returns the prior result; a task already named by the operator or an earlier refinement answers already-named and keeps its title."),
     expectedProject: z.string().min(1).optional().describe("Required for pos or placement updates: copy the current task project exactly."),
     expectedRevision: z.string().min(1).optional().describe("Required for pos or placement updates: copy the opaque revision from get_task or list_tasks."),
     text: z.string().optional(),
@@ -3216,7 +3218,7 @@ export const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
 
 export function createViewerMcpServer(service: McpToolService): McpServer {
   const server = new McpServer({ name: MCP_SERVER_NAME, version: "1.0.0" }, {
-    instructions: "Use clientRequestId on every call. Reuse it only when replaying the same logical operation.",
+    instructions: "Use clientRequestId on every call. Reuse it only when replaying the same logical operation. Your conversation is already linked to a board task. If that task still carries its placeholder title, make your first Viewer action update_task with refine: { text } — a short human title (3–10 words) on the first line and at most two concise sentences, describing the work you were given. Keep an existing meaningful title; the reply says already-named when one exists. Reuse the same text on retry.",
   });
   for (const toolName of MCP_TOOL_NAMES) {
     const taskMutation = toolName === "create_task" || toolName === "update_task";

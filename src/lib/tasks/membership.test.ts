@@ -14,8 +14,10 @@ import {
   ensureTaskMembership,
   planAdmissions,
   recordLaunchIdentity,
+  refineTask,
   UNTITLED_TASK_TEXT,
 } from "./membership";
+import { patchTask } from "./commands";
 import { loadTasks, saveTasks } from "./store";
 import type { BoardTask } from "./types";
 
@@ -60,7 +62,7 @@ test("a global launch mints one placeholder keyed by its attempt; the replay con
   expect(first.created.length).toBe(1);
   const created = first.tasks.find((candidate) => candidate.id === first.taskIds[0])!;
   expect(created.text).toBe("Restore search results");
-  expect(created.origin).toEqual({ kind: "launch", key: "attempt-1", refinement: "titled" });
+  expect(created.origin).toEqual({ kind: "launch", key: "attempt-1", refinement: "pending" });
   expect(created.assignments).toEqual([{ clientAttemptId: "attempt-1", path: null, panePid: null, state: "linked", error: null, at: now, engine: "claude" }]);
   expect(created.status).toBe("assigned");
   /* Crash after commit, before the receipt: the same attempt key replays. */
@@ -218,4 +220,39 @@ test("a launch whose identity write was lost is repaired from the transcript's r
   expect(repaired.tasks.length).toBe(1);
   expect(repaired.tasks[0]!.assignments).toEqual([expect.objectContaining({ clientAttemptId: "attempt-lost", launchId: "launch-lost", conversationId: "conversation_fixture_500", path: arrived.path, state: "linked" })]);
   expect(planAdmissions([arrived], repaired.tasks, [])).toEqual([]);
+});
+
+test("the first-action refinement names a pending placeholder once: replay returns the prior result, a second text is already-named, a stranger is refused, an operator edit wins", () => {
+  const admitted = ensureTaskMembership([], { project: "fixture", origin: { kind: "launch", key: "attempt-r" }, title: "raw prompt line that is long", identity: { clientAttemptId: "attempt-r", launchId: "launch-r", conversationId: "conversation_agent" } }, deps);
+  const tasks = admitted.ok ? admitted.tasks : [];
+  const taskId = admitted.ok ? admitted.taskIds[0]! : "";
+  expect(tasks[0]!.origin?.refinement).toBe("pending");
+  const stranger = refineTask(tasks, { callerConversationId: "conversation_other", text: "Hijack" });
+  expect(stranger.ok).toBe(false);
+  expect(!stranger.ok && stranger.status).toBe(404);
+  const strangerExplicit = refineTask(tasks, { callerConversationId: "conversation_other", taskId, text: "Hijack" });
+  expect(!strangerExplicit.ok && strangerExplicit.status).toBe(403);
+  const first = refineTask(tasks, { callerConversationId: "conversation_agent", text: "Restore search results\nRe-index the catalog and verify the results page.\nA third line is dropped." }, now);
+  expect(first.ok && first.refined).toEqual([{ taskId, result: "applied" }]);
+  const named = first.ok ? first.tasks : tasks;
+  expect(named[0]!.text).toBe("Restore search results\nRe-index the catalog and verify the results page.\nA third line is dropped.");
+  const four = refineTask(tasks, { callerConversationId: "conversation_agent", text: "Title\none\ntwo\nthree" }, now);
+  expect(four.ok && four.tasks[0]!.text).toBe("Title\none\ntwo");
+  expect(named[0]!.origin).toMatchObject({ refinement: "titled", refinedBy: "conversation_agent" });
+  const replay = refineTask(named, { callerConversationId: "conversation_agent", text: "Restore search results\nRe-index the catalog and verify the results page.\nA third line is dropped." });
+  expect(replay.ok && replay.refined).toEqual([{ taskId, result: "replayed" }]);
+  const second = refineTask(named, { callerConversationId: "conversation_agent", text: "Something else" });
+  expect(second.ok && second.refined).toEqual([{ taskId, result: "already-named" }]);
+  expect((second.ok ? second.tasks : named)[0]!.text).toBe(named[0]!.text);
+  /* An operator edit on a pending placeholder names it; the agent then gets already-named. */
+  const fresh = ensureTaskMembership([], { project: "fixture", origin: { kind: "launch", key: "attempt-o" }, identity: { clientAttemptId: "attempt-o", conversationId: "conversation_agent_2" } }, deps);
+  const edited = patchTask(fresh.ok ? fresh.tasks : [], fresh.ok ? fresh.taskIds[0]! : "", { text: "Operator's own title" }, now);
+  expect(edited.ok && edited.task.origin?.refinement).toBe("titled");
+  const late = refineTask(edited.ok ? edited.tasks : [], { callerConversationId: "conversation_agent_2", text: "Agent title" });
+  expect(late.ok && late.refined[0]!.result).toBe("already-named");
+  expect(late.ok && late.tasks[0]!.text).toBe("Operator's own title");
+  /* A long first line is shortened; empty text refuses. */
+  const long = refineTask(tasks, { callerConversationId: "conversation_agent", text: "x".repeat(120) });
+  expect(long.ok && long.tasks[0]!.text.length).toBe(80);
+  expect(refineTask(tasks, { callerConversationId: "conversation_agent", text: "   " }).ok).toBe(false);
 });
