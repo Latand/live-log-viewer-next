@@ -1578,19 +1578,37 @@ export function outboxHistory(queue: readonly OutboxEntry[]): string[] {
   return ordered.filter((text, index) => text !== ordered[index - 1]);
 }
 
+/** Whether this entry still owns the local in-flight fence — one of the
+    operator's OWN messages that this browser is actively delivering.
+
+    A `launchOwned` entry is delivered by the spawn, not the composer. An
+    UNCERTAIN entry is excluded for a different reason: the local attempt that
+    owned it is over. Its fate is genuinely unknown and a late admission is
+    still possible, so it is never replayed, never cancelled and never presented
+    as failed — but the browser is no longer waiting on a request for it, and
+    the live window in which it might still resolve locally is bounded by the
+    composer's own `busy` / reconciliation gate (see `OutboxDispatcher.ready`).
+    Keeping the fence here on top of that gate bounds nothing: a request that
+    died BEFORE admission has no operation, so no receipt can ever arrive to
+    settle it, and the entry would hold the wire for the rest of the
+    conversation's life (#1538 left this unbounded). */
+function holdsLocalWireFence(entry: OutboxEntry): boolean {
+  return entry.state === "delivering" && !entry.launchOwned && !entry.deliveryUncertain;
+}
+
 /** The next entry the serial dispatcher may send: nothing while one of the
     operator's OWN messages is already on the wire, otherwise the oldest queued
     submission. A `launchOwned` entry is delivered by the spawn, not the
     composer, so it neither dispatches nor blocks the drain (round-1 P1#2/#4). */
 export function nextDispatch(queue: readonly OutboxEntry[]): OutboxEntry | null {
-  if (queue.some((entry) => entry.state === "delivering" && !entry.launchOwned)) return null;
+  if (queue.some(holdsLocalWireFence)) return null;
   return queue.find((entry) => entry.state === "queued" && !entry.originalOperationOnly) ?? null;
 }
 
 /** Atomically claim one queued entry before any asynchronous wire work starts. */
 export function claimOutboxDispatch(cardId: string, id: string): OutboxEntry | null {
   const queue = readOutbox(cardId);
-  if (queue.some((entry) => entry.state === "delivering" && !entry.launchOwned)) return null;
+  if (queue.some(holdsLocalWireFence)) return null;
   const entry = queue.find((candidate) => candidate.id === id);
   if (!entry || entry.state !== "queued" || entry.originalOperationOnly) return null;
   /* The wire fence belongs to one attempt. A replay starts unfenced so that a
