@@ -2148,12 +2148,53 @@ test("busy account contention exhausts the existing wait with a truthful termina
   expect(scheduled).toEqual([1_000, 2_000, 4_000, 8_000, 8_000, 7_000]);
   expect(parked).toMatchObject({
     state: "needs_decision",
-    stateDetail: "stage spawn failed after 6 retries over 30s: account mutation is busy; retry shortly",
+    stateDetail: "stage spawn failed after 6 retries over 30s: account mutation is busy",
     cursor: { stageId: "plan", state: "spawning" },
   });
   expect(parked.runs[0]!.attempts).toHaveLength(1);
   expect(parked.runs[0]!.attempts[0]).toMatchObject({ n: 1, state: "needs_decision", launchId: null, conversationId: null });
   expect(parked.runs[0]!.attempts[0]!.error).toBe(parked.stateDetail);
+});
+
+test("mixed controller waits publish only the current busy retry time", async () => {
+  const h = harness();
+  await create(h.ports);
+  await tickPipelines([], h.ports);
+  const advance = frozenWallClock(h);
+  const baseSpawn = h.ports.spawnAgent;
+  const scheduled: number[] = [];
+  let spawnCalls = 0;
+  h.ports.spawnAgent = async (input, onReserved) => {
+    spawnCalls += 1;
+    if (spawnCalls === 1) throw new AccountMutationBusyError("account mutation is busy in this process; retry shortly");
+    if (spawnCalls === 2) throw new Error("structured delivery controller is unavailable");
+    if (spawnCalls === 3) throw new Error("account mutation is busy; retry shortly");
+    return baseSpawn(input, onReserved);
+  };
+  Object.assign(h.ports, {
+    scheduleTick: (delayMs: number) => { scheduled.push(delayMs); },
+    sleep: forbiddenSleep,
+  });
+
+  await tickPipelines([], h.ports);
+  let pipeline = loadPipelines()[0]!;
+  const firstRetryAfter = pipeline.runs[0]!.attempts[0]!.controllerWait!.retryAfter;
+  expect(pipeline.stateDetail).toContain(firstRetryAfter);
+
+  advance(scheduled.at(-1)!);
+  await tickPipelines([], h.ports);
+  pipeline = loadPipelines()[0]!;
+  const controllerRetryAfter = pipeline.runs[0]!.attempts[0]!.controllerWait!.retryAfter;
+  expect(controllerRetryAfter).not.toBe(firstRetryAfter);
+  expect(pipeline.stateDetail).toBeNull();
+
+  advance(scheduled.at(-1)!);
+  await tickPipelines([], h.ports);
+  pipeline = loadPipelines()[0]!;
+  const latestRetryAfter = pipeline.runs[0]!.attempts[0]!.controllerWait!.retryAfter;
+  expect(latestRetryAfter).not.toBe(controllerRetryAfter);
+  expect(pipeline.stateDetail).toBe(`stage spawn deferred: account mutation is busy; retry at ${latestRetryAfter}`);
+  expect(spawnCalls).toBe(3);
 });
 
 test("a due busy wait survives a restarted controller race with one fresh host claim", async () => {

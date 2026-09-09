@@ -2233,8 +2233,9 @@ async function tickRunStage(
         attempt.state = "pending";
         setCursorState(pipeline, stage.id, "pending");
         if (isAccountMutationContention(controllerFailure)) {
-          const reason = controllerFailure.replace(/; retry shortly$/, "");
-          pipeline.stateDetail = `stage spawn deferred: ${reason}; retry at ${attempt.controllerWait?.retryAfter ?? "an unknown time"}`;
+          pipeline.stateDetail = `stage spawn deferred: ${controllerFailureReason(controllerFailure)}; retry at ${attempt.controllerWait!.retryAfter}`;
+        } else if (pipeline.stateDetail?.startsWith("stage spawn deferred: ")) {
+          pipeline.stateDetail = null;
         }
         persist();
         return;
@@ -3038,6 +3039,10 @@ function isAccountMutationContention(failure: string): boolean {
   return failure.startsWith("account mutation is busy");
 }
 
+function controllerFailureReason(failure: string): string {
+  return failure.replace(/; retry shortly$/, "");
+}
+
 function isTransientStructuredSpawnFailure(failure: string): boolean {
   return isStructuredDeliveryControllerFailure(failure)
     || isAccountMutationContention(failure)
@@ -3093,7 +3098,7 @@ function bookControllerWaitRound(
 function controllerWaitParkDetail(attempt: PipelineStageAttempt, now: string, failure: string): string {
   const seconds = Math.round(controllerWaitElapsedMs(attempt, unixMs(now)) / 1_000);
   const rounds = attempt.controllerWait?.rounds ?? 0;
-  return `stage spawn failed after ${rounds} retries over ${seconds}s: ${failure}`;
+  return `stage spawn failed after ${rounds} retries over ${seconds}s: ${controllerFailureReason(failure)}`;
 }
 
 /** A stage waiting out a controller holds a pending cursor on purpose, and its
