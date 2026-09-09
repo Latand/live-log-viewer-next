@@ -98,6 +98,12 @@ function upsertLinked(task: BoardTask, identity: MembershipIdentity, now: string
   return { task: { ...task, status, assignments: [...task.assignments, assignment], updatedAt: now }, changed: true };
 }
 
+/** The durable admission key of a launch: its launch id or client attempt id. */
+function sameKey(assignment: TaskAssignment, identity: MembershipIdentity): boolean {
+  if (identity.launchId && assignment.launchId) return assignment.launchId === identity.launchId;
+  return Boolean(identity.clientAttemptId) && assignment.clientAttemptId === identity.clientAttemptId;
+}
+
 function hasIdentity(identity: MembershipIdentity): boolean {
   return Boolean(identity.launchId || identity.clientAttemptId || identity.conversationId || identity.path);
 }
@@ -124,8 +130,19 @@ export function ensureTaskMembership(existing: readonly BoardTask[], input: Memb
     changed = true;
   };
 
+  /* A retry keeps its original target set: the tasks already holding this
+     attempt/launch key are the admission's recorded targets, and a placeholder
+     minted for this key means the original had no explicit target at all. */
+  const keyed = tasks.filter((task) => task.assignments.some((assignment) => assignment.state !== "failed" && sameKey(assignment, input.identity)));
+  const placeholderForKey = tasks.find((task) => task.project === (project || task.project) && task.origin?.kind === input.origin.kind && task.origin.key === input.origin.key);
   if (input.explicitTaskIds?.length) {
     const unique = [...new Set(input.explicitTaskIds)];
+    if (placeholderForKey && !unique.includes(placeholderForKey.id)) {
+      return { ok: false, error: "this launch was admitted without a task target; a retry cannot add one", status: 409 };
+    }
+    if (keyed.length && (keyed.length !== unique.length || keyed.some((task) => !unique.includes(task.id)))) {
+      return { ok: false, error: "this launch was admitted with a different task target set; a retry keeps the original", status: 409 };
+    }
     const indexes = unique.map((id) => tasks.findIndex((task) => task.id === id));
     const missing = indexes.findIndex((index) => index < 0);
     if (missing >= 0) return { ok: false, error: `task ${unique[missing]} is not available`, status: 404 };
@@ -211,18 +228,36 @@ export function admissibleConversation(entry: FileEntry): boolean {
 interface CoveredIndex {
   conversationIds: Set<string>;
   paths: Set<string>;
+  /** Launch id / client attempt id → tasks holding that launch's assignment. */
+  launches: Map<string, string[]>;
 }
 
 function coveredBy(tasks: readonly BoardTask[]): CoveredIndex {
-  const index: CoveredIndex = { conversationIds: new Set(), paths: new Set() };
+  const index: CoveredIndex = { conversationIds: new Set(), paths: new Set(), launches: new Map() };
   for (const task of tasks) {
     for (const assignment of task.assignments) {
       if (assignment.state === "failed") continue;
       if (assignment.conversationId) index.conversationIds.add(assignment.conversationId);
       if (assignment.path) index.paths.add(assignment.path);
+      for (const key of [assignment.launchId, assignment.clientAttemptId]) {
+        if (!key) continue;
+        const list = index.launches.get(key) ?? [];
+        if (!list.includes(task.id)) list.push(task.id);
+        index.launches.set(key, list);
+      }
     }
   }
   return index;
+}
+
+/** A launch whose membership was committed but whose identity write was lost
+    still holds the receipt's attempt/launch key; the transcript's spawn card
+    carries the same keys, so the assignment is repaired instead of duplicated. */
+function launchTasksFor(index: CoveredIndex, entry: FileEntry): string[] {
+  const keys = [entry.spawn?.launchId, entry.spawn?.clientAttemptId].filter((key): key is string => Boolean(key));
+  const tasks = new Set<string>();
+  for (const key of keys) for (const id of index.launches.get(key) ?? []) tasks.add(id);
+  return [...tasks];
 }
 
 const isCovered = (index: CoveredIndex, entry: Pick<FileEntry, "path" | "conversationId">) =>
@@ -270,6 +305,18 @@ export function planAdmissions(
   for (const entry of entries) {
     if (plans.length >= batch) break;
     if (claimed.has(entry.path) || !admissibleConversation(entry) || isCovered(covered, entry)) continue;
+    const repair = launchTasksFor(covered, entry);
+    if (repair.length) {
+      plans.push({
+        project: entry.project,
+        origin: { kind: "launch", key: entry.spawn?.clientAttemptId ?? entry.spawn?.launchId ?? entry.path },
+        identity: { launchId: entry.spawn?.launchId ?? null, clientAttemptId: entry.spawn?.clientAttemptId ?? null, conversationId: entry.conversationId ?? null, path: entry.path },
+        explicitTaskIds: repair,
+      });
+      covered.paths.add(entry.path);
+      if (entry.conversationId) covered.conversationIds.add(entry.conversationId);
+      continue;
+    }
     plans.push({
       project: entry.project,
       origin: { kind: "conversation", key: entry.conversationId ?? entry.path },

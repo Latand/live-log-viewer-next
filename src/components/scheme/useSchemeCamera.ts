@@ -129,6 +129,11 @@ export interface SchemeCamera {
   glideFrame: (rect: SchemeRect, z: number) => void;
   /** Put the camera back at an exact position (#688's return point). */
   glideToCamera: (camera: { x: number; y: number; zoom: number }) => void;
+  /** Seed the selection anchor with a destination projection before the layout
+      moves the surface there (#1586): the next commit holds that projection's
+      screen point, so a reader opened from a reference tile lands where the
+      tile was even though the bands around it reflow. */
+  primeAnchor: (key: string, rect: SchemeRect) => void;
 }
 
 /**
@@ -293,6 +298,10 @@ export function useSchemeCamera({
      skipped on purpose: content-bound clamping must not drag a retained
      selection away. */
   const anchorRef = useRef<{ key: string; sx: number; sy: number; wx: number; wy: number; z: number } | null>(null);
+  const primeAnchor = useCallback((key: string, rect: SchemeRect) => {
+    const c = latestCam.current;
+    anchorRef.current = { key, sx: c.x + rect.x * c.z, sy: c.y + rect.y * c.z, wx: rect.x, wy: rect.y, z: c.z };
+  }, []);
   useLayoutEffect(() => {
     if (!anchor) {
       anchorRef.current = null;
@@ -889,5 +898,6 @@ export function useSchemeCamera({
     glideBy,
     glideFrame,
     glideToCamera,
+    primeAnchor,
   };
 }

@@ -187,3 +187,35 @@ test("the durable commit is serialized through the task file, replays safely and
   expect(stored.filter((candidate) => candidate.origin?.kind === "conversation").length).toBe(120);
   expect(stored.every((candidate) => candidate.assignments.every((assignment) => assignment.state !== "delivered" || candidate.id === "existing"))).toBe(true);
 });
+
+test("a retry keeps its original target set: the same attempt cannot be re-admitted against another task or gain a target", () => {
+  const tasks = [task("a", "fixture"), task("b", "fixture")];
+  const first = ensureTaskMembership(tasks, { project: "", origin: { kind: "launch", key: "attempt-t" }, identity: { clientAttemptId: "attempt-t" }, explicitTaskIds: ["a"] }, deps);
+  expect(first.ok && first.taskIds).toEqual(["a"]);
+  const moved = ensureTaskMembership(first.ok ? first.tasks : tasks, { project: "", origin: { kind: "launch", key: "attempt-t" }, identity: { clientAttemptId: "attempt-t" }, explicitTaskIds: ["b"] }, deps);
+  expect(moved.ok).toBe(false);
+  expect(!moved.ok && moved.status).toBe(409);
+  const widened = ensureTaskMembership(first.ok ? first.tasks : tasks, { project: "", origin: { kind: "launch", key: "attempt-t" }, identity: { clientAttemptId: "attempt-t" }, explicitTaskIds: ["a", "b"] }, deps);
+  expect(widened.ok).toBe(false);
+  const same = ensureTaskMembership(first.ok ? first.tasks : tasks, { project: "", origin: { kind: "launch", key: "attempt-t" }, identity: { clientAttemptId: "attempt-t", launchId: "launch-t" }, explicitTaskIds: ["a"] }, deps);
+  expect(same.ok && same.taskIds).toEqual(["a"]);
+  expect(same.ok && same.tasks.find((candidate) => candidate.id === "b")!.assignments).toEqual([]);
+  /* A launch admitted without a target (placeholder) cannot acquire one on retry. */
+  const placeholder = ensureTaskMembership([], { project: "fixture", origin: { kind: "launch", key: "attempt-p" }, identity: { clientAttemptId: "attempt-p" } }, deps);
+  const retargeted = ensureTaskMembership(placeholder.ok ? placeholder.tasks : [], { project: "", origin: { kind: "launch", key: "attempt-p" }, identity: { clientAttemptId: "attempt-p" }, explicitTaskIds: ["a"] }, deps);
+  expect(retargeted.ok).toBe(false);
+});
+
+test("a launch whose identity write was lost is repaired from the transcript's receipt keys instead of minting a second task", () => {
+  const committed = ensureTaskMembership([], { project: "fixture", origin: { kind: "launch", key: "attempt-lost" }, title: "Seat the successor", identity: { clientAttemptId: "attempt-lost", engine: "claude" } }, deps);
+  const tasks = committed.ok ? committed.tasks : [];
+  const arrived = entry(500, { spawn: { launchId: "launch-lost", clientAttemptId: "attempt-lost", accountId: null, state: "recovered" } } as Partial<FileEntry>);
+  const plans = planAdmissions([arrived], tasks, []);
+  expect(plans.length).toBe(1);
+  expect(plans[0]!.explicitTaskIds).toEqual(committed.ok ? committed.taskIds : []);
+  expect(plans[0]!.identity).toMatchObject({ launchId: "launch-lost", clientAttemptId: "attempt-lost", conversationId: "conversation_fixture_500", path: arrived.path });
+  const repaired = admitConversations(tasks, plans, deps);
+  expect(repaired.tasks.length).toBe(1);
+  expect(repaired.tasks[0]!.assignments).toEqual([expect.objectContaining({ clientAttemptId: "attempt-lost", launchId: "launch-lost", conversationId: "conversation_fixture_500", path: arrived.path, state: "linked" })]);
+  expect(planAdmissions([arrived], repaired.tasks, [])).toEqual([]);
+});

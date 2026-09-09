@@ -801,10 +801,13 @@ export function SchemeBoard({
 
   /* The selected projection's world box: the camera holds its screen position
      through zoom, viewport resize and band reflow (#1586). */
+  /* Keyed by projection (band + conversation), so opening a shared conversation
+     in another band re-baselines at the clicked tile's slot instead of holding
+     the surface at its previous band's screen position. */
   const cameraAnchor = useMemo(() => {
     if (!taskScene || !selected) return null;
     const rect = layout.byPath.get(selected);
-    return rect ? { key: selected, rect } : null;
+    return rect ? { key: `${taskScene.bandOf.get(selected) ?? ""}::${selected}`, rect } : null;
   }, [taskScene, selected, layout]);
   const {
     cam,
@@ -831,6 +834,7 @@ export function SchemeBoard({
     glideBy,
     glideFrame,
     glideToCamera,
+    primeAnchor,
   } = useSchemeCamera({
     project,
     layout,
@@ -1245,9 +1249,15 @@ export function SchemeBoard({
      where the operator clicked. */
   const bandSelectMirror = useCallback((mirror: BandMirror) => {
     const bandId = taskScene?.bandOf.get(mirror.key);
-    if (bandId) setHostOverrides((previous) => { const next = new Map(previous); next.set(mirror.ofKey, bandId); return next; });
+    const tile = taskScene?.mirrorRects.get(mirror.key);
+    if (bandId && tile) {
+      /* The clicked tile is the destination anchor: the surface lands on its
+         screen point even though the bands around it reflow. */
+      primeAnchor(`${bandId}::${mirror.ofKey}`, tile);
+      setHostOverrides((previous) => { const next = new Map(previous); next.set(mirror.ofKey, bandId); return next; });
+    }
     setSelected(mirror.ofKey);
-  }, [taskScene]);
+  }, [taskScene, primeAnchor]);
   const followContinuation = useCallback((target: { key: string; bandId: string }) => {
     setSelected(target.key);
     const rect = layout.byPath.get(target.key);

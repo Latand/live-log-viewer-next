@@ -279,3 +279,46 @@ test("the band-local «+ Agent» reports its task, and the overview keeps one in
   flushSync(() => overviewAdd.click());
   expect(added.at(-1)?.task?.id).toBe("younger-working");
 });
+
+test("opening a shared conversation from its reference tile anchors the surface at the clicked tile", async () => {
+  const shared = file("/shared", "Shared implementer", false);
+  const only = file("/only", "Only member", false);
+  const sharedFiles = [shared, only];
+  const sharedTasks = [
+    task("first", "Restore search results", "2026-01-01T00:00:00.000Z", [shared, only]),
+    task("second", "Simplify export settings", "2026-02-01T00:00:00.000Z", [shared]),
+  ];
+  previousFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(JSON.stringify({}), { status: 200, headers: { "content-type": "application/json" } })) as unknown as typeof fetch;
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  roots.add(root);
+  flushSync(() => root.render(
+    <SchemeBoard project="bands" groups={[]} manual={sharedFiles} files={sharedFiles} flows={[]} tasks={sharedTasks} allTasks={sharedTasks} drafts={[]} focus={null} onSelect={() => {}} onClose={() => {}} onDraftClose={() => {}} onDraftSpawned={() => {}} />,
+  ));
+  await settle();
+  const viewport = viewportOf(host);
+  /* The shared conversation is a member of the earlier task and a tile in the later one. */
+  select(viewport, "/shared");
+  await settle();
+  const mirror = host.querySelector('[data-scheme-mirror="/shared"]') as HTMLElement;
+  expect(mirror.closest("[data-scheme-band]")!.getAttribute("data-scheme-band-task")).toBe("second");
+  const before = cameraOf(viewport);
+  const band = mirror.closest("[data-scheme-band]") as HTMLElement;
+  const mirrorScreen = { sx: before.x + (parseFloat(band.style.left) + parseFloat(mirror.style.left)) * before.z, sy: before.y + (parseFloat(band.style.top) + parseFloat(mirror.style.top)) * before.z };
+  flushSync(() => mirror.click());
+  await settle();
+  /* The surface now lives in the clicked band, on the tile's screen point: the
+     bands reflow around it (the source band shrinks), the camera absorbs that. */
+  const shell = host.querySelector('[data-scheme-node="/shared"]') as HTMLElement;
+  const now = screenOf(viewport, "/shared");
+  expect(Math.hypot(now.sx - mirrorScreen.sx, now.sy - mirrorScreen.sy)).toBeLessThanOrEqual(2);
+  const hostBand = Array.from(host.querySelectorAll<HTMLElement>("[data-scheme-band]")).find((candidate) => {
+    const x = parseFloat(/translate\((-?[\d.e+-]+)px, (-?[\d.e+-]+)px\)/.exec(shell.style.transform)![1]!);
+    const y = parseFloat(/translate\((-?[\d.e+-]+)px, (-?[\d.e+-]+)px\)/.exec(shell.style.transform)![2]!);
+    return x >= parseFloat(candidate.style.left) && y >= parseFloat(candidate.style.top) && y < parseFloat(candidate.style.top) + parseFloat(candidate.style.height);
+  });
+  expect(hostBand?.getAttribute("data-scheme-band-task")).toBe("second");
+  expect((host.querySelector('[data-scheme-mirror="/shared"]') as HTMLElement).closest("[data-scheme-band]")!.getAttribute("data-scheme-band-task")).toBe("first");
+});
