@@ -54,7 +54,9 @@ function publishReceipts(next: RuntimeReceipt[]): void {
   for (const listener of receiptListeners) listener();
 }
 import { TmuxComposer } from "./TmuxComposer";
-import { readOutbox, retryOutbox } from "./conversation/outbox";
+import { readOutbox, resetOutboxForTests, retryOutbox } from "./conversation/outbox";
+import { attachModeFor, capabilitiesFor } from "./agentCapabilities";
+import type { RuntimeSessionView } from "@/hooks/useRuntime";
 
 /** A timeout is never replay authority. Prove no local effect, then deliver an
  * affirmative pre-dispatch rejection before exercising immutable retry bytes. */
@@ -1048,4 +1050,165 @@ test("an edited image tray retries the immutable images and preserves later atta
     }
   }
   mobileViewport = false;
+});
+
+/* #1538 parks a structured send whose request left the browser without an
+   answer as `delivering` + `deliveryUncertain`. Such an entry used to keep the
+   serial dispatcher's fence, and nothing could ever take it back: a request
+   that died BEFORE admission has no operation, so no receipt can arrive to
+   settle it, and the local unconfirmed receipt re-projects the entry as
+   `delivering` for as long as its fate stays unknown. Every later message then
+   queued behind it forever and the conversation went mute.
+
+   The parked generation keeps everything that was true about it — its key, its
+   bytes and its unknown fate. A late admission is still possible, so it is
+   never replayed, never cancelled, never presented as delivered or failed, and
+   a genuine late receipt still settles it. What it no longer does is hold this
+   browser's wire. */
+test("a stranded uncertain structured send releases the queue, keeps its payload, and still settles on a late receipt", async () => {
+  setLocale("en");
+  mobileViewport = false;
+  const conversationId = "conv-stranded-uncertain";
+  const strandedKey = "op_stranded-uncertain";
+  const followUpKey = "op_follow-up";
+  const strandedText = "why was this never delivered";
+  const followUpText = "the message queued behind it";
+  const strandedImage = { base64: "aGk=", mime: "image/png" };
+  const sends: { key: string; text: string; images: number }[] = [];
+
+  const structuredView = {
+    session: {
+      conversationId,
+      hostKind: "codex-app-server",
+      host: "hosted",
+      capabilities: { imageInput: { supported: true } },
+      recentReceipts: [],
+    },
+    uiState: {},
+    attentions: [],
+    receipts: [],
+    legacy: false,
+    structuredControlsEnabled: true,
+  } as unknown as RuntimeSessionView;
+
+  setTmuxComposerRuntimeDependenciesForTests({
+    refreshRuntime: () => refreshRuntimeImpl(),
+    useRuntimeReceiptsForArtifact: () => useSyncExternalStore(
+      (listener) => {
+        receiptListeners.add(listener);
+        return () => receiptListeners.delete(listener);
+      },
+      () => busReceipts,
+      () => busReceipts,
+    ),
+    useAgentCapabilities: (candidate) => {
+      const options = { runtimeEnabled: true };
+      return {
+        caps: capabilitiesFor(candidate, structuredView, options),
+        runtime: structuredView,
+        structuredSession: structuredView,
+        runtimeEnabled: true,
+        attachMode: attachModeFor(candidate, structuredView, options),
+      };
+    },
+    sendRuntimeMessage: async (options) => {
+      sends.push({ key: options.idempotencyKey, text: options.text, images: options.images?.length ?? 0 });
+      const receipt: RuntimeReceipt = {
+        operationId: `operation-for-${options.idempotencyKey}`,
+        idempotencyKey: options.idempotencyKey,
+        conversationId,
+        kind: "send",
+        status: "delivered",
+        text: options.text,
+        at: new Date().toISOString(),
+        revision: 1,
+      } as RuntimeReceipt;
+      return { ok: true, receipt, operationId: receipt.operationId };
+    },
+  });
+  /* The structured seam is the ONLY way out of this composer. A legacy POST
+     under the parked key would be the exact replay this fix must not make. */
+  globalThis.fetch = (async (input) => {
+    if (String(input) === "/api/tmux/targets") {
+      return { ok: true, json: async () => ({ targets: {} }) } as Response;
+    }
+    throw new Error(`unexpected request: ${String(input)}`);
+  }) as typeof fetch;
+  refreshRuntimeImpl = async () => false;
+
+  /* Exactly the restored browser state: an image-bearing generation parked
+     unknown — dispatched, no operation of its own, and NO `reconciling` marker
+     — with a later submission waiting behind it. */
+  sessionStorage.setItem(`llvOutbox:${conversationId}`, JSON.stringify([
+    { id: strandedKey, text: strandedText, images: 1, at: 1_000, echoBaseline: 0, state: "delivering", dispatchedAt: 1_001, deliveryUncertain: true },
+    { id: followUpKey, text: followUpText, images: 0, at: 2_000, echoBaseline: 0, state: "queued" },
+  ]));
+  /* The stored generation carries a VALID selected-context reference, exactly
+     as the real record does. Omitting it is not a smaller fixture: the reader
+     rejects an absent reference as an incomplete payload, which raises a
+     DIFFERENT fence (missing bytes) and would hide the defect under test. */
+  const strandedContext = {
+    version: 1, state: "none", capturedAt: "2026-09-08T13:45:23.104Z",
+    project: "repo-test", viewSessionId: "view-session-test", deviceId: "device-test", revision: 6,
+  };
+  const strandedGeneration = {
+    key: strandedKey, text: strandedText, images: [strandedImage],
+    runtimeCaptured: true, selectedContext: strandedContext,
+  };
+  sessionStorage.setItem(`llvPendingSend:${conversationId}`, JSON.stringify([strandedGeneration]));
+  resetOutboxForTests();
+
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  try {
+    flushSync(() => root.render(<TmuxComposer file={fileFor(conversationId)} />));
+    for (let attempt = 0; attempt < 100 && sends.length === 0; attempt += 1) await sleep(5);
+
+    /* The queue drains under the follow-up's OWN original key. */
+    expect(sends).toEqual([{ key: followUpKey, text: followUpText, images: 0 }]);
+
+    /* The parked original is never replayed and never claimed failed: its
+       payload, its image and its key are preserved, and its fate stays unknown
+       so a late admission can still be reported truthfully. */
+    const stranded = readOutbox(conversationId).find((entry) => entry.id === strandedKey)!;
+    expect(stranded.deliveryUncertain).toBe(true);
+    expect(stranded.text).toBe(strandedText);
+    expect(stranded.images).toBe(1);
+    /* The payload itself survives intact — key, bytes and captured context —
+       so the original stays recoverable through its own operation. (The record
+       also gains the unconfirmed-operation marker, which is bookkeeping for the
+       receipt stream rather than part of the payload.) */
+    const persisted = JSON.parse(sessionStorage.getItem(`llvPendingSend:${conversationId}`)!) as Record<string, unknown>[];
+    expect(persisted).toHaveLength(1);
+    for (const [field, value] of Object.entries(strandedGeneration)) {
+      expect(persisted[0]![field]).toEqual(value);
+    }
+    expect(persisted[0]!.payloadComplete).toBeUndefined();
+
+    /* A late authoritative receipt for the ORIGINAL key still settles it. */
+    flushSync(() => publishReceipts([{
+      operationId: "operation-original-stranded",
+      idempotencyKey: strandedKey,
+      conversationId,
+      kind: "send",
+      status: "delivered",
+      text: strandedText,
+      at: new Date().toISOString(),
+      revision: 2,
+    } as RuntimeReceipt]));
+    await sleep(10);
+    const settled = readOutbox(conversationId).find((entry) => entry.id === strandedKey)!;
+    expect(settled.state).toBe("delivered");
+    expect(settled.deliveryUncertain).toBeUndefined();
+    /* Settling it authoritatively still never puts it back on the wire. */
+    expect(sends.some((attempt) => attempt.key === strandedKey)).toBe(false);
+  } finally {
+    flushSync(() => root.unmount());
+    publishReceipts([]);
+    refreshRuntimeImpl = async () => false;
+    sessionStorage.clear();
+    resetOutboxForTests();
+    host.remove();
+  }
 });
