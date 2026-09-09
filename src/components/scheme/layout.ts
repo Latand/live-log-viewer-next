@@ -135,7 +135,10 @@ export interface NodeAncestry {
 }
 
 export interface SchemeNode extends SchemeRect {
-  presentation?: "native" | "summary";
+  /** Semantic density of the displayed surface (task bands, #1586): `native`
+      mounts the real reader, `summary` a 320×160 title/status tile, `chip` a
+      one-line identity strip for the overview scale. Absent on the free map. */
+  presentation?: "native" | "summary" | "chip";
   readerScale?: number;
   file: FileEntry;
   /** Live background tasks docked inside the pane as collapsed strips. */

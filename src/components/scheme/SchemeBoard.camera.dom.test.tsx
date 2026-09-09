@@ -150,15 +150,17 @@ test("hand, Space-pan, and lasso own pipeline header gestures without position P
     expect(header).toBeTruthy();
     expect(header.disabled).toBe(true);
 
+    /* Bands span the viewport (#1586), so the world's x axis is locked and a
+       pan shows on the y axis: the drag carries a vertical component. */
     const before = world.style.transform;
     flushSync(() => viewport.dispatchEvent(new dom.PointerEvent("pointerdown", {
       bubbles: true, isPrimary: true, pointerId: 41, pointerType: "mouse", button: 0, clientX: 500, clientY: 300,
     }) as unknown as Event));
     flushSync(() => viewport.dispatchEvent(new dom.PointerEvent("pointermove", {
-      bubbles: true, isPrimary: true, pointerId: 41, pointerType: "mouse", button: 0, clientX: 420, clientY: 300,
+      bubbles: true, isPrimary: true, pointerId: 41, pointerType: "mouse", button: 0, clientX: 420, clientY: 240,
     }) as unknown as Event));
     flushSync(() => viewport.dispatchEvent(new dom.PointerEvent("pointerup", {
-      bubbles: true, isPrimary: true, pointerId: 41, pointerType: "mouse", button: 0, clientX: 420, clientY: 300,
+      bubbles: true, isPrimary: true, pointerId: 41, pointerType: "mouse", button: 0, clientX: 420, clientY: 240,
     }) as unknown as Event));
     await settle();
 
@@ -347,7 +349,7 @@ test("0 frames current work, repeated 0 escalates to all, and Shift+0 fits all d
   expect(host.querySelector('button[title^="Fit all content"]')).toBeTruthy();
 });
 
-test("arrow navigation lands on a placed task with a visible ring and spoken title", async () => {
+test("arrow navigation lands on a task band with a visible ring and spoken title", async () => {
   const host = document.createElement("div");
   document.body.append(host);
   const root = createRoot(host);
@@ -381,13 +383,18 @@ test("arrow navigation lands on a placed task with a visible ring and spoken tit
   ));
   await settle();
 
-  const task = host.querySelector('[data-scheme-task="nav-task"]')!;
-  expect(task.firstElementChild?.className).toContain("ring-2");
+  /* Task-centered board (#1586): the task is a full-width band, so keyboard
+     navigation rings the band header, never a floating card. */
+  expect(host.querySelector("[data-scheme-task]")).toBeNull();
+  const band = host.querySelector('[data-scheme-band-task="nav-task"]')!;
+  expect(band).toBeTruthy();
+  const header = band.querySelector("[data-scheme-band-header]") as HTMLElement;
+  expect(header.className).toContain("ring-2");
   expect(host.textContent).toContain("Navigate to bounded task");
-  expect(document.activeElement).not.toBe(task);
+  expect(document.activeElement).not.toBe(band);
 });
 
-test("expanding full task text reflows a covered neighbour without persisting positions", async () => {
+test("two tasks stack as full-width bands in creation order and persist nothing", async () => {
   const host = document.createElement("div");
   document.body.append(host);
   const root = createRoot(host);
@@ -428,17 +435,20 @@ test("expanding full task text reflows a covered neighbour without persisting po
     });
     await settle();
 
-    const older = host.querySelector('[data-scheme-task="older"]') as HTMLElement;
-    const younger = host.querySelector('[data-scheme-task="younger"]') as HTMLElement;
-    expect(younger.style.transform).toBe("translate(0px, 200px)");
-    flushSync(() => (older.querySelector("[data-task-disclosure]") as HTMLButtonElement).click());
-    await settle();
-    expect(younger.style.transform).not.toBe("translate(0px, 200px)");
+    /* No free-floating cards: each task is one band, the bands share the left
+       gutter and the full available width, and the younger task sits below the
+       older one (equal working counts → creation order). Stored pins are left
+       alone: nothing is written. */
+    expect(host.querySelector("[data-scheme-task]")).toBeNull();
+    const older = host.querySelector('[data-scheme-band-task="older"]') as HTMLElement;
+    const younger = host.querySelector('[data-scheme-band-task="younger"]') as HTMLElement;
+    expect(older).toBeTruthy();
+    expect(younger).toBeTruthy();
+    expect(older.style.left).toBe(younger.style.left);
+    expect(older.style.width).toBe(younger.style.width);
+    expect(parseFloat(younger.style.top)).toBeGreaterThan(parseFloat(older.style.top) + parseFloat(older.style.height) - 0.001);
+    expect(host.textContent).toContain("Neighbour");
     expect(writes).toEqual([]);
-
-    flushSync(() => (older.querySelector("[data-task-disclosure]") as HTMLButtonElement).click());
-    await settle();
-    expect(younger.style.transform).toBe("translate(0px, 200px)");
   } finally {
     globalThis.fetch = previousFetch;
   }
@@ -496,7 +506,7 @@ test("a pane's reserved relation strip opens the assigned task without floating 
   expect(openedTasks).toEqual(["strip-task"]);
 });
 
-test("an assignment chip opens the current conversation generation and centers its pane", async () => {
+test("a task's assigned conversation resolves to its current generation inside the task's band", async () => {
   const agent: FileEntry = {
     path: "/agent-current", root: "claude-projects", name: "agent-current.jsonl", project: "task-open", title: "Current agent",
     engine: "claude", kind: "session", fmt: "claude", parent: null, mtime: 2, size: 1, activity: "live",
@@ -532,15 +542,20 @@ test("an assignment chip opens the current conversation generation and centers i
   });
   await settle();
 
-  const viewport = host.querySelector('[aria-label^="Agent board"]') as HTMLDivElement;
-  const world = Array.from(viewport.children).find((child) =>
-    (child as HTMLElement).style.transform.includes("scale("),
-  ) as HTMLElement;
-  const before = world.style.transform;
-  flushSync(() => (host.querySelector("[data-task-open-agent]") as HTMLButtonElement).click());
+  /* The assignment names an archived path; the band shows the conversation's
+     current generation as its member and opens exactly that one. */
+  const band = host.querySelector('[data-scheme-band-task="open-task"]') as HTMLElement;
+  expect(band).toBeTruthy();
+  const node = host.querySelector('[data-scheme-node="/agent-current"]') as HTMLElement;
+  expect(node.getAttribute("data-scheme-node-presentation")).toBe("summary");
+  const bandBox = { x: parseFloat(band.style.left), y: parseFloat(band.style.top), w: parseFloat(band.style.width), h: parseFloat(band.style.height) };
+  const match = /translate\((-?[\d.]+)px, (-?[\d.]+)px\)/.exec(node.style.transform)!;
+  const nodeBox = { x: parseFloat(match[1]!), y: parseFloat(match[2]!), w: parseFloat(node.style.width), h: parseFloat(node.style.height) };
+  expect(nodeBox.x).toBeGreaterThanOrEqual(bandBox.x);
+  expect(nodeBox.y).toBeGreaterThanOrEqual(bandBox.y);
+  expect(nodeBox.x + nodeBox.w).toBeLessThanOrEqual(bandBox.x + bandBox.w + 0.001);
+  expect(nodeBox.y + nodeBox.h).toBeLessThanOrEqual(bandBox.y + bandBox.h + 0.001);
+  flushSync(() => (node.querySelector("button[data-scheme-summary]") as HTMLButtonElement).click());
   await settle();
-
   expect(selected).toEqual(["/agent-current"]);
-  expect(world.style.transform).not.toBe(before);
-  expect(world.style.transform).toContain("scale(1)");
 });

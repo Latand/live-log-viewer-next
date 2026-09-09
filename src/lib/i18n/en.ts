@@ -1714,6 +1714,22 @@ export const en = {
   // Screen-reader announcement when the arrow keys land on a quiet-branch stack.
   "scheme.navStack": { one: "{count} quiet branch under {title}", other: "{count} quiet branches under {title}" },
   "scheme.navStackBare": { one: "{count} quiet branch", other: "{count} quiet branches" },
+  "bands.untitled": "Untitled task",
+  "bands.namePending": "Name pending",
+  "bands.reviewFlow": "Review flow",
+  "bands.working": { one: "{count} working", other: "{count} working" },
+  "bands.unknown": { one: "{count} unknown", other: "{count} unknown" },
+  "bands.conversations": { one: "{count} conversation", other: "{count} conversations" },
+  "bands.planned": { one: "{count} planned", other: "{count} planned" },
+  "bands.details": "Details",
+  "bands.addAgentAria": "Add an agent to the task {title}",
+  "bands.sameConversation": "Same conversation · also in {title}",
+  "bands.derivedPipeline": "Pipeline · no task yet",
+  "bands.derivedFlow": "Review flow · no task yet",
+  "bands.derivedConversation": "From the first prompt · no task yet",
+  "bands.derivedDraft": "New agent · named after launch",
+  "bands.orderUpdated": "Order updated",
+  "bands.orderUpdatedTitle": "Working counts changed while you were busy — apply the new order",
 
   // scheme/BulkActionBar (selection session)
   "bulk.selectedCount": { one: "{count} selected", other: "{count} selected" },

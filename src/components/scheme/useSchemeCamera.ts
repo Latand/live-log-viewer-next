@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import type { Camera } from "./Minimap";
 import { stackItemAt, type SchemeLayout, type SchemeRect } from "./layout";
@@ -64,6 +64,24 @@ interface CameraOptions {
   onZoomKey?: React.RefObject<(dir: 1 | -1) => boolean>;
   /** Announces explicit framing actions to the board live region. */
   onFit?: (kind: "current" | "all") => void;
+  /** Selected projection whose header top-left must keep its screen position
+      through zoom and relayout (#1586): key identifies the projection, rect is
+      its current world box. Null when nothing is selected. */
+  anchor?: SchemeAnchor | null;
+  /** Full-width band layouts: the world's left edge stays glued to the
+      viewport's left edge, so there is no horizontal drift to correct. */
+  lockX?: boolean;
+}
+
+export interface SchemeAnchor {
+  key: string;
+  rect: SchemeRect;
+}
+
+/** Pure anchor equation: the camera translation that puts `rect`'s top-left at
+    the captured screen point under the new zoom. */
+export function anchoredCamera(captured: { sx: number; sy: number }, rect: SchemeRect, z: number): Camera {
+  return { z, x: captured.sx - rect.x * z, y: captured.sy - rect.y * z };
 }
 
 export interface SchemeCamera {
@@ -158,6 +176,8 @@ export function useSchemeCamera({
   onArrowNav,
   onZoomKey,
   onFit,
+  anchor = null,
+  lockX = false,
 }: CameraOptions): SchemeCamera {
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const tapRef = useRef<{ x: number; y: number } | null>(null);
@@ -184,6 +204,9 @@ export function useSchemeCamera({
   const glideTimer = useRef<number | null>(null);
   const initedFor = useRef<string | null>(null);
   const latestCam = useRef(cam);
+  /* An explicit framing change (fit, focus glide, jump, Return) re-baselines
+     the selection anchor instead of being undone by it. */
+  const framingRef = useRef(false);
 
   useEffect(() => {
     latestCam.current = cam;
@@ -241,12 +264,47 @@ export function useSchemeCamera({
       /* Keep a strip of the world on screen from either edge, measured against
          the world box (origin world.x/world.y, which may be negative) rather
          than a fixed (0,0) so a card left of/above the layout stays reachable. */
-      const x = Math.min(Math.max(c.x, EDGE_KEEP - (world.x + world.w) * c.z), vp.w - EDGE_KEEP - world.x * c.z);
+      const x = lockX ? -world.x * c.z : Math.min(Math.max(c.x, EDGE_KEEP - (world.x + world.w) * c.z), vp.w - EDGE_KEEP - world.x * c.z);
       const y = Math.min(Math.max(c.y, EDGE_KEEP - (world.y + world.h) * c.z), vp.h - EDGE_KEEP - world.y * c.z);
       return x === c.x && y === c.y ? c : { ...c, x, y };
     },
-    [world, vp],
+    [world, vp, lockX],
   );
+
+  /* Selection anchor (#1586). Every commit records where the selected
+     projection's top-left sits on screen. When the next commit finds the same
+     projection at a different world position or under a different zoom — a
+     wheel/pinch/button/keyboard zoom, a viewport resize, a band reflow — the
+     camera is translated synchronously, before paint, so that point holds. A
+     pure pan (same zoom, same world rect) records the new position instead, and
+     an explicit framing (fit, focus glide, jump) re-baselines. Clamping is
+     skipped on purpose: content-bound clamping must not drag a retained
+     selection away. */
+  const anchorRef = useRef<{ key: string; sx: number; sy: number; wx: number; wy: number; z: number } | null>(null);
+  useLayoutEffect(() => {
+    if (!anchor) {
+      anchorRef.current = null;
+      framingRef.current = false;
+      return;
+    }
+    const explicit = framingRef.current;
+    framingRef.current = false;
+    const prev = anchorRef.current;
+    const { rect } = anchor;
+    const sx = cam.x + rect.x * cam.z;
+    const sy = cam.y + rect.y * cam.z;
+    if (prev && prev.key === anchor.key && !explicit && (prev.z !== cam.z || prev.wx !== rect.x || prev.wy !== rect.y)) {
+      const next = anchoredCamera(prev, rect, cam.z);
+      if (lockX) next.x = -world.x * cam.z;
+      if (Math.abs(next.x - cam.x) > 0.01 || Math.abs(next.y - cam.y) > 0.01) {
+        anchorRef.current = { key: anchor.key, sx: next.x + rect.x * cam.z, sy: next.y + rect.y * cam.z, wx: rect.x, wy: rect.y, z: cam.z };
+        latestCam.current = next;
+        setCam(next);
+        return;
+      }
+    }
+    anchorRef.current = { key: anchor.key, sx, sy, wx: rect.x, wy: rect.y, z: cam.z };
+  }, [anchor, cam, lockX, world.x]);
 
   /* High-rate gestures (wheel, pointermove, pinch) coalesce into one camera
      update per frame: updater functions queue up and compose inside a single
@@ -320,6 +378,7 @@ export function useSchemeCamera({
   const glideTo = useCallback((next: Camera | ((c: Camera) => Camera)) => {
     /* Reduced motion: skip the CSS transition — the move lands instantly. */
     if (!reducedMotion()) setGlide(true);
+    framingRef.current = true;
     setCam(next);
     if (glideTimer.current) window.clearTimeout(glideTimer.current);
     glideTimer.current = window.setTimeout(() => setGlide(false), 500);
@@ -334,10 +393,10 @@ export function useSchemeCamera({
   const fit = useCallback(() => {
     const c = fitCam();
     if (c) {
-      glideTo(c);
+      glideTo(clampCam(c));
       onFit?.("all");
     }
-  }, [fitCam, glideTo, onFit]);
+  }, [fitCam, glideTo, clampCam, onFit]);
 
   const currentFitCam = useCallback((): Camera | null => {
     const rect = viewportRef.current?.getBoundingClientRect();
@@ -440,6 +499,7 @@ export function useSchemeCamera({
         if (raw) {
           const saved = JSON.parse(raw) as Camera;
           if (Number.isFinite(saved.x) && Number.isFinite(saved.y) && Number.isFinite(saved.z) && saved.z >= MIN_Z && saved.z <= MAX_Z) {
+            framingRef.current = true;
             /* eslint-disable-next-line react-hooks/set-state-in-effect */
             setCam(saved);
             return;
@@ -451,9 +511,10 @@ export function useSchemeCamera({
     }
     const c = mapMode ? fitCam() : currentFitCam();
     if (c) {
-      setCam(c);
+      framingRef.current = true;
+      setCam(clampCam(c));
     }
-  }, [project, layout, taskRects, pipelineRects, fitCam, currentFitCam, mapMode]);
+  }, [project, layout, taskRects, pipelineRects, fitCam, currentFitCam, mapMode, clampCam]);
 
   /* Debounced: a pan produces hundreds of camera frames, storage needs only
      the resting position. The map never writes — the desktop camera survives. */
@@ -778,7 +839,10 @@ export function useSchemeCamera({
   };
 
   const jump = useCallback(
-    (wx: number, wy: number) => setCam((c) => clampCam({ ...c, x: vp.w / 2 - wx * c.z, y: vp.h / 2 - wy * c.z })),
+    (wx: number, wy: number) => {
+      framingRef.current = true;
+      setCam((c) => clampCam({ ...c, x: vp.w / 2 - wx * c.z, y: vp.h / 2 - wy * c.z }));
+    },
     [vp, clampCam],
   );
 

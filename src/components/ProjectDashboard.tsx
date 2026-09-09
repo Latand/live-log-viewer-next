@@ -27,7 +27,7 @@ import { TaskStrip } from "./BranchPane";
 import { MobileInlineCatalog, useMobileInlineCatalog } from "./mobile/MobileInlineCatalog";
 import { deriveOrchestratorPanelState, resolveSeatFile } from "./orchestrator/seatState";
 import { ConversationList } from "./ConversationList";
-import { clearDraftStorage, draftCwd, draftParentConversationId, draftSrc, resolveSystemDraftCwd, setDraftCwd, setDraftSrc, setDraftText } from "./DraftAgentPane";
+import { clearDraftStorage, draftBand, draftCwd, draftParentConversationId, draftSrc, resolveSystemDraftCwd, setDraftBand, setDraftCwd, setDraftSrc, setDraftText } from "./DraftAgentPane";
 import { OrchestratorPanelToggle } from "./orchestrator/OrchestratorPanelToggle";
 import { useOrchestratorSeat } from "./orchestrator/useOrchestratorSeat";
 import { useOrchestratorIncumbent } from "./orchestrator/useOrchestratorIncumbent";
@@ -53,6 +53,7 @@ import { WorkerStacks } from "./WorkerStacks";
 import { clearWorkflowDraftStorage } from "./workflows/WorkflowDraftPane";
 import { dropLegacyWorkflowDrafts, isWorkflowDraftId } from "./workflows/workflowModel";
 import { TaskPanel } from "./tasks/TaskPanel";
+import { handoffTask } from "./tasks/taskApi";
 import { pushTaskToast, TaskToastHost } from "./tasks/taskToast";
 import { MobileBoard, MobileBoardDock, mobileBoardOf } from "./mobile/MobileBoard";
 import { MobileFocusView } from "./mobile/MobileFocusView";
@@ -105,6 +106,7 @@ const ACTIVE_DELIVERY_RECEIPTS = new Set(["pending", "delivering", "applying", "
 const EMPTY_MANUAL: FileEntry[] = [];
 const EMPTY_DRAFTS: string[] = [];
 const EMPTY_TASKS: BoardTask[] = [];
+const EMPTY_TASK_LINKS: ReadonlyMap<string, string> = new Map();
 
 interface Props {
   files: FileEntry[];
@@ -1244,6 +1246,53 @@ function ProjectDashboardView({
     pendingFocusRef.current = "draft::" + id;
   };
 
+  /* Band-local «+ Agent» (#1586): the draft carries its band so the band layout
+     seats it after the band's last member. Once the launch has a transcript with
+     a real path, the assignment is recorded on the task through the existing
+     handoff route — which adopts that conversation into the task's pipeline
+     record and spawns nothing. Until then the link is provisional here. */
+  const draftBands = useMemo(
+    () => new Map(drafts.flatMap((id) => { const band = draftBand(id); return band ? [[id, band] as const] : []; })),
+    [drafts],
+  );
+  const [pendingTaskLinks, setPendingTaskLinks] = useState<ReadonlyMap<string, string>>(EMPTY_TASK_LINKS);
+  const recordTaskLink = (taskId: string, file: FileEntry) => {
+    void handoffTask(taskId, file.path).then((result) => {
+      if ("error" in result) pushTaskToast("err", result.error);
+    });
+  };
+  const linkLaunchToTask = (taskId: string, file: FileEntry) => {
+    if (!file.path.startsWith("spawn:")) {
+      recordTaskLink(taskId, file);
+      return;
+    }
+    const key = file.conversationId ?? file.path;
+    setPendingTaskLinks((previous) => new Map(previous).set(key, taskId));
+  };
+  useEffect(() => {
+    if (!pendingTaskLinks.size) return;
+    const next = new Map(pendingTaskLinks);
+    for (const [key, taskId] of pendingTaskLinks) {
+      const match = files.find((file) => !file.path.startsWith("spawn:") && (file.conversationId === key || file.path === key));
+      if (!match) continue;
+      recordTaskLink(taskId, match);
+      next.delete(key);
+    }
+    /* eslint-disable-next-line react-hooks/set-state-in-effect -- the pending set shrinks only when a transcript materialized */
+    if (next.size !== pendingTaskLinks.size) setPendingTaskLinks(next);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- recordTaskLink is a stable fetch wrapper
+  }, [files, pendingTaskLinks]);
+  const addBandAgentDraft = (band: { id: string; task: BoardTask | null; title: string }) => {
+    if (!loaded) return;
+    onUserNavigate?.();
+    const id = newDraftId();
+    if (band.task) setDraftText(id, band.task.text);
+    setDraftBand(id, band.id);
+    setDraftCwd(id, initialDraftCwd);
+    persistDrafts([...drafts, id]);
+    pendingFocusRef.current = "draft::" + id;
+  };
+
   /* `+ Пайплайн` (#136, #196, #388): the picker admits a repository before it
      creates a DRAFT. Its world-space PipelineGroup opens with the full role
      chain and shared editor before the first run. */
@@ -1314,8 +1363,10 @@ function ProjectDashboardView({
      the draft's place (openSwitchboardFile also covers a cwd from another
      project by switching there). */
   const draftSpawned = (id: string, file: FileEntry) => {
+    const band = draftBand(id);
     removeDraft(id);
     openSwitchboardFile(file);
+    if (band.startsWith("task:")) linkLaunchToTask(band.slice("task:".length), file);
   };
 
   /* The raw close, shared by an explicit user close and a history redo. */
@@ -2320,6 +2371,9 @@ function ProjectDashboardView({
                 onTaskCollapse={(task) => setTaskExpanded(task.id, false)}
                 builderPipelineId={builderPipelineId}
                 onBuilderOpened={() => setBuilderPipelineId(null)}
+                draftBands={draftBands}
+                provisionalMemberships={pendingTaskLinks}
+                onAddAgent={addBandAgentDraft}
               />
             ) : listAvailable ? (
               <ConversationList project={project} enabled={loaded && projectView === "list"} onOpen={openFullCatalogFile} />
