@@ -71,6 +71,90 @@ test("later work after a terminal event reopens the Codex turn", () => {
   expect(turnStateFromRecords(records, "codex").state).toBe("busy");
 });
 
+test("issue 1589 clears a cut-off tool ledger at the next Codex turn boundary", () => {
+  const records = [
+    { type: "response_item", timestamp: "2026-09-09T05:36:42.000Z", payload: { type: "function_call", call_id: "old-tool" } },
+    { type: "event_msg", timestamp: "2026-09-09T05:38:44.000Z", payload: { type: "task_started", turn_id: "continued-turn" } },
+    { type: "event_msg", timestamp: "2026-09-09T05:40:17.000Z", payload: { type: "agent_message", message: "finished" } },
+    { type: "event_msg", timestamp: "2026-09-09T05:40:18.000Z", payload: { type: "task_complete", turn_id: "continued-turn" } },
+  ];
+
+  expect(turnStateFromRecords(records, "codex")).toEqual({
+    state: "terminal",
+    source: "lifecycle",
+    terminalAt: "2026-09-09T05:40:18.000Z",
+  });
+});
+
+test("a Codex abort closes the turn and ignores late tool output", () => {
+  const records = [
+    { type: "event_msg", timestamp: "2026-09-09T06:00:00.000Z", payload: { type: "task_started", turn_id: "aborted-turn" } },
+    { type: "response_item", timestamp: "2026-09-09T06:00:01.000Z", payload: { type: "function_call", call_id: "aborted-tool" } },
+    { type: "event_msg", timestamp: "2026-09-09T06:00:02.000Z", payload: { type: "turn_aborted", turn_id: "aborted-turn" } },
+    { type: "response_item", timestamp: "2026-09-09T06:00:03.000Z", payload: { type: "function_call_output", call_id: "aborted-tool" } },
+  ];
+
+  expect(turnStateFromRecords(records, "codex")).toEqual({
+    state: "terminal",
+    source: "lifecycle",
+    terminalAt: "2026-09-09T06:00:02.000Z",
+  });
+});
+
+test("a prefix-truncated Codex window whose only tool evidence is an unmatched output stays busy", () => {
+  /* The 128 KiB tail window of a long rollout: the `function_call` sits above
+     the window and only its oversized output survives, so nothing in the
+     window is a terminal boundary. Reading this as `unknown` would let the
+     engine settle a running stage on a mid-turn message. */
+  const records = [
+    { type: "response_item", timestamp: "2026-09-09T07:00:00.000Z", payload: { type: "custom_tool_call_output", call_id: "call-above-the-window", output: "x" } },
+    { type: "event_msg", timestamp: "2026-09-09T07:00:01.000Z", payload: { type: "agent_message", message: "interim progress" } },
+    { type: "event_msg", timestamp: "2026-09-09T07:00:02.000Z", payload: { type: "token_count" } },
+  ];
+
+  expect(turnStateFromRecords(records, "codex")).toEqual({
+    state: "busy",
+    source: "lifecycle",
+    terminalAt: null,
+  });
+
+  /* An anonymous unmatched output before any boundary is the same shape. */
+  expect(turnStateFromRecords([
+    { type: "response_item", timestamp: "2026-09-09T07:10:00.000Z", payload: { type: "function_call_output", output: "x" } },
+  ], "codex").state).toBe("busy");
+});
+
+test("a truncated window that later reaches its own terminal boundary is terminal", () => {
+  /* The unmatched output must not become a second kind of open tool: it holds
+     the turn open only until this window shows the turn ending. */
+  const records = [
+    { type: "response_item", timestamp: "2026-09-09T07:20:00.000Z", payload: { type: "custom_tool_call_output", call_id: "call-above-the-window", output: "x" } },
+    { type: "event_msg", timestamp: "2026-09-09T07:20:01.000Z", payload: { type: "agent_message", message: "finished" } },
+    { type: "event_msg", timestamp: "2026-09-09T07:20:02.000Z", payload: { type: "task_complete", turn_id: "windowed-turn" } },
+  ];
+
+  expect(turnStateFromRecords(records, "codex")).toEqual({
+    state: "terminal",
+    source: "lifecycle",
+    terminalAt: "2026-09-09T07:20:02.000Z",
+  });
+});
+
+test("late and duplicate Codex tool output cannot reopen a terminal turn", () => {
+  const records = [
+    { type: "event_msg", timestamp: "2026-09-09T06:10:00.000Z", payload: { type: "task_started", turn_id: "finished-turn" } },
+    { type: "event_msg", timestamp: "2026-09-09T06:10:01.000Z", payload: { type: "task_complete", turn_id: "finished-turn" } },
+    { type: "response_item", timestamp: "2026-09-09T06:10:02.000Z", payload: { type: "function_call_output", call_id: "late-tool" } },
+    { type: "response_item", timestamp: "2026-09-09T06:10:03.000Z", payload: { type: "function_call_output", call_id: "late-tool" } },
+  ];
+
+  expect(turnStateFromRecords(records, "codex")).toEqual({
+    state: "terminal",
+    source: "lifecycle",
+    terminalAt: "2026-09-09T06:10:01.000Z",
+  });
+});
+
 test("Claude migration waits for a top-level result event", () => {
   const assistant = {
     type: "assistant",

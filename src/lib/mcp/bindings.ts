@@ -94,11 +94,13 @@ import { readResources } from "@/lib/resources";
 import { adoptLiveRootSession, conversationRole, liveRootSession, type RootSessionSource } from "@/lib/root/adopt";
 import { listRoles, resolveSpawnRole } from "@/lib/roles/registry";
 import type { RoleDefinition, RoleParameter } from "@/lib/roles/types";
+import { readSpawnAdmissionFence, type SpawnAdmissionFence } from "@/lib/agent/spawnAdmission";
 import type { RuntimeHostRequestHealth } from "@/lib/runtime/client";
 import type { ViewerDeploymentStatus } from "@/lib/runtime/contracts";
 import { messageOriginRole, type MessageOrigin } from "@/lib/runtime/messageOrigin";
 import { ledgerDeployment, ledgerDeployments } from "@/lib/runtime/deploymentLedger";
 import { resolveOriginalSend, resolveSendReceipt, type SendSettlementPorts } from "@/lib/runtime/sendSettlement";
+import { spawnAdmissionBodyDigest } from "@/lib/agent/spawnIdentity";
 import {
   SELECTED_TAIL_MAX_BYTES,
   SELECTED_TAIL_MAX_LINES,
@@ -645,6 +647,14 @@ export interface ViewerMcpDomainDependencies {
   /** #1490: the ports the original-key send lookup settles through. Absent
       means production (the shared registry and the runtime host socket). */
   sendSettlementPorts?(): SendSettlementPorts;
+  /** #1582: a read-only-looking admission check that may return a refusal only
+      after the downstream route atomically fences the exact request. */
+  validateSpawnAdmission?(body: Record<string, unknown>, context?: McpToolCallContext): Promise<Record<string, unknown>>;
+  /** Server-derived predecessor identities of the caller's active project seat.
+      The caller cannot supply this lineage. */
+  recoveryPredecessors?(project: string, conversationId: string): readonly string[];
+  /** #1582: read one request-bound spawn admission fence. */
+  readSpawnAdmissionFence?(clientAttemptId: string): SpawnAdmissionFence | null;
 }
 
 /**
@@ -671,6 +681,33 @@ function callerProjectFromSnapshot(snapshot: RegistrySnapshot, conversationId: s
   if (conversation.projectOwnership?.project) return conversation.projectOwnership.project;
   const cwd = conversation.generations.at(-1)?.launchProfile?.cwd?.trim();
   return cwd ? projectForCwd(cwd) : null;
+}
+
+/** Walk only the active seat in the caller's own canonical project. The active
+    seat supplies the immediate predecessor; revocations supply older links.
+    Any contradictory edge makes lineage unavailable rather than widening it. */
+function productionRecoveryPredecessors(project: string, conversationId: string): readonly string[] {
+  const canonicalProject = canonicalOrchestratorProject(project);
+  const active = orchestratorSeatFor(canonicalProject).active;
+  if (!active || active.conversationId !== conversationId || active.project !== canonicalProject) return [];
+  const predecessorBySuccessor = new Map<string, string>();
+  const ambiguousSuccessors = new Set<string>();
+  for (const revocation of orchestratorRevocations()) {
+    if (revocation.project !== canonicalProject || !revocation.successorConversationId) continue;
+    const previous = predecessorBySuccessor.get(revocation.successorConversationId);
+    if (previous && previous !== revocation.conversationId) ambiguousSuccessors.add(revocation.successorConversationId);
+    else predecessorBySuccessor.set(revocation.successorConversationId, revocation.conversationId);
+  }
+  const predecessors: string[] = [];
+  const seen = new Set<string>([conversationId]);
+  let current = active.predecessorConversationId;
+  while (current) {
+    if (seen.has(current) || ambiguousSuccessors.has(current)) return [];
+    seen.add(current);
+    predecessors.push(current);
+    current = predecessorBySuccessor.get(current) ?? null;
+  }
+  return predecessors;
 }
 
 /** Server-derived origin of the current caller. Shared by the attention record
@@ -831,6 +868,14 @@ export const productionDomainDependencies: ViewerMcpDomainDependencies = {
   selectedContext: productionSelectedContextDependencies,
   completedFileScan,
   registrySnapshot: () => agentRegistry().readOnlySnapshot(),
+  readSpawnAdmissionFence,
+  validateSpawnAdmission: (body, context) => productionViewerControlDependencies().post(
+    "/api/spawn/validate",
+    body,
+    spawnControlHeaders(),
+    context,
+  ),
+  recoveryPredecessors: productionRecoveryPredecessors,
   canonicalSeatConversationId: productionCanonicalSeatConversationId,
   boardFor,
   applyBoardCommand: (input, snapshot) => applyBoardCommand(input, { registrySnapshot: () => snapshot }),
@@ -986,6 +1031,19 @@ export function defaultMcpSpawnRoleParams(
   return Object.keys(resolved).length ? resolved : source;
 }
 
+/** The exact body handed to `/api/spawn`, shared by the one dispatch and the
+    request-bound admission recovery probe. Keeping this construction in one
+    seam makes the downstream fence digest compare the original payload. */
+export function spawnDispatchBody(args: McpToolArgs, clientAttemptId: string): Record<string, unknown> {
+  const body = withoutKeys(args, ["clientRequestId", "recoveryOnly"]);
+  const roleParams = defaultMcpSpawnRoleParams(args);
+  return {
+    ...body,
+    ...(roleParams ? { roleParams } : {}),
+    clientAttemptId,
+  };
+}
+
 /** The durable identity one `request_attention` call writes on its record —
     exported so tests and evidence can construct the record an interrupted run
     would have left behind. */
@@ -1012,16 +1070,7 @@ async function spawnAgent(args: McpToolArgs, control: ViewerControlDependencies,
       );
     }
   }
-  const body = withoutKeys(args, ["clientRequestId", "recoveryOnly"]);
-  const roleParams = defaultMcpSpawnRoleParams(args);
-  const result = await dispatchControl(control)("/api/spawn", {
-    ...body,
-    ...(roleParams ? { roleParams } : {}),
-    clientAttemptId,
-  }, {
-    ...internalServiceHeaders("mcp"),
-    [VIEWER_SPAWN_CAPABILITY_HEADER]: ensureOperatorSpawnCapability(),
-  });
+  const result = await dispatchControl(control)("/api/spawn", spawnDispatchBody(args, clientAttemptId), spawnControlHeaders());
   // A readable body alone establishes no acceptance. Validate the fields
   // this binding publishes before the service can persist a successful replay.
   if (!text(result.launchId) || !text(result.conversationId)
@@ -2129,6 +2178,16 @@ async function bridgeDirective(args: McpToolArgs, control: ViewerControlDependen
     effect that must replay with its parent call. */
 function derivedRequestId(base: string, suffix: string): string {
   return spawnAttemptId(`${base}:${suffix}`);
+}
+
+/** The capability used by both the spawn dispatch and its admission probe.
+    Keeping these control calls on one header path prevents a future route
+    authentication change from admitting the dispatch while refusing recovery. */
+function spawnControlHeaders(): Record<string, string> {
+  return {
+    ...internalServiceHeaders("mcp"),
+    [VIEWER_SPAWN_CAPABILITY_HEADER]: ensureOperatorSpawnCapability(),
+  };
 }
 
 /**
@@ -3826,7 +3885,7 @@ export function viewerMcpToolPolicy(
     projection the call already holds — never a separately resolved guess. An
     authority or registry that faults reads as unidentified, which fails both
     a fresh claim and a recovery closed. */
-function recoveryCaller(dependencies: Partial<Pick<ViewerMcpDomainDependencies, "attentionAuthority" | "registrySnapshot">>): McpRequestCaller {
+function recoveryCaller(dependencies: Partial<Pick<ViewerMcpDomainDependencies, "attentionAuthority" | "registrySnapshot" | "recoveryPredecessors">>): McpRequestCaller {
   const unidentified: McpRequestCaller = { kind: "unidentified", conversationId: null, project: null };
   let authority: AttentionCallerAuthority;
   try {
@@ -3843,7 +3902,22 @@ function recoveryCaller(dependencies: Partial<Pick<ViewerMcpDomainDependencies, 
   } catch {
     return unidentified;
   }
-  return { kind: authority.kind, conversationId: authority.conversationId, project };
+  let predecessors: string[] = [];
+  if (project) {
+    try {
+      predecessors = [...(dependencies.recoveryPredecessors ?? productionRecoveryPredecessors)(project, authority.conversationId)]
+        .filter((candidate, index, all) => /^conversation_[A-Za-z0-9_-]{1,128}$/.test(candidate) && all.indexOf(candidate) === index)
+        .slice(0, 32);
+    } catch {
+      predecessors = [];
+    }
+  }
+  return {
+    kind: authority.kind,
+    conversationId: authority.conversationId,
+    project,
+    ...(predecessors.length ? { predecessors } : {}),
+  };
 }
 
 function spawnCwd(args: McpToolArgs): string {
@@ -3976,17 +4050,78 @@ async function recoverSpawn(
   legacy: boolean,
   dependencies: ViewerMcpDomainDependencies,
   args?: McpToolArgs,
+  context?: McpToolCallContext,
 ): Promise<McpRecoveryEvidence> {
+  const key = legacy ? spawnAttemptId(binding.clientRequestId) : binding.downstreamKey;
+  const unknown = (reason = RECOVERY_ABSENT_REASON): McpRecoveryEvidence => ({
+    outcome: "unknown",
+    evidence: "none",
+    reason,
+    ids: {},
+    ...(legacy ? { ownership: "unknown" as const } : {}),
+  });
+  const fencedEvidence = (fence: SpawnAdmissionFence): McpRecoveryEvidence => ({
+    outcome: "not-executed",
+    evidence: "spawn-admission-fence",
+    reason: fence.error,
+    ids: {},
+    facts: { status: fence.status, rejectedAt: fence.rejectedAt },
+  });
   let snapshot: RegistrySnapshot;
   try {
     snapshot = dependencies.registrySnapshot();
   } catch (error) {
     return { outcome: "unknown", evidence: "spawn-receipt", reason: `the launch record could not be read: ${error instanceof Error ? error.message : String(error)}`, ids: {} };
   }
-  const key = legacy ? spawnAttemptId(binding.clientRequestId) : binding.downstreamKey;
-  const receipts = Object.values(snapshot.receipts).filter((receipt) => receipt.clientAttemptId === key);
+  let receipts = Object.values(snapshot.receipts).filter((receipt) => receipt.clientAttemptId === key);
   if (receipts.length === 0) {
-    return { outcome: "unknown", evidence: "none", reason: RECOVERY_ABSENT_REASON, ids: {}, ...(legacy ? { ownership: "unknown" as const } : {}) };
+    if (legacy || !args || typeof args.role !== "string" || !args.role.trim() || !dependencies.validateSpawnAdmission) return unknown();
+    let body: Record<string, unknown>;
+    try {
+      body = spawnDispatchBody(args, key);
+    } catch (error) {
+      return unknown(`the spawn admission request could not be reconstructed (${error instanceof Error ? error.message : String(error)})`);
+    }
+    const requestDigest = spawnAdmissionBodyDigest(body);
+    if (!dependencies.readSpawnAdmissionFence) return unknown("spawn admission fencing is unavailable; execution remains possible");
+    let existingFence: SpawnAdmissionFence | null;
+    try {
+      existingFence = dependencies.readSpawnAdmissionFence(key);
+    } catch (error) {
+      return unknown(`the spawn admission fence could not be read (${error instanceof Error ? error.message : String(error)})`);
+    }
+    if (existingFence) {
+      if (existingFence.requestDigest === requestDigest) return fencedEvidence(existingFence);
+      return unknown("the downstream admission fence contradicts the bound request");
+    }
+    let probe: Record<string, unknown>;
+    try {
+      probe = await dependencies.validateSpawnAdmission(body, context);
+    } catch (error) {
+      return unknown(`the spawn admission fence could not be established (${error instanceof Error ? error.message : String(error)})`);
+    }
+    /* A current refusal is only a hint. The response must say the downstream
+       CAS fence was written; the registry read below is the authoritative
+       check that makes validator drift and in-flight races safe. */
+    if (probe.admissible !== false || probe.fenced !== true) {
+      return unknown("spawn admission did not establish an atomic downstream fence; execution remains possible");
+    }
+    try {
+      snapshot = dependencies.registrySnapshot();
+    } catch (error) {
+      return { outcome: "unknown", evidence: "spawn-receipt", reason: `the launch record could not be read after admission fencing: ${error instanceof Error ? error.message : String(error)}`, ids: {} };
+    }
+    receipts = Object.values(snapshot.receipts).filter((receipt) => receipt.clientAttemptId === key);
+    let fence: SpawnAdmissionFence | null;
+    try {
+      fence = dependencies.readSpawnAdmissionFence(key);
+    } catch (error) {
+      return unknown(`the spawn admission fence could not be read after admission fencing (${error instanceof Error ? error.message : String(error)})`);
+    }
+    if (!fence || fence.requestDigest !== requestDigest) {
+      return unknown("the reported admission refusal could not be verified against the exact downstream fence");
+    }
+    if (receipts.length === 0) return fencedEvidence(fence);
   }
   if (receipts.length > 1) {
     return { outcome: "unknown", evidence: "spawn-receipt", reason: "more than one launch receipt claims this key; the match is ambiguous", ids: {}, ...(legacy ? { ownership: "unknown" as const } : {}) };
@@ -4046,7 +4181,7 @@ export function viewerMcpRecoverableTools(
   return {
     spawn_agent: {
       bind: (args) => bindSpawn(args, domainDependencies),
-      recover: (binding, options) => recoverSpawn(binding, options.legacy, domainDependencies, options.args),
+      recover: (binding, options) => recoverSpawn(binding, options.legacy, domainDependencies, options.args, options.context),
     },
     send_message: {
       bind: (args) => bindSend(args, domainDependencies),

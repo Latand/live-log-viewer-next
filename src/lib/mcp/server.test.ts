@@ -1974,6 +1974,66 @@ describe("original-key recovery (#1490)", () => {
     expect(await store.lookup("send_message:recover-1")).toMatchObject({ stage: "settled", binding: { caller: OWNER } });
   });
 
+  test("a same-project successor with server-derived predecessor lineage can recover a spawn, while unrelated lineage cannot", async () => {
+    const store = new MemoryMcpReceiptStore();
+    const predecessor = recoveryHarness(OWNER, store, {
+      bindingImpl: async () => ({ operationId: "op_lineage", outcome: "queued" }),
+    });
+    expect(await predecessor.service.callTool("spawn_agent", SPAWN)).toMatchObject({ ok: true, operationId: "op_lineage" });
+
+    const successor = recoveryHarness({
+      kind: "worker",
+      conversationId: "conversation_successor",
+      project: "proj-a",
+      predecessors: ["conversation_owner"],
+    }, store, {
+      evidence: { outcome: "accepted", evidence: "delivery-record", reason: "accepted", ids: { operationId: "op_lineage" } },
+    });
+    expect(await successor.service.callTool("spawn_agent", { ...SPAWN, recoveryOnly: true })).toMatchObject({
+      ok: true,
+      recovered: true,
+      outcome: "accepted",
+      operationId: "op_lineage",
+    });
+
+    /* A row claimed by the successor stays owned by that successor. Its
+       predecessor may recover rows it originally claimed, while a reverse
+       lookup cannot widen authority to the successor's live work. */
+    const successorOwned = recoveryHarness(successor.caller, store, {
+      bindingImpl: async () => ({ operationId: "op_successor_owned", outcome: "queued" }),
+    });
+    const successorOwnedArgs = { ...SPAWN, clientRequestId: "successor-owned-1" };
+    expect(await successorOwned.service.callTool("spawn_agent", successorOwnedArgs)).toMatchObject({ ok: true, operationId: "op_successor_owned" });
+    const predecessorLookup = recoveryHarness(OWNER, store);
+    expect(await predecessorLookup.service.callTool("spawn_agent", { ...successorOwnedArgs, recoveryOnly: true })).toMatchObject({
+      ok: false,
+      code: "recovery_not_permitted",
+    });
+    expect(predecessorLookup.recoverCalls).toHaveLength(0);
+
+    const unrelated = recoveryHarness({
+      kind: "worker",
+      conversationId: "conversation_unrelated",
+      project: "proj-a",
+      predecessors: ["conversation_other"],
+    }, store);
+    expect(await unrelated.service.callTool("spawn_agent", { ...SPAWN, recoveryOnly: true })).toMatchObject({
+      ok: false,
+      code: "recovery_not_permitted",
+    });
+
+    const crossProject = recoveryHarness({
+      kind: "worker",
+      conversationId: "conversation_successor",
+      project: "proj-b",
+      predecessors: ["conversation_owner"],
+    }, store);
+    expect(await crossProject.service.callTool("spawn_agent", { ...SPAWN, recoveryOnly: true })).toMatchObject({
+      ok: false,
+      code: "recovery_not_permitted",
+    });
+  });
+
   test("a duplicate in the same process is authenticated and answered from the durable record, never joined to the original", async () => {
     const store = new MemoryMcpReceiptStore();
     let release!: () => void;
@@ -2143,6 +2203,77 @@ describe("original-key recovery (#1490)", () => {
     expect(await harness.store.lookup("send_message:recover-1")).toMatchObject({ stage: "settled", result: { ok: true, recovered: true, outcome: "settled", operationId: "op_found" } });
     harness.evidence = { outcome: "unknown", evidence: "none", reason: "gone", ids: {} };
     expect(await harness.service.callTool("send_message", SEND)).toMatchObject({ ok: true, outcome: "settled", operationId: "op_found", replayed: true });
+  });
+
+  test("a post-wire spawn validation refusal closes only after an atomic downstream fence", async () => {
+    const fenced = recoveryHarness(OWNER, undefined, {
+      bindingImpl: async (_args, context) => {
+        context!.dispatch!.attempted = true;
+        throw new McpDispatchVerdictError("deployer requires confirm: deploy", { status: 400 });
+      },
+      evidence: {
+        outcome: "not-executed",
+        evidence: "spawn-admission-fence",
+        reason: "the downstream admission fence refused this exact request before launch reservation",
+        ids: {},
+        facts: { status: 400 },
+      },
+    });
+
+    const first = await fenced.service.callTool("spawn_agent", SPAWN);
+    expect(first).toMatchObject({
+      ok: false,
+      code: "not_executed",
+      replayed: false,
+      details: {
+        outcome: "not-executed",
+        evidence: "spawn-admission-fence",
+        nextAction: "new-request-permitted",
+      },
+    });
+    expect(await fenced.store.lookup("spawn_agent:recover-1")).toMatchObject({
+      stage: "not-executed",
+      result: { code: "not_executed", details: { outcome: "not-executed" } },
+    });
+
+    const replay = await fenced.service.callTool("spawn_agent", SPAWN);
+    expect(replay).toMatchObject({ ok: false, code: "not_executed", replayed: true });
+    expect(fenced.bindingCalls).toHaveLength(1);
+    expect(fenced.recoverCalls).toHaveLength(1);
+  });
+
+  test("a fenced not-executed spawn recovery replays after the MCP receipt store reopens", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-spawn-fence-reopen-"));
+    scratch.push(directory);
+    const filename = path.join(directory, "mcp-receipts.sqlite");
+    const firstStore = new SqliteMcpReceiptStore(filename);
+    const original = recoveryHarness(OWNER, firstStore, {
+      bindingImpl: async (_args, context) => {
+        context!.dispatch!.attempted = true;
+        throw new McpDispatchVerdictError("deployer requires confirm: deploy", { status: 400 });
+      },
+      evidence: { outcome: "not-executed", evidence: "spawn-admission-fence", reason: "atomic refusal", ids: {}, facts: { status: 400 } },
+    });
+    expect(await original.service.callTool("spawn_agent", SPAWN)).toMatchObject({ ok: false, code: "not_executed" });
+    expect(await firstStore.lookup("spawn_agent:recover-1")).toMatchObject({ stage: "not-executed" });
+    firstStore.close();
+
+    const reopenedStore = new SqliteMcpReceiptStore(filename);
+    const reopened = recoveryHarness(OWNER, reopenedStore, {
+      bindingImpl: async () => { throw new Error("reopened recovery must not dispatch"); },
+      evidence: { outcome: "unknown", evidence: "none", reason: "downstream unavailable", ids: {} },
+    });
+    for (const args of [SPAWN, { ...SPAWN, recoveryOnly: true }]) {
+      expect(await reopened.service.callTool("spawn_agent", args)).toMatchObject({
+        ok: false,
+        code: "not_executed",
+        replayed: true,
+        details: { outcome: "not-executed", nextAction: "new-request-permitted" },
+      });
+    }
+    expect(reopened.bindingCalls).toHaveLength(0);
+    expect(reopened.recoverCalls).toHaveLength(0);
+    reopenedStore.close();
   });
 
   test("terminal evidence recovered while the original still dispatches is persisted, so a delayed admitted error cannot replace it — across store instances and a reopen", async () => {

@@ -1,3 +1,9 @@
+import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+
+import { withAccountMutationLock } from "@/lib/accounts/accountMutation";
+import { statePath } from "@/lib/configDir";
 import type { ViewerConversationId } from "@/lib/accounts/migration/contracts";
 
 import type { RegistryFile, SpawnReceipt } from "./registry";
@@ -39,6 +45,171 @@ export interface SpawnRejection {
   maxDepth: number;
   guidance: string;
   rejectedAt: string;
+}
+
+/** A request-bound admission refusal written before a launch reservation. The
+    fence is deliberately separate from SpawnReceipt: it prevents a late
+    reservation for the same downstream key while keeping launch-receipt counts
+    truthful at zero. */
+export interface SpawnAdmissionFence {
+  version: 1;
+  clientAttemptId: string;
+  requestDigest: string;
+  status: number;
+  error: string;
+  rejectedAt: string;
+}
+
+export type SpawnAdmissionFenceResult =
+  | { kind: "fenced"; fence: SpawnAdmissionFence }
+  | { kind: "existing-receipt"; receipt: SpawnReceipt }
+  | { kind: "conflict" };
+
+export class SpawnAdmissionFenceError extends Error {
+  constructor(readonly fence: SpawnAdmissionFence) {
+    super(fence.error);
+    this.name = "SpawnAdmissionFenceError";
+  }
+}
+
+export class SpawnAdmissionFenceConflictError extends Error {
+  constructor() {
+    super("spawn attempt conflicts with its original request");
+    this.name = "SpawnAdmissionFenceConflictError";
+  }
+}
+
+interface SpawnAdmissionFenceFile {
+  version: 1;
+  fences: Record<string, SpawnAdmissionFence>;
+}
+
+function spawnAdmissionFencePath(): string {
+  return statePath("spawn-admission-fences.json");
+}
+
+function emptySpawnAdmissionFenceFile(): SpawnAdmissionFenceFile {
+  return { version: 1, fences: {} };
+}
+
+function validClientAttemptId(value: string): boolean {
+  return /^[A-Za-z0-9_-]{8,128}$/.test(value);
+}
+
+function normalizeSpawnAdmissionFence(value: unknown, key: string): SpawnAdmissionFence {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid spawn admission fence");
+  const fence = value as Partial<SpawnAdmissionFence>;
+  const status = fence.status;
+  if (fence.version !== 1
+    || fence.clientAttemptId !== key
+    || typeof fence.clientAttemptId !== "string"
+    || !validClientAttemptId(fence.clientAttemptId)
+    || typeof fence.requestDigest !== "string"
+    || !/^[0-9a-f]{64}$/i.test(fence.requestDigest)
+    || typeof status !== "number" || !Number.isInteger(status) || status < 400 || status > 499
+    || typeof fence.error !== "string" || !fence.error.trim() || fence.error.length > 500
+    || typeof fence.rejectedAt !== "string" || !fence.rejectedAt) {
+    throw new Error("invalid spawn admission fence");
+  }
+  return {
+    version: 1,
+    clientAttemptId: fence.clientAttemptId,
+    requestDigest: fence.requestDigest.toLowerCase(),
+    status,
+    error: fence.error,
+    rejectedAt: fence.rejectedAt,
+  };
+}
+
+function readSpawnAdmissionFenceFile(requestedClientAttemptId?: string): SpawnAdmissionFenceFile {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(spawnAdmissionFencePath(), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return emptySpawnAdmissionFenceFile();
+    throw error;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new Error("spawn admission fence store could not be read", { cause: error });
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)
+    || (parsed as { version?: unknown }).version !== 1
+    || !((parsed as { fences?: unknown }).fences)
+    || typeof (parsed as { fences: unknown }).fences !== "object"
+    || Array.isArray((parsed as { fences: unknown }).fences)) {
+    throw new Error("spawn admission fence store has an unsupported schema");
+  }
+  const fences: Record<string, SpawnAdmissionFence> = {};
+  for (const [key, value] of Object.entries((parsed as { fences: Record<string, unknown> }).fences)) {
+    try {
+      fences[key] = normalizeSpawnAdmissionFence(value, key);
+    } catch (error) {
+      /* A damaged entry must still make recovery of that exact key unknown.
+         An unrelated damaged key has no bearing on this lookup and must not
+         turn every new reservation into a 500. A later atomic write drops the
+         unusable entry from the normalized file. */
+      if (key === requestedClientAttemptId) throw error;
+    }
+  }
+  return { version: 1, fences };
+}
+
+function writeSpawnAdmissionFenceFile(file: SpawnAdmissionFenceFile): void {
+  const filename = spawnAdmissionFencePath();
+  fs.mkdirSync(path.dirname(filename), { recursive: true, mode: 0o700 });
+  const temporary = path.join(path.dirname(filename), `.${path.basename(filename)}.${process.pid}.${crypto.randomUUID()}.tmp`);
+  fs.writeFileSync(temporary, JSON.stringify(file, null, 2) + "\n", { encoding: "utf8", mode: 0o600 });
+  fs.renameSync(temporary, filename);
+}
+
+/** Read one durable fence. An unreadable store throws so recovery keeps the
+    original outcome unknown. */
+export function readSpawnAdmissionFence(clientAttemptId: string): SpawnAdmissionFence | null {
+  if (!validClientAttemptId(clientAttemptId)) return null;
+  return readSpawnAdmissionFenceFile(clientAttemptId).fences[clientAttemptId] ?? null;
+}
+
+/** Atomically persist a validation refusal only when no downstream launch
+    receipt already owns the same key. The caller supplies that read so the
+    fence and the route's reservation share the existing account lock. */
+export function recordSpawnAdmissionRejection(input: {
+  clientAttemptId: string;
+  requestDigest: string;
+  status: number;
+  error: string;
+  rejectedAt?: string;
+}, currentReceipt: () => SpawnReceipt | null): SpawnAdmissionFenceResult {
+  if (!validClientAttemptId(input.clientAttemptId)) throw new Error("invalid spawn admission fence clientAttemptId");
+  if (!/^[0-9a-f]{64}$/i.test(input.requestDigest)) throw new Error("invalid spawn admission fence request digest");
+  if (!Number.isInteger(input.status) || input.status < 400 || input.status > 499) throw new Error("invalid spawn admission fence status");
+  const error = input.error.trim().slice(0, 500);
+  if (!error) throw new Error("spawn admission fence error is required");
+  return withAccountMutationLock(() => {
+    const existingReceipt = currentReceipt();
+    if (existingReceipt) return { kind: "existing-receipt", receipt: existingReceipt };
+    const file = readSpawnAdmissionFenceFile(input.clientAttemptId);
+    const existing = file.fences[input.clientAttemptId];
+    const requestDigest = input.requestDigest.toLowerCase();
+    if (existing) {
+      return existing.requestDigest === requestDigest
+        ? { kind: "fenced", fence: existing }
+        : { kind: "conflict" };
+    }
+    const fence: SpawnAdmissionFence = {
+      version: 1,
+      clientAttemptId: input.clientAttemptId,
+      requestDigest,
+      status: input.status,
+      error,
+      rejectedAt: input.rejectedAt ?? new Date().toISOString(),
+    };
+    file.fences[input.clientAttemptId] = fence;
+    writeSpawnAdmissionFenceFile(file);
+    return { kind: "fenced", fence };
+  });
 }
 
 /** Typed terminal admission rejection (#393): the receipt is durable and
