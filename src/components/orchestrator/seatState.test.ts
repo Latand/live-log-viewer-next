@@ -309,20 +309,51 @@ describe("the server's own rotation recommendation is what the panel says (#978)
    */
   test("a hosted seat whose TURN is idle reads waiting, and one whose turn is running reads live", () => {
     const hosted = { hostLive: true };
-    expect(live({ ...hosted, incumbent: incumbent({ liveness: { lifecycle: "waiting", hostState: "alive", silentForMs: 211_916 } }) }))
-      .toMatchObject({ kind: "live", liveness: "waiting" });
-    expect(live({ ...hosted, incumbent: incumbent() })).toMatchObject({ kind: "live", liveness: "live" });
+    const idleTail = file({ lastTurn: { startedAt: 1_000, endedAt: 2_000 } });
+    const openTail = file({ lastTurn: { startedAt: 1_000, endedAt: null } });
+    expect(live({ ...hosted, file: idleTail })).toMatchObject({ kind: "live", liveness: "waiting" });
+    expect(live({ ...hosted, file: openTail })).toMatchObject({ kind: "live", liveness: "live" });
   });
 
-  test("only an AFFIRMED reading may downgrade the badge, and only from live", () => {
+  /**
+   * THE TURN'S OWN BOUNDARY OUTRANKS THE MINUTE-OLD READING, in both
+   * directions. `liveness.lifecycle` rides the incumbent poll, whose cadence is
+   * set by context-window wear — a minute — while `lastTurn` arrives on the
+   * file poll. Reading the slow one first holds "waiting" over an agent that
+   * started working a message ago, and "live" over one that finished: the
+   * original complaint, time-boxed rather than fixed.
+   */
+  test("the catalog's fresh turn boundary outranks a minute-old lifecycle, both ways", () => {
+    const stillIdle = incumbent({ liveness: { lifecycle: "waiting", hostState: "alive", silentForMs: 211_916 } });
+    const stillRunning = incumbent({ liveness: { lifecycle: "running", hostState: "alive", silentForMs: 0 } });
+    /* The operator just sent a message: the turn is open in the catalog while
+       the status read still remembers an idle seat. */
+    expect(live({ hostLive: true, incumbent: stillIdle, file: file({ lastTurn: { startedAt: 1_000, endedAt: null } }) }))
+      .toMatchObject({ liveness: "live" });
+    /* And the turn just ended, while the status read still remembers a running
+       one — the green badge the operator read as "it is working". */
+    expect(live({ hostLive: true, incumbent: stillRunning, file: file({ lastTurn: { startedAt: 1_000, endedAt: 2_000 } }) }))
+      .toMatchObject({ liveness: "waiting" });
+  });
+
+  test("with no turn boundary in the tail, only an AFFIRMED reading may downgrade — and only from live", () => {
     const idle = incumbent({ liveness: { lifecycle: "waiting", hostState: "alive", silentForMs: 1_000 } });
+    /* No boundary derivable from the tail (#231), so the slow reading is the
+       only reading there is. */
+    expect(live({ hostLive: true, incumbent: idle })).toMatchObject({ liveness: "waiting" });
     /* No affirmation: the reading may be a memory from before a restart, and
        accusing the seat of idling on one is the same fault `hostLive` already
        fences for the bind bound (#1182). */
     expect(live({ hostLive: false, incumbent: idle })).toMatchObject({ liveness: "live" });
-    /* Stronger statements are never softened by it. */
-    expect(live({ hostLive: true, surface: "dead", incumbent: idle })).toMatchObject({ liveness: "dead" });
-    expect(live({ hostLive: true, surface: "resume", incumbent: idle })).toMatchObject({ liveness: "resumable" });
+    /* A tail that carries a boundary needs no such gate — it is this poll's own
+       answer about this transcript, not a claim held over. */
+    expect(live({ hostLive: false, incumbent: idle, file: file({ lastTurn: { startedAt: 1_000, endedAt: 2_000 } }) }))
+      .toMatchObject({ liveness: "waiting" });
+    /* Stronger statements about the HOST are never softened by an idle turn. */
+    const idleTail = { lastTurn: { startedAt: 1_000, endedAt: 2_000 } };
+    expect(live({ hostLive: true, surface: "dead", incumbent: idle, file: file(idleTail) })).toMatchObject({ liveness: "dead" });
+    expect(live({ hostLive: true, surface: "resume", incumbent: idle, file: file(idleTail) })).toMatchObject({ liveness: "resumable" });
+    expect(live({ hostLive: true, incumbent: idle, file: file({ ...idleTail, activity: "stalled" }) })).toMatchObject({ liveness: "stalled" });
   });
 });
 

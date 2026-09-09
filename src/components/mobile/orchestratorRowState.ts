@@ -107,7 +107,15 @@ export function seatCardView(
        an empty slot with a friendly line on it: the card says «failed» and its
        tap opens the sheet holding the error and the draft that retries it. */
     shape: view.state === "draft" ? "invitation" : "seat",
-    badge: view.state === "live" && view.tap === "conversation" ? "conversation" : "state",
+    /* A HOSTED seat whose conversation is on this device carries the
+       conversation's own phrase, and `waiting` is a hosted seat — the same one
+       `live` is, with its turn idle rather than running. Excluding it would make
+       the card say «waiting» while the board row beside it says «waiting 2:14»,
+       which is the one seat reading two ways that the invariant above forbids,
+       and it would drop the duration the phrase carries. The conversation
+       vocabulary already draws the same distinction (`CONVERSATION_STATE_TONE`
+       has both `working` and `waiting`), so nothing is lost by deferring to it. */
+    badge: (view.state === "live" || view.state === "waiting") && view.tap === "conversation" ? "conversation" : "state",
   };
 }
 

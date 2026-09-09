@@ -248,6 +248,20 @@ describe("the card's shape and the badge it speaks", () => {
     expect(card.badge).toBe("conversation");
   });
 
+  test("a seat whose TURN is idle still speaks the conversation's phrase, not the coarse word", () => {
+    /* `waiting` is a hosted seat with an idle turn, and its conversation is on
+       this device — so the card carries the same phrase (and the same duration)
+       the board's row for that conversation carries. Speaking the state word
+       here would make one seat read two ways across two surfaces. */
+    const card = cardFor({
+      status: { seat: seat(), pending: null, exists: true },
+      file: { ...conversation, lastTurn: { startedAt: 1_000, endedAt: 2_000 } } as FileEntry,
+    });
+    expect(card.state).toBe("waiting");
+    expect(card.tap).toBe("conversation");
+    expect(card.badge).toBe("conversation");
+  });
+
   test("a seat designated but not yet on this device speaks its own state word", () => {
     /* «resolving» has no conversation to take a phrase from, so borrowing one
        would state a working orchestrator this phone cannot see. */

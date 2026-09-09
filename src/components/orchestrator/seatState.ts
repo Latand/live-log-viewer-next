@@ -455,28 +455,32 @@ export function deriveRotateDraftState(input: {
 }
 
 /**
- * The capability surface decides liveness; `activity` only separates a quiet
- * hosted conversation from a working one. Reading `activity` FIRST is what made
- * a finished Claude session and a killed Codex thread both show «live»: they are
- * not stalled, so everything else fell through to it. Both engines reach
- * `resume` through the same matrix — a claude-projects session and a
- * codex-sessions thread with no live host are resumable in place.
- */
-/**
- * The liveness the panel SHOWS: the capability matrix's answer, refined by the
- * one thing the catalog cannot see.
+ * The liveness the panel SHOWS: is this conversation HOSTED (the capability
+ * matrix), and is its TURN running (the transcript's own turn boundary).
  *
- * `livenessOf` decides whether the conversation is hosted at all, and it does
- * that from evidence the board already carries. Whether a hosted conversation
- * is WORKING or merely sitting there is a different question, and only the
- * status read answers it — `liveness.lifecycle`, straight out of the shared
- * lifecycle vocabulary, where `waiting` means "a host is alive and idle".
+ * The two questions have different evidence and different clocks, and getting
+ * the order wrong is how a badge lies in both directions.
  *
- * Applied only to `live`, and only to an AFFIRMED reading of the seat's own
- * conversation. `stalled`, `resumable` and `dead` are stronger statements this
- * must not soften, and a stale or absent reading may not downgrade a badge the
- * board's own evidence supports — that is the same rule `hostLive` already
- * carries for the bind bound (#1182).
+ * TURN EVIDENCE COMES FROM THE CATALOG FIRST. `lastTurn` is the boundary the
+ * scanner derives from the transcript tail — `endedAt: null` while the turn is
+ * still running — and it arrives on the FILE poll, seconds after the agent
+ * starts or stops working. The status read's `liveness.lifecycle` says the same
+ * thing in the shared vocabulary's words, but it rides the incumbent poll,
+ * whose cadence is set by context-window wear (`INCUMBENT_POLL_MS`, one
+ * minute) and whose own doc says the things it answers "move over tens of
+ * minutes". Preferring it would hold «waiting» over an agent that started
+ * working a message ago, and «live» over one that finished — the original
+ * complaint, merely time-boxed to a minute.
+ *
+ * So `lifecycle` is the FALLBACK, for a transcript tail that carries no turn
+ * boundary at all (issue #231): there the slow reading is the only reading, and
+ * only an AFFIRMED one may downgrade — a cached «waiting» carried across the
+ * restart the panel is waiting out is a memory, the same rule `hostLive`
+ * carries for the bind bound (#1182). Catalog evidence needs no such gate: it
+ * is this poll's own answer about this transcript, not a claim held over.
+ *
+ * Applied to `live` only. `stalled`, `resumable` and `dead` are stronger
+ * statements about the HOST, and an idle turn does not soften any of them.
  */
 export function seatLivenessOf(input: {
   file: FileEntry | null;
@@ -485,10 +489,33 @@ export function seatLivenessOf(input: {
   hostLive: boolean;
 }): SeatLiveness {
   const liveness = livenessOf(input.file, input.surface);
-  if (liveness !== "live" || !input.hostLive) return liveness;
-  return input.incumbent?.liveness?.lifecycle === "waiting" ? "waiting" : liveness;
+  if (liveness !== "live") return liveness;
+  const running = turnRunning(input.file);
+  if (running !== null) return running ? "live" : "waiting";
+  return input.hostLive && input.incumbent?.liveness?.lifecycle === "waiting" ? "waiting" : "live";
 }
 
+/** Whether the transcript's newest turn is still open, or null when the tail
+    carries no turn boundary to read (`lastTurn` absent — issue #231). An
+    explicitly null `lastTurn` is the scanner saying it derived none, which is
+    the same absence of evidence. */
+function turnRunning(file: FileEntry | null): boolean | null {
+  const turn = file?.lastTurn;
+  return turn ? turn.endedAt === null : null;
+}
+
+/**
+ * Is the conversation HOSTED, and can it be picked back up? The capability
+ * surface decides; `activity` only separates a hosted conversation that has
+ * gone silent from one that has not. Reading `activity` FIRST is what made a
+ * finished Claude session and a killed Codex thread both show «live»: they are
+ * not stalled, so everything else fell through to it. Both engines reach
+ * `resume` through the same matrix — a claude-projects session and a
+ * codex-sessions thread with no live host are resumable in place.
+ *
+ * `live` here means "hosted and not silent", never "working": which of the two
+ * a hosted conversation is doing is `seatLivenessOf`'s question, above.
+ */
 function livenessOf(file: FileEntry | null, surface: StripSurface | null): SeatLiveness {
   if (surface === "resume") return "resumable";
   /* `inert` is a finished conversation the engines cannot resume, and
