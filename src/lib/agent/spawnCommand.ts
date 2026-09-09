@@ -60,6 +60,7 @@ import { recordDirectOperatorWakatimeActivity } from "@/lib/wakatime/operatorAct
 import { sourceCwdStatus } from "@/app/api/spawn/sourceCwd";
 import { AGENT_SPAWN_LINEAGE_ERROR, agentSpawnLineageError, authenticatedAgentSpawnCaller, isAgentInitiatedSpawn, spawnLineageSelectorForCaller, type AuthenticatedSpawnCaller } from "@/app/api/spawn/admission";
 import { spawnAccountErrorResponse } from "@/app/api/spawn/accountError";
+import { attributeNamedAccountChoice } from "@/lib/accounts/accountOverrides";
 
 const SUGGEST_SCAN_LIMIT = 80;
 const SUGGEST_MAX = 10;
@@ -819,6 +820,27 @@ export async function executeSpawnRequest(
     });
     if (begun.kind === "conflict") return NextResponse.json({ error: "spawn attempt conflicts with its original request" }, { status: 409 });
     if (begun.kind === "created") launchId = begun.receipt.launchId;
+    /* ATTRIBUTION, not a gate (#1279's rule, launch seam). The binding no
+       longer refuses a launch that NAMES an account outside the project's pool,
+       so the crossing has to be visible instead — the project view renders this
+       journal beside the pool, and an account carrying work it is not bound to
+       must read as a decision somebody made rather than as a fence that quietly
+       stopped holding. Recorded once the receipt exists, because that is the
+       point past which this account is what the work runs on, and only for the
+       account the request actually named: a degraded pin landed on a different
+       account and nobody chose that one. Within the pool it records nothing. */
+    if (requestedAccountId && account.accountId === requestedAccountId) {
+      attributeNamedAccountChoice({
+        engine,
+        project: spawnProject,
+        accountId: requestedAccountId,
+        conversationId: begun.receipt.conversationId ?? null,
+        actor: authenticatedCaller?.kind === "agent"
+          ? { kind: "agent", conversationId: authenticatedCaller.conversationId }
+          : { kind: "operator" },
+        via: "launch",
+      });
+    }
     let queuedReceipt = begun.receipt;
     if (queuedUntil && queuedTitle && requestedAccountId) {
       const existingQueue = begun.receipt.queuedPinnedSpawn;

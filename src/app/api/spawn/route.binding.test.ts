@@ -64,7 +64,14 @@ afterAll(() => {
 
 type SpawnRouteDependencies = NonNullable<Parameters<typeof POST.withDependencies>[1]>;
 
-async function spawn(cwd: string, clientAttemptId: string, resolutionFailure?: Error): Promise<{
+async function spawn(
+  cwd: string,
+  clientAttemptId: string,
+  resolutionFailure?: Error,
+  /** The account the REQUEST names, when it names one — the board's launch
+      draft, the orchestrator's rotate draft, `spawn_agent`. */
+  requestedAccountId?: string,
+): Promise<{
   status: number;
   error: string;
   accountResolutions: number;
@@ -80,32 +87,49 @@ async function spawn(cwd: string, clientAttemptId: string, resolutionFailure?: E
   /* Recorded inside the stub, because the route's own answer cannot show what
      it asked for — and what it asked for IS the fence at this seam. */
   const projects: (string | null | undefined)[] = [];
+  const accountContext = (accountId: string) => ({
+    engine: "claude" as const,
+    accountId,
+    kind: "managed" as const,
+    home: path.join(cwd, "account"),
+    transcriptRoot: path.join(cwd, "projects"),
+    env: { NODE_ENV: "test" as const },
+  });
   const dependencies = {
     registry: () => store,
     assertStructuredRuntime: () => {},
+    /* The route re-resolves the settled account under the mutation lock before
+       it reserves the receipt; without it the reservation never happens and
+       nothing downstream of it — the attribution below included — can be
+       observed at all. */
+    resolveSpawnAccount: (_engine: unknown, accountId: string) => accountContext(accountId),
     resolveHealthySpawnAccount: async (
       _engine: unknown,
-      _requested: unknown,
+      requested: unknown,
       project?: string | null,
     ) => {
       accountResolutions += 1;
       projects.push(project);
       if (resolutionFailure) throw resolutionFailure;
-      return {
-        engine: "claude" as const,
-        accountId: "acct-default",
-        kind: "managed" as const,
-        home: path.join(cwd, "account"),
-        transcriptRoot: path.join(cwd, "projects"),
-        env: { NODE_ENV: "test" as const },
-      };
+      /* The seam resolves an explicitly named account TO ITSELF, pool or no
+         pool — that is the rule this stub stands in for, and it is what the
+         route's attribution has to see to record the crossing. */
+      return accountContext(typeof requested === "string" && requested ? requested : "acct-default");
     },
     defer: (work: () => unknown) => { void work(); },
   } as unknown as SpawnRouteDependencies;
   const response = await POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
     method: "POST",
     headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json", "sec-fetch-site": "same-origin" },
-    body: JSON.stringify({ title: "Inspect the atlas checkout", engine: "claude", model: "sonnet", cwd, "prompt": "inspect", clientAttemptId }),
+    body: JSON.stringify({
+      title: "Inspect the atlas checkout",
+      engine: "claude",
+      model: "sonnet",
+      cwd,
+      "prompt": "inspect",
+      clientAttemptId,
+      ...(requestedAccountId ? { accountId: requestedAccountId } : {}),
+    }),
   }), dependencies);
   const payload = await response.json() as { error?: string };
   return {
@@ -285,4 +309,54 @@ test("a bound pool with no capacity refuses the launch as a conflict, and the id
   expect(Object.keys(store.snapshot().receipts)).toEqual([]);
 
   setAgentRegistryForTests(null);
+});
+
+/**
+ * THE BINDING STOPPED BEING A VETO HERE, SO IT HAD TO BECOME A RECORD.
+ *
+ * A launch that NAMES an account is a control somebody worked, and the operator
+ * directive of 2026-09-10 is that no project binding may refuse one. What that
+ * costs is attribution: an account carrying work it is not bound to has to read
+ * as a decision somebody made, not as a fence that quietly stopped holding, and
+ * the project view renders this journal beside the pool.
+ */
+test("a launch onto an account outside the project's pool is recorded in the override journal", async () => {
+  const cwd = fs.mkdtempSync(path.join(SANDBOX, "named-outside-pool-"));
+  const project = projectForCwd(cwd)!;
+  fs.writeFileSync(RECORD, JSON.stringify({
+    schemaVersion: 1,
+    bindings: [{ engine: "claude", accountId: "acct-reserved", project, createdAt: "2026-09-10T00:00:00.000Z" }],
+  }), "utf8");
+
+  const attempt = await spawn(cwd, "binding_named_outside_20260910", undefined, "acct-chosen-by-hand");
+
+  /* Not refused: the whole point. */
+  expect(attempt.status).not.toBe(409);
+  const { accountProjectOverrides } = await import("@/lib/accounts/accountOverrides");
+  expect(accountProjectOverrides({ project })).toEqual([expect.objectContaining({
+    engine: "claude",
+    project,
+    accountId: "acct-chosen-by-hand",
+    allowedAccountIds: ["acct-reserved"],
+    reason: "outside-pool",
+    actor: "operator",
+    via: "launch",
+  })]);
+});
+
+test("a launch onto an account the pool already contains records nothing", async () => {
+  /* Inside the pool nothing was crossed, so the journal must stay empty — a
+     record of every launch would bury the crossings it exists to show. */
+  const cwd = fs.mkdtempSync(path.join(SANDBOX, "named-inside-pool-"));
+  const project = projectForCwd(cwd)!;
+  fs.writeFileSync(RECORD, JSON.stringify({
+    schemaVersion: 1,
+    bindings: [{ engine: "claude", accountId: "acct-reserved", project, createdAt: "2026-09-10T00:00:00.000Z" }],
+  }), "utf8");
+
+  const attempt = await spawn(cwd, "binding_named_inside_20260910", undefined, "acct-reserved");
+
+  expect(attempt.status).not.toBe(409);
+  const { accountProjectOverrides } = await import("@/lib/accounts/accountOverrides");
+  expect(accountProjectOverrides({ project })).toEqual([]);
 });

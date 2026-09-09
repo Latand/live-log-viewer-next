@@ -6,7 +6,7 @@ import type { AccountContext, AccountManager, AccountSummary, ProjectSpawnResolu
 import { unavailableLimits } from "./contracts";
 import { withAccountMutationLockAsync } from "./accountMutation";
 import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
-import { accountProjectBindings, allowedAccountIdsForProject, projectAccountRefusalDetail } from "./projectBindings";
+import { AccountProjectBindingsUnreadableError, accountProjectBindings, allowedAccountIdsForProject, projectAccountRefusalDetail, type AccountProjectBinding } from "./projectBindings";
 import { selectProjectAccount } from "./projectSelection";
 import { selectHealthyClaudeAccount } from "./spawnHealth";
 import { withoutWakatimeCredential } from "@/lib/wakatime/credential";
@@ -43,9 +43,21 @@ export type HealthySpawnAccountResolution = AccountContext & {
  * damaged record throws from that read rather than being re-derived by whoever
  * called in.
  *
- * An account the caller NAMES is still checked against the pool alone and never
- * against capacity — nobody may quietly substitute an account somebody asked
- * for, and a pin is a decision, not a guess to improve on.
+ * An account the caller NAMES is an EXPLICIT CHOICE and the binding does not
+ * veto it (operator directive, 2026-09-10). Every producer of a named account
+ * at this seam is a control somebody worked: the board's launch draft, the
+ * orchestrator's create and rotate drafts, `spawn_agent`'s `accountId`. The
+ * binding is a default for what the Viewer picks BY ITSELF — that is what
+ * `explicitAccountChoice` has said since #1279, and the two switch seams have
+ * honoured it all along, while this one still refused. The refusal it produced
+ * was not theoretical: the rotate draft prefills the INCUMBENT's account, so a
+ * seat already running outside its project's pool could not be rotated at all.
+ *
+ * Nothing else is relaxed. Capacity is still not consulted for a named account
+ * and never was; authentication is still decided below by the engine's own
+ * health pass, which the named account now goes THROUGH rather than around; and
+ * the pick nobody named still draws from the pool only, still reports an
+ * exhausted pool, and still refuses on a record this process cannot read.
  */
 export async function resolveHealthySpawnAccount(
   engine: "claude" | "codex",
@@ -54,12 +66,26 @@ export async function resolveHealthySpawnAccount(
      cannot name, and resolves exactly as an unbound one always did. */
   project: string | null = null,
 ): Promise<HealthySpawnAccountResolution> {
-  const bindings = accountProjectBindings();
+  const named = requested === undefined || requested === null ? null : requested;
+  /* A DAMAGED record means two different things to this seam's two callers. To
+     the automatic pick it means "no pool can be seen", and nothing may be
+     picked — that refusal is the fence holding. To an explicit named choice it
+     means nothing at all: a file this process cannot parse is not a decision
+     anybody made, and it must not veto a control the operator exercised. Same
+     split as `explicitAccountChoice`, reached here rather than restated. */
+  let bindings: AccountProjectBinding[];
+  let recordUnreadable = false;
+  try {
+    bindings = accountProjectBindings();
+  } catch (error) {
+    if (named === null || !(error instanceof AccountProjectBindingsUnreadableError)) throw error;
+    bindings = [];
+    recordUnreadable = true;
+  }
   const allowedAccountIds = allowedAccountIdsForProject(project, engine, bindings);
   const allowed = allowedAccountIds === null ? null : new Set(allowedAccountIds);
   const registry = agentRegistry();
   const routing = registry.engineRouting(engine).activeAccountId ?? undefined;
-  const named = requested === undefined || requested === null ? null : requested;
   const selectionInput = {
     project,
     engine,
@@ -80,10 +106,18 @@ export async function resolveHealthySpawnAccount(
     throw new ProjectAccountRefusedError(automatic, engine, project);
   }
   if (named !== null) {
-    const pinned = selectProjectAccount({ ...selectionInput, requestedId: named });
+    const pinned = selectProjectAccount({ ...selectionInput, requestedId: named, requestedChoice: "explicit" });
+    /* `explicit` cannot answer `not_allowed`, so what is left here is a
+       malformed id — refused for what it is, in the one wording. */
     if (pinned.kind !== "available") throw new ProjectAccountRefusedError(pinned, engine, project);
   }
-  const active = automatic.kind === "available" ? automatic.accountId ?? undefined : undefined;
+  /* The automatic answer is also the FALLBACK the branches below reach for when
+     a named account turns out not to exist. On a record nobody could read there
+     is no such answer: the pool was invisible, so falling back would be the
+     machine picking with the fence unread. */
+  const active = automatic.kind === "available" && !recordUnreadable
+    ? automatic.accountId ?? undefined
+    : undefined;
   const routed = named ?? active;
   const missingRequested = classifySpawnAccountAdmission({
     enabled: false,
@@ -101,11 +135,17 @@ export async function resolveHealthySpawnAccount(
          account to fall back to either — so there is nothing left to launch on
          that this project's binding permits, and the original failure stands
          rather than being answered with an account outside the pool. */
-      if (automatic.kind !== "available") throw error;
+      if (active === undefined) throw error;
       return { ...contextForSpawn(engine, active), requestedAdmission: missingRequested };
     }
   }
-  const accounts = listClaudeAccounts().filter((account) => allowed === null || allowed.has(account.id));
+  /* The named account is a candidate whether or not the pool contains it — the
+     explicit choice above already decided that. Filtering it out here would
+     make the health pass answer `requestedExists: false` and quietly launch on
+     the automatic account instead, which is the substitution this seam refuses
+     to make in every other branch. */
+  const accounts = listClaudeAccounts().filter((account) =>
+    allowed === null || allowed.has(account.id) || account.id === named);
   const requestedExists = named === null || accounts.some((account) => account.id === named);
   try {
     const selected = await selectHealthyClaudeAccount(

@@ -38,8 +38,14 @@ export type AccountChoiceActor =
   | { kind: "operator" }
   | { kind: "agent"; conversationId: string };
 
-/** The control the choice came through, so the record names the gesture. */
-export type AccountChoiceVia = "structured-reconfigure" | "conversation-switch";
+/** The control the choice came through, so the record names the gesture.
+
+    `launch` is the third one and the last to arrive: a launch that NAMES an
+    account — the board's launch draft, the orchestrator's create and rotate
+    drafts, `spawn_agent`'s `accountId`. It used to be refused outright on a
+    bound project rather than attributed, which is the one seam that read this
+    record as a veto instead of a default. */
+export type AccountChoiceVia = "structured-reconfigure" | "conversation-switch" | "launch";
 
 /** Why the choice was outside the pool the project's work is normally drawn from. */
 export type AccountOverrideReason =
@@ -127,7 +133,7 @@ function overrideList(value: unknown): AccountProjectOverride[] {
         ? record.actorConversationId
         : null,
       conversationId: typeof record.conversationId === "string" && record.conversationId ? record.conversationId : null,
-      via: record.via === "conversation-switch" ? "conversation-switch" : "structured-reconfigure",
+      via: record.via === "conversation-switch" || record.via === "launch" ? record.via : "structured-reconfigure",
     }];
   });
 }
@@ -194,11 +200,13 @@ function appendOverride(override: AccountProjectOverride): { ok: true } | { ok: 
  * pool or on an unbound project: there is nothing to attribute, and every
  * caller's behaviour there is exactly what it always was.
  *
- * Both explicit switch seams call THIS, so neither can drift into refusing what
- * the other allows. Both call it AFTER their switch has been accepted, which is
- * what makes the record a statement about something that happened: an attempt
- * attributed before authentication, reservation and dispatch left the panel
- * showing an out-of-pool choice that was refused a moment later.
+ * Every explicit account seam calls THIS, so none can drift into refusing what
+ * another allows. Each calls it AFTER its own gesture has been accepted, which
+ * is what makes the record a statement about something that happened: an
+ * attempt attributed before authentication, reservation and dispatch left the
+ * panel showing an out-of-pool choice that was refused a moment later. For a
+ * launch that is the durable receipt — the point past which the account is what
+ * the work will run on.
  *
  * A journal that would not take the record does not pass quietly. The notice
  * says `recorded: false` and carries the reason, the caller's answer carries it

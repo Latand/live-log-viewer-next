@@ -278,28 +278,97 @@ test("the direct launch's health pass considers the pool's accounts and no other
   expect((unbound as { accountIds?: string[] }).accountIds).toContain(claudeSpare);
 });
 
-test("a named account outside the pool is refused at the direct launch seam, and capacity never speaks for it (#1279)", async () => {
-  /* A launch that NAMES an account is checked against the pool alone: the
-     reserved account is allowed and exhausted, and naming it still resolves,
-     because nobody may quietly substitute an account somebody asked for. */
+/**
+ * THE RULE #1279 SHIPPED WITH, AND THE HALF OF IT THE OPERATOR OVERTURNED.
+ *
+ * As shipped, a launch that NAMED an account was checked against the pool and
+ * REFUSED when the pool did not contain it. That refusal is now gone, by
+ * explicit operator directive (2026-09-10): the binding is a default for what
+ * the Viewer picks BY ITSELF, and a control a person works is a capability. It
+ * is the rule `explicitAccountChoice` has stated in `projectBindings.ts` since
+ * #1279 — the two switch seams honoured it and the launch seam did not.
+ *
+ * Do not restore the refusal. What it actually produced in production: the
+ * orchestrator's rotate draft prefills the INCUMBENT's account, so a seat that
+ * was already running outside its project's pool could not be rotated at all,
+ * and the panel answered "the last designation failed" over a live incumbent.
+ *
+ * The other half stands and is asserted beside it in every test below: nothing
+ * the Viewer picks by itself may leave the pool.
+ */
+test("an explicitly named account outside the pool LAUNCHES at the direct seam, and capacity never speaks for it", async () => {
   registryWith(spare, [observation(reserved, 100), observation(spare, 5)]);
   bind(reserved);
 
+  /* In the pool and exhausted: naming it still resolves — nobody may quietly
+     substitute an account somebody asked for, which is unchanged. */
   expect((await resolveHealthySpawnAccount("codex", reserved, ATLAS)).accountId).toBe(reserved);
-
-  const refused = await resolveHealthySpawnAccount("codex", spare, ATLAS)
-    .then(() => null, (error: unknown) => error);
-  expect((refused as Error).name).toBe("ProjectAccountRefusedError");
-  expect((refused as Error).message).toContain(`account ${spare} is not allowed on project ${ATLAS}`);
+  /* Outside the pool: the choice is carried out, on the account named. */
+  expect((await resolveHealthySpawnAccount("codex", spare, ATLAS)).accountId).toBe(spare);
 });
 
-test("a damaged binding record refuses the direct launch seam before it resolves anything (#1279)", () => {
+test("the AUTOMATIC pick still refuses the very account an explicit choice may have", async () => {
+  /* The same account, the same project, the same record — the difference is
+     only whether anybody named it. Both readings in one test on purpose: an
+     explicit choice widening the automatic pick is the failure mode this
+     change could have introduced. */
+  registryWith(spare, [observation(reserved, 5), observation(spare, 5)]);
+  bind(reserved);
+
+  expect((await resolveHealthySpawnAccount("codex", spare, ATLAS)).accountId).toBe(spare);
+  /* Nothing named: the pool decides, and the spare account is not in it. */
+  expect((await resolveHealthySpawnAccount("codex", undefined, ATLAS)).accountId).toBe(reserved);
+  /* And a PREFERENCE for it — the shape every automatic caller passes — is
+     still ordering only, so it cannot reach outside the pool either. */
+  const headless = accountManager.resolveHeadlessSpawn("codex", spare, [], ATLAS);
+  expect(headless.kind === "available" && headless.account.accountId).toBe(reserved);
+  const owned = accountManager.resolveProjectSpawn("codex", { project: ATLAS, requestedId: spare });
+  expect(owned.kind).toBe("not_allowed");
+});
+
+test("an explicitly named Claude account outside the pool goes THROUGH the health pass, not around it", async () => {
+  /* The named account must not be filtered out of the candidate set: filtered,
+     the pass reports "the request named nobody I have" and silently launches on
+     the automatic account instead — the substitution this seam refuses to make
+     everywhere else. Neither Claude home here carries a usable credential, so
+     the pass refuses BOTH; what this asserts is which account it was asked
+     about, read out of its own message. */
+  registryWith(spare, [], claudeReserved);
+  bind(claudeReserved, ATLAS, "claude");
+
+  const refused = await resolveHealthySpawnAccount("claude", claudeSpare, ATLAS)
+    .then(() => null, (error: unknown) => error);
+  expect(refused).not.toBeNull();
+  /* The failure is the health pass's own — an unauthenticated account is still
+     an unauthenticated account — and it names the account that was CHOSEN. */
+  expect((refused as Error).name).not.toBe("ProjectAccountRefusedError");
+  expect((refused as { accountIds?: string[] }).accountIds).toContain(claudeSpare);
+});
+
+test("a damaged binding record refuses the AUTOMATIC pick and stands out of an explicit choice's way", async () => {
   registryWith(spare, []);
   fs.mkdirSync(STATE, { recursive: true });
   fs.writeFileSync(RECORD, '{"schemaVersion":1,"bindings":[{"engine":"codex"', "utf8");
 
+  /* Nothing named: no pool can be seen, so nothing may be picked. */
   expect(resolveHealthySpawnAccount("codex", undefined, ATLAS))
     .rejects.toThrow(AccountProjectBindingsUnreadableError);
+  /* Named: a file this process cannot parse is not a decision anybody made,
+     and it does not get to veto a control the operator worked. */
+  expect((await resolveHealthySpawnAccount("codex", spare, ATLAS)).accountId).toBe(spare);
+});
+
+test("a damaged record leaves a named account that does NOT exist with nowhere to fall back to", async () => {
+  /* The fallback below the named account is the AUTOMATIC pick, and on an
+     unreadable record there isn't one. Falling back here would be the machine
+     selecting with the fence unread — the exact inversion the refusal above
+     exists to prevent, arrived at through the explicit path. */
+  registryWith(spare, []);
+  fs.mkdirSync(STATE, { recursive: true });
+  fs.writeFileSync(RECORD, '{"schemaVersion":1,"bindings":[{"engine":"codex"', "utf8");
+
+  expect(resolveHealthySpawnAccount("codex", "codex-account-that-was-deleted", ATLAS))
+    .rejects.toThrow();
 });
 
 /**
