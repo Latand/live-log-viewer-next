@@ -2142,6 +2142,35 @@ async function bridgeDirective(args: McpToolArgs, control: ViewerControlDependen
   }
   const manager: { conversationId: string; path: string | null } = { conversationId: seat.conversationId, path: seat.path };
 
+  /* NO CIRCLES (#1600). The recipient is the project's designated orchestrator,
+     so a caller that IS that orchestrator would relay the instruction to itself:
+     the operator watched exactly this — a seat with voice enabled announced it
+     would hand the finished reviews "to the manager", the directive arrived back
+     in its own conversation, and the work went undone while the board still
+     showed it as the manager.
+     The persona a call injects no longer tells a seat to relay (voicePersonaMandate),
+     which is the cause. This is the tool refusing to close the circle whatever it
+     is told — by an operator override, by a thread still carrying the old item, or
+     by a later prompt edit. The refusal SAYS WHAT TO DO INSTEAD, because an agent
+     that believes it must delegate and is merely blocked will keep retrying. */
+  /* Attribution reads process ancestry and can fault. When it does, this guard
+     stands down rather than refusing every relay: it is the SECOND layer, behind
+     the persona that no longer asks a seat to relay at all, and a defence in
+     depth that breaks the ordinary path when its input is unavailable is worse
+     than the loop it prevents. */
+  let callerConversationId: string | null = null;
+  try {
+    callerConversationId = attributionOf(dependencies).conversationId;
+  } catch {
+    callerConversationId = null;
+  }
+  if (callerConversationId && callerConversationId === manager.conversationId) {
+    throw new McpToolRefusal(
+      `you are the designated orchestrator for ${project}, so this directive would be addressed to you. Voice changes how you hear a request, not who acts on it: do this work yourself with your own tools. Relay only to an orchestrator that is not you.`,
+      { code: "directive_self_relay", project },
+    );
+  }
+
   const ref = args.ref;
   const trailer: BridgeTrailer | undefined = typeof ref === "number" && Number.isInteger(ref) && ref > 0
     ? { ref }

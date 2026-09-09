@@ -7,6 +7,7 @@ import {
   realtimeCallerFromRequest,
   realtimeConversationProject,
 } from "@/lib/runtime/realtimeInjection";
+import { voicePersonaVariantForConversation } from "@/lib/runtime/voicePersonaMandate";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import type { ApiError } from "@/lib/types";
 
@@ -44,6 +45,10 @@ export async function POST(req: NextRequest): Promise<NextResponse<Record<string
        `deliverWorkerResponse` to the peer holding the call's minted session id and
        to nobody else, whatever this resolves to. */
     operator: voiceTransportOperator(req),
+    /* #1600: enabling voice must not rewrite who this conversation is. Only a
+       session deliberately created as the voice front takes the coordinator
+       role; every other conversation keeps its own and gains a microphone. */
+    personaVariant: voicePersonaVariantForConversation(requestBody.conversationId),
   });
   return NextResponse.json(result.body, { status: result.status });
 }

@@ -60,6 +60,7 @@ import {
   legacyVoicePersonaBootstrapItemId,
   voicePersonaBootstrap,
   voicePersonaBootstrapIdentity,
+  type VoicePersonaVariant,
   type VoicePersonaBootstrap,
   type VoicePersonaBootstrapIdentity,
   type VoicePersonaBootstrapReceipt,
@@ -1814,7 +1815,16 @@ export class CodexAppServerHost implements EngineHost {
     ));
   }
 
-  async startRealtimeWebRtc(sdp: string): Promise<CodexRealtimeWebRtcResult> {
+  /**
+   * @param personaVariant which persona this call bootstraps into the thread.
+   *   Defaults to `modality`, the variant that assigns no role: a caller that did
+   *   not resolve the question has not established that this thread is the voice
+   *   front, and the coordinator mandate overwrites whatever role it finds.
+   */
+  async startRealtimeWebRtc(
+    sdp: string,
+    personaVariant: VoicePersonaVariant = "modality",
+  ): Promise<CodexRealtimeWebRtcResult> {
     if (this.dead || this.releasing || this.released || !this.writerFenceAllowsActuation()) {
       throw new Error("Codex app-server host is unavailable");
     }
@@ -1830,7 +1840,7 @@ export class CodexAppServerHost implements EngineHost {
        be reported against this one. */
     this.realtimeFailure = null;
     this.realtimeSessionId = null;
-    const personaBootstrapIdentity = voicePersonaBootstrapIdentity(this.identity.threadId);
+    const personaBootstrapIdentity = voicePersonaBootstrapIdentity(this.identity.threadId, personaVariant);
 
     let pendingStart!: PendingRealtimeStart;
     const answer = new Promise<CodexRealtimeWebRtcResult>((resolve, reject) => {
@@ -1848,7 +1858,7 @@ export class CodexAppServerHost implements EngineHost {
     void answer.catch(() => undefined);
 
     try {
-      const outcome = await this.ensureVoicePersonaBootstrap(personaBootstrapIdentity, pendingStart);
+      const outcome = await this.ensureVoicePersonaBootstrap(personaBootstrapIdentity, personaVariant, pendingStart);
       if (outcome === "superseded") return answer;
     } catch (error) {
       if (this.pendingRealtimeStart !== pendingStart) return answer;
@@ -1901,6 +1911,7 @@ export class CodexAppServerHost implements EngineHost {
 
   private async ensureVoicePersonaBootstrap(
     identity: VoicePersonaBootstrapIdentity,
+    variant: VoicePersonaVariant,
     pendingStart: PendingRealtimeStart,
   ): Promise<"accepted" | "superseded"> {
     await this.ensureCanonicalTranscriptPath();
@@ -1921,10 +1932,16 @@ export class CodexAppServerHost implements EngineHost {
         identity.itemId,
         "canonical scan unavailable; refusing insertion",
       );
-      const legacyExists = canonicalExists ? false : await this.scanVoicePersonaBootstrap(
-        legacyVoicePersonaBootstrapItemId(this.identity.threadId),
-        "legacy canonical scan unavailable; refusing insertion",
-      );
+      /* The pre-#870 row is a COORDINATOR persona — no other variant existed when
+         it was written — so it answers only a coordinator bootstrap. A modality
+         start that accepted it would read "this thread is already bootstrapped"
+         off the very item it exists to correct, and leave the session demoted. */
+      const legacyExists = canonicalExists || variant !== "coordinator"
+        ? false
+        : await this.scanVoicePersonaBootstrap(
+          legacyVoicePersonaBootstrapItemId(this.identity.threadId),
+          "legacy canonical scan unavailable; refusing insertion",
+        );
       if (canonicalExists || legacyExists) {
         this.voicePersonaBootstrapAccepted = true;
         this.unresolvedVoicePersonaBootstrap = null;
@@ -1933,7 +1950,7 @@ export class CodexAppServerHost implements EngineHost {
       if (this.pendingRealtimeStart !== pendingStart) return "superseded";
       if (this.voicePersonaBootstrapInsertion) continue;
 
-      const bootstrap = this.unresolvedVoicePersonaBootstrap ?? voicePersonaBootstrap(identity);
+      const bootstrap = this.unresolvedVoicePersonaBootstrap ?? voicePersonaBootstrap(identity, variant);
       this.unresolvedVoicePersonaBootstrap = bootstrap;
       const promise = this.insertVoicePersonaBootstrap(bootstrap, identity.itemId);
       const insertion = { owner: pendingStart, promise };

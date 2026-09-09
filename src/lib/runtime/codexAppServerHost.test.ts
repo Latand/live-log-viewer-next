@@ -22,7 +22,13 @@ import { adoptCodexRegistryHosts, bindCodexHostPersistence, persistCodexHost, st
 import { STRUCTURED_IMAGE_CAPABILITY, structuredContent, type StructuredImageRef } from "./structuredContent";
 import { materializeStructuredHostAccess, READ_ONLY_STAGE_PERMISSION_PROFILE } from "./structuredSpawn";
 import type { RuntimeVoiceDelivery } from "./voiceDelivery";
-import { DEFAULT_VOICE_PERSONA, VOICE_PERSONA_FILE, legacyVoicePersonaBootstrapItemId, voicePersona } from "./voicePersona";
+import {
+  COORDINATOR_VOICE_PERSONA,
+  VOICE_PERSONA_FILE,
+  legacyVoicePersonaBootstrapItemId,
+  voicePersona,
+  voicePersonaBootstrapIdentity,
+} from "./voicePersona";
 
 function deliveryDedup(operationId: string): string {
   return createHash("sha256").update(operationId).digest("hex");
@@ -588,7 +594,7 @@ describe("CodexAppServerHost", () => {
       type: "message",
       id: started.personaBootstrap.itemId,
       role: "developer",
-      content: [{ type: "input_text", text: voicePersona() }],
+      content: [{ type: "input_text", text: voicePersona("modality") }],
     }]);
     expect(server.requests.findIndex((request) => request.method === "thread/inject_items"))
       .toBeLessThan(server.requests.findIndex((request) => request.method === "thread/realtime/start"));
@@ -631,12 +637,12 @@ describe("CodexAppServerHost", () => {
         eventStore: new MemoryEventStore(),
         spawnProcess: fakeSpawn(firstServer),
       });
-      const first = await firstHost.startRealtimeWebRtc(offers[0]);
+      const first = await firstHost.startRealtimeWebRtc(offers[0], "coordinator");
       expect(first.personaBootstrap.insertion).toBe("accepted");
       await firstHost.stopRealtime();
 
       fs.writeFileSync(overridePath, "Changed after the call was resolved.\n");
-      const duplicate = await firstHost.startRealtimeWebRtc(offers[1]);
+      const duplicate = await firstHost.startRealtimeWebRtc(offers[1], "coordinator");
       expect(duplicate.personaBootstrap).toEqual(first.personaBootstrap);
       expect(firstServer.requests.filter((request) => request.method === "thread/inject_items")).toHaveLength(1);
       await firstHost.stopRealtime();
@@ -651,7 +657,7 @@ describe("CodexAppServerHost", () => {
         eventStore: new MemoryEventStore(),
         spawnProcess: fakeSpawn(resumedServer),
       });
-      const recovered = await resumedHost.startRealtimeWebRtc(offers[2]);
+      const recovered = await resumedHost.startRealtimeWebRtc(offers[2], "coordinator");
       expect(recovered.personaBootstrap).toEqual(first.personaBootstrap);
       expect(resumedServer.requests.filter((request) => request.method === "thread/inject_items")).toHaveLength(0);
 
@@ -693,7 +699,7 @@ describe("CodexAppServerHost", () => {
         spawnProcess: fakeSpawn(server),
       });
       try {
-        const started = await host.startRealtimeWebRtc(`v=0\r\na=ice-ufrag:${suffix}\r\n`);
+        const started = await host.startRealtimeWebRtc(`v=0\r\na=ice-ufrag:${suffix}\r\n`, "coordinator");
         expect(started.personaBootstrap.insertion).toBe("accepted");
         expect(started.personaBootstrap.itemId.length).toBeLessThanOrEqual(64);
         expect(server.requests.filter((request) => request.method === "thread/inject_items")).toHaveLength(0);
@@ -709,6 +715,61 @@ describe("CodexAppServerHost", () => {
     expect(personaRows).toHaveLength(1);
     expect(personaRows[0]?.payload?.id).toBe(legacyItemId);
     fs.rmSync(isolated, { recursive: true, force: true });
+  });
+
+  test("a thread already carrying a coordinator persona still receives the modality correction", async () => {
+    /* #1600, the half that cannot be undone. A thread demoted by a call taken
+       before this fix keeps that developer item forever — the transcript is
+       append-only. What CAN happen is that the next call adds the text that
+       outranks it, and that only works because the two variants own different
+       item ids: a shared id would read the coordinator row as proof that this
+       thread was already bootstrapped and inject nothing.
+
+       Both shapes of the old row are covered: the canonical one and the
+       pre-#870 legacy one, which is a coordinator persona by construction. */
+    for (const existing of ["canonical", "legacy"] as const) {
+      const isolated = fs.mkdtempSync(path.join(os.tmpdir(), "llv-voice-demoted-thread-"));
+      const threadId = "demoted-voice-thread";
+      const transcriptPath = path.join(isolated, "demoted.jsonl");
+      const priorItemId = existing === "legacy"
+        ? legacyVoicePersonaBootstrapItemId(threadId)
+        : voicePersonaBootstrapIdentity(threadId, "coordinator").itemId;
+      fs.writeFileSync(transcriptPath, `${JSON.stringify({
+        type: "response_item",
+        payload: {
+          type: "message",
+          id: priorItemId,
+          role: "developer",
+          content: [{ type: "input_text", text: COORDINATOR_VOICE_PERSONA }],
+        },
+      })}\n`);
+
+      const server = new FakeAppServer(threadId);
+      server.threadPath = transcriptPath;
+      const host = await CodexAppServerHost.adopt(threadId, {
+        cwd: "/repo",
+        eventStore: new MemoryEventStore(),
+        spawnProcess: fakeSpawn(server),
+      });
+      try {
+        const started = await host.startRealtimeWebRtc("v=0\r\na=ice-ufrag:correct\r\n", "modality");
+        expect(started.personaBootstrap.insertion).toBe("accepted");
+        expect(started.personaBootstrap.itemId)
+          .toBe(voicePersonaBootstrapIdentity(threadId, "modality").itemId);
+
+        const injected = server.requests.filter((request) => request.method === "thread/inject_items");
+        expect(injected).toHaveLength(1);
+        const item = (injected[0]?.params as { items: Array<{ id: string; content: Array<{ text: string }> }> }).items[0];
+        expect(item?.id).toBe(started.personaBootstrap.itemId);
+        expect(item?.content[0]?.text).toBe(voicePersona("modality"));
+        /* The correction, not a second copy of the demotion. */
+        expect(item?.content[0]?.text).not.toBe(COORDINATOR_VOICE_PERSONA);
+        await host.stopRealtime();
+      } finally {
+        await host.release();
+        fs.rmSync(isolated, { recursive: true, force: true });
+      }
+    }
   });
 
   test("seeds a resumed realtime call with the interrupted duplex tail in canonical order", async () => {
@@ -1059,7 +1120,7 @@ describe("CodexAppServerHost", () => {
     /* Written with surrounding whitespace, because the resolver trims and the
        injected item must carry the trimmed text. */
     fs.writeFileSync(overridePath, `  ${override}\n`);
-    expect(override).not.toBe(DEFAULT_VOICE_PERSONA);
+    expect(override).not.toBe(COORDINATOR_VOICE_PERSONA);
 
     const previousConfigHome = process.env.XDG_CONFIG_HOME;
     process.env.XDG_CONFIG_HOME = configDirectory;
@@ -1070,7 +1131,10 @@ describe("CodexAppServerHost", () => {
         eventStore: new MemoryEventStore(),
         spawnProcess: fakeSpawn(server),
       });
-      await host.startRealtimeWebRtc("v=0\r\noffer");
+      /* The override file is the coordinator variant's, so this is a coordinator
+         call — see `voicePersona`, where the modality variant deliberately keeps
+         the built-in text. */
+      await host.startRealtimeWebRtc("v=0\r\noffer", "coordinator");
 
       const injected = server.requests.find((request) => request.method === "thread/inject_items");
       const item = (injected?.params as {
@@ -5106,6 +5170,7 @@ test("a rejected persona insertion retries the same resolved payload and stable 
   try {
     const rejected = await host.startRealtimeWebRtc(
       "v=0\r\no=- 505 2 IN IP4 127.0.0.1\r\na=ice-ufrag:rejected\r\n",
+      "coordinator",
     );
     expect(rejected.personaBootstrap.insertion).toBe("rejected");
 
@@ -5113,6 +5178,7 @@ test("a rejected persona insertion retries the same resolved payload and stable 
     server.injectItemsError = null;
     const accepted = await host.startRealtimeWebRtc(
       "v=0\r\no=- 606 2 IN IP4 127.0.0.1\r\na=ice-ufrag:retry\r\n",
+      "coordinator",
     );
     expect(accepted.personaBootstrap.receiptId).toBe(rejected.personaBootstrap.receiptId);
     expect(accepted.personaBootstrap.itemId).toBe(rejected.personaBootstrap.itemId);
