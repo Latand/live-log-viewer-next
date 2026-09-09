@@ -257,7 +257,7 @@ function scaffoldPreview(scaffold: string, params: Record<string, string | numbe
 
 /** Everything a draft keeps in sessionStorage; called when the draft leaves the scheme. */
 export function clearDraftStorage(id: string) {
-  for (const name of ["engine", "model", "cwd", "cwdSeed", "text", "boot", "src", "parentConversationId", "effort", "speed", "accountId", "role", "roleParams", "reviews", "confirm"]) sessionStorage.removeItem(field(id, name));
+  for (const name of ["engine", "model", "cwd", "cwdSeed", "text", "boot", "src", "parentConversationId", "band", "effort", "speed", "accountId", "role", "roleParams", "reviews", "confirm"]) sessionStorage.removeItem(field(id, name));
 }
 
 /** Source transcript a handoff draft continues; empty for a plain draft. */
@@ -278,6 +278,18 @@ export function draftParentConversationId(id: string): string {
 export function setDraftSrc(id: string, src: string, parentConversationId?: string) {
   writeField(id, "src", src);
   writeField(id, "parentConversationId", parentConversationId ?? "");
+}
+
+/** Board band a band-local «+ Agent» draft belongs to (#1586); empty for a
+    global draft. The band layout places the draft inside that band, and a
+    `task:<id>` band records the assignment on the task once the launched
+    transcript exists. */
+export function draftBand(id: string): string {
+  return readField(id, "band");
+}
+
+export function setDraftBand(id: string, bandId: string) {
+  writeField(id, "band", bandId);
 }
 
 /** Seeds a fresh draft's first prompt, before it mounts — the «send a task to
@@ -767,6 +779,7 @@ export function DraftAgentPane({
       images: attachments.images.map((image) => ({ base64: image.base64, mime: image.mime })),
       src,
       ...(parentConversationId ? { parentConversationId } : {}),
+      ...(draftBand(draftId).startsWith("task:") ? { taskId: draftBand(draftId).slice("task:".length) } : {}),
       ...(roleId ? {
         role: roleId,
         roleParams,

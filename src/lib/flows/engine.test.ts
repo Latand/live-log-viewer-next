@@ -23,6 +23,7 @@ let releaseRelayDeliveries: Array<() => void> = [];
 process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-flow-engine-test-"));
 const { captureReviewHead, newRound, tickFlow, tickFlows, persistTickFlows, flowTickBase, reviewerLaunchPersisted, abandonLaunch, adoptSyntheticLaunchTakeover, recordHeadlessLaunch, relayFixOrPark, reserveReviewerSpawn, sendToImplementer, setRelayDeliveryForTest } = await import("./engine");
 const { loadFlows, outputPathFor, saveFlows, stderrPathFor, stdoutPathFor } = await import("./store");
+const tasksStore = await import("@/lib/tasks/store");
 
 afterAll(() => {
   fs.rmSync(process.env.LLV_STATE_DIR!, { recursive: true, force: true });
@@ -2827,4 +2828,45 @@ test("completed fix uses durable evidence despite a stale busy scanner projectio
   const flow = raceFlow({ implementerPath: entry.path, state: "fixing", createdAt: "2026-09-08T09:00:00Z", rounds: [] });
   await tickFlow(flow, [entry], new Map([[entry.path, entry]]), () => {});
   expect(flow.state).toBe("spawning");
+});
+
+test("a flow reviewer joins the task its implementer holds; an implementer without one gets a flow fallback binding both (#1586)", () => {
+  const { loadTasks, saveTasks } = tasksStore;
+  const registry = new AgentRegistry(path.join(process.env.LLV_STATE_DIR!, "review-membership-registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const implementer = registry.ensureConversation("codex", "/sessions/membership-implementer.jsonl", "terra");
+  saveTasks([{
+    id: "implementer-task",
+    project: "viewer",
+    status: "assigned",
+    text: "Ship reviewer membership",
+    placement: "unplaced",
+    assignments: [{ path: "/sessions/membership-implementer.jsonl", conversationId: implementer.id, panePid: null, state: "delivered", error: null, at: "2026-09-09T12:00:00.000Z" }],
+    createdAt: "2026-09-09T12:00:00.000Z",
+    updatedAt: "2026-09-09T12:00:00.000Z",
+  }]);
+  const flow = {
+    id: "flow-membership",
+    project: "viewer",
+    cwd: "/repo",
+    spec: "Ship reviewer membership",
+    implementerPath: "/sessions/membership-implementer.jsonl",
+    implementerConversationId: implementer.id,
+    roles: { reviewer: { engine: "codex", model: null, effort: "xhigh" } },
+    rounds: [],
+  } as unknown as Flow;
+  const round = newRound(flow, "button", null);
+  const begun = reserveReviewerSpawn(flow, round, flow.roles.reviewer, "terra", registry);
+  expect(begun.kind).toBe("created");
+  expect(loadTasks().map((task) => task.id)).toEqual(["implementer-task"]);
+  expect(loadTasks()[0]!.assignments.map((assignment) => [assignment.conversationId, assignment.state])).toEqual([[implementer.id, "delivered"], [begun.receipt.conversationId, "linked"]]);
+
+  const legacy = registry.ensureConversation("codex", "/sessions/legacy-implementer.jsonl", "terra");
+  const legacyFlow = { ...flow, id: "flow-legacy", implementerPath: "/sessions/legacy-implementer.jsonl", implementerConversationId: legacy.id, rounds: [] } as unknown as Flow;
+  const legacyRound = newRound(legacyFlow, "button", null);
+  const fallback = reserveReviewerSpawn(legacyFlow, legacyRound, legacyFlow.roles.reviewer, "terra", registry);
+  const tasks = loadTasks();
+  expect(tasks.length).toBe(2);
+  const created = tasks.find((task) => task.id !== "implementer-task")!;
+  expect(created.origin).toEqual({ kind: "flow", key: "flow-legacy", refinement: "pending" });
+  expect(created.assignments.map((assignment) => assignment.conversationId).sort()).toEqual([fallback.receipt.conversationId, legacy.id].sort());
 });

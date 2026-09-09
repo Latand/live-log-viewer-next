@@ -27,7 +27,7 @@ import { TaskStrip } from "./BranchPane";
 import { MobileInlineCatalog, useMobileInlineCatalog } from "./mobile/MobileInlineCatalog";
 import { deriveOrchestratorPanelState, resolveSeatFile } from "./orchestrator/seatState";
 import { ConversationList } from "./ConversationList";
-import { clearDraftStorage, draftCwd, draftParentConversationId, draftSrc, resolveSystemDraftCwd, setDraftCwd, setDraftSrc, setDraftText } from "./DraftAgentPane";
+import { clearDraftStorage, draftBand, draftCwd, draftParentConversationId, draftSrc, resolveSystemDraftCwd, setDraftBand, setDraftCwd, setDraftSrc, setDraftText } from "./DraftAgentPane";
 import { OrchestratorPanelToggle } from "./orchestrator/OrchestratorPanelToggle";
 import { useOrchestratorSeat } from "./orchestrator/useOrchestratorSeat";
 import { useOrchestratorIncumbent } from "./orchestrator/useOrchestratorIncumbent";
@@ -1244,6 +1244,24 @@ function ProjectDashboardView({
     pendingFocusRef.current = "draft::" + id;
   };
 
+  /* Band-local «+ Agent» (#1586): the draft carries its band so the band layout
+     seats it after the band's last member, and the launch request carries the
+     task id so the spawn route commits the membership before the agent starts. */
+  const draftBands = useMemo(
+    () => new Map(drafts.flatMap((id) => { const band = draftBand(id); return band ? [[id, band] as const] : []; })),
+    [drafts],
+  );
+  const addBandAgentDraft = (band: { id: string; task: BoardTask | null; title: string }) => {
+    if (!loaded) return;
+    onUserNavigate?.();
+    const id = newDraftId();
+    if (band.task) setDraftText(id, band.task.text);
+    setDraftBand(id, band.id);
+    setDraftCwd(id, initialDraftCwd);
+    persistDrafts([...drafts, id]);
+    pendingFocusRef.current = "draft::" + id;
+  };
+
   /* `+ Пайплайн` (#136, #196, #388): the picker admits a repository before it
      creates a DRAFT. Its world-space PipelineGroup opens with the full role
      chain and shared editor before the first run. */
@@ -2320,6 +2338,8 @@ function ProjectDashboardView({
                 onTaskCollapse={(task) => setTaskExpanded(task.id, false)}
                 builderPipelineId={builderPipelineId}
                 onBuilderOpened={() => setBuilderPipelineId(null)}
+                draftBands={draftBands}
+                onAddAgent={addBandAgentDraft}
               />
             ) : listAvailable ? (
               <ConversationList project={project} enabled={loaded && projectView === "list"} onOpen={openFullCatalogFile} />

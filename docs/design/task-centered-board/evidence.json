@@ -1,0 +1,2970 @@
+{
+  "density": "dense",
+  "tasks": 25,
+  "conversations": 103,
+  "frames": [
+    {
+      "file": "dense-light-1280x800-z7.png",
+      "theme": "light",
+      "viewport": "1280x800",
+      "zoom": 0.07,
+      "availableWidth": 1032,
+      "bands": 25,
+      "firstBands": [
+        {
+          "id": "task:task-1586-00",
+          "task": "task-1586-00",
+          "working": 2,
+          "rect": {
+            "x": 23.999053955078125,
+            "y": 72.00001525878906,
+            "width": 983.9998779296875,
+            "height": 323.9993896484375
+          }
+        },
+        {
+          "id": "task:task-1586-01",
+          "task": "task-1586-01",
+          "working": 2,
+          "rect": {
+            "x": 23.999053955078125,
+            "y": 412.0009460449219,
+            "width": 983.9998779296875,
+            "height": 179.99954223632812
+          }
+        },
+        {
+          "id": "task:task-1586-04",
+          "task": "task-1586-04",
+          "working": 2,
+          "rect": {
+            "x": 23.999053955078125,
+            "y": 608.0009765625,
+            "width": 983.9998779296875,
+            "height": 143.99981689453125
+          }
+        },
+        {
+          "id": "task:task-1586-02",
+          "task": "task-1586-02",
+          "working": 1,
+          "rect": {
+            "x": 23.999053955078125,
+            "y": 768.0001831054688,
+            "width": 983.9998779296875,
+            "height": 143.9998779296875
+          }
+        }
+      ]
+    },
+    {
+      "file": "dense-light-1280x800-z21.png",
+      "theme": "light",
+      "viewport": "1280x800",
+      "zoom": 0.21,
+      "availableWidth": 1032,
+      "bands": 25,
+      "firstBands": [
+        {
+          "id": "task:task-1586-00",
+          "task": "task-1586-00",
+          "working": 2,
+          "rect": {
+            "x": 23.999053955078125,
+            "y": 71.99996948242188,
+            "width": 983.9976806640625,
+            "height": 323.9971923828125
+          }
+        },
+        {
+          "id": "task:task-1586-01",
+          "task": "task-1586-01",
+          "working": 2,
+          "rect": {
+            "x": 23.999053955078125,
+            "y": 411.99981689453125,
+            "width": 983.9976806640625,
+            "height": 179.99951171875
+          }
+        },
+        {
+          "id": "task:task-1586-04",
+          "task": "task-1586-04",
+          "working": 2,
+          "rect": {
+            "x": 23.999053955078125,
+            "y": 607.9987182617188,
+            "width": 983.9976806640625,
+            "height": 143.99761962890625
+          }
+        },
+        {
+          "id": "task:task-1586-02",
+          "task": "task-1586-02",
+          "working": 1,
+          "rect": {
+            "x": 23.999053955078125,
+            "y": 767.9990234375,
+            "width": 983.9976806640625,
+            "height": 143.99761962890625
+          }
+        }
+      ]
+    },
+    {
+      "file": "dense-light-1280x800-z22.png",
+      "theme": "light",
+      "viewport": "1280x800",
+      "zoom": 0.22,
+      "availableWidth": 1032,
+      "bands": 25,
+      "firstBands": [
+        {
+          "id": "task:task-1586-00",
+          "task": "task-1586-00",
+          "working": 2,
+          "rect": {
+            "x": 23.9971923828125,
+            "y": 72.00000762939453,
+            "width": 983.9981689453125,
+            "height": 323.99810791015625
+          }
+        },
+        {
+          "id": "task:task-1586-01",
+          "task": "task-1586-01",
+          "working": 2,
+          "rect": {
+            "x": 23.9971923828125,
+            "y": 411.99969482421875,
+            "width": 983.9981689453125,
+            "height": 179.997802734375
+          }
+        },
+        {
+          "id": "task:task-1586-04",
+          "task": "task-1586-04",
+          "working": 2,
+          "rect": {
+            "x": 23.9971923828125,
+            "y": 608.0025024414062,
+            "width": 983.9981689453125,
+            "height": 143.99688720703125
+          }
+        },
+        {
+          "id": "task:task-1586-02",
+          "task": "task-1586-02",
+          "working": 1,
+          "rect": {
+            "x": 23.9971923828125,
+            "y": 768.0009155273438,
+            "width": 983.9981689453125,
+            "height": 143.99688720703125
+          }
+        }
+      ]
+    },
+    {
+      "file": "dense-light-1280x800-z40.png",
+      "theme": "light",
+      "viewport": "1280x800",
+      "zoom": 0.4,
+      "availableWidth": 1032,
+      "bands": 25,
+      "firstBands": [
+        {
+          "id": "task:task-1586-00",
+          "task": "task-1586-00",
+          "working": 2,
+          "rect": {
+            "x": 24,
+            "y": 72.00001525878906,
+            "width": 984,
+            "height": 2352
+          }
+        },
+        {
+          "id": "task:task-1586-01",
+          "task": "task-1586-01",
+          "working": 2,
+          "rect": {
+            "x": 24,
+            "y": 2440,
+            "width": 984,
+            "height": 816
+          }
+        },
+        {
+          "id": "task:task-1586-04",
+          "task": "task-1586-04",
+          "working": 2,
+          "rect": {
+            "x": 24,
+            "y": 3272,
+            "width": 984,
+            "height": 624
+          }
+        },
+        {
+          "id": "task:task-1586-02",
+          "task": "task-1586-02",
+          "working": 1,
+          "rect": {
+            "x": 24,
+            "y": 3912,
+            "width": 984,
+            "height": 728
+          }
+        }
+      ]
+    },
+    {
+      "file": "dense-light-1280x800-z58.png",
+      "theme": "light",
+      "viewport": "1280x800",
+      "zoom": 0.58,
+      "availableWidth": 1032,
+      "bands": 25,
+      "firstBands": [
+        {
+          "id": "task:task-1586-00",
+          "task": "task-1586-00",
+          "working": 2,
+          "rect": {
+            "x": 23.99749755859375,
+            "y": 72,
+            "width": 983.9971313476562,
+            "height": 2351.99951171875
+          }
+        },
+        {
+          "id": "task:task-1586-01",
+          "task": "task-1586-01",
+          "working": 2,
+          "rect": {
+            "x": 23.99749755859375,
+            "y": 2439.994873046875,
+            "width": 983.9971313476562,
+            "height": 815.99658203125
+          }
+        },
+        {
+          "id": "task:task-1586-04",
+          "task": "task-1586-04",
+          "working": 2,
+          "rect": {
+            "x": 23.99749755859375,
+            "y": 3271.995849609375,
+            "width": 983.9971313476562,
+            "height": 623.998291015625
+          }
+        },
+        {
+          "id": "task:task-1586-02",
+          "task": "task-1586-02",
+          "working": 1,
+          "rect": {
+            "x": 23.99749755859375,
+            "y": 3911.99853515625,
+            "width": 983.9971313476562,
+            "height": 727.99951171875
+          }
+        }
+      ]
+    },
+    {
+      "file": "dense-light-1280x800-z100.png",
+      "theme": "light",
+      "viewport": "1280x800",
+      "zoom": 1,
+      "availableWidth": 1032,
+      "bands": 25,
+      "firstBands": [
+        {
+          "id": "task:task-1586-00",
+          "task": "task-1586-00",
+          "working": 2,
+          "rect": {
+            "x": 24,
+            "y": 72,
+            "width": 984,
+            "height": 2352
+          }
+        },
+        {
+          "id": "task:task-1586-01",
+          "task": "task-1586-01",
+          "working": 2,
+          "rect": {
+            "x": 24,
+            "y": 2440,
+            "width": 984,
+            "height": 816
+          }
+        },
+        {
+          "id": "task:task-1586-04",
+          "task": "task-1586-04",
+          "working": 2,
+          "rect": {
+            "x": 24,
+            "y": 3272,
+            "width": 984,
+            "height": 624
+          }
+        },
+        {
+          "id": "task:task-1586-02",
+          "task": "task-1586-02",
+          "working": 1,
+          "rect": {
+            "x": 24,
+            "y": 3912,
+            "width": 984,
+            "height": 728
+          }
+        }
+      ]
+    },
+    {
+      "file": "dense-light-1440x900-z7.png",
+      "theme": "light",
+      "viewport": "1440x900",
+      "zoom": 0.07,
+      "availableWidth": 1192,
+      "bands": 25,
+      "firstBands": [
+        {
+          "id": "task:task-1586-00",
+          "task": "task-1586-00",
+          "working": 2,
+          "rect": {
+            "x": 23.999053955078125,
+            "y": 72,
+            "width": 1143.9991455078125,
+            "height": 287.99969482421875
+          }
+        },
+        {
+          "id": "task:task-1586-01",
+          "task": "task-1586-01",
+          "working": 2,
+          "rect": {
+            "x": 23.999053955078125,
+            "y": 376.0001525878906,
+            "width": 1143.9991455078125,
+            "height": 143.99984741210938
+          }
+        },
+        {
+          "id": "task:task-1586-04",
+          "task": "task-1586-04",
+          "working": 2,
+          "rect": {
+            "x": 23.999053955078125,
+            "y": 536.00048828125,
+            "width": 1143.9991455078125,
+            "height": 143.99981689453125
+          }
+        },
+        {
+          "id": "task:task-1586-02",
+          "task": "task-1586-02",
+          "working": 1,
+          "rect": {
+            "x": 23.999053955078125,
+            "y": 696.000732421875,
+            "width": 1143.9991455078125,
+            "height": 143.9998779296875
+          }
+        }
+      ]
+    },
+    {
+      "file": "dense-light-1440x900-z21.png",
+      "theme": "light",
+      "viewport": "1440x900",
+      "zoom": 0.21,
+      "availableWidth": 1192,
+      "bands": 25,
+      "firstBands": [
+        {
+          "id": "task:task-1586-00",
+          "task": "task-1586-00",
+          "working": 2,
+          "rect": {
+            "x": 23.999053955078125,
+            "y": 71.99998474121094,
+            "width": 1143.9979248046875,
+            "height": 287.99859619140625
+          }
+        },
+        {
+          "id": "task:task-1586-01",
+          "task": "task-1586-01",
+          "working": 2,
+          "rect": {
+            "x": 23.999053955078125,
+            "y": 375.9979248046875,
+            "width": 1143.9979248046875,
+            "height": 143.9976806640625
+          }
+        },
+        {
+          "id": "task:task-1586-04",
+          "task": "task-1586-04",
+          "working": 2,
+          "rect": {
+            "x": 23.999053955078125,
+            "y": 535.9982299804688,
+            "width": 1143.9979248046875,
+            "height": 143.9976806640625
+          }
+        },
+        {
+          "id": "task:task-1586-02",
+          "task": "task-1586-02",
+          "working": 1,
+          "rect": {
+            "x": 23.999053955078125,
+            "y": 695.99853515625,
+            "width": 1143.9979248046875,
+            "height": 143.9976806640625
+          }
+        }
+      ]
+    },
+    {
+      "file": "dense-light-1440x900-z22.png",
+      "theme": "light",
+      "viewport": "1440x900",
+      "zoom": 0.22,
+      "availableWidth": 1192,
+      "bands": 25,
+      "firstBands": [
+        {
+          "id": "task:task-1586-00",
+          "task": "task-1586-00",
+          "working": 2,
+          "rect": {
+            "x": 23.9971923828125,
+            "y": 72,
+            "width": 1144,
+            "height": 287.9971923828125
+          }
+        },
+        {
+          "id": "task:task-1586-01",
+          "task": "task-1586-01",
+          "working": 2,
+          "rect": {
+            "x": 23.9971923828125,
+            "y": 376.0021667480469,
+            "width": 1144,
+            "height": 143.99691772460938
+          }
+        },
+        {
+          "id": "task:task-1586-04",
+          "task": "task-1586-04",
+          "working": 2,
+          "rect": {
+            "x": 23.9971923828125,
+            "y": 536.0006103515625,
+            "width": 1144,
+            "height": 143.99688720703125
+          }
+        },
+        {
+          "id": "task:task-1586-02",
+          "task": "task-1586-02",
+          "working": 1,
+          "rect": {
+            "x": 23.9971923828125,
+            "y": 696.0025024414062,
+            "width": 1144,
+            "height": 143.99688720703125
+          }
+        }
+      ]
+    },
+    {
+      "file": "dense-light-1440x900-z40.png",
+      "theme": "light",
+      "viewport": "1440x900",
+      "zoom": 0.4,
+      "availableWidth": 1192,
+      "bands": 25,
+      "firstBands": [
+        {
+          "id": "task:task-1586-00",
+          "task": "task-1586-00",
+          "working": 2,
+          "rect": {
+            "x": 24,
+            "y": 72,
+            "width": 1144,
+            "height": 1660
+          }
+        },
+        {
+          "id": "task:task-1586-01",
+          "task": "task-1586-01",
+          "working": 2,
+          "rect": {
+            "x": 24,
+            "y": 1748,
+            "width": 1144,
+            "height": 624
+          }
+        },
+        {
+          "id": "task:task-1586-04",
+          "task": "task-1586-04",
+          "working": 2,
+          "rect": {
+            "x": 24,
+            "y": 2388,
+            "width": 1144,
+            "height": 432
+          }
+        },
+        {
+          "id": "task:task-1586-02",
+          "task": "task-1586-02",
+          "working": 1,
+          "rect": {
+            "x": 24,
+            "y": 2836,
+            "width": 1144,
+            "height": 536
+          }
+        }
+      ]
+    },
+    {
+      "file": "dense-light-1440x900-z58.png",
+      "theme": "light",
+      "viewport": "1440x900",
+      "zoom": 0.58,
+      "availableWidth": 1192,
+      "bands": 25,
+      "firstBands": [
+        {
+          "id": "task:task-1586-00",
+          "task": "task-1586-00",
+          "working": 2,
+          "rect": {
+            "x": 23.99749755859375,
+            "y": 72,
+            "width": 1143.99560546875,
+            "height": 1659.99609375
+          }
+        },
+        {
+          "id": "task:task-1586-01",
+          "task": "task-1586-01",
+          "working": 2,
+          "rect": {
+            "x": 23.99749755859375,
+            "y": 1748.00048828125,
+            "width": 1143.99560546875,
+            "height": 623.99853515625
+          }
+        },
+        {
+          "id": "task:task-1586-04",
+          "task": "task-1586-04",
+          "working": 2,
+          "rect": {
+            "x": 23.99749755859375,
+            "y": 2387.994140625,
+            "width": 1143.99560546875,
+            "height": 431.991455078125
+          }
+        },
+        {
+          "id": "task:task-1586-02",
+          "task": "task-1586-02",
+          "working": 1,
+          "rect": {
+            "x": 23.99749755859375,
+            "y": 2835.9990234375,
+            "width": 1143.99560546875,
+            "height": 535.992431640625
+          }
+        }
+      ]
+    },
+    {
+      "file": "dense-light-1440x900-z100.png",
+      "theme": "light",
+      "viewport": "1440x900",
+      "zoom": 1,
+      "availableWidth": 1192,
+      "bands": 25,
+      "firstBands": [
+        {
+          "id": "task:task-1586-00",
+          "task": "task-1586-00",
+          "working": 2,
+          "rect": {
+            "x": 24,
+            "y": 72,
+            "width": 1144,
+            "height": 1660
+          }
+        },
+        {
+          "id": "task:task-1586-01",
+          "task": "task-1586-01",
+          "working": 2,
+          "rect": {
+            "x": 24,
+            "y": 1748,
+            "width": 1144,
+            "height": 624
+          }
+        },
+        {
+          "id": "task:task-1586-04",
+          "task": "task-1586-04",
+          "working": 2,
+          "rect": {
+            "x": 24,
+            "y": 2388,
+            "width": 1144,
+            "height": 432
+          }
+        },
+        {
+          "id": "task:task-1586-02",
+          "task": "task-1586-02",
+          "working": 1,
+          "rect": {
+            "x": 24,
+            "y": 2836,
+            "width": 1144,
+            "height": 536
+          }
+        }
+      ]
+    },
+    {
+      "file": "dense-dock-open-z21.png",
+      "dock": true,
+      "zoom": 0.21,
+      "availableWidth": 752,
+      "bandWidth": 719.9981689453125
+    },
+    {
+      "file": "dense-dock-open-z58.png",
+      "dock": true,
+      "zoom": 0.58,
+      "availableWidth": 752,
+      "bandWidth": 719.9974975585938
+    },
+    {
+      "file": "dense-dock-open-z100.png",
+      "dock": true,
+      "zoom": 1,
+      "availableWidth": 752,
+      "bandWidth": 720
+    },
+    {
+      "file": "dense-light-1920x1080-z7.png",
+      "theme": "light",
+      "viewport": "1920x1080",
+      "zoom": 0.07,
+      "availableWidth": 1672,
+      "bands": 25,
+      "firstBands": [
+        {
+          "id": "task:task-1586-00",
+          "task": "task-1586-00",
+          "working": 2,
+          "rect": {
+            "x": 23.999053955078125,
+            "y": 71.99996948242188,
+            "width": 1624,
+            "height": 215.99920654296875
+          }
+        },
+        {
+          "id": "task:task-1586-01",
+          "task": "task-1586-01",
+          "working": 2,
+          "rect": {
+            "x": 23.999053955078125,
+            "y": 304.0007629394531,
+            "width": 1624,
+            "height": 143.99984741210938
+          }
+        },
+        {
+          "id": "task:task-1586-04",
+          "task": "task-1586-04",
+          "working": 2,
+          "rect": {
+            "x": 23.999053955078125,
+            "y": 463.9999694824219,
+            "width": 1624,
+            "height": 107.99905395507812
+          }
+        },
+        {
+          "id": "task:task-1586-02",
+          "task": "task-1586-02",
+          "working": 1,
+          "rect": {
+            "x": 23.999053955078125,
+            "y": 588.0006103515625,
+            "width": 1624,
+            "height": 143.99981689453125
+          }
+        }
+      ]
+    },
+    {
+      "file": "dense-light-1920x1080-z21.png",
+      "theme": "light",
+      "viewport": "1920x1080",
+      "zoom": 0.21,
+      "availableWidth": 1672,
+      "bands": 25,
+      "firstBands": [
+        {
+          "id": "task:task-1586-00",
+          "task": "task-1586-00",
+          "working": 2,
+          "rect": {
+            "x": 23.999053955078125,
+            "y": 72.00007629394531,
+            "width": 1623.9989013671875,
+            "height": 215.9981231689453
+          }
+        },
+        {
+          "id": "task:task-1586-01",
+          "task": "task-1586-01",
+          "working": 2,
+          "rect": {
+            "x": 23.999053955078125,
+            "y": 304.0008544921875,
+            "width": 1623.9989013671875,
+            "height": 143.99765014648438
+          }
+        },
+        {
+          "id": "task:task-1586-04",
+          "task": "task-1586-04",
+          "working": 2,
+          "rect": {
+            "x": 23.999053955078125,
+            "y": 463.99786376953125,
+            "width": 1623.9989013671875,
+            "height": 107.99908447265625
+          }
+        },
+        {
+          "id": "task:task-1586-02",
+          "task": "task-1586-02",
+          "working": 1,
+          "rect": {
+            "x": 23.999053955078125,
+            "y": 587.9996337890625,
+            "width": 1623.9989013671875,
+            "height": 143.99761962890625
+          }
+        }
+      ]
+    },
+    {
+      "file": "dense-light-1920x1080-z22.png",
+      "theme": "light",
+      "viewport": "1920x1080",
+      "zoom": 0.22,
+      "availableWidth": 1672,
+      "bands": 25,
+      "firstBands": [
+        {
+          "id": "task:task-1586-00",
+          "task": "task-1586-00",
+          "working": 2,
+          "rect": {
+            "x": 23.9971923828125,
+            "y": 72,
+            "width": 1623.998779296875,
+            "height": 215.99874877929688
+          }
+        },
+        {
+          "id": "task:task-1586-01",
+          "task": "task-1586-01",
+          "working": 2,
+          "rect": {
+            "x": 23.9971923828125,
+            "y": 304.00030517578125,
+            "width": 1623.998779296875,
+            "height": 143.99688720703125
+          }
+        },
+        {
+          "id": "task:task-1586-04",
+          "task": "task-1586-04",
+          "working": 2,
+          "rect": {
+            "x": 23.9971923828125,
+            "y": 464.0021667480469,
+            "width": 1623.998779296875,
+            "height": 107.99935913085938
+          }
+        },
+        {
+          "id": "task:task-1586-02",
+          "task": "task-1586-02",
+          "working": 1,
+          "rect": {
+            "x": 23.9971923828125,
+            "y": 587.9996948242188,
+            "width": 1623.998779296875,
+            "height": 143.99688720703125
+          }
+        }
+      ]
+    },
+    {
+      "file": "dense-light-1920x1080-z40.png",
+      "theme": "light",
+      "viewport": "1920x1080",
+      "zoom": 0.4,
+      "availableWidth": 1672,
+      "bands": 25,
+      "firstBands": [
+        {
+          "id": "task:task-1586-00",
+          "task": "task-1586-00",
+          "working": 2,
+          "rect": {
+            "x": 24,
+            "y": 72.00001525878906,
+            "width": 1624,
+            "height": 1200
+          }
+        },
+        {
+          "id": "task:task-1586-01",
+          "task": "task-1586-01",
+          "working": 2,
+          "rect": {
+            "x": 24,
+            "y": 1288,
+            "width": 1624,
+            "height": 432
+          }
+        },
+        {
+          "id": "task:task-1586-04",
+          "task": "task-1586-04",
+          "working": 2,
+          "rect": {
+            "x": 24,
+            "y": 1736,
+            "width": 1624,
+            "height": 432
+          }
+        },
+        {
+          "id": "task:task-1586-02",
+          "task": "task-1586-02",
+          "working": 1,
+          "rect": {
+            "x": 24,
+            "y": 2184,
+            "width": 1624,
+            "height": 432
+          }
+        }
+      ]
+    },
+    {
+      "file": "dense-light-1920x1080-z58.png",
+      "theme": "light",
+      "viewport": "1920x1080",
+      "zoom": 0.58,
+      "availableWidth": 1672,
+      "bands": 25,
+      "firstBands": [
+        {
+          "id": "task:task-1586-00",
+          "task": "task-1586-00",
+          "working": 2,
+          "rect": {
+            "x": 23.99749755859375,
+            "y": 72.00000762939453,
+            "width": 1624,
+            "height": 1199.9927978515625
+          }
+        },
+        {
+          "id": "task:task-1586-01",
+          "task": "task-1586-01",
+          "working": 2,
+          "rect": {
+            "x": 23.99749755859375,
+            "y": 1287.9971923828125,
+            "width": 1624,
+            "height": 431.9912109375
+          }
+        },
+        {
+          "id": "task:task-1586-04",
+          "task": "task-1586-04",
+          "working": 2,
+          "rect": {
+            "x": 23.99749755859375,
+            "y": 1736.0018310546875,
+            "width": 1624,
+            "height": 431.9910888671875
+          }
+        },
+        {
+          "id": "task:task-1586-02",
+          "task": "task-1586-02",
+          "working": 1,
+          "rect": {
+            "x": 23.99749755859375,
+            "y": 2183.997314453125,
+            "width": 1624,
+            "height": 431.9912109375
+          }
+        }
+      ]
+    },
+    {
+      "file": "dense-light-1920x1080-z100.png",
+      "theme": "light",
+      "viewport": "1920x1080",
+      "zoom": 1,
+      "availableWidth": 1672,
+      "bands": 25,
+      "firstBands": [
+        {
+          "id": "task:task-1586-00",
+          "task": "task-1586-00",
+          "working": 2,
+          "rect": {
+            "x": 24,
+            "y": 71.99999237060547,
+            "width": 1624,
+            "height": 1200
+          }
+        },
+        {
+          "id": "task:task-1586-01",
+          "task": "task-1586-01",
+          "working": 2,
+          "rect": {
+            "x": 24,
+            "y": 1288,
+            "width": 1624,
+            "height": 432
+          }
+        },
+        {
+          "id": "task:task-1586-04",
+          "task": "task-1586-04",
+          "working": 2,
+          "rect": {
+            "x": 24,
+            "y": 1736,
+            "width": 1624,
+            "height": 432
+          }
+        },
+        {
+          "id": "task:task-1586-02",
+          "task": "task-1586-02",
+          "working": 1,
+          "rect": {
+            "x": 24,
+            "y": 2184,
+            "width": 1624,
+            "height": 432
+          }
+        }
+      ]
+    },
+    {
+      "file": "dense-dark-1280x800-z7.png",
+      "theme": "dark",
+      "viewport": "1280x800",
+      "zoom": 0.07,
+      "availableWidth": 1032,
+      "bands": 25,
+      "firstBands": [
+        {
+          "id": "task:task-1586-00",
+          "task": "task-1586-00",
+          "working": 2,
+          "rect": {
+            "x": 23.999053955078125,
+            "y": 72.00001525878906,
+            "width": 983.9998779296875,
+            "height": 323.9993896484375
+          }
+        },
+        {
+          "id": "task:task-1586-01",
+          "task": "task-1586-01",
+          "working": 2,
+          "rect": {
+            "x": 23.999053955078125,
+            "y": 412.0009460449219,
+            "width": 983.9998779296875,
+            "height": 179.99954223632812
+          }
+        },
+        {
+          "id": "task:task-1586-04",
+          "task": "task-1586-04",
+          "working": 2,
+          "rect": {
+            "x": 23.999053955078125,
+            "y": 608.0009765625,
+            "width": 983.9998779296875,
+            "height": 143.99981689453125
+          }
+        },
+        {
+          "id": "task:task-1586-02",
+          "task": "task-1586-02",
+          "working": 1,
+          "rect": {
+            "x": 23.999053955078125,
+            "y": 768.0001831054688,
+            "width": 983.9998779296875,
+            "height": 143.9998779296875
+          }
+        }
+      ]
+    },
+    {
+      "file": "dense-dark-1280x800-z21.png",
+      "theme": "dark",
+      "viewport": "1280x800",
+      "zoom": 0.21,
+      "availableWidth": 1032,
+      "bands": 25,
+      "firstBands": [
+        {
+          "id": "task:task-1586-00",
+          "task": "task-1586-00",
+          "working": 2,
+          "rect": {
+            "x": 23.999053955078125,
+            "y": 71.99996948242188,
+            "width": 983.9976806640625,
+            "height": 323.9971923828125
+          }
+        },
+        {
+          "id": "task:task-1586-01",
+          "task": "task-1586-01",
+          "working": 2,
+          "rect": {
+            "x": 23.999053955078125,
+            "y": 411.99981689453125,
+            "width": 983.9976806640625,
+            "height": 179.99951171875
+          }
+        },
+        {
+          "id": "task:task-1586-04",
+          "task": "task-1586-04",
+          "working": 2,
+          "rect": {
+            "x": 23.999053955078125,
+            "y": 607.9987182617188,
+            "width": 983.9976806640625,
+            "height": 143.99761962890625
+          }
+        },
+        {
+          "id": "task:task-1586-02",
+          "task": "task-1586-02",
+          "working": 1,
+          "rect": {
+            "x": 23.999053955078125,
+            "y": 767.9990234375,
+            "width": 983.9976806640625,
+            "height": 143.99761962890625
+          }
+        }
+      ]
+    },
+    {
+      "file": "dense-dark-1280x800-z22.png",
+      "theme": "dark",
+      "viewport": "1280x800",
+      "zoom": 0.22,
+      "availableWidth": 1032,
+      "bands": 25,
+      "firstBands": [
+        {
+          "id": "task:task-1586-00",
+          "task": "task-1586-00",
+          "working": 2,
+          "rect": {
+            "x": 23.9971923828125,
+            "y": 72.00000762939453,
+            "width": 983.9981689453125,
+            "height": 323.99810791015625
+          }
+        },
+        {
+          "id": "task:task-1586-01",
+          "task": "task-1586-01",
+          "working": 2,
+          "rect": {
+            "x": 23.9971923828125,
+            "y": 411.99969482421875,
+            "width": 983.9981689453125,
+            "height": 179.997802734375
+          }
+        },
+        {
+          "id": "task:task-1586-04",
+          "task": "task-1586-04",
+          "working": 2,
+          "rect": {
+            "x": 23.9971923828125,
+            "y": 608.0025024414062,
+            "width": 983.9981689453125,
+            "height": 143.99688720703125
+          }
+        },
+        {
+          "id": "task:task-1586-02",
+          "task": "task-1586-02",
+          "working": 1,
+          "rect": {
+            "x": 23.9971923828125,
+            "y": 768.0009155273438,
+            "width": 983.9981689453125,
+            "height": 143.99688720703125
+          }
+        }
+      ]
+    },
+    {
+      "file": "dense-dark-1280x800-z40.png",
+      "theme": "dark",
+      "viewport": "1280x800",
+      "zoom": 0.4,
+      "availableWidth": 1032,
+      "bands": 25,
+      "firstBands": [
+        {
+          "id": "task:task-1586-00",
+          "task": "task-1586-00",
+          "working": 2,
+          "rect": {
+            "x": 24,
+            "y": 72.00001525878906,
+            "width": 984,
+            "height": 2352
+          }
+        },
+        {
+          "id": "task:task-1586-01",
+          "task": "task-1586-01",
+          "working": 2,
+          "rect": {
+            "x": 24,
+            "y": 2440,
+            "width": 984,
+            "height": 816
+          }
+        },
+        {
+          "id": "task:task-1586-04",
+          "task": "task-1586-04",
+          "working": 2,
+          "rect": {
+            "x": 24,
+            "y": 3272,
+            "width": 984,
+            "height": 624
+          }
+        },
+        {
+          "id": "task:task-1586-02",
+          "task": "task-1586-02",
+          "working": 1,
+          "rect": {
+            "x": 24,
+            "y": 3912,
+            "width": 984,
+            "height": 728
+          }
+        }
+      ]
+    },
+    {
+      "file": "dense-dark-1280x800-z58.png",
+      "theme": "dark",
+      "viewport": "1280x800",
+      "zoom": 0.58,
+      "availableWidth": 1032,
+      "bands": 25,
+      "firstBands": [
+        {
+          "id": "task:task-1586-00",
+          "task": "task-1586-00",
+          "working": 2,
+          "rect": {
+            "x": 23.99749755859375,
+            "y": 72,
+            "width": 983.9971313476562,
+            "height": 2351.99951171875
+          }
+        },
+        {
+          "id": "task:task-1586-01",
+          "task": "task-1586-01",
+          "working": 2,
+          "rect": {
+            "x": 23.99749755859375,
+            "y": 2439.994873046875,
+            "width": 983.9971313476562,
+            "height": 815.99658203125
+          }
+        },
+        {
+          "id": "task:task-1586-04",
+          "task": "task-1586-04",
+          "working": 2,
+          "rect": {
+            "x": 23.99749755859375,
+            "y": 3271.995849609375,
+            "width": 983.9971313476562,
+            "height": 623.998291015625
+          }
+        },
+        {
+          "id": "task:task-1586-02",
+          "task": "task-1586-02",
+          "working": 1,
+          "rect": {
+            "x": 23.99749755859375,
+            "y": 3911.99853515625,
+            "width": 983.9971313476562,
+            "height": 727.99951171875
+          }
+        }
+      ]
+    },
+    {
+      "file": "dense-dark-1280x800-z100.png",
+      "theme": "dark",
+      "viewport": "1280x800",
+      "zoom": 1,
+      "availableWidth": 1032,
+      "bands": 25,
+      "firstBands": [
+        {
+          "id": "task:task-1586-00",
+          "task": "task-1586-00",
+          "working": 2,
+          "rect": {
+            "x": 24,
+            "y": 72,
+            "width": 984,
+            "height": 2352
+          }
+        },
+        {
+          "id": "task:task-1586-01",
+          "task": "task-1586-01",
+          "working": 2,
+          "rect": {
+            "x": 24,
+            "y": 2440,
+            "width": 984,
+            "height": 816
+          }
+        },
+        {
+          "id": "task:task-1586-04",
+          "task": "task-1586-04",
+          "working": 2,
+          "rect": {
+            "x": 24,
+            "y": 3272,
+            "width": 984,
+            "height": 624
+          }
+        },
+        {
+          "id": "task:task-1586-02",
+          "task": "task-1586-02",
+          "working": 1,
+          "rect": {
+            "x": 24,
+            "y": 3912,
+            "width": 984,
+            "height": 728
+          }
+        }
+      ]
+    },
+    {
+      "file": "dense-dark-1440x900-z7.png",
+      "theme": "dark",
+      "viewport": "1440x900",
+      "zoom": 0.07,
+      "availableWidth": 1192,
+      "bands": 25,
+      "firstBands": [
+        {
+          "id": "task:task-1586-00",
+          "task": "task-1586-00",
+          "working": 2,
+          "rect": {
+            "x": 23.999053955078125,
+            "y": 72,
+            "width": 1143.9991455078125,
+            "height": 287.99969482421875
+          }
+        },
+        {
+          "id": "task:task-1586-01",
+          "task": "task-1586-01",
+          "working": 2,
+          "rect": {
+            "x": 23.999053955078125,
+            "y": 376.0001525878906,
+            "width": 1143.9991455078125,
+            "height": 143.99984741210938
+          }
+        },
+        {
+          "id": "task:task-1586-04",
+          "task": "task-1586-04",
+          "working": 2,
+          "rect": {
+            "x": 23.999053955078125,
+            "y": 536.00048828125,
+            "width": 1143.9991455078125,
+            "height": 143.99981689453125
+          }
+        },
+        {
+          "id": "task:task-1586-02",
+          "task": "task-1586-02",
+          "working": 1,
+          "rect": {
+            "x": 23.999053955078125,
+            "y": 696.000732421875,
+            "width": 1143.9991455078125,
+            "height": 143.9998779296875
+          }
+        }
+      ]
+    },
+    {
+      "file": "dense-dark-1440x900-z21.png",
+      "theme": "dark",
+      "viewport": "1440x900",
+      "zoom": 0.21,
+      "availableWidth": 1192,
+      "bands": 25,
+      "firstBands": [
+        {
+          "id": "task:task-1586-00",
+          "task": "task-1586-00",
+          "working": 2,
+          "rect": {
+            "x": 23.999053955078125,
+            "y": 71.99998474121094,
+            "width": 1143.9979248046875,
+            "height": 287.99859619140625
+          }
+        },
+        {
+          "id": "task:task-1586-01",
+          "task": "task-1586-01",
+          "working": 2,
+          "rect": {
+            "x": 23.999053955078125,
+            "y": 375.9979248046875,
+            "width": 1143.9979248046875,
+            "height": 143.9976806640625
+          }
+        },
+        {
+          "id": "task:task-1586-04",
+          "task": "task-1586-04",
+          "working": 2,
+          "rect": {
+            "x": 23.999053955078125,
+            "y": 535.9982299804688,
+            "width": 1143.9979248046875,
+            "height": 143.9976806640625
+          }
+        },
+        {
+          "id": "task:task-1586-02",
+          "task": "task-1586-02",
+          "working": 1,
+          "rect": {
+            "x": 23.999053955078125,
+            "y": 695.99853515625,
+            "width": 1143.9979248046875,
+            "height": 143.9976806640625
+          }
+        }
+      ]
+    },
+    {
+      "file": "dense-dark-1440x900-z22.png",
+      "theme": "dark",
+      "viewport": "1440x900",
+      "zoom": 0.22,
+      "availableWidth": 1192,
+      "bands": 25,
+      "firstBands": [
+        {
+          "id": "task:task-1586-00",
+          "task": "task-1586-00",
+          "working": 2,
+          "rect": {
+            "x": 23.9971923828125,
+            "y": 72,
+            "width": 1144,
+            "height": 287.9971923828125
+          }
+        },
+        {
+          "id": "task:task-1586-01",
+          "task": "task-1586-01",
+          "working": 2,
+          "rect": {
+            "x": 23.9971923828125,
+            "y": 376.0021667480469,
+            "width": 1144,
+            "height": 143.99691772460938
+          }
+        },
+        {
+          "id": "task:task-1586-04",
+          "task": "task-1586-04",
+          "working": 2,
+          "rect": {
+            "x": 23.9971923828125,
+            "y": 536.0006103515625,
+            "width": 1144,
+            "height": 143.99688720703125
+          }
+        },
+        {
+          "id": "task:task-1586-02",
+          "task": "task-1586-02",
+          "working": 1,
+          "rect": {
+            "x": 23.9971923828125,
+            "y": 696.0025024414062,
+            "width": 1144,
+            "height": 143.99688720703125
+          }
+        }
+      ]
+    },
+    {
+      "file": "dense-dark-1440x900-z40.png",
+      "theme": "dark",
+      "viewport": "1440x900",
+      "zoom": 0.4,
+      "availableWidth": 1192,
+      "bands": 25,
+      "firstBands": [
+        {
+          "id": "task:task-1586-00",
+          "task": "task-1586-00",
+          "working": 2,
+          "rect": {
+            "x": 24,
+            "y": 72,
+            "width": 1144,
+            "height": 1660
+          }
+        },
+        {
+          "id": "task:task-1586-01",
+          "task": "task-1586-01",
+          "working": 2,
+          "rect": {
+            "x": 24,
+            "y": 1748,
+            "width": 1144,
+            "height": 624
+          }
+        },
+        {
+          "id": "task:task-1586-04",
+          "task": "task-1586-04",
+          "working": 2,
+          "rect": {
+            "x": 24,
+            "y": 2388,
+            "width": 1144,
+            "height": 432
+          }
+        },
+        {
+          "id": "task:task-1586-02",
+          "task": "task-1586-02",
+          "working": 1,
+          "rect": {
+            "x": 24,
+            "y": 2836,
+            "width": 1144,
+            "height": 536
+          }
+        }
+      ]
+    },
+    {
+      "file": "dense-dark-1440x900-z58.png",
+      "theme": "dark",
+      "viewport": "1440x900",
+      "zoom": 0.58,
+      "availableWidth": 1192,
+      "bands": 25,
+      "firstBands": [
+        {
+          "id": "task:task-1586-00",
+          "task": "task-1586-00",
+          "working": 2,
+          "rect": {
+            "x": 23.99749755859375,
+            "y": 72,
+            "width": 1143.99560546875,
+            "height": 1659.99609375
+          }
+        },
+        {
+          "id": "task:task-1586-01",
+          "task": "task-1586-01",
+          "working": 2,
+          "rect": {
+            "x": 23.99749755859375,
+            "y": 1748.00048828125,
+            "width": 1143.99560546875,
+            "height": 623.99853515625
+          }
+        },
+        {
+          "id": "task:task-1586-04",
+          "task": "task-1586-04",
+          "working": 2,
+          "rect": {
+            "x": 23.99749755859375,
+            "y": 2387.994140625,
+            "width": 1143.99560546875,
+            "height": 431.991455078125
+          }
+        },
+        {
+          "id": "task:task-1586-02",
+          "task": "task-1586-02",
+          "working": 1,
+          "rect": {
+            "x": 23.99749755859375,
+            "y": 2835.9990234375,
+            "width": 1143.99560546875,
+            "height": 535.992431640625
+          }
+        }
+      ]
+    },
+    {
+      "file": "dense-dark-1440x900-z100.png",
+      "theme": "dark",
+      "viewport": "1440x900",
+      "zoom": 1,
+      "availableWidth": 1192,
+      "bands": 25,
+      "firstBands": [
+        {
+          "id": "task:task-1586-00",
+          "task": "task-1586-00",
+          "working": 2,
+          "rect": {
+            "x": 24,
+            "y": 72,
+            "width": 1144,
+            "height": 1660
+          }
+        },
+        {
+          "id": "task:task-1586-01",
+          "task": "task-1586-01",
+          "working": 2,
+          "rect": {
+            "x": 24,
+            "y": 1748,
+            "width": 1144,
+            "height": 624
+          }
+        },
+        {
+          "id": "task:task-1586-04",
+          "task": "task-1586-04",
+          "working": 2,
+          "rect": {
+            "x": 24,
+            "y": 2388,
+            "width": 1144,
+            "height": 432
+          }
+        },
+        {
+          "id": "task:task-1586-02",
+          "task": "task-1586-02",
+          "working": 1,
+          "rect": {
+            "x": 24,
+            "y": 2836,
+            "width": 1144,
+            "height": 536
+          }
+        }
+      ]
+    },
+    {
+      "file": "dense-dark-1920x1080-z7.png",
+      "theme": "dark",
+      "viewport": "1920x1080",
+      "zoom": 0.07,
+      "availableWidth": 1672,
+      "bands": 25,
+      "firstBands": [
+        {
+          "id": "task:task-1586-00",
+          "task": "task-1586-00",
+          "working": 2,
+          "rect": {
+            "x": 23.999053955078125,
+            "y": 71.99996948242188,
+            "width": 1624,
+            "height": 215.99920654296875
+          }
+        },
+        {
+          "id": "task:task-1586-01",
+          "task": "task-1586-01",
+          "working": 2,
+          "rect": {
+            "x": 23.999053955078125,
+            "y": 304.0007629394531,
+            "width": 1624,
+            "height": 143.99984741210938
+          }
+        },
+        {
+          "id": "task:task-1586-04",
+          "task": "task-1586-04",
+          "working": 2,
+          "rect": {
+            "x": 23.999053955078125,
+            "y": 463.9999694824219,
+            "width": 1624,
+            "height": 107.99905395507812
+          }
+        },
+        {
+          "id": "task:task-1586-02",
+          "task": "task-1586-02",
+          "working": 1,
+          "rect": {
+            "x": 23.999053955078125,
+            "y": 588.0006103515625,
+            "width": 1624,
+            "height": 143.99981689453125
+          }
+        }
+      ]
+    },
+    {
+      "file": "dense-dark-1920x1080-z21.png",
+      "theme": "dark",
+      "viewport": "1920x1080",
+      "zoom": 0.21,
+      "availableWidth": 1672,
+      "bands": 25,
+      "firstBands": [
+        {
+          "id": "task:task-1586-00",
+          "task": "task-1586-00",
+          "working": 2,
+          "rect": {
+            "x": 23.999053955078125,
+            "y": 72.00007629394531,
+            "width": 1623.9989013671875,
+            "height": 215.9981231689453
+          }
+        },
+        {
+          "id": "task:task-1586-01",
+          "task": "task-1586-01",
+          "working": 2,
+          "rect": {
+            "x": 23.999053955078125,
+            "y": 304.0008544921875,
+            "width": 1623.9989013671875,
+            "height": 143.99765014648438
+          }
+        },
+        {
+          "id": "task:task-1586-04",
+          "task": "task-1586-04",
+          "working": 2,
+          "rect": {
+            "x": 23.999053955078125,
+            "y": 463.99786376953125,
+            "width": 1623.9989013671875,
+            "height": 107.99908447265625
+          }
+        },
+        {
+          "id": "task:task-1586-02",
+          "task": "task-1586-02",
+          "working": 1,
+          "rect": {
+            "x": 23.999053955078125,
+            "y": 587.9996337890625,
+            "width": 1623.9989013671875,
+            "height": 143.99761962890625
+          }
+        }
+      ]
+    },
+    {
+      "file": "dense-dark-1920x1080-z22.png",
+      "theme": "dark",
+      "viewport": "1920x1080",
+      "zoom": 0.22,
+      "availableWidth": 1672,
+      "bands": 25,
+      "firstBands": [
+        {
+          "id": "task:task-1586-00",
+          "task": "task-1586-00",
+          "working": 2,
+          "rect": {
+            "x": 23.9971923828125,
+            "y": 72,
+            "width": 1623.998779296875,
+            "height": 215.99874877929688
+          }
+        },
+        {
+          "id": "task:task-1586-01",
+          "task": "task-1586-01",
+          "working": 2,
+          "rect": {
+            "x": 23.9971923828125,
+            "y": 304.00030517578125,
+            "width": 1623.998779296875,
+            "height": 143.99688720703125
+          }
+        },
+        {
+          "id": "task:task-1586-04",
+          "task": "task-1586-04",
+          "working": 2,
+          "rect": {
+            "x": 23.9971923828125,
+            "y": 464.0021667480469,
+            "width": 1623.998779296875,
+            "height": 107.99935913085938
+          }
+        },
+        {
+          "id": "task:task-1586-02",
+          "task": "task-1586-02",
+          "working": 1,
+          "rect": {
+            "x": 23.9971923828125,
+            "y": 587.9996948242188,
+            "width": 1623.998779296875,
+            "height": 143.99688720703125
+          }
+        }
+      ]
+    },
+    {
+      "file": "dense-dark-1920x1080-z40.png",
+      "theme": "dark",
+      "viewport": "1920x1080",
+      "zoom": 0.4,
+      "availableWidth": 1672,
+      "bands": 25,
+      "firstBands": [
+        {
+          "id": "task:task-1586-00",
+          "task": "task-1586-00",
+          "working": 2,
+          "rect": {
+            "x": 24,
+            "y": 72.00001525878906,
+            "width": 1624,
+            "height": 1200
+          }
+        },
+        {
+          "id": "task:task-1586-01",
+          "task": "task-1586-01",
+          "working": 2,
+          "rect": {
+            "x": 24,
+            "y": 1288,
+            "width": 1624,
+            "height": 432
+          }
+        },
+        {
+          "id": "task:task-1586-04",
+          "task": "task-1586-04",
+          "working": 2,
+          "rect": {
+            "x": 24,
+            "y": 1736,
+            "width": 1624,
+            "height": 432
+          }
+        },
+        {
+          "id": "task:task-1586-02",
+          "task": "task-1586-02",
+          "working": 1,
+          "rect": {
+            "x": 24,
+            "y": 2184,
+            "width": 1624,
+            "height": 432
+          }
+        }
+      ]
+    },
+    {
+      "file": "dense-dark-1920x1080-z58.png",
+      "theme": "dark",
+      "viewport": "1920x1080",
+      "zoom": 0.58,
+      "availableWidth": 1672,
+      "bands": 25,
+      "firstBands": [
+        {
+          "id": "task:task-1586-00",
+          "task": "task-1586-00",
+          "working": 2,
+          "rect": {
+            "x": 23.99749755859375,
+            "y": 72.00000762939453,
+            "width": 1624,
+            "height": 1199.9927978515625
+          }
+        },
+        {
+          "id": "task:task-1586-01",
+          "task": "task-1586-01",
+          "working": 2,
+          "rect": {
+            "x": 23.99749755859375,
+            "y": 1287.9971923828125,
+            "width": 1624,
+            "height": 431.9912109375
+          }
+        },
+        {
+          "id": "task:task-1586-04",
+          "task": "task-1586-04",
+          "working": 2,
+          "rect": {
+            "x": 23.99749755859375,
+            "y": 1736.0018310546875,
+            "width": 1624,
+            "height": 431.9910888671875
+          }
+        },
+        {
+          "id": "task:task-1586-02",
+          "task": "task-1586-02",
+          "working": 1,
+          "rect": {
+            "x": 23.99749755859375,
+            "y": 2183.997314453125,
+            "width": 1624,
+            "height": 431.9912109375
+          }
+        }
+      ]
+    },
+    {
+      "file": "dense-dark-1920x1080-z100.png",
+      "theme": "dark",
+      "viewport": "1920x1080",
+      "zoom": 1,
+      "availableWidth": 1672,
+      "bands": 25,
+      "firstBands": [
+        {
+          "id": "task:task-1586-00",
+          "task": "task-1586-00",
+          "working": 2,
+          "rect": {
+            "x": 24,
+            "y": 71.99999237060547,
+            "width": 1624,
+            "height": 1200
+          }
+        },
+        {
+          "id": "task:task-1586-01",
+          "task": "task-1586-01",
+          "working": 2,
+          "rect": {
+            "x": 24,
+            "y": 1288,
+            "width": 1624,
+            "height": 432
+          }
+        },
+        {
+          "id": "task:task-1586-04",
+          "task": "task-1586-04",
+          "working": 2,
+          "rect": {
+            "x": 24,
+            "y": 1736,
+            "width": 1624,
+            "height": 432
+          }
+        },
+        {
+          "id": "task:task-1586-02",
+          "task": "task-1586-02",
+          "working": 1,
+          "rect": {
+            "x": 24,
+            "y": 2184,
+            "width": 1624,
+            "height": 432
+          }
+        }
+      ]
+    },
+    {
+      "file": "dense-phone-375x812.png",
+      "viewport": "375x812",
+      "bands": 0
+    },
+    {
+      "file": "dense-phone-390x844.png",
+      "viewport": "390x844",
+      "bands": 0
+    }
+  ],
+  "anchor": [
+    {
+      "label": "wheel to 40%",
+      "zoom": 0.4,
+      "drift": 0,
+      "presentation": "native",
+      "size": {
+        "w": 600,
+        "h": 680
+      },
+      "before": {
+        "x": 40,
+        "y": 328.0024719238281
+      },
+      "after": {
+        "x": 40,
+        "y": 328.00250244140625
+      }
+    },
+    {
+      "label": "wheel to 22%",
+      "zoom": 0.22,
+      "drift": 0,
+      "presentation": "chip",
+      "size": {
+        "w": 220,
+        "h": 28
+      },
+      "before": {
+        "x": 40,
+        "y": 328.0024719238281
+      },
+      "after": {
+        "x": 40,
+        "y": 328.00250244140625
+      }
+    },
+    {
+      "label": "wheel to 21%",
+      "zoom": 0.21,
+      "drift": 0,
+      "presentation": "chip",
+      "size": {
+        "w": 220,
+        "h": 28
+      },
+      "before": {
+        "x": 40,
+        "y": 328.0024719238281
+      },
+      "after": {
+        "x": 40,
+        "y": 328.00250244140625
+      }
+    },
+    {
+      "label": "wheel to 7%",
+      "zoom": 0.07,
+      "drift": 0,
+      "presentation": "chip",
+      "size": {
+        "w": 220,
+        "h": 28
+      },
+      "before": {
+        "x": 40,
+        "y": 328.0024719238281
+      },
+      "after": {
+        "x": 40,
+        "y": 328.00250244140625
+      }
+    },
+    {
+      "label": "wheel to 24%",
+      "zoom": 0.24,
+      "drift": 0,
+      "presentation": "native",
+      "size": {
+        "w": 600,
+        "h": 680
+      },
+      "before": {
+        "x": 40,
+        "y": 328.0024719238281
+      },
+      "after": {
+        "x": 40,
+        "y": 328.0024719238281
+      }
+    },
+    {
+      "label": "wheel to 58%",
+      "zoom": 0.58,
+      "drift": 0,
+      "presentation": "native",
+      "size": {
+        "w": 600,
+        "h": 680
+      },
+      "before": {
+        "x": 40,
+        "y": 328.0024719238281
+      },
+      "after": {
+        "x": 40,
+        "y": 328.0024719238281
+      }
+    },
+    {
+      "label": "wheel to 81%",
+      "zoom": 0.81,
+      "drift": 0,
+      "presentation": "native",
+      "size": {
+        "w": 600,
+        "h": 680
+      },
+      "before": {
+        "x": 40,
+        "y": 328.0024719238281
+      },
+      "after": {
+        "x": 40,
+        "y": 328.00250244140625
+      }
+    },
+    {
+      "label": "wheel to 84%",
+      "zoom": 0.84,
+      "drift": 0,
+      "presentation": "native",
+      "size": {
+        "w": 600,
+        "h": 680
+      },
+      "before": {
+        "x": 40,
+        "y": 328.0024719238281
+      },
+      "after": {
+        "x": 40,
+        "y": 328.00250244140625
+      }
+    },
+    {
+      "label": "wheel to 100%",
+      "zoom": 1,
+      "drift": 0,
+      "presentation": "native",
+      "size": {
+        "w": 600,
+        "h": 680
+      },
+      "before": {
+        "x": 40,
+        "y": 328.0024719238281
+      },
+      "after": {
+        "x": 40,
+        "y": 328.00250244140625
+      }
+    },
+    {
+      "label": "wheel to 58%",
+      "zoom": 0.58,
+      "drift": 0,
+      "presentation": "native",
+      "size": {
+        "w": 600,
+        "h": 680
+      },
+      "before": {
+        "x": 40,
+        "y": 328.0024719238281
+      },
+      "after": {
+        "x": 40,
+        "y": 328.0024719238281
+      }
+    },
+    {
+      "label": "toolbar out 0",
+      "zoom": 0.464,
+      "drift": 0,
+      "presentation": "native",
+      "size": {
+        "w": 600,
+        "h": 680
+      },
+      "before": {
+        "x": 40,
+        "y": 328.0024719238281
+      },
+      "after": {
+        "x": 40,
+        "y": 328.00250244140625
+      }
+    },
+    {
+      "label": "toolbar in 0",
+      "zoom": 0.58,
+      "drift": 0,
+      "presentation": "native",
+      "size": {
+        "w": 600,
+        "h": 680
+      },
+      "before": {
+        "x": 40,
+        "y": 328.0024719238281
+      },
+      "after": {
+        "x": 40,
+        "y": 328.0024719238281
+      }
+    },
+    {
+      "label": "toolbar out 1",
+      "zoom": 0.464,
+      "drift": 0,
+      "presentation": "native",
+      "size": {
+        "w": 600,
+        "h": 680
+      },
+      "before": {
+        "x": 40,
+        "y": 328.0024719238281
+      },
+      "after": {
+        "x": 40,
+        "y": 328.00250244140625
+      }
+    },
+    {
+      "label": "toolbar in 1",
+      "zoom": 0.58,
+      "drift": 0,
+      "presentation": "native",
+      "size": {
+        "w": 600,
+        "h": 680
+      },
+      "before": {
+        "x": 40,
+        "y": 328.0024719238281
+      },
+      "after": {
+        "x": 40,
+        "y": 328.0024719238281
+      }
+    },
+    {
+      "label": "toolbar out 2",
+      "zoom": 0.464,
+      "drift": 0,
+      "presentation": "native",
+      "size": {
+        "w": 600,
+        "h": 680
+      },
+      "before": {
+        "x": 40,
+        "y": 328.0024719238281
+      },
+      "after": {
+        "x": 40,
+        "y": 328.00250244140625
+      }
+    },
+    {
+      "label": "toolbar in 2",
+      "zoom": 0.58,
+      "drift": 0,
+      "presentation": "native",
+      "size": {
+        "w": 600,
+        "h": 680
+      },
+      "before": {
+        "x": 40,
+        "y": 328.0024719238281
+      },
+      "after": {
+        "x": 40,
+        "y": 328.0024719238281
+      }
+    },
+    {
+      "label": "toolbar out 3",
+      "zoom": 0.464,
+      "drift": 0,
+      "presentation": "native",
+      "size": {
+        "w": 600,
+        "h": 680
+      },
+      "before": {
+        "x": 40,
+        "y": 328.0024719238281
+      },
+      "after": {
+        "x": 40,
+        "y": 328.00250244140625
+      }
+    },
+    {
+      "label": "toolbar in 3",
+      "zoom": 0.58,
+      "drift": 0,
+      "presentation": "native",
+      "size": {
+        "w": 600,
+        "h": 680
+      },
+      "before": {
+        "x": 40,
+        "y": 328.0024719238281
+      },
+      "after": {
+        "x": 40,
+        "y": 328.0024719238281
+      }
+    },
+    {
+      "label": "toolbar out 4",
+      "zoom": 0.464,
+      "drift": 0,
+      "presentation": "native",
+      "size": {
+        "w": 600,
+        "h": 680
+      },
+      "before": {
+        "x": 40,
+        "y": 328.0024719238281
+      },
+      "after": {
+        "x": 40,
+        "y": 328.00250244140625
+      }
+    },
+    {
+      "label": "toolbar in 4",
+      "zoom": 0.58,
+      "drift": 0,
+      "presentation": "native",
+      "size": {
+        "w": 600,
+        "h": 680
+      },
+      "before": {
+        "x": 40,
+        "y": 328.0024719238281
+      },
+      "after": {
+        "x": 40,
+        "y": 328.0024719238281
+      }
+    },
+    {
+      "label": "toolbar out 5",
+      "zoom": 0.464,
+      "drift": 0,
+      "presentation": "native",
+      "size": {
+        "w": 600,
+        "h": 680
+      },
+      "before": {
+        "x": 40,
+        "y": 328.0024719238281
+      },
+      "after": {
+        "x": 40,
+        "y": 328.00250244140625
+      }
+    },
+    {
+      "label": "toolbar in 5",
+      "zoom": 0.58,
+      "drift": 0,
+      "presentation": "native",
+      "size": {
+        "w": 600,
+        "h": 680
+      },
+      "before": {
+        "x": 40,
+        "y": 328.0024719238281
+      },
+      "after": {
+        "x": 40,
+        "y": 328.0024719238281
+      }
+    },
+    {
+      "label": "toolbar out 6",
+      "zoom": 0.464,
+      "drift": 0,
+      "presentation": "native",
+      "size": {
+        "w": 600,
+        "h": 680
+      },
+      "before": {
+        "x": 40,
+        "y": 328.0024719238281
+      },
+      "after": {
+        "x": 40,
+        "y": 328.00250244140625
+      }
+    },
+    {
+      "label": "toolbar in 6",
+      "zoom": 0.58,
+      "drift": 0,
+      "presentation": "native",
+      "size": {
+        "w": 600,
+        "h": 680
+      },
+      "before": {
+        "x": 40,
+        "y": 328.0024719238281
+      },
+      "after": {
+        "x": 40,
+        "y": 328.0024719238281
+      }
+    },
+    {
+      "label": "toolbar out 7",
+      "zoom": 0.464,
+      "drift": 0,
+      "presentation": "native",
+      "size": {
+        "w": 600,
+        "h": 680
+      },
+      "before": {
+        "x": 40,
+        "y": 328.0024719238281
+      },
+      "after": {
+        "x": 40,
+        "y": 328.00250244140625
+      }
+    },
+    {
+      "label": "toolbar in 7",
+      "zoom": 0.58,
+      "drift": 0,
+      "presentation": "native",
+      "size": {
+        "w": 600,
+        "h": 680
+      },
+      "before": {
+        "x": 40,
+        "y": 328.0024719238281
+      },
+      "after": {
+        "x": 40,
+        "y": 328.0024719238281
+      }
+    },
+    {
+      "label": "toolbar out 8",
+      "zoom": 0.464,
+      "drift": 0,
+      "presentation": "native",
+      "size": {
+        "w": 600,
+        "h": 680
+      },
+      "before": {
+        "x": 40,
+        "y": 328.0024719238281
+      },
+      "after": {
+        "x": 40,
+        "y": 328.00250244140625
+      }
+    },
+    {
+      "label": "toolbar in 8",
+      "zoom": 0.58,
+      "drift": 0,
+      "presentation": "native",
+      "size": {
+        "w": 600,
+        "h": 680
+      },
+      "before": {
+        "x": 40,
+        "y": 328.0024719238281
+      },
+      "after": {
+        "x": 40,
+        "y": 328.0024719238281
+      }
+    },
+    {
+      "label": "toolbar out 9",
+      "zoom": 0.464,
+      "drift": 0,
+      "presentation": "native",
+      "size": {
+        "w": 600,
+        "h": 680
+      },
+      "before": {
+        "x": 40,
+        "y": 328.0024719238281
+      },
+      "after": {
+        "x": 40,
+        "y": 328.00250244140625
+      }
+    },
+    {
+      "label": "toolbar in 9",
+      "zoom": 0.58,
+      "drift": 0,
+      "presentation": "native",
+      "size": {
+        "w": 600,
+        "h": 680
+      },
+      "before": {
+        "x": 40,
+        "y": 328.0024719238281
+      },
+      "after": {
+        "x": 40,
+        "y": 328.0024719238281
+      }
+    },
+    {
+      "label": "toolbar out 10",
+      "zoom": 0.464,
+      "drift": 0,
+      "presentation": "native",
+      "size": {
+        "w": 600,
+        "h": 680
+      },
+      "before": {
+        "x": 40,
+        "y": 328.0024719238281
+      },
+      "after": {
+        "x": 40,
+        "y": 328.00250244140625
+      }
+    },
+    {
+      "label": "toolbar in 10",
+      "zoom": 0.58,
+      "drift": 0,
+      "presentation": "native",
+      "size": {
+        "w": 600,
+        "h": 680
+      },
+      "before": {
+        "x": 40,
+        "y": 328.0024719238281
+      },
+      "after": {
+        "x": 40,
+        "y": 328.0024719238281
+      }
+    },
+    {
+      "label": "toolbar out 11",
+      "zoom": 0.464,
+      "drift": 0,
+      "presentation": "native",
+      "size": {
+        "w": 600,
+        "h": 680
+      },
+      "before": {
+        "x": 40,
+        "y": 328.0024719238281
+      },
+      "after": {
+        "x": 40,
+        "y": 328.00250244140625
+      }
+    },
+    {
+      "label": "toolbar in 11",
+      "zoom": 0.58,
+      "drift": 0,
+      "presentation": "native",
+      "size": {
+        "w": 600,
+        "h": 680
+      },
+      "before": {
+        "x": 40,
+        "y": 328.0024719238281
+      },
+      "after": {
+        "x": 40,
+        "y": 328.0024719238281
+      }
+    },
+    {
+      "label": "toolbar out 12",
+      "zoom": 0.464,
+      "drift": 0,
+      "presentation": "native",
+      "size": {
+        "w": 600,
+        "h": 680
+      },
+      "before": {
+        "x": 40,
+        "y": 328.0024719238281
+      },
+      "after": {
+        "x": 40,
+        "y": 328.00250244140625
+      }
+    },
+    {
+      "label": "toolbar in 12",
+      "zoom": 0.58,
+      "drift": 0,
+      "presentation": "native",
+      "size": {
+        "w": 600,
+        "h": 680
+      },
+      "before": {
+        "x": 40,
+        "y": 328.0024719238281
+      },
+      "after": {
+        "x": 40,
+        "y": 328.0024719238281
+      }
+    },
+    {
+      "label": "toolbar out 13",
+      "zoom": 0.464,
+      "drift": 0,
+      "presentation": "native",
+      "size": {
+        "w": 600,
+        "h": 680
+      },
+      "before": {
+        "x": 40,
+        "y": 328.0024719238281
+      },
+      "after": {
+        "x": 40,
+        "y": 328.00250244140625
+      }
+    },
+    {
+      "label": "toolbar in 13",
+      "zoom": 0.58,
+      "drift": 0,
+      "presentation": "native",
+      "size": {
+        "w": 600,
+        "h": 680
+      },
+      "before": {
+        "x": 40,
+        "y": 328.0024719238281
+      },
+      "after": {
+        "x": 40,
+        "y": 328.0024719238281
+      }
+    },
+    {
+      "label": "toolbar out 14",
+      "zoom": 0.464,
+      "drift": 0,
+      "presentation": "native",
+      "size": {
+        "w": 600,
+        "h": 680
+      },
+      "before": {
+        "x": 40,
+        "y": 328.0024719238281
+      },
+      "after": {
+        "x": 40,
+        "y": 328.00250244140625
+      }
+    },
+    {
+      "label": "toolbar in 14",
+      "zoom": 0.58,
+      "drift": 0,
+      "presentation": "native",
+      "size": {
+        "w": 600,
+        "h": 680
+      },
+      "before": {
+        "x": 40,
+        "y": 328.0024719238281
+      },
+      "after": {
+        "x": 40,
+        "y": 328.0024719238281
+      }
+    },
+    {
+      "label": "toolbar out 15",
+      "zoom": 0.464,
+      "drift": 0,
+      "presentation": "native",
+      "size": {
+        "w": 600,
+        "h": 680
+      },
+      "before": {
+        "x": 40,
+        "y": 328.0024719238281
+      },
+      "after": {
+        "x": 40,
+        "y": 328.00250244140625
+      }
+    },
+    {
+      "label": "toolbar in 15",
+      "zoom": 0.58,
+      "drift": 0,
+      "presentation": "native",
+      "size": {
+        "w": 600,
+        "h": 680
+      },
+      "before": {
+        "x": 40,
+        "y": 328.0024719238281
+      },
+      "after": {
+        "x": 40,
+        "y": 328.0024719238281
+      }
+    },
+    {
+      "label": "toolbar out 16",
+      "zoom": 0.464,
+      "drift": 0,
+      "presentation": "native",
+      "size": {
+        "w": 600,
+        "h": 680
+      },
+      "before": {
+        "x": 40,
+        "y": 328.0024719238281
+      },
+      "after": {
+        "x": 40,
+        "y": 328.00250244140625
+      }
+    },
+    {
+      "label": "toolbar in 16",
+      "zoom": 0.58,
+      "drift": 0,
+      "presentation": "native",
+      "size": {
+        "w": 600,
+        "h": 680
+      },
+      "before": {
+        "x": 40,
+        "y": 328.0024719238281
+      },
+      "after": {
+        "x": 40,
+        "y": 328.0024719238281
+      }
+    },
+    {
+      "label": "toolbar out 17",
+      "zoom": 0.464,
+      "drift": 0,
+      "presentation": "native",
+      "size": {
+        "w": 600,
+        "h": 680
+      },
+      "before": {
+        "x": 40,
+        "y": 328.0024719238281
+      },
+      "after": {
+        "x": 40,
+        "y": 328.00250244140625
+      }
+    },
+    {
+      "label": "toolbar in 17",
+      "zoom": 0.58,
+      "drift": 0,
+      "presentation": "native",
+      "size": {
+        "w": 600,
+        "h": 680
+      },
+      "before": {
+        "x": 40,
+        "y": 328.0024719238281
+      },
+      "after": {
+        "x": 40,
+        "y": 328.0024719238281
+      }
+    },
+    {
+      "label": "toolbar out 18",
+      "zoom": 0.464,
+      "drift": 0,
+      "presentation": "native",
+      "size": {
+        "w": 600,
+        "h": 680
+      },
+      "before": {
+        "x": 40,
+        "y": 328.0024719238281
+      },
+      "after": {
+        "x": 40,
+        "y": 328.00250244140625
+      }
+    },
+    {
+      "label": "toolbar in 18",
+      "zoom": 0.58,
+      "drift": 0,
+      "presentation": "native",
+      "size": {
+        "w": 600,
+        "h": 680
+      },
+      "before": {
+        "x": 40,
+        "y": 328.0024719238281
+      },
+      "after": {
+        "x": 40,
+        "y": 328.0024719238281
+      }
+    },
+    {
+      "label": "toolbar out 19",
+      "zoom": 0.464,
+      "drift": 0,
+      "presentation": "native",
+      "size": {
+        "w": 600,
+        "h": 680
+      },
+      "before": {
+        "x": 40,
+        "y": 328.0024719238281
+      },
+      "after": {
+        "x": 40,
+        "y": 328.00250244140625
+      }
+    },
+    {
+      "label": "toolbar in 19",
+      "zoom": 0.58,
+      "drift": 0,
+      "presentation": "native",
+      "size": {
+        "w": 600,
+        "h": 680
+      },
+      "before": {
+        "x": 40,
+        "y": 328.0024719238281
+      },
+      "after": {
+        "x": 40,
+        "y": 328.0024719238281
+      }
+    },
+    {
+      "label": "viewport 1440→1280",
+      "zoom": 0.58,
+      "drift": 0,
+      "presentation": "native",
+      "size": {
+        "w": 600,
+        "h": 680
+      },
+      "before": {
+        "x": 40,
+        "y": 328.0024719238281
+      },
+      "after": {
+        "x": 40,
+        "y": 328.0024719238281
+      }
+    },
+    {
+      "label": "viewport 1280→1440",
+      "zoom": 0.58,
+      "drift": 0,
+      "presentation": "native",
+      "size": {
+        "w": 600,
+        "h": 680
+      },
+      "before": {
+        "x": 40,
+        "y": 328.0024719238281
+      },
+      "after": {
+        "x": 40,
+        "y": 328.0024719238281
+      }
+    }
+  ],
+  "anchorPresentations": [
+    "native",
+    "chip"
+  ],
+  "cumulativeDrift": 0,
+  "denseAddAgent": {
+    "task": "task-1586-00",
+    "members": 24,
+    "box": {
+      "x": 631.9962158203125,
+      "y": 2231.99951171875,
+      "width": 107.997802734375,
+      "height": 43.99853515625
+    }
+  },
+  "dockDraftFit": {
+    "draft": {
+      "x": 32,
+      "y": 48,
+      "w": 600,
+      "h": 780
+    },
+    "band": {
+      "id": "task:task-1586-00",
+      "x": 16,
+      "w": 720
+    },
+    "scale": "1",
+    "inside": true,
+    "boardWidth": 752,
+    "file": "dense-dock-open-z100-draft.png"
+  },
+  "dockDraftFitNarrow": {
+    "draft": {
+      "x": 32,
+      "y": 48,
+      "w": 352,
+      "h": 457.60009765625
+    },
+    "band": {
+      "id": "task:task-1586-00",
+      "x": 16,
+      "w": 384
+    },
+    "scale": "0.586667",
+    "zoom": 1,
+    "inside": true,
+    "boardWidth": 416,
+    "file": "dense-dock-open-1024-z100-draft.png"
+  }
+}

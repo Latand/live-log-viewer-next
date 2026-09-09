@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import { isTaskAttachment } from "./attachments";
 import { taskRevision } from "./revision";
 import { isoNow } from "./helpers";
+import { assignmentAdmissionOrigin, assignmentIdentity, ensureTaskMembership, identityHeldBy, type MembershipIdentity } from "./membership";
 import type { AssignmentRef, BoardTask, TaskAttachment, TaskAssignment, TaskSource, TaskStatus } from "./types";
 
 export const TASK_TEXT_LIMIT = 6000;
@@ -256,6 +257,11 @@ export function patchTask(existing: BoardTask[], id: string, input: PatchTaskInp
     if (!text) return { ok: false, error: "task text is required", status: 400 };
     if (text.length > TASK_TEXT_LIMIT) return textLimitError();
     patch.text = text;
+    /* An operator's edit names a placeholder for good: a later agent
+       refinement returns "already named" instead of overwriting it (#1586). */
+    if (existing[index]!.origin?.refinement === "pending" && text !== existing[index]!.text) {
+      patch.origin = { ...existing[index]!.origin!, refinement: "titled" };
+    }
   }
   if (Object.hasOwn(input, "status")) {
     const status = normalizeStatus(input.status);
@@ -307,10 +313,52 @@ export function patchTask(existing: BoardTask[], id: string, input: PatchTaskInp
   return { ok: true, tasks, task: updated };
 }
 
-export function deleteTask(existing: BoardTask[], id: string): { ok: true; tasks: BoardTask[] } | { ok: false; error: string; status: number } {
-  const tasks = existing.filter((task) => task.id !== id);
-  if (tasks.length === existing.length) return { ok: false, error: "task not found", status: 404 };
-  return { ok: true, tasks };
+export interface MembershipDeps {
+  now?: () => string;
+  id?: () => string;
+}
+
+/**
+ * The conversations of `removed` rows that no remaining task still records,
+ * each bound to a replacement placeholder in the same snapshot (#1586): every
+ * board conversation belongs to a task, and unlinking or deleting must not
+ * leave one outside every task between two writes. The replacement carries the
+ * row's admission origin (its launch key, else the conversation), so a replay
+ * of that launch converges on the replacement. `forbid` names the task a
+ * replacement may not resolve to, which is the very task the row leaves.
+ */
+function replaceLostMemberships(
+  tasks: BoardTask[],
+  project: string,
+  removed: readonly TaskAssignment[],
+  forbid: string | null,
+  deps: MembershipDeps,
+): { ok: true; tasks: BoardTask[]; replacements: string[] } | TaskRefusal {
+  let current = tasks;
+  const replacements: string[] = [];
+  for (const assignment of removed) {
+    if (assignment.state === "failed") continue;
+    const identity: MembershipIdentity | null = assignmentIdentity(assignment);
+    const origin = assignmentAdmissionOrigin(assignment);
+    if (!identity || !origin || identityHeldBy(current, identity)) continue;
+    const result = ensureTaskMembership(current, { project, origin, identity }, deps);
+    if (!result.ok) return result;
+    if (forbid && result.taskIds.includes(forbid)) {
+      return { ok: false, error: "this task is the conversation's own membership; link the conversation to another task first or delete the task", status: 409 };
+    }
+    current = result.tasks;
+    replacements.push(...result.created);
+  }
+  return { ok: true, tasks: current, replacements };
+}
+
+/** Deletes a task. Conversations whose only membership it held are bound to
+    replacement placeholders in the same snapshot; nothing is left unbound. */
+export function deleteTask(existing: BoardTask[], id: string, deps: MembershipDeps = {}): { ok: true; tasks: BoardTask[]; replacements: string[] } | TaskRefusal {
+  const task = existing.find((candidate) => candidate.id === id);
+  if (!task) return { ok: false, error: "task not found", status: 404 };
+  const tasks = existing.filter((candidate) => candidate.id !== id);
+  return replaceLostMemberships(tasks, task.project, task.assignments, null, deps);
 }
 
 /** Parse a usable assignment handle from the DELETE request body. */
@@ -343,19 +391,26 @@ function assignmentMatchesRef(assignment: TaskAssignment, ref: AssignmentRef): b
 /**
  * Detach one assignment through its strongest available identity. A string
  * keeps the original path-based interface. An unmatched handle succeeds and
- * leaves the task object unchanged, which makes repeated recovery safe.
+ * leaves the task object unchanged, which makes repeated recovery safe. When
+ * the detached row was the conversation's last membership, a replacement
+ * placeholder is bound in the same snapshot; detaching a conversation from the
+ * placeholder that is its own admission is refused, because the replacement
+ * would be that task again.
  */
-export function removeAssignment(existing: BoardTask[], id: string, handle: string | AssignmentRef, now = isoNow()): TaskCommandResult {
+export function removeAssignment(existing: BoardTask[], id: string, handle: string | AssignmentRef, now = isoNow(), deps: MembershipDeps = {}): TaskCommandResult {
   const index = existing.findIndex((task) => task.id === id);
   if (index < 0) return { ok: false, error: "task not found", status: 404 };
   const ref: AssignmentRef = typeof handle === "string" ? { path: handle } : handle;
   const task = existing[index]!;
   const assignments = task.assignments.filter((assignment) => !assignmentMatchesRef(assignment, ref));
   if (assignments.length === task.assignments.length) return { ok: true, tasks: existing, task };
+  const removed = task.assignments.filter((assignment) => assignmentMatchesRef(assignment, ref));
   const updated: BoardTask = { ...task, assignments, updatedAt: now };
   const tasks = existing.slice();
   tasks[index] = updated;
-  return { ok: true, tasks, task: updated };
+  const replaced = replaceLostMemberships(tasks, task.project, removed, id, { now: () => now, ...deps });
+  if (!replaced.ok) return replaced;
+  return { ok: true, tasks: replaced.tasks, task: updated };
 }
 
 export interface AssignmentPatch {
@@ -420,7 +475,7 @@ export function applyAssignmentPatches(
   const task = existing[index]!;
   const assignments = mergeAssignments(task.assignments, patches);
   const hasOwner = assignments.some(
-    (assignment) => assignment.state === "delivered" || assignment.state === "spawning" || assignment.state === "handoff",
+    (assignment) => assignment.state === "delivered" || assignment.state === "spawning" || assignment.state === "handoff" || assignment.state === "linked",
   );
   let status = task.status;
   if (status === "inbox" || status === "assigned") {

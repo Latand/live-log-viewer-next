@@ -9,7 +9,7 @@ import { withFileTransactionSync } from "@/lib/state/fileTransaction";
 import { snapshotTasks, stampTaskRevisions, taskRevision } from "./revision";
 import { isTaskAttachment } from "./attachments";
 import type { RecentCreate } from "./commands";
-import type { AssignmentState, BoardTask, TaskAssignment, TaskPlacement, TaskSource, TaskStatus } from "./types";
+import type { AssignmentState, BoardTask, TaskAssignment, TaskPlacement, TaskSource, TaskStatus, TaskOrigin } from "./types";
 
 export const TASKS_FILE = statePath("tasks.json");
 
@@ -55,7 +55,17 @@ function isTaskStatus(value: unknown): value is TaskStatus {
 }
 
 function isAssignmentState(value: unknown): value is AssignmentState {
-  return value === "delivered" || value === "failed" || value === "spawning" || value === "handoff";
+  return value === "delivered" || value === "failed" || value === "spawning" || value === "handoff" || value === "linked";
+}
+
+function isTaskOrigin(value: unknown): value is TaskOrigin {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const origin = value as Partial<TaskOrigin>;
+  return (origin.kind === "conversation" || origin.kind === "launch" || origin.kind === "pipeline" || origin.kind === "flow")
+    && typeof origin.key === "string" && origin.key.length > 0
+    && (origin.refinement === "pending" || origin.refinement === "titled")
+    && (origin.refinedBy === undefined || typeof origin.refinedBy === "string")
+    && (origin.refinedText === undefined || typeof origin.refinedText === "string");
 }
 
 function isFinitePos(value: unknown): value is { x: number; y: number } {
@@ -129,6 +139,7 @@ function coerceTask(value: unknown): BoardTask | null {
     Array.isArray(raw.assignments) &&
     raw.assignments.every(isTaskAssignment) &&
     (raw.source === undefined || isTaskSource(raw.source)) &&
+    (raw.origin === undefined || isTaskOrigin(raw.origin)) &&
     typeof raw.createdAt === "string" &&
     typeof raw.updatedAt === "string";
   if (!structural) return null;
@@ -148,6 +159,7 @@ function coerceTask(value: unknown): BoardTask | null {
     ...(raw.attachments !== undefined ? { attachments: raw.attachments } : {}),
     assignments: raw.assignments!,
     ...(raw.source !== undefined ? { source: raw.source } : {}),
+    ...(raw.origin !== undefined ? { origin: raw.origin } : {}),
     createdAt: raw.createdAt!,
     updatedAt: raw.updatedAt!,
   };

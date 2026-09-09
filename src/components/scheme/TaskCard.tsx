@@ -178,6 +178,7 @@ function AssignmentChip({
   const failed = state === "failed";
   const openable = assignmentOpenable(state);
   const handoff = assignment.state === "handoff";
+  const linked = assignment.state === "linked";
   const badge = file ? engineBadge(file) : null;
   const title = file
     ? cleanTitle(file.title, 40)
@@ -198,6 +199,8 @@ function AssignmentChip({
             ? t("tasks.unhostedChip")
             : handoff
               ? t("tasks.handoffChip")
+              : linked
+                ? t("tasks.linkedChip")
               : file
                 ? cleanTitle(file.title)
                 : undefined;

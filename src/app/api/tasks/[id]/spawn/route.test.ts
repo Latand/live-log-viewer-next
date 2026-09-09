@@ -2,16 +2,34 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { expect, test } from "bun:test";
+import { afterAll, expect, test } from "bun:test";
 import { NextRequest } from "next/server";
 
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { ENGINE_MODELS } from "@/lib/agent/models";
-import { AgentRegistry, type SpawnReceipt } from "@/lib/agent/registry";
+import type { SpawnReceipt } from "@/lib/agent/registry";
 import type { Pipeline } from "@/lib/pipelines/types";
 import type { BoardTask } from "@/lib/tasks/types";
 
-import { POST } from "./route";
+/* The registry commits the launch's task membership (#1586) in the task store
+   under the state directory at the receipt reservation, so the route's
+   in-memory task fixture is mirrored into an isolated store before each
+   request: the reservation names the fixture task as its explicit target. */
+const previousStateDir = process.env.LLV_STATE_DIR;
+const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-task-spawn-state-"));
+process.env.LLV_STATE_DIR = stateDir;
+const { AgentRegistry } = await import("@/lib/agent/registry");
+const { loadTasks: loadStoredTasks, saveTasks } = await import("@/lib/tasks/store");
+const { POST } = await import("./route");
+afterAll(() => {
+  if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
+  else process.env.LLV_STATE_DIR = previousStateDir;
+  fs.rmSync(stateDir, { recursive: true, force: true });
+});
+function seed(tasks: BoardTask[]): BoardTask[] {
+  saveTasks(tasks);
+  return tasks;
+}
 
 test("task spawn rejects an explicit unknown model before receipt or assignment mutation", async () => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "llv-task-model-admission-"));
@@ -31,7 +49,7 @@ test("task spawn rejects an explicit unknown model before receipt or assignment 
   let spawnCalls = 0;
   const dependencies = {
     registry: () => registry,
-    loadTasks: () => tasks,
+    loadTasks: () => seed(tasks),
     mutateTasks: () => {
       writes += 1;
       throw new Error("assignment mutation must stay unreachable");
@@ -106,7 +124,7 @@ test("task retry preserves a failed receipt's historical model without fresh-lau
   let launchedModel: string | null | undefined;
   const dependencies = {
     registry: () => registry,
-    loadTasks: () => tasks,
+    loadTasks: () => seed(tasks),
     mutateTasks: (mutator: (current: BoardTask[]) => { tasks?: BoardTask[]; result: unknown }) => {
       const mutation = mutator(tasks);
       if (mutation.tasks) tasks = mutation.tasks;
@@ -161,7 +179,7 @@ test("task attribution failure replays one launched pane into one durable assign
   const bindingParams: unknown[] = [];
   const dependencies = {
     registry: () => registry,
-    loadTasks: () => tasks,
+    loadTasks: () => seed(tasks),
     mutateTasks: (mutator: (current: BoardTask[]) => { tasks?: BoardTask[]; result: unknown }) => {
       writes += 1;
       if (writes === 2) throw new Error("task assignment write failed after launch");
@@ -278,7 +296,7 @@ test("pre-pane spawn failure returns an ownerless task to inbox", async () => {
   const bindingCalls: unknown[] = [];
   const dependencies = {
     registry: () => registry,
-    loadTasks: () => tasks,
+    loadTasks: () => seed(tasks),
     mutateTasks: (mutator: (current: BoardTask[]) => { tasks?: BoardTask[]; result: unknown }) => {
       const mutation = mutator(tasks);
       if (mutation.tasks) tasks = mutation.tasks;
@@ -373,7 +391,7 @@ test("task spawn records its operator gesture once even when launch fails before
   let tasks = [task];
   const dependencies = {
     registry: () => registry,
-    loadTasks: () => tasks,
+    loadTasks: () => seed(tasks),
     mutateTasks: (mutator: (current: BoardTask[]) => { tasks?: BoardTask[]; result: unknown }) => {
       const mutation = mutator(tasks);
       if (mutation.tasks) tasks = mutation.tasks;
@@ -428,7 +446,7 @@ test("a deliberate retry after pre-pane failure creates one fresh launch", async
   let spawnCalls = 0;
   const dependencies = {
     registry: () => registry,
-    loadTasks: () => tasks,
+    loadTasks: () => seed(tasks),
     mutateTasks: (mutator: (current: BoardTask[]) => { tasks?: BoardTask[]; result: unknown }) => {
       const mutation = mutator(tasks);
       if (mutation.tasks) tasks = mutation.tasks;
@@ -494,7 +512,7 @@ test("concurrent and lost-response replays actuate each deliberate gesture once"
   let releaseSpawn: (() => void) | null = null;
   const dependencies = {
     registry: () => registry,
-    loadTasks: () => tasks,
+    loadTasks: () => seed(tasks),
     mutateTasks: (mutator: (current: BoardTask[]) => { tasks?: BoardTask[]; result: unknown }) => {
       const mutation = mutator(tasks);
       if (mutation.tasks) tasks = mutation.tasks;
@@ -583,7 +601,7 @@ test("retryOfLaunchId relaunches a pathless failed assignment with a fresh attem
   let rerouteRetryBeforeSettlement = false;
   const dependencies = {
     registry: () => registry,
-    loadTasks: () => tasks,
+    loadTasks: () => seed(tasks),
     mutateTasks: (mutator: (current: BoardTask[]) => { tasks?: BoardTask[]; result: unknown }) => {
       const mutation = mutator(tasks);
       if (mutation.tasks) tasks = mutation.tasks;
@@ -722,7 +740,7 @@ test("process stop after pane settlement replays one launch into one task pipeli
   let spawnCalls = 0;
   const dependencies = {
     registry: () => registry,
-    loadTasks: () => tasks,
+    loadTasks: () => seed(tasks),
     mutateTasks: (mutator: (current: BoardTask[]) => { tasks?: BoardTask[]; result: unknown }) => {
       const mutation = mutator(tasks);
       if (mutation.tasks) tasks = mutation.tasks;
@@ -845,7 +863,7 @@ test("process stop after pipeline intent resumes one unbound launch exactly once
   let spawnCalls = 0;
   const dependencies = {
     registry: () => registry,
-    loadTasks: () => tasks,
+    loadTasks: () => seed(tasks),
     mutateTasks: (mutator: (current: BoardTask[]) => { tasks?: BoardTask[]; result: unknown }) => {
       const mutation = mutator(tasks);
       if (mutation.tasks) tasks = mutation.tasks;
@@ -972,7 +990,7 @@ test("process stop after pane binding resumes the existing pane exactly once", a
   };
   const dependencies = {
     registry: () => registry,
-    loadTasks: () => tasks,
+    loadTasks: () => seed(tasks),
     mutateTasks: (mutator: (current: BoardTask[]) => { tasks?: BoardTask[]; result: unknown }) => {
       const mutation = mutator(tasks);
       if (mutation.tasks) tasks = mutation.tasks;
@@ -1092,7 +1110,7 @@ test("process stop after host verification resumes prompt delivery in the existi
   };
   const dependencies = {
     registry: () => registry,
-    loadTasks: () => tasks,
+    loadTasks: () => seed(tasks),
     mutateTasks: (mutator: (current: BoardTask[]) => { tasks?: BoardTask[]; result: unknown }) => {
       const mutation = mutator(tasks);
       if (mutation.tasks) tasks = mutation.tasks;

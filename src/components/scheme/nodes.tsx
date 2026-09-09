@@ -1,7 +1,7 @@
 "use client";
 
 import { Check, Layers } from "lucide-react";
-import { memo, useCallback, useEffect, useMemo, useState, type ComponentProps } from "react";
+import { memo, useCallback, useEffect, useMemo, useState, type ComponentProps, type CSSProperties } from "react";
 
 import { ChevronRight } from "@/components/icons";
 import { conversationIdentity } from "@/lib/accounts/identity";
@@ -758,7 +758,7 @@ function LiteDraftShell({ draft, ringed, dimmed }: { draft: DraftNode; ringed: b
     <div
       data-scheme-node={draft.key}
       className={`scheme-enter absolute${dimClass(dimmed)}`}
-      style={{ transform: `translate(${draft.x}px, ${draft.y}px)`, width: draft.w, height: draft.h, transition: MOVE_TRANSITION }}
+      style={fittedShellStyle(draft)}
     >
       <div
         className={`flex h-full items-center justify-center rounded-[10px] border border-dashed border-border bg-card/70 ${
@@ -783,7 +783,7 @@ function LiteDeckShell({ deck, dimmed }: { deck: DeckNode; dimmed: boolean }) {
     <div
       data-scheme-node={deck.key}
       className={`scheme-enter absolute${dimClass(dimmed)}`}
-      style={{ transform: `translate(${deck.x}px, ${deck.y}px)`, width: deck.w, height: deck.h, transition: MOVE_TRANSITION }}
+      style={fittedShellStyle(deck)}
     >
       <div className="flex h-full flex-col overflow-hidden rounded-[10px] border border-border bg-card shadow-1">
         {round ? (
@@ -830,7 +830,7 @@ export function MiniStackShell({ stack, dimmed, onSelect }: { stack: MiniStack; 
     <div
       data-scheme-node={stack.key}
       className={`scheme-enter absolute${dimClass(dimmed)}`}
-      style={{ transform: `translate(${stack.x}px, ${stack.y}px)`, width: stack.w, height: stack.h, transition: MOVE_TRANSITION }}
+      style={fittedShellStyle(stack)}
     >
       <div className="flex h-full flex-col gap-1.5 overflow-y-auto rounded-[10px] border border-dashed border-strong bg-card/60 p-2">
         {stack.items.map(({ file, branches }) => {
@@ -1046,9 +1046,17 @@ const NodeChrome = memo(function NodeChrome({
      stage never reaches here (its node carries the flow, and the strip map
      already excludes it), but gate on !flow so the two can never stack. */
   const boardStrip = pipeline && !flow ? pipeline : null;
+  /* Semantic presentations (#1586): the overview chip is a one-line identity
+     strip and the intermediate summary a title/status tile. Both sit in a
+     dense band grid, so the card's floating controls, strips, handles, badges
+     and under-stacks — all sized for the full reader — stay on the native
+     reader only; they would collide with the band header and neighbours. */
+  const chip = node.presentation === "chip";
+  const compact = chip || node.presentation === "summary";
   return (
     <div
       data-scheme-node={node.file.path}
+      data-scheme-node-presentation={node.presentation ?? undefined}
       data-scheme-node-host={node.ancestry?.hostPath ?? undefined}
       data-scheme-node-elided={node.ancestry?.elided.length ? String(node.ancestry.elided.length) : undefined}
       data-scheme-node-unresolved-parent={node.ancestry?.unresolvedParentId ?? undefined}
@@ -1072,7 +1080,7 @@ const NodeChrome = memo(function NodeChrome({
         /* The promised member tint: readable at far zoom, panes stay legible. */
         <div aria-hidden className="pointer-events-none absolute inset-0 z-[4] rounded-[10px] bg-accent/[0.06]" />
       ) : null}
-      <AncestryChip ancestry={node.ancestry} />
+      {compact ? null : <AncestryChip ancestry={node.ancestry} />}
       {pipelineStage ? (
         <span
           data-pipeline-stage-label
@@ -1085,7 +1093,7 @@ const NodeChrome = memo(function NodeChrome({
         </span>
       ) : null}
       {/* The loop's shared header hovers above the implementer↔reviewer pair. */}
-      {flow ? (
+      {flow && !compact ? (
         <div className="absolute -top-[60px] left-0 z-[4]" style={{ width: PAIR_W }}>
           <FlowStrip flow={flow} onFocusRound={(round) => onFocusRound(flow.id, round)} />
         </div>
@@ -1093,7 +1101,7 @@ const NodeChrome = memo(function NodeChrome({
       {/* §2.2 board strip rule: the pipeline's controls mount over its current
           run stage, in the same slot FlowStrip uses (a review-loop stage yields
           the slot to FlowStrip, so the two never coexist here). */}
-      {boardStrip ? (
+      {boardStrip && !compact ? (
         <div className="absolute -top-[60px] left-0 z-[5]" style={{ width: node.w }}>
           <PipelineStrip pipeline={boardStrip} flows={flows} files={files} renderablePaths={renderablePaths} renderableFlows={renderableFlows} linkedTasks={linkedTasks} compact onOpenPath={onOpenPath} onOpenFlow={onOpenFlow} onOpenTask={onOpenTask} />
         </div>
@@ -1102,7 +1110,7 @@ const NodeChrome = memo(function NodeChrome({
           flow eligibility (#93 AC3): it appears on any pipeline-source
           conversation — children and flow-hosting roots included — sitting in
           the controls row when free, or above the flow/pipeline strip when one is up. */}
-      {canFlow || canPipeline ? (
+      {(canFlow || canPipeline) && !compact ? (
         <div className={`absolute left-0 z-[4] flex items-center gap-1.5 ${flow || boardStrip ? "-top-[92px]" : "-top-11"}`}>
           {canFlow ? (
             <button
@@ -1148,21 +1156,38 @@ const NodeChrome = memo(function NodeChrome({
       ) : null}
       {/* The hidden stack peeking from under the card: previous chats and
           finished tasks lie beneath the conversation, deck-style. */}
-      {node.under.length ? (
+      {node.under.length && !compact ? (
         <>
           <div className="absolute inset-x-4 -bottom-4 h-5 rounded-[10px] border border-border bg-card/70 shadow-1" aria-hidden />
           <div className="absolute inset-x-2 -bottom-2 h-5 rounded-[10px] border border-border bg-card/90 shadow-1" aria-hidden />
         </>
       ) : null}
       <div className={`relative z-[1] flex h-full ${ringed ? "rounded-[10px] ring-2 ring-accent/60 ring-offset-2 ring-offset-canvas" : ""}`}>
-        {node.presentation === "summary" ? <button data-scheme-ui className="relative h-full w-full rounded-xl border border-border bg-card text-left" onClick={() => onSelect(node.file)}>
+        {chip ? (
+          <button
+            data-scheme-ui
+            data-scheme-chip={node.file.path}
+            className="relative h-full w-full rounded-[8px] border border-border bg-card text-left shadow-1 hover:border-accent/45"
+            title={cleanTitle(node.file.title, 120)}
+            onClick={() => onSelect(node.file)}
+          >
+            <div
+              className="absolute left-0 top-0 flex items-center gap-2 px-2.5 text-ui"
+              style={{ width: node.w / (node.readerScale ?? 1), height: node.h / (node.readerScale ?? 1), transform: `scale(${node.readerScale ?? 1})`, transformOrigin: "top left" }}
+            >
+              <span className="min-w-0 flex-1 truncate font-semibold text-primary">{cleanTitle(node.file.title, 60)}</span>
+              <CardStatusBadge file={node.file} />
+            </div>
+          </button>
+        ) : null}
+        {node.presentation === "summary" ? <button data-scheme-ui data-scheme-summary={node.file.path} className="relative h-full w-full rounded-xl border border-border bg-card text-left" onClick={() => onSelect(node.file)}>
           <div className="absolute left-0 top-0 flex flex-col items-start justify-center gap-3 p-5 text-ui" style={{ width: node.w / (node.readerScale ?? 1), height: node.h / (node.readerScale ?? 1), transform: `scale(${node.readerScale ?? 1})`, transformOrigin: "top left" }}>
             <strong className="line-clamp-3">{cleanTitle(node.file.title,90)}</strong><CardStatusBadge file={node.file} />
           </div>
         </button> : null}
-        <div ref={nativeSlot} className="absolute left-0 top-0 flex min-h-0 min-w-0" style={{width:node.w/(node.readerScale??1),height:node.h/(node.readerScale??1),transform:`scale(${node.readerScale??1})`,transformOrigin:"top left",display:node.presentation === "summary" ? "none" : undefined}} />
+        <div ref={nativeSlot} className="absolute left-0 top-0 flex min-h-0 min-w-0" style={{width:node.w/(node.readerScale??1),height:node.h/(node.readerScale??1),transform:`scale(${node.readerScale??1})`,transformOrigin:"top left",display:node.presentation === "summary" || chip ? "none" : undefined}} />
       </div>
-      <SubagentBadges
+      {compact ? null : <SubagentBadges
         conversationId={conversationIdentity(node.file)}
         entries={files}
         cardRect={node}
@@ -1174,8 +1199,9 @@ const NodeChrome = memo(function NodeChrome({
           const target = files.find((entry) => entry.path === path);
           if (target) onSelect(target);
         }}
-      />
+      />}
       {(() => {
+        if (compact) return null;
         const tray = trayApi?.trays.get(conversationIdentity(node.file));
         return tray ? (
           <SubagentTray
@@ -1190,8 +1216,8 @@ const NodeChrome = memo(function NodeChrome({
       {node.presentation ? null : <FarLabel file={node.file} />}
       {/* The handoff handle pinned outside the card's bottom-left corner —
           where child arrows start; a click hangs a draft conversation below. */}
-      {onHandoff && canHandoff(node.file) ? <HandoffHandle file={node.file} onHandoff={() => onHandoff(node.file)} /> : null}
-      {node.under.length ? (
+      {onHandoff && canHandoff(node.file) && !compact ? <HandoffHandle file={node.file} onHandoff={() => onHandoff(node.file)} /> : null}
+      {node.under.length && !compact ? (
         <button
           className="absolute -bottom-11 left-1/2 z-[2] inline-flex h-7 -translate-x-1/2 items-center gap-1.5 whitespace-nowrap rounded-full border border-border bg-card px-2.5 text-[11px] font-semibold text-muted shadow-1 hover:border-accent/40 hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
           aria-expanded={underOpen}
@@ -1248,6 +1274,15 @@ const NodeShell = memo(function NodeShell(props: NativeNodeProps) {
 });
 
 /** A conversation draft as a scheme citizen: positioned like a fresh root node. */
+/** A band may hand a draft, slot, deck or stack less room than its natural
+    size (#1586): the shell keeps its natural box and scales it uniformly, so
+    its rendered contents fit the band with it. */
+function fittedShellStyle(rect: SchemeRect): CSSProperties {
+  const fit = rect.fit ?? 1;
+  if (fit === 1) return { transform: `translate(${rect.x}px, ${rect.y}px)`, width: rect.w, height: rect.h, transition: MOVE_TRANSITION };
+  return { transform: `translate(${rect.x}px, ${rect.y}px) scale(${fit})`, transformOrigin: "top left", width: rect.w / fit, height: rect.h / fit, transition: MOVE_TRANSITION };
+}
+
 function DraftShell({
   draft,
   project,
@@ -1269,7 +1304,7 @@ function DraftShell({
     <div
       data-scheme-node={draft.key}
       className={`scheme-enter absolute${dimClass(dimmed)}`}
-      style={{ transform: `translate(${draft.x}px, ${draft.y}px)`, width: draft.w, height: draft.h, transition: MOVE_TRANSITION }}
+      style={fittedShellStyle(draft)}
     >
       <div className={`flex h-full ${ringed ? "rounded-[10px] ring-2 ring-accent/60 ring-offset-2 ring-offset-canvas" : ""}`}>
         {isWorkflowDraftId(draft.id) ? (
@@ -1347,7 +1382,7 @@ function StageSlotShell({ slot, lite, dimmed, files, onSelect }: { slot: StageSl
       <div
         data-scheme-node={slot.key}
         className={`scheme-enter absolute${dimClass(dimmed)} ${rowOpen ? "z-30" : ""}`}
-        style={{ transform: `translate(${slot.x}px, ${slot.y}px)`, width: slot.w, height: slot.h, transition: MOVE_TRANSITION }}
+        style={fittedShellStyle(slot)}
       >
         {slot.incoming ? (
           <span
@@ -1399,7 +1434,7 @@ function StageSlotShell({ slot, lite, dimmed, files, onSelect }: { slot: StageSl
       <div
         data-scheme-node={slot.key}
         className={`scheme-enter absolute${dimClass(dimmed)}`}
-        style={{ transform: `translate(${slot.x}px, ${slot.y}px)`, width: slot.w, height: slot.h, transition: MOVE_TRANSITION }}
+        style={fittedShellStyle(slot)}
       >
         {slot.incoming ? (
           <span
@@ -1441,7 +1476,7 @@ function StageSlotShell({ slot, lite, dimmed, files, onSelect }: { slot: StageSl
     <div
       data-scheme-node={slot.key}
       className={`scheme-enter absolute${dimClass(dimmed)}`}
-      style={{ transform: `translate(${slot.x}px, ${slot.y}px)`, width: slot.w, height: slot.h, transition: MOVE_TRANSITION }}
+      style={fittedShellStyle(slot)}
     >
       {slot.incoming ? (
         <span
@@ -1510,7 +1545,7 @@ function DeckShell({
     <div
       data-scheme-node={deck.key}
       className={`scheme-enter absolute${dimClass(dimmed)}`}
-      style={{ transform: `translate(${deck.x}px, ${deck.y}px)`, width: deck.w, height: deck.h, transition: MOVE_TRANSITION }}
+      style={fittedShellStyle(deck)}
     >
       <RoundDeck flow={deck.flow} rounds={deck.rounds} focusRound={focusRound} dormant={dormant} groupLabel={groupLabel} />
       <RoleTag role="reviewer" active={activeLoopRole(deck.flow) === "reviewer"} />

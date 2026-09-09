@@ -49,6 +49,7 @@ fs.writeFileSync(path.join(CLAUDE_HOME, ".credentials.json"), "{}", { encoding: 
 
 const { POST } = await import("./route");
 const { AgentRegistry } = await import("@/lib/agent/registry");
+const { saveTasks } = await import("@/lib/tasks/store");
 const { projectInfoFromCwd } = await import("@/lib/scanner/describe");
 const { resetProjectAliasesForTests } = await import("@/lib/projects/aliases");
 const { listClaudeAccounts } = await import("@/lib/accounts/claude");
@@ -130,6 +131,9 @@ async function launch(
 ): Promise<LaunchAttempt> {
   const registry = new AgentRegistry(path.join(SANDBOX, `${id}.json`), undefined, undefined, { sqliteMode: "off" });
   let tasks: BoardTask[] = [taskFor(id, assignments)];
+  /* The reservation names this task as the launch's explicit target (#1586),
+     so the isolated task store under STATE has to hold it as well. */
+  saveTasks(tasks);
   let spawnCalls = 0;
   let writes = 0;
   const response = await POST.withDependencies(

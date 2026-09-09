@@ -115,6 +115,9 @@ export interface SchemeRect {
   y: number;
   w: number;
   h: number;
+  /** Uniform scale a band applied to the surface's natural size so it fits the
+      band's width (#1586); `w`/`h` are the fitted box. Absent means 1. */
+  fit?: number;
 }
 
 /** How a placed node stands in the canonical lineage (issue #828): what the
@@ -135,7 +138,10 @@ export interface NodeAncestry {
 }
 
 export interface SchemeNode extends SchemeRect {
-  presentation?: "native" | "summary";
+  /** Semantic density of the displayed surface (task bands, #1586): `native`
+      mounts the real reader, `summary` a 320×160 title/status tile, `chip` a
+      one-line identity strip for the overview scale. Absent on the free map. */
+  presentation?: "native" | "summary" | "chip";
   readerScale?: number;
   file: FileEntry;
   /** Live background tasks docked inside the pane as collapsed strips. */

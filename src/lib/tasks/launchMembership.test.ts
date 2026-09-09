@@ -1,0 +1,128 @@
+import { expect, test } from "bun:test";
+
+import type { MembershipInput, MembershipResult } from "./membership";
+import { admitRecoveredLaunch, admitReservedLaunch, LaunchMembershipError, launchMembershipInput, type LaunchMembershipPorts } from "./launchMembership";
+
+/**
+ * The shared launch boundary: every reserved receipt commits its membership
+ * with the reserved identity, in the launch's own project, keyed so that a
+ * replay converges; pipelines bound to tasks join them, task-less containers
+ * get one fallback task, and a failure retires the receipt.
+ */
+
+const receipt = { launchId: "launch-1", conversationId: "conversation_one" };
+const noPipelines = () => null;
+const projectFor = (cwd: string) => `derived:${cwd}`;
+
+test("an operator or agent launch is keyed by its attempt (or launch id) and titled from its prompt, in its explicit project when it has one", () => {
+  const plain = launchMembershipInput({ engine: "claude", cwd: "/repo", clientAttemptId: "attempt-1", launchDisplay: { prompt: "Restore search results\nlong prompt" } }, receipt, noPipelines, projectFor);
+  expect(plain).toEqual({ project: "derived:/repo", origin: { kind: "launch", key: "attempt-1" }, title: "Restore search results\nlong prompt", identity: { launchId: "launch-1", conversationId: "conversation_one", clientAttemptId: "attempt-1", engine: "claude" } });
+  const keyless = launchMembershipInput({ engine: "codex", cwd: "/repo", explicitProject: "selected-project", launchProfile: { title: "Helper" } }, receipt, noPipelines, projectFor);
+  expect(keyless.origin).toEqual({ kind: "launch", key: "launch-1" });
+  expect(keyless.project).toBe("selected-project");
+  expect(keyless.title).toBe("Helper");
+  expect(keyless.identity.clientAttemptId).toBeNull();
+});
+
+test("a pipeline stage joins the pipeline's recorded tasks; a task-less pipeline or flow gets one fallback task per container", () => {
+  const bound = launchMembershipInput({ engine: "codex", cwd: "/repo", origin: { kind: "container", container: "pipeline", containerId: "p1" } }, receipt, (id) => (id === "p1" ? ["task-a", "task-b"] : null), projectFor);
+  expect(bound.explicitTaskIds).toEqual(["task-a", "task-b"]);
+  expect(bound.origin).toEqual({ kind: "launch", key: "launch-1" });
+  const fallback = launchMembershipInput({ engine: "codex", cwd: "/repo", origin: { kind: "container", container: "pipeline", containerId: "p2" } }, receipt, () => [], projectFor);
+  expect(fallback.origin).toEqual({ kind: "pipeline", key: "p2" });
+  expect(fallback.explicitTaskIds).toBeUndefined();
+  const flow = launchMembershipInput({ engine: "claude", cwd: "/repo", origin: { kind: "container", container: "flow", containerId: "f1" } }, receipt, noPipelines, projectFor);
+  expect(flow.origin).toEqual({ kind: "flow", key: "f1" });
+});
+
+function ports(commit: (input: MembershipInput) => MembershipResult): LaunchMembershipPorts {
+  return { commit, pipelineTaskIds: () => ["gone-task"], projectForCwd: projectFor };
+}
+
+test("a failed commit retires the receipt and aborts with the refusal's status; a deleted pipeline task falls back to the container task", () => {
+  const failures: string[] = [];
+  expect(() => admitReservedLaunch({ engine: "claude", cwd: "/repo", clientAttemptId: "a" }, receipt, (reason) => failures.push(reason), ports(() => { throw new Error("task state is busy"); }))).toThrow(LaunchMembershipError);
+  expect(failures).toEqual(["task membership could not be recorded: task state is busy"]);
+  let thrown: unknown;
+  try {
+    admitReservedLaunch({ engine: "claude", cwd: "/repo", clientAttemptId: "a" }, receipt, () => undefined, ports(() => ({ ok: false, error: "project is required", status: 400 })));
+  } catch (error) {
+    thrown = error;
+  }
+  expect((thrown as LaunchMembershipError).status).toBe(400);
+  const commits: MembershipInput[] = [];
+  const result = admitReservedLaunch(
+    { engine: "codex", cwd: "/repo", origin: { kind: "container", container: "pipeline", containerId: "p9" } },
+    receipt,
+    () => undefined,
+    ports((input) => {
+      commits.push(input);
+      if (input.explicitTaskIds) return { ok: false, error: "task gone-task is not available", status: 404 };
+      return { ok: true, tasks: [], taskIds: ["fallback"], created: ["fallback"], changed: true };
+    }),
+  );
+  expect(result.ok && result.taskIds).toEqual(["fallback"]);
+  expect(commits.map((input) => input.origin)).toEqual([{ kind: "launch", key: "launch-1" }, { kind: "pipeline", key: "p9" }]);
+});
+
+test("explicit task targets ride on the reservation: the launch joins them in their own project and never falls back", () => {
+  const dedicated = launchMembershipInput({ engine: "claude", cwd: "/scratch-checkout", clientAttemptId: "task_abc", taskIds: ["task-7"] }, receipt, noPipelines, projectFor);
+  expect(dedicated).toEqual({ project: "", origin: { kind: "launch", key: "task_abc" }, title: null, identity: { launchId: "launch-1", conversationId: "conversation_one", clientAttemptId: "task_abc", engine: "claude" }, explicitTaskIds: ["task-7"] });
+  const commits: MembershipInput[] = [];
+  let thrown: unknown;
+  try {
+    admitReservedLaunch({ engine: "claude", cwd: "/repo", clientAttemptId: "task_abc", taskIds: ["gone"] }, receipt, () => undefined, ports((input) => {
+      commits.push(input);
+      return { ok: false, error: "task gone is not available", status: 404 };
+    }));
+  } catch (error) {
+    thrown = error;
+  }
+  expect((thrown as LaunchMembershipError).status).toBe(404);
+  expect(commits.length).toBe(1);
+});
+
+test("a reviewer inherits the reviewed conversation's task: flow rounds keep the flow fallback origin, role launches keep the launch key", () => {
+  const flow = launchMembershipInput({ engine: "codex", cwd: "/repo", clientAttemptId: "flow_f1_x", origin: { kind: "container", container: "flow", containerId: "f1" }, reviewsConversationId: "conversation_impl", parentArtifactPath: "/sessions/impl.jsonl" }, receipt, noPipelines, projectFor);
+  expect(flow.origin).toEqual({ kind: "flow", key: "f1" });
+  expect(flow.inherit).toEqual([{ conversationId: "conversation_impl", path: null }]);
+  const role = launchMembershipInput({ engine: "claude", cwd: "/repo", clientAttemptId: "a1", reviewsConversationId: "conversation_impl" }, receipt, noPipelines, projectFor);
+  expect(role.origin).toEqual({ kind: "launch", key: "a1" });
+  expect(role.inherit).toEqual([{ conversationId: "conversation_impl", path: null }]);
+  expect(launchMembershipInput({ engine: "claude", cwd: "/repo", clientAttemptId: "a2" }, receipt, noPipelines, projectFor).inherit).toBeUndefined();
+});
+
+test("a recovered receipt re-establishes membership from its durable fields before its first execution", () => {
+  const commits: MembershipInput[] = [];
+  const result = admitRecoveredLaunch(
+    { launchId: "launch-q", conversationId: "conversation_q", engine: "claude", cwd: "/repo", clientAttemptId: "attempt-q", explicitProject: "chosen", launchProfile: { title: "Queued until later" }, launchDisplay: { prompt: "Continue the queued work" } },
+    ports((input) => { commits.push(input); return { ok: true, tasks: [], taskIds: ["held"], created: [], changed: false }; }),
+  );
+  expect(result.ok && result.taskIds).toEqual(["held"]);
+  expect(commits).toEqual([{ project: "chosen", origin: { kind: "launch", key: "attempt-q" }, title: "Queued until later", identity: { launchId: "launch-q", conversationId: "conversation_q", clientAttemptId: "attempt-q", engine: "claude" } }]);
+  expect(() => admitRecoveredLaunch(
+    { launchId: "launch-q", conversationId: "conversation_q", engine: "claude", cwd: "/repo", clientAttemptId: null, explicitProject: null, launchProfile: {}, launchDisplay: null },
+    ports(() => { throw new Error("EISDIR: illegal operation on a directory"); }),
+  )).toThrow(LaunchMembershipError);
+});
+
+test("a launch that names no directory still admits, and the project derivation is never handed a missing cwd", () => {
+  const asked: string[] = [];
+  const derive = (cwd: string) => { asked.push(cwd); return cwd.trim() ? `derived:${cwd}` : null; };
+  const adopted = launchMembershipInput({ engine: "claude", cwd: undefined, clientAttemptId: null, purpose: "resume-successor" }, receipt, noPipelines, derive);
+  expect(asked).toEqual([""]);
+  expect(adopted.project).toBe("other");
+  const recovered = admitRecoveredLaunch(
+    { launchId: "launch-r", conversationId: "conversation_r", engine: "claude", cwd: undefined, clientAttemptId: null, explicitProject: null, launchProfile: {}, launchDisplay: null },
+    { commit: (input) => ({ ok: true, tasks: [], taskIds: [input.project], created: [], changed: false }), pipelineTaskIds: noPipelines, projectForCwd: derive },
+  );
+  expect(recovered.ok && recovered.taskIds).toEqual(["other"]);
+});
+
+test("an agent-initiated child inherits its parent's task; a flow reviewer names the implementer once even though it is parent and reviewed", () => {
+  const child = launchMembershipInput({ engine: "claude", cwd: "/repo", clientAttemptId: "child-1", parentConversationId: "conversation_parent", parentArtifactPath: "/sessions/parent.jsonl", origin: { kind: "agent" } }, receipt, noPipelines, projectFor);
+  expect(child.origin).toEqual({ kind: "launch", key: "child-1" });
+  expect(child.inherit).toEqual([{ conversationId: "conversation_parent", path: "/sessions/parent.jsonl" }]);
+  const flow = launchMembershipInput({ engine: "codex", cwd: "/repo", clientAttemptId: "flow_f2_x", origin: { kind: "container", container: "flow", containerId: "f2" }, reviewsConversationId: "conversation_impl", parentConversationId: "conversation_impl", parentArtifactPath: "/sessions/impl.jsonl" }, receipt, noPipelines, projectFor);
+  expect(flow.inherit).toEqual([{ conversationId: "conversation_impl", path: "/sessions/impl.jsonl" }]);
+});

@@ -1596,6 +1596,43 @@ export async function adoptPipelineAttemptFromSource(
   });
 }
 
+/** The task store as the pipeline controller reads it for bindings; an
+    unreadable store binds nothing this tick and is retried on the next. */
+function tasksForBinding(): readonly BoardTask[] {
+  try {
+    return loadTasks();
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * A pipeline without a recorded task adopts the fallback task its admission
+ * minted (#1586, origin `pipeline:<id>`), so the task/pipeline read model and
+ * `ensurePipelineForTask` see the binding instead of asking for another
+ * pipeline. Idempotent: recovery of the same launch reuses the same fallback.
+ */
+export function adoptPipelineFallbackTask(pipeline: Pipeline, tasks: readonly BoardTask[]): boolean {
+  if (pipeline.taskIds.length) return false;
+  const fallback = tasks.find((task) => task.origin?.kind === "pipeline" && task.origin.key === pipeline.id);
+  if (!fallback) return false;
+  pipeline.taskIds = [fallback.id];
+  return true;
+}
+
+function reconcilePipelineFallbackTasks(pipelines: readonly Pipeline[], persist: (records: readonly Pipeline[]) => void): boolean {
+  const unbound = pipelines.filter((pipeline) => !pipeline.taskIds.length && !pipeline.hiddenAt);
+  if (!unbound.length) return false;
+  const tasks = tasksForBinding();
+  let changed = false;
+  for (const pipeline of unbound) {
+    if (!adoptPipelineFallbackTask(pipeline, tasks)) continue;
+    persist([pipeline]);
+    changed = true;
+  }
+  return changed;
+}
+
 function reconcilePendingPipelineAdoptions(pipeline: Pipeline, ports: PipelinePorts): boolean {
   let changed = false;
   for (const candidate of ports.pipelineAdoptionCandidates(pipeline.id)) {
@@ -2197,6 +2234,10 @@ async function tickRunStage(
             attempt.launchId = reservation.launchId;
             attempt.conversationId = reservation.conversationId;
             attempt.accountId = reservation.accountId ?? attempt.accountId ?? null;
+            /* The reservation committed this stage's membership (#1586); a
+               fallback task it minted is the pipeline's task from here on,
+               recorded before the agent is actuated. */
+            adoptPipelineFallbackTask(pipeline, tasksForBinding());
             persist();
           });
           break;
@@ -3288,7 +3329,7 @@ export async function tickPipelines(entries: FileEntry[], ports: PipelinePorts =
   const recoveryAccountingDeadline = ports.monotonicNow() + VERDICT_RECOVERY_ACCOUNTING_BUDGET_MS;
   try {
     const result = await withPipelineControllerMutation(async (pipelines, persist) => {
-      let changed = false;
+      let changed = reconcilePipelineFallbackTasks(pipelines, persist);
       await forEachCooperatively(pipelines, async (pipeline) => {
         const persistPipeline = () => persist([pipeline]);
         let pipelineChanged = reconcilePipelineEmbeddedFlows(pipeline, ports);

@@ -125,6 +125,7 @@ import { overlaySessionTitles } from "@/lib/session/titleProjection";
 import { recordReplySuggestions } from "@/lib/suggestions/store";
 import { ReplySuggestionValidationError } from "@/lib/suggestions/types";
 import { applyAssignmentPatches, createTask, patchTask, type CreateTaskInput, type PatchTaskInput } from "@/lib/tasks/commands";
+import { refineTask } from "@/lib/tasks/membership";
 import { isoNow } from "@/lib/tasks/helpers";
 import { loadTasks, mutateTasks, mutateTasksFile } from "@/lib/tasks/store";
 import type { BoardTask } from "@/lib/tasks/types";
@@ -1205,7 +1206,32 @@ async function createBoardTask(args: McpToolArgs): Promise<McpToolPayload> {
   return { taskId: result.task.id, task: result.task, replay: result.replay };
 }
 
-async function updateBoardTask(args: McpToolArgs): Promise<McpToolPayload> {
+/**
+ * The agent's first-action task naming (#1586): `refine: { text }` titles the
+ * placeholder task(s) the calling conversation is linked to, once. The caller
+ * is server-derived; an unidentified caller, a task the caller does not belong
+ * to, or a task already named by an operator edit or an earlier refinement is
+ * answered truthfully instead of overwriting anything.
+ */
+async function refineBoardTask(args: McpToolArgs, dependencies: ViewerMcpDomainDependencies): Promise<McpToolPayload> {
+  const refine = args.refine as { text?: unknown } | undefined;
+  const text = typeof refine?.text === "string" ? refine.text : "";
+  const caller = attributionOf(dependencies);
+  if (caller.kind === "unidentified" || !caller.conversationId) {
+    throw new McpToolRefusal("refine needs an identified calling conversation; the Viewer MCP session carries it", { code: "TASK_INVALID_FIELD", field: "refine", status: 403 });
+  }
+  const taskId = typeof args.taskId === "string" && args.taskId.trim() ? args.taskId.trim() : null;
+  const result = mutateTasks((tasks) => {
+    const outcome = refineTask(tasks, { callerConversationId: caller.conversationId!, taskId, text });
+    return { tasks: outcome.ok && outcome.refined.some((entry) => entry.result === "applied") ? outcome.tasks : undefined, result: outcome };
+  });
+  if (!result.ok) throw new McpToolRefusal(result.error, { code: result.status === 404 ? "TASK_NOT_FOUND" : "TASK_INVALID_FIELD", field: "refine", status: result.status });
+  const byId = new Map(result.tasks.map((task) => [task.id, task] as const));
+  return { refined: result.refined, tasks: result.refined.map((entry) => byId.get(entry.taskId)).filter(Boolean) };
+}
+
+async function updateBoardTask(args: McpToolArgs, dependencies: ViewerMcpDomainDependencies): Promise<McpToolPayload> {
+  if (args.refine !== undefined) return refineBoardTask(args, dependencies);
   const taskId = required(args, "taskId");
   const patch = withoutKeys(args, ["taskId", "clientRequestId"]);
   const result = mutateTasks((tasks) => {
@@ -4200,7 +4226,7 @@ export function viewerMcpBindings(
     send_message: (args, context) => sendMessage(args, viewerControlForCall(controlDependencies, context), domainDependencies, context),
     message_receipt: (args) => messageReceipt(args),
     create_task: createBoardTask,
-    update_task: updateBoardTask,
+    update_task: (args) => updateBoardTask(args, domainDependencies),
     create_pipeline: createPipeline,
     pipeline_action: (args) => pipelineAction(args, domainDependencies),
     link_task_to_pipeline: (args) => linkTaskToPipeline(args, linkTaskDependencies),

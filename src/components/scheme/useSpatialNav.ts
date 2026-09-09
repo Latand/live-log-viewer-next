@@ -37,6 +37,10 @@ interface SpatialNavOptions {
   glideFrame: (rect: SchemeRect, z: number) => void;
   /** Bumps on any manual camera gesture — drops follow and re-baselines. */
   manualNonce: number;
+  /** The camera already holds the selection's screen anchor through zoom and
+      reflow (#1586): nav keeps its ring and re-baselines, but neither
+      translates on reflow nor takes over +/− with the ladder framing. */
+  anchored?: boolean;
 }
 
 export interface SpatialNav {
@@ -97,6 +101,7 @@ export function useSpatialNav({
   glideBy,
   glideFrame,
   manualNonce,
+  anchored = false,
 }: SpatialNavOptions): SpatialNav {
   const { t } = useLocale();
   const followRef = useRef(false);
@@ -120,9 +125,11 @@ export function useSpatialNav({
   const glideByRef = useRef(glideBy);
   const glideFrameRef = useRef(glideFrame);
   const setSelectedRef = useRef(setSelected);
+  const anchoredRef = useRef(anchored);
   const tRef = useRef(t);
   useEffect(() => {
     enabledRef.current = enabled;
+    anchoredRef.current = anchored;
     layoutRef.current = layout;
     taskRectsRef.current = taskRects;
     taskLabelsRef.current = taskLabels;
@@ -186,7 +193,7 @@ export function useSpatialNav({
   }, [land]);
 
   const onZoomKey = useCallback((dir: 1 | -1): boolean => {
-    if (!enabledRef.current || !followRef.current) return false;
+    if (!enabledRef.current || !followRef.current || anchoredRef.current) return false;
     const sel = selectedRef.current;
     if (sel == null) return false;
     const rect = rectFor(sel);
@@ -220,7 +227,7 @@ export function useSpatialNav({
       return;
     }
     if (rect) prevRectRef.current = { key: sel, x: rect.x, y: rect.y, w: rect.w, h: rect.h };
-    if (plan.kind === "translate") glideByRef.current(plan.dx, plan.dy);
+    if (plan.kind === "translate" && !anchoredRef.current) glideByRef.current(plan.dx, plan.dy);
   }, [layout, taskRects]);
 
   /* Any new anchor arms follow so it stays framed through reflow — an Arrow

@@ -14,7 +14,6 @@ import { MAX_VISIBLE_PATHS } from "@/lib/view/types";
 
 import { appendComposerDraft } from "@/components/TmuxComposer";
 import { conversationIdentity } from "@/lib/accounts/identity";
-import { layoutTaskBoard, legalTaskDrop } from "./taskBoardLayout";
 import { GroupOverridePanel } from "./GroupOverridePanel";
 import { PipelineEditor } from "@/components/pipelines/PipelineEditor";
 import { createVisibilityIndex } from "./visibilityIndex";
@@ -24,7 +23,7 @@ import { deleteTask, handoffTask, unassignTask, updateTask } from "@/components/
 import { taskRelationsByPath } from "@/components/tasks/taskRelations";
 import { TaskWorkflowPanel } from "@/components/tasks/TaskWorkflowPanel";
 import { projectTaskWorkflows } from "@/components/tasks/taskWorkflowModel";
-import { taskTitle } from "@/components/tasks/taskModel";
+import { nextTaskStatus, taskTitle } from "@/components/tasks/taskModel";
 import { pushTaskToast } from "@/components/tasks/taskToast";
 import { cleanTitle } from "@/components/utils";
 import { taskDeliveryText } from "@/lib/tasks/helpers";
@@ -50,11 +49,14 @@ import { AgentLinksLayer, EdgesLayer, GroupsLayer, LoopsLayer, MOVE_EASE, NodesL
 import type { TaskCardHandlers } from "./TaskCard";
 import { TaskEdgesLayer } from "./TaskEdgesLayer";
 import { TasksLayer } from "./TasksLayer";
+import { applyBandOrder, bandModeFor, buildTaskBands, layoutTaskBands, rankBands, type BandMirror, type BandMode, type PlacedBand, type TaskBand } from "./taskBands";
+import { TaskBandsLayer } from "./TaskBandsLayer";
 import { findFreeSlot } from "./findFreeSlot";
 import {
   buildTaskEdges,
   buildTaskTargetIndex,
   isPlacedTask,
+  type PlacedTask,
   routePathsBounds,
   routeTaskEdges,
   TASK_W,
@@ -79,6 +81,14 @@ const DORMANT_ENTER_Z = LABEL_Z * 0.95;
 const DORMANT_EXIT_Z = LABEL_Z * 1.1;
 
 const EMPTY_PATHS: ReadonlySet<string> = new Set();
+const EMPTY_PLACED_TASKS: PlacedTask[] = [];
+/** An open menu or disclosure inside the board: the operator is reading it. */
+const OPEN_DISCLOSURE = '[role="menu"], details[open], [aria-expanded="true"]';
+
+const isTextField = (target: EventTarget | null): boolean => {
+  const el = target as HTMLElement | null;
+  return Boolean(el && el.tagName && (["INPUT", "TEXTAREA", "SELECT"].includes(el.tagName) || el.isContentEditable));
+};
 const EMPTY_PIPELINE_STRIPS = new Map<string, Pipeline>();
 
 interface Props {
@@ -160,6 +170,10 @@ interface Props {
       `onBuilderOpened` fires once consumed so the caller can clear it. */
   builderPipelineId?: string | null;
   onBuilderOpened?: () => void;
+  /** Draft id → band id for drafts opened from a band's local «+ Agent» (#1586). */
+  draftBands?: ReadonlyMap<string, string>;
+  /** Band-local «+ Agent»: open the launch form in this band's context. */
+  onAddAgent?: (band: { id: string; task: BoardTask | null; title: string }) => void;
 }
 
 function ToolButton({
@@ -235,6 +249,8 @@ export function SchemeBoard({
   newTaskNonce,
   builderPipelineId,
   onBuilderOpened,
+  draftBands,
+  onAddAgent,
 }: Props) {
   const { t } = useLocale();
   const mapMode = Boolean(onNodePick);
@@ -312,6 +328,13 @@ export function SchemeBoard({
     const fresh = localTasks.filter((task) => !have.has(task.id) && task.project === project);
     return fresh.length ? [...tasks, ...fresh] : tasks;
   }, [tasks, localTasks, project]);
+  /* Every project task, including unplaced and finished ones, feeds the band
+     projection; a fresh local create shows its band before the poll echoes it. */
+  const mergedAllTasks = useMemo(() => {
+    const have = new Set(allTasks.map((task) => task.id));
+    const fresh = localTasks.filter((task) => !have.has(task.id) && task.project === project);
+    return fresh.length ? [...allTasks, ...fresh] : allTasks;
+  }, [allTasks, localTasks, project]);
   /* Session-only full-text state. Every geometry consumer reads this set, while
      durable task records and pinned positions stay unchanged. */
   const [textExpandedIds, setTextExpandedIds] = useState<ReadonlySet<string>>(new Set());
@@ -343,9 +366,32 @@ export function SchemeBoard({
     return built;
   }, [groups, manual, files, layoutFlows, drafts, pipelines, surfacePipelines, favorites, isolatedManualPaths, boardTasks, textExpandedIds, now]);
 
-  const taskScene = useMemo(() => !mapMode && (authoredLayout.groups.some(group => group.kind === "pipeline") || boardTasks.some(task => task.assignments.length || workflowModel.tasks.find(workflow => workflow.task.id === task.id)?.executions.length))
-    ? layoutTaskBoard(authoredLayout, boardTasks, workflowModel, layoutZoom, selected, textExpandedIds, {viewportWidth:layoutViewportWidth}) : null,
-    [mapMode, authoredLayout, boardTasks, workflowModel, layoutZoom, layoutViewportWidth, selected, textExpandedIds]);
+  /* Task-centered board (#1586): on the desktop every conversation is projected
+     into a horizontal task band, stacked by working count. The durable admission
+     pass gives each root conversation a task; a conversation the pass has not
+     reached yet is shown in a band derived from its lineage, labelled as such. */
+  const bandsEnabled = !mapMode;
+  const [bandMode, setBandMode] = useState<BandMode>(() => bandModeFor(0.5, null));
+  const bands = useMemo<TaskBand[]>(() => {
+    if (!bandsEnabled) return [];
+    const built = buildTaskBands(authoredLayout, { tasks: mergedAllTasks, projection: workflowModel, draftBands, untitled: t("bands.untitled"), reviewFlow: t("bands.reviewFlow") });
+    /* A finished task without a single member lives in the task list and its
+       history, not as an empty band. */
+    return built.filter((band) => band.members.length || band.mirrors.length || band.status !== "done");
+  }, [bandsEnabled, authoredLayout, mergedAllTasks, workflowModel, draftBands, t]);
+  const rankedBands = useMemo(() => rankBands(bands), [bands]);
+  /* Order snapshot during an interaction: status labels update at once, rank
+     moves wait for the pan/typing to end or an explicit «Order updated». */
+  const [frozenOrder, setFrozenOrder] = useState<string[] | null>(null);
+  const orderedBands = useMemo(() => applyBandOrder(rankedBands, frozenOrder), [rankedBands, frozenOrder]);
+  const orderPending = frozenOrder !== null && orderedBands.some((band, index) => rankedBands[index]?.id !== band.id);
+  /* Which band hosts a shared conversation's one reader surface: the band the
+     operator opened it from. Session state only; the canonical membership and
+     the composer/delivery owner are untouched. */
+  const [hostOverrides, setHostOverrides] = useState<ReadonlyMap<string, string>>(() => new Map());
+  const taskScene = useMemo(() => bandsEnabled
+    ? layoutTaskBands(authoredLayout, orderedBands, { zoom: layoutZoom, mode: bandMode, viewportWidth: layoutViewportWidth, reader: selected, hostOverrides })
+    : null, [bandsEnabled, authoredLayout, orderedBands, layoutZoom, bandMode, layoutViewportWidth, selected, hostOverrides]);
   const layout = taskScene?.layout ?? authoredLayout;
 
   /* NO PRUNING HERE (#771). The selection outlives this view, so dropping a path
@@ -415,7 +461,6 @@ export function SchemeBoard({
   const [expanded, setExpanded] = useState<string | null>(null);
   const [fullWindowPlace, setFullWindowPlace] = useState<HTMLDivElement | null>(null);
   const collapseNative = useCallback(() => setExpanded(null), []);
-  useLayoutEffect(() => {if(taskScene?.fallbackReader)setExpanded(taskScene.fallbackReader);}, [taskScene?.fallbackReader]);
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     setExpanded(null);
@@ -645,7 +690,7 @@ export function SchemeBoard({
   );
   const placedTasks = useMemo(
     () =>
-      (taskScene?.tasks ?? boardTasks).map((task) => {
+      (taskScene ? EMPTY_PLACED_TASKS : boardTasks).map((task) => {
         const spot = regionTaskPos.get(task.id) ?? placement.get(task.id);
         return spot && (spot.x !== task.pos.x || spot.y !== task.pos.y) ? { ...task, pos: spot } : task;
       }),
@@ -653,18 +698,16 @@ export function SchemeBoard({
   );
   /* Camera-facing rects: focus glides and map taps resolve task keys. */
   const taskRects = useMemo(
-    () => new Map(placedTasks.map((task) => ["task::" + task.id, taskRect(task, textExpandedIds.has(task.id))] as const)),
-    [placedTasks, textExpandedIds],
+    () => taskScene ? taskScene.taskRects : new Map(placedTasks.map((task) => ["task::" + task.id, taskRect(task, textExpandedIds.has(task.id))] as const)),
+    [taskScene, placedTasks, textExpandedIds],
   );
   const taskNavLabels = useMemo(
     () => new Map(placedTasks.map((task) => [`task::${task.id}`, taskTitle(task.text) || t("tasks.untitled")] as const)),
     [placedTasks, t],
   );
   const taskTargetIndex = useMemo(() => {
-    const index=buildTaskTargetIndex(layout,flows,files);
-    if(taskScene?.aggregate) for(const group of layout.groups) if(group.taskId) for(const key of group.members) index.delete(key);
-    return index;
-  }, [layout, flows, files, taskScene]);
+    return buildTaskTargetIndex(layout,flows,files);
+  }, [layout, flows, files]);
   const taskEdges = useMemo(
     () => buildTaskEdges(placedTasks, taskTargetIndex, textExpandedIds, files),
     [placedTasks, taskTargetIndex, textExpandedIds, files],
@@ -694,11 +737,14 @@ export function SchemeBoard({
      detour can swing a connector or its retry badge past the card extent, so both
      stay reachable and on the map, never clipping out (issue #17). */
   const world = useMemo(() => {
+    /* Bands span exactly the viewport width and stack from the origin; the
+       band layout already includes its gutters. */
+    if (taskScene) return { x: 0, y: 0, w: layout.width, h: layout.height };
     const rects = [...taskRects.values()];
     const routeBox = routePathsBounds(taskRoutes.values());
     if (routeBox) rects.push(routeBox);
     return taskWorldBounds(layout.width, layout.height, rects);
-  }, [layout.width, layout.height, taskRects, taskRoutes]);
+  }, [taskScene, layout.width, layout.height, taskRects, taskRoutes]);
   const currentWork = useMemo(() => {
     const base = currentWorkRect(layout, placedTasks, favorites ?? EMPTY_PATHS, textExpandedIds);
     return rectUnion([...(base ? [base] : [])]);
@@ -756,6 +802,16 @@ export function SchemeBoard({
   const navArrowRef = useRef<(event: KeyboardEvent) => boolean>(() => false);
   const navZoomRef = useRef<(dir: 1 | -1) => boolean>(() => false);
 
+  /* The selected projection's world box: the camera holds its screen position
+     through zoom, viewport resize and band reflow (#1586). */
+  /* Keyed by projection (band + conversation), so opening a shared conversation
+     in another band re-baselines at the clicked tile's slot instead of holding
+     the surface at its previous band's screen position. */
+  const cameraAnchor = useMemo(() => {
+    if (!taskScene || !selected) return null;
+    const rect = layout.byPath.get(selected);
+    return rect ? { key: `${taskScene.bandOf.get(selected) ?? ""}::${selected}`, rect } : null;
+  }, [taskScene, selected, layout]);
   const {
     cam,
     vp,
@@ -781,6 +837,7 @@ export function SchemeBoard({
     glideBy,
     glideFrame,
     glideToCamera,
+    primeAnchor,
   } = useSchemeCamera({
     project,
     layout,
@@ -802,9 +859,48 @@ export function SchemeBoard({
     onArrowNav: navArrowRef,
     onZoomKey: navZoomRef,
     onFit: announceFit,
+    anchor: cameraAnchor,
+    lockX: Boolean(taskScene),
   });
 
-  useLayoutEffect(() => {setLayoutZoom(cam.z);setLayoutViewportWidth(vp.w);}, [cam.z,vp.w]);
+  useLayoutEffect(() => {setLayoutZoom(cam.z);setLayoutViewportWidth(vp.w);setBandMode((previous) => bandModeFor(cam.z, previous));}, [cam.z,vp.w]);
+  /* Rank moves are deferred while the operator is busy inside the board:
+     panning, typing, holding a text selection, or reading an open disclosure
+     or action menu. Status labels still update at once; only the order waits. */
+  const [composerFocus, setComposerFocus] = useState(false);
+  const [selectingText, setSelectingText] = useState(false);
+  const [disclosureOpen, setDisclosureOpen] = useState(false);
+  useEffect(() => {
+    const root = viewportRef.current;
+    if (!root || mapMode) return;
+    const onSelectionChange = () => {
+      const selection = document.getSelection();
+      setSelectingText(Boolean(selection && selection.rangeCount > 0 && !selection.isCollapsed && selection.anchorNode && root.contains(selection.anchorNode)));
+    };
+    document.addEventListener("selectionchange", onSelectionChange);
+    const readDisclosure = () => setDisclosureOpen(root.querySelector(OPEN_DISCLOSURE) !== null);
+    const observer = typeof MutationObserver === "undefined" ? null : new MutationObserver(readDisclosure);
+    observer?.observe(root, { subtree: true, childList: true, attributes: true, attributeFilter: ["aria-expanded", "open"] });
+    /* An observer only reports what changes AFTER it attaches. A disclosure or
+       menu that is already open when this effect re-attaches (the map-mode
+       crossing) would otherwise hold nothing until some unrelated mutation
+       fired, so the reading is taken once here, at attach. */
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- the attach-time reading of a state the observer reports from then on
+    readDisclosure();
+    return () => {
+      document.removeEventListener("selectionchange", onSelectionChange);
+      observer?.disconnect();
+      setSelectingText(false);
+      setDisclosureOpen(false);
+    };
+  }, [mapMode, viewportRef]);
+  const interacting = panning || composerFocus || selectingText || disclosureOpen;
+  useEffect(() => {
+    /* eslint-disable-next-line react-hooks/set-state-in-effect -- the snapshot is taken exactly when an interaction starts */
+    setFrozenOrder((previous) => (interacting ? previous ?? rankedBands.map((band) => band.id) : null));
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- rankedBands is read only at the moment the interaction starts
+  }, [interacting]);
+  const applyPendingOrder = useCallback(() => setFrozenOrder(rankedBands.map((band) => band.id)), [rankedBands]);
 
   /* #688: the board half of a focus handoff. The index is rebuilt from the
      layout on every relayout on purpose — an accepted request resolves its
@@ -988,6 +1084,7 @@ export function SchemeBoard({
     glideBy,
     glideFrame,
     manualNonce,
+    anchored: Boolean(taskScene),
   });
   useEffect(() => {
     navArrowRef.current = onArrow;
@@ -1096,15 +1193,13 @@ export function SchemeBoard({
     taskTargetIndexRef.current = taskTargetIndex;
   }, [taskTargetIndex]);
 
-  const taskSceneRef = useRef(taskScene);
-  useLayoutEffect(() => {taskSceneRef.current=taskScene;},[taskScene]);
   const taskHandlers = useMemo<TaskCardHandlers>(
     () => ({
       history: (task) => openTaskHistory(task.id),
-      legalDrop: (task, point) => {
-        const scene=taskSceneRef.current;
-        return scene ? legalTaskDrop(task,point,scene.layout.groups,new Set(scene.tasks.filter(card=>card.placement==="pinned").map(card=>card.id))) : point;
-      },
+      /* Free-map pin collisions belonged to the desktop card layout; task
+         geometry is now owned by the bands, which have no drag handle (#1586).
+         The lite map's cards are static. */
+      legalDrop: (_task, point) => point,
       patch: async (id, patch) => {
         const error = await updateTask(id, patch);
         if (error) pushTaskToast("err", error);
@@ -1162,6 +1257,44 @@ export function SchemeBoard({
     [centerOn, stableSelect],
   );
 
+  /* Band chrome actions (#1586): Details opens the task's history, the
+     pipeline editor or the flow controls; a derived conversation band opens
+     its root; the status chip cycles through the existing patch path; a
+     mirror selects its canonical surface and glides there. */
+  const bandDetails = useCallback((band: PlacedBand) => {
+    if (band.task) openTaskHistory(band.task.id);
+    else if (band.pipeline) openPipelineControls(band.pipeline);
+    else if (band.flow) openFlowControls(band.flow);
+    else {
+      const first = band.members.find((member) => member.file);
+      if (first?.file) stableSelect(first.file);
+    }
+  }, [openTaskHistory, openPipelineControls, openFlowControls, stableSelect]);
+  const bandAddAgent = useCallback((band: PlacedBand) => onAddAgent?.({ id: band.id, task: band.task, title: band.title }), [onAddAgent]);
+  const bandCycleStatus = useCallback((task: BoardTask) => {
+    void taskHandlers.patch(task.id, { status: nextTaskStatus(task.status) });
+  }, [taskHandlers]);
+  /* Opening a shared conversation from a mirror hosts its reader in that band
+     (the mirror's slot becomes the member's) and selects it; the canonical band
+     shows the reference tile in return. No camera move: the surface appears
+     where the operator clicked. */
+  const bandSelectMirror = useCallback((mirror: BandMirror) => {
+    const bandId = taskScene?.bandOf.get(mirror.key);
+    const tile = taskScene?.mirrorRects.get(mirror.key);
+    if (bandId && tile) {
+      /* The clicked tile is the destination anchor: the surface lands on its
+         screen point even though the bands around it reflow. */
+      primeAnchor(`${bandId}::${mirror.ofKey}`, tile);
+      setHostOverrides((previous) => { const next = new Map(previous); next.set(mirror.ofKey, bandId); return next; });
+    }
+    setSelected(mirror.ofKey);
+  }, [taskScene, primeAnchor]);
+  const followContinuation = useCallback((target: { key: string; bandId: string }) => {
+    setSelected(target.key);
+    const rect = layout.byPath.get(target.key);
+    if (rect) centerOn(rect, cam.z);
+  }, [layout, centerOn, cam.z]);
+
   /* The sticky composer owns the create (text, voice, images, deadline); the
      board just adopts the fresh card optimistically and drops the sticky. */
   const handleStickyCreated = useCallback((task: BoardTask) => {
@@ -1211,6 +1344,8 @@ export function SchemeBoard({
       onPointerMove={onPointerMove}
       onDoubleClick={onDoubleClick}
       onClick={onClick}
+      onFocusCapture={(event) => { if (isTextField(event.target)) setComposerFocus(true); }}
+      onBlurCapture={(event) => { if (isTextField(event.target)) setComposerFocus(false); }}
       /* Focusable controls live inside world-space panes. Browser focus can
          scroll a clipped ancestor to reveal one, which would offset every
          camera coordinate and carry the minimap away from its corner. */
@@ -1264,6 +1399,23 @@ export function SchemeBoard({
         {taskScene ? <style>{`[data-atomic-task-layout] [data-scheme-node], [data-atomic-task-layout] [data-scheme-task], [data-atomic-task-layout] [data-scheme-group], [data-atomic-task-layout] svg path, [data-atomic-task-layout] svg circle { transition: none !important; animation: none !important; }`}</style> : null}
         {/* Group halos sit behind every edge and card so a running flow/pipeline
             reads as one framed region; the label chip stays live off the map. */}
+        {taskScene ? (
+          <TaskBandsLayer
+            bands={taskScene.bands}
+            mode={taskScene.mode}
+            scale={taskScene.scale}
+            interactive={!mapMode && !handLike && !session}
+            selectedKey={selected}
+            mirrorRects={taskScene.mirrorRects}
+            continuations={taskScene.continuations}
+            memberRects={taskScene.layout.byPath}
+            onAddAgent={bandAddAgent}
+            onOpenDetails={bandDetails}
+            onCycleStatus={bandCycleStatus}
+            onSelectMirror={bandSelectMirror}
+            onFollowContinuation={followContinuation}
+          />
+        ) : null}
         <GroupsLayer onOpenTaskHistory={openTaskHistory} groups={layout.groups} interactive={!mapMode && !handLike && !session} />
         <EdgesLayer edges={layout.edges} badgeAnchors={badgeAnchors} badgeAnchorRevision={badgeAnchorRevision} width={layout.width} height={layout.height} />
         <LoopsLayer loops={layout.loops} width={layout.width} height={layout.height} />
@@ -1451,7 +1603,18 @@ export function SchemeBoard({
         />
       ) : null}
 
-      {taskScene?.conflicts.length ? <details data-pin-conflicts className="absolute bottom-14 left-3 z-30 max-w-sm rounded border border-warning bg-card p-3 text-xs"><summary>{t("taskHistory.pinConflict")}</summary>{taskScene.conflicts.map(([a,b],i)=><p key={i}>{[a,b].map(key=><button key={key} className="m-1 underline" onClick={()=>openTaskHistory(key.replace("group::task::",""))}>{layout.groups.find(group=>group.key===key)?.label ?? key}</button>)}</p>)}</details> : null}
+      {orderPending ? (
+        <button
+          type="button"
+          data-scheme-ui
+          data-scheme-order-updated
+          className="absolute left-1/2 top-3 z-30 -translate-x-1/2 rounded-full border border-accent/45 bg-card px-3 py-1 text-[11.5px] font-semibold text-accent shadow-1 hover:bg-accent/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          title={t("bands.orderUpdatedTitle")}
+          onClick={applyPendingOrder}
+        >
+          {t("bands.orderUpdated")}
+        </button>
+      ) : null}
       {controlsFlow ? <div className="absolute right-3 top-3 z-[60]"><GroupOverridePanel group={{key:controlsFlow.id,id:controlsFlow.id,kind:"flow",flow:controlsFlow,label:t("taskHistory.reviewFlow"),hue:0,members:[],x:0,y:0,w:0,h:0}} onClose={() => setControlsFlowId(null)} /></div> : null}
       {controlsPipeline ? <div className="absolute inset-y-3 right-3 z-[60] overflow-auto rounded-xl border border-border bg-card p-2 shadow-2"><PipelineEditor pipeline={controlsPipeline} label={controlsPipeline.task} onClose={() => setControlsPipelineId(null)} /></div> : null}
       {historyOpen && <TaskWorkflowPanel key={historyTaskId} initialTaskId={historyTaskId} model={workflowModel} onOpenPipeline={openPipelineControls} onOpenFlow={openFlowControls} onOpen={stableSelect} onClose={closeHistory} />}
