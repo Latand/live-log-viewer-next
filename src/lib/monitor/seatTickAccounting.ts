@@ -641,6 +641,11 @@ export class SeatTickAccounting {
    * Refused when the row moved on to another attempt, and refused at the bound
    * — a project that has reached it keeps the fence, which is what the tick did
    * before this existed, rather than discarding an obligation to make room.
+   * That is a count bound and not an age bound: an attempt whose holder never
+   * answers conclusively is kept and asked after for ever, so a project that
+   * rotates its seat past the bound leaving those behind stops being woken
+   * again. Tracked in #1602, with the same shape #906 needed for held
+   * deliveries; nothing here may discard an obligation to avoid it.
    */
   retire(expected: SeatTickOutstandingWake, retiredAt: string, supersededBy: SeatTickRetiredWake["supersededBy"]): boolean {
     return this.mutate((tx, row) => {

@@ -102,12 +102,34 @@ export interface SeatTickControllerDependencies {
   ownsTraffic?: () => boolean | Promise<boolean>;
 }
 
-/** The ref of the card that says a prepared wake has been unresolved for
-    longer than the wake interval, or that its receipt ended unverified
-    (#1465). One ref, because the condition is the project's; the attempt's own
-    key is the occurrence, so each attempt is carded once and a new one is a
-    new card. */
+/** The family of refs for the card that says a prepared wake has been
+    unresolved for longer than the wake interval, or that its receipt ended
+    unverified (#1465). */
 export const SEAT_TICK_WAKE_UNRESOLVED_REF = "seat-tick-wake-unresolved";
+
+/**
+ * The ref of ONE attempt's unresolved card (#1594).
+ *
+ * This was a single project-wide ref while a project could only ever have one
+ * unresolved attempt. Retirement ends that: a project can now carry retired
+ * attempts beside an outstanding one, all unresolved at once, and a board card
+ * is re-found by its ref alone — `instance` distinguishes only the create
+ * receipt and never appears in the body. So one ref meant the first attempt to
+ * be carded took the project's only slot and every later one wrote nothing,
+ * leaving the board describing the wrong attempt: a retired card saying the
+ * project's wakes are not held back, standing in front of an outstanding
+ * attempt that is holding all of them.
+ *
+ * The attempt's own key is therefore the ref, hashed because
+ * {@link monitorRefIn} reads back `[A-Za-z0-9_-]{4,64}` and a client message id
+ * is neither colon-free nor bounded. The key itself goes in the body, where an
+ * operator can read it. Cards per project stay bounded by
+ * {@link SEAT_TICK_RETIRED_WAKE_LIMIT} plus the one outstanding attempt, and a
+ * card re-raised for the SAME attempt still finds its own card and rewrites
+ * nothing.
+ */
+export const seatTickWakeUnresolvedRef = (clientMessageId: string): string =>
+  `${SEAT_TICK_WAKE_UNRESOLVED_REF}-${crypto.createHash("sha256").update(clientMessageId).digest("hex").slice(0, 16)}`;
 const CARD_TEXT_LIMIT = 5_000;
 
 /**
@@ -476,9 +498,9 @@ async function reconcileRetiredWakes(context: {
         const detail = `A wake prepared ${(wake.preparedAt ?? entry.retiredAt).slice(0, 16).replace("T", " ")} UTC for seat epoch ${wake.seatEpoch},`
           + ` which epoch ${entry.supersededBy.seatEpoch} has since replaced, is still unresolved under its original key; the layer holding it last ${answer}.`
           + " The attempt is never re-sent and nothing it named is credited, and it no longer holds back this project's wakes."
-          + " Check the delivery record under its client message id";
+          + ` Check the delivery record under its client message id ${wake.clientMessageId}`;
         try {
-          context.ensureCard(context.project, { ref: SEAT_TICK_WAKE_UNRESOLVED_REF, kind: "wake-unresolved", instance: wake.clientMessageId, detail }, context.at);
+          context.ensureCard(context.project, { ref: seatTickWakeUnresolvedRef(wake.clientMessageId), kind: "wake-unresolved", instance: wake.clientMessageId, detail }, context.at);
         } catch (error) {
           console.error("[seat tick] card write failed", error instanceof Error ? error.name : "unknown");
         }
@@ -707,9 +729,9 @@ async function reconcileOutstandingWake(context: {
       + (retired
         ? " The attempt is kept under that seat, never re-sent and crediting nothing, and it no longer holds back this project's wakes."
         : " The tick keeps the attempt and dispatches no replacement wake for this project until it lands or the delivery record proves it never actuated.")
-      + " Check the seat's conversation for the wake and the delivery record under its client message id";
+      + ` Check the seat's conversation for the wake and the delivery record under its client message id ${wake.clientMessageId}`;
     try {
-      context.ensureCard(context.project, { ref: SEAT_TICK_WAKE_UNRESOLVED_REF, kind: "wake-unresolved", instance: wake.clientMessageId, detail }, context.at);
+      context.ensureCard(context.project, { ref: seatTickWakeUnresolvedRef(wake.clientMessageId), kind: "wake-unresolved", instance: wake.clientMessageId, detail }, context.at);
     } catch (error) {
       console.error("[seat tick] card write failed", error instanceof Error ? error.name : "unknown");
     }

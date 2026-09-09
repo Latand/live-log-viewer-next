@@ -12,7 +12,7 @@ process.env.XDG_CONFIG_HOME = path.join(SANDBOX, "config");
 process.env.TMPDIR = path.join(SANDBOX, "tmp");
 fs.mkdirSync(process.env.TMPDIR, { recursive: true });
 
-const { reconcileSeatTick, runSeatTickCheck, startSeatTick, stopSeatTick, wakeReached } = await import("./seatTickController");
+const { reconcileSeatTick, runSeatTickCheck, seatTickWakeUnresolvedRef, startSeatTick, stopSeatTick, wakeReached } = await import("./seatTickController");
 const { DEFAULT_SEAT_TICK_POLICY } = await import("./seatTick");
 const { defaultSeatTickSettings } = await import("./seatTickSettings");
 const { openPullRequestsForRepo } = await import("./githubEvidence");
@@ -778,7 +778,7 @@ test("a wake a holder still retains past the wake interval is carded once and ke
   expect(record).toMatchObject({ verdict: "wake", delivery: { outcome: "deferred-outstanding" } });
   expect(rig.written.at(-1)!.outstandingWake).toEqual(outstanding);
   expect(rig.journal.map((line) => line.verdict)).toEqual(["wake"]);
-  expect(rig.cards.map((entry) => entry.card)).toMatchObject([{ ref: "seat-tick-wake-unresolved", kind: "wake-unresolved", instance: outstanding.clientMessageId }]);
+  expect(rig.cards.map((entry) => entry.card)).toMatchObject([{ ref: seatTickWakeUnresolvedRef(outstanding.clientMessageId), kind: "wake-unresolved", instance: outstanding.clientMessageId }]);
   expect(rig.cards[0]!.card.detail).toContain('last answered "retained"');
   /* The same attempt on the next check is the same occurrence: the board's own
      create receipt collapses it, and a second attempt would be a second card. */
@@ -2216,7 +2216,7 @@ test("a wake the record ended without proof keeps its identity across the deadli
   expect(fixture.acknowledged()).toEqual([]);
   expect(record).toMatchObject({ verdict: "wake", delivery: { clientMessageId: expect.not.stringMatching(wake.clientMessageId), outcome: "deferred-outstanding" } });
   expect(rig.sent).toEqual([]);
-  expect(rig.cards.map((entry) => entry.card)).toMatchObject([{ ref: "seat-tick-wake-unresolved", kind: "wake-unresolved", instance: wake.clientMessageId }]);
+  expect(rig.cards.map((entry) => entry.card)).toMatchObject([{ ref: seatTickWakeUnresolvedRef(wake.clientMessageId), kind: "wake-unresolved", instance: wake.clientMessageId }]);
   expect(rig.cards[0]!.card.detail).toContain('last answered "uncertain"');
   expect(rig.cards[0]!.card.detail).toContain("dispatches no replacement wake");
 
@@ -2267,7 +2267,7 @@ test("a wake nobody can account for is kept under its key past the deadline, car
   expect(aged.sent).toEqual([]);
   expect(fixture.row()).toMatchObject({ outstandingWake: { clientMessageId: wake.clientMessageId, operationId: "op-compacted-1" }, lastWakeAt: ago(fixture, 61), harvestedChildren: [] });
   expect(fixture.acknowledged()).toEqual([]);
-  expect(aged.cards.map((entry) => entry.card)).toMatchObject([{ ref: "seat-tick-wake-unresolved", instance: wake.clientMessageId }]);
+  expect(aged.cards.map((entry) => entry.card)).toMatchObject([{ ref: seatTickWakeUnresolvedRef(wake.clientMessageId), instance: wake.clientMessageId }]);
   expect(aged.cards[0]!.card.detail).toContain('last answered "unknown"');
   /* A holder that cannot be read at all is the same wait, said the same way. */
   const unreadable = childRig(fixture, { realWakeState: true, now: fixture.now + 122 * MINUTE });
@@ -2710,7 +2710,7 @@ test("rotation and prompt changes retain an unknown predecessor wake across the 
   expect(rotated.journal[0]).toMatchObject({ verdict: "uncertain", seatEpoch: 7, delivery: { clientMessageId: original.clientMessageId, outcome: "uncertain" } });
   expect(fixture.row().outstandingWake).toEqual(original);
   expect(fixture.row().lastWakeAt).toBe(ago(fixture, 61));
-  expect(rotated.cards.map((entry) => entry.card)).toMatchObject([{ ref: "seat-tick-wake-unresolved", instance: original.clientMessageId }]);
+  expect(rotated.cards.map((entry) => entry.card)).toMatchObject([{ ref: seatTickWakeUnresolvedRef(original.clientMessageId), instance: original.clientMessageId }]);
   expect(rotated.cards[0]!.card.detail).toContain("a seat that has since been replaced");
   const stillUnknown = childRig(fixture, { now: fixture.now + 122 * MINUTE, seat: { ...fixture.seat, seatEpoch: 8 }, wakeState: "unknown", withdrawal: "unknown" });
   await runSeatTickCheck(fixture.project, stillUnknown.deps);
@@ -3086,7 +3086,7 @@ test("a dispatch paused before reservation blocks rotation until its returned re
   await runSeatTickCheck(fixture.project, rotated.deps);
   expect(rotated.sent).toEqual([]);
   expect(fixture.row().outstandingWake).toEqual(original);
-  expect(rotated.cards.map(({ card }) => card.ref)).toContain("seat-tick-wake-unresolved");
+  expect(rotated.cards.map(({ card }) => card.ref)).toContain(seatTickWakeUnresolvedRef(original.clientMessageId));
   const accounting = new SeatTickAccounting(`${fixture.stateFile}.sqlite`, fixture.project);
   expect(accounting.settleAbsent(original)).toBe(false);
   expect(accounting.cancelUndispatched(original)).toBe(false);
@@ -3128,7 +3128,7 @@ test("rotation retains absent legacy, unknown, unreadable, uncertain and too-lat
     expect(rig.sent).toEqual([]);
     expect(fixture.row().outstandingWake).toEqual(original);
     expect(fixture.acknowledged()).toEqual([]);
-    expect(rig.cards.map(({ card }) => card.ref)).toContain("seat-tick-wake-unresolved");
+    expect(rig.cards.map(({ card }) => card.ref)).toContain(seatTickWakeUnresolvedRef(original.clientMessageId));
   }
 });
 
@@ -3329,7 +3329,7 @@ test("a wake stranded by a replaced seat is retired, and the successor's own wak
 
   /* And the wait stays on the board under the attempt's own key, saying what
      it now does and does not block. */
-  expect(rig.cards.map((entry) => entry.card)).toMatchObject([{ ref: "seat-tick-wake-unresolved", kind: "wake-unresolved", instance: stranded.clientMessageId }]);
+  expect(rig.cards.map((entry) => entry.card)).toMatchObject([{ ref: seatTickWakeUnresolvedRef(stranded.clientMessageId), kind: "wake-unresolved", instance: stranded.clientMessageId }]);
   expect(rig.cards[0]!.card.detail).toContain("no longer holds back this project's wakes");
 
   /* Nothing the stranded attempt named was credited on its behalf: the child it
@@ -3482,7 +3482,7 @@ test("a retired attempt outliving the wake interval is carded once, under its ow
   const seat = { conversationId: SUCCESSOR, seatEpoch: 8, path: null };
   const rig = harness({ seat, pipelines: OPEN_LANE, state: { ...RECENT, seatEpoch: 8, retiredWakes: [entry] }, wakeState: "uncertain" });
   await runSeatTickCheck(PROJECT, rig.deps);
-  expect(rig.cards.map((raised) => raised.card)).toMatchObject([{ ref: "seat-tick-wake-unresolved", kind: "wake-unresolved", instance: entry.wake.clientMessageId }]);
+  expect(rig.cards.map((raised) => raised.card)).toMatchObject([{ ref: seatTickWakeUnresolvedRef(entry.wake.clientMessageId), kind: "wake-unresolved", instance: entry.wake.clientMessageId }]);
   expect(rig.cards[0]!.card.detail).toContain('last answered "uncertain"');
   expect(rig.cards[0]!.card.detail).toContain("never re-sent");
   expect(rig.cards[0]!.card.detail).toContain("no longer holds back this project's wakes");
@@ -3550,4 +3550,113 @@ test("a seat re-designated onto a conversation a retired attempt still names is 
   await runSeatTickCheck(PROJECT, elsewhere.deps);
   expect(elsewhere.sent).toHaveLength(1);
   expect(elsewhere.sent[0]!.conversationId).toBe(SUCCESSOR);
+});
+
+/* A board card is re-found by its ref alone, so while one ref served the whole
+   project the first unresolved attempt to be carded took the only slot and
+   every later one wrote nothing. Retirement makes a project able to hold
+   several at once — and the shadowed one is the outstanding attempt, whose card
+   is the one that says the project's wakes are held back. The board would have
+   carried a single card saying the opposite (#1594). This drives the real
+   `ensureSeatTickCard` over a board file, because the shadowing lives there and
+   the harness stub cannot see it. */
+test("a retired and an outstanding attempt each carry their own board card (#1594)", async () => {
+  const project = `wake-cards-${crypto.randomUUID().slice(0, 8)}`;
+  const board = path.join(process.env.LLV_STATE_DIR!, "tasks.json");
+  const cardsOn = (): { id: string; text: string; status: string }[] => {
+    const file = JSON.parse(fs.readFileSync(board, "utf8")) as { tasks: { id: string; project: string; text: string; status: string }[] };
+    return file.tasks.filter((task) => task.project === project && task.status !== "done");
+  };
+  const stranded = outstandingWake({ seatEpoch: 140, conversationId: CONVERSATION, operationId: null,
+    text: "the predecessor's wake", preparedAt: new Date(NOW - 70 * MINUTE).toISOString() });
+  const lane = [{ ...OPEN_LANE[0]!, project }];
+  const seat = { conversationId: SUCCESSOR, seatEpoch: 155, path: null };
+  const shared = {
+    seat, pipelines: lane, settings: defaultSeatTickSettings(project), wakeState: "unknown" as const,
+    /* A send the layer took and has not landed: the successor's own attempt
+       becomes the outstanding one, and the retired one is still unresolved. */
+    delivery: { ok: true, target: null, outcome: "queued", operationId: "op-successor-1", receipt: {} as never, structured: true } as DeliveryOutcome,
+    state: { seatEpoch: 155, lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString(), outstandingWake: stranded },
+  };
+
+  /* Check one retires the predecessor's attempt, cards it, and raises the
+     successor's own wake — which the layer keeps. */
+  const first = harness(shared);
+  await runSeatTickCheck(project, { ...first.deps, ensureCard: undefined });
+  expect(first.sent).toHaveLength(1);
+  const successorKey = first.sent[0]!.clientMessageId!;
+  expect(cardsOn()).toHaveLength(1);
+
+  /* Check two, past the interval: the successor's attempt is now unresolved
+     too, and it must reach the board rather than be shadowed. */
+  const second = harness({ ...shared, now: NOW + 61 * MINUTE,
+    state: { ...shared.state, outstandingWake: undefined as never } });
+  second.deps.readState = first.deps.readState;
+  second.deps.writeState = first.deps.writeState;
+  const record = await runSeatTickCheck(project, { ...second.deps, ensureCard: undefined });
+  expect(record).toMatchObject({ delivery: { outcome: "deferred-outstanding" } });
+
+  const standing = cardsOn();
+  expect(standing).toHaveLength(2);
+  const retiredCard = standing.find((task) => task.text.includes(stranded.clientMessageId))!;
+  const outstandingCard = standing.find((task) => task.text.includes(successorKey))!;
+  expect(retiredCard).toBeDefined();
+  expect(outstandingCard).toBeDefined();
+  expect(retiredCard.id).not.toBe(outstandingCard.id);
+  /* Each names its own attempt, and each says what that attempt costs. The
+     project's wakes being held back is stated, by the attempt holding them. */
+  expect(outstandingCard.text).toContain("dispatches no replacement wake");
+  expect(outstandingCard.text).toContain(seatTickWakeUnresolvedRef(successorKey));
+  expect(retiredCard.text).toContain("no longer holds back this project's wakes");
+  expect(retiredCard.text).toContain(seatTickWakeUnresolvedRef(stranded.clientMessageId));
+
+  /* A later check re-raises both conditions and writes nothing: a card for
+     something that HAPPENED does not churn once per check. */
+  const third = harness({ ...shared, now: NOW + 122 * MINUTE, state: { ...shared.state, outstandingWake: undefined as never } });
+  third.deps.readState = first.deps.readState;
+  third.deps.writeState = first.deps.writeState;
+  await runSeatTickCheck(project, { ...third.deps, ensureCard: undefined });
+  expect(cardsOn().map((task) => `${task.id}:${task.text}`).sort())
+    .toEqual(standing.map((task) => `${task.id}:${task.text}`).sort());
+
+  /* And closing one attempt's card leaves the other's standing. */
+  const file = JSON.parse(fs.readFileSync(board, "utf8")) as { tasks: { id: string; status: string }[] };
+  fs.writeFileSync(board, JSON.stringify({ ...file,
+    tasks: file.tasks.map((task) => task.id === retiredCard.id ? { ...task, status: "done" } : task) }));
+  expect(cardsOn().map((task) => task.id)).toEqual([outstandingCard.id]);
+});
+
+/* The retired release on affirmed absence, pinned across every dispatch state
+   it can meet — the one place the retired reconcile is deliberately less
+   conservative than the outstanding one, which fences a token and releases only
+   an explicit refusal. It can be: the admission fence claims
+   `state.outstandingWake`, so no transport call can ever start under a retired
+   attempt and there is no token left to fence. What still has to hold is the
+   other half — an attempt whose transport call has NOT come back is kept,
+   because that call is the one thing that could still be happening, and an
+   attempt naming an operation is kept, because absence beside a handle is not
+   an affirmation about that handle. */
+test("the retired release on affirmed absence turns on the transport call, never on age (#1594)", async () => {
+  const cases: [string, SeatTickOutstandingWake["dispatch"], string | null, boolean][] = [
+    ["a refusal that reserved nothing", { token: "dispatch-token", state: "refused" }, null, true],
+    ["a call that returned without refusing", { token: "dispatch-token", state: "returned" }, null, true],
+    ["a legacy attempt with no dispatch record", undefined, null, true],
+    ["a call that has not come back", { token: "dispatch-token", state: "active" }, null, false],
+    ["an attempt that still names an operation", { token: "dispatch-token", state: "refused" }, "op-retired-1", false],
+  ];
+  for (const [name, dispatch, operationId, released] of cases) {
+    const entry = retiredEntry({ clientMessageId: `retired-${name.replace(/[^a-z]+/g, "-")}`, dispatch, operationId });
+    const rig = harness({
+      seat: { conversationId: SUCCESSOR, seatEpoch: 8, path: null },
+      pipelines: OPEN_LANE,
+      state: { ...RECENT, seatEpoch: 8, retiredWakes: [entry] },
+      wakeState: "absent",
+    });
+    await runSeatTickCheck(PROJECT, rig.deps);
+    const unsent = rig.journal.find((line) => line.delivery?.clientMessageId === entry.wake.clientMessageId && line.delivery.outcome === "unsent");
+    expect([name, rig.written.at(-1)!.retiredWakes.length]).toEqual([name, released ? 0 : 1]);
+    expect([name, unsent !== undefined]).toEqual([name, released]);
+    /* Released or kept, the payload never goes out again under any key. */
+    expect(rig.sent).toEqual([]);
+  }
 });
