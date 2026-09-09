@@ -7878,3 +7878,29 @@ test("a push that fails at review ingress parks before the review flow exists", 
   expect(h.flows.size).toBe(0);
   expect(parked.lastPassedCommit).toBe(box.passedSha);
 });
+
+test("a pipeline without a recorded task adopts the fallback task its admission minted, on the tick and at the stage reservation (#1586)", async () => {
+  const h = harness();
+  const created = await create(h.ports);
+  expect(created.taskIds).toEqual([]);
+  const other = {
+    id: "other-fallback", project: created.project, status: "inbox" as const, text: "Another pipeline's fallback", placement: "unplaced" as const,
+    origin: { kind: "pipeline" as const, key: "some-other-pipeline", refinement: "pending" as const }, assignments: [], createdAt: "2026-09-09T12:00:00.000Z", updatedAt: "2026-09-09T12:00:00.000Z",
+  };
+  const fallback = { ...other, id: "created-fallback", text: "Ship pipelines", origin: { kind: "pipeline" as const, key: created.id, refinement: "pending" as const } };
+  saveTasks([other, fallback]);
+  await tickPipelines([], h.ports);
+  /* The controller pass binds the fallback before any stage is reserved. */
+  expect(loadPipelines().find((pipeline) => pipeline.id === created.id)!.taskIds).toEqual(["created-fallback"]);
+  /* Recovery of the same pipeline reuses the same binding; a bound pipeline is left alone. */
+  await tickPipelines([], h.ports);
+  expect(loadPipelines().find((pipeline) => pipeline.id === created.id)!.taskIds).toEqual(["created-fallback"]);
+  const bound = loadPipelines().find((pipeline) => pipeline.id === created.id)!;
+  expect(engineModule.adoptPipelineFallbackTask(bound, [other, fallback])).toBe(false);
+  /* The reservation callback binds a fallback minted for a pipeline whose
+     record still shows none, before the stage's agent is actuated. */
+  const unbound = { ...bound, taskIds: [] as string[] };
+  expect(engineModule.adoptPipelineFallbackTask(unbound, [other, fallback])).toBe(true);
+  expect(unbound.taskIds).toEqual(["created-fallback"]);
+  expect(engineModule.adoptPipelineFallbackTask({ ...bound, taskIds: [] }, [other])).toBe(false);
+});

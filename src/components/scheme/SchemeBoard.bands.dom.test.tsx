@@ -3,6 +3,7 @@ import { Window } from "happy-dom";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 
+import type { Pipeline } from "@/lib/pipelines/types";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
 
@@ -16,7 +17,8 @@ import { SchemeBoard } from "./SchemeBoard";
  */
 
 const dom = new Window();
-const VIEWPORT = { x: 0, y: 0, left: 0, top: 0, right: 1400, bottom: 900, width: 1400, height: 900 };
+let VIEWPORT = { x: 0, y: 0, left: 0, top: 0, right: 1400, bottom: 900, width: 1400, height: 900 };
+const setViewportWidth = (width: number) => { VIEWPORT = { ...VIEWPORT, right: width, width }; };
 class TestResizeObserver {
   constructor(private callback: () => void) {}
   observe(element: HTMLElement) {
@@ -49,6 +51,7 @@ Object.assign(globalThis, {
   sessionStorage: dom.sessionStorage,
   localStorage: dom.localStorage,
   ResizeObserver: TestResizeObserver,
+  MutationObserver: dom.MutationObserver,
   IntersectionObserver: undefined,
   requestAnimationFrame: requestFrame,
   cancelAnimationFrame: (id: number) => dom.clearTimeout(id as never),
@@ -58,6 +61,8 @@ const roots = new Set<Root>();
 let previousFetch: typeof fetch;
 afterEach(() => {
   if (previousFetch) globalThis.fetch = previousFetch;
+  setViewportWidth(1400);
+  document.getSelection()?.removeAllRanges();
   for (const root of roots) flushSync(() => root.unmount());
   roots.clear();
   document.body.replaceChildren();
@@ -321,4 +326,102 @@ test("opening a shared conversation from its reference tile anchors the surface 
   });
   expect(hostBand?.getAttribute("data-scheme-band-task")).toBe("second");
   expect((host.querySelector('[data-scheme-mirror="/shared"]') as HTMLElement).closest("[data-scheme-band]")!.getAttribute("data-scheme-band-task")).toBe("first");
+});
+
+const bandOrder = (host: HTMLElement) => Array.from(host.querySelectorAll<HTMLElement>("[data-scheme-band]")).sort((a, b) => parseFloat(a.style.top) - parseFloat(b.style.top)).map((band) => band.getAttribute("data-scheme-band-task"));
+const shellBox = (shell: HTMLElement) => {
+  const match = /translate\((-?[\d.e+-]+)px, (-?[\d.e+-]+)px\)(?: scale\(([\d.e+-]+)\))?/.exec(shell.style.transform)!;
+  const fit = match[3] ? parseFloat(match[3]) : 1;
+  return { x: parseFloat(match[1]!), y: parseFloat(match[2]!), w: parseFloat(shell.style.width) * fit, h: parseFloat(shell.style.height) * fit, fit };
+};
+
+function mountLive(initialFiles: FileEntry[], extra: Partial<Parameters<typeof SchemeBoard>[0]> = {}) {
+  previousFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(JSON.stringify({}), { status: 200, headers: { "content-type": "application/json" } })) as unknown as typeof fetch;
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  roots.add(root);
+  const render = (current: FileEntry[]) => flushSync(() => root.render(
+    <SchemeBoard project="bands" groups={[]} manual={current} files={current} flows={[]} tasks={tasks} allTasks={tasks} drafts={[]} focus={null} onSelect={() => {}} onClose={() => {}} onDraftClose={() => {}} onDraftSpawned={() => {}} {...extra} />,
+  ));
+  render(initialFiles);
+  return { host, render };
+}
+
+test("rank moves wait while text is selected inside the board or a disclosure is open; the order applies when the interaction ends", async () => {
+  const { host, render } = mountLive(files);
+  await settle();
+  expect(bandOrder(host)).toEqual(["younger-working", "older-idle"]);
+  /* The operator selects a title inside the idle band. */
+  const shell = host.querySelector('[data-scheme-node="/quiet-one"]') as HTMLElement;
+  const range = document.createRange();
+  range.selectNodeContents(shell);
+  const selection = document.getSelection()!;
+  selection.removeAllRanges();
+  selection.addRange(range);
+  flushSync(() => document.dispatchEvent(new dom.Event("selectionchange") as unknown as Event));
+  await settle();
+  /* Working counts flip: the labels update, the order does not. */
+  const flipped = [file("/busy", "Busy implementer", false), file("/quiet-one", "Quiet reviewer", true), quietTwo];
+  render(flipped);
+  await settle();
+  expect(bandOrder(host)).toEqual(["younger-working", "older-idle"]);
+  expect((host.querySelector('[data-scheme-band-task="older-idle"]') as HTMLElement).getAttribute("data-scheme-band-working")).toBe("1");
+  expect(host.querySelector("[data-scheme-order-updated]")).not.toBeNull();
+  selection.removeAllRanges();
+  flushSync(() => document.dispatchEvent(new dom.Event("selectionchange") as unknown as Event));
+  await settle();
+  expect(bandOrder(host)).toEqual(["older-idle", "younger-working"]);
+  expect(host.querySelector("[data-scheme-order-updated]")).toBeNull();
+
+  /* An open disclosure or action menu inside the board holds the order too. */
+  const trigger = host.querySelector("[data-scheme-band-add]") as HTMLElement;
+  trigger.setAttribute("aria-expanded", "true");
+  await settle();
+  render(files);
+  await settle();
+  expect(bandOrder(host)).toEqual(["older-idle", "younger-working"]);
+  expect(host.querySelector("[data-scheme-order-updated]")).not.toBeNull();
+  trigger.setAttribute("aria-expanded", "false");
+  await settle();
+  expect(bandOrder(host)).toEqual(["younger-working", "older-idle"]);
+  expect(host.querySelector("[data-scheme-order-updated]")).toBeNull();
+});
+
+test("on a narrow board a draft pane and a planned stage slot are scaled to fit inside their band", async () => {
+  setViewportWidth(490);
+  const pipeline: Pipeline = {
+    id: "narrow-pipeline", task: "Narrow pipeline", taskIds: [], project: "bands", repoDir: "/repo", worktreeDir: "/repo-narrow", branch: "pipeline/narrow", baseBranch: "main", baseRef: "abc", lastPassedCommit: "abc",
+    stages: [{ id: "build", kind: "run", "prompt": "", next: null, effectiveRole: { roleId: null, engine: "codex", model: null, effort: null, access: "read-write", promptScaffold: null } }],
+    runs: [], cursor: { stageId: "build", state: "running", input: null, activatedBy: null }, state: "running", pausedState: null, stateDetail: null, srcPath: null, srcConversationId: null, createdAt: "2025-06-01T00:00:00.000Z", closedAt: null,
+  };
+  const { host } = mountLive(files, { drafts: ["d1"], draftBands: new Map([["d1", "task:younger-working"]]), pipelines: [pipeline], surfacePipelines: [pipeline] });
+  await settle();
+  const viewport = viewportOf(host);
+  /* 100% zoom on a 490px board: the band's inner width is 426px, a draft or
+     slot is 600px wide by nature. */
+  for (let step = 0; step < 40 && cameraOf(viewport).z < 0.95; step += 1) {
+    wheelZoom(viewport, -220, { x: 200, y: 300 });
+    await settle();
+  }
+  expect(cameraOf(viewport).z).toBeGreaterThanOrEqual(0.95);
+  const bands = Array.from(host.querySelectorAll<HTMLElement>("[data-scheme-band]"));
+  const bandOf = (shell: HTMLElement) => bands.find((band) => {
+    const box = shellBox(shell);
+    return box.y >= parseFloat(band.style.top) && box.y < parseFloat(band.style.top) + parseFloat(band.style.height);
+  })!;
+  for (const key of ["draft::d1", "slot::narrow-pipeline::build"]) {
+    const shell = host.querySelector(`[data-scheme-node="${key}"]`) as HTMLElement;
+    expect(shell).not.toBeNull();
+    const box = shellBox(shell);
+    const band = bandOf(shell);
+    expect(band).toBeTruthy();
+    /* Natural size is 600 wide; the band is narrower, so the shell is scaled
+       uniformly and its right edge stays inside the band. */
+    expect(box.fit).toBeLessThan(1);
+    expect(parseFloat(shell.style.width)).toBeCloseTo(600, 3);
+    expect(box.x + box.w).toBeLessThanOrEqual(parseFloat(band.style.left) + parseFloat(band.style.width) + 0.001);
+    expect(box.x).toBeGreaterThanOrEqual(parseFloat(band.style.left) - 0.001);
+  }
 });

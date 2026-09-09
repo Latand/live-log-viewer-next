@@ -115,6 +115,9 @@ export interface SchemeRect {
   y: number;
   w: number;
   h: number;
+  /** Uniform scale a band applied to the surface's natural size so it fits the
+      band's width (#1586); `w`/`h` are the fitted box. Absent means 1. */
+  fit?: number;
 }
 
 /** How a placed node stands in the canonical lineage (issue #828): what the

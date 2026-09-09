@@ -414,6 +414,64 @@ async function main(): Promise<void> {
               const bands = await bandRects(page);
               const canvas = await page.evaluate(() => document.querySelector('[aria-label^="Agent board"]')!.getBoundingClientRect().width);
               frames.push({ file: `${DENSITY}-dock-open-z${Math.round(zoom * 100)}.png`, dock: true, zoom, availableWidth: canvas, bandWidth: bands[0]?.rect.width ?? null });
+              if (zoom === 1) {
+                /* A draft opened from the dense band's «+ Agent» on the
+                   dock-narrowed board: the 600px pane is scaled to fit its band. */
+                /* The dense band's control sits far below the fold on a
+                   board that cannot scroll, so the click goes straight to
+                   the element, as the anchor steps do. */
+                await page.evaluate((taskId) => {
+                  document.querySelector<HTMLButtonElement>(`[data-scheme-band-task="${taskId}"] [data-scheme-band-add]`)!.click();
+                }, denseTask.id);
+                await page.waitForTimeout(600);
+                const fit = await page.evaluate(() => {
+                  const viewport = document.querySelector('[aria-label^="Agent board"]')!.getBoundingClientRect();
+                  const draft = document.querySelector<HTMLElement>('[data-scheme-node^="draft::"]');
+                  if (!draft) return null;
+                  const rect = draft.getBoundingClientRect();
+                  const band = Array.from(document.querySelectorAll<HTMLElement>("[data-scheme-band]")).map((element) => ({ id: element.getAttribute("data-scheme-band")!, rect: element.getBoundingClientRect() }))
+                    .find((candidate) => rect.y >= candidate.rect.y - 0.5 && rect.y < candidate.rect.bottom);
+                  return {
+                    draft: { x: rect.x - viewport.x, y: rect.y - viewport.y, w: rect.width, h: rect.height },
+                    band: band ? { id: band.id, x: band.rect.x - viewport.x, w: band.rect.width } : null,
+                    scale: /scale\(([\d.e+-]+)\)/.exec(draft.style.transform)?.[1] ?? "1",
+                    inside: Boolean(band && rect.x >= band.rect.x - 0.5 && rect.right <= band.rect.right + 0.5),
+                    boardWidth: viewport.width,
+                  };
+                });
+                must(fit !== null, "no draft pane appeared after the dense band +Agent");
+                must(fit!.inside, `draft pane ${JSON.stringify(fit!.draft)} extends past its band ${JSON.stringify(fit!.band)}`);
+                await page.screenshot({ path: path.join(OUT_DIR, `${DENSITY}-dock-open-z100-draft.png`) });
+                evidence.dockDraftFit = { ...fit!, file: `${DENSITY}-dock-open-z100-draft.png` };
+                /* A 1024px window with the dock open leaves the board narrower
+                   than the pane's natural 600px: the pane is scaled to fit. */
+                await page.setViewportSize({ width: 1024, height: 768 });
+                await page.waitForTimeout(500);
+                const narrow = await page.evaluate(() => {
+                  const viewport = document.querySelector('[aria-label^="Agent board"]')!.getBoundingClientRect();
+                  const draft = document.querySelector<HTMLElement>('[data-scheme-node^="draft::"]');
+                  if (!draft) return null;
+                  const rect = draft.getBoundingClientRect();
+                  const band = Array.from(document.querySelectorAll<HTMLElement>("[data-scheme-band]")).map((element) => ({ id: element.getAttribute("data-scheme-band")!, rect: element.getBoundingClientRect() }))
+                    .find((candidate) => rect.y >= candidate.rect.y - 0.5 && rect.y < candidate.rect.bottom);
+                  const world = Array.from(document.querySelector('[aria-label^="Agent board"]')!.children).find((child) => (child as HTMLElement).style.transform.includes("scale(")) as HTMLElement;
+                  return {
+                    draft: { x: rect.x - viewport.x, y: rect.y - viewport.y, w: rect.width, h: rect.height },
+                    band: band ? { id: band.id, x: band.rect.x - viewport.x, w: band.rect.width } : null,
+                    scale: /scale\(([\d.e+-]+)\)/.exec(draft.style.transform)?.[1] ?? "1",
+                    zoom: parseFloat(/scale\(([\d.e+-]+)\)/.exec(world.style.transform)![1]!),
+                    inside: Boolean(band && rect.x >= band.rect.x - 0.5 && rect.right <= band.rect.right + 0.5),
+                    boardWidth: viewport.width,
+                  };
+                });
+                must(narrow !== null, "the draft pane vanished on resize");
+                must(narrow!.inside, `narrow draft pane ${JSON.stringify(narrow!.draft)} extends past its band ${JSON.stringify(narrow!.band)}`);
+                must(parseFloat(narrow!.scale) < 1, `narrow draft pane was not scaled (scale ${narrow!.scale}, board ${narrow!.boardWidth})`);
+                await page.screenshot({ path: path.join(OUT_DIR, `${DENSITY}-dock-open-1024-z100-draft.png`) });
+                evidence.dockDraftFitNarrow = { ...narrow!, file: `${DENSITY}-dock-open-1024-z100-draft.png` };
+                await page.setViewportSize({ width: 1440, height: 900 });
+                await page.waitForTimeout(300);
+              }
             }
           }
         }

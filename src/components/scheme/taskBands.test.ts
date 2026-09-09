@@ -216,10 +216,15 @@ test("bands stack full-width at every mode and width; members, mirrors and +Agen
         expect(scene.shown.has(node.file.path)).toBe(true);
         const expected = mode === "overview" ? "chip" : node.file.path === files[5]!.path ? "native" : "summary";
         expect(node.presentation).toBe(expected);
+        /* Screen-constant for its presentation, except that no surface is
+           wider than the band's inner width: a 375px board fits the tile. */
+        const inner = viewportWidth - (viewportWidth < 1024 ? BAND.gutterNarrow : BAND.gutter) * 2 - BAND.pad * 2;
         const width = node.w * zoom;
-        if (expected === "chip") expect(width).toBeCloseTo(BAND.chipW, 6);
-        else if (expected === "summary") expect(width).toBeCloseTo(BAND.summaryW, 6);
-        else expect(width).toBeGreaterThanOrEqual(BAND.nativeMinW - 0.001);
+        if (expected === "chip") expect(width).toBeCloseTo(Math.min(BAND.chipW, inner), 6);
+        else if (expected === "summary") expect(width).toBeCloseTo(Math.min(BAND.summaryW, inner), 6);
+        else expect(width).toBeGreaterThanOrEqual(Math.min(BAND.nativeMinW, inner) - 0.001);
+        expect(width).toBeLessThanOrEqual(inner + 0.001);
+        expect((node.readerScale ?? 1) * zoom).toBeCloseTo(width / (expected === "chip" ? BAND.chipW : expected === "summary" ? BAND.summaryW : node.w * zoom / ((node.readerScale ?? 1) * zoom)), 6);
       }
       /* At 375 one tile per row: no two summary tiles share a row. */
       if (viewportWidth === 375 && mode === "intermediate") {

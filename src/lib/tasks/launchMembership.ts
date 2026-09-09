@@ -38,6 +38,9 @@ export interface ReservedLaunch {
   taskIds?: readonly string[] | null;
   /** The conversation a reviewer launch reviews; the reviewer joins its tasks. */
   reviewsConversationId?: string | null;
+  /** The conversation that initiated an agent-initiated launch; the child
+      joins its tasks, as the board draws it under the parent. */
+  parentConversationId?: string | null;
   parentArtifactPath?: string | null;
 }
 
@@ -56,9 +59,9 @@ export class LaunchMembershipError extends Error {
 const engineOf = (engine: string): "claude" | "codex" | null => (engine === "claude" || engine === "codex" ? engine : null);
 
 /** The membership a reserved launch commits: its explicit tasks, the tasks of a
-    bound pipeline, the tasks of the work a reviewer reviews, a fallback task
-    per task-less container, or one placeholder keyed by the client attempt
-    (or the launch id for keyless launches). */
+    bound pipeline, the tasks of the work a reviewer reviews or a child's
+    parent does, a fallback task per task-less container, or one placeholder
+    keyed by the client attempt (or the launch id for keyless launches). */
 export function launchMembershipInput(
   launch: ReservedLaunch,
   receipt: ReservedReceipt,
@@ -73,11 +76,14 @@ export function launchMembershipInput(
   /* Explicit targets carry their own project: the operator chose the task, and
      the launch directory (a worktree, a scratch checkout) may derive another. */
   if (explicit.length) return { project: "", origin: launchOrigin, title, identity, explicitTaskIds: explicit };
-  /* A reviewer belongs to the work it reviews: the implementer's recorded
-     membership is the flow's task context. */
-  const reviewed: MembershipIdentity[] = launch.reviewsConversationId
-    ? [{ conversationId: launch.reviewsConversationId, path: launch.parentArtifactPath ?? null }]
-    : [];
+  /* A reviewer belongs to the work it reviews, a child to the work its parent
+     does: their recorded membership is the launch's task context. */
+  const reviewed: MembershipIdentity[] = [];
+  for (const conversationId of [launch.reviewsConversationId, launch.parentConversationId]) {
+    if (conversationId && !reviewed.some((identity) => identity.conversationId === conversationId)) {
+      reviewed.push({ conversationId, path: conversationId === launch.parentConversationId ? launch.parentArtifactPath ?? null : null });
+    }
+  }
   if (launch.origin?.kind === "container" && launch.origin.containerId) {
     const containerId = launch.origin.containerId;
     if (launch.origin.container === "pipeline") {

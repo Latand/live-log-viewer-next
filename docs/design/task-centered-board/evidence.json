@@ -2931,5 +2931,40 @@
       "width": 107.997802734375,
       "height": 43.99853515625
     }
+  },
+  "dockDraftFit": {
+    "draft": {
+      "x": 32,
+      "y": -605.840087890625,
+      "w": 600,
+      "h": 780
+    },
+    "band": {
+      "id": "task:task-1586-00",
+      "x": 16,
+      "w": 720
+    },
+    "scale": "1",
+    "inside": true,
+    "boardWidth": 752,
+    "file": "dense-dock-open-z100-draft.png"
+  },
+  "dockDraftFitNarrow": {
+    "draft": {
+      "x": 32,
+      "y": -605.83984375,
+      "w": 352,
+      "h": 457.60009765625
+    },
+    "band": {
+      "id": "task:task-1586-00",
+      "x": 16,
+      "w": 384
+    },
+    "scale": "0.586667",
+    "zoom": 1,
+    "inside": true,
+    "boardWidth": 416,
+    "file": "dense-dock-open-1024-z100-draft.png"
   }
 }

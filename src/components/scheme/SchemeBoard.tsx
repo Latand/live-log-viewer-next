@@ -82,6 +82,9 @@ const DORMANT_EXIT_Z = LABEL_Z * 1.1;
 
 const EMPTY_PATHS: ReadonlySet<string> = new Set();
 const EMPTY_PLACED_TASKS: PlacedTask[] = [];
+/** An open menu or disclosure inside the board: the operator is reading it. */
+const OPEN_DISCLOSURE = '[role="menu"], details[open], [aria-expanded="true"]';
+
 const isTextField = (target: EventTarget | null): boolean => {
   const el = target as HTMLElement | null;
   return Boolean(el && el.tagName && (["INPUT", "TEXTAREA", "SELECT"].includes(el.tagName) || el.isContentEditable));
@@ -861,9 +864,32 @@ export function SchemeBoard({
   });
 
   useLayoutEffect(() => {setLayoutZoom(cam.z);setLayoutViewportWidth(vp.w);setBandMode((previous) => bandModeFor(cam.z, previous));}, [cam.z,vp.w]);
-  /* Rank moves are deferred while the operator pans or types inside the board. */
+  /* Rank moves are deferred while the operator is busy inside the board:
+     panning, typing, holding a text selection, or reading an open disclosure
+     or action menu. Status labels still update at once; only the order waits. */
   const [composerFocus, setComposerFocus] = useState(false);
-  const interacting = panning || composerFocus;
+  const [selectingText, setSelectingText] = useState(false);
+  const [disclosureOpen, setDisclosureOpen] = useState(false);
+  useEffect(() => {
+    const root = viewportRef.current;
+    if (!root || mapMode) return;
+    const onSelectionChange = () => {
+      const selection = document.getSelection();
+      setSelectingText(Boolean(selection && selection.rangeCount > 0 && !selection.isCollapsed && selection.anchorNode && root.contains(selection.anchorNode)));
+    };
+    document.addEventListener("selectionchange", onSelectionChange);
+    const observer = typeof MutationObserver === "undefined"
+      ? null
+      : new MutationObserver(() => setDisclosureOpen(root.querySelector(OPEN_DISCLOSURE) !== null));
+    observer?.observe(root, { subtree: true, childList: true, attributes: true, attributeFilter: ["aria-expanded", "open"] });
+    return () => {
+      document.removeEventListener("selectionchange", onSelectionChange);
+      observer?.disconnect();
+      setSelectingText(false);
+      setDisclosureOpen(false);
+    };
+  }, [mapMode, viewportRef]);
+  const interacting = panning || composerFocus || selectingText || disclosureOpen;
   useEffect(() => {
     /* eslint-disable-next-line react-hooks/set-state-in-effect -- the snapshot is taken exactly when an interaction starts */
     setFrozenOrder((previous) => (interacting ? previous ?? rankedBands.map((band) => band.id) : null));

@@ -1,7 +1,7 @@
 "use client";
 
 import { Check, Layers } from "lucide-react";
-import { memo, useCallback, useEffect, useMemo, useState, type ComponentProps } from "react";
+import { memo, useCallback, useEffect, useMemo, useState, type ComponentProps, type CSSProperties } from "react";
 
 import { ChevronRight } from "@/components/icons";
 import { conversationIdentity } from "@/lib/accounts/identity";
@@ -758,7 +758,7 @@ function LiteDraftShell({ draft, ringed, dimmed }: { draft: DraftNode; ringed: b
     <div
       data-scheme-node={draft.key}
       className={`scheme-enter absolute${dimClass(dimmed)}`}
-      style={{ transform: `translate(${draft.x}px, ${draft.y}px)`, width: draft.w, height: draft.h, transition: MOVE_TRANSITION }}
+      style={fittedShellStyle(draft)}
     >
       <div
         className={`flex h-full items-center justify-center rounded-[10px] border border-dashed border-border bg-card/70 ${
@@ -783,7 +783,7 @@ function LiteDeckShell({ deck, dimmed }: { deck: DeckNode; dimmed: boolean }) {
     <div
       data-scheme-node={deck.key}
       className={`scheme-enter absolute${dimClass(dimmed)}`}
-      style={{ transform: `translate(${deck.x}px, ${deck.y}px)`, width: deck.w, height: deck.h, transition: MOVE_TRANSITION }}
+      style={fittedShellStyle(deck)}
     >
       <div className="flex h-full flex-col overflow-hidden rounded-[10px] border border-border bg-card shadow-1">
         {round ? (
@@ -830,7 +830,7 @@ export function MiniStackShell({ stack, dimmed, onSelect }: { stack: MiniStack; 
     <div
       data-scheme-node={stack.key}
       className={`scheme-enter absolute${dimClass(dimmed)}`}
-      style={{ transform: `translate(${stack.x}px, ${stack.y}px)`, width: stack.w, height: stack.h, transition: MOVE_TRANSITION }}
+      style={fittedShellStyle(stack)}
     >
       <div className="flex h-full flex-col gap-1.5 overflow-y-auto rounded-[10px] border border-dashed border-strong bg-card/60 p-2">
         {stack.items.map(({ file, branches }) => {
@@ -1274,6 +1274,15 @@ const NodeShell = memo(function NodeShell(props: NativeNodeProps) {
 });
 
 /** A conversation draft as a scheme citizen: positioned like a fresh root node. */
+/** A band may hand a draft, slot, deck or stack less room than its natural
+    size (#1586): the shell keeps its natural box and scales it uniformly, so
+    its rendered contents fit the band with it. */
+function fittedShellStyle(rect: SchemeRect): CSSProperties {
+  const fit = rect.fit ?? 1;
+  if (fit === 1) return { transform: `translate(${rect.x}px, ${rect.y}px)`, width: rect.w, height: rect.h, transition: MOVE_TRANSITION };
+  return { transform: `translate(${rect.x}px, ${rect.y}px) scale(${fit})`, transformOrigin: "top left", width: rect.w / fit, height: rect.h / fit, transition: MOVE_TRANSITION };
+}
+
 function DraftShell({
   draft,
   project,
@@ -1295,7 +1304,7 @@ function DraftShell({
     <div
       data-scheme-node={draft.key}
       className={`scheme-enter absolute${dimClass(dimmed)}`}
-      style={{ transform: `translate(${draft.x}px, ${draft.y}px)`, width: draft.w, height: draft.h, transition: MOVE_TRANSITION }}
+      style={fittedShellStyle(draft)}
     >
       <div className={`flex h-full ${ringed ? "rounded-[10px] ring-2 ring-accent/60 ring-offset-2 ring-offset-canvas" : ""}`}>
         {isWorkflowDraftId(draft.id) ? (
@@ -1373,7 +1382,7 @@ function StageSlotShell({ slot, lite, dimmed, files, onSelect }: { slot: StageSl
       <div
         data-scheme-node={slot.key}
         className={`scheme-enter absolute${dimClass(dimmed)} ${rowOpen ? "z-30" : ""}`}
-        style={{ transform: `translate(${slot.x}px, ${slot.y}px)`, width: slot.w, height: slot.h, transition: MOVE_TRANSITION }}
+        style={fittedShellStyle(slot)}
       >
         {slot.incoming ? (
           <span
@@ -1425,7 +1434,7 @@ function StageSlotShell({ slot, lite, dimmed, files, onSelect }: { slot: StageSl
       <div
         data-scheme-node={slot.key}
         className={`scheme-enter absolute${dimClass(dimmed)}`}
-        style={{ transform: `translate(${slot.x}px, ${slot.y}px)`, width: slot.w, height: slot.h, transition: MOVE_TRANSITION }}
+        style={fittedShellStyle(slot)}
       >
         {slot.incoming ? (
           <span
@@ -1467,7 +1476,7 @@ function StageSlotShell({ slot, lite, dimmed, files, onSelect }: { slot: StageSl
     <div
       data-scheme-node={slot.key}
       className={`scheme-enter absolute${dimClass(dimmed)}`}
-      style={{ transform: `translate(${slot.x}px, ${slot.y}px)`, width: slot.w, height: slot.h, transition: MOVE_TRANSITION }}
+      style={fittedShellStyle(slot)}
     >
       {slot.incoming ? (
         <span
@@ -1536,7 +1545,7 @@ function DeckShell({
     <div
       data-scheme-node={deck.key}
       className={`scheme-enter absolute${dimClass(dimmed)}`}
-      style={{ transform: `translate(${deck.x}px, ${deck.y}px)`, width: deck.w, height: deck.h, transition: MOVE_TRANSITION }}
+      style={fittedShellStyle(deck)}
     >
       <RoundDeck flow={deck.flow} rounds={deck.rounds} focusRound={focusRound} dormant={dormant} groupLabel={groupLabel} />
       <RoleTag role="reviewer" active={activeLoopRole(deck.flow) === "reviewer"} />

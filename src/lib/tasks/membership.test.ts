@@ -129,7 +129,7 @@ function pipeline(id: string, attempts: { agentPath: string | null; conversation
   } as unknown as Pipeline;
 }
 
-test("admission planning covers root conversations only, skips held ones, gives a task-less pipeline one fallback task, and is bounded", () => {
+test("admission planning covers roots and their children, skips held ones, gives a task-less pipeline one fallback task, and is bounded", () => {
   const entries = [
     entry(1),
     entry(2, { parent: "/fixture/projects/root/session-1.jsonl" }),
@@ -142,16 +142,23 @@ test("admission planning covers root conversations only, skips held ones, gives 
   const held = task("held", "fixture", { assignments: [{ path: entries[4]!.path, conversationId: entries[4]!.conversationId!, panePid: null, state: "delivered", error: null, at: now }] });
   const p = pipeline("p1", [{ agentPath: entries[5]!.path, conversationId: entries[5]!.conversationId! }, { agentPath: entries[6]!.path, conversationId: entries[6]!.conversationId! }]);
   const plans = planAdmissions(entries, [held], [p]);
-  expect(plans.map((plan) => [plan.origin.kind, plan.origin.key])).toEqual([["pipeline", "p1"], ["pipeline", "p1"], ["conversation", "conversation_fixture_1"]]);
+  expect(plans.map((plan) => [plan.origin.kind, plan.origin.key])).toEqual([["pipeline", "p1"], ["pipeline", "p1"], ["conversation", "conversation_fixture_1"], ["conversation", "conversation_fixture_2"]]);
+  expect(plans[3]!.inherit).toEqual([{ conversationId: "conversation_fixture_1", path: entries[0]!.path }]);
   const admitted = admitConversations([held], plans, deps);
-  expect(admitted.admitted).toBe(3);
-  /* One fallback task for the pipeline with both stage conversations, one placeholder for the root conversation, titled from its first prompt. */
+  expect(admitted.admitted).toBe(4);
+  /* One fallback task for the pipeline with both stage conversations, one
+     placeholder for the root conversation titled from its first prompt, and
+     the child inside that same placeholder: its membership is canonical. */
   const fallback = admitted.tasks.find((candidate) => candidate.origin?.kind === "pipeline")!;
   expect(fallback.text).toBe("Pipeline p1 goal");
   expect(fallback.assignments.map((assignment) => assignment.path).sort()).toEqual([entries[5]!.path, entries[6]!.path].sort());
   const placeholder = admitted.tasks.find((candidate) => candidate.origin?.kind === "conversation")!;
   expect(placeholder.text).toBe(entries[0]!.title);
-  expect(placeholder.assignments[0]).toMatchObject({ path: entries[0]!.path, conversationId: "conversation_fixture_1", state: "linked" });
+  expect(placeholder.assignments.map((assignment) => [assignment.conversationId, assignment.state])).toEqual([["conversation_fixture_1", "linked"], ["conversation_fixture_2", "linked"]]);
+  expect(admitted.tasks.filter((candidate) => candidate.origin?.kind === "conversation").length).toBe(1);
+  /* The child can now name the task it belongs to. */
+  const refined = refineTask(admitted.tasks, { callerConversationId: "conversation_fixture_2", text: "Child names the task" });
+  expect(refined.ok && refined.refined).toEqual([{ taskId: placeholder.id, result: "applied" }]);
   /* A second pass finds nothing left to admit; a pipeline that carries task ids covers its stages. */
   expect(planAdmissions(entries, admitted.tasks, [p])).toEqual([]);
   expect(planAdmissions([entry(8)], [], [pipeline("p2", [{ agentPath: entry(8).path, conversationId: entry(8).conversationId! }], ["some-task"])])).toEqual([]);
@@ -298,4 +305,26 @@ test("a reviewer joins the task the reviewed implementer holds; without one, the
   const later = ensureTaskMembership(fallback.tasks, { project: "fixture", origin: { kind: "flow", key: "flow-2" }, identity: { launchId: "launch-rev-4", conversationId: "conversation_rev4" }, inherit: [orphan] }, deps);
   expect(later.ok && later.created).toEqual([]);
   expect(later.ok && later.tasks.length).toBe(1);
+});
+
+test("a child is planned only once its parent is covered, follows a parent planned earlier in the pass, and a child of a removed parent gets its own placeholder", () => {
+  const root = entry(20);
+  const child = entry(21, { parent: root.path });
+  const grandchild = entry(22, { parent: child.path });
+  const orphan = entry(23, { parent: "/fixture/projects/root/gone.jsonl" });
+  /* Children listed before their parent wait for the pass that covers it;
+     the orphan's parent is gone, so it stands on its own. */
+  const first = planAdmissions([grandchild, child, orphan, root], [], [], 3);
+  expect(first.map((plan) => plan.identity.conversationId)).toEqual(["conversation_fixture_20", "conversation_fixture_21", "conversation_fixture_23"]);
+  expect(first[1]!.inherit).toEqual([{ conversationId: "conversation_fixture_20", path: root.path }]);
+  expect(first[2]!.inherit).toBeUndefined();
+  let tasks = admitConversations([], first, deps).tasks;
+  expect(tasks.map((task) => task.assignments.map((assignment) => assignment.conversationId))).toEqual([["conversation_fixture_20", "conversation_fixture_21"], ["conversation_fixture_23"]]);
+  const second = planAdmissions([grandchild, child, orphan, root], tasks, []);
+  expect(second.map((plan) => plan.identity.conversationId)).toEqual(["conversation_fixture_22"]);
+  expect(second[0]!.inherit).toEqual([{ conversationId: "conversation_fixture_21", path: child.path }]);
+  tasks = admitConversations(tasks, second, deps).tasks;
+  expect(tasks.length).toBe(2);
+  expect(tasks[0]!.assignments.map((assignment) => assignment.conversationId)).toEqual(["conversation_fixture_20", "conversation_fixture_21", "conversation_fixture_22"]);
+  expect(planAdmissions([grandchild, child, orphan, root], tasks, [])).toEqual([]);
 });

@@ -557,18 +557,28 @@ export function layoutTaskBands(base: SchemeLayout, orderedBands: readonly TaskB
   const shown = new Set<string>();
   const placedBands: PlacedBand[] = [];
 
+  /* Every surface fits the band's inner width: a member wider than the band
+     (a draft pane, a planned stage slot, a deck, a reader tile on a board the
+     dock has narrowed) is scaled down uniformly, contents included, so no
+     surface ever extends past the band that holds it. */
+  const fitted = (w: number, h: number): { w: number; h: number; fit: number } => {
+    const fit = w > innerW ? innerW / w : 1;
+    return { w: w * fit, h: h * fit, fit };
+  };
   let cursorY = gutter;
   for (const band of bands) {
-    const items: { key: string; w: number; h: number; kind: "member" | "mirror" | "container" | "add"; node?: SchemeNode }[] = [];
+    const items: { key: string; w: number; h: number; fit?: number; kind: "member" | "mirror" | "container" | "add"; node?: SchemeNode }[] = [];
     for (const member of band.members) {
       if (member.kind === "node") {
         const node = base.nodes.find((entry) => entry.file.path === member.key)!;
         /* The selected conversation reads natively from the intermediate scale
            up: clicking a tile opens it in place, siblings stay tiles. */
         const presentation = mode === "overview" ? "chip" : member.key === reader ? "native" : "summary";
-        const w = (presentation === "chip" ? BAND.chipW : presentation === "native" ? Math.max(BAND.nativeMinW, Math.min(BAND.nativeW, innerW / s)) : BAND.summaryW) * s;
-        const h = (presentation === "chip" ? BAND.chipH : presentation === "native" ? BAND.nativeH : BAND.summaryH) * s;
-        items.push({ key: member.key, w, h, kind: "member", node: { ...node, presentation, readerScale: s, w, h } });
+        const natural = fitted(
+          (presentation === "chip" ? BAND.chipW : presentation === "native" ? Math.max(BAND.nativeMinW, Math.min(BAND.nativeW, innerW / s)) : BAND.summaryW) * s,
+          (presentation === "chip" ? BAND.chipH : presentation === "native" ? BAND.nativeH : BAND.summaryH) * s,
+        );
+        items.push({ key: member.key, w: natural.w, h: natural.h, kind: "member", node: { ...node, presentation, readerScale: s * natural.fit, w: natural.w, h: natural.h } });
         continue;
       }
       /* Decks, stacks and planned slots are thumbnails at overview scale:
@@ -576,10 +586,12 @@ export function layoutTaskBands(base: SchemeLayout, orderedBands: readonly TaskB
       if (mode === "overview" && member.kind !== "draft") continue;
       const rect = baseRect.get(member.key);
       if (!rect) continue;
-      items.push({ key: member.key, w: rect.w, h: rect.h, kind: "member" });
+      const natural = fitted(rect.w, rect.h);
+      items.push({ key: member.key, w: natural.w, h: natural.h, fit: natural.fit, kind: "member" });
     }
     for (const mirror of band.mirrors) {
-      items.push({ key: mirror.key, w: (mode === "overview" ? BAND.mirrorChipW : BAND.mirrorW) * s, h: (mode === "overview" ? BAND.chipH : BAND.mirrorH) * s, kind: "mirror" });
+      const natural = fitted((mode === "overview" ? BAND.mirrorChipW : BAND.mirrorW) * s, (mode === "overview" ? BAND.chipH : BAND.mirrorH) * s);
+      items.push({ key: mirror.key, w: natural.w, h: natural.h, kind: "mirror" });
     }
     /* A hosted pipeline/flow with none of its surfaces placed in this mode
        still reserves a label slot: its halo header carries the controls. */
@@ -604,7 +616,7 @@ export function layoutTaskBands(base: SchemeLayout, orderedBands: readonly TaskB
         rowH = 0;
         rows += 1;
       }
-      const rect = { x, y, w: item.w, h: item.h };
+      const rect: SchemeRect = { x, y, w: item.w, h: item.h, ...(item.fit !== undefined && item.fit !== 1 ? { fit: item.fit } : {}) };
       if (item.kind === "add") addAgent = rect;
       else if (item.kind === "container") {
         containerSlots.set(item.key, rect);

@@ -277,12 +277,12 @@ export function recordLaunchIdentity(existing: readonly BoardTask[], taskIds: re
 
 export const ADMISSION_BATCH = 50;
 
-/** Root transcripts the board would draw: real files (never a launch
-    placeholder), no parent, and a project to belong to. Children inherit their
-    parent's band, so they need no task of their own. */
+/** Transcripts the board would draw: real files (never a launch placeholder)
+    with a project to belong to. Children are admitted too — into the task
+    their parent holds — so a child's membership is canonical, never only the
+    band the projection draws it under. */
 export function admissibleConversation(entry: FileEntry): boolean {
   if (!entry.project || !entry.path || entry.path.startsWith("spawn:")) return false;
-  if (entry.parent) return false;
   if (entry.root !== "claude-projects" && entry.root !== "codex-sessions") return false;
   return !entry.path.includes("/subagents/");
 }
@@ -330,8 +330,11 @@ const isCovered = (index: CoveredIndex, entry: Pick<FileEntry, "path" | "convers
  * conversations without any task membership. A pipeline or review flow without
  * a recorded task claims one fallback task for its container and binds every
  * stage conversation it materialized; a pipeline that already carries task ids
- * covers its stage conversations by that record. Everything else gets one
- * placeholder titled from its first prompt.
+ * covers its stage conversations by that record. Roots get one placeholder
+ * titled from their first prompt. A child joins the task its parent holds: it
+ * is planned once the parent is covered (already held, or planned earlier in
+ * this pass), so parent and child never split across two placeholders; a
+ * child whose parent transcript is gone gets its own placeholder.
  */
 export function planAdmissions(
   entries: readonly FileEntry[],
@@ -364,9 +367,11 @@ export function planAdmissions(
       if (member.conversationId) covered.conversationIds.add(member.conversationId);
     }
   }
-  for (const entry of entries) {
-    if (plans.length >= batch) break;
-    if (claimed.has(entry.path) || !admissibleConversation(entry) || isCovered(covered, entry)) continue;
+  const cover = (entry: FileEntry) => {
+    covered.paths.add(entry.path);
+    if (entry.conversationId) covered.conversationIds.add(entry.conversationId);
+  };
+  const plan = (entry: FileEntry, inherit: MembershipIdentity[]) => {
     const repair = launchTasksFor(covered, entry);
     if (repair.length) {
       plans.push({
@@ -375,18 +380,28 @@ export function planAdmissions(
         identity: { launchId: entry.spawn?.launchId ?? null, clientAttemptId: entry.spawn?.clientAttemptId ?? null, conversationId: entry.conversationId ?? null, path: entry.path },
         explicitTaskIds: repair,
       });
-      covered.paths.add(entry.path);
-      if (entry.conversationId) covered.conversationIds.add(entry.conversationId);
-      continue;
+    } else {
+      plans.push({
+        project: entry.project,
+        origin: { kind: "conversation", key: entry.conversationId ?? entry.path },
+        title: entry.title,
+        identity: { conversationId: entry.conversationId ?? null, path: entry.path, engine: entry.engine === "claude" || entry.engine === "codex" ? entry.engine : null },
+        ...(inherit.length ? { inherit } : {}),
+      });
     }
-    plans.push({
-      project: entry.project,
-      origin: { kind: "conversation", key: entry.conversationId ?? entry.path },
-      title: entry.title,
-      identity: { conversationId: entry.conversationId ?? null, path: entry.path, engine: entry.engine === "claude" || entry.engine === "codex" ? entry.engine : null },
-    });
-    covered.paths.add(entry.path);
-    if (entry.conversationId) covered.conversationIds.add(entry.conversationId);
+    cover(entry);
+  };
+  for (const entry of entries) {
+    if (plans.length >= batch) break;
+    if (entry.parent || claimed.has(entry.path) || !admissibleConversation(entry) || isCovered(covered, entry)) continue;
+    plan(entry, []);
+  }
+  for (const entry of entries) {
+    if (plans.length >= batch) break;
+    if (!entry.parent || claimed.has(entry.path) || !admissibleConversation(entry) || isCovered(covered, entry)) continue;
+    const parent = byPath.get(entry.parent);
+    if (parent && !isCovered(covered, parent)) continue;
+    plan(entry, parent ? [{ conversationId: parent.conversationId ?? null, path: parent.path }] : []);
   }
   return plans;
 }

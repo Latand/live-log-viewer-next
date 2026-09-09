@@ -85,7 +85,7 @@ test("explicit task targets ride on the reservation: the launch joins them in th
 test("a reviewer inherits the reviewed conversation's task: flow rounds keep the flow fallback origin, role launches keep the launch key", () => {
   const flow = launchMembershipInput({ engine: "codex", cwd: "/repo", clientAttemptId: "flow_f1_x", origin: { kind: "container", container: "flow", containerId: "f1" }, reviewsConversationId: "conversation_impl", parentArtifactPath: "/sessions/impl.jsonl" }, receipt, noPipelines, projectFor);
   expect(flow.origin).toEqual({ kind: "flow", key: "f1" });
-  expect(flow.inherit).toEqual([{ conversationId: "conversation_impl", path: "/sessions/impl.jsonl" }]);
+  expect(flow.inherit).toEqual([{ conversationId: "conversation_impl", path: null }]);
   const role = launchMembershipInput({ engine: "claude", cwd: "/repo", clientAttemptId: "a1", reviewsConversationId: "conversation_impl" }, receipt, noPipelines, projectFor);
   expect(role.origin).toEqual({ kind: "launch", key: "a1" });
   expect(role.inherit).toEqual([{ conversationId: "conversation_impl", path: null }]);
@@ -104,4 +104,12 @@ test("a recovered receipt re-establishes membership from its durable fields befo
     { launchId: "launch-q", conversationId: "conversation_q", engine: "claude", cwd: "/repo", clientAttemptId: null, explicitProject: null, launchProfile: {}, launchDisplay: null },
     ports(() => { throw new Error("EISDIR: illegal operation on a directory"); }),
   )).toThrow(LaunchMembershipError);
+});
+
+test("an agent-initiated child inherits its parent's task; a flow reviewer names the implementer once even though it is parent and reviewed", () => {
+  const child = launchMembershipInput({ engine: "claude", cwd: "/repo", clientAttemptId: "child-1", parentConversationId: "conversation_parent", parentArtifactPath: "/sessions/parent.jsonl", origin: { kind: "agent" } }, receipt, noPipelines, projectFor);
+  expect(child.origin).toEqual({ kind: "launch", key: "child-1" });
+  expect(child.inherit).toEqual([{ conversationId: "conversation_parent", path: "/sessions/parent.jsonl" }]);
+  const flow = launchMembershipInput({ engine: "codex", cwd: "/repo", clientAttemptId: "flow_f2_x", origin: { kind: "container", container: "flow", containerId: "f2" }, reviewsConversationId: "conversation_impl", parentConversationId: "conversation_impl", parentArtifactPath: "/sessions/impl.jsonl" }, receipt, noPipelines, projectFor);
+  expect(flow.inherit).toEqual([{ conversationId: "conversation_impl", path: "/sessions/impl.jsonl" }]);
 });
