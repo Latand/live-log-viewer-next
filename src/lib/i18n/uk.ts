@@ -1947,6 +1947,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "orchPanel.rotationDead": "його хост зник",
   "orchPanel.badgeNeedsYou": "потребує тебе",
   "orchPanel.badgeLive": "живий",
+  "orchPanel.badgeWaiting": "чекає",
   "orchPanel.badgeStalled": "тиша",
   "orchPanel.badgeResumable": "завершив",
   "orchPanel.badgeDead": "хост зник",

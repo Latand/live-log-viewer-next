@@ -154,12 +154,19 @@ export function mandateSummaryOf(
  *
  *  - `resolving` — no file yet, or the runtime plane has not resolved the host.
  *  - `live` / `stalled` — a hosted conversation, quiet or not.
+ *  - `waiting` — a hosted conversation whose HOST is alive and whose TURN is
+ *    not: the agent is awaiting input. The catalog alone cannot tell this from
+ *    `live` — an idle process and a working one look equally quiet from the
+ *    outside — so it comes from the lifecycle vocabulary's own `waiting`, in
+ *    the status read (`../orchestrator/seat/status`). The operator asked for
+ *    exactly this distinction: a green «live» over an agent that is only
+ *    sitting there reads as «it is working» and is a claim nobody made.
  *  - `resumable` — finished or killed, and the composer can pick THIS
  *    conversation back up (never a second spawn).
  *  - `dead` — the host is gone, retired or unresumable; recovery is the
  *    banner's, and rotation is the way forward.
  */
-export type SeatLiveness = "resolving" | "live" | "stalled" | "resumable" | "dead";
+export type SeatLiveness = "resolving" | "live" | "waiting" | "stalled" | "resumable" | "dead";
 
 /**
  * What the dock's badge NAMES, which is not always the liveness (issue #1167).
@@ -332,7 +339,12 @@ export function deriveOrchestratorPanelState(input: {
   const pendingError = pending?.intent.error ?? null;
 
   if (active?.conversationId) {
-    const liveness = livenessOf(input.file, input.surface);
+    const liveness = seatLivenessOf({
+      file: input.file,
+      surface: input.surface,
+      incumbent: input.incumbent ?? null,
+      hostLive: input.hostLive === true,
+    });
     return {
       kind: "live",
       seat: active,
@@ -450,6 +462,33 @@ export function deriveRotateDraftState(input: {
  * `resume` through the same matrix — a claude-projects session and a
  * codex-sessions thread with no live host are resumable in place.
  */
+/**
+ * The liveness the panel SHOWS: the capability matrix's answer, refined by the
+ * one thing the catalog cannot see.
+ *
+ * `livenessOf` decides whether the conversation is hosted at all, and it does
+ * that from evidence the board already carries. Whether a hosted conversation
+ * is WORKING or merely sitting there is a different question, and only the
+ * status read answers it — `liveness.lifecycle`, straight out of the shared
+ * lifecycle vocabulary, where `waiting` means "a host is alive and idle".
+ *
+ * Applied only to `live`, and only to an AFFIRMED reading of the seat's own
+ * conversation. `stalled`, `resumable` and `dead` are stronger statements this
+ * must not soften, and a stale or absent reading may not downgrade a badge the
+ * board's own evidence supports — that is the same rule `hostLive` already
+ * carries for the bind bound (#1182).
+ */
+export function seatLivenessOf(input: {
+  file: FileEntry | null;
+  surface: StripSurface | null;
+  incumbent: OrchestratorIncumbent | null;
+  hostLive: boolean;
+}): SeatLiveness {
+  const liveness = livenessOf(input.file, input.surface);
+  if (liveness !== "live" || !input.hostLive) return liveness;
+  return input.incumbent?.liveness?.lifecycle === "waiting" ? "waiting" : liveness;
+}
+
 function livenessOf(file: FileEntry | null, surface: StripSurface | null): SeatLiveness {
   if (surface === "resume") return "resumable";
   /* `inert` is a finished conversation the engines cannot resume, and

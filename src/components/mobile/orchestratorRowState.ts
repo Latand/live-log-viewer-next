@@ -30,6 +30,10 @@ export type OrchestratorRowState =
   | "creating"
   | "intent-error"
   | "live"
+  /* Hosted and idle — the seat's own reading of `waiting`, carried through so
+     the phone never calls an agent awaiting input "live" while the dock does
+     not. One state machine, two renderings. */
+  | "waiting"
   | "stalled"
   | "resumable"
   | "dead"
@@ -119,6 +123,7 @@ export const SEAT_STATE_TONE: Record<OrchestratorRowState, SeatBadgeTone> = {
   creating: "accent",
   "intent-error": "danger",
   live: "success",
+  waiting: "neutral",
   stalled: "warning",
   resumable: "neutral",
   dead: "danger",
@@ -149,6 +154,7 @@ export const ROW_STATE_LABEL: Record<OrchestratorRowState, MessageKey> = {
   creating: "orchPanel.badgeCreating",
   "intent-error": "orchPanel.badgeFailed",
   live: "orchPanel.badgeLive",
+  waiting: "orchPanel.badgeWaiting",
   stalled: "orchPanel.badgeStalled",
   resumable: "orchPanel.badgeResumable",
   dead: "orchPanel.badgeDead",

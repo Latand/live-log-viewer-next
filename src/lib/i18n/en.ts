@@ -2002,6 +2002,7 @@ export const en = {
   "orchPanel.rotationDead": "its host is gone",
   "orchPanel.badgeNeedsYou": "needs you",
   "orchPanel.badgeLive": "live",
+  "orchPanel.badgeWaiting": "waiting",
   "orchPanel.badgeStalled": "quiet",
   "orchPanel.badgeResumable": "finished",
   "orchPanel.badgeDead": "host gone",

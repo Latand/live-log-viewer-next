@@ -296,6 +296,34 @@ describe("the server's own rotation recommendation is what the panel says (#978)
     expect(live({ surface: "dead", incumbent: vacantReading }))
       .toMatchObject({ rotation: { level: "recommend", reasons: ["dead"], source: "client" } });
   });
+
+  /**
+   * AN IDLE PROCESS IS NOT AN ACTIVELY WORKING TURN (operator directive,
+   * 2026-09-10).
+   *
+   * The board's catalog cannot tell them apart — a hosted agent sitting on a
+   * finished turn is exactly as quiet as one mid-tool-call — so a green «live»
+   * over the first is a claim nobody made. The status read's lifecycle says
+   * which it is, in the shared vocabulary where `waiting` is "a host is alive
+   * and idle".
+   */
+  test("a hosted seat whose TURN is idle reads waiting, and one whose turn is running reads live", () => {
+    const hosted = { hostLive: true };
+    expect(live({ ...hosted, incumbent: incumbent({ liveness: { lifecycle: "waiting", hostState: "alive", silentForMs: 211_916 } }) }))
+      .toMatchObject({ kind: "live", liveness: "waiting" });
+    expect(live({ ...hosted, incumbent: incumbent() })).toMatchObject({ kind: "live", liveness: "live" });
+  });
+
+  test("only an AFFIRMED reading may downgrade the badge, and only from live", () => {
+    const idle = incumbent({ liveness: { lifecycle: "waiting", hostState: "alive", silentForMs: 1_000 } });
+    /* No affirmation: the reading may be a memory from before a restart, and
+       accusing the seat of idling on one is the same fault `hostLive` already
+       fences for the bind bound (#1182). */
+    expect(live({ hostLive: false, incumbent: idle })).toMatchObject({ liveness: "live" });
+    /* Stronger statements are never softened by it. */
+    expect(live({ hostLive: true, surface: "dead", incumbent: idle })).toMatchObject({ liveness: "dead" });
+    expect(live({ hostLive: true, surface: "resume", incumbent: idle })).toMatchObject({ liveness: "resumable" });
+  });
 });
 
 describe("the rotate draft renders the same two states the create draft does (#978)", () => {

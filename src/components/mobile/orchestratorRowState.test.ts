@@ -195,7 +195,7 @@ describe("what rides alongside a live incumbent", () => {
 
 describe("every designed seat state has a badge tone and a word", () => {
   const states: OrchestratorRowState[] = [
-    "loading", "unavailable", "draft", "creating", "intent-error", "live", "stalled", "resumable", "dead", "resolving",
+    "loading", "unavailable", "draft", "creating", "intent-error", "live", "waiting", "stalled", "resumable", "dead", "resolving",
   ];
 
   test("tone and label cover the union exactly", () => {
