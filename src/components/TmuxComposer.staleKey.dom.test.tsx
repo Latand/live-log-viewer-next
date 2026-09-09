@@ -12,7 +12,7 @@
  * bytes exactly; an edited resend is a new message under a new key.
  */
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { act } from "react";
+import { act, useSyncExternalStore } from "react";
 import { installActEnv } from "@/test-helpers/actEnv";
 import { Window } from "happy-dom";
 import { createRoot, type Root } from "react-dom/client";
@@ -70,12 +70,16 @@ import { readOutbox, resetOutboxForTests, retryOutbox } from "./conversation/out
 
 const realFetch = globalThis.fetch;
 
+const runtimeListeners = new Set<() => void>();
+const subscribeRuntime = (listener: () => void) => {runtimeListeners.add(listener);return () => {runtimeListeners.delete(listener);};};
+function useReceipts() {return useSyncExternalStore(subscribeRuntime,()=>structuredView.receipts,()=>structuredView.receipts);}
+
 beforeEach(() => {
   structuredView.receipts = [];
   installTmuxComposerRuntimeForTests({
-    useRuntimeView: (candidate) => candidate.conversationId === "conv-stale-key" ? structuredView : null,
+    useRuntimeView: (candidate) => {useReceipts();return candidate.conversationId === "conv-stale-key" ? structuredView : null;},
     refreshRuntime: async () => true,
-    useRuntimeReceipts: () => structuredView.receipts,
+    useRuntimeReceipts: useReceipts,
   });
 });
 
@@ -194,15 +198,24 @@ test("a remount cannot stamp a stale unresolved generation's key onto the operat
      key carrying ITS OWN text — never the stale generation's key or bytes. */
   await settle(() => composerControls(host).type("a brand new message"));
   await settle(() => composerControls(host).submit());
-  expect(sends).toHaveLength(1);
-  const queued = readOutbox("conv-stale-key").find(entry => entry.text === "a brand new message")!;
-  expect(queued.id).not.toBe(sends[0]!.idempotencyKey);
-  expect(queued.state).toBe("queued");
-  structuredView.receipts = [delivered(sends[0]!).json.receipt as RuntimeSessionView["receipts"][number]];
-  await settle(() => root.render(<TmuxComposer file={file} />));
+  /* The stale generation no longer holds this browser's wire: no receipt can be
+     made to arrive for a request that may never have been admitted, so waiting
+     on it would mute the conversation permanently (outbox `holdsLocalWireFence`).
+     The new message therefore leaves at once — and what matters here is that it
+     leaves as ITSELF, under a fresh key with its own text. */
   expect(sends).toHaveLength(2);
   expect(sends[1]!.text).toBe("a brand new message");
   expect(sends[1]!.idempotencyKey).not.toBe(sends[0]!.idempotencyKey);
+  const fresh = readOutbox("conv-stale-key").find(entry => entry.text === "a brand new message")!;
+  expect(fresh.id).not.toBe(sends[0]!.idempotencyKey);
+  expect(fresh.id).toBe(sends[1]!.idempotencyKey);
+  /* The stale generation keeps its own key and its unknown fate, and a genuine
+     late receipt settles it without ever putting it back on the wire. */
+  const stale = readOutbox("conv-stale-key").find(entry => entry.id === sends[0]!.idempotencyKey)!;
+  expect(stale.deliveryUncertain).toBe(true);
+  structuredView.receipts = [delivered(sends[0]!).json.receipt as RuntimeSessionView["receipts"][number]];
+  await settle(() => {for (const listener of runtimeListeners) listener();});
+  expect(sends).toHaveLength(2);
 
   await act(async () => root.unmount());
 });

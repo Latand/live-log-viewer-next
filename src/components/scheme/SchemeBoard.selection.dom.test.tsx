@@ -20,7 +20,13 @@ import type { FileEntry } from "@/lib/types";
 
 const dom = new Window();
 class TestResizeObserver {
-  observe() {}
+  constructor(private callback: () => void) {}
+  observe(element: HTMLElement) {
+    if (element.getAttribute('aria-label')?.startsWith('Agent board')) {
+      Object.defineProperty(element, 'getBoundingClientRect', { configurable: true, value: () => ({ x:0,y:0,left:0,top:0,right:1400,bottom:900,width:1400,height:900,toJSON() {} }) });
+      queueMicrotask(this.callback);
+    }
+  }
   unobserve() {}
   disconnect() {}
 }

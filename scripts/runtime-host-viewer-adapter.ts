@@ -3,6 +3,7 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { processIdentityStatus } from "../src/lib/processIdentity";
 
 import type {
   ViewerHealthEvidence,
@@ -145,9 +146,10 @@ function reportAdapterPhase(action: string, phase: string): void {
   writeDurableJson(adapterPhaseFile, { action, phase, updatedAt: new Date().toISOString() });
 }
 
-async function commandResult(argv: string[], options: { cwd?: string } = {}): Promise<{ code: number; stdout: string; stderr: string }> {
+async function commandResult(argv: string[], options: { cwd?: string; timeoutMs?: number } = {}): Promise<{ code: number; stdout: string; stderr: string }> {
   const child = Bun.spawn(["/usr/bin/setpriv", "--pdeathsig", "KILL", "--", ...argv], {
     cwd: options.cwd,
+    ...(options.timeoutMs ? { timeout: options.timeoutMs, killSignal: "SIGKILL" as const } : {}),
     stdout: "pipe",
     stderr: "pipe",
     env: withoutWakatimeCredential(process.env),
@@ -156,7 +158,7 @@ async function commandResult(argv: string[], options: { cwd?: string } = {}): Pr
   return { code, stdout: stdout.trim(), stderr: stderr.trim() };
 }
 
-async function command(argv: string[], options: { cwd?: string } = {}): Promise<string> {
+async function command(argv: string[], options: { cwd?: string; timeoutMs?: number } = {}): Promise<string> {
   const { code, stdout, stderr } = await commandResult(argv, options);
   if (code !== 0) throw new Error((stderr || `${argv[0]} failed`).slice(0, 1000));
   return stdout;
@@ -313,7 +315,7 @@ async function buildCandidate(deploymentId: string, revision: string): Promise<V
 }
 
 async function containerExists(container: string): Promise<boolean> {
-  try { await command(["docker", "container", "inspect", container]); return true; }
+  try { await command(["docker", "container", "inspect", container], { timeoutMs: PROBE_TIMEOUT_MS }); return true; }
   catch (error) {
     const message = error instanceof Error ? error.message : "";
     if (message.includes("No such container") || message.includes("No such object")) return false;
@@ -470,7 +472,7 @@ function referencedAssets(html: string): string[] {
 
 async function containerState(container: string): Promise<ViewerCandidateContainerState> {
   if (!await containerExists(container)) return "missing";
-  return await command(["docker", "inspect", "--format", "{{.State.Status}}", container]) === "running" ? "running" : "exited";
+  return await command(["docker", "inspect", "--format", "{{.State.Status}}", container], { timeoutMs: PROBE_TIMEOUT_MS }) === "running" ? "running" : "exited";
 }
 
 async function probeRoutes(
@@ -493,11 +495,6 @@ async function probeRoutes(
   const registryBackendMatches = observedRegistryBackendMode === expectedRegistryBackendMode;
   const releaseReady = expectedAssetsEndpoint === undefined
     || viewerDeploymentReleaseReady(capability.status, capability.text);
-  if (expectedAssetsEndpoint !== undefined) {
-    reportPhase?.(promotedViewerReadinessPhase(
-      viewerDeploymentStructuredHostStartup(capability.status, capability.text),
-    ));
-  }
   const html = authenticated?.status === 200 ? authenticated.text : root.text;
   const paths = referencedAssets(html);
   const assets = await Promise.all(paths.map(async (asset) => ({ path: asset, status: (await fetchStatus(`${endpoint}${asset}`)).status })));
@@ -534,6 +531,12 @@ async function probeRoutes(
     && registryBackendMatches
     && releaseReady
     && expectedAssetsMatch;
+  if (expectedAssetsEndpoint !== undefined) {
+    const detail = viewerHealthFailureDetail({ observations, assets, deploymentCapable,
+      registryBackendMatches, expectedRegistryBackendMode, observedRegistryBackendMode,
+      releaseReady, expectedAssetsMatch });
+    reportPhase?.(`${promotedViewerReadinessPhase(viewerDeploymentStructuredHostStartup(capability.status, capability.text))}${detail ? `; ${detail}` : ""}`);
+  }
   return {
     checkedAt: new Date().toISOString(), endpoint, processReady, rootStatus: root.status,
     authenticatedStatus: authenticated?.status ?? null, unauthorizedStatus: unauthorized?.status ?? null,
@@ -563,7 +566,10 @@ async function verifyViewer(
     endpoint,
     inspect: () => containerState(candidate.container),
     probe: () => probeRoutes(candidate, endpoint, expectedAssetsEndpoint, reportPhase),
-    ...(expectedAssetsEndpoint ? { maxAttempts: 90 } : {}),
+    ...(expectedAssetsEndpoint ? {
+      timeoutMs: null,
+      reportPending: reportPhase,
+    } : {}),
   });
   if (evidence.ok) return evidence;
   const containerLog = await candidateContainerLog(candidate.container);
@@ -952,6 +958,20 @@ async function checkpointHotStateFence(
   request: HotStateAuthority,
   revision: string,
 ): Promise<HotStateAuthority> {
+  if (request.activationOwner) {
+    const started = Date.now();
+    for (;;) {
+      const current = readHotStateAuthority(stateDir);
+      if (!current || current.mode !== "fencing" || current.epoch !== request.epoch
+        || current.releaseRevision !== revision) throw new Error("hot-state fence changed while awaiting Viewer quiescence");
+      if (current.checkpoint) return current;
+      // Only positive death permits the adapter to checkpoint for the Viewer.
+      // A live or unreadable identity keeps its startup/release barrier.
+      if (processIdentityStatus(request.activationOwner) === "dead") break;
+      if (Date.now() - started >= 30_000) throw new Error("Viewer did not acknowledge hot-state quiescence within 30000 ms");
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    }
+  }
   const previousExplicitRevision = process.env[HOT_STATE_RELEASE_REVISION_ENV];
   process.env[HOT_STATE_RELEASE_REVISION_ENV] = revision;
   try {
@@ -1271,11 +1291,19 @@ async function main(): Promise<unknown> {
     reportAdapterPhase(action, promotedViewerReadinessPhase(null));
     const candidate = release(input.candidate);
     const healthProbe = await delegatedHealthProbeAdmission(healthProbeCapability);
-    return verify(candidate, stableEndpoint, {
-      expectedAssetsEndpoint: candidate.endpoint,
-      reportPhase: (phase) => reportAdapterPhase(action, phase),
-      ...(healthProbe ?? {}),
-    });
+    while (true) {
+      // Each MCP attempt consumes its admission. Retrying readiness needs a
+      // fresh child admission after the host delegation was authenticated.
+      const admissions = healthProbe ? new McpHealthProbeAdmissions() : null;
+      const health = await verify(candidate, stableEndpoint, {
+        expectedAssetsEndpoint: candidate.endpoint,
+        reportPhase: (phase) => reportAdapterPhase(action, phase),
+        ...(admissions ? { healthProbeCapability: admissions.issue(), healthProbeAdmissions: admissions } : {}),
+      });
+      if (health.ok || !health.processReady) return health;
+      reportAdapterPhase(action, health.detail ?? "waiting for promoted MCP readiness");
+      await Bun.sleep(1_000);
+    }
   }
   if (action === "rollback") {
     const previous = release(input.previous);

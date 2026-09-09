@@ -14,6 +14,7 @@ export function kickoffPrompt(spec?: string): string {
       : ["Before your first REVIEW_READY, write spec.md with the task statement and an acceptance-criteria list using entries such as `AC1: …`.", ""]),
     "Work normally in this long-lived implementer session. When the work is ready for a fresh independent review, end your final assistant message with a line that starts exactly with:",
     "REVIEW_READY: <one-line note>",
+    "When flow_action supports agent-decision, read get_flow.decisionContext and submit submit-review with that exact revision, clean HEAD, round, turnId and stage attempt, plus a reason and stable clientRequestId. Keep the legacy marker in your final answer. Acceptance waits for completion of this turn. For further work or an explicit end use continue-fixing, stop or completed with a reason; completed grants no review approval. Recover an uncertain submission using the original key.",
     "Do not print the REVIEW_READY marker now and never quote it at the start of a line when acknowledging these instructions — print it only when the work is actually ready for review.",
     "",
     "Every review round will use a fresh reviewer who sees the full diff from the captured base ref, with no history from earlier rounds. If the reviewer sends findings back, respond to each finding before the next marker using:",

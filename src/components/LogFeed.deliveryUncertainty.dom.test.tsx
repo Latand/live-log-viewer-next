@@ -1110,7 +1110,11 @@ test("issue 1538: delivered history compacts first; an unknown original survives
     // 26 later rows fill the queue to 32; each of the next 5 evicts one delivered row, oldest first, never the original.
     for (let index = 0; index < 26; index += 1) await submit(index % 2 ? captured.text! : `later message ${index}`);
     expect(queue()).toHaveLength(32);
-    expect(queue().map((entry) => entry.id).slice(0, 6)).toEqual(sends.map((body) => body.idempotencyKey));
+    /* The oldest rows are exactly the submissions that reached the wire. The
+       unknown original is one of them and keeps its place; it simply no longer
+       stops the row behind it from being delivered, so one more submission is
+       on the wire than when the unknown entry still fenced the queue. */
+    expect(queue().map((entry) => entry.id).slice(0, sends.length)).toEqual(sends.map((body) => body.idempotencyKey));
     for (let index = 0; index < 5; index += 1) {
       await submit(`boundary message ${index}`);
       expect(mounted.host.querySelector("textarea")?.value).toBe("");
@@ -1119,10 +1123,12 @@ test("issue 1538: delivered history compacts first; an unknown original survives
       expect(queue().some((entry) => entry.id === sends[index + 1]!.idempotencyKey)).toBe(true);
     }
     expect(queue()[0]?.id).toBe(original);
-    expect(queue().filter((entry) => entry.state === "queued")).toHaveLength(31);
+    /* One row behind the unknown original is on the wire (held), so 30 wait
+        rather than 31. Capacity itself is unchanged. */
+    expect(queue().filter((entry) => entry.state === "queued")).toHaveLength(30);
     expect(originalEntry()).toMatchObject({ text: captured.text, images: 0, deliveryUncertain: true, state: "delivering" });
     expect(originalEntry()?.deliveryReceipt?.operationId).toBe(captured.operationId);
-    expect(sends).toHaveLength(6);
+    expect(sends).toHaveLength(7);
 
     // Every slot is unresolved now: the next submission is refused with its draft intact.
     await submit("one past capacity");
@@ -1143,7 +1149,7 @@ test("issue 1538: delivered history compacts first; an unknown original survives
     expect(rows[0]!.querySelector("[data-receipt-uncertain-retry]")).not.toBeNull();
     expect(mounted.host.querySelector(`[data-outbox-entry="${original}"]`)?.textContent).toContain("outcome is unknown");
     expect(mounted.host.querySelector(`[data-outbox-retry="${original}"], [data-outbox-cancel="${original}"]`)).toBeNull();
-    expect(sends).toHaveLength(6);
+    expect(sends).toHaveLength(7);
 
     // Original-operation discard at capacity binds to the original, settles it, and reopens admission.
     await settle(() => rows[0]!.querySelector<HTMLButtonElement>("[data-receipt-discard]")!.click());
@@ -1171,9 +1177,12 @@ test("issue 1538: exhausted unresolved capacity refuses the new submission befor
       await settle(() => composerControls(mounted.host).type(index % 2 ? captured.text! : `queued message ${index}`));
       await settle(() => composerControls(mounted.host).submit());
     }
-    expect(sends).toHaveLength(1);
+    /* The unknown original no longer holds this browser's wire, so the head of
+       the queue goes out; the HELD admission behind it does hold the wire, and
+       everything after it waits. Capacity accounting is unchanged: 32 rows. */
+    expect(sends).toHaveLength(2);
     expect(queue()).toHaveLength(32);
-    expect(queue().filter((entry) => entry.state === "queued")).toHaveLength(31);
+    expect(queue().filter((entry) => entry.state === "queued")).toHaveLength(30);
     expect(mounted.host.querySelector("textarea")?.value).toBe("");
 
     await settle(() => composerControls(mounted.host).type("the thirty-third message"));
@@ -1184,7 +1193,7 @@ test("issue 1538: exhausted unresolved capacity refuses the new submission befor
     expect(mounted.host.querySelector("textarea")?.value).toBe("the thirty-third message");
     expect(mounted.host.querySelectorAll("img")).toHaveLength(1);
     expect(queue().map((entry) => entry.id)).toEqual(before);
-    expect(sends).toHaveLength(1);
+    expect(sends).toHaveLength(2);
     expect(queue()[0]?.id).toBe(original);
     expect(queue()[0]?.deliveryReceipt?.operationId).toBe(captured.operationId);
 
@@ -1198,7 +1207,7 @@ test("issue 1538: exhausted unresolved capacity refuses the new submission befor
     await settle(() => composerControls(mounted.host).type("still refused"));
     await settle(() => composerControls(mounted.host).submit());
     expect(mounted.host.querySelector("textarea")?.value).toBe("still refused");
-    expect(sends).toHaveLength(1);
+    expect(sends).toHaveLength(2);
 
     // Removing one queued row through its existing control frees a slot; the same draft is then admitted and waits behind the unknown original.
     const queued = queue().find((entry) => entry.state === "queued")!;
@@ -1210,7 +1219,7 @@ test("issue 1538: exhausted unresolved capacity refuses the new submission befor
     expect(queue()).toHaveLength(32);
     expect(queue().at(-1)).toMatchObject({ text: "still refused", state: "queued" });
     expect(queue()[0]?.id).toBe(original);
-    expect(sends).toHaveLength(1);
+    expect(sends).toHaveLength(2);
   } finally { await act(async () => mounted.root.unmount()); }
 });
 

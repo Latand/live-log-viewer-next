@@ -10,6 +10,7 @@ import type { CreateFlowRequest, Flow } from "@/lib/flows/types";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
 import type { AgentRegistry as AgentRegistryType } from "@/lib/agent/registry";
+import { AccountMutationBusyError } from "@/lib/accounts/accountMutation";
 import { accountManager } from "@/lib/accounts/manager";
 
 process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-pipeline-engine-"));
@@ -2046,6 +2047,270 @@ test("transient structured spawn handshakes retry twice before parking (#1056)",
   expect(parked.state).toBe("needs_decision");
   expect(parked.stateDetail).toContain("runtime host request timed out");
   expect(parked.stateDetail).toContain("2 retries");
+});
+
+test("a busy account mutation waits between ticks and claims one host on the same attempt (#1433)", async () => {
+  const h = harness();
+  await create(h.ports);
+  await tickPipelines([], h.ports);
+  const advance = frozenWallClock(h);
+  const baseSpawn = h.ports.spawnAgent;
+  let spawnCalls = 0;
+  let launchClaims = 0;
+  let hostClaims = 0;
+  const scheduled: number[] = [];
+  h.ports.spawnAgent = async (input, onReserved) => {
+    spawnCalls += 1;
+    if (spawnCalls <= 2) {
+      throw new AccountMutationBusyError("account mutation is busy in this process; retry shortly");
+    }
+    const spawned = await baseSpawn(input, (reservation) => {
+      launchClaims += 1;
+      onReserved(reservation);
+    });
+    hostClaims += 1;
+    return spawned;
+  };
+  Object.assign(h.ports, {
+    scheduleTick: (delayMs: number) => { scheduled.push(delayMs); },
+    sleep: forbiddenSleep,
+  });
+
+  await tickPipelines([], h.ports);
+  let pipeline = loadPipelines()[0]!;
+  expect(launchClaims).toBe(0);
+  expect(hostClaims).toBe(0);
+  expect(pipeline).toMatchObject({
+    state: "running",
+    stateDetail: expect.stringMatching(/^stage spawn deferred: account mutation is busy in this process; retry at /),
+    cursor: { stageId: "plan", state: "pending" },
+  });
+  const waitingAttempt = pipeline.runs[0]!.attempts.at(-1)!;
+  expect(waitingAttempt).toMatchObject({ n: 1, state: "pending", launchId: null, conversationId: null });
+  expect(waitingAttempt.controllerWait).toMatchObject({ rounds: 1 });
+
+  advance(scheduled.at(-1)!);
+  await tickPipelines([], h.ports);
+  pipeline = loadPipelines()[0]!;
+  expect(launchClaims).toBe(0);
+  expect(hostClaims).toBe(0);
+  expect(pipeline.runs[0]!.attempts).toHaveLength(1);
+  expect(pipeline.runs[0]!.attempts[0]).toMatchObject({ n: 1, state: "pending", launchId: null });
+
+  advance(scheduled.at(-1)!);
+  await tickPipelines([], h.ports);
+  pipeline = loadPipelines()[0]!;
+  expect(spawnCalls).toBe(3);
+  expect(launchClaims).toBe(1);
+  expect(hostClaims).toBe(1);
+  expect(pipeline.runs[0]!.attempts).toHaveLength(1);
+  expect(pipeline).toMatchObject({
+    state: "running",
+    stateDetail: null,
+    cursor: { stageId: "plan", state: "running" },
+  });
+  expect(pipeline.runs[0]!.attempts[0]).toMatchObject({
+    n: 1,
+    state: "running",
+    launchId: "launch-1",
+    conversationId: "conversation_stage_1",
+  });
+  expect(scheduled).toEqual([1_000, 2_000]);
+});
+
+test("busy account contention exhausts the existing wait with a truthful terminal failure", async () => {
+  const h = harness();
+  await create(h.ports);
+  await tickPipelines([], h.ports);
+  const advance = frozenWallClock(h);
+  let spawnCalls = 0;
+  const scheduled: number[] = [];
+  h.ports.spawnAgent = async () => {
+    spawnCalls += 1;
+    throw new Error("account mutation is busy; retry shortly");
+  };
+  Object.assign(h.ports, {
+    scheduleTick: (delayMs: number) => { scheduled.push(delayMs); },
+    sleep: forbiddenSleep,
+  });
+
+  for (let round = 0; round < 8 && loadPipelines()[0]!.state === "running"; round += 1) {
+    const scheduledBefore = scheduled.length;
+    await tickPipelines([], h.ports);
+    if (loadPipelines()[0]!.state === "running") {
+      expect(scheduled.length).toBe(scheduledBefore + 1);
+      advance(scheduled.at(-1)!);
+    }
+  }
+
+  const parked = loadPipelines()[0]!;
+  expect(spawnCalls).toBe(7);
+  expect(scheduled).toEqual([1_000, 2_000, 4_000, 8_000, 8_000, 7_000]);
+  expect(parked).toMatchObject({
+    state: "needs_decision",
+    stateDetail: "stage spawn failed after 6 retries over 30s: account mutation is busy",
+    cursor: { stageId: "plan", state: "spawning" },
+  });
+  expect(parked.runs[0]!.attempts).toHaveLength(1);
+  expect(parked.runs[0]!.attempts[0]).toMatchObject({ n: 1, state: "needs_decision", launchId: null, conversationId: null });
+  expect(parked.runs[0]!.attempts[0]!.error).toBe(parked.stateDetail);
+});
+
+test("mixed controller waits publish only the current busy retry time", async () => {
+  const h = harness();
+  await create(h.ports);
+  await tickPipelines([], h.ports);
+  const advance = frozenWallClock(h);
+  const baseSpawn = h.ports.spawnAgent;
+  const scheduled: number[] = [];
+  let spawnCalls = 0;
+  h.ports.spawnAgent = async (input, onReserved) => {
+    spawnCalls += 1;
+    if (spawnCalls === 1) throw new AccountMutationBusyError("account mutation is busy in this process; retry shortly");
+    if (spawnCalls === 2) throw new Error("structured delivery controller is unavailable");
+    if (spawnCalls === 3) throw new Error("account mutation is busy; retry shortly");
+    return baseSpawn(input, onReserved);
+  };
+  Object.assign(h.ports, {
+    scheduleTick: (delayMs: number) => { scheduled.push(delayMs); },
+    sleep: forbiddenSleep,
+  });
+
+  await tickPipelines([], h.ports);
+  let pipeline = loadPipelines()[0]!;
+  const firstRetryAfter = pipeline.runs[0]!.attempts[0]!.controllerWait!.retryAfter;
+  expect(pipeline.stateDetail).toContain(firstRetryAfter);
+
+  Object.assign(h.ports, { structuredDeliveryPublication: () => "rebinding" as const });
+  advance(scheduled.at(-1)!);
+  await tickPipelines([], h.ports);
+  pipeline = loadPipelines()[0]!;
+  const rebindingRetryAfter = pipeline.runs[0]!.attempts[0]!.controllerWait!.retryAfter;
+  expect(rebindingRetryAfter).not.toBe(firstRetryAfter);
+  expect(pipeline.stateDetail).toBeNull();
+  expect(spawnCalls).toBe(1);
+
+  Object.assign(h.ports, { structuredDeliveryPublication: () => "ready" as const });
+  advance(scheduled.at(-1)!);
+  await tickPipelines([], h.ports);
+  pipeline = loadPipelines()[0]!;
+  const controllerRetryAfter = pipeline.runs[0]!.attempts[0]!.controllerWait!.retryAfter;
+  expect(controllerRetryAfter).not.toBe(rebindingRetryAfter);
+  expect(pipeline.stateDetail).toBeNull();
+
+  advance(scheduled.at(-1)!);
+  await tickPipelines([], h.ports);
+  pipeline = loadPipelines()[0]!;
+  const latestRetryAfter = pipeline.runs[0]!.attempts[0]!.controllerWait!.retryAfter;
+  expect(latestRetryAfter).not.toBe(controllerRetryAfter);
+  expect(pipeline.stateDetail).toBe(`stage spawn deferred: account mutation is busy; retry at ${latestRetryAfter}`);
+  expect(spawnCalls).toBe(3);
+});
+
+test("a due busy wait survives a restarted controller race with one fresh host claim", async () => {
+  const h = harness();
+  await create(h.ports);
+  await tickPipelines([], h.ports);
+  const advance = frozenWallClock(h);
+  const scheduled: number[] = [];
+  h.ports.spawnAgent = async () => {
+    throw new AccountMutationBusyError("account mutation is busy in this process; retry shortly");
+  };
+  Object.assign(h.ports, {
+    scheduleTick: (delayMs: number) => { scheduled.push(delayMs); },
+    sleep: forbiddenSleep,
+  });
+
+  await tickPipelines([], h.ports);
+  const pending = loadPipelines()[0]!;
+  const retryAfter = pending.runs[0]!.attempts[0]!.controllerWait?.retryAfter;
+  if (!retryAfter) throw new Error("busy contention did not persist a retry time");
+  advance(Date.parse(retryAfter) - Date.parse(h.ports.now()) + 1);
+
+  const state = process.env.LLV_STATE_DIR!;
+  const enginePath = path.join(import.meta.dir, "engine.ts");
+  const claimsPath = path.join(state, "busy-race-claims.jsonl");
+  const startedPath = path.join(state, "busy-race-second-started");
+  const releasePath = path.join(state, "busy-race-release");
+  const childScript = (marksSecond: boolean) => `
+    process.env.LLV_STATE_DIR = ${JSON.stringify(state)};
+    const fs = await import("node:fs");
+    const { defaultPipelinePorts, tickPipelines } = await import(${JSON.stringify(enginePath)});
+    const ports = defaultPipelinePorts();
+    ports.structuredDeliveryPublication = () => "ready";
+    ports.conversationAgentActive = async () => true;
+    ports.spawnAgent = async (input, onReserved) => {
+      fs.appendFileSync(${JSON.stringify(claimsPath)}, JSON.stringify({ pid: process.pid, clientAttemptId: input.clientAttemptId }) + "\\n");
+      onReserved({ launchId: "race-launch-" + process.pid, conversationId: "race-conversation-" + process.pid, accountId: "race-account" });
+      while (!fs.existsSync(${JSON.stringify(releasePath)})) await Bun.sleep(5);
+      return { launchId: "race-launch-" + process.pid, conversationId: "race-conversation-" + process.pid, sessionId: "race-session-" + process.pid, transcript: null, paneId: null, accountId: "race-account" };
+    };
+    ${marksSecond ? `fs.writeFileSync(${JSON.stringify(startedPath)}, "started");` : ""}
+    await tickPipelines([], ports);
+  `;
+  const childEnv = { ...process.env, LLV_STATE_DIR: state };
+  let first: ReturnType<typeof Bun.spawn> | null = null;
+  let second: ReturnType<typeof Bun.spawn> | null = null;
+  const waitFor = async (filename: string): Promise<void> => {
+    for (let attempt = 0; attempt < 400 && !fs.existsSync(filename); attempt += 1) await Bun.sleep(5);
+    if (!fs.existsSync(filename)) throw new Error(`timed out waiting for ${path.basename(filename)}`);
+  };
+  try {
+    first = Bun.spawn({ cmd: [process.execPath, "-e", childScript(false)], env: childEnv, stdout: "ignore", stderr: "pipe" });
+    await waitFor(claimsPath);
+    second = Bun.spawn({ cmd: [process.execPath, "-e", childScript(true)], env: childEnv, stdout: "ignore", stderr: "pipe" });
+    await waitFor(startedPath);
+    fs.writeFileSync(releasePath, "release");
+    const [firstExit, secondExit, firstError, secondError] = await Promise.all([
+      first.exited,
+      second.exited,
+      new Response(first.stderr as ReadableStream<Uint8Array>).text(),
+      new Response(second.stderr as ReadableStream<Uint8Array>).text(),
+    ]);
+    expect({ firstExit, secondExit, firstError, secondError }).toEqual({ firstExit: 0, secondExit: 0, firstError: "", secondError: "" });
+  } finally {
+    fs.writeFileSync(releasePath, "release");
+    for (const child of [first, second]) {
+      if (!child) continue;
+      const finished = await Promise.race([child.exited.then(() => true), Bun.sleep(100).then(() => false)]);
+      if (!finished) child.kill();
+    }
+  }
+
+  expect(scheduled).toEqual([1_000]);
+  expect(fs.readFileSync(claimsPath, "utf8").trim().split("\n")).toHaveLength(1);
+  const raced = loadPipelines()[0]!;
+  expect(raced).toMatchObject({
+    state: "running",
+    stateDetail: null,
+    cursor: { stageId: "plan", state: "running" },
+  });
+  expect(raced.runs[0]!.attempts).toHaveLength(1);
+  expect(raced.runs[0]!.attempts[0]).toMatchObject({ n: 1, state: "running", launchId: expect.stringMatching(/^race-launch-/), conversationId: expect.stringMatching(/^race-conversation-/) });
+});
+
+test("a busy-looking failure after reservation stays in unknown receipt recovery", async () => {
+  const h = harness();
+  await create(h.ports);
+  await tickPipelines([], h.ports);
+  let spawnCalls = 0;
+  h.ports.spawnAgent = async (_input, onReserved) => {
+    spawnCalls += 1;
+    onReserved({ launchId: "launch-unknown-busy", conversationId: "conversation-unknown-busy" });
+    throw new AccountMutationBusyError("account mutation is busy in this process; retry shortly");
+  };
+
+  await tickPipelines([], h.ports);
+
+  const parked = loadPipelines()[0]!;
+  expect(spawnCalls).toBe(1);
+  expect(parked).toMatchObject({ state: "needs_decision", stateDetail: "account mutation is busy in this process; retry shortly" });
+  expect(parked.runs[0]!.attempts[0]).toMatchObject({
+    state: "needs_decision",
+    launchId: "launch-unknown-busy",
+    conversationId: "conversation-unknown-busy",
+  });
+  expect(parked.runs[0]!.attempts[0]!.controllerWait).toBeUndefined();
 });
 
 /* The controller wait must never be slept through: the pipelines phase holds
@@ -6208,6 +6473,92 @@ function readFixtures(h: ReturnType<typeof harness>, fixtures: Record<string, st
     return fixture ? await durableStageTurnEvidence(engine, fixture) : null;
   };
 }
+
+/** The #1589 production tail, in the order the incident wrote it: a
+    `function_call` the deploy cut off mid-flight, the standing continuation
+    prompt startup delivered, and the re-hosted turn that finished with a
+    fenced verdict. */
+function severedToolTranscript(name: string): string {
+  return stageTranscript(name, [
+    { timestamp: "2026-09-09T05:36:42.000Z", type: "response_item", payload: { type: "function_call", call_id: "cut-off-by-the-restart" } },
+    { timestamp: "2026-09-09T05:38:44.000Z", type: "event_msg", payload: { type: "user_message", message: "Continue the interrupted turn from the transcript." } },
+    { timestamp: "2026-09-09T05:38:45.000Z", type: "event_msg", payload: { type: "task_started", turn_id: "continued-turn" } },
+    { timestamp: "2026-09-09T05:40:17.000Z", type: "event_msg", payload: { type: "agent_message", message: PASS_TEXT } },
+    { timestamp: "2026-09-09T05:40:18.000Z", type: "event_msg", payload: { type: "task_complete", turn_id: "continued-turn" } },
+  ]);
+}
+
+/** A tail window that begins inside an oversized tool output, so the matching
+    `function_call` and every lifecycle boundary sit above it. Everything the
+    engine can see is mid-turn — including a message that parses as a verdict. */
+function truncatedMidTurnTranscript(name: string): string {
+  return stageTranscript(name, [
+    { timestamp: "2026-09-09T08:00:00.000Z", type: "response_item", payload: { type: "function_call", call_id: "oversized" } },
+    { timestamp: "2026-09-09T08:00:01.000Z", type: "event_msg", payload: { type: "agent_reasoning", text: "r".repeat(200_000) } },
+    { timestamp: "2026-09-09T08:00:02.000Z", type: "event_msg", payload: { type: "agent_message", message: PASS_TEXT } },
+    { timestamp: "2026-09-09T08:00:03.000Z", type: "response_item", payload: { type: "custom_tool_call_output", call_id: "oversized", output: "x".repeat(40_000) } },
+    { timestamp: "2026-09-09T08:00:04.000Z", type: "event_msg", payload: { type: "token_count" } },
+  ]);
+}
+
+test("a re-hosted Codex continuation settles once and activates the next stage exactly once (#1589)", async () => {
+  const h = harness();
+  await runningStructuredStage(h);
+  h.setConversationActive(false);
+  /* Through the real projection over the real fixture, so the assertion fails
+     for the reason the incident had rather than for a hand-shaped map entry. */
+  readFixtures(h, { "/codex/stage-1.jsonl": severedToolTranscript("issue-1589-severed-tool") });
+
+  await tickPipelines([], h.ports);
+
+  const settled = loadPipelines()[0]!;
+  expect(settled.runs[0]!.attempts).toHaveLength(1);
+  expect(settled.runs[0]!.attempts[0]).toMatchObject({
+    state: "passed",
+    verdict: { status: "pass", confidence: 0.9 },
+  });
+  /* No recovery misses were spent, so nothing asked the operator anything. */
+  expect(settled.runs[0]!.attempts[0]!.verdictRecovery).toBeUndefined();
+  expect(settled).toMatchObject({ state: "running", stateDetail: null });
+  expect(settled.cursor).toMatchObject({ stageId: "build", state: "pending" });
+  expect(settled.lastPassedCommit).toBe(STAGE_HEAD);
+
+  await tickPipelines([], h.ports);
+
+  const advanced = loadPipelines()[0]!;
+  expect(advanced.runs[1]!.attempts).toHaveLength(1);
+  expect(h.calls.filter((call) => call.startsWith("spawn:"))).toHaveLength(2);
+
+  /* A third tick is the exactly-once check: no second settlement, no second
+     attempt on either stage, no second spawn. */
+  await tickPipelines([], h.ports);
+
+  const stable = loadPipelines()[0]!;
+  expect(stable.runs[0]!.attempts).toHaveLength(1);
+  expect(stable.runs[1]!.attempts).toHaveLength(1);
+  expect(h.calls.filter((call) => call.startsWith("spawn:"))).toHaveLength(2);
+  expect(stable).toMatchObject({ state: "running", stateDetail: null });
+});
+
+test("a truncated mid-turn window cannot settle a structured stage on its trailing message (#1589)", async () => {
+  const h = harness();
+  await runningStructuredStage(h);
+  h.setConversationActive(false);
+  readFixtures(h, { "/codex/stage-1.jsonl": truncatedMidTurnTranscript("issue-1589-truncated-mid-turn") });
+
+  /* The scan does have the transcript and its trailing message parses as a
+     verdict; only the busy turn projection stands between them and a
+     settlement over work that is still running. */
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+
+  const current = loadPipelines()[0]!;
+  expect(current.runs[0]!.attempts).toHaveLength(1);
+  expect(current.runs[0]!.attempts[0]).toMatchObject({ state: "running", completedAt: null });
+  expect(current.runs[1]!.attempts).toHaveLength(0);
+  expect(current.cursor?.stageId).toBe("plan");
+  expect(h.calls.filter((call) => call.startsWith("spawn:"))).toHaveLength(1);
+});
 
 function usageLimitPorts(
   h: ReturnType<typeof harness>,

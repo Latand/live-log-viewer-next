@@ -1148,6 +1148,20 @@ describe("Codex functions.exec orchestration", () => {
   const orchOutput = (callId: string, text: string) =>
     JSON.stringify({ type: "response_item", timestamp: "t", payload: { type: "custom_tool_call_output", call_id: callId, output: [{ type: "input_text", text }] } });
 
+  test("literal nested exec retains recursive ownership without duplicating children as siblings", () => {
+    const inner = 'await tools.exec_command({cmd:"nested leaf"})';
+    const middle = `await tools.exec(${JSON.stringify(inner)})`;
+    const outer = `await tools.exec(${JSON.stringify(middle)}); await tools.read_file({path:"peer.ts"})`;
+    const feed = buildFeed(codexFile, [orch(outer, "recursive")], false, "");
+    const event = feed.items.find(item => item.kind === "tool");
+    if (event?.kind !== "tool") throw Error("expected tool");
+    const calls = event.orchestration!.calls;
+    expect(calls.map(call => call.tool)).toEqual(["exec", "read_file"]);
+    expect(calls[0].children![0].tool).toBe("exec");
+    expect(calls[0].children![0].children![0].tool).toBe("exec_command");
+    expect(calls[0].children![0].children![0].summary).toContain("nested leaf");
+  });
+
   test("four concurrent tools read as one record with structured, distinct children", () => {
     const src =
       'const r = await Promise.all([tools.exec_command({cmd:"git status"}), tools.exec_command({cmd:"git diff"}), tools.read_file({path:"src/a.ts"}), tools.exec_command({cmd:"ls -la"})]); text(r);';

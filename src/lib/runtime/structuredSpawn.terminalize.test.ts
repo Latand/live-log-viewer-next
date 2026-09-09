@@ -35,7 +35,7 @@ function staleStructuredReceipt(store: AgentRegistry, attempt: string) {
     accountId: "work",
     clientAttemptId: attempt,
     requestDigest: "d".repeat(64),
-    launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+    launchProfile: emptyLaunchProfile({ title: "Stale launch fixture", cwd: "/repo" }),
   });
   if (begun.kind !== "created") throw new Error("expected structured launch creation");
   return begun.receipt;
@@ -50,7 +50,7 @@ function stagedStructuredReceipt(store: AgentRegistry, attempt: string) {
     artifactPath,
     cwd: "/repo",
     accountId: "work",
-    launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+    launchProfile: emptyLaunchProfile({ title: "Stale launch fixture", cwd: "/repo" }),
     status: "idle",
     host: null,
     structuredHost: {
@@ -76,7 +76,7 @@ const AGED = () => Date.now() + STALE_STRUCTURED_SPAWN_TIMEOUT_MS + 60_000;
 test("a runtime-host transport failure becomes actionable on the structured spawn card", async () => {
   const store = registry();
   const cwd = path.dirname(store.filename);
-  const launchProfile = emptyLaunchProfile({ cwd });
+  const launchProfile = emptyLaunchProfile({ title: "Stale launch fixture", cwd });
   const begun = store.beginSpawnRequest({
     engine: "codex",
     cwd,
@@ -179,7 +179,7 @@ test.each(["missing", "corrupt"] as const)("a %s queued payload cannot keep an o
         command: "claude",
         cwd: "/repo",
         windowName: "queued-pin",
-        launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+        launchProfile: emptyLaunchProfile({ title: "Stale launch fixture", cwd: "/repo" }),
       },
       ["prompt"]: "continue",
       imageRefs: [],
@@ -227,7 +227,7 @@ test.each(["missing", "corrupt"] as const)("a %s tmux queue payload cannot keep 
     accountId: "account-a",
     accountPin: true,
     clientAttemptId: `partial_tmux_queue_${condition}_20260824`,
-    launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+    launchProfile: emptyLaunchProfile({ title: "Stale launch fixture", cwd: "/repo" }),
   });
   if (begun.kind !== "created") throw new Error("expected tmux receipt creation");
   if (condition === "corrupt") {
@@ -241,7 +241,7 @@ test.each(["missing", "corrupt"] as const)("a %s tmux queue payload cannot keep 
         command: "claude",
         cwd: "/repo",
         windowName: "queued-pin",
-        launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+        launchProfile: emptyLaunchProfile({ title: "Stale launch fixture", cwd: "/repo" }),
       },
       ["prompt"]: "continue",
       imageRefs: [],
@@ -295,7 +295,7 @@ test("startup recovery still terminalizes a dead non-queued ownerless receipt", 
     accountId: "account-a",
     accountPin: true,
     clientAttemptId: "non_queued_ownerless_20260824",
-    launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+    launchProfile: emptyLaunchProfile({ title: "Stale launch fixture", cwd: "/repo" }),
   });
   if (begun.kind !== "created" || !begun.receipt.admissionOwner) throw new Error("expected ownerless receipt setup");
   store.releaseStartingStructuredSpawn(begun.receipt.launchId, begun.receipt.admissionOwner);
@@ -319,7 +319,7 @@ test.each(["codex", "claude"] as const)("an overdue %s placeholder still fails w
     accountId: "work",
     clientAttemptId: `effect_history_outage_${engine}`,
     requestDigest: engine === "codex" ? "c".repeat(64) : "a".repeat(64),
-    launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+    launchProfile: emptyLaunchProfile({ title: "Stale launch fixture", cwd: "/repo" }),
   });
   if (begun.kind !== "created") throw new Error("expected structured launch creation");
   const receipt = begun.receipt;
@@ -329,7 +329,7 @@ test.each(["codex", "claude"] as const)("an overdue %s placeholder still fails w
     artifactPath,
     cwd: "/repo",
     accountId: "work",
-    launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+    launchProfile: emptyLaunchProfile({ title: "Stale launch fixture", cwd: "/repo" }),
     status: "dead",
     host: null,
     structuredHost: null,
@@ -421,7 +421,7 @@ test("a staged launch whose host entry stays claimed still fails at the bounded 
     artifactPath: "/sessions/019f7b8a_9f75_7dc0_b231_17f7eadd7fe1.jsonl",
     cwd: "/repo",
     accountId: "work",
-    launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+    launchProfile: emptyLaunchProfile({ title: "Stale launch fixture", cwd: "/repo" }),
     status: "unhosted",
     host: null,
     structuredHost: {
@@ -564,7 +564,7 @@ test("issue 533: host loss after recoverable timeout reaches retry-safe failure 
     artifactPath: "/sessions/timeout-host-loss.jsonl",
     cwd: "/repo",
     accountId: "work",
-    launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+    launchProfile: emptyLaunchProfile({ title: "Stale launch fixture", cwd: "/repo" }),
     status: "dead",
     host: null,
     structuredHost: {
@@ -608,7 +608,7 @@ test("issue 1074: a stale materialized launch is recovered from its late transcr
     artifactPath,
     cwd: "/repo",
     accountId: "work",
-    launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+    launchProfile: emptyLaunchProfile({ title: "Stale launch fixture", cwd: "/repo" }),
     status: "idle",
     host: null,
     structuredHost: {
@@ -630,7 +630,7 @@ test("issue 1074: a stale materialized launch is recovered from its late transcr
     engine: "codex",
     path: artifactPath,
     accountId: "work",
-    launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+    launchProfile: emptyLaunchProfile({ title: "Stale launch fixture", cwd: "/repo" }),
     turn: { state: "busy", source: "assistant", terminalAt: null },
     observedAt: new Date().toISOString(),
   }]);
@@ -661,7 +661,7 @@ test.each(["codex", "claude"] as const)("issue 1074: a stale %s registering host
     accountId: "work",
     clientAttemptId: `registering_${engine}_incident`,
     requestDigest: engine === "codex" ? "c".repeat(64) : "a".repeat(64),
-    launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+    launchProfile: emptyLaunchProfile({ title: "Stale launch fixture", cwd: "/repo" }),
   });
   if (begun.kind !== "created") throw new Error("expected structured launch creation");
   const receipt = begun.receipt;
@@ -672,7 +672,7 @@ test.each(["codex", "claude"] as const)("issue 1074: a stale %s registering host
     artifactPath,
     cwd: "/repo",
     accountId: "work",
-    launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+    launchProfile: emptyLaunchProfile({ title: "Stale launch fixture", cwd: "/repo" }),
     status: "idle",
     host: null,
     structuredHost: {

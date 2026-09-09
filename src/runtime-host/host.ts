@@ -197,6 +197,9 @@ export class RuntimeHost {
           ref: typeof request.params?.ref === "string" ? request.params.ref : undefined,
           idempotencyKey: String(request.params?.idempotencyKey ?? ""),
         });
+      } else if (request.method === "viewer-deployment-cancel") {
+        if (!this.deployments) throw new Error("viewer deployments are disabled");
+        result = this.deployments.cancelViewerDeployment(String(request.params?.deploymentId ?? ""));
       } else if (request.method === "viewer-deployment-read") {
         if (!this.deployments) throw new Error("viewer deployments are disabled");
         result = this.deployments.readViewerDeployment(String(request.params?.deploymentId ?? ""));

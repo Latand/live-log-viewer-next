@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import { requestAccountMigrationTick } from "@/lib/accounts/migration/controllerSignal";
 import { agentRegistry, type AgentRegistry, type AgentRegistryEntry, type ProcessIdentity } from "@/lib/agent/registry";
 import { sessionKeyId, type SessionKey } from "@/lib/agent/sessionKey";
+import { forEachStartupBatch } from "./startupWork";
 import { BRANCH_SHARED_HOST_ERROR, branchSharesRootHost } from "@/lib/conversation/branchControl";
 import { captureProcessIdentity } from "@/lib/processIdentity";
 
@@ -76,7 +77,7 @@ interface ControllerState {
   republishActiveHost: ((key: SessionKey) => Promise<boolean>) | null;
   releaseActiveHost: ((key: SessionKey) => Promise<boolean>) | null;
   terminateActiveHost: ((key: SessionKey, expected?: Readonly<ProcessIdentity>) => Promise<boolean>) | null;
-  completeActive: ((adopted: readonly StructuredDeliveryHost[], progress?: (phase: StructuredHostStartupPhase) => void) => Promise<void>) | null;
+  completeActive: ((adopted: readonly StructuredDeliveryHost[], progress?: (phase: StructuredHostStartupPhase) => void, assertActive?: () => void) => Promise<void>) | null;
   stopActive: () => void;
   lastDrainError?: string | null;
   /* Distinguishes "this process hosts the controller and is between
@@ -467,10 +468,15 @@ export async function bindStructuredDeliveryQueue(
   const retirePredecessor = state.stopActive;
   const registry = dependencies.registry ?? agentRegistry();
   const hosts = new Map<string, EngineHost>();
+  // Registration events can request a drain while startup is still seating
+  // the remaining hosts. Their original queued operations must wait for those
+  // seats instead of attempting competing recovery and terminalizing them.
+  let startupPending = dependencies.deferStartupWork === true;
   let scheduleAutomaticRetry = () => {};
   let requestDrain = () => {};
   const queue = new StructuredDeliveryQueue(
     {
+      deferTarget: (conversationId) => startupPending && hostResolver(registry, hosts)(conversationId) === null,
       effects: (kinds, afterEventSeq) => client.effectBatch(kinds, afterEventSeq),
       ...(typeof client.events === "function" ? { events: (afterEventSeq: number) => client.events(afterEventSeq) } : {}),
       status: async (operationId: string) => (await client.operationStatus(operationId))?.receipt ?? null,
@@ -596,6 +602,7 @@ export async function bindStructuredDeliveryQueue(
     return true;
   };
   const drainWithRetry = async (afterAdmission = false): Promise<void> => {
+    if (stopped) return;
     try {
       if (afterAdmission) await queue.drainAfterAdmission();
       else await queue.drain();
@@ -1061,7 +1068,7 @@ export async function bindStructuredDeliveryQueue(
     }
   };
   let completion = Promise.resolve();
-  const complete = (items: readonly StructuredDeliveryHost[], progress?: (phase: StructuredHostStartupPhase) => void) => {
+  const complete = (items: readonly StructuredDeliveryHost[], progress?: (phase: StructuredHostStartupPhase) => void, assertActive: () => void = () => {}) => {
     completion = completion.catch(() => {}).then(async () => {
       /* A generation that has been swapped out cannot register anything, but it
          must not answer "done" either: its caller would clear its retry set and
@@ -1071,11 +1078,25 @@ export async function bindStructuredDeliveryQueue(
       if (stopped || state.activeQueue !== queue) {
         const successor = state.completeActive;
         if (!successor || successor === complete) throw new StructuredDeliveryControllerUnavailableError();
-        await successor(items, progress);
+        await successor(items, progress, assertActive);
         return;
       }
+      /* A route-recovered structured launch can predate this controller and
+         leave its own `spawn` marker behind. Repair only exact, completed,
+         live rows while this publication is active; an unavailable/shutting
+         down controller never gets to mutate the registry. Do this before
+         registering hosts so even a registration-triggered drain sees the
+         repaired durable state. */
+      registry.repairCompletedStructuredSpawnMarkers();
       progress?.("registering structured delivery hosts");
       for (const item of items) await register(item);
+      assertActive();
+      if (superseded()) {
+        const successor = state.completeActive;
+        if (!successor || successor === complete) throw new StructuredDeliveryControllerUnavailableError();
+        await successor(items, progress, assertActive);
+        return;
+      }
       const startupSnapshot = registry.readOnlySnapshot();
       /* Read only to skip republishing a projection that already says what
          this pass would say. It decides nothing else: the state published
@@ -1090,18 +1111,28 @@ export async function bindStructuredDeliveryQueue(
         (runtimeSnapshot?.sessions ?? []).map((session) => [session.conversationId, session]),
       );
       progress?.("publishing historical host fallbacks");
-      for (const conversation of Object.values(startupSnapshot.conversations)) {
+      await forEachStartupBatch(Object.values(startupSnapshot.conversations), async (conversation) => {
+        assertActive();
+        if (superseded()) return;
         const generation = conversation.generations.at(-1);
-        if (!generation) continue;
+        if (!generation) return;
         const id = sessionKeyId({ engine: conversation.engine, sessionId: generation.id });
-        if (registrations.has(id)) continue;
+        if (registrations.has(id)) return;
         const entry = startupSnapshot.entries[id];
-        if (!entry?.structuredHost && entry?.host?.kind !== "tmux") continue;
+        if (!entry?.structuredHost && entry?.host?.kind !== "tmux") return;
         await publishCurrentFallback(conversation.id, runtimeSessions.get(conversation.id));
+      }, assertActive);
+      if (superseded()) {
+        const successor = state.completeActive;
+        if (!successor || successor === complete) throw new StructuredDeliveryControllerUnavailableError();
+        await successor(items, progress, assertActive);
+        return;
       }
       progress?.("reconciling terminal delivery receipts");
       await reconcileTerminalDeliveries(registry, client, () => !stopped && state.activeQueue === queue);
       progress?.("draining startup delivery queue");
+      assertActive();
+      startupPending = false;
       await queue.drain();
     });
     return completion;
@@ -1156,9 +1187,10 @@ export async function publishStructuredDeliveryHost(
 export async function completeStructuredDeliveryQueueStartup(
   adopted: readonly StructuredDeliveryHost[],
   progress?: (phase: StructuredHostStartupPhase) => void,
+  assertActive?: () => void,
 ): Promise<void> {
   if (!state.completeActive) throw new StructuredDeliveryControllerUnavailableError();
-  await state.completeActive(adopted, progress);
+  await state.completeActive(adopted, progress, assertActive);
 }
 
 export async function republishStructuredDeliveryHost(key: SessionKey): Promise<boolean> {

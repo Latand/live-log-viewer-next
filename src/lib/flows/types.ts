@@ -179,6 +179,9 @@ export type Round = {
 };
 
 export type Flow = {
+  /** Decisions and their receipts share the flow's atomic durable row. */
+  agentDecisions?: FlowAgentDecision[];
+  decisionRequired?: boolean;
   id: string;
   /** Durable store generation used to fence stale cross-store projections. */
   revision?: number;
@@ -259,6 +262,7 @@ export type CreateFlowRequest = {
 };
 
 export type FlowAction =
+  | "agent-decision"
   | "pause"
   | "resume"
   | "set-mode"
@@ -289,6 +293,26 @@ export type PatchFlowRequest = {
       cannot be reseated in place, so accepting an implementer override would be a
       no-op reported as success. Reseating the implementer is a separate feature. */
   roles?: { reviewer?: Partial<RoleConfig> };
+};
+
+export type FlowDecisionRequest = {
+  clientRequestId: string;
+  flowId: string;
+  decision: "submit-review" | "continue-fixing" | "stop" | "completed";
+  reason: string;
+  expectedRevision: number;
+  expectedHead: string;
+  round: number;
+  turnId: string;
+  stage?: { pipelineId: string; stageId: string; attempt: number };
+};
+
+export type FlowAgentDecision = FlowDecisionRequest & {
+  owner: string;
+  transcriptPath: string;
+  acceptedAt: string;
+  disposition: "accepted" | "applied" | "needs_decision";
+  settledAt?: string;
 };
 
 /** Per-transcript annotation piggybacked on /api/files entries. */

@@ -27,16 +27,17 @@ function subscribeViewport(onChange: () => void) {
     visual?.removeEventListener("resize", onChange);
   };
 }
-function useViewportHeight(): number {
-  return useSyncExternalStore(subscribeViewport, () => visibleViewportHeight(window.innerHeight, window.visualViewport), () => 800);
+const noViewportSubscription = () => () => {};
+function useViewportHeight(active: boolean): number {
+  return useSyncExternalStore(active ? subscribeViewport : noViewportSubscription, () => visibleViewportHeight(window.innerHeight, window.visualViewport), () => 800);
 }
 /* The LAYOUT viewport height, tracked beside the visible one. The composer
    box's own maximum height is written in `dvh`, which the on-screen keyboard
    does not shrink (#983), so the ceiling needs both numbers: the visible one
    says what fits above the keyboard, this one says how tall the composer's own
    scroll box is allowed to be (#1483). */
-function useLayoutViewportHeight(): number {
-  return useSyncExternalStore(subscribeViewport, () => window.innerHeight, () => 800);
+function useLayoutViewportHeight(active: boolean): number {
+  return useSyncExternalStore(active ? subscribeViewport : noViewportSubscription, () => window.innerHeight, () => 800);
 }
 
 /**
@@ -59,6 +60,8 @@ export interface ComposerStatus {
 }
 
 export interface UseComposerOptions {
+  /** Suspend view-local viewport listeners while delivery remains mounted. */
+  viewActive?: boolean;
   /** The draft's initial text, read once on mount (e.g. a persisted draft or a
       seeded prompt). Passed as a lazy initializer so it runs a single time. */
   initialText: () => string;
@@ -94,7 +97,7 @@ export interface UseComposerOptions {
  * own delivery (`submit`) and its own surrounding chrome; everything below the
  * text lives in `ComposerBar`.
  */
-export function useComposer({ initialText, persistText, submit, disabled = false, imageCapability = null, acceptFiles = false, holdInputWhileBusy = true }: UseComposerOptions) {
+export function useComposer({ initialText, persistText, submit, disabled = false, imageCapability = null, acceptFiles = false, holdInputWhileBusy = true, viewActive = true }: UseComposerOptions) {
   /* A remount mid-typing (column reshuffles, draft handovers) restores the
      draft from storage; the ref always holds the latest text so async
      dictation callbacks append to what the user typed meanwhile instead of
@@ -175,9 +178,9 @@ export function useComposer({ initialText, persistText, submit, disabled = false
      the visible viewport says the field has room it does not have, and the
      field grew until the tools row holding Stop fell out of its own box
      (#1483). */
-  const isMobile = useIsMobile();
-  const viewportH = useViewportHeight();
-  const layoutH = useLayoutViewportHeight();
+  const isMobile = useIsMobile(viewActive);
+  const viewportH = useViewportHeight(viewActive);
+  const layoutH = useLayoutViewportHeight(viewActive);
   const maxPx = isMobile ? mobileComposerCeiling(viewportH, layoutH) : COMPOSER_MAX_PX;
 
   const attachments = useImageAttachments({
@@ -227,6 +230,7 @@ export function useComposer({ initialText, persistText, submit, disabled = false
      the field pins to the bottom on every update so the latest spoken words
      stay visible; while typing it pins only when the caret is at the end. */
   useAutosizePinned(inputRef, displayText, {
+    active: viewActive,
     maxPx,
     pinned: Boolean(dictation.liveText),
   });

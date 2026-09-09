@@ -858,6 +858,17 @@ export function checkpointPipelineRollbackMirrorsForDemotion(): { pipelines: num
   return { pipelines, pipelinesArchive };
 }
 
+export async function checkpointPipelineRollbackMirrorsForDemotionAsync(): Promise<{ pipelines: number; pipelinesArchive: number }> {
+  const { active, archive } = stores();
+  const pipelines = await active.checkpointMirrorForDemotionAsync((pipelines, revision) => {
+    atomicWriteJson(pipelinesFile(), { schemaVersion: PIPELINES_SCHEMA_VERSION, _sqliteRevision: revision, pipelines });
+  });
+  const pipelinesArchive = await archive.checkpointMirrorForDemotionAsync((pipelines, revision) => {
+    atomicWriteJson(pipelinesArchiveFile(), { schemaVersion: PIPELINES_SCHEMA_VERSION, _sqliteRevision: revision, pipelines });
+  });
+  return { pipelines, pipelinesArchive };
+}
+
 /** Full-record read by id: the hot registry first, then the archive. */
 export function findPipelineRecord(pipelineId: string): Pipeline | null {
   return loadPipelines().find((pipeline) => pipeline.id === pipelineId)

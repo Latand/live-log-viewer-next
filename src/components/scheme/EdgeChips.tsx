@@ -8,7 +8,7 @@ import { useLocale } from "@/lib/i18n";
 
 import type { SchemeRect } from "./layout";
 import type { Camera } from "./Minimap";
-import { offscreenClusterChips, overflowListStyle, resolveOverflowPlacement, type BoardCluster, type ChipEdge, type ClusterChip } from "./offscreenClusters";
+import { chipBox, OVERFLOW_TRIGGER, offscreenClusterChips, overflowListStyle, resolveOverflowPlacement, type BoardCluster, type ChipEdge, type ClusterChip } from "./offscreenClusters";
 
 const transformFor = (edge: ChipEdge): string => {
   if (edge === "right") return "translate(-100%, -50%)";
@@ -259,16 +259,17 @@ export function EdgeChips({ clusters, cam, vp, hidden, obstacles = [], onFit }: 
       rows.push(chip);
       byEdge.set(chip.edge, rows);
     }
+    const occupied = [...obstacles, ...partition.visible.map(chip => chipBox(chip, chip.revealWidth))];
     const placed = new Map<ChipEdge, { anchor: { x: number; y: number }; rows: ClusterChip[] }>();
     for (const [edge, rows] of byEdge) {
-      const placement = resolveOverflowPlacement(edge, vp, obstacles);
+      const placement = resolveOverflowPlacement(edge, vp, occupied);
       if (!placement) continue; // whole border blocked: suppress rather than overlap
       const bucket = placed.get(placement.edge);
       if (bucket) bucket.rows.push(...rows);
-      else placed.set(placement.edge, { anchor: { x: placement.x, y: placement.y }, rows: [...rows] });
+      else {placed.set(placement.edge, { anchor: { x: placement.x, y: placement.y }, rows: [...rows] });occupied.push(chipBox({...placement,revealWidth:OVERFLOW_TRIGGER},OVERFLOW_TRIGGER));}
     }
     return placed;
-  }, [partition.overflow, vp, obstacles]);
+  }, [partition.overflow, partition.visible, vp, obstacles]);
   const [openEdge, setOpenEdge] = useState<ChipEdge | null>(null);
   /* Touch-first and phone-width canvases fold this wayfinding into the minimap
      and mobile map instead: floating edge chips fight the finger for chat

@@ -95,7 +95,8 @@ test("the label chip fully counter-scales so it stays readable at minimum zoom (
   /* Uncapped inverse-zoom scaling: constant on-screen size, no min(…) ceiling
      that would shrink the label to a few px at the 0.12 map minimum. */
   expect(html).toContain("var(--inv-z, 1)");
-  expect(html).not.toContain("min(");
+  expect(groupLabelFontSize()).not.toContain("min(");
+  expect(html).toContain("max-width:min(26em, calc(100% - 40px))");
   expect(html).toContain(groupLabelFontSize());
 });
 

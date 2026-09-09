@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useCollapsedTools } from "../toolDisclosure";
 
 import { useIsMobile } from "@/hooks/useIsMobile";
 
@@ -19,6 +20,7 @@ import { MobileRunRow, PollRow, ToolBlockRow, ToolLine, isPendingQuestionCall, m
    the same tool id twice (a resume re-emits the tool_use), so the id alone is
    not a unique key. */
 function ReadableBlocks({ calls }: { calls: readonly ToolEvent[] }) {
+  const collapsed = useCollapsedTools();
   const blocks = groupNestedCalls(calls);
   return (
     <ol className="mb-1 mt-1 space-y-0.5">
@@ -27,6 +29,15 @@ function ReadableBlocks({ calls }: { calls: readonly ToolEvent[] }) {
            keystroke write_stdin or an output-bearing wait stays a full
            readable follow-up (issue #497). */
         const children = coalesceFollowUps(block.children);
+        if (collapsed) return (
+          <li key={`${block.parent.id}:${block.parent.srcCall}`} className="min-w-0">
+            <ToolLine event={block.parent} index={bi + 1} showTime={false}>
+              <div className="ml-4 border-l border-border pl-2">
+                {block.children.map(child => <ToolLine key={`${child.id}:${child.srcCall}`} event={child} nested showTime={false} />)}
+              </div>
+            </ToolLine>
+          </li>
+        );
         return (
           <li key={`${block.parent.id}:${bi}`} className="min-w-0">
             <ToolBlockRow event={block.parent} index={bi + 1} />
@@ -152,11 +163,13 @@ function MobileCmdGroup({ item }: { item: CmdGroupItem }) {
    summary line even when collapsed. */
 export function CmdGroupCard({ item }: { item: CmdGroupItem }) {
   const isMobile = useIsMobile();
-  if (isMobile) return <MobileCmdGroup item={item} />;
+  const collapsed = useCollapsedTools();
+  if (isMobile && !collapsed) return <MobileCmdGroup item={item} />;
   return <DesktopCmdGroup item={item} />;
 }
 
 function DesktopCmdGroup({ item }: { item: CmdGroupItem }) {
+  const collapsed = useCollapsedTools();
   const active = item.active;
   /* The operator's manual choice once the group has settled. `null` means "no
      manual choice yet", so the default (error → open, else collapsed) applies. */
@@ -172,15 +185,15 @@ function DesktopCmdGroup({ item }: { item: CmdGroupItem }) {
   const [collapsedOnce, setCollapsedOnce] = useState(false);
   if (wasActive !== active) {
     setWasActive(active);
-    if (wasActive && !active && !collapsedOnce) {
+    if (!collapsed && wasActive && !active && !collapsedOnce) {
       setCollapsedOnce(true);
       setManualOpen(false);
     }
   }
 
-  /* Active → always open; settled → the operator's choice, else the error
-     default. */
-  const open = active ? true : (manualOpen ?? item.hasErr);
+  /* The dock starts closed and always honors the operator. The board keeps
+     its live-open and settled-error defaults. */
+  const open = collapsed ? (manualOpen ?? false) : active ? true : (manualOpen ?? item.hasErr);
 
   const tools = Object.entries(item.byTool)
     .map(([tool, count]) => `${tool} ×${count}`)
@@ -199,7 +212,7 @@ function DesktopCmdGroup({ item }: { item: CmdGroupItem }) {
         /* While live the aggregate stays open: undo an operator's collapse
            attempt (React won't re-assert an unchanged `open` prop, so reset the
            DOM node directly) instead of recording it. */
-        if (active) {
+        if (active && !collapsed) {
           if (!next) e.currentTarget.open = true;
           return;
         }
@@ -212,6 +225,7 @@ function DesktopCmdGroup({ item }: { item: CmdGroupItem }) {
         }`}
       >
         <ChevronRight className="h-3.5 w-3.5 shrink-0 transition-transform motion-reduce:transition-none group-open/grp:rotate-90" aria-hidden />
+        {collapsed && item.calls.some(call => call.status === "run") ? <StatusIcon status="run" className="h-3.5 w-3.5 shrink-0" /> : null}
         <span className="flex min-w-0 flex-1 items-center gap-1 truncate text-secondary">
           {tr("render.actions", { count: item.calls.length })}
           {tools ? " · " + tools : ""}

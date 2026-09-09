@@ -5,6 +5,7 @@ import { Database } from "bun:sqlite";
 import { claudeTranscriptPath } from "@/lib/agent/transcript";
 import { RuntimeJournal } from "@/runtime-host/journal";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
+import { captureProcessIdentity } from "@/lib/processIdentity";
 function fixtureSessionId(index: number): string {
   return index < 6 ? `00000000-0000-4000-8000-${String(index).padStart(12, "0")}` : `history_${index}`;
 }
@@ -156,6 +157,46 @@ function fixture(failedCount: number, fullHistory = false) {
   }
   fs.writeFileSync(filename, JSON.stringify(data));
   const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "sqlite" });
+  const pendingProfile = emptyLaunchProfile({ cwd: directory, title: "Deferred startup launch" });
+  const pending = registry.beginSpawnRequest({
+    engine: "codex", cwd: directory, transport: "structured", accountId: "account-a",
+    accountPin: true, clientAttemptId: "original-deferred-startup-key", launchProfile: pendingProfile,
+  });
+  registry.queuePinnedSpawn(pending.receipt.launchId, {
+    version: 1, retryAt: new Date(Date.now() + 3_600_000).toISOString(), accountId: "account-a", locale: "en",
+    spec: { engine: "codex", command: "codex", cwd: directory, windowName: "deferred-startup", launchProfile: pendingProfile },
+    ["prompt"]: "Synthetic deferred work", imageRefs: [], parentArtifactPath: null, pipelineSourceConversationId: null,
+  }, "Synthetic account retry window");
+  registry.releaseStartingStructuredSpawn(pending.receipt.launchId, pending.receipt.admissionOwner!);
+  fs.writeFileSync(path.join(directory, "pending-spawn-before.json"), JSON.stringify({
+    [pending.receipt.launchId]: registry.readOnlySnapshot().receipts[pending.receipt.launchId],
+  }));
+  const externalKeys: string[] = [];
+  for (const [index, pid] of (JSON.parse(process.env.LLV_PACKAGED_EXTERNAL_PIDS ?? "[]") as number[]).entries()) {
+    const engine = index === 0 ? "codex" : "claude";
+    const artifactPath = path.join(directory, `external-${engine}.jsonl`);
+    fs.writeFileSync(artifactPath, "");
+    const conversation = registry.ensureConversation(engine, artifactPath, null);
+    const key = { engine, sessionId: conversation.generations.at(-1)!.id } as const;
+    registry.upsert({ ...structuredClone(Object.values(data.entries)[0]!), key, artifactPath,
+      status: "idle", pendingAction: null, claimOwner: null, claimEpoch: 0,
+      launchProfile: emptyLaunchProfile({ cwd: directory, mcpServers: [] }),
+      structuredHost: { kind: engine === "codex" ? "codex-app-server" : "claude-broker",
+        endpoint: "external:independent", process: null, eventCursor: 0, protocolVersion: "fixture",
+        writerClaimEpoch: 0, activeTurnRef: null, pendingAttention: [], activeFlags: [] },
+    });
+    const owner = captureProcessIdentity(pid);
+    const claimed = registry.claimStructuredHost(key, owner)!;
+    registry.setStructuredHostClaimed(key, { ...claimed.structuredHost!, process: owner }, "idle", claimed.claimOwner!, claimed.claimEpoch);
+    externalKeys.push(`${engine}:${key.sessionId}`);
+  }
+  fs.writeFileSync(path.join(directory, "external-before.json"), JSON.stringify(Object.fromEntries(
+    externalKeys.map((key) => [key, registry.readOnlySnapshot().entries[key]]),
+  )));
+  fs.writeFileSync(path.join(directory, "rehearsal-budgets.json"), JSON.stringify({
+    // Bound this rehearsal observation, not production serving readiness.
+    serving: 300_000, action: 360_000,
+  }));
   console.log(JSON.stringify({ counts: Object.fromEntries((["conversations", "entries", "receipts", "heldDeliveries"] as const).map(k => [k, Object.keys(data[k]).length])) }));
   registry.checkpointRollbackMirrorForDemotion();
   const journalFilename = path.join(directory, "runtime-events.sqlite");
@@ -170,7 +211,7 @@ function fixture(failedCount: number, fullHistory = false) {
   }
   for (let i = 0; i < 6; i++) journal.executeOperation({
     kind: "send", conversationId: `conversation_history_${i}`, idempotencyKey: `queued-startup-${i}`,
-    text: "Synthetic queued startup message", policy: "queue",
+    text: `Synthetic queued startup message queued-startup-${i}`, policy: "queue",
   });
   journal.close();
   // Retained legacy rows precede live-turn bounding. Recreate sizes with fresh

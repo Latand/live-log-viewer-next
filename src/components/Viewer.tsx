@@ -1133,7 +1133,7 @@ export function Viewer() {
       {/* #691 hoist: the owner of every conversation card's composer machinery.
           Cards publish a place; the composer's lifetimes (dictation, attachment
           object URLs, outbox) live here and survive the card unmounting mid-call. */}
-      <VoiceComposerHost />
+      <VoiceComposerHost files={allFiles} />
       {/* Staging instances (#659) announce themselves on every device; prod
           renders nothing. Top-center, clear of both corner anchors. */}
       <StagingBadge />

@@ -5,6 +5,7 @@ import type { FileEntry } from "@/lib/types";
 
 import { AgentControlStrip } from "../AgentControlStrip";
 import { LogFeed } from "../LogFeed";
+import { ToolDisclosurePolicy } from "../feed/toolDisclosure";
 import { DeadHostBanner } from "../runtime/DeadHostBanner";
 import { TmuxComposer } from "../TmuxComposer";
 import { useAgentCapabilities } from "../useAgentCapabilities";
@@ -32,16 +33,18 @@ export function OrchestratorConversation({ file, projectName }: { file: FileEntr
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col" data-orchestrator-conversation={file.conversationId ?? file.path}>
       {deadHost ? <DeadHostBanner file={file} /> : null}
-      <LogFeed
-        file={file}
-        showSvc={false}
-        lineFilter=""
-        onStatus={noop}
-        paused={false}
-        follow
-        setFollow={noop}
-        compact
-      />
+      <ToolDisclosurePolicy value="collapsed">
+        <LogFeed
+          file={file}
+          showSvc={false}
+          lineFilter=""
+          onStatus={noop}
+          paused={false}
+          follow
+          setFollow={noop}
+          compact
+        />
+      </ToolDisclosurePolicy>
       <AgentControlStrip file={file} />
       <TmuxComposer
         file={file}

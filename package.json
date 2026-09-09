@@ -1,6 +1,6 @@
 {
   "name": "agent-log-viewer",
-  "version": "1.0.3",
+  "version": "1.1.0",
   "bin": {
     "agent-log-viewer": "bin/cli.mjs",
     "agent-log-viewer-mcp": "bin/mcp-server.mjs"
@@ -46,7 +46,7 @@
     "entities": "^8.0.0",
     "highlight.js": "^11.11.1",
     "lucide-react": "^1.23.0",
-    "next": "16.3.2",
+    "next": "16.3.3",
     "pdfjs-dist": "^6.2.108",
     "qrcode": "^1.5.4",
     "qrcode-terminal": "^0.12.0",
@@ -82,10 +82,10 @@
     "url": "git+https://github.com/Latand/live-log-viewer-next.git"
   },
   "license": "MIT",
-  "patchedDependencies": {
-    "next@16.3.2": "patches/next-16.3.2.patch"
-  },
   "overrides": {
     "fast-uri": "^3.1.6"
+  },
+  "patchedDependencies": {
+    "next@16.3.3": "patches/next-16.3.3.patch"
   }
 }

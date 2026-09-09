@@ -202,3 +202,23 @@ test.each(["en", "uk"] as const)(
     flushSync(() => root.unmount());
   },
 );
+
+
+test("a hoisted superseded composer blocks Send without pane-supplied guards", async () => {
+  quietWire();
+  const prior = VIEWS["conv-499-dead"];
+
+  let mounted: Awaited<ReturnType<typeof renderInto>> | undefined;
+  try {
+    mounted = await renderInto(<TmuxComposer file={{ ...deadViewerFile(), supersededBy: { conversationId: "conversation_successor", path: null, at: "2026-09-08T07:00:00Z", reason: "replaced" } }} />);
+    const textarea = mounted.host.querySelector("textarea") as HTMLTextAreaElement;
+    const propsKey = Object.keys(textarea).find(key => key.startsWith("__reactProps$"))!;
+    const props = (textarea as unknown as Record<string, { onChange: (e: unknown) => void }>)[propsKey]!;
+    await act(async () => props.onChange({ target: { value: "Retain this draft" } }));
+    const send = mounted.host.querySelector('button[type="submit"]') as HTMLButtonElement;
+    expect(send.disabled || send.getAttribute("aria-disabled") === "true").toBe(true);
+  } finally {
+    if (mounted) await act(async () => mounted!.root.unmount());
+    VIEWS["conv-499-dead"] = prior;
+  }
+});

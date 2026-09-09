@@ -102,6 +102,7 @@ export interface RuntimeHostClient {
     options?: RuntimeTransitionOptions,
   ): Promise<RuntimeOperationResult>;
   requestViewerDeployment(request: ViewerDeploymentRequest): Promise<ViewerDeploymentReceipt>;
+  cancelViewerDeployment?(deploymentId: string): Promise<ViewerDeploymentStatus | null>;
   readViewerDeployment(deploymentId: string): Promise<ViewerDeploymentStatus | null>;
   admitMcpHealthProbe?(capability: string): Promise<boolean>;
 }
@@ -160,6 +161,7 @@ export class UnixRuntimeHostClient implements RuntimeHostClient {
     }) as Promise<RuntimeOperationResult>;
   }
   requestViewerDeployment(request: ViewerDeploymentRequest): Promise<ViewerDeploymentReceipt> { return this.call("viewer-deployment-request", request as unknown as Record<string, unknown>, this.deploymentTimeoutMs) as Promise<ViewerDeploymentReceipt>; }
+  cancelViewerDeployment(deploymentId: string): Promise<ViewerDeploymentStatus | null> { return this.call("viewer-deployment-cancel", { deploymentId }) as Promise<ViewerDeploymentStatus | null>; }
   readViewerDeployment(deploymentId: string): Promise<ViewerDeploymentStatus | null> { return this.call("viewer-deployment-read", { deploymentId }) as Promise<ViewerDeploymentStatus | null>; }
   admitMcpHealthProbe(capability: string): Promise<boolean> { return this.call("mcp-health-probe-admission", { capability }) as Promise<boolean>; }
 

@@ -49,6 +49,7 @@ interface ActivationTimer {
 }
 
 interface StructuredHostStartupOptions {
+  signal?: AbortSignal;
   schedule?: (callback: () => void, delayMs: number) => ActivationTimer;
   initialRetryMs?: number;
   maxRetryMs?: number;
@@ -304,9 +305,9 @@ export async function checkpointHotStateRollbackMirrorsForDemotion(): Promise<Ho
     import("@/lib/pipelines/store"),
     import("@/lib/workflows/store"),
   ]);
-  const flowRevision = flows.checkpointFlowRollbackMirrorForDemotion();
-  const pipelineRevisions = pipelines.checkpointPipelineRollbackMirrorsForDemotion();
-  const workflowRevision = workflows.checkpointWorkflowRollbackMirrorForDemotion();
+  const flowRevision = await flows.checkpointFlowRollbackMirrorForDemotionAsync();
+  const pipelineRevisions = await pipelines.checkpointPipelineRollbackMirrorsForDemotionAsync();
+  const workflowRevision = await workflows.checkpointWorkflowRollbackMirrorForDemotionAsync();
   return {
     flows: flowRevision,
     pipelines: pipelineRevisions.pipelines,
@@ -651,12 +652,18 @@ export async function runStructuredHostStartup(
   const attempt = async (): Promise<void> => {
     attempts += 1;
     try {
+      options.signal?.throwIfAborted();
       await adopt();
+      options.signal?.throwIfAborted();
       markStructuredHostStartupReady();
       resolveReady?.();
       if (attempts > 1) log("[structured hosts] startup adoption recovered", { attempts });
     } catch (error) {
       markStructuredHostStartupFailed();
+      if (options.signal?.aborted) {
+        rejectReady?.(error);
+        throw error;
+      }
       const classification = classifyStructuredHostStartupError(error);
       if (classification.disposition === "terminal") {
         log("[structured hosts] startup adoption failed", error, {
@@ -681,8 +688,16 @@ export async function runStructuredHostStartup(
     }
   };
 
+  const aborted = () => {
+    markStructuredHostStartupFailed();
+    // An executing attempt must settle before retirement can checkpoint.
+    if (retryPending) rejectReady?.(options.signal?.reason);
+  };
+  options.signal?.addEventListener("abort", aborted, { once: true });
+
   if (ready) {
-    await Promise.all([attempt(), ready]);
+    try { await Promise.all([attempt(), ready]); }
+    finally { options.signal?.removeEventListener("abort", aborted); }
     return;
   }
   await attempt();
@@ -707,6 +722,26 @@ export async function registerViewerRuntime(): Promise<void> {
   const hotStateDirectory = path.dirname(statePath("state.sqlite"));
   const releaseRevision = () => hotStateWriterRevision(hotStateDirectory);
   let activatedReleaseRevision: string | null = null;
+  const startupAbort = new AbortController();
+  let startup: Promise<void> | null = null;
+  const quiesceStartup = async () => {
+    startupAbort.abort(new Error("structured startup retired by release handover"));
+    await startup?.catch(() => {});
+  };
+  const assertStartupActive = () => {
+    // Observe durable retirement at every phase/batch boundary, including
+    // before the monitor's next poll and after an awaited transcript refresh.
+    if (!isCurrent() || readHotStateAuthority(hotStateDirectory)?.mode === "fencing") {
+      startupAbort.abort(new Error("structured startup lost release authority"));
+    }
+    startupAbort.signal.throwIfAborted();
+  };
+  const releaseHosts = async () => {
+    const { releaseUnpublishedStartupHostsForDemotion } = await import("@/lib/runtime/startup");
+    await releaseUnpublishedStartupHostsForDemotion();
+    const { releaseStructuredDeliveryHostsForDemotion } = await import("@/lib/runtime/structuredDeliveryController");
+    await releaseStructuredDeliveryHostsForDemotion();
+  };
   await activateViewerRuntimeWhenCurrent(async () => {
     const boundary = await establishHotStateCutoverBoundary(isCurrent);
     activatedReleaseRevision = boundary.authority?.releaseRevision ?? null;
@@ -721,11 +756,14 @@ export async function registerViewerRuntime(): Promise<void> {
       startWakatime: startWakatimeIntegrationIfEnabled,
       startStructuredHosts: structuredHostsEnabled()
         ? () => {
-            void (async () => {
+            startup = (async () => {
               const { adoptStructuredHostsAtStartup } = await import("@/lib/runtime/startup");
-              await runStructuredHostStartup(adoptStructuredHostsAtStartup, console.error, { waitUntilReady: true });
-            })()
-              .catch((error) => console.error("[structured hosts] background startup aborted", error));
+              await runStructuredHostStartup(
+                () => adoptStructuredHostsAtStartup({ assertActive: assertStartupActive }),
+                console.error, { waitUntilReady: true, signal: startupAbort.signal },
+              );
+            })();
+            void startup.catch((error) => console.error("[structured hosts] background startup aborted", error));
           }
         : null,
       startControllers: startCurrentReleaseControllers,
@@ -747,20 +785,25 @@ export async function registerViewerRuntime(): Promise<void> {
         : null;
     },
     onFenceRequested: async (request) => {
+      await quiesceStartup();
+      await releaseHosts();
       const revisions = await checkpointHotStateRollbackMirrorsForDemotion();
       const { agentRegistry } = await import("@/lib/agent/registry");
       agentRegistry().checkpointRollbackMirrorForDemotion();
       acknowledgeHotStateFence(hotStateDirectory, request, revisions);
     },
-    onDemoted: ({ fenced }) => completeViewerReleaseDemotion(async () => {
-      if (fenced) return;
-      const authority = readHotStateAuthority(hotStateDirectory);
-      if (!activatedReleaseRevision
-        || authority?.releaseRevision !== activatedReleaseRevision
-        || (authority.mode !== "sqlite" && authority.mode !== "fencing")) return;
-      const { agentRegistry } = await import("@/lib/agent/registry");
-      await checkpointHotStateRollbackMirrorsForDemotion();
-      agentRegistry().checkpointRollbackMirrorForDemotion();
-    }),
+    onDemoted: async ({ fenced }) => {
+      await quiesceStartup();
+      await completeViewerReleaseDemotion(async () => {
+        if (fenced) return;
+        const authority = readHotStateAuthority(hotStateDirectory);
+        if (!activatedReleaseRevision
+          || authority?.releaseRevision !== activatedReleaseRevision
+          || (authority.mode !== "sqlite" && authority.mode !== "fencing")) return;
+        const { agentRegistry } = await import("@/lib/agent/registry");
+        await checkpointHotStateRollbackMirrorsForDemotion();
+        agentRegistry().checkpointRollbackMirrorForDemotion();
+      }, undefined, undefined, releaseHosts);
+    },
   });
 }

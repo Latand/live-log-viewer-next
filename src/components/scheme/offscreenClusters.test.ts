@@ -73,7 +73,7 @@ describe("offscreen cluster chips", () => {
       cluster("top", 450, -700),
       cluster("bottom", 450, 1_200),
     ], cam, vp);
-    expect(Object.fromEntries(chips.visible.map((chip) => [chip.cluster.key, chip.edge]))).toEqual({
+    expect(Object.fromEntries([...chips.visible, ...chips.overflow].map((chip) => [chip.cluster.key, chip.edge]))).toEqual({
       bottom: "bottom",
       left: "left",
       right: "right",
@@ -85,8 +85,8 @@ describe("offscreen cluster chips", () => {
     const input = [cluster("inside", 100, 100), ...Array.from({ length: 7 }, (_, index) => cluster(`r${index}`, 1_300 + index * 20, 200, 7 - index))];
     const chips = offscreenClusterChips(input, cam, vp, 4);
     const represented = [...chips.visible, ...chips.overflow].map((item) => item.cluster.key);
-    expect(chips.visible).toHaveLength(4);
-    expect(chips.overflow).toHaveLength(3);
+    expect(chips.visible).toHaveLength(1);
+    expect(chips.overflow).toHaveLength(6);
     expect(new Set(represented).size).toBe(7);
     expect(represented).not.toContain("inside");
   });
@@ -546,4 +546,11 @@ describe("fixed-chrome keep-out (issue #474: chips never paint over the subagent
     expect(chips.visible.map((chip) => chip.cluster.key)).toEqual(["right-task"]);
     expect(chips.overflow).toHaveLength(0);
   });
+});
+
+test("overlapping continuation labels fold into the complete overflow list", () => {
+  const clusters: BoardCluster[] = Array.from({length:4},(_,index)=>({key:`worker-${index}`,label:`Related worker ${index}`,rect:{x:400+index,y:2000,w:100,h:100},priority:1,color:"blue"}));
+  const partition=offscreenClusterChips(clusters,{x:0,y:0,z:1},{w:1000,h:800},4,[],()=>200);
+  expect(partition.visible.length).toBe(1);
+  expect(partition.overflow.length).toBe(3);
 });

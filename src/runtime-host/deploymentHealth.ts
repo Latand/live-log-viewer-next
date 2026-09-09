@@ -34,7 +34,9 @@ export function viewerHealthRequestPlan(endpoint: string, token: string | null):
     authenticated: token
       ? { url: `${endpoint}/`, headers: authenticatedHeaders }
       : null,
-    unauthorized: token ? { url: `${endpoint}/`, headers: remoteHeaders } : null,
+    // A trusted loopback gateway vouches for loopback Host values. Exercise
+    // its untrusted Host path so this refusal still reaches the Viewer gate.
+    unauthorized: token ? { url: `${endpoint}/`, headers: { ...remoteHeaders, host: "viewer-health.invalid" } } : null,
     capability: {
       url: `${endpoint}/api/runtime/deployments/capabilities/v1`,
       headers: authenticatedHeaders,
@@ -71,7 +73,14 @@ export function viewerDeploymentRegistryBackendMode(
 export function viewerDeploymentReleaseReady(status: number, body: string): boolean {
   if (!hasViewerDeploymentCapability(status, body)) return false;
   try {
-    return (JSON.parse(body) as { releaseReady?: unknown }).releaseReady !== false;
+    const capability = JSON.parse(body) as { releaseReady?: unknown; structuredHostStartup?: unknown };
+    if (capability.releaseReady === false) return false;
+    // HTTP serving can precede recovery. A promoted deployment must await the
+    // actual startup result before it can retire its rollback generation.
+    if (capability.structuredHostStartup !== undefined && capability.structuredHostStartup !== null) {
+      return viewerDeploymentStructuredHostStartup(status, body)?.state === "ready";
+    }
+    return true;
   } catch {
     return false;
   }
@@ -243,6 +252,10 @@ export interface ViewerReadinessProbe {
   maxAttempts?: number;
   delayMs?: number;
   now?(): number;
+  /** null waits until readiness, cancellation, or positive container exit. */
+  timeoutMs?: number | null;
+  signal?: AbortSignal;
+  reportPending?(detail: string): void;
 }
 
 function unavailable(endpoint: string, state: Exclude<ViewerCandidateContainerState, "running">): ViewerHealthEvidence {
@@ -260,8 +273,12 @@ function unavailable(endpoint: string, state: Exclude<ViewerCandidateContainerSt
 }
 
 export async function waitForViewerReadiness(options: ViewerReadinessProbe): Promise<ViewerHealthEvidence> {
-  const maxAttempts = Math.min(Math.max(options.maxAttempts ?? 30, 1), 120);
   const delayMs = Math.min(Math.max(options.delayMs ?? 1_000, 0), 10_000);
+  const unbounded = options.timeoutMs === null;
+  const timeoutMs = options.timeoutMs == null ? null : Math.min(Math.max(options.timeoutMs, 1), 300_000);
+  const maxAttempts = unbounded ? Infinity : timeoutMs === null
+    ? Math.min(Math.max(options.maxAttempts ?? 30, 1), 120)
+    : Math.ceil(timeoutMs / Math.max(delayMs, 1)) + 1;
   const sleep = options.sleep ?? ((delay) => new Promise<void>((resolve) => setTimeout(resolve, delay)));
   const now = options.now ?? (() => Date.now());
   const startedAt = now();
@@ -269,18 +286,38 @@ export async function waitForViewerReadiness(options: ViewerReadinessProbe): Pro
   let firstDetail: string | null = null;
   let attempts = 0;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    const state = await options.inspect();
+    options.signal?.throwIfAborted();
+    if (attempt > 1 && timeoutMs !== null && now() - startedAt >= timeoutMs) break;
+    let state: ViewerCandidateContainerState;
+    try { state = await options.inspect(); }
+    catch (error) {
+      if (!unbounded) throw error;
+      options.reportPending?.(`candidate inspection unavailable: ${probeExcerpt(error instanceof Error ? error.message : "unknown error", DETAIL_CHARS)}`);
+      await sleep(delayMs);
+      continue;
+    }
     if (state !== "running") {
+      if (unbounded) return unavailable(options.endpoint, state);
       return {
         ...unavailable(options.endpoint, state),
         readiness: readiness({ attempts, maxAttempts, delayMs, elapsedMs: now() - startedAt, firstDetail, lastDetail: last?.detail ?? null }),
       };
     }
     attempts = attempt;
-    last = await options.probe();
+    try { last = await options.probe(); }
+    catch (error) {
+      if (!unbounded) throw error;
+      options.reportPending?.(`candidate probe unavailable: ${probeExcerpt(error instanceof Error ? error.message : "unknown error", DETAIL_CHARS)}`);
+      await sleep(delayMs);
+      continue;
+    }
+    options.signal?.throwIfAborted();
     if (last.ok) return last;
     if (attempt === 1) firstDetail = last.detail ?? null;
-    if (attempt < maxAttempts) await sleep(delayMs);
+    if (attempt < maxAttempts) {
+      const remaining = timeoutMs === null ? delayMs : Math.max(0, timeoutMs - (now() - startedAt));
+      await sleep(Math.min(delayMs, remaining));
+    }
   }
   const record = readiness({
     attempts, maxAttempts, delayMs, elapsedMs: now() - startedAt, firstDetail, lastDetail: last?.detail ?? null,

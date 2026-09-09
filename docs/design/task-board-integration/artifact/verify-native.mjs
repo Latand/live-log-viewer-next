@@ -1,0 +1,90 @@
+
+import fs from 'node:fs';import path from 'node:path';import assert from 'node:assert/strict';
+import {browser,pageFor,snapshot,focus,zoom,out} from './revision3-browser.mjs';
+const report={checks:[],errors:[]};const wait=p=>p.waitForTimeout(250);
+try{
+ const p=await pageFor();await focus(p,'index');await wait(p);
+ const pane=p.locator('[data-native-pane="index"]'),input=pane.locator('textarea').first(),feed=pane.locator('[data-log-feed-scroller]');
+ await input.fill('Retained draft with selection');await input.evaluate(e=>e.setSelectionRange(3,12));
+ // Retain exact content state while background updates append past the anchor.
+ await p.evaluate(()=>{for(let i=0;i<65;i++)window.__fixtureSource.append('/fixture/conversations/index.jsonl','assistant','Scrollable source message '+i);});
+ await wait(p);await feed.hover();await p.mouse.wheel(0,-700);await wait(p);
+ const scroll=await feed.evaluate(e=>({top:e.scrollTop,first:[...e.querySelectorAll('[data-feed-key]')].find(x=>x.getBoundingClientRect().bottom>e.getBoundingClientRect().top)?.dataset.feedKey,offset:(()=>{const r=[...e.querySelectorAll('[data-feed-key]')].find(x=>x.getBoundingClientRect().bottom>e.getBoundingClientRect().top);return r?(r.getBoundingClientRect().top-e.getBoundingClientRect().top)/(e.getBoundingClientRect().height/e.offsetHeight):0;})()}));
+ const saved=await snapshot(p);await p.evaluate(()=>window.__boardPreview.camera({...window.__boardPreview.snapshot().camera,x:-10000}));await wait(p);
+ const counts=await p.evaluate(()=>({native:window.__nativeCounters,view:window.__viewCounters,feed:window.__feedInputs}));
+ await p.evaluate(()=>{for(let i=0;i<100;i++)window.__fixtureSource.append('/fixture/conversations/index.jsonl','assistant','Latest hidden native message '+i);});
+ await wait(p);assert.deepEqual(await p.evaluate(()=>({native:window.__nativeCounters,view:window.__viewCounters,feed:window.__feedInputs})),counts);
+ await p.evaluate(c=>window.__boardPreview.camera(c),saved.camera);await wait(p);
+ assert.equal(await input.inputValue(),'Retained draft with selection');
+ assert.deepEqual(await input.evaluate(e=>[e.selectionStart,e.selectionEnd]),[3,12]);
+ assert.equal(await feed.getAttribute('data-tail-line-count'),'169');
+ const returned=await feed.evaluate(e=>({top:e.scrollTop,first:[...e.querySelectorAll('[data-feed-key]')].find(x=>x.getBoundingClientRect().bottom>e.getBoundingClientRect().top)?.dataset.feedKey,offset:(()=>{const r=[...e.querySelectorAll('[data-feed-key]')].find(x=>x.getBoundingClientRect().bottom>e.getBoundingClientRect().top);return r?(r.getBoundingClientRect().top-e.getBoundingClientRect().top)/(e.getBoundingClientRect().height/e.offsetHeight):0;})()}));
+ assert.equal(returned.first,scroll.first);assert(Math.abs(returned.offset-scroll.offset)<2);
+ report.checks.push({name:'hidden backlog draft scroll',before:scroll,after:returned,lines:169});
+ await focus(p,'repair');await wait(p);await p.getByRole('button',{name:'Return to previous view',exact:true}).click();await wait(p);
+ assert.equal((await snapshot(p)).reader,'index');assert.equal(await input.inputValue(),'Retained draft with selection');
+ assert.deepEqual((await snapshot(p)).camera,saved.camera);report.checks.push({name:'Return camera and draft',pass:true});
+ await pane.getByRole('button',{name:'Pin position',exact:true}).click();await wait(p);assert((await snapshot(p)).pins.index);
+ await pane.getByRole('button',{name:'Release automatic position',exact:true}).click();await wait(p);assert(!(await snapshot(p)).pins.index);
+ const header=await pane.locator('header').first().boundingBox(),dragCamera=(await snapshot(p)).camera;
+ await p.mouse.move(header.x+8,header.y+8);await p.mouse.down();await p.mouse.move(header.x+32,header.y+26,{steps:4});await p.mouse.up();await wait(p);
+ assert((await snapshot(p)).pins.index);assert.deepEqual((await snapshot(p)).camera,dragCamera);
+ await pane.getByRole('button',{name:'Release automatic position',exact:true}).click();await wait(p);
+ report.checks.push({name:'pin release and native header drag',pass:true});
+ await p.evaluate(()=>window.__boardPreview.expand('index'));await wait(p);assert.equal(await p.locator('[data-eligible="true"]').count(),1);
+ assert.equal(await input.inputValue(),'Retained draft with selection');await input.fill('Full-window draft retained');
+ await p.screenshot({path:path.join(out,'native-full-window.png')});await p.keyboard.press('Escape');await wait(p);
+ assert.equal(await input.inputValue(),'Full-window draft retained');assert.equal((await snapshot(p)).expanded,null);
+ assert.equal(await p.evaluate(()=>window.__nativeCounters['/fixture/conversations/index.jsonl'].mounts),1);
+ report.checks.push({name:'one full-window content owner and draft',mounts:1,pass:true});
+ // Native keyboard isolation.
+ const beforeKeys=(await snapshot(p)).camera;await input.focus();await p.keyboard.type('p r - +');assert.deepEqual((await snapshot(p)).camera,beforeKeys);
+ // Native Send crosses a controlled durable fixture while the view sleeps.
+ await p.evaluate(()=>window.__sampleTransport.manualDelivery(true));
+ await input.fill('One original delivery operation');await input.press('Enter');
+ await p.waitForFunction(()=>window.__sampleTransport.operations().length===1);
+ const op=await p.evaluate(()=>window.__sampleTransport.operations()[0]);
+ assert.equal(op.state,'pending');
+ await p.evaluate(()=>window.__boardPreview.camera({...window.__boardPreview.snapshot().camera,x:-10000}));await p.waitForTimeout(400);
+ const deliveryCounts=await p.evaluate(()=>({native:window.__nativeCounters,view:window.__viewCounters}));
+ await p.evaluate(key=>{window.__sampleTransport.settle(key,'accepted');window.__sampleTransport.settle(key,'unknown');window.__sampleTransport.settle(key,'terminal');window.__sampleTransport.settle(key,'terminal');},op.key);
+ await p.waitForTimeout(11000);
+ assert.deepEqual(await p.evaluate(()=>({native:window.__nativeCounters,view:window.__viewCounters})),deliveryCounts);
+ const settled=await p.evaluate(()=>window.__sampleTransport.operations()[0]);assert.equal(settled.key,op.key);assert.equal(settled.attempts,1);assert.equal(settled.state,'terminal');
+ await p.evaluate(c=>window.__boardPreview.camera(c),beforeKeys);await wait(p);
+ await feed.hover();await p.mouse.wheel(0,50000);await wait(p);
+ assert.equal(await feed.getByText('One original delivery operation',{exact:true}).count(),1);
+ assert.equal(await feed.getByText('Sample reply: your message is here in the preview. No agent was contacted.',{exact:true}).count(),1);
+ assert.equal((await p.evaluate(()=>window.__sampleTransport.operations())).length,1);
+ report.checks.push({name:'pending accepted unknown terminal hidden send',originalKey:op.key,attempts:settled.attempts,feedCopies:1,hiddenCallbackDelta:0});
+ // Pointer and both keyboard activation paths on task cards.
+ await p.evaluate(()=>window.__boardPreview.fit());await wait(p);
+ const task=p.locator('[data-map-node="search"]');
+ for(const key of ['click','Enter','Space']){if(key==='click')await task.click();else{await task.focus();await task.press(key);}await wait(p);assert.equal((await snapshot(p)).context,'search');await p.getByRole('button',{name:'Close details',exact:true}).click();}
+ report.checks.push({name:'task click Enter Space',pass:true});
+ await focus(p,'index');await wait(p);const cameraBeforeWheel=(await snapshot(p)).camera;
+ await feed.hover();await p.keyboard.down('Control');await p.mouse.wheel(0,25);await p.keyboard.up('Control');await wait(p);
+ assert((await snapshot(p)).camera.z<cameraBeforeWheel.z);
+ await zoom(p,.53);await wait(p);await zoom(p,.52);await wait(p);await zoom(p,.53);await wait(p);
+ assert.equal(await p.locator('[data-eligible="true"]').count(),1);
+ report.checks.push({name:'native Ctrl wheel and threshold oscillation',pass:true});
+ await p.evaluate(()=>window.__boardPreview.fit());await wait(p);
+ for(let i=0;i<14;i++)await p.getByRole('button',{name:'Zoom out',exact:true}).click();
+ assert.equal((await snapshot(p)).camera.z,.07);
+ await p.getByRole('button',{name:'Fit graph',exact:true}).click();await wait(p);
+ await p.getByRole('button',{name:'Preview options',exact:true}).click();
+ const beforeArrival=(await snapshot(p)).camera;
+ await p.getByRole('button',{name:'Add a related worker',exact:true}).click();await wait(p);
+ assert.deepEqual((await snapshot(p)).camera,beforeArrival);
+ assert((await snapshot(p)).nodes.some(n=>n.id==='new-worker'));
+ report.checks.push({name:'minus clamp Fit arrival camera',pass:true});
+ await p.getByRole('button',{name:'Close details',exact:true}).click();
+ await focus(p,'index');await wait(p);const keyboardCamera=(await snapshot(p)).camera;
+ assert.equal(await p.locator('[data-map-node="drafts"]').count(),0,'offscreen summary must not retain a focus target');
+ await p.locator('[data-native-pane="index"] textarea').first().focus();await p.keyboard.press('Tab');await wait(p);
+ assert.deepEqual(await p.locator('[data-board-preview]').evaluate(e=>[e.scrollLeft,e.scrollTop]),[0,0]);
+ assert.deepEqual((await snapshot(p)).camera,keyboardCamera);
+ report.checks.push({name:'culled offscreen summaries and native keyboard focus preserve camera',pass:true});
+ report.errors=p.errors;assert.equal(report.errors.length,0);
+}finally{fs.writeFileSync(path.join(out,'native-verification.json'),JSON.stringify(report,null,2));await browser.close();}
+console.log(JSON.stringify(report));

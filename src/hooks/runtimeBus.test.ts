@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 
-import type { RuntimeSnapshot } from "@/components/runtime/runtimeModel";
+import { deriveSessionState, type RuntimeSnapshot } from "@/components/runtime/runtimeModel";
 import { capabilitiesFor } from "@/components/agentCapabilities";
 import { RUNTIME_PLANE_ABSENT } from "@/lib/runtime/flags";
 import type { FileEntry } from "@/lib/types";
@@ -176,7 +176,7 @@ interface Harness {
   clock: Clock;
   sources: FakeEventSource[];
   setSnapshot: (s: RuntimeSnapshot) => void;
-  deferNextFetch: () => { resolveSnapshot: (s: RuntimeSnapshot) => void };
+  deferNextFetch: () => { resolveSnapshot: (s: RuntimeSnapshot) => void; resolveError: (status: number, body: unknown) => void };
   failFetch: (fail: boolean) => void;
   /** Answer every snapshot fetch with a non-ok status and body, as the routes do. */
   serveError: (status: number, body: unknown) => void;
@@ -229,6 +229,7 @@ function harness(): Harness {
       });
       return {
         resolveSnapshot: (s) => resolveFetch({ ok: true, status: 200, json: () => Promise.resolve(s) } as unknown as Response),
+        resolveError: (status, body) => resolveFetch({ ok: false, status, json: () => Promise.resolve(body) } as unknown as Response),
       };
     },
     failFetch: (fail) => (shouldFail = fail),
@@ -527,6 +528,87 @@ describe("runtimeBus reconnect", () => {
     expect(h.bus.getState().connection).toBe("reconnecting");
     h.sources[1]!.named("heartbeat", { publishedSeq: 101 });
     expect(h.bus.getState().connection).toBe("live");
+  });
+
+  test("reconnect repairs a missing session without requiring manual Re-check or new events", async () => {
+    h.setSnapshot(snapshot(100, { sessions: [] }));
+    h.bus.start(); await flush(); h.sources[0]!.open();
+    const target = file({ engine: "codex", fmt: "codex", conversationId: "conv_a", proc: "running" });
+    expect(capabilitiesFor(target, null, { runtimeEnabled: true }).surface).toBe("unresolved");
+    const manual = harness();
+    manual.setSnapshot(snapshot(100, { sessions: [] })); manual.bus.start(); await flush();
+    manual.setSnapshot(snapshot(100)); expect(await manual.bus.refresh()).toBe(true);
+    expect(manual.bus.getState().store.sessions.conv_a?.host).toBe("hosted");
+    // Projection repair can share the journal cursor: no event replay can add it.
+    h.setSnapshot(snapshot(100));
+    h.sources[0]!.error(); h.clock.advance(600); await flush();
+    expect(h.bus.getState().store.sessions.conv_a?.host).toBe("hosted");
+    expect(h.sources[1]!.url).toContain("after=100");
+    const session = h.bus.getState().store.sessions.conv_a!;
+    expect(capabilitiesFor(target, { session, uiState: deriveSessionState(session, false), attentions: [], receipts: session.recentReceipts, legacy: false, structuredControlsEnabled: true }, { runtimeEnabled: true }).controls.send.state).toBe("enabled");
+  });
+
+  test("reconnect installs the complete newer snapshot and resumes beyond it", async () => {
+    const before = snapshot(100);
+    h.setSnapshot({ ...before, sessions: [{ ...before.sessions[0]!, host: "dead" }] });
+    h.bus.start(); await flush(); h.sources[0]!.open();
+    const receipt = { operationId: "original-operation", idempotencyKey: "original-key", conversationId: "conv_a", kind: "send" as const, status: "delivered" as const, revision: 3, at: "2026-01-01T00:00:00Z", text: "Original payload", turnId: "active-turn" };
+    const fresh = snapshot(200, { filesRevision: 4, recentOperations: [receipt], sessions: [{ ...before.sessions[0]!, host: "hosted", revision: 5, turn: "running", activeTurnId: "active-turn", recentReceipts: [receipt] }] });
+    const revisions: number[] = []; h.bus.subscribeFilesRevision(value => revisions.push(value));
+    h.setSnapshot(fresh); h.sources[0]!.error(); h.clock.advance(600); await flush();
+    expect(h.bus.getState().store.cursor).toBe(200);
+    expect(h.sources[1]!.url).toContain("after=200");
+    expect(h.bus.getState().store.sessions.conv_a).toMatchObject({ host: "hosted", revision: 5, turn: "running", activeTurnId: "active-turn", recentReceipts: [receipt] });
+    expect(h.bus.getState().store.operations[receipt.operationId]).toEqual(receipt);
+    expect(revisions).toEqual([4]);
+    h.sources[1]!.message(sessionEvent(201, 6, "idle"));
+    expect(h.bus.getState().store.sessions.conv_a?.turn).toBe("idle");
+  });
+
+  test("a delayed reconnect snapshot cannot replace a newer manual projection at the same cursor", async () => {
+    h.bus.start(); await flush(); h.sources[0]!.open();
+    h.sources[0]!.error(); const slow = h.deferNextFetch(); h.clock.advance(600); await flush();
+    const fresh = snapshot(100, { sessions: [{ ...snapshot(100).sessions[0]!, revision: 5, turn: "running", activeTurnId: "new-turn" }] });
+    h.setSnapshot(fresh); expect(await h.bus.refresh()).toBe(true);
+    slow.resolveSnapshot(snapshot(100, { structuredHostsEnabled: false })); await flush();
+    expect(h.bus.getState().structuredHostsEnabled).toBe(true);
+    expect(h.bus.getState().store.sessions.conv_a?.activeTurnId).toBe("new-turn");
+    expect(h.bus.getState().store.sessions.conv_a?.revision).toBe(5);
+    expect(h.sources[1]!.url).toContain("after=100");
+  });
+
+  test("a failed reconnect read preserves unresolved state until a successful automatic retry", async () => {
+    h.setSnapshot(snapshot(100, { sessions: [] }));
+    h.bus.start(); await flush(); h.sources[0]!.open();
+    h.failFetch(true); h.sources[0]!.error(); h.clock.advance(600); await flush();
+    expect(h.bus.getState().store.sessions.conv_a).toBeUndefined();
+    expect(h.bus.getState().connection).toBe("reconnecting");
+    expect(h.sources).toHaveLength(1);
+    h.failFetch(false); h.setSnapshot(snapshot(100)); h.clock.advance(1100); await flush();
+    expect(h.bus.getState().store.sessions.conv_a?.host).toBe("hosted");
+    expect(h.sources).toHaveLength(2);
+  });
+
+  test("a late plane-absent response cannot invalidate a successful concurrent projection refresh", async () => {
+    h.bus.start(); await flush(); h.sources[0]!.open();
+    h.sources[0]!.error(); const slow = h.deferNextFetch(); h.clock.advance(600); await flush();
+    expect(await h.bus.refresh()).toBe(true);
+    slow.resolveError(503, { code: RUNTIME_PLANE_ABSENT }); await flush();
+    expect(h.bus.getState().enabled).toBe(true);
+    expect(h.bus.getState().structuredHostsEnabled).toBe(true);
+    expect(h.sources[1]!.url).toContain("after=100");
+  });
+
+  test("reconnect retains authoritative dead-host evidence and ignores completions after stop", async () => {
+    h.bus.start(); await flush(); h.sources[0]!.open();
+    h.setSnapshot(snapshot(200, { sessions: [{ ...snapshot(200).sessions[0]!, host: "dead", revision: 5 }] }));
+    h.sources[0]!.error(); h.clock.advance(600); await flush();
+    expect(h.bus.getState().store.sessions.conv_a?.host).toBe("dead");
+    h.sources[1]!.error(); const slow = h.deferNextFetch(); h.clock.advance(1100); await flush();
+    h.bus.stop(); slow.resolveSnapshot(snapshot(300)); await flush();
+    expect(h.bus.getState().enabled).toBe(false);
+    expect(h.bus.getState().store.sessions.conv_a).toBeUndefined();
+    expect(h.sources).toHaveLength(2);
   });
 
   test("a tab refreshes the structured-host gate after a server restart", async () => {

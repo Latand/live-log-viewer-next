@@ -11,6 +11,7 @@ import type { SpawnAccountAdmission } from "@/lib/agent/accountLiveness";
 import { effectiveClaudePermissionMode, type AgentEngine, type ResumeSpec } from "@/lib/agent/cli";
 import { identityMaterializationFence, type AgentRegistry, type AgentRegistryEntry, type ProcessIdentity, type RegistryFile, type SpawnReceipt, type StructuredHostColumns } from "@/lib/agent/registry";
 import { sessionKey, sessionKeyId, type SessionKey } from "@/lib/agent/sessionKey";
+import { forEachStartupBatch } from "./startupWork";
 import type { SpawnResponse } from "@/lib/agent/spawnResponse";
 import { prepareManagedClaudeSpawnHome } from "@/lib/agent/spawnPolicy";
 import { claudeTranscriptPath } from "@/lib/agent/transcript";
@@ -433,6 +434,7 @@ export async function reconcileStructuredSpawnReplay(
         receipts. Pending launches always read fresh state below. Live writer
         claims are still merged atomically by recoverStructuredSpawnFromEvidence. */
     failedReceiptSnapshot?: () => Promise<RuntimeSnapshot>;
+    assertActive?: () => void;
   } = {},
 ): Promise<SpawnReceipt & { initialMessage: "pending" | "queued" | "delivered" | "failed" }> {
   const current = registry.readOnlySnapshot().receipts[launchId];
@@ -450,6 +452,7 @@ export async function reconcileStructuredSpawnReplay(
       ? options.failedReceiptSnapshot()
       : client.snapshot()).catch(() => null),
   ]);
+  options.assertActive?.();
   let operation = initialOperation;
   let effectHistoryUnavailable = false;
   if (!operation && current.state === "path-pending" && current.artifactPath) {
@@ -674,6 +677,7 @@ function queuedPinnedSpawnForReceipt(receipt: SpawnReceipt): NonNullable<SpawnRe
 }
 
 export interface StructuredSpawnRecoveryOptions {
+  assertActive?: () => void;
   now?: () => number;
   timeoutMs?: number;
   actuationCap?: number;
@@ -857,6 +861,7 @@ export async function terminalizeStaleStructuredSpawns(
   const recovered: string[] = [];
   let examined = 0;
   for (const receipt of Object.values(snapshot.receipts)) {
+    options.assertActive?.();
     if (examined >= actuationCap) break;
     if (receipt.state === "completed" || receipt.state === "failed" || receipt.state === "conflicted") continue;
     const queued = queuedPinnedSpawnForReceipt(receipt);
@@ -907,7 +912,7 @@ export async function terminalizeStaleStructuredSpawns(
     if (!client) continue;
     examined += 1;
     try {
-      const reconciled = await reconcile(receipt.launchId, registry, client, { now, timeoutMs });
+      const reconciled = await reconcile(receipt.launchId, registry, client, { now, timeoutMs, assertActive: options.assertActive });
       if (reconciled.state === "failed") terminalized.push(receipt.launchId);
       else if (reconciled.state === "completed") recovered.push(receipt.launchId);
     } catch (error) {
@@ -1120,12 +1125,15 @@ export async function recoverPendingStructuredSpawns(
   client: RuntimeHostClient,
   options: StructuredSpawnRecoveryOptions = {},
 ): Promise<void> {
+  const assertActive = options.assertActive ?? (() => {});
+  assertActive();
   /* Boot reconciliation shares the reaper's bounded contract so placeholders
      admitted by an older process settle before startup replay considers them. */
   await terminalizeStaleStructuredSpawns(registry, client, options);
   const spawnEffects = new Map<string, Record<string, unknown>>();
   let afterEventSeq = 0;
   while (true) {
+    assertActive();
     const batch = await client.effectBatch(["runtime.spawn"], afterEventSeq);
     for (const effect of batch) {
       const operationId = typeof effect.payload.operationId === "string" ? effect.payload.operationId : null;
@@ -1145,19 +1153,49 @@ export async function recoverPendingStructuredSpawns(
   let failedReceiptRuntime: Promise<RuntimeSnapshot> | undefined;
   const failedReceiptSnapshot = () => failedReceiptRuntime ??= client.snapshot();
 
-  let registeringConversationIds: Set<string> | null = null;
-  const registeringSessions = async (): Promise<Set<string>> => {
-    if (!registeringConversationIds) {
-      const runtime = await client.snapshot().catch(() => null);
-      registeringConversationIds = new Set((runtime?.sessions ?? [])
-        .filter((session) => session.host === "registering")
-        .map((session) => session.conversationId));
-    }
-    return registeringConversationIds;
-  };
+  let registeringConversationIds: Promise<Set<string>> | undefined;
+  const registeringSessions = (): Promise<Set<string>> => registeringConversationIds ??= (async () => {
+    const runtime = await client.snapshot().catch(() => null);
+    return new Set((runtime?.sessions ?? [])
+      .filter((session) => session.host === "registering")
+      .map((session) => session.conversationId));
+  })();
 
   const snapshot = registry.readOnlySnapshot();
+  const failedGroups = new Map<string, SpawnReceipt[]>();
   for (const receipt of Object.values(snapshot.receipts)) {
+    if (receipt.state !== "failed" || receipt.transport === "tmux") continue;
+    const id = registry.canonicalConversationId(receipt.conversationId);
+    const group = failedGroups.get(id) ?? [];
+    group.push(receipt);
+    failedGroups.set(id, group);
+  }
+  await forEachStartupBatch([...failedGroups.values()], async (receipts) => {
+    for (const receipt of receipts) {
+      assertActive();
+      await reconcileFailed(receipt);
+    }
+  }, assertActive);
+  async function reconcileFailed(receipt: SpawnReceipt): Promise<void> {
+    const reconciled = await reconcileStructuredSpawnReplay(receipt.launchId, registry, client, { failedReceiptSnapshot, assertActive });
+    if (reconciled.state === "completed") return;
+    /* The durable launch receipt failed, but its runtime spawn operation can
+       survive as queued when the terminal transition itself timed out. The
+       placeholder session then sits registering/unknown until someone closes
+       the operation; the journal retires the placeholder on that transition. */
+    if (!(await registeringSessions()).has(receipt.conversationId)) return;
+    const operation = await client.operationStatus(receipt.launchId);
+    const status = operation?.receipt.status;
+    if (operation
+      && operation.receipt.conversationId === receipt.conversationId
+      && (status === "pending" || status === "queued" || status === "delivering")) {
+      await client.transitionOperation(receipt.launchId, "failed", {
+        reason: (receipt.error ?? "structured spawn failed before runtime acknowledgement").slice(0, 240),
+      });
+    }
+  }
+  for (const receipt of Object.values(snapshot.receipts)) {
+    assertActive();
     const effect = spawnEffects.get(receipt.launchId);
     /* Re-validate before replay (#1071): a queued launch the previous
        generation accepted is not replayed verbatim by its successor. One whose
@@ -1181,25 +1219,7 @@ export async function recoverPendingStructuredSpawns(
       registry.failStructuredSpawn(receipt.launchId, supersededReason);
       continue;
     }
-    if (receipt.state === "failed" && receipt.transport !== "tmux") {
-      const reconciled = await reconcileStructuredSpawnReplay(receipt.launchId, registry, client, { failedReceiptSnapshot });
-      if (reconciled.state === "completed") continue;
-      /* The durable launch receipt failed, but its runtime spawn operation can
-         survive as queued when the terminal transition itself timed out. The
-         placeholder session then sits registering/unknown until someone closes
-         the operation; the journal retires the placeholder on that transition. */
-      if (!(await registeringSessions()).has(receipt.conversationId)) continue;
-      const operation = await client.operationStatus(receipt.launchId);
-      const status = operation?.receipt.status;
-      if (operation
-        && operation.receipt.conversationId === receipt.conversationId
-        && (status === "pending" || status === "queued" || status === "delivering")) {
-        await client.transitionOperation(receipt.launchId, "failed", {
-          reason: (receipt.error ?? "structured spawn failed before runtime acknowledgement").slice(0, 240),
-        });
-      }
-      continue;
-    }
+    if (receipt.state === "failed" && receipt.transport !== "tmux") continue;
     if (queuedPinnedSpawnForReceipt(receipt)) continue;
     if (receipt.state === "starting" && !receipt.key && receipt.transport !== "tmux") {
       const operation = await client.operationStatus(receipt.launchId);

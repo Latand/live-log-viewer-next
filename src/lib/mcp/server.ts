@@ -377,6 +377,8 @@ export interface McpRequestCaller {
   kind: "root" | "worker" | "unidentified";
   conversationId: string | null;
   project: string | null;
+  /** Server-derived predecessor seats that the current caller may recover. */
+  predecessors?: string[];
 }
 
 export interface McpRequestTarget {
@@ -482,7 +484,7 @@ function terminalReceiptResult(result: McpToolResult | null | undefined): result
   return Boolean(result && (result.ok
     ? result.outcome === "settled" || result.settled === true
       || (result.toolName === "spawn_agent" && result.state === "settled")
-    : result.details?.outcome === "settled"));
+    : result.details?.outcome === "settled" || result.details?.outcome === "not-executed"));
 }
 
 function receiptSettlement(
@@ -495,7 +497,7 @@ function receiptSettlement(
   if (receipt.recoveryResult) return { receipt, result: receipt.recoveryResult };
   if (receipt.result) {
     if (recovery && !terminalReceiptResult(receipt.result) && receipt.stage !== "not-executed") {
-      return { receipt: { ...receipt, recoveryResult: result }, result };
+      return { receipt: { ...receipt, recoveryResult: result, stage }, result };
     }
     return { receipt, result: receipt.result };
   }
@@ -647,7 +649,11 @@ export function validRequestBinding(value: unknown, toolName?: McpToolName, requ
   if (typeof value.claimedAt !== "string") return false;
   const { caller, target, owner } = value;
   if (!isRecord(caller) || !["root", "worker", "unidentified"].includes(String(caller.kind))
-    || !nullableString(caller.conversationId) || !nullableString(caller.project)) return false;
+    || !nullableString(caller.conversationId) || !nullableString(caller.project)
+    || (caller.predecessors !== undefined
+      && (!Array.isArray(caller.predecessors)
+        || caller.predecessors.length > 32
+        || caller.predecessors.some((predecessor) => typeof predecessor !== "string" || !/^conversation_[A-Za-z0-9_-]{1,128}$/.test(predecessor))))) return false;
   if (!isRecord(target) || !nullableString(target.project) || !nullableString(target.identity)) return false;
   if (!isRecord(owner) || typeof owner.pid !== "number" || !nullableString(owner.startIdentity)) return false;
   return true;
@@ -1970,8 +1976,9 @@ export class McpDispatchVerdictError extends McpToolRefusal {
 
 function sameCaller(recorded: McpRequestCaller, current: McpRequestCaller): boolean {
   return recorded.kind === current.kind
-    && recorded.conversationId === current.conversationId
-    && recorded.project === current.project;
+    && recorded.project === current.project
+    && (recorded.conversationId === current.conversationId
+      || (recorded.conversationId !== null && (current.predecessors ?? []).includes(recorded.conversationId)));
 }
 
 function identifiedCaller(caller: McpRequestCaller): boolean {
@@ -2082,6 +2089,20 @@ export function createMcpToolService(
       const retention: ReceiptRetention = MUTATING_MCP_TOOL_NAMES.has(typedTool) ? "durable" : "bounded";
       const requestId = clientRequestId(effectiveArgs);
       if (!requestId) return finish(failure(toolName, null, "invalid_request", "clientRequestId is required", false), "failure");
+      /* Agent decisions own an atomic receipt in the flow row. Always enter the
+         binding so caller authority is checked before replay, including after
+         restart; an MCP-cache hit must never disclose another owner's receipt. */
+      if (typedTool === "flow_action" && effectiveArgs.action === "agent-decision") {
+        const verdict = policy?.permit(typedTool, effectiveArgs);
+        if (verdict && !verdict.allowed) return finish(failure(typedTool, requestId, verdict.code, verdict.error, false), "failure");
+        try {
+          const payload = await bindings[typedTool](effectiveArgs, context);
+          return finish({ ...payload, ok: true, toolName: typedTool, clientRequestId: requestId, replayed: payload.replayed === true }, "success");
+        } catch (error) {
+          return finish(failure(typedTool, requestId, "tool_failed", error instanceof Error ? error.message : String(error), false, false,
+            { outcome: "unknown", nextAction: "original-key-lookup" }), "failure");
+        }
+      }
       const recoverable = options.recovery?.[typedTool] ?? null;
       const recoveryStore = recoverable && supportsMcpRecovery(receipts) ? receipts : null;
       if (recoverable && !recoveryStore) throw new Error(`MCP receipt store cannot recover ${typedTool}`);
@@ -2224,10 +2245,16 @@ export function createMcpToolService(
             replayed: true,
           };
           const answer = recoveryAnswer(typedTool, requestId, evidence, replayed, previous);
-          if (evidence.outcome !== "settled") return answer;
+          if (evidence.outcome !== "settled" && evidence.outcome !== "not-executed") return answer;
           let stored: McpToolResult;
           try {
-            stored = await store.settle(key, digest, answer, "settled", true);
+            stored = await store.settle(
+              key,
+              digest,
+              answer,
+              evidence.outcome === "not-executed" ? "not-executed" : "settled",
+              true,
+            );
           } catch {
             // A failed write can race a successful terminal recovery.
             try {
@@ -2270,6 +2297,10 @@ export function createMcpToolService(
           if (record.digest !== digest) {
             outcome = "conflict";
             return failure(typedTool, requestId, "idempotency_conflict", "clientRequestId was already used with different arguments", false, true);
+          }
+          if (record.recoveryResult && record.stage === "not-executed") {
+            outcome = "replay";
+            return { ...record.recoveryResult, replayed: true };
           }
           if (record.result && (!recoveryOnly || record.stage === "not-executed")) {
             outcome = "replay";
@@ -2618,7 +2649,7 @@ const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
   board_snapshot: "Read a bounded, redacted snapshot of the Viewer board, durable placement, and the selected project's hidden conversation count.",
   list_flows: "List durable implement-review flows.",
   get_flow: "Read one implement-review flow by durable id.",
-  flow_action: "Apply a supported action to an implement-review flow.",
+  flow_action: "Apply a supported action to an implement-review flow. agent-decision durably submits an owner decision for one exact revision, HEAD, round, turn and optional pipeline stage attempt. Use submit-review, continue-fixing, stop or completed with a reason. Accepted decisions await authoritative completion of that same turn. Replay the original clientRequestId to recover its receipt. completed records a comment outcome and never grants review approval.",
   list_pipelines: "List durable pipelines as bounded board cards: id, task, project, branch/worktree, state and stateDetail, cursor stage, task links, and a per-stage summary (role, engine, attempt count, latest attempt's state and verdict). Deliberately carries no bodies — the spec, stage prompts, role scaffolds and every attempt's input/output transcript are read with get_pipeline, which still returns the whole record. hasSpec tells you a spec exists; long free text is truncated.",
   conversation_action: "Control or archive Viewer conversations. interrupt, kill, resume, compact, and dialog-key accept one conversation by id, transcript path, or selected-card reference. archive and unarchive also accept up to 100 targets; they update the existing board hidden placement without requiring a live host or readable transcript. Each archive or unarchive target expands to every registered generation path while preserving an exact transcriptPath and a spawn:<launchId> placeholder. Each per-target outcome lists the paths actually written by this call; already-archived means the full expanded set was already hidden. Archive execution requires the operator root or a designated orchestrator seat and retains conversation_action's existing cross-project reach.",
   operator_snapshot: "Read the bounded, secret-redacted Viewer state currently visible to the operator.",
@@ -2981,7 +3012,14 @@ export const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
   flow_action: z.object({
     clientRequestId: clientRequestIdSchema,
     flowId: entityIdSchema,
-    action: z.enum(["pause", "resume", "set-mode", "advance", "retry-round", "cancel-round", "set-round-limit", "extend", "another-round", "set-roles", "close"]),
+    action: z.enum(["pause", "resume", "set-mode", "advance", "retry-round", "cancel-round", "set-round-limit", "extend", "another-round", "set-roles", "close", "agent-decision"]),
+    decision: z.enum(["submit-review", "continue-fixing", "stop", "completed"]).optional(),
+    reason: z.string().optional(),
+    expectedRevision: z.number().int().nonnegative().optional(),
+    expectedHead: z.string().regex(/^[0-9a-f]{40}$/).optional(),
+    round: z.number().int().nonnegative().optional(),
+    turnId: z.string().optional(),
+    stage: z.object({ pipelineId: z.string(), stageId: z.string(), attempt: z.number().int().positive() }).optional(),
     mode: z.enum(["auto", "manual"]).optional(),
     rounds: z.number().int().min(0).max(50).optional(),
     note: z.string().optional(),

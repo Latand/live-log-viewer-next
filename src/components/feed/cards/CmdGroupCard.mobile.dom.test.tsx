@@ -1,3 +1,4 @@
+import { MOBILE_LAYOUT_QUERY } from "@/lib/attention/eligibility";
 import { afterEach, expect, test } from "bun:test";
 import { Window } from "happy-dom";
 import type { ReactElement } from "react";
@@ -22,7 +23,7 @@ let narrowViewport = false;
 
 const normalize = (query: string) => String(query).replace(/\s+/g, "");
 const matchMediaStub = (query: string) => ({
-  matches: normalize(query) === "(max-width:767px)" ? narrowViewport : false,
+  matches: normalize(query) === normalize(MOBILE_LAYOUT_QUERY) ? narrowViewport : false,
   media: String(query),
   onchange: null,
   addEventListener() {},
