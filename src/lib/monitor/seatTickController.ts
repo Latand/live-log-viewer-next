@@ -32,10 +32,13 @@ import {
   type SeatTickSources,
   type SeatTickWakeState,
 } from "./seatTickSources";
+import { SEAT_TICK_RETIRED_WAKE_LIMIT } from "./types";
 import type {
   SeatTickCard,
+  SeatTickOutstandingWake,
   SeatTickPolicy,
   SeatTickProjectState,
+  SeatTickRetiredWake,
   SeatTickRunRecord,
   SeatTickVerdict,
   SeatTickVerdictKind,
@@ -99,12 +102,43 @@ export interface SeatTickControllerDependencies {
   ownsTraffic?: () => boolean | Promise<boolean>;
 }
 
-/** The ref of the card that says a prepared wake has been unresolved for
-    longer than the wake interval, or that its receipt ended unverified
-    (#1465). One ref, because the condition is the project's; the attempt's own
-    key is the occurrence, so each attempt is carded once and a new one is a
-    new card. */
+/** The family of refs for the card that says a prepared wake has been
+    unresolved for longer than the wake interval, or that its receipt ended
+    unverified (#1465). */
 export const SEAT_TICK_WAKE_UNRESOLVED_REF = "seat-tick-wake-unresolved";
+
+/**
+ * The ref of ONE attempt's unresolved card (#1594).
+ *
+ * This was a single project-wide ref while a project could only ever have one
+ * unresolved attempt. Retirement ends that: a project can now carry retired
+ * attempts beside an outstanding one, all unresolved at once, and a board card
+ * is re-found by its ref alone — `instance` distinguishes only the create
+ * receipt and never appears in the body. So one ref meant the first attempt to
+ * be carded took the project's only slot and every later one wrote nothing,
+ * leaving the board describing the wrong attempt: a retired card saying the
+ * project's wakes are not held back, standing in front of an outstanding
+ * attempt that is holding all of them.
+ *
+ * The attempt's own key is therefore the ref, hashed because
+ * {@link monitorRefIn} reads back `[A-Za-z0-9_-]{4,64}` and a client message id
+ * is neither colon-free nor bounded. The key itself goes in the body, where an
+ * operator can read it. Cards per project stay bounded by
+ * {@link SEAT_TICK_RETIRED_WAKE_LIMIT} plus the one outstanding attempt, and a
+ * card re-raised for the SAME attempt still finds its own card and rewrites
+ * nothing.
+ *
+ * One expected effect at the release that carries this: a card standing under
+ * the old flat ref is no longer re-found — neither by the ref nor by the create
+ * receipt, which is derived from it — so an attempt already carded is carded
+ * once more under its own ref, and the old card stays open until an operator
+ * closes it. One duplicate per attempt already unresolved at the deploy, and
+ * none afterwards. Re-finding the old ref as well would mean carrying a lookup
+ * for a shape that exists only in the board's past, which is a worse trade than
+ * one stale card.
+ */
+export const seatTickWakeUnresolvedRef = (clientMessageId: string): string =>
+  `${SEAT_TICK_WAKE_UNRESOLVED_REF}-${crypto.createHash("sha256").update(clientMessageId).digest("hex").slice(0, 16)}`;
 const CARD_TEXT_LIMIT = 5_000;
 
 /**
@@ -362,6 +396,171 @@ function wakePromptIdentity(monitorPrompt: string | null): string {
 
 const REVOKED_WAKE_REASON = "the seat tick revoked a wake raised for a seat that has since been replaced";
 
+/**
+ * Positive proof that the seat an attempt was addressed to has been replaced
+ * (#1594), or null.
+ *
+ * This is deliberately stricter than the `replaced` test that decides whether
+ * to REVOKE an attempt, because it licenses something else: releasing the fence
+ * that keeps a second wake out of flight. Revocation is safe on weak evidence —
+ * taking a payload back from a seat that turns out to still be there costs one
+ * wake. Releasing the fence on weak evidence puts two wakes in flight to one
+ * seat, which is the failure the fence exists for. So it takes all three:
+ *
+ * - a seat that is actually there, because a seat file that reads empty or
+ *   could not be read is an absence of evidence, not a successor;
+ * - a strictly higher epoch, which is the project's own monotonic proof that
+ *   the seat moved on rather than a row that disagrees about which seat it is;
+ * - a different conversation, because a re-designation of the SAME conversation
+ *   at a higher epoch is one seat: a payload still in the queue for it would
+ *   reach the live seat, and a second wake beside it is exactly a duplicate.
+ */
+function supersededSeat(
+  seat: { conversationId: string | null; seatEpoch: number } | null,
+  wake: SeatTickOutstandingWake,
+): SeatTickRetiredWake["supersededBy"] | null {
+  if (!seat?.conversationId) return null;
+  if (seat.seatEpoch <= wake.seatEpoch || seat.conversationId === wake.conversationId) return null;
+  return { conversationId: seat.conversationId, seatEpoch: seat.seatEpoch };
+}
+
+/**
+ * What a check has to say about a retired attempt, and whether it ended.
+ *
+ * The verdicts are the outstanding reconcile's own, read the same way off the
+ * journal — with one thing removed. A retired attempt never commits: it was
+ * addressed to a seat this project has replaced, so even `landed` acknowledges
+ * nothing, moves no stamp and harvests no child. Everything it named is still
+ * owed, and the successor's own wake is what carries it.
+ */
+interface RetiredSettlement {
+  verdict: SeatTickVerdictKind;
+  outcome: string;
+  detail: string;
+}
+
+/**
+ * Ask, every check, what became of the attempts a superseded seat left behind
+ * (#1594).
+ *
+ * This is the whole of what retirement keeps: the holder is still asked, a
+ * holder that still HAS the payload is still asked to give it back, and a wait
+ * that has outlived the interval is still on the board. What it deliberately
+ * does not do is re-dispatch. The payload was prepared for a conversation that
+ * no longer holds the project, and there is no answer — not `absent`, not a
+ * refusal, not age — that makes sending it again the right thing: the only
+ * caller that could admit it reads {@link SeatTickProjectState.outstandingWake},
+ * which a retired attempt is no longer in.
+ */
+async function reconcileRetiredWakes(context: {
+  project: string;
+  state: SeatTickProjectState;
+  sources: SeatTickSources;
+  appendRecord: typeof appendSeatTickRecord;
+  writeState: typeof writeSeatTickState;
+  ensureCard: (project: string, card: SeatTickCard, at: string) => boolean;
+  at: string;
+  now: number;
+  wakeIntervalMs: number;
+}): Promise<SeatTickProjectState> {
+  let state = context.state;
+  const entries = [...state.retiredWakes];
+  if (!entries.length) return state;
+  for (const entry of entries) {
+    const wake = entry.wake;
+    let observed: SeatTickWakeState | "unreadable";
+    let reason = "";
+    try {
+      observed = await context.sources.wakeState(wake);
+    } catch (error) {
+      observed = "unreadable";
+      reason = redactMonitorText(error instanceof Error ? error.message : "unknown error");
+    }
+    let settlement: RetiredSettlement | null = null;
+    /* The divergence named at the outstanding path's own `landed` branch: there
+       a landing commits even when the seat has been replaced, here it credits
+       nothing. This is the safe half of the disagreement and the reason it is
+       tolerable while #1604 is open — an obligation kept owed costs the
+       successor a repeat, an obligation discharged on a seat that never held it
+       costs the successor the instruction entirely. */
+    if (observed === "landed") {
+      settlement = { verdict: "landed", outcome: "landed",
+        detail: "a wake retired to a superseded seat was delivered to it after all; nothing it carried is credited, because the seat that received it no longer holds this project, so every obligation it named is still owed and the successor's own wake carries it" };
+    } else if (observed === "dropped") {
+      settlement = { verdict: "dropped", outcome: "dropped",
+        detail: "the layer holding a wake retired to a superseded seat settled it without delivering it; the obligations it named were never credited and remain owed" };
+    } else if (observed === "retained") {
+      let withdrawal: Awaited<ReturnType<SeatTickSources["withdrawWake"]>>;
+      try { withdrawal = await context.sources.withdrawWake(wake, REVOKED_WAKE_REASON); }
+      catch (error) { withdrawal = "unknown"; reason = redactMonitorText(error instanceof Error ? error.message : "unknown error"); }
+      if (withdrawal === "withdrawn") {
+        settlement = { verdict: "revoked", outcome: "withdrawn",
+          detail: "a wake retired to a superseded seat was taken out of the queue holding it before it could reach that seat" };
+      }
+    } else if (observed === "absent" && !wake.operationId && wake.dispatch?.state !== "active") {
+      /* The holder affirms it is holding nothing under this key, and no
+         transport call is out. Where an outstanding attempt would be
+         re-dispatched on that answer, this one is released and never sent:
+         the seat it names is gone. */
+      settlement = { verdict: "revoked", outcome: "unsent",
+        detail: "the layer holding a wake retired to a superseded seat affirms it holds nothing under its key and no transport call is outstanding: the attempt is released unsent, and it is never re-dispatched because the seat it was prepared for has been replaced" };
+    }
+    /* An answer that settles nothing leaves the board and no journal line —
+       which is where this path parts company with the outstanding one, and on
+       purpose. There a keep-verdict (`too-late`, `unknown`, `uncertain`) writes
+       a line every check, and it can afford to: a project has at most ONE
+       outstanding attempt, so that is one extra line per check. Here a project
+       may hold {@link SEAT_TICK_RETIRED_WAKE_LIMIT} of them, and twenty lines
+       per five-minute check would evict the journal's whole
+       `SEAT_TICK_RUN_HISTORY` of history in two checks — the audit trail
+       spent on repeating what has not changed. The standing condition is the
+       card's to carry, and the retirement line already recorded what the holder
+       last answered at the moment the attempt was retired. */
+    if (!settlement) {
+      const preparedAt = Date.parse(wake.preparedAt ?? entry.retiredAt);
+      const overdue = Number.isFinite(preparedAt) && context.now - preparedAt >= context.wakeIntervalMs;
+      if (overdue || observed === "uncertain") {
+        const answer = observed === "unreadable" ? `could not be read${reason ? ` (${reason})` : ""}` : `answered "${observed}"`;
+        const detail = `A wake prepared ${(wake.preparedAt ?? entry.retiredAt).slice(0, 16).replace("T", " ")} UTC for seat epoch ${wake.seatEpoch},`
+          + ` which epoch ${entry.supersededBy.seatEpoch} has since replaced, is still unresolved under its original key; the layer holding it last ${answer}.`
+          + " The attempt is never re-sent and nothing it named is credited, and it no longer holds back this project's wakes."
+          + ` Check the delivery record under its client message id ${wake.clientMessageId}`;
+        try {
+          context.ensureCard(context.project, { ref: seatTickWakeUnresolvedRef(wake.clientMessageId), kind: "wake-unresolved", instance: wake.clientMessageId, detail }, context.at);
+        } catch (error) {
+          console.error("[seat tick] card write failed", error instanceof Error ? error.name : "unknown");
+        }
+      }
+      continue;
+    }
+    if (state.accounting) {
+      const accounting = new SeatTickAccounting(state.accounting.filename, context.project);
+      if (!accounting.settleRetired(wake.clientMessageId)) {
+        state = accounting.readState();
+        continue;
+      }
+      state = accounting.readState();
+    } else {
+      state = { ...state, retiredWakes: state.retiredWakes.filter((held) => held.wake.clientMessageId !== wake.clientMessageId) };
+      context.writeState(context.project, state);
+    }
+    context.appendRecord({
+      schemaVersion: 1,
+      at: context.at,
+      project: context.project,
+      seatEpoch: wake.seatEpoch,
+      verdict: settlement.verdict,
+      reasons: [],
+      items: 0,
+      deferred: 0,
+      eventsThrough: state.eventsThrough ?? 0,
+      delivery: { clientMessageId: wake.clientMessageId, outcome: settlement.outcome },
+      detail: settlement.detail,
+    });
+  }
+  return state;
+}
+
 /** What the reconcile concluded: the journal line it owes, and what the row
     does with the wake — credit it, forget it, or keep it for the next check.
     Null is the answer that settles nothing and is worth no line of its own. */
@@ -437,6 +636,17 @@ async function reconcileOutstandingWake(context: {
   }
   let settlement: WakeSettlement | null = null;
   let redispatched: string | null = null;
+  /* A landing is asked about before a replacement, so a wake that reaches a
+     conversation the project has since replaced still commits here — the stamp,
+     the cursor and every child it named. That is not what the retired path
+     does with the same physical event (see `reconcileRetiredWakes`), and the
+     two are reachable for one attempt depending only on whether an earlier
+     check retired it first. Both readings are defensible: this one discharges
+     the obligation because SOMEONE was told, the retired one keeps it owed
+     because the successor was not, and the retired one is the safe direction —
+     at worst the successor is told again. What decides between them is a
+     question about what "told" means across a rotation, not a question about
+     this branch, so it is not settled here: #1604. */
   if (observed === "landed") {
     settlement = { verdict: "landed", outcome: "landed", row: "commit",
       detail: "a wake the delivery layer had kept reached the seat; the wake stamp and the event cursor move now, on the plan the check that raised it wrote down" };
@@ -528,14 +738,37 @@ async function reconcileOutstandingWake(context: {
       detail: "the delivery record was fenced, but its admitted transport call has not returned; the original attempt remains outstanding until that call is accounted for" };
   }
   const kept = !settlement || settlement.row === "keep";
+  /* #1594. A kept attempt is an obligation, and it is also a fence on the next
+     wake — two jobs one field was doing at once. The obligation is right and
+     survives; the fence is only sound while the attempt can still reach the
+     seat the tick is about to wake. Given positive proof that the seat has been
+     superseded, the attempt moves to the retired slot: same key, same payload,
+     same landing plan, still asked after every check — and out of the way of a
+     successor that would otherwise wait behind an answer that is never coming.
+     A row at the retention bound refuses, and the fence stands. */
+  const superseded = kept && settlement ? supersededSeat(context.seat, wake) : null;
+  let retired = false;
+  if (superseded) {
+    if (state.accounting) {
+      const accounting = new SeatTickAccounting(state.accounting.filename, context.project);
+      retired = accounting.retire(wake, context.at, superseded);
+      state = accounting.readState();
+    } else if (state.retiredWakes.length < SEAT_TICK_RETIRED_WAKE_LIMIT) {
+      state = persist({ ...state, outstandingWake: null,
+        retiredWakes: [...state.retiredWakes, { wake, retiredAt: context.at, supersededBy: superseded }] });
+      retired = true;
+    }
+  }
   if (kept && (overdue || observed === "uncertain")) {
     const answer = observed === "unreadable" ? `could not be read${reason ? ` (${reason})` : ""}` : `answered "${observed}"`;
     const detail = `A wake prepared ${wake.preparedAt!.slice(0, 16).replace("T", " ")} UTC for ${replaced ? "a seat that has since been replaced" : "this seat"}`
       + ` is still unresolved under its original key; the layer holding it last ${answer}${redispatched ? `, and a re-dispatch under the same key answered "${redispatched}"` : ""}.`
-      + " The tick keeps the attempt and dispatches no replacement wake for this project until it lands or the delivery record proves it never actuated."
-      + " Check the seat's conversation for the wake and the delivery record under its client message id";
+      + (retired
+        ? " The attempt is kept under that seat, never re-sent and crediting nothing, and it no longer holds back this project's wakes."
+        : " The tick keeps the attempt and dispatches no replacement wake for this project until it lands or the delivery record proves it never actuated.")
+      + ` Check the seat's conversation for the wake and the delivery record under its client message id ${wake.clientMessageId}`;
     try {
-      context.ensureCard(context.project, { ref: SEAT_TICK_WAKE_UNRESOLVED_REF, kind: "wake-unresolved", instance: wake.clientMessageId, detail }, context.at);
+      context.ensureCard(context.project, { ref: seatTickWakeUnresolvedRef(wake.clientMessageId), kind: "wake-unresolved", instance: wake.clientMessageId, detail }, context.at);
     } catch (error) {
       console.error("[seat tick] card write failed", error instanceof Error ? error.name : "unknown");
     }
@@ -553,14 +786,19 @@ async function reconcileOutstandingWake(context: {
     at: context.at,
     project: context.project,
     seatEpoch: wake.seatEpoch,
-    verdict: settlement.verdict,
+    /* One line, both facts: what the holder answered is the outcome, and the
+       verdict says the attempt stopped fencing this project's wakes. */
+    verdict: retired ? "retired" : settlement.verdict,
     reasons: [],
     items: 0,
     deferred: 0,
     eventsThrough: next.eventsThrough ?? 0,
     delivery: { clientMessageId: wake.clientMessageId, outcome: settlement.outcome },
-    detail: settlement.detail,
+    detail: retired
+      ? `${settlement.detail}; the attempt is retired to seat epoch ${wake.seatEpoch}, which epoch ${superseded!.seatEpoch} has replaced: it keeps its original key, is never re-sent, credits nothing whatever becomes of it, and no longer withholds this project's wakes`
+      : settlement.detail,
   });
+  if (retired) return state;
   if (settlement.row === "keep") return next;
   if (state.accounting) {
     const accounting = new SeatTickAccounting(state.accounting.filename, context.project);
@@ -634,9 +872,23 @@ async function check(
      rotation for. */
   const opening = sources.now();
   const openingSeat = sources.seatFor(canonical).active ?? null;
-  const settled = await reconcileOutstandingWake({
+  const openingInterval = wakeIntervalFor(canonical, opening, sources);
+  /* Retired attempts first (#1594), so an attempt this check is about to retire
+     is asked of its holder by the NEXT check rather than twice by this one. */
+  const drained = await reconcileRetiredWakes({
     project: canonical,
     state: seatTickStateForEpoch(readState(canonical), openingSeat?.seatEpoch ?? null),
+    sources,
+    appendRecord,
+    writeState,
+    ensureCard,
+    at: new Date(opening).toISOString(),
+    now: opening,
+    wakeIntervalMs: openingInterval,
+  });
+  const settled = await reconcileOutstandingWake({
+    project: canonical,
+    state: drained,
     seat: openingSeat,
     sources,
     appendRecord,
@@ -645,7 +897,7 @@ async function check(
     deliver,
     at: new Date(opening).toISOString(),
     now: opening,
-    wakeIntervalMs: wakeIntervalFor(canonical, opening, sources),
+    wakeIntervalMs: openingInterval,
   });
 
   const gathered = await gatherSeatTickInput(canonical, settled, policy, sources);
@@ -741,7 +993,16 @@ async function check(
     /* A prepared wake retains its original key and payload until settlement,
        including across prompt changes and seat rotation. */
     const outstanding = state.outstandingWake;
-    const withheld = outstanding !== null;
+    /* Retirement releases the fence because the retired attempt is addressed to
+       a conversation that is no longer the seat (#1594). A seat re-designated
+       BACK onto that conversation makes it the seat again, and the fence is
+       owed to it again: a payload still queued for it and a wake raised now
+       would both reach one seat, which is the duplicate the fence exists for.
+       So the wake this project may raise is withheld by any attempt — kept or
+       retired — addressed to the conversation about to be woken. */
+    const seatConversation = input.seat.conversationId;
+    const withheld = outstanding !== null
+      || state.retiredWakes.some((entry) => entry.wake.conversationId === seatConversation);
     /* The cursor then moves past everything this check READ, not only what
        the message listed: the terminal events are the ones carried, and the
        routine progress between them is what the seat is deliberately not
