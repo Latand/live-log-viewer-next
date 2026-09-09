@@ -101,6 +101,12 @@ export interface RuntimeHostClient {
     details?: { turnId?: string | null; queuePosition?: number | null; reason?: string | null },
     options?: RuntimeTransitionOptions,
   ): Promise<RuntimeOperationResult>;
+  /** Releases the retention a terminal transition took out under
+      `awaitProjection` (#1612), once its outcome is in the durable delivery
+      record. Optional because a runtime host from before it answers
+      "unsupported": the receipt then expires on the ordinary compaction
+      cadence, which is exactly the behaviour that predates this method. */
+  acknowledgeTerminalProjection?(operationIds: readonly string[]): Promise<number>;
   requestViewerDeployment(request: ViewerDeploymentRequest): Promise<ViewerDeploymentReceipt>;
   cancelViewerDeployment?(deploymentId: string): Promise<ViewerDeploymentStatus | null>;
   readViewerDeployment(deploymentId: string): Promise<ViewerDeploymentStatus | null>;
@@ -158,7 +164,11 @@ export class UnixRuntimeHostClient implements RuntimeHostClient {
       status,
       ...(details ? { details } : {}),
       ...(options.fromStatuses ? { fromStatuses: [...options.fromStatuses] } : {}),
+      ...(options.awaitProjection ? { awaitProjection: true } : {}),
     }) as Promise<RuntimeOperationResult>;
+  }
+  acknowledgeTerminalProjection(operationIds: readonly string[]): Promise<number> {
+    return this.call("operation-projection-ack", { operationIds: [...operationIds] }) as Promise<number>;
   }
   requestViewerDeployment(request: ViewerDeploymentRequest): Promise<ViewerDeploymentReceipt> { return this.call("viewer-deployment-request", request as unknown as Record<string, unknown>, this.deploymentTimeoutMs) as Promise<ViewerDeploymentReceipt>; }
   cancelViewerDeployment(deploymentId: string): Promise<ViewerDeploymentStatus | null> { return this.call("viewer-deployment-cancel", { deploymentId }) as Promise<ViewerDeploymentStatus | null>; }

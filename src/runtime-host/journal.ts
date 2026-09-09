@@ -64,6 +64,20 @@ export const RUNTIME_SNAPSHOT_STALE_EDGE_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000
     every effect drain remains proportional to work that can still run. */
 export const RUNTIME_PENDING_EFFECT_STALE_MS = 60 * 60 * 1_000;
 
+/** How many terminal receipts may be held past the compaction anchor while
+    their projection is unacknowledged (#1612).
+ *
+ * A terminal receipt whose acknowledgement was lost is the ONLY remaining proof
+ * that its message was delivered, so compaction must not take it while the
+ * durable delivery record still needs it. That obligation cannot be unbounded:
+ * a Viewer that never acknowledges — one that crashed, one released before this
+ * protocol existed — would otherwise pin the operations table for ever. The
+ * cap is the bound, applied to the OLDEST retained receipts first, because the
+ * newest are the ones a live repair can still consume. Sized far above any
+ * realistic outstanding set: production carries single digits of unprojected
+ * terminal receipts at a time, and each row is a receipt, not a transcript. */
+export const RUNTIME_UNPROJECTED_RECEIPT_RETENTION_LIMIT = 512;
+
 export type RuntimeRegistryConversationRetentionState = "current" | "dead" | "superseded";
 
 type EventRow = {
@@ -344,6 +358,7 @@ export class RuntimeJournal {
     `);
     this.migrateOperationIdempotencyScope();
     this.migrateOperationOrphanedSince();
+    this.migrateOperationProjectionPending();
     this.migrateLegacyEvents();
     this.migrateEntityUpdatedAt();
     for (const row of this.db.query<EventRow, []>("SELECT * FROM events WHERE producer_key IS NOT NULL").all()) {
@@ -676,7 +691,14 @@ export class RuntimeJournal {
       const committed = { ...next, revision: event.revision };
       this.upsertEntity("operation", operationId, event.revision, committed, event.seq);
       if (completing) this.appendCompletionConsequences(command, committed, operationId);
-      this.db.query("UPDATE operations SET receipt_json = ?, event_seq = ? WHERE operation_id = ?").run(stableJson(committed), event.seq, operationId);
+      /* The retention obligation is taken in the same transaction that commits
+         the outcome (#1612), because the failure it exists for is the answer to
+         THIS call never reaching its caller: a marker written afterwards, from
+         the caller, is lost by exactly the event it is meant to survive.
+         COALESCE, so a later transition can never silently release an
+         obligation an earlier one took. */
+      this.db.query("UPDATE operations SET receipt_json = ?, event_seq = ?, projection_pending = COALESCE(?, projection_pending) WHERE operation_id = ?")
+        .run(stableJson(committed), event.seq, completing && options.awaitProjection === true ? this.now() : null, operationId);
       if (completing) this.db.query("UPDATE outbox SET state = 'completed', payload_json = '{}' WHERE id = ?").run(`effect:${operationId}`);
       if (killBoundary) {
         this.db.query(`
@@ -1346,7 +1368,40 @@ export class RuntimeJournal {
     });
   }
 
-  compact(maxEvents = this.maxEvents): void {
+  /** Releases the retention taken by {@link transitionOperation} under
+      `awaitProjection`, for receipts whose outcome now lives in the durable
+      delivery record (#1612).
+   *
+   * Idempotent and self-limiting: an id with no obligation, an id compacted
+   * away, and an id acknowledged twice are all the same no-op, so a caller that
+   * cannot tell whether its previous acknowledgement arrived may simply send it
+   * again. It moves nothing else — not the receipt, not its status, not its
+   * time — so nothing about the delivery evidence depends on who called it. */
+  acknowledgeTerminalProjection(operationIds: readonly string[]): number {
+    this.assertHealthy();
+    if (operationIds.length === 0) return 0;
+    if (operationIds.length > RUNTIME_UNPROJECTED_RECEIPT_RETENTION_LIMIT) {
+      throw new Error("runtime projection acknowledgement batch is too large");
+    }
+    if (operationIds.some((operationId) => typeof operationId !== "string" || !operationId)) {
+      throw new Error("runtime projection acknowledgement id is invalid");
+    }
+    return this.db.query(
+      `UPDATE operations SET projection_pending = NULL
+       WHERE projection_pending IS NOT NULL AND operation_id IN (${operationIds.map(() => "?").join(", ")})`,
+    ).run(...operationIds).changes;
+  }
+
+  /** The receipts compaction is holding for an unacknowledged projection, newest
+      first — the exact set the cap below is applied to. */
+  unprojectedTerminalOperationIds(limit = RUNTIME_UNPROJECTED_RECEIPT_RETENTION_LIMIT): string[] {
+    this.assertHealthy();
+    return this.db.query<{ operation_id: string }, [number]>(
+      "SELECT operation_id FROM operations WHERE projection_pending IS NOT NULL ORDER BY event_seq DESC LIMIT ?",
+    ).all(Math.max(0, limit)).map((row) => row.operation_id);
+  }
+
+  compact(maxEvents = this.maxEvents, unprojectedReceiptLimit = RUNTIME_UNPROJECTED_RECEIPT_RETENTION_LIMIT): void {
     this.assertHealthy();
     const count = Number(this.db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM events").get()?.count ?? 0);
     if (count <= maxEvents) return;
@@ -1358,7 +1413,29 @@ export class RuntimeJournal {
       this.db.query("DELETE FROM events WHERE seq <= ?").run(anchor.seq);
       this.db.exec("DELETE FROM consumer_checkpoints WHERE NOT EXISTS (SELECT 1 FROM events WHERE events.event_id = consumer_checkpoints.event_id)");
       this.db.query("DELETE FROM outbox WHERE state = 'completed' AND event_seq <= ?").run(anchor.seq);
-      this.db.query("DELETE FROM operations WHERE event_seq <= ? AND operation_id NOT IN (SELECT substr(id, 8) FROM outbox WHERE state = 'pending' AND id LIKE 'effect:%')").run(anchor.seq);
+      /* Two reasons an operation outlives the anchor: an effect still owed
+         execution, and a terminal receipt still owed a projection (#1612). The
+         second is capped, and the cap keeps the NEWEST obligations, so a
+         Viewer that stopped acknowledging cannot pin the table indefinitely
+         while a live repair keeps the receipts it can still consume. */
+      const released = Number(this.db.query<{ count: number }, [number, number]>(
+        `SELECT COUNT(*) AS count FROM operations
+         WHERE event_seq <= ? AND projection_pending IS NOT NULL
+           AND operation_id NOT IN (
+             SELECT operation_id FROM operations WHERE projection_pending IS NOT NULL ORDER BY event_seq DESC LIMIT ?
+           )`,
+      ).get(anchor.seq, Math.max(0, unprojectedReceiptLimit))?.count ?? 0);
+      this.db.query(
+        `DELETE FROM operations
+         WHERE event_seq <= ?
+           AND operation_id NOT IN (SELECT substr(id, 8) FROM outbox WHERE state = 'pending' AND id LIKE 'effect:%')
+           AND operation_id NOT IN (
+             SELECT operation_id FROM operations WHERE projection_pending IS NOT NULL ORDER BY event_seq DESC LIMIT ?
+           )`,
+      ).run(anchor.seq, Math.max(0, unprojectedReceiptLimit));
+      if (released > 0) {
+        console.error(`[runtime journal] compaction released ${released} unacknowledged terminal receipt(s) over the ${unprojectedReceiptLimit} retention cap`);
+      }
       this.db.exec("DELETE FROM delivery_operation_actions WHERE operation_id NOT IN (SELECT operation_id FROM operations)");
       this.db.query("DELETE FROM entities WHERE kind = 'operation' AND checkpoint_seq <= ?").run(anchor.seq);
       this.metaSet("anchor_seq", String(anchor.seq));
@@ -2411,6 +2488,14 @@ export class RuntimeJournal {
   private migrateOperationOrphanedSince(): void {
     const columns = new Set(this.db.query<{ name: string }, []>("PRAGMA table_info(operations)").all().map((row) => row.name));
     if (!columns.has("orphaned_since")) this.db.exec("ALTER TABLE operations ADD COLUMN orphaned_since INTEGER");
+  }
+
+  /** #1612. Null on every existing row, which reads as "owed nothing": a
+      journal written before this column keeps exactly its previous retention,
+      and only transitions that ask for projection retention set it. */
+  private migrateOperationProjectionPending(): void {
+    const columns = new Set(this.db.query<{ name: string }, []>("PRAGMA table_info(operations)").all().map((row) => row.name));
+    if (!columns.has("projection_pending")) this.db.exec("ALTER TABLE operations ADD COLUMN projection_pending INTEGER");
   }
 
   private migrateLegacyEvents(): void {

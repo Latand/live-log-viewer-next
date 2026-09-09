@@ -179,6 +179,10 @@ export class RuntimeHost {
         }
         const details = request.params?.details;
         const fromStatuses = request.params?.fromStatuses;
+        const awaitProjection = request.params?.awaitProjection;
+        if (awaitProjection !== undefined && typeof awaitProjection !== "boolean") {
+          throw new Error("runtime operation projection retention flag is invalid");
+        }
         if (fromStatuses !== undefined && (!Array.isArray(fromStatuses)
           || fromStatuses.some((candidate) => typeof candidate !== "string"
             || !RUNTIME_RECEIPT_STATUSES.includes(candidate as RuntimeReceiptStatus)))) {
@@ -188,8 +192,18 @@ export class RuntimeHost {
           String(request.params?.operationId ?? ""),
           status as Exclude<RuntimeReceiptStatus, "pending">,
           details && typeof details === "object" ? details as { turnId?: string | null; queuePosition?: number | null; reason?: string | null } : {},
-          fromStatuses ? { fromStatuses: fromStatuses as RuntimeReceiptStatus[] } : {},
+          {
+            ...(fromStatuses ? { fromStatuses: fromStatuses as RuntimeReceiptStatus[] } : {}),
+            ...(awaitProjection === true ? { awaitProjection: true } : {}),
+          },
         );
+      } else if (request.method === "operation-projection-ack") {
+        if (!this.structuredHosts) throw new Error("structured hosts are disabled");
+        const operationIds = request.params?.operationIds;
+        if (!Array.isArray(operationIds) || operationIds.some((operationId) => typeof operationId !== "string" || !operationId)) {
+          throw new Error("runtime projection acknowledgement ids are invalid");
+        }
+        result = this.journal.acknowledgeTerminalProjection(operationIds as string[]);
       } else if (request.method === "viewer-deployment-request") {
         if (!this.deployments) throw new Error("viewer deployments are disabled");
         result = await this.deployments.requestViewerDeployment({

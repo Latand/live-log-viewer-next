@@ -60,6 +60,22 @@ export interface StructuredDeliveryQueuePort {
       claim, or a read that throws: no evidence either way, which leaves the row
       with the executor that holds it rather than ending its send. */
   hostClaim?(conversationId: string): string | null | Promise<string | null>;
+  /** Carries the outcome of a transition whose ACKNOWLEDGEMENT was lost into
+      the durable delivery record (#1612).
+   *
+   * `transition` writes the journal and the delivery record in that order, so a
+   * transport failure between them commits the outcome and drops the projection
+   * — and the completing transition clears the effect in the same transaction,
+   * which means no later drain pass can rediscover it. This queue holds the one
+   * moment where that is still known, so it hands the operation back rather than
+   * dropping it. The implementation reads the journal's own answer instead of
+   * trusting what this call meant to write, and settles nothing it cannot read;
+   * it must never throw and never actuate the message again.
+   *
+   * Answers whether the fate was ESTABLISHED — settled, or read and shown to
+   * settle nothing. False means only that the journal could not be read, which
+   * is what brings the operation back on the next pass. */
+  projectTerminal?(operationId: string): Promise<boolean>;
 }
 
 export type StructuredHostResolver = (conversationId: string) => EngineHost | null;
@@ -71,6 +87,10 @@ const THREAD_READ_ATTEMPTS = 2;
 /** Controls carry no message reservation to settle them outside the journal,
     so the queue itself gives every accepted control a terminal ceiling. */
 export const CONTROL_SETTLEMENT_WINDOW_MS = 2 * 60_000;
+/** How many terminal projections may be owed at once before the oldest is
+    given up (#1612). The Viewer's side of the same bound the runtime journal
+    keeps on the receipts themselves. */
+const UNPROJECTED_TERMINAL_LIMIT = 128;
 const TERMINAL_DELIVERY_STATUSES = new Set([
   "turn-started",
   "steered",
@@ -487,6 +507,14 @@ export class StructuredDeliveryQueue {
       arrived. The effect stays pending in the journal meanwhile, so every later
       drain pass must find it here and leave it alone (#862). */
   private readonly activeCompactions = new Map<string, Promise<void>>();
+  /** Operations the journal ended and whose projection is still owed, because
+      the pass that lost the acknowledgement could not read the receipt either
+      (#1612). Nothing else remembers them: the completing transition cleared
+      their effects, so they can never come back through `effects()`. Bounded,
+      and drained at the head of every later pass — the drain is the clock, so
+      the repair needs no timer of its own and stops as soon as the journal can
+      answer. */
+  private readonly unprojectedTerminals = new Set<string>();
   /** The conversations those compactions belong to. Reads block on this rather
       than on a whole-group barrier, so an unfinished compaction holds messages
       without holding kill, interrupt, or answer. */
@@ -551,6 +579,7 @@ export class StructuredDeliveryQueue {
   }
 
   private async drainPass(): Promise<void> {
+    await this.projectOwedTerminals();
     const rawEffects: StructuredDeliveryEffect[] = [];
     let afterEventSeq = 0;
     while (true) {
@@ -1114,9 +1143,63 @@ export class StructuredDeliveryQueue {
     } catch (error) {
       const durable = await this.readStatus(operationId);
       if (durable.readable && durable.value && TERMINAL_DELIVERY_STATUSES.has(durable.value.status)) {
+        /* The journal ended this operation and only the answer was lost, so the
+           delivery record's projection — which rides on that answer — never
+           happened. Nothing else will come back for it: the effect is cleared
+           and this pass is the last one that sees the operation at all (#1612).
+           Awaited, because the evidence is readable right now and the repair is
+           two reads away. */
+        await this.projectLostTerminalAcknowledgement(operationId);
         return false;
       }
+      /* Unreadable: whether the transition applied at all is unknown, and an
+         unknown is not settled here. The repair is asked for anyway — it reads
+         the journal itself and settles only what it can prove — and this pass
+         still fails exactly as before. Not awaited: this path is a broken
+         socket, and every read behind it would spend its whole timeout before
+         the failure below could be reported. */
+      void this.projectLostTerminalAcknowledgement(operationId);
       throw error;
+    }
+  }
+
+  /** Never throws: a repair that could not be made leaves the record exactly as
+      it was, and the operation is kept for the next pass rather than dropped. */
+  private async projectLostTerminalAcknowledgement(operationId: string): Promise<void> {
+    let established = false;
+    try {
+      established = await this.port.projectTerminal?.(operationId) ?? true;
+    } catch (error) {
+      console.error("[structured delivery] terminal projection after a lost acknowledgement failed", {
+        operationId,
+        error: failureReason(error),
+      });
+    }
+    if (established) {
+      this.unprojectedTerminals.delete(operationId);
+      return;
+    }
+    /* The cap releases the OLDEST owed projection, which has had every pass
+       since it was recorded to be established and is the one the journal's own
+       bounded retention gives up on first. */
+    if (!this.unprojectedTerminals.has(operationId) && this.unprojectedTerminals.size >= UNPROJECTED_TERMINAL_LIMIT) {
+      const oldest = this.unprojectedTerminals.values().next();
+      if (!oldest.done) {
+        this.unprojectedTerminals.delete(oldest.value);
+        console.error("[structured delivery] owed terminal projection released at the retry cap", { operationId: oldest.value });
+      }
+    }
+    this.unprojectedTerminals.add(operationId);
+    /* Nothing else will wake this: the effect is gone, so without a scheduled
+       pass a quiet queue would wait for the next message to repair the last. */
+    this.retrySoon();
+  }
+
+  /** The owed projections, retried once per pass and in the order they were
+      recorded. Reported unreadable again, they simply stay owed. */
+  private async projectOwedTerminals(): Promise<void> {
+    for (const operationId of [...this.unprojectedTerminals]) {
+      await this.projectLostTerminalAcknowledgement(operationId);
     }
   }
 
