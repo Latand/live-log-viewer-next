@@ -1,9 +1,12 @@
 import type { NextRequest } from "next/server";
 
 import { agentRegistry } from "@/lib/agent/registry";
+import { voiceTransportOperator } from "@/lib/agent/operatorAuthority";
 import { VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/spawnPolicy";
 import { orchestratorSeatFor } from "@/lib/orchestrator/seats";
 import { resolveProjectAttribution } from "@/lib/session/projectResolution";
+import { voicePersonaVariantForConversation } from "./voicePersonaMandate";
+import type { VoicePersonaVariant } from "./voicePersona";
 
 import crypto from "node:crypto";
 
@@ -178,4 +181,52 @@ export function designatedManagerConversationId(project: string | null | undefin
   const scopedProject = project?.trim();
   if (!scopedProject) return null;
   return orchestratorSeatFor(scopedProject).active?.conversationId ?? null;
+}
+
+/** Everything `executeRealtimeControl` must be told about a request, resolved
+    server-side. */
+export interface RealtimeRequestAuthority {
+  caller: RealtimeCaller;
+  managerConversationId: string | null;
+  operator: boolean;
+  personaVariant: VoicePersonaVariant;
+}
+
+/**
+ * Compose one request's authority — extracted from the route so it can be tested.
+ *
+ * A Next.js route module may export only route fields, so a composition living
+ * inline there is reachable only by driving the whole endpoint, which needs a live
+ * structured host. That left the one line joining the persona resolver to the
+ * control path unproven (#1615 review, finding 5). Dropping `personaVariant`
+ * fails safe to `modality`; the regression worth a test is the opposite one — a
+ * resolver wired up so that it answers `coordinator` too readily.
+ *
+ * Every field is derived from the registry, the request's own headers, or the
+ * durable designation record. NOTHING is read from the body except the target
+ * conversation id, because a caller naming itself is not evidence.
+ */
+export function realtimeRequestAuthority(
+  request: Pick<NextRequest, "headers">,
+  body: Record<string, unknown>,
+): RealtimeRequestAuthority {
+  return {
+    /* #691 §6: resolved from the capability the registry issued. */
+    caller: realtimeCallerFromRequest(request, body),
+    managerConversationId: designatedManagerConversationId(
+      realtimeConversationProject(body.conversationId),
+    ),
+    /* Opening and closing the call is the operator's own act, and on this loopback
+       single-user app the same-origin browser IS the operator (the route's
+       cross-origin rejection is the perimeter). The only caller refused transport
+       is an AGENT, which names itself by presenting its capability. What does NOT
+       follow from being the operator is injection — `permitRealtimeAction` grants
+       `appendSpeech` and `deliverWorkerResponse` to the peer holding the call's
+       minted session id and to nobody else, whatever this resolves to. */
+    operator: voiceTransportOperator(request),
+    /* #1615: enabling voice must not rewrite who this conversation is. Only a
+       session deliberately created as the voice front takes the coordinator role;
+       every other conversation keeps its own and gains a microphone. */
+    personaVariant: voicePersonaVariantForConversation(body.conversationId),
+  };
 }

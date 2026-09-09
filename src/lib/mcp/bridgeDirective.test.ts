@@ -77,6 +77,10 @@ function bindings(
   /** What the delivery path answers. `delivered` is arrival; `queued` is
       acceptance, and the two must not settle a decision request alike. */
   deliveryOutcome: "delivered" | "queued" = "delivered",
+  /** Who the server attributes the call to. The default is the voice gateway,
+      which is what every other test here is. */
+  callerAttribution: { kind: string; conversationId: string | null; role: string | null } =
+    { kind: "gateway", conversationId: "conversation_gateway", role: null },
 ) {
   posted = [];
   const control: ViewerControlDependencies = {
@@ -90,6 +94,7 @@ function bindings(
   return viewerMcpBindings(undefined, control, {
     callerProject: () => callerProject,
     authorizedSeats: realSeatAuthority,
+    callerAttribution: () => callerAttribution,
     ...(canonicalSeatConversationId ? { canonicalSeatConversationId } : {}),
   } as never);
 }
@@ -483,4 +488,65 @@ test("a project with no VALIDATED seat refuses rather than falling back to anoth
     project: "proj-unknown",
   })).rejects.toThrow();
   expect(posted).toEqual([]);
+});
+
+/**
+ * The loop the operator watched happen (#1615).
+ *
+ * Voice was enabled on the conversation holding the seat, the call injected the
+ * coordinator persona, and the seat did what it now believed it was for: it
+ * relayed the work onward. The recipient is resolved from the designation
+ * record, so "onward" was itself. The instruction arrived back in the same
+ * conversation, the cards went untriaged, and the Viewer still showed the
+ * conversation as the manager the whole time.
+ *
+ * The persona fix stops the seat being told to relay. This stops the relay from
+ * closing a circle even if something tells it to anyway — an operator override,
+ * a thread that already carries the old item, a future prompt edit.
+ */
+test("a designated seat cannot relay an instruction to itself", async () => {
+  sandbox();
+  const tools = bindings(
+    "proj-voice",
+    undefined,
+    "delivered",
+    /* The server's own attribution of the caller: this IS the seat. */
+    { kind: "manager", conversationId: "conversation_manager", role: "orchestrator" },
+  );
+
+  await expect(tools.bridge_directive({
+    clientRequestId: "self-relay",
+    rootTurnId: "turn_0400",
+    utterance: 0,
+    instruction: "harvest the finished reviews and update the cards",
+  })).rejects.toThrow(/yourself/i);
+
+  /* Nothing was delivered: the instruction did not come back around. */
+  expect(posted).toHaveLength(0);
+});
+
+test("a seat may still relay to another project's orchestrator", async () => {
+  /* The refusal is about the circle, not about being a manager. A seat that
+     names another project addresses a different conversation, and that is an
+     ordinary relay. */
+  sandbox();
+  seatProject("proj-other", "conversation_other_manager");
+  const tools = bindings(
+    "proj-voice",
+    undefined,
+    "delivered",
+    { kind: "manager", conversationId: "conversation_manager", role: "orchestrator" },
+  );
+
+  const receipt = await tools.bridge_directive({
+    clientRequestId: "cross-project",
+    rootTurnId: "turn_0401",
+    utterance: 0,
+    instruction: "the shared migration landed, rebase your lane",
+    project: "proj-other",
+  });
+
+  expect(posted).toHaveLength(1);
+  expect(posted[0]!.body.conversationId).toBe("conversation_other_manager");
+  expect(receipt).toMatchObject({ managerConversationId: "conversation_other_manager" });
 });

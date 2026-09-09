@@ -4,7 +4,7 @@ import { redactCodexHostDiagnostic } from "./codexAppServerHost";
 import { structuredDeliveryHostForConversation } from "./structuredDeliveryController";
 import { permitRealtimeAction, type RealtimeCaller } from "./realtimeInjection";
 import type { RuntimeVoiceDelivery } from "./voiceDelivery";
-import type { VoicePersonaBootstrapReceipt } from "./voicePersona";
+import type { VoicePersonaBootstrapReceipt, VoicePersonaVariant } from "./voicePersona";
 import {
   admitVoiceSelectedContext,
   bindVoiceSession,
@@ -17,7 +17,7 @@ const MAX_SDP_BYTES = 512 * 1024;
 const MAX_SPEECH_BYTES = 8 * 1024;
 
 interface RealtimeHost {
-  startRealtimeWebRtc(sdp: string): Promise<{
+  startRealtimeWebRtc(sdp: string, personaVariant?: VoicePersonaVariant): Promise<{
     sdp: string | null;
     realtimeSessionId: string | null;
     personaBootstrap: VoicePersonaBootstrapReceipt;
@@ -103,7 +103,13 @@ export async function executeRealtimeControl(
      the caller's transport can ask (`voiceTransportOperator` reads the request's
      headers), so a call site that omits it has not asked — and an unasked authority
      question must resolve to "no", not to "yes". */
-  authority: { caller?: RealtimeCaller; managerConversationId?: string | null; operator: boolean },
+  authority: {
+    caller?: RealtimeCaller;
+    managerConversationId?: string | null;
+    operator: boolean;
+    /** Which persona a `start` bootstraps (#1615). Omitted is `modality`. */
+    personaVariant?: VoicePersonaVariant;
+  },
   dependencies: RealtimeControlDependencies = REALTIME_CONTROL_DEPENDENCIES,
 ): Promise<RealtimeControlResult> {
   if (!body || typeof body !== "object" || Array.isArray(body)) {
@@ -151,7 +157,13 @@ export async function executeRealtimeControl(
       if (!sdp.trimStart().startsWith("v=0") || byteLength(sdp) > MAX_SDP_BYTES) {
         return { status: 400, body: { error: "a valid WebRTC SDP offer is required" } };
       }
-      const answer = await host.startRealtimeWebRtc(sdp);
+      /* #1615: voice is a modality, so the persona a call bootstraps is decided
+         from WHAT THIS CONVERSATION ALREADY IS, resolved per start rather than
+         cached — a seat rotation between two calls must be seen by the second.
+         Absent, it is `modality`: the variant that assigns no role, because a
+         call site that did not ask has not established that this thread is the
+         voice front. */
+      const answer = await host.startRealtimeWebRtc(sdp, authority.personaVariant ?? "modality");
       if (!answer.personaBootstrap) {
         return rejectStartedRealtimeContract(host, { error: "Codex returned no voice persona bootstrap receipt" });
       }
