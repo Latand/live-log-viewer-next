@@ -124,6 +124,18 @@ interface AdmissionRecord {
   /** The backing turn that claimed it, once one did. Never reassigned. */
   boundTurnId: string | null;
   /**
+   * The call's handoff counter when this record's handoff was accepted, and
+   * again when a backing turn claimed it.
+   *
+   * Native steers more than one handoff into one backing turn
+   * (`native-voice-work-identity.md`), so a turn id is COARSER than a spoken
+   * utterance and the claim it made says nothing about what arrived after it.
+   * Comparing the two counters is how a later, still-unclaimed handoff is
+   * recognised as something this same turn may have accepted.
+   */
+  handoffEpoch: number | null;
+  claimedAtHandoffEpoch: number | null;
+  /**
    * The host's idle counter when this record's handoff was accepted, or null
    * while it has none.
    *
@@ -163,6 +175,9 @@ interface VoiceSessionState {
    * nothing — so reads answer `unavailable` rather than `no-call`.
    */
   evidenceLost: boolean;
+  /** Incremented by every handoff this call accepts, and by an ambiguity it
+      records: the ordering a bound turn's claim is compared against. */
+  handoffEpoch: number;
   /** Incremented every time the host is observed going from running to idle. */
   idleEpoch: number;
   /** The host's last reported active turn, for spotting that transition. */
@@ -251,6 +266,8 @@ export function bindVoiceSession(
     handoffKeys: new Set(),
     ambiguity: previous?.ambiguity ?? null,
     evidenceLost: previous?.evidenceLost ?? false,
+    /* Carried across the generation, because the records it orders are. */
+    handoffEpoch: previous?.handoffEpoch ?? 0,
     idleEpoch: previous?.idleEpoch ?? 0,
     lastActiveTurnId: previous?.lastActiveTurnId ?? null,
   });
@@ -419,6 +436,8 @@ export function admitVoiceSelectedContext(input: VoiceSelectedContextAdmissionIn
     id: `admission-${admissionCounter}`,
     generation: session.generation,
     boundTurnId: null,
+    handoffEpoch: null,
+    claimedAtHandoffEpoch: null,
     joinedAtIdleEpoch: null,
     admission: {
       conversationId: input.conversationId,
@@ -443,9 +462,15 @@ export function admitVoiceSelectedContext(input: VoiceSelectedContextAdmissionIn
   return { ok: true, admission: record.admission };
 }
 
-/** The canonical name of one handoff, for a generation's dedup set. */
+/**
+ * The canonical name of one handoff, for a generation's dedup set.
+ *
+ * JSON, so the separator cannot be a character an identity contains and the
+ * source stays text. It used to join on a literal NUL byte, which made `file(1)`
+ * call this module `data` and every plain text tool skip it.
+ */
 function handoffKey(generation: number, handoff: VoiceHandoffIdentity): string {
-  return [generation, handoff.handoffId ?? "", handoff.itemId ?? "", handoff.userBidiTurnId ?? ""].join(" ");
+  return JSON.stringify([generation, handoff.handoffId ?? "", handoff.itemId ?? "", handoff.userBidiTurnId ?? ""]);
 }
 
 /**
@@ -523,7 +548,9 @@ export function recordVoiceHandoff(input: {
     };
   }
   session.handoffKeys.add(key);
+  session.handoffEpoch += 1;
   standing.admission = { ...standing.admission, handoff: input.handoff };
+  standing.handoffEpoch = session.handoffEpoch;
   standing.joinedAtIdleEpoch = session.idleEpoch;
   return { ok: true, admission: standing.admission };
 }
@@ -606,9 +633,14 @@ export function voiceSelectedContext(conversationId: string): VoiceSelectedConte
  * call B's card. So the caller must present the native work identity its request
  * actually carried, and the answer is about THAT turn:
  *
- * - A turn that has already claimed a record keeps it, unchanged, forever. An
- *   accepted operation is frozen: later utterances, later calls and a hangup all
- *   leave it exactly where it was.
+ * - A turn that has already claimed a record keeps that record, unchanged,
+ *   forever: the binding is never reassigned by a later utterance, a later call
+ *   or a hangup. What it does NOT get is the right to keep answering while the
+ *   call has moved on — native steers more than one handoff into one backing
+ *   turn, so once a handoff this turn may also have accepted is outstanding, an
+ *   unqualified read is refused for exactly the reason a new claim would be.
+ *   When that later speech is claimed by its own turn, or retired with it, this
+ *   turn is answered with its own card again.
  * - A turn that has claimed nothing may claim one only when exactly one
  *   unclaimed join exists in the CURRENT generation and nothing about the call
  *   is ambiguous. Two candidates is the same problem native has: multiple
@@ -715,7 +747,36 @@ export function voiceUtteranceContext(
     };
   }
   const bound = session.records.find((record) => record.boundTurnId === work.turnId);
-  if (bound) return joined(bound, session);
+  if (bound) {
+    /* A CLAIM IS NOT A FENCE AROUND THE TURN. Native steers more than one handoff
+       into one backing turn, so a turn that claimed A's card may since have been
+       given B's speech as well — and answering the next tool call with A there
+       acts on the conversation the operator has moved off
+       (`native-voice-work-identity.md` §"Realtime joins and their limits",
+       `native-codex-experience.md` §Limits). The turn id has no finer
+       discriminator, so implicit selection stops here and says why.
+
+       The record itself is untouched: an accepted binding is never reassigned,
+       and once the later speech is claimed by its own turn or retired with it,
+       this same caller is answered with A again. Explicit `conversationId` and
+       `selectedContext` targeting never come through here at all. */
+    const since = bound.claimedAtHandoffEpoch ?? 0;
+    const later = session.records.some((record) =>
+      record !== bound && record.boundTurnId === null && record.admission.handoff !== null
+      && (record.handoffEpoch ?? 0) > since);
+    if (later) {
+      return {
+        state: "ambiguous",
+        reason: "the operator has spoken again since this work claimed its card, and native routes more than one handoff into one backing turn, so which of them this call belongs to cannot be told apart",
+      };
+    }
+    /* THE LINE IS AN ACCEPTED HANDOFF, and deliberately no wider. A reported
+       ambiguity is left where the ledger already puts it — work bound before one
+       keeps what it was given — and speech whose handoff has not been reported
+       yet is not a handoff this turn carries. Both are existing decisions with
+       their own tests; this repairs the case the evidence names. */
+    return joined(bound, session);
+  }
   if (session.ambiguity) return { state: "ambiguous", reason: session.ambiguity.reason };
   if (session.evidenceLost) {
     return {
@@ -746,6 +807,7 @@ export function voiceUtteranceContext(
   if (candidates.length === 0) return { state: "no-reference" };
   const claimed = candidates[0]!;
   claimed.boundTurnId = work.turnId;
+  claimed.claimedAtHandoffEpoch = session.handoffEpoch;
   return joined(claimed, session);
 }
 

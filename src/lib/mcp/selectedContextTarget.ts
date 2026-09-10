@@ -211,12 +211,15 @@ export async function resolveSelectedContext(
  * why there is none (#1629).
  *
  * NOTHING HERE EVER REACHES FOR AN EARLIER CARD. The ledger publishes a
- * reference only while it is joined to the handoff that produced the work in
- * hand; the moment the operator speaks again the join is gone and this refuses,
- * so an agent asking a second question about a screen the operator has moved on
- * from is told to ask rather than answered about the wrong card. Each refusal
- * names its own condition, because "they have not selected anything", "they have
- * spoken since" and "there is no call" are three different next moves.
+ * reference only for the backing work the caller's own request named, and only
+ * while that work is the sole candidate: native steers more than one handoff
+ * into one backing turn, so the moment the operator speaks again the ledger
+ * refuses this caller too — a turn that already claimed a card included. An
+ * agent asking a second question about a screen the operator has moved on from
+ * is therefore told to ask rather than answered about the wrong card. Each
+ * refusal names its own condition, because "they have not selected anything",
+ * "they have spoken since" and "there is no call" are three different next
+ * moves.
  */
 async function resolveSpokenSelectedContext(
   dependencies: SelectedContextTargetDependencies,

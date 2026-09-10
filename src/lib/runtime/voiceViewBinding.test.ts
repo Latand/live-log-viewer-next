@@ -379,6 +379,38 @@ test("A's work keeps card A after the operator speaks about B", () => {
   expect(cardOf(readCard("turn-a"))).toBe("conversation_atlas_a");
 });
 
+test("one backing turn carrying two handoffs stops answering about either", () => {
+  /* THE REVIEWER'S OWN A→tool→B→tool SEQUENCE. Native V3 steers more than one
+     handoff into ONE backing turn (`native-voice-work-identity.md`), so a turn
+     that claimed A's card can since have been given B's speech as well — and
+     the claim, keyed on the turn id, went on answering A. An agent then acted on
+     the conversation the operator had moved off, which is precisely what
+     `native-codex-experience.md` §Limits says stays refused. */
+  bindVoiceSession(CONVERSATION, "rt-1", DESK);
+  spokenTurn(1, "conversation_atlas_a", "handoff-a");
+  expect(cardOf(readCard("turn-shared"))).toBe("conversation_atlas_a");
+
+  spokenTurn(2, "conversation_atlas_b", "handoff-b");
+  const answered = readCard("turn-shared");
+  expect(answered.state).toBe("ambiguous");
+  expect(answered.state === "ambiguous" && answered.reason).toContain("spoken again");
+});
+
+test("the binding itself is not reassigned, and comes back once the later speech has its own turn", () => {
+  /* An accepted binding is never handed to another card: what the shared turn
+     loses is the right to answer IMPLICITLY while a handoff it may also carry is
+     outstanding. Once that handoff is claimed by the turn it actually belongs
+     to, this caller reads its own card again. */
+  bindVoiceSession(CONVERSATION, "rt-1", DESK);
+  spokenTurn(1, "conversation_atlas_a", "handoff-a");
+  expect(cardOf(readCard("turn-a"))).toBe("conversation_atlas_a");
+  spokenTurn(2, "conversation_atlas_b", "handoff-b");
+  expect(readCard("turn-a").state).toBe("ambiguous");
+
+  expect(cardOf(readCard("turn-b"))).toBe("conversation_atlas_b");
+  expect(cardOf(readCard("turn-a"))).toBe("conversation_atlas_a");
+});
+
 test("two unclaimed joins are ambiguous, and neither is offered", () => {
   /* Native can steer several handoffs into ONE backing turn, so an unclaimed
      pair has no discriminator. The answer is the uncertainty itself. */
