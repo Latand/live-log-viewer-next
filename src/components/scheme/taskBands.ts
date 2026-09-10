@@ -230,18 +230,16 @@ export function buildTaskBands(base: SchemeLayout, sources: BandSources): TaskBa
   };
 
   /* 1. Recorded tasks, claimed in creation order so a shared conversation's
-        canonical surface is stable across polls and activity changes. */
-  /* Tasks the operator removed from the board draw no band — but only while
-     they are genuinely empty. Emptiness is read from the task's own recorded
-     assignments (`taskShowsOnBoard`), not from what this viewport happens to
-     hold: a conversation that is simply off this page, or in another project,
-     must not turn its task into a hidden one. A hidden task that later gets an
-     agent comes back on its own, with no flag change. A launch this session
-     started but whose assignment is not persisted yet counts the same way, so
-     the band the operator just spawned into never blinks out. */
+        canonical surface is stable across polls and activity changes.
+
+     Every task is built here, including the ones the operator took off the
+     board: what a band resolved is the evidence the flag is applied to, and
+     that is only known once it has been built. The filter runs at the end.
+     A launch this session started but whose assignment is not persisted yet
+     counts as membership too, so the band the operator just spawned into never
+     blinks out. */
   const provisionalTaskIds = new Set(provisionalMemberships?.values() ?? []);
   const orderedTasks = [...tasks]
-    .filter((task) => taskShowsOnBoard(task) || provisionalTaskIds.has(task.id))
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
   for (const task of orderedTasks) {
     const workflow = projection.tasks.find((entry) => entry.task.id === task.id);
@@ -381,7 +379,27 @@ export function buildTaskBands(base: SchemeLayout, sources: BandSources): TaskBa
     }
     band.planned = band.members.filter((member) => member.kind === "slot" && base.slots.find((slot) => slot.key === member.key)?.presentation === "placeholder").length;
   }
-  return bands;
+  /* The board flag, applied to what each band actually resolved.
+     `bandHoldsMembers` is the one notion of membership on this surface: the
+     same predicate decides whether a hidden task draws a band at all and
+     whether the band offers «Remove from board» (TaskBandsLayer), so the board
+     can never present a control whose write it would then override. A band
+     that holds nothing has claimed nothing, so dropping it here releases no
+     conversation and moves no other band's members. */
+  return bands.filter((band) => band.origin !== "task" || !band.task
+    || taskShowsOnBoard(band.task, bandHoldsMembers(band))
+    || provisionalTaskIds.has(band.task.id));
+}
+
+/**
+ * Whether a band resolved anything the board is drawing for it: a conversation
+ * of its own, a mirror of one claimed by an earlier band, or a pipeline/flow
+ * container it owns. A task whose recorded assignments all point at
+ * conversations this board does not carry — archived, hidden, or simply never
+ * scanned again — holds nothing, and that is what the board flag governs.
+ */
+export function bandHoldsMembers(band: Pick<TaskBand, "members" | "mirrors" | "groups">): boolean {
+  return band.members.length > 0 || band.mirrors.length > 0 || band.groups.length > 0;
 }
 
 /** Working count descending, then creation ascending (tasks before undated

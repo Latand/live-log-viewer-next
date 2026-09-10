@@ -13,6 +13,7 @@ import {
   applyBandOrder,
   applyHostOverrides,
   bandEdgePorts,
+  bandHoldsMembers,
   bandModeFor,
   buildTaskBands,
   layoutTaskBands,
@@ -425,16 +426,53 @@ test("a hidden EMPTY task draws no band; a hidden task holding an agent still do
   expect(bands.find((band) => band.task?.id === "staffed")!.members.map((member) => member.key)).toContain(files[0]!.path);
 });
 
-test("emptiness is read from the task's own assignments, not from what this viewport holds (#1614 item 1)", () => {
-  /* The task's agent is recorded but its transcript is not in this scan — the
-     board is paged, or the conversation belongs to another project. A viewport
-     test would call this task empty and hide it; a durable one keeps it. */
-  const layout = base([file(0)]);
-  const hidden = { ...task("offscreen-agent", "2026-01-01T00:00:00Z", [file(9)]), board: "hidden" as const };
-  const band = buildTaskBands(layout, sources([hidden], [file(0)])).find((entry) => entry.task?.id === "offscreen-agent");
+test("membership, not history: a hidden task whose conversation the board no longer carries draws no band (#1614 item 1)", () => {
+  /* The interpretation this replaces read the assignment ROW: any task that had
+     ever been launched kept its band forever. On the reported board that left
+     319 of 385 empty bands in place — every one drawing «0 working · 0
+     conversations», which is the complaint. An assignment counts when it still
+     resolves to a conversation the board carries. */
+  const carried = file(0);
+  const gone = file(9);
+  const layout = base([carried]);
+  const stale = { ...task("archived-agent", "2026-01-01T00:00:00Z", [gone]), board: "hidden" as const };
+  const held = { ...task("live-agent", "2026-01-02T00:00:00Z", [carried]), board: "hidden" as const };
+  /* The board carries `carried` and nothing else: `gone` was archived, hidden,
+     or has aged out of the window. */
+  const bands = buildTaskBands(layout, sources([stale, held], [carried]));
+
+  expect(bands.find((entry) => entry.task?.id === "archived-agent")).toBeUndefined();
+  /* And the invariant that keeps a live conversation reachable still holds: a
+     task whose assignment still resolves overrides the flag. */
+  const live = bands.find((entry) => entry.task?.id === "live-agent");
+  expect(live).toBeDefined();
+  expect(live!.members.map((member) => member.key)).toEqual([carried.path]);
+});
+
+test("a member the camera is not showing is still a member (#1614 item 1)", () => {
+  /* Board membership is not camera visibility. This band's conversation sits
+     far outside any viewport the operator has framed — the board draws it, so
+     the task stays whatever the flag says. Nothing here consults a camera. */
+  const near = file(0);
+  const far = file(1);
+  const layout = base([near, far]);
+  layout.byPath.get(far.path)!.x = 48_000;
+  layout.byPath.get(far.path)!.y = 32_000;
+  const hidden = { ...task("far-agent", "2026-01-01T00:00:00Z", [far]), board: "hidden" as const };
+  const band = buildTaskBands(layout, sources([hidden], [near, far])).find((entry) => entry.task?.id === "far-agent");
   expect(band).toBeDefined();
-  /* It draws its band even though this layout placed none of its members. */
-  expect(band!.conversations).toBe(0);
+  expect(band!.members.map((member) => member.key)).toEqual([far.path]);
+});
+
+test("a hidden task keeps its band while it owns a container, even with no conversation of its own", () => {
+  /* `bandHoldsMembers` is what the flag is applied to, and a pipeline group the
+     band owns is something the board is drawing for it. */
+  const layout = base([]);
+  const hidden = { ...task("container", "2026-01-01T00:00:00Z", []), board: "hidden" as const };
+  const band = buildTaskBands(layout, sources([hidden], [])).find((entry) => entry.task?.id === "container");
+  expect(band).toBeUndefined();
+  expect(bandHoldsMembers({ members: [], mirrors: [], groups: [] })).toBe(false);
+  expect(bandHoldsMembers({ members: [], mirrors: [], groups: ["pipeline:p1"] })).toBe(true);
 });
 
 test("a launch this session started keeps its hidden task on the board before the assignment persists", () => {

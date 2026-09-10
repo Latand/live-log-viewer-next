@@ -10,7 +10,7 @@ import { TASK_TONES } from "@/components/tasks/taskModel";
 import { cleanTitle } from "@/components/utils";
 
 import type { SchemeRect } from "./layout";
-import { BAND, type BandContinuation, type BandMirror, type BandMode, type PlacedBand } from "./taskBands";
+import { BAND, bandHoldsMembers, type BandContinuation, type BandMirror, type BandMode, type PlacedBand } from "./taskBands";
 
 /**
  * Band chrome of the task-centered board (#1586): one full-width surface per
@@ -153,9 +153,13 @@ export const TaskBandsLayer = memo(function TaskBandsLayer({
               <div className="ml-auto flex shrink-0 items-center gap-2">
                 {/* An empty task's band can be taken off the board from where
                     the operator sees it. Reversible from the task list, which
-                    keeps every task; a band holding a conversation has no such
-                    control, because the flag would not apply to it. */}
-                {band.task && band.conversations === 0 && band.members.length === 0 ? (
+                    keeps every task. `bandHoldsMembers` is the same predicate
+                    that decides whether the flag is honoured at all, so this
+                    control appears exactly where pressing it does something: a
+                    band holding a conversation, a mirror of one, or a container
+                    is not offered it, because the board would override the
+                    write. */}
+                {band.task && !bandHoldsMembers(band) ? (
                   <button
                     type="button"
                     data-scheme-band-remove={band.task.id}
