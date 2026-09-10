@@ -61,7 +61,7 @@ import {
   withComposerAdmissionDeadline,
 } from "./composerAdmissionDeadline";
 import { RuntimePill } from "./RuntimePill";
-import { savedResumeProfile, sendRuntimeFrom, type RuntimeProfile } from "./runtimeProfile";
+import { observedModelId, savedResumeProfile, sendRuntimeFrom, type RuntimeProfile } from "./runtimeProfile";
 import { type PendingAttachment, type PendingFile, type PendingImage, type RestoredFile } from "./imageAttachments";
 import {
   DELIVERY_WAIT_TICK_MS,
@@ -1212,6 +1212,62 @@ function canMessageWithoutPane(file: FileEntry): boolean {
 const draftKey = (id: string) => "llvDraft:" + id;
 const COMPOSE_EVENT = "llv-compose-draft";
 
+/** Where a queue hand-off whose outcome nobody knows keeps its identity. */
+const queueAdmissionKey = (id: string) => "llvQueueAdmission:" + id;
+
+/**
+ * The Codex-queue hand-off this browser cannot say the outcome of (#1629).
+ *
+ * A queue add is one durable operation identified by its idempotency key, and
+ * the runtime journal answers a replay of that key with the operation it already
+ * holds. So the ONLY safe next move after a lost reply is to press again with
+ * the SAME key: the journal either replays the admission it committed or admits
+ * it now, and exactly one message reaches Codex either way. Minting a fresh key
+ * for the second press made the two indistinguishable operations, which is how
+ * Codex could receive one message twice with nothing able to reconcile them.
+ *
+ * It is a record of identity and nothing else. Nothing here resends, retries or
+ * schedules: native owns dispatch and this adds no second owner. It survives a
+ * reload because the request it describes did too — the operator returning to a
+ * restored draft presses the same button and replays the same operation.
+ *
+ * `images` is a comparison device rather than a payload. The draft itself is
+ * restored by the composer, and this only has to decide whether the next press is the
+ * SAME message. A different message is genuinely a different operation and gets
+ * its own key. A false match is answered by the journal's own request-hash
+ * check, which refuses the replay in the operator's sight rather than admitting
+ * a second one.
+ */
+interface RetainedQueueAdmission {
+  key: string;
+  text: string;
+  images: string[];
+}
+
+function queueAdmissionFingerprint(images: readonly { base64: string; mime: string }[]): string[] {
+  return images.map((image) => `${image.mime}:${image.base64.length}`);
+}
+
+function readRetainedQueueAdmission(id: string): RetainedQueueAdmission | null {
+  try {
+    const raw: unknown = JSON.parse(sessionStorage.getItem(queueAdmissionKey(id)) ?? "null");
+    if (!raw || typeof raw !== "object") return null;
+    const value = raw as Partial<RetainedQueueAdmission>;
+    if (typeof value.key !== "string" || !value.key || typeof value.text !== "string") return null;
+    if (!Array.isArray(value.images) || value.images.some((item) => typeof item !== "string")) return null;
+    return { key: value.key, text: value.text, images: value.images as string[] };
+  } catch {
+    return null;
+  }
+}
+
+function writeRetainedQueueAdmission(id: string, retained: RetainedQueueAdmission | null): void {
+  try {
+    if (retained) sessionStorage.setItem(queueAdmissionKey(id), JSON.stringify(retained));
+    else sessionStorage.removeItem(queueAdmissionKey(id));
+  } catch { /* quota/opaque-origin: the in-memory press still carries the key */ }
+}
+
 /** Links a transcript path to the identity whose sessionStorage records hold
     that conversation's composer state, so an id rotation can find them. */
 const composerOwnerKey = (path: string) => "llvComposerOwner:" + path;
@@ -1230,7 +1286,7 @@ export function adoptComposerState(path: string, cardId: string): void {
     const previousOwner = sessionStorage.getItem(composerOwnerKey(path));
     for (const from of [previousOwner, path]) {
       if (!from || from === cardId) continue;
-      for (const keyOf of [draftKey, draftImagesKey, draftFilesKey, pendingSendKey, sentKey, dismissedReceiptsKey]) {
+      for (const keyOf of [draftKey, draftImagesKey, draftFilesKey, pendingSendKey, sentKey, dismissedReceiptsKey, queueAdmissionKey]) {
         const legacy = sessionStorage.getItem(keyOf(from));
         if (legacy === null) continue;
         if (sessionStorage.getItem(keyOf(cardId)) === null) sessionStorage.setItem(keyOf(cardId), legacy);
@@ -2841,6 +2897,19 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
        everything the reference will ever say is decided now. */
     const reference = viewerSelectedContext();
     const snapshot = { text: textRef.current, images: requestedImages };
+    /* THE SAME MESSAGE KEEPS THE SAME OPERATION. A hand-off whose reply this
+       browser never saw may already be in the journal, so pressing again mints
+       nothing: the retained key replays that one operation instead of admitting
+       a second, indistinguishable one. Only a message that is no longer the same
+       message is a new operation. */
+    const fingerprint = queueAdmissionFingerprint(requestedImages);
+    const retained = readRetainedQueueAdmission(cardId);
+    const replaying = retained !== null
+      && retained.text === requestedText
+      && retained.images.length === fingerprint.length
+      && retained.images.every((item, index) => item === fingerprint[index]);
+    const idempotencyKey = replaying ? retained.key : mintIdempotencyKey();
+    if (!replaying) writeRetainedQueueAdmission(cardId, null);
     setText("");
     attachments.clearAll();
     setStatus({ kind: "ok", text: t("queue.queueMessage") });
@@ -2858,13 +2927,20 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
            runs on the thread's settings when Codex dispatches it. */
         ...(requested ? { runtime: requested } : {}),
         ...(reference ? { selectedContext: reference } : {}),
-      }, mintIdempotencyKey());
+      }, idempotencyKey);
+      /* Both terminal answers end the operation's uncertainty. `ok` is the
+         journal's own receipt for it — including the replay of one it already
+         held — and a refusal is the journal saying it admitted nothing. */
+      if (answer.outcome !== "unknown") writeRetainedQueueAdmission(cardId, null);
       if (answer.ok) return;
       /* A REFUSED ADMISSION GIVES THE DRAFT BACK, ATTACHMENTS AND ALL. Nothing
          was queued, so the words and the tiles belong in the composer where the
          operator left them — losing them to a refusal is the failure the outbox
          exists to prevent on the other path. Neither is restored over something
          the operator has typed or staged since. */
+      if (answer.outcome === "unknown") {
+        writeRetainedQueueAdmission(cardId, { key: idempotencyKey, text: requestedText, images: fingerprint });
+      }
       setStatus({ kind: "err", text: answer.error ?? t("queue.refused") });
       setText((current) => current || snapshot.text);
       if (snapshot.images.length && attachments.imagesRef.current.length === 0) {
@@ -3070,10 +3146,16 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
           loading={nativeQueue.loading}
           error={nativeQueue.error}
           thread={{
-            /* The thread's own settings, which is what a queued message will
-               actually run on: native's queue carries no per-entry profile. */
-            model: sendRuntimeFrom(file)?.model ?? null,
-            effort: sendRuntimeFrom(file)?.effort ?? null,
+            /* WHAT THE HOST IS OBSERVED RUNNING. The composer's own pending
+               request is a separate line below it. Native's queue carries no per-entry profile, so a queued
+               message runs on the thread's settings at dispatch — and the row's
+               separate "asked for" line only means anything while the two come
+               from different places. `sendRuntimeFrom` is the operator's pending
+               next-send selection, so using it for both collapsed the request
+               into the effective profile and the difference stopped being
+               visible. A thread the Viewer has observed nothing about says so. */
+            model: observedModelId(file),
+            effort: file.effort ?? null,
           }}
           mintKey={mintIdempotencyKey}
           submit={nativeQueue.submit}

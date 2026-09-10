@@ -49,6 +49,16 @@ export interface NativeQueueMutation {
 
 export interface NativeQueueSubmission {
   ok: boolean;
+  /**
+   * What the journal actually said, on a submission that did not succeed.
+   *
+   * `refused` is a verdict: the journal was reached, it answered, and it
+   * admitted nothing. `unknown` is the absence of one — a thrown transport or a
+   * server error, where the operation may already be committed. The two need
+   * different next moves, and collapsing them into `ok: false` is how a caller
+   * ends up minting a second key for an operation that already exists.
+   */
+  outcome?: "refused" | "unknown";
   /** The runtime's own words when it refused, for the row to show verbatim. */
   error?: string;
   status?: number;
@@ -154,7 +164,8 @@ export function useNativeQueue(
   }, [conversationId, dependencies, enabled, changeRevision, localRevision]);
 
   const submit = useCallback(async (mutation: NativeQueueMutation, idempotencyKey: string): Promise<NativeQueueSubmission> => {
-    if (!threadId) return { ok: false, error: "this conversation has no native Codex thread" };
+    /* Nothing left this browser, so the journal holds nothing to replay. */
+    if (!threadId) return { ok: false, outcome: "refused", error: "this conversation has no native Codex thread" };
     const entryId = mutation.entryId;
     if (entryId) setInFlight((current) => new Set(current).add(entryId));
     try {
@@ -173,6 +184,10 @@ export function useNativeQueue(
       return failed || rejected
         ? {
           ok: false,
+          /* A 5xx is the server failing to answer for the journal, which is not
+             the journal refusing: the write may have committed before the
+             failure. Only a verdict it actually gave settles the operation. */
+          outcome: answer.status >= 500 ? "unknown" : "refused",
           status: answer.status,
           error: typeof answer.body.error === "string"
             ? answer.body.error
@@ -182,7 +197,7 @@ export function useNativeQueue(
     } catch (failure) {
       /* The request may or may not have reached the journal. Replaying the SAME
          key is the only safe next move, and it is the operator's to make. */
-      return { ok: false, error: failure instanceof Error ? failure.message : String(failure) };
+      return { ok: false, outcome: "unknown", error: failure instanceof Error ? failure.message : String(failure) };
     } finally {
       if (entryId) {
         setInFlight((current) => {

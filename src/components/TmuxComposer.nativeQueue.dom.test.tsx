@@ -13,6 +13,7 @@ import type { NativeQueueRecord } from "@/lib/runtime/nativeQueueContracts";
 import type { RuntimeSessionView } from "@/hooks/useRuntime";
 
 import { agentCapabilitiesFromViews } from "./useAgentCapabilities";
+import { writeProfile } from "./runtimeProfile";
 import { appendComposerDraft, TmuxComposer } from "./TmuxComposer";
 import { readOutbox, resetOutboxForTests } from "./conversation/outbox";
 import { setTmuxComposerRuntimeDependenciesForTests } from "./tmuxComposerRuntime";
@@ -133,6 +134,7 @@ function sessionView(): RuntimeSessionView {
 }
 
 beforeEach(() => {
+  observed = {};
   queueWrites = [];
   queueEntries = [];
   sends = [];
@@ -161,6 +163,9 @@ afterEach(() => {
   sessionStorage.clear();
   resetOutboxForTests();
 });
+
+/** Per-test fields of the conversation the board actually observed. */
+let observed: Partial<FileEntry> = {};
 
 const file = {
   path: "/codex.jsonl",
@@ -191,7 +196,7 @@ async function mount(): Promise<{ host: HTMLElement; root: Root }> {
   document.body.append(host);
   const root = createRoot(host);
   await act(async () => {
-    root.render(<TmuxComposer file={file} />);
+    root.render(<TmuxComposer file={{ ...file, ...observed }} />);
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
   return { host, root };
@@ -287,6 +292,30 @@ test("a queued message rides with what the operator had selected, as a request",
   await act(async () => root.unmount());
 });
 
+test("a queued row names the thread's OBSERVED settings, and the request separately", async () => {
+  /* The two lines only mean anything while they come from different places. The
+     panel used to be handed `sendRuntimeFrom(file)` for both — the operator's
+     pending NEXT-SEND selection. That is the request; the host's own runtime is
+     the effective profile — so "Runs on" stated a request as the effective one and the
+     "Asked for" line was suppressed for matching it. `profilePolicy:
+     "thread-at-dispatch"` exists precisely to keep them apart. */
+  observed = { model: "gpt-6-astra", effort: "medium" };
+  writeProfile({ ...file, ...observed } as FileEntry, { model: "gpt-6-astra", effort: "low" });
+  queueEntries = [{
+    entryId: "q1", conversationId: CARD, binding: { threadId: "thread-1", accountId: "acct-1" },
+    clientUserMessageId: "c1", nativeSubmissionId: null, revision: 1,
+    versions: [{ revision: 1, operationId: "q1", text: "queued", images: [], contentDigest: "d",
+      requestedRuntime: { model: "gpt-6-astra", effort: "low" } }],
+    profilePolicy: "thread-at-dispatch", state: "queued", mutationOperationId: null,
+    dispatchedRevision: null, dispatchedTurnId: null, proof: null, reason: null,
+  }];
+  const { host, root } = await mount();
+  const status = host.querySelector('[data-testid="native-queue-row-status"]')?.textContent ?? "";
+  expect(status).toContain("Runs on gpt-6-astra · medium");
+  expect(status).toContain("Asked for gpt-6-astra · low");
+  await act(async () => root.unmount());
+});
+
 test("a refused queue admission gives the draft back rather than losing it", async () => {
   const { host, root } = await mount();
   const textarea = host.querySelector("textarea") as HTMLTextAreaElement;
@@ -304,6 +333,94 @@ test("a refused queue admission gives the draft back rather than losing it", asy
   } finally {
     (queueTransport as { write: NativeQueueDependencies["write"] }).write = previous;
   }
+  await act(async () => root.unmount());
+});
+
+test("a hand-off whose reply was lost is replayed under its own identity", async () => {
+  /* A queue add is ONE durable operation named by its idempotency key, and the
+     journal answers a replay of that key with the operation it already holds. A
+     thrown transport is the case where the journal may already have committed
+     it, so minting a fresh key for the second press made the two
+     indistinguishable operations — Codex could receive the message twice with
+     nothing able to reconcile them. */
+  const { host, root } = await mount();
+  const textarea = host.querySelector("textarea") as HTMLTextAreaElement;
+  const previous = queueTransport.write;
+  (queueTransport as { write: NativeQueueDependencies["write"] }).write = async (body) => {
+    queueWrites.push(body);
+    throw new Error("network is unreachable");
+  };
+  try {
+    await settle(() => appendComposerDraft(CARD, "queue this once"));
+    await settle(() => press(textarea, "Enter", { altKey: true }));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    /* The draft is back, exactly as a refusal returns it. */
+    expect((host.querySelector("textarea") as HTMLTextAreaElement).value).toBe("queue this once");
+
+    await settle(() => press(host.querySelector("textarea") as HTMLTextAreaElement, "Enter", { altKey: true }));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+  } finally {
+    (queueTransport as { write: NativeQueueDependencies["write"] }).write = previous;
+  }
+  expect(queueWrites).toHaveLength(2);
+  expect(queueWrites[1]!.idempotencyKey).toBe(queueWrites[0]!.idempotencyKey);
+  expect(queueWrites[1]!.text).toBe(queueWrites[0]!.text);
+  await act(async () => root.unmount());
+});
+
+test("the retained identity survives a reload, and a different message gets its own", async () => {
+  /* The request it describes survived the page, so the record does too: an
+     operator who comes back to a restored draft and presses again replays the
+     same operation. A message that is no longer the same message is genuinely a
+     different operation and mints its own key — replaying the retained one there
+     would submit words the operator has since changed. */
+  const lose = async (body: Record<string, unknown>) => {
+    queueWrites.push(body);
+    throw new Error("network is unreachable");
+  };
+  const previous = queueTransport.write;
+  (queueTransport as { write: NativeQueueDependencies["write"] }).write = lose;
+  try {
+    const first = await mount();
+    await settle(() => appendComposerDraft(CARD, "survives a reload"));
+    await settle(() => press(first.host.querySelector("textarea") as HTMLTextAreaElement, "Enter", { altKey: true }));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    await act(async () => first.root.unmount());
+    document.body.replaceChildren();
+
+    /* A fresh page: the draft is restored from the same session record the
+       composer has always kept, and so is the operation's identity. */
+    const second = await mount();
+    await settle(() => press(second.host.querySelector("textarea") as HTMLTextAreaElement, "Enter", { altKey: true }));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    expect(queueWrites).toHaveLength(2);
+    expect(queueWrites[1]!.idempotencyKey).toBe(queueWrites[0]!.idempotencyKey);
+
+    const restored = second.host.querySelector("textarea") as HTMLTextAreaElement;
+    await settle(() => appendComposerDraft(CARD, "and something else entirely"));
+    await settle(() => press(restored, "Enter", { altKey: true }));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    expect(queueWrites).toHaveLength(3);
+    expect(queueWrites[2]!.idempotencyKey).not.toBe(queueWrites[0]!.idempotencyKey);
+    await act(async () => second.root.unmount());
+  } finally {
+    (queueTransport as { write: NativeQueueDependencies["write"] }).write = previous;
+  }
+});
+
+test("an admission the journal answered releases its identity, so the next message is new", async () => {
+  const { host, root } = await mount();
+  const textarea = host.querySelector("textarea") as HTMLTextAreaElement;
+  await settle(() => appendComposerDraft(CARD, "first message"));
+  await settle(() => press(textarea, "Enter", { altKey: true }));
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+  await settle(() => appendComposerDraft(CARD, "first message"));
+  await settle(() => press(host.querySelector("textarea") as HTMLTextAreaElement, "Enter", { altKey: true }));
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+  /* Same words, deliberately sent twice: the journal gave a verdict on the
+     first, so the second is a second message and not a replay of the first. */
+  expect(queueWrites).toHaveLength(2);
+  expect(queueWrites[1]!.idempotencyKey).not.toBe(queueWrites[0]!.idempotencyKey);
   await act(async () => root.unmount());
 });
 
