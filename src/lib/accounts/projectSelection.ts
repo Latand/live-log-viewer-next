@@ -84,16 +84,24 @@ import {
  * A new automatic seam belongs on this list and behind one of the two functions
  * below. A new one that reads the pool itself is the defect coming back.
  *
- * WHAT THIS LIST IS ABOUT, restated because half of (1) and (2) stopped being
- * on it (operator directive, 2026-09-10): it is the inventory of places that
- * choose an account WITHOUT BEING TOLD WHICH. A launch that NAMES one is not
- * one of them. It is a control somebody worked — the launch draft's picker, the
+ * WHAT THIS LIST IS ABOUT, restated because (1)'s NAMED branch stopped being on
+ * it (operator directive, 2026-09-10): it is the inventory of places that choose
+ * an account WITHOUT BEING TOLD WHICH. A launch that NAMES one is not one of
+ * them. It is a control somebody worked — the launch draft's picker, the
  * orchestrator's rotate draft, `spawn_agent`'s `accountId` — and the binding is
  * a default for the machine's own picks, never a veto on a person's. Such a
  * choice passes `requestedChoice: "explicit"` to `selectProjectAccount`, which
  * carries it out; the launch seam attributes the crossing against the record
- * itself (`accountOverrides.ts`). Everything on the list above is unchanged and
- * still draws from the pool only.
+ * itself (`accountOverrides.ts`).
+ *
+ * ONE branch, and the scope is worth being exact about: only
+ * `resolveHealthySpawnAccount` passes `explicit`, and only when the request
+ * named an account. Its own automatic pick is unchanged, and so is every other
+ * entry above — (2) `resolveProjectSpawn` in particular, where a task launch, a
+ * pipeline stage, a workflow stage or the flow's pane reviewer passes a
+ * `requestedId` it FORWARDED rather than one anybody chose here. That id is
+ * still refused outside the pool (`managerProjectBinding.test.ts` asserts it),
+ * because nobody worked a control to produce it.
  */
 
 /** What #1279's rule decides for one launch, before any home or env is resolved. */

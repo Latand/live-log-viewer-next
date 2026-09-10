@@ -395,6 +395,28 @@ test("a damaged record leaves a named CLAUDE account nowhere to degrade onto eit
   expect((refused as { accountIds?: string[] }).accountIds).not.toContain(claudeSpare);
 });
 
+test("a damaged record and a named account that is GONE answers about the record, not about logins", async () => {
+  /* The one corner where narrowing the candidate set could hand the operator
+     the wrong repair: with no pool readable and the named account deleted, the
+     set is empty and the health pass would refuse with "no healthy Claude
+     account is available. Re-login…" — a true sentence about a state nobody is
+     in. Both engines name the thing that is actually wrong. */
+  registryWith(spare, [], claudeSpare);
+  fs.mkdirSync(STATE, { recursive: true });
+  fs.writeFileSync(RECORD, '{"schemaVersion":1,"bindings":[{"engine":"codex"', "utf8");
+
+  const claude = await resolveHealthySpawnAccount("claude", "claude-account-that-was-deleted", ATLAS)
+    .then(() => null, (error: unknown) => error);
+  expect(claude).toBeInstanceOf(AccountProjectBindingsUnreadableError);
+  expect((claude as Error).message).toContain("account-project-bindings.json");
+  expect((claude as Error).message).not.toContain("Re-login");
+
+  /* Codex says it its own way, naming the account the request asked for. */
+  const codex = await resolveHealthySpawnAccount("codex", "codex-account-that-was-deleted", ATLAS)
+    .then(() => null, (error: unknown) => error);
+  expect((codex as Error).message).toContain("codex-account-that-was-deleted");
+});
+
 test("a damaged record leaves a named account that does NOT exist with nowhere to fall back to", async () => {
   /* The fallback below the named account is the AUTOMATIC pick, and on an
      unreadable record there isn't one. Falling back here would be the machine

@@ -834,8 +834,8 @@ export async function executeSpawnRequest(
        retried, an existing attempt resumed — is the same launch arriving twice,
        not a second choice, and the journal is capped: duplicates evict the
        older crossings it exists to keep. */
-    if (begun.kind === "created" && requestedAccountId && account.accountId === requestedAccountId) {
-      attributeNamedAccountChoice({
+    const accountOverride = begun.kind === "created" && requestedAccountId && account.accountId === requestedAccountId
+      ? attributeNamedAccountChoice({
         engine,
         project: spawnProject,
         accountId: requestedAccountId,
@@ -844,8 +844,18 @@ export async function executeSpawnRequest(
           ? { kind: "agent", conversationId: authenticatedCaller.conversationId }
           : { kind: "operator" },
         via: "launch",
-      });
-    }
+      }) ?? undefined
+      : undefined;
+    /* THE NOTICE RIDES THE ANSWER, as it does at the two switch seams
+       (`delivery.ts`, `structuredControls.ts`). It is the contract
+       `attributeNamedAccountChoice` states: a journal that would not take the
+       record answers `recorded: false` with the reason, and the caller's answer
+       carries it to whoever made the choice. That matters more here than there
+       — this journal is now the ONLY thing that makes an out-of-pool launch
+       visible, so a state directory that cannot be written to would otherwise
+       let the crossing happen behind a perfectly ordinary spawn response. */
+    const withAccountOverride = (body: SpawnResponse): SpawnResponse =>
+      (accountOverride ? { ...body, accountOverride } : body);
     let queuedReceipt = begun.receipt;
     if (queuedUntil && queuedTitle && requestedAccountId) {
       const existingQueue = begun.receipt.queuedPinnedSpawn;
@@ -1024,10 +1034,10 @@ export async function executeSpawnRequest(
         && identityMaterializationFence(registry.readOnlySnapshot()).allowsReceipt(receipt, { structured })) {
         await adoptMaterializedAttempt(receipt, receipt.artifactPath);
       }
-      const response = spawnResponseForReceipt(receipt, receipt.artifactPath, {
+      const response = withAccountOverride(spawnResponseForReceipt(receipt, receipt.artifactPath, {
         structured,
         initialMessage: queuedUntil ? "queued" : initialMessage,
-      });
+      }));
       return NextResponse.json(response, { status: spawnReplayStatus(response, structured) });
     }
     if (queuedUntil) {
@@ -1036,10 +1046,10 @@ export async function executeSpawnRequest(
         ? registry.releaseSpawnActuation(queuedReceipt.launchId, queuedReceipt.admissionOwner).receipt
         : queuedReceipt;
       return NextResponse.json(
-        spawnResponseForReceipt(releasedQueuedReceipt, releasedQueuedReceipt.artifactPath, {
+        withAccountOverride(spawnResponseForReceipt(releasedQueuedReceipt, releasedQueuedReceipt.artifactPath, {
           structured: transport === "structured",
           initialMessage: "queued",
-        }),
+        })),
         { status: 202 },
       );
     }
@@ -1052,9 +1062,9 @@ export async function executeSpawnRequest(
       catch (error) { throw new RuntimeImageStorageError(error instanceof Error ? error.message : String(error)); }
       deferStructuredSpawn(begun.receipt, runtimeClient, imageRefs);
       return NextResponse.json(
-        spawnResponseForReceipt(begun.receipt, begun.receipt.artifactPath, {
+        withAccountOverride(spawnResponseForReceipt(begun.receipt, begun.receipt.artifactPath, {
           structured: true,
-        }),
+        })),
         { status: 202 },
       );
     }
@@ -1094,11 +1104,11 @@ export async function executeSpawnRequest(
     if (!pane.host || !await verifyTmuxHostEvidence(pane.host)) {
       agentRegistry().invalidateSpawnHost(begun.receipt.launchId, "spawn host disappeared before API confirmation");
       const lost = agentRegistry().readOnlySnapshot().receipts[begun.receipt.launchId]!;
-      return NextResponse.json(spawnResponseForReceipt(lost, childPath));
+      return NextResponse.json(withAccountOverride(spawnResponseForReceipt(lost, childPath)));
     }
     if (!childPath || !key || !pane.receipt) {
       const pending = agentRegistry().markSpawnPathPending(begun.receipt.launchId);
-      return NextResponse.json(spawnResponseForReceipt(pending, null));
+      return NextResponse.json(withAccountOverride(spawnResponseForReceipt(pending, null)));
     }
     const settled = agentRegistry().settleSpawn(pane.receipt.launchId, {
       key,
@@ -1111,7 +1121,7 @@ export async function executeSpawnRequest(
       claimOwner: null,
       pendingAction: "spawn",
     });
-    if (settled.kind === "conflict") return NextResponse.json(spawnResponseForReceipt(settled.receipt));
+    if (settled.kind === "conflict") return NextResponse.json(withAccountOverride(spawnResponseForReceipt(settled.receipt)));
     recordActualLaunchAccount(settled.receipt, account.accountId, childPath);
     await adoptMaterializedAttempt(settled.receipt, childPath);
     if (runtimeClient && operationId) {
@@ -1138,9 +1148,9 @@ export async function executeSpawnRequest(
     if (!await verifyTmuxHostEvidence(pane.host)) {
       agentRegistry().invalidateSpawnHost(begun.receipt.launchId, "spawn host disappeared before API response");
       const lost = agentRegistry().readOnlySnapshot().receipts[begun.receipt.launchId]!;
-      return NextResponse.json(spawnResponseForReceipt(lost, childPath));
+      return NextResponse.json(withAccountOverride(spawnResponseForReceipt(lost, childPath)));
     }
-    return NextResponse.json(spawnResponseForReceipt(settled.receipt, childPath));
+    return NextResponse.json(withAccountOverride(spawnResponseForReceipt(settled.receipt, childPath)));
   } catch (error) {
     const receipt = launchId ? registry.readOnlySnapshot().receipts[launchId] : null;
     if (!receipt || receipt.pane === null) {

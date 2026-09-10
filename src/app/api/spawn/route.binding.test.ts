@@ -74,6 +74,12 @@ async function spawn(
   /** A registry shared across calls, so a second request with the same
       `clientAttemptId` is a REPLAY rather than a fresh launch. */
   sharedStore?: InstanceType<typeof AgentRegistry>,
+  /** Report the named account as rate-limited until this instant, which is how
+      the route reaches its QUEUED answer: a 202 carrying a real
+      `SpawnResponse`, with no process started anywhere. It is the only success
+      shape this suite can produce — every other one ends in the tmux launcher,
+      which reads the process-global registry rather than the injected one. */
+  admissionRetryAt?: string,
 ): Promise<{
   status: number;
   error: string;
@@ -84,6 +90,8 @@ async function spawn(
       route contributes to the fence. */
   projects: (string | null | undefined)[];
   receipts: number;
+  /** The out-of-pool notice on the route's OWN answer, when it carried one. */
+  accountOverride: { recorded?: boolean; recordFailure?: string; accountId?: string; reason?: string } | null;
 }> {
   const store = sharedStore ?? new AgentRegistry(path.join(SANDBOX, `${clientAttemptId}.json`));
   let accountResolutions = 0;
@@ -106,6 +114,9 @@ async function spawn(
        nothing downstream of it — the attribution below included — can be
        observed at all. */
     resolveSpawnAccount: (_engine: unknown, accountId: string) => accountContext(accountId),
+    /* The queued answer stores the launch's images before it parks the pin;
+       this suite sends none. */
+    storeImages: () => [],
     resolveHealthySpawnAccount: async (
       _engine: unknown,
       requested: unknown,
@@ -117,7 +128,10 @@ async function spawn(
       /* The seam resolves an explicitly named account TO ITSELF, pool or no
          pool — that is the rule this stub stands in for, and it is what the
          route's attribution has to see to record the crossing. */
-      return accountContext(typeof requested === "string" && requested ? requested : "acct-default");
+      const context = accountContext(typeof requested === "string" && requested ? requested : "acct-default");
+      return admissionRetryAt
+        ? { ...context, requestedAdmission: { kind: "retry-at", retryAt: admissionRetryAt } }
+        : context;
     },
     defer: (work: () => unknown) => { void work(); },
   } as unknown as SpawnRouteDependencies;
@@ -134,13 +148,17 @@ async function spawn(
       ...(requestedAccountId ? { accountId: requestedAccountId } : {}),
     }),
   }), dependencies);
-  const payload = await response.json() as { error?: string };
+  const payload = await response.json() as {
+    error?: string;
+    accountOverride?: { recorded?: boolean; recordFailure?: string; accountId?: string; reason?: string };
+  };
   return {
     status: response.status,
     error: payload.error ?? "",
     accountResolutions,
     projects,
     receipts: Object.keys(store.snapshot().receipts).length,
+    accountOverride: payload.accountOverride ?? null,
   };
 }
 
@@ -395,4 +413,59 @@ test("a second request under the same attempt id appends no second crossing", as
   expect(second.receipts).toBe(1);
   const { accountProjectOverrides } = await import("@/lib/accounts/accountOverrides");
   expect(accountProjectOverrides({ project })).toHaveLength(1);
+});
+
+/**
+ * THE NOTICE RIDES THE ANSWER, which is `attributeNamedAccountChoice`'s own
+ * contract and what both switch seams already do: a journal that would not take
+ * the record answers `recorded: false` with the reason, and the caller's answer
+ * carries it to whoever made the choice. It matters more at this seam than at
+ * those — this record is the ONLY thing that makes an out-of-pool launch
+ * visible now that the binding does not refuse one, so a state directory that
+ * cannot be written to must not leave the crossing behind an ordinary spawn
+ * response.
+ */
+test("an out-of-pool launch carries its notice on the route's own answer", async () => {
+  const cwd = fs.mkdtempSync(path.join(SANDBOX, "notice-recorded-"));
+  const project = projectForCwd(cwd)!;
+  fs.writeFileSync(RECORD, JSON.stringify({
+    schemaVersion: 1,
+    bindings: [{ engine: "claude", accountId: "acct-reserved", project, createdAt: "2026-09-10T00:00:00.000Z" }],
+  }), "utf8");
+  const retryAt = new Date(Date.now() + 600_000).toISOString();
+
+  const attempt = await spawn(cwd, "binding_notice_recorded_20260910", undefined, "acct-chosen-by-hand", undefined, retryAt);
+
+  expect(attempt.status).toBe(202);
+  expect(attempt.accountOverride).toMatchObject({
+    accountId: "acct-chosen-by-hand",
+    reason: "outside-pool",
+    recorded: true,
+  });
+});
+
+test("a record the journal REFUSED says so on the answer rather than only in a server log", async () => {
+  const cwd = fs.mkdtempSync(path.join(SANDBOX, "notice-unrecordable-"));
+  const project = projectForCwd(cwd)!;
+  fs.writeFileSync(RECORD, JSON.stringify({
+    schemaVersion: 1,
+    bindings: [{ engine: "claude", accountId: "acct-reserved", project, createdAt: "2026-09-10T00:00:00.000Z" }],
+  }), "utf8");
+  /* A DIRECTORY where the journal's file belongs: the durable write cannot
+     rename over it, so the record is refused while the launch is not. */
+  const journal = path.join(STATE, "account-project-overrides.json");
+  fs.rmSync(journal, { recursive: true, force: true });
+  fs.mkdirSync(journal, { recursive: true });
+  const retryAt = new Date(Date.now() + 600_000).toISOString();
+  try {
+    const attempt = await spawn(cwd, "binding_notice_refused_20260910", undefined, "acct-chosen-by-hand", undefined, retryAt);
+
+    /* The launch was NOT refused for it — attribution that failed to write is
+       not a reason to refuse a gesture the operator is entitled to make. */
+    expect(attempt.status).toBe(202);
+    expect(attempt.accountOverride).toMatchObject({ accountId: "acct-chosen-by-hand", recorded: false });
+    expect(attempt.accountOverride?.recordFailure).toBeTruthy();
+  } finally {
+    fs.rmSync(journal, { recursive: true, force: true });
+  }
 });

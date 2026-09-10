@@ -74,13 +74,16 @@ export async function resolveHealthySpawnAccount(
      anybody made, and it must not veto a control the operator exercised. Same
      split as `explicitAccountChoice`, reached here rather than restated. */
   let bindings: AccountProjectBinding[];
-  let recordUnreadable = false;
+  /* The error itself, not a flag: the branches below that have nothing left to
+     fall back to answer WITH it, so an operator reading the refusal is told
+     which record to repair rather than which account to re-login. */
+  let recordUnreadable: AccountProjectBindingsUnreadableError | null = null;
   try {
     bindings = accountProjectBindings();
   } catch (error) {
     if (named === null || !(error instanceof AccountProjectBindingsUnreadableError)) throw error;
     bindings = [];
-    recordUnreadable = true;
+    recordUnreadable = error;
   }
   const allowedAccountIds = allowedAccountIdsForProject(project, engine, bindings);
   const allowed = allowedAccountIds === null ? null : new Set(allowedAccountIds);
@@ -121,7 +124,7 @@ export async function resolveHealthySpawnAccount(
      the fallback is the engine's own default and `contextForSpawn(undefined)`
      is how this seam has always resolved it. Reading a missing id as a missing
      ANSWER would turn that into a throw. */
-  const hasAutomatic = automatic.kind === "available" && !recordUnreadable;
+  const hasAutomatic = automatic.kind === "available" && recordUnreadable === null;
   const active = hasAutomatic ? automatic.accountId ?? undefined : undefined;
   const routed = named ?? active;
   const missingRequested = classifySpawnAccountAdmission({
@@ -162,6 +165,15 @@ export async function resolveHealthySpawnAccount(
     : listClaudeAccounts().filter((account) =>
       allowed === null || allowed.has(account.id) || account.id === named);
   const requestedExists = named === null || accounts.some((account) => account.id === named);
+  /* ...and with the record unreadable, a named account the machine does not
+     have leaves that set EMPTY. The health pass would then refuse with "no
+     healthy Claude account is available. Re-login…", which is a true sentence
+     about a state nobody is in: nothing was wrong with any account, the request
+     named one that is gone and the record that would say where else to look
+     could not be read. The Codex twin keeps its reason (`UnknownAccountError`
+     names the account), so this branch says the same thing rather than handing
+     the operator the wrong repair. */
+  if (recordUnreadable && !requestedExists) throw recordUnreadable;
   try {
     const selected = await selectHealthyClaudeAccount(
       accounts,
