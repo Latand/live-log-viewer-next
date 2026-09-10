@@ -363,6 +363,31 @@ const REACH = (selector: string) => {
   return { present: true, pointer, keyboard, disabled };
 };
 
+/** The same question asked of EVERY node a selector matches — a menu's rows, a
+    receipt's actions — because a surface is reachable only if all of it is. */
+const REACH_ALL = (selector: string) => {
+  const nodes = [...document.querySelectorAll(selector)] as HTMLElement[];
+  if (nodes.length === 0) return { present: false, pointer: false, keyboard: false, disabled: false, count: 0 };
+  const pane = document.querySelector("#app section")!.getBoundingClientRect();
+  const seen = (node: HTMLElement) => {
+    const box = node.getBoundingClientRect();
+    const top = Math.max(box.top, pane.top);
+    const bottom = Math.min(box.bottom, pane.bottom);
+    if (bottom - top < Math.min(24, box.height)) return false;
+    return [0.1, 0.5, 0.9].some((share) => {
+      const at = document.elementFromPoint(box.x + box.width / 2, top + (bottom - top) * share);
+      return Boolean(at && (node.contains(at) || at.contains(node)));
+    });
+  };
+  const pointer = nodes.every((node) => { node.scrollIntoView({ block: "nearest" }); return seen(node); });
+  const keyboard = nodes.every((node) => {
+    if ((node as HTMLButtonElement).disabled) return true;
+    node.focus();
+    return document.activeElement === node && seen(node);
+  });
+  return { present: true, pointer, keyboard, disabled: false, count: nodes.length };
+};
+
 /** The conversation has to keep enough room to still be a conversation. */
 const MIN_FEED_PX = 120;
 /** And a surface in the region has to keep enough of a window to be used
@@ -492,6 +517,18 @@ async function probeControls(view: Page, scenario: Case): Promise<ControlReading
     for (let index = 0; index < items; index += 1) {
       await probe(`send menu action ${index + 1}`, `[data-testid="composer-send-menu"] [role="menuitem"]:nth-of-type(${index + 1})`);
     }
+    await view.keyboard.press("Escape");
+    await view.waitForTimeout(80);
+  }
+  /* AND THE COMPOSER'S OWN RUNTIME CONTROL, which opens upward out of the same
+     box from the row under the input. The phone opens a sheet instead, which is
+     the whole viewport's and never this box's. */
+  if (scenario.surface === "card") {
+    await view.locator("[data-runtime-pill]").first().click();
+    await view.waitForTimeout(150);
+    await probe("runtime popover", "[data-runtime-popover]", true);
+    const rows = await view.evaluate(REACH_ALL, "[data-runtime-popover] [data-runtime-row]");
+    readings.push({ id: `runtime popover rows (${rows.count})`, present: rows.present, pointer: rows.pointer, keyboard: rows.keyboard, clickable: rows.keyboard });
     await view.keyboard.press("Escape");
     await view.waitForTimeout(80);
   }
