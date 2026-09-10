@@ -206,9 +206,22 @@ export function NativeQueuePanel({ view, error, thread, cardId, binding, unresol
       aria-label={t("queue.panel")}
       data-testid="native-queue-panel"
       data-stale={view.nativeStale ? "true" : undefined}
-      className="rounded-control border border-border bg-raised/60"
+      /* BOUNDED, BECAUSE IT SITS ABOVE THE INPUT. The composer's form does not
+         shrink, so an unbounded panel pushed the textarea and the send control
+         out of the pane entirely — the conversation's feed collapsed to nothing
+         first, and past about a dozen queued rows there was no way left to type
+         or send. The queue caps itself and scrolls its own rows instead, in the
+         same `max-h / overflow-y-auto / overscroll-contain` idiom the rest of
+         the app uses, so a wheel inside it never escapes to the board. The cap
+         is the smaller of a share of the viewport and a fixed ceiling, so a
+         tall screen keeps the conversation readable and a short one still gets
+         a usable queue. Below the cap nothing scrolls and nothing moves.
+         The phone composer already capped its whole form this way
+         (`max-h-[min(38dvh,20rem)]`), which is why this only ever bit
+         desktop. */
+      className="flex max-h-[min(45dvh,26rem)] flex-col rounded-control border border-border bg-raised/60"
     >
-      <header className="flex items-center gap-2 border-b border-border/60 px-2 py-1">
+      <header className="flex shrink-0 items-center gap-2 border-b border-border/60 px-2 py-1">
         <span className="text-caption font-medium text-secondary">{t("queue.title")}</span>
         <span data-testid="native-queue-count" className="text-caption text-muted">
           {t("queue.count", { count: view.rows.length })}
@@ -227,7 +240,7 @@ export function NativeQueuePanel({ view, error, thread, cardId, binding, unresol
       </header>
 
       {view.notice ? (
-        <p data-testid="native-queue-notice" role="status" className="border-b border-border/40 px-2 py-1 text-caption text-muted">
+        <p data-testid="native-queue-notice" role="status" className="shrink-0 border-b border-border/40 px-2 py-1 text-caption text-muted">
           {noticeText(view.notice, t)}
         </p>
       ) : null}
@@ -236,10 +249,12 @@ export function NativeQueuePanel({ view, error, thread, cardId, binding, unresol
         <section
           data-testid="native-queue-unresolved"
           aria-label={t("queue.unresolvedTitle")}
-          className="border-b border-warning/30 bg-warning/5 px-2 py-1.5"
+          className="shrink-0 border-b border-warning/30 bg-warning/5 px-2 py-1.5"
         >
           <p className="text-caption text-secondary">{t("queue.unresolved", { count: pending.length })}</p>
-          <ul className="mt-1 flex flex-col gap-1">
+          {/* Its own small cap, so a run of unanswered hand-offs cannot take the
+              room the queue's rows need to stay reachable. */}
+          <ul className="mt-1 flex max-h-24 flex-col gap-1 overflow-y-auto overscroll-contain">
             {pending.map((entry) => (
               <li key={entry.key} data-testid="native-queue-unresolved-row" data-key={entry.key} className="flex items-start gap-2">
                 <p className="min-w-0 flex-1 truncate text-ui text-primary">
@@ -261,7 +276,10 @@ export function NativeQueuePanel({ view, error, thread, cardId, binding, unresol
         </section>
       ) : null}
 
-      <ul className="divide-y divide-border/40">
+      {/* The one part that scrolls. No `flex-1`: its basis stays its content, so
+          a short queue is laid out exactly as before and only an overflowing one
+          shrinks against the cap above. */}
+      <ul data-testid="native-queue-rows" className="min-h-0 divide-y divide-border/40 overflow-y-auto overscroll-contain">
         {view.rows.map((row, index) => (
           <li key={row.entryId} data-testid="native-queue-row" data-entry={row.entryId} data-state={row.state} className="px-2 py-1.5">
             {editing === row.entryId ? (

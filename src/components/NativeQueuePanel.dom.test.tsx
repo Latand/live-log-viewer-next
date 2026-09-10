@@ -858,3 +858,35 @@ test("a slot this browser cannot READ refuses the control and leaves the bytes a
     Object.assign(globalThis, { sessionStorage: real });
   }
 });
+
+test("the queue bounds itself above the composer, and scrolls its own rows", async () => {
+  /* THE STRUCTURAL HALF of the height repair. happy-dom lays nothing out, so
+     what this can hold is the contract that makes the layout right: the panel
+     carries a max-height and the ROWS are the element that scrolls, with the
+     header and the recovery section outside that scroller so the queue-level
+     start and the replay controls never scroll away. The measurement itself —
+     input and send inside the pane, the conversation keeping room, the last row
+     reachable at 4/16/128 rows on both widths — is `scripts/capture-issue-1629-
+     queue-height.ts`, in a real browser, because only a browser has a layout.
+
+     Without the bound the composer's form, which does not shrink, grew until
+     the textarea and the send control were laid out past the pane's bottom edge
+     and clipped: at sixteen rows there was no way left to type or send. */
+  entries = Array.from({ length: 40 }, (_, index) => record(`e${index}`));
+  items = entries.map((entry) => submission(entry.entryId));
+  await mount({ turn: "idle" });
+
+  const panel = host.querySelector('[data-testid="native-queue-panel"]') as HTMLElement;
+  expect(panel.className).toContain("max-h-");
+  expect(panel.className).toContain("flex-col");
+
+  const list = host.querySelector('[data-testid="native-queue-rows"]') as HTMLElement;
+  expect(list.className).toContain("overflow-y-auto");
+  /* A wheel inside the queue stays in the queue rather than reaching the board. */
+  expect(list.className).toContain("overscroll-contain");
+  expect(list.querySelectorAll('[data-testid="native-queue-row"]')).toHaveLength(40);
+
+  /* The controls that must never scroll away are outside the scroller. */
+  expect(list.querySelector('[data-testid="native-queue-start"]')).toBeNull();
+  expect(host.querySelector('[data-testid="native-queue-start"]')).not.toBeNull();
+});
