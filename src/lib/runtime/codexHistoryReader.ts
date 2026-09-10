@@ -267,7 +267,12 @@ export type CodexHistoryDeliveryResult =
 
 function normalizedContent(content: ObjectValue[]): ObjectValue[] {
   return content.map((input) => {
-    if (input.type === "text") return { ...input, text_elements: input.text_elements ?? [] };
+    if (input.type === "text") return {
+      ...input,
+      text_elements: ((input.text_elements ?? []) as ObjectValue[]).map(span => ({
+        ...span, placeholder: span.placeholder ?? null,
+      })),
+    };
     if (input.type === "image" || input.type === "localImage") return { ...input, detail: input.detail ?? null };
     return input;
   });

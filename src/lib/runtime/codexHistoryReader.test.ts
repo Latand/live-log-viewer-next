@@ -104,6 +104,41 @@ describe("bounded canonical history", () => {
     expect((await lookup([metadata, page([turn()])], { ...target, content: [{ ...content[0], text_elements: [{ byteRange: { start: 0, end: 2 }, placeholder: "x" }] }] })).delivery.state).toBe("unknown");
   });
 
+  test("omitted and null span placeholders match without changing frozen content or other fields", async () => {
+    const span = { byteRange: { start: 0, end: 2 } };
+    const withSpan = (element: Record<string, unknown>) => [
+      { ...content[0], text_elements: [element] },
+      { type: "image", url: "fixture-image", detail: "original" },
+    ];
+    for (const canonicalSpan of [span, { ...span, placeholder: null }]) {
+      const responses = [metadata, page([turn([{ ...user, content: withSpan(canonicalSpan) }])])];
+      const before = structuredClone(responses);
+      for (const admittedSpan of [span, { ...span, placeholder: null }]) {
+        const wanted = { ...target, content: withSpan(admittedSpan) };
+        const frozen = structuredClone(wanted);
+        expect((await lookup(responses, wanted)).delivery.state).toBe("found");
+        expect(wanted).toEqual(frozen);
+      }
+      for (const changed of [
+        { content: withSpan({ ...span, placeholder: "" }) },
+        { content: withSpan({ ...span, placeholder: "marker" }) },
+        { content: withSpan({ byteRange: { start: 2, end: 4 } }) },
+        { content: withSpan({ byteRange: { start: 0, end: 4 } }) },
+        { content: [{ ...withSpan(span)[0], text: "Інший текст" }, withSpan(span)[1]] },
+        { content: [withSpan(span)[0], { type: "image", url: "other-image", detail: "original" }] },
+        { clientId: "other-key", content: withSpan(span) },
+        { turnId: "other-turn", content: withSpan(span) },
+        { itemId: "other-item", content: withSpan(span) },
+      ]) expect((await lookup(responses, { ...target, ...changed })).delivery.state).toBe("unknown");
+      expect(responses).toEqual(before);
+    }
+    const named = withSpan({ ...span, placeholder: "marker" });
+    const responses = [metadata, page([turn([{ ...user, content: named }])])];
+    expect((await lookup(responses, { ...target, content: named })).delivery.state).toBe("found");
+    expect((await lookup(responses, { ...target, content: withSpan({ ...span, placeholder: "changed" }) })).delivery.state).toBe("unknown");
+    expect((await lookup(responses, { ...target, content: withSpan(span) })).delivery.state).toBe("unknown");
+  });
+
   test("duplicate text under other keys is harmless, duplicate original keys are ambiguous", async () => {
     const other = { ...user, id: "item-b", clientId: "other-key" };
     expect((await lookup([metadata, page([turn([other, user])])])).delivery.state).toBe("found");
@@ -279,7 +314,9 @@ plugins = false
     const nativeIdentity = { threadId: started.thread.id, path: started.thread.path };
     const targets: CodexHistoryDeliveryTarget[] = [];
     for (let i = 0; i < 3; i++) {
-      const input = [{ type: "text", text: `Canonical fixture ${i} 🌍` }];
+      const input = [{ type: "text", text: `Canonical fixture ${i} 🌍`, text_elements: [
+        { byteRange: { start: 0, end: 9 }, ...(i === 0 ? {} : { placeholder: i === 1 ? null : "marker" }) },
+      ] }];
       const result = await client.rpc("turn/start", { threadId: nativeIdentity.threadId, clientUserMessageId: `original-${i}`, input }, 5000) as { turn: { id: string } };
       targets.push({ clientId: `original-${i}`, content: input, turnId: result.turn.id });
       const deadline = Date.now() + 8000;
@@ -296,7 +333,20 @@ plugins = false
     expect(history.turns).toHaveLength(3);
     expect(history.pages.filter(p => p.method === "thread/turns/list" && p.cursor !== null).length).toBeGreaterThanOrEqual(2);
     expect(history.pages.filter(p => p.method === "thread/items/list" && p.cursor !== null).length).toBeGreaterThanOrEqual(3);
-    for (const wanted of targets) expect(findCodexHistoryDelivery(history, wanted).state).toBe("found");
+    const firstUser = history.turns[0].items.find(item => item.clientId === targets[0].clientId);
+    expect(firstUser?.content).toEqual([{ ...targets[0].content[0], text_elements: [
+      { byteRange: { start: 0, end: 9 }, placeholder: null },
+    ] }]);
+    expect(targets[0].content[0].text_elements).toEqual([{ byteRange: { start: 0, end: 9 } }]);
+    for (const wanted of targets) {
+      expect(findCodexHistoryDelivery(history, wanted).state).toBe("found");
+      for (const element of [
+        { byteRange: { start: 0, end: 9 }, placeholder: "changed" },
+        { byteRange: { start: 0, end: 8 }, placeholder: null },
+      ]) expect(findCodexHistoryDelivery(history, {
+        ...wanted, content: [{ ...wanted.content[0], text_elements: [element] }],
+      })).toEqual({ state: "unknown", reason: "conflicting-record" });
+    }
     const removed = { ...history, turns: history.turns.map(t => ({ ...t, items: t.items.filter(i => i.clientId !== targets[1].clientId) })) };
     expect(findCodexHistoryDelivery(removed, targets[1]).state).toBe("unknown");
     for (const view of ["summary", "full"] as const) {

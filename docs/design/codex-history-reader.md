@@ -14,6 +14,8 @@ Results:
 
 `findCodexHistoryDelivery(history, target)` accepts the original client ID, frozen native input content, explicit null/string turn ID, and optional canonical item ID. Null means the turn is not yet known; a supplied string must match. The lookup returns `found` only for one canonical user message with matching identity and payload. Multiple instances of the original key remain ambiguous. Identical text under other keys cannot establish delivery. Comparison preserves Unicode, content order, markers, attachment identity/detail and text spans; only object property ordering and documented empty/null input defaults are normalized. It does not invent a delivery timestamp or terminal turn outcome. A missing message always remains `unknown`, even after complete traversal.
 
+Codex 0.154 serializes an omitted `text_elements[].placeholder` as `null`. Payload comparison treats those two forms as equivalent, while preserving explicit placeholder strings (including empty strings), byte ranges, text, keys, turn fences and attachments. Normalization creates comparison copies and retains the original admitted input and canonical record. The native round-trip regression observes this serialization and requires the omitted input to match; changed placeholders and ranges remain unknown. That lookup fails on the original reader and passes with normalization.
+
 ## Remaining integration work
 
 After the voice owner releases the host file, the integration worker must:
