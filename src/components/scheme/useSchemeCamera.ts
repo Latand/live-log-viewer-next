@@ -709,7 +709,14 @@ export function useSchemeCamera({
        the handled marker — not the obligation — clears when the request ends. */
     if (!focus) focusHandled.current = null;
     const aim = focusAim.current;
-    if (!aim || aim.project !== project) return;
+    if (!aim) return;
+    /* Another project is another board: a request made against the one the
+       operator left is not owed by the one they arrived at, and must not be
+       waiting for them when they come back. */
+    if (aim.project !== project) {
+      focusAim.current = null;
+      return;
+    }
     const node = layout.byPath.get(aim.path) ?? taskRects?.get(aim.path);
     /* Not placed yet is not a failure: the request is still owed. */
     if (!node) return;
