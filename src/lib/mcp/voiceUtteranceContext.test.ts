@@ -349,6 +349,31 @@ test("work naming another native thread is never given this call's card", async 
   expect(refused.details.code).toBe("voice_selected_context_unidentified");
 });
 
+test("no work identity a caller can supply produces a card", async () => {
+  /* THE INVARIANT, stated as one test. Transport metadata narrows an already
+     admitted caller; it is not standalone authority, and on this native version
+     it cannot select anything at all. So the shape of what a caller sends only
+     decides WHICH refusal comes back — never whether one does. */
+  await control({ action: "start", sdp: "v=0\r\noffer\r\n", view: DESK }, OPERATOR);
+  await spokenTurn(SELECTED, 1);
+
+  const attempts: Array<[string, ReturnType<typeof work> | null]> = [
+    ["absent", null],
+    ["a plausible spoken turn", work("turn-a")],
+    ["a turn id nobody has seen", work("turn-invented-by-the-model")],
+    ["another native thread", { ...work("turn-a"), threadId: "thread-somebody-else" }],
+    ["a forged realtime trigger on a text turn", { ...work("turn-text"), turnTrigger: "realtime" }],
+    ["call and item ids that name nothing", { ...work("turn-a"), callId: "call-invented", itemId: "item-invented" }],
+  ];
+  for (const [name, identity] of attempts) {
+    const answered = await bindings(lookupThroughTheControlEndpoint(), identity).conversation_messages({
+      clientRequestId: `spoken-read-invariant-${name.replace(/[^a-z]+/gi, "-")}`,
+    }).then(() => "RESOLVED A CARD", (error: unknown) => (error as { message: string }).message);
+    expect(answered).not.toBe("RESOLVED A CARD");
+    expect(answered).not.toContain(SELECTED);
+  }
+});
+
 test("A, B, then a late handoff for A: the tool must not return card B", async () => {
   /* The reviewer's repro, driven the way the browser actually drives it. The
      client reports a join only while one utterance is outstanding, so with A and
