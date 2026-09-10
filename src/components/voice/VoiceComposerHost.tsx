@@ -81,11 +81,26 @@ export function VoiceComposerHost({ files = NO_FILES }: { files?: readonly FileE
   /* The card's props are retained past its unmount on purpose — a parked composer
      needs something to render with — so nothing retracts them at the seam. This
      is where they stop being needed: a conversation this host no longer renders a
-     composer for keeps no `FileEntry` snapshot alive. Runs after commit, so the
-     render above always had the props it was about to use. */
+     composer for keeps no `FileEntry` snapshot alive.
+
+     THE SET IS RE-READ HERE, not taken from the render above, and the difference
+     is a composer that never appears at all. A card publishes its PLACE from a
+     ref, during the commit that notifies this host, and its PROPS from its own
+     effect, which runs before this one. So this effect's first run carries a
+     `conversationIds` from a render taken before the card existed, while the
+     registry it is about to prune already holds that card's freshly published
+     props — and it deletes them, along with the per-place map nothing will
+     republish until the card's own props change again. The dock's seat conversation
+     is exactly the case with no second publisher behind it: the operator was left
+     with the feed, the control strip and a live badge over an agent they had no
+     way to answer (operator report, 2026-09-10). Read at effect time, the prune
+     sees what the render's own commit produced and releases only what has really
+     gone. */
   useEffect(() => {
+    const rendered = new Set(getVoiceComposerCardIds());
+    if (liveCall) rendered.add(liveCall.conversationId);
     for (const cardId of getVoiceComposerCardPropsIds()) {
-      if (!conversationIds.has(cardId)) forgetVoiceComposerCardProps(cardId);
+      if (!rendered.has(cardId)) forgetVoiceComposerCardProps(cardId);
     }
   });
 

@@ -68,6 +68,9 @@ let structuredMessageCalls = 0;
 let structuredMessageRequest: Record<string, unknown> | null = null;
 let operatorActivityRequests: Record<string, unknown>[] = [];
 let operatorActivityEnabled = true;
+/* Set by a test that needs the REAL recording boundary — the stub below cannot
+   reproduce a storage outage, which is the thing under test. */
+let operatorActivityRecorder: ((request: Record<string, unknown>) => unknown) | null = null;
 let collectedImages: Array<{ base64: string; mime: string }> = [];
 let deletedImagePaths: string[][] = [];
 let structuredMessageResult:
@@ -134,6 +137,7 @@ beforeAll(() => {
     recordDirectOperatorWakatimeActivity: (request) => {
       if (!operatorActivityEnabled) return null;
       operatorActivityRequests.push({ ...request });
+      if (operatorActivityRecorder) return operatorActivityRecorder(request as Record<string, unknown>) as never;
       return { key: "a".repeat(64), engine: "codex", project: "fixture", atMs: Date.now() };
     },
     deliverConversationMessage: (message: unknown) => delivery(message),
@@ -959,5 +963,197 @@ test("/api/tmux folds attachment paths into the structured send and cleans up a 
     structuredMessageRequest = null;
     if (previous === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
     else process.env.LLV_STRUCTURED_HOSTS = previous;
+  }
+});
+
+test("/api/tmux delivers an operator message and a dialog answer while the WakaTime state file is corrupt", async () => {
+  const { recordDirectOperatorWakatimeActivity } = await import("@/lib/wakatime/operatorActivity");
+  const { enqueueProductionOperatorHeartbeat } = await import("@/lib/wakatime/sync");
+  const stateDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-tmux-corrupt-state-"));
+  const stateFile = path.join(stateDirectory, "wakatime-state.json");
+  /* The production shape of this outage: a state file that is entirely NUL
+     bytes. `JSON.parse` throws before the queue can be touched. */
+  const corruptBytes = Buffer.alloc(4_096, 0);
+  fs.writeFileSync(stateFile, corruptBytes, { mode: 0o600 });
+  const at = Date.parse("2026-09-10T09:00:00.000Z");
+  const snapshot = {
+    conversationAliases: {},
+    conversations: {
+      conversation_corrupt_state: {
+        id: "conversation_corrupt_state",
+        engine: "codex",
+        generations: [{
+          id: "generation_corrupt_state",
+          path: PATHNAME,
+          accountId: null,
+          launchProfile: {
+            cwd: "/workspace/repository",
+            model: null,
+            effort: null,
+            fast: null,
+            permissionMode: null,
+            readOnly: null,
+            allowSubagents: true,
+            title: null,
+            project: "project-fixture",
+            parentConversationId: null,
+            role: "builder",
+            goal: null,
+            plan: null,
+          },
+          historyHash: null,
+          host: null,
+          createdAt: new Date(at).toISOString(),
+          archivedAt: null,
+        }],
+        continuityPaths: [],
+        abandonedContinuityPaths: [],
+        projectOwnership: {
+          project: "project-fixture",
+          source: "operator",
+          setAt: new Date(at).toISOString(),
+          operationId: "launch-fixture",
+        },
+        migration: null,
+        migrationOptOut: null,
+        supersededBy: null,
+        agentRole: "builder",
+        delegationDepth: 1,
+        turn: { state: "idle", source: "lifecycle", observedAt: new Date(at).toISOString() },
+        createdAt: new Date(at).toISOString(),
+        updatedAt: new Date(at).toISOString(),
+      },
+    },
+  };
+  const storageDiagnostics: string[] = [];
+  operatorActivityRequests = [];
+  operatorActivityRecorder = (request) => recordDirectOperatorWakatimeActivity(request as never, {
+    enabled: () => true,
+    now: () => at,
+    registrySnapshot: () => snapshot as never,
+    enqueue: (heartbeat) => enqueueProductionOperatorHeartbeat(heartbeat, stateFile, () => true),
+    reportStorageFailure: (event, fields) => { storageDiagnostics.push(`${event}:${String(fields.outcome)}`); },
+  });
+  let deliveries = 0;
+  delivery = async () => {
+    deliveries += 1;
+    return { ok: true, outcome: "delivered-to-live", target: "agents:4.0" };
+  };
+  try {
+    const message = await POST(post({
+      path: PATHNAME,
+      text: "the board still has to work",
+      clientMessageId: "corrupt-state-message",
+    }));
+    const dialog = await POST(post({
+      path: PATHNAME,
+      action: "dialog-key",
+      key: "1",
+      clientMessageId: "corrupt-state-dialog",
+    }));
+
+    expect(message.status).toBe(200);
+    expect(deliveries).toBe(1);
+    expect(dialog.status).toBe(200);
+    expect(operatorActivityRequests).toHaveLength(2);
+    expect(storageDiagnostics).toEqual([
+      "operator_activity_not_stored:state_unreadable",
+      "operator_activity_not_stored:state_unreadable",
+    ]);
+    /* Every corrupt byte survives: the outage is reported, never repaired by
+       overwriting an unreadable queue the operator may still want to recover. */
+    expect(fs.readFileSync(stateFile)).toEqual(corruptBytes);
+  } finally {
+    operatorActivityRecorder = null;
+    fs.rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
+test("/api/tmux still refuses a message whose target evidence conflicts, corrupt state file or not", async () => {
+  const { recordDirectOperatorWakatimeActivity } = await import("@/lib/wakatime/operatorActivity");
+  const { enqueueProductionOperatorHeartbeat } = await import("@/lib/wakatime/sync");
+  const stateDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-tmux-conflict-state-"));
+  const stateFile = path.join(stateDirectory, "wakatime-state.json");
+  fs.writeFileSync(stateFile, Buffer.alloc(4_096, 0), { mode: 0o600 });
+  const at = Date.parse("2026-09-10T09:00:00.000Z");
+  const conversation = (id: string, transcript: string) => ({
+    id,
+    engine: "codex",
+    generations: [{
+      id: `generation_${id}`,
+      path: transcript,
+      accountId: null,
+      launchProfile: {
+        cwd: "/workspace/repository",
+        model: null,
+        effort: null,
+        fast: null,
+        permissionMode: null,
+        readOnly: null,
+        allowSubagents: true,
+        title: null,
+        project: "project-fixture",
+        parentConversationId: null,
+        role: "builder",
+        goal: null,
+        plan: null,
+      },
+      historyHash: null,
+      host: null,
+      createdAt: new Date(at).toISOString(),
+      archivedAt: null,
+    }],
+    continuityPaths: [],
+    abandonedContinuityPaths: [],
+    projectOwnership: {
+      project: "project-fixture",
+      source: "operator",
+      setAt: new Date(at).toISOString(),
+      operationId: "launch-fixture",
+    },
+    migration: null,
+    migrationOptOut: null,
+    supersededBy: null,
+    agentRole: "builder",
+    delegationDepth: 1,
+    turn: { state: "idle", source: "lifecycle", observedAt: new Date(at).toISOString() },
+    createdAt: new Date(at).toISOString(),
+    updatedAt: new Date(at).toISOString(),
+  });
+  /* The conversation named by the caller owns a DIFFERENT transcript than the
+     path it presents — an unresolvable identity, not a telemetry outage. */
+  const snapshot = {
+    conversationAliases: {},
+    conversations: {
+      conversation_elsewhere: conversation("conversation_elsewhere", "/sessions/elsewhere.jsonl"),
+      conversation_here: conversation("conversation_here", PATHNAME),
+    },
+  };
+  operatorActivityRequests = [];
+  operatorActivityRecorder = (request) => recordDirectOperatorWakatimeActivity(request as never, {
+    enabled: () => true,
+    now: () => at,
+    registrySnapshot: () => snapshot as never,
+    enqueue: (heartbeat) => enqueueProductionOperatorHeartbeat(heartbeat, stateFile, () => true),
+    reportStorageFailure: () => undefined,
+  });
+  let deliveries = 0;
+  delivery = async () => {
+    deliveries += 1;
+    return { ok: true, outcome: "delivered-to-live", target: "agents:4.0" };
+  };
+  try {
+    const response = await POST(post({
+      path: PATHNAME,
+      conversationId: "conversation_elsewhere",
+      text: "conflicting identity",
+      clientMessageId: "corrupt-state-conflict",
+    }));
+
+    expect(response.status).toBe(503);
+    expect(deliveries).toBe(0);
+  } finally {
+    operatorActivityRecorder = null;
+    fs.rmSync(stateDirectory, { recursive: true, force: true });
   }
 });

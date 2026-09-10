@@ -1,4 +1,7 @@
 import { beforeEach, expect, test } from "bun:test";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 import { captureSelectedContext, type SelectedContextRef } from "@/lib/selection/selectedContext";
 
@@ -136,7 +139,7 @@ test("an explicit empty selection is admitted and readable, distinct from never 
   expect(voiceSelectedContext("conversation_voice")?.reference.state).toBe("none");
 });
 
-test("a live peer records one stable operator event and a recording failure stays retryable", async () => {
+test("a live peer records one stable operator event and an unattributable event stays retryable", async () => {
   const spoken: string[] = [];
   const host = hostFor(spoken);
   const recorded: unknown[] = [];
@@ -151,7 +154,9 @@ test("a live peer records one stable operator event and a recording failure stay
   const dependencies = {
     recordOperatorActivity(input: unknown) {
       recorded.push(input);
-      if (fail) throw new Error("disk unavailable");
+      /* An attribution failure, the only class this boundary still throws:
+         optional storage outages are absorbed inside the recorder itself. */
+      if (fail) throw new Error("direct operator activity target is unavailable");
       return { key: "a".repeat(64), engine: "codex" as const, project: "atlas", atMs: NOW };
     },
   };
@@ -226,4 +231,86 @@ test("hanging up releases the binding, so a later utterance cannot ride the dead
   );
   await executeRealtimeControl({ action: "stop", conversationId: "conversation_voice" }, () => host, OPERATOR);
   expect(voiceSelectedContext("conversation_voice")).toBeNull();
+});
+
+test("a corrupt WakaTime state file does not refuse a live realtime operator event", async () => {
+  const { enqueueProductionOperatorHeartbeat } = await import("@/lib/wakatime/sync");
+  const stateDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-realtime-corrupt-state-"));
+  const stateFile = path.join(stateDirectory, "wakatime-state.json");
+  const corruptBytes = Buffer.alloc(4_096, 0);
+  fs.writeFileSync(stateFile, corruptBytes, { mode: 0o600 });
+  const host = hostFor([]);
+  await start(host, DESK);
+  const outcomes: string[] = [];
+
+  try {
+    const result = await executeRealtimeControl({
+      action: "operatorActivity",
+      conversationId: "conversation_voice",
+      realtimeSessionId: "live-1",
+      operatorEventId: "9".repeat(64),
+    }, () => host, PEER, {
+      recordOperatorActivity: (input) => recordDirectOperatorWakatimeActivity(input, {
+        enabled: () => true,
+        now: () => NOW,
+        registrySnapshot: () => ({
+          conversationAliases: {},
+          conversations: {
+            conversation_voice: {
+              id: "conversation_voice",
+              engine: "codex",
+              generations: [{
+                id: "generation_voice",
+                path: "/sessions/voice.jsonl",
+                accountId: null,
+                launchProfile: {
+                  cwd: "/workspace/repository",
+                  model: null,
+                  effort: null,
+                  fast: null,
+                  permissionMode: null,
+                  readOnly: null,
+                  allowSubagents: true,
+                  title: null,
+                  project: "atlas",
+                  parentConversationId: null,
+                  role: "builder",
+                  goal: null,
+                  plan: null,
+                },
+                historyHash: null,
+                host: null,
+                createdAt: new Date(NOW).toISOString(),
+                archivedAt: null,
+              }],
+              continuityPaths: [],
+              abandonedContinuityPaths: [],
+              projectOwnership: {
+                project: "atlas",
+                source: "operator",
+                setAt: new Date(NOW).toISOString(),
+                operationId: "launch-fixture",
+              },
+              migration: null,
+              migrationOptOut: null,
+              supersededBy: null,
+              agentRole: "builder",
+              delegationDepth: 1,
+              turn: { state: "idle", source: "lifecycle", observedAt: new Date(NOW).toISOString() },
+              createdAt: new Date(NOW).toISOString(),
+              updatedAt: new Date(NOW).toISOString(),
+            },
+          },
+        } as never),
+        enqueue: (heartbeat) => enqueueProductionOperatorHeartbeat(heartbeat, stateFile, () => true),
+        reportStorageFailure: (event, fields) => { outcomes.push(`${event}:${String(fields.outcome)}`); },
+      }),
+    });
+
+    expect(result.status).toBe(200);
+    expect(outcomes).toEqual(["operator_activity_not_stored:state_unreadable"]);
+    expect(fs.readFileSync(stateFile)).toEqual(corruptBytes);
+  } finally {
+    fs.rmSync(stateDirectory, { recursive: true, force: true });
+  }
 });

@@ -928,6 +928,9 @@ const WARNING_BADGE = "border-warning/45 bg-warning-soft text-warning";
 const SEAT_BADGE: Record<SeatBadge, { tone: string; key: MessageKey }> = {
   "needs-you": { tone: WARNING_BADGE, key: "orchPanel.badgeNeedsYou" },
   live: { tone: "border-success/45 bg-success-soft text-success", key: "orchPanel.badgeLive" },
+  /* Hosted and idle. Not green: green is the word for a turn that is running,
+     and an agent awaiting input is a state the operator may want to act on. */
+  waiting: { tone: QUIET_BADGE, key: "orchPanel.badgeWaiting" },
   stalled: { tone: WARNING_BADGE, key: "orchPanel.badgeStalled" },
   resumable: { tone: QUIET_BADGE, key: "orchPanel.badgeResumable" },
   dead: { tone: DANGER_BADGE, key: "orchPanel.badgeDead" },
