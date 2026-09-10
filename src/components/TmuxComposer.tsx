@@ -1232,11 +1232,11 @@ const queueAdmissionKey = (id: string) => "llvQueueAdmission:" + id;
  * restored draft presses the same button and replays the same operation.
  *
  * `images` is a comparison device rather than a payload. The draft itself is
- * restored by the composer, and this only has to decide whether the next press is the
- * SAME message. A different message is genuinely a different operation and gets
- * its own key. A false match is answered by the journal's own request-hash
- * check, which refuses the replay in the operator's sight rather than admitting
- * a second one.
+ * restored by the composer, and this only has to decide whether the next press
+ * is the SAME message. A different message is genuinely a different operation
+ * and gets its own key. A false match is answered by the journal's own
+ * request-hash check, which refuses the replay in the operator's sight rather
+ * than admitting a second one.
  */
 interface RetainedQueueAdmission {
   key: string;

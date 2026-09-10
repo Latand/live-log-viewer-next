@@ -124,14 +124,14 @@ interface AdmissionRecord {
   /** The backing turn that claimed it, once one did. Never reassigned. */
   boundTurnId: string | null;
   /**
-   * The call's handoff counter when this record's handoff was accepted, and
-   * again when a backing turn claimed it.
+   * Where this record sits among the handoffs the call has accepted, and where
+   * its claiming turn sat when it claimed. Both null until each happens.
    *
    * Native steers more than one handoff into one backing turn
    * (`native-voice-work-identity.md`), so a turn id is COARSER than a spoken
-   * utterance and the claim it made says nothing about what arrived after it.
-   * Comparing the two counters is how a later, still-unclaimed handoff is
-   * recognised as something this same turn may have accepted.
+   * utterance and the claim a turn made says nothing about what arrived after
+   * it. Comparing the two is how a later, still-unclaimed handoff is recognised
+   * as something that same turn may also have been given.
    */
   handoffEpoch: number | null;
   claimedAtHandoffEpoch: number | null;
@@ -175,8 +175,9 @@ interface VoiceSessionState {
    * nothing — so reads answer `unavailable` rather than `no-call`.
    */
   evidenceLost: boolean;
-  /** Incremented by every handoff this call accepts, and by an ambiguity it
-      records: the ordering a bound turn's claim is compared against. */
+  /** Incremented by every handoff this call accepts. It orders the accepted
+      handoffs against the claim a backing turn made, which is the only way to
+      tell that one arrived after that turn had already claimed its card. */
   handoffEpoch: number;
   /** Incremented every time the host is observed going from running to idle. */
   idleEpoch: number;
