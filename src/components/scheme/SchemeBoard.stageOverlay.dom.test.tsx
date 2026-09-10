@@ -19,7 +19,13 @@ import { SchemeBoard } from "./SchemeBoard";
 
 const dom = new Window();
 class TestResizeObserver {
-  observe() {}
+  constructor(private callback: () => void) {}
+  observe(element: HTMLElement) {
+    if (element.getAttribute("aria-label")?.startsWith("Agent board")) {
+      Object.defineProperty(element, "getBoundingClientRect", { configurable: true, value: () => ({ x: 0, y: 0, left: 0, top: 0, right: 1400, bottom: 900, width: 1400, height: 900, toJSON() {} }) });
+      queueMicrotask(this.callback);
+    }
+  }
   unobserve() {}
   disconnect() {}
 }
@@ -76,7 +82,7 @@ const pipeline = {
     { id: "plan_v3_voice", kind: "run", role: { roleId: "architect" }, prompt: "", next: "integrate_v3_voice", effectiveRole: stageRole },
     { id: "integrate_v3_voice", kind: "run", role: { roleId: "builder" }, prompt: "", next: null, effectiveRole: stageRole },
   ],
-  runs: [{ stageId: "integrate_v3_voice", attempts: [{ n: 1, state: "running", agentPath: "/integrate", flowId: null }] }],
+  runs: [{ stageId: "integrate_v3_voice", attempts: [{ n: 1, state: "running", agentPath: "/integrate", flowId: null, effectiveRole: stageRole }] }],
   cursor: { stageId: "integrate_v3_voice", state: "running", input: null, activatedBy: null },
   state: "running", pausedState: null, stateDetail: null,
   srcPath: null, srcConversationId: null, createdAt: new Date(0).toISOString(), closedAt: null,
@@ -87,7 +93,7 @@ const settle = async () => {
   flushSync(() => undefined);
 };
 
-function mountBoard(files: FileEntry[], pipelines: Pipeline[], focus: string | null = null): HTMLElement {
+function mountBoard(files: FileEntry[], pipelines: Pipeline[], focus: string | null = files[0]?.path ?? null): HTMLElement {
   const groups = buildBranchGroups(files, "demo");
   const host = document.createElement("div");
   document.body.append(host);
