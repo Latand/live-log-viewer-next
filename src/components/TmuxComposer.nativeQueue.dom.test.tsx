@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { act } from "react";
 import { installActEnv } from "@/test-helpers/actEnv";
 import { Window } from "happy-dom";
@@ -19,6 +19,7 @@ import { resetRetainedQueueAdmissionsForTests } from "./retainedQueueAdmissions"
 import { readOutbox, resetOutboxForTests } from "./conversation/outbox";
 import { setTmuxComposerRuntimeDependenciesForTests } from "./tmuxComposerRuntime";
 import { accessoryReserve, mobileComposerCeiling, mobileComposerUnitMax } from "@/lib/composerScroll";
+import { composerSubmissionPayloads } from "@/lib/composerSubmissionPayloads";
 
 /**
  * The composer's two submissions, on a Codex conversation that can queue
@@ -808,6 +809,10 @@ test("everything above the input shares ONE region; the input and Send never yie
 });
 
 test("a rendered queue panel takes its room off the phone field's grow ceiling", async () => {
+  // This case measures the queue alone. Happy DOM has no IndexedDB, which
+  // would otherwise add a separate, correctly visible recovery-error panel.
+  // Real storage failures and their compact controls run in Chromium.
+  const savedPayloads = spyOn(composerSubmissionPayloads, "list").mockResolvedValue([]);
   /* The other half of the same budget, on the phone, where the form is at its
      `38dvh` cap and the panel is the only part that can shrink: a draft grown to
      the field's old ceiling left the panel a 2px border with nothing inside it,
@@ -848,6 +853,7 @@ test("a rendered queue panel takes its room off the phone field's grow ceiling",
        draft, exactly as it was before the queue existed. */
     expect(ceilingAlone).toBe(mobileComposerCeiling(dom.innerHeight, dom.innerHeight));
   } finally {
+    savedPayloads.mockRestore();
     (dom as unknown as { matchMedia: (query: string) => unknown }).matchMedia = (query: string) => ({
       matches: false, media: query, addEventListener() {}, removeEventListener() {},
     });
