@@ -26,10 +26,25 @@ export async function projectStructuredFileLiveness(
     const generation = conversation.generations.at(-1);
     if (!generation || conversation.supersededBy) return [];
     const entry = snapshot.entries[`${conversation.engine}:${generation.id}`];
-    return entry?.structuredHost && entry.status !== "dead" && entry.status !== "unhosted"
+    return !entry?.host && entry?.structuredHost && entry.status !== "dead" && entry.status !== "unhosted"
       ? [[generation.path, conversation] as const]
       : [];
   }));
+
+  // The scanner and journal can arrive in either order after host succession.
+  // Expose the current registry transport without copying a PID into authority.
+  for (const file of files) {
+    delete file.controlHost;
+    const conversation = file.conversationId ? snapshot.conversations[file.conversationId] : undefined;
+    const generation = conversation?.generations.at(-1);
+    if (!conversation || generation?.path !== file.path || conversation.supersededBy) continue;
+    const entry = snapshot.entries[`${conversation.engine}:${generation.id}`];
+    if (!entry || (entry.status !== "live" && entry.status !== "idle")) continue;
+    if (entry.host || entry.structuredHost) file.controlHost = {
+      conversationId: conversation.id,
+      transport: entry.host ? "legacy" : "structured",
+    };
+  }
 
   const candidates = files.filter((file) => conversationByCurrentPath.has(file.path));
   for (let start = 0; start < candidates.length; start += LIVENESS_PROJECTION_CONCURRENCY) {

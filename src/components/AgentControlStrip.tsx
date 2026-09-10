@@ -7,8 +7,9 @@ import { ArrowUpToLine, Check, FoldVertical, Loader2, Play, RotateCw, Square, Sq
 
 import { Hint } from "@/components/Hint";
 import { AttachTerminalDialog } from "@/components/AttachTerminalDialog";
+import { useConversationControl } from "@/hooks/useConversationControl";
 import { useIsMobile } from "@/hooks/useIsMobile";
-import { interruptRuntime, refreshRuntime } from "@/hooks/useRuntime";
+import { refreshRuntime } from "@/hooks/useRuntime";
 import { useLocale, type MessageKey, type TFunction } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
@@ -407,7 +408,12 @@ export function useAgentControlActions(file: FileEntry): AgentControlActions {
   const { t } = useLocale();
   const { caps, attachMode, structuredSession } = useAgentCapabilities(file);
 
-  const [stopBusy, setStopBusy] = useState(false);
+  const interrupt = useConversationControl(caps.surface === "structured-subagent" && structuredSession
+    ? { conversationId: structuredSession.session.conversationId }
+    : { ...(file.conversationId ? { conversationId: file.conversationId } : {}), path: file.path }, "interrupt");
+  const stopBusy = interrupt.busy;
+  const interruptTurn = useRef<number | null>(null);
+  const [interruptNoteActive, setInterruptNoteActive] = useState(false);
   const [compactBusy, setCompactBusy] = useState(false);
   const [recheckBusy, setRecheckBusy] = useState(false);
   const [compactArmed, setCompactArmed] = useState(false);
@@ -423,6 +429,7 @@ export function useAgentControlActions(file: FileEntry): AgentControlActions {
       outcome, which would otherwise sit on the status line forever and hide the
       note the NEXT action wants to show (#1214). */
   const clearStatus = () => {
+    setInterruptNoteActive(false);
     setStatus(null);
     setCompactWatch(null);
   };
@@ -475,30 +482,12 @@ export function useAgentControlActions(file: FileEntry): AgentControlActions {
 
   const stop = async () => {
     if (stopBusy) return;
-    setStopBusy(true);
     clearStatus();
-    try {
-      const result = structuredSession
-        ? await interruptRuntime(structuredSession.session.conversationId, mintIdempotencyKey())
-        : await fetch("/api/tmux", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ action: "interrupt", path: file.path }),
-          }).then(async (response) => {
-            const body = (await response.json()) as { ok?: boolean; error?: string };
-            return { ok: response.ok && body.ok === true, error: body.error };
-          });
-      setStatus(result.ok
-        /* Keep the turn this Escape was aimed at: the note is about THAT turn,
-           and the spinner beside it is about whichever turn is running now. */
-        ? { kind: "interrupt", turnStartedAt: file.lastTurn?.startedAt ?? null }
-        : { kind: "err", text: result.error ?? t("composer.failedInterrupt") });
-    } catch {
-      setStatus({ kind: "err", text: t("common.serverUnavailable") });
-    } finally {
-      setStopBusy(false);
-    }
+    interruptTurn.current = file.lastTurn?.startedAt ?? null;
+    setInterruptNoteActive(true);
+    await interrupt.run();
   };
+
 
   const recheck = async () => {
     if (recheckBusy) return;
@@ -576,7 +565,13 @@ export function useAgentControlActions(file: FileEntry): AgentControlActions {
     stopBusy,
     compactBusy,
     recheckBusy,
-    status: compactOutcome ?? resolvedStatus(status, file, t),
+    status: interruptNoteActive
+      ? interrupt.outcome === "done"
+        ? resolvedStatus({ kind: "interrupt", turnStartedAt: interruptTurn.current }, file, t)
+        : interrupt.outcome === "failed"
+          ? { kind: "err", text: interrupt.error ?? t("composer.failedInterrupt") }
+          : { kind: "info", text: t(interrupt.outcome === "unknown" ? "task.controlUnknown" : "task.interruptPending") }
+      : compactOutcome ?? resolvedStatus(status, file, t),
     stop: () => void stop(),
     compact: (options) => void compact(options),
     recheck: () => void recheck(),

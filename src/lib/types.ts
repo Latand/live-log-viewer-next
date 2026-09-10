@@ -132,6 +132,9 @@ export interface BridgeAsk {
 
 /** One sidebar entry returned by GET /api/files. */
 export interface FileEntry {
+  /** Current registry transport for this exact conversation. Presentation only;
+      controls resolve and fence ownership again when the operator acts. */
+  controlHost?: { conversationId: string; transport: "legacy" | "structured" };
   path: string;
   root: RootKey;
   /** Path relative to its root. */

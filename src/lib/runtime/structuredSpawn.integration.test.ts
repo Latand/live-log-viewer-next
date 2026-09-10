@@ -4926,6 +4926,43 @@ describe.each(["codex", "claude"] as const)("%s structured spawn round trip", (e
     });
     await completesWithin(kickStructuredDeliveryQueue(), "structured delivery queue stayed wedged after kill");
     expect(host.sent.some((entry) => entry.text === "must stay queued after kill")).toBeFalse();
+
+    // Resume the stopped conversation on its existing native identity/profile.
+    // Both hosts are injected, and the transcript's bytes must survive unchanged.
+    const history = fs.readFileSync(artifactPath, "utf8");
+    const resumeReceipt = beginLegacySpawnFixture(registry, {
+      engine, cwd, transport: "structured", accountId: account.accountId,
+      conversationId: response.conversationId, purpose: "resume-successor",
+      expectedArtifactPath: artifactPath, launchProfile,
+    });
+    if (resumeReceipt.kind !== "created") throw new Error("resume receipt unavailable");
+    const successor = new RoundTripHost(engine, artifactPath, id);
+    const resumed = await spawnStructuredConversation({
+      engine, receipt: resumeReceipt.receipt, spec, account, prompt: "", registry, client,
+    }, {
+      startHost: async (input) => {
+        expect(input.spec.launchProfile?.model).toBe(model);
+        return successor;
+      },
+      bindHost: async (targetRegistry, key, runningHost, claimOwner, claimEpoch) => {
+        const state = await runningHost.health();
+        targetRegistry.setStructuredHostClaimed(key, {
+          kind: engine === "codex" ? "codex-app-server" : "claude-broker",
+          endpoint: state.endpoint,
+          process: state.pid ? { pid: state.pid, startIdentity: state.processStartIdentity } : null,
+          eventCursor: state.eventCursor, protocolVersion: state.protocolVersion,
+          writerClaimEpoch: claimEpoch, activeTurnRef: state.activeTurnRef,
+          pendingAttention: state.pendingAttention, activeFlags: state.activeFlags,
+        }, "idle", claimOwner, claimEpoch);
+        return () => {};
+      },
+      processIdentity: () => ({ pid: process.pid, startIdentity: "successor-process" }),
+    });
+    expect(resumed).toMatchObject({ conversationId: response.conversationId, path: artifactPath, state: "settled" });
+    expect(registry.snapshot().entries[`${engine}:${id}`]).toMatchObject({ accountId: account.accountId, launchProfile: { model } });
+    expect(fs.readFileSync(artifactPath, "utf8")).toBe(history);
+    expect(host.releaseCount).toBe(1);
+
   });
 });
 

@@ -29,6 +29,7 @@ import {
   deleteInboxImages,
   forgetResumePane,
   killTmuxHostIfMatches,
+  interruptTmuxHostIfMatches,
   knownLivePids,
   paneScreen,
   resolveTarget,
@@ -316,8 +317,22 @@ export async function interruptConversation(filePath: string): Promise<DeliveryO
     return failure("no active agent pane to interrupt", 409);
   }
   try {
-    await sendInterrupt(host.paneId);
-    return { ok: true, target: host.display };
+    const registry = agentRegistry();
+    const registered = registeredHostForPath(registry.readOnlySnapshot(), host.primaryPath ?? filePath);
+    if (!registered?.host || registered.host.paneId !== host.paneId
+      || registered.host.agent.pid !== host.agentPid
+      || registered.host.agent.startIdentity !== host.agentIdentity) {
+      return failure("conversation host identity is unavailable or ambiguous", 409);
+    }
+    return await registry.withOperationLock(registered.key,
+      { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) }, async () => {
+        const current = registry.readOnlySnapshot().entries[`${registered.key.engine}:${registered.key.sessionId}`];
+        if (!current?.host || !sameRegisteredHost(current.host, registered.host!)) {
+          return failure("conversation host changed before interrupt", 409);
+        }
+        if (!await interruptTmuxHostIfMatches(current.host)) return failure("conversation host identity changed before interrupt", 409);
+        return { ok: true, target: host.display };
+      });
   } catch (error) {
     return failure(error);
   }
@@ -570,9 +585,14 @@ function registeredHostForPath(
   snapshot: ReturnType<AgentRegistry["snapshot"]>,
   filePath: string,
 ): AgentRegistryEntry | null {
-  return Object.values(snapshot.entries)
-    .filter((candidate) => candidate.artifactPath === filePath && candidate.host !== null)
-    .sort((left, right) => right.claimEpoch - left.claimEpoch || right.updatedAt.localeCompare(left.updatedAt))[0] ?? null;
+  const candidates = Object.values(snapshot.entries)
+    .filter((candidate) => candidate.artifactPath === filePath && candidate.host !== null);
+  if (candidates.length !== 1) return null;
+  const owned = candidates[0]!;
+  const shared = Object.values(snapshot.entries).some((candidate) => candidate !== owned
+    && candidate.host?.endpoint === owned.host?.endpoint
+    && candidate.host?.paneId === owned.host?.paneId);
+  return shared ? null : owned;
 }
 
 function sameRegisteredHost(left: TmuxHostEvidence | null, right: TmuxHostEvidence): boolean {
@@ -598,17 +618,16 @@ export async function killConversation(filePath: string, overrides: KillConversa
     return failure("the conversation path is required to close", 400);
   }
   const entry = (await (overrides.listFiles ?? listFiles)({ pin: filePath })).find((item) => item.path === filePath);
-  /* A branch column shares the root conversation's pane: killing it from a
-     branch close would take the whole agent down along with the root card
-     that is still on screen. Only a root conversation may kill a pane. */
-  if (entry && entry.parent) {
-    return failure("a branch shares its root conversation pane and cannot be closed independently", 409);
-  }
+  // A viewer-spawned child can own its own pane. Shared branches have no
+  // independent claim; the conversation action boundary also checks lineage.
   const registry = overrides.registry ?? agentRegistry();
   const readSnapshot = overrides.registry
     ? () => registry.readOnlySnapshot()
     : overrides.registrySnapshot ?? (() => registry.readOnlySnapshot());
   const registered = registeredHostForPath(readSnapshot(), filePath);
+  if (entry?.parent && !registered?.host) {
+    return failure("a branch shares its root conversation pane and cannot be closed independently", 409);
+  }
   if (!registered?.host) return failure("no registered agent pane for this conversation", 404);
   const owner = { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) };
   const runLocked = overrides.registry || !overrides.registrySnapshot
@@ -618,6 +637,8 @@ export async function killConversation(filePath: string, overrides: KillConversa
     return await runLocked(async () => {
       const refreshed = registeredHostForPath(readSnapshot(), filePath);
       if (!refreshed?.host) return failure("no registered agent pane for this conversation", 404);
+      if (refreshed.key.engine !== registered.key.engine || refreshed.key.sessionId !== registered.key.sessionId
+        || !sameRegisteredHost(refreshed.host, registered.host!)) return failure("conversation host changed before stop", 409);
       const killed = await (overrides.killHost ?? killTmuxHostIfMatches)(refreshed.host);
       if (!killed) return failure("the registered pane changed or its process did not exit", 409);
       if (overrides.registry || !overrides.registrySnapshot) {

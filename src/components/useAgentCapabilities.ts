@@ -42,6 +42,13 @@ export function agentCapabilitiesFromViews(
   rootView: RuntimeSessionView | null,
   runtimeEnabled: boolean,
 ): AgentCapabilities {
+  // A registry-owned legacy host supersedes an older native journal. The
+  // action still sends the card identity to the server for fresh resolution.
+  if (file.controlHost?.conversationId === file.conversationId
+    && file.controlHost?.transport === "legacy") {
+    runtime = runtime ? { ...runtime, legacy: true } : null;
+    runtimeEnabled = false;
+  }
   const isClaudeSubagent = file.root === "claude-projects" && file.kind === "subagent";
   const opts: HostOptions = {
     runtimeEnabled,

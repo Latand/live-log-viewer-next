@@ -336,8 +336,33 @@ export function sendRuntimeMessage(options: SendOptions): Promise<CommandResult>
   });
 }
 
-export function interruptRuntime(conversationId: string, operationId: string): Promise<CommandResult> {
-  return postCommand("/api/runtime/interrupt", { conversationId, operationId });
+export async function interruptRuntime(conversationId: string, operationId: string): Promise<CommandResult> {
+  let result = await postCommand("/api/conversation-host", { conversationId, action: "interrupt", operationId });
+  if (!result.ok) return result;
+  // Composer callers keep their pending affordance until the control settles.
+  // Read the original operation only; never resend after a lost answer.
+  const deadline = Date.now() + 5_000;
+  while (result.receipt) {
+    const receipt = result.receipt;
+    if (receipt.conversationId !== conversationId || receipt.operationId !== operationId || receipt.kind !== "interrupt") {
+      return { ...result, ok: false, error: "interrupt receipt identity does not match" };
+    }
+    if (receipt.status === "interrupted" || receipt.status === "delivered") return result;
+    if (receipt.status === "failed" || receipt.status === "rejected") {
+      return { ...result, ok: false, error: receipt.reason ?? "interrupt failed" };
+    }
+    if (Date.now() >= deadline) return { ...result, ok: false, error: "Interrupt outcome is not yet confirmed. Check the conversation controls." };
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    try {
+      const response = await fetch(`/api/runtime/operations/${encodeURIComponent(operationId)}`, { signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())) });
+      const body = await response.json() as { receipt?: RuntimeReceipt };
+      if (!response.ok || !body.receipt) return { ...result, ok: false, error: "Interrupt outcome is not yet confirmed. Check the conversation controls." };
+      result = { ...result, receipt: body.receipt };
+    } catch {
+      return { ...result, ok: false, error: "Interrupt outcome is not yet confirmed. Check the conversation controls." };
+    }
+  }
+  return result;
 }
 
 /** Force a fresh runtime snapshot into the tab-wide store (dead-host Re-check,

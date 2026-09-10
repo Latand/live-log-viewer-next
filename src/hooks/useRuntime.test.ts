@@ -138,3 +138,21 @@ test.each([200, 503].flatMap(status => ["conversation", "key", "envelope"].map(m
       .toEqual({ ok: false, status, error: "receipt-identity-mismatch" });
   } finally { globalThis.fetch = original; }
 });
+
+test("composer interrupt uses current-owner routing and waits for a failed receipt", async () => {
+  const original = globalThis.fetch;
+  const calls: string[] = [];
+  const receipt = { operationId: "interrupt-op", idempotencyKey: "interrupt-op", conversationId: "conversation_selected", kind: "interrupt", status: "queued" };
+  globalThis.fetch = (async (url, init) => {
+    calls.push(String(url));
+    if (init?.method === "POST") {
+      expect(JSON.parse(String(init.body))).toEqual({ conversationId: receipt.conversationId, action: "interrupt", operationId: receipt.operationId });
+      return Response.json({ ok: true, operationId: receipt.operationId, receipt }, { status: 202 });
+    }
+    return Response.json({ receipt: { ...receipt, status: "failed", reason: "host refused" } });
+  }) as typeof fetch;
+  try {
+    expect(await interruptRuntime(receipt.conversationId, receipt.operationId)).toMatchObject({ ok: false, error: "host refused" });
+    expect(calls).toEqual(["/api/conversation-host", "/api/runtime/operations/interrupt-op"]);
+  } finally { globalThis.fetch = original; }
+});

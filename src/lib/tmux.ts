@@ -404,7 +404,8 @@ function processIsGone(expected: ProcessIdentity, deps: Pick<KillTmuxHostDeps, "
 
 /** Applies a registry host identity fence, kills its stable pane id, then
     waits for both the pane shell and agent process identities to disappear. */
-export async function killTmuxHostIfMatches(
+async function controlTmuxHostIfMatches(
+  action: "kill" | "interrupt",
   host: TmuxHostEvidence,
   overrides: Partial<KillTmuxHostDeps> = {},
 ): Promise<boolean> {
@@ -440,17 +441,27 @@ export async function killTmuxHostIfMatches(
     host.paneId,
     "-F",
     condition,
-    `kill-pane -t ${host.paneId}`,
+    action === "kill" ? `kill-pane -t ${host.paneId}` : `send-keys -t ${host.paneId} Escape`,
     `display-message -p ${mismatch}`,
   ], undefined, endpoint);
   if (result.code !== 0) return false;
   if (result.stdout.includes(mismatch)) return false;
+  if (action === "interrupt") return true;
   for (let attempt = 0; attempt < deps.maxVerifyAttempts; attempt += 1) {
     const currentPane = await inspectTmuxPane(host.paneId, endpoint, deps);
     if (currentPane === null && processIsGone(host.panePid, deps) && processIsGone(host.agent, deps)) return true;
     if (attempt + 1 < deps.maxVerifyAttempts) await deps.sleep(25);
   }
   return false;
+}
+
+export function killTmuxHostIfMatches(host: TmuxHostEvidence, overrides: Partial<KillTmuxHostDeps> = {}): Promise<boolean> {
+  return controlTmuxHostIfMatches("kill", host, overrides);
+}
+
+/** Escape uses the same server, pane, agent, argv and ancestry fence as stop. */
+export function interruptTmuxHostIfMatches(host: TmuxHostEvidence, overrides: Partial<KillTmuxHostDeps> = {}): Promise<boolean> {
+  return controlTmuxHostIfMatches("interrupt", host, overrides);
 }
 
 export type TmuxHostCleanupResult = "cancelled" | "absent" | "unverifiable";
