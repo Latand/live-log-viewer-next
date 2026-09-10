@@ -9,6 +9,9 @@ const MIN_Z = 0.07;
 const MAX_Z = 1.6;
 /* At least this much of the world stays inside the viewport when panning. */
 const EDGE_KEEP = 120;
+/* How long the board must hold a framing that shows nothing before it is
+   re-framed — long enough that a measuring layout is never judged. */
+const OFF_WORLD_SETTLE_MS = 300;
 
 const MODE_KEY = "llvSchemeMode";
 /* Band board framings (#1586): content is screen-constant, so "fit" cannot
@@ -164,6 +167,33 @@ export function hasBoardContent(
 export function fitCameraToRect(rect: SchemeRect, vp: { w: number; h: number }): Camera {
   const z = Math.min(MAX_Z, Math.max(MIN_Z, Math.min((vp.w - 48) / rect.w, (vp.h - 48) / rect.h, 1)));
   return { z, x: (vp.w - rect.w * z) / 2 - rect.x * z, y: (vp.h - rect.h * z) / 2 - rect.y * z };
+}
+
+/**
+ * Whether a camera still shows the world it is pointed at (#1614).
+ *
+ * The saved camera is per project and survives a reload, but the world it was
+ * saved against does not have to: hiding the empty task bands of a 390-task
+ * board shortens the band stack from tens of thousands of pixels to a few
+ * thousand, and a camera parked far down the old stack then frames nothing at
+ * all — an empty canvas the operator has no way to read as "scrolled off the
+ * board". This is the same visibility rule `clampCam` maintains during a pan,
+ * asked as a question instead of enforced: at least `EDGE_KEEP` of the world
+ * (or all of it, when it is smaller than that) overlaps the viewport on both
+ * axes. An unmeasured viewport cannot answer it and does not veto.
+ */
+export function cameraShowsWorld(camera: Camera, world: SchemeRect, vp: { w: number; h: number }): boolean {
+  /* An unmeasured viewport, or a world with no extent yet (the first commit of
+     a board whose layout has not been measured), cannot answer the question —
+     and must not answer it "no", or a camera would be thrown away over a
+     transient. */
+  if (!(vp.w > 1) || !(vp.h > 1) || !(world.w > 0) || !(world.h > 0)) return true;
+  const overlap = (origin: number, extent: number, offset: number, size: number) => {
+    const start = origin * camera.z + offset;
+    return Math.min(start + extent * camera.z, size) - Math.max(start, 0);
+  };
+  return overlap(world.x, world.w, camera.x, vp.w) >= Math.min(EDGE_KEEP, world.w * camera.z)
+    && overlap(world.y, world.h, camera.y, vp.h) >= Math.min(EDGE_KEEP, world.h * camera.z);
 }
 
 /** The deadband used by repeated 0 to escalate from current work to all. */
@@ -521,7 +551,15 @@ export function useSchemeCamera({
         const raw = sessionStorage.getItem("llvCam:" + project);
         if (raw) {
           const saved = JSON.parse(raw) as Camera;
-          if (Number.isFinite(saved.x) && Number.isFinite(saved.y) && Number.isFinite(saved.z) && saved.z >= MIN_Z && saved.z <= MAX_Z) {
+          const rect = viewportRef.current?.getBoundingClientRect();
+          const measured = rect && rect.width > 1 && rect.height > 1 ? { w: rect.width, h: rect.height } : vp;
+          /* A camera the world grew out from under is not restored: it framed
+             a part of the board that no longer exists, so the operator would
+             open an empty canvas. Every camera that still shows the world is
+             restored exactly as it was saved — scroll position is state, and
+             re-fitting an in-bounds camera would throw it away. */
+          if (Number.isFinite(saved.x) && Number.isFinite(saved.y) && Number.isFinite(saved.z) && saved.z >= MIN_Z && saved.z <= MAX_Z
+            && cameraShowsWorld(saved, world, measured)) {
             framingRef.current = true;
             /* eslint-disable-next-line react-hooks/set-state-in-effect */
             setCam(saved);
@@ -539,7 +577,43 @@ export function useSchemeCamera({
          framings above are already aligned to the world. */
       setCam(c);
     }
-  }, [project, layout, taskRects, pipelineRects, fitCam, currentFitCam, mapMode]);
+  }, [project, layout, taskRects, pipelineRects, fitCam, currentFitCam, mapMode, world, vp]);
+
+  /* The standing rule behind the restore check above: a camera that framed the
+     board when it was set can be left framing nothing when the WORLD moves
+     instead — the board's own content decides its bounds, and hiding 384 empty
+     task bands shortens the stack from tens of thousands of pixels to a few
+     thousand under a camera parked at the bottom of the old one. The world
+     arrives a commit or two after the camera does, so checking only at restore
+     time reads the world before it has shrunk and lets exactly that camera
+     through; this runs on every world the board reports.
+     It cannot fight a gesture: `clampCam` already keeps a strip of the world on
+     screen through every pan and zoom, so a camera that frames none of it is
+     one no gesture could have produced. */
+  const reframedTo = useRef<Camera | null>(null);
+  useEffect(() => {
+    if (mapMode || initedFor.current !== project) return;
+    if (!hasBoardContent(layout, taskRects, pipelineRects)) return;
+    if (cameraShowsWorld(cam, world, vp)) return;
+    /* One verdict per framing: if the board is already sitting on the framing
+       this rule chose and still reports nothing on screen, the disagreement is
+       between the fit and the world box, and re-fitting on a timer forever
+       would only render the board unusable in a new way. */
+    if (reframedTo.current && cameraMatchesFraming(cam, reframedTo.current)) return;
+    /* Only a settled board is judged. Bands span the viewport, so between the
+       viewport being measured and the layout being recomputed for it the board
+       reports a world about one pixel wide — which no camera "shows", and which
+       is nobody's lost canvas. Any camera, world or viewport change re-arms
+       this, so what runs is one verdict on a board that stopped moving. */
+    const timer = window.setTimeout(() => {
+      const c = currentFitCam();
+      if (!c) return;
+      framingRef.current = true;
+      reframedTo.current = c;
+      setCam(c);
+    }, OFF_WORLD_SETTLE_MS);
+    return () => window.clearTimeout(timer);
+  }, [world, vp, cam, mapMode, project, layout, taskRects, pipelineRects, currentFitCam]);
 
   /* Debounced: a pan produces hundreds of camera frames, storage needs only
      the resting position. The map never writes — the desktop camera survives. */

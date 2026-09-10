@@ -565,3 +565,145 @@ test("a task's assigned conversation resolves to its current generation inside t
   await settle();
   expect(selected).toEqual(["/agent-current"]);
 });
+
+/* The saved camera and the board it was saved against (#1614). Two tasks make a
+   short band stack a few hundred pixels tall — the shape a 390-task board takes
+   once its empty bands are off it — while the stored camera is the one the
+   operator actually had: parked 25 000px down the stack the board no longer has. */
+const bandBoardTasks = (project: string) => [
+  { id: "first", project, status: "assigned" as const, text: "First task", placement: "pinned" as const, pos: { x: 0, y: 0 }, assignments: [], createdAt: "2026-07-01T00:00:00.000Z", updatedAt: "2026-07-01T00:00:00.000Z" },
+  { id: "second", project, status: "assigned" as const, text: "Second task", placement: "pinned" as const, pos: { x: 0, y: 200 }, assignments: [], createdAt: "2026-07-02T00:00:00.000Z", updatedAt: "2026-07-02T00:00:00.000Z" },
+];
+
+async function mountBandBoard(project: string): Promise<HTMLElement> {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  roots.add(root);
+  flushSync(() => {
+    root.render(
+      <SchemeBoard
+        project={project}
+        groups={[]}
+        manual={[]}
+        files={[]}
+        flows={[]}
+        tasks={bandBoardTasks(project)}
+        drafts={[]}
+        focus={null}
+        onSelect={() => {}}
+        onClose={() => {}}
+        onDraftClose={() => {}}
+        onDraftSpawned={() => {}}
+      />,
+    );
+  });
+  await settle();
+  return host;
+}
+
+const worldTransform = (host: HTMLElement) => {
+  const viewport = host.querySelector('[aria-label^="Agent board"]') as HTMLElement;
+  const world = Array.from(viewport.children).find((child) => (child as HTMLElement).style.transform.includes("scale(")) as HTMLElement;
+  return world.style.transform;
+};
+
+test("a saved camera the board shrank out from under is re-fitted, not restored onto empty canvas", async () => {
+  dom.sessionStorage.setItem("llvCam:camera-offworld", JSON.stringify({ x: 0, y: -25239.92, z: 1.6 }));
+  const host = await mountBandBoard("camera-offworld");
+  /* The standing rule waits for the board to settle before it judges a framing
+     (a board mid-measure reports a world a pixel wide), so wait past it. */
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  await settle();
+
+  const transform = worldTransform(host);
+  /* Not the stored coordinates: that camera looks 25 000px past the last band. */
+  expect(transform).not.toContain("-25239.92px");
+  /* And what it framed instead actually holds the board: both bands are inside
+     the viewport the board was measured at (1400x900). */
+  const viewport = host.querySelector('[aria-label^="Agent board"]') as HTMLElement;
+  const camera = /translate\((-?[\d.]+)px, (-?[\d.]+)px\) scale\(([\d.]+)\)/.exec(transform)!;
+  const [x, y, z] = [Number(camera[1]), Number(camera[2]), Number(camera[3])];
+  const bands = Array.from(host.querySelectorAll<HTMLElement>("[data-scheme-band-task]"));
+  expect(bands).toHaveLength(2);
+  for (const band of bands) {
+    const top = parseFloat(band.style.top) * z + y;
+    const left = parseFloat(band.style.left) * z + x;
+    expect(top).toBeGreaterThan(-1);
+    expect(top).toBeLessThan(viewport.getBoundingClientRect().height);
+    expect(left).toBeGreaterThan(-1);
+    expect(left).toBeLessThan(viewport.getBoundingClientRect().width);
+  }
+});
+
+test("a saved camera that still shows the board is restored exactly as it was left", async () => {
+  dom.sessionStorage.setItem("llvCam:camera-inbounds", JSON.stringify({ x: -20, y: -60, z: 0.9 }));
+  const host = await mountBandBoard("camera-inbounds");
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  await settle();
+  /* Scroll position is state: an in-bounds camera is never silently re-framed,
+     including after the settle window the rule above waits out. */
+  expect(worldTransform(host)).toBe("translate(-20px, -60px) scale(0.9)");
+});
+
+test("hiding the empty task bands under a camera parked deep in the stack brings the board back", async () => {
+  /* The production sequence, in order: the board is opened deep in a long band
+     stack, and the one-time migration then takes 384 empty bands off it. The
+     camera was in bounds when it was set, so nothing rejects it at restore —
+     the world moves out from under it while the board is mounted. */
+  const many = Array.from({ length: 40 }, (_, index) => ({
+    id: `task-${index}`, project: "camera-shrink", status: "assigned" as const,
+    text: `Task ${index}`, placement: "pinned" as const, pos: { x: 0, y: index * 200 },
+    assignments: [], createdAt: `2026-07-${String((index % 27) + 1).padStart(2, "0")}T00:00:00.000Z`,
+    updatedAt: "2026-07-01T00:00:00.000Z",
+  }));
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  roots.add(root);
+  const render = (tasks: typeof many) => flushSync(() => {
+    root.render(
+      <SchemeBoard
+        project="camera-shrink" groups={[]} manual={[]} files={[]} flows={[]}
+        tasks={tasks} drafts={[]} focus={null}
+        onSelect={() => {}} onClose={() => {}} onDraftClose={() => {}} onDraftSpawned={() => {}}
+      />,
+    );
+  });
+  render(many);
+  await settle();
+
+  const viewport = host.querySelector('[aria-label^="Agent board"]') as HTMLElement;
+  const world = Array.from(viewport.children).find((child) => (child as HTMLElement).style.transform.includes("scale(")) as HTMLElement;
+  /* Park the camera at the bottom of the long stack by wheeling there, so the
+     position under test is one the board itself produced and clamped. */
+  for (let step = 0; step < 12; step += 1) {
+    const wheel = new dom.WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: 900 });
+    Object.defineProperties(wheel, { clientX: { value: 600 }, clientY: { value: 400 }, ctrlKey: { value: false } });
+    flushSync(() => viewport.dispatchEvent(wheel as unknown as Event));
+    await settle();
+  }
+  const parked = /translate\((-?[\d.]+)px, (-?[\d.]+)px\)/.exec(world.style.transform)!;
+  expect(Number(parked[2])).toBeLessThan(-500);
+
+  /* The migration: every empty band leaves the board. */
+  render(many.slice(0, 2));
+  await settle();
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  await settle();
+
+  /* The board is on screen again, and the bands with it. */
+  const camera = /translate\((-?[\d.]+)px, (-?[\d.]+)px\) scale\(([\d.]+)\)/.exec(world.style.transform)!;
+  const [x, y, z] = [Number(camera[1]), Number(camera[2]), Number(camera[3])];
+  expect(y).toBeGreaterThan(Number(parked[2]));
+  const bands = Array.from(host.querySelectorAll<HTMLElement>("[data-scheme-band-task]"));
+  expect(bands.length).toBeGreaterThan(0);
+  for (const band of bands) {
+    const top = parseFloat(band.style.top) * z + y;
+    const left = parseFloat(band.style.left) * z + x;
+    expect(top).toBeGreaterThan(-1);
+    expect(top).toBeLessThan(900);
+    expect(left).toBeGreaterThan(-1);
+    expect(left).toBeLessThan(1400);
+  }
+});
