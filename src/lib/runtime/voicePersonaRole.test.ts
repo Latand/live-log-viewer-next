@@ -1,5 +1,3 @@
-import { createHash } from "node:crypto";
-
 import { expect, test } from "bun:test";
 
 import { executeRealtimeControl } from "./realtimeControl";
@@ -8,9 +6,8 @@ import {
   MODALITY_VOICE_PERSONA,
   resetVoicePersonaOverrideWarningForTest,
   VOICE_PERSONA_FILE,
-  voicePersona,
-  voicePersonaBootstrap,
-  voicePersonaBootstrapIdentity,
+  spokenVoicePersona,
+  voiceSessionPersona,
 } from "./voicePersona";
 import { voicePersonaVariantFor } from "./voicePersonaMandate";
 
@@ -82,48 +79,73 @@ test("an unresolvable conversation fails safe to the modality persona", () => {
 });
 
 /* ------------------------------------------------------------------ *
- * 2. What the modality persona may and may not say.
+ * 2. What the SPOKEN persona may and may not say.
  * ------------------------------------------------------------------ */
 
-/** The three sentences that demoted the seat, as the properties they assert. */
-const ROLE_REPLACEMENTS: { label: string; pattern: RegExp }[] = [
+/** The sentences that demoted the seat, as the properties they assert. They now
+    live in two places — what the spoken model is told, and what the backing
+    model is told — so each is checked against the text it belongs to. */
+const SPOKEN_ROLE_REPLACEMENTS: { label: string; pattern: RegExp }[] = [
   { label: "declares a replacement identity", pattern: /you are the voice coordinator/i },
-  { label: "hands the work to a separate manager", pattern: /there is a manager for that/i },
-  { label: "strips the session's own tools", pattern: /you have no tools for spawning agents/i },
-  { label: "mandates relaying instead of acting", pattern: /relay (?:what the user wants|with bridge_directive)/i },
   { label: "forbids touching the board", pattern: /you do not touch the board yourself/i },
 ];
 
-test("the modality persona replaces no part of an existing role", () => {
-  const offences = ROLE_REPLACEMENTS
+const BACKING_ROLE_REPLACEMENTS: { label: string; pattern: RegExp }[] = [
+  { label: "casts the session as the voice front", pattern: /which is the voice front/i },
+  { label: "mandates relaying instead of acting", pattern: /relay with bridge_directive/i },
+];
+
+test("the modality spoken persona replaces no part of an existing role", () => {
+  const offences = SPOKEN_ROLE_REPLACEMENTS
     .filter(({ pattern }) => pattern.test(MODALITY_VOICE_PERSONA))
     .map(({ label }) => label);
   expect(offences).toEqual([]);
 });
 
-test("the modality persona says outright that the role and its pending work stand", () => {
-  /* Not decoration. The thread may ALREADY carry the coordinator item from a call
-     taken before this fix, and this is the only text that outranks it. */
-  expect(MODALITY_VOICE_PERSONA).toMatch(/voice (?:is|changes) (?:only )?how/i);
-  expect(MODALITY_VOICE_PERSONA).toMatch(/role/i);
-  expect(MODALITY_VOICE_PERSONA).toMatch(/pending work/i);
+test("the modality backing instructions replace no part of an existing role", () => {
+  const backing = voiceSessionPersona("modality").startInstructions;
+  const offences = BACKING_ROLE_REPLACEMENTS
+    .filter(({ pattern }) => pattern.test(backing))
+    .map(({ label }) => label);
+  expect(offences).toEqual([]);
 });
 
-test("the modality persona keeps the spoken-delivery rules the call needs", () => {
-  /* The reason a persona is injected at all: a thread's instructions are written
-     for a reader, and every one of these fails out loud. Dropping them would trade
-     one defect for another. */
-  for (const rule of [/## Language/, /## Voice/, /## Honesty/]) {
-    expect(MODALITY_VOICE_PERSONA).toMatch(rule);
-  }
-  expect(MODALITY_VOICE_PERSONA).toMatch(/never speak numbers or identifiers aloud/i);
+test("the modality backing instructions say outright that the role and its work stand", () => {
+  /* Not decoration. The thread may ALREADY carry the coordinator item in its
+     append-only history from a call taken before #1615, and this is the only text
+     that outranks it — now delivered per session rather than written beside it. */
+  const backing = voiceSessionPersona("modality").startInstructions;
+  expect(backing).toMatch(/preserve this conversation's original instructions/i);
+  expect(backing).toMatch(/\btools\b/);
+  expect(backing).toMatch(/ongoing work/i);
+  expect(backing).toMatch(/it was not written for you/i);
 });
 
-test("the modality persona tells an incumbent manager not to relay its own work", () => {
+test("the modality backing instructions tell an incumbent manager not to relay its own work", () => {
   /* The observed loop, closed in the text as well as in the tool: a seat told to
      relay sends the instruction to the seat, which is itself. */
-  expect(MODALITY_VOICE_PERSONA).toMatch(/yourself/i);
-  expect(MODALITY_VOICE_PERSONA).toMatch(/bridge_directive/);
+  const backing = voiceSessionPersona("modality").startInstructions;
+  expect(backing).toMatch(/do the work yourself/i);
+  expect(backing).toMatch(/bridge_directive/);
+});
+
+test("the modality spoken persona forbids the spoken model claiming it has no tools", () => {
+  /* The reported symptom, stated as a rule. The spoken model genuinely holds no
+     tool — a realtime session has none — so left to Codex's stock persona it
+     answers for itself and reports that it cannot reach anything. */
+  expect(MODALITY_VOICE_PERSONA).toMatch(/never say that you have no tools/i);
+  expect(MODALITY_VOICE_PERSONA).toMatch(/do not answer from your own knowledge/i);
+});
+
+test("both spoken personas keep the spoken-delivery rules the call needs", () => {
+  /* The reason a persona is sent at all: a thread's instructions are written for
+     a reader, and every one of these fails out loud. */
+  for (const persona of [MODALITY_VOICE_PERSONA, COORDINATOR_VOICE_PERSONA]) {
+    for (const rule of [/## Language/, /## Voice/, /## Honesty/]) {
+      expect(persona).toMatch(rule);
+    }
+    expect(persona).toMatch(/never speak numbers or identifiers aloud/i);
+  }
 });
 
 /* ------------------------------------------------------------------ *
@@ -131,15 +153,19 @@ test("the modality persona tells an incumbent manager not to relay its own work"
  * ------------------------------------------------------------------ */
 
 test("the coordinator persona still carries the relay mandate it was written for", () => {
-  for (const { pattern } of ROLE_REPLACEMENTS) {
+  for (const { pattern } of SPOKEN_ROLE_REPLACEMENTS) {
     expect(COORDINATOR_VOICE_PERSONA).toMatch(pattern);
+  }
+  const backing = voiceSessionPersona("coordinator").startInstructions;
+  for (const { pattern } of BACKING_ROLE_REPLACEMENTS) {
+    expect(backing).toMatch(pattern);
   }
 });
 
-test("voicePersona resolves the variant it is asked for", () => {
+test("spokenVoicePersona resolves the variant it is asked for", () => {
   const nothingOnDisk = () => { throw new Error("ENOENT"); };
-  expect(voicePersona("coordinator", nothingOnDisk)).toBe(COORDINATOR_VOICE_PERSONA);
-  expect(voicePersona("modality", nothingOnDisk)).toBe(MODALITY_VOICE_PERSONA);
+  expect(spokenVoicePersona("coordinator", nothingOnDisk)).toBe(COORDINATOR_VOICE_PERSONA);
+  expect(spokenVoicePersona("modality", nothingOnDisk)).toBe(MODALITY_VOICE_PERSONA);
 });
 
 test("an ignored override is reported once, so the operator can find out why", () => {
@@ -152,17 +178,17 @@ test("an ignored override is reported once, so the operator can find out why", (
   const warn = console.warn;
   console.warn = (...args: unknown[]) => { warnings.push(args.join(" ")); };
   try {
-    expect(voicePersona("modality", () => "An operator's own persona.")).toBe(MODALITY_VOICE_PERSONA);
-    expect(voicePersona("modality", () => "An operator's own persona.")).toBe(MODALITY_VOICE_PERSONA);
-    /* Once per process: this resolves on every bootstrap. */
+    expect(spokenVoicePersona("modality", () => "An operator's own persona.")).toBe(MODALITY_VOICE_PERSONA);
+    expect(spokenVoicePersona("modality", () => "An operator's own persona.")).toBe(MODALITY_VOICE_PERSONA);
+    /* Once per process: this resolves on every call start. */
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain(VOICE_PERSONA_FILE);
 
     /* And nothing at all when there is no override to ignore. */
     resetVoicePersonaOverrideWarningForTest();
     warnings.length = 0;
-    expect(voicePersona("modality", () => { throw new Error("ENOENT"); })).toBe(MODALITY_VOICE_PERSONA);
-    expect(voicePersona("modality", () => "   \n ")).toBe(MODALITY_VOICE_PERSONA);
+    expect(spokenVoicePersona("modality", () => { throw new Error("ENOENT"); })).toBe(MODALITY_VOICE_PERSONA);
+    expect(spokenVoicePersona("modality", () => "   \n ")).toBe(MODALITY_VOICE_PERSONA);
     expect(warnings).toEqual([]);
   } finally {
     console.warn = warn;
@@ -175,60 +201,61 @@ test("an operator persona override applies to the coordinator only", () => {
      by construction. Applying it to an incumbent would reintroduce this very
      defect through the operator's own file, so the modality variant is built-in. */
   const override = () => "You are the voice coordinator. Relay everything.";
-  expect(voicePersona("coordinator", override)).toBe("You are the voice coordinator. Relay everything.");
-  expect(voicePersona("modality", override)).toBe(MODALITY_VOICE_PERSONA);
+  expect(spokenVoicePersona("coordinator", override)).toBe("You are the voice coordinator. Relay everything.");
+  expect(spokenVoicePersona("modality", override)).toBe(MODALITY_VOICE_PERSONA);
 });
 
 /* ------------------------------------------------------------------ *
- * 4. Identity: a demoted thread can still be corrected.
+ * 4. Identity: which persona a live call is running on.
  * ------------------------------------------------------------------ */
 
-test("each variant owns a distinct bootstrap item id on the same thread", () => {
-  /* The item id is the idempotency receipt. Were it shared, a thread that already
-     took the coordinator item would be seen as bootstrapped and could never be
-     told otherwise — the demotion would outlive the fix for the thread's life. */
-  const coordinator = voicePersonaBootstrapIdentity("thread-1", "coordinator");
-  const modality = voicePersonaBootstrapIdentity("thread-1", "modality");
-  expect(modality.itemId).not.toBe(coordinator.itemId);
-  for (const identity of [coordinator, modality]) {
-    /* The provider's 64-character ceiling (#870) binds both variants. */
-    expect(identity.receiptId).toMatch(/^voice_persona_[a-f0-9]{46}$/);
-    expect(identity.itemId).toBe(`msg_${identity.receiptId}`);
-    expect(identity.itemId.length).toBeLessThanOrEqual(64);
+test("each variant owns a distinct persona identity", () => {
+  const coordinator = voiceSessionPersona("coordinator");
+  const modality = voiceSessionPersona("modality");
+  expect(modality.personaId).not.toBe(coordinator.personaId);
+  for (const persona of [coordinator, modality]) {
+    expect(persona.personaId).toMatch(/^voice_persona_[a-f0-9]{46}$/);
   }
 });
 
-test("the coordinator identity is unchanged, so established root threads take no second item", () => {
-  /* The pre-fix digest, recomputed here from the formula that shipped rather than
-     pasted as a literal. A new id would inject a duplicate persona into every
-     thread that has ever hosted a coordinator call. */
-  const legacyDigest = createHash("sha256")
-    .update("voice-persona-bootstrap\0", "utf8")
-    .update("thread-1", "utf8")
-    .digest("hex")
-    .slice(0, 46);
-  expect(voicePersonaBootstrapIdentity("thread-1", "coordinator")).toEqual({
-    receiptId: `voice_persona_${legacyDigest}`,
-    itemId: `msg_voice_persona_${legacyDigest}`,
-  });
+test("the persona identity follows the text, so an override is visible as a different call", () => {
+  /* The id is evidence of WHICH persona a live call is running on. An override
+     that changed the spoken instructions while reporting the built-in identity
+     would make the voice panel and every regression assertion agree about a
+     persona the call is not using. */
+  const builtIn = voiceSessionPersona("coordinator", () => { throw new Error("ENOENT"); });
+  const overridden = voiceSessionPersona("coordinator", () => "An operator's own persona.");
+  expect(overridden.personaId).not.toBe(builtIn.personaId);
+  expect(overridden.prompt).toBe("An operator's own persona.");
 });
 
-test("the injected item carries the resolved variant's text", () => {
-  const identity = voicePersonaBootstrapIdentity("thread-1", "modality");
-  const bootstrap = voicePersonaBootstrap(identity, "modality", () => { throw new Error("ENOENT"); });
-  expect(bootstrap.item.role).toBe("developer");
-  expect(bootstrap.item.id).toBe(identity.itemId);
-  expect(bootstrap.item.content[0].text).toBe(MODALITY_VOICE_PERSONA);
+test("a session persona carries the spoken prompt and the backing pair, and nothing thread-durable", () => {
+  /* The whole repair, as a shape: three session-scoped strings. Before this,
+     the persona was a `thread/inject_items` write that reached the backing model
+     permanently and the spoken model never. */
+  const persona = voiceSessionPersona("modality", () => { throw new Error("ENOENT"); });
+  expect(persona.prompt).toBe(MODALITY_VOICE_PERSONA);
+  expect(persona.startInstructions).toMatch(/realtime voice is active/i);
+  expect(persona.endInstructions).toMatch(/realtime voice has ended/i);
+  expect(persona.endInstructions).toMatch(/normal text-output policy/i);
+  expect(Object.keys(persona).sort()).toEqual([
+    "endInstructions", "personaId", "prompt", "startInstructions", "variant",
+  ]);
+});
+
+test("the end instructions withdraw the spoken register the start instructions imposed", () => {
+  /* The pairing is what keeps a text agent from inheriting spoken-delivery rules
+     for the rest of its life, which is what a permanent injected item did. */
+  for (const variant of ["modality", "coordinator"] as const) {
+    const persona = voiceSessionPersona(variant);
+    expect(persona.startInstructions).toMatch(/spoken aloud while this call is live/i);
+    expect(persona.endInstructions).toMatch(/only while the call was live/i);
+  }
 });
 
 /* ------------------------------------------------------------------ *
  * 5. On, off, and back on again.
  * ------------------------------------------------------------------ */
-
-function personaBootstrapReceipt(variant: "coordinator" | "modality") {
-  const identity = voicePersonaBootstrapIdentity("thread-live", variant);
-  return { ...identity, insertion: "accepted" as const };
-}
 
 /** A host that records the persona variant every start was asked for. */
 function recordingHost(variant: "coordinator" | "modality") {
@@ -240,11 +267,8 @@ function recordingHost(variant: "coordinator" | "modality") {
       async startRealtimeWebRtc(sdp: string, persona?: unknown) {
         starts.push(persona);
         live = "live-1";
-        return {
-          sdp: "v=0\r\nanswer",
-          realtimeSessionId: live,
-          personaBootstrap: personaBootstrapReceipt(variant),
-        };
+        const { variant: resolved, personaId } = voiceSessionPersona(variant);
+        return { sdp: "v=0\r\nanswer", realtimeSessionId: live, persona: { variant: resolved, personaId } };
       },
       async appendRealtimeSpeech() {},
       async stopRealtime() { live = null; },

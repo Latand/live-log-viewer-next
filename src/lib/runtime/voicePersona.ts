@@ -5,6 +5,38 @@ import { createHash } from "node:crypto";
 import { configFilePath } from "@/lib/configDir";
 
 /**
+ * WHICH MODEL EACH OF THESE TEXTS IS FOR (#1629).
+ *
+ * A realtime V3 call runs TWO models, and the whole voice failure was writing
+ * for one of them and delivering to the other:
+ *
+ * - The SPOKEN model (`gpt-live-1-codex`) holds the microphone. Its entire
+ *   instruction set is the `prompt` parameter of `thread/realtime/start`. It has
+ *   no tools; it delegates to the thread.
+ * - The BACKING model is the thread's own agent — the orchestrator, with its
+ *   mandate, its seat and its whole MCP inventory. It receives session-scoped
+ *   developer instructions through `realtimeStartInstructions` and, when the
+ *   call ends, `realtimeEndInstructions`.
+ *
+ * Until this split the Viewer sent NEITHER. It wrote the persona into the
+ * thread with `thread/inject_items`, which reaches only the backing model, and
+ * left `prompt` unset — so the spoken model ran Codex's stock built-in realtime
+ * persona ("You are Codex … a playful collaborator", 5.7 kB), whose startup
+ * context states in its own words that it excludes repo memory instructions and
+ * AGENTS files. The operator's orchestrator therefore lost its role and its
+ * tools the moment the microphone opened, exactly as reported, while the text
+ * agent quietly accumulated one permanent copy of the spoken-delivery rules per
+ * thread.
+ *
+ * Verified against the installed app-server, credential-free, in
+ * `docs/design/codex-api-update/voice_probe.py`: an incumbent thread carrying a
+ * durable developer role/tool mandate reaches the backing model and does NOT
+ * reach the spoken session, whose instructions are the stock persona; supplying
+ * `prompt` replaces those instructions, and neither `prompt` nor either
+ * instruction string is written to canonical history.
+ */
+
+/**
  * The assistant's established name, in its canonical English spelling.
  *
  * A name written in one script is read aloud in that script's language, so a
@@ -105,64 +137,48 @@ Never use the construction "not X, but Y" — say it straight.
 `;
 
 /**
- * The mandate of a session whose ONLY job is the call (#691 §4).
+ * What the SPOKEN model does for a session created to BE the voice front (#691 §4).
  *
- * This is a role, and a total one: it says the session talks to nobody but the
- * user, owns no board tool, and relays everything onward. That is right for a
- * session created to be the voice front and catastrophic for any other, which is
- * why it is reachable only through {@link voicePersonaVariantFor} naming an
- * explicitly-created coordinator.
+ * The spoken model owns no tool in either variant — a realtime V3 session has
+ * none — so this says how to talk about the work, not how to do it. The relay
+ * mechanics that used to live here moved to {@link COORDINATOR_BACKING_WORK},
+ * where the model that actually holds `bridge_directive` can read them.
  */
-const COORDINATOR_WORK = `
-You are the only agent the user talks to, and you do not touch the board yourself. There is a manager for that: it owns tasks, pipelines, pull requests, workers and deploys. You relay what the user wants to it, and you tell the user what comes back. You have no tools for spawning agents, editing tasks or deploying, and asking for them is not the move — relaying is.
+const COORDINATOR_SPOKEN_WORK = `
+You are the only voice the user hears, and you do not touch the board yourself. The agent behind you does: it owns tasks, pipelines, pull requests, workers and deploys, and it has the tools for all of it. Everything the user asks for goes to it, and you say back what comes of it.
 
-Relay with bridge_directive. Pass the current turn id and the index of this instruction within the turn, and the user's intent in plain words. The recipient is resolved for you; you never name it. If a call fails and you retry, reuse the same turn id and index — that is what stops one instruction arriving twice.
+Never say you cannot do something. Pass it to the agent behind you and let it answer.
 
-Answers, questions and blockers from the manager arrive in this conversation on their own. Say what matters out loud in your own words. Do not read identifiers, do not read the report verbatim, and do not narrate the plumbing.
+Answers, questions and blockers arrive on their own. Say what matters out loud in your own words. Do not read identifiers, do not read a report verbatim, and do not narrate the plumbing.
 
-When the manager asks something, put the question to the user, then relay their answer with bridge_directive carrying the reference from that report.
+A deploy needs the user's spoken yes. Put the question plainly and pass their answer back exactly as they gave it; anything other than a clear yes is a no.
 
-A deploy needs the user's spoken yes. The manager sends the exact commit and a one-time authorization; ask the user plainly, and on a yes relay it back with the reference, the nonce and the commit exactly as given. Never invent or reword any of the three. Anything other than a clear yes is a no — say so and relay nothing.
+Before any claim about the state of the work, ask rather than guess. Claims from memory go stale faster than the conversation runs.
 
-Before any claim about the state of the work, ask the manager rather than guessing. Claims from memory go stale faster than the conversation runs.
-
-While a worker runs, say briefly what is happening. Two minutes of silence sounds like a hang.
-
-Do not ask permission for what you can check yourself.
+While work runs, say briefly what is happening. Two minutes of silence sounds like a hang.
 
 Stay silent until you are spoken to: this text is context, and there is nothing here to greet.`;
 
 /**
- * What voice changes for a session that already has a role: how it hears and how
- * it answers, and nothing else (#1615).
+ * What the SPOKEN model does for a conversation that already has a role (#1615, #1629).
  *
- * The operator enabled voice on their orchestrator's conversation and the call
- * start wrote {@link COORDINATOR_WORK} into that thread. The seat read it,
- * concluded it was now a relay with no board tools, and relayed its own work to
- * "the manager" — which `bridge_directive` resolves from the designation record,
- * so the instruction arrived back at the seat that sent it. It then declined the
- * work it was holding, while the Viewer still showed it as the manager.
- *
- * So this section assigns nothing and removes nothing. It states that the role,
- * the authority, the seat, the tools and the pending work are untouched, and it
- * says so explicitly enough to outrank a coordinator item a thread may already
- * carry from a call taken before this fix — an injected item cannot be withdrawn
- * from an append-only transcript, so the correction has to be louder than it.
+ * The agent behind this microphone is the one holding the work — commonly the
+ * project's own orchestrator, with its mandate, its seat and its whole tool
+ * inventory. The spoken model's job is to be its voice, and the failure this
+ * text exists to prevent is the spoken model answering FOR it: Codex's stock
+ * realtime persona introduces itself as a general-purpose assistant, so left to
+ * itself it chats, guesses, and tells the operator it has no tools.
  */
-const MODALITY_WORK = `
-Voice changes how you hear and how you answer while a call is live. It changes nothing else.
+const MODALITY_SPOKEN_WORK = `
+You are the voice of the agent in this conversation. It is not a helper standing behind you; it is who you are speaking as, and it already has its own instructions, its own authority and its own tools.
 
-The delivery rules above are about speaking. This text stays in the thread after the call ends, so when you are writing rather than speaking, write the way you always have.
+So do not answer from your own knowledge and do not decide anything on your own. Every request, correction and question the user speaks goes to that agent, and what you say aloud is what came back.
 
-Your role in this conversation is exactly what it was a moment ago: the same instructions, the same authority, the same seat, the same tools, the same pending work, the same agents to run. Nothing here removes a tool you have or moves your responsibilities to anyone else.
+Never say that you have no tools, no access or no permission. You do not know what it can reach; it does. Pass the request on and let it answer.
 
-If something earlier in this thread cast you as a relay — that your only job is to speak, that the board belongs to someone else, that the tools you can see are not yours to use — it was written for a session created to be nothing but a voice front. It was not written for you, and it does not apply here. Your own instructions stand.
+Do not describe yourself as a separate assistant, a front end or a relay, and do not talk about the agent in the third person. To the user there is one participant in this conversation, and you are how it speaks.
 
-Do the work yourself. You are being spoken to because you are the one holding it.
-
-Do not relay your own work with bridge_directive. That tool addresses the project's designated orchestrator, so when you are that orchestrator it hands the instruction back to you and the request goes nowhere. Use it only to reach an orchestrator that is not you.
-
-A spoken request is an ordinary request. Take it with the authority you already have, do the work, and say out loud what came of it.
+While it works, say briefly what is happening. Two minutes of silence sounds like a hang.
 
 Stay silent until you are spoken to: this text is context, and there is nothing here to greet.`;
 
@@ -173,70 +189,74 @@ const COORDINATOR_IDENTITY = `Your name is ${PERSONA_NAME}. You are the voice co
 /** The same spoken name, and no claim about the role behind it. The operator
     hears one voice either way; what differs is what that voice is allowed to
     say it is responsible for. */
-const MODALITY_IDENTITY = `Your name is ${PERSONA_NAME} when you speak aloud. Speaking is how you hear this conversation and how you answer in it.`;
+const MODALITY_IDENTITY = `Your name is ${PERSONA_NAME} when you speak aloud. Speaking is how this conversation hears the operator and how it answers.`;
 
-/** Injected as the call's first thread item for a session created to BE the
-    voice front. Editable without a deploy — see {@link voicePersona}. */
+/** The spoken model's whole instruction set for a session created to BE the
+    voice front. Editable without a deploy — see {@link spokenVoicePersona}. */
 export const COORDINATOR_VOICE_PERSONA = `${COORDINATOR_IDENTITY}${SPOKEN_DELIVERY}
 ## Work
-${COORDINATOR_WORK}`;
+${COORDINATOR_SPOKEN_WORK}`;
 
-/** Injected for every other session: the spoken-delivery rules, and an explicit
-    statement that the session's existing role survives the call. */
+/** The spoken model's whole instruction set for every other session: the
+    spoken-delivery rules, and an explicit statement that the agent it speaks
+    for keeps its own role, authority and tools. */
 export const MODALITY_VOICE_PERSONA = `${MODALITY_IDENTITY}${SPOKEN_DELIVERY}
 ## Work
-${MODALITY_WORK}`;
-
-/** Operator override, resolved once per thread; edits apply when a new thread starts. */
-export const VOICE_PERSONA_FILE = "prompts/voice-persona.md";
-
-export type VoicePersonaBootstrapReceipt = {
-  receiptId: string;
-  itemId: string;
-  insertion: "accepted" | "rejected";
-  diagnostic?: string;
-};
-
-export type VoicePersonaBootstrap = {
-  item: {
-    type: "message";
-    id: string;
-    role: "developer";
-    content: [{ type: "input_text"; text: string }];
-  };
-};
-
-export type VoicePersonaBootstrapIdentity = Pick<VoicePersonaBootstrapReceipt, "receiptId" | "itemId">;
-
-/* Larger than the host's maximum admissible app-server frame, while keeping a
-   transcript with an oversized unrelated row from growing scanner memory. */
-const MAX_CANONICAL_VOICE_PERSONA_RECORD_BYTES = 32 * 1024 * 1024;
-/* Responses API item ids accept at most 64 characters. `msg_voice_persona_`
-   consumes 18, leaving 46 hex characters (184 bits) for the stable digest. */
-const VOICE_PERSONA_ID_DIGEST_HEX = 46;
-
-function record(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : null;
-}
-
-function isCanonicalVoicePersonaRecord(line: Buffer, itemId: string): boolean {
-  let row: Record<string, unknown> | null = null;
-  try {
-    row = record(JSON.parse(line.toString("utf8")));
-  } catch {
-    return false;
-  }
-  const payload = record(row?.payload);
-  return row?.type === "response_item"
-    && payload?.type === "message"
-    && payload.id === itemId
-    && payload.role === "developer";
-}
+${MODALITY_SPOKEN_WORK}`;
 
 /**
- * The persona text for a starting call.
+ * What the BACKING model is told while a call is live, and what it is told when
+ * the call ends (#1629).
+ *
+ * Native Codex hands its backing model exactly this pair, and the pairing is the
+ * point: the start text is scoped to the session and the end text withdraws it,
+ * so a call leaves the thread's own instructions standing instead of a permanent
+ * layer of spoken-delivery rules. The Viewer used to write that layer into
+ * canonical history with `thread/inject_items`, once per thread, never withdrawn
+ * — which is why a conversation kept answering in two-sentence spoken register
+ * long after the microphone closed.
+ *
+ * FAILS TOWARD THE THREAD'S OWN ROLE. Neither string assigns a role, and the
+ * modality one says so in as many words: it has to outrank a coordinator item a
+ * thread may still carry in its history from a call taken before #1615, and an
+ * append-only transcript cannot have that item withdrawn.
+ */
+const MODALITY_BACKING_WORK = `Realtime voice is active for this conversation. Preserve this conversation's original instructions, role, authority, seat, permissions, tools and ongoing work — voice changes none of them, and nothing here moves your responsibilities to anyone else.
+
+Do the work yourself. You are being spoken to because you are the one holding it. A spoken request is an ordinary request: take it with the authority you already have.
+
+Do not relay your own work with bridge_directive. That tool addresses the project's designated orchestrator, so when you are that orchestrator it hands the instruction back to you and the request goes nowhere. Use it only to reach an orchestrator that is not you.
+
+If an earlier item in this conversation cast you as a relay — that your only job is to speak, that the board belongs to someone else, that the tools you can see are not yours to use — it was written for a session created to be nothing but a voice front. It was not written for you and it does not apply here.
+
+Your answers are spoken aloud while this call is live, so keep them short and plain: no markup, no lists read out, no identifiers or numbers spoken digit by digit. Say the thing that matters and offer to go further.`;
+
+const COORDINATOR_BACKING_WORK = `Realtime voice is active for this conversation, which is the voice front: it speaks to the user and relays the work onward.
+
+Relay with bridge_directive. Pass the current turn id and the index of this instruction within the turn, and the user's intent in plain words. The recipient is resolved for you; you never name it. If a call fails and you retry, reuse the same turn id and index — that is what stops one instruction arriving twice.
+
+When the manager asks something, put the question to the user, then relay their answer with bridge_directive carrying the reference from that report.
+
+A deploy needs the user's spoken yes. The manager sends the exact commit and a one-time authorization; on a yes relay it back with the reference, the nonce and the commit exactly as given. Never invent or reword any of the three.
+
+Your answers are spoken aloud while this call is live, so keep them short and plain: no markup, no lists read out, no identifiers or numbers spoken digit by digit.`;
+
+/** Withdrawn at hangup, so the thread returns to being a text agent. Shared by
+    both variants: neither of them assigned a role, so neither has one to
+    restore — what has to be restored is the output policy. */
+const BACKING_END_WORK = `Realtime voice has ended. Resume this conversation's original instructions, role, authority, permissions, tools, ongoing work and normal text-output policy. The spoken-delivery rules applied only while the call was live; write as you always have.`;
+
+/** Operator override, resolved per call; edits apply to the next call. */
+export const VOICE_PERSONA_FILE = "prompts/voice-persona.md";
+
+/* The digest is an identity, not a secret: 46 hex characters (184 bits) is what
+   the previous canonical item id carried, and the voice panel and its tests
+   still match on that width. */
+const VOICE_PERSONA_ID_DIGEST_HEX = 46;
+
+/**
+ * The SPOKEN model's instruction set for a starting call — the `prompt` of
+ * `thread/realtime/start`, and the only instructions that model ever has.
  *
  * The COORDINATOR variant honours the operator's override file, exactly as it
  * always has. The MODALITY variant does not, and that is the point: an override
@@ -245,11 +265,10 @@ function isCanonicalVoicePersonaRecord(line: Buffer, itemId: string): boolean {
  * reintroduce this defect through the operator's own file. It keeps the
  * built-in text, which assigns nothing.
  *
- * The host invokes this resolver only while the thread has no canonical persona
- * item for the resolved variant, so an established thread keeps its wording and
- * a new one picks up edits.
+ * Resolved per call rather than per thread: the prompt is a session parameter
+ * now, so an edit applies to the next call instead of waiting for a new thread.
  */
-export function voicePersona(
+export function spokenVoicePersona(
   variant: VoicePersonaVariant,
   readFile: (path: string) => string = (target) => fs.readFileSync(target, "utf8"),
 ): string {
@@ -288,144 +307,45 @@ export function resetVoicePersonaOverrideWarningForTest(): void {
 }
 
 /**
- * The bootstrap digest, which the variant is part of.
+ * What a live call carries, resolved once per start (#1629).
  *
- * The COORDINATOR digest is byte-for-byte the one that shipped, so every thread
- * that has already taken a coordinator item is still recognized and takes no
- * second one. The MODALITY digest is deliberately different: the item id is the
- * idempotency receipt, so sharing it would make a thread that was demoted before
- * this fix look already-bootstrapped and leave it demoted for the rest of its
- * life. A distinct id is what lets the correction land.
+ * Three strings and an identity, and no write to the thread anywhere in it. The
+ * `prompt` instructs the spoken model, the two instruction strings frame the
+ * session for the backing model and withdraw that framing at hangup, and
+ * `personaId` is a digest of the exact text sent — evidence of WHICH persona a
+ * live call is running on, which is what the voice panel and the regression
+ * tests need and all they need. It is deliberately not an idempotency receipt:
+ * there is no longer anything durable to be idempotent about.
  */
-function voicePersonaBootstrapDigest(threadId: string, variant: VoicePersonaVariant): string {
-  const digest = createHash("sha256")
-    .update("voice-persona-bootstrap\0", "utf8")
-    .update(threadId, "utf8");
-  if (variant !== "coordinator") digest.update("\0modality", "utf8");
-  return digest.digest("hex");
+export interface VoiceSessionPersona {
+  variant: VoicePersonaVariant;
+  /** Stable digest of the resolved prompt; identical text yields identical id. */
+  personaId: string;
+  /** Instructions for the spoken model. */
+  prompt: string;
+  /** Session-scoped developer instructions for the backing model. */
+  startInstructions: string;
+  /** Withdrawal handed to the backing model when the call ends. */
+  endInstructions: string;
 }
 
-/** Provider-invalid identity emitted before #870, used only to recognize an existing
-    row. Coordinator-only: no thread ever received a modality item under it. */
-export function legacyVoicePersonaBootstrapItemId(threadId: string): string {
-  return `msg_voice_persona_${voicePersonaBootstrapDigest(threadId, "coordinator")}`;
-}
-
-/** Stable canonical identity shared by every WebRTC attempt on one thread at one
-    variant. */
-export function voicePersonaBootstrapIdentity(
-  threadId: string,
-  variant: VoicePersonaVariant,
-): VoicePersonaBootstrapIdentity {
-  const digest = voicePersonaBootstrapDigest(threadId, variant).slice(0, VOICE_PERSONA_ID_DIGEST_HEX);
-  const receiptId = `voice_persona_${digest}`;
-  const itemId = `msg_${receiptId}`;
-  return { receiptId, itemId };
-}
-
-/** Canonical developer item resolved once after its identity is known absent. */
-export function voicePersonaBootstrap(
-  identity: VoicePersonaBootstrapIdentity,
+export function voiceSessionPersona(
   variant: VoicePersonaVariant,
   readFile?: (path: string) => string,
-): VoicePersonaBootstrap {
-  const text = voicePersona(variant, readFile);
+): VoiceSessionPersona {
+  const prompt = spokenVoicePersona(variant, readFile);
+  const digest = createHash("sha256")
+    .update("voice-session-persona\0", "utf8")
+    .update(variant, "utf8")
+    .update("\0", "utf8")
+    .update(prompt, "utf8")
+    .digest("hex")
+    .slice(0, VOICE_PERSONA_ID_DIGEST_HEX);
   return {
-    item: {
-      type: "message",
-      id: identity.itemId,
-      role: "developer",
-      content: [{ type: "input_text", text }],
-    },
+    variant,
+    personaId: `voice_persona_${digest}`,
+    prompt,
+    startInstructions: variant === "coordinator" ? COORDINATOR_BACKING_WORK : MODALITY_BACKING_WORK,
+    endInstructions: BACKING_END_WORK,
   };
-}
-
-/**
- * Check the app-server-owned canonical JSONL without loading a possibly large
- * transcript into memory. A successful inject flushes this item before its RPC
- * response, so finding the stable id is the durable idempotency receipt.
- */
-export async function canonicalVoicePersonaBootstrapExists(
-  transcriptPath: string | null,
-  itemId: string,
-): Promise<boolean> {
-  if (!transcriptPath) {
-    const error = new Error("canonical transcript path is unavailable") as NodeJS.ErrnoException;
-    error.code = "NO_TRANSCRIPT_PATH";
-    throw error;
-  }
-  let handle: fs.promises.FileHandle;
-  try {
-    handle = await fs.promises.open(
-      transcriptPath,
-      fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0),
-    );
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ENOENT" || code === "ENOTDIR") return false;
-    throw error;
-  }
-  return new Promise<boolean>((resolve, reject) => {
-    const stream = handle.createReadStream({ autoClose: true });
-    let settled = false;
-    let pending: Buffer[] = [];
-    let pendingBytes = 0;
-    let skippingRecord = false;
-    const finish = (found: boolean) => {
-      if (settled) return;
-      settled = true;
-      stream.destroy();
-      resolve(found);
-    };
-    const resetLine = () => {
-      pending = [];
-      pendingBytes = 0;
-      skippingRecord = false;
-    };
-    stream.on("data", (chunk) => {
-      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-      let cursor = 0;
-      while (cursor <= bytes.length) {
-        const newline = bytes.indexOf(0x0a, cursor);
-        if (newline === -1) {
-          const rest = bytes.length - cursor;
-          if (!skippingRecord && rest > 0) {
-            if (pendingBytes + rest > MAX_CANONICAL_VOICE_PERSONA_RECORD_BYTES) {
-              pending = [];
-              pendingBytes = 0;
-              skippingRecord = true;
-            } else {
-              pending.push(Buffer.from(bytes.subarray(cursor)));
-              pendingBytes += rest;
-            }
-          }
-          return;
-        }
-        if (!skippingRecord) {
-          const segment = bytes.subarray(cursor, newline);
-          if (pendingBytes + segment.length <= MAX_CANONICAL_VOICE_PERSONA_RECORD_BYTES) {
-            const line = pendingBytes
-              ? Buffer.concat([...pending, segment], pendingBytes + segment.length)
-              : segment;
-            if (isCanonicalVoicePersonaRecord(line, itemId)) return finish(true);
-          }
-        }
-        resetLine();
-        cursor = newline + 1;
-      }
-    });
-    stream.on("end", () => {
-      if (!skippingRecord && pendingBytes > 0
-        && isCanonicalVoicePersonaRecord(Buffer.concat(pending, pendingBytes), itemId)) {
-        finish(true);
-        return;
-      }
-      finish(false);
-    });
-    stream.on("error", (error: NodeJS.ErrnoException) => {
-      if (settled) return;
-      settled = true;
-      reject(error);
-    });
-  });
 }

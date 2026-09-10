@@ -25,9 +25,7 @@ import type { RuntimeVoiceDelivery } from "./voiceDelivery";
 import {
   COORDINATOR_VOICE_PERSONA,
   VOICE_PERSONA_FILE,
-  legacyVoicePersonaBootstrapItemId,
-  voicePersona,
-  voicePersonaBootstrapIdentity,
+  voiceSessionPersona,
 } from "./voicePersona";
 
 function deliveryDedup(operationId: string): string {
@@ -561,13 +559,12 @@ describe("CodexAppServerHost", () => {
     });
 
     const started = await host.startRealtimeWebRtc("v=0\r\noffer");
+    const persona = voiceSessionPersona("modality");
     expect(started).toMatchObject({
       sdp: "v=0\r\nanswer",
       realtimeSessionId: "realtime-1",
-      personaBootstrap: { insertion: "accepted" },
+      persona: { variant: "modality", personaId: persona.personaId },
     });
-    expect(started.personaBootstrap.receiptId).toMatch(/^voice_persona_[a-f0-9]{46}$/);
-    expect(started.personaBootstrap.itemId).toMatch(/^msg_voice_persona_[a-f0-9]{46}$/);
     // SDP requires a terminal CRLF; a missing one is healed, never trimmed —
     // OpenAI rejects an unterminated offer with "unmarshal SDP: EOF".
     /* The live model is named explicitly (#664): letting the backend choose
@@ -582,22 +579,19 @@ describe("CodexAppServerHost", () => {
       clientManagedHandoffs: true,
       codexResponsesAsItems: true,
       includeStartupContext: true,
+      /* THE SPOKEN MODEL'S INSTRUCTIONS (#1629). Omitting this is what left the
+         operator's orchestrator speaking as Codex's stock realtime assistant,
+         with no role and no idea what the thread behind it can reach. */
+      prompt: persona.prompt,
+      realtimeStartInstructions: persona.startInstructions,
+      realtimeEndInstructions: persona.endInstructions,
+      flushTranscriptTailOnSessionEnd: true,
     });
 
-    /* The thread owns the persona while a current V3 call may also receive a
-       bounded unresolved conversation tail through its creation payload. */
-    const injected = server.requests.find((request) => request.method === "thread/inject_items");
-    expect((injected?.params as { threadId?: string })?.threadId).toBe("voice-thread");
-    /* Shape and ordering only. Which text arrives is pinned by the override
-       test below, where the expected string cannot also be the default. */
-    expect((injected?.params as { items?: unknown[] })?.items).toEqual([{
-      type: "message",
-      id: started.personaBootstrap.itemId,
-      role: "developer",
-      content: [{ type: "input_text", text: voicePersona("modality") }],
-    }]);
-    expect(server.requests.findIndex((request) => request.method === "thread/inject_items"))
-      .toBeLessThan(server.requests.findIndex((request) => request.method === "thread/realtime/start"));
+    /* AND NOTHING IS WRITTEN TO THE THREAD. The persona used to be a
+       `thread/inject_items` developer row, which reached the backing model
+       permanently and the spoken model never. */
+    expect(server.requests.filter((request) => request.method === "thread/inject_items")).toEqual([]);
 
     await host.appendRealtimeSpeech("Worker inspected package.json");
     expect(server.requests.find((request) => request.method === "thread/realtime/appendSpeech")?.params).toEqual({
@@ -611,8 +605,12 @@ describe("CodexAppServerHost", () => {
     await host.release();
   });
 
-  test("reuses one canonical persona row and stable receipt after duplicate start and host restart", async () => {
-    const isolated = fs.mkdtempSync(path.join(os.tmpdir(), "llv-voice-bootstrap-"));
+  test("an override edit reaches the next call, and no call writes to the thread", async () => {
+    /* The persona is a session parameter now, so it is resolved per call rather
+       than once per thread: an operator edit applies to the next call instead of
+       waiting for a new thread, and repeated calls — including across a host
+       restart — leave the canonical transcript exactly as they found it. */
+    const isolated = fs.mkdtempSync(path.join(os.tmpdir(), "llv-voice-session-persona-"));
     const transcriptPath = path.join(isolated, "voice-thread.jsonl");
     fs.writeFileSync(transcriptPath, "");
     const configDirectory = path.join(isolated, "config");
@@ -629,6 +627,9 @@ describe("CodexAppServerHost", () => {
       "v=0\r\no=- 202 2 IN IP4 127.0.0.1\r\na=ice-ufrag:second\r\na=ice-pwd:second-password\r\na=fingerprint:sha-256 33:44\r\n",
       "v=0\r\no=- 303 2 IN IP4 127.0.0.1\r\na=ice-ufrag:third\r\na=ice-pwd:third-password\r\na=fingerprint:sha-256 55:66\r\n",
     ] as const;
+    const sentPrompt = (server: FakeAppServer, occurrence: number): unknown =>
+      (server.requests.filter((request) => request.method === "thread/realtime/start")[occurrence]
+        ?.params as { prompt?: unknown })?.prompt;
     try {
       const firstServer = new FakeAppServer("voice-thread");
       firstServer.threadPath = transcriptPath;
@@ -638,13 +639,15 @@ describe("CodexAppServerHost", () => {
         spawnProcess: fakeSpawn(firstServer),
       });
       const first = await firstHost.startRealtimeWebRtc(offers[0], "coordinator");
-      expect(first.personaBootstrap.insertion).toBe("accepted");
+      expect(sentPrompt(firstServer, 0)).toBe("First resolved call persona.");
       await firstHost.stopRealtime();
 
-      fs.writeFileSync(overridePath, "Changed after the call was resolved.\n");
-      const duplicate = await firstHost.startRealtimeWebRtc(offers[1], "coordinator");
-      expect(duplicate.personaBootstrap).toEqual(first.personaBootstrap);
-      expect(firstServer.requests.filter((request) => request.method === "thread/inject_items")).toHaveLength(1);
+      fs.writeFileSync(overridePath, "Changed after the first call.\n");
+      const second = await firstHost.startRealtimeWebRtc(offers[1], "coordinator");
+      expect(sentPrompt(firstServer, 1)).toBe("Changed after the first call.");
+      /* A different persona is a different identity, which is what makes the
+         reported one evidence rather than decoration. */
+      expect(second.persona.personaId).not.toBe(first.persona.personaId);
       await firstHost.stopRealtime();
       await firstHost.release();
       firstHost = null;
@@ -657,15 +660,14 @@ describe("CodexAppServerHost", () => {
         eventStore: new MemoryEventStore(),
         spawnProcess: fakeSpawn(resumedServer),
       });
-      const recovered = await resumedHost.startRealtimeWebRtc(offers[2], "coordinator");
-      expect(recovered.personaBootstrap).toEqual(first.personaBootstrap);
-      expect(resumedServer.requests.filter((request) => request.method === "thread/inject_items")).toHaveLength(0);
+      await resumedHost.startRealtimeWebRtc(offers[2], "coordinator");
+      expect(sentPrompt(resumedServer, 0)).toBe("Changed again after host restart.");
 
-      const canonical = fs.readFileSync(transcriptPath, "utf8").trim().split("\n")
-        .map((line) => JSON.parse(line) as { payload: { id?: string; content?: Array<{ text?: string }> } })
-        .filter((line) => line.payload.id === first.personaBootstrap.itemId);
-      expect(canonical).toHaveLength(1);
-      expect(canonical[0]?.payload.content?.[0]?.text).toBe("First resolved call persona.");
+      /* Three calls, two hosts, nothing appended. */
+      for (const server of [firstServer, resumedServer]) {
+        expect(server.requests.filter((request) => request.method === "thread/inject_items")).toEqual([]);
+      }
+      expect(fs.readFileSync(transcriptPath, "utf8")).toBe("");
     } finally {
       if (firstHost) await firstHost.release();
       if (resumedHost) await resumedHost.release();
@@ -675,100 +677,53 @@ describe("CodexAppServerHost", () => {
     }
   });
 
-  test("recognizes one persisted legacy persona row across repeated host restarts", async () => {
-    const isolated = fs.mkdtempSync(path.join(os.tmpdir(), "llv-legacy-voice-bootstrap-"));
-    const transcriptPath = path.join(isolated, "legacy-voice-thread.jsonl");
-    const threadId = "legacy-voice-thread";
-    const legacyItemId = legacyVoicePersonaBootstrapItemId(threadId);
-    fs.writeFileSync(transcriptPath, `${JSON.stringify({
+  test("a thread already carrying a coordinator persona row still gets the modality correction", async () => {
+    /* #1615, the half that cannot be undone. A thread demoted by a call taken
+       before the persona moved out of the thread keeps that developer item
+       forever — the transcript is append-only. What the correction can no longer
+       do is append a rebuttal beside it; it now rides on the session's own
+       start instructions, which are the most recent developer instruction the
+       backing model receives and are withdrawn when the call ends. */
+    const isolated = fs.mkdtempSync(path.join(os.tmpdir(), "llv-voice-demoted-thread-"));
+    const threadId = "demoted-voice-thread";
+    const transcriptPath = path.join(isolated, "demoted.jsonl");
+    const priorRow = `${JSON.stringify({
       type: "response_item",
       payload: {
         type: "message",
-        id: legacyItemId,
+        id: `msg_voice_persona_${"a".repeat(46)}`,
         role: "developer",
-        content: [{ type: "input_text", text: "Persisted legacy persona." }],
+        content: [{ type: "input_text", text: COORDINATOR_VOICE_PERSONA }],
       },
-    })}\n`);
+    })}\n`;
+    fs.writeFileSync(transcriptPath, priorRow);
 
-    for (const suffix of ["first", "second"]) {
-      const server = new FakeAppServer(threadId);
-      server.threadPath = transcriptPath;
-      const host = await CodexAppServerHost.adopt(threadId, {
-        cwd: "/repo",
-        eventStore: new MemoryEventStore(),
-        spawnProcess: fakeSpawn(server),
-      });
-      try {
-        const started = await host.startRealtimeWebRtc(`v=0\r\na=ice-ufrag:${suffix}\r\n`, "coordinator");
-        expect(started.personaBootstrap.insertion).toBe("accepted");
-        expect(started.personaBootstrap.itemId.length).toBeLessThanOrEqual(64);
-        expect(server.requests.filter((request) => request.method === "thread/inject_items")).toHaveLength(0);
-        await host.stopRealtime();
-      } finally {
-        await host.release();
-      }
-    }
+    const server = new FakeAppServer(threadId);
+    server.threadPath = transcriptPath;
+    const host = await CodexAppServerHost.adopt(threadId, {
+      cwd: "/repo",
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+    });
+    try {
+      const started = await host.startRealtimeWebRtc("v=0\r\na=ice-ufrag:correct\r\n", "modality");
+      expect(started.persona.variant).toBe("modality");
 
-    const personaRows = fs.readFileSync(transcriptPath, "utf8").trim().split("\n")
-      .map((line) => JSON.parse(line) as { payload?: { id?: string; role?: string } })
-      .filter((line) => line.payload?.role === "developer" && line.payload.id?.startsWith("msg_voice_persona_"));
-    expect(personaRows).toHaveLength(1);
-    expect(personaRows[0]?.payload?.id).toBe(legacyItemId);
-    fs.rmSync(isolated, { recursive: true, force: true });
-  });
+      const start = server.requests.find((request) => request.method === "thread/realtime/start")
+        ?.params as { prompt?: string; realtimeStartInstructions?: string; realtimeEndInstructions?: string };
+      /* The correction, not a second copy of the demotion. */
+      expect(start.realtimeStartInstructions).toMatch(/it was not written for you/i);
+      expect(start.realtimeStartInstructions).not.toBe(COORDINATOR_VOICE_PERSONA);
+      expect(start.prompt).not.toBe(COORDINATOR_VOICE_PERSONA);
+      expect(start.realtimeEndInstructions).toMatch(/realtime voice has ended/i);
 
-  test("a thread already carrying a coordinator persona still receives the modality correction", async () => {
-    /* #1615, the half that cannot be undone. A thread demoted by a call taken
-       before this fix keeps that developer item forever — the transcript is
-       append-only. What CAN happen is that the next call adds the text that
-       outranks it, and that only works because the two variants own different
-       item ids: a shared id would read the coordinator row as proof that this
-       thread was already bootstrapped and inject nothing.
-
-       Both shapes of the old row are covered: the canonical one and the
-       pre-#870 legacy one, which is a coordinator persona by construction. */
-    for (const existing of ["canonical", "legacy"] as const) {
-      const isolated = fs.mkdtempSync(path.join(os.tmpdir(), "llv-voice-demoted-thread-"));
-      const threadId = "demoted-voice-thread";
-      const transcriptPath = path.join(isolated, "demoted.jsonl");
-      const priorItemId = existing === "legacy"
-        ? legacyVoicePersonaBootstrapItemId(threadId)
-        : voicePersonaBootstrapIdentity(threadId, "coordinator").itemId;
-      fs.writeFileSync(transcriptPath, `${JSON.stringify({
-        type: "response_item",
-        payload: {
-          type: "message",
-          id: priorItemId,
-          role: "developer",
-          content: [{ type: "input_text", text: COORDINATOR_VOICE_PERSONA }],
-        },
-      })}\n`);
-
-      const server = new FakeAppServer(threadId);
-      server.threadPath = transcriptPath;
-      const host = await CodexAppServerHost.adopt(threadId, {
-        cwd: "/repo",
-        eventStore: new MemoryEventStore(),
-        spawnProcess: fakeSpawn(server),
-      });
-      try {
-        const started = await host.startRealtimeWebRtc("v=0\r\na=ice-ufrag:correct\r\n", "modality");
-        expect(started.personaBootstrap.insertion).toBe("accepted");
-        expect(started.personaBootstrap.itemId)
-          .toBe(voicePersonaBootstrapIdentity(threadId, "modality").itemId);
-
-        const injected = server.requests.filter((request) => request.method === "thread/inject_items");
-        expect(injected).toHaveLength(1);
-        const item = (injected[0]?.params as { items: Array<{ id: string; content: Array<{ text: string }> }> }).items[0];
-        expect(item?.id).toBe(started.personaBootstrap.itemId);
-        expect(item?.content[0]?.text).toBe(voicePersona("modality"));
-        /* The correction, not a second copy of the demotion. */
-        expect(item?.content[0]?.text).not.toBe(COORDINATOR_VOICE_PERSONA);
-        await host.stopRealtime();
-      } finally {
-        await host.release();
-        fs.rmSync(isolated, { recursive: true, force: true });
-      }
+      /* And the history the demotion lives in is left exactly as it was. */
+      expect(server.requests.filter((request) => request.method === "thread/inject_items")).toEqual([]);
+      expect(fs.readFileSync(transcriptPath, "utf8")).toBe(priorRow);
+      await host.stopRealtime();
+    } finally {
+      await host.release();
+      fs.rmSync(isolated, { recursive: true, force: true });
     }
   });
 
@@ -833,6 +788,7 @@ describe("CodexAppServerHost", () => {
       });
     expect(diagnostics).toEqual([["[realtime context] selected", {
       providerStartupContext: true,
+      personaVariant: "modality",
       durableTail: [
         { role: "assistant", source: "durable-delta", bytes: 26 },
         { role: "user", source: "durable-item", bytes: Buffer.byteLength(followUpText, "utf8") },
@@ -1105,7 +1061,7 @@ describe("CodexAppServerHost", () => {
     await replacementHost.release();
   });
 
-  test("the operator's override is the text that reaches the call's thread", async () => {
+  test("the operator's override is the text that reaches the call's spoken model", async () => {
     /* The call path has to resolve the persona the way production does, not
        just inject some persona. With no override file on disk the resolver and
        the built-in default are the same string, so a call that injected the
@@ -1132,19 +1088,12 @@ describe("CodexAppServerHost", () => {
         spawnProcess: fakeSpawn(server),
       });
       /* The override file is the coordinator variant's, so this is a coordinator
-         call — see `voicePersona`, where the modality variant deliberately keeps
-         the built-in text. */
+         call — see `spokenVoicePersona`, where the modality variant deliberately
+         keeps the built-in text. */
       await host.startRealtimeWebRtc("v=0\r\noffer", "coordinator");
 
-      const injected = server.requests.find((request) => request.method === "thread/inject_items");
-      const item = (injected?.params as {
-        items?: Array<{ type?: string; role?: string; content?: Array<{ type?: string; text?: string }> }>;
-      })?.items?.[0];
-      expect(item).toMatchObject({
-        type: "message",
-        role: "developer",
-        content: [{ type: "input_text", text: override }],
-      });
+      const start = server.requests.find((request) => request.method === "thread/realtime/start");
+      expect((start?.params as { prompt?: string })?.prompt).toBe(override);
       await host.release();
     } finally {
       if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
@@ -1198,16 +1147,22 @@ describe("CodexAppServerHost", () => {
     await host.startRealtimeWebRtc("v=0\r\noffer");
     const realtimeStart = server.requests.find((request) => request.method === "thread/realtime/start");
     const params = realtimeStart?.params as Record<string, unknown>;
-    /* App-server contract (codex 0.145.0): thread/realtime/start names the
-       thread and nothing else — no MCP table, config, or tool list rides the
-       call, so the session can only inherit the thread's servers above. */
+    /* App-server contract (codex-cli 0.154.0, bundled app-server 0.153.4):
+       thread/realtime/start carries the session's own instructions and nothing
+       about tools — no MCP table, config, or tool list rides the call, so the
+       backing model can only inherit the thread's servers above, and the spoken
+       model holds no tool of its own at all. */
     expect(params.threadId).toBe("voice-mcp-thread");
     expect(Object.keys(params).sort()).toEqual([
       "clientManagedHandoffs",
       "codexResponsesAsItems",
+      "flushTranscriptTailOnSessionEnd",
       "includeStartupContext",
       "model",
       "outputModality",
+      "prompt",
+      "realtimeEndInstructions",
+      "realtimeStartInstructions",
       "threadId",
       "transport",
       "version",
@@ -4814,247 +4769,6 @@ describe("CodexAppServerHost", () => {
   });
 });
 
-test("a refused persona insertion returns a bounded rejected receipt before realtime starts", async () => {
-  const server = new FakeAppServer("voice-thread");
-  server.injectItemsError = "Invalid request: unknown field `role`";
-  const host = await CodexAppServerHost.start({
-    cwd: "/repo",
-    eventStore: new MemoryEventStore(),
-    spawnProcess: fakeSpawn(server),
-  });
-
-  const rejected = await host.startRealtimeWebRtc("v=0\r\noffer");
-  expect(rejected).toMatchObject({
-    sdp: null,
-    realtimeSessionId: null,
-    personaBootstrap: {
-      insertion: "rejected",
-      diagnostic: "Codex app-server request failed: Invalid request: unknown field `role`",
-    },
-  });
-  expect(rejected.personaBootstrap.receiptId).toMatch(/^voice_persona_[a-f0-9]{46}$/);
-  expect(rejected.personaBootstrap.diagnostic?.length).toBeLessThanOrEqual(500);
-  expect(server.requests.find((request) => request.method === "thread/realtime/start")).toBeUndefined();
-  expect(host.currentRealtimeSessionId()).toBeNull();
-  await host.release();
-});
-
-test("replacement hosts reject an unverifiable canonical transcript without reinserting", async () => {
-  const isolated = fs.mkdtempSync(path.join(os.tmpdir(), "llv-voice-bootstrap-scan-fault-"));
-  const transcriptPath = path.join(isolated, "voice-thread.jsonl");
-  const linkedPath = path.join(isolated, "linked-thread.jsonl");
-  fs.writeFileSync(transcriptPath, "");
-  fs.symlinkSync(transcriptPath, linkedPath);
-  const warnings = spyOn(console, "warn").mockImplementation(() => {});
-  const firstServer = new FakeAppServer("voice-thread");
-  firstServer.threadPath = linkedPath;
-  const firstHost = await CodexAppServerHost.start({
-    cwd: "/repo",
-    eventStore: new MemoryEventStore(),
-    spawnProcess: fakeSpawn(firstServer),
-  });
-  let replacementHost: CodexAppServerHost | null = null;
-  try {
-    const first = await firstHost.startRealtimeWebRtc("v=0\r\no=- 404 2 IN IP4 127.0.0.1\r\n");
-    expect(first).toMatchObject({
-      sdp: null,
-      personaBootstrap: { insertion: "rejected", diagnostic: expect.stringContaining("ELOOP") },
-    });
-    await firstHost.release();
-
-    const replacementServer = new FakeAppServer("voice-thread");
-    replacementServer.threadPath = linkedPath;
-    replacementHost = await CodexAppServerHost.adopt("voice-thread", {
-      cwd: "/repo",
-      eventStore: new MemoryEventStore(),
-      spawnProcess: fakeSpawn(replacementServer),
-    });
-    const replacement = await replacementHost.startRealtimeWebRtc("v=0\r\no=- 405 2 IN IP4 127.0.0.1\r\n");
-    expect(replacement.personaBootstrap).toEqual(first.personaBootstrap);
-    expect(firstServer.requests.filter((request) => request.method === "thread/inject_items")).toHaveLength(0);
-    expect(replacementServer.requests.filter((request) => request.method === "thread/inject_items")).toHaveLength(0);
-    expect(fs.readFileSync(transcriptPath, "utf8")).toBe("");
-    expect(warnings).toHaveBeenCalledWith(
-      "[voice persona bootstrap] canonical scan unavailable; refusing insertion",
-      expect.objectContaining({ code: "ELOOP", diagnostic: expect.stringContaining("ELOOP") }),
-    );
-    expect(warnings).toHaveBeenCalledTimes(2);
-  } finally {
-    warnings.mockRestore();
-    await replacementHost?.release();
-    await firstHost.release();
-    fs.rmSync(isolated, { recursive: true, force: true });
-  }
-});
-
-test("an unrecoverable transcript path rejects before persona insertion", async () => {
-  const server = new FakeAppServer("voice-thread");
-  server.omitThreadPath = true;
-  server.omitThreadReadPath = true;
-  const host = await CodexAppServerHost.start({
-    cwd: "/repo",
-    eventStore: new MemoryEventStore(),
-    spawnProcess: fakeSpawn(server),
-  });
-  try {
-    const first = await host.startRealtimeWebRtc("v=0\r\no=- 406 2 IN IP4 127.0.0.1\r\n");
-    const repeated = await host.startRealtimeWebRtc("v=0\r\no=- 407 2 IN IP4 127.0.0.1\r\n");
-    expect(repeated.personaBootstrap).toEqual(first.personaBootstrap);
-    expect(first).toMatchObject({
-      sdp: null,
-      personaBootstrap: {
-        insertion: "rejected",
-        diagnostic: "canonical transcript path is unavailable",
-      },
-    });
-    expect(server.requests.filter((request) => request.method === "thread/inject_items")).toHaveLength(0);
-    expect(server.requests.filter((request) => request.method === "thread/realtime/start")).toHaveLength(0);
-  } finally {
-    await host.release();
-  }
-});
-
-test("replacement hosts recover an omitted canonical path and persist one persona row", async () => {
-  const isolated = fs.mkdtempSync(path.join(os.tmpdir(), "llv-voice-bootstrap-path-recovery-"));
-  const transcriptPath = path.join(isolated, "voice-thread.jsonl");
-  fs.writeFileSync(transcriptPath, "");
-  const firstServer = new FakeAppServer("voice-thread");
-  firstServer.omitThreadPath = true;
-  firstServer.threadPath = transcriptPath;
-  const firstHost = await CodexAppServerHost.start({
-    cwd: "/repo",
-    eventStore: new MemoryEventStore(),
-    spawnProcess: fakeSpawn(firstServer),
-  });
-  let replacementHost: CodexAppServerHost | null = null;
-  try {
-    const first = await firstHost.startRealtimeWebRtc("v=0\r\no=- 408 2 IN IP4 127.0.0.1\r\n");
-    await firstHost.release();
-
-    const replacementServer = new FakeAppServer("voice-thread");
-    replacementServer.omitThreadPath = true;
-    replacementServer.threadPath = transcriptPath;
-    replacementHost = await CodexAppServerHost.adopt("voice-thread", {
-      cwd: "/repo",
-      eventStore: new MemoryEventStore(),
-      spawnProcess: fakeSpawn(replacementServer),
-    });
-    const recovered = await replacementHost.startRealtimeWebRtc("v=0\r\no=- 409 2 IN IP4 127.0.0.1\r\n");
-    expect(recovered.personaBootstrap).toEqual(first.personaBootstrap);
-    expect(firstServer.requests.filter((request) => request.method === "thread/inject_items")).toHaveLength(1);
-    expect(replacementServer.requests.filter((request) => request.method === "thread/inject_items")).toHaveLength(0);
-    expect(fs.readFileSync(transcriptPath, "utf8").split(recovered.personaBootstrap.itemId)).toHaveLength(2);
-  } finally {
-    await replacementHost?.release();
-    await firstHost.release();
-    fs.rmSync(isolated, { recursive: true, force: true });
-  }
-});
-
-test("a persisted persona row recovers an ambiguous insertion failure", async () => {
-  const isolated = fs.mkdtempSync(path.join(os.tmpdir(), "llv-voice-bootstrap-ambiguous-"));
-  const transcriptPath = path.join(isolated, "voice-thread.jsonl");
-  fs.writeFileSync(transcriptPath, "");
-  const server = new FakeAppServer("voice-thread");
-  server.threadPath = transcriptPath;
-  server.holdInjectItems = true;
-  const host = await CodexAppServerHost.start({
-    cwd: "/repo",
-    eventStore: new MemoryEventStore(),
-    spawnProcess: fakeSpawn(server),
-  });
-  try {
-    const pending = host.startRealtimeWebRtc("v=0\r\no=- 909 2 IN IP4 127.0.0.1\r\n");
-    void pending.catch(() => undefined);
-    for (let attempt = 0; attempt < 100 && server.heldInjectItemIds.length < 1; attempt += 1) {
-      await Bun.sleep(1);
-    }
-    const request = server.requests.find((candidate) => candidate.method === "thread/inject_items");
-    const item = (request?.params as { items?: unknown[] } | undefined)?.items?.[0];
-    if (!item) throw new Error("persona insertion item missing");
-    fs.appendFileSync(transcriptPath, `${JSON.stringify({ type: "response_item", payload: item })}\n`);
-    server.completeNextInject("thread/inject_items response was lost");
-
-    expect(await pending).toMatchObject({
-      sdp: "v=0\r\nanswer",
-      personaBootstrap: { insertion: "accepted" },
-    });
-    expect(server.requests.filter((candidate) => candidate.method === "thread/realtime/start")).toHaveLength(1);
-  } finally {
-    await host.release();
-    fs.rmSync(isolated, { recursive: true, force: true });
-  }
-});
-
-test("an uncertain persona insertion timeout fences the writer and recovers on a replacement host", async () => {
-  const isolated = fs.mkdtempSync(path.join(os.tmpdir(), "llv-voice-bootstrap-timeout-"));
-  const transcriptPath = path.join(isolated, "voice-thread.jsonl");
-  fs.writeFileSync(transcriptPath, "");
-  const firstServer = new FakeAppServer("voice-thread", "voice-thread", true);
-  firstServer.threadPath = transcriptPath;
-  firstServer.injectItemsDelayMs = 25;
-  const firstHost = await CodexAppServerHost.start({
-    cwd: "/repo",
-    eventStore: new MemoryEventStore(),
-    spawnProcess: fakeSpawn(firstServer),
-    realtimePersonaTimeoutMs: 10,
-    shutdownGraceMs: 50,
-  });
-  let replacementHost: CodexAppServerHost | null = null;
-  try {
-    await expect(firstHost.startRealtimeWebRtc("v=0\r\no=- 910 2 IN IP4 127.0.0.1\r\n"))
-      .rejects.toThrow("thread/inject_items timed out; outcome is uncertain");
-    await Bun.sleep(40);
-    expect((await firstHost.health()).status).toBe("dead");
-
-    const replacementServer = new FakeAppServer("voice-thread");
-    replacementServer.threadPath = transcriptPath;
-    replacementHost = await CodexAppServerHost.adopt("voice-thread", {
-      cwd: "/repo",
-      eventStore: new MemoryEventStore(),
-      spawnProcess: fakeSpawn(replacementServer),
-    });
-    const recovered = await replacementHost.startRealtimeWebRtc("v=0\r\no=- 911 2 IN IP4 127.0.0.1\r\n");
-    expect(recovered.personaBootstrap.insertion).toBe("accepted");
-    expect(replacementServer.requests.filter((request) => request.method === "thread/inject_items")).toHaveLength(0);
-    expect(fs.readFileSync(transcriptPath, "utf8").split(recovered.personaBootstrap.itemId)).toHaveLength(2);
-  } finally {
-    await replacementHost?.release();
-    await firstHost.release();
-    fs.rmSync(isolated, { recursive: true, force: true });
-  }
-});
-
-test("persona bootstrap completes before the single fenced realtime-start deadline begins", async () => {
-  const isolated = fs.mkdtempSync(path.join(os.tmpdir(), "llv-realtime-start-deadline-"));
-  const transcriptPath = path.join(isolated, "voice-thread.jsonl");
-  fs.writeFileSync(transcriptPath, "");
-  const server = new FakeAppServer("voice-thread");
-  server.threadPath = transcriptPath;
-  server.injectItemsDelayMs = 20;
-  server.realtimeStartDelayMs = 20;
-  const host = await CodexAppServerHost.start({
-    cwd: "/repo",
-    eventStore: new MemoryEventStore(),
-    spawnProcess: fakeSpawn(server),
-    realtimePersonaTimeoutMs: 50,
-    realtimeStartTimeoutMs: 30,
-  });
-  try {
-    expect(await host.startRealtimeWebRtc("v=0\r\no=- 912 2 IN IP4 127.0.0.1\r\n")).toMatchObject({
-      sdp: "v=0\r\nanswer",
-      realtimeSessionId: "realtime-1",
-      personaBootstrap: { insertion: "accepted" },
-    });
-    expect(server.requests.filter((request) => request.method === "thread/realtime/start")).toHaveLength(1);
-  } finally {
-    await Bun.sleep(25);
-    if (host.currentRealtimeSessionId()) await host.stopRealtime();
-    await host.release();
-    fs.rmSync(isolated, { recursive: true, force: true });
-  }
-});
-
 test("the realtime notification deadline poisons a writer after the start RPC succeeds", async () => {
   const server = new FakeAppServer("voice-thread");
   server.suppressRealtimeStartNotifications = true;
@@ -5071,212 +4785,6 @@ test("the realtime notification deadline poisons a writer after the start RPC su
     expect(server.requests.filter((request) => request.method === "thread/realtime/start")).toHaveLength(1);
   } finally {
     await host.release();
-  }
-});
-
-test("a successor start joins the cancelled call's in-flight persona insertion", async () => {
-  const server = new FakeAppServer("voice-thread");
-  server.holdInjectItems = true;
-  const host = await CodexAppServerHost.start({
-    cwd: "/repo",
-    eventStore: new MemoryEventStore(),
-    spawnProcess: fakeSpawn(server),
-  });
-  try {
-    const cancelled = host.startRealtimeWebRtc("v=0\r\no=- 1001 2 IN IP4 127.0.0.1\r\n");
-    void cancelled.catch(() => undefined);
-    for (let attempt = 0; attempt < 100 && server.heldInjectItemIds.length < 1; attempt += 1) {
-      await Bun.sleep(1);
-    }
-    expect(server.heldInjectItemIds).toHaveLength(1);
-    await host.stopRealtime();
-
-    const successor = host.startRealtimeWebRtc("v=0\r\no=- 1002 2 IN IP4 127.0.0.1\r\n");
-    void successor.catch(() => undefined);
-    await Bun.sleep(10);
-    expect(server.heldInjectItemIds).toHaveLength(1);
-    expect(server.requests.filter((request) => request.method === "thread/inject_items")).toHaveLength(1);
-    server.completeNextInject();
-
-    await expect(cancelled).rejects.toThrow("stopped during startup");
-    expect(await successor).toMatchObject({
-      sdp: "v=0\r\nanswer",
-      personaBootstrap: { insertion: "accepted" },
-    });
-    expect(server.requests.filter((request) => request.method === "thread/realtime/start")).toHaveLength(1);
-  } finally {
-    await host.release();
-  }
-});
-
-test("a cancelled persona insertion failure cannot reject the successor start", async () => {
-  const server = new FakeAppServer("voice-thread");
-  server.holdInjectItems = true;
-  const host = await CodexAppServerHost.start({
-    cwd: "/repo",
-    eventStore: new MemoryEventStore(),
-    spawnProcess: fakeSpawn(server),
-  });
-  try {
-    const cancelled = host.startRealtimeWebRtc("v=0\r\no=- 707 2 IN IP4 127.0.0.1\r\n");
-    void cancelled.catch(() => undefined);
-    for (let attempt = 0; attempt < 100 && server.heldInjectItemIds.length < 1; attempt += 1) {
-      await Bun.sleep(1);
-    }
-    expect(server.heldInjectItemIds).toHaveLength(1);
-    await host.stopRealtime();
-
-    const successor = host.startRealtimeWebRtc("v=0\r\no=- 808 2 IN IP4 127.0.0.1\r\n");
-    void successor.catch(() => undefined);
-    await Bun.sleep(10);
-    expect(server.heldInjectItemIds).toHaveLength(1);
-    server.completeNextInject("cancelled call insertion failed");
-    await expect(cancelled).rejects.toThrow("stopped during startup");
-    for (let attempt = 0; attempt < 100 && server.heldInjectItemIds.length < 1; attempt += 1) {
-      await Bun.sleep(1);
-    }
-    expect(server.requests.filter((request) => request.method === "thread/inject_items")).toHaveLength(2);
-    server.completeNextInject();
-
-    expect(await successor).toMatchObject({
-      sdp: "v=0\r\nanswer",
-      personaBootstrap: { insertion: "accepted" },
-    });
-    expect(server.requests.filter((request) => request.method === "thread/realtime/start")).toHaveLength(1);
-  } finally {
-    await host.release();
-  }
-});
-
-/**
- * One thread now has TWO persona identities, so the host's bootstrap memo is per
- * variant or it is wrong (#1615 review, finding 1).
- *
- * Both fields were per-host booleans written when a thread could only ever hold
- * one persona item. With two variants that premise fails in two directions, and
- * each has its own test below: a stale unresolved payload puts the WRONG TEXT in
- * the transcript, and a global accepted flag makes the host claim an item it
- * never injected.
- */
-test("a variant switch after a rejected insertion injects the new variant's text, not the stale payload", async () => {
-  const isolated = fs.mkdtempSync(path.join(os.tmpdir(), "llv-voice-variant-stale-"));
-  const transcriptPath = path.join(isolated, "voice-thread.jsonl");
-  fs.writeFileSync(transcriptPath, "");
-  const server = new FakeAppServer("voice-thread");
-  server.threadPath = transcriptPath;
-  server.injectItemsError = "temporary insertion refusal";
-  const host = await CodexAppServerHost.start({
-    cwd: "/repo",
-    eventStore: new MemoryEventStore(),
-    spawnProcess: fakeSpawn(server),
-  });
-  try {
-    const rejected = await host.startRealtimeWebRtc("v=0\r\na=ice-ufrag:rejected\r\n", "coordinator");
-    expect(rejected.personaBootstrap.insertion).toBe("rejected");
-
-    /* The next call resolves the OTHER variant — the fail-safe in
-       `voicePersonaVariantForConversation` answering `modality` for one start is
-       exactly how a host sees two variants in a row. */
-    server.injectItemsError = null;
-    const accepted = await host.startRealtimeWebRtc("v=0\r\na=ice-ufrag:switched\r\n", "modality");
-    expect(accepted.personaBootstrap.insertion).toBe("accepted");
-    expect(accepted.personaBootstrap.itemId)
-      .toBe(voicePersonaBootstrapIdentity("voice-thread", "modality").itemId);
-
-    /* The item that actually went to the provider must be the one the receipt
-       names, carrying the persona the receipt implies. */
-    const injected = server.requests.filter((request) => request.method === "thread/inject_items").at(-1);
-    const item = (injected?.params as { items: Array<{ id: string; content: Array<{ text: string }> }> }).items[0];
-    expect(item?.id).toBe(accepted.personaBootstrap.itemId);
-    expect(item?.content[0]?.text).toBe(voicePersona("modality"));
-    expect(item?.content[0]?.text).not.toBe(COORDINATOR_VOICE_PERSONA);
-  } finally {
-    await host.release();
-    fs.rmSync(isolated, { recursive: true, force: true });
-  }
-});
-
-test("a second variant on the same host is injected rather than reported accepted on the first one's receipt", async () => {
-  const isolated = fs.mkdtempSync(path.join(os.tmpdir(), "llv-voice-variant-second-"));
-  const transcriptPath = path.join(isolated, "voice-thread.jsonl");
-  fs.writeFileSync(transcriptPath, "");
-  const server = new FakeAppServer("voice-thread");
-  server.threadPath = transcriptPath;
-  const host = await CodexAppServerHost.start({
-    cwd: "/repo",
-    eventStore: new MemoryEventStore(),
-    spawnProcess: fakeSpawn(server),
-  });
-  try {
-    const first = await host.startRealtimeWebRtc("v=0\r\na=ice-ufrag:first\r\n", "modality");
-    expect(first.personaBootstrap.insertion).toBe("accepted");
-    await host.stopRealtime();
-
-    const second = await host.startRealtimeWebRtc("v=0\r\na=ice-ufrag:second\r\n", "coordinator");
-    expect(second.personaBootstrap.insertion).toBe("accepted");
-    expect(second.personaBootstrap.itemId)
-      .toBe(voicePersonaBootstrapIdentity("voice-thread", "coordinator").itemId);
-
-    /* An `accepted` receipt naming an item that is not in the thread is the
-       failure `rejectStartedRealtimeContract` exists to catch, reported as a
-       success instead. Both variants are now genuinely present. */
-    const attempts = server.requests.filter((request) => request.method === "thread/inject_items");
-    expect(attempts).toHaveLength(2);
-    const persisted = fs.readFileSync(transcriptPath, "utf8");
-    expect(persisted).toContain(first.personaBootstrap.itemId);
-    expect(persisted).toContain(second.personaBootstrap.itemId);
-  } finally {
-    await host.release();
-    fs.rmSync(isolated, { recursive: true, force: true });
-  }
-});
-
-test("a rejected persona insertion retries the same resolved payload and stable receipt", async () => {
-  const isolated = fs.mkdtempSync(path.join(os.tmpdir(), "llv-voice-bootstrap-retry-"));
-  const transcriptPath = path.join(isolated, "voice-thread.jsonl");
-  fs.writeFileSync(transcriptPath, "");
-  const configDirectory = path.join(isolated, "config");
-  const overridePath = path.join(configDirectory, "agent-log-viewer", ...VOICE_PERSONA_FILE.split("/"));
-  fs.mkdirSync(path.dirname(overridePath), { recursive: true });
-  fs.writeFileSync(overridePath, "Resolved before the rejected insertion.\n");
-  const previousConfigHome = process.env.XDG_CONFIG_HOME;
-  process.env.XDG_CONFIG_HOME = configDirectory;
-
-  const server = new FakeAppServer("voice-thread");
-  server.threadPath = transcriptPath;
-  server.injectItemsError = "temporary insertion refusal";
-  const host = await CodexAppServerHost.start({
-    cwd: "/repo",
-    eventStore: new MemoryEventStore(),
-    spawnProcess: fakeSpawn(server),
-  });
-  try {
-    const rejected = await host.startRealtimeWebRtc(
-      "v=0\r\no=- 505 2 IN IP4 127.0.0.1\r\na=ice-ufrag:rejected\r\n",
-      "coordinator",
-    );
-    expect(rejected.personaBootstrap.insertion).toBe("rejected");
-
-    fs.writeFileSync(overridePath, "A later edit must not change this call.\n");
-    server.injectItemsError = null;
-    const accepted = await host.startRealtimeWebRtc(
-      "v=0\r\no=- 606 2 IN IP4 127.0.0.1\r\na=ice-ufrag:retry\r\n",
-      "coordinator",
-    );
-    expect(accepted.personaBootstrap.receiptId).toBe(rejected.personaBootstrap.receiptId);
-    expect(accepted.personaBootstrap.itemId).toBe(rejected.personaBootstrap.itemId);
-    expect(accepted.personaBootstrap.insertion).toBe("accepted");
-
-    const attempts = server.requests.filter((request) => request.method === "thread/inject_items");
-    expect(attempts).toHaveLength(2);
-    expect((attempts[1]?.params as { items: Array<{ content: Array<{ text: string }> }> }).items[0]?.content[0]?.text)
-      .toBe("Resolved before the rejected insertion.");
-    expect(fs.readFileSync(transcriptPath, "utf8").split(accepted.personaBootstrap.itemId)).toHaveLength(2);
-  } finally {
-    await host.release();
-    if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
-    else process.env.XDG_CONFIG_HOME = previousConfigHome;
-    fs.rmSync(isolated, { recursive: true, force: true });
   }
 });
 

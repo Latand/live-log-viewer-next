@@ -4,7 +4,7 @@ import { redactCodexHostDiagnostic } from "./codexAppServerHost";
 import { structuredDeliveryHostForConversation } from "./structuredDeliveryController";
 import { permitRealtimeAction, type RealtimeCaller } from "./realtimeInjection";
 import type { RuntimeVoiceDelivery } from "./voiceDelivery";
-import type { VoicePersonaBootstrapReceipt, VoicePersonaVariant } from "./voicePersona";
+import type { VoicePersonaVariant } from "./voicePersona";
 import {
   admitVoiceSelectedContext,
   bindVoiceSession,
@@ -20,7 +20,7 @@ interface RealtimeHost {
   startRealtimeWebRtc(sdp: string, personaVariant?: VoicePersonaVariant): Promise<{
     sdp: string | null;
     realtimeSessionId: string | null;
-    personaBootstrap: VoicePersonaBootstrapReceipt;
+    persona: { variant: VoicePersonaVariant; personaId: string };
   }>;
   appendRealtimeSpeech(text: string): Promise<void>;
   deliverRealtimeWorkerResponse?(delivery: RuntimeVoiceDelivery): Promise<{
@@ -64,16 +64,21 @@ function byteLength(value: string): number {
   return new TextEncoder().encode(value).byteLength;
 }
 
-function voicePersonaBootstrapReceipt(value: unknown): VoicePersonaBootstrapReceipt | null {
+/**
+ * Which persona the started call is running on (#1629).
+ *
+ * The persona now rides on `thread/realtime/start` itself, so a started call has
+ * one by construction and there is no insertion to accept or reject. This
+ * validates the shape only, so a host that answers something else is caught
+ * rather than reported to the browser as a live persona.
+ */
+function voiceSessionPersonaReceipt(value: unknown): { variant: VoicePersonaVariant; personaId: string } | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const receipt = value as Record<string, unknown>;
-  const receiptId = typeof receipt.receiptId === "string" ? receipt.receiptId : "";
-  const itemId = typeof receipt.itemId === "string" ? receipt.itemId : "";
-  if (!/^voice_persona_[a-f0-9]{46}$/.test(receiptId) || itemId !== `msg_${receiptId}`) return null;
-  if (receipt.insertion !== "accepted" && receipt.insertion !== "rejected") return null;
-  if (receipt.diagnostic !== undefined
-    && (typeof receipt.diagnostic !== "string" || receipt.diagnostic.length > 500)) return null;
-  return receipt as VoicePersonaBootstrapReceipt;
+  const personaId = typeof receipt.personaId === "string" ? receipt.personaId : "";
+  if (!/^voice_persona_[a-f0-9]{46}$/.test(personaId)) return null;
+  if (receipt.variant !== "coordinator" && receipt.variant !== "modality") return null;
+  return { variant: receipt.variant, personaId };
 }
 
 async function rejectStartedRealtimeContract(
@@ -164,20 +169,9 @@ export async function executeRealtimeControl(
          call site that did not ask has not established that this thread is the
          voice front. */
       const answer = await host.startRealtimeWebRtc(sdp, authority.personaVariant ?? "modality");
-      if (!answer.personaBootstrap) {
-        return rejectStartedRealtimeContract(host, { error: "Codex returned no voice persona bootstrap receipt" });
-      }
-      const personaBootstrap = voicePersonaBootstrapReceipt(answer.personaBootstrap);
-      if (!personaBootstrap) {
-        return rejectStartedRealtimeContract(host, { error: "Codex returned an invalid voice persona bootstrap receipt" });
-      }
-      if (personaBootstrap.insertion === "rejected") {
-        const diagnostic = redactCodexHostDiagnostic(personaBootstrap.diagnostic ?? "Voice persona insertion was rejected");
-        const error = redactCodexHostDiagnostic(`Voice persona could not be recorded: ${diagnostic}`);
-        return rejectStartedRealtimeContract(host, {
-          error,
-          personaBootstrap: { ...personaBootstrap, diagnostic },
-        });
+      const persona = voiceSessionPersonaReceipt(answer.persona);
+      if (!persona) {
+        return rejectStartedRealtimeContract(host, { error: "Codex returned no voice session persona" });
       }
       if (!answer.sdp) {
         return rejectStartedRealtimeContract(host, { error: "Codex returned no WebRTC answer" });
@@ -189,7 +183,7 @@ export async function executeRealtimeControl(
       if (answer.realtimeSessionId) {
         bindVoiceSession(conversationId, answer.realtimeSessionId, parseVoiceViewBinding(request.view));
       }
-      return { status: 200, body: { ok: true, ...answer, personaBootstrap } };
+      return { status: 200, body: { ok: true, ...answer, persona } };
     }
     /**
      * The browser's utterance boundary (#844 §2).

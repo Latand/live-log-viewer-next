@@ -22,10 +22,9 @@ import { recordDirectOperatorWakatimeActivity } from "@/lib/wakatime/operatorAct
 const NOW = Date.now();
 const DESK = { viewSessionId: "vs-desk-1", deviceId: "dev-desk" };
 const PHONE = { viewSessionId: "vs-phone-1", deviceId: "dev-phone" };
-const ACCEPTED_PERSONA_BOOTSTRAP = {
-  receiptId: `voice_persona_${"d".repeat(46)}`,
-  itemId: `msg_voice_persona_${"d".repeat(46)}`,
-  insertion: "accepted" as const,
+const LIVE_PERSONA = {
+  variant: "modality" as const,
+  personaId: `voice_persona_${"d".repeat(46)}`,
 };
 
 function reference(identity: { viewSessionId: string; deviceId: string }, card = "conversation_atlas_a"): SelectedContextRef {
@@ -45,7 +44,7 @@ function hostFor(spoken: string[]) {
       return {
         sdp: "v=0\r\nanswer",
         realtimeSessionId: "live-1",
-        personaBootstrap: ACCEPTED_PERSONA_BOOTSTRAP,
+        persona: LIVE_PERSONA,
       };
     },
     async appendRealtimeSpeech(text: string) {
