@@ -1,3 +1,4 @@
+import { NativeQueueExecutor } from "./nativeQueueExecutor";
 import crypto from "node:crypto";
 
 import { requestAccountMigrationTick } from "@/lib/accounts/migration/controllerSignal";
@@ -20,6 +21,7 @@ import { publishFilesRevision } from "./filesRevision";
 import { setStructuredDeliveryKick } from "./structuredDeliverySignal";
 import { journalVerdict, sendIsSettled } from "./sendSettlement";
 import { runtimeImageCapability } from "./runtimeImageStore";
+import { noteVoiceWorkBoundary } from "./voiceViewBinding";
 import { STRUCTURED_IMAGE_CAPABILITY } from "./structuredContent";
 import {
   markStructuredDeliveryControllerReady,
@@ -174,11 +176,11 @@ function pendingAccountSwitch(registry: AgentRegistry, conversationId: string): 
 }
 
 function deliveryStateKey(state: HostState): string {
-  return JSON.stringify([state.status, state.activeTurnRef]);
+  return JSON.stringify([state.status, state.activeTurnRef, state.nativeQueueRevision]);
 }
 
 function hostProjectionKey(state: HostState): string {
-  return JSON.stringify([state.status, state.activeTurnRef, state.pendingAttention]);
+  return JSON.stringify([state.status, state.activeTurnRef, state.pendingAttention, state.activeFlags, state.diagnostics]);
 }
 
 export async function publishStructuredHostProjection(
@@ -392,6 +394,12 @@ async function publishHostState(
     return;
   }
   if (!state) return;
+  /* #1629: the voice ledger's only authoritative retirement signal for a spoken
+     turn no tool call ever claimed. This listener already fires on every change
+     to the projected active turn, and it runs in the process that holds the
+     ledger, so the running-to-idle transition is observed rather than guessed
+     at from elapsed time. */
+  noteVoiceWorkBoundary(conversationId, state.activeTurnRef);
   const host = state.status === "dead" ? "dead" : state.status === "unhosted" ? "unhosted" : "hosted";
   const turn = state.activeTurnRef ? "running" : "idle";
   /* A host with no active turn is the turn-end evidence a pending account
@@ -431,14 +439,16 @@ async function publishHostState(
       artifactPath: entry.artifactPath,
       capabilities: {
         steer: adopted.key.engine === "codex",
+        nativeQueue: adopted.key.engine === "codex" && state.activeFlags.includes("native-queue"),
         structuredAttention: true,
         imageInput: runtimeImageCapability(
           adopted.key.engine,
           state.activeFlags.includes(STRUCTURED_IMAGE_CAPABILITY),
         ),
-        runtimeSettings: runtimeSettingsCapability(adopted.key.engine),
+        runtimeSettings: runtimeSettingsCapability(adopted.key.engine, state.activeFlags.includes("native-turn-profile")),
       },
       activeTurnId: state.activeTurnRef,
+      diagnostics: state.diagnostics,
     },
   });
 }
@@ -474,10 +484,43 @@ export async function bindStructuredDeliveryQueue(
   let startupPending = dependencies.deferStartupWork === true;
   let scheduleAutomaticRetry = () => {};
   let requestDrain = () => {};
+  const nativeReconciliations = new Map<string, Promise<void>>();
+  const nativeQueueExecutor = new NativeQueueExecutor({
+    client,
+    resolveHost: hostResolver(registry, hosts),
+    settled: (entry) => {
+      registry.recordDeliveryOutcomeForOperation(entry.conversationId as `conversation_${string}`, entry.entryId,
+        entry.state === "removed" ? "failed" : "delivered", entry.state === "removed" ? "delivery-discarded" : null);
+    },
+    binding: (conversationId) => {
+      const snapshot = registry.readOnlySnapshot();
+      const conversation = snapshot.conversations[conversationId];
+      const generation = conversation?.generations.at(-1);
+      if (!conversation || conversation.engine !== "codex" || !generation) return null;
+      return { threadId: generation.id, accountId: generation.accountId };
+    },
+  });
   const queue = new StructuredDeliveryQueue(
     {
       deferTarget: (conversationId) => startupPending && hostResolver(registry, hosts)(conversationId) === null,
       effects: (kinds, afterEventSeq) => client.effectBatch(kinds, afterEventSeq),
+      nativeQueueExecute: (command, refusalReason) => nativeQueueExecutor.execute(command, refusalReason),
+      nativeQueueReconcile: async () => {
+        if (!client.nativeQueueRead) return;
+        const entries = registry.readOnlySnapshot().entries;
+        for (const [key, host] of hosts) {
+          if (!host.nativeQueue) continue;
+          const entry = entries[key];
+          const conversationId = entry ? conversationIdForEntry(registry, entry) : null;
+          if (!conversationId || nativeReconciliations.has(conversationId)) continue;
+          // Canonical reads cannot hold up interrupt/answer or other sends.
+          const read = nativeQueueExecutor.reconcile(conversationId)
+            .then(pending => { if (pending) scheduleAutomaticRetry(); })
+            .catch(() => { scheduleAutomaticRetry(); })
+            .finally(() => { nativeReconciliations.delete(conversationId); });
+          nativeReconciliations.set(conversationId, read);
+        }
+      },
       ...(typeof client.events === "function" ? { events: (afterEventSeq: number) => client.events(afterEventSeq) } : {}),
       status: async (operationId: string) => (await client.operationStatus(operationId))?.receipt ?? null,
       /* The durable delivery record's own fence (#1131): a send a receipt query

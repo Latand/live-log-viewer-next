@@ -85,10 +85,13 @@ afterAll(() => {
 
 interface ControlRequest {
   action?: string;
+  reason?: string;
   view?: { viewSessionId: string; deviceId: string };
   realtimeSessionId?: string;
   selectedContext?: SelectedContextRef;
   operatorEventId?: string;
+  utterance?: { id: string; sequence: number };
+  handoff?: { handoffId: string | null; itemId: string | null; userBidiTurnId: string | null };
 }
 
 let requests: ControlRequest[] = [];
@@ -129,6 +132,19 @@ const fragment = (peer: StubPeerConnection, role: "user" | "assistant", text: st
   });
 const finished = (peer: StubPeerConnection, role: "user" | "assistant", text: string) =>
   peer.channel.onmessage?.({ data: JSON.stringify({ type: "turn.done", role, item: { text } }) });
+const handedOff = (peer: StubPeerConnection, suffix: string) =>
+  peer.channel.onmessage?.({
+    data: JSON.stringify({
+      type: "delegation.created",
+      item: {
+        id: `delegation-${suffix}`,
+        type: "delegation",
+        target: "client",
+        handoff_id: `handoff-${suffix}`,
+        user_bidi_turn_id: `bidi-${suffix}`,
+      },
+    }),
+  });
 
 test("the call binds itself to this window when it opens", async () => {
   await liveCall("conversation_voice_bind");
@@ -231,4 +247,175 @@ test("each finished utterance reports again, so a mid-call re-selection is honou
   expect(published[0]!.selectedContext).toMatchObject({ state: "selected" });
   expect(published[1]!.selectedContext).toMatchObject({ state: "none" });
   expect(requests.filter((request) => request.action === "operatorActivity")).toHaveLength(2);
+});
+
+
+test("each utterance carries an identity, and a retry reuses it", async () => {
+  /* The identity is what tells the server a second POST is the same spoken turn
+     rather than a later one, so it has to survive the retry and change between
+     utterances. */
+  const peer = await liveCall("conversation_voice_identity");
+  finished(peer, "user", "first");
+  await Promise.resolve();
+  finished(peer, "user", "second");
+  await Promise.resolve();
+
+  const published = requests.filter((request) => request.action === "selectedContext");
+  expect(published).toHaveLength(2);
+  expect(published[0]!.utterance).toMatchObject({ sequence: 1 });
+  expect(published[1]!.utterance).toMatchObject({ sequence: 2 });
+  expect(published[0]!.utterance!.id).toMatch(/^[a-f0-9]{32}$/);
+  expect(published[1]!.utterance!.id).not.toBe(published[0]!.utterance!.id);
+});
+
+test("a handoff is reported once, against the utterance it follows", async () => {
+  const peer = await liveCall("conversation_voice_handoff");
+  finished(peer, "user", "look at that one");
+  await Promise.resolve();
+  handedOff(peer, "a");
+  await Promise.resolve();
+
+  const published = requests.filter((request) => request.action === "selectedContext");
+  const joins = requests.filter((request) => request.action === "handoff");
+  expect(joins).toHaveLength(1);
+  expect(joins[0]!.realtimeSessionId).toBe("live-1");
+  expect(joins[0]!.utterance!.id).toBe(published[0]!.utterance!.id);
+  expect(joins[0]!.handoff).toEqual({
+    handoffId: "handoff-a", itemId: "delegation-a", userBidiTurnId: "bidi-a",
+  });
+
+  /* Consumed. A second handoff on the same utterance — a duplicate event, or one
+     belonging to a turn that published nothing — reports nothing rather than
+     claiming the utterance twice. */
+  handedOff(peer, "b");
+  await Promise.resolve();
+  expect(requests.filter((request) => request.action === "handoff")).toHaveLength(1);
+});
+
+test("a handoff before any utterance is published reports nothing", async () => {
+  /* No utterance has been published yet, so there is nothing to join it to, and
+     inventing an utterance for it would put a reference in the ledger the
+     operator never published. */
+  const peer = await liveCall("conversation_voice_early_handoff");
+  handedOff(peer, "c");
+  await Promise.resolve();
+  expect(requests.filter((request) => request.action === "handoff")).toEqual([]);
+});
+
+
+test("a usage warning belongs to the call that reported it", async () => {
+  /* The warning describes an account's window as it stood during one call. A
+     fresh call that has reported nothing must not open showing the last one's. */
+  const client = codexRealtimeClient("conversation_voice_usage");
+  await client.start();
+  const peer = StubPeerConnection.latest!;
+  peer.channel.onopen?.();
+  peer.channel.onmessage?.({
+    data: JSON.stringify({ type: "session.usage.updated", usage_limit: { status: "approaching" } }),
+  });
+  expect(client.getSnapshot().notice).toContain("approaching its usage limit");
+  /* And a call that reports its window is fine again says so. */
+  peer.channel.onmessage?.({
+    data: JSON.stringify({ type: "session.usage.updated", usage_limit: { status: "ok" } }),
+  });
+  expect(client.getSnapshot().notice).toBeNull();
+
+  peer.channel.onmessage?.({
+    data: JSON.stringify({ type: "session.usage.updated", usage_limit: { status: "approaching" } }),
+  });
+  await client.stop();
+  await client.start();
+  expect(client.getSnapshot().notice).toBeNull();
+  await client.stop();
+});
+
+
+test("two utterances outstanding: a handoff belongs to neither, so none is claimed", async () => {
+  /* The correlation this peer can prove holds in exactly one arrangement: one
+     utterance outstanding, one handoff arriving. With two outstanding the event
+     could belong to either, and reporting it against the newer one is how card B
+     comes back to a question asked about card A.
+
+     So nothing is reported. The standing admission never gets a handoff, the
+     reader refuses, and the agent asks which conversation the operator meant. */
+  const peer = await liveCall("conversation_voice_ambiguous");
+  finished(peer, "user", "look at A");
+  await Promise.resolve();
+  finished(peer, "user", "now look at B");
+  await Promise.resolve();
+  handedOff(peer, "a");
+  await Promise.resolve();
+
+  expect(requests.filter((request) => request.action === "selectedContext")).toHaveLength(2);
+  expect(requests.filter((request) => request.action === "handoff")).toEqual([]);
+});
+
+test("A, B, late handoff A, C, late handoff B claims nothing at any point", async () => {
+  /* The independent review's exact reproduction. Emptying the ambiguous queue
+     and carrying on made the NEXT handoff — belonging to one of the abandoned
+     utterances — look unambiguous, so B's handoff claimed C and the consumer
+     returned C's transcript under B's name.
+
+     The uncertainty is now published once and stands for the rest of the call:
+     every unattributed utterance may still produce a handoff, so no later
+     arrival can be shown to be anyone's. */
+  const peer = await liveCall("conversation_voice_ambiguous_recovery");
+  finished(peer, "user", "look at A");
+  await Promise.resolve();
+  finished(peer, "user", "now look at B");
+  await Promise.resolve();
+  handedOff(peer, "a");
+  await Promise.resolve();
+  handedOff(peer, "b");
+  await Promise.resolve();
+
+  finished(peer, "user", "and now C");
+  await Promise.resolve();
+  handedOff(peer, "c");
+  await Promise.resolve();
+
+  expect(requests.filter((request) => request.action === "handoff")).toEqual([]);
+  /* And the server is TOLD, rather than left to infer an absence. */
+  const reported = requests.filter((request) => request.action === "handoffAmbiguity");
+  expect(reported).toHaveLength(1);
+  expect(reported[0]!.realtimeSessionId).toBe("live-1");
+  expect(String(reported[0]!.reason)).toContain("outstanding");
+});
+
+test("a handoff repeated after the operator speaks again claims nothing new", async () => {
+  /* The review's other sequence. Native redelivers a handoff across its two
+     event shapes and can repeat one late; the repeat used to arrive with the
+     NEXT utterance outstanding and be joined to it, which is how card B answered
+     a question asked about card A. */
+  const peer = await liveCall("conversation_voice_duplicate_handoff");
+  finished(peer, "user", "look at A");
+  await Promise.resolve();
+  handedOff(peer, "a");
+  await Promise.resolve();
+  finished(peer, "user", "now look at B");
+  await Promise.resolve();
+  handedOff(peer, "a");
+  await Promise.resolve();
+
+  const joins = requests.filter((request) => request.action === "handoff");
+  expect(joins).toHaveLength(1);
+  expect(joins[0]!.utterance!.sequence).toBe(1);
+  expect(joins[0]!.handoff!.handoffId).toBe("handoff-a");
+  expect(requests.filter((request) => request.action === "handoffAmbiguity")).toHaveLength(1);
+});
+
+test("the join names the utterance it claimed, never the latest one", async () => {
+  /* The report carries the claimed queue entry's own identity, so a future
+     change that let the queue and the latest publish diverge cannot silently
+     re-point a join at a newer turn. */
+  const peer = await liveCall("conversation_voice_claim_identity");
+  finished(peer, "user", "look at A");
+  await Promise.resolve();
+  const published = requests.filter((request) => request.action === "selectedContext");
+  handedOff(peer, "a");
+  await Promise.resolve();
+
+  const joins = requests.filter((request) => request.action === "handoff");
+  expect(joins).toHaveLength(1);
+  expect(joins[0]!.utterance).toEqual(published[0]!.utterance!);
 });

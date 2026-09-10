@@ -238,3 +238,102 @@ test("mute controls stay out of the way outside a live call", () => {
   expect(host.querySelector('[data-testid="voice-output-toggle"]')).toBeNull();
   flushSync(() => root.unmount());
 });
+
+
+test("an approaching usage limit is said while the call is still running", () => {
+  /* The 9-second cutoff in docs/realtime-v3/BLOCKED.md arrived as a dead
+     transport with no warning. The backend does say so first, and the operator
+     can only act on it while there is still a call to act in — so it is a
+     status beside a live transcript. An alert ends a call in the reader's mind,
+     and this call is still running. */
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  flushSync(() => root.render(
+    <VoiceConversationPanel
+      phase="live"
+      error={null}
+      notice="This account is approaching its usage limit; the call may be cut short."
+      startedAt={1_000}
+      lines={[{ id: "a", role: "assistant", text: "On the line.", final: true }]}
+      t={t}
+    />,
+  ));
+  const notice = host.querySelector('[data-testid="voice-notice"]');
+  expect(notice?.getAttribute("role")).toBe("status");
+  expect(notice?.textContent).toContain("approaching its usage limit");
+  /* Not the failure treatment: no alert, no retry, and the call keeps its live
+     transcript. */
+  expect(host.querySelector('[role="alert"]')).toBeNull();
+  expect(host.querySelector('[data-testid="voice-retry"]')).toBeNull();
+  expect(host.textContent).toContain("On the line.");
+  flushSync(() => root.unmount());
+});
+
+test("a failed call reports the failure rather than a stale warning", () => {
+  /* Both at once is the state after a limit warning became a cutoff. The
+     operator needs the reason and the retry, and a warning about what might
+     happen next is noise beside the thing that already did. */
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  flushSync(() => root.render(
+    <VoiceConversationPanel
+      phase="error"
+      error="You have reached your usage limit."
+      notice="This account is approaching its usage limit; the call may be cut short."
+      startedAt={null}
+      lines={[]}
+      onRetry={() => undefined}
+      t={t}
+    />,
+  ));
+  expect(host.querySelector('[data-testid="voice-notice"]')).toBeNull();
+  expect(host.querySelector('[role="alert"]')?.textContent).toContain("reached your usage limit");
+  flushSync(() => root.unmount());
+});
+
+test("a live call whose agent is gone says so rather than looking healthy", () => {
+  /* #1629. The WebRTC leg runs to the provider, so an interrupted or replaced
+     backing host leaves the transport perfectly alive. The panel used to read
+     `live` throughout, and a worker answer that failed to deliver was swallowed
+     in silence — the operator kept talking to a call that reached nothing. */
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  flushSync(() => root.render(
+    <VoiceConversationPanel
+      phase="live"
+      error={null}
+      agentUnavailable="the agent behind this call is no longer running, so nothing said here reaches it"
+      lines={[{ id: "u", role: "user", text: "Inspect the board", final: true }]}
+      t={t}
+    />,
+  ));
+
+  const row = host.querySelector('[data-testid="voice-agent-unavailable"]');
+  expect(row?.textContent).toContain("no longer running");
+  expect(row?.getAttribute("role")).toBe("status");
+  flushSync(() => root.unmount());
+});
+
+test("a failed call reports the transport reason alone, without a second verdict", () => {
+  /* The two rows answer different questions and must never stack: a call that
+     has ended has an error to show and no agent link left to describe. */
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  flushSync(() => root.render(
+    <VoiceConversationPanel
+      phase="error"
+      error="AVAS route unavailable"
+      agentUnavailable="the agent behind this call is no longer running"
+      lines={[]}
+      t={t}
+    />,
+  ));
+
+  expect(host.querySelector('[data-testid="voice-agent-unavailable"]')).toBeNull();
+  expect(host.textContent).toContain("AVAS route unavailable");
+  flushSync(() => root.unmount());
+});

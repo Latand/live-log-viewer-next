@@ -1,5 +1,9 @@
 # Codex API implementation handoff
 
+Current integration: [native Codex runtime](../native-codex-runtime.md). The
+September 10 direction in #1629 supersedes the queue and Voice deferrals below.
+This document retains the original research handoff for reference.
+
 The operator authorized integration. This PR repairs research and probes; product integration remains outstanding. Begin after the deployment release gate and explicit release of the shared host/queue files. The deployment owner retains startup, succession, registry and release behavior. Each slice below needs a separate implementation PR and fresh review at its exact HEAD.
 
 Source baseline: Viewer `88e5a9508be2802266734056d6436f3168201cad`; installed Codex `0.153.4`. Recheck the target base and these file manifests before implementation. Serialize shared-file ownership in the order **pagination → questions → profiles → idle context → diagnostics**. Diagnostics has no semantic dependency on idle context, but shares the host file. Idle context depends on the pagination evidence reader. No runtime file changes belong to the research PR.

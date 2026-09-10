@@ -1,3 +1,6 @@
+import { NativeQueueJournal } from "./nativeQueueJournal";
+import type { NativeQueueCommand, NativeQueueRecord, NativeQueueTransition } from "@/lib/runtime/nativeQueueContracts";
+import { parseRuntimeCommand } from "@/lib/runtime/commands";
 import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from "node:crypto";
 import fs from "node:fs";
 
@@ -52,6 +55,11 @@ import {
 } from "@/lib/runtime/liveTurn";
 import { parseStructuredImageRefs, structuredContent } from "@/lib/runtime/structuredContent";
 import { runtimeImageCapability } from "@/lib/runtime/runtimeImageStore";
+
+function nativeQueueReceipt(entry: NativeQueueRecord): NonNullable<RuntimeOperationReceipt["nativeQueue"]> {
+  return { entryId: entry.entryId, nativeSubmissionId: entry.nativeSubmissionId, revision: entry.revision,
+    dispatchedRevision: entry.dispatchedRevision, profilePolicy: entry.profilePolicy };
+}
 
 export class RuntimeJournalFault extends Error {}
 
@@ -248,10 +256,24 @@ function baseSession(id: string, payload: Record<string, unknown>, revision: num
     capabilities: {
       steer: capabilities.steer === true,
       structuredAttention: capabilities.structuredAttention === true,
+      nativeQueue: capabilities.nativeQueue === true,
+      ...(capabilities.runtimeSettings && typeof capabilities.runtimeSettings === "object" ? { runtimeSettings: {
+        perTurnModel: record(capabilities.runtimeSettings).perTurnModel === true,
+        perTurnEffort: record(capabilities.runtimeSettings).perTurnEffort === true,
+      } } : {}),
       imageInput: capabilities.imageInput && typeof capabilities.imageInput === "object"
         ? capabilities.imageInput as RuntimeSession["capabilities"]["imageInput"]
         : runtimeImageCapability(key.engine === "claude" ? "claude" : "codex", false),
     },
+    ...(payload.diagnostics && typeof payload.diagnostics === "object" ? { diagnostics: {
+      executable: typeof record(payload.diagnostics).executable === "string" ? String(record(payload.diagnostics).executable).split(/[\\/]/).at(-1)!.slice(0, 80) : "unknown",
+      queueCapability: record(payload.diagnostics).queueCapability === "supported" ? "supported" as const
+        : record(payload.diagnostics).queueCapability === "unsupported" ? "unsupported" as const : "unknown" as const,
+      version: typeof record(payload.diagnostics).version === "string" ? String(record(payload.diagnostics).version).slice(0, 80) : null,
+      nativeQueue: record(payload.diagnostics).nativeQueue === true,
+      authRecovery: record(payload.diagnostics).authRecovery === "started" ? "started" as const
+        : record(payload.diagnostics).authRecovery === "completed-unverified" ? "completed-unverified" as const : "unknown" as const,
+    } } : {}),
     activeTurnId: typeof payload.activeTurnId === "string" ? payload.activeTurnId : null,
     pendingReconfigure: payload.pendingReconfigure && typeof payload.pendingReconfigure === "object"
       ? payload.pendingReconfigure as RuntimeSession["pendingReconfigure"]
@@ -279,6 +301,7 @@ export interface RuntimeJournalOptions {
 
 export class RuntimeJournal {
   private readonly db: Database;
+  private readonly nativeQueue: NativeQueueJournal;
   private readonly maxEvents: number;
   private readonly now: () => number;
   private readonly structuredHosts: boolean;
@@ -295,6 +318,7 @@ export class RuntimeJournal {
     this.structuredHosts = options.structuredHosts ?? structuredHostsEnabled();
     this.secretKey = loadSecretKey(filename);
     this.db.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA auto_vacuum = INCREMENTAL;");
+    this.nativeQueue = new NativeQueueJournal(this.db);
     if (filename !== ":memory:") {
       for (const candidate of [filename, `${filename}-wal`, `${filename}-shm`]) {
         if (fs.existsSync(candidate)) fs.chmodSync(candidate, 0o600);
@@ -424,6 +448,11 @@ export class RuntimeJournal {
         ? JSON.parse(retryParent.receipt_json) as RuntimeOperationReceipt
         : null;
       const receipt = this.operationReceipt(command, operationId, retryOfOperationId, parentReceipt);
+      const nativeCommand = this.nativeCommandAtAdmission(command, operationId);
+      if (nativeCommand && receipt.status !== "rejected") {
+        const entry = this.nativeQueue.admit(nativeCommand, operationId);
+        if (entry) receipt.nativeQueue = nativeQueueReceipt(entry);
+      }
       const effectPayload = command.kind === "answer"
         ? { ...command, operationId, resolution: this.encryptSecret(command.resolution) }
         : {
@@ -432,11 +461,12 @@ export class RuntimeJournal {
             ...(this.structuredHosts
               && (command.kind === "send" || command.kind === "steer")
               && typeof receipt.turnId === "string"
+              && command.turnId === undefined
               ? { turnId: receipt.turnId }
               : {}),
           };
       const effect = receipt.status === "pending" || receipt.status === "queued"
-        ? { id: `effect:${operationId}`, kind: `runtime.${command.kind}`, payload: effectPayload }
+        ? { id: `effect:${operationId}`, kind: nativeCommand ? "runtime.native-queue" : `runtime.${command.kind}`, payload: nativeCommand ? { ...nativeCommand } : effectPayload }
         : undefined;
       const event = this.appendInTransaction(normalizeRuntimeEventInput({
         scope: { type: "operation", id: operationId },
@@ -461,6 +491,35 @@ export class RuntimeJournal {
     }
   }
 
+  private nativeCommandAtAdmission(command: RuntimeOperationCommand, operationId: string): NativeQueueCommand | null {
+    if (command.kind === "native-queue") return { ...command, operationId };
+    if (command.kind !== "send" || command.policy !== "queue") return null;
+    const session = this.entity<RuntimeSession>("session", command.conversationId);
+    if (!session?.capabilities.nativeQueue || session.hostKind !== "codex-app-server") return null;
+    return { kind: "native-queue", action: "add", conversationId: command.conversationId, operationId,
+      idempotencyKey: command.idempotencyKey, binding: { threadId: session.sessionKey.sessionId, accountId: session.accountId },
+      text: command.text, images: command.images ?? [], contentDigest: command.contentDigest,
+      ...(command.runtime ? { runtime: command.runtime } : {}), ...(command.turnId !== undefined ? { turnId: command.turnId } : {}),
+      ...(command.selectedContext ? { selectedContext: command.selectedContext } : {}), ...(command.origin ? { origin: command.origin } : {}) };
+  }
+
+  nativeQueueRead(conversationId: string): NativeQueueRecord[] {
+    this.assertHealthy();
+    return this.nativeQueue.read(conversationId);
+  }
+
+  nativeQueueTransition(operationId: string, transition: NativeQueueTransition): RuntimeOperationResult {
+    const original = this.operationResult(operationId);
+    const status = transition.phase === "prepared" || transition.phase === "withdrawn" ? "delivering"
+      : (transition.phase === "acknowledged" || transition.phase === "observed-queued") ? original?.receipt.kind === "send" ? "queued" : "applied"
+      : transition.phase === "proven" ? "delivered"
+      : transition.phase === "refused" || transition.phase === "removed" ? "failed" : "uncertain";
+    return this.transitionOperation(operationId, status,
+      transition.phase === "removed" ? { reason: RUNTIME_DELIVERY_DISCARDED_REASON }
+        : "reason" in transition ? { reason: transition.reason } : {},
+      transition.phase === "prepared" ? { fromStatuses: ["pending", "queued"] } : {}, transition);
+  }
+
   operationResult(operationId: string): RuntimeOperationResult | null {
     this.assertHealthy();
     const row = this.db.query<{ operation_id: string; receipt_json: string }, [string]>("SELECT operation_id, receipt_json FROM operations WHERE operation_id = ?").get(operationId);
@@ -482,6 +541,7 @@ export class RuntimeJournal {
       if (!row) throw new Error("runtime operation is unknown");
       const command = JSON.parse(row.request_json) as RuntimeOperationCommand;
       const receipt = JSON.parse(row.receipt_json) as RuntimeOperationReceipt;
+      if (this.nativeQueue.command(command, operationId)) throw new Error("native queue operation requires explicit native controls; retry is unavailable");
       if (command.kind !== "send" && command.kind !== "steer") {
         throw new Error(`runtime operation does not support ${action}`);
       }
@@ -587,6 +647,7 @@ export class RuntimeJournal {
     status: Exclude<RuntimeReceiptStatus, "pending">,
     details: Partial<Pick<RuntimeOperationReceipt, "turnId" | "queuePosition" | "reason">> = {},
     options: RuntimeTransitionOptions = {},
+    nativeTransition?: NativeQueueTransition,
   ): RuntimeOperationResult {
     this.assertHealthy();
     this.db.exec("BEGIN IMMEDIATE");
@@ -595,6 +656,14 @@ export class RuntimeJournal {
       if (!row) throw new Error("runtime operation is unknown");
       const previous = JSON.parse(row.receipt_json) as RuntimeOperationReceipt;
       const command = JSON.parse(row.request_json) as RuntimeOperationCommand;
+      const nativeCommand = this.nativeQueue.command(command, operationId);
+      let nativeEntry: NativeQueueRecord | null = null;
+      if (nativeTransition) {
+        if (!nativeCommand) throw new Error("operation is not a native queue mutation");
+        nativeEntry = this.nativeQueue.transition(nativeCommand, operationId, nativeTransition);
+      } else if (nativeCommand) {
+        throw new Error("native queue operations require their native transition and recovery path");
+      }
       const discarding = (command.kind === "send" || command.kind === "steer")
         && status === "failed"
         && details.reason === RUNTIME_DELIVERY_DISCARDED_REASON;
@@ -618,7 +687,7 @@ export class RuntimeJournal {
         if (options.fromStatuses && !options.fromStatuses.includes(previous.status)) {
           throw new Error("runtime operation moved before its transition");
         }
-        if (previous.status === status) {
+        if (previous.status === status && !nativeTransition) {
           this.db.exec("COMMIT");
           return { operationId, receipt: previous, replayed: true };
         }
@@ -631,8 +700,10 @@ export class RuntimeJournal {
       const completing = discarding || ((previous.status === "pending" || previous.status === "queued"
         || previous.status === "delivering" || previous.status === "applying")
         && status !== "delivering" && status !== "applying" && status !== "queued");
-      if (!queueing && !beginning && !completing) throw new Error("runtime operation transition is invalid");
-      if ((status === "applying" || status === "applied") && command.kind !== "reconfigure") {
+      const nativeProgress = !!nativeCommand && nativeTransition
+        && (nativeTransition.phase === "proven" || nativeTransition.phase === "removed" || nativeTransition.phase === "observed-queued" || (previous.status === "delivering" && nativeTransition.phase === "withdrawn"));
+      if (!queueing && !beginning && !completing && !nativeProgress) throw new Error("runtime operation transition is invalid");
+      if ((status === "applying" || status === "applied") && command.kind !== "reconfigure" && command.kind !== "native-queue") {
         throw new Error("runtime operation transition is invalid");
       }
       const killBoundary = completing && command.kind === "kill" && status === "delivered"
@@ -655,9 +726,14 @@ export class RuntimeJournal {
             .run(stableJson({ ...payload, turnId: details.turnId }), `effect:${operationId}`);
         }
       }
+      const deliveredVersion = nativeTransition?.phase === "proven" && nativeEntry
+        ? nativeEntry.versions.find(version => version.revision === nativeEntry.dispatchedRevision) : null;
       const next: RuntimeOperationReceipt = {
         ...previous,
         ...details,
+        ...(nativeEntry ? { nativeQueue: nativeQueueReceipt(nativeEntry) } : {}),
+        ...(deliveredVersion ? { text: deliveredVersion.text.slice(0, 240), imageCount: deliveredVersion.images.length,
+          turnId: nativeEntry!.proof!.turnId } : {}),
         status,
         reason: details.reason !== undefined ? details.reason : status === "queued" ? previous.reason : null,
         at: new Date(this.now()).toISOString(),
@@ -677,7 +753,7 @@ export class RuntimeJournal {
       this.upsertEntity("operation", operationId, event.revision, committed, event.seq);
       if (completing) this.appendCompletionConsequences(command, committed, operationId);
       this.db.query("UPDATE operations SET receipt_json = ?, event_seq = ? WHERE operation_id = ?").run(stableJson(committed), event.seq, operationId);
-      if (completing) this.db.query("UPDATE outbox SET state = 'completed', payload_json = '{}' WHERE id = ?").run(`effect:${operationId}`);
+      if (completing || nativeTransition?.phase === "acknowledged" || nativeTransition?.phase === "observed-queued" || nativeTransition?.phase === "proven") this.db.query("UPDATE outbox SET state = 'completed', payload_json = '{}' WHERE id = ?").run(`effect:${operationId}`);
       if (killBoundary) {
         this.db.query(`
           INSERT INTO outbox(id, kind, payload_json, event_seq, state)
@@ -729,6 +805,7 @@ export class RuntimeJournal {
       if (previous.status !== "failed" && previous.status !== "rejected") {
         throw new Error("only terminal failed runtime operations can start a new attempt");
       }
+      if (this.nativeQueue.command(command, operationId)) throw new Error("native queue operation requires explicit native controls; retry is unavailable");
       if (command.kind !== "send" && command.kind !== "steer") {
         throw new Error("runtime operation does not support retry");
       }
@@ -792,6 +869,7 @@ export class RuntimeJournal {
       if (!row) throw new Error("runtime operation is unknown");
       const previous = JSON.parse(row.receipt_json) as RuntimeOperationReceipt;
       const command = JSON.parse(row.request_json) as RuntimeOperationCommand;
+      if (this.nativeQueue.command(command, operationId)) throw new Error("native queue operation does not support retry");
       if (command.kind !== "send" && command.kind !== "steer") throw new Error("runtime operation does not support retry");
       const recorded = this.recordedDeliveryActionInTransaction(operationId, previous);
       if (recorded?.winner === "discard") throw this.deliveryActionConflict("discard", "retry");
@@ -1540,6 +1618,7 @@ export class RuntimeJournal {
   }
 
   private normalizeOperation(command: RuntimeOperationCommand): RuntimeOperationCommand {
+    if (command.kind === "native-queue") return parseRuntimeCommand("native-queue", command);
     if (command.kind !== "send" && command.kind !== "steer" && command.kind !== "spawn") return command;
     const rawImages = command.images ?? [];
     const images = parseStructuredImageRefs(rawImages, 16);
@@ -1591,12 +1670,34 @@ export class RuntimeJournal {
     let reason: string | null = null;
     let turnId = "turnId" in command && typeof command.turnId === "string" ? command.turnId : session?.activeTurnId ?? null;
     let queuePosition: number | null = null;
-    if (this.structuredHosts
+    if (command.kind === "native-queue") {
+      turnId = command.turnId ?? null;
+      if (!this.structuredHosts || !session || session.host !== "hosted") {
+        status = "rejected"; reason = "no-claim";
+      } else if (session.hostKind !== "codex-app-server" || !session.capabilities.nativeQueue) {
+        status = "rejected"; reason = "unsupported-capability";
+      } else if (session.sessionKey.sessionId !== command.binding.threadId || session.accountId !== command.binding.accountId) {
+        status = "rejected"; reason = "stale-generation";
+      } else if (command.turnId !== undefined && command.turnId !== session.activeTurnId) {
+        status = "rejected"; reason = "stale-turn";
+      } else {
+        status = "queued";
+      }
+    } else if (this.structuredHosts
       && command.kind === "send"
       && (session?.hostKind === "codex-app-server" || session?.hostKind === "claude-broker")) {
-      if (!session || session.host !== "hosted") {
+      if (command.policy === "queue" && session.hostKind === "codex-app-server"
+        && session.diagnostics?.queueCapability === "unknown") {
+        status = "rejected";
+        reason = "native-queue-capability-unknown";
+      } else if (!session || session.host !== "hosted") {
         status = "rejected";
         reason = session?.host === "dead" || session?.host === "unhosted" ? "dead-host" : "no-claim";
+      /* A NAMED turn is the fence. An explicit `null` on an ordinary send has
+         always meant "no turn to fence against" — the native queue's own
+         commands are where it means "only while idle", and they are fenced in
+         their own branch above. Reading it as a fence here rejected sends the
+         Viewer has always delivered against a busy host. */
       } else if (command.turnId && command.turnId !== session.activeTurnId) {
         status = "rejected";
         reason = "stale-turn";
@@ -2097,6 +2198,7 @@ export class RuntimeJournal {
         unowned: payload.unowned === true,
         createdAt: typeof payload.createdAt === "string" ? payload.createdAt : event.recorded_at,
         request: record(payload.request),
+        isBlocking: !(record(record(payload.request).protocol).method === "item/tool/requestUserInput" && payload.isBlocking === false),
         ...(typeof payload.autoResolutionMs === "number" || payload.autoResolutionMs === null ? { autoResolutionMs: payload.autoResolutionMs } : {}),
         ...(typeof payload.turnId === "string" || payload.turnId === null ? { turnId: payload.turnId } : {}),
       };
@@ -2331,7 +2433,7 @@ export class RuntimeJournal {
 
   private verify(): void {
     try {
-      for (const table of ["journal_meta", "events", "scope_revisions", "projections", "entities", "outbox", "operations", "delivery_operation_actions", "consumer_checkpoints", "viewer_deployments"]) {
+      for (const table of ["journal_meta", "events", "scope_revisions", "projections", "entities", "outbox", "operations", "delivery_operation_actions", "native_queue_entries", "consumer_checkpoints", "viewer_deployments"]) {
         const check = this.db.query<{ quick_check: string }, []>(`PRAGMA quick_check(${table})`).get();
         if (check?.quick_check !== "ok") throw new RuntimeJournalFault(`runtime journal SQLite check failed: ${table}`);
       }

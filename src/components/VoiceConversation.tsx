@@ -215,6 +215,8 @@ export function VoiceConversationPanel({
   phase,
   lines,
   error,
+  notice = null,
+  agentUnavailable = null,
   startedAt = null,
   stream = null,
   micMuted = false,
@@ -227,6 +229,19 @@ export function VoiceConversationPanel({
   phase: CodexRealtimePhase;
   lines: readonly CodexRealtimeLine[];
   error: string | null;
+  /** Something to say while the call keeps running — an approaching usage limit
+      is the case it was added for (#1629). */
+  notice?: string | null;
+  /**
+   * Why the agent behind this call cannot be reached, or null while it can
+   * (#1629).
+   *
+   * Distinct from `error`, which is about the transport. The WebRTC leg runs to
+   * the provider, so a backing host that died or was replaced leaves the call
+   * sounding perfectly alive — and the panel used to go on reading `live` while
+   * nothing said into it could reach any work. This is the row that says so.
+   */
+  agentUnavailable?: string | null;
   /** Epoch ms the current call went live; null before it does. */
   startedAt?: number | null;
   /** The live microphone stream, for the level meter. */
@@ -239,7 +254,7 @@ export function VoiceConversationPanel({
   t: TFunction;
 }) {
   const { ref, onScroll } = useFollowLatest(lines);
-  if (phase === "idle" && lines.length === 0 && !error) return null;
+  if (phase === "idle" && lines.length === 0 && !error && !notice && !agentUnavailable) return null;
   const live = phase === "live";
   const status = phase === "connecting"
     ? t("voice.connecting")
@@ -339,6 +354,34 @@ export function VoiceConversationPanel({
           );
         })}
       </div>
+
+      {/* A warning the call survives. Rendered above the error slot and in a
+          different tone, because "your window is nearly spent" and "the call is
+          over" call for different reactions, and the operator can only act on
+          the first while there is still a call. */}
+      {/* The agent link, which the transport cannot speak for. Shown above the
+          usage notice and below nothing, because a call whose agent is gone is
+          the most important thing on this panel: everything else on it is about
+          a conversation that is still happening. */}
+      {agentUnavailable && !error ? (
+        <div
+          role="status"
+          data-testid="voice-agent-unavailable"
+          className="flex items-start gap-2 border-t border-danger/30 bg-danger/5 px-2 py-1.5"
+        >
+          <p className="min-w-0 flex-1 text-label text-danger">{agentUnavailable}</p>
+        </div>
+      ) : null}
+
+      {notice && !error ? (
+        <div
+          role="status"
+          data-testid="voice-notice"
+          className="flex items-start gap-2 border-t border-warning/30 bg-warning/5 px-2 py-1.5"
+        >
+          <p className="min-w-0 flex-1 text-label text-warning">{notice}</p>
+        </div>
+      ) : null}
 
       {/* A failed call is the one state that needs an action attached: the
           reason comes from the backend verbatim (#664) and the operator's next

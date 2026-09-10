@@ -132,8 +132,16 @@ test("390px staged images occupy the first compact row inside the composer (#440
   expect(tray).not.toBeNull();
   expect(tray!.className).toContain("overflow-x-auto");
   expect(tray!.className).toContain("max-h-16");
+  /* Still the first bounded row above the input, now as a surface of the
+     composer's accessory region — one budget and one scrollport for everything
+     above the field (#1629), rather than a sibling of the form with a bound of
+     its own. */
+  const region = form.querySelector('[data-testid="composer-accessories"]') as HTMLElement;
+  const unit = form.querySelector('[data-testid="composer-input-unit"]') as HTMLElement;
+  expect(region.contains(tray!)).toBe(true);
+  expect(unit.contains(inputSurface)).toBe(true);
   const rows = [...form.children];
-  expect(rows.indexOf(tray!)).toBeLessThan(rows.indexOf(inputSurface));
+  expect(rows.indexOf(region)).toBeLessThan(rows.indexOf(unit));
   expect(tray!.querySelectorAll('[data-testid="attachment-tile"]')).toHaveLength(3);
   expect(tray!.querySelectorAll('button[aria-label^="Remove image"]')).toHaveLength(3);
 

@@ -1,3 +1,4 @@
+import type { NativeQueueRecord, NativeQueueTransition } from "./nativeQueueContracts";
 import net from "node:net";
 
 import type { RuntimeDeliveryAction, RuntimeDeliveryActionClaim, RuntimeEventInput, RuntimeOperationCommand, RuntimeOperationResult, RuntimePendingEffect, RuntimeReceiptStatus, RuntimeReplay, RuntimeRetryOptions, RuntimeSnapshot, RuntimeSocketRequest, RuntimeSocketResponse, RuntimeTransitionOptions, ViewerDeploymentReceipt, ViewerDeploymentRequest, ViewerDeploymentStatus } from "./contracts";
@@ -84,6 +85,8 @@ export function isRuntimeHostTransportFailure(error: unknown): boolean {
 }
 
 export interface RuntimeHostClient {
+  nativeQueueRead?(conversationId: string): Promise<NativeQueueRecord[]>;
+  nativeQueueTransition?(operationId: string, transition: NativeQueueTransition): Promise<RuntimeOperationResult>;
   snapshot(signal?: AbortSignal): Promise<RuntimeSnapshot>;
   events(after: number, signal?: AbortSignal): Promise<RuntimeReplay>;
   waitEvents(after: number, timeoutMs?: number, signal?: AbortSignal): Promise<RuntimeReplay>;
@@ -115,6 +118,12 @@ export class UnixRuntimeHostClient implements RuntimeHostClient {
     private readonly snapshotTimeoutMs = RUNTIME_SNAPSHOT_REQUEST_TIMEOUT_MS,
   ) {}
 
+  nativeQueueRead(conversationId: string): Promise<NativeQueueRecord[]> {
+    return this.call("native-queue-read", { conversationId }) as Promise<NativeQueueRecord[]>;
+  }
+  nativeQueueTransition(operationId: string, transition: NativeQueueTransition): Promise<RuntimeOperationResult> {
+    return this.call("native-queue-transition", { operationId, transition }) as Promise<RuntimeOperationResult>;
+  }
   snapshot(signal?: AbortSignal): Promise<RuntimeSnapshot> { return this.call("snapshot", undefined, this.snapshotTimeoutMs, signal) as Promise<RuntimeSnapshot>; }
   events(after: number, signal?: AbortSignal): Promise<RuntimeReplay> { return this.call("events", { after }, this.timeoutMs, signal) as Promise<RuntimeReplay>; }
   waitEvents(after: number, timeoutMs = 15_000, signal?: AbortSignal): Promise<RuntimeReplay> { return this.call("wait", { after, timeoutMs }, timeoutMs + 1_000, signal) as Promise<RuntimeReplay>; }

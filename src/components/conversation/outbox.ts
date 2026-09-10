@@ -48,6 +48,16 @@ export interface OutboxEntry {
   state: OutboxState;
   /** Possible dispatch without affirmative arrival evidence; never locally replay. */
   deliveryUncertain?: true;
+  /**
+   * How this submission asked to meet a running turn (#1629).
+   *
+   * Absent is the default and the operator's stated preference: an ordinary send
+   * interrupts the turn in progress. `steer-if-active` is the explicit second
+   * choice, offered only where the host advertises steering, and it rides on the
+   * durable entry so a replay after a reload asks for the same thing the
+   * operator did rather than silently becoming an interrupt.
+   */
+  policy?: "steer-if-active";
   /** The moment this attempt was handed to the wire (ms). Written by the
       composer immediately before the request leaves and cleared by the next
       claim, so a reload while the response is still pending can tell a

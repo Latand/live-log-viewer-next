@@ -1,3 +1,4 @@
+import { isNonblockingCodexQuestion } from "./codexAttention";
 import type { RuntimeAttentionKind, RuntimeAttentionRequest, RuntimeEventInput } from "./contracts";
 import type { RuntimeEvent } from "./engineHost";
 import { boundedToolArgs } from "./liveTurn";
@@ -210,6 +211,7 @@ function attentionProjection(engine: "codex" | "claude", event: Extract<RuntimeE
   request: RuntimeAttentionRequest;
   turnId: string | null;
   autoResolutionMs?: number;
+  isBlocking: boolean;
 } {
   const source = record(event.attention);
   const input = record(source.input);
@@ -255,6 +257,7 @@ function attentionProjection(engine: "codex" | "claude", event: Extract<RuntimeE
     kind,
     request,
     turnId: text(source.turnId, record(source.turn).id),
+    isBlocking: !(engine === "codex" && isNonblockingCodexQuestion(method, source)),
     ...(typeof source.autoResolutionMs === "number" ? { autoResolutionMs: source.autoResolutionMs } : {}),
   };
 }
@@ -274,6 +277,20 @@ export function projectEngineHostEvent(
   }
   if (event.kind === "delta") {
     return { ...base, kind: "delta", payload: { conversationId, turnId: event.turnId, text: clipped(event.text, 8 * 1024) } };
+  }
+  if (event.kind === "voice-transcript") {
+    return {
+      ...base,
+      kind: "voice-transcript",
+      payload: {
+        conversationId,
+        realtimeSessionId: event.realtimeSessionId,
+        segmentId: event.segmentId,
+        role: event.role,
+        text: clipped(event.text, 16 * 1024),
+        final: event.final,
+      },
+    };
   }
   if (event.kind === "voice-chunk") {
     return {
@@ -307,6 +324,9 @@ export function projectEngineHostEvent(
   if (event.kind === "turn-ended") {
     return { ...base, kind: "turn-ended", payload: { conversationId, turnId: event.turnId, outcome: event.status } };
   }
+  if (event.kind === "native-queue-changed") {
+    return { ...base, kind: "native-queue-changed", payload: { conversationId, threadId: event.threadId } };
+  }
   if (event.kind === "attention") {
     const projected = attentionProjection(engine, event);
     return {
@@ -317,10 +337,11 @@ export function projectEngineHostEvent(
         conversationId,
         kind: projected.kind,
         state: "open",
-        unowned: false,
+        unowned: record(event.attention).unowned === true,
         createdAt: new Date().toISOString(),
         request: projected.request,
         turnId: projected.turnId,
+        isBlocking: projected.isBlocking,
         ...(projected.autoResolutionMs !== undefined ? { autoResolutionMs: projected.autoResolutionMs } : {}),
       },
     };

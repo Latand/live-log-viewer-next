@@ -15,6 +15,7 @@ import { useCodexRealtime } from "@/hooks/useCodexRealtime";
 import { interruptRuntime, useRuntimeBusState, type RuntimeSessionView } from "@/hooks/useRuntime";
 import { parseSelectedContextRef, type SelectedContextRef } from "@/lib/selection/selectedContext";
 import { useViewerSelectedContext, viewerSelectedContext } from "@/lib/selection/viewerSelectedContext";
+import { useComposerBox } from "@/hooks/useComposerBox";
 import { useHostTarget } from "@/hooks/useHostTarget";
 import { accountIdFromPath } from "@/lib/accounts/badge";
 import { conversationIdentity } from "@/lib/accounts/identity";
@@ -22,6 +23,17 @@ import { activeCardMigration, cardMigrationState, migrationHoldsDelivery, migrat
 import { getLocale, useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 import type { RuntimeReceipt } from "@/components/runtime/runtimeModel";
+import type { RuntimeVoiceTranscriptSegment } from "@/lib/runtime/contracts";
+import { NativeQueuePanel } from "@/components/NativeQueuePanel";
+import {
+  queueAdmissionKey,
+  readRetainedQueueAdmissions,
+  releaseQueueAdmission,
+  retainQueueAdmission,
+  sameQueueOperation,
+  type RetainedQueueAdmission,
+} from "@/components/retainedQueueAdmissions";
+import { useNativeQueue, type NativeQueueMutation } from "@/hooks/useNativeQueue";
 
 import { DormantView } from "./conversation/DormantView";
 import { ComposerBar, composerSlotKind, type ComposerSlotKind } from "./ComposerBar";
@@ -58,7 +70,7 @@ import {
   withComposerAdmissionDeadline,
 } from "./composerAdmissionDeadline";
 import { RuntimePill } from "./RuntimePill";
-import { savedResumeProfile, sendRuntimeFrom, type RuntimeProfile } from "./runtimeProfile";
+import { observedModelId, savedResumeProfile, sendRuntimeFrom, type RuntimeProfile } from "./runtimeProfile";
 import { type PendingAttachment, type PendingFile, type PendingImage, type RestoredFile } from "./imageAttachments";
 import {
   DELIVERY_WAIT_TICK_MS,
@@ -162,6 +174,9 @@ interface ComposerSendResult {
 }
 
 const SENT_LIMIT = 8;
+/* A stable identity for "no canonical transcript yet", so the merge effect does
+   not re-run on every render of a card that has never held a call. */
+const EMPTY_VOICE_TRANSCRIPT: readonly RuntimeVoiceTranscriptSegment[] = [];
 const SPAWN_TTL_MS = 90_000;
 const PANE_TTL_MS = 10 * 60_000;
 const RECOVERABLE_BUSY_RETRY_REASONS = new Set(["delivery-auto-retry", "interrupt-auto-retry"]);
@@ -1203,8 +1218,16 @@ function canMessageWithoutPane(file: FileEntry): boolean {
   return file.root === "codex-sessions";
 }
 
+/* The retained store also holds the panel's own unanswered controls, which are
+   not hand-offs and have no words to give back: a control names an entry the
+   journal still holds, and pressing it again is its own recovery. Only an `add`
+   earns a recovery row in the composer. */
+const unresolvedHandoffs = (id: string) =>
+  readRetainedQueueAdmissions(id).filter((entry) => entry.mutation.action === "add");
+
 const draftKey = (id: string) => "llvDraft:" + id;
 const COMPOSE_EVENT = "llv-compose-draft";
+
 
 /** Links a transcript path to the identity whose sessionStorage records hold
     that conversation's composer state, so an id rotation can find them. */
@@ -1224,7 +1247,7 @@ export function adoptComposerState(path: string, cardId: string): void {
     const previousOwner = sessionStorage.getItem(composerOwnerKey(path));
     for (const from of [previousOwner, path]) {
       if (!from || from === cardId) continue;
-      for (const keyOf of [draftKey, draftImagesKey, draftFilesKey, pendingSendKey, sentKey, dismissedReceiptsKey]) {
+      for (const keyOf of [draftKey, draftImagesKey, draftFilesKey, pendingSendKey, sentKey, dismissedReceiptsKey, queueAdmissionKey]) {
         const legacy = sessionStorage.getItem(keyOf(from));
         if (legacy === null) continue;
         if (sessionStorage.getItem(keyOf(cardId)) === null) sessionStorage.setItem(keyOf(cardId), legacy);
@@ -1483,7 +1506,32 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
     voiceWorkerTurn?.text ?? "",
     Boolean(voiceWorkerTurn?.turnId && structuredSession?.session.activeTurnId === voiceWorkerTurn.turnId),
     structuredSession?.session.voiceDeliveries ?? [],
+    structuredSession?.session.voiceTranscript ?? EMPTY_VOICE_TRANSCRIPT,
+    structuredSession?.session.host ?? "unknown",
   );
+  /* Codex's own queue (#1629). Available only where the host has actually
+     advertised native queue support — the capability is observed from the
+     running executable, never assumed from the engine name — so a Codex host
+     that cannot queue shows no queue controls at all rather than offering ones
+     the wire would refuse. */
+  const nativeQueueEnabled = Boolean(structuredSession?.session.capabilities?.nativeQueue);
+  /* Hand-offs this browser cannot say the outcome of, mirrored into state so the
+     panel can offer the one control that resolves them. Seeded on mount, because
+     the operation may have been admitted by a page that is gone. */
+  const [unresolvedAdmissions, setUnresolvedAdmissions] = useState<RetainedQueueAdmission[]>(
+    () => (typeof window === "undefined" ? [] : unresolvedHandoffs(cardId)),
+  );
+  useEffect(() => { setUnresolvedAdmissions(unresolvedHandoffs(cardId)); }, [cardId]);
+  const nativeQueue = useNativeQueue(cardId, {
+    enabled: nativeQueueEnabled,
+    threadId: structuredSession?.session.sessionKey?.sessionId ?? null,
+    accountId: structuredSession?.session.accountId ?? null,
+    turn: structuredSession?.session.turn === "running"
+      ? "running"
+      : structuredSession?.session.turn === "idle" ? "idle" : "unknown",
+    activeTurnId: structuredSession?.session.activeTurnId ?? null,
+    changeRevision: structuredSession?.session.nativeQueueRevision ?? 0,
+  }, runtimeDependencies.nativeQueue);
   /* #691, ownership inverted: the voice panel is rendered by `VoicePipHost`, the
      Viewer-level owner that survives this card unmounting. Docked, the panel lands
      in the slot node this card publishes; floating, the HOST publishes a composer
@@ -1521,6 +1569,25 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
   /* An off-screen or far-zoom pane skips the pane-resolution poll; the last
      known target keeps the composer usable the moment it comes back. */
   const target = useHostTarget(file.pid, canMessageWithoutPane(file) ? file.path : undefined, !pollPaused);
+  /* WHAT ELSE IS IN THE COMPOSER'S BOX, each on the predicate that actually puts
+     it there: `NativeQueuePanel` draws nothing with no rows and no unanswered
+     hand-off, and the call panel is docked only while a call is up and no
+     floating window has taken it. A capability alone reserves nothing, and a
+     queue that empties or a call that ends gives its room straight back to the
+     draft. */
+  const queuePanelRendered = nativeQueueEnabled
+    && (nativeQueue.view.rows.length > 0 || unresolvedAdmissions.length > 0);
+  const callPanelDocked = voiceEnabled && !pipComposerSlot && voice.phase !== "idle";
+  /* And the box itself: the conversation this composer is laid out in. The
+     form's budget is a share of it and the field's ceiling is what is left
+     inside that share, so both read the same element (#1629). */
+  const composerBox = useComposerBox(viewActive);
+  /* HOW MANY SURFACES THE ACCESSORY REGION HOLDS. Two of them are known here;
+     the delivery lists are derived far below, out of state this render has not
+     reached yet, so the count is published from the render that draws them and
+     read here on the next one. A count that arrives one commit later costs the
+     field one re-layout — a count guessed here would cost a control. */
+  const [accessorySurfaces, setAccessorySurfaces] = useState(0);
   /* Column reshuffles can remount the composer mid-typing; the draft lives in
      sessionStorage so the text survives the remount. */
   const composer = useComposer({
@@ -1544,6 +1611,14 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
     /* Queue-first (issue #561): a submitted message lives in the durable
        outbox, so the field never locks behind an in-flight delivery. */
     holdInputWhileBusy: false,
+    /* The accessory region above shares this composer's ONE bounded box, so the
+       field's own grow ceiling gives up the room that region needs to stay
+       reachable (#1629) — measured against the same box the form's budget is a
+       share of, and only for the surfaces actually in it. A draft that keeps
+       growing past the ceiling scrolls inside the field, which is what the
+       field has always done there. */
+    accessorySurfaces,
+    boxHeight: composerBox.height,
     viewActive,
   });
   /* Pulls the bridge inbox once, at the start of a turn, and only for the voice
@@ -1713,6 +1788,17 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
     transcriptEchoCounts,
     respondedMessageKeys,
   );
+
+  /* What the accessory region will actually draw this render, published for the
+     field's ceiling above (#1629). Every one of these is a surface with its own
+     controls — a call to hang up, a queue to start, a send to retry, a receipt
+     to settle — so each counts once, and one that goes away hands its room
+     straight back to the draft. */
+  const renderedAccessorySurfaces = (callPanelDocked ? 1 : 0) + (queuePanelRendered ? 1 : 0)
+    + (sent.length || echoedReceipts.length ? 1 : 0) + (displayedRuntimeReceipts.length ? 1 : 0);
+  useEffect(() => {
+    setAccessorySurfaces(renderedAccessorySurfaces);
+  }, [renderedAccessorySurfaces]);
 
   const persistPendingDeliveries = (next: PendingDelivery[]) => {
     /* Admission releases the local snapshot. A later safe-failure receipt
@@ -2102,7 +2188,7 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
   /* `preserveDraft` queues a message that stands apart from the operator's
      current draft — the quick-ack (finding 5). It carries no attachments and
      leaves the composer's typed text and staged tiles exactly where they were. */
-  const queueSubmit = (overrideText?: string, options?: { preserveDraft?: boolean }) => {
+  const queueSubmit = (overrideText?: string, options?: { preserveDraft?: boolean; policy?: "steer-if-active" }) => {
     const preserveDraft = options?.preserveDraft ?? false;
     const requestedText = overrideText ?? textRef.current;
     const requestedImages: PendingImage[] = preserveDraft ? [] : attachments.imagesRef.current.map((image) => ({ ...image }));
@@ -2149,6 +2235,10 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
          one — `outboxFiles` is memory-only, so a replay after a reload would
          deliver the text without the file and say nothing. */
       ...(requestedFiles.length ? { files: requestedFiles.length } : {}),
+      /* #1629: the operator's explicit choice, carried on the durable entry so a
+         replay after a reload asks for the same thing rather than falling back
+         to the default interrupt. */
+      ...(options?.policy ? { policy: options.policy } : {}),
       at: nowMs(),
       /* Submission watermark (finding 2): the echoes of this exact text that
          already exist, so a pre-existing identical message never retires this
@@ -2344,6 +2434,9 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
       }
     }
     const runtimeOverride = runtimeSendSnapshots.current.get(clientMessageId);
+    const submissionPolicy = (outboxId
+      ? readOutbox(cardId).find((entry) => entry.id === outboxId)?.policy
+      : undefined) ?? "interrupt-active";
     /* A local pre-flight rejection (image protocol gate) never reaches the
        wire, so it must not arm a pending generation either. */
     const reachesWire = !(structuredSession && structuredImagesDisabled && sentImages.length > 0);
@@ -2472,7 +2565,10 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
                  because it is the same machine. */
               ...(sentFiles.length ? { files: sentFiles.map((file) => ({ name: file.name, base64: file.base64 })) } : {}),
               idempotencyKey: clientMessageId,
-              policy: "interrupt-active",
+              /* DEFAULT INTERRUPT STAYS THE DEFAULT (#1629). A submission asks
+                 for something else only when the operator chose it explicitly
+                 and the entry carries that choice. */
+              policy: submissionPolicy,
               ...(runtimeOverride ? { runtime: runtimeOverride } : {}),
               selectedContext,
             }).then((result) => ({
@@ -2765,6 +2861,164 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
     });
   };
 
+  /**
+   * Put the draft in Codex's own queue (#1629).
+   *
+   * A SECOND SUBMISSION BESIDE THE DEFAULT. Enter still sends, and for Codex a
+   * send still interrupts the running turn — that is the operator's stated
+   * preference and nothing here changes it. This is the other thing they asked
+   * for: hand the message to Codex, which holds it and dispatches it when the
+   * turn it is working on ends.
+   *
+   * It goes to the queue route rather than through the composer's own outbox,
+   * because the queue is CODEX'S: the runtime's executor is its single dispatch
+   * owner and the panel above reads what Codex is actually holding. Putting it
+   * through the outbox as well would be a second scheduler for the same message.
+   *
+   * IMMEDIATE FEEDBACK, HONESTLY LABELLED. The draft clears and the status line
+   * says the message was handed over the moment the journal admits it — which is
+   * what has happened. It does not say "queued by Codex": that is what the panel
+   * says, once Codex has acknowledged it.
+   */
+  const queueForCodex = () => {
+    const requestedText = textRef.current.trim();
+    const requestedImages = attachments.imagesRef.current.map((image) => ({ ...image }));
+    if (!nativeQueueEnabled) {
+      setStatus({ kind: "err", text: t("queue.queueUnavailable") });
+      return;
+    }
+    if (!requestedText && !requestedImages.length) return;
+    if (voiceSending || reconcilingSend) return;
+    if (effectiveSendBlockedReason) {
+      setStatus({ kind: "err", text: effectiveSendBlockedReason });
+      return;
+    }
+    if (structuredImagesDisabled && requestedImages.length) {
+      setStatus({ kind: "err", text: structuredImagesReason! });
+      return;
+    }
+    if (requestedImages.length && !attachments.validate()) return;
+    const requested = structuredSession ? sendRuntimeFrom(file) : undefined;
+    /* #844: read at the submission instant, exactly as an ordinary send does —
+       everything the reference will ever say is decided now. */
+    const reference = viewerSelectedContext();
+    const snapshot = { text: textRef.current, images: requestedImages };
+    /* THE EXACT COMMAND, decided once and never rebuilt. The journal hashes the
+       request behind an idempotency key and refuses a key whose payload changed,
+       so a replay assembled from whatever the composer holds later is not a
+       replay at all. */
+    const mutation: NativeQueueMutation = {
+      action: "add",
+      text: requestedText,
+      ...(requestedImages.length
+        ? { images: requestedImages.map((image) => ({ base64: image.base64, mime: image.mime })) as never }
+        : {}),
+      /* AN AUDIT RECORD OF WHAT WAS ASKED FOR. Native's queue parameters carry no model or
+         effort, so what the operator had selected when they queued is retained
+         as what they asked for; the panel says what the thread is observed on
+         now and never promises what it will be at dispatch. */
+      ...(requested ? { runtime: requested } : {}),
+      ...(reference ? { selectedContext: reference } : {}),
+    };
+    /* THE SAME MESSAGE KEEPS THE SAME OPERATION. A hand-off whose reply this
+       browser never saw may already be in the journal, so pressing again mints
+       nothing: the retained envelope replays that one operation, under its own
+       key and its own binding, instead of admitting a second indistinguishable
+       one. A message that is no longer the same message is a new operation, and
+       the unresolved one is kept rather than overwritten. */
+    const retained = readRetainedQueueAdmissions(cardId).find((entry) => sameQueueOperation(entry.mutation, mutation));
+    const envelope: RetainedQueueAdmission = retained ?? {
+      key: mintIdempotencyKey(),
+      mutation,
+      binding: {
+        threadId: structuredSession?.session.sessionKey?.sessionId ?? null,
+        accountId: structuredSession?.session.accountId ?? null,
+      },
+    };
+    /* PERSISTED BEFORE THE WIRE. The case this exists for is a reply that never
+       arrives, and a record written in the error path does not survive a reload
+       or a navigation while the request is still in flight. */
+    if (retainQueueAdmission(cardId, envelope) === "refused") {
+      /* THE DRAFT STAYS, AND NOTHING WAS SENT. The store could not keep this
+         operation's identity — the card is already holding the most unresolved
+         operations it may, or the browser would not take the write — so the
+         hand-off does not leave. Clearing the composer here would take the
+         operator's words away in exchange for an operation nobody could name
+         after a reload. */
+      setStatus({ kind: "err", text: t("queue.retentionRefused") });
+      return;
+    }
+    setUnresolvedAdmissions(unresolvedHandoffs(cardId));
+    setText("");
+    attachments.clearAll();
+    setStatus({ kind: "ok", text: t("queue.queueMessage") });
+    inputRef.current?.focus();
+    void (async () => {
+      const answer = await nativeQueue.submit({ ...envelope.mutation, binding: envelope.binding }, envelope.key);
+      /* Both terminal answers end THIS operation's uncertainty, and nothing
+         else's. `ok` is the journal's own identified receipt for it — including
+         the replay of one it already held — and a refusal is the journal saying
+         it admitted nothing. An unknown outcome leaves the record exactly where
+         it was written. */
+      if (answer.outcome !== "unknown") releaseQueueAdmission(cardId, envelope.key);
+      setUnresolvedAdmissions(unresolvedHandoffs(cardId));
+      if (answer.ok) return;
+      /* A REFUSED ADMISSION GIVES THE DRAFT BACK, ATTACHMENTS AND ALL. Nothing
+         was queued, so the words and the tiles belong in the composer where the
+         operator left them — losing them to a refusal is the failure the outbox
+         exists to prevent on the other path. Neither is restored over something
+         the operator has typed or staged since. An UNKNOWN outcome gives them
+         back too, and the operation stays recoverable from the panel either way. */
+      setStatus({ kind: "err", text: answer.error ?? t("queue.refused") });
+      setText((current) => current || snapshot.text);
+      if (snapshot.images.length && attachments.imagesRef.current.length === 0) {
+        attachments.replace(snapshot.images);
+      }
+    })();
+  };
+
+  /**
+   * Send one unresolved hand-off again, exactly as it was admitted (#1629).
+   *
+   * The recovery control behind the panel's unresolved row. It replays the
+   * stored envelope verbatim — key, payload and original binding — so the
+   * journal either answers with the operation it already holds or admits this
+   * one; nothing is rebuilt from what the composer currently shows, and a
+   * binding that has moved since is refused by the runtime rather than silently
+   * followed.
+   */
+  const replayQueueAdmission = (key: string) => {
+    const envelope = readRetainedQueueAdmissions(cardId).find((entry) => entry.key === key);
+    if (!envelope) return;
+    void (async () => {
+      const answer = await nativeQueue.submit({ ...envelope.mutation, binding: envelope.binding }, envelope.key);
+      if (answer.outcome !== "unknown") releaseQueueAdmission(cardId, envelope.key);
+      setUnresolvedAdmissions(unresolvedHandoffs(cardId));
+      if (!answer.ok) setStatus({ kind: "err", text: answer.error ?? t("queue.refused") });
+    })();
+  };
+
+  /**
+   * Add to the turn already running, instead of interrupting it (#1629).
+   *
+   * REFUSED HERE WHEN IT CANNOT WORK, before anything is admitted. The broker
+   * behind a Claude conversation cannot steer at all, and a steer with nothing
+   * running is not a steer; both used to become a durable operation that failed
+   * later, which reads to the operator as the message being lost rather than
+   * never accepted.
+   */
+  const steerRunningTurn = () => {
+    if (!structuredSession?.session.capabilities?.steer) {
+      setStatus({ kind: "err", text: t("queue.steerUnsupported") });
+      return;
+    }
+    if (structuredSession.session.turn !== "running") {
+      setStatus({ kind: "err", text: t("queue.steerIdle") });
+      return;
+    }
+    queueSubmit(undefined, { policy: "steer-if-active" });
+  };
+
   /* Every submission method funnels through the queue-first path (round-1 P1#1):
      the Send button (this form submit), the Enter key (ComposerBar → the
      composer's `submit`), and one-tap dictation (`stopAndSend` → the same
@@ -2890,6 +3144,90 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
         ? t("mobile2.composer.placeholderHeld")
         : null;
 
+  /* SENDS WAITING FOR AN ANSWER, and the quiet echoes of the ones that landed:
+     a surface of the accessory region (#1629), where it shares one budget and
+     one scrollport with the call, the queue and the receipts of the sends that
+     failed. A run of them stacked above the field used to push the field and
+     Send down past the pane's bottom edge inside a small card. Its own rows
+     keep their order and their controls. */
+  const deliveries = sent.length || echoedReceipts.length ? (
+    <div data-testid="composer-deliveries" className="flex flex-col gap-0.5 overflow-y-auto overscroll-contain" aria-label={t("composer.queueAria")}>
+      {echoedReceipts.map((receipt) => (
+        <div key={receipt.operationId} data-delivery-echo className="flex items-center justify-end gap-1.5">
+          <Check className="h-3 w-3 shrink-0 text-success" aria-hidden />
+          <span className="sr-only">{t("composer.deliveredEcho")}</span>
+          <span
+            className="min-w-0 max-w-[85%] truncate text-label text-secondary"
+            title={receipt.text ?? undefined}
+          >
+            {receipt.text}
+          </span>
+          <span className="inline-flex shrink-0 items-center gap-0.5 text-caption tabular-nums text-muted">
+            {hhmm(Date.parse(receipt.at))}
+          </span>
+          <button
+            type="button"
+            aria-label={t("runtime.receipt.dismiss")}
+            className={`inline-flex shrink-0 items-center justify-center rounded text-muted hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+              isMobile ? "h-11 w-11" : "px-0.5"
+            }`}
+            onClick={() => dismissReceipts([receipt.operationId])}
+          >
+            <X className={isMobile ? "h-4 w-4" : "h-3 w-3"} aria-hidden />
+          </button>
+        </div>
+      ))}
+      {sent.map((entry) => {
+        const receipt = receiptMeta(t, entry.state);
+        return (
+        <div key={entry.id} className="flex items-center justify-end gap-1.5">
+          {receipt ? (
+            <Badge tone={receipt.tone} role="status" aria-live="polite">
+              {receipt.label}
+            </Badge>
+          ) : null}
+          {entry.state === "failed" ? (
+            <button
+              type="button"
+              aria-label={t("composer.retrySend")}
+              title={t("composer.retrySend")}
+              disabled={busy || voiceSending}
+              className={`inline-flex shrink-0 items-center justify-center rounded text-muted hover:text-accent disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+                isMobile ? "h-11 w-11" : "px-0.5"
+              }`}
+              onClick={() => {
+                void send(entry.text, { receiptId: entry.id, clientMessageId: entry.clientMessageId });
+              }}
+            >
+              <RotateCcw className={isMobile ? "h-4 w-4" : "h-3 w-3"} aria-hidden />
+            </button>
+          ) : null}
+          <span
+            className="min-w-0 max-w-[85%] truncate text-label text-secondary"
+            title={entry.text}
+          >
+            {entry.text}
+          </span>
+          <span className="inline-flex shrink-0 items-center gap-0.5 text-caption tabular-nums text-muted">
+            {entry.via === "spawn" ? <Play className="h-2.5 w-2.5" aria-hidden /> : <ArrowRight className="h-2.5 w-2.5" aria-hidden />}
+            {hhmm(entry.at)}
+          </span>
+          <button
+            type="button"
+            aria-label={t("composer.removeFromQueue")}
+            className={`inline-flex shrink-0 items-center justify-center rounded text-muted hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+              isMobile ? "h-11 w-11" : "px-0.5"
+            }`}
+            onClick={() => persistSent(sent.filter((item) => item.id !== entry.id))}
+          >
+            <X className={isMobile ? "h-4 w-4" : "h-3 w-3"} aria-hidden />
+          </button>
+        </div>
+        );
+      })}
+    </div>
+  ) : null;
+
   const composerBar = (
     <ComposerBar
       composer={composer}
@@ -2931,27 +3269,108 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
       voicePanel={voiceEnabled && !pipComposerSlot ? (
         /* An empty slot, not a panel: `VoicePipHost` owns the ONE panel rendering
            and portals it here while no floating window is open. While one is,
-           the panel lives in the PiP window and this slot stands down. */
-        <div ref={publishDockSlot} data-testid="voice-dock-slot" className="flex flex-col" />
+           the panel lives in the PiP window and this slot stands down.
+
+           A SURFACE OF THE ACCESSORY REGION, and the tallest one this composer
+           can gain — a transcript, a notice and the call controls. The region
+           gives it its share and this slot scrolls what does not fit into that
+           share; the panel inside must NOT shrink with the slot
+           (`[&>*]:shrink-0`), because a panel that collapses alongside its
+           scroller leaves it nothing to scroll and its own `overflow-hidden`
+           then clips the transcript away. An empty slot — every conversation
+           that is not on a call — takes no row at all (`[&:empty]:hidden`),
+           down to the gap a row of nothing would still have cost above the
+           input; the portal fills it and it returns. */
+        <div ref={publishDockSlot} data-testid="voice-dock-slot" className="flex flex-col overflow-y-auto overscroll-contain [&:empty]:hidden [&>*]:shrink-0" />
       ) : undefined}
-      sendMenuActions={
-        canQuickAck
-          ? [
-              {
-                id: "quick-ack",
-                label: t("composer.quickAckLabel"),
-                description: t("composer.quickAck"),
-                disabled: quickAckDisabled,
-                tone: "ok",
-                /* Queue-first like every other submission (finding 5): the ack
-                   enqueues behind any active delivery, renders immediately, is
-                   cancellable, joins history, and dispatches once — while the
-                   operator's typed draft and staged tiles stay put. */
-                onSelect: () => queueSubmit(t("composer.quickAck"), { preserveDraft: true }),
-              },
-            ]
-          : []
-      }
+      /* Sends still waiting for their answer, in the accessory region with the
+         rest of what a send produced (#1629). */
+      deliveries={deliveries}
+      /* The card and phone forms are bounded boxes that scroll their own
+         content, so the input unit pins to the bottom edge of whichever one
+         holds it. In the floating call window the bar is in a form of its own
+         with no budget to be pinned against. */
+      pinInput={!pipComposerSlot}
+      /* Codex's own queue, above the field that fills it (#1629). */
+      queuePanel={nativeQueueEnabled ? (
+        <NativeQueuePanel
+          view={nativeQueue.view}
+          loading={nativeQueue.loading}
+          error={nativeQueue.error}
+          thread={{
+            /* WHAT THE HOST IS OBSERVED RUNNING. The composer's own pending
+               request is a separate line below it. Native's queue carries no per-entry profile, so a queued
+               message runs on the thread's settings at dispatch — and the row's
+               separate "asked for" line only means anything while the two come
+               from different places. `sendRuntimeFrom` is the operator's pending
+               next-send selection, so using it for both collapsed the request
+               into the effective profile and the difference stopped being
+               visible. A thread the Viewer has observed nothing about says so. */
+            model: observedModelId(file),
+            effort: file.effort ?? null,
+          }}
+          /* Where a control press whose reply never arrived keeps its key, and
+             the binding it was admitted against — the same record, and the same
+             rule, as the hand-off below it. */
+          cardId={cardId}
+          binding={{
+            threadId: structuredSession?.session.sessionKey?.sessionId ?? null,
+            accountId: structuredSession?.session.accountId ?? null,
+          }}
+          /* Hand-offs with no answer yet, and the one control that settles
+             one. They are not queue rows and are not counted as such. */
+          unresolved={unresolvedAdmissions.map((entry) => ({
+            key: entry.key,
+            text: entry.mutation.text ?? "",
+            imageCount: entry.mutation.images?.length ?? 0,
+          }))}
+          onReplay={replayQueueAdmission}
+          mintKey={mintIdempotencyKey}
+          submit={nativeQueue.submit}
+          onRefresh={nativeQueue.refresh}
+          t={t}
+        />
+      ) : undefined}
+      /* Alt+Enter hands the draft to Codex instead of interrupting the turn.
+         Enter keeps its meaning; this is the second submission beside it. */
+      onAlternateSubmit={nativeQueueEnabled ? queueForCodex : undefined}
+      sendMenuActions={[
+        ...(nativeQueueEnabled
+          ? [{
+            id: "native-queue",
+            label: t("queue.queueMessage"),
+            description: t("queue.queueMessageHint"),
+            disabled: busy || voiceSending || sendBlocked,
+            onSelect: queueForCodex,
+          } as const]
+          : []),
+        ...(structuredSession?.session.capabilities?.steer
+          ? [{
+            id: "steer",
+            label: t("queue.steerMessage"),
+            description: t("queue.steerHint"),
+            /* Refused BEFORE anything is admitted: a steer with nothing running
+               is not a steer, and a durable operation that fails later reads to
+               the operator as a message lost rather than never accepted. */
+            disabled: busy || voiceSending || sendBlocked || structuredSession.session.turn !== "running",
+            onSelect: steerRunningTurn,
+          } as const]
+          : []),
+        ...(canQuickAck
+          ? [{
+            id: "quick-ack",
+            label: t("composer.quickAckLabel"),
+            description: t("composer.quickAck"),
+            disabled: quickAckDisabled,
+            tone: "ok" as const,
+            /* Queue-first like every other submission (finding 5): the ack
+               enqueues behind any active delivery, renders immediately, is
+               cancellable, joins history, and dispatches once — while the
+               operator's typed draft and staged tiles stay put. */
+            onSelect: () => queueSubmit(t("composer.quickAck"), { preserveDraft: true }),
+          }]
+          : []),
+      ]}
       showImage={!deadHostBlocksSend}
       /* A dead structured surface can still recover TEXT while its image
          pipeline waits for the host to recover (finding 4): the picker stays
@@ -3003,16 +3422,47 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
 
   const body = (
     <form
+      ref={composerBox.ref}
       onSubmit={handleSubmit}
       data-testid={isMobile ? "bounded-mobile-composer" : undefined}
-      /* Chat-first mobile budget (issue #419): the phone composer is a single
-         input row with its secondary controls folded, so it takes the tighter
-         vertical padding — every reclaimed row keeps the transcript above its
-         ≥60% viewport share. Desktop keeps the roomier py-2. */
-      className={`flex shrink-0 flex-col gap-1.5 border-t border-border bg-card px-2.5 ${
+      /* ONE BOX, ONE CONTRACT (#1629).
+
+         THE BOX. Both surfaces budget against the conversation they are in. On
+         the phone the conversation IS the viewport, so the share is written in
+         `dvh`. On the desktop the conversation is a card of whatever height the
+         board gave it — a child pane is 680 px against a 1080 px screen — and a
+         budget taken from the screen there left a 680 px conversation 44 px of
+         transcript. So the card's budget is a share of the CARD: at most 60% of
+         it, and never less than 15rem of it left for the transcript, whichever
+         binds first. `cardComposerBudget` is the same arithmetic for the
+         ceiling that has to know what is left inside it.
+
+         WHAT YIELDS INSIDE THE BOX, and in this order. The accessory region
+         above the input holds every surface that is not the input itself — the
+         docked call, the native queue, the sends awaiting an answer, the
+         receipts of the ones that failed — and it is the one thing here that
+         gives room back, as one scrollport with one budget. Before this there
+         were four bounds and no budget between them, so each repair fixed the
+         sibling it was about and left the next one to be squeezed to zero: a
+         queue that was a 2 px border, then a receipt list 0 px tall below the
+         pane's edge with every recovery control in it out of reach.
+
+         WHAT NEVER YIELDS: the input and the controls that send what is in it.
+         They are pinned to the bottom edge of this box, so a composition this
+         budget cannot fit is one the operator scrolls THIS box through — never
+         one that lays Send out past the pane and clips it away. That is why the
+         box scrolls its own content on both surfaces, and why the page it is on
+         does not have to.
+
+         AND THE DRAFT IS BOUNDED BY THE SAME BUDGET: the field's ceiling stops
+         short of the region's reserve (`accessoryReserve`), so what the
+         operator types can never be what removes a control they have to reach.
+         Where the box's own height is not definite the percentage cannot
+         resolve, and each surface's own ceiling is the bound, as before. */
+      className={`flex shrink-0 flex-col gap-1.5 border-t border-border bg-card px-2.5 overflow-x-clip overflow-y-auto overscroll-y-contain ${
         isMobile
-          ? "max-h-[min(38dvh,20rem)] overflow-x-clip overflow-y-auto overscroll-y-contain py-1.5"
-          : "py-2"
+          ? "max-h-[min(38dvh,20rem)] py-1.5"
+          : "max-h-[min(60%,calc(100%_-_15rem))] py-2"
       }`}
       aria-label={composerAriaLabel}
     >
@@ -3034,83 +3484,6 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
         <div role="status" aria-live="polite" className="flex items-center gap-1.5 rounded-control border border-warning/45 bg-warning-soft px-2 py-1 text-label font-semibold text-warning">
           <ArrowUpToLine className="h-3 w-3 shrink-0" aria-hidden />
           <span className="min-w-0 truncate">{t("migrate.heldSend")}</span>
-        </div>
-      ) : null}
-      {sent.length || echoedReceipts.length ? (
-        <div className="flex flex-col gap-0.5" aria-label={t("composer.queueAria")}>
-          {echoedReceipts.map((receipt) => (
-            <div key={receipt.operationId} data-delivery-echo className="flex items-center justify-end gap-1.5">
-              <Check className="h-3 w-3 shrink-0 text-success" aria-hidden />
-              <span className="sr-only">{t("composer.deliveredEcho")}</span>
-              <span
-                className="min-w-0 max-w-[85%] truncate text-label text-secondary"
-                title={receipt.text ?? undefined}
-              >
-                {receipt.text}
-              </span>
-              <span className="inline-flex shrink-0 items-center gap-0.5 text-caption tabular-nums text-muted">
-                {hhmm(Date.parse(receipt.at))}
-              </span>
-              <button
-                type="button"
-                aria-label={t("runtime.receipt.dismiss")}
-                className={`inline-flex shrink-0 items-center justify-center rounded text-muted hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
-                  isMobile ? "h-11 w-11" : "px-0.5"
-                }`}
-                onClick={() => dismissReceipts([receipt.operationId])}
-              >
-                <X className={isMobile ? "h-4 w-4" : "h-3 w-3"} aria-hidden />
-              </button>
-            </div>
-          ))}
-          {sent.map((entry) => {
-            const receipt = receiptMeta(t, entry.state);
-            return (
-            <div key={entry.id} className="flex items-center justify-end gap-1.5">
-              {receipt ? (
-                <Badge tone={receipt.tone} role="status" aria-live="polite">
-                  {receipt.label}
-                </Badge>
-              ) : null}
-              {entry.state === "failed" ? (
-                <button
-                  type="button"
-                  aria-label={t("composer.retrySend")}
-                  title={t("composer.retrySend")}
-                  disabled={busy || voiceSending}
-                  className={`inline-flex shrink-0 items-center justify-center rounded text-muted hover:text-accent disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
-                    isMobile ? "h-11 w-11" : "px-0.5"
-                  }`}
-                  onClick={() => {
-                    void send(entry.text, { receiptId: entry.id, clientMessageId: entry.clientMessageId });
-                  }}
-                >
-                  <RotateCcw className={isMobile ? "h-4 w-4" : "h-3 w-3"} aria-hidden />
-                </button>
-              ) : null}
-              <span
-                className="min-w-0 max-w-[85%] truncate text-label text-secondary"
-                title={entry.text}
-              >
-                {entry.text}
-              </span>
-              <span className="inline-flex shrink-0 items-center gap-0.5 text-caption tabular-nums text-muted">
-                {entry.via === "spawn" ? <Play className="h-2.5 w-2.5" aria-hidden /> : <ArrowRight className="h-2.5 w-2.5" aria-hidden />}
-                {hhmm(entry.at)}
-              </span>
-              <button
-                type="button"
-                aria-label={t("composer.removeFromQueue")}
-                className={`inline-flex shrink-0 items-center justify-center rounded text-muted hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
-                  isMobile ? "h-11 w-11" : "px-0.5"
-                }`}
-                onClick={() => persistSent(sent.filter((item) => item.id !== entry.id))}
-              >
-                <X className={isMobile ? "h-4 w-4" : "h-3 w-3"} aria-hidden />
-              </button>
-            </div>
-            );
-          })}
         </div>
       ) : null}
       {pipComposerSlot

@@ -10,6 +10,7 @@ export function createFakeDeliveryLedger(): FakeDeliveryLedger {
 }
 
 export class FakeEngineHost implements EngineHost {
+  readonly supportsSteer = true;
   constructor(
     readonly ledger: FakeDeliveryLedger = createFakeDeliveryLedger(),
     private readonly state: HostState = {
