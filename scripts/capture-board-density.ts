@@ -65,6 +65,11 @@ function reading() {
   }
   const chips = [...document.querySelectorAll("[data-edge-chip], [data-band-dependency], [data-pipeline-stage-label], [data-board-role] > div")].filter(visible);
   for (const chip of chips) for (const node of nodes) if (overlap(rect(chip), node.rect)) collisions.push(`${chip.getAttribute("data-edge-chip") ?? chip.getAttribute("data-band-dependency") ?? "role"}: covers ${node.key}`);
+  for (const label of document.querySelectorAll("[data-board-role] > div, [data-pipeline-stage-label]")) {
+    const node = label.closest("[data-scheme-node]");
+    if (!node || !visible(label)) continue;
+    for (const button of node.querySelectorAll("button")) if (visible(button) && overlap(rect(label), rect(button))) collisions.push("role badge overlaps card controls");
+  }
   const pathCollisions: string[] = [];
   for (const route of document.querySelectorAll<SVGPathElement>("[data-pipeline-edge] path:first-child")) {
     const matrix = route.getScreenCTM(); if (!matrix) continue;
@@ -210,6 +215,14 @@ try {
       runs.push({tag:`${width}-reader`,before,after,cameraBefore,cameraAfter,targetBox});
     } else must(false,`${width}: history navigation opens actual reader`);
     await page.screenshot({path:path.join(out,`${width}-history-target.png`)});
+    await panTo(page, '[data-scheme-band="task:task-0"]');
+    if (await click(page, '[data-scheme-summary="/fixture/worker-0.jsonl"]')) {
+      await page.waitForTimeout(1000);
+      const activeRead = await page.evaluate(reading);
+      must(activeRead.collisions.length === 0, `${width}: active reader role/control clearance: ${activeRead.collisions.join(", ")}`);
+      await page.screenshot({path:path.join(out,`${width}-active-reader.png`)});
+      runs.push({tag:`${width}-active-reader`,...activeRead});
+    } else must(false, `${width}: active work reader opens`);
     // Board wheel over a collapsed card and over a header button.
     await panTo(page,'[data-scheme-band="task:task-3"]');
     for(const selector of ['[data-scheme-summary="/fixture/worker-3.jsonl"]','[data-scheme-band="task:task-3"] [data-scheme-band-details]']) {

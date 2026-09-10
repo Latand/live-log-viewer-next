@@ -1171,7 +1171,7 @@ const NodeChrome = memo(function NodeChrome({
           conversation — children and flow-hosting roots included — sitting in
           the controls row when free, or above the flow/pipeline strip when one is up. */}
       {(canFlow || canPipeline) && !compact ? (
-        <div className={`absolute left-0 z-[4] flex items-center gap-1.5 ${!node.presentation && (flow || boardStrip) ? "-top-[92px]" : "-top-11"}`}>
+        <div className={`absolute left-0 z-[4] flex items-center gap-1.5 ${node.presentation ? "-top-16" : flow || boardStrip ? "-top-[92px]" : "-top-11"}`}>
           {canFlow ? (
             <button
               data-scheme-ui
