@@ -5,6 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import assert from "node:assert/strict";
 import { chromium } from "playwright-core";
+import { AgentRegistry } from "@/lib/agent/registry";
 import { childControlFixture } from "@/lib/runtime/childControl.fixture";
 import { projectStructuredFileLiveness } from "@/lib/runtime/livenessProjection";
 import { applyConversationAction } from "@/lib/conversation/actions";
@@ -47,16 +48,36 @@ const bundle = await build.outputs[0]!.text();
 
 const fixture = childControlFixture();
 const { registry, root: rootFile, child, stale, observed } = fixture;
+let activeRegistry = registry;
+let selectedChild = child;
+let activeObserved = observed;
+const advancedSnapshot = registry.snapshot();
+const advancedRoot = advancedSnapshot.conversations[rootFile.conversationId!]!;
+const previous = advancedRoot.generations.at(-1)!;
+const current = { ...previous, id: crypto.randomUUID(), path: path.join(path.dirname(rootFile.path), "current-root.jsonl") };
+advancedRoot.generations.push(current);
+const previousEntry = advancedSnapshot.entries[`claude:${previous.id}`]!;
+advancedSnapshot.entries[`claude:${current.id}`] = { ...previousEntry, key: { engine: "claude", sessionId: current.id }, artifactPath: current.path };
+previousEntry.host = null;
+previousEntry.status = "dead";
+advancedSnapshot.conversationAliases.conversation_child_alias = fixture.childConversation.id;
+advancedSnapshot.conversationAliases.conversation_root_alias = advancedRoot.id;
+advancedSnapshot.conversations[fixture.childConversation.id]!.generations.at(-1)!.launchProfile.parentConversationId = "conversation_root_alias";
+const advancedPath = path.join(path.dirname(rootFile.path), "advanced-registry.json");
+fs.writeFileSync(advancedPath, JSON.stringify(advancedSnapshot));
+const advancedRegistry = new AgentRegistry(advancedPath, undefined, undefined, { sqliteMode: "off" });
+const aliasChild = { ...child, conversationId: "conversation_child_alias" };
+const advancedObserved = { ...observed, claimedPaths: [child.path, current.path], primaryPath: child.path };
 const posts: Record<string, unknown>[] = [];
 const effects: string[] = [];
 const unexpected = async (): Promise<never> => { throw new Error("unexpected host operation"); };
 const dependencies = {
-  registry: () => registry,
+  registry: () => activeRegistry,
   structuredEnabled: () => true,
   dispatchStructuredControl: (request: Parameters<typeof dispatchStructuredControl>[0]) =>
-    dispatchStructuredControl(request, { registry, enabled: () => true, client: null }),
+    dispatchStructuredControl(request, { registry: activeRegistry, enabled: () => true, client: null }),
   interruptConversation: (pathname: string) => interruptConversation(pathname, {
-    registry, pathAllowed: () => true, livePaneHost: async () => observed,
+    registry: activeRegistry, pathAllowed: () => true, livePaneHost: async () => activeObserved,
     interruptHost: async (host) => { assert.equal(host.agent.pid, observed.agentPid); effects.push(host.paneId); return true; },
   }),
   killConversation: unexpected, resumeConversation: unexpected,
@@ -68,8 +89,8 @@ const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: async (request
   if (url.pathname === "/api/conversation-host") {
     const body = await request.json() as Record<string, unknown>;
     posts.push(body);
-    assert.equal(body.path, child.path);
-    assert.equal(body.conversationId, child.conversationId);
+    assert.equal(body.path, selectedChild.path);
+    assert.equal(body.conversationId, selectedChild.conversationId);
     const result = await applyConversationAction({
       action: String(body.action), conversationId: String(body.conversationId),
       transcriptPath: String(body.path), operationId: String(body.operationId),
@@ -113,6 +134,18 @@ try {
       assert.equal(posts.at(-1)!.action, "interrupt");
       results.push(`${surface}/root-selected-${includeRoot}: pointer interrupt reaches unique owner once`);
     }
+    activeRegistry = advancedRegistry;
+    activeObserved = advancedObserved;
+    selectedChild = aliasChild;
+    await projectStructuredFileLiveness([aliasChild], advancedRegistry);
+    assert.equal(aliasChild.rootControlHost?.conversationId, advancedRoot.id);
+    await render(aliasChild, surface);
+    const beforeAdvanced = effects.length;
+    const [advancedResponse] = await Promise.all([page.waitForResponse(r => r.url().endsWith("/api/conversation-host")), interrupt.click()]);
+    assert.equal(advancedResponse.status(), 200, JSON.stringify(await advancedResponse.json()));
+    assert.equal(effects.length, beforeAdvanced + 1);
+    assert.equal(posts.at(-1)!.conversationId, "conversation_child_alias");
+    results.push(`${surface}/alias-current-generation: pointer interrupt preserves selected alias and resolves current owner`);
     const beforeStop = effects.length;
     const kill = surface === "mobile" ? page.locator('[data-mobile2-menu-row="kill"]') : page.getByRole("button", {name: "Stop host", exact: true});
     await kill.click();
@@ -121,6 +154,9 @@ try {
     assert.equal(posts.at(-1)!.action, "kill");
     assert.equal(effects.length, beforeStop);
     results.push(`${surface}: selected child stop visibly refused without host effects`);
+    activeRegistry = registry;
+    activeObserved = observed;
+    selectedChild = child;
     for (const negative of ["missing", "dead", "ambiguous", "identity", "superseded"]) {
       const snapshot = registry.snapshot();
       const parent = snapshot.conversations[rootFile.conversationId!]!;
