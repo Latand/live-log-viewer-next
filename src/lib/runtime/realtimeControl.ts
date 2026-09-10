@@ -67,15 +67,6 @@ function byteLength(value: string): number {
   return new TextEncoder().encode(value).byteLength;
 }
 
-/**
- * The utterance a publication speaks for (#1629).
- *
- * Named by the browser, because the browser is the peer that sees the operator's
- * transcript go final — the operator's audio never passes through this server.
- * A malformed identity is dropped rather than refused: the reference is still
- * the bound view's and still admissible, and the ordering rules fall back to the
- * reference's own revision.
- */
 /** At least one canonical id, each bounded; a report naming nothing is refused. */
 function voiceHandoffIdentity(value: unknown): VoiceHandoffIdentity | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -92,6 +83,16 @@ function voiceHandoffIdentity(value: unknown): VoiceHandoffIdentity | null {
   return handoff.handoffId || handoff.itemId || handoff.userBidiTurnId ? handoff : null;
 }
 
+/**
+ * The utterance a publication speaks for (#1629).
+ *
+ * Named by the browser, because the browser is the peer that sees the operator's
+ * transcript go final — the operator's audio never passes through this server.
+ * A malformed identity is dropped rather than refused where a reference is being
+ * published: the reference is still the bound view's and still admissible, and
+ * the ordering rules fall back to its own revision. A handoff report has nothing
+ * left once it is dropped, so that path refuses instead.
+ */
 function voiceUtteranceIdentity(value: unknown): VoiceUtteranceIdentity | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const body = value as Record<string, unknown>;
