@@ -2,6 +2,8 @@ import { conversationIdentity } from "@/lib/accounts/identity";
 import type { Flow } from "@/lib/flows/types";
 import type { Pipeline } from "@/lib/pipelines/types";
 import { taskShowsOnBoard } from "@/lib/tasks/boardVisibility";
+import { COLLAPSED_DECK_CHIP_H, deckDisclosureTerminal } from "@/components/flows/reviewDeckDisclosure";
+import { FLOW_HUB } from "@/components/flows/flowHubGeometry";
 import type { BoardTask, TaskStatus } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
 
@@ -11,7 +13,7 @@ import { cleanTitle } from "@/components/utils";
 
 import { hueFromId } from "./agentLinks";
 import type { SchemeEdge, SchemeGroup, SchemeLayout, SchemeNode, SchemeRect } from "./layout";
-import { routeTaskEdge } from "./taskGeometry";
+import { routeTaskEdge, sampleRoute } from "./taskGeometry";
 
 /**
  * Task-centered board (#1586): every admitted conversation belongs to exactly
@@ -430,8 +432,12 @@ export function applyBandOrder(ranked: readonly TaskBand[], frozen: readonly str
 /* Geometry                                                                   */
 /* ------------------------------------------------------------------------- */
 
-/** CSS-pixel constants of the band chrome; the layout divides by zoom so every
-    one of them is constant on screen at any scale. */
+/** Board-pixel constants of the band chrome. World geometry is stable: a band
+    member is one rectangle in board pixels and the camera's own `scale(zoom)`
+    is what grows or shrinks it on screen, so a card, the frame that holds it
+    and the connectors between them scale together (#1641). Zoom still chooses
+    the presentation — chip, summary or the native reader — via `bandModeFor`;
+    nothing here is divided by it. */
 export const BAND = {
   containerW: 280,
   containerH: 44,
@@ -456,6 +462,10 @@ export const BAND = {
   mirrorH: 72,
   mirrorChipW: 220,
   minOverviewH: 72,
+  /* Board height a review-round deck occupies as its collapsed verdict chip —
+     the height RoundDeck paints the chip at — so a band holding one hugs the
+     chip instead of the full expanded deck box. */
+  collapsedDeckH: COLLAPSED_DECK_CHIP_H,
   /* A band is only as wide as it needs to be (#1590 follow-up). Below this it
      is unreadable — the header alone carries a title, a status pill, counts and
      two controls — and above it nothing is gained by growing further, so a band
@@ -484,8 +494,6 @@ export interface BandScene {
   /** `task::<id>` → header rect, so focus/glide on a task lands on its band. */
   taskRects: Map<string, SchemeRect>;
   mirrorRects: Map<string, SchemeRect>;
-  /** World units per CSS pixel (1 / zoom). */
-  scale: number;
   /** Band id per placed key, for same-band edge filtering and hit tests. */
   bandOf: Map<string, string>;
   /** Cross-band recorded relations, per attached member/mirror. */
@@ -493,7 +501,6 @@ export interface BandScene {
 }
 
 export interface BandLayoutOptions {
-  zoom: number;
   mode: BandMode;
   viewportWidth: number;
   /** Conversation whose reader is native in near mode. */
@@ -503,6 +510,12 @@ export interface BandLayoutOptions {
       band shows the reference tile instead. Ignored unless the band holds a
       mirror of the node. */
   hostOverrides?: ReadonlyMap<string, string>;
+  /** Deck keys the operator is seeing collapsed to their verdict chip — the
+      actual disclosure state (localStorage override + lifecycle default). A
+      collapsed deck reserves the chip height so its band hugs; a manually
+      expanded settled deck reserves its full footprint. Absent it, the
+      lifecycle default decides. */
+  collapsedDecks?: ReadonlySet<string>;
 }
 
 /** A recorded relation whose other endpoint lives in another band: shown as a
@@ -523,9 +536,9 @@ function union(rects: readonly SchemeRect[]): SchemeRect {
 /** Directed ports between two placed rects: side ports on the same row, top/
     bottom ports across rows; the port height stays near the header so a tall
     reader's arrow leaves where its title is. */
-export function bandEdgePorts(a: SchemeRect, b: SchemeRect, scale: number): { x1: number; y1: number; x2: number; y2: number } {
+export function bandEdgePorts(a: SchemeRect, b: SchemeRect): { x1: number; y1: number; x2: number; y2: number } {
   const sameRow = a.y < b.y + b.h && b.y < a.y + a.h;
-  const portY = (rect: SchemeRect) => rect.y + Math.min(rect.h / 2, 40 * scale);
+  const portY = (rect: SchemeRect) => rect.y + Math.min(rect.h / 2, 40);
   if (sameRow) {
     return a.x + a.w <= b.x
       ? { x1: a.x + a.w, y1: portY(a), x2: b.x, y2: portY(b) }
@@ -536,13 +549,6 @@ export function bandEdgePorts(a: SchemeRect, b: SchemeRect, scale: number): { x1
     : { x1: a.x + a.w / 2, y1: a.y, x2: b.x + b.w / 2, y2: b.y + b.h };
 }
 
-/**
- * Stack the ordered bands top to bottom at full available width and wrap their
- * members into rows. Node footprints are screen-constant per mode (chip /
- * summary / native reader); slots, decks, drafts and stacks keep their base
- * footprint. The returned layout carries every placed surface at its final
- * rectangle, so cards, halos, hit targets and edge endpoints agree.
- */
 /** Swap a conversation's surface into the band the operator opened it in: the
     override band's mirror becomes the member and the canonical band keeps a
     mirror, so the reader owner is one and the counts do not change. */
@@ -566,22 +572,52 @@ export function applyHostOverrides(bands: readonly TaskBand[], overrides: Readon
   return next;
 }
 
+/** Where the ⟳ hub of a review loop sits: ON the routed connector, as close
+    to its middle as a hub-sized box can be without covering a card that is
+    not one of the loop's two endpoints. The connector already threads between
+    the band's other cards; the hub is wider than a stroke, so it walks along
+    the path from the middle outward until its box is clear. */
+export function hubOnRoute(route: string, others: readonly SchemeRect[]): { x: number; y: number } {
+  const points = sampleRoute(route);
+  const mid = Math.floor(points.length / 2);
+  const clear = (point: { x: number; y: number }) => !others.some((rect) =>
+    point.x + FLOW_HUB.w / 2 > rect.x && point.x - FLOW_HUB.w / 2 < rect.x + rect.w
+    && point.y + FLOW_HUB.h / 2 > rect.y && point.y - FLOW_HUB.h / 2 < rect.y + rect.h);
+  for (let step = 0; step < points.length; step += 1) {
+    for (const index of [mid + step, mid - step]) {
+      const point = points[index];
+      if (point && clear(point)) return point;
+    }
+  }
+  return points[mid] ?? { x: 0, y: 0 };
+}
+
+/**
+ * Stack the ordered bands top to bottom and wrap their members into rows, in
+ * board pixels the camera scales as one. Node footprints follow the mode
+ * (chip / summary / native reader); slots, decks, drafts and stacks keep their
+ * base footprint, a collapsed deck its chip. The returned layout carries every
+ * placed surface at its final rectangle, so cards, halos, hit targets, edge
+ * endpoints and the review hub agree. The zoom is deliberately not an input:
+ * the board once divided every size by it so the camera's multiply cancelled
+ * out and cards stayed screen-constant, which is why cards did not change size
+ * when the operator zoomed and why every zoom frame forced a relayout (#1641).
+ */
 export function layoutTaskBands(base: SchemeLayout, orderedBands: readonly TaskBand[], options: BandLayoutOptions): BandScene {
   const { mode, viewportWidth, reader } = options;
   const bands = applyHostOverrides(orderedBands, options.hostOverrides);
-  const s = 1 / Math.max(0.07, options.zoom);
-  const gutter = (viewportWidth < 1024 ? BAND.gutterNarrow : BAND.gutter) * s;
+  const gutter = viewportWidth < 1024 ? BAND.gutterNarrow : BAND.gutter;
   /* The widest a band may become. Content decides the rest. */
-  const maxBandW = Math.max(BAND.nativeMinW * s, viewportWidth * s - gutter * 2);
-  const pad = BAND.pad * s;
-  const itemGap = (mode === "overview" ? BAND.chipGap : BAND.tileGap) * s;
-  const rowGap = (mode === "overview" ? BAND.chipGap : BAND.rowGap) * s;
-  const headerH = BAND.header * s;
+  const maxBandW = Math.max(BAND.nativeMinW, viewportWidth - gutter * 2);
+  const pad = BAND.pad;
+  const itemGap = mode === "overview" ? BAND.chipGap : BAND.tileGap;
+  const rowGap = mode === "overview" ? BAND.chipGap : BAND.rowGap;
+  const headerH = BAND.header;
   /* Members are measured against the widest a band could be, then the band is
      narrowed to the row they actually occupied — measuring against a width that
      the band has not been given yet would wrap a row that fits. */
   const maxInnerW = maxBandW - pad * 2;
-  const minBandW = Math.min(maxBandW, BAND.minBandW * s);
+  const minBandW = Math.min(maxBandW, BAND.minBandW);
   const innerX0 = gutter + pad;
   const innerRight = gutter + maxBandW - pad;
 
@@ -606,6 +642,16 @@ export function layoutTaskBands(base: SchemeLayout, orderedBands: readonly TaskB
     const fit = w > maxInnerW ? maxInnerW / w : 1;
     return { w: w * fit, h: h * fit, fit };
   };
+  /* A review-round deck that renders as its one-line verdict chip must reserve
+     the chip's height, not the full deck box it would need expanded, or a
+     collapsed review loop leaves a task frame almost entirely empty. Which decks
+     are collapsed is the operator's actual disclosure state (the localStorage
+     override plus the lifecycle default), passed in by SchemeBoard so a manual
+     expand of a settled deck re-opens its full footprint; absent it (SSR, a
+     pure test) the lifecycle default stands in. */
+  const collapsedDecks = options.collapsedDecks
+    ?? new Set(base.decks.filter((deck) => deckDisclosureTerminal(deck.flow)).map((deck) => deck.key));
+  const deckKeyOfFlow = new Map(base.decks.map((deck) => [deck.flow.id, deck.key] as const));
   let cursorY = gutter;
   for (const band of bands) {
     const items: { key: string; w: number; h: number; fit?: number; kind: "member" | "mirror" | "container" | "add"; node?: SchemeNode }[] = [];
@@ -616,10 +662,10 @@ export function layoutTaskBands(base: SchemeLayout, orderedBands: readonly TaskB
            up: clicking a tile opens it in place, siblings stay tiles. */
         const presentation = mode === "overview" ? "chip" : member.key === reader ? "native" : "summary";
         const natural = fitted(
-          (presentation === "chip" ? BAND.chipW : presentation === "native" ? Math.max(BAND.nativeMinW, Math.min(BAND.nativeW, maxInnerW / s)) : BAND.summaryW) * s,
-          (presentation === "chip" ? BAND.chipH : presentation === "native" ? BAND.nativeH : BAND.summaryH) * s,
+          presentation === "chip" ? BAND.chipW : presentation === "native" ? Math.max(BAND.nativeMinW, Math.min(BAND.nativeW, maxInnerW)) : BAND.summaryW,
+          presentation === "chip" ? BAND.chipH : presentation === "native" ? BAND.nativeH : BAND.summaryH,
         );
-        items.push({ key: member.key, w: natural.w, h: natural.h, kind: "member", node: { ...node, presentation, readerScale: s * natural.fit, w: natural.w, h: natural.h } });
+        items.push({ key: member.key, w: natural.w, h: natural.h, kind: "member", node: { ...node, presentation, readerScale: natural.fit, w: natural.w, h: natural.h } });
         continue;
       }
       /* Decks, stacks and planned slots are thumbnails at overview scale:
@@ -627,11 +673,12 @@ export function layoutTaskBands(base: SchemeLayout, orderedBands: readonly TaskB
       if (mode === "overview" && member.kind !== "draft") continue;
       const rect = baseRect.get(member.key);
       if (!rect) continue;
-      const natural = fitted(rect.w, rect.h);
+      const shellH = member.kind === "deck" && collapsedDecks.has(member.key) ? BAND.collapsedDeckH : rect.h;
+      const natural = fitted(rect.w, shellH);
       items.push({ key: member.key, w: natural.w, h: natural.h, fit: natural.fit, kind: "member" });
     }
     for (const mirror of band.mirrors) {
-      const natural = fitted((mode === "overview" ? BAND.mirrorChipW : BAND.mirrorW) * s, (mode === "overview" ? BAND.chipH : BAND.mirrorH) * s);
+      const natural = fitted(mode === "overview" ? BAND.mirrorChipW : BAND.mirrorW, mode === "overview" ? BAND.chipH : BAND.mirrorH);
       items.push({ key: mirror.key, w: natural.w, h: natural.h, kind: "mirror" });
     }
     /* A hosted pipeline/flow with none of its surfaces placed in this mode
@@ -641,9 +688,9 @@ export function layoutTaskBands(base: SchemeLayout, orderedBands: readonly TaskB
     for (const groupKey of band.groups) {
       const group = base.groups.find((entry) => entry.key === groupKey);
       if (!group || group.members.some((key) => placedKeys.has(key) || mirrored.has(key))) continue;
-      items.push({ key: groupKey, w: (mode === "overview" ? BAND.chipW : BAND.containerW) * s, h: (mode === "overview" ? BAND.chipH : BAND.containerH) * s, kind: "container" });
+      items.push({ key: groupKey, w: mode === "overview" ? BAND.chipW : BAND.containerW, h: mode === "overview" ? BAND.chipH : BAND.containerH, kind: "container" });
     }
-    items.push({ key: `add::${band.id}`, w: BAND.addW * s, h: (mode === "overview" ? BAND.chipH : BAND.addH) * s, kind: "add" });
+    items.push({ key: `add::${band.id}`, w: BAND.addW, h: mode === "overview" ? BAND.chipH : BAND.addH, kind: "add" });
 
     let x = innerX0;
     let y = cursorY + headerH + pad;
@@ -652,7 +699,7 @@ export function layoutTaskBands(base: SchemeLayout, orderedBands: readonly TaskB
     /* Rightmost inked edge across every row, so the band can be trimmed to the
        content it actually holds instead of to the width it was measured in. */
     let contentRight = innerX0;
-    let addAgent: SchemeRect = { x, y, w: BAND.addW * s, h: BAND.addH * s };
+    let addAgent: SchemeRect = { x, y, w: BAND.addW, h: BAND.addH };
     for (const item of items) {
       if (x + item.w > innerRight + 0.001 && x > innerX0) {
         x = innerX0;
@@ -677,7 +724,7 @@ export function layoutTaskBands(base: SchemeLayout, orderedBands: readonly TaskB
       rowH = Math.max(rowH, item.h);
     }
     let bandH = headerH + pad + (y - (cursorY + headerH + pad)) + rowH + pad;
-    if (mode === "overview") bandH = Math.max(bandH, BAND.minOverviewH * s);
+    if (mode === "overview") bandH = Math.max(bandH, BAND.minOverviewH);
     /* The band ends where its content ends. The floor keeps the header
        readable — title, status, counts, Details and «+ Agent» all live on one
        screen-constant row — and the ceiling is the width it was measured in, so
@@ -687,7 +734,7 @@ export function layoutTaskBands(base: SchemeLayout, orderedBands: readonly TaskB
     const header = { x: gutter, y: cursorY, w: bandW, h: headerH };
     if (band.task) taskRects.set(`task::${band.task.id}`, header);
     placedBands.push({ ...band, geometry: { rect, header, addAgent, rows } });
-    cursorY += bandH + BAND.gap * s;
+    cursorY += bandH + BAND.gap;
   }
 
   const byPath = new Map<string, SchemeRect>(placed);
@@ -728,7 +775,7 @@ export function layoutTaskBands(base: SchemeLayout, orderedBands: readonly TaskB
       for (const rep of representations.get(edge.to) ?? []) continue_(rep, { key: edge.from, bandId: bandOf.get(edge.from)!, direction: "from" });
       return [];
     }
-    const ports = bandEdgePorts(from, to, s);
+    const ports = bandEdgePorts(from, to);
     const route = routeTaskEdge(ports, rectsIn(bandOf.get(edge.from)!, [edge.from, edge.to]));
     return [{ ...edge, ...ports, route: route.d, routeCrosses: route.crosses }];
   });
@@ -759,8 +806,8 @@ export function layoutTaskBands(base: SchemeLayout, orderedBands: readonly TaskB
       return slot ? [{ ...group, members: [], ...slot }] : [];
     }
     const envelope = union(local.map((key) => placed.get(key)!));
-    const padX = 12 * s;
-    const heading = 30 * s;
+    const padX = 12;
+    const heading = 30;
     return [{ ...group, members: local, x: envelope.x - padX, y: envelope.y - heading, w: envelope.w + padX * 2, h: envelope.h + heading + padX }];
   });
   const layout: SchemeLayout = {
@@ -770,19 +817,33 @@ export function layoutTaskBands(base: SchemeLayout, orderedBands: readonly TaskB
     groups,
     byPath,
     links: base.links.filter((link) => placed.has(link.from) && placed.has(link.to)),
+    /* The review cycle is drawn between the implementer card and the reviewer
+       deck AS THEY ARE PLACED — same-row side ports, or top/bottom ports when
+       the deck wrapped to a later row — and routed around the other cards in
+       the band, exactly like the lineage edges above. Carrying the routed path
+       and both endpoints lets LoopsLayer draw the connector to the real cards
+       instead of the fixed-offset arcs it used for a 780px side-by-side pair,
+       which on a wrapped band stranded a squiggle in the empty space. */
     loops: base.loops.flatMap((loop) => {
-      const impl = placed.get(loop.flow.implementerPath);
-      const deck = base.decks.find((entry) => entry.flow.id === loop.flow.id);
-      const target = deck ? placed.get(deck.key) : undefined;
-      return impl && target ? [{ ...loop, x1: impl.x + impl.w, x2: target.x, y: impl.y }] : [];
+      const implKey = loop.flow.implementerPath;
+      const deckKey = deckKeyOfFlow.get(loop.flow.id);
+      const impl = placed.get(implKey);
+      const deckRect = deckKey ? placed.get(deckKey) : undefined;
+      if (!impl || !deckRect || !deckKey) return [];
+      const bandId = bandOf.get(implKey);
+      if (!bandId || bandId !== bandOf.get(deckKey)) return [];
+      const ports = bandEdgePorts(impl, deckRect);
+      const others = rectsIn(bandId, [implKey, deckKey]);
+      const route = routeTaskEdge(ports, others);
+      return [{ ...loop, x1: ports.x1, y1: ports.y1, x2: ports.x2, y2: ports.y2, route: route.d, hub: hubOnRoute(route.d, others) }];
     }),
     stacks: base.stacks.flatMap((rect) => (placed.has(rect.key) ? [{ ...rect, ...placed.get(rect.key)! }] : [])),
     decks: base.decks.flatMap((rect) => (placed.has(rect.key) ? [{ ...rect, ...placed.get(rect.key)! }] : [])),
     drafts: base.drafts.flatMap((rect) => (placed.has(rect.key) ? [{ ...rect, ...placed.get(rect.key)! }] : [])),
     slots: base.slots.flatMap((rect) => (placed.has(rect.key) ? [{ ...rect, ...placed.get(rect.key)! }] : [])),
     regionTasks: [],
-    width: viewportWidth * s,
+    width: viewportWidth,
     height: cursorY + gutter,
   };
-  return { layout, bands: placedBands, shown, mode, taskRects, mirrorRects, scale: s, bandOf, continuations: [...continuationByKey.values()] };
+  return { layout, bands: placedBands, shown, mode, taskRects, mirrorRects, bandOf, continuations: [...continuationByKey.values()] };
 }

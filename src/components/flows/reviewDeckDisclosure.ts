@@ -79,3 +79,8 @@ export function deckCollapsed(override: DeckDisclosureOverride | null, marker: s
   if (override && (override.at === null || override.at === marker)) return override.v === "collapsed";
   return terminal;
 }
+
+/** Height of the collapsed verdict chip, in board pixels. RoundDeck renders
+    the chip at exactly this height and the band layout reserves exactly this
+    much for a collapsed deck, so the two cannot drift apart (#1641). */
+export const COLLAPSED_DECK_CHIP_H = 48;

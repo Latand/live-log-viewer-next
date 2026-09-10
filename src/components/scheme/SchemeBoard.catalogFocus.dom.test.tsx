@@ -295,9 +295,16 @@ test("a catalog open that mounts the board with its request standing brings the 
      on screen is its content and not a tile of it. */
   expect(placed!.presentation).toBe("native");
   /* And it is genuinely deep in the stack — a fixture that stopped placing it
-     far down would pass this test without asking the question. */
+     far down would pass this test without asking the question. The depth is
+     measured against the viewport's own height, in the board pixels the world
+     uses now (it once counter-scaled every coordinate by the zoom, #1641, and
+     a bare pixel constant written in that unit rotted with it): at the zooms
+     the board frames a reader, a head more than a whole viewport down the
+     stack cannot share a screen with the top of it, so the open has to move
+     the camera. A target in the first band sits a few dozen pixels down. */
   const shell = host.querySelector(`[data-scheme-node="${TARGET}"]`) as HTMLElement;
-  expect(parseFloat(/translate\((?:-?[\d.e+-]+)px, (-?[\d.e+-]+)px\)/.exec(shell.style.transform)![1]!)).toBeGreaterThan(2500);
+  const depth = parseFloat(/translate\((?:-?[\d.e+-]+)px, (-?[\d.e+-]+)px\)/.exec(shell.style.transform)![1]!);
+  expect(depth).toBeGreaterThan(VIEWPORT.height);
 });
 
 test("a repeated catalog open of the same conversation brings it back after the operator has panned away", async () => {

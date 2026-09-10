@@ -20,13 +20,13 @@ import { BAND, bandHoldsMembers, type BandContinuation, type BandMirror, type Ba
  * slots, decks and drafts inside the band are drawn by the existing layers at
  * the rectangles the band layout assigned them.
  *
- * Everything the operator reads is sized in CSS pixels and counter-scaled by
- * `scale` (1 / zoom), so zoom changes density, never legibility.
+ * Everything here is drawn in board pixels at the rectangles the band layout
+ * assigned, and the camera's own scale is what grows or shrinks it on screen —
+ * the same law as the cards, frames and connectors it sits among (#1641).
  */
 export const TaskBandsLayer = memo(function TaskBandsLayer({
   bands,
   mode,
-  scale,
   interactive,
   selectedKey,
   mirrorRects,
@@ -41,7 +41,6 @@ export const TaskBandsLayer = memo(function TaskBandsLayer({
 }: {
   bands: PlacedBand[];
   mode: BandMode;
-  scale: number;
   /** Passive on the map and during a selection session. The hand tool keeps
       these controls live: only they take pointer events, so the rest of the
       band still pans. */
@@ -63,7 +62,7 @@ export const TaskBandsLayer = memo(function TaskBandsLayer({
 }) {
   const { t } = useLocale();
   if (!bands.length) return null;
-  const screen = (rect: SchemeRect) => ({ width: rect.w / scale, height: rect.h / scale, transform: `scale(${scale})`, transformOrigin: "top left" as const });
+  const screen = (rect: SchemeRect) => ({ width: rect.w, height: rect.h });
   return (
     <div aria-hidden={false} data-scheme-bands={mode}>
       {bands.map((band) => {
@@ -102,13 +101,13 @@ export const TaskBandsLayer = memo(function TaskBandsLayer({
               style={{
                 borderColor: `color-mix(in srgb, ${color} ${selectedInside ? 55 : 26}%, var(--border-default))`,
                 backgroundColor: `color-mix(in srgb, ${color} 3.5%, var(--surface-well))`,
-                borderWidth: Math.max(1, scale),
+                borderWidth: 1,
               }}
             />
             <div
               aria-hidden
               className="absolute left-0 top-0 rounded-l-[6px]"
-              style={{ width: Math.max(3 * scale, 1), height: rect.h, backgroundColor: color, opacity: band.working ? 0.9 : 0.35 }}
+              style={{ width: 3, height: rect.h, backgroundColor: color, opacity: band.working ? 0.9 : 0.35 }}
             />
             {/* Header, screen-constant. */}
             <div
@@ -235,9 +234,9 @@ export const TaskBandsLayer = memo(function TaskBandsLayer({
                   data-scheme-ui
                   data-scheme-continuation={entry.key}
                   className="absolute flex items-start gap-1"
-                  style={{ left: at.x - rect.x, top: at.y + at.h - rect.y + 4 * scale, width: at.w, height: 22 * scale }}
+                  style={{ left: at.x - rect.x, top: at.y + at.h - rect.y + 4, width: at.w, height: 22 }}
                 >
-                  <div className="absolute left-0 top-0 flex flex-nowrap items-center gap-1 overflow-hidden" style={{ width: at.w / scale, height: 22, transform: `scale(${scale})`, transformOrigin: "top left" }}>
+                  <div className="absolute left-0 top-0 flex flex-nowrap items-center gap-1 overflow-hidden" style={{ width: at.w, height: 22 }}>
                     {entry.targets.map((target) => (
                       <button
                         key={`${target.direction}:${target.key}`}
@@ -268,7 +267,7 @@ export const TaskBandsLayer = memo(function TaskBandsLayer({
                 style={{ left: addAgent.x - rect.x, top: addAgent.y - rect.y, width: addAgent.w, height: addAgent.h }}
                 onClick={() => onAddAgent(band)}
               >
-                <div className="absolute left-0 top-0 flex items-center justify-center gap-1 text-[11.5px] font-bold text-primary" style={{ width: BAND.addW, height: BAND.addH, transform: `scale(${scale})`, transformOrigin: "top left" }}>
+                <div className="absolute left-0 top-0 flex items-center justify-center gap-1 text-[11.5px] font-bold text-primary" style={{ width: BAND.addW, height: BAND.addH }}>
                   <span className="text-[14px] leading-none text-accent">+</span> {t("dash.agent")}
                 </div>
               </button>

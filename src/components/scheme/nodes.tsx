@@ -269,6 +269,35 @@ export const LoopsLayer = memo(function LoopsLayer({ loops, width, height }: { l
     <svg width={width} height={height} className="pointer-events-none absolute left-0 top-0" aria-hidden>
       {loops.map((loop) => {
         const leg = activeLoopLeg(loop.flow);
+        /* Task-band review connector (#1641): one routed path between the
+           implementer card and the reviewer deck as they were placed — around
+           the other cards, across wrapped rows — capped with an arrowhead at
+           each end to read as the review cycle. The active leg tints accent. */
+        if (loop.route && loop.y1 !== undefined && loop.y2 !== undefined) {
+          const live = leg !== null;
+          const color = live ? "var(--color-accent)" : "var(--color-strong)";
+          const toDeck = Math.atan2(loop.y2 - loop.y1, loop.x2 - loop.x1);
+          const toImpl = Math.atan2(loop.y1 - loop.y2, loop.x1 - loop.x2);
+          const headStyle = (d: string) => ({ d: `path("${d}")`, transition: `d ${MOVE_MS}ms ${MOVE_EASE}` }) as React.CSSProperties;
+          const deckHead = loopArrowHead(loop.x2, loop.y2, toDeck);
+          const implHead = loopArrowHead(loop.x1, loop.y1, toImpl);
+          return (
+            <g key={loop.key}>
+              <path
+                d={loop.route}
+                style={{ d: `path("${loop.route}")`, transition: `d ${MOVE_MS}ms ${MOVE_EASE}` } as React.CSSProperties}
+                fill="none"
+                stroke={color}
+                strokeWidth={live ? 3 : 2.5}
+                strokeLinecap="round"
+                strokeDasharray="5 7"
+                className={live ? "loop-arc-live" : undefined}
+              />
+              <path d={deckHead} style={headStyle(deckHead)} fill={color} />
+              <path d={implHead} style={headStyle(implHead)} fill={color} />
+            </g>
+          );
+        }
         const yTop = loop.y + LOOP_ARC_TOP;
         const yBot = loop.y + LOOP_ARC_BOT;
         const forward = `M ${loop.x1} ${yTop} C ${loop.x1 + LOOP_REACH} ${yTop - LOOP_BULGE}, ${loop.x2 - LOOP_REACH} ${
@@ -317,6 +346,7 @@ const RAIL_CLEARANCE = 10;
 export const AgentLinksLayer = memo(function AgentLinksLayer({
   links,
   byPath,
+  loops = [],
   obstacles = [],
   interactive,
   hubInteractive = interactive,
@@ -326,6 +356,11 @@ export const AgentLinksLayer = memo(function AgentLinksLayer({
 }: {
   links: AgentLink[];
   byPath: Map<string, SchemeRect>;
+  /** The review loops as the layout drew them. On the band board a loop
+      carries the point on its routed connector where the ⟳ hub belongs
+      (#1641); a loop without one (the free board) places the hub at the
+      corridor midpoint between its two cards. */
+  loops?: readonly FlowLoop[];
   /** Card rects the pipeline rails must not cross — nodes, decks, stacks, drafts
       (issue #136). A rail excludes its own two endpoints and routes around the
       rest, reusing the task-edge obstacle router (PR #130). */
@@ -363,6 +398,7 @@ export const AgentLinksLayer = memo(function AgentLinksLayer({
     return { d: route.d, mid: route.mid, chevrons: [] };
   };
   const railByKey = new Map(pipelineLinks.map((link) => [link.key, railGeom(link)] as const));
+  const hubByFlow = new Map(loops.flatMap((loop) => (loop.hub ? [[loop.flow.id, loop.hub] as const] : [])));
 
   return (
     <>
@@ -415,9 +451,11 @@ export const AgentLinksLayer = memo(function AgentLinksLayer({
           return <PipelineEdgeBadge key={link.key} index={link.pipeline.index} total={link.pipeline.total} color={PIPELINE_RAIL_COLOR[link.pipeline.tone]} x={x} y={y} moveTransition={MOVE_TRANSITION} semanticZoom={semanticZoom} />;
         }
         if (!link.flow) return null;
-        /* Corridor midpoint of the pair, level with the cycle arcs' center. */
-        const x = (from.x + from.w + to.x) / 2;
-        const y = Math.min(from.y, to.y) + (LOOP_ARC_TOP + LOOP_ARC_BOT) / 2;
+        /* On the routed connector where the layout put it; otherwise the
+           corridor midpoint of the pair, level with the cycle arcs' center. */
+        const routed = hubByFlow.get(link.flow.flow.id);
+        const x = routed ? routed.x : (from.x + from.w + to.x) / 2;
+        const y = routed ? routed.y : Math.min(from.y, to.y) + (LOOP_ARC_TOP + LOOP_ARC_BOT) / 2;
         return (
           <FlowHub key={link.key} flow={link.flow.flow} x={x} y={y} interactive={interactive} moveTransition={MOVE_TRANSITION} />
         );
