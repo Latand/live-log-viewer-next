@@ -52,6 +52,11 @@ export function SubagentBadges({ conversationId, entries, cardRect, onNavigate, 
   const at = now ?? clock;
   const children = useMemo(() => subagentsOf(conversationId, entries, exclude, at), [conversationId, entries, exclude, at]);
   const positions = useMemo(() => layoutBadges(children, cardRect), [children, cardRect]);
+  // Parent renders can recreate entries and rectangles without moving a badge.
+  // Publish by geometry so the registry's notification does not re-arm this effect.
+  const anchorGeometry = JSON.stringify(positions.flatMap(position => position.kind === "badge"
+    ? [[position.child.id, position.x + position.size / 2, position.y + position.size / 2]]
+    : []));
   const hasExpandedChild = expandedId !== null && children.some((child) => child.id === expandedId);
 
   useEffect(() => {
@@ -59,14 +64,11 @@ export function SubagentBadges({ conversationId, entries, cardRect, onNavigate, 
   }, [hasExpandedChild, onExpandedChange]);
   useEffect(() => {
     if (!anchorRegistry) return;
-    const anchors = new Map(
-      positions.flatMap((position) => position.kind === "badge"
-        ? [[position.child.id, { x: position.x + position.size / 2, y: position.y + position.size / 2 }] as const]
-        : []),
-    );
+    const points = JSON.parse(anchorGeometry) as Array<[string, number, number]>;
+    const anchors = new Map(points.map(([id, x, y]) => [id, { x, y }]));
     if (!anchors.size) return;
     return anchorRegistry.replace(conversationId, anchors);
-  }, [anchorRegistry, conversationId, positions]);
+  }, [anchorRegistry, conversationId, anchorGeometry]);
   if (!positions.length) return null;
 
   return (
