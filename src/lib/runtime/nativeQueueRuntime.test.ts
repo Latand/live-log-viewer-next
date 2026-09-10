@@ -81,7 +81,7 @@ function fixture(journal = makeJournal()) {
     },
   } as unknown as EngineHost;
   const executor = new NativeQueueExecutor({ client, resolveHost: () => host, binding: () => liveBinding });
-  return { journal, client, executor, calls, get items() { return items; },
+  return { journal, client, executor, calls, queue, get items() { return items; },
     loseAdd: () => { loseAdd = true; }, race: () => { raceDelete = true; }, refuseDelete: () => { refuseDelete = true; },
     switchAccount: () => { liveBinding = { ...binding, accountId: "account-b" }; },
     prove: () => {
@@ -167,6 +167,64 @@ test("queue HTTP admits immediately on the populated fixture without waiting for
   expect(response.status).toBe(202); expect(kicks).toBe(1); expect(f.calls).toEqual([]);
   expect(performance.now() - start).toBeLessThan(250);
   const body = await response.json(); expect(body.receipt.status).toBe("queued");
+  f.journal.close();
+});
+
+test("the queue read answers the journal's entries beside Codex's own snapshot", async () => {
+  /* What the panel reads. Both halves are needed and neither substitutes for the
+     other: the journal knows about a mutation the queue has not acknowledged,
+     and only the queue knows the order. */
+  const f = fixture();
+  const add = command("op-read");
+  f.journal.executeOperation(add);
+  await f.executor.execute(add);
+  const response = await handleNativeQueue(
+    new NextRequest(`http://localhost/api/runtime/queue?conversationId=${conversationId}`, { headers: { host: "localhost" } }),
+    {
+      client: () => f.client, enabled: () => true, kick: () => {},
+      admitImages: () => ({ images: [], error: null }), storeImages: () => [],
+      /* The production reader refreshes and falls back to the cached read; a
+         cached read alone has never completed a list pass and answers null. */
+      nativeSnapshot: async () => f.queue.refresh(),
+    },
+  );
+  expect(response.status).toBe(200);
+  const body = await response.json();
+  expect(body.entries.map((entry: { entryId: string }) => entry.entryId)).toEqual(["op-read"]);
+  expect(body.native.items.map((item: { clientUserMessageId: string }) => item.clientUserMessageId))
+    .toEqual([body.entries[0].clientUserMessageId]);
+  f.journal.close();
+});
+
+test("a queue read that cannot see Codex still answers the journal, marked stale", async () => {
+  /* A failed native read must not empty the panel: what the Viewer admitted is
+     still true, and the snapshot says its order is the last one seen. */
+  const f = fixture();
+  const add = command("op-stale");
+  f.journal.executeOperation(add);
+  await f.executor.execute(add);
+  const response = await handleNativeQueue(
+    new NextRequest(`http://localhost/api/runtime/queue?conversationId=${conversationId}`, { headers: { host: "localhost" } }),
+    {
+      client: () => f.client, enabled: () => true, kick: () => {},
+      admitImages: () => ({ images: [], error: null }), storeImages: () => [],
+      nativeSnapshot: async () => ({ threadId: binding.threadId, items: null, stale: true }),
+    },
+  );
+  expect(response.status).toBe(200);
+  const body = await response.json();
+  expect(body.entries).toHaveLength(1);
+  expect(body.native).toMatchObject({ stale: true, items: null });
+  f.journal.close();
+});
+
+test("a queue read refuses an identity that is not a conversation", async () => {
+  const f = fixture();
+  const response = await handleNativeQueue(
+    new NextRequest("http://localhost/api/runtime/queue?conversationId=../etc", { headers: { host: "localhost" } }),
+    { client: () => f.client, enabled: () => true, kick: () => {}, admitImages: () => ({ images: [], error: null }), storeImages: () => [] },
+  );
+  expect(response.status).toBe(400);
   f.journal.close();
 });
 
