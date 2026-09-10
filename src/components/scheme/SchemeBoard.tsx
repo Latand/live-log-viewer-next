@@ -1,7 +1,7 @@
 "use client";
 
 import { BoxSelect, History, Focus, Hand, Maximize2, Minus, MousePointer2, Plus, StickyNote } from "lucide-react";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { useBoardState } from "@/hooks/useBoardState";
 import { cameraToPresence, orderedSelection, schemeFocusedPath, schemeVisiblePaths, viewBus } from "@/hooks/viewPresenceBus";
@@ -174,6 +174,13 @@ interface Props {
   draftBands?: ReadonlyMap<string, string>;
   /** Band-local «+ Agent»: open the launch form in this band's context. */
   onAddAgent?: (band: { id: string; task: BoardTask | null; title: string }) => void;
+  /** The dashboard's board/list switch (#1614). It is passed in rather than
+      floated over the canvas by the caller because both claim the same top-left
+      corner: the tool palette below floats at `z-40`, so a switch positioned
+      there separately is drawn under it and a click at its centre lands on a
+      tool button. Rendered as the leading item of that one palette, the two
+      cannot overlap at any viewport size. */
+  viewSwitch?: ReactNode;
 }
 
 function ToolButton({
@@ -251,6 +258,7 @@ export function SchemeBoard({
   onBuilderOpened,
   draftBands,
   onAddAgent,
+  viewSwitch,
 }: Props) {
   const { t } = useLocale();
   const mapMode = Boolean(onNodePick);
@@ -1547,9 +1555,15 @@ export function SchemeBoard({
         onFit={fitRect}
       />
 
-      <div data-scheme-ui className="absolute left-3 top-3 z-40 flex items-center gap-1 rounded-[10px] border border-border bg-card/95 p-1 shadow-1">
+      <div data-scheme-ui data-chip-keepout className="absolute left-3 top-3 z-40 flex items-center gap-1 rounded-[10px] border border-border bg-card/95 p-1 shadow-1">
         {mapMode ? null : (
           <>
+            {viewSwitch ? (
+              <>
+                {viewSwitch}
+                <div className="mx-0.5 h-5 w-px bg-border" aria-hidden />
+              </>
+            ) : null}
             <ToolButton active={handLike && !taskTool} title={t("scheme.handTool")} onClick={() => setMode("hand")}>
               <Hand className="h-4 w-4" aria-hidden />
             </ToolButton>

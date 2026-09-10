@@ -238,21 +238,36 @@ function gotoProject(project: string) {
   location.hash = "#p=" + encodeURIComponent(project);
 }
 
+/**
+ * The desktop board/list switch (#1614).
+ *
+ * `floating` draws it as its own chip over a leaf that has no chrome of its own
+ * — the agent list, the empty project. On the board it is `embedded` instead,
+ * handed to `SchemeBoard` and drawn inside the tool palette: the palette floats
+ * at `left-3 top-3 z-40`, so a switch floated at the same corner sits under it
+ * and a click at the centre of «Список» reached the task tool instead. Sharing
+ * one container is what makes that overlap impossible rather than unlikely.
+ */
 function ProjectViewTabs({
   value,
   onChange,
   floating = false,
+  embedded = false,
 }: {
   value: ProjectView;
   onChange: (next: ProjectView) => void;
   floating?: boolean;
+  embedded?: boolean;
 }) {
   const { t } = useLocale();
   return (
     <div
-      className={`z-30 inline-flex shrink-0 items-center gap-0.5 rounded-full border border-border bg-card p-0.5 shadow-1 ${
-        floating ? "absolute left-3 top-3" : "mx-3 mt-3 self-start"
-      }`}
+      data-project-view-tabs
+      className={embedded
+        ? "inline-flex shrink-0 items-center gap-0.5"
+        : `z-30 inline-flex shrink-0 items-center gap-0.5 rounded-full border border-border bg-card p-0.5 shadow-1 ${
+          floating ? "absolute left-3 top-3" : "mx-3 mt-3 self-start"
+        }`}
     >
       {(["scheme", "list"] as const).map((mode) => (
         <button
@@ -1765,6 +1780,10 @@ function ProjectDashboardView({
      conversation sits on top of the stack; the footer and the presence slice
      both hang off that one answer. */
   const mobileBoardLeaf = isMobile && projectView === "scheme" && schemeAvailable && mobileConversationKey === null;
+  /* The desktop leaf that is the board itself — the one leaf that owns chrome in
+     the top-left corner, so it is handed the view switch instead of having one
+     floated over it (#1614). */
+  const desktopBoardLeaf = projectView === "scheme" && schemeAvailable;
   /* Which conversations the phone board is showing, in the order it shows them,
      as a signature so the presence effect below compares BY VALUE — a fresh
      array every render would re-report the same view on every poll. Null
@@ -2298,12 +2317,15 @@ function ProjectDashboardView({
       ) : (
         <div className="flex min-h-0 min-w-0 flex-1">
           <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
-            {boardReady && viewToggle ? (
+            {/* The board carries the switch inside its own tool palette (see
+                ProjectViewTabs); every other desktop leaf has no chrome in that
+                corner, so there it floats. */}
+            {boardReady && viewToggle && !desktopBoardLeaf ? (
               <ProjectViewTabs value={projectView} onChange={chooseEmptyView} floating />
             ) : null}
             {!boardReady ? (
               catalogFailures > 0 ? <CatalogFailureNotice failures={catalogFailures} className="mt-[12vh]" /> : <SchemeSkeleton />
-            ) : projectView === "scheme" && schemeAvailable ? (
+            ) : desktopBoardLeaf ? (
               <SchemeBoard
                 project={project}
                 groups={layoutGroups}
@@ -2340,6 +2362,7 @@ function ProjectDashboardView({
                 onBuilderOpened={() => setBuilderPipelineId(null)}
                 draftBands={draftBands}
                 onAddAgent={addBandAgentDraft}
+                viewSwitch={viewToggle ? <ProjectViewTabs value={projectView} onChange={chooseEmptyView} embedded /> : undefined}
               />
             ) : listAvailable ? (
               <ConversationList project={project} enabled={loaded && projectView === "list"} onOpen={openFullCatalogFile} />
