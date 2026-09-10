@@ -2,8 +2,9 @@
 
 This backend stage of #1629 preserves the Voice implementation from #1634 at
 `016271376270bb306839ed2ea6b38199ea2de61c` and incorporates the reviewed queue
-adapter from #1633 and history reader from #1635. Responsive queue controls,
-MCP experience wiring, and live Voice acceptance remain the next stage.
+adapter from #1633 and history reader from #1635. The queue controls, the
+composer's second submission, the MCP work-identity wiring and the Voice repairs
+are the experience stage, in `native-codex-experience.md`.
 
 The reference is Codex CLI 0.154.0 and the native app's 0.153.4 protocol.
 [Official app-server documentation](https://learn.chatgpt.com/docs/app-server)
@@ -110,8 +111,8 @@ because of the baseline React plugin crash.
 canonical persistence receipt and role boundary differ from send/queue. This
 stage provides no context-injection action and never routes a send into one.
 
-The inherited Voice handoff still requires browser/provider verification of the
-existing orchestrator's role, tools and work across call, reconnect and hangup.
-Ambiguous utterance-to-handoff correlations remain refused. Context retained
-after hangup must be checked against the work that legitimately owns it in the
-experience stage. This PR does not close #1629.
+The experience stage carries the inherited Voice handoff forward: ambiguous
+utterance-to-handoff correlations are published as ambiguity and stay refused,
+retained context is bound to the backing turn that owns it rather than to a
+clock, and the canonical transcript now reaches the browser. Real-provider audio
+and spoken model quality over a live call remain unverified.

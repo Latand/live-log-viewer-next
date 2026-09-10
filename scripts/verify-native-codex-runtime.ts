@@ -38,8 +38,37 @@ const files = [
   "src/lib/runtime/voicePersonaMandate.test.ts",
   "src/lib/runtime/voiceDelivery.test.ts",
   "src/lib/runtime/voiceStreamChunks.test.ts",
+  // #1629 experience stage: the queue the operator touches, and the voice
+  // repairs the independent review of the component branch required.
+  "src/lib/runtime/codexRealtimeTranscript.test.ts",
+  "src/lib/mcp/nativeWorkMetadata.test.ts",
+  "src/lib/mcp/voiceUtteranceContext.test.ts",
+  "src/lib/mcp/voiceUtteranceWiring.test.ts",
+  "src/components/nativeQueueView.test.ts",
 ];
-for (const file of files) if (!existsSync(file)) throw new Error(`Missing named native runtime check: ${file}`);
-const result = spawnSync(process.execPath, ["test", ...files], { env, stdio: "inherit" });
-if (result.error) throw result.error;
-process.exit(result.status ?? 1);
+
+/**
+ * The browser half, run in its own process.
+ *
+ * Every one of these installs its own happy-dom window over the same globals,
+ * and Bun runs a `bun test <files…>` invocation in ONE process — so a DOM file
+ * sharing a process with the runtime files above starts inheriting whichever
+ * document loaded first. They are a separate spawn for that reason, not because
+ * they are optional.
+ */
+const domFiles = [
+  "src/components/NativeQueuePanel.dom.test.tsx",
+  "src/components/TmuxComposer.nativeQueue.dom.test.tsx",
+  "src/components/VoiceConversation.dom.test.tsx",
+  "src/lib/realtime/voiceCardChain.dom.test.ts",
+  "src/lib/realtime/voiceCanonicalTranscript.dom.test.ts",
+  "src/lib/realtime/codexRealtimeClient.selectedContext.dom.test.ts",
+  "src/lib/realtime/codexRealtimeClient.transport.dom.test.ts",
+];
+for (const file of [...files, ...domFiles]) if (!existsSync(file)) throw new Error(`Missing named native runtime check: ${file}`);
+for (const batch of [files, domFiles]) {
+  const result = spawnSync(process.execPath, ["test", ...batch], { env, stdio: "inherit" });
+  if (result.error) throw result.error;
+  if (result.status !== 0) process.exit(result.status ?? 1);
+}
+process.exit(0);
