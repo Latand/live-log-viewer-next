@@ -159,7 +159,17 @@ export function NativeQueuePanel({ view, error, thread, cardId, binding, unresol
       mutation,
       binding: binding ?? { threadId: null, accountId: null },
     };
-    retainQueueAdmission(cardId, envelope);
+    /* NOTHING IS SENT THAT THIS BROWSER COULD NOT NAME AFTERWARDS. The store
+       refuses a NEW operation it cannot keep — the card already holds the most
+       unresolved operations it may, the slot holds bytes nothing here can read,
+       or the browser will not take the write. Refusing here costs a press; going
+       ahead would put an operation in the journal under a key that vanishes on
+       reload, and the operator's next press would be a second one of it. A
+       replay is never refused: its key is already in the slot. */
+    if (retainQueueAdmission(cardId, envelope) === "refused") {
+      setFailure(t("queue.retentionFull"));
+      return false;
+    }
     /* The ORIGINAL binding rides with a replay, so a thread or account that
        moved since the first press is refused by the journal rather than quietly
        followed. A caller that named no binding leaves it to the hook's live one,

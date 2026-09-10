@@ -668,3 +668,41 @@ test("handing a draft to the queue clears the composer inside the feedback deadl
     (queueTransport as { write: NativeQueueDependencies["write"] }).write = previous;
   }
 });
+
+test("a browser that will not store the hand-off keeps the draft and sends nothing", async () => {
+  /* The record is written BEFORE the wire because a reply that never arrives is
+     what it exists for, so a browser that cannot store it cannot name the
+     operation after a reload. Handing the message over anyway would take the
+     operator's words away in exchange for an operation nobody could recover, so
+     the hand-off is refused where it costs only a press. */
+  const real = globalThis.sessionStorage;
+  Object.assign(globalThis, {
+    sessionStorage: {
+      getItem: (key: string) => real.getItem(key),
+      removeItem: (key: string) => real.removeItem(key),
+      clear: () => real.clear(),
+      /* Only the admission slot refuses: its envelope carries the attachment
+         bytes, so it is the write that meets a quota first, and scoping it this
+         way keeps the case about retention rather than about every other thing
+         the composer stores. */
+      setItem: (key: string, value: string) => {
+        if (key.startsWith("llvQueueAdmission:")) throw new Error("QuotaExceededError");
+        real.setItem(key, value);
+      },
+    },
+  });
+  try {
+    const { host, root } = await mount();
+    const textarea = host.querySelector("textarea") as HTMLTextAreaElement;
+    await settle(() => appendComposerDraft(CARD, "must not be lost"));
+    await settle(() => press(textarea, "Enter", { altKey: true }));
+
+    expect(queueWrites).toEqual([]);
+    expect(readOutbox(CARD)).toEqual([]);
+    expect(sends).toEqual([]);
+    expect((host.querySelector("textarea") as HTMLTextAreaElement).value).toBe("must not be lost");
+    await act(async () => root.unmount());
+  } finally {
+    Object.assign(globalThis, { sessionStorage: real });
+  }
+});

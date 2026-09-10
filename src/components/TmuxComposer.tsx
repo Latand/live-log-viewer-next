@@ -2899,13 +2899,20 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
     /* PERSISTED BEFORE THE WIRE. The case this exists for is a reply that never
        arrives, and a record written in the error path does not survive a reload
        or a navigation while the request is still in flight. */
-    const durable = retainQueueAdmission(cardId, envelope);
+    if (retainQueueAdmission(cardId, envelope) === "refused") {
+      /* THE DRAFT STAYS, AND NOTHING WAS SENT. The store could not keep this
+         operation's identity — the card is already holding the most unresolved
+         operations it may, or the browser would not take the write — so the
+         hand-off does not leave. Clearing the composer here would take the
+         operator's words away in exchange for an operation nobody could name
+         after a reload. */
+      setStatus({ kind: "err", text: t("queue.retentionFull") });
+      return;
+    }
     setUnresolvedAdmissions(unresolvedHandoffs(cardId));
     setText("");
     attachments.clearAll();
-    setStatus(durable
-      ? { kind: "ok", text: t("queue.queueMessage") }
-      : { kind: "ok", text: t("queue.queueMessageUnsaved") });
+    setStatus({ kind: "ok", text: t("queue.queueMessage") });
     inputRef.current?.focus();
     void (async () => {
       const answer = await nativeQueue.submit({ ...envelope.mutation, binding: envelope.binding }, envelope.key);

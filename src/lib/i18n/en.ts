@@ -2422,7 +2422,7 @@ export const en = {
   "queue.retryRead": "Try again",
   "queue.queueMessage": "Queue for Codex",
   "queue.queueMessageHint": "Codex sends it when the current turn ends. Alt+Enter.",
-  "queue.queueMessageUnsaved": "Handed to Codex. This browser could not save the hand-off, so a reload will not be able to recover it.",
+  "queue.retentionFull": "Not sent. This card already holds every unresolved queue operation this browser can keep track of \u2014 settle one before starting another.",
   "queue.unresolvedTitle": "Waiting on an answer from Codex",
   "queue.unresolved": { one: "{count} hand-off has no answer yet. Sending it again asks Codex about the same message rather than adding another.", other: "{count} hand-offs have no answer yet. Sending one again asks Codex about the same message rather than adding another." },
   "queue.unresolvedRetry": "Send it again",

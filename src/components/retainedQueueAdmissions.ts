@@ -59,24 +59,63 @@ export interface RetainedQueueAdmission {
 }
 
 /**
- * In-process mirror of the durable records, as a LIST per conversation.
+ * What one card's slot holds, as this build can and cannot read it.
  *
- * A list because sending a second message does not settle the first: an
+ * `records` are the operations this build can name. `opaque` are entries the
+ * slot already held that it CANNOT name — a record written by a newer build, or
+ * one naming an action this build does not know. They are carried through every
+ * write verbatim. Dropping them would be this browser forgetting an operation
+ * that may be live in the journal, which is the same loss as evicting one of its
+ * own, only harder to notice.
+ *
+ * `unreadable` means the slot held bytes that are not JSON at all. Nothing can
+ * be preserved across a write then, so nothing is written and no new admission
+ * is accepted; the bytes stay for whoever can read them.
+ */
+interface RetainedStore {
+  records: RetainedQueueAdmission[];
+  opaque: unknown[];
+  unreadable: boolean;
+}
+
+/**
+ * In-process mirror of the durable slot, per conversation.
+ *
+ * A LIST because sending a second message does not settle the first: an
  * operation whose outcome is unknown stays unresolved until something says what
  * happened to IT, and overwriting one record with the next press is how an
  * unrecoverable operation was quietly forgotten.
  *
  * Mirrored in memory because the composer remounts on every board poll, so a
- * component ref cannot hold this; and because `sessionStorage` can refuse a
- * write (quota, opaque origin) exactly when the payload is large enough to
- * matter. Holding both means a storage failure costs the reload case rather than
- * the operation.
+ * component ref cannot hold this.
  */
-const retainedQueueAdmissions = new Map<string, RetainedQueueAdmission[]>();
+const retainedQueueAdmissions = new Map<string, RetainedStore>();
 
-/** Enough for any realistic run of lost replies; a browser holding more than
-    this has a problem no local record is going to solve. */
+const EMPTY_STORE: RetainedStore = { records: [], opaque: [], unreadable: false };
+
+/**
+ * How many unresolved operations one card may hold — and a REFUSAL BOUND, never
+ * an eviction bound.
+ *
+ * This used to trim the oldest control away when the bound was reached, on the
+ * reasoning that a control is recoverable through the entry it names. That is
+ * false for the two queue-level commands: `start` and `reorder` name no entry,
+ * so `nativeQueueJournal`'s per-entry `mutationOperationId` fence never sees
+ * them, and an evicted `start` whose reply was lost came back on the next press
+ * as a SECOND start under a new key. Losing the identity of an operation the
+ * journal may already hold is the one thing this store exists to prevent, so it
+ * is now the new request that is refused — before it reaches the wire, where a
+ * refusal costs nothing but a message the operator can act on.
+ */
 const MAX_RETAINED_ADMISSIONS_PER_CARD = 8;
+
+/**
+ * Whether the store took the operation, and therefore whether it may be sent.
+ *
+ * `refused` is answered BEFORE the wire, so nothing was admitted anywhere and
+ * the caller keeps whatever the operator authored.
+ */
+export type RetainOutcome = "retained" | "refused";
 
 /**
  * Whether two presses are the operator asking for the SAME operation.
@@ -123,73 +162,101 @@ function parseRetainedQueueAdmission(value: unknown): RetainedQueueAdmission | n
   return { key: record.key, mutation: record.mutation, binding: record.binding } as RetainedQueueAdmission;
 }
 
-export function readRetainedQueueAdmissions(id: string): RetainedQueueAdmission[] {
+/**
+ * Read the slot, keeping what this build cannot name.
+ *
+ * The old reading dropped every entry it could not parse and then wrote the
+ * survivors back, so one unrecognised record — a newer build's, or one naming an
+ * action added later — was silently destroyed by the next ordinary press. An
+ * entry nobody here can read still names an operation the journal may be
+ * holding, so it is carried verbatim instead.
+ */
+function readRetainedStore(id: string): RetainedStore {
   const live = retainedQueueAdmissions.get(id);
   if (live) return live;
   let raw: string | null = null;
   try { raw = sessionStorage.getItem(queueAdmissionKey(id)); }
-  catch { return []; }
-  if (raw === null) return [];
-  let parsed: RetainedQueueAdmission[] = [];
+  catch { return EMPTY_STORE; }
+  if (raw === null) return EMPTY_STORE;
+  let store: RetainedStore;
   try {
     const value: unknown = JSON.parse(raw);
-    /* UNREADABLE IS NOT ABSENT. Something was written here, so an operation may
-       exist that this browser can no longer name; what is dropped is only the
-       entries that cannot be read, and the readable ones still replay. */
-    parsed = (Array.isArray(value) ? value : [value])
-      .map(parseRetainedQueueAdmission)
-      .filter((record): record is RetainedQueueAdmission => record !== null);
-  } catch { parsed = []; }
-  retainedQueueAdmissions.set(id, parsed);
-  return parsed;
+    const records: RetainedQueueAdmission[] = [];
+    const opaque: unknown[] = [];
+    for (const entry of Array.isArray(value) ? value : [value]) {
+      const record = parseRetainedQueueAdmission(entry);
+      if (record) records.push(record); else opaque.push(entry);
+    }
+    store = { records, opaque, unreadable: false };
+  } catch {
+    /* NOT JSON AT ALL. There is nothing to carry through a write, so the slot is
+       left exactly as it is and no new operation is accepted against it. */
+    store = { records: [], opaque: [], unreadable: true };
+  }
+  retainedQueueAdmissions.set(id, store);
+  return store;
+}
+
+export function readRetainedQueueAdmissions(id: string): RetainedQueueAdmission[] {
+  return readRetainedStore(id).records;
 }
 
 /**
- * Trim to the bound, dropping the oldest CONTROL first.
+ * Commit the slot, records and unreadable entries alike.
  *
- * A hand-off is the only record with a payload nobody else holds and the only
- * one with a recovery control behind it; a control names an entry the journal
- * still has and is fenced by that entry's `mutationOperationId`. So when a run
- * of unanswered control presses meets the bound, the operator's unsent words are
- * not what gets evicted to make room for them.
+ * Returns false when the browser refused to store it — quota, or an origin with
+ * no session storage. The caller treats that as a refusal for a NEW operation,
+ * because a key only this tab remembers is a key a reload loses, and the whole
+ * point of the record is the reload.
  */
-function boundRetained(records: RetainedQueueAdmission[]): RetainedQueueAdmission[] {
-  if (records.length <= MAX_RETAINED_ADMISSIONS_PER_CARD) return records;
-  const surplus = records.length - MAX_RETAINED_ADMISSIONS_PER_CARD;
-  const evicted = new Set<string>();
-  for (const record of records) {
-    if (evicted.size === surplus) break;
-    if (record.mutation.action !== "add") evicted.add(record.key);
-  }
-  const kept = records.filter((record) => !evicted.has(record.key));
-  return kept.slice(-MAX_RETAINED_ADMISSIONS_PER_CARD);
-}
-
-/** True when the list is durable; false when only the in-process mirror has it,
-    which the caller says out loud rather than swallowing. */
-function writeRetainedQueueAdmissions(id: string, records: RetainedQueueAdmission[]): boolean {
-  const bounded = boundRetained(records);
-  retainedQueueAdmissions.set(id, bounded);
+function writeRetainedStore(id: string, store: RetainedStore): boolean {
+  const all: unknown[] = [...store.records, ...store.opaque];
   try {
-    if (bounded.length) sessionStorage.setItem(queueAdmissionKey(id), JSON.stringify(bounded));
+    if (all.length) sessionStorage.setItem(queueAdmissionKey(id), JSON.stringify(all));
     else sessionStorage.removeItem(queueAdmissionKey(id));
-    return true;
   } catch {
     return false;
   }
+  retainedQueueAdmissions.set(id, store);
+  return true;
 }
 
-/** Record one operation as unresolved, replacing an earlier entry for the same
-    key so a replay does not accumulate copies of itself. */
-export function retainQueueAdmission(id: string, record: RetainedQueueAdmission): boolean {
-  const kept = readRetainedQueueAdmissions(id).filter((entry) => entry.key !== record.key);
-  return writeRetainedQueueAdmissions(id, [...kept, record]);
+/**
+ * Record one operation as unresolved, BEFORE it is sent.
+ *
+ * A replay of a key the slot already holds always succeeds: that operation is
+ * already durable, so re-writing it adds no identity and can lose none. A NEW
+ * operation is refused when the slot is full, unreadable, or will not take the
+ * write — every case where accepting it would mean sending something this
+ * browser could not name afterwards.
+ */
+export function retainQueueAdmission(id: string, record: RetainedQueueAdmission): RetainOutcome {
+  const store = readRetainedStore(id);
+  if (store.unreadable) return "refused";
+  const replay = store.records.some((entry) => entry.key === record.key);
+  const kept = store.records.filter((entry) => entry.key !== record.key);
+  if (!replay && kept.length + store.opaque.length >= MAX_RETAINED_ADMISSIONS_PER_CARD) return "refused";
+  const next: RetainedStore = { ...store, records: [...kept, record] };
+  if (writeRetainedStore(id, next)) return "retained";
+  /* The write failed. A replay is already in the slot from its first press, so
+     it stays recoverable and may go; a new operation is refused with the mirror
+     left exactly as it was, so nothing half-remembers it. */
+  return replay ? "retained" : "refused";
 }
 
 /** Terminal evidence about ONE operation, and only that one. */
 export function releaseQueueAdmission(id: string, key: string): void {
-  const kept = readRetainedQueueAdmissions(id).filter((entry) => entry.key !== key);
-  writeRetainedQueueAdmissions(id, kept);
+  const store = readRetainedStore(id);
+  if (store.unreadable) return;
+  writeRetainedStore(id, { ...store, records: store.records.filter((entry) => entry.key !== key) });
+}
+
+/** How many more unresolved operations this card can take, so a caller can say
+    why it is refusing before the operator presses anything. */
+export function retainedQueueAdmissionRoom(id: string): number {
+  const store = readRetainedStore(id);
+  if (store.unreadable) return 0;
+  return Math.max(0, MAX_RETAINED_ADMISSIONS_PER_CARD - store.records.length - store.opaque.length);
 }
 
 /** Test seam: the mirror is module-scoped, so a suite must be able to start

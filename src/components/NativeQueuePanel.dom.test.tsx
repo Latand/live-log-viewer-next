@@ -704,3 +704,105 @@ test("a different request after a lost one is still its own operation", async ()
   expect(writes[2]!.idempotencyKey).toBe(writes[0]!.idempotencyKey);
   writeAnswer = (body) => journalReceipt(body);
 });
+
+test("a full card refuses a NEW control before the wire and keeps every unresolved key", async () => {
+  /* THE EVICTION THE VERIFIER REPRODUCED. The store used to trim the oldest
+     CONTROL when it reached its bound, reasoning that a control is recoverable
+     through the entry it names. `start` and `reorder` name no entry, so the
+     journal's per-entry `mutationOperationId` fence never sees them: an evicted
+     `start` whose reply was lost came back on the next press as a second start
+     under a new key. So the bound refuses the NEW request instead, before it
+     reaches the wire, and every unresolved identity stays.
+
+     Exactly the reported sequence: lose the reply to a queue-level start, lose
+     eight row controls behind it, reload, press start again. */
+  entries = Array.from({ length: 8 }, (_, index) => record(`e${index}`));
+  items = entries.map((entry) => submission(entry.entryId));
+  writeAnswer = () => ({ status: 503, body: {} });
+  await mount({ turn: "idle" });
+
+  await click(host.querySelector('[data-testid="native-queue-start"]'));
+  const startKey = writes[0]!.idempotencyKey;
+  for (const row of rows()) await click(row.querySelector('[data-testid="native-queue-delete"]'));
+
+  /* Eight unresolved operations fit; the ninth is refused with nothing sent. */
+  expect(writes).toHaveLength(8);
+  expect(host.querySelector('[data-testid="native-queue-failure"]')?.textContent ?? "")
+    .toContain("already holds every unresolved queue operation");
+
+  /* A RELOAD: only what storage kept before each request left can name them. */
+  flushSync(() => root.unmount());
+  document.body.replaceChildren();
+  resetRetainedQueueAdmissionsForTests();
+  await mount({ turn: "idle" });
+  await click(host.querySelector('[data-testid="native-queue-start"]'));
+
+  expect(writes).toHaveLength(9);
+  expect(String(writes[8]!.idempotencyKey)).toBe(String(startKey));
+  writeAnswer = (body) => journalReceipt(body);
+});
+
+test("a browser that will not store the record refuses the control rather than sending it", async () => {
+  /* A key only this tab remembers is a key a reload loses, and the reload is the
+     whole reason the record exists. So a storage that refuses the write — quota,
+     an origin with no session storage — refuses the operation, before the wire. */
+  const real = globalThis.sessionStorage;
+  Object.assign(globalThis, {
+    sessionStorage: {
+      getItem: (key: string) => real.getItem(key),
+      removeItem: (key: string) => real.removeItem(key),
+      clear: () => real.clear(),
+      /* Only the admission slot refuses: its envelope carries the attachment
+         bytes, so it is the write that meets a quota first, and scoping it this
+         way keeps the case about retention rather than about every other thing
+         the composer stores. */
+      setItem: (key: string, value: string) => {
+        if (key.startsWith("llvQueueAdmission:")) throw new Error("QuotaExceededError");
+        real.setItem(key, value);
+      },
+    },
+  });
+  try {
+    await mount({ turn: "idle" });
+    await click(rows()[0]!.querySelector('[data-testid="native-queue-delete"]'));
+    expect(writes).toHaveLength(0);
+    expect(host.querySelector('[data-testid="native-queue-failure"]')?.textContent ?? "")
+      .toContain("already holds every unresolved queue operation");
+  } finally {
+    Object.assign(globalThis, { sessionStorage: real });
+  }
+});
+
+test("a stored record this build cannot read is carried through, never quietly dropped", async () => {
+  /* An entry a NEWER build wrote, or one naming an action added later, still
+     names an operation the journal may be holding. The old reading parsed it
+     away and then wrote the survivors back, so one ordinary press destroyed it.
+     It is opaque here, and it survives both a retain and a release. */
+  const foreign = { key: "key-from-a-later-build", mutation: { action: "rewind" }, binding: {}, extra: 7 };
+  sessionStorage.setItem("llvQueueAdmission:conversation_queue", JSON.stringify([foreign]));
+  resetRetainedQueueAdmissionsForTests();
+
+  writeAnswer = () => ({ status: 503, body: {} });
+  await mount({ turn: "idle" });
+  await click(rows()[0]!.querySelector('[data-testid="native-queue-delete"]'));
+  const afterRetain = JSON.parse(sessionStorage.getItem("llvQueueAdmission:conversation_queue")!) as unknown[];
+  expect(afterRetain).toContainEqual(foreign);
+
+  /* And a settled operation releases only itself. */
+  writeAnswer = (body) => journalReceipt(body);
+  await click(rows()[1]!.querySelector('[data-testid="native-queue-delete"]'));
+  const afterRelease = JSON.parse(sessionStorage.getItem("llvQueueAdmission:conversation_queue")!) as unknown[];
+  expect(afterRelease).toContainEqual(foreign);
+});
+
+test("a slot holding bytes that are not JSON is left alone, and no new operation is sent against it", async () => {
+  /* Nothing can be carried through a write, so the bytes stay for whoever can
+     read them and the press is refused instead of overwriting them. */
+  sessionStorage.setItem("llvQueueAdmission:conversation_queue", "{not json at all");
+  resetRetainedQueueAdmissionsForTests();
+  await mount({ turn: "idle" });
+  await click(rows()[0]!.querySelector('[data-testid="native-queue-delete"]'));
+
+  expect(writes).toHaveLength(0);
+  expect(sessionStorage.getItem("llvQueueAdmission:conversation_queue")).toBe("{not json at all");
+});
