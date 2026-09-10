@@ -133,6 +133,8 @@ class FakeAppServer extends EventEmitter {
   persistUserMessages = false;
   readTurns: unknown[] | null = null;
   readError: string | null = null;
+  turnsError: string | null = null;
+  userAgent = "codex_desktop_app/0.144.1 (Linux)";
   /* Rejects only hydrated reads (includeTurns), the way codex 0.151+ paginated
      threads do; metadata-only reads and thread/turns/list keep answering. */
   hydratedReadError: string | null = null;
@@ -215,7 +217,8 @@ class FakeAppServer extends EventEmitter {
     if (typeof message.id !== "number") return;
     const method = message.method;
     if (typeof method === "string" && this.ignoredMethods.includes(method)) return;
-    if (method === "initialize") return this.respond(message.id, { userAgent: "codex_desktop_app/0.144.1 (Linux)" });
+    if (method === "initialize") return this.respond(message.id, { userAgent: this.userAgent });
+    if (method === "thread/queue/list") return this.respondError(message.id, "method not found");
     if (method === "account/read") return this.respond(message.id, { account: { type: "chatgpt", planType: "pro" }, requiresOpenaiAuth: false });
     if (method === "model/list") {
       if (this.modelListFailuresRemaining > 0) {
@@ -263,6 +266,7 @@ class FakeAppServer extends EventEmitter {
       });
     }
     if (method === "thread/turns/list") {
+      if (this.turnsError) return this.respondError(message.id, this.turnsError);
       if (this.readError) return this.respondError(message.id, this.readError);
       const turns = [...(this.readTurns ?? this.turns)];
       if ((message.params as { sortDirection?: string } | undefined)?.sortDirection === "desc") turns.reverse();
@@ -2221,9 +2225,14 @@ describe("CodexAppServerHost", () => {
     await host.release();
   });
 
-  test("starts the first delivery when Codex reports an unmaterialized thread", async () => {
+  test.each(["0.144.1", "0.154.0"])("starts the first delivery when Codex %s reports an unmaterialized thread", async (version) => {
     const server = new FakeAppServer("fresh-delivery-thread");
+    server.userAgent = `codex_desktop_app/${version} (Linux)`;
     server.readError = "thread fresh-delivery-thread is not materialized yet; includeTurns is unavailable before first user message";
+    if (version === "0.154.0") {
+      server.turnsError = server.readError.replace("includeTurns", "thread/turns/list");
+      server.readError = null;
+    }
     const host = await CodexAppServerHost.start({
       cwd: "/repo",
       eventStore: new MemoryEventStore(),
@@ -2235,6 +2244,20 @@ describe("CodexAppServerHost", () => {
       turnId: "turn-1",
     });
     await host.release();
+  });
+
+  test("native-history transport refusals never authorize a first delivery", async () => {
+    const server = new FakeAppServer("refused-first-thread");
+    server.userAgent = "codex_desktop_app/0.154.0 (Linux)";
+    server.readError = "permission denied";
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo", eventStore: new MemoryEventStore(), spawnProcess: fakeSpawn(server),
+    });
+    try {
+      await expect(host.send({ id: "refused-first", text: "hello" }))
+        .rejects.toThrow("Codex canonical history is unavailable: transport");
+      expect(server.requests.some(request => request.method === "turn/start" || request.method === "turn/steer")).toBeFalse();
+    } finally { await host.release(); }
   });
 
   test("a successful hydrated read with no turns defers to the rollout on disk (#1332)", async () => {

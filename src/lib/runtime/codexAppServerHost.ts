@@ -1651,7 +1651,12 @@ export class CodexAppServerHost implements EngineHost {
         { deadlineAt: Date.now() + (timeoutMs ?? this.requestTimeoutMs), sortDirection: window === "first" ? "asc" : "desc" });
       if (history.state === "complete") return { thread: { id: history.identity.threadId, path: history.identity.path,
         turns: window === "latest" ? [...history.turns].reverse() : history.turns } };
-      if (history.state === "unknown") throw new Error(`Codex canonical history is unavailable: ${history.reason}`);
+      if (history.state === "unknown") {
+        if (history.reason === "not-materialized") {
+          throw new Error("Codex thread is not materialized yet before first user message");
+        }
+        throw new Error(`Codex canonical history is unavailable: ${history.reason}`);
+      }
     }
     try {
       return await this.rpc("thread/read", {
