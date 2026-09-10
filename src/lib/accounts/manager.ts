@@ -6,7 +6,7 @@ import type { AccountContext, AccountManager, AccountSummary, ProjectSpawnResolu
 import { unavailableLimits } from "./contracts";
 import { withAccountMutationLockAsync } from "./accountMutation";
 import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
-import { accountProjectBindings, allowedAccountIdsForProject, projectAccountRefusalDetail } from "./projectBindings";
+import { AccountProjectBindingsUnreadableError, accountProjectBindings, allowedAccountIdsForProject, projectAccountRefusalDetail, type AccountProjectBinding } from "./projectBindings";
 import { selectProjectAccount } from "./projectSelection";
 import { selectHealthyClaudeAccount } from "./spawnHealth";
 import { withoutWakatimeCredential } from "@/lib/wakatime/credential";
@@ -43,9 +43,21 @@ export type HealthySpawnAccountResolution = AccountContext & {
  * damaged record throws from that read rather than being re-derived by whoever
  * called in.
  *
- * An account the caller NAMES is still checked against the pool alone and never
- * against capacity — nobody may quietly substitute an account somebody asked
- * for, and a pin is a decision, not a guess to improve on.
+ * An account the caller NAMES is an EXPLICIT CHOICE and the binding does not
+ * veto it (operator directive, 2026-09-10). Every producer of a named account
+ * at this seam is a control somebody worked: the board's launch draft, the
+ * orchestrator's create and rotate drafts, `spawn_agent`'s `accountId`. The
+ * binding is a default for what the Viewer picks BY ITSELF — that is what
+ * `explicitAccountChoice` has said since #1279, and the two switch seams have
+ * honoured it all along, while this one still refused. The refusal it produced
+ * was not theoretical: the rotate draft prefills the INCUMBENT's account, so a
+ * seat already running outside its project's pool could not be rotated at all.
+ *
+ * Nothing else is relaxed. Capacity is still not consulted for a named account
+ * and never was; authentication is still decided below by the engine's own
+ * health pass, which the named account now goes THROUGH rather than around; and
+ * the pick nobody named still draws from the pool only, still reports an
+ * exhausted pool, and still refuses on a record this process cannot read.
  */
 export async function resolveHealthySpawnAccount(
   engine: "claude" | "codex",
@@ -54,12 +66,29 @@ export async function resolveHealthySpawnAccount(
      cannot name, and resolves exactly as an unbound one always did. */
   project: string | null = null,
 ): Promise<HealthySpawnAccountResolution> {
-  const bindings = accountProjectBindings();
+  const named = requested === undefined || requested === null ? null : requested;
+  /* A DAMAGED record means two different things to this seam's two callers. To
+     the automatic pick it means "no pool can be seen", and nothing may be
+     picked — that refusal is the fence holding. To an explicit named choice it
+     means nothing at all: a file this process cannot parse is not a decision
+     anybody made, and it must not veto a control the operator exercised. Same
+     split as `explicitAccountChoice`, reached here rather than restated. */
+  let bindings: AccountProjectBinding[];
+  /* The error itself, not a flag: the branches below that have nothing left to
+     fall back to answer WITH it, so an operator reading the refusal is told
+     which record to repair rather than which account to re-login. */
+  let recordUnreadable: AccountProjectBindingsUnreadableError | null = null;
+  try {
+    bindings = accountProjectBindings();
+  } catch (error) {
+    if (named === null || !(error instanceof AccountProjectBindingsUnreadableError)) throw error;
+    bindings = [];
+    recordUnreadable = error;
+  }
   const allowedAccountIds = allowedAccountIdsForProject(project, engine, bindings);
   const allowed = allowedAccountIds === null ? null : new Set(allowedAccountIds);
   const registry = agentRegistry();
   const routing = registry.engineRouting(engine).activeAccountId ?? undefined;
-  const named = requested === undefined || requested === null ? null : requested;
   const selectionInput = {
     project,
     engine,
@@ -80,10 +109,23 @@ export async function resolveHealthySpawnAccount(
     throw new ProjectAccountRefusedError(automatic, engine, project);
   }
   if (named !== null) {
-    const pinned = selectProjectAccount({ ...selectionInput, requestedId: named });
+    const pinned = selectProjectAccount({ ...selectionInput, requestedId: named, requestedChoice: "explicit" });
+    /* `explicit` cannot answer `not_allowed`, so what is left here is a
+       malformed id — refused for what it is, in the one wording. */
     if (pinned.kind !== "available") throw new ProjectAccountRefusedError(pinned, engine, project);
   }
-  const active = automatic.kind === "available" ? automatic.accountId ?? undefined : undefined;
+  /* The automatic answer is also the FALLBACK the branches below reach for when
+     a named account turns out not to exist. On a record nobody could read there
+     is no such answer: the pool was invisible, so falling back would be the
+     machine picking with the fence unread.
+
+     `hasAutomatic` is separate from `active` because `available` with a NULL
+     account is a real answer — an unbound project with nothing routed, where
+     the fallback is the engine's own default and `contextForSpawn(undefined)`
+     is how this seam has always resolved it. Reading a missing id as a missing
+     ANSWER would turn that into a throw. */
+  const hasAutomatic = automatic.kind === "available" && recordUnreadable === null;
+  const active = hasAutomatic ? automatic.accountId ?? undefined : undefined;
   const routed = named ?? active;
   const missingRequested = classifySpawnAccountAdmission({
     enabled: false,
@@ -101,12 +143,37 @@ export async function resolveHealthySpawnAccount(
          account to fall back to either — so there is nothing left to launch on
          that this project's binding permits, and the original failure stands
          rather than being answered with an account outside the pool. */
-      if (automatic.kind !== "available") throw error;
+      if (!hasAutomatic) throw error;
       return { ...contextForSpawn(engine, active), requestedAdmission: missingRequested };
     }
   }
-  const accounts = listClaudeAccounts().filter((account) => allowed === null || allowed.has(account.id));
+  /* The named account is a candidate whether or not the pool contains it — the
+     explicit choice above already decided that. Filtering it out here would
+     make the health pass answer `requestedExists: false` and quietly launch on
+     the automatic account instead, which is the substitution this seam refuses
+     to make in every other branch.
+
+     ON AN UNREADABLE RECORD THE NAMED ACCOUNT IS THE ONLY CANDIDATE. `allowed`
+     is null there because no pool could be READ, not because none was drawn —
+     and handing that null to the filter would put every Claude account in front
+     of the health pass, so a named-but-inadmissible account degrades onto one
+     the machine picked with the fence unread. That is the same thing the Codex
+     branch's `hasAutomatic` guard above refuses, one branch over. The choice
+     still stands; there is simply nothing behind it to fall back to. */
+  const accounts = recordUnreadable
+    ? listClaudeAccounts().filter((account) => account.id === named)
+    : listClaudeAccounts().filter((account) =>
+      allowed === null || allowed.has(account.id) || account.id === named);
   const requestedExists = named === null || accounts.some((account) => account.id === named);
+  /* ...and with the record unreadable, a named account the machine does not
+     have leaves that set EMPTY. The health pass would then refuse with "no
+     healthy Claude account is available. Re-login…", which is a true sentence
+     about a state nobody is in: nothing was wrong with any account, the request
+     named one that is gone and the record that would say where else to look
+     could not be read. The Codex twin keeps its reason (`UnknownAccountError`
+     names the account), so this branch says the same thing rather than handing
+     the operator the wrong repair. */
+  if (recordUnreadable && !requestedExists) throw recordUnreadable;
   try {
     const selected = await selectHealthyClaudeAccount(
       accounts,
