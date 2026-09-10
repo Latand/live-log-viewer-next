@@ -13,8 +13,14 @@ Installed Codex **0.154.0 carries the native backing turn ID into actual MCP cal
 This enables a narrow improvement to request attribution. It does **not establish exact selected-card ownership for each realtime handoff**. Native V3 can steer multiple handoffs into one backing turn. The installed core discards the incoming bidi identity, routes handoff content as text, and emits its handoff notification without the accepted backing turn ID. The bundled app reconstructs an association in its UI state for lifecycle analytics. That reconstruction is insufficient authority for automatic target selection.
 
 Decision: carry and validate native work metadata through existing Viewer seams; keep automatic voice selection non-actionable wherever either the utterance-to-handoff edge or handoff-to-work edge lacks authoritative evidence. An unqualified request in that state receives a typed refusal. Explicit targeting continues through the existing target validation and authority rules. This document authorizes no product changes or release. The integration that
-acts on it is `native-codex-experience.md`; its "Smallest Viewer integration"
-section below is what that stage implemented.
+acts on it is `native-codex-experience.md`, and what that stage took from the
+"Smallest Viewer integration" section below is the metadata seam, the typed
+refusals and the retention rule. The automatic-selection states proposed in its
+step 4 were NOT implemented: on installed 0.154.0 the handoff-to-work edge is
+unavailable for every request, so the condition this decision makes selection
+non-actionable in holds always, and the shipped reader hands out no card to any
+caller. The section below records a design; the shipped account lives in
+`native-codex-experience.md`.
 
 ## Evidence scope and provenance
 
@@ -150,6 +156,12 @@ Native `bemItemPromoted` history contains an explicit backing `turnId` and `item
 The capture assertions test native protocol behavior. They do not implement or validate the proposed Viewer authorization changes. Duplicate/late handoff refusal and elapsed-time retention are requirements derived from the independent product review; no new product correctness claim is made for them.
 
 ## Smallest Viewer integration
+
+THIS SECTION IS A DESIGN. What shipped from it is the metadata seam, the typed
+refusals and the observed-work retention rule. The automatic selection its step 4
+describes was never implemented, because on installed 0.154.0 the handoff-to-work
+edge is unavailable for every request. For what the Viewer actually does with a
+spoken turn, read `native-codex-experience.md`.
 
 Reuse the existing caller admission, runtime event journal, control hop, and MCP request binding. Add no scheduler, polling worker, lease manager, or separate context database.
 
