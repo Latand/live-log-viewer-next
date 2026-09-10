@@ -18,7 +18,7 @@ if (parent === repo || parent.startsWith(repo + path.sep)) throw new Error("Capt
 fs.mkdirSync(parent, { recursive: true });
 const out = fs.mkdtempSync(path.join(parent, "llv-issue-1651-"));
 const sourceRef = process.env.BOARD_SOURCE_REF;
-const originalModules = ["src/components/scheme/SchemeBoard.tsx", "src/components/scheme/taskBands.ts", "src/components/scheme/TaskBandsLayer.tsx", "src/components/scheme/nodes.tsx", "src/components/pipelines/StageStatusRow.tsx"];
+const originalModules = ["src/components/scheme/SchemeBoard.tsx", "src/components/scheme/taskBands.ts", "src/components/scheme/TaskBandsLayer.tsx", "src/components/scheme/nodes.tsx", "src/components/pipelines/StageStatusRow.tsx", "src/components/scheme/boardPresentation.ts"];
 const old = new Map<string, string>();
 if (sourceRef) for (const file of originalModules) {
   const result = Bun.spawnSync(["git", "show", `${sourceRef}:${file}`], { cwd: repo });
@@ -26,7 +26,9 @@ if (sourceRef) for (const file of originalModules) {
   old.set(path.join(repo, file), result.stdout.toString());
 }
 const build = await Bun.build({
-  entrypoints: [path.join(repo, "scripts/fixtures/board-density.tsx")], outdir: out, target: "browser", minify: false,
+  // iife: a classic script's top-level `function dispatchEvent` (React's own)
+  // would otherwise replace window.dispatchEvent for the whole page.
+  entrypoints: [path.join(repo, "scripts/fixtures/board-density.tsx")], outdir: out, target: "browser", format: "iife", minify: false,
   define: { "process.env.NODE_ENV": '"production"' },
   plugins: old.size ? [{ name: "old-board-control", setup(builder) {
     builder.onLoad({ filter: /\.[jt]sx?$/ }, args => { const contents = old.get(args.path); return contents === undefined ? undefined : { contents, loader: args.path.endsWith("tsx") ? "tsx" : "ts" }; });
@@ -85,7 +87,7 @@ type Reading = ReturnType<typeof reading>;
 const wait = (page: Page) => page.waitForTimeout(220);
 async function panTo(page: Page, selector: string, top = 88) {
   for (let i = 0; i < 12; i++) {
-    const box = await page.locator(selector).first().boundingBox();
+    const box = await page.locator(selector).count() ? await page.locator(selector).first().boundingBox() : null;
     if (!box) return false;
     const width = page.viewportSize()!.width;
     const dx = box.width < width - 48 && (box.x < 24 || box.x + box.width > width - 24) ? box.x + box.width / 2 - width / 2 : 0;
@@ -115,28 +117,105 @@ async function zoom(page: Page, target: number) {
   await page.keyboard.up("Control"); await wait(page);
 }
 
+async function open(width: number, query = "") {
+  const context = await browser.newContext({ viewport: { width, height: 1000 }, reducedMotion: "reduce" });
+  await context.addInitScript(() => {
+    (window as unknown as {process: unknown}).process = { env: { NODE_ENV: "production" } };
+    Object.defineProperty(window, "EventSource", { value: undefined });
+    localStorage.setItem("llv_lang", "en"); localStorage.setItem("llvSound", "0"); localStorage.setItem("llvSchemeMode", "select");
+  });
+  const page = await context.newPage(); page.on("pageerror", error => errors.push(error.stack ?? String(error)));
+  await page.route("**/*", async route => {
+    const url = new URL(route.request().url()); requests.push(`${route.request().method()} ${url.pathname}`);
+    if (url.pathname === "/") return route.fulfill({ contentType: "text/html; charset=utf-8", body: '<html><head><meta charset="utf-8"><link rel="stylesheet" href="/style.css"></head><body><div id="root" style="height:100vh;display:flex"></div><script src="/board-density.js"></script></body></html>' });
+    if (url.pathname === "/board-density.js" || url.pathname === "/style.css") return route.fulfill({ contentType: url.pathname.endsWith("css") ? "text/css" : "application/javascript", body: fs.readFileSync(path.join(out, url.pathname.slice(1))) });
+    if (url.pathname === "/api/logs") {
+      const {reqs} = route.request().postDataJSON();
+      const data = Array.from({length:60}, (_, i) => JSON.stringify({type:"assistant",uuid:`reply-${i}`,timestamp:"2026-09-01T10:00:00Z",message:{role:"assistant",content:[{type:"text",text:`Recorded conversation message ${i}. ` + "This is a retained transcript paragraph for scrolling evidence. ".repeat(12)}]}})).join("\n")+"\n";
+      return route.fulfill({json:{chunks:Object.fromEntries(reqs.map((r: {id:string;offset:number})=>[r.id,{data:r.offset?"":data,start:0,size:data.length,offset:data.length}]))}});
+    }
+    return route.fulfill({json:{ok:true,files:[],tasks:[],flows:[],pipelines:[],messages:[],entries:[],accounts:[],roles:[],models:[],backends:[],voices:[],options:[]}});
+  });
+  page.setDefaultTimeout(5000);
+  await page.goto(`http://density.test/${query}`); await page.waitForSelector("[data-scheme-band]", {timeout:15000}); await wait(page);
+  return { context, page };
+}
+
+/* Task 0's review loop: a deck the operator expanded must not be hidden by the
+   completed task's automatic history fold, and a round recorded after
+   completion is current work, never history. */
+const historyBand = '[data-scheme-band="task:task-0"]', historyToggle = '[data-scheme-band-history="task:task-0"]', deck = '[data-scheme-node="deck::review-flow"]';
+// RoundDeck's open form is its round group; the collapsed form is one chip button.
+const openDeck = `${deck} [role="group"]`;
+const present = async (page: Page, selector: string) => await page.locator(selector).count() > 0 && ((await page.locator(selector).first().boundingBox())?.width ?? 0) > 0;
+const disclosure = async (page: Page) => await page.locator(historyToggle).count() ? await page.locator(historyToggle).getAttribute("aria-expanded") : "none";
+/* A click selects the deck, and a selected target always reveals its band;
+   clear it so the fold rule itself decides, as it does once the task is done. */
+async function deselect(page: Page) {
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+  await page.keyboard.press("Escape"); await wait(page);
+}
+async function reload(page: Page) { await page.reload(); await page.waitForSelector("[data-scheme-band]", {timeout:15000}); await wait(page); await zoom(page, 1); await panTo(page, historyBand); }
+async function historyChecks(width: number) {
+  const tag = `${width}-history`;
+  let { context, page } = await open(width, "?case=history");
+  await zoom(page, 1); await panTo(page, historyBand);
+  must(await click(page, `${deck} [data-review-deck-collapsed]`), `${tag}: settled deck expands before completion`);
+  await deselect(page);
+  await page.evaluate(() => window.densityStep("complete")); await wait(page); await panTo(page, historyBand);
+  for (const phase of ["completion", "reload"]) {
+    if (phase === "reload") await reload(page);
+    must(await disclosure(page) === "true", `${tag}: ${phase} keeps the expanded deck's history open (${await disclosure(page)})`);
+    must(await present(page, openDeck), `${tag}: ${phase} keeps the expanded deck`);
+  }
+  await page.screenshot({ path: path.join(out, `${tag}-expanded-deck.png`) });
+  /* The deck's collapse control sits in its pane header, which the phone
+     layout does not draw (BranchPane); there the chip expands it only. */
+  if (width >= 830) {
+    // Collapsing the deck withdraws the only reason to open: the fold resumes.
+    await panTo(page, deck, 200);
+    must(await click(page, `${deck} [data-review-deck-collapse]`), `${tag}: deck collapse reachable`);
+    await deselect(page); await panTo(page, historyBand);
+    must(await disclosure(page) === "false" && !await present(page, deck), `${tag}: collapsing the deck returns to the automatic fold`);
+    must(await click(page, historyToggle), `${tag}: Show history reachable`);
+    must(await disclosure(page) === "true" && await present(page, `${deck} [data-review-deck-collapsed]`), `${tag}: Show history reveals the collapsed deck`);
+    must(await click(page, `${deck} [data-review-deck-collapsed]`), `${tag}: deck expands inside shown history`);
+    await deselect(page); await panTo(page, historyBand);
+  }
+  // The parent control stays explicit in both directions and survives reload.
+  must(await click(page, historyToggle), `${tag}: Collapse history reachable`);
+  must(await disclosure(page) === "false" && !await present(page, deck), `${tag}: explicit collapse wins over the deck choice`);
+  await reload(page);
+  must(await disclosure(page) === "false" && !await present(page, deck), `${tag}: explicit collapse survives reload`);
+  must(await click(page, historyToggle), `${tag}: Show history after reload`);
+  must(await disclosure(page) === "true" && await present(page, openDeck), `${tag}: explicit show restores the expanded deck`);
+  await context.close();
+
+  ({ context, page } = await open(width, "?case=history&steps=complete"));
+  await zoom(page, 1); await panTo(page, historyBand);
+  must(await disclosure(page) === "false" && !await present(page, deck), `${tag}: an old settled loop folds with its completed task`);
+  await page.evaluate(() => window.densityStep("round")); await wait(page); await panTo(page, historyBand);
+  for (const phase of ["new round", "reload"]) {
+    if (phase === "reload") await reload(page);
+    const text = await page.locator(historyBand).innerText();
+    must(await disclosure(page) === "none" && !text.includes("Historical runs"), `${tag}: ${phase} after completion is not labeled history`);
+    must(await present(page, openDeck), `${tag}: ${phase} keeps the decision deck open`);
+  }
+  for (const z of [0.9, 1.6, 1]) {
+    await zoom(page, z); await panTo(page, historyBand);
+    const result = await page.evaluate(reading);
+    must(result.nodes.some(node => node.key === "deck::review-flow"), `${tag}-${Math.round(z * 100)}: decision deck placed`);
+    must(result.collisions.length === 0, `${tag}-${Math.round(z * 100)}: ${result.collisions.slice(0, 8).join(", ")}`);
+  }
+  await page.screenshot({ path: path.join(out, `${tag}-new-round.png`) });
+  runs.push({ tag, ...(await page.evaluate(reading)) });
+  await context.close();
+}
+
 try {
   for (const width of [1440, 830, 390]) {
-    const context = await browser.newContext({ viewport: { width, height: 1000 }, reducedMotion: "reduce" });
-    await context.addInitScript(() => {
-      (window as unknown as {process: unknown}).process = { env: { NODE_ENV: "production" } };
-      Object.defineProperty(window, "EventSource", { value: undefined });
-      localStorage.setItem("llv_lang", "en"); localStorage.setItem("llvSound", "0"); localStorage.setItem("llvSchemeMode", "select");
-    });
-    const page = await context.newPage(); page.on("pageerror", error => errors.push(error.stack ?? String(error)));
-    await page.route("**/*", async route => {
-      const url = new URL(route.request().url()); requests.push(`${route.request().method()} ${url.pathname}`);
-      if (url.pathname === "/") return route.fulfill({ contentType: "text/html; charset=utf-8", body: '<html><head><meta charset="utf-8"><link rel="stylesheet" href="/style.css"></head><body><div id="root" style="height:100vh;display:flex"></div><script src="/board-density.js"></script></body></html>' });
-      if (url.pathname === "/board-density.js" || url.pathname === "/style.css") return route.fulfill({ contentType: url.pathname.endsWith("css") ? "text/css" : "application/javascript", body: fs.readFileSync(path.join(out, url.pathname.slice(1))) });
-      if (url.pathname === "/api/logs") {
-        const {reqs} = route.request().postDataJSON();
-        const data = Array.from({length:60}, (_, i) => JSON.stringify({type:"assistant",uuid:`reply-${i}`,timestamp:"2026-09-01T10:00:00Z",message:{role:"assistant",content:[{type:"text",text:`Recorded conversation message ${i}. ` + "This is a retained transcript paragraph for scrolling evidence. ".repeat(12)}]}})).join("\n")+"\n";
-        return route.fulfill({json:{chunks:Object.fromEntries(reqs.map((r: {id:string;offset:number})=>[r.id,{data:r.offset?"":data,start:0,size:data.length,offset:data.length}]))}});
-      }
-      return route.fulfill({json:{ok:true,files:[],tasks:[],flows:[],pipelines:[],messages:[],entries:[],accounts:[],roles:[],models:[],backends:[],voices:[],options:[]}});
-    });
-    page.setDefaultTimeout(5000);
-    await page.goto("http://density.test/"); await page.waitForSelector("[data-scheme-band]", {timeout:15000}); await wait(page);
+    await historyChecks(width);
+    const { context, page } = await open(width);
     for (const z of [0.9, 1, 1.6]) {
       await zoom(page,z);
       await panTo(page,'[data-scheme-band="task:task-2"]');

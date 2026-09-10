@@ -521,6 +521,10 @@ export interface BandLayoutOptions {
       expanded settled deck reserves its full footprint. Absent it, the
       lifecycle default decides. */
   collapsedDecks?: ReadonlySet<string>;
+  /** Deck keys the operator expanded under their current round. A completed
+      task's automatic history fold never hides one; the band's own history
+      control still does. */
+  expandedDecks?: ReadonlySet<string>;
 }
 
 /** A recorded relation whose other endpoint lives in another band: shown as a
@@ -660,7 +664,10 @@ export function layoutTaskBands(base: SchemeLayout, orderedBands: readonly TaskB
     if (!empty && emptyColumn) { cursorY += headerH + BAND.gap; emptyColumn = 0; }
     const bandX = gutter + (empty ? emptyColumn * (minBandW + BAND.gap) : 0);
     const historyAvailable = bandHistoryAvailable(band, base);
-    const historyCollapsed = historyAvailable && options.historyOverrides?.get(band.id) !== true && !bandContainsTarget(band, base, options.revealTarget ?? reader);
+    const historyChoice = options.historyOverrides?.get(band.id);
+    const historyCollapsed = historyAvailable && historyChoice !== true
+      && !(historyChoice === undefined && band.members.some(member => member.kind === "deck" && options.expandedDecks?.has(member.key)))
+      && !bandContainsTarget(band, base, options.revealTarget ?? reader);
     const items: { key: string; w: number; h: number; fit?: number; kind: "member" | "mirror"; node?: SchemeNode }[] = [];
     for (const member of historyCollapsed ? [] : band.members) {
       if (member.kind === "node") {

@@ -412,15 +412,20 @@ export function SchemeBoard({
       window.removeEventListener("storage", bump);
     };
   }, []);
-  const collapsedDecks = useMemo(() => {
+  /* A deck shown expanded by the operator's own still-valid choice also keeps
+     a completed task's automatic history fold open. */
+  const { collapsedDecks, expandedDecks } = useMemo(() => {
     void disclosureNonce;
-    const set = new Set<string>();
-    if (typeof window === "undefined") return set;
+    const collapsed = new Set<string>();
+    const expanded = new Set<string>();
+    if (typeof window === "undefined") return { collapsedDecks: collapsed, expandedDecks: expanded };
     for (const deck of authoredLayout.decks) {
       const override = readDeckDisclosureOverride(window.localStorage, deck.flow.id);
-      if (deckCollapsed(override, deckDisclosureMarker(deck.flow), deckDisclosureTerminal(deck.flow))) set.add(deck.key);
+      const marker = deckDisclosureMarker(deck.flow);
+      if (deckCollapsed(override, marker, deckDisclosureTerminal(deck.flow))) collapsed.add(deck.key);
+      else if (override?.v === "expanded" && override.at === marker) expanded.add(deck.key);
     }
-    return set;
+    return { collapsedDecks: collapsed, expandedDecks: expanded };
   }, [authoredLayout.decks, disclosureNonce]);
   const [expandedStages, setExpandedStages] = useState<ReadonlySet<string>>(() => new Set());
   const [historyOverrides, setHistoryOverrides] = useState<ReadonlyMap<string, boolean>>(() => {
@@ -441,8 +446,8 @@ export function SchemeBoard({
     });
   }, [project]);
   const taskScene = useMemo(() => bandsEnabled
-    ? layoutTaskBands(authoredLayout, orderedBands, { mode: bandMode, viewportWidth: layoutViewportWidth, reader: selected, hostOverrides, collapsedDecks, expandedStages, historyOverrides, revealTarget: selected })
-    : null, [bandsEnabled, authoredLayout, orderedBands, bandMode, layoutViewportWidth, selected, hostOverrides, collapsedDecks, expandedStages, historyOverrides]);
+    ? layoutTaskBands(authoredLayout, orderedBands, { mode: bandMode, viewportWidth: layoutViewportWidth, reader: selected, hostOverrides, collapsedDecks, expandedDecks, expandedStages, historyOverrides, revealTarget: selected })
+    : null, [bandsEnabled, authoredLayout, orderedBands, bandMode, layoutViewportWidth, selected, hostOverrides, collapsedDecks, expandedDecks, expandedStages, historyOverrides]);
   const layout = taskScene?.layout ?? authoredLayout;
 
   /* NO PRUNING HERE (#771). The selection outlives this view, so dropping a path

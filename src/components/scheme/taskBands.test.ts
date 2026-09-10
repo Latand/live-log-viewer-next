@@ -709,6 +709,62 @@ test("completed-task history folds without discarding targets or rewriting state
   }
 });
 
+/** A completed task whose idle implementer ran a review loop: its flow group
+    and deck, the task finished on `finishedAt`. */
+function reviewedTaskScene(flow: import("@/lib/flows/types").Flow, finishedAt: string) {
+  const files = [file(0, "idle")];
+  const layout = base(files);
+  const deckKey = `deck::${flow.id}`;
+  layout.decks = [{ key: deckKey, flow, rounds: [], x: 700, y: 100, w: 600, h: 810 }] as SchemeLayout["decks"];
+  layout.groups = [{ key: `group::flow::${flow.id}`, kind: "flow", id: flow.id, flow, hue: 0, label: "Review", members: [files[0]!.path, deckKey], x: 0, y: 0, w: 1300, h: 900 }];
+  layout.byPath.set(deckKey, layout.decks[0]!);
+  const done = { ...task("done", "2026-01-01T00:00:00Z", files, "done"), updatedAt: finishedAt };
+  const bands = buildTaskBands(layout, { tasks: [done], projection: projectTaskWorkflows([done], [], [flow], files), untitled: "Untitled task" });
+  return { layout, bands, deckKey, options: { mode: "near" as const, viewportWidth: 1440, reader: null } };
+}
+
+test("an expanded deck keeps a completed task's automatic history open; the band's own control still decides", () => {
+  const flow = reviewFlow(file(0).path, "approved");
+  const { layout, bands, deckKey, options } = reviewedTaskScene(flow, "2026-01-02T00:00:00Z");
+  expect(bands[0]!.members.some(member => member.key === deckKey)).toBe(true);
+  const automatic = layoutTaskBands(layout, bands, options);
+  expect(automatic.bands[0]!.geometry).toMatchObject({ historyAvailable: true, historyCollapsed: true });
+  expect(automatic.shown.has(deckKey)).toBe(false);
+  // SchemeBoard's disclosure: the operator's valid "expanded" override.
+  const expandedDecks = new Set([deckKey]);
+  const kept = layoutTaskBands(layout, bands, { ...options, collapsedDecks: new Set(), expandedDecks });
+  expect(kept.bands[0]!.geometry).toMatchObject({ historyAvailable: true, historyCollapsed: false });
+  expect(kept.shown.has(deckKey)).toBe(true);
+  expect(kept.layout.decks[0]!.h).toBe(810);
+  const folded = layoutTaskBands(layout, bands, { ...options, expandedDecks, historyOverrides: new Map([["task:done", false]]) });
+  expect(folded.bands[0]!.geometry.historyCollapsed).toBe(true);
+  expect(folded.shown.has(deckKey)).toBe(false);
+  const shown = layoutTaskBands(layout, bands, { ...options, historyOverrides: new Map([["task:done", true]]) });
+  expect(shown.shown.has(deckKey)).toBe(true);
+  expect(flow.state).toBe("approved");
+});
+
+test("a round recorded after the task finished is current work, never folded history", () => {
+  const round = (n: number, startedAt: string) => ({ ...reviewFlow("", "approved").rounds[0]!, n, verdict: "REQUEST_CHANGES" as const, startedAt });
+  const withRounds = (...rounds: ReturnType<typeof round>[]) => ({ ...reviewFlow(file(0).path, "approved"), state: "needs_decision" as const, decisionRequired: true, rounds });
+  const collapsedWith = (flow: ReturnType<typeof withRounds>, finishedAt: string) => {
+    const { layout, bands, deckKey, options } = reviewedTaskScene(flow, finishedAt);
+    const scene = layoutTaskBands(layout, bands, { ...options, historyOverrides: new Map([["task:done", false]]) });
+    return { available: scene.bands[0]!.geometry.historyAvailable, deckShown: scene.shown.has(deckKey) };
+  };
+  // An old flow that was created before completion gets a new round after it.
+  const renewed = withRounds(round(1, "2026-01-01T00:00:00Z"), round(2, "2026-01-03T00:00:00Z"));
+  expect(collapsedWith(renewed, "2026-01-02T00:00:00Z")).toEqual({ available: false, deckShown: true });
+  expect(renewed.state).toBe("needs_decision");
+  // A decision recorded before completion is still history.
+  expect(collapsedWith(withRounds(round(1, "2026-01-01T00:00:00Z")), "2026-01-02T00:00:00Z")).toEqual({ available: true, deckShown: false });
+  // Dates compare as instants: half a second later is later, whatever the precision.
+  expect(collapsedWith(withRounds(round(1, "2026-01-02T00:00:00.500Z")), "2026-01-02T00:00:00Z").available).toBe(false);
+  // A missing or unreadable date cannot place work before completion.
+  expect(collapsedWith(withRounds(round(1, "")), "2026-01-02T00:00:00Z").available).toBe(false);
+  expect(collapsedWith(withRounds(round(1, "2026-01-01T00:00:00Z")), "not a date").available).toBe(false);
+});
+
 test("461 empty tasks pack into readable header surfaces without dropping visibility choices", () => {
   const tasks = Array.from({ length: 461 }, (_, i) => ({ ...task(String(i), "2026-01-01T00:00:00Z", [], i === 0 ? "done" : "assigned"), showOnBoard: true }));
   const layout = base([]);

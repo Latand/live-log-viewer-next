@@ -1,4 +1,4 @@
-import React, {useState} from 'react';
+import React, {useMemo, useState} from 'react';
 import {createRoot} from 'react-dom/client';
 import type {FileEntry} from '../../src/lib/types';
 import type {BoardTask} from '../../src/lib/tasks/types';
@@ -18,7 +18,24 @@ tasks[0]!.status = "done";
 const flows: Flow[] = [{ id: "review-flow", project: "density", state: "approved", roles: { implementer: {engine:"claude",model:null,effort:null}, reviewer: {engine:"claude",model:null,effort:null} }, template:"implement-review-loop", cwd:"/fixture/repo", baseRef:"abc", baseMode:"head", mode:"manual", reviewerMode:"headless", roundLimit:3, stateDetail:null, implementerPath: files[0]!.path, rounds: [
   {n:1, reviewerPath:files[73]!.path, verdict:"APPROVE", findingsCount:0, terminalAt:"2026-09-01T00:00:00Z"}
 ], createdAt:"2026-09-01T00:00:00Z", closedAt:null } as Flow];
-declare global { interface Window { densityFixture: { files: FileEntry[]; tasks: BoardTask[]; pipelines: Pipeline[] }; openHistoryTarget: () => void } }
+// ?case=history: task 0 still runs its review loop, whose approved round
+// predates completion; its implementer is idle. Steps change the records as
+// the Viewer would and are kept in the URL, so a reload replays them.
+const params=new URL(location.href).searchParams;
+const steps:Record<string,()=>void>={
+  complete:()=>{tasks[0]={...tasks[0]!,status:'done',updatedAt:'2026-09-02T00:00:00Z'};},
+  round:()=>{flows[0]={...flows[0]!,state:'needs_decision',decisionRequired:true,stateDetail:'Round 2 requested changes',rounds:[...flows[0]!.rounds,{n:2,reviewerPath:files[72]!.path,verdict:'REQUEST_CHANGES',findingsCount:1,startedAt:'2026-09-03T00:00:00Z',reviewedAt:'2026-09-03T00:10:00Z',terminalAt:'2026-09-03T00:10:00Z'} as Flow['rounds'][number]]};},
+};
+if(params.get('case')==='history'){
+  files[0]={...files[0]!,activity:'idle',proc:null,authoritativeTurn:{state:'idle',source:'lifecycle',terminalAt:null}} as FileEntry;
+  tasks[0]={...tasks[0]!,status:'assigned'};
+  for(const step of params.get('steps')?.split(',').filter(Boolean)??[])steps[step]!();
+}
+declare global { interface Window { densityFixture: { files: FileEntry[]; tasks: BoardTask[]; pipelines: Pipeline[] }; openHistoryTarget: () => void; densityStep: (step: string) => void } }
 window.densityFixture={files,tasks,pipelines};
-function App(){const [selected,setSelected]=useState<string | null>(null);window.openHistoryTarget=()=>setSelected(files[1]!.path);return <SchemeBoard project="density" groups={[]} manual={files} files={files} flows={flows} tasks={tasks} allTasks={tasks} pipelines={pipelines} surfacePipelines={pipelines} drafts={[]} focus={selected} onSelect={f=>setSelected(f.path)} onClose={()=>setSelected(null)} onDraftClose={()=>{}} onDraftSpawned={()=>{}}/>;}
+function App(){const [selected,setSelected]=useState<string | null>(null);const [revision,setRevision]=useState(0);window.openHistoryTarget=()=>setSelected(files[1]!.path);
+  window.densityStep=step=>{steps[step]!();params.set('steps',[...(params.get('steps')?.split(',').filter(Boolean)??[]),step].join(','));history.replaceState(null,'',`?${params}`);setRevision(n=>n+1);};
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- a step replaces records in place; the revision publishes them
+  const records=useMemo(()=>({tasks:[...tasks],flows:[...flows]}),[revision]);
+  return <SchemeBoard project="density" groups={[]} manual={files} files={files} flows={records.flows} tasks={records.tasks} allTasks={records.tasks} pipelines={pipelines} surfacePipelines={pipelines} drafts={[]} focus={selected} onSelect={f=>setSelected(f.path)} onClose={()=>setSelected(null)} onDraftClose={()=>{}} onDraftSpawned={()=>{}}/>;}
 createRoot(document.getElementById('root')!).render(<App/>);
