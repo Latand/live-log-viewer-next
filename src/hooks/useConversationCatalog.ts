@@ -65,6 +65,42 @@ interface CatalogSnapshot extends ConversationPage {
   expired: boolean;
 }
 
+/**
+ * Scoped snapshots outlive the consumer that loaded them (#1614).
+ *
+ * A scoped consumer names the surface its pages belong to, and that surface
+ * outlives any one mount of it: opening an agent from the desktop agent list
+ * unmounts the list to show the conversation, and coming back used to restart
+ * at page one — several hundred rows of scrolling lost to one click, every
+ * time. Pages are kept here under the same key the mount would have used, so
+ * the list that comes back is the list that was left. Unscoped consumers (the
+ * switchboard's search) keep the old per-mount behaviour and never reach this
+ * map.
+ *
+ * Bounded by scope, least-recently-written first, and gone with the tab: a
+ * place to come back to, not a store.
+ */
+const RETAINED_CATALOG_PAGES = new Map<string, CatalogSnapshot>();
+const RETAINED_CATALOG_SCOPES = 8;
+
+function retainPage(store: Map<string, CatalogSnapshot>, key: string, snapshot: CatalogSnapshot): void {
+  /* Delete before set, so insertion order is recency order. */
+  store.delete(key);
+  store.set(key, snapshot);
+  if (store !== RETAINED_CATALOG_PAGES) return;
+  while (store.size > RETAINED_CATALOG_SCOPES) {
+    const oldest = store.keys().next().value;
+    if (oldest === undefined || oldest === key) break;
+    store.delete(oldest);
+  }
+}
+
+/** Test seam: retained pages are module state, so a test that asserts on them
+    can start from a known one. */
+export function clearRetainedConversationPages(): void {
+  RETAINED_CATALOG_PAGES.clear();
+}
+
 /** Each scope keeps one coherent cursor chain for this mounted consumer. */
 export function useConversationCatalog({
   project, query = "", enabled = true, pageSize = 40, scopeKey,
@@ -77,7 +113,11 @@ export function useConversationCatalog({
   scopeKey?: string;
 }): ConversationCatalogData {
   const key = JSON.stringify([scopeKey ?? null, project ?? null, query.trim(), pageSize]);
-  const cache = useRef(new Map<string, CatalogSnapshot>());
+  const perMount = useRef(new Map<string, CatalogSnapshot>());
+  /* Scoped consumers read and write the retained map, so their pages survive an
+     unmount; unscoped ones keep theirs for as long as they are up. */
+  const cache = useRef(perMount.current);
+  cache.current = scopeKey === undefined ? perMount.current : RETAINED_CATALOG_PAGES;
   const flight = useRef<{ key: string; controller: AbortController } | null>(null);
   const [, render] = useState(0);
   const update = useCallback(() => render((n) => n + 1), []);
@@ -98,11 +138,11 @@ export function useConversationCatalog({
         const seen = new Set<string>();
         const items = [...(cursor ? current?.items ?? [] : []), ...page.items]
           .filter((item) => { if (seen.has(item.path)) return false; seen.add(item.path); return true; });
-        cache.current.set(key, { ...page, items, known: true, error: false, expired: false });
+        retainPage(cache.current, key, { ...page, items, known: true, error: false, expired: false });
       })
       .catch((cause: unknown) => {
         if (controller.signal.aborted || flight.current !== token || active.current.key !== key) return;
-        cache.current.set(key, {
+        retainPage(cache.current, key, {
           ...(cache.current.get(key) ?? { ...EMPTY_PAGE, known: false, expired: false }),
           error: true, failedCursor: conversationCatalogCursorExpired(cause) ? null : cursor,
           expired: conversationCatalogCursorExpired(cause) || (cache.current.get(key)?.expired ?? false),

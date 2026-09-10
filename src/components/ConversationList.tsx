@@ -49,7 +49,7 @@ export function ConversationList({
     return () => observer.disconnect();
   }, [enabled, catalog.loading, catalog.error, catalog.nextCursor, catalog.loadMore]);
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto px-3 py-4 sm:px-4 sm:py-5">
+    <div data-conversation-list-scroll className="min-h-0 flex-1 overflow-y-auto px-3 py-4 sm:px-4 sm:py-5">
       <div className="mx-auto w-full max-w-[760px]">
         <div className="flex items-baseline gap-2">
           <div className="text-[13.5px] font-semibold text-muted">{t(searching ? "switch.results" : "list.title")}</div>
@@ -64,8 +64,15 @@ export function ConversationList({
           aria-label={t("switch.search")}
           className="mb-3 mt-2 h-11 w-full rounded-[8px] border border-border bg-card px-3 text-[13px] text-primary outline-none placeholder:text-muted focus-visible:ring-2 focus-visible:ring-accent/40"
         />
-        <div className="space-y-1.5">
-          {catalog.items.map((file) => <QuietFileRow key={file.path} file={file} activeSubtree={false} showProject={searching} onOpen={onOpen} />)}
+        {/* One row per loaded conversation. Marked because what this list is
+            judged on is how many rows it actually has after a scroll — counted
+            in a real browser, where the sentinel below is what loads them. */}
+        <div data-conversation-list-rows className="space-y-1.5">
+          {catalog.items.map((file) => (
+            <div key={file.path} data-conversation-list-row={file.path}>
+              <QuietFileRow file={file} activeSubtree={false} showProject={searching} onOpen={onOpen} />
+            </div>
+          ))}
         </div>
         {catalog.loading && !catalog.items.length ? (
           <div className="flex min-h-32 items-center justify-center gap-2 text-[13px] font-semibold text-muted">

@@ -5,6 +5,8 @@ import { createRoot, type Root } from "react-dom/client";
 
 import type { FileEntry } from "@/lib/types";
 
+import { clearRetainedConversationPages, useConversationCatalog } from "@/hooks/useConversationCatalog";
+
 import { CONVERSATION_LIST_PAGE_SIZE, ConversationList } from "./ConversationList";
 
 /**
@@ -45,6 +47,9 @@ const roots = new Set<Root>();
 let previousFetch: typeof fetch;
 afterEach(() => {
   if (previousFetch) globalThis.fetch = previousFetch;
+  /* Scoped pages are retained across unmount now (#1614), so one test's list
+     would otherwise be the next test's starting point. */
+  clearRetainedConversationPages();
   for (const root of roots) flushSync(() => root.unmount());
   roots.clear();
   observers.length = 0;
@@ -165,6 +170,61 @@ test("pagination and focus survive an update — the list does not snap back to 
   /* And paging continues from where it stopped, not from the start. */
   await reachSentinel();
   expect(titles(host).length).toBe(200);
+});
+
+test("reopening the list after opening an agent returns to the pages that were scrolled (#1614)", async () => {
+  serveCatalog();
+  const first = mount();
+  await settle();
+  await reachSentinel();
+  await reachSentinel();
+  expect(titles(first.host).length).toBe(150);
+  const requestsBefore = urls.length;
+
+  /* Opening an agent from the list is what unmounts it: the desktop shows the
+     conversation on the board, and the list leaf goes away entirely. This is a
+     harder case than the disable/enable update above — the component instance
+     and every ref it owned are gone. */
+  flushSync(() => { for (const root of roots) root.unmount(); });
+  roots.clear();
+  document.body.replaceChildren();
+  expect(document.querySelectorAll("[data-conversation-list-row]")).toHaveLength(0);
+
+  const second = mount();
+  await settle();
+  /* Back to 150 rows without asking the endpoint for a single one of them. */
+  expect(titles(second.host).length).toBe(150);
+  expect(titles(second.host)[149]).toBe("Agent 149 keeps area 149");
+  expect(urls.length).toBe(requestsBefore);
+  /* And the next scroll continues the same chain. */
+  await reachSentinel();
+  expect(titles(second.host).length).toBe(200);
+});
+
+test("a list with no scope of its own still starts clean on every mount", async () => {
+  /* The switchboard's search passes no scopeKey: its results belong to the
+     query being typed, not to a surface to come back to. */
+  serveCatalog();
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  roots.add(root);
+  const Probe = () => {
+    const catalog = useConversationCatalog({ query: "agent", enabled: true, pageSize: CONVERSATION_LIST_PAGE_SIZE });
+    return <div data-probe-rows={catalog.items.length} />;
+  };
+  flushSync(() => root.render(<Probe />));
+  await settle();
+  expect(host.querySelector("[data-probe-rows]")?.getAttribute("data-probe-rows")).toBe(String(CONVERSATION_LIST_PAGE_SIZE));
+  const requests = urls.length;
+  flushSync(() => root.unmount());
+  roots.delete(root);
+
+  const second = createRoot(host);
+  roots.add(second);
+  flushSync(() => second.render(<Probe />));
+  await settle();
+  expect(urls.length).toBe(requests + 1);
 });
 
 test("the list still reaches the end of a 680-entry corpus and stops asking", async () => {
