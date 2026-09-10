@@ -510,7 +510,7 @@ class CodexRealtimeClient {
    * further utterance is attributed to the later one. Closing that needs an
    * identifier the current data channel does not carry, which cannot be
    * established without a live capture; until then the ledger's `handoff` is
-   * evidence about the call, not a guarantee about a particular turn.
+   * evidence about the call, and it guarantees nothing about a particular turn.
    */
   private publishHandoffJoin(event: { handoffId: string | null; itemId: string | null; userBidiTurnId: string | null }): void {
     const utteranceId = this.utteranceAwaitingHandoff;

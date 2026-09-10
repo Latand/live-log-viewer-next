@@ -284,6 +284,49 @@ export function voiceSelectedContext(conversationId: string): VoiceSelectedConte
   return sessions.get(conversationId)?.admission ?? null;
 }
 
+/**
+ * What a tool call made from this conversation is entitled to read (#1629).
+ *
+ * This is the whole reader contract, and it is a state rather than a value on
+ * purpose: the four ways there is no card each mean something different to the
+ * agent holding the microphone, and collapsing them into `null` is how the agent
+ * ends up guessing.
+ *
+ * THE CARD IS ONLY AVAILABLE WHILE IT DESCRIBES THE WORK IN HAND. A reference
+ * becomes readable when its utterance has been handed off — that handoff is the
+ * work this tool call belongs to — and stops being readable the moment the
+ * operator speaks again, because a new utterance replaces the admission wholesale
+ * and its own handoff has not landed yet. So a later turn that pointed at nothing
+ * reads `awaiting-handoff` and refuses. It never reads the card from the turn
+ * before, which is the failure this state machine exists to make impossible.
+ */
+export type VoiceUtteranceContext =
+  | { state: "no-call" }
+  | { state: "no-reference" }
+  | { state: "awaiting-handoff" }
+  | {
+    state: "joined";
+    reference: SelectedContextRef;
+    handoff: VoiceHandoffIdentity;
+    utteranceId: string | null;
+    sequence: number;
+  };
+
+export function voiceUtteranceContext(conversationId: string): VoiceUtteranceContext {
+  const session = sessions.get(conversationId);
+  if (!session) return { state: "no-call" };
+  const admission = session.admission;
+  if (!admission) return { state: "no-reference" };
+  if (!admission.handoff) return { state: "awaiting-handoff" };
+  return {
+    state: "joined",
+    reference: admission.reference,
+    handoff: admission.handoff,
+    utteranceId: admission.utteranceId,
+    sequence: admission.sequence,
+  };
+}
+
 /** Test seam: the ledger is process-global, so a suite must be able to start
     from an empty one without reaching into module internals. */
 export function resetVoiceViewBindings(): void {

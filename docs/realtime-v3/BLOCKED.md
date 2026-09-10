@@ -63,7 +63,7 @@ the difference understood:
 | transport | client-owned call, handed over as `existingCall` | server-created WebRTC |
 | `clientManagedHandoffs` | not set at the frontend call site | `true` — client-managed delegation is what streams worker progress into the call |
 
-Two of those are transport-ownership choices, not defects. The startup-context
+Two of those are transport-ownership choices and neither is a defect. The startup-context
 difference is a real one: a wider `initialItems` continuity window (native bounds
 it at 128 items and 8,192 estimated tokens) would give the spoken model more of
 the conversation than the latest turn, and overlaps with what startup context

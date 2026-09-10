@@ -711,7 +711,7 @@ describe("CodexAppServerHost", () => {
 
       const start = server.requests.find((request) => request.method === "thread/realtime/start")
         ?.params as { prompt?: string; realtimeStartInstructions?: string; realtimeEndInstructions?: string };
-      /* The correction, not a second copy of the demotion. */
+      /* The correction. A second copy of the demotion would be the defect. */
       expect(start.realtimeStartInstructions).toMatch(/it was not written for you/i);
       expect(start.realtimeStartInstructions).not.toBe(COORDINATOR_VOICE_PERSONA);
       expect(start.prompt).not.toBe(COORDINATOR_VOICE_PERSONA);

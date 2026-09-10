@@ -379,7 +379,7 @@ test("a handoff from a caller with no live session credential is refused", async
 });
 
 test("a malformed utterance identity does not make an ordinary reference unpublishable", async () => {
-  /* The identity is ordering evidence, not a credential. A client that sends a
+  /* The identity is ordering evidence and authorizes nothing. A client that sends a
      broken one still had something on screen, and refusing the reference would
      trade a weaker ordering guarantee for no reference at all. */
   const host = hostFor([]);

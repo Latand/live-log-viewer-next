@@ -244,7 +244,8 @@ test("an approaching usage limit is said while the call is still running", () =>
   /* The 9-second cutoff in docs/realtime-v3/BLOCKED.md arrived as a dead
      transport with no warning. The backend does say so first, and the operator
      can only act on it while there is still a call to act in — so it is a
-     status beside a live transcript, not an alert that ends one. */
+     status beside a live transcript. An alert ends a call in the reader's mind,
+     and this call is still running. */
   const host = document.createElement("div");
   document.body.append(host);
   const root = createRoot(host);

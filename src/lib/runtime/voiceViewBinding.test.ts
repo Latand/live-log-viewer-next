@@ -174,7 +174,7 @@ test("without an utterance identity the reference's own revision decides", () =>
   expect(voiceSelectedContext(CONVERSATION)?.reference).toEqual(newer);
 });
 
-test("a retried publication is the same utterance, not a second one", () => {
+test("a retried publication stays one utterance", () => {
   /* The publish path is fire-and-forget with one retry, so a POST that timed
      out on the client and succeeded on the server arrives twice. Counting that
      as two utterances would make the boundary sequence describe the network. */
@@ -195,7 +195,7 @@ test("a retried publication is the same utterance, not a second one", () => {
 });
 
 test("a later utterance still admits after a refused earlier one", () => {
-  /* The refusal is about ordering, not about the window: the call keeps
+  /* The refusal is about ordering alone — the window is still the bound one, so the call keeps
      working, and the next thing the operator says lands normally. */
   bindVoiceSession(CONVERSATION, "rt-1", DESK);
   admitVoiceSelectedContext({

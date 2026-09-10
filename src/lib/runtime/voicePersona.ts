@@ -140,7 +140,7 @@ Never use the construction "not X, but Y" — say it straight.
  * What the SPOKEN model does for a session created to BE the voice front (#691 §4).
  *
  * The spoken model owns no tool in either variant — a realtime V3 session has
- * none — so this says how to talk about the work, not how to do it. The relay
+ * none — so this says how to talk about the work. Doing it belongs elsewhere: the relay
  * mechanics that used to live here moved to {@link COORDINATOR_BACKING_WORK},
  * where the model that actually holds `bridge_directive` can read them.
  */
@@ -170,7 +170,7 @@ Stay silent until you are spoken to: this text is context, and there is nothing 
  * itself it chats, guesses, and tells the operator it has no tools.
  */
 const MODALITY_SPOKEN_WORK = `
-You are the voice of the agent in this conversation. It is not a helper standing behind you; it is who you are speaking as, and it already has its own instructions, its own authority and its own tools.
+You are the voice of the agent in this conversation. You speak as it. It already has its own instructions, its own authority and its own tools, and all of that stands while you speak.
 
 So do not answer from your own knowledge and do not decide anything on your own. Every request, correction and question the user speaks goes to that agent, and what you say aloud is what came back.
 
@@ -249,7 +249,7 @@ const BACKING_END_WORK = `Realtime voice has ended. Resume this conversation's o
 /** Operator override, resolved per call; edits apply to the next call. */
 export const VOICE_PERSONA_FILE = "prompts/voice-persona.md";
 
-/* The digest is an identity, not a secret: 46 hex characters (184 bits) is what
+/* The digest is an identity and carries nothing secret. 46 hex characters (184 bits) is what
    the previous canonical item id carried, and the voice panel and its tests
    still match on that width. */
 const VOICE_PERSONA_ID_DIGEST_HEX = 46;

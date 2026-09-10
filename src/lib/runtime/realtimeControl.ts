@@ -11,6 +11,7 @@ import {
   parseVoiceViewBinding,
   recordVoiceHandoff,
   releaseVoiceSession,
+  voiceUtteranceContext,
   type VoiceHandoffIdentity,
   type VoiceUtteranceIdentity,
 } from "./voiceViewBinding";
@@ -188,6 +189,34 @@ export async function executeRealtimeControl(
     return { status: permitted.status, body: { error: permitted.error } };
   }
 
+  /**
+   * The reader (#1629), answered before the host requirement because it reads a
+   * process-local ledger and needs no thread.
+   *
+   * The agent running the backing turn asks what the operator was looking at
+   * when they spoke. It is entitled to that about ITS OWN call and nothing else,
+   * which the capability the registry mapped is what establishes — an agent
+   * cannot ask about another conversation's call, and a caller presenting
+   * nothing cannot ask at all.
+   *
+   * Every answer is 200 with a state, including the ones that say no. The four
+   * ways there is no card mean different things to the agent holding the
+   * microphone, and an error would flatten them into "something went wrong".
+   */
+  if (request.action === "utteranceContext") {
+    const own = caller.kind === "conversation" && caller.conversationId === conversationId;
+    if (!own && !authority.operator) {
+      return {
+        status: 403,
+        body: {
+          error: "utteranceContext reads what the operator's own voice call points at. "
+            + "Only that call's conversation may read it.",
+        },
+      };
+    }
+    return { status: 200, body: { ok: true, utterance: voiceUtteranceContext(conversationId) } };
+  }
+
   if (!host) {
     return { status: 409, body: { error: "the active conversation has no hosted Codex realtime thread" } };
   }
@@ -359,7 +388,7 @@ export async function executeRealtimeControl(
         },
       };
     }
-    return { status: 400, body: { error: "action must be start, operatorActivity, selectedContext, handoff, appendSpeech, deliverWorkerResponse, stop, or status" } };
+    return { status: 400, body: { error: "action must be start, operatorActivity, selectedContext, handoff, utteranceContext, appendSpeech, deliverWorkerResponse, stop, or status" } };
   } catch (error) {
     return { status: 409, body: { error: redactCodexHostDiagnostic(error) } };
   }
