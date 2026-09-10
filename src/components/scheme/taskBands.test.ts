@@ -464,6 +464,29 @@ test("a member the camera is not showing is still a member (#1614 item 1)", () =
   expect(band!.members.map((member) => member.key)).toEqual([far.path]);
 });
 
+test("a hidden task whose pipeline has only planned stages keeps its band (#1614)", () => {
+  /* The reported board has three of these: a band whose task carries no
+     conversation at all, and whose pipeline has not launched a stage yet. It
+     holds a reserved slot and the container it owns, so it is not empty, and
+     the preference must not take it off the canvas. */
+  const planned = {
+    ...pipelineWith("planned", [], ["planned-task"]),
+    stages: [{ id: "stage-0", kind: "run", prompt: "", next: null, effectiveRole: { roleId: "builder", engine: "codex", model: null, effort: null, access: "read-write", promptScaffold: null } }],
+    runs: [],
+  } as unknown as Pipeline;
+  const hidden = { ...task("planned-task", "2026-01-01T00:00:00Z", []), board: "hidden" as const };
+  const layout = base([]);
+  layout.groups = [{ key: "group::pipeline::planned", kind: "pipeline", id: "planned", hue: 10, members: [], label: "Pipeline planned", pipeline: planned, x: 0, y: 0, w: 0, h: 0 }];
+  layout.slots = [{ key: "slot::planned::stage-0", pipeline: planned, stage: planned.stages[0]!, x: 0, y: 0, w: 100, h: 40 }] as SchemeLayout["slots"];
+  const bands = buildTaskBands(layout, { tasks: [hidden], projection: projectTaskWorkflows([hidden], [planned], [], []), untitled: "Untitled task" });
+  const band = bands.find((entry) => entry.task?.id === "planned-task");
+  expect(band).toBeDefined();
+  expect(bandHoldsMembers(band!)).toBe(true);
+  /* And it draws no conversation, so a rule that counted only those would have
+     dropped it. */
+  expect(band!.conversations).toBe(0);
+});
+
 test("a hidden task keeps its band while it owns a container, even with no conversation of its own", () => {
   /* `bandHoldsMembers` is what the flag is applied to, and a pipeline group the
      band owns is something the board is drawing for it. */
