@@ -31,7 +31,7 @@ export interface CodexHistoryPage {
   nextCursor: string | null;
   backwardsCursor?: string | null;
 }
-type UnknownReason = "identity" | "malformed" | "cursor" | "bytes" | "pages" | "deadline" | "transport" | "not-observed" | "conflicting-record";
+type UnknownReason = "identity" | "malformed" | "cursor" | "bytes" | "pages" | "deadline" | "transport" | "not-materialized" | "not-observed" | "conflicting-record";
 export type CodexHistoryResult =
   | { state: "complete"; identity: CodexHistoryIdentity; turns: CodexHistoryTurn[]; pages: CodexHistoryPage[]; bytes: number }
   | { state: "unknown"; reason: UnknownReason }
@@ -53,6 +53,12 @@ function unsupported(error: unknown): boolean {
   if (object(error)?.code === -32601) return true;
   const message = error instanceof Error ? error.message : object(error)?.message;
   return typeof message === "string" && /^Codex app-server request failed: (?:method not found|unknown method [`'"]?thread\/(?:turns|items)\/list[`'"]?|(?:list_turns|list_items) is not supported yet)[.!]?$/i.test(message);
+}
+
+function notMaterialized(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : object(error)?.message;
+  return typeof message === "string" && /\bnot materialized yet\b/i.test(message)
+    && /\bbefore (?:the )?first user message\b/i.test(message);
 }
 
 /** Counts JSON wire bytes before retaining a response. Large strings fail before encoding. */
@@ -163,6 +169,14 @@ export async function readCodexHistory(
         ]);
       } catch (error) {
         if (error instanceof ReadFailure) throw error;
+        // This is still unavailable history. Preserve the native first-turn
+        // diagnostic so the host can distinguish initial delivery from a
+        // transport failure; a later pagination failure grants no such fact.
+        if (((method === "thread/read" && requests === 1)
+          || (method === "thread/turns/list" && requests === 2 && params.cursor === null))
+          && notMaterialized(error)) {
+          throw new ReadFailure("not-materialized");
+        }
         throw new ReadFailure(unsupported(error) ? "unsupported" : "transport");
       } finally { clearTimeout(timer); }
       requireValue(Date.now() < deadlineAt, "deadline");
