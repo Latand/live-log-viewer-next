@@ -47,6 +47,8 @@ import path from "node:path";
 
 import { chromium, type Browser, type Page } from "playwright-core";
 
+import { mobileComposerCeiling } from "@/lib/composerScroll";
+
 import { createCaptureDirectory } from "./capture-directory";
 
 const repoRoot = path.resolve(import.meta.dir, "..");
@@ -95,6 +97,17 @@ interface Case {
   unresolved: number;
   /** Shrink the card to this height after it has laid out once. */
   resizeTo?: number;
+  /** Type a twenty-line draft into the real field, through the real input
+      handler, so the composer's own autosize decides the field's height the way
+      it does for an operator writing a long instruction. */
+  draft?: "long";
+  /** Deliveries with no terminal answer, stacked under the input. */
+  receipts?: number;
+  /** A live call docked above the composer, panel and all. */
+  voice?: boolean;
+  /** A conversation whose host advertises no queue: nothing here can yield, so
+      the budget has to fit what is left on its own. */
+  noQueue?: boolean;
 }
 
 const CASES: Case[] = [
@@ -111,14 +124,49 @@ const CASES: Case[] = [
   { name: "card-root-128", surface: "card", pane: { width: 600, height: 780 }, viewport: { width: 720, height: 1080 }, rows: 128, long: false, unresolved: 0 },
   { name: "card-narrow-128-long", surface: "card", pane: { width: 390, height: 760 }, viewport: { width: 720, height: 840 }, rows: 128, long: true, unresolved: 3 },
   { name: "card-child-128-resized-to-500", surface: "card", pane: { width: 600, height: 680 }, viewport: { width: 720, height: 1080 }, rows: 128, long: true, unresolved: 3, resizeTo: 500 },
+  /* A DRAFT THAT GREW. The field autosizes, and on the phone it used to grow
+     into the whole box: the queue above it collapsed to a border with a
+     zero-height interior, and Send landed past the pane. */
+  { name: "phone-128-long-draft", surface: "phone", pane: { width: 342, height: 760 }, viewport: { width: 390, height: 840 }, rows: 128, long: true, unresolved: 3, draft: "long" },
+  { name: "phone-4-long-draft", surface: "phone", pane: { width: 342, height: 760 }, viewport: { width: 390, height: 840 }, rows: 4, long: false, unresolved: 0, draft: "long" },
+  { name: "card-child-128-long-draft", surface: "card", pane: { width: 600, height: 680 }, viewport: { width: 720, height: 1080 }, rows: 128, long: true, unresolved: 3, draft: "long" },
+  /* A CALL DOCKED ABOVE THE COMPOSER, with no queue in the form at all — the
+     composition where nothing could yield and the budget clipped Send instead.
+     With receipts under the input, and on the smallest card the board makes. */
+  { name: "card-child-voice-long-draft", surface: "card", pane: { width: 600, height: 680 }, viewport: { width: 720, height: 1080 }, rows: 0, long: false, unresolved: 0, draft: "long", voice: true, noQueue: true },
+  { name: "card-child-voice-receipts-long-draft", surface: "card", pane: { width: 600, height: 680 }, viewport: { width: 720, height: 1080 }, rows: 0, long: false, unresolved: 0, draft: "long", voice: true, receipts: 6, noQueue: true },
+  { name: "card-small-voice-receipts", surface: "card", pane: { width: 600, height: 500 }, viewport: { width: 720, height: 1080 }, rows: 0, long: false, unresolved: 0, voice: true, receipts: 6, noQueue: true },
+  { name: "card-small-voice-receipts-long-draft", surface: "card", pane: { width: 600, height: 500 }, viewport: { width: 720, height: 1080 }, rows: 0, long: false, unresolved: 0, draft: "long", voice: true, receipts: 6, noQueue: true },
+  { name: "phone-voice-receipts-long-draft", surface: "phone", pane: { width: 342, height: 760 }, viewport: { width: 390, height: 840 }, rows: 0, long: false, unresolved: 0, draft: "long", voice: true, receipts: 6, noQueue: true },
+  /* And both at once: a call and a queue dividing one budget with a grown
+     draft, which is the whole contention this bound arbitrates. */
+  { name: "card-child-voice-queue-long-draft", surface: "card", pane: { width: 600, height: 680 }, viewport: { width: 720, height: 1080 }, rows: 128, long: true, unresolved: 3, draft: "long", voice: true, receipts: 6 },
+  { name: "phone-voice-queue-long-draft", surface: "phone", pane: { width: 342, height: 760 }, viewport: { width: 390, height: 840 }, rows: 16, long: false, unresolved: 0, draft: "long", voice: true },
 ];
+
+/** Twenty lines, typed into the field the way an operator writes a long
+    instruction — long enough that the field reaches its ceiling on every
+    surface here and has to stop. */
+const LONG_DRAFT = Array.from({ length: 20 }, (_, index) => `Long instruction line ${index + 1} with enough text to wrap`).join("\n");
 
 interface Reading {
   inputInsidePane: boolean;
   sendInsidePane: boolean;
   inputPressable: boolean;
+  sendPressable: boolean;
   feedHeight: number;
+  fieldHeight: number;
+  panelPresent: boolean;
   panelHeight: number;
+  /** The panel's own scrollport. A panel squeezed to its borders still reports
+      a height; only its INTERIOR says whether anything inside it can be seen or
+      scrolled to. */
+  panelInterior: number;
+  /** The docked call's slot, and how much of it the operator can see. A call
+      panel is the tallest thing this form ever gains, so it is the first to
+      yield — and what it yields down to still has to be a panel. */
+  voicePresent: boolean;
+  voiceInterior: number;
   queueStartVisible: boolean;
   rows: number;
   rowsScrollToEnd: boolean;
@@ -131,21 +179,33 @@ const READ = () => {
   const feed = document.querySelector("[data-log-feed-scroller]")!.getBoundingClientRect();
   const field = document.querySelector("textarea") as HTMLTextAreaElement;
   const input = field.getBoundingClientRect();
-  const send = (field.closest("form")?.querySelector('button[type="submit"]') ?? null)?.getBoundingClientRect() ?? null;
-  const panel = document.querySelector('[data-testid="native-queue-panel"]')!.getBoundingClientRect();
+  const sendControl = field.closest("form")?.querySelector('button[type="submit"]') ?? null;
+  const send = sendControl?.getBoundingClientRect() ?? null;
+  const panelNode = document.querySelector('[data-testid="native-queue-panel"]') as HTMLElement | null;
+  const panel = panelNode?.getBoundingClientRect() ?? null;
   const start = document.querySelector('[data-testid="native-queue-start"]')?.getBoundingClientRect() ?? null;
   const list = document.querySelector('[data-testid="native-queue-rows"]') as HTMLElement | null;
+  const dock = document.querySelector('[data-testid="voice-dock-slot"]') as HTMLElement | null;
   const inside = (box: DOMRect) => box.top >= pane.top - 1 && box.bottom <= pane.bottom + 1;
   /* WHAT IS ON TOP OF THE FIELD. A control laid out inside the pane can still
      be covered by a panel that spilled over it, and a covered field takes no
-     typing, so the reading asks the page who owns those pixels. */
+     typing, so the reading asks the page who owns those pixels. Send is asked
+     the same question: a submit control the operator cannot hit is a composer
+     with no way to send. */
   const over = document.elementFromPoint(input.x + input.width / 2, input.y + input.height / 2);
+  const onSend = send ? document.elementFromPoint(send.x + send.width / 2, send.y + send.height / 2) : null;
   const common = {
     inputInsidePane: inside(input),
     sendInsidePane: send ? inside(send) : false,
     inputPressable: over === field,
+    sendPressable: Boolean(sendControl && onSend && sendControl.contains(onSend)),
     feedHeight: Math.round(feed.height),
-    panelHeight: Math.round(panel.height),
+    fieldHeight: Math.round(input.height),
+    panelPresent: panelNode !== null,
+    panelHeight: panel ? Math.round(panel.height) : 0,
+    panelInterior: panelNode ? panelNode.clientHeight : 0,
+    voicePresent: Boolean(dock?.querySelector('[aria-label="Voice conversation"]')),
+    voiceInterior: dock ? dock.clientHeight : 0,
     queueStartVisible: start ? inside(start) : false,
     rows: document.querySelectorAll('[data-testid="native-queue-row"]').length,
     pageScrolls: document.documentElement.scrollHeight > window.innerHeight + 1,
@@ -174,12 +234,31 @@ const READ = () => {
 
 /** The conversation has to keep enough room to still be a conversation. */
 const MIN_FEED_PX = 120;
+/** And the queue has to keep enough room to still be a queue: its header row
+    with the queue-level control, and a scrollport tall enough to read a row in.
+    Below this the panel is a border with nothing inside it — which is what a
+    grown draft did to it, leaving no control reachable by scroll or by
+    keyboard. */
+const MIN_QUEUE_INTERIOR_PX = 88;
+/** A docked call yields before the queue does — its own start/stop and float
+    controls are in the composer's control row, not in the panel — but what it
+    yields down to is still a panel with something in it. */
+const MIN_VOICE_INTERIOR_PX = 54;
 
-function holds(reading: Reading, scenario: { rows: number }): boolean {
-  return reading.inputInsidePane && reading.sendInsidePane && reading.inputPressable
-    && reading.feedHeight >= MIN_FEED_PX
+function holds(reading: Reading, scenario: Case): boolean {
+  /* The two controls with no alternative come first, on every composition:
+     something to type in, and something to press. */
+  const composerUsable = reading.inputInsidePane && reading.sendInsidePane
+    && reading.inputPressable && reading.sendPressable
+    && reading.feedHeight >= MIN_FEED_PX && !reading.pageScrolls;
+  /* A call that is up shows a panel, however squeezed the composition is. */
+  const voiceUsable = !scenario.voice
+    || (reading.voicePresent && reading.voiceInterior >= MIN_VOICE_INTERIOR_PX);
+  if (scenario.noQueue) return composerUsable && voiceUsable && !reading.panelPresent;
+  return composerUsable && voiceUsable
+    && reading.panelPresent && reading.panelInterior >= MIN_QUEUE_INTERIOR_PX
     && reading.queueStartVisible && reading.rows === scenario.rows
-    && reading.rowsScrollToEnd && reading.lastRowPressable && !reading.pageScrolls;
+    && reading.rowsScrollToEnd && reading.lastRowPressable;
 }
 
 function page(css: string, scenario: Case): string {
@@ -199,9 +278,21 @@ async function open(browser: Browser, bundle: string, css: string, scenario: Cas
     if (url.pathname === "/") return route.fulfill({ contentType: "text/html", body: page(css, scenario) });
     return route.abort();
   });
-  const query = `count=${scenario.rows}&surface=${scenario.surface}${scenario.long ? "&long=1" : ""}&unresolved=${scenario.unresolved}`;
+  const query = `count=${scenario.rows}&surface=${scenario.surface}${scenario.long ? "&long=1" : ""}&unresolved=${scenario.unresolved}`
+    + `&receipts=${scenario.receipts ?? 0}${scenario.voice ? "&voice=1" : ""}${scenario.noQueue ? "&noqueue=1" : ""}`;
   await view.goto(`http://queue-height.fixture/?${query}`);
-  await view.locator('[data-testid="native-queue-row"]').first().waitFor({ timeout: 15000 });
+  await view.locator("textarea").first().waitFor({ timeout: 15000 });
+  if (!scenario.noQueue) await view.locator('[data-testid="native-queue-row"]').first().waitFor({ timeout: 15000 });
+  /* The call panel is portalled in by its Viewer-level owner, so it arrives
+     after the composer does. */
+  if (scenario.voice) await view.locator('[aria-label="Voice conversation"]').first().waitFor({ timeout: 15000 });
+  /* TYPED, not seeded: the field's height comes from the composer's own autosize
+     running on a real input event, which is what an operator writing a long
+     instruction produces. */
+  if (scenario.draft === "long") {
+    await view.locator("textarea").first().fill(LONG_DRAFT);
+    await view.waitForTimeout(150);
+  }
   if (scenario.resizeTo) {
     await view.evaluate((height) => { (document.getElementById("app") as HTMLElement).style.height = `${height}px`; }, scenario.resizeTo);
   }
@@ -219,9 +310,12 @@ async function main(): Promise<number> {
     const verdicts: [string, boolean][] = [];
     for (const scenario of CASES) {
       const { view, errors, close } = await open(browser, bundle, css, scenario);
+      /* The frame first: the reading below scrolls the queue to its far end to
+         prove the last row is reachable, and a frame taken after that shows a
+         scrolled queue rather than the layout the operator opens on. */
+      try { await view.screenshot({ path: path.join(OUT_DIR, `${scenario.name}.png`) }); } catch { /* a frame is for a human */ }
       const reading = await view.evaluate(READ) as Reading;
       measurements[scenario.name] = { ...reading, errors };
-      try { await view.screenshot({ path: path.join(OUT_DIR, `${scenario.name}.png`) }); } catch { /* a frame is for a human */ }
       verdicts.push([`${scenario.name}: composer reachable, conversation keeps room, every row reachable`, holds(reading, scenario) && errors.length === 0]);
       await close();
     }
@@ -246,6 +340,44 @@ async function main(): Promise<number> {
       measurements[`red-${scenario.name}-unbudgeted`] = unbudgeted;
       try { await view.screenshot({ path: path.join(OUT_DIR, `red-${scenario.name}-unbudgeted.png`) }); } catch { /* frame only */ }
       verdicts.push([`RED ${scenario.name}: the queue taking room the conversation cannot spare is caught`, !holds(unbudgeted, scenario)]);
+      await close();
+    }
+
+    /* RED, the second repair: the field's ceiling now leaves the panels their
+       room, and the panels above the input now yield. Each is put back the way
+       it was, one composition at a time, and the same reading has to fail. */
+    {
+      const scenario = CASES.find((one) => one.name === "phone-128-long-draft")!;
+      const { view, close } = await open(browser, bundle, css, scenario);
+      /* The ceiling the field had before it reserved anything for the queue —
+         computed from the product's own function, so this control cannot drift
+         away from the behaviour it stands for. */
+      await view.evaluate((height) => {
+        const field = document.querySelector("textarea") as HTMLTextAreaElement | null;
+        if (field) field.style.height = `${height}px`;
+      }, mobileComposerCeiling(840, 840));
+      const unreserved = await view.evaluate(READ) as Reading;
+      measurements["red-phone-128-long-draft-unreserved"] = unreserved;
+      try { await view.screenshot({ path: path.join(OUT_DIR, "red-phone-128-long-draft-unreserved.png") }); } catch { /* frame only */ }
+      verdicts.push(["RED phone long draft: a field that grows into the queue's room is caught", !holds(unreserved, scenario)]);
+      await close();
+    }
+
+    for (const scenario of CASES.filter((one) => one.name === "card-child-voice-long-draft" || one.name === "card-small-voice-receipts")) {
+      const { view, close } = await open(browser, bundle, css, scenario);
+      /* The call's slot and the receipt list as they were: no `min-h-0`, no
+         scroller of their own — so the flexbox can take nothing back from them
+         and the budget's overflow lands on the input and Send instead. */
+      await view.evaluate(() => {
+        const dock = document.querySelector('[data-testid="voice-dock-slot"]') as HTMLElement | null;
+        if (dock) { dock.style.minHeight = "auto"; dock.style.overflow = "visible"; }
+        const receipts = document.querySelector('[data-testid="composer-receipts"]') as HTMLElement | null;
+        if (receipts) { receipts.style.minHeight = "auto"; receipts.style.overflow = "visible"; }
+      });
+      const unyielding = await view.evaluate(READ) as Reading;
+      measurements[`red-${scenario.name}-unyielding`] = unyielding;
+      try { await view.screenshot({ path: path.join(OUT_DIR, `red-${scenario.name}-unyielding.png`) }); } catch { /* frame only */ }
+      verdicts.push([`RED ${scenario.name}: a call panel that cannot yield taking the input's room is caught`, !holds(unyielding, scenario)]);
       await close();
     }
 

@@ -17,6 +17,7 @@ import { parseSelectedContextRef, type SelectedContextRef } from "@/lib/selectio
 import { useViewerSelectedContext, viewerSelectedContext } from "@/lib/selection/viewerSelectedContext";
 import { useHostTarget } from "@/hooks/useHostTarget";
 import { accountIdFromPath } from "@/lib/accounts/badge";
+import { COMPOSER_CALL_RESERVE_PX, COMPOSER_QUEUE_RESERVE_PX } from "@/lib/composerScroll";
 import { conversationIdentity } from "@/lib/accounts/identity";
 import { activeCardMigration, cardMigrationState, migrationHoldsDelivery, migrationHoldsSends, migrationTargetName } from "@/lib/accounts/migration";
 import { getLocale, useLocale } from "@/lib/i18n";
@@ -1568,6 +1569,15 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
   /* An off-screen or far-zoom pane skips the pane-resolution poll; the last
      known target keeps the composer usable the moment it comes back. */
   const target = useHostTarget(file.pid, canMessageWithoutPane(file) ? file.path : undefined, !pollPaused);
+  /* WHAT ELSE IS IN THE COMPOSER'S BOX, each on the predicate that actually puts
+     it there: `NativeQueuePanel` draws nothing with no rows and no unanswered
+     hand-off, and the call panel is docked only while a call is up and no
+     floating window has taken it. A capability alone reserves nothing, and a
+     queue that empties or a call that ends gives its room straight back to the
+     draft. */
+  const queuePanelRendered = nativeQueueEnabled
+    && (nativeQueue.view.rows.length > 0 || unresolvedAdmissions.length > 0);
+  const callPanelDocked = voiceEnabled && !pipComposerSlot && voice.phase !== "idle";
   /* Column reshuffles can remount the composer mid-typing; the draft lives in
      sessionStorage so the text survives the remount. */
   const composer = useComposer({
@@ -1591,6 +1601,13 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
     /* Queue-first (issue #561): a submitted message lives in the durable
        outbox, so the field never locks behind an in-flight delivery. */
     holdInputWhileBusy: false,
+    /* The queue panel below shares this composer's ONE bounded box, so the
+       field's own grow ceiling gives up the room that panel needs (#1629) —
+       exactly when the panel is rendered, on exactly the predicate the panel
+       renders on. A draft that keeps growing past it scrolls inside the field,
+       which is what the field has always done at its ceiling. */
+    reservedPx: (queuePanelRendered ? COMPOSER_QUEUE_RESERVE_PX : 0)
+      + (callPanelDocked ? COMPOSER_CALL_RESERVE_PX : 0),
     viewActive,
   });
   /* Pulls the bridge inbox once, at the start of a turn, and only for the voice
@@ -3146,8 +3163,23 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
       voicePanel={voiceEnabled && !pipComposerSlot ? (
         /* An empty slot, not a panel: `VoicePipHost` owns the ONE panel rendering
            and portals it here while no floating window is open. While one is,
-           the panel lives in the PiP window and this slot stands down. */
-        <div ref={publishDockSlot} data-testid="voice-dock-slot" className="flex flex-col" />
+           the panel lives in the PiP window and this slot stands down.
+
+           THE SLOT IS WHAT YIELDS for the panel it holds. A live call's panel
+           is the tallest thing this form can gain — a transcript, a notice and
+           the call controls — and it arrives through a portal, so the form can
+           only take room back from the slot: `min-h-0` lets the flexbox shrink
+           it and its own scroller keeps what does not fit reachable. The panel
+           itself must NOT shrink with it (`[&>*]:shrink-0`) — a panel that
+           collapses alongside its slot leaves the scroller nothing to scroll,
+           and its own `overflow-hidden` then clips the transcript away. The
+           floor is on the slot WITH a panel in it (`:not(:empty)`): an empty
+           slot is every conversation that is not on a call, and 56 px of nothing
+           above the input on all of them is what the floor must not cost. Without
+           that, an inline call in a 680 px card laid Send out below the pane and
+           no wheel could reveal it. The panel's controls sit in its header, so a
+           squeezed slot still opens on them. */
+        <div ref={publishDockSlot} data-testid="voice-dock-slot" className="flex min-h-0 flex-col overflow-y-auto overscroll-contain [&:not(:empty)]:min-h-14 [&>*]:shrink-0" />
       ) : undefined}
       /* Codex's own queue, above the field that fills it (#1629). */
       queuePanel={nativeQueueEnabled ? (
@@ -3295,11 +3327,19 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
          transcript, and a phone's own composer overflowing its form with the
          input and Send laid out below the pane. So the card's budget is a share
          of the CARD: at most 60% of it, and never less than 15rem of it left
-         for the transcript, whichever binds first. Inside the budget the queue
-         panel is the part that yields (`NativeQueuePanel`); the input, the
-         controls and the receipts do not. Where the card's own height is not
-         definite the percentage cannot resolve and the panel's own ceiling is
-         the bound, exactly as before. */
+         for the transcript, whichever binds first.
+
+         WHAT YIELDS INSIDE THE BUDGET, and in this order: everything that is a
+         LIST — the docked Voice call's panel, the native queue, the receipts
+         under the input — each bounded with `min-h-0` and its own scroller, so
+         what does not fit is scrolled to inside it rather than laid out past the
+         pane's bottom edge. The input and Send never yield: they are the two
+         controls with no alternative, and a budget that pushed THEM out is the
+         defect this bound exists to fix, not a trade it may make. A bound with
+         nothing left to yield did exactly that — an inline call in a 680 px card
+         needed 479 px inside a 407 px budget, and the 72 px that did not fit
+         were Send. Where the card's own height is not definite the percentage
+         cannot resolve and each panel's own ceiling is the bound, as before. */
       className={`flex shrink-0 flex-col gap-1.5 border-t border-border bg-card px-2.5 ${
         isMobile
           ? "max-h-[min(38dvh,20rem)] overflow-x-clip overflow-y-auto overscroll-y-contain py-1.5"
@@ -3328,7 +3368,11 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
         </div>
       ) : null}
       {sent.length || echoedReceipts.length ? (
-        <div className="flex flex-col gap-0.5" aria-label={t("composer.queueAria")}>
+        /* A list, so it scrolls (`min-h-0` is what lets the form take room back
+           from it): a run of unacknowledged sends stacked above the field used
+           to push the field and Send down past the pane's bottom edge inside a
+           small card. Its own rows keep their order and their controls. */
+        <div className="flex min-h-0 flex-col gap-0.5 overflow-y-auto overscroll-contain" aria-label={t("composer.queueAria")}>
           {echoedReceipts.map((receipt) => (
             <div key={receipt.operationId} data-delivery-echo className="flex items-center justify-end gap-1.5">
               <Check className="h-3 w-3 shrink-0 text-success" aria-hidden />

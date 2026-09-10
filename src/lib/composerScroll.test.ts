@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import {
   caretAtEnd,
   clampHeight,
+  COMPOSER_QUEUE_RESERVE_PX,
   keyboardInset,
   MOBILE_COMPOSER_CHROME_PX,
   MOBILE_COMPOSER_UNIT_CHROME_PX,
@@ -179,6 +180,56 @@ describe("mobileComposerCeiling — the grown field never pushes its own tools r
        opens the field well past the shared 160px cap. */
     expect(mobileComposerCeiling(844, 844)).toBeGreaterThan(160);
     expect(mobileComposerCeiling(932, 932)).toBeGreaterThan(160);
+  });
+});
+
+/*
+ * Issue #1629 — the field and the native queue divide ONE bounded box. The
+ * queue panel sits above the field inside the same form, and it is the only
+ * part of that form that can give room back, so a field that grows into all of
+ * it leaves a panel with a zero-height interior: no Start, no recovery control
+ * and no row reachable, by scroll or by keyboard. The ceiling reserves that
+ * room while the panel is rendered, and gives it straight back when it is not.
+ */
+describe("mobileComposerCeiling — the field leaves the queue panel its room (#1629)", () => {
+  const PHONE = { visible: 840, layout: 840 };
+
+  test("with no queue panel the ceiling is exactly what it always was", () => {
+    expect(mobileComposerCeiling(PHONE.visible, PHONE.layout, 0)).toBe(mobileComposerCeiling(PHONE.visible, PHONE.layout));
+    expect(mobileComposerCeiling(PHONE.visible, PHONE.layout)).toBe(mobileComposerUnitMax(840) - MOBILE_COMPOSER_UNIT_CHROME_PX);
+  });
+
+  test("a rendered panel takes its room off the field, not off the input's own chrome", () => {
+    const withQueue = mobileComposerCeiling(PHONE.visible, PHONE.layout, COMPOSER_QUEUE_RESERVE_PX);
+    expect(withQueue).toBe(mobileComposerCeiling(PHONE.visible, PHONE.layout) - COMPOSER_QUEUE_RESERVE_PX);
+    /* What the phone that reported this actually has left: the box budget minus
+       its own chrome minus the panel's room — and the tools row holding Send
+       still fits inside the box beside the field (#1483 still holds). */
+    expect(withQueue).toBe(128);
+    expect(withQueue + MOBILE_COMPOSER_UNIT_CHROME_PX + COMPOSER_QUEUE_RESERVE_PX)
+      .toBeLessThanOrEqual(mobileComposerUnitMax(PHONE.layout));
+  });
+
+  test("the reserve comes off the keyboard-open bound too, because the panel is above the keyboard as well", () => {
+    /* Keyboard up on a 390×844 phone: the visible bound is what binds, and the
+       panel shares that visible area with the field. */
+    const open = mobileComposerCeiling(508, 844, COMPOSER_QUEUE_RESERVE_PX);
+    expect(open).toBeLessThan(mobileComposerCeiling(508, 844));
+    expect(open).toBe(129);
+    /* Whichever of the two bounds binds, the panel's room survives both. */
+    expect(open + MOBILE_COMPOSER_CHROME_PX + COMPOSER_QUEUE_RESERVE_PX).toBeLessThanOrEqual(508);
+    expect(open + MOBILE_COMPOSER_UNIT_CHROME_PX + COMPOSER_QUEUE_RESERVE_PX).toBeLessThanOrEqual(mobileComposerUnitMax(844));
+  });
+
+  test("a usable field outranks the reserve on a viewport too small for both", () => {
+    /* Landscape, keyboard up: the one-row floor still wins, so the field never
+       collapses to nothing for the sake of the panel — the panel scrolls
+       itself instead. */
+    expect(mobileComposerCeiling(280, 390, COMPOSER_QUEUE_RESERVE_PX)).toBe(44);
+  });
+
+  test("the reserve is the panel's header, a readable row and the gap above the field", () => {
+    expect(COMPOSER_QUEUE_RESERVE_PX).toBe(126);
   });
 });
 

@@ -87,6 +87,11 @@ export interface UseComposerOptions {
       queue, so the input must stay typable while it is delivered — there is no
       long-lived "sending" state holding the draft hostage. */
   holdInputWhileBusy?: boolean;
+  /** Room inside the composer's own bounded box that is NOT the field's to
+      take — the native queue panel above it (#1629). The phone ceiling yields
+      it, so a grown draft cannot squeeze a sibling the operator still has to
+      reach. */
+  reservedPx?: number;
 }
 
 /**
@@ -97,7 +102,7 @@ export interface UseComposerOptions {
  * own delivery (`submit`) and its own surrounding chrome; everything below the
  * text lives in `ComposerBar`.
  */
-export function useComposer({ initialText, persistText, submit, disabled = false, imageCapability = null, acceptFiles = false, holdInputWhileBusy = true, viewActive = true }: UseComposerOptions) {
+export function useComposer({ initialText, persistText, submit, disabled = false, imageCapability = null, acceptFiles = false, holdInputWhileBusy = true, viewActive = true, reservedPx = 0 }: UseComposerOptions) {
   /* A remount mid-typing (column reshuffles, draft handovers) restores the
      draft from storage; the ref always holds the latest text so async
      dictation callbacks append to what the user typed meanwhile instead of
@@ -177,11 +182,14 @@ export function useComposer({ initialText, persistText, submit, disabled = false
      written in `dvh`, which the keyboard leaves alone: with the keyboard DOWN
      the visible viewport says the field has room it does not have, and the
      field grew until the tools row holding Stop fell out of its own box
-     (#1483). */
+     (#1483). `reservedPx` is that same rule for a sibling the box gained
+     since: the native queue panel renders inside this budget too, so the
+     field stops short of the room that panel needs to stay reachable
+     (#1629). */
   const isMobile = useIsMobile(viewActive);
   const viewportH = useViewportHeight(viewActive);
   const layoutH = useLayoutViewportHeight(viewActive);
-  const maxPx = isMobile ? mobileComposerCeiling(viewportH, layoutH) : COMPOSER_MAX_PX;
+  const maxPx = isMobile ? mobileComposerCeiling(viewportH, layoutH, reservedPx) : COMPOSER_MAX_PX;
 
   const attachments = useImageAttachments({
     onError: (message) => setStatus({ kind: "err", text: message }),

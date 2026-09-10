@@ -15,13 +15,22 @@
  * wrapper is consistent with itself.
  *
  * The query decides the case: `surface=phone|card`, `count`, `long`,
- * `unresolved`.
+ * `unresolved`, `draft=long`, `receipts=<n>`, `voice`, and `noqueue` for the
+ * composition that has no queue at all to give room back.
+ *
+ * `voice` mounts the REAL `VoicePipHost` against a fake realtime client with a
+ * null microphone stream, so the docked call panel above the composer is the
+ * app's own — the tallest thing this form ever gains, and the one that pushed
+ * the input and Send out of a 680 px card.
  */
 import { createRoot } from "react-dom/client";
 import { createElement } from "react";
 
 import { BranchPane } from "@/components/BranchPane";
 import { NativeConversationPane } from "@/components/scheme/NativeConversationPane";
+import { VoicePipHost } from "@/components/voice/VoicePipHost";
+import { configureRealtimeClientForTests } from "@/hooks/useCodexRealtime";
+import { reportCallPhase } from "@/lib/realtime/activeCall";
 import { installSnapshot } from "@/components/runtime/runtimeModel";
 import { setLogFeedDependenciesForTests } from "@/components/logFeedDependencies";
 import { setTmuxComposerRuntimeDependenciesForTests } from "@/components/tmuxComposerRuntime";
@@ -36,6 +45,9 @@ const count = Number(params.get("count") ?? "16");
 const long = params.has("long");
 const unresolved = Number(params.get("unresolved") ?? "0");
 const phone = params.get("surface") === "phone";
+const receiptCount = Number(params.get("receipts") ?? "0");
+const withVoice = params.has("voice");
+const withQueue = !params.has("noqueue");
 
 const CARD = "conversation_queue_height";
 const THREAD = "thread-queue-height";
@@ -76,6 +88,59 @@ const items = entries.map((entry, index) => ({
   input: [{ type: "text" as const, text: entry.versions[0]!.text }],
 }));
 
+/* Deliveries this conversation has no terminal answer for: the receipt list
+   under the input, which is one of the surfaces that has to give room back when
+   the form is at its budget. */
+const receipts = Array.from({ length: receiptCount }, (_, index) => ({
+  operationId: `receipt-${index}`,
+  idempotencyKey: `receipt-key-${index}`,
+  conversationId: CARD,
+  kind: "send",
+  status: index % 2 ? "failed" : "uncertain",
+  text: `Submitted message ${index + 1}: check the requested result and preserve the work.`,
+  reason: index % 2 ? "the transport timed out with no terminal answer" : "the delivery outcome is unknown",
+  at: new Date(Date.now() - 10_000 + index).toISOString(),
+  revision: 1,
+}));
+
+/* A call that is up, with a transcript and a notice, and NO microphone: the
+   panel is the app's own and the client is a stand-in that answers a snapshot
+   and nothing else. Nothing here reaches a provider. */
+const voiceSnapshot = {
+  phase: "live" as const,
+  lines: Array.from({ length: 12 }, (_, index) => ({
+    id: `v${index}`,
+    role: index % 2 ? ("assistant" as const) : ("user" as const),
+    text: `Voice transcript ${index + 1}: read the selected conversation and report the requested information.`,
+    final: true,
+  })),
+  error: null,
+  notice: "This account is approaching its usage limit; the call may be cut short.",
+  agentUnavailable: null,
+  startedAt: Date.now() - 62_000,
+  micMuted: false,
+  outputMuted: false,
+};
+const voiceClient = {
+  subscribe: () => () => {},
+  getSnapshot: () => voiceSnapshot,
+  micStream: () => null,
+  toggleMic() {},
+  toggleOutput() {},
+  start: async () => {},
+  stop: async () => {},
+  updateWorkerProgress() {},
+  reconcileWorkerDeliveries() {},
+  reconcileCanonicalTranscript() {},
+  reportBackingHost() {},
+  onDeliveryAcknowledged: () => () => {},
+  realtimeSession: () => null,
+};
+if (withVoice) {
+  configureRealtimeClientForTests(() => voiceClient as never);
+  reportCallPhase(CARD, "live");
+}
+
 const session = {
   conversationId: CARD,
   sessionKey: { engine: "codex", sessionId: THREAD },
@@ -90,7 +155,7 @@ const session = {
   capabilities: {
     steer: true,
     structuredAttention: true,
-    nativeQueue: true,
+    nativeQueue: withQueue,
     imageInput: { supported: true, mimes: ["image/png"] },
   },
   activeTurnId: null,
@@ -138,6 +203,7 @@ setRuntimeBusForTests({
 const writes: unknown[] = [];
 Object.assign(window, { __queueWrites: writes });
 setTmuxComposerRuntimeDependenciesForTests({
+  useRuntimeReceiptsForArtifact: (() => receipts) as never,
   nativeQueue: {
     read: async () => ({ entries, native: { threadId: THREAD, items, stale: false } }),
     write: async (body) => {
@@ -212,3 +278,12 @@ const host = document.getElementById("app")!;
 createRoot(host).render(phone
   ? createElement(BranchPane, { file, tasks: [], isRoot: true })
   : createElement(NativeConversationPane, { file, tasks: [], isRoot: false, active: true, place: host, fullWindowPlace: null }));
+
+/* The Viewer-level owner of the ONE call panel, mounted the way the app mounts
+   it: it portals the panel into the slot the card publishes above its composer,
+   so the docked call in these frames is the real composition. */
+if (withVoice) {
+  const voiceHost = document.createElement("div");
+  document.body.append(voiceHost);
+  createRoot(voiceHost).render(createElement(VoicePipHost, { mobile: phone, resolveClient: () => voiceClient as never }));
+}

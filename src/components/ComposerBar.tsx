@@ -653,7 +653,14 @@ export function ComposerBar({
       {imageDisabled && imageDisabledReason ? (
         <span role="status" className="text-caption font-semibold text-muted">{imageDisabledReason}</span>
       ) : null}
-      {receipts ? <div className="flex flex-wrap gap-1.5">{receipts}</div> : null}
+      {/* Bounded like the tray above it, and for the same reason: a run of
+          failed or uncertain deliveries stacks under the input, and inside a
+          card's bounded composer (`TmuxComposer`'s form) whatever it takes past
+          the budget is taken from the controls above it — a live call's panel
+          plus six unresolved receipts laid Send out below the pane. `min-h-0`
+          is what lets the form take that room back; the receipts keep their
+          order and their retry controls inside their own scroller. */}
+      {receipts ? <div data-testid="composer-receipts" className="flex min-h-0 flex-wrap gap-1.5 overflow-y-auto overscroll-contain">{receipts}</div> : null}
     </>
   );
 }

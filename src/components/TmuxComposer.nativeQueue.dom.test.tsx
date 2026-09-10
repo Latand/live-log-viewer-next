@@ -18,6 +18,7 @@ import { appendComposerDraft, TmuxComposer } from "./TmuxComposer";
 import { resetRetainedQueueAdmissionsForTests } from "./retainedQueueAdmissions";
 import { readOutbox, resetOutboxForTests } from "./conversation/outbox";
 import { setTmuxComposerRuntimeDependenciesForTests } from "./tmuxComposerRuntime";
+import { COMPOSER_QUEUE_RESERVE_PX, mobileComposerCeiling } from "@/lib/composerScroll";
 
 /**
  * The composer's two submissions, on a Codex conversation that can queue
@@ -743,4 +744,93 @@ test("the composer budgets itself against the conversation, so the queue has roo
      gives room back. */
   expect(form.querySelector('[data-testid="native-queue-panel"]')).not.toBeNull();
   await act(async () => root.unmount());
+});
+
+test("everything above the input yields to the budget; the input and Send do not", async () => {
+  /* WHO GIVES ROOM BACK when the form is at its budget. The queue panel is one
+     of three: a docked Voice call arrives through a portal into the slot, and
+     the receipt list grows with every unacknowledged send. All three are
+     bounded lists with their own scroller and `min-h-0`, which is what lets the
+     flexbox take room from them; the composer box holding the input and Send is
+     none of those, so it keeps its size and stays inside the pane. A 680 px card
+     with an inline call laid Send out below the pane, and no wheel revealed it.
+
+     happy-dom lays nothing out, so this pins the contract; the measurement is
+     `scripts/capture-issue-1629-queue-height.ts`. */
+  observed = { conversationId: "conversation_native_queue" };
+  queueEntries = [{
+    entryId: "yield-1", conversationId: "conversation_native_queue", binding: { threadId: "thread-1", accountId: "acct-1" },
+    clientUserMessageId: "c-yield", nativeSubmissionId: "n-yield", revision: 1,
+    versions: [{ revision: 1, operationId: "op-yield", text: "queued", images: [], contentDigest: "d" }],
+    profilePolicy: "thread-at-dispatch", state: "queued", mutationOperationId: null,
+    dispatchedRevision: null, dispatchedTurnId: null, proof: null, reason: null,
+  }];
+  const { host, root } = await mount();
+
+  const dock = host.querySelector('[data-testid="voice-dock-slot"]') as HTMLElement;
+  expect(dock.className).toContain("min-h-0");
+  expect(dock.className).toContain("overflow-y-auto");
+  /* A wheel inside a squeezed call panel stays in it rather than reaching the
+     board behind the card. */
+  expect(dock.className).toContain("overscroll-contain");
+
+  const panel = host.querySelector('[data-testid="native-queue-panel"]') as HTMLElement;
+  expect(panel.className).toContain("min-h-0");
+  expect(panel.className).toContain("overflow-y-auto");
+
+  /* The input's own box is NOT in that set: it is what the yielding is for. */
+  const field = host.querySelector("textarea") as HTMLTextAreaElement;
+  const box = field.parentElement as HTMLElement;
+  expect(box.className).not.toContain("min-h-0");
+  expect(box.querySelector('button[type="submit"]')).not.toBeNull();
+  await act(async () => root.unmount());
+});
+
+test("a rendered queue panel takes its room off the phone field's grow ceiling", async () => {
+  /* The other half of the same budget, on the phone, where the form is at its
+     `38dvh` cap and the panel is the only part that can shrink: a draft grown to
+     the field's old ceiling left the panel a 2px border with nothing inside it,
+     so Start, the recovery controls and every row were unreachable. The field
+     now stops `COMPOSER_QUEUE_RESERVE_PX` short — and only while a panel is
+     actually rendered, which is what this checks by emptying the queue.
+
+     happy-dom measures nothing, so the field is given a content height taller
+     than any ceiling and the ceiling is read off the height the hook writes. */
+  const tall = 4000;
+  const proto = Object.getPrototypeOf(document.createElement("textarea")) as object;
+  const original = Object.getOwnPropertyDescriptor(proto, "scrollHeight");
+  Object.defineProperty(proto, "scrollHeight", { configurable: true, get: () => tall });
+  (dom as unknown as { matchMedia: (query: string) => unknown }).matchMedia = (query: string) => ({
+    matches: true, media: query, addEventListener() {}, removeEventListener() {},
+  });
+  try {
+    queueEntries = [{
+      entryId: "ceiling-1", conversationId: CARD, binding: { threadId: "thread-1", accountId: "acct-1" },
+      clientUserMessageId: "c-ceiling", nativeSubmissionId: "n-ceiling", revision: 1,
+      versions: [{ revision: 1, operationId: "op-ceiling", text: "queued", images: [], contentDigest: "d" }],
+      profilePolicy: "thread-at-dispatch", state: "queued", mutationOperationId: null,
+      dispatchedRevision: null, dispatchedTurnId: null, proof: null, reason: null,
+    }];
+    const withQueue = await mount();
+    expect(withQueue.host.querySelector('[data-testid="native-queue-panel"]')).not.toBeNull();
+    const ceilingWithQueue = Number.parseInt((withQueue.host.querySelector("textarea") as HTMLTextAreaElement).style.height, 10);
+    await act(async () => withQueue.root.unmount());
+
+    queueEntries = [];
+    const alone = await mount();
+    expect(alone.host.querySelector('[data-testid="native-queue-panel"]')).toBeNull();
+    const ceilingAlone = Number.parseInt((alone.host.querySelector("textarea") as HTMLTextAreaElement).style.height, 10);
+    await act(async () => alone.root.unmount());
+
+    expect(ceilingWithQueue).toBe(ceilingAlone - COMPOSER_QUEUE_RESERVE_PX);
+    /* And an empty queue reserves nothing: the room goes straight back to the
+       draft, exactly as it was before the queue existed. */
+    expect(ceilingAlone).toBe(mobileComposerCeiling(dom.innerHeight, dom.innerHeight));
+  } finally {
+    (dom as unknown as { matchMedia: (query: string) => unknown }).matchMedia = (query: string) => ({
+      matches: false, media: query, addEventListener() {}, removeEventListener() {},
+    });
+    if (original) Object.defineProperty(proto, "scrollHeight", original);
+    else Reflect.deleteProperty(proto, "scrollHeight");
+  }
 });

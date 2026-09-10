@@ -100,6 +100,24 @@ export function mobileComposerUnitMax(layoutHeight: number): number {
    small for chrome plus field, the field stays usable rather than collapsing
    to zero. */
 const COMPOSER_CEILING_FLOOR_PX = 44;
+/* What a queue panel sharing the composer's box needs to stay a queue (#1629):
+   its header row with the queue-level control, a scrollport tall enough to read
+   a row in, and the flex gap between it and the field. The field's ceiling
+   gives this up whenever such a panel is rendered, because the two divide ONE
+   bounded form: at 390 × 840 a twenty-line draft grew the field to the whole
+   319px box minus its own chrome, and the panel — the only part left that can
+   yield — was squeezed to a 2px border with a zero-height interior, so its
+   Start, its recovery controls and its rows could not be reached at all.
+   Anything the panel does not use goes back to the conversation above, since
+   the form is sized by its content and only capped by the budget. */
+export const COMPOSER_QUEUE_RESERVE_PX = 126;
+/* And the same for the other panel that can arrive above the field: a docked
+   voice call (#691). It reserves less than the queue does because it yields
+   first — its start/stop and float controls live in the composer's own control
+   row, so a squeezed panel still leaves the call controllable — but it keeps
+   its header and a line or two of transcript rather than collapsing to nothing
+   while a call is up. */
+export const COMPOSER_CALL_RESERVE_PX = 76;
 
 /** The phone grow ceiling, from the VISIBLE viewport the operator can see
     (#983) and the LAYOUT viewport the composer box's own `dvh` cap is written
@@ -114,11 +132,19 @@ const COMPOSER_CEILING_FLOOR_PX = 44;
       short rotated viewport drops the budget below the 160px cap; the field
       then scrolls internally sooner.
 
+    `reservedPx` is what OTHER bounded content in the same box needs — the panels
+    above the field, which are rendered inside the same budget and can only give
+    room back if the field stops taking all of it: the native queue
+    (`COMPOSER_QUEUE_RESERVE_PX`) and a docked call (`COMPOSER_CALL_RESERVE_PX`),
+    summed over whichever are actually rendered. It comes off both shared bounds
+    for the same reason the unit chrome does: a panel sits inside the box AND
+    above the keyboard.
+
     Below the one-row floor neither bound can be honored, and a usable field
     outranks them: the ceiling stops there. */
-export function mobileComposerCeiling(visibleHeight: number, layoutHeight: number): number {
+export function mobileComposerCeiling(visibleHeight: number, layoutHeight: number, reservedPx = 0): number {
   const grown = Math.max(COMPOSER_MAX_PX, Math.round(visibleHeight * COMPOSER_MAX_VH));
-  const insideTheBox = mobileComposerUnitMax(layoutHeight) - MOBILE_COMPOSER_UNIT_CHROME_PX;
-  const aboveTheKeyboard = visibleHeight - MOBILE_COMPOSER_CHROME_PX;
+  const insideTheBox = mobileComposerUnitMax(layoutHeight) - MOBILE_COMPOSER_UNIT_CHROME_PX - reservedPx;
+  const aboveTheKeyboard = visibleHeight - MOBILE_COMPOSER_CHROME_PX - reservedPx;
   return Math.max(COMPOSER_CEILING_FLOOR_PX, Math.min(grown, insideTheBox, aboveTheKeyboard));
 }
