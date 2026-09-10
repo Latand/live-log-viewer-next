@@ -293,7 +293,7 @@ test("a handoff is reported once, against the utterance it follows", async () =>
 });
 
 test("a handoff before any utterance is published reports nothing", async () => {
-  /* Nothing has claimed a card yet, so there is nothing to join it to, and
+  /* No utterance has been published yet, so there is nothing to join it to, and
      inventing an utterance for it would put a reference in the ledger the
      operator never published. */
   const peer = await liveCall("conversation_voice_early_handoff");

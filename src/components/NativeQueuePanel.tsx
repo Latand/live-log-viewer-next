@@ -10,6 +10,13 @@ import {
   type NativeQueueRow,
   type NativeQueueView,
 } from "@/components/nativeQueueView";
+import {
+  readRetainedQueueAdmissions,
+  releaseQueueAdmission,
+  retainQueueAdmission,
+  sameQueueOperation,
+  type RetainedQueueAdmission,
+} from "@/components/retainedQueueAdmissions";
 import type { NativeQueueMutation, NativeQueueSubmission } from "@/hooks/useNativeQueue";
 import type { TFunction } from "@/lib/i18n";
 
@@ -65,6 +72,18 @@ export interface NativeQueuePanelProps {
   error: string | null;
   /** The thread's model and effort right now, for the truthful profile line. */
   thread: { model: string | null; effort: string | null };
+  /**
+   * The card these controls belong to, and the thread and account they are
+   * admitted against.
+   *
+   * The card id is where a press whose reply never arrived keeps its key, so
+   * that key survives the poll-driven remount above (#1629 review). The binding
+   * rides in the frozen envelope for the same reason the composer's does: an
+   * account switched between the press and the replay must be refused by the
+   * journal rather than silently followed.
+   */
+  cardId: string;
+  binding?: { threadId: string | null; accountId: string | null };
   /** Mint a fresh immutable key per control press. */
   mintKey(): string;
   submit(mutation: NativeQueueMutation, idempotencyKey: string): Promise<NativeQueueSubmission>;
@@ -99,7 +118,7 @@ function profileText(row: NativeQueueRow, thread: { model: string | null; effort
   return requested ? `${runs} ${t("queue.asked", { settings: requested })}` : runs;
 }
 
-export function NativeQueuePanel({ view, error, thread, unresolved, onReplay, mintKey, submit, onRefresh, t }: NativeQueuePanelProps) {
+export function NativeQueuePanel({ view, error, thread, cardId, binding, unresolved, onReplay, mintKey, submit, onRefresh, t }: NativeQueuePanelProps) {
   const [editing, setEditing] = useState<string | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
   /* The edit box is UNCONTROLLED, and read at save. A queued message can be
@@ -116,21 +135,38 @@ export function NativeQueuePanel({ view, error, thread, unresolved, onReplay, mi
    * refusal looks like: the runtime's own words, verbatim, next to the queue it
    * is about. A refusal never clears the panel or the draft.
    *
-   * AND THE SAME ORIGINAL-KEY RULE THE COMPOSER USES. A mutation whose outcome
-   * this browser never learned may already be in the journal, so pressing the
-   * same control on the same row again must replay THAT operation rather than
-   * mint a second one. The key is retained against the mutation itself, so an
-   * identical repeat replays and anything else is a new operation; it is
-   * released as soon as the journal gives any verdict on it.
+   * AND THE SAME ORIGINAL-KEY RULE THE COMPOSER USES, THROUGH THE SAME RECORD.
+   * A mutation whose outcome this browser never learned may already be in the
+   * journal, so pressing the same control on the same row again must replay THAT
+   * operation rather than mint a second one — and it must still do so after the
+   * composer above has been remounted by a board poll or the tab reloaded, which
+   * a component ref cannot survive. So the key lives in the retained-admission
+   * store the composer's own hand-offs use: written BEFORE the request leaves,
+   * matched by everything the press authored and addressed, and released the
+   * moment the journal gives any verdict on it. Anything the operator changed —
+   * a different row, different words, a different order — is a different request
+   * and gets its own key.
+   *
+   * This adds no scheduler and no retry. The replay happens only when the
+   * operator presses the control again, and the journal answers a replayed key
+   * with the operation it already holds.
    */
-  const retainedKeys = useRef(new Map<string, string>());
   const run = async (mutation: NativeQueueMutation) => {
     setFailure(null);
-    const signature = JSON.stringify(mutation);
-    const key = retainedKeys.current.get(signature) ?? mintKey();
-    retainedKeys.current.set(signature, key);
-    const answer = await submit(mutation, key);
-    if (answer.outcome !== "unknown") retainedKeys.current.delete(signature);
+    const retained = readRetainedQueueAdmissions(cardId).find((entry) => sameQueueOperation(entry.mutation, mutation));
+    const envelope: RetainedQueueAdmission = retained ?? {
+      key: mintKey(),
+      mutation,
+      binding: binding ?? { threadId: null, accountId: null },
+    };
+    retainQueueAdmission(cardId, envelope);
+    /* The ORIGINAL binding rides with a replay, so a thread or account that
+       moved since the first press is refused by the journal rather than quietly
+       followed. A caller that named no binding leaves it to the hook's live one,
+       which is what every ordinary first press wants anyway. */
+    const command = binding ? { ...envelope.mutation, binding: envelope.binding } : envelope.mutation;
+    const answer = await submit(command, envelope.key);
+    if (answer.outcome !== "unknown") releaseQueueAdmission(cardId, envelope.key);
     if (!answer.ok) setFailure(answer.error ?? t("queue.refused"));
     return answer.ok;
   };

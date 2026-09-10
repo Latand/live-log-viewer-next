@@ -24,6 +24,14 @@ import type { FileEntry } from "@/lib/types";
 import type { RuntimeReceipt } from "@/components/runtime/runtimeModel";
 import type { RuntimeVoiceTranscriptSegment } from "@/lib/runtime/contracts";
 import { NativeQueuePanel } from "@/components/NativeQueuePanel";
+import {
+  queueAdmissionKey,
+  readRetainedQueueAdmissions,
+  releaseQueueAdmission,
+  retainQueueAdmission,
+  sameQueueOperation,
+  type RetainedQueueAdmission,
+} from "@/components/retainedQueueAdmissions";
 import { useNativeQueue, type NativeQueueMutation } from "@/hooks/useNativeQueue";
 
 import { DormantView } from "./conversation/DormantView";
@@ -1209,148 +1217,16 @@ function canMessageWithoutPane(file: FileEntry): boolean {
   return file.root === "codex-sessions";
 }
 
+/* The retained store also holds the panel's own unanswered controls, which are
+   not hand-offs and have no words to give back: a control names an entry the
+   journal still holds, and pressing it again is its own recovery. Only an `add`
+   earns a recovery row in the composer. */
+const unresolvedHandoffs = (id: string) =>
+  readRetainedQueueAdmissions(id).filter((entry) => entry.mutation.action === "add");
+
 const draftKey = (id: string) => "llvDraft:" + id;
 const COMPOSE_EVENT = "llv-compose-draft";
 
-/** Where a queue hand-off whose outcome nobody knows keeps its whole envelope. */
-const queueAdmissionKey = (id: string) => "llvQueueAdmission:" + id;
-
-/**
- * The Codex-queue hand-off this browser cannot say the outcome of (#1629).
- *
- * A queue add is one durable operation identified by its idempotency key, and
- * the runtime journal answers a replay of that key with the operation it already
- * holds — but ONLY for a byte-identical request: it hashes the command and
- * refuses a key whose payload has changed. So recovery is the whole envelope or
- * it is nothing, so this keeps the envelope itself and never a description of one.
- *
- * WHAT IS RETAINED, and why each part:
- *
- * - `key`, the operation's identity. Minting a fresh one for the second press
- *   made the two indistinguishable operations, which is how Codex could receive
- *   one message twice with nothing able to reconcile them.
- * - `mutation`, the exact command body — text, attachment refs or bytes, the
- *   requested runtime and the selected card. Rebuilding it from the composer at
- *   replay time would submit whatever the UI happens to hold now, which is a
- *   different request under an old key and is refused on arrival.
- * - `binding`, the thread and account it was admitted against. An account
- *   switched between the press and the replay must not silently move the
- *   message: replaying the original binding is either accepted by the journal or
- *   refused by it, and both are outcomes; rebinding is neither.
- *
- * WHEN IT IS WRITTEN: BEFORE the request leaves. A reply that never arrives is
- * the case this exists for, and a record written only in the error path does not
- * survive a reload or a navigation while the request is still in flight.
- *
- * It is a record of identity and payload, and nothing else. Nothing here
- * resends, retries or schedules: native owns dispatch and this adds no second
- * owner. It is cleared only by terminal evidence about THAT operation — a
- * journal receipt for it, or a refusal saying it admitted nothing — so sending a
- * different message afterwards leaves it exactly where it was.
- */
-interface RetainedQueueAdmission {
-  key: string;
-  mutation: NativeQueueMutation;
-  binding: { threadId: string | null; accountId: string | null };
-}
-
-/**
- * In-process mirror of the durable records, as a LIST per conversation.
- *
- * A list because sending a second message does not settle the first: an
- * operation whose outcome is unknown stays unresolved until something says what
- * happened to IT, and overwriting one record with the next press is how an
- * unrecoverable operation was quietly forgotten.
- *
- * Mirrored in memory because the composer remounts on every board poll, so a
- * component ref cannot hold this; and because `sessionStorage` can refuse a
- * write (quota, opaque origin) exactly when the payload is large enough to
- * matter. Holding both means a storage failure costs the reload case rather than
- * the operation.
- */
-const retainedQueueAdmissions = new Map<string, RetainedQueueAdmission[]>();
-
-/** Enough for any realistic run of lost replies; a browser holding more than
-    this has a problem no local record is going to solve. */
-const MAX_RETAINED_ADMISSIONS_PER_CARD = 8;
-
-/**
- * Whether two presses are the operator sending the SAME message.
- *
- * The words, the attachments and the runtime they asked for — and deliberately
- * not the selected-card reference, which is captured fresh at every submission
- * instant and would therefore never match itself. The reference belongs to the
- * operation that was admitted, so a replay carries the ORIGINAL one out of the
- * retained envelope rather than whatever is on screen at the second press.
- */
-function sameQueuePayload(left: NativeQueueMutation, right: NativeQueueMutation): boolean {
-  const authored = ({ action, text, images, runtime }: NativeQueueMutation) =>
-    JSON.stringify({ action, text: text ?? "", images: images ?? [], runtime: runtime ?? null });
-  return authored(left) === authored(right);
-}
-
-function parseRetainedQueueAdmission(value: unknown): RetainedQueueAdmission | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const record = value as Partial<RetainedQueueAdmission>;
-  if (typeof record.key !== "string" || !record.key) return null;
-  if (!record.mutation || typeof record.mutation !== "object" || record.mutation.action !== "add") return null;
-  if (!record.binding || typeof record.binding !== "object") return null;
-  return { key: record.key, mutation: record.mutation, binding: record.binding } as RetainedQueueAdmission;
-}
-
-function readRetainedQueueAdmissions(id: string): RetainedQueueAdmission[] {
-  const live = retainedQueueAdmissions.get(id);
-  if (live) return live;
-  let raw: string | null = null;
-  try { raw = sessionStorage.getItem(queueAdmissionKey(id)); }
-  catch { return []; }
-  if (raw === null) return [];
-  let parsed: RetainedQueueAdmission[] = [];
-  try {
-    const value: unknown = JSON.parse(raw);
-    /* UNREADABLE IS NOT ABSENT. Something was written here, so an operation may
-       exist that this browser can no longer name; what is dropped is only the
-       entries that cannot be read, and the readable ones still replay. */
-    parsed = (Array.isArray(value) ? value : [value])
-      .map(parseRetainedQueueAdmission)
-      .filter((record): record is RetainedQueueAdmission => record !== null);
-  } catch { parsed = []; }
-  retainedQueueAdmissions.set(id, parsed);
-  return parsed;
-}
-
-/** True when the list is durable; false when only the in-process mirror has it,
-    which the caller says out loud rather than swallowing. */
-function writeRetainedQueueAdmissions(id: string, records: RetainedQueueAdmission[]): boolean {
-  const bounded = records.slice(-MAX_RETAINED_ADMISSIONS_PER_CARD);
-  retainedQueueAdmissions.set(id, bounded);
-  try {
-    if (bounded.length) sessionStorage.setItem(queueAdmissionKey(id), JSON.stringify(bounded));
-    else sessionStorage.removeItem(queueAdmissionKey(id));
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/** Record one operation as unresolved, replacing an earlier entry for the same
-    key so a replay does not accumulate copies of itself. */
-function retainQueueAdmission(id: string, record: RetainedQueueAdmission): boolean {
-  const kept = readRetainedQueueAdmissions(id).filter((entry) => entry.key !== record.key);
-  return writeRetainedQueueAdmissions(id, [...kept, record]);
-}
-
-/** Terminal evidence about ONE operation, and only that one. */
-function releaseQueueAdmission(id: string, key: string): void {
-  const kept = readRetainedQueueAdmissions(id).filter((entry) => entry.key !== key);
-  writeRetainedQueueAdmissions(id, kept);
-}
-
-/** Test seam: the mirror is module-scoped, so a suite must be able to start
-    from an empty one without reaching into module internals. */
-export function resetRetainedQueueAdmissionsForTests(): void {
-  retainedQueueAdmissions.clear();
-}
 
 /** Links a transcript path to the identity whose sessionStorage records hold
     that conversation's composer state, so an id rotation can find them. */
@@ -1642,9 +1518,9 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
      panel can offer the one control that resolves them. Seeded on mount, because
      the operation may have been admitted by a page that is gone. */
   const [unresolvedAdmissions, setUnresolvedAdmissions] = useState<RetainedQueueAdmission[]>(
-    () => (typeof window === "undefined" ? [] : readRetainedQueueAdmissions(cardId)),
+    () => (typeof window === "undefined" ? [] : unresolvedHandoffs(cardId)),
   );
-  useEffect(() => { setUnresolvedAdmissions(readRetainedQueueAdmissions(cardId)); }, [cardId]);
+  useEffect(() => { setUnresolvedAdmissions(unresolvedHandoffs(cardId)); }, [cardId]);
   const nativeQueue = useNativeQueue(cardId, {
     enabled: nativeQueueEnabled,
     threadId: structuredSession?.session.sessionKey?.sessionId ?? null,
@@ -2949,7 +2825,7 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
   /**
    * Put the draft in Codex's own queue (#1629).
    *
-   * A SECOND SUBMISSION, NOT A NEW DEFAULT. Enter still sends, and for Codex a
+   * A SECOND SUBMISSION BESIDE THE DEFAULT. Enter still sends, and for Codex a
    * send still interrupts the running turn — that is the operator's stated
    * preference and nothing here changes it. This is the other thing they asked
    * for: hand the message to Codex, which holds it and dispatches it when the
@@ -2998,7 +2874,7 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
       ...(requestedImages.length
         ? { images: requestedImages.map((image) => ({ base64: image.base64, mime: image.mime })) as never }
         : {}),
-      /* AUDIT, NOT A PROMISE. Native's queue parameters carry no model or
+      /* AN AUDIT RECORD OF WHAT WAS ASKED FOR. Native's queue parameters carry no model or
          effort, so what the operator had selected when they queued is retained
          as what they asked for; the panel says what the thread is observed on
          now and never promises what it will be at dispatch. */
@@ -3011,7 +2887,7 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
        key and its own binding, instead of admitting a second indistinguishable
        one. A message that is no longer the same message is a new operation, and
        the unresolved one is kept rather than overwritten. */
-    const retained = readRetainedQueueAdmissions(cardId).find((entry) => sameQueuePayload(entry.mutation, mutation));
+    const retained = readRetainedQueueAdmissions(cardId).find((entry) => sameQueueOperation(entry.mutation, mutation));
     const envelope: RetainedQueueAdmission = retained ?? {
       key: mintIdempotencyKey(),
       mutation,
@@ -3024,7 +2900,7 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
        arrives, and a record written in the error path does not survive a reload
        or a navigation while the request is still in flight. */
     const durable = retainQueueAdmission(cardId, envelope);
-    setUnresolvedAdmissions(readRetainedQueueAdmissions(cardId));
+    setUnresolvedAdmissions(unresolvedHandoffs(cardId));
     setText("");
     attachments.clearAll();
     setStatus(durable
@@ -3039,7 +2915,7 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
          it admitted nothing. An unknown outcome leaves the record exactly where
          it was written. */
       if (answer.outcome !== "unknown") releaseQueueAdmission(cardId, envelope.key);
-      setUnresolvedAdmissions(readRetainedQueueAdmissions(cardId));
+      setUnresolvedAdmissions(unresolvedHandoffs(cardId));
       if (answer.ok) return;
       /* A REFUSED ADMISSION GIVES THE DRAFT BACK, ATTACHMENTS AND ALL. Nothing
          was queued, so the words and the tiles belong in the composer where the
@@ -3071,7 +2947,7 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
     void (async () => {
       const answer = await nativeQueue.submit({ ...envelope.mutation, binding: envelope.binding }, envelope.key);
       if (answer.outcome !== "unknown") releaseQueueAdmission(cardId, envelope.key);
-      setUnresolvedAdmissions(readRetainedQueueAdmissions(cardId));
+      setUnresolvedAdmissions(unresolvedHandoffs(cardId));
       if (!answer.ok) setStatus({ kind: "err", text: answer.error ?? t("queue.refused") });
     })();
   };
@@ -3283,6 +3159,14 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
                visible. A thread the Viewer has observed nothing about says so. */
             model: observedModelId(file),
             effort: file.effort ?? null,
+          }}
+          /* Where a control press whose reply never arrived keeps its key, and
+             the binding it was admitted against — the same record, and the same
+             rule, as the hand-off below it. */
+          cardId={cardId}
+          binding={{
+            threadId: structuredSession?.session.sessionKey?.sessionId ?? null,
+            accountId: structuredSession?.session.accountId ?? null,
           }}
           /* Hand-offs with no answer yet, and the one control that settles
              one. They are not queue rows and are not counted as such. */

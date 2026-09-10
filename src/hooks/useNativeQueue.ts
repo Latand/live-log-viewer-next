@@ -13,14 +13,14 @@ import type { SelectedContextRef } from "@/lib/selection/selectedContext";
  * The operator's view of the native Codex queue, and the one place a control on
  * it is submitted from (#1629).
  *
- * READS ARE PUSHED, NEVER POLLED. Native tells the host its queue changed
+ * READS ARRIVE BY PUSH. Native tells the host its queue changed
  * (`thread/queue/changed`), the host publishes that on the runtime bus as a
  * revision counter, and this refetches when the counter moves. A queue that is
  * not changing costs nothing, and a change the operator did not make — Codex
  * dispatching the head of the queue on its own — reaches the panel as fast as
  * one they did.
  *
- * WRITES ARE ADMISSIONS, NOT ACTUATIONS. Every control POSTs one command with
+ * EVERY WRITE IS AN ADMISSION. Every control POSTs one command with
  * its own immutable idempotency key and returns as soon as the journal has
  * committed it; the runtime's own executor is the single dispatch owner and this
  * adds no second scheduler. The reply is a receipt, so the row it belongs to

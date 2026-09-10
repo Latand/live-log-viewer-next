@@ -14,7 +14,8 @@ import type { RuntimeSessionView } from "@/hooks/useRuntime";
 
 import { agentCapabilitiesFromViews } from "./useAgentCapabilities";
 import { writeProfile } from "./runtimeProfile";
-import { appendComposerDraft, resetRetainedQueueAdmissionsForTests, TmuxComposer } from "./TmuxComposer";
+import { appendComposerDraft, TmuxComposer } from "./TmuxComposer";
+import { resetRetainedQueueAdmissionsForTests } from "./retainedQueueAdmissions";
 import { readOutbox, resetOutboxForTests } from "./conversation/outbox";
 import { setTmuxComposerRuntimeDependenciesForTests } from "./tmuxComposerRuntime";
 

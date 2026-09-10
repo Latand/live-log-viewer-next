@@ -32,7 +32,7 @@ export type NativeQueueRowAction = "edit" | "delete" | "send-now" | "move" | "st
 /**
  * Why a row offers no controls.
  *
- * A CODE, NOT A SENTENCE. This module is pure and locale-free — it runs in
+ * A CODE THE VIEW TRANSLATES. This module is pure and locale-free — it runs in
  * tests, in a capture script and in the panel — so it names the condition and
  * the view translates it. Emitting English prose here is how half a panel ends
  * up in one language.

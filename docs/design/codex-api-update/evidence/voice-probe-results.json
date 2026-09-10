@@ -33,7 +33,7 @@
       "held": true
     },
     {
-      "check": "no session-scoped string is written to canonical history",
+      "check": "creating and stopping a call, with no backing turn during it, commits no session-scoped string to canonical history by itself (a backing turn during the call is what commits them, as developer items - see the successful-session evidence in docs/realtime-v3/BLOCKED.md)",
       "held": true
     }
   ],
@@ -43,9 +43,10 @@
       "requests": 1,
       "sees_thread_mandate": true
     },
-    "canonical_history": {
+    "canonical_history_at_call_creation": {
       "end_instructions_persisted": false,
       "injected_developer_item_persisted": true,
+      "scope": "call creation and stop only: no backing turn ran during the call and no later text turn follows, so this says nothing about what a turn commits",
       "spoken_prompt_persisted": false,
       "start_instructions_persisted": false
     },

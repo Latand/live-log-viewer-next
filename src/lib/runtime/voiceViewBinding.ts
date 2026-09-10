@@ -205,19 +205,25 @@ export function parseVoiceViewBinding(value: unknown): VoiceViewBinding | null {
 /**
  * Bind a call to the window that opened it.
  *
- * A reconnect is a NEW GENERATION, not a fresh ledger. What the previous
+ * A reconnect opens a NEW GENERATION over the same ledger. What the previous
  * generation left behind is kept exactly as far as the work it started may still
- * be running:
+ * be running, and one rule decides that, on the host's own evidence:
  *
- * - A record a backing turn already claimed is always carried. That turn is an
- *   accepted operation and it keeps its card through anything.
- * - A record whose utterance became a handoff but which no turn has claimed yet
- *   is carried only when the host says a turn is running. That is the reconnect
- *   the operator actually hits — hang up, come back, and the agent is still
- *   working on what they last said — and without the host's evidence there is
- *   nothing to distinguish it from a call that finished with nothing pending.
- * - Everything else is dropped: an utterance that never became work has no work
- *   to be entitled to it.
+ * - A record whose utterance became a handoff is carried when the host says a
+ *   turn is running. That is the reconnect the operator actually hits — hang up,
+ *   come back, and the agent is still working on what they last said — and
+ *   without the host's `activeWork` evidence there is nothing to distinguish it
+ *   from a call that finished with nothing pending.
+ * - Everything else is dropped, including every record with no handoff: an
+ *   utterance that never became work has no work to be entitled to it.
+ *
+ * NO RECORD IS BOUND TO A TURN. There is no per-record claim to carry, and
+ * `activeWork` is the whole test — which is why a handoff-bearing record is
+ * dropped too when the host reports nothing running. What survives here is
+ * EVIDENCE the panel and the control endpoint read back: it says what this call
+ * was told, and it selects no card for anybody. The immutable context of an
+ * operation the journal already admitted is a different thing entirely; it
+ * travels with that operation's own key and never through this ledger.
  *
  * The previous generation's ambiguity is retained, because it describes handoff
  * reports that may still arrive.

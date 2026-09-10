@@ -11,6 +11,7 @@ import type { NativeQueuedSubmission } from "@/lib/runtime/nativeCodexQueue";
 import type { NativeQueueRecord } from "@/lib/runtime/nativeQueueContracts";
 
 import { NativeQueuePanel, type NativeQueueUnresolvedAdmission } from "./NativeQueuePanel";
+import { resetRetainedQueueAdmissionsForTests } from "./retainedQueueAdmissions";
 
 /**
  * The queue the operator actually touches (#1629).
@@ -37,6 +38,7 @@ Object.assign(globalThis, {
   Node: dom.Node,
   HTMLElement: dom.HTMLElement,
   MouseEvent: dom.MouseEvent,
+  sessionStorage: dom.sessionStorage,
   requestAnimationFrame: (callback: FrameRequestCallback) => setTimeout(() => callback(0), 0),
   cancelAnimationFrame: (handle: number) => clearTimeout(handle),
 });
@@ -147,6 +149,7 @@ function Harness({ turn = "idle" as "idle" | "running", changeRevision = 0 }) {
       loading={queue.loading}
       error={queue.error}
       thread={{ model: "gpt-6-astra", effort: "high" }}
+      cardId="conversation_queue"
       mintKey={() => `key-${++keySequence}`}
       submit={queue.submit}
       onRefresh={queue.refresh}
@@ -165,6 +168,7 @@ function BindingHarness({ threadId, accountId }: { threadId: string; accountId: 
       loading={queue.loading}
       error={queue.error}
       thread={{ model: "gpt-6-astra", effort: "high" }}
+      cardId="conversation_queue"
       mintKey={() => `key-${++keySequence}`}
       submit={queue.submit}
       onRefresh={queue.refresh}
@@ -188,6 +192,7 @@ function UnresolvedHarness(props: {
       thread={{ model: "gpt-6-astra", effort: "high" }}
       unresolved={props.unresolved}
       onReplay={props.onReplay}
+      cardId="conversation_queue"
       mintKey={() => `key-${++keySequence}`}
       submit={queue.submit}
       onRefresh={queue.refresh}
@@ -208,6 +213,11 @@ beforeEach(() => {
   writes = [];
   reads = 0;
   keySequence = 0;
+  /* The retained keys are module-scoped and durable ON PURPOSE (a poll-driven
+     remount must not lose them), so each test starts from an empty store and an
+     empty tab rather than inheriting the previous one's unanswered presses. */
+  resetRetainedQueueAdmissionsForTests();
+  sessionStorage.clear();
   readFails = null;
   writeAnswer = (body) => journalReceipt(body);
   entries = [record("a"), record("b")];
@@ -625,4 +635,72 @@ test("a full queue stays responsive: a control press paints its own row inside t
   } finally {
     (dependencies as { write: NativeQueueDependencies["write"] }).write = previous;
   }
+});
+
+test("a control whose reply never arrived keeps its operation across a remount, and across a reload", async () => {
+  /* THE POLL-DRIVEN REMOUNT, which is what a component ref could not survive
+     (review finding 7). The composer above this panel remounts on every board
+     poll, so a key held in a ref was minted fresh afterwards and the operator's
+     second press became a SECOND operation for something the journal may already
+     hold. The entry-level fence hides that for a delete or an edit — the journal
+     refuses a second mutation while `mutationOperationId` is set — but a
+     queue-level `start` names no entry and has no such fence, so it is checked
+     here too.
+
+     A reload is the same case with the in-process mirror gone: only what was
+     written to storage BEFORE the request left can name the operation. */
+  for (const [name, press] of [
+    ["a row control", () => rows()[0]!.querySelector('[data-testid="native-queue-delete"]')],
+    ["the queue-level start", () => host.querySelector('[data-testid="native-queue-start"]')],
+  ] as const) {
+    for (const survive of ["remount", "reload"] as const) {
+      resetRetainedQueueAdmissionsForTests();
+      sessionStorage.clear();
+      writes = [];
+      writeAnswer = () => ({ status: 503, body: {} });
+      await mount({ turn: "idle" });
+      await click(press());
+      /* A 5xx with no receipt is the journal's answer never arriving: the row
+         says so, and the operation stays this browser's to name. */
+      expect(`${name}/${survive}: ${host.querySelector('[data-testid="native-queue-failure"]')?.textContent ?? ""}`)
+        .toContain("could not answer");
+
+      flushSync(() => root.unmount());
+      document.body.replaceChildren();
+      /* A reload keeps sessionStorage and loses the module's own mirror. */
+      if (survive === "reload") resetRetainedQueueAdmissionsForTests();
+      await mount({ turn: "idle" });
+      await click(press());
+
+      expect(`${name}/${survive}: ${writes.length}`).toBe(`${name}/${survive}: 2`);
+      expect(`${name}/${survive}: ${String(writes[1]!.idempotencyKey)}`)
+        .toBe(`${name}/${survive}: ${String(writes[0]!.idempotencyKey)}`);
+      /* And the ORIGINAL frozen envelope, not one rebuilt from the second press. */
+      expect(`${name}/${survive}: ${JSON.stringify(writes[1]!.action)}`)
+        .toBe(`${name}/${survive}: ${JSON.stringify(writes[0]!.action)}`);
+
+      flushSync(() => root.unmount());
+      document.body.replaceChildren();
+    }
+  }
+  writeAnswer = (body) => journalReceipt(body);
+  await mount();
+});
+
+test("a different request after a lost one is still its own operation", async () => {
+  /* The other half of the same rule: retention must not collapse two things the
+     operator actually asked for into one. A lost delete on row a leaves its key
+     retained; deleting row b is a different request and gets its own. */
+  writeAnswer = () => ({ status: 503, body: {} });
+  await mount();
+  await click(rows()[0]!.querySelector('[data-testid="native-queue-delete"]'));
+  await click(rows()[1]!.querySelector('[data-testid="native-queue-delete"]'));
+  expect(writes).toHaveLength(2);
+  expect(writes[1]!.entryId).not.toBe(writes[0]!.entryId);
+  expect(writes[1]!.idempotencyKey).not.toBe(writes[0]!.idempotencyKey);
+
+  /* And the first one is still recoverable under its own key. */
+  await click(rows()[0]!.querySelector('[data-testid="native-queue-delete"]'));
+  expect(writes[2]!.idempotencyKey).toBe(writes[0]!.idempotencyKey);
+  writeAnswer = (body) => journalReceipt(body);
 });

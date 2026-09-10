@@ -2,10 +2,19 @@
 
 Verified 2026-09-10 against `codex-cli 0.154.0` (bundled app-server in the
 current Linux ChatGPT build: `0.153.4`; the two agree on every field of the
-contracts below). Everything under this heading is reproducible with
-`python3 docs/design/codex-api-update/voice_probe.py`, which needs no credential,
-no account and no network: it points the configured model provider at a local
-fixture, so realtime call creation is captured verbatim instead of sent.
+contracts below).
+
+**What is reproducible with what.** The wire contract in the table and the three
+bullets under it comes from `python3 docs/design/codex-api-update/voice_probe.py`,
+which needs no credential, no account and no network: it points the configured
+model provider at a local fixture, so realtime call creation is captured verbatim
+instead of sent. That probe observes CALL CREATION and the app-server's own
+persistence around it, and nothing else — it runs no backing turn during the
+call, so what a turn commits to canonical history is out of its scope and comes
+from the fuller successful-session run recorded below. The Viewer's own boundary
+— what it sends, where a spoken card may steer work, what the browser does with
+the canonical transcript — is established by the source and its tests; the probe
+says nothing about any of it.
 
 | | Model | Instructions it runs on | Tools |
 |---|---|---|---|
@@ -65,31 +74,45 @@ sends `realtimeEndInstructions`, which supersedes it.
 is routed through Codex rather than dropped. The Viewer itself writes nothing to
 the thread.
 
-**Where a spoken card is allowed to steer work.** A tool call gets the card the
-operator was looking at only when the ledger can show that card belongs to THAT
-CALLER'S OWN BACKING WORK. Two edges have to hold, and each has its own evidence:
+**Where a spoken card is allowed to steer work: nowhere, on installed Codex
+0.154.0.** Automatic selection of the card the operator was looking at needs two
+edges, neither is available, so the reader refuses every spoken turn by name and
+hands out no card at all.
 
-- utterance to handoff, which the browser owns, because it is the only peer that
-  sees both the transcript boundary and the handoff event. They share no
-  identifier on the wire, so the association is a fact in exactly one
-  arrangement: one utterance outstanding, one handoff arriving for the first
-  time. Anything else — two outstanding, or a canonical identity this call has
-  already reported — is published as an **ambiguity**, and it stands for the rest
-  of the call, because every unattributed utterance may still produce a handoff.
-- handoff to work, which the request itself supplies. Installed Codex carries its
-  backing turn identity on every MCP request in
-  `params._meta["x-codex-turn-metadata"]`, so the reader answers about one turn
-  rather than about the conversation. A turn that has claimed a card keeps it
-  through anything; a turn that has claimed none may claim one only when exactly
-  one unclaimed join exists and nothing is ambiguous; and a turn native did not
-  start from the call — no `turn_trigger` — never claims anything, which is what
-  keeps a later typed request from inheriting the call's card.
+- utterance to handoff is the browser's to observe, because it is the only peer
+  that sees both the transcript boundary and the handoff event. They share no
+  identifier on the wire. The client still reports what it saw and still refuses
+  to guess when two utterances are outstanding — that evidence is worth keeping
+  — but a report that only ONE was outstanding is arrival order, and arrival
+  order is not permission to select a card. A late handoff can still belong to
+  earlier speech.
+- handoff to work is not established at all. Installed Codex carries its backing
+  turn identity on every MCP request in `params._meta["x-codex-turn-metadata"]`,
+  read off the transport rather than the arguments, so a reader can tell one of
+  a caller's turns from another — but native steers more than one handoff into
+  one backing turn, so `turn_id` names the work and cannot name the utterance
+  the work came from.
 
-An accepted join survives a hangup, because the work the last utterance started
-does. It is retired by the host saying that turn finished, or by the thread going
-idle after the join for a spoken turn no tool call ever claimed. No clock is
-involved: the earlier ten-minute window both discarded work that was still
-running and left a finished call's card available to unrelated turns.
+So the reader classifies and refuses, and the refusals stay distinct because the
+next move differs: there is no call; the call has reported no card; this request
+proves no backing turn; the turn is not the call's at all; the client reported an
+ambiguity; or — the ordinary one — the call points at a card and nothing ties it
+to this request.
+
+What still works, and is the supported route from a spoken turn: explicit
+`conversationId` and `selectedContext` targeting, the bound-view and context
+tools, and the immutable context of an operation that was already admitted,
+which travels with that operation's own key rather than through this reader.
+
+The ledger keeps recording what each call was told, because the panel and the
+control endpoint read it back as evidence. Retention is bounded by observed work,
+never by a clock: a record whose utterance became a handoff survives a hangup and
+a reconnect while the host reports a turn still running, and is retired when the
+thread is observed going idle after the handoff. There is no per-record turn
+verdict to use instead — which turn a handoff was routed into is the very edge
+native does not report. The ten-minute window this replaces both discarded work
+that was still running and left a finished call's card available to unrelated
+turns.
 
 The full evidence, its limits, and what a future authorized live capture would
 have to record are in `docs/design/native-voice-work-identity.md`.

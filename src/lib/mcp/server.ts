@@ -196,7 +196,7 @@ export interface McpToolCallContext {
  * isolated fixture runs, with a forged-argument case proving that the same names
  * placed in `arguments` never reach this object.
  *
- * THIS IS TRANSPORT PROVENANCE, NOT PERMISSION. It cannot widen what a caller
+ * THIS IS TRANSPORT PROVENANCE. It cannot widen what a caller
  * may do; it only lets a reader tell one of that caller's turns from another,
  * which is what the voice ledger needs and what conversation identity alone
  * could never supply. A caller that presents none is not refused — it simply

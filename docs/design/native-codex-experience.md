@@ -22,12 +22,12 @@ composer is a view of that queue rather than a plan for it:
   and the row says "waiting for Codex to acknowledge it" instead of guessing;
 - an entry leaves the panel when the journal settles it.
 
-Reads are pushed, not polled. Native's `thread/queue/changed` reaches the host,
+Reads arrive by push. Native's `thread/queue/changed` reaches the host,
 the host publishes a revision counter on the runtime bus, and the panel refetches
 when the counter moves — so a dispatch Codex made on its own appears as fast as
 one the operator made.
 
-Writes are admissions. Every control POSTs one command with its own immutable
+Every write is an admission. Every control POSTs one command with its own immutable
 idempotency key and returns when the journal commits; the runtime's executor
 remains the single dispatch owner and the browser adds no second scheduler. The
 row goes busy until the next read shows what happened, and a 202 whose receipt

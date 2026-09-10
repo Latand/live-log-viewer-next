@@ -17,17 +17,19 @@
  *   - that the notice is rendered, on its own row, ABOVE the transcript's
  *     bottom edge and BELOW the last spoken line — a warning that lands off
  *     screen is not a warning;
- *   - that its text is legible: non-zero size, and a colour that is not the
- *     panel's own background;
+ *   - that its text is legible: non-zero size, and a WCAG contrast ratio against
+ *     what is painted behind it, measured in the theme the app ships;
  *   - that it is NOT the failure treatment — a different foreground colour from
  *     the error slot, and no retry control beside it;
  *   - that a real failure takes the slot back, so the operator is not told what
  *     might happen next while reading what already did.
  *
  * Then it proves the reading can go red: the same measurements are taken against
- * a page where the notice has been removed from the DOM by hand, and against one
- * where it has been given the failure's own colour. A run where either still
- * reads as "a legible, distinct notice" exits non-zero.
+ * a page where the notice has been removed from the DOM by hand, one where it has
+ * been given the failure's own colour, and one where it has been dimmed towards
+ * its own background — which keeps its size, its slot and a colour distinct from
+ * the error, so only the contrast measurement catches it. A run where any of the
+ * three still reads as "a legible, distinct notice" exits non-zero.
  *
  * Frames and the measurement JSON land outside the repository, under
  * <BOARD_CAPTURE_DIR>/<unique-run>/out. Nothing is served from the operator's
@@ -72,10 +74,22 @@ function stylesheet(): string {
   return names.map((name) => fs.readFileSync(path.join(cssDir, name), "utf8")).join("\n");
 }
 
+/**
+ * The page the panel is measured on.
+ *
+ * `data-theme="dark"` is the app's OWN dark switch (`styles/tokens.css`), which
+ * keys on that attribute and on `prefers-color-scheme` — `class="dark"` selects
+ * nothing. Getting it wrong is not cosmetic: the panel then rendered light-mode
+ * text tokens over a hard-coded dark background, and every colour measured here
+ * and every frame captured described a theme the app never ships. The background
+ * is the canvas token for the same reason, and the browser context sets
+ * `colorScheme: "dark"` so the media-query half of the switch agrees with the
+ * attribute half.
+ */
 function page(body: string, css: string): string {
-  return `<!doctype html><html lang="en" class="dark"><head><meta charset="utf-8">
+  return `<!doctype html><html lang="en" data-theme="dark"><head><meta charset="utf-8">
 <style>${css}</style>
-<style>body{margin:0;background:var(--color-surface,#0b0b0e);padding:24px;}
+<style>body{margin:0;background:var(--color-canvas);padding:24px;}
   #frame{width:520px;}</style>
 </head><body><div id="frame">${body}</div></body></html>`;
 }
@@ -99,9 +113,16 @@ interface Reading {
   insidePanel: boolean;
   colour: string;
   fontSizePx: number;
+  /** WCAG contrast ratio of the notice text against what is painted behind it. */
+  contrast: number;
   distinctFromError: boolean;
   hasRetryBeside: boolean;
 }
+
+/** The floor the notice has to clear to count as readable. WCAG AA for text at
+    this size is 4.5:1; the shipped dark treatment clears it several times over,
+    so a run near this number is a regression rather than a close call. */
+const MIN_CONTRAST = 4.5;
 
 const READ = (errorColour: string | null) => {
   const notice = document.querySelector('[data-testid="voice-notice"]') as HTMLElement | null;
@@ -114,7 +135,7 @@ const READ = (errorColour: string | null) => {
   if (!notice || !panel) {
     return {
       present: false, visible: false, belowLastLine: false, insidePanel: false,
-      colour: "", fontSizePx: 0, distinctFromError: false, hasRetryBeside: false,
+      colour: "", fontSizePx: 0, contrast: 0, distinctFromError: false, hasRetryBeside: false,
     };
   }
   const text = notice.querySelector("p") as HTMLElement;
@@ -122,6 +143,23 @@ const READ = (errorColour: string | null) => {
   const panelBox = panel.getBoundingClientRect();
   const lineBox = line?.getBoundingClientRect();
   const style = getComputedStyle(text);
+  /* The shipped colours, compared the way a reader's eye has to: relative
+     luminance, rather than a string equality on two token values. A notice the
+     operator cannot read is a notice that was not delivered. */
+  const channel = (value: string) => {
+    const parts = value.match(/[\d.]+/g)?.map(Number) ?? [0, 0, 0];
+    const linear = parts.slice(0, 3).map((raw) => {
+      const unit = raw / 255;
+      return unit <= 0.04045 ? unit / 12.92 : ((unit + 0.055) / 1.055) ** 2.4;
+    });
+    return 0.2126 * linear[0]! + 0.7152 * linear[1]! + 0.0722 * linear[2]!;
+  };
+  /* The panel is translucent over the page, so what is painted behind the text
+     is the page's own canvas. */
+  const behind = getComputedStyle(document.body).backgroundColor;
+  const front = channel(style.color);
+  const back = channel(behind);
+  const ratio = (Math.max(front, back) + 0.05) / (Math.min(front, back) + 0.05);
   return {
     present: true,
     visible: box.width > 0 && box.height > 0 && style.visibility !== "hidden" && style.opacity !== "0",
@@ -129,6 +167,7 @@ const READ = (errorColour: string | null) => {
     insidePanel: box.top >= panelBox.top - 1 && box.bottom <= panelBox.bottom + 1,
     colour: style.color,
     fontSizePx: Number.parseFloat(style.fontSize),
+    contrast: Math.round(ratio * 100) / 100,
     distinctFromError: errorColour === null ? true : style.color !== errorColour,
     hasRetryBeside: notice.querySelector('[data-testid="voice-retry"]') !== null,
   };
@@ -136,7 +175,8 @@ const READ = (errorColour: string | null) => {
 
 function holds(reading: Reading): boolean {
   return reading.present && reading.visible && reading.belowLastLine && reading.insidePanel
-    && reading.fontSizePx >= 10 && reading.distinctFromError && !reading.hasRetryBeside;
+    && reading.fontSizePx >= 10 && reading.contrast >= MIN_CONTRAST
+    && reading.distinctFromError && !reading.hasRetryBeside;
 }
 
 /**
@@ -164,7 +204,11 @@ async function main(): Promise<number> {
     browser = await chromium.launch({
       args: ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--hide-scrollbars"],
     });
-    const context = await browser.newContext({ viewport: { width: 620, height: 520 }, reducedMotion: "no-preference" });
+    const context = await browser.newContext({
+      viewport: { width: 620, height: 520 },
+      reducedMotion: "no-preference",
+      colorScheme: "dark",
+    });
     const view = await context.newPage();
 
     /* The failure treatment first, so the notice can be compared against it. */
@@ -201,11 +245,25 @@ async function main(): Promise<number> {
     const indistinct = await view.evaluate(READ, errorColour) as Reading;
     measurements.redIndistinct = indistinct;
 
+    /* AND THE ONE THE OLD READING COULD NOT SEE. A notice dimmed towards its own
+       background keeps its size, its slot and a colour that is still not the
+       error's — every check this script used to make — and becomes unreadable.
+       Only the contrast measurement catches it. */
+    await view.setContent(page(panelHtml({ notice: NOTICE, error: null }), css), { waitUntil: "load" });
+    await view.evaluate(() => {
+      const text = document.querySelector('[data-testid="voice-notice"] p') as HTMLElement | null;
+      if (text) text.style.color = "rgb(40, 36, 28)";
+    });
+    const dimmed = await view.evaluate(READ, errorColour) as Reading;
+    await frame(view, "red-dimmed");
+    measurements.redDimmed = dimmed;
+
     const verdicts = [
       ["a live call shows a legible notice, distinct from the failure slot", holds(live)],
       ["a failure takes the slot back", !both.present],
       ["RED: removing the notice is caught", !holds(removed)],
       ["RED: giving it the failure's colour is caught", !holds(indistinct)],
+      ["RED: dimming it towards its own background is caught", !holds(dimmed)],
     ] as const;
     measurements.verdicts = verdicts.map(([check, held]) => ({ check, held }));
     fs.writeFileSync(path.join(OUT_DIR, "voice-notice.json"), `${JSON.stringify(measurements, null, 2)}\n`);

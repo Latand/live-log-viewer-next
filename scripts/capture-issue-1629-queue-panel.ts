@@ -146,6 +146,7 @@ function panelHtml(failure: string | null): string {
     loading: false,
     error: null,
     thread: { model: "gpt-6-astra", effort: "high" },
+    cardId: "conversation_capture",
     mintKey: () => "capture",
     submit: async () => ({ ok: true }),
     onRefresh: () => undefined,

@@ -138,9 +138,6 @@ export interface SelectedContextResolution {
   /** The identity the tool should act on: explicit argument, else the resolved
       reference, else empty (the caller named the conversation another way). */
   conversationId: string;
-  /** Set when the identity came from the caller's own live voice call rather
-      than from an argument, so the answer can say where it got the card. */
-  voice?: { handoff: Record<string, string | null> };
 }
 
 export interface ResolveSelectedContextOptions {

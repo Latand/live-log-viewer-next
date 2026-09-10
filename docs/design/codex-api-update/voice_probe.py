@@ -4,6 +4,12 @@ Answers one question with the installed app-server rather than with its schema:
 when a call starts on a thread that already has a role and tools, what does the
 SPOKEN model actually receive?
 
+SCOPE: call creation, parameter deserialization, and what creating and stopping a
+call commits to canonical history ON ITS OWN. No backing turn runs during the
+call and no text turn follows it, so nothing here speaks to what a turn commits;
+that comes from the fuller successful-session run recorded in
+docs/realtime-v3/BLOCKED.md.
+
 The realtime call is created against the configured model provider, so pointing
 that provider at a local fixture captures the outgoing live-session body verbatim
 without any credential, any account, and any request leaving the machine. The
@@ -230,12 +236,22 @@ plugins = false
             result['cases']['parameter_deserialization'][name] = 'rejected' if 'error' in answer else 'accepted'
             client.settle(1)
 
-        # None of the session-scoped strings may be written to canonical history;
-        # the injected item, being an ordinary thread write, must be.
+        # WHAT THIS OBSERVES, AND WHAT IT DOES NOT. The call was created and
+        # stopped; NO BACKING TURN RAN DURING IT, and no text turn follows. So
+        # this reads canonical history for what call creation and a stop commit
+        # ON THEIR OWN. It is NOT the general question of whether native ever
+        # persists the session-scoped strings: it does, as developer items, once
+        # a backing turn runs — established by the fuller successful-session run
+        # recorded in docs/realtime-v3/BLOCKED.md, which this probe's scope
+        # cannot reach and does not contradict.
+        #
+        # The injected item, being an ordinary thread write, is persisted here.
         read = client.rpc('thread/read', {'threadId': thread_id})
         path = (read.get('result') or {}).get('thread', {}).get('path')
         history = Path(path).read_text(encoding='utf8', errors='replace') if path else ''
-        result['cases']['canonical_history'] = {
+        result['cases']['canonical_history_at_call_creation'] = {
+            'scope': ('call creation and stop only: no backing turn ran during the call and no '
+                      'later text turn follows, so this says nothing about what a turn commits'),
             'injected_developer_item_persisted': 'probe-mandate' in history,
             'spoken_prompt_persisted': 'SPOKEN PERSONA.' in history,
             'start_instructions_persisted': 'voice is active; keep this task role' in history,
@@ -261,9 +277,11 @@ plugins = false
          all(verdict == 'rejected' for name, verdict in result['cases']['parameter_deserialization'].items()
              if name != 'unknown_field_control')),
         ('an injected thread item is permanent',
-         result['cases']['canonical_history']['injected_developer_item_persisted'] is True),
-        ('no session-scoped string is written to canonical history',
-         not any(result['cases']['canonical_history'][key] for key in
+         result['cases']['canonical_history_at_call_creation']['injected_developer_item_persisted'] is True),
+        ('creating and stopping a call, with no backing turn during it, commits no session-scoped '
+         'string to canonical history by itself (a backing turn during the call is what commits '
+         'them, as developer items - see the successful-session evidence in docs/realtime-v3/BLOCKED.md)',
+         not any(result['cases']['canonical_history_at_call_creation'][key] for key in
                  ('spoken_prompt_persisted', 'start_instructions_persisted', 'end_instructions_persisted'))),
     ]
     result['assertions'] = [{'check': check, 'held': held} for check, held in checks]
