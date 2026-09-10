@@ -1,6 +1,7 @@
 import type { NativeQueuedSubmission, NativeQueueSnapshot } from "@/lib/runtime/nativeCodexQueue";
 import type { NativeQueueRecord } from "@/lib/runtime/nativeQueueContracts";
 import type { RuntimeSendSettings } from "@/lib/runtime/contracts";
+import type { StructuredImageRef } from "@/lib/runtime/structuredContent";
 
 /**
  * What the operator sees of the native Codex queue, and what they may do to it
@@ -23,8 +24,10 @@ import type { RuntimeSendSettings } from "@/lib/runtime/contracts";
  * or a host.
  */
 
-/** Whether an entry may still be changed, and why not when it may not. */
-export type NativeQueueRowAction = "edit" | "delete" | "send-now" | "move";
+/** Whether an entry may still be changed, and why not when it may not.
+    `start` is native's own idle dispatch of one entry, which is the only route
+    back for a payload native no longer holds; `send-now` is the steer. */
+export type NativeQueueRowAction = "edit" | "delete" | "send-now" | "move" | "start";
 
 /**
  * Why a row offers no controls.
@@ -63,6 +66,9 @@ export interface NativeQueueRow {
   revision: number;
   /** The latest admitted version's text. */
   text: string;
+  /** The latest admitted version's attachments, so an edit of the words carries
+      them forward instead of admitting a payload that has lost them. */
+  images: readonly StructuredImageRef[];
   imageCount: number;
   state: NativeQueueRecord["state"];
   /** The runtime's own reason for a refusal or an unknown outcome. */
@@ -164,9 +170,12 @@ function rowActions(
   if (entry.state === "withdrawn") {
     /* Withdrawn means native no longer holds it and the Viewer still does: the
        payload survived a send-now whose steer did not land. Only an explicit
-       idle start can move it. */
+       idle START can move it — the runtime refuses every other action on a
+       withdrawn entry, so offering `send-now` here was offering the one control
+       that could never be admitted, and the operator's words had no route back
+       at all. */
     return turn === "idle"
-      ? { actions: ["send-now"], blocked: null }
+      ? { actions: ["start"], blocked: null }
       : { actions: [], blocked: { code: "withdrawn-running" } };
   }
   if (!entry.nativeSubmissionId) return { actions: [], blocked: { code: "unacknowledged" } };
@@ -176,7 +185,12 @@ function rowActions(
 export function projectNativeQueue(input: NativeQueueViewInput): NativeQueueView {
   const inFlight = input.inFlight ?? new Set<string>();
   const order = nativeOrder(input.native?.items);
-  const live = input.entries.filter((entry) => !TERMINAL.has(entry.state) || entry.state === "delivered");
+  /* THE QUEUE, AND ONLY THE QUEUE. The journal returns up to 128 settled rows so
+     a reader can see history; the panel is the operator's view of what Codex may
+     still dispatch, and counting delivered messages into its header read
+     "129 messages" above a queue holding one. History belongs to the transcript,
+     which is where a delivered message actually appears. */
+  const live = input.entries.filter((entry) => !TERMINAL.has(entry.state));
   const rows: NativeQueueRow[] = live.map((entry) => {
     const version = latestVersion(entry);
     const busy = inFlight.has(entry.entryId) || (entry.mutationOperationId !== null && entry.state !== "uncertain");
@@ -187,6 +201,7 @@ export function projectNativeQueue(input: NativeQueueViewInput): NativeQueueView
       nativeSubmissionId: entry.nativeSubmissionId,
       revision: entry.revision,
       text: version?.text ?? "",
+      images: version?.images ?? [],
       imageCount: version?.images.length ?? 0,
       state: entry.state,
       reason: entry.reason,
@@ -213,7 +228,12 @@ export function projectNativeQueue(input: NativeQueueViewInput): NativeQueueView
   });
   const nativeStale = input.native === null || input.native.stale || input.native.items === null;
   const observed = rows.filter((row) => row.observedInNative);
-  const pending = rows.filter((row) => !row.observedInNative && !TERMINAL.has(row.state));
+  /* Rows that are genuinely WAITING for Codex to acknowledge them, which is what
+     the notice says of them. A withdrawn entry is one Codex deliberately no
+     longer holds and an uncertain one has its own sentence on its own row; both
+     counted here made the notice describe the opposite of their situation. */
+  const pending = rows.filter((row) => !row.observedInNative && !TERMINAL.has(row.state)
+    && row.state !== "withdrawn" && row.state !== "uncertain");
   return {
     rows,
     nativeStale,

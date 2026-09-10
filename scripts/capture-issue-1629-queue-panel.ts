@@ -18,6 +18,12 @@
  *     text the reader can actually see;
  *   - that a refusal is legible and distinct from the ordinary row status, so
  *     "Codex refused this" is not read as another queued message;
+ *   - that the two controls the runtime's own rules make load-bearing are
+ *     REACHABLE AND HITTABLE: the header's queue-level start, and the one action
+ *     a withdrawn payload has (a start naming that entry), which is the only
+ *     route back for words that survived a steer that did not land;
+ *   - that a message the journal has settled is not painted at all — the journal
+ *     keeps up to 128 of them behind the queue, and the panel is the queue;
  *   - that the panel stays inside its own width — a queue is above the composer,
  *     and one that overflows pushes the field the operator is typing in.
  *
@@ -82,9 +88,17 @@ const ENTRIES = [
     state: "uncertain",
     reason: "native queue mutation outcome is unknown; no mutation was retried",
   }),
+  entry("four", "Say in the thread that the rehearsal passed.", { state: "withdrawn", nativeSubmissionId: null }),
+  /* Settled, and therefore not part of the queue at all. It is here so the
+     reading can say the panel painted no history, rather than the fixture
+     never offering it any. */
+  entry("five", "This one was delivered a while ago.", { state: "delivered" }),
 ];
 
-const ITEMS = ENTRIES.filter((row) => row.state !== "uncertain").map((row) => ({
+/** What the panel is expected to paint: the queue, and nothing settled. */
+const LIVE_ENTRIES = ENTRIES.filter((row) => row.state !== "delivered");
+
+const ITEMS = ENTRIES.filter((row) => row.nativeSubmissionId !== null && row.state === "queued").map((row) => ({
   id: row.nativeSubmissionId!,
   clientUserMessageId: row.clientUserMessageId,
   input: [{ type: "text" as const, text: row.versions[0]!.text }],
@@ -135,6 +149,13 @@ function panelHtml(failure: string | null): string {
 
 interface Reading {
   rows: number;
+  /** The panel must paint the queue and no settled history. */
+  settledRowsPainted: number;
+  /** The smallest side of the header's queue-level start control, in px. */
+  headerStartPx: number;
+  /** The controls a withdrawn row offers: exactly its one start. */
+  withdrawnRowControls: number;
+  withdrawnStartPx: number;
   controlsInsidePanel: boolean;
   smallestControlPx: number;
   blockedRowHasControls: boolean;
@@ -153,7 +174,8 @@ const READ = () => {
   const frame = document.querySelector("#frame") as HTMLElement;
   if (!panel) {
     return {
-      rows: 0, controlsInsidePanel: false, smallestControlPx: 0, blockedRowHasControls: true,
+      rows: 0, settledRowsPainted: 0, headerStartPx: 0, withdrawnRowControls: 0, withdrawnStartPx: 0,
+      controlsInsidePanel: false, smallestControlPx: 0, blockedRowHasControls: true,
       smallestActionableRowControls: 0,
       blockedReasonVisible: false, blockedReasonColour: "", statusColour: "", failureColour: "",
       failureVisible: false, withinWidth: false,
@@ -168,14 +190,23 @@ const READ = () => {
   const anyStatus = rows[0]?.querySelector('[data-testid="native-queue-row-status"]') as HTMLElement | null;
   const failure = document.querySelector('[data-testid="native-queue-failure"]') as HTMLElement | null;
   const failureBox = failure?.getBoundingClientRect();
+  const headerStart = panel.querySelector('[data-testid="native-queue-start"]') as HTMLElement | null;
+  const headerBox = headerStart?.getBoundingClientRect();
+  const withdrawn = rows.find((row) => row.getAttribute("data-state") === "withdrawn");
+  const withdrawnStart = withdrawn?.querySelector('[data-testid="native-queue-row-start"]') as HTMLElement | null;
+  const withdrawnBox = withdrawnStart?.getBoundingClientRect();
   return {
     rows: rows.length,
+    settledRowsPainted: rows.filter((row) => ["delivered", "removed", "refused"].includes(row.getAttribute("data-state") ?? "")).length,
+    headerStartPx: headerBox ? Math.min(headerBox.width, headerBox.height) : 0,
+    withdrawnRowControls: withdrawn ? withdrawn.querySelectorAll("button").length : 0,
+    withdrawnStartPx: withdrawnBox ? Math.min(withdrawnBox.width, withdrawnBox.height) : 0,
     controlsInsidePanel: boxes.every((box) => box.top >= panelBox.top - 1 && box.bottom <= panelBox.bottom + 1
       && box.left >= panelBox.left - 1 && box.right <= panelBox.right + 1),
     smallestControlPx: boxes.length ? Math.min(...boxes.map((box) => Math.min(box.width, box.height))) : 0,
     blockedRowHasControls: blocked ? blocked.querySelectorAll("button").length > 0 : true,
     smallestActionableRowControls: Math.min(...rows
-      .filter((row) => row.getAttribute("data-state") !== "uncertain")
+      .filter((row) => row.getAttribute("data-state") === "queued")
       .map((row) => row.querySelectorAll("button").length), Number.POSITIVE_INFINITY),
     blockedReasonVisible: Boolean(blockedStatus
       && blockedStatus.getBoundingClientRect().height > 0
@@ -189,7 +220,13 @@ const READ = () => {
 };
 
 function holds(reading: Reading): boolean {
-  return reading.rows === ENTRIES.length
+  return reading.rows === LIVE_ENTRIES.length
+    && reading.settledRowsPainted === 0
+    /* The header's queue-level start, and the withdrawn payload's own one: both
+       are controls the runtime admits and the panel used not to offer at all. */
+    && reading.headerStartPx >= 12
+    && reading.withdrawnRowControls === 1
+    && reading.withdrawnStartPx >= 12
     && reading.controlsInsidePanel
     && reading.smallestControlPx >= 12
     /* Edit, remove, send now, and at least one move: a row the operator may
@@ -250,8 +287,32 @@ async function main(): Promise<number> {
     });
     measurements.redFailureIndistinct = await view.evaluate(READ) as Reading;
 
+    /* The queue-level start taken away again: the header control the panel
+       offered for as long as the parser was rejecting it. */
+    await view.setContent(page(panelHtml("Codex refused this change."), css), { waitUntil: "load" });
+    await view.evaluate(() => { document.querySelector('[data-testid="native-queue-start"]')?.remove(); });
+    measurements.redNoQueueStart = await view.evaluate(READ) as Reading;
+
+    /* And the withdrawn payload stranded again: its row present, its one route
+       back gone, which is exactly what the panel used to render. */
+    await view.setContent(page(panelHtml("Codex refused this change."), css), { waitUntil: "load" });
+    await view.evaluate(() => {
+      for (const button of document.querySelectorAll('[data-state="withdrawn"] button')) button.remove();
+    });
+    measurements.redWithdrawnStranded = await view.evaluate(READ) as Reading;
+
+    /* And a settled message painted back into the queue. */
+    await view.setContent(page(panelHtml("Codex refused this change."), css), { waitUntil: "load" });
+    await view.evaluate(() => {
+      const row = document.querySelector('[data-testid="native-queue-row"]');
+      const clone = row?.cloneNode(true) as HTMLElement | undefined;
+      if (clone && row) { clone.setAttribute("data-state", "delivered"); row.parentElement?.append(clone); }
+    });
+    measurements.redHistoryPainted = await view.evaluate(READ) as Reading;
+
     const greens = holds(live);
-    const reds = [measurements.redNoControls, measurements.redReasonHidden, measurements.redFailureIndistinct]
+    const reds = [measurements.redNoControls, measurements.redReasonHidden, measurements.redFailureIndistinct,
+      measurements.redNoQueueStart, measurements.redWithdrawnStranded, measurements.redHistoryPainted]
       .map((reading) => holds(reading as Reading));
     measurements.verdict = { queueHolds: greens, redPathsCaught: reds.map((held) => !held) };
     fs.writeFileSync(path.join(OUT_DIR, "measurements.json"), `${JSON.stringify(measurements, null, 2)}\n`);

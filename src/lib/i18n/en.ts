@@ -2401,6 +2401,7 @@ export const en = {
   "queue.moveDown": "Move later in the queue",
   "queue.heldByCodex": "Held by Codex",
   "queue.awaitingCodex": "Waiting for Codex to acknowledge it",
+  "queue.withdrawnIdle": "Codex no longer holds it — sending it now starts a turn with it.",
   "queue.blocked": "Cannot be changed — {reason}",
   "queue.blocked.busy": "waiting for this change to be acknowledged",
   "queue.blocked.dispatched": "already dispatched, so its payload is fixed",

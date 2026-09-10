@@ -2332,6 +2332,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "queue.moveDown": "Пересунути пізніше в черзі",
   "queue.heldByCodex": "Тримає Codex",
   "queue.awaitingCodex": "Чекає на підтвердження від Codex",
+  "queue.withdrawnIdle": "Codex більше не тримає його — відправлення зараз почне хід із ним.",
   "queue.blocked": "Не можна змінити — {reason}",
   "queue.blocked.busy": "чекає на підтвердження цієї зміни",
   "queue.blocked.dispatched": "уже відправлено, тож вміст зафіксовано",

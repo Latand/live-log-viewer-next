@@ -5,6 +5,7 @@ import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 
 import { translate, type TFunction } from "@/lib/i18n";
+import { parseRuntimeCommand } from "@/lib/runtime/commands";
 import { useNativeQueue, type NativeQueueDependencies } from "@/hooks/useNativeQueue";
 import type { NativeQueuedSubmission } from "@/lib/runtime/nativeCodexQueue";
 import type { NativeQueueRecord } from "@/lib/runtime/nativeQueueContracts";
@@ -19,6 +20,13 @@ import { NativeQueuePanel } from "./NativeQueuePanel";
  * admission with its own immutable key, the row it belongs to goes busy at once,
  * the queue is re-read, and a refusal is shown in the runtime's own words with
  * nothing retried behind it.
+ *
+ * AND THE TRANSPORT RUNS THE REAL PARSER. Every press is handed to
+ * `parseRuntimeCommand` exactly as the route hands it, and its refusal is this
+ * transport's 400. A stub that answered 202 to anything let the header's own
+ * "send the queue now" pass here for as long as the parser had been rejecting
+ * it with `entryId is invalid` — a control that could never be admitted, green
+ * in CI.
  */
 
 const dom = new Window();
@@ -81,6 +89,8 @@ const dependencies: NativeQueueDependencies = {
   },
   write: async (body) => {
     writes.push(body);
+    try { parseRuntimeCommand("native-queue", body); }
+    catch (error) { return { status: 400, body: { error: error instanceof Error ? error.message : "invalid" } }; }
     return writeAnswer;
   },
 };
@@ -209,7 +219,76 @@ test("starting the queue asks for an idle fence, and is offered only when idle",
   document.body.replaceChildren();
   await mount({ turn: "idle" });
   await click(host.querySelector('[data-testid="native-queue-start"]'));
+  /* The queue-level form native's own protocol has: `queuedSubmissionId` is
+     nullable, so a start that names no entry dispatches the head of the queue.
+     The real parser is what says whether the header's control is admissible. */
   expect(writes[0]).toMatchObject({ action: "start", turnId: null });
+  expect(writes[0]).not.toHaveProperty("entryId");
+  expect(host.querySelector('[data-testid="native-queue-failure"]')).toBeNull();
+});
+
+test("a withdrawn message goes back through the one action the runtime admits", async () => {
+  /* The payload survived a send-now whose steer did not land. The journal takes
+     only a `start` for it, so the row offers a start naming the entry and its
+     revision — a `send-now` here was refused every time, which left the
+     operator's words visible in the panel and unreachable from it. */
+  entries = [record("stuck", { state: "withdrawn" })];
+  items = [];
+  await mount({ turn: "idle" });
+  expect(rows()[0]!.querySelector('[data-testid="native-queue-send-now"]')).toBeNull();
+  /* And it says what it is. Codex no longer holds it, so the unobserved row's
+     ordinary "waiting for Codex to acknowledge it" described the opposite. */
+  expect(rows()[0]!.querySelector('[data-testid="native-queue-row-status"]')?.textContent)
+    .toContain("no longer holds it");
+  await click(rows()[0]!.querySelector('[data-testid="native-queue-row-start"]'));
+  expect(writes[0]).toMatchObject({ action: "start", entryId: "stuck", expectedRevision: 1, turnId: null });
+  expect(host.querySelector('[data-testid="native-queue-failure"]')).toBeNull();
+});
+
+test("editing the words of a message with attachments keeps them", async () => {
+  /* An update replaces the version wholesale and its digest is computed over
+     what the command carries, so a Save that named no images admitted a
+     revision with none: a text edit that silently threw the pictures away. */
+  const image = { sha256: "c".repeat(64), mime: "image/png" as const, bytes: 64 };
+  entries = [record("a", { versions: [{
+    revision: 1, operationId: "op-a", text: "message a", images: [image], contentDigest: "d-a",
+  }] })];
+  items = [submission("a")];
+  await mount();
+  await click(rows()[0]!.querySelector('[data-testid="native-queue-edit"]'));
+  (host.querySelector('[data-testid="native-queue-edit-field"]') as HTMLTextAreaElement).value = "new words";
+  await click(host.querySelector('[data-testid="native-queue-save"]'));
+  expect(writes[0]).toMatchObject({ action: "update", entryId: "a", text: "new words", images: [image] });
+});
+
+test("an attachment-only message is editable, and its Save is not swallowed", async () => {
+  /* Its text is empty and always was. Refusing an empty box made the one message
+     whose words the operator most likely wanted to ADD the only one they could
+     not save at all — the press did nothing and said nothing. */
+  const image = { sha256: "d".repeat(64), mime: "image/png" as const, bytes: 64 };
+  entries = [record("pic", { versions: [{
+    revision: 1, operationId: "op-pic", text: "", images: [image], contentDigest: "d-pic",
+  }] })];
+  items = [submission("pic")];
+  await mount();
+  await click(rows()[0]!.querySelector('[data-testid="native-queue-edit"]'));
+  (host.querySelector('[data-testid="native-queue-edit-field"]') as HTMLTextAreaElement).value = "a caption at last";
+  await click(host.querySelector('[data-testid="native-queue-save"]'));
+  expect(writes[0]).toMatchObject({ action: "update", entryId: "pic", text: "a caption at last", images: [image] });
+});
+
+test("the header counts the queue, leaving the history behind it out", async () => {
+  /* The journal keeps up to 128 settled rows so a reader can see what happened.
+     Counting them into the panel above the composer read "129 messages" over a
+     queue holding one. */
+  entries = [
+    ...Array.from({ length: 128 }, (_, index) => record(`done-${index}`, { state: "delivered" })),
+    record("a"),
+  ];
+  items = [submission("a")];
+  await mount();
+  expect(rows()).toHaveLength(1);
+  expect(host.querySelector('[data-testid="native-queue-count"]')?.textContent).toContain("1 message");
 });
 
 test("a refusal is shown in the runtime's own words and nothing is retried", async () => {

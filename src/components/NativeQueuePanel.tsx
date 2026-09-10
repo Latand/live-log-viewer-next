@@ -170,15 +170,25 @@ export function NativeQueuePanel({ view, error, thread, mintKey, submit, onRefre
                     data-testid="native-queue-save"
                     onClick={() => void (async () => {
                       const text = editRef.current?.value.trim() ?? "";
-                      if (!text) return;
+                      /* An ATTACHMENT-ONLY entry is editable too. Its text is
+                         empty and always was, so refusing an empty box here left
+                         the one message whose words the operator most likely
+                         wanted to add with no way to save them. */
+                      if (!text && !row.images.length) return;
                       /* The EXPECTED REVISION rides the update: an entry the
                          runtime has admitted a newer version of is a conflict,
-                         and the operator is told rather than overwriting it. */
+                         and the operator is told rather than overwriting it.
+                         THE ATTACHMENTS RIDE IT TOO. An update replaces the
+                         version wholesale and its digest is computed over what
+                         the command carries, so an edit of the words that named
+                         no images used to admit revision 2 with none — the
+                         operator saw a text edit and lost the pictures. */
                       const saved = await run({
                         action: "update",
                         entryId: row.entryId,
                         expectedRevision: row.revision,
                         text,
+                        ...(row.images.length ? { images: [...row.images] } : {}),
                       });
                       if (saved) setEditing(null);
                     })()}
@@ -215,9 +225,16 @@ export function NativeQueuePanel({ view, error, thread, mintKey, submit, onRefre
             <p data-testid="native-queue-row-status" className="mt-0.5 text-caption text-muted">
               {row.blocked
                 ? blockedText(row.blocked, t)
-                : row.observedInNative
-                  ? t("queue.heldByCodex")
-                  : t("queue.awaitingCodex")}
+                /* A WITHDRAWN ROW IS NOT WAITING FOR ANYTHING. Codex no longer
+                   holds it and the Viewer still does, so "waiting for Codex to
+                   acknowledge it" — which is what an unobserved row otherwise
+                   says — described the opposite of its situation next to the one
+                   control that moves it. */
+                : row.state === "withdrawn"
+                  ? t("queue.withdrawnIdle")
+                  : row.observedInNative
+                    ? t("queue.heldByCodex")
+                    : t("queue.awaitingCodex")}
               {/* What it will run on, for a message that still has a future.
                   A row that is finished, refused or unresolved is not going to
                   be dispatched, so saying which settings it would use is noise
@@ -291,6 +308,25 @@ function RowControls({
           {t("queue.edit")}
         </button>
       ) : null}
+      {can("start") ? (
+        <button
+          type="button"
+          data-testid="native-queue-row-start"
+          /* THE ONE ROUTE BACK for a payload native no longer holds. The runtime
+             refuses every action but `start` on a withdrawn entry, so this is a
+             start — naming the entry and its revision — rather than the
+             `send-now` the row used to offer and the journal always refused. */
+          onClick={() => void run({
+            action: "start",
+            entryId: row.entryId,
+            expectedRevision: row.revision,
+            turnId: null,
+          })}
+          className="rounded-control border border-accent/50 px-1.5 py-0.5 text-caption text-accent hover:bg-accent/10"
+        >
+          {t("queue.sendNow")}
+        </button>
+      ) : null}
       {can("send-now") ? (
         <button
           type="button"
@@ -303,7 +339,7 @@ function RowControls({
             action: "send-now",
             entryId: row.entryId,
             expectedRevision: row.revision,
-            turnId: view.canStart || row.state === "withdrawn" ? null : (view.activeTurnId ?? null),
+            turnId: view.canStart ? null : (view.activeTurnId ?? null),
           })}
           className="rounded-control border border-accent/50 px-1.5 py-0.5 text-caption text-accent hover:bg-accent/10"
         >

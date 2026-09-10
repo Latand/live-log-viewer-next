@@ -96,7 +96,7 @@ test("an entry whose last change has an unknown outcome offers no retry", () => 
     .toEqual({ code: "uncertain", detail: "native queue mutation outcome is unknown" });
 });
 
-test("a withdrawn payload waits for an idle thread and then offers one send", () => {
+test("a withdrawn payload waits for an idle thread and then offers the one action the runtime admits", () => {
   const running = view({
     entries: [entry({ entryId: "a", state: "withdrawn" })],
     native: { threadId: "thread-1", items: [], stale: false },
@@ -105,11 +105,18 @@ test("a withdrawn payload waits for an idle thread and then offers one send", ()
   expect(running.rows[0]!.actions).toEqual([]);
   expect(running.rows[0]!.blocked).toEqual({ code: "withdrawn-running" });
 
+  /* START, and nothing else. The journal refuses every other action on a
+     withdrawn entry ("withdrawn input requires an explicit idle start"), so
+     offering `send-now` here offered the one control that could never be
+     admitted and stranded the operator's words with no route back. */
   const idle = view({
     entries: [entry({ entryId: "a", state: "withdrawn" })],
     native: { threadId: "thread-1", items: [], stale: false },
   });
-  expect(idle.rows[0]!.actions).toEqual(["send-now"]);
+  expect(idle.rows[0]!.actions).toEqual(["start"]);
+  /* And the queue-level notice does not describe it as waiting for an
+     acknowledgement Codex is never going to give it. */
+  expect(idle.notice).toBeNull();
 });
 
 test("a mutation in flight freezes its own row and nothing else", () => {
@@ -156,7 +163,7 @@ test("send now fences against the turn actually running", () => {
   expect(view({ entries: [entry({ entryId: "a" })], activeTurnId: "turn-live" }).activeTurnId).toBeNull();
 });
 
-test("a removed or refused entry leaves the panel; a delivered one is kept", () => {
+test("a settled entry leaves the panel, delivered ones included", () => {
   const projected = view({
     entries: [
       entry({ entryId: "gone", state: "removed" }),
@@ -166,8 +173,45 @@ test("a removed or refused entry leaves the panel; a delivered one is kept", () 
     ],
     native: { threadId: "thread-1", items: [submission("live")], stale: false },
   });
-  expect(projected.rows.map((row) => row.entryId).sort()).toEqual(["done", "live"]);
-  expect(projected.rows.find((row) => row.entryId === "done")!.blocked).toEqual({ code: "delivered" });
+  expect(projected.rows.map((row) => row.entryId)).toEqual(["live"]);
+});
+
+test("the header counts the queue, leaving out the history the journal keeps", () => {
+  /* The journal returns up to 128 settled rows so a reader can see what happened.
+     Counting them into the panel above the composer read "129 messages" over a
+     queue holding one, which is the opposite of what the operator needs from the
+     one number on that line. */
+  const projected = view({
+    entries: [
+      ...Array.from({ length: 128 }, (_, index) => entry({ entryId: `done-${index}`, state: "delivered" })),
+      entry({ entryId: "live" }),
+    ],
+    native: { threadId: "thread-1", items: [submission("live")], stale: false },
+  });
+  expect(projected.rows).toHaveLength(1);
+  expect(projected.rows[0]!.entryId).toBe("live");
+});
+
+test("a row carries the attachments an edit has to carry forward", () => {
+  /* The Save control admits a whole new version, and its digest is computed over
+     exactly what the command names. A row that could only say HOW MANY images it
+     had left the control nothing to send, so editing the words of a message
+     silently admitted a revision with none. */
+  const projected = view({
+    entries: [entry({
+      entryId: "a",
+      versions: [{
+        revision: 1,
+        operationId: "op-a",
+        text: "look at this",
+        images: [{ sha256: "a".repeat(64), mime: "image/png", bytes: 12 }],
+        contentDigest: "digest-a",
+      }],
+    })],
+    native: { threadId: "thread-1", items: [submission("a")], stale: false },
+  });
+  expect(projected.rows[0]!.imageCount).toBe(1);
+  expect(projected.rows[0]!.images).toEqual([{ sha256: "a".repeat(64), mime: "image/png", bytes: 12 }]);
 });
 
 test("moving an entry rewrites only the order Codex acknowledged", () => {
