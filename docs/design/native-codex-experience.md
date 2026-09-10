@@ -87,16 +87,32 @@ message. The draft clears and the status line says it was handed over as soon as
 the press is made, before the journal has answered — the composer is empty for
 the next thing the operator types rather than frozen on a round trip. That is a
 statement about the hand-off. Whether Codex has queued it is a separate fact,
-and the panel says that once Codex acknowledges. A refused admission gives the draft back,
-attachments and all.
+and the panel says that once Codex acknowledges. A refused admission gives the
+draft back, attachments and all.
 
-A hand-off whose reply never arrives keeps its identity. The idempotency key and
-the payload it was minted for are retained (in session storage, so a reload keeps
-them), and the next press of the same message replays that one operation: the
-journal answers a replayed key with the operation it already holds, so Codex
-receives the message once whether or not the first request landed. A message the
-operator has since changed is a different message and mints its own key. Nothing
-resends on its own — native owns dispatch and this is a record of identity.
+**A hand-off whose reply never arrives keeps its whole envelope.** The journal
+hashes a command behind its idempotency key and refuses a key whose payload
+changed, so recovery is the envelope or it is nothing: the key, the exact command
+— text, attachments, requested runtime, selected card — and the thread and
+account it was admitted against are written BEFORE the request leaves, which is
+what makes a reload or a navigation while it is still in flight recoverable. The
+next press of the same message replays that one operation, and the journal
+answers a replayed key with the operation it already holds, so Codex receives the
+message once whether or not the first request landed. An account switched in
+between does not move the message: the original binding is replayed and the
+runtime either accepts it or refuses it, where rebinding would be neither.
+
+A reply is only an answer when it identifies what it settled. The journal answers
+with the operation it committed and a receipt status it knows; a 202 carrying an
+empty body, no receipt status, a status this build has never heard of, or a
+receipt for a different operation is UNKNOWN, and the operation keeps its
+identity. Sending a different message afterwards does not settle the earlier one
+either — unresolved hand-offs are listed above the queue, separately from the
+messages Codex is holding, with one control that sends the stored envelope again.
+Nothing resends on its own: native owns dispatch and this is a presentation
+record; it is no second scheduler. The same rule governs every queue control, so a
+row whose change had no answer replays that change rather than admitting a new
+one.
 
 Attachments ride the same road an ordinary send takes: the composer stages bytes,
 the queue route admits and content-addresses them, and the command carries refs.
@@ -114,45 +130,64 @@ rather than never accepted.
 
 ## Voice: which work may read the spoken card
 
-A tool call gets the card the operator was looking at only when the ledger can
-show that card belongs to that caller's own backing work. Two edges have to hold.
+**None of it, on installed Codex 0.154.0.** Automatic selection needs two edges
+and `native-voice-work-identity.md` establishes that neither is available, so
+implicit voice-selected targeting is non-actionable and every spoken turn gets a
+typed refusal that names the missing edge.
 
-**Utterance to handoff** is the browser's, because it is the only peer that sees
-both the transcript boundary and the handoff event. They share no identifier on
-the wire, so the association is a fact in exactly one arrangement: one utterance
-outstanding, one handoff arriving for the first time. Anything else — two
-outstanding, or a canonical identity this call has already reported — is
-published as an ambiguity, and it stands for the rest of the call, because every
-unattributed utterance may still produce a handoff. The earlier client dropped
-its queue and carried on, which let a later handoff look unambiguous and attach
-one turn's work to another turn's card.
+**Utterance to handoff** is the browser's to observe, because it is the only peer
+that sees both the transcript boundary and the handoff event. They share no
+identifier on the wire. The client still reports what it saw, and still refuses
+to guess when two utterances are outstanding — that evidence is worth keeping —
+but a report that only ONE was outstanding is arrival order, and the native
+report defers "one-outstanding-utterance order" by name as permission to select a
+card. A late handoff can still belong to earlier speech.
 
-**Handoff to work** is the request's. Installed Codex carries its backing turn
-identity on every MCP request in `params._meta["x-codex-turn-metadata"]`, read
-off the transport rather than the arguments, so the reader answers about one turn
-rather than about the conversation:
+**Handoff to work** is not established at all. Installed Codex carries its
+backing turn identity on every MCP request in
+`params._meta["x-codex-turn-metadata"]`, read off the transport rather than the
+arguments — but native steers more than one handoff into one backing turn, so
+`turn_id` names the work and cannot name the utterance the work came from. No new
+tool call inherits an operation merely by sharing its native turn.
 
-- a turn that has claimed a card keeps that binding through later utterances, a
-  hangup and a reconnect: it is never handed to another card. What it does not
-  keep is the right to answer implicitly while a handoff it may also carry is
-  outstanding — native steers more than one handoff into one backing turn, so the
-  turn id is coarser than an utterance and the answer there is the same refusal a
-  new claim would get. When the later speech is claimed by its own turn, or
-  retired with it, this turn reads its own card again;
-- a turn that has claimed none may claim one only when exactly one unclaimed join
-  exists, nothing is ambiguous, and no newer spoken turn is still waiting for its
-  own handoff;
-- a turn native did not start from the call — no `turn_trigger` — never claims
-  anything, which is what keeps a later typed request from inheriting the card;
-- a caller that can prove no backing turn is refused by name rather than handed
-  the conversation's latest card.
+So the reader classifies and refuses, and the refusals stay distinct because the
+next move differs: there is no call; the call has reported no card; this request
+proves no backing turn; the turn is not the call's at all; the client reported an
+ambiguity; or — the ordinary one — the call points at a card and nothing ties it
+to this request. It never hands out a card on evidence that cannot carry one.
 
-Retention is bounded by work, never by a clock. An accepted join survives a
-hangup because the work it started does; it is retired when the host says that
-turn finished, or — for a spoken turn no tool call ever claimed — when the thread
-is observed going idle after the join, since native routes a handoff into a
-running turn. The ten-minute window this replaces both discarded work that was
-still running and left a finished call's card available to unrelated turns.
+What still works, and is the supported route from a spoken turn: explicit
+`conversationId` and `selectedContext` targeting, the bound-view and context
+tools, and the immutable context of an operation that was already admitted, which
+travels with that operation's own key through recovery rather than through this
+reader. The ledger keeps recording what each call was told, because the panel and
+the control endpoint read it as evidence; only automatic target selection is
+refused.
+
+Retention is bounded by work, never by a clock. A record survives a hangup
+because the work it started does, and is retired when the thread is observed
+going idle after the handoff was accepted, since native routes a handoff into a
+running turn. There is no per-record turn verdict to use instead — which turn a
+handoff was routed into is the very edge native does not report. The ten-minute
+window this replaces both discarded work that was still running and left a
+finished call's card available to unrelated turns.
+
+Closing this needs an acceptance receipt native does not emit today; the upstream
+seam and what a live capture would have to record are in
+`native-voice-work-identity.md`.
+
+## The spoken model's operating protocol
+
+The persona the spoken session runs is this repository's own wording, and it
+carries the functional protocol the installed app's fallback prompt implements:
+the user's speech and the backing agent's messages both arrive as user-role text
+and are told apart by `[USER]` and `[BACKEND]`, so an update is never fed back as
+a fresh request; a backend message may be intermediate and the completion to rely
+on is the tool return; a clearly self-contained conversational turn is answered
+directly while anything uncertain still goes to the agent; and pacing, detail and
+update-frequency preferences set for a task hold across later backend updates
+until the task ends or the operator changes them. What is not adopted is that
+prompt's identity or its instruction to conceal the arrangement.
 
 ## The canonical transcript reaches the browser
 
@@ -205,7 +240,14 @@ context behaviour against installed Codex and the real Viewer code; real-provide
 audio, spoken model quality, and whole-call behaviour over a long live call
 remain unverified and need an authorized capture on a real account.
 
-For a native turn carrying more than one handoff, the metadata has no finer
-discriminator, so implicit selection stays refused there. Closing that needs an
-acceptance receipt native does not emit today; the upstream seam and what a live
-capture would have to record are in `native-voice-work-identity.md`.
+Implicit voice-selected targeting is non-actionable on this native version, for
+every spoken turn including one with a single outstanding utterance: neither the
+utterance-to-handoff nor the handoff-to-work edge is established, and cardinality,
+arrival order and `turn_trigger` are deferred by name as permission. Explicit
+targeting and the context tools are unaffected. Closing it needs an acceptance
+receipt native does not emit today; the upstream seam and what a live capture
+would have to record are in `native-voice-work-identity.md`.
+
+The spoken persona ports the installed app's operating protocol from a source
+reading. No reproduced live-model failure stands behind it, no real-provider call was made,
+and nothing here is evidence about spoken audio quality.
