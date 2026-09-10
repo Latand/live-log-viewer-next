@@ -220,6 +220,16 @@ ${MODALITY_SPOKEN_WORK}`;
  * modality one says so in as many words: it has to outrank a coordinator item a
  * thread may still carry in its history from a call taken before #1615, and an
  * append-only transcript cannot have that item withdrawn.
+ *
+ * AND IT ADDS NO PROCEDURE. A conversation that already has a role has its own
+ * rules about how work is accepted and how a deploy is decided — the Viewer's
+ * own manager mandate, for one, states that nobody ever asks the operator to
+ * confirm, approve or repeat anything. The modality text therefore carries no
+ * approval step, no confirmation step and no deploy gate; the relay procedure in
+ * {@link COORDINATOR_BACKING_WORK} belongs to a session created to be nothing
+ * but a voice front, which by construction has no mandate of its own to
+ * contradict. {@link voicePersonaVariantFor} is the only thing that chooses
+ * between them, and it fails toward modality.
  */
 const MODALITY_BACKING_WORK = `Realtime voice is active for this conversation. Preserve this conversation's original instructions, role, authority, seat, permissions, tools and ongoing work — voice changes none of them, and nothing here moves your responsibilities to anyone else.
 

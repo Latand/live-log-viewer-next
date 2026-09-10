@@ -324,3 +324,27 @@ test("a start that asks no persona question gets the modality persona", async ()
   expect(started.status).toBe(200);
   expect(starts).toEqual(["modality"]);
 });
+
+
+test("the modality instructions add no procedure to a conversation that has its own", () => {
+  /* An incumbent orchestrator arrives with a mandate that already says how work
+     is accepted and how a deploy is decided — the Viewer's own manager mandate
+     states that nobody ever asks the operator to confirm, approve or repeat
+     anything. A voice call that quietly added a confirmation step would put the
+     seat in the position of contradicting its own instructions out loud, which
+     is the same class of harm as taking its tools away. */
+  const persona = voiceSessionPersona("modality");
+  /* The shapes that IMPOSE a step. "permissions" survives on its own, because
+     the modality text names it only to say it is preserved. */
+  for (const procedure of [
+    /\bconfirm\b/i, /\bapprove\b/i, /\bapproval\b/i, /spoken yes/i,
+    /ask the (?:user|operator)/i, /needs the (?:user|operator)/i,
+    /\bauthoriz/i, /\bnonce\b/i, /commit (?:hash|exactly)/i, /wait for the (?:user|operator)/i,
+  ]) {
+    expect(persona.startInstructions).not.toMatch(procedure);
+    expect(persona.endInstructions).not.toMatch(procedure);
+  }
+  /* And the deploy relay stays where it was written for: a session created to be
+     nothing but a voice front, which has no mandate of its own to contradict. */
+  expect(voiceSessionPersona("coordinator").startInstructions).toMatch(/spoken yes/i);
+});
