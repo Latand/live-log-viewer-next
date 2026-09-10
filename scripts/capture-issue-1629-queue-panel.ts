@@ -164,8 +164,11 @@ function panelHtml(failure: string | null): string {
 
 interface Reading {
   rows: number;
-  /** WCAG contrast ratio of the row status line against the panel behind it. */
+  /** WCAG contrast ratio of the row status line against the pixels composited
+      behind it: the row, the panel and the page canvas. */
   statusContrast: number;
+  /** The composited background that ratio was taken against. */
+  statusBehind: string;
   /** The panel must paint the queue and no settled history. */
   settledRowsPainted: number;
   /** The smallest side of the header's queue-level start control, in px. */
@@ -191,7 +194,7 @@ const READ = () => {
   const frame = document.querySelector("#frame") as HTMLElement;
   if (!panel) {
     return {
-      rows: 0, statusContrast: 0, settledRowsPainted: 0, headerStartPx: 0, withdrawnRowControls: 0, withdrawnStartPx: 0,
+      rows: 0, statusContrast: 0, statusBehind: "", settledRowsPainted: 0, headerStartPx: 0, withdrawnRowControls: 0, withdrawnStartPx: 0,
       controlsInsidePanel: false, smallestControlPx: 0, blockedRowHasControls: true,
       smallestActionableRowControls: 0,
       blockedReasonVisible: false, blockedReasonColour: "", statusColour: "", failureColour: "",
@@ -222,9 +225,28 @@ const READ = () => {
     });
     return 0.2126 * linear[0]! + 0.7152 * linear[1]! + 0.0722 * linear[2]!;
   };
-  /* The panel is translucent over the page, so the effective background is what
-     the page paints under it. */
-  const behind = getComputedStyle(document.body).backgroundColor;
+  /* WHAT IS PAINTED BEHIND THE STATUS LINE, composited by the browser. Reading
+     `document.body` skipped the translucent panel between the two — the same
+     error the voice capture published a wrong ratio from — and the row's own
+     background with it. Tailwind emits these tokens as `oklab(... / a)`, so the
+     compositing is left to a canvas: `fillStyle` takes whatever the computed
+     style says and `source-over` is the alpha rule the compositor itself used. */
+  const paintedBehind = (element: HTMLElement | null) => {
+    const surface = document.createElement("canvas");
+    surface.width = 1; surface.height = 1;
+    const ink = surface.getContext("2d", { willReadFrequently: true })!;
+    ink.fillStyle = "#ffffff";
+    ink.fillRect(0, 0, 1, 1);
+    const stack: string[] = [];
+    for (let node = element; node; node = node.parentElement) stack.push(getComputedStyle(node).backgroundColor);
+    for (let index = stack.length - 1; index >= 0; index -= 1) {
+      ink.fillStyle = stack[index]!;
+      ink.fillRect(0, 0, 1, 1);
+    }
+    const painted = ink.getImageData(0, 0, 1, 1).data;
+    return `rgb(${painted[0]}, ${painted[1]}, ${painted[2]})`;
+  };
+  const behind = paintedBehind(anyStatus);
   const statusLuminance = anyStatus ? channel(getComputedStyle(anyStatus).color) : 0;
   const behindLuminance = channel(behind);
   const contrast = (Math.max(statusLuminance, behindLuminance) + 0.05)
@@ -232,6 +254,7 @@ const READ = () => {
   return {
     rows: rows.length,
     statusContrast: Math.round(contrast * 100) / 100,
+    statusBehind: behind,
     settledRowsPainted: rows.filter((row) => ["delivered", "removed", "refused"].includes(row.getAttribute("data-state") ?? "")).length,
     headerStartPx: headerBox ? Math.min(headerBox.width, headerBox.height) : 0,
     withdrawnRowControls: withdrawn ? withdrawn.querySelectorAll("button").length : 0,
