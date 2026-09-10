@@ -722,8 +722,8 @@ export function SchemeBoard({
      these stay the SAME objects byPath holds, so a rail can exclude its own two
      endpoints by identity before routing around the rest. */
   const railObstacles = useMemo<SchemeRect[]>(
-    () => [...layout.nodes, ...layout.decks, ...layout.stacks, ...layout.drafts, ...layout.slots],
-    [layout],
+    () => [...layout.nodes.filter(node => !taskScene || taskScene.shown.has(node.file.path)), ...layout.decks, ...layout.stacks, ...layout.drafts, ...layout.slots],
+    [layout, taskScene],
   );
   /* Task cards owned by a pipeline region (#531) sit at the layout's coordinates
      inside the colored halo; only the remaining free cards run through the
@@ -1051,7 +1051,7 @@ export function SchemeBoard({
       const bandChrome = taskScene ? [...taskScene.bands.map(band => band.geometry.header), ...layout.groups, ...layout.slots,
         ...taskScene.continuations.flatMap(entry => { const at = layout.byPath.get(entry.key); return at ? [{ x: at.x, y: at.y + at.h, w: at.w, h: 28 }] : []; })
       ].map(rect => ({ x: rect.x * cam.z + cam.x, y: rect.y * cam.z + cam.y, w: rect.w * cam.z, h: rect.h * cam.z })) : [];
-      return chipObstacleRects(layout.nodes, layout.decks, layout.drafts, cam, [...keepoutObstacles, ...bandChrome]);
+      return chipObstacleRects(layout.nodes.filter(node => !taskScene || taskScene.shown.has(node.file.path)), layout.decks, layout.drafts, cam, [...keepoutObstacles, ...bandChrome]);
     },
     [layout, taskScene, cam, keepoutObstacles],
   );
@@ -1358,10 +1358,18 @@ export function SchemeBoard({
     setSelected(mirror.ofKey);
   }, [taskScene, primeAnchor]);
   const followContinuation = useCallback((target: { key: string; bandId: string }) => {
+    const file = files.find(entry => entry.path === target.key);
+    if (file) {
+      // Use the conversation opener's focus obligation: it frames the reader
+      // after history disclosure and wrapping have produced its actual bounds.
+      stableSelect(file);
+      return;
+    }
     setSelected(target.key);
-    const rect = layout.byPath.get(target.key);
+    const rect = layout.byPath.get(target.key)
+      ?? taskScene?.bands.find(band => band.id === target.bandId)?.geometry.header;
     if (rect) centerOn(rect, cam.z);
-  }, [layout, centerOn, cam.z]);
+  }, [files, stableSelect, layout, taskScene, centerOn, cam.z]);
 
   /* The sticky composer owns the create (text, voice, images, deadline); the
      board just adopts the fresh card optimistically and drops the sticky. */

@@ -758,3 +758,18 @@ test("older attempt labels retain the old verdict and never label a reused curre
   current.agentPath = old.agentPath;
   expect(historicalAttemptLabels([pipeline]).size).toBe(0);
 });
+
+
+test("a dependency into folded history retains a continuation to its actual conversation", () => {
+  const files = [file(0, "busy"), file(1, "idle")];
+  const layout = base(files, [[0, 1]]);
+  const tasks = [task("current", "2026-01-01T00:00:00Z", [files[0]!]), task("old", "2026-01-02T00:00:00Z", [files[1]!], "done")];
+  const bands = buildTaskBands(layout, sources(tasks, files));
+  const options = { mode: "near" as const, viewportWidth: 1440, reader: null };
+  const folded = layoutTaskBands(layout, bands, options);
+  expect(folded.shown.has(files[1]!.path)).toBe(false);
+  expect(folded.continuations[0]!.targets[0]).toMatchObject({ key: files[1]!.path, bandId: "task:old" });
+  const revealed = layoutTaskBands(layout, bands, { ...options, reader: folded.continuations[0]!.targets[0]!.key });
+  expect(revealed.shown.has(files[1]!.path)).toBe(true);
+  expect(revealed.layout.byPath.get(files[1]!.path)?.h).toBe(BAND.nativeH);
+});

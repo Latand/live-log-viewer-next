@@ -1429,27 +1429,12 @@ function StageSlotShell({ slot, lite, dimmed, files, onSelect, onToggleDetails }
   const [rowOpen, setRowOpen] = useState(false);
   const tone = STAGE_TONES[stageChipState(slot.pipeline, slot.stage)];
   const { pipeline } = slot;
-  if (slot.detailsExpanded !== undefined) {
-    const target = slot.attempt ? attemptNavTarget(slot.attempt) : null;
-    const file = target ? resolveStageNavFile(target, files) : null;
-    return <div data-scheme-node={slot.key} data-stage-details-expanded={slot.detailsExpanded}
-      className={`scheme-enter absolute${dimClass(dimmed)}`} style={fittedShellStyle(slot)}>
-      <div style={{ height: BOARD_SURFACE.stage.h }}>
-        <StageStatusRow slot={slot} expanded={slot.detailsExpanded} controls={`${slot.key}::details`}
-          onToggle={!lite ? () => onToggleDetails?.(slot.key) : undefined} />
-      </div>
-      {slot.detailsExpanded ? <div id={`${slot.key}::details`} data-stage-row-card className="flex" style={{ height: BOARD_SURFACE.stageDetails.h - BOARD_SURFACE.stage.h }}>
-        <EscapeToClose onClose={() => onToggleDetails?.(slot.key)} />
-        {slot.presentation === "completed" ? <StageCompletedCard slot={slot} onOpen={file && !lite ? () => onSelect(file) : undefined} /> : <StagePlaceholderPane slot={slot} interactive={!lite} />}
-      </div> : null}
-    </div>;
-  }
   /* Settled work — skipped, or completed evidence — collapses to ONE status row
      at its stage position (#658): the layout reserved exactly that row, and the
      disclosure floats the full card over the board on demand, so the operator can
      still read the prompt and open the transcript without the finished stage
      claiming a pending card's weight. */
-  if (slot.collapsedRow) {
+  if (slot.collapsedRow && slot.detailsExpanded === undefined) {
     const target = slot.attempt ? attemptNavTarget(slot.attempt) : null;
     const file = target ? resolveStageNavFile(target, files) : null;
     const cardId = `${slot.key}::card`;
@@ -1502,7 +1487,7 @@ function StageSlotShell({ slot, lite, dimmed, files, onSelect, onToggleDetails }
   /* A completed stage of an active pipeline renders as a full conversation card
      at its stage position — same footprint as the live and placeholder cards, so
      the group reads as real cards rather than compact history stubs (#507 F2). */
-  if (slot.presentation === "completed") {
+  if (slot.presentation === "completed" && slot.detailsExpanded === undefined) {
     const target = slot.attempt ? attemptNavTarget(slot.attempt) : null;
     const file = target ? resolveStageNavFile(target, files) : null;
     return (
@@ -1547,6 +1532,26 @@ function StageSlotShell({ slot, lite, dimmed, files, onSelect, onToggleDetails }
       setBusy(false);
     });
   };
+  if (slot.detailsExpanded !== undefined) {
+    const target = slot.attempt ? attemptNavTarget(slot.attempt) : null;
+    const file = target ? resolveStageNavFile(target, files) : null;
+    return <div data-scheme-node={slot.key} data-stage-details-expanded={slot.detailsExpanded}
+      className={`scheme-enter absolute${dimClass(dimmed)}`} style={fittedShellStyle(slot)}>
+      <div style={{ height: BOARD_SURFACE.stage.h }}>
+        <StageStatusRow slot={slot} expanded={slot.detailsExpanded} controls={`${slot.key}::details`}
+          onToggle={!lite ? () => onToggleDetails?.(slot.key) : undefined} />
+      </div>
+      {slot.detailsExpanded ? <div id={`${slot.key}::details`} data-stage-row-card className="flex flex-col" style={{ height: BOARD_SURFACE.stageDetails.h - BOARD_SURFACE.stage.h }}>
+        <EscapeToClose onClose={() => onToggleDetails?.(slot.key)} />
+        <div className="flex min-h-0 flex-1">{slot.presentation === "completed" ? <StageCompletedCard slot={slot} onOpen={file && !lite ? () => onSelect(file) : undefined} /> : <StagePlaceholderPane slot={slot} interactive={!lite} />}</div>
+        {canAdd ? <div data-scheme-ui className="flex h-9 shrink-0 items-center gap-2 bg-card px-2">
+          {last ? <button type="button" className="rounded border border-border px-2 py-1 text-label" disabled={busy} onClick={() => addAfter("run")}>{t("pipelineSlot.addAgent")}</button> : null}
+          {slot.stage.kind === "run" ? <button type="button" className="rounded border border-border px-2 py-1 text-label" disabled={busy || !canAddReview} onClick={() => addAfter("review-loop")}>{t("pipelineSlot.addReview")}</button> : null}
+        </div> : null}
+      </div> : null}
+    </div>;
+  }
+
   return (
     <div
       data-scheme-node={slot.key}

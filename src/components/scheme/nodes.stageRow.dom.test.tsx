@@ -280,3 +280,13 @@ test("a live stage pane is titled role · stage · position, never the prompt's 
   expect(pane.textContent).toBe("Builder · integrate_v3_voice · stage 2/3");
   expect(pane.getAttribute("title")).toContain("Work alone and launch no helpers");
 });
+
+
+test("expanded draft Details retains chain configuration inside its reserved surface", () => {
+  const draft = pipeline({ state: "draft", cursor: null, stages: [stages[0]!] });
+  const { host } = mountLayer(layout([slot({ pipeline: draft, stage: stages[0]!, index: 0, total: 1, detailsExpanded: true, w: 600, h: 724 })]));
+  const details = host.querySelector("[data-stage-row-card]")!;
+  expect(details.textContent).toContain("Next agent");
+  expect(details.textContent).toContain("Review cycle");
+  expect((host.querySelector('[data-scheme-node]') as HTMLElement).style.height).toBe("724px");
+});

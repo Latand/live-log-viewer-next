@@ -188,6 +188,13 @@ try {
       await click(page,history);
       must(await page.locator(history).getAttribute('aria-expanded')==='false',`${width}: history collapses`);
     } else must(false,`${width}: history toggle reachable`);
+    const continuation = '[data-scheme-continuation-target="/fixture/worker-1.jsonl"]';
+    await panTo(page, continuation, 180);
+    if (await click(page, continuation)) {
+      await page.waitForTimeout(1000);
+      const opened = await page.locator('[data-scheme-node="/fixture/worker-1.jsonl"]').boundingBox();
+      must(opened && opened.y >= 45 && opened.y + opened.height <= 1001, `${width}: continuation reveals and frames folded history target`);
+    } else must(false, `${width}: folded history retains its incoming navigation link`);
     // The same focus prop used by a direct conversation opener. The actual
     // target must become the reader and be fully framed after layout settles.
     await page.evaluate(()=>window.openHistoryTarget());await page.waitForTimeout(1600);

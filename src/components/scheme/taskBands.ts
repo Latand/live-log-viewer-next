@@ -753,6 +753,7 @@ export function layoutTaskBands(base: SchemeLayout, orderedBands: readonly TaskB
   for (const [key, rect] of containerSlots) byPath.set(key, rect);
 
   const nodes = base.nodes.map((node) => nodeRects.get(node.file.path) ?? node);
+  const recordedBandOf = new Map(bands.flatMap(band => band.members.map(member => [member.key, band.id] as const)));
   const rectsIn = (bandId: string, except: readonly string[]) =>
     [...placed].filter(([key]) => bandOf.get(key) === bandId && !except.includes(key)).map(([, rect]) => rect);
   /* A node key may be represented in several bands: as its member surface and
@@ -779,12 +780,14 @@ export function layoutTaskBands(base: SchemeLayout, orderedBands: readonly TaskB
     if (!edge.from) return [];
     const from = placed.get(edge.from);
     const to = placed.get(edge.to);
-    if (!from || !to) return [];
-    if (bandOf.get(edge.from) !== bandOf.get(edge.to)) {
-      for (const rep of representations.get(edge.from) ?? []) continue_(rep, { key: edge.to, bandId: bandOf.get(edge.to)!, direction: "to" });
-      for (const rep of representations.get(edge.to) ?? []) continue_(rep, { key: edge.from, bandId: bandOf.get(edge.from)!, direction: "from" });
+    const fromBand = bandOf.get(edge.from) ?? recordedBandOf.get(edge.from);
+    const toBand = bandOf.get(edge.to) ?? recordedBandOf.get(edge.to);
+    if (fromBand && toBand && fromBand !== toBand) {
+      for (const rep of representations.get(edge.from) ?? []) continue_(rep, { key: edge.to, bandId: toBand, direction: "to" });
+      for (const rep of representations.get(edge.to) ?? []) continue_(rep, { key: edge.from, bandId: fromBand, direction: "from" });
       return [];
     }
+    if (!from || !to) return [];
     const ports = bandEdgePorts(from, to);
     const route = routeTaskEdge(ports, rectsIn(bandOf.get(edge.from)!, [edge.from, edge.to]));
     return [{ ...edge, ...ports, route: route.d, routeCrosses: route.crosses }];
@@ -797,9 +800,11 @@ export function layoutTaskBands(base: SchemeLayout, orderedBands: readonly TaskB
     for (const rep of representations.get(edge.to) ?? []) if (rep !== edge.to && bandOf.get(rep) !== bandOf.get(edge.from)) continue_(rep, { key: edge.from, bandId: bandOf.get(edge.from)!, direction: "from" });
   }
   for (const link of base.links) {
-    if (!placed.has(link.from) || !placed.has(link.to) || bandOf.get(link.from) === bandOf.get(link.to)) continue;
-    continue_(link.from, { key: link.to, bandId: bandOf.get(link.to)!, direction: "to" });
-    continue_(link.to, { key: link.from, bandId: bandOf.get(link.from)!, direction: "from" });
+    const fromBand = bandOf.get(link.from) ?? recordedBandOf.get(link.from);
+    const toBand = bandOf.get(link.to) ?? recordedBandOf.get(link.to);
+    if (!fromBand || !toBand || fromBand === toBand) continue;
+    if (placed.has(link.from)) continue_(link.from, { key: link.to, bandId: toBand, direction: "to" });
+    if (placed.has(link.to)) continue_(link.to, { key: link.from, bandId: fromBand, direction: "from" });
   }
   /* A container halo is a projection inside the band that owns it: it wraps
      the container's members placed in that band and the band's mirrors of its
