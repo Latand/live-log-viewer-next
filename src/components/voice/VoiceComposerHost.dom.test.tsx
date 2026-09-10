@@ -113,6 +113,8 @@ let relayResolutions: string[] = [];
 
 const relayClient = {
   reconcileWorkerDeliveries: () => undefined,
+  reconcileCanonicalTranscript: () => undefined,
+  reportBackingHost: () => undefined,
   onDeliveryAcknowledged: () => {
     relaySubscriptions += 1;
     return () => { relayReleases += 1; };

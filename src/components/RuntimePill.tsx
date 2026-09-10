@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 import { Check, ChevronDown, ChevronLeft, ChevronRight, Loader2, Zap } from "@/components/icons";
 import { useIsMobile } from "@/hooks/useIsMobile";
@@ -159,6 +160,10 @@ export function RuntimePill({
   const [version, setVersion] = useState(0);
 
   const [open, setOpen] = useState(false);
+  /* Where the popover goes when it opens, measured off the pill: it renders
+     through a portal, because the composer's own box is bounded and scrolls its
+     content (#1629) and an in-flow popover is clipped by exactly that. */
+  const [popoverAt, setPopoverAt] = useState<{ bottom: number; left: number } | null>(null);
   const [panel, setPanel] = useState<"root" | "model" | "speed">("root");
   const [announce, setAnnounce] = useState("");
   const pillRef = useRef<HTMLButtonElement>(null);
@@ -439,6 +444,17 @@ export function RuntimePill({
     pillRef.current?.focus();
   }, []);
 
+  /* The popover opens where the pill is, in viewport coordinates, because it is
+     portalled out of the composer's scrolling box (#1629). */
+  const openPopover = useCallback(() => {
+    const rect = pillRef.current?.getBoundingClientRect();
+    const view = pillRef.current?.ownerDocument.defaultView;
+    if (rect && view) {
+      setPopoverAt({ bottom: Math.max(8, view.innerHeight - rect.top + 6), left: Math.max(8, rect.left) });
+    }
+    setOpen(true);
+  }, []);
+
   const selectEffort = (tier: string) => {
     if (effortLocked) return;
     commit({ effort: tier });
@@ -481,11 +497,11 @@ export function RuntimePill({
         /* The composer box's chip is what opens the «Next message» sheet
             (mobile v2 §4.4) — the one model/reasoning surface on the phone. */
         data-mobile2-open={isMobile ? "model" : undefined}
-        onClick={() => (open ? closePopover() : setOpen(true))}
+        onClick={() => (open ? closePopover() : openPopover())}
         onKeyDown={(event) => {
           if (!open && (event.key === "ArrowDown" || event.key === "Enter" || event.key === " ")) {
             event.preventDefault();
-            setOpen(true);
+            openPopover();
           }
         }}
         className={
@@ -530,8 +546,10 @@ export function RuntimePill({
         </span>
       ) : null}
 
-      {open && !isMobile ? (
+      {open && !isMobile && popoverAt ? (
         <RuntimePopover
+          at={popoverAt}
+          owner={pillRef.current?.ownerDocument ?? document}
           t={t}
           engine={engine}
           face={face}
@@ -606,8 +624,14 @@ interface PanelProps {
 function RuntimePopover({
   t, engine, face, efforts, speedShown, panel, setPanel,
   effortLocked, modelLocked, speedLocked, lockReason,
-  onSelectEffort, onSelectModel, onSelectFast, onClose,
-}: PanelProps & { panel: "root" | "model" | "speed"; setPanel: (p: "root" | "model" | "speed") => void }) {
+  onSelectEffort, onSelectModel, onSelectFast, onClose, at, owner,
+}: PanelProps & {
+  panel: "root" | "model" | "speed";
+  setPanel: (p: "root" | "model" | "speed") => void;
+  /* Viewport coordinates of the pill it belongs to. */
+  at: { bottom: number; left: number };
+  owner: Document;
+}) {
   const rootRef = useRef<HTMLDivElement>(null);
   const rowRefs = useRef<(HTMLButtonElement | null)[]>([]);
   const [activeIndex, setActiveIndex] = useState(0);
@@ -677,14 +701,22 @@ function RuntimePopover({
     }
   };
 
-  return (
+  /* PORTALLED, AND FIXED WHERE THE PILL IS. The composer's box is bounded and
+     scrolls its own content (#1629), so an in-flow popover opening upward out of
+     the control row lost its head above the box's top edge in a 600 x 500 card —
+     with a row of the model list inside the part that was cut. It escapes the
+     clip the same way the account menu escapes a card header that clips it, into
+     the document this pill is actually in. */
+  return createPortal(
     <div
       ref={rootRef}
       role="menu"
       aria-label={t("composer.runtimePill")}
       data-runtime-popover
       onKeyDown={onKeyDown}
-      className="absolute bottom-[calc(100%+6px)] left-0 z-40 w-[240px] rounded-surface border border-border bg-raised p-1.5 shadow-2 motion-reduce:transition-none"
+      onPointerDown={(event) => event.stopPropagation()}
+      style={{ bottom: at.bottom, left: at.left }}
+      className="fixed z-40 w-[240px] rounded-surface border border-border bg-raised p-1.5 shadow-2 motion-reduce:transition-none"
     >
       {panel === "root" ? (
         <>
@@ -705,7 +737,8 @@ function RuntimePopover({
           ))}
         </div>
       )}
-    </div>
+    </div>,
+    owner.body,
   );
 }
 

@@ -100,6 +100,85 @@ export function mobileComposerUnitMax(layoutHeight: number): number {
    small for chrome plus field, the field stays usable rather than collapsing
    to zero. */
 const COMPOSER_CEILING_FLOOR_PX = 44;
+/* ONE RULE FOR THE ROOM ABOVE THE INPUT (#1629). The composer's box holds two
+   things: the input unit — the field and the controls that send what is in it —
+   and the ACCESSORY REGION above it, which is where every other surface the
+   composer can gain goes: a docked call, the native queue, the sends waiting
+   for an answer, the receipts of the ones that failed. The region is one
+   scrollport, so the number below is not a per-panel minimum: it is what ONE
+   surface in that region needs to be usable — its header row with the
+   surface-level control, and a scrollport tall enough to read a row in. Below
+   it a panel is a border with nothing inside it, which is what a grown draft
+   did to the queue at 390 x 840 and to the receipts in a 600 x 500 card: their
+   controls could not be reached by pointer or by keyboard at all. The two px
+   of the surface's own frame are in the number, because the window is what the
+   region hands over and the frame is drawn out of it. */
+export const COMPOSER_ACCESSORY_WINDOW_PX = 90;
+/* And the gap each surface arrives with: the flex/grid gap above it — between
+   two surfaces in the region, and between the region and the input unit for the
+   first one. It is reserved per surface rather than folded into the chrome
+   constants below, because it exists only when a surface does: a composer with
+   an empty region has no region, no gap, and the whole box for its field. */
+const COMPOSER_ACCESSORY_GAP_PX = 6;
+/* And what the region may take TOGETHER, however many surfaces are in it: half
+   the box, never more. Past that the field the operator is typing in would be
+   the thing squeezed to nothing, and the region has its own scroll for what
+   does not fit — every surface in it keeps a share and its own scroller, so the
+   rest is reached by scrolling rather than by taking the draft's room. */
+const COMPOSER_ACCESSORY_MAX_SHARE = 0.5;
+
+/** The room the accessory region keeps inside a composer box of `boxHeight`,
+    for the number of surfaces actually rendered in it. Zero surfaces reserve
+    zero: a queue that empties, a call that ends and a receipt that is answered
+    hand their room straight back to the draft. */
+export function accessoryReserve(surfaces: number, boxHeight: number): number {
+  if (surfaces <= 0 || boxHeight <= 0) return 0;
+  return Math.min(
+    surfaces * (COMPOSER_ACCESSORY_WINDOW_PX + COMPOSER_ACCESSORY_GAP_PX),
+    Math.round(boxHeight * COMPOSER_ACCESSORY_MAX_SHARE),
+  );
+}
+
+/* THE CARD COMPOSER'S OWN BUDGET, in the numbers its `max-height` is written
+   in: at most 60% of the conversation it sits in, and never less than 15rem of
+   that conversation left for the transcript above it, whichever binds first.
+   The class on the form is the bound the browser applies; this is the same
+   arithmetic for the code that has to know how much room is left INSIDE it —
+   the two are read together, and the capture measures the result of both. */
+const CARD_COMPOSER_MAX_SHARE = 0.6;
+const CARD_CONVERSATION_FLOOR_PX = 240;
+/** How tall a card composer may render inside a conversation of `boxHeight`
+    before its own budget binds. */
+export function cardComposerBudget(boxHeight: number): number {
+  return Math.min(Math.round(boxHeight * CARD_COMPOSER_MAX_SHARE), boxHeight - CARD_CONVERSATION_FLOOR_PX);
+}
+/* The card composer's chrome around the field, measured on the rendered card:
+   the form's own padding and top border (py-2 + 1px = 17px), the input box's
+   padding and borders (py-1 + two 1px edges = 10px), the quiet secondary row
+   under it holding the runtime pill and the picker (32px) and the 6px gap above
+   that row. Every pixel of it is inside the budget with the field, so a field
+   taller than the budget minus this number and the region's reserve is one that
+   took room from a surface the operator still has to reach. The region's own
+   gap is not here: it belongs to the region, which is not always there. */
+const CARD_COMPOSER_CHROME_PX = 65;
+
+/** The card grow ceiling: the same rule as the phone's, against the box a card
+    composer actually has. The conversation is a card of whatever height the
+    board gave it, so the budget is a share of THAT (`cardComposerBudget`), the
+    accessory region's reserve comes off it, and what is left is the field's —
+    capped, as before, at the shared ~6-row maximum, because a roomy card has
+    no reason to grow the field further.
+
+    `boxHeight` of zero is a composer whose conversation has not been measured,
+    or one laid out in a box with no definite height of its own — where the
+    form's percentage budget does not resolve either. The fixed cap is the
+    bound there, exactly as it was before this rule existed. */
+export function cardComposerCeiling(boxHeight: number, surfaces: number): number {
+  if (!(boxHeight > 0)) return COMPOSER_MAX_PX;
+  const budget = cardComposerBudget(boxHeight);
+  const reserve = accessoryReserve(surfaces, budget);
+  return Math.max(COMPOSER_CEILING_FLOOR_PX, Math.min(COMPOSER_MAX_PX, budget - CARD_COMPOSER_CHROME_PX - reserve));
+}
 
 /** The phone grow ceiling, from the VISIBLE viewport the operator can see
     (#983) and the LAYOUT viewport the composer box's own `dvh` cap is written
@@ -114,11 +193,19 @@ const COMPOSER_CEILING_FLOOR_PX = 44;
       short rotated viewport drops the budget below the 160px cap; the field
       then scrolls internally sooner.
 
+    `surfaces` is how many surfaces the accessory region above the field holds
+    right now; `accessoryReserve` turns that into the room they need, and it
+    comes off both shared bounds for the same reason the unit chrome does: the
+    region sits inside the box AND above the keyboard. It is the same reserve a
+    card composer takes (`cardComposerCeiling`) — one rule, two boxes.
+
     Below the one-row floor neither bound can be honored, and a usable field
     outranks them: the ceiling stops there. */
-export function mobileComposerCeiling(visibleHeight: number, layoutHeight: number): number {
+export function mobileComposerCeiling(visibleHeight: number, layoutHeight: number, surfaces = 0): number {
   const grown = Math.max(COMPOSER_MAX_PX, Math.round(visibleHeight * COMPOSER_MAX_VH));
-  const insideTheBox = mobileComposerUnitMax(layoutHeight) - MOBILE_COMPOSER_UNIT_CHROME_PX;
-  const aboveTheKeyboard = visibleHeight - MOBILE_COMPOSER_CHROME_PX;
+  const box = mobileComposerUnitMax(layoutHeight);
+  const reserved = accessoryReserve(surfaces, box);
+  const insideTheBox = box - MOBILE_COMPOSER_UNIT_CHROME_PX - reserved;
+  const aboveTheKeyboard = visibleHeight - MOBILE_COMPOSER_CHROME_PX - reserved;
   return Math.max(COMPOSER_CEILING_FLOOR_PX, Math.min(grown, insideTheBox, aboveTheKeyboard));
 }

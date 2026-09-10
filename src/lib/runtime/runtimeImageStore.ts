@@ -350,6 +350,7 @@ function collectJournalDigests(filename: string, digests: Set<string>, retireBef
         ["events", ["payload_json"]],
         ["projections", ["state_json"]],
         ["entities", ["state_json"]],
+        ["native_queue_entries", ["state_json"]],
         ["outbox", ["payload_json"]],
         ["producer_receipts", ["event_json"]],
       ];

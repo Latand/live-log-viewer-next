@@ -37,6 +37,7 @@ function idleState(sessionKey = "session-one"): HostState {
 
 function host(send: (entry: QueueEntry) => Promise<DeliveryReceipt>): EngineHost {
   return {
+    supportsSteer: true,
     attach: () => ({ async *[Symbol.asyncIterator](): AsyncIterator<RuntimeEvent> {} }),
     send,
     interrupt: async () => {},
@@ -457,6 +458,7 @@ test("a dead host applies pending reconfigure before queued delivery recovery", 
 
 test("a runtime settings snapshot on the durable effect rides the queue entry to the host (issue #390 §10)", async () => {
   const entries: QueueEntry[] = [];
+  const failures: string[] = [];
   const port: StructuredDeliveryQueuePort = {
     effects: async () => [
       {
@@ -476,12 +478,16 @@ test("a runtime settings snapshot on the durable effect rides the queue entry to
         payload: {
           kind: "send", operationId: "op-plain", conversationId: "conversation-one",
           text: "host defaults", idempotencyKey: "two", policy: "queue",
-          // A malformed snapshot drops silently — the message itself delivers.
+          /* A malformed snapshot drops silently and the message itself delivers
+             (#390 §10). Admission validated this payload with the same parser,
+             so a blemish on a durable record describes a record no admission
+             produced — and failing the message over it loses the one thing the
+             outbox exists to keep. */
           runtime: "ultra",
         },
       },
     ],
-    transition: async () => {},
+    transition: async (id, status) => { if (status === "failed") failures.push(id); },
   };
   const queue = new StructuredDeliveryQueue(port, () => host(async (entry) => {
     entries.push(entry);
@@ -493,6 +499,33 @@ test("a runtime settings snapshot on the durable effect rides the queue entry to
   expect(entries).toHaveLength(2);
   expect(entries[0]!.runtime).toEqual({ effort: "ultra", fast: true });
   expect(entries[1]!.runtime).toBeUndefined();
+  expect(failures).toEqual([]);
+});
+
+test("a per-turn service tier on the durable effect rides the queue entry too (#1629)", async () => {
+  /* Native's `turn/start` takes `serviceTier` and `serviceTierForTurn`, so the
+     durable reader has to carry them — the reason it validates with the same
+     parser admission uses rather than the older three-field reader. */
+  const entries: QueueEntry[] = [];
+  const port: StructuredDeliveryQueuePort = {
+    effects: async () => [{
+      id: "effect:op-tier",
+      kind: "runtime.send",
+      eventSeq: 1,
+      payload: {
+        kind: "send", operationId: "op-tier", conversationId: "conversation-one",
+        text: "priority please", idempotencyKey: "tier", policy: "queue",
+        runtime: { serviceTierForTurn: "priority", serviceTier: null },
+      },
+    }],
+    transition: async () => {},
+  };
+  const queue = new StructuredDeliveryQueue(port, () => host(async (entry) => {
+    entries.push(entry);
+    return { outcome: "turn-started", turnId: "turn-tier" };
+  }));
+  await queue.drain();
+  expect(entries[0]!.runtime).toEqual({ serviceTier: null, serviceTierForTurn: "priority" });
 });
 
 test("unrelated outbox effects cannot starve structured message delivery", async () => {
@@ -526,6 +559,7 @@ test("unrelated outbox effects cannot starve structured message delivery", async
   await queue.drain();
 
   expect(requestedKinds).toEqual([[
+    "runtime.native-queue",
     "runtime.send",
     "runtime.steer",
     "runtime.answer",
@@ -2501,4 +2535,24 @@ test("an unreadable host state issues no control at all", async () => {
 
   expect(answers).toEqual([]);
   expect(transitions).toEqual([]);
+});
+
+test("unsupported active steering refuses before the Claude broker can write or interrupt", async () => {
+  let writes = 0;
+  let interrupts = 0;
+  const transitions: string[] = [];
+  const broker: EngineHost = { ...host(async () => { writes++; return { outcome: "queued-next-turn", turnId: "incumbent" }; }),
+    supportsSteer: false,
+    health: async () => ({ ...idleState(), status: "active", activeTurnRef: "incumbent" }),
+    interrupt: async () => { interrupts++; },
+  };
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => [{ id: "effect:unsupported", eventSeq: 1, kind: "runtime.send", payload: {
+      operationId: "unsupported", conversationId: "conversation-broker", text: "supplementary", policy: "steer-if-active", turnId: "incumbent",
+    } }],
+    transition: async (_id, status, details) => { transitions.push(`${status}:${details?.reason}`); },
+  }, () => broker);
+  await queue.drain();
+  expect(writes).toBe(0); expect(interrupts).toBe(0);
+  expect(transitions).toEqual(["failed:unsupported-steering"]);
 });

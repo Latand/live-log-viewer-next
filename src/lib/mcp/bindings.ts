@@ -151,6 +151,8 @@ import {
   type McpToolName,
   type McpToolPayload,
 } from "./server";
+import { parseSelectedContextRef } from "@/lib/selection/selectedContext";
+
 import { viewerControlOrigin, viewerControlToken } from "./controlEndpoint";
 import {
   productionSelectedContextDependencies,
@@ -159,6 +161,8 @@ import {
   selectedConversationTarget,
   selectedConversationTail,
   type SelectedContextTargetDependencies,
+  type VoiceUtteranceLookup,
+  type VoiceWorkLookupIdentity,
 } from "./selectedContextTarget";
 import { mcpCallerIdentity, mcpToolPolicy, permitAttentionHandoff, permitReplySuggestions, type ManagerTarget, type McpToolPolicy } from "./toolAllowlist";
 
@@ -860,13 +864,94 @@ function attentionCallerSources(): AttentionCallerSources {
   };
 }
 
+/**
+ * What the operator's own live voice call points at, asked of the Viewer that
+ * holds it (#1629).
+ *
+ * The ledger describes a live WebRTC transport and lives in the Viewer process;
+ * this one runs beside the agent, in the MCP server. So the reader is a control
+ * read over the hop every other cross-process fact already uses, identified by
+ * the capability the registry maps to this agent's conversation — which is what
+ * makes it a read of ITS OWN call and of nothing else.
+ *
+ * A hop that fails answers `unavailable` with the reason rather than "no card".
+ * Reporting a failed read as an absent selection is how an agent ends up telling
+ * the operator they selected nothing when the truth is that nobody could look.
+ */
+/**
+ * Ask the Viewer what a conversation's live call points at, and read the answer.
+ *
+ * Split from the caller resolution below so the WIRING — the path, the body, the
+ * forwarded capability, and what each answered state means — can be driven over
+ * a real socket without standing up a registry to be recognised by. The caller
+ * resolution is the other half and is covered where authority is.
+ */
+export async function voiceUtteranceLookup(
+  conversationId: string,
+  post: ViewerControlDependencies["post"],
+  /* #1629: the work this request is doing, carried across the hop so the ledger
+     can answer about that turn. Native puts it on the request envelope, so it is
+     evidence about the caller rather than a claim in its arguments. */
+  work: VoiceWorkLookupIdentity | null = null,
+): Promise<VoiceUtteranceLookup> {
+  let answer: Record<string, unknown>;
+  try {
+    answer = await post(
+      "/api/runtime/realtime",
+      { action: "utteranceContext", conversationId, ...(work ? { work } : {}) },
+      callerCapabilityHeaders(),
+    );
+  } catch (error) {
+    return { state: "unavailable", reason: error instanceof Error ? error.message : String(error) };
+  }
+  const utterance = answer.utterance;
+  if (!objectRecord(utterance)) {
+    return { state: "unavailable", reason: text(answer.error) || "the Viewer answered no voice utterance state" };
+  }
+  const state = text(utterance.state);
+  if (state === "no-call" || state === "no-reference" || state === "awaiting-handoff" || state === "unrelated-work") return { state };
+  if (state === "unidentified-work" || state === "ambiguous" || state === "unproven-association") {
+    return { state, reason: text(utterance.reason) || "the Viewer gave no reason" };
+  }
+  /* Anything else — including a `joined` answer from a Viewer that still has one
+     — is not a state this reader may act on. Installed Codex reports no edge
+     from an utterance to the work it became, so a card arriving over this hop
+     would be an association nobody can vouch for. */
+  return { state: "unavailable", reason: `unusable voice utterance state ${state || "(none)"}` };
+}
+
+/**
+ * What the operator's own live voice call points at (#1629).
+ *
+ * The ledger describes a live WebRTC transport and lives in the Viewer process;
+ * this one runs beside the agent, in the MCP server. So the reader is a control
+ * read over the hop every other cross-process fact already uses, identified by
+ * the capability the registry maps to this agent's conversation — which is what
+ * makes it a read of ITS OWN call and of nothing else.
+ *
+ * A hop that fails answers `unavailable` with the reason rather than "no card".
+ * Reporting a failed read as an absent selection is how an agent ends up telling
+ * the operator they selected nothing when the truth is that nobody could look.
+ */
+async function productionVoiceUtteranceContext(work: VoiceWorkLookupIdentity | null): Promise<VoiceUtteranceLookup> {
+  const authority = attentionCallerAuthority(attentionCallerSources());
+  const conversationId = authority.kind === "root" || authority.kind === "worker"
+    ? authority.conversationId
+    : null;
+  if (!conversationId) return { state: "no-call" };
+  return voiceUtteranceLookup(conversationId, productionViewerControlDependencies().post, work);
+}
+
 /** Exported for the isolated evidence driver, which runs the REAL production
     dependency set and overrides only the caller-authority seam per scenario. */
 export const productionDomainDependencies: ViewerMcpDomainDependencies = {
   listFiles,
   targetedFileEntry: targetedFileEntry,
   pinnedTranscript: openPinnedTranscript,
-  selectedContext: productionSelectedContextDependencies,
+  selectedContext: {
+    ...productionSelectedContextDependencies,
+    voiceUtteranceContext: productionVoiceUtteranceContext,
+  },
   completedFileScan,
   registrySnapshot: () => agentRegistry().readOnlySnapshot(),
   readSpawnAdmissionFence,
@@ -1732,9 +1817,15 @@ async function getConversation(
 ): Promise<McpToolPayload> {
   throwIfCallEnded(context);
   const selectedDependencies = dependencies.selectedContext ?? productionSelectedContextDependencies;
-  const selected = resolveSelectedContext(args, text(args.conversationId), selectedDependencies);
-  const requestedId = selected.conversationId;
   const requestedPath = text(args.transcriptPath) || text(args.path);
+  /* #1629: a spoken turn carries no `ctx=` marker, so when the agent names
+     nothing at all the card the operator was looking at is asked for. A caller
+     that reached its target another way is left alone. */
+  const selected = await resolveSelectedContext(args, text(args.conversationId), selectedDependencies, {
+    voiceUtterance: !requestedPath,
+    work: context.nativeWork ?? null,
+  });
+  const requestedId = selected.conversationId;
   const tailLines = integer(args.tailLines, 0);
   if (!requestedId && !requestedPath) {
     throw new Error("conversationId, transcriptPath or selectedContext is required");
@@ -1882,9 +1973,12 @@ async function conversationMessages(
 ): Promise<McpToolPayload> {
   throwIfCallEnded(context);
   const selectedDependencies = dependencies.selectedContext ?? productionSelectedContextDependencies;
-  const selected = resolveSelectedContext(args, text(args.conversationId), selectedDependencies);
-  const requestedId = selected.conversationId;
   const requestedPath = text(args.transcriptPath) || text(args.path);
+  const selected = await resolveSelectedContext(args, text(args.conversationId), selectedDependencies, {
+    voiceUtterance: !requestedPath,
+    work: context.nativeWork ?? null,
+  });
+  const requestedId = selected.conversationId;
   if (!requestedId && !requestedPath) {
     throw new Error("conversationId, transcriptPath or selectedContext is required");
   }
@@ -3043,10 +3137,10 @@ type ResolvedConversationArchiveTarget = {
   project: string;
 };
 
-function conversationArchiveInputs(
+async function conversationArchiveInputs(
   args: McpToolArgs,
   dependencies: ViewerMcpDomainDependencies,
-): { inputs: ConversationArchiveInput[]; selectedTarget: ReturnType<typeof resolveSelectedContext>["target"] | null } {
+): Promise<{ inputs: ConversationArchiveInput[]; selectedTarget: Awaited<ReturnType<typeof resolveSelectedContext>>["target"] | null }> {
   if (args.targets !== undefined) {
     if (!Array.isArray(args.targets) || args.targets.length === 0) {
       throw new Error("targets must be a non-empty list");
@@ -3069,7 +3163,7 @@ function conversationArchiveInputs(
     };
   }
 
-  const selected = resolveSelectedContext(
+  const selected = await resolveSelectedContext(
     args,
     text(args.conversationId),
     dependencies.selectedContext ?? productionSelectedContextDependencies,
@@ -3262,7 +3356,7 @@ async function archiveConversationAction(
   dependencies: ViewerMcpDomainDependencies,
   context: McpToolCallContext,
 ): Promise<McpToolPayload> {
-  const { inputs, selectedTarget } = conversationArchiveInputs(args, dependencies);
+  const { inputs, selectedTarget } = await conversationArchiveInputs(args, dependencies);
   const snapshot = dependencies.registrySnapshot();
   const resolved = inputs.map((input) => resolveArchiveTargetFromRegistry(input, snapshot));
   const outcomes: Array<Record<string, unknown>> = [];
@@ -3363,7 +3457,7 @@ async function conversationAction(
      and no scan stands between "the operator pointed at that card" and acting on
      it. Only the IDENTITY is taken from the reference — the path it recorded is
      capture-time provenance, and a later generation would make it wrong. */
-  const selected = resolveSelectedContext(
+  const selected = await resolveSelectedContext(
     args,
     text(args.conversationId),
     dependencies.selectedContext ?? productionSelectedContextDependencies,

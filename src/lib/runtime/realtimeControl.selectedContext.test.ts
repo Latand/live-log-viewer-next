@@ -22,10 +22,9 @@ import { recordDirectOperatorWakatimeActivity } from "@/lib/wakatime/operatorAct
 const NOW = Date.now();
 const DESK = { viewSessionId: "vs-desk-1", deviceId: "dev-desk" };
 const PHONE = { viewSessionId: "vs-phone-1", deviceId: "dev-phone" };
-const ACCEPTED_PERSONA_BOOTSTRAP = {
-  receiptId: `voice_persona_${"d".repeat(46)}`,
-  itemId: `msg_voice_persona_${"d".repeat(46)}`,
-  insertion: "accepted" as const,
+const LIVE_PERSONA = {
+  variant: "modality" as const,
+  personaId: `voice_persona_${"d".repeat(46)}`,
 };
 
 function reference(identity: { viewSessionId: string; deviceId: string }, card = "conversation_atlas_a"): SelectedContextRef {
@@ -45,7 +44,7 @@ function hostFor(spoken: string[]) {
       return {
         sdp: "v=0\r\nanswer",
         realtimeSessionId: "live-1",
-        personaBootstrap: ACCEPTED_PERSONA_BOOTSTRAP,
+        persona: LIVE_PERSONA,
       };
     },
     async appendRealtimeSpeech(text: string) {
@@ -313,4 +312,84 @@ test("a corrupt WakaTime state file does not refuse a live realtime operator eve
   } finally {
     fs.rmSync(stateDirectory, { recursive: true, force: true });
   }
+});
+
+
+/* ------------------------------------------------------------------ *
+ * The handoff report (#1629): which work the last utterance became.
+ * ------------------------------------------------------------------ */
+
+const UTTERANCE = { id: "a".repeat(32), sequence: 1 };
+const HANDOFF = { handoffId: "handoff-1", itemId: "item-1", userBidiTurnId: "bidi-1" };
+
+async function publish(host: ReturnType<typeof hostFor>, body: Record<string, unknown>) {
+  return executeRealtimeControl(
+    { conversationId: "conversation_voice", ...body },
+    () => host,
+    PEER,
+  );
+}
+
+test("a handoff report completes the utterance it names", async () => {
+  const host = hostFor([]);
+  await start(host, DESK);
+  await publish(host, { action: "selectedContext", selectedContext: reference(DESK), utterance: UTTERANCE });
+
+  const recorded = await publish(host, { action: "handoff", utterance: UTTERANCE, handoff: HANDOFF });
+  expect(recorded.status).toBe(200);
+  expect(recorded.body).toEqual({ ok: true, handoff: HANDOFF });
+  expect(voiceSelectedContext("conversation_voice")?.handoff).toEqual(HANDOFF);
+});
+
+test("a handoff report naming nothing is refused before it reaches the ledger", async () => {
+  /* Not a 409: a report that names no utterance and no handoff is a malformed
+     request, and answering it with the ledger's "you have moved on" would send
+     the client looking for a race that is not there. */
+  const host = hostFor([]);
+  await start(host, DESK);
+  await publish(host, { action: "selectedContext", selectedContext: reference(DESK), utterance: UTTERANCE });
+
+  for (const body of [
+    { action: "handoff", utterance: UTTERANCE },
+    { action: "handoff", utterance: UTTERANCE, handoff: {} },
+    { action: "handoff", utterance: UTTERANCE, handoff: { handoffId: "" } },
+    { action: "handoff", handoff: HANDOFF },
+    { action: "handoff", utterance: { id: "not-hex", sequence: 1 }, handoff: HANDOFF },
+    { action: "handoff", utterance: { id: UTTERANCE.id, sequence: 0 }, handoff: HANDOFF },
+  ]) {
+    const refused = await publish(host, body);
+    expect(refused.status).toBe(400);
+  }
+  expect(voiceSelectedContext("conversation_voice")?.handoff).toBeNull();
+});
+
+test("a handoff from a caller with no live session credential is refused", async () => {
+  const host = hostFor([]);
+  await start(host, DESK);
+  await publish(host, { action: "selectedContext", selectedContext: reference(DESK), utterance: UTTERANCE });
+
+  const anonymous = await executeRealtimeControl(
+    { action: "handoff", conversationId: "conversation_voice", utterance: UTTERANCE, handoff: HANDOFF },
+    () => host,
+    { operator: false },
+  );
+  expect(anonymous.status).toBe(409);
+  expect(anonymous.body.code).toBe("unbound");
+  expect(voiceSelectedContext("conversation_voice")?.handoff).toBeNull();
+});
+
+test("a malformed utterance identity does not make an ordinary reference unpublishable", async () => {
+  /* The identity is ordering evidence and authorizes nothing. A client that sends a
+     broken one still had something on screen, and refusing the reference would
+     trade a weaker ordering guarantee for no reference at all. */
+  const host = hostFor([]);
+  await start(host, DESK);
+  const published = await publish(host, {
+    action: "selectedContext",
+    selectedContext: reference(DESK),
+    utterance: { id: "not-hex", sequence: "second" },
+  });
+  expect(published.status).toBe(200);
+  expect(voiceSelectedContext("conversation_voice")?.reference).toEqual(reference(DESK));
+  expect(voiceSelectedContext("conversation_voice")?.utteranceId).toBeNull();
 });

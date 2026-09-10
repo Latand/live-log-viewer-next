@@ -143,6 +143,8 @@ test("runtime image GC reclaims aged unreachable blobs and preserves reachable r
   });
   const [firstRef] = store.putMany([{ base64: first.toString("base64"), mime: "image/png" }]);
   if (!firstRef) throw new Error("first image ref missing");
+  const aged = new Date(Date.now() - 2_000);
+  fs.utimesSync(store.pathFor(firstRef), aged, aged);
 
   const [secondRef] = store.putMany([{ base64: second.toString("base64"), mime: "image/png" }]);
   if (!secondRef) throw new Error("second image ref missing");
@@ -157,7 +159,7 @@ test("runtime image GC reclaims aged unreachable blobs and preserves reachable r
 
 test("runtime image reachability scans registry backends, Claude ledger, host events, and journal JSON", () => {
   const state = sandbox();
-  const refs = ["a", "b", "c", "d", "e"].map((letter) => ({
+  const refs = ["a", "b", "c", "d", "e", "f"].map((letter) => ({
     sha256: letter.repeat(64),
     mime: "image/png",
     bytes: PNG.byteLength,
@@ -170,6 +172,8 @@ test("runtime image reachability scans registry backends, Claude ledger, host ev
   const db = new Database(path.join(state, "runtime-events.sqlite"), { create: true });
   db.exec("CREATE TABLE operations (request_json TEXT, receipt_json TEXT)");
   db.query("INSERT INTO operations VALUES (?, ?)").run(JSON.stringify({ images: [refs[3]] }), "{}");
+  db.exec("CREATE TABLE native_queue_entries (state_json TEXT)");
+  db.query("INSERT INTO native_queue_entries VALUES (?)").run(JSON.stringify({ state: "uncertain", versions: [{ images: [refs[5]] }] }));
   db.close();
   const registryDb = new Database(path.join(state, "agent-registry.sqlite"), { create: true });
   registryDb.exec("CREATE TABLE registry_rows (value_json TEXT)");

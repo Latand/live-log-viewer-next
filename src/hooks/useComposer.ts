@@ -7,7 +7,7 @@ import { performVoiceSend } from "@/hooks/composerVoiceSend";
 import { useAutosizePinned } from "@/hooks/useAutosizePinned";
 import { useDictation } from "@/hooks/useDictation";
 import { useIsMobile } from "@/hooks/useIsMobile";
-import { COMPOSER_MAX_PX, keyboardInset, mobileComposerCeiling, visibleViewportHeight } from "@/lib/composerScroll";
+import { cardComposerCeiling, keyboardInset, mobileComposerCeiling, visibleViewportHeight } from "@/lib/composerScroll";
 import type { RuntimeImageCapability } from "@/lib/runtime/structuredContent";
 
 /* Live VISIBLE viewport height, tracked the same way as `useIsMobile`
@@ -87,6 +87,17 @@ export interface UseComposerOptions {
       queue, so the input must stay typable while it is delivered — there is no
       long-lived "sending" state holding the draft hostage. */
   holdInputWhileBusy?: boolean;
+  /** How many surfaces the accessory region above the field holds right now —
+      a docked call, the native queue, sends awaiting an answer, receipts of the
+      ones that failed (#1629). They share this composer's ONE bounded box with
+      the field, so the field's ceiling stops short of the room they need to
+      stay reachable, and hands it back the moment they are gone. */
+  accessorySurfaces?: number;
+  /** The conversation box this composer is laid out in, in px, from
+      `useComposerBox`. Zero is "not measured": the ceiling is the fixed cap
+      then, which is also what an unbounded box gets, because the form's own
+      percentage budget does not resolve there either. */
+  boxHeight?: number;
 }
 
 /**
@@ -97,7 +108,7 @@ export interface UseComposerOptions {
  * own delivery (`submit`) and its own surrounding chrome; everything below the
  * text lives in `ComposerBar`.
  */
-export function useComposer({ initialText, persistText, submit, disabled = false, imageCapability = null, acceptFiles = false, holdInputWhileBusy = true, viewActive = true }: UseComposerOptions) {
+export function useComposer({ initialText, persistText, submit, disabled = false, imageCapability = null, acceptFiles = false, holdInputWhileBusy = true, viewActive = true, accessorySurfaces = 0, boxHeight = 0 }: UseComposerOptions) {
   /* A remount mid-typing (column reshuffles, draft handovers) restores the
      draft from storage; the ref always holds the latest text so async
      dictation callbacks append to what the user typed meanwhile instead of
@@ -177,11 +188,17 @@ export function useComposer({ initialText, persistText, submit, disabled = false
      written in `dvh`, which the keyboard leaves alone: with the keyboard DOWN
      the visible viewport says the field has room it does not have, and the
      field grew until the tools row holding Stop fell out of its own box
-     (#1483). */
+     (#1483). The card composer now budgets the same way against the box it is
+     in — the conversation is a card of whatever height the board gave it, not
+     the screen — and both take the accessory region's reserve off the top, so
+     a grown draft cannot squeeze a surface the operator still has to reach
+     (#1629). One rule, two boxes. */
   const isMobile = useIsMobile(viewActive);
   const viewportH = useViewportHeight(viewActive);
   const layoutH = useLayoutViewportHeight(viewActive);
-  const maxPx = isMobile ? mobileComposerCeiling(viewportH, layoutH) : COMPOSER_MAX_PX;
+  const maxPx = isMobile
+    ? mobileComposerCeiling(viewportH, layoutH, accessorySurfaces)
+    : cardComposerCeiling(boxHeight, accessorySurfaces);
 
   const attachments = useImageAttachments({
     onError: (message) => setStatus({ kind: "err", text: message }),
