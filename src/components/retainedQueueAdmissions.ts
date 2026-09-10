@@ -1,7 +1,5 @@
 "use client";
 
-import type { NativeQueueMutation } from "@/hooks/useNativeQueue";
-
 /**
  * Where a queue command whose outcome nobody knows keeps its whole envelope
  * (#1629).
@@ -13,6 +11,8 @@ import type { NativeQueueMutation } from "@/hooks/useNativeQueue";
  * that does not survive the remount is a second operation waiting to be minted
  * for one the journal may already hold.
  */
+import type { NativeQueueMutation } from "@/hooks/useNativeQueue";
+
 /** The one sessionStorage slot these records live in, per card. */
 export const queueAdmissionKey = (id: string) => "llvQueueAdmission:" + id;
 
