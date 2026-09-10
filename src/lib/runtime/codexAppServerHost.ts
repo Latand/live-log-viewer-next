@@ -3206,7 +3206,7 @@ export class CodexAppServerHost implements EngineHost {
       const currentRequest = [...this.attentions].find(([, attention]) => attention.origin === "current" && attention.rpcId === id && attention.method === method);
       const attentionId = currentRequest?.[0] ?? (this.attentions.get(baseAttentionId)?.origin === "restored"
         ? `${baseAttentionId}:generation-${this.cursor + 1}` : baseAttentionId);
-      this.attentions.set(attentionId, { rpcId: id, method, origin: "current", isBlocking: !isNonblockingCodexQuestion(method, params) });
+      this.attentions.set(attentionId, { ...currentRequest?.[1], rpcId: id, method, origin: "current", isBlocking: !isNonblockingCodexQuestion(method, params) });
       const event = { kind: "attention" as const, id: attentionId, method, attention: params };
       if (!reconcileBufferedLifecycle || !this.consumeBufferedNotification(event)) this.emit(event);
       return;

@@ -4859,3 +4859,20 @@ test("malformed nonblocking requests stay blocking; auth recovery remains bounde
   expect(server.requests.filter(request => request.method === "turn/start")).toHaveLength(1);
   await host.release();
 });
+
+
+test("a replayed native question retains its pending answer and rejects a duplicate answer", async () => {
+  const server = new FakeAppServer("question-replay-thread");
+  const host = await CodexAppServerHost.start({ cwd: "/repo", eventStore: new MemoryEventStore(), spawnProcess: fakeSpawn(server) });
+  server.autoResolveServerRequests = false;
+  const params = { threadId: "question-replay-thread", turnId: "turn-1", isBlocking: false, questions: [{ id: "q", question: "Choose" }] };
+  server.request("question-replay", "item/tool/requestUserInput", params);
+  const answer = host.answer("item/tool/requestUserInput:question-replay", { answers: { q: { answers: ["yes"] } } });
+  server.request("question-replay", "item/tool/requestUserInput", params);
+  await expect(host.answer("item/tool/requestUserInput:question-replay", {})).rejects.toThrow("already awaiting confirmation");
+  server.notify("serverRequest/resolved", { threadId: "question-replay-thread", requestId: "question-replay" });
+  await answer;
+  expect(server.requests.filter(request => request.id === "question-replay")).toHaveLength(1);
+  expect((await host.health()).pendingAttention).toEqual([]);
+  await host.release();
+});
