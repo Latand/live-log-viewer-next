@@ -300,3 +300,30 @@ test("a handoff before any utterance is published reports nothing", async () => 
   await Promise.resolve();
   expect(requests.filter((request) => request.action === "handoff")).toEqual([]);
 });
+
+
+test("a usage warning belongs to the call that reported it", async () => {
+  /* The warning describes an account's window as it stood during one call. A
+     fresh call that has reported nothing must not open showing the last one's. */
+  const client = codexRealtimeClient("conversation_voice_usage");
+  await client.start();
+  const peer = StubPeerConnection.latest!;
+  peer.channel.onopen?.();
+  peer.channel.onmessage?.({
+    data: JSON.stringify({ type: "session.usage.updated", usage_limit: { status: "approaching" } }),
+  });
+  expect(client.getSnapshot().notice).toContain("approaching its usage limit");
+  /* And a call that reports its window is fine again says so. */
+  peer.channel.onmessage?.({
+    data: JSON.stringify({ type: "session.usage.updated", usage_limit: { status: "ok" } }),
+  });
+  expect(client.getSnapshot().notice).toBeNull();
+
+  peer.channel.onmessage?.({
+    data: JSON.stringify({ type: "session.usage.updated", usage_limit: { status: "approaching" } }),
+  });
+  await client.stop();
+  await client.start();
+  expect(client.getSnapshot().notice).toBeNull();
+  await client.stop();
+});

@@ -280,7 +280,12 @@ class CodexRealtimeClient {
       return;
     }
     this.cleanupTransport();
-    this.update({ phase: "connecting", error: null, startedAt: null, micMuted: false, outputMuted: false });
+    /* `notice` is cleared with `error` for the same reason: it describes the
+       call that is starting, and a warning carried over from the previous one
+       would tell the operator about a limit this call has not reported. */
+    this.update({
+      phase: "connecting", error: null, notice: null, startedAt: null, micMuted: false, outputMuted: false,
+    });
     const epoch = ++this.epoch;
     try {
       const media = await navigator.mediaDevices.getUserMedia({
