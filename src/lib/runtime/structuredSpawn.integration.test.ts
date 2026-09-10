@@ -4932,7 +4932,7 @@ describe.each(["codex", "claude"] as const)("%s structured spawn round trip", (e
     const history = fs.readFileSync(artifactPath, "utf8");
     const resumeReceipt = beginLegacySpawnFixture(registry, {
       engine, cwd, transport: "structured", accountId: account.accountId,
-      conversationId: response.conversationId, purpose: "resume-successor",
+      conversationId: begun.receipt.conversationId, purpose: "resume-successor",
       expectedArtifactPath: artifactPath, launchProfile,
     });
     if (resumeReceipt.kind !== "created") throw new Error("resume receipt unavailable");
