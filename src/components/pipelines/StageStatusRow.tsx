@@ -53,7 +53,7 @@ export function StageStatusRow({
       className="flex h-full min-h-0 min-w-0 flex-col justify-center gap-1 overflow-hidden rounded-control border bg-card px-3 py-2 shadow-1"
       style={{ borderColor: "var(--border-strong)" }}
     >
-      <div className="flex min-w-0 items-center gap-2">
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
         <span
           className="inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-label font-bold"
           style={{ backgroundColor: tone.soft, color: tone.color }}
@@ -61,7 +61,7 @@ export function StageStatusRow({
           <span aria-hidden>{STAGE_GLYPH[state]}</span>
           {t(`pipelineChipState.${state}`)}
         </span>
-        <span className="min-w-0 flex-1 truncate text-ui font-semibold text-secondary" title={title}>
+        <span className="order-first w-full min-w-0 truncate text-ui font-semibold text-secondary" title={title}>
           {title}
         </span>
         {onToggle ? (
@@ -73,9 +73,10 @@ export function StageStatusRow({
             aria-controls={controls}
             aria-label={expanded ? t("pipelineSlot.rowCollapse") : t("pipelineSlot.rowExpand")}
             title={expanded ? t("pipelineSlot.rowCollapse") : t("pipelineSlot.rowExpand")}
-            className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-control border border-border bg-canvas text-muted hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className="ml-auto inline-flex h-7 shrink-0 gap-1 px-2 items-center justify-center rounded-control border border-border bg-canvas text-muted hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             onClick={onToggle}
           >
+            {expanded ? t("pipelineSlot.rowCollapse") : t("bands.details")}
             <ChevronRight className={`h-3.5 w-3.5 transition-transform ${expanded ? "rotate-90" : ""}`} aria-hidden />
           </button>
         ) : null}

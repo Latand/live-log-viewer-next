@@ -1,3 +1,4 @@
+import { historicalAttemptLabels } from "./boardPresentation";
 import { expect, test } from "bun:test";
 
 import type { BoardTask } from "@/lib/tasks/types";
@@ -202,7 +203,7 @@ test("bands stack at content width at every mode and width; members, mirrors and
       const available = viewportWidth - gutter * 2;
       let previousBottom = -Infinity;
       for (const band of scene.bands) {
-        const { rect, header, addAgent } = band.geometry;
+        const { rect, header } = band.geometry;
         expect(rect.x).toBeCloseTo(gutter, 6);
         /* Compact geometry: a band is as wide as its content, floored so its
            header stays readable and ceilinged at the available width. */
@@ -210,15 +211,13 @@ test("bands stack at content width at every mode and width; members, mirrors and
         expect(rect.w).toBeGreaterThanOrEqual(Math.min(available, BAND.minBandW) - 0.001);
         expect(rect.y).toBeGreaterThanOrEqual(previousBottom - 0.001);
         previousBottom = rect.y + rect.h;
-        expect(header.h).toBeCloseTo(BAND.header, 6);
-        expect(contains(rect, addAgent)).toBe(true);
+        expect(header.h).toBeCloseTo(BAND.header + (available < 600 ? 40 : 0), 6);
         const items = [...band.members.map((member) => member.key), ...band.mirrors.map((mirror) => mirror.key)]
           .map((key) => scene.layout.byPath.get(key))
           .filter((item): item is SchemeRect => Boolean(item));
         for (const item of items) {
           expect(contains(rect, item)).toBe(true);
           expect(item.y).toBeGreaterThanOrEqual(rect.y + header.h - 0.001);
-          expect(overlapping(item, addAgent)).toBe(false);
         }
         for (let i = 0; i < items.length; i += 1) for (let j = i + 1; j < items.length; j += 1) expect(overlapping(items[i]!, items[j]!)).toBe(false);
       }
@@ -249,27 +248,17 @@ test("bands stack at content width at every mode and width; members, mirrors and
   }
 });
 
-test("the local +Agent sits right after the last member, or opens the next row when the row is full", () => {
-  const files = Array.from({ length: 12 }, (_, index) => file(index));
+test("header actions reserve no empty card row, even when the member row fills", () => {
+  const files = Array.from({ length: 4 }, (_, index) => file(index));
   const layout = base(files);
-  const one = rankBands(buildTaskBands(layout, sources([task("one", "2026-01-01T00:00:00Z", [files[0]!])], files.slice(0, 1))));
-  const scene1 = layoutTaskBands(layout, one, { mode: "intermediate", viewportWidth: 1440, reader: null });
-  const single = scene1.bands[0]!;
-  const member = single.members[0]!;
-  const memberRect = scene1.layout.byPath.get(member.key)!;
-  /* Board pixels: the +Agent sits one tile gap past the last member on its row. */
-  expect(single.geometry.addAgent.x).toBeCloseTo(memberRect.x + memberRect.w + BAND.tileGap, 6);
-  expect(single.geometry.addAgent.y).toBeCloseTo(memberRect.y, 6);
-  /* Four 320px tiles fill a 1440 row (24 gutter + 16 pad each side leaves
-     1360; 4 × 320 + 3 × 24 = 1352): the +Agent must start the next row. */
-  const four = rankBands(buildTaskBands(layout, sources([task("four", "2026-01-01T00:00:00Z", files.slice(0, 4))], files.slice(0, 4))));
-  const scene = layoutTaskBands(layout, four, { mode: "intermediate", viewportWidth: 1440, reader: null });
-  const band = scene.bands[0]!;
-  const last = scene.layout.byPath.get(band.members[3]!.key)!;
-  expect(band.geometry.addAgent.y).toBeGreaterThan(last.y + last.h - 0.001);
-  /* Wrapped to the next row, back at the inner-left edge (gutter + pad). */
-  expect(band.geometry.addAgent.x).toBeCloseTo(BAND.gutter + BAND.pad, 6);
-  expect(band.geometry.rows).toBe(2);
+  for (const count of [0, 1, 4]) {
+    const bands = buildTaskBands(base(files.slice(0, count)), sources([task("one", "2026-01-01T00:00:00Z", files.slice(0, count))], files.slice(0, count)));
+    const scene = layoutTaskBands(layout, bands, { mode: "near", viewportWidth: 1440, reader: null });
+    const band = scene.bands[0]!;
+    const bottom = Math.max(band.geometry.header.y + band.geometry.header.h, ...band.members.map(member => { const rect = scene.layout.byPath.get(member.key)!; return rect.y + rect.h; }));
+    expect(band.geometry.rect.y + band.geometry.rect.h - bottom).toBeLessThanOrEqual(44);
+    if (!count) expect(band.geometry.rect.h).toBe(band.geometry.header.h);
+  }
 });
 
 test("edges route between same-band members through side ports on a row and top/bottom ports across rows", () => {
@@ -689,15 +678,83 @@ test("the review hub sits on the routed connector, clear of every card but its t
       const overlaps = hub.x + FLOW_HUB.w / 2 > rect.x && hub.x - FLOW_HUB.w / 2 < rect.x + rect.w && hub.y + FLOW_HUB.h / 2 > rect.y && hub.y - FLOW_HUB.h / 2 < rect.y + rect.h;
       expect(overlaps).toBe(false);
     }
-    /* The corridor formula the free board uses would have been wrong here:
-       level with the arcs' centre it lands 240px under the implementer's top,
-       inside the wrapped helper on the narrow board. */
-    if (viewportWidth === 900) {
-      const impl = scene.layout.byPath.get(files[0]!.path)!;
-      const wrapped = scene.layout.byPath.get(files[2]!.path)!;
-      const corridorY = impl.y + 240;
-      expect(corridorY > wrapped.y && corridorY < wrapped.y + wrapped.h).toBe(true);
-      expect(hub.y > wrapped.y && hub.y < wrapped.y + wrapped.h && hub.x > wrapped.x && hub.x < wrapped.x + wrapped.w).toBe(false);
+
+  }
+});
+
+
+test("completed-task history folds without discarding targets or rewriting states", () => {
+  const files = [file(0, "idle")];
+  const layout = base(files);
+  const done = task("done", "2026-01-01T00:00:00Z", files, "done");
+  const bands = buildTaskBands(layout, sources([done], files));
+  const options = { mode: "near" as const, viewportWidth: 1440, reader: null };
+  const folded = layoutTaskBands(layout, bands, options);
+  expect(folded.bands[0]!.geometry.historyCollapsed).toBe(true);
+  expect(folded.shown.has(files[0]!.path)).toBe(false);
+  expect(folded.layout.nodes[0]!.file).toBe(files[0]!);
+  const opened = layoutTaskBands(layout, bands, { ...options, reader: files[0]!.path });
+  expect(opened.bands[0]!.geometry.historyCollapsed).toBe(false);
+  expect(opened.layout.byPath.get(files[0]!.path)?.h).toBe(BAND.nativeH);
+  const deliberate = layoutTaskBands(layout, bands, { ...options, historyOverrides: new Map([[bands[0]!.id, true]]) });
+  expect(deliberate.shown.has(files[0]!.path)).toBe(true);
+  expect(done.status).toBe("done");
+  for (const turn of ["busy", "unknown"] as const) {
+    const activeFiles = [file(1, turn)];
+    const activeBase = base(activeFiles);
+    const activeBands = buildTaskBands(activeBase, sources([task("active", "2026-01-01T00:00:00Z", activeFiles, "done")], activeFiles));
+    const active = layoutTaskBands(activeBase, activeBands, { ...options, historyOverrides: new Map([["task:active", false]]) });
+    expect(active.bands[0]!.geometry.historyCollapsed).toBe(false);
+    expect(active.shown.has(activeFiles[0]!.path)).toBe(true);
+  }
+});
+
+test("461 empty tasks pack into readable header surfaces without dropping visibility choices", () => {
+  const tasks = Array.from({ length: 461 }, (_, i) => ({ ...task(String(i), "2026-01-01T00:00:00Z", [], i === 0 ? "done" : "assigned"), showOnBoard: true }));
+  const layout = base([]);
+  const bands = buildTaskBands(layout, sources(tasks, []));
+  for (const viewportWidth of [1440, 830, 390]) {
+    const scene = layoutTaskBands(layout, bands, { mode: "near", viewportWidth, reader: null });
+    expect(scene.bands).toHaveLength(461);
+    for (const band of scene.bands) {
+      expect(band.geometry.rect.h).toBe(band.geometry.header.h);
+      expect(band.geometry.rect.x + band.geometry.rect.w).toBeLessThanOrEqual(viewportWidth);
+    }
+    if (viewportWidth === 1440) {
+      expect(scene.bands[0]!.geometry.rect.y).toBe(scene.bands[1]!.geometry.rect.y);
+      expect(scene.bands[1]!.geometry.rect.x).toBeGreaterThan(scene.bands[0]!.geometry.rect.x + scene.bands[0]!.geometry.rect.w);
     }
   }
+});
+
+test("placeholder disclosure reserves its actual surface and reflows the following band both ways", () => {
+  const layout = base([]);
+  const pipeline = pipelineWith("planned", [file(1)], ["t"]);
+  pipeline.runs = [];
+  pipeline.state = "needs_decision";
+  const key = "slot::planned::stage-0";
+  layout.slots = [{ key, pipeline, stage: pipeline.stages[0]!, index: 0, total: 1, presentation: "placeholder", x: 0, y: 0, w: 600, h: 620 }];
+  layout.groups = [{ key: "group::pipeline::planned", kind: "pipeline", id: pipeline.id, pipeline, hue: 0, label: "Planned", members: [key], x: 0, y: 0, w: 600, h: 620 }];
+  const tasks = [task("t", "2026-01-01T00:00:00Z", []), task("next", "2026-01-02T00:00:00Z", [])];
+  const bands = buildTaskBands(layout, { tasks, projection: projectTaskWorkflows(tasks, [pipeline], [], []), untitled: "Untitled" });
+  const options = { mode: "near" as const, viewportWidth: 830, reader: null };
+  const compact = layoutTaskBands(layout, bands, options);
+  expect(compact.layout.slots[0]!.h).toBe(104);
+  const expanded = layoutTaskBands(layout, bands, { ...options, expandedStages: new Set([key]) });
+  expect(expanded.layout.slots[0]!.h).toBe(724);
+  expect(expanded.bands[1]!.geometry.rect.y - compact.bands[1]!.geometry.rect.y).toBe(620);
+  expect(layoutTaskBands(layout, bands, options).bands.map(band => band.geometry)).toEqual(compact.bands.map(band => band.geometry));
+  expect(pipeline.state).toBe("needs_decision");
+});
+
+
+test("older attempt labels retain the old verdict and never label a reused current path as history", () => {
+  const pipeline = pipelineWith("retry", [file(0)]);
+  const old = { n: 1, state: "failed", agentPath: "/fixture/old" } as import("@/lib/pipelines/types").PipelineStageAttempt;
+  const current = { n: 2, state: "passed", agentPath: "/fixture/current" } as import("@/lib/pipelines/types").PipelineStageAttempt;
+  pipeline.runs = [{ stageId: "stage-0", attempts: [old, current] }];
+  expect(historicalAttemptLabels([pipeline]).get(old.agentPath!)?.state).toBe("failed");
+  expect(historicalAttemptLabels([pipeline]).has(current.agentPath!)).toBe(false);
+  current.agentPath = old.agentPath;
+  expect(historicalAttemptLabels([pipeline]).size).toBe(0);
 });

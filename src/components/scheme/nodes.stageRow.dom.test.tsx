@@ -136,7 +136,7 @@ function layout(slots: StageSlot[]): SchemeLayout {
 /* Escaping a slot key (it carries `::`) for a CSS id selector. */
 const CSS_ESCAPE = (value: string) => value.replace(/[^a-zA-Z0-9_-]/g, (ch) => `\\${ch}`);
 
-function mountLayer(next: SchemeLayout, pipelines: Pipeline[] = [], options: { lite?: boolean } = {}): { host: HTMLElement; root: Root } {
+function mountLayer(next: SchemeLayout, pipelines: Pipeline[] = [], options: { lite?: boolean; dormant?: boolean } = {}): { host: HTMLElement; root: Root } {
   const element = dom.document.createElement("div");
   dom.document.body.append(element);
   const host = element as unknown as HTMLElement;
@@ -151,7 +151,7 @@ function mountLayer(next: SchemeLayout, pipelines: Pipeline[] = [], options: { l
         pipelines={pipelines}
         interactive
         lite={options.lite ?? false}
-        dormant
+        dormant={options.dormant ?? true}
         selected={null}
         multi={new Set()}
         session={false}
@@ -262,7 +262,7 @@ function node(file: FileEntry): SchemeNode {
   return { file, tasks: [], under: [], isRoot: true, x: 0, y: 0, w: 600, h: 780 };
 }
 
-test("a live stage pane is titled role · stage · position, never the prompt's shared preamble", () => {
+test("a live stage pane is titled role · stage · position, never the prompt's shared preamble", async () => {
   /* The scanner titled this transcript by its opening prompt — the preamble every
      stage prompt starts with, which named every stage pane on the board the
      same. The pane leads with the stage identity and keeps the transcript title
@@ -271,7 +271,10 @@ test("a live stage pane is titled role · stage · position, never the prompt's 
   const running = pipeline({
     runs: [{ stageId: "integrate_v3_voice", attempts: [{ n: 1, state: "running", agentPath: "/integrate", flowId: null } as never] }],
   });
-  const { host } = mountLayer({ ...layout([]), nodes: [node(live)] }, [running]);
+  const { host } = mountLayer({ ...layout([]), nodes: [node(live)] }, [running], { dormant: false });
+  // The native reader attaches its stable portal after mount.
+  for (let i = 0; i < 4; i++) await new Promise(resolve => setTimeout(resolve, 0));
+  flushSync(() => undefined);
   const pane = host.querySelector("[data-pane-title-override]") as HTMLElement;
   expect(pane).toBeTruthy();
   expect(pane.textContent).toBe("Builder · integrate_v3_voice · stage 2/3");

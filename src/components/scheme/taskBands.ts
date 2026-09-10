@@ -1,3 +1,4 @@
+import { BOARD_SURFACE, bandHistoryAvailable, bandContainsTarget, stageSurface } from "./boardPresentation";
 import { conversationIdentity } from "@/lib/accounts/identity";
 import type { Flow } from "@/lib/flows/types";
 import type { Pipeline } from "@/lib/pipelines/types";
@@ -444,12 +445,12 @@ export const BAND = {
   gutter: 24,
   gutterNarrow: 16,
   gap: 16,
-  header: 48,
+  header: BOARD_SURFACE.header,
   pad: 16,
   tileGap: 24,
   rowGap: 32,
-  summaryW: 320,
-  summaryH: 160,
+  summaryW: BOARD_SURFACE.summary.w,
+  summaryH: BOARD_SURFACE.summary.h,
   nativeW: 600,
   nativeMinW: 320,
   nativeH: 680,
@@ -471,13 +472,14 @@ export const BAND = {
      two controls — and above it nothing is gained by growing further, so a band
      whose row of members ends early stops there instead of ruling a line across
      the whole canvas. Both are CSS pixels, like every other constant here. */
-  minBandW: 520,
+  minBandW: 620,
 } as const;
 
 export interface BandGeometry {
+  historyAvailable: boolean;
+  historyCollapsed: boolean;
   rect: SchemeRect;
   header: SchemeRect;
-  addAgent: SchemeRect;
   rows: number;
 }
 
@@ -501,6 +503,9 @@ export interface BandScene {
 }
 
 export interface BandLayoutOptions {
+  expandedStages?: ReadonlySet<string>;
+  historyOverrides?: ReadonlyMap<string, boolean>;
+  revealTarget?: string | null;
   mode: BandMode;
   viewportWidth: number;
   /** Conversation whose reader is native in near mode. */
@@ -527,11 +532,6 @@ export interface BandContinuation {
   targets: { key: string; bandId: string; title: string; direction: "to" | "from" }[];
 }
 
-function union(rects: readonly SchemeRect[]): SchemeRect {
-  const x = Math.min(...rects.map((rect) => rect.x));
-  const y = Math.min(...rects.map((rect) => rect.y));
-  return { x, y, w: Math.max(...rects.map((rect) => rect.x + rect.w)) - x, h: Math.max(...rects.map((rect) => rect.y + rect.h)) - y };
-}
 
 /** Directed ports between two placed rects: side ports on the same row, top/
     bottom ports across rows; the port height stays near the header so a tall
@@ -612,7 +612,7 @@ export function layoutTaskBands(base: SchemeLayout, orderedBands: readonly TaskB
   const pad = BAND.pad;
   const itemGap = mode === "overview" ? BAND.chipGap : BAND.tileGap;
   const rowGap = mode === "overview" ? BAND.chipGap : BAND.rowGap;
-  const headerH = BAND.header;
+  const headerH = maxBandW < 600 ? BAND.header + 40 : BAND.header;
   /* Members are measured against the widest a band could be, then the band is
      narrowed to the row they actually occupied — measuring against a width that
      the band has not been given yet would wrap a row that fits. */
@@ -653,9 +653,16 @@ export function layoutTaskBands(base: SchemeLayout, orderedBands: readonly TaskB
     ?? new Set(base.decks.filter((deck) => deckDisclosureTerminal(deck.flow)).map((deck) => deck.key));
   const deckKeyOfFlow = new Map(base.decks.map((deck) => [deck.flow.id, deck.key] as const));
   let cursorY = gutter;
+  let emptyColumn = 0;
+  const emptyColumns = Math.max(1, Math.floor((maxBandW + BAND.gap) / (minBandW + BAND.gap)));
   for (const band of bands) {
-    const items: { key: string; w: number; h: number; fit?: number; kind: "member" | "mirror" | "container" | "add"; node?: SchemeNode }[] = [];
-    for (const member of band.members) {
+    const empty = !bandHoldsMembers(band);
+    if (!empty && emptyColumn) { cursorY += headerH + BAND.gap; emptyColumn = 0; }
+    const bandX = gutter + (empty ? emptyColumn * (minBandW + BAND.gap) : 0);
+    const historyAvailable = bandHistoryAvailable(band, base);
+    const historyCollapsed = historyAvailable && options.historyOverrides?.get(band.id) !== true && !bandContainsTarget(band, base, options.revealTarget ?? reader);
+    const items: { key: string; w: number; h: number; fit?: number; kind: "member" | "mirror"; node?: SchemeNode }[] = [];
+    for (const member of historyCollapsed ? [] : band.members) {
       if (member.kind === "node") {
         const node = base.nodes.find((entry) => entry.file.path === member.key)!;
         /* The selected conversation reads natively from the intermediate scale
@@ -673,68 +680,71 @@ export function layoutTaskBands(base: SchemeLayout, orderedBands: readonly TaskB
       if (mode === "overview" && member.kind !== "draft") continue;
       const rect = baseRect.get(member.key);
       if (!rect) continue;
-      const shellH = member.kind === "deck" && collapsedDecks.has(member.key) ? BAND.collapsedDeckH : rect.h;
-      const natural = fitted(rect.w, shellH);
+      const slot = member.kind === "slot" ? base.slots.find(slot => slot.key === member.key) : undefined;
+      const surface = slot ? stageSurface(options.expandedStages?.has(member.key) ?? false) : rect;
+      const shellH = member.kind === "deck" && collapsedDecks.has(member.key) ? BAND.collapsedDeckH : surface.h;
+      const natural = fitted(surface.w, shellH);
       items.push({ key: member.key, w: natural.w, h: natural.h, fit: natural.fit, kind: "member" });
     }
-    for (const mirror of band.mirrors) {
+    for (const mirror of historyCollapsed ? [] : band.mirrors) {
       const natural = fitted(mode === "overview" ? BAND.mirrorChipW : BAND.mirrorW, mode === "overview" ? BAND.chipH : BAND.mirrorH);
       items.push({ key: mirror.key, w: natural.w, h: natural.h, kind: "mirror" });
     }
-    /* A hosted pipeline/flow with none of its surfaces placed in this mode
-       still reserves a label slot: its halo header carries the controls. */
-    const placedKeys = new Set(items.filter((item) => item.kind === "member" || item.kind === "mirror").map((item) => item.key));
-    const mirrored = new Set(band.mirrors.map((mirror) => mirror.ofKey));
-    for (const groupKey of band.groups) {
-      const group = base.groups.find((entry) => entry.key === groupKey);
-      if (!group || group.members.some((key) => placedKeys.has(key) || mirrored.has(key))) continue;
-      items.push({ key: groupKey, w: mode === "overview" ? BAND.chipW : BAND.containerW, h: mode === "overview" ? BAND.chipH : BAND.containerH, kind: "container" });
+    // Each container gets a dedicated heading before its members. A heading
+    // never borrows the task title row or spans another container's cards.
+    const groupHeadroom = band.groups.length * BOARD_SURFACE.groupHeader;
+    const hasNative = items.some(item => item.node?.presentation === "native");
+    const hasRole = band.members.some(member => member.kind === "deck" || (member.kind === "node" && (
+      base.loops.some(loop => loop.flow.implementerPath === member.key)
+      || base.groups.some(group => group.pipeline?.runs.some(run => run.attempts.some(attempt => attempt.agentPath === member.key)))
+    )));
+    const roleSpace = mode === "overview" ? 0 : hasNative ? 64 : hasRole ? BOARD_SURFACE.roleSpace : 0;
+    const bodyTop = cursorY + headerH + groupHeadroom + (items.length ? roleSpace : 0);
+    for (const [index, key] of band.groups.entries()) {
+      containerSlots.set(key, { x: innerX0, y: cursorY + headerH + index * BOARD_SURFACE.groupHeader, w: Math.min(680, maxInnerW), h: BOARD_SURFACE.groupHeader });
+      bandOf.set(key, band.id);
     }
-    items.push({ key: `add::${band.id}`, w: BAND.addW, h: mode === "overview" ? BAND.chipH : BAND.addH, kind: "add" });
-
     let x = innerX0;
-    let y = cursorY + headerH + pad;
+    let y = bodyTop;
     let rowH = 0;
-    let rows = 1;
+    let rows = items.length ? 1 : 0;
     /* Rightmost inked edge across every row, so the band can be trimmed to the
        content it actually holds instead of to the width it was measured in. */
     let contentRight = innerX0;
-    let addAgent: SchemeRect = { x, y, w: BAND.addW, h: BAND.addH };
     for (const item of items) {
       if (x + item.w > innerRight + 0.001 && x > innerX0) {
         x = innerX0;
-        y += rowH + rowGap;
+        y += rowH + rowGap + roleSpace;
         rowH = 0;
         rows += 1;
       }
       const rect: SchemeRect = { x, y, w: item.w, h: item.h, ...(item.fit !== undefined && item.fit !== 1 ? { fit: item.fit } : {}) };
-      if (item.kind === "add") addAgent = rect;
-      else if (item.kind === "container") {
-        containerSlots.set(item.key, rect);
-        bandOf.set(item.key, band.id);
-      } else {
-        placed.set(item.key, rect);
-        shown.add(item.key);
-        bandOf.set(item.key, band.id);
-        if (item.kind === "mirror") mirrorRects.set(item.key, rect);
-        if (item.node) nodeRects.set(item.key, { ...item.node, x, y });
-      }
+      placed.set(item.key, rect);
+      shown.add(item.key);
+      bandOf.set(item.key, band.id);
+      if (item.kind === "mirror") mirrorRects.set(item.key, rect);
+      if (item.node) nodeRects.set(item.key, { ...item.node, x, y });
       contentRight = Math.max(contentRight, x + item.w);
-      x += item.w + itemGap;
+      const reviewGap = base.loops.some(loop => loop.flow.implementerPath === item.key) ? FLOW_HUB.w + 16 : itemGap;
+      x += item.w + Math.max(itemGap, reviewGap);
       rowH = Math.max(rowH, item.h);
     }
-    let bandH = headerH + pad + (y - (cursorY + headerH + pad)) + rowH + pad;
+    let bandH = y - cursorY + rowH + (items.length ? BOARD_SURFACE.navigationSpace + pad : 0);
     if (mode === "overview") bandH = Math.max(bandH, BAND.minOverviewH);
     /* The band ends where its content ends. The floor keeps the header
-       readable — title, status, counts, Details and «+ Agent» all live on one
-       screen-constant row — and the ceiling is the width it was measured in, so
+       readable — title and header controls have dedicated rows — and the ceiling is the width it was measured in, so
        a band that filled its rows is exactly as wide as it was before. */
     const bandW = Math.min(maxBandW, Math.max(minBandW, contentRight + pad - gutter));
-    const rect = { x: gutter, y: cursorY, w: bandW, h: bandH };
-    const header = { x: gutter, y: cursorY, w: bandW, h: headerH };
+    const rect = { x: bandX, y: cursorY, w: bandW, h: bandH };
+    const header = { x: bandX, y: cursorY, w: bandW, h: headerH };
+    for (const key of band.groups) {
+      const heading = containerSlots.get(key);
+      if (heading) heading.w = bandW - pad * 2;
+    }
     if (band.task) taskRects.set(`task::${band.task.id}`, header);
-    placedBands.push({ ...band, geometry: { rect, header, addAgent, rows } });
-    cursorY += bandH + BAND.gap;
+    placedBands.push({ ...band, geometry: { rect, header, rows, historyAvailable, historyCollapsed } });
+    if (empty && emptyColumn + 1 < emptyColumns) emptyColumn += 1;
+    else { cursorY += bandH + BAND.gap; emptyColumn = 0; }
   }
 
   const byPath = new Map<string, SchemeRect>(placed);
@@ -786,6 +796,11 @@ export function layoutTaskBands(base: SchemeLayout, orderedBands: readonly TaskB
     for (const rep of representations.get(edge.from) ?? []) if (rep !== edge.from && bandOf.get(rep) !== bandOf.get(edge.to)) continue_(rep, { key: edge.to, bandId: bandOf.get(edge.to)!, direction: "to" });
     for (const rep of representations.get(edge.to) ?? []) if (rep !== edge.to && bandOf.get(rep) !== bandOf.get(edge.from)) continue_(rep, { key: edge.from, bandId: bandOf.get(edge.from)!, direction: "from" });
   }
+  for (const link of base.links) {
+    if (!placed.has(link.from) || !placed.has(link.to) || bandOf.get(link.from) === bandOf.get(link.to)) continue;
+    continue_(link.from, { key: link.to, bandId: bandOf.get(link.to)!, direction: "to" });
+    continue_(link.to, { key: link.from, bandId: bandOf.get(link.from)!, direction: "from" });
+  }
   /* A container halo is a projection inside the band that owns it: it wraps
      the container's members placed in that band and the band's mirrors of its
      other members, never a surface placed in a different band. */
@@ -796,19 +811,10 @@ export function layoutTaskBands(base: SchemeLayout, orderedBands: readonly TaskB
     const bandId = owner.get(group.key);
     if (!bandId) return [];
     const band = placedBands.find((entry) => entry.id === bandId)!;
+    const heading = containerSlots.get(group.key);
     const memberSet = new Set(group.members);
-    const local = [
-      ...group.members.filter((key) => placed.has(key) && bandOf.get(key) === bandId),
-      ...band.mirrors.filter((mirror) => memberSet.has(mirror.ofKey) && placed.has(mirror.key)).map((mirror) => mirror.key),
-    ];
-    if (!local.length) {
-      const slot = containerSlots.get(group.key);
-      return slot ? [{ ...group, members: [], ...slot }] : [];
-    }
-    const envelope = union(local.map((key) => placed.get(key)!));
-    const padX = 12;
-    const heading = 30;
-    return [{ ...group, members: local, x: envelope.x - padX, y: envelope.y - heading, w: envelope.w + padX * 2, h: envelope.h + heading + padX }];
+    const local = [...group.members.filter(key => placed.has(key) && bandOf.get(key) === bandId), ...band.mirrors.filter(mirror => memberSet.has(mirror.ofKey) && placed.has(mirror.key)).map(mirror => mirror.key)];
+    return heading ? [{ ...group, ...heading, members: local, bandHeader: true, historical: band.geometry.historyAvailable }] : [];
   });
   const layout: SchemeLayout = {
     ...base,
@@ -816,7 +822,7 @@ export function layoutTaskBands(base: SchemeLayout, orderedBands: readonly TaskB
     edges,
     groups,
     byPath,
-    links: base.links.filter((link) => placed.has(link.from) && placed.has(link.to)),
+    links: base.links.filter((link) => placed.has(link.from) && placed.has(link.to) && bandOf.get(link.from) === bandOf.get(link.to)),
     /* The review cycle is drawn between the implementer card and the reviewer
        deck AS THEY ARE PLACED — same-row side ports, or top/bottom ports when
        the deck wrapped to a later row — and routed around the other cards in
@@ -838,12 +844,12 @@ export function layoutTaskBands(base: SchemeLayout, orderedBands: readonly TaskB
       return [{ ...loop, x1: ports.x1, y1: ports.y1, x2: ports.x2, y2: ports.y2, route: route.d, hub: hubOnRoute(route.d, others) }];
     }),
     stacks: base.stacks.flatMap((rect) => (placed.has(rect.key) ? [{ ...rect, ...placed.get(rect.key)! }] : [])),
-    decks: base.decks.flatMap((rect) => (placed.has(rect.key) ? [{ ...rect, ...placed.get(rect.key)! }] : [])),
+    decks: base.decks.flatMap((rect) => (placed.has(rect.key) ? [{ ...rect, ...placed.get(rect.key)!, bandSurface: true }] : [])),
     drafts: base.drafts.flatMap((rect) => (placed.has(rect.key) ? [{ ...rect, ...placed.get(rect.key)! }] : [])),
-    slots: base.slots.flatMap((rect) => (placed.has(rect.key) ? [{ ...rect, ...placed.get(rect.key)! }] : [])),
+    slots: base.slots.flatMap((rect) => (placed.has(rect.key) ? [{ ...rect, ...placed.get(rect.key)!, detailsExpanded: options.expandedStages?.has(rect.key) ?? false, incoming: undefined }] : [])),
     regionTasks: [],
     width: viewportWidth,
-    height: cursorY + gutter,
+    height: cursorY + (emptyColumn ? headerH + BAND.gap : 0) + gutter,
   };
   return { layout, bands: placedBands, shown, mode, taskRects, mirrorRects, bandOf, continuations: [...continuationByKey.values()] };
 }

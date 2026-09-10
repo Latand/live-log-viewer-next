@@ -464,8 +464,9 @@ test("on a narrow board a draft pane and a planned stage slot are scaled to fit 
     expect(band).toBeTruthy();
     /* Natural size is 600 wide; the band is narrower, so the shell is scaled
        uniformly and its right edge stays inside the band. */
-    expect(box.fit).toBeLessThan(1);
-    expect(parseFloat(shell.style.width)).toBeCloseTo(600, 3);
+    if (key.startsWith("draft::")) expect(box.fit).toBeLessThan(1);
+    else expect(box.h).toBeLessThanOrEqual(104);
+    expect(parseFloat(shell.style.width)).toBeCloseTo(key.startsWith("draft::") ? 600 : 360, 3);
     expect(box.x + box.w).toBeLessThanOrEqual(parseFloat(band.style.left) + parseFloat(band.style.width) + 0.001);
     expect(box.x).toBeGreaterThanOrEqual(parseFloat(band.style.left) - 0.001);
   }

@@ -1,5 +1,8 @@
 "use client";
 
+import { bandEdgePorts } from "./taskBands";
+import { BOARD_SURFACE, historicalAttemptLabels } from "./boardPresentation";
+
 import { Check, Layers } from "lucide-react";
 import { memo, useCallback, useEffect, useMemo, useState, type ComponentProps, type CSSProperties } from "react";
 
@@ -26,7 +29,7 @@ import { PipelineTemplatePicker } from "@/components/pipelines/PipelineTemplateP
 import { StagePlaceholderPane } from "@/components/pipelines/StagePlaceholderPane";
 import { StageCompletedCard } from "@/components/pipelines/StageCompletedCard";
 import { StageStatusRow } from "@/components/pipelines/StageStatusRow";
-import { STAGE_TONES, attemptNavTarget, canSourcePipeline, createDraftPipeline, optimisticAddStage, patchPipeline, pipelineStagePosition, pipelineStateLabel, renderableFlowIds, resolveStageNavFile, reviewLoopChainValid, stageChipLabel, stageChipState, pipelineStageByAgentPath, stagePaneTitleOf, type PipelineStagePane } from "@/components/pipelines/pipelineModel";
+import { STAGE_TONES, attemptStateLabel, attemptNavTarget, canSourcePipeline, createDraftPipeline, optimisticAddStage, patchPipeline, pipelineStagePosition, pipelineStateLabel, renderableFlowIds, resolveStageNavFile, reviewLoopChainValid, stageChipLabel, stageChipState, pipelineStageByAgentPath, stagePaneTitleOf, type PipelineStagePane } from "@/components/pipelines/pipelineModel";
 import { pushTaskToast } from "@/components/tasks/taskToast";
 import type { TaskRelation } from "@/components/tasks/taskRelations";
 import { MAX_PIPELINE_STAGES } from "@/lib/pipelines/limits";
@@ -386,8 +389,8 @@ export const AgentLinksLayer = memo(function AgentLinksLayer({
   const railGeom = (link: AgentLink): { d: string; mid: { x: number; y: number }; chevrons: string[] } => {
     const from = byPath.get(link.from)!;
     const to = byPath.get(link.to)!;
-    const seg = pipelineRailSegment(from, to);
-    const near = obstacles.filter((rect) => rect !== from && rect !== to);
+    const seg = semanticZoom ? { ...bandEdgePorts(from, to), chevrons: [] } : pipelineRailSegment(from, to);
+    const near = obstacles.filter((rect) => ![from, to].some(endpoint => rect.x === endpoint.x && rect.y === endpoint.y && rect.w === endpoint.w && rect.h === endpoint.h));
     const blocked = near.some((rect) => segHitsRect(seg.x1, seg.y1, seg.x2, seg.y2, rect, RAIL_CLEARANCE));
     if (!blocked) {
       return { d: `M ${seg.x1} ${seg.y1} L ${seg.x2} ${seg.y2}`, mid: { x: (seg.x1 + seg.x2) / 2, y: (seg.y1 + seg.y2) / 2 }, chevrons: seg.chevrons };
@@ -445,6 +448,12 @@ export const AgentLinksLayer = memo(function AgentLinksLayer({
           const geom = railByKey.get(link.key);
           const x = link.pipeline.anchorOnly ? from.x + from.w / 2 : geom?.mid.x ?? from.x + from.w / 2;
           const y = link.pipeline.anchorOnly ? from.y : geom?.mid.y ?? from.y;
+          if (semanticZoom) {
+            if (link.pipeline.anchorOnly) return null; // the dedicated group header opens these controls
+            return <span key={link.key} data-band-dependency={link.key} aria-label={`${link.pipeline.index + 1}/${link.pipeline.total}`}
+              className="pointer-events-none absolute flex h-5 w-5 items-center justify-center rounded-full border bg-card text-[11px]"
+              style={{ left: x - 10, top: y - 10, color: PIPELINE_RAIL_COLOR[link.pipeline.tone] }}>→</span>;
+          }
           if (link.pipeline.hub) {
             return <PipelineHub key={link.key} pipeline={link.pipeline.pipeline} x={x} y={y} interactive={hubInteractive} moveTransition={MOVE_TRANSITION} semanticZoom={semanticZoom} />;
           }
@@ -520,7 +529,7 @@ export const GroupsLayer = memo(function GroupsLayer({
                 (and drop targets elsewhere), which keep the warning halo. */}
             <div
               aria-hidden
-              className={`absolute inset-0 rounded-[20px] ${draft ? "border-2 border-dashed" : "border"}`}
+              className={`absolute inset-0 rounded-[20px] ${group.bandHeader ? "hidden" : ""} ${draft ? "border-2 border-dashed" : "border"}`}
               style={
                 draft
                   ? {
@@ -541,19 +550,19 @@ export const GroupsLayer = memo(function GroupsLayer({
             <button
               data-scheme-ui
               data-pipeline-group-header={group.pipeline ? group.id : undefined}
-              className={`absolute -top-3 left-5 z-[8] inline-flex max-w-[26em] items-center gap-[0.4em] rounded-full bg-card px-[0.7em] py-[0.15em] font-bold shadow-1 hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-default ${
+              className={`absolute ${group.bandHeader ? "top-1 left-0" : "-top-3 left-5"} z-[8] inline-flex max-w-[26em] items-center gap-[0.4em] rounded-full bg-card px-[0.7em] py-[0.15em] font-bold shadow-1 hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-default ${
                 interactive ? "pointer-events-auto" : ""
               }`}
               /* Font fully counter-scaled (constant on-screen at any zoom); border
                  and padding are in em so the whole chip holds its on-screen size. */
-              style={{ maxWidth: "min(26em, calc(100% - 40px))", borderColor: color, color, borderWidth: "0.18em", borderStyle: draft ? "dashed" : "solid", fontSize: groupLabelFontSize() }}
+              style={{ maxWidth: group.bandHeader ? "100%" : "min(26em, calc(100% - 40px))", borderColor: color, color, borderWidth: "0.18em", borderStyle: draft ? "dashed" : "solid", fontSize: group.bandHeader ? 11 : groupLabelFontSize() }}
               aria-expanded={open}
               aria-haspopup="dialog"
               disabled={!interactive}
               onClick={() => group.taskId ? onOpenTaskHistory?.(group.taskId) : setOpenId((value) => (value === group.id ? null : group.id))}
             >
               <span aria-hidden>{group.kind === "task" ? "▤" : group.kind === "pipeline" ? "⇢" : "⟳"}</span>
-              <span className="truncate">{group.label}</span>
+              <span className="truncate">{group.historical ? `${t("bands.historicalRun")} · ` : ""}{group.label}</span>
               {group.pipeline ? (
                 <>
                   <span
@@ -1004,6 +1013,7 @@ const NodeChrome = memo(function NodeChrome({
   flow,
   pipeline,
   pipelineStage,
+  historicalAttempt,
   flows,
   files,
   renderablePaths,
@@ -1047,6 +1057,7 @@ const NodeChrome = memo(function NodeChrome({
   pipeline: Pipeline | null;
   /** The exact pipeline stage represented by this real conversation pane. */
   pipelineStage: PipelineStagePane | null;
+  historicalAttempt?: import("@/lib/pipelines/types").PipelineStageAttempt;
   /** All flows, for the strip's review-loop round counters + open-review. */
   flows: Flow[];
   files: readonly FileEntry[];
@@ -1127,10 +1138,13 @@ const NodeChrome = memo(function NodeChrome({
         <div aria-hidden className="pointer-events-none absolute inset-0 z-[4] rounded-[10px] bg-accent/[0.06]" />
       ) : null}
       {compact ? null : <AncestryChip ancestry={node.ancestry} />}
+      {historicalAttempt ? <span data-historical-attempt className="pointer-events-none absolute -top-6 left-0 text-[11px] font-semibold text-muted">
+        {t("bands.earlierAttempt", { count: historicalAttempt.n, state: attemptStateLabel(t, historicalAttempt.state) })}
+      </span> : null}
       {pipelineStage ? (
         <span
           data-pipeline-stage-label
-          style={node.presentation ? { fontSize: "calc(10.5px * var(--inv-z, 1))", height: "2.3em", paddingInline: ".75em", gap: ".5em", top: "-1.15em", right: "1em" } : undefined}
+          style={node.presentation ? { fontSize: 10.5, height: "2.3em", paddingInline: ".75em", gap: ".5em", top: -26, right: 0 } : undefined}
           className="pointer-events-none absolute -top-3 right-3 z-[7] inline-flex h-6 max-w-[78%] items-center gap-1.5 rounded-full border border-accent/35 bg-card px-2 text-[10.5px] font-bold text-accent shadow-1"
           title={stageChipLabel(t, pipelineStage.stage)}
         >
@@ -1139,7 +1153,7 @@ const NodeChrome = memo(function NodeChrome({
         </span>
       ) : null}
       {/* The loop's shared header hovers above the implementer↔reviewer pair. */}
-      {flow && !compact ? (
+      {flow && !compact && !node.presentation ? (
         <div className="absolute -top-[60px] left-0 z-[4]" style={{ width: PAIR_W }}>
           <FlowStrip flow={flow} onFocusRound={(round) => onFocusRound(flow.id, round)} />
         </div>
@@ -1157,7 +1171,7 @@ const NodeChrome = memo(function NodeChrome({
           conversation — children and flow-hosting roots included — sitting in
           the controls row when free, or above the flow/pipeline strip when one is up. */}
       {(canFlow || canPipeline) && !compact ? (
-        <div className={`absolute left-0 z-[4] flex items-center gap-1.5 ${flow || boardStrip ? "-top-[92px]" : "-top-11"}`}>
+        <div className={`absolute left-0 z-[4] flex items-center gap-1.5 ${!node.presentation && (flow || boardStrip) ? "-top-[92px]" : "-top-11"}`}>
           {canFlow ? (
             <button
               data-scheme-ui
@@ -1227,8 +1241,8 @@ const NodeChrome = memo(function NodeChrome({
           </button>
         ) : null}
         {node.presentation === "summary" ? <button data-scheme-ui data-scheme-summary={node.file.path} className="relative h-full w-full rounded-xl border border-border bg-card text-left" onClick={() => onSelect(node.file)}>
-          <div className="absolute left-0 top-0 flex flex-col items-start justify-center gap-3 p-5 text-ui" style={{ width: node.w / (node.readerScale ?? 1), height: node.h / (node.readerScale ?? 1), transform: `scale(${node.readerScale ?? 1})`, transformOrigin: "top left" }}>
-            <strong className="line-clamp-3">{cleanTitle(node.file.title,90)}</strong><CardStatusBadge file={node.file} />
+          <div className="absolute left-0 top-0 flex flex-col items-start justify-center gap-1 px-3 py-2 text-ui" style={{ width: node.w / (node.readerScale ?? 1), height: node.h / (node.readerScale ?? 1), transform: `scale(${node.readerScale ?? 1})`, transformOrigin: "top left" }}>
+            <strong className="line-clamp-3 text-[13px] leading-[18px]">{cleanTitle(node.file.title,180)}</strong><CardStatusBadge file={node.file} />
           </div>
         </button> : null}
         <div ref={nativeSlot} className="absolute left-0 top-0 flex min-h-0 min-w-0" style={{width:node.w/(node.readerScale??1),height:node.h/(node.readerScale??1),transform:`scale(${node.readerScale??1})`,transformOrigin:"top left",display:node.presentation === "summary" || chip ? "none" : undefined}} />
@@ -1258,7 +1272,7 @@ const NodeChrome = memo(function NodeChrome({
           />
         ) : null;
       })()}
-      {flow ? <RoleTag role="implementer" active={activeLoopRole(flow) === "implementer"} /> : null}
+      {flow && !pipelineStage ? <div data-board-role className="absolute inset-x-0" style={{ top: node.presentation ? -14 : 0 }}><RoleTag role="implementer" active={activeLoopRole(flow) === "implementer"} /></div> : null}
       {node.presentation ? null : <FarLabel file={node.file} />}
       {/* The handoff handle pinned outside the card's bottom-left corner —
           where child arrows start; a click hangs a draft conversation below. */}
@@ -1409,12 +1423,27 @@ function EscapeToClose({ onClose }: { onClose: () => void }) {
  * wraps. Every add is an optimistic add-stage PATCH on the same draft
  * contract, applied locally first (issue #221 §3).
  */
-function StageSlotShell({ slot, lite, dimmed, files, onSelect }: { slot: StageSlot; lite: boolean; dimmed: boolean; files: FileEntry[]; onSelect: (file: FileEntry) => void }) {
+function StageSlotShell({ slot, lite, dimmed, files, onSelect, onToggleDetails }: { slot: StageSlot; lite: boolean; dimmed: boolean; files: FileEntry[]; onSelect: (file: FileEntry) => void; onToggleDetails?: (key: string) => void }) {
   const { t } = useLocale();
   const [busy, setBusy] = useState(false);
   const [rowOpen, setRowOpen] = useState(false);
   const tone = STAGE_TONES[stageChipState(slot.pipeline, slot.stage)];
   const { pipeline } = slot;
+  if (slot.detailsExpanded !== undefined) {
+    const target = slot.attempt ? attemptNavTarget(slot.attempt) : null;
+    const file = target ? resolveStageNavFile(target, files) : null;
+    return <div data-scheme-node={slot.key} data-stage-details-expanded={slot.detailsExpanded}
+      className={`scheme-enter absolute${dimClass(dimmed)}`} style={fittedShellStyle(slot)}>
+      <div style={{ height: BOARD_SURFACE.stage.h }}>
+        <StageStatusRow slot={slot} expanded={slot.detailsExpanded} controls={`${slot.key}::details`}
+          onToggle={!lite ? () => onToggleDetails?.(slot.key) : undefined} />
+      </div>
+      {slot.detailsExpanded ? <div id={`${slot.key}::details`} data-stage-row-card className="flex" style={{ height: BOARD_SURFACE.stageDetails.h - BOARD_SURFACE.stage.h }}>
+        <EscapeToClose onClose={() => onToggleDetails?.(slot.key)} />
+        {slot.presentation === "completed" ? <StageCompletedCard slot={slot} onOpen={file && !lite ? () => onSelect(file) : undefined} /> : <StagePlaceholderPane slot={slot} interactive={!lite} />}
+      </div> : null}
+    </div>;
+  }
   /* Settled work — skipped, or completed evidence — collapses to ONE status row
      at its stage position (#658): the layout reserved exactly that row, and the
      disclosure floats the full card over the board on demand, so the operator can
@@ -1594,7 +1623,7 @@ function DeckShell({
       style={fittedShellStyle(deck)}
     >
       <RoundDeck flow={deck.flow} rounds={deck.rounds} focusRound={focusRound} dormant={dormant} groupLabel={groupLabel} />
-      <RoleTag role="reviewer" active={activeLoopRole(deck.flow) === "reviewer"} />
+      <div data-board-role className="absolute inset-x-0" style={{ top: deck.bandSurface ? -14 : 0 }}><RoleTag role="reviewer" active={activeLoopRole(deck.flow) === "reviewer"} /></div>
     </div>
   );
 }
@@ -1636,7 +1665,9 @@ export const NodesLayer = memo(function NodesLayer({
   onExpand,
   onToggleMember,
   onPipelineCreated,
+  onToggleStageDetails,
 }: {
+  onToggleStageDetails?: (key: string) => void;
   visiblePaths?: ReadonlySet<string>;
   expandedPath?: string | null;
   fullWindowPlace?: HTMLElement | null;
@@ -1716,6 +1747,7 @@ export const NodesLayer = memo(function NodesLayer({
   /* Which stage each live transcript runs — the shared index (#658), so the
      board node and the full-window overlay name a stage pane identically. */
   const pipelineStageByPath = useMemo(() => pipelineStageByAgentPath(pipelines), [pipelines]);
+  const historicalByPath = useMemo(() => historicalAttemptLabels(pipelines), [pipelines]);
   /* Activity ranking reaches the screen through each host's x/y transform.
      Stable sibling order keeps React from moving stateful hosts in the DOM,
      preserving scroll, focus, selection, and draft/deck state. */
@@ -1775,7 +1807,7 @@ export const NodesLayer = memo(function NodesLayer({
       {/* Placeholder windows for planned pipeline stages (issue #196): dashed
           chat-window shells the live stage windows replace in place. */}
       {slotsInDomOrder.map((slot) => (
-        <DormantView key={slot.key} active={visiblePaths?.has(slot.key) ?? true}><StageSlotShell slot={slot} lite={lite} dimmed={attentionPaths !== null} files={files} onSelect={onSelect} /></DormantView>
+        <DormantView key={slot.key} active={visiblePaths?.has(slot.key) ?? true}><StageSlotShell onToggleDetails={onToggleStageDetails} slot={slot} lite={lite} dimmed={attentionPaths !== null} files={files} onSelect={onSelect} /></DormantView>
       ))}
       {draftsInDomOrder.map((draft) =>
         lite ? (
@@ -1826,6 +1858,7 @@ export const NodesLayer = memo(function NodesLayer({
             flow={flowsByImpl.get(node.file.path) ?? null}
             pipeline={pipeline}
             pipelineStage={pipelineStageByPath.get(node.file.path) ?? null}
+            historicalAttempt={historicalByPath.get(node.file.path)}
             linkedTasks={pipeline ? linkedTasksByPipeline.get(pipeline.id) ?? EMPTY_TASKS : EMPTY_TASKS}
             relatedTasks={relatedTasksByPath?.get(node.file.path) ?? EMPTY_RELATIONS}
             flows={flows}

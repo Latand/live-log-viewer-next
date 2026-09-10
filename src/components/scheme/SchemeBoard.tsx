@@ -383,9 +383,8 @@ export function SchemeBoard({
   const bands = useMemo<TaskBand[]>(() => {
     if (!bandsEnabled) return [];
     const built = buildTaskBands(authoredLayout, { tasks: mergedAllTasks, projection: workflowModel, draftBands, untitled: t("bands.untitled"), reviewFlow: t("bands.reviewFlow") });
-    /* A finished task without a single member lives in the task list and its
-       history, not as an empty band. */
-    return built.filter((band) => band.members.length || band.mirrors.length || band.status !== "done");
+    /* The task visibility preference also governs completed empty tasks. */
+    return built;
   }, [bandsEnabled, authoredLayout, mergedAllTasks, workflowModel, draftBands, t]);
   const rankedBands = useMemo(() => rankBands(bands), [bands]);
   /* Order snapshot during an interaction: status labels update at once, rank
@@ -423,9 +422,27 @@ export function SchemeBoard({
     }
     return set;
   }, [authoredLayout.decks, disclosureNonce]);
+  const [expandedStages, setExpandedStages] = useState<ReadonlySet<string>>(() => new Set());
+  const [historyOverrides, setHistoryOverrides] = useState<ReadonlyMap<string, boolean>>(() => {
+    try { return new Map(JSON.parse(localStorage.getItem(`llv-board-history:${project}`) ?? "[]")); }
+    catch { return new Map(); }
+  });
+  const toggleStageDetails = useCallback((key: string) => setExpandedStages(previous => {
+    const next = new Set(previous);
+    if (next.has(key)) next.delete(key); else next.add(key);
+    return next;
+  }), []);
+  const toggleBandHistory = useCallback((band: PlacedBand) => {
+    if (!band.geometry.historyCollapsed) setSelected(null);
+    setHistoryOverrides(previous => {
+      const next = new Map(previous).set(band.id, band.geometry.historyCollapsed);
+      try { localStorage.setItem(`llv-board-history:${project}`, JSON.stringify([...next])); } catch { /* session choice still works */ }
+      return next;
+    });
+  }, [project]);
   const taskScene = useMemo(() => bandsEnabled
-    ? layoutTaskBands(authoredLayout, orderedBands, { mode: bandMode, viewportWidth: layoutViewportWidth, reader: selected, hostOverrides, collapsedDecks })
-    : null, [bandsEnabled, authoredLayout, orderedBands, bandMode, layoutViewportWidth, selected, hostOverrides, collapsedDecks]);
+    ? layoutTaskBands(authoredLayout, orderedBands, { mode: bandMode, viewportWidth: layoutViewportWidth, reader: selected, hostOverrides, collapsedDecks, expandedStages, historyOverrides, revealTarget: selected })
+    : null, [bandsEnabled, authoredLayout, orderedBands, bandMode, layoutViewportWidth, selected, hostOverrides, collapsedDecks, expandedStages, historyOverrides]);
   const layout = taskScene?.layout ?? authoredLayout;
 
   /* NO PRUNING HERE (#771). The selection outlives this view, so dropping a path
@@ -1030,8 +1047,13 @@ export function SchemeBoard({
      disclosure instead of covering chat content (issue #292 rejection), the
      agent stack / composer, or an open draft's composer (#474). */
   const chipObstacles = useMemo(
-    () => chipObstacleRects(layout.nodes, layout.decks, layout.drafts, cam, keepoutObstacles),
-    [layout, cam, keepoutObstacles],
+    () => {
+      const bandChrome = taskScene ? [...taskScene.bands.map(band => band.geometry.header), ...layout.groups, ...layout.slots,
+        ...taskScene.continuations.flatMap(entry => { const at = layout.byPath.get(entry.key); return at ? [{ x: at.x, y: at.y + at.h, w: at.w, h: 28 }] : []; })
+      ].map(rect => ({ x: rect.x * cam.z + cam.x, y: rect.y * cam.z + cam.y, w: rect.w * cam.z, h: rect.h * cam.z })) : [];
+      return chipObstacleRects(layout.nodes, layout.decks, layout.drafts, cam, [...keepoutObstacles, ...bandChrome]);
+    },
+    [layout, taskScene, cam, keepoutObstacles],
   );
 
   /* The fit functions change identity on every poll-driven relayout (useFiles
@@ -1465,6 +1487,7 @@ export function SchemeBoard({
             onRemoveFromBoard={bandRemoveFromBoard}
             onSelectMirror={bandSelectMirror}
             onFollowContinuation={followContinuation}
+            onToggleHistory={toggleBandHistory}
           />
         ) : null}
         <GroupsLayer onOpenTaskHistory={openTaskHistory} groups={layout.groups} interactive={!mapMode && !handLike && !session} />
@@ -1475,6 +1498,7 @@ export function SchemeBoard({
             through it (#93 §2.3). */}
         <AgentLinksLayer semanticZoom={Boolean(taskScene)} links={layout.links} loops={layout.loops} byPath={layout.byPath} obstacles={railObstacles} interactive={!mapMode && !handLike && !session} hubInteractive={!handLike && !session} width={layout.width} height={layout.height} />
         <NodesLayer
+          onToggleStageDetails={toggleStageDetails}
           layout={layout}
           visiblePaths={visibleNativePaths}
           expandedPath={expandedNode?.file.path}
