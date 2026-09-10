@@ -582,7 +582,7 @@ describe("CodexAppServerHost", () => {
       /* THE SPOKEN MODEL'S INSTRUCTIONS (#1629). Omitting this is what left the
          operator's orchestrator speaking as Codex's stock realtime assistant,
          with no role and no idea what the thread behind it can reach. */
-      prompt: persona.prompt,
+      "prompt": persona.prompt,
       realtimeStartInstructions: persona.startInstructions,
       realtimeEndInstructions: persona.endInstructions,
       flushTranscriptTailOnSessionEnd: true,

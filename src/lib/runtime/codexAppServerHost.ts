@@ -1877,7 +1877,7 @@ export class CodexAppServerHost implements EngineHost {
            gives it Codex's stock realtime persona — a general-purpose assistant
            that knows nothing about this thread's role or tools — and no item
            written into the thread ever reaches it. */
-        prompt: persona.prompt,
+        "prompt": persona.prompt,
         /* THE BACKING MODEL'S FRAMING, scoped to this call. Paired with the end
            instructions so hanging up withdraws it, which is what keeps a text
            agent from inheriting spoken-delivery rules for the rest of its life. */

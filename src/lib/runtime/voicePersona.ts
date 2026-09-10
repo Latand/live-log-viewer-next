@@ -322,7 +322,7 @@ export interface VoiceSessionPersona {
   /** Stable digest of the resolved prompt; identical text yields identical id. */
   personaId: string;
   /** Instructions for the spoken model. */
-  prompt: string;
+  "prompt": string;
   /** Session-scoped developer instructions for the backing model. */
   startInstructions: string;
   /** Withdrawal handed to the backing model when the call ends. */
