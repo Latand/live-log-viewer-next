@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { executeRealtimeControl } from "@/lib/runtime/realtimeControl";
-import { resetVoiceViewBindings } from "@/lib/runtime/voiceViewBinding";
+import { noteVoiceWorkBoundary, resetVoiceViewBindings } from "@/lib/runtime/voiceViewBinding";
 import { captureSelectedContext, type SelectedContextRef } from "@/lib/selection/selectedContext";
 
 import { viewerMcpBindings } from "./bindings";
@@ -37,7 +37,15 @@ const CALLER = "conversation_voice_caller";
 const SELECTED = "conversation_atlas_selected";
 const OTHER = "conversation_atlas_other";
 const DESK = { viewSessionId: "vs-desk-1", deviceId: "dev-desk" };
-const NOW = Date.parse("2026-09-10T09:00:00.000Z");
+/**
+ * READ FROM THE CLOCK, not written into the file.
+ *
+ * The control endpoint admits a reference against `Date.now()` and refuses one
+ * older than the capture window, so a hardcoded capture instant makes this whole
+ * file pass only within ten minutes of the moment it was written and fail
+ * silently ever after — which is exactly what it did.
+ */
+const NOW = Date.now();
 
 let sandbox = "";
 let selectedTranscript = "";
@@ -78,7 +86,21 @@ function voiceHost() {
     async appendRealtimeSpeech() {},
     async stopRealtime() {},
     currentRealtimeSessionId() { return "live-1"; },
+    /* #1629: what turns the caller's `_meta` claim into evidence, and what the
+       ledger retires finished work on. `unknown` for everything, so nothing is
+       retired unless a test says the host saw it end. */
+    providerThreadId() { return THREAD; },
+    voiceWorkTurnState() { return "unknown" as const; },
+    hasActiveTurn() { return false; },
   };
+}
+
+const THREAD = "thread-native-1";
+
+/** The native work identity a tool call arrives with, as the MCP transport
+    reads it off `params._meta`. */
+function work(turnId: string, turnTrigger: string | null = "realtime") {
+  return { threadId: THREAD, turnId, turnTrigger, callId: `call-${turnId}`, itemId: `fc-${turnId}` };
 }
 
 const OPERATOR = { operator: true };
@@ -98,6 +120,18 @@ function reference(card: string, revision: number, at = NOW): SelectedContextRef
 }
 
 const utterance = (sequence: number) => ({ id: `${sequence}`.padStart(32, "f"), sequence });
+
+/**
+ * The host running a backing turn and then going idle again.
+ *
+ * The production signal is the structured-host state listener; this is the same
+ * call it makes. It is what retires a spoken turn whose work finished without
+ * ever calling a Viewer tool — the ordinary "answer me out loud" turn.
+ */
+function workRanAndFinished(turnId: string) {
+  noteVoiceWorkBoundary(CALLER, turnId);
+  noteVoiceWorkBoundary(CALLER, null);
+}
 
 async function control(body: Record<string, unknown>, authority: Parameters<typeof executeRealtimeControl>[2]) {
   return executeRealtimeControl({ conversationId: CALLER, ...body }, () => voiceHost(), authority);
@@ -121,9 +155,9 @@ async function spokenTurn(card: string, sequence: number, options: { handoff?: b
  * `bindings.ts`: if the two ever disagree about what a state means, this file
  * stops describing the deployed reader and starts describing itself.
  */
-function lookupThroughTheControlEndpoint(): () => Promise<VoiceUtteranceLookup> {
-  return async () => {
-    const answer = await control({ action: "utteranceContext" }, AGENT);
+function lookupThroughTheControlEndpoint(): (work: unknown) => Promise<VoiceUtteranceLookup> {
+  return async (requestWork: unknown) => {
+    const answer = await control({ action: "utteranceContext", work: requestWork }, AGENT);
     if (answer.status !== 200) {
       return { state: "unavailable", reason: String(answer.body.error ?? `status ${answer.status}`) };
     }
@@ -131,7 +165,17 @@ function lookupThroughTheControlEndpoint(): () => Promise<VoiceUtteranceLookup> 
   };
 }
 
-function bindings(voiceUtteranceContext: () => Promise<VoiceUtteranceLookup>) {
+/**
+ * The real bindings, called the way the MCP transport calls them.
+ *
+ * `nativeWork` is what the transport reads off `params._meta` and forwards as
+ * call context (#1629); every tool here is invoked with one, because a caller
+ * that cannot say which backing turn it is has no implicit card by design.
+ */
+function bindings(
+  voiceUtteranceContext: (work: unknown) => Promise<VoiceUtteranceLookup>,
+  nativeWork: ReturnType<typeof work> | null = work("turn-1"),
+) {
   const records: Record<string, { path: string }> = {
     [SELECTED]: { path: selectedTranscript },
     [OTHER]: { path: otherTranscript },
@@ -141,7 +185,7 @@ function bindings(voiceUtteranceContext: () => Promise<VoiceUtteranceLookup>) {
     const descriptor = fs.openSync(candidate, "r");
     return { descriptor, stat: fs.fstatSync(descriptor), rootName: "codex-sessions", root: sandbox, sameIdentity: () => true };
   };
-  return viewerMcpBindings(undefined, undefined, {
+  const built = viewerMcpBindings(undefined, undefined, {
     selectedContext: {
       selectedConversation: () => ({
         resolve: (conversationId: string) => records[conversationId]
@@ -163,6 +207,11 @@ function bindings(voiceUtteranceContext: () => Promise<VoiceUtteranceLookup>) {
     },
     pinnedTranscript,
   } as never);
+  const context = { nativeWork };
+  return {
+    conversation_messages: (args: Record<string, unknown>) => built.conversation_messages(args, context),
+    get_conversation: (args: Record<string, unknown>) => built.get_conversation(args, context),
+  };
 }
 
 async function refusal(run: Promise<unknown>): Promise<McpToolRefusal> {
@@ -215,16 +264,19 @@ test("the answer names the handoff it was resolved through", async () => {
  * Every way it must refuse rather than answer about the wrong card.
  * ------------------------------------------------------------------ */
 
-test("speaking again withdraws the card until the new utterance is handed off", async () => {
+test("speaking again withdraws the card from work that has not claimed one", async () => {
   /* THE FORBIDDEN FALLBACK. The operator pointed at one card, then spoke again
-     about something else. Until that second utterance becomes work, no card
-     describes the turn in hand — and answering about the first one is exactly
-     the failure this refuses. */
+     about something else. Until that second utterance becomes work, an unclaimed
+     join from before it cannot be shown to belong to any particular caller — the
+     handoff report is asynchronous, so the newer turn may already be running.
+     A caller with no binding of its own is refused rather than handed the
+     earlier card. */
   await control({ action: "start", sdp: "v=0\r\noffer\r\n", view: DESK }, OPERATOR);
   await spokenTurn(SELECTED, 1);
+  workRanAndFinished("turn-a");
   await spokenTurn(OTHER, 2, { handoff: false });
 
-  const refused = await refusal(bindings(lookupThroughTheControlEndpoint()).conversation_messages({
+  const refused = await refusal(bindings(lookupThroughTheControlEndpoint(), work("turn-fresh")).conversation_messages({
     clientRequestId: "spoken-read-3",
   }));
   expect(refused.details.code).toBe("voice_selected_context_superseded");
@@ -236,10 +288,65 @@ test("speaking again withdraws the card until the new utterance is handed off", 
     utterance: utterance(2),
     handoff: { handoffId: "handoff-2", itemId: "item-2", userBidiTurnId: "bidi-2" },
   }, PEER);
-  const answered = await bindings(lookupThroughTheControlEndpoint()).conversation_messages({
+  const answered = await bindings(lookupThroughTheControlEndpoint(), work("turn-two")).conversation_messages({
     clientRequestId: "spoken-read-4",
   }) as { conversationId: string };
   expect(answered.conversationId).toBe(OTHER);
+});
+
+test("the work that already claimed a card keeps it while the operator speaks again", async () => {
+  /* The other half of the same rule (#1629 P1 #2): an accepted binding is
+     frozen. A's backing turn goes on reading A no matter what is said after it. */
+  await control({ action: "start", sdp: "v=0\r\noffer\r\n", view: DESK }, OPERATOR);
+  await spokenTurn(SELECTED, 1);
+  const first = await bindings(lookupThroughTheControlEndpoint(), work("turn-a")).conversation_messages({
+    clientRequestId: "spoken-read-frozen-1",
+  }) as { conversationId: string };
+  expect(first.conversationId).toBe(SELECTED);
+
+  await spokenTurn(OTHER, 2);
+  const second = await bindings(lookupThroughTheControlEndpoint(), work("turn-b")).conversation_messages({
+    clientRequestId: "spoken-read-frozen-2",
+  }) as { conversationId: string };
+  expect(second.conversationId).toBe(OTHER);
+
+  const again = await bindings(lookupThroughTheControlEndpoint(), work("turn-a")).conversation_messages({
+    clientRequestId: "spoken-read-frozen-3",
+  }) as { conversationId: string };
+  expect(again.conversationId).toBe(SELECTED);
+});
+
+test("a turn native did not start from the call reads no card at all", async () => {
+  /* The unrelated later text turn (#1629 P2). It carries no `turn_trigger`, so
+     it has no claim on anything the call admitted — and it is not an error
+     either: it simply has to name its target like any other caller. */
+  await control({ action: "start", sdp: "v=0\r\noffer\r\n", view: DESK }, OPERATOR);
+  await spokenTurn(SELECTED, 1);
+  await control({ action: "stop" }, OPERATOR);
+
+  await expect(bindings(lookupThroughTheControlEndpoint(), work("turn-text", null)).conversation_messages({
+    clientRequestId: "spoken-read-text",
+  })).rejects.toThrow("conversationId, transcriptPath or selectedContext is required");
+});
+
+test("a caller whose transport proves no backing turn is refused, not answered", async () => {
+  await control({ action: "start", sdp: "v=0\r\noffer\r\n", view: DESK }, OPERATOR);
+  await spokenTurn(SELECTED, 1);
+
+  const refused = await refusal(bindings(lookupThroughTheControlEndpoint(), null).conversation_messages({
+    clientRequestId: "spoken-read-unidentified",
+  }));
+  expect(refused.details.code).toBe("voice_selected_context_unidentified");
+});
+
+test("work naming another native thread is never given this call's card", async () => {
+  await control({ action: "start", sdp: "v=0\r\noffer\r\n", view: DESK }, OPERATOR);
+  await spokenTurn(SELECTED, 1);
+
+  const refused = await refusal(bindings(lookupThroughTheControlEndpoint(), {
+    ...work("turn-a"), threadId: "thread-somebody-else",
+  }).conversation_messages({ clientRequestId: "spoken-read-foreign" }));
+  expect(refused.details.code).toBe("voice_selected_context_unidentified");
 });
 
 test("A, B, then a late handoff for A: the tool must not return card B", async () => {

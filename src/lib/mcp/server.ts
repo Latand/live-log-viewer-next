@@ -181,6 +181,73 @@ export interface McpToolCallContext {
       dispatch, which is the only way an error without an id proves that the
       server did nothing. */
   dispatch?: McpDispatchTracker;
+  /** #1629: the native work identity this request arrived with, read off the
+      protocol envelope rather than the arguments. See {@link McpNativeWork}. */
+  nativeWork?: McpNativeWork | null;
+}
+
+/**
+ * What native Codex says about the work that made this call (#1629).
+ *
+ * Installed 0.154.0 puts its backing turn identity on the JSON-RPC request
+ * itself — `params._meta["x-codex-turn-metadata"]` — and repeats the thread on
+ * `params._meta.threadId`. The evidence and its limits are recorded in
+ * `docs/design/native-voice-work-identity.md`: eighteen real calls across three
+ * isolated fixture runs, with a forged-argument case proving that the same names
+ * placed in `arguments` never reach this object.
+ *
+ * THIS IS TRANSPORT PROVENANCE, NOT PERMISSION. It cannot widen what a caller
+ * may do; it only lets a reader tell one of that caller's turns from another,
+ * which is what the voice ledger needs and what conversation identity alone
+ * could never supply. A caller that presents none is not refused — it simply
+ * cannot have an implicit voice card resolved for it.
+ */
+export interface McpNativeWork {
+  threadId: string;
+  turnId: string;
+  /** `turn_trigger`: `"realtime"` for a turn native started from a call. */
+  turnTrigger: string | null;
+  /** The tool-call occurrence within that turn. */
+  callId: string | null;
+  /** The provider output item this call came from. */
+  itemId: string | null;
+}
+
+function metaString(source: Record<string, unknown> | null, key: string): string | null {
+  const value = source?.[key];
+  return typeof value === "string" && value.length > 0 && value.length <= 200 ? value : null;
+}
+
+function metaObject(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+/**
+ * Read the native work identity off one request's `_meta`, or answer null.
+ *
+ * Strict on purpose. A turn metadata object whose `thread_id` disagrees with the
+ * envelope's own `threadId` describes something this reader has no model for, so
+ * it yields nothing rather than picking one — an inconsistent claim is weaker
+ * evidence than no claim, not stronger.
+ */
+export function nativeWorkFromRequestMeta(meta: unknown): McpNativeWork | null {
+  const envelope = metaObject(meta);
+  if (!envelope) return null;
+  const turn = metaObject(envelope["x-codex-turn-metadata"]);
+  const turnId = metaString(turn, "turn_id");
+  const threadId = metaString(envelope, "threadId") ?? metaString(turn, "thread_id");
+  if (!turnId || !threadId) return null;
+  const turnThreadId = metaString(turn, "thread_id");
+  if (turnThreadId && turnThreadId !== threadId) return null;
+  return {
+    threadId,
+    turnId,
+    turnTrigger: metaString(turn, "turn_trigger"),
+    callId: metaString(envelope, "callId"),
+    itemId: metaString(envelope, "itemId"),
+  };
 }
 
 export interface McpDispatchTracker {
@@ -3255,6 +3322,13 @@ export function createViewerMcpServer(service: McpToolService): McpServer {
         const result = await service.callTool(toolName, args as McpToolArgs, {
           signal: deadline.signal,
           deadlineAt: Date.now() + timeoutMs,
+          /* #1629: the SDK hands the request's own `_meta` through on `extra`,
+             which is the only place native work identity exists — the model
+             never sees it and its arguments travel in a different namespace.
+             Forwarded as context so a voice-selected card can be resolved for
+             the turn that actually asked, rather than for whatever the
+             conversation last pointed at. */
+          nativeWork: nativeWorkFromRequestMeta((extra as { _meta?: unknown })._meta),
         });
         return {
           content: [{ type: "text" as const, text: JSON.stringify(result) }],

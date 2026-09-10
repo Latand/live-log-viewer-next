@@ -51,8 +51,28 @@ export type VoiceUtteranceLookup =
   | { state: "no-call" }
   | { state: "no-reference" }
   | { state: "awaiting-handoff" }
+  /** The request proved no backing-turn identity, so no card can be its own. */
+  | { state: "unidentified-work"; reason: string }
+  /** The request's work exists and nothing about the call belongs to it. */
+  | { state: "unrelated-work" }
+  /** Evidence exists and cannot pick one card. Saying so IS the answer. */
+  | { state: "ambiguous"; reason: string }
   | { state: "unavailable"; reason: string }
   | { state: "joined"; reference: SelectedContextRef; handoff: Record<string, string | null> };
+
+/**
+ * What the caller can prove about the work it is doing (#1629).
+ *
+ * Mirrors `McpNativeWork` structurally, for the same reason the lookup mirrors
+ * the ledger's state: this module answers tools and must not import the runtime.
+ */
+export interface VoiceWorkLookupIdentity {
+  threadId: string;
+  turnId: string;
+  turnTrigger: string | null;
+  callId: string | null;
+  itemId: string | null;
+}
 
 export interface SelectedContextTargetDependencies {
   /** Bounded identity + tail resolver. Injected so a test can hand in a lookup
@@ -72,7 +92,7 @@ export interface SelectedContextTargetDependencies {
    * lives, because the ledger describes a live transport held by the Viewer
    * process and this one runs beside the agent.
    */
-  voiceUtteranceContext?(): Promise<VoiceUtteranceLookup>;
+  voiceUtteranceContext?(work: VoiceWorkLookupIdentity | null): Promise<VoiceUtteranceLookup>;
 }
 
 export const productionSelectedContextDependencies: SelectedContextTargetDependencies = {
@@ -132,6 +152,16 @@ export interface ResolveSelectedContextOptions {
    * alone, which is what the flag being false says.
    */
   voiceUtterance?: boolean;
+  /**
+   * The native work identity this request arrived with (#1629).
+   *
+   * The ledger answers about ONE backing turn, so this is what makes the answer
+   * the caller's own. Absent — a caller whose transport carries no such
+   * metadata — resolves to a refusal that says so rather than to the
+   * conversation's latest card, which is the substitution the independent review
+   * reproduced: A's continuing work read B.
+   */
+  work?: VoiceWorkLookupIdentity | null;
 }
 
 /**
@@ -148,7 +178,7 @@ export async function resolveSelectedContext(
   if (!ref) {
     return explicitConversationId || !options.voiceUtterance
       ? { target: null, conversationId: explicitConversationId }
-      : resolveSpokenSelectedContext(dependencies);
+      : resolveSpokenSelectedContext(dependencies, options.work ?? null);
   }
   if (ref.state === "none") {
     throw new McpToolRefusal(
@@ -190,9 +220,27 @@ export async function resolveSelectedContext(
  */
 async function resolveSpokenSelectedContext(
   dependencies: SelectedContextTargetDependencies,
+  work: VoiceWorkLookupIdentity | null,
 ): Promise<SelectedContextResolution> {
-  const lookup = await (dependencies.voiceUtteranceContext?.() ?? Promise.resolve({ state: "no-call" as const }));
+  const lookup = await (dependencies.voiceUtteranceContext?.(work) ?? Promise.resolve({ state: "no-call" as const }));
   if (lookup.state === "no-call") return { target: null, conversationId: "" };
+  /* A turn the call never started, and a caller that cannot say which turn it
+     is, both end here. Neither is an error and neither is a card: the tool is
+     told to name its target, which is what every caller outside a spoken turn
+     has always had to do. */
+  if (lookup.state === "unrelated-work") return { target: null, conversationId: "" };
+  if (lookup.state === "unidentified-work") {
+    throw new McpToolRefusal(
+      `this request carries no evidence of which backing turn it belongs to, so the card the operator spoke about cannot be resolved for it: ${lookup.reason}. Pass conversationId or selectedContext explicitly.`,
+      { code: "voice_selected_context_unidentified" },
+    );
+  }
+  if (lookup.state === "ambiguous") {
+    throw new McpToolRefusal(
+      `more than one spoken card could belong to this work, and there is no way to tell which: ${lookup.reason}. Ask the operator which conversation they mean, or pass conversationId explicitly — do not act on either candidate.`,
+      { code: "voice_selected_context_ambiguous" },
+    );
+  }
   if (lookup.state === "unavailable") {
     throw new McpToolRefusal(
       `the operator's voice call could not be read, so the card they were looking at is unknown: ${lookup.reason}. Ask which conversation they meant, or pass conversationId explicitly.`,

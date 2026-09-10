@@ -21,6 +21,7 @@ import { publishFilesRevision } from "./filesRevision";
 import { setStructuredDeliveryKick } from "./structuredDeliverySignal";
 import { journalVerdict, sendIsSettled } from "./sendSettlement";
 import { runtimeImageCapability } from "./runtimeImageStore";
+import { noteVoiceWorkBoundary } from "./voiceViewBinding";
 import { STRUCTURED_IMAGE_CAPABILITY } from "./structuredContent";
 import {
   markStructuredDeliveryControllerReady,
@@ -393,6 +394,12 @@ async function publishHostState(
     return;
   }
   if (!state) return;
+  /* #1629: the voice ledger's only authoritative retirement signal for a spoken
+     turn no tool call ever claimed. This listener already fires on every change
+     to the projected active turn, and it runs in the process that holds the
+     ledger, so the running-to-idle transition is observed rather than guessed
+     at from elapsed time. */
+  noteVoiceWorkBoundary(conversationId, state.activeTurnRef);
   const host = state.status === "dead" ? "dead" : state.status === "unhosted" ? "unhosted" : "hosted";
   const turn = state.activeTurnRef ? "running" : "idle";
   /* A host with no active turn is the turn-end evidence a pending account

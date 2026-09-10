@@ -1,16 +1,19 @@
 import { beforeEach, expect, test } from "bun:test";
 
-import { SELECTED_CONTEXT_MAX_AGE_MS } from "@/lib/realtime/selectedContextBinding";
 import { captureSelectedContext, type SelectedContextRef } from "@/lib/selection/selectedContext";
 
 import {
   admitVoiceSelectedContext,
   bindVoiceSession,
   recordVoiceHandoff,
+  noteVoiceWorkBoundary,
+  recordVoiceHandoffAmbiguity,
   releaseVoiceSession,
   resetVoiceViewBindings,
   voiceSelectedContext,
   voiceUtteranceContext,
+  type VoiceWorkIdentity,
+  type VoiceWorkState,
 } from "./voiceViewBinding";
 
 /**
@@ -46,6 +49,51 @@ function reference(
 /** One utterance's identity, as the browser mints it. */
 function utterance(sequence: number, id = `${sequence}`.padStart(32, "f")): { id: string; sequence: number } {
   return { id, sequence };
+}
+
+/**
+ * The native work identity a tool call arrives with (#1629).
+ *
+ * `turnTrigger: "realtime"` is what native puts on a backing turn it started
+ * from the call; an ordinary later text turn carries none, which is the whole
+ * discriminator between "this work belongs to the call" and "this work does
+ * not". See `docs/design/native-voice-work-identity.md`.
+ */
+function work(turnId: string, turnTrigger: string | null = "realtime"): VoiceWorkIdentity {
+  return { threadId: "thread-1", turnId, turnTrigger, callId: null, itemId: null };
+}
+
+/** A host that reports the named turns finished and knows nothing of the rest. */
+function completed(...turnIds: readonly string[]): (turnId: string) => VoiceWorkState {
+  const finished = new Set(turnIds);
+  return (turnId) => finished.has(turnId) ? "completed" : "unknown";
+}
+
+/** Speak once and report the handoff it became. */
+function spokenTurn(sequence: number, card: string, handoffId: string, at = NOW + sequence * 1_000) {
+  admitVoiceSelectedContext({
+    conversationId: CONVERSATION, realtimeSessionId: "rt-1",
+    reference: reference(DESK, card, at, sequence), utterance: utterance(sequence), now: at,
+  });
+  return recordVoiceHandoff({
+    conversationId: CONVERSATION, realtimeSessionId: "rt-1",
+    utterance: utterance(sequence),
+    handoff: { handoffId, itemId: `item-${handoffId}`, userBidiTurnId: `bidi-${handoffId}` },
+  });
+}
+
+function readCard(turnId: string, options: { trigger?: string | null; workState?: (turnId: string) => VoiceWorkState } = {}) {
+  const answer = voiceUtteranceContext(CONVERSATION, {
+    work: work(turnId, options.trigger === undefined ? "realtime" : options.trigger),
+    ...(options.workState ? { workState: options.workState } : {}),
+  });
+  return answer;
+}
+
+function cardOf(answer: ReturnType<typeof voiceUtteranceContext>): string {
+  return answer.state === "joined" && answer.reference.state === "selected"
+    ? answer.reference.conversationId
+    : answer.state;
 }
 
 beforeEach(() => resetVoiceViewBindings());
@@ -303,27 +351,129 @@ test("a handoff presented with another call's session id is refused", () => {
 
 
 /* ------------------------------------------------------------------ *
- * After the hangup: what the work the call started may still read.
+ * Which WORK may read the card: the review's two P1s and its P2.
+ * ------------------------------------------------------------------ */
+
+test("a request that cannot say which turn it is gets no card at all", () => {
+  /* P1 #2. Conversation identity was the whole authority, so any call from this
+     conversation read whatever it last pointed at. A caller with no work
+     identity now has no claim rather than the newest one. */
+  bindVoiceSession(CONVERSATION, "rt-1", DESK);
+  spokenTurn(1, "conversation_atlas_a", "handoff-a");
+  const answered = voiceUtteranceContext(CONVERSATION);
+  expect(answered.state).toBe("unidentified-work");
+});
+
+test("A's work keeps card A after the operator speaks about B", () => {
+  /* P1 #2, the reviewer's own acceptance: A joined, A read, B joined, and then
+     A's CONTINUING work reads again. It must still be A. */
+  bindVoiceSession(CONVERSATION, "rt-1", DESK);
+  spokenTurn(1, "conversation_atlas_a", "handoff-a");
+  expect(cardOf(readCard("turn-a"))).toBe("conversation_atlas_a");
+
+  spokenTurn(2, "conversation_atlas_b", "handoff-b");
+  expect(cardOf(readCard("turn-b"))).toBe("conversation_atlas_b");
+  /* The frozen operation: A's binding is immutable, so a later card cannot be
+     reinterpreted onto it. */
+  expect(cardOf(readCard("turn-a"))).toBe("conversation_atlas_a");
+});
+
+test("two unclaimed joins are ambiguous, and neither is offered", () => {
+  /* Native can steer several handoffs into ONE backing turn, so an unclaimed
+     pair has no discriminator. The answer is the uncertainty itself. */
+  bindVoiceSession(CONVERSATION, "rt-1", DESK);
+  spokenTurn(1, "conversation_atlas_a", "handoff-a");
+  spokenTurn(2, "conversation_atlas_b", "handoff-b");
+  const answered = readCard("turn-shared");
+  expect(answered.state).toBe("ambiguous");
+});
+
+test("an unrelated later text turn never inherits the call's card", () => {
+  /* P2. The turn native did not start from the call carries no `turn_trigger`,
+     which is the only evidence that separates it from a spoken one. */
+  bindVoiceSession(CONVERSATION, "rt-1", DESK);
+  spokenTurn(1, "conversation_atlas_a", "handoff-a");
+  releaseVoiceSession(CONVERSATION, NOW + 5_000);
+  expect(readCard("turn-text", { trigger: null }).state).toBe("unrelated-work");
+});
+
+test("the same handoff reported twice cannot claim a second utterance", () => {
+  /* P1 #1's duplicate arm, at the ledger: a canonical identity is spent once. */
+  bindVoiceSession(CONVERSATION, "rt-1", DESK);
+  expect(spokenTurn(1, "conversation_atlas_a", "handoff-a").ok).toBe(true);
+  admitVoiceSelectedContext({
+    conversationId: CONVERSATION, realtimeSessionId: "rt-1",
+    reference: reference(DESK, "conversation_atlas_b", NOW + 2_000, 2), utterance: utterance(2), now: NOW + 2_000,
+  });
+  const repeated = recordVoiceHandoff({
+    conversationId: CONVERSATION, realtimeSessionId: "rt-1",
+    utterance: utterance(2),
+    handoff: { handoffId: "handoff-a", itemId: "item-handoff-a", userBidiTurnId: "bidi-handoff-a" },
+  });
+  expect(repeated.ok).toBe(false);
+  expect(repeated.ok || repeated.failure.code).toBe("superseded");
+  expect(voiceSelectedContext(CONVERSATION)?.handoff).toBeNull();
+});
+
+test("the identical report for the utterance it already completed is idempotent", () => {
+  bindVoiceSession(CONVERSATION, "rt-1", DESK);
+  spokenTurn(1, "conversation_atlas_a", "handoff-a");
+  const replayed = recordVoiceHandoff({
+    conversationId: CONVERSATION, realtimeSessionId: "rt-1",
+    utterance: utterance(1),
+    handoff: { handoffId: "handoff-a", itemId: "item-handoff-a", userBidiTurnId: "bidi-handoff-a" },
+  });
+  expect(replayed.ok).toBe(true);
+  expect(cardOf(readCard("turn-a"))).toBe("conversation_atlas_a");
+});
+
+test("a reported ambiguity keeps every later implicit selection unavailable", () => {
+  /* P1 #1. The client saw a handoff it could not attribute; the uncertainty
+     stands for the rest of the call, because the unattributed utterance may
+     still produce one at any time. */
+  bindVoiceSession(CONVERSATION, "rt-1", DESK);
+  recordVoiceHandoffAmbiguity({
+    conversationId: CONVERSATION, realtimeSessionId: "rt-1",
+    reason: "more than one spoken turn was outstanding when a handoff arrived",
+  });
+  spokenTurn(3, "conversation_atlas_c", "handoff-c");
+  const answered = readCard("turn-c");
+  expect(answered.state).toBe("ambiguous");
+  expect(answered.state === "ambiguous" && answered.reason).toContain("outstanding");
+});
+
+test("work already bound before the ambiguity keeps what it was given", () => {
+  bindVoiceSession(CONVERSATION, "rt-1", DESK);
+  spokenTurn(1, "conversation_atlas_a", "handoff-a");
+  expect(cardOf(readCard("turn-a"))).toBe("conversation_atlas_a");
+  recordVoiceHandoffAmbiguity({
+    conversationId: CONVERSATION, realtimeSessionId: "rt-1", reason: "a handoff arrived twice",
+  });
+  expect(cardOf(readCard("turn-a"))).toBe("conversation_atlas_a");
+});
+
+test("an ambiguity report from another call's session id changes nothing", () => {
+  bindVoiceSession(CONVERSATION, "rt-1", DESK);
+  spokenTurn(1, "conversation_atlas_a", "handoff-a");
+  const impostor = recordVoiceHandoffAmbiguity({
+    conversationId: CONVERSATION, realtimeSessionId: "rt-9", reason: "not this call",
+  });
+  expect(impostor.ok).toBe(false);
+  expect(cardOf(readCard("turn-a"))).toBe("conversation_atlas_a");
+});
+
+/* ------------------------------------------------------------------ *
+ * After the hangup: bounded by work, never by a clock.
  * ------------------------------------------------------------------ */
 
 test("an accepted join survives the hangup, because the work it started does", () => {
-  /* The operator asks for something, hangs up, and the agent is still working
-     when it reaches for the card they were pointing at. */
   bindVoiceSession(CONVERSATION, "rt-1", DESK);
-  const ref = reference(DESK, "conversation_atlas_a", NOW, 1);
-  admitVoiceSelectedContext({
-    conversationId: CONVERSATION, realtimeSessionId: "rt-1",
-    reference: ref, utterance: utterance(1), now: NOW,
-  });
-  recordVoiceHandoff({
-    conversationId: CONVERSATION, realtimeSessionId: "rt-1",
-    utterance: utterance(1), handoff: HANDOFF,
-  });
-  releaseVoiceSession(CONVERSATION, NOW + 1_000);
+  spokenTurn(1, "conversation_atlas_a", "handoff-a");
+  expect(cardOf(readCard("turn-a"))).toBe("conversation_atlas_a");
+  releaseVoiceSession(CONVERSATION, NOW + 5_000);
 
-  const retained = voiceUtteranceContext(CONVERSATION, NOW + 2_000);
+  const retained = readCard("turn-a");
   expect(retained.state).toBe("joined");
-  expect(retained.state === "joined" && retained.reference).toEqual(ref);
   /* And it says what it is, so a reader can tell live context from a legacy. */
   expect(retained.state === "joined" && retained.callEnded).toBe(true);
 });
@@ -337,63 +487,149 @@ test("a hangup with no accepted join leaves nothing behind", () => {
     reference: reference(DESK), utterance: utterance(1), now: NOW,
   });
   releaseVoiceSession(CONVERSATION, NOW + 1_000);
-  expect(voiceUtteranceContext(CONVERSATION, NOW + 2_000)).toEqual({ state: "no-call" });
+  expect(voiceUtteranceContext(CONVERSATION, { work: work("turn-a") })).toEqual({ state: "no-call" });
   expect(voiceSelectedContext(CONVERSATION)).toBeNull();
 });
 
-test("what a finished call left ages out of the window a capture may steer from", () => {
+test("work still running long past ten minutes still reads its own card", () => {
+  /* The defect this replaces: the ledger used the capture's freshness window as
+     a work-completion signal, so an agent that was still working lost the card
+     it had been asked about. Elapsed time is not evidence about an agent. */
   bindVoiceSession(CONVERSATION, "rt-1", DESK);
-  admitVoiceSelectedContext({
-    conversationId: CONVERSATION, realtimeSessionId: "rt-1",
-    reference: reference(DESK, "conversation_atlas_a", NOW, 1), utterance: utterance(1), now: NOW,
-  });
-  recordVoiceHandoff({
-    conversationId: CONVERSATION, realtimeSessionId: "rt-1",
-    utterance: utterance(1), handoff: HANDOFF,
-  });
-  releaseVoiceSession(CONVERSATION, NOW + 1_000);
+  spokenTurn(1, "conversation_atlas_a", "handoff-a");
+  expect(cardOf(readCard("turn-a"))).toBe("conversation_atlas_a");
+  releaseVoiceSession(CONVERSATION, NOW + 5_000);
 
-  expect(voiceUtteranceContext(CONVERSATION, NOW + SELECTED_CONTEXT_MAX_AGE_MS - 1).state).toBe("joined");
-  expect(voiceUtteranceContext(CONVERSATION, NOW + SELECTED_CONTEXT_MAX_AGE_MS + 1)).toEqual({ state: "no-call" });
+  /* An hour later, with the host still reporting nothing terminal for it. */
+  expect(cardOf(readCard("turn-a", { workState: completed() }))).toBe("conversation_atlas_a");
+});
+
+test("the host saying the turn finished is what retires it", () => {
+  bindVoiceSession(CONVERSATION, "rt-1", DESK);
+  spokenTurn(1, "conversation_atlas_a", "handoff-a");
+  readCard("turn-a");
+  releaseVoiceSession(CONVERSATION, NOW + 5_000);
+
+  expect(readCard("turn-a", { workState: completed("turn-a") })).toEqual({ state: "no-call" });
 });
 
 test("a hung-up call admits nothing further", () => {
   /* The transport is gone, so there is no window speaking for it. What it left
      is a record of work already started, never a channel still open. */
   bindVoiceSession(CONVERSATION, "rt-1", DESK);
-  admitVoiceSelectedContext({
-    conversationId: CONVERSATION, realtimeSessionId: "rt-1",
-    reference: reference(DESK, "conversation_atlas_a", NOW, 1), utterance: utterance(1), now: NOW,
-  });
-  recordVoiceHandoff({
-    conversationId: CONVERSATION, realtimeSessionId: "rt-1",
-    utterance: utterance(1), handoff: HANDOFF,
-  });
-  releaseVoiceSession(CONVERSATION, NOW + 1_000);
+  spokenTurn(1, "conversation_atlas_a", "handoff-a");
+  readCard("turn-a");
+  releaseVoiceSession(CONVERSATION, NOW + 5_000);
 
   const later = admitVoiceSelectedContext({
     conversationId: CONVERSATION, realtimeSessionId: "rt-1",
-    reference: reference(DESK, "conversation_atlas_b", NOW + 2_000, 2), utterance: utterance(2), now: NOW + 2_000,
+    reference: reference(DESK, "conversation_atlas_b", NOW + 6_000, 2), utterance: utterance(2), now: NOW + 6_000,
   });
   expect(later.ok).toBe(false);
   expect(later.ok || later.failure.code).toBe("unbound");
-  const standing = voiceUtteranceContext(CONVERSATION, NOW + 2_000);
-  expect(standing.state === "joined" && standing.reference.state === "selected"
-    && standing.reference.conversationId).toBe("conversation_atlas_a");
+  expect(cardOf(readCard("turn-a"))).toBe("conversation_atlas_a");
 });
 
-test("a new call replaces what the last one left", () => {
+/* ------------------------------------------------------------------ *
+ * Reconnect: a new generation, and what the old one may keep.
+ * ------------------------------------------------------------------ */
+
+test("a reconnect while work is running keeps the card that work was asked about", () => {
   bindVoiceSession(CONVERSATION, "rt-1", DESK);
+  spokenTurn(1, "conversation_atlas_a", "handoff-a");
+  releaseVoiceSession(CONVERSATION, NOW + 5_000);
+  bindVoiceSession(CONVERSATION, "rt-2", DESK, { activeWork: true });
+
+  /* The turn started before the reconnect makes its first tool call after it. */
+  expect(cardOf(readCard("turn-a"))).toBe("conversation_atlas_a");
+});
+
+test("a reconnect with nothing running starts clean", () => {
+  bindVoiceSession(CONVERSATION, "rt-1", DESK);
+  spokenTurn(1, "conversation_atlas_a", "handoff-a");
+  releaseVoiceSession(CONVERSATION, NOW + 5_000);
+  bindVoiceSession(CONVERSATION, "rt-2", DESK, { activeWork: false });
+
+  expect(readCard("turn-later").state).toBe("no-reference");
+});
+
+test("a turn bound before the reconnect keeps its card whatever the host says now", () => {
+  bindVoiceSession(CONVERSATION, "rt-1", DESK);
+  spokenTurn(1, "conversation_atlas_a", "handoff-a");
+  expect(cardOf(readCard("turn-a"))).toBe("conversation_atlas_a");
+  releaseVoiceSession(CONVERSATION, NOW + 5_000);
+  bindVoiceSession(CONVERSATION, "rt-2", DESK, { activeWork: false });
+
+  expect(cardOf(readCard("turn-a"))).toBe("conversation_atlas_a");
+});
+
+test("a new call's spoken turn reads its own card, not the previous call's", () => {
+  bindVoiceSession(CONVERSATION, "rt-1", DESK);
+  spokenTurn(1, "conversation_atlas_a", "handoff-a");
+  readCard("turn-a");
+  releaseVoiceSession(CONVERSATION, NOW + 5_000);
+  bindVoiceSession(CONVERSATION, "rt-2", DESK, { activeWork: false });
   admitVoiceSelectedContext({
-    conversationId: CONVERSATION, realtimeSessionId: "rt-1",
-    reference: reference(DESK, "conversation_atlas_a", NOW, 1), utterance: utterance(1), now: NOW,
+    conversationId: CONVERSATION, realtimeSessionId: "rt-2",
+    reference: reference(DESK, "conversation_atlas_z", NOW + 9_000, 9), utterance: utterance(9), now: NOW + 9_000,
   });
   recordVoiceHandoff({
-    conversationId: CONVERSATION, realtimeSessionId: "rt-1",
-    utterance: utterance(1), handoff: HANDOFF,
+    conversationId: CONVERSATION, realtimeSessionId: "rt-2",
+    utterance: utterance(9), handoff: { handoffId: "handoff-z", itemId: null, userBidiTurnId: null },
   });
-  releaseVoiceSession(CONVERSATION, NOW + 1_000);
+  expect(cardOf(readCard("turn-z"))).toBe("conversation_atlas_z");
+  expect(cardOf(readCard("turn-a"))).toBe("conversation_atlas_a");
+});
 
-  bindVoiceSession(CONVERSATION, "rt-2", DESK);
-  expect(voiceUtteranceContext(CONVERSATION, NOW + 2_000)).toEqual({ state: "no-reference" });
+/* ------------------------------------------------------------------ *
+ * Retiring a join no tool call ever claimed.
+ * ------------------------------------------------------------------ */
+
+test("a spoken turn answered without tools stops being a candidate once the host is idle", () => {
+  /* The ordinary case the strict rule would otherwise ruin: the operator asks
+     something the agent answers out loud, so that join is never claimed. Left
+     standing it would make every later card ambiguous. The host going idle is
+     what ends it — native routes a handoff into a running turn, so an idle
+     thread means that work is over. */
+  bindVoiceSession(CONVERSATION, "rt-1", DESK);
+  spokenTurn(1, "conversation_atlas_a", "handoff-a");
+  noteVoiceWorkBoundary(CONVERSATION, "turn-spoken-a");
+  noteVoiceWorkBoundary(CONVERSATION, null);
+
+  spokenTurn(2, "conversation_atlas_b", "handoff-b");
+  expect(cardOf(readCard("turn-b"))).toBe("conversation_atlas_b");
+});
+
+test("a join stays a candidate while its work is still running", () => {
+  bindVoiceSession(CONVERSATION, "rt-1", DESK);
+  spokenTurn(1, "conversation_atlas_a", "handoff-a");
+  noteVoiceWorkBoundary(CONVERSATION, "turn-spoken-a");
+
+  /* No idle boundary yet, so nothing has ended and the card is still A's. */
+  expect(cardOf(readCard("turn-spoken-a"))).toBe("conversation_atlas_a");
+});
+
+test("an idle boundary before the join retires nothing", () => {
+  bindVoiceSession(CONVERSATION, "rt-1", DESK);
+  noteVoiceWorkBoundary(CONVERSATION, "turn-earlier");
+  noteVoiceWorkBoundary(CONVERSATION, null);
+  spokenTurn(1, "conversation_atlas_a", "handoff-a");
+
+  expect(cardOf(readCard("turn-a"))).toBe("conversation_atlas_a");
+});
+
+test("work that already claimed a card is not retired by an idle boundary", () => {
+  /* Only the host's verdict on THAT turn retires an accepted binding, because a
+     tool call proves which turn owns the card and a thread can go idle between
+     a turn's own tool calls. */
+  bindVoiceSession(CONVERSATION, "rt-1", DESK);
+  spokenTurn(1, "conversation_atlas_a", "handoff-a");
+  expect(cardOf(readCard("turn-a"))).toBe("conversation_atlas_a");
+  noteVoiceWorkBoundary(CONVERSATION, "turn-a");
+  noteVoiceWorkBoundary(CONVERSATION, null);
+
+  expect(cardOf(readCard("turn-a"))).toBe("conversation_atlas_a");
+  /* The host's verdict on that turn does retire it; the call is still live, so
+     what is left is a call with nothing to point at rather than no call. */
+  expect(readCard("turn-a", { workState: completed("turn-a") })).toEqual({ state: "no-reference" });
 });

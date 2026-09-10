@@ -10,10 +10,13 @@ import {
   bindVoiceSession,
   parseVoiceViewBinding,
   recordVoiceHandoff,
+  recordVoiceHandoffAmbiguity,
   releaseVoiceSession,
   voiceUtteranceContext,
   type VoiceHandoffIdentity,
   type VoiceUtteranceIdentity,
+  type VoiceWorkIdentity,
+  type VoiceWorkState,
 } from "./voiceViewBinding";
 import { recordDirectOperatorWakatimeActivity } from "@/lib/wakatime/operatorActivity";
 
@@ -39,6 +42,21 @@ interface RealtimeHost {
       that cannot report one, which denies session-based callers rather than
       admitting them. */
   currentRealtimeSessionId?(): string | null;
+  /**
+   * The native thread this host actually runs (#1629).
+   *
+   * A tool call's `_meta` names the thread it came from; comparing the two is
+   * what turns a claim into evidence. Absent on a host that cannot say, and the
+   * cross-check is then skipped rather than failed — the caller was already
+   * admitted by the capability the registry mapped to this conversation.
+   */
+  providerThreadId?(): string | null;
+  /** The host's verdict on a backing turn, used to retire finished work. A host
+      that cannot speak for a turn answers `unknown`, which retires nothing. */
+  voiceWorkTurnState?(turnId: string): VoiceWorkState;
+  /** Whether a backing turn is running right now. Read at `start` so a reconnect
+      can tell "the agent is still working on what I said" from a clean restart. */
+  hasActiveTurn?(): boolean;
 }
 
 export type RealtimeControlResult = {
@@ -102,6 +120,29 @@ function voiceUtteranceIdentity(value: unknown): VoiceUtteranceIdentity | null {
   if (!/^[a-f0-9]{32}$/.test(id)) return null;
   if (typeof sequence !== "number" || !Number.isSafeInteger(sequence) || sequence < 1) return null;
   return { id, sequence };
+}
+
+/**
+ * The native work identity a tool call carried (#1629).
+ *
+ * Read by the MCP transport off `params._meta` — never off tool arguments,
+ * which are model-controlled and carry no authority — and forwarded here so the
+ * ledger can answer about ONE backing turn instead of about the conversation.
+ * Both identifiers are required: a report with a thread and no turn cannot be
+ * distinguished from any other request on the same thread, which is the
+ * conversation-level answer this exists to replace.
+ */
+function voiceWorkIdentity(value: unknown): VoiceWorkIdentity | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const body = value as Record<string, unknown>;
+  const id = (key: string): string | null => {
+    const raw = body[key];
+    return typeof raw === "string" && raw.length > 0 && raw.length <= 200 ? raw : null;
+  };
+  const threadId = id("threadId");
+  const turnId = id("turnId");
+  if (!threadId || !turnId) return null;
+  return { threadId, turnId, turnTrigger: id("turnTrigger"), callId: id("callId"), itemId: id("itemId") };
 }
 
 /**
@@ -214,7 +255,29 @@ export async function executeRealtimeControl(
         },
       };
     }
-    return { status: 200, body: { ok: true, utterance: voiceUtteranceContext(conversationId) } };
+    /* The work identity the caller's own request carried, cross-checked against
+       the thread this Viewer actually hosts. A caller whose metadata names a
+       different thread is answered `unidentified-work`: it may be a stale host,
+       or a claim about work this conversation does not own, and neither is
+       something to select a card from. */
+    const work = voiceWorkIdentity(request.work);
+    const hostThreadId = host?.providerThreadId?.() ?? null;
+    const mismatched = Boolean(work && hostThreadId && work.threadId !== hostThreadId);
+    return {
+      status: 200,
+      body: {
+        ok: true,
+        utterance: mismatched
+          ? {
+            state: "unidentified-work",
+            reason: "the backing turn this request carries belongs to a different native thread than this conversation's host",
+          }
+          : voiceUtteranceContext(conversationId, {
+            work,
+            ...(host?.voiceWorkTurnState ? { workState: (turnId: string) => host.voiceWorkTurnState!(turnId) } : {}),
+          }),
+      },
+    };
   }
 
   if (!host) {
@@ -249,7 +312,13 @@ export async function executeRealtimeControl(
          refuses every later selected-card reference rather than accepting the
          first one offered — the same fail-closed rule injection follows. */
       if (answer.realtimeSessionId) {
-        bindVoiceSession(conversationId, answer.realtimeSessionId, parseVoiceViewBinding(request.view));
+        /* The host's own answer to "is anything still running?", asked at the
+           moment the new call binds. It is what lets a reconnect keep the card
+           the still-running work was asked about, without letting a clean
+           restart inherit anything (#1629). */
+        bindVoiceSession(conversationId, answer.realtimeSessionId, parseVoiceViewBinding(request.view), {
+          activeWork: host.hasActiveTurn?.() === true,
+        });
       }
       return { status: 200, body: { ok: true, ...answer, persona } };
     }
@@ -308,6 +377,28 @@ export async function executeRealtimeControl(
         return { status: 409, body: { error: recorded.failure.message, code: recorded.failure.code } };
       }
       return { status: 200, body: { ok: true, handoff: recorded.admission.handoff } };
+    }
+    /**
+     * The call saw a handoff it cannot attribute (#1629).
+     *
+     * Authorized like the two above, by the ledger and against the session id
+     * the call was bound to. The browser is the only peer that can see the
+     * arrangement — a handoff arriving while more than one utterance is
+     * outstanding, or one whose canonical identity it has already reported — and
+     * native emits no receipt that would settle it. Reporting the uncertainty is
+     * what keeps it from being silently resolved into a guess.
+     */
+    if (request.action === "handoffAmbiguity") {
+      const reason = typeof request.reason === "string" ? request.reason.trim().slice(0, 200) : "";
+      const recorded = recordVoiceHandoffAmbiguity({
+        conversationId,
+        realtimeSessionId: caller.kind === "session" ? caller.realtimeSessionId : "",
+        reason: reason || "the call could not tell which spoken turn a handoff belongs to",
+      });
+      if (!recorded.ok) {
+        return { status: 409, body: { error: recorded.failure.message, code: recorded.failure.code } };
+      }
+      return { status: 200, body: { ok: true } };
     }
     if (request.action === "operatorActivity") {
       const operatorEventId = typeof request.operatorEventId === "string" ? request.operatorEventId.trim() : "";
@@ -388,7 +479,7 @@ export async function executeRealtimeControl(
         },
       };
     }
-    return { status: 400, body: { error: "action must be start, operatorActivity, selectedContext, handoff, utteranceContext, appendSpeech, deliverWorkerResponse, stop, or status" } };
+    return { status: 400, body: { error: "action must be start, operatorActivity, selectedContext, handoff, handoffAmbiguity, utteranceContext, appendSpeech, deliverWorkerResponse, stop, or status" } };
   } catch (error) {
     return { status: 409, body: { error: redactCodexHostDiagnostic(error) } };
   }

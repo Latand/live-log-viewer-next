@@ -85,6 +85,10 @@ function viewer(received: Received[], answer?: (body: Record<string, unknown>) =
 
 const post = () => productionViewerControlDependencies().post;
 
+/** The native work identity the MCP transport reads off `params._meta` and this
+    reader forwards across the hop (#1629). */
+const WORK = { threadId: "thread-wire", turnId: "turn-wire", turnTrigger: "realtime", callId: null, itemId: null };
+
 function reference(card: string) {
   return captureSelectedContext({
     context: { project: "atlas" },
@@ -99,13 +103,15 @@ function reference(card: string) {
 test("the reader asks the realtime control for the named conversation, same-origin", async () => {
   const received: Received[] = [];
   viewer(received);
-  await voiceUtteranceLookup(CALLER, post());
+  await voiceUtteranceLookup(CALLER, post(), WORK);
 
   expect(received).toHaveLength(1);
   expect(received[0]).toMatchObject({
     pathname: "/api/runtime/realtime",
     method: "POST",
-    body: { action: "utteranceContext", conversationId: CALLER },
+    /* The work identity rides the same hop: without it the Viewer can only
+       answer about the conversation, which is the substitution #1629 removes. */
+    body: { action: "utteranceContext", conversationId: CALLER, work: WORK },
     fetchSite: "same-origin",
   });
   /* The same-origin headers the Viewer's cross-origin guard requires. */
@@ -123,7 +129,7 @@ test("a joined answer survives the wire with its reference and handoff", async (
   });
   recordVoiceHandoff({ conversationId: CALLER, realtimeSessionId: "rt-wire", utterance, handoff });
 
-  const lookup = await voiceUtteranceLookup(CALLER, post());
+  const lookup = await voiceUtteranceLookup(CALLER, post(), WORK);
   expect(lookup.state).toBe("joined");
   expect(lookup.state === "joined" && lookup.reference.state === "selected"
     && lookup.reference.conversationId).toBe(CARD);
@@ -134,16 +140,33 @@ test("every refusing state crosses the wire as itself", async () => {
   const received: Received[] = [];
   viewer(received);
 
-  expect(await voiceUtteranceLookup(CALLER, post())).toEqual({ state: "no-call" });
+  expect(await voiceUtteranceLookup(CALLER, post(), WORK)).toEqual({ state: "no-call" });
 
   bindVoiceSession(CALLER, "rt-wire", DESK);
-  expect(await voiceUtteranceLookup(CALLER, post())).toEqual({ state: "no-reference" });
+  expect(await voiceUtteranceLookup(CALLER, post(), WORK)).toEqual({ state: "no-reference" });
 
   admitVoiceSelectedContext({
     conversationId: CALLER, realtimeSessionId: "rt-wire", reference: reference(CARD),
     utterance: { id: "b".repeat(32), sequence: 1 }, now: NOW,
   });
-  expect(await voiceUtteranceLookup(CALLER, post())).toEqual({ state: "awaiting-handoff" });
+  expect(await voiceUtteranceLookup(CALLER, post(), WORK)).toEqual({ state: "awaiting-handoff" });
+
+  /* And the two states this reader learned for #1629, both of which carry the
+     reason the Viewer gave rather than being flattened into "no card". */
+  expect(await voiceUtteranceLookup(CALLER, post(), null)).toMatchObject({ state: "unidentified-work" });
+  expect(await voiceUtteranceLookup(CALLER, post(), { ...WORK, turnTrigger: null }))
+    .toEqual({ state: "unrelated-work" });
+});
+
+test("an ambiguity the Viewer reports crosses the wire with its reason", async () => {
+  const received: Received[] = [];
+  viewer(received, () => Response.json({
+    ok: true,
+    utterance: { state: "ambiguous", reason: "more than one spoken turn is waiting to be claimed" },
+  }));
+  const lookup = await voiceUtteranceLookup(CALLER, post(), WORK);
+  expect(lookup.state).toBe("ambiguous");
+  expect(lookup.state === "ambiguous" && lookup.reason).toContain("more than one");
 });
 
 test("a Viewer that refuses the read is reported as unavailable, never as no card", async () => {
@@ -152,7 +175,7 @@ test("a Viewer that refuses the read is reported as unavailable, never as no car
   const received: Received[] = [];
   viewer(received, () => Response.json({ error: "utteranceContext reads what the operator's own voice call points at." }, { status: 403 }));
 
-  const lookup = await voiceUtteranceLookup(CALLER, post());
+  const lookup = await voiceUtteranceLookup(CALLER, post(), WORK);
   expect(lookup.state).toBe("unavailable");
   expect(lookup.state === "unavailable" && lookup.reason).toContain("own voice call");
 });

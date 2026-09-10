@@ -1,4 +1,5 @@
 import { normalizeNativeQueueObservation } from "./nativeQueueContent";
+import { CodexRealtimeTranscript } from "./codexRealtimeTranscript";
 import type { NativeQueueInput } from "./nativeCodexQueue";
 import { StructuredSendRefusedError } from "./engineHost";
 import { basename } from "node:path";
@@ -354,6 +355,18 @@ const REPLAY_FRAME_BUDGETS: ReplayFrameBudgets = {
 };
 const MAX_STDERR_TAIL_BYTES = 16 * 1024;
 const MAX_PRE_RESTORE_FRAMES = 256;
+/** How many finished turns a host remembers for the voice ledger's retirement
+    check. Beyond this the oldest answers `unknown`, which retires nothing. */
+const MAX_TERMINATED_TURN_MEMORY = 512;
+
+/** The app-server notifications that carry the canonical realtime transcript. */
+const CANONICAL_REALTIME_TRANSCRIPT_METHODS: ReadonlySet<string> = new Set([
+  "thread/realtime/transcript/delta",
+  "thread/realtime/transcript/done",
+  "thread/realtime/item/transcript/delta",
+  "thread/realtime/item/started",
+  "thread/realtime/item/completed",
+]);
 const MAX_PRE_RESTORE_BYTES = 4 * 1024 * 1024;
 const MUTATING_RPC_METHODS = new Set([
   "thread/start",
@@ -1118,6 +1131,7 @@ export class CodexAppServerHost implements EngineHost {
      what the backend actually said ("You have reached your usage limit."). */
   private realtimeFailure: CodexRealtimeFailure | null = null;
   private realtimeSessionId: string | null = null;
+  private readonly realtimeTranscript = new CodexRealtimeTranscript();
   private readonly lateThreadReadResponses = new Map<number, number>();
   private readonly replayEnvelopeRequestIds = new Set<number>();
   private replayReduction: CodexReplayFrameReducer | null = null;
@@ -1165,6 +1179,10 @@ export class CodexAppServerHost implements EngineHost {
   private eventLedgerRestored = false;
   private cursor: number;
   private activeTurnId: string | null = null;
+  /** Turns this host saw end, newest last and bounded. The voice ledger's only
+      authoritative retirement evidence (#1629); absence is `unknown`, never
+      "finished". */
+  private readonly terminatedTurnIds = new Set<string>();
   private protocolVersion: string | null = null;
   private modelCatalog: unknown = null;
   private authRecovery: "unknown" | "started" | "completed-unverified" = "unknown";
@@ -1931,6 +1949,7 @@ export class CodexAppServerHost implements EngineHost {
        be reported against this one. */
     this.realtimeFailure = null;
     this.realtimeSessionId = null;
+    this.realtimeTranscript.end();
     const persona = voiceSessionPersona(personaVariant);
 
     let pendingStart!: PendingRealtimeStart;
@@ -2275,6 +2294,7 @@ export class CodexAppServerHost implements EngineHost {
     /* An operator hanging up is not a failure to report back to them. */
     this.realtimeFailure = null;
     this.realtimeSessionId = null;
+    this.realtimeTranscript.end();
     for (const stream of this.voiceStreams.values()) {
       this.clearVoiceStreamTimer(stream);
       stream.fallbackToTerminal = true;
@@ -2386,6 +2406,7 @@ export class CodexAppServerHost implements EngineHost {
       const hangup = this.rpc("thread/realtime/stop", { threadId: this.identity.threadId }, REALTIME_HANGUP_TIMEOUT_MS);
       await hangup.catch(() => undefined);
       this.realtimeSessionId = null;
+    this.realtimeTranscript.end();
     }
     this.releasing = true;
     this.rejectRealtimeStart(new Error("Codex app-server host released"));
@@ -2539,6 +2560,11 @@ export class CodexAppServerHost implements EngineHost {
 
   private emit(event: UnsequencedEvent): void {
     if (this.ledgerFailed) return;
+    /* Recorded here rather than at each call site, so every path that ends a
+       turn — a terminal notification, a resume that finds it already over, an
+       error that terminalizes it — leaves the same evidence for the voice
+       ledger. Bounded, because a long-lived host ends a great many turns. */
+    if (event.kind === "turn-ended") this.recordTerminatedTurn(event.turnId);
     if (!this.eventLedgerRestored) {
       if (this.preRestoreEvents.length + this.preRestoreMessages.length >= MAX_PRE_RESTORE_FRAMES) {
         this.ledgerFailed = true;
@@ -2572,6 +2598,20 @@ export class CodexAppServerHost implements EngineHost {
       subscriber.wake?.();
     }
     this.notifyStateListeners();
+  }
+
+  /** Bounded terminal-turn memory. The oldest is forgotten first, and forgetting
+      answers `unknown` rather than `completed` — the ledger then keeps its own
+      record instead of retiring work on missing evidence. */
+  private recordTerminatedTurn(turnId: string): void {
+    if (!turnId) return;
+    this.terminatedTurnIds.delete(turnId);
+    this.terminatedTurnIds.add(turnId);
+    while (this.terminatedTurnIds.size > MAX_TERMINATED_TURN_MEMORY) {
+      const oldest = this.terminatedTurnIds.values().next().value as string | undefined;
+      if (oldest === undefined) break;
+      this.terminatedTurnIds.delete(oldest);
+    }
   }
 
   private restoreEvents(): number {
@@ -3257,12 +3297,32 @@ export class CodexAppServerHost implements EngineHost {
   }
 
   private acceptNotification(method: string, params: JsonObject, reconcileBufferedLifecycle = false): void {
+    /* #1629: the canonical transcript. These are the app-server's own
+       notifications, so they survive a data-channel drop and are what the
+       thread's committed timeline is built from. Answered before the pending
+       start check because they arrive throughout the call, not around it. */
+    if (CANONICAL_REALTIME_TRANSCRIPT_METHODS.has(method)) {
+      if (stringField(params, "threadId") !== this.identity.threadId) return;
+      const segment = this.realtimeTranscript.observe(method, params);
+      if (segment) {
+        this.emit({
+          kind: "voice-transcript",
+          realtimeSessionId: segment.realtimeSessionId,
+          segmentId: segment.id,
+          role: segment.role,
+          text: segment.text,
+          final: segment.final,
+        });
+      }
+      return;
+    }
     if (method === "thread/realtime/started") {
       const pending = this.pendingRealtimeStart;
       if (!pending || stringField(params, "threadId") !== this.identity.threadId) return;
       pending.started = true;
       pending.realtimeSessionId = stringField(params, "realtimeSessionId");
       this.realtimeSessionId = pending.realtimeSessionId;
+      this.realtimeTranscript.begin(pending.realtimeSessionId ?? "");
       this.resumeVoiceStreams();
       this.resolveRealtimeStart();
       return;
@@ -3503,6 +3563,37 @@ export class CodexAppServerHost implements EngineHost {
       the call. */
   currentRealtimeSessionId(): string | null {
     return this.realtimeSessionId;
+  }
+
+  /**
+   * The native thread this host runs (#1629).
+   *
+   * A tool call's `_meta` names the thread it came from. Comparing the two is
+   * what turns the caller's claim into evidence, so the voice ledger can refuse
+   * a request that names work on some other thread.
+   */
+  providerThreadId(): string | null {
+    return this.identity.threadId;
+  }
+
+  /** Whether a backing turn is running right now. */
+  hasActiveTurn(): boolean {
+    return this.activeTurnId !== null;
+  }
+
+  /**
+   * What this host can say about one backing turn (#1629).
+   *
+   * `completed` is the only authoritative retirement evidence the voice ledger
+   * accepts: it means this host saw that turn end. A turn it has no terminal
+   * record for is `unknown` — a host that restarted, or one whose ledger was
+   * replayed past the event, has MISSING evidence, and the ledger keeps what it
+   * holds rather than treating silence as an ending.
+   */
+  voiceWorkTurnState(turnId: string): "active" | "completed" | "unknown" {
+    if (!turnId) return "unknown";
+    if (this.activeTurnId === turnId) return "active";
+    return this.terminatedTurnIds.has(turnId) ? "completed" : "unknown";
   }
 
   lastRealtimeFailure(): CodexRealtimeFailure | null {

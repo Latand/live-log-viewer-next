@@ -85,6 +85,7 @@ afterAll(() => {
 
 interface ControlRequest {
   action?: string;
+  reason?: string;
   view?: { viewSessionId: string; deviceId: string };
   realtimeSessionId?: string;
   selectedContext?: SelectedContextRef;
@@ -349,7 +350,15 @@ test("two utterances outstanding: a handoff belongs to neither, so none is claim
   expect(requests.filter((request) => request.action === "handoff")).toEqual([]);
 });
 
-test("the queue recovers on the next utterance, so one crossed pair costs one turn", async () => {
+test("A, B, late handoff A, C, late handoff B claims nothing at any point", async () => {
+  /* The independent review's exact reproduction. Emptying the ambiguous queue
+     and carrying on made the NEXT handoff — belonging to one of the abandoned
+     utterances — look unambiguous, so B's handoff claimed C and the consumer
+     returned C's transcript under B's name.
+
+     The uncertainty is now published once and stands for the rest of the call:
+     every unattributed utterance may still produce a handoff, so no later
+     arrival can be shown to be anyone's. */
   const peer = await liveCall("conversation_voice_ambiguous_recovery");
   finished(peer, "user", "look at A");
   await Promise.resolve();
@@ -357,20 +366,42 @@ test("the queue recovers on the next utterance, so one crossed pair costs one tu
   await Promise.resolve();
   handedOff(peer, "a");
   await Promise.resolve();
-  /* A second handoff for the abandoned pair still claims nothing. */
   handedOff(peer, "b");
   await Promise.resolve();
-  expect(requests.filter((request) => request.action === "handoff")).toEqual([]);
 
   finished(peer, "user", "and now C");
   await Promise.resolve();
   handedOff(peer, "c");
   await Promise.resolve();
 
+  expect(requests.filter((request) => request.action === "handoff")).toEqual([]);
+  /* And the server is TOLD, rather than left to infer an absence. */
+  const reported = requests.filter((request) => request.action === "handoffAmbiguity");
+  expect(reported).toHaveLength(1);
+  expect(reported[0]!.realtimeSessionId).toBe("live-1");
+  expect(String(reported[0]!.reason)).toContain("outstanding");
+});
+
+test("a handoff repeated after the operator speaks again claims nothing new", async () => {
+  /* The review's other sequence. Native redelivers a handoff across its two
+     event shapes and can repeat one late; the repeat used to arrive with the
+     NEXT utterance outstanding and be joined to it, which is how card B answered
+     a question asked about card A. */
+  const peer = await liveCall("conversation_voice_duplicate_handoff");
+  finished(peer, "user", "look at A");
+  await Promise.resolve();
+  handedOff(peer, "a");
+  await Promise.resolve();
+  finished(peer, "user", "now look at B");
+  await Promise.resolve();
+  handedOff(peer, "a");
+  await Promise.resolve();
+
   const joins = requests.filter((request) => request.action === "handoff");
   expect(joins).toHaveLength(1);
-  expect(joins[0]!.utterance!.sequence).toBe(3);
-  expect(joins[0]!.handoff!.handoffId).toBe("handoff-c");
+  expect(joins[0]!.utterance!.sequence).toBe(1);
+  expect(joins[0]!.handoff!.handoffId).toBe("handoff-a");
+  expect(requests.filter((request) => request.action === "handoffAmbiguity")).toHaveLength(1);
 });
 
 test("the join names the utterance it claimed, never the latest one", async () => {

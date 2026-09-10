@@ -162,6 +162,7 @@ import {
   selectedConversationTail,
   type SelectedContextTargetDependencies,
   type VoiceUtteranceLookup,
+  type VoiceWorkLookupIdentity,
 } from "./selectedContextTarget";
 import { mcpCallerIdentity, mcpToolPolicy, permitAttentionHandoff, permitReplySuggestions, type ManagerTarget, type McpToolPolicy } from "./toolAllowlist";
 
@@ -888,12 +889,16 @@ function attentionCallerSources(): AttentionCallerSources {
 export async function voiceUtteranceLookup(
   conversationId: string,
   post: ViewerControlDependencies["post"],
+  /* #1629: the work this request is doing, carried across the hop so the ledger
+     can answer about that turn. Native puts it on the request envelope, so it is
+     evidence about the caller rather than a claim in its arguments. */
+  work: VoiceWorkLookupIdentity | null = null,
 ): Promise<VoiceUtteranceLookup> {
   let answer: Record<string, unknown>;
   try {
     answer = await post(
       "/api/runtime/realtime",
-      { action: "utteranceContext", conversationId },
+      { action: "utteranceContext", conversationId, ...(work ? { work } : {}) },
       callerCapabilityHeaders(),
     );
   } catch (error) {
@@ -904,7 +909,10 @@ export async function voiceUtteranceLookup(
     return { state: "unavailable", reason: text(answer.error) || "the Viewer answered no voice utterance state" };
   }
   const state = text(utterance.state);
-  if (state === "no-call" || state === "no-reference" || state === "awaiting-handoff") return { state };
+  if (state === "no-call" || state === "no-reference" || state === "awaiting-handoff" || state === "unrelated-work") return { state };
+  if (state === "unidentified-work" || state === "ambiguous") {
+    return { state, reason: text(utterance.reason) || "the Viewer gave no reason" };
+  }
   if (state !== "joined") return { state: "unavailable", reason: `unknown voice utterance state ${state || "(none)"}` };
   const reference = parseSelectedContextRef(utterance.reference);
   const handoff = utterance.handoff;
@@ -933,13 +941,13 @@ export async function voiceUtteranceLookup(
  * Reporting a failed read as an absent selection is how an agent ends up telling
  * the operator they selected nothing when the truth is that nobody could look.
  */
-async function productionVoiceUtteranceContext(): Promise<VoiceUtteranceLookup> {
+async function productionVoiceUtteranceContext(work: VoiceWorkLookupIdentity | null): Promise<VoiceUtteranceLookup> {
   const authority = attentionCallerAuthority(attentionCallerSources());
   const conversationId = authority.kind === "root" || authority.kind === "worker"
     ? authority.conversationId
     : null;
   if (!conversationId) return { state: "no-call" };
-  return voiceUtteranceLookup(conversationId, productionViewerControlDependencies().post);
+  return voiceUtteranceLookup(conversationId, productionViewerControlDependencies().post, work);
 }
 
 /** Exported for the isolated evidence driver, which runs the REAL production
@@ -1823,6 +1831,7 @@ async function getConversation(
      that reached its target another way is left alone. */
   const selected = await resolveSelectedContext(args, text(args.conversationId), selectedDependencies, {
     voiceUtterance: !requestedPath,
+    work: context.nativeWork ?? null,
   });
   const requestedId = selected.conversationId;
   const tailLines = integer(args.tailLines, 0);
@@ -1975,6 +1984,7 @@ async function conversationMessages(
   const requestedPath = text(args.transcriptPath) || text(args.path);
   const selected = await resolveSelectedContext(args, text(args.conversationId), selectedDependencies, {
     voiceUtterance: !requestedPath,
+    work: context.nativeWork ?? null,
   });
   const requestedId = selected.conversationId;
   if (!requestedId && !requestedPath) {
