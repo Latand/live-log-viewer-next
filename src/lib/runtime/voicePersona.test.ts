@@ -44,6 +44,31 @@ function languagePins(persona: string): string[] {
   return pins;
 }
 
+test("both spoken personas carry native's operating protocol, in this repo's words", () => {
+  /* The originating directive asked for the native USER/BACKEND framing and the
+     operating protocol preserved, which three slogans from it do not cover. Each of these is a
+     distinct failure the installed app's own prompt is written to prevent, and
+     each has to reach BOTH variants — the spoken model is the same model either
+     way. The wording is this repository's; the bundled prompt is a reference. */
+  for (const persona of [COORDINATOR_VOICE_PERSONA, MODALITY_VOICE_PERSONA]) {
+    /* The two sources arrive in one stream, both as user-role text. */
+    expect(persona).toContain("[USER]");
+    expect(persona).toContain("[BACKEND]");
+    expect(persona).toContain("never send one back as work");
+    /* An update is not a completion; the tool return is. */
+    expect(persona).toContain("tool return");
+    expect(persona).toContain("do not announce a task as done");
+    /* Self-contained conversation needs no backing turn; uncertainty still does. */
+    expect(persona).toContain("plainly conversational");
+    expect(persona).toContain("unsure about goes to the agent");
+    /* Task-level pacing survives the next backend message. */
+    expect(persona).toContain("holds for the whole task");
+    expect(persona).toContain("Do not drift back to your default");
+    /* And the rules already there are still there. */
+    expect(persona).toContain("authoritative");
+  }
+});
+
 test("the built-in persona stands when no override file exists", () => {
   const persona = spokenVoicePersona("coordinator", () => { throw new Error("ENOENT"); });
   expect(persona).toBe(COORDINATOR_VOICE_PERSONA);
