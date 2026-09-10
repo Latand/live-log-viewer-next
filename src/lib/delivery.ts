@@ -11,7 +11,7 @@ import {
 } from "@/lib/accounts/accountOverrides";
 import { deliveryFence } from "@/lib/accounts/migration/coordinator";
 import { requestAccountMigrationTick } from "@/lib/accounts/migration/controllerSignal";
-import { deliverToTranscriptHost, readTranscriptHosts, type HostDeliveryOutcome } from "@/lib/agent/transcriptHost";
+import { deliverToTranscriptHost, readTranscriptHosts, type HostDeliveryOutcome, type TranscriptHost } from "@/lib/agent/transcriptHost";
 import { admitTranscriptConversation } from "@/lib/conversation/transcriptAdmission";
 import { listFiles } from "@/lib/scanner";
 import { pathAllowed } from "@/lib/scanner/roots";
@@ -308,29 +308,37 @@ export async function livePaneTarget(filePath: string): Promise<string | null> {
   return (await livePaneHost(filePath))?.display ?? null;
 }
 
-export async function interruptConversation(filePath: string): Promise<DeliveryOutcome> {
-  if (!filePath || !pathAllowed(filePath)) {
+interface InterruptConversationOverrides {
+  pathAllowed?: typeof pathAllowed;
+  livePaneHost?: typeof livePaneHost;
+  registry?: AgentRegistry;
+  interruptHost?: typeof interruptTmuxHostIfMatches;
+}
+
+export async function interruptConversation(filePath: string, overrides: InterruptConversationOverrides = {}): Promise<DeliveryOutcome> {
+  if (!filePath || !(overrides.pathAllowed ?? pathAllowed)(filePath)) {
     return failure("the conversation path is required to interrupt", 400);
   }
-  const host = await livePaneHost(filePath);
+  const host = await (overrides.livePaneHost ?? livePaneHost)(filePath);
   if (host === null) {
     return failure("no active agent pane to interrupt", 409);
   }
   try {
-    const registry = agentRegistry();
-    const registered = registeredHostForPath(registry.readOnlySnapshot(), host.primaryPath ?? filePath);
-    if (!registered?.host || registered.host.paneId !== host.paneId
-      || registered.host.agent.pid !== host.agentPid
-      || registered.host.agent.startIdentity !== host.agentIdentity) {
+    const registry = overrides.registry ?? agentRegistry();
+    const registered = registeredOwnerForObservedHost(registry.readOnlySnapshot(), host);
+    if (!registered?.host) {
       return failure("conversation host identity is unavailable or ambiguous", 409);
     }
     return await registry.withOperationLock(registered.key,
       { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) }, async () => {
-        const current = registry.readOnlySnapshot().entries[`${registered.key.engine}:${registered.key.sessionId}`];
-        if (!current?.host || !sameRegisteredHost(current.host, registered.host!)) {
+        const current = registeredOwnerForObservedHost(registry.readOnlySnapshot(), host);
+        if (!current?.host || current.key.engine !== registered.key.engine
+          || current.key.sessionId !== registered.key.sessionId
+          || current.artifactPath !== registered.artifactPath
+          || !sameRegisteredHost(current.host, registered.host!)) {
           return failure("conversation host changed before interrupt", 409);
         }
-        if (!await interruptTmuxHostIfMatches(current.host)) return failure("conversation host identity changed before interrupt", 409);
+        if (!await (overrides.interruptHost ?? interruptTmuxHostIfMatches)(current.host)) return failure("conversation host identity changed before interrupt", 409);
         return { ok: true, target: host.display };
       });
   } catch (error) {
@@ -593,6 +601,26 @@ function registeredHostForPath(
     && candidate.host?.endpoint === owned.host?.endpoint
     && candidate.host?.paneId === owned.host?.paneId);
   return shared ? null : owned;
+}
+
+/** A native child can be the scanner's primary transcript while the Viewer
+    launch remains registered under its root. Resolve that owner among the
+    observed claims, retaining both the unique registry claim and host fence. */
+function registeredOwnerForObservedHost(
+  snapshot: ReturnType<AgentRegistry["snapshot"]>,
+  host: TranscriptHost,
+): AgentRegistryEntry | null {
+  const candidates = Object.values(snapshot.entries).filter((candidate) =>
+    candidate.key.engine === host.engine
+    && candidate.artifactPath !== null && host.claimedPaths.includes(candidate.artifactPath)
+    && candidate.host?.paneId === host.paneId
+    && candidate.host.server.pid === host.tmuxServerPid
+    && candidate.host.panePid.pid === host.panePid
+    && candidate.host.agent.pid === host.agentPid
+    && Boolean(host.agentIdentity) && candidate.host.agent.startIdentity === host.agentIdentity);
+  return candidates.length === 1
+    ? registeredHostForPath(snapshot, candidates[0]!.artifactPath!)
+    : null;
 }
 
 function sameRegisteredHost(left: TmuxHostEvidence | null, right: TmuxHostEvidence): boolean {
