@@ -327,3 +327,64 @@ test("a usage warning belongs to the call that reported it", async () => {
   expect(client.getSnapshot().notice).toBeNull();
   await client.stop();
 });
+
+
+test("two utterances outstanding: a handoff belongs to neither, so none is claimed", async () => {
+  /* The correlation this peer can prove holds in exactly one arrangement: one
+     utterance outstanding, one handoff arriving. With two outstanding the event
+     could belong to either, and reporting it against the newer one is how card B
+     comes back to a question asked about card A.
+
+     So nothing is reported. The standing admission never gets a handoff, the
+     reader refuses, and the agent asks which conversation the operator meant. */
+  const peer = await liveCall("conversation_voice_ambiguous");
+  finished(peer, "user", "look at A");
+  await Promise.resolve();
+  finished(peer, "user", "now look at B");
+  await Promise.resolve();
+  handedOff(peer, "a");
+  await Promise.resolve();
+
+  expect(requests.filter((request) => request.action === "selectedContext")).toHaveLength(2);
+  expect(requests.filter((request) => request.action === "handoff")).toEqual([]);
+});
+
+test("the queue recovers on the next utterance, so one crossed pair costs one turn", async () => {
+  const peer = await liveCall("conversation_voice_ambiguous_recovery");
+  finished(peer, "user", "look at A");
+  await Promise.resolve();
+  finished(peer, "user", "now look at B");
+  await Promise.resolve();
+  handedOff(peer, "a");
+  await Promise.resolve();
+  /* A second handoff for the abandoned pair still claims nothing. */
+  handedOff(peer, "b");
+  await Promise.resolve();
+  expect(requests.filter((request) => request.action === "handoff")).toEqual([]);
+
+  finished(peer, "user", "and now C");
+  await Promise.resolve();
+  handedOff(peer, "c");
+  await Promise.resolve();
+
+  const joins = requests.filter((request) => request.action === "handoff");
+  expect(joins).toHaveLength(1);
+  expect(joins[0]!.utterance!.sequence).toBe(3);
+  expect(joins[0]!.handoff!.handoffId).toBe("handoff-c");
+});
+
+test("the join names the utterance it claimed, never the latest one", async () => {
+  /* The report carries the claimed queue entry's own identity, so a future
+     change that let the queue and the latest publish diverge cannot silently
+     re-point a join at a newer turn. */
+  const peer = await liveCall("conversation_voice_claim_identity");
+  finished(peer, "user", "look at A");
+  await Promise.resolve();
+  const published = requests.filter((request) => request.action === "selectedContext");
+  handedOff(peer, "a");
+  await Promise.resolve();
+
+  const joins = requests.filter((request) => request.action === "handoff");
+  expect(joins).toHaveLength(1);
+  expect(joins[0]!.utterance).toEqual(published[0]!.utterance!);
+});

@@ -242,6 +242,60 @@ test("speaking again withdraws the card until the new utterance is handed off", 
   expect(answered.conversationId).toBe(OTHER);
 });
 
+test("A, B, then a late handoff for A: the tool must not return card B", async () => {
+  /* The reviewer's repro, driven the way the browser actually drives it. The
+     client reports a join only while one utterance is outstanding, so with A and
+     B both published it reports nothing at all — and the reader refuses instead
+     of handing the agent card B under handoff A's name.
+
+     The earlier version of this case labelled the late report with A's identity
+     by hand, which the ledger correctly refused; the production client would have
+     labelled it B and been believed. This drives the client's own decision. */
+  await control({ action: "start", sdp: "v=0\r\noffer\r\n", view: DESK }, OPERATOR);
+  await control({ action: "selectedContext", selectedContext: reference(SELECTED, 1), utterance: utterance(1) }, PEER);
+  await control({ action: "selectedContext", selectedContext: reference(OTHER, 2), utterance: utterance(2) }, PEER);
+
+  /* What the client sends after seeing A's handoff with two outstanding: nothing. */
+  const refused = await refusal(bindings(lookupThroughTheControlEndpoint()).conversation_messages({
+    clientRequestId: "spoken-read-ambiguous",
+  }));
+  expect(refused.details.code).toBe("voice_selected_context_superseded");
+
+  /* And had it reported anyway, naming the newer utterance as the older one's
+     work, the ledger would still refuse to complete the wrong admission. */
+  const mislabelled = await control({
+    action: "handoff",
+    utterance: utterance(1),
+    handoff: { handoffId: "handoff-1", itemId: "item-1", userBidiTurnId: "bidi-1" },
+  }, PEER);
+  expect(mislabelled.status).toBe(409);
+  const stillRefused = await refusal(bindings(lookupThroughTheControlEndpoint()).conversation_messages({
+    clientRequestId: "spoken-read-ambiguous-2",
+  }));
+  expect(stillRefused.details.code).toBe("voice_selected_context_superseded");
+});
+
+test("a handoff report whose identity halves disagree completes nothing", async () => {
+  /* Both halves are checked because they answer different questions: the id says
+     which publication the report belongs to, the sequence says where it sits in
+     the call. A report that mixes one turn's id with another's position
+     describes a boundary this ledger never saw. */
+  await control({ action: "start", sdp: "v=0\r\noffer\r\n", view: DESK }, OPERATOR);
+  await control({ action: "selectedContext", selectedContext: reference(SELECTED, 1), utterance: utterance(1) }, PEER);
+
+  const crossed = await control({
+    action: "handoff",
+    utterance: { id: utterance(1).id, sequence: 2 },
+    handoff: { handoffId: "handoff-1", itemId: "item-1", userBidiTurnId: "bidi-1" },
+  }, PEER);
+  expect(crossed.status).toBe(409);
+
+  const refused = await refusal(bindings(lookupThroughTheControlEndpoint()).conversation_messages({
+    clientRequestId: "spoken-read-crossed",
+  }));
+  expect(refused.details.code).toBe("voice_selected_context_superseded");
+});
+
 test("a late handoff for a superseded utterance never delivers its card", async () => {
   /* Out of order on the wire: the first utterance's handoff arrives after the
      second utterance has already been published. It must not resurrect the

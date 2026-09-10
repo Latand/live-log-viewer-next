@@ -1,5 +1,6 @@
 import {
   bindSelectedContextToVoiceSession,
+  SELECTED_CONTEXT_MAX_AGE_MS,
   type SelectedContextBindingFailure,
   type VoiceViewBinding,
 } from "@/lib/realtime/selectedContextBinding";
@@ -86,6 +87,8 @@ interface VoiceSessionState {
   sequence: number;
   /** The utterance sequence the standing admission was published for. */
   utteranceSequence: number | null;
+  /** Set when the call ended while a joined admission was still standing. */
+  endedAt: number | null;
 }
 
 const store = globalThis as typeof globalThis & {
@@ -117,12 +120,34 @@ export function parseVoiceViewBinding(value: unknown): VoiceViewBinding | null {
     call: the previous admission is dropped rather than inherited. */
 export function bindVoiceSession(conversationId: string, realtimeSessionId: string, binding: VoiceViewBinding | null): void {
   sessions.set(conversationId, {
-    realtimeSessionId, binding, admission: null, sequence: 0, utteranceSequence: null,
+    realtimeSessionId, binding, admission: null, sequence: 0, utteranceSequence: null, endedAt: null,
   });
 }
 
-export function releaseVoiceSession(conversationId: string): void {
-  sessions.delete(conversationId);
+/**
+ * Hang up, and keep only what the work still running may legitimately need.
+ *
+ * A turn started by the last thing the operator said outlives the transport that
+ * carried it: they ask for something, hang up, and the agent is still working
+ * when it reaches for the card they were pointing at. Dropping the whole ledger
+ * at `stop` threw that away, so the tool answered "you have no call" to work the
+ * call itself started.
+ *
+ * ONLY AN ACCEPTED JOIN SURVIVES. A reference with no handoff describes an
+ * utterance that never became work, so nothing is running that could need it,
+ * and keeping it would leave a card standing for a later turn to pick up. What
+ * is kept expires with the reference's own freshness window — the same bound
+ * that governs how long a capture may steer a turn at all — and a new call
+ * replaces it outright.
+ */
+export function releaseVoiceSession(conversationId: string, now = Date.now()): void {
+  const session = sessions.get(conversationId);
+  if (!session?.admission?.handoff) {
+    sessions.delete(conversationId);
+    return;
+  }
+  session.binding = null;
+  session.endedAt = now;
 }
 
 /**
@@ -241,16 +266,22 @@ export function admitVoiceSelectedContext(input: VoiceSelectedContextAdmissionIn
 /**
  * Record which handoff an already-admitted utterance became.
  *
- * Deliberately not an admission: it mints no utterance, moves no counter and
- * replaces no reference. It only completes the record of one that already
- * exists, so a handoff reported for an utterance the ledger has moved past — a
- * late event, or one belonging to a superseded publication — is dropped rather
- * than allowed to reopen it.
+ * It mints no utterance, moves no counter and replaces no reference: it only
+ * completes the record of one that already exists, so a handoff reported for an
+ * utterance the ledger has moved past — a late event, or one belonging to a
+ * superseded publication — is dropped rather than allowed to reopen it.
+ *
+ * WHAT IT CANNOT CHECK is whether the caller labelled the report correctly. The
+ * peer that hears the operator is the only one that sees both the transcript
+ * boundary and the handoff, so it is the only one that can tell whether the
+ * association is a fact; this end refuses everything that contradicts its own
+ * record and trusts the rest. That is why the client reports nothing at all when
+ * more than one utterance is outstanding.
  */
 export function recordVoiceHandoff(input: {
   conversationId: string;
   realtimeSessionId: string;
-  utteranceId: string;
+  utterance: VoiceUtteranceIdentity;
   handoff: VoiceHandoffIdentity;
 }): VoiceSelectedContextAdmissionResult {
   const session = sessions.get(input.conversationId);
@@ -264,7 +295,14 @@ export function recordVoiceHandoff(input: {
     };
   }
   const admission = session.admission;
-  if (!admission || admission.utteranceId !== input.utteranceId) {
+  /* BOTH halves of the identity, because they answer different questions. The id
+     says which publication this report belongs to; the sequence says where that
+     publication sits in the call. A report whose halves disagree describes a
+     boundary this ledger never saw, and completing the standing admission from
+     it would attach one turn's work to another turn's card. */
+  if (!admission
+    || admission.utteranceId !== input.utterance.id
+    || session.utteranceSequence !== input.utterance.sequence) {
     return {
       ok: false,
       failure: {
@@ -299,6 +337,11 @@ export function voiceSelectedContext(conversationId: string): VoiceSelectedConte
  * and its own handoff has not landed yet. So a later turn that pointed at nothing
  * reads `awaiting-handoff` and refuses. It never reads the card from the turn
  * before, which is the failure this state machine exists to make impossible.
+ *
+ * A hangup does not end it. The work the last utterance started outlives the
+ * transport, so an accepted join survives `stop` until the reference ages out of
+ * its own freshness window — see {@link releaseVoiceSession}, which keeps
+ * nothing else.
  */
 export type VoiceUtteranceContext =
   | { state: "no-call" }
@@ -310,20 +353,33 @@ export type VoiceUtteranceContext =
     handoff: VoiceHandoffIdentity;
     utteranceId: string | null;
     sequence: number;
+    /** True when the call has ended and this is what it left for the work it
+        started. The card is still the one that work was asked about. */
+    callEnded: boolean;
   };
 
-export function voiceUtteranceContext(conversationId: string): VoiceUtteranceContext {
+export function voiceUtteranceContext(conversationId: string, now = Date.now()): VoiceUtteranceContext {
   const session = sessions.get(conversationId);
   if (!session) return { state: "no-call" };
   const admission = session.admission;
   if (!admission) return { state: "no-reference" };
   if (!admission.handoff) return { state: "awaiting-handoff" };
+  if (session.endedAt !== null && now - Date.parse(admission.reference.capturedAt) > SELECTED_CONTEXT_MAX_AGE_MS) {
+    /* The call is over and what it left has aged out of the window a capture may
+       steer a turn from. Nothing that started with it is still plausibly
+       running, so this stops being an answer rather than becoming a stale one. */
+    sessions.delete(conversationId);
+    return { state: "no-call" };
+  }
   return {
     state: "joined",
     reference: admission.reference,
     handoff: admission.handoff,
     utteranceId: admission.utteranceId,
     sequence: admission.sequence,
+    /** Evidence, so a reader can tell live context from what a finished call
+        left behind for the work it started. */
+    callEnded: session.endedAt !== null,
   };
 }
 

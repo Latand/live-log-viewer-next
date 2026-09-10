@@ -301,7 +301,7 @@ export async function executeRealtimeControl(
       const recorded = recordVoiceHandoff({
         conversationId,
         realtimeSessionId: caller.kind === "session" ? caller.realtimeSessionId : "",
-        utteranceId: utterance.id,
+        utterance,
         handoff,
       });
       if (!recorded.ok) {

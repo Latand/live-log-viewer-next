@@ -1,5 +1,6 @@
 import { beforeEach, expect, test } from "bun:test";
 
+import { SELECTED_CONTEXT_MAX_AGE_MS } from "@/lib/realtime/selectedContextBinding";
 import { captureSelectedContext, type SelectedContextRef } from "@/lib/selection/selectedContext";
 
 import {
@@ -9,6 +10,7 @@ import {
   releaseVoiceSession,
   resetVoiceViewBindings,
   voiceSelectedContext,
+  voiceUtteranceContext,
 } from "./voiceViewBinding";
 
 /**
@@ -251,7 +253,7 @@ test("a handoff completes the standing admission without minting an utterance", 
   });
   const recorded = recordVoiceHandoff({
     conversationId: CONVERSATION, realtimeSessionId: "rt-1",
-    utteranceId: utterance(1).id, handoff: HANDOFF,
+    utterance: utterance(1), handoff: HANDOFF,
   });
   expect(recorded.ok).toBe(true);
   /* The reference and the boundary counter are untouched: this reports what the
@@ -277,7 +279,7 @@ test("a handoff for an utterance the call has moved past is dropped", () => {
   });
   const late = recordVoiceHandoff({
     conversationId: CONVERSATION, realtimeSessionId: "rt-1",
-    utteranceId: utterance(1).id, handoff: HANDOFF,
+    utterance: utterance(1), handoff: HANDOFF,
   });
   expect(late.ok).toBe(false);
   expect(late.ok || late.failure.code).toBe("superseded");
@@ -292,9 +294,106 @@ test("a handoff presented with another call's session id is refused", () => {
   });
   const impostor = recordVoiceHandoff({
     conversationId: CONVERSATION, realtimeSessionId: "rt-2",
-    utteranceId: utterance(1).id, handoff: HANDOFF,
+    utterance: utterance(1), handoff: HANDOFF,
   });
   expect(impostor.ok).toBe(false);
   expect(impostor.ok || impostor.failure.code).toBe("unbound");
   expect(voiceSelectedContext(CONVERSATION)?.handoff).toBeNull();
+});
+
+
+/* ------------------------------------------------------------------ *
+ * After the hangup: what the work the call started may still read.
+ * ------------------------------------------------------------------ */
+
+test("an accepted join survives the hangup, because the work it started does", () => {
+  /* The operator asks for something, hangs up, and the agent is still working
+     when it reaches for the card they were pointing at. */
+  bindVoiceSession(CONVERSATION, "rt-1", DESK);
+  const ref = reference(DESK, "conversation_atlas_a", NOW, 1);
+  admitVoiceSelectedContext({
+    conversationId: CONVERSATION, realtimeSessionId: "rt-1",
+    reference: ref, utterance: utterance(1), now: NOW,
+  });
+  recordVoiceHandoff({
+    conversationId: CONVERSATION, realtimeSessionId: "rt-1",
+    utterance: utterance(1), handoff: HANDOFF,
+  });
+  releaseVoiceSession(CONVERSATION, NOW + 1_000);
+
+  const retained = voiceUtteranceContext(CONVERSATION, NOW + 2_000);
+  expect(retained.state).toBe("joined");
+  expect(retained.state === "joined" && retained.reference).toEqual(ref);
+  /* And it says what it is, so a reader can tell live context from a legacy. */
+  expect(retained.state === "joined" && retained.callEnded).toBe(true);
+});
+
+test("a hangup with no accepted join leaves nothing behind", () => {
+  /* An utterance that never became work has nothing running that could need it,
+     and keeping its card would leave one standing for a later turn to pick up. */
+  bindVoiceSession(CONVERSATION, "rt-1", DESK);
+  admitVoiceSelectedContext({
+    conversationId: CONVERSATION, realtimeSessionId: "rt-1",
+    reference: reference(DESK), utterance: utterance(1), now: NOW,
+  });
+  releaseVoiceSession(CONVERSATION, NOW + 1_000);
+  expect(voiceUtteranceContext(CONVERSATION, NOW + 2_000)).toEqual({ state: "no-call" });
+  expect(voiceSelectedContext(CONVERSATION)).toBeNull();
+});
+
+test("what a finished call left ages out of the window a capture may steer from", () => {
+  bindVoiceSession(CONVERSATION, "rt-1", DESK);
+  admitVoiceSelectedContext({
+    conversationId: CONVERSATION, realtimeSessionId: "rt-1",
+    reference: reference(DESK, "conversation_atlas_a", NOW, 1), utterance: utterance(1), now: NOW,
+  });
+  recordVoiceHandoff({
+    conversationId: CONVERSATION, realtimeSessionId: "rt-1",
+    utterance: utterance(1), handoff: HANDOFF,
+  });
+  releaseVoiceSession(CONVERSATION, NOW + 1_000);
+
+  expect(voiceUtteranceContext(CONVERSATION, NOW + SELECTED_CONTEXT_MAX_AGE_MS - 1).state).toBe("joined");
+  expect(voiceUtteranceContext(CONVERSATION, NOW + SELECTED_CONTEXT_MAX_AGE_MS + 1)).toEqual({ state: "no-call" });
+});
+
+test("a hung-up call admits nothing further", () => {
+  /* The transport is gone, so there is no window speaking for it. What it left
+     is a record of work already started, never a channel still open. */
+  bindVoiceSession(CONVERSATION, "rt-1", DESK);
+  admitVoiceSelectedContext({
+    conversationId: CONVERSATION, realtimeSessionId: "rt-1",
+    reference: reference(DESK, "conversation_atlas_a", NOW, 1), utterance: utterance(1), now: NOW,
+  });
+  recordVoiceHandoff({
+    conversationId: CONVERSATION, realtimeSessionId: "rt-1",
+    utterance: utterance(1), handoff: HANDOFF,
+  });
+  releaseVoiceSession(CONVERSATION, NOW + 1_000);
+
+  const later = admitVoiceSelectedContext({
+    conversationId: CONVERSATION, realtimeSessionId: "rt-1",
+    reference: reference(DESK, "conversation_atlas_b", NOW + 2_000, 2), utterance: utterance(2), now: NOW + 2_000,
+  });
+  expect(later.ok).toBe(false);
+  expect(later.ok || later.failure.code).toBe("unbound");
+  const standing = voiceUtteranceContext(CONVERSATION, NOW + 2_000);
+  expect(standing.state === "joined" && standing.reference.state === "selected"
+    && standing.reference.conversationId).toBe("conversation_atlas_a");
+});
+
+test("a new call replaces what the last one left", () => {
+  bindVoiceSession(CONVERSATION, "rt-1", DESK);
+  admitVoiceSelectedContext({
+    conversationId: CONVERSATION, realtimeSessionId: "rt-1",
+    reference: reference(DESK, "conversation_atlas_a", NOW, 1), utterance: utterance(1), now: NOW,
+  });
+  recordVoiceHandoff({
+    conversationId: CONVERSATION, realtimeSessionId: "rt-1",
+    utterance: utterance(1), handoff: HANDOFF,
+  });
+  releaseVoiceSession(CONVERSATION, NOW + 1_000);
+
+  bindVoiceSession(CONVERSATION, "rt-2", DESK);
+  expect(voiceUtteranceContext(CONVERSATION, NOW + 2_000)).toEqual({ state: "no-reference" });
 });

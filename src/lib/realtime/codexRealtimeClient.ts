@@ -226,10 +226,10 @@ class CodexRealtimeClient {
      ledger here. */
   private utteranceSequence = 0;
   private utteranceId: string | null = null;
-  /* Set when an utterance is published and cleared by the first handoff reported
-     against it, so one handoff is never reported twice and a slot left over from
-     an utterance that produced none cannot capture an unrelated later one. */
-  private utteranceAwaitingHandoff: string | null = null;
+  /* Utterances published and not yet accounted for by a handoff. A join is
+     reported only while this holds exactly one of them, because that is the only
+     arrangement in which the association is a fact rather than a guess. */
+  private utterancesAwaitingHandoff: { id: string; sequence: number }[] = [];
   private epoch = 0;
 
   constructor(readonly conversationId: string) {}
@@ -502,25 +502,44 @@ class CodexRealtimeClient {
    * attaches the canonical identities to that admission instead of counting a
    * second utterance.
    *
-   * WHAT THIS CANNOT DO. The handoff event and the transcript boundary that
-   * published the reference share no identifier on the wire, so the join is the
-   * most recent unclaimed utterance rather than a proven correlation. In the
-   * ordinary flow — speak, pause, handoff — that is the same utterance. Under
-   * barge-in, a handoff arriving after the operator has already finished a
-   * further utterance is attributed to the later one. Closing that needs an
-   * identifier the current data channel does not carry, which cannot be
-   * established without a live capture; until then the ledger's `handoff` is
-   * evidence about the call, and it guarantees nothing about a particular turn.
+   * AND IT REPORTS NOTHING RATHER THAN GUESS. The handoff event and the
+   * transcript boundary that published the reference share no identifier on the
+   * wire, so the association is a fact in exactly one arrangement: one utterance
+   * outstanding, one handoff arriving. That is the ordinary flow — speak, pause,
+   * the work starts — and it is what the queue below holds.
+   *
+   * With two outstanding, a handoff could belong to either, and reporting it
+   * against the newer one is how card B ends up answering a question asked about
+   * card A. So the whole queue is abandoned instead: the standing admission
+   * never gets a handoff, the reader refuses `awaiting-handoff`, and the agent
+   * asks the operator which conversation they mean. The next utterance starts a
+   * clean queue, so one crossed pair costs one turn of context and nothing more.
+   *
+   * Closing this properly needs an identifier shared by the transcript boundary
+   * and the handoff — the native events carry `user_bidi_turn_id`, but whether
+   * the user transcript event carries it too cannot be established without a
+   * live capture. Until it is, an unproven correlation must not become a target.
    */
   private publishHandoffJoin(event: { handoffId: string | null; itemId: string | null; userBidiTurnId: string | null }): void {
-    const utteranceId = this.utteranceAwaitingHandoff;
-    if (!this.realtimeSessionId || !utteranceId) return;
-    this.utteranceAwaitingHandoff = null;
+    const outstanding = this.utterancesAwaitingHandoff;
+    if (outstanding.length !== 1) {
+      /* Ambiguous, or nothing to claim. Either way the queue no longer describes
+         anything this peer can prove, so it is dropped rather than drained into
+         a guess. */
+      this.utterancesAwaitingHandoff = [];
+      return;
+    }
+    const claimed = outstanding[0]!;
+    this.utterancesAwaitingHandoff = [];
+    if (!this.realtimeSessionId) return;
     const payload = JSON.stringify({
       action: "handoff",
       conversationId: this.conversationId,
       realtimeSessionId: this.realtimeSessionId,
-      utterance: { id: utteranceId, sequence: this.utteranceSequence },
+      /* The CLAIMED utterance's own identity, carried on the queue entry rather
+         than read off the latest publish, so the report cannot drift onto a
+         newer turn if the two ever stop being the same one. */
+      utterance: claimed,
       handoff: {
         handoffId: event.handoffId,
         itemId: event.itemId,
@@ -572,7 +591,7 @@ class CodexRealtimeClient {
        recognizes a replay as the same spoken turn rather than a later one. */
     this.utteranceSequence += 1;
     this.utteranceId = randomHex(16);
-    this.utteranceAwaitingHandoff = this.utteranceId;
+    this.utterancesAwaitingHandoff.push({ id: this.utteranceId, sequence: this.utteranceSequence });
     const payload = JSON.stringify({
       action: "selectedContext",
       conversationId: this.conversationId,
@@ -736,7 +755,7 @@ class CodexRealtimeClient {
        last one of this one. */
     this.utteranceSequence = 0;
     this.utteranceId = null;
-    this.utteranceAwaitingHandoff = null;
+    this.utterancesAwaitingHandoff = [];
     this.openTranscriptLines.clear();
   }
 }

@@ -877,15 +877,21 @@ function attentionCallerSources(): AttentionCallerSources {
  * Reporting a failed read as an absent selection is how an agent ends up telling
  * the operator they selected nothing when the truth is that nobody could look.
  */
-async function productionVoiceUtteranceContext(): Promise<VoiceUtteranceLookup> {
-  const authority = attentionCallerAuthority(attentionCallerSources());
-  const conversationId = authority.kind === "root" || authority.kind === "worker"
-    ? authority.conversationId
-    : null;
-  if (!conversationId) return { state: "no-call" };
+/**
+ * Ask the Viewer what a conversation's live call points at, and read the answer.
+ *
+ * Split from the caller resolution below so the WIRING — the path, the body, the
+ * forwarded capability, and what each answered state means — can be driven over
+ * a real socket without standing up a registry to be recognised by. The caller
+ * resolution is the other half and is covered where authority is.
+ */
+export async function voiceUtteranceLookup(
+  conversationId: string,
+  post: ViewerControlDependencies["post"],
+): Promise<VoiceUtteranceLookup> {
   let answer: Record<string, unknown>;
   try {
-    answer = await productionViewerControlDependencies().post(
+    answer = await post(
       "/api/runtime/realtime",
       { action: "utteranceContext", conversationId },
       callerCapabilityHeaders(),
@@ -901,8 +907,8 @@ async function productionVoiceUtteranceContext(): Promise<VoiceUtteranceLookup> 
   if (state === "no-call" || state === "no-reference" || state === "awaiting-handoff") return { state };
   if (state !== "joined") return { state: "unavailable", reason: `unknown voice utterance state ${state || "(none)"}` };
   const reference = parseSelectedContextRef(utterance.reference);
-  const handoff = objectRecord(utterance.handoff);
-  if (!reference || !handoff) {
+  const handoff = utterance.handoff;
+  if (!reference || !objectRecord(handoff)) {
     return { state: "unavailable", reason: "the Viewer answered a joined utterance with no readable reference" };
   }
   return {
@@ -912,6 +918,28 @@ async function productionVoiceUtteranceContext(): Promise<VoiceUtteranceLookup> 
       Object.entries(handoff).map(([key, value]) => [key, typeof value === "string" ? value : null]),
     ),
   };
+}
+
+/**
+ * What the operator's own live voice call points at (#1629).
+ *
+ * The ledger describes a live WebRTC transport and lives in the Viewer process;
+ * this one runs beside the agent, in the MCP server. So the reader is a control
+ * read over the hop every other cross-process fact already uses, identified by
+ * the capability the registry maps to this agent's conversation — which is what
+ * makes it a read of ITS OWN call and of nothing else.
+ *
+ * A hop that fails answers `unavailable` with the reason rather than "no card".
+ * Reporting a failed read as an absent selection is how an agent ends up telling
+ * the operator they selected nothing when the truth is that nobody could look.
+ */
+async function productionVoiceUtteranceContext(): Promise<VoiceUtteranceLookup> {
+  const authority = attentionCallerAuthority(attentionCallerSources());
+  const conversationId = authority.kind === "root" || authority.kind === "worker"
+    ? authority.conversationId
+    : null;
+  if (!conversationId) return { state: "no-call" };
+  return voiceUtteranceLookup(conversationId, productionViewerControlDependencies().post);
 }
 
 /** Exported for the isolated evidence driver, which runs the REAL production

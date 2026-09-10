@@ -48,6 +48,23 @@ withdraws it with `realtimeEndInstructions`. `flushTranscriptTailOnSessionEnd`
 is set, so the last thing said before a hangup is routed through Codex rather
 than dropped. Nothing is written to the thread.
 
+**Where a spoken card is allowed to steer work.** The reference the operator's
+screen carried reaches a tool only while it describes the work in hand: it
+becomes readable once its utterance has been handed off, and stops the moment
+the operator speaks again. The association between an utterance and its handoff
+is a fact in exactly one arrangement — one utterance outstanding, one handoff
+arriving — because the transcript boundary and the handoff event share no
+identifier on the wire. With two outstanding, the browser reports nothing rather
+than guess, and every read then refuses by name. An accepted join survives a
+hangup, because the work the last utterance started does; it expires with the
+reference's own freshness window and a new call replaces it.
+
+Closing the ambiguity properly needs an identifier shared by the user transcript
+event and the handoff. The native events carry `user_bidi_turn_id`; whether the
+user transcript event carries it too has not been established, and cannot be
+without a live capture. Until it is, the correlation stays non-actionable in the
+ambiguous case rather than being resolved by recency.
+
 **What this does not establish.** No live provider call was made for any of it.
 The probe proves what leaves the app-server and what the app-server persists; it
 cannot prove what the provider does with a session body, that audio flows, or
