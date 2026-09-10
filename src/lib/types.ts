@@ -132,6 +132,13 @@ export interface BridgeAsk {
 
 /** One sidebar entry returned by GET /api/files. */
 export interface FileEntry {
+  /** Current registry transport for this exact conversation. Presentation only;
+      controls resolve and fence ownership again when the operator acts. */
+  controlHost?: { conversationId: string; transport: "legacy" | "structured" };
+  /** Current canonical root owner for a shared Claude child. The selected
+      conversation keeps its own identity; parentPath binds this projection to
+      the scanner parent, even when the root has advanced to a new generation. */
+  rootControlHost?: { conversationId: string; transport: "legacy" | "structured"; parentPath: string };
   path: string;
   root: RootKey;
   /** Path relative to its root. */

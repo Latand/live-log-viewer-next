@@ -1032,3 +1032,27 @@ test("a socket that fails after the host took the reconfigure attributes the swi
     via: "structured-reconfigure",
   }]);
 });
+
+// A legacy claim remains authoritative when structured metadata survives recovery.
+for (const action of ["interrupt", "kill"]) {
+  test(`${action} yields to the current legacy owner despite stale structured metadata`, async () => {
+    const fixture = structuredConversation();
+    const snapshot = fixture.registry.readOnlySnapshot();
+    const entry = Object.values(snapshot.entries)[0]!;
+    // Preserve both columns without launching or addressing a process.
+    const registry = {
+      conversationForPath: () => fixture.registry.conversationForPath(fixture.path),
+      readOnlySnapshot: () => ({ ...snapshot, entries: {
+        ...snapshot.entries,
+        [`${entry.key.engine}:${entry.key.sessionId}`]: { ...entry, host: { kind: "tmux" } },
+      } }),
+    } as unknown as AgentRegistry;
+    const commands: unknown[] = [];
+    const result = await dispatchStructuredControl({ path: fixture.path, conversationId: fixture.conversationId, action }, {
+      registry, enabled: () => true,
+      client: { command: async (command: unknown) => { commands.push(command); throw new Error("wrong owner"); } } as unknown as RuntimeHostClient,
+    });
+    expect(result).toBeNull();
+    expect(commands).toEqual([]);
+  });
+}

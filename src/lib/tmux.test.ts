@@ -13,6 +13,7 @@ import {
   createSpawnWindow,
   createTmuxEndpointDescriptor,
   killTmuxHostIfMatches,
+  interruptTmuxHostIfMatches,
   knownLivePidsFrom,
   legacyClaudeTmuxSpawnRefusal,
   spawnAgentWithPrompt,
@@ -436,6 +437,26 @@ describe("killTmuxHostIfMatches", () => {
     agent: { pid: 101, startIdentity: "101:one" },
     argv: ["codex"],
   };
+
+  test("interrupt preserves the host and refuses changed or incomplete identities", async () => {
+    for (const mismatch of [false, true, "missing"] as const) {
+      const calls: string[][] = [];
+      const result = await interruptTmuxHostIfMatches(host, {
+        runTmux: async (args) => {
+          calls.push(args);
+          return { code: 0, stdout: args[0] === "display-message" ? "900\t%11\t100\tagents:2.0\tworker\tzsh\n" : "", stderr: "" };
+        },
+        processIdentity: (pid) => pid === 101 && mismatch ? mismatch === "missing" ? null : "101:other" : `${pid}:one`,
+        argv: () => ["codex"], pidAlive: () => true,
+        parentPid: (pid) => pid === 101 ? 100 : pid === 100 ? 900 : null,
+      });
+      expect(result).toBe(mismatch === false);
+      const effects = calls.filter((args) => args[0] === "if-shell");
+      expect(effects).toHaveLength(mismatch === false ? 1 : 0);
+      if (!mismatch) expect(effects[0]).toContain("send-keys -t %11 Escape");
+      expect(calls.flat().some((arg) => arg.includes("kill-pane"))).toBe(false);
+    }
+  });
 
   test("kills by stable pane id and waits for the pane process tree to exit", async () => {
     let killed = false;

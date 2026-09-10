@@ -5,6 +5,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Play } from "@/components/icons";
 import { Badge } from "@/components/ui/Badge";
 import { Hint } from "@/components/Hint";
+import { useConversationControl } from "@/hooks/useConversationControl";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useLocale } from "@/lib/i18n";
 import { cleanTitle } from "@/lib/title";
@@ -30,16 +31,9 @@ export function ProcessStatusChip({ file }: { file: FileEntry }) {
   return null;
 }
 
-/**
- * Killing a conversation's agent, apart from the control that draws it.
- *
- * Mobile v2 lane 3: the phone's Kill is a labelled row last in the
- * conversation's `⋯` menu, in danger colour, and it acts on the tap — no arm
- * step anywhere (README §2 rule 9, Q4). The row and the desktop's chip-side
- * button must never own two different kill paths, so both read this: the one
- * capability gate (#241 §4), the structured control channel for a structured
- * host (#242), and `/api/proc` with the SIGTERM→SIGKILL escalation otherwise.
- */
+/** Shared stop action for desktop headers and the mobile conversation menu.
+    Conversation hosts use current-owner routing and durable receipts. Background
+    shell tasks retain their existing process-signal escalation. */
 export interface ProcessKill {
   /** `enabled` shows the control, `disabled` shows it inert with a reason,
       `hidden` means this surface has nothing to kill. */
@@ -51,9 +45,8 @@ export interface ProcessKill {
   force: boolean;
   /** The outcome line the caller shows: a signal receipt, or a failure. */
   message: string;
-  /** Fires the kill and answers whether the request was ACCEPTED. A caller
-      that armed the action first keeps it armed on false, so the escalation
-      the failure just unlocked is the next press rather than a re-arm. */
+  /** True only for a settled successful action. Pending or refused actions
+      keep their status visible on the calling surface. */
   kill: () => Promise<boolean>;
 }
 
@@ -62,21 +55,21 @@ export function useProcessKill(file: FileEntry): ProcessKill {
   const [killing, setKilling] = useState(false);
   const [message, setMessage] = useState("");
   const [forceNext, setForceNext] = useState(false);
-  const { caps, structuredSession } = useAgentCapabilities(file);
+  const { caps } = useAgentCapabilities(file);
+  const control = useConversationControl({ ...(file.conversationId ? { conversationId: file.conversationId } : {}), path: file.path }, "kill");
   const killCap = caps.controls.kill;
   const kill = useCallback(async (): Promise<boolean> => {
+    if (file.engine !== "shell") return control.run();
     setKilling(true);
     setMessage("");
     try {
-      const result = await requestKill(file, structuredSession, forceNext);
+      const result = await requestShellKill(file, forceNext);
       if (!result.ok) {
         setMessage(result.error ?? t("task.stopFailed"));
-        if (!result.structured) setForceNext(true);
+        setForceNext(true);
         return false;
       }
-      setMessage(result.structured
-        ? t("task.killRequested")
-        : t("task.signalSent", { signal: forceNext ? "SIGKILL" : "SIGTERM", pid: result.pid ?? "" }));
+      setMessage(t("task.signalSent", { signal: forceNext ? "SIGKILL" : "SIGTERM", pid: result.pid ?? "" }));
       return true;
     } catch {
       setMessage(t("common.serverUnavailable"));
@@ -85,42 +78,34 @@ export function useProcessKill(file: FileEntry): ProcessKill {
     } finally {
       setKilling(false);
     }
-  }, [file, structuredSession, forceNext, t]);
+  }, [file, control, forceNext, t]);
   return {
     state: killCap.state,
     reason: killCap.state === "disabled" ? t(killCap.reason) : "",
-    busy: killing,
-    force: forceNext,
-    message,
+    busy: file.engine === "shell" ? killing : control.busy,
+    force: file.engine === "shell" && forceNext,
+    message: file.engine === "shell" ? message
+      : control.outcome === "idle" ? ""
+      : control.outcome === "done" ? t("task.hostStopped")
+      : control.outcome === "pending" ? t("task.killRequested")
+      : control.outcome === "unknown" ? t("task.controlUnknown")
+      : control.error ?? t("task.stopFailed"),
     kill,
   };
 }
 
-/** The one kill request. Structured hosts (#242) go through the durable
-    control channel keyed by the canonical ROOT conversation identity and never
-    escalate; everything else posts to `/api/proc`, which resolves a live
-    subagent's kill to its root pid server-side. */
-async function requestKill(
+/** Background shell tasks keep their existing identity-fenced signal route. */
+async function requestShellKill(
   file: FileEntry,
-  structuredSession: ReturnType<typeof useAgentCapabilities>["structuredSession"],
   force: boolean,
-): Promise<{ ok: boolean; structured: boolean; pid?: number; error?: string }> {
-  if (structuredSession) {
-    const res = await fetch("/api/tmux", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ action: "kill", conversationId: structuredSession.session.conversationId }),
-    });
-    const json = (await res.json()) as { ok?: boolean; error?: string };
-    return { ok: res.ok && Boolean(json.ok), structured: true, error: json.error };
-  }
+): Promise<{ ok: boolean; pid?: number; error?: string }> {
   const res = await fetch("/api/proc", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ path: file.path, force }),
   });
   const json = (await res.json()) as { ok?: boolean; pid?: number; error?: string };
-  return { ok: res.ok && Boolean(json.ok), structured: false, pid: json.pid, error: json.error };
+  return { ok: res.ok && Boolean(json.ok), pid: json.pid, error: json.error };
 }
 
 export function ProcessStatusControls({
@@ -212,7 +197,7 @@ export function ProcessStatusControls({
             className={`inline-flex items-center whitespace-nowrap rounded-full border border-border bg-card text-[11px] font-semibold text-muted hover:border-danger/40 hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60 ${
               isMobile ? "min-h-11 px-3" : "px-2 py-0.5"
             }`}
-            aria-label={t("task.stopAria", { pid: file.pid ?? "" })}
+            aria-label={file.engine === "shell" ? t("task.stopAria", { pid: file.pid ?? "" }) : t("task.kill")}
             disabled={isMobile && kill.busy}
             onClick={isMobile ? act : () => setConfirming(true)}
           >
@@ -220,7 +205,7 @@ export function ProcessStatusControls({
           </button>
         )
       ) : null}
-      {kill.message ? <span className="max-w-[220px] truncate text-[11px] font-semibold text-muted">{kill.message}</span> : null}
+      {kill.message ? <span role="status" aria-live="polite" className="max-w-[220px] truncate text-[11px] font-semibold text-muted">{kill.message}</span> : null}
     </span>
   );
 }
