@@ -6,8 +6,10 @@ import { installSnapshot, type RuntimeReceipt } from '@/components/runtime/runti
 import { setRuntimeBusForTests } from '@/hooks/runtimeBus';
 import { setTmuxComposerRuntimeDependenciesForTests } from '@/components/tmuxComposerRuntime';
 import { setLogFeedDependenciesForTests } from '@/components/logFeedDependencies';
+import { composerSubmissionPayloads } from '@/lib/composerSubmissionPayloads';
 import { readPendingDeliveries } from '@/components/TmuxComposer';
-import { readOutbox } from '@/components/conversation/outbox';
+import { readOutbox, enqueueOutbox, updateOutbox } from '@/components/conversation/outbox';
+import { viewBus } from '@/hooks/viewPresenceBus';
 import { setLocale } from '@/lib/i18n';
 import type { FileEntry } from '@/lib/types';
 import type { RuntimeSnapshot } from '@/lib/runtime/contracts';
@@ -29,13 +31,17 @@ const state = {
   connection:'live',resyncedAt:null,lastEventAt:null,enabled:true,structuredHostsEnabled:true,
 };
 setRuntimeBusForTests({getState:()=>state,subscribe:()=>()=>{},subscribeFilesRevision:()=>()=>{},start(){},stop(){},refresh:async()=>true} as never);
+let refreshes = 0;
 let mode = new URLSearchParams(location.search).get('mode') ?? 'safe';
 setTmuxComposerRuntimeDependenciesForTests({
+  refreshRuntime: async () => { refreshes++; return true; },
   useRuntimeReceiptsForArtifact: () => useSyncExternalStore(listener => {listeners.add(listener);return()=>{listeners.delete(listener);};},()=>receipts,()=>receipts),
   sendRuntimeMessage: async body => {
     requests.push(JSON.parse(JSON.stringify(body)));
     if(mode === 'unknown') return {ok:false,error:'Synthetic lost response',status:503};
-    const receipt = {conversationId:CARD,idempotencyKey:body.idempotencyKey,operationId:'fixture-operation',kind:'send',status:mode === 'delivered'?'delivered':'failed',resend:mode === 'delivered'?'unsafe':'safe',text:body.text,reason:'Synthetic pre-dispatch refusal',at:new Date().toISOString(),revision:requests.length} as RuntimeReceipt;
+    const revision = Number(localStorage.getItem('fixture-server-revision') ?? '0') + 1;
+    localStorage.setItem('fixture-server-revision', String(revision));
+    const receipt = {conversationId:CARD,idempotencyKey:body.idempotencyKey,operationId:'fixture-operation',kind:'send',status:mode === 'delivered'?'delivered':'failed',resend:mode === 'delivered'?'unsafe':'safe',text:body.text,reason:'Synthetic pre-dispatch refusal',at:new Date().toISOString(),revision} as RuntimeReceipt;
     return {ok:mode === 'delivered',status:mode === 'delivered'?200:409,receipt,error:mode === 'delivered'?undefined:receipt.reason ?? undefined};
   },
 });
@@ -50,8 +56,31 @@ const render = (other = false) => root.render(createElement(NativeConversationPa
 render();
 Object.assign(window,{payloadFixture:{
   requests, cardId:CARD,
+  seedLegacyOutbox:(pending:{key:string;text:string}[])=>{
+    for (const p of pending) {
+      enqueueOutbox(CARD,{id:p.key,text:p.text,images:0,at:Date.now()});
+      updateOutbox(CARD,p.key,{state:"delivering",originalOperationOnly:true,operationId:"report-op-"+p.key.split("-").at(-1)});
+    }
+  },
+  select:(name:string)=>{
+    const path='/fixture/selected-'+name+'.jsonl';
+    viewBus.reportIdentity({viewSessionId:'fixture-view',deviceId:'fixture-device'});
+    viewBus.reportContext({project:'viewer',board:{renderedRevision:null,durableRevision:null,sync:'unavailable'}});
+    viewBus.reportCards([{path,conversationId:'conversation_selected_'+name,project:'viewer',label:'Selected '+name}]);
+    viewBus.reportSlice({mode:'list',focusedPath:path,selectedPaths:[path],visiblePaths:[path],camera:null});
+  },
+  refreshes:()=>refreshes,
+  saved:async()=>Promise.all((await composerSubmissionPayloads.list(CARD)).map(ref=>composerSubmissionPayloads.restore(ref))),
+  holdStorage:()=>{
+    const original=crypto.subtle.digest.bind(crypto.subtle);
+    let release!:()=>void;
+    const wait=new Promise<void>(resolve=>{release=resolve;});
+    crypto.subtle.digest=(async (...args:Parameters<SubtleCrypto['digest']>)=>{await wait;return original(...args);}) as SubtleCrypto['digest'];
+    return Object.assign(window,{releasePayloadStorage:()=>{crypto.subtle.digest=original;release();}}),true;
+  },
   state:()=>({outbox:readOutbox(CARD),pending:readPendingDeliveries(CARD)}),
   remount:()=>render(),switchCard:(other:boolean)=>render(other),
   mode:(next:string)=>{mode=next;},
+  profile:()=>{file.model="fixture-later-model";file.effort="low";render();},
   receipts:(next:RuntimeReceipt[])=>{receipts=next;for(const listener of listeners)listener();},
 }});

@@ -25,6 +25,8 @@ try {
   return r.abort();
  });
  const page=await context.newPage();
+ page.setDefaultTimeout(15000);
+ page.on("console",message=>fs.appendFileSync(path.join(out,"console.log"),message.text()+"\n"));
  page.on('pageerror',e=>fs.appendFileSync(path.join(out,'page-errors.log'),String(e)+'\n'));
  await page.goto('https://composer.invalid/');
  await page.locator('textarea').waitFor();
@@ -36,7 +38,8 @@ try {
  await page.waitForFunction(()=>document.querySelectorAll('[data-testid="attachment-tile"]').length===5).catch(async()=>{await page.screenshot({path:path.join(out,'intake.png')});});
  await page.screenshot({path:path.join(out,'before-send.png')});
  await page.locator('textarea').press('Enter');
- await page.waitForFunction(()=>window.payloadFixture.requests.length===1);
+ await page.waitForFunction(()=>window.payloadFixture.requests.length===1,{},{timeout:15000}).catch(async error=>{await page.screenshot({path:path.join(out,'failed-send.png')});fs.writeFileSync(path.join(out,'failed-dom.txt'),await page.locator('body').innerText());throw error;});
+ await page.waitForFunction(()=>window.payloadFixture.state().outbox[0]?.deliveryReceipt?.resend==='safe');
  const before=await page.evaluate(()=>({requests:window.payloadFixture.requests.map(r=>({key:r.idempotencyKey,images:r.images?.length,bytes:r.images?.map(i=>i.base64.length),files:r.files?.length})),pending:window.payloadFixture.state().pending.map(p=>({key:p.key,complete:p.payloadComplete,images:p.images.length,files:p.files?.length})),text:document.querySelector('textarea').value}));
  await page.reload();await page.locator('textarea').waitFor();
  await page.waitForTimeout(500);
@@ -45,6 +48,15 @@ try {
  const result={before,after,baseline:values.baseline};
  fs.writeFileSync(path.join(out,'composer-browser.json'),JSON.stringify(result,null,2));
  if(values.baseline)assert(before.requests[0].images===4 && after.requests===0 && after.pending.some(p=>p.complete===false&&p.images===0),'Baseline did not reproduce payload loss');
- else assert(after.pending.some(p=>p.complete!==false&&p.images===4),'Reload did not recover original images');
+ else {
+   await page.locator('[data-payload-key] summary').first().click();
+   await page.locator('[data-payload-retry]').click();
+   await page.waitForFunction(()=>window.payloadFixture.requests.length===1,{},{timeout:15000}).catch(async error=>{await page.screenshot({path:path.join(out,'failed-send.png')});fs.writeFileSync(path.join(out,'failed-dom.txt'),await page.locator('body').innerText());throw error;});
+   const retried=await page.evaluate(()=>window.payloadFixture.requests.map(r=>({key:r.idempotencyKey,images:r.images?.length,bytes:r.images?.map(i=>i.base64.length),files:r.files?.length})));
+   assert(retried[0].key===before.requests[0].key && retried[0].images===4 && retried[0].files===1 && retried[0].bytes.every(n=>n===4194304),'Original-key retry lost attachment bytes');
+   result.retried=retried;
+   await page.screenshot({path:path.join(out,'recovery-open.png')});
+   fs.writeFileSync(path.join(out,'composer-browser.json'),JSON.stringify(result,null,2));
+ }
  console.log(JSON.stringify(result));
 }finally{await browser.close();}

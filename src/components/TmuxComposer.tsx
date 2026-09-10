@@ -9,6 +9,7 @@ import { CircleAlert, RotateCcw } from "lucide-react";
 import type { TFunction } from "@/lib/i18n";
 
 import { Badge, type BadgeTone } from "@/components/ui/Badge";
+import { composerSubmissionPayloads, composerSubmissionSaving, withComposerSubmission, type RestoredComposerSubmission } from "@/lib/composerSubmissionPayloads";
 import { useComposer } from "@/hooks/useComposer";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useCodexRealtime } from "@/hooks/useCodexRealtime";
@@ -45,6 +46,7 @@ import {
   cancelOutbox,
   claimOutboxDispatch,
   enqueueOutbox,
+  retryOutbox,
   markOutboxResponded,
   outboxHistory,
   outboxCanAdmit,
@@ -303,6 +305,8 @@ export function RuntimeComposerReceipts({
   onEdit,
   onDismiss,
   onDiscard,
+  payloadRecoveryKeys = NO_DISMISSED,
+  onRecheck,
 }: {
   receipts: RuntimeReceipt[];
   actionsDisabled?: boolean;
@@ -323,6 +327,8 @@ export function RuntimeComposerReceipts({
   /** Persists a dismissal — receives every settled operation id of the row. */
   onDismiss?: (operationIds: string[]) => void;
   onDiscard?: (receipt: RuntimeReceipt) => void;
+  payloadRecoveryKeys?: ReadonlySet<string>;
+  onRecheck?: () => void;
 }) {
   const { t } = useLocale();
   const statusId = useId();
@@ -355,7 +361,8 @@ export function RuntimeComposerReceipts({
   }, [pinnedNow, unsettled]);
   const now = nowMs ?? tick;
   const isMessage = (receipt: RuntimeReceipt) => receipt.kind === "send" || receipt.kind === "steer";
-  const editable = (receipt: RuntimeReceipt) => isMessage(receipt)
+  const alternateRetry = (receipt: RuntimeReceipt) => !payloadRecoveryKeys.has(receipt.idempotencyKey);
+  const editable = (receipt: RuntimeReceipt) => alternateRetry(receipt) && isMessage(receipt)
     && (receipt.status === "failed" || receipt.status === "rejected")
     && !receiptHasUnknownFate(receipt)
     && typeof receipt.text === "string"
@@ -385,7 +392,9 @@ export function RuntimeComposerReceipts({
     <span className="flex min-w-0 flex-wrap items-center justify-end gap-1.5" data-operation={receipt.operationId}>
       <span role="status" className="text-caption text-warning">{t("orchPanel.errorUnknownTitle")}</span>
       {!receipt.operationId.startsWith(UNCONFIRMED_RECEIPT_PREFIX) ? <>
-        <button type="button" data-receipt-uncertain-retry disabled={actionsDisabled} className="min-h-11 rounded-full border border-border px-3" onClick={() => onRetry(receipt, "uncertain")}>{t("runtime.receipt.retry")}</button>
+        {alternateRetry(receipt)
+          ? <button type="button" data-receipt-uncertain-retry disabled={actionsDisabled} className="min-h-11 rounded-full border border-border px-3" onClick={() => onRetry(receipt, "uncertain")}>{t("runtime.receipt.retry")}</button>
+          : <button type="button" disabled={actionsDisabled} className="min-h-11 rounded-full border border-border px-3" onClick={onRecheck}>{t("composer.payloadRecheck")}</button>}
         {onDiscard ? <button type="button" data-receipt-discard disabled={actionsDisabled} className="min-h-11 rounded-full border border-border px-3" onClick={() => onDiscard(receipt)}>{t("runtime.receipt.discard")}</button> : null}
       </> : null}
     </span>
@@ -679,7 +688,7 @@ export function RuntimeComposerReceipts({
                         receipt={receipt}
                         wait={wait}
                         actionsDisabled={actionsDisabled}
-                        onRetry={failed
+                        onRetry={!alternateRetry(receipt) ? undefined : failed
                           ? () => retryFailed(receipt)
                           : exitable
                             ? () => onRetry(receipt, "uncertain")
@@ -771,7 +780,7 @@ export function RuntimeComposerReceipts({
                     {receiptHasUnknownFate(receipt) ? uncertainControls(receipt) : <ReceiptChip
                       receipt={receipt}
                       actionsDisabled={actionsDisabled}
-                      onRetry={receipt.status === "failed" ? () => retryFailed(receipt) : undefined}
+                      onRetry={alternateRetry(receipt) && receipt.status === "failed" ? () => retryFailed(receipt) : undefined}
                     />}
                     {receiptHasUnknownFate(receipt) && receipt.reason ? (
                       <span className="w-full break-words text-right text-caption text-muted" data-receipt-uncertain-why>{receipt.reason}</span>
@@ -828,7 +837,7 @@ export function RuntimeComposerReceipts({
             <ReceiptChip
               receipt={receipt}
               actionsDisabled={actionsDisabled}
-              onRetry={isMessage(receipt) && failed ? () => retryFailed(receipt) : undefined}
+              onRetry={alternateRetry(receipt) && isMessage(receipt) && failed ? () => retryFailed(receipt) : undefined}
               onEdit={editable(receipt) ? () => onEdit(receipt) : undefined}
             />
             {onDismiss && !receiptHasUnknownFate(receipt) && deliveryProblem(receipt.status) ? (
@@ -894,6 +903,8 @@ export interface PendingDelivery {
       replay. Such a record remains observable for late receipt settlement and
       never lends its key to a new payload after remount. */
   payloadComplete?: false;
+  /** Browser payload owner retained through canonical identity enrichment. */
+  payloadConversationId?: string;
   /** Current runtime operation that owns this logical generation. A manual
       retry rotates the operation while preserving the generation. */
   operationId?: string;
@@ -902,7 +913,6 @@ export interface PendingDelivery {
   reconciling?: true;
 }
 
-const PENDING_DELIVERY_LIMIT = 8;
 const SETTLED_SEND_KEY_LIMIT = 32;
 
 /** Text-only projection persisted per conversation so an unsettled generation
@@ -924,6 +934,7 @@ interface PersistedPendingDelivery {
   selectedContext?: unknown;
   reconciling?: unknown;
   payloadComplete?: unknown;
+  payloadConversationId?: unknown;
   operationId?: unknown;
 }
 
@@ -1022,7 +1033,6 @@ export function readPendingDeliveries(id: string): PendingDelivery[] {
     return raw
       .filter((entry): entry is PersistedPendingDelivery & { key: string; text: string } =>
         Boolean(entry) && typeof entry.key === "string" && typeof entry.text === "string")
-      .slice(0, PENDING_DELIVERY_LIMIT)
       .map((entry) => {
         const images = persistedImages(entry.images);
         const selectedContext = parseSelectedContextRef(entry.selectedContext);
@@ -1036,6 +1046,7 @@ export function readPendingDeliveries(id: string): PendingDelivery[] {
           ...(runtime ? { runtime } : {}),
           ...(entry.runtimeCaptured === true ? { runtimeCaptured: true as const } : {}),
           ...(payloadComplete ? {} : { payloadComplete: false as const }),
+          ...(typeof entry.payloadConversationId === "string" ? { payloadConversationId: entry.payloadConversationId } : {}),
           ...(typeof entry.operationId === "string" ? { operationId: entry.operationId } : {}),
           ...(entry.reconciling === true ? { reconciling: true as const } : {}),
         };
@@ -1048,10 +1059,10 @@ export function readPendingDeliveries(id: string): PendingDelivery[] {
 export function writePendingDeliveries(id: string, pending: readonly PendingDelivery[]): void {
   try {
     if (pending.length) {
-      sessionStorage.setItem(pendingSendKey(id), JSON.stringify(pending.map(({ key, text, images, files, runtime, runtimeCaptured, selectedContext, reconciling, payloadComplete, operationId }) => ({
+      sessionStorage.setItem(pendingSendKey(id), JSON.stringify(pending.map(({ key, text, images, files, runtime, runtimeCaptured, selectedContext, reconciling, payloadComplete, payloadConversationId, operationId }) => ({
         key,
         text,
-        images: images.map(({ id: imageId, base64, mime }) => ({
+        images: payloadConversationId ? undefined : images.map(({ id: imageId, base64, mime }) => ({
           ...(imageId ? { id: imageId } : {}),
           base64,
           mime,
@@ -1062,7 +1073,8 @@ export function writePendingDeliveries(id: string, pending: readonly PendingDeli
         ...(reconciling ? { reconciling: true } : {}),
         /* A generation whose files live only in memory is observable for late
            settlement but never lends its key to a replay (#1224). */
-        ...(payloadComplete === false || files?.length ? { payloadComplete: false } : {}),
+        ...(payloadComplete === false || files?.length || payloadConversationId ? { payloadComplete: false } : {}),
+        ...(payloadConversationId ? { payloadConversationId } : {}),
         ...(operationId ? { operationId } : {}),
       }))));
     } else {
@@ -1073,7 +1085,7 @@ export function writePendingDeliveries(id: string, pending: readonly PendingDeli
        settlement metadata and explicitly fence the key from payload replay;
        the in-memory owner still holds all bytes until this mount ends. */
     try {
-      sessionStorage.setItem(pendingSendKey(id), JSON.stringify(pending.map(({ key, text, runtime, runtimeCaptured, reconciling, operationId }) => ({
+      sessionStorage.setItem(pendingSendKey(id), JSON.stringify(pending.map(({ key, text, runtime, runtimeCaptured, reconciling, payloadConversationId, operationId }) => ({
         key,
         text,
         ...(runtime ? { runtime } : {}),
@@ -1081,6 +1093,7 @@ export function writePendingDeliveries(id: string, pending: readonly PendingDeli
         ...(reconciling ? { reconciling: true } : {}),
         ...(operationId ? { operationId } : {}),
         payloadComplete: false,
+        ...(payloadConversationId ? { payloadConversationId } : {}),
       }))));
     } catch { /* opaque origin: in-memory settlement remains authoritative */ }
   }
@@ -1642,6 +1655,39 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
      moment they are submitted, so the feed can render them as optimistic user
      bubbles while the composer clears and stays typable. */
   const outbox = useOutbox(cardId);
+  const [payloadRows, setPayloadRows] = useState<RestoredComposerSubmission[]>([]);
+  const [payloadStorageError, setPayloadStorageError] = useState<string | null>(null);
+  const payloadOwner = useRef(cardId);
+  const settlingPayloads = useRef(new Set<string>());
+  const [payloadHydrated, setPayloadHydrated] = useState(false);
+  const refreshPayloads = useCallback(async () => {
+    const owner = cardId;
+    const rows: RestoredComposerSubmission[] = [];
+    let error: string | null = null;
+    try {
+      for (const id of new Set([owner, file.path, ...readPendingDeliveries(owner).flatMap(entry => entry.payloadConversationId ? [entry.payloadConversationId] : [])])) {
+        for (const ref of await composerSubmissionPayloads.list(id)) {
+          try {
+            const row = await composerSubmissionPayloads.restore(ref);
+            if (row) rows.push(row);
+          } catch { error = t("composer.payloadCorrupt"); }
+        }
+      }
+    } catch { error = t("composer.payloadStorageUnavailable"); }
+    if (payloadOwner.current !== owner) return;
+    setPayloadRows(rows);
+    setPayloadStorageError(error);
+    setPayloadHydrated(true);
+  // The translator is recreated on every render; identity owns this read.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cardId, file.path]);
+  useEffect(() => {
+    payloadOwner.current = cardId;
+    setPayloadHydrated(false);
+    setPayloadRows([]);
+    void refreshPayloads();
+    return () => { payloadOwner.current = ""; };
+  }, [cardId, refreshPayloads]);
   /* Exact transcript user echoes are the authoritative retirement signal for
      temporary delivered rows. The feed publishes them reactively because the
      transcript write commonly precedes the final delivered receipt. */
@@ -1857,7 +1903,7 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
     if (!entry) return;
     /* A quota-limited remount lacks bytes for a safe replay. Keep the composer
        fenced while the durable receipt stream determines the original fate. */
-    setReconcilingSend(receiptReconciliations.current.size > 0 || entry.payloadComplete === false);
+    setReconcilingSend(receiptReconciliations.current.size > 0);
     setStatus({ kind: "err", text: t("composer.deliveryUnconfirmed") });
     if (outboxKeys.current.has(clientMessageId)) {
       updateOutbox(cardId, clientMessageId, { state: "failed", settledAt: nowMs(), error: t("composer.deliveryUnconfirmed") });
@@ -1927,7 +1973,8 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
        ownership before late receipts can settle text typed after remount. */
     outboxKeys.current = new Set(readOutbox(cardId).map((entry) => entry.id));
     for (const entry of restoredPending) {
-      if (entry.payloadComplete === false) updateOutbox(cardId, entry.key, { originalOperationOnly: true });
+      if (entry.payloadComplete === false) updateOutbox(cardId, entry.key, { originalOperationOnly: true,
+        ...(readOutbox(cardId).find(item => item.id === entry.key)?.state === "delivering" ? { deliveryUncertain: true as const } : {}) });
     }
     setReplayGenerationAvailable(restoredPending.some((entry) => entry.payloadComplete !== false));
     runtimeSendSnapshots.current = new Map();
@@ -1952,8 +1999,8 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
     }
     const reconcilingKeys = restoredPending.filter((entry) => entry.reconciling).map((entry) => entry.key);
     const hasIncompletePayload = restoredPending.some((entry) => entry.payloadComplete === false);
-    setReconcilingSend(reconcilingKeys.length > 0 || hasIncompletePayload);
-    if (reconcilingKeys.length || hasIncompletePayload) setStatus({ kind: "err", text: t("composer.admissionTimedOut") });
+    setReconcilingSend(reconcilingKeys.length > 0);
+    if (reconcilingKeys.length || hasIncompletePayload) setStatus(null);
     /* A staged document cannot be persisted, only named (#1224): the restored
        slots block Send, and the status says which files have to be attached
        again — a card switch or a phone tab restore never empties them out in
@@ -1973,6 +2020,65 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cardId]);
   /* eslint-enable react-hooks/set-state-in-effect */
+
+  // Hydration restores bytes only. Receipt evidence continues to own replay.
+  useEffect(() => {
+    if (!payloadHydrated) return;
+    let next = [...pendingDeliveries.current];
+    for (const row of payloadRows) {
+      outboxImages.current.set(row.ref.key, row.submission.images);
+      outboxFiles.current.set(row.ref.key, row.submission.files);
+      const existing = next.find(entry => entry.key === row.ref.key);
+      const restored: PendingDelivery = {
+        ...existing, key: row.ref.key,
+        text: typeof row.envelope?.body.text === "string" ? row.envelope.body.text : row.submission.text,
+        images: row.submission.images, files: row.submission.files,
+        selectedContext: row.submission.selectedContext as SelectedContextRef | undefined,
+        runtime: row.submission.runtime as RuntimeProfile | undefined,
+        runtimeCaptured: true,
+        payloadConversationId: row.ref.conversationId,
+      };
+      delete restored.payloadComplete;
+      if (row.envelope) next = [...next.filter(entry => entry.key !== row.ref.key), restored];
+      const queued = readOutbox(cardId).find(entry => entry.id === row.ref.key);
+      if (queued) {
+        outboxKeys.current.add(row.ref.key);
+        // Keep reload's original-operation fence until an explicit safe retry.
+        updateOutbox(cardId, row.ref.key, { needsReattach: undefined });
+      }
+    }
+    persistPendingDeliveries(next);
+    setReconcilingSend(receiptReconciliations.current.size > 0);
+    setStatus(current => current && [t("composer.admissionTimedOut"), t("composer.deliveryUnconfirmed")].includes(current.text) ? null : current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [payloadRows, payloadHydrated, cardId]);
+
+  useEffect(() => {
+    for (const row of payloadRows) {
+      const entry = outbox.find(item => item.id === row.ref.key);
+      // Observe the raw journal stream before presentation folding. A stale
+      // terminal projection must not hide a newer unknown journal revision.
+      const receipt = [...runtimeReceipts, ...displayedRuntimeReceipts]
+        .filter(item => item.idempotencyKey === row.ref.key && item.conversationId === row.ref.conversationId
+          && (!entry?.operationId || item.operationId === entry.operationId))
+        .sort((a, b) => b.revision - a.revision)[0];
+      if (!receipt) continue;
+      const evidenceKey = JSON.stringify([row.ref.conversationId, row.ref.key, receipt.operationId, receipt.revision, receipt.status, receipt.resend]);
+      if (settlingPayloads.current.has(evidenceKey)) continue;
+      settlingPayloads.current.add(evidenceKey);
+      void (async () => {
+        if (!await composerSubmissionPayloads.observe(row.ref, receipt)) return;
+        if (receipt.status !== "delivered" && receipt.reason !== "delivery-discarded") { await refreshPayloads(); return; }
+        // Disable every queue owner before the durable terminal marker and byte release.
+        if (entry) updateOutbox(cardId, row.ref.key, { state: receipt.status === "delivered" ? "delivered" : "failed", originalOperationOnly: true });
+        if (await composerSubmissionPayloads.settle(row.ref, receipt)) await refreshPayloads();
+      })().catch(() => {
+        settlingPayloads.current.delete(evidenceKey);
+        setPayloadStorageError(t("composer.payloadEvidenceUnknown"));
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [payloadRows, outbox, displayedRuntimeReceipts, runtimeReceipts, cardId, refreshPayloads]);
 
   useEffect(() => {
     if (!attachmentDraftHydrated.current) return;
@@ -2018,13 +2124,7 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
     const operationChanged = rebound.some((entry, index) => entry !== pendingDeliveries.current[index]);
     if (operationChanged) persistPendingDeliveries(rebound);
     const { settled, remaining } = settlePendingDeliveries(pendingDeliveries.current, displayedRuntimeReceipts);
-    const incompleteStillUncertain = remaining.some((entry) => {
-      if (entry.payloadComplete !== false) return false;
-      return !displayedRuntimeReceipts.some((receipt) =>
-        (receipt.idempotencyKey === entry.key || receipt.operationId === entry.operationId)
-        && receiptIsTerminal(receipt.status));
-    });
-    setReconcilingSend(receiptReconciliations.current.size > 0 || incompleteStillUncertain);
+    setReconcilingSend(receiptReconciliations.current.size > 0);
     if (!settled.length) return;
     persistPendingDeliveries(remaining);
     for (const settlement of settled) {
@@ -2110,6 +2210,7 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
     const onCompose = (event: Event) => {
       if ((event as CustomEvent<{ path?: string }>).detail?.path !== cardId) return;
       const next = sessionStorage.getItem(draftKey(cardId)) ?? "";
+      composer.draftRevision.current += 1;
       textRef.current = next;
       setTextState(next);
       requestAnimationFrame(() => {
@@ -2189,7 +2290,9 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
      current draft — the quick-ack (finding 5). It carries no attachments and
      leaves the composer's typed text and staged tiles exactly where they were. */
   const queueSubmit = (overrideText?: string, options?: { preserveDraft?: boolean; policy?: "steer-if-active" }) => {
+    if (composerSubmissionSaving(cardId)) return;
     const preserveDraft = options?.preserveDraft ?? false;
+    const draftRevision = composer.draftRevision.current;
     const requestedText = overrideText ?? textRef.current;
     const requestedImages: PendingImage[] = preserveDraft ? [] : attachments.imagesRef.current.map((image) => ({ ...image }));
     const requestedFiles: PendingFile[] = preserveDraft ? [] : attachments.filesRef.current.map((file) => ({ ...file }));
@@ -2223,52 +2326,110 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
        remount may have restored from an older unresolved generation — reusing
        such a key would stamp a NEW message as a replay of stale bytes. */
     const clientMessageId = mintIdempotencyKey();
-    outboxImages.current.set(clientMessageId, requestedImages);
-    if (requestedFiles.length) outboxFiles.current.set(clientMessageId, requestedFiles);
-    outboxKeys.current.add(clientMessageId);
-    const admitted = enqueueOutbox(cardId, {
-      id: clientMessageId,
-      text: requestedText,
-      images: requestedImages.length,
-      /* #1224: recorded on the durable entry so the refresh fence holds a
-         document-bearing submission back exactly as it holds an image-bearing
-         one — `outboxFiles` is memory-only, so a replay after a reload would
-         deliver the text without the file and say nothing. */
-      ...(requestedFiles.length ? { files: requestedFiles.length } : {}),
-      /* #1629: the operator's explicit choice, carried on the durable entry so a
-         replay after a reload asks for the same thing rather than falling back
-         to the default interrupt. */
-      ...(options?.policy ? { policy: options.policy } : {}),
-      at: nowMs(),
-      /* Submission watermark (finding 2): the echoes of this exact text that
-         already exist, so a pre-existing identical message never retires this
-         fresh bubble — only its own later echo does. */
-      echoBaseline: transcriptEchoCount(cardId, requestedText),
+    const commitSubmission = () => {
+      if (payloadOwner.current !== cardId) return;
+      outboxImages.current.set(clientMessageId, requestedImages);
+      if (requestedFiles.length) outboxFiles.current.set(clientMessageId, requestedFiles);
+      outboxKeys.current.add(clientMessageId);
+      const admitted = enqueueOutbox(cardId, {
+        id: clientMessageId,
+        text: requestedText,
+        images: requestedImages.length,
+        /* #1224: recorded on the durable entry so the refresh fence holds a
+           document-bearing submission back exactly as it holds an image-bearing
+           one — `outboxFiles` is memory-only, so a replay after a reload would
+           deliver the text without the file and say nothing. */
+        ...(requestedFiles.length ? { files: requestedFiles.length } : {}),
+        /* #1629: the operator's explicit choice, carried on the durable entry so a
+           replay after a reload asks for the same thing rather than falling back
+           to the default interrupt. */
+        ...(options?.policy ? { policy: options.policy } : {}),
+        at: nowMs(),
+        /* Submission watermark (finding 2): the echoes of this exact text that
+           already exist, so a pre-existing identical message never retires this
+           fresh bubble — only its own later echo does. */
+        echoBaseline: transcriptEchoCount(cardId, requestedText),
+      });
+      if (!admitted) {
+        outboxImages.current.delete(clientMessageId);
+        outboxFiles.current.delete(clientMessageId);
+        outboxKeys.current.delete(clientMessageId);
+        setStatus({ kind: "err", text: t("composer.outboxFull") });
+        return;
+      }
+      if (!preserveDraft) {
+        if (composer.draftRevision.current === draftRevision) setText("");
+        attachments.settleDelivered(requestedImages, requestedFiles);
+      }
+      setStatus(null);
+      inputRef.current?.focus();
+    };
+    if (!requestedImages.length && !requestedFiles.length
+      && !pendingDeliveries.current.some(entry => entry.payloadComplete === false)) { commitSubmission(); return; }
+    // Keep the complete authored generation until both durable phases commit.
+    const selectedContext = viewerSelectedContext();
+    const submittedFile = { path: file.path, project: file.project, pid: file.pid };
+    const submittedConversationId = structuredSession?.session.conversationId;
+    const legacyResumeRuntime = spawnMode && !relayMode;
+    const runtime = structuredSession ? sendRuntimeFrom(file) : legacyResumeRuntime ? resumeProfileBody(file) : undefined;
+    const policy = options?.policy ?? "interrupt-active";
+    void withComposerSubmission(cardId, async () => {
+      try {
+        const ref = await composerSubmissionPayloads.retain({ conversationId: cardId, key: clientMessageId }, {
+          text: requestedText, images: requestedImages, files: requestedFiles, selectedContext,
+          runtime: runtime as Record<string, unknown> | undefined, policy,
+        });
+        const bridge = await drainBridgeTurnStart();
+        const prelude = await isDesignatedManagerConversation(cardId, submittedFile.project)
+          ? viewerContextPrelude({ path: submittedFile.path, project: submittedFile.project }) : "";
+        const composed = prelude ? `${prelude}\n${requestedText}` : requestedText;
+        const wireText = bridge?.text ? `${bridge.text}\n\n${composed}` : composed;
+        const content = {
+          text: structuredSession ? wireText.trim() : wireText,
+          images: requestedImages.map(({ base64, mime }) => ({ base64, mime })),
+          ...(requestedFiles.length ? { files: requestedFiles.map(({ name, base64 }) => ({ name, base64 })) } : {}),
+          idempotencyKey: clientMessageId,
+        };
+        await composerSubmissionPayloads.seal(ref, structuredSession
+          ? { route: "runtime", body: { ...content, conversationId: submittedConversationId,
+              policy, ...(runtime ? { runtime } : {}), selectedContext } }
+          : { route: "legacy", body: { ...content, pid: submittedFile.pid ?? undefined, path: submittedFile.path,
+              clientMessageId, origin: { kind: "operator" }, ...(legacyResumeRuntime ? runtime ?? {} : {}) } });
+        if (!await composerSubmissionPayloads.beginAttempt(ref)) throw new Error("Original attempt is already owned");
+        if (bridge?.ackToken) rememberBridgeAcknowledgement(clientMessageId, bridge.ackToken);
+        await refreshPayloads();
+        commitSubmission();
+      } catch {
+        if (payloadOwner.current === cardId) {
+          setStatus({ kind: "err", text: t("composer.payloadStorageUnavailable") });
+          void refreshPayloads();
+        }
+      }
     });
-    if (!admitted) {
-      outboxImages.current.delete(clientMessageId);
-      outboxFiles.current.delete(clientMessageId);
-      outboxKeys.current.delete(clientMessageId);
-      setStatus({ kind: "err", text: t("composer.outboxFull") });
-      return;
-    }
-    if (!preserveDraft) {
-      setText("");
-      attachments.clearAll();
-    }
-    setStatus(null);
-    inputRef.current?.focus();
   };
 
   const send = async (overrideText?: string, retry?: { receiptId?: number; clientMessageId?: string }, outboxId?: string) => {
-    const requestedText = overrideText ?? text;
+    const originalKey = deliveryAttemptKey(idempotencyKey.current, retry?.clientMessageId);
+    const knownPayload = payloadRows.find(row => row.ref.key === originalKey);
+    let durable: RestoredComposerSubmission | null = null;
+    if (knownPayload || (outboxId && ((outboxImages.current.get(outboxId)?.length ?? 0) + (outboxFiles.current.get(outboxId)?.length ?? 0) > 0))) {
+      try {
+        durable = await composerSubmissionPayloads.restore(knownPayload?.ref ?? { conversationId: cardId, key: originalKey });
+        if (!durable?.envelope) throw new Error("Original envelope unavailable");
+      } catch {
+        if (outboxId) updateOutbox(cardId, outboxId, { state: "failed", originalOperationOnly: true, error: t("composer.payloadCorrupt") });
+        setStatus({ kind: "err", text: t("composer.payloadCorrupt") });
+        return;
+      }
+    }
+    const requestedText = durable?.submission.text ?? overrideText ?? text;
     /* The generation snapshot: exactly the text and attachments this attempt
        carries onto the wire. Read through the ref so a submit racing a paste
        still sends and later clears the same set. A queued submission carries
        the attachments frozen at submit time instead — the tray has moved on. */
-    const requestedImages: PendingImage[] = (outboxId ? outboxImages.current.get(outboxId) ?? [] : attachments.imagesRef.current)
+    const requestedImages: PendingImage[] = (durable?.submission.images ?? (outboxId ? outboxImages.current.get(outboxId) ?? [] : attachments.imagesRef.current))
       .map((image) => ({ ...image }));
-    const requestedFiles: PendingFile[] = (outboxId ? outboxFiles.current.get(outboxId) ?? [] : attachments.filesRef.current)
+    const requestedFiles: PendingFile[] = (durable?.submission.files ?? (outboxId ? outboxFiles.current.get(outboxId) ?? [] : attachments.filesRef.current))
       .map((file) => ({ ...file }));
     /** Records a queued submission's fate on the queue itself. A no-op for a
         direct (non-queued) send, which reports through the status line. The
@@ -2335,12 +2496,12 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
        now, so the operator moving the board a moment later cannot rewrite the
        admitted turn. A replay reuses the generation's original reference for
        the same reason it replays the original bytes. */
-    const selectedContext = replayGeneration ? replayGeneration.selectedContext : viewerSelectedContext();
+    const selectedContext = durable ? durable.submission.selectedContext as SelectedContextRef : replayGeneration ? replayGeneration.selectedContext : viewerSelectedContext();
     /* #691 §4, the no-call path: a turn is opening, so whatever the manager
        reported while nothing was live rides in with it. Never on a replay — a
        retained generation replays its original bytes under its original key, and
        changing them would defeat the idempotency the retry exists for. */
-    const bridgeTurn = replayGeneration ? null : await drainBridgeTurnStart();
+    const bridgeTurn = durable || replayGeneration ? null : await drainBridgeTurnStart();
     /* The Viewer-global orchestrator travels with the operator: what they are
        looking at right now — current project, focused conversation, explicit
        selection, read from the same view bus presence publishes from — rides
@@ -2354,11 +2515,11 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
        prepended the operator's view to unrelated workers' turns. The one thing
        that names the manager is the project's active seat (`managerIdentity`),
        queried per dispatch and cached. */
-    const viewerPrelude = replayGeneration || !(await isDesignatedManagerConversation(cardId, file.project))
+    const viewerPrelude = durable || replayGeneration || !(await isDesignatedManagerConversation(cardId, file.project))
       ? ""
       : viewerContextPrelude({ path: file.path, project: file.project });
     const composedText = viewerPrelude ? `${viewerPrelude}\n${requestedText}` : requestedText;
-    const payloadText = replayGeneration?.text
+    const payloadText = durable?.envelope?.body.text as string | undefined ?? replayGeneration?.text
       ?? (bridgeTurn?.text ? `${bridgeTurn.text}\n\n${composedText}` : composedText);
     const sentImages: PendingImage[] = replayGeneration
       ? replayGeneration.images.map((image) => ({ ...image }))
@@ -2366,6 +2527,11 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
     const sentFiles: PendingFile[] = replayGeneration
       ? (replayGeneration.files ?? []).map((file) => ({ ...file }))
       : requestedFiles;
+    if ((sentImages.length || sentFiles.length) && !durable) {
+      setStatus({ kind: "err", text: t("composer.payloadCorrupt") });
+      if (outboxId) updateOutbox(cardId, outboxId, { state: "failed", originalOperationOnly: true });
+      return;
+    }
     if (!payloadText.trim() && !sentImages.length && !sentFiles.length) {
       /* Nothing to deliver — a queued entry that lost its payload must leave
          the queue rather than block the drain forever. */
@@ -2433,7 +2599,7 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
         runtimeSendSnapshots.current.delete(oldest);
       }
     }
-    const runtimeOverride = runtimeSendSnapshots.current.get(clientMessageId);
+    const runtimeOverride = durable ? durable.submission.runtime as RuntimeProfile | undefined : runtimeSendSnapshots.current.get(clientMessageId);
     const submissionPolicy = (outboxId
       ? readOutbox(cardId).find((entry) => entry.id === outboxId)?.policy
       : undefined) ?? "interrupt-active";
@@ -2458,9 +2624,10 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
           ...(runtimeOverride ? { runtime: runtimeOverride } : {}),
           selectedContext,
           ...(capturesRuntime ? { runtimeCaptured: true as const } : {}),
+          ...(durable ? { payloadConversationId: durable.ref.conversationId } : {}),
         },
         ...pendingDeliveries.current,
-      ].slice(0, PENDING_DELIVERY_LIMIT));
+      ]);
     }
     /* Clear exactly this settled generation: its text prefix leaves the draft
        (later typing survives) and its attachment snapshot leaves the tray
@@ -2510,6 +2677,10 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
       /* A legacy pane send that reached the pane is delivered; a migration
          hold/queue is still in flight to the successor (round-1 P1#4). */
       settleOutbox(held ? "delivering" : "delivered", undefined, held);
+      if (!held && durable?.envelope?.route === "legacy") {
+        void composerSubmissionPayloads.settle(durable.ref).then(() => refreshPayloads())
+          .catch(() => setPayloadStorageError(t("composer.payloadCleanupPending")));
+      }
       if (ownsDeliveryState) {
         /* A `held` outcome does NOT imply an account switch: the registry fence
            also holds a delivery whose generation claim did not land. Only a card
@@ -2551,12 +2722,22 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
          the request is created, before anything can await. A reload while the
          response is still pending then hydrates this entry as a possible
          dispatch instead of replaying it or presenting it as failed. */
+      if (durable && !composerSubmissionPayloads.consumeAttempt(durable.ref)) {
+        // The existing outbox Retry button also enters through this dispatcher.
+        // Its explicit queued retry still needs the durable receipt/attempt gate.
+        const retryClaim = durable.retryAvailable && await composerSubmissionPayloads.beginAttempt(durable.ref);
+        if (!retryClaim || !composerSubmissionPayloads.consumeAttempt(durable.ref)) {
+          if (outboxId) updateOutbox(cardId, outboxId, { state: "failed", originalOperationOnly: true, deliveryUncertain: true });
+          setStatus({ kind: "err", text: t("composer.payloadUnknown") });
+          return;
+        }
+      }
       if (outboxId && reachesWire) updateOutbox(cardId, outboxId, { dispatchedAt: nowMs() });
-      admissionRequest = Promise.resolve(structuredSession
+      admissionRequest = Promise.resolve((durable ? durable.envelope?.route === "runtime" : Boolean(structuredSession))
         ? !reachesWire
           ? { ok: false, structured: true, error: structuredImagesReason }
-          : runtimeDependencies.sendRuntimeMessage({
-              conversationId: structuredSession.session.conversationId,
+          : runtimeDependencies.sendRuntimeMessage((durable?.envelope?.body ?? {
+              conversationId: structuredSession!.session.conversationId,
               text: payloadText.trim(),
               images: sentImages.map((image) => ({ base64: image.base64, mime: image.mime })),
               /* #1224: the bytes ride the request and the SERVER writes them to
@@ -2571,7 +2752,7 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
               policy: submissionPolicy,
               ...(runtimeOverride ? { runtime: runtimeOverride } : {}),
               selectedContext,
-            }).then((result) => ({
+            }) as unknown as Parameters<typeof runtimeDependencies.sendRuntimeMessage>[0]).then((result) => ({
               ok: result.ok,
               structured: true,
               error: result.error,
@@ -2586,7 +2767,7 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
         : fetch("/api/tmux", {
             method: "POST",
             headers: { "content-type": "application/json" },
-            body: JSON.stringify({
+            body: JSON.stringify(durable?.envelope?.body ?? {
               pid: file.pid ?? undefined,
               path: file.path,
               text: payloadText,
@@ -2612,6 +2793,12 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
         || (json.operationId && json.receipt.operationId !== json.operationId))) {
         json = { ...json, ok: false, receipt: undefined, operationId: undefined, held: undefined,
           error: "receipt-identity-mismatch" };
+      }
+      if (durable && json.receipt) {
+        if (!await composerSubmissionPayloads.observe(durable.ref, json.receipt)) {
+          json = { ...json, ok: false, receipt: undefined, operationId: undefined, error: "receipt-identity-mismatch" };
+        }
+        await refreshPayloads();
       }
       if (json.operationId) {
         if (outboxId) updateOutbox(cardId, outboxId, { operationId: json.operationId });
@@ -2881,6 +3068,7 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
    * says, once Codex has acknowledged it.
    */
   const queueForCodex = () => {
+    if (composerSubmissionSaving(cardId)) return;
     const requestedText = textRef.current.trim();
     const requestedImages = attachments.imagesRef.current.map((image) => ({ ...image }));
     if (!nativeQueueEnabled) {
@@ -3228,9 +3416,61 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
     </div>
   ) : null;
 
+  const payloadRecovery = payloadRows.length || payloadStorageError || pendingDeliveries.current.some(entry => entry.payloadComplete === false) ? (
+    <section data-testid="composer-payload-recovery" className="flex flex-col gap-2 text-caption" aria-label={t("composer.payloadRecovery")}>
+      {payloadStorageError ? <p role="alert">{payloadStorageError}</p> : null}
+      {payloadRows.map(row => {
+        const queued = outbox.find(entry => entry.id === row.ref.key);
+        const known = queued?.deliveryReceipt;
+        const persisted = row.receipt ? { ...row.receipt, kind: "send", at: row.receipt.at ?? "", text: row.submission.text } as RuntimeReceipt : undefined;
+        const receipt = [...displayedRuntimeReceipts, ...(known ? [known] : []), ...(persisted ? [persisted] : [])]
+          .filter(item => item.idempotencyKey === row.ref.key && item.conversationId === row.ref.conversationId
+            && (!persisted || item.operationId === persisted.operationId))
+          .sort((a, b) => b.revision - a.revision)[0];
+        const safe = row.retryAvailable && !queued?.deliveryUncertain && (!queued || queued.state === "failed")
+          && receipt?.status === "failed" && receipt.resend === "safe" && !receiptHasUnknownFate(receipt)
+          && receipt.reason !== "delivery-discarded" && (!queued?.operationId || receipt.operationId === queued.operationId);
+        return <details key={row.ref.key} data-payload-key={row.ref.key} className="rounded border border-border p-2">
+          <summary className="cursor-pointer">{row.submission.text.length > 160 ? row.submission.text.slice(0, 160) + "…" : row.submission.text || t("composer.payloadAttachments")} · {t("composer.payloadSaved")}</summary>
+          <p>{t("composer.payloadImages", { count: row.submission.images.length })} · {t("composer.payloadFiles", { count: row.submission.files.length })}</p>
+          <p>{receipt?.reason ?? t(row.envelope ? "composer.payloadUnknown" : "composer.payloadLocal")}</p>
+          <p>{t(receiptReconciliations.current.has(row.ref.key) ? "composer.payloadChecking" : "composer.payloadNotChecking")}</p>
+          <div className="flex flex-wrap gap-2">
+            <button type="button" className="min-h-9 rounded border border-border px-2" onClick={() => void runtimeDependencies.refreshRuntime().then(() => refreshPayloads())}>{t("composer.payloadRecheck")}</button>
+            {!row.envelope ? <button type="button" className="min-h-9 rounded border border-border px-2"
+              onClick={() => void composerSubmissionPayloads.discardUnprepared(row.ref).then(() => refreshPayloads())
+                .catch(() => setPayloadStorageError(t("composer.payloadCorrupt")))}>{t("composer.payloadDiscardPreparation")}</button> : null}
+            {safe && row.envelope ? <button type="button" data-payload-retry className="min-h-9 rounded border border-border px-2" disabled={busy || voiceSending}
+              onClick={() => void withComposerSubmission(cardId, async () => {
+                if (!await composerSubmissionPayloads.beginAttempt(row.ref)) return;
+                const live = readOutbox(cardId).find(entry => entry.id === row.ref.key);
+                if (live && (live.state !== "failed" || live.deliveryUncertain)) return;
+                if (!queued) {
+                  if (!enqueueOutbox(cardId, { id: row.ref.key, text: row.submission.text, images: row.submission.images.length, files: row.submission.files.length, at: row.ref.savedAt })) return;
+                  updateOutbox(cardId, row.ref.key, { state: "failed", deliveryReceipt: receipt });
+                }
+                updateOutbox(cardId, row.ref.key, { state: "failed", needsReattach: undefined, originalOperationOnly: undefined, deliveryUncertain: undefined });
+                retryOutbox(cardId, row.ref.key);
+                await refreshPayloads();
+              }).catch(() => setPayloadStorageError(t("composer.payloadCorrupt")))}>{t("composer.payloadRetry")}</button> : null}
+          </div>
+        </details>;
+      })}
+      {pendingDeliveries.current.filter(entry => entry.payloadComplete === false && !payloadRows.some(row => row.ref.key === entry.key)).map(entry => (
+        <details key={entry.key} data-payload-incomplete className="rounded border border-border p-2">
+          <summary>{entry.text || t("composer.payloadAttachments")} · {t("composer.payloadIncomplete")}</summary>
+          <p>{t("composer.payloadMissing")}</p>
+          <p>{displayedRuntimeReceipts.find(receipt => receipt.idempotencyKey === entry.key)?.reason ?? t("composer.payloadUnknown")}</p>
+          <p>{t(receiptReconciliations.current.has(entry.key) ? "composer.payloadChecking" : "composer.payloadNotChecking")}</p>
+          <button type="button" className="min-h-9 rounded border border-border px-2" onClick={() => void runtimeDependencies.refreshRuntime().then(() => refreshPayloads())}>{t("composer.payloadRecheck")}</button>
+        </details>
+      ))}
+    </section>
+  ) : null;
   const composerBar = (
     <ComposerBar
-      composer={composer}
+      composer={{ ...composer, status: composer.status && ([t("composer.admissionTimedOut"), t("composer.deliveryUnconfirmed")].includes(composer.status.text)
+        || displayedRuntimeReceipts.some(receipt => receipt.reason === composer.status!.text)) ? null : composer.status }}
       placeholder={placeholder ?? (isMobile && phonePlaceholder
         ? phonePlaceholder
         : unresolvedOwnership
@@ -3382,16 +3622,18 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
       sendDisabledReason={deadHostBlocksSend
         ? t("deadHost.sendBlocked")
         : reconcilingSend
-          ? t("composer.admissionTimedOut")
+          ? t("composer.payloadChecking")
           : effectiveSendBlockedReason ?? undefined}
       /* Every blocked state keeps one recovery route (issue #499): Re-check
          forces a fresh runtime snapshot, which resolves an unresolved host,
          surfaces a recovered one, and reconciles a timed-out admission. */
       onSendBlockedRecover={() => void runtimeDependencies.refreshRuntime()}
-      receipts={
+      receipts={payloadRecovery || displayedRuntimeReceipts.length ? <>{payloadRecovery}{
         displayedRuntimeReceipts.length
           ? <RuntimeComposerReceipts
               receipts={displayedRuntimeReceipts}
+              payloadRecoveryKeys={new Set([...payloadRows.map(row => row.ref.key), ...pendingDeliveries.current.filter(entry => entry.payloadComplete === false).map(entry => entry.key)])}
+              onRecheck={() => void runtimeDependencies.refreshRuntime().then(() => refreshPayloads())}
               actionsDisabled={busy || voiceSending || deadHostBlocksSend}
               dismissed={dismissedReceipts}
               session={structuredSession
@@ -3403,7 +3645,7 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
               onDiscard={(receipt) => void discardRuntimeReceipt(receipt)}
             />
           : undefined
-      }
+      }</> : undefined}
       leftSlot={
         /* The compact model/reasoning pill (issue #390): lives in the quiet
            bottom row, left of the image picker, on exactly the surfaces the
@@ -3512,7 +3754,7 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
      remains outside the dormant presentation boundary. */
   const view = <DormantView active={viewActive}>{body}</DormantView>;
   return <>
-    <OutboxDispatcher entries={outbox} ready={!busy && !voiceSending && !reconcilingSend} onDispatch={dispatchQueued} />
+    <OutboxDispatcher entries={outbox} ready={payloadHydrated && !busy && !voiceSending && !reconcilingSend} onDispatch={dispatchQueued} />
     {dockNode === undefined ? view : dockNode ? createPortal(view, dockNode) : <div hidden data-testid="voice-composer-parked">{view}</div>}
   </>;
 });

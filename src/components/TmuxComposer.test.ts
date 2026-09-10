@@ -503,7 +503,7 @@ test("a retry leaf takes ownership and settles the original generation once", ()
   expect(second.settled).toEqual([]);
 });
 
-test("pending generations persist immutable image snapshots per conversation and reload bounded", () => {
+test("pending generations retain every unresolved identity across reload", () => {
   /* A remount or refresh must retain the exact generation bytes needed for an
      idempotent retry. Preview URLs are rebuilt from the persisted image body. */
   const backing = new Map<string, string>();
@@ -528,7 +528,7 @@ test("pending generations persist immutable image snapshots per conversation and
     }));
     writePendingDeliveries("conv-persist", entries);
     const reloaded = readPendingDeliveries("conv-persist");
-    expect(reloaded).toHaveLength(8);
+    expect(reloaded).toHaveLength(10);
     expect(reloaded[0]).toEqual({
       key: "key-0",
       text: "ask 0",
@@ -542,6 +542,12 @@ test("pending generations persist immutable image snapshots per conversation and
       operationId: "op-key-0",
       selectedContext: { version: 1, state: "none", capturedAt: "2026-09-05T12:00:00.000Z" },
     });
+    writePendingDeliveries("conv-persist", [{ ...entries[0]!, payloadConversationId: "original-owner" }]);
+    const pointer = readPendingDeliveries("conv-persist")[0]!;
+    expect(pointer.payloadConversationId).toBe("original-owner");
+    expect(pointer.payloadComplete).toBe(false);
+    expect(pointer.images).toEqual([]);
+    expect(JSON.parse(backing.get("llvPendingSend:conv-persist")!)[0].images).toBeUndefined();
     writePendingDeliveries("conv-persist", []);
     expect(readPendingDeliveries("conv-persist")).toEqual([]);
     backing.set("llvPendingSend:conv-corrupt", "{not json");

@@ -115,8 +115,10 @@ export function useComposer({ initialText, persistText, submit, disabled = false
      overwriting it. */
   const [text, setTextState] = useState(initialText);
   const textRef = useRef(text);
+  const draftRevision = useRef(0);
   const setText = (value: string | ((prev: string) => string)) => {
     const next = typeof value === "function" ? value(textRef.current) : value;
+    draftRevision.current += 1;
     textRef.current = next;
     setTextState(next);
     persistText(next);
@@ -285,6 +287,7 @@ export function useComposer({ initialText, persistText, submit, disabled = false
   return {
     text,
     textRef,
+    draftRevision,
     setText,
     /* The raw setter, for restoring an already-persisted draft from outside
        (a link-arrow drop) without re-persisting it through setText. */
