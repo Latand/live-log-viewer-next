@@ -2111,6 +2111,66 @@ describe("CodexAppServerHost", () => {
     }
   });
 
+  test.each([false, true])("a bounded tail starting inside a marker-bearing record preserves send dedup (already delivered: %s)", async (alreadyDelivered) => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-tail-boundary-"));
+    const transcriptPath = path.join(directory, "delivery-thread.jsonl");
+    const operationId = "operation-tail-boundary";
+    const text = "retain exact recipient ownership";
+    const delivered = JSON.stringify({ type: "event_msg", payload: {
+      type: "user_message",
+      message: encodeCodexStructuredUserText(text, undefined, null, null, deliveryDedup(operationId)),
+    } });
+    // The 16 MiB tail starts inside this complete, valid tool record. Its
+    // quoted marker is ordinary tool output, not a corrupt recipient message.
+    const tool = JSON.stringify({ type: "response_item", payload: {
+      type: "function_call_output", output: "x".repeat(2 * 1024 * 1024) + " llv:structured-user quoted source",
+    } });
+    const filler = JSON.stringify({ type: "event_msg", payload: {
+      type: "agent_message", message: "x".repeat(15 * 1024 * 1024),
+    } });
+    fs.writeFileSync(transcriptPath, `${alreadyDelivered ? delivered + "\n" : ""}${tool}\n${filler}\n`);
+    const server = new FakeAppServer("delivery-thread", "delivery-thread");
+    server.threadPath = transcriptPath;
+    server.hydratedReadError = "list_turns is not supported yet";
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo", eventStore: new MemoryEventStore(), spawnProcess: fakeSpawn(server),
+    });
+    try {
+      expect(await host.send({ id: operationId, text })).toEqual({
+        outcome: "turn-started", turnId: alreadyDelivered ? operationId : "turn-1",
+      });
+      expect(server.requests.filter((request) => request.method === "turn/start" || request.method === "turn/steer"))
+        .toHaveLength(alreadyDelivered ? 0 : 1);
+    } finally {
+      await host.release();
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("a malformed marker-bearing record crossing the tail boundary still refuses delivery", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-tail-corrupt-"));
+    const transcriptPath = path.join(directory, "delivery-thread.jsonl");
+    const corrupt = "x".repeat(2 * 1024 * 1024) + " llv:structured-user malformed record";
+    const filler = JSON.stringify({ type: "event_msg", payload: {
+      type: "agent_message", message: "x".repeat(15 * 1024 * 1024),
+    } });
+    fs.writeFileSync(transcriptPath, `${corrupt}\n${filler}\n`);
+    const server = new FakeAppServer("delivery-thread", "delivery-thread");
+    server.threadPath = transcriptPath;
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo", eventStore: new MemoryEventStore(), spawnProcess: fakeSpawn(server),
+    });
+    try {
+      await expect(host.send({ id: "operation-corrupt-tail", text: "deliver once" }))
+        .rejects.toThrow("recipient transcript is unavailable for delivery deduplication");
+      expect(server.requests.some((request) => request.method === "turn/start" || request.method === "turn/steer"))
+        .toBeFalse();
+    } finally {
+      await host.release();
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   test("keeps a send pending until the matching user item is persisted", async () => {
     const server = new FakeAppServer("confirm-after-rpc");
     server.autoCompleteUserMessage = false;

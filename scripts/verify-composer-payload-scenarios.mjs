@@ -52,7 +52,7 @@ try{
  results.wireQuota=await wireQuota.evaluate(()=>({requests:window.payloadFixture.requests.length,text:document.querySelector('textarea').value,tiles:document.querySelectorAll('[data-testid="attachment-tile"]').length}));
  assert(results.wireQuota.requests===0&&results.wireQuota.tiles===5&&results.wireQuota.text==='Keep draft if envelope storage fails','Second-phase quota lost draft or sent');
  await wireQuota.locator('[data-payload-key] summary').click();
- await wireQuota.getByText('Remove saved preparation',{exact:true}).click();await wireQuota.waitForFunction(async()=>!(await window.payloadFixture.saved()).length);
+ await wireQuota.getByText('Discard unsent copy',{exact:true}).click();await wireQuota.waitForFunction(async()=>!(await window.payloadFixture.saved()).length);
  results.wireQuota.explicitPreparationDiscard=true;await wireQuota.close();
 
  const denied=await context.newPage();denied.setDefaultTimeout(15000);
