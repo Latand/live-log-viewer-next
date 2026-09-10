@@ -87,11 +87,36 @@ let steerSupported = true;
 let turn: "running" | "idle" = "idle";
 let nativeQueueCapable = true;
 
+/** The journal's own answer, in the shape the route actually returns: the
+    operation it committed, and a receipt carrying that operation's identity —
+    which conversation, which idempotency key, which kind of command. The hook
+    checks all of it before reading the verdict, so a stub that answers less than
+    this is testing a contract the server does not have. */
+function journalReceipt(body: Record<string, unknown>, status = "queued"): { status: number; body: Record<string, unknown> } {
+  const operationId = `op-${String(body.idempotencyKey)}`;
+  return {
+    status: status === "rejected" ? 409 : 202,
+    body: {
+      operationId,
+      receipt: {
+        operationId,
+        conversationId: body.conversationId,
+        idempotencyKey: body.idempotencyKey,
+        kind: "native-queue",
+        status,
+        revision: 1,
+        at: "2026-09-10T11:00:00.000Z",
+        admittedAt: "2026-09-10T11:00:00.000Z",
+      },
+    },
+  };
+}
+
 const queueTransport: NativeQueueDependencies = {
   read: async () => ({ entries: queueEntries, native: { threadId: "thread-1", items: [], stale: false } }),
   write: async (body) => {
     queueWrites.push(body);
-    return { status: 202, body: { operationId: "op-1", receipt: { status: "queued" } } };
+    return journalReceipt(body);
   },
 };
 
@@ -407,6 +432,86 @@ test("the retained identity survives a reload, and a different message gets its 
   } finally {
     (queueTransport as { write: NativeQueueDependencies["write"] }).write = previous;
   }
+});
+
+test("a receipt belonging to another request cannot settle this hand-off", async () => {
+  /* A FULLY-SHAPED FOREIGN RECEIPT. It names one operation consistently in the
+     reply and in the receipt, and carries a status the journal really uses — but
+     its conversation and its idempotency key belong to somebody else's request.
+     Reading it as this operation's verdict released the recovery record, and the
+     next press minted a new key for a message that may already be queued.
+
+     Both verdicts are covered, because the refusal path used to skip identity
+     entirely: a foreign `queued` and a foreign `failed` settled this operation
+     just as readily as each other. */
+  for (const status of ["queued", "failed"] as const) {
+    const previous = queueTransport.write;
+    (queueTransport as { write: NativeQueueDependencies["write"] }).write = async (body) => {
+      queueWrites.push(body);
+      return {
+        status: 202,
+        body: {
+          operationId: "foreign-operation",
+          receipt: {
+            operationId: "foreign-operation",
+            conversationId: "conversation_foreign",
+            idempotencyKey: "another-request",
+            kind: "native-queue",
+            status,
+            revision: 1,
+            at: "2026-09-10T11:00:00.000Z",
+            admittedAt: "2026-09-10T11:00:00.000Z",
+          },
+        },
+      };
+    };
+    const { host, root } = await mount();
+    try {
+      const textarea = host.querySelector("textarea") as HTMLTextAreaElement;
+      await settle(() => appendComposerDraft(CARD, "one operation only"));
+      await settle(() => press(textarea, "Enter", { altKey: true }));
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+      /* The draft comes back, because nothing said this operation was taken. */
+      const restored = host.querySelector("textarea") as HTMLTextAreaElement;
+      expect(`${status}: ${restored.value}`).toBe(`${status}: one operation only`);
+
+      await settle(() => press(restored, "Enter", { altKey: true }));
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+      expect(`${status}: ${String(queueWrites[1]!.idempotencyKey)}`)
+        .toBe(`${status}: ${String(queueWrites[0]!.idempotencyKey)}`);
+      /* And the panel still offers the one control that resolves it. */
+      expect(host.querySelector('[data-testid="native-queue-unresolved-retry"]')).not.toBeNull();
+    } finally {
+      (queueTransport as { write: NativeQueueDependencies["write"] }).write = previous;
+      await act(async () => root.unmount());
+    }
+    document.body.replaceChildren();
+    sessionStorage.clear();
+    resetRetainedQueueAdmissionsForTests();
+    queueWrites = [];
+  }
+});
+
+test("this hand-off's own receipt settles it, and the unresolved row goes with it", async () => {
+  /* The positive control: a receipt whose operation, conversation, idempotency
+     key and kind are all this request's is read as the verdict it carries, the
+     recovery record is released, and nothing is left waiting on an answer. */
+  const { host, root } = await mount();
+  const textarea = host.querySelector("textarea") as HTMLTextAreaElement;
+  await settle(() => appendComposerDraft(CARD, "properly acknowledged"));
+  await settle(() => press(textarea, "Enter", { altKey: true }));
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+
+  expect(queueWrites).toHaveLength(1);
+  expect((host.querySelector("textarea") as HTMLTextAreaElement).value).toBe("");
+  expect(host.querySelector('[data-testid="native-queue-unresolved"]')).toBeNull();
+
+  /* Settled means settled: the same words again are a second message. */
+  await settle(() => appendComposerDraft(CARD, "properly acknowledged"));
+  await settle(() => press(host.querySelector("textarea") as HTMLTextAreaElement, "Enter", { altKey: true }));
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+  expect(queueWrites[1]!.idempotencyKey).not.toBe(queueWrites[0]!.idempotencyKey);
+  await act(async () => root.unmount());
 });
 
 test("an admission the journal answered releases its identity, so the next message is new", async () => {

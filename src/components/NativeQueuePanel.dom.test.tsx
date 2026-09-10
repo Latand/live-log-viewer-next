@@ -76,9 +76,42 @@ let writes: Record<string, unknown>[] = [];
 let reads = 0;
 let entries: NativeQueueRecord[] = [];
 let items: NativeQueuedSubmission[] = [];
-/* The journal's own answer shape: the operation it committed, and its verdict.
-   A reply short of that is not an acceptance and the tests below say so. */
-let writeAnswer: { status: number; body: Record<string, unknown> } = { status: 202, body: { operationId: "op-1", receipt: { status: "queued" } } };
+/**
+ * The journal's own answer, in the shape the route actually returns: the
+ * operation it committed, and a receipt carrying that operation's identity —
+ * which conversation, which idempotency key, which kind of command.
+ *
+ * The hook checks every one of those against what it submitted BEFORE reading
+ * the verdict, so a stub that answers less than this is testing a contract the
+ * server does not have. `null` fields let a test withhold exactly one of them.
+ */
+function journalReceipt(
+  body: Record<string, unknown>,
+  overrides: { status?: string; conversationId?: string | null; idempotencyKey?: string | null; kind?: string | null; operationId?: string | null } = {},
+): { status: number; body: Record<string, unknown> } {
+  const operationId = overrides.operationId === undefined ? `op-${String(body.idempotencyKey)}` : overrides.operationId;
+  const receipt: Record<string, unknown> = {
+    status: overrides.status ?? "queued",
+    revision: 1,
+    at: "2026-09-10T11:00:00.000Z",
+    admittedAt: "2026-09-10T11:00:00.000Z",
+  };
+  if (operationId !== null) receipt.operationId = operationId;
+  const conversationId = overrides.conversationId === undefined ? body.conversationId : overrides.conversationId;
+  if (conversationId !== null) receipt.conversationId = conversationId;
+  const idempotencyKey = overrides.idempotencyKey === undefined ? body.idempotencyKey : overrides.idempotencyKey;
+  if (idempotencyKey !== null) receipt.idempotencyKey = idempotencyKey;
+  const kind = overrides.kind === undefined ? "native-queue" : overrides.kind;
+  if (kind !== null) receipt.kind = kind;
+  return {
+    status: (overrides.status ?? "queued") === "rejected" ? 409 : 202,
+    body: { ...(operationId === null ? {} : { operationId: `op-${String(body.idempotencyKey)}` }), receipt },
+  };
+}
+
+/** Replaced per test; by default the journal's honest answer for the request. */
+let writeAnswer: ((body: Record<string, unknown>) => { status: number; body: Record<string, unknown> }) | { status: number; body: Record<string, unknown> } =
+  (body) => journalReceipt(body);
 let readFails: string | null = null;
 let host: HTMLDivElement;
 let root: ReturnType<typeof createRoot>;
@@ -93,7 +126,7 @@ const dependencies: NativeQueueDependencies = {
     writes.push(body);
     try { parseRuntimeCommand("native-queue", body); }
     catch (error) { return { status: 400, body: { error: error instanceof Error ? error.message : "invalid" } }; }
-    return writeAnswer;
+    return typeof writeAnswer === "function" ? writeAnswer(body) : writeAnswer;
   },
 };
 
@@ -176,7 +209,7 @@ beforeEach(() => {
   reads = 0;
   keySequence = 0;
   readFails = null;
-  writeAnswer = { status: 202, body: { operationId: "op-1", receipt: { status: "queued" } } };
+  writeAnswer = (body) => journalReceipt(body);
   entries = [record("a"), record("b")];
   items = [submission("a"), submission("b")];
 });
@@ -347,42 +380,87 @@ test("a refusal is shown in the runtime's own words and nothing is retried", asy
 test("a 202 whose receipt was rejected is a failure, not an acceptance", async () => {
   /* The HTTP code says the request was understood; the journal's own receipt is
      the verdict. */
-  writeAnswer = { status: 202, body: { operationId: "op-1", receipt: { status: "rejected" }, error: "expectedRevision is stale" } };
+  writeAnswer = (body) => ({ ...journalReceipt(body, { status: "rejected" }), body: { ...journalReceipt(body, { status: "rejected" }).body, error: "expectedRevision is stale" } });
   await mount();
   await click(rows()[0]!.querySelector('[data-testid="native-queue-delete"]'));
   expect(host.querySelector('[data-testid="native-queue-failure"]')?.textContent).toContain("stale");
 });
 
-test("a successful status with no operation envelope is unknown, and keeps its key", async () => {
-  /* THE RESPONSE-SCHEMA NEGATIVE. HTTP 202 with `{}` was read as success: the
-     row was released and the next identical press minted a second key for an
-     operation that may already exist. A status is not an answer — the journal
-     replies with the operation it committed and a receipt status it knows, and
-     anything short of that is UNKNOWN. */
-  for (const body of [
-    {},
-    { receipt: { status: "queued" } },
-    { operationId: "op-1" },
-    { operationId: "op-1", receipt: {} },
-    { operationId: "op-1", receipt: { status: "teleported" } },
-    { operationId: "op-1", receipt: { status: "queued", operationId: "op-someone-else" } },
-  ]) {
+test("a receipt that is not this operation's cannot settle it, whatever it says", async () => {
+  /* THE RESPONSE-SCHEMA NEGATIVE, over every way a reply can fail to be about
+     this request. HTTP 202 with `{}` was read as success, and a fully-shaped
+     receipt naming ANOTHER operation was read as success or as a refusal
+     depending only on its status — the verdict path never looked at identity at
+     all. Either way the row was released and the next identical press minted a
+     second key for an operation that may already exist.
+
+     A receipt is evidence about the operation it names. The reply must name an
+     operation, the receipt must name the same one, and its conversation, its
+     idempotency key and its kind must be the ones this request submitted. */
+  const cases: Array<[string, (body: Record<string, unknown>) => { status: number; body: Record<string, unknown> }]> = [
+    ["an empty body", () => ({ status: 202, body: {} })],
+    ["a receipt with no operation named beside it", (body) => ({ status: 202, body: { receipt: journalReceipt(body).body.receipt } })],
+    ["an operation with no receipt", () => ({ status: 202, body: { operationId: "op-1" } })],
+    ["a receipt with no status", (body) => journalReceipt(body, { status: "" })],
+    ["a status this build has never heard of", (body) => journalReceipt(body, { status: "teleported" })],
+    ["a receipt naming a different operation", (body) => journalReceipt(body, { operationId: "op-someone-else" })],
+    ["a receipt with no operation id", (body) => journalReceipt(body, { operationId: null })],
+    ["a receipt from another conversation", (body) => journalReceipt(body, { conversationId: "conversation_foreign" })],
+    ["a receipt with no conversation", (body) => journalReceipt(body, { conversationId: null })],
+    ["a receipt for another request", (body) => journalReceipt(body, { idempotencyKey: "another-request" })],
+    ["a receipt with no idempotency key", (body) => journalReceipt(body, { idempotencyKey: null })],
+    ["a receipt for a different kind of command", (body) => journalReceipt(body, { kind: "send" })],
+    ["a receipt with no kind", (body) => journalReceipt(body, { kind: null })],
+    /* AND THE SAME FOREIGN RECEIPT CARRYING A REFUSAL. This is the arm the
+       verdict path skipped: `rejected` and `failed` released the operation
+       without ever asking whose receipt it was. */
+    ["a foreign receipt that says rejected", (body) => ({
+      status: 409,
+      body: journalReceipt(body, { status: "rejected", conversationId: "conversation_foreign", idempotencyKey: "another-request" }).body,
+    })],
+    ["a foreign receipt that says failed", (body) => journalReceipt(body, { status: "failed", conversationId: "conversation_foreign", idempotencyKey: "another-request" })],
+  ];
+  for (const [name, answer] of cases) {
     writes = [];
-    writeAnswer = { status: 202, body };
+    writeAnswer = answer;
     await mount();
     await click(rows()[0]!.querySelector('[data-testid="native-queue-delete"]'));
-    expect(host.querySelector('[data-testid="native-queue-failure"]')?.textContent ?? "")
+    expect(`${name}: ${host.querySelector('[data-testid="native-queue-failure"]')?.textContent ?? ""}`)
       .toContain("unknown");
 
     /* And the operation keeps its identity: pressing the same control again
        replays it rather than admitting a second one. */
     await click(rows()[0]!.querySelector('[data-testid="native-queue-delete"]'));
-    expect(writes).toHaveLength(2);
-    expect(writes[1]!.idempotencyKey).toBe(writes[0]!.idempotencyKey);
+    expect(`${name}: ${writes.length}`).toBe(`${name}: 2`);
+    expect(`${name}: ${String(writes[1]!.idempotencyKey)}`).toBe(`${name}: ${String(writes[0]!.idempotencyKey)}`);
     flushSync(() => root.unmount());
     document.body.replaceChildren();
   }
-  writeAnswer = { status: 202, body: { operationId: "op-1", receipt: { status: "queued" } } };
+  writeAnswer = (body) => journalReceipt(body);
+  await mount();
+});
+
+test("this operation's own receipt settles it, on either verdict", async () => {
+  /* THE POSITIVE CONTROL for the same check: a receipt whose operation,
+     conversation, idempotency key and kind are all this request's is read as the
+     verdict it carries — an acceptance releases the key, and so does a refusal,
+     because both are the journal speaking about THIS operation. */
+  for (const [status, expectRefusal] of [["queued", false], ["applied", false], ["rejected", true], ["failed", true]] as const) {
+    writes = [];
+    writeAnswer = (body) => journalReceipt(body, { status });
+    await mount();
+    await click(rows()[0]!.querySelector('[data-testid="native-queue-delete"]'));
+    const failure = host.querySelector('[data-testid="native-queue-failure"]')?.textContent ?? "";
+    expect(`${status}: ${failure.includes("unknown")}`).toBe(`${status}: false`);
+    expect(`${status}: ${failure.length > 0}`).toBe(`${status}: ${expectRefusal}`);
+
+    /* Settled means settled: the next press is a new operation. */
+    await click(rows()[0]!.querySelector('[data-testid="native-queue-delete"]'));
+    expect(`${status}: ${writes[1]!.idempotencyKey === writes[0]!.idempotencyKey}`).toBe(`${status}: false`);
+    flushSync(() => root.unmount());
+    document.body.replaceChildren();
+  }
+  writeAnswer = (body) => journalReceipt(body);
   await mount();
 });
 
@@ -532,7 +610,7 @@ test("a full queue stays responsive: a control press paints its own row inside t
   (dependencies as { write: NativeQueueDependencies["write"] }).write = async (body) => {
     writes.push(body);
     await new Promise<void>((resolve) => { release = resolve; });
-    return writeAnswer;
+    return typeof writeAnswer === "function" ? writeAnswer(body) : writeAnswer;
   };
   try {
     const pressedAt = performance.now();

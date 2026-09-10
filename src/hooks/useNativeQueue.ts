@@ -128,38 +128,66 @@ async function writeQueue(body: Record<string, unknown>): Promise<{ status: numb
 
 export const productionNativeQueueDependencies: NativeQueueDependencies = { read: readQueue, write: writeQueue };
 
-/** Receipt statuses the runtime journal can answer an admission with. A value
-    outside this set is a build disagreement rather than a verdict. */
-const ADMITTED_RECEIPT_STATUSES: ReadonlySet<string> = new Set([
+/** Every status the runtime journal can put on a receipt. A value outside this
+    set is a build disagreement rather than a verdict. */
+const KNOWN_RECEIPT_STATUSES: ReadonlySet<string> = new Set([
   "pending", "delivering", "applying", "turn-started", "steered", "queued",
-  "delivered", "applied", "interrupted", "answered", "uncertain",
+  "delivered", "applied", "interrupted", "answered", "rejected", "failed", "uncertain",
 ]);
 
+/** Verdicts that mean the journal admitted nothing. */
+const REFUSING_RECEIPT_STATUSES: ReadonlySet<string> = new Set(["rejected", "failed"]);
+
 /**
- * Whether a non-error reply actually identifies the operation it settled.
+ * Whether a reply is about THIS operation, checked before it is read as one.
  *
- * The journal's own answer is `{ operationId, receipt }`. Anything short of that
- * — a body that lost its envelope in a proxy, a receipt with no status, a status
- * this build does not know — cannot be read as "your message is queued", and
- * reading it that way is how a possibly-admitted operation was released and then
- * submitted again under a new identity.
+ * The journal answers `{ operationId, receipt }`, and the receipt carries its own
+ * identity: the operation, the conversation, the idempotency key it was admitted
+ * under and the kind of command it was. Every one of those has to match what
+ * this request submitted, because a receipt that names another operation is
+ * evidence about that operation and none at all about this one — however
+ * well-formed it is, and whichever verdict it carries.
+ *
+ * THE VERDICT COMES SECOND ON PURPOSE. A foreign `rejected` used to release this
+ * operation just as readily as a foreign `queued`: the refusal path never looked
+ * at identity, so a reply about somebody else's request settled ours and the next
+ * press minted a new key for an operation that may already exist. Missing or
+ * contradictory identity is UNKNOWN, and the caller keeps its envelope.
  */
-function settledEnvelope(body: Record<string, unknown>):
+function receiptIdentity(
+  body: Record<string, unknown>,
+  expected: { conversationId: string; idempotencyKey: string },
+):
   | { ok: true; operationId: string; receiptStatus: string }
   | { ok: false; reason: string } {
+  const unknown = (reason: string) => ({ ok: false as const, reason });
   const operationId = typeof body.operationId === "string" ? body.operationId.trim() : "";
   const receipt = body.receipt && typeof body.receipt === "object" && !Array.isArray(body.receipt)
     ? body.receipt as Record<string, unknown>
     : null;
-  const receiptStatus = receipt && typeof receipt.status === "string" ? receipt.status : "";
-  if (!operationId) return { ok: false, reason: "Codex accepted the request but named no operation, so whether it was queued is unknown." };
-  if (!receiptStatus) return { ok: false, reason: "Codex accepted the request but returned no receipt status, so whether it was queued is unknown." };
-  if (!ADMITTED_RECEIPT_STATUSES.has(receiptStatus)) {
-    return { ok: false, reason: `Codex answered with an unrecognised receipt status (${receiptStatus}), so whether it was queued is unknown.` };
+  if (!operationId) return unknown("Codex answered without naming an operation, so what happened to this one is unknown.");
+  if (!receipt) return unknown("Codex answered without a receipt, so what happened to this request is unknown.");
+
+  const field = (name: string) => typeof receipt[name] === "string" ? (receipt[name] as string) : "";
+  const receiptStatus = field("status");
+  if (!receiptStatus) return unknown("Codex answered with a receipt that carries no status, so what happened to this request is unknown.");
+  if (!KNOWN_RECEIPT_STATUSES.has(receiptStatus)) {
+    return unknown(`Codex answered with an unrecognised receipt status (${receiptStatus}), so what happened to this request is unknown.`);
   }
-  /* The receipt must be about the operation the reply names, when it says. */
-  if (typeof receipt!.operationId === "string" && receipt!.operationId !== operationId) {
-    return { ok: false, reason: "Codex answered with a receipt for a different operation, so whether this one was queued is unknown." };
+  /* Each of these is required, and each is checked against what WE sent. An
+     absent one is as unusable as a wrong one: it leaves the receipt unattributed,
+     which is the state this exists to refuse. */
+  if (field("operationId") !== operationId) {
+    return unknown("Codex answered with a receipt that names a different operation from the reply, so what happened to this request is unknown.");
+  }
+  if (field("conversationId") !== expected.conversationId) {
+    return unknown("Codex answered with a receipt belonging to another conversation, so what happened to this request is unknown.");
+  }
+  if (field("idempotencyKey") !== expected.idempotencyKey) {
+    return unknown("Codex answered with a receipt for another request, so what happened to this one is unknown.");
+  }
+  if (field("kind") !== "native-queue") {
+    return unknown("Codex answered with a receipt for a different kind of command, so what happened to this request is unknown.");
   }
   return { ok: true, operationId, receiptStatus };
 }
@@ -241,36 +269,55 @@ export function useNativeQueue(
         binding: replayBinding ?? { threadId, accountId },
         ...command,
       });
-      const failed = answer.status >= 400;
-      const receipt = answer.body.receipt as { status?: string } | undefined;
-      /* A REJECTED RECEIPT IS A FAILURE EVEN AT 202. The journal answers with the
-         operation it holds, and its status is the verdict; the HTTP code only
-         says the request was understood. */
-      const rejected = receipt?.status === "rejected" || receipt?.status === "failed";
-      if (failed || rejected) {
+      const error = typeof answer.body.error === "string" ? answer.body.error : "";
+      const carriesReceipt = Boolean(answer.body.receipt) || typeof answer.body.operationId === "string";
+      /* NO RECEIPT AT ALL. The route answered before the journal did — a parser
+         refusal, an ownership conflict, a host that is not there — so there is no
+         receipt to attribute and the HTTP code is the whole answer. A 5xx is the
+         server failing to answer FOR the journal, where the write may have
+         committed first, so only that one is unknown. */
+      if (!carriesReceipt) {
+        if (answer.status >= 500) {
+          return { ok: false, outcome: "unknown", status: answer.status, error: error || `Codex could not answer for the queue (${answer.status}).` };
+        }
+        if (answer.status >= 400) {
+          return { ok: false, outcome: "refused", status: answer.status, error: error || `Codex refused this change (${answer.status}).` };
+        }
         return {
           ok: false,
-          /* A 5xx is the server failing to answer for the journal, which is not
-             the journal refusing: the write may have committed before the
-             failure. Only a verdict it actually gave settles the operation. */
-          outcome: answer.status >= 500 ? "unknown" : "refused",
+          outcome: "unknown",
           status: answer.status,
-          error: typeof answer.body.error === "string"
-            ? answer.body.error
-            : `Codex refused this change (${receipt?.status ?? answer.status})`,
+          error: "Codex accepted the request without saying what it did with it, so whether it was queued is unknown.",
         };
       }
-      /* A SUCCESSFUL STATUS IS NOT A SUCCESSFUL ANSWER. The journal replies with
-         the operation it committed — an id and a receipt whose status is one it
-         knows — and only that settles anything. A 202 carrying `{}`, a receipt
-         with no status, or a status this build has never heard of describes a
-         write whose fate nobody here can state, so it is UNKNOWN and the caller
-         keeps its operation rather than releasing it as delivered. */
-      const settled = settledEnvelope(answer.body);
-      if (!settled.ok) {
-        return { ok: false, outcome: "unknown", status: answer.status, error: settled.reason };
+      /* A RECEIPT IS EVIDENCE ONLY ABOUT THE OPERATION IT NAMES, and this checks
+         that before reading its verdict — at any status, including a refusal.
+         A reply about somebody else's request settles nothing here. */
+      const identified = receiptIdentity(answer.body, { conversationId, idempotencyKey });
+      if (!identified.ok) {
+        return { ok: false, outcome: "unknown", status: answer.status, error: identified.reason };
       }
-      return { ok: true, status: answer.status, operationId: settled.operationId, receiptStatus: settled.receiptStatus };
+      /* Now the verdict, from the receipt this operation actually owns. A
+         rejected or failed receipt is a refusal even at 202: the journal answers
+         with the operation it holds and its status IS the verdict, where the HTTP
+         code only says the request was understood. */
+      if (REFUSING_RECEIPT_STATUSES.has(identified.receiptStatus)) {
+        return {
+          ok: false,
+          outcome: "refused",
+          status: answer.status,
+          error: error || `Codex refused this change (${identified.receiptStatus})`,
+        };
+      }
+      /* A 5xx still outranks an otherwise good-looking receipt: the server did
+         not finish answering, so what reached us may not be the whole of it. */
+      if (answer.status >= 500) {
+        return { ok: false, outcome: "unknown", status: answer.status, error: error || `Codex could not answer for the queue (${answer.status}).` };
+      }
+      if (answer.status >= 400) {
+        return { ok: false, outcome: "refused", status: answer.status, error: error || `Codex refused this change (${answer.status}).` };
+      }
+      return { ok: true, status: answer.status, operationId: identified.operationId, receiptStatus: identified.receiptStatus };
     } catch (failure) {
       /* The request may or may not have reached the journal. Replaying the SAME
          key is the only safe next move, and it is the operator's to make. */
