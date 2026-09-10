@@ -24,15 +24,25 @@ const DESK = { viewSessionId: "vs-desk-1", deviceId: "dev-desk" };
 const PHONE = { viewSessionId: "vs-phone-1", deviceId: "dev-phone" };
 const CONVERSATION = "conversation_orchestrator";
 
-function reference(identity: { viewSessionId: string; deviceId: string }, card = "conversation_atlas_a", now = NOW): SelectedContextRef {
+function reference(
+  identity: { viewSessionId: string; deviceId: string },
+  card = "conversation_atlas_a",
+  now = NOW,
+  revision = 1,
+): SelectedContextRef {
   return captureSelectedContext({
     context: { project: "atlas" },
     slice: { focusedPath: "fixtures/projects/atlas/worker-a.jsonl", selectedPaths: [] },
     cards: [{ path: "fixtures/projects/atlas/worker-a.jsonl", conversationId: card, label: "Worker A" }],
     identity,
-    revision: 1,
+    revision,
     now,
   });
+}
+
+/** One utterance's identity, as the browser mints it. */
+function utterance(sequence: number, id = `${sequence}`.padStart(32, "f")): { id: string; sequence: number } {
+  return { id, sequence };
 }
 
 beforeEach(() => resetVoiceViewBindings());
@@ -116,4 +126,110 @@ test("rebinding the same conversation to a new call drops the previous admission
   expect(voiceSelectedContext(CONVERSATION)).toBeNull();
   const admitted = admitVoiceSelectedContext({ conversationId: CONVERSATION, realtimeSessionId: "rt-2", reference: reference(PHONE), now: NOW });
   expect(admitted.ok).toBe(true);
+});
+
+
+/* ------------------------------------------------------------------ *
+ * Ordering: publishing is asynchronous, retried, and out of order (#1629).
+ * ------------------------------------------------------------------ */
+
+test("a late publication for an earlier utterance cannot replace a newer one", () => {
+  /* The reproduced defect. Both publications are the bound window's and both
+     pass the freshness window, so nothing in the binding check can separate
+     them — the ledger used to take whichever arrived last, and a slow POST for
+     the previous utterance dragged the call back to the previous card. */
+  bindVoiceSession(CONVERSATION, "rt-1", DESK);
+  const older = reference(DESK, "conversation_atlas_a", NOW, 1);
+  const newer = reference(DESK, "conversation_atlas_b", NOW + 1_000, 2);
+
+  expect(admitVoiceSelectedContext({
+    conversationId: CONVERSATION, realtimeSessionId: "rt-1",
+    reference: newer, utterance: utterance(2), now: NOW + 1_000,
+  }).ok).toBe(true);
+
+  const late = admitVoiceSelectedContext({
+    conversationId: CONVERSATION, realtimeSessionId: "rt-1",
+    reference: older, utterance: utterance(1), now: NOW + 1_200,
+  });
+  expect(late.ok).toBe(false);
+  expect(late.ok || late.failure.code).toBe("superseded");
+
+  /* A refusal changes nothing: the newer reference still stands, and the
+     boundary counter still says two utterances have been published for. */
+  expect(voiceSelectedContext(CONVERSATION)?.reference).toEqual(newer);
+  expect(voiceSelectedContext(CONVERSATION)?.sequence).toBe(1);
+});
+
+test("without an utterance identity the reference's own revision decides", () => {
+  /* A client that carries no utterance identity still cannot go backwards:
+     `revision` is monotonic within a view session, and a call is bound to
+     exactly one. */
+  bindVoiceSession(CONVERSATION, "rt-1", DESK);
+  const newer = reference(DESK, "conversation_atlas_b", NOW + 1_000, 7);
+  const older = reference(DESK, "conversation_atlas_a", NOW, 3);
+  admitVoiceSelectedContext({ conversationId: CONVERSATION, realtimeSessionId: "rt-1", reference: newer, now: NOW + 1_000 });
+  const late = admitVoiceSelectedContext({ conversationId: CONVERSATION, realtimeSessionId: "rt-1", reference: older, now: NOW + 1_200 });
+  expect(late.ok).toBe(false);
+  expect(voiceSelectedContext(CONVERSATION)?.reference).toEqual(newer);
+});
+
+test("a retried publication is the same utterance, not a second one", () => {
+  /* The publish path is fire-and-forget with one retry, so a POST that timed
+     out on the client and succeeded on the server arrives twice. Counting that
+     as two utterances would make the boundary sequence describe the network. */
+  bindVoiceSession(CONVERSATION, "rt-1", DESK);
+  const ref = reference(DESK, "conversation_atlas_a", NOW, 4);
+  const first = admitVoiceSelectedContext({
+    conversationId: CONVERSATION, realtimeSessionId: "rt-1",
+    reference: ref, utterance: utterance(1), now: NOW,
+  });
+  const replay = admitVoiceSelectedContext({
+    conversationId: CONVERSATION, realtimeSessionId: "rt-1",
+    reference: ref, utterance: utterance(1), now: NOW + 50,
+  });
+  expect(first.ok && replay.ok).toBe(true);
+  if (!first.ok || !replay.ok) throw new Error("both admissions were expected to succeed");
+  expect(replay.admission).toEqual(first.admission);
+  expect(voiceSelectedContext(CONVERSATION)?.sequence).toBe(1);
+});
+
+test("a later utterance still admits after a refused earlier one", () => {
+  /* The refusal is about ordering, not about the window: the call keeps
+     working, and the next thing the operator says lands normally. */
+  bindVoiceSession(CONVERSATION, "rt-1", DESK);
+  admitVoiceSelectedContext({
+    conversationId: CONVERSATION, realtimeSessionId: "rt-1",
+    reference: reference(DESK, "conversation_atlas_b", NOW + 1_000, 2), utterance: utterance(2), now: NOW + 1_000,
+  });
+  admitVoiceSelectedContext({
+    conversationId: CONVERSATION, realtimeSessionId: "rt-1",
+    reference: reference(DESK, "conversation_atlas_a", NOW, 1), utterance: utterance(1), now: NOW + 1_200,
+  });
+  const third = reference(DESK, "conversation_atlas_c", NOW + 2_000, 3);
+  const admitted = admitVoiceSelectedContext({
+    conversationId: CONVERSATION, realtimeSessionId: "rt-1",
+    reference: third, utterance: utterance(3), now: NOW + 2_000,
+  });
+  expect(admitted.ok).toBe(true);
+  expect(voiceSelectedContext(CONVERSATION)?.reference).toEqual(third);
+  expect(voiceSelectedContext(CONVERSATION)?.sequence).toBe(2);
+});
+
+test("a new call starts its own utterance ledger", () => {
+  /* Rebinding is a new call. If the previous call's utterance sequence carried
+     over, the first utterance of the new one would be refused as superseded by
+     the last of the old one. */
+  bindVoiceSession(CONVERSATION, "rt-1", DESK);
+  admitVoiceSelectedContext({
+    conversationId: CONVERSATION, realtimeSessionId: "rt-1",
+    reference: reference(DESK, "conversation_atlas_b", NOW, 9), utterance: utterance(9), now: NOW,
+  });
+  bindVoiceSession(CONVERSATION, "rt-2", DESK);
+  const first = reference(DESK, "conversation_atlas_a", NOW + 1_000, 1);
+  const admitted = admitVoiceSelectedContext({
+    conversationId: CONVERSATION, realtimeSessionId: "rt-2",
+    reference: first, utterance: utterance(1), now: NOW + 1_000,
+  });
+  expect(admitted.ok).toBe(true);
+  expect(voiceSelectedContext(CONVERSATION)?.reference).toEqual(first);
 });

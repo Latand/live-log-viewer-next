@@ -48,9 +48,13 @@ const MAX_LINE_CHARS = 12_000;
 const MAX_LINES = 80;
 
 function newOperatorActivityId(): string {
-  const bytes = new Uint8Array(32);
-  crypto.getRandomValues(bytes);
-  return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return randomHex(32);
+}
+
+function randomHex(bytes: number): string {
+  const buffer = new Uint8Array(bytes);
+  crypto.getRandomValues(buffer);
+  return [...buffer].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function object(value: unknown): Record<string, unknown> | null {
@@ -173,6 +177,13 @@ class CodexRealtimeClient {
       interleaves both speakers with worker progress, so "the last line" is
       almost never the line an update belongs to. */
   private readonly openTranscriptLines = new Map<TranscriptSpeaker, string>();
+  /* #1629: the utterance boundary this peer is currently publishing for. The
+     server cannot mint it — the operator's audio never reaches it — and without
+     one a retried publication counts as a second utterance and a slow one
+     overwrites a newer one. Reset with the call, like every other per-call
+     ledger here. */
+  private utteranceSequence = 0;
+  private utteranceId: string | null = null;
   private epoch = 0;
 
   constructor(readonly conversationId: string) {}
@@ -465,11 +476,16 @@ class CodexRealtimeClient {
    */
   private publishSelectedContext(): void {
     if (!this.realtimeSessionId) return;
+    /* Minted once per utterance and reused by the retry below, so the server
+       recognizes a replay as the same spoken turn rather than a later one. */
+    this.utteranceSequence += 1;
+    this.utteranceId = randomHex(16);
     const payload = JSON.stringify({
       action: "selectedContext",
       conversationId: this.conversationId,
       realtimeSessionId: this.realtimeSessionId,
       selectedContext: viewerSelectedContext(),
+      utterance: { id: this.utteranceId, sequence: this.utteranceSequence },
     });
     const publish = async (retry: boolean): Promise<void> => {
       try {
@@ -617,6 +633,12 @@ class CodexRealtimeClient {
     this.media = null;
     this.audio = null;
     this.realtimeSessionId = null;
+    /* A new call is a new utterance ledger. Carrying the counter across would
+       let the first utterance of the next call be refused as superseded by the
+       last one of this one. */
+    this.utteranceSequence = 0;
+    this.utteranceId = null;
+    this.openTranscriptLines.clear();
   }
 }
 

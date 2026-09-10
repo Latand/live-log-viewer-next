@@ -21,9 +21,11 @@ import { parseSelectedContextRef, type SelectedContextRef } from "@/lib/selectio
  *   (see `realtimeInjection`), so admission reuses it rather than inventing a
  *   second notion of who is calling.
  * - `admitVoiceSelectedContext` runs at the utterance/delegation boundary. It
- *   validates the reference against the binding and, only then, replaces what
- *   the call points at. A refusal changes NOTHING: the previously admitted
- *   reference stands, so a phone's stray publish cannot blank the desk's.
+ *   validates the reference against the binding AND against what the call has
+ *   already been told, and only then replaces what the call points at. A refusal
+ *   changes NOTHING: the previously admitted reference stands, so a phone's
+ *   stray publish cannot blank the desk's, and a slow publish for an earlier
+ *   utterance cannot drag the call back to an earlier screen.
  * - `voiceSelectedContext` is what realtime delegation and tool routing read.
  *
  * Process-scoped and deliberately not durable: it describes a live transport. A
@@ -33,6 +35,23 @@ import { parseSelectedContextRef, type SelectedContextRef } from "@/lib/selectio
  * on the structured-user record instead.
  */
 
+/**
+ * Who published, and which utterance of theirs (#1629).
+ *
+ * The reference alone cannot answer either question. It says what was on screen,
+ * not which spoken turn it belongs to, so two publications from one window are
+ * indistinguishable — which is how a retried POST used to count as a second
+ * utterance and how a late one used to overwrite a newer one. The browser owns
+ * the utterance boundary (it is the peer that sees its own transcript go final),
+ * so it is the peer that names it.
+ */
+export interface VoiceUtteranceIdentity {
+  /** Stable for one utterance, including across this publication's retries. */
+  id: string;
+  /** Monotonic within one call, starting at 1. */
+  sequence: number;
+}
+
 export interface VoiceSelectedContextAdmission {
   conversationId: string;
   realtimeSessionId: string;
@@ -41,6 +60,8 @@ export interface VoiceSelectedContextAdmission {
   admittedAt: string;
   /** Utterance boundary counter for this call: 1 for the first admission. */
   sequence: number;
+  /** The utterance this reference was published for, when the caller named one. */
+  utteranceId: string | null;
 }
 
 interface VoiceSessionState {
@@ -48,6 +69,8 @@ interface VoiceSessionState {
   binding: VoiceViewBinding | null;
   admission: VoiceSelectedContextAdmission | null;
   sequence: number;
+  /** The utterance sequence the standing admission was published for. */
+  utteranceSequence: number | null;
 }
 
 const store = globalThis as typeof globalThis & {
@@ -78,7 +101,9 @@ export function parseVoiceViewBinding(value: unknown): VoiceViewBinding | null {
 /** Bind a call to the window that opened it. Rebinding a conversation is a new
     call: the previous admission is dropped rather than inherited. */
 export function bindVoiceSession(conversationId: string, realtimeSessionId: string, binding: VoiceViewBinding | null): void {
-  sessions.set(conversationId, { realtimeSessionId, binding, admission: null, sequence: 0 });
+  sessions.set(conversationId, {
+    realtimeSessionId, binding, admission: null, sequence: 0, utteranceSequence: null,
+  });
 }
 
 export function releaseVoiceSession(conversationId: string): void {
@@ -102,7 +127,43 @@ export interface VoiceSelectedContextAdmissionInput {
   /** The credential the caller presented; must be the call's own. */
   realtimeSessionId: string;
   reference: SelectedContextRef | null;
+  /** The utterance this publication speaks for, when the caller named one. */
+  utterance?: VoiceUtteranceIdentity | null;
   now: number;
+}
+
+/**
+ * Is this publication newer than the one standing?
+ *
+ * Preference order, and each step is used only when the one before it cannot
+ * decide:
+ *
+ * 1. The utterance sequence, when both publications carry one. It is minted by
+ *    the peer that saw the utterances happen, so it is the only ordering that
+ *    describes the CALL rather than the network.
+ * 2. The reference's own `revision`, monotonic within a view session — and a
+ *    call is bound to exactly one view session, so within a call it is total.
+ * 3. `capturedAt`, for a client that carries neither.
+ *
+ * Ties admit. A publication that cannot be shown to be older is treated as the
+ * current one: refusing it would strand the call on a stale card whenever a
+ * client stops carrying ordering evidence, which is the worse of the two.
+ */
+function supersedes(
+  candidate: { reference: SelectedContextRef; utterance: VoiceUtteranceIdentity | null },
+  standing: VoiceSelectedContextAdmission | null,
+  standingUtteranceSequence: number | null,
+): boolean {
+  if (!standing) return true;
+  if (candidate.utterance && standingUtteranceSequence !== null) {
+    return candidate.utterance.sequence >= standingUtteranceSequence;
+  }
+  const candidateRevision = candidate.reference.revision;
+  const standingRevision = standing.reference.revision;
+  if (typeof candidateRevision === "number" && typeof standingRevision === "number") {
+    return candidateRevision >= standingRevision;
+  }
+  return candidate.reference.capturedAt >= standing.reference.capturedAt;
 }
 
 export type VoiceSelectedContextAdmissionResult =
@@ -124,13 +185,31 @@ export function admitVoiceSelectedContext(input: VoiceSelectedContextAdmissionIn
       },
     };
   }
+  const utterance = input.utterance ?? null;
+  /* A REPLAY IS NOT A SECOND UTTERANCE. Publishing is fire-and-forget with a
+     retry, so the same utterance can arrive twice; answering with the standing
+     admission keeps the boundary counter equal to the number of spoken turns
+     instead of the number of successful POSTs. */
+  if (utterance && session.admission?.utteranceId === utterance.id) {
+    return { ok: true, admission: session.admission };
+  }
   const bound = bindSelectedContextToVoiceSession({
     binding: session.binding,
     reference: input.reference,
     now: input.now,
   });
   if (!bound.ok) return bound;
+  if (!supersedes({ reference: bound.reference, utterance }, session.admission, session.utteranceSequence)) {
+    return {
+      ok: false,
+      failure: {
+        code: "superseded",
+        message: "This voice session has already been told about a later utterance, so an earlier one cannot replace it.",
+      },
+    };
+  }
   session.sequence += 1;
+  if (utterance) session.utteranceSequence = utterance.sequence;
   session.admission = {
     conversationId: input.conversationId,
     realtimeSessionId: session.realtimeSessionId,
@@ -138,6 +217,7 @@ export function admitVoiceSelectedContext(input: VoiceSelectedContextAdmissionIn
     reference: bound.reference,
     admittedAt: new Date(input.now).toISOString(),
     sequence: session.sequence,
+    utteranceId: utterance?.id ?? null,
   };
   return { ok: true, admission: session.admission };
 }

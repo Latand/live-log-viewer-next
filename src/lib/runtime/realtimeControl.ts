@@ -10,6 +10,7 @@ import {
   bindVoiceSession,
   parseVoiceViewBinding,
   releaseVoiceSession,
+  type VoiceUtteranceIdentity,
 } from "./voiceViewBinding";
 import { recordDirectOperatorWakatimeActivity } from "@/lib/wakatime/operatorActivity";
 
@@ -62,6 +63,25 @@ function realtimeHost(value: unknown): RealtimeHost | null {
 
 function byteLength(value: string): number {
   return new TextEncoder().encode(value).byteLength;
+}
+
+/**
+ * The utterance a publication speaks for (#1629).
+ *
+ * Named by the browser, because the browser is the peer that sees the operator's
+ * transcript go final — the operator's audio never passes through this server.
+ * A malformed identity is dropped rather than refused: the reference is still
+ * the bound view's and still admissible, and the ordering rules fall back to the
+ * reference's own revision.
+ */
+function voiceUtteranceIdentity(value: unknown): VoiceUtteranceIdentity | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const body = value as Record<string, unknown>;
+  const id = typeof body.id === "string" ? body.id : "";
+  const sequence = body.sequence;
+  if (!/^[a-f0-9]{32}$/.test(id)) return null;
+  if (typeof sequence !== "number" || !Number.isSafeInteger(sequence) || sequence < 1) return null;
+  return { id, sequence };
 }
 
 /**
@@ -205,6 +225,7 @@ export async function executeRealtimeControl(
         conversationId,
         realtimeSessionId: caller.kind === "session" ? caller.realtimeSessionId : "",
         reference: parseSelectedContextRef(request.selectedContext),
+        utterance: voiceUtteranceIdentity(request.utterance),
         now: Date.now(),
       });
       if (!admission.ok) {
@@ -252,6 +273,7 @@ export async function executeRealtimeControl(
           conversationId,
           realtimeSessionId: caller.kind === "session" ? caller.realtimeSessionId : "",
           reference,
+          utterance: voiceUtteranceIdentity(request.utterance),
           now: Date.now(),
         });
         if (!admission.ok) {

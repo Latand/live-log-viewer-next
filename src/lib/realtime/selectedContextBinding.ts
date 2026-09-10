@@ -28,6 +28,12 @@ import type { SelectedContextRef } from "@/lib/selection/selectedContext";
  *   selection: an explicit `none` from the bound view resolves normally.
  * - `unbound` — the session never recorded a view. A bug or an old client, and
  *   it fails closed rather than accepting the first reference offered.
+ * - `superseded` — the bound view's own, but describing a screen state the call
+ *   has already moved past. Publishing is asynchronous and retried, so a slow
+ *   POST for an earlier utterance can land after a later one; admitting it would
+ *   point the call at the card the operator had selected two utterances ago.
+ *   Raised by the ledger rather than here, because it is a question about the
+ *   admission history and not about the reference in hand.
  */
 
 /**
@@ -46,7 +52,8 @@ export interface VoiceViewBinding {
   deviceId: string;
 }
 
-export type SelectedContextBindingFailureCode = "unbound" | "missing" | "stale" | "ambiguous";
+export type SelectedContextBindingFailureCode =
+  | "unbound" | "missing" | "stale" | "ambiguous" | "superseded";
 
 export interface SelectedContextBindingFailure {
   code: SelectedContextBindingFailureCode;
