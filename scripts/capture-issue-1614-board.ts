@@ -39,6 +39,8 @@ import path from "node:path";
 
 import { chromium, type Browser, type Page } from "playwright-core";
 
+import { CONVERSATION_LIST_PAGE_SIZE } from "@/components/ConversationList";
+
 import { createCaptureDirectory } from "./capture-directory";
 import { demoPort } from "./demo-capture";
 
@@ -97,6 +99,21 @@ function seedConversations(): string[] {
     paths.push(file);
   }
   return paths;
+}
+
+/** One more conversation, written while the browser is watching: a real scan
+    update for the agent list to survive (see `walkAgentList`). */
+function seedOneMoreConversation(): void {
+  const { file, uuid } = conversationFile(CONVERSATIONS);
+  const cwd = path.join(HOME, "Projects", PROJECT_NAME);
+  const stamp = "2100-01-02T09:00:00.000Z";
+  const title = "Agent arriving mid-scroll";
+  fs.writeFileSync(
+    file,
+    line({ type: "user", uuid: `${uuid}-u`, timestamp: stamp, cwd, message: { role: "user", content: `${title}.` } })
+    + line({ type: "assistant", uuid: `${uuid}-a`, timestamp: stamp, cwd, message: { role: "assistant", model: "claude-sonnet-4-5", content: [{ type: "text", text: `${title} — recorded.` }] } }),
+    "utf8",
+  );
 }
 
 function seedHome(): void {
@@ -520,6 +537,377 @@ async function measureCanvasCost(page: Page, bands: number): Promise<CanvasCost>
   return { bands, steps, elapsedMs, frames: cost.frames, longTasksMs: Math.round(cost.long), longTaskCount: cost.count, worstLongTaskMs: Math.round(cost.worst) };
 }
 
+/* ------------------------------------------------------------------------- */
+/* Requirement 4: the desktop agent list, walked the way an operator walks it  */
+/* ------------------------------------------------------------------------- */
+
+/**
+ * Counting the catalog endpoint's `total` says nothing about whether an
+ * operator can reach a single row of it. This is the whole journey, in the
+ * browser: find the board/list switch, hit-test it, click it, read the first
+ * page, scroll — with the wheel, not a button — until it has loaded several
+ * more, hold it through a real scan update, open an agent from it, come back.
+ *
+ * The switch is here because it is where the journey used to end: the
+ * dashboard floated it at the board's own top-left corner, under the tool
+ * palette, so `elementFromPoint` at the centre of «conversations» returned the
+ * task tool and the click created a task instead of opening the list.
+ */
+interface SwitchProbe {
+  found: boolean;
+  x: number; y: number; width: number; height: number;
+  hit: string;
+  hitsSelf: boolean;
+  disabled: boolean;
+  pointerEvents: string;
+}
+
+interface ListJourney {
+  pageSize: number;
+  catalogTotal: number;
+  switchOnBoard: SwitchProbe;
+  switchOnList: SwitchProbe;
+  firstPage: number;
+  scrollSteps: number[];
+  /** Rows the list holds after the same scroll is repeated post-reload. */
+  deepRows: number;
+  usedFallbackButton: boolean;
+  filesUpdatesObserved: number;
+  afterUpdate: number;
+  opened: { path: string; hitsSelf: boolean; hashMatched: boolean; onScreen: boolean };
+  afterReopen: number;
+  /** The board is still one click away at the end of the round trip. */
+  boardCameBack: boolean;
+  redChecks: Record<string, boolean>;
+}
+
+/** Runs inside the page: the switch, and what a pointer at its centre reaches. */
+function probeViewSwitch(label: string): SwitchProbe {
+  const empty = { found: false, x: 0, y: 0, width: 0, height: 0, hit: "none", hitsSelf: false, disabled: true, pointerEvents: "none" };
+  const button = document.querySelector<HTMLElement>(`button[aria-pressed][aria-label="${label}"]`);
+  if (!button) return empty;
+  const rect = button.getBoundingClientRect();
+  if (rect.width === 0 || rect.height === 0) return empty;
+  const x = rect.left + rect.width / 2;
+  const y = rect.top + rect.height / 2;
+  const hit = document.elementFromPoint(x, y);
+  const named = hit?.closest("[aria-label]");
+  return {
+    found: true,
+    x, y, width: rect.width, height: rect.height,
+    hit: named?.getAttribute("aria-label") ?? hit?.tagName.toLowerCase() ?? "none",
+    hitsSelf: Boolean(hit && button.contains(hit)),
+    disabled: (button as HTMLButtonElement).disabled === true,
+    pointerEvents: getComputedStyle(button).pointerEvents,
+  };
+}
+
+const countListRows = () => document.querySelectorAll("[data-conversation-list-row]").length;
+
+/** Lay a transparent sheet over the switch — the shape of the reported defect,
+    where the tool palette was drawn over it. The probe must see it. */
+function reintroduceCoveredViewSwitch(label: string): void {
+  const button = document.querySelector<HTMLElement>(`button[aria-pressed][aria-label="${label}"]`);
+  if (!button) return;
+  const rect = button.getBoundingClientRect();
+  const shim = document.createElement("div");
+  shim.setAttribute("data-audit", "switch-shim");
+  shim.setAttribute("aria-label", "audit shim");
+  shim.style.cssText = `position:fixed;left:${rect.left}px;top:${rect.top}px;width:${rect.width}px;height:${rect.height}px;background:transparent;pointer-events:auto;z-index:9999;`;
+  document.body.appendChild(shim);
+}
+
+/** Cut the list back to one page and take the sentinel away — a list that
+    cannot page, which is what requirement 4 says must not ship. */
+function reintroduceUnpaginatedList(pageSize: number): void {
+  const rows = Array.from(document.querySelectorAll<HTMLElement>("[data-conversation-list-row]"));
+  for (const row of rows.slice(pageSize)) row.remove();
+  document.querySelector("[data-conversation-list-sentinel]")?.remove();
+}
+
+/** Waits for an in-page predicate, polling; returns the last value it read. */
+async function waitForValue<T>(page: Page, read: () => T, accept: (value: T) => boolean, timeoutMs = 30_000): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  let last = await page.evaluate(read);
+  while (!accept(last) && Date.now() < deadline) {
+    await page.waitForTimeout(250);
+    last = await page.evaluate(read);
+  }
+  return last;
+}
+
+async function walkAgentList(browser: Browser, baseUrl: string, project: string, catalogEntries: number, onNewConversation: () => void): Promise<ListJourney> {
+  const page = await openBoard(browser, baseUrl, project, 1, "select");
+  const redChecks: Record<string, boolean> = {};
+  try {
+    /* 1. The switch, on the board, where it used to be unreachable. */
+    const switchOnBoard = await page.evaluate(probeViewSwitch, "conversations");
+    /* The probe must be able to see an occluded switch, or its verdict is
+       worth nothing — so cover it, re-probe, and uncover. */
+    await page.evaluate(reintroduceCoveredViewSwitch, "conversations");
+    redChecks.coveredViewSwitch = !(await page.evaluate(probeViewSwitch, "conversations")).hitsSelf;
+    await page.evaluate(() => document.querySelector('[data-audit="switch-shim"]')?.remove());
+
+    /* 2. A real click at its own centre — no synthetic DOM event. */
+    await page.mouse.click(switchOnBoard.x, switchOnBoard.y);
+    await page.waitForSelector("[data-conversation-list-rows]", { timeout: 60_000 });
+    const firstPage = await waitForValue(page, countListRows, (rows) => rows >= CONVERSATION_LIST_PAGE_SIZE);
+    const switchOnList = await page.evaluate(probeViewSwitch, "conversations");
+
+    /* 3. Infinite scroll: the wheel over the list, three times, each waiting
+          for the sentinel to bring the next page. The fallback button is never
+          touched — the point is that it does not have to be. */
+    const scrollSteps: number[] = [];
+    let seen = firstPage;
+    for (let step = 0; step < 3; step += 1) {
+      await page.evaluate(() => {
+        const scroller = document.querySelector<HTMLElement>("[data-conversation-list-scroll]");
+        if (scroller) scroller.scrollTop = scroller.scrollHeight;
+      });
+      await page.mouse.move(800, 600);
+      await page.mouse.wheel(0, 4_000);
+      const grown = await waitForValue(page, countListRows, (rows) => rows > seen);
+      scrollSteps.push(grown);
+      seen = grown;
+    }
+    const usedFallbackButton = false;
+
+    /* Same red question for pagination: a list cut back to one page with no
+       sentinel must not read as a list that paged. */
+    await page.evaluate(reintroduceUnpaginatedList, CONVERSATION_LIST_PAGE_SIZE);
+    redChecks.unpaginatedList = (await page.evaluate(countListRows)) <= CONVERSATION_LIST_PAGE_SIZE;
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.waitForSelector("[data-conversation-list-rows]", { timeout: 60_000 });
+    await waitForValue(page, countListRows, (rows) => rows >= CONVERSATION_LIST_PAGE_SIZE);
+    /* Back to where the scroll had got to, so the update below is judged
+       against a list that really is several pages deep. */
+    for (let step = 0; step < 3; step += 1) {
+      const before = await page.evaluate(countListRows);
+      await page.evaluate(() => {
+        const scroller = document.querySelector<HTMLElement>("[data-conversation-list-scroll]");
+        if (scroller) scroller.scrollTop = scroller.scrollHeight;
+      });
+      await page.mouse.wheel(0, 4_000);
+      await waitForValue(page, countListRows, (rows) => rows > before);
+    }
+    const deep = await page.evaluate(countListRows);
+
+    /* 4. Hold it through a real update. A new conversation lands on disk, the
+          scan picks it up, and the poll delivers it — the exact moment the
+          list used to throw away every page it had loaded and start again at
+          one, because the catalog hook had no scope to keep them under. */
+    await page.evaluate(() => {
+      const store = globalThis as unknown as { __llvFiles?: number; fetch: typeof fetch };
+      store.__llvFiles = 0;
+      const original = store.fetch;
+      store.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+        if (String(input).includes("/api/files")) store.__llvFiles = (store.__llvFiles ?? 0) + 1;
+        return original(input, init);
+      }) as typeof fetch;
+    });
+    onNewConversation();
+    const filesUpdatesObserved = await waitForValue(
+      page,
+      () => (globalThis as unknown as { __llvFiles?: number }).__llvFiles ?? 0,
+      (count) => count >= 2,
+      60_000,
+    );
+    const afterUpdate = await page.evaluate(countListRows);
+
+    /* 5. Open an agent from the list, by clicking its row. */
+    const rowProbe = await page.evaluate(() => {
+      /* A row scrolled out of the list's own viewport cannot be clicked and
+         must not be judged as if it could — the list scrolls under the app
+         header, so "inside the window" is not the same as "inside the list". */
+      const scroller = document.querySelector<HTMLElement>("[data-conversation-list-scroll]");
+      const view = scroller?.getBoundingClientRect();
+      if (!view) return null;
+      for (const row of Array.from(document.querySelectorAll<HTMLElement>("[data-conversation-list-row]"))) {
+        const button = row.querySelector<HTMLElement>("button");
+        if (!button) continue;
+        const rect = button.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) continue;
+        if (rect.top < view.top || rect.bottom > view.bottom || rect.left < view.left || rect.right > view.right) continue;
+        const x = rect.left + rect.width / 2;
+        const y = rect.top + rect.height / 2;
+        const hit = document.elementFromPoint(x, y);
+        return {
+          path: row.getAttribute("data-conversation-list-row") ?? "",
+          title: (button.getAttribute("aria-label") ?? "").replace(/^Open /, ""),
+          x, y,
+          hitsSelf: Boolean(hit && button.contains(hit)),
+        };
+      }
+      return null;
+    });
+    if (!rowProbe) throw new Error("the agent list drew no row on screen to open");
+    await page.mouse.click(rowProbe.x, rowProbe.y);
+    await page.waitForTimeout(3_000);
+    /* Opened means: this conversation is the one the URL now names, and its
+       card is on the board — not merely that the click was accepted. */
+    const opened = await page.evaluate((probe: { path: string; title: string }) => ({
+      hash: location.hash,
+      hashMatched: location.hash.startsWith("#c=") || decodeURIComponent(location.hash).includes(probe.path),
+      onScreen: Boolean(document.querySelector(`[data-scheme-node="${CSS.escape(probe.path)}"]`))
+        || Array.from(document.querySelectorAll<HTMLElement>("[data-scheme-node]"))
+          .some((node) => (node.textContent ?? "").includes(probe.title.slice(0, 24))),
+    }), rowProbe);
+
+    /* 6. And back to the list — the switch has to be reachable from wherever
+          opening an agent left the operator, and the list has to still be the
+          list they had scrolled. */
+    const switchBack = await waitForValue(
+      page,
+      () => {
+        const button = document.querySelector<HTMLElement>('button[aria-pressed][aria-label="conversations"]');
+        if (!button) return { x: 0, y: 0, ready: false };
+        const rect = button.getBoundingClientRect();
+        return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, ready: rect.width > 0 };
+      },
+      (probe) => probe.ready,
+      30_000,
+    );
+    if (switchBack.ready) {
+      await page.mouse.click(switchBack.x, switchBack.y);
+      await page.waitForSelector("[data-conversation-list-rows]", { timeout: 60_000 });
+    }
+    const afterReopen = await waitForValue(page, countListRows, (rows) => rows > CONVERSATION_LIST_PAGE_SIZE, 15_000);
+
+    await page.screenshot({ path: path.join(OUT_DIR, "1614-agent-list.png") });
+
+    /* And out again through the same switch. The view mode is durable, so a
+       journey that ended in the list would leave every later step — and the
+       operator's next visit — opening on the list. */
+    const backToBoard = await page.evaluate(probeViewSwitch, "scheme");
+    if (backToBoard.found) await page.mouse.click(backToBoard.x, backToBoard.y);
+    const boardCameBack = await waitForValue(page, () => document.querySelectorAll("[data-scheme-band]").length, (bands) => bands > 0, 60_000) > 0;
+
+    return {
+      pageSize: CONVERSATION_LIST_PAGE_SIZE,
+      catalogTotal: catalogEntries,
+      switchOnBoard, switchOnList,
+      firstPage,
+      scrollSteps,
+      deepRows: deep,
+      boardCameBack,
+      usedFallbackButton,
+      filesUpdatesObserved,
+      afterUpdate,
+      opened: { path: rowProbe.path, hitsSelf: rowProbe.hitsSelf, ...opened },
+      afterReopen,
+      redChecks,
+    };
+  } finally {
+    await page.context().close();
+  }
+}
+
+/* ------------------------------------------------------------------------- */
+/* The camera the migration leaves behind                                      */
+/* ------------------------------------------------------------------------- */
+
+/**
+ * The board is per-project and its camera is remembered per project, so the
+ * first board opened after the one-time migration is opened by a camera saved
+ * against the board as it was. The operator's own was
+ * `{x:0,y:-25239.92,z:1.6}` — 25 000px down a band stack that hiding 384 empty
+ * tasks had just shortened. Restored as saved, it frames a part of the world
+ * that no longer exists: an empty canvas, with no hint that the board is up
+ * there somewhere.
+ *
+ * Measured here from the operator's exact stored value, as a timeline from the
+ * board's first painted frame. Both halves of the verdict come out of it: the
+ * framing the saved camera actually produces — which is what the measurement
+ * has to be able to report, and does, as zero bands on screen — and the board
+ * coming back a moment later. Nothing is mutated by hand; band geometry on
+ * this board is screen-constant, so a transform injected under a layout that
+ * was computed for another camera would describe a board that cannot exist.
+ */
+interface CameraFraming {
+  atMs: number;
+  camera: { x: number; y: number; z: number };
+  bandsDrawn: number;
+  bandsOnScreen: number;
+}
+
+interface CameraRecovery {
+  savedCamera: { x: number; y: number; z: number };
+  /** The framing the board opened with, at its first painted frame. */
+  opened: CameraFraming;
+  /** The framing it settled on. */
+  settled: CameraFraming;
+  recoveredWithinMs: number | null;
+  restoredSaved: boolean;
+  /** The measurement reported a framing showing nothing — it can see the class
+      of defect it is here to judge. */
+  redCheckOffWorld: boolean;
+}
+
+/** Runs inside the page: samples the camera and what it frames, from the first
+    painted frame until the board holds one framing. */
+function sampleFraming(windowMs: number): Promise<CameraFraming[]> {
+  return new Promise<CameraFraming[]>((resolve) => {
+    const samples: CameraFraming[] = [];
+    const started = performance.now();
+    const viewport = document.querySelector<HTMLElement>('[aria-label^="Agent board"]');
+    if (!viewport) { resolve(samples); return; }
+    const tick = () => {
+      const canvas = viewport.getBoundingClientRect();
+      const world = Array.from(viewport.children).find((child) => (child as HTMLElement).style.transform.includes("scale(")) as HTMLElement | undefined;
+      const parsed = /translate\((-?[\d.]+)px, (-?[\d.]+)px\) scale\(([\d.]+)\)/.exec(world?.style.transform ?? "");
+      const bands = Array.from(document.querySelectorAll<HTMLElement>("[data-scheme-band]"));
+      const onScreen = bands.filter((band) => {
+        const rect = band.getBoundingClientRect();
+        return rect.bottom > canvas.top && rect.top < canvas.bottom && rect.right > canvas.left && rect.left < canvas.right;
+      }).length;
+      samples.push({
+        atMs: Math.round(performance.now() - started),
+        camera: parsed ? { x: Number(parsed[1]), y: Number(parsed[2]), z: Number(parsed[3]) } : { x: 0, y: 0, z: 0 },
+        bandsDrawn: bands.length,
+        bandsOnScreen: onScreen,
+      });
+      if (performance.now() - started < windowMs) setTimeout(tick, 50);
+      else resolve(samples);
+    };
+    tick();
+  });
+}
+
+async function recoverOffWorldCamera(browser: Browser, baseUrl: string, project: string): Promise<CameraRecovery> {
+  /* The operator's own stored value, byte for byte. */
+  const savedCamera = { x: 0, y: -25239.92, z: 1.6 };
+  const context = await browser.newContext({ viewport: { width: 1600, height: 1000 }, reducedMotion: "no-preference" });
+  await context.addInitScript((camera: { project: string; value: { x: number; y: number; z: number } }) => {
+    localStorage.clear();
+    sessionStorage.clear();
+    localStorage.setItem("llv_lang", "en");
+    localStorage.setItem("llvSound", "0");
+    localStorage.setItem("llvSchemeMode", "select");
+    sessionStorage.setItem(`llvCam:${camera.project}`, JSON.stringify(camera.value));
+  }, { project, value: savedCamera });
+  const page = await context.newPage();
+  try {
+    await page.goto(`${baseUrl}/#p=${encodeURIComponent(project)}`, { waitUntil: "domcontentloaded", timeout: 120_000 });
+    await page.waitForSelector("[data-scheme-band]", { timeout: 120_000 });
+    const samples = await page.evaluate(sampleFraming, 4_000);
+    if (!samples.length) throw new Error("the board drew no viewport to measure");
+    const opened = samples[0]!;
+    const settled = samples[samples.length - 1]!;
+    const recovered = samples.find((sample) => sample.bandsOnScreen > 0);
+    await page.waitForTimeout(500);
+    await page.screenshot({ path: path.join(OUT_DIR, "1614-camera-after-migration.png") });
+    return {
+      savedCamera,
+      opened, settled,
+      recoveredWithinMs: recovered ? recovered.atMs : null,
+      restoredSaved: Math.abs(settled.camera.y - savedCamera.y) < 1 && Math.abs(settled.camera.z - savedCamera.z) < 0.001,
+      redCheckOffWorld: samples.some((sample) => sample.bandsDrawn > 0 && sample.bandsOnScreen === 0),
+    };
+  } finally {
+    await context.close();
+  }
+}
+
 interface Measurement {
   zoom: number;
   tool: string;
@@ -683,6 +1071,46 @@ async function main(): Promise<void> {
       }
     }
 
+    /* The camera the migration leaves behind, from the operator's own value. */
+    const cameraRecovery = await recoverOffWorldCamera(browser, baseUrl, project);
+    console.log("camera after migration:", JSON.stringify(cameraRecovery));
+    must(cameraRecovery.settled.bandsOnScreen > 0,
+      `the board stayed on an empty canvas: ${cameraRecovery.settled.bandsDrawn} bands drawn, none of them on screen, at camera ${JSON.stringify(cameraRecovery.settled.camera)}`);
+    must(!cameraRecovery.restoredSaved, "the saved pre-migration camera was left in place on the shortened board");
+    must(cameraRecovery.recoveredWithinMs !== null && cameraRecovery.recoveredWithinMs < 2_000,
+      `the board took ${cameraRecovery.recoveredWithinMs ?? "forever"} ms to frame anything`);
+    /* If this ever fails because the board no longer passes through the saved
+       camera's framing at all, the measurement needs a new way to be shown
+       going red — not a relaxed assertion. */
+    must(cameraRecovery.redCheckOffWorld,
+      "the framing measurement never reported a framing with nothing on screen — it cannot judge that class");
+
+    /* Requirement 4: the agent list, walked rather than counted. */
+    const listJourney = await walkAgentList(browser, baseUrl, project, catalogEntries, seedOneMoreConversation);
+    console.log("agent list:", JSON.stringify(listJourney));
+    must(listJourney.switchOnBoard.found, "the board draws no board/list switch at all");
+    must(listJourney.switchOnBoard.hitsSelf,
+      `the board/list switch does not receive a pointer at its own centre — a click there reaches ${listJourney.switchOnBoard.hit}`);
+    must(!listJourney.switchOnBoard.disabled && listJourney.switchOnBoard.pointerEvents !== "none", "the board/list switch is inert");
+    must(listJourney.firstPage === CONVERSATION_LIST_PAGE_SIZE,
+      `the list's first page drew ${listJourney.firstPage} rows, expected ${CONVERSATION_LIST_PAGE_SIZE}`);
+    must(listJourney.scrollSteps.every((rows, index) => rows > (index === 0 ? listJourney.firstPage : listJourney.scrollSteps[index - 1]!)),
+      `scrolling did not load further pages: ${listJourney.scrollSteps.join(" → ")}`);
+    must(!listJourney.usedFallbackButton, "the list only paged because the fallback button was pressed");
+    const deepest = listJourney.deepRows;
+    must(deepest > CONVERSATION_LIST_PAGE_SIZE * 2, `scrolling reached only ${deepest} rows`);
+    must(listJourney.filesUpdatesObserved >= 2, `no scan update reached the page (${listJourney.filesUpdatesObserved} observed)`);
+    must(listJourney.afterUpdate >= deepest,
+      `a scan update cut the list back from ${deepest} rows to ${listJourney.afterUpdate}`);
+    must(listJourney.opened.hitsSelf, "an agent row does not receive a pointer at its own centre");
+    must(listJourney.opened.hashMatched && listJourney.opened.onScreen, "clicking an agent row did not open that conversation");
+    must(listJourney.afterReopen >= deepest,
+      `reopening the list after opening an agent restarted it at ${listJourney.afterReopen} rows, from ${deepest}`);
+    must(listJourney.boardCameBack, "the switch did not bring the board back, so the round trip is one-way");
+    for (const [name, red] of Object.entries(listJourney.redChecks)) {
+      must(red, `the agent-list audit did NOT flag a deliberately reintroduced ${name} defect — it cannot judge that class`);
+    }
+
     /* Reversibility, through the surfaces the operator actually uses: a hidden
        task put back on the board draws a compact band, that band offers to
        take it off again, and the click that does so is a flag write — the task
@@ -749,7 +1177,7 @@ async function main(): Promise<void> {
 
     fs.writeFileSync(
       path.join(OUT_DIR, "measurements.json"),
-      JSON.stringify({ scale, measurements, failures }, null, 2) + "\n", "utf8",
+      JSON.stringify({ scale, measurements, cameraRecovery, listJourney, failures }, null, 2) + "\n", "utf8",
     );
     console.log(`measurements: ${path.join(OUT_DIR, "measurements.json")}`);
   } finally {
