@@ -1,5 +1,6 @@
 import { modelFromBody } from "@/lib/agent/models";
 import { parseSelectedContextRef } from "@/lib/selection/selectedContext";
+import { parseMessageOrigin } from "./messageOrigin";
 
 import type { RuntimeOperationCommand, RuntimeOperationKind, RuntimeReconfigureCommand, RuntimeSendSettings } from "./contracts";
 import { parseStructuredImageRefs, structuredContent } from "./structuredContent";
@@ -9,7 +10,7 @@ const MAX_OPERATION_BYTES = 256 * 1024;
 /** The optional per-turn runtime snapshot a send may carry (issue #390 §10).
     Model reuses the CLI-argument bounds; effort is a bounded lowercase tier
     token (the host/capability enforces the engine catalog). Absent = today. */
-function parseRuntimeSendSettings(value: unknown): RuntimeSendSettings | undefined {
+export function parseRuntimeSendSettings(value: unknown): RuntimeSendSettings | undefined {
   if (value === undefined || value === null) return undefined;
   if (typeof value !== "object" || Array.isArray(value)) throw new Error("runtime settings are invalid");
   const body = value as Record<string, unknown>;
@@ -25,7 +26,15 @@ function parseRuntimeSendSettings(value: unknown): RuntimeSendSettings | undefin
     if (!effort || effort.length > 32 || !/^[a-z]+$/.test(effort)) throw new Error("runtime effort is invalid");
     settings.effort = effort;
   }
+  if (body.fast !== undefined && typeof body.fast !== "boolean") throw new Error("runtime speed is invalid");
   if (typeof body.fast === "boolean") settings.fast = body.fast;
+  for (const field of ["serviceTier", "serviceTierForTurn"] as const) {
+    if (body[field] === undefined) continue;
+    if (body[field] !== null && (typeof body[field] !== "string" || !/^[a-z][a-z0-9_-]{0,31}$/.test(body[field]))) {
+      throw new Error(`runtime ${field} is invalid`);
+    }
+    settings[field] = body[field] as string | null;
+  }
   return Object.keys(settings).length ? settings : undefined;
 }
 
@@ -69,6 +78,47 @@ export function parseRuntimeCommand(kind: RuntimeOperationKind, value: unknown):
   const operationId = optionalId(body.operationId, "operationId");
   const idempotencyKey = idempotency(body, operationId);
   const turnId = optionalNullableId(body.turnId, "turnId");
+
+  if (kind === "native-queue") {
+    const action = body.action;
+    if (action !== "add" && action !== "update" && action !== "delete" && action !== "reorder" && action !== "start" && action !== "send-now") throw new Error("native queue action is invalid");
+    const binding = object(body.binding);
+    const threadId = requiredId(binding.threadId, "threadId");
+    if (binding.accountId !== null && typeof binding.accountId !== "string") throw new Error("accountId is required");
+    const accountId = binding.accountId === null ? null : requiredId(binding.accountId, "accountId");
+    /* Native's own start takes a nullable `queuedSubmissionId`, so a start is
+       either about ONE entry — a queued row, or a withdrawn payload's one route
+       back — or about the queue as a whole, which is what the panel header
+       offers. Update, delete and send-now name a native submission and cannot
+       be queue-level at all. */
+    const target = action === "update" || action === "delete" || action === "send-now"
+      || (action === "start" && body.entryId !== undefined);
+    const entryId = target ? requiredId(body.entryId, "entryId") : undefined;
+    const expectedRevision = target ? body.expectedRevision : undefined;
+    if (target && (typeof expectedRevision !== "number" || !Number.isSafeInteger(expectedRevision) || expectedRevision < 1)) throw new Error("expectedRevision is invalid");
+    if ((action === "start" || action === "send-now") && turnId === undefined) throw new Error("turnId fence is required");
+    if (action === "start" && turnId !== null) throw new Error("queue start requires an idle fence");
+    const ids = body.queuedSubmissionIds;
+    if (action === "reorder" && (!Array.isArray(ids) || ids.length > 2000 || ids.some(id => typeof id !== "string" || !id) || new Set(ids).size !== ids.length)) throw new Error("queuedSubmissionIds is invalid");
+    const withContent = action === "add" || action === "update";
+    const images = withContent ? parseStructuredImageRefs(body.images ?? [], 16) : [];
+    if (!images) throw new Error("images are invalid");
+    const content = withContent ? structuredContent(typeof body.text === "string" ? body.text.trim() : "", images) : null;
+    const runtime = withContent ? parseRuntimeSendSettings(body.runtime) : undefined;
+    return {
+      kind, conversationId, idempotencyKey, ...(operationId ? { operationId } : {}), action,
+      binding: { threadId, accountId },
+      ...(target ? { entryId, expectedRevision: expectedRevision as number } : {}),
+      ...(action === "reorder" ? { queuedSubmissionIds: ids as string[] } : {}),
+      ...(content ? { text: content.content.text, images: content.content.images, contentDigest: content.contentDigest } : {}),
+      ...(runtime ? { runtime } : {}), ...(turnId !== undefined ? { turnId } : {}),
+      ...(parseSelectedContextRef(body.selectedContext) ? { selectedContext: parseSelectedContextRef(body.selectedContext)! } : {}),
+      /* #1117 authorship, which the route stamps server-side before this reads
+         it. A queued message is a message, and it carries the same provenance a
+         message sent straight through does. */
+      ...(withContent && parseMessageOrigin(body.origin) ? { origin: parseMessageOrigin(body.origin)! } : {}),
+    };
+  }
 
   if (kind === "send" || kind === "steer") {
     const text = typeof body.text === "string" ? body.text.trim() : "";

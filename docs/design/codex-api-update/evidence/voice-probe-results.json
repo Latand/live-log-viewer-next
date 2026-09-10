@@ -1,0 +1,92 @@
+{
+  "assertions": [
+    {
+      "check": "the thread mandate reaches the backing model",
+      "held": true
+    },
+    {
+      "check": "without a prompt the spoken model runs the stock Codex persona",
+      "held": true
+    },
+    {
+      "check": "without a prompt the thread mandate does NOT reach the spoken model",
+      "held": true
+    },
+    {
+      "check": "the spoken session carries no tool inventory of its own",
+      "held": true
+    },
+    {
+      "check": "a prompt replaces the spoken model instructions",
+      "held": true
+    },
+    {
+      "check": "an unknown parameter is ignored, so acceptance alone proves nothing",
+      "held": true
+    },
+    {
+      "check": "every parameter this repair sends is deserialized",
+      "held": true
+    },
+    {
+      "check": "an injected thread item is permanent",
+      "held": true
+    },
+    {
+      "check": "creating and stopping a call, with no backing turn during it, commits no session-scoped string to canonical history by itself (a backing turn during the call is what commits them, as developer items - see the successful-session evidence in docs/realtime-v3/BLOCKED.md)",
+      "held": true
+    }
+  ],
+  "backend": "local synthetic fixture; no credentials; no external requests",
+  "cases": {
+    "backing_model": {
+      "requests": 1,
+      "sees_thread_mandate": true
+    },
+    "canonical_history_at_call_creation": {
+      "end_instructions_persisted": false,
+      "injected_developer_item_persisted": true,
+      "scope": "call creation and stop only: no backing turn ran during the call and no later text turn follows, so this says nothing about what a turn commits",
+      "spoken_prompt_persisted": false,
+      "start_instructions_persisted": false
+    },
+    "parameter_deserialization": {
+      "flushTranscriptTailOnSessionEnd": "rejected",
+      "prompt": "rejected",
+      "realtimeEndInstructions": "rejected",
+      "realtimeStartInstructions": "rejected",
+      "unknown_field_control": "accepted"
+    },
+    "with_prompt": {
+      "call_creation_requests": 1,
+      "carries_a_tool_inventory": false,
+      "initial_items": 0,
+      "instructions_are_the_stock_codex_persona": false,
+      "instructions_bytes": 1029,
+      "session_keys": [
+        "audio",
+        "delegation",
+        "instructions",
+        "model"
+      ],
+      "spoken_model_sees_thread_mandate": true
+    },
+    "without_prompt": {
+      "call_creation_requests": 1,
+      "carries_a_tool_inventory": false,
+      "initial_items": 0,
+      "instructions_are_the_stock_codex_persona": true,
+      "instructions_bytes": 5745,
+      "session_keys": [
+        "audio",
+        "delegation",
+        "instructions",
+        "model"
+      ],
+      "spoken_model_sees_thread_mandate": false
+    }
+  },
+  "cli": "codex-cli 0.154.0",
+  "held": true,
+  "question": "what does the spoken model receive when a call starts on a thread that already has a role"
+}

@@ -1,18 +1,11 @@
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
-
 import { expect, test } from "bun:test";
 
 import {
-  canonicalVoicePersonaBootstrapExists,
   COORDINATOR_VOICE_PERSONA,
   MODALITY_VOICE_PERSONA,
-  legacyVoicePersonaBootstrapItemId,
   PERSONA_NAME,
-  voicePersona,
-  voicePersonaBootstrap,
-  voicePersonaBootstrapIdentity,
+  spokenVoicePersona,
+  voiceSessionPersona,
 } from "./voicePersona";
 
 /* Language names the prompt must never speak of, in the forms a hard pin would
@@ -51,92 +44,84 @@ function languagePins(persona: string): string[] {
   return pins;
 }
 
+test("both spoken personas carry native's operating protocol, in this repo's words", () => {
+  /* The originating directive asked for the native USER/BACKEND framing and the
+     operating protocol preserved, which three slogans from it do not cover. Each of these is a
+     distinct failure the installed app's own prompt is written to prevent, and
+     each has to reach BOTH variants — the spoken model is the same model either
+     way. The wording is this repository's; the bundled prompt is a reference. */
+  for (const persona of [COORDINATOR_VOICE_PERSONA, MODALITY_VOICE_PERSONA]) {
+    /* The two sources arrive in one stream, both as user-role text. */
+    expect(persona).toContain("[USER]");
+    expect(persona).toContain("[BACKEND]");
+    expect(persona).toContain("never send one back as work");
+    /* An update is not a completion; the tool return is. */
+    expect(persona).toContain("tool return");
+    expect(persona).toContain("do not announce a task as done");
+    /* Self-contained conversation needs no backing turn; uncertainty still does. */
+    expect(persona).toContain("plainly conversational");
+    expect(persona).toContain("unsure about goes to the agent");
+    /* Task-level pacing survives the next backend message. */
+    expect(persona).toContain("holds for the whole task");
+    expect(persona).toContain("Do not drift back to your default");
+    /* And the rules already there are still there. */
+    expect(persona).toContain("authoritative");
+  }
+});
+
 test("the built-in persona stands when no override file exists", () => {
-  const persona = voicePersona("coordinator", () => { throw new Error("ENOENT"); });
+  const persona = spokenVoicePersona("coordinator", () => { throw new Error("ENOENT"); });
   expect(persona).toBe(COORDINATOR_VOICE_PERSONA);
 });
 
 test("an operator override replaces the built-in persona wholesale", () => {
   /* A new thread resolves the current override wholesale; an established
      thread keeps the developer item it already persisted. */
-  const persona = voicePersona("coordinator", () => "  You are the coordinator. Keep it short.  ");
+  const persona = spokenVoicePersona("coordinator", () => "  You are the coordinator. Keep it short.  ");
   expect(persona).toBe("You are the coordinator. Keep it short.");
   expect(persona).not.toBe(COORDINATOR_VOICE_PERSONA);
 });
 
 test("an empty or whitespace override falls back instead of muting the persona", () => {
-  expect(voicePersona("coordinator", () => "   \n  ")).toBe(COORDINATOR_VOICE_PERSONA);
+  expect(spokenVoicePersona("coordinator", () => "   \n  ")).toBe(COORDINATOR_VOICE_PERSONA);
 });
 
-test("one durable thread identity produces one stable canonical developer item", () => {
-  const identity = voicePersonaBootstrapIdentity("thread-voice", "coordinator");
-  expect(voicePersonaBootstrapIdentity("thread-voice", "coordinator")).toEqual(identity);
-  expect(voicePersonaBootstrapIdentity("thread-other", "coordinator")).not.toEqual(identity);
-  expect(identity.itemId.length).toBeLessThanOrEqual(64);
-  expect(legacyVoicePersonaBootstrapItemId("thread-voice")).toStartWith(identity.itemId);
-  expect(legacyVoicePersonaBootstrapItemId("thread-voice").length).toBe(82);
-  expect(voicePersonaBootstrap(identity, "coordinator", () => "  Resolved call persona. \n")).toEqual({
-    item: {
-      type: "message",
-      id: identity.itemId,
-      role: "developer",
-      content: [{ type: "input_text", text: "Resolved call persona." }],
-    },
-  });
+test("one variant produces one stable session persona", () => {
+  /* Stable so the voice panel and the tests can name the persona a live call is
+     running on, and so a reconnect on the same variant is recognisably the same
+     persona rather than a new one. */
+  const persona = voiceSessionPersona("coordinator", () => "  Resolved call persona. \n");
+  expect(voiceSessionPersona("coordinator", () => "  Resolved call persona. \n")).toEqual(persona);
+  expect(persona.prompt).toBe("Resolved call persona.");
+  expect(persona.variant).toBe("coordinator");
+  expect(voiceSessionPersona("modality").personaId).not.toBe(persona.personaId);
 });
 
-test("canonical receipt scanning recognizes reordered fields across a stream chunk boundary and refuses a symlink", async () => {
-  const isolated = fs.mkdtempSync(path.join(os.tmpdir(), "llv-voice-persona-scan-"));
-  const transcript = path.join(isolated, "thread.jsonl");
-  const linked = path.join(isolated, "linked.jsonl");
-  const itemId = `msg_voice_persona_${"b".repeat(46)}`;
-  const record = JSON.stringify({
-    padding: "x".repeat(65_400),
-    payload: { role: "developer", content: [], id: itemId, type: "message" },
-    type: "response_item",
-  });
-  fs.writeFileSync(transcript, `${record}\n`);
-  fs.symlinkSync(transcript, linked);
-  try {
-    expect(await canonicalVoicePersonaBootstrapExists(transcript, itemId)).toBeTrue();
-    await expect(canonicalVoicePersonaBootstrapExists(linked, itemId)).rejects.toThrow();
-    await expect(canonicalVoicePersonaBootstrapExists(null, itemId))
-      .rejects.toThrow("canonical transcript path is unavailable");
-  } finally {
-    fs.rmSync(isolated, { recursive: true, force: true });
-  }
-});
-
-test("canonical receipt scanning ignores malformed rows and marker-like content", async () => {
-  const isolated = fs.mkdtempSync(path.join(os.tmpdir(), "llv-voice-persona-structural-scan-"));
-  const transcript = path.join(isolated, "thread.jsonl");
-  const itemId = `msg_voice_persona_${"c".repeat(46)}`;
-  const markerLikeText = `"type":"message","id":"${itemId}","role":"developer"`;
-  fs.writeFileSync(transcript, [
-    `{malformed:${markerLikeText}}`,
-    JSON.stringify({
-      type: "response_item",
-      payload: {
-        type: "message",
-        id: "ordinary-system-row",
-        role: "developer",
-        content: [{ type: "input_text", text: markerLikeText }],
-      },
-    }),
-  ].join("\n") + "\n");
-  try {
-    expect(await canonicalVoicePersonaBootstrapExists(transcript, itemId)).toBeFalse();
-  } finally {
-    fs.rmSync(isolated, { recursive: true, force: true });
-  }
+test("a session persona writes nothing that could outlive its call", () => {
+  /* The property the whole repair rests on. `thread/inject_items` appends to an
+     append-only transcript, so a persona written that way is permanent and each
+     variant accumulated its own copy; these three strings are parameters of one
+     `thread/realtime/start` and are gone when the call is. */
+  const persona = voiceSessionPersona("modality");
+  expect(Object.keys(persona).sort()).toEqual([
+    "endInstructions", "personaId", "prompt", "startInstructions", "variant",
+  ]);
+  for (const value of Object.values(persona)) expect(typeof value).toBe("string");
 });
 
 test("no shipped persona pins a spoken language anywhere", () => {
   /* The whole property in one line: naming any language, in any sentence, is
      the defect — the prose may not even name the language it is written in.
-     Both variants are shipped text, so both are bound by it. */
+     Both variants are shipped text, so both are bound by it — and so are the
+     session-scoped instructions the backing model receives, which are prompt
+     text reaching a model exactly as the spoken persona is. */
   expect(languagePins(COORDINATOR_VOICE_PERSONA)).toEqual([]);
   expect(languagePins(MODALITY_VOICE_PERSONA)).toEqual([]);
+  for (const variant of ["coordinator", "modality"] as const) {
+    const persona = voiceSessionPersona(variant);
+    expect(languagePins(persona.startInstructions)).toEqual([]);
+    expect(languagePins(persona.endInstructions)).toEqual([]);
+  }
 });
 
 test("appending a hard pin to any language is caught", () => {
@@ -249,27 +234,33 @@ test("the character never buys itself room on truth", () => {
    agent is told which tool carries it and what to reuse on a retry; nothing else in
    the running system can say so. */
 
-test("the persona tells the gateway it relays to a manager rather than driving the board", () => {
-  expect(COORDINATOR_VOICE_PERSONA).toContain("only agent the user talks to");
+test("the spoken persona tells the voice it does not drive the board itself", () => {
+  expect(COORDINATOR_VOICE_PERSONA).toContain("only voice the user hears");
   expect(COORDINATOR_VOICE_PERSONA).toContain("do not touch the board yourself");
-  expect(COORDINATOR_VOICE_PERSONA).toContain("manager");
 });
 
-test("the persona names the directive tool and the id it must reuse on a retry", () => {
-  expect(COORDINATOR_VOICE_PERSONA).toContain("bridge_directive");
-  expect(COORDINATOR_VOICE_PERSONA).toContain("reuse the same turn id and index");
+test("the backing instructions name the directive tool and the id it must reuse on a retry", () => {
+  /* Addressed to the model that actually holds the tool. The spoken model has
+     none, so a relay mandate delivered to it can only produce a refusal. */
+  const backing = voiceSessionPersona("coordinator").startInstructions;
+  expect(backing).toContain("bridge_directive");
+  expect(backing).toContain("reuse the same turn id and index");
   /* The recipient is server-resolved; a gateway that thought it chose one would
      eventually try to message a worker. */
-  expect(COORDINATOR_VOICE_PERSONA).toContain("you never name it");
+  expect(backing).toContain("you never name it");
 });
 
-test("the persona carries the deploy round trip and its refusals", () => {
+test("the deploy round trip and its refusals reach both models", () => {
+  /* The user's spoken yes is heard by the spoken model and acted on by the
+     backing one, so neither half can carry the rule alone. */
   expect(COORDINATOR_VOICE_PERSONA).toContain("spoken yes");
-  expect(COORDINATOR_VOICE_PERSONA).toContain("Never invent or reword");
-  expect(COORDINATOR_VOICE_PERSONA).toContain("Anything other than a clear yes is a no");
+  expect(COORDINATOR_VOICE_PERSONA).toContain("anything other than a clear yes is a no");
+  const backing = voiceSessionPersona("coordinator").startInstructions;
+  expect(backing).toContain("spoken yes");
+  expect(backing).toContain("Never invent or reword");
 });
 
-test("the persona keeps the plumbing out of the user's ear", () => {
+test("the spoken persona keeps the plumbing out of the user's ear", () => {
   expect(COORDINATOR_VOICE_PERSONA).toContain("do not narrate the plumbing");
-  expect(COORDINATOR_VOICE_PERSONA).toContain("do not read the report verbatim");
+  expect(COORDINATOR_VOICE_PERSONA).toContain("do not read a report verbatim");
 });

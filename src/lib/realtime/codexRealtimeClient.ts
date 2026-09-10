@@ -4,6 +4,8 @@ import {
   normalizeVoiceDeliveries,
   type RuntimeVoiceDelivery,
 } from "@/lib/runtime/voiceDelivery";
+import type { RuntimeVoiceTranscriptSegment } from "@/lib/runtime/contracts";
+import type { VoiceBackingHost } from "@/hooks/useCodexRealtime";
 
 
 import { viewBus } from "@/hooks/viewPresenceBus";
@@ -36,11 +38,36 @@ export interface CodexRealtimeSnapshot {
   micMuted: boolean;
   /** Agent audio silenced locally; the call keeps running. */
   outputMuted: boolean;
+  /**
+   * Something the operator should know while the call keeps running (#1629).
+   *
+   * Deliberately not `error`, which puts the panel in its failed state and ends
+   * the call in the reader's mind. An approaching usage limit is the case this
+   * was added for: the backend says so before it cuts the call, and the operator
+   * can only act on it while there is still a call to act in.
+   */
+  notice: string | null;
+  /**
+   * Why the agent behind this call cannot be reached, or null while it can
+   * (#1629).
+   *
+   * SEPARATE FROM `error`, WHICH IS ABOUT THE TRANSPORT. The two failures look
+   * identical to the operator and are not the same thing: the WebRTC leg runs to
+   * the provider, so a backing host that was interrupted, replaced or killed
+   * leaves the call sounding perfectly alive while nothing said into it can
+   * reach any work. The panel used to show `live` throughout that, and a worker
+   * response that failed to deliver was swallowed silently.
+   */
+  agentUnavailable: string | null;
 }
 
 export type ParsedRealtimeEvent =
   | { kind: "transcript"; role: "user" | "assistant"; text: string; final: boolean }
-  | { kind: "delegation"; id: string }
+  /** The handoff that turns the utterance just finished into work on the thread.
+      Its identities are the canonical join between what was said and what the
+      backing model was asked to do (#1629). */
+  | { kind: "handoff"; handoffId: string | null; itemId: string | null; userBidiTurnId: string | null }
+  | { kind: "usage"; status: string }
   | { kind: "error"; message: string }
   | { kind: "ignored" };
 
@@ -48,9 +75,28 @@ const MAX_LINE_CHARS = 12_000;
 const MAX_LINES = 80;
 
 function newOperatorActivityId(): string {
-  const bytes = new Uint8Array(32);
-  crypto.getRandomValues(bytes);
-  return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return randomHex(32);
+}
+
+/**
+ * The backend's usage-limit state, in words the operator can act on.
+ *
+ * Only `approaching` is spoken about: it is the one state where saying something
+ * changes what the operator does. Any other status the backend adds later is
+ * passed through rather than swallowed, because a warning nobody has taught this
+ * function about is still a warning.
+ */
+function usageNotice(status: string): string | null {
+  if (status === "approaching") {
+    return "This account is approaching its usage limit; the call may be cut short.";
+  }
+  return status === "ok" || status === "none" ? null : `Usage limit status: ${status}.`;
+}
+
+function randomHex(bytes: number): string {
+  const buffer = new Uint8Array(bytes);
+  crypto.getRandomValues(buffer);
+  return [...buffer].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function object(value: unknown): Record<string, unknown> | null {
@@ -108,12 +154,24 @@ export function parseCodexRealtimeEvent(value: unknown): ParsedRealtimeEvent {
       ? { kind: "transcript", role: eventRole(event, "assistant"), text, final: true }
       : { kind: "ignored" };
   }
-  if (type === "delegation.created") {
-    const id = stringAt(event.item, "id")
-      ?? stringAt(event.delegation, "id")
-      ?? stringAt(event, "delegation_item_id")
-      ?? "";
-    return id ? { kind: "delegation", id } : { kind: "ignored" };
+  if (type === "delegation.created" || type === "conversation.handoff.requested") {
+    /* Both events name the same handoff; `delegation.created` nests the
+       identities under the item it created and the request carries them flat. */
+    const item = object(event.item) ?? object(event.delegation);
+    const handoffId = stringAt(event, "handoff_id") ?? stringAt(item, "handoff_id");
+    const itemId = stringAt(event, "item_id") ?? stringAt(item, "id") ?? stringAt(event, "delegation_item_id");
+    const userBidiTurnId = stringAt(event, "user_bidi_turn_id") ?? stringAt(item, "user_bidi_turn_id");
+    return handoffId || itemId || userBidiTurnId
+      ? { kind: "handoff", handoffId, itemId, userBidiTurnId }
+      : { kind: "ignored" };
+  }
+  if (type === "session.usage.updated") {
+    /* A limit warning is not a failure: the call keeps running, and saying so
+       out of band is the difference between the operator finishing a thought
+       and the call ending mid-sentence with a generic transport message. The
+       9-second cutoff in `docs/realtime-v3/BLOCKED.md` is what this exists for. */
+    const status = stringAt(event.usage_limit, "status") ?? stringAt(event, "status");
+    return status ? { kind: "usage", status } : { kind: "ignored" };
   }
   if (type === "error") {
     const message = (
@@ -149,7 +207,10 @@ async function waitForIceGathering(peer: RTCPeerConnection): Promise<void> {
 }
 
 class CodexRealtimeClient {
-  private snapshot: CodexRealtimeSnapshot = { phase: "idle", lines: [], error: null, startedAt: null, micMuted: false, outputMuted: false };
+  private snapshot: CodexRealtimeSnapshot = {
+    phase: "idle", lines: [], error: null, startedAt: null, micMuted: false, outputMuted: false, notice: null,
+    agentUnavailable: null,
+  };
   private readonly listeners = new Set<() => void>();
   private peer: RTCPeerConnection | null = null;
   private events: RTCDataChannel | null = null;
@@ -173,6 +234,29 @@ class CodexRealtimeClient {
       interleaves both speakers with worker progress, so "the last line" is
       almost never the line an update belongs to. */
   private readonly openTranscriptLines = new Map<TranscriptSpeaker, string>();
+  /* #1629: the utterance boundary this peer is currently publishing for. The
+     server cannot mint it — the operator's audio never reaches it — and without
+     one a retried publication counts as a second utterance and a slow one
+     overwrites a newer one. Reset with the call, like every other per-call
+     ledger here. */
+  private utteranceSequence = 0;
+  private utteranceId: string | null = null;
+  /* Utterances published and not yet accounted for by a handoff. A join is
+     reported only while this holds exactly one of them, because that is the only
+     arrangement in which the association is a fact rather than a guess. */
+  private utterancesAwaitingHandoff: { id: string; sequence: number }[] = [];
+  /* Canonical handoff identities this call has already seen. Native repeats a
+     handoff across its two event shapes and can redeliver one late, and a repeat
+     that claimed a fresh utterance is how card B answered a question asked about
+     card A after the operator spoke again. */
+  private readonly reportedHandoffKeys = new Set<string>();
+  /* Which panel line each canonical transcript segment owns, so a segment that
+     is republished updates its own line instead of stacking a second copy. */
+  private readonly canonicalLines = new Map<string, string>();
+  /* Set once this peer sees a handoff it cannot attribute, and never cleared
+     within the call. Every unattributed utterance may still produce a handoff,
+     so nothing arriving afterwards can be shown to be anyone's. */
+  private handoffCorrelationLost = false;
   private epoch = 0;
 
   constructor(readonly conversationId: string) {}
@@ -223,7 +307,12 @@ class CodexRealtimeClient {
       return;
     }
     this.cleanupTransport();
-    this.update({ phase: "connecting", error: null, startedAt: null, micMuted: false, outputMuted: false });
+    /* `notice` is cleared with `error` for the same reason: it describes the
+       call that is starting, and a warning carried over from the previous one
+       would tell the operator about a limit this call has not reported. */
+    this.update({
+      phase: "connecting", error: null, notice: null, agentUnavailable: null, startedAt: null, micMuted: false, outputMuted: false,
+    });
     const epoch = ++this.epoch;
     try {
       const media = await navigator.mediaDevices.getUserMedia({
@@ -421,14 +510,150 @@ class CodexRealtimeClient {
             delivery,
           }),
         }));
-      } catch {
+      } catch (failure) {
+        /* SAY SO. This is the request that carries work output INTO the call, so
+           a failure here means the operator is listening to a call whose agent
+           cannot be reached — and it used to return in silence, leaving the
+           panel reading `live`. The delivery itself stays pending and is
+           retried by the next reconcile; what changes is that the panel stops
+           claiming a working link. */
+        this.reportAgentUnavailable(failure instanceof Error ? failure.message : String(failure));
         return;
       }
-      if (body.acknowledged !== true || body.deliveryId !== delivery.deliveryId) return;
+      if (body.acknowledged !== true || body.deliveryId !== delivery.deliveryId) {
+        this.reportAgentUnavailable("the runtime did not acknowledge the last answer sent into this call");
+        return;
+      }
+      this.clearAgentUnavailable();
       this.pendingWorkerDeliveries.delete(delivery.deliveryId);
       this.acknowledgedWorkerDeliveries.add(delivery.deliveryId);
       for (const listener of this.deliveryAcknowledgedListeners) listener(delivery.deliveryId);
     }
+  }
+
+  /**
+   * Report which handoff the last published utterance became (#1629).
+   *
+   * Fire-and-forget for the same reason the reference itself is: the audio is
+   * already on its way, and a stutter in the conversation is a worse price than
+   * a missing join. Carries the utterance id it is completing, so the server
+   * attaches the canonical identities to that admission instead of counting a
+   * second utterance.
+   *
+   * AND IT REPORTS NOTHING RATHER THAN GUESS. The handoff event and the
+   * transcript boundary that published the reference share no identifier on the
+   * wire — native's own parser uses `item.id` for both handoff ids and emits no
+   * acceptance receipt naming the utterance
+   * (`docs/design/native-voice-work-identity.md`) — so the association is a fact
+   * in exactly one arrangement: one utterance outstanding, one handoff arriving
+   * for the first time. That is the ordinary flow — speak, pause, the work
+   * starts.
+   *
+   * Everything else is UNCERTAINTY, AND IT IS REPORTED AS SUCH. Two outstanding
+   * utterances means a handoff could belong to either; a canonical identity this
+   * call has already reported means a repeat, and repeats used to claim whatever
+   * had been said since. Both tell the server that this call can no longer prove
+   * a join, and the server's answer to an implicit card request becomes a typed
+   * refusal for the rest of the call. Clearing the queue and carrying on — what
+   * this did before — is how `A, B, late A, C, late B` ended with C's transcript
+   * under B's handoff.
+   */
+  private publishHandoffJoin(event: { handoffId: string | null; itemId: string | null; userBidiTurnId: string | null }): void {
+    const key = [event.handoffId ?? "", event.itemId ?? "", event.userBidiTurnId ?? ""].join(" ");
+    if (this.reportedHandoffKeys.has(key)) {
+      /* The same handoff twice. It already belongs to whatever it belonged to;
+         what is unknown is whether the utterance since has one of its own. */
+      this.reportAmbiguousHandoff("this call reported the same handoff twice, so a later spoken turn's own handoff cannot be told from a repeat");
+      return;
+    }
+    this.reportedHandoffKeys.add(key);
+    const outstanding = this.utterancesAwaitingHandoff;
+    if (this.handoffCorrelationLost || outstanding.length !== 1) {
+      this.utterancesAwaitingHandoff = [];
+      this.reportAmbiguousHandoff(outstanding.length > 1
+        ? "more than one spoken turn was outstanding when a handoff arrived"
+        : "a handoff arrived with no spoken turn waiting for one");
+      return;
+    }
+    const claimed = outstanding[0]!;
+    this.utterancesAwaitingHandoff = [];
+    if (!this.realtimeSessionId) return;
+    const payload = JSON.stringify({
+      action: "handoff",
+      conversationId: this.conversationId,
+      realtimeSessionId: this.realtimeSessionId,
+      /* The CLAIMED utterance's own identity, carried on the queue entry rather
+         than read off the latest publish, so the report cannot drift onto a
+         newer turn if the two ever stop being the same one. */
+      utterance: claimed,
+      handoff: {
+        handoffId: event.handoffId,
+        itemId: event.itemId,
+        userBidiTurnId: event.userBidiTurnId,
+      },
+    });
+    void fetch("/api/runtime/realtime", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: payload,
+    }).catch(() => undefined);
+  }
+
+  /**
+   * Tell the server this call can no longer prove which utterance a handoff is.
+   *
+   * Sent once — the server holds the uncertainty for the rest of the generation,
+   * so repeating it changes nothing — and fire-and-forget like every other
+   * publication on this leg. A POST that never lands leaves the server's own
+   * ledger to refuse on its own evidence; it cannot turn the uncertainty back
+   * into a join, because nothing after this point reports one.
+   */
+  private reportAmbiguousHandoff(reason: string): void {
+    if (this.handoffCorrelationLost) return;
+    this.handoffCorrelationLost = true;
+    if (!this.realtimeSessionId) return;
+    void fetch("/api/runtime/realtime", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        action: "handoffAmbiguity",
+        conversationId: this.conversationId,
+        realtimeSessionId: this.realtimeSessionId,
+        reason,
+      }),
+    }).catch(() => undefined);
+  }
+
+  /**
+   * What the runtime says about the host behind this call (#1629).
+   *
+   * Fed from the same session projection the composer already reads, so a host
+   * that died, was replaced or was never adopted reaches the panel as a state
+   * rather than as continued silence. `unknown` is not a failure — a projection
+   * that has not arrived yet says nothing — and only `dead` and `unhosted`
+   * contradict a live call.
+   */
+  reportBackingHost(host: VoiceBackingHost): void {
+    if (host === "hosted") return this.clearAgentUnavailable();
+    if (host === "unknown") return;
+    this.reportAgentUnavailable(host === "dead"
+      ? "the agent behind this call is no longer running, so nothing said here reaches it"
+      : host === "recovering" || host === "registering"
+        ? "the agent behind this call is being restored; what is said now may not reach it yet"
+        : host === "conflict"
+          ? "another host has claimed this conversation, so this call may no longer reach its agent"
+          : "this conversation has no running agent behind the call right now");
+  }
+
+  private reportAgentUnavailable(reason: string): void {
+    const message = reason.slice(0, 300);
+    if (this.snapshot.agentUnavailable === message) return;
+    this.update({ agentUnavailable: message });
+  }
+
+  private clearAgentUnavailable(): void {
+    if (this.snapshot.agentUnavailable === null) return;
+    this.update({ agentUnavailable: null });
   }
 
   private publishOperatorActivity(): void {
@@ -465,11 +690,21 @@ class CodexRealtimeClient {
    */
   private publishSelectedContext(): void {
     if (!this.realtimeSessionId) return;
+    /* Minted once per utterance and reused by the retry below, so the server
+       recognizes a replay as the same spoken turn rather than a later one. */
+    this.utteranceSequence += 1;
+    this.utteranceId = randomHex(16);
+    /* Once this call can no longer prove a join, the queue has no reader left,
+       so it stops being filled rather than growing for the rest of the call. */
+    if (!this.handoffCorrelationLost) {
+      this.utterancesAwaitingHandoff.push({ id: this.utteranceId, sequence: this.utteranceSequence });
+    }
     const payload = JSON.stringify({
       action: "selectedContext",
       conversationId: this.conversationId,
       realtimeSessionId: this.realtimeSessionId,
       selectedContext: viewerSelectedContext(),
+      utterance: { id: this.utteranceId, sequence: this.utteranceSequence },
     });
     const publish = async (retry: boolean): Promise<void> => {
       try {
@@ -513,11 +748,73 @@ class CodexRealtimeClient {
         this.publishOperatorActivity();
         this.publishSelectedContext();
       }
-    } else if (event.kind === "delegation") {
-      return;
+    } else if (event.kind === "handoff") {
+      /* The utterance just published is the one being handed off, so this is
+         where the reference the operator was looking at is joined to the work
+         the backing model is about to do. */
+      this.publishHandoffJoin(event);
+    } else if (event.kind === "usage") {
+      this.update({ notice: usageNotice(event.status) });
     } else if (event.kind === "error") {
       this.setError(event.message);
     }
+  }
+
+  /**
+   * Merge the canonical transcript the app-server published (#1629).
+   *
+   * TWO SOURCES, ONE PANEL. The data channel is the immediate one and the
+   * app-server's `thread/realtime/*` notifications are the committed one; the
+   * Viewer used to carry only the first, so a call whose data channel dropped
+   * showed nothing of what the backend had actually recorded. Both now reach
+   * here, and the whole job is not showing the operator every sentence twice.
+   *
+   * A canonical segment carries its WHOLE text each time, so:
+   *
+   * - a segment already merged updates the line it owns, in place. That is what
+   *   makes a redelivered frame, a `done` completing its own deltas, and a
+   *   replay after reconnect converge on one line instead of three.
+   * - a segment arriving for the first time ADOPTS the most recent line of the
+   *   same speaker whose text it continues — the data-channel line for the same
+   *   words — and takes ownership of it. The canonical text wins, because it is
+   *   the record the thread keeps.
+   * - anything else is a line this panel never saw, and it is appended. That is
+   *   the case a dropped data channel produces, and it is the reason for all of
+   *   this.
+   */
+  reconcileCanonicalTranscript(segments: readonly RuntimeVoiceTranscriptSegment[] | null | undefined): void {
+    for (const segment of segments ?? []) {
+      if (!segment?.segmentId || typeof segment.text !== "string") continue;
+      if (segment.role !== "user" && segment.role !== "assistant") continue;
+      const owned = this.canonicalLines.get(segment.segmentId);
+      const key = owned ?? this.adoptableLineFor(segment) ?? `canonical:${segment.segmentId}`;
+      if (!owned) {
+        this.canonicalLines.set(segment.segmentId, key);
+        /* The canonical record owns this line now, so a later data-channel
+           fragment for the same speaker opens a fresh one rather than appending
+           to text the backend has already committed. */
+        if (this.openTranscriptLines.get(segment.role) === key) this.openTranscriptLines.delete(segment.role);
+      }
+      this.writeLine(key, segment.role, segment.text, segment.final, "replace");
+    }
+  }
+
+  /**
+   * The line this segment is the committed form of, if the panel already has it.
+   *
+   * Matched by speaker and by prefix, newest first, and never a line another
+   * segment already owns. Prefix rather than equality because the data channel
+   * streams: when the canonical `done` lands, the line usually holds a leading
+   * part of the same sentence.
+   */
+  private adoptableLineFor(segment: RuntimeVoiceTranscriptSegment): string | null {
+    const owned = new Set(this.canonicalLines.values());
+    for (let index = this.snapshot.lines.length - 1; index >= 0; index -= 1) {
+      const line = this.snapshot.lines[index]!;
+      if (line.role !== segment.role || owned.has(line.id)) continue;
+      return line.text && segment.text.startsWith(line.text) ? line.id : null;
+    }
+    return null;
   }
 
   /**
@@ -617,6 +914,16 @@ class CodexRealtimeClient {
     this.media = null;
     this.audio = null;
     this.realtimeSessionId = null;
+    /* A new call is a new utterance ledger. Carrying the counter across would
+       let the first utterance of the next call be refused as superseded by the
+       last one of this one. */
+    this.utteranceSequence = 0;
+    this.utteranceId = null;
+    this.utterancesAwaitingHandoff = [];
+    this.reportedHandoffKeys.clear();
+    this.handoffCorrelationLost = false;
+    this.canonicalLines.clear();
+    this.openTranscriptLines.clear();
   }
 }
 
