@@ -50,9 +50,13 @@ export function agentCapabilitiesFromViews(
     runtimeEnabled = false;
   }
   const isClaudeSubagent = file.root === "claude-projects" && file.kind === "subagent";
+  const currentLegacyRoot = isClaudeSubagent
+    && file.rootControlHost?.parentPath === file.parent
+    && file.rootControlHost?.transport === "legacy";
   const opts: HostOptions = {
     runtimeEnabled,
-    ...(runtimeEnabled && isClaudeSubagent ? { root: rootHostFrom(rootView) } : {}),
+    ...(currentLegacyRoot ? { root: { liveness: "live" as const, structured: false } }
+      : runtimeEnabled && isClaudeSubagent ? { root: rootHostFrom(rootView) } : {}),
   };
   const caps = capabilitiesFor(file, runtime, opts);
   /* Every consumer gets the same card verdict. A contradictory stale runtime
