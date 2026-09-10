@@ -7,6 +7,7 @@ import {
   bindVoiceSession,
   recordVoiceHandoff,
   noteVoiceWorkBoundary,
+  realtimeBoundConversationIds,
   recordVoiceHandoffAmbiguity,
   releaseVoiceSession,
   resetVoiceViewBindings,
@@ -632,4 +633,25 @@ test("work that already claimed a card is not retired by an idle boundary", () =
   /* The host's verdict on that turn does retire it; the call is still live, so
      what is left is a call with nothing to point at rather than no call. */
   expect(readCard("turn-a", { workState: completed("turn-a") })).toEqual({ state: "no-reference" });
+});
+
+/* ------------------------------------------------------------------ *
+ * What a finished call may and may not pin.
+ * ------------------------------------------------------------------ */
+
+test("a live call is a realtime binding; what a finished one left is not", () => {
+  /* Automatic host retirement (#747) refuses a conversation this reports. A call
+     in progress holds a transport no transcript can restore, so it must be
+     reported — but a record ABOUT WORK is not a transport, and reporting it
+     would let one hangup pin a host for as long as the ledger kept anything at
+     all. The host's own live realtime session is the other half of that
+     predicate and is unaffected by this. */
+  bindVoiceSession(CONVERSATION, "rt-1", DESK);
+  spokenTurn(1, "conversation_atlas_a", "handoff-a");
+  expect(realtimeBoundConversationIds().has(CONVERSATION)).toBeTrue();
+
+  releaseVoiceSession(CONVERSATION, NOW + 5_000);
+  expect(realtimeBoundConversationIds().has(CONVERSATION)).toBeFalse();
+  /* And the work the call started still has its card. */
+  expect(cardOf(readCard("turn-a"))).toBe("conversation_atlas_a");
 });
