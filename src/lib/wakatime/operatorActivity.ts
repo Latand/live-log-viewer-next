@@ -6,6 +6,7 @@ import {
   type RegistryFile,
 } from "@/lib/agent/registry";
 import { UNRESOLVED_PROJECT } from "@/lib/projects/identity";
+import { FileTransactionBusyError } from "@/lib/state/fileTransaction";
 import { resolveProjectAttribution } from "@/lib/session/projectResolution";
 import type { FileEntry } from "@/lib/types";
 
@@ -32,10 +33,25 @@ interface DirectOperatorWakatimeDependencies {
   now(): number;
   registrySnapshot(): RegistryFile;
   enqueue(action: DirectOperatorWakatimeHeartbeat): void;
+  reportStorageFailure(
+    event: string,
+    fields: Readonly<Record<string, string | number | boolean | null>>,
+  ): void;
 }
 
 function digest(...parts: string[]): string {
   return crypto.createHash("sha256").update(parts.join("\0")).digest("hex");
+}
+
+/** One closed set of outcome classes for a refused optional write. The failure
+    text itself never travels: `fs` messages carry the state path, and a parse
+    failure can quote state bytes. */
+function storageOutcome(error: unknown): string {
+  if (error instanceof FileTransactionBusyError) return "busy";
+  if (error instanceof SyntaxError) return "state_unreadable";
+  const code = (error as NodeJS.ErrnoException | null)?.code;
+  if (typeof code === "string" && /^E[A-Z]{1,15}$/.test(code)) return code;
+  return "unavailable";
 }
 
 export function recordDirectOperatorWakatimeActivity(
@@ -47,6 +63,8 @@ export function recordDirectOperatorWakatimeActivity(
     now: overrides.now ?? Date.now,
     registrySnapshot: overrides.registrySnapshot ?? (() => agentRegistry().readOnlySnapshot()),
     enqueue: overrides.enqueue ?? enqueueProductionOperatorHeartbeat,
+    reportStorageFailure: overrides.reportStorageFailure
+      ?? ((event, fields) => console.error(`[wakatime] ${event}`, fields)),
   };
   if (!dependencies.enabled()) return null;
   const idempotencyKey = input.idempotencyKey?.trim() ?? "";
@@ -99,6 +117,17 @@ export function recordDirectOperatorWakatimeActivity(
     ? digest("llv-wakatime-direct-operator-v1", idempotencyKey)
     : crypto.randomBytes(32).toString("hex");
   const action: DirectOperatorWakatimeAction = { key, engine, project, atMs };
-  dependencies.enqueue(action);
+  /* THE ACTION IS ALREADY VALID HERE. Everything above rejects an unattributed,
+     conflicting or unauthorized gesture by throwing, and callers turn that into
+     a refusal. What remains is the optional heartbeat queue — a corrupt, busy or
+     unwritable state file is a telemetry outage, and an outage in a statistics
+     feature must not disable a control the operator is entitled to use (#1621).
+     The point is dropped, the outcome class is reported, and no state is reset:
+     an unreadable file keeps every byte for recovery from a backup. */
+  try {
+    dependencies.enqueue(action);
+  } catch (error) {
+    dependencies.reportStorageFailure("operator_activity_not_stored", { outcome: storageOutcome(error) });
+  }
   return action;
 }

@@ -62,6 +62,15 @@ heartbeat identity. Project and engine attribution come from the ingress's
 conversation target or its pre-resolved task or spawn metadata. Conflicting or
 unavailable attribution rejects the input.
 
+Recording is optional, and an outage in it never withholds a control. An
+attributed action whose heartbeat cannot be stored — a corrupt, busy, or
+unwritable state file — still sends, spawns, answers, or starts its call. The
+point is dropped, and the Viewer logs one `[wakatime]
+operator_activity_not_stored` diagnostic carrying an outcome class only
+(`state_unreadable`, an `errno` such as `EACCES`, or `unavailable`). Only an
+unattributed, conflicting, or unauthorized action is refused, and that refusal
+is unchanged.
+
 Signed internal-service provenance marks Viewer monitor, MCP and bridge, and
 orchestrator requests as background traffic. Agent capability provenance
 excludes other agent-originated requests from direct operator points. Agent and
@@ -127,9 +136,16 @@ of up to 25 heartbeats. Other restart paths coalesce events through stable
 local keys.
 
 Back up `wakatime-state.json` with its file mode intact if you need to preserve
-an undelivered queue. A corrupt file starts a new forward-only boundary and
-emits a count-only server diagnostic; unreadable pending records cannot be
-recovered without a backup.
+an undelivered queue. A corrupt file starts a new forward-only boundary in the
+scheduler's memory and emits a count-only server diagnostic; unreadable pending
+records cannot be recovered without a backup.
+
+An unreadable file on disk is never overwritten, so nothing is lost before you
+have decided what to keep, and delivery stays stopped until you act: writes
+refuse with `state_write_failed`, and each operator action logs
+`operator_activity_not_stored`. To resume collection, stop the Viewer, move the
+file aside (keep it if you want to attempt recovery), and start the Viewer
+again; a missing file creates a fresh version 1 with a forward-only boundary.
 
 ## Verification
 
