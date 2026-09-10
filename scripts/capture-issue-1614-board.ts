@@ -60,6 +60,10 @@ const CONVERSATIONS = 680;
 const TASKS = 390;
 /** Tasks that actually hold an agent — the bands that must survive everything. */
 const STAFFED = 6;
+/** Tasks whose agent ran once and whose conversation the board no longer draws
+    — the 319 of the operator's 385 empty bands that a history-based rule keeps
+    and a membership-based one removes. */
+const HISTORICAL = 300;
 const PROJECT_NAME = "board";
 
 const projectSlug = (cwd: string) => cwd.replace(/[^A-Za-z0-9]/g, "-");
@@ -125,17 +129,33 @@ function seedHome(): void {
 
 /**
  * The task corpus, written straight into the state file the way a board that
- * has been in use for months holds it: a few hundred tasks nobody ever put an
- * agent on, and a handful that carry one. No `migrations` key — the running
- * server's own one-time migration is what must decide their board membership.
+ * has been in use for months holds it. The reported board is not a few hundred
+ * never-launched tasks: of 385 empty bands, 319 carried an assignment row
+ * pointing at a conversation the board no longer draws, and only 66 had no row
+ * at all. Reading the row alone leaves those 319 on the canvas, so the corpus
+ * seeded here has the same shape —
+ *
+ *   - {@link STAFFED} tasks assigned to conversations inside the board's own
+ *     window, whose bands hold real members;
+ *   - {@link HISTORICAL} tasks assigned to conversations that exist on disk but
+ *     sit far outside that window, so the board draws none of them — the
+ *     historical link that must not keep an empty band;
+ *   - the rest with no assignment at all.
+ *
+ * No `migrations` key — the running server's own one-time migration is what
+ * must decide their board membership.
  */
 function seedTasks(project: string, conversations: string[]): void {
   const tasks = Array.from({ length: TASKS }, (_, index) => {
     const staffed = index < STAFFED;
+    const historical = !staffed && index < STAFFED + HISTORICAL;
     /* The board draws a bounded window of the most recent cards per project, so
-       a staffed task points at a conversation from the END of the corpus — the
-       part the window holds — and its band therefore has real members. */
-    const held = conversations[index]!;
+       a staffed task points at a conversation from the START of the corpus —
+       the freshest, the part the window holds — and its band therefore has real
+       members. A historical task points at the OLDEST end, which the window
+       does not reach: the row is intact, the transcript is intact, and the
+       board has nothing to draw for it. */
+    const held = staffed ? conversations[index]! : conversations[conversations.length - 1 - index]!;
     const created = new Date(Date.UTC(2100, 0, 1, 0, index % 60, 0)).toISOString();
     return {
       id: `task-${String(index).padStart(4, "0")}-4000-8000-a00000000000`,
@@ -143,13 +163,15 @@ function seedTasks(project: string, conversations: string[]): void {
       status: !staffed && index % 4 === 3 ? "done" : "assigned",
       text: staffed
         ? `Staffed task ${index}\nAn agent is on this one.`
-        : `Untouched task ${index}\nRecorded months ago and never launched.`,
+        : historical
+          ? `Historical task ${index}\nAn agent ran on this months ago; the board no longer carries it.`
+          : `Untouched task ${index}\nRecorded months ago and never launched.`,
       placement: "unplaced",
       /* Path-keyed, with no conversation id: the shape a spawn records before
          the scanner has attributed a Viewer conversation to it. An id the
          scanner does not know would resolve to nothing — `resolve()` in the
          workflow projection does not fall back to the path once an id is set. */
-      assignments: staffed
+      assignments: staffed || historical
         ? [{ path: held, conversationId: null, panePid: null, state: "delivered", error: null, at: created }]
         : [],
       createdAt: created,
@@ -231,7 +253,12 @@ async function waitForServer(url: string, child: ChildProcess): Promise<void> {
 
 interface FilesPayload {
   files?: { path?: string; project?: string }[];
-  tasks?: { id: string; project: string; board?: string; assignments: unknown[] }[];
+  tasks?: {
+    id: string;
+    project: string;
+    board?: string;
+    assignments: { path?: string | null; conversationId?: string | null }[];
+  }[];
   scan?: { durationMs?: number };
 }
 
@@ -954,20 +981,43 @@ async function main(): Promise<void> {
     const tasks = withTasks.tasks ?? [];
     const catalogEntries = await catalogTotal(baseUrl, project);
     const hiddenTasks = tasks.filter((task) => task.board === "hidden");
-    const staffedTasks = tasks.filter((task) => task.assignments.length > 0);
+    const withAssignments = tasks.filter((task) => task.assignments.length > 0);
+    const boardPaths = new Set((withTasks.files ?? []).map((file) => file.path ?? ""));
+    /* Membership as the board itself resolves it: an assignment that still
+       names a conversation the board carries. */
+    const holdingMembers = tasks.filter((task) =>
+      task.assignments.some((assignment) => assignment.path && boardPaths.has(assignment.path)));
+    const historicalHidden = hiddenTasks.filter((task) => task.assignments.length > 0);
     scale = {
       catalogEntries,
       boardWindowCards: (withTasks.files ?? []).length,
       tasksInList: tasks.length,
       tasksHiddenByMigration: hiddenTasks.length,
-      tasksHoldingAgents: staffedTasks.length,
+      tasksHoldingAgents: holdingMembers.length,
+      tasksWithAssignmentRows: withAssignments.length,
+      tasksHiddenDespiteAnAssignmentRow: historicalHidden.length,
       scanDurationMs: withTasks.scan?.durationMs ?? null,
     };
     console.log("scale:", JSON.stringify(scale));
-    /* Nothing may be lost: the list still holds every task that was seeded. */
+    /* Nothing may be lost: the list still holds every task that was seeded, and
+       no assignment was deleted to make the board look emptier. */
     must(tasks.length === TASKS, `task list holds ${tasks.length} of ${TASKS} tasks — the migration must never remove one`);
-    must(hiddenTasks.length === TASKS - STAFFED, `migration hid ${hiddenTasks.length}, expected ${TASKS - STAFFED}`);
-    must(staffedTasks.every((task) => task.board !== "hidden"), "a task holding an agent was flagged hidden");
+    must(withAssignments.length === STAFFED + HISTORICAL,
+      `${withAssignments.length} tasks still carry an assignment row, expected ${STAFFED + HISTORICAL}`);
+    /* The migration writes a PREFERENCE, for every task that predates it — it
+       decides nothing about membership, because neither the assignment row nor
+       the scanner's file list can tell a drawn card from an archived one. So
+       every legacy row carries the flag afterwards, including the staffed ones,
+       and what keeps a band is the board's own answer (asserted below: exactly
+       the staffed tasks still draw one). */
+    must(hiddenTasks.length === TASKS, `migration flagged ${hiddenTasks.length} of ${TASKS} legacy tasks`);
+    /* The finding this corpus exists for: 300 tasks whose agent ran once and
+       whose conversation the board no longer draws. A rule that read the
+       assignment row — or the scanner's file list — leaves every one of them on
+       the canvas as an empty band. */
+    must(historicalHidden.length === STAFFED + HISTORICAL,
+      `only ${historicalHidden.length} of ${STAFFED + HISTORICAL} tasks with an assignment row carry the preference`);
+    must(holdingMembers.length === STAFFED, `${holdingMembers.length} tasks name a conversation the board window carries, expected ${STAFFED}`);
     must(catalogEntries >= CONVERSATIONS, `catalog served ${catalogEntries} entries, expected at least ${CONVERSATIONS}`);
 
     const executablePath = process.env.CHROME_BIN
@@ -1115,7 +1165,11 @@ async function main(): Promise<void> {
        task put back on the board draws a compact band, that band offers to
        take it off again, and the click that does so is a flag write — the task
        is still in the list afterwards, with its text and history intact. */
-    const restoreId = tasks.find((task) => task.board === "hidden")?.id;
+    /* A task the board draws nothing for — one of the historical links, not one
+       of the staffed rows: restoring a band that holds a conversation is a
+       different case, and its «Remove from board» is deliberately absent. */
+    const restoreId = tasks.find((task) =>
+      task.board === "hidden" && !holdingMembers.some((held) => held.id === task.id))?.id;
     if (!restoreId) {
       /* No task carries the flag: this build has no board-membership concept,
          so there is nothing to restore and nothing to reverse. Recorded as a
@@ -1170,6 +1224,20 @@ async function main(): Promise<void> {
       must(Boolean(row), "«Remove from board» removed the task from the task list — it must only set a flag");
       must(row?.board === "hidden", `«Remove from board» left the task at board=${row?.board ?? "?"}`);
       must((after.tasks ?? []).length === TASKS, `the task list holds ${(after.tasks ?? []).length} of ${TASKS} tasks after a remove`);
+      /* The write must also DO something. This band's task carries an
+         assignment row — the shape that used to be offered this control and
+         then have its write overridden by the board — so the band has to
+         actually leave the canvas the operator is looking at. */
+      must(row!.assignments.length > 0, "the restore case no longer exercises a task with an assignment row");
+      const bandGone = await page.evaluate(async (id: string) => {
+        const deadline = Date.now() + 15_000;
+        while (Date.now() < deadline) {
+          if (!document.querySelector(`[data-scheme-band-task="${id}"]`)) return true;
+          await new Promise((resolve) => setTimeout(resolve, 250));
+        }
+        return false;
+      }, restoreId);
+      must(bandGone, "«Remove from board» wrote the flag and the band stayed on the board — an accepted, ignored write");
       console.log(`remove-from-board: task still listed, board=${row?.board}, list still holds ${(after.tasks ?? []).length} tasks`);
     }
     await page.context().close();
