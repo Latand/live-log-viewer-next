@@ -45,6 +45,17 @@ const files = [
   "src/lib/mcp/voiceUtteranceContext.test.ts",
   "src/lib/mcp/voiceUtteranceWiring.test.ts",
   "src/components/nativeQueueView.test.ts",
+  /* The delivery contracts the native queue shares with every other send. This
+     file is green on the default branch and was red at this branch's head for
+     two of them (an explicit-null turn fence read as an idle fence, and an
+     undeclared steering capability read as a refusal), and nothing reported it:
+     the branch never touched this file, so no reviewer ran it. A shared contract
+     is verified by the suites of its dependents or by nobody. */
+  "src/lib/runtime/structuredDelivery.integration.test.ts",
+  /* The panel and composer halves of the same contracts, so a control the
+     runtime cannot admit fails here rather than in the operator's hands. */
+  "src/components/NativeQueuePanel.dom.test.tsx",
+  "src/components/TmuxComposer.nativeQueue.dom.test.tsx",
 ];
 
 /**
