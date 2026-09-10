@@ -3334,8 +3334,8 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
          under the input — each bounded with `min-h-0` and its own scroller, so
          what does not fit is scrolled to inside it rather than laid out past the
          pane's bottom edge. The input and Send never yield: they are the two
-         controls with no alternative, and a budget that pushed THEM out is the
-         defect this bound exists to fix, not a trade it may make. A bound with
+         controls with no alternative, and a budget that pushed THEM out would
+         be committing the defect this bound exists to fix. A bound with
          nothing left to yield did exactly that — an inline call in a 680 px card
          needed 479 px inside a 407 px budget, and the 72 px that did not fit
          were Send. Where the card's own height is not definite the percentage

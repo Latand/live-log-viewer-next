@@ -240,9 +240,10 @@ const MIN_FEED_PX = 120;
     grown draft did to it, leaving no control reachable by scroll or by
     keyboard. */
 const MIN_QUEUE_INTERIOR_PX = 88;
-/** A docked call yields before the queue does — its own start/stop and float
-    controls are in the composer's control row, not in the panel — but what it
-    yields down to is still a panel with something in it. */
+/** A docked call yields before the queue does — the composer's control row
+    holds its start/stop and float controls, so a squeezed panel still leaves
+    the call controllable — and what it yields down to is still a panel with
+    something in it. */
 const MIN_VOICE_INTERIOR_PX = 54;
 
 function holds(reading: Reading, scenario: Case): boolean {
@@ -286,9 +287,9 @@ async function open(browser: Browser, bundle: string, css: string, scenario: Cas
   /* The call panel is portalled in by its Viewer-level owner, so it arrives
      after the composer does. */
   if (scenario.voice) await view.locator('[aria-label="Voice conversation"]').first().waitFor({ timeout: 15000 });
-  /* TYPED, not seeded: the field's height comes from the composer's own autosize
-     running on a real input event, which is what an operator writing a long
-     instruction produces. */
+  /* TYPED THROUGH THE FIELD. The height comes from the composer's own autosize
+     running on a real input event, the way it does for an operator writing a
+     long instruction; a draft dropped into storage skips that path. */
   if (scenario.draft === "long") {
     await view.locator("textarea").first().fill(LONG_DRAFT);
     await view.waitForTimeout(150);

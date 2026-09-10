@@ -199,7 +199,7 @@ describe("mobileComposerCeiling — the field leaves the queue panel its room (#
     expect(mobileComposerCeiling(PHONE.visible, PHONE.layout)).toBe(mobileComposerUnitMax(840) - MOBILE_COMPOSER_UNIT_CHROME_PX);
   });
 
-  test("a rendered panel takes its room off the field, not off the input's own chrome", () => {
+  test("a rendered panel takes its room off the field, leaving the input's own chrome whole", () => {
     const withQueue = mobileComposerCeiling(PHONE.visible, PHONE.layout, COMPOSER_QUEUE_RESERVE_PX);
     expect(withQueue).toBe(mobileComposerCeiling(PHONE.visible, PHONE.layout) - COMPOSER_QUEUE_RESERVE_PX);
     /* What the phone that reported this actually has left: the box budget minus
