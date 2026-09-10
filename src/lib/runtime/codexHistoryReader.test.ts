@@ -186,7 +186,7 @@ describe("bounded canonical history", () => {
     for (const error of [Object.assign(new Error("Method not found"), { code: -32601 }), new Error("Codex app-server request failed: list_turns is not supported yet")]) {
       expect((await lookup([metadata, error])).history).toEqual({ state: "legacy-fallback", reason: "unsupported" });
     }
-    for (const error of [new Error("transport not supported"), new Error("Codex app-server request failed: permission denied"), new Error("Codex app-server request failed: thread not materialized yet before first user message"), new Error("thread/read timed out")]) {
+    for (const error of [new Error("transport not supported"), new Error("Codex app-server request failed: permission denied"), new Error("thread/read timed out")]) {
       expect((await lookup([error])).history).toEqual({ state: "unknown", reason: "transport" });
     }
   });
@@ -208,6 +208,23 @@ describe("bounded canonical history", () => {
     expect(result.delivery.state).toBe("found");
     if (result.history.state === "complete") expect(result.history.bytes).toBe(exact);
     expect((await lookup(responses, target, { maxBytes: exact - 1 })).history.state).toBe("unknown");
+  });
+
+  test("preserves only the initial native unmaterialized-history diagnostic", async () => {
+    const error = new Error("Codex app-server request failed: thread fixture is not materialized yet; includeTurns is unavailable before first user message");
+    const initial = await readCodexHistory(async () => { throw error; }, identity, options());
+    expect(initial).toEqual({ state: "unknown", reason: "not-materialized" });
+    expect(findCodexHistoryDelivery(initial, target).state).toBe("unknown");
+    expect(await readCodexHistory(async (method) => {
+      if (method === "thread/read") return metadata;
+      throw error;
+    }, identity, options())).toEqual({ state: "unknown", reason: "not-materialized" });
+    let calls = 0;
+    expect(await readCodexHistory(async () => {
+      if (++calls === 1) return metadata;
+      if (calls === 2) return page([turn()], "next");
+      throw error;
+    }, identity, options())).toEqual({ state: "unknown", reason: "transport" });
   });
 
   test("bounds pages, enforces one deadline even if RPC never settles, ignores late results", async () => {
@@ -312,6 +329,10 @@ plugins = false
     let client = startClient(); await init(client);
     const started = await client.rpc("thread/start", { cwd, model: "fixture-model", modelProvider: "fixture", approvalPolicy: "never", sandbox: "read-only", historyMode: "paginated" }, 5000) as { thread: { id: string; path: string } };
     const nativeIdentity = { threadId: started.thread.id, path: started.thread.path };
+    // Before the first native turn, preserve the precise unavailable-history
+    // classification that the host's first-delivery preflight consumes.
+    expect(await readCodexHistory(client.rpc, nativeIdentity, options({ deadlineAt: Date.now() + 8000 })))
+      .toEqual({ state: "unknown", reason: "not-materialized" });
     const targets: CodexHistoryDeliveryTarget[] = [];
     for (let i = 0; i < 3; i++) {
       const input = [{ type: "text", text: `Canonical fixture ${i} 🌍`, text_elements: [
