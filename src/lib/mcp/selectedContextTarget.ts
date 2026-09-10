@@ -41,17 +41,44 @@ import { McpToolRefusal, type McpToolArgs, type McpToolPayload } from "./server"
  * never be silently resolved in either direction.
  */
 
+/**
+ * The state of the caller's own live voice call, as its ledger reports it
+ * (#1629). Mirrors `VoiceUtteranceContext` structurally so nothing here has to
+ * import the runtime, and so a lookup that cannot reach the Viewer at all is a
+ * distinguishable answer rather than a silent "no card".
+ */
+export type VoiceUtteranceLookup =
+  | { state: "no-call" }
+  | { state: "no-reference" }
+  | { state: "awaiting-handoff" }
+  | { state: "unavailable"; reason: string }
+  | { state: "joined"; reference: SelectedContextRef; handoff: Record<string, string | null> };
+
 export interface SelectedContextTargetDependencies {
   /** Bounded identity + tail resolver. Injected so a test can hand in a lookup
       whose scan-shaped methods throw and still see an answer come back. */
   selectedConversation(): SelectedConversationResolver;
   /** Scanner-root membership gate for the tail read. */
   pathAllowed(candidate: string): boolean;
+  /**
+   * What the caller's own live voice call points at, when it has one.
+   *
+   * Optional, and absent means "no call" — the truthful answer for every caller
+   * that is not on one, and the only safe reading for a dependency set assembled
+   * before this existed. A missing lookup must never be able to fail a tool that
+   * named its target perfectly well.
+   *
+   * The production implementation is wired where the Viewer control hop already
+   * lives, because the ledger describes a live transport held by the Viewer
+   * process and this one runs beside the agent.
+   */
+  voiceUtteranceContext?(): Promise<VoiceUtteranceLookup>;
 }
 
 export const productionSelectedContextDependencies: SelectedContextTargetDependencies = {
   selectedConversation: () => selectedConversationResolver(),
   pathAllowed,
+  voiceUtteranceContext: async () => ({ state: "no-call" }),
 };
 
 export interface SelectedContextTarget {
@@ -89,19 +116,40 @@ export interface SelectedContextResolution {
   /** The identity the tool should act on: explicit argument, else the resolved
       reference, else empty (the caller named the conversation another way). */
   conversationId: string;
+  /** Set when the identity came from the caller's own live voice call rather
+      than from an argument, so the answer can say where it got the card. */
+  voice?: { handoff: Record<string, string | null> };
+}
+
+export interface ResolveSelectedContextOptions {
+  /**
+   * Consult the caller's own live voice call when it named nothing (#1629).
+   *
+   * Opt-in per call site, because a spoken turn carries no `ctx=` marker for the
+   * agent to pass on: the operator's audio goes straight to the model, so the
+   * only place their card is recorded is the voice ledger. A tool that reached
+   * its target another way — a transcript path, an explicit id — must be left
+   * alone, which is what the flag being false says.
+   */
+  voiceUtterance?: boolean;
 }
 
 /**
  * Resolve the reference into a canonical identity, reconciled with whatever the
  * caller named explicitly.
  */
-export function resolveSelectedContext(
+export async function resolveSelectedContext(
   args: McpToolArgs,
   explicitConversationId: string,
   dependencies: SelectedContextTargetDependencies,
-): SelectedContextResolution {
+  options: ResolveSelectedContextOptions = {},
+): Promise<SelectedContextResolution> {
   const ref = selectedContextArg(args.selectedContext);
-  if (!ref) return { target: null, conversationId: explicitConversationId };
+  if (!ref) {
+    return explicitConversationId || !options.voiceUtterance
+      ? { target: null, conversationId: explicitConversationId }
+      : resolveSpokenSelectedContext(dependencies);
+  }
   if (ref.state === "none") {
     throw new McpToolRefusal(
       "the operator submitted that turn with NO card selected, so the reference names no conversation. Ask which conversation they meant, or pass conversationId explicitly.",
@@ -126,6 +174,65 @@ export function resolveSelectedContext(
     );
   }
   return { target: { ref, record }, conversationId: record.conversationId };
+}
+
+/**
+ * The card the operator was looking at when they spoke, or a refusal that says
+ * why there is none (#1629).
+ *
+ * NOTHING HERE EVER REACHES FOR AN EARLIER CARD. The ledger publishes a
+ * reference only while it is joined to the handoff that produced the work in
+ * hand; the moment the operator speaks again the join is gone and this refuses,
+ * so an agent asking a second question about a screen the operator has moved on
+ * from is told to ask rather than answered about the wrong card. Each refusal
+ * names its own condition, because "they have not selected anything", "they have
+ * spoken since" and "there is no call" are three different next moves.
+ */
+async function resolveSpokenSelectedContext(
+  dependencies: SelectedContextTargetDependencies,
+): Promise<SelectedContextResolution> {
+  const lookup = await (dependencies.voiceUtteranceContext?.() ?? Promise.resolve({ state: "no-call" as const }));
+  if (lookup.state === "no-call") return { target: null, conversationId: "" };
+  if (lookup.state === "unavailable") {
+    throw new McpToolRefusal(
+      `the operator's voice call could not be read, so the card they were looking at is unknown: ${lookup.reason}. Ask which conversation they meant, or pass conversationId explicitly.`,
+      { code: "voice_selected_context_unavailable" },
+    );
+  }
+  if (lookup.state === "no-reference") {
+    throw new McpToolRefusal(
+      "the operator is on a voice call that has reported no selected card, so this turn names no conversation. Ask which one they meant, or pass conversationId explicitly.",
+      { code: "voice_selected_context_absent" },
+    );
+  }
+  if (lookup.state === "awaiting-handoff") {
+    throw new McpToolRefusal(
+      "the operator has spoken again since the card that started this work, so no selected card belongs to the turn in hand. Ask which conversation they mean rather than acting on the previous one.",
+      { code: "voice_selected_context_superseded" },
+    );
+  }
+  if (lookup.reference.state === "none") {
+    throw new McpToolRefusal(
+      "the operator spoke that turn with NO card selected, so the reference names no conversation. Ask which conversation they meant, or pass conversationId explicitly.",
+      { code: "selected_context_empty", capturedAt: lookup.reference.capturedAt },
+    );
+  }
+  const record = dependencies.selectedConversation().resolve(lookup.reference.conversationId);
+  if (!record) {
+    throw new McpToolRefusal(
+      "the card the operator was looking at is not in the Viewer registry — the reference is stale or names a conversation this Viewer never owned.",
+      {
+        code: "selected_context_unresolved",
+        conversationId: lookup.reference.conversationId,
+        capturedAt: lookup.reference.capturedAt,
+      },
+    );
+  }
+  return {
+    target: { ref: lookup.reference, record },
+    conversationId: record.conversationId,
+    voice: { handoff: lookup.handoff },
+  };
 }
 
 /** What the tool echoes back, so the caller can see which card it acted on.

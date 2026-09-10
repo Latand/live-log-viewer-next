@@ -1,4 +1,103 @@
-# Realtime V3 voice: working — the cutoff was the alpha model default
+# Realtime V3 voice: a call runs two models, and only one of them holds the microphone
+
+Verified 2026-09-10 against `codex-cli 0.154.0` (bundled app-server in the
+current Linux ChatGPT build: `0.153.4`; the two agree on every field of the
+contracts below). Everything under this heading is reproducible with
+`python3 docs/design/codex-api-update/voice_probe.py`, which needs no credential,
+no account and no network: it points the configured model provider at a local
+fixture, so realtime call creation is captured verbatim instead of sent.
+
+| | Model | Instructions it runs on | Tools |
+|---|---|---|---|
+| Spoken | `gpt-live-1-codex` | the `prompt` parameter of `thread/realtime/start`, and nothing else | none — a realtime session carries no tool inventory |
+| Backing | the thread's own agent | the thread's own instructions, plus session-scoped `realtimeStartInstructions` | the thread's whole MCP inventory |
+
+**The defect this cost us (#1629).** The Viewer wrote its voice persona into the
+thread with `thread/inject_items` and left `prompt` unset. An injected item
+reaches only the backing model, so the persona was delivered to the one model
+that did not need it and withheld from the one that had nothing else — the
+spoken model ran Codex's stock realtime persona, which introduces itself as a
+general-purpose assistant, and whose `<startup_context>` block states in its own
+words that it excludes repo memory instructions and AGENTS files. Enabling voice
+on the operator's own orchestrator therefore produced a voice with no role, no
+knowledge of what the thread behind it could reach, and a habit of answering for
+itself. Meanwhile the injected item is appended to an append-only transcript and
+never withdrawn, so every thread accumulated a permanent copy of the
+spoken-delivery rules and kept answering in two-sentence spoken register long
+after the microphone closed.
+
+The probe establishes each half separately, on a thread carrying a synthetic
+developer role/tool mandate:
+
+- the mandate reaches the backing model, and does **not** reach the spoken
+  session, whose instructions are the stock 5.7 kB persona;
+- supplying `prompt` replaces those instructions;
+- the spoken session body carries `instructions`, `model`, `audio` and
+  `delegation` — and no tool list, in either case;
+- `prompt`, `realtimeStartInstructions`, `realtimeEndInstructions` and
+  `flushTranscriptTailOnSessionEnd` are deserialized, while an unknown field is
+  accepted silently — so "the call succeeded" proves nothing about a parameter
+  and the ill-typed control is what proves it is in the contract;
+- none of the three session-scoped strings is written to canonical history,
+  while an injected item is.
+
+**What the Viewer sends now.** The persona is the session's `prompt`; the
+role-preserving framing (and, for a session created to be the voice front, the
+relay mandate) is the backing model's `realtimeStartInstructions`; hanging up
+withdraws it with `realtimeEndInstructions`. `flushTranscriptTailOnSessionEnd`
+is set, so the last thing said before a hangup is routed through Codex rather
+than dropped. Nothing is written to the thread.
+
+**Where a spoken card is allowed to steer work.** The reference the operator's
+screen carried reaches a tool only while it describes the work in hand: it
+becomes readable once its utterance has been handed off, and stops the moment
+the operator speaks again. The association between an utterance and its handoff
+is a fact in exactly one arrangement — one utterance outstanding, one handoff
+arriving — because the transcript boundary and the handoff event share no
+identifier on the wire. With two outstanding, the browser reports nothing rather
+than guess, and every read then refuses by name. An accepted join survives a
+hangup, because the work the last utterance started does; it expires with the
+reference's own freshness window and a new call replaces it.
+
+Closing the ambiguity properly needs an identifier shared by the user transcript
+event and the handoff. The native events carry `user_bidi_turn_id`; whether the
+user transcript event carries it too has not been established, and cannot be
+without a live capture. Until it is, the correlation stays non-actionable in the
+ambiguous case rather than being resolved by recency.
+
+**What this does not establish.** No live provider call was made for any of it.
+The probe proves what leaves the app-server and what the app-server persists; it
+cannot prove what the provider does with a session body, that audio flows, or
+that a live call keeps its role for its whole length. That needs a call on a
+real account and is not something an implementation agent can produce.
+
+**Where the Viewer still differs from the native app**, deliberately and with
+the difference understood:
+
+| | native Codex app | Viewer |
+|---|---|---|
+| `includeStartupContext` | `false` — it supplies its own continuity window | `true` — Codex's own curated context, plus the durable tail only when a streamed response has no committed item |
+| transport | client-owned call, handed over as `existingCall` | server-created WebRTC |
+| `clientManagedHandoffs` | not set at the frontend call site | `true` — client-managed delegation is what streams worker progress into the call |
+
+Two of those are transport-ownership choices and neither is a defect. The startup-context
+difference is a real one: a wider `initialItems` continuity window (native bounds
+it at 128 items and 8,192 estimated tokens) would give the spoken model more of
+the conversation than the latest turn, and overlaps with what startup context
+already carries. Neither has been measured against a live call, so neither was
+changed on the strength of the schema.
+
+---
+
+# Superseded reading (2026-07): "working — the cutoff was the alpha model default"
+
+The measurements below stand and the model fix stands. What the table at the
+bottom of this section reads as settled — that the handoff flags "turned out not
+to be the problem" — was true of the 9-second cutoff and says nothing about the
+persona split above, which nobody was looking for at the time. Keep the
+incident; the section above is the current architecture.
+
+## Realtime V3 voice: working — the cutoff was the alpha model default
 
 `thread/realtime/start` sent no `model`, so the backend assigned
 `gpt-live-1-boulder-alpha`, and every call on it was killed 9.0-9.4 seconds

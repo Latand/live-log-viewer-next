@@ -4,12 +4,16 @@ import { redactCodexHostDiagnostic } from "./codexAppServerHost";
 import { structuredDeliveryHostForConversation } from "./structuredDeliveryController";
 import { permitRealtimeAction, type RealtimeCaller } from "./realtimeInjection";
 import type { RuntimeVoiceDelivery } from "./voiceDelivery";
-import type { VoicePersonaBootstrapReceipt, VoicePersonaVariant } from "./voicePersona";
+import type { VoicePersonaVariant } from "./voicePersona";
 import {
   admitVoiceSelectedContext,
   bindVoiceSession,
   parseVoiceViewBinding,
+  recordVoiceHandoff,
   releaseVoiceSession,
+  voiceUtteranceContext,
+  type VoiceHandoffIdentity,
+  type VoiceUtteranceIdentity,
 } from "./voiceViewBinding";
 import { recordDirectOperatorWakatimeActivity } from "@/lib/wakatime/operatorActivity";
 
@@ -20,7 +24,7 @@ interface RealtimeHost {
   startRealtimeWebRtc(sdp: string, personaVariant?: VoicePersonaVariant): Promise<{
     sdp: string | null;
     realtimeSessionId: string | null;
-    personaBootstrap: VoicePersonaBootstrapReceipt;
+    persona: { variant: VoicePersonaVariant; personaId: string };
   }>;
   appendRealtimeSpeech(text: string): Promise<void>;
   deliverRealtimeWorkerResponse?(delivery: RuntimeVoiceDelivery): Promise<{
@@ -64,16 +68,57 @@ function byteLength(value: string): number {
   return new TextEncoder().encode(value).byteLength;
 }
 
-function voicePersonaBootstrapReceipt(value: unknown): VoicePersonaBootstrapReceipt | null {
+/** At least one canonical id, each bounded; a report naming nothing is refused. */
+function voiceHandoffIdentity(value: unknown): VoiceHandoffIdentity | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const body = value as Record<string, unknown>;
+  const id = (key: string): string | null => {
+    const raw = body[key];
+    return typeof raw === "string" && raw.length > 0 && raw.length <= 200 ? raw : null;
+  };
+  const handoff = {
+    handoffId: id("handoffId"),
+    itemId: id("itemId"),
+    userBidiTurnId: id("userBidiTurnId"),
+  };
+  return handoff.handoffId || handoff.itemId || handoff.userBidiTurnId ? handoff : null;
+}
+
+/**
+ * The utterance a publication speaks for (#1629).
+ *
+ * Named by the browser, because the browser is the peer that sees the operator's
+ * transcript go final — the operator's audio never passes through this server.
+ * A malformed identity is dropped rather than refused where a reference is being
+ * published: the reference is still the bound view's and still admissible, and
+ * the ordering rules fall back to its own revision. A handoff report has nothing
+ * left once it is dropped, so that path refuses instead.
+ */
+function voiceUtteranceIdentity(value: unknown): VoiceUtteranceIdentity | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const body = value as Record<string, unknown>;
+  const id = typeof body.id === "string" ? body.id : "";
+  const sequence = body.sequence;
+  if (!/^[a-f0-9]{32}$/.test(id)) return null;
+  if (typeof sequence !== "number" || !Number.isSafeInteger(sequence) || sequence < 1) return null;
+  return { id, sequence };
+}
+
+/**
+ * Which persona the started call is running on (#1629).
+ *
+ * The persona now rides on `thread/realtime/start` itself, so a started call has
+ * one by construction and there is no insertion to accept or reject. This
+ * validates the shape only, so a host that answers something else is caught
+ * rather than reported to the browser as a live persona.
+ */
+function voiceSessionPersonaReceipt(value: unknown): { variant: VoicePersonaVariant; personaId: string } | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const receipt = value as Record<string, unknown>;
-  const receiptId = typeof receipt.receiptId === "string" ? receipt.receiptId : "";
-  const itemId = typeof receipt.itemId === "string" ? receipt.itemId : "";
-  if (!/^voice_persona_[a-f0-9]{46}$/.test(receiptId) || itemId !== `msg_${receiptId}`) return null;
-  if (receipt.insertion !== "accepted" && receipt.insertion !== "rejected") return null;
-  if (receipt.diagnostic !== undefined
-    && (typeof receipt.diagnostic !== "string" || receipt.diagnostic.length > 500)) return null;
-  return receipt as VoicePersonaBootstrapReceipt;
+  const personaId = typeof receipt.personaId === "string" ? receipt.personaId : "";
+  if (!/^voice_persona_[a-f0-9]{46}$/.test(personaId)) return null;
+  if (receipt.variant !== "coordinator" && receipt.variant !== "modality") return null;
+  return { variant: receipt.variant, personaId };
 }
 
 async function rejectStartedRealtimeContract(
@@ -144,6 +189,34 @@ export async function executeRealtimeControl(
     return { status: permitted.status, body: { error: permitted.error } };
   }
 
+  /**
+   * The reader (#1629), answered before the host requirement because it reads a
+   * process-local ledger and needs no thread.
+   *
+   * The agent running the backing turn asks what the operator was looking at
+   * when they spoke. It is entitled to that about ITS OWN call and nothing else,
+   * which the capability the registry mapped is what establishes — an agent
+   * cannot ask about another conversation's call, and a caller presenting
+   * nothing cannot ask at all.
+   *
+   * Every answer is 200 with a state, including the ones that say no. The four
+   * ways there is no card mean different things to the agent holding the
+   * microphone, and an error would flatten them into "something went wrong".
+   */
+  if (request.action === "utteranceContext") {
+    const own = caller.kind === "conversation" && caller.conversationId === conversationId;
+    if (!own && !authority.operator) {
+      return {
+        status: 403,
+        body: {
+          error: "utteranceContext reads what the operator's own voice call points at. "
+            + "Only that call's conversation may read it.",
+        },
+      };
+    }
+    return { status: 200, body: { ok: true, utterance: voiceUtteranceContext(conversationId) } };
+  }
+
   if (!host) {
     return { status: 409, body: { error: "the active conversation has no hosted Codex realtime thread" } };
   }
@@ -164,20 +237,9 @@ export async function executeRealtimeControl(
          call site that did not ask has not established that this thread is the
          voice front. */
       const answer = await host.startRealtimeWebRtc(sdp, authority.personaVariant ?? "modality");
-      if (!answer.personaBootstrap) {
-        return rejectStartedRealtimeContract(host, { error: "Codex returned no voice persona bootstrap receipt" });
-      }
-      const personaBootstrap = voicePersonaBootstrapReceipt(answer.personaBootstrap);
-      if (!personaBootstrap) {
-        return rejectStartedRealtimeContract(host, { error: "Codex returned an invalid voice persona bootstrap receipt" });
-      }
-      if (personaBootstrap.insertion === "rejected") {
-        const diagnostic = redactCodexHostDiagnostic(personaBootstrap.diagnostic ?? "Voice persona insertion was rejected");
-        const error = redactCodexHostDiagnostic(`Voice persona could not be recorded: ${diagnostic}`);
-        return rejectStartedRealtimeContract(host, {
-          error,
-          personaBootstrap: { ...personaBootstrap, diagnostic },
-        });
+      const persona = voiceSessionPersonaReceipt(answer.persona);
+      if (!persona) {
+        return rejectStartedRealtimeContract(host, { error: "Codex returned no voice session persona" });
       }
       if (!answer.sdp) {
         return rejectStartedRealtimeContract(host, { error: "Codex returned no WebRTC answer" });
@@ -189,7 +251,7 @@ export async function executeRealtimeControl(
       if (answer.realtimeSessionId) {
         bindVoiceSession(conversationId, answer.realtimeSessionId, parseVoiceViewBinding(request.view));
       }
-      return { status: 200, body: { ok: true, ...answer, personaBootstrap } };
+      return { status: 200, body: { ok: true, ...answer, persona } };
     }
     /**
      * The browser's utterance boundary (#844 §2).
@@ -211,6 +273,7 @@ export async function executeRealtimeControl(
         conversationId,
         realtimeSessionId: caller.kind === "session" ? caller.realtimeSessionId : "",
         reference: parseSelectedContextRef(request.selectedContext),
+        utterance: voiceUtteranceIdentity(request.utterance),
         now: Date.now(),
       });
       if (!admission.ok) {
@@ -220,6 +283,31 @@ export async function executeRealtimeControl(
         status: 200,
         body: { ok: true, selectedContext: admission.admission.reference, sequence: admission.admission.sequence },
       };
+    }
+    /**
+     * Which handoff the last published utterance became (#1629).
+     *
+     * Authorized the same way `selectedContext` is — by the ledger, against the
+     * session id the call was bound to — because it completes that ledger's own
+     * record and nothing else. It writes no words, mints no utterance and moves
+     * no counter.
+     */
+    if (request.action === "handoff") {
+      const utterance = voiceUtteranceIdentity(request.utterance);
+      const handoff = voiceHandoffIdentity(request.handoff);
+      if (!utterance || !handoff) {
+        return { status: 400, body: { error: "a handoff report needs an utterance identity and at least one handoff id" } };
+      }
+      const recorded = recordVoiceHandoff({
+        conversationId,
+        realtimeSessionId: caller.kind === "session" ? caller.realtimeSessionId : "",
+        utterance,
+        handoff,
+      });
+      if (!recorded.ok) {
+        return { status: 409, body: { error: recorded.failure.message, code: recorded.failure.code } };
+      }
+      return { status: 200, body: { ok: true, handoff: recorded.admission.handoff } };
     }
     if (request.action === "operatorActivity") {
       const operatorEventId = typeof request.operatorEventId === "string" ? request.operatorEventId.trim() : "";
@@ -258,6 +346,7 @@ export async function executeRealtimeControl(
           conversationId,
           realtimeSessionId: caller.kind === "session" ? caller.realtimeSessionId : "",
           reference,
+          utterance: voiceUtteranceIdentity(request.utterance),
           now: Date.now(),
         });
         if (!admission.ok) {
@@ -299,7 +388,7 @@ export async function executeRealtimeControl(
         },
       };
     }
-    return { status: 400, body: { error: "action must be start, operatorActivity, selectedContext, appendSpeech, deliverWorkerResponse, stop, or status" } };
+    return { status: 400, body: { error: "action must be start, operatorActivity, selectedContext, handoff, utteranceContext, appendSpeech, deliverWorkerResponse, stop, or status" } };
   } catch (error) {
     return { status: 409, body: { error: redactCodexHostDiagnostic(error) } };
   }

@@ -36,11 +36,24 @@ export interface CodexRealtimeSnapshot {
   micMuted: boolean;
   /** Agent audio silenced locally; the call keeps running. */
   outputMuted: boolean;
+  /**
+   * Something the operator should know while the call keeps running (#1629).
+   *
+   * Deliberately not `error`, which puts the panel in its failed state and ends
+   * the call in the reader's mind. An approaching usage limit is the case this
+   * was added for: the backend says so before it cuts the call, and the operator
+   * can only act on it while there is still a call to act in.
+   */
+  notice: string | null;
 }
 
 export type ParsedRealtimeEvent =
   | { kind: "transcript"; role: "user" | "assistant"; text: string; final: boolean }
-  | { kind: "delegation"; id: string }
+  /** The handoff that turns the utterance just finished into work on the thread.
+      Its identities are the canonical join between what was said and what the
+      backing model was asked to do (#1629). */
+  | { kind: "handoff"; handoffId: string | null; itemId: string | null; userBidiTurnId: string | null }
+  | { kind: "usage"; status: string }
   | { kind: "error"; message: string }
   | { kind: "ignored" };
 
@@ -48,9 +61,28 @@ const MAX_LINE_CHARS = 12_000;
 const MAX_LINES = 80;
 
 function newOperatorActivityId(): string {
-  const bytes = new Uint8Array(32);
-  crypto.getRandomValues(bytes);
-  return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return randomHex(32);
+}
+
+/**
+ * The backend's usage-limit state, in words the operator can act on.
+ *
+ * Only `approaching` is spoken about: it is the one state where saying something
+ * changes what the operator does. Any other status the backend adds later is
+ * passed through rather than swallowed, because a warning nobody has taught this
+ * function about is still a warning.
+ */
+function usageNotice(status: string): string | null {
+  if (status === "approaching") {
+    return "This account is approaching its usage limit; the call may be cut short.";
+  }
+  return status === "ok" || status === "none" ? null : `Usage limit status: ${status}.`;
+}
+
+function randomHex(bytes: number): string {
+  const buffer = new Uint8Array(bytes);
+  crypto.getRandomValues(buffer);
+  return [...buffer].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function object(value: unknown): Record<string, unknown> | null {
@@ -108,12 +140,24 @@ export function parseCodexRealtimeEvent(value: unknown): ParsedRealtimeEvent {
       ? { kind: "transcript", role: eventRole(event, "assistant"), text, final: true }
       : { kind: "ignored" };
   }
-  if (type === "delegation.created") {
-    const id = stringAt(event.item, "id")
-      ?? stringAt(event.delegation, "id")
-      ?? stringAt(event, "delegation_item_id")
-      ?? "";
-    return id ? { kind: "delegation", id } : { kind: "ignored" };
+  if (type === "delegation.created" || type === "conversation.handoff.requested") {
+    /* Both events name the same handoff; `delegation.created` nests the
+       identities under the item it created and the request carries them flat. */
+    const item = object(event.item) ?? object(event.delegation);
+    const handoffId = stringAt(event, "handoff_id") ?? stringAt(item, "handoff_id");
+    const itemId = stringAt(event, "item_id") ?? stringAt(item, "id") ?? stringAt(event, "delegation_item_id");
+    const userBidiTurnId = stringAt(event, "user_bidi_turn_id") ?? stringAt(item, "user_bidi_turn_id");
+    return handoffId || itemId || userBidiTurnId
+      ? { kind: "handoff", handoffId, itemId, userBidiTurnId }
+      : { kind: "ignored" };
+  }
+  if (type === "session.usage.updated") {
+    /* A limit warning is not a failure: the call keeps running, and saying so
+       out of band is the difference between the operator finishing a thought
+       and the call ending mid-sentence with a generic transport message. The
+       9-second cutoff in `docs/realtime-v3/BLOCKED.md` is what this exists for. */
+    const status = stringAt(event.usage_limit, "status") ?? stringAt(event, "status");
+    return status ? { kind: "usage", status } : { kind: "ignored" };
   }
   if (type === "error") {
     const message = (
@@ -149,7 +193,9 @@ async function waitForIceGathering(peer: RTCPeerConnection): Promise<void> {
 }
 
 class CodexRealtimeClient {
-  private snapshot: CodexRealtimeSnapshot = { phase: "idle", lines: [], error: null, startedAt: null, micMuted: false, outputMuted: false };
+  private snapshot: CodexRealtimeSnapshot = {
+    phase: "idle", lines: [], error: null, startedAt: null, micMuted: false, outputMuted: false, notice: null,
+  };
   private readonly listeners = new Set<() => void>();
   private peer: RTCPeerConnection | null = null;
   private events: RTCDataChannel | null = null;
@@ -173,6 +219,17 @@ class CodexRealtimeClient {
       interleaves both speakers with worker progress, so "the last line" is
       almost never the line an update belongs to. */
   private readonly openTranscriptLines = new Map<TranscriptSpeaker, string>();
+  /* #1629: the utterance boundary this peer is currently publishing for. The
+     server cannot mint it — the operator's audio never reaches it — and without
+     one a retried publication counts as a second utterance and a slow one
+     overwrites a newer one. Reset with the call, like every other per-call
+     ledger here. */
+  private utteranceSequence = 0;
+  private utteranceId: string | null = null;
+  /* Utterances published and not yet accounted for by a handoff. A join is
+     reported only while this holds exactly one of them, because that is the only
+     arrangement in which the association is a fact rather than a guess. */
+  private utterancesAwaitingHandoff: { id: string; sequence: number }[] = [];
   private epoch = 0;
 
   constructor(readonly conversationId: string) {}
@@ -223,7 +280,12 @@ class CodexRealtimeClient {
       return;
     }
     this.cleanupTransport();
-    this.update({ phase: "connecting", error: null, startedAt: null, micMuted: false, outputMuted: false });
+    /* `notice` is cleared with `error` for the same reason: it describes the
+       call that is starting, and a warning carried over from the previous one
+       would tell the operator about a limit this call has not reported. */
+    this.update({
+      phase: "connecting", error: null, notice: null, startedAt: null, micMuted: false, outputMuted: false,
+    });
     const epoch = ++this.epoch;
     try {
       const media = await navigator.mediaDevices.getUserMedia({
@@ -431,6 +493,66 @@ class CodexRealtimeClient {
     }
   }
 
+  /**
+   * Report which handoff the last published utterance became (#1629).
+   *
+   * Fire-and-forget for the same reason the reference itself is: the audio is
+   * already on its way, and a stutter in the conversation is a worse price than
+   * a missing join. Carries the utterance id it is completing, so the server
+   * attaches the canonical identities to that admission instead of counting a
+   * second utterance.
+   *
+   * AND IT REPORTS NOTHING RATHER THAN GUESS. The handoff event and the
+   * transcript boundary that published the reference share no identifier on the
+   * wire, so the association is a fact in exactly one arrangement: one utterance
+   * outstanding, one handoff arriving. That is the ordinary flow — speak, pause,
+   * the work starts — and it is what the queue below holds.
+   *
+   * With two outstanding, a handoff could belong to either, and reporting it
+   * against the newer one is how card B ends up answering a question asked about
+   * card A. So the whole queue is abandoned instead: the standing admission
+   * never gets a handoff, the reader refuses `awaiting-handoff`, and the agent
+   * asks the operator which conversation they mean. The next utterance starts a
+   * clean queue, so one crossed pair costs one turn of context and nothing more.
+   *
+   * Closing this properly needs an identifier shared by the transcript boundary
+   * and the handoff — the native events carry `user_bidi_turn_id`, but whether
+   * the user transcript event carries it too cannot be established without a
+   * live capture. Until it is, an unproven correlation must not become a target.
+   */
+  private publishHandoffJoin(event: { handoffId: string | null; itemId: string | null; userBidiTurnId: string | null }): void {
+    const outstanding = this.utterancesAwaitingHandoff;
+    if (outstanding.length !== 1) {
+      /* Ambiguous, or nothing to claim. Either way the queue no longer describes
+         anything this peer can prove, so it is dropped rather than drained into
+         a guess. */
+      this.utterancesAwaitingHandoff = [];
+      return;
+    }
+    const claimed = outstanding[0]!;
+    this.utterancesAwaitingHandoff = [];
+    if (!this.realtimeSessionId) return;
+    const payload = JSON.stringify({
+      action: "handoff",
+      conversationId: this.conversationId,
+      realtimeSessionId: this.realtimeSessionId,
+      /* The CLAIMED utterance's own identity, carried on the queue entry rather
+         than read off the latest publish, so the report cannot drift onto a
+         newer turn if the two ever stop being the same one. */
+      utterance: claimed,
+      handoff: {
+        handoffId: event.handoffId,
+        itemId: event.itemId,
+        userBidiTurnId: event.userBidiTurnId,
+      },
+    });
+    void fetch("/api/runtime/realtime", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: payload,
+    }).catch(() => undefined);
+  }
+
   private publishOperatorActivity(): void {
     if (!this.realtimeSessionId) return;
     const payload = JSON.stringify({
@@ -465,11 +587,17 @@ class CodexRealtimeClient {
    */
   private publishSelectedContext(): void {
     if (!this.realtimeSessionId) return;
+    /* Minted once per utterance and reused by the retry below, so the server
+       recognizes a replay as the same spoken turn rather than a later one. */
+    this.utteranceSequence += 1;
+    this.utteranceId = randomHex(16);
+    this.utterancesAwaitingHandoff.push({ id: this.utteranceId, sequence: this.utteranceSequence });
     const payload = JSON.stringify({
       action: "selectedContext",
       conversationId: this.conversationId,
       realtimeSessionId: this.realtimeSessionId,
       selectedContext: viewerSelectedContext(),
+      utterance: { id: this.utteranceId, sequence: this.utteranceSequence },
     });
     const publish = async (retry: boolean): Promise<void> => {
       try {
@@ -513,8 +641,13 @@ class CodexRealtimeClient {
         this.publishOperatorActivity();
         this.publishSelectedContext();
       }
-    } else if (event.kind === "delegation") {
-      return;
+    } else if (event.kind === "handoff") {
+      /* The utterance just published is the one being handed off, so this is
+         where the reference the operator was looking at is joined to the work
+         the backing model is about to do. */
+      this.publishHandoffJoin(event);
+    } else if (event.kind === "usage") {
+      this.update({ notice: usageNotice(event.status) });
     } else if (event.kind === "error") {
       this.setError(event.message);
     }
@@ -617,6 +750,13 @@ class CodexRealtimeClient {
     this.media = null;
     this.audio = null;
     this.realtimeSessionId = null;
+    /* A new call is a new utterance ledger. Carrying the counter across would
+       let the first utterance of the next call be refused as superseded by the
+       last one of this one. */
+    this.utteranceSequence = 0;
+    this.utteranceId = null;
+    this.utterancesAwaitingHandoff = [];
+    this.openTranscriptLines.clear();
   }
 }
 

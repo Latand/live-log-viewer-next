@@ -56,14 +56,9 @@ import {
   type RuntimeEventStore,
 } from "./eventStore";
 import {
-  canonicalVoicePersonaBootstrapExists,
-  legacyVoicePersonaBootstrapItemId,
-  voicePersonaBootstrap,
-  voicePersonaBootstrapIdentity,
+  voiceSessionPersona,
   type VoicePersonaVariant,
-  type VoicePersonaBootstrap,
-  type VoicePersonaBootstrapIdentity,
-  type VoicePersonaBootstrapReceipt,
+  type VoiceSessionPersona,
 } from "./voicePersona";
 
 type JsonObject = Record<string, unknown>;
@@ -90,17 +85,13 @@ export type CodexRealtimeFailure = {
   realtimeSessionId: string | null;
 };
 type PendingRealtimeStart = {
-  resolve(result: CodexRealtimeWebRtcResult): void;
+  resolve(result: CodexRealtimeWebRtcAnswer): void;
   reject(error: Error): void;
   timer: ReturnType<typeof setTimeout> | undefined;
   started: boolean;
   realtimeSessionId: string | null;
   sdp: string | null;
-  personaBootstrap: VoicePersonaBootstrapReceipt;
-};
-type VoicePersonaBootstrapInsertion = {
-  owner: PendingRealtimeStart;
-  promise: Promise<void>;
+  persona: VoiceSessionPersonaReceipt;
 };
 type PendingCompaction = {
   promise: Promise<RuntimeCompactOutcome>;
@@ -187,7 +178,6 @@ export interface CodexAppServerHostOptions {
   approvalPolicy?: string;
   env?: NodeJS.ProcessEnv;
   requestTimeoutMs?: number;
-  realtimePersonaTimeoutMs?: number;
   realtimeStartTimeoutMs?: number;
   deliveryConfirmationTimeoutMs?: number;
   compactEvidenceTimeoutMs?: number;
@@ -210,22 +200,25 @@ export interface CodexThreadIdentity {
   path: string | null;
 }
 
+/**
+ * Which persona the live call is running on (#1629).
+ *
+ * The persona is a parameter of `thread/realtime/start` now, so it either went
+ * out with the start or the start did not happen — there is no separate write to
+ * succeed or fail, and so no separate receipt to reject. What remains worth
+ * reporting is WHICH one, which the voice panel shows and the regression tests
+ * assert against.
+ */
+export interface VoiceSessionPersonaReceipt {
+  variant: VoicePersonaVariant;
+  personaId: string;
+}
+
 export interface CodexRealtimeWebRtcAnswer {
   sdp: string;
   realtimeSessionId: string | null;
-  personaBootstrap: VoicePersonaBootstrapReceipt;
+  persona: VoiceSessionPersonaReceipt;
 }
-
-export interface CodexRealtimeWebRtcRejection {
-  sdp: null;
-  realtimeSessionId: null;
-  personaBootstrap: VoicePersonaBootstrapReceipt & {
-    insertion: "rejected";
-    diagnostic: string;
-  };
-}
-
-export type CodexRealtimeWebRtcResult = CodexRealtimeWebRtcAnswer | CodexRealtimeWebRtcRejection;
 
 const CHILD_ENV_ALLOWLIST = [
   "PATH",
@@ -298,7 +291,6 @@ const DEFAULT_SHUTDOWN_GRACE_MS = 1_000;
 const REALTIME_START_TIMEOUT_MS = 90_000;
 /* First speech waits for the persona's durable insertion outcome. Keep that
    gate bounded when an app-server accepts the method and then stalls. */
-const REALTIME_PERSONA_TIMEOUT_MS = 3_000;
 /* Releasing the host must not block on a wedged app-server, but the hangup is
    worth a moment: skipping it strands the account's realtime slot. */
 const REALTIME_HANGUP_TIMEOUT_MS = 2_000;
@@ -1093,7 +1085,6 @@ export class CodexAppServerHost implements EngineHost {
 
   private readonly child: ChildProcessWithoutNullStreams;
   private readonly requestTimeoutMs: number;
-  private readonly realtimePersonaTimeoutMs: number;
   private readonly realtimeStartTimeoutMs: number;
   private readonly deliveryConfirmationTimeoutMs: number;
   private readonly compactEvidenceTimeoutMs: number;
@@ -1138,9 +1129,6 @@ export class CodexAppServerHost implements EngineHost {
      without ever injecting it, which is a false receipt that
      `rejectStartedRealtimeContract` would otherwise have caught.
      Successor starts of the SAME variant still join the same insertion promise. */
-  private readonly unresolvedVoicePersonaBootstrap = new Map<VoicePersonaVariant, VoicePersonaBootstrap>();
-  private voicePersonaBootstrapInsertion: VoicePersonaBootstrapInsertion | null = null;
-  private readonly voicePersonaBootstrapAccepted = new Set<VoicePersonaVariant>();
   private readonly pendingVoiceChunks = new Map<string, string>();
   private readonly cancelledVoiceTurns = new Set<string>();
   private readonly activeRealtimeDeliveries = new Map<string, {
@@ -1191,7 +1179,6 @@ export class CodexAppServerHost implements EngineHost {
     this.child = child;
     this.identity = identity;
     this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_TIMEOUT_MS;
-    this.realtimePersonaTimeoutMs = options.realtimePersonaTimeoutMs ?? REALTIME_PERSONA_TIMEOUT_MS;
     this.realtimeStartTimeoutMs = options.realtimeStartTimeoutMs ?? REALTIME_START_TIMEOUT_MS;
     this.deliveryConfirmationTimeoutMs = options.deliveryConfirmationTimeoutMs
       ?? DEFAULT_DELIVERY_CONFIRMATION_TIMEOUT_MS;
@@ -1830,7 +1817,7 @@ export class CodexAppServerHost implements EngineHost {
   async startRealtimeWebRtc(
     sdp: string,
     personaVariant: VoicePersonaVariant = "modality",
-  ): Promise<CodexRealtimeWebRtcResult> {
+  ): Promise<CodexRealtimeWebRtcAnswer> {
     if (this.dead || this.releasing || this.released || !this.writerFenceAllowsActuation()) {
       throw new Error("Codex app-server host is unavailable");
     }
@@ -1846,10 +1833,10 @@ export class CodexAppServerHost implements EngineHost {
        be reported against this one. */
     this.realtimeFailure = null;
     this.realtimeSessionId = null;
-    const personaBootstrapIdentity = voicePersonaBootstrapIdentity(this.identity.threadId, personaVariant);
+    const persona = voiceSessionPersona(personaVariant);
 
     let pendingStart!: PendingRealtimeStart;
-    const answer = new Promise<CodexRealtimeWebRtcResult>((resolve, reject) => {
+    const answer = new Promise<CodexRealtimeWebRtcAnswer>((resolve, reject) => {
       pendingStart = {
         resolve,
         reject,
@@ -1857,36 +1844,16 @@ export class CodexAppServerHost implements EngineHost {
         started: false,
         realtimeSessionId: null,
         sdp: null,
-        personaBootstrap: { ...personaBootstrapIdentity, insertion: "accepted" },
+        persona: { variant: persona.variant, personaId: persona.personaId },
       };
     });
     this.pendingRealtimeStart = pendingStart;
     void answer.catch(() => undefined);
 
-    try {
-      const outcome = await this.ensureVoicePersonaBootstrap(personaBootstrapIdentity, personaVariant, pendingStart);
-      if (outcome === "superseded") return answer;
-    } catch (error) {
-      if (this.pendingRealtimeStart !== pendingStart) return answer;
-      const pending = pendingStart;
-      this.pendingRealtimeStart = null;
-      clearTimeout(pending.timer);
-      const rejected: CodexRealtimeWebRtcRejection = {
-        sdp: null,
-        realtimeSessionId: null,
-        personaBootstrap: {
-          ...personaBootstrapIdentity,
-          insertion: "rejected",
-          diagnostic: safeError(error),
-        },
-      };
-      pending.resolve(rejected);
-      return answer;
-    }
-    if (this.pendingRealtimeStart !== pendingStart) return answer;
     const realtimeContext = selectRealtimeContext(this.events);
     console.info("[realtime context] selected", {
       providerStartupContext: true,
+      personaVariant: persona.variant,
       durableTail: realtimeContext.diagnosticItems,
       truncated: realtimeContext.truncated,
     });
@@ -1904,6 +1871,20 @@ export class CodexAppServerHost implements EngineHost {
         clientManagedHandoffs: true,
         codexResponsesAsItems: true,
         includeStartupContext: true,
+        /* THE SPOKEN MODEL'S ONLY INSTRUCTIONS (#1629). Unset, the backend
+           gives it Codex's stock realtime persona — a general-purpose assistant
+           that knows nothing about this thread's role or tools — and no item
+           written into the thread ever reaches it. */
+        "prompt": persona.prompt,
+        /* THE BACKING MODEL'S FRAMING, scoped to this call. Paired with the end
+           instructions so hanging up withdraws it, which is what keeps a text
+           agent from inheriting spoken-delivery rules for the rest of its life. */
+        realtimeStartInstructions: persona.startInstructions,
+        realtimeEndInstructions: persona.endInstructions,
+        /* The last thing said before a hangup is said INTO the tail. Without
+           this it is dropped instead of routed through Codex, so an instruction
+           given on the way out never reaches the canonical thread. */
+        flushTranscriptTailOnSessionEnd: true,
         /* Current V3 clients carry initial items in call creation. Add the
            durable tail only when a streamed assistant response has no
            committed item; provider startup context owns the persisted history. */
@@ -1915,114 +1896,6 @@ export class CodexAppServerHost implements EngineHost {
     return answer;
   }
 
-  private async ensureVoicePersonaBootstrap(
-    identity: VoicePersonaBootstrapIdentity,
-    variant: VoicePersonaVariant,
-    pendingStart: PendingRealtimeStart,
-  ): Promise<"accepted" | "superseded"> {
-    await this.ensureCanonicalTranscriptPath();
-    while (!this.voicePersonaBootstrapAccepted.has(variant)) {
-      const active = this.voicePersonaBootstrapInsertion;
-      if (active) {
-        try {
-          await active.promise;
-        } catch (error) {
-          if (this.pendingRealtimeStart !== pendingStart) return "superseded";
-          if (active.owner === pendingStart) throw error;
-          continue;
-        }
-        continue;
-      }
-
-      const canonicalExists = await this.scanVoicePersonaBootstrap(
-        identity.itemId,
-        "canonical scan unavailable; refusing insertion",
-      );
-      /* The pre-#870 row is a COORDINATOR persona — no other variant existed when
-         it was written — so it answers only a coordinator bootstrap. A modality
-         start that accepted it would read "this thread is already bootstrapped"
-         off the very item it exists to correct, and leave the session demoted. */
-      const legacyExists = canonicalExists || variant !== "coordinator"
-        ? false
-        : await this.scanVoicePersonaBootstrap(
-          legacyVoicePersonaBootstrapItemId(this.identity.threadId),
-          "legacy canonical scan unavailable; refusing insertion",
-        );
-      if (canonicalExists || legacyExists) {
-        this.voicePersonaBootstrapAccepted.add(variant);
-        this.unresolvedVoicePersonaBootstrap.delete(variant);
-        break;
-      }
-      if (this.pendingRealtimeStart !== pendingStart) return "superseded";
-      if (this.voicePersonaBootstrapInsertion) continue;
-
-      const bootstrap = this.unresolvedVoicePersonaBootstrap.get(variant)
-        ?? voicePersonaBootstrap(identity, variant);
-      this.unresolvedVoicePersonaBootstrap.set(variant, bootstrap);
-      const promise = this.insertVoicePersonaBootstrap(bootstrap, identity.itemId, variant);
-      const insertion = { owner: pendingStart, promise };
-      this.voicePersonaBootstrapInsertion = insertion;
-      const clearInsertion = () => {
-        if (this.voicePersonaBootstrapInsertion === insertion) this.voicePersonaBootstrapInsertion = null;
-      };
-      void promise.then(clearInsertion, clearInsertion);
-      try {
-        await promise;
-      } catch (error) {
-        if (this.pendingRealtimeStart !== pendingStart) return "superseded";
-        throw error;
-      }
-    }
-    return "accepted";
-  }
-
-  private async ensureCanonicalTranscriptPath(): Promise<void> {
-    if (this.identity.path) return;
-    /* Metadata-only on purpose: this reader consumes nothing but the thread
-       identity and path, and hydration is refused on paginated threads (#1332). */
-    const result = await this.rpc("thread/read", {
-      threadId: this.identity.threadId,
-    });
-    const recovered = threadFromResult(result, "thread/read");
-    if (recovered.threadId !== this.identity.threadId) {
-      throw new Error("thread/read returned a different thread id");
-    }
-    if (!recovered.path) {
-      const error = new Error("canonical transcript path is unavailable") as NodeJS.ErrnoException;
-      error.code = "NO_TRANSCRIPT_PATH";
-      throw error;
-    }
-    this.identity.path = recovered.path;
-  }
-
-  private async insertVoicePersonaBootstrap(
-    bootstrap: VoicePersonaBootstrap,
-    itemId: string,
-    variant: VoicePersonaVariant,
-  ): Promise<void> {
-    try {
-      await this.rpc("thread/inject_items", {
-        threadId: this.identity.threadId,
-        items: [bootstrap.item],
-      }, this.realtimePersonaTimeoutMs);
-    } catch (error) {
-      if (!await this.scanVoicePersonaBootstrap(itemId, "recovery scan unavailable")) throw error;
-    }
-    this.voicePersonaBootstrapAccepted.add(variant);
-    this.unresolvedVoicePersonaBootstrap.delete(variant);
-  }
-
-  private async scanVoicePersonaBootstrap(itemId: string, warning: string): Promise<boolean> {
-    try {
-      return await canonicalVoicePersonaBootstrapExists(this.identity.path, itemId);
-    } catch (error) {
-      console.warn(`[voice persona bootstrap] ${warning}`, {
-        code: (error as NodeJS.ErrnoException).code ?? "unknown",
-        diagnostic: safeError(error),
-      });
-      throw error;
-    }
-  }
 
   async appendRealtimeSpeech(text: string): Promise<void> {
     if (!text || Buffer.byteLength(text, "utf8") > MAX_REALTIME_SPEECH_BYTES) {
@@ -2413,7 +2286,6 @@ export class CodexAppServerHost implements EngineHost {
       this.realtimeSessionId = null;
     }
     this.releasing = true;
-    this.unresolvedVoicePersonaBootstrap.clear();
     this.rejectRealtimeStart(new Error("Codex app-server host released"));
     this.rejectPendingAnswers(new Error("Codex app-server host released"));
     this.rejectPendingDeliveries(new Error("Codex app-server host released"));
@@ -3500,7 +3372,7 @@ export class CodexAppServerHost implements EngineHost {
     pending.resolve({
       sdp: pending.sdp,
       realtimeSessionId: pending.realtimeSessionId,
-      personaBootstrap: pending.personaBootstrap,
+      persona: pending.persona,
     });
   }
 
