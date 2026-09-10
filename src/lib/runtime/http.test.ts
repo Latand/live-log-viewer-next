@@ -2100,3 +2100,116 @@ test("a send no structured delivery owns is refused rather than admitted without
   expect(interrupt.status).toBe(202);
   expect(commands).toHaveLength(1);
 });
+
+test("a corrupt WakaTime state file does not refuse a structured runtime send, steer or answer", async () => {
+  const { enqueueProductionOperatorHeartbeat } = await import("@/lib/wakatime/sync");
+  const stateDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-corrupt-state-"));
+  const stateFile = path.join(stateDirectory, "wakatime-state.json");
+  /* The production shape of this outage: an all-NUL state file that throws in
+     `JSON.parse` before the heartbeat queue can be opened. */
+  const corruptBytes = Buffer.alloc(4_096, 0);
+  fs.writeFileSync(stateFile, corruptBytes, { mode: 0o600 });
+  const at = Date.parse("2026-09-10T09:00:00.000Z");
+  const outcomes: string[] = [];
+  const commands: unknown[] = [];
+  const client = {
+    command: async (command: { kind: string; idempotencyKey: string; conversationId: string }) => {
+      commands.push(command);
+      return {
+        operationId: `op-${command.idempotencyKey}`,
+        replayed: false,
+        receipt: {
+          operationId: `op-${command.idempotencyKey}`,
+          idempotencyKey: command.idempotencyKey,
+          conversationId: command.conversationId,
+          kind: command.kind as "send",
+          status: "pending" as const,
+          at: new Date(at).toISOString(),
+          revision: 1,
+        },
+      };
+    },
+  } as unknown as RuntimeHostClient;
+  const dependencies: RuntimeHttpDependencies = {
+    enabled: () => true,
+    structuredEnabled: () => true,
+    client: () => client,
+    recordOperatorActivity: (input) => recordDirectOperatorWakatimeActivity(input, {
+      enabled: () => true,
+      now: () => at,
+      registrySnapshot: () => ({
+        conversationAliases: {},
+        conversations: {
+          conversation_direct: {
+            id: "conversation_direct",
+            engine: "codex",
+            generations: [{
+              id: "generation_direct",
+              path: "/sessions/direct.jsonl",
+              accountId: null,
+              launchProfile: {
+                ...emptyLaunchProfile({}),
+                cwd: "/workspace/repository",
+                project: "project-fixture",
+              },
+              historyHash: null,
+              host: null,
+              createdAt: new Date(at).toISOString(),
+              archivedAt: null,
+            }],
+            continuityPaths: [],
+            abandonedContinuityPaths: [],
+            projectOwnership: {
+              project: "project-fixture",
+              source: "operator",
+              setAt: new Date(at).toISOString(),
+              operationId: "launch-fixture",
+            },
+            migration: null,
+            migrationOptOut: null,
+            supersededBy: null,
+            agentRole: "builder",
+            delegationDepth: 1,
+            turn: { state: "idle", source: "lifecycle", observedAt: new Date(at).toISOString() },
+            createdAt: new Date(at).toISOString(),
+            updatedAt: new Date(at).toISOString(),
+          },
+        },
+      } as never),
+      enqueue: (heartbeat) => enqueueProductionOperatorHeartbeat(heartbeat, stateFile, () => true),
+      reportStorageFailure: (event, fields) => { outcomes.push(`${event}:${String(fields.outcome)}`); },
+    }),
+  };
+
+  try {
+    const sent = await handleRuntimeCommand(request({
+      conversationId: "conversation_direct",
+      text: "the composer still has to work",
+      idempotencyKey: "corrupt-state-send",
+    }), "send", dependencies);
+    const steered = await handleRuntimeCommand(request({
+      conversationId: "conversation_direct",
+      text: "change course",
+      idempotencyKey: "corrupt-state-steer",
+    }), "steer", dependencies);
+    const answered = await handleRuntimeCommand(request({
+      conversationId: "conversation_direct",
+      attentionId: "attention-corrupt-state",
+      resolution: { choice: "1" },
+      idempotencyKey: "corrupt-state-answer",
+    }), "answer", dependencies);
+
+    expect([sent.status, steered.status, answered.status]).toEqual([202, 202, 202]);
+    expect(commands).toHaveLength(3);
+    expect(outcomes).toEqual([
+      "operator_activity_not_stored:state_unreadable",
+      "operator_activity_not_stored:state_unreadable",
+      "operator_activity_not_stored:state_unreadable",
+    ]);
+    /* Every corrupt byte survives: the outage is reported, never repaired by
+       overwriting a queue the operator may still want to recover. */
+    expect(fs.readFileSync(stateFile)).toEqual(corruptBytes);
+  } finally {
+    fs.rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
