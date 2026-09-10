@@ -1,36 +1,43 @@
 /**
- * The queue above the input, measured inside the container that clips it (#1629).
+ * The queue above the input, measured inside the conversation that holds it (#1629).
+ *
+ *   bun run build && bun scripts/capture-issue-1629-queue-height.ts
  *
  * WHY A SECOND CAPTURE. The sibling `capture-issue-1629-queue-panel.ts` renders
  * the panel alone on a page, so nothing above or below it can be wrong: it
- * reads four rows and never meets the composer's form or the pane's
- * `overflow-hidden`. The defect this file exists for lived exactly there. The
- * composer form is `shrink-0`, so an unbounded queue grew the form instead of
- * itself: at sixteen queued rows the conversation's feed collapsed to zero and
- * the textarea and send control were laid out BELOW the pane's bottom edge and
- * clipped away, leaving no way to type or send. At 128 rows the input sat some
- * six thousand pixels past it.
+ * reads four rows and never meets the composer or the pane that clips it. The
+ * defect this file exists for lived exactly there. The composer's form is
+ * `shrink-0`, so an unbounded queue grew the form instead of itself: the
+ * conversation's feed collapsed and the textarea and the send control were laid
+ * out BELOW the pane's bottom edge and clipped away, leaving no way to type or
+ * send.
  *
- * So this renders the real `ComposerBar` — with the real `NativeQueuePanel` in
- * its queue slot and the real `useComposer` behind it — inside the two
- * container contracts that actually surround it in the app: `BranchPane`'s
- * clipping pane and `TmuxComposer`'s desktop form. Those two class strings are
- * READ OUT OF THE SOURCE at run time and asserted to still be there, so this
- * fixture cannot quietly drift away from what the app assembles.
+ * So this mounts the ASSEMBLED conversation — `BranchPane` at a real phone
+ * viewport, and the board's `NativeConversationPane` for a card — through
+ * `capture-issue-1629-queue-conversation.fixture.tsx`, which stands in only for
+ * the runtime snapshot, the queue transport, the log tail and `fetch`. The
+ * pane, its header, the feed, `TmuxComposer`'s form, `ComposerBar` and
+ * `NativeQueuePanel` are the app's own, so a change to any of their heights
+ * fails this capture rather than shipping.
  *
- * At 4, 16 and 128 rows, at composer and phone widths, and once with a long
- * message and unresolved hand-offs present, it measures that the input and the
- * send control are inside the pane, that the conversation keeps usable height,
- * that the queue's own header control needs no scrolling, and that every row —
- * including the last — can be brought into view and its controls reached.
+ * The sizes are the ones the product actually has: the phone at 390 × 840, and
+ * the board's own card heights (`src/components/scheme/layout.ts`) — a 680 px
+ * child, a 780 px root, and a narrow card — at 4, 16 and 128 queued rows, with
+ * wrapping messages and unanswered hand-offs present, plus a card resized down
+ * while the queue is full. Each case measures that the input and the send
+ * control are inside the pane and reachable, that the conversation keeps usable
+ * transcript height, that the queue's own header control needs no scrolling,
+ * and that every row — including the last — can be brought into view and its
+ * controls pressed.
  *
- * Then it proves the reading can go red: the cap is removed from the panel in
- * the page, and separately the rows are made to overflow visibly, and a run
- * where either still reads as "usable" exits non-zero.
+ * Then it proves the reading can go red: the panel's yield and the composer's
+ * budget are put back the way they were before this repair, and separately the
+ * rows are made to overflow visibly, and a run where any of those still reads
+ * as "usable" exits non-zero.
  *
- * WHAT IT IS NOT. A statically rendered composition, not the assembled
- * conversation: it establishes that these components in these containers lay
- * out correctly, and nothing about the surrounding board.
+ * WHAT IT IS NOT. This is one conversation in a browser with injected data. It
+ * establishes that these components at these sizes lay out correctly, and
+ * nothing about a negotiated host or the surrounding board.
  *
  * Frames and the measurement JSON land outside the repository, under
  * <BOARD_CAPTURE_DIR>/<unique-run>/out.
@@ -38,16 +45,8 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { createElement } from "react";
-import { renderToStaticMarkup } from "react-dom/server";
-import { chromium, type Browser } from "playwright-core";
+import { chromium, type Browser, type Page } from "playwright-core";
 
-import { ComposerBar } from "../src/components/ComposerBar";
-import { useComposer } from "../src/hooks/useComposer";
-import { NativeQueuePanel } from "../src/components/NativeQueuePanel";
-import { projectNativeQueue } from "../src/components/nativeQueueView";
-import type { NativeQueueRecord } from "../src/lib/runtime/nativeQueueContracts";
-import { translate, type TFunction } from "../src/lib/i18n";
 import { createCaptureDirectory } from "./capture-directory";
 
 const repoRoot = path.resolve(import.meta.dir, "..");
@@ -60,23 +59,18 @@ const BASE = createCaptureDirectory({
 const OUT_DIR = path.join(BASE, "out");
 fs.mkdirSync(OUT_DIR, { recursive: true });
 
-const t: TFunction = (key, params) => translate("en", key as never, params as never);
-
-/**
- * The two containers, taken from the app rather than retyped.
- *
- * A fixture that hard-codes its own wrapper proves only that the fixture is
- * consistent. These are asserted to still appear in the components that own
- * them, so a change to either surface fails this capture instead of shipping.
- */
-function containerContracts(): { pane: string; form: string } {
-  const pane = "relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-[10px] border";
-  const form = "flex shrink-0 flex-col gap-1.5 border-t border-border bg-card px-2.5 ";
-  const paneSource = fs.readFileSync(path.join(repoRoot, "src/components/BranchPane.tsx"), "utf8");
-  const formSource = fs.readFileSync(path.join(repoRoot, "src/components/TmuxComposer.tsx"), "utf8");
-  if (!paneSource.includes(pane)) throw new Error("BranchPane no longer uses the pane contract this fixture reproduces");
-  if (!formSource.includes(form)) throw new Error("TmuxComposer no longer uses the desktop form contract this fixture reproduces");
-  return { pane, form: `${form}py-2` };
+async function fixtureBundle(): Promise<string> {
+  const built = await Bun.build({
+    entrypoints: [path.join(repoRoot, "scripts/capture-issue-1629-queue-conversation.fixture.tsx")],
+    outdir: path.join(BASE, "browser"),
+    target: "browser",
+    format: "esm",
+    define: { "process.env.NODE_ENV": JSON.stringify("production") },
+  });
+  if (!built.success) throw new Error(`the conversation fixture did not build: ${built.logs.join("\n")}`);
+  const output = built.outputs[0];
+  if (!output) throw new Error("the conversation fixture built nothing");
+  return fs.readFileSync(output.path, "utf8");
 }
 
 function stylesheet(): string {
@@ -88,215 +82,185 @@ function stylesheet(): string {
   return names.map((name) => fs.readFileSync(path.join(cssDir, name), "utf8")).join("\n");
 }
 
-const LONG = "Rebase the branch onto main, rerun the focused suites for the queue and the composer, and then write the evidence table into the pull request body with the exact counts from the run rather than the ones the description already claims.";
-
-function record(index: number, text: string): NativeQueueRecord {
-  return {
-    entryId: `e${index}`,
-    conversationId: "conversation_height",
-    binding: { threadId: "thread-height", accountId: null },
-    clientUserMessageId: `client-${index}`,
-    nativeSubmissionId: `native-${index}`,
-    revision: 1,
-    versions: [{ revision: 1, operationId: `op-${index}`, text, images: [], contentDigest: `d-${index}` }],
-    profilePolicy: "thread-at-dispatch",
-    state: "queued",
-    mutationOperationId: null,
-    dispatchedRevision: null,
-    dispatchedTurnId: null,
-    proof: null,
-    reason: null,
-  } as NativeQueueRecord;
+interface Case {
+  name: string;
+  /** `phone` mounts `BranchPane` at a phone viewport, which is the only way to
+      get the phone composer: a phone-width desktop render is a different form
+      with a different budget. `card` mounts the board's conversation pane. */
+  surface: "phone" | "card";
+  pane: { width: number; height: number };
+  viewport: { width: number; height: number };
+  rows: number;
+  long: boolean;
+  unresolved: number;
+  /** Shrink the card to this height after it has laid out once. */
+  resizeTo?: number;
 }
 
-interface Case { name: string; rows: number; width: number; long: boolean; unresolved: number }
-
-function panelHtml(scenario: Case): string {
-  const { pane, form } = containerContracts();
-  const entries = Array.from({ length: scenario.rows }, (_, index) =>
-    record(index, scenario.long && index === 0 ? LONG : `Queued instruction ${index + 1}: run the focused check.`));
-  const items = entries.map((entry) => ({
-    id: entry.nativeSubmissionId,
-    clientUserMessageId: entry.clientUserMessageId,
-    input: [{ type: "text", text: entry.versions[0]!.text }],
-  }));
-  const view = projectNativeQueue({
-    entries,
-    native: { threadId: "thread-height", items, stale: false },
-    turn: "idle",
-  } as never);
-  const queue = createElement(NativeQueuePanel, {
-    view,
-    loading: false,
-    error: null,
-    thread: { model: "gpt-6-astra", effort: "high" },
-    cardId: "conversation_height",
-    unresolved: Array.from({ length: scenario.unresolved }, (_, index) => ({
-      key: `unresolved-${index}`,
-      text: `A message whose admission was never answered (${index + 1})`,
-      imageCount: 0,
-    })),
-    onReplay: () => undefined,
-    mintKey: () => "capture",
-    submit: async () => ({ ok: true }),
-    onRefresh: () => undefined,
-    t,
-  } as never);
-  /* The composer's own state comes from the composer's own hook, so the bar has
-     the rows and controls the app gives it rather than a stub that happens to
-     satisfy the type. A hook needs a component, so the bar is one. */
-  const Bar = () => {
-    const composer = useComposer({ initialText: () => "A new instruction", persistText: () => undefined, submit: () => undefined } as never);
-    return createElement(ComposerBar, {
-      composer,
-      placeholder: "Prompt",
-      textareaAriaLabel: "Prompt",
-      imageAriaLabel: "Add images",
-      leftSlot: null,
-      sendLabelIdle: "Send",
-      sendLabelRecording: "Stop",
-      sendIdleClassName: "bg-accent",
-      imageDisabled: true,
-      queuePanel: queue,
-    } as never);
-  };
-  return renderToStaticMarkup(createElement("section", { id: "pane", className: pane },
-    createElement("header", { className: "shrink-0 px-2 py-2 text-ui text-secondary" }, "Fixture conversation"),
-    createElement("div", { id: "feed", className: "min-h-0 flex-1 overflow-y-auto px-2" },
-      Array.from({ length: 60 }, (_, index) => createElement("p", { key: index, className: "text-ui text-primary" }, `Existing conversation line ${index + 1}`))),
-    createElement("form", { className: form }, createElement(Bar))));
-}
+const CASES: Case[] = [
+  { name: "phone-4", surface: "phone", pane: { width: 342, height: 760 }, viewport: { width: 390, height: 840 }, rows: 4, long: false, unresolved: 0 },
+  { name: "phone-16", surface: "phone", pane: { width: 342, height: 760 }, viewport: { width: 390, height: 840 }, rows: 16, long: false, unresolved: 0 },
+  { name: "phone-128", surface: "phone", pane: { width: 342, height: 760 }, viewport: { width: 390, height: 840 }, rows: 128, long: false, unresolved: 0 },
+  { name: "phone-128-long-and-unresolved", surface: "phone", pane: { width: 342, height: 760 }, viewport: { width: 390, height: 840 }, rows: 128, long: true, unresolved: 3 },
+  { name: "phone-short-128", surface: "phone", pane: { width: 342, height: 552 }, viewport: { width: 390, height: 600 }, rows: 128, long: false, unresolved: 0 },
+  { name: "card-child-4", surface: "card", pane: { width: 600, height: 680 }, viewport: { width: 720, height: 1080 }, rows: 4, long: false, unresolved: 0 },
+  { name: "card-child-16", surface: "card", pane: { width: 600, height: 680 }, viewport: { width: 720, height: 1080 }, rows: 16, long: false, unresolved: 0 },
+  { name: "card-child-128", surface: "card", pane: { width: 600, height: 680 }, viewport: { width: 720, height: 1080 }, rows: 128, long: false, unresolved: 0 },
+  { name: "card-child-128-long-and-unresolved", surface: "card", pane: { width: 600, height: 680 }, viewport: { width: 720, height: 1080 }, rows: 128, long: true, unresolved: 3 },
+  { name: "card-stage-128", surface: "card", pane: { width: 600, height: 620 }, viewport: { width: 720, height: 1080 }, rows: 128, long: false, unresolved: 0 },
+  { name: "card-root-128", surface: "card", pane: { width: 600, height: 780 }, viewport: { width: 720, height: 1080 }, rows: 128, long: false, unresolved: 0 },
+  { name: "card-narrow-128-long", surface: "card", pane: { width: 390, height: 760 }, viewport: { width: 720, height: 840 }, rows: 128, long: true, unresolved: 3 },
+  { name: "card-child-128-resized-to-500", surface: "card", pane: { width: 600, height: 680 }, viewport: { width: 720, height: 1080 }, rows: 128, long: true, unresolved: 3, resizeTo: 500 },
+];
 
 interface Reading {
   inputInsidePane: boolean;
   sendInsidePane: boolean;
+  inputPressable: boolean;
   feedHeight: number;
   panelHeight: number;
   queueStartVisible: boolean;
-  rowsReachable: boolean;
-  lastRowControlsInsidePane: boolean;
+  rows: number;
+  rowsScrollToEnd: boolean;
+  lastRowPressable: boolean;
   pageScrolls: boolean;
 }
 
 const READ = () => {
-  const pane = document.querySelector("#pane")!.getBoundingClientRect();
-  const feed = document.querySelector("#feed")!.getBoundingClientRect();
-  const input = document.querySelector("textarea")!.getBoundingClientRect();
-  const send = document.querySelector('[data-testid="composer-send"], form button[type="submit"]')?.getBoundingClientRect()
-    ?? document.querySelector("form button:last-of-type")!.getBoundingClientRect();
+  const pane = document.querySelector("#app section")!.getBoundingClientRect();
+  const feed = document.querySelector("[data-log-feed-scroller]")!.getBoundingClientRect();
+  const field = document.querySelector("textarea") as HTMLTextAreaElement;
+  const input = field.getBoundingClientRect();
+  const send = (field.closest("form")?.querySelector('button[type="submit"]') ?? null)?.getBoundingClientRect() ?? null;
   const panel = document.querySelector('[data-testid="native-queue-panel"]')!.getBoundingClientRect();
   const start = document.querySelector('[data-testid="native-queue-start"]')?.getBoundingClientRect() ?? null;
   const list = document.querySelector('[data-testid="native-queue-rows"]') as HTMLElement | null;
   const inside = (box: DOMRect) => box.top >= pane.top - 1 && box.bottom <= pane.bottom + 1;
-  /* A MISSING SCROLLER IS A READING, not a crash. If the rows list is gone the
-     bound went with it, and that has to come back as a failed measurement the
-     run reports rather than a stack trace nobody can compare. */
-  if (!list) {
-    return {
-      inputInsidePane: inside(input), sendInsidePane: inside(send),
-      feedHeight: Math.round(feed.height), panelHeight: Math.round(panel.height),
-      queueStartVisible: start ? inside(start) : false,
-      rowsReachable: false, lastRowControlsInsidePane: false,
-      pageScrolls: document.documentElement.scrollHeight > window.innerHeight + 1,
-    };
-  }
-  /* EVERY ROW HAS TO BE REACHABLE, which for an overflowing list means it
-     scrolls. Scrolling it to the end and measuring the last row's own control is
-     what proves the far end is not simply clipped away. */
-  list.scrollTop = list.scrollHeight;
-  const rowNodes = [...list.querySelectorAll('[data-testid="native-queue-row"]')];
-  const lastControl = rowNodes.at(-1)?.querySelector("button")?.getBoundingClientRect() ?? null;
-  const reachable = list.scrollHeight <= list.clientHeight + 1
-    || Math.abs(list.scrollTop + list.clientHeight - list.scrollHeight) <= 2;
-  list.scrollTop = 0;
-  return {
+  /* WHAT IS ON TOP OF THE FIELD. A control laid out inside the pane can still
+     be covered by a panel that spilled over it, and a covered field takes no
+     typing, so the reading asks the page who owns those pixels. */
+  const over = document.elementFromPoint(input.x + input.width / 2, input.y + input.height / 2);
+  const common = {
     inputInsidePane: inside(input),
-    sendInsidePane: inside(send),
+    sendInsidePane: send ? inside(send) : false,
+    inputPressable: over === field,
     feedHeight: Math.round(feed.height),
     panelHeight: Math.round(panel.height),
     queueStartVisible: start ? inside(start) : false,
-    rowsReachable: reachable,
-    lastRowControlsInsidePane: lastControl ? inside(lastControl) : false,
+    rows: document.querySelectorAll('[data-testid="native-queue-row"]').length,
     pageScrolls: document.documentElement.scrollHeight > window.innerHeight + 1,
   };
+  /* A MISSING SCROLLER IS A READING. If the rows list is gone the bound went
+     with it, and that has to come back as a failed measurement the run reports
+     rather than a stack trace nobody can compare. */
+  if (!list) return { ...common, rowsScrollToEnd: false, lastRowPressable: false };
+  /* EVERY ROW HAS TO BE REACHABLE, which for an overflowing list means it
+     scrolls. The list is taken to its end, and then the last row's own control
+     is brought into view and pressed where it lands: together those say the far
+     end is reachable rather than clipped away. */
+  list.scrollTop = list.scrollHeight;
+  const scrolled = list.scrollHeight <= list.clientHeight + 1
+    || Math.abs(list.scrollTop + list.clientHeight - list.scrollHeight) <= 2;
+  const lastRow = [...list.querySelectorAll('[data-testid="native-queue-row"]')].at(-1) ?? null;
+  const lastControl = lastRow?.querySelector("button") ?? null;
+  lastControl?.scrollIntoView({ block: "nearest" });
+  const control = lastControl?.getBoundingClientRect() ?? null;
+  const pressable = control !== null
+    && document.elementFromPoint(control.x + control.width / 2, control.y + control.height / 2)?.closest("button") === lastControl
+    && inside(control);
+  list.scrollTop = 0;
+  return { ...common, rowsScrollToEnd: scrolled, lastRowPressable: pressable };
 };
 
 /** The conversation has to keep enough room to still be a conversation. */
 const MIN_FEED_PX = 120;
 
-function holds(reading: Reading): boolean {
-  return reading.inputInsidePane && reading.sendInsidePane
+function holds(reading: Reading, scenario: { rows: number }): boolean {
+  return reading.inputInsidePane && reading.sendInsidePane && reading.inputPressable
     && reading.feedHeight >= MIN_FEED_PX
-    && reading.queueStartVisible && reading.rowsReachable
-    && reading.lastRowControlsInsidePane && !reading.pageScrolls;
+    && reading.queueStartVisible && reading.rows === scenario.rows
+    && reading.rowsScrollToEnd && reading.lastRowPressable && !reading.pageScrolls;
 }
 
-const CASES: Case[] = [
-  { name: "desktop-4", rows: 4, width: 620, long: false, unresolved: 0 },
-  { name: "desktop-16", rows: 16, width: 620, long: false, unresolved: 0 },
-  { name: "desktop-128", rows: 128, width: 620, long: false, unresolved: 0 },
-  { name: "desktop-128-long-and-unresolved", rows: 128, width: 620, long: true, unresolved: 3 },
-  { name: "narrow-4", rows: 4, width: 390, long: false, unresolved: 0 },
-  { name: "narrow-16", rows: 16, width: 390, long: false, unresolved: 0 },
-  { name: "narrow-128", rows: 128, width: 390, long: true, unresolved: 3 },
-];
+function page(css: string, scenario: Case): string {
+  return `<!doctype html><html lang="en" data-theme="dark"><head><meta charset="utf-8"><style>${css}</style>
+<style>body{margin:0;padding:24px;background:var(--color-canvas)}#app{display:flex;width:${scenario.pane.width}px;height:${scenario.pane.height}px}</style>
+</head><body><div id="app"></div><script type="module" src="/conversation.js"></script></body></html>`;
+}
+
+async function open(browser: Browser, bundle: string, css: string, scenario: Case): Promise<{ view: Page; errors: string[]; close: () => Promise<void> }> {
+  const context = await browser.newContext({ viewport: scenario.viewport, colorScheme: "dark" });
+  const view = await context.newPage();
+  const errors: string[] = [];
+  view.on("pageerror", (error) => errors.push(String(error)));
+  await view.route("**/*", async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname === "/conversation.js") return route.fulfill({ contentType: "text/javascript", body: bundle });
+    if (url.pathname === "/") return route.fulfill({ contentType: "text/html", body: page(css, scenario) });
+    return route.abort();
+  });
+  const query = `count=${scenario.rows}&surface=${scenario.surface}${scenario.long ? "&long=1" : ""}&unresolved=${scenario.unresolved}`;
+  await view.goto(`http://queue-height.fixture/?${query}`);
+  await view.locator('[data-testid="native-queue-row"]').first().waitFor({ timeout: 15000 });
+  if (scenario.resizeTo) {
+    await view.evaluate((height) => { (document.getElementById("app") as HTMLElement).style.height = `${height}px`; }, scenario.resizeTo);
+  }
+  await view.waitForTimeout(250);
+  return { view, errors, close: () => context.close() };
+}
 
 async function main(): Promise<number> {
   const css = stylesheet();
+  const bundle = await fixtureBundle();
   const measurements: Record<string, unknown> = {};
   let browser: Browser | undefined;
   try {
     browser = await chromium.launch({ args: ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--hide-scrollbars"] });
     const verdicts: [string, boolean][] = [];
     for (const scenario of CASES) {
-      const context = await browser.newContext({
-        viewport: { width: scenario.width + 48, height: 840 },
-        colorScheme: "dark",
-      });
-      const view = await context.newPage();
-      await view.setContent(
-        `<!doctype html><html lang="en" data-theme="dark"><head><meta charset="utf-8"><style>${css}</style>
-<style>body{margin:0;padding:24px;background:var(--color-canvas)}#pane{width:${scenario.width}px;height:760px}</style>
-</head><body>${panelHtml(scenario)}</body></html>`,
-        { waitUntil: "load" },
-      );
+      const { view, errors, close } = await open(browser, bundle, css, scenario);
       const reading = await view.evaluate(READ) as Reading;
-      measurements[scenario.name] = reading;
+      measurements[scenario.name] = { ...reading, errors };
       try { await view.screenshot({ path: path.join(OUT_DIR, `${scenario.name}.png`) }); } catch { /* a frame is for a human */ }
-      verdicts.push([`${scenario.name}: composer reachable, conversation keeps room, every row reachable`, holds(reading)]);
-      await context.close();
+      verdicts.push([`${scenario.name}: composer reachable, conversation keeps room, every row reachable`, holds(reading, scenario) && errors.length === 0]);
+      await close();
     }
 
-    /* RED. The bound is what makes all of the above true, so both halves of it
-       are taken away in the page and the same reading has to fail. */
-    const context = await browser.newContext({ viewport: { width: 668, height: 840 }, colorScheme: "dark" });
-    const red = await context.newPage();
-    const worst: Case = { name: "red", rows: 128, width: 620, long: false, unresolved: 0 };
-    const load = async () => red.setContent(
-      `<!doctype html><html lang="en" data-theme="dark"><head><meta charset="utf-8"><style>${css}</style>
-<style>body{margin:0;padding:24px;background:var(--color-canvas)}#pane{width:620px;height:760px}</style>
-</head><body>${panelHtml(worst)}</body></html>`, { waitUntil: "load" });
+    /* RED. The repair is the panel's yield and the composer's budget, so both
+       are put back the way they were and the same reading has to fail — on the
+       phone and on a card, the two compositions that were broken. */
+    for (const scenario of CASES.filter((one) => one.name === "phone-128" || one.name === "card-child-128")) {
+      const { view, close } = await open(browser, bundle, css, scenario);
+      /* Exactly what this repair added, taken back off: the panel's yield on
+         both surfaces — `min-h-0` AND the panel's own scroller, since a scroll
+         container yields even where its minimum is automatic — and on a card
+         the composer's budget, which is the one the phone's form had all
+         along. */
+      await view.evaluate((surface) => {
+        const panel = document.querySelector('[data-testid="native-queue-panel"]') as HTMLElement | null;
+        const form = document.querySelector("textarea")?.closest("form") as HTMLElement | null;
+        if (panel) { panel.style.minHeight = "auto"; panel.style.overflow = "visible"; }
+        if (form && surface === "card") form.style.maxHeight = "none";
+      }, scenario.surface);
+      const unbudgeted = await view.evaluate(READ) as Reading;
+      measurements[`red-${scenario.name}-unbudgeted`] = unbudgeted;
+      try { await view.screenshot({ path: path.join(OUT_DIR, `red-${scenario.name}-unbudgeted.png`) }); } catch { /* frame only */ }
+      verdicts.push([`RED ${scenario.name}: the queue taking room the conversation cannot spare is caught`, !holds(unbudgeted, scenario)]);
+      await close();
+    }
 
-    await load();
-    await red.evaluate(() => {
-      const found = document.querySelector('[data-testid="native-queue-panel"]') as HTMLElement | null;
-      if (found) found.style.maxHeight = "none";
-    });
-    const uncapped = await red.evaluate(READ) as Reading;
-    measurements.redUncapped = uncapped;
-    try { await red.screenshot({ path: path.join(OUT_DIR, "red-uncapped.png") }); } catch { /* frame only */ }
-
-    await load();
-    await red.evaluate(() => {
-      const list = document.querySelector('[data-testid="native-queue-rows"]') as HTMLElement | null;
-      if (list) list.style.overflowY = "visible";
-    });
-    const unscrolled = await red.evaluate(READ) as Reading;
-    measurements.redUnscrolled = unscrolled;
-    await context.close();
-
-    verdicts.push(["RED: removing the panel's cap is caught", !holds(uncapped)]);
-    verdicts.push(["RED: letting the rows overflow instead of scrolling is caught", !holds(unscrolled)]);
+    {
+      const scenario = CASES.find((one) => one.name === "card-child-128")!;
+      const { view, close } = await open(browser, bundle, css, scenario);
+      await view.evaluate(() => {
+        const list = document.querySelector('[data-testid="native-queue-rows"]') as HTMLElement | null;
+        if (list) list.style.overflowY = "visible";
+      });
+      const unscrolled = await view.evaluate(READ) as Reading;
+      measurements.redUnscrolled = unscrolled;
+      verdicts.push(["RED: letting the rows overflow instead of scrolling is caught", !holds(unscrolled, scenario)]);
+      await close();
+    }
 
     measurements.verdicts = verdicts.map(([check, held]) => ({ check, held }));
     fs.writeFileSync(path.join(OUT_DIR, "queue-height.json"), `${JSON.stringify(measurements, null, 2)}\n`);
