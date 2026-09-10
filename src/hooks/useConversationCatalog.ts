@@ -65,6 +65,45 @@ interface CatalogSnapshot extends ConversationPage {
   expired: boolean;
 }
 
+/**
+ * Scoped snapshots outlive the consumer that loaded them (#1614).
+ *
+ * A scoped consumer names the surface its pages belong to, and that surface
+ * outlives any one mount of it: opening an agent from the desktop agent list
+ * unmounts the list to show the conversation, and coming back used to restart
+ * at page one — several hundred rows of scrolling lost to one click, every
+ * time. Pages are kept here under the same key the mount would have used, so
+ * the list that comes back is the list that was left. Unscoped consumers (the
+ * switchboard's search) keep the old per-mount behaviour and never reach this
+ * map.
+ *
+ * Bounded by scope, least-recently-written first, and gone with the tab: a
+ * place to come back to, not a store.
+ */
+const RETAINED_CATALOG_PAGES = new Map<string, CatalogSnapshot>();
+const RETAINED_CATALOG_SCOPES = 8;
+/* Ceiling on a single revalidation, so a very deep list re-reads its head
+   rather than its whole history. */
+const REVALIDATE_MAX_PAGES = 8;
+
+function retainPage(store: Map<string, CatalogSnapshot>, key: string, snapshot: CatalogSnapshot): void {
+  /* Delete before set, so insertion order is recency order. */
+  store.delete(key);
+  store.set(key, snapshot);
+  if (store !== RETAINED_CATALOG_PAGES) return;
+  while (store.size > RETAINED_CATALOG_SCOPES) {
+    const oldest = store.keys().next().value;
+    if (oldest === undefined || oldest === key) break;
+    store.delete(oldest);
+  }
+}
+
+/** Test seam: retained pages are module state, so a test that asserts on them
+    can start from a known one. */
+export function clearRetainedConversationPages(): void {
+  RETAINED_CATALOG_PAGES.clear();
+}
+
 /** Each scope keeps one coherent cursor chain for this mounted consumer. */
 export function useConversationCatalog({
   project, query = "", enabled = true, pageSize = 40, scopeKey,
@@ -77,7 +116,11 @@ export function useConversationCatalog({
   scopeKey?: string;
 }): ConversationCatalogData {
   const key = JSON.stringify([scopeKey ?? null, project ?? null, query.trim(), pageSize]);
-  const cache = useRef(new Map<string, CatalogSnapshot>());
+  const perMount = useRef(new Map<string, CatalogSnapshot>());
+  /* Scoped consumers read and write the retained map, so their pages survive an
+     unmount; unscoped ones keep theirs for as long as they are up. */
+  const cache = useRef(perMount.current);
+  cache.current = scopeKey === undefined ? perMount.current : RETAINED_CATALOG_PAGES;
   const flight = useRef<{ key: string; controller: AbortController } | null>(null);
   const [, render] = useState(0);
   const update = useCallback(() => render((n) => n + 1), []);
@@ -98,11 +141,11 @@ export function useConversationCatalog({
         const seen = new Set<string>();
         const items = [...(cursor ? current?.items ?? [] : []), ...page.items]
           .filter((item) => { if (seen.has(item.path)) return false; seen.add(item.path); return true; });
-        cache.current.set(key, { ...page, items, known: true, error: false, expired: false });
+        retainPage(cache.current, key, { ...page, items, known: true, error: false, expired: false });
       })
       .catch((cause: unknown) => {
         if (controller.signal.aborted || flight.current !== token || active.current.key !== key) return;
-        cache.current.set(key, {
+        retainPage(cache.current, key, {
           ...(cache.current.get(key) ?? { ...EMPTY_PAGE, known: false, expired: false }),
           error: true, failedCursor: conversationCatalogCursorExpired(cause) ? null : cursor,
           expired: conversationCatalogCursorExpired(cause) || (cache.current.get(key)?.expired ?? false),
@@ -114,6 +157,73 @@ export function useConversationCatalog({
         update();
       });
   }, [key, project, query, pageSize, update]);
+
+  /**
+   * Re-reads the pages a scoped consumer came back to (#1614).
+   *
+   * A retained snapshot is what the operator left, and left alone it stays a
+   * photograph: they open an agent, spawn another, rename a third, come back —
+   * and see the list as it was, with no request made, no page to load (an
+   * exhausted chain has no «load more») and nothing to press. So a scoped
+   * consumer re-reads its own span on the way back in: the chain is followed
+   * from the start until it has covered as many rows as were retained, and the
+   * result replaces the snapshot in one swap, so the rows never blink back to
+   * page one on the way. Bounded by the pages actually held (and hard-capped),
+   * never a poll: it happens on the way in, and on an explicit refresh.
+   *
+   * A failure keeps what the operator came back to — their scrolled rows are
+   * worth more than an error banner over an empty list.
+   */
+  const revalidate = useCallback(() => {
+    const current = cache.current.get(key);
+    if (!current?.known || flight.current) return;
+    const held = current.items.length;
+    const controller = new AbortController();
+    const token = { key, controller };
+    flight.current = token;
+    update();
+    void (async () => {
+      try {
+        let cursor: string | null = null;
+        let items: FileEntry[] = [];
+        let page: ConversationPage | null = null;
+        for (let index = 0; index < REVALIDATE_MAX_PAGES; index += 1) {
+          page = await fetchConversationPage(project, query, cursor, controller.signal, pageSize);
+          const seen = new Set(items.map((item) => item.path));
+          items = [...items, ...page.items.filter((item) => !seen.has(item.path))];
+          cursor = page.nextCursor;
+          if (!cursor || items.length >= held) break;
+        }
+        if (!page || controller.signal.aborted || flight.current !== token || active.current.key !== key) return;
+        retainPage(cache.current, key, { ...page, items, nextCursor: cursor, known: true, error: false, expired: false });
+      } catch {
+        /* Keep the retained pages: a list that is a few seconds stale beats one
+           that emptied itself because a revalidation lost the network. */
+      } finally {
+        if (flight.current === token) {
+          flight.current = null;
+          update();
+        }
+      }
+    })();
+  }, [key, project, query, pageSize, update]);
+
+  /* Coming back in, and only that: the scopes this mount INHERITED — pages
+     some earlier mount left behind — are re-read once each. Pages this mount
+     loaded itself are not: an update, a poll, or a leaf collapsing and
+     expanding again is not a return, and re-reading there would spend a request
+     on every toggle while the operator watched. That the accumulated pages
+     survive those untouched is the other half of what this hook is for. */
+  const inheritedScopes = useRef<Set<string> | null>(null);
+  if (inheritedScopes.current === null) inheritedScopes.current = new Set(RETAINED_CATALOG_PAGES.keys());
+  const revalidatedScopes = useRef(new Set<string>());
+  useEffect(() => {
+    if (!enabled || scopeKey === undefined) return;
+    if (!inheritedScopes.current?.has(key) || revalidatedScopes.current.has(key)) return;
+    if (!cache.current.has(key)) return;
+    revalidatedScopes.current.add(key);
+    revalidate();
+  }, [key, enabled, scopeKey, revalidate]);
 
   useEffect(() => {
     const delay = conversationCatalogRequestDelay(previousQuery.current, query);
@@ -138,7 +248,9 @@ export function useConversationCatalog({
     const current = cache.current.get(key);
     if (current?.nextCursor && !current.error && !current.expired) request(current.nextCursor);
   }, [key, request]);
-  const refresh = useCallback(() => request(null), [request]);
+  /* The operator's own «refresh»: the same span re-read, not a truncation back
+     to page one — pressing it must never cost them their place. */
+  const refresh = revalidate;
   const retry = useCallback(() => {
     const current = cache.current.get(key);
     request(current?.expired ? null : current?.error ? current.failedCursor ?? null : current?.nextCursor ?? null);

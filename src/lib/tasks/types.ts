@@ -1,5 +1,9 @@
 export type TaskStatus = "inbox" | "assigned" | "blocked" | "done";
 
+/** Board membership of a task's band. Absent on a row is `shown`; the value is
+    written explicitly so a restore is durable and readable in the state file. */
+export type TaskBoardVisibility = "shown" | "hidden";
+
 /** `linked` records membership only (#1586): the conversation belongs to the
     task, nothing was delivered or handed off. */
 export type AssignmentState = "delivered" | "failed" | "spawning" | "handoff" | "linked";
@@ -109,6 +113,15 @@ export interface BoardTask {
   source?: TaskSource;
   /** Admission origin of a placeholder task (#1586); absent on operator-created tasks. */
   origin?: TaskOrigin;
+  /** Whether an EMPTY band may be drawn for this task. Absent means shown — the
+      default for every task the operator or an agent creates. `hidden` is only
+      ever written by an explicit «Remove from board», by the task panel's
+      preference control, or once by the legacy-task migration, and it is a
+      preference rather than a claim about membership: a task whose band
+      resolves a conversation, a mirror, a container or a draft is drawn
+      whatever this says (`boardVisibility`). The task itself is never deleted
+      or archived and never leaves the task list. */
+  board?: TaskBoardVisibility;
   createdAt: string;
   updatedAt: string; // bumped by every PATCH
 }

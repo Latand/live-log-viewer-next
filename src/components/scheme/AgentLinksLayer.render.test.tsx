@@ -27,15 +27,43 @@ const render = (interactive: boolean, hubInteractive?: boolean) =>
     <AgentLinksLayer links={[hubLink]} byPath={byPath} interactive={interactive} hubInteractive={hubInteractive} width={400} height={60} />,
   );
 
+/**
+ * The hub's own wrapper class, not the whole layer's markup.
+ *
+ * This used to be a substring test over everything the layer rendered, which
+ * only worked while nothing else in it was pointer-transparent. The decorative
+ * rails SVG is now `pointer-events-none` — an `aria-hidden` overlay must not
+ * swallow the clicks meant for the band controls underneath it (#1614) — so a
+ * whole-markup search no longer says anything about the hub. The contract
+ * (#93 §2.3) is unchanged and is now asserted where it actually lives.
+ */
+const hubWrapperClass = (markup: string): string => {
+  const wrapper = /<div class="([^"]*z-\[5\][^"]*)"/.exec(markup);
+  expect(wrapper, "the hub wrapper is rendered").not.toBeNull();
+  return wrapper![1]!;
+};
+
 test("the pipeline hub stays tappable on the lite map even when the layer is passive (#93 §2.3)", () => {
   /* Map mode passes interactive=false but hubInteractive=true: the hub wrapper
      must not be pointer-events-none, so its tap opens the controls. */
-  expect(render(false, true)).not.toContain("pointer-events-none");
+  expect(hubWrapperClass(render(false, true))).not.toContain("pointer-events-none");
 });
 
 test("without the hub override a passive layer leaves the hub untappable", () => {
   /* Default hubInteractive = interactive, so the old behavior (passive) holds. */
-  expect(render(false)).toContain("pointer-events-none");
+  expect(hubWrapperClass(render(false))).toContain("pointer-events-none");
+});
+
+test("the decorative rails never take pointer input, whether the layer is interactive or not (#1614)", () => {
+  /* The rails are `aria-hidden`. An `<svg>` root is a replaced element whose
+     whole box is hit-testable at the default `pointer-events: auto`, so a
+     full-canvas decorative overlay would intercept every click meant for the
+     band chrome beneath it. */
+  for (const markup of [render(true), render(false, true)]) {
+    const svg = /<svg[^>]*class="([^"]*)"[^>]*aria-hidden/.exec(markup);
+    expect(svg, "the rails svg is rendered").not.toBeNull();
+    expect(svg![1]!).toContain("pointer-events-none");
+  }
 });
 
 test("a pipeline rail routes around an unrelated card between two stages (#136 finding 2)", () => {

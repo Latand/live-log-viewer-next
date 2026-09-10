@@ -16,6 +16,10 @@ export const dynamic = "force-dynamic";
 
 export async function GET(): Promise<NextResponse<{ tasks: TaskPipelineReadModel[] } | ApiError>> {
   try {
+    /* Deliberately no migration here. This route serves the task LIST, which
+       shows every task whatever its board flag, so it has nothing to migrate
+       for — and a GET that writes surprises every caller. The board reads its
+       tasks through /api/files, and that is where the one-time migration runs. */
     return NextResponse.json({ tasks: projectTaskPipelineIds(loadTasks(), loadPipelines()) });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "task read model unavailable" }, { status: 500 });

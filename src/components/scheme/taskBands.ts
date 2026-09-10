@@ -1,6 +1,7 @@
 import { conversationIdentity } from "@/lib/accounts/identity";
 import type { Flow } from "@/lib/flows/types";
 import type { Pipeline } from "@/lib/pipelines/types";
+import { taskShowsOnBoard } from "@/lib/tasks/boardVisibility";
 import type { BoardTask, TaskStatus } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
 
@@ -229,8 +230,17 @@ export function buildTaskBands(base: SchemeLayout, sources: BandSources): TaskBa
   };
 
   /* 1. Recorded tasks, claimed in creation order so a shared conversation's
-        canonical surface is stable across polls and activity changes. */
-  const orderedTasks = [...tasks].sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
+        canonical surface is stable across polls and activity changes.
+
+     Every task is built here, including the ones the operator took off the
+     board: what a band resolved is the evidence the flag is applied to, and
+     that is only known once it has been built. The filter runs at the end.
+     A launch this session started but whose assignment is not persisted yet
+     counts as membership too, so the band the operator just spawned into never
+     blinks out. */
+  const provisionalTaskIds = new Set(provisionalMemberships?.values() ?? []);
+  const orderedTasks = [...tasks]
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
   for (const task of orderedTasks) {
     const workflow = projection.tasks.find((entry) => entry.task.id === task.id);
     const title = taskTitle(task.text) || untitled;
@@ -369,7 +379,27 @@ export function buildTaskBands(base: SchemeLayout, sources: BandSources): TaskBa
     }
     band.planned = band.members.filter((member) => member.kind === "slot" && base.slots.find((slot) => slot.key === member.key)?.presentation === "placeholder").length;
   }
-  return bands;
+  /* The board flag, applied to what each band actually resolved.
+     `bandHoldsMembers` is the one notion of membership on this surface: the
+     same predicate decides whether a hidden task draws a band at all and
+     whether the band offers «Remove from board» (TaskBandsLayer), so the board
+     can never present a control whose write it would then override. A band
+     that holds nothing has claimed nothing, so dropping it here releases no
+     conversation and moves no other band's members. */
+  return bands.filter((band) => band.origin !== "task" || !band.task
+    || taskShowsOnBoard(band.task, bandHoldsMembers(band))
+    || provisionalTaskIds.has(band.task.id));
+}
+
+/**
+ * Whether a band resolved anything the board is drawing for it: a conversation
+ * of its own, a mirror of one claimed by an earlier band, or a pipeline/flow
+ * container it owns. A task whose recorded assignments all point at
+ * conversations this board does not carry — archived, hidden, or simply never
+ * scanned again — holds nothing, and that is what the board flag governs.
+ */
+export function bandHoldsMembers(band: Pick<TaskBand, "members" | "mirrors" | "groups">): boolean {
+  return band.members.length > 0 || band.mirrors.length > 0 || band.groups.length > 0;
 }
 
 /** Working count descending, then creation ascending (tasks before undated
@@ -426,6 +456,12 @@ export const BAND = {
   mirrorH: 72,
   mirrorChipW: 220,
   minOverviewH: 72,
+  /* A band is only as wide as it needs to be (#1590 follow-up). Below this it
+     is unreadable — the header alone carries a title, a status pill, counts and
+     two controls — and above it nothing is gained by growing further, so a band
+     whose row of members ends early stops there instead of ruling a line across
+     the whole canvas. Both are CSS pixels, like every other constant here. */
+  minBandW: 520,
 } as const;
 
 export interface BandGeometry {
@@ -535,14 +571,19 @@ export function layoutTaskBands(base: SchemeLayout, orderedBands: readonly TaskB
   const bands = applyHostOverrides(orderedBands, options.hostOverrides);
   const s = 1 / Math.max(0.07, options.zoom);
   const gutter = (viewportWidth < 1024 ? BAND.gutterNarrow : BAND.gutter) * s;
-  const bandW = Math.max(BAND.nativeMinW * s, viewportWidth * s - gutter * 2);
+  /* The widest a band may become. Content decides the rest. */
+  const maxBandW = Math.max(BAND.nativeMinW * s, viewportWidth * s - gutter * 2);
   const pad = BAND.pad * s;
-  const innerX0 = gutter + pad;
-  const innerRight = gutter + bandW - pad;
-  const innerW = innerRight - innerX0;
   const itemGap = (mode === "overview" ? BAND.chipGap : BAND.tileGap) * s;
   const rowGap = (mode === "overview" ? BAND.chipGap : BAND.rowGap) * s;
   const headerH = BAND.header * s;
+  /* Members are measured against the widest a band could be, then the band is
+     narrowed to the row they actually occupied — measuring against a width that
+     the band has not been given yet would wrap a row that fits. */
+  const maxInnerW = maxBandW - pad * 2;
+  const minBandW = Math.min(maxBandW, BAND.minBandW * s);
+  const innerX0 = gutter + pad;
+  const innerRight = gutter + maxBandW - pad;
 
   const baseRect = new Map<string, SchemeRect>();
   for (const node of base.nodes) baseRect.set(node.file.path, node);
@@ -562,7 +603,7 @@ export function layoutTaskBands(base: SchemeLayout, orderedBands: readonly TaskB
      dock has narrowed) is scaled down uniformly, contents included, so no
      surface ever extends past the band that holds it. */
   const fitted = (w: number, h: number): { w: number; h: number; fit: number } => {
-    const fit = w > innerW ? innerW / w : 1;
+    const fit = w > maxInnerW ? maxInnerW / w : 1;
     return { w: w * fit, h: h * fit, fit };
   };
   let cursorY = gutter;
@@ -575,7 +616,7 @@ export function layoutTaskBands(base: SchemeLayout, orderedBands: readonly TaskB
            up: clicking a tile opens it in place, siblings stay tiles. */
         const presentation = mode === "overview" ? "chip" : member.key === reader ? "native" : "summary";
         const natural = fitted(
-          (presentation === "chip" ? BAND.chipW : presentation === "native" ? Math.max(BAND.nativeMinW, Math.min(BAND.nativeW, innerW / s)) : BAND.summaryW) * s,
+          (presentation === "chip" ? BAND.chipW : presentation === "native" ? Math.max(BAND.nativeMinW, Math.min(BAND.nativeW, maxInnerW / s)) : BAND.summaryW) * s,
           (presentation === "chip" ? BAND.chipH : presentation === "native" ? BAND.nativeH : BAND.summaryH) * s,
         );
         items.push({ key: member.key, w: natural.w, h: natural.h, kind: "member", node: { ...node, presentation, readerScale: s * natural.fit, w: natural.w, h: natural.h } });
@@ -608,6 +649,9 @@ export function layoutTaskBands(base: SchemeLayout, orderedBands: readonly TaskB
     let y = cursorY + headerH + pad;
     let rowH = 0;
     let rows = 1;
+    /* Rightmost inked edge across every row, so the band can be trimmed to the
+       content it actually holds instead of to the width it was measured in. */
+    let contentRight = innerX0;
     let addAgent: SchemeRect = { x, y, w: BAND.addW * s, h: BAND.addH * s };
     for (const item of items) {
       if (x + item.w > innerRight + 0.001 && x > innerX0) {
@@ -628,11 +672,17 @@ export function layoutTaskBands(base: SchemeLayout, orderedBands: readonly TaskB
         if (item.kind === "mirror") mirrorRects.set(item.key, rect);
         if (item.node) nodeRects.set(item.key, { ...item.node, x, y });
       }
+      contentRight = Math.max(contentRight, x + item.w);
       x += item.w + itemGap;
       rowH = Math.max(rowH, item.h);
     }
     let bandH = headerH + pad + (y - (cursorY + headerH + pad)) + rowH + pad;
     if (mode === "overview") bandH = Math.max(bandH, BAND.minOverviewH * s);
+    /* The band ends where its content ends. The floor keeps the header
+       readable — title, status, counts, Details and «+ Agent» all live on one
+       screen-constant row — and the ceiling is the width it was measured in, so
+       a band that filled its rows is exactly as wide as it was before. */
+    const bandW = Math.min(maxBandW, Math.max(minBandW, contentRight + pad - gutter));
     const rect = { x: gutter, y: cursorY, w: bandW, h: bandH };
     const header = { x: gutter, y: cursorY, w: bandW, h: headerH };
     if (band.task) taskRects.set(`task::${band.task.id}`, header);

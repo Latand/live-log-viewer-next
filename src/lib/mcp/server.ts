@@ -2911,6 +2911,8 @@ export const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
     pos: z.object({ x: z.number().finite(), y: z.number().finite() }).optional(),
     dueAt: z.string().nullable().optional(),
     dueTz: z.string().nullable().optional(),
+    board: z.enum(["shown", "hidden"]).optional()
+      .describe("Board membership of this task's band (#1614). hidden takes the band off the board and shown puts it back; the task itself is never removed, keeps its row in the task list and every assignment, and either direction is one write. It governs EMPTY tasks only — a task holding a durable agent association draws its band whatever this says."),
   }).passthrough(),
   create_pipeline: z.object({
     clientRequestId: clientRequestIdSchema,

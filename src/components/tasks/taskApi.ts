@@ -1,7 +1,7 @@
 "use client";
 
 import { getLocale, translate } from "@/lib/i18n";
-import type { AssignmentRef, BoardTask, TaskAttachment, TaskStatus } from "@/lib/tasks/types";
+import type { AssignmentRef, BoardTask, TaskAttachment, TaskBoardVisibility, TaskStatus } from "@/lib/tasks/types";
 
 /** Fired after any successful task mutation so pollers refresh immediately. */
 export const TASKS_CHANGED_EVENT = "llv:tasks-changed";
@@ -143,6 +143,8 @@ export function updateTask(
     /** `null` clears the deadline; a value must come paired with `dueTz`. */
     dueAt?: string | null;
     dueTz?: string;
+    /** Band membership. Reversible; the task itself is never removed. */
+    board?: TaskBoardVisibility;
   },
 ): Promise<string | null> {
   /* Text patches chain behind the previous in-flight one: an autosave and a

@@ -1,8 +1,8 @@
-import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from "bun:test";
 import { Window } from "happy-dom";
 import { createRoot, type Root } from "react-dom/client";
 import { flushSync } from "react-dom";
-import { useConversationCatalog, type ConversationCatalogData } from "./useConversationCatalog";
+import { clearRetainedConversationPages, useConversationCatalog, type ConversationCatalogData } from "./useConversationCatalog";
 import type { FileEntry } from "@/lib/types";
 
 const dom = new Window({ url: "http://localhost" });
@@ -31,7 +31,8 @@ beforeAll(() => {
     }) };
   for (const [key, value] of Object.entries(overrides)) { saved.set(key, globals[key]); globals[key] = value; }
 });
-afterEach(async () => { flushSync(() => root?.unmount()); await tick(); });
+beforeEach(() => clearRetainedConversationPages());
+afterEach(async () => { flushSync(() => root?.unmount()); await tick(); clearRetainedConversationPages(); });
 afterAll(() => { for (const [key, value] of saved) globals[key] = value; });
 
 test("20/20/5 with one in-flight cursor, within-page duplicates and historical generations preserved", async () => {

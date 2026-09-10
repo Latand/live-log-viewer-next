@@ -3,6 +3,7 @@ import { Window } from "happy-dom";
 import { createRoot, type Root } from "react-dom/client";
 import { flushSync } from "react-dom";
 
+import { clearRetainedConversationPages } from "@/hooks/useConversationCatalog";
 import { translate } from "@/lib/i18n";
 import { emptyStore } from "@/components/runtime/runtimeModel";
 import type { FileEntry } from "@/lib/types";
@@ -202,6 +203,10 @@ const dashboardProps = (over: Partial<React.ComponentProps<typeof ProjectDashboa
 let roots: Root[] = [];
 beforeEach(() => {
   roots = [];
+  /* Scoped catalog pages are retained across mounts (#1614), so without this
+     one case's loaded pages would be the next case's first paint — and the
+     request counts below would count the previous test's work. */
+  clearRetainedConversationPages();
   catalogRequests.length = 0;
   observers.clear();
   seatFailure = false;

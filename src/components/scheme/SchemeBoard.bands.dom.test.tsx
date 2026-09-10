@@ -125,9 +125,16 @@ const tasks = [
   task("younger-working", "Restore search results", "2026-02-01T00:00:00.000Z", [busy]),
 ];
 
-function mount(onAddAgent?: (band: { id: string; task: BoardTask | null; title: string }) => void) {
+/** Every request the mounted board made, so a control's real effect is visible. */
+let requests: { url: string; method: string; body: unknown }[] = [];
+
+function mount(onAddAgent?: (band: { id: string; task: BoardTask | null; title: string }) => void, boardTasks: BoardTask[] = tasks) {
   previousFetch = globalThis.fetch;
-  globalThis.fetch = (async () => new Response(JSON.stringify({}), { status: 200, headers: { "content-type": "application/json" } })) as unknown as typeof fetch;
+  requests = [];
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    requests.push({ url: String(input), method: init?.method ?? "GET", body: init?.body ? JSON.parse(String(init.body)) as unknown : null });
+    return new Response(JSON.stringify({ ok: true, task: tasks[0] }), { status: 200, headers: { "content-type": "application/json" } });
+  }) as unknown as typeof fetch;
   const host = document.createElement("div");
   document.body.append(host);
   const root = createRoot(host);
@@ -139,8 +146,8 @@ function mount(onAddAgent?: (band: { id: string; task: BoardTask | null; title: 
       manual={files}
       files={files}
       flows={[]}
-      tasks={tasks}
-      allTasks={tasks}
+      tasks={boardTasks}
+      allTasks={boardTasks}
       drafts={[]}
       focus={null}
       onSelect={() => {}}
@@ -177,7 +184,7 @@ function select(viewport: HTMLElement, path: string) {
   flushSync(() => window.dispatchEvent(new dom.PointerEvent("pointerup", { bubbles: true, isPrimary: true, pointerId: 3, pointerType: "mouse", button: 0, clientX: 300, clientY: 300 }) as unknown as Event));
 }
 
-test("bands stack full width with the working task on top, and every conversation sits inside its band", async () => {
+test("bands stack at content width with the working task on top, and every conversation sits inside its band", async () => {
   const host = mount();
   await settle();
   expect(host.querySelector("[data-scheme-task]")).toBeNull();
@@ -185,11 +192,14 @@ test("bands stack full width with the working task on top, and every conversatio
   expect(bands.map((band) => band.getAttribute("data-scheme-band-task"))).toEqual(["younger-working", "older-idle"]);
   expect(bands.map((band) => band.getAttribute("data-scheme-band-working"))).toEqual(["1", "0"]);
   expect(bands[0]!.style.left).toBe(bands[1]!.style.left);
-  expect(bands[0]!.style.width).toBe(bands[1]!.style.width);
   const viewport = viewportOf(host);
   const cam = cameraOf(viewport);
-  /* Full available width: the band spans the 1400px viewport minus two 24px gutters. */
-  expect(parseFloat(bands[0]!.style.width) * cam.z).toBeCloseTo(1400 - 48, 3);
+  /* Compact geometry: each band ends at its own content, never ruling a line
+     across the canvas. The one-member band is narrower than the two-member
+     one, and neither exceeds the 1400px viewport minus two 24px gutters. */
+  const widths = bands.map((band) => parseFloat(band.style.width) * cam.z);
+  expect(widths[0]!).toBeLessThan(widths[1]!);
+  for (const width of widths) expect(width).toBeLessThanOrEqual(1400 - 48 + 0.5);
   expect(cam.x).toBeCloseTo(0, 6);
   for (const [path, taskId] of [["/busy", "younger-working"], ["/quiet-one", "older-idle"], ["/quiet-two", "older-idle"]] as const) {
     const band = host.querySelector(`[data-scheme-band-task="${taskId}"]`) as HTMLElement;
@@ -449,4 +459,96 @@ test("on a narrow board a draft pane and a planned stage slot are scaled to fit 
     expect(box.x + box.w).toBeLessThanOrEqual(parseFloat(band.style.left) + parseFloat(band.style.width) + 0.001);
     expect(box.x).toBeGreaterThanOrEqual(parseFloat(band.style.left) - 0.001);
   }
+});
+
+/** Presses a control the way a mouse does: the pointer sequence the board's own
+    camera sees first, then the click the button handler answers. A control that
+    is `disabled`, or that takes no pointer events, receives neither. */
+function press(element: HTMLElement) {
+  for (const type of ["pointerdown", "pointerup"] as const) {
+    flushSync(() => element.dispatchEvent(new dom.PointerEvent(type, { bubbles: true, cancelable: true, isPrimary: true, pointerId: 5, pointerType: "mouse", button: 0, clientX: 400, clientY: 120 }) as unknown as Event));
+  }
+  flushSync(() => element.dispatchEvent(new dom.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }) as unknown as Event));
+}
+
+const toolButton = (host: HTMLElement, title: string) =>
+  Array.from(host.querySelectorAll<HTMLElement>("button")).find((button) => button.getAttribute("title") === title)!;
+
+test("Details, + Agent and the status pill answer a real press in BOTH the select and hand tools (#1614 item 3)", async () => {
+  for (const tool of ["select", "hand"] as const) {
+    const added: string[] = [];
+    const host = mount((band) => added.push(band.id));
+    await settle();
+    if (tool === "hand") {
+      press(toolButton(host, "Hand — drag the canvas (H, or hold Space)"));
+      await settle();
+    }
+    const band = host.querySelector('[data-scheme-band-task="younger-working"]') as HTMLElement;
+    const details = band.querySelector("[data-scheme-band-details]") as HTMLButtonElement;
+    const status = band.querySelector("[data-scheme-band-status]") as HTMLButtonElement;
+    const add = band.querySelector("[data-scheme-band-add]") as HTMLButtonElement;
+
+    /* The whole complaint: on the hand tool every one of these was `disabled`
+       and took no pointer events, so nothing the operator clicked answered. */
+    for (const [name, control] of [["details", details], ["status", status], ["+agent", add]] as const) {
+      expect(control, `${tool}/${name} exists`).not.toBeNull();
+      expect(control.disabled, `${tool}/${name} enabled`).toBe(false);
+      expect(control.className, `${tool}/${name} takes pointer events`).toContain("pointer-events-auto");
+    }
+
+    press(add);
+    await settle();
+    expect(added, `${tool}: + Agent opened a draft`).toEqual(["task:younger-working"]);
+
+    press(status);
+    await settle();
+    const patch = requests.find((request) => request.method === "PATCH" && request.url.includes("/api/tasks/younger-working"));
+    expect(patch, `${tool}: the status pill wrote a status`).toBeDefined();
+    expect((patch!.body as { status?: string }).status).toBe("blocked");
+
+    press(details);
+    await settle();
+    expect(host.textContent, `${tool}: Details opened the task`).toContain("Restore search results");
+
+    for (const root of roots) flushSync(() => root.unmount());
+    roots.clear();
+    document.body.replaceChildren();
+  }
+});
+
+test("+ Agent carries the band's own task, never a bare new-task default (#1614 item 3)", async () => {
+  const opened: { id: string; task: BoardTask | null; title: string }[] = [];
+  const host = mount((band) => opened.push(band));
+  await settle();
+  for (const taskId of ["younger-working", "older-idle"]) {
+    const band = host.querySelector(`[data-scheme-band-task="${taskId}"]`) as HTMLElement;
+    press(band.querySelector("[data-scheme-band-add]") as HTMLElement);
+    await settle();
+  }
+  expect(opened.map((band) => band.id)).toEqual(["task:younger-working", "task:older-idle"]);
+  /* The launch context is the band's recorded task, with its real title — the
+     draft the operator lands in is bound to it, not to an untitled default. */
+  expect(opened.map((band) => band.task?.id ?? null)).toEqual(["younger-working", "older-idle"]);
+  expect(opened.map((band) => band.title)).toEqual(["Restore search results", "Repair old links"]);
+});
+
+test("an empty task band offers Remove from board; a band holding a conversation does not (#1614 item 1)", async () => {
+  /* An empty task alongside a staffed one: only the empty band can be taken
+     off the board, because the flag governs empty bands only. */
+  const host = mount(undefined, [...tasks, task("lonely", "Draft the migration notes", "2026-03-01T00:00:00.000Z", [])]);
+  await settle();
+  const staffed = host.querySelector('[data-scheme-band-task="younger-working"]') as HTMLElement;
+  expect(staffed.querySelector("[data-scheme-band-remove]")).toBeNull();
+
+  const empty = host.querySelector('[data-scheme-band-task="lonely"]') as HTMLElement | null;
+  expect(empty, "the empty task drew a band").not.toBeNull();
+  const remove = empty!.querySelector("[data-scheme-band-remove]") as HTMLButtonElement;
+  expect(remove).not.toBeNull();
+  press(remove);
+  await settle();
+  const patch = requests.find((request) => request.method === "PATCH" && request.url.includes("/api/tasks/lonely"));
+  expect(patch).toBeDefined();
+  /* Reversible flag, not a delete: no DELETE ever leaves the board. */
+  expect((patch!.body as { board?: string }).board).toBe("hidden");
+  expect(requests.some((request) => request.method === "DELETE")).toBe(false);
 });

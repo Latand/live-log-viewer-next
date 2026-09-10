@@ -10,7 +10,7 @@ import { TASK_TONES } from "@/components/tasks/taskModel";
 import { cleanTitle } from "@/components/utils";
 
 import type { SchemeRect } from "./layout";
-import { BAND, type BandContinuation, type BandMirror, type BandMode, type PlacedBand } from "./taskBands";
+import { BAND, bandHoldsMembers, type BandContinuation, type BandMirror, type BandMode, type PlacedBand } from "./taskBands";
 
 /**
  * Band chrome of the task-centered board (#1586): one full-width surface per
@@ -35,13 +35,16 @@ export const TaskBandsLayer = memo(function TaskBandsLayer({
   onAddAgent,
   onOpenDetails,
   onCycleStatus,
+  onRemoveFromBoard,
   onSelectMirror,
   onFollowContinuation,
 }: {
   bands: PlacedBand[];
   mode: BandMode;
   scale: number;
-  /** Passive on the hand tool and during a selection session. */
+  /** Passive on the map and during a selection session. The hand tool keeps
+      these controls live: only they take pointer events, so the rest of the
+      band still pans. */
   interactive: boolean;
   selectedKey: string | null;
   mirrorRects: ReadonlyMap<string, SchemeRect>;
@@ -52,6 +55,8 @@ export const TaskBandsLayer = memo(function TaskBandsLayer({
   onAddAgent: (band: PlacedBand) => void;
   onOpenDetails: (band: PlacedBand) => void;
   onCycleStatus: (task: BoardTask) => void;
+  /** Removes an empty task's band from the board; reversible from the task list. */
+  onRemoveFromBoard: (task: BoardTask) => void;
   onSelectMirror: (mirror: BandMirror) => void;
   /** Navigate to the other endpoint of a cross-band relation. */
   onFollowContinuation: (target: { key: string; bandId: string }) => void;
@@ -146,6 +151,26 @@ export const TaskBandsLayer = memo(function TaskBandsLayer({
                 {mode === "overview" && crossLinks > 0 ? <span className="text-muted"> · {t("bands.crossLinks", { count: crossLinks })}</span> : null}
               </span>
               <div className="ml-auto flex shrink-0 items-center gap-2">
+                {/* An empty task's band can be taken off the board from where
+                    the operator sees it. Reversible from the task list, which
+                    keeps every task. `bandHoldsMembers` is the same predicate
+                    that decides whether the flag is honoured at all, so this
+                    control appears exactly where pressing it does something: a
+                    band holding a conversation, a mirror of one, or a container
+                    is not offered it, because the board would override the
+                    write. */}
+                {band.task && !bandHoldsMembers(band) ? (
+                  <button
+                    type="button"
+                    data-scheme-band-remove={band.task.id}
+                    disabled={!interactive}
+                    className={`h-7 rounded-[8px] border border-border bg-card px-2.5 text-[11px] font-semibold text-muted shadow-1 ${interactive ? "pointer-events-auto hover:border-accent/45 hover:text-accent" : ""} focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-default`}
+                    title={t("bands.removeFromBoardTitle")}
+                    onClick={() => onRemoveFromBoard(band.task!)}
+                  >
+                    {t("bands.removeFromBoard")}
+                  </button>
+                ) : null}
                 <button
                   type="button"
                   data-scheme-band-details

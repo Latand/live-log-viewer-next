@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import type { SchemeRect } from "./layout";
-import { cameraMatchesFraming, fitCameraToRect, hasBoardContent } from "./useSchemeCamera";
+import { cameraMatchesFraming, cameraShowsWorld, fitCameraToRect, hasBoardContent } from "./useSchemeCamera";
 
 const empty = { nodes: [], drafts: [] };
 const rect: SchemeRect = { x: 0, y: 0, w: 260, h: 100 };
@@ -46,5 +46,40 @@ describe("fit camera geometry (#343)", () => {
     expect(cameraMatchesFraming(target, target)).toBe(true);
     expect(cameraMatchesFraming({ ...target, z: target.z * 1.02 }, target)).toBe(false);
     expect(cameraMatchesFraming({ ...target, x: target.x + 8 }, target)).toBe(false);
+  });
+});
+
+describe("a restored camera must still show the world (#1614)", () => {
+  const vp = { w: 1400, h: 900 };
+  /* The board the operator opened: a 390-task band stack, tens of thousands of
+     pixels tall, and the camera saved far down it. */
+  const tallWorld: SchemeRect = { x: 0, y: 0, w: 1400, h: 40_000 };
+  const savedFarDown = { x: 0, y: -25_239.92, z: 1.6 };
+
+  test("the saved camera is kept while its own world still stands", () => {
+    expect(cameraShowsWorld(savedFarDown, tallWorld, vp)).toBe(true);
+  });
+
+  test("the same camera frames nothing once the empty bands leave the board", () => {
+    /* What the one-time migration leaves: 80 bands instead of 368. */
+    expect(cameraShowsWorld(savedFarDown, { x: 0, y: 0, w: 1400, h: 9_000 }, vp)).toBe(false);
+  });
+
+  test("a world smaller than the viewport is not treated as off-world", () => {
+    const small: SchemeRect = { x: 0, y: 0, w: 520, h: 240 };
+    expect(cameraShowsWorld({ x: 40, y: 40, z: 1 }, small, vp)).toBe(true);
+    /* Even scrolled to the very edge, as far as `clampCam` allows. */
+    expect(cameraShowsWorld({ x: vp.w - 130, y: vp.h - 130, z: 1 }, small, vp)).toBe(true);
+    expect(cameraShowsWorld({ x: vp.w + 10, y: 40, z: 1 }, small, vp)).toBe(false);
+  });
+
+  test("a world with a negative origin is measured from where it actually is", () => {
+    const shifted: SchemeRect = { x: -4_000, y: -4_000, w: 1_000, h: 1_000 };
+    expect(cameraShowsWorld({ x: 4_200, y: 4_200, z: 1 }, shifted, vp)).toBe(true);
+    expect(cameraShowsWorld({ x: 0, y: 0, z: 1 }, shifted, vp)).toBe(false);
+  });
+
+  test("an unmeasured viewport cannot judge and does not veto a restore", () => {
+    expect(cameraShowsWorld(savedFarDown, { x: 0, y: 0, w: 1400, h: 9_000 }, { w: 1, h: 1 })).toBe(true);
   });
 });
