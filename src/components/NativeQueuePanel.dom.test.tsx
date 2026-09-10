@@ -806,3 +806,42 @@ test("a slot holding bytes that are not JSON is left alone, and no new operation
   expect(writes).toHaveLength(0);
   expect(sessionStorage.getItem("llvQueueAdmission:conversation_queue")).toBe("{not json at all");
 });
+
+test("a slot this browser cannot READ refuses the control and leaves the bytes alone", async () => {
+  /* A READ THAT FAILS IS NOT AN EMPTY SLOT. The first repair caught a storage
+     that would not take the WRITE, and answered an empty store when the READ
+     threw — so a card already holding an unresolved queue-level start accepted
+     the next control and overwrote it, and the start came back on the next press
+     as a second operation. A read that cannot answer leaves the contents
+     unknown, and unknown refuses. */
+  const real = globalThis.sessionStorage;
+  const slot = "llvQueueAdmission:conversation_queue";
+  const seeded = JSON.stringify([{
+    key: "key-original-start",
+    mutation: { action: "start", turnId: null },
+    binding: { threadId: "thread-1", accountId: "acct-1" },
+  }]);
+  real.setItem(slot, seeded);
+  resetRetainedQueueAdmissionsForTests();
+  Object.assign(globalThis, {
+    sessionStorage: {
+      getItem: (key: string) => { if (key === slot) throw new Error("read unavailable"); return real.getItem(key); },
+      /* Writing still works, which is exactly what made this reachable. */
+      setItem: (key: string, value: string) => real.setItem(key, value),
+      removeItem: (key: string) => real.removeItem(key),
+      clear: () => real.clear(),
+    },
+  });
+  try {
+    await mount({ turn: "idle" });
+    await click(rows()[0]!.querySelector('[data-testid="native-queue-delete"]'));
+
+    expect(writes).toHaveLength(0);
+    expect(host.querySelector('[data-testid="native-queue-failure"]')?.textContent ?? "")
+      .toContain("already holds every unresolved queue operation");
+    /* And the unresolved start is still exactly where it was. */
+    expect(real.getItem(slot)).toBe(seeded);
+  } finally {
+    Object.assign(globalThis, { sessionStorage: real });
+  }
+});

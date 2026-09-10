@@ -68,14 +68,18 @@ export interface RetainedQueueAdmission {
  * that may be live in the journal, which is the same loss as evicting one of its
  * own, only harder to notice.
  *
- * `unreadable` means the slot held bytes that are not JSON at all. Nothing can
- * be preserved across a write then, so nothing is written and no new admission
- * is accepted; the bytes stay for whoever can read them.
+ * `contentsUnknown` means this browser cannot say what the slot holds — the read
+ * itself failed, or what came back is not JSON at all. AN UNKNOWN SLOT IS NEVER
+ * AN EMPTY ONE. Treating it as empty is how a write erases an operation that is
+ * live in the journal: the record is gone, and the next press mints a second
+ * key for something the journal may already hold. So nothing is written and no
+ * new admission is accepted, and whatever is in there stays for whoever can
+ * read it.
  */
 interface RetainedStore {
   records: RetainedQueueAdmission[];
   opaque: unknown[];
-  unreadable: boolean;
+  contentsUnknown: boolean;
 }
 
 /**
@@ -91,7 +95,12 @@ interface RetainedStore {
  */
 const retainedQueueAdmissions = new Map<string, RetainedStore>();
 
-const EMPTY_STORE: RetainedStore = { records: [], opaque: [], unreadable: false };
+/** A slot that is genuinely absent: nothing was ever written for this card. */
+const EMPTY_STORE: RetainedStore = { records: [], opaque: [], contentsUnknown: false };
+
+/** A slot whose contents this browser cannot establish. Distinct from the one
+    above on purpose — the difference decides whether anything may be sent. */
+const UNKNOWN_STORE: RetainedStore = { records: [], opaque: [], contentsUnknown: true };
 
 /**
  * How many unresolved operations one card may hold — and a REFUSAL BOUND, never
@@ -175,8 +184,12 @@ function readRetainedStore(id: string): RetainedStore {
   const live = retainedQueueAdmissions.get(id);
   if (live) return live;
   let raw: string | null = null;
+  /* A READ THAT FAILS SAYS NOTHING ABOUT WHAT IS IN THERE. Quota, an opaque
+     origin, a storage the browser has disabled mid-session: in every one of
+     them the slot may still hold an unresolved operation, and answering "empty"
+     let the next admission overwrite it. */
   try { raw = sessionStorage.getItem(queueAdmissionKey(id)); }
-  catch { return EMPTY_STORE; }
+  catch { return UNKNOWN_STORE; }
   if (raw === null) return EMPTY_STORE;
   let store: RetainedStore;
   try {
@@ -187,11 +200,11 @@ function readRetainedStore(id: string): RetainedStore {
       const record = parseRetainedQueueAdmission(entry);
       if (record) records.push(record); else opaque.push(entry);
     }
-    store = { records, opaque, unreadable: false };
+    store = { records, opaque, contentsUnknown: false };
   } catch {
     /* NOT JSON AT ALL. There is nothing to carry through a write, so the slot is
        left exactly as it is and no new operation is accepted against it. */
-    store = { records: [], opaque: [], unreadable: true };
+    store = UNKNOWN_STORE;
   }
   retainedQueueAdmissions.set(id, store);
   return store;
@@ -226,8 +239,8 @@ function writeRetainedStore(id: string, store: RetainedStore): boolean {
  *
  * A replay of a key the slot already holds always succeeds: that operation is
  * already durable, so re-writing it adds no identity and can lose none. A NEW
- * operation is refused when the slot is full, unreadable, or will not take the
- * write — every case where accepting it would mean sending something this
+ * operation is refused when the slot is full, its contents are unknown, or it
+ * will not take the write — every case where accepting it would mean sending something this
  * browser could not name afterwards.
  *
  * Entries this build cannot read count against the bound, because each of them
@@ -238,7 +251,7 @@ function writeRetainedStore(id: string, store: RetainedStore): boolean {
  */
 export function retainQueueAdmission(id: string, record: RetainedQueueAdmission): RetainOutcome {
   const store = readRetainedStore(id);
-  if (store.unreadable) return "refused";
+  if (store.contentsUnknown) return "refused";
   const replay = store.records.some((entry) => entry.key === record.key);
   const kept = store.records.filter((entry) => entry.key !== record.key);
   if (!replay && kept.length + store.opaque.length >= MAX_RETAINED_ADMISSIONS_PER_CARD) return "refused";
@@ -253,7 +266,7 @@ export function retainQueueAdmission(id: string, record: RetainedQueueAdmission)
 /** Terminal evidence about ONE operation, and only that one. */
 export function releaseQueueAdmission(id: string, key: string): void {
   const store = readRetainedStore(id);
-  if (store.unreadable) return;
+  if (store.contentsUnknown) return;
   writeRetainedStore(id, { ...store, records: store.records.filter((entry) => entry.key !== key) });
 }
 
