@@ -729,7 +729,7 @@ test("a full card refuses a NEW control before the wire and keeps every unresolv
   /* Eight unresolved operations fit; the ninth is refused with nothing sent. */
   expect(writes).toHaveLength(8);
   expect(host.querySelector('[data-testid="native-queue-failure"]')?.textContent ?? "")
-    .toContain("cannot keep the record");
+    .toContain("could not retain its recovery record");
 
   /* A RELOAD: only what storage kept before each request left can name them. */
   flushSync(() => root.unmount());
@@ -771,11 +771,16 @@ test("a browser that will not store the record refuses the control rather than s
        the operator to settle one of their unresolved operations would name a
        state that does not exist and a next step they cannot take. */
     const said = host.querySelector('[data-testid="native-queue-failure"]')?.textContent ?? "";
-    expect(said).toContain("cannot keep the record");
+    expect(said).toContain("could not retain its recovery record");
     /* AND IT ASSERTS NOTHING FALSE. Nothing is retained on this card, so a
        message stating the card was full would name a state the operator is not
-       in; the copy offers settling only as a conditional. */
-    expect(said).toContain("if it has one");
+       in. It is scoped to THIS attempt, it says earlier operations are
+       untouched — the slot may hold one Codex already admitted — and it points
+       at the recovery this fix exists to protect rather than at a way around
+       it. */
+    expect(said).toContain("This attempt was not sent");
+    expect(said).toContain("remain unchanged");
+    expect(said).not.toContain("tab");
   } finally {
     Object.assign(globalThis, { sessionStorage: real });
   }
@@ -846,7 +851,7 @@ test("a slot this browser cannot READ refuses the control and leaves the bytes a
 
     expect(writes).toHaveLength(0);
     expect(host.querySelector('[data-testid="native-queue-failure"]')?.textContent ?? "")
-      .toContain("cannot keep the record");
+      .toContain("could not retain its recovery record");
     /* And the unresolved start is still exactly where it was. */
     expect(real.getItem(slot)).toBe(seeded);
   } finally {

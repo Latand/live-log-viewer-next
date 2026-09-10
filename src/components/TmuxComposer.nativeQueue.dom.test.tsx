@@ -704,8 +704,9 @@ test("a browser that will not store the hand-off keeps the draft and sends nothi
     /* And the reason is the true one: nothing is retained on this card, so the
        capacity wording would name a state that does not exist. */
     const said = host.textContent ?? "";
-    expect(said).toContain("cannot keep the record");
-    expect(said).toContain("if it has one");
+    expect(said).toContain("could not retain its recovery record");
+    expect(said).toContain("remain unchanged");
+    expect(said).not.toContain("tab");
     await act(async () => root.unmount());
   } finally {
     Object.assign(globalThis, { sessionStorage: real });

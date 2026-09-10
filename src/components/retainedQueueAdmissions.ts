@@ -130,8 +130,12 @@ const MAX_RETAINED_ADMISSIONS_PER_CARD = 8;
  * slot would not answer, would not take the write, or holds something nothing
  * here can parse. The second happens on the very first press, with nothing
  * retained; telling that operator to settle one of their unresolved operations
- * names a state they are not in and a step they cannot take. So the copy the
- * callers use covers both and asserts neither.
+ * names a state they are not in and a step they cannot take.
+ *
+ * So the copy the callers use is scoped to THE ATTEMPT that was refused. It
+ * asserts nothing about what came before it: an unreadable slot may hold an
+ * operation Codex has already admitted, so saying that nothing reached Codex
+ * would be a second false statement in the same breath.
  */
 export type RetainOutcome = "retained" | "refused";
 
@@ -254,9 +258,11 @@ function writeRetainedStore(id: string, store: RetainedStore): boolean {
  *
  * Entries this build cannot read count against the bound, because each of them
  * may name a live operation too. A slot filled entirely with them refuses
- * everything until the build that wrote them settles them; `sessionStorage` is
- * per tab, so a new tab is the operator's way out, and refusing is the right
- * side to fail on when the alternative is sending under a forgotten key.
+ * everything until the build that wrote them settles those operations, and
+ * refusing is the right side to fail on when the alternative is sending under a
+ * forgotten key. Discarding the slot would clear the refusal and is exactly the
+ * loss it exists to prevent, so nothing here — and nothing the operator is
+ * told — offers that as a way out.
  */
 export function retainQueueAdmission(id: string, record: RetainedQueueAdmission): RetainOutcome {
   const store = readRetainedStore(id);
