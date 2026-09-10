@@ -25,7 +25,12 @@
  *   - that a message the journal has settled is not painted at all — the journal
  *     keeps up to 128 of them behind the queue, and the panel is the queue;
  *   - that the panel stays inside its own width — a queue is above the composer,
- *     and one that overflows pushes the field the operator is typing in.
+ *     and one that overflows pushes the field the operator is typing in — AT THE
+ *     NARROW COMPOSER WIDTH as well as the wide one, because that is where a row
+ *     of controls beside a paragraph of text actually runs out of room;
+ *   - that the small grey status and profile line is legible against the panel it
+ *     sits on, measured as a contrast ratio from the shipped colours rather than
+ *     eyeballed from a screenshot.
  *
  * Then it proves the reading can go red: the same measurements are taken against
  * pages where the controls have been removed, where the blocked row's
@@ -117,11 +122,20 @@ function stylesheet(): string {
   return names.map((name) => fs.readFileSync(path.join(cssDir, name), "utf8")).join("\n");
 }
 
-function page(body: string, css: string): string {
-  return `<!doctype html><html lang="en" class="dark"><head><meta charset="utf-8">
+/**
+ * The page the panel is measured on.
+ *
+ * `data-theme="dark"` is the app's OWN dark switch (`styles/tokens.css`), and
+ * getting it wrong is not cosmetic: `class="dark"` selects nothing here, so the
+ * panel rendered light-mode text tokens over a hard-coded dark background and
+ * every colour measured — and every frame captured — described a theme the app
+ * never ships. The background is the canvas token for the same reason.
+ */
+function page(body: string, css: string, width = 520): string {
+  return `<!doctype html><html lang="en" data-theme="dark"><head><meta charset="utf-8">
 <style>${css}</style>
-<style>body{margin:0;background:var(--color-surface,#0b0b0e);padding:24px;}
-  #frame{width:520px;}</style>
+<style>body{margin:0;background:var(--color-canvas);padding:24px;}
+  #frame{width:${width}px;}</style>
 </head><body><div id="frame">${body}</div></body></html>`;
 }
 
@@ -149,6 +163,8 @@ function panelHtml(failure: string | null): string {
 
 interface Reading {
   rows: number;
+  /** WCAG contrast ratio of the row status line against the panel behind it. */
+  statusContrast: number;
   /** The panel must paint the queue and no settled history. */
   settledRowsPainted: number;
   /** The smallest side of the header's queue-level start control, in px. */
@@ -174,7 +190,7 @@ const READ = () => {
   const frame = document.querySelector("#frame") as HTMLElement;
   if (!panel) {
     return {
-      rows: 0, settledRowsPainted: 0, headerStartPx: 0, withdrawnRowControls: 0, withdrawnStartPx: 0,
+      rows: 0, statusContrast: 0, settledRowsPainted: 0, headerStartPx: 0, withdrawnRowControls: 0, withdrawnStartPx: 0,
       controlsInsidePanel: false, smallestControlPx: 0, blockedRowHasControls: true,
       smallestActionableRowControls: 0,
       blockedReasonVisible: false, blockedReasonColour: "", statusColour: "", failureColour: "",
@@ -195,8 +211,26 @@ const READ = () => {
   const withdrawn = rows.find((row) => row.getAttribute("data-state") === "withdrawn");
   const withdrawnStart = withdrawn?.querySelector('[data-testid="native-queue-row-start"]') as HTMLElement | null;
   const withdrawnBox = withdrawnStart?.getBoundingClientRect();
+  /* The shipped colours, resolved by the browser and compared the way a reader's
+     eye has to: relative luminance, not a string equality on two hex values. */
+  const channel = (value: string) => {
+    const parts = value.match(/[\d.]+/g)?.map(Number) ?? [0, 0, 0];
+    const linear = parts.slice(0, 3).map((raw) => {
+      const unit = raw / 255;
+      return unit <= 0.04045 ? unit / 12.92 : ((unit + 0.055) / 1.055) ** 2.4;
+    });
+    return 0.2126 * linear[0]! + 0.7152 * linear[1]! + 0.0722 * linear[2]!;
+  };
+  /* The panel is translucent over the page, so the effective background is what
+     the page paints under it. */
+  const behind = getComputedStyle(document.body).backgroundColor;
+  const statusLuminance = anyStatus ? channel(getComputedStyle(anyStatus).color) : 0;
+  const behindLuminance = channel(behind);
+  const contrast = (Math.max(statusLuminance, behindLuminance) + 0.05)
+    / (Math.min(statusLuminance, behindLuminance) + 0.05);
   return {
     rows: rows.length,
+    statusContrast: Math.round(contrast * 100) / 100,
     settledRowsPainted: rows.filter((row) => ["delivered", "removed", "refused"].includes(row.getAttribute("data-state") ?? "")).length,
     headerStartPx: headerBox ? Math.min(headerBox.width, headerBox.height) : 0,
     withdrawnRowControls: withdrawn ? withdrawn.querySelectorAll("button").length : 0,
@@ -221,6 +255,9 @@ const READ = () => {
 
 function holds(reading: Reading): boolean {
   return reading.rows === LIVE_ENTRIES.length
+    /* WCAG AA for small text. The row status carries the refusal and the profile
+       line, which are the two things the operator reads this panel FOR. */
+    && reading.statusContrast >= 4.5
     && reading.settledRowsPainted === 0
     /* The header's queue-level start, and the withdrawn payload's own one: both
        are controls the runtime admits and the panel used not to offer at all. */
@@ -259,13 +296,27 @@ async function main(): Promise<number> {
     browser = await chromium.launch({
       args: ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--hide-scrollbars"],
     });
-    const context = await browser.newContext({ viewport: { width: 620, height: 640 }, reducedMotion: "no-preference" });
+    const context = await browser.newContext({
+      viewport: { width: 620, height: 640 },
+      reducedMotion: "no-preference",
+      colorScheme: "dark",
+    });
     const view = await context.newPage();
 
     await view.setContent(page(panelHtml("Codex refused this change: the queued message was already dispatched."), css), { waitUntil: "load" });
     const live = await view.evaluate(READ) as Reading;
     measurements.frames = await frame(view, "queue");
     measurements.queue = live;
+
+    /* THE NARROW COMPOSER WIDTH. A phone-width card is where a row of controls
+       beside a paragraph runs out of room, and where an overflow would push the
+       field the operator is typing in. */
+    await view.setViewportSize({ width: 390, height: 780 });
+    await view.setContent(page(panelHtml("Codex refused this change: the queued message was already dispatched."), css, 342), { waitUntil: "load" });
+    const narrow = await view.evaluate(READ) as Reading;
+    measurements.narrowFrames = await frame(view, "queue-390");
+    measurements.narrow = narrow;
+    await view.setViewportSize({ width: 620, height: 640 });
 
     /* RED PATHS. Each reintroduces a defect in the page and must be caught. */
     await view.setContent(page(panelHtml("Codex refused this change."), css), { waitUntil: "load" });
@@ -310,11 +361,27 @@ async function main(): Promise<number> {
     });
     measurements.redHistoryPainted = await view.evaluate(READ) as Reading;
 
-    const greens = holds(live);
+    /* And the status line dimmed towards the panel it sits on: the defect a
+       screenshot cannot settle and a colour string does not measure. */
+    await view.setContent(page(panelHtml("Codex refused this change."), css), { waitUntil: "load" });
+    await view.evaluate(() => {
+      for (const status of document.querySelectorAll('[data-testid="native-queue-row-status"]')) {
+        (status as HTMLElement).style.color = "#181820";
+      }
+    });
+    measurements.redStatusDimmed = await view.evaluate(READ) as Reading;
+
+    const greens = holds(live) && holds(narrow);
     const reds = [measurements.redNoControls, measurements.redReasonHidden, measurements.redFailureIndistinct,
-      measurements.redNoQueueStart, measurements.redWithdrawnStranded, measurements.redHistoryPainted]
+      measurements.redNoQueueStart, measurements.redWithdrawnStranded, measurements.redHistoryPainted,
+      measurements.redStatusDimmed]
       .map((reading) => holds(reading as Reading));
-    measurements.verdict = { queueHolds: greens, redPathsCaught: reds.map((held) => !held) };
+    measurements.verdict = {
+      queueHolds: greens,
+      wideStatusContrast: live.statusContrast,
+      narrowStatusContrast: narrow.statusContrast,
+      redPathsCaught: reds.map((held) => !held),
+    };
     fs.writeFileSync(path.join(OUT_DIR, "measurements.json"), `${JSON.stringify(measurements, null, 2)}\n`);
     console.log(JSON.stringify(measurements.verdict));
     console.log(`frames and measurements: ${OUT_DIR}`);
