@@ -16,6 +16,7 @@ import { projectDisplayName } from "@/lib/displayNames";
 import type { Flow } from "@/lib/flows/types";
 import { useLocale } from "@/lib/i18n";
 import type { Pipeline } from "@/lib/pipelines/types";
+import { boardConversationKeys } from "@/lib/tasks/boardVisibility";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry, ProjectCatalogEntry } from "@/lib/types";
 import { MAX_VISIBLE_PATHS } from "@/lib/view/types";
@@ -1780,6 +1781,10 @@ function ProjectDashboardView({
      conversation sits on top of the stack; the footer and the presence slice
      both hang off that one answer. */
   const mobileBoardLeaf = isMobile && projectView === "scheme" && schemeAvailable && mobileConversationKey === null;
+  /* What the open project's board carries, by path and by conversation id.
+     «Remove from board» is judged against this, so the task panel offers it
+     only where the flag takes effect (#1614). */
+  const boardMemberKeys = useMemo(() => boardConversationKeys(files), [files]);
   /* The desktop leaf that is the board itself — the one leaf that owns chrome in
      the top-left corner, so it is handed the view switch instead of having one
      floated over it (#1614). */
@@ -2410,6 +2415,7 @@ function ProjectDashboardView({
             <TaskPanel
               tasks={tasks}
               project={project}
+              boardMembers={boardMemberKeys}
               favorites={favoriteRows}
               onOpenFavorite={openSwitchboardFile}
               onToggleFavorite={(id) => board.setFavorite(id, false)}

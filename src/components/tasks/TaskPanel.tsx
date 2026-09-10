@@ -8,7 +8,7 @@ import { activityDot, cleanTitle, fmtAge } from "@/components/utils";
 import { useTaskDraft } from "@/hooks/useTaskDraft";
 import { projectDisplayName } from "@/lib/displayNames";
 import { getLocale, useLocale } from "@/lib/i18n";
-import { taskHasAgents, taskShowsOnBoard } from "@/lib/tasks/boardVisibility";
+import { taskMembershipInScope, taskShowsOnBoard, type BoardConversationKeys } from "@/lib/tasks/boardVisibility";
 import { formatDue, isOverdue } from "@/lib/tasks/helpers";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
@@ -162,6 +162,7 @@ function PanelNewTask({ project, onDone }: { project: string; onDone: () => void
 export function TaskPanel({
   tasks,
   project,
+  boardMembers,
   favorites,
   onOpenFavorite,
   onToggleFavorite,
@@ -172,6 +173,10 @@ export function TaskPanel({
   /** Every project's tasks; the header toggle filters. */
   tasks: BoardTask[];
   project: string;
+  /** Conversations the OPEN project's board carries, keyed by path and by
+      conversation id: what «Remove from board» is judged against, so the
+      control is offered only where the flag would actually take effect. */
+  boardMembers: BoardConversationKeys;
   /** Favorited conversations across every project; the toggle scopes them (#185). */
   favorites: FavoriteRow[];
   /** Focus/pin a favorited conversation on the board. */
@@ -240,7 +245,8 @@ export function TaskPanel({
           rows.map((task) => {
             const tone = TASK_TONES[task.status];
             const unplaced = task.placement === "unplaced" || !task.pos;
-            const onBoard = taskShowsOnBoard(task);
+            const hasMembers = taskMembershipInScope(task, project, boardMembers);
+            const onBoard = taskShowsOnBoard(task, hasMembers);
             const dueOverdue = task.dueAt ? isOverdue(task.dueAt) : false;
             return (
               <div
@@ -284,15 +290,27 @@ export function TaskPanel({
                     <span>{fmtAge(new Date(task.updatedAt).getTime() / 1000)}</span>
                   </span>
                 </button>
-                {/* Band membership (reversible, never a delete). The flag only
-                    governs EMPTY tasks, so the control appears only where it
-                    does something: a task holding an agent draws its band
-                    whatever the flag says, and offering to hide it would lie. */}
-                {taskHasAgents(task) ? null : (
-                  <div className="flex items-center gap-1.5 pl-0.5">
+                {/* The empty-band preference (reversible, never a delete), and
+                    it is edited here as a preference rather than as a claim
+                    about the board: this panel lists every project and cannot
+                    see what any board resolved, so gating the control on a
+                    guess would either hide it where it works or offer it where
+                    it does not. The label says what it governs — the EMPTY
+                    band — and the rule it names is the one the board applies:
+                    a task that still holds a member, a draft or a recovery
+                    representation is drawn whatever this says. */}
+                <div className="flex items-center gap-1.5 pl-0.5">
                     {onBoard ? null : (
                       <span className="rounded-full bg-sunken px-1.5 py-0.5 text-[9px] font-bold text-muted">{t("tasks.offBoard")}</span>
                     )}
+                    {hasMembers ? (
+                      <span
+                        className="rounded-full bg-sunken px-1.5 py-0.5 text-[9px] font-bold text-muted"
+                        title={t("tasks.holdsAgentTitle")}
+                      >
+                        {t("tasks.holdsAgent")}
+                      </span>
+                    ) : null}
                     <button
                       type="button"
                       data-task-board-toggle={task.id}
@@ -305,8 +323,7 @@ export function TaskPanel({
                         ? <><EyeOff className="h-2.5 w-2.5" aria-hidden /> {t("tasks.removeFromBoard")}</>
                         : <><Rows3 className="h-2.5 w-2.5" aria-hidden /> {t("tasks.showOnBoard")}</>}
                     </button>
-                  </div>
-                )}
+                </div>
                 {unplaced ? (
                   <div className="flex items-center gap-1.5 pl-0.5">
                     <span className="rounded-full bg-sunken px-1.5 py-0.5 text-[9px] font-bold text-warning">{t("tasks.unplaced")}</span>
