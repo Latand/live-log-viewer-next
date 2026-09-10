@@ -83,6 +83,25 @@ import {
  *
  * A new automatic seam belongs on this list and behind one of the two functions
  * below. A new one that reads the pool itself is the defect coming back.
+ *
+ * WHAT THIS LIST IS ABOUT, restated because (1)'s NAMED branch stopped being on
+ * it (operator directive, 2026-09-10): it is the inventory of places that choose
+ * an account WITHOUT BEING TOLD WHICH. A launch that NAMES one is not one of
+ * them. It is a control somebody worked — the launch draft's picker, the
+ * orchestrator's rotate draft, `spawn_agent`'s `accountId` — and the binding is
+ * a default for the machine's own picks, never a veto on a person's. Such a
+ * choice passes `requestedChoice: "explicit"` to `selectProjectAccount`, which
+ * carries it out; the launch seam attributes the crossing against the record
+ * itself (`accountOverrides.ts`).
+ *
+ * ONE branch, and the scope is worth being exact about: only
+ * `resolveHealthySpawnAccount` passes `explicit`, and only when the request
+ * named an account. Its own automatic pick is unchanged, and so is every other
+ * entry above — (2) `resolveProjectSpawn` in particular, where a task launch, a
+ * pipeline stage, a workflow stage or the flow's pane reviewer passes a
+ * `requestedId` it FORWARDED rather than one anybody chose here. That id is
+ * still refused outside the pool (`managerProjectBinding.test.ts` asserts it),
+ * because nobody worked a control to produce it.
  */
 
 /** What #1279's rule decides for one launch, before any home or env is resolved. */
@@ -102,6 +121,29 @@ export interface ProjectAccountSelectionInput {
   bindings: readonly AccountProjectBinding[];
   /** The account the launch named, if it named one. */
   requestedId?: string | null;
+  /**
+   * WHAT `requestedId` IS, and the reason the binding does not veto every one
+   * of them (operator directive, 2026-09-10).
+   *
+   * - `fenced` (the default, and every pre-existing caller) — an id a caller
+   *   FORWARDED: a pipeline stage's recorded `account`, a round's own account.
+   *   Nobody exercised a control here, so the pool is still the fence and an id
+   *   outside it is refused rather than quietly substituted.
+   * - `explicit` — a DELIBERATE named choice made through a control: the launch
+   *   draft's account picker, the rotate draft's, `spawn_agent`'s `accountId`.
+   *   The binding is a default for what the Viewer picks BY ITSELF, never a veto
+   *   on what a person asks for, so this choice is carried out and ATTRIBUTED
+   *   (`outsidePool` on the answer) instead of refused. It is the same rule
+   *   `explicitAccountChoice` already states for the two switch seams; the
+   *   launch seams simply never reached it, and the orchestrator's rotate draft
+   *   — which prefills the INCUMBENT's account — could not rotate a seat that
+   *   was already running outside the pool.
+   *
+   * Nothing else is relaxed. Capacity is not consulted for a named account and
+   * never was; authentication is decided further in, by the engine's own health
+   * pass; and an id nobody named still draws from the pool only.
+   */
+  requestedChoice?: "explicit" | "fenced";
   /** The engine's current routing choice, used only to order candidates. */
   preferredId?: string | null;
   excludedIds?: readonly string[];
@@ -127,9 +169,11 @@ export interface ProjectAccountSelectionInput {
  *
  * - **Unbound project** — `allowedAccountIdsForProject` answers null, and the
  *   caller's own historical strategy decides, untouched.
- * - **Bound project, an account named** — allowed, or refused. It is never
- *   downgraded to a different account: a pin the project forbids is a mistake
- *   worth reporting, not a preference worth working around.
+ * - **Bound project, an account named** — allowed, or decided by
+ *   `requestedChoice`: a FORWARDED id outside the pool is refused, an EXPLICIT
+ *   choice outside it is carried out and reported as such. Neither is ever
+ *   downgraded to a different account: nobody may quietly substitute an account
+ *   a caller actually named.
  * - **Bound project, nothing named** — the candidates ARE the allowed set. Every
  *   one of them out of capacity reports `exhausted`; the idle account next door
  *   is not a candidate and is not consulted, which is the whole point.
@@ -138,6 +182,13 @@ export function selectProjectAccount(input: ProjectAccountSelectionInput): Proje
   const allowed = allowedAccountIdsForProject(input.project, input.engine, input.bindings);
   const requestedId = input.requestedId?.trim() || null;
   if (requestedId && allowed !== null && !allowed.includes(requestedId)) {
+    /* A control someone exercised is a capability, not a request the record
+       gets to veto, so it resolves. The crossing is NOT reported back through
+       here: `attributeNamedAccountChoice` classifies it against the record at
+       the moment the launch is admitted, and that is one classifier for every
+       explicit seam — a second copy riding on this return value would be a
+       second place for the two to disagree. */
+    if (input.requestedChoice === "explicit") return { kind: "available", accountId: requestedId };
     return { kind: "not_allowed", accountId: requestedId, allowedAccountIds: allowed };
   }
   if (requestedId) return { kind: "available", accountId: requestedId };
