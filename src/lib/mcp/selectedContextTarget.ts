@@ -57,8 +57,10 @@ export type VoiceUtteranceLookup =
   | { state: "unrelated-work" }
   /** Evidence exists and cannot pick one card. Saying so IS the answer. */
   | { state: "ambiguous"; reason: string }
-  | { state: "unavailable"; reason: string }
-  | { state: "joined"; reference: SelectedContextRef; handoff: Record<string, string | null> };
+  /** The call points at a card and no evidence ties it to THIS request. The
+      ordinary answer for a spoken turn on installed Codex 0.154.0. */
+  | { state: "unproven-association"; reason: string }
+  | { state: "unavailable"; reason: string };
 
 /**
  * What the caller can prove about the work it is doing (#1629).
@@ -207,19 +209,21 @@ export async function resolveSelectedContext(
 }
 
 /**
- * The card the operator was looking at when they spoke, or a refusal that says
- * why there is none (#1629).
+ * Why a spoken turn gets no implicit card, in the words the agent needs (#1629).
  *
- * NOTHING HERE EVER REACHES FOR AN EARLIER CARD. The ledger publishes a
- * reference only for the backing work the caller's own request named, and only
- * while that work is the sole candidate: native steers more than one handoff
- * into one backing turn, so the moment the operator speaks again the ledger
- * refuses this caller too — a turn that already claimed a card included. An
- * agent asking a second question about a screen the operator has moved on from
- * is therefore told to ask rather than answered about the wrong card. Each
- * refusal names its own condition, because "they have not selected anything",
- * "they have spoken since" and "there is no call" are three different next
- * moves.
+ * THIS RESOLVES NOTHING ON INSTALLED CODEX 0.154.0, and that is the finding.
+ * `docs/design/native-voice-work-identity.md` establishes that neither edge
+ * automatic selection needs — utterance to handoff, handoff to backing work —
+ * is available, and defers cardinality, arrival order and `turn_trigger` by name
+ * as permission. So the ledger has nothing that could name this caller's card,
+ * and every spoken turn is refused here, including one with a single
+ * outstanding utterance.
+ *
+ * It still classifies, because the refusals are not interchangeable: "there is
+ * no call", "they have selected nothing" and "nothing can prove whose work you
+ * are" are three different next moves. Explicit `conversationId` and
+ * `selectedContext` targeting does not come through this function at all, and
+ * is the supported way to name a conversation from a spoken turn.
  */
 async function resolveSpokenSelectedContext(
   dependencies: SelectedContextTargetDependencies,
@@ -262,28 +266,14 @@ async function resolveSpokenSelectedContext(
       { code: "voice_selected_context_superseded" },
     );
   }
-  if (lookup.reference.state === "none") {
-    throw new McpToolRefusal(
-      "the operator spoke that turn with NO card selected, so the reference names no conversation. Ask which conversation they meant, or pass conversationId explicitly.",
-      { code: "selected_context_empty", capturedAt: lookup.reference.capturedAt },
-    );
-  }
-  const record = dependencies.selectedConversation().resolve(lookup.reference.conversationId);
-  if (!record) {
-    throw new McpToolRefusal(
-      "the card the operator was looking at is not in the Viewer registry — the reference is stale or names a conversation this Viewer never owned.",
-      {
-        code: "selected_context_unresolved",
-        conversationId: lookup.reference.conversationId,
-        capturedAt: lookup.reference.capturedAt,
-      },
-    );
-  }
-  return {
-    target: { ref: lookup.reference, record },
-    conversationId: record.conversationId,
-    voice: { handoff: lookup.handoff },
-  };
+  /* The ordinary answer for a spoken turn on this native version. Installed
+     Codex reports no edge from an utterance to the work it became, so the card
+     the operator is looking at cannot be shown to be this request's — however
+     few candidates there are. */
+  throw new McpToolRefusal(
+    `the operator's voice call points at a card, and nothing in this request can be shown to be the work they spoke about: ${lookup.reason}. Ask which conversation they mean, or pass conversationId or selectedContext explicitly — do not act on the card they happen to have open.`,
+    { code: "voice_selected_context_unproven" },
+  );
 }
 
 /** What the tool echoes back, so the caller can see which card it acted on.

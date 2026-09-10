@@ -118,7 +118,11 @@ test("the reader asks the realtime control for the named conversation, same-orig
   expect(received[0]!.origin).toContain("127.0.0.1");
 });
 
-test("a joined answer survives the wire with its reference and handoff", async () => {
+test("a spoken turn crosses the wire as the refusal it is, with its reason", async () => {
+  /* The whole round trip on a call that HAS a card and a reported handoff — the
+     arrangement that used to answer with the card. Installed Codex reports no
+     edge from that utterance to this request's work, so what crosses is the
+     refusal and the reason for it. */
   const received: Received[] = [];
   viewer(received);
   const utterance = { id: "a".repeat(32), sequence: 1 };
@@ -130,10 +134,27 @@ test("a joined answer survives the wire with its reference and handoff", async (
   recordVoiceHandoff({ conversationId: CALLER, realtimeSessionId: "rt-wire", utterance, handoff });
 
   const lookup = await voiceUtteranceLookup(CALLER, post(), WORK);
-  expect(lookup.state).toBe("joined");
-  expect(lookup.state === "joined" && lookup.reference.state === "selected"
-    && lookup.reference.conversationId).toBe(CARD);
-  expect(lookup.state === "joined" && lookup.handoff).toEqual(handoff);
+  expect(lookup.state).toBe("unproven-association");
+  expect(lookup.state === "unproven-association" && lookup.reason).toContain("no edge");
+  expect(JSON.stringify(lookup)).not.toContain(CARD);
+});
+
+test("a Viewer that still answers `joined` is not acted on", async () => {
+  /* An older or tampered Viewer on the other end of the hop. A card arriving
+     here would be an association nobody can vouch for, so the reader refuses to
+     read it rather than passing it to the resolver. */
+  const received: Received[] = [];
+  viewer(received, () => Response.json({
+    ok: true,
+    utterance: {
+      state: "joined",
+      reference: { version: 1, state: "selected", conversationId: CARD, capturedAt: "2026-09-10T00:00:00.000Z" },
+      handoff: { handoffId: "handoff-w", itemId: null, userBidiTurnId: null },
+    },
+  }));
+  const lookup = await voiceUtteranceLookup(CALLER, post(), WORK);
+  expect(lookup.state).toBe("unavailable");
+  expect(lookup.state === "unavailable" && lookup.reason).toContain("unusable");
 });
 
 test("every refusing state crosses the wire as itself", async () => {
@@ -187,11 +208,13 @@ test("an answer in a shape this reader does not know is unavailable, never guess
   expect(unknown.state).toBe("unavailable");
   expect(unknown.state === "unavailable" && unknown.reason).toContain("something-new");
 
+  /* A state this reader knows the NAME of but may not act on lands in the same
+     place, and says which one it was. */
   servers.splice(0).forEach((server) => server.stop());
   viewer(received, () => Response.json({ ok: true, utterance: { state: "joined", handoff: {} } }));
   const incomplete = await voiceUtteranceLookup(CALLER, post());
   expect(incomplete.state).toBe("unavailable");
-  expect(incomplete.state === "unavailable" && incomplete.reason).toContain("no readable reference");
+  expect(incomplete.state === "unavailable" && incomplete.reason).toContain("joined");
 });
 
 test("a Viewer that is not listening is unavailable rather than an empty selection", async () => {

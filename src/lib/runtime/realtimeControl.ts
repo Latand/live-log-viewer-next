@@ -16,7 +16,6 @@ import {
   type VoiceHandoffIdentity,
   type VoiceUtteranceIdentity,
   type VoiceWorkIdentity,
-  type VoiceWorkState,
 } from "./voiceViewBinding";
 import { recordDirectOperatorWakatimeActivity } from "@/lib/wakatime/operatorActivity";
 
@@ -53,7 +52,6 @@ interface RealtimeHost {
   providerThreadId?(): string | null;
   /** The host's verdict on a backing turn, used to retire finished work. A host
       that cannot speak for a turn answers `unknown`, which retires nothing. */
-  voiceWorkTurnState?(turnId: string): VoiceWorkState;
   /** Whether a backing turn is running right now. Read at `start` so a reconnect
       can tell "the agent is still working on what I said" from a clean restart. */
   hasActiveTurn?(): boolean;
@@ -272,10 +270,12 @@ export async function executeRealtimeControl(
             state: "unidentified-work",
             reason: "the backing turn this request carries belongs to a different native thread than this conversation's host",
           }
-          : voiceUtteranceContext(conversationId, {
-            work,
-            ...(host?.voiceWorkTurnState ? { workState: (turnId: string) => host.voiceWorkTurnState!(turnId) } : {}),
-          }),
+          /* No turn verdict rides along: which turn a handoff was routed into
+             is the edge native does not report, so there is no record a host
+             verdict could be applied to. Retention rests on the host's observed
+             idle transitions, which reach the ledger through
+             `noteVoiceWorkBoundary`. */
+          : voiceUtteranceContext(conversationId, { work }),
       },
     };
   }

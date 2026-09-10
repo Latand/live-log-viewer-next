@@ -228,36 +228,37 @@ async function refusal(run: Promise<unknown>): Promise<McpToolRefusal> {
  * The delivery itself.
  * ------------------------------------------------------------------ */
 
-test("a tool asked for nothing reads the card the operator spoke about", async () => {
-  /* The whole point, end to end: the operator selects a card, says "read that
-     one", and the agent — which was handed no id, no path and no reference —
-     comes back with THAT card's transcript. */
+test("a tool asked for nothing is refused, through the whole real chain", async () => {
+  /* THE EFFECTFUL PATH, and the one that matters: a live call, a selected card,
+     a reported handoff, and a tool handed no id, no path and no reference. It
+     used to come back with that card's transcript. `native-voice-work-identity`
+     establishes that installed Codex reports no edge from the utterance to this
+     request's work, so the tool is told to ask instead — and the refusal reaches
+     the caller as a typed refusal rather than a silent empty answer. */
   await control({ action: "start", sdp: "v=0\r\noffer\r\n", view: DESK }, OPERATOR);
   await spokenTurn(SELECTED, 1);
 
-  const answered = await bindings(lookupThroughTheControlEndpoint()).conversation_messages({
+  const refused = await refusal(bindings(lookupThroughTheControlEndpoint()).conversation_messages({
     clientRequestId: "spoken-read-1",
-  }) as { conversationId: string; records: Array<{ text: string }> };
-
-  expect(answered.conversationId).toBe(SELECTED);
-  expect(answered.records[0]!.text).toContain("the selected card speaks");
+  }));
+  expect(refused.details.code).toBe("voice_selected_context_unproven");
+  expect(refused.message).toContain("pass conversationId or selectedContext explicitly");
+  /* And it never leaks the card it declined to act on. */
+  expect(refused.message).not.toContain(SELECTED);
 });
 
-test("the answer names the handoff it was resolved through", async () => {
-  /* Provenance, so the operator and a later reader can tell a spoken resolution
-     from an argument the agent supplied itself. */
+test("the keyed selected-card read is refused the same way", async () => {
+  /* `tailLines` takes the keyed selected-card read (#844 §6), which is the shape
+     a spoken "what does that one say" actually wants. Same evidence, same
+     refusal: one non-actionable boundary rather than a per-tool one. */
   await control({ action: "start", sdp: "v=0\r\noffer\r\n", view: DESK }, OPERATOR);
   await spokenTurn(SELECTED, 1);
 
-  /* `tailLines` takes the keyed selected-card read (#844 §6), which is the shape
-     a spoken "what does that one say" actually wants. */
-  const answered = await bindings(lookupThroughTheControlEndpoint()).get_conversation({
+  const refused = await refusal(bindings(lookupThroughTheControlEndpoint()).get_conversation({
     clientRequestId: "spoken-read-2",
     tailLines: 5,
-  }) as { conversationId: string; selectedContext?: { conversationId?: string } };
-
-  expect(answered.conversationId).toBe(SELECTED);
-  expect(answered.selectedContext?.conversationId).toBe(SELECTED);
+  }));
+  expect(refused.details.code).toBe("voice_selected_context_unproven");
 });
 
 /* ------------------------------------------------------------------ *
@@ -282,38 +283,37 @@ test("speaking again withdraws the card from work that has not claimed one", asy
   expect(refused.details.code).toBe("voice_selected_context_superseded");
   expect(refused.message).toContain("spoken again");
 
-  /* And once that utterance IS handed off, the tool answers about the NEW card. */
+  /* And once that utterance IS handed off, it is refused for the other reason:
+     the card is there and nothing ties it to this request's work. */
   await control({
     action: "handoff",
     utterance: utterance(2),
     handoff: { handoffId: "handoff-2", itemId: "item-2", userBidiTurnId: "bidi-2" },
   }, PEER);
-  const answered = await bindings(lookupThroughTheControlEndpoint(), work("turn-two")).conversation_messages({
+  const still = await refusal(bindings(lookupThroughTheControlEndpoint(), work("turn-two")).conversation_messages({
     clientRequestId: "spoken-read-4",
-  }) as { conversationId: string };
-  expect(answered.conversationId).toBe(OTHER);
+  }));
+  expect(still.details.code).toBe("voice_selected_context_unproven");
 });
 
-test("the work that already claimed a card keeps it while the operator speaks again", async () => {
-  /* The other half of the same rule (#1629 P1 #2): an accepted binding is
-     frozen. A's backing turn goes on reading A no matter what is said after it. */
+test("one backing turn carrying two handoffs is refused about both", async () => {
+  /* The reproduced same-turn leak, followed to the effectful resolver. A's turn
+     read A, the operator spoke about B into the SAME native turn, and the next
+     tool call still got A. Both reads refuse now, and neither names a card. */
   await control({ action: "start", sdp: "v=0\r\noffer\r\n", view: DESK }, OPERATOR);
   await spokenTurn(SELECTED, 1);
-  const first = await bindings(lookupThroughTheControlEndpoint(), work("turn-a")).conversation_messages({
+  const first = await refusal(bindings(lookupThroughTheControlEndpoint(), work("turn-shared")).conversation_messages({
     clientRequestId: "spoken-read-frozen-1",
-  }) as { conversationId: string };
-  expect(first.conversationId).toBe(SELECTED);
+  }));
+  expect(first.details.code).toBe("voice_selected_context_unproven");
 
   await spokenTurn(OTHER, 2);
-  const second = await bindings(lookupThroughTheControlEndpoint(), work("turn-b")).conversation_messages({
+  const second = await refusal(bindings(lookupThroughTheControlEndpoint(), work("turn-shared")).conversation_messages({
     clientRequestId: "spoken-read-frozen-2",
-  }) as { conversationId: string };
-  expect(second.conversationId).toBe(OTHER);
-
-  const again = await bindings(lookupThroughTheControlEndpoint(), work("turn-a")).conversation_messages({
-    clientRequestId: "spoken-read-frozen-3",
-  }) as { conversationId: string };
-  expect(again.conversationId).toBe(SELECTED);
+  }));
+  expect(second.details.code).toBe("voice_selected_context_unproven");
+  expect(second.message).not.toContain(SELECTED);
+  expect(second.message).not.toContain(OTHER);
 });
 
 test("a turn native did not start from the call reads no card at all", async () => {
@@ -423,10 +423,11 @@ test("a late handoff for a superseded utterance never delivers its card", async 
   expect(refused.details.code).toBe("voice_selected_context_superseded");
 });
 
-test("a reordered publication cannot become the card a tool reads", async () => {
-  /* The reproduced ordering defect, followed all the way to the tool: the older
-     reference is refused by the ledger, so the work still resolves to the newer
-     card rather than the one that arrived last. */
+test("a reordered publication is refused at the ledger, and changes nothing downstream", async () => {
+  /* The reproduced ordering defect, at the boundary that still owns it: the
+     older reference is refused on arrival, so it never becomes what the call
+     points at. No tool reads a card either way now, and the refusal downstream
+     is the ordinary one. */
   await control({ action: "start", sdp: "v=0\r\noffer\r\n", view: DESK }, OPERATOR);
   await spokenTurn(SELECTED, 2);
   const stale = await control(
@@ -435,10 +436,10 @@ test("a reordered publication cannot become the card a tool reads", async () => 
   );
   expect(stale.status).toBe(409);
 
-  const answered = await bindings(lookupThroughTheControlEndpoint()).conversation_messages({
+  const refused = await refusal(bindings(lookupThroughTheControlEndpoint()).conversation_messages({
     clientRequestId: "spoken-read-6",
-  }) as { conversationId: string };
-  expect(answered.conversationId).toBe(SELECTED);
+  }));
+  expect(refused.details.code).toBe("voice_selected_context_unproven");
 });
 
 test("a call that has reported no card refuses instead of guessing", async () => {

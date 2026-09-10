@@ -63,9 +63,6 @@ export interface VoiceWorkIdentity {
   itemId: string | null;
 }
 
-/** What the host says about a backing turn this ledger has a record for. */
-export type VoiceWorkState = "active" | "completed" | "unknown";
-
 /**
  * Who published, and which utterance of theirs (#1629).
  *
@@ -121,20 +118,6 @@ interface AdmissionRecord {
    * nothing new may bind to them.
    */
   generation: number;
-  /** The backing turn that claimed it, once one did. Never reassigned. */
-  boundTurnId: string | null;
-  /**
-   * Where this record sits among the handoffs the call has accepted, and where
-   * its claiming turn sat when it claimed. Both null until each happens.
-   *
-   * Native steers more than one handoff into one backing turn
-   * (`native-voice-work-identity.md`), so a turn id is COARSER than a spoken
-   * utterance and the claim a turn made says nothing about what arrived after
-   * it. Comparing the two is how a later, still-unclaimed handoff is recognised
-   * as something that same turn may also have been given.
-   */
-  handoffEpoch: number | null;
-  claimedAtHandoffEpoch: number | null;
   /**
    * The host's idle counter when this record's handoff was accepted, or null
    * while it has none.
@@ -175,10 +158,6 @@ interface VoiceSessionState {
    * nothing — so reads answer `unavailable` rather than `no-call`.
    */
   evidenceLost: boolean;
-  /** Incremented by every handoff this call accepts. It orders the accepted
-      handoffs against the claim a backing turn made, which is the only way to
-      tell that one arrived after that turn had already claimed its card. */
-  handoffEpoch: number;
   /** Incremented every time the host is observed going from running to idle. */
   idleEpoch: number;
   /** The host's last reported active turn, for spotting that transition. */
@@ -250,10 +229,12 @@ export function bindVoiceSession(
   evidence: { activeWork?: boolean } = {},
 ): void {
   const previous = sessions.get(conversationId);
-  const carried = previous
-    ? previous.records.filter((record) =>
-      record.boundTurnId !== null
-      || (evidence.activeWork === true && record.admission.handoff !== null))
+  /* A reconnect keeps the records describing work that may still be running, so
+     the panel and the control endpoint can still say what the call was told.
+     Nothing binds a record to a turn any more, so `activeWork` — the host's own
+     "something is still running" — is the whole test. */
+  const carried = previous && evidence.activeWork === true
+    ? previous.records.filter((record) => record.admission.handoff !== null)
     : [];
   sessions.set(conversationId, {
     realtimeSessionId,
@@ -267,8 +248,6 @@ export function bindVoiceSession(
     handoffKeys: new Set(),
     ambiguity: previous?.ambiguity ?? null,
     evidenceLost: previous?.evidenceLost ?? false,
-    /* Carried across the generation, because the records it orders are. */
-    handoffEpoch: previous?.handoffEpoch ?? 0,
     idleEpoch: previous?.idleEpoch ?? 0,
     lastActiveTurnId: previous?.lastActiveTurnId ?? null,
   });
@@ -286,10 +265,10 @@ export function bindVoiceSession(
  * What is kept is bounded by WORK, never by a clock. A record whose utterance
  * never became a handoff describes something that never became work, so nothing
  * is running that could need it. Everything else is retired by
- * {@link voiceUtteranceContext} when the host says its turn finished — see
- * {@link VoiceWorkState}. Elapsed time proves nothing about whether an agent is
- * still working, and the earlier ten-minute window both discarded live work and
- * left a finished call's card available to unrelated turns.
+ * {@link voiceUtteranceContext} once the host has been observed going idle since
+ * the handoff was accepted. Elapsed time proves nothing about whether an agent
+ * is still working, and the earlier ten-minute window both discarded live work
+ * and left a finished call's card available to unrelated turns.
  */
 export function releaseVoiceSession(conversationId: string, now = Date.now()): void {
   const session = sessions.get(conversationId);
@@ -382,7 +361,7 @@ export type VoiceSelectedContextAdmissionResult =
 function enforceRetentionBound(session: VoiceSessionState): void {
   while (session.records.length > MAX_RETAINED_ADMISSIONS) {
     const resolvedIndex = session.records.findIndex((record) =>
-      record.boundTurnId !== null && record.generation !== session.generation);
+      record.generation !== session.generation && record.admission.handoff !== null);
     if (resolvedIndex >= 0) {
       session.records.splice(resolvedIndex, 1);
       continue;
@@ -436,9 +415,6 @@ export function admitVoiceSelectedContext(input: VoiceSelectedContextAdmissionIn
   const record: AdmissionRecord = {
     id: `admission-${admissionCounter}`,
     generation: session.generation,
-    boundTurnId: null,
-    handoffEpoch: null,
-    claimedAtHandoffEpoch: null,
     joinedAtIdleEpoch: null,
     admission: {
       conversationId: input.conversationId,
@@ -549,9 +525,7 @@ export function recordVoiceHandoff(input: {
     };
   }
   session.handoffKeys.add(key);
-  session.handoffEpoch += 1;
   standing.admission = { ...standing.admission, handoff: input.handoff };
-  standing.handoffEpoch = session.handoffEpoch;
   standing.joinedAtIdleEpoch = session.idleEpoch;
   return { ok: true, admission: standing.admission };
 }
@@ -623,37 +597,41 @@ export function voiceSelectedContext(conversationId: string): VoiceSelectedConte
 /**
  * What a tool call made from this conversation is entitled to read (#1629).
  *
- * This is the whole reader contract, and it is a state rather than a value on
- * purpose: every way there is no card means something different to the agent
- * holding the microphone, and collapsing them into `null` is how the agent ends
- * up guessing.
+ * ON INSTALLED CODEX 0.154.0 THE ANSWER IS NEVER A CARD, and that is a finding
+ * rather than a gap in this file. Automatic selection needs two edges, and
+ * `docs/design/native-voice-work-identity.md` establishes that neither is
+ * available:
  *
- * THE QUESTION IS ABOUT WORK, NOT ABOUT THE CONVERSATION. A conversation-level
- * answer cannot be right: while A's work is still running the operator may have
- * spoken about B, and "what does this conversation point at" then hands A's tool
- * call B's card. So the caller must present the native work identity its request
- * actually carried, and the answer is about THAT turn:
+ * - UTTERANCE TO HANDOFF. The core discards the incoming bidi identity, routes
+ *   the handoff as text, and emits its notification without one. The bundled
+ *   app reconstructs an association for its own lifecycle analytics, and that
+ *   reconstruction is explicitly insufficient authority (§"Finding and
+ *   decision").
+ * - HANDOFF TO BACKING WORK. `turn_id` identifies the turn a tool call is doing
+ *   work in, and native steers MORE THAN ONE handoff into one turn, so the turn
+ *   is coarser than the utterance it would have to name.
  *
- * - A turn that has already claimed a record keeps that record, unchanged,
- *   forever: the binding is never reassigned by a later utterance, a later call
- *   or a hangup. What it does NOT get is the right to keep answering while the
- *   call has moved on — native steers more than one handoff into one backing
- *   turn, so once a handoff this turn may also have accepted is outstanding, an
- *   unqualified read is refused for exactly the reason a new claim would be.
- *   When that later speech is claimed by its own turn, or retired with it, this
- *   turn is answered with its own card again.
- * - A turn that has claimed nothing may claim one only when exactly one
- *   unclaimed join exists in the CURRENT generation and nothing about the call
- *   is ambiguous. Two candidates is the same problem native has: multiple
- *   handoffs can share one backing turn, so there is no discriminator and the
- *   answer is a refusal.
- * - A turn native did not start from the realtime leg never claims anything.
- *   That is the unrelated later text turn, and inheriting the call's card there
- *   is precisely the leak this state machine exists to close.
+ * What the ledger has instead is cardinality, arrival order and `turn_trigger`,
+ * and the report defers all three by name: "Treating app lifecycle analytics,
+ * BEM output promotion, one-outstanding-utterance order, or a time window as
+ * permission to select a card" is listed under what is NOT currently justified.
+ * A sole outstanding candidate is that same order argument with one element —
+ * a late handoff can still belong to earlier speech — so it is refused too.
  *
- * A hangup does not end any of it. The work the last utterance started outlives
- * the transport, and it is retired here when the host says that turn finished —
- * never on a clock.
+ * So this reader classifies and refuses. It keeps naming the condition, because
+ * "there is no call", "they have selected nothing" and "nothing here can prove
+ * whose work you are" are three different next moves for the agent holding the
+ * microphone. What it never does is hand out a card on evidence that cannot
+ * carry one, and no new tool call inherits an operation merely by sharing its
+ * native turn.
+ *
+ * WHAT STILL WORKS, and is the supported route: explicit `conversationId` and
+ * `selectedContext` targeting, the bound-view and context tools, and the
+ * immutable context of an operation that was already admitted — which travels
+ * with that operation's own key through recovery, not through this reader.
+ *
+ * Closing this needs an acceptance receipt native does not emit today; the
+ * upstream seam is named in the report's §"Non-actionable boundary".
  */
 export type VoiceUtteranceContext =
   | { state: "no-call" }
@@ -663,40 +641,22 @@ export type VoiceUtteranceContext =
   | { state: "unidentified-work"; reason: string }
   /** The caller's work exists, but nothing about the call belongs to it. */
   | { state: "unrelated-work" }
+  /**
+   * The call points at a card and nothing can prove it is THIS caller's.
+   *
+   * The ordinary answer for a spoken turn on this native version, and the
+   * reason it is its own state: the agent should ask which conversation the
+   * operator means rather than read it as "you have selected nothing".
+   */
+  | { state: "unproven-association"; reason: string }
   /** Evidence exists but cannot pick one card, and saying so is the answer. */
   | { state: "ambiguous"; reason: string }
   /** The ledger knew something and no longer does. */
-  | { state: "unavailable"; reason: string }
-  | {
-    state: "joined";
-    reference: SelectedContextRef;
-    handoff: VoiceHandoffIdentity;
-    utteranceId: string | null;
-    sequence: number;
-    /** True when the call has ended and this is what it left for the work it
-        started. The card is still the one that work was asked about. */
-    callEnded: boolean;
-  };
+  | { state: "unavailable"; reason: string };
 
 export interface VoiceUtteranceContextOptions {
   /** The native work identity the caller's own request carried, if any. */
   work?: VoiceWorkIdentity | null;
-  /** The host's verdict on a backing turn. Absent means every turn is unknown,
-      which retires nothing — uncertainty is preserved rather than resolved. */
-  workState?(turnId: string): VoiceWorkState;
-}
-
-function joined(record: AdmissionRecord, session: VoiceSessionState): VoiceUtteranceContext {
-  return {
-    state: "joined",
-    reference: record.admission.reference,
-    handoff: record.admission.handoff!,
-    utteranceId: record.admission.utteranceId,
-    sequence: record.admission.sequence,
-    /* Evidence, so a reader can tell live context from what a finished call
-       left behind for the work it started. */
-    callEnded: session.endedAt !== null,
-  };
 }
 
 /**
@@ -708,23 +668,19 @@ function joined(record: AdmissionRecord, session: VoiceSessionState): VoiceUtter
  * evidence, and treating missing evidence as completion is the same mistake the
  * ten-minute window made.
  */
-function retireCompletedWork(session: VoiceSessionState, options: VoiceUtteranceContextOptions): void {
-  session.records = session.records.filter((record) => {
-    if (record.boundTurnId !== null) {
-      return !options.workState || options.workState(record.boundTurnId) !== "completed";
-    }
-    /* Never claimed by a tool call. It is retired once the host has been seen
-       going idle SINCE the join — the turn that handoff was routed into has then
-       ended, and nothing is left that could be entitled to the card.
+function retireVoiceWork(session: VoiceSessionState): void {
+  session.records = session.records.filter((record) =>
+    /* A record is retired once the host has been seen going idle SINCE its
+       handoff was accepted — the turn that handoff was routed into has then
+       ended, and nothing is left that this card describes. There is no
+       per-record turn verdict to use instead: which turn a handoff was routed
+       into is the very edge native does not report.
        INEXACT AT ONE EDGE, AND SAFE THERE. The idle observation arrives through
-       the host's state projection, so an earlier turn's end can be observed just
-       after a join and retire it a moment early. Both directions of that error
-       are refusals rather than wrong answers — retiring early makes the next
-       tool call ask which card the operator meant, retiring late makes the next
-       card ambiguous — so the simple rule is kept over a fence that would have
-       to reconstruct the ordering of two asynchronous streams. */
-    return record.joinedAtIdleEpoch === null || record.joinedAtIdleEpoch >= session.idleEpoch;
-  });
+       the host's state projection, so an earlier turn's end can be observed
+       just after a join and retire it a moment early. Retiring early only
+       shortens how long the panel shows a spoken card; nothing reads these
+       records for a target. */
+    record.joinedAtIdleEpoch === null || record.joinedAtIdleEpoch >= session.idleEpoch);
 }
 
 export function voiceUtteranceContext(
@@ -733,7 +689,7 @@ export function voiceUtteranceContext(
 ): VoiceUtteranceContext {
   const session = sessions.get(conversationId);
   if (!session) return { state: "no-call" };
-  retireCompletedWork(session, options);
+  retireVoiceWork(session);
   /* A finished call whose work is all finished too has nothing left to say, and
      leaving the row behind would keep answering about a call nobody is on. */
   if (session.endedAt !== null && session.records.length === 0 && !session.evidenceLost) {
@@ -747,69 +703,35 @@ export function voiceUtteranceContext(
       reason: "this request carries no backing-turn identity, so which work it belongs to cannot be established",
     };
   }
-  const bound = session.records.find((record) => record.boundTurnId === work.turnId);
-  if (bound) {
-    /* A CLAIM IS NOT A FENCE AROUND THE TURN. Native steers more than one handoff
-       into one backing turn, so a turn that claimed A's card may since have been
-       given B's speech as well — and answering the next tool call with A there
-       acts on the conversation the operator has moved off
-       (`native-voice-work-identity.md` §"Realtime joins and their limits",
-       `native-codex-experience.md` §Limits). The turn id has no finer
-       discriminator, so implicit selection stops here and says why.
-
-       The record itself is untouched: an accepted binding is never reassigned,
-       and once the later speech is claimed by its own turn or retired with it,
-       this same caller is answered with A again. Explicit `conversationId` and
-       `selectedContext` targeting never come through here at all. */
-    const since = bound.claimedAtHandoffEpoch ?? 0;
-    const later = session.records.some((record) =>
-      record !== bound && record.boundTurnId === null && record.admission.handoff !== null
-      && (record.handoffEpoch ?? 0) > since);
-    if (later) {
-      return {
-        state: "ambiguous",
-        reason: "the operator has spoken again since this work claimed its card, and native routes more than one handoff into one backing turn, so which of them this call belongs to cannot be told apart",
-      };
-    }
-    /* THE LINE IS AN ACCEPTED HANDOFF, and deliberately no wider. A reported
-       ambiguity is left where the ledger already puts it — work bound before one
-       keeps what it was given — and speech whose handoff has not been reported
-       yet is not a handoff this turn carries. Both are existing decisions with
-       their own tests; this repairs the case the evidence names. */
-    return joined(bound, session);
-  }
-  if (session.ambiguity) return { state: "ambiguous", reason: session.ambiguity.reason };
   if (session.evidenceLost) {
     return {
       state: "unavailable",
-      reason: "this call's earlier utterance records were dropped for space, so an unclaimed join cannot be ruled out",
+      reason: "this call's earlier utterance records were dropped for space, so what it was told cannot be read back",
     };
   }
-  /* Only a turn native started FROM the call may claim what the call admitted.
+  /* A turn native did not start FROM the call is not the call's business at all.
      `turn_trigger` is the one piece of evidence that says so, and an ordinary
-     text turn carries none. */
+     later text turn carries none — which is why it gets "no card here" rather
+     than a refusal about the call. */
   if (work.turnTrigger !== "realtime") return { state: "unrelated-work" };
-  /* A SPOKEN TURN WITH NO HANDOFF YET BLOCKS EVERY NEW CLAIM. The operator has
-     said something whose work has not been reported, so an unclaimed join from
-     before it cannot be shown to be this caller's rather than that one's — the
-     handoff report is asynchronous and the backing turn may already be running.
-     Refusing here is the conservative half of the same rule that freezes an
-     accepted binding: work that already claimed a card keeps it (checked
-     above), and nothing new is guessed at. */
+  if (session.ambiguity) return { state: "ambiguous", reason: session.ambiguity.reason };
+  /* The operator has spoken and the work it became has not been reported yet. */
   if (session.standing && session.standing.admission.handoff === null) return { state: "awaiting-handoff" };
-  const candidates = session.records.filter((record) =>
-    record.boundTurnId === null && record.admission.handoff !== null);
-  if (candidates.length > 1) {
-    return {
-      state: "ambiguous",
-      reason: "more than one spoken turn is waiting to be claimed, and native gives no way to tell which of them this work is",
-    };
-  }
+  const candidates = session.records.filter((record) => record.admission.handoff !== null);
   if (candidates.length === 0) return { state: "no-reference" };
-  const claimed = candidates[0]!;
-  claimed.boundTurnId = work.turnId;
-  claimed.claimedAtHandoffEpoch = session.handoffEpoch;
-  return joined(claimed, session);
+  /* AND HERE IS WHERE A CARD USED TO BE HANDED OUT. Whether there is one
+     candidate or five, what the ledger holds is cardinality and arrival order,
+     and `native-voice-work-identity.md` defers exactly that as permission: a
+     late handoff can still belong to earlier speech, and one candidate is that
+     same order argument with a single element. `turn_id` cannot break the tie
+     either, because native steers more than one handoff into one turn. So the
+     answer names the missing edge and the agent asks. */
+  return {
+    state: "unproven-association",
+    reason: candidates.length > 1
+      ? "more than one spoken turn is outstanding on this call, and installed Codex reports no edge from an utterance to the work it became, so which of them this request is doing cannot be established"
+      : "installed Codex reports no edge from a spoken utterance to the backing work it became, so this request cannot be shown to be the one the operator spoke about — arrival order alone is not evidence of it",
+  };
 }
 
 /** Test seam: the ledger is process-global, so a suite must be able to start

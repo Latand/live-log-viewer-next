@@ -303,38 +303,41 @@ test("A, B, late handoff A, C, late handoff B: no card is ever read for the wron
 });
 
 test("the same handoff repeated after a later utterance claims nothing", async () => {
-  /* P1 #1's other arm. A is joined and read; the operator speaks about B; native
-     redelivers handoff A. The old client believed it and joined A's identities
-     to B's card. */
+  /* The duplicate arm, at the client. A is reported once; the operator speaks
+     about B; native redelivers handoff A. The old client believed it and joined
+     A's identities to B's card — the report is refused now, and the client says
+     so as an ambiguity rather than carrying on. */
   const peer = await liveCall();
   await spoke(CARD_A, peer);
   await handedOff(peer, "a");
-  expect(await agentRead("turn-a", "chain-dup-1")).toContain("card A speaks");
+  expect(await agentRead("turn-a", "chain-dup-1")).toBe("voice_selected_context_unproven");
 
   await spoke(CARD_B, peer);
   await handedOff(peer, "a");
 
   expect(actions().filter((action) => action === "handoff")).toHaveLength(1);
   expect(actions()).toContain("handoffAmbiguity");
-  /* A's own work is an accepted operation and keeps what it was given. */
-  expect(await agentRead("turn-a", "chain-dup-2")).toContain("card A speaks");
-  /* Nothing else gets a card out of the repeat. */
+  /* And no turn gets a card out of any of it. */
+  expect(await agentRead("turn-a", "chain-dup-2")).toBe("voice_selected_context_ambiguous");
   expect(await agentRead("turn-b", "chain-dup-3")).toBe("voice_selected_context_ambiguous");
 });
 
-test("A's work reads A after B joins, and B's work reads B", async () => {
-  /* P1 #2's acceptance, end to end. Before this the lookup carried only the
-     conversation, so the second read through A's binding returned B. */
+test("neither A's turn nor B's is handed a card, at any point in the chain", async () => {
+  /* END TO END, THROUGH THE REAL EFFECTFUL PATH: browser client, control hop,
+     ledger and MCP resolver. The lookup once carried only the conversation, so
+     A's second read returned B; then it carried the turn, so A's read returned A
+     on evidence that could not carry it. Installed Codex reports no edge from an
+     utterance to the work it became, so every read here is a typed refusal and
+     none of them names a card. */
   const peer = await liveCall();
   await spoke(CARD_A, peer);
   await handedOff(peer, "a");
-  expect(await agentRead("turn-a", "chain-ab-1")).toContain("card A speaks");
+  expect(await agentRead("turn-a", "chain-ab-1")).toBe("voice_selected_context_unproven");
 
   await spoke(CARD_B, peer);
   await handedOff(peer, "b");
-  expect(await agentRead("turn-b", "chain-ab-2")).toContain("card B speaks");
-
-  expect(await agentRead("turn-a", "chain-ab-3")).toContain("card A speaks");
+  expect(await agentRead("turn-b", "chain-ab-2")).toBe("voice_selected_context_unproven");
+  expect(await agentRead("turn-a", "chain-ab-3")).toBe("voice_selected_context_unproven");
 });
 
 test("an unrelated text turn after the call reads no card", async () => {
@@ -343,36 +346,42 @@ test("an unrelated text turn after the call reads no card", async () => {
   const peer = await liveCall();
   await spoke(CARD_A, peer);
   await handedOff(peer, "a");
-  expect(await agentRead("turn-a", "chain-text-1")).toContain("card A speaks");
+  expect(await agentRead("turn-a", "chain-text-1")).toBe("voice_selected_context_unproven");
   await codexRealtimeClient(CALLER).stop();
   await settle();
 
-  /* A turn native did not start from the call: no `turn_trigger`. */
+  /* A turn native did not start from the call carries no `turn_trigger`, so it
+     is not the call's business at all and falls through to the ordinary
+     "name your target" — a different answer from the spoken refusal, which is
+     the distinction the agent acts on. */
   expect(await agentRead("turn-typed", "chain-text-2", null))
     .toContain("conversationId, transcriptPath or selectedContext is required");
-  /* And the work the call started still has its own card. */
-  expect(await agentRead("turn-a", "chain-text-3")).toContain("card A speaks");
+  expect(await agentRead("turn-a", "chain-text-3")).toBe("voice_selected_context_unproven");
 });
 
-test("work still running when the operator hangs up keeps its card indefinitely", async () => {
-  /* P2's other half: the ten-minute window used to discard live work. Nothing
-     here is a clock — only the host saying that turn ended retires it. */
+test("a hangup is not a clock: what the call recorded outlives the transport", async () => {
+  /* The ten-minute window used to discard live work. Nothing here is a clock —
+     the record survives the hangup and is retired only when the host is observed
+     going idle after the handoff. The refusal is the same throughout, which is
+     what says the record is still there rather than gone. */
   const peer = await liveCall();
   await spoke(CARD_A, peer);
   await handedOff(peer, "a");
-  expect(await agentRead("turn-a", "chain-hangup-1")).toContain("card A speaks");
+  expect(await agentRead("turn-a", "chain-hangup-1")).toBe("voice_selected_context_unproven");
   await codexRealtimeClient(CALLER).stop();
   await settle();
 
-  expect(await agentRead("turn-a", "chain-hangup-2")).toContain("card A speaks");
+  expect(await agentRead("turn-a", "chain-hangup-2")).toBe("voice_selected_context_unproven");
   noteVoiceWorkBoundary(CALLER, "turn-a");
-  expect(await agentRead("turn-a", "chain-hangup-3")).toContain("card A speaks");
+  expect(await agentRead("turn-a", "chain-hangup-3")).toBe("voice_selected_context_unproven");
 });
 
-test("a spoken turn the agent answered out loud stops blocking the next one", async () => {
-  /* The ordinary flow that the strict rule would otherwise break: the first
-     utterance produced work that called no tool. Once the host is idle again
-     that work is over, so the next spoken card resolves normally. */
+test("a spoken turn the agent answered out loud is retired, and the refusal stays specific", async () => {
+  /* The first utterance produced work that called no tool. Once the host is idle
+     again that work is over and its record goes, so the call is back to ONE
+     outstanding utterance — which changes the sentence the agent is given and
+     changes nothing about the answer. Retirement keeps the ledger honest; it was
+     never what made a card actionable. */
   const peer = await liveCall();
   await spoke(CARD_A, peer);
   await handedOff(peer, "a");
@@ -381,5 +390,5 @@ test("a spoken turn the agent answered out loud stops blocking the next one", as
 
   await spoke(CARD_B, peer);
   await handedOff(peer, "b");
-  expect(await agentRead("turn-b", "chain-idle-1")).toContain("card B speaks");
+  expect(await agentRead("turn-b", "chain-idle-1")).toBe("voice_selected_context_unproven");
 });

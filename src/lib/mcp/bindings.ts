@@ -910,22 +910,14 @@ export async function voiceUtteranceLookup(
   }
   const state = text(utterance.state);
   if (state === "no-call" || state === "no-reference" || state === "awaiting-handoff" || state === "unrelated-work") return { state };
-  if (state === "unidentified-work" || state === "ambiguous") {
+  if (state === "unidentified-work" || state === "ambiguous" || state === "unproven-association") {
     return { state, reason: text(utterance.reason) || "the Viewer gave no reason" };
   }
-  if (state !== "joined") return { state: "unavailable", reason: `unknown voice utterance state ${state || "(none)"}` };
-  const reference = parseSelectedContextRef(utterance.reference);
-  const handoff = utterance.handoff;
-  if (!reference || !objectRecord(handoff)) {
-    return { state: "unavailable", reason: "the Viewer answered a joined utterance with no readable reference" };
-  }
-  return {
-    state: "joined",
-    reference,
-    handoff: Object.fromEntries(
-      Object.entries(handoff).map(([key, value]) => [key, typeof value === "string" ? value : null]),
-    ),
-  };
+  /* Anything else — including a `joined` answer from a Viewer that still has one
+     — is not a state this reader may act on. Installed Codex reports no edge
+     from an utterance to the work it became, so a card arriving over this hop
+     would be an association nobody can vouch for. */
+  return { state: "unavailable", reason: `unusable voice utterance state ${state || "(none)"}` };
 }
 
 /**
