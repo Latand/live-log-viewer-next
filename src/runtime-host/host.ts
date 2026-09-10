@@ -1,3 +1,4 @@
+import type { NativeQueueTransition } from "@/lib/runtime/nativeQueueContracts";
 import { RUNTIME_RECEIPT_STATUSES, RuntimeIdempotencyConflictError, type RuntimeEvent, type RuntimeEventInput, type RuntimeOperationCommand, type RuntimeReceiptStatus, type RuntimeSocketRequest, type RuntimeSocketResponse } from "@/lib/runtime/contracts";
 import { structuredHostsEnabled } from "@/lib/runtime/flags";
 import { consumeRuntimeEvent, type RuntimeConsumerPorts } from "@/lib/runtime/consumers";
@@ -161,6 +162,14 @@ export class RuntimeHost {
           throw new Error("runtime producer cursor is invalid");
         }
         result = this.journal.producerCursor(producerKind, eventKeyPrefix);
+      } else if (request.method === "native-queue-read") {
+        if (typeof request.params?.conversationId !== "string") throw new Error("conversationId is invalid");
+        result = this.journal.nativeQueueRead(request.params.conversationId);
+      } else if (request.method === "native-queue-transition") {
+        if (!this.structuredHosts) throw new Error("structured hosts are disabled");
+        const transition = request.params?.transition as NativeQueueTransition | undefined;
+        if (!transition || !["prepared", "acknowledged", "observed-queued", "withdrawn", "removed", "refused", "uncertain", "proven"].includes(transition.phase)) throw new Error("native queue transition is invalid");
+        result = this.journal.nativeQueueTransition(String(request.params?.operationId ?? ""), transition);
       } else if (request.method === "operation-transition") {
         if (!this.structuredHosts) throw new Error("structured hosts are disabled");
         const status = request.params?.status;

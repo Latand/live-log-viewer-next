@@ -1477,14 +1477,13 @@ describe("CodexAppServerHost", () => {
     expect(overrideServer.requests.find((request) => request.method === "turn/start")?.params).toMatchObject({ effort: "ultra" });
     await overrideHost.release();
 
-    // A tier outside the codex vocabulary falls back to the host default
-    // instead of failing the turn over a settings blemish.
+    // Invalid explicit selections fail before the native write.
     const invalidServer = new FakeAppServer("per-turn-invalid");
     const invalidHost = await CodexAppServerHost.start({
       cwd: "/repo", effort: "medium", eventStore: new MemoryEventStore(), spawnProcess: fakeSpawn(invalidServer),
     });
-    await invalidHost.send({ id: "with-blemish", text: "stay safe", runtime: { effort: "warp9" } });
-    expect(invalidServer.requests.find((request) => request.method === "turn/start")?.params).toMatchObject({ effort: "medium" });
+    await expect(invalidHost.send({ id: "with-blemish", text: "stay safe", runtime: { effort: "warp9" } })).rejects.toThrow("effort is invalid");
+    expect(invalidServer.requests.some((request) => request.method === "turn/start")).toBeFalse();
     await invalidHost.release();
   });
 
@@ -2501,7 +2500,7 @@ describe("CodexAppServerHost", () => {
     await host.release();
   });
 
-  test("resolves ledger attention during adoption and preserves resumed active flags", async () => {
+  test("retains unowned ledger attention during adoption and preserves resumed active flags", async () => {
     const eventStore = new MemoryEventStore();
     eventStore.append("crashed-attention", {
       kind: "attention",
@@ -2527,9 +2526,10 @@ describe("CodexAppServerHost", () => {
     const replay = host.attach(1)[Symbol.asyncIterator]();
     expect((await replay.next()).value).toEqual({ kind: "turn-started", turnId: "approval-turn", seq: 2 });
     expect((await replay.next()).value).toEqual({
-      kind: "attention-resolved",
+      kind: "attention",
       id: "item/commandExecution/requestApproval:approval-crash",
-      resolution: "host-restarted",
+      method: "item/commandExecution/requestApproval",
+      attention: { command: "date", unowned: true },
       seq: 3,
     });
     expect((await replay.next()).value).toEqual({
@@ -2539,9 +2539,9 @@ describe("CodexAppServerHost", () => {
       seq: 4,
     });
     expect(await host.health()).toMatchObject({
-      status: "active",
+      status: "attention",
       activeTurnRef: "approval-turn",
-      pendingAttention: [],
+      pendingAttention: ["item/commandExecution/requestApproval:approval-crash"],
       activeFlags: ["waitingForApproval"],
     });
     await host.release();
@@ -3074,7 +3074,7 @@ describe("CodexAppServerHost", () => {
     await host.release();
   });
 
-  test("reuses a buffered approval already present in the durable crash prefix", async () => {
+  test("keeps restored and newly issued same-RPC-id requests in distinct generations", async () => {
     const threadId = "buffered-attention-overlap";
     const attentionId = "item/commandExecution/requestApproval:buffered-approval";
     const attention = { command: "date" };
@@ -3099,15 +3099,11 @@ describe("CodexAppServerHost", () => {
       spawnProcess: fakeSpawn(server),
     });
 
-    expect(eventStore.load(threadId).filter((event) => event.kind === "attention")).toEqual([{
-      kind: "attention",
-      id: attentionId,
-      method: "item/commandExecution/requestApproval",
-      attention,
-      seq: 1,
-    }]);
-    expect(await host.health()).toMatchObject({ status: "attention", pendingAttention: [attentionId] });
-    await host.answer(attentionId, { decision: "accept" });
+    const newId = `${attentionId}:generation-2`;
+    expect((await host.health()).pendingAttention).toEqual([attentionId, newId]);
+    await expect(host.answer(attentionId, { decision: "accept" })).rejects.toThrow("previous host generation");
+    await host.answer(newId, { decision: "accept" });
+    expect((await host.health()).pendingAttention).toEqual([attentionId]);
     await host.release();
   });
 
@@ -4814,4 +4810,52 @@ test("a host with no live call releases without a stray hangup", async () => {
   });
   await host.release();
   expect(server.requests.some((request) => request.method === "thread/realtime/stop")).toBe(false);
+});
+
+
+test.each([false, true, undefined, null, "false"])("native question flag %j retains answer IDs and only false permits steer", async (flag) => {
+  const server = new FakeAppServer("async-question-thread");
+  const host = await CodexAppServerHost.start({ cwd: "/repo", eventStore: new MemoryEventStore(), spawnProcess: fakeSpawn(server) });
+  await host.send({ id: "active-question-turn", text: "start" });
+  server.request("question-one", "item/tool/requestUserInput", { threadId: "async-question-thread", turnId: "turn-1", isBlocking: flag, questions: [{ id: "q", question: "Continue?" }] });
+  expect((await host.health()).status).toBe(flag === false ? "active" : "attention");
+  expect((await host.health()).pendingAttention).toEqual(["item/tool/requestUserInput:question-one"]);
+  if (flag === false) {
+    expect(await host.send({ id: "matching-steer", text: "keep going", expectedTurnId: "turn-1" })).toMatchObject({ outcome: "steered" });
+    server.request("approval-one", "item/commandExecution/requestApproval", { isBlocking: false, command: "date" });
+    expect((await host.health()).status).toBe("attention");
+    await host.answer("item/tool/requestUserInput:question-one", { answers: { q: { answers: ["yes"] } } });
+    expect((await host.health()).pendingAttention).toEqual(["item/commandExecution/requestApproval:approval-one"]);
+  }
+  await host.release();
+});
+
+test("Codex stdout preserves Unicode split inside a completed user echo", async () => {
+  const server = new FakeAppServer("unicode-wire");
+  const host = await CodexAppServerHost.start({ cwd: "/repo", eventStore: new MemoryEventStore(), spawnProcess: fakeSpawn(server) });
+  await host.send({ id: "unicode-original", text: "Привіт 🌍" });
+  const encoded = encodeCodexStructuredUserText("Привіт 🌍", undefined, undefined, undefined, deliveryDedup("unicode-original"));
+  const bytes = Buffer.from(JSON.stringify({ method: "item/completed", params: { threadId: "unicode-wire", turnId: "turn-1", item: { type: "userMessage", id: "unicode-item", clientId: "unicode-original", content: [{ type: "text", text: encoded }] } } }) + "\n");
+  const split = bytes.indexOf(Buffer.from("П")) + 1;
+  server.stdout.write(bytes.subarray(0, split)); server.stdout.write(bytes.subarray(split));
+  expect(await host.send({ id: "unicode-original", text: "Привіт 🌍" })).toMatchObject({ turnId: "turn-1" });
+  await expect(host.send({ id: "unicode-original", text: "wrong payload" })).rejects.toThrow("different payload");
+  await host.release();
+});
+
+test("malformed nonblocking requests stay blocking; auth recovery remains bounded and unverified", async () => {
+  const server = new FakeAppServer("diagnostic-thread");
+  const host = await CodexAppServerHost.start({ cwd: "/repo", eventStore: new MemoryEventStore(), spawnProcess: fakeSpawn(server) });
+  await host.send({ id: "diagnostic-turn", text: "start" });
+  server.request("malformed-question", "item/tool/requestUserInput", { threadId: "diagnostic-thread", turnId: "turn-1", isBlocking: false, questions: [{ question: "Missing identity" }] });
+  expect((await host.health()).status).toBe("attention");
+  server.notify("modelProvider/authRecoveryCompleted", {});
+  expect((await host.health()).diagnostics?.authRecovery).toBe("unknown");
+  server.notify("modelProvider/authRecoveryStarted", { threadId: "diagnostic-thread", turnId: "turn-1", provider: "fixture", message: "retrying" });
+  expect((await host.health()).diagnostics?.authRecovery).toBe("started");
+  server.notify("modelProvider/authRecoveryCompleted", { threadId: "diagnostic-thread", turnId: "turn-1", provider: "fixture", message: "complete" });
+  expect((await host.health()).diagnostics).toMatchObject({ executable: "codex", authRecovery: "completed-unverified" });
+  expect((await host.health()).pendingAttention).toEqual(["item/tool/requestUserInput:malformed-question"]);
+  expect(server.requests.filter(request => request.method === "turn/start")).toHaveLength(1);
+  await host.release();
 });

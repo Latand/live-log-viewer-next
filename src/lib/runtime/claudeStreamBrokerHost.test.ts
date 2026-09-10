@@ -1087,7 +1087,7 @@ describe("ClaudeStreamBrokerHost", () => {
     await replacement.release();
   });
 
-  test("a missing replay confirmation times out and leaves retry ownership for adoption", async () => {
+  test("a missing replay confirmation keeps the incumbent alive and preserves adoption evidence", async () => {
     const ledger = new RecordingDeliveryLedger();
     const eventStore = new MemoryEventStore();
     const firstChild = new FakeClaude(ledger);
@@ -1104,7 +1104,8 @@ describe("ClaudeStreamBrokerHost", () => {
 
     await expect(first.send({ id: "timeout-entry", text: "retry after timeout" }))
       .rejects.toThrow("delivery confirmation timed out");
-    expect((await first.health()).status).toBe("dead");
+    expect((await first.health()).status).toBe("active");
+    expect(firstChild.signals).toEqual([]);
     expect(ledger.load("timeout-session")).toContainEqual(expect.objectContaining({
       entry: expect.objectContaining({ id: "timeout-entry", content: { text: "retry after timeout", images: [] } }),
       delivered: false,
@@ -2251,4 +2252,27 @@ describe("issue 367 concurrent launch admission", () => {
       fs.rmSync(dir, { recursive: true, force: true });
     }
   });
+});
+
+
+test("delayed replay echo during provider retry preserves unrelated Claude work and settles the original payload", async () => {
+  const ledger = new RecordingDeliveryLedger();
+  const child = new FakeClaude(ledger);
+  const host = await ClaudeStreamBrokerHost.adopt("delayed-echo-session", {
+    cwd: "/repo", deliveryLedger: ledger, eventStore: new MemoryEventStore(), requestTimeoutMs: 10,
+    readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
+    readTranscript: () => [], spawnProcess: fakeSpawn(child, {}),
+  });
+  const send = host.send({ id: "delayed-entry", text: "retained instruction" });
+  child.emitJson({ type: "system", subtype: "api_retry", attempt: 1, max_retries: 5, retry_delay_ms: 1000, error: "rate_limit" });
+  await expect(send).rejects.toThrow("delivery confirmation timed out");
+  expect((await host.health()).status).toBe("active");
+  expect(child.signals).toEqual([]);
+  await expect(host.send({ id: "delayed-entry", text: "retained instruction" })).rejects.toThrow("delivery confirmation timed out");
+  expect(child.inputs.filter(input => input.type === "user")).toHaveLength(1);
+  child.emitJson({ type: "user", isReplay: true, session_id: "delayed-echo-session", uuid: "echo-id", message: { role: "user", content: [{ type: "text", text: "retained instruction" }] } });
+  expect(await host.send({ id: "delayed-entry", text: "retained instruction" })).toMatchObject({ outcome: "turn-started" });
+  expect(child.inputs.filter(input => input.type === "user")).toHaveLength(1);
+  expect(ledger.load("delayed-echo-session")[0]?.delivered).toBeTrue();
+  await host.release();
 });

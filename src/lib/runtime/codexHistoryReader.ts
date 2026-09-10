@@ -265,7 +265,7 @@ export type CodexHistoryDeliveryResult =
   | { state: "found"; identity: CodexHistoryIdentity; turnId: string; item: CodexHistoryItem }
   | Exclude<CodexHistoryResult, { state: "complete" }>;
 
-function normalizedContent(content: ObjectValue[]): ObjectValue[] {
+export function normalizedCodexHistoryContent(content: ObjectValue[]): ObjectValue[] {
   return content.map((input) => {
     if (input.type === "text") return {
       ...input,
@@ -292,7 +292,7 @@ export function findCodexHistoryDelivery(history: CodexHistoryResult, target: Co
   const match = candidates[0];
   if ((target.turnId !== null && target.turnId !== match.turnId)
       || (target.itemId !== undefined && target.itemId !== match.item.id)
-      || !isDeepStrictEqual(normalizedContent(target.content), normalizedContent(match.item.content as ObjectValue[]))) {
+      || !isDeepStrictEqual(normalizedCodexHistoryContent(target.content), normalizedCodexHistoryContent(match.item.content as ObjectValue[]))) {
     return { state: "unknown", reason: "conflicting-record" };
   }
   return { state: "found", identity: history.identity, ...match };

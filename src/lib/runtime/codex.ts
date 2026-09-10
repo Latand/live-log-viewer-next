@@ -1,3 +1,4 @@
+import { isNonblockingCodexQuestion } from "./codexAttention";
 import { createHash } from "node:crypto";
 
 import type { AppServerNotification, AppServerRequest } from "@/lib/accounts/codexAppServer";
@@ -118,6 +119,7 @@ export function normalizeCodexRequest(scope: RuntimeScope, request: AppServerReq
       unowned: false,
       createdAt: new Date().toISOString(),
       request: attentionRequest(request.method, payload),
+      isBlocking: !isNonblockingCodexQuestion(request.method, payload),
       turnId: text(payload.turnId, turn.id),
       ...(typeof payload.autoResolutionMs === "number" ? { autoResolutionMs: payload.autoResolutionMs } : {}),
     },

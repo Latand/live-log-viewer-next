@@ -1,9 +1,19 @@
+import { normalizeNativeQueueObservation } from "./nativeQueueContent";
+import type { NativeQueueInput } from "./nativeCodexQueue";
+import { StructuredSendRefusedError } from "./engineHost";
+import { basename } from "node:path";
+import { isNonblockingCodexQuestion } from "./codexAttention";
+import { codexTurnProfile } from "./codexTurnProfile";
+import { StringDecoder } from "node:string_decoder";
+import { NativeCodexQueue, NativeQueueProtocolRefusal } from "./nativeCodexQueue";
+import { readCodexHistory, findCodexHistoryDelivery, type CodexHistoryResult } from "./codexHistoryReader";
+import type { NativeQueueHost } from "./nativeQueueExecutor";
+import type { NativeQueueRecord } from "./nativeQueueContracts";
 import { spawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from "node:child_process";
 import { createHash, type Hash } from "node:crypto";
 import fs from "node:fs";
 
-import { isKnownEffortTier } from "@/lib/agent/efforts";
 import type { ProcessIdentity } from "@/lib/agent/registry";
 import { procBackend } from "@/lib/proc";
 import { signalDetachedProcessGroup, signalProcessGroup, type ProcessSignal } from "@/lib/processGroup";
@@ -113,6 +123,7 @@ type PendingAttention = {
   rpcId: string | number;
   method: string;
   origin: "current" | "restored";
+  isBlocking?: boolean;
   answer?: PendingAnswer;
 };
 type ThreadStatus = {
@@ -1135,6 +1146,12 @@ export class CodexAppServerHost implements EngineHost {
     digest: string;
     promise: Promise<{ deliveryId: string; acknowledged: true }>;
   }>();
+  readonly supportsSteer = true;
+  nativeQueue?: NativeQueueHost;
+  private nativeQueueRevision = 0;
+  private readonly selectedExecutable: string;
+  private queueCapability: "unknown" | "supported" | "unsupported" = "unknown";
+  private readonly stdoutDecoder = new StringDecoder("utf8");
   private readonly attentions = new Map<string, PendingAttention>();
   private readonly stateListeners = new Set<(state: HostState) => void>();
   private readonly preRestoreEvents: UnsequencedEvent[] = [];
@@ -1149,6 +1166,8 @@ export class CodexAppServerHost implements EngineHost {
   private cursor: number;
   private activeTurnId: string | null = null;
   private protocolVersion: string | null = null;
+  private modelCatalog: unknown = null;
+  private authRecovery: "unknown" | "started" | "completed-unverified" = "unknown";
   private account: HostState["account"] = null;
   private engineStatus: "active" | "idle" | "unhosted" | "dead" = "idle";
   private activeFlags: string[] = [];
@@ -1180,6 +1199,7 @@ export class CodexAppServerHost implements EngineHost {
     this.identity = identity;
     this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.realtimeStartTimeoutMs = options.realtimeStartTimeoutMs ?? REALTIME_START_TIMEOUT_MS;
+    this.selectedExecutable = basename(options.binary ?? "codex");
     this.deliveryConfirmationTimeoutMs = options.deliveryConfirmationTimeoutMs
       ?? DEFAULT_DELIVERY_CONFIRMATION_TIMEOUT_MS;
     this.compactEvidenceTimeoutMs = options.compactEvidenceTimeoutMs ?? DEFAULT_COMPACT_EVIDENCE_TIMEOUT_MS;
@@ -1199,7 +1219,7 @@ export class CodexAppServerHost implements EngineHost {
     });
     this.cursor = options.initialEventCursor ?? 0;
     this.reapedPromise = new Promise((resolve) => { this.resolveReaped = resolve; });
-    child.stdout.on("data", (chunk: Buffer | string) => this.acceptStdout(String(chunk)));
+    child.stdout.on("data", (chunk: Buffer | string) => this.acceptStdout(typeof chunk === "string" ? chunk : this.stdoutDecoder.write(chunk)));
     child.stderr.on("data", (chunk: Buffer | string) => this.acceptStderr(String(chunk)));
     child.stdin.on("error", (error) => {
       if (!this.releasing && !this.released) this.fail(new Error(`Codex app-server stdin failed: ${safeError(error)}`));
@@ -1280,8 +1300,9 @@ export class CodexAppServerHost implements EngineHost {
       provisional.account = { type: accountType, planType: stringField(account, "planType") };
       provisional.requestedModel = options.model;
       try {
+        provisional.modelCatalog = await provisional.rpc("model/list", {});
         provisional.imageInputSupport = modelSupportsImageInput(
-          await provisional.rpc("model/list", {}),
+          provisional.modelCatalog,
           options.model,
         ) ? "supported" : "unsupported";
       } catch {
@@ -1325,6 +1346,7 @@ export class CodexAppServerHost implements EngineHost {
       if (threadId) provisional.reconcileThreadHistory(result);
       provisional.reconcileAfterOpen(threadStatus(result), resumedActiveTurnId(result));
       provisional.endBufferedNotificationReconciliation();
+      await provisional.initializeNativeQueue();
       return provisional;
     } catch (error) {
       try {
@@ -1411,6 +1433,84 @@ export class CodexAppServerHost implements EngineHost {
     if (this.imageInputSupport === "supported") this.setSessionStatus(this.engineStatus, this.activeFlags);
   }
 
+  private supportsNativeHistory(): boolean {
+    const version = this.protocolVersion?.match(/^(\d+)\.(\d+)\./);
+    return !!version && (Number(version[1]) > 0 || Number(version[2]) >= 153);
+  }
+
+  private async initializeNativeQueue(): Promise<void> {
+    if (!this.supportsNativeHistory()) { if (this.protocolVersion) this.queueCapability = "unsupported"; return; }
+    const queue = new NativeCodexQueue({ rpc: (method, params, timeout) => {
+      if (!this.writerFenceAllowsActuation() || this.dead || this.releasing || this.released) {
+        throw new StructuredSendRefusedError("native queue writer is unavailable");
+      }
+      return this.rpc(method, params, timeout, true);
+    } }, this.identity.threadId, { timeoutMs: this.requestTimeoutMs });
+    try { await queue.refresh(); }
+    catch (error) { queue.dispose(); this.queueCapability = error instanceof NativeQueueProtocolRefusal && error.code === -32601 ? "unsupported" : "unknown"; return; }
+    this.queueCapability = "supported";
+    this.nativeQueue = {
+      queue,
+      prepare: async (entry, version) => {
+        if (version.images.length && this.imageInputSupport !== "supported") throw new StructuredSendRefusedError("image input capability is unavailable");
+        return [
+          ...version.images.map(image => ({ type: "localImage" as const, path: this.resolveImagePath(image) })),
+          { type: "text", text: encodeCodexStructuredUserText(version.text,
+            version.images.length ? version.contentDigest : undefined, version.selectedContext, version.origin ?? { kind: "operator" },
+            codexDeliveryDedup(`${entry.entryId}-v${version.revision}`)) },
+        ];
+      },
+      evidence: (entry) => this.nativeQueueEvidence(entry),
+      evidenceBatch: async (entries) => {
+        if (!this.identity.path) return entries.map(() => null);
+        const history = await readCodexHistory((method, params, timeout) => this.rpc(method, params, timeout, true),
+          { threadId: this.identity.threadId, path: this.identity.path }, { deadlineAt: Date.now() + this.requestTimeoutMs, sortDirection: "desc" });
+        return Promise.all(entries.map(entry => this.nativeQueueEvidence(entry, history)));
+      },
+      sendWithdrawn: async (entry, expectedTurnId) => {
+        if (!this.writerFenceAllowsActuation() || this.dead || this.releasing || this.released) throw new StructuredSendRefusedError("native queue writer is unavailable");
+        if (this.activeTurnId !== expectedTurnId || this.hasBlockingAttention()) throw new StructuredSendRefusedError("stale-turn or blocking attention");
+        const version = entry.versions.find(v => v.revision === entry.revision);
+        if (!version?.input) throw new StructuredSendRefusedError("native queue input is unavailable");
+        const result = await this.rpc(expectedTurnId === null ? "turn/start" : "turn/steer", {
+          threadId: this.identity.threadId, input: version.input, clientUserMessageId: entry.clientUserMessageId,
+          ...(expectedTurnId === null ? {} : { expectedTurnId }),
+        }, this.requestTimeoutMs, true);
+        const turnId = turnIdFromResult(result, expectedTurnId === null ? "turn/start" : "turn/steer");
+        if (expectedTurnId !== null && turnId !== expectedTurnId) throw new Error("native steer returned a different turn identity");
+        return { turnId };
+      },
+    };
+    this.notifyStateListeners();
+  }
+
+  private async nativeQueueEvidence(entry: NativeQueueRecord, snapshot?: CodexHistoryResult) {
+    if (entry.binding.threadId !== this.identity.threadId || !this.identity.path) return null;
+    const history = snapshot ?? await readCodexHistory((method, params, timeout) => this.rpc(method, params, timeout, true),
+      { threadId: this.identity.threadId, path: this.identity.path }, { deadlineAt: Date.now() + this.requestTimeoutMs, sortDirection: "desc" });
+    const targetHistory = history.state !== "complete" ? history : { ...history,
+      turns: history.turns.map(turn => ({ ...turn, items: turn.items.filter(item => item.type === "userMessage" && item.clientId === entry.clientUserMessageId) }))
+        .filter(turn => turn.items.length > 0),
+    };
+    for (const version of entry.versions) {
+      if (!version.input || (entry.dispatchedRevision !== null && entry.dispatchedRevision !== version.revision)) continue;
+      const normalizedHistory = targetHistory.state !== "complete" ? targetHistory : {
+        ...targetHistory,
+        turns: targetHistory.turns.map(turn => ({ ...turn, items: turn.items.map(item =>
+          item.type === "userMessage" && item.clientId === entry.clientUserMessageId
+            ? { ...item, content: normalizeNativeQueueObservation(version, item.content as NativeQueueInput[]) ?? item.content } : item) })),
+      };
+      const found = findCodexHistoryDelivery(normalizedHistory, { clientId: entry.clientUserMessageId, content: version.input, turnId: entry.dispatchedTurnId ?? null });
+      if (found.state === "found") return { threadId: found.identity.threadId, clientUserMessageId: entry.clientUserMessageId,
+        revision: version.revision, turnId: found.turnId, itemId: found.item.id, input: version.input };
+    }
+    return null;
+  }
+
+  private hasBlockingAttention(): boolean {
+    return [...this.attentions.values()].some(attention => attention.isBlocking !== false);
+  }
+
   async send(entry: QueueEntry): Promise<DeliveryReceipt> {
     if (this.dead || this.releasing || this.released || !this.writerFenceAllowsActuation()) {
       return { outcome: "rejected", reason: "dead-host" };
@@ -1461,6 +1561,7 @@ export class CodexAppServerHost implements EngineHost {
       },
     ];
     if (currentTurn) {
+      if (this.hasBlockingAttention()) throw new StructuredSendRefusedError("blocking attention must be answered before steering");
       try {
         const result = await this.rpc("turn/steer", {
           threadId: this.identity.threadId,
@@ -1479,21 +1580,10 @@ export class CodexAppServerHost implements EngineHost {
         throw error;
       }
     }
-    /* Per-turn effort (issue #390 §5): the snapshot riding the durable entry
-       outranks the host-fixed default — the only axis `turn/start` accepts
-       (model and service tier are thread-level in this protocol, so the
-       negotiated capability advertises `perTurnModel: false`). A token outside
-       the CLI tier vocabulary falls back to the host default rather than
-       failing the turn over a settings blemish; model fit for an in-vocabulary
-       tier is the app server's own verdict (per-model scales exceed the base
-       engine list — sol/terra accept `ultra`). */
-    const perTurnEffort = entry.runtime?.effort && isKnownEffortTier(entry.runtime.effort)
-      ? entry.runtime.effort
-      : undefined;
-    const effort = perTurnEffort ?? this.effort;
+    const profile = codexTurnProfile(entry.runtime, { model: this.requestedModel, effort: this.effort }, this.modelCatalog);
     const result = await this.rpc("turn/start", {
       threadId: this.identity.threadId,
-      ...(effort ? { effort } : {}),
+      ...profile,
       input,
       clientUserMessageId: entry.id,
     });
@@ -1533,6 +1623,14 @@ export class CodexAppServerHost implements EngineHost {
       `window` bounds which end survives — "first" for materialization
       evidence, "latest" for delivery confirmation; always oldest-first. */
   private async readThreadWithTurns(window: "first" | "latest", timeoutMs?: number): Promise<unknown> {
+    if (this.supportsNativeHistory() && this.identity.path) {
+      const history = await readCodexHistory((method, params, remaining) => this.rpc(method, params, remaining, true),
+        { threadId: this.identity.threadId, path: this.identity.path },
+        { deadlineAt: Date.now() + (timeoutMs ?? this.requestTimeoutMs), sortDirection: window === "first" ? "asc" : "desc" });
+      if (history.state === "complete") return { thread: { id: history.identity.threadId, path: history.identity.path,
+        turns: window === "latest" ? [...history.turns].reverse() : history.turns } };
+      if (history.state === "unknown") throw new Error(`Codex canonical history is unavailable: ${history.reason}`);
+    }
     try {
       return await this.rpc("thread/read", {
         threadId: this.identity.threadId,
@@ -2188,6 +2286,7 @@ export class CodexAppServerHost implements EngineHost {
       throw new Error("Codex app-server host is unavailable");
     }
     const attention = this.attentions.get(attentionRef);
+    if (attention?.origin === "restored") throw new Error("attention belongs to a previous host generation; answer ownership is unavailable");
     if (!attention) throw new Error("attention request is missing or already answered");
     if (attention.answer) throw new Error("attention answer is already awaiting confirmation");
     await new Promise<void>((resolve, reject) => {
@@ -2228,7 +2327,7 @@ export class CodexAppServerHost implements EngineHost {
       : null;
     const status: HostState["status"] = this.dead ? "dead"
       : this.released ? "unhosted"
-      : this.attentions.size > 0 ? "attention"
+      : this.hasBlockingAttention() ? "attention"
       : this.activeTurnId ? "active"
       : this.engineStatus;
     return {
@@ -2241,13 +2340,16 @@ export class CodexAppServerHost implements EngineHost {
       protocolVersion: this.protocolVersion,
       activeTurnRef: this.activeTurnId,
       pendingAttention: [...this.attentions.keys()],
-      activeFlags: [...this.activeFlags],
+      nativeQueueRevision: this.nativeQueueRevision,
+      activeFlags: [...this.activeFlags, ...(this.nativeQueue ? ["native-queue"] : []), ...(this.supportsNativeHistory() && Array.isArray(record(this.modelCatalog)?.data) ? ["native-turn-profile"] : [])],
       account: this.account,
+      diagnostics: { executable: this.selectedExecutable, version: this.protocolVersion, nativeQueue: !!this.nativeQueue, queueCapability: this.queueCapability, authRecovery: this.authRecovery },
     };
   }
 
   async release(): Promise<void> {
     if (this.released) return;
+    this.nativeQueue?.queue.dispose();
     if (!this.releasePromise) {
       const attempt = this.releaseAndReap();
       this.releasePromise = attempt;
@@ -2523,7 +2625,7 @@ export class CodexAppServerHost implements EngineHost {
         if (event.status !== "completed") this.cancelledVoiceTurns.add(event.turnId);
       }
       if (event.kind === "attention") {
-        this.attentions.set(event.id, { rpcId: "restored", method: event.method, origin: "restored" });
+        this.attentions.set(event.id, { rpcId: "restored", method: event.method, origin: "restored", isBlocking: !isNonblockingCodexQuestion(event.method, event.attention) });
       }
       if (event.kind === "attention-resolved") this.attentions.delete(event.id);
       if (event.kind === "realtime-delivery-progress") {
@@ -2549,7 +2651,6 @@ export class CodexAppServerHost implements EngineHost {
         this.activeFlags = [...(event.activeFlags ?? [])];
         if (event.status === "unhosted" || event.status === "dead") {
           this.activeTurnId = null;
-          this.attentions.clear();
         }
       }
     }
@@ -2577,8 +2678,9 @@ export class CodexAppServerHost implements EngineHost {
     }
     for (const [attentionId, attention] of [...this.attentions]) {
       if (attention.origin !== "restored") continue;
-      this.attentions.delete(attentionId);
-      this.emit({ kind: "attention-resolved", id: attentionId, resolution: "host-restarted" });
+      const previous = this.events.findLast(event => event.kind === "attention" && event.id === attentionId);
+      if (previous?.kind === "attention") this.emit({ kind: "attention", id: attentionId, method: attention.method,
+        attention: { ...(record(previous.attention) ?? {}), unowned: true } });
     }
     this.emitThreadStatus(resumedTurnTerminalized && !this.activeTurnId
       ? { type: "idle", activeFlags: [] }
@@ -2875,17 +2977,17 @@ export class CodexAppServerHost implements EngineHost {
     this.setSessionStatus(mapped, status.activeFlags);
   }
 
-  private rpc(method: string, params: JsonObject = {}, timeoutMs = this.requestTimeoutMs): Promise<unknown> {
+  private rpc(method: string, params: JsonObject = {}, timeoutMs = this.requestTimeoutMs, preserveHost = false): Promise<unknown> {
     if (this.dead || this.releasing || this.released) return Promise.reject(new Error("Codex app-server host is unavailable"));
     const id = this.nextRpcId++;
     if (REPLAY_ENVELOPE_METHODS.has(method)) this.trackReplayEnvelopeRequest(id);
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        if (method === "thread/read") this.rememberLateThreadReadResponse(id, timeoutMs);
+        if (method === "thread/read" || preserveHost) this.rememberLateThreadReadResponse(id, timeoutMs);
         const error = new Error(`${method} timed out${MUTATING_RPC_METHODS.has(method) ? "; outcome is uncertain" : ""}`);
         reject(error);
-        if (MUTATING_RPC_METHODS.has(method)) this.fail(error);
+        if (MUTATING_RPC_METHODS.has(method) && !preserveHost) this.fail(error);
       }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
       this.write({ jsonrpc: "2.0", id, method, params });
@@ -3089,18 +3191,35 @@ export class CodexAppServerHost implements EngineHost {
       this.pending.delete(id);
       clearTimeout(pending.timer);
       const error = record(message.error);
-      if (error) pending.reject(new Error(`Codex app-server request failed: ${safeError(error.message ?? "unknown error")}`));
+      if (error) {
+        const message = `Codex app-server request failed: ${safeError(error.message ?? "unknown error")}`;
+        pending.reject(typeof error.code === "number" && Number.isInteger(error.code)
+          ? new NativeQueueProtocolRefusal(error.code, message) : new Error(message));
+      }
       else pending.resolve(message.result);
       return;
     }
     if (!method) return this.fail(new Error("Codex app-server message has no method"));
     const params = record(message.params) ?? {};
     if (typeof id === "number" || typeof id === "string") {
-      const attentionId = `${method}:${String(id)}`;
-      this.attentions.set(attentionId, { rpcId: id, method, origin: "current" });
+      const baseAttentionId = `${method}:${String(id)}`;
+      const currentRequest = [...this.attentions].find(([, attention]) => attention.origin === "current" && attention.rpcId === id && attention.method === method);
+      const attentionId = currentRequest?.[0] ?? (this.attentions.get(baseAttentionId)?.origin === "restored"
+        ? `${baseAttentionId}:generation-${this.cursor + 1}` : baseAttentionId);
+      this.attentions.set(attentionId, { rpcId: id, method, origin: "current", isBlocking: !isNonblockingCodexQuestion(method, params) });
       const event = { kind: "attention" as const, id: attentionId, method, attention: params };
       if (!reconcileBufferedLifecycle || !this.consumeBufferedNotification(event)) this.emit(event);
       return;
+    }
+    if (method === "modelProvider/authRecoveryStarted" || method === "modelProvider/authRecoveryCompleted") {
+      const valid = params.threadId === this.identity.threadId && typeof params.turnId === "string" && params.turnId.length > 0
+        && typeof params.provider === "string" && typeof params.message === "string";
+      this.authRecovery = !valid ? "unknown" : method.endsWith("Started") ? "started" : "completed-unverified";
+      this.notifyStateListeners();
+    }
+    if (this.nativeQueue?.queue.handleNotification(method, params)) {
+      this.nativeQueueRevision++;
+      this.emit({ kind: "native-queue-changed", threadId: this.identity.threadId });
     }
     this.acceptNotification(method, params, reconcileBufferedLifecycle);
   }
@@ -3180,7 +3299,7 @@ export class CodexAppServerHost implements EngineHost {
       const requestId = params.requestId;
       if (typeof requestId !== "number" && typeof requestId !== "string") return;
       const resolved = [...this.attentions.entries()].find(([, attention]) =>
-        String(attention.rpcId) === String(requestId));
+        attention.origin === "current" && String(attention.rpcId) === String(requestId));
       if (!resolved) return;
       const answer = resolved[1].answer;
       if (answer) {

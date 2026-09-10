@@ -141,6 +141,8 @@ function validEvent(value: unknown): value is RuntimeEvent {
   if (!Number.isSafeInteger(event.seq) || (event.seq as number) <= 0) return false;
   const nonEmptyString = (field: unknown): field is string => typeof field === "string" && field.length > 0;
   switch (event.kind) {
+    case "native-queue-changed":
+      return nonEmptyString(event.threadId);
     case "turn-started":
       return nonEmptyString(event.turnId);
     case "delta":
