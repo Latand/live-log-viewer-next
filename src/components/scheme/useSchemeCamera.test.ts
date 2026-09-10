@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import type { SchemeRect } from "./layout";
-import { cameraMatchesFraming, cameraShowsWorld, centredCamera, fitCameraToRect, hasBoardContent, nodeIsFramed } from "./useSchemeCamera";
+import { READABLE_Z, cameraMatchesFraming, cameraShowsWorld, centredCamera, fitCameraToRect, hasBoardContent, nodeIsFramed } from "./useSchemeCamera";
 
 const empty = { nodes: [], drafts: [] };
 const rect: SchemeRect = { x: 0, y: 0, w: 260, h: 100 };
@@ -119,5 +119,23 @@ describe("nodeIsFramed — what a focus request actually asks (#1625)", () => {
 
   test("an unmeasured viewport frames nothing, so a request stays owed", () => {
     expect(nodeIsFramed(pane, centredCamera(pane, 0.58, view), { w: 1, h: 1 })).toBe(false);
+  });
+
+  test("a board zoomed out to chips frames nothing, however well the rectangle lines up", () => {
+    /* Perfectly placed and entirely on screen — and drawn as a chip, which is
+       located rather than readable. The focus request is not satisfied by it. */
+    const overview = centredCamera(pane, 0.2, view);
+    expect(nodeIsFramed(pane, overview, view)).toBe(false);
+    expect(nodeIsFramed(pane, centredCamera(pane, READABLE_Z, view), view)).toBe(true);
+  });
+
+  test("a sliver hanging off the side is not framed", () => {
+    const framed = centredCamera(pane, 0.58, view);
+    /* One pixel of the pane inside the right edge. */
+    expect(nodeIsFramed(pane, { ...framed, x: framed.x + view.w }, view)).toBe(false);
+    /* And one pixel inside the left edge. */
+    expect(nodeIsFramed(pane, { ...framed, x: framed.x - view.w }, view)).toBe(false);
+    /* Half of it across the edge still reads. */
+    expect(nodeIsFramed(pane, { ...framed, x: framed.x - pane.w * 0.58 / 2 }, view)).toBe(true);
   });
 });

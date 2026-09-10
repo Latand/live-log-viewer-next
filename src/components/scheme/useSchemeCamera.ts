@@ -209,19 +209,30 @@ export function centredCamera(node: SchemeRect, z: number, vp: { w: number; h: n
 /** How much of a node's head must be on screen before an opened conversation
     counts as shown: its title row and the first lines under it. */
 const FRAMED_HEAD = 120;
+/** The scale below which a conversation is drawn as a chip rather than as
+    content. `centerOn` has always raised the camera to it for a focus, which is
+    what makes an opened conversation readable rather than merely located. */
+export const READABLE_Z = 0.55;
 
 /**
  * Whether `node` is on screen and readable at this camera — the question a
  * focus request actually asks, as opposed to "did a camera move happen".
- * The head is what is judged: a pane taller than the viewport is framed when
- * its top is inside it, and one pushed past an edge is not.
+ *
+ * Readable is the operative word, and it rules out two things that "the
+ * rectangle overlaps the viewport" would accept: a board zoomed out far enough
+ * that the node is a chip, and a node hanging off an edge with a sliver of
+ * itself showing. The head is what is judged, so a pane taller than the
+ * viewport is framed when its top is inside it and one pushed past an edge is
+ * not.
  */
 export function nodeIsFramed(node: SchemeRect, camera: Camera, vp: { w: number; h: number }): boolean {
   if (!(vp.w > 1) || !(vp.h > 1)) return false;
+  if (camera.z < READABLE_Z) return false;
   const sx = camera.x + node.x * camera.z;
   const sy = camera.y + node.y * camera.z;
   const head = Math.min(node.h * camera.z, FRAMED_HEAD);
-  return sy >= 0 && sy + head <= vp.h && sx < vp.w && sx + node.w * camera.z > 0;
+  const across = Math.min(sx + node.w * camera.z, vp.w) - Math.max(sx, 0);
+  return sy >= 0 && sy + head <= vp.h && across >= Math.min(node.w * camera.z, FRAMED_HEAD);
 }
 
 const sameRect = (a: SchemeRect, b: SchemeRect) => a.x === b.x && a.y === b.y && a.w === b.w && a.h === b.h;
@@ -720,7 +731,12 @@ export function useSchemeCamera({
     const node = layout.byPath.get(aim.path) ?? taskRects?.get(aim.path);
     /* Not placed yet is not a failure: the request is still owed. */
     if (!node) return;
-    if (nodeIsFramed(node, cam, vp)) {
+    /* The FIRST aim is unconditional. An open asks for a readable framing of
+       that conversation, not merely for its rectangle to be somewhere in the
+       viewport, so returning to one from the overview scale still zooms in to
+       it — the guarantee `centerOn(node, 0.55)` has always carried. Only once
+       an aim has been taken does "already shown" complete the request. */
+    if (aim.at && nodeIsFramed(node, cam, vp)) {
       focusAim.current = null;
       return;
     }
@@ -730,12 +746,12 @@ export function useSchemeCamera({
     if (aim.at && sameRect(aim.at, node) && aim.cam && cameraMatchesFraming(cam, aim.cam)) return;
     const rect = viewportRef.current?.getBoundingClientRect();
     if (!rect || !(rect.width > 1) || !(rect.height > 1)) return;
-    const z = Math.min(MAX_Z, Math.max(cam.z, 0.55));
+    const z = Math.min(MAX_Z, Math.max(cam.z, READABLE_Z));
     aim.at = { x: node.x, y: node.y, w: node.w, h: node.h };
     aim.cam = alignX(centredCamera(node, z, { w: rect.width, h: rect.height }));
     aiming.current = true;
     try {
-      centerOn(node, 0.55);
+      centerOn(node, READABLE_Z);
     } finally {
       aiming.current = false;
     }
