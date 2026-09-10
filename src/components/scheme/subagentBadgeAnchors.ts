@@ -10,31 +10,45 @@ export interface SubagentBadgeAnchorRegistry {
 
 function sameAnchors(
   left: ReadonlyMap<string, SubagentBadgeAnchor> | undefined,
-  right: ReadonlyMap<string, SubagentBadgeAnchor>,
+  right: ReadonlyMap<string, SubagentBadgeAnchor> | undefined,
 ): boolean {
-  if (!left || left.size !== right.size) return false;
+  if ((left?.size ?? 0) !== (right?.size ?? 0)) return false;
+  if (!right) return true;
   for (const [id, anchor] of right) {
-    const current = left.get(id);
+    const current = left?.get(id);
     if (!current || current.x !== anchor.x || current.y !== anchor.y) return false;
   }
   return true;
 }
 
 export function createSubagentBadgeAnchorRegistry(onChange: () => void = () => undefined): SubagentBadgeAnchorRegistry {
-  const byParent = new Map<string, ReadonlyMap<string, SubagentBadgeAnchor>>();
+  type Anchors = ReadonlyMap<string, SubagentBadgeAnchor>;
+  type Owners = Map<symbol, Anchors>;
+  const byParent = new Map<string, Owners>();
+  const current = (owners: Owners | undefined): Anchors | undefined => {
+    let anchors: Anchors | undefined;
+    for (const candidate of owners?.values() ?? []) anchors = candidate;
+    return anchors;
+  };
   return {
     anchorFor(parentConversationId, childConversationId) {
-      return byParent.get(parentConversationId)?.get(childConversationId) ?? null;
+      return current(byParent.get(parentConversationId))?.get(childConversationId) ?? null;
     },
     replace(parentConversationId, anchors) {
+      // One conversation can appear in several task bands. Each mounted copy
+      // owns its registration; removing the latest copy restores the remaining one.
+      const owners = byParent.get(parentConversationId) ?? new Map<symbol, Anchors>();
+      const owner = Symbol();
       const owned = new Map(anchors);
-      const changed = !sameAnchors(byParent.get(parentConversationId), owned);
-      byParent.set(parentConversationId, owned);
+      const changed = !sameAnchors(current(owners), owned);
+      owners.set(owner, owned);
+      byParent.set(parentConversationId, owners);
       if (changed) onChange();
       return () => {
-        if (byParent.get(parentConversationId) !== owned) return;
-        byParent.delete(parentConversationId);
-        onChange();
+        const previous = current(owners);
+        if (!owners.delete(owner)) return;
+        if (!owners.size) byParent.delete(parentConversationId);
+        if (!sameAnchors(previous, current(owners))) onChange();
       };
     },
   };

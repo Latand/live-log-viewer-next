@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { Window } from "happy-dom";
+import { Component, useMemo, useState, type ReactNode } from "react";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 
@@ -242,6 +243,52 @@ test("visible circles register their fixed world-space centers for structural ar
   await Bun.sleep(0);
 
   expect(registry.anchorFor("parent", "child")).toEqual({ x: 721, y: 255 });
+});
+
+test("anchor publication settles with fresh parent props and retains a remaining duplicate", async () => {
+  let notifications = 0;
+  let failure: Error | null = null;
+  let registry = createSubagentBadgeAnchorRegistry();
+  class Boundary extends Component<{ children: ReactNode }, { failed: boolean }> {
+    state = { failed: false };
+    static getDerivedStateFromError() { return { failed: true }; }
+    componentDidCatch(error: Error) { failure = error; }
+    render() { return this.state.failed ? null : this.props.children; }
+  }
+  const parent = entry({ path: "/parent", conversationId: "parent" });
+  const child = entry({ path: "/child", conversationId: "child", parent: parent.path });
+  function Board({ duplicate, offset = 0 }: { duplicate: boolean; offset?: number }) {
+    const [, setRevision] = useState(0);
+    registry = useMemo(() => createSubagentBadgeAnchorRegistry(() => {
+      notifications++;
+      if (notifications === 13) throw new Error("anchor publication did not settle");
+      setRevision(value => value + 1);
+    }), []);
+    return <>{[100 + offset, ...(duplicate ? [400] : [])].map((x, index) => (
+      <SubagentBadges key={index} conversationId="parent" entries={[{ ...parent }, { ...child }]}
+        cardRect={{ x, y: 200, w: 600, h: 70 }} anchorRegistry={registry}
+        onNavigate={() => undefined} now={1_800_000_000} />
+    ))}</>;
+  }
+  const element = dom.document.createElement("div");
+  dom.document.body.append(element);
+  const root = createRoot(element as unknown as HTMLElement);
+  roots.add(root);
+  flushSync(() => root.render(<Boundary><Board duplicate /></Boundary>));
+  await Bun.sleep(30);
+  expect(failure).toBeNull();
+  expect(notifications).toBeLessThanOrEqual(2);
+  expect(registry.anchorFor("parent", "child")).toEqual({ x: 1021, y: 255 });
+
+  flushSync(() => root.render(<Boundary><Board duplicate={false} /></Boundary>));
+  await Bun.sleep(0);
+  expect(failure).toBeNull();
+  expect(registry.anchorFor("parent", "child")).toEqual({ x: 721, y: 255 });
+  flushSync(() => root.render(<Boundary><Board duplicate={false} offset={30} /></Boundary>));
+  await Bun.sleep(0);
+  expect(failure).toBeNull();
+  expect(registry.anchorFor("parent", "child")).toEqual({ x: 751, y: 255 });
+  expect(notifications).toBeLessThan(8);
 });
 
 test("removing the expanded child releases the parent card foreground layer", async () => {
