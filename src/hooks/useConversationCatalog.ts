@@ -82,6 +82,9 @@ interface CatalogSnapshot extends ConversationPage {
  */
 const RETAINED_CATALOG_PAGES = new Map<string, CatalogSnapshot>();
 const RETAINED_CATALOG_SCOPES = 8;
+/* Ceiling on a single revalidation, so a very deep list re-reads its head
+   rather than its whole history. */
+const REVALIDATE_MAX_PAGES = 8;
 
 function retainPage(store: Map<string, CatalogSnapshot>, key: string, snapshot: CatalogSnapshot): void {
   /* Delete before set, so insertion order is recency order. */
@@ -155,6 +158,73 @@ export function useConversationCatalog({
       });
   }, [key, project, query, pageSize, update]);
 
+  /**
+   * Re-reads the pages a scoped consumer came back to (#1614).
+   *
+   * A retained snapshot is what the operator left, and left alone it stays a
+   * photograph: they open an agent, spawn another, rename a third, come back —
+   * and see the list as it was, with no request made, no page to load (an
+   * exhausted chain has no «load more») and nothing to press. So a scoped
+   * consumer re-reads its own span on the way back in: the chain is followed
+   * from the start until it has covered as many rows as were retained, and the
+   * result replaces the snapshot in one swap, so the rows never blink back to
+   * page one on the way. Bounded by the pages actually held (and hard-capped),
+   * never a poll: it happens on the way in, and on an explicit refresh.
+   *
+   * A failure keeps what the operator came back to — their scrolled rows are
+   * worth more than an error banner over an empty list.
+   */
+  const revalidate = useCallback(() => {
+    const current = cache.current.get(key);
+    if (!current?.known || flight.current) return;
+    const held = current.items.length;
+    const controller = new AbortController();
+    const token = { key, controller };
+    flight.current = token;
+    update();
+    void (async () => {
+      try {
+        let cursor: string | null = null;
+        let items: FileEntry[] = [];
+        let page: ConversationPage | null = null;
+        for (let index = 0; index < REVALIDATE_MAX_PAGES; index += 1) {
+          page = await fetchConversationPage(project, query, cursor, controller.signal, pageSize);
+          const seen = new Set(items.map((item) => item.path));
+          items = [...items, ...page.items.filter((item) => !seen.has(item.path))];
+          cursor = page.nextCursor;
+          if (!cursor || items.length >= held) break;
+        }
+        if (!page || controller.signal.aborted || flight.current !== token || active.current.key !== key) return;
+        retainPage(cache.current, key, { ...page, items, nextCursor: cursor, known: true, error: false, expired: false });
+      } catch {
+        /* Keep the retained pages: a list that is a few seconds stale beats one
+           that emptied itself because a revalidation lost the network. */
+      } finally {
+        if (flight.current === token) {
+          flight.current = null;
+          update();
+        }
+      }
+    })();
+  }, [key, project, query, pageSize, update]);
+
+  /* Coming back in, and only that: the scopes this mount INHERITED — pages
+     some earlier mount left behind — are re-read once each. Pages this mount
+     loaded itself are not: an update, a poll, or a leaf collapsing and
+     expanding again is not a return, and re-reading there would spend a request
+     on every toggle while the operator watched. That the accumulated pages
+     survive those untouched is the other half of what this hook is for. */
+  const inheritedScopes = useRef<Set<string> | null>(null);
+  if (inheritedScopes.current === null) inheritedScopes.current = new Set(RETAINED_CATALOG_PAGES.keys());
+  const revalidatedScopes = useRef(new Set<string>());
+  useEffect(() => {
+    if (!enabled || scopeKey === undefined) return;
+    if (!inheritedScopes.current?.has(key) || revalidatedScopes.current.has(key)) return;
+    if (!cache.current.has(key)) return;
+    revalidatedScopes.current.add(key);
+    revalidate();
+  }, [key, enabled, scopeKey, revalidate]);
+
   useEffect(() => {
     const delay = conversationCatalogRequestDelay(previousQuery.current, query);
     previousQuery.current = query;
@@ -178,7 +248,9 @@ export function useConversationCatalog({
     const current = cache.current.get(key);
     if (current?.nextCursor && !current.error && !current.expired) request(current.nextCursor);
   }, [key, request]);
-  const refresh = useCallback(() => request(null), [request]);
+  /* The operator's own «refresh»: the same span re-read, not a truncation back
+     to page one — pressing it must never cost them their place. */
+  const refresh = revalidate;
   const retry = useCallback(() => {
     const current = cache.current.get(key);
     request(current?.expired ? null : current?.error ? current.failedCursor ?? null : current?.nextCursor ?? null);

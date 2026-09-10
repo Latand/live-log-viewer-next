@@ -162,6 +162,8 @@ test("pagination and focus survive an update — the list does not snap back to 
 
   expect(titles(host).length).toBe(150);
   expect(titles(host)[149]).toBe("Agent 149 keeps area 149");
+  /* An update is not a return: the pages are kept as they are, and not one
+     request is spent re-reading them while the operator is looking at them. */
   expect(urls.length).toBe(requestsBefore);
   /* The focused row is the same DOM node, so focus was never dropped. */
   expect(document.activeElement).toBe(deepRow);
@@ -191,14 +193,56 @@ test("reopening the list after opening an agent returns to the pages that were s
   expect(document.querySelectorAll("[data-conversation-list-row]")).toHaveLength(0);
 
   const second = mount();
+  /* The first paint is already the list that was left — the retained rows are
+     rendered before a single response comes back, so returning never blinks
+     through page one. */
+  expect(titles(second.host).length).toBe(150);
   await settle();
-  /* Back to 150 rows without asking the endpoint for a single one of them. */
+
+  /* And they are re-read rather than trusted: the same three pages are asked
+     for again, so an agent spawned or renamed while the operator was away is
+     on the list they came back to. Bounded by the span they held — not one
+     request (which would truncate them to page one) and not a poll. */
+  expect(urls.length).toBe(requestsBefore + 3);
+  expect(urls.slice(requestsBefore).every((url) => url.includes(`limit=${CONVERSATION_LIST_PAGE_SIZE}`))).toBe(true);
   expect(titles(second.host).length).toBe(150);
   expect(titles(second.host)[149]).toBe("Agent 149 keeps area 149");
-  expect(urls.length).toBe(requestsBefore);
   /* And the next scroll continues the same chain. */
   await reachSentinel();
   expect(titles(second.host).length).toBe(200);
+});
+
+test("the list that comes back carries what changed while it was gone (#1614)", async () => {
+  /* The defect the retention above introduced on its own: a snapshot kept
+     across an unmount is a photograph unless something re-reads it. */
+  previousFetch = globalThis.fetch;
+  let changed = false;
+  urls = [];
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    urls.push(String(input));
+    const items = changed
+      ? [{ ...entry(0), title: "Agent 0 renamed while away" }, entry(1)]
+      : [entry(0)];
+    return new Response(JSON.stringify({ items, total: items.length, nextCursor: null }), {
+      status: 200, headers: { "content-type": "application/json" },
+    });
+  }) as unknown as typeof fetch;
+
+  const first = mount();
+  await settle();
+  expect(first.host.textContent).toContain("Agent 0 keeps area 0");
+  /* The chain is exhausted, so there is no «load more» to press either. */
+  expect(first.host.querySelector("[data-conversation-list-more]")).toBeNull();
+
+  flushSync(() => { for (const root of roots) root.unmount(); });
+  roots.clear();
+  document.body.replaceChildren();
+  changed = true;
+
+  const returned = mount();
+  await settle();
+  expect(returned.host.textContent).toContain("Agent 0 renamed while away");
+  expect(returned.host.textContent).toContain("Agent 1 keeps area 1");
 });
 
 test("a list with no scope of its own still starts clean on every mount", async () => {
