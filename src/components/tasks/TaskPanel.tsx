@@ -246,6 +246,17 @@ export function TaskPanel({
             const tone = TASK_TONES[task.status];
             const unplaced = task.placement === "unplaced" || !task.pos;
             const hasMembers = taskMembershipInScope(task, project, boardMembers);
+            /* Two different questions, and the row answers both. `prefersBand`
+               is the stored preference, which is what this control edits and
+               therefore what its label, its state and its write must read.
+               `onBoard` is the effective visibility the board produces from
+               that preference plus membership — the «off board» badge, and
+               nothing else, is about that. Reading the preference off the
+               effective answer made the control unpressable for every task
+               that holds an agent: the migration writes `hidden` on every
+               legacy row, membership overrode it, and the button then offered
+               to write the value already stored, for ever. */
+            const prefersBand = task.board !== "hidden";
             const onBoard = taskShowsOnBoard(task, hasMembers);
             const dueOverdue = task.dueAt ? isOverdue(task.dueAt) : false;
             return (
@@ -314,12 +325,12 @@ export function TaskPanel({
                     <button
                       type="button"
                       data-task-board-toggle={task.id}
-                      data-task-board-state={onBoard ? "shown" : "hidden"}
+                      data-task-board-state={prefersBand ? "shown" : "hidden"}
                       className="inline-flex items-center gap-0.5 rounded-[6px] border border-border px-1.5 py-0.5 text-[9.5px] font-bold text-muted hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-                      title={t(onBoard ? "tasks.removeFromBoardTitle" : "tasks.showOnBoardTitle")}
-                      onClick={() => { void updateTask(task.id, { board: onBoard ? "hidden" : "shown" }); }}
+                      title={t(prefersBand ? "tasks.removeFromBoardTitle" : "tasks.showOnBoardTitle")}
+                      onClick={() => { void updateTask(task.id, { board: prefersBand ? "hidden" : "shown" }); }}
                     >
-                      {onBoard
+                      {prefersBand
                         ? <><EyeOff className="h-2.5 w-2.5" aria-hidden /> {t("tasks.removeFromBoard")}</>
                         : <><Rows3 className="h-2.5 w-2.5" aria-hidden /> {t("tasks.showOnBoard")}</>}
                     </button>

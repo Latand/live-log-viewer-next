@@ -3,7 +3,7 @@ import { Window as HappyWindow } from "happy-dom";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 
-import { boardConversationKeys } from "@/lib/tasks/boardVisibility";
+import { boardConversationKeys, taskShowsOnBoard } from "@/lib/tasks/boardVisibility";
 import type { BoardTask } from "@/lib/tasks/types";
 
 /**
@@ -143,4 +143,43 @@ test("a row that still names a scanned conversation says so instead of losing it
      claim about the scene, so it never takes the preference away. */
   expect(toggle(host, "held")).not.toBeNull();
   expect(toggle(host, "historical")).not.toBeNull();
+});
+
+test("a hidden preference on a task that holds a member is readable and reversible (#1614)", () => {
+  /* The state the migration leaves every staffed row in: `board: "hidden"`
+     stored, and a member that overrides it, so the band is drawn. Reading the
+     control off the effective visibility made it say «remove from board»,
+     write the value already stored, and never offer the way back. */
+  const host = mount(
+    [task("staffed-hidden", { board: "hidden", assignments: [assignment] })],
+    [{ path: "/agent.jsonl", conversationId: "conversation-agent" }],
+  );
+  const button = toggle(host, "staffed-hidden")!;
+
+  /* The control states the stored preference and offers the other direction. */
+  expect(button.getAttribute("data-task-board-state")).toBe("hidden");
+  expect(button.textContent).toContain("show on board");
+  expect(button.textContent).not.toContain("remove from board");
+
+  flushSync(() => button.dispatchEvent(new dom.MouseEvent("click", { bubbles: true, cancelable: true }) as never));
+  expect(patches).toHaveLength(1);
+  expect(patches[0]!.body).toEqual({ board: "shown" });
+
+  /* And the two questions stay apart: the row keeps its member, so its band is
+     drawn either way and the «off board» badge — the one thing here that IS
+     about effective visibility — never appears. */
+  expect(host.textContent).not.toContain("off board");
+  expect(host.textContent).toContain("names an agent");
+  expect(taskShowsOnBoard(task("staffed-hidden", { board: "hidden", assignments: [assignment] }), true)).toBe(true);
+});
+
+test("with no member, the same stored preference is what the badge and the control agree on", () => {
+  const host = mount([task("empty-hidden", { board: "hidden" })]);
+  const button = toggle(host, "empty-hidden")!;
+  expect(button.getAttribute("data-task-board-state")).toBe("hidden");
+  expect(button.textContent).toContain("show on board");
+  /* Nothing overrides the preference here, so the row is genuinely off board. */
+  expect(host.textContent).toContain("off board");
+  flushSync(() => button.dispatchEvent(new dom.MouseEvent("click", { bubbles: true, cancelable: true }) as never));
+  expect(patches[0]!.body).toEqual({ board: "shown" });
 });
