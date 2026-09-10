@@ -128,7 +128,7 @@ jobs:
         run: npm install --prefix "$RUNNER_TEMP/native-codex" --no-save --ignore-scripts @openai/codex@0.154.0
 
       - name: Verify native queue, history, status and inherited Voice contracts
-        run: bun scripts/verify-native-codex-runtime.ts "$RUNNER_TEMP/native-codex/node_modules/.bin/codex"
+        run: bun scripts/verify-native-codex-runtime.ts "$RUNNER_TEMP/native-codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex"
 
       # The same environment the image's build stage sets. NODE_ENV belongs to
       # the build and not to the install above, which needs the dev
