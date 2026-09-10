@@ -46,13 +46,20 @@ that would be a second attempt at something nobody has the result of.
 | queued, not acknowledged | none | update/delete/send-now all name that id |
 | dispatching, or with a dispatched revision | none | the payload became a turn and is fixed |
 | uncertain | none | the runtime holds the original; a second mutation would be a blind retry |
-| withdrawn | send now, and only while idle | native no longer holds it; an explicit idle start is its one route |
-| delivered | none | it is history, kept until the journal drops it |
+| withdrawn | start, and only while idle | native no longer holds it; the journal admits no other action on it |
+| delivered | — | it has left the panel; the message is in the transcript |
 
 `send now` carries the fence the runtime requires: an explicit `null` on an idle
 thread and the exact active turn otherwise, taken from the session projection so
 the panel never guesses a turn id. Starting the queue is offered only from an
-idle thread with something in it and a queue that was actually read.
+idle thread with something in it and a queue that was actually read, and it names
+no entry at all — native's own `ThreadQueueStartParams.queuedSubmissionId` is
+nullable, and a start without one dispatches the head of the queue.
+
+The panel shows the queue and nothing behind it. The journal retains up to 128
+settled entries so a reader can see what happened to them; a delivered message is
+in the transcript, where the operator reads it, so it leaves the panel when the
+journal settles it and the header counts what Codex may still dispatch.
 
 Reorder names native submission ids and nothing else, so an entry Codex has not
 acknowledged cannot take part; when the native snapshot is stale the panel says
@@ -76,9 +83,20 @@ the operator's stated preference and nothing here changes it.
 Beside it: **Alt+Enter**, and the same entry in the send menu, hands the draft to
 Codex's queue. It goes to the queue route rather than through the composer's own
 outbox, because putting it through both would be a second scheduler for one
-message. The draft clears and the status line says it was handed over the moment
-the journal admits it — not that Codex has queued it, which is what the panel
-says once Codex acknowledges. A refused admission gives the draft back.
+message. The draft clears and the status line says it was handed over as soon as
+the press is made, before the journal has answered — the composer is empty for
+the next thing the operator types rather than frozen on a round trip. That is a
+statement about the hand-off. Whether Codex has queued it is a separate fact,
+and the panel says that once Codex acknowledges. A refused admission gives the draft back,
+attachments and all.
+
+A hand-off whose reply never arrives keeps its identity. The idempotency key and
+the payload it was minted for are retained (in session storage, so a reload keeps
+them), and the next press of the same message replays that one operation: the
+journal answers a replayed key with the operation it already holds, so Codex
+receives the message once whether or not the first request landed. A message the
+operator has since changed is a different message and mints its own key. Nothing
+resends on its own — native owns dispatch and this is a record of identity.
 
 Attachments ride the same road an ordinary send takes: the composer stages bytes,
 the queue route admits and content-addresses them, and the command carries refs.
@@ -114,8 +132,13 @@ identity on every MCP request in `params._meta["x-codex-turn-metadata"]`, read
 off the transport rather than the arguments, so the reader answers about one turn
 rather than about the conversation:
 
-- a turn that has claimed a card keeps it through later utterances, a hangup and
-  a reconnect. An accepted operation is frozen;
+- a turn that has claimed a card keeps that binding through later utterances, a
+  hangup and a reconnect: it is never handed to another card. What it does not
+  keep is the right to answer implicitly while a handoff it may also carry is
+  outstanding — native steers more than one handoff into one backing turn, so the
+  turn id is coarser than an utterance and the answer there is the same refusal a
+  new claim would get. When the later speech is claimed by its own turn, or
+  retired with it, this turn reads its own card again;
 - a turn that has claimed none may claim one only when exactly one unclaimed join
   exists, nothing is ambiguous, and no newer spoken turn is still waiting for its
   own handoff;
@@ -167,9 +190,13 @@ width. It then reintroduces each of those defects in the page and fails if the
 reading still holds.
 
 Responsiveness is measured on the same production-shaped fixture the runtime
-stage used for admission: with the queue at its admission bound, a control press
-paints its own row inside 250 ms, and handing a draft to the queue clears the
-composer inside 250 ms with the transport deliberately never answering.
+stage used for admission, at 128 rows: the number the journal keeps. The
+journal's own admission bound is 2000, which no panel is expected to hold. A
+control press commits the row's busy state inside 250 ms and handing a draft to
+the queue clears the composer inside 250 ms, both with the transport deliberately
+never answering. These are `act()` measurements in happy-dom: what they catch is
+a render gone quadratic or an accidental await on the transport, not paint
+timing, which no DOM harness observes.
 
 ## Limits
 

@@ -18,37 +18,38 @@ import { configFilePath } from "@/lib/configDir";
  *   developer instructions through `realtimeStartInstructions` and, when the
  *   call ends, `realtimeEndInstructions`.
  *
- * Until this split the Viewer sent NEITHER. It wrote the persona into the
+ * WHAT THE EVIDENCE ESTABLISHES, as one account.
+ *
+ * Until this split the Viewer sent NEITHER text. It wrote the persona into the
  * thread with `thread/inject_items`, which reaches only the backing model, and
  * left `prompt` unset — so the spoken model ran Codex's stock built-in realtime
- * persona ("You are Codex … a playful collaborator", 5.7 kB), whose startup
- * context states in its own words that it excludes repo memory instructions and
- * AGENTS files. The operator's orchestrator therefore lost its role and its
- * tools the moment the microphone opened, exactly as reported, while the text
- * agent quietly accumulated one permanent copy of the spoken-delivery rules per
- * thread.
+ * persona ("You are Codex … a playful collaborator", 5.7 kB) and the text agent
+ * quietly accumulated one permanent copy of the spoken-delivery rules per
+ * thread. Supplying `prompt` replaces the spoken session's stock instructions:
+ * verified against the installed app-server, credential-free, in
+ * `docs/design/codex-api-update/voice_probe.py`.
  *
- * Verified against the installed app-server, credential-free, in
- * `docs/design/codex-api-update/voice_probe.py`: supplying `prompt` replaces the
- * spoken session's stock instructions.
+ * What that generic spoken identity does NOT explain is the reported loss of
+ * role and tools. The fuller local probe — an ordinary USER-delivered mandate
+ * turn, a live call, overlapping handoffs, a reconnect and a later text turn —
+ * found that a mandate a thread carries as a USER turn DOES reach the spoken
+ * session's startup context, and that the advertised tool inventory was
+ * identical before, during and after the call. So the persona below is written
+ * to give the spoken model the orchestrator's own voice and rules, not to
+ * restore an inventory that was never lost; what the reported failure actually
+ * was remains open, and no text here should be read as its cause.
  *
- * WHAT A LATER, SUCCESSFUL SESSION CORRECTED. A fuller local probe — an ordinary
- * USER-delivered mandate turn, a live call, overlapping handoffs, a reconnect and
- * a later text turn — showed two earlier claims to be wrong, and the code and the
- * pull request both used to repeat them:
+ * Native writes the start instruction into canonical history as a developer
+ * item and the end instruction as ANOTHER one; the end does not remove the start
+ * text and both remain in later request history. This pair is therefore a
+ * native-managed mode transition rather than a withdrawal, which is why the end
+ * text below restores the thread's own policy in its own words instead of
+ * relying on the start text disappearing.
  *
- * - A mandate a thread carries as a USER turn DOES reach the spoken session's
- *   startup context, and the advertised tool inventory was identical before,
- *   during and after the call. The failed-call probe that suggested otherwise
- *   delivered its marker as a developer item, which is not the shape a Viewer
- *   mandate arrives in. A generic spoken identity is therefore not by itself the
- *   whole cause of the reported role loss.
- * - Native writes the start instruction into canonical history as a developer
- *   item, and the end instruction as ANOTHER one. The end does not remove the
- *   start text: both remain in later request history. So this pair is a
- *   native-managed mode transition, not a withdrawal — which is why the end text
- *   below restores the thread's own policy in its own words rather than relying
- *   on the start text disappearing.
+ * SUPERSEDED, kept because the earlier claim is quoted in the record: an earlier
+ * failed-call probe suggested the mandate did not survive the microphone
+ * opening. It delivered its marker as a DEVELOPER item, which is not the shape a
+ * Viewer mandate arrives in, and the successful session above replaces it.
  *
  * Neither probe used a real provider, so nothing here is evidence about spoken
  * audio quality or how a live model behaves.
