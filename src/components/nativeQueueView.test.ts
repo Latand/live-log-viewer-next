@@ -226,25 +226,31 @@ test("moving an entry rewrites only the order Codex acknowledged", () => {
   expect(reorderedNativeQueue(projected, "native-pending", "up")).toBeNull();
 });
 
-test("the profile names the thread's settings as effective, and the request as a request", () => {
-  /* Native's queue parameters carry no model or effort. Presenting what was
-     asked for as what will run would be inventing a guarantee the protocol does
-     not have, so the two are separate fields and stay separate. */
+test("the profile names what the thread was OBSERVED on, and the request as a request", () => {
+  /* Native's queue parameters carry no model or effort, so nobody can say what
+     a queued message WILL run on. The observed value is the thread's current
+     settings and the requested one is a pending preference; presenting either as
+     the other invents a guarantee the protocol does not have. */
   expect(nativeQueueProfile({ requestedRuntime: null }, { model: "gpt-6-astra", effort: "high" }))
-    .toEqual({ effective: "gpt-6-astra · high", requested: null });
+    .toEqual({ observed: "gpt-6-astra · high", requested: null });
 
   expect(nativeQueueProfile(
     { requestedRuntime: { model: "gpt-6-astra", effort: "low" } },
     { model: "gpt-6-astra", effort: "high" },
-  )).toEqual({ effective: "gpt-6-astra · high", requested: "gpt-6-astra · low" });
+  )).toEqual({ observed: "gpt-6-astra · high", requested: "gpt-6-astra · low" });
 
   /* A request that matches what will run is not worth saying twice. */
   expect(nativeQueueProfile(
     { requestedRuntime: { model: "gpt-6-astra", effort: "high" } },
     { model: "gpt-6-astra", effort: "high" },
-  )).toEqual({ effective: "gpt-6-astra · high", requested: null });
+  )).toEqual({ observed: "gpt-6-astra · high", requested: null });
 
-  /* And a thread the Viewer has no settings for says so rather than inventing. */
+  /* And a thread the Viewer has observed nothing about says so rather than
+     substituting the request, which is the only other value in reach. */
   expect(nativeQueueProfile({ requestedRuntime: null }, { model: null, effort: null }))
-    .toEqual({ effective: null, requested: null });
+    .toEqual({ observed: null, requested: null });
+  expect(nativeQueueProfile(
+    { requestedRuntime: { model: "gpt-6-astra", effort: "low" } },
+    { model: null, effort: null },
+  )).toEqual({ observed: null, requested: "gpt-6-astra · low" });
 });

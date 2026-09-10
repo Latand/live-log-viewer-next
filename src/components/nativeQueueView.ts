@@ -277,19 +277,26 @@ export function reorderedNativeQueue(
 /**
  * What the queue can honestly say about the settings a message will run on.
  *
- * Native's queue parameters carry NO model or effort: a queued submission
- * inherits the thread's profile at the moment Codex dispatches it, which is what
- * `profilePolicy: "thread-at-dispatch"` records. So a queued entry's requested
- * settings are audit — what the operator asked for when they queued it — and the
- * effective settings are the thread's, whatever they are then. Presenting the
- * request as a promise would be inventing a frozen profile the protocol does not
- * have.
+ * WHICH IS: nothing about the future. Native's queue parameters carry NO model
+ * or effort, so a queued submission inherits the thread's profile at the moment
+ * Codex dispatches it — that is what `profilePolicy: "thread-at-dispatch"`
+ * records, and nobody can say now what those settings will be then.
+ *
+ * So the two values are what they are and are labelled as such:
+ *
+ * - `observed` is the thread's CURRENT settings, as this Viewer has actually
+ *   seen them reported: a present-tense fact about the thread, and `null` when
+ *   nothing has been observed, which the caller says plainly rather than
+ *   substituting something else. It promises nothing about the dispatch.
+ * - `requested` is audit: what the operator had selected when they queued it. It
+ *   is a pending next-send preference and never becomes the observed value, so
+ *   the two must come from different sources or the distinction disappears.
  */
 export function nativeQueueProfile(
   row: Pick<NativeQueueRow, "requestedRuntime">,
   thread: { model: string | null; effort: string | null },
-): { effective: string | null; requested: string | null } {
-  const effective = [thread.model, thread.effort].filter(Boolean).join(" · ") || null;
+): { observed: string | null; requested: string | null } {
+  const observed = [thread.model, thread.effort].filter(Boolean).join(" · ") || null;
   const requested = [row.requestedRuntime?.model, row.requestedRuntime?.effort].filter(Boolean).join(" · ") || null;
-  return { effective, requested: requested && requested !== effective ? requested : null };
+  return { observed, requested: requested && requested !== observed ? requested : null };
 }
