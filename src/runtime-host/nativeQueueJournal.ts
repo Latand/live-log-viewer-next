@@ -1,8 +1,22 @@
 import { nativeQueueInputMatches } from "@/lib/runtime/nativeQueueContent";
 import type { RuntimeOperationCommand } from "@/lib/runtime/contracts";
 import type { Database } from "bun:sqlite";
-import type { NativeQueueCommand, NativeQueueRecord, NativeQueueTransition } from "@/lib/runtime/nativeQueueContracts";
+import type { NativeQueueCommand, NativeQueueRecord, NativeQueueTransition, NativeQueueVersion } from "@/lib/runtime/nativeQueueContracts";
 import { sameNativeQueueBinding } from "@/lib/runtime/nativeQueueContracts";
+
+/**
+ * Whether this command is about ONE entry of the journal's.
+ *
+ * A reorder names native submission ids and no Viewer entry. A start may name
+ * one — the withdrawn payload's recovery, and the queued row's `send now` on an
+ * idle thread — or none at all, which is native's own queue-level start
+ * (`ThreadQueueStartParams.queuedSubmissionId` is nullable). Neither of the
+ * entry-less forms has a version to admit or a state to move.
+ */
+function entryTargeted(command: NativeQueueCommand): boolean {
+  if (command.action === "reorder") return false;
+  return command.action === "add" || command.entryId !== undefined;
+}
 
 /** Called inside the journal's admission/transition transaction. No transport. */
 export class NativeQueueJournal {
@@ -44,8 +58,9 @@ export class NativeQueueJournal {
   }
 
   admit(command: NativeQueueCommand, operationId: string): NativeQueueRecord | null {
-    if (command.action === "reorder") return null;
+    if (!entryTargeted(command)) return null;
     let entry: NativeQueueRecord;
+    let base: NativeQueueVersion | undefined;
     if (command.action === "add") {
       if (this.read(command.conversationId).filter(entry => !["delivered", "removed", "refused"].includes(entry.state)).length >= 2000) throw new Error("native queue admission bound exceeded");
       entry = { entryId: operationId, conversationId: command.conversationId, binding: command.binding,
@@ -58,20 +73,34 @@ export class NativeQueueJournal {
       if (entry.mutationOperationId || (entry.state !== "queued" && entry.state !== "withdrawn")) throw new Error("native queue entry is frozen or unresolved");
       if (entry.state === "withdrawn" && command.action !== "start") throw new Error("withdrawn input requires an explicit idle start");
       if (command.action === "update" && entry.versions.length >= 128) throw new Error("native queue retained edit bound exceeded");
+      /* The version this edit is a revision OF, resolved BEFORE the counter
+         moves. It is what an edit that names no attachments and no provenance
+         carries forward, so changing the words of a message never silently
+         throws its images, its selected card or its authorship away (#1629). */
+      base = entry.versions.find(version => version.revision === entry.revision);
       if (command.action === "update") entry.revision = entry.versions.length + 1;
       entry.mutationOperationId = operationId;
     }
     if (command.action === "add" || command.action === "update") {
+      /* CONTENT IS THE CALLER'S AND IS NEVER RECONSTRUCTED HERE. `contentDigest`
+         was computed over exactly the text and refs the command carries, so
+         silently substituting a prior version's attachments would produce a
+         payload whose digest describes something else. An edit that drops them
+         is refused instead, and the control that offers it carries them. */
+      if (command.action === "update" && base?.images.length && !command.images?.length) {
+        throw new Error("native queue edit must carry the entry's attachments");
+      }
       entry.versions.push({ revision: entry.revision, operationId, text: command.text!, images: command.images ?? [],
         contentDigest: command.contentDigest!, ...(command.runtime ? { requestedRuntime: command.runtime } : {}),
-        ...(command.selectedContext ? { selectedContext: command.selectedContext } : {}), ...(command.origin ? { origin: command.origin } : {}) });
+        ...(command.selectedContext ?? base?.selectedContext ? { selectedContext: (command.selectedContext ?? base?.selectedContext)! } : {}),
+        ...(command.origin ?? base?.origin ? { origin: (command.origin ?? base?.origin)! } : {}) });
     }
     this.save(entry);
     return entry;
   }
 
   transition(command: NativeQueueCommand, operationId: string, transition: NativeQueueTransition): NativeQueueRecord | null {
-    if (command.action === "reorder") return null;
+    if (!entryTargeted(command)) return null;
     const entry = this.get(command.action === "add" ? operationId : command.entryId!);
     if (entry.conversationId !== command.conversationId || !sameNativeQueueBinding(entry.binding, command.binding)) throw new Error("native queue entry ownership changed");
     if (transition.phase === "removed") {
@@ -118,7 +147,13 @@ export class NativeQueueJournal {
     } else if (transition.phase === "refused") {
       if (!entry.proof) {
         if (command.action === "add") entry.state = "refused";
-        if (command.action === "update") entry.revision = entry.versions.at(-2)!.revision;
+        /* Back to the revision this edit was a revision OF, which the command
+           carries and the admission validated against the entry. Counting back
+           through `versions` instead reached into REFUSED history: every
+           attempt appends a version, so a second consecutive refusal landed on
+           the first refused one and presented — and would have dispatched —
+           text native never accepted (#1629). */
+        if (command.action === "update") entry.revision = command.expectedRevision!;
       }
       entry.reason = transition.reason;
       entry.mutationOperationId = null;

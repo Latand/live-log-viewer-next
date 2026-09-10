@@ -59,10 +59,14 @@ export async function handleNativeQueue(request: NextRequest, dependencies: Depe
      ceiling bounds the command rather than the attachment. */
   if (body && typeof body === "object" && !Array.isArray(body)) {
     const payload = body as Record<string, unknown>;
+    /* #1117: this route is the operator's own composer surface, exactly as
+       `/api/runtime/send` is, so authorship is stamped HERE and never read off
+       the body — a queued message keeps the same provenance a sent one has. */
+    body = { ...payload, origin: { kind: "operator" } };
     if (Array.isArray(payload.images) && payload.images.some((image) => image && typeof image === "object" && "base64" in image)) {
       const admitted = dependencies.admitImages(payload.images);
       if (admitted.error) return NextResponse.json({ error: admitted.error.error }, { status: admitted.error.status });
-      body = { ...payload, images: dependencies.storeImages(admitted.images) };
+      body = { ...(body as Record<string, unknown>), images: dependencies.storeImages(admitted.images) };
     }
   }
   try { command = parseRuntimeCommand("native-queue", body); }

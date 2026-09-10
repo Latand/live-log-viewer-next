@@ -1693,7 +1693,12 @@ export class RuntimeJournal {
       } else if (!session || session.host !== "hosted") {
         status = "rejected";
         reason = session?.host === "dead" || session?.host === "unhosted" ? "dead-host" : "no-claim";
-      } else if (command.turnId !== undefined && command.turnId !== session.activeTurnId) {
+      /* A NAMED turn is the fence. An explicit `null` on an ordinary send has
+         always meant "no turn to fence against" — the native queue's own
+         commands are where it means "only while idle", and they are fenced in
+         their own branch above. Reading it as a fence here rejected sends the
+         Viewer has always delivered against a busy host. */
+      } else if (command.turnId && command.turnId !== session.activeTurnId) {
         status = "rejected";
         reason = "stale-turn";
       } else {
@@ -1705,7 +1710,7 @@ export class RuntimeJournal {
       if (!session || session.host !== "hosted") {
         status = "rejected";
         reason = session?.host === "dead" || session?.host === "unhosted" ? "dead-host" : "no-claim";
-      } else if (command.turnId !== undefined && command.turnId !== session.activeTurnId) {
+      } else if (command.turnId && command.turnId !== session.activeTurnId) {
         status = "rejected";
         reason = "stale-turn";
       } else if ((command.kind === "steer" || command.policy !== "queue") && session.turn === "running" && session.capabilities.steer) {
@@ -1728,7 +1733,7 @@ export class RuntimeJournal {
       if (!session || session.host !== "hosted") {
         status = "rejected";
         reason = session?.host === "dead" || session?.host === "unhosted" ? "dead-host" : "no-claim";
-      } else if (command.turnId !== undefined && command.turnId !== session.activeTurnId) {
+      } else if (command.turnId && command.turnId !== session.activeTurnId) {
         status = "rejected";
         reason = "stale-turn";
       } else if (session.turn !== "running" && session.turn !== "interrupt_requested") {

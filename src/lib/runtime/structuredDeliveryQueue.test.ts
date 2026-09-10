@@ -478,7 +478,11 @@ test("a runtime settings snapshot on the durable effect rides the queue entry to
         payload: {
           kind: "send", operationId: "op-plain", conversationId: "conversation-one",
           text: "host defaults", idempotencyKey: "two", policy: "queue",
-          // A malformed persisted selection is refused before engine input.
+          /* A malformed snapshot drops silently and the message itself delivers
+             (#390 §10). Admission validated this payload with the same parser,
+             so a blemish on a durable record describes a record no admission
+             produced — and failing the message over it loses the one thing the
+             outbox exists to keep. */
           runtime: "ultra",
         },
       },
@@ -492,9 +496,36 @@ test("a runtime settings snapshot on the durable effect rides the queue entry to
 
   await queue.drain();
 
-  expect(entries).toHaveLength(1);
+  expect(entries).toHaveLength(2);
   expect(entries[0]!.runtime).toEqual({ effort: "ultra", fast: true });
-  expect(failures).toEqual(["op-plain"]);
+  expect(entries[1]!.runtime).toBeUndefined();
+  expect(failures).toEqual([]);
+});
+
+test("a per-turn service tier on the durable effect rides the queue entry too (#1629)", async () => {
+  /* Native's `turn/start` takes `serviceTier` and `serviceTierForTurn`, so the
+     durable reader has to carry them — the reason it validates with the same
+     parser admission uses rather than the older three-field reader. */
+  const entries: QueueEntry[] = [];
+  const port: StructuredDeliveryQueuePort = {
+    effects: async () => [{
+      id: "effect:op-tier",
+      kind: "runtime.send",
+      eventSeq: 1,
+      payload: {
+        kind: "send", operationId: "op-tier", conversationId: "conversation-one",
+        text: "priority please", idempotencyKey: "tier", policy: "queue",
+        runtime: { serviceTierForTurn: "priority", serviceTier: null },
+      },
+    }],
+    transition: async () => {},
+  };
+  const queue = new StructuredDeliveryQueue(port, () => host(async (entry) => {
+    entries.push(entry);
+    return { outcome: "turn-started", turnId: "turn-tier" };
+  }));
+  await queue.drain();
+  expect(entries[0]!.runtime).toEqual({ serviceTier: null, serviceTierForTurn: "priority" });
 });
 
 test("unrelated outbox effects cannot starve structured message delivery", async () => {

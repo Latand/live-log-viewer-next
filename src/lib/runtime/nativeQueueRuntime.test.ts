@@ -32,10 +32,12 @@ function fixture(journal = makeJournal()) {
   let liveBinding = binding;
   let next = 0;
   const calls: string[] = [];
+  const startedSubmissionIds: Array<string | null> = [];
   let items: NativeQueuedSubmission[] = [];
   let loseAdd = false;
   let raceDelete = false;
   let refuseDelete = false;
+  let refuseUpdate = false;
   let proof: NativeQueueProof | null = null;
   const queue = new NativeCodexQueue({ rpc: async (method, params) => {
     calls.push(method);
@@ -47,6 +49,7 @@ function fixture(journal = makeJournal()) {
       return { queuedSubmission };
     }
     if (method === "thread/queue/update") {
+      if (refuseUpdate) throw new NativeQueueProtocolRefusal(-1, "native refused this edit");
       const item = items.find(i => i.id === params.queuedSubmissionId)!;
       item.input = params.input as NativeQueuedSubmission["input"];
       return { queuedSubmission: item };
@@ -58,7 +61,12 @@ function fixture(journal = makeJournal()) {
       return { deleted: true };
     }
     if (method === "thread/queue/reorder") return {};
-    if (method === "thread/queue/start") return { turn: { id: "started", items: [], status: "inProgress" } };
+    if (method === "thread/queue/start") {
+      /* Native's own queue-level start: `queuedSubmissionId` is nullable, and an
+         entry-less start dispatches the head of the queue. */
+      startedSubmissionIds.push((params.queuedSubmissionId ?? null) as string | null);
+      return { turn: { id: "started", items: [], status: "inProgress" } };
+    }
     throw new Error("unexpected method");
   } }, binding.threadId);
   const client = {
@@ -81,8 +89,19 @@ function fixture(journal = makeJournal()) {
     },
   } as unknown as EngineHost;
   const executor = new NativeQueueExecutor({ client, resolveHost: () => host, binding: () => liveBinding });
-  return { journal, client, executor, calls, queue, get items() { return items; },
+  return { journal, client, executor, calls, queue, startedSubmissionIds, get items() { return items; },
     loseAdd: () => { loseAdd = true; }, race: () => { raceDelete = true; }, refuseDelete: () => { refuseDelete = true; },
+    refuseUpdate: (value = true) => { refuseUpdate = value; },
+    /* The host goes idle AND the journal's session projection says so: the
+       admission fence reads the projection, the executor reads the host. */
+    idle: () => {
+      active = null;
+      journal.append({ scope: `session:${conversationId}`, kind: "session-status", payload: {
+        conversationId, sessionKey: { engine: "codex", sessionId: binding.threadId }, hostKind: "codex-app-server",
+        host: "hosted", turn: "idle", activeTurnId: null, accountId: binding.accountId,
+        capabilities: { steer: true, structuredAttention: true, nativeQueue: true },
+      } });
+    },
     switchAccount: () => { liveBinding = { ...binding, accountId: "account-b" }; },
     prove: () => {
       const entry = journal.nativeQueueRead(conversationId)[0]!;
@@ -355,16 +374,35 @@ test("a unique live queue observation recovers a lost add acknowledgement withou
   f.journal.close();
 });
 
-test("explicit null and string turn fences survive admission without being rebound to the active turn", () => {
+test("a named turn fence survives admission without being rebound to the active turn", () => {
+  /* A fence the caller NAMED is honoured verbatim, and a stale one is refused
+     before anything is admitted. */
   const journal = makeJournal();
   for (const kind of ["send", "steer", "interrupt"] as const) {
-    const c = parseRuntimeCommand(kind, { conversationId, operationId: `${kind}-null`, idempotencyKey: `${kind}-null`, text: "fenced", turnId: null });
+    const c = parseRuntimeCommand(kind, { conversationId, operationId: `${kind}-stale`, idempotencyKey: `${kind}-stale`, text: "fenced", turnId: "turn-that-ended" });
     expect(journal.executeOperation(c).receipt).toMatchObject({ status: "rejected", reason: "stale-turn" });
   }
   expect(journal.effectBatch(100)).toHaveLength(0);
   const matching = parseRuntimeCommand("steer", { conversationId, idempotencyKey: "matching", text: "fenced", turnId: "active-a" });
   expect(journal.executeOperation(matching).receipt.status).toBe("pending");
   expect(journal.effectBatch(100)[0]?.payload.turnId).toBe("active-a");
+  journal.close();
+});
+
+test("an explicit null fence means idle for a native queue command, and no fence for an ordinary send", () => {
+  /* THE TWO MEANINGS ARE NOT THE SAME AND THE SPLIT IS DELIBERATE. Native's
+     queue controls take a turn fence whose explicit `null` is the protocol's own
+     "only while idle" — `start` is refused without it. An ordinary send's
+     `turnId: null` has always meant "no turn to fence against", which is exactly
+     what a `policy: "queue"` send says: queue it, whatever is running. Reading
+     the send's null as an idle fence rejected messages the Viewer has always
+     delivered against a busy host. */
+  const journal = makeJournal();
+  const queued = parseRuntimeCommand("send", { conversationId, operationId: "send-null", idempotencyKey: "send-null", text: "queue me", policy: "queue", turnId: null });
+  expect(journal.executeOperation(queued).receipt).toMatchObject({ status: "queued", reason: null });
+
+  const idleStart = parseRuntimeCommand("native-queue", { conversationId, operationId: "start-null", idempotencyKey: "start-null", action: "start", binding, turnId: null });
+  expect(journal.executeOperation(idleStart).receipt).toMatchObject({ status: "rejected", reason: "stale-turn" });
   journal.close();
 });
 
@@ -397,4 +435,146 @@ test("unknown native queue capability cannot admit a second scheduler through or
   expect(journal.effectBatch(100)).toEqual([]);
   expect(journal.nativeQueueRead(conversationId)).toEqual([]);
   journal.close();
+});
+
+test("consecutive refused edits leave the entry on the last version native accepted", async () => {
+  /* Every edit attempt appends a version, refused ones included, so counting
+     back through `versions` to undo a refusal landed on the PREVIOUS REFUSAL the
+     second time round. The entry then presented — and, on the next dispatch,
+     would have sent — text native had already rejected. The command's own
+     `expectedRevision` is the version it was a revision of, and the admission
+     validated it against the entry, so that is what a refusal returns to. */
+  const f = fixture();
+  const add = command("op-refused-base");
+  f.journal.executeOperation(add);
+  await f.executor.execute(add);
+  f.refuseUpdate();
+
+  for (const attempt of ["op-refused-one", "op-refused-two"]) {
+    const edit = command(attempt, { action: "update", entryId: add.operationId, expectedRevision: 1, text: attempt });
+    f.journal.executeOperation(edit);
+    await f.executor.execute(edit);
+    const entry = f.journal.nativeQueueRead(conversationId)[0]!;
+    expect(entry.revision).toBe(1);
+    expect(entry.versions.find(version => version.revision === entry.revision)?.text).toBe("queued text");
+    expect(entry.state).toBe("queued");
+    expect(entry.mutationOperationId).toBeNull();
+  }
+  /* And what a dispatch would freeze is that same accepted version, never a
+     refused one: the refused attempts survive as history and nothing else. */
+  const entry = f.journal.nativeQueueRead(conversationId)[0]!;
+  expect(entry.versions.map(version => version.text)).toEqual(["queued text", "op-refused-one", "op-refused-two"]);
+  f.refuseUpdate(false);
+  f.idle();
+  const start = command("op-refused-dispatch", { action: "start", entryId: add.operationId, expectedRevision: 1, turnId: null });
+  f.journal.executeOperation(start);
+  await f.executor.execute(start);
+  expect(f.journal.nativeQueueRead(conversationId)[0]).toMatchObject({ dispatchedRevision: 1, state: "dispatching" });
+  f.journal.close();
+});
+
+test("the queue as a whole can be started, naming no entry at all", async () => {
+  /* Native's `ThreadQueueStartParams.queuedSubmissionId` is nullable and its
+     start with no submission dispatches the head of the queue. The panel header
+     offers exactly that, and it used to be rejected at the parser with
+     "entryId is invalid" — the one control on the panel that could never work. */
+  const f = fixture();
+  const add = command("op-queued-head");
+  f.journal.executeOperation(add);
+  await f.executor.execute(add);
+  f.idle();
+
+  const start = parseRuntimeCommand("native-queue", {
+    conversationId, operationId: "op-queue-start", idempotencyKey: "op-queue-start",
+    action: "start", binding, turnId: null,
+  }) as NativeQueueCommand & { operationId: string };
+  expect(start.entryId).toBeUndefined();
+  expect(f.journal.executeOperation(start).receipt.status).toBe("queued");
+  await f.executor.execute(start);
+
+  expect(f.startedSubmissionIds).toEqual([null]);
+  expect(f.journal.operationResult("op-queue-start")?.receipt.status).toBe("applied");
+  /* It is a queue-level control, so it owns no entry and moves none. */
+  expect(f.journal.nativeQueueRead(conversationId).map(entry => entry.state)).toEqual(["queued"]);
+  f.journal.close();
+});
+
+test("a withdrawn payload goes back through an idle start, exactly once", async () => {
+  /* Withdrawn is the payload that survived a send-now whose steer did not land:
+     native no longer holds it and the Viewer still does. The journal admits only
+     a `start` for it, so a panel that offered `send-now` offered the one action
+     the journal always refused and the operator's words had no route back. */
+  const f = fixture();
+  const add = command("op-stranded");
+  f.journal.executeOperation(add);
+  await f.executor.execute(add);
+  f.race();
+  const steer = command("op-lost-steer", { action: "send-now", entryId: add.operationId, expectedRevision: 1, turnId: "active-a" });
+  f.journal.executeOperation(steer);
+  await f.executor.execute(steer);
+  expect(f.journal.nativeQueueRead(conversationId)[0]).toMatchObject({ state: "withdrawn", mutationOperationId: null });
+
+  f.idle();
+  /* The route the row used to offer, refused for exactly what it always refused
+     — which is why the payload was stranded with no control that could move it. */
+  expect(() => f.journal.executeOperation(command("op-wrong-route", {
+    action: "send-now", entryId: add.operationId, expectedRevision: 1, turnId: null,
+  }))).toThrow("withdrawn input requires an explicit idle start");
+
+  const recover = command("op-recover", { action: "start", entryId: add.operationId, expectedRevision: 1, turnId: null });
+  f.journal.executeOperation(recover);
+  await f.executor.execute(recover);
+  const recovered = f.journal.nativeQueueRead(conversationId)[0]!;
+  expect(recovered).toMatchObject({ state: "dispatching", dispatchedRevision: 1, dispatchedTurnId: "started" });
+  expect(recovered.versions[0]?.text).toBe("queued text");
+  expect(f.calls.at(-1)).toBe("turn/start");
+
+  /* And a second press is refused: the payload became a turn, and a turn's
+     payload is not sent again by anything. */
+  expect(() => f.journal.executeOperation(command("op-recover-again", {
+    action: "start", entryId: add.operationId, expectedRevision: 1, turnId: null,
+  }))).toThrow("frozen or unresolved");
+  f.journal.close();
+});
+
+test("editing the words of a message keeps its attachments, its card and its authorship", async () => {
+  /* An update replaces the version wholesale, so an edit that named no images
+     admitted a revision with none: the operator saw a text edit and the pictures
+     were gone, with nothing said. Attachments ride the command (their digest is
+     computed over exactly what it carries); the card and the authorship are
+     server-side provenance and are carried forward here. */
+  const image = { sha256: "b".repeat(64), mime: "image/png" as const, bytes: 91 };
+  const f = fixture();
+  const add = command("op-with-image", {
+    images: [image],
+    selectedContext: { version: 1, state: "selected", conversationId: "conversation_card", capturedAt: "2026-09-10T00:00:00.000Z" },
+    origin: { kind: "operator" },
+  });
+  f.journal.executeOperation(add);
+  await f.executor.execute(add);
+  const admitted = f.journal.nativeQueueRead(conversationId)[0]!.versions[0]!;
+  expect(admitted.images).toEqual([image]);
+  expect(admitted.selectedContext).toMatchObject({ conversationId: "conversation_card" });
+
+  const edit = command("op-image-edit", {
+    action: "update", entryId: add.operationId, expectedRevision: 1, text: "changed words", images: [image],
+  });
+  f.journal.executeOperation(edit);
+  await f.executor.execute(edit);
+  const entry = f.journal.nativeQueueRead(conversationId)[0]!;
+  const latest = entry.versions.find(version => version.revision === entry.revision)!;
+  expect(latest.text).toBe("changed words");
+  expect(latest.images).toEqual([image]);
+  expect(latest.contentDigest).not.toBe(admitted.contentDigest);
+  expect(latest.selectedContext).toMatchObject({ conversationId: "conversation_card" });
+  expect(admitted.origin).toEqual({ kind: "operator" });
+  expect(latest.origin).toEqual({ kind: "operator" });
+
+  /* And an edit that would drop them is refused rather than admitted: the
+     command's digest describes what the command carries, so the journal cannot
+     substitute the prior version's refs without describing something else. */
+  expect(() => f.journal.executeOperation(command("op-image-dropping-edit", {
+    action: "update", entryId: add.operationId, expectedRevision: entry.revision, text: "no images",
+  }))).toThrow("native queue edit must carry the entry's attachments");
+  f.journal.close();
 });

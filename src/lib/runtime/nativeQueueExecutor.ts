@@ -42,8 +42,12 @@ export class NativeQueueExecutor {
       return;
     }
     const records = await client.nativeQueueRead(command.conversationId);
-    const entry = command.action === "reorder" ? null : records.find(e => e.entryId === (command.action === "add" ? command.operationId : command.entryId));
-    if (command.action !== "reorder" && (!entry || entry.mutationOperationId !== command.operationId)) throw new Error("native queue mutation identity is unavailable");
+    /* A reorder names native submission ids, and a queue-level start names
+       nothing at all (native's `queuedSubmissionId` is nullable). Neither has a
+       journal entry to own, so neither looks for one. */
+    const entryTargeted = command.action !== "reorder" && (command.action === "add" || command.entryId !== undefined);
+    const entry = entryTargeted ? records.find(e => e.entryId === (command.action === "add" ? command.operationId : command.entryId)) : null;
+    if (entryTargeted && (!entry || entry.mutationOperationId !== command.operationId)) throw new Error("native queue mutation identity is unavailable");
     const version = entry?.versions.find(v => v.revision === entry.revision);
     let actuated = false;
     let prepared = false;
@@ -80,9 +84,16 @@ export class NativeQueueExecutor {
         await native.queue.reorder(command.queuedSubmissionIds!);
         await transition({ phase: "acknowledged" });
       } else if (command.action === "start" || command.turnId === null) {
-        const turnId = entry!.state === "withdrawn"
-          ? (await native.sendWithdrawn(entry!, null)).turnId
-          : (await native.queue.start(entry!.nativeSubmissionId)).result.turn.id;
+        /* Three idle dispatches through one native call. Without an entry it is
+           native's queue-level start, which dispatches the head of the queue.
+           With one it is either that entry's turn — `start(submissionId)` — or
+           the recovery of a payload native no longer holds, which has no
+           submission id left to name and goes back as its own input. */
+        const turnId = !entry
+          ? (await native.queue.start(null)).result.turn.id
+          : entry.state === "withdrawn"
+            ? (await native.sendWithdrawn(entry, null)).turnId
+            : (await native.queue.start(entry.nativeSubmissionId)).result.turn.id;
         await transition({ phase: "acknowledged", turnId });
       } else {
         // Native's steer-then-delete permits auto-dispatch between the two writes.

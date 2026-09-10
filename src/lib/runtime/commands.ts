@@ -1,5 +1,6 @@
 import { modelFromBody } from "@/lib/agent/models";
 import { parseSelectedContextRef } from "@/lib/selection/selectedContext";
+import { parseMessageOrigin } from "./messageOrigin";
 
 import type { RuntimeOperationCommand, RuntimeOperationKind, RuntimeReconfigureCommand, RuntimeSendSettings } from "./contracts";
 import { parseStructuredImageRefs, structuredContent } from "./structuredContent";
@@ -85,7 +86,13 @@ export function parseRuntimeCommand(kind: RuntimeOperationKind, value: unknown):
     const threadId = requiredId(binding.threadId, "threadId");
     if (binding.accountId !== null && typeof binding.accountId !== "string") throw new Error("accountId is required");
     const accountId = binding.accountId === null ? null : requiredId(binding.accountId, "accountId");
-    const target = action !== "add" && action !== "reorder";
+    /* Native's own start takes a nullable `queuedSubmissionId`, so a start is
+       either about ONE entry — a queued row, or a withdrawn payload's one route
+       back — or about the queue as a whole, which is what the panel header
+       offers. Update, delete and send-now name a native submission and cannot
+       be queue-level at all. */
+    const target = action === "update" || action === "delete" || action === "send-now"
+      || (action === "start" && body.entryId !== undefined);
     const entryId = target ? requiredId(body.entryId, "entryId") : undefined;
     const expectedRevision = target ? body.expectedRevision : undefined;
     if (target && (typeof expectedRevision !== "number" || !Number.isSafeInteger(expectedRevision) || expectedRevision < 1)) throw new Error("expectedRevision is invalid");
@@ -106,6 +113,10 @@ export function parseRuntimeCommand(kind: RuntimeOperationKind, value: unknown):
       ...(content ? { text: content.content.text, images: content.content.images, contentDigest: content.contentDigest } : {}),
       ...(runtime ? { runtime } : {}), ...(turnId !== undefined ? { turnId } : {}),
       ...(parseSelectedContextRef(body.selectedContext) ? { selectedContext: parseSelectedContextRef(body.selectedContext)! } : {}),
+      /* #1117 authorship, which the route stamps server-side before this reads
+         it. A queued message is a message, and it carries the same provenance a
+         message sent straight through does. */
+      ...(withContent && parseMessageOrigin(body.origin) ? { origin: parseMessageOrigin(body.origin)! } : {}),
     };
   }
 

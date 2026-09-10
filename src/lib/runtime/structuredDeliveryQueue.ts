@@ -226,7 +226,12 @@ function sendEffect(effect: StructuredDeliveryEffect): SendEffect | null {
     ? effect.payload.policy
     : undefined;
   let runtime: RuntimeSendSettings | undefined;
-  try { runtime = parseRuntimeSendSettings(effect.payload.runtime); } catch { return null; }
+  /* A SETTINGS BLEMISH MUST NEVER STRAND THE MESSAGE ITSELF (#390 §10). The
+     admission validated this payload with this same function, so a throw here
+     can only describe a durable record no admission produced; absent settings
+     mean today's behaviour, and dropping the words with them would lose the one
+     thing the outbox exists to keep. */
+  try { runtime = parseRuntimeSendSettings(effect.payload.runtime); } catch { runtime = undefined; }
   /* A malformed selection reference is omitted; the message retains its
      independent content and runtime profile. */
   const selectedContext = parseSelectedContextRef(effect.payload.selectedContext);
@@ -812,7 +817,12 @@ export class StructuredDeliveryQueue {
       }
       const maySteer = health.status === "active"
         && (effect.kind === "steer" || effect.policy === "steer-if-active");
-      if (maySteer && !host.supportsSteer) {
+      /* A host that DECLARED it cannot steer, which is the Claude broker: its
+         write would land as an interrupt the operator never asked for, so the
+         message is refused here rather than delivered as something else.
+         An undeclared capability is unknown and is no refusal — a host that says
+         nothing about steering keeps the delivery path it has always had. */
+      if (maySteer && host.supportsSteer === false) {
         await this.transitionUnlessSettled(effect.operationId, "failed", { reason: "unsupported-steering" });
         continue;
       }
