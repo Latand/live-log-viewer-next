@@ -93,6 +93,38 @@ export function taskShowsOnBoard(task: BoardTask, hasMembers: boolean): boolean 
 }
 
 /**
+ * How many of a project's tasks occupy a band on the board.
+ *
+ * This is the count the per-project admission limit is taken against (#1627).
+ * It is the same rule the board renders by — {@link taskShowsOnBoard} — asked
+ * of every row of one project, so the number a refusal quotes and the number of
+ * bands the operator can see are the same statement, and there is no second
+ * definition of membership to drift from the first.
+ *
+ * `hasMembers` is again the caller's answer, and again nobody guesses it here.
+ * A caller with no scene to consult passes `() => false`, which counts exactly
+ * the tasks the board is ASKED to draw: a hidden row that still holds an agent
+ * draws its band whatever the flag says, but that band belongs to a launch, and
+ * mandatory launch membership is exempt from this limit by construction
+ * (`ensureTaskMembership`) — so counting it would only refuse the operator a
+ * band they can see is missing. A caller that can answer truthfully (the board,
+ * a test, any surface holding the resolved bands) passes its own predicate and
+ * gets those rows counted.
+ */
+export function countBoardTasks(
+  tasks: readonly BoardTask[],
+  project: string,
+  hasMembers: (task: BoardTask) => boolean,
+): number {
+  let count = 0;
+  for (const task of tasks) {
+    if (task.project !== project) continue;
+    if (taskShowsOnBoard(task, hasMembers(task))) count += 1;
+  }
+  return count;
+}
+
+/**
  * The note the task panel shows: does this row still name a conversation the
  * open project's scan carries?
  *

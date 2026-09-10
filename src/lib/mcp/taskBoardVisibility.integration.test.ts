@@ -34,7 +34,7 @@ process.env.LLV_RUNTIME_HOST_SOCKET = path.join(sandbox, "runtime.sock");
 process.env.LLV_RUNTIME_HOST_CONTROL_SOCKET = path.join(sandbox, "absent.sock");
 const { viewerMcpBindings } = await import("./bindings");
 const { createMcpToolService, createViewerMcpServer, SqliteMcpReceiptStore } = await import("./server");
-const { TASKS_FILE, loadTasks } = await import("@/lib/tasks/store");
+const { TASKS_FILE, loadTasks, saveTasks } = await import("@/lib/tasks/store");
 expect(TASKS_FILE.startsWith(sandbox + path.sep)).toBe(true);
 
 async function protocol() {
@@ -125,5 +125,56 @@ test("the HTTP task PATCH and update_task write the same board flag", async () =
     } })).structuredContent as { task: TaskWithRevision };
     expect(restored.task.board).toBe("shown");
     expect(loadTasks().find(task => task.id === created.task.id)!.board).toBe("shown");
+  } finally { await p.close(); }
+});
+
+/**
+ * The band cap an agent meets (#1627). What it must be able to do when a
+ * project's board is full is record the work anyway: the limit bounds the
+ * canvas, and a task an agent cannot create is a piece of work nobody holds.
+ */
+test("create_task publishes board membership, and a full board still takes a hidden task", async () => {
+  const { BOARD_TASKS_PER_PROJECT_LIMIT } = await import("@/lib/tasks/commands");
+  const project = "band-cap-project";
+  saveTasks([
+    ...loadTasks(),
+    ...Array.from({ length: BOARD_TASKS_PER_PROJECT_LIMIT }, (_, index) => ({
+      id: `band-cap-${index}`,
+      project,
+      status: "done" as const,
+      text: `band ${index}`,
+      placement: "unplaced" as const,
+      board: "shown" as const,
+      assignments: [],
+      createdAt: "2026-07-01T00:00:00.000Z",
+      updatedAt: "2026-07-01T00:00:00.000Z",
+    })),
+  ]);
+  const before = loadTasks().length;
+  const p = await protocol();
+  try {
+    /* Published: the field and its two values are in the tool an agent reads. */
+    const { tools } = await p.client.listTools();
+    const board = (tools.find(tool => tool.name === "create_task")!.inputSchema.properties as Record<string, { enum?: string[]; description?: string }>).board;
+    expect(board?.enum?.slice().sort()).toEqual(["hidden", "shown"]);
+
+    const refused = (await p.client.callTool({ name: "create_task", arguments: {
+      clientRequestId: "band-cap-refused", project, text: "one band too many",
+    } })).structuredContent as { ok: boolean; error?: string; details?: { code?: string } };
+    expect(refused.ok).toBe(false);
+    expect(refused.details?.code).toBe("TASK_BOARD_FULL");
+    /* The refusal tells the agent the way through, and it is not deletion. */
+    expect(refused.error ?? "").toContain('board: "hidden"');
+    expect(loadTasks()).toHaveLength(before);
+
+    const accepted = (await p.client.callTool({ name: "create_task", arguments: {
+      clientRequestId: "band-cap-hidden", project, text: "recorded off the board", board: "hidden",
+    } })).structuredContent as { ok: boolean; task: TaskWithRevision };
+    expect(accepted.ok).toBe(true);
+    expect(accepted.task.board).toBe("hidden");
+    const stored = loadTasks().find(task => task.id === accepted.task.id)!;
+    expect(stored.board).toBe("hidden");
+    expect(stored.text).toBe("recorded off the board");
+    expect(loadTasks()).toHaveLength(before + 1);
   } finally { await p.close(); }
 });

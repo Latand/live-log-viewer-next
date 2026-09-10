@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { describe, expect, test } from "bun:test";
 
-import { applyAssignmentPatches, assignmentRefFromBody, createTask, deleteTask, mergeAssignments, patchTask, pinnedAccountId, removeAssignment, TASKS_PER_PROJECT_LIMIT } from "./commands";
+import { applyAssignmentPatches, assignmentRefFromBody, createTask, deleteTask, mergeAssignments, patchTask, pinnedAccountId, removeAssignment, BOARD_TASKS_PER_PROJECT_LIMIT } from "./commands";
 import { firstLineTitle } from "./helpers";
 import { ensureTaskMembership } from "./membership";
 import { reconcileTasks } from "./reconcile";
@@ -245,12 +245,14 @@ describe("stable assignment detach", () => {
 });
 
 describe("task command helpers", () => {
-  test("create enforces text and project caps", () => {
+  test("create enforces the text cap and the project's band cap", () => {
     const tooLong = createTask([], { project: "proj", text: "x".repeat(6001), pos: { x: 0, y: 0 } });
     expect(tooLong.ok).toBe(false);
     if (!tooLong.ok) expect(tooLong.status).toBe(400);
 
-    const fullProject = Array.from({ length: TASKS_PER_PROJECT_LIMIT }, (_, index) => task({ id: `task-${index}` }));
+    /* Every one of these is on the board (no `board` flag is `hidden`), so the
+       band cap is genuinely reached. */
+    const fullProject = Array.from({ length: BOARD_TASKS_PER_PROJECT_LIMIT }, (_, index) => task({ id: `task-${index}` }));
     const capped = createTask(fullProject, { project: "proj", text: "new", pos: { x: 0, y: 0 } });
     expect(capped.ok).toBe(false);
     if (!capped.ok) expect(capped.status).toBe(409);
