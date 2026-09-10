@@ -1,7 +1,7 @@
 import type { BoardTask, TaskAssignment } from "./types";
 
 /**
- * Board membership of a task band: the rule the board itself applies.
+ * The board's empty-band preference, and the rule that applies it.
  *
  * The task-centered board (#1586) draws one band per recorded task. Every task
  * ever created therefore reached the canvas, including the several hundred that
@@ -10,22 +10,30 @@ import type { BoardTask, TaskAssignment } from "./types";
  * repair is a per-task flag, not a deletion and not an archive — the task list
  * keeps every row, and «Show on board» puts a band back at any time.
  *
- * The rule is deliberately narrow: the flag is honoured only while the task has
- * nothing on the board. A task that still holds a member draws its band
- * whatever the flag says, so hiding can never lose a live conversation.
+ * The flag is honoured only while the task has nothing on the board, so hiding
+ * can never lose a live conversation. WHAT COUNTS AS HOLDING SOMETHING is the
+ * whole question, and it is answered where it can be: at render, by what the
+ * band actually resolved (`bandHoldsMembers` in `scheme/taskBands`), which is
+ * passed in here as `hasMembers`.
  *
- * WHAT COUNTS AS HOLDING SOMETHING is the whole question, and the answer is
- * membership, not history. An assignment row is written at spawn and is never
- * removed, so a task whose conversation has since been archived, hidden or
- * aged out of the board keeps that row forever. Reading the row alone left 319
- * of the operator's 385 empty bands on the board — every one of them drawing
- * `0 working · 0 conversations`, which is the complaint. So an assignment
- * counts when it still resolves to a conversation THE BOARD CARRIES.
+ * Two answers that look plausible and are not:
  *
- * That is not the same as being on screen. The camera frames a part of the
- * board; a member scrolled far out of view, or in a band the operator has not
- * reached, is still a member and still keeps its task visible. The question is
- * asked against the board's own set of conversations, never against a viewport.
+ *  - the assignment ROW. It is written at spawn and never removed, so a task
+ *    whose conversation has since been archived, hidden or aged off the board
+ *    keeps it forever — 319 of the operator's 385 empty bands carried one.
+ *  - the SCAN. It lists transcripts; the board applies hidden/archive/placement
+ *    policy on top of them, so a conversation the scan carries may have no card
+ *    on the scene at all. A dry run against the operator's own state kept 265
+ *    tasks that way while only 11 bands actually held a conversation.
+ *
+ * Being off screen is a third thing again, and not membership either: the
+ * camera frames a part of the board, and a member scrolled far out of view is
+ * still a member. Nothing in this module reads a viewport.
+ *
+ * The scan-keyed helpers below answer a smaller, honest question for surfaces
+ * that have no scene to consult — "does this task still name a conversation the
+ * scan carries?" — which the task panel shows as a note beside its preference
+ * control. They are never the visibility rule.
  *
  * Pure by design — the board's client bundle imports this. The one-time
  * migration that first set the flag lives in `boardVisibilityMigration`, which
@@ -64,11 +72,9 @@ export function assignmentOnBoard(assignment: TaskAssignment, keys: BoardConvers
 }
 
 /**
- * Durable membership: at least one recorded assignment still resolves to a
- * conversation this board carries.
- *
- * Read from the task's own recorded assignments against the board's own
- * conversations — never from what a viewport happens to be showing.
+ * Whether at least one recorded assignment still names a conversation the scan
+ * carries. Not membership — the board may draw no card for that conversation —
+ * but enough to tell a task that once had an agent from one that never did.
  */
 export function taskHasBoardMembers(task: BoardTask, keys: BoardConversationKeys): boolean {
   return task.assignments.some((assignment) => assignmentOnBoard(assignment, keys));
@@ -77,24 +83,23 @@ export function taskHasBoardMembers(task: BoardTask, keys: BoardConversationKeys
 /**
  * Whether the board should draw a band for this task.
  *
- * `hasMembers` is the caller's answer to the membership question above, because
- * the two callers resolve it from different evidence and must not each invent
- * their own rule: the board asks its own workflow projection, which has already
- * resolved every assignment to a scanned conversation (including generations),
- * and the server asks the scan the board is about to be served.
+ * `hasMembers` is the caller's answer to the membership question — for the
+ * board, what its band resolved. It is passed in rather than computed here so
+ * that the surface which can actually see the scene is the one that answers,
+ * and every other surface has to say out loud that it is guessing.
  */
 export function taskShowsOnBoard(task: BoardTask, hasMembers: boolean): boolean {
   return task.board !== "hidden" || hasMembers;
 }
 
 /**
- * Membership as the OPEN project's board can judge it, for surfaces that list
- * tasks across projects (the task panel).
+ * The note the task panel shows: does this row still name a conversation the
+ * open project's scan carries?
  *
- * A task belonging to another project is judged by its recorded assignments
- * instead: this scan carries no conversations of that board, so the absence of
- * a member here is not evidence of anything, and treating it as one would offer
- * to hide a band that project is drawing.
+ * A task belonging to another project is answered from its own recorded
+ * assignments, because this scan carries no conversation of that board and its
+ * silence is not evidence. Informational only — the panel offers its preference
+ * control on every row whatever this says.
  */
 export function taskMembershipInScope(task: BoardTask, project: string, keys: BoardConversationKeys): boolean {
   return task.project === project ? taskHasBoardMembers(task, keys) : task.assignments.length > 0;

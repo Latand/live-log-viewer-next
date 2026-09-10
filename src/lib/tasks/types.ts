@@ -113,12 +113,14 @@ export interface BoardTask {
   source?: TaskSource;
   /** Admission origin of a placeholder task (#1586); absent on operator-created tasks. */
   origin?: TaskOrigin;
-  /** Whether this task may draw a band on the board. Absent means shown — the
+  /** Whether an EMPTY band may be drawn for this task. Absent means shown — the
       default for every task the operator or an agent creates. `hidden` is only
-      ever written by an explicit «Remove from board» or by the one-time
-      empty-task migration, and only an EMPTY task honours it: a task that holds
-      a durable agent association draws its band whatever this says. The task
-      itself is never deleted or archived and never leaves the task list. */
+      ever written by an explicit «Remove from board», by the task panel's
+      preference control, or once by the legacy-task migration, and it is a
+      preference rather than a claim about membership: a task whose band
+      resolves a conversation, a mirror, a container or a draft is drawn
+      whatever this says (`boardVisibility`). The task itself is never deleted
+      or archived and never leaves the task list. */
   board?: TaskBoardVisibility;
   createdAt: string;
   updatedAt: string; // bumped by every PATCH
