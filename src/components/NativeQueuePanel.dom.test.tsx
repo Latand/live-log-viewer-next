@@ -859,31 +859,44 @@ test("a slot this browser cannot READ refuses the control and leaves the bytes a
   }
 });
 
-test("the queue bounds itself above the composer, and scrolls its own rows", async () => {
+test("the queue yields to the conversation above the composer, and scrolls its own rows", async () => {
   /* THE STRUCTURAL HALF of the height repair. happy-dom lays nothing out, so
      what this can hold is the contract that makes the layout right: the panel
-     carries a max-height and the ROWS are the element that scrolls, with the
-     header and the recovery section outside that scroller so the queue-level
-     start and the replay controls never scroll away. The measurement itself —
-     input and send inside the pane, the conversation keeping room, the last row
-     reachable at 4/16/128 rows on both widths — is `scripts/capture-issue-1629-
-     queue-height.ts`, in a real browser, because only a browser has a layout.
+     YIELDS — `min-h-0`, and its own scroller, which is what lets a flexbox take
+     room back from it — inside the budget `TmuxComposer` gives the composer, it
+     keeps a ceiling for the surfaces where that budget cannot resolve, and the
+     ROWS are the first element to scroll, with the header and the recovery
+     section outside that scroller so the queue-level start and the replay
+     controls never scroll away. The measurement itself — input and send inside
+     the pane and pressable, the conversation keeping room, the last row
+     reachable at 4/16/128 rows, on a real phone viewport and on the board's own
+     card heights — is `scripts/capture-issue-1629-queue-height.ts`, in a real
+     browser, because only a browser has a layout.
 
-     Without the bound the composer's form, which does not shrink, grew until
-     the textarea and the send control were laid out past the pane's bottom edge
-     and clipped: at sixteen rows there was no way left to type or send. */
+     Sized from the viewport alone the panel could be taller than the whole
+     phone composer, which put the textarea and the send control below the
+     pane's bottom edge with no way left to type or send, and left a 680 px card
+     44 px of transcript. */
   entries = Array.from({ length: 40 }, (_, index) => record(`e${index}`));
   items = entries.map((entry) => submission(entry.entryId));
   await mount({ turn: "idle" });
 
   const panel = host.querySelector('[data-testid="native-queue-panel"]') as HTMLElement;
+  expect(panel.className).toContain("min-h-0");
   expect(panel.className).toContain("max-h-");
   expect(panel.className).toContain("flex-col");
+  /* Squeezed past its own header and recovery section, the panel scrolls itself
+     rather than spilling over the input below it. */
+  expect(panel.className).toContain("overflow-y-auto");
+  expect(panel.className).toContain("overscroll-contain");
 
   const list = host.querySelector('[data-testid="native-queue-rows"]') as HTMLElement;
   expect(list.className).toContain("overflow-y-auto");
   /* A wheel inside the queue stays in the queue rather than reaching the board. */
   expect(list.className).toContain("overscroll-contain");
+  /* The rows are what yields first, down to a floor: a squeezed queue still
+     shows the queue. */
+  expect(list.className).toContain("min-h-14");
   expect(list.querySelectorAll('[data-testid="native-queue-row"]')).toHaveLength(40);
 
   /* The controls that must never scroll away are outside the scroller. */

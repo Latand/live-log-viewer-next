@@ -712,3 +712,35 @@ test("a browser that will not store the hand-off keeps the draft and sends nothi
     Object.assign(globalThis, { sessionStorage: real });
   }
 });
+
+test("the composer budgets itself against the conversation, so the queue has room to give back", async () => {
+  /* THE OTHER HALF of the height repair, on the composer's side. The queue can
+     only yield room if something bounds the form it sits in: the phone's form
+     has budgeted itself against the viewport since #419 — the conversation IS
+     the viewport there — and a card has to budget against the CARD, because a
+     680 px card on a 1080 px screen took a viewport-sized queue and had 44 px of
+     transcript left.
+
+     happy-dom lays nothing out, so this pins the contract; the measurement is
+     `scripts/capture-issue-1629-queue-height.ts`, which mounts the assembled
+     conversation in a real browser at the phone's size and the board's own card
+     heights. */
+  queueEntries = [{
+    entryId: "budget-1", conversationId: CARD, binding: { threadId: "thread-1", accountId: "acct-1" },
+    clientUserMessageId: "c-budget", nativeSubmissionId: "n-budget", revision: 1,
+    versions: [{ revision: 1, operationId: "op-budget", text: "queued", images: [], contentDigest: "d" }],
+    profilePolicy: "thread-at-dispatch", state: "queued", mutationOperationId: null,
+    dispatchedRevision: null, dispatchedTurnId: null, proof: null, reason: null,
+  }];
+  const { host, root } = await mount();
+  const form = host.querySelector("form") as HTMLFormElement;
+
+  /* A card, so the desktop form: the phone's is `bounded-mobile-composer`. */
+  expect(form.getAttribute("data-testid")).toBeNull();
+  /* A share of the card, and a floor of it left for the transcript. */
+  expect(form.className).toContain("max-h-[min(60%,calc(100%_-_15rem))]");
+  /* And the queue is inside that budget, which is what makes it the part that
+     gives room back. */
+  expect(form.querySelector('[data-testid="native-queue-panel"]')).not.toBeNull();
+  await act(async () => root.unmount());
+});

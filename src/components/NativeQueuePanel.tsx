@@ -206,20 +206,24 @@ export function NativeQueuePanel({ view, error, thread, cardId, binding, unresol
       aria-label={t("queue.panel")}
       data-testid="native-queue-panel"
       data-stale={view.nativeStale ? "true" : undefined}
-      /* BOUNDED, BECAUSE IT SITS ABOVE THE INPUT. The composer's form does not
-         shrink, so an unbounded panel pushed the textarea and the send control
-         out of the pane entirely — the conversation's feed collapsed to nothing
-         first, and past about a dozen queued rows there was no way left to type
-         or send. The queue caps itself and scrolls its own rows instead, in the
-         same `max-h / overflow-y-auto / overscroll-contain` idiom the rest of
-         the app uses, so a wheel inside it never escapes to the board. The cap
-         is the smaller of a share of the viewport and a fixed ceiling, so a
-         tall screen keeps the conversation readable and a short one still gets
-         a usable queue. Below the cap nothing scrolls and nothing moves.
-         The phone composer already capped its whole form this way
-         (`max-h-[min(38dvh,20rem)]`), which is why this only ever bit
-         desktop. */
-      className="flex max-h-[min(45dvh,26rem)] flex-col rounded-control border border-border bg-raised/60"
+      /* IT SITS ABOVE THE INPUT, SO IT TAKES WHAT THE CONVERSATION CAN SPARE.
+         The composer budgets itself against the conversation it is in
+         (`TmuxComposer`'s form), and inside that budget this panel is the part
+         that yields: `min-h-0` is what lets the flexbox shrink it, so the
+         textarea, the send control and a readable transcript keep their room
+         at every conversation size instead of being pushed past the pane's
+         bottom edge and clipped. Sized from the viewport alone the panel could
+         be taller than the whole phone composer — 378 px inside a 319 px form —
+         and the operator had no way left to type or send.
+         The ceiling stays for the surfaces whose height is not definite, where
+         a percentage budget cannot resolve and this is the only bound.
+         What yields first is the rows list; when even its floor does not fit,
+         the panel scrolls itself, in the same
+         `max-h / overflow-y-auto / overscroll-contain` idiom the rest of the app
+         uses, so the header, the recovery controls and every row stay reachable
+         and a wheel inside the queue never escapes to the board. With room to
+         spare nothing scrolls and nothing moves. */
+      className="flex min-h-0 max-h-[min(45dvh,26rem)] flex-col overflow-y-auto overscroll-contain rounded-control border border-border bg-raised/60"
     >
       <header className="flex shrink-0 items-center gap-2 border-b border-border/60 px-2 py-1">
         <span className="text-caption font-medium text-secondary">{t("queue.title")}</span>
@@ -276,10 +280,13 @@ export function NativeQueuePanel({ view, error, thread, cardId, binding, unresol
         </section>
       ) : null}
 
-      {/* The one part that scrolls. No `flex-1`: its basis stays its content, so
-          a short queue is laid out exactly as before and only an overflowing one
-          shrinks against the cap above. */}
-      <ul data-testid="native-queue-rows" className="min-h-0 divide-y divide-border/40 overflow-y-auto overscroll-contain">
+      {/* The first part to scroll, and the first to yield. No `flex-1`: its basis
+          stays its content, so a short queue is laid out exactly as before and
+          only an overflowing one shrinks against the room above. The floor is
+          about half a row: a panel squeezed to almost nothing still shows the
+          queue it is a view of, rather than a bare header over an empty
+          strip. */}
+      <ul data-testid="native-queue-rows" className="min-h-14 divide-y divide-border/40 overflow-y-auto overscroll-contain">
         {view.rows.map((row, index) => (
           <li key={row.entryId} data-testid="native-queue-row" data-entry={row.entryId} data-state={row.state} className="px-2 py-1.5">
             {editing === row.entryId ? (

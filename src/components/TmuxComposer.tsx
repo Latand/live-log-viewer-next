@@ -3285,11 +3285,25 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
       /* Chat-first mobile budget (issue #419): the phone composer is a single
          input row with its secondary controls folded, so it takes the tighter
          vertical padding — every reclaimed row keeps the transcript above its
-         ≥60% viewport share. Desktop keeps the roomier py-2. */
+         ≥60% viewport share. Desktop keeps the roomier py-2.
+
+         BOTH BUDGET AGAINST THE CONVERSATION THEY ARE IN. On the phone the
+         conversation IS the viewport, so the share is written in `dvh`. On the
+         desktop the conversation is a card of whatever height the board gave
+         it — a child pane is 680 px against a 1080 px screen — and a budget
+         taken from the screen there left a 680 px conversation 44 px of
+         transcript, and a phone's own composer overflowing its form with the
+         input and Send laid out below the pane. So the card's budget is a share
+         of the CARD: at most 60% of it, and never less than 15rem of it left
+         for the transcript, whichever binds first. Inside the budget the queue
+         panel is the part that yields (`NativeQueuePanel`); the input, the
+         controls and the receipts do not. Where the card's own height is not
+         definite the percentage cannot resolve and the panel's own ceiling is
+         the bound, exactly as before. */
       className={`flex shrink-0 flex-col gap-1.5 border-t border-border bg-card px-2.5 ${
         isMobile
           ? "max-h-[min(38dvh,20rem)] overflow-x-clip overflow-y-auto overscroll-y-contain py-1.5"
-          : "py-2"
+          : "max-h-[min(60%,calc(100%_-_15rem))] py-2"
       }`}
       aria-label={composerAriaLabel}
     >
