@@ -142,6 +142,7 @@ function snapshotFor(phase: Phase) {
       ? ([] as const)
       : ([{ id: "l1", role: "assistant" as const, text: "listening", final: true }] as const),
     error: null,
+    notice: null,
     startedAt: phase === "live" ? 1_000 : null,
     micMuted: false,
     outputMuted: false,

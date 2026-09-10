@@ -69,6 +69,7 @@ export interface VoicePipClient {
     lines: readonly CodexRealtimeLine[];
     error: string | null;
     startedAt: number | null;
+    notice: string | null;
     micMuted: boolean;
     outputMuted: boolean;
   };
@@ -170,6 +171,7 @@ export function VoicePipHost({ mobile, resolveClient = codexRealtimeClient }: Vo
       phase={snapshot.phase}
       lines={snapshot.lines}
       error={snapshot.error}
+      notice={snapshot.notice}
       startedAt={snapshot.startedAt}
       /* Read at render time from the one client: the stream is not duplicated,
          it is the same MediaStream object the call owns. */
@@ -229,6 +231,7 @@ const IDLE = {
   phase: "idle" as const,
   lines: [] as const,
   error: null,
+  notice: null,
   startedAt: null,
   micMuted: false,
   outputMuted: false,

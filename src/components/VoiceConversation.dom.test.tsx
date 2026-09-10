@@ -238,3 +238,56 @@ test("mute controls stay out of the way outside a live call", () => {
   expect(host.querySelector('[data-testid="voice-output-toggle"]')).toBeNull();
   flushSync(() => root.unmount());
 });
+
+
+test("an approaching usage limit is said while the call is still running", () => {
+  /* The 9-second cutoff in docs/realtime-v3/BLOCKED.md arrived as a dead
+     transport with no warning. The backend does say so first, and the operator
+     can only act on it while there is still a call to act in — so it is a
+     status beside a live transcript, not an alert that ends one. */
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  flushSync(() => root.render(
+    <VoiceConversationPanel
+      phase="live"
+      error={null}
+      notice="This account is approaching its usage limit; the call may be cut short."
+      startedAt={1_000}
+      lines={[{ id: "a", role: "assistant", text: "On the line.", final: true }]}
+      t={t}
+    />,
+  ));
+  const notice = host.querySelector('[data-testid="voice-notice"]');
+  expect(notice?.getAttribute("role")).toBe("status");
+  expect(notice?.textContent).toContain("approaching its usage limit");
+  /* Not the failure treatment: no alert, no retry, and the call keeps its live
+     transcript. */
+  expect(host.querySelector('[role="alert"]')).toBeNull();
+  expect(host.querySelector('[data-testid="voice-retry"]')).toBeNull();
+  expect(host.textContent).toContain("On the line.");
+  flushSync(() => root.unmount());
+});
+
+test("a failed call reports the failure rather than a stale warning", () => {
+  /* Both at once is the state after a limit warning became a cutoff. The
+     operator needs the reason and the retry, and a warning about what might
+     happen next is noise beside the thing that already did. */
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  flushSync(() => root.render(
+    <VoiceConversationPanel
+      phase="error"
+      error="You have reached your usage limit."
+      notice="This account is approaching its usage limit; the call may be cut short."
+      startedAt={null}
+      lines={[]}
+      onRetry={() => undefined}
+      t={t}
+    />,
+  ));
+  expect(host.querySelector('[data-testid="voice-notice"]')).toBeNull();
+  expect(host.querySelector('[role="alert"]')?.textContent).toContain("reached your usage limit");
+  flushSync(() => root.unmount());
+});

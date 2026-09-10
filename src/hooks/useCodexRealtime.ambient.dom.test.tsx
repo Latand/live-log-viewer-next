@@ -70,6 +70,7 @@ const IDLE: CodexRealtimeSnapshot = {
   startedAt: null,
   micMuted: false,
   outputMuted: false,
+  notice: null,
 };
 
 /**

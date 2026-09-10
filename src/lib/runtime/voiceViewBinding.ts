@@ -62,6 +62,21 @@ export interface VoiceSelectedContextAdmission {
   sequence: number;
   /** The utterance this reference was published for, when the caller named one. */
   utteranceId: string | null;
+  /**
+   * The handoff this utterance became, once the call reported one (#1629).
+   *
+   * The join between what the operator was looking at, what they said, and the
+   * work the backing model was asked to do. Null until the handoff is reported,
+   * and null for an utterance that never produced one.
+   */
+  handoff: VoiceHandoffIdentity | null;
+}
+
+/** The canonical identities a realtime handoff carries. */
+export interface VoiceHandoffIdentity {
+  handoffId: string | null;
+  itemId: string | null;
+  userBidiTurnId: string | null;
 }
 
 interface VoiceSessionState {
@@ -218,7 +233,47 @@ export function admitVoiceSelectedContext(input: VoiceSelectedContextAdmissionIn
     admittedAt: new Date(input.now).toISOString(),
     sequence: session.sequence,
     utteranceId: utterance?.id ?? null,
+    handoff: null,
   };
+  return { ok: true, admission: session.admission };
+}
+
+/**
+ * Record which handoff an already-admitted utterance became.
+ *
+ * Deliberately not an admission: it mints no utterance, moves no counter and
+ * replaces no reference. It only completes the record of one that already
+ * exists, so a handoff reported for an utterance the ledger has moved past — a
+ * late event, or one belonging to a superseded publication — is dropped rather
+ * than allowed to reopen it.
+ */
+export function recordVoiceHandoff(input: {
+  conversationId: string;
+  realtimeSessionId: string;
+  utteranceId: string;
+  handoff: VoiceHandoffIdentity;
+}): VoiceSelectedContextAdmissionResult {
+  const session = sessions.get(input.conversationId);
+  if (!session || !session.binding || session.realtimeSessionId !== input.realtimeSessionId) {
+    return {
+      ok: false,
+      failure: {
+        code: "unbound",
+        message: "This voice session is not bound to a Viewer window, so it cannot resolve a selected card.",
+      },
+    };
+  }
+  const admission = session.admission;
+  if (!admission || admission.utteranceId !== input.utteranceId) {
+    return {
+      ok: false,
+      failure: {
+        code: "superseded",
+        message: "This voice session has already been told about a later utterance, so an earlier one cannot replace it.",
+      },
+    };
+  }
+  session.admission = { ...admission, handoff: input.handoff };
   return { ok: true, admission: session.admission };
 }
 

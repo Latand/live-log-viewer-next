@@ -9,7 +9,9 @@ import {
   admitVoiceSelectedContext,
   bindVoiceSession,
   parseVoiceViewBinding,
+  recordVoiceHandoff,
   releaseVoiceSession,
+  type VoiceHandoffIdentity,
   type VoiceUtteranceIdentity,
 } from "./voiceViewBinding";
 import { recordDirectOperatorWakatimeActivity } from "@/lib/wakatime/operatorActivity";
@@ -74,6 +76,22 @@ function byteLength(value: string): number {
  * the bound view's and still admissible, and the ordering rules fall back to the
  * reference's own revision.
  */
+/** At least one canonical id, each bounded; a report naming nothing is refused. */
+function voiceHandoffIdentity(value: unknown): VoiceHandoffIdentity | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const body = value as Record<string, unknown>;
+  const id = (key: string): string | null => {
+    const raw = body[key];
+    return typeof raw === "string" && raw.length > 0 && raw.length <= 200 ? raw : null;
+  };
+  const handoff = {
+    handoffId: id("handoffId"),
+    itemId: id("itemId"),
+    userBidiTurnId: id("userBidiTurnId"),
+  };
+  return handoff.handoffId || handoff.itemId || handoff.userBidiTurnId ? handoff : null;
+}
+
 function voiceUtteranceIdentity(value: unknown): VoiceUtteranceIdentity | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const body = value as Record<string, unknown>;
@@ -236,6 +254,31 @@ export async function executeRealtimeControl(
         body: { ok: true, selectedContext: admission.admission.reference, sequence: admission.admission.sequence },
       };
     }
+    /**
+     * Which handoff the last published utterance became (#1629).
+     *
+     * Authorized the same way `selectedContext` is — by the ledger, against the
+     * session id the call was bound to — because it completes that ledger's own
+     * record and nothing else. It writes no words, mints no utterance and moves
+     * no counter.
+     */
+    if (request.action === "handoff") {
+      const utterance = voiceUtteranceIdentity(request.utterance);
+      const handoff = voiceHandoffIdentity(request.handoff);
+      if (!utterance || !handoff) {
+        return { status: 400, body: { error: "a handoff report needs an utterance identity and at least one handoff id" } };
+      }
+      const recorded = recordVoiceHandoff({
+        conversationId,
+        realtimeSessionId: caller.kind === "session" ? caller.realtimeSessionId : "",
+        utteranceId: utterance.id,
+        handoff,
+      });
+      if (!recorded.ok) {
+        return { status: 409, body: { error: recorded.failure.message, code: recorded.failure.code } };
+      }
+      return { status: 200, body: { ok: true, handoff: recorded.admission.handoff } };
+    }
     if (request.action === "operatorActivity") {
       const operatorEventId = typeof request.operatorEventId === "string" ? request.operatorEventId.trim() : "";
       if (!/^[a-f0-9]{64}$/.test(operatorEventId)) {
@@ -315,7 +358,7 @@ export async function executeRealtimeControl(
         },
       };
     }
-    return { status: 400, body: { error: "action must be start, operatorActivity, selectedContext, appendSpeech, deliverWorkerResponse, stop, or status" } };
+    return { status: 400, body: { error: "action must be start, operatorActivity, selectedContext, handoff, appendSpeech, deliverWorkerResponse, stop, or status" } };
   } catch (error) {
     return { status: 409, body: { error: redactCodexHostDiagnostic(error) } };
   }

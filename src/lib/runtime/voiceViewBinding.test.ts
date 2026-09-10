@@ -5,6 +5,7 @@ import { captureSelectedContext, type SelectedContextRef } from "@/lib/selection
 import {
   admitVoiceSelectedContext,
   bindVoiceSession,
+  recordVoiceHandoff,
   releaseVoiceSession,
   resetVoiceViewBindings,
   voiceSelectedContext,
@@ -232,4 +233,68 @@ test("a new call starts its own utterance ledger", () => {
   });
   expect(admitted.ok).toBe(true);
   expect(voiceSelectedContext(CONVERSATION)?.reference).toEqual(first);
+});
+
+
+/* ------------------------------------------------------------------ *
+ * The join: what was on screen, what was said, what was handed off.
+ * ------------------------------------------------------------------ */
+
+const HANDOFF = { handoffId: "handoff-1", itemId: "item-1", userBidiTurnId: "bidi-1" };
+
+test("a handoff completes the standing admission without minting an utterance", () => {
+  bindVoiceSession(CONVERSATION, "rt-1", DESK);
+  const ref = reference(DESK, "conversation_atlas_a", NOW, 1);
+  admitVoiceSelectedContext({
+    conversationId: CONVERSATION, realtimeSessionId: "rt-1",
+    reference: ref, utterance: utterance(1), now: NOW,
+  });
+  const recorded = recordVoiceHandoff({
+    conversationId: CONVERSATION, realtimeSessionId: "rt-1",
+    utteranceId: utterance(1).id, handoff: HANDOFF,
+  });
+  expect(recorded.ok).toBe(true);
+  /* The reference and the boundary counter are untouched: this reports what the
+     utterance became, it does not claim a new one happened. */
+  expect(voiceSelectedContext(CONVERSATION)?.reference).toEqual(ref);
+  expect(voiceSelectedContext(CONVERSATION)?.sequence).toBe(1);
+  expect(voiceSelectedContext(CONVERSATION)?.handoff).toEqual(HANDOFF);
+});
+
+test("a handoff for an utterance the call has moved past is dropped", () => {
+  /* Handoff events are asynchronous like everything else on this leg. One that
+     names a superseded utterance must not reopen it and attach itself to the
+     reference that replaced it — that would join the operator's newest card to
+     an older spoken turn's work. */
+  bindVoiceSession(CONVERSATION, "rt-1", DESK);
+  admitVoiceSelectedContext({
+    conversationId: CONVERSATION, realtimeSessionId: "rt-1",
+    reference: reference(DESK, "conversation_atlas_a", NOW, 1), utterance: utterance(1), now: NOW,
+  });
+  admitVoiceSelectedContext({
+    conversationId: CONVERSATION, realtimeSessionId: "rt-1",
+    reference: reference(DESK, "conversation_atlas_b", NOW + 1_000, 2), utterance: utterance(2), now: NOW + 1_000,
+  });
+  const late = recordVoiceHandoff({
+    conversationId: CONVERSATION, realtimeSessionId: "rt-1",
+    utteranceId: utterance(1).id, handoff: HANDOFF,
+  });
+  expect(late.ok).toBe(false);
+  expect(late.ok || late.failure.code).toBe("superseded");
+  expect(voiceSelectedContext(CONVERSATION)?.handoff).toBeNull();
+});
+
+test("a handoff presented with another call's session id is refused", () => {
+  bindVoiceSession(CONVERSATION, "rt-1", DESK);
+  admitVoiceSelectedContext({
+    conversationId: CONVERSATION, realtimeSessionId: "rt-1",
+    reference: reference(DESK), utterance: utterance(1), now: NOW,
+  });
+  const impostor = recordVoiceHandoff({
+    conversationId: CONVERSATION, realtimeSessionId: "rt-2",
+    utteranceId: utterance(1).id, handoff: HANDOFF,
+  });
+  expect(impostor.ok).toBe(false);
+  expect(impostor.ok || impostor.failure.code).toBe("unbound");
+  expect(voiceSelectedContext(CONVERSATION)?.handoff).toBeNull();
 });

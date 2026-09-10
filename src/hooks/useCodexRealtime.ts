@@ -8,7 +8,7 @@ import { speakingFromLines } from "@/lib/audio/speech";
 import { codexRealtimeClient, type CodexRealtimeLine, type CodexRealtimeSnapshot } from "@/lib/realtime/codexRealtimeClient";
 import type { RuntimeVoiceDelivery } from "@/lib/runtime/voiceDelivery";
 
-const IDLE = { phase: "idle" as const, lines: [], error: null, startedAt: null, micMuted: false, outputMuted: false };
+const IDLE = { phase: "idle" as const, lines: [], error: null, startedAt: null, micMuted: false, outputMuted: false, notice: null };
 
 /**
  * The part of the realtime client this hook consumes.

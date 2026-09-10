@@ -36,11 +36,24 @@ export interface CodexRealtimeSnapshot {
   micMuted: boolean;
   /** Agent audio silenced locally; the call keeps running. */
   outputMuted: boolean;
+  /**
+   * Something the operator should know while the call keeps running (#1629).
+   *
+   * Deliberately not `error`, which puts the panel in its failed state and ends
+   * the call in the reader's mind. An approaching usage limit is the case this
+   * was added for: the backend says so before it cuts the call, and the operator
+   * can only act on it while there is still a call to act in.
+   */
+  notice: string | null;
 }
 
 export type ParsedRealtimeEvent =
   | { kind: "transcript"; role: "user" | "assistant"; text: string; final: boolean }
-  | { kind: "delegation"; id: string }
+  /** The handoff that turns the utterance just finished into work on the thread.
+      Its identities are the canonical join between what was said and what the
+      backing model was asked to do (#1629). */
+  | { kind: "handoff"; handoffId: string | null; itemId: string | null; userBidiTurnId: string | null }
+  | { kind: "usage"; status: string }
   | { kind: "error"; message: string }
   | { kind: "ignored" };
 
@@ -49,6 +62,21 @@ const MAX_LINES = 80;
 
 function newOperatorActivityId(): string {
   return randomHex(32);
+}
+
+/**
+ * The backend's usage-limit state, in words the operator can act on.
+ *
+ * Only `approaching` is spoken about: it is the one state where saying something
+ * changes what the operator does. Any other status the backend adds later is
+ * passed through rather than swallowed, because a warning nobody has taught this
+ * function about is still a warning.
+ */
+function usageNotice(status: string): string | null {
+  if (status === "approaching") {
+    return "This account is approaching its usage limit; the call may be cut short.";
+  }
+  return status === "ok" || status === "none" ? null : `Usage limit status: ${status}.`;
 }
 
 function randomHex(bytes: number): string {
@@ -112,12 +140,24 @@ export function parseCodexRealtimeEvent(value: unknown): ParsedRealtimeEvent {
       ? { kind: "transcript", role: eventRole(event, "assistant"), text, final: true }
       : { kind: "ignored" };
   }
-  if (type === "delegation.created") {
-    const id = stringAt(event.item, "id")
-      ?? stringAt(event.delegation, "id")
-      ?? stringAt(event, "delegation_item_id")
-      ?? "";
-    return id ? { kind: "delegation", id } : { kind: "ignored" };
+  if (type === "delegation.created" || type === "conversation.handoff.requested") {
+    /* Both events name the same handoff; `delegation.created` nests the
+       identities under the item it created and the request carries them flat. */
+    const item = object(event.item) ?? object(event.delegation);
+    const handoffId = stringAt(event, "handoff_id") ?? stringAt(item, "handoff_id");
+    const itemId = stringAt(event, "item_id") ?? stringAt(item, "id") ?? stringAt(event, "delegation_item_id");
+    const userBidiTurnId = stringAt(event, "user_bidi_turn_id") ?? stringAt(item, "user_bidi_turn_id");
+    return handoffId || itemId || userBidiTurnId
+      ? { kind: "handoff", handoffId, itemId, userBidiTurnId }
+      : { kind: "ignored" };
+  }
+  if (type === "session.usage.updated") {
+    /* A limit warning is not a failure: the call keeps running, and saying so
+       out of band is the difference between the operator finishing a thought
+       and the call ending mid-sentence with a generic transport message. The
+       9-second cutoff in `docs/realtime-v3/BLOCKED.md` is what this exists for. */
+    const status = stringAt(event.usage_limit, "status") ?? stringAt(event, "status");
+    return status ? { kind: "usage", status } : { kind: "ignored" };
   }
   if (type === "error") {
     const message = (
@@ -153,7 +193,9 @@ async function waitForIceGathering(peer: RTCPeerConnection): Promise<void> {
 }
 
 class CodexRealtimeClient {
-  private snapshot: CodexRealtimeSnapshot = { phase: "idle", lines: [], error: null, startedAt: null, micMuted: false, outputMuted: false };
+  private snapshot: CodexRealtimeSnapshot = {
+    phase: "idle", lines: [], error: null, startedAt: null, micMuted: false, outputMuted: false, notice: null,
+  };
   private readonly listeners = new Set<() => void>();
   private peer: RTCPeerConnection | null = null;
   private events: RTCDataChannel | null = null;
@@ -442,6 +484,35 @@ class CodexRealtimeClient {
     }
   }
 
+  /**
+   * Report which handoff the last published utterance became (#1629).
+   *
+   * Fire-and-forget for the same reason the reference itself is: the audio is
+   * already on its way, and a stutter in the conversation is a worse price than
+   * a missing join. Carries the utterance id it is completing, so the server
+   * attaches the canonical identities to that admission instead of counting a
+   * second utterance.
+   */
+  private publishHandoffJoin(event: { handoffId: string | null; itemId: string | null; userBidiTurnId: string | null }): void {
+    if (!this.realtimeSessionId || !this.utteranceId) return;
+    const payload = JSON.stringify({
+      action: "handoff",
+      conversationId: this.conversationId,
+      realtimeSessionId: this.realtimeSessionId,
+      utterance: { id: this.utteranceId, sequence: this.utteranceSequence },
+      handoff: {
+        handoffId: event.handoffId,
+        itemId: event.itemId,
+        userBidiTurnId: event.userBidiTurnId,
+      },
+    });
+    void fetch("/api/runtime/realtime", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: payload,
+    }).catch(() => undefined);
+  }
+
   private publishOperatorActivity(): void {
     if (!this.realtimeSessionId) return;
     const payload = JSON.stringify({
@@ -529,8 +600,13 @@ class CodexRealtimeClient {
         this.publishOperatorActivity();
         this.publishSelectedContext();
       }
-    } else if (event.kind === "delegation") {
-      return;
+    } else if (event.kind === "handoff") {
+      /* The utterance just published is the one being handed off, so this is
+         where the reference the operator was looking at is joined to the work
+         the backing model is about to do. */
+      this.publishHandoffJoin(event);
+    } else if (event.kind === "usage") {
+      this.update({ notice: usageNotice(event.status) });
     } else if (event.kind === "error") {
       this.setError(event.message);
     }
