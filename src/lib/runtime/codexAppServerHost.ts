@@ -85,7 +85,7 @@ export type CodexRealtimeFailure = {
   realtimeSessionId: string | null;
 };
 type PendingRealtimeStart = {
-  resolve(result: CodexRealtimeWebRtcResult): void;
+  resolve(result: CodexRealtimeWebRtcAnswer): void;
   reject(error: Error): void;
   timer: ReturnType<typeof setTimeout> | undefined;
   started: boolean;
@@ -219,8 +219,6 @@ export interface CodexRealtimeWebRtcAnswer {
   realtimeSessionId: string | null;
   persona: VoiceSessionPersonaReceipt;
 }
-
-export type CodexRealtimeWebRtcResult = CodexRealtimeWebRtcAnswer;
 
 const CHILD_ENV_ALLOWLIST = [
   "PATH",
@@ -1819,7 +1817,7 @@ export class CodexAppServerHost implements EngineHost {
   async startRealtimeWebRtc(
     sdp: string,
     personaVariant: VoicePersonaVariant = "modality",
-  ): Promise<CodexRealtimeWebRtcResult> {
+  ): Promise<CodexRealtimeWebRtcAnswer> {
     if (this.dead || this.releasing || this.released || !this.writerFenceAllowsActuation()) {
       throw new Error("Codex app-server host is unavailable");
     }
@@ -1838,7 +1836,7 @@ export class CodexAppServerHost implements EngineHost {
     const persona = voiceSessionPersona(personaVariant);
 
     let pendingStart!: PendingRealtimeStart;
-    const answer = new Promise<CodexRealtimeWebRtcResult>((resolve, reject) => {
+    const answer = new Promise<CodexRealtimeWebRtcAnswer>((resolve, reject) => {
       pendingStart = {
         resolve,
         reject,
