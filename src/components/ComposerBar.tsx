@@ -120,9 +120,16 @@ export interface ComposerBarProps {
       editable textarea and image tray are empty. */
   sendPayloadAvailable?: boolean;
   /** Durable runtime receipt chips for the last sends on this target (issue
-      #25). Rendered under the status line; absent while the runtime bus is off,
-      so the composer is unchanged on the landing-disabled path. */
+      #25). A delivery that failed or has no answer yet, with the controls that
+      settle it — so they live in the accessory region with the rest of what a
+      send produced, above the input rather than under it (#1629). Absent while
+      the runtime bus is off, so the composer is unchanged on the
+      landing-disabled path. */
   receipts?: ReactNode;
+  /** Sends still waiting for their answer, newest last — the caller's own row
+      list (#561). Rendered in the accessory region beside the receipts, which
+      are the same thing one state later. */
+  deliveries?: ReactNode;
   /** Previously submitted messages, newest first — queued ones ahead of sent
       ones (issue #561). ArrowUp/ArrowDown recall them while the composer is
       empty; absent (the default) leaves the arrows as plain caret movement. */
@@ -133,6 +140,13 @@ export interface ComposerBarProps {
       by the card, so it sits with the field that fills it and moves with the
       composer into a floating window. */
   queuePanel?: ReactNode;
+  /** The composer's form is a bounded box that scrolls its own content, so the
+      input unit pins to its bottom edge and stays visible whatever else the
+      composer gained (#1629). A bar rendered in a box with no budget of its own
+      — a floating call window, a task form — passes nothing: there is nothing
+      to pin against, and `sticky` would otherwise catch on whatever page
+      scroller is above it. */
+  pinInput?: boolean;
   /**
    * Alt+Enter, when this surface has a second submission (#1629).
    *
@@ -228,10 +242,12 @@ export function ComposerBar({
   onSendBlockedRecover,
   sendPayloadAvailable = false,
   receipts,
+  deliveries,
   history = NO_HISTORY,
   voiceControl,
   voicePanel,
   queuePanel,
+  pinInput = false,
   onAlternateSubmit,
 }: ComposerBarProps) {
   const {
@@ -433,161 +449,216 @@ export function ComposerBar({
     </div>
   );
 
+  /* THE ACCESSORY REGION: ONE BUDGET FOR EVERYTHING ABOVE THE INPUT (#1629).
+     Each of these surfaces used to be a flex sibling of the field with a bound
+     of its own, and two repairs in a row fixed one of them and left the next
+     one to collapse: in a 600 x 500 card with a live call, six unresolved
+     receipts and a twenty-line draft, the queue was a 2px border and the
+     receipt list was 0px tall BELOW the pane's bottom edge — a pointer could
+     not reach a single recovery control and the keyboard focused invisible
+     ones, while Send and 133px of transcript sat there looking correct.
+
+     So they share ONE region and ONE rule. The region is what yields in the
+     composer's box (`min-h-0`) and it is the ONE scrollport over all of them
+     (`overflow-y-auto`, `overscroll-contain`, so a wheel inside it never
+     escapes to the board). Inside it the surfaces are grid ROWS, because that
+     is the layout that divides room the way this has to be divided: a grid
+     hands each row an equal share of what there is and stops at the row's own
+     content, so six receipt chips stay whole beside a 128-row queue and the
+     queue gets what the chips did not need. A flex column would have shrunk
+     both in proportion to how much they had to show, which is how a 46px
+     receipt list ends up with a 10px window next to a 400px queue. Each row
+     keeps its own scroller for whatever its share cannot hold. The
+     field's ceiling reserves this region's room from the same budget
+     (`accessoryReserve`), and the input unit below never yields, so what the
+     operator types can never be what removes a control they have to reach. */
+  const stagedStrip = isMobile && !onAttachFiles && attachments.attachments.length > 0;
+  /* Rendered only with something in it: an empty region is still a row of the
+     composer's box and would cost the gap above the input on every conversation
+     that has none of these. */
+  const accessories = Boolean(voicePanel || queuePanel || deliveries || receipts || stagedStrip);
   return (
     <>
-      {voicePanel}
-      {queuePanel}
-      {/* On phones, staged images are the composer's first bounded row. The
-          desktop tray keeps its established position below the controls. */}
-      {isMobile && !onAttachFiles ? (
-        <ImagePreviewStrip
-          attachments={attachments.attachments}
-          onRemove={attachments.remove}
-          onRetry={attachments.retry}
-          onClearAll={attachments.clearAll}
-        />
-      ) : null}
-      {/* The input is the anchor (design doc §3.5): a single sunken field that
-          owns the mic and send controls. On the phone it is the composer UNIT —
-          the field on top, one tools row under it, both inside the same box
-          (mobile v2 §2 rule 8) — and the box is the only chrome the operator
-          sees above the keyboard. On the desktop, idle lays the controls out at
-          the right edge (row) and recording stacks them below the full-width
-          transcript (column), exactly as before. */}
-      <div
-        data-mobile2-composer={isMobile ? slotKind : undefined}
-        className={
-          isMobile
-            ? "flex flex-col rounded-surface border border-border bg-sunken px-2 pb-0.5 pt-1 focus-within:border-accent/55"
-            : `flex rounded-control border border-border bg-sunken focus-within:ring-2 focus-within:ring-accent/40 ${
-                dictationRecording ? "flex-col gap-1.5 p-2.5" : "items-end gap-1 py-1 pl-2.5 pr-1"
-              }`
-        }
-      >
-        <textarea
-          /* The callback ref keeps `inputRef` current and re-attaches the IME
-             mirror when the field remounts — which it does whenever this bar
-             moves between the card and the floating PiP document. */
-          ref={attachInput}
-          value={displayText}
-          rows={1}
-          readOnly={Boolean(dictation.liveText)}
-          onChange={(event) => {
-            setHistoryIndex(-1);
-            setText(event.target.value);
-          }}
-          /* Focusing the composer often precedes a dictation; minting the live
-             token here hides its round-trip from the eventual mic press. */
-          onFocus={prewarmLiveToken}
-          onPaste={(event) => {
-            /* EVERY pasted file, not only images (#1224). `kind` separates a
-               file from the plain text of an ordinary paste, which must keep
-               its default behaviour. */
-            const picks = Array.from(event.clipboardData.items)
-              .filter((entry) => entry.kind !== "string")
-              .map((entry) => entry.getAsFile())
-              .filter((entry): entry is File => entry !== null);
-            if (!picks.length) return;
-            event.preventDefault();
-            (onAttachFiles ?? attachments.addFiles)(picks);
-          }}
-          onDragOver={(event) => {
-            /* A file drop only fires when its dragover was cancelled — without
-               this the browser navigates to the dropped file instead of
-               attaching it, which is what a dragged PDF used to do. ANY file
-               drag is claimed, with no per-type exception: the tray is what
-               decides what it can hold, and it decides identically for a paste,
-               a drop and the picker (#1224). A drag waved away here would be a
-               file lost with only a cursor to explain it. */
-            const items = Array.from(event.dataTransfer.items).filter((item) => item.kind === "file");
-            if (!items.length) return;
-            event.preventDefault();
-            event.dataTransfer.dropEffect = "copy";
-          }}
-          onDrop={(event) => {
-            const files = Array.from(event.dataTransfer.files);
-            if (!files.length) return;
-            event.preventDefault();
-            event.stopPropagation();
-            (onAttachFiles ?? attachments.addFiles)(files);
-          }}
-          onKeyDown={(event) => {
-            /* ArrowUp/ArrowDown recall previously queued and sent messages
-               while the composer is empty (issue #561) — the shell convention.
-               Once recall is active the arrows keep walking the list, so a
-               recalled multi-line message can be stepped past; the first edit
-               releases the arrows back to caret movement. */
-            if ((event.key === "ArrowUp" || event.key === "ArrowDown") && !dictationRecording && !event.metaKey && !event.ctrlKey && !event.altKey) {
-              const recall = recallHistory(historyIndex, event.key, history, displayText.length === 0);
-              if (recall) {
-                event.preventDefault();
-                setHistoryIndex(recall.index);
-                setText(recall.text);
-                requestAnimationFrame(() => {
-                  const el = inputRef.current;
-                  if (!el) return;
-                  el.setSelectionRange(el.value.length, el.value.length);
-                });
-                return;
-              }
-            }
-            /* Enter sends like the old single-line input; Shift+Enter makes a
-               new line. Composition guard keeps IME confirms from sending.
-               Enter honors the exact admission gate of the Send button (PR
-               #431): a blocked send — dead host, an attachment still decoding
-               or failed, images disabled with images staged — must do nothing
-               rather than submit and silently drop an attachment. During
-               recording Enter means stop-and-send — a plain submit would fire
-               off just the typed prefix and leave the recording running. */
-            /* Alt+Enter is the second submission where a surface has one — the
-               native Codex queue (#1629). It runs through the SAME admission
-               gate as Enter, so a blocked send is blocked both ways, and it is
-               checked first because Enter's own branch ignores modifiers. */
-            if (event.key === "Enter" && event.altKey && onAlternateSubmit && !event.nativeEvent.isComposing) {
-              event.preventDefault();
-              if (sendBlocked || !effectiveCanSend || imageSendBlocked) return;
-              setHistoryIndex(-1);
-              onAlternateSubmit();
-              return;
-            }
-            if (event.key === "Enter" && !event.shiftKey && !event.altKey && !event.nativeEvent.isComposing) {
-              event.preventDefault();
-              if (sendBlocked || !effectiveCanSend || imageSendBlocked) return;
-              setHistoryIndex(-1);
-              if (dictation.phase === "rec") void stopAndSend();
-              else void submit();
-            }
-          }}
-          placeholder={placeholder}
-          aria-label={textareaAriaLabel}
-          disabled={fieldsDisabled}
-          data-mobile2-field={isMobile ? true : undefined}
-          className={
-            isMobile
-              /* 16 px so iOS never zooms the page to reach the field (§5). */
-              ? "block w-full min-w-0 resize-none overflow-y-auto bg-transparent px-1 py-1 text-[16px] leading-[22px] text-primary placeholder:text-muted focus-visible:outline-none disabled:opacity-60"
-              : `min-w-0 resize-none overflow-y-auto bg-transparent py-1 text-ui leading-[18px] text-primary placeholder:text-muted focus-visible:outline-none disabled:opacity-60 ${
-                  dictationRecording ? "w-full" : "flex-1 self-center"
-                }`
-          }
-        />
-        {isMobile ? unitTools : dictationRecording ? (
-          <div className="flex items-center justify-end gap-1">{controls}</div>
-        ) : (
-          controls
-        )}
-      </div>
-      {/* Secondary controls, desktop only: one quiet borderless row under the
-          input, holding the runtime pill and the attachment picker. The phone
-          has neither row any more — the chip and the picker are cells of the
-          box's tools row (mobile v2 §2 rule 8), which is what removes the
-          «pill row above the keyboard» the operator photographed. */}
-      {!isMobile && hasSecondaryRow ? (
-        <div id={optionsRowId} data-testid="composer-options-row" className="flex items-center justify-between gap-1.5">
-          <div className="flex min-w-0 items-center gap-1.5">{leftSlot}</div>
-          {picker}
+      {accessories ? (
+        <div
+          data-testid="composer-accessories"
+          className="grid min-h-0 auto-rows-[minmax(0,max-content)] gap-1.5 overflow-y-auto overscroll-contain [&>*]:min-h-0"
+        >
+          {deliveries}
+          {voicePanel}
+          {queuePanel}
+          {/* On phones, staged images are the composer's first bounded row. The
+              desktop tray keeps its established position below the controls. */}
+          {stagedStrip ? (
+            <ImagePreviewStrip
+              attachments={attachments.attachments}
+              onRemove={attachments.remove}
+              onRetry={attachments.retry}
+              onClearAll={attachments.clearAll}
+            />
+          ) : null}
+          {/* The receipts keep their own scroller inside their share of the
+              region: a run of failed or uncertain deliveries wraps into rows of
+              chips, and each chip carries the controls that settle it. */}
+          {receipts ? (
+            <div data-testid="composer-receipts" className="flex flex-wrap gap-1.5 overflow-y-auto overscroll-contain">{receipts}</div>
+          ) : null}
         </div>
       ) : null}
+      {/* THE INPUT UNIT NEVER YIELDS AND NEVER SCROLLS AWAY. The field and the
+          controls that send what is in it are the two things with no
+          alternative, so they are `shrink-0` inside the budget and pinned to
+          the bottom edge of the box that holds them: whatever the composer
+          gains above, the operator can still type and still send, and what did
+          not fit is scrolled to rather than laid out past the pane's edge. */}
+      <div
+        data-testid="composer-input-unit"
+        className={`flex shrink-0 flex-col gap-1.5 ${pinInput ? "sticky bottom-0 z-10 bg-card" : ""}`}
+      >
+        {/* The input is the anchor (design doc §3.5): a single sunken field that
+            owns the mic and send controls. On the phone it is the composer UNIT —
+            the field on top, one tools row under it, both inside the same box
+            (mobile v2 §2 rule 8) — and the box is the only chrome the operator
+            sees above the keyboard. On the desktop, idle lays the controls out at
+            the right edge (row) and recording stacks them below the full-width
+            transcript (column), exactly as before. */}
+        <div
+          data-mobile2-composer={isMobile ? slotKind : undefined}
+          className={
+            isMobile
+              ? "flex flex-col rounded-surface border border-border bg-sunken px-2 pb-0.5 pt-1 focus-within:border-accent/55"
+              : `flex rounded-control border border-border bg-sunken focus-within:ring-2 focus-within:ring-accent/40 ${
+                  dictationRecording ? "flex-col gap-1.5 p-2.5" : "items-end gap-1 py-1 pl-2.5 pr-1"
+                }`
+          }
+        >
+          <textarea
+            /* The callback ref keeps `inputRef` current and re-attaches the IME
+               mirror when the field remounts — which it does whenever this bar
+               moves between the card and the floating PiP document. */
+            ref={attachInput}
+            value={displayText}
+            rows={1}
+            readOnly={Boolean(dictation.liveText)}
+            onChange={(event) => {
+              setHistoryIndex(-1);
+              setText(event.target.value);
+            }}
+            /* Focusing the composer often precedes a dictation; minting the live
+               token here hides its round-trip from the eventual mic press. */
+            onFocus={prewarmLiveToken}
+            onPaste={(event) => {
+              /* EVERY pasted file, not only images (#1224). `kind` separates a
+                 file from the plain text of an ordinary paste, which must keep
+                 its default behaviour. */
+              const picks = Array.from(event.clipboardData.items)
+                .filter((entry) => entry.kind !== "string")
+                .map((entry) => entry.getAsFile())
+                .filter((entry): entry is File => entry !== null);
+              if (!picks.length) return;
+              event.preventDefault();
+              (onAttachFiles ?? attachments.addFiles)(picks);
+            }}
+            onDragOver={(event) => {
+              /* A file drop only fires when its dragover was cancelled — without
+                 this the browser navigates to the dropped file instead of
+                 attaching it, which is what a dragged PDF used to do. ANY file
+                 drag is claimed, with no per-type exception: the tray is what
+                 decides what it can hold, and it decides identically for a paste,
+                 a drop and the picker (#1224). A drag waved away here would be a
+                 file lost with only a cursor to explain it. */
+              const items = Array.from(event.dataTransfer.items).filter((item) => item.kind === "file");
+              if (!items.length) return;
+              event.preventDefault();
+              event.dataTransfer.dropEffect = "copy";
+            }}
+            onDrop={(event) => {
+              const files = Array.from(event.dataTransfer.files);
+              if (!files.length) return;
+              event.preventDefault();
+              event.stopPropagation();
+              (onAttachFiles ?? attachments.addFiles)(files);
+            }}
+            onKeyDown={(event) => {
+              /* ArrowUp/ArrowDown recall previously queued and sent messages
+                 while the composer is empty (issue #561) — the shell convention.
+                 Once recall is active the arrows keep walking the list, so a
+                 recalled multi-line message can be stepped past; the first edit
+                 releases the arrows back to caret movement. */
+              if ((event.key === "ArrowUp" || event.key === "ArrowDown") && !dictationRecording && !event.metaKey && !event.ctrlKey && !event.altKey) {
+                const recall = recallHistory(historyIndex, event.key, history, displayText.length === 0);
+                if (recall) {
+                  event.preventDefault();
+                  setHistoryIndex(recall.index);
+                  setText(recall.text);
+                  requestAnimationFrame(() => {
+                    const el = inputRef.current;
+                    if (!el) return;
+                    el.setSelectionRange(el.value.length, el.value.length);
+                  });
+                  return;
+                }
+              }
+              /* Enter sends like the old single-line input; Shift+Enter makes a
+                 new line. Composition guard keeps IME confirms from sending.
+                 Enter honors the exact admission gate of the Send button (PR
+                 #431): a blocked send — dead host, an attachment still decoding
+                 or failed, images disabled with images staged — must do nothing
+                 rather than submit and silently drop an attachment. During
+                 recording Enter means stop-and-send — a plain submit would fire
+                 off just the typed prefix and leave the recording running. */
+              /* Alt+Enter is the second submission where a surface has one — the
+                 native Codex queue (#1629). It runs through the SAME admission
+                 gate as Enter, so a blocked send is blocked both ways, and it is
+                 checked first because Enter's own branch ignores modifiers. */
+              if (event.key === "Enter" && event.altKey && onAlternateSubmit && !event.nativeEvent.isComposing) {
+                event.preventDefault();
+                if (sendBlocked || !effectiveCanSend || imageSendBlocked) return;
+                setHistoryIndex(-1);
+                onAlternateSubmit();
+                return;
+              }
+              if (event.key === "Enter" && !event.shiftKey && !event.altKey && !event.nativeEvent.isComposing) {
+                event.preventDefault();
+                if (sendBlocked || !effectiveCanSend || imageSendBlocked) return;
+                setHistoryIndex(-1);
+                if (dictation.phase === "rec") void stopAndSend();
+                else void submit();
+              }
+            }}
+            placeholder={placeholder}
+            aria-label={textareaAriaLabel}
+            disabled={fieldsDisabled}
+            data-mobile2-field={isMobile ? true : undefined}
+            className={
+              isMobile
+                /* 16 px so iOS never zooms the page to reach the field (§5). */
+                ? "block w-full min-w-0 resize-none overflow-y-auto bg-transparent px-1 py-1 text-[16px] leading-[22px] text-primary placeholder:text-muted focus-visible:outline-none disabled:opacity-60"
+                : `min-w-0 resize-none overflow-y-auto bg-transparent py-1 text-ui leading-[18px] text-primary placeholder:text-muted focus-visible:outline-none disabled:opacity-60 ${
+                    dictationRecording ? "w-full" : "flex-1 self-center"
+                  }`
+            }
+          />
+          {isMobile ? unitTools : dictationRecording ? (
+            <div className="flex items-center justify-end gap-1">{controls}</div>
+          ) : (
+            controls
+          )}
+        </div>
+        {/* Secondary controls, desktop only: one quiet borderless row under the
+            input, holding the runtime pill and the attachment picker. The phone
+            has neither row any more — the chip and the picker are cells of the
+            box's tools row (mobile v2 §2 rule 8), which is what removes the
+            «pill row above the keyboard» the operator photographed. Part of the
+            unit: these are the composer's own controls, so they stay with the
+            field rather than scrolling away from it. */}
+        {!isMobile && hasSecondaryRow ? (
+          <div id={optionsRowId} data-testid="composer-options-row" className="flex items-center justify-between gap-1.5">
+            <div className="flex min-w-0 items-center gap-1.5">{leftSlot}</div>
+            {picker}
+          </div>
+        ) : null}
+      </div>
       {/* The task composer renders its own durable-ref strip; the in-memory one
           stays for the pane/draft composers that still upload at send time. */}
       {!isMobile && !onAttachFiles ? (
@@ -653,14 +724,6 @@ export function ComposerBar({
       {imageDisabled && imageDisabledReason ? (
         <span role="status" className="text-caption font-semibold text-muted">{imageDisabledReason}</span>
       ) : null}
-      {/* Bounded like the tray above it, and for the same reason: a run of
-          failed or uncertain deliveries stacks under the input, and inside a
-          card's bounded composer (`TmuxComposer`'s form) whatever it takes past
-          the budget is taken from the controls above it — a live call's panel
-          plus six unresolved receipts laid Send out below the pane. `min-h-0`
-          is what lets the form take that room back; the receipts keep their
-          order and their retry controls inside their own scroller. */}
-      {receipts ? <div data-testid="composer-receipts" className="flex min-h-0 flex-wrap gap-1.5 overflow-y-auto overscroll-contain">{receipts}</div> : null}
     </>
   );
 }

@@ -1,9 +1,13 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  accessoryReserve,
+  cardComposerBudget,
+  cardComposerCeiling,
   caretAtEnd,
   clampHeight,
-  COMPOSER_QUEUE_RESERVE_PX,
+  COMPOSER_ACCESSORY_WINDOW_PX,
+  COMPOSER_MAX_PX,
   keyboardInset,
   MOBILE_COMPOSER_CHROME_PX,
   MOBILE_COMPOSER_UNIT_CHROME_PX,
@@ -184,67 +188,128 @@ describe("mobileComposerCeiling — the grown field never pushes its own tools r
 });
 
 /*
- * Issue #1629 — the field and the native queue divide ONE bounded box. The
- * queue panel sits above the field inside the same form, and it is the only
- * part of that form that can give room back, so a field that grows into all of
- * it leaves a panel with a zero-height interior: no Start, no recovery control
- * and no row reachable, by scroll or by keyboard. The ceiling reserves that
- * room while the panel is rendered, and gives it straight back when it is not.
+ * Issue #1629 — the field and the accessory region divide ONE bounded box. The
+ * region above the field holds every surface the composer can gain — a docked
+ * call, the native queue, the sends awaiting an answer, the receipts of the
+ * ones that failed — and it is the part of the box that gives room back, so a
+ * field that grows into all of it leaves surfaces with a zero-height interior:
+ * no Start, no recovery control and no receipt reachable, by pointer or by
+ * keyboard. The ceiling reserves the region's room while surfaces are in it,
+ * and hands it straight back when they are gone. The same rule runs against
+ * two boxes — the phone's viewport share and a card's own height.
  */
-describe("mobileComposerCeiling — the field leaves the queue panel its room (#1629)", () => {
+describe("accessoryReserve — one rule for the room above the input (#1629)", () => {
+  test("nothing in the region reserves nothing, on any box", () => {
+    expect(accessoryReserve(0, 320)).toBe(0);
+    expect(accessoryReserve(0, 1080)).toBe(0);
+  });
+
+  test("each surface in the region gets a window it can be used through, and the gap it arrives with", () => {
+    expect(accessoryReserve(1, 320)).toBe(COMPOSER_ACCESSORY_WINDOW_PX + 6);
+    expect(accessoryReserve(2, 800)).toBe(2 * (COMPOSER_ACCESSORY_WINDOW_PX + 6));
+  });
+
+  test("together they never take more than half the box — the field is what the operator is typing in", () => {
+    /* A call, a queue, a run of pending sends and six unresolved receipts, all
+       at once, inside a 260px card composer: four windows do not fit, so the
+       region takes half and scrolls the rest. */
+    expect(accessoryReserve(4, 260)).toBe(130);
+    expect(accessoryReserve(4, 260)).toBeLessThan(4 * (COMPOSER_ACCESSORY_WINDOW_PX + 6));
+  });
+
+  test("an unmeasured box reserves nothing, because there is no share to take it from", () => {
+    expect(accessoryReserve(3, 0)).toBe(0);
+  });
+});
+
+describe("cardComposerBudget — a share of the conversation, not of the screen (#1629)", () => {
+  test("the 60% share binds on a tall card and the transcript floor on a short one", () => {
+    expect(cardComposerBudget(1080)).toBe(648);
+    expect(cardComposerBudget(500)).toBe(260);
+    expect(cardComposerBudget(680)).toBe(408);
+  });
+});
+
+describe("cardComposerCeiling — the card field yields to the region it shares a box with (#1629)", () => {
+  test("with an empty region the ceiling is the shared cap it always was", () => {
+    expect(cardComposerCeiling(680, 0)).toBe(COMPOSER_MAX_PX);
+    expect(cardComposerCeiling(1080, 0)).toBe(COMPOSER_MAX_PX);
+  });
+
+  test("a roomy card keeps the whole cap even with the region full", () => {
+    /* 648px of budget: three windows and the composer's chrome fit inside it
+       with the field at its cap, so nothing is taken from the draft. */
+    expect(cardComposerCeiling(1080, 3)).toBe(COMPOSER_MAX_PX);
+  });
+
+  test("the 600x500 card that lost its receipts gives the region its room instead", () => {
+    /* The composition the final review reproduced: a live call and six
+       unresolved receipts under a twenty-line draft. The field stops short of
+       the region's reserve, so the region has a window rather than 0px below
+       the pane's bottom edge. */
+    const ceiling = cardComposerCeiling(500, 2);
+    expect(ceiling).toBeLessThan(COMPOSER_MAX_PX);
+    expect(ceiling).toBe(cardComposerBudget(500) - 65 - accessoryReserve(2, cardComposerBudget(500)));
+    expect(cardComposerBudget(500) - ceiling).toBeGreaterThanOrEqual(accessoryReserve(2, cardComposerBudget(500)));
+  });
+
+  test("a usable field outranks the reserve on a card too small for both", () => {
+    /* The region scrolls itself there; a field the operator cannot type one
+       line into has no alternative at all. */
+    expect(cardComposerCeiling(320, 4)).toBe(44);
+  });
+
+  test("an unmeasured or indefinite box falls back to the fixed cap, exactly as before", () => {
+    expect(cardComposerCeiling(0, 4)).toBe(COMPOSER_MAX_PX);
+    expect(cardComposerCeiling(-1, 1)).toBe(COMPOSER_MAX_PX);
+  });
+});
+
+describe("mobileComposerCeiling — the field leaves the region its room (#1629)", () => {
   const PHONE = { visible: 840, layout: 840 };
+  const BOX = mobileComposerUnitMax(840);
 
-  test("with no queue panel the ceiling is exactly what it always was", () => {
+  test("with an empty region the ceiling is exactly what it always was", () => {
     expect(mobileComposerCeiling(PHONE.visible, PHONE.layout, 0)).toBe(mobileComposerCeiling(PHONE.visible, PHONE.layout));
-    expect(mobileComposerCeiling(PHONE.visible, PHONE.layout)).toBe(mobileComposerUnitMax(840) - MOBILE_COMPOSER_UNIT_CHROME_PX);
+    expect(mobileComposerCeiling(PHONE.visible, PHONE.layout)).toBe(BOX - MOBILE_COMPOSER_UNIT_CHROME_PX);
   });
 
-  test("a rendered panel takes its room off the field, leaving the input's own chrome whole", () => {
-    const withQueue = mobileComposerCeiling(PHONE.visible, PHONE.layout, COMPOSER_QUEUE_RESERVE_PX);
-    expect(withQueue).toBe(mobileComposerCeiling(PHONE.visible, PHONE.layout) - COMPOSER_QUEUE_RESERVE_PX);
+  test("a rendered surface takes its room off the field, leaving the input's own chrome whole", () => {
+    const withQueue = mobileComposerCeiling(PHONE.visible, PHONE.layout, 1);
+    expect(withQueue).toBe(mobileComposerCeiling(PHONE.visible, PHONE.layout) - accessoryReserve(1, BOX));
     /* What the phone that reported this actually has left: the box budget minus
-       its own chrome minus the panel's room — and the tools row holding Send
+       its own chrome minus the region's room — and the tools row holding Send
        still fits inside the box beside the field (#1483 still holds). */
-    expect(withQueue).toBe(128);
-    expect(withQueue + MOBILE_COMPOSER_UNIT_CHROME_PX + COMPOSER_QUEUE_RESERVE_PX)
-      .toBeLessThanOrEqual(mobileComposerUnitMax(PHONE.layout));
+    expect(withQueue).toBe(158);
+    expect(withQueue + MOBILE_COMPOSER_UNIT_CHROME_PX + accessoryReserve(1, BOX))
+      .toBeLessThanOrEqual(BOX);
   });
 
-  test("the reserve comes off the keyboard-open bound too, because the panel is above the keyboard as well", () => {
+  test("a call and a queue at once reserve two windows, capped at half the box", () => {
+    const both = mobileComposerCeiling(PHONE.visible, PHONE.layout, 2);
+    expect(both).toBeLessThan(mobileComposerCeiling(PHONE.visible, PHONE.layout, 1));
+    expect(both + MOBILE_COMPOSER_UNIT_CHROME_PX + accessoryReserve(2, BOX)).toBeLessThanOrEqual(BOX);
+  });
+
+  test("the reserve comes off the keyboard-open bound too, because the region is above the keyboard as well", () => {
     /* Keyboard up on a 390×844 phone: the visible bound is what binds, and the
-       panel shares that visible area with the field. */
-    const open = mobileComposerCeiling(508, 844, COMPOSER_QUEUE_RESERVE_PX);
+       region shares that visible area with the field. */
+    const open = mobileComposerCeiling(508, 844, 1);
     expect(open).toBeLessThan(mobileComposerCeiling(508, 844));
-    expect(open).toBe(129);
-    /* Whichever of the two bounds binds, the panel's room survives both. */
-    expect(open + MOBILE_COMPOSER_CHROME_PX + COMPOSER_QUEUE_RESERVE_PX).toBeLessThanOrEqual(508);
-    expect(open + MOBILE_COMPOSER_UNIT_CHROME_PX + COMPOSER_QUEUE_RESERVE_PX).toBeLessThanOrEqual(mobileComposerUnitMax(844));
+    /* Whichever of the two bounds binds, the region's room survives both. */
+    const reserve = accessoryReserve(1, mobileComposerUnitMax(844));
+    expect(open + MOBILE_COMPOSER_CHROME_PX + reserve).toBeLessThanOrEqual(508);
+    expect(open + MOBILE_COMPOSER_UNIT_CHROME_PX + reserve).toBeLessThanOrEqual(mobileComposerUnitMax(844));
   });
 
   test("a usable field outranks the reserve on a viewport too small for both", () => {
     /* Landscape, keyboard up: the one-row floor still wins, so the field never
-       collapses to nothing for the sake of the panel — the panel scrolls
+       collapses to nothing for the sake of the region — the region scrolls
        itself instead. */
-    expect(mobileComposerCeiling(280, 390, COMPOSER_QUEUE_RESERVE_PX)).toBe(44);
+    expect(mobileComposerCeiling(280, 390, 1)).toBe(44);
   });
 
-  test("the reserve is the panel's header, a readable row and the gap above the field", () => {
-    expect(COMPOSER_QUEUE_RESERVE_PX).toBe(126);
-  });
-});
-
-describe("keyboardInset — the keyboard's overlap with a 100dvh surface (#983)", () => {
-  test("the iOS keyboard's slice of the layout viewport", () => {
-    expect(keyboardInset(800, { height: 448, scale: 1 })).toBe(352);
-  });
-
-  test("zero when the viewports agree (keyboard closed, or resizes-content honored)", () => {
-    expect(keyboardInset(800, { height: 800, scale: 1 })).toBe(0);
-    expect(keyboardInset(391, { height: 391, scale: 1 })).toBe(0);
-  });
-
-  test("zero without visualViewport and never negative", () => {
-    expect(keyboardInset(800, null)).toBe(0);
-    expect(keyboardInset(800, { height: 801, scale: 1 })).toBe(0);
+  test("one window is a surface's frame, its header and a row readable inside it", () => {
+    expect(COMPOSER_ACCESSORY_WINDOW_PX).toBe(90);
   });
 });

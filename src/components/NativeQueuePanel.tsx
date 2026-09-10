@@ -206,23 +206,20 @@ export function NativeQueuePanel({ view, error, thread, cardId, binding, unresol
       aria-label={t("queue.panel")}
       data-testid="native-queue-panel"
       data-stale={view.nativeStale ? "true" : undefined}
-      /* IT SITS ABOVE THE INPUT, SO IT TAKES WHAT THE CONVERSATION CAN SPARE.
-         The composer budgets itself against the conversation it is in
-         (`TmuxComposer`'s form), and inside that budget this panel is the part
-         that yields: `min-h-0` is what lets the flexbox shrink it, so the
-         textarea, the send control and a readable transcript keep their room
-         at every conversation size instead of being pushed past the pane's
-         bottom edge and clipped. Sized from the viewport alone the panel could
-         be taller than the whole phone composer — 378 px inside a 319 px form —
-         and the operator had no way left to type or send.
-         The ceiling stays for the surfaces whose height is not definite, where
-         a percentage budget cannot resolve and this is the only bound.
-         What yields first is the rows list; when even its floor does not fit,
-         the panel scrolls itself, in the same
+      /* A SURFACE OF THE COMPOSER'S ACCESSORY REGION (#1629), which is where
+         everything above the input lives and which divides its room evenly
+         between whatever is in it. What this panel owes that arrangement is the
+         ability to yield: `min-h-0` lets the region hand it a share smaller
+         than its content, and its own scroller keeps the header, the recovery
+         controls and every row reachable inside that share — in the same
          `max-h / overflow-y-auto / overscroll-contain` idiom the rest of the app
-         uses, so the header, the recovery controls and every row stay reachable
-         and a wheel inside the queue never escapes to the board. With room to
-         spare nothing scrolls and nothing moves. */
+         uses, so a wheel inside the queue never escapes to the board. With room
+         to spare nothing scrolls and nothing moves.
+         The ceiling stays for the surfaces whose height is not definite, where a
+         percentage budget cannot resolve and this is the only bound. Sized from
+         the viewport alone the panel could be taller than the whole phone
+         composer — 378 px inside a 319 px form — and the operator had no way
+         left to type or send. */
       className="flex min-h-0 max-h-[min(45dvh,26rem)] flex-col overflow-y-auto overscroll-contain rounded-control border border-border bg-raised/60"
     >
       <header className="flex shrink-0 items-center gap-2 border-b border-border/60 px-2 py-1">
@@ -284,8 +281,8 @@ export function NativeQueuePanel({ view, error, thread, cardId, binding, unresol
           stays its content, so a short queue is laid out exactly as before and
           only an overflowing one shrinks against the room above. The floor is
           about half a row: a panel squeezed to almost nothing still shows the
-          queue it is a view of, rather than a bare header over an empty
-          strip. */}
+          queue it is a view of, rather than a bare header over an empty strip —
+          and where even that does not fit, the panel scrolls it. */}
       <ul data-testid="native-queue-rows" className="min-h-14 divide-y divide-border/40 overflow-y-auto overscroll-contain">
         {view.rows.map((row, index) => (
           <li key={row.entryId} data-testid="native-queue-row" data-entry={row.entryId} data-state={row.state} className="px-2 py-1.5">

@@ -15,9 +15,9 @@ import { useCodexRealtime } from "@/hooks/useCodexRealtime";
 import { interruptRuntime, useRuntimeBusState, type RuntimeSessionView } from "@/hooks/useRuntime";
 import { parseSelectedContextRef, type SelectedContextRef } from "@/lib/selection/selectedContext";
 import { useViewerSelectedContext, viewerSelectedContext } from "@/lib/selection/viewerSelectedContext";
+import { useComposerBox } from "@/hooks/useComposerBox";
 import { useHostTarget } from "@/hooks/useHostTarget";
 import { accountIdFromPath } from "@/lib/accounts/badge";
-import { COMPOSER_CALL_RESERVE_PX, COMPOSER_QUEUE_RESERVE_PX } from "@/lib/composerScroll";
 import { conversationIdentity } from "@/lib/accounts/identity";
 import { activeCardMigration, cardMigrationState, migrationHoldsDelivery, migrationHoldsSends, migrationTargetName } from "@/lib/accounts/migration";
 import { getLocale, useLocale } from "@/lib/i18n";
@@ -1578,6 +1578,16 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
   const queuePanelRendered = nativeQueueEnabled
     && (nativeQueue.view.rows.length > 0 || unresolvedAdmissions.length > 0);
   const callPanelDocked = voiceEnabled && !pipComposerSlot && voice.phase !== "idle";
+  /* And the box itself: the conversation this composer is laid out in. The
+     form's budget is a share of it and the field's ceiling is what is left
+     inside that share, so both read the same element (#1629). */
+  const composerBox = useComposerBox(viewActive);
+  /* HOW MANY SURFACES THE ACCESSORY REGION HOLDS. Two of them are known here;
+     the delivery lists are derived far below, out of state this render has not
+     reached yet, so the count is published from the render that draws them and
+     read here on the next one. A count that arrives one commit later costs the
+     field one re-layout — a count guessed here would cost a control. */
+  const [accessorySurfaces, setAccessorySurfaces] = useState(0);
   /* Column reshuffles can remount the composer mid-typing; the draft lives in
      sessionStorage so the text survives the remount. */
   const composer = useComposer({
@@ -1601,13 +1611,14 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
     /* Queue-first (issue #561): a submitted message lives in the durable
        outbox, so the field never locks behind an in-flight delivery. */
     holdInputWhileBusy: false,
-    /* The queue panel below shares this composer's ONE bounded box, so the
-       field's own grow ceiling gives up the room that panel needs (#1629) —
-       exactly when the panel is rendered, on exactly the predicate the panel
-       renders on. A draft that keeps growing past it scrolls inside the field,
-       which is what the field has always done at its ceiling. */
-    reservedPx: (queuePanelRendered ? COMPOSER_QUEUE_RESERVE_PX : 0)
-      + (callPanelDocked ? COMPOSER_CALL_RESERVE_PX : 0),
+    /* The accessory region above shares this composer's ONE bounded box, so the
+       field's own grow ceiling gives up the room that region needs to stay
+       reachable (#1629) — measured against the same box the form's budget is a
+       share of, and only for the surfaces actually in it. A draft that keeps
+       growing past the ceiling scrolls inside the field, which is what the
+       field has always done there. */
+    accessorySurfaces,
+    boxHeight: composerBox.height,
     viewActive,
   });
   /* Pulls the bridge inbox once, at the start of a turn, and only for the voice
@@ -1777,6 +1788,17 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
     transcriptEchoCounts,
     respondedMessageKeys,
   );
+
+  /* What the accessory region will actually draw this render, published for the
+     field's ceiling above (#1629). Every one of these is a surface with its own
+     controls — a call to hang up, a queue to start, a send to retry, a receipt
+     to settle — so each counts once, and one that goes away hands its room
+     straight back to the draft. */
+  const renderedAccessorySurfaces = (callPanelDocked ? 1 : 0) + (queuePanelRendered ? 1 : 0)
+    + (sent.length || echoedReceipts.length ? 1 : 0) + (displayedRuntimeReceipts.length ? 1 : 0);
+  useEffect(() => {
+    setAccessorySurfaces(renderedAccessorySurfaces);
+  }, [renderedAccessorySurfaces]);
 
   const persistPendingDeliveries = (next: PendingDelivery[]) => {
     /* Admission releases the local snapshot. A later safe-failure receipt
@@ -3122,6 +3144,90 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
         ? t("mobile2.composer.placeholderHeld")
         : null;
 
+  /* SENDS WAITING FOR AN ANSWER, and the quiet echoes of the ones that landed:
+     a surface of the accessory region (#1629), where it shares one budget and
+     one scrollport with the call, the queue and the receipts of the sends that
+     failed. A run of them stacked above the field used to push the field and
+     Send down past the pane's bottom edge inside a small card. Its own rows
+     keep their order and their controls. */
+  const deliveries = sent.length || echoedReceipts.length ? (
+    <div data-testid="composer-deliveries" className="flex flex-col gap-0.5 overflow-y-auto overscroll-contain" aria-label={t("composer.queueAria")}>
+      {echoedReceipts.map((receipt) => (
+        <div key={receipt.operationId} data-delivery-echo className="flex items-center justify-end gap-1.5">
+          <Check className="h-3 w-3 shrink-0 text-success" aria-hidden />
+          <span className="sr-only">{t("composer.deliveredEcho")}</span>
+          <span
+            className="min-w-0 max-w-[85%] truncate text-label text-secondary"
+            title={receipt.text ?? undefined}
+          >
+            {receipt.text}
+          </span>
+          <span className="inline-flex shrink-0 items-center gap-0.5 text-caption tabular-nums text-muted">
+            {hhmm(Date.parse(receipt.at))}
+          </span>
+          <button
+            type="button"
+            aria-label={t("runtime.receipt.dismiss")}
+            className={`inline-flex shrink-0 items-center justify-center rounded text-muted hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+              isMobile ? "h-11 w-11" : "px-0.5"
+            }`}
+            onClick={() => dismissReceipts([receipt.operationId])}
+          >
+            <X className={isMobile ? "h-4 w-4" : "h-3 w-3"} aria-hidden />
+          </button>
+        </div>
+      ))}
+      {sent.map((entry) => {
+        const receipt = receiptMeta(t, entry.state);
+        return (
+        <div key={entry.id} className="flex items-center justify-end gap-1.5">
+          {receipt ? (
+            <Badge tone={receipt.tone} role="status" aria-live="polite">
+              {receipt.label}
+            </Badge>
+          ) : null}
+          {entry.state === "failed" ? (
+            <button
+              type="button"
+              aria-label={t("composer.retrySend")}
+              title={t("composer.retrySend")}
+              disabled={busy || voiceSending}
+              className={`inline-flex shrink-0 items-center justify-center rounded text-muted hover:text-accent disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+                isMobile ? "h-11 w-11" : "px-0.5"
+              }`}
+              onClick={() => {
+                void send(entry.text, { receiptId: entry.id, clientMessageId: entry.clientMessageId });
+              }}
+            >
+              <RotateCcw className={isMobile ? "h-4 w-4" : "h-3 w-3"} aria-hidden />
+            </button>
+          ) : null}
+          <span
+            className="min-w-0 max-w-[85%] truncate text-label text-secondary"
+            title={entry.text}
+          >
+            {entry.text}
+          </span>
+          <span className="inline-flex shrink-0 items-center gap-0.5 text-caption tabular-nums text-muted">
+            {entry.via === "spawn" ? <Play className="h-2.5 w-2.5" aria-hidden /> : <ArrowRight className="h-2.5 w-2.5" aria-hidden />}
+            {hhmm(entry.at)}
+          </span>
+          <button
+            type="button"
+            aria-label={t("composer.removeFromQueue")}
+            className={`inline-flex shrink-0 items-center justify-center rounded text-muted hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+              isMobile ? "h-11 w-11" : "px-0.5"
+            }`}
+            onClick={() => persistSent(sent.filter((item) => item.id !== entry.id))}
+          >
+            <X className={isMobile ? "h-4 w-4" : "h-3 w-3"} aria-hidden />
+          </button>
+        </div>
+        );
+      })}
+    </div>
+  ) : null;
+
   const composerBar = (
     <ComposerBar
       composer={composer}
@@ -3165,22 +3271,26 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
            and portals it here while no floating window is open. While one is,
            the panel lives in the PiP window and this slot stands down.
 
-           THE SLOT IS WHAT YIELDS for the panel it holds. A live call's panel
-           is the tallest thing this form can gain — a transcript, a notice and
-           the call controls — and it arrives through a portal, so the form can
-           only take room back from the slot: `min-h-0` lets the flexbox shrink
-           it and its own scroller keeps what does not fit reachable. The panel
-           itself must NOT shrink with it (`[&>*]:shrink-0`) — a panel that
-           collapses alongside its slot leaves the scroller nothing to scroll,
-           and its own `overflow-hidden` then clips the transcript away. The
-           floor is on the slot WITH a panel in it (`:not(:empty)`): an empty
-           slot is every conversation that is not on a call, and 56 px of nothing
-           above the input on all of them is what the floor must not cost. Without
-           that, an inline call in a 680 px card laid Send out below the pane and
-           no wheel could reveal it. The panel's controls sit in its header, so a
-           squeezed slot still opens on them. */
-        <div ref={publishDockSlot} data-testid="voice-dock-slot" className="flex min-h-0 flex-col overflow-y-auto overscroll-contain [&:not(:empty)]:min-h-14 [&>*]:shrink-0" />
+           A SURFACE OF THE ACCESSORY REGION, and the tallest one this composer
+           can gain — a transcript, a notice and the call controls. The region
+           gives it its share and this slot scrolls what does not fit into that
+           share; the panel inside must NOT shrink with the slot
+           (`[&>*]:shrink-0`), because a panel that collapses alongside its
+           scroller leaves it nothing to scroll and its own `overflow-hidden`
+           then clips the transcript away. An empty slot — every conversation
+           that is not on a call — takes no row at all (`[&:empty]:hidden`),
+           down to the gap a row of nothing would still have cost above the
+           input; the portal fills it and it returns. */
+        <div ref={publishDockSlot} data-testid="voice-dock-slot" className="flex flex-col overflow-y-auto overscroll-contain [&:empty]:hidden [&>*]:shrink-0" />
       ) : undefined}
+      /* Sends still waiting for their answer, in the accessory region with the
+         rest of what a send produced (#1629). */
+      deliveries={deliveries}
+      /* The card and phone forms are bounded boxes that scroll their own
+         content, so the input unit pins to the bottom edge of whichever one
+         holds it. In the floating call window the bar is in a form of its own
+         with no budget to be pinned against. */
+      pinInput={!pipComposerSlot}
       /* Codex's own queue, above the field that fills it (#1629). */
       queuePanel={nativeQueueEnabled ? (
         <NativeQueuePanel
@@ -3312,37 +3422,46 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
 
   const body = (
     <form
+      ref={composerBox.ref}
       onSubmit={handleSubmit}
       data-testid={isMobile ? "bounded-mobile-composer" : undefined}
-      /* Chat-first mobile budget (issue #419): the phone composer is a single
-         input row with its secondary controls folded, so it takes the tighter
-         vertical padding — every reclaimed row keeps the transcript above its
-         ≥60% viewport share. Desktop keeps the roomier py-2.
+      /* ONE BOX, ONE CONTRACT (#1629).
 
-         BOTH BUDGET AGAINST THE CONVERSATION THEY ARE IN. On the phone the
-         conversation IS the viewport, so the share is written in `dvh`. On the
-         desktop the conversation is a card of whatever height the board gave
-         it — a child pane is 680 px against a 1080 px screen — and a budget
-         taken from the screen there left a 680 px conversation 44 px of
-         transcript, and a phone's own composer overflowing its form with the
-         input and Send laid out below the pane. So the card's budget is a share
-         of the CARD: at most 60% of it, and never less than 15rem of it left
-         for the transcript, whichever binds first.
+         THE BOX. Both surfaces budget against the conversation they are in. On
+         the phone the conversation IS the viewport, so the share is written in
+         `dvh`. On the desktop the conversation is a card of whatever height the
+         board gave it — a child pane is 680 px against a 1080 px screen — and a
+         budget taken from the screen there left a 680 px conversation 44 px of
+         transcript. So the card's budget is a share of the CARD: at most 60% of
+         it, and never less than 15rem of it left for the transcript, whichever
+         binds first. `cardComposerBudget` is the same arithmetic for the
+         ceiling that has to know what is left inside it.
 
-         WHAT YIELDS INSIDE THE BUDGET, and in this order: everything that is a
-         LIST — the docked Voice call's panel, the native queue, the receipts
-         under the input — each bounded with `min-h-0` and its own scroller, so
-         what does not fit is scrolled to inside it rather than laid out past the
-         pane's bottom edge. The input and Send never yield: they are the two
-         controls with no alternative, and a budget that pushed THEM out would
-         be committing the defect this bound exists to fix. A bound with
-         nothing left to yield did exactly that — an inline call in a 680 px card
-         needed 479 px inside a 407 px budget, and the 72 px that did not fit
-         were Send. Where the card's own height is not definite the percentage
-         cannot resolve and each panel's own ceiling is the bound, as before. */
-      className={`flex shrink-0 flex-col gap-1.5 border-t border-border bg-card px-2.5 ${
+         WHAT YIELDS INSIDE THE BOX, and in this order. The accessory region
+         above the input holds every surface that is not the input itself — the
+         docked call, the native queue, the sends awaiting an answer, the
+         receipts of the ones that failed — and it is the one thing here that
+         gives room back, as one scrollport with one budget. Before this there
+         were four bounds and no budget between them, so each repair fixed the
+         sibling it was about and left the next one to be squeezed to zero: a
+         queue that was a 2 px border, then a receipt list 0 px tall below the
+         pane's edge with every recovery control in it out of reach.
+
+         WHAT NEVER YIELDS: the input and the controls that send what is in it.
+         They are pinned to the bottom edge of this box, so a composition this
+         budget cannot fit is one the operator scrolls THIS box through — never
+         one that lays Send out past the pane and clips it away. That is why the
+         box scrolls its own content on both surfaces, and why the page it is on
+         does not have to.
+
+         AND THE DRAFT IS BOUNDED BY THE SAME BUDGET: the field's ceiling stops
+         short of the region's reserve (`accessoryReserve`), so what the
+         operator types can never be what removes a control they have to reach.
+         Where the box's own height is not definite the percentage cannot
+         resolve, and each surface's own ceiling is the bound, as before. */
+      className={`flex shrink-0 flex-col gap-1.5 border-t border-border bg-card px-2.5 overflow-x-clip overflow-y-auto overscroll-y-contain ${
         isMobile
-          ? "max-h-[min(38dvh,20rem)] overflow-x-clip overflow-y-auto overscroll-y-contain py-1.5"
+          ? "max-h-[min(38dvh,20rem)] py-1.5"
           : "max-h-[min(60%,calc(100%_-_15rem))] py-2"
       }`}
       aria-label={composerAriaLabel}
@@ -3365,87 +3484,6 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
         <div role="status" aria-live="polite" className="flex items-center gap-1.5 rounded-control border border-warning/45 bg-warning-soft px-2 py-1 text-label font-semibold text-warning">
           <ArrowUpToLine className="h-3 w-3 shrink-0" aria-hidden />
           <span className="min-w-0 truncate">{t("migrate.heldSend")}</span>
-        </div>
-      ) : null}
-      {sent.length || echoedReceipts.length ? (
-        /* A list, so it scrolls (`min-h-0` is what lets the form take room back
-           from it): a run of unacknowledged sends stacked above the field used
-           to push the field and Send down past the pane's bottom edge inside a
-           small card. Its own rows keep their order and their controls. */
-        <div className="flex min-h-0 flex-col gap-0.5 overflow-y-auto overscroll-contain" aria-label={t("composer.queueAria")}>
-          {echoedReceipts.map((receipt) => (
-            <div key={receipt.operationId} data-delivery-echo className="flex items-center justify-end gap-1.5">
-              <Check className="h-3 w-3 shrink-0 text-success" aria-hidden />
-              <span className="sr-only">{t("composer.deliveredEcho")}</span>
-              <span
-                className="min-w-0 max-w-[85%] truncate text-label text-secondary"
-                title={receipt.text ?? undefined}
-              >
-                {receipt.text}
-              </span>
-              <span className="inline-flex shrink-0 items-center gap-0.5 text-caption tabular-nums text-muted">
-                {hhmm(Date.parse(receipt.at))}
-              </span>
-              <button
-                type="button"
-                aria-label={t("runtime.receipt.dismiss")}
-                className={`inline-flex shrink-0 items-center justify-center rounded text-muted hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
-                  isMobile ? "h-11 w-11" : "px-0.5"
-                }`}
-                onClick={() => dismissReceipts([receipt.operationId])}
-              >
-                <X className={isMobile ? "h-4 w-4" : "h-3 w-3"} aria-hidden />
-              </button>
-            </div>
-          ))}
-          {sent.map((entry) => {
-            const receipt = receiptMeta(t, entry.state);
-            return (
-            <div key={entry.id} className="flex items-center justify-end gap-1.5">
-              {receipt ? (
-                <Badge tone={receipt.tone} role="status" aria-live="polite">
-                  {receipt.label}
-                </Badge>
-              ) : null}
-              {entry.state === "failed" ? (
-                <button
-                  type="button"
-                  aria-label={t("composer.retrySend")}
-                  title={t("composer.retrySend")}
-                  disabled={busy || voiceSending}
-                  className={`inline-flex shrink-0 items-center justify-center rounded text-muted hover:text-accent disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
-                    isMobile ? "h-11 w-11" : "px-0.5"
-                  }`}
-                  onClick={() => {
-                    void send(entry.text, { receiptId: entry.id, clientMessageId: entry.clientMessageId });
-                  }}
-                >
-                  <RotateCcw className={isMobile ? "h-4 w-4" : "h-3 w-3"} aria-hidden />
-                </button>
-              ) : null}
-              <span
-                className="min-w-0 max-w-[85%] truncate text-label text-secondary"
-                title={entry.text}
-              >
-                {entry.text}
-              </span>
-              <span className="inline-flex shrink-0 items-center gap-0.5 text-caption tabular-nums text-muted">
-                {entry.via === "spawn" ? <Play className="h-2.5 w-2.5" aria-hidden /> : <ArrowRight className="h-2.5 w-2.5" aria-hidden />}
-                {hhmm(entry.at)}
-              </span>
-              <button
-                type="button"
-                aria-label={t("composer.removeFromQueue")}
-                className={`inline-flex shrink-0 items-center justify-center rounded text-muted hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
-                  isMobile ? "h-11 w-11" : "px-0.5"
-                }`}
-                onClick={() => persistSent(sent.filter((item) => item.id !== entry.id))}
-              >
-                <X className={isMobile ? "h-4 w-4" : "h-3 w-3"} aria-hidden />
-              </button>
-            </div>
-            );
-          })}
         </div>
       ) : null}
       {pipComposerSlot

@@ -18,7 +18,7 @@ import { appendComposerDraft, TmuxComposer } from "./TmuxComposer";
 import { resetRetainedQueueAdmissionsForTests } from "./retainedQueueAdmissions";
 import { readOutbox, resetOutboxForTests } from "./conversation/outbox";
 import { setTmuxComposerRuntimeDependenciesForTests } from "./tmuxComposerRuntime";
-import { COMPOSER_QUEUE_RESERVE_PX, mobileComposerCeiling } from "@/lib/composerScroll";
+import { accessoryReserve, mobileComposerCeiling, mobileComposerUnitMax } from "@/lib/composerScroll";
 
 /**
  * The composer's two submissions, on a Codex conversation that can queue
@@ -746,14 +746,15 @@ test("the composer budgets itself against the conversation, so the queue has roo
   await act(async () => root.unmount());
 });
 
-test("everything above the input yields to the budget; the input and Send do not", async () => {
-  /* WHO GIVES ROOM BACK when the form is at its budget. The queue panel is one
-     of three: a docked Voice call arrives through a portal into the slot, and
-     the receipt list grows with every unacknowledged send. All three are
-     bounded lists with their own scroller and `min-h-0`, which is what lets the
-     flexbox take room from them; the composer box holding the input and Send is
-     none of those, so it keeps its size and stays inside the pane. A 680 px card
-     with an inline call laid Send out below the pane, and no wheel revealed it.
+test("everything above the input shares ONE region; the input and Send never yield (#1629)", async () => {
+  /* WHO GIVES ROOM BACK when the form is at its budget. Not each surface for
+     itself — that is what the two repairs before this one did, and each of them
+     fixed the sibling it was about and left the next to be squeezed to zero. The
+     docked call, the queue, the sends awaiting an answer and the receipts of the
+     ones that failed are all in ONE region, which is the part of the box that
+     yields (`min-h-0`) and the one scrollport over all of them; the input unit
+     is `shrink-0` and pinned to the box's bottom edge, so a composition the
+     budget cannot fit is scrolled through rather than laid out past the pane.
 
      happy-dom lays nothing out, so this pins the contract; the measurement is
      `scripts/capture-issue-1629-queue-height.ts`. */
@@ -767,22 +768,38 @@ test("everything above the input yields to the budget; the input and Send do not
   }];
   const { host, root } = await mount();
 
-  const dock = host.querySelector('[data-testid="voice-dock-slot"]') as HTMLElement;
-  expect(dock.className).toContain("min-h-0");
-  expect(dock.className).toContain("overflow-y-auto");
-  /* A wheel inside a squeezed call panel stays in it rather than reaching the
-     board behind the card. */
-  expect(dock.className).toContain("overscroll-contain");
-
-  const panel = host.querySelector('[data-testid="native-queue-panel"]') as HTMLElement;
-  expect(panel.className).toContain("min-h-0");
+  const region = host.querySelector('[data-testid="composer-accessories"]') as HTMLElement;
+  expect(region.className).toContain("min-h-0");
+  expect(region.className).toContain("overflow-y-auto");
+  /* A wheel inside a squeezed region stays in it rather than reaching the board
+     behind the card. */
+  expect(region.className).toContain("overscroll-contain");
+  /* Every surface is IN it, as a grid row: each takes an equal share of the
+     region and stops at its own content, rather than shrinking in proportion to
+     how much it has to show. */
+  expect(region.className).toContain("[&>*]:min-h-0");
+  expect(region.className).toContain("grid");
+  expect(region.className).toContain("auto-rows-[minmax(0,max-content)]");
+  const dock = region.querySelector('[data-testid="voice-dock-slot"]');
+  const panel = region.querySelector('[data-testid="native-queue-panel"]') as HTMLElement;
+  expect(dock).not.toBeNull();
+  expect(panel).not.toBeNull();
   expect(panel.className).toContain("overflow-y-auto");
 
-  /* The input's own box is NOT in that set: it is what the yielding is for. */
-  const field = host.querySelector("textarea") as HTMLTextAreaElement;
-  const box = field.parentElement as HTMLElement;
-  expect(box.className).not.toContain("min-h-0");
-  expect(box.querySelector('button[type="submit"]')).not.toBeNull();
+  /* The input unit is NOT in the region: it is what the yielding is for, and it
+     stays against the bottom edge of the box whatever the region holds. */
+  const unit = host.querySelector('[data-testid="composer-input-unit"]') as HTMLElement;
+  expect(region.contains(unit)).toBe(false);
+  expect(unit.className).toContain("shrink-0");
+  expect(unit.className).toContain("sticky");
+  expect(unit.className).toContain("bottom-0");
+  expect(unit.querySelector("textarea")).not.toBeNull();
+  expect(unit.querySelector('button[type="submit"]')).not.toBeNull();
+  /* And the box itself scrolls its own content, so what the budget could not
+     fit is reachable inside the composer rather than clipped by the pane. */
+  const form = host.querySelector("form") as HTMLFormElement;
+  expect(form.className).toContain("overflow-y-auto");
+  expect(form.className).toContain("overscroll-y-contain");
   await act(async () => root.unmount());
 });
 
@@ -791,8 +808,8 @@ test("a rendered queue panel takes its room off the phone field's grow ceiling",
      `38dvh` cap and the panel is the only part that can shrink: a draft grown to
      the field's old ceiling left the panel a 2px border with nothing inside it,
      so Start, the recovery controls and every row were unreachable. The field
-     now stops `COMPOSER_QUEUE_RESERVE_PX` short — and only while a panel is
-     actually rendered, which is what this checks by emptying the queue.
+     now stops one accessory window short — and only while a surface is actually
+     in the region, which is what this checks by emptying the queue.
 
      happy-dom measures nothing, so the field is given a content height taller
      than any ceiling and the ceiling is read off the height the hook writes. */
@@ -822,7 +839,7 @@ test("a rendered queue panel takes its room off the phone field's grow ceiling",
     const ceilingAlone = Number.parseInt((alone.host.querySelector("textarea") as HTMLTextAreaElement).style.height, 10);
     await act(async () => alone.root.unmount());
 
-    expect(ceilingWithQueue).toBe(ceilingAlone - COMPOSER_QUEUE_RESERVE_PX);
+    expect(ceilingWithQueue).toBe(ceilingAlone - accessoryReserve(1, mobileComposerUnitMax(dom.innerHeight)));
     /* And an empty queue reserves nothing: the room goes straight back to the
        draft, exactly as it was before the queue existed. */
     expect(ceilingAlone).toBe(mobileComposerCeiling(dom.innerHeight, dom.innerHeight));
