@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join, isAbsolute } from "node:path";
 import { createInterface } from "node:readline";
 import {
-  NativeCodexQueue, NativeQueueProtocolRefusal, NativeQueueUncertainError,
+  NativeCodexQueue, NativeQueueProtocolRefusal, NativeQueueUncertainError, NativeQueueNotSubmittedError,
   type NativeQueueRpcPort, type NativeQueueInput,
 } from "./nativeCodexQueue";
 
@@ -440,7 +440,7 @@ describe("native queue mutations", () => {
     await expect(queue.update(submission(), [{ type: "audio" }] as never)).rejects.toThrow();
     await expect(queue.reorder(["duplicate", "duplicate"])).rejects.toThrow();
     queue.dispose();
-    await expect(queue.start()).rejects.toThrow();
+    await expect(queue.start()).rejects.toBeInstanceOf(NativeQueueNotSubmittedError);
     await expect(queue.refresh()).rejects.toThrow();
     expect(calls).toHaveLength(0);
   });
@@ -449,7 +449,31 @@ describe("native queue mutations", () => {
     const { queue, calls } = fixture([{ queuedSubmission: submission() }]);
     const adding = queue.add("client-a", input);
     queue.dispose();
-    await expect(adding).rejects.toThrow();
+    const error = await adding.catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(NativeQueueNotSubmittedError);
+    expect(error).toMatchObject({ outcome: "not-submitted", method: "thread/queue/add", threadId: "thread-a" });
     expect(calls).toHaveLength(0);
+  });
+
+  test("disposal after transport invocation leaves a lost acknowledgement uncertain", async () => {
+    const pending = deferred<unknown>();
+    const started = deferred<void>();
+    const { queue, calls } = fixture([() => { started.resolve(); return pending.promise; }]);
+    const adding = queue.add("client-a", input);
+    await started.promise;
+    queue.dispose();
+    pending.reject(new Error("connection lost after write"));
+    await expect(adding).rejects.toBeInstanceOf(NativeQueueUncertainError);
+    expect(calls).toHaveLength(1);
+  });
+
+  test("a synchronous transport exception cannot claim local non-submission", async () => {
+    let calls = 0;
+    const queue = new NativeCodexQueue({ rpc: () => {
+      calls++;
+      throw new NativeQueueNotSubmittedError("thread/queue/add", "thread-a");
+    } }, "thread-a");
+    await expect(queue.add("client-a", input)).rejects.toBeInstanceOf(NativeQueueUncertainError);
+    expect(calls).toBe(1);
   });
 });

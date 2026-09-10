@@ -57,6 +57,15 @@ export class NativeQueueProtocolRefusal extends Error {
   }
 }
 
+/** Local disposal prevented this mutation from ever reaching the RPC port. */
+export class NativeQueueNotSubmittedError extends Error {
+  readonly outcome = "not-submitted";
+  constructor(readonly method: string, readonly threadId: string) {
+    super("Native queue mutation was not submitted: adapter is disposed");
+    this.name = "NativeQueueNotSubmittedError";
+  }
+}
+
 /** The caller retains its durable operation and payload; this grants no retry. */
 export class NativeQueueUncertainError extends Error {
   readonly outcome = "uncertain";
@@ -211,12 +220,14 @@ export class NativeCodexQueue {
   }
 
   private async mutate<T>(action: string, params: Record<string, unknown>, parse: (value: unknown) => T): Promise<NativeQueueAcknowledgement<T>> {
-    this.assertOpen();
     const method = `thread/queue/${action}`;
+    if (this.disposed) throw new NativeQueueNotSubmittedError(method, this.threadId);
+    let transportInvoked = false;
     this.mutations++;
     this.invalidate();
     const wire = Promise.resolve().then(() => {
-      this.assertOpen();
+      if (this.disposed) throw new NativeQueueNotSubmittedError(method, this.threadId);
+      transportInvoked = true;
       return this.port.rpc(method, { ...params, threadId: this.threadId }, this.limits.timeoutMs);
     });
     // A caller deadline does not end the wire operation. Fence reads until the
@@ -228,6 +239,7 @@ export class NativeCodexQueue {
       this.checkThread(value);
       return { outcome: "acknowledged", result: parse(value) };
     } catch (cause) {
+      if (!transportInvoked && cause instanceof NativeQueueNotSubmittedError) throw cause;
       if (cause instanceof NativeQueueProtocolRefusal) throw cause;
       throw new NativeQueueUncertainError(method, this.threadId, cause);
     }

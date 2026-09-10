@@ -34,6 +34,11 @@ Malformed replies, lost acknowledgements, and unclassified RPC failures throw
 `NativeQueueUncertainError`. The caller must retain its original durable
 operation and payload without automatically repeating the mutation. Error
 causes can contain protocol data and must not be serialized to public surfaces.
+Disposal before transport invocation throws `NativeQueueNotSubmittedError` with
+`outcome: "not-submitted"`: the caller can safely reconsider submission through
+its existing durable workflow and a current adapter. This local outcome is
+distinct from protocol refusal. After transport invocation, disposal and lost
+acknowledgements preserve uncertainty. The adapter never retries either path.
 
 `read()` returns a copy of the last complete observation and its `stale` flag.
 `items: null` means there has been no complete observation. `items: []` means a
