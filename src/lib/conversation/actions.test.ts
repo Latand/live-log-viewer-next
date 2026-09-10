@@ -262,12 +262,12 @@ test("current and continuity selectors remain valid in structured and legacy rou
   const owner = conversation("conversation_owner", ["/sessions/old.jsonl", "/sessions/current.jsonl"]);
   owner.continuityPaths.push("/sessions/continuity.jsonl");
   for (const structured of [true, false]) {
-    for (const transcriptPath of ["/sessions/current.jsonl", "/sessions/continuity.jsonl"]) {
+    for (const conversationId of [owner.id, ""]) for (const transcriptPath of ["/sessions/current.jsonl", "/sessions/continuity.jsonl"]) {
       let dispatches = 0;
       let deliveries = 0;
       const result = await applyConversationAction({
         operationId: `valid-${structured}-${transcriptPath}`,
-        conversationId: owner.id,
+        conversationId,
         transcriptPath,
         action: "interrupt",
       }, {
@@ -286,6 +286,7 @@ test("current and continuity selectors remain valid in structured and legacy rou
         },
         interruptConversation: async (target) => {
           deliveries += 1;
+          expect(target).toBe("/sessions/current.jsonl");
           return { ok: true, target };
         },
         killConversation: async () => ({ ok: true, target: "%1" }),

@@ -92,7 +92,7 @@ export async function applyConversationAction(
     }
   }
   const conversation = byId ?? byPath;
-  const transcriptPath = byId?.generations.at(-1)?.path ?? request.transcriptPath;
+  const transcriptPath = conversation?.generations.at(-1)?.path ?? request.transcriptPath;
 
   if (request.action === "kill" && branchSharesRootHost(registry, conversation)) {
     return {

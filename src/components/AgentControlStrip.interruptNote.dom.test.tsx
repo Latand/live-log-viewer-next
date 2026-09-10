@@ -40,7 +40,7 @@ class FakeResizeObserver {
 Object.assign(globalThis, { ResizeObserver: FakeResizeObserver });
 
 /* Pure legacy pane: `file.proc` is the host authority and Stop takes the
-   canonical /api/tmux interrupt path. */
+   canonical /api/conversation-host interrupt path. */
 const actualRuntimeHooks = await import("@/hooks/useRuntime");
 mock.module("@/hooks/useRuntime", () => ({
   ...actualRuntimeHooks,
@@ -86,7 +86,7 @@ async function mount(file: FileEntry): Promise<{ host: HTMLElement; root: Root }
 
 function stubInterrupt(): void {
   globalThis.fetch = ((url: string) => {
-    if (String(url) === "/api/tmux") {
+    if (String(url) === "/api/conversation-host") {
       return Promise.resolve({ ok: true, json: () => Promise.resolve({ ok: true }) } as unknown as Response);
     }
     return Promise.resolve({ ok: true, json: () => Promise.resolve({}) } as unknown as Response);
@@ -167,7 +167,7 @@ test("a note retired by a new turn stays retired once that turn ends", async () 
 
 test("a failed interrupt still reports its own error, untouched by the turn state", async () => {
   globalThis.fetch = ((url: string) => {
-    if (String(url) === "/api/tmux") {
+    if (String(url) === "/api/conversation-host") {
       return Promise.resolve({ ok: false, json: () => Promise.resolve({ ok: false, error: "no pane" }) } as unknown as Response);
     }
     return Promise.resolve({ ok: true, json: () => Promise.resolve({}) } as unknown as Response);

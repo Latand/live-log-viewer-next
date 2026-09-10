@@ -647,7 +647,7 @@ test("conversation kill rejects success when process-death verification fails", 
   expect(outcome).toEqual({ ok: false, outcome: "failed", error: "the registered pane changed or its process did not exit", status: 409 });
 });
 
-test("conversation kill refreshes the registry host inside the session lock", async () => {
+test("conversation kill refuses ownership replaced while waiting for the session lock", async () => {
   const pathname = "/transcripts/racing.jsonl";
   const oldSnapshot = killSnapshot(pathname, KILL_HOST);
   const replacement: TmuxHostEvidence = {
@@ -675,9 +675,9 @@ test("conversation kill refreshes the registry host inside the session lock", as
     killHost: async (host) => { killed.push(host.paneId); return true; },
   });
 
-  expect(outcome).toEqual({ ok: true, target: "%8" });
-  expect(killed).toEqual(["%8"]);
-  expect(unhosted).toHaveLength(1);
+  expect(outcome).toMatchObject({ ok: false, status: 409 });
+  expect(killed).toEqual([]);
+  expect(unhosted).toHaveLength(0);
 });
 
 test("conversation kill preserves replacement ownership with matching process fields", async () => {
@@ -1451,4 +1451,31 @@ test("message-triggered relaunches carry the stored MCP grant on both the direct
     { path: branchPath, mcpServers: ["viewer"] },
     { path: rootPath, mcpServers: ["viewer"] },
   ]);
+});
+
+test("conversation stop refuses a pane claimed by another registry session", async () => {
+  const pathname = "/transcripts/ambiguous.jsonl";
+  const snapshot = killSnapshot(pathname, KILL_HOST);
+  const existing = Object.values(snapshot.entries)[0]!;
+  snapshot.entries["codex:other"] = { ...existing, key: { engine: "codex", sessionId: "other" }, artifactPath: "/transcripts/other.jsonl" };
+  let effects = 0;
+  const result = await killConversation(pathname, {
+    pathAllowed: () => true, listFiles: async () => [], registrySnapshot: () => snapshot,
+    killHost: async () => { effects++; return true; },
+  });
+  expect(result.ok).toBe(false);
+  expect(effects).toBe(0);
+});
+
+test("a viewer-spawned child with its own registered pane can stop independently", async () => {
+  const pathname = "/transcripts/independent-child.jsonl";
+  const killed: string[] = [];
+  const result = await killConversation(pathname, {
+    pathAllowed: () => true,
+    listFiles: async () => [{ path: pathname, parent: "/transcripts/parent.jsonl" } as never],
+    registrySnapshot: () => killSnapshot(pathname, KILL_HOST),
+    killHost: async (host) => { killed.push(host.paneId); return true; },
+  });
+  expect(result).toMatchObject({ ok: true, target: KILL_HOST.paneId });
+  expect(killed).toEqual([KILL_HOST.paneId]);
 });

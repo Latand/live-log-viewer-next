@@ -3,6 +3,7 @@
 import { useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
+import { ProcessStatusControls } from "../TaskHeader";
 import { AgentControlStrip } from "../AgentControlStrip";
 import { LogFeed } from "../LogFeed";
 import { ToolDisclosurePolicy } from "../feed/toolDisclosure";
@@ -45,6 +46,7 @@ export function OrchestratorConversation({ file, projectName }: { file: FileEntr
           compact
         />
       </ToolDisclosurePolicy>
+      <ProcessStatusControls file={file} hideChip />
       <AgentControlStrip file={file} />
       <TmuxComposer
         file={file}
