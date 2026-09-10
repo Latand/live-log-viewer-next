@@ -738,9 +738,13 @@ function rolloutCacheEntryFromDisk(pathname: string | null | undefined): Rollout
     if (stat.size > ROLLOUT_FALLBACK_READ_BYTES) {
       const descriptor = fs.openSync(pathname, "r");
       try {
-        const buffer = Buffer.alloc(ROLLOUT_FALLBACK_READ_BYTES);
+        // Include the preceding byte to distinguish a complete first record
+        // from a fragment created by our bounded read. The full delivery index
+        // still scans that record before absence can authorize a new send.
+        const buffer = Buffer.alloc(ROLLOUT_FALLBACK_READ_BYTES + 1);
         const read = fs.readSync(descriptor, buffer, 0, buffer.length, stat.size - buffer.length);
-        raw = buffer.subarray(0, read).toString("utf8");
+        const start = buffer[0] === 0x0a ? 1 : buffer.indexOf(0x0a, 1) + 1;
+        raw = start > 0 ? buffer.subarray(start, read).toString("utf8") : "";
       } finally {
         fs.closeSync(descriptor);
       }
