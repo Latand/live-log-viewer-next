@@ -2422,7 +2422,7 @@ export const en = {
   "queue.retryRead": "Try again",
   "queue.queueMessage": "Queue for Codex",
   "queue.queueMessageHint": "Codex sends it when the current turn ends. Alt+Enter.",
-  "queue.retentionFull": "Not sent. This card already holds every unresolved queue operation this browser can keep track of \u2014 settle one before starting another.",
+  "queue.retentionRefused": "Not sent. This browser cannot keep the record that makes a queue operation recoverable, so Codex was given nothing. Settle an unresolved operation on this card if it has one; otherwise its storage is full or blocked, and a fresh tab starts with an empty one.",
   "queue.unresolvedTitle": "Waiting on an answer from Codex",
   "queue.unresolved": { one: "{count} hand-off has no answer yet. Sending it again asks Codex about the same message rather than adding another.", other: "{count} hand-offs have no answer yet. Sending one again asks Codex about the same message rather than adding another." },
   "queue.unresolvedRetry": "Send it again",

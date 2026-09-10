@@ -2906,7 +2906,7 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
          hand-off does not leave. Clearing the composer here would take the
          operator's words away in exchange for an operation nobody could name
          after a reload. */
-      setStatus({ kind: "err", text: t("queue.retentionFull") });
+      setStatus({ kind: "err", text: t("queue.retentionRefused") });
       return;
     }
     setUnresolvedAdmissions(unresolvedHandoffs(cardId));

@@ -127,7 +127,7 @@ interface Reading {
 
 /** The floor the notice has to clear to count as readable. WCAG AA for text at
     this size is 4.5:1; the shipped dark treatment clears it several times over,
-    so a run near this number is a regression rather than a close call. */
+    so a run near this number should be read as a regression. */
 const MIN_CONTRAST = 4.5;
 
 const READ = (errorColour: string | null) => {
@@ -150,8 +150,8 @@ const READ = (errorColour: string | null) => {
   const panelBox = panel.getBoundingClientRect();
   const lineBox = line?.getBoundingClientRect();
   const style = getComputedStyle(text);
-  /* WHAT IS ACTUALLY PAINTED BEHIND THE GLYPHS, not the page's own canvas.
-     Reading `document.body` was wrong by a whole layer stack: the panel is
+  /* WHAT IS ACTUALLY PAINTED BEHIND THE GLYPHS. Reading `document.body` gave
+     the page's own canvas, which is a whole layer stack away: the panel is
      `bg-raised/70` and the notice itself `bg-warning/5`, so the pixels behind
      the text are those two composited over the canvas — RGB(33,31,33) where the
      body is RGB(16,16,20). Measuring the body published 9.32:1 for a notice that

@@ -121,8 +121,17 @@ const MAX_RETAINED_ADMISSIONS_PER_CARD = 8;
 /**
  * Whether the store took the operation, and therefore whether it may be sent.
  *
- * `refused` is answered BEFORE the wire, so nothing was admitted anywhere and
+ * A refusal is answered BEFORE the wire, so nothing was admitted anywhere and
  * the caller keeps whatever the operator authored.
+ *
+ * ONE VERDICT, TWO CAUSES, AND THE MESSAGE HAS TO FIT BOTH. Either this card is
+ * already holding as many unresolved operations as it can name — where settling
+ * one makes room — or the browser cannot keep the record at all, because the
+ * slot would not answer, would not take the write, or holds something nothing
+ * here can parse. The second happens on the very first press, with nothing
+ * retained; telling that operator to settle one of their unresolved operations
+ * names a state they are not in and a step they cannot take. So the copy the
+ * callers use covers both and asserts neither.
  */
 export type RetainOutcome = "retained" | "refused";
 

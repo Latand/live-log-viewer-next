@@ -675,7 +675,8 @@ test("a control whose reply never arrived keeps its operation across a remount, 
       expect(`${name}/${survive}: ${writes.length}`).toBe(`${name}/${survive}: 2`);
       expect(`${name}/${survive}: ${String(writes[1]!.idempotencyKey)}`)
         .toBe(`${name}/${survive}: ${String(writes[0]!.idempotencyKey)}`);
-      /* And the ORIGINAL frozen envelope, not one rebuilt from the second press. */
+      /* And the ORIGINAL frozen envelope, rebuilding it from the second press
+         would submit whatever is on screen now under an old key. */
       expect(`${name}/${survive}: ${JSON.stringify(writes[1]!.action)}`)
         .toBe(`${name}/${survive}: ${JSON.stringify(writes[0]!.action)}`);
 
@@ -728,7 +729,7 @@ test("a full card refuses a NEW control before the wire and keeps every unresolv
   /* Eight unresolved operations fit; the ninth is refused with nothing sent. */
   expect(writes).toHaveLength(8);
   expect(host.querySelector('[data-testid="native-queue-failure"]')?.textContent ?? "")
-    .toContain("already holds every unresolved queue operation");
+    .toContain("cannot keep the record");
 
   /* A RELOAD: only what storage kept before each request left can name them. */
   flushSync(() => root.unmount());
@@ -766,14 +767,21 @@ test("a browser that will not store the record refuses the control rather than s
     await mount({ turn: "idle" });
     await click(rows()[0]!.querySelector('[data-testid="native-queue-delete"]'));
     expect(writes).toHaveLength(0);
-    expect(host.querySelector('[data-testid="native-queue-failure"]')?.textContent ?? "")
-      .toContain("already holds every unresolved queue operation");
+    /* AND IT SAYS THE TRUE THING. Nothing is retained on this card, so telling
+       the operator to settle one of their unresolved operations would name a
+       state that does not exist and a next step they cannot take. */
+    const said = host.querySelector('[data-testid="native-queue-failure"]')?.textContent ?? "";
+    expect(said).toContain("cannot keep the record");
+    /* AND IT ASSERTS NOTHING FALSE. Nothing is retained on this card, so a
+       message stating the card was full would name a state the operator is not
+       in; the copy offers settling only as a conditional. */
+    expect(said).toContain("if it has one");
   } finally {
     Object.assign(globalThis, { sessionStorage: real });
   }
 });
 
-test("a stored record this build cannot read is carried through, never quietly dropped", async () => {
+test("a stored record this build cannot read survives a retain and a release", async () => {
   /* An entry a NEWER build wrote, or one naming an action added later, still
      names an operation the journal may be holding. The old reading parsed it
      away and then wrote the survivors back, so one ordinary press destroyed it.
@@ -808,9 +816,9 @@ test("a slot holding bytes that are not JSON is left alone, and no new operation
 });
 
 test("a slot this browser cannot READ refuses the control and leaves the bytes alone", async () => {
-  /* A READ THAT FAILS IS NOT AN EMPTY SLOT. The first repair caught a storage
-     that would not take the WRITE, and answered an empty store when the READ
-     threw — so a card already holding an unresolved queue-level start accepted
+  /* A READ THAT FAILS LEAVES THE CONTENTS UNKNOWN. The first repair caught a
+     storage that would not take the WRITE, and answered an empty store when the
+     READ threw — so a card already holding an unresolved queue-level start accepted
      the next control and overwrote it, and the start came back on the next press
      as a second operation. A read that cannot answer leaves the contents
      unknown, and unknown refuses. */
@@ -838,7 +846,7 @@ test("a slot this browser cannot READ refuses the control and leaves the bytes a
 
     expect(writes).toHaveLength(0);
     expect(host.querySelector('[data-testid="native-queue-failure"]')?.textContent ?? "")
-      .toContain("already holds every unresolved queue operation");
+      .toContain("cannot keep the record");
     /* And the unresolved start is still exactly where it was. */
     expect(real.getItem(slot)).toBe(seeded);
   } finally {

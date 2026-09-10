@@ -167,7 +167,7 @@ export function NativeQueuePanel({ view, error, thread, cardId, binding, unresol
        reload, and the operator's next press would be a second one of it. A
        replay is never refused: its key is already in the slot. */
     if (retainQueueAdmission(cardId, envelope) === "refused") {
-      setFailure(t("queue.retentionFull"));
+      setFailure(t("queue.retentionRefused"));
       return false;
     }
     /* The ORIGINAL binding rides with a replay, so a thread or account that
