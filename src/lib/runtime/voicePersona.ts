@@ -7,8 +7,8 @@ import { configFilePath } from "@/lib/configDir";
 /**
  * WHICH MODEL EACH OF THESE TEXTS IS FOR (#1629).
  *
- * A realtime V3 call runs TWO models, and the whole voice failure was writing
- * for one of them and delivering to the other:
+ * A realtime V3 call runs TWO models, and the Viewer was writing for one of them
+ * and delivering to the other:
  *
  * - The SPOKEN model (`gpt-live-1-codex`) holds the microphone. Its entire
  *   instruction set is the `prompt` parameter of `thread/realtime/start`. It has
