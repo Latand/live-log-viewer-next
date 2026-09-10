@@ -6,6 +6,12 @@ const nextConfig: NextConfig = {
   // Dev-only: hosts allowed to reach dev resources cross-origin (Tailscale/LAN preview).
   allowedDevOrigins: process.env.LLV_DEV_ORIGINS ? process.env.LLV_DEV_ORIGINS.split(",") : undefined,
   images: { unoptimized: true },
+  experimental: {
+    // A send can carry 24 MiB of encoded images plus 40 MiB of files
+    // (about 54 MiB after base64). Keep room for its JSON envelope so the
+    // proxy forwards complete bodies to the existing attachment validators.
+    proxyClientMaxBodySize: 80 * 1024 * 1024,
+  },
   outputFileTracingExcludes: {
     "*": ["node_modules/@img/**", "node_modules/sharp/**"],
   },

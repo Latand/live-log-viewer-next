@@ -3,6 +3,7 @@ import fs from "node:fs";
 import { agentRegistry, type AgentRegistry } from "./registry";
 import { sessionKeyFromTranscript } from "./sessionKey";
 import { claudeProjectRootFor, codexSessionRootFor } from "@/lib/scanner/roots";
+import { REVIEWER_REQUIRES_REVIEWS_ERROR, REVIEWS_REQUIRE_REVIEWER_ERROR } from "@/app/api/spawn/admission";
 
 export interface ResolvedSpawnParent {
   conversationId: `conversation_${string}`;
@@ -83,12 +84,14 @@ export function resolveSpawnLineage(
   registry = agentRegistry(),
 ): ResolvedSpawnLineage {
   const reviewer = body.role === "reviewer";
+  /* The same two messages admission refuses with (#1641), so a fence written
+     at admission and this deeper refusal never disagree about the reason. */
   if (!reviewer) {
-    if (body.reviews !== undefined) throw new SpawnParentError("reviews requires role: reviewer", 400);
+    if (body.reviews !== undefined) throw new SpawnParentError(REVIEWS_REQUIRE_REVIEWER_ERROR, 400);
     return { parent: resolveSpawnParent(body, registry), reviewed: null };
   }
   if (typeof body.reviews !== "string" || !body.reviews.trim()) {
-    throw new SpawnParentError("reviewer requires reviews", 400);
+    throw new SpawnParentError(REVIEWER_REQUIRES_REVIEWS_ERROR, 400);
   }
   const reviewRef = body.reviews.trim();
   const reviewed = reviewRef.startsWith("conversation_")

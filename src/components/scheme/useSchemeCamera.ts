@@ -14,9 +14,10 @@ const EDGE_KEEP = 120;
 const OFF_WORLD_SETTLE_MS = 300;
 
 const MODE_KEY = "llvSchemeMode";
-/* Band board framings (#1586): content is screen-constant, so "fit" cannot
-   shrink it into the viewport. Fit All frames the task overview from the top at
-   chip scale; Fit Current frames the top (working) bands at tile scale. */
+/* Band board framings (#1586): the band stack is a document taller than any
+   viewport, so "fit" frames it from the top at a chosen scale rather than
+   shrinking it in. Fit All frames the task overview at chip scale; Fit Current
+   frames the top (working) bands at tile scale. */
 export const BAND_FIT_ALL_Z = 0.2;
 export const BAND_FIT_CURRENT_Z = 0.58;
 
@@ -76,11 +77,18 @@ interface CameraOptions {
       through zoom and relayout (#1586): key identifies the projection, rect is
       its current world box. Null when nothing is selected. */
   anchor?: SchemeAnchor | null;
-  /** Full-width band layouts: gesture and button zoom keep the world's left
-      edge where it is (the world is exactly one viewport wide, so a pointer-
-      centred zoom would only open a gap beside the band). The selection anchor
-      still corrects both axes; horizontal panning stays available to come back. */
+  /** Band layouts read as a document (#1641): the band stack is exactly one
+      viewport wide in world pixels, so whenever it fits the viewport (zoom at
+      or below 1) the camera keeps its left edge on the viewport's — no dead
+      canvas beside the bands, from any zoom, framing, anchor hold, resize or
+      pan; when the stack is wider than the viewport the camera may show any
+      part of it but never past its edges. Every camera the hook settles on the
+      band board goes through this rule, the selection anchor included. */
   lockX?: boolean;
+  /** Zoom an opened conversation is framed at (#1641). On the physical-scaling
+      band board a reader's size follows the camera, so an open reaches for a
+      fuller zoom than the bare readable floor; defaults to `READABLE_Z`. */
+  focusZoom?: number;
 }
 
 export interface SchemeAnchor {
@@ -272,6 +280,7 @@ export function useSchemeCamera({
   onFit,
   anchor = null,
   lockX = false,
+  focusZoom = READABLE_Z,
 }: CameraOptions): SchemeCamera {
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const tapRef = useRef<{ x: number; y: number } | null>(null);
@@ -371,11 +380,18 @@ export function useSchemeCamera({
     },
     [world, vp],
   );
-  /* Horizontal zoom origin: the pointer on the free map, the world's left edge
-     on the band board (see `lockX`). Explicit framings on the band board align
-     that edge with the viewport's; only the selection anchor may offset it. */
-  const zoomOriginX = useCallback((cx: number, c: Camera) => (lockX ? c.x - world.x * c.z : cx), [lockX, world.x]);
-  const alignX = useCallback((c: Camera): Camera => (lockX ? { ...c, x: -world.x * c.z } : c), [lockX, world.x]);
+  /* The document rule of the band board (see `lockX`): a world that fits the
+     viewport horizontally sits on its left edge; a wider one is clamped so
+     neither of its edges leaves a gap. Identity on the free map. */
+  const alignX = useCallback((c: Camera): Camera => {
+    if (!lockX) return c;
+    const left = -world.x * c.z;
+    if (world.w * c.z <= vp.w) return c.x === left ? c : { ...c, x: left };
+    const x = Math.min(left, Math.max(vp.w - (world.x + world.w) * c.z, c.x));
+    return x === c.x ? c : { ...c, x };
+  }, [lockX, world.x, world.w, vp.w]);
+  /* Every gesture and framing settles through both rules. */
+  const settle = useCallback((c: Camera): Camera => alignX(clampCam(c)), [alignX, clampCam]);
 
   /* Selection anchor (#1586). Every commit records where the selected
      projection's top-left sits on screen. When the next commit finds the same
@@ -404,7 +420,11 @@ export function useSchemeCamera({
     const sx = cam.x + rect.x * cam.z;
     const sy = cam.y + rect.y * cam.z;
     if (prev && prev.key === anchor.key && !explicit && (prev.z !== cam.z || prev.wx !== rect.x || prev.wy !== rect.y)) {
-      const next = anchoredCamera(prev, rect, cam.z);
+      /* The hold is exact on the free map. On the band board the document
+         rule outranks it horizontally (#1641): a reader that wrapped to
+         another row keeps its vertical screen position, and the band stack
+         stays on the viewport's left edge instead of following the tile. */
+      const next = alignX(anchoredCamera(prev, rect, cam.z));
       if (Math.abs(next.x - cam.x) > 0.01 || Math.abs(next.y - cam.y) > 0.01) {
         anchorRef.current = { key: anchor.key, sx: next.x + rect.x * cam.z, sy: next.y + rect.y * cam.z, wx: rect.x, wy: rect.y, z: cam.z };
         latestCam.current = next;
@@ -413,7 +433,7 @@ export function useSchemeCamera({
       }
     }
     anchorRef.current = { key: anchor.key, sx, sy, wx: rect.x, wy: rect.y, z: cam.z };
-  }, [anchor, cam]);
+  }, [anchor, cam, alignX]);
 
   /* High-rate gestures (wheel, pointermove, pinch) coalesce into one camera
      update per frame: updater functions queue up and compose inside a single
@@ -446,11 +466,10 @@ export function useSchemeCamera({
         const z = Math.min(MAX_Z, Math.max(MIN_Z, c.z * factor));
         if (z === c.z) return c;
         const k = z / c.z;
-        const ox = zoomOriginX(cx, c);
-        return clampCam({ z, x: ox - (ox - c.x) * k, y: cy - (cy - c.y) * k });
+        return settle({ z, x: cx - (cx - c.x) * k, y: cy - (cy - c.y) * k });
       });
     },
-    [clampCam, queueCam, zoomOriginX],
+    [settle, queueCam],
   );
 
   const zoomCenter = useCallback(
@@ -470,12 +489,12 @@ export function useSchemeCamera({
         const z = Math.min(MAX_Z, Math.max(MIN_Z, targetZ));
         if (z === c.z) return c;
         const k = z / c.z;
-        const cx = zoomOriginX(rect.width / 2, c);
+        const cx = rect.width / 2;
         const cy = rect.height / 2;
-        return clampCam({ z, x: cx - (cx - c.x) * k, y: cy - (cy - c.y) * k });
+        return settle({ z, x: cx - (cx - c.x) * k, y: cy - (cy - c.y) * k });
       });
     },
-    [clampCam, zoomOriginX],
+    [settle],
   );
 
   const fitCam = useCallback((): Camera | null => {
@@ -511,10 +530,10 @@ export function useSchemeCamera({
   const fit = useCallback(() => {
     const c = fitCam();
     if (c) {
-      glideTo(clampCam(c));
+      glideTo(settle(c));
       onFit?.("all");
     }
-  }, [fitCam, glideTo, clampCam, onFit]);
+  }, [fitCam, glideTo, settle, onFit]);
 
   const currentFitCam = useCallback((): Camera | null => {
     const rect = viewportRef.current?.getBoundingClientRect();
@@ -526,14 +545,14 @@ export function useSchemeCamera({
   const fitCurrent = useCallback(() => {
     const c = currentFitCam();
     if (!c) return;
-    glideTo(clampCam(c));
+    glideTo(settle(c));
     onFit?.(currentWork ? "current" : "all");
-  }, [currentFitCam, glideTo, clampCam, onFit, currentWork]);
+  }, [currentFitCam, glideTo, settle, onFit, currentWork]);
 
   const fitCurrentOrAll = useCallback(() => {
     const current = currentFitCam();
     if (!current) return;
-    const target = clampCam(current);
+    const target = settle(current);
     if (currentWork && cameraMatchesFraming(latestCam.current, target)) {
       fit();
       return;
@@ -541,15 +560,15 @@ export function useSchemeCamera({
     latestCam.current = target;
     glideTo(target);
     onFit?.(currentWork ? "current" : "all");
-  }, [currentFitCam, currentWork, clampCam, fit, glideTo, onFit]);
+  }, [currentFitCam, currentWork, settle, fit, glideTo, onFit]);
 
   const fitRect = useCallback(
     (r: SchemeRect) => {
       const rect = viewportRef.current?.getBoundingClientRect();
       if (!rect || r.w <= 0 || r.h <= 0) return;
-      glideTo(clampCam(alignX(fitCameraToRect(r, { w: rect.width, h: rect.height }))));
+      glideTo(settle(fitCameraToRect(r, { w: rect.width, h: rect.height })));
     },
-    [glideTo, clampCam, alignX],
+    [glideTo, settle],
   );
 
   /* Glide a node into view: centered horizontally, its head near the top so
@@ -567,9 +586,9 @@ export function useSchemeCamera({
      translate the camera the opposite way (× z) so it holds its screen spot. */
   const glideBy = useCallback(
     (wdx: number, wdy: number) => {
-      glideTo((c) => clampCam({ ...c, x: c.x - wdx * c.z, y: c.y - wdy * c.z }));
+      glideTo((c) => settle({ ...c, x: c.x - wdx * c.z, y: c.y - wdy * c.z }));
     },
-    [glideTo, clampCam],
+    [glideTo, settle],
   );
 
   /* Restore an exact camera — #688's return point, which puts back a framing
@@ -577,9 +596,9 @@ export function useSchemeCamera({
      position verbatim (still clamped, since the world may have shrunk). */
   const glideToCamera = useCallback(
     (next: { x: number; y: number; zoom: number }) => {
-      glideTo(clampCam({ x: next.x, y: next.y, z: next.zoom }));
+      glideTo(settle({ x: next.x, y: next.y, z: next.zoom }));
     },
-    [glideTo, clampCam],
+    [glideTo, settle],
   );
 
   /* The keyboard zoom ladder: same centered/head-near-top placement as
@@ -590,14 +609,14 @@ export function useSchemeCamera({
       if (!rect) return;
       const zz = Math.min(MAX_Z, Math.max(MIN_Z, z));
       glideTo(
-        clampCam(alignX({
+        settle({
           z: zz,
           x: rect.width / 2 - (node.x + node.w / 2) * zz,
           y: Math.min(rect.height / 2 - node.y * zz, rect.height * 0.08 - (node.y - 40) * zz),
-        })),
+        }),
       );
     },
-    [glideTo, clampCam, alignX],
+    [glideTo, settle],
   );
 
   /* First layout of a project: restore the saved camera or fit everything.
@@ -735,31 +754,53 @@ export function useSchemeCamera({
        that conversation, not merely for its rectangle to be somewhere in the
        viewport, so returning to one from the overview scale still zooms in to
        it — the guarantee `centerOn(node, 0.55)` has always carried. Only once
-       an aim has been taken does "already shown" complete the request. */
-    if (aim.at && nodeIsFramed(node, cam, vp)) {
-      focusAim.current = null;
-      return;
+       an aim has been taken AGAINST THE RECTANGLE THE NODE STILL HAS does
+       "already shown" complete the request: the aim promised the framing
+       `centredCamera` computes for that rectangle, and a rectangle that moved
+       since (the tile it was taken against became the reader and wrapped to
+       the next row, the bands re-measured for a mode change) has not been
+       given that framing — its head may be on screen, its composer below the
+       fold, with the space it was promised sitting empty above it (#1641).
+       Such a node is aimed at again; a node whose rectangle is stable and
+       framed discharges the request, and a stable one that the aim could not
+       frame is left alone rather than fought over. */
+    if (aim.at && sameRect(aim.at, node)) {
+      if (nodeIsFramed(node, cam, vp)) {
+        focusAim.current = null;
+        return;
+      }
+      /* Our own aim is already standing and the node is still not framed:
+         there is nothing further this rule can do, and repeating the move
+         would only fight whatever is holding the camera. */
+      if (aim.cam && cameraMatchesFraming(cam, aim.cam)) return;
     }
-    /* Our own aim is already standing and the node is still not framed: there
-       is nothing further this rule can do, and repeating the move would only
-       fight whatever is holding the camera. */
-    if (aim.at && sameRect(aim.at, node) && aim.cam && cameraMatchesFraming(cam, aim.cam)) return;
     const rect = viewportRef.current?.getBoundingClientRect();
     if (!rect || !(rect.width > 1) || !(rect.height > 1)) return;
-    const z = Math.min(MAX_Z, Math.max(cam.z, READABLE_Z));
+    /* The zoom an open reaches for. On the physical-scaling band board a card's
+       size follows the camera, so opening a conversation at the bare readable
+       floor would leave its reader shrunk; the band asks for a fuller zoom so
+       the opened conversation reads prominently. Never below the readable floor,
+       and never past the current zoom downward. */
+    const openZoom = Math.max(focusZoom, READABLE_Z);
+    const z = Math.min(MAX_Z, Math.max(cam.z, openZoom));
     aim.at = { x: node.x, y: node.y, w: node.w, h: node.h };
     aim.cam = alignX(centredCamera(node, z, { w: rect.width, h: rect.height }));
     aiming.current = true;
     try {
-      centerOn(node, READABLE_Z);
+      centerOn(node, openZoom);
     } finally {
       aiming.current = false;
     }
-  }, [focus, project, layout, taskRects, cam, vp, centerOn, alignX]);
+  }, [focus, project, layout, taskRects, cam, vp, centerOn, alignX, focusZoom]);
 
   /* Wheel: plain — pan (shift turns it horizontal); ctrl/cmd (and trackpad
-     pinch) — zoom at the cursor. In select mode a wheel over a scrollable
-     feed keeps native scrolling. */
+     pinch) — zoom at the cursor. The only surface that keeps the wheel for
+     itself is a scroll container under the pointer with content to scroll —
+     the open conversation reader's feed, or a scrollable panel floating over
+     the board. Everything else pans, so a wheel over the task background, a
+     band's header controls, «+ Agent», a mirror tile or a collapsed agent card
+     moves the board instead of being swallowed by a control that cannot use it
+     (#1641). */
   useEffect(() => {
     const el = viewportRef.current;
     if (!el) return;
@@ -769,8 +810,20 @@ export function useSchemeCamera({
       if (wheelSettle.current) window.clearTimeout(wheelSettle.current);
       wheelSettle.current = window.setTimeout(() => setManualNonce((n) => n + 1), 250);
     };
+    /* The nearest ancestor between the target and the viewport that can consume
+       vertical wheel: overflowing content in an auto/scroll box. Interactive
+       chrome that does not scroll (a button, a status pill, a card that is not
+       an open reader) returns nothing, so the board pans over it. */
+    const scrollableAncestor = (target: HTMLElement | null): HTMLElement | null => {
+      for (let node = target; node && node !== el; node = node.parentElement) {
+        if (node.scrollHeight > node.clientHeight + 1) {
+          const overflowY = getComputedStyle(node).overflowY;
+          if (overflowY === "auto" || overflowY === "scroll") return node;
+        }
+      }
+      return null;
+    };
     const onWheel = (event: WheelEvent) => {
-      if ((event.target as HTMLElement).closest("[data-scheme-ui]")) return;
       const rect = el.getBoundingClientRect();
       if (event.ctrlKey || event.metaKey) {
         event.preventDefault();
@@ -778,18 +831,12 @@ export function useSchemeCamera({
         armSettle();
         return;
       }
-      if (modeRef.current === "select" && !spaceRef.current) {
-        for (let node = event.target as HTMLElement | null; node && node !== el; node = node.parentElement) {
-          if (node.scrollHeight > node.clientHeight + 1) {
-            const overflowY = getComputedStyle(node).overflowY;
-            if (overflowY === "auto" || overflowY === "scroll") return;
-          }
-        }
-      }
+      /* A held Space is an explicit hand-pan and overrides even a feed. */
+      if (!spaceRef.current && scrollableAncestor(event.target as HTMLElement | null)) return;
       event.preventDefault();
       const dx = event.shiftKey && !event.deltaX ? event.deltaY : event.deltaX;
       const dy = event.shiftKey && !event.deltaX ? 0 : event.deltaY;
-      queueCam((c) => clampCam({ ...c, x: c.x - dx, y: c.y - dy }));
+      queueCam((c) => settle({ ...c, x: c.x - dx, y: c.y - dy }));
       armSettle();
     };
     el.addEventListener("wheel", onWheel, { passive: false });
@@ -797,7 +844,7 @@ export function useSchemeCamera({
       el.removeEventListener("wheel", onWheel);
       if (wheelSettle.current) window.clearTimeout(wheelSettle.current);
     };
-  }, [applyZoom, clampCam, queueCam]);
+  }, [applyZoom, settle, queueCam]);
 
   /* Keyboard: H/V tools, Space-hold temporary hand, +/−/1 zoom, 0 fit,
      arrows pan, Esc drops the selection. */
@@ -953,8 +1000,7 @@ export function useSchemeCamera({
         queueCam((c) => {
           const z = Math.min(MAX_Z, Math.max(MIN_Z, c.z * factor));
           const k = z / c.z;
-          const ox = zoomOriginX(pinch.cx, c);
-          return clampCam({ z, x: lockX ? ox - (ox - c.x) * k : cx - (pinch.cx - c.x) * k, y: cy - (pinch.cy - c.y) * k });
+          return settle({ z, x: cx - (pinch.cx - c.x) * k, y: cy - (pinch.cy - c.y) * k });
         });
         pinchRef.current = { d, cx, cy };
         return;
@@ -967,7 +1013,7 @@ export function useSchemeCamera({
     /* Past the 9px tap threshold this is a real drag, not a click — mark it so
        its end re-baselines nav. */
     if (Math.hypot(dx, dy) > 9) panMovedRef.current = true;
-    queueCam((c) => clampCam({ ...c, x: pan.cx + dx, y: pan.cy + dy }));
+    queueCam((c) => settle({ ...c, x: pan.cx + dx, y: pan.cy + dy }));
   };
 
   /* Gestures end on window-level listeners: a pointerup outside the viewport
@@ -1061,9 +1107,9 @@ export function useSchemeCamera({
   const jump = useCallback(
     (wx: number, wy: number) => {
       framingRef.current = true;
-      setCam((c) => clampCam(alignX({ ...c, x: vp.w / 2 - wx * c.z, y: vp.h / 2 - wy * c.z })));
+      setCam((c) => settle({ ...c, x: vp.w / 2 - wx * c.z, y: vp.h / 2 - wy * c.z }));
     },
-    [vp, clampCam, alignX],
+    [vp, settle],
   );
 
   return {

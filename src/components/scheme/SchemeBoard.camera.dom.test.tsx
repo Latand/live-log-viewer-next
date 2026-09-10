@@ -255,6 +255,9 @@ test("the scheme viewport keeps its minimap and camera gestures after descendant
   );
   await settle();
   expect(viewport.className).toContain("cursor-grabbing");
+  /* A diagonal drag: the band board is a document whose stack fits the
+     viewport here, so only the vertical component can move it (#1641), and
+     the camera already rests at the strip-keeping top bound, so it moves down. */
   flushSync(() =>
     viewport.dispatchEvent(new dom.PointerEvent("pointermove", {
       bubbles: true,
@@ -263,7 +266,7 @@ test("the scheme viewport keeps its minimap and camera gestures after descendant
       pointerType: "mouse",
       button: 0,
       clientX: 340,
-      clientY: 300,
+      clientY: 360,
     }) as unknown as Event),
   );
   await settle();

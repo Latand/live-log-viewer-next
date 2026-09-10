@@ -297,3 +297,93 @@ test("production recovery probes the exported validate route over HTTP with the 
     else process.env.LLV_VIEWER_CONTROL_URL = previousControlUrl;
   }
 });
+
+/** The exact shape the original stranded claim carried (#1641): a reviewer
+    launch that names no `reviews`. Its arguments are otherwise complete, so
+    every refusal it meets belongs to the mandatory reviewer contract alone. */
+function reviewerArgsWithoutReviews(clientRequestId: string, cwd: string): Record<string, unknown> {
+  return {
+    clientRequestId,
+    role: "reviewer",
+    roleParams: { diffSource: "origin/main...HEAD" },
+    engine: "codex",
+    cwd,
+    ["prompt"]: "independent read-only review of the runtime packet",
+    title: "Independent runtime packet review",
+  };
+}
+
+test("a reviewer stranded for missing reviews recovers to NOT_EXECUTED on its exact original key", async () => {
+  const cwd = path.join(sandbox, "reviewer-http-probe-dir");
+  fs.mkdirSync(cwd, { recursive: true });
+  const registry = new AgentRegistry(path.join(sandbox, `registry-${crypto.randomUUID()}.json`), undefined, undefined, { sqliteMode: "off" });
+  const requests: { pathname: string; capability: string | null; secFetchSite: string | null }[] = [];
+  const viewer = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: async (request) => {
+      requests.push({
+        pathname: new URL(request.url).pathname,
+        capability: request.headers.get(VIEWER_SPAWN_CAPABILITY_HEADER),
+        secFetchSite: request.headers.get("sec-fetch-site"),
+      });
+      return spawnAdmissionPost.withDependencies(
+        new NextRequest(request),
+        { registry: () => registry },
+      );
+    },
+  });
+  const previousControlUrl = process.env.LLV_VIEWER_CONTROL_URL;
+  process.env.LLV_VIEWER_CONTROL_URL = viewer.url.origin;
+  try {
+    const args = reviewerArgsWithoutReviews("spawn_reviewer_stranded_http_1", cwd);
+    const tools = viewerMcpRecoverableTools({
+      ...productionDomainDependencies,
+      registrySnapshot: () => registry.readOnlySnapshot(),
+      attentionAuthority: () => ({ kind: "root", conversationId: null, role: null }),
+      recoveryPredecessors: () => [],
+    });
+    const bindingInput = await tools.spawn_agent!.bind(args);
+    const binding: McpRequestBinding = {
+      ...bindingInput,
+      version: 1,
+      toolName: "spawn_agent",
+      clientRequestId: String(args.clientRequestId),
+      owner: { pid: process.pid, startIdentity: null },
+      claimedAt: new Date().toISOString(),
+    };
+
+    /* Viewer control calls carry the same-origin marker, so this probe lands
+       on the validator's role-resolution branch — the same branch the original
+       dispatch reached through `/api/spawn`. That branch used to answer
+       admissible:true, which is why the caller's key could only stay unknown. */
+    const recovered = await tools.spawn_agent!.recover(binding, { legacy: false, args });
+    expect(recovered).toMatchObject({
+      outcome: "not-executed",
+      evidence: "spawn-admission-fence",
+      reason: "reviewer requires reviews",
+    });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      pathname: "/api/spawn/validate",
+      capability: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
+      secFetchSite: "same-origin",
+    });
+    expect(readSpawnAdmissionFence(binding.downstreamKey)).toMatchObject({ status: 400 });
+    /* Nothing was launched for the recovered key. */
+    expect(registry.readOnlySnapshot().receipts).toEqual({});
+
+    /* A recovery bound to different arguments under the same key reads the
+       fence as contradicting its request and must stay unknown. */
+    const contradicted = await tools.spawn_agent!.recover(binding, {
+      legacy: false,
+      args: { ...args, ["prompt"]: "review a different packet" },
+    });
+    expect(contradicted).toMatchObject({ outcome: "unknown" });
+    expect(requests).toHaveLength(1);
+  } finally {
+    viewer.stop(true);
+    if (previousControlUrl === undefined) delete process.env.LLV_VIEWER_CONTROL_URL;
+    else process.env.LLV_VIEWER_CONTROL_URL = previousControlUrl;
+  }
+});

@@ -18,6 +18,7 @@ import { GroupOverridePanel } from "./GroupOverridePanel";
 import { PipelineEditor } from "@/components/pipelines/PipelineEditor";
 import { createVisibilityIndex } from "./visibilityIndex";
 import { flowByImplementer } from "@/components/flows/flowModel";
+import { deckCollapsed, deckDisclosureMarker, deckDisclosureTerminal, readDeckDisclosureOverride } from "@/components/flows/reviewDeckDisclosure";
 import type { BranchGroup } from "@/components/projectModel";
 import { deleteTask, handoffTask, unassignTask, updateTask } from "@/components/tasks/taskApi";
 import { taskRelationsByPath } from "@/components/tasks/taskRelations";
@@ -271,7 +272,6 @@ export function SchemeBoard({
   const [historyOpen, setHistoryOpen] = useState(false);
   const [historyTaskId, setHistoryTaskId] = useState<string | null>(null);
   const openTaskHistory = useCallback((id: string) => {setHistoryTaskId(id);setHistoryOpen(true);}, []);
-  const [layoutZoom, setLayoutZoom] = useState(.5);
   const [layoutViewportWidth, setLayoutViewportWidth] = useState(1400);
   const closeHistory = useCallback(() => setHistoryOpen(false), []);
   const workflowModel = useMemo(() => projectTaskWorkflows(allTasks, pipelines, flows, files, project), [allTasks, pipelines, flows, files, project]);
@@ -397,9 +397,35 @@ export function SchemeBoard({
      operator opened it from. Session state only; the canonical membership and
      the composer/delivery owner are untouched. */
   const [hostOverrides, setHostOverrides] = useState<ReadonlyMap<string, string>>(() => new Map());
+  /* The operator's actual review-deck disclosure, so a band reserves the
+     collapsed chip height for a deck it is showing collapsed and the full
+     footprint for one they manually expanded (#1641). The state lives in
+     localStorage (RoundDeck's own store); the nonce re-reads it when a toggle
+     dispatches `llv-deck-disclosure`, or another tab writes the key. */
+  const [disclosureNonce, setDisclosureNonce] = useState(0);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const bump = () => setDisclosureNonce((n) => n + 1);
+    window.addEventListener("llv-deck-disclosure", bump);
+    window.addEventListener("storage", bump);
+    return () => {
+      window.removeEventListener("llv-deck-disclosure", bump);
+      window.removeEventListener("storage", bump);
+    };
+  }, []);
+  const collapsedDecks = useMemo(() => {
+    void disclosureNonce;
+    const set = new Set<string>();
+    if (typeof window === "undefined") return set;
+    for (const deck of authoredLayout.decks) {
+      const override = readDeckDisclosureOverride(window.localStorage, deck.flow.id);
+      if (deckCollapsed(override, deckDisclosureMarker(deck.flow), deckDisclosureTerminal(deck.flow))) set.add(deck.key);
+    }
+    return set;
+  }, [authoredLayout.decks, disclosureNonce]);
   const taskScene = useMemo(() => bandsEnabled
-    ? layoutTaskBands(authoredLayout, orderedBands, { zoom: layoutZoom, mode: bandMode, viewportWidth: layoutViewportWidth, reader: selected, hostOverrides })
-    : null, [bandsEnabled, authoredLayout, orderedBands, layoutZoom, bandMode, layoutViewportWidth, selected, hostOverrides]);
+    ? layoutTaskBands(authoredLayout, orderedBands, { mode: bandMode, viewportWidth: layoutViewportWidth, reader: selected, hostOverrides, collapsedDecks })
+    : null, [bandsEnabled, authoredLayout, orderedBands, bandMode, layoutViewportWidth, selected, hostOverrides, collapsedDecks]);
   const layout = taskScene?.layout ?? authoredLayout;
 
   /* NO PRUNING HERE (#771). The selection outlives this view, so dropping a path
@@ -869,9 +895,15 @@ export function SchemeBoard({
     onFit: announceFit,
     anchor: cameraAnchor,
     lockX: Boolean(taskScene),
+    /* The band board scales cards with the camera, so an opened conversation
+       is framed at a fuller zoom to read prominently (#1641). */
+    focusZoom: taskScene ? 0.9 : undefined,
   });
 
-  useLayoutEffect(() => {setLayoutZoom(cam.z);setLayoutViewportWidth(vp.w);setBandMode((previous) => bandModeFor(cam.z, previous));}, [cam.z,vp.w]);
+  /* The band layout follows the camera only through the presentation mode
+     (chip / summary / reader) and the viewport width; the zoom itself is the
+     camera's, so a zoom frame that stays inside one mode relayouts nothing. */
+  useLayoutEffect(() => {setLayoutViewportWidth(vp.w);setBandMode((previous) => bandModeFor(cam.z, previous));}, [cam.z,vp.w]);
   /* Rank moves are deferred while the operator is busy inside the board:
      panning, typing, holding a text selection, or reading an open disclosure
      or action menu. Status labels still update at once; only the order waits. */
@@ -1417,7 +1449,6 @@ export function SchemeBoard({
           <TaskBandsLayer
             bands={taskScene.bands}
             mode={taskScene.mode}
-            scale={taskScene.scale}
             /* Band chrome stays live on the hand tool. Only the controls
                themselves take pointer events (`data-scheme-ui`, which
                `onPointerDown` already refuses to start a pan on), so the rest
@@ -1442,7 +1473,7 @@ export function SchemeBoard({
         {/* Rails/badges stay passive on the map, but the pipeline hub keeps its
             tap target there — the mobile lite map reaches pipeline controls only
             through it (#93 §2.3). */}
-        <AgentLinksLayer semanticZoom={Boolean(taskScene)} links={layout.links} byPath={layout.byPath} obstacles={railObstacles} interactive={!mapMode && !handLike && !session} hubInteractive={!handLike && !session} width={layout.width} height={layout.height} />
+        <AgentLinksLayer semanticZoom={Boolean(taskScene)} links={layout.links} loops={layout.loops} byPath={layout.byPath} obstacles={railObstacles} interactive={!mapMode && !handLike && !session} hubInteractive={!handLike && !session} width={layout.width} height={layout.height} />
         <NodesLayer
           layout={layout}
           visiblePaths={visibleNativePaths}
