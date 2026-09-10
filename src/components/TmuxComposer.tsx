@@ -2860,12 +2860,16 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
         ...(reference ? { selectedContext: reference } : {}),
       }, mintIdempotencyKey());
       if (answer.ok) return;
-      /* A REFUSED ADMISSION GIVES THE DRAFT BACK. Nothing was queued, so the
-         words belong in the composer where the operator left them — losing them
-         to a refusal is the failure the outbox exists to prevent on the other
-         path. */
+      /* A REFUSED ADMISSION GIVES THE DRAFT BACK, ATTACHMENTS AND ALL. Nothing
+         was queued, so the words and the tiles belong in the composer where the
+         operator left them — losing them to a refusal is the failure the outbox
+         exists to prevent on the other path. Neither is restored over something
+         the operator has typed or staged since. */
       setStatus({ kind: "err", text: answer.error ?? t("queue.refused") });
       setText((current) => current || snapshot.text);
+      if (snapshot.images.length && attachments.imagesRef.current.length === 0) {
+        attachments.replace(snapshot.images);
+      }
     })();
   };
 

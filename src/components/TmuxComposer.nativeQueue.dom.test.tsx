@@ -33,6 +33,23 @@ import { setTmuxComposerRuntimeDependenciesForTests } from "./tmuxComposerRuntim
  *   cannot steer or nothing is running.
  */
 
+/** The composer decodes a staged attachment through a FileReader; this is the
+    same queued stand-in the draft-attachment suite uses. */
+class QueuedReader {
+  static queue: QueuedReader[] = [];
+  result: string | null = null;
+  onload: (() => void) | null = null;
+  onerror: (() => void) | null = null;
+  onabort: (() => void) | null = null;
+  readAsDataURL() { QueuedReader.queue.push(this); }
+  static settleAll(dataUrl: string) {
+    for (const reader of QueuedReader.queue.splice(0, QueuedReader.queue.length)) {
+      reader.result = dataUrl;
+      reader.onload?.();
+    }
+  }
+}
+
 const dom = new Window();
 installActEnv();
 Object.assign(globalThis, {
@@ -51,6 +68,9 @@ Object.assign(globalThis, {
   cancelAnimationFrame: dom.cancelAnimationFrame.bind(dom),
   localStorage: dom.localStorage,
   sessionStorage: dom.sessionStorage,
+  File: dom.File,
+  FileReader: QueuedReader,
+  URL: dom.URL,
 });
 (dom as unknown as { matchMedia: (query: string) => unknown }).matchMedia = (query: string) => ({
   matches: false, media: query, addEventListener() {}, removeEventListener() {},
@@ -89,7 +109,15 @@ function sessionView(): RuntimeSessionView {
       parentConversationId: null,
       cwd: null,
       artifactPath: "/codex.jsonl",
-      capabilities: { steer: steerSupported, structuredAttention: true, nativeQueue: nativeQueueCapable },
+      capabilities: {
+        steer: steerSupported,
+        structuredAttention: true,
+        nativeQueue: nativeQueueCapable,
+        /* A host that negotiated image input, so the composer's own attachment
+           gate is open and what is under test is the queue path rather than the
+           gate. */
+        imageInput: { supported: true, mimes: ["image/png"] },
+      },
       activeTurnId: turn === "running" ? "turn-live" : null,
       nativeQueueRevision: 0,
       attentionIds: [],
@@ -327,6 +355,49 @@ test("a host that cannot be steered offers no steer at all", async () => {
   await settle(() => appendComposerDraft(CARD, "cannot steer"));
   await openSendMenu(host);
   expect(menuAction(host, "Steer the running turn")).toBeUndefined();
+  await act(async () => root.unmount());
+});
+
+/** Drop one attachment into the composer, the way the draft-attachment suite
+    does, and let its decode settle. */
+async function stage(host: HTMLElement, file: { name: string; type: string; size: number }): Promise<void> {
+  const textarea = host.querySelector("textarea") as HTMLTextAreaElement;
+  const propsKey = Object.keys(textarea).find((key) => key.startsWith("__reactProps$"))!;
+  const props = (textarea as unknown as Record<string, { onDrop(event: unknown): void }>)[propsKey]!;
+  await settle(() => props.onDrop({ dataTransfer: { files: [file] }, preventDefault() {}, stopPropagation() {} }));
+  await act(async () => {
+    QueuedReader.settleAll("data:image/png;base64,aW52ZW50ZWQ=");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+}
+
+test("a queued message carries its staged attachment, and a refusal gives it back", async () => {
+  /* Losing a staged attachment to a refused admission is the failure the outbox
+     exists to prevent on the other path; the queue route takes the same bytes,
+     so this one must not lose them either. */
+  const { host, root } = await mount();
+  await stage(host, { name: "shot.png", type: "image/png", size: 12 });
+  expect(host.querySelectorAll('[data-testid="attachment-tile"]')).toHaveLength(1);
+
+  const previous = queueTransport.write;
+  (queueTransport as { write: NativeQueueDependencies["write"] }).write = async (body) => {
+    queueWrites.push(body);
+    return { status: 409, body: { error: "native queue host or account ownership changed" } };
+  };
+  try {
+    await settle(() => appendComposerDraft(CARD, "look at this"));
+    await settle(() => press(host.querySelector("textarea") as HTMLTextAreaElement, "Enter", { altKey: true }));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+
+    /* The bytes went, and the route is what content-addresses them. */
+    expect(queueWrites[0]).toMatchObject({ action: "add", text: "look at this" });
+    expect((queueWrites[0]!.images as Array<{ mime: string }>)[0]!.mime).toBe("image/png");
+    /* And the refusal put both back. */
+    expect((host.querySelector("textarea") as HTMLTextAreaElement).value).toBe("look at this");
+    expect(host.querySelectorAll('[data-testid="attachment-tile"]')).toHaveLength(1);
+  } finally {
+    (queueTransport as { write: NativeQueueDependencies["write"] }).write = previous;
+  }
   await act(async () => root.unmount());
 });
 

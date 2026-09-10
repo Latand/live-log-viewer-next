@@ -38,7 +38,11 @@ import type { TFunction } from "@/lib/i18n";
 
 export interface NativeQueuePanelProps {
   view: NativeQueueView;
-  loading: boolean;
+  /** True until this conversation's queue has been read once. Accepted so a
+      caller need not decide what to do with it; the panel opens on rows, not on
+      a pending read, because a card that has never queued anything would flash
+      an empty header above the composer on every mount. */
+  loading?: boolean;
   error: string | null;
   /** The thread's model and effort right now, for the truthful profile line. */
   thread: { model: string | null; effort: string | null };
@@ -76,7 +80,7 @@ function profileText(row: NativeQueueRow, thread: { model: string | null; effort
   return requested ? `${runs} ${t("queue.asked", { settings: requested })}` : runs;
 }
 
-export function NativeQueuePanel({ view, loading, error, thread, mintKey, submit, onRefresh, t }: NativeQueuePanelProps) {
+export function NativeQueuePanel({ view, error, thread, mintKey, submit, onRefresh, t }: NativeQueuePanelProps) {
   const [editing, setEditing] = useState<string | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
   /* The edit box is UNCONTROLLED, and read at save. A queued message can be
@@ -113,7 +117,8 @@ export function NativeQueuePanel({ view, loading, error, thread, mintKey, submit
       </section>
     );
   }
-  if (!loading && view.rows.length === 0) return null;
+  /* An empty queue is not a panel. */
+  if (view.rows.length === 0) return null;
 
   return (
     <section
