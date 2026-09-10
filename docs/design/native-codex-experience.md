@@ -224,14 +224,15 @@ and distinct from an ordinary row status, and that the panel stays inside its
 width. It then reintroduces each of those defects in the page and fails if the
 reading still holds.
 
-Responsiveness is measured on the same production-shaped fixture the runtime
-stage used for admission, at 128 rows: the number the journal keeps. The
-journal's own admission bound is 2000, which no panel is expected to hold. A
-control press commits the row's busy state inside 250 ms and handing a draft to
-the queue clears the composer inside 250 ms, both with the transport deliberately
-never answering. These are `act()` measurements in happy-dom: what they catch is
-a render gone quadratic or an accidental await on the transport, not paint
-timing, which no DOM harness observes.
+Responsiveness is measured on production-shaped fixtures, each at the size its
+own surface has to survive. A control press commits the row's busy state inside
+250 ms with **128 queued rows** in the panel — the number the journal keeps —
+and handing a draft to the queue clears the composer inside 250 ms with **64
+queued rows** behind it. Both run with the transport deliberately never
+answering. The journal's own admission bound is 2000, which no panel is expected
+to hold. These are `act()` measurements in happy-dom, so what they catch is a
+render gone quadratic or an accidental await on the transport; paint timing is
+something no DOM harness observes.
 
 ## Limits
 

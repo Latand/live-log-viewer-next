@@ -36,6 +36,7 @@
  * state, nothing is deployed, and no path from this machine reaches a frame.
  */
 import fs from "node:fs";
+import zlib from "node:zlib";
 import path from "node:path";
 
 import { createElement } from "react";
@@ -115,6 +116,11 @@ interface Reading {
   fontSizePx: number;
   /** WCAG contrast ratio of the notice text against what is painted behind it. */
   contrast: number;
+  /** The composited background the ratio was taken against, as painted. */
+  behind: string;
+  /** Every background between the text and the page, outermost last. Kept so a
+      reader can see WHICH layers the composite was built from. */
+  layers: string[];
   distinctFromError: boolean;
   hasRetryBeside: boolean;
 }
@@ -135,7 +141,8 @@ const READ = (errorColour: string | null) => {
   if (!notice || !panel) {
     return {
       present: false, visible: false, belowLastLine: false, insidePanel: false,
-      colour: "", fontSizePx: 0, contrast: 0, distinctFromError: false, hasRetryBeside: false,
+      colour: "", fontSizePx: 0, contrast: 0, behind: "", layers: [],
+      distinctFromError: false, hasRetryBeside: false,
     };
   }
   const text = notice.querySelector("p") as HTMLElement;
@@ -143,9 +150,36 @@ const READ = (errorColour: string | null) => {
   const panelBox = panel.getBoundingClientRect();
   const lineBox = line?.getBoundingClientRect();
   const style = getComputedStyle(text);
-  /* The shipped colours, compared the way a reader's eye has to: relative
-     luminance, rather than a string equality on two token values. A notice the
-     operator cannot read is a notice that was not delivered. */
+  /* WHAT IS ACTUALLY PAINTED BEHIND THE GLYPHS, not the page's own canvas.
+     Reading `document.body` was wrong by a whole layer stack: the panel is
+     `bg-raised/70` and the notice itself `bg-warning/5`, so the pixels behind
+     the text are those two composited over the canvas — RGB(33,31,33) where the
+     body is RGB(16,16,20). Measuring the body published 9.32:1 for a notice that
+     is 8.04:1, and passed a grey at 4.94:1 that is really 4.26:1, under a 4.5
+     floor. A contrast check that reads the wrong background is worse than none:
+     it is a green light with a number beside it.
+
+     The compositing is done BY THE BROWSER, on a canvas. Tailwind emits these
+     tokens as `oklab(... / .7)`, and hand-parsing colour spaces here is how the
+     next wrong number gets published; `fillStyle` accepts whatever the computed
+     style says and `source-over` is exactly the alpha rule the compositor used. */
+  const stack: string[] = [];
+  for (let node: HTMLElement | null = text; node; node = node.parentElement) {
+    stack.push(getComputedStyle(node).backgroundColor);
+  }
+  const surface = document.createElement("canvas");
+  surface.width = 1; surface.height = 1;
+  const ink = surface.getContext("2d", { willReadFrequently: true })!;
+  /* The initial canvas a browser paints a page onto, so a fully transparent
+     stack still composites against something real. */
+  ink.fillStyle = "#ffffff";
+  ink.fillRect(0, 0, 1, 1);
+  for (let index = stack.length - 1; index >= 0; index -= 1) {
+    ink.fillStyle = stack[index]!;
+    ink.fillRect(0, 0, 1, 1);
+  }
+  const painted = ink.getImageData(0, 0, 1, 1).data;
+  const behind = `rgb(${painted[0]}, ${painted[1]}, ${painted[2]})`;
   const channel = (value: string) => {
     const parts = value.match(/[\d.]+/g)?.map(Number) ?? [0, 0, 0];
     const linear = parts.slice(0, 3).map((raw) => {
@@ -154,9 +188,6 @@ const READ = (errorColour: string | null) => {
     });
     return 0.2126 * linear[0]! + 0.7152 * linear[1]! + 0.0722 * linear[2]!;
   };
-  /* The panel is translucent over the page, so what is painted behind the text
-     is the page's own canvas. */
-  const behind = getComputedStyle(document.body).backgroundColor;
   const front = channel(style.color);
   const back = channel(behind);
   const ratio = (Math.max(front, back) + 0.05) / (Math.min(front, back) + 0.05);
@@ -168,6 +199,8 @@ const READ = (errorColour: string | null) => {
     colour: style.color,
     fontSizePx: Number.parseFloat(style.fontSize),
     contrast: Math.round(ratio * 100) / 100,
+    behind,
+    layers: stack,
     distinctFromError: errorColour === null ? true : style.color !== errorColour,
     hasRetryBeside: notice.querySelector('[data-testid="voice-retry"]') !== null,
   };
@@ -194,6 +227,34 @@ async function frame(view: import("playwright-core").Page, name: string): Promis
   } catch {
     return false;
   }
+}
+
+/**
+ * One pixel out of a real PNG, so the composite can be checked against paint.
+ *
+ * A 1x1 screenshot is a single IDAT of one filtered scanline, which is small
+ * enough to read here and is the only way this script can see what Chromium
+ * actually put on screen rather than what it computed. A frame it cannot decode
+ * fails the run, because the whole point of the sample is that nobody has to
+ * take the composite on trust.
+ */
+function decodeSinglePixel(png: Buffer): string {
+  let offset = 8;
+  const parts: Buffer[] = [];
+  let filtered: Buffer | null = null;
+  while (offset < png.length) {
+    const length = png.readUInt32BE(offset);
+    const type = png.subarray(offset + 4, offset + 8).toString("ascii");
+    if (type === "IDAT") parts.push(png.subarray(offset + 8, offset + 8 + length));
+    if (type === "IEND") break;
+    offset += length + 12;
+  }
+  if (!parts.length) throw new Error("the screenshot carried no image data");
+  filtered = zlib.inflateSync(Buffer.concat(parts));
+  /* Byte 0 is the scanline's filter type; for one pixel every filter reduces to
+     the raw bytes, since there is nothing to its left or above it. */
+  const [red, green, blue] = [filtered[1]!, filtered[2]!, filtered[3]!];
+  return `rgb(${red}, ${green}, ${blue})`;
 }
 
 async function main(): Promise<number> {
@@ -258,12 +319,43 @@ async function main(): Promise<number> {
     await frame(view, "red-dimmed");
     measurements.redDimmed = dimmed;
 
+    /* THE BOUNDARY, which is where a wrong background actually costs something.
+       This grey sits just under the 4.5 floor against the pixels really painted
+       behind it (4.26:1) and just over it against the page canvas (4.94:1). The
+       reading that measured the body passed it. It has to fail. */
+    await view.setContent(page(panelHtml({ notice: NOTICE, error: null }), css), { waitUntil: "load" });
+    await view.evaluate(() => {
+      const text = document.querySelector('[data-testid="voice-notice"] p') as HTMLElement | null;
+      if (text) text.style.color = "rgb(130, 130, 130)";
+    });
+    const boundary = await view.evaluate(READ, errorColour) as Reading;
+    await frame(view, "red-boundary");
+    measurements.redBoundary = boundary;
+
+    /* AND A CHECK ON THE CHECK. The composite is only worth trusting if it
+       agrees with the pixels Chromium actually painted, so one pixel of the
+       notice's own background is read back out of a real screenshot and the two
+       must match. A composite that drifts from the frame fails the run instead
+       of publishing a number nobody sampled. */
+    await view.setContent(page(panelHtml({ notice: NOTICE, error: null }), css), { waitUntil: "load" });
+    const spot = await view.evaluate(() => {
+      const notice = document.querySelector('[data-testid="voice-notice"]') as HTMLElement;
+      const box = notice.getBoundingClientRect();
+      return { x: Math.round(box.right - 3), y: Math.round(box.top + box.height / 2) };
+    });
+    const pixel = await view.screenshot({ clip: { x: spot.x, y: spot.y, width: 1, height: 1 } });
+    const sampled = decodeSinglePixel(pixel);
+    const composited = (await view.evaluate(READ, errorColour) as Reading).behind;
+    measurements.paintedPixel = { sampled, composited, at: spot };
+
     const verdicts = [
       ["a live call shows a legible notice, distinct from the failure slot", holds(live)],
       ["a failure takes the slot back", !both.present],
       ["RED: removing the notice is caught", !holds(removed)],
       ["RED: giving it the failure's colour is caught", !holds(indistinct)],
       ["RED: dimming it towards its own background is caught", !holds(dimmed)],
+      ["RED: a grey under the floor against the PAINTED background is caught", !holds(boundary)],
+      ["the composited background equals the pixel Chromium painted", sampled === composited],
     ] as const;
     measurements.verdicts = verdicts.map(([check, held]) => ({ check, held }));
     fs.writeFileSync(path.join(OUT_DIR, "voice-notice.json"), `${JSON.stringify(measurements, null, 2)}\n`);
