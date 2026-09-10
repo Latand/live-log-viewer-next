@@ -1686,7 +1686,11 @@ export class RuntimeJournal {
     } else if (this.structuredHosts
       && command.kind === "send"
       && (session?.hostKind === "codex-app-server" || session?.hostKind === "claude-broker")) {
-      if (!session || session.host !== "hosted") {
+      if (command.policy === "queue" && session.hostKind === "codex-app-server"
+        && session.diagnostics?.queueCapability === "unknown") {
+        status = "rejected";
+        reason = "native-queue-capability-unknown";
+      } else if (!session || session.host !== "hosted") {
         status = "rejected";
         reason = session?.host === "dead" || session?.host === "unhosted" ? "dead-host" : "no-claim";
       } else if (command.turnId !== undefined && command.turnId !== session.activeTurnId) {

@@ -271,3 +271,17 @@ test("native queue profile requests and image versions survive reopening without
   expect(entries[0]?.versions[0]?.images).toEqual(images);
   reopened.close();
 });
+
+
+test("unknown native queue capability cannot admit a second scheduler through ordinary queue policy", () => {
+  const journal = makeJournal();
+  journal.append({ scope: `session:${conversationId}`, kind: "session-status", payload: {
+    capabilities: { steer: true, structuredAttention: true, nativeQueue: false },
+    diagnostics: { executable: "codex", version: "0.154.0", nativeQueue: false, queueCapability: "unknown", authRecovery: "unknown" },
+  } });
+  const c = parseRuntimeCommand("send", { conversationId, idempotencyKey: "unknown-capability", text: "queued", policy: "queue" });
+  expect(journal.executeOperation(c).receipt).toMatchObject({ status: "rejected", reason: "native-queue-capability-unknown" });
+  expect(journal.effectBatch(100)).toEqual([]);
+  expect(journal.nativeQueueRead(conversationId)).toEqual([]);
+  journal.close();
+});

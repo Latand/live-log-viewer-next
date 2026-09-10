@@ -28,7 +28,8 @@ The existing structured delivery controller executes these mutations. An
 ordinary Codex send with explicit queue policy uses the same native path once
 the host has negotiated support. Its journal effect leaves the Viewer dispatch
 queue after native acknowledgement. Codex owns subsequent dispatch, including
-idle add and cold-resume dispatch. Default interrupt remains unchanged.
+idle add and cold-resume dispatch. Unknown native capability refuses new queued
+sends before dispatch. Default interrupt remains unchanged.
 Canonical reconciliation runs as coalesced reads outside the dispatch loop, so
 history reads cannot hold interrupt or answer controls.
 
