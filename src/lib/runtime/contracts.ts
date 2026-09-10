@@ -236,6 +236,21 @@ interface RuntimeCommandBase {
     the composer snapshots the conversation's selected model/effort/fast onto the
     send so a replay re-delivers with identical settings. Absent field = today's
     behaviour, keeping the durable format forward-compatible. */
+/**
+ * One canonical realtime transcript segment, projected to the browser (#1629).
+ *
+ * The app-server's own record of what was said, carried over the runtime bus so
+ * the panel shows what the backend committed rather than only what one WebRTC
+ * data channel happened to deliver.
+ */
+export interface RuntimeVoiceTranscriptSegment {
+  segmentId: string;
+  realtimeSessionId: string;
+  role: "user" | "assistant";
+  text: string;
+  final: boolean;
+}
+
 export interface RuntimeSendSettings {
   model?: string;
   effort?: string;
@@ -452,6 +467,13 @@ export interface RuntimeSession {
   /** Canonical terminal assistant items retained independently from the
       bounded live UI projection until Live Mode acknowledges delivery. */
   voiceDeliveries?: RuntimeVoiceDelivery[];
+  /** The canonical realtime transcript this session has published (#1629), as a
+      bounded tail. Distinct from `voiceDeliveries`, which is worker output being
+      spoken INTO the call. */
+  voiceTranscript?: RuntimeVoiceTranscriptSegment[];
+  /** Bumped by every native `thread/queue/changed` (#1629); the signal a queue
+      reader refreshes on, never the queue itself. */
+  nativeQueueRevision?: number;
   /** Bounded durable tombstones prevent terminal-event replay from recreating
       deliveries already acknowledged by Live Mode. */
   acknowledgedVoiceDeliveryIds?: string[];

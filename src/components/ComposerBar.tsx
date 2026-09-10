@@ -129,6 +129,19 @@ export interface ComposerBarProps {
   history?: readonly string[];
   voiceControl?: ReactNode;
   voicePanel?: ReactNode;
+  /** Codex's own queue, above the composer (#1629). Rendered here rather than
+      by the card, so it sits with the field that fills it and moves with the
+      composer into a floating window. */
+  queuePanel?: ReactNode;
+  /**
+   * Alt+Enter, when this surface has a second submission (#1629).
+   *
+   * Enter keeps its meaning — an ordinary send, which for Codex interrupts the
+   * running turn — and this is the one beside it. A surface without a second
+   * submission passes nothing and the chord does nothing, so the default is
+   * never quietly changed for a card that has no queue.
+   */
+  onAlternateSubmit?: () => void;
 }
 
 const NO_HISTORY: readonly string[] = [];
@@ -218,6 +231,8 @@ export function ComposerBar({
   history = NO_HISTORY,
   voiceControl,
   voicePanel,
+  queuePanel,
+  onAlternateSubmit,
 }: ComposerBarProps) {
   const {
     displayText,
@@ -421,6 +436,7 @@ export function ComposerBar({
   return (
     <>
       {voicePanel}
+      {queuePanel}
       {/* On phones, staged images are the composer's first bounded row. The
           desktop tray keeps its established position below the controls. */}
       {isMobile && !onAttachFiles ? (
@@ -523,7 +539,18 @@ export function ComposerBar({
                rather than submit and silently drop an attachment. During
                recording Enter means stop-and-send — a plain submit would fire
                off just the typed prefix and leave the recording running. */
-            if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+            /* Alt+Enter is the second submission where a surface has one — the
+               native Codex queue (#1629). It runs through the SAME admission
+               gate as Enter, so a blocked send is blocked both ways, and it is
+               checked first because Enter's own branch ignores modifiers. */
+            if (event.key === "Enter" && event.altKey && onAlternateSubmit && !event.nativeEvent.isComposing) {
+              event.preventDefault();
+              if (sendBlocked || !effectiveCanSend || imageSendBlocked) return;
+              setHistoryIndex(-1);
+              onAlternateSubmit();
+              return;
+            }
+            if (event.key === "Enter" && !event.shiftKey && !event.altKey && !event.nativeEvent.isComposing) {
               event.preventDefault();
               if (sendBlocked || !effectiveCanSend || imageSendBlocked) return;
               setHistoryIndex(-1);

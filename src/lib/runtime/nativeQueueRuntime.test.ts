@@ -163,10 +163,65 @@ test("queue HTTP admits immediately on the populated fixture without waiting for
   for (let i = 0; i < 128; i++) f.journal.append({ scope: `session:board-${i}`, kind: "session-status", payload: { host: "hosted", turn: "idle" } });
   let kicks = 0;
   const start = performance.now();
-  const response = await handleNativeQueue(new NextRequest("http://localhost/api/runtime/queue", { method: "POST", headers: { host: "localhost" }, body: JSON.stringify(command("op-http")) }), { client: () => f.client, enabled: () => true, kick: () => { kicks++; } });
+  const response = await handleNativeQueue(new NextRequest("http://localhost/api/runtime/queue", { method: "POST", headers: { host: "localhost" }, body: JSON.stringify(command("op-http")) }), { client: () => f.client, enabled: () => true, kick: () => { kicks++; }, admitImages: () => ({ images: [], error: null }), storeImages: () => [] });
   expect(response.status).toBe(202); expect(kicks).toBe(1); expect(f.calls).toEqual([]);
   expect(performance.now() - start).toBeLessThan(250);
   const body = await response.json(); expect(body.receipt.status).toBe("queued");
+  f.journal.close();
+});
+
+test("a queued message carries attachment bytes the same way an ordinary send does", async () => {
+  /* #1629: the composer stages attachments as bytes. The queue route admits and
+     content-addresses them here, so the command itself carries refs — the same
+     road `/api/runtime/send` takes, and the reason the command's own size ceiling
+     bounds the command rather than the attachment. */
+  const f = fixture();
+  const stored: unknown[] = [];
+  const png = Buffer.from("89504e470d0a1a0a0000000d49484452", "hex").toString("base64");
+  const response = await handleNativeQueue(
+    new NextRequest("http://localhost/api/runtime/queue", {
+      method: "POST", headers: { host: "localhost" },
+      body: JSON.stringify({
+        kind: "native-queue", conversationId, operationId: "op-image", idempotencyKey: "op-image",
+        action: "add", text: "look at this", binding,
+        images: [{ base64: png, mime: "image/png" }],
+      }),
+    }),
+    {
+      client: () => f.client, enabled: () => true, kick: () => {},
+      admitImages: (images) => ({ images: images as never[], error: null }),
+      storeImages: (uploads) => {
+        stored.push(...uploads);
+        return [{ sha256: "a".repeat(64), mime: "image/png", bytes: 16 }];
+      },
+    },
+  );
+  expect(response.status).toBe(202);
+  expect(stored).toHaveLength(1);
+  const admitted = f.journal.nativeQueueRead(conversationId).find(entry => entry.entryId === "op-image");
+  expect(admitted?.versions[0]?.images).toEqual([{ sha256: "a".repeat(64), mime: "image/png", bytes: 16 }]);
+  f.journal.close();
+});
+
+test("a refused attachment refuses the whole queue admission, with the reason", async () => {
+  const f = fixture();
+  const response = await handleNativeQueue(
+    new NextRequest("http://localhost/api/runtime/queue", {
+      method: "POST", headers: { host: "localhost" },
+      body: JSON.stringify({
+        kind: "native-queue", conversationId, operationId: "op-bad-image", idempotencyKey: "op-bad-image",
+        action: "add", text: "look at this", binding, images: [{ base64: "!!!", mime: "image/png" }],
+      }),
+    }),
+    {
+      client: () => f.client, enabled: () => true, kick: () => {},
+      admitImages: () => ({ images: [], error: { error: "runtime image base64 is invalid", status: 400 } }),
+      storeImages: () => [],
+    },
+  );
+  expect(response.status).toBe(400);
+  expect((await response.json()).error).toContain("base64 is invalid");
+  expect(f.journal.nativeQueueRead(conversationId)).toEqual([]);
   f.journal.close();
 });
 

@@ -22,6 +22,9 @@ import { activeCardMigration, cardMigrationState, migrationHoldsDelivery, migrat
 import { getLocale, useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 import type { RuntimeReceipt } from "@/components/runtime/runtimeModel";
+import type { RuntimeVoiceTranscriptSegment } from "@/lib/runtime/contracts";
+import { NativeQueuePanel } from "@/components/NativeQueuePanel";
+import { useNativeQueue } from "@/hooks/useNativeQueue";
 
 import { DormantView } from "./conversation/DormantView";
 import { ComposerBar, composerSlotKind, type ComposerSlotKind } from "./ComposerBar";
@@ -162,6 +165,9 @@ interface ComposerSendResult {
 }
 
 const SENT_LIMIT = 8;
+/* A stable identity for "no canonical transcript yet", so the merge effect does
+   not re-run on every render of a card that has never held a call. */
+const EMPTY_VOICE_TRANSCRIPT: readonly RuntimeVoiceTranscriptSegment[] = [];
 const SPAWN_TTL_MS = 90_000;
 const PANE_TTL_MS = 10 * 60_000;
 const RECOVERABLE_BUSY_RETRY_REASONS = new Set(["delivery-auto-retry", "interrupt-auto-retry"]);
@@ -1483,7 +1489,25 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
     voiceWorkerTurn?.text ?? "",
     Boolean(voiceWorkerTurn?.turnId && structuredSession?.session.activeTurnId === voiceWorkerTurn.turnId),
     structuredSession?.session.voiceDeliveries ?? [],
+    structuredSession?.session.voiceTranscript ?? EMPTY_VOICE_TRANSCRIPT,
+    structuredSession?.session.host ?? "unknown",
   );
+  /* Codex's own queue (#1629). Available only where the host has actually
+     advertised native queue support — the capability is observed from the
+     running executable, never assumed from the engine name — so a Codex host
+     that cannot queue shows no queue controls at all rather than offering ones
+     the wire would refuse. */
+  const nativeQueueEnabled = Boolean(structuredSession?.session.capabilities?.nativeQueue);
+  const nativeQueue = useNativeQueue(cardId, {
+    enabled: nativeQueueEnabled,
+    threadId: structuredSession?.session.sessionKey?.sessionId ?? null,
+    accountId: structuredSession?.session.accountId ?? null,
+    turn: structuredSession?.session.turn === "running"
+      ? "running"
+      : structuredSession?.session.turn === "idle" ? "idle" : "unknown",
+    activeTurnId: structuredSession?.session.activeTurnId ?? null,
+    changeRevision: structuredSession?.session.nativeQueueRevision ?? 0,
+  }, runtimeDependencies.nativeQueue);
   /* #691, ownership inverted: the voice panel is rendered by `VoicePipHost`, the
      Viewer-level owner that survives this card unmounting. Docked, the panel lands
      in the slot node this card publishes; floating, the HOST publishes a composer
@@ -2102,7 +2126,7 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
   /* `preserveDraft` queues a message that stands apart from the operator's
      current draft — the quick-ack (finding 5). It carries no attachments and
      leaves the composer's typed text and staged tiles exactly where they were. */
-  const queueSubmit = (overrideText?: string, options?: { preserveDraft?: boolean }) => {
+  const queueSubmit = (overrideText?: string, options?: { preserveDraft?: boolean; policy?: "steer-if-active" }) => {
     const preserveDraft = options?.preserveDraft ?? false;
     const requestedText = overrideText ?? textRef.current;
     const requestedImages: PendingImage[] = preserveDraft ? [] : attachments.imagesRef.current.map((image) => ({ ...image }));
@@ -2149,6 +2173,10 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
          one — `outboxFiles` is memory-only, so a replay after a reload would
          deliver the text without the file and say nothing. */
       ...(requestedFiles.length ? { files: requestedFiles.length } : {}),
+      /* #1629: the operator's explicit choice, carried on the durable entry so a
+         replay after a reload asks for the same thing rather than falling back
+         to the default interrupt. */
+      ...(options?.policy ? { policy: options.policy } : {}),
       at: nowMs(),
       /* Submission watermark (finding 2): the echoes of this exact text that
          already exist, so a pre-existing identical message never retires this
@@ -2344,6 +2372,9 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
       }
     }
     const runtimeOverride = runtimeSendSnapshots.current.get(clientMessageId);
+    const submissionPolicy = (outboxId
+      ? readOutbox(cardId).find((entry) => entry.id === outboxId)?.policy
+      : undefined) ?? "interrupt-active";
     /* A local pre-flight rejection (image protocol gate) never reaches the
        wire, so it must not arm a pending generation either. */
     const reachesWire = !(structuredSession && structuredImagesDisabled && sentImages.length > 0);
@@ -2472,7 +2503,10 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
                  because it is the same machine. */
               ...(sentFiles.length ? { files: sentFiles.map((file) => ({ name: file.name, base64: file.base64 })) } : {}),
               idempotencyKey: clientMessageId,
-              policy: "interrupt-active",
+              /* DEFAULT INTERRUPT STAYS THE DEFAULT (#1629). A submission asks
+                 for something else only when the operator chose it explicitly
+                 and the entry carries that choice. */
+              policy: submissionPolicy,
               ...(runtimeOverride ? { runtime: runtimeOverride } : {}),
               selectedContext,
             }).then((result) => ({
@@ -2765,6 +2799,97 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
     });
   };
 
+  /**
+   * Put the draft in Codex's own queue (#1629).
+   *
+   * A SECOND SUBMISSION, NOT A NEW DEFAULT. Enter still sends, and for Codex a
+   * send still interrupts the running turn — that is the operator's stated
+   * preference and nothing here changes it. This is the other thing they asked
+   * for: hand the message to Codex, which holds it and dispatches it when the
+   * turn it is working on ends.
+   *
+   * It goes to the queue route rather than through the composer's own outbox,
+   * because the queue is CODEX'S: the runtime's executor is its single dispatch
+   * owner and the panel above reads what Codex is actually holding. Putting it
+   * through the outbox as well would be a second scheduler for the same message.
+   *
+   * IMMEDIATE FEEDBACK, HONESTLY LABELLED. The draft clears and the status line
+   * says the message was handed over the moment the journal admits it — which is
+   * what has happened. It does not say "queued by Codex": that is what the panel
+   * says, once Codex has acknowledged it.
+   */
+  const queueForCodex = () => {
+    const requestedText = textRef.current.trim();
+    const requestedImages = attachments.imagesRef.current.map((image) => ({ ...image }));
+    if (!nativeQueueEnabled) {
+      setStatus({ kind: "err", text: t("queue.queueUnavailable") });
+      return;
+    }
+    if (!requestedText && !requestedImages.length) return;
+    if (voiceSending || reconcilingSend) return;
+    if (effectiveSendBlockedReason) {
+      setStatus({ kind: "err", text: effectiveSendBlockedReason });
+      return;
+    }
+    if (structuredImagesDisabled && requestedImages.length) {
+      setStatus({ kind: "err", text: structuredImagesReason! });
+      return;
+    }
+    if (requestedImages.length && !attachments.validate()) return;
+    const requested = structuredSession ? sendRuntimeFrom(file) : undefined;
+    /* #844: read at the submission instant, exactly as an ordinary send does —
+       everything the reference will ever say is decided now. */
+    const reference = viewerSelectedContext();
+    const snapshot = { text: textRef.current, images: requestedImages };
+    setText("");
+    attachments.clearAll();
+    setStatus({ kind: "ok", text: t("queue.queueMessage") });
+    inputRef.current?.focus();
+    void (async () => {
+      const answer = await nativeQueue.submit({
+        action: "add",
+        text: requestedText,
+        ...(requestedImages.length
+          ? { images: requestedImages.map((image) => ({ base64: image.base64, mime: image.mime })) as never }
+          : {}),
+        /* AUDIT, NOT A PROMISE. Native's queue parameters carry no model or
+           effort, so what the operator had selected when they queued is retained
+           as what they asked for; the panel says plainly that a queued message
+           runs on the thread's settings when Codex dispatches it. */
+        ...(requested ? { runtime: requested } : {}),
+        ...(reference ? { selectedContext: reference } : {}),
+      }, mintIdempotencyKey());
+      if (answer.ok) return;
+      /* A REFUSED ADMISSION GIVES THE DRAFT BACK. Nothing was queued, so the
+         words belong in the composer where the operator left them — losing them
+         to a refusal is the failure the outbox exists to prevent on the other
+         path. */
+      setStatus({ kind: "err", text: answer.error ?? t("queue.refused") });
+      setText((current) => current || snapshot.text);
+    })();
+  };
+
+  /**
+   * Add to the turn already running, instead of interrupting it (#1629).
+   *
+   * REFUSED HERE WHEN IT CANNOT WORK, before anything is admitted. The broker
+   * behind a Claude conversation cannot steer at all, and a steer with nothing
+   * running is not a steer; both used to become a durable operation that failed
+   * later, which reads to the operator as the message being lost rather than
+   * never accepted.
+   */
+  const steerRunningTurn = () => {
+    if (!structuredSession?.session.capabilities?.steer) {
+      setStatus({ kind: "err", text: t("queue.steerUnsupported") });
+      return;
+    }
+    if (structuredSession.session.turn !== "running") {
+      setStatus({ kind: "err", text: t("queue.steerIdle") });
+      return;
+    }
+    queueSubmit(undefined, { policy: "steer-if-active" });
+  };
+
   /* Every submission method funnels through the queue-first path (round-1 P1#1):
      the Send button (this form submit), the Enter key (ComposerBar → the
      composer's `submit`), and one-tap dictation (`stopAndSend` → the same
@@ -2934,24 +3059,64 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
            the panel lives in the PiP window and this slot stands down. */
         <div ref={publishDockSlot} data-testid="voice-dock-slot" className="flex flex-col" />
       ) : undefined}
-      sendMenuActions={
-        canQuickAck
-          ? [
-              {
-                id: "quick-ack",
-                label: t("composer.quickAckLabel"),
-                description: t("composer.quickAck"),
-                disabled: quickAckDisabled,
-                tone: "ok",
-                /* Queue-first like every other submission (finding 5): the ack
-                   enqueues behind any active delivery, renders immediately, is
-                   cancellable, joins history, and dispatches once — while the
-                   operator's typed draft and staged tiles stay put. */
-                onSelect: () => queueSubmit(t("composer.quickAck"), { preserveDraft: true }),
-              },
-            ]
-          : []
-      }
+      /* Codex's own queue, above the field that fills it (#1629). */
+      queuePanel={nativeQueueEnabled ? (
+        <NativeQueuePanel
+          view={nativeQueue.view}
+          loading={nativeQueue.loading}
+          error={nativeQueue.error}
+          thread={{
+            /* The thread's own settings, which is what a queued message will
+               actually run on: native's queue carries no per-entry profile. */
+            model: sendRuntimeFrom(file)?.model ?? null,
+            effort: sendRuntimeFrom(file)?.effort ?? null,
+          }}
+          mintKey={mintIdempotencyKey}
+          submit={nativeQueue.submit}
+          onRefresh={nativeQueue.refresh}
+          t={t}
+        />
+      ) : undefined}
+      /* Alt+Enter hands the draft to Codex instead of interrupting the turn.
+         Enter keeps its meaning; this is the second submission beside it. */
+      onAlternateSubmit={nativeQueueEnabled ? queueForCodex : undefined}
+      sendMenuActions={[
+        ...(nativeQueueEnabled
+          ? [{
+            id: "native-queue",
+            label: t("queue.queueMessage"),
+            description: t("queue.queueMessageHint"),
+            disabled: busy || voiceSending || sendBlocked,
+            onSelect: queueForCodex,
+          } as const]
+          : []),
+        ...(structuredSession?.session.capabilities?.steer
+          ? [{
+            id: "steer",
+            label: t("queue.steerMessage"),
+            description: t("queue.steerHint"),
+            /* Refused BEFORE anything is admitted: a steer with nothing running
+               is not a steer, and a durable operation that fails later reads to
+               the operator as a message lost rather than never accepted. */
+            disabled: busy || voiceSending || sendBlocked || structuredSession.session.turn !== "running",
+            onSelect: steerRunningTurn,
+          } as const]
+          : []),
+        ...(canQuickAck
+          ? [{
+            id: "quick-ack",
+            label: t("composer.quickAckLabel"),
+            description: t("composer.quickAck"),
+            disabled: quickAckDisabled,
+            tone: "ok" as const,
+            /* Queue-first like every other submission (finding 5): the ack
+               enqueues behind any active delivery, renders immediately, is
+               cancellable, joins history, and dispatches once — while the
+               operator's typed draft and staged tiles stay put. */
+            onSelect: () => queueSubmit(t("composer.quickAck"), { preserveDraft: true }),
+          }]
+          : []),
+      ]}
       showImage={!deadHostBlocksSend}
       /* A dead structured surface can still recover TEXT while its image
          pipeline waits for the host to recover (finding 4): the picker stays

@@ -5,16 +5,23 @@ import type { NativeQueueSnapshot } from "./nativeCodexQueue";
 import { parseRuntimeCommand } from "./commands";
 import { runtimeHostClient, type RuntimeHostClient } from "./client";
 import { structuredHostsEnabled } from "./flags";
+import { admitRuntimeImagePayload, type RuntimeImageAdmissionResult } from "./runtimeImageAdmission";
+import { runtimeImageStore, type RuntimeImageUpload } from "./runtimeImageStore";
+import type { StructuredImageRef } from "./structuredContent";
 import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
 
 interface Dependencies {
   client(): RuntimeHostClient | null;
   enabled(): boolean;
   kick(): void;
+  admitImages(images: unknown): RuntimeImageAdmissionResult;
+  storeImages(uploads: readonly RuntimeImageUpload[]): StructuredImageRef[];
   nativeSnapshot?(conversationId: string): Promise<NativeQueueSnapshot | null>;
 }
 const defaults: Dependencies = {
   client: runtimeHostClient, enabled: structuredHostsEnabled, kick: kickStructuredDeliveryQueue,
+  admitImages: (images) => admitRuntimeImagePayload({ images }),
+  storeImages: (uploads) => runtimeImageStore().putMany(uploads),
   nativeSnapshot: async (id) => {
     const native = structuredDeliveryHostForConversation(id)?.nativeQueue;
     if (!native) return null;
@@ -42,7 +49,23 @@ export async function handleNativeQueue(request: NextRequest, dependencies: Depe
     }
   }
   let command;
-  try { command = parseRuntimeCommand("native-queue", await request.json()); }
+  let body: unknown;
+  try { body = await request.json(); }
+  catch { return NextResponse.json({ error: "invalid JSON" }, { status: 400 }); }
+  /* #1629: the composer stages attachments as bytes, exactly as it does for an
+     ordinary send, so a queued message must be able to carry them. The bytes are
+     admitted and content-addressed HERE and the command carries refs — the same
+     road `/api/runtime/send` takes, and the reason the command's own 256 KiB
+     ceiling bounds the command rather than the attachment. */
+  if (body && typeof body === "object" && !Array.isArray(body)) {
+    const payload = body as Record<string, unknown>;
+    if (Array.isArray(payload.images) && payload.images.some((image) => image && typeof image === "object" && "base64" in image)) {
+      const admitted = dependencies.admitImages(payload.images);
+      if (admitted.error) return NextResponse.json({ error: admitted.error.error }, { status: admitted.error.status });
+      body = { ...payload, images: dependencies.storeImages(admitted.images) };
+    }
+  }
+  try { command = parseRuntimeCommand("native-queue", body); }
   catch (error) { return NextResponse.json({ error: error instanceof Error ? error.message : "invalid native queue command" }, { status: 400 }); }
   try {
     const result = await client.command(command);
