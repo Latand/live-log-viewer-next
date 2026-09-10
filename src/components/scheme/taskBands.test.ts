@@ -190,20 +190,24 @@ test("bands stack at content width at every mode and width; members, mirrors and
     for (const zoom of [0.07, 0.21, 0.22, 0.4, 0.58, 1]) {
       const mode = bandModeFor(zoom, null);
       const scene = layoutTaskBands(layout, bands, { zoom, mode, viewportWidth, reader: files[5]!.path });
-      const s = 1 / zoom;
-      const gutter = (viewportWidth < 1024 ? BAND.gutterNarrow : BAND.gutter) * s;
+      /* Stable world geometry (#1641): a band member is one rectangle in board
+         pixels and the camera's own scale grows or shrinks it, so nothing here
+         divides by the zoom. The geometry depends on the zoom only through the
+         presentation mode, so two zooms in one mode place identical rectangles;
+         physical card scaling is verified separately. */
+      const gutter = viewportWidth < 1024 ? BAND.gutterNarrow : BAND.gutter;
+      const available = viewportWidth - gutter * 2;
       let previousBottom = -Infinity;
       for (const band of scene.bands) {
         const { rect, header, addAgent } = band.geometry;
         expect(rect.x).toBeCloseTo(gutter, 6);
         /* Compact geometry: a band is as wide as its content, floored so its
            header stays readable and ceilinged at the available width. */
-        const available = viewportWidth - (viewportWidth < 1024 ? BAND.gutterNarrow : BAND.gutter) * 2;
-        expect(rect.w * zoom).toBeLessThanOrEqual(available + 0.001);
-        expect(rect.w * zoom).toBeGreaterThanOrEqual(Math.min(available, BAND.minBandW) - 0.001);
+        expect(rect.w).toBeLessThanOrEqual(available + 0.001);
+        expect(rect.w).toBeGreaterThanOrEqual(Math.min(available, BAND.minBandW) - 0.001);
         expect(rect.y).toBeGreaterThanOrEqual(previousBottom - 0.001);
         previousBottom = rect.y + rect.h;
-        expect(header.h * zoom).toBeCloseTo(BAND.header, 6);
+        expect(header.h).toBeCloseTo(BAND.header, 6);
         expect(contains(rect, addAgent)).toBe(true);
         const items = [...band.members.map((member) => member.key), ...band.mirrors.map((mirror) => mirror.key)]
           .map((key) => scene.layout.byPath.get(key))
@@ -215,21 +219,23 @@ test("bands stack at content width at every mode and width; members, mirrors and
         }
         for (let i = 0; i < items.length; i += 1) for (let j = i + 1; j < items.length; j += 1) expect(overlapping(items[i]!, items[j]!)).toBe(false);
       }
-      expect(scene.layout.width * zoom).toBeCloseTo(viewportWidth, 6);
-      /* Every node is placed and screen-constant for its presentation. */
+      /* The band world is exactly the available viewport at 1:1; the camera
+         scales it from there. */
+      expect(scene.layout.width).toBeCloseTo(viewportWidth, 6);
       for (const node of scene.layout.nodes) {
         expect(scene.shown.has(node.file.path)).toBe(true);
         const expected = mode === "overview" ? "chip" : node.file.path === files[5]!.path ? "native" : "summary";
         expect(node.presentation).toBe(expected);
-        /* Screen-constant for its presentation, except that no surface is
-           wider than the band's inner width: a 375px board fits the tile. */
-        const inner = viewportWidth - (viewportWidth < 1024 ? BAND.gutterNarrow : BAND.gutter) * 2 - BAND.pad * 2;
-        const width = node.w * zoom;
+        /* Board-pixel footprint for its presentation, capped only so no surface
+           is wider than the band's inner width (a 375px board fits the tile). */
+        const inner = viewportWidth - gutter * 2 - BAND.pad * 2;
+        const width = node.w;
         if (expected === "chip") expect(width).toBeCloseTo(Math.min(BAND.chipW, inner), 6);
         else if (expected === "summary") expect(width).toBeCloseTo(Math.min(BAND.summaryW, inner), 6);
         else expect(width).toBeGreaterThanOrEqual(Math.min(BAND.nativeMinW, inner) - 0.001);
         expect(width).toBeLessThanOrEqual(inner + 0.001);
-        expect((node.readerScale ?? 1) * zoom).toBeCloseTo(width / (expected === "chip" ? BAND.chipW : expected === "summary" ? BAND.summaryW : node.w * zoom / ((node.readerScale ?? 1) * zoom)), 6);
+        /* The shell scales its content back to the tile's own footprint. */
+        if (expected !== "native") expect(width).toBeCloseTo((expected === "chip" ? BAND.chipW : BAND.summaryW) * (node.readerScale ?? 1), 6);
       }
       /* At 375 one tile per row: no two summary tiles share a row. */
       if (viewportWidth === 375 && mode === "intermediate") {
@@ -244,10 +250,12 @@ test("the local +Agent sits right after the last member, or opens the next row w
   const files = Array.from({ length: 12 }, (_, index) => file(index));
   const layout = base(files);
   const one = rankBands(buildTaskBands(layout, sources([task("one", "2026-01-01T00:00:00Z", [files[0]!])], files.slice(0, 1))));
-  const single = layoutTaskBands(layout, one, { zoom: 0.5, mode: "intermediate", viewportWidth: 1440, reader: null }).bands[0]!;
+  const scene1 = layoutTaskBands(layout, one, { zoom: 0.5, mode: "intermediate", viewportWidth: 1440, reader: null });
+  const single = scene1.bands[0]!;
   const member = single.members[0]!;
-  const memberRect = layoutTaskBands(layout, one, { zoom: 0.5, mode: "intermediate", viewportWidth: 1440, reader: null }).layout.byPath.get(member.key)!;
-  expect(single.geometry.addAgent.x).toBeCloseTo(memberRect.x + memberRect.w + BAND.tileGap * 2, 6);
+  const memberRect = scene1.layout.byPath.get(member.key)!;
+  /* Board pixels: the +Agent sits one tile gap past the last member on its row. */
+  expect(single.geometry.addAgent.x).toBeCloseTo(memberRect.x + memberRect.w + BAND.tileGap, 6);
   expect(single.geometry.addAgent.y).toBeCloseTo(memberRect.y, 6);
   /* Four 320px tiles fill a 1440 row (24 gutter + 16 pad each side leaves
      1360; 4 × 320 + 3 × 24 = 1352): the +Agent must start the next row. */
@@ -256,7 +264,8 @@ test("the local +Agent sits right after the last member, or opens the next row w
   const band = scene.bands[0]!;
   const last = scene.layout.byPath.get(band.members[3]!.key)!;
   expect(band.geometry.addAgent.y).toBeGreaterThan(last.y + last.h - 0.001);
-  expect(band.geometry.addAgent.x).toBeCloseTo(last.x - 3 * (BAND.summaryW + BAND.tileGap) * 2, 6);
+  /* Wrapped to the next row, back at the inner-left edge (gutter + pad). */
+  expect(band.geometry.addAgent.x).toBeCloseTo(BAND.gutter + BAND.pad, 6);
   expect(band.geometry.rows).toBe(2);
 });
 
@@ -519,7 +528,7 @@ test("an empty band ends at its content instead of ruling a line across the canv
   ], files)));
   for (const [viewportWidth, zoom] of [[1440, 1], [1440, 1.6], [1920, 1], [1280, 0.5]] as const) {
     const scene = layoutTaskBands(layout, bands, { zoom, mode: bandModeFor(zoom, null), viewportWidth, reader: null });
-    const widthOf = (id: string) => scene.bands.find((band) => band.task?.id === id)!.geometry.rect.w * zoom;
+    const widthOf = (id: string) => scene.bands.find((band) => band.task?.id === id)!.geometry.rect.w;
     const available = viewportWidth - BAND.gutter * 2;
     /* The whole complaint: an empty band used to be exactly as wide as a band
        holding eight conversations. Now it is strictly narrower, and narrower
@@ -580,48 +589,67 @@ function deckScene(flowState: "approved" | "reviewing") {
   return { layout, band, deckKey, nodePath: node.path };
 }
 
-test("a settled review deck reserves its collapsed chip height, not the full expanded box (#1641)", () => {
-  const { layout, band, deckKey } = deckScene("approved");
-  const scene = layoutTaskBands(layout, [band], { zoom: 1, mode: "near", viewportWidth: 1440, reader: null });
-  const deck = scene.layout.byPath.get(deckKey)!;
-  /* At 1:1 the world unit is a CSS pixel, so the reserved box is the collapsed
-     chip (BAND.collapsedDeckH), an order of magnitude short of the 810px it
-     would need expanded — the giant empty task frame in the report. */
-  expect(deck.h).toBeLessThanOrEqual(BAND.collapsedDeckH + 1);
-  /* An actionable deck still reserves its working height. */
-  const live = layoutTaskBands(deckScene("reviewing").layout, [deckScene("reviewing").band], { zoom: 1, mode: "near", viewportWidth: 1440, reader: null });
-  expect(live.layout.byPath.get(deckKey)!.h).toBeGreaterThan(400);
+test("a review deck reserves its collapsed chip height by the operator's actual disclosure state (#1641)", () => {
+  const { layout, band, deckKey } = deckScene("reviewing");
+  const at = (collapsedDecks?: ReadonlySet<string>) =>
+    layoutTaskBands(layout, [band], { zoom: 1, mode: "near", viewportWidth: 1440, reader: null, collapsedDecks }).layout.byPath.get(deckKey)!;
+  /* Told the deck is collapsed, the band reserves the chip height — an order of
+     magnitude short of the 810px it needs expanded, the empty task frame in the
+     report. Told it is expanded (a manual expand of a settled deck), it reserves
+     the full footprint. The set is authoritative over flow terminality. */
+  expect(at(new Set([deckKey])).h).toBeLessThanOrEqual(BAND.collapsedDeckH + 1);
+  expect(at(new Set()).h).toBeGreaterThan(400);
+  /* Without a set, an actionable flow's lifecycle default is expanded. */
+  expect(at(undefined).h).toBeGreaterThan(400);
+  /* And a settled flow's lifecycle default is collapsed. */
+  const settled = deckScene("approved");
+  expect(layoutTaskBands(settled.layout, [settled.band], { zoom: 1, mode: "near", viewportWidth: 1440, reader: null }).layout.byPath.get(deckKey)!.h).toBeLessThanOrEqual(BAND.collapsedDeckH + 1);
 });
 
-test("every band surface is screen-constant: a deck scales by the same law as the node tiles beside it (#1641)", () => {
+test("a band member physically scales with the camera within one presentation mode (#1641)", () => {
   const { layout, band, deckKey, nodePath } = deckScene("reviewing");
   const at = (zoom: number) => {
     const scene = layoutTaskBands(layout, [band], { zoom, mode: "near", viewportWidth: 1440, reader: null });
     return { deck: scene.layout.byPath.get(deckKey)!, node: scene.layout.byPath.get(nodePath)! };
   };
+  /* World geometry is stable, so within one presentation mode two zooms place
+     the SAME rectangle — the camera's own scale, not the layout, changes its
+     on-screen size. This is the operator's actual complaint: a card must get
+     bigger when zooming in and smaller when zooming out. */
   const one = at(1);
   const half = at(0.5);
-  /* World size scales as 1/zoom, so the on-screen size (world × zoom) holds
-     constant. The regression had the deck ride the raw board scale (screen size
-     halving with the camera) while the summary tiles stayed put. */
-  const screen = (rect: { w: number; h: number }, zoom: number) => ({ w: rect.w * zoom, h: rect.h * zoom });
-  const deckScreen1 = screen(one.deck, 1);
-  const deckScreenHalf = screen(half.deck, 0.5);
-  const nodeScreen1 = screen(one.node, 1);
-  const nodeScreenHalf = screen(half.node, 0.5);
-  expect(deckScreenHalf.w).toBeCloseTo(deckScreen1.w, 1);
-  expect(nodeScreenHalf.w).toBeCloseTo(nodeScreen1.w, 1);
-  /* One law, not two: the deck's on-screen width equals what the same shrink
-     applied to the node tile gives (both constant across the zoom change). */
-  expect(deckScreenHalf.w / deckScreen1.w).toBeCloseTo(nodeScreenHalf.w / nodeScreen1.w, 2);
+  expect(half.node.w).toBeCloseTo(one.node.w, 6);
+  expect(half.deck.w).toBeCloseTo(one.deck.w, 6);
+  /* On screen (world × zoom) the card therefore halves from 100% to 50%, and
+     the deck scales by the identical factor — one coherent geometry, not two. */
+  expect((half.node.w * 0.5) / (one.node.w * 1)).toBeCloseTo(0.5, 6);
+  expect((half.deck.w * 0.5) / (one.deck.w * 1)).toBeCloseTo(0.5, 6);
 });
 
-test("the band surface draws no free-board review-cycle arcs (#1641)", () => {
-  const { layout, band } = deckScene("reviewing");
-  expect(layout.loops.length).toBe(1);
-  const scene = layoutTaskBands(layout, [band], { zoom: 0.4, mode: "intermediate", viewportWidth: 1440, reader: null });
-  /* The fixed-offset forward/return arcs land nowhere near the band's wrapped,
-     counter-scaled cards; the band emits none, so no squiggle strands in the
-     empty space below its content. */
-  expect(scene.layout.loops).toEqual([]);
+test("the band routes the review connector between the placed implementer and deck, across wrapped rows (#1641)", () => {
+  const wide = deckScene("reviewing");
+  const scene = layoutTaskBands(wide.layout, [wide.band], { zoom: 1, mode: "near", viewportWidth: 1440, reader: null });
+  expect(scene.layout.loops.length).toBe(1);
+  const loop = scene.layout.loops[0]!;
+  const impl = scene.layout.byPath.get(wide.nodePath)!;
+  const deck = scene.layout.byPath.get(wide.deckKey)!;
+  /* The connector is drawn between the cards AS PLACED, not at fixed offsets:
+     both endpoints touch the actual implementer and deck rectangles, and it
+     carries a routed path — never a stranded squiggle. */
+  expect(loop.route).toBeTruthy();
+  expect(loop.y1).toBeDefined();
+  const onImpl = loop.x1! >= impl.x - 1 && loop.x1! <= impl.x + impl.w + 1 && loop.y1! >= impl.y - 1 && loop.y1! <= impl.y + impl.h + 1;
+  const onDeck = loop.x2! >= deck.x - 1 && loop.x2! <= deck.x + deck.w + 1 && loop.y2! >= deck.y - 1 && loop.y2! <= deck.y + deck.h + 1;
+  expect(onImpl).toBe(true);
+  expect(onDeck).toBe(true);
+  /* On a narrow board the deck wraps below the implementer; the connector
+     still attaches to both — top/bottom ports instead of side ports. */
+  const narrow = layoutTaskBands(wide.layout, [wide.band], { zoom: 1, mode: "near", viewportWidth: 700, reader: null });
+  const nLoop = narrow.layout.loops[0]!;
+  const nImpl = narrow.layout.byPath.get(wide.nodePath)!;
+  const nDeck = narrow.layout.byPath.get(wide.deckKey)!;
+  expect(Math.round(nImpl.y)).not.toBe(Math.round(nDeck.y));
+  expect(nLoop.route).toBeTruthy();
+  expect(nLoop.y1! >= nImpl.y - 1 && nLoop.y1! <= nImpl.y + nImpl.h + 1).toBe(true);
+  expect(nLoop.y2! >= nDeck.y - 1 && nLoop.y2! <= nDeck.y + nDeck.h + 1).toBe(true);
 });

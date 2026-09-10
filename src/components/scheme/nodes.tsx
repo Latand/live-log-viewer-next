@@ -269,6 +269,35 @@ export const LoopsLayer = memo(function LoopsLayer({ loops, width, height }: { l
     <svg width={width} height={height} className="pointer-events-none absolute left-0 top-0" aria-hidden>
       {loops.map((loop) => {
         const leg = activeLoopLeg(loop.flow);
+        /* Task-band review connector (#1641): one routed path between the
+           implementer card and the reviewer deck as they were placed — around
+           the other cards, across wrapped rows — capped with an arrowhead at
+           each end to read as the review cycle. The active leg tints accent. */
+        if (loop.route && loop.y1 !== undefined && loop.y2 !== undefined) {
+          const live = leg !== null;
+          const color = live ? "var(--color-accent)" : "var(--color-strong)";
+          const toDeck = Math.atan2(loop.y2 - loop.y1, loop.x2 - loop.x1);
+          const toImpl = Math.atan2(loop.y1 - loop.y2, loop.x1 - loop.x2);
+          const headStyle = (d: string) => ({ d: `path("${d}")`, transition: `d ${MOVE_MS}ms ${MOVE_EASE}` }) as React.CSSProperties;
+          const deckHead = loopArrowHead(loop.x2, loop.y2, toDeck);
+          const implHead = loopArrowHead(loop.x1, loop.y1, toImpl);
+          return (
+            <g key={loop.key}>
+              <path
+                d={loop.route}
+                style={{ d: `path("${loop.route}")`, transition: `d ${MOVE_MS}ms ${MOVE_EASE}` } as React.CSSProperties}
+                fill="none"
+                stroke={color}
+                strokeWidth={live ? 3 : 2.5}
+                strokeLinecap="round"
+                strokeDasharray="5 7"
+                className={live ? "loop-arc-live" : undefined}
+              />
+              <path d={deckHead} style={headStyle(deckHead)} fill={color} />
+              <path d={implHead} style={headStyle(implHead)} fill={color} />
+            </g>
+          );
+        }
         const yTop = loop.y + LOOP_ARC_TOP;
         const yBot = loop.y + LOOP_ARC_BOT;
         const forward = `M ${loop.x1} ${yTop} C ${loop.x1 + LOOP_REACH} ${yTop - LOOP_BULGE}, ${loop.x2 - LOOP_REACH} ${

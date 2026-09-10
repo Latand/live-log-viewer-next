@@ -142,6 +142,10 @@ export function RoundDeck({
     const v = value ? ("collapsed" as const) : ("expanded" as const);
     setOverride({ v, at: marker });
     writeDeckDisclosureOverride(window.localStorage, flow.id, v, marker);
+    /* The board reserves a deck's height from its disclosure state (#1641); a
+       same-tab write does not fire `storage`, so announce the toggle for the
+       band layout to re-measure. */
+    window.dispatchEvent(new Event("llv-deck-disclosure"));
   };
   /* The painted form lags the derived one by exactly one suck-in animation:
      collapsing keeps the deck mounted with the `deck-collapsing` phase class,

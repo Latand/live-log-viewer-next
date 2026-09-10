@@ -81,6 +81,10 @@ interface CameraOptions {
       centred zoom would only open a gap beside the band). The selection anchor
       still corrects both axes; horizontal panning stays available to come back. */
   lockX?: boolean;
+  /** Zoom an opened conversation is framed at (#1641). On the physical-scaling
+      band board a reader's size follows the camera, so an open reaches for a
+      fuller zoom than the bare readable floor; defaults to `READABLE_Z`. */
+  focusZoom?: number;
 }
 
 export interface SchemeAnchor {
@@ -272,6 +276,7 @@ export function useSchemeCamera({
   onFit,
   anchor = null,
   lockX = false,
+  focusZoom = READABLE_Z,
 }: CameraOptions): SchemeCamera {
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const tapRef = useRef<{ x: number; y: number } | null>(null);
@@ -746,16 +751,22 @@ export function useSchemeCamera({
     if (aim.at && sameRect(aim.at, node) && aim.cam && cameraMatchesFraming(cam, aim.cam)) return;
     const rect = viewportRef.current?.getBoundingClientRect();
     if (!rect || !(rect.width > 1) || !(rect.height > 1)) return;
-    const z = Math.min(MAX_Z, Math.max(cam.z, READABLE_Z));
+    /* The zoom an open reaches for. On the physical-scaling band board a card's
+       size follows the camera, so opening a conversation at the bare readable
+       floor would leave its reader shrunk; the band asks for a fuller zoom so
+       the opened conversation reads prominently. Never below the readable floor,
+       and never past the current zoom downward. */
+    const openZoom = Math.max(focusZoom, READABLE_Z);
+    const z = Math.min(MAX_Z, Math.max(cam.z, openZoom));
     aim.at = { x: node.x, y: node.y, w: node.w, h: node.h };
     aim.cam = alignX(centredCamera(node, z, { w: rect.width, h: rect.height }));
     aiming.current = true;
     try {
-      centerOn(node, READABLE_Z);
+      centerOn(node, openZoom);
     } finally {
       aiming.current = false;
     }
-  }, [focus, project, layout, taskRects, cam, vp, centerOn, alignX]);
+  }, [focus, project, layout, taskRects, cam, vp, centerOn, alignX, focusZoom]);
 
   /* Wheel: plain — pan (shift turns it horizontal); ctrl/cmd (and trackpad
      pinch) — zoom at the cursor. The only surface that keeps the wheel for

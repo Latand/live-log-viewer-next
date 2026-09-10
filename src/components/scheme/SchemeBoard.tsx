@@ -18,6 +18,7 @@ import { GroupOverridePanel } from "./GroupOverridePanel";
 import { PipelineEditor } from "@/components/pipelines/PipelineEditor";
 import { createVisibilityIndex } from "./visibilityIndex";
 import { flowByImplementer } from "@/components/flows/flowModel";
+import { deckCollapsed, deckDisclosureMarker, deckDisclosureTerminal, readDeckDisclosureOverride } from "@/components/flows/reviewDeckDisclosure";
 import type { BranchGroup } from "@/components/projectModel";
 import { deleteTask, handoffTask, unassignTask, updateTask } from "@/components/tasks/taskApi";
 import { taskRelationsByPath } from "@/components/tasks/taskRelations";
@@ -397,9 +398,35 @@ export function SchemeBoard({
      operator opened it from. Session state only; the canonical membership and
      the composer/delivery owner are untouched. */
   const [hostOverrides, setHostOverrides] = useState<ReadonlyMap<string, string>>(() => new Map());
+  /* The operator's actual review-deck disclosure, so a band reserves the
+     collapsed chip height for a deck it is showing collapsed and the full
+     footprint for one they manually expanded (#1641). The state lives in
+     localStorage (RoundDeck's own store); the nonce re-reads it when a toggle
+     dispatches `llv-deck-disclosure`, or another tab writes the key. */
+  const [disclosureNonce, setDisclosureNonce] = useState(0);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const bump = () => setDisclosureNonce((n) => n + 1);
+    window.addEventListener("llv-deck-disclosure", bump);
+    window.addEventListener("storage", bump);
+    return () => {
+      window.removeEventListener("llv-deck-disclosure", bump);
+      window.removeEventListener("storage", bump);
+    };
+  }, []);
+  const collapsedDecks = useMemo(() => {
+    void disclosureNonce;
+    const set = new Set<string>();
+    if (typeof window === "undefined") return set;
+    for (const deck of authoredLayout.decks) {
+      const override = readDeckDisclosureOverride(window.localStorage, deck.flow.id);
+      if (deckCollapsed(override, deckDisclosureMarker(deck.flow), deckDisclosureTerminal(deck.flow))) set.add(deck.key);
+    }
+    return set;
+  }, [authoredLayout.decks, disclosureNonce]);
   const taskScene = useMemo(() => bandsEnabled
-    ? layoutTaskBands(authoredLayout, orderedBands, { zoom: layoutZoom, mode: bandMode, viewportWidth: layoutViewportWidth, reader: selected, hostOverrides })
-    : null, [bandsEnabled, authoredLayout, orderedBands, layoutZoom, bandMode, layoutViewportWidth, selected, hostOverrides]);
+    ? layoutTaskBands(authoredLayout, orderedBands, { zoom: layoutZoom, mode: bandMode, viewportWidth: layoutViewportWidth, reader: selected, hostOverrides, collapsedDecks })
+    : null, [bandsEnabled, authoredLayout, orderedBands, layoutZoom, bandMode, layoutViewportWidth, selected, hostOverrides, collapsedDecks]);
   const layout = taskScene?.layout ?? authoredLayout;
 
   /* NO PRUNING HERE (#771). The selection outlives this view, so dropping a path
@@ -869,6 +896,9 @@ export function SchemeBoard({
     onFit: announceFit,
     anchor: cameraAnchor,
     lockX: Boolean(taskScene),
+    /* The band board scales cards with the camera, so an opened conversation
+       is framed at a fuller zoom to read prominently (#1641). */
+    focusZoom: taskScene ? 0.9 : undefined,
   });
 
   useLayoutEffect(() => {setLayoutZoom(cam.z);setLayoutViewportWidth(vp.w);setBandMode((previous) => bandModeFor(cam.z, previous));}, [cam.z,vp.w]);

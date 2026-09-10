@@ -508,6 +508,12 @@ export interface BandLayoutOptions {
       band shows the reference tile instead. Ignored unless the band holds a
       mirror of the node. */
   hostOverrides?: ReadonlyMap<string, string>;
+  /** Deck keys the operator is seeing collapsed to their verdict chip — the
+      actual disclosure state (localStorage override + lifecycle default). A
+      collapsed deck reserves the chip height so its band hugs; a manually
+      expanded settled deck reserves its full footprint. Absent it, the
+      lifecycle default decides. */
+  collapsedDecks?: ReadonlySet<string>;
 }
 
 /** A recorded relation whose other endpoint lives in another band: shown as a
@@ -574,7 +580,17 @@ export function applyHostOverrides(bands: readonly TaskBand[], overrides: Readon
 export function layoutTaskBands(base: SchemeLayout, orderedBands: readonly TaskBand[], options: BandLayoutOptions): BandScene {
   const { mode, viewportWidth, reader } = options;
   const bands = applyHostOverrides(orderedBands, options.hostOverrides);
-  const s = 1 / Math.max(0.07, options.zoom);
+  /* World geometry is stable: a band member is one rectangle in board pixels,
+     and the camera's own `scale(zoom)` is what makes it grow and shrink on
+     screen — so a card physically scales with the zoom, coherently with the
+     frame that holds it and the connectors between them. (The board once
+     divided every size by the zoom so the camera's later multiply cancelled
+     out and cards stayed screen-constant; that inverse-scale fed a zoom↔layout
+     loop the selection anchor then had to repair, and it is the reason cards
+     did not change size when the operator zoomed. Removed.) Zoom still chooses
+     the presentation — chip, summary, or the native reader — through
+     `bandModeFor`; only the size law is the camera's now. */
+  const s = 1;
   const gutter = (viewportWidth < 1024 ? BAND.gutterNarrow : BAND.gutter) * s;
   /* The widest a band may become. Content decides the rest. */
   const maxBandW = Math.max(BAND.nativeMinW * s, viewportWidth * s - gutter * 2);
@@ -611,26 +627,16 @@ export function layoutTaskBands(base: SchemeLayout, orderedBands: readonly TaskB
     const fit = w > maxInnerW ? maxInnerW / w : 1;
     return { w: w * fit, h: h * fit, fit };
   };
-  /* A deck, slot, draft or stack is authored in board pixels, but a band member
-     is screen-constant like the node tiles beside it: its world box is the base
-     footprint counter-scaled by `s`, and the shell renders its own content back
-     at natural size through that same `fit`. Without this the shell alone rode
-     the raw board scale, so it grew and shrank with the camera while the summary
-     tiles sharing its band held still — two coordinate systems in one row. A box
-     wider than the band shrinks further, contents included. */
-  const fittedShell = (bw: number, bh: number): { w: number; h: number; fit: number } => {
-    const overflow = bw * s > maxInnerW ? maxInnerW / (bw * s) : 1;
-    const fit = s * overflow;
-    return { w: bw * fit, h: bh * fit, fit };
-  };
-  /* A review-round deck whose flow reached its outcome renders as a one-line
-     verdict chip (its lifecycle default, RoundDeck's `deckDisclosureTerminal`).
-     The band must reserve that chip's height, not the full deck box it would
-     need expanded, or a settled review loop leaves a task frame that is almost
-     entirely empty with the cycle arcs stranded in the void below its cards. */
-  const collapsedDeckFlow = new Set(
-    base.decks.filter((deck) => deckDisclosureTerminal(deck.flow)).map((deck) => deck.key),
-  );
+  /* A review-round deck that renders as its one-line verdict chip must reserve
+     the chip's height, not the full deck box it would need expanded, or a
+     collapsed review loop leaves a task frame almost entirely empty. Which decks
+     are collapsed is the operator's actual disclosure state (the localStorage
+     override plus the lifecycle default), passed in by SchemeBoard so a manual
+     expand of a settled deck re-opens its full footprint; absent it (SSR, a
+     pure test) the lifecycle default stands in. */
+  const collapsedDecks = options.collapsedDecks
+    ?? new Set(base.decks.filter((deck) => deckDisclosureTerminal(deck.flow)).map((deck) => deck.key));
+  const deckKeyOfFlow = new Map(base.decks.map((deck) => [deck.flow.id, deck.key] as const));
   let cursorY = gutter;
   for (const band of bands) {
     const items: { key: string; w: number; h: number; fit?: number; kind: "member" | "mirror" | "container" | "add"; node?: SchemeNode }[] = [];
@@ -652,8 +658,8 @@ export function layoutTaskBands(base: SchemeLayout, orderedBands: readonly TaskB
       if (mode === "overview" && member.kind !== "draft") continue;
       const rect = baseRect.get(member.key);
       if (!rect) continue;
-      const shellH = member.kind === "deck" && collapsedDeckFlow.has(member.key) ? BAND.collapsedDeckH : rect.h;
-      const natural = fittedShell(rect.w, shellH);
+      const shellH = member.kind === "deck" && collapsedDecks.has(member.key) ? BAND.collapsedDeckH : rect.h;
+      const natural = fitted(rect.w * s, shellH * s);
       items.push({ key: member.key, w: natural.w, h: natural.h, fit: natural.fit, kind: "member" });
     }
     for (const mirror of band.mirrors) {
@@ -796,14 +802,25 @@ export function layoutTaskBands(base: SchemeLayout, orderedBands: readonly TaskB
     groups,
     byPath,
     links: base.links.filter((link) => placed.has(link.from) && placed.has(link.to)),
-    /* No free-board review-cycle arcs on the band surface. LoopsLayer draws its
-       forward/return arcs at fixed board-pixel offsets (LOOP_ARC_TOP/BOT,
-       REACH, BULGE) sized for the 780px pair of a spatial board; a band wraps
-       its implementer and reviewer deck into independent screen-constant rows,
-       so those arcs land nowhere near either card and read as a stranded
-       squiggle in the band's empty space. The implement↔review relationship is
-       already legible from both surfaces sharing the one task band. */
-    loops: [],
+    /* The review cycle is drawn between the implementer card and the reviewer
+       deck AS THEY ARE PLACED — same-row side ports, or top/bottom ports when
+       the deck wrapped to a later row — and routed around the other cards in
+       the band, exactly like the lineage edges above. Carrying the routed path
+       and both endpoints lets LoopsLayer draw the connector to the real cards
+       instead of the fixed-offset arcs it used for a 780px side-by-side pair,
+       which on a wrapped band stranded a squiggle in the empty space. */
+    loops: base.loops.flatMap((loop) => {
+      const implKey = loop.flow.implementerPath;
+      const deckKey = deckKeyOfFlow.get(loop.flow.id);
+      const impl = placed.get(implKey);
+      const deckRect = deckKey ? placed.get(deckKey) : undefined;
+      if (!impl || !deckRect || !deckKey) return [];
+      const bandId = bandOf.get(implKey);
+      if (!bandId || bandId !== bandOf.get(deckKey)) return [];
+      const ports = bandEdgePorts(impl, deckRect, s);
+      const route = routeTaskEdge(ports, rectsIn(bandId, [implKey, deckKey]));
+      return [{ ...loop, x1: ports.x1, y1: ports.y1, x2: ports.x2, y2: ports.y2, route: route.d }];
+    }),
     stacks: base.stacks.flatMap((rect) => (placed.has(rect.key) ? [{ ...rect, ...placed.get(rect.key)! }] : [])),
     decks: base.decks.flatMap((rect) => (placed.has(rect.key) ? [{ ...rect, ...placed.get(rect.key)! }] : [])),
     drafts: base.drafts.flatMap((rect) => (placed.has(rect.key) ? [{ ...rect, ...placed.get(rect.key)! }] : [])),

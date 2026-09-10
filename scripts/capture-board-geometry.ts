@@ -419,6 +419,7 @@ async function main(): Promise<void> {
     const scanned = (seeded: string) => scannedPaths.find((candidate) => candidate === seeded || candidate.endsWith(path.basename(seeded))) ?? seeded;
     const implementer = scanned(tasks[0]!.members[0]!.path);
     const sibling = scanned(tasks[1]!.members[2]!.path);
+    const sibling2 = scanned(tasks[1]!.members[0]!.path);
 
     for (const viewportSize of [{ width: 1400, height: 900, tag: "wide" }, { width: 830, height: 600, tag: "narrow" }]) {
       const context = await browser.newContext({ viewport: { width: viewportSize.width, height: viewportSize.height }, reducedMotion: "reduce" });
@@ -454,14 +455,26 @@ async function main(): Promise<void> {
         /* 1. The frame is as tall as what it holds. */
         const overhang = flowBand.rect.y + flowBand.rect.h - flowBand.paintedBottom;
         must(overhang <= 72 * r.camera.z + 8, `${label}: the review-loop band hangs ${Math.round(overhang)}px below its last painted surface (band ${Math.round(flowBand.rect.h)}px tall, ${flowBand.members} surfaces)`);
-        /* 2. No stranded connector. A settled review loop used to draw its two
-              cycle arcs at fixed board-pixel offsets that landed nowhere near
-              the band's counter-scaled cards, leaving a squiggle floating in
-              the band's empty space. Every connector the band draws must now
-              stay within its painted content, none dangling below it. */
+        /* 2. The review connector attaches to the ACTUAL cards. It used to be
+              drawn at fixed board-pixel offsets that landed nowhere near the
+              band's cards, leaving a squiggle in the empty space. Now its two
+              endpoints touch the implementer card and the reviewer deck as they
+              are placed — including when the deck wrapped to a later row — and
+              nothing dangles below the band's content. */
         const deck = r.decks[0];
         const impl = r.nodes.find((node) => node.key === implementer);
         if (!deck || !impl) { must(false, `${label}: deck or implementer not found (deck ${Boolean(deck)}, implementer ${Boolean(impl)})`); return; }
+        const deckBox = deck.painted ?? deck.shell;
+        const nearRect = (pt: { x: number; y: number }, rc: Rect, tol = 22) => pt.x >= rc.x - tol && pt.x <= rc.x + rc.w + tol && pt.y >= rc.y - tol && pt.y <= rc.y + rc.h + tol;
+        /* Both endpoints must be on screen to judge attachment; a band taller
+           than the viewport pushes the reviewer deck past the fold, where it is
+           virtualized to a stale rect. Wrapped-row attachment is proven at that
+           density by the unit test instead. */
+        const onScreen = (rc: Rect) => rc.x + rc.w > 4 && rc.x < r.canvas.w - 4 && rc.y + rc.h > 4 && rc.y < r.canvas.h - 4;
+        if (onScreen(impl.rect) && onScreen(deckBox)) {
+          const connector = r.paths.find((p) => !p.closed && ((nearRect(p.start, impl.rect) && nearRect(p.end, deckBox)) || (nearRect(p.start, deckBox) && nearRect(p.end, impl.rect))));
+          must(connector !== undefined, `${label}: no review connector runs between the implementer card and its reviewer deck (impl at ${Math.round(impl.rect.x)},${Math.round(impl.rect.y)}, deck at ${Math.round(deckBox.x)},${Math.round(deckBox.y)})`);
+        }
         const strandMargin = 24 * r.camera.z + 12;
         const stranded = r.paths.filter((p) => p.bbox.y > flowBand.paintedBottom + strandMargin && p.bbox.y < flowBand.rect.y + flowBand.rect.h);
         must(stranded.length === 0, `${label}: ${stranded.length} connector path(s) dangle below the band's content (paintedBottom ${Math.round(flowBand.paintedBottom)}, band bottom ${Math.round(flowBand.rect.y + flowBand.rect.h)})`);
@@ -492,42 +505,47 @@ async function main(): Promise<void> {
       frames.nearSelected = { camera: r.camera, band: r.bands.find((band) => band.task === flowTask), decks: r.decks, node: r.nodes.find((node) => node.key === implementer) };
       arcChecks(r, `${tag} near selected`);
 
-      /* ---- Zoom coherence: every surface in a band scales with the camera. */
+      /* ---- Physical card scaling within one presentation mode. The operator's
+         actual complaint: a card must change size when the zoom changes. Two
+         intermediate zooms (0.8 → 0.4), both showing summary tiles, so the
+         presentation is fixed and only the camera moves. On screen every card
+         must halve, and the review deck must scale by the identical factor —
+         one coherent geometry, cards AND frames AND connectors together. */
       await page.keyboard.press("Escape");
-      await page.waitForTimeout(300);
+      await zoomTo(page, 0.8, center);
+      await page.waitForTimeout(500);
       r = await read(page);
-      const tileAt1 = r.nodes.filter((node) => node.presentation === "summary" && node.rect.w > 0).map((node) => ({ key: node.key, w: node.rect.w }));
-      const deckAt1 = r.decks[0]?.shell.w ?? 0;
-      await zoomTo(page, 0.5, center);
+      const tileAtBig = r.nodes.filter((node) => node.presentation === "summary" && node.rect.w > 0).map((node) => ({ key: node.key, w: node.rect.w }));
+      const deckAtBig = r.decks[0]?.shell.w ?? 0;
+      const bandWBig = r.bands.find((b) => b.task === flowTask)?.rect.w ?? 0;
+      await zoomTo(page, 0.4, center);
       await page.waitForTimeout(600);
       r = await read(page);
       await page.screenshot({ path: path.join(OUT_DIR, `${tag}-intermediate.png`) });
-      const tileAt05 = r.nodes.filter((node) => node.presentation === "summary");
-      const ratios = tileAt1.map((tile) => { const now = tileAt05.find((node) => node.key === tile.key); return now && now.rect.w > 0 ? now.rect.w / tile.w : null; }).filter((v): v is number => v !== null);
-      const deckRatio = r.decks[0] && deckAt1 ? r.decks[0].shell.w / deckAt1 : null;
-      frames.intermediate = { camera: r.camera, tileRatios: ratios, deckRatio };
-      /* Coherence, not a specific magnitude: the band deliberately keeps its
-         surfaces screen-constant (semantic zoom swaps chip/summary/native), so
-         what must hold is that every surface in a band obeys ONE scaling law.
-         On the base build the review deck rode the raw camera scale while its
-         sibling summary tiles held still — two coordinate systems in one row. */
+      const tileAtSmall = r.nodes.filter((node) => node.presentation === "summary");
+      const ratios = tileAtBig.map((tile) => { const now = tileAtSmall.find((node) => node.key === tile.key); return now && now.rect.w > 0 ? now.rect.w / tile.w : null; }).filter((v): v is number => v !== null);
+      const deckRatio = r.decks[0] && deckAtBig ? r.decks[0].shell.w / deckAtBig : null;
+      const bandRatio = bandWBig ? (r.bands.find((b) => b.task === flowTask)?.rect.w ?? 0) / bandWBig : null;
       const tileR = ratios.length ? ratios.reduce((a, b) => a + b, 0) / ratios.length : null;
-      must(ratios.length > 0 && Math.max(...ratios) - Math.min(...ratios) < 0.06, `${tag}: sibling tiles scaled by different amounts between 100% and 50% (${ratios.map((v) => v.toFixed(2)).join(", ")}×)`);
-      if (deckRatio !== null && tileR !== null) must(near(deckRatio, tileR, 0.08), `${tag}: the deck scaled ${deckRatio.toFixed(2)}× while its band's tiles scaled ${tileR.toFixed(2)}× — two coordinate systems in one band`);
-      /* The toolbar's own zoom-in, through a real click: the deck and the tiles
-         stay coherent with each other across that framing too. */
+      frames.intermediate = { from: 0.8, to: 0.4, tileRatios: ratios, deckRatio, bandRatio };
+      /* Physical: on screen the card halves (0.4 / 0.8 = 0.5). The base build,
+         which divided sizes by the zoom, held the tiles constant (ratio ~1). */
+      must(tileR !== null && near(tileR, 0.5, 0.06), `${tag}: a summary tile scaled ${tileR?.toFixed(2)}× on screen between 80% and 40% zoom — cards do not follow the camera`);
+      must(ratios.length > 0 && Math.max(...ratios) - Math.min(...ratios) < 0.06, `${tag}: sibling tiles scaled unevenly (${ratios.map((v) => v.toFixed(2)).join(", ")}×)`);
+      /* Coherent: the deck and the band frame scale by the same factor. */
+      if (deckRatio !== null && tileR !== null) must(near(deckRatio, tileR, 0.08), `${tag}: the deck scaled ${deckRatio.toFixed(2)}× while its tiles scaled ${tileR.toFixed(2)}× — two coordinate systems in one band`);
+      if (bandRatio !== null && tileR !== null) must(near(bandRatio, tileR, 0.08), `${tag}: the band frame scaled ${bandRatio.toFixed(2)}× while its cards scaled ${tileR.toFixed(2)}×`);
+      /* The toolbar's own zoom-in, through a real click, scales the cards too. */
       const before = r;
-      const deckBefore = before.decks[0]?.shell.w ?? 0;
       const tilesBefore = before.nodes.filter((node) => node.presentation === "summary" && node.rect.w > 0);
       await page.$eval('[aria-label="Zoom in (+)"]', (el) => (el as HTMLButtonElement).click());
       await page.waitForTimeout(500);
       r = await read(page);
       const plusRatios = tilesBefore.map((node) => { const now = r.nodes.find((entry) => entry.key === node.key); return now && now.rect.w > 0 ? now.rect.w / node.rect.w : null; }).filter((v): v is number => v !== null);
-      const plusDeck = r.decks[0] && deckBefore ? r.decks[0].shell.w / deckBefore : null;
       const plusTile = plusRatios.length ? plusRatios.reduce((a, b) => a + b, 0) / plusRatios.length : null;
-      frames.toolbarZoom = { from: before.camera.z, to: r.camera.z, tileRatios: plusRatios, deckRatio: plusDeck };
-      must(plusRatios.length > 0 && Math.max(...plusRatios) - Math.min(...plusRatios) < 0.06, `${tag}: the toolbar zoom scaled sibling tiles unevenly (${plusRatios.map((v) => v.toFixed(2)).join(", ")}×)`);
-      if (plusDeck !== null && plusTile !== null) must(near(plusDeck, plusTile, 0.08), `${tag}: after the toolbar zoom the deck scaled ${plusDeck.toFixed(2)}× while tiles scaled ${plusTile.toFixed(2)}×`);
+      const cameraRatio = r.camera.z / before.camera.z;
+      frames.toolbarZoom = { from: before.camera.z, to: r.camera.z, tileRatios: plusRatios, cameraRatio };
+      must(plusTile !== null && near(plusTile, cameraRatio, 0.06), `${tag}: the toolbar zoom went ${before.camera.z.toFixed(2)}→${r.camera.z.toFixed(2)} (×${cameraRatio.toFixed(2)}) but tiles scaled ${plusTile?.toFixed(2)}×`);
 
       /* ---- Overview: still one geometry. */
       await zoomTo(page, 0.15, center);
@@ -543,43 +561,57 @@ async function main(): Promise<void> {
       const chrome = (BAND_HEADER + BAND_PAD * 3 + BAND_ROWGAP) / r.camera.z;
       must(r.bands.filter((band) => band.members > 0 && band.rect.y >= 0 && band.rect.y + band.rect.h <= r.canvas.h).every((band) => band.rect.y + band.rect.h - band.paintedBottom <= chrome), `${tag} overview: a band hangs far below its content`);
 
-      /* ---- Click-to-open from the intermediate scale: the clicked card is
-              the one framed, and the camera settles once. */
-      await zoomTo(page, 0.5, center);
-      await page.waitForTimeout(500);
-      let target: { x: number; y: number } | null = null;
-      for (let attempt = 0; attempt < 30; attempt += 1) {
-        const node = (await read(page)).nodes.find((entry) => entry.key === sibling);
-        const canvasH = (await read(page)).canvas.h;
-        if (node && node.rect.h > 0) {
-          const delta = node.rect.y + node.rect.h / 2 - canvasH / 2;
-          if (Math.abs(delta) < 40) { target = await visiblePoint(page, `[data-scheme-summary="${sibling}"]`); break; }
+      /* ---- Click-to-open frames the EXACT clicked conversation, from every
+              zoom entry and on a repeat open. A click must land the operator on
+              the card they clicked, opened as its reader and settled once. */
+      const bringOnScreen = async (key: string): Promise<{ x: number; y: number } | null> => {
+        for (let attempt = 0; attempt < 30; attempt += 1) {
+          const reading = await read(page);
+          const node = reading.nodes.find((entry) => entry.key === key);
+          if (node && node.rect.h > 0 && node.rect.w > 0) {
+            const delta = node.rect.y + node.rect.h / 2 - reading.canvas.h / 2;
+            if (Math.abs(delta) < 50) {
+              return (await visiblePoint(page, `[data-scheme-chip="${key}"]`))
+                ?? (await visiblePoint(page, `[data-scheme-summary="${key}"]`))
+                ?? (await visiblePoint(page, `[data-scheme-node="${key}"]`));
+            }
+          }
           const at = await canvasPoint(page, 0.02, 0.5);
           await page.mouse.move(at.x, at.y);
-          await page.mouse.wheel(0, Math.max(-500, Math.min(500, delta)));
-        } else {
-          const at = await canvasPoint(page, 0.02, 0.5);
-          await page.mouse.move(at.x, at.y);
-          await page.mouse.wheel(0, 400);
+          await page.mouse.wheel(0, node && node.rect.h > 0 ? Math.max(-500, Math.min(500, node.rect.y + node.rect.h / 2 - (await read(page)).canvas.h / 2)) : 400);
+          await page.waitForTimeout(150);
         }
-        await page.waitForTimeout(160);
-      }
-      must(target !== null, `${tag}: the sibling tile could not be brought to the middle of the viewport at 50%`);
-      if (target) {
-        const before = await read(page);
-        await page.mouse.click(target.x, target.y);
-        await page.waitForTimeout(900);
+        return null;
+      };
+      const openAndVerify = async (entryZoom: number, key: string, label: string) => {
+        await page.keyboard.press("Escape");
+        await zoomTo(page, entryZoom, center);
+        await page.waitForTimeout(300);
+        const point = await bringOnScreen(key);
+        must(point !== null, `${tag} ${label}: could not bring ${key.slice(-24)} on screen at ${Math.round(entryZoom * 100)}%`);
+        if (!point) return;
+        await page.mouse.click(point.x, point.y);
+        await page.waitForTimeout(1_000);
         const settled1 = await read(page);
         await page.waitForTimeout(700);
         const settled2 = await read(page);
-        await page.screenshot({ path: path.join(OUT_DIR, `${tag}-after-click.png`) });
-        const node = settled2.nodes.find((entry) => entry.key === sibling);
-        frames.click = { before: before.camera, after: settled2.camera, node };
-        must(node !== undefined && node.rect.y >= 0 && node.rect.y + Math.min(node.rect.h, 120) <= settled2.canvas.h && node.rect.x >= -1 && node.rect.x + node.rect.w <= settled2.canvas.w + 1, `${tag}: after the click the conversation sits at ${node ? `${Math.round(node.rect.x)},${Math.round(node.rect.y)} ${Math.round(node.rect.w)}×${Math.round(node.rect.h)}` : "nowhere"} in a ${settled2.canvas.w}×${settled2.canvas.h} viewport`);
-        must(near(settled1.camera.y, settled2.camera.y, 1) && near(settled1.camera.z, settled2.camera.z, 0.001), `${tag}: the camera kept moving after the click settled (${settled1.camera.y.toFixed(0)}→${settled2.camera.y.toFixed(0)}, z ${settled1.camera.z.toFixed(2)}→${settled2.camera.z.toFixed(2)})`);
-        must(node !== undefined && node.presentation === "native", `${tag}: the clicked conversation opened as ${node?.presentation ?? "nothing"}, not as its reader`);
-        must(node !== undefined && node.rect.w * node.rect.h > 0.2 * settled2.canvas.w * settled2.canvas.h, `${tag}: the opened conversation covers ${node ? Math.round(100 * node.rect.w * node.rect.h / (settled2.canvas.w * settled2.canvas.h)) : 0}% of the viewport — too little to read`);
-      }
+        const node = settled2.nodes.find((entry) => entry.key === key);
+        (frames as Record<string, unknown>)[`click_${label}`] = { entryZoom, after: settled2.camera, node: node ? { presentation: node.presentation, rect: node.rect } : null };
+        /* The EXACT clicked conversation is on screen, as its reader. */
+        must(node !== undefined && node.presentation === "native", `${tag} ${label}: the clicked conversation opened as ${node?.presentation ?? "nothing"}, not as its reader`);
+        must(node !== undefined && node.rect.y >= -1 && node.rect.y + Math.min(node.rect.h, 140) <= settled2.canvas.h + 1 && node.rect.x >= -1 && node.rect.x + node.rect.w <= settled2.canvas.w + 1, `${tag} ${label}: the clicked conversation sits at ${node ? `${Math.round(node.rect.x)},${Math.round(node.rect.y)} ${Math.round(node.rect.w)}×${Math.round(node.rect.h)}` : "nowhere"} in ${settled2.canvas.w}×${settled2.canvas.h}`);
+        must(node !== undefined && node.rect.w * node.rect.h > 0.18 * settled2.canvas.w * settled2.canvas.h, `${tag} ${label}: the opened conversation covers ${node ? Math.round(100 * node.rect.w * node.rect.h / (settled2.canvas.w * settled2.canvas.h)) : 0}% of the viewport`);
+        /* And the camera has settled — one framing, not a drift. */
+        must(near(settled1.camera.y, settled2.camera.y, 1.5) && near(settled1.camera.z, settled2.camera.z, 0.001), `${tag} ${label}: the camera kept moving after the click settled (${settled1.camera.y.toFixed(0)}→${settled2.camera.y.toFixed(0)}, z ${settled1.camera.z.toFixed(2)}→${settled2.camera.z.toFixed(2)})`);
+      };
+      await openAndVerify(0.15, sibling, "overview-entry");
+      await openAndVerify(0.5, sibling, "intermediate-entry");
+      await openAndVerify(0.95, sibling, "near-entry");
+      /* Repeat opens: a different card, then back — each frames its own exact
+         conversation, never the one opened before. */
+      await openAndVerify(0.5, sibling2, "repeat-other");
+      await openAndVerify(0.5, sibling, "repeat-back");
+      await page.screenshot({ path: path.join(OUT_DIR, `${tag}-after-click.png`) });
 
       /* ---- Wheel routing, through Chromium's input pipeline.
 
