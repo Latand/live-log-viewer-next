@@ -36,8 +36,27 @@ import type { TFunction } from "@/lib/i18n";
  *   settles it, never because Codex stopped listing it.
  */
 
+/** One hand-off this browser cannot say the outcome of, for the panel to offer
+    the single control that resolves it. */
+export interface NativeQueueUnresolvedAdmission {
+  key: string;
+  text: string;
+  imageCount: number;
+}
+
 export interface NativeQueuePanelProps {
   view: NativeQueueView;
+  /**
+   * Hand-offs admitted from this conversation whose reply never arrived.
+   *
+   * They are NOT queue rows: the journal may or may not hold them, which is the
+   * whole point, and the panel says so rather than counting them among the
+   * messages Codex is holding. Sending one again replays that one operation
+   * under its own key — the journal answers a replay with the operation it
+   * already has, so the message reaches Codex once either way.
+   */
+  unresolved?: readonly NativeQueueUnresolvedAdmission[];
+  onReplay?(key: string): void;
   /** True until this conversation's queue has been read once. Accepted so a
       caller need not decide what to do with it; the panel opens on rows, not on
       a pending read, because a card that has never queued anything would flash
@@ -75,12 +94,12 @@ function noticeText(notice: NativeQueueNotice, t: TFunction): string {
 }
 
 function profileText(row: NativeQueueRow, thread: { model: string | null; effort: string | null }, t: TFunction): string {
-  const { effective, requested } = nativeQueueProfile(row, thread);
-  const runs = effective ? t("queue.runsOn", { settings: effective }) : t("queue.runsOnThread");
+  const { observed, requested } = nativeQueueProfile(row, thread);
+  const runs = observed ? t("queue.runsOn", { settings: observed }) : t("queue.runsOnThread");
   return requested ? `${runs} ${t("queue.asked", { settings: requested })}` : runs;
 }
 
-export function NativeQueuePanel({ view, error, thread, mintKey, submit, onRefresh, t }: NativeQueuePanelProps) {
+export function NativeQueuePanel({ view, error, thread, unresolved, onReplay, mintKey, submit, onRefresh, t }: NativeQueuePanelProps) {
   const [editing, setEditing] = useState<string | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
   /* The edit box is UNCONTROLLED, and read at save. A queued message can be
@@ -92,12 +111,26 @@ export function NativeQueuePanel({ view, error, thread, mintKey, submit, onRefre
     if (editing) editRef.current?.focus();
   }, [editing]);
 
-  /* Every control funnels through here so exactly one thing decides what a
-     refusal looks like: the runtime's own words, verbatim, next to the queue it
-     is about. A refusal never clears the panel or the draft. */
+  /**
+   * Every control funnels through here so exactly one thing decides what a
+   * refusal looks like: the runtime's own words, verbatim, next to the queue it
+   * is about. A refusal never clears the panel or the draft.
+   *
+   * AND THE SAME ORIGINAL-KEY RULE THE COMPOSER USES. A mutation whose outcome
+   * this browser never learned may already be in the journal, so pressing the
+   * same control on the same row again must replay THAT operation rather than
+   * mint a second one. The key is retained against the mutation itself, so an
+   * identical repeat replays and anything else is a new operation; it is
+   * released as soon as the journal gives any verdict on it.
+   */
+  const retainedKeys = useRef(new Map<string, string>());
   const run = async (mutation: NativeQueueMutation) => {
     setFailure(null);
-    const answer = await submit(mutation, mintKey());
+    const signature = JSON.stringify(mutation);
+    const key = retainedKeys.current.get(signature) ?? mintKey();
+    retainedKeys.current.set(signature, key);
+    const answer = await submit(mutation, key);
+    if (answer.outcome !== "unknown") retainedKeys.current.delete(signature);
     if (!answer.ok) setFailure(answer.error ?? t("queue.refused"));
     return answer.ok;
   };
@@ -117,8 +150,10 @@ export function NativeQueuePanel({ view, error, thread, mintKey, submit, onRefre
       </section>
     );
   }
-  /* An empty queue is not a panel. */
-  if (view.rows.length === 0) return null;
+  /* An empty queue is not a panel — unless something is unresolved, which is
+     exactly when the operator needs the one control that settles it. */
+  const pending = unresolved ?? [];
+  if (view.rows.length === 0 && pending.length === 0) return null;
 
   return (
     <section
@@ -149,6 +184,35 @@ export function NativeQueuePanel({ view, error, thread, mintKey, submit, onRefre
         <p data-testid="native-queue-notice" role="status" className="border-b border-border/40 px-2 py-1 text-caption text-muted">
           {noticeText(view.notice, t)}
         </p>
+      ) : null}
+
+      {pending.length > 0 ? (
+        <section
+          data-testid="native-queue-unresolved"
+          aria-label={t("queue.unresolvedTitle")}
+          className="border-b border-warning/30 bg-warning/5 px-2 py-1.5"
+        >
+          <p className="text-caption text-secondary">{t("queue.unresolved", { count: pending.length })}</p>
+          <ul className="mt-1 flex flex-col gap-1">
+            {pending.map((entry) => (
+              <li key={entry.key} data-testid="native-queue-unresolved-row" data-key={entry.key} className="flex items-start gap-2">
+                <p className="min-w-0 flex-1 truncate text-ui text-primary">
+                  {entry.text || t("queue.unresolvedNoText", { count: entry.imageCount })}
+                </p>
+                {onReplay ? (
+                  <button
+                    type="button"
+                    data-testid="native-queue-unresolved-retry"
+                    onClick={() => onReplay(entry.key)}
+                    className="shrink-0 rounded-control border border-accent/50 px-1.5 py-0.5 text-caption text-accent hover:bg-accent/10"
+                  >
+                    {t("queue.unresolvedRetry")}
+                  </button>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        </section>
       ) : null}
 
       <ul className="divide-y divide-border/40">

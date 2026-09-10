@@ -14,7 +14,7 @@ import type { RuntimeSessionView } from "@/hooks/useRuntime";
 
 import { agentCapabilitiesFromViews } from "./useAgentCapabilities";
 import { writeProfile } from "./runtimeProfile";
-import { appendComposerDraft, TmuxComposer } from "./TmuxComposer";
+import { appendComposerDraft, resetRetainedQueueAdmissionsForTests, TmuxComposer } from "./TmuxComposer";
 import { readOutbox, resetOutboxForTests } from "./conversation/outbox";
 import { setTmuxComposerRuntimeDependenciesForTests } from "./tmuxComposerRuntime";
 
@@ -161,6 +161,7 @@ afterEach(() => {
   document.body.replaceChildren();
   localStorage.clear();
   sessionStorage.clear();
+  resetRetainedQueueAdmissionsForTests();
   resetOutboxForTests();
 });
 
@@ -311,7 +312,7 @@ test("a queued row names the thread's OBSERVED settings, and the request separat
   }];
   const { host, root } = await mount();
   const status = host.querySelector('[data-testid="native-queue-row-status"]')?.textContent ?? "";
-  expect(status).toContain("Runs on gpt-6-astra · medium");
+  expect(status).toContain("The thread is on gpt-6-astra · medium right now");
   expect(status).toContain("Asked for gpt-6-astra · low");
   await act(async () => root.unmount());
 });

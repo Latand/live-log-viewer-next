@@ -10,7 +10,7 @@ import { useNativeQueue, type NativeQueueDependencies } from "@/hooks/useNativeQ
 import type { NativeQueuedSubmission } from "@/lib/runtime/nativeCodexQueue";
 import type { NativeQueueRecord } from "@/lib/runtime/nativeQueueContracts";
 
-import { NativeQueuePanel } from "./NativeQueuePanel";
+import { NativeQueuePanel, type NativeQueueUnresolvedAdmission } from "./NativeQueuePanel";
 
 /**
  * The queue the operator actually touches (#1629).
@@ -76,7 +76,9 @@ let writes: Record<string, unknown>[] = [];
 let reads = 0;
 let entries: NativeQueueRecord[] = [];
 let items: NativeQueuedSubmission[] = [];
-let writeAnswer: { status: number; body: Record<string, unknown> } = { status: 202, body: { receipt: { status: "queued" } } };
+/* The journal's own answer shape: the operation it committed, and its verdict.
+   A reply short of that is not an acceptance and the tests below say so. */
+let writeAnswer: { status: number; body: Record<string, unknown> } = { status: 202, body: { operationId: "op-1", receipt: { status: "queued" } } };
 let readFails: string | null = null;
 let host: HTMLDivElement;
 let root: ReturnType<typeof createRoot>;
@@ -120,6 +122,47 @@ function Harness({ turn = "idle" as "idle" | "running", changeRevision = 0 }) {
   );
 }
 
+function BindingHarness({ threadId, accountId }: { threadId: string; accountId: string }) {
+  const queue = useNativeQueue("conversation_queue", {
+    enabled: true, threadId, accountId, turn: "idle", activeTurnId: null, changeRevision: 0,
+  }, dependencies);
+  return (
+    <NativeQueuePanel
+      view={queue.view}
+      loading={queue.loading}
+      error={queue.error}
+      thread={{ model: "gpt-6-astra", effort: "high" }}
+      mintKey={() => `key-${++keySequence}`}
+      submit={queue.submit}
+      onRefresh={queue.refresh}
+      t={t}
+    />
+  );
+}
+
+function UnresolvedHarness(props: {
+  unresolved: NativeQueueUnresolvedAdmission[];
+  onReplay(key: string): void;
+}) {
+  const queue = useNativeQueue("conversation_queue", {
+    enabled: true, threadId: "thread-1", accountId: "acct-1", turn: "idle", activeTurnId: null, changeRevision: 0,
+  }, dependencies);
+  return (
+    <NativeQueuePanel
+      view={queue.view}
+      loading={queue.loading}
+      error={queue.error}
+      thread={{ model: "gpt-6-astra", effort: "high" }}
+      unresolved={props.unresolved}
+      onReplay={props.onReplay}
+      mintKey={() => `key-${++keySequence}`}
+      submit={queue.submit}
+      onRefresh={queue.refresh}
+      t={t}
+    />
+  );
+}
+
 async function mount(props: Parameters<typeof Harness>[0] = {}) {
   host = document.createElement("div");
   document.body.append(host);
@@ -133,7 +176,7 @@ beforeEach(() => {
   reads = 0;
   keySequence = 0;
   readFails = null;
-  writeAnswer = { status: 202, body: { receipt: { status: "queued" } } };
+  writeAnswer = { status: 202, body: { operationId: "op-1", receipt: { status: "queued" } } };
   entries = [record("a"), record("b")];
   items = [submission("a"), submission("b")];
 });
@@ -304,10 +347,114 @@ test("a refusal is shown in the runtime's own words and nothing is retried", asy
 test("a 202 whose receipt was rejected is a failure, not an acceptance", async () => {
   /* The HTTP code says the request was understood; the journal's own receipt is
      the verdict. */
-  writeAnswer = { status: 202, body: { receipt: { status: "rejected" }, error: "expectedRevision is stale" } };
+  writeAnswer = { status: 202, body: { operationId: "op-1", receipt: { status: "rejected" }, error: "expectedRevision is stale" } };
   await mount();
   await click(rows()[0]!.querySelector('[data-testid="native-queue-delete"]'));
   expect(host.querySelector('[data-testid="native-queue-failure"]')?.textContent).toContain("stale");
+});
+
+test("a successful status with no operation envelope is unknown, and keeps its key", async () => {
+  /* THE RESPONSE-SCHEMA NEGATIVE. HTTP 202 with `{}` was read as success: the
+     row was released and the next identical press minted a second key for an
+     operation that may already exist. A status is not an answer — the journal
+     replies with the operation it committed and a receipt status it knows, and
+     anything short of that is UNKNOWN. */
+  for (const body of [
+    {},
+    { receipt: { status: "queued" } },
+    { operationId: "op-1" },
+    { operationId: "op-1", receipt: {} },
+    { operationId: "op-1", receipt: { status: "teleported" } },
+    { operationId: "op-1", receipt: { status: "queued", operationId: "op-someone-else" } },
+  ]) {
+    writes = [];
+    writeAnswer = { status: 202, body };
+    await mount();
+    await click(rows()[0]!.querySelector('[data-testid="native-queue-delete"]'));
+    expect(host.querySelector('[data-testid="native-queue-failure"]')?.textContent ?? "")
+      .toContain("unknown");
+
+    /* And the operation keeps its identity: pressing the same control again
+       replays it rather than admitting a second one. */
+    await click(rows()[0]!.querySelector('[data-testid="native-queue-delete"]'));
+    expect(writes).toHaveLength(2);
+    expect(writes[1]!.idempotencyKey).toBe(writes[0]!.idempotencyKey);
+    flushSync(() => root.unmount());
+    document.body.replaceChildren();
+  }
+  writeAnswer = { status: 202, body: { operationId: "op-1", receipt: { status: "queued" } } };
+  await mount();
+});
+
+test("a verdict the journal did give releases the key, so the next press is a new operation", async () => {
+  await mount();
+  await click(rows()[0]!.querySelector('[data-testid="native-queue-delete"]'));
+  await click(rows()[0]!.querySelector('[data-testid="native-queue-delete"]'));
+  expect(writes).toHaveLength(2);
+  expect(writes[1]!.idempotencyKey).not.toBe(writes[0]!.idempotencyKey);
+});
+
+test("an unresolved hand-off is offered its one recovery control, on an empty queue too", async () => {
+  /* It is NOT a queue row: the journal may or may not hold it, which is the
+     whole point, so it is counted and presented separately. The panel opens for
+     it even when Codex is holding nothing, because that is exactly when the
+     operator would otherwise see no sign of it at all. */
+  entries = [];
+  items = [];
+  const replayed: string[] = [];
+  host = document.createElement("div");
+  document.body.append(host);
+  root = createRoot(host);
+  await act(async () => {
+    root.render(
+      <UnresolvedHarness
+        unresolved={[{ key: "op-lost", text: "the message with no answer", imageCount: 0 }]}
+        onReplay={(key) => replayed.push(key)}
+      />,
+    );
+  });
+  await act(async () => { await Promise.resolve(); });
+
+  expect(host.querySelector('[data-testid="native-queue-row"]')).toBeNull();
+  const row = host.querySelector('[data-testid="native-queue-unresolved-row"]');
+  expect(row?.textContent).toContain("the message with no answer");
+  expect(host.querySelector('[data-testid="native-queue-unresolved"]')?.textContent).toContain("no answer yet");
+  await click(row?.querySelector('[data-testid="native-queue-unresolved-retry"]'));
+  expect(replayed).toEqual(["op-lost"]);
+});
+
+test("an account or thread change empties the panel before the new queue is read", async () => {
+  /* The same card in front of the operator, a different binding behind it. The
+     previous conversation's rows are a false statement about what Codex is
+     holding, and their controls name a binding the runtime would refuse — so
+     they go the moment the binding moves, rather than when a read that may fail
+     or never answer eventually replaces them. */
+  let resolveRead: null | (() => void) = null;
+  const previous = dependencies.read;
+  host = document.createElement("div");
+  document.body.append(host);
+  root = createRoot(host);
+  await act(async () => { root.render(<BindingHarness threadId="thread-1" accountId="acct-1" />); });
+  await act(async () => { await Promise.resolve(); });
+  expect(rows()).toHaveLength(2);
+
+  try {
+    /* The next read never answers, which is the case that used to leave the old
+       rows on screen for good. */
+    (dependencies as { read: NativeQueueDependencies["read"] }).read = () =>
+      new Promise((resolve) => { resolveRead = () => resolve({ entries: [], native: null }); });
+    await act(async () => { root.render(<BindingHarness threadId="thread-1" accountId="acct-2" />); });
+    await act(async () => { await Promise.resolve(); });
+    expect(host.querySelector('[data-testid="native-queue-row"]')).toBeNull();
+
+    /* And a thread rehost does the same. */
+    await act(async () => { root.render(<BindingHarness threadId="thread-2" accountId="acct-2" />); });
+    await act(async () => { await Promise.resolve(); });
+    expect(host.querySelector('[data-testid="native-queue-row"]')).toBeNull();
+  } finally {
+    (dependencies as { read: NativeQueueDependencies["read"] }).read = previous;
+    (resolveRead as null | (() => void))?.();
+  }
 });
 
 test("a queue that cannot be read says so rather than showing an empty queue", async () => {
@@ -329,7 +476,7 @@ test("every row says what a queued message will run on, and does not promise mor
   items = [submission("a")];
   await mount();
   const status = rows()[0]!.querySelector('[data-testid="native-queue-row-status"]')?.textContent ?? "";
-  expect(status).toContain("Runs on gpt-6-astra · high");
+  expect(status).toContain("The thread is on gpt-6-astra · high right now");
   expect(status).toContain("Asked for gpt-6-astra · low");
 });
 
