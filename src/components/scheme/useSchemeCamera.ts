@@ -196,6 +196,47 @@ export function cameraShowsWorld(camera: Camera, world: SchemeRect, vp: { w: num
     && overlap(world.y, world.h, camera.y, vp.h) >= Math.min(EDGE_KEEP, world.h * camera.z);
 }
 
+/** Where the camera must sit for `node` to be framed: centred horizontally,
+    its head near the top so a tall pane starts readable instead of split. */
+export function centredCamera(node: SchemeRect, z: number, vp: { w: number; h: number }): Camera {
+  return {
+    z,
+    x: vp.w / 2 - (node.x + node.w / 2) * z,
+    y: Math.min(vp.h / 2 - node.y * z, vp.h * 0.08 - (node.y - 40) * z),
+  };
+}
+
+/** How much of a node's head must be on screen before an opened conversation
+    counts as shown: its title row and the first lines under it. */
+const FRAMED_HEAD = 120;
+
+/**
+ * Whether `node` is on screen and readable at this camera — the question a
+ * focus request actually asks, as opposed to "did a camera move happen".
+ * The head is what is judged: a pane taller than the viewport is framed when
+ * its top is inside it, and one pushed past an edge is not.
+ */
+export function nodeIsFramed(node: SchemeRect, camera: Camera, vp: { w: number; h: number }): boolean {
+  if (!(vp.w > 1) || !(vp.h > 1)) return false;
+  const sx = camera.x + node.x * camera.z;
+  const sy = camera.y + node.y * camera.z;
+  const head = Math.min(node.h * camera.z, FRAMED_HEAD);
+  return sy >= 0 && sy + head <= vp.h && sx < vp.w && sx + node.w * camera.z > 0;
+}
+
+const sameRect = (a: SchemeRect, b: SchemeRect) => a.x === b.x && a.y === b.y && a.w === b.w && a.h === b.h;
+
+/** A focus request the camera still owes the operator: the node it names, the
+    rectangle the last aim was taken against, and the camera that aim asked for.
+    Cleared when the node is framed, when the operator moves the camera, or when
+    a new request replaces it. */
+interface FocusAim {
+  path: string;
+  project: string;
+  at: SchemeRect | null;
+  cam: Camera | null;
+}
+
 /** The deadband used by repeated 0 to escalate from current work to all. */
 export function cameraMatchesFraming(camera: Camera, target: Camera): boolean {
   return Math.abs(camera.z - target.z) <= target.z * 0.01 && Math.abs(camera.x - target.x) <= 4 && Math.abs(camera.y - target.y) <= 4;
@@ -249,6 +290,13 @@ export function useSchemeCamera({
   /* An explicit framing change (fit, focus glide, jump, Return) re-baselines
      the selection anchor instead of being undone by it. */
   const framingRef = useRef(false);
+  /* The standing focus obligation, and the flag that tells the framings below
+     that the move they are being asked for IS that obligation's own aim. */
+  const focusAim = useRef<FocusAim | null>(null);
+  const aiming = useRef(false);
+  const dropFocusAim = useCallback(() => {
+    if (!aiming.current) focusAim.current = null;
+  }, []);
 
   useEffect(() => {
     latestCam.current = cam;
@@ -362,6 +410,9 @@ export function useSchemeCamera({
   const camQueue = useRef<((c: Camera) => Camera)[]>([]);
   const camRaf = useRef<number | null>(null);
   const queueCam = useCallback((fn: (c: Camera) => Camera) => {
+    /* Pan, wheel and pinch: the operator has taken the camera, so a focus
+       request still owed is dropped rather than pulling them back. */
+    dropFocusAim();
     camQueue.current.push(fn);
     if (camRaf.current != null) return;
     camRaf.current = requestAnimationFrame(() => {
@@ -370,7 +421,7 @@ export function useSchemeCamera({
       camQueue.current = [];
       setCam((c) => fns.reduce((acc, apply) => apply(acc), c));
     });
-  }, []);
+  }, [dropFocusAim]);
   useEffect(
     () => () => {
       if (camRaf.current != null) cancelAnimationFrame(camRaf.current);
@@ -428,13 +479,17 @@ export function useSchemeCamera({
   }, [layout.nodes.length, layout.drafts.length, layout.groups.length, taskRects, pipelineRects, world, alignX, lockX]);
 
   const glideTo = useCallback((next: Camera | ((c: Camera) => Camera)) => {
+    /* Every explicit framing but the focus aim itself — fit, jump, Return, a
+       task-panel row — is the operator deciding where to look, and ends any
+       focus request still owed. */
+    dropFocusAim();
     /* Reduced motion: skip the CSS transition — the move lands instantly. */
     if (!reducedMotion()) setGlide(true);
     framingRef.current = true;
     setCam(next);
     if (glideTimer.current) window.clearTimeout(glideTimer.current);
     glideTimer.current = window.setTimeout(() => setGlide(false), 500);
-  }, []);
+  }, [dropFocusAim]);
   useEffect(
     () => () => {
       if (glideTimer.current) window.clearTimeout(glideTimer.current);
@@ -492,14 +547,7 @@ export function useSchemeCamera({
     (node: SchemeRect, zMin: number) => {
       const rect = viewportRef.current?.getBoundingClientRect();
       if (!rect) return;
-      glideTo((c) => {
-        const z = Math.min(MAX_Z, Math.max(c.z, zMin));
-        return alignX({
-          z,
-          x: rect.width / 2 - (node.x + node.w / 2) * z,
-          y: Math.min(rect.height / 2 - node.y * z, rect.height * 0.08 - (node.y - 40) * z),
-        });
-      });
+      glideTo((c) => alignX(centredCamera(node, Math.min(MAX_Z, Math.max(c.z, zMin)), { w: rect.width, h: rect.height })));
     },
     [glideTo, alignX],
   );
@@ -623,19 +671,68 @@ export function useSchemeCamera({
     return () => window.clearTimeout(t);
   }, [cam, project, mapMode]);
 
-  /* An opened conversation glides into view once its node exists in the layout. */
+  /*
+   * An opened conversation is brought into view — and STAYS the camera's
+   * obligation until it actually is (#1625).
+   *
+   * The band projection is built for a camera it is built BEFORE: SchemeBoard
+   * must hand `layoutTaskBands` a zoom and a viewport width, and — the layout
+   * is an input to this hook, not an output of it — those can only be copies of
+   * this camera's own values, applied one commit late. A board that mounts with
+   * a focus already standing (the catalog open: the list unmounts, the board
+   * mounts, the request arrives with it) therefore offers the requested node a
+   * PROVISIONAL rectangle, projected at the initial 0.5 zoom and 1400px width,
+   * and on a tall stack of task bands that rectangle is thousands of world
+   * pixels away from where the node settles. Aiming at it once and calling the
+   * request handled left the operator's own conversation far outside the
+   * viewport, with nothing left to correct it: the saved-camera restore and the
+   * off-world re-fit both ran afterwards and framed something else entirely.
+   *
+   * So the request is an obligation rather than an event. It is discharged the
+   * moment the node is framed — after that a reflow moves the node freely and
+   * the camera stays where the operator left it — and it re-aims only while the
+   * node is NOT framed and either its rectangle or the camera has moved since
+   * the aim, so it answers the settling board without ever chasing a settled
+   * one. `glideTo` drops it, which is every explicit framing the operator can
+   * ask for; so does `queueCam`, which is every pan, wheel and pinch. Neither
+   * the highlight expiring nor a scanner poll can re-arm it — only a new focus
+   * VALUE can, and upstream only a new focus nonce produces one, which is what
+   * keeps this from being the standing follow `focusRequestEdge` removed.
+   */
   const focusHandled = useRef<string | null>(null);
   useEffect(() => {
-    if (!focus) {
-      focusHandled.current = null;
+    if (focus && focusHandled.current !== focus) {
+      focusHandled.current = focus;
+      focusAim.current = { path: focus, project, at: null, cam: null };
+    }
+    /* A repeated open of the same conversation must move the view again, so
+       the handled marker — not the obligation — clears when the request ends. */
+    if (!focus) focusHandled.current = null;
+    const aim = focusAim.current;
+    if (!aim || aim.project !== project) return;
+    const node = layout.byPath.get(aim.path) ?? taskRects?.get(aim.path);
+    /* Not placed yet is not a failure: the request is still owed. */
+    if (!node) return;
+    if (nodeIsFramed(node, cam, vp)) {
+      focusAim.current = null;
       return;
     }
-    if (focusHandled.current === focus) return;
-    const node = layout.byPath.get(focus) ?? taskRects?.get(focus);
-    if (!node) return;
-    focusHandled.current = focus;
-    centerOn(node, 0.55);
-  }, [focus, layout, taskRects, centerOn]);
+    /* Our own aim is already standing and the node is still not framed: there
+       is nothing further this rule can do, and repeating the move would only
+       fight whatever is holding the camera. */
+    if (aim.at && sameRect(aim.at, node) && aim.cam && cameraMatchesFraming(cam, aim.cam)) return;
+    const rect = viewportRef.current?.getBoundingClientRect();
+    if (!rect || !(rect.width > 1) || !(rect.height > 1)) return;
+    const z = Math.min(MAX_Z, Math.max(cam.z, 0.55));
+    aim.at = { x: node.x, y: node.y, w: node.w, h: node.h };
+    aim.cam = alignX(centredCamera(node, z, { w: rect.width, h: rect.height }));
+    aiming.current = true;
+    try {
+      centerOn(node, 0.55);
+    } finally {
+      aiming.current = false;
+    }
+  }, [focus, project, layout, taskRects, cam, vp, centerOn, alignX]);
 
   /* Wheel: plain — pan (shift turns it horizontal); ctrl/cmd (and trackpad
      pinch) — zoom at the cursor. In select mode a wheel over a scrollable

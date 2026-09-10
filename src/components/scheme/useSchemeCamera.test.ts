@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import type { SchemeRect } from "./layout";
-import { cameraMatchesFraming, cameraShowsWorld, fitCameraToRect, hasBoardContent } from "./useSchemeCamera";
+import { cameraMatchesFraming, cameraShowsWorld, centredCamera, fitCameraToRect, hasBoardContent, nodeIsFramed } from "./useSchemeCamera";
 
 const empty = { nodes: [], drafts: [] };
 const rect: SchemeRect = { x: 0, y: 0, w: 260, h: 100 };
@@ -81,5 +81,43 @@ describe("a restored camera must still show the world (#1614)", () => {
 
   test("an unmeasured viewport cannot judge and does not veto a restore", () => {
     expect(cameraShowsWorld(savedFarDown, { x: 0, y: 0, w: 1400, h: 9_000 }, { w: 1, h: 1 })).toBe(true);
+  });
+});
+
+describe("nodeIsFramed — what a focus request actually asks (#1625)", () => {
+  const view = { w: 1600, h: 1000 };
+  /* A conversation pane on a band board: taller than it is wide, and at this
+     zoom taller than a third of the viewport. */
+  const pane: SchemeRect = { x: 68.9, y: 9336.9, w: 1034.5, h: 1172.4 };
+
+  test("the camera centredCamera asks for frames the node it was computed from", () => {
+    const cam = centredCamera(pane, 0.58, view);
+    expect(nodeIsFramed(pane, cam, view)).toBe(true);
+    /* Head near the top, so a pane taller than the viewport starts readable. */
+    expect(cam.y + pane.y * cam.z).toBeCloseTo(view.h * 0.08 + 40 * 0.58, 6);
+  });
+
+  test("the rectangle the live board reported, under the camera it reported, is not framed", () => {
+    /* The production reading: the requested conversation sat above the
+       viewport, which is exactly the state the operator could not read. */
+    expect(nodeIsFramed(pane, { x: -8, y: -6438.3056, z: 0.58 }, view)).toBe(false);
+    /* And the aim taken against a provisional projection leaves it below. */
+    expect(nodeIsFramed(pane, { x: -2.88, y: -2813.9344, z: 0.58 }, view)).toBe(false);
+  });
+
+  test("a pane taller than the viewport is framed by its head, not by fitting whole", () => {
+    const tall: SchemeRect = { x: 0, y: 0, w: 600, h: 40_000 };
+    expect(nodeIsFramed(tall, { x: 0, y: 100, z: 0.58 }, view)).toBe(true);
+    /* One pixel of head showing at the bottom edge is not readable. */
+    expect(nodeIsFramed(tall, { x: 0, y: view.h - 1, z: 0.58 }, view)).toBe(false);
+  });
+
+  test("a node pushed off the side is not framed even at the right height", () => {
+    expect(nodeIsFramed(pane, { x: -3_000, y: -5_305.8, z: 0.58 }, view)).toBe(false);
+    expect(nodeIsFramed(pane, { x: view.w + 10, y: -5_305.8, z: 0.58 }, view)).toBe(false);
+  });
+
+  test("an unmeasured viewport frames nothing, so a request stays owed", () => {
+    expect(nodeIsFramed(pane, centredCamera(pane, 0.58, view), { w: 1, h: 1 })).toBe(false);
   });
 });
