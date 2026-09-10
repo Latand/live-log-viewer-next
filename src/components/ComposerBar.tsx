@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useId, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import type { CSSProperties, ReactNode } from "react";
 
 import { Loader2, Play, Square } from "@/components/icons";
@@ -160,7 +161,13 @@ export interface ComposerBarProps {
 
 const NO_HISTORY: readonly string[] = [];
 
-function SendMenu({ label, actions, onClose }: { label: string; actions: SendMenuAction[]; onClose: () => void }) {
+function SendMenu({ label, actions, onClose, position, owner }: {
+  label: string;
+  actions: SendMenuAction[];
+  onClose: () => void;
+  position: { bottom: number; right: number };
+  owner: Document;
+}) {
   const rootRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -178,12 +185,28 @@ function SendMenu({ label, actions, onClose }: { label: string; actions: SendMen
     };
   }, [onClose]);
 
-  return (
+  /* THE MENU IS THE COMPOSER'S, NOT THE BOX'S. The composer's own box is
+     bounded and scrolls its own content (#1629), and an in-flow absolute menu
+     is clipped by exactly that: in a 600 x 500 card it opened taller than the
+     box and lost its head above the top edge, with no scroll that could reveal
+     it — the menu is anchored to an input pinned to the bottom, so scrolling
+     the box moves the two together. It renders through a portal with fixed
+     positioning instead, the same way the account menu escapes a card header
+     that clips (`AccountBadge`), into the document the bar is actually in —
+     which in a floating call window is not this one. The first action takes
+     focus, because a portal leaves the tab order behind at the trigger. */
+  useEffect(() => {
+    rootRef.current?.querySelector<HTMLElement>('[role="menuitem"]:not([disabled])')?.focus();
+  }, []);
+
+  return createPortal(
     <div
       ref={rootRef}
       role="menu"
       aria-label={label}
-      className="absolute bottom-[calc(100%+6px)] right-0 z-40 w-[220px] rounded-surface border border-border bg-raised p-1.5 shadow-2"
+      data-testid="composer-send-menu"
+      style={{ bottom: position.bottom, right: position.right }}
+      className="fixed z-40 w-[220px] rounded-surface border border-border bg-raised p-1.5 shadow-2"
     >
       {/* Menu group-label: sentence-case label recipe (design doc §3.6). */}
       <div className="px-2 pb-1 pt-1.5 text-label font-semibold text-secondary">
@@ -210,16 +233,11 @@ function SendMenu({ label, actions, onClose }: { label: string; actions: SendMen
           </span>
         </button>
       ))}
-    </div>
+    </div>,
+    owner.body,
   );
 }
 
-/**
- * The bottom-row cluster shared by the pane composer and the spawn draft: the
- * auto-growing textarea, the mic button, the image picker, the send button,
- * the pending-image strip, and the status line. Presentational only — all
- * state lives in `useComposer`, handed in as `composer`.
- */
 export function ComposerBar({
   composer,
   placeholder,
@@ -272,6 +290,10 @@ export function ComposerBar({
   const { t } = useLocale();
   const isMobile = useIsMobile();
   const [sendMenuOpen, setSendMenuOpen] = useState(false);
+  /* Where the menu goes when it opens: measured off the send control, because
+     it renders through a portal to escape the composer box's own scroll clip. */
+  const [sendMenuPosition, setSendMenuPosition] = useState<{ bottom: number; right: number } | null>(null);
+  const sendAnchorRef = useRef<HTMLSpanElement>(null);
   /* Empty-composer history recall (issue #561). -1 is "the operator's own
      draft"; any index at or above 0 is a recalled message, and typing drops
      straight back out of recall so navigation never fights editing. */
@@ -337,10 +359,19 @@ export function ComposerBar({
       : `text-white ${sendIdleClassName}`;
   const sendControl = (
     <span
+      ref={sendAnchorRef}
       className="relative inline-flex shrink-0"
       onContextMenu={(event) => {
         if (!hasSendMenu || dictationRecording || slotActs) return;
         event.preventDefault();
+        const rect = sendAnchorRef.current?.getBoundingClientRect();
+        const view = sendAnchorRef.current?.ownerDocument.defaultView;
+        if (rect && view) {
+          setSendMenuPosition({
+            bottom: Math.max(8, view.innerHeight - rect.top + 6),
+            right: Math.max(8, view.innerWidth - rect.right),
+          });
+        }
         setSendMenuOpen((open) => !open);
       }}
     >
@@ -394,8 +425,14 @@ export function ComposerBar({
           )}
         </button>
       </Hint>
-      {sendMenuOpen && hasSendMenu && sendMenuLabel ? (
-        <SendMenu label={sendMenuLabel} actions={sendMenuActions} onClose={() => setSendMenuOpen(false)} />
+      {sendMenuOpen && hasSendMenu && sendMenuLabel && sendMenuPosition && sendAnchorRef.current ? (
+        <SendMenu
+          label={sendMenuLabel}
+          actions={sendMenuActions}
+          onClose={() => setSendMenuOpen(false)}
+          position={sendMenuPosition}
+          owner={sendAnchorRef.current.ownerDocument}
+        />
       ) : null}
     </span>
   );

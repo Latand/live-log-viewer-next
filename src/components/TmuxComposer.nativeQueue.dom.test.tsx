@@ -254,8 +254,12 @@ function press(textarea: HTMLTextAreaElement, key: string, modifiers: { altKey?:
   });
 }
 
+/* The send menu renders through a portal into the composer's own document —
+   the composer box is bounded and scrolls, and an in-flow menu was clipped by
+   it (#1629) — so its actions are looked for in the document, not under the
+   mount. */
 const menuAction = (host: HTMLElement, label: string) =>
-  [...host.querySelectorAll("button")].find((button) => button.textContent?.includes(label));
+  [...host.ownerDocument.querySelectorAll("button")].find((button) => button.textContent?.includes(label));
 
 /** The send menu opens on the send control's context menu, which is how the
     composer has always exposed its secondary submissions. */

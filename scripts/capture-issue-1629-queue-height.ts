@@ -213,6 +213,8 @@ interface ControlReading {
   /** Playwright's own actionability check: visible, stable, and the hit target
       at its centre. Run for the surface-level controls. */
   clickable: boolean;
+  /** Turned off by the composer itself — visible, and pressable by nobody. */
+  disabled?: boolean;
 }
 
 interface Reading {
@@ -331,7 +333,7 @@ const READ = () => {
     have. */
 const REACH = (selector: string) => {
   const node = document.querySelector(selector) as HTMLElement | null;
-  if (!node) return { present: false, pointer: false, keyboard: false };
+  if (!node) return { present: false, pointer: false, keyboard: false, disabled: false };
   const pane = document.querySelector("#app section")!.getBoundingClientRect();
   /* SEEN WHERE IT IS. A control smaller than the window it is in has to be
      inside the conversation whole and own the pixels at its middle. A surface
@@ -354,7 +356,11 @@ const REACH = (selector: string) => {
   const pointer = hits();
   node.focus();
   const keyboard = document.activeElement === node && hits();
-  return { present: true, pointer, keyboard };
+  /* A control the composer has deliberately turned off owes the operator only
+     the sight of it: it takes no focus and no press, by design. What it must
+     never be is invisible, which is the failure this reading is about. */
+  const disabled = (node as HTMLButtonElement).disabled === true || node.getAttribute("aria-disabled") === "true";
+  return { present: true, pointer, keyboard, disabled };
 };
 
 /** The conversation has to keep enough room to still be a conversation. */
@@ -386,7 +392,7 @@ function holds(reading: Reading, scenario: Case, controls: ControlReading[]): bo
      a queue whose Start cannot be pressed is exactly the reading that passed
      while the defect shipped. */
   const controlsUsable = controls.every((control) => control.present && control.pointer
-    && (control.readout || (control.keyboard && control.clickable)));
+    && (control.readout || control.disabled || (control.keyboard && control.clickable)));
   /* A call that is up shows a panel, however squeezed the composition is. */
   const voiceUsable = !scenario.voice || reading.voicePresent;
   if (scenario.noQueue) return composerUsable && surfacesUsable && controlsUsable && voiceUsable && !reading.panelPresent;
@@ -449,7 +455,7 @@ async function probeControls(view: Page, scenario: Case): Promise<ControlReading
       return;
     }
     const reach = await view.evaluate(REACH, selector);
-    if (readout) {
+    if (readout || reach.disabled) {
       readings.push({ id, readout, ...reach, clickable: false });
       return;
     }
@@ -473,6 +479,21 @@ async function probeControls(view: Page, scenario: Case): Promise<ControlReading
     await probe("queue first row edit", '[data-testid="native-queue-rows"] > li:first-child [data-testid="native-queue-edit"]');
     await probe("queue last row delete", '[data-testid="native-queue-rows"] > li:last-child [data-testid="native-queue-delete"]');
     if (scenario.unresolved) await probe("queue hand-off replay", '[data-testid="native-queue-unresolved-retry"]');
+  }
+  /* THE SECOND SUBMISSION'S OTHER DOOR. Alt+Enter hands the draft to Codex's
+     queue; the send menu is the same action for a pointer, and it opens upward
+     out of a box that is bounded and scrolls — so it is asked to appear whole,
+     with every action pressable, in the composition with the least room. */
+  if (!scenario.noQueue) {
+    await view.locator('button[type="submit"], button[data-mobile2-send]').first().click({ button: "right" });
+    await view.waitForTimeout(120);
+    await probe("send menu", '[data-testid="composer-send-menu"]', true);
+    const items = await view.locator('[data-testid="composer-send-menu"] [role="menuitem"]').count();
+    for (let index = 0; index < items; index += 1) {
+      await probe(`send menu action ${index + 1}`, `[data-testid="composer-send-menu"] [role="menuitem"]:nth-of-type(${index + 1})`);
+    }
+    await view.keyboard.press("Escape");
+    await view.waitForTimeout(80);
   }
   if (scenario.receipts) {
     await probe("receipt disclosure", '[data-testid="composer-receipts"] summary');
