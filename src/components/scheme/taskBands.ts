@@ -2,6 +2,7 @@ import { conversationIdentity } from "@/lib/accounts/identity";
 import type { Flow } from "@/lib/flows/types";
 import type { Pipeline } from "@/lib/pipelines/types";
 import { taskShowsOnBoard } from "@/lib/tasks/boardVisibility";
+import { deckDisclosureTerminal } from "@/components/flows/reviewDeckDisclosure";
 import type { BoardTask, TaskStatus } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
 
@@ -456,6 +457,10 @@ export const BAND = {
   mirrorH: 72,
   mirrorChipW: 220,
   minOverviewH: 72,
+  /* Board height a settled review-round deck occupies as its collapsed verdict
+     chip (RoundDeck's `h-12` plus the shell's own rounding), so a band holding
+     one hugs the chip instead of the full expanded deck box. */
+  collapsedDeckH: 56,
   /* A band is only as wide as it needs to be (#1590 follow-up). Below this it
      is unreadable — the header alone carries a title, a status pill, counts and
      two controls — and above it nothing is gained by growing further, so a band
@@ -606,6 +611,26 @@ export function layoutTaskBands(base: SchemeLayout, orderedBands: readonly TaskB
     const fit = w > maxInnerW ? maxInnerW / w : 1;
     return { w: w * fit, h: h * fit, fit };
   };
+  /* A deck, slot, draft or stack is authored in board pixels, but a band member
+     is screen-constant like the node tiles beside it: its world box is the base
+     footprint counter-scaled by `s`, and the shell renders its own content back
+     at natural size through that same `fit`. Without this the shell alone rode
+     the raw board scale, so it grew and shrank with the camera while the summary
+     tiles sharing its band held still — two coordinate systems in one row. A box
+     wider than the band shrinks further, contents included. */
+  const fittedShell = (bw: number, bh: number): { w: number; h: number; fit: number } => {
+    const overflow = bw * s > maxInnerW ? maxInnerW / (bw * s) : 1;
+    const fit = s * overflow;
+    return { w: bw * fit, h: bh * fit, fit };
+  };
+  /* A review-round deck whose flow reached its outcome renders as a one-line
+     verdict chip (its lifecycle default, RoundDeck's `deckDisclosureTerminal`).
+     The band must reserve that chip's height, not the full deck box it would
+     need expanded, or a settled review loop leaves a task frame that is almost
+     entirely empty with the cycle arcs stranded in the void below its cards. */
+  const collapsedDeckFlow = new Set(
+    base.decks.filter((deck) => deckDisclosureTerminal(deck.flow)).map((deck) => deck.key),
+  );
   let cursorY = gutter;
   for (const band of bands) {
     const items: { key: string; w: number; h: number; fit?: number; kind: "member" | "mirror" | "container" | "add"; node?: SchemeNode }[] = [];
@@ -627,7 +652,8 @@ export function layoutTaskBands(base: SchemeLayout, orderedBands: readonly TaskB
       if (mode === "overview" && member.kind !== "draft") continue;
       const rect = baseRect.get(member.key);
       if (!rect) continue;
-      const natural = fitted(rect.w, rect.h);
+      const shellH = member.kind === "deck" && collapsedDeckFlow.has(member.key) ? BAND.collapsedDeckH : rect.h;
+      const natural = fittedShell(rect.w, shellH);
       items.push({ key: member.key, w: natural.w, h: natural.h, fit: natural.fit, kind: "member" });
     }
     for (const mirror of band.mirrors) {
@@ -770,12 +796,14 @@ export function layoutTaskBands(base: SchemeLayout, orderedBands: readonly TaskB
     groups,
     byPath,
     links: base.links.filter((link) => placed.has(link.from) && placed.has(link.to)),
-    loops: base.loops.flatMap((loop) => {
-      const impl = placed.get(loop.flow.implementerPath);
-      const deck = base.decks.find((entry) => entry.flow.id === loop.flow.id);
-      const target = deck ? placed.get(deck.key) : undefined;
-      return impl && target ? [{ ...loop, x1: impl.x + impl.w, x2: target.x, y: impl.y }] : [];
-    }),
+    /* No free-board review-cycle arcs on the band surface. LoopsLayer draws its
+       forward/return arcs at fixed board-pixel offsets (LOOP_ARC_TOP/BOT,
+       REACH, BULGE) sized for the 780px pair of a spatial board; a band wraps
+       its implementer and reviewer deck into independent screen-constant rows,
+       so those arcs land nowhere near either card and read as a stranded
+       squiggle in the band's empty space. The implement↔review relationship is
+       already legible from both surfaces sharing the one task band. */
+    loops: [],
     stacks: base.stacks.flatMap((rect) => (placed.has(rect.key) ? [{ ...rect, ...placed.get(rect.key)! }] : [])),
     decks: base.decks.flatMap((rect) => (placed.has(rect.key) ? [{ ...rect, ...placed.get(rect.key)! }] : [])),
     drafts: base.drafts.flatMap((rect) => (placed.has(rect.key) ? [{ ...rect, ...placed.get(rect.key)! }] : [])),

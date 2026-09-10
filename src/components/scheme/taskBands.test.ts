@@ -537,3 +537,91 @@ test("an empty band ends at its content instead of ruling a line across the canv
     expect(available - widthOf("many")).toBeLessThan(tile + 0.001);
   }
 });
+
+/* -- Board geometry: coherent member scaling, collapsed deck, no stray arcs -- */
+
+function reviewFlow(implementerPath: string, state: "approved" | "reviewing"): import("@/lib/flows/types").Flow {
+  return {
+    id: "flow-geom",
+    template: "implement-review-loop",
+    project: "fixture",
+    cwd: "/repo",
+    implementerPath,
+    roles: { implementer: { engine: "claude", model: "opus", effort: "high" }, reviewer: { engine: "claude", model: "opus", effort: "high" } },
+    baseRef: "0".repeat(40),
+    baseMode: "head",
+    mode: "auto",
+    reviewerMode: "headless",
+    roundLimit: 5,
+    state,
+    stateDetail: null,
+    rounds: [{ n: 1, reviewerPath: "/fixture/reviewer", verdict: state === "approved" ? "APPROVE" : null, findingsCount: state === "approved" ? 2 : null, findingsPath: null, triggeredBy: "marker", readyNote: null, startedAt: "2026-01-01T00:00:00Z", reviewedAt: null, relayedAt: null, error: null } as import("@/lib/flows/types").Round],
+    createdAt: "2026-01-01T00:00:00Z",
+    closedAt: null,
+  } as import("@/lib/flows/types").Flow;
+}
+
+/** A base layout carrying one node and one review deck, plus a hand-built band
+    that holds both as members — the shape `layoutTaskBands` places. */
+function deckScene(flowState: "approved" | "reviewing") {
+  const node = file(0, "busy");
+  const layout = base([node]);
+  const flow = reviewFlow(node.path, flowState);
+  const deckKey = "deck::flow-geom";
+  layout.decks = [{ key: deckKey, flow, rounds: [], x: 700, y: 100, w: 600, h: 810 }] as SchemeLayout["decks"];
+  layout.loops = [{ key: "loop::flow-geom", flow, x1: 600, x2: 700, y: 100 }] as SchemeLayout["loops"];
+  layout.byPath.set(deckKey, layout.decks[0]!);
+  const band: TaskBand = {
+    id: "task:geom", origin: "task", task: task("geom", "2026-01-01T00:00:00Z", [node]), pipeline: null, flow: null,
+    title: "Geometry", status: "assigned", hue: 0,
+    members: [{ key: node.path, kind: "node", file: node }, { key: deckKey, kind: "deck", file: null }],
+    mirrors: [], groups: [], working: 1, unknown: 0, conversations: 1, planned: 0, pinnedTop: false, createdAt: "2026-01-01T00:00:00Z",
+  };
+  return { layout, band, deckKey, nodePath: node.path };
+}
+
+test("a settled review deck reserves its collapsed chip height, not the full expanded box (#1641)", () => {
+  const { layout, band, deckKey } = deckScene("approved");
+  const scene = layoutTaskBands(layout, [band], { zoom: 1, mode: "near", viewportWidth: 1440, reader: null });
+  const deck = scene.layout.byPath.get(deckKey)!;
+  /* At 1:1 the world unit is a CSS pixel, so the reserved box is the collapsed
+     chip (BAND.collapsedDeckH), an order of magnitude short of the 810px it
+     would need expanded — the giant empty task frame in the report. */
+  expect(deck.h).toBeLessThanOrEqual(BAND.collapsedDeckH + 1);
+  /* An actionable deck still reserves its working height. */
+  const live = layoutTaskBands(deckScene("reviewing").layout, [deckScene("reviewing").band], { zoom: 1, mode: "near", viewportWidth: 1440, reader: null });
+  expect(live.layout.byPath.get(deckKey)!.h).toBeGreaterThan(400);
+});
+
+test("every band surface is screen-constant: a deck scales by the same law as the node tiles beside it (#1641)", () => {
+  const { layout, band, deckKey, nodePath } = deckScene("reviewing");
+  const at = (zoom: number) => {
+    const scene = layoutTaskBands(layout, [band], { zoom, mode: "near", viewportWidth: 1440, reader: null });
+    return { deck: scene.layout.byPath.get(deckKey)!, node: scene.layout.byPath.get(nodePath)! };
+  };
+  const one = at(1);
+  const half = at(0.5);
+  /* World size scales as 1/zoom, so the on-screen size (world × zoom) holds
+     constant. The regression had the deck ride the raw board scale (screen size
+     halving with the camera) while the summary tiles stayed put. */
+  const screen = (rect: { w: number; h: number }, zoom: number) => ({ w: rect.w * zoom, h: rect.h * zoom });
+  const deckScreen1 = screen(one.deck, 1);
+  const deckScreenHalf = screen(half.deck, 0.5);
+  const nodeScreen1 = screen(one.node, 1);
+  const nodeScreenHalf = screen(half.node, 0.5);
+  expect(deckScreenHalf.w).toBeCloseTo(deckScreen1.w, 1);
+  expect(nodeScreenHalf.w).toBeCloseTo(nodeScreen1.w, 1);
+  /* One law, not two: the deck's on-screen width equals what the same shrink
+     applied to the node tile gives (both constant across the zoom change). */
+  expect(deckScreenHalf.w / deckScreen1.w).toBeCloseTo(nodeScreenHalf.w / nodeScreen1.w, 2);
+});
+
+test("the band surface draws no free-board review-cycle arcs (#1641)", () => {
+  const { layout, band } = deckScene("reviewing");
+  expect(layout.loops.length).toBe(1);
+  const scene = layoutTaskBands(layout, [band], { zoom: 0.4, mode: "intermediate", viewportWidth: 1440, reader: null });
+  /* The fixed-offset forward/return arcs land nowhere near the band's wrapped,
+     counter-scaled cards; the band emits none, so no squiggle strands in the
+     empty space below its content. */
+  expect(scene.layout.loops).toEqual([]);
+});

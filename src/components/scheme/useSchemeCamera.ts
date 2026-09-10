@@ -758,8 +758,13 @@ export function useSchemeCamera({
   }, [focus, project, layout, taskRects, cam, vp, centerOn, alignX]);
 
   /* Wheel: plain — pan (shift turns it horizontal); ctrl/cmd (and trackpad
-     pinch) — zoom at the cursor. In select mode a wheel over a scrollable
-     feed keeps native scrolling. */
+     pinch) — zoom at the cursor. The only surface that keeps the wheel for
+     itself is a scroll container under the pointer with content to scroll —
+     the open conversation reader's feed, or a scrollable panel floating over
+     the board. Everything else pans, so a wheel over the task background, a
+     band's header controls, «+ Agent», a mirror tile or a collapsed agent card
+     moves the board instead of being swallowed by a control that cannot use it
+     (#1641). */
   useEffect(() => {
     const el = viewportRef.current;
     if (!el) return;
@@ -769,8 +774,20 @@ export function useSchemeCamera({
       if (wheelSettle.current) window.clearTimeout(wheelSettle.current);
       wheelSettle.current = window.setTimeout(() => setManualNonce((n) => n + 1), 250);
     };
+    /* The nearest ancestor between the target and the viewport that can consume
+       vertical wheel: overflowing content in an auto/scroll box. Interactive
+       chrome that does not scroll (a button, a status pill, a card that is not
+       an open reader) returns nothing, so the board pans over it. */
+    const scrollableAncestor = (target: HTMLElement | null): HTMLElement | null => {
+      for (let node = target; node && node !== el; node = node.parentElement) {
+        if (node.scrollHeight > node.clientHeight + 1) {
+          const overflowY = getComputedStyle(node).overflowY;
+          if (overflowY === "auto" || overflowY === "scroll") return node;
+        }
+      }
+      return null;
+    };
     const onWheel = (event: WheelEvent) => {
-      if ((event.target as HTMLElement).closest("[data-scheme-ui]")) return;
       const rect = el.getBoundingClientRect();
       if (event.ctrlKey || event.metaKey) {
         event.preventDefault();
@@ -778,14 +795,8 @@ export function useSchemeCamera({
         armSettle();
         return;
       }
-      if (modeRef.current === "select" && !spaceRef.current) {
-        for (let node = event.target as HTMLElement | null; node && node !== el; node = node.parentElement) {
-          if (node.scrollHeight > node.clientHeight + 1) {
-            const overflowY = getComputedStyle(node).overflowY;
-            if (overflowY === "auto" || overflowY === "scroll") return;
-          }
-        }
-      }
+      /* A held Space is an explicit hand-pan and overrides even a feed. */
+      if (!spaceRef.current && scrollableAncestor(event.target as HTMLElement | null)) return;
       event.preventDefault();
       const dx = event.shiftKey && !event.deltaX ? event.deltaY : event.deltaX;
       const dy = event.shiftKey && !event.deltaX ? 0 : event.deltaY;
