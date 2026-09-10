@@ -1840,8 +1840,10 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
      controls — a call to hang up, a queue to start, a send to retry, a receipt
      to settle — so each counts once, and one that goes away hands its room
      straight back to the draft. */
+  const hasPayloadRecovery = payloadRows.length > 0 || payloadStorageError !== null
+    || pendingDeliveries.current.some(entry => entry.payloadComplete === false);
   const renderedAccessorySurfaces = (callPanelDocked ? 1 : 0) + (queuePanelRendered ? 1 : 0)
-    + (sent.length || echoedReceipts.length ? 1 : 0) + (displayedRuntimeReceipts.length ? 1 : 0);
+    + (sent.length || echoedReceipts.length ? 1 : 0) + (hasPayloadRecovery || displayedRuntimeReceipts.length ? 1 : 0);
   useEffect(() => {
     setAccessorySurfaces(renderedAccessorySurfaces);
   }, [renderedAccessorySurfaces]);
@@ -3416,7 +3418,7 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
     </div>
   ) : null;
 
-  const payloadRecovery = payloadRows.length || payloadStorageError || pendingDeliveries.current.some(entry => entry.payloadComplete === false) ? (
+  const payloadRecovery = hasPayloadRecovery ? (
     <section data-testid="composer-payload-recovery" className="flex flex-col gap-2 text-caption" aria-label={t("composer.payloadRecovery")}>
       {payloadStorageError ? <p role="alert">{payloadStorageError}</p> : null}
       {payloadRows.map(row => {

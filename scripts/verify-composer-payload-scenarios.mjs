@@ -51,9 +51,15 @@ try{
  await wireQuota.locator('textarea').press('Enter');await wireQuota.getByText('Could not save the complete message.',{exact:false}).first().waitFor();
  results.wireQuota=await wireQuota.evaluate(()=>({requests:window.payloadFixture.requests.length,text:document.querySelector('textarea').value,tiles:document.querySelectorAll('[data-testid="attachment-tile"]').length}));
  assert(results.wireQuota.requests===0&&results.wireQuota.tiles===5&&results.wireQuota.text==='Keep draft if envelope storage fails','Second-phase quota lost draft or sent');
- await wireQuota.locator('[data-payload-key] summary').click();
+ await wireQuota.setViewportSize({width:650,height:550});
+ await wireQuota.evaluate(()=>{const app=document.querySelector('#app');app.style.width='600px';app.style.height='500px';app.style.margin='0';});
+ const laterDraft=Array.from({length:20},(_,i)=>`New draft line ${i}`).join('\n');
+ await wireQuota.locator('textarea').fill(laterDraft);
+ await wireQuota.screenshot({path:path.join(out,'compact-wire-quota.png')});
+ await wireQuota.locator('[data-payload-key] summary').click({timeout:3000});
  await wireQuota.getByText('Discard unsent copy',{exact:true}).click();await wireQuota.waitForFunction(async()=>!(await window.payloadFixture.saved()).length);
- results.wireQuota.explicitPreparationDiscard=true;await wireQuota.close();
+ assert(await wireQuota.locator('textarea').inputValue()===laterDraft,'Discarded copy cleared a later draft');
+ results.wireQuota.compactRecoveryReachable=true;results.wireQuota.explicitPreparationDiscard=true;await wireQuota.close();
 
  const denied=await context.newPage();denied.setDefaultTimeout(15000);
  await denied.addInitScript(()=>Object.defineProperty(window,'indexedDB',{value:undefined,configurable:true}));
