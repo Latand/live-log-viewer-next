@@ -202,7 +202,7 @@ export function readRetainedQueueAdmissions(id: string): RetainedQueueAdmission[
 }
 
 /**
- * Commit the slot, records and unreadable entries alike.
+ * Commit the slot: this build's records and the entries it cannot read, together.
  *
  * Returns false when the browser refused to store it — quota, or an origin with
  * no session storage. The caller treats that as a refusal for a NEW operation,
@@ -229,6 +229,12 @@ function writeRetainedStore(id: string, store: RetainedStore): boolean {
  * operation is refused when the slot is full, unreadable, or will not take the
  * write — every case where accepting it would mean sending something this
  * browser could not name afterwards.
+ *
+ * Entries this build cannot read count against the bound, because each of them
+ * may name a live operation too. A slot filled entirely with them refuses
+ * everything until the build that wrote them settles them; `sessionStorage` is
+ * per tab, so a new tab is the operator's way out, and refusing is the right
+ * side to fail on when the alternative is sending under a forgotten key.
  */
 export function retainQueueAdmission(id: string, record: RetainedQueueAdmission): RetainOutcome {
   const store = readRetainedStore(id);
@@ -249,14 +255,6 @@ export function releaseQueueAdmission(id: string, key: string): void {
   const store = readRetainedStore(id);
   if (store.unreadable) return;
   writeRetainedStore(id, { ...store, records: store.records.filter((entry) => entry.key !== key) });
-}
-
-/** How many more unresolved operations this card can take, so a caller can say
-    why it is refusing before the operator presses anything. */
-export function retainedQueueAdmissionRoom(id: string): number {
-  const store = readRetainedStore(id);
-  if (store.unreadable) return 0;
-  return Math.max(0, MAX_RETAINED_ADMISSIONS_PER_CARD - store.records.length - store.opaque.length);
 }
 
 /** Test seam: the mirror is module-scoped, so a suite must be able to start
