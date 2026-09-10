@@ -29,41 +29,78 @@ after the microphone closed.
 The probe establishes each half separately, on a thread carrying a synthetic
 developer role/tool mandate:
 
-- the mandate reaches the backing model, and does **not** reach the spoken
-  session, whose instructions are the stock 5.7 kB persona;
-- supplying `prompt` replaces those instructions;
+- supplying `prompt` replaces the spoken session's stock 5.7 kB instructions;
 - the spoken session body carries `instructions`, `model`, `audio` and
   `delegation` — and no tool list, in either case;
 - `prompt`, `realtimeStartInstructions`, `realtimeEndInstructions` and
   `flushTranscriptTailOnSessionEnd` are deserialized, while an unknown field is
   accepted silently — so "the call succeeded" proves nothing about a parameter
-  and the ill-typed control is what proves it is in the contract;
-- none of the three session-scoped strings is written to canonical history,
-  while an injected item is.
+  and the ill-typed control is what proves it is in the contract.
+
+**Two claims this document used to make, and a fuller probe corrected.** A later
+credential-free run drove a complete successful session: an ordinary
+USER-delivered mandate turn, a live call, overlapping handoffs, a stop and
+reconnect, and a later text turn, over twelve real requests.
+
+- A mandate the thread carries as a **user** turn DOES reach the spoken session's
+  startup context, and the advertised tool inventory was identical before, during
+  and after the call. The earlier reading came from a failed call whose marker was
+  delivered as a developer item, which is not the shape a Viewer mandate arrives
+  in. A generic spoken identity is therefore not by itself the whole cause of the
+  reported role loss — the native app's own fallback spoken prompt uses the same
+  general-purpose Codex identity, and works, because it also carries functional
+  delegation and steering rules. Those rules are what the Viewer's persona now
+  adapts.
+- Native **does** write the session-scoped instructions to canonical history, as
+  developer items, and the end instruction does not remove the start text: both
+  are present in later request history. So the pair is a native-managed mode
+  transition rather than a withdrawal, and the end instruction says in words that
+  the earlier one no longer applies.
 
 **What the Viewer sends now.** The persona is the session's `prompt`; the
 role-preserving framing (and, for a session created to be the voice front, the
 relay mandate) is the backing model's `realtimeStartInstructions`; hanging up
-withdraws it with `realtimeEndInstructions`. `flushTranscriptTailOnSessionEnd`
-is set, so the last thing said before a hangup is routed through Codex rather
-than dropped. Nothing is written to the thread.
+sends `realtimeEndInstructions`, which supersedes it.
+`flushTranscriptTailOnSessionEnd` is set, so the last thing said before a hangup
+is routed through Codex rather than dropped. The Viewer itself writes nothing to
+the thread.
 
-**Where a spoken card is allowed to steer work.** The reference the operator's
-screen carried reaches a tool only while it describes the work in hand: it
-becomes readable once its utterance has been handed off, and stops the moment
-the operator speaks again. The association between an utterance and its handoff
-is a fact in exactly one arrangement — one utterance outstanding, one handoff
-arriving — because the transcript boundary and the handoff event share no
-identifier on the wire. With two outstanding, the browser reports nothing rather
-than guess, and every read then refuses by name. An accepted join survives a
-hangup, because the work the last utterance started does; it expires with the
-reference's own freshness window and a new call replaces it.
+**Where a spoken card is allowed to steer work.** A tool call gets the card the
+operator was looking at only when the ledger can show that card belongs to THAT
+CALLER'S OWN BACKING WORK. Two edges have to hold, and each has its own evidence:
 
-Closing the ambiguity properly needs an identifier shared by the user transcript
-event and the handoff. The native events carry `user_bidi_turn_id`; whether the
-user transcript event carries it too has not been established, and cannot be
-without a live capture. Until it is, the correlation stays non-actionable in the
-ambiguous case rather than being resolved by recency.
+- utterance to handoff, which the browser owns, because it is the only peer that
+  sees both the transcript boundary and the handoff event. They share no
+  identifier on the wire, so the association is a fact in exactly one
+  arrangement: one utterance outstanding, one handoff arriving for the first
+  time. Anything else — two outstanding, or a canonical identity this call has
+  already reported — is published as an **ambiguity**, and it stands for the rest
+  of the call, because every unattributed utterance may still produce a handoff.
+- handoff to work, which the request itself supplies. Installed Codex carries its
+  backing turn identity on every MCP request in
+  `params._meta["x-codex-turn-metadata"]`, so the reader answers about one turn
+  rather than about the conversation. A turn that has claimed a card keeps it
+  through anything; a turn that has claimed none may claim one only when exactly
+  one unclaimed join exists and nothing is ambiguous; and a turn native did not
+  start from the call — no `turn_trigger` — never claims anything, which is what
+  keeps a later typed request from inheriting the call's card.
+
+An accepted join survives a hangup, because the work the last utterance started
+does. It is retired by the host saying that turn finished, or by the thread going
+idle after the join for a spoken turn no tool call ever claimed. No clock is
+involved: the earlier ten-minute window both discarded work that was still
+running and left a finished call's card available to unrelated turns.
+
+The full evidence, its limits, and what a future authorized live capture would
+have to record are in `docs/design/native-voice-work-identity.md`.
+
+**The canonical transcript reaches the browser.** `thread/realtime/transcript/*`
+and `thread/realtime/item/*` are reduced into runtime events, carried over the
+runtime bus with every other session event, and merged into the panel beside what
+the WebRTC data channel delivered. A segment is addressed by native's own item id
+where there is one, so a redelivered frame, a `done` completing its own deltas
+and a replay after reconnect converge on one line; a line the data channel
+already streamed is adopted by the committed text rather than duplicated.
 
 **What this does not establish.** No live provider call was made for any of it.
 The probe proves what leaves the app-server and what the app-server persists; it

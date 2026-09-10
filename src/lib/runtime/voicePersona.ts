@@ -29,11 +29,29 @@ import { configFilePath } from "@/lib/configDir";
  * thread.
  *
  * Verified against the installed app-server, credential-free, in
- * `docs/design/codex-api-update/voice_probe.py`: an incumbent thread carrying a
- * durable developer role/tool mandate reaches the backing model and does NOT
- * reach the spoken session, whose instructions are the stock persona; supplying
- * `prompt` replaces those instructions, and neither `prompt` nor either
- * instruction string is written to canonical history.
+ * `docs/design/codex-api-update/voice_probe.py`: supplying `prompt` replaces the
+ * spoken session's stock instructions.
+ *
+ * WHAT A LATER, SUCCESSFUL SESSION CORRECTED. A fuller local probe — an ordinary
+ * USER-delivered mandate turn, a live call, overlapping handoffs, a reconnect and
+ * a later text turn — showed two earlier claims to be wrong, and the code and the
+ * pull request both used to repeat them:
+ *
+ * - A mandate a thread carries as a USER turn DOES reach the spoken session's
+ *   startup context, and the advertised tool inventory was identical before,
+ *   during and after the call. The failed-call probe that suggested otherwise
+ *   delivered its marker as a developer item, which is not the shape a Viewer
+ *   mandate arrives in. A generic spoken identity is therefore not by itself the
+ *   whole cause of the reported role loss.
+ * - Native writes the start instruction into canonical history as a developer
+ *   item, and the end instruction as ANOTHER one. The end does not remove the
+ *   start text: both remain in later request history. So this pair is a
+ *   native-managed mode transition, not a withdrawal — which is why the end text
+ *   below restores the thread's own policy in its own words rather than relying
+ *   on the start text disappearing.
+ *
+ * Neither probe used a real provider, so nothing here is evidence about spoken
+ * audio quality or how a live model behaves.
  */
 
 /**
@@ -149,6 +167,10 @@ You are the only voice the user hears, and you do not touch the board yourself. 
 
 Never say you cannot do something. Pass it to the agent behind you and let it answer.
 
+What it sends back is authoritative. Do not override it, contradict it or improve on it.
+
+Work already running stays open to change: a correction or a new instruction goes straight through while it is working, and nothing under way is ever described to the user as impossible to redirect.
+
 Answers, questions and blockers arrive on their own. Say what matters out loud in your own words. Do not read identifiers, do not read a report verbatim, and do not narrate the plumbing.
 
 A deploy needs the user's spoken yes. Put the question plainly and pass their answer back exactly as they gave it; anything other than a clear yes is a no.
@@ -168,13 +190,28 @@ Stay silent until you are spoken to: this text is context, and there is nothing 
  * text exists to prevent is the spoken model answering FOR it: Codex's stock
  * realtime persona introduces itself as a general-purpose assistant, so left to
  * itself it chats, guesses, and tells the operator it has no tools.
+ *
+ * THREE RULES ARE THE NATIVE APP'S, ADAPTED. Its own fallback spoken prompt is
+ * built on the same split — a conversational surface in front of an executing
+ * backend — and three of its operating rules are what make the arrangement work
+ * rather than merely describe it: never refuse, always delegate; treat what the
+ * backend sends back as authoritative; and keep running work steerable, never
+ * telling the user that something under way cannot be redirected. They are
+ * restated here in this persona's own register. What is NOT adopted is that
+ * prompt's identity and its instruction to conceal the arrangement: this
+ * conversation already has a role, and concealment is not a spoken-delivery
+ * rule.
  */
 const MODALITY_SPOKEN_WORK = `
 You are the voice of the agent in this conversation. You speak as it. It already has its own instructions, its own authority and its own tools, and all of that stands while you speak.
 
 So do not answer from your own knowledge and do not decide anything on your own. Every request, correction and question the user speaks goes to that agent, and what you say aloud is what came back.
 
-Never say that you have no tools, no access or no permission. You do not know what it can reach; it does. Pass the request on and let it answer.
+Never refuse and never say that you have no tools, no access or no permission. You do not know what it can reach; it does. Pass the request on and let it decide what is possible.
+
+What that agent sends back is authoritative. Do not override it, contradict it or improve on it — say what it said, in your own spoken words.
+
+Work already running stays open to change. A correction, a new constraint or a fresh instruction goes straight through while it is working; never tell the user that something under way cannot be redirected or stopped.
 
 Do not describe yourself as a separate assistant, a front end or a relay, and do not talk about the agent in the third person. To the user there is one participant in this conversation, and you are how it speaks.
 
@@ -209,12 +246,14 @@ ${MODALITY_SPOKEN_WORK}`;
  * the call ends (#1629).
  *
  * Native Codex hands its backing model exactly this pair, and the pairing is the
- * point: the start text is scoped to the session and the end text withdraws it,
- * so a call leaves the thread's own instructions standing instead of a permanent
- * layer of spoken-delivery rules. The Viewer used to write that layer into
- * canonical history with `thread/inject_items`, once per thread, never withdrawn
- * — which is why a conversation kept answering in two-sentence spoken register
- * long after the microphone closed.
+ * point: the start text frames the session and the end text states plainly that
+ * the framing is over. Both are recorded by native as canonical developer items
+ * and BOTH REMAIN IN HISTORY — the end does not delete the start — so the end
+ * text has to restore the thread's own output policy in words rather than lean
+ * on the start text going away. The Viewer used to write its own layer with
+ * `thread/inject_items`, once per thread, with nothing to close it at all, which
+ * is why a conversation kept answering in two-sentence spoken register long
+ * after the microphone closed.
  *
  * FAILS TOWARD THE THREAD'S OWN ROLE. Neither string assigns a role, and the
  * modality one says so in as many words: it has to outrank a coordinator item a
@@ -251,10 +290,12 @@ A deploy needs the user's spoken yes. The manager sends the exact commit and a o
 
 Your answers are spoken aloud while this call is live, so keep them short and plain: no markup, no lists read out, no identifiers or numbers spoken digit by digit.`;
 
-/** Withdrawn at hangup, so the thread returns to being a text agent. Shared by
+/** Delivered at hangup, so the thread returns to being a text agent. Shared by
     both variants: neither of them assigned a role, so neither has one to
-    restore — what has to be restored is the output policy. */
-const BACKING_END_WORK = `Realtime voice has ended. Resume this conversation's original instructions, role, authority, permissions, tools, ongoing work and normal text-output policy. The spoken-delivery rules applied only while the call was live; write as you always have.`;
+    restore — what has to be restored is the output policy. It says so
+    explicitly, because native keeps the start instruction in history rather than
+    removing it, so the closing text is what supersedes it. */
+const BACKING_END_WORK = `Realtime voice has ended. The realtime voice instructions earlier in this conversation no longer apply; this message supersedes them. Resume this conversation's original instructions, role, authority, permissions, tools, ongoing work and normal text-output policy. The spoken-delivery rules applied only while the call was live; write as you always have.`;
 
 /** Operator override, resolved per call; edits apply to the next call. */
 export const VOICE_PERSONA_FILE = "prompts/voice-persona.md";
@@ -319,13 +360,14 @@ export function resetVoicePersonaOverrideWarningForTest(): void {
 /**
  * What a live call carries, resolved once per start (#1629).
  *
- * Three strings and an identity, and no write to the thread anywhere in it. The
- * `prompt` instructs the spoken model, the two instruction strings frame the
- * session for the backing model and withdraw that framing at hangup, and
- * `personaId` is a digest of the exact text sent — evidence of WHICH persona a
- * live call is running on, which is what the voice panel and the regression
- * tests need and all they need. It is deliberately not an idempotency receipt:
- * there is no longer anything durable to be idempotent about.
+ * Three strings and an identity, and the Viewer writes nothing to the thread
+ * itself. The `prompt` instructs the spoken model; the two instruction strings
+ * frame the session for the backing model and then close that framing at hangup
+ * — native records both of them as canonical developer items and keeps both, so
+ * the second supersedes the first in words rather than deleting it. `personaId`
+ * is a digest of the exact text sent: evidence of WHICH persona a live call is
+ * running on, which is what the voice panel and the regression tests need and
+ * all they need. It is deliberately not an idempotency receipt.
  */
 export interface VoiceSessionPersona {
   variant: VoicePersonaVariant;

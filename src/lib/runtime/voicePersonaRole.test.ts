@@ -243,14 +243,33 @@ test("a session persona carries the spoken prompt and the backing pair, and noth
   ]);
 });
 
-test("the end instructions withdraw the spoken register the start instructions imposed", () => {
+test("the end instructions supersede the spoken register the start instructions imposed", () => {
   /* The pairing is what keeps a text agent from inheriting spoken-delivery rules
-     for the rest of its life, which is what a permanent injected item did. */
+     for the rest of its life, which is what a permanent injected item did.
+     Native keeps BOTH as canonical developer items, so the closing text has to
+     say in words that the earlier one no longer applies — it cannot rely on the
+     start text being removed, which the successful-session probe showed it is
+     not. */
   for (const variant of ["modality", "coordinator"] as const) {
     const persona = voiceSessionPersona(variant);
     expect(persona.startInstructions).toMatch(/spoken aloud while this call is live/i);
+    expect(persona.endInstructions).toMatch(/no longer apply; this message supersedes them/i);
     expect(persona.endInstructions).toMatch(/only while the call was live/i);
   }
+});
+
+test("the spoken persona carries native's own operating rules for a backend it fronts", () => {
+  /* Adapted from the native app's fallback spoken prompt: never refuse, always
+     delegate; backend output is authoritative; running work stays steerable.
+     Its identity and its instruction to conceal the arrangement are deliberately
+     not adopted — this conversation already has a role. */
+  for (const persona of [MODALITY_VOICE_PERSONA, COORDINATOR_VOICE_PERSONA]) {
+    expect(persona).toMatch(/authoritative/i);
+    expect(persona).toMatch(/stays open to change/i);
+    expect(persona).toMatch(/redirect/i);
+  }
+  expect(MODALITY_VOICE_PERSONA).toMatch(/Never refuse/i);
+  expect(COORDINATOR_VOICE_PERSONA).toMatch(/Never say you cannot do something/i);
 });
 
 /* ------------------------------------------------------------------ *

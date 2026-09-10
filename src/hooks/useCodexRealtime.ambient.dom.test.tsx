@@ -67,6 +67,7 @@ const IDLE: CodexRealtimeSnapshot = {
   phase: "idle",
   lines: [],
   error: null,
+  agentUnavailable: null,
   startedAt: null,
   micMuted: false,
   outputMuted: false,
@@ -101,6 +102,8 @@ function fakeClient() {
       stop: async () => undefined,
       updateWorkerProgress: () => undefined,
       reconcileWorkerDeliveries: () => undefined,
+      reconcileCanonicalTranscript: () => undefined,
+      reportBackingHost: () => undefined,
       onDeliveryAcknowledged: () => () => undefined,
       realtimeSession: () => null,
       push(patch: Partial<CodexRealtimeSnapshot>) {

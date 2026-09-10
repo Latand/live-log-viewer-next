@@ -70,6 +70,8 @@ export interface VoicePipClient {
     error: string | null;
     startedAt: number | null;
     notice: string | null;
+    /** #1629: why the agent behind the call cannot be reached, or null. */
+    agentUnavailable: string | null;
     micMuted: boolean;
     outputMuted: boolean;
   };
@@ -172,6 +174,7 @@ export function VoicePipHost({ mobile, resolveClient = codexRealtimeClient }: Vo
       lines={snapshot.lines}
       error={snapshot.error}
       notice={snapshot.notice}
+      agentUnavailable={snapshot.agentUnavailable}
       startedAt={snapshot.startedAt}
       /* Read at render time from the one client: the stream is not duplicated,
          it is the same MediaStream object the call owns. */
@@ -232,6 +235,7 @@ const IDLE = {
   lines: [] as const,
   error: null,
   notice: null,
+  agentUnavailable: null,
   startedAt: null,
   micMuted: false,
   outputMuted: false,

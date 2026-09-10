@@ -292,3 +292,48 @@ test("a failed call reports the failure rather than a stale warning", () => {
   expect(host.querySelector('[role="alert"]')?.textContent).toContain("reached your usage limit");
   flushSync(() => root.unmount());
 });
+
+test("a live call whose agent is gone says so rather than looking healthy", () => {
+  /* #1629. The WebRTC leg runs to the provider, so an interrupted or replaced
+     backing host leaves the transport perfectly alive. The panel used to read
+     `live` throughout, and a worker answer that failed to deliver was swallowed
+     in silence — the operator kept talking to a call that reached nothing. */
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  flushSync(() => root.render(
+    <VoiceConversationPanel
+      phase="live"
+      error={null}
+      agentUnavailable="the agent behind this call is no longer running, so nothing said here reaches it"
+      lines={[{ id: "u", role: "user", text: "Inspect the board", final: true }]}
+      t={t}
+    />,
+  ));
+
+  const row = host.querySelector('[data-testid="voice-agent-unavailable"]');
+  expect(row?.textContent).toContain("no longer running");
+  expect(row?.getAttribute("role")).toBe("status");
+  flushSync(() => root.unmount());
+});
+
+test("a failed call reports the transport reason alone, without a second verdict", () => {
+  /* The two rows answer different questions and must never stack: a call that
+     has ended has an error to show and no agent link left to describe. */
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  flushSync(() => root.render(
+    <VoiceConversationPanel
+      phase="error"
+      error="AVAS route unavailable"
+      agentUnavailable="the agent behind this call is no longer running"
+      lines={[]}
+      t={t}
+    />,
+  ));
+
+  expect(host.querySelector('[data-testid="voice-agent-unavailable"]')).toBeNull();
+  expect(host.textContent).toContain("AVAS route unavailable");
+  flushSync(() => root.unmount());
+});
