@@ -9,15 +9,8 @@ import type { FileEntry } from "@/lib/types";
 import type { RuntimeSessionView } from "@/hooks/useRuntime";
 import type { HostAxis, HostKind } from "@/components/runtime/runtimeModel";
 
-/* Integration/action coverage for the container's real wiring (issue #241
-   findings 1, 2 & 7): a running Claude *subagent* pane whose transcript is
-   scanner-shaped — proc:null, pid:null, because the root process writes the
-   child transcript (src/lib/scanner/transcripts.ts). The strip's liveness comes
-   from the canonical ROOT host, and its ROUTING follows the root's kind:
-   - a live claude-broker (structured) root → Stop relays to the root's
-     structured interrupt (/api/runtime/interrupt), Kill/images disabled, and
-     zero /api/tmux + /api/proc requests fire.
-   - a live tmux-legacy root → Stop keeps the canonical /api/tmux child path. */
+/* Actual strip activation with injected runtime views and inert endpoints.
+   Shared-root interrupt remains explicit; all transports use current-owner routing. */
 
 const dom = new Window();
 installActEnv();
@@ -69,6 +62,7 @@ let sessionView: RuntimeSessionView | null = null;
 const actual = await import("@/hooks/useRuntime");
 mock.module("@/hooks/useRuntime", () => ({
   ...actual,
+  useRuntimeEnabled: () => planeEnabled,
   useRuntime: () => ({ enabled: planeEnabled, connection: planeEnabled ? "live" : "offline", resyncedAt: null, store: {} }),
   useRuntimeSession: () => sessionView,
   useRuntimeSessionByArtifact: (path: string | null) => (planeEnabled && path === "/root.jsonl" ? rootView(rootKind, rootAxis) : null),
@@ -176,7 +170,7 @@ test("the width observer attaches when the strip mounts late (gated → live roo
   await act(async () => root.unmount());
 });
 
-test("Stop on a structured-root subagent relays to the root's structured interrupt — zero /api/tmux, /api/proc", async () => {
+test("Interrupt on a structured-root subagent names the root through the common route", async () => {
   const calls: { url: string; body: unknown }[] = [];
   stubFetch((url: string, init?: RequestInit) => {
     calls.push({ url: String(url), body: init?.body ? JSON.parse(String(init.body)) : undefined });
@@ -191,7 +185,7 @@ test("Stop on a structured-root subagent relays to the root's structured interru
   });
 
   // exactly one root structured interrupt, carrying the ROOT conversationId
-  const interrupts = calls.filter((c) => c.url.includes("/api/runtime/interrupt"));
+  const interrupts = calls.filter((c) => c.url.includes("/api/conversation-host"));
   expect(interrupts.length).toBe(1);
   expect((interrupts[0]!.body as { conversationId?: string }).conversationId).toBe("conv-root");
   // never the legacy routes for a structured root
@@ -200,7 +194,7 @@ test("Stop on a structured-root subagent relays to the root's structured interru
   await act(async () => root.unmount());
 });
 
-test("Stop on a live TMUX-root subagent keeps the canonical /api/tmux child path", async () => {
+test("Interrupt on a legacy-root subagent keeps the canonical child path", async () => {
   rootKind = "tmux-legacy";
   const calls: { url: string; body: unknown }[] = [];
   stubFetch((url: string, init?: RequestInit) => {
@@ -216,9 +210,9 @@ test("Stop on a live TMUX-root subagent keeps the canonical /api/tmux child path
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
 
-  const interrupts = calls.filter((c) => c.url.includes("/api/tmux"));
+  const interrupts = calls.filter((c) => c.url.includes("/api/conversation-host"));
   expect(interrupts.length).toBe(1);
-  expect(interrupts[0]!.body).toEqual({ action: "interrupt", path: "/child.jsonl" });
+  expect(interrupts[0]!.body).toMatchObject({ action: "interrupt", path: "/child.jsonl", operationId: expect.any(String) });
   expect(calls.some((c) => c.url.includes("/api/runtime/interrupt"))).toBe(false);
   await act(async () => root.unmount());
 });

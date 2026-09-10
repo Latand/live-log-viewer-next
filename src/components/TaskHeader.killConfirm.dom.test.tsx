@@ -109,7 +109,7 @@ test("a refused SIGTERM keeps the row armed, with SIGKILL one press away (#699/#
     return { ok: true, status: 200, json: async () => ({ ok: false, error: "no such process" }) } as unknown as Response;
   }) as unknown as typeof fetch;
   try {
-    const host = openConfirm(runningFile("Rebuild the pipeline registry projection"));
+    const host = openConfirm({ ...runningFile("Rebuild the pipeline registry projection"), engine: "shell" });
     const yes = [...host.querySelectorAll("button")].find((node) => node.textContent === en["common.yes"]);
     expect(yes).toBeTruthy();
     flushSync(() => { yes!.click(); });
@@ -143,7 +143,7 @@ test("an accepted kill collapses the armed row", async () => {
     await settle();
 
     expect(host.textContent).not.toContain("Stop Rebuild the pipeline registry projection?");
-    expect(host.textContent).toContain("SIGTERM");
+    expect(host.textContent).toContain(en["task.hostStopped"]);
   } finally {
     globalThis.fetch = original;
   }
