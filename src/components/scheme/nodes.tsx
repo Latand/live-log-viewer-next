@@ -346,6 +346,7 @@ const RAIL_CLEARANCE = 10;
 export const AgentLinksLayer = memo(function AgentLinksLayer({
   links,
   byPath,
+  loops = [],
   obstacles = [],
   interactive,
   hubInteractive = interactive,
@@ -355,6 +356,11 @@ export const AgentLinksLayer = memo(function AgentLinksLayer({
 }: {
   links: AgentLink[];
   byPath: Map<string, SchemeRect>;
+  /** The review loops as the layout drew them. On the band board a loop
+      carries the point on its routed connector where the ⟳ hub belongs
+      (#1641); a loop without one (the free board) places the hub at the
+      corridor midpoint between its two cards. */
+  loops?: readonly FlowLoop[];
   /** Card rects the pipeline rails must not cross — nodes, decks, stacks, drafts
       (issue #136). A rail excludes its own two endpoints and routes around the
       rest, reusing the task-edge obstacle router (PR #130). */
@@ -392,6 +398,7 @@ export const AgentLinksLayer = memo(function AgentLinksLayer({
     return { d: route.d, mid: route.mid, chevrons: [] };
   };
   const railByKey = new Map(pipelineLinks.map((link) => [link.key, railGeom(link)] as const));
+  const hubByFlow = new Map(loops.flatMap((loop) => (loop.hub ? [[loop.flow.id, loop.hub] as const] : [])));
 
   return (
     <>
@@ -444,9 +451,11 @@ export const AgentLinksLayer = memo(function AgentLinksLayer({
           return <PipelineEdgeBadge key={link.key} index={link.pipeline.index} total={link.pipeline.total} color={PIPELINE_RAIL_COLOR[link.pipeline.tone]} x={x} y={y} moveTransition={MOVE_TRANSITION} semanticZoom={semanticZoom} />;
         }
         if (!link.flow) return null;
-        /* Corridor midpoint of the pair, level with the cycle arcs' center. */
-        const x = (from.x + from.w + to.x) / 2;
-        const y = Math.min(from.y, to.y) + (LOOP_ARC_TOP + LOOP_ARC_BOT) / 2;
+        /* On the routed connector where the layout put it; otherwise the
+           corridor midpoint of the pair, level with the cycle arcs' center. */
+        const routed = hubByFlow.get(link.flow.flow.id);
+        const x = routed ? routed.x : (from.x + from.w + to.x) / 2;
+        const y = routed ? routed.y : Math.min(from.y, to.y) + (LOOP_ARC_TOP + LOOP_ARC_BOT) / 2;
         return (
           <FlowHub key={link.key} flow={link.flow.flow} x={x} y={y} interactive={interactive} moveTransition={MOVE_TRANSITION} />
         );

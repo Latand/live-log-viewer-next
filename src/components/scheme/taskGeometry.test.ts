@@ -13,6 +13,7 @@ import {
   routePathsBounds,
   routeTaskEdge,
   routeTaskEdges,
+  sampleRoute,
   TASK_ACTION_ROW_H,
   TASK_DISCLOSURE_H,
   TASK_PREVIEW_CLAMP,
@@ -1232,4 +1233,21 @@ describe("taskEdgesSignature — poll-stable route cache key (Finding 2)", () =>
     expect(taskEdgesSignature(edges, [{ id: "a", x: 80, y: 10, w: 260, h: 100 }], [])).not.toBe(base);
     expect(taskEdgesSignature(edges, cards, [{ x: 0, y: 0, w: 10, h: 10 }])).not.toBe(base);
   });
+});
+
+test("sampleRoute walks the M/L/C commands the routers emit, endpoints included (#1641)", () => {
+  const cubic = sampleRoute("M 0 0 C 50 0, 50 100, 100 100", 4);
+  expect(cubic[0]).toEqual({ x: 0, y: 0 });
+  expect(cubic[cubic.length - 1]).toEqual({ x: 100, y: 100 });
+  expect(cubic.length).toBe(5);
+  /* t = 0.5 of that S-curve is its midpoint. */
+  expect(cubic[2]!.x).toBeCloseTo(50, 6);
+  expect(cubic[2]!.y).toBeCloseTo(50, 6);
+  const detour = sampleRoute("M 0 0 L 0 40 L 80 40 L 80 0", 2);
+  expect(detour.map((point) => `${point.x},${point.y}`)).toEqual(["0,0", "0,20", "0,40", "40,40", "80,40", "80,20", "80,0"]);
+  /* A routed edge's midpoint sample coincides with its reported mid. */
+  const route = routeTaskEdge({ x1: 0, y1: 0, x2: 200, y2: 60 }, []);
+  const samples = sampleRoute(route.d, 2);
+  expect(samples[1]!.x).toBeCloseTo(route.mid.x, 6);
+  expect(samples[1]!.y).toBeCloseTo(route.mid.y, 6);
 });

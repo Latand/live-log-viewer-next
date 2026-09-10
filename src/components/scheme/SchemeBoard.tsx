@@ -272,7 +272,6 @@ export function SchemeBoard({
   const [historyOpen, setHistoryOpen] = useState(false);
   const [historyTaskId, setHistoryTaskId] = useState<string | null>(null);
   const openTaskHistory = useCallback((id: string) => {setHistoryTaskId(id);setHistoryOpen(true);}, []);
-  const [layoutZoom, setLayoutZoom] = useState(.5);
   const [layoutViewportWidth, setLayoutViewportWidth] = useState(1400);
   const closeHistory = useCallback(() => setHistoryOpen(false), []);
   const workflowModel = useMemo(() => projectTaskWorkflows(allTasks, pipelines, flows, files, project), [allTasks, pipelines, flows, files, project]);
@@ -425,8 +424,8 @@ export function SchemeBoard({
     return set;
   }, [authoredLayout.decks, disclosureNonce]);
   const taskScene = useMemo(() => bandsEnabled
-    ? layoutTaskBands(authoredLayout, orderedBands, { zoom: layoutZoom, mode: bandMode, viewportWidth: layoutViewportWidth, reader: selected, hostOverrides, collapsedDecks })
-    : null, [bandsEnabled, authoredLayout, orderedBands, layoutZoom, bandMode, layoutViewportWidth, selected, hostOverrides, collapsedDecks]);
+    ? layoutTaskBands(authoredLayout, orderedBands, { mode: bandMode, viewportWidth: layoutViewportWidth, reader: selected, hostOverrides, collapsedDecks })
+    : null, [bandsEnabled, authoredLayout, orderedBands, bandMode, layoutViewportWidth, selected, hostOverrides, collapsedDecks]);
   const layout = taskScene?.layout ?? authoredLayout;
 
   /* NO PRUNING HERE (#771). The selection outlives this view, so dropping a path
@@ -901,7 +900,10 @@ export function SchemeBoard({
     focusZoom: taskScene ? 0.9 : undefined,
   });
 
-  useLayoutEffect(() => {setLayoutZoom(cam.z);setLayoutViewportWidth(vp.w);setBandMode((previous) => bandModeFor(cam.z, previous));}, [cam.z,vp.w]);
+  /* The band layout follows the camera only through the presentation mode
+     (chip / summary / reader) and the viewport width; the zoom itself is the
+     camera's, so a zoom frame that stays inside one mode relayouts nothing. */
+  useLayoutEffect(() => {setLayoutViewportWidth(vp.w);setBandMode((previous) => bandModeFor(cam.z, previous));}, [cam.z,vp.w]);
   /* Rank moves are deferred while the operator is busy inside the board:
      panning, typing, holding a text selection, or reading an open disclosure
      or action menu. Status labels still update at once; only the order waits. */
@@ -1447,7 +1449,6 @@ export function SchemeBoard({
           <TaskBandsLayer
             bands={taskScene.bands}
             mode={taskScene.mode}
-            scale={taskScene.scale}
             /* Band chrome stays live on the hand tool. Only the controls
                themselves take pointer events (`data-scheme-ui`, which
                `onPointerDown` already refuses to start a pan on), so the rest
@@ -1472,7 +1473,7 @@ export function SchemeBoard({
         {/* Rails/badges stay passive on the map, but the pipeline hub keeps its
             tap target there — the mobile lite map reaches pipeline controls only
             through it (#93 §2.3). */}
-        <AgentLinksLayer semanticZoom={Boolean(taskScene)} links={layout.links} byPath={layout.byPath} obstacles={railObstacles} interactive={!mapMode && !handLike && !session} hubInteractive={!handLike && !session} width={layout.width} height={layout.height} />
+        <AgentLinksLayer semanticZoom={Boolean(taskScene)} links={layout.links} loops={layout.loops} byPath={layout.byPath} obstacles={railObstacles} interactive={!mapMode && !handLike && !session} hubInteractive={!handLike && !session} width={layout.width} height={layout.height} />
         <NodesLayer
           layout={layout}
           visiblePaths={visibleNativePaths}

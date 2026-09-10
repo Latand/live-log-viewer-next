@@ -12,6 +12,7 @@ import { engineBadgeFor, fmtAge } from "@/components/utils";
 
 import { VERDICT_GLYPHS, verdictTone } from "./flowModel";
 import {
+  COLLAPSED_DECK_CHIP_H,
   deckCollapsed,
   deckDisclosureMarker,
   deckDisclosureTerminal,
@@ -242,7 +243,8 @@ export function RoundDeck({
       <button
         type="button"
         data-review-deck-collapsed
-        className="deck-chip-in flex h-12 w-full items-center gap-2 rounded-[10px] border border-border bg-card px-3 text-left shadow-1 hover:border-accent/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+        className="deck-chip-in flex w-full items-center gap-2 rounded-[10px] border border-border bg-card px-3 text-left shadow-1 hover:border-accent/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+        style={{ height: COLLAPSED_DECK_CHIP_H }}
         aria-label={t("roundDeck.expandStack", { count: rounds.length })}
         aria-expanded="false"
         title={t("roundDeck.expandStack", { count: rounds.length })}

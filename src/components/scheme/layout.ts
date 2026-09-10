@@ -287,6 +287,10 @@ export interface FlowLoop {
   y1?: number;
   y2?: number;
   route?: string;
+  /** Where the ⟳ hub sits: a point on `route` clear of every card but the
+      two endpoints. Set with `route`; without it the hub falls back to the
+      free board's corridor midpoint. */
+  hub?: { x: number; y: number };
 }
 
 export interface SchemeLayout {
