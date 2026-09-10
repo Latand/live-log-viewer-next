@@ -278,6 +278,20 @@ export function projectEngineHostEvent(
   if (event.kind === "delta") {
     return { ...base, kind: "delta", payload: { conversationId, turnId: event.turnId, text: clipped(event.text, 8 * 1024) } };
   }
+  if (event.kind === "voice-transcript") {
+    return {
+      ...base,
+      kind: "voice-transcript",
+      payload: {
+        conversationId,
+        realtimeSessionId: event.realtimeSessionId,
+        segmentId: event.segmentId,
+        role: event.role,
+        text: clipped(event.text, 16 * 1024),
+        final: event.final,
+      },
+    };
+  }
   if (event.kind === "voice-chunk") {
     return {
       ...base,

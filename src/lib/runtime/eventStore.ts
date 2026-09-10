@@ -151,6 +151,12 @@ function validEvent(value: unknown): value is RuntimeEvent {
       return (nonEmptyString(event.turnId) || event.turnId === null)
         && (event.phase === "started" || event.phase === "completed")
         && Object.hasOwn(event, "item");
+    case "voice-transcript":
+      return nonEmptyString(event.segmentId)
+        && (event.role === "user" || event.role === "assistant")
+        && typeof event.text === "string"
+        && typeof event.final === "boolean"
+        && typeof event.realtimeSessionId === "string";
     case "voice-chunk": {
       if (!nonEmptyString(event.turnId)) return false;
       const delivery = normalizeVoiceDeliveries([event.delivery])[0];

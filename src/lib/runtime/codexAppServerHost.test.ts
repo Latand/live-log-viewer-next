@@ -605,6 +605,51 @@ describe("CodexAppServerHost", () => {
     await host.release();
   });
 
+  test("the canonical realtime transcript leaves the host as runtime events", async () => {
+    /* #1629. Until now the app-server's own `thread/realtime/*` transcript went
+       nowhere: the panel could show only what one WebRTC data channel delivered,
+       so a call whose channel dropped showed nothing of what the backend had
+       actually committed. These are the notifications an installed app-server
+       sends, driven through the real process boundary. */
+    const server = new FakeAppServer("voice-thread");
+    const store = new MemoryEventStore();
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      eventStore: store,
+      spawnProcess: fakeSpawn(server),
+    });
+    await host.startRealtimeWebRtc("v=0\r\noffer");
+
+    server.notify("thread/realtime/transcript/delta", { threadId: "voice-thread", role: "user", delta: "look at " });
+    server.notify("thread/realtime/transcript/delta", { threadId: "voice-thread", role: "user", delta: "that card" });
+    server.notify("thread/realtime/transcript/done", { threadId: "voice-thread", role: "user", text: "look at that card" });
+    server.notify("thread/realtime/item/started", {
+      threadId: "voice-thread",
+      item: { id: "seg-9", realtimeSessionId: "realtime-1", type: "transcriptSegment", role: "assistant", text: "" },
+    });
+    server.notify("thread/realtime/item/completed", {
+      threadId: "voice-thread",
+      item: { id: "seg-9", realtimeSessionId: "realtime-1", type: "transcriptSegment", role: "assistant", text: "Reading it now." },
+    });
+    /* A notification for another thread must never enter this host's ledger. */
+    server.notify("thread/realtime/transcript/done", { threadId: "other-thread", role: "user", text: "not ours" });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    const published = store.load("voice-thread")
+      .filter((event): event is Extract<RuntimeEvent, { kind: "voice-transcript" }> => event.kind === "voice-transcript")
+      .map(({ seq: _seq, ...event }) => event);
+    expect(published).toEqual([
+      { kind: "voice-transcript", realtimeSessionId: "realtime-1", segmentId: published[0]!.segmentId, role: "user", text: "look at ", final: false },
+      { kind: "voice-transcript", realtimeSessionId: "realtime-1", segmentId: published[0]!.segmentId, role: "user", text: "look at that card", final: false },
+      { kind: "voice-transcript", realtimeSessionId: "realtime-1", segmentId: published[0]!.segmentId, role: "user", text: "look at that card", final: true },
+      { kind: "voice-transcript", realtimeSessionId: "realtime-1", segmentId: "seg-9", role: "assistant", text: "", final: false },
+      { kind: "voice-transcript", realtimeSessionId: "realtime-1", segmentId: "seg-9", role: "assistant", text: "Reading it now.", final: true },
+    ]);
+    /* One id for the whole spoken segment, so the browser updates one line. */
+    expect(new Set(published.map((event) => event.segmentId)).size).toBe(2);
+    await host.release();
+  });
+
   test("an override edit reaches the next call, and no call writes to the thread", async () => {
     /* The persona is a session parameter now, so it is resolved per call rather
        than once per thread: an operator edit applies to the next call instead of

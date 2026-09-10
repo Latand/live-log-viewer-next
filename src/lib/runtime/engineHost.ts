@@ -65,6 +65,18 @@ export type DeliveryReceipt =
   | { outcome: "rejected"; reason: "stale-turn" | "dead-host" };
 
 export type RuntimeEvent =
+  /** One canonical realtime transcript segment, from the app-server's own
+      `thread/realtime/*` notifications rather than the browser's data channel
+      (#1629). Carries the whole segment so far, never a delta. */
+  | {
+    kind: "voice-transcript";
+    realtimeSessionId: string;
+    segmentId: string;
+    role: "user" | "assistant";
+    text: string;
+    final: boolean;
+    seq: number;
+  }
   | { kind: "native-queue-changed"; threadId: string; seq: number }
   | { kind: "turn-started"; turnId: string; seq: number }
   | { kind: "delta"; turnId: string; text: string; seq: number }
