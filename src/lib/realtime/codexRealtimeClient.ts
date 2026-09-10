@@ -226,6 +226,10 @@ class CodexRealtimeClient {
      ledger here. */
   private utteranceSequence = 0;
   private utteranceId: string | null = null;
+  /* Set when an utterance is published and cleared by the first handoff reported
+     against it, so one handoff is never reported twice and a slot left over from
+     an utterance that produced none cannot capture an unrelated later one. */
+  private utteranceAwaitingHandoff: string | null = null;
   private epoch = 0;
 
   constructor(readonly conversationId: string) {}
@@ -492,14 +496,26 @@ class CodexRealtimeClient {
    * a missing join. Carries the utterance id it is completing, so the server
    * attaches the canonical identities to that admission instead of counting a
    * second utterance.
+   *
+   * WHAT THIS CANNOT DO. The handoff event and the transcript boundary that
+   * published the reference share no identifier on the wire, so the join is the
+   * most recent unclaimed utterance rather than a proven correlation. In the
+   * ordinary flow — speak, pause, handoff — that is the same utterance. Under
+   * barge-in, a handoff arriving after the operator has already finished a
+   * further utterance is attributed to the later one. Closing that needs an
+   * identifier the current data channel does not carry, which cannot be
+   * established without a live capture; until then the ledger's `handoff` is
+   * evidence about the call, not a guarantee about a particular turn.
    */
   private publishHandoffJoin(event: { handoffId: string | null; itemId: string | null; userBidiTurnId: string | null }): void {
-    if (!this.realtimeSessionId || !this.utteranceId) return;
+    const utteranceId = this.utteranceAwaitingHandoff;
+    if (!this.realtimeSessionId || !utteranceId) return;
+    this.utteranceAwaitingHandoff = null;
     const payload = JSON.stringify({
       action: "handoff",
       conversationId: this.conversationId,
       realtimeSessionId: this.realtimeSessionId,
-      utterance: { id: this.utteranceId, sequence: this.utteranceSequence },
+      utterance: { id: utteranceId, sequence: this.utteranceSequence },
       handoff: {
         handoffId: event.handoffId,
         itemId: event.itemId,
@@ -551,6 +567,7 @@ class CodexRealtimeClient {
        recognizes a replay as the same spoken turn rather than a later one. */
     this.utteranceSequence += 1;
     this.utteranceId = randomHex(16);
+    this.utteranceAwaitingHandoff = this.utteranceId;
     const payload = JSON.stringify({
       action: "selectedContext",
       conversationId: this.conversationId,
@@ -714,6 +731,7 @@ class CodexRealtimeClient {
        last one of this one. */
     this.utteranceSequence = 0;
     this.utteranceId = null;
+    this.utteranceAwaitingHandoff = null;
     this.openTranscriptLines.clear();
   }
 }

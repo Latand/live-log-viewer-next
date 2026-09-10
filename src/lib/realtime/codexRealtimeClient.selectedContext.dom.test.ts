@@ -89,6 +89,8 @@ interface ControlRequest {
   realtimeSessionId?: string;
   selectedContext?: SelectedContextRef;
   operatorEventId?: string;
+  utterance?: { id: string; sequence: number };
+  handoff?: { handoffId: string | null; itemId: string | null; userBidiTurnId: string | null };
 }
 
 let requests: ControlRequest[] = [];
@@ -129,6 +131,19 @@ const fragment = (peer: StubPeerConnection, role: "user" | "assistant", text: st
   });
 const finished = (peer: StubPeerConnection, role: "user" | "assistant", text: string) =>
   peer.channel.onmessage?.({ data: JSON.stringify({ type: "turn.done", role, item: { text } }) });
+const handedOff = (peer: StubPeerConnection, suffix: string) =>
+  peer.channel.onmessage?.({
+    data: JSON.stringify({
+      type: "delegation.created",
+      item: {
+        id: `delegation-${suffix}`,
+        type: "delegation",
+        target: "client",
+        handoff_id: `handoff-${suffix}`,
+        user_bidi_turn_id: `bidi-${suffix}`,
+      },
+    }),
+  });
 
 test("the call binds itself to this window when it opens", async () => {
   await liveCall("conversation_voice_bind");
@@ -231,4 +246,57 @@ test("each finished utterance reports again, so a mid-call re-selection is honou
   expect(published[0]!.selectedContext).toMatchObject({ state: "selected" });
   expect(published[1]!.selectedContext).toMatchObject({ state: "none" });
   expect(requests.filter((request) => request.action === "operatorActivity")).toHaveLength(2);
+});
+
+
+test("each utterance carries an identity, and a retry reuses it", async () => {
+  /* The identity is what tells the server a second POST is the same spoken turn
+     rather than a later one, so it has to survive the retry and change between
+     utterances. */
+  const peer = await liveCall("conversation_voice_identity");
+  finished(peer, "user", "first");
+  await Promise.resolve();
+  finished(peer, "user", "second");
+  await Promise.resolve();
+
+  const published = requests.filter((request) => request.action === "selectedContext");
+  expect(published).toHaveLength(2);
+  expect(published[0]!.utterance).toMatchObject({ sequence: 1 });
+  expect(published[1]!.utterance).toMatchObject({ sequence: 2 });
+  expect(published[0]!.utterance!.id).toMatch(/^[a-f0-9]{32}$/);
+  expect(published[1]!.utterance!.id).not.toBe(published[0]!.utterance!.id);
+});
+
+test("a handoff is reported once, against the utterance it follows", async () => {
+  const peer = await liveCall("conversation_voice_handoff");
+  finished(peer, "user", "look at that one");
+  await Promise.resolve();
+  handedOff(peer, "a");
+  await Promise.resolve();
+
+  const published = requests.filter((request) => request.action === "selectedContext");
+  const joins = requests.filter((request) => request.action === "handoff");
+  expect(joins).toHaveLength(1);
+  expect(joins[0]!.realtimeSessionId).toBe("live-1");
+  expect(joins[0]!.utterance!.id).toBe(published[0]!.utterance!.id);
+  expect(joins[0]!.handoff).toEqual({
+    handoffId: "handoff-a", itemId: "delegation-a", userBidiTurnId: "bidi-a",
+  });
+
+  /* Consumed. A second handoff on the same utterance — a duplicate event, or one
+     belonging to a turn that published nothing — reports nothing rather than
+     claiming the utterance twice. */
+  handedOff(peer, "b");
+  await Promise.resolve();
+  expect(requests.filter((request) => request.action === "handoff")).toHaveLength(1);
+});
+
+test("a handoff before any utterance is published reports nothing", async () => {
+  /* Nothing has claimed a card yet, so there is nothing to join it to, and
+     inventing an utterance for it would put a reference in the ledger the
+     operator never published. */
+  const peer = await liveCall("conversation_voice_early_handoff");
+  handedOff(peer, "c");
+  await Promise.resolve();
+  expect(requests.filter((request) => request.action === "handoff")).toEqual([]);
 });
