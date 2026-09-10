@@ -3,6 +3,7 @@ import { expect, test } from "bun:test";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
 
+import { COLLAPSED_DECK_CHIP_H } from "@/components/flows/reviewDeckDisclosure";
 import { projectTaskWorkflows } from "@/components/tasks/taskWorkflowModel";
 
 import type { SchemeLayout, SchemeRect } from "./layout";
@@ -22,6 +23,8 @@ import {
   type BandMode,
   type TaskBand,
 } from "./taskBands";
+import { FLOW_HUB } from "@/components/flows/flowHubGeometry";
+import { sampleRoute } from "./taskGeometry";
 import { anchoredCamera } from "./useSchemeCamera";
 
 type Turn = "busy" | "terminal" | "idle" | "unknown" | null;
@@ -189,21 +192,25 @@ test("bands stack at content width at every mode and width; members, mirrors and
   for (const viewportWidth of [375, 680, 1024, 1280, 1440, 1920]) {
     for (const zoom of [0.07, 0.21, 0.22, 0.4, 0.58, 1]) {
       const mode = bandModeFor(zoom, null);
-      const scene = layoutTaskBands(layout, bands, { zoom, mode, viewportWidth, reader: files[5]!.path });
-      const s = 1 / zoom;
-      const gutter = (viewportWidth < 1024 ? BAND.gutterNarrow : BAND.gutter) * s;
+      const scene = layoutTaskBands(layout, bands, { mode, viewportWidth, reader: files[5]!.path });
+      /* Stable world geometry (#1641): a band member is one rectangle in board
+         pixels and the camera's own scale grows or shrinks it, so nothing here
+         divides by the zoom. The geometry depends on the zoom only through the
+         presentation mode, so two zooms in one mode place identical rectangles;
+         physical card scaling is verified separately. */
+      const gutter = viewportWidth < 1024 ? BAND.gutterNarrow : BAND.gutter;
+      const available = viewportWidth - gutter * 2;
       let previousBottom = -Infinity;
       for (const band of scene.bands) {
         const { rect, header, addAgent } = band.geometry;
         expect(rect.x).toBeCloseTo(gutter, 6);
         /* Compact geometry: a band is as wide as its content, floored so its
            header stays readable and ceilinged at the available width. */
-        const available = viewportWidth - (viewportWidth < 1024 ? BAND.gutterNarrow : BAND.gutter) * 2;
-        expect(rect.w * zoom).toBeLessThanOrEqual(available + 0.001);
-        expect(rect.w * zoom).toBeGreaterThanOrEqual(Math.min(available, BAND.minBandW) - 0.001);
+        expect(rect.w).toBeLessThanOrEqual(available + 0.001);
+        expect(rect.w).toBeGreaterThanOrEqual(Math.min(available, BAND.minBandW) - 0.001);
         expect(rect.y).toBeGreaterThanOrEqual(previousBottom - 0.001);
         previousBottom = rect.y + rect.h;
-        expect(header.h * zoom).toBeCloseTo(BAND.header, 6);
+        expect(header.h).toBeCloseTo(BAND.header, 6);
         expect(contains(rect, addAgent)).toBe(true);
         const items = [...band.members.map((member) => member.key), ...band.mirrors.map((mirror) => mirror.key)]
           .map((key) => scene.layout.byPath.get(key))
@@ -215,21 +222,23 @@ test("bands stack at content width at every mode and width; members, mirrors and
         }
         for (let i = 0; i < items.length; i += 1) for (let j = i + 1; j < items.length; j += 1) expect(overlapping(items[i]!, items[j]!)).toBe(false);
       }
-      expect(scene.layout.width * zoom).toBeCloseTo(viewportWidth, 6);
-      /* Every node is placed and screen-constant for its presentation. */
+      /* The band world is exactly the available viewport at 1:1; the camera
+         scales it from there. */
+      expect(scene.layout.width).toBeCloseTo(viewportWidth, 6);
       for (const node of scene.layout.nodes) {
         expect(scene.shown.has(node.file.path)).toBe(true);
         const expected = mode === "overview" ? "chip" : node.file.path === files[5]!.path ? "native" : "summary";
         expect(node.presentation).toBe(expected);
-        /* Screen-constant for its presentation, except that no surface is
-           wider than the band's inner width: a 375px board fits the tile. */
-        const inner = viewportWidth - (viewportWidth < 1024 ? BAND.gutterNarrow : BAND.gutter) * 2 - BAND.pad * 2;
-        const width = node.w * zoom;
+        /* Board-pixel footprint for its presentation, capped only so no surface
+           is wider than the band's inner width (a 375px board fits the tile). */
+        const inner = viewportWidth - gutter * 2 - BAND.pad * 2;
+        const width = node.w;
         if (expected === "chip") expect(width).toBeCloseTo(Math.min(BAND.chipW, inner), 6);
         else if (expected === "summary") expect(width).toBeCloseTo(Math.min(BAND.summaryW, inner), 6);
         else expect(width).toBeGreaterThanOrEqual(Math.min(BAND.nativeMinW, inner) - 0.001);
         expect(width).toBeLessThanOrEqual(inner + 0.001);
-        expect((node.readerScale ?? 1) * zoom).toBeCloseTo(width / (expected === "chip" ? BAND.chipW : expected === "summary" ? BAND.summaryW : node.w * zoom / ((node.readerScale ?? 1) * zoom)), 6);
+        /* The shell scales its content back to the tile's own footprint. */
+        if (expected !== "native") expect(width).toBeCloseTo((expected === "chip" ? BAND.chipW : BAND.summaryW) * (node.readerScale ?? 1), 6);
       }
       /* At 375 one tile per row: no two summary tiles share a row. */
       if (viewportWidth === 375 && mode === "intermediate") {
@@ -244,19 +253,22 @@ test("the local +Agent sits right after the last member, or opens the next row w
   const files = Array.from({ length: 12 }, (_, index) => file(index));
   const layout = base(files);
   const one = rankBands(buildTaskBands(layout, sources([task("one", "2026-01-01T00:00:00Z", [files[0]!])], files.slice(0, 1))));
-  const single = layoutTaskBands(layout, one, { zoom: 0.5, mode: "intermediate", viewportWidth: 1440, reader: null }).bands[0]!;
+  const scene1 = layoutTaskBands(layout, one, { mode: "intermediate", viewportWidth: 1440, reader: null });
+  const single = scene1.bands[0]!;
   const member = single.members[0]!;
-  const memberRect = layoutTaskBands(layout, one, { zoom: 0.5, mode: "intermediate", viewportWidth: 1440, reader: null }).layout.byPath.get(member.key)!;
-  expect(single.geometry.addAgent.x).toBeCloseTo(memberRect.x + memberRect.w + BAND.tileGap * 2, 6);
+  const memberRect = scene1.layout.byPath.get(member.key)!;
+  /* Board pixels: the +Agent sits one tile gap past the last member on its row. */
+  expect(single.geometry.addAgent.x).toBeCloseTo(memberRect.x + memberRect.w + BAND.tileGap, 6);
   expect(single.geometry.addAgent.y).toBeCloseTo(memberRect.y, 6);
   /* Four 320px tiles fill a 1440 row (24 gutter + 16 pad each side leaves
      1360; 4 × 320 + 3 × 24 = 1352): the +Agent must start the next row. */
   const four = rankBands(buildTaskBands(layout, sources([task("four", "2026-01-01T00:00:00Z", files.slice(0, 4))], files.slice(0, 4))));
-  const scene = layoutTaskBands(layout, four, { zoom: 0.5, mode: "intermediate", viewportWidth: 1440, reader: null });
+  const scene = layoutTaskBands(layout, four, { mode: "intermediate", viewportWidth: 1440, reader: null });
   const band = scene.bands[0]!;
   const last = scene.layout.byPath.get(band.members[3]!.key)!;
   expect(band.geometry.addAgent.y).toBeGreaterThan(last.y + last.h - 0.001);
-  expect(band.geometry.addAgent.x).toBeCloseTo(last.x - 3 * (BAND.summaryW + BAND.tileGap) * 2, 6);
+  /* Wrapped to the next row, back at the inner-left edge (gutter + pad). */
+  expect(band.geometry.addAgent.x).toBeCloseTo(BAND.gutter + BAND.pad, 6);
   expect(band.geometry.rows).toBe(2);
 });
 
@@ -264,7 +276,7 @@ test("edges route between same-band members through side ports on a row and top/
   const files = Array.from({ length: 6 }, (_, index) => file(index));
   const layout = base(files, [[0, 1], [0, 5]]);
   const bands = rankBands(buildTaskBands(layout, sources([task("t", "2026-01-01T00:00:00Z", files)], files)));
-  const scene = layoutTaskBands(layout, bands, { zoom: 0.5, mode: "intermediate", viewportWidth: 1440, reader: null });
+  const scene = layoutTaskBands(layout, bands, { mode: "intermediate", viewportWidth: 1440, reader: null });
   expect(scene.layout.edges.length).toBe(2);
   const sameRow = scene.layout.edges.find((edge) => edge.to === files[1]!.path)!;
   const from = scene.layout.byPath.get(files[0]!.path)!;
@@ -272,7 +284,7 @@ test("edges route between same-band members through side ports on a row and top/
   const wrapped = scene.layout.edges.find((edge) => edge.to === files[5]!.path)!;
   expect(wrapped.y1).toBeCloseTo(from.y + from.h, 6);
   expect(typeof wrapped.route).toBe("string");
-  const ports = bandEdgePorts({ x: 0, y: 0, w: 10, h: 10 }, { x: 0, y: 40, w: 10, h: 10 }, 1);
+  const ports = bandEdgePorts({ x: 0, y: 0, w: 10, h: 10 }, { x: 0, y: 40, w: 10, h: 10 });
   expect(ports).toEqual({ x1: 5, y1: 10, x2: 5, y2: 40 });
 });
 
@@ -284,7 +296,7 @@ test("350 tasks and 1,000 conversations project to one band per task and place e
   const bands = rankBands(buildTaskBands(layout, sources(tasks, files)));
   expect(bands.length).toBe(350);
   for (const zoom of [0.07, 0.4, 1]) {
-    const scene = layoutTaskBands(layout, bands, { zoom, mode: bandModeFor(zoom, null), viewportWidth: 1440, reader: files[0]!.path });
+    const scene = layoutTaskBands(layout, bands, { mode: bandModeFor(zoom, null), viewportWidth: 1440, reader: files[0]!.path });
     expect(scene.shown.size).toBe(1000);
     expect(scene.bands.length).toBe(350);
     expect(scene.taskRects.size).toBe(350);
@@ -307,7 +319,7 @@ test("a mirror never duplicates a node key, so the layer count equals the node c
   const bands: TaskBand[] = buildTaskBands(base(files), sources(tasks, files));
   expect(bands.flatMap((band) => band.members).length).toBe(2);
   expect(bands.flatMap((band) => band.mirrors).length).toBe(4);
-  const scene = layoutTaskBands(base(files), bands, { zoom: 0.5, mode: "intermediate", viewportWidth: 1440, reader: null });
+  const scene = layoutTaskBands(base(files), bands, { mode: "intermediate", viewportWidth: 1440, reader: null });
   expect(scene.layout.nodes.length).toBe(2);
   expect(scene.mirrorRects.size).toBe(4);
 });
@@ -362,7 +374,7 @@ test("opening a shared conversation from its mirror hosts the one surface in tha
   /* Counts are unchanged and the node is still placed exactly once. */
   expect(a.working).toBe(1);
   expect(b.working).toBe(1);
-  const scene = layoutTaskBands(layout, bands, { zoom: 0.5, mode: "intermediate", viewportWidth: 1440, reader: null, hostOverrides: new Map([[files[0]!.path, "task:b"]]) });
+  const scene = layoutTaskBands(layout, bands, { mode: "intermediate", viewportWidth: 1440, reader: null, hostOverrides: new Map([[files[0]!.path, "task:b"]]) });
   expect(scene.bandOf.get(files[0]!.path)).toBe("task:b");
   expect(scene.layout.nodes.length).toBe(2);
   expect(scene.mirrorRects.size).toBe(1);
@@ -375,7 +387,7 @@ test("a recorded relation across bands becomes a labelled continuation on both e
   const tasks = [task("a", "2026-01-01T00:00:00Z", [files[0]!]), task("b", "2026-01-02T00:00:00Z", [files[1]!, files[0]!])];
   const layout = base(files, [[0, 1], [0, 2]]);
   const bands = rankBands(buildTaskBands(layout, sources(tasks, files)));
-  const scene = layoutTaskBands(layout, bands, { zoom: 0.5, mode: "intermediate", viewportWidth: 1440, reader: null });
+  const scene = layoutTaskBands(layout, bands, { mode: "intermediate", viewportWidth: 1440, reader: null });
   /* Node 2 inherits its parent's band a; the edge 0→1 crosses a → b. */
   expect(scene.layout.edges.length).toBe(1);
   const byKey = new Map(scene.continuations.map((entry) => [entry.key, entry]));
@@ -394,7 +406,7 @@ test("a container halo stays inside its own band: a stage worker assigned to ano
   const layout = base(files);
   layout.groups = [{ key: "group::pipeline::p", kind: "pipeline", id: "p", hue: 10, members: files.slice(0, 2).map((entry) => entry.path), label: "Pipeline p", pipeline, x: 0, y: 0, w: 0, h: 0 }];
   const bands = rankBands(buildTaskBands(layout, { tasks, projection: projectTaskWorkflows(tasks, [pipeline], [], files), untitled: "Untitled task" }));
-  const scene = layoutTaskBands(layout, bands, { zoom: 0.5, mode: "intermediate", viewportWidth: 1440, reader: null });
+  const scene = layoutTaskBands(layout, bands, { mode: "intermediate", viewportWidth: 1440, reader: null });
   const halo = scene.layout.groups.find((group) => group.id === "p")!;
   const pipelineBand = scene.bands.find((band) => band.id === "task:t")!;
   const olderBand = scene.bands.find((band) => band.id === "task:older")!;
@@ -518,8 +530,8 @@ test("an empty band ends at its content instead of ruling a line across the canv
     task("many", "2026-01-03T00:00:00Z", files.slice(1)),
   ], files)));
   for (const [viewportWidth, zoom] of [[1440, 1], [1440, 1.6], [1920, 1], [1280, 0.5]] as const) {
-    const scene = layoutTaskBands(layout, bands, { zoom, mode: bandModeFor(zoom, null), viewportWidth, reader: null });
-    const widthOf = (id: string) => scene.bands.find((band) => band.task?.id === id)!.geometry.rect.w * zoom;
+    const scene = layoutTaskBands(layout, bands, { mode: bandModeFor(zoom, null), viewportWidth, reader: null });
+    const widthOf = (id: string) => scene.bands.find((band) => band.task?.id === id)!.geometry.rect.w;
     const available = viewportWidth - BAND.gutter * 2;
     /* The whole complaint: an empty band used to be exactly as wide as a band
        holding eight conversations. Now it is strictly narrower, and narrower
@@ -535,5 +547,157 @@ test("an empty band ends at its content instead of ruling a line across the canv
     expect(widthOf("many")).toBeGreaterThan(widthOf("one"));
     const tile = (scene.mode === "overview" ? BAND.chipW : BAND.summaryW) + BAND.tileGap;
     expect(available - widthOf("many")).toBeLessThan(tile + 0.001);
+  }
+});
+
+/* -- Board geometry: coherent member scaling, collapsed deck, no stray arcs -- */
+
+function reviewFlow(implementerPath: string, state: "approved" | "reviewing"): import("@/lib/flows/types").Flow {
+  return {
+    id: "flow-geom",
+    template: "implement-review-loop",
+    project: "fixture",
+    cwd: "/repo",
+    implementerPath,
+    roles: { implementer: { engine: "claude", model: "opus", effort: "high" }, reviewer: { engine: "claude", model: "opus", effort: "high" } },
+    baseRef: "0".repeat(40),
+    baseMode: "head",
+    mode: "auto",
+    reviewerMode: "headless",
+    roundLimit: 5,
+    state,
+    stateDetail: null,
+    rounds: [{ n: 1, reviewerPath: "/fixture/reviewer", verdict: state === "approved" ? "APPROVE" : null, findingsCount: state === "approved" ? 2 : null, findingsPath: null, triggeredBy: "marker", readyNote: null, startedAt: "2026-01-01T00:00:00Z", reviewedAt: null, relayedAt: null, error: null } as import("@/lib/flows/types").Round],
+    createdAt: "2026-01-01T00:00:00Z",
+    closedAt: null,
+  } as import("@/lib/flows/types").Flow;
+}
+
+/** A base layout carrying one node and one review deck, plus a hand-built band
+    that holds both as members — the shape `layoutTaskBands` places. */
+function deckScene(flowState: "approved" | "reviewing") {
+  const node = file(0, "busy");
+  const layout = base([node]);
+  const flow = reviewFlow(node.path, flowState);
+  const deckKey = "deck::flow-geom";
+  layout.decks = [{ key: deckKey, flow, rounds: [], x: 700, y: 100, w: 600, h: 810 }] as SchemeLayout["decks"];
+  layout.loops = [{ key: "loop::flow-geom", flow, x1: 600, x2: 700, y: 100 }] as SchemeLayout["loops"];
+  layout.byPath.set(deckKey, layout.decks[0]!);
+  const band: TaskBand = {
+    id: "task:geom", origin: "task", task: task("geom", "2026-01-01T00:00:00Z", [node]), pipeline: null, flow: null,
+    title: "Geometry", status: "assigned", hue: 0,
+    members: [{ key: node.path, kind: "node", file: node }, { key: deckKey, kind: "deck", file: null }],
+    mirrors: [], groups: [], working: 1, unknown: 0, conversations: 1, planned: 0, pinnedTop: false, createdAt: "2026-01-01T00:00:00Z",
+  };
+  return { layout, band, deckKey, nodePath: node.path };
+}
+
+test("a review deck reserves its collapsed chip height by the operator's actual disclosure state (#1641)", () => {
+  const { layout, band, deckKey } = deckScene("reviewing");
+  const at = (collapsedDecks?: ReadonlySet<string>) =>
+    layoutTaskBands(layout, [band], { mode: "near", viewportWidth: 1440, reader: null, collapsedDecks }).layout.byPath.get(deckKey)!;
+  /* Told the deck is collapsed, the band reserves the chip height — an order of
+     magnitude short of the 810px it needs expanded, the empty task frame in the
+     report. Told it is expanded (a manual expand of a settled deck), it reserves
+     the full footprint. The set is authoritative over flow terminality. */
+  expect(at(new Set([deckKey])).h).toBe(COLLAPSED_DECK_CHIP_H);
+  expect(at(new Set()).h).toBeGreaterThan(400);
+  /* Without a set, an actionable flow's lifecycle default is expanded. */
+  expect(at(undefined).h).toBeGreaterThan(400);
+  /* And a settled flow's lifecycle default is collapsed. */
+  const settled = deckScene("approved");
+  expect(layoutTaskBands(settled.layout, [settled.band], { mode: "near", viewportWidth: 1440, reader: null }).layout.byPath.get(deckKey)!.h).toBe(COLLAPSED_DECK_CHIP_H);
+});
+
+test("band geometry is board pixels the camera scales as one: the zoom is not a layout input (#1641)", () => {
+  const { layout, band, deckKey, nodePath } = deckScene("reviewing");
+  const at = (mode: "intermediate" | "near") => {
+    const scene = layoutTaskBands(layout, [band], { mode, viewportWidth: 1440, reader: null });
+    return { deck: scene.layout.byPath.get(deckKey)!, node: scene.layout.byPath.get(nodePath)!, header: scene.bands[0]!.geometry.header };
+  };
+  /* The two tile-scale modes place identical rectangles: the layout knows no
+     zoom, so the camera's own `scale(zoom)` is the only thing that changes a
+     card's on-screen size — and it changes the deck, the band frame and the
+     connectors by the same factor. (The browser harness measures that factor;
+     what a pure test can pin is that nothing here is counter-scaled.) */
+  const near = at("near");
+  const intermediate = at("intermediate");
+  expect(near.node).toEqual(intermediate.node);
+  expect(near.deck).toEqual(intermediate.deck);
+  expect(near.header.h).toBe(BAND.header);
+  expect(near.node.w).toBe(BAND.summaryW);
+});
+
+test("the band routes the review connector between the placed implementer and deck, across wrapped rows (#1641)", () => {
+  const wide = deckScene("reviewing");
+  const scene = layoutTaskBands(wide.layout, [wide.band], { mode: "near", viewportWidth: 1440, reader: null });
+  expect(scene.layout.loops.length).toBe(1);
+  const loop = scene.layout.loops[0]!;
+  const impl = scene.layout.byPath.get(wide.nodePath)!;
+  const deck = scene.layout.byPath.get(wide.deckKey)!;
+  /* The connector is drawn between the cards AS PLACED, not at fixed offsets:
+     both endpoints touch the actual implementer and deck rectangles, and it
+     carries a routed path — never a stranded squiggle. */
+  expect(loop.route).toBeTruthy();
+  expect(loop.y1).toBeDefined();
+  const onImpl = loop.x1! >= impl.x - 1 && loop.x1! <= impl.x + impl.w + 1 && loop.y1! >= impl.y - 1 && loop.y1! <= impl.y + impl.h + 1;
+  const onDeck = loop.x2! >= deck.x - 1 && loop.x2! <= deck.x + deck.w + 1 && loop.y2! >= deck.y - 1 && loop.y2! <= deck.y + deck.h + 1;
+  expect(onImpl).toBe(true);
+  expect(onDeck).toBe(true);
+  /* On a narrow board the deck wraps below the implementer; the connector
+     still attaches to both — top/bottom ports instead of side ports. */
+  const narrow = layoutTaskBands(wide.layout, [wide.band], { mode: "near", viewportWidth: 700, reader: null });
+  const nLoop = narrow.layout.loops[0]!;
+  const nImpl = narrow.layout.byPath.get(wide.nodePath)!;
+  const nDeck = narrow.layout.byPath.get(wide.deckKey)!;
+  expect(Math.round(nImpl.y)).not.toBe(Math.round(nDeck.y));
+  expect(nLoop.route).toBeTruthy();
+  expect(nLoop.y1! >= nImpl.y - 1 && nLoop.y1! <= nImpl.y + nImpl.h + 1).toBe(true);
+  expect(nLoop.y2! >= nDeck.y - 1 && nLoop.y2! <= nDeck.y + nDeck.h + 1).toBe(true);
+});
+
+test("the review hub sits on the routed connector, clear of every card but its two endpoints (#1641)", () => {
+  /* Implementer, two helpers and the deck: on a 900px board the third card
+     wraps under the implementer and the deck wraps below that, so the
+     connector must thread past the wrapped helper — and the hub must not land
+     on it, which is where the corridor formula put it (inside the helper). */
+  const files = [file(0, "busy"), file(1), file(2)];
+  const layout = base(files);
+  const flow = reviewFlow(files[0]!.path, "reviewing");
+  const deckKey = "deck::flow-geom";
+  layout.decks = [{ key: deckKey, flow, rounds: [], x: 700, y: 100, w: 600, h: 810 }] as SchemeLayout["decks"];
+  layout.loops = [{ key: "loop::flow-geom", flow, x1: 600, x2: 700, y: 100 }] as SchemeLayout["loops"];
+  layout.byPath.set(deckKey, layout.decks[0]!);
+  const band: TaskBand = {
+    id: "task:geom", origin: "task", task: task("geom", "2026-01-01T00:00:00Z", files), pipeline: null, flow: null,
+    title: "Geometry", status: "assigned", hue: 0,
+    members: [...files.map((entry) => ({ key: entry.path, kind: "node" as const, file: entry })), { key: deckKey, kind: "deck", file: null }],
+    mirrors: [], groups: [], working: 1, unknown: 0, conversations: 3, planned: 0, pinnedTop: false, createdAt: "2026-01-01T00:00:00Z",
+  };
+  for (const viewportWidth of [1440, 900]) {
+    const scene = layoutTaskBands(layout, [band], { mode: "near", viewportWidth, reader: null });
+    const loop = scene.layout.loops[0]!;
+    expect(loop.hub).toBeDefined();
+    const hub = loop.hub!;
+    /* On the path: within a sample step of the drawn connector. */
+    const samples = sampleRoute(loop.route!);
+    const gap = Math.min(...samples.map((point) => Math.hypot(point.x - hub.x, point.y - hub.y)));
+    expect(gap).toBeLessThanOrEqual(1e-6);
+    /* And its box overlaps no card that is not an endpoint of the loop. */
+    for (const helper of files.slice(1)) {
+      const rect = scene.layout.byPath.get(helper.path)!;
+      const overlaps = hub.x + FLOW_HUB.w / 2 > rect.x && hub.x - FLOW_HUB.w / 2 < rect.x + rect.w && hub.y + FLOW_HUB.h / 2 > rect.y && hub.y - FLOW_HUB.h / 2 < rect.y + rect.h;
+      expect(overlaps).toBe(false);
+    }
+    /* The corridor formula the free board uses would have been wrong here:
+       level with the arcs' centre it lands 240px under the implementer's top,
+       inside the wrapped helper on the narrow board. */
+    if (viewportWidth === 900) {
+      const impl = scene.layout.byPath.get(files[0]!.path)!;
+      const wrapped = scene.layout.byPath.get(files[2]!.path)!;
+      const corridorY = impl.y + 240;
+      expect(corridorY > wrapped.y && corridorY < wrapped.y + wrapped.h).toBe(true);
+      expect(hub.y > wrapped.y && hub.y < wrapped.y + wrapped.h && hub.x > wrapped.x && hub.x < wrapped.x + wrapped.w).toBe(false);
+    }
   }
 });

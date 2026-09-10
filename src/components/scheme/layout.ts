@@ -279,6 +279,18 @@ export interface FlowLoop {
   x2: number;
   /** Shared top of the two cards. */
   y: number;
+  /** Task-band review connector (#1641): the routed port endpoints between the
+      implementer card and the reviewer deck as they are actually placed, and
+      the routed path between them. Present only on the band surface, where the
+      two can wrap to different rows; the free board leaves these unset and
+      LoopsLayer draws its side-by-side forward/return arcs from x1/x2/y. */
+  y1?: number;
+  y2?: number;
+  route?: string;
+  /** Where the ⟳ hub sits: a point on `route` clear of every card but the
+      two endpoints. Set with `route`; without it the hub falls back to the
+      free board's corridor midpoint. */
+  hub?: { x: number; y: number };
 }
 
 export interface SchemeLayout {
