@@ -121,20 +121,23 @@ export function useNativeQueue(
 
   const refresh = useCallback(() => setLocalRevision((current) => current + 1), []);
 
+  /* A different conversation is a different queue, so nothing of the last one's
+     is shown while the new one is being read. Registered before the read below,
+     so it lands first in the same commit. */
+  useEffect(() => {
+    setRead(EMPTY_READ);
+    setLoading(enabled);
+    setError(null);
+  }, [conversationId, enabled]);
+
   /* One read at a time, and the last one wins. A stale answer that arrived after
      a newer one must never overwrite it — that is how a panel ends up showing a
      queue the operator has already changed. */
   const generation = useRef(0);
   useEffect(() => {
-    if (!enabled) {
-      setRead(EMPTY_READ);
-      setLoading(false);
-      setError(null);
-      return;
-    }
+    if (!enabled) return;
     const controller = new AbortController();
     const mine = ++generation.current;
-    setLoading((current) => current || read.entries.length === 0);
     void dependencies.read(conversationId, controller.signal)
       .then((answer) => {
         if (mine !== generation.current) return;
@@ -148,8 +151,6 @@ export function useNativeQueue(
         setLoading(false);
       });
     return () => controller.abort();
-    /* `read` is deliberately not a dependency: it is what this effect writes. */
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [conversationId, dependencies, enabled, changeRevision, localRevision]);
 
   const submit = useCallback(async (mutation: NativeQueueMutation, idempotencyKey: string): Promise<NativeQueueSubmission> => {

@@ -680,9 +680,16 @@ function retireCompletedWork(session: VoiceSessionState, options: VoiceUtterance
     if (record.boundTurnId !== null) {
       return !options.workState || options.workState(record.boundTurnId) !== "completed";
     }
-    /* Never claimed by a tool call. It is retired only once the host has been
-       seen going idle SINCE the join — the turn that handoff was routed into has
-       then ended, and nothing is left that could be entitled to the card. */
+    /* Never claimed by a tool call. It is retired once the host has been seen
+       going idle SINCE the join — the turn that handoff was routed into has then
+       ended, and nothing is left that could be entitled to the card.
+       INEXACT AT ONE EDGE, AND SAFE THERE. The idle observation arrives through
+       the host's state projection, so an earlier turn's end can be observed just
+       after a join and retire it a moment early. Both directions of that error
+       are refusals rather than wrong answers — retiring early makes the next
+       tool call ask which card the operator meant, retiring late makes the next
+       card ambiguous — so the simple rule is kept over a fence that would have
+       to reconstruct the ordering of two asynchronous streams. */
     return record.joinedAtIdleEpoch === null || record.joinedAtIdleEpoch >= session.idleEpoch;
   });
 }
