@@ -50,6 +50,7 @@ import { AgentLinksLayer, EdgesLayer, GroupsLayer, LoopsLayer, MOVE_EASE, NodesL
 import type { TaskCardHandlers } from "./TaskCard";
 import { TaskEdgesLayer } from "./TaskEdgesLayer";
 import { TasksLayer } from "./TasksLayer";
+import { bandContainsTarget } from "./boardPresentation";
 import { applyBandOrder, bandModeFor, buildTaskBands, layoutTaskBands, rankBands, type BandMirror, type BandMode, type PlacedBand, type TaskBand } from "./taskBands";
 import { TaskBandsLayer } from "./TaskBandsLayer";
 import { findFreeSlot } from "./findFreeSlot";
@@ -383,9 +384,8 @@ export function SchemeBoard({
   const bands = useMemo<TaskBand[]>(() => {
     if (!bandsEnabled) return [];
     const built = buildTaskBands(authoredLayout, { tasks: mergedAllTasks, projection: workflowModel, draftBands, untitled: t("bands.untitled"), reviewFlow: t("bands.reviewFlow") });
-    /* A finished task without a single member lives in the task list and its
-       history, not as an empty band. */
-    return built.filter((band) => band.members.length || band.mirrors.length || band.status !== "done");
+    /* The task visibility preference also governs completed empty tasks. */
+    return built;
   }, [bandsEnabled, authoredLayout, mergedAllTasks, workflowModel, draftBands, t]);
   const rankedBands = useMemo(() => rankBands(bands), [bands]);
   /* Order snapshot during an interaction: status labels update at once, rank
@@ -413,19 +413,44 @@ export function SchemeBoard({
       window.removeEventListener("storage", bump);
     };
   }, []);
-  const collapsedDecks = useMemo(() => {
+  /* A deck shown expanded by the operator's own still-valid choice also keeps
+     a completed task's automatic history fold open. */
+  const { collapsedDecks, expandedDecks } = useMemo(() => {
     void disclosureNonce;
-    const set = new Set<string>();
-    if (typeof window === "undefined") return set;
+    const collapsed = new Set<string>();
+    const expanded = new Set<string>();
+    if (typeof window === "undefined") return { collapsedDecks: collapsed, expandedDecks: expanded };
     for (const deck of authoredLayout.decks) {
       const override = readDeckDisclosureOverride(window.localStorage, deck.flow.id);
-      if (deckCollapsed(override, deckDisclosureMarker(deck.flow), deckDisclosureTerminal(deck.flow))) set.add(deck.key);
+      const marker = deckDisclosureMarker(deck.flow);
+      if (deckCollapsed(override, marker, deckDisclosureTerminal(deck.flow))) collapsed.add(deck.key);
+      else if (override?.v === "expanded" && override.at === marker) expanded.add(deck.key);
     }
-    return set;
+    return { collapsedDecks: collapsed, expandedDecks: expanded };
   }, [authoredLayout.decks, disclosureNonce]);
+  const [expandedStages, setExpandedStages] = useState<ReadonlySet<string>>(() => new Set());
+  const [historyOverrides, setHistoryOverrides] = useState<ReadonlyMap<string, boolean>>(() => {
+    try { return new Map(JSON.parse(localStorage.getItem(`llv-board-history:${project}`) ?? "[]")); }
+    catch { return new Map(); }
+  });
+  const toggleStageDetails = useCallback((key: string) => setExpandedStages(previous => {
+    const next = new Set(previous);
+    if (next.has(key)) next.delete(key); else next.add(key);
+    return next;
+  }), []);
+  const toggleBandHistory = useCallback((band: PlacedBand) => {
+    /* The open reader keeps its band revealed, so folding that band closes it;
+       folding any other band leaves the reader alone. */
+    if (!band.geometry.historyCollapsed && bandContainsTarget(band, authoredLayout, selected)) setSelected(null);
+    setHistoryOverrides(previous => {
+      const next = new Map(previous).set(band.id, band.geometry.historyCollapsed);
+      try { localStorage.setItem(`llv-board-history:${project}`, JSON.stringify([...next])); } catch { /* session choice still works */ }
+      return next;
+    });
+  }, [project, authoredLayout, selected]);
   const taskScene = useMemo(() => bandsEnabled
-    ? layoutTaskBands(authoredLayout, orderedBands, { mode: bandMode, viewportWidth: layoutViewportWidth, reader: selected, hostOverrides, collapsedDecks })
-    : null, [bandsEnabled, authoredLayout, orderedBands, bandMode, layoutViewportWidth, selected, hostOverrides, collapsedDecks]);
+    ? layoutTaskBands(authoredLayout, orderedBands, { mode: bandMode, viewportWidth: layoutViewportWidth, reader: selected, hostOverrides, collapsedDecks, expandedDecks, expandedStages, historyOverrides, revealTarget: selected, flows })
+    : null, [bandsEnabled, authoredLayout, orderedBands, bandMode, layoutViewportWidth, selected, hostOverrides, collapsedDecks, expandedDecks, expandedStages, historyOverrides, flows]);
   const layout = taskScene?.layout ?? authoredLayout;
 
   /* NO PRUNING HERE (#771). The selection outlives this view, so dropping a path
@@ -705,8 +730,8 @@ export function SchemeBoard({
      these stay the SAME objects byPath holds, so a rail can exclude its own two
      endpoints by identity before routing around the rest. */
   const railObstacles = useMemo<SchemeRect[]>(
-    () => [...layout.nodes, ...layout.decks, ...layout.stacks, ...layout.drafts, ...layout.slots],
-    [layout],
+    () => [...layout.nodes.filter(node => !taskScene || taskScene.shown.has(node.file.path)), ...layout.decks, ...layout.stacks, ...layout.drafts, ...layout.slots],
+    [layout, taskScene],
   );
   /* Task cards owned by a pipeline region (#531) sit at the layout's coordinates
      inside the colored halo; only the remaining free cards run through the
@@ -1030,8 +1055,13 @@ export function SchemeBoard({
      disclosure instead of covering chat content (issue #292 rejection), the
      agent stack / composer, or an open draft's composer (#474). */
   const chipObstacles = useMemo(
-    () => chipObstacleRects(layout.nodes, layout.decks, layout.drafts, cam, keepoutObstacles),
-    [layout, cam, keepoutObstacles],
+    () => {
+      const bandChrome = taskScene ? [...taskScene.bands.map(band => band.geometry.header), ...layout.groups, ...layout.slots,
+        ...taskScene.continuations.flatMap(entry => { const at = layout.byPath.get(entry.key); return at ? [{ x: at.x, y: at.y + at.h, w: at.w, h: 28 }] : []; })
+      ].map(rect => ({ x: rect.x * cam.z + cam.x, y: rect.y * cam.z + cam.y, w: rect.w * cam.z, h: rect.h * cam.z })) : [];
+      return chipObstacleRects(layout.nodes.filter(node => !taskScene || taskScene.shown.has(node.file.path)), layout.decks, layout.drafts, cam, [...keepoutObstacles, ...bandChrome]);
+    },
+    [layout, taskScene, cam, keepoutObstacles],
   );
 
   /* The fit functions change identity on every poll-driven relayout (useFiles
@@ -1336,10 +1366,18 @@ export function SchemeBoard({
     setSelected(mirror.ofKey);
   }, [taskScene, primeAnchor]);
   const followContinuation = useCallback((target: { key: string; bandId: string }) => {
+    const file = files.find(entry => entry.path === target.key);
+    if (file) {
+      // Use the conversation opener's focus obligation: it frames the reader
+      // after history disclosure and wrapping have produced its actual bounds.
+      stableSelect(file);
+      return;
+    }
     setSelected(target.key);
-    const rect = layout.byPath.get(target.key);
+    const rect = layout.byPath.get(target.key)
+      ?? taskScene?.bands.find(band => band.id === target.bandId)?.geometry.header;
     if (rect) centerOn(rect, cam.z);
-  }, [layout, centerOn, cam.z]);
+  }, [files, stableSelect, layout, taskScene, centerOn, cam.z]);
 
   /* The sticky composer owns the create (text, voice, images, deadline); the
      board just adopts the fresh card optimistically and drops the sticky. */
@@ -1465,6 +1503,7 @@ export function SchemeBoard({
             onRemoveFromBoard={bandRemoveFromBoard}
             onSelectMirror={bandSelectMirror}
             onFollowContinuation={followContinuation}
+            onToggleHistory={toggleBandHistory}
           />
         ) : null}
         <GroupsLayer onOpenTaskHistory={openTaskHistory} groups={layout.groups} interactive={!mapMode && !handLike && !session} />
@@ -1475,6 +1514,7 @@ export function SchemeBoard({
             through it (#93 §2.3). */}
         <AgentLinksLayer semanticZoom={Boolean(taskScene)} links={layout.links} loops={layout.loops} byPath={layout.byPath} obstacles={railObstacles} interactive={!mapMode && !handLike && !session} hubInteractive={!handLike && !session} width={layout.width} height={layout.height} />
         <NodesLayer
+          onToggleStageDetails={toggleStageDetails}
           layout={layout}
           visiblePaths={visibleNativePaths}
           expandedPath={expandedNode?.file.path}
