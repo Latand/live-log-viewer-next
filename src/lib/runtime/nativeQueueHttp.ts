@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import { attachmentsAreOrphaned, type AttachmentDeliveryOutcome } from "@/lib/attachmentRetention";
+import type { AttachmentDeliveryOutcome } from "@/lib/attachmentRetention";
 import {
-  admitInboxFilePayload, deleteInboxFiles, InboxFileConflictError, inboxFileBatchToken, inboxFilePaths, inboxFileText,
-  stageInboxFiles, withInboxBatch, type InboxFileUpload, type StagedInboxFiles,
+  admitInboxFilePayload, InboxFileConflictError, inboxFileBatchToken, inboxFilePaths, inboxFileText,
+  settleInboxFiles, stageInboxFiles, withInboxBatch, type InboxFileUpload, type StagedInboxFiles,
 } from "@/lib/inboxFiles";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { structuredDeliveryHostForConversation } from "./structuredDeliveryController";
@@ -119,7 +119,7 @@ export async function handleNativeQueue(request: NextRequest, dependencies: Depe
       if (conflict) outcome = "refused";
       return NextResponse.json({ error: message, recovery: "query or replay the original Viewer idempotency key" }, { status: conflict ? 409 : 503 });
     } finally {
-      if (staged?.created.length && attachmentsAreOrphaned(outcome)) deleteInboxFiles(staged.created);
+      if (staged) settleInboxFiles(staged, outcome);
     }
   };
   if (!files.length) return admit(null);

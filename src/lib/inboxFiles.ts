@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
+import { attachmentsAreOrphaned, type AttachmentDeliveryOutcome } from "@/lib/attachmentRetention";
 import {
   attachmentMegabytes,
   inboxAttachmentName,
@@ -112,9 +113,14 @@ export function admitInboxFilePayload(body: { files?: unknown }): InboxFileAdmis
 
 /**
  * The directory name one send's attachments share. Derived from the caller's
- * own message id, so a retried delivery rewrites the SAME paths rather than
+ * own message id, so a retried delivery lands on the SAME paths rather than
  * orphaning a second copy beside the first — the same reasoning that makes the
  * legacy image path replay its recorded artifacts on retry.
+ *
+ * The key alone names the batch, while the journal scopes a key by
+ * conversation, so one batch can be reached by requests of different
+ * conversations and routes (#1652). Every writer therefore stages through
+ * `stageInboxFiles`, which never changes a file that is already there.
  */
 export function inboxFileBatchToken(clientMessageId: string | null | undefined): string {
   const seed = clientMessageId?.trim();
@@ -156,28 +162,40 @@ export function inboxFilePaths(files: readonly InboxFileUpload[], token: string)
 
 /** Writes one admitted batch and returns the paths, in the order sent. A write
     that throws mid-batch deletes what it already wrote, so no caller can orphan
-    a partial batch (`buildImagePayload`'s contract). */
+    a partial batch (`buildImagePayload`'s contract). A path that already holds
+    the same bytes is reused and one that holds other bytes refuses the batch
+    with `InboxFileConflictError`, as `stageInboxFiles` explains. */
 export function saveInboxFiles(files: readonly InboxFileUpload[], token: string): string[] {
-  const filePaths = inboxFilePaths(files, token);
-  if (!filePaths.length) return [];
-  const written: string[] = [];
-  try {
-    fs.mkdirSync(path.dirname(filePaths[0]!), { recursive: true });
-    files.forEach((file, index) => {
-      fs.writeFileSync(filePaths[index]!, file.data);
-      written.push(filePaths[index]!);
-    });
-  } catch (error) {
-    deleteInboxFiles(written);
-    throw error;
-  }
-  return written;
+  return stageInboxFiles(files, token).filePaths;
 }
 
 /** A path of this batch already holds other bytes: the key it derives from
     belongs to a different request, whose attachment is not this one's to
     replace. */
 export class InboxFileConflictError extends Error {}
+
+/* Paths a request created and may still delete on a terminal refusal (#1652).
+   A path enters when a staging call creates it. It leaves when its request
+   deletes or keeps it, and the moment any other request stages it too: from
+   then on a message that request had admitted may name it, so no request may
+   delete it. Nothing else can make a path deletable, so a writer that reaches a
+   file it did not create can never remove it, whichever route or conversation
+   it came from.
+
+   A route that keeps its files without saying so (the legacy
+   `/api/conversation-host` send) leaves its entries behind, so the set is
+   bounded and forgets its oldest entries first. A refused request whose entry
+   was forgotten keeps its bytes, the same result as an uncertain delivery.
+   Held on globalThis for the same reason the batch turns are. */
+const MAX_DELETABLE_PATHS = 1024;
+const deletable: Set<string> = ((globalThis as { __llvInboxDeletablePaths?: Set<string> })
+  .__llvInboxDeletablePaths ??= new Set());
+
+function markDeletable(filePath: string): void {
+  deletable.delete(filePath);
+  deletable.add(filePath);
+  while (deletable.size > MAX_DELETABLE_PATHS) deletable.delete(deletable.values().next().value!);
+}
 
 export interface StagedInboxFiles {
   filePaths: string[];
@@ -188,18 +206,18 @@ export interface StagedInboxFiles {
 }
 
 /**
- * Writes one admitted batch for a replayable command, without ever changing a
- * file that is already there (#1652).
+ * Writes one admitted batch, without ever changing a file that is already
+ * there (#1652). Every writer of the inbox batches goes through here.
  *
- * The batch directory derives from the command's key, so a replay lands on the
- * paths its first attempt wrote. `saveInboxFiles` rewrites them, which is
- * harmless for identical bytes and destroys an accepted attachment for
- * different ones, and a caller that then releases the batch on a refusal
- * deletes a file an admitted message names. Here each file is published by
- * linking a finished temporary copy into place, so a path is either absent or
- * whole; one that already holds the same bytes is reused and reported as not
- * created, and one that holds other bytes refuses the batch. A failure releases
- * only what this call created.
+ * The batch directory derives from the request's key, so a replay lands on the
+ * paths its first attempt wrote, and so does any other request under the same
+ * key, from another conversation or route. Rewriting those paths is harmless
+ * for identical bytes and destroys an accepted attachment for different ones,
+ * and deleting them on a refusal removes a file an admitted message names. Here
+ * each file is published by linking a finished temporary copy into place, so a
+ * path is either absent or whole; one that already holds the same bytes is
+ * reused and reported as not created, and one that holds other bytes refuses
+ * the batch. A failure releases only what this call created.
  */
 export function stageInboxFiles(files: readonly InboxFileUpload[], token: string): StagedInboxFiles {
   const filePaths = inboxFilePaths(files, token);
@@ -215,12 +233,16 @@ export function stageInboxFiles(files: readonly InboxFileUpload[], token: string
       try {
         fs.linkSync(temporary, target);
         created.push(target);
+        markDeletable(target);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
         const existing = fs.statSync(target);
         if (existing.size !== file.data.byteLength || !fs.readFileSync(target).equals(file.data)) {
           throw new InboxFileConflictError(`${path.basename(target)} is already attached under this request with different contents`);
         }
+        /* Taken up by this request as well, so whoever created it can no
+           longer delete it. */
+        deletable.delete(target);
       } finally {
         try { fs.unlinkSync(temporary); } catch { /* already gone */ }
       }
@@ -251,18 +273,40 @@ const batchTurns: Map<string, Promise<void>> = ((globalThis as { __llvInboxBatch
  * own timeout, which also bounds how long a waiting request is delayed.
  */
 export async function withInboxBatch<T>(token: string, work: () => Promise<T>): Promise<T> {
+  const leave = await enterInboxBatch(token);
+  try {
+    return await work();
+  } finally {
+    leave();
+  }
+}
+
+/** `withInboxBatch` for a request whose stage, admission and release do not
+    fit one callback: resolves once the batch is this request's turn, with the
+    function that ends it. The caller must call it exactly once, after its
+    release. */
+export async function enterInboxBatch(token: string): Promise<() => void> {
   const previous = batchTurns.get(token);
   let finish!: () => void;
   const turn = new Promise<void>((resolve) => { finish = resolve; });
   const tail = previous ? previous.then(() => turn) : turn;
   batchTurns.set(token, tail);
-  try {
-    if (previous) await previous;
-    return await work();
-  } finally {
+  if (previous) await previous;
+  return () => {
     finish();
     if (batchTurns.get(token) === tail) batchTurns.delete(token);
+  };
+}
+
+/** Ends one request's claim on the files it staged. A TERMINAL refusal deletes
+    the ones it created that no other request has staged since (#1224); any
+    other outcome keeps them, and they are nobody's to delete from then on. */
+export function settleInboxFiles(staged: StagedInboxFiles, outcome: AttachmentDeliveryOutcome): void {
+  if (attachmentsAreOrphaned(outcome)) {
+    deleteInboxFiles(staged.created);
+    return;
   }
+  for (const filePath of staged.created) deletable.delete(filePath);
 }
 
 /**
@@ -270,11 +314,16 @@ export async function withInboxBatch<T>(token: string, work: () => Promise<T>): 
  * agent, and the batch directory once it holds nothing — best effort, exactly
  * like `deleteInboxImages`, since a delivery that already succeeded never calls
  * this (the agent still has to open the path it was given).
+ *
+ * Only a path its request created and nobody else has staged since is removed
+ * (#1652): a caller may hand over every path its message names, and one it
+ * found already there belongs to a request that may have been admitted.
  */
 export function deleteInboxFiles(paths: readonly string[]): void {
   const root = inboxFilesDir();
   const dirs = new Set<string>();
   for (const filePath of paths) {
+    if (!deletable.delete(filePath)) continue;
     try {
       fs.unlinkSync(filePath);
     } catch {
@@ -294,7 +343,8 @@ export function deleteInboxFiles(paths: readonly string[]): void {
 
 /** Saves an admitted batch and folds the resulting paths into the delivered
     text, one per line after it — the same shape `buildImagePayload` gives an
-    agent for a pasted image. */
+    agent for a pasted image. A caller that is refused may hand every path back
+    to `deleteInboxFiles`, which removes only the ones this call created. */
 export function buildFilePayload(
   text: string,
   files: readonly InboxFileUpload[],

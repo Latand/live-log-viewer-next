@@ -350,3 +350,80 @@ test("a replay after the message was delivered answers the delivered receipt and
   expect(fs.readFileSync(path.join(batchDir("queue-delivered"), "trace.bin")).equals(binary)).toBeTrue();
   journal.close();
 });
+
+/* An ordinary send reaches the same batch with the same key, from any
+   conversation, and takes its turn with the queue (#1652). */
+const { handleRuntimeCommand } = await import("./http");
+type SendDependencies = NonNullable<Parameters<typeof handleRuntimeCommand>[2]>;
+type SendAdmission = Awaited<ReturnType<NonNullable<SendDependencies["enqueue"]>>>;
+
+/** An ordinary send whose admission waits at the door until the test lets it
+    through, then answers `answer`. */
+function heldSend(answer: SendAdmission) {
+  let release!: () => void;
+  let reached!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const arrived = new Promise<void>((resolve) => { reached = resolve; });
+  const send = (body: Record<string, unknown>) => handleRuntimeCommand(new NextRequest("http://localhost/api/runtime/send", {
+    method: "POST", headers: { host: "localhost", "content-type": "application/json" }, body: JSON.stringify(body),
+  }), "send", {
+    enabled: () => true, structuredEnabled: () => true, client: () => null,
+    enqueue: async () => { reached(); await gate; return answer; },
+  });
+  return { send, release, arrived };
+}
+
+const sendAccepted = { ok: true, structured: true, target: "conversation_other", outcome: "queued", operationId: "op_send",
+  receipt: { operationId: "op_send", status: "queued" } } as unknown as SendAdmission;
+const sendRefused = { ok: false, structured: true, outcome: "failed", error: "structured host ownership is unavailable",
+  status: 409 } as unknown as SendAdmission;
+
+test("a queued message under the key an ordinary send is still delivering waits for that send's refusal to finish", async () => {
+  const journal = makeJournal();
+  const held = heldSend(sendRefused);
+  const files = [attachment("trace.bin", binary)];
+  const send = held.send({ conversationId: "conversation_other", idempotencyKey: "cross-route", text: "ordinary send", files });
+  await held.arrived;
+  const queue = post(add("cross-route", { files }), journal);
+  await Bun.sleep(20);
+  const queuedWhileHeld = journal.nativeQueueRead(conversationId);
+  held.release();
+  const [sendAnswer, queueAnswer] = await Promise.all([send, queue]);
+  const file = path.join(batchDir("cross-route"), "trace.bin");
+  /* The admitted message's file is there, whole, whatever the refused send released. */
+  expect(fs.existsSync(file) && fs.readFileSync(file).equals(binary)).toBeTrue();
+  /* The send still held the batch, so the queue had not reached the journal. */
+  expect(queuedWhileHeld).toEqual([]);
+  expect(sendAnswer.status).toBe(409);
+  expect(queueAnswer.status).toBe(202);
+  expect(journal.nativeQueueRead(conversationId).map((entry) => entry.versions[0]!.text)).toEqual([`read the attached trace\n${file}`]);
+  journal.close();
+});
+
+test("an ordinary send under the key a queued message is still admitting waits for the queue's refusal to finish", async () => {
+  const journal = makeJournal();
+  const held = heldClient(journal, "native queue entry revision changed");
+  const files = [attachment("trace.bin", binary)];
+  const queue = held.send(add("cross-route-queue", { files }));
+  await held.arrived;
+  const sent: string[] = [];
+  const send = handleRuntimeCommand(new NextRequest("http://localhost/api/runtime/send", {
+    method: "POST", headers: { host: "localhost", "content-type": "application/json" },
+    body: JSON.stringify({ conversationId: "conversation_other", idempotencyKey: "cross-route-queue", text: "ordinary send", files }),
+  }), "send", {
+    enabled: () => true, structuredEnabled: () => true, client: () => null,
+    enqueue: async (input) => { sent.push(input.text); return sendAccepted; },
+  });
+  await Bun.sleep(20);
+  const sentWhileHeld = [...sent];
+  held.release();
+  const [queueAnswer, sendAnswer] = await Promise.all([queue, send]);
+  const file = path.join(batchDir("cross-route-queue"), "trace.bin");
+  /* The admitted send's file is there, whole, whatever the refused queue released. */
+  expect(fs.existsSync(file) && fs.readFileSync(file).equals(binary)).toBeTrue();
+  expect(sentWhileHeld).toEqual([]);
+  expect(queueAnswer.status).toBe(409);
+  expect(sendAnswer.status).toBe(202);
+  expect(sent).toEqual([`ordinary send\n${file}`]);
+  journal.close();
+});

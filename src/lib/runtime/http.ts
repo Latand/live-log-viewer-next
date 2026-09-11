@@ -4,7 +4,8 @@ import { NextRequest, NextResponse } from "next/server";
 import crypto from "node:crypto";
 
 import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
-import { attachmentsAreOrphaned, structuredAttachmentOutcome, type AttachmentDeliveryOutcome } from "@/lib/attachmentRetention";
+import { structuredAttachmentOutcome, type AttachmentDeliveryOutcome } from "@/lib/attachmentRetention";
+import type { InboxFileUpload, StagedInboxFiles } from "@/lib/inboxFiles";
 import { directOperatorActivityAuthority } from "@/lib/agent/operatorAuthority";
 import { retireReplySuggestionsOnOperatorMessage } from "@/lib/suggestions/store";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
@@ -108,7 +109,12 @@ function retryRecordUnavailable(recorded: Evidence<boolean>): NextResponse {
  * response's status cannot tell a refusal apart from an uncertain delivery.
  */
 interface CommandAttachments {
-  filePaths: string[];
+  /** Admitted, and written only once the command they ride is valid. */
+  files: InboxFileUpload[];
+  batch: string;
+  staged: StagedInboxFiles | null;
+  /** Ends this request's turn on the batch (#1652). */
+  leave: (() => void) | null;
   /** Starts `refused`: every exit above the delivery attempt is terminal —
       nothing was ever handed over, so nothing can be reading these paths. */
   outcome: AttachmentDeliveryOutcome;
@@ -158,27 +164,26 @@ async function dispatchRuntimeCommand(
          no engine image capability at all. Folded BEFORE the command is parsed,
          because an attachment-only send has no text of its own to validate. */
       if (body.files !== undefined && body.files !== null) {
-        const { admitInboxFilePayload, buildFilePayload, inboxFileBatchToken } = await import("@/lib/inboxFiles");
+        const { admitInboxFilePayload, inboxFileBatchToken, inboxFilePaths, inboxFileText } = await import("@/lib/inboxFiles");
         const admittedFiles = admitInboxFilePayload({ files: body.files });
         if (admittedFiles.error) {
           return NextResponse.json({ error: admittedFiles.error.error }, { status: admittedFiles.error.status });
         }
         /* The uploaded bytes never reach `parseRuntimeCommand`. Its 256 KiB
-           ceiling bounds the COMMAND — and by this point the attachment is on
-           disk and represented by a path, so leaving the base64 on the object
-           would refuse every document past ~190 KB with an error naming neither
-           the file nor the real limit. The images branch above reduces its own
+           ceiling bounds the COMMAND — and the attachment is represented by the
+           path it will be written to, so leaving the base64 on the object would
+           refuse every document past ~190 KB with an error naming neither the
+           file nor the real limit. The images branch above reduces its own
            payload to refs for exactly this reason. */
         const parsed: Record<string, unknown> = { ...(parseValue as Record<string, unknown>) };
         delete parsed.files;
         if (admittedFiles.files.length) {
-          const bundle = buildFilePayload(
+          attachments.files = admittedFiles.files;
+          attachments.batch = inboxFileBatchToken(typeof body.idempotencyKey === "string" ? body.idempotencyKey : null);
+          parsed.text = inboxFileText(
             typeof parsed.text === "string" ? parsed.text : "",
-            admittedFiles.files,
-            inboxFileBatchToken(typeof body.idempotencyKey === "string" ? body.idempotencyKey : null),
+            inboxFilePaths(admittedFiles.files, attachments.batch),
           );
-          attachments.filePaths = bundle.filePaths;
-          parsed.text = bundle.payload;
         }
         parseValue = parsed;
       }
@@ -186,6 +191,23 @@ async function dispatchRuntimeCommand(
     command = parseRuntimeCommand(kind, parseValue);
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "runtime command is invalid" }, { status: 400 });
+  }
+  /* #1652: the batch derives from the key alone, so a queued message or a send
+     of another conversation may already hold these paths. The files are
+     written the way the queue writes them — once the command is valid, never
+     over a file already there — and staging, delivery and the release below
+     take one turn per batch with every other request under the key. */
+  if (attachments.files.length) {
+    const { enterInboxBatch, InboxFileConflictError, stageInboxFiles } = await import("@/lib/inboxFiles");
+    attachments.leave = await enterInboxBatch(attachments.batch);
+    try {
+      attachments.staged = stageInboxFiles(attachments.files, attachments.batch);
+    } catch (error) {
+      if (error instanceof InboxFileConflictError) {
+        return NextResponse.json({ error: error.message, recovery: "query or replay the original Viewer idempotency key" }, { status: 409 });
+      }
+      return NextResponse.json({ error: "the attachments could not be saved to the inbox", retryable: true }, { status: 503 });
+    }
   }
   const client = dependencies.client();
   try {
@@ -310,12 +332,18 @@ export async function handleRuntimeCommand(
   kind: RuntimeOperationKind,
   dependencies: RuntimeHttpDependencies = DEFAULT_DEPENDENCIES,
 ): Promise<NextResponse> {
-  const attachments: CommandAttachments = { filePaths: [], outcome: "refused" };
-  const response = await dispatchRuntimeCommand(request, kind, dependencies, attachments);
-  if (attachments.filePaths.length && attachmentsAreOrphaned(attachments.outcome)) {
-    (await import("@/lib/inboxFiles")).deleteInboxFiles(attachments.filePaths);
+  const attachments: CommandAttachments = { files: [], batch: "", staged: null, leave: null, outcome: "refused" };
+  try {
+    return await dispatchRuntimeCommand(request, kind, dependencies, attachments);
+  } finally {
+    /* Only what this request created, and only while no other request has
+       staged it since, is released; the turn ends after that. */
+    try {
+      if (attachments.staged) (await import("@/lib/inboxFiles")).settleInboxFiles(attachments.staged, attachments.outcome);
+    } finally {
+      attachments.leave?.();
+    }
   }
-  return response;
 }
 
 export interface RuntimeOperationQueryDependencies {
