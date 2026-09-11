@@ -6,7 +6,9 @@ import type { RuntimeReceipt } from "@/components/runtime/runtimeModel";
 import type { RuntimeSessionView } from "@/hooks/useRuntime";
 import { translate } from "@/lib/i18n";
 
-import { deliveryAttemptKey, mergeRuntimeReceipts, RuntimeComposerReceipts, structuredComposerSession } from "./TmuxComposer";
+import { payloadAttemptState } from "@/lib/composerSubmissionPayloads";
+
+import { deliveryAttemptKey, mergeRuntimeReceipts, payloadReceiptEvidence, RuntimeComposerReceipts, structuredComposerSession } from "./TmuxComposer";
 
 function runtimeSession(structuredControlsEnabled: boolean): RuntimeSessionView {
   return {
@@ -503,7 +505,7 @@ test("a retry leaf takes ownership and settles the original generation once", ()
   expect(second.settled).toEqual([]);
 });
 
-test("pending generations persist immutable image snapshots per conversation and reload bounded", () => {
+test("pending generations retain every unresolved identity across reload", () => {
   /* A remount or refresh must retain the exact generation bytes needed for an
      idempotent retry. Preview URLs are rebuilt from the persisted image body. */
   const backing = new Map<string, string>();
@@ -528,7 +530,7 @@ test("pending generations persist immutable image snapshots per conversation and
     }));
     writePendingDeliveries("conv-persist", entries);
     const reloaded = readPendingDeliveries("conv-persist");
-    expect(reloaded).toHaveLength(8);
+    expect(reloaded).toHaveLength(10);
     expect(reloaded[0]).toEqual({
       key: "key-0",
       text: "ask 0",
@@ -542,6 +544,12 @@ test("pending generations persist immutable image snapshots per conversation and
       operationId: "op-key-0",
       selectedContext: { version: 1, state: "none", capturedAt: "2026-09-05T12:00:00.000Z" },
     });
+    writePendingDeliveries("conv-persist", [{ ...entries[0]!, payloadConversationId: "original-owner" }]);
+    const pointer = readPendingDeliveries("conv-persist")[0]!;
+    expect(pointer.payloadConversationId).toBe("original-owner");
+    expect(pointer.payloadComplete).toBe(false);
+    expect(pointer.images).toEqual([]);
+    expect(JSON.parse(backing.get("llvPendingSend:conv-persist")!)[0].images).toBeUndefined();
     writePendingDeliveries("conv-persist", []);
     expect(readPendingDeliveries("conv-persist")).toEqual([]);
     backing.set("llvPendingSend:conv-corrupt", "{not json");
@@ -627,4 +635,28 @@ test("identity adoption moves composer records across id rotations in both direc
     if (previous === undefined) delete globalStore.sessionStorage;
     else globalStore.sessionStorage = previous;
   }
+});
+
+test("a retained message follows its journal retry leaf in both receipt shapes", () => {
+  const base = { conversationId: "conv-one", kind: "send" as const, at: "2026-09-11T00:00:00.000Z" };
+  const admitted: RuntimeReceipt = { ...base, operationId: "op-original", idempotencyKey: "key-one", status: "failed", revision: 2 };
+  /* A live event carries the raw leaf; a snapshot presents it under the
+     admitted operation. Both are the same journal fact at revision 3. */
+  const rawLeaf = { ...base, operationId: "retry_leaf", idempotencyKey: "retry_leaf", retryOfOperationId: "op-original",
+    presentationOperationId: "op-original", presentationRevision: 3, status: "queued", revision: 1 } as RuntimeReceipt;
+  const presentedLeaf = { ...base, operationId: "op-original", idempotencyKey: "retry_leaf", retryOfOperationId: "op-original",
+    status: "delivered", revision: 4 } as RuntimeReceipt;
+  const foreign = { ...base, operationId: "op-other", idempotencyKey: "retry_other", retryOfOperationId: "op-other", status: "delivered", revision: 9 } as RuntimeReceipt;
+  const marker = { ...admitted, status: "uncertain", resend: "verify-first", retryAuthorized: true, revision: 5 } as RuntimeReceipt;
+  const row = { conversationId: "conv-one", key: "key-one", operationId: null };
+
+  const evidence = payloadReceiptEvidence(row, [presentedLeaf, foreign, marker, rawLeaf, admitted]);
+  expect(evidence.map((receipt) => [receipt.operationId, receipt.revision, receipt.status])).toEqual([
+    ["op-original", 2, "failed"], ["op-original", 3, "queued"], ["op-original", 4, "delivered"],
+  ]);
+  expect(payloadReceiptEvidence({ ...row, conversationId: "conv-two" }, evidence)).toEqual([]);
+  /* The durable state reads the same chain: the current attempt is the leaf. */
+  expect(payloadAttemptState("key-one", evidence)).toMatchObject({ operationId: "op-original", current: { status: "delivered", revision: 4 } });
+  /* A leaf alone names no message: without the admitted operation it binds nothing. */
+  expect(payloadAttemptState("key-one", [presentedLeaf]).operationId).toBeNull();
 });

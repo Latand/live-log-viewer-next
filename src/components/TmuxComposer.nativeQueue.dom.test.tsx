@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { act } from "react";
 import { installActEnv } from "@/test-helpers/actEnv";
 import { Window } from "happy-dom";
@@ -15,10 +15,12 @@ import type { RuntimeSessionView } from "@/hooks/useRuntime";
 import { agentCapabilitiesFromViews } from "./useAgentCapabilities";
 import { writeProfile } from "./runtimeProfile";
 import { appendComposerDraft, TmuxComposer } from "./TmuxComposer";
-import { resetRetainedQueueAdmissionsForTests } from "./retainedQueueAdmissions";
+import { readRetainedQueueAdmissions, resetRetainedQueueAdmissionsForTests } from "./retainedQueueAdmissions";
 import { readOutbox, resetOutboxForTests } from "./conversation/outbox";
 import { setTmuxComposerRuntimeDependenciesForTests } from "./tmuxComposerRuntime";
 import { accessoryReserve, mobileComposerCeiling, mobileComposerUnitMax } from "@/lib/composerScroll";
+import { composerSubmissionPayloads, composerSubmissionSaving } from "@/lib/composerSubmissionPayloads";
+import { installComposerStorageForTests } from "@/test-helpers/composerStorage";
 
 /**
  * The composer's two submissions, on a Codex conversation that can queue
@@ -589,13 +591,13 @@ test("a host that cannot be steered offers no steer at all", async () => {
 
 /** Drop one attachment into the composer, the way the draft-attachment suite
     does, and let its decode settle. */
-async function stage(host: HTMLElement, file: { name: string; type: string; size: number }): Promise<void> {
+async function stage(host: HTMLElement, file: { name: string; type: string; size: number }, dataUrl = "data:image/png;base64,aW52ZW50ZWQ="): Promise<void> {
   const textarea = host.querySelector("textarea") as HTMLTextAreaElement;
   const propsKey = Object.keys(textarea).find((key) => key.startsWith("__reactProps$"))!;
   const props = (textarea as unknown as Record<string, { onDrop(event: unknown): void }>)[propsKey]!;
   await settle(() => props.onDrop({ dataTransfer: { files: [file] }, preventDefault() {}, stopPropagation() {} }));
   await act(async () => {
-    QueuedReader.settleAll("data:image/png;base64,aW52ZW50ZWQ=");
+    QueuedReader.settleAll(dataUrl);
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
 }
@@ -808,6 +810,10 @@ test("everything above the input shares ONE region; the input and Send never yie
 });
 
 test("a rendered queue panel takes its room off the phone field's grow ceiling", async () => {
+  // This case measures the queue alone. Happy DOM has no IndexedDB, which
+  // would otherwise add a separate, correctly visible recovery-error panel.
+  // Real storage failures and their compact controls run in Chromium.
+  const savedPayloads = spyOn(composerSubmissionPayloads, "list").mockResolvedValue([]);
   /* The other half of the same budget, on the phone, where the form is at its
      `38dvh` cap and the panel is the only part that can shrink: a draft grown to
      the field's old ceiling left the panel a 2px border with nothing inside it,
@@ -848,10 +854,372 @@ test("a rendered queue panel takes its room off the phone field's grow ceiling",
        draft, exactly as it was before the queue existed. */
     expect(ceilingAlone).toBe(mobileComposerCeiling(dom.innerHeight, dom.innerHeight));
   } finally {
+    savedPayloads.mockRestore();
     (dom as unknown as { matchMedia: (query: string) => unknown }).matchMedia = (query: string) => ({
       matches: false, media: query, addEventListener() {}, removeEventListener() {},
     });
     if (original) Object.defineProperty(proto, "scrollHeight", original);
     else Reflect.deleteProperty(proto, "scrollHeight");
   }
+});
+
+/* ── A large hand-off whose acknowledgement is held ─────────────────────────
+   Its envelope goes to IndexedDB before the wire, and the journal's answer can
+   take seconds to come back over a 16 MiB upload. Only that preparation may
+   hold the composer: once the operation is durable, Enter is the operator's
+   again, and the answer, whenever it lands, settles that one operation and
+   nothing the operator has written since. */
+
+const LARGE_IMAGE = `data:image/png;base64,${"A".repeat(400_000)}`;
+
+async function until(check: () => boolean, what: string): Promise<void> {
+  for (let attempt = 0; attempt < 200; attempt++) {
+    if (check()) return;
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 5)); });
+  }
+  throw new Error(`timed out waiting for ${what}`);
+}
+
+async function withHeldLargeHandOff(
+  run: (context: {
+    host: HTMLElement;
+    answer: (reply: () => Promise<{ status: number; body: Record<string, unknown> }>) => Promise<void>;
+  }) => Promise<void>,
+  options: { document?: boolean } = {},
+): Promise<void> {
+  const storage = installComposerStorageForTests();
+  const previous = queueTransport.write;
+  const held: Array<(reply: () => Promise<{ status: number; body: Record<string, unknown> }>) => void> = [];
+  (queueTransport as { write: NativeQueueDependencies["write"] }).write = (body) => {
+    queueWrites.push(body);
+    return new Promise((resolve, reject) => {
+      held.push((reply) => { reply().then(resolve, reject); });
+    });
+  };
+  const { host, root } = await mount();
+  try {
+    await stage(host, { name: "large.png", type: "image/png", size: 300_000 }, LARGE_IMAGE);
+    if (options.document) await stage(host, { name: "fixture.bin", type: "application/octet-stream", size: 8 }, DOCUMENT);
+    await settle(() => appendComposerDraft(CARD, "large hand-off"));
+    await settle(() => press(host.querySelector("textarea") as HTMLTextAreaElement, "Enter", { altKey: true }));
+    await until(() => queueWrites.length === 1, "the large hand-off to reach the wire");
+    await run({
+      host,
+      answer: async (reply) => {
+        await act(async () => {
+          held.shift()!(reply);
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        });
+      },
+    });
+  } finally {
+    (queueTransport as { write: NativeQueueDependencies["write"] }).write = previous;
+    await act(async () => root.unmount());
+    storage.uninstall();
+  }
+}
+
+test("a held large acknowledgement leaves Enter working for the next ordinary command", async () => {
+  await withHeldLargeHandOff(async ({ host, answer }) => {
+    /* The envelope is durable and the composer is the operator's again. */
+    expect((host.querySelector("textarea") as HTMLTextAreaElement).value).toBe("");
+    expect(host.querySelectorAll('[data-testid="attachment-tile"]')).toHaveLength(0);
+    const [retained] = readRetainedQueueAdmissions(CARD);
+    expect(retained?.key).toBe(queueWrites[0]!.idempotencyKey as string);
+    expect(retained?.payload?.images).toBe(1);
+
+    /* An ordinary small command goes at once, without waiting on the answer. */
+    await settle(() => appendComposerDraft(CARD, "small command"));
+    await settle(() => press(host.querySelector("textarea") as HTMLTextAreaElement, "Enter"));
+    expect(readOutbox(CARD).map((entry) => entry.text)).toEqual(["small command"]);
+    await until(() => sends.length === 1, "the ordinary command to be sent");
+    expect(sends[0]).toMatchObject({ text: "small command", policy: "interrupt-active" });
+    expect(queueWrites).toHaveLength(1);
+    expect(composerSubmissionSaving(CARD)).toBeFalse();
+
+    /* The held answer settles only its own operation. */
+    await answer(async () => journalReceipt(queueWrites[0]!));
+    expect(readRetainedQueueAdmissions(CARD)).toEqual([]);
+    expect((host.querySelector("textarea") as HTMLTextAreaElement).value).toBe("");
+    expect(host.querySelector('[data-testid="native-queue-unresolved"]')).toBeNull();
+  });
+});
+
+test("a held large hand-off still admits one press: a second Alt+Enter during its retention mints nothing", async () => {
+  const storage = installComposerStorageForTests();
+  const previous = queueTransport.write;
+  (queueTransport as { write: NativeQueueDependencies["write"] }).write = async (body) => {
+    queueWrites.push(body);
+    return new Promise(() => {});
+  };
+  const { host, root } = await mount();
+  try {
+    await stage(host, { name: "large.png", type: "image/png", size: 300_000 }, LARGE_IMAGE);
+    await settle(() => appendComposerDraft(CARD, "pressed twice"));
+    await act(async () => {
+      const textarea = host.querySelector("textarea") as HTMLTextAreaElement;
+      press(textarea, "Enter", { altKey: true });
+      press(textarea, "Enter", { altKey: true });
+      /* Words typed while it saves belong to the next message. */
+      appendComposerDraft(CARD, "typed while saving");
+    });
+    await until(() => queueWrites.length === 1, "the one admission");
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(queueWrites).toHaveLength(1);
+    expect(queueWrites[0]!.text).toBe("pressed twice");
+    expect(readRetainedQueueAdmissions(CARD)).toHaveLength(1);
+    expect((host.querySelector("textarea") as HTMLTextAreaElement).value).toContain("typed while saving");
+    expect(host.querySelectorAll('[data-testid="attachment-tile"]')).toHaveLength(0);
+  } finally {
+    (queueTransport as { write: NativeQueueDependencies["write"] }).write = previous;
+    await act(async () => root.unmount());
+    storage.uninstall();
+  }
+});
+
+/** Types into the composer the way an onChange would deliver it. */
+async function typeDraft(host: HTMLElement, value: string): Promise<void> {
+  const textarea = host.querySelector("textarea") as HTMLTextAreaElement;
+  const propsKey = Object.keys(textarea).find((key) => key.startsWith("__reactProps$"))!;
+  const props = (textarea as unknown as Record<string, { onChange(event: unknown): void }>)[propsKey]!;
+  await settle(() => props.onChange({ target: { value }, currentTarget: { value } }));
+}
+
+const click = async (element: Element | null) => {
+  if (!element) throw new Error("nothing to click");
+  await settle(() => element.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
+};
+
+const tileStates = (host: HTMLElement) => [...host.querySelectorAll('[data-testid="attachment-tile"]')]
+  .map((tile) => `${tile.getAttribute("data-kind")}:${tile.getAttribute("data-status")}`).sort();
+
+test("a held large refusal never lands on the newer draft, and its copy stays until it is put back or discarded", async () => {
+  const refusal = async () => ({ status: 409, body: { error: "native queue host or account ownership changed" } });
+  await withHeldLargeHandOff(async ({ host, answer }) => {
+    await settle(() => appendComposerDraft(CARD, "newer words"));
+    await stage(host, { name: "newer.png", type: "image/png", size: 12 });
+    await answer(refusal);
+    expect(host.textContent).toContain("ownership changed");
+    expect((host.querySelector("textarea") as HTMLTextAreaElement).value).toBe("newer words");
+    expect(host.querySelectorAll('[data-testid="attachment-tile"]')).toHaveLength(1);
+    /* #1652: a refusal admitted nothing, and the refused message is still the
+       operator's. It stays, bytes and all, as a refused copy. */
+    const [kept] = readRetainedQueueAdmissions(CARD);
+    expect(kept).toMatchObject({ key: queueWrites[0]!.idempotencyKey, refused: { reason: "native queue host or account ownership changed" }, payload: { images: 1, files: 1 } });
+    const row = host.querySelector('[data-testid="native-queue-refused-row"]');
+    expect(row?.textContent).toContain("large hand-off");
+    expect(host.querySelector('[data-testid="native-queue-unresolved-retry"]')).toBeNull();
+
+    /* Never over the newer draft. */
+    await click(row!.querySelector('[data-testid="native-queue-refused-restore"]'));
+    await until(() => host.textContent?.includes("another draft") ?? false, "the occupied-composer refusal");
+    expect((host.querySelector("textarea") as HTMLTextAreaElement).value).toBe("newer words");
+    expect(readRetainedQueueAdmissions(CARD)).toHaveLength(1);
+
+    /* Once the composer is clear, the whole message comes back from the copy. */
+    await click(host.querySelector('[data-testid="attachment-tile"] button[aria-label="Remove image 1"]'));
+    await typeDraft(host, "");
+    await click(host.querySelector('[data-testid="native-queue-refused-restore"]'));
+    await until(() => (host.querySelector("textarea") as HTMLTextAreaElement).value === "large hand-off", "the refused message to come back");
+    expect(tileStates(host)).toEqual(["file:ready", "image:ready"]);
+    expect(readRetainedQueueAdmissions(CARD)).toHaveLength(1);
+
+    /* Queued again, it is a new operation, under the binding it has now, and
+       the new operation takes the refused copy's place. */
+    await settle(() => press(host.querySelector("textarea") as HTMLTextAreaElement, "Enter", { altKey: true }));
+    await until(() => queueWrites.length === 2, "the second hand-off");
+    expect(queueWrites[1]!.idempotencyKey).not.toBe(queueWrites[0]!.idempotencyKey);
+    expect(queueWrites[1]!.files).toEqual(queueWrites[0]!.files);
+    expect(JSON.stringify(queueWrites[1]!.images)).toBe(JSON.stringify(queueWrites[0]!.images));
+    expect(readRetainedQueueAdmissions(CARD).map((entry) => [entry.key, Boolean(entry.refused)]))
+      .toEqual([[String(queueWrites[1]!.idempotencyKey), false]]);
+    expect(host.querySelector('[data-testid="native-queue-refused-row"]')).toBeNull();
+    await answer(async () => journalReceipt(queueWrites[1]!));
+    expect(readRetainedQueueAdmissions(CARD)).toEqual([]);
+  }, { document: true });
+  document.body.replaceChildren();
+  sessionStorage.clear();
+  resetRetainedQueueAdmissionsForTests();
+  queueWrites = [];
+  await withHeldLargeHandOff(async ({ host, answer }) => {
+    await answer(refusal);
+    expect((host.querySelector("textarea") as HTMLTextAreaElement).value).toBe("large hand-off");
+    expect(host.querySelectorAll('[data-testid="attachment-tile"]')).toHaveLength(1);
+    expect(readRetainedQueueAdmissions(CARD)[0]?.refused).toBeDefined();
+  });
+});
+
+test("a refused copy survives a reload that loses the draft's bytes, and is gone only when discarded", async () => {
+  const refusal = async () => ({ status: 409, body: { error: "native queue host or account ownership changed" } });
+  const storage = installComposerStorageForTests();
+  const previous = queueTransport.write;
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  (queueTransport as { write: NativeQueueDependencies["write"] }).write = async (body) => {
+    queueWrites.push(body);
+    await held;
+    return refusal();
+  };
+  try {
+    const first = await mount();
+    await stage(first.host, { name: "large.png", type: "image/png", size: 300_000 }, LARGE_IMAGE);
+    await stage(first.host, { name: "fixture.bin", type: "application/octet-stream", size: 8 }, DOCUMENT);
+    await settle(() => appendComposerDraft(CARD, "refused then reloaded"));
+    await settle(() => press(first.host.querySelector("textarea") as HTMLTextAreaElement, "Enter", { altKey: true }));
+    await until(() => queueWrites.length === 1, "the hand-off");
+    await act(async () => { release(); await new Promise((resolve) => setTimeout(resolve, 0)); });
+    await until(() => (first.host.querySelector("textarea") as HTMLTextAreaElement).value === "refused then reloaded", "the draft to come back");
+    await act(async () => first.root.unmount());
+    document.body.replaceChildren();
+
+    /* A reload: only what the browser persisted. The draft kept its words and
+       names its document, whose bytes no draft keeps. */
+    resetRetainedQueueAdmissionsForTests();
+    const second = await mount();
+    try {
+      expect((second.host.querySelector("textarea") as HTMLTextAreaElement).value).toBe("refused then reloaded");
+      expect(tileStates(second.host)).toContain("file:error");
+      const row = second.host.querySelector('[data-testid="native-queue-refused-row"]');
+      expect(row?.textContent).toContain("refused then reloaded");
+      expect(row?.textContent).toContain("ownership changed");
+
+      /* The remnant is this same message, so the copy replaces it whole. */
+      await click(row!.querySelector('[data-testid="native-queue-refused-restore"]'));
+      await until(() => tileStates(second.host).join() === "file:ready,image:ready", "the whole message to come back");
+      expect((second.host.querySelector("textarea") as HTMLTextAreaElement).value).toBe("refused then reloaded");
+
+      await click(second.host.querySelector('[data-testid="native-queue-refused-discard"]'));
+      expect(readRetainedQueueAdmissions(CARD)).toEqual([]);
+      expect(sessionStorage.getItem("llvQueueAdmission:" + CARD)).toBeNull();
+      expect(second.host.querySelector('[data-testid="native-queue-refused-row"]')).toBeNull();
+      /* Discarding the copy leaves the composer alone. */
+      expect(tileStates(second.host)).toEqual(["file:ready", "image:ready"]);
+      expect(queueWrites).toHaveLength(1);
+    } finally {
+      await act(async () => second.root.unmount());
+    }
+  } finally {
+    (queueTransport as { write: NativeQueueDependencies["write"] }).write = previous;
+    storage.uninstall();
+  }
+});
+
+test("a small refused hand-off behind a newer draft is kept on the panel rather than lost", async () => {
+  const { host, root } = await mount();
+  const previous = queueTransport.write;
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  (queueTransport as { write: NativeQueueDependencies["write"] }).write = async (body) => {
+    queueWrites.push(body);
+    await held;
+    return { status: 409, body: { error: "native queue host or account ownership changed" } };
+  };
+  try {
+    await settle(() => appendComposerDraft(CARD, "short and refused"));
+    await settle(() => press(host.querySelector("textarea") as HTMLTextAreaElement, "Enter", { altKey: true }));
+    await settle(() => appendComposerDraft(CARD, "newer words"));
+    await act(async () => { release(); await new Promise((resolve) => setTimeout(resolve, 0)); });
+    expect((host.querySelector("textarea") as HTMLTextAreaElement).value).toBe("newer words");
+    expect(host.querySelector('[data-testid="native-queue-refused-row"]')?.textContent).toContain("short and refused");
+    expect(readRetainedQueueAdmissions(CARD)[0]).toMatchObject({ mutation: { text: "short and refused" }, refused: { reason: "native queue host or account ownership changed" } });
+  } finally {
+    (queueTransport as { write: NativeQueueDependencies["write"] }).write = previous;
+  }
+  await act(async () => root.unmount());
+});
+
+test("a held large answer that is lost keeps the original operation, and its replay is the same envelope", async () => {
+  await withHeldLargeHandOff(async ({ host, answer }) => {
+    await settle(() => appendComposerDraft(CARD, "newer words"));
+    await answer(async () => { throw new Error("network is unreachable"); });
+    expect((host.querySelector("textarea") as HTMLTextAreaElement).value).toBe("newer words");
+    const [retained] = readRetainedQueueAdmissions(CARD);
+    expect(retained?.key).toBe(queueWrites[0]!.idempotencyKey as string);
+
+    /* The panel's replay sends the stored envelope: same key, same bytes. */
+    const retry = host.querySelector('[data-testid="native-queue-unresolved-retry"]') as HTMLButtonElement;
+    await settle(() => retry.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
+    await until(() => queueWrites.length === 2, "the replay");
+    expect(queueWrites[1]!.idempotencyKey).toBe(queueWrites[0]!.idempotencyKey);
+    expect(queueWrites[1]!.text).toBe("large hand-off");
+    expect(JSON.stringify(queueWrites[1]!.images)).toBe(JSON.stringify(queueWrites[0]!.images));
+    expect(JSON.stringify(queueWrites[1]!.binding)).toBe(JSON.stringify(queueWrites[0]!.binding));
+    expect((host.querySelector("textarea") as HTMLTextAreaElement).value).toBe("newer words");
+    await answer(async () => journalReceipt(queueWrites[1]!));
+    expect(readRetainedQueueAdmissions(CARD)).toEqual([]);
+  });
+});
+
+const DOCUMENT = "data:application/octet-stream;base64,AP8QgH8ADQo=";
+
+test("a staged document rides the queue hand-off beside its image, and a refusal gives both back ready", async () => {
+  /* #1652: the queue route takes files the way Enter does, so the hand-off
+     carries the whole tray. A refusal admitted nothing, so the document comes
+     back with its bytes and can be queued again as it was. */
+  const { host, root } = await mount();
+  await stage(host, { name: "fixture.bin", type: "application/octet-stream", size: 8 }, DOCUMENT);
+  await stage(host, { name: "shot.png", type: "image/png", size: 12 });
+  const previous = queueTransport.write;
+  (queueTransport as { write: NativeQueueDependencies["write"] }).write = async (body) => {
+    queueWrites.push(body);
+    return queueWrites.length === 1
+      ? { status: 409, body: { error: "native queue host or account ownership changed" } }
+      : journalReceipt(body);
+  };
+  try {
+    await settle(() => appendComposerDraft(CARD, "image and file"));
+    await settle(() => press(host.querySelector("textarea") as HTMLTextAreaElement, "Enter", { altKey: true }));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+
+    expect(queueWrites[0]).toMatchObject({ action: "add", text: "image and file", files: [{ name: "fixture.bin", base64: "AP8QgH8ADQo=" }] });
+    expect((queueWrites[0]!.images as unknown[])).toHaveLength(1);
+    expect((host.querySelector("textarea") as HTMLTextAreaElement).value).toBe("image and file");
+    const tiles = [...host.querySelectorAll('[data-testid="attachment-tile"]')];
+    expect(tiles.map((tile) => `${tile.getAttribute("data-kind")}:${tile.getAttribute("data-status")}`).sort()).toEqual(["file:ready", "image:ready"]);
+    /* The refused copy is kept until the same message is queued again. */
+    expect(readRetainedQueueAdmissions(CARD).map((entry) => Boolean(entry.refused))).toEqual([true]);
+
+    await settle(() => press(host.querySelector("textarea") as HTMLTextAreaElement, "Enter", { altKey: true }));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    expect(queueWrites).toHaveLength(2);
+    expect(queueWrites[1]!.files).toEqual(queueWrites[0]!.files);
+    expect(queueWrites[1]!.idempotencyKey).not.toBe(queueWrites[0]!.idempotencyKey);
+    expect((host.querySelector("textarea") as HTMLTextAreaElement).value).toBe("");
+    expect(host.querySelectorAll('[data-testid="attachment-tile"]')).toHaveLength(0);
+    expect(readOutbox(CARD)).toEqual([]);
+    expect(sends).toEqual([]);
+  } finally {
+    (queueTransport as { write: NativeQueueDependencies["write"] }).write = previous;
+  }
+  await act(async () => root.unmount());
+});
+
+test("a large hand-off keeps its document in the durable envelope, and a lost answer replays the same files", async () => {
+  await withHeldLargeHandOff(async ({ host, answer }) => {
+    expect(queueWrites[0]!.files).toEqual([{ name: "fixture.bin", base64: "AP8QgH8ADQo=" }]);
+    const [retained] = readRetainedQueueAdmissions(CARD);
+    /* The bytes are in IndexedDB; the slot names how many rode along. */
+    expect(retained?.payload).toMatchObject({ images: 1, files: 1 });
+    expect(retained?.mutation.files).toBeUndefined();
+    expect(host.querySelectorAll('[data-testid="attachment-tile"]')).toHaveLength(0);
+
+    /* Enter is the operator's while the answer is held. */
+    await settle(() => appendComposerDraft(CARD, "small command"));
+    await settle(() => press(host.querySelector("textarea") as HTMLTextAreaElement, "Enter"));
+    await until(() => sends.length === 1, "the ordinary command to be sent");
+    expect(sends[0]).toMatchObject({ text: "small command" });
+
+    await answer(async () => { throw new Error("network is unreachable"); });
+    expect(readRetainedQueueAdmissions(CARD)[0]?.key).toBe(queueWrites[0]!.idempotencyKey as string);
+    const retry = host.querySelector('[data-testid="native-queue-unresolved-retry"]') as HTMLButtonElement;
+    expect(host.querySelector('[data-testid="native-queue-unresolved-row"]')?.textContent).toContain("large hand-off");
+    await settle(() => retry.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
+    await until(() => queueWrites.length === 2, "the replay");
+    expect(queueWrites[1]!.idempotencyKey).toBe(queueWrites[0]!.idempotencyKey);
+    expect(queueWrites[1]!.files).toEqual(queueWrites[0]!.files);
+    expect(JSON.stringify(queueWrites[1]!.images)).toBe(JSON.stringify(queueWrites[0]!.images));
+    expect(JSON.stringify(queueWrites[1]!.binding)).toBe(JSON.stringify(queueWrites[0]!.binding));
+    await answer(async () => journalReceipt(queueWrites[1]!));
+    expect(readRetainedQueueAdmissions(CARD)).toEqual([]);
+  }, { document: true });
 });

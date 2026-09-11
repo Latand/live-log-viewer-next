@@ -1,4 +1,6 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeEach, expect, test } from "bun:test";
+
+import { installComposerStorageForTests } from "@/test-helpers/composerStorage";
 import { Window } from "happy-dom";
 import { useSyncExternalStore } from "react";
 import { flushSync } from "react-dom";
@@ -47,6 +49,10 @@ function publishReceipts(next: RuntimeReceipt[]): void {
 import { appendComposerDraft, TmuxComposer } from "./TmuxComposer";
 import { readOutbox, retryOutbox, resetOutboxForTests } from "./conversation/outbox";
 
+/* Attachment submissions are kept in IndexedDB before they reach the wire. */
+const composerStorage = installComposerStorageForTests();
+afterAll(() => composerStorage.uninstall());
+
 beforeEach(() => {
   setRuntimeUiEnabledForTests(false);
   setTmuxComposerRuntimeDependenciesForTests({
@@ -62,6 +68,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  composerStorage.reset();
   setTmuxComposerRuntimeDependenciesForTests(null);
   setRuntimeUiEnabledForTests(null);
 });
@@ -131,6 +138,14 @@ test("queue-first: a lost image send keeps its own immutable snapshot while retr
     }
     expect(previews()).toHaveLength(count);
   };
+  /* A submission with attachments reaches the wire once its complete copy is
+     durably retained, which takes more than one macrotask. */
+  const untilSent = async (count: number) => {
+    for (let attempt = 0; attempt < 200 && sentKeys.length < count; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 2));
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  };
   const lateReceipt = (revision: number): RuntimeReceipt => ({
     operationId: "op-late-delivery",
     idempotencyKey: sentKeys[0]!,
@@ -151,7 +166,7 @@ test("queue-first: a lost image send keeps its own immutable snapshot while retr
        immediately. The lost first attempt (503) marks arrival unknown while
        preserving its immutable image snapshot. */
     flushSync(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await untilSent(1);
     expect(sentImageCounts).toEqual([1]);
     expect(textarea.value).toBe("");
     await untilPreviews(0);
@@ -188,7 +203,7 @@ test("queue-first: a lost image send keeps its own immutable snapshot while retr
        never crossed generations. */
     flushSync(() => appendComposerDraft("conv-pending-images", "next ask"));
     flushSync(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await untilSent(2);
     expect(sentKeys).toHaveLength(2);
     expect(sentKeys[1]).not.toBe(sentKeys[0]);
     expect(sentImageCounts[1]).toBe(1);
