@@ -9,7 +9,7 @@ import { CircleAlert, RotateCcw } from "lucide-react";
 import type { TFunction } from "@/lib/i18n";
 
 import { Badge, type BadgeTone } from "@/components/ui/Badge";
-import { composerSubmissionPayloads, composerSubmissionSaving, presentedPayloadReceipt, withComposerSubmission, type RestoredComposerSubmission } from "@/lib/composerSubmissionPayloads";
+import { composerSubmissionPayloads, composerSubmissionSaving, presentedPayloadReceipt, withComposerSubmission, type ComposerPayloadReceipt, type RestoredComposerSubmission } from "@/lib/composerSubmissionPayloads";
 import { useComposer } from "@/hooks/useComposer";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useCodexRealtime } from "@/hooks/useCodexRealtime";
@@ -2095,19 +2095,26 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
     for (const row of payloadRows) {
       // Observe the raw journal stream before presentation folding. A stale
       // terminal projection must not hide a newer unknown journal revision.
-      const evidenceKey = (receipt: RuntimeReceipt) => JSON.stringify([row.ref.conversationId, row.ref.key,
+      const evidenceKey = (receipt: ComposerPayloadReceipt) => JSON.stringify([row.ref.conversationId, row.ref.key,
         receipt.operationId, receipt.revision, receipt.status, receipt.resend]);
-      const evidence = payloadReceiptEvidence({ conversationId: row.ref.conversationId, key: row.ref.key, operationId: row.operationId },
-        [...runtimeReceipts, ...displayedRuntimeReceipts]).filter(receipt => !settlingPayloads.current.has(evidenceKey(receipt)));
+      const candidates: ComposerPayloadReceipt[] = payloadReceiptEvidence({ conversationId: row.ref.conversationId, key: row.ref.key, operationId: row.operationId },
+        [...runtimeReceipts, ...displayedRuntimeReceipts]);
+      /* A converged retry answer records its terminal receipt before any copy
+         of it reaches this pass, and observing that copy again adds nothing.
+         The latest recorded receipt is itself the evidence that ends the message. */
+      if (row.receipt && (row.receipt.status === "delivered" || row.receipt.reason === "delivery-discarded")) candidates.push(row.receipt);
+      const evidence = candidates.filter(receipt => !settlingPayloads.current.has(evidenceKey(receipt)));
       if (!evidence.length) continue;
       for (const receipt of evidence) settlingPayloads.current.add(evidenceKey(receipt));
       void (async () => {
         let observed = false;
         for (const receipt of evidence) observed = await composerSubmissionPayloads.observe(row.ref, receipt) || observed;
-        if (!observed) return;
         // Only the current attempt's latest journal receipt can end the message.
         const current = (await composerSubmissionPayloads.restore(row.ref))?.receipt;
-        if (!current || (current.status !== "delivered" && current.reason !== "delivery-discarded")) { await refreshPayloads(); return; }
+        if (!current || (current.status !== "delivered" && current.reason !== "delivery-discarded")) {
+          if (observed) await refreshPayloads();
+          return;
+        }
         // Disable every queue owner before the durable terminal marker and byte release.
         if (readOutbox(cardId).some(item => item.id === row.ref.key)) {
           updateOutbox(cardId, row.ref.key, { state: current.status === "delivered" ? "delivered" : "failed", originalOperationOnly: true });

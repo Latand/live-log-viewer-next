@@ -22,7 +22,9 @@ const assert=(ok,message)=>{if(!ok)throw new Error(message);};
 const redact=value=>JSON.parse(JSON.stringify(value).replaceAll(sandbox,'<sandbox>'));
 /* Every request the page puts on the runtime routes, as the server received it. */
 const wire=[];
-let corruptNextSend=false,conflictNextSend=false;
+let corruptNextSend=false,conflictNextSend=false,loseNextRetry=false;
+/* A receipt stream that lags behind the journal: the page keeps reading this copy. */
+let frozenReceipts=null;
 const profile=fs.mkdtempSync(path.join(out,'profile-'));
 let context;
 const launch=async()=>{
@@ -32,7 +34,7 @@ const launch=async()=>{
   if(url.pathname==='/composer.js')return route.fulfill({contentType:'application/javascript',path:path.join(out,'composer.js')});
   if(url.pathname==='/composer.css')return route.fulfill({contentType:'text/css',path:path.join(out,'composer.css')});
   if(url.pathname==='/')return route.fulfill({contentType:'text/html',body:'<!doctype html><html lang="en" data-theme="light"><head><meta charset="utf-8"><link rel="stylesheet" href="/composer.css"></head><body><div id="app" style="position:relative;width:650px;height:800px;margin:24px"></div><script src="/composer.js"></script></body></html>'});
-  if(url.pathname==='/fixture/receipts')return route.fulfill({contentType:'application/json',body:JSON.stringify(await runtime.receipts())});
+  if(url.pathname==='/fixture/receipts')return route.fulfill({contentType:'application/json',body:JSON.stringify(frozenReceipts??await runtime.receipts())});
   if(!url.pathname.startsWith('/api/runtime/'))return route.abort();
   let body=request.postData()??undefined;
   const entry={method:request.method(),path:url.pathname};
@@ -50,6 +52,10 @@ const launch=async()=>{
   }
   const response=await runtime.handle(new Request('http://localhost'+url.pathname+url.search,{method:request.method(),headers:{'content-type':'application/json'},...(body===undefined?{}:{body})}));
   const text=await response.text();entry.status=response.status;
+  if(loseNextRetry&&url.pathname.startsWith('/api/runtime/operations/')&&request.method()==='POST'){
+   // The journal started the attempt; its answer never reaches the page.
+   loseNextRetry=false;entry.lost=true;return route.abort('connectionreset');
+  }
   return route.fulfill({status:response.status,contentType:'application/json',body:text});
  });
 };
@@ -64,6 +70,7 @@ const messages=[
  {text:'Recovered by the receipt Retry',fill:10,imageBytes:3*1024*1024},
  {text:'Recovered by the saved-message Retry after reload',fill:20,imageBytes:3*1024*1024},
  {text:'Recovered by the delivery notice Retry in a new browser context',fill:30,imageBytes:3*1024*1024},
+ {text:'Recovered after its retry answer was lost',fill:60,imageBytes:3*1024*1024},
  {text:'Refused before admission, then sent again',fill:40,imageBytes:64*1024},
  {text:'Answered 409 without an operation',fill:50,imageBytes:64*1024},
 ].map(message=>({...message,files:attachmentsFor(message.fill,message.imageBytes)}));
@@ -95,16 +102,16 @@ const results={};
 try{
  await launch();
  let page=await open();
- // 1. Three complete submissions admitted while the engine host is down.
- for(const message of messages.slice(0,3)){
+ // 1. Four complete submissions admitted while the engine host is down.
+ for(const message of messages.slice(0,4)){
   await submit(page,message);
   await waitFor(()=>runtime.journal.operationResult(operationOf(message)??'')?.receipt.status==='failed','the queue to fence '+message.text);
   message.operationId=operationOf(message);
  }
- await page.waitForFunction(count=>document.querySelectorAll('[data-payload-key]').length===count,3);
+ await page.waitForFunction(count=>document.querySelectorAll('[data-payload-key]').length===count,4);
  let retained=[];
- await waitFor(async()=>(retained=await saved(page)).length===3&&retained.every(row=>row.retry==='operation'),'the failures to be observed durably');
- results.admittedAndFenced=messages.slice(0,3).map(message=>{
+ await waitFor(async()=>(retained=await saved(page)).length===4&&retained.every(row=>row.retry==='operation'),'the failures to be observed durably');
+ results.admittedAndFenced=messages.slice(0,4).map(message=>{
   const row=retained.find(item=>item.key===message.key);const want=expected(message);
   return {status:runtime.journal.operationResult(message.operationId).receipt.status,reason:runtime.journal.operationResult(message.operationId).receipt.reason,
    retained:Boolean(row),bytesMatch:Boolean(row)&&JSON.stringify(row.images)===JSON.stringify(want.images)&&JSON.stringify(row.files)===JSON.stringify(want.files),
@@ -131,7 +138,7 @@ try{
  await waitFor(()=>deliveredFor(first).length===1,'the receipt retry delivery');
  await page.waitForFunction(key=>!document.querySelector(`[data-payload-key="${key}"]`),first.key);
  results.receiptRetry={retries:retriesOf(first.operationId).map(entry=>entry.status),resends:wire.filter(entry=>entry.path==='/api/runtime/send').length-sendsBefore,...checkDelivered(first),
-  released:!(await saved(page)).some(row=>row.key===first.key),othersRetained:(await saved(page)).map(row=>row.key).sort().join()===[messages[1].key,messages[2].key].sort().join()};
+  released:!(await saved(page)).some(row=>row.key===first.key),othersRetained:(await saved(page)).map(row=>row.key).sort().join()===[messages[1].key,messages[2].key,messages[3].key].sort().join()};
  assert(results.feedBubbleRetryForAdmitted===0&&results.receiptRetry.retries.join()==='202'&&results.receiptRetry.resends===0&&results.receiptRetry.count===1&&results.receiptRetry.imagesMatch&&results.receiptRetry.filesMatch&&results.receiptRetry.released&&results.receiptRetry.othersRetained,'Receipt retry did not deliver once through the operation contract');
  // 4. Reload; the saved-message Retry delivers message two, and a double click stays one delivery.
  await page.reload();await page.locator(`[data-payload-key="${second.key}"]`).waitFor();
@@ -145,6 +152,33 @@ try{
  await Bun.sleep(500);
  results.recoveryRetry={retries:retriesOf(second.operationId).map(entry=>entry.status),resends:sends(second.key).length-1,...checkDelivered(second),released:!(await saved(page)).some(row=>row.key===second.key)};
  assert(results.recoveryRetry.resends===0&&results.recoveryRetry.count===1&&results.recoveryRetry.imagesMatch&&results.recoveryRetry.filesMatch&&results.recoveryRetry.released,'Saved-message retry did not deliver once');
+ // 4b. The saved-message Retry's answer is lost while the receipt stream lags;
+ // the next Retry converges on the delivered leaf and that answer alone ends the copy.
+ const lost=messages[3];
+ frozenReceipts=await runtime.receipts();loseNextRetry=true;
+ const lostRow=page.locator(`[data-payload-key="${lost.key}"]`);
+ if(!await lostRow.evaluate(element=>element.open))await lostRow.locator('summary').click();
+ await lostRow.locator('[data-payload-retry]').click();
+ await waitFor(()=>retriesOf(lost.operationId)[0]?.lost===true,'the lost retry answer');
+ await waitFor(()=>deliveredFor(lost).length===1,'the delivery behind the lost answer');
+ const lostLeaf=()=>runtime.journal.db.query('SELECT receipt_json FROM operations WHERE receipt_json LIKE ?').all(`%"retryOfOperationId":"${lost.operationId}"%`).map(row=>JSON.parse(row.receipt_json));
+ await waitFor(()=>lostLeaf()[0]?.status==='delivered','the leaf behind the lost answer to settle');
+ await Bun.sleep(300);
+ results.lostRetryAnswer={retainedAfterLoss:(await saved(page)).some(row=>row.key===lost.key),retryStillOffered:await lostRow.locator('[data-payload-retry]').count()};
+ assert(results.lostRetryAnswer.retainedAfterLoss&&results.lostRetryAnswer.retryStillOffered===1,'A lost retry answer released the copy or lost the route');
+ await lostRow.locator('[data-payload-retry]:not([disabled])').click();
+ await waitFor(()=>retriesOf(lost.operationId).length===2&&retriesOf(lost.operationId)[1].status!==undefined,'the converged retry answer');
+ // Still lagging: the answer itself has to end the copy, not a later stream revision.
+ await page.waitForFunction(key=>!document.querySelector(`[data-payload-key="${key}"]`),lost.key);
+ const releasedWhileLagging=!(await saved(page)).some(row=>row.key===lost.key);
+ frozenReceipts=null;
+ await page.reload();await page.locator('textarea').waitFor();await Bun.sleep(500);
+ Object.assign(results.lostRetryAnswer,{retries:retriesOf(lost.operationId).map(entry=>entry.status),lostFirst:retriesOf(lost.operationId)[0].lost===true,
+  convergedReceipt:lostLeaf()[0]?.status,leaves:lostLeaf().length,resends:sends(lost.key).length-1,...checkDelivered(lost),releasedWhileLagging,
+  releasedAfterReload:!(await saved(page)).some(row=>row.key===lost.key),rowAfterReload:await page.locator(`[data-payload-key="${lost.key}"]`).count()});
+ assert(results.lostRetryAnswer.retries.join()==='202,200'&&results.lostRetryAnswer.lostFirst&&results.lostRetryAnswer.leaves===1&&results.lostRetryAnswer.resends===0
+  &&results.lostRetryAnswer.count===1&&results.lostRetryAnswer.imagesMatch&&results.lostRetryAnswer.filesMatch&&releasedWhileLagging
+  &&results.lostRetryAnswer.releasedAfterReload&&results.lostRetryAnswer.rowAfterReload===0,'A converged retry answer left the delivered copy retained or delivered twice');
  // 5. A new browser context; the collapsed delivery notice Retry delivers message three.
  await context.close();await launch();page=await open();
  const third=messages[2];
@@ -159,7 +193,7 @@ try{
  assert(results.noticeRetry.retries.join()==='202'&&results.noticeRetry.resends===0&&results.noticeRetry.count===1&&results.noticeRetry.imagesMatch&&results.noticeRetry.filesMatch&&results.noticeRetry.released&&results.noticeRetry.incompleteClaims===0,'Notice retry did not deliver once, or a delivered message still reads incomplete');
  // 6. Receipt and parent links: each leaf names the operation its own message owns.
  results.lineage=[];
- for(const message of messages.slice(0,3)){
+ for(const message of messages.slice(0,4)){
   const leaf=runtime.journal.db.query('SELECT receipt_json FROM operations WHERE operation_id <> ? AND receipt_json LIKE ?').all(message.operationId,`%"retryOfOperationId":"${message.operationId}"%`).map(row=>JSON.parse(row.receipt_json));
   const snapshot=runtime.registry.readOnlySnapshot();
   const reservation=Object.values(snapshot.heldDeliveries).find(item=>item.command.operationId===message.operationId);
@@ -172,9 +206,9 @@ try{
  const repeat=await page.evaluate(async operationId=>{const response=await fetch(`/api/runtime/operations/${encodeURIComponent(operationId)}`,{method:'POST'});return {status:response.status,body:await response.json()};},first.operationId);
  await page.reload();await page.locator('textarea').waitFor();await Bun.sleep(500);
  results.repeatAndReload={repeatStatus:repeat.status,repeatReceipt:repeat.body.receipt?.status,delivered:runtime.delivered.length,retained:(await saved(page)).length,incompleteClaims:await page.locator('[data-payload-incomplete]').count()};
- assert(results.repeatAndReload.repeatStatus===200&&results.repeatAndReload.repeatReceipt==='delivered'&&results.repeatAndReload.delivered===3&&results.repeatAndReload.retained===0&&results.repeatAndReload.incompleteClaims===0,'A repeat or reload duplicated delivery or left a false incomplete claim');
+ assert(results.repeatAndReload.repeatStatus===200&&results.repeatAndReload.repeatReceipt==='delivered'&&results.repeatAndReload.delivered===4&&results.repeatAndReload.retained===0&&results.repeatAndReload.incompleteClaims===0,'A repeat or reload duplicated delivery or left a false incomplete claim');
  // 8. A refusal before admission offers the sealed envelope again, truthfully, across reload.
- const refused=messages[3];
+ const refused=messages[4];
  corruptNextSend=true;await submit(page,refused);
  await page.locator(`[data-payload-key="${refused.key}"]`).waitFor();
  await page.locator(`[data-payload-key="${refused.key}"] summary`).click();
@@ -192,7 +226,7 @@ try{
  Object.assign(results.preAdmission,{resendStatus:secondAttempt.status,sameKey:secondAttempt.key===firstAttempt.key,sameEnvelope:secondAttempt.sha===firstAttempt.sha,...checkDelivered(refused)});
  assert(results.preAdmission.sameEnvelope&&results.preAdmission.resendStatus===202&&results.preAdmission.count===1&&results.preAdmission.imagesMatch&&results.preAdmission.filesMatch,'Resent refusal changed its envelope or did not deliver once');
  // 9. A 409 that names no operation stays unknown: no local resend, no discard.
- const conflicted=messages[4];
+ const conflicted=messages[5];
  conflictNextSend=true;await submit(page,conflicted);
  await page.locator(`[data-payload-key="${conflicted.key}"]`).waitFor();
  await page.reload();await page.locator(`[data-payload-key="${conflicted.key}"] summary`).click();await Bun.sleep(500);
@@ -203,7 +237,7 @@ try{
  await page.screenshot({path:path.join(out,'ambiguous-409.png')});
  results.totals={engineDeliveries:runtime.delivered.length,sends:wire.filter(entry=>entry.path==='/api/runtime/send').map(entry=>({status:entry.status,corrupted:Boolean(entry.corrupted),synthetic:Boolean(entry.synthetic)})),
   operationRetries:wire.filter(entry=>entry.path.startsWith('/api/runtime/operations/')&&entry.method==='POST').map(entry=>entry.status)};
- assert(results.totals.engineDeliveries===4,'Unexpected engine delivery count');
+ assert(results.totals.engineDeliveries===5,'Unexpected engine delivery count');
  fs.writeFileSync(path.join(out,'runtime-e2e.json'),JSON.stringify(redact(results),null,2));
  console.log(JSON.stringify(redact(results)));
 }catch(error){fs.writeFileSync(path.join(out,'partial.json'),JSON.stringify(redact({results,wire}),null,2));throw error;}
