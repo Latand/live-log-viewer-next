@@ -136,12 +136,17 @@ test("barge-in mid-answer interleaves transcripts, keeps the mic live, and never
     // The agent is mid-answer when server VAD detects operator speech: the
     // truncated agent line stays visible, the operator turn opens a new line,
     // and the post-interruption answer never glues onto the abandoned one.
+    // The abandoned answer ends at its own turn.done, which is where native
+    // closes the agent's segment too. The operator speaking leaves it open,
+    // because in a duplex call the two overlap word by word within one turn
+    // (#1658).
     peer.channel.onmessage?.({ data: JSON.stringify({ type: "output_transcript.added", item: { text: "The build is" } }) });
     peer.channel.onmessage?.({ data: JSON.stringify({ type: "input_transcript.added", item: { text: "Stop — check the tests instead" } }) });
+    peer.channel.onmessage?.({ data: JSON.stringify({ type: "turn.done", turn: { role: "assistant", transcript: "The build is" } }) });
     peer.channel.onmessage?.({ data: JSON.stringify({ type: "output_transcript.added", item: { text: "Checking the tests" } }) });
     peer.channel.onmessage?.({ data: JSON.stringify({ type: "turn.done", turn: { role: "assistant", transcript: "Checking the tests now" } }) });
     expect(client.getSnapshot().lines.map((line) => [line.role, line.text, line.final])).toEqual([
-      ["assistant", "The build is", false],
+      ["assistant", "The build is", true],
       ["user", "Stop — check the tests instead", false],
       ["assistant", "Checking the tests now", true],
     ]);

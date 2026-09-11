@@ -209,6 +209,7 @@ export interface MiniStack {
 
 /** Review-round deck of a flow, sitting beside its implementer as the pair. */
 export interface DeckNode {
+  bandSurface?: boolean;
   key: string;
   flow: Flow;
   rounds: DeckRound[];
@@ -221,6 +222,9 @@ export interface DeckNode {
 /** A flow/pipeline group halo on the scheme (issue #118): the union region of
     every session belonging to one running flow or pipeline, plus its label. */
 export interface SchemeGroup extends SchemeGroupSpec, SchemeRect {
+  /** Dedicated heading in the task band. */
+  bandHeader?: boolean;
+  historical?: boolean;
   /** Display name shown on the halo's label chip (flow: implementer title;
       pipeline: task), pre-cleaned so the component only sizes and tints it. */
   label: string;
@@ -230,6 +234,8 @@ export interface SchemeGroup extends SchemeGroupSpec, SchemeRect {
     placeholder chat window in stage order (issue #196). Materializing a stage
     (its agent node / review deck placing) dissolves exactly its slot. */
 export interface StageSlot extends SchemeRect {
+  /** Band disclosure; absent on the free map. */
+  detailsExpanded?: boolean;
   key: string;
   pipeline: Pipeline;
   stage: PipelineStage;

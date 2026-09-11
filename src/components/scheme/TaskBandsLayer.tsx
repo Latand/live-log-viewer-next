@@ -10,7 +10,7 @@ import { TASK_TONES } from "@/components/tasks/taskModel";
 import { cleanTitle } from "@/components/utils";
 
 import type { SchemeRect } from "./layout";
-import { BAND, bandHoldsMembers, type BandContinuation, type BandMirror, type BandMode, type PlacedBand } from "./taskBands";
+import { bandHoldsMembers, type BandContinuation, type BandMirror, type BandMode, type PlacedBand } from "./taskBands";
 
 /**
  * Band chrome of the task-centered board (#1586): one full-width surface per
@@ -38,6 +38,7 @@ export const TaskBandsLayer = memo(function TaskBandsLayer({
   onRemoveFromBoard,
   onSelectMirror,
   onFollowContinuation,
+  onToggleHistory,
 }: {
   bands: PlacedBand[];
   mode: BandMode;
@@ -58,6 +59,7 @@ export const TaskBandsLayer = memo(function TaskBandsLayer({
   onRemoveFromBoard: (task: BoardTask) => void;
   onSelectMirror: (mirror: BandMirror) => void;
   /** Navigate to the other endpoint of a cross-band relation. */
+  onToggleHistory?: (band: PlacedBand) => void;
   onFollowContinuation: (target: { key: string; bandId: string }) => void;
 }) {
   const { t } = useLocale();
@@ -66,7 +68,7 @@ export const TaskBandsLayer = memo(function TaskBandsLayer({
   return (
     <div aria-hidden={false} data-scheme-bands={mode}>
       {bands.map((band) => {
-        const { rect, header, addAgent } = band.geometry;
+        const { rect, header } = band.geometry;
         const color = `hsl(${band.hue} 58% 44%)`;
         const derivedLabel = band.origin === "pipeline"
           ? t("bands.derivedPipeline")
@@ -113,15 +115,15 @@ export const TaskBandsLayer = memo(function TaskBandsLayer({
             <div
               data-scheme-ui
               data-scheme-band-header={band.id}
-              className={`absolute left-0 top-0 flex items-center gap-3 px-4 text-ui ${headerRinged ? "rounded-[6px] ring-2 ring-accent/60 ring-inset" : ""}`}
+              className={`absolute left-0 top-0 flex flex-wrap content-start items-center gap-x-3 gap-y-2 px-4 py-2 text-ui ${headerRinged ? "rounded-[6px] ring-2 ring-accent/60 ring-inset" : ""}`}
               style={screen(header)}
             >
               <button
                 type="button"
                 data-scheme-band-title
                 disabled={!interactive}
-                className={`min-w-0 truncate text-left text-[13px] font-semibold text-primary ${interactive ? "pointer-events-auto hover:text-accent" : ""} focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-default`}
-                style={{ maxWidth: "46%" }}
+                className={`min-w-0 text-left text-[13px] font-semibold text-primary ${interactive ? "pointer-events-auto hover:text-accent" : ""} focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-default`}
+                style={{ width: "100%", height: 36, flexShrink: 0, lineHeight: "18px", overflow: "hidden", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" }}
                 title={band.title}
                 onClick={() => onOpenDetails(band)}
               >
@@ -142,13 +144,14 @@ export const TaskBandsLayer = memo(function TaskBandsLayer({
               ) : null}
               {derivedLabel ? <span className="shrink-0 truncate text-[11px] text-muted">{derivedLabel}</span> : null}
               {band.task && !band.task.text.trim() ? <span className="shrink-0 text-[11px] text-muted">{t("bands.namePending")}</span> : null}
-              <span data-scheme-band-counts className="shrink-0 whitespace-nowrap text-[11px] tabular-nums text-secondary">
+              {band.geometry.historyAvailable ? <span className="text-[11px] font-semibold text-muted">{t("bands.historicalRuns")}</span> : null}
+              {band.geometry.historyAvailable ? null : <span data-scheme-band-counts className="min-w-0 flex-1 text-[11px] tabular-nums text-secondary">
                 <span className={band.working ? "font-semibold text-success" : ""}>{t("bands.working", { count: band.working })}</span>
                 {band.unknown ? <span className="text-warning"> · {t("bands.unknown", { count: band.unknown })}</span> : null}
                 <span className="text-muted"> · {t("bands.conversations", { count: band.conversations })}</span>
                 {band.planned ? <span className="text-muted"> · {t("bands.planned", { count: band.planned })}</span> : null}
                 {mode === "overview" && crossLinks > 0 ? <span className="text-muted"> · {t("bands.crossLinks", { count: crossLinks })}</span> : null}
-              </span>
+              </span>}
               <div className="ml-auto flex shrink-0 items-center gap-2">
                 {/* An empty task's band can be taken off the board from where
                     the operator sees it. Reversible from the task list, which
@@ -170,6 +173,12 @@ export const TaskBandsLayer = memo(function TaskBandsLayer({
                     {t("bands.removeFromBoard")}
                   </button>
                 ) : null}
+                {band.geometry.historyAvailable ? <button type="button" data-scheme-band-history={band.id}
+                  aria-expanded={!band.geometry.historyCollapsed} disabled={!interactive}
+                  className="pointer-events-auto h-7 rounded-[8px] border border-border bg-card px-2.5 text-[11px] font-semibold text-muted"
+                  onClick={() => onToggleHistory?.(band)}>
+                  {band.geometry.historyCollapsed ? t("bands.showHistory") : t("bands.collapseHistory")}
+                </button> : null}
                 <button
                   type="button"
                   data-scheme-band-details
@@ -179,7 +188,7 @@ export const TaskBandsLayer = memo(function TaskBandsLayer({
                 >
                   {t("bands.details")}
                 </button>
-                {mode === "overview" ? (
+                {(
                   <button
                     type="button"
                     data-scheme-band-add={band.id}
@@ -190,7 +199,7 @@ export const TaskBandsLayer = memo(function TaskBandsLayer({
                   >
                     <span className="text-[13px] leading-none text-accent">+</span> {t("dash.agent")}
                   </button>
-                ) : null}
+                )}
               </div>
             </div>
             {/* Reference tiles for conversations whose reader is in another band. */}
@@ -213,7 +222,7 @@ export const TaskBandsLayer = memo(function TaskBandsLayer({
                 >
                   <div className={`absolute left-0 top-0 flex ${chip ? "items-center gap-2 px-2.5" : "flex-col justify-center gap-1 px-3"} text-ui`} style={screen(tile)}>
                     <div className="flex min-w-0 items-center gap-2">
-                      <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-primary">{cleanTitle(mirror.file.title, 60)}</span>
+                      <span className="min-w-0 flex-1 line-clamp-2 text-[12px] leading-[16px] font-semibold text-primary">{cleanTitle(mirror.file.title, 140)}</span>
                       <CardStatusBadge file={mirror.file} />
                     </div>
                     {chip ? null : <span className="truncate text-[11px] text-muted">{t("bands.sameConversation", { title: mirror.primaryTitle })}</span>}
@@ -255,23 +264,7 @@ export const TaskBandsLayer = memo(function TaskBandsLayer({
                 </div>
               );
             })}
-            {/* Local «+ Agent», right after the last member (or the next row). */}
-            {mode === "overview" ? null : (
-              <button
-                type="button"
-                data-scheme-ui
-                data-scheme-band-add={band.id}
-                aria-label={t("bands.addAgentAria", { title: band.title })}
-                disabled={!interactive}
-                className={`absolute rounded-[8px] border border-dashed border-border bg-card/70 ${interactive ? "pointer-events-auto hover:border-accent/45 hover:bg-card" : ""} focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-default`}
-                style={{ left: addAgent.x - rect.x, top: addAgent.y - rect.y, width: addAgent.w, height: addAgent.h }}
-                onClick={() => onAddAgent(band)}
-              >
-                <div className="absolute left-0 top-0 flex items-center justify-center gap-1 text-[11.5px] font-bold text-primary" style={{ width: BAND.addW, height: BAND.addH }}>
-                  <span className="text-[14px] leading-none text-accent">+</span> {t("dash.agent")}
-                </div>
-              </button>
-            )}
+
           </div>
         );
       })}
