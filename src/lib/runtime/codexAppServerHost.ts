@@ -8,7 +8,7 @@ import { isNonblockingCodexQuestion } from "./codexAttention";
 import { codexTurnProfile } from "./codexTurnProfile";
 import { StringDecoder } from "node:string_decoder";
 import { NativeCodexQueue, NativeQueueProtocolRefusal } from "./nativeCodexQueue";
-import { readCodexHistory, readCodexDeliveryHistory, findCodexHistoryDelivery, type CodexDeliveryHistoryResult } from "./codexHistoryReader";
+import { readCodexDeliveryHistory, findCodexHistoryDelivery, type CodexDeliveryHistoryResult } from "./codexHistoryReader";
 import type { NativeQueueHost } from "./nativeQueueExecutor";
 import type { NativeQueueRecord } from "./nativeQueueContracts";
 import { spawn } from "node:child_process";
@@ -1660,21 +1660,15 @@ export class CodexAppServerHost implements EngineHost {
     }
   }
 
-  /** Hydrated thread read with the #1332 fallback, returning the hydrated
-      response shape either way so every consumer of `thread.turns` keeps
-      working. On refusal the persisted turns come from the rollout on disk;
-      `window` bounds which end survives — "first" for materialization
-      evidence, "latest" for delivery confirmation; always oldest-first. */
-  private async readThreadWithTurns(window: "first" | "latest", timeoutMs?: number, clientId?: string): Promise<unknown> {
+  /** Delivery-scoped native evidence, with the established legacy hydration
+      fallback. Every caller names the input it is verifying; native history
+      never returns an unbounded full-turn response. Legacy windows stay
+      first/latest as before, and the returned turns are oldest-first. */
+  private async readThreadForDelivery(clientId: string, window: "first" | "latest", timeoutMs?: number): Promise<unknown> {
     if (this.supportsNativeHistory() && this.identity.path) {
-      const history = clientId ? await this.readDeliveryHistory([clientId], timeoutMs) : await readCodexHistory((method, params, remaining) => this.rpc(method, params, remaining, true),
-        { threadId: this.identity.threadId, path: this.identity.path },
-        // Native full pages avoid one extra item traversal per historical turn.
-        // The reader retains its byte/page/deadline bounds and hydrates any
-        // partial page before accepting it as canonical evidence.
-        { deadlineAt: Date.now() + (timeoutMs ?? this.requestTimeoutMs), sortDirection: window === "first" ? "asc" : "desc", itemsView: "full" });
+      const history = await this.readDeliveryHistory([clientId], timeoutMs);
       if (history.state === "complete" || history.state === "observed") return { thread: { id: history.identity.threadId, path: history.identity.path,
-        turns: window === "latest" ? [...history.turns].reverse() : history.turns } };
+        turns: [...history.turns].reverse() } };
       if (history.state === "unknown") {
         if (history.reason === "not-materialized") {
           throw new Error("Codex thread is not materialized yet before first user message");
@@ -1700,7 +1694,7 @@ export class CodexAppServerHost implements EngineHost {
   async sessionMaterializationEvidence(clientMessageId: string): Promise<SessionMaterializationEvidence> {
     let result: unknown;
     try {
-      result = await this.readThreadWithTurns("first", undefined, clientMessageId);
+      result = await this.readThreadForDelivery(clientMessageId, "first");
     } catch (error) {
       const reason = safeError(error);
       if (/not materialized yet/i.test(reason) && /before first user message/i.test(reason)) {
@@ -2829,7 +2823,7 @@ export class CodexAppServerHost implements EngineHost {
       const timeoutMs = this.activeTurnId
         ? this.requestTimeoutMs * ACTIVE_THREAD_READ_TIMEOUT_MULTIPLIER
         : this.requestTimeoutMs;
-      thread = await this.readThreadWithTurns("latest", timeoutMs, entry.id);
+      thread = await this.readThreadForDelivery(entry.id, "latest", timeoutMs);
     } catch (error) {
       const message = safeError(error);
       if (/not materialized yet/i.test(message) && /before first user message/i.test(message)) return null;
