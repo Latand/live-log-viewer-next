@@ -204,7 +204,7 @@ test("the CLI rejects a ready runtime socket owned by another process", async ()
   }
 }, 10_000);
 
-test("the CLI names a missing Bun prerequisite before starting the Viewer", async () => {
+for (const missingExitEvent of [false, true]) test(`the CLI names a missing Bun prerequisite before starting the Viewer (missing exit event: ${missingExitEvent})`, async () => {
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-missing-bun-"));
   const nodeSearchPath = (process.env.PATH ?? "")
     .split(path.delimiter)
@@ -222,8 +222,26 @@ test("the CLI names a missing Bun prerequisite before starting the Viewer", asyn
     LLV_BUN_EXECUTABLE: path.join(sandbox, "missing-bun"),
   };
   delete environment.LLV_RUNTIME_HOST_SOCKET;
+  const preload = path.join(sandbox, "failed-spawn.cjs");
+  if (missingExitEvent) fs.writeFileSync(preload, `
+    const cp = require('node:child_process');
+    const {EventEmitter} = require('node:events');
+    const {PassThrough} = require('node:stream');
+    const original = cp.spawn;
+    cp.spawn = function(command, ...args) {
+      if (command !== process.env.LLV_BUN_EXECUTABLE) return original.call(this, command, ...args);
+      const child = Object.assign(new EventEmitter(), {
+        pid: undefined, exitCode: null, signalCode: null, killed: false,
+        stderr: new PassThrough(), kill: () => false,
+      });
+      process.nextTick(() => child.emit('error', Object.assign(new Error('spawn ENOENT'), {code: 'ENOENT'})));
+      return child;
+    };
+    require('node:module').syncBuiltinESMExports();
+  `);
   const child = Bun.spawn([
     nodeExecutable,
+    ...(missingExitEvent ? ["--require", preload] : []),
     path.join(import.meta.dir, "cli.mjs"),
     "--no-open",
     "--port",
@@ -236,6 +254,7 @@ test("the CLI names a missing Bun prerequisite before starting the Viewer", asyn
     expect(stderr).toContain("Bun executable");
     expect(stderr).toContain("is unavailable");
   } finally {
+    if (child.exitCode === null && !child.killed) child.kill();
     removeSandbox(sandbox);
   }
 }, 10_000);

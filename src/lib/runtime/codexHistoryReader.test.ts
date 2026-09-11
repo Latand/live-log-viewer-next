@@ -6,7 +6,7 @@ import { createInterface } from "node:readline";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, copyFileSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import {
-  readCodexHistory, findCodexHistoryDelivery,
+  readCodexHistory, readCodexDeliveryHistory, findCodexHistoryDelivery,
   type CodexHistoryRpc, type CodexHistoryOptions, type CodexHistoryDeliveryTarget,
 } from "./codexHistoryReader";
 
@@ -35,6 +35,56 @@ async function lookup(responses: unknown[], wanted = target, extra: Partial<Code
 }
 
 describe("bounded canonical history", () => {
+  test("positive delivery reads the complete matching turn without hydrating older history", async () => {
+    const f = fixture([
+      metadata, page([turn([], "notLoaded")], "older-turns"),
+      page([{turnId: "turn-a", item: user}], "remaining-items"),
+      page([{turnId: "turn-a", item: {type: "agentMessage", id: "answer", text: "Done"}}]),
+    ]);
+    const result = await readCodexDeliveryHistory(f.rpc, identity, options(), [user.clientId]);
+    expect(result.state).toBe("observed");
+    expect(findCodexHistoryDelivery(result, target).state).toBe("found");
+    expect(f.calls).toHaveLength(4);
+    expect(f.calls.at(-1)?.params.cursor).toBe("remaining-items");
+    expect(findCodexHistoryDelivery(result, {...target, clientId: "unseen"})).toEqual({state: "unknown", reason: "not-observed"});
+  });
+
+  test("a matching item in an incomplete or conflicting turn supplies no positive proof", async () => {
+    for (const ending of [
+      new Error("transport unavailable"),
+      page([{turnId: "foreign-turn", item: {type: "agentMessage", id: "answer"}}]),
+      page([{turnId: "turn-a", item: {...user, id: "conflicting-item", content: [{type: "text", text: "changed"}]}}]),
+    ]) {
+      const f = fixture([metadata, page([turn([], "notLoaded")], "older"),
+        page([{turnId: "turn-a", item: user}], "tail"), ending]);
+      const result = await readCodexDeliveryHistory(f.rpc, identity, options(), [user.clientId]);
+      expect(findCodexHistoryDelivery(result, target).state).toBe("unknown");
+    }
+  });
+
+  test("a conflicting batch member does not hide another member's valid proof", async () => {
+    const other = {...user, clientId: "other-client", id: "other-item"};
+    const bad = {...user, content: [{type: "text", text: "changed"}]};
+    const wanted = {...target, clientId: other.clientId, itemId: other.id, turnId: "turn-b"};
+    const f = fixture([metadata, page([turn([bad]), turn([other], "full", "turn-b")], "older")]);
+    const result = await readCodexDeliveryHistory(f.rpc, identity, options(), [user.clientId, other.clientId],
+      history => findCodexHistoryDelivery(history, target).state === "found" || findCodexHistoryDelivery(history, wanted).state === "found");
+    expect(findCodexHistoryDelivery(result, target).state).toBe("unknown");
+    expect(findCodexHistoryDelivery(result, wanted).state).toBe("found");
+    expect(f.calls).toHaveLength(2);
+  });
+
+  test("positive delivery admits the caller's bounded image allowance without changing full-history defaults", async () => {
+    const image = {type: "image", url: "data:image/png;base64," + "A".repeat(16 * 1024 * 1024)};
+    const imageUser = {...user, content: [...content, image]};
+    const rows = [metadata, page([turn([], "notLoaded")], "older"), page([{turnId: "turn-a", item: imageUser}])];
+    const f = fixture(rows);
+    const result = await readCodexDeliveryHistory(f.rpc, identity, options({maxBytes: 40 * 1024 * 1024}), [user.clientId]);
+    expect(findCodexHistoryDelivery(result, {...target, content: imageUser.content}).state).toBe("found");
+    expect(await readCodexHistory(fixture(rows).rpc, identity, options())).toEqual({state: "unknown", reason: "bytes"});
+    expect(findCodexHistoryDelivery(result, target).state).toBe("unknown");
+  });
+
   test("walks second turns and items pages, preserves order and opaque cursors", async () => {
     const turnCursor = '{"anchor":"opaque-turn"}';
     const itemCursor = '{"anchor":"opaque-item"}';

@@ -37,6 +37,13 @@ export type CodexHistoryResult =
   | { state: "unknown"; reason: UnknownReason }
   | { state: "legacy-fallback"; reason: "unsupported" };
 
+/** A complete canonical turn was read, but older unrelated turns were not.
+ * This can prove a positive delivery; it cannot prove absence or uniqueness
+ * across the whole thread, and must never authorize a resend. */
+export type CodexDeliveryHistoryResult = CodexHistoryResult
+  | (Omit<Extract<CodexHistoryResult, {state: "complete"}>, "state"> & {state: "observed"});
+type ObservedHistory = Extract<CodexDeliveryHistoryResult, {state: "observed"}>;
+
 class ReadFailure extends Error {
   constructor(readonly reason: UnknownReason | "unsupported") { super(reason); }
 }
@@ -138,6 +145,27 @@ function item(value: unknown): CodexHistoryItem {
 export async function readCodexHistory(
   rpc: CodexHistoryRpc, identity: CodexHistoryIdentity, options: CodexHistoryOptions,
 ): Promise<CodexHistoryResult> {
+  const result = await readHistory(rpc, identity, options);
+  return result.state === "observed" ? {state: "unknown", reason: "malformed"} : result;
+}
+
+/** Read through the first complete turn containing a requested client ID.
+ * Full item hydration and all identity/cursor/deadline checks still apply.
+ * Callers must compare its canonical content with the frozen input. */
+export async function readCodexDeliveryHistory(
+  rpc: CodexHistoryRpc, identity: CodexHistoryIdentity, options: CodexHistoryOptions,
+  clientIds: readonly string[],
+  accept?: (history: ObservedHistory) => boolean,
+): Promise<CodexDeliveryHistoryResult> {
+  if (!clientIds.length || clientIds.length > 2000 || !clientIds.every(nonempty)) return {state: "unknown", reason: "malformed"};
+  return readHistory(rpc, identity, options, new Set(clientIds), accept);
+}
+
+async function readHistory(
+  rpc: CodexHistoryRpc, identity: CodexHistoryIdentity, options: CodexHistoryOptions,
+  matchingClientIds?: ReadonlySet<string>,
+  accept?: (history: ObservedHistory) => boolean,
+): Promise<CodexDeliveryHistoryResult> {
   try {
     const maxBytes = options.maxBytes ?? 16 * 1024 * 1024;
     const maxPages = options.maxPages ?? 128;
@@ -254,6 +282,14 @@ export async function readCodexHistory(
           ids.add(canonical.id);
         }
         turns.push({ ...turn, id: turn.id, items, itemsView: "full" });
+        if (matchingClientIds && items.some(canonical => canonical.type === "userMessage"
+          && typeof canonical.clientId === "string" && matchingClientIds.has(canonical.clientId))) {
+          const observed: ObservedHistory = {state: "observed", identity: target, turns, pages, bytes};
+          if (!accept || accept(observed)) {
+            requireValue(Date.now() < deadlineAt, "deadline");
+            return observed;
+          }
+        }
       }
       cursor = page.nextCursor;
     } while (cursor !== null);
@@ -293,8 +329,8 @@ export function normalizedCodexHistoryContent(content: ObjectValue[]): ObjectVal
 }
 
 /** Absence, even after complete traversal, never authorizes resend or deletion. */
-export function findCodexHistoryDelivery(history: CodexHistoryResult, target: CodexHistoryDeliveryTarget): CodexHistoryDeliveryResult {
-  if (history.state !== "complete") return history;
+export function findCodexHistoryDelivery(history: CodexDeliveryHistoryResult, target: CodexHistoryDeliveryTarget): CodexHistoryDeliveryResult {
+  if (history.state !== "complete" && history.state !== "observed") return history;
   if (!nonempty(target.clientId) || !validContent(target.content)
       || !(target.turnId === null || nonempty(target.turnId))
       || !(target.itemId === undefined || nonempty(target.itemId))) return { state: "unknown", reason: "malformed" };
