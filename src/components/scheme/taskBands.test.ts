@@ -814,6 +814,25 @@ test("an incomplete scan of a completed task's conversation keeps its history op
   expect(scene({ derivationComplete: false })).toBe(false);
 });
 
+test("unknown, incomplete and running mirrors keep a completed task visible", () => {
+  for (const extra of [
+    {derivationComplete: false, authoritativeTurn: undefined},
+    {authoritativeTurn: {state: "unknown", source: "lifecycle", terminalAt: null}},
+    {proc: "running"},
+  ] as Partial<FileEntry>[]) {
+    const files = [file(0, "idle", extra), file(1, "idle")];
+    const layout = base(files);
+    const bands = buildTaskBands(layout, sources([
+      task("a", "2026-01-01T00:00:00Z", [files[0]!]),
+      task("b", "2026-02-01T00:00:00Z", files, "done"),
+    ], files));
+    expect(bands.find(band => band.id === "task:b")!.mirrors).toHaveLength(1);
+    const scene = layoutTaskBands(layout, bands, {mode: "near", viewportWidth: 1440, reader: null});
+    expect(scene.bands.find(band => band.id === "task:b")!.geometry.historyCollapsed).toBe(false);
+    expect(scene.mirrorRects.size).toBe(1);
+  }
+});
+
 test("461 empty tasks pack into readable header surfaces without dropping visibility choices", () => {
   const tasks = Array.from({ length: 461 }, (_, i) => ({ ...task(String(i), "2026-01-01T00:00:00Z", [], i === 0 ? "done" : "assigned"), showOnBoard: true }));
   const layout = base([]);

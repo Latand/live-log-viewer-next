@@ -248,8 +248,33 @@ async function evidenceChecks(width: number) {
   await context.close();
 }
 
+async function mirrorChecks(width: number) {
+  for (const evidence of ["incomplete", "unknown", "running"]) {
+    const {context, page} = await open(width, `?case=history&steps=complete&mirror=${evidence}`);
+    const band = '[data-scheme-band="task:task-2"]';
+    const toggle = '[data-scheme-band-history="task:task-2"]';
+    for (const phase of ["initial", "reload"]) {
+      if (phase === "reload") {
+        await page.reload();
+        await page.waitForSelector("[data-scheme-band]", {timeout: 15000});
+        await wait(page);
+      }
+      await zoom(page, 1);
+      await panTo(page, band);
+      const tag = `${width}: ${evidence} mirror ${phase}`;
+      must(!await page.locator(toggle).count() || await page.locator(toggle).getAttribute("aria-expanded") !== "false", `${tag} is not folded`);
+      must(await present(page, '[data-scheme-mirror-band="task:task-2"]'), `${tag} stays visible`);
+      must(!await page.locator(band).innerText().then(text => text.includes("Historical runs")), `${tag} has no historical label`);
+    }
+    await page.screenshot({path: path.join(out, `${width}-mirror-${evidence}.png`)});
+    await context.close();
+  }
+}
+
 try {
   for (const width of [1440, 830, 390]) {
+    await mirrorChecks(width);
+    if (process.env.BOARD_CAPTURE_CASE === "mirrors") continue;
     await historyChecks(width);
     await evidenceChecks(width);
     const { context, page } = await open(width);

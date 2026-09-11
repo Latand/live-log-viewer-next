@@ -64,6 +64,7 @@ export function bandHistoryAvailable(band: TaskBand, base: SchemeLayout, flows: 
     ...(base.stacks.find(stack => stack.key === member.key)?.items.map(item => item.file) ?? []),
     ...(base.decks.find(deck => deck.key === member.key)?.rounds.flatMap(round => round.file ? [round.file] : []) ?? []),
   ]);
+  files.push(...band.mirrors.map(mirror => mirror.file));
   if (band.members.some(member => member.kind === "draft")) return false;
   if (files.some(file => file.pendingQuestion || file.waitingInput || file.derivationComplete === false
     || file.authoritativeTurn?.state === "unknown" || file.authoritativeTurn?.state === "busy"

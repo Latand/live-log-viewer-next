@@ -45,6 +45,13 @@ if(params.get('case')==='history'){
   tasks[0]={...tasks[0]!,status:'assigned'};
   for(const step of params.get('steps')?.split(',').filter(Boolean)??[])steps[step]!();
 }
+const mirrorEvidence=params.get('mirror');
+if(mirrorEvidence){
+  tasks[2]={...tasks[2]!,status:'done',updatedAt:'2026-09-02T00:00:00Z'};
+  if(mirrorEvidence==='incomplete')files[0]={...files[0]!,derivationComplete:false,authoritativeTurn:undefined} as FileEntry;
+  if(mirrorEvidence==='unknown')files[0]={...files[0]!,authoritativeTurn:{state:'unknown',source:'lifecycle',terminalAt:null}} as FileEntry;
+  if(mirrorEvidence==='running')files[0]={...files[0]!,proc:'running'} as FileEntry;
+}
 declare global { interface Window { densityFixture: { files: FileEntry[]; tasks: BoardTask[]; pipelines: Pipeline[] }; openHistoryTarget: () => void; openConversation: (n: number) => void; densityStep: (step: string) => void } }
 window.densityFixture={files,tasks,pipelines};
 function App(){const [selected,setSelected]=useState<string | null>(null);const [revision,setRevision]=useState(0);window.openHistoryTarget=()=>setSelected(files[1]!.path);window.openConversation=n=>setSelected(files[n]!.path);
