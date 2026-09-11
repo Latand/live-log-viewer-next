@@ -19,6 +19,7 @@ const out=path.resolve(values.out);fs.mkdirSync(out,{recursive:true});
 const sandbox=fs.mkdtempSync(path.join(process.env.TMPDIR??'/var/tmp','nc-'));
 const {startNativeCodexRuntime}=await import('../src/lib/runtime/fixtures/nativeCodexRuntime.ts');
 const {runtimeImageStore}=await import('../src/lib/runtime/runtimeImageStore.ts');
+const {inboxFileBatchToken,inboxFilesDir}=await import('../src/lib/inboxFiles.ts');
 const runtime=await startNativeCodexRuntime(sandbox,values.codex);
 const {conversationId,threadId}=runtime;
 const bundle=await Bun.build({entrypoints:['scripts/capture-composer-payloads.fixture.tsx'],target:'browser',define:{'process.env.NODE_ENV':JSON.stringify('production')},outdir:out,naming:'composer.js'});
@@ -39,7 +40,7 @@ const engineRead=async file=>fs.readFileSync(`/proc/${await codexPid()}/root${fi
 const wire=[];
 /* The exact bodies, to ask the original key again after its terminal answer. */
 const bodies=new Map();
-const faults={dropQueue:false,holdQueue:null,dropSend:false};
+const faults={dropQueue:false,holdQueue:null,dropSend:false,staleQueue:false};
 let activePage=null;
 const profile=fs.mkdtempSync(path.join(out,'profile-'));
 let context;
@@ -63,7 +64,14 @@ const launch=async()=>{
     binding:json.binding??null,slotChars:slot?.length??0});
   }
   if(!(request.method()==='GET'&&url.pathname==='/api/runtime/queue'))wire.push(entry);
-  const response=await runtime.handle(new Request('http://localhost'+url.pathname+url.search,{method:request.method(),headers:{'content-type':'application/json'},...(body===undefined?{}:{body})}));
+  /* A binding that moved between the press and the journal: this one request
+     reaches the real journal naming another account, which refuses it. */
+  let forwarded=body;
+  if(entry.key&&url.pathname==='/api/runtime/queue'&&faults.staleQueue){
+   faults.staleQueue=false;entry.bindingRewritten=true;
+   const json=JSON.parse(body);forwarded=JSON.stringify({...json,binding:{...json.binding,accountId:'another-account'}});
+  }
+  const response=await runtime.handle(new Request('http://localhost'+url.pathname+url.search,{method:request.method(),headers:{'content-type':'application/json'},...(forwarded===undefined?{}:{body:forwarded})}));
   const text=await response.text();
   entry.status=response.status;entry.answeredAt=Date.now();
   if(entry.key&&url.pathname==='/api/runtime/queue'){
@@ -104,6 +112,12 @@ const waitFor=async(check,what,timeout=30000)=>{const end=Date.now()+timeout;whi
 const writes=(route,key)=>wire.filter(entry=>entry.path===route&&entry.key===key);
 const lastWrite=route=>wire.filter(entry=>entry.path===route&&entry.key).at(-1);
 const slot=page=>page.evaluate(key=>sessionStorage.getItem(key),slotKey);
+const storedEnvelopes=page=>page.evaluate(()=>new Promise((resolve,reject)=>{
+ const request=indexedDB.open('llv-queue-admissions-v1');
+ request.onerror=()=>reject(request.error);
+ request.onsuccess=()=>{const count=request.result.transaction('submissions').objectStore('submissions').count();count.onsuccess=()=>resolve(count.result);count.onerror=()=>reject(count.error);};
+}));
+const trayStates=page=>page.evaluate(()=>[...document.querySelectorAll('[data-testid="attachment-tile"]')].map(tile=>`${tile.dataset.kind}:${tile.dataset.status}`).sort());
 const entries=()=>runtime.journal.nativeQueueRead(conversationId);
 const operationKey=operationId=>runtime.journal.db.query('SELECT idempotency_key FROM operations WHERE operation_id = ?').get(operationId)?.idempotency_key;
 const operationsFor=key=>runtime.journal.db.query('SELECT operation_id FROM operations WHERE idempotency_key = ?').all(key).length;
@@ -267,6 +281,94 @@ try{
   &&results.ordinaryEnvelope.engineFileMatch&&results.ordinaryEnvelope.fileSurvivesTerminalReplay&&results.ordinaryEnvelope.providerTurnsAfterReplay===1
   &&results.ordinaryEnvelope.turnStarts===1&&results.ordinaryEnvelope.requestsOnReload===0&&results.ordinaryEnvelope.journalOperations===1
   &&results.ordinaryEnvelope.recoveryRows===0&&results.ordinaryEnvelope.retryPosts===0,'The ordinary image-plus-file envelope was not delivered exactly once with its file intact');
+ fs.writeFileSync(path.join(out,'progress.json'),JSON.stringify(redact({results,wire,provider:runtime.provider.requests,entries:entries(),rpc:runtime.rpc.map(call=>call.method)}),null,2));
+
+ // 5. The journal refuses a four-image-and-file hand-off, and the answer lands
+ //    only after the operator has started a newer draft. The refused copy keeps
+ //    its bytes through a reload, never lands on the newer draft, comes back
+ //    whole into a clear composer, and queued again is one new operation that
+ //    Codex delivers with the same bytes.
+ while(await tiles(page))await page.locator('[data-testid="attachment-tile"] button[aria-label^="Remove"]').first().click();
+ const refused={text:'Refused behind a newer draft',files:[...imagesFor(40),binaryFor(40)]};
+ await stage(page,refused.text,refused.files);
+ let releaseRefusal;faults.holdQueue={promise:new Promise(resolve=>{releaseRefusal=resolve;})};faults.staleQueue=true;
+ await page.locator('textarea').press('Alt+Enter');
+ await waitFor(()=>lastWrite('/api/runtime/queue')?.answerHeld===true,'the refused hand-off with its answer held');
+ refused.key=lastWrite('/api/runtime/queue').key;
+ await page.waitForFunction(()=>document.querySelector('textarea').value===''&&document.querySelectorAll('[data-testid="attachment-tile"]').length===0);
+ await page.locator('textarea').fill('Newer draft typed while the answer was held');
+ releaseRefusal();
+ await page.locator(`[data-testid="native-queue-refused-row"][data-key="${refused.key}"]`).waitFor();
+ const refusedWrite=writes('/api/runtime/queue',refused.key)[0];
+ const refusedBatch=path.join(inboxFilesDir(),inboxFileBatchToken(refused.key));
+ results.lateRefusal={status:refusedWrite.status,bindingRewritten:refusedWrite.bindingRewritten===true,journalOperations:operationsFor(refused.key),queuedEntries:entryFor(refused.key)?1:0,
+  inboxBatchReleased:!fs.existsSync(refusedBatch),draft:await page.locator('textarea').inputValue(),tiles:await tiles(page),
+  slotKeepsRefusedCopy:JSON.parse(await slot(page)??'[]').some(record=>record.key===refused.key&&record.refused&&record.payload?.images===4&&record.payload?.files===1),
+  storedEnvelopes:await storedEnvelopes(page)};
+ await page.screenshot({path:path.join(out,'late-refusal-newer-draft.png')});
+ await page.reload();await page.locator('textarea').waitFor();activePage=page;
+ await page.locator(`[data-testid="native-queue-refused-row"][data-key="${refused.key}"]`).waitFor();
+ Object.assign(results.lateRefusal,{draftAfterReload:await page.locator('textarea').inputValue(),storedEnvelopesAfterReload:await storedEnvelopes(page),
+  refusedRowsAfterReload:await page.locator('[data-testid="native-queue-refused-row"]').count()});
+ await page.locator(`[data-testid="native-queue-refused-row"][data-key="${refused.key}"] [data-testid="native-queue-refused-restore"]`).click();
+ await page.getByText('holds another draft',{exact:false}).first().waitFor();
+ results.lateRefusal.restoreOverNewerDraft=await page.locator('textarea').inputValue();
+ /* The newer draft goes out with Enter and keeps a turn running, so the
+    message queued again waits in Codex's queue as the first one did. */
+ await page.locator('textarea').press('Enter');
+ await waitFor(()=>runtime.provider.open()===1,'the newer draft turn to reach the provider');
+ await page.waitForFunction(()=>document.querySelector('textarea').value==='');
+ await page.locator(`[data-testid="native-queue-refused-row"][data-key="${refused.key}"] [data-testid="native-queue-refused-restore"]`).click();
+ await page.waitForFunction(text=>document.querySelector('textarea').value===text,refused.text);
+ await page.waitForFunction(()=>document.querySelectorAll('[data-testid="attachment-tile"][data-status="ready"]').length===5);
+ results.lateRefusal.restoredTray=await trayStates(page);
+ await page.locator('textarea').press('Alt+Enter');
+ await waitFor(()=>lastWrite('/api/runtime/queue')?.key!==refused.key&&lastWrite('/api/runtime/queue')?.status!==undefined,'the restored message to be queued again');
+ const again=lastWrite('/api/runtime/queue');
+ await waitFor(async()=>!(await slot(page)),'the new operation to settle and the refused copy to be taken over');
+ await page.locator('[data-testid="native-queue-refused-row"]').waitFor({state:'detached'});
+ for(let turns=0;turns<6&&entryFor(again.key)?.state!=='delivered';turns++){while(runtime.provider.open()>0)runtime.provider.completeNext();await Bun.sleep(1000);}
+ await waitFor(()=>entryFor(again.key)?.state==='delivered','the message queued again to be delivered',60000);
+ const againEntry=entryFor(again.key);
+ const againFile=queuedFilePath(againEntry,refused.files[4].name);
+ const againImages=[];for(const item of (againEntry.proof?.input??[]).filter(item=>item.type==='localImage'))againImages.push(sha(await engineRead(item.path)));
+ Object.assign(results.lateRefusal,{againStatus:again.status,newKey:again.key!==refused.key,againBinding:againEntry.binding,
+  wireImagesMatch:JSON.stringify(again.images)===JSON.stringify(shas(refused.files.slice(0,4))),
+  wireFileMatch:JSON.stringify(again.files)===JSON.stringify([{name:refused.files[4].name,sha:sha(refused.files[4].buffer)}]),
+  inputKinds:(againEntry.proof?.input??[]).map(item=>item.type),engineImagesMatch:JSON.stringify(againImages)===JSON.stringify(shas(refused.files.slice(0,4))),
+  engineFileMatch:againFile?sha(await engineRead(againFile))===sha(refused.files[4].buffer):false,againJournalOperations:operationsFor(again.key),
+  queueAdds:rpcCount('thread/queue/add',params=>JSON.stringify(params).includes(againEntry.clientUserMessageId)),
+  providerTurns:providerTurnsWith(shas(refused.files.slice(0,4))).length,storedEnvelopesAfterDelivery:await storedEnvelopes(page)});
+ while(runtime.provider.open()>0)runtime.provider.completeNext();
+ await waitFor(async()=>(await runtime.host().health()).activeTurnRef===null,'the thread to go idle after the refusal scenario');
+ assert(results.lateRefusal.status===409&&results.lateRefusal.bindingRewritten&&results.lateRefusal.journalOperations===1&&results.lateRefusal.queuedEntries===0
+  &&results.lateRefusal.inboxBatchReleased&&results.lateRefusal.draft==='Newer draft typed while the answer was held'&&results.lateRefusal.tiles===0
+  &&results.lateRefusal.slotKeepsRefusedCopy&&results.lateRefusal.storedEnvelopes===1&&results.lateRefusal.storedEnvelopesAfterReload===1&&results.lateRefusal.refusedRowsAfterReload===1
+  &&results.lateRefusal.draftAfterReload==='Newer draft typed while the answer was held'&&results.lateRefusal.restoreOverNewerDraft==='Newer draft typed while the answer was held'
+  &&JSON.stringify(results.lateRefusal.restoredTray)===JSON.stringify(['file:ready','image:ready','image:ready','image:ready','image:ready'])
+  &&results.lateRefusal.againStatus===202&&results.lateRefusal.newKey&&results.lateRefusal.againBinding.threadId===threadId
+  &&results.lateRefusal.wireImagesMatch&&results.lateRefusal.wireFileMatch&&results.lateRefusal.engineImagesMatch&&results.lateRefusal.engineFileMatch
+  &&JSON.stringify([...results.lateRefusal.inputKinds].sort())===JSON.stringify(['localImage','localImage','localImage','localImage','text'])
+  &&results.lateRefusal.againJournalOperations===1&&results.lateRefusal.queueAdds===1&&results.lateRefusal.providerTurns===1&&results.lateRefusal.storedEnvelopesAfterDelivery===0,
+  'A late refusal did not keep the whole message recoverable until it was queued again');
+
+ // 6. A refused copy the operator discards: its identity and bytes go, and the
+ //    draft it gave back stays theirs.
+ const discarded={text:'Refused, then discarded',files:[binaryFor(50)]};
+ await stage(page,discarded.text,discarded.files);
+ faults.staleQueue=true;
+ await page.locator('textarea').press('Alt+Enter');
+ await waitFor(()=>lastWrite('/api/runtime/queue')?.bindingRewritten===true&&lastWrite('/api/runtime/queue')?.status!==undefined,'the second refusal');
+ discarded.key=lastWrite('/api/runtime/queue').key;
+ await page.locator(`[data-testid="native-queue-refused-row"][data-key="${discarded.key}"]`).waitFor();
+ await page.waitForFunction(text=>document.querySelector('textarea').value===text,discarded.text);
+ const slotBeforeDiscard=await slot(page);
+ await page.locator(`[data-testid="native-queue-refused-row"][data-key="${discarded.key}"] [data-testid="native-queue-refused-discard"]`).click();
+ await page.locator('[data-testid="native-queue-refused-row"]').waitFor({state:'detached'});
+ results.discard={status:lastWrite('/api/runtime/queue').status,keptBeforeDiscard:Boolean(slotBeforeDiscard?.includes(discarded.key)),slotAfter:await slot(page),
+  storedEnvelopes:await storedEnvelopes(page),draft:await page.locator('textarea').inputValue(),tray:await trayStates(page),journalOperations:operationsFor(discarded.key)};
+ assert(results.discard.status===409&&results.discard.keptBeforeDiscard&&results.discard.slotAfter===null&&results.discard.storedEnvelopes===0
+  &&results.discard.draft===discarded.text&&JSON.stringify(results.discard.tray)===JSON.stringify(['file:ready'])&&results.discard.journalOperations===1,'Discarding a refused copy did not remove exactly it');
 
  results.totals={providerRequests:runtime.provider.requests.length,queueAdds:rpcCount('thread/queue/add'),turnStarts:rpcCount('turn/start'),journalEntries:entries().length,
   entryStates:entries().map(entry=>entry.state)};

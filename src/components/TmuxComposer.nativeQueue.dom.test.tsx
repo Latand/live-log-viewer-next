@@ -977,7 +977,23 @@ test("a held large hand-off still admits one press: a second Alt+Enter during it
   }
 });
 
-test("a held large refusal never lands on the newer draft, and returns whole to an empty one", async () => {
+/** Types into the composer the way an onChange would deliver it. */
+async function typeDraft(host: HTMLElement, value: string): Promise<void> {
+  const textarea = host.querySelector("textarea") as HTMLTextAreaElement;
+  const propsKey = Object.keys(textarea).find((key) => key.startsWith("__reactProps$"))!;
+  const props = (textarea as unknown as Record<string, { onChange(event: unknown): void }>)[propsKey]!;
+  await settle(() => props.onChange({ target: { value }, currentTarget: { value } }));
+}
+
+const click = async (element: Element | null) => {
+  if (!element) throw new Error("nothing to click");
+  await settle(() => element.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
+};
+
+const tileStates = (host: HTMLElement) => [...host.querySelectorAll('[data-testid="attachment-tile"]')]
+  .map((tile) => `${tile.getAttribute("data-kind")}:${tile.getAttribute("data-status")}`).sort();
+
+test("a held large refusal never lands on the newer draft, and its copy stays until it is put back or discarded", async () => {
   const refusal = async () => ({ status: 409, body: { error: "native queue host or account ownership changed" } });
   await withHeldLargeHandOff(async ({ host, answer }) => {
     await settle(() => appendComposerDraft(CARD, "newer words"));
@@ -986,9 +1002,41 @@ test("a held large refusal never lands on the newer draft, and returns whole to 
     expect(host.textContent).toContain("ownership changed");
     expect((host.querySelector("textarea") as HTMLTextAreaElement).value).toBe("newer words");
     expect(host.querySelectorAll('[data-testid="attachment-tile"]')).toHaveLength(1);
-    /* A refusal admitted nothing, so there is nothing left to recover. */
+    /* #1652: a refusal admitted nothing, and the refused message is still the
+       operator's. It stays, bytes and all, as a refused copy. */
+    const [kept] = readRetainedQueueAdmissions(CARD);
+    expect(kept).toMatchObject({ key: queueWrites[0]!.idempotencyKey, refused: { reason: "native queue host or account ownership changed" }, payload: { images: 1, files: 1 } });
+    const row = host.querySelector('[data-testid="native-queue-refused-row"]');
+    expect(row?.textContent).toContain("large hand-off");
+    expect(host.querySelector('[data-testid="native-queue-unresolved-retry"]')).toBeNull();
+
+    /* Never over the newer draft. */
+    await click(row!.querySelector('[data-testid="native-queue-refused-restore"]'));
+    await until(() => host.textContent?.includes("another draft") ?? false, "the occupied-composer refusal");
+    expect((host.querySelector("textarea") as HTMLTextAreaElement).value).toBe("newer words");
+    expect(readRetainedQueueAdmissions(CARD)).toHaveLength(1);
+
+    /* Once the composer is clear, the whole message comes back from the copy. */
+    await click(host.querySelector('[data-testid="attachment-tile"] button[aria-label="Remove image 1"]'));
+    await typeDraft(host, "");
+    await click(host.querySelector('[data-testid="native-queue-refused-restore"]'));
+    await until(() => (host.querySelector("textarea") as HTMLTextAreaElement).value === "large hand-off", "the refused message to come back");
+    expect(tileStates(host)).toEqual(["file:ready", "image:ready"]);
+    expect(readRetainedQueueAdmissions(CARD)).toHaveLength(1);
+
+    /* Queued again, it is a new operation, under the binding it has now, and
+       the new operation takes the refused copy's place. */
+    await settle(() => press(host.querySelector("textarea") as HTMLTextAreaElement, "Enter", { altKey: true }));
+    await until(() => queueWrites.length === 2, "the second hand-off");
+    expect(queueWrites[1]!.idempotencyKey).not.toBe(queueWrites[0]!.idempotencyKey);
+    expect(queueWrites[1]!.files).toEqual(queueWrites[0]!.files);
+    expect(JSON.stringify(queueWrites[1]!.images)).toBe(JSON.stringify(queueWrites[0]!.images));
+    expect(readRetainedQueueAdmissions(CARD).map((entry) => [entry.key, Boolean(entry.refused)]))
+      .toEqual([[String(queueWrites[1]!.idempotencyKey), false]]);
+    expect(host.querySelector('[data-testid="native-queue-refused-row"]')).toBeNull();
+    await answer(async () => journalReceipt(queueWrites[1]!));
     expect(readRetainedQueueAdmissions(CARD)).toEqual([]);
-  });
+  }, { document: true });
   document.body.replaceChildren();
   sessionStorage.clear();
   resetRetainedQueueAdmissionsForTests();
@@ -997,7 +1045,87 @@ test("a held large refusal never lands on the newer draft, and returns whole to 
     await answer(refusal);
     expect((host.querySelector("textarea") as HTMLTextAreaElement).value).toBe("large hand-off");
     expect(host.querySelectorAll('[data-testid="attachment-tile"]')).toHaveLength(1);
+    expect(readRetainedQueueAdmissions(CARD)[0]?.refused).toBeDefined();
   });
+});
+
+test("a refused copy survives a reload that loses the draft's bytes, and is gone only when discarded", async () => {
+  const refusal = async () => ({ status: 409, body: { error: "native queue host or account ownership changed" } });
+  const storage = installComposerStorageForTests();
+  const previous = queueTransport.write;
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  (queueTransport as { write: NativeQueueDependencies["write"] }).write = async (body) => {
+    queueWrites.push(body);
+    await held;
+    return refusal();
+  };
+  try {
+    const first = await mount();
+    await stage(first.host, { name: "large.png", type: "image/png", size: 300_000 }, LARGE_IMAGE);
+    await stage(first.host, { name: "fixture.bin", type: "application/octet-stream", size: 8 }, DOCUMENT);
+    await settle(() => appendComposerDraft(CARD, "refused then reloaded"));
+    await settle(() => press(first.host.querySelector("textarea") as HTMLTextAreaElement, "Enter", { altKey: true }));
+    await until(() => queueWrites.length === 1, "the hand-off");
+    await act(async () => { release(); await new Promise((resolve) => setTimeout(resolve, 0)); });
+    await until(() => (first.host.querySelector("textarea") as HTMLTextAreaElement).value === "refused then reloaded", "the draft to come back");
+    await act(async () => first.root.unmount());
+    document.body.replaceChildren();
+
+    /* A reload: only what the browser persisted. The draft kept its words and
+       names its document, whose bytes no draft keeps. */
+    resetRetainedQueueAdmissionsForTests();
+    const second = await mount();
+    try {
+      expect((second.host.querySelector("textarea") as HTMLTextAreaElement).value).toBe("refused then reloaded");
+      expect(tileStates(second.host)).toContain("file:error");
+      const row = second.host.querySelector('[data-testid="native-queue-refused-row"]');
+      expect(row?.textContent).toContain("refused then reloaded");
+      expect(row?.textContent).toContain("ownership changed");
+
+      /* The remnant is this same message, so the copy replaces it whole. */
+      await click(row!.querySelector('[data-testid="native-queue-refused-restore"]'));
+      await until(() => tileStates(second.host).join() === "file:ready,image:ready", "the whole message to come back");
+      expect((second.host.querySelector("textarea") as HTMLTextAreaElement).value).toBe("refused then reloaded");
+
+      await click(second.host.querySelector('[data-testid="native-queue-refused-discard"]'));
+      expect(readRetainedQueueAdmissions(CARD)).toEqual([]);
+      expect(sessionStorage.getItem("llvQueueAdmission:" + CARD)).toBeNull();
+      expect(second.host.querySelector('[data-testid="native-queue-refused-row"]')).toBeNull();
+      /* Discarding the copy leaves the composer alone. */
+      expect(tileStates(second.host)).toEqual(["file:ready", "image:ready"]);
+      expect(queueWrites).toHaveLength(1);
+    } finally {
+      await act(async () => second.root.unmount());
+    }
+  } finally {
+    (queueTransport as { write: NativeQueueDependencies["write"] }).write = previous;
+    storage.uninstall();
+  }
+});
+
+test("a small refused hand-off behind a newer draft is kept on the panel rather than lost", async () => {
+  const { host, root } = await mount();
+  const previous = queueTransport.write;
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  (queueTransport as { write: NativeQueueDependencies["write"] }).write = async (body) => {
+    queueWrites.push(body);
+    await held;
+    return { status: 409, body: { error: "native queue host or account ownership changed" } };
+  };
+  try {
+    await settle(() => appendComposerDraft(CARD, "short and refused"));
+    await settle(() => press(host.querySelector("textarea") as HTMLTextAreaElement, "Enter", { altKey: true }));
+    await settle(() => appendComposerDraft(CARD, "newer words"));
+    await act(async () => { release(); await new Promise((resolve) => setTimeout(resolve, 0)); });
+    expect((host.querySelector("textarea") as HTMLTextAreaElement).value).toBe("newer words");
+    expect(host.querySelector('[data-testid="native-queue-refused-row"]')?.textContent).toContain("short and refused");
+    expect(readRetainedQueueAdmissions(CARD)[0]).toMatchObject({ mutation: { text: "short and refused" }, refused: { reason: "native queue host or account ownership changed" } });
+  } finally {
+    (queueTransport as { write: NativeQueueDependencies["write"] }).write = previous;
+  }
+  await act(async () => root.unmount());
 });
 
 test("a held large answer that is lost keeps the original operation, and its replay is the same envelope", async () => {
@@ -1048,7 +1176,8 @@ test("a staged document rides the queue hand-off beside its image, and a refusal
     expect((host.querySelector("textarea") as HTMLTextAreaElement).value).toBe("image and file");
     const tiles = [...host.querySelectorAll('[data-testid="attachment-tile"]')];
     expect(tiles.map((tile) => `${tile.getAttribute("data-kind")}:${tile.getAttribute("data-status")}`).sort()).toEqual(["file:ready", "image:ready"]);
-    expect(readRetainedQueueAdmissions(CARD)).toEqual([]);
+    /* The refused copy is kept until the same message is queued again. */
+    expect(readRetainedQueueAdmissions(CARD).map((entry) => Boolean(entry.refused))).toEqual([true]);
 
     await settle(() => press(host.querySelector("textarea") as HTMLTextAreaElement, "Enter", { altKey: true }));
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });

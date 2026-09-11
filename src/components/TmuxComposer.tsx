@@ -31,6 +31,7 @@ import {
   findRetainedQueueAdmission,
   queueEnvelopeNeedsDurableBytes,
   readRetainedQueueAdmissions,
+  refuseQueueAdmission,
   releaseQueueAdmission,
   restoreQueueAdmission,
   retainDurableQueueAdmission,
@@ -1265,7 +1266,8 @@ function canMessageWithoutPane(file: FileEntry): boolean {
 /* The retained store also holds the panel's own unanswered controls, which are
    not hand-offs and have no words to give back: a control names an entry the
    journal still holds, and pressing it again is its own recovery. Only an `add`
-   earns a recovery row in the composer. */
+   earns a recovery row in the composer: one waiting on an answer, or a refused
+   one kept until the operator puts it back or discards it. */
 const unresolvedHandoffs = (id: string) =>
   readRetainedQueueAdmissions(id).filter((entry) => entry.mutation.action === "add");
 
@@ -3250,7 +3252,7 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
        key and its own binding, instead of admitting a second indistinguishable
        one. A message that is no longer the same message is a new operation, and
        the unresolved one is kept rather than overwritten. */
-    const retained = readRetainedQueueAdmissions(cardId).find((entry) => !entry.payload && sameQueueOperation(entry.mutation, mutation));
+    const retained = readRetainedQueueAdmissions(cardId).find((entry) => !entry.payload && !entry.refused && sameQueueOperation(entry.mutation, mutation));
     const envelope: RetainedQueueAdmission = retained ?? { key: mintIdempotencyKey(), mutation, binding };
     /* Too large for the slot: its bytes go to IndexedDB first. Every other
        command stays on this synchronous path. */
@@ -3327,14 +3329,21 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
     });
   };
 
+  /* Both terminal answers end THIS operation's uncertainty, and nothing
+     else's. `ok` is the journal's own identified receipt for it — including the
+     replay of one it already held — and releases it. A refusal is the journal
+     saying it admitted nothing, so the record keeps the message from here on,
+     bytes included (#1652): the composer may already hold newer words, and no
+     draft keeps a document's bytes across a reload.
+     An unknown outcome leaves the record exactly where it was written. */
+  const settleHandOff = (key: string, answer: { ok: boolean; outcome?: "refused" | "unknown"; error?: string }) => {
+    if (answer.ok) releaseQueueAdmission(cardId, key);
+    else if (answer.outcome === "refused") refuseQueueAdmission(cardId, key, answer.error ?? t("queue.refused"));
+  };
+
   const submitHandOff = async (envelope: RetainedQueueAdmission, snapshot: QueueHandOffSnapshot) => {
     const answer = await nativeQueue.submit({ ...envelope.mutation, binding: envelope.binding }, envelope.key);
-    /* Both terminal answers end THIS operation's uncertainty, and nothing
-       else's. `ok` is the journal's own identified receipt for it — including
-       the replay of one it already held — and a refusal is the journal saying
-       it admitted nothing. An unknown outcome leaves the record exactly where
-       it was written. */
-    if (answer.outcome !== "unknown") releaseQueueAdmission(cardId, envelope.key);
+    settleHandOff(envelope.key, answer);
     if (payloadOwner.current !== cardId) return;
     setUnresolvedAdmissions(unresolvedHandoffs(cardId));
     if (answer.ok) return;
@@ -3344,8 +3353,10 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
        exists to prevent on the other path. The answer can arrive after the
        operator has started the next message, so the draft comes back whole and
        only into a composer holding nothing: never beside newer words or tiles,
-       and never replacing a tray still reading them. An UNKNOWN outcome gives
-       it back too, and the operation stays recoverable from the panel either way. */
+       and never replacing a tray still reading them. Either way the refused
+       copy stays on the panel until it is discarded or queued again. An
+       UNKNOWN outcome gives it back too, and the operation stays recoverable
+       from the panel. */
     setStatus({ kind: "err", text: answer.error ?? t("queue.refused") });
     if (textRef.current.trim() || attachments.attachmentsRef.current.length) return;
     setText(snapshot.text);
@@ -3363,7 +3374,7 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
    * followed.
    */
   const replayQueueAdmission = (key: string) => {
-    const retained = readRetainedQueueAdmissions(cardId).find((entry) => entry.key === key);
+    const retained = readRetainedQueueAdmissions(cardId).find((entry) => entry.key === key && !entry.refused);
     if (!retained) return;
     void (async () => {
       /* Bytes kept in IndexedDB are read back and verified first; a copy that
@@ -3375,10 +3386,64 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
         return;
       }
       const answer = await nativeQueue.submit({ ...envelope.mutation, binding: envelope.binding }, envelope.key);
-      if (answer.outcome !== "unknown") releaseQueueAdmission(cardId, envelope.key);
+      settleHandOff(envelope.key, answer);
       setUnresolvedAdmissions(unresolvedHandoffs(cardId));
       if (!answer.ok) setStatus({ kind: "err", text: answer.error ?? t("queue.refused") });
     })();
+  };
+
+  /**
+   * Put a refused hand-off back into the composer, from its kept copy (#1652).
+   *
+   * The copy is read back and verified first, so the words, images and files
+   * return byte for byte. It goes only into a composer holding nothing but
+   * this same message, perhaps with the pieces a reload could not keep, and
+   * never over a newer draft. The copy stays on the panel afterwards: a draft
+   * cannot keep a document's bytes across a reload, so it leaves only when the
+   * operator discards it or queues the message again.
+   */
+  const restoreRefusedHandOff = (key: string) => {
+    const retained = readRetainedQueueAdmissions(cardId).find((entry) => entry.key === key && entry.refused);
+    if (!retained) return;
+    void (async () => {
+      let envelope: RetainedQueueAdmission;
+      try { envelope = await restoreQueueAdmission(cardId, retained); }
+      catch {
+        setStatus({ kind: "err", text: t("composer.payloadCorrupt") });
+        return;
+      }
+      if (payloadOwner.current !== cardId) return;
+      const text = envelope.mutation.text ?? "";
+      const images = (envelope.mutation.images ?? []) as unknown as Array<{ base64: string; mime: string }>;
+      const files = envelope.mutation.files ?? [];
+      const current = textRef.current.trim();
+      const imageBytes = new Set(images.map((image) => image.base64));
+      const fileBytes = new Set(files.map((entry) => entry.base64));
+      const fileNames = new Set(files.map((entry) => entry.name));
+      const holdsOnlyThis = (!current || current === text.trim())
+        && attachments.attachmentsRef.current.every((slot) => (slot.status === "error"
+          ? slot.kind === "file" && fileNames.has(slot.name)
+          : slot.status === "ready" && Boolean(slot.base64) && (slot.kind === "image" ? imageBytes : fileBytes).has(slot.base64!)));
+      if (!holdsOnlyThis) {
+        setStatus({ kind: "err", text: t("queue.refusedRestoreOccupied") });
+        return;
+      }
+      setText(text);
+      attachments.replace(
+        images.map((image) => ({ base64: image.base64, mime: image.mime, preview: `data:${image.mime};base64,${image.base64}` })),
+        files.map((entry, index) => ({ id: `${key}-file-${index}`, name: entry.name, mime: "", base64: entry.base64 })),
+      );
+      setStatus(null);
+      inputRef.current?.focus();
+    })();
+  };
+
+  /** The operator's explicit discard of a refused copy: its identity and its
+      bytes go, and nothing else does. */
+  const discardRefusedHandOff = (key: string) => {
+    if (!readRetainedQueueAdmissions(cardId).some((entry) => entry.key === key && entry.refused)) return;
+    releaseQueueAdmission(cardId, key);
+    setUnresolvedAdmissions(unresolvedHandoffs(cardId));
   };
 
   /**
@@ -3766,8 +3831,11 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
             text: entry.mutation.text ?? "",
             imageCount: (entry.payload?.images ?? entry.mutation.images?.length ?? 0)
               + (entry.payload?.files ?? entry.mutation.files?.length ?? 0),
+            ...(entry.refused ? { refused: entry.refused.reason } : {}),
           }))}
           onReplay={replayQueueAdmission}
+          onRestore={restoreRefusedHandOff}
+          onDiscard={discardRefusedHandOff}
           mintKey={mintIdempotencyKey}
           submit={nativeQueue.submit}
           onRefresh={nativeQueue.refresh}

@@ -251,6 +251,89 @@ test("an edit keeps the files its words name and may carry new ones under its ow
   journal.close();
 });
 
+/** The journal behind a socket whose FIRST command waits at the door until the
+    test lets it through, and may then fail the way `fail` says. */
+function heldClient(journal: RuntimeJournalType, fail?: string) {
+  let release!: () => void;
+  let reached!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const arrived = new Promise<void>((resolve) => { reached = resolve; });
+  const order: string[] = [];
+  let calls = 0;
+  const client = {
+    command: async (command: NativeQueueCommand & { text?: string }) => {
+      const first = ++calls === 1;
+      order.push(command.text?.split("\n")[0] ?? "");
+      if (first) {
+        reached();
+        await gate;
+        if (fail) throw new Error(fail);
+      }
+      return journal.executeOperation(command);
+    },
+    nativeQueueRead: async (id: string) => journal.nativeQueueRead(id),
+  } as unknown as RuntimeHostClient;
+  const send = (body: Record<string, unknown>) => handleNativeQueue(new NextRequest("http://localhost/api/runtime/queue", {
+    method: "POST", headers: { host: "localhost", "content-type": "application/json" }, body: JSON.stringify(body),
+  }), { client: () => client, enabled: () => true, kick: () => {}, admitImages: () => ({ images: [], error: null }), storeImages: () => [] });
+  return { send, release, arrived, order };
+}
+
+test("a request refused under the key another request was admitted with never deletes the file that one names", async () => {
+  const journal = makeJournal();
+  const held = heldClient(journal);
+  const files = [attachment("trace.bin", binary)];
+  const first = held.send(add("queue-race", { text: "first words", files }));
+  await held.arrived;
+  /* Same key, same bytes, different words: a second request while the first
+     is still waiting for the journal. */
+  const second = held.send(add("queue-race", { text: "second words", files }));
+  await Bun.sleep(20);
+  const reachedWhileHeld = [...held.order];
+  held.release();
+  const [firstAnswer, secondAnswer] = await Promise.all([first, second]);
+  const file = path.join(batchDir("queue-race"), "trace.bin");
+  expect(fs.existsSync(file) && fs.readFileSync(file).equals(binary)).toBeTrue();
+  expect(reachedWhileHeld).toEqual(["first words"]);
+  expect(firstAnswer.status).toBe(202);
+  expect(secondAnswer.status).toBe(409);
+  const entries = journal.nativeQueueRead(conversationId);
+  expect(entries.map((entry) => entry.versions[0]!.text)).toEqual([`first words\n${file}`]);
+  journal.close();
+});
+
+test("a refusal that releases its file finishes before a request under the same key reuses it", async () => {
+  const journal = makeJournal();
+  const held = heldClient(journal, "native queue entry revision changed");
+  const files = [attachment("trace.bin", binary)];
+  const first = held.send(add("queue-race-refused", { text: "first words", files }));
+  await held.arrived;
+  const second = held.send(add("queue-race-refused", { text: "second words", files }));
+  await Bun.sleep(20);
+  held.release();
+  const [firstAnswer, secondAnswer] = await Promise.all([first, second]);
+  const file = path.join(batchDir("queue-race-refused"), "trace.bin");
+  /* The admitted request's file is there, whole, whatever the refused one released. */
+  expect(fs.existsSync(file) && fs.readFileSync(file).equals(binary)).toBeTrue();
+  expect(firstAnswer.status).toBe(409);
+  expect(secondAnswer.status).toBe(202);
+  expect(held.order).toEqual(["first words", "second words"]);
+  expect(journal.nativeQueueRead(conversationId).map((entry) => entry.versions[0]!.text)).toEqual([`second words\n${file}`]);
+  journal.close();
+});
+
+test("requests under different keys do not wait for each other", async () => {
+  const journal = makeJournal();
+  const held = heldClient(journal);
+  const first = held.send(add("queue-slow", { text: "slow", files: [attachment("trace.bin", binary)] }));
+  await held.arrived;
+  const quick = await held.send(add("queue-quick", { text: "quick", files: [attachment("trace.bin", binary)] }));
+  expect(quick.status).toBe(202);
+  held.release();
+  expect((await first).status).toBe(202);
+  journal.close();
+});
+
 test("a replay after the message was delivered answers the delivered receipt and keeps the file", async () => {
   const journal = makeJournal();
   const body = add("queue-delivered", { files: [attachment("trace.bin", binary)] });

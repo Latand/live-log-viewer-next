@@ -9,6 +9,7 @@ import {
   queueAdmissionKey,
   queueEnvelopeNeedsDurableBytes,
   readRetainedQueueAdmissions,
+  refuseQueueAdmission,
   releaseQueueAdmission,
   resetRetainedQueueAdmissionsForTests,
   restoreQueueAdmission,
@@ -149,4 +150,59 @@ test("a hand-off retained before files could ride keeps the identity it was stor
   const digest = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(legacy))),
     (byte) => byte.toString(16).padStart(2, "0")).join("");
   expect(stored[0]!.payload.authored).toBe(digest);
+});
+
+test("a refused hand-off keeps its identity and its bytes, across a reload, until it is discarded", async () => {
+  /* #1652: a refusal admitted nothing, but the record is still the only whole
+     copy of the message once the composer holds newer words. */
+  const envelope = handOff("refused later");
+  await retainDurableQueueAdmission(CARD, envelope);
+  refuseQueueAdmission(CARD, envelope.key, "native queue host or account ownership changed");
+  resetRetainedQueueAdmissionsForTests();
+  const [record] = readRetainedQueueAdmissions(CARD);
+  expect(record).toMatchObject({ key: envelope.key, refused: { reason: "native queue host or account ownership changed" }, payload: { images: 4 } });
+  expect((await restoreQueueAdmission(CARD, record!)).mutation).toEqual(envelope.mutation);
+  /* The same message pressed again is a new operation. */
+  expect(await findRetainedQueueAdmission(CARD, envelope.mutation)).toBeUndefined();
+
+  releaseQueueAdmission(CARD, envelope.key);
+  expect(slot()).toBeNull();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  await expect(restoreQueueAdmission(CARD, record!)).rejects.toThrow("could not be verified");
+});
+
+test("the same message retained again as a new operation takes over the refused copy", async () => {
+  const refused = handOff("queued again", "key-refused");
+  await retainDurableQueueAdmission(CARD, refused);
+  refuseQueueAdmission(CARD, refused.key, "stale binding");
+  const [old] = readRetainedQueueAdmissions(CARD);
+  /* A different message leaves the refused copy where it is. */
+  expect(await retainDurableQueueAdmission(CARD, handOff("something else", "key-other"))).toBe("retained");
+  expect(readRetainedQueueAdmissions(CARD).map((entry) => entry.key)).toEqual(["key-refused", "key-other"]);
+
+  expect(await retainDurableQueueAdmission(CARD, { ...refused, key: "key-again" })).toBe("retained");
+  expect(readRetainedQueueAdmissions(CARD).map((entry) => entry.key)).toEqual(["key-other", "key-again"]);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  await expect(restoreQueueAdmission(CARD, old!)).rejects.toThrow("could not be verified");
+  const [, again] = readRetainedQueueAdmissions(CARD);
+  expect((await restoreQueueAdmission(CARD, again!)).mutation).toEqual(refused.mutation);
+});
+
+test("a small refused hand-off stays inline, and is taken over by the same words pressed again", () => {
+  const small: RetainedQueueAdmission = { key: "small-refused", binding, mutation: { action: "add", text: "short" } };
+  retainQueueAdmission(CARD, small);
+  refuseQueueAdmission(CARD, small.key, "stale binding");
+  expect(JSON.parse(slot()!)).toEqual([{ ...small, refused: { reason: "stale binding" } }]);
+  expect(retainQueueAdmission(CARD, { ...small, key: "small-again" })).toBe("retained");
+  expect(readRetainedQueueAdmissions(CARD).map((entry) => entry.key)).toEqual(["small-again"]);
+});
+
+test("a refused copy the new operation takes over does not count against the bound", () => {
+  for (let index = 0; index < 7; index++) retainQueueAdmission(CARD, { key: `other-${index}`, binding, mutation: { action: "add", text: `other ${index}` } });
+  const small: RetainedQueueAdmission = { key: "bounded-refused", binding, mutation: { action: "add", text: "bounded" } };
+  expect(retainQueueAdmission(CARD, small)).toBe("retained");
+  refuseQueueAdmission(CARD, small.key, "stale binding");
+  expect(retainQueueAdmission(CARD, { key: "new-message", binding, mutation: { action: "add", text: "new" } })).toBe("refused");
+  expect(retainQueueAdmission(CARD, { ...small, key: "bounded-again" })).toBe("retained");
+  expect(readRetainedQueueAdmissions(CARD)).toHaveLength(8);
 });

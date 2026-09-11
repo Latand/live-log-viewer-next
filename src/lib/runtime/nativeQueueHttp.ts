@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { attachmentsAreOrphaned, type AttachmentDeliveryOutcome } from "@/lib/attachmentRetention";
 import {
   admitInboxFilePayload, deleteInboxFiles, InboxFileConflictError, inboxFileBatchToken, inboxFilePaths, inboxFileText,
-  stageInboxFiles, type InboxFileUpload, type StagedInboxFiles,
+  stageInboxFiles, withInboxBatch, type InboxFileUpload, type StagedInboxFiles,
 } from "@/lib/inboxFiles";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { structuredDeliveryHostForConversation } from "./structuredDeliveryController";
@@ -53,7 +53,7 @@ export async function handleNativeQueue(request: NextRequest, dependencies: Depe
       return NextResponse.json({ error: "native queue history is unavailable" }, { status: 503 });
     }
   }
-  let command;
+  let command: ReturnType<typeof parseRuntimeCommand>;
   let body: unknown;
   try { body = await request.json(); }
   catch { return NextResponse.json({ error: "invalid JSON" }, { status: 400 }); }
@@ -102,11 +102,34 @@ export async function handleNativeQueue(request: NextRequest, dependencies: Depe
   }
   try { command = parseRuntimeCommand("native-queue", body); }
   catch (error) { return NextResponse.json({ error: error instanceof Error ? error.message : "invalid native queue command" }, { status: 400 }); }
+  const admit = async (staged: StagedInboxFiles | null): Promise<NextResponse> => {
+    /* The same rule as an ordinary send (#1224): bytes go on a TERMINAL refusal
+       and on nothing else. A 409 is the journal refusing this request; a thrown
+       transport leaves the operation's fate unknown, and a receipt of any other
+       status names an operation whose message holds these paths. */
+    let outcome: AttachmentDeliveryOutcome = "uncertain";
+    try {
+      const result = await client.command(command);
+      outcome = result.receipt.status === "rejected" ? "refused" : "accepted";
+      if (result.receipt.status === "queued" || result.receipt.status === "pending") dependencies.kick();
+      return NextResponse.json(result, { status: result.receipt.status === "rejected" ? 409 : 202 });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "native queue admission is unavailable";
+      const conflict = /idempotency|revision changed|frozen or unresolved|ownership changed/.test(message);
+      if (conflict) outcome = "refused";
+      return NextResponse.json({ error: message, recovery: "query or replay the original Viewer idempotency key" }, { status: conflict ? 409 : 503 });
+    } finally {
+      if (staged?.created.length && attachmentsAreOrphaned(outcome)) deleteInboxFiles(staged.created);
+    }
+  };
+  if (!files.length) return admit(null);
   /* Written only once the command is valid, and never over a file already
      there: a replay reuses the bytes its first attempt left, and only the
-     files this request created are its to release. */
-  let staged: StagedInboxFiles | null = null;
-  if (files.length) {
+     files this request created are its to release. Staging, admission and
+     that release take one turn per batch, so no other request under the key
+     can reuse a file while this one may still delete it. */
+  return withInboxBatch(batch, async () => {
+    let staged: StagedInboxFiles;
     try { staged = stageInboxFiles(files, batch); }
     catch (error) {
       if (error instanceof InboxFileConflictError) {
@@ -114,23 +137,6 @@ export async function handleNativeQueue(request: NextRequest, dependencies: Depe
       }
       return NextResponse.json({ error: "the attachments could not be saved to the inbox", retryable: true }, { status: 503 });
     }
-  }
-  /* The same rule as an ordinary send (#1224): bytes go on a TERMINAL refusal
-     and on nothing else. A 409 is the journal refusing this request; a thrown
-     transport leaves the operation's fate unknown, and a receipt of any other
-     status names an operation whose message holds these paths. */
-  let outcome: AttachmentDeliveryOutcome = "uncertain";
-  try {
-    const result = await client.command(command);
-    outcome = result.receipt.status === "rejected" ? "refused" : "accepted";
-    if (result.receipt.status === "queued" || result.receipt.status === "pending") dependencies.kick();
-    return NextResponse.json(result, { status: result.receipt.status === "rejected" ? 409 : 202 });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "native queue admission is unavailable";
-    const conflict = /idempotency|revision changed|frozen or unresolved|ownership changed/.test(message);
-    if (conflict) outcome = "refused";
-    return NextResponse.json({ error: message, recovery: "query or replay the original Viewer idempotency key" }, { status: conflict ? 409 : 503 });
-  } finally {
-    if (staged?.created.length && attachmentsAreOrphaned(outcome)) deleteInboxFiles(staged.created);
-  }
+    return admit(staged);
+  });
 }

@@ -232,6 +232,39 @@ export function stageInboxFiles(files: readonly InboxFileUpload[], token: string
   return { filePaths, created };
 }
 
+/* Held on globalThis so every bundle that loads this module shares one set of
+   turns. */
+const batchTurns: Map<string, Promise<void>> = ((globalThis as { __llvInboxBatchTurns?: Map<string, Promise<void>> })
+  .__llvInboxBatchTurns ??= new Map());
+
+/**
+ * Runs one request's stage → admission → release of a replayable batch while no
+ * other request under the same batch is doing any of the three (#1652).
+ *
+ * `created` says which files a request wrote, and it goes stale the moment the
+ * request awaits the journal: a second request under the same key finds those
+ * bytes, reuses them, and can be admitted first. The first one's refusal then
+ * deleted a file an admitted message names. Taking turns per batch means that,
+ * while a request may still release what it created, nobody else can be holding
+ * those paths. The turn is per process, and the Viewer serves this route from
+ * one process. The journal call it waits on is bounded by the runtime client's
+ * own timeout, which also bounds how long a waiting request is delayed.
+ */
+export async function withInboxBatch<T>(token: string, work: () => Promise<T>): Promise<T> {
+  const previous = batchTurns.get(token);
+  let finish!: () => void;
+  const turn = new Promise<void>((resolve) => { finish = resolve; });
+  const tail = previous ? previous.then(() => turn) : turn;
+  batchTurns.set(token, tail);
+  try {
+    if (previous) await previous;
+    return await work();
+  } finally {
+    finish();
+    if (batchTurns.get(token) === tail) batchTurns.delete(token);
+  }
+}
+
 /**
  * Removes attachments written for a delivery that failed before reaching the
  * agent, and the batch directory once it holds nothing — best effort, exactly
