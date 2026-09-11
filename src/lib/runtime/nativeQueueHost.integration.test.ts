@@ -13,20 +13,32 @@ import { RuntimeJournal } from "@/runtime-host/journal";
 import type { RuntimeHostClient } from "./client";
 import type { NativeQueueCommand } from "./nativeQueueContracts";
 import { NativeQueueExecutor } from "./nativeQueueExecutor";
+import { StructuredDeliveryQueue } from "./structuredDeliveryQueue";
 import { parseRuntimeCommand } from "./commands";
 
 const binary = process.env.NATIVE_CODEX_QUEUE_TEST_BINARY;
 
-test.skipIf(!binary)("native runtime: real Codex queue edits, canonical dispatch, lost reply and cold host recovery", async () => {
+for (const scenario of ["small", "large", "two-image-turns"]) test.skipIf(!binary)(`native runtime: queue edits, canonical dispatch, lost reply and cold recovery (${scenario})`, async () => {
+  const largeImages = scenario !== "small";
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "nh-"));
   const env: NodeJS.ProcessEnv = { PATH: "/usr/bin:/bin", LANG: "C.UTF-8", NODE_ENV: "test" };
   for (const key of ["HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "GEMINI_CLI_HOME", "LLV_STATE_DIR", "TMPDIR"]) {
     env[key] = path.join(base, key.toLowerCase()); fs.mkdirSync(env[key]!);
   }
   const cwd = path.join(base, "workspace"); fs.mkdirSync(cwd);
-  const png = Buffer.from("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d49444154789c63f8cfc0f01f00050001ff89993d1d0000000049454e44ae426082", "hex");
+  const smallPng = Buffer.from("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d49444154789c63f8cfc0f01f00050001ff89993d1d0000000049454e44ae426082", "hex");
+  const png = largeImages ? Buffer.concat([smallPng, Buffer.alloc(3 * 1024 * 1024 - smallPng.length)]) : smallPng;
   const imagePath = path.join(base, "fixture.png"); fs.writeFileSync(imagePath, png);
   const imageRef = { sha256: createHash("sha256").update(png).digest("hex"), mime: "image/png" as const, bytes: png.length };
+  const imagePaths = new Map([[imageRef.sha256, imagePath]]);
+  const imageRefs = largeImages ? Array.from({length: 4}, (_, index) => {
+    const bytes = Buffer.concat([smallPng, Buffer.alloc(3 * 1024 * 1024 - smallPng.length, index)]);
+    const ref = {sha256: createHash("sha256").update(bytes).digest("hex"), mime: "image/png" as const, bytes: bytes.length};
+    const filename = path.join(base, `fixture-${index}.png`);
+    fs.writeFileSync(filename, bytes);
+    imagePaths.set(ref.sha256, filename);
+    return ref;
+  }) : [imageRef];
   const responses: ServerResponse[] = [];
   const backend = createServer((request, response) => {
     request.resume(); response.writeHead(200, { "Content-Type": "text/event-stream" });
@@ -77,6 +89,11 @@ plugins = false
       if (method === "thread/items/list" && hideCanonicalClient && Array.isArray(message.result?.data)) {
         message.result.data = message.result.data.filter((entry: { item?: { clientId?: string } }) => entry.item?.clientId !== hideCanonicalClient);
       }
+      if (method === "thread/turns/list" && hideCanonicalClient && Array.isArray(message.result?.data)) {
+        for (const turn of message.result.data) {
+          if (Array.isArray(turn.items)) turn.items = turn.items.filter((item: {clientId?: string}) => item.clientId !== hideCanonicalClient);
+        }
+      }
       output.write(JSON.stringify(message) + "\n");
     });
     child.once("close", () => { inbound.close(); outbound.close(); output.end(); });
@@ -86,8 +103,11 @@ plugins = false
       const value = Reflect.get(target, property); return typeof value === "function" ? value.bind(target) : value;
     } }) as ChildProcessWithoutNullStreams;
   };
-  const options = { cwd, binary, codexHome: env.CODEX_HOME, env, model: "fixture-model", requestTimeoutMs: 1000,
-    eventStore: new FileRuntimeEventStore(path.join(base, "events")), resolveImagePath: () => imagePath, spawnProcess };
+  const options = { cwd, binary, codexHome: env.CODEX_HOME, env, model: "fixture-model",
+    // The background-history case uses the production timeout. The other
+    // cases retain their shorter lost-acknowledgement fault-injection budget.
+    ...(scenario === "two-image-turns" ? {} : {requestTimeoutMs: 1000}),
+    eventStore: new FileRuntimeEventStore(path.join(base, "events")), resolveImagePath: (image: {sha256: string}) => imagePaths.get(image.sha256)!, spawnProcess };
   let host: CodexAppServerHost | undefined;
   const journal = new RuntimeJournal(path.join(base, "journal.sqlite"), { structuredHosts: true });
   async function until(predicate: () => boolean | Promise<boolean>) {
@@ -118,16 +138,42 @@ plugins = false
       expect(journal.executeOperation(command).receipt.status).toBe("queued");
       await executor.execute(command); return journal.nativeQueueRead(conversationId).find(e => e.entryId === (extra.entryId ?? id))!;
     };
+    if (scenario === "two-image-turns") {
+      for (const [index, id] of ["image-one", "image-two"].entries()) {
+        await admit(id, {images: imageRefs});
+        if (index === 1) await admit(`start-${id}`, {action: "start", entryId: id, expectedRevision: 1, turnId: null});
+        await until(() => responses.length === index + 1);
+        await host.interrupt((await host.health()).activeTurnRef!);
+        await until(async () => (await host!.health()).activeTurnRef === null);
+      }
+      // Both accepted image turns exist before the first background read.
+      // A full turns page would aggregate them into an oversized host frame.
+      await until(async () => {
+        await executor.reconcile(conversationId);
+        return journal.nativeQueueRead(conversationId).every(entry => entry.state === "delivered");
+      });
+      expect((await host.health()).status).toBe("idle");
+      expect(journal.nativeQueueRead(conversationId)).toHaveLength(2);
+      expect(responses).toHaveLength(2);
+      return;
+    }
     // Idle add auto-dispatches under the native owner.
     const active = await admit("active-native", {});
     expect(active.state).toBe("queued");
     await until(() => responses.length === 1);
     await until(async () => { await executor.reconcile(conversationId); return journal.nativeQueueRead(conversationId)[0]?.state === "delivered"; });
     expect(active.proof).toBeNull(); // The mutation acknowledgement itself proves no delivery.
-    const a = await admit("queued-native", { images: [imageRef] });
+    const a = await admit("queued-native", { images: imageRefs });
     expect(a.reason).toBeNull();
     expect(a.nativeSubmissionId).toBeTruthy();
-    const edited = await admit("edit-native", { action: "update", entryId: a.entryId, expectedRevision: 1, text: "edited Привіт 🌍", images: [imageRef] });
+    if (largeImages) {
+      await admit("second-large-native", {images: imageRefs});
+      const inventory = await host.nativeQueue!.queue.refresh();
+      expect(inventory.items).toHaveLength(2);
+      expect((await host.health()).status).toBe("active");
+      await admit("remove-second-large", {action: "delete", entryId: "second-large-native", expectedRevision: 1});
+    }
+    const edited = await admit("edit-native", { action: "update", entryId: a.entryId, expectedRevision: 1, text: "edited Привіт 🌍", images: imageRefs });
     expect(edited.versions.map(v => v.text)).toEqual(["queued native input", "edited Привіт 🌍"]);
     expect((await host.nativeQueue!.queue.refresh()).items?.find(i => i.id === a.nativeSubmissionId)?.input).toEqual(expect.arrayContaining([expect.objectContaining({ text: expect.stringContaining("edited Привіт") })]));
     const turn = (await host.health()).activeTurnRef!;
@@ -141,7 +187,7 @@ plugins = false
     await until(async () => { await executor.reconcile(conversationId); return journal.nativeQueueRead(conversationId).find(e => e.entryId === a.entryId)?.state === "delivered"; });
     expect(journal.nativeQueueRead(conversationId).find(e => e.entryId === a.entryId)?.dispatchedRevision).toBe(2);
     dropAdd = true;
-    const lost = await admit("lost-native", {});
+    const lost = await admit("lost-native", largeImages ? {images: imageRefs} : {});
     expect(lost.state).toBe("uncertain");
     expect((await host.health()).status).toBe("active");
     const adds = requests.filter(r => r.method === "thread/queue/add").length;
@@ -155,11 +201,45 @@ plugins = false
     const proof = journal.nativeQueueRead(conversationId).find(e => e.entryId === lost.entryId)?.proof;
     expect(proof?.clientUserMessageId).toBe("lost-native");
     expect(requests.some(r => r.method === "thread/turns/list")).toBeTrue();
-    expect(requests.some(r => r.method === "thread/items/list")).toBeTrue();
-    await host.interrupt((await host.health()).activeTurnRef!);
+    expect(requests.some(r => r.method === "thread/turns/list" && r.params.itemsView === "notLoaded")).toBeTrue();
+    const recoveredState = await host.health();
+    const recoveredTurn = recoveredState.activeTurnRef;
+    if (!recoveredTurn) expect(recoveredState.status).toBe("idle");
+    if (recoveredTurn) await host.interrupt(recoveredTurn);
     await until(async () => (await host!.health()).activeTurnRef === null);
-    await host.send({ id: "profile-send", text: "profile input", runtime: { model: "fixture-model", effort: "high", serviceTier: "default", serviceTierForTurn: "priority" } });
+    const delivery = new StructuredDeliveryQueue({
+      effects: async () => journal.effectBatch(100, ["runtime.send"]),
+      status: async id => journal.operationResult(id)?.receipt ?? null,
+      hostClaim: async () => "fixture-owner:1",
+      transition: async (id, status, details) => { journal.transitionOperation(id, status, details); },
+    }, () => host!);
+    const sendManaged = async (id: string, images = imageRefs, runtime?: NativeQueueCommand["runtime"]) => {
+      await publish();
+      const command = parseRuntimeCommand("send", {conversationId, operationId: id, idempotencyKey: id,
+        text: "ordinary managed delivery", images, policy: "interrupt-active", ...(runtime ? {runtime} : {})});
+      expect(journal.executeOperation(command).receipt.status).toBe("queued");
+      const before = responses.length;
+      await until(async () => {
+        await delivery.drain();
+        const receipt = journal.operationResult(id)?.receipt;
+        if (receipt?.status === "failed" || receipt?.status === "uncertain") throw new Error(receipt.reason ?? receipt.status);
+        return receipt?.status === "delivered";
+      });
+      expect(journal.operationResult(id)?.receipt.status).toBe("delivered");
+      await until(() => responses.length === before + 1);
+      await delivery.drain();
+      expect(responses).toHaveLength(before + 1);
+    };
+    await sendManaged("profile-send", [], {model: "fixture-model", effort: "high", serviceTier: "default", serviceTierForTurn: "priority"});
     expect(requests.find(r => r.method === "turn/start" && r.params.clientUserMessageId === "profile-send")?.params).toMatchObject({ model: "fixture-model", effort: "high", serviceTier: "default", serviceTierForTurn: "priority" });
+    if (largeImages) {
+      await sendManaged("ordinary-images");
+      expect(await host.sessionMaterializationEvidence("ordinary-images")).toEqual({state: "materialized"});
+      // A new text send remains usable beyond the recovery read byte budget:
+      // three distinct image turns now hold approximately 48 MiB of input.
+      await sendManaged("fresh-after-images", []);
+      expect((await host.health()).status).toBe("active");
+    }
   } finally {
     await host?.release(); journal.close();
     for (const response of responses) response.end();

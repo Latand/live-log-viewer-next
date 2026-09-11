@@ -651,6 +651,10 @@ async function stopChild(processHandle) {
   const { child, state } = processHandle;
   state.stopping = true;
 
+  // A failed spawn with no PID created no child to signal or wait for. Node
+  // does not guarantee an exit event after a spawn error.
+  if (state.spawnError && child.pid === undefined) return;
+
   if (child.exitCode !== null || child.signalCode !== null) {
     return;
   }
