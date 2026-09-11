@@ -846,6 +846,33 @@ test("an earlier turn's done delivered again neither ends the turn streaming now
   await client.stop();
 });
 
+for (const again of [false, true]) {
+  test(`a done whose turn lost every caption fragment, ${again ? "delivered again" : "delivered once"}, neither ends the next turn nor adds a line`, async () => {
+    /* The done has no words and nothing streamed before it, so it draws nothing;
+       its id still names a turn that has ended. */
+    const client = await panel();
+    const emptyDone = { type: "turn.done", turn: { id: "turn-uncaptioned", role: "assistant", transcript: "" } };
+    completedSegment(client, "segment-uncaptioned", "assistant", " First answer.");
+    channel(emptyDone);
+    channel({ type: "output_transcript.added", item: { id: "chunk-second", type: "output_transcript", text: " Second" } });
+    if (again) channel(emptyDone);
+    channel({ type: "output_transcript.added", item: { id: "chunk-second-more", type: "output_transcript", text: " answer." } });
+    expect(shown(client)).toEqual([
+      { role: "assistant", text: " First answer.", final: true },
+      { role: "assistant", text: " Second answer.", final: false },
+    ]);
+
+    channel({ type: "turn.done", turn: { id: "turn-second", role: "assistant", transcript: " Second answer." } });
+    completedSegment(client, "segment-second", "assistant", " Second answer.");
+    if (again) channel(emptyDone);
+    expect(shown(client)).toEqual([
+      { role: "assistant", text: " First answer.", final: true },
+      { role: "assistant", text: " Second answer.", final: true },
+    ]);
+    await client.stop();
+  });
+}
+
 for (const order of ["caption", "canonical"] as const) {
   test(`native's events with an answer's done delivered again mid-turn and after the call still show every turn once (${order} first)`, async () => {
     const captions = sources("call-one", "data-channel");

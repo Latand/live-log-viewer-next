@@ -1126,8 +1126,13 @@ class CodexRealtimeClient {
     }
     /* So is a done: the one that closed a turn, delivered again, is known by
        the turn id it carries, and ends neither that turn a second time nor the
-       one streaming now. */
-    if (final && turnId && ledger.completions.has(turnId)) return;
+       one streaming now. That holds for a done that drew nothing, too, because
+       every fragment of its turn was lost. */
+    if (final && turnId) {
+      if (ledger.completions.has(turnId)) return;
+      ledger.completions.add(turnId);
+      forgetOldest(ledger.completions, MAX_SEEN_COMPLETIONS);
+    }
     let turn = ledger.streaming.get(role);
     if (!turn) {
       /* A done with no words and nothing streamed before it is no turn. */
@@ -1141,10 +1146,6 @@ class CodexRealtimeClient {
       turn.finalText = text ? text.slice(0, MAX_LINE_CHARS) : null;
       turn.closed = true;
       ledger.streaming.delete(role);
-      if (turnId) {
-        ledger.completions.add(turnId);
-        forgetOldest(ledger.completions, MAX_SEEN_COMPLETIONS);
-      }
     } else {
       /* A fragment with its own id is one delta, so a word said twice in a row
          is two of them. Only a fragment without one may be a backend resending
