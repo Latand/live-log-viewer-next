@@ -336,6 +336,43 @@ export function sendRuntimeMessage(options: SendOptions): Promise<CommandResult>
   });
 }
 
+export interface InjectOptions {
+  conversationId: string;
+  text: string;
+  idempotencyKey: string;
+  /** The turn fence, evaluated again at actuation. A string requires that turn
+      to still be running; `null` requires an idle thread; omitted accepts
+      either placement, which is what the composer's action sends. */
+  turnId?: string | null;
+  files?: { name: string; base64: string }[];
+  selectedContext?: SelectedContextRef;
+}
+
+/**
+ * Append text to a Codex thread's model-visible input without answering it
+ * (#1560, native `thread/inject_items`).
+ *
+ * Its own endpoint rather than a `policy` on `sendRuntimeMessage`, because it
+ * is a different operation with a different receipt vocabulary: it starts no
+ * turn, interrupts none, and settles on whether the insertion was found in the
+ * thread rather than on whether an answer began. Replaying the same key returns
+ * the original receipt, exactly as a send does — which matters more here, since
+ * the engine itself does not deduplicate.
+ *
+ * No `images` and no `policy`: the route refuses both, and offering them here
+ * would only move the refusal later.
+ */
+export function injectRuntimeContext(options: InjectOptions): Promise<CommandResult> {
+  return postCommand("/api/runtime/inject", {
+    conversationId: options.conversationId,
+    text: options.text,
+    idempotencyKey: options.idempotencyKey,
+    ...(options.turnId !== undefined ? { turnId: options.turnId } : {}),
+    ...(options.files?.length ? { files: options.files } : {}),
+    ...(options.selectedContext ? { selectedContext: options.selectedContext } : {}),
+  });
+}
+
 export async function interruptRuntime(conversationId: string, operationId: string): Promise<CommandResult> {
   let result = await postCommand("/api/conversation-host", { conversationId, action: "interrupt", operationId });
   if (!result.ok) return result;

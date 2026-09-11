@@ -40,7 +40,7 @@ export interface StructuredMessageRequest {
   conversationId?: string | null;
   clientMessageId?: string | null;
   operationId?: string;
-  kind?: "send" | "steer";
+  kind?: "send" | "steer" | "inject";
   policy?: "queue" | "steer-if-active" | "interrupt-active";
   turnId?: string | null;
   text: string;
@@ -284,6 +284,28 @@ function holdDuringRuntimeSynchronization(
   if (rejectedHold) return rejectedHold;
   if (owner?.kind === "legacy") return requiresStructuredCommand(request) ? legacyCommandUnavailable() : null;
   let conversation = persistedConversation;
+  /**
+   * #1560: the last way an injection could become a held reservation.
+   *
+   * Everything this function admits is drained by the migration coordinator
+   * alone, which replays it against the SUCCESSOR generation — a different
+   * thread. That is right for a message and wrong for an injection, whose whole
+   * meaning is "put this into the history of the thread I am looking at". The
+   * refusal further down covers a switch that is already pending; this covers
+   * the other way in, where the runtime-host socket is unavailable at admission
+   * and a switch commits before the drain. Refused before any reservation
+   * exists, so nothing is written and the operator can inject again once the
+   * runtime is reachable.
+   */
+  if (request.kind === "inject") {
+    return {
+      ok: false,
+      structured: true,
+      outcome: "failed",
+      error: "structured delivery ownership is unavailable; injected context cannot be held for a later generation",
+      status: 503,
+    };
+  }
   if (request.hasImages || request.images?.length) {
     return { ok: false, structured: true, outcome: "failed", error: "structured host image delivery is unavailable", status: 409 };
   }
@@ -645,7 +667,10 @@ export async function deliverHeldStructuredMessage(
       text: content.content.text,
       ...(refs.length ? { images: refs } : {}),
       contentDigest: content.contentDigest,
-      policy: command.policy,
+      /* Same rule on the drain path (#1560). `canonicalHeldDeliveryCommand`
+         always fills a policy in, so a persisted injection replayed from before
+         holds were refused would die here too. */
+      ...(command.kind === "inject" ? {} : { policy: command.policy }),
       ...(command.turnId !== undefined ? { turnId: command.turnId } : {}),
       /* #1117: the authorship persisted on the held record survives the
          migration hold — the drained message re-attributes exactly as admitted. */
@@ -792,6 +817,27 @@ export async function enqueueStructuredMessage(
     } catch (error) {
       return deliveryFailure(error);
     }
+  }
+  /**
+   * #1560: an injection is never parked behind an account switch.
+   *
+   * A held delivery is replayed against the SUCCESSOR generation, which is a
+   * different thread. That is right for a message — the operator wants it said
+   * to whoever is answering now — and wrong for an injection, whose whole
+   * meaning is "put this into the history of the thread I am looking at".
+   * Replaying it elsewhere would write the operator's context into a thread
+   * they never aimed at, and dropping it would lose it silently. Refused here,
+   * before any reservation exists, so nothing is written and the operator can
+   * simply inject again once the switch has landed.
+   */
+  if (request.kind === "inject" && deliveryFence(conversation) === "held") {
+    return {
+      ok: false,
+      structured: true,
+      outcome: "failed",
+      error: "an account switch is pending for this conversation; injected context cannot be held across it",
+      status: 409,
+    };
   }
   let migrationOwnsSend = deliveryFence(conversation) === "held";
   /* Belt and braces for issue #1028: a send arriving while a switch is pending
@@ -983,6 +1029,20 @@ export async function enqueueStructuredMessage(
       reservation = registry.retryUncertainDelivery(reservation.id);
     }
     if (reservation.state === "held") {
+      /* The switch landed between the check above and the reservation. The
+         reservation exists but nothing has been handed to any engine, so
+         releasing it leaves the thread untouched (#1560). */
+      if (request.kind === "inject") {
+        registry.terminalizeHeldDelivery(reservation.id, "injected context cannot be held across an account switch");
+        return {
+          ok: false,
+          structured: true,
+          outcome: "failed",
+          error: "an account switch is pending for this conversation; injected context cannot be held across it",
+          status: 409,
+          operationId: reservation.command.operationId,
+        };
+      }
       (dependencies.requestMigrationTick ?? requestAccountMigrationTick)();
       return {
         ok: true,
@@ -1043,7 +1103,12 @@ export async function enqueueStructuredMessage(
       text: content.content.text,
       ...(refs.length ? { images: refs } : {}),
       contentDigest: content.contentDigest,
-      policy: request.policy ?? "interrupt-active",
+      /* #1560: an injection carries NO policy. There is no interrupt to choose
+         and no queue to fall back to, and the parser refuses one — so stamping
+         the send default here refused every injection at the journal, with
+         `thread/inject_items` never called. The default stays exactly what it
+         was for every other kind. */
+      ...(reservation.command.kind === "inject" ? {} : { policy: request.policy ?? "interrupt-active" }),
       ...(request.turnId !== undefined ? { turnId: request.turnId } : {}),
       ...(request.runtime ? { runtime: request.runtime } : {}),
       ...(request.selectedContext ? { selectedContext: request.selectedContext } : {}),

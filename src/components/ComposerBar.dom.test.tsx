@@ -513,3 +513,30 @@ test("desktop blocked-send recovery keeps its compact control and invokes recove
   expect(recovered).toBe(1);
   flushSync(() => root.unmount());
 });
+
+test("Send options has a visible keyboard and pointer opener without submitting", () => {
+  let selected = 0;
+  function MenuHarness() {
+    const composer = useComposer({ initialText: () => "context", persistText: () => {}, submit: () => { throw new Error("unexpected send"); } });
+    return <ComposerBar composer={composer} placeholder="Prompt" textareaAriaLabel="Prompt"
+      imageAriaLabel="Attach" leftSlot={null} sendLabelIdle="Send" sendLabelRecording="Stop"
+      sendIdleClassName="bg-accent" sendMenuLabel="Send options"
+      sendMenuActions={[{ id: "inject", label: "Add to context", onSelect: () => { selected++; } }]} />;
+  }
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  flushSync(() => root.render(<MenuHarness />));
+  const opener = container.querySelector<HTMLButtonElement>('button[aria-label="Send options"]');
+  expect(opener).not.toBeNull();
+  expect(opener!.type).toBe("button");
+  expect(opener!.getAttribute("aria-haspopup")).toBe("menu");
+  flushSync(() => opener!.click());
+  expect(opener!.getAttribute("aria-expanded")).toBe("true");
+  const item = document.querySelector<HTMLButtonElement>('[role="menuitem"]')!;
+  expect(item.textContent).toContain("Add to context");
+  flushSync(() => item.click());
+  expect(selected).toBe(1);
+  expect(document.querySelector('[role="menu"]')).toBeNull();
+  flushSync(() => root.unmount());
+});

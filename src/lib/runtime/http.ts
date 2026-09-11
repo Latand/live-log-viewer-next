@@ -136,9 +136,15 @@ async function dispatchRuntimeCommand(
   let rawImages: RuntimeImageUpload[] | null = null;
   try {
     let parseValue = value;
-    if ((kind === "send" || kind === "steer") && value && typeof value === "object" && !Array.isArray(value)) {
+    /* #1560: injection joins this block for its ATTACHMENTS only. It never
+       enters the image branch below — `thread/inject_items` takes raw Responses
+       items whose image form is unestablished for us, so the parser refuses an
+       image payload outright and this route must not have written one to disk
+       first. Files are different: they are folded into the text as paths, so a
+       document rides along on an injection exactly as it does on a send. */
+    if ((kind === "send" || kind === "steer" || kind === "inject") && value && typeof value === "object" && !Array.isArray(value)) {
       const body = value as Record<string, unknown>;
-      if (Array.isArray(body.images) && body.images.some((image) => image && typeof image === "object" && "base64" in image)) {
+      if (kind !== "inject" && Array.isArray(body.images) && body.images.some((image) => image && typeof image === "object" && "base64" in image)) {
         const admitted = admitRuntimeImagePayload({ images: body.images });
         if (admitted.error) return NextResponse.json({ error: admitted.error.error }, { status: admitted.error.status });
         rawImages = admitted.images;
@@ -190,7 +196,7 @@ async function dispatchRuntimeCommand(
   const client = dependencies.client();
   try {
     const byOperator = directOperatorActivityAuthority(request).ok;
-    if ((command.kind === "send" || command.kind === "steer" || command.kind === "answer")
+    if ((command.kind === "send" || command.kind === "steer" || command.kind === "inject" || command.kind === "answer")
       && byOperator
       && dependencies.recordOperatorActivity) {
       try {
@@ -207,7 +213,7 @@ async function dispatchRuntimeCommand(
        closed dock or a second device changes nothing, and compared against the
        moment of acceptance, so a set offered while this request was in flight
        survives it. */
-    if ((command.kind === "send" || command.kind === "steer") && byOperator) {
+    if ((command.kind === "send" || command.kind === "steer" || command.kind === "inject") && byOperator) {
       /* Keyed by the command's own idempotency key, so a re-delivery of the
          same message clears against its first admission rather than against
          the clock of the retry — which would retire drafts offered in
@@ -218,7 +224,7 @@ async function dispatchRuntimeCommand(
         command.idempotencyKey,
       );
     }
-    if ((command.kind === "send" || command.kind === "steer") && dependencies.enqueue) {
+    if ((command.kind === "send" || command.kind === "steer" || command.kind === "inject") && dependencies.enqueue) {
       /* In flight ⇒ the Viewer cannot say. Set BEFORE the call so an enqueue
          that throws mid-delivery keeps the attachments too (#1224). */
       attachments.outcome = "uncertain";

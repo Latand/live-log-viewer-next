@@ -86,6 +86,8 @@ import {
   deliveryEchoes,
   deliveryProblem,
   dismissedReceiptsKey,
+  isMessageReceipt,
+  isRetryableReceipt,
   type DeliveryAttemptGroup,
   messageReceiptForAssistantTurn,
   readDismissedReceipts,
@@ -335,7 +337,9 @@ export function RuntimeComposerReceipts({
   const attemptGroups = [
     ...deliveryAttemptGroups(ordinaryReceipts, dismissed),
     ...unknownReceipts
-      .filter((receipt) => (receipt.kind === "send" || receipt.kind === "steer") && Boolean(receipt.text))
+      /* #1560: `uncertain` is the outcome injection was designed to report
+         honestly, so it is the last one that may be dropped here. */
+      .filter((receipt) => isMessageReceipt(receipt) && Boolean(receipt.text))
       .map((receipt) => ({ current: receipt, attempts: [receipt] })),
   ].sort((left, right) => Date.parse(right.current.at) - Date.parse(left.current.at));
   const visibleAttempts = attemptGroups.flatMap((group) => group.attempts);
@@ -354,8 +358,7 @@ export function RuntimeComposerReceipts({
     return () => clearInterval(timer);
   }, [pinnedNow, unsettled]);
   const now = nowMs ?? tick;
-  const isMessage = (receipt: RuntimeReceipt) => receipt.kind === "send" || receipt.kind === "steer";
-  const editable = (receipt: RuntimeReceipt) => isMessage(receipt)
+  const editable = (receipt: RuntimeReceipt) => isMessageReceipt(receipt)
     && (receipt.status === "failed" || receipt.status === "rejected")
     && !receiptHasUnknownFate(receipt)
     && typeof receipt.text === "string"
@@ -384,7 +387,13 @@ export function RuntimeComposerReceipts({
   const uncertainControls = (receipt: RuntimeReceipt) => (
     <span className="flex min-w-0 flex-wrap items-center justify-end gap-1.5" data-operation={receipt.operationId}>
       <span role="status" className="text-caption text-warning">{t("orchPanel.errorUnknownTitle")}</span>
-      {!receipt.operationId.startsWith(UNCONFIRMED_RECEIPT_PREFIX) ? <>
+      {/* #1560: an injection gets the verdict and NO controls. Both of these
+          re-arm or end the original operation, and the journal refuses either
+          for this kind — the engine does not deduplicate a second insertion,
+          and discarding would claim the operator ended something that may be
+          sitting in the thread. The reason line beside this says what is
+          actually known, which is the whole truth available. */}
+      {!receipt.operationId.startsWith(UNCONFIRMED_RECEIPT_PREFIX) && isRetryableReceipt(receipt) ? <>
         <button type="button" data-receipt-uncertain-retry disabled={actionsDisabled} className="min-h-11 rounded-full border border-border px-3" onClick={() => onRetry(receipt, "uncertain")}>{t("runtime.receipt.retry")}</button>
         {onDiscard ? <button type="button" data-receipt-discard disabled={actionsDisabled} className="min-h-11 rounded-full border border-border px-3" onClick={() => onDiscard(receipt)}>{t("runtime.receipt.discard")}</button> : null}
       </> : null}
@@ -408,7 +417,7 @@ export function RuntimeComposerReceipts({
      history under it now; only still-moving and non-message operations keep a
      standalone chip. Textless failures with one cause share one history row. */
   const textlessProblems = standaloneReceipts
-    .filter((receipt) => isMessage(receipt) && (deliveryProblem(receipt.status) || receiptHasUnknownFate(receipt)))
+    .filter((receipt) => isMessageReceipt(receipt) && (deliveryProblem(receipt.status) || receiptHasUnknownFate(receipt)))
     .sort((left, right) => Date.parse(right.at) - Date.parse(left.at));
   const standaloneChips = standaloneReceipts.filter((receipt) => !textlessProblems.includes(receipt));
   const textlessRows = textlessProblems.reduce<RuntimeReceipt[][]>((rows, receipt) => {
@@ -440,7 +449,7 @@ export function RuntimeComposerReceipts({
      message, never for a rejection (Edit mints the new key there) or a discard. */
   const noticeRetryable = Boolean(notice
     && notice.current.status === "failed"
-    && isMessage(notice.current)
+    && isRetryableReceipt(notice.current)
     && notice.current.reason !== "delivery-discarded");
   /* Collapsed is the default state, and it is what the operator photographed:
      a warning badge counting an attempt that was never coming. A row that went
@@ -641,7 +650,13 @@ export function RuntimeComposerReceipts({
                 const uncertain = unknownFate || wait?.phase === "uncertain";
                 const serverBacked = !receipt.operationId.startsWith(UNCONFIRMED_RECEIPT_PREFIX);
                 const exitable = uncertain && serverBacked;
+                /* #1560: Discard ends the ORIGINAL operation, and the route
+                   refuses that for an injection exactly as it refuses Retry —
+                   so the control is gated on the same question. Without this an
+                   injection parked `queued` behind a dead host crosses the
+                   uncertain wait threshold, renders Discard, and answers 409. */
                 const discardable = serverBacked
+                  && isRetryableReceipt(receipt)
                   && receipt.reason !== "delivery-discarded"
                   && (exitable || (failed && receipt.resend === "verify-first"));
                 const retryingBusy = pending
@@ -679,11 +694,13 @@ export function RuntimeComposerReceipts({
                         receipt={receipt}
                         wait={wait}
                         actionsDisabled={actionsDisabled}
-                        onRetry={failed
-                          ? () => retryFailed(receipt)
-                          : exitable
-                            ? () => onRetry(receipt, "uncertain")
-                            : undefined}
+                        onRetry={!isRetryableReceipt(receipt)
+                          ? undefined
+                          : failed
+                            ? () => retryFailed(receipt)
+                            : exitable
+                              ? () => onRetry(receipt, "uncertain")
+                              : undefined}
                         onEdit={editable(receipt) ? () => onEdit(receipt) : undefined}
                         onDiscard={discardable && onDiscard ? () => onDiscard(receipt) : undefined}
                       />}
@@ -771,7 +788,7 @@ export function RuntimeComposerReceipts({
                     {receiptHasUnknownFate(receipt) ? uncertainControls(receipt) : <ReceiptChip
                       receipt={receipt}
                       actionsDisabled={actionsDisabled}
-                      onRetry={receipt.status === "failed" ? () => retryFailed(receipt) : undefined}
+                      onRetry={isRetryableReceipt(receipt) && receipt.status === "failed" ? () => retryFailed(receipt) : undefined}
                     />}
                     {receiptHasUnknownFate(receipt) && receipt.reason ? (
                       <span className="w-full break-words text-right text-caption text-muted" data-receipt-uncertain-why>{receipt.reason}</span>
@@ -828,7 +845,7 @@ export function RuntimeComposerReceipts({
             <ReceiptChip
               receipt={receipt}
               actionsDisabled={actionsDisabled}
-              onRetry={isMessage(receipt) && failed ? () => retryFailed(receipt) : undefined}
+              onRetry={isRetryableReceipt(receipt) && failed ? () => retryFailed(receipt) : undefined}
               onEdit={editable(receipt) ? () => onEdit(receipt) : undefined}
             />
             {onDismiss && !receiptHasUnknownFate(receipt) && deliveryProblem(receipt.status) ? (
@@ -1658,6 +1675,18 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
      the editable draft — that draft was already cleared at submit time and
      anything in it now belongs to the next message. */
   const outboxKeys = useRef<Set<string>>(new Set());
+  /* Intake ids of staged documents an Add to context request is carrying and
+     has not been answered for (#1560). Their chips stay in the tray until the
+     answer, so a second Add to context and the queue-first submit (Send, Enter,
+     Alt+Enter, steer, dictation) refuse while one of them is still there: Codex
+     does not deduplicate injections, and an Enter would carry the same bytes
+     into an interrupting send. */
+  const injectingFileIds = useRef<Set<string>>(new Set());
+  const refuseWhileInjecting = (files: readonly PendingFile[]): boolean => {
+    if (!files.some((file) => injectingFileIds.current.has(file.id))) return false;
+    setStatus({ kind: "err", text: t("inject.submitting") });
+    return true;
+  };
   const [immediateRuntimeReceipts, setImmediateRuntimeReceipts] = useState<RuntimeReceipt[]>(() => readRecoveryReceipts(cardId));
   const [reconcilingSend, setReconcilingSend] = useState(() =>
     typeof window !== "undefined" && readPendingDeliveries(cardId).some((entry) => entry.reconciling));
@@ -2195,6 +2224,7 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
     const requestedFiles: PendingFile[] = preserveDraft ? [] : attachments.filesRef.current.map((file) => ({ ...file }));
     if (voiceSending || reconcilingSend) return;
     if (!requestedText.trim() && !requestedImages.length && !requestedFiles.length) return;
+    if (refuseWhileInjecting(requestedFiles)) return;
     if (deadHost && !structuredSession) {
       setStatus({ kind: "err", text: t("deadHost.sendBlocked") });
       return;
@@ -2634,7 +2664,7 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
         if (json.structured && json.receipt) {
           /* Keep the payload readable in the compact receipt for retry and
              audit even when the server's echo omits it. */
-          const receipt: RuntimeReceipt = (json.receipt.kind === "send" || json.receipt.kind === "steer")
+          const receipt: RuntimeReceipt = isMessageReceipt(json.receipt)
             && !json.receipt.text && payloadText.trim()
             ? { ...json.receipt, text: payloadText.trim() }
             : json.receipt;
@@ -2747,7 +2777,7 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
             if (receipt && (receipt.conversationId !== cardId || receipt.idempotencyKey !== clientMessageId
               || (result.operationId && result.operationId !== receipt.operationId))) return null;
             if (receipt && (receiptIsAdmitted(receipt.status) || receiptIsTerminal(receipt.status))) {
-              return (receipt.kind === "send" || receipt.kind === "steer")
+              return isMessageReceipt(receipt)
                 && !receipt.text && payloadText.trim()
                 ? { ...receipt, text: payloadText.trim() }
                 : receipt;
@@ -3007,6 +3037,101 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
    * later, which reads to the operator as the message being lost rather than
    * never accepted.
    */
+  /**
+   * Add the draft to the thread's context WITHOUT asking for an answer (#1560).
+   *
+   * The third thing the operator can do with a draft, beside sending it (which
+   * interrupts) and queuing it (which waits). Native `thread/inject_items`
+   * appends it to the model-visible input: with a turn running it joins that
+   * turn and is read at its next model request, and with the thread idle it is
+   * stored and read by whatever asks next. No turn is interrupted and none is
+   * started, in either case.
+   *
+   * Refused HERE when it cannot work, before anything durable exists — a host
+   * that has not advertised the capability, and an image payload the raw
+   * Responses item form cannot carry. Both used to be the kind of thing that
+   * became an operation and failed later, which reads as a lost message rather
+   * than a refused one. There is deliberately no fallback to steering: the
+   * action's whole promise is that it does not touch the running turn.
+   */
+  const injectContext = () => {
+    const requestedText = textRef.current.trim();
+    if (!structuredSession?.session.capabilities?.inject) {
+      setStatus({ kind: "err", text: t("inject.unsupported") });
+      return;
+    }
+    if (attachments.hasReading || attachments.hasError) {
+      setStatus({ kind: "err", text: t(attachments.hasReading ? "attach.blockedReading" : "attach.blockedFailed") });
+      return;
+    }
+    if (!requestedText && !attachments.filesRef.current.length) return;
+    if (refuseWhileInjecting(attachments.filesRef.current)) return;
+    if (voiceSending || reconcilingSend) return;
+    if (effectiveSendBlockedReason) {
+      setStatus({ kind: "err", text: effectiveSendBlockedReason });
+      return;
+    }
+    /* NAMED, NEVER DROPPED. The operator staged pictures and asked for an
+       action that cannot carry them; saying so and keeping the draft intact is
+       the only honest option. Sending the text alone would silently deliver
+       something they did not compose. */
+    if (attachments.imagesRef.current.length > 0) {
+      setStatus({ kind: "err", text: t("inject.imagesUnsupported") });
+      return;
+    }
+    /* Documents DO ride along, exactly as they do on a send: the route writes
+       the bytes to the conversation inbox and folds their paths into the text,
+       so they need no engine image capability. Reading them here is what keeps
+       the earlier refusal honest — it refuses pictures, which genuinely cannot
+       be carried, rather than every attachment. */
+    const requestedFiles = attachments.filesRef.current.map((file) => ({ ...file }));
+    const reference = viewerSelectedContext();
+    const snapshotText = textRef.current;
+    const clientMessageId = mintIdempotencyKey();
+    setText("");
+    /* THE STAGED DOCUMENTS STAY UNTIL THE ANSWER. Clearing them now would be
+       unrecoverable: the restore path rebuilds a file slot WITHOUT its bytes —
+       it exists for a page reload, where the bytes are genuinely gone — so a
+       refusal would leave the operator holding a chip that can no longer be
+       sent. Text is different: it is a string this closure still has, so it
+       clears immediately and comes back if the request is refused. Staying in
+       the tray, they are fenced from every other submission until then. */
+    for (const file of requestedFiles) injectingFileIds.current.add(file.id);
+    /* A SUBMISSION, NOT AN OUTCOME. The request has not been answered yet, and
+       even a successful answer only means the injection was admitted: it can
+       still settle `uncertain` because an empty engine acknowledgement proves
+       nothing about the thread. The placement is reported by the receipt, once
+       the insertion has actually been observed — saying "Added" here would
+       claim the one thing this operation is careful never to assume. */
+    setStatus({ kind: "ok", text: t("inject.submitting") });
+    inputRef.current?.focus();
+    void (async () => {
+      const answer = await runtimeDependencies.injectRuntimeContext({
+        conversationId: structuredSession.session.conversationId,
+        text: requestedText,
+        idempotencyKey: clientMessageId,
+        ...(requestedFiles.length
+          ? { files: requestedFiles.map((file) => ({ name: file.name, base64: file.base64 })) }
+          : {}),
+        ...(reference ? { selectedContext: reference } : {}),
+      }).finally(() => {
+        for (const file of requestedFiles) injectingFileIds.current.delete(file.id);
+      });
+      if (answer.ok) {
+        /* Accepted, and only that. The placement is the receipt's to report,
+           once the insertion has been observed in the thread. */
+        setStatus({ kind: "ok", text: t("inject.submitted") });
+        attachments.settleDelivered([], requestedFiles);
+        return;
+      }
+      /* A REFUSAL GIVES THE DRAFT BACK — and never over something the operator
+         has typed since. The documents never left, so there is nothing to
+         restore for them. */
+      setStatus({ kind: "err", text: answer.error ?? t("inject.refused") });
+      setText((current) => current || snapshotText);
+    })();
+  };
+
   const steerRunningTurn = () => {
     if (!structuredSession?.session.capabilities?.steer) {
       setStatus({ kind: "err", text: t("queue.steerUnsupported") });
@@ -3342,6 +3467,23 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
             description: t("queue.queueMessageHint"),
             disabled: busy || voiceSending || sendBlocked,
             onSelect: queueForCodex,
+          } as const]
+          : []),
+        /* #1560. Offered only on an OBSERVED capability, and labelled for what
+           the thread is doing right now: the same control means "join the
+           running turn" and "store for the next request" depending on the turn
+           axis, and one label for both would be untrue half the time. Unlike
+           steer, it is NOT disabled while idle — idle injection is a supported
+           outcome, just a different one. */
+        ...(structuredSession?.session.capabilities?.inject
+          ? [{
+            id: "inject",
+            label: t("inject.action"),
+            description: structuredSession.session.turn === "running"
+              ? t("inject.hintActive")
+              : t("inject.hintIdle"),
+            disabled: busy || voiceSending || sendBlocked || attachments.images.length > 0,
+            onSelect: injectContext,
           } as const]
           : []),
         ...(structuredSession?.session.capabilities?.steer

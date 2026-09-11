@@ -4,7 +4,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { CSSProperties, ReactNode } from "react";
 
-import { Loader2, Play, Square } from "@/components/icons";
+import { ChevronDown, Loader2, Play, Square } from "@/components/icons";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useLocale } from "@/lib/i18n";
 import type { UseComposerReturn } from "@/hooks/useComposer";
@@ -205,8 +205,19 @@ function SendMenu({ label, actions, onClose, position, owner }: {
       role="menu"
       aria-label={label}
       data-testid="composer-send-menu"
-      style={{ bottom: position.bottom, right: position.right }}
-      className="fixed z-40 w-[220px] rounded-surface border border-border bg-raised p-1.5 shadow-2"
+      /* BOUNDED, BECAUSE IT GROWS UPWARD. The menu is anchored by its bottom
+         edge, so each action added pushes its head further toward the top of
+         the viewport — with the injection action (#1560) a Codex conversation
+         can offer four. Past the edge there is no scroll that could reveal the
+         first item, which is the same way this menu was clipped before it
+         became a portal. The ceiling is the space actually above the anchor,
+         so the list scrolls instead of running off. */
+      style={{
+        bottom: position.bottom,
+        right: position.right,
+        maxHeight: `calc(100dvh - ${position.bottom}px - 16px)`,
+      }}
+      className="fixed z-40 w-[220px] overflow-y-auto rounded-surface border border-border bg-raised p-1.5 shadow-2"
     >
       {/* Menu group-label: sentence-case label recipe (design doc §3.6). */}
       <div className="px-2 pb-1 pt-1.5 text-label font-semibold text-secondary">
@@ -357,6 +368,16 @@ export function ComposerBar({
     : slotSubmits && !effectiveCanSend && !hasSendMenu
       ? "border-strong bg-strong text-white"
       : `text-white ${sendIdleClassName}`;
+  const toggleSendMenu = () => {
+    const rect = sendAnchorRef.current?.getBoundingClientRect();
+    const view = sendAnchorRef.current?.ownerDocument.defaultView;
+    if (!rect || !view) return;
+    setSendMenuPosition({
+      bottom: Math.max(8, view.innerHeight - rect.top + 6),
+      right: Math.max(8, view.innerWidth - rect.right),
+    });
+    setSendMenuOpen((open) => !open);
+  };
   const sendControl = (
     <span
       ref={sendAnchorRef}
@@ -364,15 +385,7 @@ export function ComposerBar({
       onContextMenu={(event) => {
         if (!hasSendMenu || dictationRecording || slotActs) return;
         event.preventDefault();
-        const rect = sendAnchorRef.current?.getBoundingClientRect();
-        const view = sendAnchorRef.current?.ownerDocument.defaultView;
-        if (rect && view) {
-          setSendMenuPosition({
-            bottom: Math.max(8, view.innerHeight - rect.top + 6),
-            right: Math.max(8, view.innerWidth - rect.right),
-          });
-        }
-        setSendMenuOpen((open) => !open);
+        toggleSendMenu();
       }}
     >
       <Hint label={slotKind === "send" && !sendBlocked && dictationRecording ? (sendTitleRecording ?? sendLabelRecording) : slotLabel} align="right">
@@ -425,6 +438,20 @@ export function ComposerBar({
           )}
         </button>
       </Hint>
+      {hasSendMenu && sendMenuLabel && !dictationRecording && !slotActs ? (
+        <button
+          type="button"
+          aria-label={sendMenuLabel}
+          title={sendMenuLabel}
+          aria-haspopup="menu"
+          aria-expanded={sendMenuOpen}
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={toggleSendMenu}
+          className={`inline-flex shrink-0 items-center justify-center rounded-control text-secondary hover:bg-sunken focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 ${isMobile ? "h-11 w-11" : "ml-1 p-2"}`}
+        >
+          <ChevronDown className="h-4 w-4" aria-hidden />
+        </button>
+      ) : null}
       {sendMenuOpen && hasSendMenu && sendMenuLabel && sendMenuPosition && sendAnchorRef.current ? (
         <SendMenu
           label={sendMenuLabel}

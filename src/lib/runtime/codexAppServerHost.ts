@@ -52,6 +52,8 @@ import type {
   RuntimeCompactOutcome,
   RuntimeCompactRequest,
   RuntimeEvent,
+  RuntimeInjectOutcome,
+  RuntimeInjectRequest,
 } from "./engineHost";
 import {
   normalizeQueueEntry,
@@ -59,6 +61,7 @@ import {
   type SessionMaterializationEvidence,
   StructuredCompactError,
   StructuredHostAdoptionCleanupError,
+  StructuredInjectError,
 } from "./engineHost";
 import {
   FileRuntimeEventStore,
@@ -193,6 +196,9 @@ export interface CodexAppServerHostOptions {
   requestTimeoutMs?: number;
   realtimeStartTimeoutMs?: number;
   deliveryConfirmationTimeoutMs?: number;
+  /** How long an injection waits for its item to surface in canonical history
+      before reporting the insertion unobserved (#1560). */
+  injectObservationTimeoutMs?: number;
   compactEvidenceTimeoutMs?: number;
   shutdownGraceMs?: number;
   initialEventCursor?: number;
@@ -297,6 +303,50 @@ const DEFAULT_DELIVERY_CONFIRMATION_TIMEOUT_MS = 5 * 60_000;
     past it the operation terminalizes visibly rather than hanging (#862). */
 const DEFAULT_COMPACT_EVIDENCE_TIMEOUT_MS = 5 * 60_000;
 const ACTIVE_THREAD_READ_TIMEOUT_MULTIPLIER = 3;
+/** How often the canonical transcript is re-read while waiting for an injected
+    item to surface (#1560). The scan is cached on size and mtime, so a poll
+    over an unchanged rollout costs a stat. */
+const INJECT_OBSERVATION_POLL_MS = 150;
+const INJECT_OBSERVATION_POLL_CEILING_MS = 2_000;
+/** The observed capability flag that lets the composer offer the injection
+    action (#1560). Absent = the action is not offered at all. */
+export const NATIVE_INJECT_CAPABILITY = "native-inject";
+/**
+ * How long an injection waits to SEE its item in the transcript.
+ *
+ * The same window an ordinary send's confirmation gets, and for the same
+ * reason. The active path's item is written when the turn reaches its next
+ * model request, so a turn sitting in one long tool call would blow a short
+ * window and settle `uncertain` — terminally, since that status is absorbing —
+ * for an insertion that lands and is consumed perfectly well a minute later.
+ * The wait almost never runs to this length: the idle flush is immediate, and
+ * an active injection stops as soon as its turn ends.
+ */
+export const DEFAULT_INJECT_OBSERVATION_TIMEOUT_MS = DEFAULT_DELIVERY_CONFIRMATION_TIMEOUT_MS;
+/** Exported beside it so a test can hold the two to the same value: the
+    equality IS the decision, and it is not observable from behaviour without a
+    multi-minute test. */
+export const CODEX_DELIVERY_CONFIRMATION_TIMEOUT_MS = DEFAULT_DELIVERY_CONFIRMATION_TIMEOUT_MS;
+
+/**
+ * Whether a failed injection request PROVED that nothing was written.
+ *
+ * Only one thing proves it: a JSON-RPC error the server articulated. The
+ * transport decodes those into `NativeQueueProtocolRefusal`, which carries the
+ * engine's own numeric code, and every other failure — a timeout, a closed
+ * socket, a child that exited, a writer fence, anything whose wording nobody
+ * has enumerated — arrives as a plain `Error` and means the request may have
+ * been applied with the answer lost.
+ *
+ * This is deliberately NOT a keyword list over error messages. Such a list
+ * decides the default for everything it fails to anticipate, and here the
+ * default it would pick is the dangerous one: `refused` tells the operator
+ * nothing was written, which is a claim no unrecognised failure supports.
+ * Defaulting the other way costs one operation reported as unverified.
+ */
+function injectionRefusalIsProven(error: unknown): boolean {
+  return error instanceof NativeQueueProtocolRefusal;
+}
 const LATE_THREAD_READ_RESPONSE_TTL_MULTIPLIER = 3;
 const MIN_LATE_THREAD_READ_RESPONSE_TTL_MS = 1_000;
 const MAX_LATE_THREAD_READ_RESPONSES = 32;
@@ -583,6 +633,27 @@ function rememberRolloutStructuredUsersFromRecord(
   if (payloadType === "user_message") {
     const message = stringField(payload, "message");
     if (message !== null) rememberRolloutStructuredUser(deliveries, message);
+  }
+  /* #1560: the RAW Responses form. An ordinary send is persisted through the
+     item lifecycle above, but `thread/inject_items` appends raw Responses items
+     and codex 0.154 writes those straight out as
+     `{"type":"response_item","payload":{"type":"message","role":"user",...}}`
+     — verified against real rollouts on disk. Without this branch the canonical
+     scan cannot see an injection at all, so every insertion would be reported
+     unverified and the pre-insertion dedup check would never find the record it
+     is meant to converge on.
+
+     `role` is checked against `user` and nothing else. The same rollout carries
+     `developer` and `assistant` messages in the identical shape, and a marker
+     appearing on one of those must never be read as the operator's input — the
+     role is the only thing separating them. Ordinary sends whose input is also
+     persisted this way simply agree with their lifecycle record: both decode
+     from the same marker text to the same digest, so the duplicate resolves
+     rather than conflicting. */
+  if (payloadType === "message" && stringField(payload, "role") === "user") {
+    const wireText = userMessageText(payload);
+    if (wireText !== null) rememberRolloutStructuredUser(deliveries, wireText);
+    return;
   }
   if (payloadType !== "item_completed") return;
   const item = record(payload.item);
@@ -1122,6 +1193,7 @@ export class CodexAppServerHost implements EngineHost {
   private readonly requestTimeoutMs: number;
   private readonly realtimeStartTimeoutMs: number;
   private readonly deliveryConfirmationTimeoutMs: number;
+  private readonly injectObservationTimeoutMs: number;
   private readonly compactEvidenceTimeoutMs: number;
   private readonly shutdownGraceMs: number;
   private readonly eventStore: RuntimeEventStore;
@@ -1176,6 +1248,10 @@ export class CodexAppServerHost implements EngineHost {
   private nativeQueueRevision = 0;
   private readonly selectedExecutable: string;
   private queueCapability: "unknown" | "supported" | "unsupported" = "unknown";
+  /** #1560. Fail-closed until the negotiated protocol is known to carry
+      `thread/inject_items`, and driven back to `unsupported` by a method-not-
+      found at the call site — the one answer that proves this engine lacks it. */
+  private injectCapability: "unknown" | "supported" | "unsupported" = "unknown";
   private readonly stdoutDecoder = new StringDecoder("utf8");
   private readonly attentions = new Map<string, PendingAttention>();
   private readonly stateListeners = new Set<(state: HostState) => void>();
@@ -1231,6 +1307,7 @@ export class CodexAppServerHost implements EngineHost {
     this.selectedExecutable = basename(options.binary ?? "codex");
     this.deliveryConfirmationTimeoutMs = options.deliveryConfirmationTimeoutMs
       ?? DEFAULT_DELIVERY_CONFIRMATION_TIMEOUT_MS;
+    this.injectObservationTimeoutMs = options.injectObservationTimeoutMs ?? DEFAULT_INJECT_OBSERVATION_TIMEOUT_MS;
     this.compactEvidenceTimeoutMs = options.compactEvidenceTimeoutMs ?? DEFAULT_COMPACT_EVIDENCE_TIMEOUT_MS;
     this.shutdownGraceMs = options.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS;
     this.eventStore = options.eventStore ?? new FileRuntimeEventStore();
@@ -1467,7 +1544,29 @@ export class CodexAppServerHost implements EngineHost {
     return !!version && (Number(version[1]) > 0 || Number(version[2]) >= 153);
   }
 
+  /**
+   * Injection capability, decided from the negotiated protocol rather than by
+   * probing (#1560).
+   *
+   * There is no read-only way to ask whether `thread/inject_items` exists: the
+   * method's only form is the mutating one, and calling it to find out would
+   * write into the operator's thread. So the same protocol floor the native
+   * queue uses decides it — `thread/inject_items` is part of that generation of
+   * the app-server API — and the authoritative correction comes from the call
+   * site, where a method-not-found flips this to `unsupported` for good and
+   * re-advertises the capability so the composer stops offering the action.
+   *
+   * Unknown stays unknown until the protocol version is known, and unknown is
+   * fail-closed: no action is offered and an admitted injection is refused.
+   */
+  private resolveInjectCapability(): void {
+    if (!this.protocolVersion) return;
+    if (this.injectCapability === "unsupported") return;
+    this.injectCapability = this.supportsNativeHistory() ? "supported" : "unsupported";
+  }
+
   private async initializeNativeQueue(): Promise<void> {
+    this.resolveInjectCapability();
     if (!this.supportsNativeHistory()) { if (this.protocolVersion) this.queueCapability = "unsupported"; return; }
     const queue = new NativeCodexQueue({ rpc: (method, params, timeout) => {
       if (!this.writerFenceAllowsActuation() || this.dead || this.releasing || this.released) {
@@ -1764,6 +1863,176 @@ export class CodexAppServerHost implements EngineHost {
     return persistedFirstMessage
       ? { state: "materialized" }
       : { state: "absent", reason: "Codex app-server did not read back the confirmed first message" };
+  }
+
+  /**
+   * Native history injection (#1560): `thread/inject_items`, the one
+   * app-server write that appends model-visible input to a thread WITHOUT
+   * interrupting the running turn and without starting a new one.
+   *
+   * The engine's two placements are genuinely different facts and are reported
+   * as such. With a turn running, the items land in that turn's pending input
+   * and are picked up at its next sampling request, inside the same turn. Idle,
+   * they are written to history and simply wait. Neither placement is a claim
+   * that the model read them.
+   *
+   * Three properties make this safe to run as a durable operation:
+   *
+   * - **The engine does not deduplicate.** A repeated request writes a second
+   *   record, which the prior probe observed directly. So the canonical
+   *   transcript is scanned for this operation's dedup marker BEFORE the
+   *   mutating request, and a hit returns that insertion instead of making
+   *   another one.
+   * - **The acknowledgement is empty.** `{}` proves the request was accepted
+   *   and nothing more — on the active path it can be answered while the items
+   *   are still only pending and the rollout flush has not happened. So the ack
+   *   never settles this operation on its own; the insertion has to be read
+   *   back out of canonical history before it is called observed.
+   * - **Injection is not a send.** Nothing here falls back to `turn/steer`,
+   *   `turn/start` or `turn/interrupt`. A host that cannot inject says so and
+   *   the operation fails with that reason; it is never quietly delivered as
+   *   something the operator did not ask for.
+   */
+  async inject(request: RuntimeInjectRequest): Promise<RuntimeInjectOutcome> {
+    if (this.dead || this.releasing || this.released || !this.writerFenceAllowsActuation()) {
+      throw new StructuredInjectError("Codex app-server host is unavailable", "refused");
+    }
+    if (request.threadId && request.threadId !== this.identity.threadId) {
+      throw new StructuredInjectError("injection target thread is not the thread this host owns", "refused");
+    }
+    if (this.injectCapability === "unsupported") {
+      throw new StructuredInjectError("this Codex app-server does not support history injection", "refused");
+    }
+    /* An unanswered approval owns the thread's input. Injecting underneath it
+       is the same hazard steering has, and is refused the same way. */
+    if (this.hasBlockingAttention()) {
+      throw new StructuredInjectError("blocking attention must be answered before injecting context", "refused");
+    }
+    /* The caller's fence, re-evaluated at actuation because the turn axis can
+       move between admission and here. `undefined` accepts either placement. */
+    if (request.expectedTurnId !== undefined && request.expectedTurnId !== this.activeTurnId) {
+      throw new StructuredInjectError("stale-turn", "refused");
+    }
+    const dedup = codexDeliveryDedup(request.operationId);
+    const entry: QueueEntry = { id: request.operationId, text: request.text, contentDigest: request.contentDigest };
+    /* Canonical lookup precedes insertion. A payload mismatch under the same
+       operation id throws out of here, which is what keeps one durable key
+       bound to one payload for ever.
+
+       Classified as REFUSED, and the wrapper is the whole point: this runs
+       BEFORE the request, so whatever it throws — an unreadable transcript, a
+       payload that does not match the one this key already carries — is a
+       failure in which `thread/inject_items` provably was never called. Left
+       unwrapped it reached the caller as a plain error and was reported
+       "issued, outcome unverified", which is untrue, and `uncertain` is
+       absorbing: retry is refused for this kind and the row is not editable, so
+       the operation stranded with nothing the operator could do. On the
+       `failed` path the wording is true and Edit comes back. */
+    let already;
+    try {
+      already = await rolloutConfirmedDelivery(this.identity.path, entry);
+    } catch (error) {
+      throw new StructuredInjectError(safeError(error), "refused");
+    }
+    if (already) {
+      /* Already in the transcript, so the evidence phase has nothing left to
+         wait for and answers immediately. */
+      return { placement: "history", turnId: null, observe: async () => true };
+    }
+    // The canonical read yielded. Recheck ownership and the turn immediately
+    // before the write, so a successor cannot inherit this admitted operation.
+    if (this.dead || this.releasing || this.released || !this.writerFenceAllowsActuation()) {
+      throw new StructuredInjectError("stale-generation", "refused");
+    }
+    if (request.expectedTurnId !== undefined && request.expectedTurnId !== this.activeTurnId) {
+      throw new StructuredInjectError("stale-turn", "refused");
+    }
+    /* Read once, before the write, so the placement reported afterwards is the
+       one the request was actually issued against rather than whatever the turn
+       axis drifted to while the insertion was being observed. */
+    const turnAtActuation = this.activeTurnId;
+    const items = [{
+      type: "message",
+      role: "user",
+      content: [{
+        type: "input_text",
+        /* The SAME structured-user envelope an ordinary send writes, so the
+           injected record is recognisably ours, keeps its authorship and its
+           selected-card reference, and — through `dedup` — is findable in the
+           rollout by the scan above. That marker is the whole idempotency
+           story here, because the engine supplies none. */
+        text: encodeCodexStructuredUserText(
+          request.text,
+          undefined,
+          request.selectedContext,
+          request.origin ?? { kind: "operator" },
+          dedup,
+        ),
+      }],
+    }];
+    try {
+      await this.rpc("thread/inject_items", { threadId: this.identity.threadId, items });
+    } catch (error) {
+      const message = safeError(error);
+      if (error instanceof NativeQueueProtocolRefusal && error.code === -32601) {
+        this.injectCapability = "unsupported";
+        this.setSessionStatus(this.engineStatus, this.activeFlags);
+        throw new StructuredInjectError("this Codex app-server does not support history injection", "refused");
+      }
+      /* A transport failure after the request left is NOT a refusal: the
+         insertion may have landed. It is reported unverified so the caller
+         terminalizes it as unknown rather than offering a second write. */
+      throw new StructuredInjectError(message, injectionRefusalIsProven(error) ? "refused" : "unverified");
+    }
+    const placement = turnAtActuation ? "pending-input" as const : "history" as const;
+    /* The acknowledgement returns NOW. Reading the insertion back is a separate
+       phase the caller runs on its own schedule, because the active path's
+       evidence does not exist until the turn reaches its next model request. */
+    return {
+      placement,
+      turnId: turnAtActuation,
+      observe: () => this.observeInjectedItem(entry, turnAtActuation),
+    };
+  }
+
+  /**
+   * Waits, bounded, for an injected item to appear in the canonical transcript.
+   *
+   * This is the whole difference between "the engine accepted the request" and
+   * "the input is in the thread". The rollout scan is cached on size and mtime,
+   * so a poll over an unchanged file costs a stat; the deadline is what keeps
+   * an active injection whose flush never comes from waiting for ever. Coming
+   * back false is not a failure — it is the honest "not established yet", and
+   * the caller records it as exactly that.
+   */
+  private async observeInjectedItem(entry: QueueEntry, turnAtActuation: string | null): Promise<boolean> {
+    const deadline = Date.now() + this.injectObservationTimeoutMs;
+    let wait = INJECT_OBSERVATION_POLL_MS;
+    for (;;) {
+      if (this.dead || this.releasing || this.released || !this.writerFenceAllowsActuation()) return false;
+      /* Read the turn BEFORE the scan, so the final scan below happens after
+         the turn ended rather than racing the flush that ends with it. */
+      const turnEnded = turnAtActuation !== null && this.activeTurnId !== turnAtActuation;
+      try {
+        if (await rolloutConfirmedDelivery(this.identity.path, entry)) return true;
+      } catch {
+        /* An unreadable transcript establishes nothing either way, and must not
+           turn an insertion that may have landed into a reported failure. */
+        return false;
+      }
+      /* THE TURN THIS JOINED IS OVER. Its pending input was either consumed or
+         discarded, and the rollout has been flushed either way — so one more
+         scan cannot change, and waiting out the rest of the deadline would only
+         delay the verdict. The scan above already ran after the end. */
+      if (turnEnded) return false;
+      if (Date.now() >= deadline) return false;
+      await new Promise((resolve) => setTimeout(resolve, wait));
+      /* Backs off toward the ceiling: an active turn can sit in one tool call
+         for minutes, and a 150 ms poll held for that long is thousands of stats
+         to learn nothing. Found-fast stays fast — the idle flush is immediate,
+         so it is seen on the first or second pass. */
+      wait = Math.min(wait * 2, INJECT_OBSERVATION_POLL_CEILING_MS);
+    }
   }
 
   async interrupt(turnRef: string): Promise<void> {
@@ -2388,9 +2657,9 @@ export class CodexAppServerHost implements EngineHost {
       activeTurnRef: this.activeTurnId,
       pendingAttention: [...this.attentions.keys()],
       nativeQueueRevision: this.nativeQueueRevision,
-      activeFlags: [...this.activeFlags, ...(this.nativeQueue ? ["native-queue"] : []), ...(this.supportsNativeHistory() && Array.isArray(record(this.modelCatalog)?.data) ? ["native-turn-profile"] : [])],
+      activeFlags: [...this.activeFlags, ...(this.nativeQueue ? ["native-queue"] : []), ...(this.injectCapability === "supported" ? [NATIVE_INJECT_CAPABILITY] : []), ...(this.supportsNativeHistory() && Array.isArray(record(this.modelCatalog)?.data) ? ["native-turn-profile"] : [])],
       account: this.account,
-      diagnostics: { executable: this.selectedExecutable, version: this.protocolVersion, nativeQueue: !!this.nativeQueue, queueCapability: this.queueCapability, authRecovery: this.authRecovery },
+      diagnostics: { executable: this.selectedExecutable, version: this.protocolVersion, nativeQueue: !!this.nativeQueue, queueCapability: this.queueCapability, injectCapability: this.injectCapability, authRecovery: this.authRecovery },
     };
   }
 

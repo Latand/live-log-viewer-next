@@ -554,7 +554,9 @@ function ProjectDashboardView({
   const activeDeliverySignature = useRuntimeSelector(
     (state) => {
       const active = new Set(Object.values(state.store.operations)
-        .filter((receipt) => (receipt.kind === "send" || receipt.kind === "steer")
+        /* #1560: an injection being admitted keeps its card marked active
+           between board polls, exactly as a send does. */
+        .filter((receipt) => (receipt.kind === "send" || receipt.kind === "steer" || receipt.kind === "inject")
           && ACTIVE_DELIVERY_RECEIPTS.has(receipt.status))
         .map((receipt) => receipt.conversationId));
       for (const session of Object.values(state.store.sessions)) {

@@ -248,6 +248,7 @@ function baseSession(id: string, payload: Record<string, unknown>, revision: num
     attentionIds: strings(payload.attentionIds),
     recentReceipts: receipts(payload.recentReceipts),
     accountId: typeof payload.accountId === "string" ? payload.accountId : null,
+    ...(typeof payload.writerClaim === "string" || payload.writerClaim === null ? { writerClaim: payload.writerClaim } : {}),
     parentConversationId: typeof payload.parentConversationId === "string" ? payload.parentConversationId : null,
     flowId: typeof payload.flowId === "string" ? payload.flowId : null,
     workflowId: typeof payload.workflowId === "string" ? payload.workflowId : null,
@@ -257,6 +258,10 @@ function baseSession(id: string, payload: Record<string, unknown>, revision: num
       steer: capabilities.steer === true,
       structuredAttention: capabilities.structuredAttention === true,
       nativeQueue: capabilities.nativeQueue === true,
+      /* #1560. Fail-closed like every other observed capability: a projection
+         that predates the field, or one whose publisher said nothing, reads as
+         no injection rather than as an unverified yes. */
+      inject: capabilities.inject === true,
       ...(capabilities.runtimeSettings && typeof capabilities.runtimeSettings === "object" ? { runtimeSettings: {
         perTurnModel: record(capabilities.runtimeSettings).perTurnModel === true,
         perTurnEffort: record(capabilities.runtimeSettings).perTurnEffort === true,
@@ -269,6 +274,8 @@ function baseSession(id: string, payload: Record<string, unknown>, revision: num
       executable: typeof record(payload.diagnostics).executable === "string" ? String(record(payload.diagnostics).executable).split(/[\\/]/).at(-1)!.slice(0, 80) : "unknown",
       queueCapability: record(payload.diagnostics).queueCapability === "supported" ? "supported" as const
         : record(payload.diagnostics).queueCapability === "unsupported" ? "unsupported" as const : "unknown" as const,
+      injectCapability: record(payload.diagnostics).injectCapability === "supported" ? "supported" as const
+        : record(payload.diagnostics).injectCapability === "unsupported" ? "unsupported" as const : "unknown" as const,
       version: typeof record(payload.diagnostics).version === "string" ? String(record(payload.diagnostics).version).slice(0, 80) : null,
       nativeQueue: record(payload.diagnostics).nativeQueue === true,
       authRecovery: record(payload.diagnostics).authRecovery === "started" ? "started" as const
@@ -465,6 +472,7 @@ export class RuntimeJournal {
         : {
             ...command,
             operationId,
+            ...(command.kind === "inject" ? { binding: this.injectionBindingAtAdmission(command.conversationId) } : {}),
             ...(this.structuredHosts
               && (command.kind === "send" || command.kind === "steer")
               && typeof receipt.turnId === "string"
@@ -1651,6 +1659,15 @@ export class RuntimeJournal {
       if (!command.text.trim() && !command.images?.length) throw new Error("message content is required");
       if (!command.contentDigest) throw new Error("message content digest is required");
     }
+    /* Injection carries text and only text, and the refusal is repeated here
+       because the journal is reachable from more than one admitting surface —
+       an image that slipped past a route must not become a durable operation
+       nobody can execute. */
+    if (command.kind === "inject") {
+      if (!command.text.trim()) throw new Error("injected context text is required");
+      if (!command.contentDigest) throw new Error("message content digest is required");
+      if (command.images?.length) throw new Error("injected context cannot carry images");
+    }
     if (command.kind === "answer" && !command.attentionId.trim()) throw new Error("attentionId is required");
     if ((command.kind === "kill" || command.kind === "compact" || (command.kind === "reconfigure" && command.sessionKey))
       && ((!command.sessionKey || (command.sessionKey.engine !== "codex" && command.sessionKey.engine !== "claude"))
@@ -1665,6 +1682,19 @@ export class RuntimeJournal {
 
   private normalizeOperation(command: RuntimeOperationCommand): RuntimeOperationCommand {
     if (command.kind === "native-queue") return parseRuntimeCommand("native-queue", command);
+    if (command.kind === "inject") {
+      const normalized = parseRuntimeCommand("inject", command);
+      /* The parser recomputes the digest from the text it accepted. Comparing
+         it to what the caller claimed is what binds one durable key to one
+         payload: without this, a replay under the same operation id could
+         arrive with different text and be admitted as if nothing changed. */
+      if (command.contentDigest
+        && normalized.kind === "inject"
+        && command.contentDigest !== normalized.contentDigest) {
+        throw new Error("message content digest mismatch");
+      }
+      return normalized;
+    }
     if (command.kind !== "send" && command.kind !== "steer" && command.kind !== "spawn") return command;
     const rawImages = command.images ?? [];
     const images = parseStructuredImageRefs(rawImages, 16);
@@ -1751,6 +1781,34 @@ export class RuntimeJournal {
         status = "queued";
         queuePosition = this.queuedSendCount(command.conversationId) + 1;
         turnId = null;
+      }
+    /* #1560: native injection is admitted on its own terms and never on a
+       send's. It has no policy to interpret, it never becomes a native-queue
+       add, and its whole reason to exist is that it does not start or interrupt
+       a turn — so `running` is a perfectly good state to be admitted against,
+       which is the opposite of what the send branch below concludes. The
+       capability is required AT ADMISSION so the operator is refused now rather
+       than holding an operation that fails later, and there is deliberately no
+       degradation to steering: an engine that cannot inject says so. */
+    } else if (command.kind === "inject") {
+      if (!session || session.host !== "hosted") {
+        status = "rejected";
+        reason = session?.host === "dead" || session?.host === "unhosted" ? "dead-host" : "no-claim";
+      } else if (!session.writerClaim) {
+        status = "rejected";
+        reason = "stale-generation";
+      } else if (!session.capabilities.inject) {
+        status = "rejected";
+        reason = "unsupported-injection";
+      /* Unlike an ordinary send, an explicit `null` here IS a fence: it is the
+         caller saying "only into an idle thread", which is the one way to ask
+         for the history placement and be sure of getting it. */
+      } else if (command.turnId !== undefined && command.turnId !== session.activeTurnId) {
+        status = "rejected";
+        reason = "stale-turn";
+      } else {
+        status = "queued";
+        turnId = session.activeTurnId;
       }
     } else if (command.kind === "send" || command.kind === "steer") {
       if (!session || session.host !== "hosted") {
@@ -1855,7 +1913,14 @@ export class RuntimeJournal {
       turnId,
       queuePosition,
       reason,
-      text: command.kind === "send" || command.kind === "steer" ? command.text.slice(0, 240) : null,
+      /* #1560: an injection carries the operator's own words, so its receipt
+         carries them too. Without this every inject receipt has `text: null`,
+         and the composer surfaces that render a receipt all require text — so a
+         failed, refused or unverified injection would be invisible, which is
+         exactly the outcome this operation exists to report honestly. */
+      text: command.kind === "send" || command.kind === "steer" || command.kind === "inject"
+        ? command.text.slice(0, 240)
+        : null,
       ...(command.kind === "send" || command.kind === "steer" ? { imageCount: command.images?.length ?? 0 } : {}),
       ...((command.kind === "send" || command.kind === "steer") && command.runtime ? { runtime: command.runtime } : {}),
       at: admittedAt,
@@ -1866,6 +1931,12 @@ export class RuntimeJournal {
       admittedAt,
       revision,
     };
+  }
+
+  private injectionBindingAtAdmission(conversationId: string) {
+    const session = this.entity<RuntimeSession>("session", conversationId);
+    if (!session?.writerClaim) return null;
+    return { threadId: session.sessionKey.sessionId, accountId: session.accountId, writerClaim: session.writerClaim };
   }
 
   private queuedSendCount(conversationId: string): number {
