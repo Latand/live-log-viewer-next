@@ -58,7 +58,7 @@ export class FakeEngineHost implements EngineHost {
     return {
       placement: this.state.activeTurnRef ? "pending-input" : "history",
       turnId: this.state.activeTurnRef,
-      observed: true,
+      observe: async () => true,
     };
   }
 

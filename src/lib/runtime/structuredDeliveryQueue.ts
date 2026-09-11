@@ -6,7 +6,7 @@ import { parseSelectedContextRef, type SelectedContextRef } from "@/lib/selectio
 import { parseMessageOrigin, type MessageOrigin } from "./messageOrigin";
 import type { RuntimeSendSettings } from "./contracts";
 import { evidenceAgrees, readEvidence, readOptionalEvidence, type Evidence } from "./evidence";
-import type { CompactCapableHost, DeliveryReceipt, EngineHost, FirstDispatchEvidence, HostState, QueueEntry } from "./engineHost";
+import type { CompactCapableHost, DeliveryReceipt, EngineHost, FirstDispatchEvidence, HostState, QueueEntry, RuntimeInjectOutcome } from "./engineHost";
 import { hostSupportsCompact, hostSupportsInject, StructuredCompactError, StructuredInjectError, StructuredSendRefusedError } from "./engineHost";
 import {
   parseStructuredImageRefs,
@@ -573,6 +573,9 @@ export class StructuredDeliveryQueue {
       arrived. The effect stays pending in the journal meanwhile, so every later
       drain pass must find it here and leave it alone (#862). */
   private readonly activeCompactions = new Map<string, Promise<void>>();
+  /** #1560: injections whose engine write is done and whose canonical evidence
+      is still being read, detached from the pass that issued them. */
+  private readonly activeInjections = new Map<string, Promise<void>>();
   /** The conversations those compactions belong to. Reads block on this rather
       than on a whole-group barrier, so an unfinished compaction holds messages
       without holding kill, interrupt, or answer. */
@@ -1340,6 +1343,10 @@ export class StructuredDeliveryQueue {
    *   terminal the journal refuses to transition out of.
    */
   private async executeInjection(effect: InjectEffect, host: EngineHost, health: HostState): Promise<boolean> {
+    /* Its acknowledgement already came back and its evidence is still being
+       read. Re-issuing here would be a second insertion, which the engine does
+       not deduplicate. */
+    if (this.activeInjections.has(effect.operationId)) return true;
     if (!hostSupportsInject(host)) {
       await this.transitionUnlessSettled(effect.operationId, "failed", { reason: "unsupported-injection" });
       return true;
@@ -1378,9 +1385,49 @@ export class StructuredDeliveryQueue {
       await this.terminalizeUnverified(effect.operationId, `${INJECTION_UNVERIFIED_AFTER_ACTUATION}: ${reason}`);
       return true;
     }
-    if (!outcome.observed) {
+    /* THE ENGINE WRITE IS DONE; WHAT IS LEFT IS READING IT BACK.
+       That read waits for the turn to reach its next model request, which can
+       be minutes into a single tool call — and this pass must not be inside it.
+       `drainAfterAdmission` awaits the drain already running, so an observation
+       held here would make every later admission, on every OTHER conversation,
+       wait out the window before it was even looked at. A compaction is
+       detached for the same reason.
+
+       No conversation barrier goes with it, unlike compaction: a compaction is
+       still MUTATING the thread, while this is a read of history that has
+       already been written. Ordering on the thread was fixed when the request
+       returned, so a send admitted a moment later neither overtakes the
+       injection nor needs to wait for its evidence. */
+    const settle = this.settleObservedInjection(effect, outcome).finally(() => {
+      this.activeInjections.delete(effect.operationId);
+      this.retrySoon();
+    });
+    this.activeInjections.set(effect.operationId, settle);
+    void settle.catch(() => undefined);
+    return true;
+  }
+
+  /**
+   * Records what the canonical transcript turned out to say about one
+   * injection (#1560). Runs detached from the delivery pass; see the note at
+   * its call site for why that is required rather than merely tidy.
+   */
+  private async settleObservedInjection(effect: InjectEffect, outcome: RuntimeInjectOutcome): Promise<void> {
+    let observed: boolean;
+    try {
+      observed = await outcome.observe();
+    } catch (error) {
+      /* The evidence read failed. The insertion itself was acknowledged, so its
+         fate is unknown rather than failed. */
+      await this.terminalizeUnverified(
+        effect.operationId,
+        `${INJECTION_ACKNOWLEDGED_BUT_UNOBSERVED}: ${failureReason(error)}`,
+      );
+      return;
+    }
+    if (!observed) {
       await this.terminalizeUnverified(effect.operationId, INJECTION_ACKNOWLEDGED_BUT_UNOBSERVED);
-      return true;
+      return;
     }
     await this.transitionUnlessSettled(effect.operationId, "delivered", {
       turnId: outcome.turnId,
@@ -1388,7 +1435,6 @@ export class StructuredDeliveryQueue {
         ? INJECTION_INTO_RUNNING_TURN
         : INJECTION_INTO_HISTORY,
     });
-    return true;
   }
 
   /**

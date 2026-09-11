@@ -21,20 +21,23 @@ import { setTmuxComposerRuntimeDependenciesForTests } from "./tmuxComposerRuntim
 import { accessoryReserve, mobileComposerCeiling, mobileComposerUnitMax } from "@/lib/composerScroll";
 
 /**
- * The composer's injection action, driven through the real component (#1560).
+ * What the operator sees when an injection does not simply work (#1560).
  *
- * The operator asked for a discoverable control that adds to the thread without
- * interrupting it, and asked for the existing submissions to stay exactly as
- * they are. Both halves are asserted here against the rendered composer rather
- * than against a hand-built capability object, so the REAL capability rules
- * decide what appears:
+ * Separate from the action suite because it exercises the other half: the
+ * durable receipt, after the fact. The composer answers an accepted injection
+ * with "Accepted — the receipt confirms when it reaches the thread", so the
+ * receipt is the only thing that can ever say it did not. Three of its outcomes
+ * are reachable and none of them is a send:
  *
- * - the action shows only when the host has advertised injection;
- * - choosing it posts to the injection endpoint and to nothing else — no send,
- *   no queue write, so no interrupt and no new turn can come from it;
- * - it stays available while the thread is idle, where a steer is refused,
- *   because idle injection is a supported outcome rather than a no-op;
- * - Enter and Alt+Enter keep their meanings.
+ * - `failed`, from a stale turn, a retired capability or a waiting approval;
+ * - `uncertain`, from an acknowledgement the transcript never corroborated —
+ *   the outcome this whole operation exists to report honestly, and so the one
+ *   it would be worst to hide;
+ * - and neither of them may offer Retry, which the journal refuses for this
+ *   kind because the engine does not deduplicate a second insertion.
+ *
+ * Every composer surface that renders a receipt requires `receipt.text`, which
+ * is why the journal projects the operator's words onto an inject receipt.
  */
 
 /** The composer decodes a staged attachment through a FileReader; this is the
@@ -304,201 +307,62 @@ async function openSendMenu(host: HTMLElement): Promise<void> {
 }
 
 
-const textarea = (host: HTMLElement) => host.querySelector("textarea")!;
-
-async function type(host: HTMLElement, value: string): Promise<void> {
-  const field = textarea(host);
-  const propsKey = Object.keys(field).find((candidate) => candidate.startsWith("__reactProps$"))!;
-  const props = (field as unknown as Record<string, { onChange(event: unknown): void }>)[propsKey]!;
-  await settle(() => props.onChange({ target: { value }, currentTarget: { value } }));
-}
-
-test("the injection action is offered, and choosing it posts only to the injection endpoint", async () => {
-  turn = "running";
-  const { host, root } = await mount();
-  await type(host, "also read the migration notes");
-  await openSendMenu(host);
-
-  const action = menuAction(host, "Add to context");
-  expect(action).toBeDefined();
-  expect(action!.hasAttribute("disabled")).toBe(false);
-  /* While a turn is running the hint says what actually happens to it. */
-  expect(action!.textContent).toContain("without interrupting");
-
-  await settle(() => action!.click());
-  await settle(() => {});
-
-  expect(injections).toHaveLength(1);
-  expect(injections[0]).toMatchObject({
+function injectReceipt(status: string, reason: string): Record<string, unknown> {
+  return {
+    operationId: `op-inject-${status}`,
     conversationId: CARD,
-    text: "also read the migration notes",
-  });
-  /* NOTHING ELSE WAS TOUCHED. A send here would interrupt the turn and a queue
-     write would park the words until it ended; the action promises neither. */
-  expect(sends).toEqual([]);
-  expect(queueWrites).toEqual([]);
-  /* The draft is cleared, exactly as the other submissions clear it. */
-  expect(textarea(host).value).toBe("");
-  root.unmount();
-});
-
-test("the action stays available while the thread is idle, where a steer is not", async () => {
-  turn = "idle";
-  const { host, root } = await mount();
-  await type(host, "background material");
-  await openSendMenu(host);
-
-  const inject = menuAction(host, "Add to context");
-  expect(inject!.hasAttribute("disabled")).toBe(false);
-  /* Idle injection has its own honest description: it stores rather than joins. */
-  expect(inject!.textContent).toContain("Stores it in the conversation");
-
-  /* The steer action is the contrast: nothing is running, so it is refused. */
-  const steer = menuAction(host, "Steer the running turn");
-  expect(steer!.hasAttribute("disabled")).toBe(true);
-
-  await settle(() => inject!.click());
-  await settle(() => {});
-  expect(injections).toHaveLength(1);
-  expect(sends).toEqual([]);
-  root.unmount();
-});
-
-test("a host that has not advertised injection offers no action at all", async () => {
-  injectCapable = false;
-  const { host, root } = await mount();
-  await type(host, "nowhere to go");
-  await openSendMenu(host);
-
-  /* Not a disabled row: the capability was never observed, so the composer
-     makes no offer it cannot keep. */
-  expect(menuAction(host, "Add to context")).toBeUndefined();
-  expect(menuAction(host, "Queue")).toBeDefined();
-  root.unmount();
-});
-
-test("the existing submissions keep their meanings beside the new action", async () => {
-  turn = "running";
-  const { host, root } = await mount();
-  await type(host, "answer me");
-
-  /* Enter still sends, and a send still interrupts the running turn. */
-  await settle(() => press(textarea(host), "Enter"));
-  await settle(() => {});
-  expect(sends).toHaveLength(1);
-  expect(sends[0]).toMatchObject({ policy: "interrupt-active" });
-  expect(injections).toEqual([]);
-
-  /* Alt+Enter still hands the draft to Codex's own queue. */
-  await type(host, "later please");
-  await settle(() => press(textarea(host), "Enter", { altKey: true }));
-  await settle(() => {});
-  expect(queueWrites).toHaveLength(1);
-  expect(injections).toEqual([]);
-  root.unmount();
-});
-
-/** Reaches the picker the composer renders and hands it a real document, the
-    way the attachment suites do, so the staged state is the composer's own. */
-async function stageFile(host: HTMLElement, name: string, body: string): Promise<void> {
-  let onFiles: ((files: File[]) => void) | null = null;
-  for (const node of host.querySelectorAll("input")) {
-    const propsKey = Object.keys(node).find((candidate) => candidate.startsWith("__reactProps$"));
-    const props = propsKey ? (node as unknown as Record<string, { onChange?: (event: unknown) => void; type?: string }>)[propsKey] : null;
-    if (node.getAttribute("type") !== "file" || typeof props?.onChange !== "function") continue;
-    const handler = props.onChange;
-    await settle(() => handler({ target: { files: [new File([body], name, { type: "text/markdown" })], value: "" } }));
-    QueuedReader.settleAll(`data:text/markdown;base64,${Buffer.from(body).toString("base64")}`);
-    await settle(() => {});
-    return;
-  }
-  if (!onFiles) throw new Error("the composer rendered no file input");
+    idempotencyKey: `key-inject-${status}`,
+    kind: "inject",
+    status,
+    reason,
+    /* The journal projects the operator's own words onto an inject receipt.
+       Every composer surface that renders a receipt requires text, so a null
+       here is the difference between the outcome being visible and not. */
+    text: "context the operator added",
+    revision: 1,
+    at: new Date().toISOString(),
+    admittedAt: new Date().toISOString(),
+  };
 }
 
-test("a staged document rides the injection instead of being silently dropped", async () => {
+test("a failed injection is visible to the operator", async () => {
+  durableReceipts = [injectReceipt("failed", "unsupported-injection")];
   const { host, root } = await mount();
-  await type(host, "use the attached spec");
-  await stageFile(host, "spec.md", "# spec\n");
-  await openSendMenu(host);
-
-  const action = menuAction(host, "Add to context");
-  /* A DOCUMENT IS NOT AN IMAGE. Images genuinely cannot ride a raw Responses
-     item and are refused by name; a file is folded into the text as a path, so
-     the action stays available and must actually carry it. */
-  expect(action!.hasAttribute("disabled")).toBe(false);
-  await settle(() => action!.click());
-  await settle(() => {});
-
-  expect(injections).toHaveLength(1);
-  expect(injections[0]!.files).toMatchObject([{ name: "spec.md" }]);
+  const rendered = host.textContent ?? "";
+  /* The words are shown, so the operator can see WHICH context did not land. */
+  expect(rendered).toContain("context the operator added");
   root.unmount();
 });
 
-test("an injection never carries images", async () => {
+test("an injection whose fate is unknown is visible to the operator", async () => {
+  /* `uncertain` is the outcome this whole operation was designed to report
+     honestly — an empty engine acknowledgement proves nothing about the thread.
+     It would be the worst one to hide. */
+  durableReceipts = [injectReceipt("uncertain", "injection was acknowledged and did not appear in canonical history; whether it reached the thread is unverified")];
   const { host, root } = await mount();
-  await type(host, "with a picture");
-  await openSendMenu(host);
-  const action = menuAction(host, "Add to context");
-  expect(action!.hasAttribute("disabled")).toBe(false);
-  await settle(() => action!.click());
-  await settle(() => {});
-  expect(injections).toHaveLength(1);
-  expect(injections[0]!.images).toBeUndefined();
+  expect(host.textContent ?? "").toContain("context the operator added");
   root.unmount();
 });
 
-test("the composer reports a submission, not a placement it has not observed", async () => {
-  turn = "running";
-  holdInjection = true;
+test.each([["failed", "stale-turn"], ["uncertain", "acknowledged and not observed"]])(
+  "a %s injection offers no Retry, because the journal refuses one",
+  async (status, reason) => {
+  durableReceipts = [injectReceipt(status, reason)];
   const { host, root } = await mount();
-  await type(host, "context please");
-  await openSendMenu(host);
-  await settle(() => menuAction(host, "Add to context")!.click());
-
-  /* WHILE THE REQUEST IS IN FLIGHT nothing may claim the text reached the
-     thread. "Added to the running turn's input" is a statement about the
-     engine, and at this moment the request has not even been answered. */
-  const inFlight = host.textContent ?? "";
-  expect(inFlight).toContain("Adding to context");
-  expect(inFlight).not.toContain("Added to the running turn");
-
-  await settle(() => releaseInjection?.());
-  /* AND AFTER A SUCCESSFUL POST it says accepted, not delivered: the operation
-     can still settle uncertain, because an empty engine acknowledgement proves
-     nothing about the thread. The receipt carries the placement. */
-  const settled = host.textContent ?? "";
-  expect(settled).toContain("Accepted");
-  expect(settled).not.toContain("Stored in the conversation context");
-  root.unmount();
-});
-
-test("a refusal gives the draft back instead of reporting success", async () => {
-  injectAnswer = { ok: false, status: 503, error: "structured delivery ownership is unavailable" };
-  const { host, root } = await mount();
-  await type(host, "give this back");
-  await openSendMenu(host);
-  await settle(() => menuAction(host, "Add to context")!.click());
-  await settle(() => {});
-
-  expect(textarea(host).value).toBe("give this back");
-  expect(host.textContent ?? "").toContain("structured delivery ownership is unavailable");
-  root.unmount();
-});
-
-test("every send-menu action stays reachable: the menu scrolls instead of overflowing", async () => {
-  turn = "running";
-  const { host, root } = await mount();
-  await type(host, "four actions now");
-  await openSendMenu(host);
-
-  const menu = host.ownerDocument.querySelector('[data-testid="composer-send-menu"]') as HTMLElement;
-  expect(menu).toBeTruthy();
-  const items = [...menu.querySelectorAll('[role="menuitem"]')];
-  /* Queue, inject, steer and quick-ack: the most a Codex conversation offers. */
-  expect(items.length).toBe(4);
-  /* Bounded and scrollable, so the head of the list cannot be pushed past the
-     top of a short viewport with no way to reach it. */
-  expect(menu.style.maxHeight).toContain("100dvh");
-  expect(menu.className).toContain("overflow-y-auto");
+  /* Retry re-arms the ORIGINAL operation and the journal refuses that for an
+     injection: the engine does not deduplicate, so it would be a second
+     insertion. A control whose only outcome is a refusal must not be offered.
+     A failed SEND still has its Retry; this is about the kind, not the state. */
+  /* Indexed rather than spread: spreading a happy-dom NodeList here exhausts
+     the heap, so the labels are read out by position. */
+  const labels: string[] = [];
+  const buttons = host.querySelectorAll("button");
+  for (let index = 0; index < buttons.length; index += 1) {
+    labels.push(buttons[index]?.textContent ?? "");
+  }
+  expect(labels.filter((label) => /retry/i.test(label))).toEqual([]);
+  /* The receipt IS on screen — otherwise this would pass by rendering nothing,
+     which is the very defect the two tests above exist to catch. */
+  expect(host.textContent ?? "").toContain("context the operator added");
   root.unmount();
 });

@@ -1908,7 +1908,14 @@ export class RuntimeJournal {
       turnId,
       queuePosition,
       reason,
-      text: command.kind === "send" || command.kind === "steer" ? command.text.slice(0, 240) : null,
+      /* #1560: an injection carries the operator's own words, so its receipt
+         carries them too. Without this every inject receipt has `text: null`,
+         and the composer surfaces that render a receipt all require text — so a
+         failed, refused or unverified injection would be invisible, which is
+         exactly the outcome this operation exists to report honestly. */
+      text: command.kind === "send" || command.kind === "steer" || command.kind === "inject"
+        ? command.text.slice(0, 240)
+        : null,
       ...(command.kind === "send" || command.kind === "steer" ? { imageCount: command.images?.length ?? 0 } : {}),
       ...((command.kind === "send" || command.kind === "steer") && command.runtime ? { runtime: command.runtime } : {}),
       at: admittedAt,

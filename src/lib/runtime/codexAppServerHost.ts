@@ -1920,7 +1920,9 @@ export class CodexAppServerHost implements EngineHost {
        bound to one payload for ever. */
     const already = await rolloutConfirmedDelivery(this.identity.path, entry);
     if (already) {
-      return { placement: "history", turnId: null, observed: true };
+      /* Already in the transcript, so the evidence phase has nothing left to
+         wait for and answers immediately. */
+      return { placement: "history", turnId: null, observe: async () => true };
     }
     /* Read once, before the write, so the placement reported afterwards is the
        one the request was actually issued against rather than whatever the turn
@@ -1960,8 +1962,14 @@ export class CodexAppServerHost implements EngineHost {
       throw new StructuredInjectError(message, injectionRefusalIsProven(error) ? "refused" : "unverified");
     }
     const placement = turnAtActuation ? "pending-input" as const : "history" as const;
-    const observed = await this.observeInjectedItem(entry, turnAtActuation);
-    return { placement, turnId: turnAtActuation, observed };
+    /* The acknowledgement returns NOW. Reading the insertion back is a separate
+       phase the caller runs on its own schedule, because the active path's
+       evidence does not exist until the turn reaches its next model request. */
+    return {
+      placement,
+      turnId: turnAtActuation,
+      observe: () => this.observeInjectedItem(entry, turnAtActuation),
+    };
   }
 
   /**

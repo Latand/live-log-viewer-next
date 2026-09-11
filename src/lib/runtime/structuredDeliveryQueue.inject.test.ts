@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 
 import type { DeliveryReceipt, EngineHost, HostState, QueueEntry, RuntimeEvent, RuntimeInjectOutcome, RuntimeInjectRequest } from "./engineHost";
 import { StructuredInjectError } from "./engineHost";
+import type { StructuredDeliveryEffect } from "./structuredDeliveryQueue";
 import {
   INJECTION_ACKNOWLEDGED_BUT_UNOBSERVED,
   INJECTION_INTO_HISTORY,
@@ -43,6 +44,7 @@ interface HostProbe {
 function probeHost(options: {
   activeTurnRef?: string | null;
   inject?: (request: RuntimeInjectRequest) => Promise<RuntimeInjectOutcome>;
+  observe?: () => Promise<boolean>;
   canInject?: boolean;
 } = {}): HostProbe {
   const sends: QueueEntry[] = [];
@@ -66,8 +68,11 @@ function probeHost(options: {
       injections.push(request);
       return options.inject
         ? options.inject(request)
-        : { placement: request.expectedTurnId || options.activeTurnRef ? "pending-input" as const : "history" as const,
-            turnId: options.activeTurnRef ?? null, observed: true };
+        : {
+            placement: request.expectedTurnId || options.activeTurnRef ? "pending-input" as const : "history" as const,
+            turnId: options.activeTurnRef ?? null,
+            observe: options.observe ?? (async () => true),
+          };
     },
   }) as EngineHost;
   return { host, sends, interrupts, injections };
@@ -132,10 +137,7 @@ test("an idle injection settles with the history wording, not the running-turn w
 });
 
 test("an acknowledged but unobserved insertion settles uncertain, never delivered", async () => {
-  const probe = probeHost({
-    activeTurnRef: "turn-live",
-    inject: async () => ({ placement: "pending-input", turnId: "turn-live", observed: false }),
-  });
+  const probe = probeHost({ activeTurnRef: "turn-live", observe: async () => false });
   const { queue, transitions } = injectQueue(probe);
   await queue.drain();
 
@@ -211,4 +213,102 @@ test("an injection effect carrying images is not executed at all", async () => {
     status: "failed",
     reason: "structured delivery effect is invalid",
   }]);
+});
+
+test("a message admitted during a slow injection is not held behind its observation", async () => {
+  /* THE STALL THIS GUARDS AGAINST. An active injection's item is written when
+     its turn reaches the next model request, so the observation legitimately
+     waits behind a long tool call — minutes, by design.
+
+     `drainAfterAdmission` awaits the drain already running before it starts its
+     own pass. So an observation awaited INSIDE the pass makes every later
+     admission — a send, a steer, an interrupt, on any conversation — wait out
+     the whole window before it is even looked at. Nothing else here holds a
+     pass that long: a compaction is detached for exactly this reason. */
+  let releaseObservation: (() => void) | null = null;
+  const held = new Promise<void>((resolve) => { releaseObservation = resolve; });
+  const sends: QueueEntry[] = [];
+  const injections: RuntimeInjectRequest[] = [];
+  const transitions: Transition[] = [];
+
+  const slowHost = {
+    supportsSteer: true,
+    attach: () => ({ async *[Symbol.asyncIterator](): AsyncIterator<RuntimeEvent> {} }),
+    send: async (entry: QueueEntry): Promise<DeliveryReceipt> => {
+      sends.push(entry);
+      return { outcome: "turn-started", turnId: "turn-other" };
+    },
+    interrupt: async () => {},
+    answer: async () => {},
+    health: async () => state("turn-live", "thread-slow"),
+    release: async () => {},
+    inject: async (request: RuntimeInjectRequest) => {
+      injections.push(request);
+      /* The acknowledgement comes back at once, as the engine's does. What is
+         slow is reading the insertion back, which is the phase held here. */
+      return {
+        placement: "pending-input" as const,
+        turnId: "turn-live",
+        observe: async () => { await held; return true; },
+      };
+    },
+  } as EngineHost;
+  const otherHost = { ...slowHost, health: async () => state(null, "thread-other") } as EngineHost;
+
+  const injectEffect: StructuredDeliveryEffect = {
+    id: "effect:slow-inject",
+    kind: "runtime.inject",
+    eventSeq: 1,
+    payload: {
+      kind: "inject",
+      operationId: "slow-inject",
+      conversationId: "conversation-slow",
+      text: "context for the busy thread",
+      contentDigest: structuredContent("context for the busy thread", []).contentDigest,
+    },
+  };
+  const laterSend: StructuredDeliveryEffect = {
+    id: "effect:later-send",
+    kind: "runtime.send",
+    eventSeq: 2,
+    payload: {
+      kind: "send",
+      operationId: "later-send",
+      conversationId: "conversation-other",
+      text: "an unrelated message",
+      policy: "queue",
+    },
+  };
+  /* The later send does not exist yet — it is admitted while the injection's
+     observation is in flight, which is the case that matters. */
+  let effects: StructuredDeliveryEffect[] = [injectEffect];
+
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => effects,
+    status: async () => ({ status: "queued", revision: 1 }),
+    hostClaim: async () => "owner:1",
+    transition: async (operationId, status, details) => { transitions.push({ operationId, status, ...details }); },
+  }, (conversationId) => (conversationId === "conversation-slow" ? slowHost : otherHost));
+
+  const pass = queue.drain();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  expect(injections).toHaveLength(1);
+
+  effects = [injectEffect, laterSend];
+  const admitted = queue.drainAfterAdmission();
+
+  /* The admission's own pass must run rather than queue behind an observation
+     on a different thread. Bounded so a regression fails instead of hanging. */
+  await Promise.race([admitted, new Promise((resolve) => setTimeout(resolve, 500))]);
+  expect(sends.map((entry) => entry.id)).toEqual(["later-send"]);
+
+  releaseObservation!();
+  await pass;
+  await admitted;
+  await queue.drain();
+
+  /* And the injection still settles correctly once its observation lands. */
+  const settled = transitions.filter((entry) => entry.operationId === "slow-inject").at(-1)!;
+  expect(settled.status).toBe("delivered");
+  expect(settled.reason).toBe(INJECTION_INTO_RUNNING_TURN);
 });

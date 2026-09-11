@@ -219,10 +219,23 @@ export interface RuntimeInjectOutcome {
   placement: "pending-input" | "history";
   /** The turn the items joined, or null when the thread was idle. */
   turnId: string | null;
-  /** True only when the insertion was READ BACK from canonical history. The
-      engine acknowledges `thread/inject_items` with an empty object, which
-      proves the request was accepted and nothing else. */
-  observed: boolean;
+  /**
+   * The bounded wait for the insertion to appear in canonical history,
+   * deliberately SEPARATE from the acknowledgement above.
+   *
+   * The engine answers `thread/inject_items` with an empty object, which proves
+   * the request was accepted and nothing else — so something still has to read
+   * the thread back before this operation can be called delivered. But on the
+   * active path that evidence only appears when the turn reaches its next model
+   * request, which can be minutes into one tool call.
+   *
+   * Splitting it out is what keeps that wait off the delivery pass. The engine
+   * write is already done when this resolves to a function; observing it is a
+   * read, so the caller can run it detached without anything else on the thread
+   * losing its order. Resolves false when the window closed without evidence,
+   * which is "not established", never "did not happen".
+   */
+  observe(): Promise<boolean>;
 }
 
 /** A host whose engine exposes client-originated history injection (#1560). */

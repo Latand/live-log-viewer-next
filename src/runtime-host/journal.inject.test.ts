@@ -153,3 +153,21 @@ test("an injection does not support retry, because the engine does not deduplica
   expect(() => journal.claimDeliveryAction(admitted.operationId, "retry")).toThrow(/does not support/i);
   journal.close();
 });
+
+test("an inject receipt carries the operator's words, so its outcome can be shown", () => {
+  const journal = journalWithSession("text", { turn: "idle", inject: true });
+  const admitted = journal.executeOperation(injectCommand({ text: "the context the operator added" }) as never);
+  /* EVERY composer surface that renders a receipt requires text. A null here
+     is the difference between a failed or unverified injection being visible
+     and it disappearing silently — and `uncertain` is the outcome this whole
+     operation exists to report honestly. */
+  expect(admitted.receipt.text).toBe("the context the operator added");
+  journal.close();
+});
+
+test("a long injection's receipt text is bounded like a send's", () => {
+  const journal = journalWithSession("bounded", { turn: "idle", inject: true });
+  const admitted = journal.executeOperation(injectCommand({ text: "x".repeat(500) }) as never);
+  expect(admitted.receipt.text).toHaveLength(240);
+  journal.close();
+});

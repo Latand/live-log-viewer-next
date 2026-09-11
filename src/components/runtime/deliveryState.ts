@@ -28,7 +28,30 @@ export function deliveryResolved(status: ReceiptStatus): boolean {
   return status === "turn-started" || status === "steered" || (receiptIsTerminal(status) && !deliveryProblem(status));
 }
 
-function isMessage(receipt: RuntimeReceipt): boolean {
+/**
+ * Whether a receipt carries the operator's own words, and therefore belongs on
+ * every surface that shows what became of them.
+ *
+ * Exported so the composer shares this ONE definition. It previously kept a
+ * second copy, and when `inject` was added to one and not the other the result
+ * was an operation whose failed and unverified outcomes rendered nowhere.
+ */
+/**
+ * Whether a same-key retry exists for this receipt at all (#1560).
+ *
+ * Retry re-arms the ORIGINAL operation, and the journal refuses that for an
+ * injection on purpose: `thread/inject_items` is not deduplicated by the
+ * engine, so re-issuing one is a second insertion rather than a second attempt
+ * at the first. Offering the control anyway would put a button in front of the
+ * operator whose only possible outcome is a refusal. Edit is unaffected — it
+ * puts the words back in the draft and mints a new operation, which is a fresh
+ * injection and perfectly sound.
+ */
+export function isRetryableReceipt(receipt: RuntimeReceipt): boolean {
+  return receipt.kind === "send" || receipt.kind === "steer";
+}
+
+export function isMessageReceipt(receipt: RuntimeReceipt): boolean {
   /* #1560: an injection carries the operator's own words and can fail or end
      unverified, so its receipt belongs on the same surfaces a send's does —
      leaving it out would make the one operation whose outcome is least certain
@@ -49,7 +72,7 @@ export function messageReceiptForAssistantTurn(
   return [...receipts]
     .sort(newestFirst)
     .find((receipt) =>
-      isMessage(receipt)
+      isMessageReceipt(receipt)
       && (receipt.turnId === assistantTurnId || receipt.operationId === assistantTurnId)) ?? null;
 }
 
@@ -74,7 +97,7 @@ export function deliveryAttemptGroups(
   dismissed: ReadonlySet<string> = new Set(),
 ): DeliveryAttemptGroup[] {
   const messageReceipts = receipts
-    .filter((receipt) => isMessage(receipt) && Boolean(receipt.text))
+    .filter((receipt) => isMessageReceipt(receipt) && Boolean(receipt.text))
     .sort(newestFirst);
   const order: string[] = [];
   const byKey = new Map<string, RuntimeReceipt[]>();
@@ -111,7 +134,7 @@ export function visibleStandaloneReceipts(
   dismissed: ReadonlySet<string> = new Set(),
 ): RuntimeReceipt[] {
   return receipts.filter((receipt) =>
-    (!isMessage(receipt) || !receipt.text)
+    (!isMessageReceipt(receipt) || !receipt.text)
     && !deliveryResolved(receipt.status)
     && !(receiptIsTerminal(receipt.status) && dismissed.has(receipt.operationId)));
 }
@@ -160,7 +183,7 @@ export function deliveryEchoes(
   const seenKeys = new Set<string>();
   const currentReceipts: RuntimeReceipt[] = [];
   for (const receipt of receipts
-    .filter((receipt) => isMessage(receipt) && Boolean(receipt.text))
+    .filter((receipt) => isMessageReceipt(receipt) && Boolean(receipt.text))
     .sort(newestFirst)) {
     if (seenKeys.has(receipt.idempotencyKey)) continue;
     seenKeys.add(receipt.idempotencyKey);

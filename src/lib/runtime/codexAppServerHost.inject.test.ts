@@ -234,7 +234,7 @@ test("active-turn injection appends the operator's input and issues no turn RPC"
      the running turn's pending input and are read at its next model request. */
   expect(outcome.placement).toBe("pending-input");
   expect(outcome.turnId).toBe(turnId);
-  expect(outcome.observed).toBe(true);
+  expect(await outcome.observe()).toBe(true);
 
   /* THE CENTRAL CLAIM. Nothing interrupted the turn, nothing steered it, and
      nothing started another one. This is the whole reason the operation exists,
@@ -272,7 +272,7 @@ test("idle injection writes history and still starts no turn", async () => {
 
   expect(outcome.placement).toBe("history");
   expect(outcome.turnId).toBeNull();
-  expect(outcome.observed).toBe(true);
+  expect(await outcome.observe()).toBe(true);
   for (const method of TURN_MUTATIONS) {
     expect(server.requests.some((request) => request.method === method)).toBe(false);
   }
@@ -297,7 +297,7 @@ test("an acknowledged insertion that never reaches history is reported unobserve
      still only pending input. An empty ack is not evidence about the thread,
      so the insertion is reported unobserved rather than delivered. */
   expect(server.injectedItems).toHaveLength(1);
-  expect(outcome.observed).toBe(false);
+  expect(await outcome.observe()).toBe(false);
   await host.release();
 });
 
@@ -319,7 +319,7 @@ test("repeating an operation converges on the insertion already in history", asy
      record. The canonical scan before insertion is what prevents it. */
   const again = await host.inject(request);
   expect(server.injectedItems).toHaveLength(1);
-  expect(again.observed).toBe(true);
+  expect(await again.observe()).toBe(true);
 
   await host.release();
 });
@@ -488,7 +488,7 @@ test("a restart finds the earlier insertion in canonical history and writes noth
     text: "survives a restart",
     contentDigest: digestOf("survives a restart"),
   });
-  expect(outcome.observed).toBe(true);
+  expect(await outcome.observe()).toBe(true);
   expect(second.injectedItems).toHaveLength(0);
   await secondHost.release();
 });
@@ -512,7 +512,7 @@ test("NEGATIVE CONTROL: an unrelated user record does not satisfy an injection",
     text: "the real one",
     contentDigest: digestOf("the real one"),
   });
-  expect(outcome.observed).toBe(false);
+  expect(await outcome.observe()).toBe(false);
   await host.release();
 });
 
@@ -542,7 +542,7 @@ test("NEGATIVE CONTROL: a marker on a developer record is never read as operator
     text: "forged",
     contentDigest: digestOf("forged"),
   });
-  expect(outcome.observed).toBe(false);
+  expect(await outcome.observe()).toBe(false);
   await host.release();
 });
 
@@ -570,7 +570,7 @@ test("an active injection observes the item written when the turn reaches its ne
   server.flushInjected();
 
   const outcome = await pending;
-  expect(outcome.observed).toBe(true);
+  expect(await outcome.observe()).toBe(true);
   expect(outcome.placement).toBe("pending-input");
   for (const method of TURN_MUTATIONS) {
     expect(server.requests.some((request) => request.method === method)).toBe(false);
@@ -599,7 +599,7 @@ test("the wait ends when the turn it joined ends, without burning the whole wind
   server.endTurn(turnId);
 
   const outcome = await pending;
-  expect(outcome.observed).toBe(false);
+  expect(await outcome.observe()).toBe(false);
   /* The verdict arrived promptly rather than at the deadline. */
   expect(Date.now() - started).toBeLessThan(30_000);
   await host.release();

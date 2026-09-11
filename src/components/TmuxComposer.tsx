@@ -86,6 +86,8 @@ import {
   deliveryEchoes,
   deliveryProblem,
   dismissedReceiptsKey,
+  isMessageReceipt,
+  isRetryableReceipt,
   type DeliveryAttemptGroup,
   messageReceiptForAssistantTurn,
   readDismissedReceipts,
@@ -335,7 +337,9 @@ export function RuntimeComposerReceipts({
   const attemptGroups = [
     ...deliveryAttemptGroups(ordinaryReceipts, dismissed),
     ...unknownReceipts
-      .filter((receipt) => (receipt.kind === "send" || receipt.kind === "steer") && Boolean(receipt.text))
+      /* #1560: `uncertain` is the outcome injection was designed to report
+         honestly, so it is the last one that may be dropped here. */
+      .filter((receipt) => isMessageReceipt(receipt) && Boolean(receipt.text))
       .map((receipt) => ({ current: receipt, attempts: [receipt] })),
   ].sort((left, right) => Date.parse(right.current.at) - Date.parse(left.current.at));
   const visibleAttempts = attemptGroups.flatMap((group) => group.attempts);
@@ -354,8 +358,7 @@ export function RuntimeComposerReceipts({
     return () => clearInterval(timer);
   }, [pinnedNow, unsettled]);
   const now = nowMs ?? tick;
-  const isMessage = (receipt: RuntimeReceipt) => receipt.kind === "send" || receipt.kind === "steer" || receipt.kind === "inject";
-  const editable = (receipt: RuntimeReceipt) => isMessage(receipt)
+  const editable = (receipt: RuntimeReceipt) => isMessageReceipt(receipt)
     && (receipt.status === "failed" || receipt.status === "rejected")
     && !receiptHasUnknownFate(receipt)
     && typeof receipt.text === "string"
@@ -384,7 +387,13 @@ export function RuntimeComposerReceipts({
   const uncertainControls = (receipt: RuntimeReceipt) => (
     <span className="flex min-w-0 flex-wrap items-center justify-end gap-1.5" data-operation={receipt.operationId}>
       <span role="status" className="text-caption text-warning">{t("orchPanel.errorUnknownTitle")}</span>
-      {!receipt.operationId.startsWith(UNCONFIRMED_RECEIPT_PREFIX) ? <>
+      {/* #1560: an injection gets the verdict and NO controls. Both of these
+          re-arm or end the original operation, and the journal refuses either
+          for this kind — the engine does not deduplicate a second insertion,
+          and discarding would claim the operator ended something that may be
+          sitting in the thread. The reason line beside this says what is
+          actually known, which is the whole truth available. */}
+      {!receipt.operationId.startsWith(UNCONFIRMED_RECEIPT_PREFIX) && isRetryableReceipt(receipt) ? <>
         <button type="button" data-receipt-uncertain-retry disabled={actionsDisabled} className="min-h-11 rounded-full border border-border px-3" onClick={() => onRetry(receipt, "uncertain")}>{t("runtime.receipt.retry")}</button>
         {onDiscard ? <button type="button" data-receipt-discard disabled={actionsDisabled} className="min-h-11 rounded-full border border-border px-3" onClick={() => onDiscard(receipt)}>{t("runtime.receipt.discard")}</button> : null}
       </> : null}
@@ -408,7 +417,7 @@ export function RuntimeComposerReceipts({
      history under it now; only still-moving and non-message operations keep a
      standalone chip. Textless failures with one cause share one history row. */
   const textlessProblems = standaloneReceipts
-    .filter((receipt) => isMessage(receipt) && (deliveryProblem(receipt.status) || receiptHasUnknownFate(receipt)))
+    .filter((receipt) => isMessageReceipt(receipt) && (deliveryProblem(receipt.status) || receiptHasUnknownFate(receipt)))
     .sort((left, right) => Date.parse(right.at) - Date.parse(left.at));
   const standaloneChips = standaloneReceipts.filter((receipt) => !textlessProblems.includes(receipt));
   const textlessRows = textlessProblems.reduce<RuntimeReceipt[][]>((rows, receipt) => {
@@ -440,7 +449,7 @@ export function RuntimeComposerReceipts({
      message, never for a rejection (Edit mints the new key there) or a discard. */
   const noticeRetryable = Boolean(notice
     && notice.current.status === "failed"
-    && isMessage(notice.current)
+    && isRetryableReceipt(notice.current)
     && notice.current.reason !== "delivery-discarded");
   /* Collapsed is the default state, and it is what the operator photographed:
      a warning badge counting an attempt that was never coming. A row that went
@@ -679,11 +688,13 @@ export function RuntimeComposerReceipts({
                         receipt={receipt}
                         wait={wait}
                         actionsDisabled={actionsDisabled}
-                        onRetry={failed
-                          ? () => retryFailed(receipt)
-                          : exitable
-                            ? () => onRetry(receipt, "uncertain")
-                            : undefined}
+                        onRetry={!isRetryableReceipt(receipt)
+                          ? undefined
+                          : failed
+                            ? () => retryFailed(receipt)
+                            : exitable
+                              ? () => onRetry(receipt, "uncertain")
+                              : undefined}
                         onEdit={editable(receipt) ? () => onEdit(receipt) : undefined}
                         onDiscard={discardable && onDiscard ? () => onDiscard(receipt) : undefined}
                       />}
@@ -771,7 +782,7 @@ export function RuntimeComposerReceipts({
                     {receiptHasUnknownFate(receipt) ? uncertainControls(receipt) : <ReceiptChip
                       receipt={receipt}
                       actionsDisabled={actionsDisabled}
-                      onRetry={receipt.status === "failed" ? () => retryFailed(receipt) : undefined}
+                      onRetry={isRetryableReceipt(receipt) && receipt.status === "failed" ? () => retryFailed(receipt) : undefined}
                     />}
                     {receiptHasUnknownFate(receipt) && receipt.reason ? (
                       <span className="w-full break-words text-right text-caption text-muted" data-receipt-uncertain-why>{receipt.reason}</span>
@@ -828,7 +839,7 @@ export function RuntimeComposerReceipts({
             <ReceiptChip
               receipt={receipt}
               actionsDisabled={actionsDisabled}
-              onRetry={isMessage(receipt) && failed ? () => retryFailed(receipt) : undefined}
+              onRetry={isRetryableReceipt(receipt) && failed ? () => retryFailed(receipt) : undefined}
               onEdit={editable(receipt) ? () => onEdit(receipt) : undefined}
             />
             {onDismiss && !receiptHasUnknownFate(receipt) && deliveryProblem(receipt.status) ? (
@@ -2634,7 +2645,7 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
         if (json.structured && json.receipt) {
           /* Keep the payload readable in the compact receipt for retry and
              audit even when the server's echo omits it. */
-          const receipt: RuntimeReceipt = (json.receipt.kind === "send" || json.receipt.kind === "steer")
+          const receipt: RuntimeReceipt = isMessageReceipt(json.receipt)
             && !json.receipt.text && payloadText.trim()
             ? { ...json.receipt, text: payloadText.trim() }
             : json.receipt;
@@ -2747,7 +2758,7 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
             if (receipt && (receipt.conversationId !== cardId || receipt.idempotencyKey !== clientMessageId
               || (result.operationId && result.operationId !== receipt.operationId))) return null;
             if (receipt && (receiptIsAdmitted(receipt.status) || receiptIsTerminal(receipt.status))) {
-              return (receipt.kind === "send" || receipt.kind === "steer")
+              return isMessageReceipt(receipt)
                 && !receipt.text && payloadText.trim()
                 ? { ...receipt, text: payloadText.trim() }
                 : receipt;
