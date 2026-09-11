@@ -1,5 +1,5 @@
 import { NativeQueueJournal } from "./nativeQueueJournal";
-import type { NativeQueueCommand, NativeQueueRecord, NativeQueueTransition } from "@/lib/runtime/nativeQueueContracts";
+import type { NativeQueueCommand, NativeQueueCompactedProof, NativeQueueCompactedSettlement, NativeQueueRecord, NativeQueueTransition } from "@/lib/runtime/nativeQueueContracts";
 import { parseRuntimeCommand } from "@/lib/runtime/commands";
 import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from "node:crypto";
 import fs from "node:fs";
@@ -438,6 +438,13 @@ export class RuntimeJournal {
       }
       const operationOwner = this.db.query<{ idempotency_key: string }, [string]>("SELECT idempotency_key FROM operations WHERE operation_id = ?").get(operationId);
       if (operationOwner) throw new RuntimeIdempotencyConflictError("operationId already belongs to another request");
+      /* #1664: a native entry outlives its add operation once that operation is
+         settled and compacted. The entry still owns the id, so a late replay of
+         the original request must not admit it again: that would reset the
+         entry and hand the executor a second native write of the same input. */
+      if (this.nativeQueue.retains(operationId)) {
+        throw new RuntimeIdempotencyConflictError("operationId belongs to a retained native queue entry whose operation was compacted");
+      }
       beforeAdmission?.();
       const retryParent = retryOfOperationId
         ? this.db.query<{ receipt_json: string }, [string]>(
@@ -518,6 +525,39 @@ export class RuntimeJournal {
       transition.phase === "removed" ? { reason: RUNTIME_DELIVERY_DISCARDED_REASON }
         : "reason" in transition ? { reason: transition.reason } : {},
       transition.phase === "prepared" ? { fromStatuses: ["pending", "queued"] } : {}, transition);
+  }
+
+  /** Evidence-only settlement of an entry whose add operation compaction
+      already removed (#1664). It writes the entry and one native-queue-changed
+      event, and never an operation, receipt, effect or delivery action. An
+      entry whose operation still exists is refused here: that operation's
+      transition is the path that keeps its receipt truthful. */
+  nativeQueueSettleCompacted(request: NativeQueueCompactedProof): NativeQueueCompactedSettlement {
+    this.assertHealthy();
+    if (!this.structuredHosts) throw new Error("structured hosts are disabled");
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const operation = this.db.query<{ one: number }, [string]>("SELECT 1 AS one FROM operations WHERE operation_id = ?").get(request.entryId);
+      if (operation) throw new Error("native queue operation is retained; settle it through its operation");
+      const { entry, replayed } = this.nativeQueue.proveCompacted(request);
+      if (!replayed) {
+        this.appendInTransaction(normalizeRuntimeEventInput({
+          scope: { type: "session", id: entry.conversationId },
+          kind: "native-queue-changed",
+          producer: { kind: "runtime-effect", eventKey: `native-queue:${entry.entryId}:compacted-proof`, hostEpoch: Number(this.meta("host_epoch")) },
+          payload: { conversationId: entry.conversationId, threadId: entry.binding.threadId, entryId: entry.entryId, settledBy: "canonical-proof" },
+        }));
+      }
+      this.db.exec("COMMIT");
+      if (!replayed) {
+        this.compactIfNeeded();
+        this.notifyWaiters();
+      }
+      return { operation: "compacted", entry, replayed };
+    } catch (error) {
+      try { this.db.exec("ROLLBACK"); } catch { /* transaction already closed */ }
+      throw error;
+    }
   }
 
   operationResult(operationId: string): RuntimeOperationResult | null {
@@ -1436,7 +1476,13 @@ export class RuntimeJournal {
       this.db.query("DELETE FROM events WHERE seq <= ?").run(anchor.seq);
       this.db.exec("DELETE FROM consumer_checkpoints WHERE NOT EXISTS (SELECT 1 FROM events WHERE events.event_id = consumer_checkpoints.event_id)");
       this.db.query("DELETE FROM outbox WHERE state = 'completed' AND event_seq <= ?").run(anchor.seq);
-      this.db.query("DELETE FROM operations WHERE event_seq <= ? AND operation_id NOT IN (SELECT substr(id, 8) FROM outbox WHERE state = 'pending' AND id LIKE 'effect:%')").run(anchor.seq);
+      /* A native entry that is not yet settled is still answered through its
+         add (and any unresolved mutation) operation after that effect stops
+         being pending, so those ids are held for as long as the entry needs
+         them (#1664). */
+      this.db.query(`DELETE FROM operations WHERE event_seq <= ?
+        AND operation_id NOT IN (SELECT substr(id, 8) FROM outbox WHERE state = 'pending' AND id LIKE 'effect:%')
+        AND operation_id NOT IN (SELECT operation_id FROM native_queue_operation_holds)`).run(anchor.seq);
       this.db.exec("DELETE FROM delivery_operation_actions WHERE operation_id NOT IN (SELECT operation_id FROM operations)");
       this.db.query("DELETE FROM entities WHERE kind = 'operation' AND checkpoint_seq <= ?").run(anchor.seq);
       this.metaSet("anchor_seq", String(anchor.seq));
@@ -2433,7 +2479,7 @@ export class RuntimeJournal {
 
   private verify(): void {
     try {
-      for (const table of ["journal_meta", "events", "scope_revisions", "projections", "entities", "outbox", "operations", "delivery_operation_actions", "native_queue_entries", "consumer_checkpoints", "viewer_deployments"]) {
+      for (const table of ["journal_meta", "events", "scope_revisions", "projections", "entities", "outbox", "operations", "delivery_operation_actions", "native_queue_entries", "native_queue_operation_holds", "consumer_checkpoints", "viewer_deployments"]) {
         const check = this.db.query<{ quick_check: string }, []>(`PRAGMA quick_check(${table})`).get();
         if (check?.quick_check !== "ok") throw new RuntimeJournalFault(`runtime journal SQLite check failed: ${table}`);
       }

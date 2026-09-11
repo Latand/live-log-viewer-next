@@ -760,7 +760,7 @@ export interface RuntimeReplay {
 
 export interface RuntimeSocketRequest {
   id: string;
-  method: "runtime-host-health" | "snapshot" | "events" | "wait" | "append" | "operation" | "command" | "operation-status" | "operation-delivery-action" | "operation-retry" | "effect-batch" | "operation-transition" | "producer-cursor" | "viewer-deployment-request" | "viewer-deployment-read" | "viewer-deployment-cancel" | "mcp-health-probe-admission" | "native-queue-read" | "native-queue-transition";
+  method: "runtime-host-health" | "snapshot" | "events" | "wait" | "append" | "operation" | "command" | "operation-status" | "operation-delivery-action" | "operation-retry" | "effect-batch" | "operation-transition" | "producer-cursor" | "viewer-deployment-request" | "viewer-deployment-read" | "viewer-deployment-cancel" | "mcp-health-probe-admission" | "native-queue-read" | "native-queue-transition" | "native-queue-settle-compacted";
   params?: Record<string, unknown>;
 }
 

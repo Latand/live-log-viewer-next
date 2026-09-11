@@ -80,6 +80,28 @@ export type NativeQueueTransition =
   | { phase: "uncertain"; reason: string }
   | { phase: "proven"; proof: NativeQueueProof };
 
+/**
+ * Canonical proof for an entry whose add operation journal compaction already
+ * removed (#1664). The binding is the one the prover read the thread under.
+ */
+export interface NativeQueueCompactedProof {
+  conversationId: string;
+  entryId: string;
+  binding: NativeQueueBinding;
+  proof: NativeQueueProof;
+}
+/**
+ * What settling such an entry answers. It is NOT an operation receipt: the
+ * operation is gone, so the settled entry is the only record of the delivery,
+ * and nothing was admitted, queued or retried to produce it.
+ */
+export interface NativeQueueCompactedSettlement {
+  operation: "compacted";
+  entry: NativeQueueRecord;
+  /** True when this exact proof had already settled the entry. */
+  replayed: boolean;
+}
+
 export function sameNativeQueueBinding(a: NativeQueueBinding, b: NativeQueueBinding): boolean {
   return a.threadId === b.threadId && a.accountId === b.accountId;
 }

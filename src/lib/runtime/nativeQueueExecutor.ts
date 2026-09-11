@@ -148,7 +148,10 @@ export class NativeQueueExecutor {
     for (const entry of records) {
       if (entry.state === "removed") {
         const operation = await client.operationStatus(entry.entryId);
-        if (operation?.receipt.status !== "failed") await client.nativeQueueTransition(entry.entryId, { phase: "removed" });
+        /* A compacted add has no receipt left to fail. The removed entry is the
+           discard record, and asking for the transition anyway threw on every
+           pass, so no later entry of this conversation could ever converge. */
+        if (operation && operation.receipt.status !== "failed") await client.nativeQueueTransition(entry.entryId, { phase: "removed" });
         await this.port.settled?.(entry);
       }
     }
@@ -165,7 +168,22 @@ export class NativeQueueExecutor {
       if (!proof || this.port.resolveHost(conversationId) !== host) continue;
       const current = this.port.binding(conversationId);
       if (!current || !sameNativeQueueBinding(current, binding)) continue;
-      await client.nativeQueueTransition(entry.entryId, { phase: "proven", proof });
+      try {
+        if (await client.operationStatus(entry.entryId)) {
+          await client.nativeQueueTransition(entry.entryId, { phase: "proven", proof });
+        } else {
+          /* #1664: compaction removed the add before this proof could land. The
+             proof alone settles the entry: nothing is re-admitted and no engine
+             write follows, and only the reader bound to the entry's thread may
+             supply it. */
+          if (!client.nativeQueueSettleCompacted || host.nativeQueue.queue.threadId !== entry.binding.threadId) { pending = true; continue; }
+          await client.nativeQueueSettleCompacted({ conversationId, entryId: entry.entryId, binding: current, proof });
+        }
+      } catch {
+        // One entry the journal refuses leaves it unchanged and cannot hold up the rest.
+        pending = true;
+        continue;
+      }
       await this.port.settled?.({ ...entry, proof, state: "delivered" });
     }
     return pending;
