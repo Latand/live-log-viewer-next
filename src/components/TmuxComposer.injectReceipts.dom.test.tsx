@@ -366,3 +366,28 @@ test.each([["failed", "stale-turn"], ["uncertain", "acknowledged and not observe
   expect(host.textContent ?? "").toContain("context the operator added");
   root.unmount();
 });
+
+test("an injection parked past the uncertain wait offers no Discard either", async () => {
+  /* The reachable path: admitted while the host was dead, so the row parks at
+     `queued` with no unknown fate. Past the uncertain wait threshold the chip
+     treats it as exitable — and Discard ends the ORIGINAL operation, which the
+     route refuses for this kind exactly as it refuses Retry. */
+  const longAgo = new Date(Date.now() - 60 * 60_000).toISOString();
+  durableReceipts = [{
+    ...injectReceipt("queued", "dead-host"),
+    status: "queued",
+    reason: "dead-host",
+    at: longAgo,
+    admittedAt: longAgo,
+  }];
+  const { host, root } = await mount();
+
+  const labels: string[] = [];
+  const buttons = host.querySelectorAll("button");
+  for (let index = 0; index < buttons.length; index += 1) labels.push(buttons[index]?.textContent ?? "");
+  expect(labels.filter((label) => /discard/i.test(label))).toEqual([]);
+  expect(labels.filter((label) => /retry/i.test(label))).toEqual([]);
+  /* The row IS rendered — otherwise this passes by showing nothing. */
+  expect(host.textContent ?? "").toContain("context the operator added");
+  root.unmount();
+});

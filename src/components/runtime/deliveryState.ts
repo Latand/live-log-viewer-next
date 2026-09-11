@@ -29,14 +29,6 @@ export function deliveryResolved(status: ReceiptStatus): boolean {
 }
 
 /**
- * Whether a receipt carries the operator's own words, and therefore belongs on
- * every surface that shows what became of them.
- *
- * Exported so the composer shares this ONE definition. It previously kept a
- * second copy, and when `inject` was added to one and not the other the result
- * was an operation whose failed and unverified outcomes rendered nowhere.
- */
-/**
  * Whether a same-key retry exists for this receipt at all (#1560).
  *
  * Retry re-arms the ORIGINAL operation, and the journal refuses that for an
@@ -51,11 +43,16 @@ export function isRetryableReceipt(receipt: RuntimeReceipt): boolean {
   return receipt.kind === "send" || receipt.kind === "steer";
 }
 
+/**
+ * Whether a receipt carries the operator's own words, and therefore belongs on
+ * every surface that shows what became of them.
+ *
+ * Exported so the composer shares this ONE definition. It previously kept a
+ * second copy, and when `inject` was added to one and not the other the result
+ * was an operation whose failed and unverified outcomes rendered nowhere —
+ * which is the outcome an injection is least able to afford hiding.
+ */
 export function isMessageReceipt(receipt: RuntimeReceipt): boolean {
-  /* #1560: an injection carries the operator's own words and can fail or end
-     unverified, so its receipt belongs on the same surfaces a send's does —
-     leaving it out would make the one operation whose outcome is least certain
-     also the one the operator can see least about. */
   return receipt.kind === "send" || receipt.kind === "steer" || receipt.kind === "inject";
 }
 

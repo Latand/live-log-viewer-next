@@ -650,7 +650,13 @@ export function RuntimeComposerReceipts({
                 const uncertain = unknownFate || wait?.phase === "uncertain";
                 const serverBacked = !receipt.operationId.startsWith(UNCONFIRMED_RECEIPT_PREFIX);
                 const exitable = uncertain && serverBacked;
+                /* #1560: Discard ends the ORIGINAL operation, and the route
+                   refuses that for an injection exactly as it refuses Retry —
+                   so the control is gated on the same question. Without this an
+                   injection parked `queued` behind a dead host crosses the
+                   uncertain wait threshold, renders Discard, and answers 409. */
                 const discardable = serverBacked
+                  && isRetryableReceipt(receipt)
                   && receipt.reason !== "delivery-discarded"
                   && (exitable || (failed && receipt.resend === "verify-first"));
                 const retryingBusy = pending

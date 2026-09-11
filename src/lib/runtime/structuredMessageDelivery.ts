@@ -284,6 +284,28 @@ function holdDuringRuntimeSynchronization(
   if (rejectedHold) return rejectedHold;
   if (owner?.kind === "legacy") return requiresStructuredCommand(request) ? legacyCommandUnavailable() : null;
   let conversation = persistedConversation;
+  /**
+   * #1560: the last way an injection could become a held reservation.
+   *
+   * Everything this function admits is drained by the migration coordinator
+   * alone, which replays it against the SUCCESSOR generation — a different
+   * thread. That is right for a message and wrong for an injection, whose whole
+   * meaning is "put this into the history of the thread I am looking at". The
+   * refusal further down covers a switch that is already pending; this covers
+   * the other way in, where the runtime-host socket is unavailable at admission
+   * and a switch commits before the drain. Refused before any reservation
+   * exists, so nothing is written and the operator can inject again once the
+   * runtime is reachable.
+   */
+  if (request.kind === "inject") {
+    return {
+      ok: false,
+      structured: true,
+      outcome: "failed",
+      error: "structured delivery ownership is unavailable; injected context cannot be held for a later generation",
+      status: 503,
+    };
+  }
   if (request.hasImages || request.images?.length) {
     return { ok: false, structured: true, outcome: "failed", error: "structured host image delivery is unavailable", status: 409 };
   }

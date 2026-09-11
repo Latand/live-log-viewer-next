@@ -655,3 +655,56 @@ test("the default observation window is the send confirmation window, not a shor
   expect(DEFAULT_INJECT_OBSERVATION_TIMEOUT_MS).toBe(CODEX_DELIVERY_CONFIRMATION_TIMEOUT_MS);
   expect(DEFAULT_INJECT_OBSERVATION_TIMEOUT_MS).toBeGreaterThanOrEqual(5 * 60_000);
 });
+
+test("an unreadable transcript refuses before the request, and says so", async () => {
+  const server = new InjectAppServer(scratchRoot());
+  const host = await startHost(server);
+  await Bun.sleep(10);
+
+  /* The dedup scan runs BEFORE the RPC and reads the rollout. A tail line that
+     carries the structured-user marker but is not yet valid JSON — a partially
+     written record — makes that read throw. */
+  appendFileSync(server.rolloutPath, '{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<!-- llv:structured-user dedup=');
+
+  const failure = await host.inject({
+    operationId: "op-unreadable",
+    threadId: server.threadId,
+    text: "never issued",
+    contentDigest: digestOf("never issued"),
+  }).catch((error: unknown) => error);
+
+  expect(failure).toBeInstanceOf(StructuredInjectError);
+  /* REFUSED, not unverified: the request was never sent, so telling the
+     operator it "was issued" would be false — and `uncertain` is absorbing,
+     with no retry for this kind and no Edit, so it would strand. */
+  expect((failure as StructuredInjectError).phase).toBe("refused");
+  expect(server.requests.some((request) => request.method === "thread/inject_items")).toBe(false);
+  await host.release();
+});
+
+test("a payload mismatch under the same key refuses before the request", async () => {
+  const server = new InjectAppServer(scratchRoot());
+  const host = await startHost(server);
+  await Bun.sleep(10);
+
+  await host.inject({
+    operationId: "op-mismatch",
+    threadId: server.threadId,
+    text: "the original",
+    contentDigest: digestOf("the original"),
+  });
+  const issued = server.requests.filter((request) => request.method === "thread/inject_items").length;
+
+  const failure = await host.inject({
+    operationId: "op-mismatch",
+    threadId: server.threadId,
+    text: "something else",
+    contentDigest: digestOf("something else"),
+  }).catch((error: unknown) => error);
+
+  expect(failure).toBeInstanceOf(StructuredInjectError);
+  expect((failure as StructuredInjectError).phase).toBe("refused");
+  /* And nothing further went to the engine. */
+  expect(server.requests.filter((request) => request.method === "thread/inject_items")).toHaveLength(issued);
+  await host.release();
+});

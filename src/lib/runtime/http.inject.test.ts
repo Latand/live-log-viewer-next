@@ -6,6 +6,7 @@ import { afterEach, expect, test } from "bun:test";
 
 import { NextRequest } from "next/server";
 
+import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { AgentRegistry } from "@/lib/agent/registry";
 import { RuntimeJournal } from "@/runtime-host/journal";
 
@@ -49,6 +50,7 @@ function request(body: Record<string, unknown>): NextRequest {
 
 interface Chain {
   dependencies: RuntimeHttpDependencies;
+  registry: AgentRegistry;
   ledger: FakeDeliveryLedger;
   journal: RuntimeJournal;
   conversationId: string;
@@ -106,6 +108,7 @@ function chain(name: string, options: { activeTurnRef?: string | null; inject?: 
   return {
     ledger,
     journal,
+    registry,
     conversationId: conversation.id,
     drain: () => queue.drain().then(() => {}),
     dependencies: {
@@ -238,5 +241,129 @@ test("replaying the same key returns the first operation and injects once", asyn
 
   await link.drain();
   expect(link.ledger.injections).toHaveLength(1);
+  link.journal.close();
+});
+
+/**
+ * A conversation with a PERSISTED structured owner but no live runtime client.
+ *
+ * That combination is what reaches `holdDuringRuntimeSynchronization`'s
+ * reservation-creating path — the one whose reservations only the migration
+ * coordinator drains, against a successor generation.
+ */
+function ownedButUnreachable(name: string) {
+  const directory = scratch(name);
+  const sessionId = "dddddddd-dddd-0ddd-0ddd-dddddddddddd";
+  const artifactPath = path.join(directory, `${sessionId}.jsonl`);
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const launchProfile = emptyLaunchProfile({ cwd: directory });
+  registry.reconcileConversations([{
+    engine: "codex",
+    path: artifactPath,
+    accountId: "account-one",
+    launchProfile,
+    turn: { state: "idle", source: "empty", terminalAt: null },
+    observedAt: "2026-09-11T12:00:00.000Z",
+  }]);
+  const conversation = registry.conversationForPath(artifactPath)!;
+  registry.upsert({
+    key: { engine: "codex", sessionId },
+    artifactPath,
+    cwd: directory,
+    accountId: "account-one",
+    launchProfile,
+    status: "idle",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "fake:inject-unreachable",
+      process: null,
+      eventCursor: 0,
+      protocolVersion: "0.154.0",
+      writerClaimEpoch: 0,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  return {
+    registry,
+    conversationId: conversation.id,
+    dependencies: {
+      enabled: () => true,
+      /* THE CONDITION: the runtime host socket is unavailable at admission. */
+      client: () => null,
+      structuredEnabled: () => true,
+      registry: () => registry,
+      enqueue: enqueueStructuredMessage,
+      kick: () => {},
+    } as RuntimeHttpDependencies,
+  };
+}
+
+test("an ordinary send IS held when the runtime host is unreachable", async () => {
+  /* The control for the test below: this fixture really does reach the hold,
+     so the injection's refusal there is a refusal and not a fixture that never
+     got that far. */
+  const link = ownedButUnreachable("held-send");
+  const response = await handleRuntimeCommand(request({
+    conversationId: link.conversationId,
+    text: "a message that may wait for the successor",
+    idempotencyKey: "send-unreachable",
+  }), "send", link.dependencies);
+
+  expect(response.status).toBe(202);
+  expect(await response.json()).toMatchObject({ held: true });
+  const held = Object.values(link.registry.readOnlySnapshot().heldDeliveries);
+  expect(held.map((delivery) => delivery.command?.kind)).toEqual(["send"]);
+});
+
+test("an injection is REFUSED where a send is held, so nothing can replay it into a successor", async () => {
+  /* Held reservations are drained only by the migration coordinator, against
+     the SUCCESSOR generation — a different thread. A message belongs there; an
+     injection's whole meaning is the thread it was aimed at, so it is refused
+     before any reservation exists rather than replayed elsewhere or dropped. */
+  const link = ownedButUnreachable("refused-inject");
+  const response = await handleRuntimeCommand(request({
+    conversationId: link.conversationId,
+    text: "context for this thread only",
+    idempotencyKey: "inject-unreachable",
+  }), "inject", link.dependencies);
+
+  expect(response.status).toBeGreaterThanOrEqual(400);
+  expect(await response.json()).toMatchObject({
+    error: expect.stringContaining("cannot be held"),
+  });
+  expect(Object.values(link.registry.readOnlySnapshot().heldDeliveries)).toEqual([]);
+});
+
+test("an injection is refused rather than held when the runtime host is unreachable", async () => {
+  /* The other way into a held reservation (#1560). With no runtime client the
+     admission falls to the synchronization hold, whose reservations are drained
+     only by the migration coordinator — against the SUCCESSOR generation, which
+     is a different thread. An injection replayed there would write the
+     operator's context into a thread they never aimed at, so it is refused
+     before any reservation exists. A SEND takes the hold as it always has. */
+  const link = chain("unreachable");
+  const withoutClient = { ...link.dependencies, client: () => null } as RuntimeHttpDependencies;
+
+  const response = await handleRuntimeCommand(request({
+    conversationId: link.conversationId,
+    text: "context for this thread only",
+    idempotencyKey: "inject-e2e-unreachable",
+  }), "inject", withoutClient);
+
+  expect(response.status).toBeGreaterThanOrEqual(400);
+  /* THE INVARIANT, whichever refusal fires first: no reservation carrying
+     `kind: "inject"` exists, so the migration coordinator has nothing to replay
+     into a successor thread. */
+  const held = Object.values(link.registry.readOnlySnapshot().heldDeliveries);
+  expect(held.filter((delivery) => delivery.command?.kind === "inject")).toEqual([]);
+  await link.drain();
+  expect(link.ledger.injections).toEqual([]);
+  expect(link.ledger.writes).toEqual([]);
   link.journal.close();
 });

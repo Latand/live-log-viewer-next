@@ -1917,8 +1917,23 @@ export class CodexAppServerHost implements EngineHost {
     const entry: QueueEntry = { id: request.operationId, text: request.text, contentDigest: request.contentDigest };
     /* Canonical lookup precedes insertion. A payload mismatch under the same
        operation id throws out of here, which is what keeps one durable key
-       bound to one payload for ever. */
-    const already = await rolloutConfirmedDelivery(this.identity.path, entry);
+       bound to one payload for ever.
+
+       Classified as REFUSED, and the wrapper is the whole point: this runs
+       BEFORE the request, so whatever it throws — an unreadable transcript, a
+       payload that does not match the one this key already carries — is a
+       failure in which `thread/inject_items` provably was never called. Left
+       unwrapped it reached the caller as a plain error and was reported
+       "issued, outcome unverified", which is untrue, and `uncertain` is
+       absorbing: retry is refused for this kind and the row is not editable, so
+       the operation stranded with nothing the operator could do. On the
+       `failed` path the wording is true and Edit comes back. */
+    let already;
+    try {
+      already = await rolloutConfirmedDelivery(this.identity.path, entry);
+    } catch (error) {
+      throw new StructuredInjectError(safeError(error), "refused");
+    }
     if (already) {
       /* Already in the transcript, so the evidence phase has nothing left to
          wait for and answers immediately. */
