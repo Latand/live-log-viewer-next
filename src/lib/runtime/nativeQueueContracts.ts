@@ -102,6 +102,24 @@ export interface NativeQueueCompactedSettlement {
   replayed: boolean;
 }
 
+/**
+ * The proof with exactly the fields the history reader builds, or null when any
+ * of them is missing or of the wrong type. Every settlement stores what this
+ * returns, so a malformed identity is refused before anything is written and
+ * nothing a caller adds beyond these fields is persisted.
+ */
+export function canonicalNativeQueueProof(value: unknown): NativeQueueProof | null {
+  if (!value || typeof value !== "object") return null;
+  const proof = value as Record<string, unknown>;
+  const identity = (field: unknown): field is string => typeof field === "string" && field.length > 0;
+  if (!identity(proof.threadId) || !identity(proof.clientUserMessageId) || !identity(proof.turnId) || !identity(proof.itemId)) return null;
+  if (typeof proof.revision !== "number" || !Number.isSafeInteger(proof.revision) || proof.revision < 1) return null;
+  if (!Array.isArray(proof.input) || proof.input.length === 0
+    || !proof.input.every(item => item !== null && typeof item === "object" && !Array.isArray(item))) return null;
+  return { threadId: proof.threadId, clientUserMessageId: proof.clientUserMessageId, revision: proof.revision,
+    turnId: proof.turnId, itemId: proof.itemId, input: proof.input as NativeQueueInput[] };
+}
+
 export function sameNativeQueueBinding(a: NativeQueueBinding, b: NativeQueueBinding): boolean {
   return a.threadId === b.threadId && a.accountId === b.accountId;
 }

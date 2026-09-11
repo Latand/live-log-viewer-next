@@ -2,7 +2,7 @@ import { nativeQueueInputMatches } from "@/lib/runtime/nativeQueueContent";
 import type { RuntimeOperationCommand } from "@/lib/runtime/contracts";
 import type { Database } from "bun:sqlite";
 import type { NativeQueueCommand, NativeQueueCompactedProof, NativeQueueProof, NativeQueueRecord, NativeQueueTransition, NativeQueueVersion } from "@/lib/runtime/nativeQueueContracts";
-import { sameNativeQueueBinding } from "@/lib/runtime/nativeQueueContracts";
+import { canonicalNativeQueueProof, sameNativeQueueBinding } from "@/lib/runtime/nativeQueueContracts";
 
 const SETTLED_STATES = ["delivered", "removed", "refused"] as const;
 
@@ -15,13 +15,15 @@ const SETTLED_STATES = ["delivered", "removed", "refused"] as const;
  * operation rows once their effect stops being `pending`, which native
  * admission reaches long before canonical delivery is seen, so these ids are
  * held explicitly.
- * A settled entry holds nothing: its answer is already recorded on the entry.
+ * A settled entry's add holds nothing, since its answer is recorded on the
+ * entry. Its unresolved mutation still does: canonical proof of an earlier
+ * version settles the entry while an edit that raced it stays uncertain, and
+ * that edit's original key must keep replaying its own receipt.
  */
 function heldOperationIds(entry: NativeQueueRecord): string[] {
-  if ((SETTLED_STATES as readonly string[]).includes(entry.state)) return [];
-  return entry.mutationOperationId && entry.mutationOperationId !== entry.entryId
-    ? [entry.entryId, entry.mutationOperationId]
-    : [entry.entryId];
+  const held = (SETTLED_STATES as readonly string[]).includes(entry.state) ? [] : [entry.entryId];
+  if (entry.mutationOperationId && entry.mutationOperationId !== entry.entryId) held.push(entry.mutationOperationId);
+  return held;
 }
 
 /**
@@ -47,15 +49,16 @@ export class NativeQueueJournal {
     CREATE TABLE IF NOT EXISTS native_queue_operation_holds (operation_id TEXT PRIMARY KEY, entry_id TEXT NOT NULL);
     CREATE INDEX IF NOT EXISTS native_queue_operation_holds_entry ON native_queue_operation_holds(entry_id);`);
     /* Rebuilt from the entries on every open, so a journal written before the
-       holds existed gains them before its first compaction. Bounded like the
-       entries it mirrors: at most two ids per unsettled entry, and admission
-       refuses a conversation's 2001st unsettled entry. */
+       holds existed gains them before its first compaction. Bounded by the
+       entries they mirror, which are never deleted: at most two ids per
+       unsettled entry (admission refuses a conversation's 2001st), and at most
+       one, its unresolved mutation, per settled entry. */
     db.exec(`BEGIN IMMEDIATE; DELETE FROM native_queue_operation_holds;
       INSERT OR IGNORE INTO native_queue_operation_holds(operation_id, entry_id)
         SELECT entry_id, entry_id FROM native_queue_entries WHERE json_extract(state_json, '$.state') NOT IN ('delivered', 'removed', 'refused');
       INSERT OR IGNORE INTO native_queue_operation_holds(operation_id, entry_id)
         SELECT json_extract(state_json, '$.mutationOperationId'), entry_id FROM native_queue_entries
-        WHERE json_extract(state_json, '$.state') NOT IN ('delivered', 'removed', 'refused') AND json_extract(state_json, '$.mutationOperationId') IS NOT NULL;
+        WHERE json_extract(state_json, '$.mutationOperationId') IS NOT NULL AND json_extract(state_json, '$.mutationOperationId') <> entry_id;
       COMMIT;`);
   }
 
@@ -100,7 +103,9 @@ export class NativeQueueJournal {
   }
 
   /** Canonical proof of one retained version; the same rule for every caller. */
-  private prove(entry: NativeQueueRecord, proof: NativeQueueProof): void {
+  private prove(entry: NativeQueueRecord, candidate: NativeQueueProof): void {
+    const proof = canonicalNativeQueueProof(candidate);
+    if (!proof) throw new Error("native queue canonical proof is malformed");
     const version = entry.versions.find(v => v.revision === proof.revision);
     if ((entry.dispatchedTurnId && proof.turnId !== entry.dispatchedTurnId) || !version?.input || proof.threadId !== entry.binding.threadId || proof.clientUserMessageId !== entry.clientUserMessageId
       || !proof.turnId || !proof.itemId || JSON.stringify(version.input) !== JSON.stringify(proof.input)) throw new Error("native queue canonical proof mismatch");
@@ -130,16 +135,18 @@ export class NativeQueueJournal {
     const entry = this.get(request.entryId);
     if (entry.entryId !== request.entryId || entry.clientUserMessageId !== entry.entryId) throw new Error("native queue entry is not an original add identity");
     if (entry.conversationId !== request.conversationId || !sameNativeQueueBinding(entry.binding, request.binding)) throw new Error("native queue entry ownership changed");
+    const proof = canonicalNativeQueueProof(request.proof);
+    if (!proof) throw new Error("native queue canonical proof is malformed");
     if (entry.proof) {
-      if (JSON.stringify(entry.proof) !== JSON.stringify(request.proof)) throw new Error("native queue canonical proof conflict");
+      if (JSON.stringify(entry.proof) !== JSON.stringify(proof)) throw new Error("native queue canonical proof conflict");
       return { entry, replayed: true };
     }
     if (entry.state !== "admitted" && entry.state !== "queued" && entry.state !== "dispatching" && entry.state !== "uncertain") {
       throw new Error("native queue entry is not awaiting canonical proof");
     }
     if (entry.mutationOperationId && entry.mutationOperationId !== entry.entryId) throw new Error("native queue entry has an unresolved mutation");
-    if (request.proof.revision !== (entry.dispatchedRevision ?? entry.revision)) throw new Error("native queue canonical proof names another version");
-    this.prove(entry, request.proof);
+    if (proof.revision !== (entry.dispatchedRevision ?? entry.revision)) throw new Error("native queue canonical proof names another version");
+    this.prove(entry, proof);
     this.save(entry);
     return { entry, replayed: false };
   }

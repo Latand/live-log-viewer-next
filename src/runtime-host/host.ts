@@ -1,4 +1,4 @@
-import type { NativeQueueCompactedProof, NativeQueueTransition } from "@/lib/runtime/nativeQueueContracts";
+import { canonicalNativeQueueProof, type NativeQueueCompactedProof, type NativeQueueTransition } from "@/lib/runtime/nativeQueueContracts";
 import { RUNTIME_RECEIPT_STATUSES, RuntimeIdempotencyConflictError, type RuntimeEvent, type RuntimeEventInput, type RuntimeOperationCommand, type RuntimeReceiptStatus, type RuntimeSocketRequest, type RuntimeSocketResponse } from "@/lib/runtime/contracts";
 import { structuredHostsEnabled } from "@/lib/runtime/flags";
 import { consumeRuntimeEvent, type RuntimeConsumerPorts } from "@/lib/runtime/consumers";
@@ -174,10 +174,10 @@ export class RuntimeHost {
         if (!this.structuredHosts) throw new Error("structured hosts are disabled");
         const params = request.params as Partial<NativeQueueCompactedProof> | undefined;
         const binding = params?.binding;
-        const proof = params?.proof;
+        const proof = canonicalNativeQueueProof(params?.proof);
         if (typeof params?.conversationId !== "string" || typeof params.entryId !== "string"
-          || !binding || typeof binding.threadId !== "string" || (binding.accountId !== null && typeof binding.accountId !== "string")
-          || !proof || typeof proof !== "object" || !Array.isArray(proof.input)) throw new Error("native queue compacted proof is invalid");
+          || !binding || typeof binding !== "object" || typeof binding.threadId !== "string" || (binding.accountId !== null && typeof binding.accountId !== "string")
+          || !proof) throw new Error("native queue compacted proof is invalid");
         result = this.journal.nativeQueueSettleCompacted({ conversationId: params.conversationId, entryId: params.entryId,
           binding: { threadId: binding.threadId, accountId: binding.accountId }, proof });
       } else if (request.method === "operation-transition") {

@@ -266,6 +266,47 @@ test("every unsettled state holds exactly the ids it still answers through, acro
   journal.close();
 });
 
+test("an edit left unresolved when proof of the earlier version settles the entry keeps replaying under its original key through compaction and restart", async () => {
+  const filename = journalFile();
+  let journal = open(filename);
+  nativeSession(journal);
+  const h = harness(journal);
+  const add = nativeCommand("op-raced");
+  journal.executeOperation(add); await h.executor.execute(add);
+  const edit = nativeCommand("op-raced-edit", { action: "update", entryId: "op-raced", expectedRevision: 1, text: "raced words" });
+  journal.executeOperation(edit);
+  journal.nativeQueueTransition(edit.operationId, { phase: "prepared", input: [{ type: "text", text: "raced words v2" }] });
+  journal.nativeQueueTransition(edit.operationId, { phase: "uncertain", reason: "native reply lost while the turn started" });
+  // Canonical history shows revision 1 delivered; the edit's fate is still unknown.
+  journal.nativeQueueTransition(add.operationId, { phase: "proven", proof: { ...h.proofFor("op-raced"), revision: 1,
+    input: journal.nativeQueueRead(conversationId)[0]!.versions[0]!.input! } });
+  expect(journal.nativeQueueRead(conversationId)[0]).toMatchObject({ state: "delivered", mutationOperationId: "op-raced-edit", dispatchedRevision: 1 });
+  expect(holds(filename)).toEqual(["op-raced-edit"]);
+  const before = journal.executeOperation(edit);
+  expect(before).toMatchObject({ replayed: true, operationId: "op-raced-edit", receipt: { status: "uncertain" } });
+
+  churn(journal);
+  journal.close();
+  journal = open(filename);
+  churn(journal);
+
+  expect(holds(filename)).toEqual(["op-raced-edit"]);
+  expect(journal.operationResult("op-raced")).toBeNull();
+  expect(journal.executeOperation(edit)).toEqual({ ...before });
+  // The id stays a fence: no fresh key can edit the entry past its unresolved mutation.
+  expect(() => journal.executeOperation(nativeCommand("op-raced-edit-2", { action: "update", entryId: "op-raced", expectedRevision: 2, text: "again" }))).toThrow("frozen or unresolved");
+
+  // Once the edit answers, the entry holds nothing and compaction may take the row.
+  journal.nativeQueueTransition(edit.operationId, { phase: "observed-queued",
+    submission: { id: "native-1", clientUserMessageId: "op-raced", input: [{ type: "text", text: "raced words v2" }] } });
+  expect(journal.nativeQueueRead(conversationId)[0]).toMatchObject({ state: "delivered", mutationOperationId: null });
+  expect(holds(filename)).toEqual([]);
+  churn(journal);
+  expect(journal.operationResult("op-raced-edit")).toBeNull();
+  expect(h.writes).toEqual(["thread/queue/add"]);
+  journal.close();
+});
+
 test("a settled entry's original key cannot admit it again after compaction", async () => {
   const filename = journalFile();
   const journal = open(filename);
@@ -518,9 +559,42 @@ test("the compacted-proof settlement crosses the production socket with its own 
   await once(server, "listening");
   const client = new UnixRuntimeHostClient(socket);
   try {
-    await expect(client.nativeQueueSettleCompacted({ conversationId, entryId: "op-socket", binding, proof: { ...proof, input: "text" as never } })).rejects.toThrow("compacted proof is invalid");
+    const original = rawEntry(journal, "op-socket");
+    const seqBefore = tailSeq(filename);
+    const malformed: Array<[string, unknown]> = [
+      ["input", { ...proof, input: "text" }],
+      ["empty input", { ...proof, input: [] }],
+      ["turn id", { ...proof, turnId: 42 }],
+      ["item id", { ...proof, itemId: {} }],
+      ["turn and item ids", { ...proof, turnId: 42, itemId: {} }],
+      ["revision", { ...proof, revision: "1" }],
+      ["fractional revision", { ...proof, revision: 1.5 }],
+      ["thread id", { ...proof, threadId: null }],
+      ["client identity", { ...proof, clientUserMessageId: ["op-socket"] }],
+      ["proof", "proof"],
+    ];
+    for (const [name, candidate] of malformed) {
+      await expect(client.nativeQueueSettleCompacted({ conversationId, entryId: "op-socket", binding, proof: candidate as never }), name).rejects.toThrow("compacted proof is invalid");
+      // A caller that skips the socket reaches the same rule in the journal.
+      expect(() => journal.nativeQueueSettleCompacted({ conversationId, entryId: "op-socket", binding, proof: candidate as never }), name).toThrow("proof is malformed");
+      expect(rawEntry(journal, "op-socket"), name).toBe(original);
+    }
     await expect(client.nativeQueueSettleCompacted({ conversationId, entryId: "op-socket", binding: { threadId: binding.threadId } as never, proof })).rejects.toThrow("compacted proof is invalid");
-    const settled = await client.nativeQueueSettleCompacted({ conversationId, entryId: "op-socket", binding, proof });
+    expect(rawEntry(journal, "op-socket")).toBe(original);
+    expect(tailSeq(filename)).toBe(seqBefore);
+
+    // The operation path refuses the same identities before writing anything.
+    await client.command(nativeCommand("op-socket-live"));
+    await harness(journal).executor.execute(nativeCommand("op-socket-live"));
+    const live = rawEntry(journal, "op-socket-live");
+    const liveProof = harness(journal).proofFor("op-socket-live");
+    await expect(client.nativeQueueTransition("op-socket-live", { phase: "proven", proof: { ...liveProof, turnId: 42, itemId: {} } as never })).rejects.toThrow("proof is malformed");
+    expect(rawEntry(journal, "op-socket-live")).toBe(live);
+
+    // Fields beyond the proof's own are not persisted.
+    const settled = await client.nativeQueueSettleCompacted({ conversationId, entryId: "op-socket", binding, proof: { ...proof, note: "extra" } as never });
+    expect(settled.entry.proof).toEqual(proof);
+    expect(settled.replayed).toBeFalse();
     expect(settled).toMatchObject({ operation: "compacted", replayed: false, entry: { entryId: "op-socket", state: "delivered", proof } });
     expect(settled).not.toHaveProperty("receipt");
     expect(await client.operationStatus("op-socket")).toBeNull();
