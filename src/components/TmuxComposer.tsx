@@ -354,7 +354,7 @@ export function RuntimeComposerReceipts({
     return () => clearInterval(timer);
   }, [pinnedNow, unsettled]);
   const now = nowMs ?? tick;
-  const isMessage = (receipt: RuntimeReceipt) => receipt.kind === "send" || receipt.kind === "steer";
+  const isMessage = (receipt: RuntimeReceipt) => receipt.kind === "send" || receipt.kind === "steer" || receipt.kind === "inject";
   const editable = (receipt: RuntimeReceipt) => isMessage(receipt)
     && (receipt.status === "failed" || receipt.status === "rejected")
     && !receiptHasUnknownFate(receipt)
@@ -3007,6 +3007,68 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
    * later, which reads to the operator as the message being lost rather than
    * never accepted.
    */
+  /**
+   * Add the draft to the thread's context WITHOUT asking for an answer (#1560).
+   *
+   * The third thing the operator can do with a draft, beside sending it (which
+   * interrupts) and queuing it (which waits). Native `thread/inject_items`
+   * appends it to the model-visible input: with a turn running it joins that
+   * turn and is read at its next model request, and with the thread idle it is
+   * stored and read by whatever asks next. No turn is interrupted and none is
+   * started, in either case.
+   *
+   * Refused HERE when it cannot work, before anything durable exists — a host
+   * that has not advertised the capability, and an image payload the raw
+   * Responses item form cannot carry. Both used to be the kind of thing that
+   * became an operation and failed later, which reads as a lost message rather
+   * than a refused one. There is deliberately no fallback to steering: the
+   * action's whole promise is that it does not touch the running turn.
+   */
+  const injectContext = () => {
+    const requestedText = textRef.current.trim();
+    if (!structuredSession?.session.capabilities?.inject) {
+      setStatus({ kind: "err", text: t("inject.unsupported") });
+      return;
+    }
+    if (!requestedText) return;
+    if (voiceSending || reconcilingSend) return;
+    if (effectiveSendBlockedReason) {
+      setStatus({ kind: "err", text: effectiveSendBlockedReason });
+      return;
+    }
+    /* NAMED, NEVER DROPPED. The operator staged pictures and asked for an
+       action that cannot carry them; saying so and keeping the draft intact is
+       the only honest option. Sending the text alone would silently deliver
+       something they did not compose. */
+    if (attachments.imagesRef.current.length > 0) {
+      setStatus({ kind: "err", text: t("inject.imagesUnsupported") });
+      return;
+    }
+    const reference = viewerSelectedContext();
+    const snapshotText = textRef.current;
+    const clientMessageId = mintIdempotencyKey();
+    /* The placement is read from the SAME state authority the rest of the
+       composer reads, so the confirmation the operator gets describes the turn
+       axis the action was submitted against. The runtime re-checks it at
+       actuation and is the authority; this only decides what to say. */
+    const intoRunningTurn = structuredSession.session.turn === "running";
+    setText("");
+    setStatus({ kind: "ok", text: intoRunningTurn ? t("inject.submittedActive") : t("inject.submittedIdle") });
+    inputRef.current?.focus();
+    void (async () => {
+      const answer = await runtimeDependencies.injectRuntimeContext({
+        conversationId: structuredSession.session.conversationId,
+        text: requestedText,
+        idempotencyKey: clientMessageId,
+        ...(reference ? { selectedContext: reference } : {}),
+      });
+      if (answer.ok) return;
+      /* A REFUSAL GIVES THE DRAFT BACK, and never over something typed since. */
+      setStatus({ kind: "err", text: answer.error ?? t("inject.refused") });
+      setText((current) => current || snapshotText);
+    })();
+  };
+
   const steerRunningTurn = () => {
     if (!structuredSession?.session.capabilities?.steer) {
       setStatus({ kind: "err", text: t("queue.steerUnsupported") });
@@ -3342,6 +3404,23 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
             description: t("queue.queueMessageHint"),
             disabled: busy || voiceSending || sendBlocked,
             onSelect: queueForCodex,
+          } as const]
+          : []),
+        /* #1560. Offered only on an OBSERVED capability, and labelled for what
+           the thread is doing right now: the same control means "join the
+           running turn" and "store for the next request" depending on the turn
+           axis, and one label for both would be untrue half the time. Unlike
+           steer, it is NOT disabled while idle — idle injection is a supported
+           outcome, just a different one. */
+        ...(structuredSession?.session.capabilities?.inject
+          ? [{
+            id: "inject",
+            label: t("inject.action"),
+            description: structuredSession.session.turn === "running"
+              ? t("inject.hintActive")
+              : t("inject.hintIdle"),
+            disabled: busy || voiceSending || sendBlocked || attachments.images.length > 0,
+            onSelect: injectContext,
           } as const]
           : []),
         ...(structuredSession?.session.capabilities?.steer

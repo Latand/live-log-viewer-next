@@ -29,7 +29,11 @@ export function deliveryResolved(status: ReceiptStatus): boolean {
 }
 
 function isMessage(receipt: RuntimeReceipt): boolean {
-  return receipt.kind === "send" || receipt.kind === "steer";
+  /* #1560: an injection carries the operator's own words and can fail or end
+     unverified, so its receipt belongs on the same surfaces a send's does —
+     leaving it out would make the one operation whose outcome is least certain
+     also the one the operator can see least about. */
+  return receipt.kind === "send" || receipt.kind === "steer" || receipt.kind === "inject";
 }
 
 const newestFirst = (left: RuntimeReceipt, right: RuntimeReceipt) => Date.parse(right.at) - Date.parse(left.at);

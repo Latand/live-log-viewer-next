@@ -44,7 +44,7 @@ export interface RuntimeSessionAxes {
 
 export type RuntimeAttentionKind = "approval" | "permission" | "question" | "waiting_heuristic";
 export type RuntimeAttentionState = "open" | "resolving" | "resolved" | "expired-confirmed" | "cancelled" | "resolution-unknown";
-export type RuntimeOperationKind = "send" | "steer" | "interrupt" | "answer" | "kill" | "spawn" | "reconfigure" | "compact" | "native-queue";
+export type RuntimeOperationKind = "send" | "steer" | "inject" | "interrupt" | "answer" | "kill" | "spawn" | "reconfigure" | "compact" | "native-queue";
 export const RUNTIME_RECEIPT_STATUSES = [
   "pending", "delivering", "applying", "turn-started", "steered", "queued",
   "delivered", "applied", "interrupted", "answered", "rejected", "failed", "uncertain",
@@ -260,7 +260,13 @@ export interface RuntimeSendSettings {
 }
 
 export interface RuntimeSendCommand extends RuntimeCommandBase {
-  kind: "send" | "steer";
+  /** `inject` is native Codex `thread/inject_items` (#1560): the operator's raw
+      text is appended to the thread's model-visible input WITHOUT interrupting
+      the running turn and WITHOUT starting one. It shares this command shape
+      because it carries the same immutable payload, fence and authorship as a
+      message — it is not a control — but it carries no `policy`: there is no
+      interrupt to choose and no queue to fall back to. */
+  kind: "send" | "steer" | "inject";
   text: string;
   images?: StructuredImageRef[];
   contentDigest?: string;
@@ -437,6 +443,10 @@ export interface RuntimeHostDiagnostics {
   version: string | null;
   nativeQueue: boolean;
   queueCapability: "unknown" | "supported" | "unsupported";
+  /** Whether this host generation can append model-visible input without a turn
+      (#1560). `unknown` is fail-closed: the composer offers no injection action
+      and an admitted one is refused rather than delivered as a steer. */
+  injectCapability: "unknown" | "supported" | "unsupported";
   authRecovery: "unknown" | "started" | "completed-unverified";
 }
 
@@ -457,7 +467,7 @@ export interface RuntimeSession {
   workflowId: string | null;
   cwd: string | null;
   artifactPath: string | null;
-  capabilities: { steer: boolean; structuredAttention: boolean; nativeQueue?: boolean; imageInput?: RuntimeImageCapability; runtimeSettings?: RuntimeSettingsCapability };
+  capabilities: { steer: boolean; structuredAttention: boolean; nativeQueue?: boolean; inject?: boolean; imageInput?: RuntimeImageCapability; runtimeSettings?: RuntimeSettingsCapability };
   activeTurnId: string | null;
   pendingReconfigure?: RuntimePendingReconfigure | null;
   drift?: RuntimeDrift | null;

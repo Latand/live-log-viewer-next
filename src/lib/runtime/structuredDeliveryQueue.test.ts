@@ -619,6 +619,9 @@ test("unrelated outbox effects cannot starve structured message delivery", async
     "runtime.native-queue",
     "runtime.send",
     "runtime.steer",
+    /* #1560: injection is drained in the same pass as every other message
+       effect, so it cannot be starved by control traffic either. */
+    "runtime.inject",
     "runtime.answer",
     "runtime.interrupt",
     "runtime.kill",

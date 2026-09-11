@@ -40,7 +40,7 @@ export interface StructuredMessageRequest {
   conversationId?: string | null;
   clientMessageId?: string | null;
   operationId?: string;
-  kind?: "send" | "steer";
+  kind?: "send" | "steer" | "inject";
   policy?: "queue" | "steer-if-active" | "interrupt-active";
   turnId?: string | null;
   text: string;
@@ -793,6 +793,27 @@ export async function enqueueStructuredMessage(
       return deliveryFailure(error);
     }
   }
+  /**
+   * #1560: an injection is never parked behind an account switch.
+   *
+   * A held delivery is replayed against the SUCCESSOR generation, which is a
+   * different thread. That is right for a message — the operator wants it said
+   * to whoever is answering now — and wrong for an injection, whose whole
+   * meaning is "put this into the history of the thread I am looking at".
+   * Replaying it elsewhere would write the operator's context into a thread
+   * they never aimed at, and dropping it would lose it silently. Refused here,
+   * before any reservation exists, so nothing is written and the operator can
+   * simply inject again once the switch has landed.
+   */
+  if (request.kind === "inject" && deliveryFence(conversation) === "held") {
+    return {
+      ok: false,
+      structured: true,
+      outcome: "failed",
+      error: "an account switch is pending for this conversation; injected context cannot be held across it",
+      status: 409,
+    };
+  }
   let migrationOwnsSend = deliveryFence(conversation) === "held";
   /* Belt and braces for issue #1028: a send arriving while a switch is pending
      FORCES it. "After current turn" is only an honest promise while a turn is
@@ -983,6 +1004,20 @@ export async function enqueueStructuredMessage(
       reservation = registry.retryUncertainDelivery(reservation.id);
     }
     if (reservation.state === "held") {
+      /* The switch landed between the check above and the reservation. The
+         reservation exists but nothing has been handed to any engine, so
+         releasing it leaves the thread untouched (#1560). */
+      if (request.kind === "inject") {
+        registry.terminalizeHeldDelivery(reservation.id, "injected context cannot be held across an account switch");
+        return {
+          ok: false,
+          structured: true,
+          outcome: "failed",
+          error: "an account switch is pending for this conversation; injected context cannot be held across it",
+          status: 409,
+          operationId: reservation.command.operationId,
+        };
+      }
       (dependencies.requestMigrationTick ?? requestAccountMigrationTick)();
       return {
         ok: true,

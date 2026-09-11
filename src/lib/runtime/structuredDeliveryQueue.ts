@@ -7,7 +7,7 @@ import { parseMessageOrigin, type MessageOrigin } from "./messageOrigin";
 import type { RuntimeSendSettings } from "./contracts";
 import { evidenceAgrees, readEvidence, readOptionalEvidence, type Evidence } from "./evidence";
 import type { CompactCapableHost, DeliveryReceipt, EngineHost, FirstDispatchEvidence, HostState, QueueEntry } from "./engineHost";
-import { hostSupportsCompact, StructuredCompactError, StructuredSendRefusedError } from "./engineHost";
+import { hostSupportsCompact, hostSupportsInject, StructuredCompactError, StructuredInjectError, StructuredSendRefusedError } from "./engineHost";
 import {
   parseStructuredImageRefs,
   structuredContent,
@@ -106,6 +106,29 @@ interface SendEffect {
   eventSeq: number;
 }
 
+/**
+ * One native history injection (#1560).
+ *
+ * Deliberately its OWN effect type rather than a `SendEffect` with a third
+ * kind: the send effect carries a delivery policy and an image list, and
+ * injection has neither. Keeping them apart is what makes it impossible for a
+ * policy to be read off an injection and acted on, which is the exact mistake
+ * that would turn "add this without interrupting" into an interrupt.
+ */
+interface InjectEffect {
+  operationId: string;
+  conversationId: string;
+  kind: "inject";
+  text: string;
+  contentDigest: string;
+  /** The caller's fence, replayed verbatim. A string requires that turn to
+      still be running; `null` requires an idle thread; absent accepts either. */
+  turnId?: string | null;
+  selectedContext?: SelectedContextRef;
+  origin?: MessageOrigin;
+  eventSeq: number;
+}
+
 interface ControlEffect {
   operationId: string;
   conversationId: string;
@@ -150,7 +173,7 @@ export type StructuredReconfigureHandler = (
 ) => Promise<void | "applied" | "pending">;
 
 type NativeEffect = NativeQueueCommand & { operationId: string; eventSeq: number };
-type DeliveryEffect = NativeEffect | SendEffect | ControlEffect | CompactEffect | StructuredReconfigureEffect;
+type DeliveryEffect = NativeEffect | SendEffect | InjectEffect | ControlEffect | CompactEffect | StructuredReconfigureEffect;
 
 interface ControlDrainResult {
   blocked: boolean;
@@ -252,6 +275,38 @@ function sendEffect(effect: StructuredDeliveryEffect): SendEffect | null {
   };
 }
 
+function injectEffect(effect: StructuredDeliveryEffect): InjectEffect | null {
+  if (effect.kind !== "runtime.inject") return null;
+  const operationId = typeof effect.payload.operationId === "string" ? effect.payload.operationId : "";
+  const conversationId = typeof effect.payload.conversationId === "string" ? effect.payload.conversationId : "";
+  const text = typeof effect.payload.text === "string" ? effect.payload.text : "";
+  if (!operationId || !conversationId || !text) return null;
+  /* An injection that somehow carries images is DROPPED, not stripped: the
+     operator asked for that payload, and executing a silently reduced version
+     of it is worse than leaving the operation for its admission-time refusal.
+     Admission refuses images, so a record reaching here with them is corrupt. */
+  if (Array.isArray(effect.payload.images) && effect.payload.images.length > 0) return null;
+  let content;
+  try { content = structuredContent(text, []); } catch { return null; }
+  if (typeof effect.payload.contentDigest === "string" && effect.payload.contentDigest !== content.contentDigest) return null;
+  const turnId = typeof effect.payload.turnId === "string" || effect.payload.turnId === null
+    ? effect.payload.turnId
+    : undefined;
+  const selectedContext = parseSelectedContextRef(effect.payload.selectedContext);
+  const origin = parseMessageOrigin(effect.payload.origin);
+  return {
+    operationId,
+    conversationId,
+    kind: "inject",
+    text: content.content.text,
+    contentDigest: content.contentDigest,
+    eventSeq: effect.eventSeq,
+    ...(turnId !== undefined ? { turnId } : {}),
+    ...(selectedContext ? { selectedContext } : {}),
+    ...(origin ? { origin } : {}),
+  };
+}
+
 function controlEffect(effect: StructuredDeliveryEffect): ControlEffect | null {
   if (effect.kind !== "runtime.answer" && effect.kind !== "runtime.interrupt" && effect.kind !== "runtime.kill") return null;
   const operationId = typeof effect.payload.operationId === "string" ? effect.payload.operationId : "";
@@ -340,7 +395,7 @@ function deliveryEffect(effect: StructuredDeliveryEffect): DeliveryEffect | null
       return { ...command, operationId: command.operationId, eventSeq: effect.eventSeq };
     } catch { return null; }
   }
-  return controlEffect(effect) ?? compactEffect(effect) ?? reconfigureEffect(effect) ?? sendEffect(effect);
+  return injectEffect(effect) ?? controlEffect(effect) ?? compactEffect(effect) ?? reconfigureEffect(effect) ?? sendEffect(effect);
 }
 
 function successfulKillBoundary(effect: StructuredDeliveryEffect): SuccessfulKillBoundary | null {
@@ -368,6 +423,26 @@ function successfulKillBoundary(effect: StructuredDeliveryEffect): SuccessfulKil
  */
 export const DELIVERY_UNVERIFIED_BY_EARLIER_EXECUTOR =
   "delivery was started by an earlier executor; whether it reached the recipient is unverified";
+/**
+ * The four reasons a native injection ends with (#1560), kept as constants
+ * because the composer, the receipt projection and the MCP surface all have to
+ * say the same thing about the same outcome.
+ *
+ * The split that matters is between the last two. `delivered` with
+ * INJECTION_INTO_RUNNING_TURN or INJECTION_INTO_HISTORY means the insertion was
+ * found in canonical history; neither says the model has read it, and the
+ * operator-facing wording keeps that distinction. The unobserved reason is
+ * written on `uncertain`, because an empty acknowledgement is a statement about
+ * the request and not about the thread.
+ */
+export const INJECTION_INTO_RUNNING_TURN =
+  "added to the running turn's input; it is read at that turn's next model request";
+export const INJECTION_INTO_HISTORY =
+  "stored in conversation context; it is read by the next model request";
+export const INJECTION_ACKNOWLEDGED_BUT_UNOBSERVED =
+  "injection was acknowledged and did not appear in canonical history; whether it reached the thread is unverified";
+export const INJECTION_UNVERIFIED_AFTER_ACTUATION =
+  "injection was issued and the structured host did not answer; whether it reached the thread is unverified";
 export const DELIVERY_UNVERIFIED_AFTER_ACTUATION =
   "delivery was started and the structured host did not answer; whether it reached the recipient is unverified";
 /**
@@ -567,7 +642,7 @@ export class StructuredDeliveryQueue {
     let afterEventSeq = 0;
     while (true) {
       const page = await this.port.effects(
-        ["runtime.native-queue", "runtime.send", "runtime.steer", "runtime.answer", "runtime.interrupt", "runtime.kill", "runtime.kill-boundary", "runtime.reconfigure", "runtime.compact"],
+        ["runtime.native-queue", "runtime.send", "runtime.steer", "runtime.inject", "runtime.answer", "runtime.interrupt", "runtime.kill", "runtime.kill-boundary", "runtime.reconfigure", "runtime.compact"],
         afterEventSeq,
       );
       if (page.length === 0) break;
@@ -822,6 +897,17 @@ export class StructuredDeliveryQueue {
         if (!await this.transitionUnlessSettled(effect.operationId, "queued", { reason: "dead-host" })) continue;
         await this.recoverUnavailableHost(effect);
         return true;
+      }
+      /* #1560: injection leaves the group here, before a single line of the
+         steer/interrupt machinery below can look at it. That machinery decides
+         between ending the running turn and joining it; injection does neither,
+         so running it through those branches is how a "do not interrupt" action
+         would quietly acquire an interrupt. Any state the host can take the
+         write in — active, attention, idle — is a state injection can be
+         executed in, because it does not contend for the turn. */
+      if (effect.kind === "inject") {
+        if (!await this.executeInjection(effect, host, health)) return true;
+        continue;
       }
       const maySteer = health.status === "active"
         && (effect.kind === "steer" || effect.policy === "steer-if-active");
@@ -1228,6 +1314,80 @@ export class StructuredDeliveryQueue {
    */
   private fenceUnavailable(): boolean {
     this.retrySoon();
+    return true;
+  }
+
+  /**
+   * Executes one native injection (#1560). Returns whether the pass may carry
+   * on with the rest of this conversation's queue.
+   *
+   * Three things this deliberately does NOT do, each because the operator asked
+   * for injection and not for something adjacent to it:
+   *
+   * - It never interrupts, steers or starts a turn. A host that cannot inject
+   *   ends the operation with that reason. There is no fallback, because a
+   *   fallback here would silently deliver a different action than the one the
+   *   label promised.
+   * - It never settles on the acknowledgement. `thread/inject_items` answers
+   *   `{}`, and on the active path it can answer while the items are still only
+   *   pending input with the rollout flush still to come. `delivered` therefore
+   *   requires the insertion to have been READ BACK out of canonical history;
+   *   an accepted-but-unobserved insertion settles `uncertain`, which is the
+   *   status that means exactly "this may have landed and nothing proved it".
+   * - It never issues a second insertion. The engine does not deduplicate, so
+   *   an unknown outcome is absorbed rather than retried: the host scans for
+   *   this operation's dedup marker before writing, and `uncertain` is a
+   *   terminal the journal refuses to transition out of.
+   */
+  private async executeInjection(effect: InjectEffect, host: EngineHost, health: HostState): Promise<boolean> {
+    if (!hostSupportsInject(host)) {
+      await this.transitionUnlessSettled(effect.operationId, "failed", { reason: "unsupported-injection" });
+      return true;
+    }
+    /* The fence is re-read here because admission's verdict is older than this
+       pass. `null` asks for the idle placement and a running turn refuses it;
+       a named turn must still be the one running. Refused BEFORE `delivering`,
+       so a stale fence costs no durable actuation record at all. */
+    if (effect.turnId !== undefined && effect.turnId !== health.activeTurnRef) {
+      await this.transitionUnlessSettled(effect.operationId, "failed", { reason: "stale-turn" });
+      return true;
+    }
+    if (!await this.transitionUnlessSettled(effect.operationId, "delivering", { turnId: health.activeTurnRef })) {
+      return true;
+    }
+    let outcome;
+    try {
+      outcome = await host.inject({
+        operationId: effect.operationId,
+        threadId: health.sessionKey,
+        text: effect.text,
+        contentDigest: effect.contentDigest,
+        ...(effect.turnId !== undefined ? { expectedTurnId: effect.turnId } : {}),
+        ...(effect.selectedContext ? { selectedContext: effect.selectedContext } : {}),
+        ...(effect.origin ? { origin: effect.origin } : {}),
+      });
+    } catch (error) {
+      const reason = failureReason(error);
+      /* A REFUSED injection wrote nothing and can say so plainly. Anything else
+         may have written, and saying `failed` there would tell a caller the
+         context is absent when it may be sitting in the thread. */
+      if (error instanceof StructuredInjectError && error.phase === "refused") {
+        await this.transitionUnlessSettled(effect.operationId, "failed", { reason });
+        return true;
+      }
+      await this.terminalizeUnverified(effect.operationId, `${INJECTION_UNVERIFIED_AFTER_ACTUATION}: ${reason}`);
+      return true;
+    }
+    if (!outcome.observed) {
+      await this.terminalizeUnverified(effect.operationId, INJECTION_ACKNOWLEDGED_BUT_UNOBSERVED);
+      return true;
+    }
+    await this.transitionUnlessSettled(effect.operationId, "delivered", {
+      turnId: outcome.turnId,
+      reason: outcome.placement === "pending-input"
+        ? INJECTION_INTO_RUNNING_TURN
+        : INJECTION_INTO_HISTORY,
+    });
     return true;
   }
 

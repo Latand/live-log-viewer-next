@@ -2440,6 +2440,19 @@ export const en = {
   "queue.steerHint": "Adds to the turn already running instead of interrupting it.",
   "queue.steerUnsupported": "This agent cannot be steered; a send interrupts the running turn instead.",
   "queue.steerIdle": "Nothing is running to steer.",
+
+  /* Native history injection (#1560). The wording keeps the one distinction
+     the operation actually supports: the text becomes part of what the model
+     reads NEXT, which is not the same as the model having read it. Nothing
+     here says "delivered" or "the agent has it". */
+  "inject.action": "Add to context",
+  "inject.hintActive": "Adds to the running turn's input without interrupting it. Read at its next step.",
+  "inject.hintIdle": "Stores it in the conversation for the next request. Starts nothing now.",
+  "inject.submittedActive": "Added to the running turn's input",
+  "inject.submittedIdle": "Stored in the conversation context",
+  "inject.unsupported": "This conversation's Codex host has not advertised context injection.",
+  "inject.imagesUnsupported": "Added context cannot carry images. Send or queue the message instead.",
+  "inject.refused": "The context was not added.",
   "voice.floatSurface": "Voice conversation",
   "voice.float": "Open the floating voice window",
   "voice.dock": "Close the floating window and keep the call",

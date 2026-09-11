@@ -205,8 +205,19 @@ function SendMenu({ label, actions, onClose, position, owner }: {
       role="menu"
       aria-label={label}
       data-testid="composer-send-menu"
-      style={{ bottom: position.bottom, right: position.right }}
-      className="fixed z-40 w-[220px] rounded-surface border border-border bg-raised p-1.5 shadow-2"
+      /* BOUNDED, BECAUSE IT GROWS UPWARD. The menu is anchored by its bottom
+         edge, so each action added pushes its head further toward the top of
+         the viewport — with the injection action (#1560) a Codex conversation
+         can offer four. Past the edge there is no scroll that could reveal the
+         first item, which is the same way this menu was clipped before it
+         became a portal. The ceiling is the space actually above the anchor,
+         so the list scrolls instead of running off. */
+      style={{
+        bottom: position.bottom,
+        right: position.right,
+        maxHeight: `calc(100dvh - ${position.bottom}px - 16px)`,
+      }}
+      className="fixed z-40 w-[220px] overflow-y-auto rounded-surface border border-border bg-raised p-1.5 shadow-2"
     >
       {/* Menu group-label: sentence-case label recipe (design doc §3.6). */}
       <div className="px-2 pb-1 pt-1.5 text-label font-semibold text-secondary">
