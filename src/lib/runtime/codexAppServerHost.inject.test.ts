@@ -7,7 +7,11 @@ import type { ChildProcessWithoutNullStreams } from "node:child_process";
 
 import { afterEach, expect, test } from "bun:test";
 
-import { CodexAppServerHost } from "./codexAppServerHost";
+import {
+  CodexAppServerHost,
+  CODEX_DELIVERY_CONFIRMATION_TIMEOUT_MS,
+  DEFAULT_INJECT_OBSERVATION_TIMEOUT_MS,
+} from "./codexAppServerHost";
 import { StructuredInjectError } from "./engineHost";
 import type { RuntimeEvent } from "./engineHost";
 import type { RuntimeEventStore } from "./eventStore";
@@ -69,6 +73,9 @@ class InjectAppServer extends EventEmitter {
   /** When false, the ack is returned and nothing is written — the active path
       whose flush has not happened yet. */
   persistOnInject = true;
+  /** When true the request is never answered at all, which is what a lost
+      answer looks like: no JSON-RPC error, so nothing proves a refusal. */
+  swallowInject = false;
   readonly rolloutPath: string;
   private ordinal = 0;
   private turn = 0;
@@ -120,6 +127,12 @@ class InjectAppServer extends EventEmitter {
     return turnId;
   }
 
+  /** End the turn the way the engine does, so the host's turn axis moves. */
+  endTurn(turnId: string): void {
+    this.activeTurnId = null;
+    this.notify("turn/ended", { threadId: this.threadId, turn: { id: turnId, status: "completed" } });
+  }
+
   /** The deferred flush: what the active path does at its own pace. */
   flushInjected(): void {
     for (const pending of this.pendingItems.splice(0)) this.writeResponseItem(pending);
@@ -159,6 +172,7 @@ class InjectAppServer extends EventEmitter {
     }
     if (method === "thread/queue/list") return this.respond(message.id, { items: [] });
     if (method === "thread/inject_items") {
+      if (this.swallowInject) return;
       if (this.injectErrorCode !== null) {
         return this.respondError(message.id, this.injectErrorMessage, this.injectErrorCode);
       }
@@ -268,7 +282,7 @@ test("idle injection writes history and still starts no turn", async () => {
 test("an acknowledged insertion that never reaches history is reported unobserved, not delivered", async () => {
   const server = new InjectAppServer(scratchRoot());
   server.persistOnInject = false;
-  const host = await startHost(server);
+  const host = await startHost(server, { injectObservationTimeoutMs: 400 });
   server.startTurn();
   await Bun.sleep(10);
 
@@ -530,4 +544,114 @@ test("NEGATIVE CONTROL: a marker on a developer record is never read as operator
   });
   expect(outcome.observed).toBe(false);
   await host.release();
+});
+
+test("an active injection observes the item written when the turn reaches its next step", async () => {
+  /* THE FLAGSHIP CASE, with the delay it really has. The engine acknowledges
+     while the items are still pending and writes them when the turn gets to
+     its next model request — here, well past the old ten-second window. The
+     wait must survive that: settling `uncertain` for an insertion that lands
+     and is consumed is a terminal verdict on a delivery that worked. */
+  const server = new InjectAppServer(scratchRoot());
+  server.persistOnInject = false;
+  const host = await startHost(server, { injectObservationTimeoutMs: 30_000 });
+  server.startTurn();
+  await Bun.sleep(10);
+
+  const pending = host.inject({
+    operationId: "op-late-flush",
+    threadId: server.threadId,
+    text: "read this at your next step",
+    contentDigest: digestOf("read this at your next step"),
+  });
+
+  /* Longer than the window this used to have. */
+  await Bun.sleep(300);
+  server.flushInjected();
+
+  const outcome = await pending;
+  expect(outcome.observed).toBe(true);
+  expect(outcome.placement).toBe("pending-input");
+  for (const method of TURN_MUTATIONS) {
+    expect(server.requests.some((request) => request.method === method)).toBe(false);
+  }
+  await host.release();
+});
+
+test("the wait ends when the turn it joined ends, without burning the whole window", async () => {
+  const server = new InjectAppServer(scratchRoot());
+  server.persistOnInject = false;
+  /* A window far longer than this test may take: what ends the wait has to be
+     the turn ending, not the deadline. */
+  const host = await startHost(server, { injectObservationTimeoutMs: 120_000 });
+  const turnId = server.startTurn();
+  await Bun.sleep(10);
+
+  const started = Date.now();
+  const pending = host.inject({
+    operationId: "op-turn-ends",
+    threadId: server.threadId,
+    text: "never flushed",
+    contentDigest: digestOf("never flushed"),
+  });
+  await Bun.sleep(50);
+  server.notify("turn/completed", { threadId: server.threadId, turn: { id: turnId, status: "completed" } });
+  server.endTurn(turnId);
+
+  const outcome = await pending;
+  expect(outcome.observed).toBe(false);
+  /* The verdict arrived promptly rather than at the deadline. */
+  expect(Date.now() - started).toBeLessThan(30_000);
+  await host.release();
+});
+
+test("an unarticulated transport failure is unverified, never a refusal", async () => {
+  const server = new InjectAppServer(scratchRoot());
+  /* No JSON-RPC error comes back at all — the request times out. Nothing about
+     that proves the insertion did not land, so it must not settle `failed`,
+     which tells the operator the context is absent. */
+  server.swallowInject = true;
+  const host = await startHost(server, { requestTimeoutMs: 200 });
+  await Bun.sleep(10);
+
+  const failure = await host.inject({
+    operationId: "op-lost-answer",
+    threadId: server.threadId,
+    text: "may or may not have landed",
+    contentDigest: digestOf("may or may not have landed"),
+  }).catch((error: unknown) => error);
+
+  expect(failure).toBeInstanceOf(StructuredInjectError);
+  expect((failure as StructuredInjectError).phase).toBe("unverified");
+  await host.release();
+});
+
+test("an articulated JSON-RPC error is a proven refusal", async () => {
+  const server = new InjectAppServer(scratchRoot());
+  server.injectErrorCode = -32602;
+  server.injectErrorMessage = "invalid params";
+  const host = await startHost(server);
+  await Bun.sleep(10);
+
+  const failure = await host.inject({
+    operationId: "op-articulated",
+    threadId: server.threadId,
+    text: "refused outright",
+    contentDigest: digestOf("refused outright"),
+  }).catch((error: unknown) => error);
+
+  expect(failure).toBeInstanceOf(StructuredInjectError);
+  /* The server said no, so the operator can be told nothing was written. */
+  expect((failure as StructuredInjectError).phase).toBe("refused");
+  await host.release();
+});
+
+test("the default observation window is the send confirmation window, not a short one", () => {
+  /* The active path's item is written when the turn reaches its next model
+     request, which can be minutes into one tool call. A short default settles
+     `uncertain` — terminally, since it is absorbing — for insertions that land
+     and are consumed perfectly well. This equality is the decision, and no
+     behavioural test can assert it without running for minutes. */
+  expect(DEFAULT_INJECT_OBSERVATION_TIMEOUT_MS).toBe(CODEX_DELIVERY_CONFIRMATION_TIMEOUT_MS);
+  expect(DEFAULT_INJECT_OBSERVATION_TIMEOUT_MS).toBeGreaterThanOrEqual(5 * 60_000);
 });

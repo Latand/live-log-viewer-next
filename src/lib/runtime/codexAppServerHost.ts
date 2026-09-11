@@ -307,23 +307,45 @@ const ACTIVE_THREAD_READ_TIMEOUT_MULTIPLIER = 3;
     item to surface (#1560). The scan is cached on size and mtime, so a poll
     over an unchanged rollout costs a stat. */
 const INJECT_OBSERVATION_POLL_MS = 150;
+const INJECT_OBSERVATION_POLL_CEILING_MS = 2_000;
 /** The observed capability flag that lets the composer offer the injection
     action (#1560). Absent = the action is not offered at all. */
 export const NATIVE_INJECT_CAPABILITY = "native-inject";
-const DEFAULT_INJECT_OBSERVATION_TIMEOUT_MS = 10_000;
+/**
+ * How long an injection waits to SEE its item in the transcript.
+ *
+ * The same window an ordinary send's confirmation gets, and for the same
+ * reason. The active path's item is written when the turn reaches its next
+ * model request, so a turn sitting in one long tool call would blow a short
+ * window and settle `uncertain` — terminally, since that status is absorbing —
+ * for an insertion that lands and is consumed perfectly well a minute later.
+ * The wait almost never runs to this length: the idle flush is immediate, and
+ * an active injection stops as soon as its turn ends.
+ */
+export const DEFAULT_INJECT_OBSERVATION_TIMEOUT_MS = DEFAULT_DELIVERY_CONFIRMATION_TIMEOUT_MS;
+/** Exported beside it so a test can hold the two to the same value: the
+    equality IS the decision, and it is not observable from behaviour without a
+    multi-minute test. */
+export const CODEX_DELIVERY_CONFIRMATION_TIMEOUT_MS = DEFAULT_DELIVERY_CONFIRMATION_TIMEOUT_MS;
 
 /**
- * Whether an injection's fate is genuinely unknown after a failed request.
+ * Whether a failed injection request PROVED that nothing was written.
  *
- * Only transport-shaped failures qualify: the request may have been applied and
- * the answer lost. An error the server ARTICULATED is a refusal — it says the
- * insertion did not happen — and must stay a refusal, because the two
- * terminalize differently and only one of them is ever safe to tell the
- * operator nothing was written.
+ * Only one thing proves it: a JSON-RPC error the server articulated. The
+ * transport decodes those into `NativeQueueProtocolRefusal`, which carries the
+ * engine's own numeric code, and every other failure — a timeout, a closed
+ * socket, a child that exited, a writer fence, anything whose wording nobody
+ * has enumerated — arrives as a plain `Error` and means the request may have
+ * been applied with the answer lost.
+ *
+ * This is deliberately NOT a keyword list over error messages. Such a list
+ * decides the default for everything it fails to anticipate, and here the
+ * default it would pick is the dangerous one: `refused` tells the operator
+ * nothing was written, which is a claim no unrecognised failure supports.
+ * Defaulting the other way costs one operation reported as unverified.
  */
-function injectionOutcomeIsUnknown(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return /timed out|socket|closed|EPIPE|ECONNRESET|disconnect/i.test(message);
+function injectionRefusalIsProven(error: unknown): boolean {
+  return error instanceof NativeQueueProtocolRefusal;
 }
 const LATE_THREAD_READ_RESPONSE_TTL_MULTIPLIER = 3;
 const MIN_LATE_THREAD_READ_RESPONSE_TTL_MS = 1_000;
@@ -1935,10 +1957,10 @@ export class CodexAppServerHost implements EngineHost {
       /* A transport failure after the request left is NOT a refusal: the
          insertion may have landed. It is reported unverified so the caller
          terminalizes it as unknown rather than offering a second write. */
-      throw new StructuredInjectError(message, injectionOutcomeIsUnknown(error) ? "unverified" : "refused");
+      throw new StructuredInjectError(message, injectionRefusalIsProven(error) ? "refused" : "unverified");
     }
     const placement = turnAtActuation ? "pending-input" as const : "history" as const;
-    const observed = await this.observeInjectedItem(entry);
+    const observed = await this.observeInjectedItem(entry, turnAtActuation);
     return { placement, turnId: turnAtActuation, observed };
   }
 
@@ -1952,10 +1974,14 @@ export class CodexAppServerHost implements EngineHost {
    * back false is not a failure — it is the honest "not established yet", and
    * the caller records it as exactly that.
    */
-  private async observeInjectedItem(entry: QueueEntry): Promise<boolean> {
+  private async observeInjectedItem(entry: QueueEntry, turnAtActuation: string | null): Promise<boolean> {
     const deadline = Date.now() + this.injectObservationTimeoutMs;
+    let wait = INJECT_OBSERVATION_POLL_MS;
     for (;;) {
       if (this.dead || this.releasing || this.released) return false;
+      /* Read the turn BEFORE the scan, so the final scan below happens after
+         the turn ended rather than racing the flush that ends with it. */
+      const turnEnded = turnAtActuation !== null && this.activeTurnId !== turnAtActuation;
       try {
         if (await rolloutConfirmedDelivery(this.identity.path, entry)) return true;
       } catch {
@@ -1963,8 +1989,18 @@ export class CodexAppServerHost implements EngineHost {
            turn an insertion that may have landed into a reported failure. */
         return false;
       }
+      /* THE TURN THIS JOINED IS OVER. Its pending input was either consumed or
+         discarded, and the rollout has been flushed either way — so one more
+         scan cannot change, and waiting out the rest of the deadline would only
+         delay the verdict. The scan above already ran after the end. */
+      if (turnEnded) return false;
       if (Date.now() >= deadline) return false;
-      await new Promise((resolve) => setTimeout(resolve, INJECT_OBSERVATION_POLL_MS));
+      await new Promise((resolve) => setTimeout(resolve, wait));
+      /* Backs off toward the ceiling: an active turn can sit in one tool call
+         for minutes, and a 150 ms poll held for that long is thousands of stats
+         to learn nothing. Found-fast stays fast — the idle flush is immediate,
+         so it is seen on the first or second pass. */
+      wait = Math.min(wait * 2, INJECT_OBSERVATION_POLL_CEILING_MS);
     }
   }
 

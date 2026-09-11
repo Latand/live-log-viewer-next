@@ -91,6 +91,9 @@ let turn: "running" | "idle" = "idle";
 let nativeQueueCapable = true;
 let injectCapable = true;
 let injections: Record<string, unknown>[] = [];
+let injectAnswer: Record<string, unknown> = { ok: true, status: 202, receipt: { status: "queued" }, operationId: "inject-1" };
+let holdInjection = false;
+let releaseInjection: (() => void) | null = null;
 
 /** The journal's own answer, in the shape the route actually returns: the
     operation it committed, and a receipt carrying that operation's identity —
@@ -174,6 +177,9 @@ beforeEach(() => {
   nativeQueueCapable = true;
   injectCapable = true;
   injections = [];
+  injectAnswer = { ok: true, status: 202, receipt: { status: "queued" }, operationId: "inject-1" };
+  holdInjection = false;
+  releaseInjection = null;
   setRuntimeUiEnabledForTests(false);
   setTmuxComposerRuntimeDependenciesForTests({
     nativeQueue: queueTransport,
@@ -185,7 +191,12 @@ beforeEach(() => {
     }) as never,
     injectRuntimeContext: (async (options: Record<string, unknown>) => {
       injections.push(options);
-      return { ok: true, status: 202, receipt: { status: "queued" }, operationId: "inject-1" };
+      /* A test may HOLD the answer, so the in-flight state of the composer is
+         actually observable. A stub that resolves in the same tick would make
+         "what does it say before the answer" untestable — and that window is
+         exactly where an optimistic claim would live. */
+      if (holdInjection) await new Promise<void>((resolve) => { releaseInjection = resolve; });
+      return injectAnswer;
     }) as never,
   });
 });
@@ -381,20 +392,90 @@ test("the existing submissions keep their meanings beside the new action", async
   root.unmount();
 });
 
-test("staged images are named and refused rather than silently dropped", async () => {
+/** Reaches the picker the composer renders and hands it a real document, the
+    way the attachment suites do, so the staged state is the composer's own. */
+async function stageFile(host: HTMLElement, name: string, body: string): Promise<void> {
+  let onFiles: ((files: File[]) => void) | null = null;
+  for (const node of host.querySelectorAll("input")) {
+    const propsKey = Object.keys(node).find((candidate) => candidate.startsWith("__reactProps$"));
+    const props = propsKey ? (node as unknown as Record<string, { onChange?: (event: unknown) => void; type?: string }>)[propsKey] : null;
+    if (node.getAttribute("type") !== "file" || typeof props?.onChange !== "function") continue;
+    const handler = props.onChange;
+    await settle(() => handler({ target: { files: [new File([body], name, { type: "text/markdown" })], value: "" } }));
+    QueuedReader.settleAll(`data:text/markdown;base64,${Buffer.from(body).toString("base64")}`);
+    await settle(() => {});
+    return;
+  }
+  if (!onFiles) throw new Error("the composer rendered no file input");
+}
+
+test("a staged document rides the injection instead of being silently dropped", async () => {
+  const { host, root } = await mount();
+  await type(host, "use the attached spec");
+  await stageFile(host, "spec.md", "# spec\n");
+  await openSendMenu(host);
+
+  const action = menuAction(host, "Add to context");
+  /* A DOCUMENT IS NOT AN IMAGE. Images genuinely cannot ride a raw Responses
+     item and are refused by name; a file is folded into the text as a path, so
+     the action stays available and must actually carry it. */
+  expect(action!.hasAttribute("disabled")).toBe(false);
+  await settle(() => action!.click());
+  await settle(() => {});
+
+  expect(injections).toHaveLength(1);
+  expect(injections[0]!.files).toMatchObject([{ name: "spec.md" }]);
+  root.unmount();
+});
+
+test("an injection never carries images", async () => {
   const { host, root } = await mount();
   await type(host, "with a picture");
   await openSendMenu(host);
   const action = menuAction(host, "Add to context");
-  expect(action).toBeDefined();
-
-  /* With no image staged the action is live; the refusal path is the composer's
-     own guard, asserted through the action's disabled state once one is. */
   expect(action!.hasAttribute("disabled")).toBe(false);
   await settle(() => action!.click());
   await settle(() => {});
   expect(injections).toHaveLength(1);
   expect(injections[0]!.images).toBeUndefined();
+  root.unmount();
+});
+
+test("the composer reports a submission, not a placement it has not observed", async () => {
+  turn = "running";
+  holdInjection = true;
+  const { host, root } = await mount();
+  await type(host, "context please");
+  await openSendMenu(host);
+  await settle(() => menuAction(host, "Add to context")!.click());
+
+  /* WHILE THE REQUEST IS IN FLIGHT nothing may claim the text reached the
+     thread. "Added to the running turn's input" is a statement about the
+     engine, and at this moment the request has not even been answered. */
+  const inFlight = host.textContent ?? "";
+  expect(inFlight).toContain("Adding to context");
+  expect(inFlight).not.toContain("Added to the running turn");
+
+  await settle(() => releaseInjection?.());
+  /* AND AFTER A SUCCESSFUL POST it says accepted, not delivered: the operation
+     can still settle uncertain, because an empty engine acknowledgement proves
+     nothing about the thread. The receipt carries the placement. */
+  const settled = host.textContent ?? "";
+  expect(settled).toContain("Accepted");
+  expect(settled).not.toContain("Stored in the conversation context");
+  root.unmount();
+});
+
+test("a refusal gives the draft back instead of reporting success", async () => {
+  injectAnswer = { ok: false, status: 503, error: "structured delivery ownership is unavailable" };
+  const { host, root } = await mount();
+  await type(host, "give this back");
+  await openSendMenu(host);
+  await settle(() => menuAction(host, "Add to context")!.click());
+  await settle(() => {});
+
+  expect(textarea(host).value).toBe("give this back");
+  expect(host.textContent ?? "").toContain("structured delivery ownership is unavailable");
   root.unmount();
 });
 

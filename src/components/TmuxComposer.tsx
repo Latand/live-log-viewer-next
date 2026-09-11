@@ -3044,26 +3044,50 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
       setStatus({ kind: "err", text: t("inject.imagesUnsupported") });
       return;
     }
+    /* Documents DO ride along, exactly as they do on a send: the route writes
+       the bytes to the conversation inbox and folds their paths into the text,
+       so they need no engine image capability. Reading them here is what keeps
+       the earlier refusal honest — it refuses pictures, which genuinely cannot
+       be carried, rather than every attachment. */
+    const requestedFiles = attachments.filesRef.current.map((file) => ({ ...file }));
     const reference = viewerSelectedContext();
     const snapshotText = textRef.current;
     const clientMessageId = mintIdempotencyKey();
-    /* The placement is read from the SAME state authority the rest of the
-       composer reads, so the confirmation the operator gets describes the turn
-       axis the action was submitted against. The runtime re-checks it at
-       actuation and is the authority; this only decides what to say. */
-    const intoRunningTurn = structuredSession.session.turn === "running";
     setText("");
-    setStatus({ kind: "ok", text: intoRunningTurn ? t("inject.submittedActive") : t("inject.submittedIdle") });
+    /* THE STAGED DOCUMENTS STAY UNTIL THE ANSWER. Clearing them now would be
+       unrecoverable: the restore path rebuilds a file slot WITHOUT its bytes —
+       it exists for a page reload, where the bytes are genuinely gone — so a
+       refusal would leave the operator holding a chip that can no longer be
+       sent. Text is different: it is a string this closure still has, so it
+       clears immediately and comes back if the request is refused. */
+    /* A SUBMISSION, NOT AN OUTCOME. The request has not been answered yet, and
+       even a successful answer only means the injection was admitted: it can
+       still settle `uncertain` because an empty engine acknowledgement proves
+       nothing about the thread. The placement is reported by the receipt, once
+       the insertion has actually been observed — saying "Added" here would
+       claim the one thing this operation is careful never to assume. */
+    setStatus({ kind: "ok", text: t("inject.submitting") });
     inputRef.current?.focus();
     void (async () => {
       const answer = await runtimeDependencies.injectRuntimeContext({
         conversationId: structuredSession.session.conversationId,
         text: requestedText,
         idempotencyKey: clientMessageId,
+        ...(requestedFiles.length
+          ? { files: requestedFiles.map((file) => ({ name: file.name, base64: file.base64 })) }
+          : {}),
         ...(reference ? { selectedContext: reference } : {}),
       });
-      if (answer.ok) return;
-      /* A REFUSAL GIVES THE DRAFT BACK, and never over something typed since. */
+      if (answer.ok) {
+        /* Accepted, and only that. The placement is the receipt's to report,
+           once the insertion has been observed in the thread. */
+        setStatus({ kind: "ok", text: t("inject.submitted") });
+        attachments.clearAll();
+        return;
+      }
+      /* A REFUSAL GIVES THE DRAFT BACK — and never over something the operator
+         has typed since. The documents never left, so there is nothing to
+         restore for them. */
       setStatus({ kind: "err", text: answer.error ?? t("inject.refused") });
       setText((current) => current || snapshotText);
     })();
