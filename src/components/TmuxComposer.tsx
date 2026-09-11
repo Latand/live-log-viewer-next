@@ -1675,6 +1675,18 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
      the editable draft — that draft was already cleared at submit time and
      anything in it now belongs to the next message. */
   const outboxKeys = useRef<Set<string>>(new Set());
+  /* Intake ids of staged documents an Add to context request is carrying and
+     has not been answered for (#1560). Their chips stay in the tray until the
+     answer, so a second Add to context and the queue-first submit (Send, Enter,
+     Alt+Enter, steer, dictation) refuse while one of them is still there: Codex
+     does not deduplicate injections, and an Enter would carry the same bytes
+     into an interrupting send. */
+  const injectingFileIds = useRef<Set<string>>(new Set());
+  const refuseWhileInjecting = (files: readonly PendingFile[]): boolean => {
+    if (!files.some((file) => injectingFileIds.current.has(file.id))) return false;
+    setStatus({ kind: "err", text: t("inject.submitting") });
+    return true;
+  };
   const [immediateRuntimeReceipts, setImmediateRuntimeReceipts] = useState<RuntimeReceipt[]>(() => readRecoveryReceipts(cardId));
   const [reconcilingSend, setReconcilingSend] = useState(() =>
     typeof window !== "undefined" && readPendingDeliveries(cardId).some((entry) => entry.reconciling));
@@ -2212,6 +2224,7 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
     const requestedFiles: PendingFile[] = preserveDraft ? [] : attachments.filesRef.current.map((file) => ({ ...file }));
     if (voiceSending || reconcilingSend) return;
     if (!requestedText.trim() && !requestedImages.length && !requestedFiles.length) return;
+    if (refuseWhileInjecting(requestedFiles)) return;
     if (deadHost && !structuredSession) {
       setStatus({ kind: "err", text: t("deadHost.sendBlocked") });
       return;
@@ -3052,6 +3065,7 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
       return;
     }
     if (!requestedText && !attachments.filesRef.current.length) return;
+    if (refuseWhileInjecting(attachments.filesRef.current)) return;
     if (voiceSending || reconcilingSend) return;
     if (effectiveSendBlockedReason) {
       setStatus({ kind: "err", text: effectiveSendBlockedReason });
@@ -3080,7 +3094,9 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
        it exists for a page reload, where the bytes are genuinely gone — so a
        refusal would leave the operator holding a chip that can no longer be
        sent. Text is different: it is a string this closure still has, so it
-       clears immediately and comes back if the request is refused. */
+       clears immediately and comes back if the request is refused. Staying in
+       the tray, they are fenced from every other submission until then. */
+    for (const file of requestedFiles) injectingFileIds.current.add(file.id);
     /* A SUBMISSION, NOT AN OUTCOME. The request has not been answered yet, and
        even a successful answer only means the injection was admitted: it can
        still settle `uncertain` because an empty engine acknowledgement proves
@@ -3098,6 +3114,8 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
           ? { files: requestedFiles.map((file) => ({ name: file.name, base64: file.base64 })) }
           : {}),
         ...(reference ? { selectedContext: reference } : {}),
+      }).finally(() => {
+        for (const file of requestedFiles) injectingFileIds.current.delete(file.id);
       });
       if (answer.ok) {
         /* Accepted, and only that. The placement is the receipt's to report,

@@ -529,3 +529,70 @@ test("an accepted injection removes only its own documents and preserves later i
   expect(injections[0]!.files).toMatchObject([{ name: "first.md" }]);
   root.unmount();
 });
+
+/** Every request any path made that carried a document of this name. */
+const carrying = (name: string) =>
+  [...injections, ...sends, ...queueWrites].filter((request) =>
+    Array.isArray(request.files) && (request.files as { name: string }[]).some((entry) => entry.name === name));
+
+test("a document already on its way into the context cannot be submitted again while the request is pending", async () => {
+  turn = "running";
+  holdInjection = true;
+  const { host, root } = await mount();
+  await type(host, "read the notes");
+  await stageFile(host, "design-notes.md", "# notes\n");
+  await openSendMenu(host);
+  await settle(() => menuAction(host, "Add to context")!.click());
+  expect(carrying("design-notes.md")).toHaveLength(1);
+
+  /* The chip is still in the tray, so a second Add to context and an Enter
+     both reach for it. Neither may carry it again: Codex does not deduplicate
+     injections, and the Enter would interrupt the turn this action exists to
+     leave alone. */
+  await openSendMenu(host);
+  await settle(() => menuAction(host, "Add to context")!.click());
+  await type(host, "and answer me");
+  await settle(() => press(textarea(host), "Enter"));
+  await settle(() => {});
+  expect(carrying("design-notes.md")).toHaveLength(1);
+  expect(sends).toEqual([]);
+  expect(queueWrites).toEqual([]);
+  /* The refused Enter keeps what the operator typed. */
+  expect(textarea(host).value).toBe("and answer me");
+
+  await settle(() => releaseInjection?.());
+  /* Accepted: the document left with the injection, so the fence lifts and
+     the typed message sends on its own. */
+  expect(host.textContent).not.toContain("design-notes.md");
+  await settle(() => press(textarea(host), "Enter"));
+  await settle(() => {});
+  expect(sends).toHaveLength(1);
+  expect(sends[0]!.files).toBeUndefined();
+  expect(carrying("design-notes.md")).toHaveLength(1);
+  root.unmount();
+});
+
+test("a refused injection leaves its document staged and sendable, beside documents added meanwhile", async () => {
+  turn = "running";
+  holdInjection = true;
+  injectAnswer = { ok: false, status: 503, error: "structured delivery ownership is unavailable" };
+  const { host, root } = await mount();
+  await type(host, "read the notes");
+  await stageFile(host, "design-notes.md", "# notes\n");
+  await openSendMenu(host);
+  await settle(() => menuAction(host, "Add to context")!.click());
+  await stageFile(host, "later.md", "later");
+
+  await settle(() => releaseInjection?.());
+  expect(host.textContent ?? "").toContain("structured delivery ownership is unavailable");
+  expect(host.textContent).toContain("design-notes.md");
+  expect(host.textContent).toContain("later.md");
+
+  /* Nothing is held any more: the next send carries both documents, once. */
+  await settle(() => press(textarea(host), "Enter"));
+  await settle(() => {});
+  expect(sends).toHaveLength(1);
+  expect((sends[0]!.files as { name: string }[]).map((entry) => entry.name)).toEqual(["design-notes.md", "later.md"]);
+  expect(carrying("design-notes.md")).toHaveLength(2);
+  root.unmount();
+});
