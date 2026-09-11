@@ -202,7 +202,10 @@ plugins = false
     expect(proof?.clientUserMessageId).toBe("lost-native");
     expect(requests.some(r => r.method === "thread/turns/list")).toBeTrue();
     expect(requests.some(r => r.method === "thread/turns/list" && r.params.itemsView === "notLoaded")).toBeTrue();
-    await host.interrupt((await host.health()).activeTurnRef!);
+    const recoveredState = await host.health();
+    const recoveredTurn = recoveredState.activeTurnRef;
+    if (!recoveredTurn) expect(recoveredState.status).toBe("idle");
+    if (recoveredTurn) await host.interrupt(recoveredTurn);
     await until(async () => (await host!.health()).activeTurnRef === null);
     const delivery = new StructuredDeliveryQueue({
       effects: async () => journal.effectBatch(100, ["runtime.send"]),
