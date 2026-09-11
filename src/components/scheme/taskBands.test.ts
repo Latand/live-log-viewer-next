@@ -765,6 +765,55 @@ test("a round recorded after the task finished is current work, never folded his
   expect(collapsedWith(withRounds(round(1, "2026-01-01T00:00:00Z")), "not a date").available).toBe(false);
 });
 
+/** A completed task that owns a parked pipeline whose one stage ran on an idle
+    conversation; the task finished on 2026-01-02. */
+function pipelineTaskScene(attempt: Partial<import("@/lib/pipelines/types").PipelineStageAttempt>, flows: import("@/lib/flows/types").Flow[] = []) {
+  const files = [file(0, "idle")];
+  const pipeline = pipelineWith("p", files, ["done"]);
+  pipeline.state = "needs_decision";
+  Object.assign(pipeline.runs[0]!.attempts[0]!, { state: "needs_decision", startedAt: "2026-01-01T00:00:00Z", completedAt: "2026-01-01T01:00:00Z" }, attempt);
+  const layout = base(files);
+  layout.groups = [{ key: "group::pipeline::p", kind: "pipeline", id: "p", hue: 0, members: [files[0]!.path], label: "Pipeline p", pipeline, x: 0, y: 0, w: 0, h: 0 }];
+  const done = { ...task("done", "2026-01-01T00:00:00Z", files, "done"), updatedAt: "2026-01-02T00:00:00Z" };
+  const bands = buildTaskBands(layout, { tasks: [done], projection: projectTaskWorkflows([done], [pipeline], flows, files), untitled: "Untitled task" });
+  expect(bands[0]!.groups).toEqual(["group::pipeline::p"]);
+  const scene = layoutTaskBands(layout, bands, { mode: "near", viewportWidth: 1440, reader: null, flows });
+  return { available: scene.bands[0]!.geometry.historyAvailable, shown: scene.shown.has(files[0]!.path), pipeline };
+}
+
+test("a parked pipeline attempt started after completion, or never dated, is current work", () => {
+  // Parked before completion: history.
+  expect(pipelineTaskScene({})).toMatchObject({ available: true, shown: false });
+  // Started after completion and parked without a completion date.
+  const renewed = pipelineTaskScene({ startedAt: "2026-01-03T00:00:00Z", completedAt: null });
+  expect(renewed).toMatchObject({ available: false, shown: true });
+  expect(renewed.pipeline.state).toBe("needs_decision");
+  // Parked before it ever launched: nothing dates it before completion.
+  expect(pipelineTaskScene({ startedAt: null, completedAt: null })).toMatchObject({ available: false, shown: true });
+});
+
+test("a pipeline's review loop with a round after completion is current work, read from the flow catalog", () => {
+  const round = (startedAt: string) => ({ ...reviewFlow("", "approved").rounds[0]!, verdict: "REQUEST_CHANGES" as const, startedAt });
+  const loop = (startedAt: string) => ({ ...reviewFlow(file(0).path, "approved"), id: "flow-p", state: "needs_decision" as const, rounds: [round("2026-01-01T00:30:00Z"), round(startedAt)] });
+  const attempt = { state: "passed" as const, flowId: "flow-p" };
+  // The loop is not a board deck, so only the catalog carries its new round.
+  expect(pipelineTaskScene(attempt, [loop("2026-01-03T00:00:00Z")])).toMatchObject({ available: false, shown: true });
+  expect(pipelineTaskScene(attempt, [loop("2026-01-01T00:40:00Z")])).toMatchObject({ available: true, shown: false });
+  expect(pipelineTaskScene(attempt, [{ ...loop("2026-01-01T00:40:00Z"), state: "reviewing" }])).toMatchObject({ available: false, shown: true });
+});
+
+test("an incomplete scan of a completed task's conversation keeps its history open", () => {
+  const scene = (extra: Partial<FileEntry>) => {
+    const files = [file(0, null, extra)];
+    const layout = base(files);
+    const bands = buildTaskBands(layout, sources([task("done", "2026-01-01T00:00:00Z", files, "done")], files));
+    return layoutTaskBands(layout, bands, { mode: "near", viewportWidth: 1440, reader: null }).bands[0]!.geometry.historyAvailable;
+  };
+  // No turn evidence and an idle mtime: complete, it is idle; incomplete, it is unread.
+  expect(scene({ derivationComplete: true })).toBe(true);
+  expect(scene({ derivationComplete: false })).toBe(false);
+});
+
 test("461 empty tasks pack into readable header surfaces without dropping visibility choices", () => {
   const tasks = Array.from({ length: 461 }, (_, i) => ({ ...task(String(i), "2026-01-01T00:00:00Z", [], i === 0 ? "done" : "assigned"), showOnBoard: true }));
   const layout = base([]);

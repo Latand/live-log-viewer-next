@@ -525,6 +525,8 @@ export interface BandLayoutOptions {
       task's automatic history fold never hides one; the band's own history
       control still does. */
   expandedDecks?: ReadonlySet<string>;
+  /** The flow catalog, for review loops a pipeline stage ran without a deck. */
+  flows?: readonly Flow[];
 }
 
 /** A recorded relation whose other endpoint lives in another band: shown as a
@@ -663,7 +665,7 @@ export function layoutTaskBands(base: SchemeLayout, orderedBands: readonly TaskB
     const empty = !bandHoldsMembers(band);
     if (!empty && emptyColumn) { cursorY += headerH + BAND.gap; emptyColumn = 0; }
     const bandX = gutter + (empty ? emptyColumn * (minBandW + BAND.gap) : 0);
-    const historyAvailable = bandHistoryAvailable(band, base);
+    const historyAvailable = bandHistoryAvailable(band, base, options.flows);
     const historyChoice = options.historyOverrides?.get(band.id);
     const historyCollapsed = historyAvailable && historyChoice !== true
       && !(historyChoice === undefined && band.members.some(member => member.kind === "deck" && options.expandedDecks?.has(member.key)))

@@ -563,3 +563,33 @@ test("an empty task band offers Remove from board; a band holding a conversation
   expect((patch!.body as { board?: string }).board).toBe("hidden");
   expect(requests.some((request) => request.method === "DELETE")).toBe(false);
 });
+
+test("collapsing one task's history leaves another task's open reader alone; folding the reader's own band closes it", async () => {
+  const finished = { ...task("older-idle", "Repair old links", "2026-01-01T00:00:00.000Z", [quietOne, quietTwo]), status: "done" as const };
+  const host = mount(undefined, [finished, tasks[1]!]);
+  await settle();
+  const viewport = viewportOf(host);
+  const history = () => host.querySelector('[data-scheme-band-history="task:older-idle"]') as HTMLButtonElement;
+  const presentation = (path: string) => host.querySelector(`[data-scheme-node="${path}"]`)!.getAttribute("data-scheme-node-presentation");
+  expect(history().getAttribute("aria-expanded")).toBe("false");
+  select(viewport, "/busy");
+  await settle();
+  expect(presentation("/busy")).toBe("native");
+  press(history());
+  await settle();
+  expect(history().getAttribute("aria-expanded")).toBe("true");
+  press(history());
+  await settle();
+  expect(history().getAttribute("aria-expanded")).toBe("false");
+  expect(presentation("/busy")).toBe("native");
+  /* A reader inside the history keeps its band revealed, so the band folds
+     only because pressing its control closed that reader. */
+  press(history());
+  await settle();
+  select(viewport, "/quiet-one");
+  await settle();
+  expect(presentation("/quiet-one")).toBe("native");
+  press(history());
+  await settle();
+  expect(history().getAttribute("aria-expanded")).toBe("false");
+});

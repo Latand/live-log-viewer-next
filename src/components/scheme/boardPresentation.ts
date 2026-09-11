@@ -25,31 +25,37 @@ function recordedAt(value: string | null | undefined): number | null {
   return Number.isFinite(at) ? at : null;
 }
 
+/** Work placed after the task finished, or with no readable date at all,
+ * cannot be shown to predate completion. */
+function mayPostdate(values: readonly (string | null | undefined)[], finishedAt: number): boolean {
+  const dates = values.map(recordedAt).filter((at): at is number => at !== null);
+  return !dates.length || dates.some(at => at > finishedAt);
+}
+
 function pipelineMayHaveWork(pipeline: Pipeline, finishedAt: number): boolean {
-  const after = (value: string | null) => (recordedAt(value) ?? -Infinity) > finishedAt;
-  if (after(pipeline.createdAt) || pipeline.unconfirmedHosts?.length) return true;
+  if (mayPostdate([pipeline.createdAt], finishedAt) || pipeline.unconfirmedHosts?.length) return true;
   if (!["needs_decision", "completed", "closed"].includes(pipeline.state)) return true;
   return pipeline.runs.some(run => run.attempts.some(attempt =>
     ["spawning", "running", "reviewing", "committing"].includes(attempt.state)
     || Boolean(attempt.unresolvedTermination?.survivors.length)
-    || after(attempt.completedAt),
+    || mayPostdate([attempt.startedAt, attempt.completedAt], finishedAt),
   ));
 }
 
 /** A review loop's current work is its latest round (its creation before the
  * first). A round started, reviewed or relayed after the task finished is a new
- * decision; one with no readable date cannot be shown to predate completion. */
+ * decision. */
 function flowMayHaveWork(flow: Flow, finishedAt: number): boolean {
   if (!["approved", "done_comment", "needs_decision", "closed"].includes(flow.state)) return true;
   const latest = flow.rounds.at(-1);
-  const dates = (latest ? [latest.startedAt, latest.reviewedAt, latest.terminalAt, latest.relayedAt] : [flow.createdAt])
-    .map(recordedAt).filter((at): at is number => at !== null);
-  return !dates.length || dates.some(at => at > finishedAt);
+  return mayPostdate(latest ? [latest.startedAt, latest.reviewedAt, latest.terminalAt, latest.relayedAt] : [flow.createdAt], finishedAt);
 }
 
 /** A completed task may retain a parked old run. Its recorded state stays on
- * the history heading. Live/unknown work and drafts keep their surfaces. */
-export function bandHistoryAvailable(band: TaskBand, base: SchemeLayout): boolean {
+ * the history heading. Live/unknown work, incomplete evidence and drafts keep
+ * their surfaces. `flows` is the flow catalog: a pipeline's review loops are
+ * not board decks, so only their records say whether a round is new. */
+export function bandHistoryAvailable(band: TaskBand, base: SchemeLayout, flows: readonly Flow[] = []): boolean {
   if (band.status !== "done" || band.working || band.unknown || !band.members.length) return false;
   const finishedAt = recordedAt(band.task?.updatedAt);
   if (finishedAt === null) return false;
@@ -59,16 +65,20 @@ export function bandHistoryAvailable(band: TaskBand, base: SchemeLayout): boolea
     ...(base.decks.find(deck => deck.key === member.key)?.rounds.flatMap(round => round.file ? [round.file] : []) ?? []),
   ]);
   if (band.members.some(member => member.kind === "draft")) return false;
-  if (files.some(file => file.pendingQuestion || file.waitingInput
+  if (files.some(file => file.pendingQuestion || file.waitingInput || file.derivationComplete === false
     || file.authoritativeTurn?.state === "unknown" || file.authoritativeTurn?.state === "busy"
     || file.proc === "running" || (file.spawn && file.spawn.state !== "failed"))) return false;
   const groups = base.groups.filter(group => band.groups.includes(group.key));
-  /* A pipeline's review stage draws its deck without a flow group, so the
-     band's decks answer for their loops as well. */
-  const decks = base.decks.filter(deck => band.members.some(member => member.key === deck.key));
-  const flows = [...groups.flatMap(group => !group.pipeline && group.flow ? [group.flow] : []), ...decks.map(deck => deck.flow)];
+  /* A band's review loops: flow groups, decks placed without one, and every
+     loop a pipeline stage ran. */
+  const flowIds = new Set(groups.flatMap(group => group.pipeline?.runs.flatMap(run => run.attempts.flatMap(attempt => attempt.flowId ? [attempt.flowId] : [])) ?? []));
+  const loops = [
+    ...groups.flatMap(group => !group.pipeline && group.flow ? [group.flow] : []),
+    ...base.decks.filter(deck => band.members.some(member => member.key === deck.key)).map(deck => deck.flow),
+    ...(flowIds.size ? flows.filter(flow => flowIds.has(flow.id)) : []),
+  ];
   return !groups.some(group => group.pipeline && pipelineMayHaveWork(group.pipeline, finishedAt))
-    && !flows.some(flow => flowMayHaveWork(flow, finishedAt));
+    && !loops.some(flow => flowMayHaveWork(flow, finishedAt));
 }
 
 export function bandContainsTarget(band: TaskBand, base: SchemeLayout, target: string | null): boolean {

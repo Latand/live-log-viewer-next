@@ -212,9 +212,46 @@ async function historyChecks(width: number) {
   await context.close();
 }
 
+/* Completed task 1 owns pipeline-0 and folds as history. Each fixture step is
+   evidence the fold must not hide: it stays open without the history label,
+   live and after reload. */
+const oldBand = '[data-scheme-band="task:task-1"]', oldToggle = '[data-scheme-band-history="task:task-1"]';
+const oldMembers = ['[data-scheme-node="/fixture/worker-1.jsonl"]', '[data-scheme-node="slot::pipeline-0::build"]'];
+async function evidenceChecks(width: number) {
+  for (const step of ["parked", "undated", "pipelineRound", "unread"]) {
+    const tag = `${width}-evidence-${step}`;
+    const { context, page } = await open(width, "?case=history");
+    await zoom(page, 1); await panTo(page, oldBand);
+    must(await page.locator(oldToggle).getAttribute("aria-expanded") === "false", `${tag}: the old task folds before the step`);
+    await page.evaluate(step => window.densityStep(step), step); await wait(page); await panTo(page, oldBand);
+    for (const phase of ["live", "reload"]) {
+      if (phase === "reload") { await page.reload(); await page.waitForSelector("[data-scheme-band]", {timeout:15000}); await wait(page); await zoom(page, 1); await panTo(page, oldBand); }
+      const text = await page.locator(oldBand).innerText();
+      must(!await page.locator(oldToggle).count() && !text.includes("Historical runs"), `${tag}: ${phase} is not labeled history`);
+      for (const member of oldMembers) must(await present(page, member), `${tag}: ${phase} keeps ${member}`);
+    }
+    if (step === "pipelineRound") await page.screenshot({ path: path.join(out, `${tag}.png`) });
+    await context.close();
+  }
+  /* Folding one task's history leaves another task's open reader alone. */
+  const tag = `${width}-evidence-focus`;
+  const { context, page } = await open(width, "?case=history");
+  await zoom(page, 1); await panTo(page, oldBand);
+  must(await click(page, oldToggle), `${tag}: Show history reachable`);
+  await page.evaluate(() => window.openConversation(3)); await page.waitForTimeout(1600);
+  const reader = '[data-scheme-node="/fixture/worker-3.jsonl"]';
+  must(await page.locator(reader).getAttribute("data-scheme-node-presentation") === "native", `${tag}: worker 3 reader opens`);
+  await panTo(page, oldToggle, 160);
+  must(await click(page, oldToggle), `${tag}: Collapse history reachable`);
+  must(await page.locator(oldToggle).getAttribute("aria-expanded") === "false", `${tag}: the old task folds`);
+  must(await page.locator(reader).getAttribute("data-scheme-node-presentation") === "native", `${tag}: worker 3 reader stays open`);
+  await context.close();
+}
+
 try {
   for (const width of [1440, 830, 390]) {
     await historyChecks(width);
+    await evidenceChecks(width);
     const { context, page } = await open(width);
     for (const z of [0.9, 1, 1.6]) {
       await zoom(page,z);

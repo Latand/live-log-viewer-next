@@ -50,6 +50,7 @@ import { AgentLinksLayer, EdgesLayer, GroupsLayer, LoopsLayer, MOVE_EASE, NodesL
 import type { TaskCardHandlers } from "./TaskCard";
 import { TaskEdgesLayer } from "./TaskEdgesLayer";
 import { TasksLayer } from "./TasksLayer";
+import { bandContainsTarget } from "./boardPresentation";
 import { applyBandOrder, bandModeFor, buildTaskBands, layoutTaskBands, rankBands, type BandMirror, type BandMode, type PlacedBand, type TaskBand } from "./taskBands";
 import { TaskBandsLayer } from "./TaskBandsLayer";
 import { findFreeSlot } from "./findFreeSlot";
@@ -438,16 +439,18 @@ export function SchemeBoard({
     return next;
   }), []);
   const toggleBandHistory = useCallback((band: PlacedBand) => {
-    if (!band.geometry.historyCollapsed) setSelected(null);
+    /* The open reader keeps its band revealed, so folding that band closes it;
+       folding any other band leaves the reader alone. */
+    if (!band.geometry.historyCollapsed && bandContainsTarget(band, authoredLayout, selected)) setSelected(null);
     setHistoryOverrides(previous => {
       const next = new Map(previous).set(band.id, band.geometry.historyCollapsed);
       try { localStorage.setItem(`llv-board-history:${project}`, JSON.stringify([...next])); } catch { /* session choice still works */ }
       return next;
     });
-  }, [project]);
+  }, [project, authoredLayout, selected]);
   const taskScene = useMemo(() => bandsEnabled
-    ? layoutTaskBands(authoredLayout, orderedBands, { mode: bandMode, viewportWidth: layoutViewportWidth, reader: selected, hostOverrides, collapsedDecks, expandedDecks, expandedStages, historyOverrides, revealTarget: selected })
-    : null, [bandsEnabled, authoredLayout, orderedBands, bandMode, layoutViewportWidth, selected, hostOverrides, collapsedDecks, expandedDecks, expandedStages, historyOverrides]);
+    ? layoutTaskBands(authoredLayout, orderedBands, { mode: bandMode, viewportWidth: layoutViewportWidth, reader: selected, hostOverrides, collapsedDecks, expandedDecks, expandedStages, historyOverrides, revealTarget: selected, flows })
+    : null, [bandsEnabled, authoredLayout, orderedBands, bandMode, layoutViewportWidth, selected, hostOverrides, collapsedDecks, expandedDecks, expandedStages, historyOverrides, flows]);
   const layout = taskScene?.layout ?? authoredLayout;
 
   /* NO PRUNING HERE (#771). The selection outlives this view, so dropping a path
