@@ -88,6 +88,8 @@ const MAX_OPEN_TURNS = 32;
 /** Fragment ids one call remembers, so a fragment delivered again is known
     however long ago its turn ended. */
 const MAX_SEEN_FRAGMENTS = 2_048;
+/** Turn ids of the dones that closed a turn, remembered for the same reason. */
+const MAX_SEEN_COMPLETIONS = 512;
 /** Earlier calls whose late canonical segments must stay out of the current one. */
 const MAX_RETIRED_SESSIONS = 8;
 
@@ -102,8 +104,6 @@ interface CaptionTurn {
   /** The words of the `turn.done` that closed the turn: the provider's final
       transcript. Null while the turn is open, and when that done had none. */
   finalText: string | null;
-  /** The turn id that done carried, to know the same done delivered again. */
-  closedBy: string | null;
   closed: boolean;
   /** The panel line it is on, once drawn. */
   line: string | null;
@@ -115,6 +115,11 @@ interface CanonicalTurn {
   /** The whole segment so far, as the store carries it. */
   text: string;
   final: boolean;
+  /** What the segment said before a repair rewrote it, when this client saw
+      it: the words its fragments accumulated, which is what the caption of
+      the same turn streamed. Null until a text arrives that does not continue
+      the one before. */
+  unrepaired: { text: string; final: boolean } | null;
   line: string | null;
   /** The caption turn it was last aligned with. */
   caption: CaptionTurn | null;
@@ -138,8 +143,6 @@ interface TranscriptLedger {
       speaker's line whenever the other spoke split every overlapping sentence
       into fragments. */
   streaming: Map<TranscriptSpeaker, CaptionTurn>;
-  /** Each speaker's latest caption turn, open or closed. */
-  lastCaption: Map<TranscriptSpeaker, CaptionTurn>;
   /** Each speaker's turns still open to alignment, per source, in the order
       that source took them. Everything older has settled on its line. */
   open: Record<TranscriptSpeaker, { captions: CaptionTurn[]; canonicals: CanonicalTurn[] }>;
@@ -147,16 +150,18 @@ interface TranscriptLedger {
   segments: Map<string, CanonicalTurn>;
   /** Fragment ids already applied. */
   fragments: Set<string>;
+  /** Turn ids of the dones that already closed a turn. */
+  completions: Set<string>;
 }
 
 function newTranscriptLedger(sessionId: string | null = null): TranscriptLedger {
   return {
     sessionId,
     streaming: new Map(),
-    lastCaption: new Map(),
     open: { user: { captions: [], canonicals: [] }, assistant: { captions: [], canonicals: [] } },
     segments: new Map(),
     fragments: new Set(),
+    completions: new Set(),
   };
 }
 
@@ -183,11 +188,18 @@ function continues(longer: string, shorter: string): boolean {
 
 /* How strongly a caption turn and a canonical segment are shown to be one turn. */
 const DIFFERENT_TURNS = 0;
-/** Only their first words agree. That is all a final segment whose text its
-    repair rewrote shares with a caption that has no final text of its own. */
-const SAME_OPENING = 1;
+/** Only one end of their words agrees: the first words, or every word after
+    the first. That is all a final segment whose repair rewrote the other end
+    shares with a caption that has no final text of its own. */
+const SAME_EDGE = 1;
 /** Their words agree past the opening. */
 const SAME_WORDS = 2;
+
+/** The words of a text, as a repair can leave them: case and punctuation are
+    the provider's to change. */
+function words(text: string): string[] {
+  return comparable(text).toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, "").split(" ").filter(Boolean);
+}
 
 /**
  * Whether a caption turn and a canonical segment are the same spoken turn.
@@ -199,9 +211,20 @@ const SAME_WORDS = 2;
  * fragments as the caption, one a little ahead of the other; a final one is what
  * those fragments accumulated or, once repaired, the provider's final text. A
  * pair that fits none of that is two turns, whatever order they arrived in.
+ *
+ * A repair replaces the segment's text, so the text it replaced is kept and
+ * weighed too: it is the fragments themselves, and the evidence the caption of
+ * the same turn still carries.
  */
 function sameTurn(caption: CaptionTurn, canonical: CanonicalTurn): number {
-  const committed = comparable(canonical.text);
+  const now = agreement(caption, canonical.text, canonical.final);
+  return canonical.unrepaired
+    ? Math.max(now, agreement(caption, canonical.unrepaired.text, canonical.unrepaired.final))
+    : now;
+}
+
+function agreement(caption: CaptionTurn, text: string, final: boolean): number {
+  const committed = comparable(text);
   const opening = comparable(caption.opening);
   const finalText = caption.finalText === null ? null : comparable(caption.finalText);
   /* A turn that streamed nothing is only its final text. */
@@ -210,9 +233,18 @@ function sameTurn(caption: CaptionTurn, canonical: CanonicalTurn): number {
   if (!committed.startsWith(opening) && !opening.startsWith(committed)) {
     /* A different start. The provider's final text can still show one turn,
        because a repair may rewrite how the turn began. */
-    return canonical.final && finalText === committed ? SAME_WORDS : DIFFERENT_TURNS;
+    if (!final) return DIFFERENT_TURNS;
+    if (finalText !== null) return finalText === committed ? SAME_WORDS : DIFFERENT_TURNS;
+    /* A caption whose done had no words has only its fragments, and a repair
+       of the opening word keeps every word after it. */
+    const said = words(streamed);
+    const kept = words(committed);
+    return caption.closed && said.length > 1 && said.length === kept.length
+      && said.every((word, index) => index === 0 || word === kept[index])
+      ? SAME_EDGE
+      : DIFFERENT_TURNS;
   }
-  if (!canonical.final) {
+  if (!final) {
     /* A closed caption already holds every fragment the segment can reach. */
     return streamed.startsWith(committed) || (!caption.closed && committed.startsWith(streamed))
       ? SAME_WORDS
@@ -223,7 +255,7 @@ function sameTurn(caption: CaptionTurn, canonical: CanonicalTurn): number {
   }
   /* A caption with a final text of its own that still disagrees is another
      turn; one without it can be checked no further than its opening. */
-  return finalText === null ? SAME_OPENING : DIFFERENT_TURNS;
+  return finalText === null ? SAME_EDGE : DIFFERENT_TURNS;
 }
 
 /**
@@ -1033,7 +1065,9 @@ class CodexRealtimeClient {
       const placed = ledger.segments.get(segment.segmentId);
       if (!placed) {
         if (!comparable(text) || !this.belongsToThisCall(segment.realtimeSessionId)) continue;
-        const turn: CanonicalTurn = { role: segment.role, text, final: segment.final, line: null, caption: null };
+        const turn: CanonicalTurn = {
+          role: segment.role, text, final: segment.final, unrepaired: null, line: null, caption: null,
+        };
         ledger.segments.set(segment.segmentId, turn);
         forgetOldest(ledger.segments, MAX_CANONICAL_SEGMENTS);
         ledger.open[segment.role].canonicals.push(turn);
@@ -1043,6 +1077,10 @@ class CodexRealtimeClient {
       /* A settled segment is not reopened by a late non-final frame of it. */
       if (!comparable(text) || (placed.final && !segment.final)) continue;
       if (placed.text === text && placed.final === segment.final) continue;
+      /* A repair replaces the words; the ones it replaced still name the turn. */
+      if (!placed.unrepaired && !continues(text, placed.text)) {
+        placed.unrepaired = { text: placed.text, final: placed.final };
+      }
       placed.text = text;
       placed.final = segment.final;
       if (ledger.open[placed.role].canonicals.includes(placed)) realign.add(placed.role);
@@ -1086,30 +1124,33 @@ class CodexRealtimeClient {
       ledger.fragments.add(chunkId);
       forgetOldest(ledger.fragments, MAX_SEEN_FRAGMENTS);
     }
+    /* So is a done: the one that closed a turn, delivered again, is known by
+       the turn id it carries, and ends neither that turn a second time nor the
+       one streaming now. */
+    if (final && turnId && ledger.completions.has(turnId)) return;
     let turn = ledger.streaming.get(role);
     if (!turn) {
       /* A done with no words and nothing streamed before it is no turn. */
       if (!text) return;
-      /* Nor is the done that closed the last turn, delivered again, known by
-         the turn id it carries. */
-      const last = ledger.lastCaption.get(role);
-      if (final && turnId && last?.closedBy === turnId && last.finalText !== null
-        && comparable(last.finalText) === comparable(text)) return;
-      turn = { role, streamed: "", opening: text, finalText: null, closedBy: null, closed: false, line: null };
+      turn = { role, streamed: "", opening: text, finalText: null, closed: false, line: null };
       ledger.open[role].captions.push(turn);
-      ledger.lastCaption.set(role, turn);
       if (!final) ledger.streaming.set(role, turn);
     }
     if (final) {
       /* A done carries the complete turn; an empty one keeps what streamed. */
       turn.finalText = text ? text.slice(0, MAX_LINE_CHARS) : null;
-      turn.closedBy = turnId ?? null;
       turn.closed = true;
       ledger.streaming.delete(role);
+      if (turnId) {
+        ledger.completions.add(turnId);
+        forgetOldest(ledger.completions, MAX_SEEN_COMPLETIONS);
+      }
     } else {
-      /* A fragment carries only the new words, except on backends that resend
-         the whole text, which the prefix check absorbs. */
-      turn.streamed = (text.startsWith(turn.streamed) ? text : `${turn.streamed}${text}`).slice(-MAX_LINE_CHARS);
+      /* A fragment with its own id is one delta, so a word said twice in a row
+         is two of them. Only a fragment without one may be a backend resending
+         the whole text so far, which the prefix check absorbs. */
+      const whole = !chunkId && text.startsWith(turn.streamed);
+      turn.streamed = (whole ? text : `${turn.streamed}${text}`).slice(-MAX_LINE_CHARS);
       if (!comparable(turn.opening)) turn.opening = text;
     }
     this.draw(this.realign(role));

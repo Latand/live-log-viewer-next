@@ -1,14 +1,19 @@
-import { afterAll, beforeEach, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeEach, expect, test } from "bun:test";
 import fs from "node:fs";
 import path from "node:path";
 import { Window } from "happy-dom";
+import { createElement } from "react";
+import { flushSync } from "react-dom";
+import { createRoot, type Root } from "react-dom/client";
 
 import { applyEvent, emptyStore, type RuntimeStore } from "@/components/runtime/runtimeModel";
+import { VoiceConversationPanel } from "@/components/VoiceConversation";
+import { translate, type TFunction } from "@/lib/i18n";
 import { CodexRealtimeTranscript } from "@/lib/runtime/codexRealtimeTranscript";
 import { projectEngineHostEvent } from "@/lib/runtime/engineHostEvents";
 import type { RuntimeEvent } from "@/lib/runtime/engineHost";
 
-import { codexRealtimeClient } from "./codexRealtimeClient";
+import { codexRealtimeClient, type CodexRealtimeRole } from "./codexRealtimeClient";
 
 /**
  * The canonical transcript's whole path to the panel (#1629).
@@ -27,6 +32,9 @@ import { codexRealtimeClient } from "./codexRealtimeClient";
  * 3. `applyRuntimeEvent` folds it into the browser's session store,
  * 4. the real `CodexRealtimeClient` merges what the store carries into its lines.
  *
+ * 5. `VoiceConversationPanel` renders those lines, and every assertion reads
+ *    what it rendered.
+ *
  * The one seam is the socket between 2 and 3, which is the same transport every
  * other runtime event uses and is covered by the runtime bus's own suite. The
  * host's own emission of step 1's output is pinned in
@@ -37,6 +45,9 @@ const dom = new Window();
 Object.assign(globalThis, {
   window: dom,
   document: dom.document,
+  Node: dom.Node,
+  Element: dom.Element,
+  HTMLElement: dom.HTMLElement,
   Audio: dom.Audio,
   MediaStream: dom.MediaStream ?? class {},
 });
@@ -188,6 +199,59 @@ async function call(client: ReturnType<typeof codexRealtimeClient>, session: str
   StubPeerConnection.latest!.channel.onopen?.();
 }
 
+const t: TFunction = (key, params) => translate("en", key, params);
+const ROLE_BY_LABEL = new Map<string, CodexRealtimeRole>(
+  (["user", "assistant", "progress"] as const).map((role) => [
+    t(role === "user" ? "voice.you" : role === "assistant" ? "voice.agent" : "voice.progress"),
+    role,
+  ]),
+);
+const mounts = new Map<Client, { host: HTMLElement; root: Root }>();
+
+afterEach(() => {
+  for (const { host, root } of mounts.values()) {
+    flushSync(() => root.unmount());
+    host.remove();
+  }
+  mounts.clear();
+});
+
+interface Shown {
+  role: CodexRealtimeRole;
+  text: string;
+  final: boolean;
+}
+
+/**
+ * What the operator reads: the client's lines rendered by the real panel.
+ *
+ * Read off the DOM rather than the snapshot, so a line the panel draws twice or
+ * not at all fails here. A speaker's label opens each run of that speaker's
+ * lines, and an unfinished line carries the caret.
+ */
+function shown(client: Client): Shown[] {
+  let mount = mounts.get(client);
+  if (!mount) {
+    const host = document.createElement("div");
+    document.body.append(host);
+    mount = { host, root: createRoot(host) };
+    mounts.set(client, mount);
+  }
+  const { phase, lines, error } = client.getSnapshot();
+  const { root, host } = mount;
+  flushSync(() => root.render(createElement(VoiceConversationPanel, { phase, lines, error, t })));
+  let role: CodexRealtimeRole | null = null;
+  return [...host.querySelectorAll("section [aria-live] > div")].map((row) => {
+    const label = row.querySelector("span.uppercase")?.textContent;
+    if (label) role = ROLE_BY_LABEL.get(label) ?? null;
+    const text = row.querySelector("span.text-label")!;
+    if (!role) throw new Error("the panel drew a line with no speaker");
+    return { role, text: text.textContent ?? "", final: !text.querySelector("[aria-hidden]") };
+  });
+}
+
+const spoken = (client: Client) => shown(client).map((line) => `${line.role}:${line.text}`);
+
 test("a call whose data channel says nothing still shows what the backend committed", async () => {
   /* The failure this closes. Nothing arrives on the data channel at all, and the
      panel used to stay empty for the whole call. */
@@ -200,7 +264,7 @@ test("a call whose data channel says nothing still shows what the backend commit
   });
 
   client.reconcileCanonicalTranscript(carried());
-  expect(client.getSnapshot().lines.map((line) => ({ role: line.role, text: line.text, final: line.final }))).toEqual([
+  expect(shown(client)).toEqual([
     { role: "user", text: "look at that card", final: true },
     { role: "assistant", text: "Reading it now.", final: true },
   ]);
@@ -219,7 +283,7 @@ test("the same sentence from both sources is one line, not two", async () => {
   peer.channel.onmessage?.({
     data: JSON.stringify({ type: "output_transcript.added", item: { text: "is gre" } }),
   });
-  expect(client.getSnapshot().lines).toHaveLength(1);
+  expect(shown(client)).toHaveLength(1);
 
   notified("thread/realtime/item/completed", {
     threadId: THREAD,
@@ -227,7 +291,7 @@ test("the same sentence from both sources is one line, not two", async () => {
   });
   client.reconcileCanonicalTranscript(carried());
 
-  expect(client.getSnapshot().lines.map((line) => ({ role: line.role, text: line.text, final: line.final }))).toEqual([
+  expect(shown(client)).toEqual([
     { role: "assistant", text: "The build is green.", final: true },
   ]);
   await client.stop();
@@ -250,7 +314,7 @@ test("a redelivered segment updates its own line rather than repeating it", asyn
   client.reconcileCanonicalTranscript(carried());
 
   expect(carried()).toHaveLength(1);
-  expect(client.getSnapshot().lines).toHaveLength(1);
+  expect(shown(client)).toHaveLength(1);
   await client.stop();
 });
 
@@ -261,7 +325,7 @@ test("barge-in keeps the two speakers on their own lines", async () => {
   notified("thread/realtime/transcript/done", { threadId: THREAD, role: "user", text: "no, stop" });
   client.reconcileCanonicalTranscript(carried());
 
-  expect(client.getSnapshot().lines.map((line) => `${line.role}:${line.text}`)).toEqual([
+  expect(spoken(client)).toEqual([
     "assistant:I am looking at",
     "user:no, stop",
   ]);
@@ -281,7 +345,7 @@ test("a segment the panel never saw is appended, and one it did is adopted", asy
   });
   client.reconcileCanonicalTranscript(carried());
 
-  expect(client.getSnapshot().lines.map((line) => `${line.role}:${line.text}`)).toEqual([
+  expect(spoken(client)).toEqual([
     "user:read that one",
     "assistant:Reading.",
   ]);
@@ -334,10 +398,6 @@ function replay(client: Client, records: readonly Recorded[]): void {
     else canonical(client, record.method!, record.params!);
   }
 }
-
-const shown = (client: Client) =>
-  client.getSnapshot().lines.map((line) => ({ role: line.role, text: line.text, final: line.final }));
-type Shown = ReturnType<typeof shown>[number];
 
 const DUPLEX_TURNS: Shown[] = [
   { role: "user", text: " Please repeat the read-only", final: true },
@@ -568,8 +628,6 @@ test("both speakers talking at once keep one line each", async () => {
  * shown twice.
  * ------------------------------------------------------------------------ */
 
-const spoken = (client: Client) => shown(client).map((line) => `${line.role}:${line.text}`);
-
 function completedSegment(client: Client, id: string, role: "user" | "assistant", text: string): void {
   canonical(client, "thread/realtime/item/started", {
     threadId: THREAD, item: { id, realtimeSessionId: "realtime-1", type: "transcriptSegment", role, text: "" },
@@ -722,7 +780,7 @@ for (const first of ["caption", "canonical"] as const) {
 test("a completion its mirrored done has not repaired yet never takes the caption's final words away", async () => {
   const client = await panel();
   const seen: string[] = [];
-  const unsubscribe = client.subscribe(() => seen.push(client.getSnapshot().lines.map((line) => line.text).join(" | ")));
+  const unsubscribe = client.subscribe(() => seen.push(shown(client).map((line) => line.text).join(" | ")));
   channel({ type: "output_transcript.added", item: { id: "chunk-hello", type: "output_transcript", text: " Hello" } });
   channel({ type: "output_transcript.added", item: { id: "chunk-world", type: "output_transcript", text: " world" } });
   channel({ type: "turn.done", turn: { id: "turn-hello", role: "assistant", transcript: " Hello big world" } });
@@ -751,5 +809,113 @@ test("a fragment or done delivered again after its turn ended changes nothing, a
   completedSegment(client, "segment-yes-again", "user", " yes");
   channel(fragment);
   expect(spoken(client)).toEqual(["user: yes", "user: yes"]);
+  await client.stop();
+});
+
+/* ------------------------------------------------------------------------ *
+ * A DONE DELIVERED AGAIN, A REPAIR OF THE OPENING WORDS, A WORD SAID TWICE.
+ *
+ * A turn id names the turn its `turn.done` closed, so the same done delivered
+ * again is that finished turn, never the one streaming now. A repair may rewrite
+ * how a turn began, and the caption whose done had no words is still that turn.
+ * A fragment with its own id is one delta, whatever words it repeats.
+ * ------------------------------------------------------------------------ */
+
+test("an earlier turn's done delivered again neither ends the turn streaming now nor adds a line", async () => {
+  const client = await panel();
+  const firstDone = { type: "turn.done", turn: { id: "turn-first", role: "assistant", transcript: " First answer." } };
+  channel({ type: "output_transcript.added", item: { id: "chunk-first", type: "output_transcript", text: " First answer." } });
+  channel(firstDone);
+  completedSegment(client, "segment-first", "assistant", " First answer.");
+
+  channel({ type: "output_transcript.added", item: { id: "chunk-second", type: "output_transcript", text: " Second" } });
+  channel(firstDone);
+  channel({ type: "output_transcript.added", item: { id: "chunk-second-more", type: "output_transcript", text: " answer." } });
+  expect(shown(client)).toEqual([
+    { role: "assistant", text: " First answer.", final: true },
+    { role: "assistant", text: " Second answer.", final: false },
+  ]);
+
+  channel({ type: "turn.done", turn: { id: "turn-second", role: "assistant", transcript: " Second answer." } });
+  completedSegment(client, "segment-second", "assistant", " Second answer.");
+  channel(firstDone);
+  expect(shown(client)).toEqual([
+    { role: "assistant", text: " First answer.", final: true },
+    { role: "assistant", text: " Second answer.", final: true },
+  ]);
+  await client.stop();
+});
+
+for (const order of ["caption", "canonical"] as const) {
+  test(`native's events with an answer's done delivered again mid-turn and after the call still show every turn once (${order} first)`, async () => {
+    const captions = sources("call-one", "data-channel");
+    const again = captions.find((record) => (record.event as { turn?: { id?: string } }).turn?.id === "bidi-a1")!;
+    /* Redelivered while " Interrupted" is still being said, and once more at the end. */
+    const streaming = captions.findIndex((record) => (record.event as { item?: { id?: string } }).item?.id === "chunk-017");
+    const redelivered = [...captions.slice(0, streaming + 1), again, ...captions.slice(streaming + 1), again];
+    const committed = sources("call-one", "app-server");
+    const client = await panel("call-one");
+    replay(client, order === "caption" ? [...redelivered, ...committed] : [...committed, ...redelivered]);
+    expect(shown(client)).toEqual(NATIVE_TURNS);
+    await client.stop();
+  });
+}
+
+for (const first of ["caption", "canonical"] as const) {
+  for (const delivery of ["event by event", "in one batch"] as const) {
+    test(`a repair that rewrote the opening words stays the captioned turn's one line (${first} first, ${delivery})`, async () => {
+      const client = await panel();
+      const caption = () => {
+        channel({ type: "output_transcript.added", item: { id: "chunk-their", type: "output_transcript", text: " Their answer" } });
+        channel({ type: "turn.done", turn: { id: "turn-their", role: "assistant", transcript: "" } });
+      };
+      const committed = () => {
+        const deliver = delivery === "event by event"
+          ? (method: string, params: Record<string, unknown>) => canonical(client, method, params)
+          : notified;
+        deliver("thread/realtime/item/started", {
+          threadId: THREAD, item: { id: "segment-their", realtimeSessionId: "realtime-1", type: "transcriptSegment", role: "assistant", text: "" },
+        });
+        deliver("thread/realtime/item/transcript/delta", { threadId: THREAD, itemId: "segment-their", delta: " Their answer" });
+        deliver("thread/realtime/item/completed", {
+          threadId: THREAD, item: { id: "segment-their", realtimeSessionId: "realtime-1", type: "transcriptSegment", role: "assistant", text: " Their answer" },
+        });
+        deliver("thread/realtime/transcript/done", { threadId: THREAD, role: "assistant", text: " The answer." });
+        client.reconcileCanonicalTranscript(carried());
+      };
+      if (first === "caption") { caption(); committed(); } else { committed(); caption(); }
+      expect(shown(client)).toEqual([{ role: "assistant", text: " The answer.", final: true }]);
+      await client.stop();
+    });
+  }
+}
+
+test("a repair that rewrote the opening words does not join a different turn missed by the other source", async () => {
+  /* The caption's done kept its words, and they are not the repair's. The
+     segment no caption is takes its place ahead of the caption turn. */
+  const client = await panel();
+  channel({ type: "output_transcript.added", item: { id: "chunk-their", type: "output_transcript", text: " Their answer" } });
+  channel({ type: "turn.done", turn: { id: "turn-their", role: "assistant", transcript: " Their answer" } });
+  for (const [method, params] of [
+    ["thread/realtime/item/completed", {
+      threadId: THREAD, item: { id: "segment-other", realtimeSessionId: "realtime-1", type: "transcriptSegment", role: "assistant", text: " Other answer" },
+    }],
+    ["thread/realtime/transcript/done", { threadId: THREAD, role: "assistant", text: " The answer." }],
+  ] as const) notified(method, params);
+  client.reconcileCanonicalTranscript(carried());
+  expect(spoken(client)).toEqual(["assistant: The answer.", "assistant: Their answer"]);
+  await client.stop();
+});
+
+test("a word said twice in a row keeps both, one fragment each", async () => {
+  const client = await panel();
+  for (const [index, text] of [" very", " very", " good"].entries()) {
+    channel({ type: "output_transcript.added", item: { id: `chunk-word-${index}`, type: "output_transcript", text } });
+  }
+  expect(shown(client)).toEqual([{ role: "assistant", text: " very very good", final: false }]);
+  channel({ type: "output_transcript.added", item: { id: "chunk-word-1", type: "output_transcript", text: " very" } });
+  channel({ type: "turn.done", turn: { id: "turn-very", role: "assistant", transcript: "" } });
+  completedSegment(client, "segment-very", "assistant", " very very good");
+  expect(shown(client)).toEqual([{ role: "assistant", text: " very very good", final: true }]);
   await client.stop();
 });
