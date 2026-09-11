@@ -1,0 +1,150 @@
+{"at": 0, "source": "data-channel", "event": {"type": "input_transcript.added", "item": {"id": "chunk-001", "type": "input_transcript", "text": " Please"}, "start_ms": 0, "end_ms": 200}}
+{"at": 83, "source": "app-server", "method": "thread/realtime/item/started", "params": {"threadId": "thread-fixture", "item": {"id": "segment-01", "realtimeSessionId": "call-live", "type": "transcriptSegment", "role": "user", "text": ""}}}
+{"at": 83, "source": "data-channel", "event": {"type": "input_transcript.added", "item": {"id": "chunk-002", "type": "input_transcript", "text": " repeat the"}, "start_ms": 83, "end_ms": 283}}
+{"at": 100, "source": "app-server", "method": "thread/realtime/item/transcript/delta", "params": {"threadId": "thread-fixture", "itemId": "segment-01", "delta": " Please"}}
+{"at": 100, "source": "app-server", "method": "thread/realtime/transcript/delta", "params": {"threadId": "thread-fixture", "role": "user", "delta": " Please"}}
+{"at": 146, "source": "app-server", "method": "thread/realtime/item/transcript/delta", "params": {"threadId": "thread-fixture", "itemId": "segment-01", "delta": " repeat the"}}
+{"at": 146, "source": "app-server", "method": "thread/realtime/transcript/delta", "params": {"threadId": "thread-fixture", "role": "user", "delta": " repeat the"}}
+{"at": 146, "source": "data-channel", "event": {"type": "input_transcript.added", "item": {"id": "chunk-003", "type": "input_transcript", "text": " read"}, "start_ms": 146, "end_ms": 346}}
+{"at": 153, "source": "data-channel", "event": {"type": "input_transcript.added", "item": {"id": "chunk-004", "type": "input_transcript", "text": "-only"}, "start_ms": 153, "end_ms": 353}}
+{"at": 177, "source": "data-channel", "event": {"type": "output_transcript.added", "item": {"id": "chunk-005", "type": "output_transcript", "text": " I'm the"}, "start_ms": 177, "end_ms": 377}}
+{"at": 178, "source": "data-channel", "event": {"type": "output_transcript.added", "item": {"id": "chunk-006", "type": "output_transcript", "text": " dedicated"}, "start_ms": 178, "end_ms": 378}}
+{"at": 215, "source": "app-server", "method": "thread/realtime/item/transcript/delta", "params": {"threadId": "thread-fixture", "itemId": "segment-01", "delta": " read"}}
+{"at": 215, "source": "app-server", "method": "thread/realtime/transcript/delta", "params": {"threadId": "thread-fixture", "role": "user", "delta": " read"}}
+{"at": 223, "source": "data-channel", "event": {"type": "output_transcript.added", "item": {"id": "chunk-007", "type": "output_transcript", "text": " Voice"}, "start_ms": 223, "end_ms": 423}}
+{"at": 299, "source": "app-server", "method": "thread/realtime/item/transcript/delta", "params": {"threadId": "thread-fixture", "itemId": "segment-01", "delta": "-only"}}
+{"at": 299, "source": "app-server", "method": "thread/realtime/transcript/delta", "params": {"threadId": "thread-fixture", "role": "user", "delta": "-only"}}
+{"at": 351, "source": "app-server", "method": "thread/realtime/item/started", "params": {"threadId": "thread-fixture", "item": {"id": "segment-02", "realtimeSessionId": "call-live", "type": "transcriptSegment", "role": "assistant", "text": ""}}}
+{"at": 371, "source": "app-server", "method": "thread/realtime/item/transcript/delta", "params": {"threadId": "thread-fixture", "itemId": "segment-02", "delta": " I'm the"}}
+{"at": 371, "source": "app-server", "method": "thread/realtime/transcript/delta", "params": {"threadId": "thread-fixture", "role": "assistant", "delta": " I'm the"}}
+{"at": 408, "source": "app-server", "method": "thread/realtime/item/transcript/delta", "params": {"threadId": "thread-fixture", "itemId": "segment-02", "delta": " dedicated"}}
+{"at": 408, "source": "app-server", "method": "thread/realtime/transcript/delta", "params": {"threadId": "thread-fixture", "role": "assistant", "delta": " dedicated"}}
+{"at": 460, "source": "app-server", "method": "thread/realtime/item/transcript/delta", "params": {"threadId": "thread-fixture", "itemId": "segment-02", "delta": " Voice"}}
+{"at": 460, "source": "app-server", "method": "thread/realtime/transcript/delta", "params": {"threadId": "thread-fixture", "role": "assistant", "delta": " Voice"}}
+{"at": 487, "source": "data-channel", "event": {"type": "turn.done", "turn": {"id": "turn-01", "role": "user", "transcript": " Please repeat the read-only"}}}
+{"at": 579, "source": "app-server", "method": "thread/realtime/item/completed", "params": {"threadId": "thread-fixture", "item": {"id": "segment-01", "realtimeSessionId": "call-live", "type": "transcriptSegment", "role": "user", "text": " Please repeat the read-only"}}}
+{"at": 579, "source": "app-server", "method": "thread/realtime/transcript/done", "params": {"threadId": "thread-fixture", "role": "user", "text": " Please repeat the read-only"}}
+{"at": 654, "source": "data-channel", "event": {"type": "output_transcript.added", "item": {"id": "chunk-008", "type": "output_transcript", "text": " regression"}, "start_ms": 654, "end_ms": 854}}
+{"at": 715, "source": "app-server", "method": "thread/realtime/item/transcript/delta", "params": {"threadId": "thread-fixture", "itemId": "segment-02", "delta": " regression"}}
+{"at": 715, "source": "app-server", "method": "thread/realtime/transcript/delta", "params": {"threadId": "thread-fixture", "role": "assistant", "delta": " regression"}}
+{"at": 962, "source": "data-channel", "event": {"type": "input_transcript.added", "item": {"id": "chunk-009", "type": "input_transcript", "text": " status"}, "start_ms": 962, "end_ms": 1162}}
+{"at": 1062, "source": "data-channel", "event": {"type": "turn.done", "turn": {"id": "turn-02", "role": "assistant", "transcript": " I'm the dedicated Voice regression"}}}
+{"at": 1185, "source": "data-channel", "event": {"type": "input_transcript.added", "item": {"id": "chunk-010", "type": "input_transcript", "text": " check from"}, "start_ms": 1185, "end_ms": 1385}}
+{"at": 1292, "source": "data-channel", "event": {"type": "input_transcript.added", "item": {"id": "chunk-011", "type": "input_transcript", "text": " our"}, "start_ms": 1292, "end_ms": 1492}}
+{"at": 1319, "source": "data-channel", "event": {"type": "output_transcript.added", "item": {"id": "chunk-012", "type": "output_transcript", "text": " QA"}, "start_ms": 1319, "end_ms": 1519}}
+{"at": 1688, "source": "data-channel", "event": {"type": "output_transcript.added", "item": {"id": "chunk-013", "type": "output_transcript", "text": " orchestrator"}, "start_ms": 1688, "end_ms": 1888}}
+{"at": 1882, "source": "data-channel", "event": {"type": "input_transcript.added", "item": {"id": "chunk-014", "type": "input_transcript", "text": " setup"}, "start_ms": 1882, "end_ms": 2082}}
+{"at": 1882, "source": "data-channel", "event": {"type": "output_transcript.added", "item": {"id": "chunk-015", "type": "output_transcript", "text": ","}, "start_ms": 1882, "end_ms": 2082}}
+{"at": 2088, "source": "app-server", "method": "thread/realtime/item/started", "params": {"threadId": "thread-fixture", "item": {"id": "segment-03", "realtimeSessionId": "call-live", "type": "transcriptSegment", "role": "user", "text": ""}}}
+{"at": 2117, "source": "app-server", "method": "thread/realtime/item/transcript/delta", "params": {"threadId": "thread-fixture", "itemId": "segment-03", "delta": " status"}}
+{"at": 2117, "source": "app-server", "method": "thread/realtime/transcript/delta", "params": {"threadId": "thread-fixture", "role": "user", "delta": " status"}}
+{"at": 2179, "source": "app-server", "method": "thread/realtime/item/completed", "params": {"threadId": "thread-fixture", "item": {"id": "segment-02", "realtimeSessionId": "call-live", "type": "transcriptSegment", "role": "assistant", "text": " I'm the dedicated Voice regression"}}}
+{"at": 2179, "source": "app-server", "method": "thread/realtime/transcript/done", "params": {"threadId": "thread-fixture", "role": "assistant", "text": " I'm the dedicated Voice regression"}}
+{"at": 2250, "source": "app-server", "method": "thread/realtime/item/transcript/delta", "params": {"threadId": "thread-fixture", "itemId": "segment-03", "delta": " check from"}}
+{"at": 2250, "source": "app-server", "method": "thread/realtime/transcript/delta", "params": {"threadId": "thread-fixture", "role": "user", "delta": " check from"}}
+{"at": 2314, "source": "app-server", "method": "thread/realtime/item/transcript/delta", "params": {"threadId": "thread-fixture", "itemId": "segment-03", "delta": " our"}}
+{"at": 2314, "source": "app-server", "method": "thread/realtime/transcript/delta", "params": {"threadId": "thread-fixture", "role": "user", "delta": " our"}}
+{"at": 2383, "source": "app-server", "method": "thread/realtime/item/started", "params": {"threadId": "thread-fixture", "item": {"id": "segment-04", "realtimeSessionId": "call-live", "type": "transcriptSegment", "role": "assistant", "text": ""}}}
+{"at": 2417, "source": "app-server", "method": "thread/realtime/item/transcript/delta", "params": {"threadId": "thread-fixture", "itemId": "segment-04", "delta": " QA"}}
+{"at": 2417, "source": "app-server", "method": "thread/realtime/transcript/delta", "params": {"threadId": "thread-fixture", "role": "assistant", "delta": " QA"}}
+{"at": 2458, "source": "data-channel", "event": {"type": "input_transcript.added", "item": {"id": "chunk-016", "type": "input_transcript", "text": " using"}, "start_ms": 2458, "end_ms": 2658}}
+{"at": 2476, "source": "app-server", "method": "thread/realtime/item/transcript/delta", "params": {"threadId": "thread-fixture", "itemId": "segment-04", "delta": " orchestrator"}}
+{"at": 2476, "source": "app-server", "method": "thread/realtime/transcript/delta", "params": {"threadId": "thread-fixture", "role": "assistant", "delta": " orchestrator"}}
+{"at": 2543, "source": "app-server", "method": "thread/realtime/item/transcript/delta", "params": {"threadId": "thread-fixture", "itemId": "segment-03", "delta": " setup"}}
+{"at": 2543, "source": "app-server", "method": "thread/realtime/transcript/delta", "params": {"threadId": "thread-fixture", "role": "user", "delta": " setup"}}
+{"at": 2574, "source": "data-channel", "event": {"type": "input_transcript.added", "item": {"id": "chunk-017", "type": "input_transcript", "text": " the"}, "start_ms": 2574, "end_ms": 2774}}
+{"at": 2636, "source": "app-server", "method": "thread/realtime/item/transcript/delta", "params": {"threadId": "thread-fixture", "itemId": "segment-04", "delta": ","}}
+{"at": 2636, "source": "app-server", "method": "thread/realtime/transcript/delta", "params": {"threadId": "thread-fixture", "role": "assistant", "delta": ","}}
+{"at": 2715, "source": "app-server", "method": "thread/realtime/item/transcript/delta", "params": {"threadId": "thread-fixture", "itemId": "segment-03", "delta": " using"}}
+{"at": 2715, "source": "app-server", "method": "thread/realtime/transcript/delta", "params": {"threadId": "thread-fixture", "role": "user", "delta": " using"}}
+{"at": 2791, "source": "app-server", "method": "thread/realtime/item/transcript/delta", "params": {"threadId": "thread-fixture", "itemId": "segment-03", "delta": " the"}}
+{"at": 2791, "source": "app-server", "method": "thread/realtime/transcript/delta", "params": {"threadId": "thread-fixture", "role": "user", "delta": " the"}}
+{"at": 2958, "source": "data-channel", "event": {"type": "input_transcript.added", "item": {"id": "chunk-018", "type": "input_transcript", "text": " tool"}, "start_ms": 2958, "end_ms": 3158}}
+{"at": 3459, "source": "data-channel", "event": {"type": "input_transcript.added", "item": {"id": "chunk-019", "type": "input_transcript", "text": " again"}, "start_ms": 3459, "end_ms": 3659}}
+{"at": 3571, "source": "data-channel", "event": {"type": "input_transcript.added", "item": {"id": "chunk-020", "type": "input_transcript", "text": " now"}, "start_ms": 3571, "end_ms": 3771}}
+{"at": 4106, "source": "data-channel", "event": {"type": "output_transcript.added", "item": {"id": "chunk-021", "type": "output_transcript", "text": " Checking"}, "start_ms": 4106, "end_ms": 4306}}
+{"at": 4298, "source": "data-channel", "event": {"type": "output_transcript.added", "item": {"id": "chunk-022", "type": "output_transcript", "text": " it now"}, "start_ms": 4298, "end_ms": 4498}}
+{"at": 4444, "source": "data-channel", "event": {"type": "input_transcript.added", "item": {"id": "chunk-023", "type": "input_transcript", "text": " Tell"}, "start_ms": 4444, "end_ms": 4644}}
+{"at": 4445, "source": "data-channel", "event": {"type": "output_transcript.added", "item": {"id": "chunk-024", "type": "output_transcript", "text": "."}, "start_ms": 4445, "end_ms": 4645}}
+{"at": 4670, "source": "data-channel", "event": {"type": "input_transcript.added", "item": {"id": "chunk-025", "type": "input_transcript", "text": " me"}, "start_ms": 4670, "end_ms": 4870}}
+{"at": 4805, "source": "data-channel", "event": {"type": "input_transcript.added", "item": {"id": "chunk-026", "type": "input_transcript", "text": " your"}, "start_ms": 4805, "end_ms": 5005}}
+{"at": 5190, "source": "data-channel", "event": {"type": "input_transcript.added", "item": {"id": "chunk-027", "type": "input_transcript", "text": " role in"}, "start_ms": 5190, "end_ms": 5390}}
+{"at": 5338, "source": "data-channel", "event": {"type": "input_transcript.added", "item": {"id": "chunk-028", "type": "input_transcript", "text": " this"}, "start_ms": 5338, "end_ms": 5538}}
+{"at": 6216, "source": "data-channel", "event": {"type": "turn.done", "turn": {"id": "turn-03", "role": "user", "transcript": " status check from our setup using the tool again now Tell me your role in this"}}}
+{"at": 6472, "source": "data-channel", "event": {"type": "input_transcript.added", "item": {"id": "chunk-029", "type": "input_transcript", "text": " conversation"}, "start_ms": 6472, "end_ms": 6672}}
+{"at": 6473, "source": "data-channel", "event": {"type": "turn.done", "turn": {"id": "turn-04", "role": "assistant", "transcript": " QA orchestrator, Checking it now."}}}
+{"at": 6682, "source": "data-channel", "event": {"type": "output_transcript.added", "item": {"id": "chunk-030", "type": "output_transcript", "text": " One sec"}, "start_ms": 6682, "end_ms": 6882}}
+{"at": 6824, "source": "data-channel", "event": {"type": "output_transcript.added", "item": {"id": "chunk-031", "type": "output_transcript", "text": "."}, "start_ms": 6824, "end_ms": 7024}}
+{"at": 7074, "source": "data-channel", "event": {"type": "input_transcript.added", "item": {"id": "chunk-032", "type": "input_transcript", "text": " Do"}, "start_ms": 7074, "end_ms": 7274}}
+{"at": 7384, "source": "app-server", "method": "thread/realtime/item/transcript/delta", "params": {"threadId": "thread-fixture", "itemId": "segment-03", "delta": " tool"}}
+{"at": 7384, "source": "app-server", "method": "thread/realtime/transcript/delta", "params": {"threadId": "thread-fixture", "role": "user", "delta": " tool"}}
+{"at": 8376, "source": "data-channel", "event": {"type": "input_transcript.added", "item": {"id": "chunk-033", "type": "input_transcript", "text": " not"}, "start_ms": 8376, "end_ms": 8576}}
+{"at": 8427, "source": "data-channel", "event": {"type": "input_transcript.added", "item": {"id": "chunk-034", "type": "input_transcript", "text": " change"}, "start_ms": 8427, "end_ms": 8627}}
+{"at": 8435, "source": "data-channel", "event": {"type": "input_transcript.added", "item": {"id": "chunk-035", "type": "input_transcript", "text": " anything"}, "start_ms": 8435, "end_ms": 8635}}
+{"at": 8568, "source": "data-channel", "event": {"type": "input_transcript.added", "item": {"id": "chunk-036", "type": "input_transcript", "text": " or"}, "start_ms": 8568, "end_ms": 8768}}
+{"at": 8771, "source": "app-server", "method": "thread/realtime/item/transcript/delta", "params": {"threadId": "thread-fixture", "itemId": "segment-03", "delta": " again"}}
+{"at": 8771, "source": "app-server", "method": "thread/realtime/transcript/delta", "params": {"threadId": "thread-fixture", "role": "user", "delta": " again"}}
+{"at": 8837, "source": "app-server", "method": "thread/realtime/item/transcript/delta", "params": {"threadId": "thread-fixture", "itemId": "segment-03", "delta": " now"}}
+{"at": 8837, "source": "app-server", "method": "thread/realtime/transcript/delta", "params": {"threadId": "thread-fixture", "role": "user", "delta": " now"}}
+{"at": 8950, "source": "app-server", "method": "thread/realtime/item/transcript/delta", "params": {"threadId": "thread-fixture", "itemId": "segment-04", "delta": " Checking"}}
+{"at": 8950, "source": "app-server", "method": "thread/realtime/transcript/delta", "params": {"threadId": "thread-fixture", "role": "assistant", "delta": " Checking"}}
+{"at": 8976, "source": "data-channel", "event": {"type": "input_transcript.added", "item": {"id": "chunk-037", "type": "input_transcript", "text": " launch"}, "start_ms": 8976, "end_ms": 9176}}
+{"at": 9145, "source": "app-server", "method": "thread/realtime/item/transcript/delta", "params": {"threadId": "thread-fixture", "itemId": "segment-04", "delta": " it now"}}
+{"at": 9145, "source": "app-server", "method": "thread/realtime/transcript/delta", "params": {"threadId": "thread-fixture", "role": "assistant", "delta": " it now"}}
+{"at": 9159, "source": "data-channel", "event": {"type": "input_transcript.added", "item": {"id": "chunk-038", "type": "input_transcript", "text": " any"}, "start_ms": 9159, "end_ms": 9359}}
+{"at": 9201, "source": "app-server", "method": "thread/realtime/item/transcript/delta", "params": {"threadId": "thread-fixture", "itemId": "segment-03", "delta": " Tell"}}
+{"at": 9201, "source": "app-server", "method": "thread/realtime/transcript/delta", "params": {"threadId": "thread-fixture", "role": "user", "delta": " Tell"}}
+{"at": 9297, "source": "app-server", "method": "thread/realtime/item/transcript/delta", "params": {"threadId": "thread-fixture", "itemId": "segment-04", "delta": "."}}
+{"at": 9297, "source": "app-server", "method": "thread/realtime/transcript/delta", "params": {"threadId": "thread-fixture", "role": "assistant", "delta": "."}}
+{"at": 9386, "source": "app-server", "method": "thread/realtime/item/transcript/delta", "params": {"threadId": "thread-fixture", "itemId": "segment-03", "delta": " me"}}
+{"at": 9386, "source": "app-server", "method": "thread/realtime/transcript/delta", "params": {"threadId": "thread-fixture", "role": "user", "delta": " me"}}
+{"at": 9466, "source": "app-server", "method": "thread/realtime/item/transcript/delta", "params": {"threadId": "thread-fixture", "itemId": "segment-03", "delta": " your"}}
+{"at": 9466, "source": "app-server", "method": "thread/realtime/transcript/delta", "params": {"threadId": "thread-fixture", "role": "user", "delta": " your"}}
+{"at": 9634, "source": "app-server", "method": "thread/realtime/item/transcript/delta", "params": {"threadId": "thread-fixture", "itemId": "segment-03", "delta": " role in"}}
+{"at": 9634, "source": "app-server", "method": "thread/realtime/transcript/delta", "params": {"threadId": "thread-fixture", "role": "user", "delta": " role in"}}
+{"at": 9668, "source": "data-channel", "event": {"type": "input_transcript.added", "item": {"id": "chunk-039", "type": "input_transcript", "text": " agents"}, "start_ms": 9668, "end_ms": 9868}}
+{"at": 9877, "source": "data-channel", "event": {"type": "output_transcript.added", "item": {"id": "chunk-040", "type": "output_transcript", "text": " Still looking"}, "start_ms": 9877, "end_ms": 10077}}
+{"at": 10039, "source": "data-channel", "event": {"type": "output_transcript.added", "item": {"id": "chunk-041", "type": "output_transcript", "text": "."}, "start_ms": 10039, "end_ms": 10239}}
+{"at": 10359, "source": "data-channel", "event": {"type": "turn.done", "turn": {"id": "turn-05", "role": "user", "transcript": " conversation Do not change anything or launch any agents"}}}
+{"at": 10878, "source": "app-server", "method": "thread/realtime/item/transcript/delta", "params": {"threadId": "thread-fixture", "itemId": "segment-03", "delta": " this"}}
+{"at": 10878, "source": "app-server", "method": "thread/realtime/transcript/delta", "params": {"threadId": "thread-fixture", "role": "user", "delta": " this"}}
+{"at": 11486, "source": "app-server", "method": "thread/realtime/item/completed", "params": {"threadId": "thread-fixture", "item": {"id": "segment-03", "realtimeSessionId": "call-live", "type": "transcriptSegment", "role": "user", "text": " status check from our setup using the tool again now Tell me your role in this"}}}
+{"at": 11486, "source": "app-server", "method": "thread/realtime/transcript/done", "params": {"threadId": "thread-fixture", "role": "user", "text": " status check from our setup using the tool again now Tell me your role in this"}}
+{"at": 11858, "source": "app-server", "method": "thread/realtime/item/started", "params": {"threadId": "thread-fixture", "item": {"id": "segment-05", "realtimeSessionId": "call-live", "type": "transcriptSegment", "role": "user", "text": ""}}}
+{"at": 11908, "source": "app-server", "method": "thread/realtime/item/transcript/delta", "params": {"threadId": "thread-fixture", "itemId": "segment-05", "delta": " conversation"}}
+{"at": 11908, "source": "app-server", "method": "thread/realtime/transcript/delta", "params": {"threadId": "thread-fixture", "role": "user", "delta": " conversation"}}
+{"at": 11981, "source": "app-server", "method": "thread/realtime/item/completed", "params": {"threadId": "thread-fixture", "item": {"id": "segment-04", "realtimeSessionId": "call-live", "type": "transcriptSegment", "role": "assistant", "text": " QA orchestrator, Checking it now."}}}
+{"at": 11981, "source": "app-server", "method": "thread/realtime/transcript/done", "params": {"threadId": "thread-fixture", "role": "assistant", "text": " QA orchestrator, Checking it now."}}
+{"at": 12160, "source": "app-server", "method": "thread/realtime/item/started", "params": {"threadId": "thread-fixture", "item": {"id": "segment-06", "realtimeSessionId": "call-live", "type": "transcriptSegment", "role": "assistant", "text": ""}}}
+{"at": 12179, "source": "app-server", "method": "thread/realtime/item/transcript/delta", "params": {"threadId": "thread-fixture", "itemId": "segment-06", "delta": " One sec"}}
+{"at": 12179, "source": "app-server", "method": "thread/realtime/transcript/delta", "params": {"threadId": "thread-fixture", "role": "assistant", "delta": " One sec"}}
+{"at": 12207, "source": "app-server", "method": "thread/realtime/item/transcript/delta", "params": {"threadId": "thread-fixture", "itemId": "segment-06", "delta": "."}}
+{"at": 12207, "source": "app-server", "method": "thread/realtime/transcript/delta", "params": {"threadId": "thread-fixture", "role": "assistant", "delta": "."}}
+{"at": 12214, "source": "data-channel", "event": {"type": "turn.done", "turn": {"id": "turn-06", "role": "assistant", "transcript": " One sec. Still looking."}}}
+{"at": 12261, "source": "app-server", "method": "thread/realtime/item/transcript/delta", "params": {"threadId": "thread-fixture", "itemId": "segment-05", "delta": " Do"}}
+{"at": 12261, "source": "app-server", "method": "thread/realtime/transcript/delta", "params": {"threadId": "thread-fixture", "role": "user", "delta": " Do"}}
+{"at": 12347, "source": "app-server", "method": "thread/realtime/item/transcript/delta", "params": {"threadId": "thread-fixture", "itemId": "segment-05", "delta": " not"}}
+{"at": 12347, "source": "app-server", "method": "thread/realtime/transcript/delta", "params": {"threadId": "thread-fixture", "role": "user", "delta": " not"}}
+{"at": 12418, "source": "app-server", "method": "thread/realtime/item/transcript/delta", "params": {"threadId": "thread-fixture", "itemId": "segment-05", "delta": " change"}}
+{"at": 12418, "source": "app-server", "method": "thread/realtime/transcript/delta", "params": {"threadId": "thread-fixture", "role": "user", "delta": " change"}}
+{"at": 12473, "source": "app-server", "method": "thread/realtime/item/transcript/delta", "params": {"threadId": "thread-fixture", "itemId": "segment-05", "delta": " anything"}}
+{"at": 12473, "source": "app-server", "method": "thread/realtime/transcript/delta", "params": {"threadId": "thread-fixture", "role": "user", "delta": " anything"}}
+{"at": 12526, "source": "app-server", "method": "thread/realtime/item/transcript/delta", "params": {"threadId": "thread-fixture", "itemId": "segment-05", "delta": " or"}}
+{"at": 12526, "source": "app-server", "method": "thread/realtime/transcript/delta", "params": {"threadId": "thread-fixture", "role": "user", "delta": " or"}}
+{"at": 12590, "source": "app-server", "method": "thread/realtime/item/transcript/delta", "params": {"threadId": "thread-fixture", "itemId": "segment-05", "delta": " launch"}}
+{"at": 12590, "source": "app-server", "method": "thread/realtime/transcript/delta", "params": {"threadId": "thread-fixture", "role": "user", "delta": " launch"}}
+{"at": 12645, "source": "app-server", "method": "thread/realtime/item/transcript/delta", "params": {"threadId": "thread-fixture", "itemId": "segment-05", "delta": " any"}}
+{"at": 12645, "source": "app-server", "method": "thread/realtime/transcript/delta", "params": {"threadId": "thread-fixture", "role": "user", "delta": " any"}}
+{"at": 12690, "source": "data-channel", "event": {"type": "output_transcript.added", "item": {"id": "chunk-042", "type": "output_transcript", "text": " Let me"}, "start_ms": 12690, "end_ms": 12890}}
+{"at": 12690, "source": "app-server", "method": "thread/realtime/item/transcript/delta", "params": {"threadId": "thread-fixture", "itemId": "segment-05", "delta": " agents"}}
+{"at": 12690, "source": "app-server", "method": "thread/realtime/transcript/delta", "params": {"threadId": "thread-fixture", "role": "user", "delta": " agents"}}
+{"at": 12725, "source": "app-server", "method": "thread/realtime/item/transcript/delta", "params": {"threadId": "thread-fixture", "itemId": "segment-06", "delta": " Still looking"}}
+{"at": 12725, "source": "app-server", "method": "thread/realtime/transcript/delta", "params": {"threadId": "thread-fixture", "role": "assistant", "delta": " Still looking"}}
+{"at": 12813, "source": "app-server", "method": "thread/realtime/item/transcript/delta", "params": {"threadId": "thread-fixture", "itemId": "segment-06", "delta": "."}}
+{"at": 12813, "source": "app-server", "method": "thread/realtime/transcript/delta", "params": {"threadId": "thread-fixture", "role": "assistant", "delta": "."}}
+{"at": 12838, "source": "app-server", "method": "thread/realtime/item/completed", "params": {"threadId": "thread-fixture", "item": {"id": "segment-05", "realtimeSessionId": "call-live", "type": "transcriptSegment", "role": "user", "text": " conversation Do not change anything or launch any agents"}}}
+{"at": 12838, "source": "app-server", "method": "thread/realtime/transcript/done", "params": {"threadId": "thread-fixture", "role": "user", "text": " conversation Do not change anything or launch any agents"}}
+{"at": 12855, "source": "data-channel", "event": {"type": "output_transcript.added", "item": {"id": "chunk-043", "type": "output_transcript", "text": " check that"}, "start_ms": 12855, "end_ms": 13055}}
+{"at": 13049, "source": "data-channel", "event": {"type": "output_transcript.added", "item": {"id": "chunk-044", "type": "output_transcript", "text": " again."}, "start_ms": 13049, "end_ms": 13249}}
+{"at": 13724, "source": "app-server", "method": "thread/realtime/item/completed", "params": {"threadId": "thread-fixture", "item": {"id": "segment-06", "realtimeSessionId": "call-live", "type": "transcriptSegment", "role": "assistant", "text": " One sec. Still looking."}}}
+{"at": 13724, "source": "app-server", "method": "thread/realtime/transcript/done", "params": {"threadId": "thread-fixture", "role": "assistant", "text": " One sec. Still looking."}}

@@ -646,7 +646,8 @@ describe("CodexAppServerHost", () => {
       { kind: "voice-transcript", realtimeSessionId: "realtime-1", segmentId: published[0]!.segmentId, role: "user", text: "look at ", final: false },
       { kind: "voice-transcript", realtimeSessionId: "realtime-1", segmentId: published[0]!.segmentId, role: "user", text: "look at that card", final: false },
       { kind: "voice-transcript", realtimeSessionId: "realtime-1", segmentId: published[0]!.segmentId, role: "user", text: "look at that card", final: true },
-      { kind: "voice-transcript", realtimeSessionId: "realtime-1", segmentId: "seg-9", role: "assistant", text: "", final: false },
+      /* The empty `item/started` publishes nothing (#1658): a segment with no
+         words must not take a line ahead of the words it is for. */
       { kind: "voice-transcript", realtimeSessionId: "realtime-1", segmentId: "seg-9", role: "assistant", text: "Reading it now.", final: true },
     ]);
     /* One id for the whole spoken segment, so the browser updates one line. */
