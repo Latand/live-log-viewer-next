@@ -13,6 +13,19 @@ test("parses Frameless Bidi transcript, handoff, usage and error events", () => 
     type: "turn.done",
     turn: { role: "assistant", transcript: "done" },
   })).toEqual({ kind: "transcript", role: "assistant", text: "done", final: true });
+  /* Native's streamed fragments carry their own id, and a done with no words
+     still ends the turn of the speaker it names (#1658). */
+  expect(parseCodexRealtimeEvent({
+    type: "output_transcript.added",
+    item: { id: "chunk-1", type: "output_transcript", text: " word" },
+    start_ms: 800,
+    end_ms: 1000,
+  })).toEqual({ kind: "transcript", role: "assistant", text: " word", final: false, chunkId: "chunk-1" });
+  expect(parseCodexRealtimeEvent({
+    type: "turn.done",
+    turn: { id: "turn-1", role: "user", transcript: "" },
+  })).toEqual({ kind: "transcript", role: "user", text: "", final: true });
+  expect(parseCodexRealtimeEvent({ type: "turn.done", turn: { transcript: "" } })).toEqual({ kind: "ignored" });
   /* The identities the native controller reads off this event, and the join
      between an utterance and the work it became (#1629). */
   expect(parseCodexRealtimeEvent({

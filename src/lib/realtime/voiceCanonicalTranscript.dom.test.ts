@@ -1,4 +1,6 @@
 import { afterAll, beforeEach, expect, test } from "bun:test";
+import fs from "node:fs";
+import path from "node:path";
 import { Window } from "happy-dom";
 
 import { applyEvent, emptyStore, type RuntimeStore } from "@/components/runtime/runtimeModel";
@@ -93,8 +95,11 @@ let conversationId = "";
 let store: RuntimeStore;
 let reducer: CodexRealtimeTranscript;
 let hostSequence = 0;
+/** The realtime session the next call's answer names, as the host would. */
+let callSession = "realtime-1";
 
 beforeEach(() => {
+  callSession = "realtime-1";
   conversationSequence += 1;
   conversationId = `conversation_canonical_${conversationSequence}`;
   hostSequence = 0;
@@ -126,7 +131,7 @@ beforeEach(() => {
   globalThis.fetch = (async () => ({
     ok: true,
     status: 200,
-    json: async () => ({ ok: true, sdp: "v=0\r\nanswer", realtimeSessionId: "realtime-1" }),
+    json: async () => ({ ok: true, sdp: "v=0\r\nanswer", realtimeSessionId: callSession }),
   })) as unknown as typeof fetch;
 });
 
@@ -169,11 +174,18 @@ function applied(envelope: Record<string, unknown>): RuntimeStore {
 /** What the browser's session projection now carries for this conversation. */
 const carried = () => store.sessions[conversationId]?.voiceTranscript ?? [];
 
-async function panel() {
+async function panel(session = "realtime-1") {
   const client = codexRealtimeClient(conversationId);
+  await call(client, session);
+  return client;
+}
+
+/** Start a call on this client, with the host beginning the same session. */
+async function call(client: ReturnType<typeof codexRealtimeClient>, session: string): Promise<void> {
+  callSession = session;
+  reducer.begin(session);
   await client.start();
   StubPeerConnection.latest!.channel.onopen?.();
-  return client;
 }
 
 test("a call whose data channel says nothing still shows what the backend committed", async () => {
@@ -272,6 +284,276 @@ test("a segment the panel never saw is appended, and one it did is adopted", asy
   expect(client.getSnapshot().lines.map((line) => `${line.role}:${line.text}`)).toEqual([
     "user:read that one",
     "assistant:Reading.",
+  ]);
+  await client.stop();
+});
+
+/* ------------------------------------------------------------------------ *
+ * ONE LINE PER SPOKEN TURN (#1658).
+ *
+ * A live call rendered the same sentence three times — the data-channel caption,
+ * a line for native's item, and a line for native's flat mirror of that item —
+ * and the two speakers' overlapping words left the caption in fragments with the
+ * whole sentence repeated underneath. What follows replays captured calls
+ * through every production link above, and reads what the panel shows.
+ * ------------------------------------------------------------------------ */
+
+interface Recorded {
+  source: "data-channel" | "app-server";
+  call?: string;
+  method?: string;
+  params?: Record<string, unknown>;
+  event?: Record<string, unknown>;
+}
+
+function recorded(file: string): Recorded[] {
+  return fs.readFileSync(file, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as Recorded);
+}
+
+/** Recorded in a live call: both speakers talking over each other, word by word. */
+const DUPLEX_CALL = recorded(path.join(import.meta.dir, "fixtures/voice-duplex-call.jsonl"));
+/** Native 0.154.0's own notifications for known provider events. */
+const NATIVE_WIRE = recorded(path.join(import.meta.dir, "../runtime/fixtures/codex-realtime-transcript-v0.154.0.jsonl"));
+
+type Client = ReturnType<typeof codexRealtimeClient>;
+
+function channel(event: Record<string, unknown>): void {
+  StubPeerConnection.latest!.channel.onmessage?.({ data: JSON.stringify(event) });
+}
+
+/** One notification reaching the store, and the composer's effect handing the
+    store's tail to the client, as `useCodexRealtime` does on every change. */
+function canonical(client: Client, method: string, params: Record<string, unknown>): void {
+  notified(method, params);
+  client.reconcileCanonicalTranscript(carried());
+}
+
+function replay(client: Client, records: readonly Recorded[]): void {
+  for (const record of records) {
+    if (record.source === "data-channel") channel(record.event!);
+    else canonical(client, record.method!, record.params!);
+  }
+}
+
+const shown = (client: Client) =>
+  client.getSnapshot().lines.map((line) => ({ role: line.role, text: line.text, final: line.final }));
+type Shown = ReturnType<typeof shown>[number];
+
+const DUPLEX_TURNS: Shown[] = [
+  { role: "user", text: " Please repeat the read-only", final: true },
+  { role: "assistant", text: " I'm the dedicated Voice regression", final: true },
+  { role: "user", text: " status check from our setup using the tool again now Tell me your role in this", final: true },
+  { role: "assistant", text: " QA orchestrator, Checking it now.", final: true },
+  { role: "user", text: " conversation Do not change anything or launch any agents", final: true },
+  { role: "assistant", text: " One sec. Still looking.", final: true },
+  /* Still being spoken when the recording stopped. */
+  { role: "assistant", text: " Let me check that again.", final: false },
+];
+
+test("the recorded duplex call shows each spoken turn once", async () => {
+  const client = await panel("call-live");
+  replay(client, DUPLEX_CALL);
+  expect(shown(client)).toEqual(DUPLEX_TURNS);
+  await client.stop();
+});
+
+test("the recorded call reads the same when the committed transcript lands in one batch", async () => {
+  /* The store coalesces, and the effect can run once for many notifications. */
+  const client = await panel("call-live");
+  for (const record of DUPLEX_CALL) if (record.source === "data-channel") channel(record.event!);
+  for (const record of DUPLEX_CALL) if (record.source === "app-server") notified(record.method!, record.params!);
+  client.reconcileCanonicalTranscript(carried());
+  expect(shown(client)).toEqual(DUPLEX_TURNS);
+  await client.stop();
+});
+
+test("the recorded call reads the same when the committed transcript arrives first", async () => {
+  const client = await panel("call-live");
+  for (const record of DUPLEX_CALL) if (record.source === "app-server") canonical(client, record.method!, record.params!);
+  for (const record of DUPLEX_CALL) if (record.source === "data-channel") channel(record.event!);
+  expect(shown(client)).toEqual(DUPLEX_TURNS);
+  await client.stop();
+});
+
+const NATIVE_TURNS: Shown[] = [
+  { role: "user", text: " Please repeat the read-only", final: true },
+  { role: "assistant", text: " I'm the dedicated Voice regression", final: true },
+  { role: "user", text: " status check from our", final: true },
+  { role: "assistant", text: " QA orchestrator,", final: true },
+  { role: "user", text: " yes", final: true },
+  { role: "assistant", text: " ok", final: true },
+  { role: "user", text: " yes", final: true },
+  { role: "assistant", text: " Unstreamed answer.", final: true },
+  { role: "assistant", text: " Hello big world", final: true },
+  { role: "assistant", text: " Resumed", final: true },
+  { role: "user", text: " wait", final: true },
+];
+
+const sources = (call: string, source: Recorded["source"]) =>
+  NATIVE_WIRE.filter((record) => record.call === call && record.source === source);
+
+for (const order of ["caption", "canonical"] as const) {
+  test(`native's own events show each turn once when the ${order} arrives first`, async () => {
+    /* Both sources carry the SAME provider events here, so this is the claim
+       the join rests on: the two describe one turn order. The same words said
+       twice are two turns and stay two lines. */
+    const client = await panel("call-one");
+    const captions = sources("call-one", "data-channel");
+    const committed = sources("call-one", "app-server");
+    replay(client, order === "caption" ? [...captions, ...committed] : [...committed, ...captions]);
+    expect(shown(client)).toEqual(NATIVE_TURNS);
+    await client.stop();
+  });
+}
+
+test("a new call starts its own turn order and leaves the last call's lines alone", async () => {
+  const client = await panel("call-one");
+  replay(client, [...sources("call-one", "data-channel"), ...sources("call-one", "app-server")]);
+  await client.stop();
+
+  /* The store still carries the first call's segments into the second, and the
+     second's committed transcript arrives before its captions. */
+  await call(client, "call-two");
+  replay(client, [...sources("call-two", "app-server"), ...sources("call-two", "data-channel")]);
+  /* A segment the first call's backend commits late belongs to the first call. */
+  const late = new CodexRealtimeTranscript();
+  late.begin("call-one");
+  const stray = late.observe("thread/realtime/item/completed", {
+    threadId: THREAD,
+    item: { id: "segment-late", realtimeSessionId: "call-one", type: "transcriptSegment", role: "user", text: " late words" },
+  })!;
+  store = applied({
+    seq: ++hostSequence,
+    ...projectEngineHostEvent(conversationId, `codex:${THREAD}`, {
+      kind: "voice-transcript",
+      realtimeSessionId: stray.realtimeSessionId,
+      segmentId: stray.id,
+      role: stray.role,
+      text: stray.text,
+      final: stray.final,
+      seq: hostSequence,
+    })!,
+    recordedAt: new Date().toISOString(),
+  });
+  client.reconcileCanonicalTranscript(carried());
+
+  expect(shown(client)).toEqual([
+    ...NATIVE_TURNS,
+    { role: "user", text: " second call", final: true },
+    { role: "assistant", text: " reply", final: true },
+  ]);
+  await client.stop();
+});
+
+test("an empty canonical segment takes no line ahead of the caption with its words", async () => {
+  const client = await panel();
+  channel({ type: "input_transcript.added", item: { id: "chunk-a", type: "input_transcript", text: " Please" } });
+  /* What an empty `item/started` looked like to the client before the host
+     stopped publishing it. */
+  client.reconcileCanonicalTranscript([
+    { segmentId: "segment-empty", realtimeSessionId: "realtime-1", role: "user", text: "", final: false },
+  ]);
+  expect(shown(client)).toEqual([{ role: "user", text: " Please", final: false }]);
+
+  client.reconcileCanonicalTranscript([
+    { segmentId: "segment-empty", realtimeSessionId: "realtime-1", role: "user", text: " Please repeat", final: false },
+  ]);
+  channel({ type: "input_transcript.added", item: { id: "chunk-b", type: "input_transcript", text: " repeat that" } });
+  expect(shown(client)).toEqual([{ role: "user", text: " Please repeat that", final: false }]);
+  await client.stop();
+});
+
+for (const first of ["caption", "canonical"] as const) {
+  test(`whichever source finishes the turn first, the other finishes the same line (${first} first)`, async () => {
+    const client = await panel();
+    channel({ type: "output_transcript.added", item: { id: "chunk-1", type: "output_transcript", text: "The build" } });
+    canonical(client, "thread/realtime/item/started", {
+      threadId: THREAD, item: { id: "segment-done", realtimeSessionId: "realtime-1", type: "transcriptSegment", role: "assistant", text: "" },
+    });
+    canonical(client, "thread/realtime/item/transcript/delta", { threadId: THREAD, itemId: "segment-done", delta: "The build" });
+    const captionDone = () => channel({ type: "turn.done", turn: { id: "turn-1", role: "assistant", transcript: "The build is green." } });
+    const canonicalDone = () => {
+      canonical(client, "thread/realtime/item/completed", {
+        threadId: THREAD,
+        item: { id: "segment-done", realtimeSessionId: "realtime-1", type: "transcriptSegment", role: "assistant", text: "The build" },
+      });
+      canonical(client, "thread/realtime/transcript/done", { threadId: THREAD, role: "assistant", text: "The build is green." });
+    };
+    if (first === "caption") {
+      captionDone();
+      expect(shown(client)).toEqual([{ role: "assistant", text: "The build is green.", final: true }]);
+      canonicalDone();
+    } else {
+      canonicalDone();
+      expect(shown(client)).toEqual([{ role: "assistant", text: "The build is green.", final: true }]);
+      captionDone();
+    }
+    expect(shown(client)).toEqual([{ role: "assistant", text: "The build is green.", final: true }]);
+    await client.stop();
+  });
+}
+
+test("a replayed fragment and a replayed canonical tail change nothing", async () => {
+  const client = await panel();
+  channel({ type: "input_transcript.added", item: { id: "chunk-w", type: "input_transcript", text: " can" } });
+  const fragment = { type: "input_transcript.added", item: { id: "chunk-x", type: "input_transcript", text: " you check" } };
+  channel(fragment);
+  channel(fragment);
+  expect(shown(client)).toEqual([{ role: "user", text: " can you check", final: false }]);
+
+  const completed = {
+    threadId: THREAD,
+    item: { id: "segment-x", realtimeSessionId: "realtime-1", type: "transcriptSegment", role: "user", text: " can you check" },
+  };
+  canonical(client, "thread/realtime/item/completed", completed);
+  canonical(client, "thread/realtime/item/completed", completed);
+  client.reconcileCanonicalTranscript(carried());
+  client.reconcileCanonicalTranscript(carried());
+  expect(shown(client)).toEqual([{ role: "user", text: " can you check", final: true }]);
+  await client.stop();
+});
+
+test("the committed transcript two turns behind still lands on the right lines", async () => {
+  /* Two identical answers, then a different one, all captioned before any of
+     them is committed. Words would pair the first commit with the wrong "yes". */
+  const client = await panel();
+  for (const [index, text] of [" yes", " yes", " no"].entries()) {
+    channel({ type: "output_transcript.added", item: { id: `chunk-${index}`, type: "output_transcript", text } });
+    channel({ type: "turn.done", turn: { id: `turn-${index}`, role: "assistant", transcript: text } });
+  }
+  expect(shown(client).map((line) => line.text)).toEqual([" yes", " yes", " no"]);
+  for (const [index, text] of [" yes", " yes", " no"].entries()) {
+    canonical(client, "thread/realtime/item/completed", {
+      threadId: THREAD,
+      item: { id: `segment-${index}`, realtimeSessionId: "realtime-1", type: "transcriptSegment", role: "assistant", text },
+    });
+  }
+  expect(shown(client)).toEqual([
+    { role: "assistant", text: " yes", final: true },
+    { role: "assistant", text: " yes", final: true },
+    { role: "assistant", text: " no", final: true },
+  ]);
+  await client.stop();
+});
+
+test("both speakers talking at once keep one line each", async () => {
+  const client = await panel();
+  const words: [string, string][] = [
+    ["input", " can"], ["output", " Sure,"], ["input", " you"], ["output", " one"], ["input", " check"], ["output", " moment."],
+  ];
+  for (const [index, [kind, text]] of words.entries()) {
+    channel({ type: `${kind}_transcript.added`, item: { id: `chunk-${index}`, type: `${kind}_transcript`, text } });
+  }
+  expect(shown(client)).toEqual([
+    { role: "user", text: " can you check", final: false },
+    { role: "assistant", text: " Sure, one moment.", final: false },
+  ]);
+  channel({ type: "turn.done", turn: { id: "turn-u", role: "user", transcript: " can you check" } });
+  channel({ type: "output_transcript.added", item: { id: "chunk-late", type: "output_transcript", text: " Looking" } });
+  channel({ type: "turn.done", turn: { id: "turn-a", role: "assistant", transcript: " Sure, one moment. Looking" } });
+  expect(shown(client)).toEqual([
+    { role: "user", text: " can you check", final: true },
+    { role: "assistant", text: " Sure, one moment. Looking", final: true },
   ]);
   await client.stop();
 });

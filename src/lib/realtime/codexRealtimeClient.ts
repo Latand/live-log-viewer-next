@@ -62,7 +62,10 @@ export interface CodexRealtimeSnapshot {
 }
 
 export type ParsedRealtimeEvent =
-  | { kind: "transcript"; role: "user" | "assistant"; text: string; final: boolean }
+  /** `chunkId` is the provider's id for one streamed fragment; a `turn.done`
+      has none. An empty `text` occurs only on a `turn.done` that names its
+      speaker: it ends that speaker's turn with the words already streamed. */
+  | { kind: "transcript"; role: "user" | "assistant"; text: string; final: boolean; chunkId?: string }
   /** The handoff that turns the utterance just finished into work on the thread.
       Its identities are the canonical join between what was said and what the
       backing model was asked to do (#1629). */
@@ -73,6 +76,99 @@ export type ParsedRealtimeEvent =
 
 const MAX_LINE_CHARS = 12_000;
 const MAX_LINES = 80;
+/** Canonical segment ids one call remembers. Above the runtime store's own
+    tail of 80, so every segment the store can still redeliver is recognised as
+    already placed and keeps the one place it has in the turn order. */
+const MAX_CANONICAL_SEGMENTS = 160;
+/** Utterances one source may be ahead of the other, per speaker. The canonical
+    stream lags the data channel by a few turns at most. */
+const MAX_UNPAIRED_UTTERANCES = 32;
+/** Fragment ids one streaming turn remembers for replay detection. */
+const MAX_TURN_CHUNKS = 512;
+/** Earlier calls whose late canonical segments must stay out of the current one. */
+const MAX_RETIRED_SESSIONS = 8;
+
+/**
+ * One spoken turn, and the panel line it owns (#1658).
+ *
+ * Two sources describe it: the data channel's caption, immediate and streamed
+ * fragment by fragment, and the app-server's canonical segment, committed and a
+ * little behind. They share no identifier. What they share is the turn
+ * structure: native opens a speaker's segment on that speaker's first fragment
+ * and closes it on that speaker's `turn.done` — the same provider events the data
+ * channel delivers — so within one call the k-th turn a speaker takes is the
+ * k-th on both sources. Each half is attached here when its source reaches that
+ * turn, in whichever order the two arrive.
+ */
+interface Utterance {
+  lineId: string;
+  role: TranscriptSpeaker;
+  caption: { text: string; final: boolean } | null;
+  canonical: { text: string; final: boolean } | null;
+  /** The line has been drawn once. Missing after that means it scrolled out of
+      the bounded list, and it is not brought back. */
+  drawn: boolean;
+}
+
+/** One call's transcript: which utterance each source is filling, per speaker. */
+interface TranscriptLedger {
+  /** The realtime session whose canonical segments belong on these lines. */
+  sessionId: string | null;
+  /** The turn each speaker's caption is streaming into. One per speaker, not
+      one overall: in a duplex call both speak at once, and closing one
+      speaker's line whenever the other spoke split every overlapping sentence
+      into fragments. */
+  streaming: Map<TranscriptSpeaker, { utterance: Utterance; chunkIds: Set<string> }>;
+  /** Captioned turns the canonical stream has not reached yet, oldest first. */
+  awaitingCanonical: Record<TranscriptSpeaker, Utterance[]>;
+  /** Canonical turns the data channel has not reached yet, oldest first. */
+  awaitingCaption: Record<TranscriptSpeaker, Utterance[]>;
+  /** The utterance each canonical segment id was placed on. */
+  segments: Map<string, Utterance>;
+}
+
+function newTranscriptLedger(sessionId: string | null = null): TranscriptLedger {
+  return {
+    sessionId,
+    streaming: new Map(),
+    awaitingCanonical: { user: [], assistant: [] },
+    awaitingCaption: { user: [], assistant: [] },
+    segments: new Map(),
+  };
+}
+
+function boundedPush<T>(queue: T[], value: T, limit: number): void {
+  queue.push(value);
+  if (queue.length > limit) queue.splice(0, queue.length - limit);
+}
+
+function comparable(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+/** `longer` says everything `shorter` does and possibly more. */
+function continues(longer: string, shorter: string): boolean {
+  return comparable(longer).startsWith(comparable(shorter));
+}
+
+/**
+ * The words one utterance shows.
+ *
+ * The committed text wins once it is final, and the caption leads while both
+ * stream, because the caption is the low-latency one. When both have finished
+ * and disagree, the caption's `turn.done` is the provider's own final text: a
+ * canonical completion can reach the panel before native's mirrored `done`
+ * repairs it, and a stale completion must not overwrite a correct line.
+ */
+function utteranceText(utterance: Utterance): string {
+  const { caption, canonical } = utterance;
+  if (!canonical?.text) return caption?.text ?? "";
+  if (!caption?.text) return canonical.text;
+  if (canonical.final && caption.final) return continues(canonical.text, caption.text) ? canonical.text : caption.text;
+  if (canonical.final) return canonical.text;
+  if (caption.final) return caption.text;
+  return continues(canonical.text, caption.text) ? canonical.text : caption.text;
+}
 
 function newOperatorActivityId(): string {
   return randomHex(32);
@@ -129,30 +225,39 @@ function eventText(event: Record<string, unknown>): string {
   ).slice(0, MAX_LINE_CHARS);
 }
 
-function eventRole(event: Record<string, unknown>, fallback: "user" | "assistant"): "user" | "assistant" {
+function namedRole(event: Record<string, unknown>): "user" | "assistant" | null {
   const role = stringAt(event, "role")
     ?? stringAt(event.turn, "role")
     ?? stringAt(event.item, "role");
-  return role === "user" || role === "input" ? "user" : role === "assistant" || role === "output" ? "assistant" : fallback;
+  return role === "user" || role === "input" ? "user" : role === "assistant" || role === "output" ? "assistant" : null;
+}
+
+function transcriptChunk(event: Record<string, unknown>, role: "user" | "assistant"): ParsedRealtimeEvent {
+  const text = eventText(event);
+  if (!text) return { kind: "ignored" };
+  /* Native's streamed fragments each carry their own id, so a fragment the
+     channel delivers twice can be recognised as the same one. */
+  const chunkId = stringAt(event.item, "id");
+  return chunkId
+    ? { kind: "transcript", role, text, final: false, chunkId }
+    : { kind: "transcript", role, text, final: false };
 }
 
 export function parseCodexRealtimeEvent(value: unknown): ParsedRealtimeEvent {
   const event = object(value);
   if (!event) return { kind: "ignored" };
   const type = stringAt(event, "type") ?? stringAt(event, "method") ?? "";
-  if (type === "input_transcript.added") {
-    const text = eventText(event);
-    return text ? { kind: "transcript", role: "user", text, final: false } : { kind: "ignored" };
-  }
-  if (type === "output_transcript.added") {
-    const text = eventText(event);
-    return text ? { kind: "transcript", role: "assistant", text, final: false } : { kind: "ignored" };
-  }
+  if (type === "input_transcript.added") return transcriptChunk(event, "user");
+  if (type === "output_transcript.added") return transcriptChunk(event, "assistant");
   if (type === "turn.done") {
     const text = eventText(event);
-    return text
-      ? { kind: "transcript", role: eventRole(event, "assistant"), text, final: true }
-      : { kind: "ignored" };
+    const role = namedRole(event);
+    /* A done with no words still ends its speaker's turn — native closes that
+       speaker's canonical segment on it (#1658), and a caption left open would
+       swallow the next turn into this one. Without words it is only a boundary
+       when it says whose. */
+    if (!text) return role ? { kind: "transcript", role, text: "", final: true } : { kind: "ignored" };
+    return { kind: "transcript", role: role ?? "assistant", text, final: true };
   }
   if (type === "delegation.created" || type === "conversation.handoff.requested") {
     /* Both events name the same handoff; `delegation.created` nests the
@@ -229,11 +334,13 @@ class CodexRealtimeClient {
   private workerDeliveryWakeEpoch: number | null = null;
   private unloadHangup: (() => void) | null = null;
   private lineSequence = 0;
-  /** The line each speaker is still streaming into, by line id. Held here
-      rather than read off the end of the list because a delegating turn
+  /** The current call's utterances, held here because a delegating turn
       interleaves both speakers with worker progress, so "the last line" is
-      almost never the line an update belongs to. */
-  private readonly openTranscriptLines = new Map<TranscriptSpeaker, string>();
+      almost never the line an update belongs to. Kept through the hangup and
+      replaced when the next call starts: a canonical segment the backend
+      commits just after the hangup still belongs on this call's lines. */
+  private transcript: TranscriptLedger = newTranscriptLedger();
+  private readonly retiredTranscriptSessions: string[] = [];
   /* #1629: the utterance boundary this peer is currently publishing for. The
      server cannot mint it — the operator's audio never reaches it — and without
      one a retried publication counts as a second utterance and a slow one
@@ -250,9 +357,6 @@ class CodexRealtimeClient {
      that claimed a fresh utterance is how card B answered a question asked about
      card A after the operator spoke again. */
   private readonly reportedHandoffKeys = new Set<string>();
-  /* Which panel line each canonical transcript segment owns, so a segment that
-     is republished updates its own line instead of stacking a second copy. */
-  private readonly canonicalLines = new Map<string, string>();
   /* Set once this peer sees a handoff it cannot attribute, and never cleared
      within the call. Every unattributed utterance may still produce a handoff,
      so nothing arriving afterwards can be shown to be anyone's. */
@@ -307,6 +411,13 @@ class CodexRealtimeClient {
       return;
     }
     this.cleanupTransport();
+    /* A new call is a new turn order. The last call's lines stay on screen,
+       but nothing of this call may be attached to them, and that call's own
+       late segments are kept out of this one. */
+    if (this.transcript.sessionId) {
+      boundedPush(this.retiredTranscriptSessions, this.transcript.sessionId, MAX_RETIRED_SESSIONS);
+    }
+    this.transcript = newTranscriptLedger();
     /* `notice` is cleared with `error` for the same reason: it describes the
        call that is starting, and a warning carried over from the previous one
        would tell the operator about a limit this call has not reported. */
@@ -413,6 +524,8 @@ class CodexRealtimeClient {
          peer just ran. Held for the life of the session and presented on every write
          into it (#691 §6). */
       this.realtimeSessionId = typeof answer.realtimeSessionId === "string" ? answer.realtimeSessionId : null;
+      /* The same id the host tags every canonical segment of this call with. */
+      if (this.realtimeSessionId) this.transcript.sessionId = this.realtimeSessionId;
       await peer.setRemoteDescription({ type: "answer", sdp: answer.sdp });
     } catch (error) {
       if (epoch !== this.epoch) return;
@@ -454,7 +567,7 @@ class CodexRealtimeClient {
        answer once per tick as a ladder of ever-longer prefixes. The turn id
        also survives the line being finalized when the turn ends, so a trailing
        tick reuses it instead of opening a second copy. */
-    this.writeLine(`progress:${turnId}`, "progress", text, !running, "replace");
+    this.writeLine(`progress:${turnId}`, "progress", text, !running);
   }
 
   reconcileWorkerDeliveries(
@@ -735,7 +848,7 @@ class CodexRealtimeClient {
     }
     const event = parseCodexRealtimeEvent(value);
     if (event.kind === "transcript") {
-      this.writeTranscript(event.role, event.text, event.final);
+      this.writeCaption(event.role, event.text, event.final, event.chunkId);
       /* THE UTTERANCE BOUNDARY (#844 §2). The operator's speech never passes
          through our server — it rides the WebRTC leg straight to the model — so
          this is the one moment in the whole system where a spoken turn can be
@@ -743,8 +856,9 @@ class CodexRealtimeClient {
          instant the transcript goes final, for the same reason the composer
          reads it inside its submit handler: everything the reference will say
          is decided by the state that existed when the operator finished
-         speaking. */
-      if (event.role === "user" && event.final) {
+         speaking. A done with no words ends the caption but publishes nothing,
+         exactly as when such a done was not read at all. */
+      if (event.role === "user" && event.final && event.text) {
         this.publishOperatorActivity();
         this.publishSelectedContext();
       }
@@ -769,89 +883,147 @@ class CodexRealtimeClient {
    * showed nothing of what the backend had actually recorded. Both now reach
    * here, and the whole job is not showing the operator every sentence twice.
    *
-   * A canonical segment carries its WHOLE text each time, so:
+   * A canonical segment carries its WHOLE text each time, and is placed ONCE
+   * (#1658):
    *
-   * - a segment already merged updates the line it owns, in place. That is what
-   *   makes a redelivered frame, a `done` completing its own deltas, and a
-   *   replay after reconnect converge on one line instead of three.
-   * - a segment arriving for the first time ADOPTS the most recent line of the
-   *   same speaker whose text it continues — the data-channel line for the same
-   *   words — and takes ownership of it. The canonical text wins, because it is
-   *   the record the thread keeps.
-   * - anything else is a line this panel never saw, and it is appended. That is
-   *   the case a dropped data channel produces, and it is the reason for all of
-   *   this.
+   * - a segment already placed updates its own utterance, in place. That is what
+   *   makes a redelivered frame, a `done` completing its own deltas, and the
+   *   store handing over its whole tail again converge on one line.
+   * - a segment seen for the first time is the speaker's next turn on the
+   *   canonical stream, so it joins that speaker's oldest captioned turn still
+   *   waiting for one — the same turn, by the turn order both sources share.
+   *   Nothing is matched by words, so the same sentence said twice stays two
+   *   lines.
+   * - a segment the caption has not reached is a line of its own, and the
+   *   caption joins it when it gets there. That is the case a dropped data
+   *   channel produces, and it is the reason for all of this.
+   *
+   * A segment with no words yet takes no line and no place in the order: native
+   * opens every segment empty, and an empty one used to claim a line before the
+   * caption with its words could be joined.
    */
   reconcileCanonicalTranscript(segments: readonly RuntimeVoiceTranscriptSegment[] | null | undefined): void {
+    const changed = new Set<Utterance>();
     for (const segment of segments ?? []) {
       if (!segment?.segmentId || typeof segment.text !== "string") continue;
       if (segment.role !== "user" && segment.role !== "assistant") continue;
-      const owned = this.canonicalLines.get(segment.segmentId);
-      const key = owned ?? this.adoptableLineFor(segment) ?? `canonical:${segment.segmentId}`;
-      if (!owned) {
-        this.canonicalLines.set(segment.segmentId, key);
-        /* The canonical record owns this line now, so a later data-channel
-           fragment for the same speaker opens a fresh one rather than appending
-           to text the backend has already committed. */
-        if (this.openTranscriptLines.get(segment.role) === key) this.openTranscriptLines.delete(segment.role);
+      let utterance = this.transcript.segments.get(segment.segmentId);
+      if (!utterance) {
+        if (!segment.text || !this.belongsToThisCall(segment.realtimeSessionId)) continue;
+        utterance = this.transcript.awaitingCanonical[segment.role].shift()
+          ?? this.newUtterance(segment.role, this.transcript.awaitingCaption[segment.role]);
+        this.placeSegment(segment.segmentId, utterance);
       }
-      this.writeLine(key, segment.role, segment.text, segment.final, "replace");
+      /* A settled segment is not reopened by a late non-final frame of it. */
+      if (utterance.canonical?.final && !segment.final) continue;
+      utterance.canonical = { text: segment.text.slice(0, MAX_LINE_CHARS), final: segment.final };
+      changed.add(utterance);
     }
+    this.draw(changed);
   }
 
   /**
-   * The line this segment is the committed form of, if the panel already has it.
+   * Whether a canonical segment from this realtime session belongs on the
+   * current call's lines.
    *
-   * Matched by speaker and by prefix, newest first, and never a line another
-   * segment already owns. Prefix rather than equality because the data channel
-   * streams: when the canonical `done` lands, the line usually holds a leading
-   * part of the same sentence.
+   * The runtime store keeps the last calls' segments too, and a new call must
+   * not attach them to its own turns. The call's own id comes from its answer;
+   * an answer without one binds the first session that is not an earlier call's,
+   * and nothing binds while the answer is still on its way.
    */
-  private adoptableLineFor(segment: RuntimeVoiceTranscriptSegment): string | null {
-    const owned = new Set(this.canonicalLines.values());
-    for (let index = this.snapshot.lines.length - 1; index >= 0; index -= 1) {
-      const line = this.snapshot.lines[index]!;
-      if (line.role !== segment.role || owned.has(line.id)) continue;
-      return line.text && segment.text.startsWith(line.text) ? line.id : null;
+  private belongsToThisCall(sessionId: string): boolean {
+    if (this.transcript.sessionId !== null) return sessionId === this.transcript.sessionId;
+    if (this.snapshot.phase === "connecting" || this.retiredTranscriptSessions.includes(sessionId)) return false;
+    this.transcript.sessionId = sessionId;
+    return true;
+  }
+
+  private placeSegment(segmentId: string, utterance: Utterance): void {
+    const placed = this.transcript.segments;
+    placed.set(segmentId, utterance);
+    if (placed.size > MAX_CANONICAL_SEGMENTS) {
+      const oldest = placed.keys().next().value as string | undefined;
+      if (oldest !== undefined) placed.delete(oldest);
     }
-    return null;
+  }
+
+  /** A turn only one source has reached so far, queued for the other. */
+  private newUtterance(role: TranscriptSpeaker, waitingFor: Utterance[]): Utterance {
+    const utterance: Utterance = {
+      lineId: `${role}:${++this.lineSequence}`, role, caption: null, canonical: null, drawn: false,
+    };
+    boundedPush(waitingFor, utterance, MAX_UNPAIRED_UTTERANCES);
+    return utterance;
   }
 
   /**
-   * Route a speaker's text to the line that speaker currently owns. Barge-in
-   * puts the operator's turn after the agent's half-finished one, and worker
-   * progress lands between the two, so position says nothing about ownership.
-   * Whoever speaks closes the other's line: an interrupted turn that resumes
-   * opens a fresh line instead of growing the one it abandoned.
+   * Route a caption fragment to the turn its speaker is taking.
+   *
+   * Each speaker streams into its own turn until that speaker's `turn.done`,
+   * which is exactly where native closes the canonical segment. The other
+   * speaker talking does not end it: in a duplex call the two overlap word by
+   * word, and ending a turn there left every overlapping sentence in pieces
+   * with the whole of it repeated underneath. Worker progress lands between
+   * them too, so position says nothing about ownership.
    */
-  private writeTranscript(role: TranscriptSpeaker, text: string, final: boolean): void {
-    this.openTranscriptLines.delete(role === "user" ? "assistant" : "user");
-    const key = this.openTranscriptLines.get(role) ?? `${role}:${++this.lineSequence}`;
-    if (final) this.openTranscriptLines.delete(role);
-    else this.openTranscriptLines.set(role, key);
-    /* A final event carries the complete turn, a streamed one only the new
-       fragment — except on backends that resend the whole text, which the
-       prefix check below absorbs. */
-    this.writeLine(key, role, text, final, final ? "replace" : "append");
+  private writeCaption(role: TranscriptSpeaker, text: string, final: boolean, chunkId?: string): void {
+    const ledger = this.transcript;
+    let streaming = ledger.streaming.get(role);
+    /* The same fragment delivered twice is one fragment. */
+    if (chunkId && streaming?.chunkIds.has(chunkId)) return;
+    if (!streaming) {
+      /* A done with no words and nothing streamed before it is no turn. */
+      if (!text) return;
+      const utterance = ledger.awaitingCaption[role].shift() ?? this.newUtterance(role, ledger.awaitingCanonical[role]);
+      streaming = { utterance, chunkIds: new Set() };
+      if (!final) ledger.streaming.set(role, streaming);
+    }
+    if (chunkId) {
+      if (streaming.chunkIds.size >= MAX_TURN_CHUNKS) streaming.chunkIds.clear();
+      streaming.chunkIds.add(chunkId);
+    }
+    const { utterance } = streaming;
+    const previous = utterance.caption?.text ?? "";
+    /* A final event carries the complete turn — an empty one keeps what was
+       streamed — and a streamed one only the new fragment, except on backends
+       that resend the whole text, which the prefix check absorbs. */
+    const combined = final
+      ? text || previous
+      : text.startsWith(previous) ? text : `${previous}${text}`;
+    utterance.caption = { text: combined.slice(-MAX_LINE_CHARS), final };
+    if (final) ledger.streaming.delete(role);
+    this.draw([utterance]);
   }
 
-  private writeLine(
-    key: string,
-    role: CodexRealtimeRole,
-    text: string,
-    final: boolean,
-    mode: "replace" | "append",
-  ): void {
+  /** Put these utterances on the panel, in one update. */
+  private draw(utterances: Iterable<Utterance>): void {
+    let lines: CodexRealtimeLine[] | null = null;
+    for (const utterance of utterances) {
+      const text = utteranceText(utterance);
+      if (!text) continue;
+      const final = utterance.caption?.final === true || utterance.canonical?.final === true;
+      const current = lines ?? this.snapshot.lines;
+      const index = current.findIndex((line) => line.id === utterance.lineId);
+      if (index < 0 && utterance.drawn) continue;
+      if (index >= 0 && current[index]!.text === text && current[index]!.final === final) continue;
+      lines ??= [...this.snapshot.lines];
+      if (index < 0) {
+        lines.push({ id: utterance.lineId, role: utterance.role, text, final });
+        utterance.drawn = true;
+      } else {
+        lines[index] = { ...lines[index]!, text, final };
+      }
+    }
+    if (lines) this.update({ lines: lines.slice(-MAX_LINES) });
+  }
+
+  private writeLine(key: string, role: CodexRealtimeRole, text: string, final: boolean): void {
     const lines = [...this.snapshot.lines];
     const index = lines.findIndex((line) => line.id === key);
     if (index < 0) {
       lines.push({ id: key, role, text: text.slice(-MAX_LINE_CHARS), final });
     } else {
-      const previous = lines[index]!;
-      const combined = mode === "replace" || text.startsWith(previous.text)
-        ? text
-        : `${previous.text}${text}`;
-      lines[index] = { ...previous, text: combined.slice(-MAX_LINE_CHARS), final };
+      lines[index] = { ...lines[index]!, text: text.slice(-MAX_LINE_CHARS), final };
     }
     this.update({ lines: lines.slice(-MAX_LINES) });
   }
@@ -900,9 +1072,10 @@ class CodexRealtimeClient {
   realtimeSession = (): string | null => this.realtimeSessionId;
 
   private cleanupTransport(): void {
-    /* No line survives a dead transport as "still streaming": the next call
-       opens its own rather than appending to a turn nobody can finish. */
-    this.openTranscriptLines.clear();
+    /* No turn survives a dead transport as "still streaming". Its canonical
+       half can still arrive, so the turn order itself is kept until the next
+       call replaces it. */
+    this.transcript.streaming.clear();
     if (this.unloadHangup) window.removeEventListener("pagehide", this.unloadHangup);
     this.unloadHangup = null;
     this.events?.close();
@@ -922,8 +1095,6 @@ class CodexRealtimeClient {
     this.utterancesAwaitingHandoff = [];
     this.reportedHandoffKeys.clear();
     this.handoffCorrelationLost = false;
-    this.canonicalLines.clear();
-    this.openTranscriptLines.clear();
   }
 }
 
