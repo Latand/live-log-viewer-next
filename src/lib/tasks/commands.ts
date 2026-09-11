@@ -3,11 +3,25 @@ import crypto from "node:crypto";
 import { isTaskAttachment } from "./attachments";
 import { taskRevision } from "./revision";
 import { isoNow } from "./helpers";
+import { countBoardTasks, taskShowsOnBoard } from "./boardVisibility";
 import { assignmentAdmissionOrigin, assignmentIdentity, ensureTaskMembership, identityHeldBy, type MembershipIdentity } from "./membership";
 import type { AssignmentRef, BoardTask, TaskAttachment, TaskAssignment, TaskBoardVisibility, TaskSource, TaskStatus } from "./types";
 
 export const TASK_TEXT_LIMIT = 6000;
-export const TASKS_PER_PROJECT_LIMIT = 300;
+/**
+ * How many bands one project's board may carry (#1627).
+ *
+ * A DISPLAY bound, and only that: it counts the tasks the board draws, never
+ * the rows the task file stores. The stored list is a history — since #1614
+ * every task that has nothing on the canvas keeps its row and its place in the
+ * task list with `board: "hidden"` — and a history has no cap here, so a
+ * project with hundreds of finished tasks can still take a new one. What is
+ * bounded is the vertical stack of bands that made the board unusable in the
+ * first place.
+ *
+ * The number is unchanged from the row cap it replaces.
+ */
+export const BOARD_TASKS_PER_PROJECT_LIMIT = 300;
 /** How many recent create receipts are kept for `clientRequestId` replay. Sized
     to the double-tap / retry-after-timeout window; a replay older than the cap
     can mint a twin (documented, durability beyond the cap is deferred). */
@@ -40,6 +54,10 @@ export interface CreateTaskInput {
   attachments?: unknown;
   clientRequestId?: unknown;
   source?: unknown;
+  /** Optional board membership of the new task's band. Omitted creates a task
+      the board shows; `"hidden"` creates it off the board, which is how a
+      caller records work while the board is full. */
+  board?: unknown;
 }
 
 export interface PatchTaskInput {
@@ -60,6 +78,23 @@ export interface TaskCommandDeps {
   now?: () => string;
   id?: () => string;
   attachmentExists?: (att: TaskAttachment) => boolean;
+  /** Whether a hidden task still holds something the board draws — the answer
+      only a caller that can see the resolved bands has. Defaults to "no", which
+      counts exactly the bands the board was ASKED to draw; see
+      {@link countBoardTasks} for why guessing it from stored rows is worse than
+      not answering. */
+  hasBoardMembers?: (task: BoardTask) => boolean;
+}
+
+/** The refusal both admission paths give when the board is full. */
+function boardFullError(field: "board" | "project"): TaskRefusal {
+  return {
+    ok: false,
+    error: `The board already shows ${BOARD_TASKS_PER_PROJECT_LIMIT} task bands for this project. Hide a band you no longer need, or keep this task off the board with board: "hidden".`,
+    status: 409,
+    code: "TASK_BOARD_FULL",
+    field,
+  };
 }
 
 export type SpawnEngine = "claude" | "codex";
@@ -210,9 +245,14 @@ export function createTask(
 
   const source = normalizeSource(input.source);
   if (source === null) return { ok: false, error: "invalid task source", status: 400 };
-  const count = existing.filter((task) => task.project === project).length;
-  if (count >= TASKS_PER_PROJECT_LIMIT) {
-    return { ok: false, error: `The project already has ${TASKS_PER_PROJECT_LIMIT} tasks. Close or delete extra tasks.`, status: 409 };
+
+  const board = Object.hasOwn(input, "board") ? normalizeBoardVisibility(input.board) : undefined;
+  if (board === null) return { ok: false, error: "invalid board visibility", status: 400, code: "TASK_INVALID_FIELD", field: "board" };
+  /* The bound is on bands, so only a task that will occupy one is counted
+     against it: a task created off the board joins the history, which has no
+     cap, and no durable identity is ever refused to keep a display small. */
+  if (board !== "hidden" && countBoardTasks(existing, project, deps.hasBoardMembers ?? (() => false)) >= BOARD_TASKS_PER_PROJECT_LIMIT) {
+    return boardFullError("project");
   }
 
   const now = deps.now?.() ?? isoNow();
@@ -227,6 +267,7 @@ export function createTask(
     ...(due.dueAt ? { dueAt: due.dueAt, dueTz: due.dueTz } : {}),
     ...(attachments.attachments ? { attachments: attachments.attachments } : {}),
     ...(source ? { source } : {}),
+    ...(board ? { board } : {}),
     assignments: [],
     createdAt: now,
     updatedAt: now,
@@ -237,7 +278,7 @@ export function createTask(
   return { ok: true, tasks: [...existing, task], task, recentCreates: nextRecent, replay: false };
 }
 
-export function patchTask(existing: BoardTask[], id: string, input: PatchTaskInput, now = isoNow(), options: { requirePlacementGuards?: boolean } = {}): TaskCommandResult {
+export function patchTask(existing: BoardTask[], id: string, input: PatchTaskInput, now = isoNow(), options: { requirePlacementGuards?: boolean; hasBoardMembers?: (task: BoardTask) => boolean } = {}): TaskCommandResult {
   const index = existing.findIndex((task) => task.id === id);
   if (index < 0) return { ok: false, error: "task not found", status: 404 };
   const task = existing[index]!;
@@ -287,6 +328,18 @@ export function patchTask(existing: BoardTask[], id: string, input: PatchTaskInp
   if (Object.hasOwn(input, "board")) {
     const board = normalizeBoardVisibility(input.board);
     if (!board) return { ok: false, error: "invalid board visibility", status: 400, code: "TASK_INVALID_FIELD", field: "board" };
+    /* Restoring a band is the board's other admission (#1627), so it answers to
+       the same bound as a create — otherwise the cap would only ever move a
+       task's growth from one control to the other. A task that already occupies
+       a band takes no new slot, so re-asserting `shown` is never refused, and
+       neither is hiding one; and because the count is taken from the snapshot
+       this call was handed, the serialized read-modify-write around it (see
+       `mutateTasks`) is what stops two writers taking the last slot at once. */
+    const hasMembers = options.hasBoardMembers ?? (() => false);
+    if (board === "shown" && !taskShowsOnBoard(task, hasMembers(task))
+      && countBoardTasks(existing, task.project, hasMembers) >= BOARD_TASKS_PER_PROJECT_LIMIT) {
+      return boardFullError("board");
+    }
     patch.board = board;
   }
   if (Object.hasOwn(input, "placement")) {

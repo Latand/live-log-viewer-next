@@ -22,6 +22,9 @@ const files = [
   "src/lib/runtime/nativeQueueRuntime.test.ts",
   "src/lib/runtime/nativeQueueContent.test.ts",
   "src/runtime-host/nativeQueueJournal.test.ts",
+  // #1664: native entries through journal compaction, and evidence-only recovery.
+  "src/runtime-host/nativeQueueCompaction.test.ts",
+  "src/lib/runtime/nativeQueueCompaction.integration.test.ts",
   "src/lib/runtime/nativeQueueHost.integration.test.ts",
   "src/lib/runtime/codexTurnProfile.test.ts",
   "src/lib/runtime/codexAppServerHost.test.ts",

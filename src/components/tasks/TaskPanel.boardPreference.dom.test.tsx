@@ -45,6 +45,7 @@ function bindDomGlobals() {
 
 bindDomGlobals();
 const { TaskPanel } = await import("./TaskPanel");
+const { TaskToastHost } = await import("./taskToast");
 
 const roots = new Set<Root>();
 let patches: { url: string; body: unknown }[] = [];
@@ -182,4 +183,41 @@ test("with no member, the same stored preference is what the badge and the contr
   expect(host.textContent).toContain("off board");
   flushSync(() => button.dispatchEvent(new dom.MouseEvent("click", { bubbles: true, cancelable: true }) as never));
   expect(patches[0]!.body).toEqual({ board: "shown" });
+});
+
+test("a “show on board” the server refuses is told to the operator, not swallowed (#1627)", async () => {
+  /* The board carries its full complement of bands, so the restore is refused.
+     Before the cap counted bands this write could not fail, and the control
+     dropped its result — which would have left the row claiming a band the
+     canvas never drew. */
+  globalThis.fetch = (async () => new Response(
+    JSON.stringify({ error: 'The board already shows 300 task bands for this project. Hide a band you no longer need, or keep this task off the board with board: "hidden".' }),
+    { status: 409, headers: { "content-type": "application/json" } },
+  )) as unknown as typeof fetch;
+
+  const host = dom.document.createElement("div");
+  dom.document.body.appendChild(host);
+  const root = createRoot(host as unknown as Element);
+  roots.add(root);
+  flushSync(() => root.render(
+    <>
+      <TaskPanel
+        tasks={[task("empty-hidden", { board: "hidden" })]}
+        project="repo-board"
+        boardMembers={boardConversationKeys([])}
+        favorites={[]}
+        onOpenFavorite={() => {}}
+        onToggleFavorite={() => {}}
+        onOpenTask={() => {}}
+        onClose={() => {}}
+      />
+      <TaskToastHost />
+    </>,
+  ));
+
+  const button = (host as unknown as HTMLElement).querySelector('[data-task-board-toggle="empty-hidden"]') as HTMLButtonElement;
+  flushSync(() => button.dispatchEvent(new dom.MouseEvent("click", { bubbles: true, cancelable: true }) as never));
+  for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+
+  expect(dom.document.body.textContent).toContain("300 task bands");
 });
