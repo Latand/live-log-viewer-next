@@ -77,6 +77,11 @@ plugins = false
       if (method === "thread/items/list" && hideCanonicalClient && Array.isArray(message.result?.data)) {
         message.result.data = message.result.data.filter((entry: { item?: { clientId?: string } }) => entry.item?.clientId !== hideCanonicalClient);
       }
+      if (method === "thread/turns/list" && hideCanonicalClient && Array.isArray(message.result?.data)) {
+        for (const turn of message.result.data) {
+          if (Array.isArray(turn.items)) turn.items = turn.items.filter((item: {clientId?: string}) => item.clientId !== hideCanonicalClient);
+        }
+      }
       output.write(JSON.stringify(message) + "\n");
     });
     child.once("close", () => { inbound.close(); outbound.close(); output.end(); });
@@ -155,7 +160,7 @@ plugins = false
     const proof = journal.nativeQueueRead(conversationId).find(e => e.entryId === lost.entryId)?.proof;
     expect(proof?.clientUserMessageId).toBe("lost-native");
     expect(requests.some(r => r.method === "thread/turns/list")).toBeTrue();
-    expect(requests.some(r => r.method === "thread/items/list")).toBeTrue();
+    expect(requests.some(r => r.method === "thread/turns/list" && r.params.itemsView === "full")).toBeTrue();
     await host.interrupt((await host.health()).activeTurnRef!);
     await until(async () => (await host!.health()).activeTurnRef === null);
     await host.send({ id: "profile-send", text: "profile input", runtime: { model: "fixture-model", effort: "high", serviceTier: "default", serviceTierForTurn: "priority" } });

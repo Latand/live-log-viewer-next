@@ -22,6 +22,7 @@ import { adoptCodexRegistryHosts, bindCodexHostPersistence, persistCodexHost, st
 import { STRUCTURED_IMAGE_CAPABILITY, structuredContent, type StructuredImageRef } from "./structuredContent";
 import { materializeStructuredHostAccess, READ_ONLY_STAGE_PERMISSION_PROFILE } from "./structuredSpawn";
 import type { RuntimeVoiceDelivery } from "./voiceDelivery";
+import type { NativeQueueRecord } from "./nativeQueueContracts";
 import {
   COORDINATOR_VOICE_PERSONA,
   VOICE_PERSONA_FILE,
@@ -135,6 +136,7 @@ class FakeAppServer extends EventEmitter {
   readError: string | null = null;
   turnsError: string | null = null;
   userAgent = "codex_desktop_app/0.144.1 (Linux)";
+  paginatedHistory = false;
   /* Rejects only hydrated reads (includeTurns), the way codex 0.151+ paginated
      threads do; metadata-only reads and thread/turns/list keep answering. */
   hydratedReadError: string | null = null;
@@ -218,7 +220,9 @@ class FakeAppServer extends EventEmitter {
     const method = message.method;
     if (typeof method === "string" && this.ignoredMethods.includes(method)) return;
     if (method === "initialize") return this.respond(message.id, { userAgent: this.userAgent });
-    if (method === "thread/queue/list") return this.respondError(message.id, "method not found");
+    if (method === "thread/queue/list") return this.paginatedHistory
+      ? this.respond(message.id, { data: [], nextCursor: null })
+      : this.respondError(message.id, "method not found");
     if (method === "account/read") return this.respond(message.id, { account: { type: "chatgpt", planType: "pro" }, requiresOpenaiAuth: false });
     if (method === "model/list") {
       if (this.modelListFailuresRemaining > 0) {
@@ -270,10 +274,30 @@ class FakeAppServer extends EventEmitter {
       if (this.readError) return this.respondError(message.id, this.readError);
       const turns = [...(this.readTurns ?? this.turns)];
       if ((message.params as { sortDirection?: string } | undefined)?.sortDirection === "desc") turns.reverse();
+      if (this.paginatedHistory) {
+        const params = message.params as { cursor?: string; limit: number; itemsView: string };
+        const offset = Number(params.cursor ?? 0);
+        return this.respond(message.id, {
+          data: turns.slice(offset, offset + params.limit).map(value => {
+            const turn = value as { items: unknown[] };
+            return { ...turn, items: params.itemsView === "full" ? turn.items : [], itemsView: params.itemsView };
+          }),
+          nextCursor: offset + params.limit < turns.length ? String(offset + params.limit) : null,
+        });
+      }
       return this.respond(message.id, {
         data: turns,
         nextCursor: null,
         backwardsCursor: null,
+      });
+    }
+    if (method === "thread/items/list" && this.paginatedHistory) {
+      const params = message.params as { turnId: string; cursor?: string; limit: number };
+      const turn = (this.readTurns ?? this.turns).find(value => (value as { id: string }).id === params.turnId) as {items: unknown[]};
+      const offset = Number(params.cursor ?? 0);
+      return this.respond(message.id, {
+        data: turn.items.slice(offset, offset + params.limit).map(item => ({turnId: params.turnId, item})),
+        nextCursor: offset + params.limit < turn.items.length ? String(offset + params.limit) : null,
       });
     }
     if (method === "turn/start") {
@@ -2245,6 +2269,48 @@ describe("CodexAppServerHost", () => {
     });
     await host.release();
   });
+
+  test("confirms native queue delivery and materialization across 316 turns within existing bounds", async () => {
+    const server = new FakeAppServer("long-native-thread");
+    server.userAgent = "codex_desktop_app/0.154.0 (Linux)";
+    server.paginatedHistory = true;
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo", eventStore: new MemoryEventStore(), spawnProcess: fakeSpawn(server),
+    });
+    try {
+      expect(host.nativeQueue).toBeDefined();
+      const entry: NativeQueueRecord = {
+        entryId: "long-history-send", conversationId: "conversation_fixture",
+        binding: {threadId: "long-native-thread", accountId: "fixture"},
+        clientUserMessageId: "long-history-send", nativeSubmissionId: "native-submission",
+        revision: 1, versions: [{revision: 1, operationId: "long-history-send", text: "Continue the authorized review", images: [], contentDigest: "fixture-digest"}],
+        profilePolicy: "thread-at-dispatch", state: "queued", mutationOperationId: null,
+        dispatchedRevision: null, dispatchedTurnId: null, proof: null, reason: null,
+      };
+      entry.versions[0].input = await host.nativeQueue!.prepare(entry, entry.versions[0]);
+      const user = {type: "userMessage", id: "canonical-user", clientId: entry.clientUserMessageId, content: entry.versions[0].input};
+      // Match the observed 316-turn, roughly 2,500-item / 12 MB projection.
+      // The target is recent; reading unrelated history must fit the original
+      // 128-response / 16 MiB bounds without creating any new model turn.
+      server.readTurns = Array.from({length: 316}, (_, index) => ({
+        id: `history-${index}`, status: "completed", items: [
+          ...Array.from({length: 7}, (_, tool) => ({type: "commandExecution", id: `tool-${index}-${tool}`, aggregatedOutput: "x".repeat(5500)})),
+          ...(index === 315 ? [user] : [{type: "agentMessage", id: `answer-${index}`, text: "Earlier answer"}]),
+        ],
+      }));
+      expect(await host.nativeQueue!.evidence(entry)).toMatchObject({clientUserMessageId: entry.clientUserMessageId, turnId: "history-315", itemId: user.id});
+      expect(await host.nativeQueue!.evidenceBatch!([entry])).toEqual([expect.objectContaining({itemId: user.id})]);
+      expect(await host.sessionMaterializationEvidence(entry.clientUserMessageId)).toEqual({state: "materialized"});
+      const mismatched = structuredClone(entry);
+      mismatched.versions[0].input = [{type: "text", text: "Different payload"}];
+      expect(await host.nativeQueue!.evidence(mismatched)).toBeNull();
+      const foreign = {...entry, binding: {...entry.binding, threadId: "foreign-thread"}};
+      expect(await host.nativeQueue!.evidence(foreign)).toBeNull();
+      (server.readTurns[315] as {items: unknown[]}).items.pop();
+      expect(await host.nativeQueue!.evidence(entry)).toBeNull();
+      expect(server.requests.some(r => r.method === "turn/start" || r.method === "turn/steer" || r.method === "thread/queue/add")).toBeFalse();
+    } finally { await host.release(); }
+  }, 15000);
 
   test("native-history transport refusals never authorize a first delivery", async () => {
     const server = new FakeAppServer("refused-first-thread");

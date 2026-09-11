@@ -1486,7 +1486,7 @@ export class CodexAppServerHost implements EngineHost {
       evidenceBatch: async (entries) => {
         if (!this.identity.path) return entries.map(() => null);
         const history = await readCodexHistory((method, params, timeout) => this.rpc(method, params, timeout, true),
-          { threadId: this.identity.threadId, path: this.identity.path }, { deadlineAt: Date.now() + this.requestTimeoutMs, sortDirection: "desc" });
+          { threadId: this.identity.threadId, path: this.identity.path }, { deadlineAt: Date.now() + this.requestTimeoutMs, sortDirection: "desc", itemsView: "full" });
         return Promise.all(entries.map(entry => this.nativeQueueEvidence(entry, history)));
       },
       sendWithdrawn: async (entry, expectedTurnId) => {
@@ -1509,7 +1509,7 @@ export class CodexAppServerHost implements EngineHost {
   private async nativeQueueEvidence(entry: NativeQueueRecord, snapshot?: CodexHistoryResult) {
     if (entry.binding.threadId !== this.identity.threadId || !this.identity.path) return null;
     const history = snapshot ?? await readCodexHistory((method, params, timeout) => this.rpc(method, params, timeout, true),
-      { threadId: this.identity.threadId, path: this.identity.path }, { deadlineAt: Date.now() + this.requestTimeoutMs, sortDirection: "desc" });
+      { threadId: this.identity.threadId, path: this.identity.path }, { deadlineAt: Date.now() + this.requestTimeoutMs, sortDirection: "desc", itemsView: "full" });
     const targetHistory = history.state !== "complete" ? history : { ...history,
       turns: history.turns.map(turn => ({ ...turn, items: turn.items.filter(item => item.type === "userMessage" && item.clientId === entry.clientUserMessageId) }))
         .filter(turn => turn.items.length > 0),
@@ -1648,7 +1648,10 @@ export class CodexAppServerHost implements EngineHost {
     if (this.supportsNativeHistory() && this.identity.path) {
       const history = await readCodexHistory((method, params, remaining) => this.rpc(method, params, remaining, true),
         { threadId: this.identity.threadId, path: this.identity.path },
-        { deadlineAt: Date.now() + (timeoutMs ?? this.requestTimeoutMs), sortDirection: window === "first" ? "asc" : "desc" });
+        // Native full pages avoid one extra item traversal per historical turn.
+        // The reader retains its byte/page/deadline bounds and hydrates any
+        // partial page before accepting it as canonical evidence.
+        { deadlineAt: Date.now() + (timeoutMs ?? this.requestTimeoutMs), sortDirection: window === "first" ? "asc" : "desc", itemsView: "full" });
       if (history.state === "complete") return { thread: { id: history.identity.threadId, path: history.identity.path,
         turns: window === "latest" ? [...history.turns].reverse() : history.turns } };
       if (history.state === "unknown") {
