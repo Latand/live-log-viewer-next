@@ -68,7 +68,7 @@ const realFetch = globalThis.fetch;
 let roots: Root[] = [];
 let starts = 0;
 
-const IDLE = { phase: "idle" as const, lines: [], error: null, startedAt: null, micMuted: false, outputMuted: false };
+const IDLE = { phase: "idle" as const, lines: [], error: null, startedAt: null, micMuted: false, outputMuted: false, notice: null, agentUnavailable: null };
 const spyClient = {
   subscribe: () => () => undefined,
   getSnapshot: () => IDLE,
@@ -79,6 +79,8 @@ const spyClient = {
   stop: async () => undefined,
   updateWorkerProgress: () => undefined,
   reconcileWorkerDeliveries: () => undefined,
+  reconcileCanonicalTranscript: () => undefined,
+  reportBackingHost: () => undefined,
   onDeliveryAcknowledged: () => () => undefined,
   realtimeSession: () => null,
 };

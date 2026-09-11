@@ -255,6 +255,9 @@ test("the scheme viewport keeps its minimap and camera gestures after descendant
   );
   await settle();
   expect(viewport.className).toContain("cursor-grabbing");
+  /* A diagonal drag: the band board is a document whose stack fits the
+     viewport here, so only the vertical component can move it (#1641), and
+     the camera already rests at the strip-keeping top bound, so it moves down. */
   flushSync(() =>
     viewport.dispatchEvent(new dom.PointerEvent("pointermove", {
       bubbles: true,
@@ -263,7 +266,7 @@ test("the scheme viewport keeps its minimap and camera gestures after descendant
       pointerType: "mouse",
       button: 0,
       clientX: 340,
-      clientY: 300,
+      clientY: 360,
     }) as unknown as Event),
   );
   await settle();
@@ -400,7 +403,7 @@ test("arrow navigation lands on a task band with a visible ring and spoken title
   expect(document.activeElement).not.toBe(band);
 });
 
-test("two tasks stack as full-width bands in creation order and persist nothing", async () => {
+test("empty tasks share a compact row in creation order and persist nothing", async () => {
   const host = document.createElement("div");
   document.body.append(host);
   const root = createRoot(host);
@@ -441,18 +444,16 @@ test("two tasks stack as full-width bands in creation order and persist nothing"
     });
     await settle();
 
-    /* No free-floating cards: each task is one band, the bands share the left
-       gutter and the full available width, and the younger task sits below the
-       older one (equal working counts → creation order). Stored pins are left
-       alone: nothing is written. */
+    /* Empty tasks share a compact row in creation order. Their authored pins
+       remain untouched by presentation; no writes occur. */
     expect(host.querySelector("[data-scheme-task]")).toBeNull();
     const older = host.querySelector('[data-scheme-band-task="older"]') as HTMLElement;
     const younger = host.querySelector('[data-scheme-band-task="younger"]') as HTMLElement;
     expect(older).toBeTruthy();
     expect(younger).toBeTruthy();
-    expect(older.style.left).toBe(younger.style.left);
+    expect(parseFloat(younger.style.left)).toBeGreaterThan(parseFloat(older.style.left) + parseFloat(older.style.width));
     expect(older.style.width).toBe(younger.style.width);
-    expect(parseFloat(younger.style.top)).toBeGreaterThan(parseFloat(older.style.top) + parseFloat(older.style.height) - 0.001);
+    expect(younger.style.top).toBe(older.style.top);
     expect(host.textContent).toContain("Neighbour");
     expect(writes).toEqual([]);
   } finally {
@@ -637,13 +638,13 @@ test("a saved camera the board shrank out from under is re-fitted, not restored 
 });
 
 test("a saved camera that still shows the board is restored exactly as it was left", async () => {
-  dom.sessionStorage.setItem("llvCam:camera-inbounds", JSON.stringify({ x: -20, y: -60, z: 0.9 }));
+  dom.sessionStorage.setItem("llvCam:camera-inbounds", JSON.stringify({ x: 0, y: 0, z: 0.9 }));
   const host = await mountBandBoard("camera-inbounds");
   await new Promise((resolve) => setTimeout(resolve, 500));
   await settle();
   /* Scroll position is state: an in-bounds camera is never silently re-framed,
      including after the settle window the rule above waits out. */
-  expect(worldTransform(host)).toBe("translate(-20px, -60px) scale(0.9)");
+  expect(worldTransform(host)).toBe("translate(0px, 0px) scale(0.9)");
 });
 
 test("hiding the empty task bands under a camera parked deep in the stack brings the board back", async () => {

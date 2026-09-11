@@ -9,6 +9,7 @@ import { useLocale } from "@/lib/i18n";
 import { useRuntimeFlow } from "@/hooks/useRuntime";
 import { currentRound, flowLinkPhase, type FlowLinkPhase } from "@/components/scheme/agentLinks";
 
+import { FLOW_HUB } from "./flowHubGeometry";
 import { flowPresentation, patchFlow } from "./flowModel";
 
 /* Hub tone per link phase: work in accent, waiting-on-you in amber, done in
@@ -84,8 +85,9 @@ export function FlowHub({
     >
       <button
         data-scheme-ui
-        className="absolute inline-flex h-[34px] -translate-x-1/2 -translate-y-1/2 items-center gap-1 whitespace-nowrap rounded-full border-2 bg-card px-2.5 shadow-1 hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-        style={{ borderColor: tone, color: tone }}
+        data-flow-hub={flow.id}
+        className="absolute inline-flex -translate-x-1/2 -translate-y-1/2 items-center gap-1 whitespace-nowrap rounded-full border-2 bg-card px-2.5 shadow-1 hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+        style={{ borderColor: tone, color: tone, height: FLOW_HUB.h }}
         title={label}
         aria-label={label}
         aria-expanded={open}

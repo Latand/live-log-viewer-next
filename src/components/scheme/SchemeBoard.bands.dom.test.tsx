@@ -224,13 +224,21 @@ test("the selected conversation holds its screen anchor through wheel zoom, tool
   select(viewport, "/quiet-two");
   await settle();
   const start = screenOf(viewport, "/quiet-two");
-  /* Both axes hold at every step, mode crossings included: the camera
-     translates so the selected header keeps its screen point even when the
-     row layout gives the tile another column. */
+  /* The vertical axis holds at every step, mode crossings included: the
+     camera translates so the selected header keeps its screen height even
+     when the row layout gives the tile another column. Horizontally the band
+     board is a document (#1641): while the stack fits the viewport its left
+     edge stays on the viewport's, so the tile moves within the stack rather
+     than dragging the stack — and no dead canvas opens beside the bands. */
   const drift = (label: string) => {
     const now = screenOf(viewport, "/quiet-two");
-    const delta = Math.hypot(now.sx - start.sx, now.sy - start.sy);
-    if (delta > 2) throw new Error(`${label}: selected header drifted ${delta.toFixed(2)}px at zoom ${now.z}`);
+    const delta = Math.abs(now.sy - start.sy);
+    if (delta > 2) throw new Error(`${label}: selected header drifted ${delta.toFixed(2)}px vertically at zoom ${now.z}`);
+    /* The band world is one viewport wide, so it fits up to 100%: pinned
+       there; past it the stack may scroll but never leaves a gap on the left. */
+    const camera = cameraOf(viewport);
+    if (camera.z <= 1 && Math.abs(camera.x) > 0.01) throw new Error(`${label}: the band stack left the viewport's left edge (camera x ${camera.x.toFixed(2)}) at zoom ${now.z}`);
+    if (camera.x > 0.01) throw new Error(`${label}: dead canvas opened left of the band stack (camera x ${camera.x.toFixed(2)}) at zoom ${now.z}`);
     return delta;
   };
   /* Wheel zoom in, five notches, each anchored (the scale is capped, so only
@@ -271,9 +279,11 @@ test("the selected conversation holds its screen anchor through wheel zoom, tool
     await settle();
     drift(`toolbar in ${cycle}`);
   }
-  /* Twenty forward/reverse cycles: cumulative drift stays under 4px on both axes. */
+  /* Twenty forward/reverse cycles: cumulative vertical drift stays under 4px
+     and the stack is still on the left edge. */
   const end = screenOf(viewport, "/quiet-two");
-  expect(Math.hypot(end.sx - start.sx, end.sy - start.sy)).toBeLessThanOrEqual(4);
+  expect(Math.abs(end.sy - start.sy)).toBeLessThanOrEqual(4);
+  expect(cameraOf(viewport).x).toBeLessThanOrEqual(0.01);
 });
 
 test("without a selection a wheel zoom keeps the pointer's world point; a pan is never undone", async () => {
@@ -454,8 +464,9 @@ test("on a narrow board a draft pane and a planned stage slot are scaled to fit 
     expect(band).toBeTruthy();
     /* Natural size is 600 wide; the band is narrower, so the shell is scaled
        uniformly and its right edge stays inside the band. */
-    expect(box.fit).toBeLessThan(1);
-    expect(parseFloat(shell.style.width)).toBeCloseTo(600, 3);
+    if (key.startsWith("draft::")) expect(box.fit).toBeLessThan(1);
+    else expect(box.h).toBeLessThanOrEqual(104);
+    expect(parseFloat(shell.style.width)).toBeCloseTo(key.startsWith("draft::") ? 600 : 360, 3);
     expect(box.x + box.w).toBeLessThanOrEqual(parseFloat(band.style.left) + parseFloat(band.style.width) + 0.001);
     expect(box.x).toBeGreaterThanOrEqual(parseFloat(band.style.left) - 0.001);
   }
@@ -551,4 +562,34 @@ test("an empty task band offers Remove from board; a band holding a conversation
   /* Reversible flag, not a delete: no DELETE ever leaves the board. */
   expect((patch!.body as { board?: string }).board).toBe("hidden");
   expect(requests.some((request) => request.method === "DELETE")).toBe(false);
+});
+
+test("collapsing one task's history leaves another task's open reader alone; folding the reader's own band closes it", async () => {
+  const finished = { ...task("older-idle", "Repair old links", "2026-01-01T00:00:00.000Z", [quietOne, quietTwo]), status: "done" as const };
+  const host = mount(undefined, [finished, tasks[1]!]);
+  await settle();
+  const viewport = viewportOf(host);
+  const history = () => host.querySelector('[data-scheme-band-history="task:older-idle"]') as HTMLButtonElement;
+  const presentation = (path: string) => host.querySelector(`[data-scheme-node="${path}"]`)!.getAttribute("data-scheme-node-presentation");
+  expect(history().getAttribute("aria-expanded")).toBe("false");
+  select(viewport, "/busy");
+  await settle();
+  expect(presentation("/busy")).toBe("native");
+  press(history());
+  await settle();
+  expect(history().getAttribute("aria-expanded")).toBe("true");
+  press(history());
+  await settle();
+  expect(history().getAttribute("aria-expanded")).toBe("false");
+  expect(presentation("/busy")).toBe("native");
+  /* A reader inside the history keeps its band revealed, so the band folds
+     only because pressing its control closed that reader. */
+  press(history());
+  await settle();
+  select(viewport, "/quiet-one");
+  await settle();
+  expect(presentation("/quiet-one")).toBe("native");
+  press(history());
+  await settle();
+  expect(history().getAttribute("aria-expanded")).toBe("false");
 });

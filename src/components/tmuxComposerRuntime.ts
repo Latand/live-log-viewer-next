@@ -6,6 +6,8 @@ import {
   useRuntimeReceiptsForArtifact,
 } from "@/hooks/useRuntime";
 
+import { productionNativeQueueDependencies, type NativeQueueDependencies } from "@/hooks/useNativeQueue";
+
 import { useAgentCapabilities } from "./useAgentCapabilities";
 
 export interface TmuxComposerRuntimeDependencies {
@@ -13,6 +15,9 @@ export interface TmuxComposerRuntimeDependencies {
   sendRuntimeMessage: typeof sendRuntimeMessage;
   useRuntimeReceiptsForArtifact: typeof useRuntimeReceiptsForArtifact;
   useAgentCapabilities: typeof useAgentCapabilities;
+  /** #1629: the native queue transport, so a test can drive the whole control
+      loop without a socket. */
+  nativeQueue: NativeQueueDependencies;
 }
 
 const productionDependencies: TmuxComposerRuntimeDependencies = {
@@ -20,6 +25,7 @@ const productionDependencies: TmuxComposerRuntimeDependencies = {
   sendRuntimeMessage,
   useRuntimeReceiptsForArtifact,
   useAgentCapabilities,
+  nativeQueue: productionNativeQueueDependencies,
 };
 
 let testDependencies: Partial<TmuxComposerRuntimeDependencies> | null = null;

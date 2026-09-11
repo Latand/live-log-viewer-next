@@ -138,7 +138,7 @@ afterAll(() => {
   mock.module("@/hooks/useRuntime", () => actualRuntimeHooks);
 });
 
-test("a refused Kill reports the refusal instead of a receipt, and the SIGKILL it unlocked survives", async () => {
+test("a refused host stop stays visible and a deliberate retry uses the common route", async () => {
   const host = open();
   answer = () => ({ ok: false, error: "kill refused: no such process" });
   await tap(host, "kill");
@@ -149,18 +149,18 @@ test("a refused Kill reports the refusal instead of a receipt, and the SIGKILL i
   expect(host.querySelector('[data-mobile2-sheet="menu"]')).not.toBeNull();
   expect((host.querySelector("[data-mobile2-kill-status]") as unknown as HTMLElement | null)?.textContent)
     .toContain("kill refused: no such process");
-  /* The escalation the refusal unlocked is on the row itself. */
+  /* A host control stays on its identity-bound route. */
   expect(calls).toHaveLength(1);
-  expect(calls[0]!.url).toBe("/api/proc");
-  expect(calls[0]!.body.force).toBe(false);
-  expect(row(host, "kill").textContent).toContain("SIGKILL");
+  expect(calls[0]!.url).toBe("/api/conversation-host");
+  expect(calls[0]!.body.action).toBe("kill");
+  expect(row(host, "kill").textContent).not.toContain("SIGKILL");
 
-  /* And the next tap is that escalation — the state the closing sheet used to
-     drop — which the host accepts, so now the receipt is earned. */
+  /* A deliberate new gesture succeeds and earns the completion receipt. */
   answer = () => ({ ok: true, pid: 4242 });
   await tap(host, "kill");
   expect(calls).toHaveLength(2);
-  expect(calls[1]!.body.force).toBe(true);
+  expect(calls[1]!.body.action).toBe("kill");
+  expect(calls[1]!.body.operationId).not.toBe(calls[0]!.body.operationId);
   expect(closes).toBe(1);
   expect(receipts.getState()?.text).toBe(translate("en", "mobile2.chat.killed", { title: TITLE }));
 });
@@ -173,8 +173,8 @@ test("a Kill whose transport is dead says so rather than reporting a kill", asyn
   expect(receipts.getState()).toBeNull();
   expect(closes).toBe(0);
   expect((host.querySelector("[data-mobile2-kill-status]") as unknown as HTMLElement | null)?.textContent)
-    .toBe(translate("en", "common.serverUnavailable"));
-  expect(row(host, "kill").textContent).toContain("SIGKILL");
+    .toBe(translate("en", "task.controlUnknown"));
+  expect(row(host, "kill").textContent).not.toContain("SIGKILL");
 });
 
 test("a refused Stop answers on the sheet's own status line, which is still on screen to be read", async () => {
@@ -184,7 +184,7 @@ test("a refused Stop answers on the sheet's own status line, which is still on s
 
   expect(closes).toBe(0);
   expect(calls).toHaveLength(1);
-  expect(calls[0]!.url).toBe("/api/tmux");
+  expect(calls[0]!.url).toBe("/api/conversation-host");
   expect(calls[0]!.body.action).toBe("interrupt");
   const status = host.querySelector("[data-mobile2-menu-status]") as unknown as HTMLElement | null;
   expect(status?.getAttribute("data-mobile2-menu-status")).toBe("err");

@@ -401,6 +401,7 @@ test("snapshot exposes the canonical projected runtime model", () => {
       capabilities: {
         steer: true,
         structuredAttention: true,
+        nativeQueue: false,
         imageInput: expect.objectContaining({
           supported: false,
           reason: "The selected Codex model does not advertise image input through app-server.",
@@ -417,6 +418,7 @@ test("snapshot exposes the canonical projected runtime model", () => {
       kind: "approval",
       state: "open",
       unowned: false,
+      isBlocking: true,
       createdAt: "2026-07-10T00:00:00.000Z",
       request: { command: "bun test" },
       turnId: "turn-one",

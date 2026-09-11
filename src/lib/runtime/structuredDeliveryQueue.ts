@@ -1,10 +1,13 @@
+import { NativeQueueProtocolRefusal } from "./nativeCodexQueue";
+import type { NativeQueueCommand } from "./nativeQueueContracts";
+import { parseRuntimeCommand, parseRuntimeSendSettings } from "./commands";
 import { parseSelectedContextRef, type SelectedContextRef } from "@/lib/selection/selectedContext";
 
 import { parseMessageOrigin, type MessageOrigin } from "./messageOrigin";
 import type { RuntimeSendSettings } from "./contracts";
 import { evidenceAgrees, readEvidence, readOptionalEvidence, type Evidence } from "./evidence";
-import type { CompactCapableHost, DeliveryReceipt, EngineHost, HostState, QueueEntry } from "./engineHost";
-import { hostSupportsCompact, StructuredCompactError } from "./engineHost";
+import type { CompactCapableHost, DeliveryReceipt, EngineHost, FirstDispatchEvidence, HostState, QueueEntry } from "./engineHost";
+import { hostSupportsCompact, StructuredCompactError, StructuredSendRefusedError } from "./engineHost";
 import {
   parseStructuredImageRefs,
   structuredContent,
@@ -22,6 +25,7 @@ export type StructuredDeliveryTransition = "queued" | "delivering" | "applying" 
 
 interface StructuredOperationStatus {
   status: string;
+  revision?: number;
   reason?: string | null;
   /** Immutable admission time on current receipts; `at` supports older rows. */
   admittedAt?: string;
@@ -29,6 +33,8 @@ interface StructuredOperationStatus {
 }
 
 export interface StructuredDeliveryQueuePort {
+  nativeQueueExecute?(command: NativeQueueCommand & { operationId: string }, refusalReason?: string): Promise<void>;
+  nativeQueueReconcile?(): Promise<void>;
   /** Startup owns recovery for hosts it has not registered yet. Leave their
    * original operations pending while already registered hosts keep serving. */
   deferTarget?(conversationId: string): boolean;
@@ -100,19 +106,6 @@ interface SendEffect {
   eventSeq: number;
 }
 
-/** The per-turn runtime snapshot off a durable send effect (issue #390 §10).
-    A malformed field drops silently — absent settings mean today's behavior,
-    and a settings blemish must never strand the message itself. */
-function runtimeSendSettings(value: unknown): RuntimeSendSettings | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
-  const body = value as Record<string, unknown>;
-  const settings: RuntimeSendSettings = {};
-  if (typeof body.model === "string" && body.model) settings.model = body.model;
-  if (typeof body.effort === "string" && body.effort) settings.effort = body.effort;
-  if (typeof body.fast === "boolean") settings.fast = body.fast;
-  return Object.keys(settings).length ? settings : undefined;
-}
-
 interface ControlEffect {
   operationId: string;
   conversationId: string;
@@ -156,7 +149,8 @@ export type StructuredReconfigureHandler = (
   ownership: StructuredReconfigureOwnership,
 ) => Promise<void | "applied" | "pending">;
 
-type DeliveryEffect = SendEffect | ControlEffect | CompactEffect | StructuredReconfigureEffect;
+type NativeEffect = NativeQueueCommand & { operationId: string; eventSeq: number };
+type DeliveryEffect = NativeEffect | SendEffect | ControlEffect | CompactEffect | StructuredReconfigureEffect;
 
 interface ControlDrainResult {
   blocked: boolean;
@@ -232,9 +226,15 @@ function sendEffect(effect: StructuredDeliveryEffect): SendEffect | null {
     || effect.payload.policy === "interrupt-active"
     ? effect.payload.policy
     : undefined;
-  const runtime = runtimeSendSettings(effect.payload.runtime);
-  /* A malformed reference drops the same way malformed settings do: the
-     message must never be stranded by its own provenance. */
+  let runtime: RuntimeSendSettings | undefined;
+  /* A SETTINGS BLEMISH MUST NEVER STRAND THE MESSAGE ITSELF (#390 §10). The
+     admission validated this payload with this same function, so a throw here
+     can only describe a durable record no admission produced; absent settings
+     mean today's behaviour, and dropping the words with them would lose the one
+     thing the outbox exists to keep. */
+  try { runtime = parseRuntimeSendSettings(effect.payload.runtime); } catch { runtime = undefined; }
+  /* A malformed selection reference is omitted; the message retains its
+     independent content and runtime profile. */
   const selectedContext = parseSelectedContextRef(effect.payload.selectedContext);
   const origin = parseMessageOrigin(effect.payload.origin);
   return {
@@ -333,6 +333,13 @@ function reconfigureEffect(effect: StructuredDeliveryEffect): StructuredReconfig
 }
 
 function deliveryEffect(effect: StructuredDeliveryEffect): DeliveryEffect | null {
+  if (effect.kind === "runtime.native-queue") {
+    try {
+      const command = parseRuntimeCommand("native-queue", effect.payload) as NativeQueueCommand;
+      if (!command.operationId) return null;
+      return { ...command, operationId: command.operationId, eventSeq: effect.eventSeq };
+    } catch { return null; }
+  }
   return controlEffect(effect) ?? compactEffect(effect) ?? reconfigureEffect(effect) ?? sendEffect(effect);
 }
 
@@ -460,10 +467,10 @@ function isThreadReadTimeout(error: unknown): boolean {
   return /thread\/read.*timed out|request timed out:\s*thread\/read/i.test(failureReason(error));
 }
 
-async function sendWithReadRetry(host: EngineHost, entry: QueueEntry): Promise<DeliveryReceipt> {
+async function sendWithReadRetry(host: EngineHost, entry: QueueEntry, firstDispatch?: FirstDispatchEvidence): Promise<DeliveryReceipt> {
   for (let attempt = 1; attempt <= THREAD_READ_ATTEMPTS; attempt += 1) {
     try {
-      return await host.send(entry);
+      return await (attempt === 1 && firstDispatch ? host.send(entry, firstDispatch) : host.send(entry));
     } catch (error) {
       if (attempt === THREAD_READ_ATTEMPTS || !isThreadReadTimeout(error)) throw error;
     }
@@ -482,6 +489,10 @@ export class StructuredDeliveryQueue {
       which is what a recovered row has to be able to tell (#1131). */
   private readonly executorId = crypto.randomUUID();
   private readonly interruptAcknowledged = new Set<string>();
+  /** An interrupt can need several drain passes before any message is handed
+   * over. Keep that first-dispatch evidence only in this executor and claim;
+   * eviction or restart returns to the conservative recovery path. */
+  private readonly firstDispatches = new Map<string, FirstDispatchEvidence>();
   private readonly successfulKillBoundaries = new Map<string, SuccessfulKillBoundary>();
   /** Compactions whose engine control is issued and whose evidence has not
       arrived. The effect stays pending in the journal meanwhile, so every later
@@ -551,11 +562,12 @@ export class StructuredDeliveryQueue {
   }
 
   private async drainPass(): Promise<void> {
+    await this.port.nativeQueueReconcile?.();
     const rawEffects: StructuredDeliveryEffect[] = [];
     let afterEventSeq = 0;
     while (true) {
       const page = await this.port.effects(
-        ["runtime.send", "runtime.steer", "runtime.answer", "runtime.interrupt", "runtime.kill", "runtime.kill-boundary", "runtime.reconfigure", "runtime.compact"],
+        ["runtime.native-queue", "runtime.send", "runtime.steer", "runtime.answer", "runtime.interrupt", "runtime.kill", "runtime.kill-boundary", "runtime.reconfigure", "runtime.compact"],
         afterEventSeq,
       );
       if (page.length === 0) break;
@@ -669,7 +681,10 @@ export class StructuredDeliveryQueue {
     for (const effect of effects) {
       const durable = await this.readStatus(effect.operationId);
       if (!durable.readable) return this.fenceUnavailable();
-      if (durable.value && TERMINAL_DELIVERY_STATUSES.has(durable.value.status)) continue;
+      if (durable.value && TERMINAL_DELIVERY_STATUSES.has(durable.value.status)) {
+        this.firstDispatches.delete(effect.operationId);
+        continue;
+      }
       const expired = isRuntimeControlEffect(effect)
         ? expiredControlSettlement(effect, durable.value)
         : null;
@@ -738,6 +753,12 @@ export class StructuredDeliveryQueue {
         }
         continue;
       }
+      if (effect.kind === "native-queue") {
+        if (!this.port.nativeQueueExecute) throw new Error("native queue executor is unavailable");
+        const boundary = this.successfulKillBoundaries.get(effect.conversationId);
+        await this.port.nativeQueueExecute(effect, boundary && effect.eventSeq <= boundary.eventSeq ? "conversation was intentionally terminated" : undefined);
+        continue;
+      }
       const killBoundary = this.successfulKillBoundaries.get(effect.conversationId);
       if (killBoundary && effect.eventSeq <= killBoundary.eventSeq) {
         await this.transitionUnlessSettled(effect.operationId, "failed", {
@@ -804,6 +825,15 @@ export class StructuredDeliveryQueue {
       }
       const maySteer = health.status === "active"
         && (effect.kind === "steer" || effect.policy === "steer-if-active");
+      /* A host that DECLARED it cannot steer, which is the Claude broker: its
+         write would land as an interrupt the operator never asked for, so the
+         message is refused here rather than delivered as something else.
+         An undeclared capability is unknown and is no refusal — a host that says
+         nothing about steering keeps the delivery path it has always had. */
+      if (maySteer && host.supportsSteer === false) {
+        await this.transitionUnlessSettled(effect.operationId, "failed", { reason: "unsupported-steering" });
+        continue;
+      }
       const replacementIsActive = effect.policy === "interrupt-active"
         && (health.status === "active" || health.status === "attention")
         && Boolean(health.activeTurnRef);
@@ -837,11 +867,23 @@ export class StructuredDeliveryQueue {
          claim is recorded as unknown instead, which proves nothing to anybody
          and is exactly what it should prove. */
       const claim = await this.readHostClaim(effect.conversationId);
+      const retainedDispatch = this.firstDispatches.get(effect.operationId);
+      const firstDispatch: FirstDispatchEvidence | undefined = claim.readable && typeof claim.value === "string"
+        && !!claim.value && claim.value !== UNKNOWN_HOST_CLAIM
+        && ((durable?.revision === 1 && (durable.status === "queued" || durable.status === "pending"))
+          || retainedDispatch?.writerClaim === claim.value)
+        ? {operationId: effect.operationId, writerClaim: claim.value, firstDispatch: true}
+        : undefined;
+      if (!firstDispatch) this.firstDispatches.delete(effect.operationId);
       if (!await this.transitionUnlessSettled(
         effect.operationId,
         "delivering",
         { turnId: deliveryFence, reason: deliveringOwnershipReason(this.executorId, claim) },
       )) continue;
+      if (firstDispatch) {
+        this.firstDispatches.set(effect.operationId, firstDispatch);
+        while (this.firstDispatches.size > 128) this.firstDispatches.delete(this.firstDispatches.keys().next().value!);
+      }
       if (shouldInterrupt) {
         try {
           await host.interrupt(health.activeTurnRef!);
@@ -886,9 +928,16 @@ export class StructuredDeliveryQueue {
       }
       let receipt;
       try {
-        receipt = await sendWithReadRetry(host, entry);
+        // Consume before entering the host. A read retry, thrown result or
+        // later queued retry must establish its own canonical evidence.
+        this.firstDispatches.delete(effect.operationId);
+        receipt = await sendWithReadRetry(host, entry, firstDispatch);
       } catch (error) {
         const reason = failureReason(error);
+        if (error instanceof StructuredSendRefusedError || error instanceof NativeQueueProtocolRefusal) {
+          await this.transitionUnlessSettled(effect.operationId, "failed", { reason });
+          continue;
+        }
         /* The one resend below is allowed only where the host is READ to be
            alive, so an unreadable state is grouped with the host being gone:
            the grouping that resends nothing. It costs a drain pass on a

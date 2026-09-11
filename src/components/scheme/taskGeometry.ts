@@ -642,6 +642,37 @@ function detourRoute(
  * Pure and deterministic — depends only on the endpoints, the lane, and the
  * obstacle rects.
  */
+/**
+ * Points along a routed path, in path order — the polyline a `routeTaskEdge`
+ * / detour `d` string draws, sampled densely enough to place something ON the
+ * connector (the review hub) without the DOM. Reads the three commands those
+ * routers emit (`M`, `L`, `C`); anything else ends the walk.
+ */
+export function sampleRoute(d: string, perSegment = 16): { x: number; y: number }[] {
+  const points: { x: number; y: number }[] = [];
+  const tokens = d.match(/[MLCZ]|-?\d*\.?\d+(?:e[-+]?\d+)?/gi) ?? [];
+  let index = 0;
+  let cursor = { x: 0, y: 0 };
+  const num = () => Number(tokens[index++]);
+  while (index < tokens.length) {
+    const command = tokens[index++];
+    if (command === "M" || command === "L") {
+      const next = { x: num(), y: num() };
+      if (command === "M") points.push(next);
+      else for (let i = 1; i <= perSegment; i += 1) points.push({ x: cursor.x + (next.x - cursor.x) * (i / perSegment), y: cursor.y + (next.y - cursor.y) * (i / perSegment) });
+      cursor = next;
+    } else if (command === "C") {
+      const c1x = num(), c1y = num(), c2x = num(), c2y = num(), x = num(), y = num();
+      for (let i = 1; i <= perSegment; i += 1) {
+        const t = i / perSegment;
+        points.push({ x: cubicAt(t, cursor.x, c1x, c2x, x), y: cubicAt(t, cursor.y, c1y, c2y, y) });
+      }
+      cursor = { x, y };
+    } else break;
+  }
+  return points;
+}
+
 export function routeTaskEdge(
   edge: { x1: number; y1: number; x2: number; y2: number },
   obstacles: readonly SchemeRect[],

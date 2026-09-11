@@ -7,8 +7,12 @@ import type { Speaker } from "@/lib/audio/ambientLoop";
 import { speakingFromLines } from "@/lib/audio/speech";
 import { codexRealtimeClient, type CodexRealtimeLine, type CodexRealtimeSnapshot } from "@/lib/realtime/codexRealtimeClient";
 import type { RuntimeVoiceDelivery } from "@/lib/runtime/voiceDelivery";
+import type { HostAxis, RuntimeVoiceTranscriptSegment } from "@/lib/runtime/contracts";
 
-const IDLE = { phase: "idle" as const, lines: [], error: null, startedAt: null, micMuted: false, outputMuted: false };
+const IDLE = {
+  phase: "idle" as const, lines: [], error: null, startedAt: null,
+  micMuted: false, outputMuted: false, notice: null, agentUnavailable: null,
+};
 
 /**
  * The part of the realtime client this hook consumes.
@@ -30,6 +34,12 @@ export interface RealtimeSurface {
     deliveries: readonly RuntimeVoiceDelivery[],
     options?: { authoritative?: boolean },
   ): void;
+  /** #1629: the app-server's own transcript, merged into the panel beside what
+      the data channel delivered. */
+  reconcileCanonicalTranscript(segments: readonly RuntimeVoiceTranscriptSegment[]): void;
+  /** #1629: what the runtime says about the host behind this call, so a panel
+      never claims a working agent link the runtime has already contradicted. */
+  reportBackingHost(host: VoiceBackingHost): void;
   /** #691 §6: this call's credential, presented on every write into it and on every
       read of the inbox that carries its deploy nonces. */
   realtimeSession(): string | null;
@@ -37,6 +47,16 @@ export interface RealtimeSurface {
      the only signal that may advance the bridge's cursor. */
   onDeliveryAcknowledged(listener: (deliveryId: string) => void): () => void;
 }
+
+/**
+ * What the runtime says about the host behind a call (#1629).
+ *
+ * The runtime's own host axis, plus `unknown` for the window before any
+ * projection has arrived. `registering`, `recovering` and `conflict` are all
+ * states in which a call cannot be shown to reach an agent, so they are carried
+ * through as themselves rather than folded into "fine".
+ */
+export type VoiceBackingHost = HostAxis | "unknown";
 
 const NO_LINES: ReadonlySet<string> = new Set();
 
@@ -135,6 +155,13 @@ export function useCodexRealtime(
   workerProgress: string,
   workerRunning: boolean,
   workerDeliveries: readonly RuntimeVoiceDelivery[],
+  /* #1629: the canonical transcript the runtime carried over from the
+     app-server. Passed in like the deliveries above, from the same session
+     projection, so the client stays the one place that decides what a line is. */
+  canonicalTranscript: readonly RuntimeVoiceTranscriptSegment[] = [],
+  /* #1629: the runtime's own verdict on the host behind the call. `unknown`
+     while no projection has arrived, which asserts nothing either way. */
+  backingHost: VoiceBackingHost = "unknown",
 ) {
   const client = useMemo(
     () => enabled && conversationId.startsWith("conversation_") ? clientFactory(conversationId) : null,
@@ -152,6 +179,12 @@ export function useCodexRealtime(
   useEffect(() => {
     client?.reconcileWorkerDeliveries(workerDeliveries, { authoritative: true });
   }, [client, snapshot.phase, workerDeliveries]);
+  useEffect(() => {
+    client?.reconcileCanonicalTranscript(canonicalTranscript);
+  }, [canonicalTranscript, client]);
+  useEffect(() => {
+    client?.reportBackingHost(backingHost);
+  }, [backingHost, client, snapshot.phase]);
 
   /* The ambient lease deliberately does NOT live here any more: this hook is
      card-scoped and the card unmounts mid-call on board navigation. The music's

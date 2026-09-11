@@ -6,6 +6,8 @@ import { createRoot } from "react-dom/client";
 import type { Flow, ReviewVerdict } from "@/lib/flows/types";
 import { setLocale } from "@/lib/i18n";
 
+import { COLLAPSED_DECK_CHIP_H } from "./reviewDeckDisclosure";
+
 /*
  * Deck disclosure (#289 + #325): the deck auto-collapses to a clickable
  * verdict chip the moment the final verdict lands, a manual expand of the
@@ -111,6 +113,10 @@ test("verdict arrival auto-collapses the deck to a clickable chip; a click expan
   await settle();
   const chip = host.querySelector("[data-review-deck-collapsed]")!;
   expect(chip.getAttribute("aria-expanded")).toBe("false");
+  /* The chip is painted at the one height the band layout reserves for a
+     collapsed deck (#1641): the two read the same constant, so the frame
+     around a settled review loop hugs the chip instead of an empty deck box. */
+  expect((chip as unknown as HTMLElement).style.height).toBe(`${COLLAPSED_DECK_CHIP_H}px`);
   expect(chip.textContent).toContain("2 rounds");
   expect(chip.textContent).toContain("APPROVE");
   expect(chip.textContent).toContain("Claude");

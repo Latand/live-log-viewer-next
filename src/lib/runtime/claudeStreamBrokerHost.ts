@@ -552,6 +552,7 @@ function defaultTranscriptUsers(cwd: string, sessionId: string, projectsRoot?: s
 
 /** One durable writer around a long-lived Claude stream-json process. */
 export class ClaudeStreamBrokerHost implements EngineHost {
+  readonly supportsSteer = false;
   readonly identity: ClaudeSessionIdentity;
 
   private readonly child: ChildProcessWithoutNullStreams;
@@ -834,7 +835,11 @@ export class ClaudeStreamBrokerHost implements EngineHost {
     });
     const timer = setTimeout(() => {
       if (this.pendingDeliveries.get(entry.id)?.promise !== promise) return;
-      this.fail(new Error("Claude delivery confirmation timed out; outcome is uncertain"));
+      // A missing replay echo says nothing about the incumbent turn's liveness.
+      // Keep the original ledger entry and transport for late canonical evidence.
+      // Retain the rejected promise too: another call with this id must not
+      // write the same input again while its original replay echo is pending.
+      rejectDelivery(new Error("Claude delivery confirmation timed out; outcome is uncertain"));
     }, this.requestTimeoutMs);
     const pending: PendingDelivery = {
       promise,

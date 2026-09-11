@@ -1,7 +1,8 @@
+import type { NativeQueueHost } from "./nativeQueueExecutor";
 import type { SelectedContextRef } from "@/lib/selection/selectedContext";
 
 import type { MessageOrigin } from "./messageOrigin";
-import type { RuntimeSendSettings } from "./contracts";
+import type { RuntimeSendSettings, RuntimeHostDiagnostics } from "./contracts";
 import type { RuntimeVoiceDelivery, RuntimeVoiceResponse } from "./voiceDelivery";
 import {
   structuredContent,
@@ -31,6 +32,15 @@ export interface QueueEntry {
       host stamps it onto the structured-user marker. Absent = unknown, and
       the feed keeps its current rendering. */
   origin?: MessageOrigin;
+}
+
+/** Internal journal evidence, never accepted from a send request body. The
+ * delivery executor supplies this only after taking the first queued receipt
+ * into delivering under a known writer claim. A retry gets no such evidence. */
+export interface FirstDispatchEvidence {
+  readonly operationId: string;
+  readonly writerClaim: string;
+  readonly firstDispatch: true;
 }
 
 export interface NormalizedQueueEntry {
@@ -64,6 +74,19 @@ export type DeliveryReceipt =
   | { outcome: "rejected"; reason: "stale-turn" | "dead-host" };
 
 export type RuntimeEvent =
+  /** One canonical realtime transcript segment, from the app-server's own
+      `thread/realtime/*` notifications rather than the browser's data channel
+      (#1629). Carries the whole segment so far, never a delta. */
+  | {
+    kind: "voice-transcript";
+    realtimeSessionId: string;
+    segmentId: string;
+    role: "user" | "assistant";
+    text: string;
+    final: boolean;
+    seq: number;
+  }
+  | { kind: "native-queue-changed"; threadId: string; seq: number }
   | { kind: "turn-started"; turnId: string; seq: number }
   | { kind: "delta"; turnId: string; text: string; seq: number }
   | { kind: "item"; turnId: string | null; item: unknown; phase: "started" | "completed"; voiceResponse?: RuntimeVoiceResponse | null; seq: number }
@@ -85,7 +108,10 @@ export interface HostState {
   eventCursor: number;
   protocolVersion: string | null;
   activeTurnRef: string | null;
+  /** Includes every answerable request; only validated blocking requests affect status. */
   pendingAttention: string[];
+  nativeQueueRevision?: number;
+  diagnostics?: RuntimeHostDiagnostics;
   activeFlags: string[];
   account: { type: string | null; planType: string | null } | null;
 }
@@ -99,8 +125,10 @@ export class RuntimeReplayGapError extends Error {
 
 /** Shared structured-host boundary from the issue 25 spike. */
 export interface EngineHost {
+  readonly nativeQueue?: NativeQueueHost;
+  readonly supportsSteer?: boolean;
   attach(afterSeq: number): AsyncIterable<RuntimeEvent>;
-  send(entry: QueueEntry): Promise<DeliveryReceipt>;
+  send(entry: QueueEntry, firstDispatch?: FirstDispatchEvidence): Promise<DeliveryReceipt>;
   interrupt(turnRef: string): Promise<void>;
   answer(attentionRef: string, value: unknown): Promise<void>;
   health(): Promise<HostState>;
@@ -168,4 +196,9 @@ export class StructuredHostAdoptionCleanupError<Host extends EngineHost = Engine
     super(message, options);
     this.name = "StructuredHostAdoptionCleanupError";
   }
+}
+
+/** A local precondition refused a send before a mutating engine request. */
+export class StructuredSendRefusedError extends Error {
+  constructor(message: string) { super(message); this.name = "StructuredSendRefusedError"; }
 }

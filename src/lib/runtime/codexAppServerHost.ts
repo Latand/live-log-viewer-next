@@ -1,9 +1,21 @@
+import { normalizeNativeQueueObservation } from "./nativeQueueContent";
+import { CodexRealtimeTranscript } from "./codexRealtimeTranscript";
+import type { NativeQueueInput } from "./nativeCodexQueue";
+import { StructuredSendRefusedError } from "./engineHost";
+import type { FirstDispatchEvidence } from "./engineHost";
+import { basename } from "node:path";
+import { isNonblockingCodexQuestion } from "./codexAttention";
+import { codexTurnProfile } from "./codexTurnProfile";
+import { StringDecoder } from "node:string_decoder";
+import { NativeCodexQueue, NativeQueueProtocolRefusal } from "./nativeCodexQueue";
+import { readCodexDeliveryHistory, findCodexHistoryDelivery, type CodexDeliveryHistoryResult } from "./codexHistoryReader";
+import type { NativeQueueHost } from "./nativeQueueExecutor";
+import type { NativeQueueRecord } from "./nativeQueueContracts";
 import { spawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from "node:child_process";
 import { createHash, type Hash } from "node:crypto";
 import fs from "node:fs";
 
-import { isKnownEffortTier } from "@/lib/agent/efforts";
 import type { ProcessIdentity } from "@/lib/agent/registry";
 import { procBackend } from "@/lib/proc";
 import { signalDetachedProcessGroup, signalProcessGroup, type ProcessSignal } from "@/lib/processGroup";
@@ -56,14 +68,9 @@ import {
   type RuntimeEventStore,
 } from "./eventStore";
 import {
-  canonicalVoicePersonaBootstrapExists,
-  legacyVoicePersonaBootstrapItemId,
-  voicePersonaBootstrap,
-  voicePersonaBootstrapIdentity,
+  voiceSessionPersona,
   type VoicePersonaVariant,
-  type VoicePersonaBootstrap,
-  type VoicePersonaBootstrapIdentity,
-  type VoicePersonaBootstrapReceipt,
+  type VoiceSessionPersona,
 } from "./voicePersona";
 
 type JsonObject = Record<string, unknown>;
@@ -90,17 +97,13 @@ export type CodexRealtimeFailure = {
   realtimeSessionId: string | null;
 };
 type PendingRealtimeStart = {
-  resolve(result: CodexRealtimeWebRtcResult): void;
+  resolve(result: CodexRealtimeWebRtcAnswer): void;
   reject(error: Error): void;
   timer: ReturnType<typeof setTimeout> | undefined;
   started: boolean;
   realtimeSessionId: string | null;
   sdp: string | null;
-  personaBootstrap: VoicePersonaBootstrapReceipt;
-};
-type VoicePersonaBootstrapInsertion = {
-  owner: PendingRealtimeStart;
-  promise: Promise<void>;
+  persona: VoiceSessionPersonaReceipt;
 };
 type PendingCompaction = {
   promise: Promise<RuntimeCompactOutcome>;
@@ -122,6 +125,7 @@ type PendingAttention = {
   rpcId: string | number;
   method: string;
   origin: "current" | "restored";
+  isBlocking?: boolean;
   answer?: PendingAnswer;
 };
 type ThreadStatus = {
@@ -187,7 +191,6 @@ export interface CodexAppServerHostOptions {
   approvalPolicy?: string;
   env?: NodeJS.ProcessEnv;
   requestTimeoutMs?: number;
-  realtimePersonaTimeoutMs?: number;
   realtimeStartTimeoutMs?: number;
   deliveryConfirmationTimeoutMs?: number;
   compactEvidenceTimeoutMs?: number;
@@ -210,22 +213,25 @@ export interface CodexThreadIdentity {
   path: string | null;
 }
 
+/**
+ * Which persona the live call is running on (#1629).
+ *
+ * The persona is a parameter of `thread/realtime/start` now, so it either went
+ * out with the start or the start did not happen — there is no separate write to
+ * succeed or fail, and so no separate receipt to reject. What remains worth
+ * reporting is WHICH one, which the voice panel shows and the regression tests
+ * assert against.
+ */
+export interface VoiceSessionPersonaReceipt {
+  variant: VoicePersonaVariant;
+  personaId: string;
+}
+
 export interface CodexRealtimeWebRtcAnswer {
   sdp: string;
   realtimeSessionId: string | null;
-  personaBootstrap: VoicePersonaBootstrapReceipt;
+  persona: VoiceSessionPersonaReceipt;
 }
-
-export interface CodexRealtimeWebRtcRejection {
-  sdp: null;
-  realtimeSessionId: null;
-  personaBootstrap: VoicePersonaBootstrapReceipt & {
-    insertion: "rejected";
-    diagnostic: string;
-  };
-}
-
-export type CodexRealtimeWebRtcResult = CodexRealtimeWebRtcAnswer | CodexRealtimeWebRtcRejection;
 
 const CHILD_ENV_ALLOWLIST = [
   "PATH",
@@ -298,7 +304,6 @@ const DEFAULT_SHUTDOWN_GRACE_MS = 1_000;
 const REALTIME_START_TIMEOUT_MS = 90_000;
 /* First speech waits for the persona's durable insertion outcome. Keep that
    gate bounded when an app-server accepts the method and then stalls. */
-const REALTIME_PERSONA_TIMEOUT_MS = 3_000;
 /* Releasing the host must not block on a wedged app-server, but the hangup is
    worth a moment: skipping it strands the account's realtime slot. */
 const REALTIME_HANGUP_TIMEOUT_MS = 2_000;
@@ -318,6 +323,12 @@ const MAX_REALTIME_CONTEXT_ITEM_BYTES = 8 * 1024;
 const MAX_REALTIME_CONTEXT_BYTES = 24 * 1024;
 const MAX_REPLAY_ENVELOPE_BYTES = 256 * 1024;
 const MAX_LINE_BYTES = MAX_STRUCTURED_IMAGE_ENCODED_BYTES + MAX_REPLAY_ENVELOPE_BYTES;
+// A supported image envelope must fit alongside the bounded surrounding
+// history. Per-item pages keep each native response within MAX_LINE_BYTES.
+const DELIVERY_HISTORY_BYTES = MAX_STRUCTURED_IMAGE_ENCODED_BYTES + 16 * 1024 * 1024;
+// Single-item frames retain the nominal item coverage of 128 pages of 32
+// items. The byte budget and existing caller deadline still bound the read.
+const DELIVERY_HISTORY_PAGES = 128 * 32;
 /**
  * A `thread/resume` (or `thread/read`) response replays the whole thread
  * history as one JSONL frame, and history the operator legally accumulated can
@@ -351,6 +362,18 @@ const REPLAY_FRAME_BUDGETS: ReplayFrameBudgets = {
 };
 const MAX_STDERR_TAIL_BYTES = 16 * 1024;
 const MAX_PRE_RESTORE_FRAMES = 256;
+/** How many finished turns a host remembers for the voice ledger's retirement
+    check. Beyond this the oldest answers `unknown`, which retires nothing. */
+const MAX_TERMINATED_TURN_MEMORY = 512;
+
+/** The app-server notifications that carry the canonical realtime transcript. */
+const CANONICAL_REALTIME_TRANSCRIPT_METHODS: ReadonlySet<string> = new Set([
+  "thread/realtime/transcript/delta",
+  "thread/realtime/transcript/done",
+  "thread/realtime/item/transcript/delta",
+  "thread/realtime/item/started",
+  "thread/realtime/item/completed",
+]);
 const MAX_PRE_RESTORE_BYTES = 4 * 1024 * 1024;
 const MUTATING_RPC_METHODS = new Set([
   "thread/start",
@@ -738,9 +761,13 @@ function rolloutCacheEntryFromDisk(pathname: string | null | undefined): Rollout
     if (stat.size > ROLLOUT_FALLBACK_READ_BYTES) {
       const descriptor = fs.openSync(pathname, "r");
       try {
-        const buffer = Buffer.alloc(ROLLOUT_FALLBACK_READ_BYTES);
+        // Include the preceding byte to distinguish a complete first record
+        // from a fragment created by our bounded read. The full delivery index
+        // still scans that record before absence can authorize a new send.
+        const buffer = Buffer.alloc(ROLLOUT_FALLBACK_READ_BYTES + 1);
         const read = fs.readSync(descriptor, buffer, 0, buffer.length, stat.size - buffer.length);
-        raw = buffer.subarray(0, read).toString("utf8");
+        const start = buffer[0] === 0x0a ? 1 : buffer.indexOf(0x0a, 1) + 1;
+        raw = start > 0 ? buffer.subarray(start, read).toString("utf8") : "";
       } finally {
         fs.closeSync(descriptor);
       }
@@ -1093,7 +1120,6 @@ export class CodexAppServerHost implements EngineHost {
 
   private readonly child: ChildProcessWithoutNullStreams;
   private readonly requestTimeoutMs: number;
-  private readonly realtimePersonaTimeoutMs: number;
   private readonly realtimeStartTimeoutMs: number;
   private readonly deliveryConfirmationTimeoutMs: number;
   private readonly compactEvidenceTimeoutMs: number;
@@ -1116,6 +1142,7 @@ export class CodexAppServerHost implements EngineHost {
      what the backend actually said ("You have reached your usage limit."). */
   private realtimeFailure: CodexRealtimeFailure | null = null;
   private realtimeSessionId: string | null = null;
+  private readonly realtimeTranscript = new CodexRealtimeTranscript();
   private readonly lateThreadReadResponses = new Map<number, number>();
   private readonly replayEnvelopeRequestIds = new Set<number>();
   private replayReduction: CodexReplayFrameReducer | null = null;
@@ -1138,15 +1165,18 @@ export class CodexAppServerHost implements EngineHost {
      without ever injecting it, which is a false receipt that
      `rejectStartedRealtimeContract` would otherwise have caught.
      Successor starts of the SAME variant still join the same insertion promise. */
-  private readonly unresolvedVoicePersonaBootstrap = new Map<VoicePersonaVariant, VoicePersonaBootstrap>();
-  private voicePersonaBootstrapInsertion: VoicePersonaBootstrapInsertion | null = null;
-  private readonly voicePersonaBootstrapAccepted = new Set<VoicePersonaVariant>();
   private readonly pendingVoiceChunks = new Map<string, string>();
   private readonly cancelledVoiceTurns = new Set<string>();
   private readonly activeRealtimeDeliveries = new Map<string, {
     digest: string;
     promise: Promise<{ deliveryId: string; acknowledged: true }>;
   }>();
+  readonly supportsSteer = true;
+  nativeQueue?: NativeQueueHost;
+  private nativeQueueRevision = 0;
+  private readonly selectedExecutable: string;
+  private queueCapability: "unknown" | "supported" | "unsupported" = "unknown";
+  private readonly stdoutDecoder = new StringDecoder("utf8");
   private readonly attentions = new Map<string, PendingAttention>();
   private readonly stateListeners = new Set<(state: HostState) => void>();
   private readonly preRestoreEvents: UnsequencedEvent[] = [];
@@ -1160,7 +1190,13 @@ export class CodexAppServerHost implements EngineHost {
   private eventLedgerRestored = false;
   private cursor: number;
   private activeTurnId: string | null = null;
+  /** Turns this host saw end, newest last and bounded. The voice ledger's only
+      authoritative retirement evidence (#1629); absence is `unknown`, never
+      "finished". */
+  private readonly terminatedTurnIds = new Set<string>();
   private protocolVersion: string | null = null;
+  private modelCatalog: unknown = null;
+  private authRecovery: "unknown" | "started" | "completed-unverified" = "unknown";
   private account: HostState["account"] = null;
   private engineStatus: "active" | "idle" | "unhosted" | "dead" = "idle";
   private activeFlags: string[] = [];
@@ -1191,8 +1227,8 @@ export class CodexAppServerHost implements EngineHost {
     this.child = child;
     this.identity = identity;
     this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_TIMEOUT_MS;
-    this.realtimePersonaTimeoutMs = options.realtimePersonaTimeoutMs ?? REALTIME_PERSONA_TIMEOUT_MS;
     this.realtimeStartTimeoutMs = options.realtimeStartTimeoutMs ?? REALTIME_START_TIMEOUT_MS;
+    this.selectedExecutable = basename(options.binary ?? "codex");
     this.deliveryConfirmationTimeoutMs = options.deliveryConfirmationTimeoutMs
       ?? DEFAULT_DELIVERY_CONFIRMATION_TIMEOUT_MS;
     this.compactEvidenceTimeoutMs = options.compactEvidenceTimeoutMs ?? DEFAULT_COMPACT_EVIDENCE_TIMEOUT_MS;
@@ -1212,7 +1248,7 @@ export class CodexAppServerHost implements EngineHost {
     });
     this.cursor = options.initialEventCursor ?? 0;
     this.reapedPromise = new Promise((resolve) => { this.resolveReaped = resolve; });
-    child.stdout.on("data", (chunk: Buffer | string) => this.acceptStdout(String(chunk)));
+    child.stdout.on("data", (chunk: Buffer | string) => this.acceptStdout(typeof chunk === "string" ? chunk : this.stdoutDecoder.write(chunk)));
     child.stderr.on("data", (chunk: Buffer | string) => this.acceptStderr(String(chunk)));
     child.stdin.on("error", (error) => {
       if (!this.releasing && !this.released) this.fail(new Error(`Codex app-server stdin failed: ${safeError(error)}`));
@@ -1293,8 +1329,9 @@ export class CodexAppServerHost implements EngineHost {
       provisional.account = { type: accountType, planType: stringField(account, "planType") };
       provisional.requestedModel = options.model;
       try {
+        provisional.modelCatalog = await provisional.rpc("model/list", {});
         provisional.imageInputSupport = modelSupportsImageInput(
-          await provisional.rpc("model/list", {}),
+          provisional.modelCatalog,
           options.model,
         ) ? "supported" : "unsupported";
       } catch {
@@ -1338,6 +1375,7 @@ export class CodexAppServerHost implements EngineHost {
       if (threadId) provisional.reconcileThreadHistory(result);
       provisional.reconcileAfterOpen(threadStatus(result), resumedActiveTurnId(result));
       provisional.endBufferedNotificationReconciliation();
+      await provisional.initializeNativeQueue();
       return provisional;
     } catch (error) {
       try {
@@ -1424,7 +1462,98 @@ export class CodexAppServerHost implements EngineHost {
     if (this.imageInputSupport === "supported") this.setSessionStatus(this.engineStatus, this.activeFlags);
   }
 
-  async send(entry: QueueEntry): Promise<DeliveryReceipt> {
+  private supportsNativeHistory(): boolean {
+    const version = this.protocolVersion?.match(/^(\d+)\.(\d+)\./);
+    return !!version && (Number(version[1]) > 0 || Number(version[2]) >= 153);
+  }
+
+  private async initializeNativeQueue(): Promise<void> {
+    if (!this.supportsNativeHistory()) { if (this.protocolVersion) this.queueCapability = "unsupported"; return; }
+    const queue = new NativeCodexQueue({ rpc: (method, params, timeout) => {
+      if (!this.writerFenceAllowsActuation() || this.dead || this.releasing || this.released) {
+        throw new StructuredSendRefusedError("native queue writer is unavailable");
+      }
+      return this.rpc(method, params, timeout, true);
+    } }, this.identity.threadId, { timeoutMs: this.requestTimeoutMs, pageSize: 1, maxPages: 2000 });
+    try { await queue.refresh(); }
+    catch (error) { queue.dispose(); this.queueCapability = error instanceof NativeQueueProtocolRefusal && error.code === -32601 ? "unsupported" : "unknown"; return; }
+    this.queueCapability = "supported";
+    this.nativeQueue = {
+      queue,
+      prepare: async (entry, version) => {
+        if (version.images.length && this.imageInputSupport !== "supported") throw new StructuredSendRefusedError("image input capability is unavailable");
+        return [
+          ...version.images.map(image => ({ type: "localImage" as const, path: this.resolveImagePath(image) })),
+          { type: "text", text: encodeCodexStructuredUserText(version.text,
+            version.images.length ? version.contentDigest : undefined, version.selectedContext, version.origin ?? { kind: "operator" },
+            codexDeliveryDedup(`${entry.entryId}-v${version.revision}`)) },
+        ];
+      },
+      evidence: (entry) => this.nativeQueueEvidence(entry),
+      evidenceBatch: async (entries) => {
+        if (!this.identity.path) return entries.map(() => null);
+        const history = await this.readDeliveryHistory(entries.map(entry => entry.clientUserMessageId), this.requestTimeoutMs,
+          candidate => entries.some(entry => this.nativeQueueProof(entry, candidate) !== null));
+        return Promise.all(entries.map(entry => this.nativeQueueEvidence(entry, history)));
+      },
+      sendWithdrawn: async (entry, expectedTurnId) => {
+        if (!this.writerFenceAllowsActuation() || this.dead || this.releasing || this.released) throw new StructuredSendRefusedError("native queue writer is unavailable");
+        if (this.activeTurnId !== expectedTurnId || this.hasBlockingAttention()) throw new StructuredSendRefusedError("stale-turn or blocking attention");
+        const version = entry.versions.find(v => v.revision === entry.revision);
+        if (!version?.input) throw new StructuredSendRefusedError("native queue input is unavailable");
+        const result = await this.rpc(expectedTurnId === null ? "turn/start" : "turn/steer", {
+          threadId: this.identity.threadId, input: version.input, clientUserMessageId: entry.clientUserMessageId,
+          ...(expectedTurnId === null ? {} : { expectedTurnId }),
+        }, this.requestTimeoutMs, true);
+        const turnId = turnIdFromResult(result, expectedTurnId === null ? "turn/start" : "turn/steer");
+        if (expectedTurnId !== null && turnId !== expectedTurnId) throw new Error("native steer returned a different turn identity");
+        return { turnId };
+      },
+    };
+    this.notifyStateListeners();
+  }
+
+  private async readDeliveryHistory(clientIds: string[], timeoutMs = this.requestTimeoutMs,
+    accept?: (history: Extract<CodexDeliveryHistoryResult, {state: "observed"}>) => boolean): Promise<CodexDeliveryHistoryResult> {
+    if (!this.identity.path) return {state: "unknown", reason: "identity"};
+    return readCodexDeliveryHistory((method, params, timeout) => this.rpc(method, params, timeout, true),
+      {threadId: this.identity.threadId, path: this.identity.path},
+      {deadlineAt: Date.now() + timeoutMs, sortDirection: "desc", itemsPerPage: 1,
+        maxPages: DELIVERY_HISTORY_PAGES, maxBytes: DELIVERY_HISTORY_BYTES}, clientIds, accept);
+  }
+
+  private async nativeQueueEvidence(entry: NativeQueueRecord, snapshot?: CodexDeliveryHistoryResult) {
+    if (entry.binding.threadId !== this.identity.threadId || !this.identity.path) return null;
+    const history = snapshot ?? await this.readDeliveryHistory([entry.clientUserMessageId]);
+    return this.nativeQueueProof(entry, history);
+  }
+
+  private nativeQueueProof(entry: NativeQueueRecord, history: CodexDeliveryHistoryResult) {
+    if (entry.binding.threadId !== this.identity.threadId || !this.identity.path) return null;
+    const targetHistory = history.state !== "complete" && history.state !== "observed" ? history : { ...history,
+      turns: history.turns.map(turn => ({ ...turn, items: turn.items.filter(item => item.type === "userMessage" && item.clientId === entry.clientUserMessageId) }))
+        .filter(turn => turn.items.length > 0),
+    };
+    for (const version of entry.versions) {
+      if (!version.input || (entry.dispatchedRevision !== null && entry.dispatchedRevision !== version.revision)) continue;
+      const normalizedHistory = targetHistory.state !== "complete" && targetHistory.state !== "observed" ? targetHistory : {
+        ...targetHistory,
+        turns: targetHistory.turns.map(turn => ({ ...turn, items: turn.items.map(item =>
+          item.type === "userMessage" && item.clientId === entry.clientUserMessageId
+            ? { ...item, content: normalizeNativeQueueObservation(version, item.content as NativeQueueInput[]) ?? item.content } : item) })),
+      };
+      const found = findCodexHistoryDelivery(normalizedHistory, { clientId: entry.clientUserMessageId, content: version.input, turnId: entry.dispatchedTurnId ?? null });
+      if (found.state === "found") return { threadId: found.identity.threadId, clientUserMessageId: entry.clientUserMessageId,
+        revision: version.revision, turnId: found.turnId, itemId: found.item.id, input: version.input };
+    }
+    return null;
+  }
+
+  private hasBlockingAttention(): boolean {
+    return [...this.attentions.values()].some(attention => attention.isBlocking !== false);
+  }
+
+  async send(entry: QueueEntry, firstDispatch?: FirstDispatchEvidence): Promise<DeliveryReceipt> {
     if (this.dead || this.releasing || this.released || !this.writerFenceAllowsActuation()) {
       return { outcome: "rejected", reason: "dead-host" };
     }
@@ -1449,7 +1578,8 @@ export class CodexAppServerHost implements EngineHost {
       ...(normalized.origin ? { origin: normalized.origin } : {}),
     };
     if (!entry.id) throw new Error("queue entry id is required");
-    const confirmed = await this.confirmedDelivery(entry);
+    const confirmed = await this.confirmedDelivery(entry, firstDispatch?.firstDispatch === true
+      && firstDispatch.operationId === entry.id && Boolean(firstDispatch.writerClaim));
     if (confirmed) return confirmed;
     const currentTurn = this.activeTurnId;
     if (entry.expectedTurnId !== undefined && entry.expectedTurnId !== currentTurn) {
@@ -1474,6 +1604,7 @@ export class CodexAppServerHost implements EngineHost {
       },
     ];
     if (currentTurn) {
+      if (this.hasBlockingAttention()) throw new StructuredSendRefusedError("blocking attention must be answered before steering");
       try {
         const result = await this.rpc("turn/steer", {
           threadId: this.identity.threadId,
@@ -1492,21 +1623,10 @@ export class CodexAppServerHost implements EngineHost {
         throw error;
       }
     }
-    /* Per-turn effort (issue #390 §5): the snapshot riding the durable entry
-       outranks the host-fixed default — the only axis `turn/start` accepts
-       (model and service tier are thread-level in this protocol, so the
-       negotiated capability advertises `perTurnModel: false`). A token outside
-       the CLI tier vocabulary falls back to the host default rather than
-       failing the turn over a settings blemish; model fit for an in-vocabulary
-       tier is the app server's own verdict (per-model scales exceed the base
-       engine list — sol/terra accept `ultra`). */
-    const perTurnEffort = entry.runtime?.effort && isKnownEffortTier(entry.runtime.effort)
-      ? entry.runtime.effort
-      : undefined;
-    const effort = perTurnEffort ?? this.effort;
+    const profile = codexTurnProfile(entry.runtime, { model: this.requestedModel, effort: this.effort }, this.modelCatalog);
     const result = await this.rpc("turn/start", {
       threadId: this.identity.threadId,
-      ...(effort ? { effort } : {}),
+      ...profile,
       input,
       clientUserMessageId: entry.id,
     });
@@ -1540,12 +1660,22 @@ export class CodexAppServerHost implements EngineHost {
     }
   }
 
-  /** Hydrated thread read with the #1332 fallback, returning the hydrated
-      response shape either way so every consumer of `thread.turns` keeps
-      working. On refusal the persisted turns come from the rollout on disk;
-      `window` bounds which end survives — "first" for materialization
-      evidence, "latest" for delivery confirmation; always oldest-first. */
-  private async readThreadWithTurns(window: "first" | "latest", timeoutMs?: number): Promise<unknown> {
+  /** Delivery-scoped native evidence, with the established legacy hydration
+      fallback. Every caller names the input it is verifying; native history
+      never returns an unbounded full-turn response. Legacy windows stay
+      first/latest as before, and the returned turns are oldest-first. */
+  private async readThreadForDelivery(clientId: string, window: "first" | "latest", timeoutMs?: number): Promise<unknown> {
+    if (this.supportsNativeHistory() && this.identity.path) {
+      const history = await this.readDeliveryHistory([clientId], timeoutMs);
+      if (history.state === "complete" || history.state === "observed") return { thread: { id: history.identity.threadId, path: history.identity.path,
+        turns: [...history.turns].reverse() } };
+      if (history.state === "unknown") {
+        if (history.reason === "not-materialized") {
+          throw new Error("Codex thread is not materialized yet before first user message");
+        }
+        throw new Error(`Codex canonical history is unavailable: ${history.reason}`);
+      }
+    }
     try {
       return await this.rpc("thread/read", {
         threadId: this.identity.threadId,
@@ -1564,7 +1694,7 @@ export class CodexAppServerHost implements EngineHost {
   async sessionMaterializationEvidence(clientMessageId: string): Promise<SessionMaterializationEvidence> {
     let result: unknown;
     try {
-      result = await this.readThreadWithTurns("first");
+      result = await this.readThreadForDelivery(clientMessageId, "first");
     } catch (error) {
       const reason = safeError(error);
       if (/not materialized yet/i.test(reason) && /before first user message/i.test(reason)) {
@@ -1830,7 +1960,7 @@ export class CodexAppServerHost implements EngineHost {
   async startRealtimeWebRtc(
     sdp: string,
     personaVariant: VoicePersonaVariant = "modality",
-  ): Promise<CodexRealtimeWebRtcResult> {
+  ): Promise<CodexRealtimeWebRtcAnswer> {
     if (this.dead || this.releasing || this.released || !this.writerFenceAllowsActuation()) {
       throw new Error("Codex app-server host is unavailable");
     }
@@ -1846,10 +1976,11 @@ export class CodexAppServerHost implements EngineHost {
        be reported against this one. */
     this.realtimeFailure = null;
     this.realtimeSessionId = null;
-    const personaBootstrapIdentity = voicePersonaBootstrapIdentity(this.identity.threadId, personaVariant);
+    this.realtimeTranscript.end();
+    const persona = voiceSessionPersona(personaVariant);
 
     let pendingStart!: PendingRealtimeStart;
-    const answer = new Promise<CodexRealtimeWebRtcResult>((resolve, reject) => {
+    const answer = new Promise<CodexRealtimeWebRtcAnswer>((resolve, reject) => {
       pendingStart = {
         resolve,
         reject,
@@ -1857,36 +1988,16 @@ export class CodexAppServerHost implements EngineHost {
         started: false,
         realtimeSessionId: null,
         sdp: null,
-        personaBootstrap: { ...personaBootstrapIdentity, insertion: "accepted" },
+        persona: { variant: persona.variant, personaId: persona.personaId },
       };
     });
     this.pendingRealtimeStart = pendingStart;
     void answer.catch(() => undefined);
 
-    try {
-      const outcome = await this.ensureVoicePersonaBootstrap(personaBootstrapIdentity, personaVariant, pendingStart);
-      if (outcome === "superseded") return answer;
-    } catch (error) {
-      if (this.pendingRealtimeStart !== pendingStart) return answer;
-      const pending = pendingStart;
-      this.pendingRealtimeStart = null;
-      clearTimeout(pending.timer);
-      const rejected: CodexRealtimeWebRtcRejection = {
-        sdp: null,
-        realtimeSessionId: null,
-        personaBootstrap: {
-          ...personaBootstrapIdentity,
-          insertion: "rejected",
-          diagnostic: safeError(error),
-        },
-      };
-      pending.resolve(rejected);
-      return answer;
-    }
-    if (this.pendingRealtimeStart !== pendingStart) return answer;
     const realtimeContext = selectRealtimeContext(this.events);
     console.info("[realtime context] selected", {
       providerStartupContext: true,
+      personaVariant: persona.variant,
       durableTail: realtimeContext.diagnosticItems,
       truncated: realtimeContext.truncated,
     });
@@ -1904,6 +2015,20 @@ export class CodexAppServerHost implements EngineHost {
         clientManagedHandoffs: true,
         codexResponsesAsItems: true,
         includeStartupContext: true,
+        /* THE SPOKEN MODEL'S ONLY INSTRUCTIONS (#1629). Unset, the backend
+           gives it Codex's stock realtime persona — a general-purpose assistant
+           that knows nothing about this thread's role or tools — and no item
+           written into the thread ever reaches it. */
+        "prompt": persona.prompt,
+        /* THE BACKING MODEL'S FRAMING, scoped to this call. Paired with the end
+           instructions so hanging up withdraws it, which is what keeps a text
+           agent from inheriting spoken-delivery rules for the rest of its life. */
+        realtimeStartInstructions: persona.startInstructions,
+        realtimeEndInstructions: persona.endInstructions,
+        /* The last thing said before a hangup is said INTO the tail. Without
+           this it is dropped instead of routed through Codex, so an instruction
+           given on the way out never reaches the canonical thread. */
+        flushTranscriptTailOnSessionEnd: true,
         /* Current V3 clients carry initial items in call creation. Add the
            durable tail only when a streamed assistant response has no
            committed item; provider startup context owns the persisted history. */
@@ -1915,114 +2040,6 @@ export class CodexAppServerHost implements EngineHost {
     return answer;
   }
 
-  private async ensureVoicePersonaBootstrap(
-    identity: VoicePersonaBootstrapIdentity,
-    variant: VoicePersonaVariant,
-    pendingStart: PendingRealtimeStart,
-  ): Promise<"accepted" | "superseded"> {
-    await this.ensureCanonicalTranscriptPath();
-    while (!this.voicePersonaBootstrapAccepted.has(variant)) {
-      const active = this.voicePersonaBootstrapInsertion;
-      if (active) {
-        try {
-          await active.promise;
-        } catch (error) {
-          if (this.pendingRealtimeStart !== pendingStart) return "superseded";
-          if (active.owner === pendingStart) throw error;
-          continue;
-        }
-        continue;
-      }
-
-      const canonicalExists = await this.scanVoicePersonaBootstrap(
-        identity.itemId,
-        "canonical scan unavailable; refusing insertion",
-      );
-      /* The pre-#870 row is a COORDINATOR persona — no other variant existed when
-         it was written — so it answers only a coordinator bootstrap. A modality
-         start that accepted it would read "this thread is already bootstrapped"
-         off the very item it exists to correct, and leave the session demoted. */
-      const legacyExists = canonicalExists || variant !== "coordinator"
-        ? false
-        : await this.scanVoicePersonaBootstrap(
-          legacyVoicePersonaBootstrapItemId(this.identity.threadId),
-          "legacy canonical scan unavailable; refusing insertion",
-        );
-      if (canonicalExists || legacyExists) {
-        this.voicePersonaBootstrapAccepted.add(variant);
-        this.unresolvedVoicePersonaBootstrap.delete(variant);
-        break;
-      }
-      if (this.pendingRealtimeStart !== pendingStart) return "superseded";
-      if (this.voicePersonaBootstrapInsertion) continue;
-
-      const bootstrap = this.unresolvedVoicePersonaBootstrap.get(variant)
-        ?? voicePersonaBootstrap(identity, variant);
-      this.unresolvedVoicePersonaBootstrap.set(variant, bootstrap);
-      const promise = this.insertVoicePersonaBootstrap(bootstrap, identity.itemId, variant);
-      const insertion = { owner: pendingStart, promise };
-      this.voicePersonaBootstrapInsertion = insertion;
-      const clearInsertion = () => {
-        if (this.voicePersonaBootstrapInsertion === insertion) this.voicePersonaBootstrapInsertion = null;
-      };
-      void promise.then(clearInsertion, clearInsertion);
-      try {
-        await promise;
-      } catch (error) {
-        if (this.pendingRealtimeStart !== pendingStart) return "superseded";
-        throw error;
-      }
-    }
-    return "accepted";
-  }
-
-  private async ensureCanonicalTranscriptPath(): Promise<void> {
-    if (this.identity.path) return;
-    /* Metadata-only on purpose: this reader consumes nothing but the thread
-       identity and path, and hydration is refused on paginated threads (#1332). */
-    const result = await this.rpc("thread/read", {
-      threadId: this.identity.threadId,
-    });
-    const recovered = threadFromResult(result, "thread/read");
-    if (recovered.threadId !== this.identity.threadId) {
-      throw new Error("thread/read returned a different thread id");
-    }
-    if (!recovered.path) {
-      const error = new Error("canonical transcript path is unavailable") as NodeJS.ErrnoException;
-      error.code = "NO_TRANSCRIPT_PATH";
-      throw error;
-    }
-    this.identity.path = recovered.path;
-  }
-
-  private async insertVoicePersonaBootstrap(
-    bootstrap: VoicePersonaBootstrap,
-    itemId: string,
-    variant: VoicePersonaVariant,
-  ): Promise<void> {
-    try {
-      await this.rpc("thread/inject_items", {
-        threadId: this.identity.threadId,
-        items: [bootstrap.item],
-      }, this.realtimePersonaTimeoutMs);
-    } catch (error) {
-      if (!await this.scanVoicePersonaBootstrap(itemId, "recovery scan unavailable")) throw error;
-    }
-    this.voicePersonaBootstrapAccepted.add(variant);
-    this.unresolvedVoicePersonaBootstrap.delete(variant);
-  }
-
-  private async scanVoicePersonaBootstrap(itemId: string, warning: string): Promise<boolean> {
-    try {
-      return await canonicalVoicePersonaBootstrapExists(this.identity.path, itemId);
-    } catch (error) {
-      console.warn(`[voice persona bootstrap] ${warning}`, {
-        code: (error as NodeJS.ErrnoException).code ?? "unknown",
-        diagnostic: safeError(error),
-      });
-      throw error;
-    }
-  }
 
   async appendRealtimeSpeech(text: string): Promise<void> {
     if (!text || Buffer.byteLength(text, "utf8") > MAX_REALTIME_SPEECH_BYTES) {
@@ -2304,6 +2321,7 @@ export class CodexAppServerHost implements EngineHost {
     /* An operator hanging up is not a failure to report back to them. */
     this.realtimeFailure = null;
     this.realtimeSessionId = null;
+    this.realtimeTranscript.end();
     for (const stream of this.voiceStreams.values()) {
       this.clearVoiceStreamTimer(stream);
       stream.fallbackToTerminal = true;
@@ -2315,6 +2333,7 @@ export class CodexAppServerHost implements EngineHost {
       throw new Error("Codex app-server host is unavailable");
     }
     const attention = this.attentions.get(attentionRef);
+    if (attention?.origin === "restored") throw new Error("attention belongs to a previous host generation; answer ownership is unavailable");
     if (!attention) throw new Error("attention request is missing or already answered");
     if (attention.answer) throw new Error("attention answer is already awaiting confirmation");
     await new Promise<void>((resolve, reject) => {
@@ -2355,7 +2374,7 @@ export class CodexAppServerHost implements EngineHost {
       : null;
     const status: HostState["status"] = this.dead ? "dead"
       : this.released ? "unhosted"
-      : this.attentions.size > 0 ? "attention"
+      : this.hasBlockingAttention() ? "attention"
       : this.activeTurnId ? "active"
       : this.engineStatus;
     return {
@@ -2368,13 +2387,16 @@ export class CodexAppServerHost implements EngineHost {
       protocolVersion: this.protocolVersion,
       activeTurnRef: this.activeTurnId,
       pendingAttention: [...this.attentions.keys()],
-      activeFlags: [...this.activeFlags],
+      nativeQueueRevision: this.nativeQueueRevision,
+      activeFlags: [...this.activeFlags, ...(this.nativeQueue ? ["native-queue"] : []), ...(this.supportsNativeHistory() && Array.isArray(record(this.modelCatalog)?.data) ? ["native-turn-profile"] : [])],
       account: this.account,
+      diagnostics: { executable: this.selectedExecutable, version: this.protocolVersion, nativeQueue: !!this.nativeQueue, queueCapability: this.queueCapability, authRecovery: this.authRecovery },
     };
   }
 
   async release(): Promise<void> {
     if (this.released) return;
+    this.nativeQueue?.queue.dispose();
     if (!this.releasePromise) {
       const attempt = this.releaseAndReap();
       this.releasePromise = attempt;
@@ -2411,9 +2433,9 @@ export class CodexAppServerHost implements EngineHost {
       const hangup = this.rpc("thread/realtime/stop", { threadId: this.identity.threadId }, REALTIME_HANGUP_TIMEOUT_MS);
       await hangup.catch(() => undefined);
       this.realtimeSessionId = null;
+    this.realtimeTranscript.end();
     }
     this.releasing = true;
-    this.unresolvedVoicePersonaBootstrap.clear();
     this.rejectRealtimeStart(new Error("Codex app-server host released"));
     this.rejectPendingAnswers(new Error("Codex app-server host released"));
     this.rejectPendingDeliveries(new Error("Codex app-server host released"));
@@ -2565,6 +2587,11 @@ export class CodexAppServerHost implements EngineHost {
 
   private emit(event: UnsequencedEvent): void {
     if (this.ledgerFailed) return;
+    /* Recorded here rather than at each call site, so every path that ends a
+       turn — a terminal notification, a resume that finds it already over, an
+       error that terminalizes it — leaves the same evidence for the voice
+       ledger. Bounded, because a long-lived host ends a great many turns. */
+    if (event.kind === "turn-ended") this.recordTerminatedTurn(event.turnId);
     if (!this.eventLedgerRestored) {
       if (this.preRestoreEvents.length + this.preRestoreMessages.length >= MAX_PRE_RESTORE_FRAMES) {
         this.ledgerFailed = true;
@@ -2598,6 +2625,20 @@ export class CodexAppServerHost implements EngineHost {
       subscriber.wake?.();
     }
     this.notifyStateListeners();
+  }
+
+  /** Bounded terminal-turn memory. The oldest is forgotten first, and forgetting
+      answers `unknown` rather than `completed` — the ledger then keeps its own
+      record instead of retiring work on missing evidence. */
+  private recordTerminatedTurn(turnId: string): void {
+    if (!turnId) return;
+    this.terminatedTurnIds.delete(turnId);
+    this.terminatedTurnIds.add(turnId);
+    while (this.terminatedTurnIds.size > MAX_TERMINATED_TURN_MEMORY) {
+      const oldest = this.terminatedTurnIds.values().next().value as string | undefined;
+      if (oldest === undefined) break;
+      this.terminatedTurnIds.delete(oldest);
+    }
   }
 
   private restoreEvents(): number {
@@ -2651,7 +2692,7 @@ export class CodexAppServerHost implements EngineHost {
         if (event.status !== "completed") this.cancelledVoiceTurns.add(event.turnId);
       }
       if (event.kind === "attention") {
-        this.attentions.set(event.id, { rpcId: "restored", method: event.method, origin: "restored" });
+        this.attentions.set(event.id, { rpcId: "restored", method: event.method, origin: "restored", isBlocking: !isNonblockingCodexQuestion(event.method, event.attention) });
       }
       if (event.kind === "attention-resolved") this.attentions.delete(event.id);
       if (event.kind === "realtime-delivery-progress") {
@@ -2677,7 +2718,6 @@ export class CodexAppServerHost implements EngineHost {
         this.activeFlags = [...(event.activeFlags ?? [])];
         if (event.status === "unhosted" || event.status === "dead") {
           this.activeTurnId = null;
-          this.attentions.clear();
         }
       }
     }
@@ -2705,8 +2745,9 @@ export class CodexAppServerHost implements EngineHost {
     }
     for (const [attentionId, attention] of [...this.attentions]) {
       if (attention.origin !== "restored") continue;
-      this.attentions.delete(attentionId);
-      this.emit({ kind: "attention-resolved", id: attentionId, resolution: "host-restarted" });
+      const previous = this.events.findLast(event => event.kind === "attention" && event.id === attentionId);
+      if (previous?.kind === "attention") this.emit({ kind: "attention", id: attentionId, method: attention.method,
+        attention: { ...(record(previous.attention) ?? {}), unowned: true } });
     }
     this.emitThreadStatus(resumedTurnTerminalized && !this.activeTurnId
       ? { type: "idle", activeFlags: [] }
@@ -2767,18 +2808,22 @@ export class CodexAppServerHost implements EngineHost {
     }
   }
 
-  private async confirmedDelivery(entry: QueueEntry): Promise<DeliveryReceipt | null> {
+  private async confirmedDelivery(entry: QueueEntry, firstDispatch = false): Promise<DeliveryReceipt | null> {
     const known = this.confirmedDeliveries.get(entry.id);
     if (known) return this.confirmedReceipt(entry, known);
     const persistedRead = rolloutConfirmedDelivery(this.identity.path, entry);
     const persisted = persistedRead instanceof Promise ? await persistedRead : persistedRead;
     if (persisted) return persisted;
+    // The journal already established this operation's first actuation. Keep
+    // local duplicate/collision checks, but do not scan unrelated native
+    // history to authorize a newly admitted message. Recovery remains below.
+    if (firstDispatch) return null;
     let thread: unknown;
     try {
       const timeoutMs = this.activeTurnId
         ? this.requestTimeoutMs * ACTIVE_THREAD_READ_TIMEOUT_MULTIPLIER
         : this.requestTimeoutMs;
-      thread = await this.readThreadWithTurns("latest", timeoutMs);
+      thread = await this.readThreadForDelivery(entry.id, "latest", timeoutMs);
     } catch (error) {
       const message = safeError(error);
       if (/not materialized yet/i.test(message) && /before first user message/i.test(message)) return null;
@@ -3003,17 +3048,17 @@ export class CodexAppServerHost implements EngineHost {
     this.setSessionStatus(mapped, status.activeFlags);
   }
 
-  private rpc(method: string, params: JsonObject = {}, timeoutMs = this.requestTimeoutMs): Promise<unknown> {
+  private rpc(method: string, params: JsonObject = {}, timeoutMs = this.requestTimeoutMs, preserveHost = false): Promise<unknown> {
     if (this.dead || this.releasing || this.released) return Promise.reject(new Error("Codex app-server host is unavailable"));
     const id = this.nextRpcId++;
     if (REPLAY_ENVELOPE_METHODS.has(method)) this.trackReplayEnvelopeRequest(id);
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        if (method === "thread/read") this.rememberLateThreadReadResponse(id, timeoutMs);
+        if (method === "thread/read" || preserveHost) this.rememberLateThreadReadResponse(id, timeoutMs);
         const error = new Error(`${method} timed out${MUTATING_RPC_METHODS.has(method) ? "; outcome is uncertain" : ""}`);
         reject(error);
-        if (MUTATING_RPC_METHODS.has(method)) this.fail(error);
+        if (MUTATING_RPC_METHODS.has(method) && !preserveHost) this.fail(error);
       }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
       this.write({ jsonrpc: "2.0", id, method, params });
@@ -3217,18 +3262,35 @@ export class CodexAppServerHost implements EngineHost {
       this.pending.delete(id);
       clearTimeout(pending.timer);
       const error = record(message.error);
-      if (error) pending.reject(new Error(`Codex app-server request failed: ${safeError(error.message ?? "unknown error")}`));
+      if (error) {
+        const message = `Codex app-server request failed: ${safeError(error.message ?? "unknown error")}`;
+        pending.reject(typeof error.code === "number" && Number.isInteger(error.code)
+          ? new NativeQueueProtocolRefusal(error.code, message) : new Error(message));
+      }
       else pending.resolve(message.result);
       return;
     }
     if (!method) return this.fail(new Error("Codex app-server message has no method"));
     const params = record(message.params) ?? {};
     if (typeof id === "number" || typeof id === "string") {
-      const attentionId = `${method}:${String(id)}`;
-      this.attentions.set(attentionId, { rpcId: id, method, origin: "current" });
+      const baseAttentionId = `${method}:${String(id)}`;
+      const currentRequest = [...this.attentions].find(([, attention]) => attention.origin === "current" && attention.rpcId === id && attention.method === method);
+      const attentionId = currentRequest?.[0] ?? (this.attentions.get(baseAttentionId)?.origin === "restored"
+        ? `${baseAttentionId}:generation-${this.cursor + 1}` : baseAttentionId);
+      this.attentions.set(attentionId, { ...currentRequest?.[1], rpcId: id, method, origin: "current", isBlocking: !isNonblockingCodexQuestion(method, params) });
       const event = { kind: "attention" as const, id: attentionId, method, attention: params };
       if (!reconcileBufferedLifecycle || !this.consumeBufferedNotification(event)) this.emit(event);
       return;
+    }
+    if (method === "modelProvider/authRecoveryStarted" || method === "modelProvider/authRecoveryCompleted") {
+      const valid = params.threadId === this.identity.threadId && typeof params.turnId === "string" && params.turnId.length > 0
+        && typeof params.provider === "string" && typeof params.message === "string";
+      this.authRecovery = !valid ? "unknown" : method.endsWith("Started") ? "started" : "completed-unverified";
+      this.notifyStateListeners();
+    }
+    if (this.nativeQueue?.queue.handleNotification(method, params)) {
+      this.nativeQueueRevision++;
+      this.emit({ kind: "native-queue-changed", threadId: this.identity.threadId });
     }
     this.acceptNotification(method, params, reconcileBufferedLifecycle);
   }
@@ -3266,12 +3328,32 @@ export class CodexAppServerHost implements EngineHost {
   }
 
   private acceptNotification(method: string, params: JsonObject, reconcileBufferedLifecycle = false): void {
+    /* #1629: the canonical transcript. These are the app-server's own
+       notifications, so they survive a data-channel drop and are what the
+       thread's committed timeline is built from. Answered before the pending
+       start check because they arrive throughout the call, not around it. */
+    if (CANONICAL_REALTIME_TRANSCRIPT_METHODS.has(method)) {
+      if (stringField(params, "threadId") !== this.identity.threadId) return;
+      const segment = this.realtimeTranscript.observe(method, params);
+      if (segment) {
+        this.emit({
+          kind: "voice-transcript",
+          realtimeSessionId: segment.realtimeSessionId,
+          segmentId: segment.id,
+          role: segment.role,
+          text: segment.text,
+          final: segment.final,
+        });
+      }
+      return;
+    }
     if (method === "thread/realtime/started") {
       const pending = this.pendingRealtimeStart;
       if (!pending || stringField(params, "threadId") !== this.identity.threadId) return;
       pending.started = true;
       pending.realtimeSessionId = stringField(params, "realtimeSessionId");
       this.realtimeSessionId = pending.realtimeSessionId;
+      this.realtimeTranscript.begin(pending.realtimeSessionId ?? "");
       this.resumeVoiceStreams();
       this.resolveRealtimeStart();
       return;
@@ -3308,7 +3390,7 @@ export class CodexAppServerHost implements EngineHost {
       const requestId = params.requestId;
       if (typeof requestId !== "number" && typeof requestId !== "string") return;
       const resolved = [...this.attentions.entries()].find(([, attention]) =>
-        String(attention.rpcId) === String(requestId));
+        attention.origin === "current" && String(attention.rpcId) === String(requestId));
       if (!resolved) return;
       const answer = resolved[1].answer;
       if (answer) {
@@ -3500,7 +3582,7 @@ export class CodexAppServerHost implements EngineHost {
     pending.resolve({
       sdp: pending.sdp,
       realtimeSessionId: pending.realtimeSessionId,
-      personaBootstrap: pending.personaBootstrap,
+      persona: pending.persona,
     });
   }
 
@@ -3512,6 +3594,37 @@ export class CodexAppServerHost implements EngineHost {
       the call. */
   currentRealtimeSessionId(): string | null {
     return this.realtimeSessionId;
+  }
+
+  /**
+   * The native thread this host runs (#1629).
+   *
+   * A tool call's `_meta` names the thread it came from. Comparing the two is
+   * what turns the caller's claim into evidence, so the voice ledger can refuse
+   * a request that names work on some other thread.
+   */
+  providerThreadId(): string | null {
+    return this.identity.threadId;
+  }
+
+  /** Whether a backing turn is running right now. */
+  hasActiveTurn(): boolean {
+    return this.activeTurnId !== null;
+  }
+
+  /**
+   * What this host can say about one backing turn (#1629).
+   *
+   * `completed` is the only authoritative retirement evidence the voice ledger
+   * accepts: it means this host saw that turn end. A turn it has no terminal
+   * record for is `unknown` — a host that restarted, or one whose ledger was
+   * replayed past the event, has MISSING evidence, and the ledger keeps what it
+   * holds rather than treating silence as an ending.
+   */
+  voiceWorkTurnState(turnId: string): "active" | "completed" | "unknown" {
+    if (!turnId) return "unknown";
+    if (this.activeTurnId === turnId) return "active";
+    return this.terminatedTurnIds.has(turnId) ? "completed" : "unknown";
   }
 
   lastRealtimeFailure(): CodexRealtimeFailure | null {

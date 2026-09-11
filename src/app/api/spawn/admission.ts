@@ -46,6 +46,28 @@ export function isAgentInitiatedSpawn(req: Pick<NextRequest, "headers">): boolea
   }
 }
 
+export const REVIEWER_REQUIRES_REVIEWS_ERROR = "reviewer requires reviews";
+export const REVIEWS_REQUIRE_REVIEWER_ERROR = "reviews requires role: reviewer";
+
+/**
+ * The mandatory reviewer contract, as ONE predicate (#1641).
+ *
+ * `/api/spawn` and `/api/spawn/validate` both call this, so the validator
+ * cannot report a launch admissible that the route then refuses. That drift is
+ * what left a reviewer spawn rejected for a missing `reviews` permanently
+ * unknown: the route answered a bare 400 without a request-bound fence, and
+ * recovery — which trusts only the fence — had nothing terminal to read.
+ *
+ * `role` is the RESOLVED role id (or null when the request names none), so a
+ * role alias or override cannot smuggle a reviewer past the check.
+ */
+export function mandatoryReviewsError(role: string | null, body: { reviews?: unknown }): string | null {
+  if (role === "reviewer") {
+    return typeof body.reviews === "string" && body.reviews.trim() ? null : REVIEWER_REQUIRES_REVIEWS_ERROR;
+  }
+  return body.reviews === undefined ? null : REVIEWS_REQUIRE_REVIEWER_ERROR;
+}
+
 /** Lineage no longer gates admission on `src` (#341): the durable parent is
     inferred from the authenticated caller conversation, so agent-initiated
     requests only need their admission identity (`role`, plus `reviews` for
@@ -57,9 +79,7 @@ export function agentSpawnLineageError(
   if (!isAgentInitiatedSpawn(req)) return null;
   if (body.src !== undefined && (typeof body.src !== "string" || !body.src.trim())) return AGENT_SPAWN_LINEAGE_ERROR;
   if (typeof body.role !== "string" || !body.role.trim()) return AGENT_SPAWN_LINEAGE_ERROR;
-  if (body.role.trim() === "reviewer" && (typeof body.reviews !== "string" || !body.reviews.trim())) {
-    return AGENT_SPAWN_LINEAGE_ERROR;
-  }
+  if (body.role.trim() === "reviewer" && mandatoryReviewsError("reviewer", body)) return AGENT_SPAWN_LINEAGE_ERROR;
   return null;
 }
 

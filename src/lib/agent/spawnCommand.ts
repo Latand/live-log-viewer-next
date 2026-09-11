@@ -58,7 +58,7 @@ import type { ApiError } from "@/lib/types";
 import { recordDirectOperatorWakatimeActivity } from "@/lib/wakatime/operatorActivity";
 
 import { sourceCwdStatus } from "@/app/api/spawn/sourceCwd";
-import { AGENT_SPAWN_LINEAGE_ERROR, agentSpawnLineageError, authenticatedAgentSpawnCaller, isAgentInitiatedSpawn, spawnLineageSelectorForCaller, type AuthenticatedSpawnCaller } from "@/app/api/spawn/admission";
+import { AGENT_SPAWN_LINEAGE_ERROR, agentSpawnLineageError, authenticatedAgentSpawnCaller, isAgentInitiatedSpawn, mandatoryReviewsError, spawnLineageSelectorForCaller, type AuthenticatedSpawnCaller } from "@/app/api/spawn/admission";
 import { spawnAccountErrorResponse } from "@/app/api/spawn/accountError";
 import { attributeNamedAccountChoice } from "@/lib/accounts/accountOverrides";
 
@@ -240,8 +240,10 @@ export async function executeSpawnRequest(
   const requestedPlugins = normalizeSpawnPlugins(body.plugins);
   if (!requestedPlugins.ok) return NextResponse.json({ error: requestedPlugins.error }, { status: 400 });
 
-  const lineageError = agentSpawnLineageError(req, body);
-  if (lineageError) return NextResponse.json({ error: lineageError }, { status: 400 });
+  /* The caller is established BEFORE the first refusal that writes a fence
+     (#1641). The 403 itself still waits until after validation, so a stranger
+     learns the ordinary refusal and no more — but an unauthenticated one can
+     never burn another caller's downstream key. */
   const agentInitiated = isAgentInitiatedSpawn(req);
   let registryForCaller: ReturnType<SpawnCommandDependencies["registry"]> | null = null;
   let authenticatedCaller: AuthenticatedSpawnCaller | null = null;
@@ -259,22 +261,24 @@ export async function executeSpawnRequest(
       };
     }
   }
+  /* Every pre-reservation refusal below records the request-bound fence, so a
+     caller whose dispatch was interrupted can recover this exact key to a
+     terminal NOT_EXECUTED instead of an indefinite unknown (#1641). */
+  const refuse = (error: string): NextResponse<ApiError> => {
+    if (!authenticatedCallerError) {
+      fenceSpawnAdmissionRejection(body as Record<string, unknown>, 400, error, dependencies);
+    }
+    return NextResponse.json({ error }, { status: 400 });
+  };
+  const lineageError = agentSpawnLineageError(req, body);
+  if (lineageError) return refuse(lineageError);
   if (body.allowSubagents !== undefined && typeof body.allowSubagents !== "boolean") {
     return NextResponse.json({ error: "allowSubagents must be a boolean" }, { status: 400 });
   }
   const role = resolveSpawnRole(body);
-  if (!role.ok) {
-    if (!authenticatedCallerError) {
-      fenceSpawnAdmissionRejection(body as Record<string, unknown>, 400, role.error, dependencies);
-    }
-    return NextResponse.json({ error: role.error }, { status: 400 });
-  }
-  if (role.value?.role === "reviewer" && (typeof body.reviews !== "string" || !body.reviews.trim())) {
-    return NextResponse.json({ error: "reviewer requires reviews" }, { status: 400 });
-  }
-  if (role.value?.role !== "reviewer" && body.reviews !== undefined) {
-    return NextResponse.json({ error: "reviews requires role: reviewer" }, { status: 400 });
-  }
+  if (!role.ok) return refuse(role.error);
+  const reviewsError = mandatoryReviewsError(role.value?.role ?? null, body);
+  if (reviewsError) return refuse(reviewsError);
   /* Reviewer isolation (#393): reviewer/verifier launch profiles always carry
      allowSubagents:false, so every engine denies native multi-agent tools on
      fresh launch, resume, and restart adoption. Even the operator lane cannot

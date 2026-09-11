@@ -222,3 +222,27 @@ test("a superseded conversation keeps its terminal projection", async () => {
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("current legacy ownership overrides retained structured metadata without a native probe", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-owner-projection-"));
+  try {
+    const registry = new AgentRegistry(path.join(directory, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+    const file = structuredFile(registry, directory, { pid: 1001, startIdentity: "old" });
+    const snapshot = registry.readOnlySnapshot();
+    const conversation = Object.values(snapshot.conversations)[0]!;
+    file.conversationId = conversation.id;
+    const entry = Object.values(snapshot.entries)[0]!;
+    entry.host = { kind: "tmux" } as never;
+    file.pid = 2002;
+    let probed = false;
+    await projectStructuredFileLiveness([file], registry, snapshot, {
+      hostProbe: (() => { probed = true; throw new Error("stale native probe"); }) as never,
+    } as never);
+    expect(file.controlHost).toEqual({ conversationId: conversation.id, transport: "legacy" });
+    expect(file.pid).toBe(2002);
+    expect(probed).toBe(false);
+    file.conversationId = "conversation_other";
+    await projectStructuredFileLiveness([file], registry, snapshot);
+    expect(file.controlHost).toBeUndefined();
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+});

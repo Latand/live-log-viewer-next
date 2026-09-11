@@ -136,12 +136,17 @@ test("barge-in mid-answer interleaves transcripts, keeps the mic live, and never
     // The agent is mid-answer when server VAD detects operator speech: the
     // truncated agent line stays visible, the operator turn opens a new line,
     // and the post-interruption answer never glues onto the abandoned one.
+    // The abandoned answer ends at its own turn.done, which is where native
+    // closes the agent's segment too. The operator speaking leaves it open,
+    // because in a duplex call the two overlap word by word within one turn
+    // (#1658).
     peer.channel.onmessage?.({ data: JSON.stringify({ type: "output_transcript.added", item: { text: "The build is" } }) });
     peer.channel.onmessage?.({ data: JSON.stringify({ type: "input_transcript.added", item: { text: "Stop — check the tests instead" } }) });
+    peer.channel.onmessage?.({ data: JSON.stringify({ type: "turn.done", turn: { role: "assistant", transcript: "The build is" } }) });
     peer.channel.onmessage?.({ data: JSON.stringify({ type: "output_transcript.added", item: { text: "Checking the tests" } }) });
     peer.channel.onmessage?.({ data: JSON.stringify({ type: "turn.done", turn: { role: "assistant", transcript: "Checking the tests now" } }) });
     expect(client.getSnapshot().lines.map((line) => [line.role, line.text, line.final])).toEqual([
-      ["assistant", "The build is", false],
+      ["assistant", "The build is", true],
       ["user", "Stop — check the tests instead", false],
       ["assistant", "Checking the tests now", true],
     ]);
@@ -559,5 +564,67 @@ test("a finalized progress line is reused by later ticks of the same turn", asyn
     ["progress", "next answer", false],
   ]);
 
+  await client.stop();
+});
+
+test("a worker answer that cannot be delivered stops the panel claiming a working agent", async () => {
+  /* #1629. The WebRTC leg runs to the provider, so a backing host that was
+     interrupted, replaced or killed leaves the call sounding perfectly alive.
+     This request is the one that carries work output INTO the call, and its
+     failure used to return in silence — the operator went on talking to a call
+     that reached nothing. */
+  let refuse = true;
+  globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+    if (body.action !== "deliverWorkerResponse") return jsonResponse(200, { ok: true, sdp: "v=0\r\nanswer" });
+    return refuse
+      ? jsonResponse(409, { error: "structured host ownership is unavailable" })
+      : jsonResponse(200, { ok: true, deliveryId: body.deliveryId ?? (body.delivery as { deliveryId: string }).deliveryId, acknowledged: true });
+  }) as typeof fetch;
+
+  const client = codexRealtimeClient("conversation_agent_link");
+  await client.start();
+  StubPeerConnection.latest!.channel.onopen?.();
+  expect(client.getSnapshot().agentUnavailable).toBeNull();
+
+  const delivery = voiceDelivery("turn-link", [{ responseId: "response-one", text: "the build is green" }]);
+  client.reconcileWorkerDeliveries([delivery]);
+  await flushAsync();
+
+  /* The call is still up — this is not the transport's failure — and the panel
+     now says which half of it is broken. */
+  expect(client.getSnapshot().phase).toBe("live");
+  expect(client.getSnapshot().error).toBeNull();
+  expect(client.getSnapshot().agentUnavailable).toContain("ownership is unavailable");
+
+  /* And it clears itself the moment an answer does land, rather than sticking
+     until the operator hangs up. */
+  refuse = false;
+  client.reconcileWorkerDeliveries([delivery]);
+  await flushAsync();
+  expect(client.getSnapshot().agentUnavailable).toBeNull();
+  await client.stop();
+});
+
+test("a runtime that reports the host gone contradicts the call at once", async () => {
+  globalThis.fetch = (async () => jsonResponse(200, { ok: true, sdp: "v=0\r\nanswer" })) as unknown as typeof fetch;
+  const client = codexRealtimeClient("conversation_agent_host_axis");
+  await client.start();
+  StubPeerConnection.latest!.channel.onopen?.();
+
+  client.reportBackingHost("hosted");
+  expect(client.getSnapshot().agentUnavailable).toBeNull();
+  /* No projection yet asserts nothing either way. */
+  client.reportBackingHost("unknown");
+  expect(client.getSnapshot().agentUnavailable).toBeNull();
+
+  client.reportBackingHost("dead");
+  expect(client.getSnapshot().agentUnavailable).toContain("no longer running");
+  expect(client.getSnapshot().phase).toBe("live");
+
+  client.reportBackingHost("recovering");
+  expect(client.getSnapshot().agentUnavailable).toContain("being restored");
+  client.reportBackingHost("hosted");
+  expect(client.getSnapshot().agentUnavailable).toBeNull();
   await client.stop();
 });

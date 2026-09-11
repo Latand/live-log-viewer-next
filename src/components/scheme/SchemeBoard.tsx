@@ -18,6 +18,7 @@ import { GroupOverridePanel } from "./GroupOverridePanel";
 import { PipelineEditor } from "@/components/pipelines/PipelineEditor";
 import { createVisibilityIndex } from "./visibilityIndex";
 import { flowByImplementer } from "@/components/flows/flowModel";
+import { deckCollapsed, deckDisclosureMarker, deckDisclosureTerminal, readDeckDisclosureOverride } from "@/components/flows/reviewDeckDisclosure";
 import type { BranchGroup } from "@/components/projectModel";
 import { deleteTask, handoffTask, unassignTask, updateTask } from "@/components/tasks/taskApi";
 import { taskRelationsByPath } from "@/components/tasks/taskRelations";
@@ -49,6 +50,7 @@ import { AgentLinksLayer, EdgesLayer, GroupsLayer, LoopsLayer, MOVE_EASE, NodesL
 import type { TaskCardHandlers } from "./TaskCard";
 import { TaskEdgesLayer } from "./TaskEdgesLayer";
 import { TasksLayer } from "./TasksLayer";
+import { bandContainsTarget } from "./boardPresentation";
 import { applyBandOrder, bandModeFor, buildTaskBands, layoutTaskBands, rankBands, type BandMirror, type BandMode, type PlacedBand, type TaskBand } from "./taskBands";
 import { TaskBandsLayer } from "./TaskBandsLayer";
 import { findFreeSlot } from "./findFreeSlot";
@@ -271,7 +273,6 @@ export function SchemeBoard({
   const [historyOpen, setHistoryOpen] = useState(false);
   const [historyTaskId, setHistoryTaskId] = useState<string | null>(null);
   const openTaskHistory = useCallback((id: string) => {setHistoryTaskId(id);setHistoryOpen(true);}, []);
-  const [layoutZoom, setLayoutZoom] = useState(.5);
   const [layoutViewportWidth, setLayoutViewportWidth] = useState(1400);
   const closeHistory = useCallback(() => setHistoryOpen(false), []);
   const workflowModel = useMemo(() => projectTaskWorkflows(allTasks, pipelines, flows, files, project), [allTasks, pipelines, flows, files, project]);
@@ -383,9 +384,8 @@ export function SchemeBoard({
   const bands = useMemo<TaskBand[]>(() => {
     if (!bandsEnabled) return [];
     const built = buildTaskBands(authoredLayout, { tasks: mergedAllTasks, projection: workflowModel, draftBands, untitled: t("bands.untitled"), reviewFlow: t("bands.reviewFlow") });
-    /* A finished task without a single member lives in the task list and its
-       history, not as an empty band. */
-    return built.filter((band) => band.members.length || band.mirrors.length || band.status !== "done");
+    /* The task visibility preference also governs completed empty tasks. */
+    return built;
   }, [bandsEnabled, authoredLayout, mergedAllTasks, workflowModel, draftBands, t]);
   const rankedBands = useMemo(() => rankBands(bands), [bands]);
   /* Order snapshot during an interaction: status labels update at once, rank
@@ -397,9 +397,60 @@ export function SchemeBoard({
      operator opened it from. Session state only; the canonical membership and
      the composer/delivery owner are untouched. */
   const [hostOverrides, setHostOverrides] = useState<ReadonlyMap<string, string>>(() => new Map());
+  /* The operator's actual review-deck disclosure, so a band reserves the
+     collapsed chip height for a deck it is showing collapsed and the full
+     footprint for one they manually expanded (#1641). The state lives in
+     localStorage (RoundDeck's own store); the nonce re-reads it when a toggle
+     dispatches `llv-deck-disclosure`, or another tab writes the key. */
+  const [disclosureNonce, setDisclosureNonce] = useState(0);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const bump = () => setDisclosureNonce((n) => n + 1);
+    window.addEventListener("llv-deck-disclosure", bump);
+    window.addEventListener("storage", bump);
+    return () => {
+      window.removeEventListener("llv-deck-disclosure", bump);
+      window.removeEventListener("storage", bump);
+    };
+  }, []);
+  /* A deck shown expanded by the operator's own still-valid choice also keeps
+     a completed task's automatic history fold open. */
+  const { collapsedDecks, expandedDecks } = useMemo(() => {
+    void disclosureNonce;
+    const collapsed = new Set<string>();
+    const expanded = new Set<string>();
+    if (typeof window === "undefined") return { collapsedDecks: collapsed, expandedDecks: expanded };
+    for (const deck of authoredLayout.decks) {
+      const override = readDeckDisclosureOverride(window.localStorage, deck.flow.id);
+      const marker = deckDisclosureMarker(deck.flow);
+      if (deckCollapsed(override, marker, deckDisclosureTerminal(deck.flow))) collapsed.add(deck.key);
+      else if (override?.v === "expanded" && override.at === marker) expanded.add(deck.key);
+    }
+    return { collapsedDecks: collapsed, expandedDecks: expanded };
+  }, [authoredLayout.decks, disclosureNonce]);
+  const [expandedStages, setExpandedStages] = useState<ReadonlySet<string>>(() => new Set());
+  const [historyOverrides, setHistoryOverrides] = useState<ReadonlyMap<string, boolean>>(() => {
+    try { return new Map(JSON.parse(localStorage.getItem(`llv-board-history:${project}`) ?? "[]")); }
+    catch { return new Map(); }
+  });
+  const toggleStageDetails = useCallback((key: string) => setExpandedStages(previous => {
+    const next = new Set(previous);
+    if (next.has(key)) next.delete(key); else next.add(key);
+    return next;
+  }), []);
+  const toggleBandHistory = useCallback((band: PlacedBand) => {
+    /* The open reader keeps its band revealed, so folding that band closes it;
+       folding any other band leaves the reader alone. */
+    if (!band.geometry.historyCollapsed && bandContainsTarget(band, authoredLayout, selected)) setSelected(null);
+    setHistoryOverrides(previous => {
+      const next = new Map(previous).set(band.id, band.geometry.historyCollapsed);
+      try { localStorage.setItem(`llv-board-history:${project}`, JSON.stringify([...next])); } catch { /* session choice still works */ }
+      return next;
+    });
+  }, [project, authoredLayout, selected]);
   const taskScene = useMemo(() => bandsEnabled
-    ? layoutTaskBands(authoredLayout, orderedBands, { zoom: layoutZoom, mode: bandMode, viewportWidth: layoutViewportWidth, reader: selected, hostOverrides })
-    : null, [bandsEnabled, authoredLayout, orderedBands, layoutZoom, bandMode, layoutViewportWidth, selected, hostOverrides]);
+    ? layoutTaskBands(authoredLayout, orderedBands, { mode: bandMode, viewportWidth: layoutViewportWidth, reader: selected, hostOverrides, collapsedDecks, expandedDecks, expandedStages, historyOverrides, revealTarget: selected, flows })
+    : null, [bandsEnabled, authoredLayout, orderedBands, bandMode, layoutViewportWidth, selected, hostOverrides, collapsedDecks, expandedDecks, expandedStages, historyOverrides, flows]);
   const layout = taskScene?.layout ?? authoredLayout;
 
   /* NO PRUNING HERE (#771). The selection outlives this view, so dropping a path
@@ -679,8 +730,8 @@ export function SchemeBoard({
      these stay the SAME objects byPath holds, so a rail can exclude its own two
      endpoints by identity before routing around the rest. */
   const railObstacles = useMemo<SchemeRect[]>(
-    () => [...layout.nodes, ...layout.decks, ...layout.stacks, ...layout.drafts, ...layout.slots],
-    [layout],
+    () => [...layout.nodes.filter(node => !taskScene || taskScene.shown.has(node.file.path)), ...layout.decks, ...layout.stacks, ...layout.drafts, ...layout.slots],
+    [layout, taskScene],
   );
   /* Task cards owned by a pipeline region (#531) sit at the layout's coordinates
      inside the colored halo; only the remaining free cards run through the
@@ -869,9 +920,15 @@ export function SchemeBoard({
     onFit: announceFit,
     anchor: cameraAnchor,
     lockX: Boolean(taskScene),
+    /* The band board scales cards with the camera, so an opened conversation
+       is framed at a fuller zoom to read prominently (#1641). */
+    focusZoom: taskScene ? 0.9 : undefined,
   });
 
-  useLayoutEffect(() => {setLayoutZoom(cam.z);setLayoutViewportWidth(vp.w);setBandMode((previous) => bandModeFor(cam.z, previous));}, [cam.z,vp.w]);
+  /* The band layout follows the camera only through the presentation mode
+     (chip / summary / reader) and the viewport width; the zoom itself is the
+     camera's, so a zoom frame that stays inside one mode relayouts nothing. */
+  useLayoutEffect(() => {setLayoutViewportWidth(vp.w);setBandMode((previous) => bandModeFor(cam.z, previous));}, [cam.z,vp.w]);
   /* Rank moves are deferred while the operator is busy inside the board:
      panning, typing, holding a text selection, or reading an open disclosure
      or action menu. Status labels still update at once; only the order waits. */
@@ -998,8 +1055,13 @@ export function SchemeBoard({
      disclosure instead of covering chat content (issue #292 rejection), the
      agent stack / composer, or an open draft's composer (#474). */
   const chipObstacles = useMemo(
-    () => chipObstacleRects(layout.nodes, layout.decks, layout.drafts, cam, keepoutObstacles),
-    [layout, cam, keepoutObstacles],
+    () => {
+      const bandChrome = taskScene ? [...taskScene.bands.map(band => band.geometry.header), ...layout.groups, ...layout.slots,
+        ...taskScene.continuations.flatMap(entry => { const at = layout.byPath.get(entry.key); return at ? [{ x: at.x, y: at.y + at.h, w: at.w, h: 28 }] : []; })
+      ].map(rect => ({ x: rect.x * cam.z + cam.x, y: rect.y * cam.z + cam.y, w: rect.w * cam.z, h: rect.h * cam.z })) : [];
+      return chipObstacleRects(layout.nodes.filter(node => !taskScene || taskScene.shown.has(node.file.path)), layout.decks, layout.drafts, cam, [...keepoutObstacles, ...bandChrome]);
+    },
+    [layout, taskScene, cam, keepoutObstacles],
   );
 
   /* The fit functions change identity on every poll-driven relayout (useFiles
@@ -1304,10 +1366,18 @@ export function SchemeBoard({
     setSelected(mirror.ofKey);
   }, [taskScene, primeAnchor]);
   const followContinuation = useCallback((target: { key: string; bandId: string }) => {
+    const file = files.find(entry => entry.path === target.key);
+    if (file) {
+      // Use the conversation opener's focus obligation: it frames the reader
+      // after history disclosure and wrapping have produced its actual bounds.
+      stableSelect(file);
+      return;
+    }
     setSelected(target.key);
-    const rect = layout.byPath.get(target.key);
+    const rect = layout.byPath.get(target.key)
+      ?? taskScene?.bands.find(band => band.id === target.bandId)?.geometry.header;
     if (rect) centerOn(rect, cam.z);
-  }, [layout, centerOn, cam.z]);
+  }, [files, stableSelect, layout, taskScene, centerOn, cam.z]);
 
   /* The sticky composer owns the create (text, voice, images, deadline); the
      board just adopts the fresh card optimistically and drops the sticky. */
@@ -1417,7 +1487,6 @@ export function SchemeBoard({
           <TaskBandsLayer
             bands={taskScene.bands}
             mode={taskScene.mode}
-            scale={taskScene.scale}
             /* Band chrome stays live on the hand tool. Only the controls
                themselves take pointer events (`data-scheme-ui`, which
                `onPointerDown` already refuses to start a pan on), so the rest
@@ -1434,6 +1503,7 @@ export function SchemeBoard({
             onRemoveFromBoard={bandRemoveFromBoard}
             onSelectMirror={bandSelectMirror}
             onFollowContinuation={followContinuation}
+            onToggleHistory={toggleBandHistory}
           />
         ) : null}
         <GroupsLayer onOpenTaskHistory={openTaskHistory} groups={layout.groups} interactive={!mapMode && !handLike && !session} />
@@ -1442,8 +1512,9 @@ export function SchemeBoard({
         {/* Rails/badges stay passive on the map, but the pipeline hub keeps its
             tap target there — the mobile lite map reaches pipeline controls only
             through it (#93 §2.3). */}
-        <AgentLinksLayer semanticZoom={Boolean(taskScene)} links={layout.links} byPath={layout.byPath} obstacles={railObstacles} interactive={!mapMode && !handLike && !session} hubInteractive={!handLike && !session} width={layout.width} height={layout.height} />
+        <AgentLinksLayer semanticZoom={Boolean(taskScene)} links={layout.links} loops={layout.loops} byPath={layout.byPath} obstacles={railObstacles} interactive={!mapMode && !handLike && !session} hubInteractive={!handLike && !session} width={layout.width} height={layout.height} />
         <NodesLayer
+          onToggleStageDetails={toggleStageDetails}
           layout={layout}
           visiblePaths={visibleNativePaths}
           expandedPath={expandedNode?.file.path}

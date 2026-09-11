@@ -209,6 +209,7 @@ export interface MiniStack {
 
 /** Review-round deck of a flow, sitting beside its implementer as the pair. */
 export interface DeckNode {
+  bandSurface?: boolean;
   key: string;
   flow: Flow;
   rounds: DeckRound[];
@@ -221,6 +222,9 @@ export interface DeckNode {
 /** A flow/pipeline group halo on the scheme (issue #118): the union region of
     every session belonging to one running flow or pipeline, plus its label. */
 export interface SchemeGroup extends SchemeGroupSpec, SchemeRect {
+  /** Dedicated heading in the task band. */
+  bandHeader?: boolean;
+  historical?: boolean;
   /** Display name shown on the halo's label chip (flow: implementer title;
       pipeline: task), pre-cleaned so the component only sizes and tints it. */
   label: string;
@@ -230,6 +234,8 @@ export interface SchemeGroup extends SchemeGroupSpec, SchemeRect {
     placeholder chat window in stage order (issue #196). Materializing a stage
     (its agent node / review deck placing) dissolves exactly its slot. */
 export interface StageSlot extends SchemeRect {
+  /** Band disclosure; absent on the free map. */
+  detailsExpanded?: boolean;
   key: string;
   pipeline: Pipeline;
   stage: PipelineStage;
@@ -279,6 +285,18 @@ export interface FlowLoop {
   x2: number;
   /** Shared top of the two cards. */
   y: number;
+  /** Task-band review connector (#1641): the routed port endpoints between the
+      implementer card and the reviewer deck as they are actually placed, and
+      the routed path between them. Present only on the band surface, where the
+      two can wrap to different rows; the free board leaves these unset and
+      LoopsLayer draws its side-by-side forward/return arcs from x1/x2/y. */
+  y1?: number;
+  y2?: number;
+  route?: string;
+  /** Where the ⟳ hub sits: a point on `route` clear of every card but the
+      two endpoints. Set with `route`; without it the hub falls back to the
+      free board's corridor midpoint. */
+  hub?: { x: number; y: number };
 }
 
 export interface SchemeLayout {

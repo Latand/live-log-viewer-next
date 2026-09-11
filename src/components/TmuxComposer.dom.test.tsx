@@ -971,8 +971,12 @@ const openSendMenu = async (host: HTMLElement) => {
   const send = host.querySelector('button[type="submit"]') as HTMLButtonElement;
   await settle(() => send.dispatchEvent(new dom.MouseEvent("contextmenu", { bubbles: true }) as unknown as Event));
 };
+/* The send menu renders through a portal into the document the composer is in
+   — the composer's own box is bounded and scrolls, and an in-flow menu was
+   clipped by it (#1629) — so the menu is looked for in the document rather
+   than under the mount. */
 const quickAckItems = (host: HTMLElement) =>
-  [...host.querySelectorAll('[role="menuitem"]')].filter((n) => (n.textContent ?? "").includes(quickAckLabel));
+  [...host.ownerDocument.querySelectorAll('[role="menuitem"]')].filter((n) => (n.textContent ?? "").includes(quickAckLabel));
 
 test("a live composer offers an enabled quick-ack in the send menu", async () => {
   globalThis.fetch = (async () => ({ ok: true, json: async () => ({ targets: {} }) } as Response)) as unknown as typeof fetch;
@@ -989,7 +993,7 @@ test("a dead-host composer exposes no quick-ack action (finding: dead composer)"
   const { host, root } = await renderInto(<TmuxComposer file={relaySubagent} deadHost />);
   await openSendMenu(host);
   // the menu never opens (no actions) and no quick-ack item exists anywhere
-  expect(host.querySelector('[role="menu"]')).toBeNull();
+  expect(host.ownerDocument.querySelector('[role="menu"]')).toBeNull();
   expect(quickAckItems(host).length).toBe(0);
   await act(async () => root.unmount());
 });
@@ -998,7 +1002,7 @@ test("an unresolved-host composer exposes no quick-ack action (finding: unresolv
   globalThis.fetch = (async () => ({ ok: true, json: async () => ({ targets: {} }) } as Response)) as unknown as typeof fetch;
   const { host, root } = await renderInto(<TmuxComposer file={relaySubagent} sendBlockedReason="resolving the agent host…" />);
   await openSendMenu(host);
-  expect(host.querySelector('[role="menu"]')).toBeNull();
+  expect(host.ownerDocument.querySelector('[role="menu"]')).toBeNull();
   expect(quickAckItems(host).length).toBe(0);
   await act(async () => root.unmount());
 });

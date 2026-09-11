@@ -1,4 +1,163 @@
-# Realtime V3 voice: working — the cutoff was the alpha model default
+# Realtime V3 voice: a call runs two models, and only one of them holds the microphone
+
+Verified 2026-09-10 against `codex-cli 0.154.0` (bundled app-server in the
+current Linux ChatGPT build: `0.153.4`; the two agree on every field of the
+contracts below).
+
+**What is reproducible with what.** The wire contract in the table and the three
+bullets under it comes from `python3 docs/design/codex-api-update/voice_probe.py`,
+which needs no credential, no account and no network: it points the configured
+model provider at a local fixture, so realtime call creation is captured verbatim
+instead of sent. That probe observes CALL CREATION and the app-server's own
+persistence around it, and nothing else — it runs no backing turn during the
+call, so what a turn commits to canonical history is out of its scope and comes
+from the fuller successful-session run recorded below. The Viewer's own boundary
+— what it sends, where a spoken card may steer work, what the browser does with
+the canonical transcript — is established by the source and its tests; the probe
+says nothing about any of it.
+
+| | Model | Instructions it runs on | Tools |
+|---|---|---|---|
+| Spoken | `gpt-live-1-codex` | the `prompt` parameter of `thread/realtime/start`, and nothing else | none — a realtime session carries no tool inventory |
+| Backing | the thread's own agent | the thread's own instructions, plus session-scoped `realtimeStartInstructions` | the thread's whole MCP inventory |
+
+**The defect this cost us (#1629).** The Viewer wrote its voice persona into the
+thread with `thread/inject_items` and left `prompt` unset. An injected item
+reaches only the backing model, so the persona was delivered to the one model
+that did not need it and withheld from the one that had nothing else — the
+spoken model ran Codex's stock realtime persona, which introduces itself as a
+general-purpose assistant, and whose `<startup_context>` block states in its own
+words that it excludes repo memory instructions and AGENTS files. Enabling voice
+on the operator's own orchestrator therefore produced a voice with no role, no
+knowledge of what the thread behind it could reach, and a habit of answering for
+itself. Meanwhile the injected item is appended to an append-only transcript and
+never withdrawn, so every thread accumulated a permanent copy of the
+spoken-delivery rules and kept answering in two-sentence spoken register long
+after the microphone closed.
+
+The probe establishes each half separately, on a thread carrying a synthetic
+developer role/tool mandate:
+
+- supplying `prompt` replaces the spoken session's stock 5.7 kB instructions;
+- the spoken session body carries `instructions`, `model`, `audio` and
+  `delegation` — and no tool list, in either case;
+- `prompt`, `realtimeStartInstructions`, `realtimeEndInstructions` and
+  `flushTranscriptTailOnSessionEnd` are deserialized, while an unknown field is
+  accepted silently — so "the call succeeded" proves nothing about a parameter
+  and the ill-typed control is what proves it is in the contract.
+
+**Two claims this document used to make, and a fuller probe corrected.** A later
+credential-free run drove a complete successful session: an ordinary
+USER-delivered mandate turn, a live call, overlapping handoffs, a stop and
+reconnect, and a later text turn, over twelve real requests.
+
+- A mandate the thread carries as a **user** turn DOES reach the spoken session's
+  startup context, and the advertised tool inventory was identical before, during
+  and after the call. The earlier reading came from a failed call whose marker was
+  delivered as a developer item, which is not the shape a Viewer mandate arrives
+  in. A generic spoken identity is therefore not by itself the whole cause of the
+  reported role loss — the native app's own fallback spoken prompt uses the same
+  general-purpose Codex identity, and works, because it also carries functional
+  delegation and steering rules. Those rules are what the Viewer's persona now
+  adapts.
+- Native **does** write the session-scoped instructions to canonical history, as
+  developer items, and the end instruction does not remove the start text: both
+  are present in later request history. So the pair is a native-managed mode
+  transition rather than a withdrawal, and the end instruction says in words that
+  the earlier one no longer applies.
+
+**What the Viewer sends now.** The persona is the session's `prompt`; the
+role-preserving framing (and, for a session created to be the voice front, the
+relay mandate) is the backing model's `realtimeStartInstructions`; hanging up
+sends `realtimeEndInstructions`, which supersedes it.
+`flushTranscriptTailOnSessionEnd` is set, so the last thing said before a hangup
+is routed through Codex rather than dropped. The Viewer itself writes nothing to
+the thread.
+
+**Where a spoken card is allowed to steer work: nowhere, on installed Codex
+0.154.0.** Automatic selection of the card the operator was looking at needs two
+edges, neither is available, so the reader refuses every spoken turn by name and
+hands out no card at all.
+
+- utterance to handoff is the browser's to observe, because it is the only peer
+  that sees both the transcript boundary and the handoff event. They share no
+  identifier on the wire. The client still reports what it saw and still refuses
+  to guess when two utterances are outstanding — that evidence is worth keeping
+  — but a report that only ONE was outstanding is arrival order, and arrival
+  order is not permission to select a card. A late handoff can still belong to
+  earlier speech.
+- handoff to work is not established at all. Installed Codex carries its backing
+  turn identity on every MCP request in `params._meta["x-codex-turn-metadata"]`,
+  read off the transport rather than the arguments, so a reader can tell one of
+  a caller's turns from another — but native steers more than one handoff into
+  one backing turn, so `turn_id` names the work and cannot name the utterance
+  the work came from.
+
+So the reader classifies and refuses, and the refusals stay distinct because the
+next move differs: there is no call; the call has reported no card; this request
+proves no backing turn; the turn is not the call's at all; the client reported an
+ambiguity; or — the ordinary one — the call points at a card and nothing ties it
+to this request.
+
+What still works, and is the supported route from a spoken turn: explicit
+`conversationId` and `selectedContext` targeting, the bound-view and context
+tools, and the immutable context of an operation that was already admitted,
+which travels with that operation's own key rather than through this reader.
+
+The ledger keeps recording what each call was told, because the panel and the
+control endpoint read it back as evidence. Retention is bounded by observed work,
+never by a clock: a record whose utterance became a handoff survives a hangup and
+a reconnect while the host reports a turn still running, and is retired when the
+thread is observed going idle after the handoff. There is no per-record turn
+verdict to use instead — which turn a handoff was routed into is the very edge
+native does not report. The ten-minute window this replaces both discarded work
+that was still running and left a finished call's card available to unrelated
+turns.
+
+The full evidence, its limits, and what a future authorized live capture would
+have to record are in `docs/design/native-voice-work-identity.md`.
+
+**The canonical transcript reaches the browser.** `thread/realtime/transcript/*`
+and `thread/realtime/item/*` are reduced into runtime events, carried over the
+runtime bus with every other session event, and merged into the panel beside what
+the WebRTC data channel delivered. A segment is addressed by native's own item id
+where there is one, so a redelivered frame, a `done` completing its own deltas
+and a replay after reconnect converge on one line; a line the data channel
+already streamed is adopted by the committed text rather than duplicated.
+
+**What this does not establish.** No live provider call was made for any of it.
+The probe proves what leaves the app-server and what the app-server persists; it
+cannot prove what the provider does with a session body, that audio flows, or
+that a live call keeps its role for its whole length. That needs a call on a
+real account and is not something an implementation agent can produce.
+
+**Where the Viewer still differs from the native app**, deliberately and with
+the difference understood:
+
+| | native Codex app | Viewer |
+|---|---|---|
+| `includeStartupContext` | `false` — it supplies its own continuity window | `true` — Codex's own curated context, plus the durable tail only when a streamed response has no committed item |
+| transport | client-owned call, handed over as `existingCall` | server-created WebRTC |
+| `clientManagedHandoffs` | not set at the frontend call site | `true` — client-managed delegation is what streams worker progress into the call |
+
+Two of those are transport-ownership choices and neither is a defect. The startup-context
+difference is a real one: a wider `initialItems` continuity window (native bounds
+it at 128 items and 8,192 estimated tokens) would give the spoken model more of
+the conversation than the latest turn, and overlaps with what startup context
+already carries. Neither has been measured against a live call, so neither was
+changed on the strength of the schema.
+
+---
+
+# Superseded reading (2026-07): "working — the cutoff was the alpha model default"
+
+The measurements below stand and the model fix stands. What the table at the
+bottom of this section reads as settled — that the handoff flags "turned out not
+to be the problem" — was true of the 9-second cutoff and says nothing about the
+persona split above, which nobody was looking for at the time. Keep the
+incident; the section above is the current architecture.
+
+## Realtime V3 voice: working — the cutoff was the alpha model default
 
 `thread/realtime/start` sent no `model`, so the backend assigned
 `gpt-live-1-boulder-alpha`, and every call on it was killed 9.0-9.4 seconds

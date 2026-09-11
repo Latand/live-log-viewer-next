@@ -42,10 +42,21 @@ export function agentCapabilitiesFromViews(
   rootView: RuntimeSessionView | null,
   runtimeEnabled: boolean,
 ): AgentCapabilities {
+  // A registry-owned legacy host supersedes an older native journal. The
+  // action still sends the card identity to the server for fresh resolution.
+  if (file.controlHost?.conversationId === file.conversationId
+    && file.controlHost?.transport === "legacy") {
+    runtime = runtime ? { ...runtime, legacy: true } : null;
+    runtimeEnabled = false;
+  }
   const isClaudeSubagent = file.root === "claude-projects" && file.kind === "subagent";
+  const currentLegacyRoot = isClaudeSubagent
+    && file.rootControlHost?.parentPath === file.parent
+    && file.rootControlHost?.transport === "legacy";
   const opts: HostOptions = {
     runtimeEnabled,
-    ...(runtimeEnabled && isClaudeSubagent ? { root: rootHostFrom(rootView) } : {}),
+    ...(currentLegacyRoot ? { root: { liveness: "live" as const, structured: false } }
+      : runtimeEnabled && isClaudeSubagent ? { root: rootHostFrom(rootView) } : {}),
   };
   const caps = capabilitiesFor(file, runtime, opts);
   /* Every consumer gets the same card verdict. A contradictory stale runtime
