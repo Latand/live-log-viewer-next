@@ -71,6 +71,7 @@ function chain(name: string, options: { activeTurnRef?: string | null; inject?: 
       sessionKey: { engine: "codex", sessionId: "recipient-thread" },
       hostKind: "codex-app-server",
       host: "hosted",
+      writerClaim: "owner:1",
       turn: activeTurnRef ? "running" : "idle",
       provenance: "structured",
       capabilities: { steer: true, structuredAttention: true, inject: options.inject ?? true },
@@ -104,6 +105,8 @@ function chain(name: string, options: { activeTurnRef?: string | null; inject?: 
     transition: async (id, status, details) => { journal.transitionOperation(id, status, details); },
     status: async (id) => journal.operationResult(id)?.receipt ?? null,
     settled: () => false,
+    hostClaim: () => "owner:1",
+    injectionBinding: () => ({ threadId: "recipient-thread", accountId: null, writerClaim: "owner:1" }),
   }, () => host);
   return {
     ledger,

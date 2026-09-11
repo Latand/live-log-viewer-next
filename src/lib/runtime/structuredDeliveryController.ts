@@ -438,6 +438,7 @@ async function publishHostState(
       turn,
       provenance: "structured",
       accountId: entry.accountId,
+      writerClaim: entry.claimOwner && entry.structuredHost ? `${entry.claimOwner}:${entry.structuredHost.writerClaimEpoch}` : null,
       parentConversationId: entry.launchProfile?.parentConversationId ?? null,
       cwd: entry.cwd,
       artifactPath: entry.artifactPath,
@@ -541,6 +542,13 @@ export async function bindStructuredDeliveryQueue(
          evidence a `delivering` row is compared against before it is called
          abandoned, so a send another live executor is actuating is left to it. */
       hostClaim: structuredHostClaim(registry),
+      injectionBinding: (conversationId) => {
+        const conversation = registry.conversation(conversationId as `conversation_${string}`);
+        const generation = conversation?.generations.at(-1);
+        const claim = structuredHostClaim(registry)(conversationId);
+        if (!generation || !claim) return null;
+        return { threadId: generation.id, accountId: generation.accountId, writerClaim: claim };
+      },
       transition: async (operationId, status, details) => {
         const result = await client.transitionOperation(operationId, status, details);
         /* The three states a held delivery can settle into. `uncertain` — a

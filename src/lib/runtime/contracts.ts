@@ -450,7 +450,15 @@ export interface RuntimeHostDiagnostics {
   authRecovery: "unknown" | "started" | "completed-unverified";
 }
 
+export interface RuntimeInjectionBinding {
+  threadId: string;
+  accountId: string | null;
+  writerClaim: string;
+}
+
 export interface RuntimeSession {
+  /** Structured writer identity published with this session generation. */
+  writerClaim?: string | null;
   diagnostics?: RuntimeHostDiagnostics;
   conversationId: string;
   sessionKey: { engine: RuntimeEngine; sessionId: string };

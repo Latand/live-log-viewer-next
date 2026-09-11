@@ -248,6 +248,7 @@ function baseSession(id: string, payload: Record<string, unknown>, revision: num
     attentionIds: strings(payload.attentionIds),
     recentReceipts: receipts(payload.recentReceipts),
     accountId: typeof payload.accountId === "string" ? payload.accountId : null,
+    ...(typeof payload.writerClaim === "string" || payload.writerClaim === null ? { writerClaim: payload.writerClaim } : {}),
     parentConversationId: typeof payload.parentConversationId === "string" ? payload.parentConversationId : null,
     flowId: typeof payload.flowId === "string" ? payload.flowId : null,
     workflowId: typeof payload.workflowId === "string" ? payload.workflowId : null,
@@ -471,6 +472,7 @@ export class RuntimeJournal {
         : {
             ...command,
             operationId,
+            ...(command.kind === "inject" ? { binding: this.injectionBindingAtAdmission(command.conversationId) } : {}),
             ...(this.structuredHosts
               && (command.kind === "send" || command.kind === "steer")
               && typeof receipt.turnId === "string"
@@ -1792,6 +1794,9 @@ export class RuntimeJournal {
       if (!session || session.host !== "hosted") {
         status = "rejected";
         reason = session?.host === "dead" || session?.host === "unhosted" ? "dead-host" : "no-claim";
+      } else if (!session.writerClaim) {
+        status = "rejected";
+        reason = "stale-generation";
       } else if (!session.capabilities.inject) {
         status = "rejected";
         reason = "unsupported-injection";
@@ -1926,6 +1931,12 @@ export class RuntimeJournal {
       admittedAt,
       revision,
     };
+  }
+
+  private injectionBindingAtAdmission(conversationId: string) {
+    const session = this.entity<RuntimeSession>("session", conversationId);
+    if (!session?.writerClaim) return null;
+    return { threadId: session.sessionKey.sessionId, accountId: session.accountId, writerClaim: session.writerClaim };
   }
 
   private queuedSendCount(conversationId: string): number {

@@ -46,6 +46,7 @@ function probeHost(options: {
   inject?: (request: RuntimeInjectRequest) => Promise<RuntimeInjectOutcome>;
   observe?: () => Promise<boolean>;
   canInject?: boolean;
+  sessionKey?: string;
 } = {}): HostProbe {
   const sends: QueueEntry[] = [];
   const interrupts: string[] = [];
@@ -59,7 +60,7 @@ function probeHost(options: {
     },
     interrupt: async (turnRef: string) => { interrupts.push(turnRef); },
     answer: async () => {},
-    health: async () => state(options.activeTurnRef ?? null),
+    health: async () => state(options.activeTurnRef ?? null, options.sessionKey),
     release: async () => {},
   };
   const host = (options.canInject === false ? base : {
@@ -92,11 +93,13 @@ function injectQueue(probe: HostProbe, payload: Record<string, unknown> = {}) {
         conversationId: "conversation-one",
         text,
         contentDigest: structuredContent(text, []).contentDigest,
+        binding: { threadId: "thread-one", accountId: null, writerClaim: "owner:1" },
         ...payload,
       },
     }],
     status: async () => ({ status: "queued", revision: 1 }),
     hostClaim: async () => "owner:1",
+    injectionBinding: () => ({ threadId: "thread-one", accountId: null, writerClaim: "owner:1" }),
     transition: async (operationId, status, details) => {
       transitions.push({ operationId, status, ...details });
     },
@@ -262,6 +265,7 @@ test("a message admitted during a slow injection is not held behind its observat
     payload: {
       kind: "inject",
       operationId: "slow-inject",
+      binding: { threadId: "thread-slow", accountId: null, writerClaim: "owner:1" },
       conversationId: "conversation-slow",
       text: "context for the busy thread",
       contentDigest: structuredContent("context for the busy thread", []).contentDigest,
@@ -287,6 +291,7 @@ test("a message admitted during a slow injection is not held behind its observat
     effects: async () => effects,
     status: async () => ({ status: "queued", revision: 1 }),
     hostClaim: async () => "owner:1",
+    injectionBinding: () => ({ threadId: "thread-slow", accountId: null, writerClaim: "owner:1" }),
     transition: async (operationId, status, details) => { transitions.push({ operationId, status, ...details }); },
   }, (conversationId) => (conversationId === "conversation-slow" ? slowHost : otherHost));
 
@@ -311,4 +316,27 @@ test("a message admitted during a slow injection is not held behind its observat
   const settled = transitions.filter((entry) => entry.operationId === "slow-inject").at(-1)!;
   expect(settled.status).toBe("delivered");
   expect(settled.reason).toBe(INJECTION_INTO_RUNNING_TURN);
+});
+
+for (const [name, binding] of [
+  ["thread", { threadId: "thread-old", accountId: null, writerClaim: "owner:1" }],
+  ["account", { threadId: "thread-one", accountId: "account-old", writerClaim: "owner:1" }],
+  ["writer generation", { threadId: "thread-one", accountId: null, writerClaim: "owner:0" }],
+  ["missing binding", undefined],
+] as const) {
+  test(`injection refuses changed ${name} before delivery with zero writes`, async () => {
+    const probe = probeHost();
+    const { queue, transitions } = injectQueue(probe, { binding });
+    await queue.drain();
+    expect(probe.injections).toEqual([]);
+    expect(transitions).toEqual([{ operationId: "inject-one", status: "failed", reason: "stale-generation" }]);
+  });
+}
+
+test("the admitted binding is also compared with the actual host thread", async () => {
+  const probe = probeHost({ sessionKey: "thread-other" });
+  const { queue, transitions } = injectQueue(probe);
+  await queue.drain();
+  expect(probe.injections).toEqual([]);
+  expect(transitions).toEqual([{ operationId: "inject-one", status: "failed", reason: "stale-generation" }]);
 });

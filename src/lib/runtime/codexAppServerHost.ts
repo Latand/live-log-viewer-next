@@ -1939,6 +1939,14 @@ export class CodexAppServerHost implements EngineHost {
          wait for and answers immediately. */
       return { placement: "history", turnId: null, observe: async () => true };
     }
+    // The canonical read yielded. Recheck ownership and the turn immediately
+    // before the write, so a successor cannot inherit this admitted operation.
+    if (this.dead || this.releasing || this.released || !this.writerFenceAllowsActuation()) {
+      throw new StructuredInjectError("stale-generation", "refused");
+    }
+    if (request.expectedTurnId !== undefined && request.expectedTurnId !== this.activeTurnId) {
+      throw new StructuredInjectError("stale-turn", "refused");
+    }
     /* Read once, before the write, so the placement reported afterwards is the
        one the request was actually issued against rather than whatever the turn
        axis drifted to while the insertion was being observed. */
@@ -2001,7 +2009,7 @@ export class CodexAppServerHost implements EngineHost {
     const deadline = Date.now() + this.injectObservationTimeoutMs;
     let wait = INJECT_OBSERVATION_POLL_MS;
     for (;;) {
-      if (this.dead || this.releasing || this.released) return false;
+      if (this.dead || this.releasing || this.released || !this.writerFenceAllowsActuation()) return false;
       /* Read the turn BEFORE the scan, so the final scan below happens after
          the turn ended rather than racing the flush that ends with it. */
       const turnEnded = turnAtActuation !== null && this.activeTurnId !== turnAtActuation;

@@ -400,7 +400,7 @@ test("the existing submissions keep their meanings beside the new action", async
 
 /** Reaches the picker the composer renders and hands it a real document, the
     way the attachment suites do, so the staged state is the composer's own. */
-async function stageFile(host: HTMLElement, name: string, body: string): Promise<void> {
+async function stageFile(host: HTMLElement, name: string, body: string, finishRead = true): Promise<void> {
   let onFiles: ((files: File[]) => void) | null = null;
   for (const node of host.querySelectorAll("input")) {
     const propsKey = Object.keys(node).find((candidate) => candidate.startsWith("__reactProps$"));
@@ -408,7 +408,7 @@ async function stageFile(host: HTMLElement, name: string, body: string): Promise
     if (node.getAttribute("type") !== "file" || typeof props?.onChange !== "function") continue;
     const handler = props.onChange;
     await settle(() => handler({ target: { files: [new File([body], name, { type: "text/markdown" })], value: "" } }));
-    QueuedReader.settleAll(`data:text/markdown;base64,${Buffer.from(body).toString("base64")}`);
+    if (finishRead) QueuedReader.settleAll(`data:text/markdown;base64,${Buffer.from(body).toString("base64")}`);
     await settle(() => {});
     return;
   }
@@ -500,5 +500,32 @@ test("every send-menu action stays reachable: the menu scrolls instead of overfl
      top of a short viewport with no way to reach it. */
   expect(menu.style.maxHeight).toContain("100dvh");
   expect(menu.className).toContain("overflow-y-auto");
+  root.unmount();
+});
+
+test("injection refuses a still-reading document without sending a reduced payload", async () => {
+  const { host, root } = await mount();
+  await type(host, "include the whole document");
+  await stageFile(host, "reading.md", "content", false);
+  await openSendMenu(host);
+  const action = menuAction(host, "Add to context")!;
+  await settle(() => action.click());
+  expect(injections).toEqual([]);
+  expect(textarea(host).value).toBe("include the whole document");
+  root.unmount();
+});
+
+test("an accepted injection removes only its own documents and preserves later intake", async () => {
+  holdInjection = true;
+  const { host, root } = await mount();
+  await type(host, "context");
+  await stageFile(host, "first.md", "first");
+  await openSendMenu(host);
+  await settle(() => menuAction(host, "Add to context")!.click());
+  await stageFile(host, "later.md", "later");
+  await settle(() => releaseInjection?.());
+  expect(host.textContent).toContain("later.md");
+  expect(host.textContent).not.toContain("first.md");
+  expect(injections[0]!.files).toMatchObject([{ name: "first.md" }]);
   root.unmount();
 });

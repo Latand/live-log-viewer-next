@@ -4,7 +4,7 @@ import { parseRuntimeCommand, parseRuntimeSendSettings } from "./commands";
 import { parseSelectedContextRef, type SelectedContextRef } from "@/lib/selection/selectedContext";
 
 import { parseMessageOrigin, type MessageOrigin } from "./messageOrigin";
-import type { RuntimeSendSettings } from "./contracts";
+import type { RuntimeInjectionBinding, RuntimeSendSettings } from "./contracts";
 import { evidenceAgrees, readEvidence, readOptionalEvidence, type Evidence } from "./evidence";
 import type { CompactCapableHost, DeliveryReceipt, EngineHost, FirstDispatchEvidence, HostState, QueueEntry, RuntimeInjectOutcome } from "./engineHost";
 import { hostSupportsCompact, hostSupportsInject, StructuredCompactError, StructuredInjectError, StructuredSendRefusedError } from "./engineHost";
@@ -66,6 +66,7 @@ export interface StructuredDeliveryQueuePort {
       claim, or a read that throws: no evidence either way, which leaves the row
       with the executor that holds it rather than ending its send. */
   hostClaim?(conversationId: string): string | null | Promise<string | null>;
+  injectionBinding?(conversationId: string): RuntimeInjectionBinding | null;
 }
 
 export type StructuredHostResolver = (conversationId: string) => EngineHost | null;
@@ -116,6 +117,7 @@ interface SendEffect {
  * that would turn "add this without interrupting" into an interrupt.
  */
 interface InjectEffect {
+  binding: RuntimeInjectionBinding | null;
   operationId: string;
   conversationId: string;
   kind: "inject";
@@ -275,6 +277,15 @@ function sendEffect(effect: StructuredDeliveryEffect): SendEffect | null {
   };
 }
 
+function parseInjectionBinding(value: unknown): RuntimeInjectionBinding | null {
+  if (!value || typeof value !== "object") return null;
+  const binding = value as Partial<RuntimeInjectionBinding>;
+  return typeof binding.threadId === "string" && !!binding.threadId
+    && (typeof binding.accountId === "string" || binding.accountId === null)
+    && typeof binding.writerClaim === "string" && !!binding.writerClaim
+    ? binding as RuntimeInjectionBinding : null;
+}
+
 function injectEffect(effect: StructuredDeliveryEffect): InjectEffect | null {
   if (effect.kind !== "runtime.inject") return null;
   const operationId = typeof effect.payload.operationId === "string" ? effect.payload.operationId : "";
@@ -298,6 +309,7 @@ function injectEffect(effect: StructuredDeliveryEffect): InjectEffect | null {
     operationId,
     conversationId,
     kind: "inject",
+    binding: parseInjectionBinding(effect.payload.binding),
     text: content.content.text,
     contentDigest: content.contentDigest,
     eventSeq: effect.eventSeq,
@@ -436,9 +448,9 @@ export const DELIVERY_UNVERIFIED_BY_EARLIER_EXECUTOR =
  * the request and not about the thread.
  */
 export const INJECTION_INTO_RUNNING_TURN =
-  "added to the running turn's input; it is read at that turn's next model request";
+  "injected input was observed in canonical history for the running turn";
 export const INJECTION_INTO_HISTORY =
-  "stored in conversation context; it is read by the next model request";
+  "injected input was observed in conversation history; no turn was started";
 export const INJECTION_ACKNOWLEDGED_BUT_UNOBSERVED =
   "injection was acknowledged and did not appear in canonical history; whether it reached the thread is unverified";
 export const INJECTION_UNVERIFIED_AFTER_ACTUATION =
@@ -864,6 +876,7 @@ export class StructuredDeliveryQueue {
          delivering could be delivered a SECOND time by whichever pass caught
          the journal at a bad moment. */
       const durable = durableStatuses.get(effect.operationId) ?? null;
+      if (effect.kind === "inject" && this.activeInjections.has(effect.operationId)) continue;
       if (durable?.status === "delivering") {
         if (await this.deliveringOwnerDisposition(effect.conversationId, durable.reason) !== "abandoned") continue;
         await this.terminalizeUnverified(effect.operationId, DELIVERY_UNVERIFIED_BY_EARLIER_EXECUTOR);
@@ -1347,6 +1360,18 @@ export class StructuredDeliveryQueue {
        read. Re-issuing here would be a second insertion, which the engine does
        not deduplicate. */
     if (this.activeInjections.has(effect.operationId)) return true;
+    const binding = effect.binding;
+    const current = await readEvidence(() => this.port.injectionBinding?.(effect.conversationId) ?? null);
+    if (!current.readable) {
+      this.retrySoon();
+      return false;
+    }
+    if (!binding || !current.value || binding.threadId !== health.sessionKey
+      || binding.threadId !== current.value.threadId || binding.accountId !== current.value.accountId
+      || binding.writerClaim !== current.value.writerClaim) {
+      await this.transitionUnlessSettled(effect.operationId, "failed", { reason: "stale-generation" });
+      return true;
+    }
     if (!hostSupportsInject(host)) {
       await this.transitionUnlessSettled(effect.operationId, "failed", { reason: "unsupported-injection" });
       return true;
@@ -1359,14 +1384,17 @@ export class StructuredDeliveryQueue {
       await this.transitionUnlessSettled(effect.operationId, "failed", { reason: "stale-turn" });
       return true;
     }
-    if (!await this.transitionUnlessSettled(effect.operationId, "delivering", { turnId: health.activeTurnRef })) {
+    if (!await this.transitionUnlessSettled(effect.operationId, "delivering", {
+      turnId: health.activeTurnRef,
+      reason: deliveringOwnershipReason(this.executorId, { readable: true, value: binding.writerClaim }),
+    })) {
       return true;
     }
     let outcome;
     try {
       outcome = await host.inject({
         operationId: effect.operationId,
-        threadId: health.sessionKey,
+        threadId: binding.threadId,
         text: effect.text,
         contentDigest: effect.contentDigest,
         ...(effect.turnId !== undefined ? { expectedTurnId: effect.turnId } : {}),

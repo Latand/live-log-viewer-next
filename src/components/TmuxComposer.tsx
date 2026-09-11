@@ -3047,7 +3047,11 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
       setStatus({ kind: "err", text: t("inject.unsupported") });
       return;
     }
-    if (!requestedText) return;
+    if (attachments.hasReading || attachments.hasError) {
+      setStatus({ kind: "err", text: t(attachments.hasReading ? "attach.blockedReading" : "attach.blockedFailed") });
+      return;
+    }
+    if (!requestedText && !attachments.filesRef.current.length) return;
     if (voiceSending || reconcilingSend) return;
     if (effectiveSendBlockedReason) {
       setStatus({ kind: "err", text: effectiveSendBlockedReason });
@@ -3099,7 +3103,7 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
         /* Accepted, and only that. The placement is the receipt's to report,
            once the insertion has been observed in the thread. */
         setStatus({ kind: "ok", text: t("inject.submitted") });
-        attachments.clearAll();
+        attachments.settleDelivered([], requestedFiles);
         return;
       }
       /* A REFUSAL GIVES THE DRAFT BACK — and never over something the operator

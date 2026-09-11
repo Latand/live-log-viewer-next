@@ -708,3 +708,35 @@ test("a payload mismatch under the same key refuses before the request", async (
   expect(server.requests.filter((request) => request.method === "thread/inject_items")).toHaveLength(issued);
   await host.release();
 });
+
+test("stdin failure after an injection write cannot be reported as server refusal", async () => {
+  const server = new InjectAppServer(scratchRoot());
+  server.swallowInject = true;
+  const host = await startHost(server);
+  const write = server.stdin.write.bind(server.stdin);
+  server.stdin.write = ((chunk: string) => {
+    const result = write(chunk);
+    if (String(chunk).includes('"thread/inject_items"')) throw new Error("stdin failed");
+    return result;
+  }) as typeof server.stdin.write;
+  const failure = await host.inject({ operationId: "stdin-loss", threadId: server.threadId,
+    text: "input", contentDigest: digestOf("input") }).catch((error: unknown) => error);
+  expect(server.requests.filter(r => r.method === "thread/inject_items")).toHaveLength(1);
+  expect(failure).toBeInstanceOf(StructuredInjectError);
+  expect((failure as StructuredInjectError).phase).toBe("unverified");
+  await host.release();
+});
+
+test("writer ownership lost during the canonical read refuses before the injection write", async () => {
+  const server = new InjectAppServer(scratchRoot());
+  const host = await startHost(server);
+  let checks = 0;
+  host.setWriterFence(() => ++checks === 1);
+  const failure = await host.inject({ operationId: "writer-loss", threadId: server.threadId,
+    text: "input", contentDigest: digestOf("input") }).catch((error: unknown) => error);
+  expect(checks).toBe(2);
+  expect(server.requests.filter(r => r.method === "thread/inject_items")).toHaveLength(0);
+  expect(failure).toBeInstanceOf(StructuredInjectError);
+  expect((failure as StructuredInjectError).phase).toBe("refused");
+  await host.release();
+});

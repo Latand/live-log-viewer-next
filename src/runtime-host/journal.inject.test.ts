@@ -35,6 +35,7 @@ function journalWithSession(name: string, session: {
       turn: session.turn,
       provenance: "structured",
       accountId: "account-one",
+      writerClaim: "owner:1",
       parentConversationId: null,
       flowId: null,
       workflowId: null,
@@ -169,5 +170,17 @@ test("a long injection's receipt text is bounded like a send's", () => {
   const journal = journalWithSession("bounded", { turn: "idle", inject: true });
   const admitted = journal.executeOperation(injectCommand({ text: "x".repeat(500) }) as never);
   expect(admitted.receipt.text).toHaveLength(240);
+  journal.close();
+});
+
+test("admission freezes the thread, account and writer generation on the durable effect", () => {
+  const journal = journalWithSession("binding", { turn: "idle", inject: true });
+  journal.append({ scope: runtimeScope("session", "conv-one"), kind: "session-status", payload: { writerClaim: "owner:7" } });
+  const admitted = journal.executeOperation(injectCommand() as never);
+  expect(admitted.receipt.status).toBe("queued");
+  const effect = journal.effectBatch(100, ["runtime.inject"])[0]!;
+  expect(effect.payload.binding).toEqual({ threadId: "thread-one", accountId: "account-one", writerClaim: "owner:7" });
+  journal.append({ scope: runtimeScope("session", "conv-one"), kind: "session-status", payload: { writerClaim: "owner:8", accountId: "account-two" } });
+  expect(journal.effectBatch(100, ["runtime.inject"])[0]!.payload.binding).toEqual(effect.payload.binding);
   journal.close();
 });
