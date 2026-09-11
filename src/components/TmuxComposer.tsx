@@ -3193,6 +3193,14 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
       setStatus({ kind: "err", text: t("queue.queueUnavailable") });
       return;
     }
+    /* Codex's queue carries text and images. A staged document has no place in
+       its command, and handing the rest over used to clear the document from
+       the tray with nothing sent for it; the draft stays whole instead, and
+       Enter delivers the document by path. */
+    if (attachments.attachmentsRef.current.some((attachment) => attachment.kind === "file")) {
+      setStatus({ kind: "err", text: t("queue.filesUnsupported") });
+      return;
+    }
     if (!requestedText && !requestedImages.length) return;
     if (voiceSending || reconcilingSend) return;
     if (effectiveSendBlockedReason) {
@@ -3274,9 +3282,15 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
    * operator, and text or tiles added while it saves are left for the next
    * message. A press of the same message finds its unresolved operation by what
    * was authored and replays the stored envelope, so nothing mints a second key.
+   *
+   * ONLY THE PREPARATION HOLDS THE SUBMISSION GUARD. Once the envelope and its
+   * identity are durable the operation is recoverable without this press, so
+   * the upload and the journal's answer run behind it: an acknowledgement that
+   * takes seconds must not leave an enabled Send that silently does nothing.
    */
   const handOffDurably = (candidate: RetainedQueueAdmission, snapshot: { text: string; images: PendingImage[] }) => {
     const draftRevision = composer.draftRevision.current;
+    let admitted: RetainedQueueAdmission | undefined;
     void withComposerSubmission(cardId, async () => {
       let envelope = candidate;
       let outcome: "retained" | "refused" | "unverified";
@@ -3301,7 +3315,9 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
       attachments.settleDelivered(snapshot.images, []);
       setStatus({ kind: "ok", text: t("queue.queueMessage") });
       inputRef.current?.focus();
-      await submitHandOff(envelope, snapshot);
+      admitted = envelope;
+    }).then(() => {
+      if (admitted) void submitHandOff(admitted, snapshot);
     });
   };
 
@@ -3313,19 +3329,21 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
        it admitted nothing. An unknown outcome leaves the record exactly where
        it was written. */
     if (answer.outcome !== "unknown") releaseQueueAdmission(cardId, envelope.key);
+    if (payloadOwner.current !== cardId) return;
     setUnresolvedAdmissions(unresolvedHandoffs(cardId));
     if (answer.ok) return;
     /* A REFUSED ADMISSION GIVES THE DRAFT BACK, ATTACHMENTS AND ALL. Nothing
        was queued, so the words and the tiles belong in the composer where the
        operator left them — losing them to a refusal is the failure the outbox
-       exists to prevent on the other path. Neither is restored over something
-       the operator has typed or staged since. An UNKNOWN outcome gives them
-       back too, and the operation stays recoverable from the panel either way. */
+       exists to prevent on the other path. The answer can arrive after the
+       operator has started the next message, so the draft comes back whole and
+       only into a composer holding nothing: never beside newer words or tiles,
+       and never replacing a tray still reading them. An UNKNOWN outcome gives
+       it back too, and the operation stays recoverable from the panel either way. */
     setStatus({ kind: "err", text: answer.error ?? t("queue.refused") });
-    setText((current) => current || snapshot.text);
-    if (snapshot.images.length && attachments.imagesRef.current.length === 0) {
-      attachments.replace(snapshot.images);
-    }
+    if (textRef.current.trim() || attachments.attachmentsRef.current.length) return;
+    setText(snapshot.text);
+    if (snapshot.images.length) attachments.replace(snapshot.images);
   };
 
   /**

@@ -446,6 +446,9 @@ export function useImageAttachments(handlers: {
         render-scope `images` may be stale by the time a receipt settles. */
     imagesRef,
     filesRef,
+    /** The whole intake list as last committed, reading and refused slots
+        included: what a late answer checks before it gives a draft back. */
+    attachmentsRef,
     /** True while a placeholder is still decoding — Send blocks so no image is
         silently dropped mid-read. */
     hasReading,
