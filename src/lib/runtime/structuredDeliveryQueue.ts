@@ -868,7 +868,8 @@ export class StructuredDeliveryQueue {
          and is exactly what it should prove. */
       const claim = await this.readHostClaim(effect.conversationId);
       const retainedDispatch = this.firstDispatches.get(effect.operationId);
-      const firstDispatch: FirstDispatchEvidence | undefined = claim.readable && !!claim.value
+      const firstDispatch: FirstDispatchEvidence | undefined = claim.readable && typeof claim.value === "string"
+        && !!claim.value && claim.value !== UNKNOWN_HOST_CLAIM
         && ((durable?.revision === 1 && (durable.status === "queued" || durable.status === "pending"))
           || retainedDispatch?.writerClaim === claim.value)
         ? {operationId: effect.operationId, writerClaim: claim.value, firstDispatch: true}

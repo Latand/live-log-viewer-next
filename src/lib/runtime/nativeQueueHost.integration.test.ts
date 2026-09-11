@@ -18,7 +18,8 @@ import { parseRuntimeCommand } from "./commands";
 
 const binary = process.env.NATIVE_CODEX_QUEUE_TEST_BINARY;
 
-for (const largeImages of [false, true]) test.skipIf(!binary)(`native runtime: queue edits, canonical dispatch, lost reply and cold recovery (large images: ${largeImages})`, async () => {
+for (const scenario of ["small", "large", "two-image-turns"]) test.skipIf(!binary)(`native runtime: queue edits, canonical dispatch, lost reply and cold recovery (${scenario})`, async () => {
+  const largeImages = scenario !== "small";
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "nh-"));
   const env: NodeJS.ProcessEnv = { PATH: "/usr/bin:/bin", LANG: "C.UTF-8", NODE_ENV: "test" };
   for (const key of ["HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "GEMINI_CLI_HOME", "LLV_STATE_DIR", "TMPDIR"]) {
@@ -102,7 +103,10 @@ plugins = false
       const value = Reflect.get(target, property); return typeof value === "function" ? value.bind(target) : value;
     } }) as ChildProcessWithoutNullStreams;
   };
-  const options = { cwd, binary, codexHome: env.CODEX_HOME, env, model: "fixture-model", requestTimeoutMs: 1000,
+  const options = { cwd, binary, codexHome: env.CODEX_HOME, env, model: "fixture-model",
+    // The background-history case uses the production timeout. The other
+    // cases retain their shorter lost-acknowledgement fault-injection budget.
+    ...(scenario === "two-image-turns" ? {} : {requestTimeoutMs: 1000}),
     eventStore: new FileRuntimeEventStore(path.join(base, "events")), resolveImagePath: (image: {sha256: string}) => imagePaths.get(image.sha256)!, spawnProcess };
   let host: CodexAppServerHost | undefined;
   const journal = new RuntimeJournal(path.join(base, "journal.sqlite"), { structuredHosts: true });
@@ -134,6 +138,25 @@ plugins = false
       expect(journal.executeOperation(command).receipt.status).toBe("queued");
       await executor.execute(command); return journal.nativeQueueRead(conversationId).find(e => e.entryId === (extra.entryId ?? id))!;
     };
+    if (scenario === "two-image-turns") {
+      for (const [index, id] of ["image-one", "image-two"].entries()) {
+        await admit(id, {images: imageRefs});
+        if (index === 1) await admit(`start-${id}`, {action: "start", entryId: id, expectedRevision: 1, turnId: null});
+        await until(() => responses.length === index + 1);
+        await host.interrupt((await host.health()).activeTurnRef!);
+        await until(async () => (await host!.health()).activeTurnRef === null);
+      }
+      // Both accepted image turns exist before the first background read.
+      // A full turns page would aggregate them into an oversized host frame.
+      await until(async () => {
+        await executor.reconcile(conversationId);
+        return journal.nativeQueueRead(conversationId).every(entry => entry.state === "delivered");
+      });
+      expect((await host.health()).status).toBe("idle");
+      expect(journal.nativeQueueRead(conversationId)).toHaveLength(2);
+      expect(responses).toHaveLength(2);
+      return;
+    }
     // Idle add auto-dispatches under the native owner.
     const active = await admit("active-native", {});
     expect(active.state).toBe("queued");
@@ -164,7 +187,7 @@ plugins = false
     await until(async () => { await executor.reconcile(conversationId); return journal.nativeQueueRead(conversationId).find(e => e.entryId === a.entryId)?.state === "delivered"; });
     expect(journal.nativeQueueRead(conversationId).find(e => e.entryId === a.entryId)?.dispatchedRevision).toBe(2);
     dropAdd = true;
-    const lost = await admit("lost-native", {});
+    const lost = await admit("lost-native", largeImages ? {images: imageRefs} : {});
     expect(lost.state).toBe("uncertain");
     expect((await host.health()).status).toBe("active");
     const adds = requests.filter(r => r.method === "thread/queue/add").length;
@@ -181,37 +204,36 @@ plugins = false
     expect(requests.some(r => r.method === "thread/turns/list" && r.params.itemsView === "notLoaded")).toBeTrue();
     await host.interrupt((await host.health()).activeTurnRef!);
     await until(async () => (await host!.health()).activeTurnRef === null);
-    await host.send({ id: "profile-send", text: "profile input", runtime: { model: "fixture-model", effort: "high", serviceTier: "default", serviceTierForTurn: "priority" } });
+    const delivery = new StructuredDeliveryQueue({
+      effects: async () => journal.effectBatch(100, ["runtime.send"]),
+      status: async id => journal.operationResult(id)?.receipt ?? null,
+      hostClaim: async () => "fixture-owner:1",
+      transition: async (id, status, details) => { journal.transitionOperation(id, status, details); },
+    }, () => host!);
+    const sendManaged = async (id: string, images = imageRefs, runtime?: NativeQueueCommand["runtime"]) => {
+      await publish();
+      const command = parseRuntimeCommand("send", {conversationId, operationId: id, idempotencyKey: id,
+        text: "ordinary managed delivery", images, policy: "interrupt-active", ...(runtime ? {runtime} : {})});
+      expect(journal.executeOperation(command).receipt.status).toBe("queued");
+      const before = responses.length;
+      await until(async () => {
+        await delivery.drain();
+        const receipt = journal.operationResult(id)?.receipt;
+        if (receipt?.status === "failed" || receipt?.status === "uncertain") throw new Error(receipt.reason ?? receipt.status);
+        return receipt?.status === "delivered";
+      });
+      expect(journal.operationResult(id)?.receipt.status).toBe("delivered");
+      await until(() => responses.length === before + 1);
+      await delivery.drain();
+      expect(responses).toHaveLength(before + 1);
+    };
+    await sendManaged("profile-send", [], {model: "fixture-model", effort: "high", serviceTier: "default", serviceTierForTurn: "priority"});
     expect(requests.find(r => r.method === "turn/start" && r.params.clientUserMessageId === "profile-send")?.params).toMatchObject({ model: "fixture-model", effort: "high", serviceTier: "default", serviceTierForTurn: "priority" });
     if (largeImages) {
-      await host.interrupt((await host.health()).activeTurnRef!);
-      await until(async () => (await host!.health()).activeTurnRef === null);
-      const delivery = new StructuredDeliveryQueue({
-        effects: async () => journal.effectBatch(100, ["runtime.send"]),
-        status: async id => journal.operationResult(id)?.receipt ?? null,
-        hostClaim: async () => "fixture-owner:1",
-        transition: async (id, status, details) => { journal.transitionOperation(id, status, details); },
-      }, () => host!);
-      const sendManaged = async (id: string, images = imageRefs) => {
-        await publish();
-        const command = parseRuntimeCommand("send", {conversationId, operationId: id, idempotencyKey: id,
-          text: "ordinary managed delivery", images, policy: "interrupt-active"});
-        expect(journal.executeOperation(command).receipt.status).toBe("queued");
-        const before = responses.length;
-        await until(async () => {
-          await delivery.drain();
-          const receipt = journal.operationResult(id)?.receipt;
-          if (receipt?.status === "failed" || receipt?.status === "uncertain") throw new Error(receipt.reason ?? receipt.status);
-          return receipt?.status === "delivered";
-        });
-        expect(journal.operationResult(id)?.receipt.status).toBe("delivered");
-        await until(() => responses.length === before + 1);
-        await delivery.drain();
-        expect(responses).toHaveLength(before + 1);
-      };
       await sendManaged("ordinary-images");
       expect(await host.sessionMaterializationEvidence("ordinary-images")).toEqual({state: "materialized"});
-      // A new text send must remain usable after two large image turns.
+      // A new text send remains usable beyond the recovery read byte budget:
+      // three distinct image turns now hold approximately 48 MiB of input.
       await sendManaged("fresh-after-images", []);
       expect((await host.health()).status).toBe("active");
     }

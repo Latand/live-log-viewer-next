@@ -48,7 +48,7 @@ function host(send: (entry: QueueEntry, firstDispatch?: FirstDispatchEvidence) =
 }
 
 test("only the first journal admission under a known claim supplies first-dispatch evidence", async () => {
-  for (const [revision, claim] of [[1, "owner:1"], [2, "owner:1"], [undefined, "owner:1"], [1, null]] as const) {
+  for (const [revision, claim] of [[1, "owner:1"], [2, "owner:1"], [undefined, "owner:1"], [1, null], [1, "?"]] as const) {
     const seen: Array<FirstDispatchEvidence | undefined> = [];
     const queue = new StructuredDeliveryQueue({
       effects: async () => [{id: "effect:fresh", kind: "runtime.send", eventSeq: 1,
@@ -61,7 +61,7 @@ test("only the first journal admission under a known claim supplies first-dispat
       return {outcome: "turn-started", turnId: "turn-one"};
     }));
     await queue.drain();
-    expect(seen).toEqual([revision === 1 && claim ? {operationId: "fresh", writerClaim: claim, firstDispatch: true} : undefined]);
+    expect(seen).toEqual([revision === 1 && claim && claim !== "?" ? {operationId: "fresh", writerClaim: claim, firstDispatch: true} : undefined]);
   }
 });
 

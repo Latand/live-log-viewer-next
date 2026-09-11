@@ -38,9 +38,9 @@ export interface QueueEntry {
  * delivery executor supplies this only after taking the first queued receipt
  * into delivering under a known writer claim. A retry gets no such evidence. */
 export interface FirstDispatchEvidence {
-  operationId: string;
-  writerClaim: string;
-  firstDispatch: true;
+  readonly operationId: string;
+  readonly writerClaim: string;
+  readonly firstDispatch: true;
 }
 
 export interface NormalizedQueueEntry {
