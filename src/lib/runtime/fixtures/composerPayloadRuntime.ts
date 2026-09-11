@@ -20,6 +20,8 @@ import { UnixRuntimeHostClient } from "../client";
 import type { RuntimeOperationReceipt } from "../contracts";
 import type { QueueEntry } from "../engineHost";
 import { handleRuntimeCommand, handleRuntimeOperationQuery, handleRuntimeRetry } from "../http";
+import { handleNativeQueue } from "../nativeQueueHttp";
+import { admitRuntimeImagePayload } from "../runtimeImageAdmission";
 import { runtimeImageStore } from "../runtimeImageStore";
 import { resolveSendReceipt } from "../sendSettlement";
 import { bindStructuredDeliveryQueue } from "../structuredDeliveryController";
@@ -44,6 +46,10 @@ export interface ComposerPayloadRuntime {
   delivered: DeliveredPayload[];
   handle(request: Request): Promise<Response>;
   receipts(): Promise<RuntimeOperationReceipt[]>;
+  /** A second conversation hosted by a native-queue Codex thread. The queue
+      route admits its hand-offs into the real journal; nothing dispatches them
+      to an engine, which leaves native semantics outside this fixture. */
+  queue: { conversationId: string; threadId: string; accountId: string };
   /** The engine host starts unavailable while the journal still projects its
       session as hosted, so a send is admitted and then fenced by the queue.
       This makes it available again and republishes it. */
@@ -175,6 +181,30 @@ export async function startComposerPayloadRuntime(directory: string): Promise<Co
     retireReplySuggestions: () => ({ cleared: false, pending: false }),
     kick: kickStructuredDeliveryQueue,
   };
+  const queue = { conversationId: `conversation_${crypto.randomUUID()}`, threadId: crypto.randomUUID(), accountId: "fixture-account" };
+  journal.append({
+    scope: { type: "session", id: queue.conversationId },
+    kind: "session-status",
+    payload: {
+      conversationId: queue.conversationId,
+      sessionKey: { engine: "codex", sessionId: queue.threadId },
+      accountId: queue.accountId,
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "running",
+      provenance: "structured",
+      artifactPath: path.join(directory, "sessions", `${queue.threadId}.jsonl`),
+      capabilities: { steer: true, structuredAttention: true, nativeQueue: true },
+      diagnostics: { queueCapability: "supported", nativeQueue: true },
+    },
+  });
+  const queueDependencies = {
+    client: () => client,
+    enabled: () => true,
+    kick: () => {},
+    admitImages: (images: unknown) => admitRuntimeImagePayload({ images }),
+    storeImages: (uploads: Parameters<ReturnType<typeof runtimeImageStore>["putMany"]>[0]) => runtimeImageStore().putMany(uploads),
+  };
   const retryDependencies = {
     enabled: () => true,
     client: () => client,
@@ -195,6 +225,7 @@ export async function startComposerPayloadRuntime(directory: string): Promise<Co
     registry,
     journal,
     delivered,
+    queue,
     async handle(request) {
       const url = new URL(request.url);
       const next = new NextRequest(new URL(url.pathname + url.search, "http://localhost"), {
@@ -209,6 +240,7 @@ export async function startComposerPayloadRuntime(directory: string): Promise<Co
       if (operation && request.method === "POST") {
         return handleRuntimeRetry(next, decodeURIComponent(operation[1]!), retryDependencies);
       }
+      if (url.pathname === "/api/runtime/queue") return handleNativeQueue(next, queueDependencies);
       if (operation && request.method === "GET") {
         return handleRuntimeOperationQuery(decodeURIComponent(operation[1]!), queryDependencies);
       }

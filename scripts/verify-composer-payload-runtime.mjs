@@ -177,6 +177,8 @@ try{
  const refused=messages[3];
  corruptNextSend=true;await submit(page,refused);
  await page.locator(`[data-payload-key="${refused.key}"]`).waitFor();
+ await page.locator(`[data-payload-key="${refused.key}"] summary`).click();
+ await page.locator(`[data-payload-key="${refused.key}"] [data-payload-reason]`).getByText('invalid JSON',{exact:false}).waitFor();
  await page.reload();await page.locator(`[data-payload-key="${refused.key}"] summary`).click();
  const refusedText=await page.locator(`[data-payload-key="${refused.key}"] [data-payload-reason]`).innerText();
  results.preAdmission={firstStatus:sends(refused.key)[0].status,corrupted:sends(refused.key)[0].corrupted===true,journalOperation:operationOf(refused),reason:refusedText,

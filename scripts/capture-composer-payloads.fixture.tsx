@@ -23,11 +23,13 @@ const PATH = params.get('path') ?? '/fixture/payload.jsonl';
 const listeners = new Set<() => void>();
 let receipts: RuntimeReceipt[] = [];
 const requests: Record<string, unknown>[] = [];
+// `?queue=<thread>` hosts the card on a native-queue Codex thread with a running turn.
+const queueThread = params.get('queue');
 const session = {
-  conversationId: CARD, sessionKey: { engine:'codex',sessionId:'fixture-thread' },
-  hostKind:'codex-app-server',host:'hosted',turn:'idle',provenance:'structured',
+  conversationId: CARD, sessionKey: { engine:'codex',sessionId:queueThread ?? 'fixture-thread' },
+  hostKind:'codex-app-server',host:'hosted',turn:queueThread ? 'running' : 'idle',provenance:'structured',
   accountId:'fixture-account',parentConversationId:null,cwd:null,artifactPath:PATH,
-  capabilities:{steer:true,structuredAttention:true,nativeQueue:false,imageInput:{supported:true,mimes:['image/png']}},
+  capabilities:{steer:true,structuredAttention:true,nativeQueue:Boolean(queueThread),imageInput:{supported:true,mimes:['image/png']}},
   activeTurnId:null,nativeQueueRevision:0,attentionIds:[],recentReceipts:[],revision:1,
 };
 const state = {
