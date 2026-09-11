@@ -2309,6 +2309,7 @@ describe("CodexAppServerHost", () => {
       (server.readTurns[315] as {items: unknown[]}).items.pop();
       expect(await host.nativeQueue!.evidence(entry)).toBeNull();
       expect(server.requests.some(r => r.method === "turn/start" || r.method === "turn/steer" || r.method === "thread/queue/add")).toBeFalse();
+      expect((await host.send({id: "fresh-long-history-message", text: "A fresh authorized message"})).outcome).toBe("turn-started");
     } finally { await host.release(); }
   }, 15000);
 
@@ -2323,6 +2324,24 @@ describe("CodexAppServerHost", () => {
       await expect(host.send({ id: "refused-first", text: "hello" }))
         .rejects.toThrow("Codex canonical history is unavailable: transport");
       expect(server.requests.some(request => request.method === "turn/start" || request.method === "turn/steer")).toBeFalse();
+    } finally { await host.release(); }
+  });
+
+  test("journal first-dispatch evidence avoids a cold history scan while retaining collision checks", async () => {
+    const server = new FakeAppServer("journal-first-thread");
+    server.userAgent = "codex_desktop_app/0.154.0 (Linux)";
+    const host = await CodexAppServerHost.start({cwd: "/repo", eventStore: new MemoryEventStore(), spawnProcess: fakeSpawn(server)});
+    server.readError = "history transport is unavailable";
+    try {
+      await expect(host.send({id: "wrong-binding", text: "hello"}, {operationId: "different", writerClaim: "owner:1", firstDispatch: true}))
+        .rejects.toThrow("Codex canonical history is unavailable");
+      expect(server.requests.some(request => request.method === "turn/start")).toBeFalse();
+      const input = {id: "fresh-authorized", text: "hello"};
+      const proof = {operationId: input.id, writerClaim: "owner:1", firstDispatch: true as const};
+      expect((await host.send(input, proof)).outcome).toBe("turn-started");
+      expect((await host.send(input, proof)).outcome).toBe("turn-started");
+      await expect(host.send({...input, text: "changed"}, proof)).rejects.toThrow("different payload");
+      expect(server.requests.filter(request => request.method === "turn/start")).toHaveLength(1);
     } finally { await host.release(); }
   });
 

@@ -75,7 +75,7 @@ export class NativeQueueUncertainError extends Error {
   }
 }
 
-type Limits = { pageSize: number; maxPages: number; maxItems: number; maxRefreshPasses: number; timeoutMs: number };
+type Limits = { pageSize: number; maxPages: number; maxItems: number; maxBytes: number; maxRefreshPasses: number; timeoutMs: number };
 
 /**
  * One thread on one RPC connection. Replace the adapter on host/account change.
@@ -94,7 +94,7 @@ export class NativeCodexQueue {
 
   constructor(private readonly port: NativeQueueRpcPort, readonly threadId: string, limits: Partial<Limits> = {}) {
     id.parse(threadId);
-    this.limits = { pageSize: 100, maxPages: 20, maxItems: 2000, maxRefreshPasses: 2, timeoutMs: 10_000, ...limits };
+    this.limits = { pageSize: 100, maxPages: 20, maxItems: 2000, maxBytes: 64 * 1024 * 1024, maxRefreshPasses: 2, timeoutMs: 10_000, ...limits };
     for (const value of Object.values(this.limits)) {
       if (!Number.isSafeInteger(value) || value <= 0 || value > 2_147_483_647) throw new Error("Invalid native queue bound");
     }
@@ -133,6 +133,7 @@ export class NativeCodexQueue {
       if (this.mutations) throw new Error("Native queue mutation is still pending");
       const revision = this.revision;
       const data: NativeQueuedSubmission[] = [];
+      let bytes = 0;
       const seenIds = new Set<string>();
       const seenCursors = new Set<string>();
       const previous = new Map(this.items?.map((item) => [item.id, item.clientUserMessageId]));
@@ -149,6 +150,8 @@ export class NativeCodexQueue {
         const clear = () => { if (this.wireRead === wire) this.wireRead = null; };
         void wire.then(clear, clear);
         const response = listSchema.parse(await this.withDeadline(wire, remaining));
+        bytes += Buffer.byteLength(JSON.stringify(response));
+        if (bytes > this.limits.maxBytes) throw new Error("Native queue byte bound exceeded");
         this.assertOpen();
         this.checkThread(response);
         if (data.length + response.data.length > this.limits.maxItems) throw new Error("Native queue item bound exceeded");
@@ -161,6 +164,7 @@ export class NativeCodexQueue {
         }
         cursor = response.nextCursor;
         if (cursor === null) {
+          if (Date.now() >= deadline) throw new Error("Native queue refresh deadline exceeded");
           if (this.mutations) throw new Error("Native queue mutation is still pending");
           if (revision !== this.revision) break;
           this.items = structuredClone(data);

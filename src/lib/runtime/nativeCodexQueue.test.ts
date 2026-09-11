@@ -171,6 +171,16 @@ function fixture(replies: Array<unknown | (() => unknown)> = [], options = {}) {
 }
 
 describe("native queue reads", () => {
+  test("an oversized refresh retains the previous inventory and marks it stale", async () => {
+    const large = {...submission("large"), input: [{type: "text" as const, text: "🌍".repeat(1024)}]};
+    const {queue, calls, replies} = fixture([page(submission())], {pageSize: 1, maxBytes: 3000});
+    await queue.refresh();
+    replies.push(page(large));
+    await expect(queue.refresh()).rejects.toThrow("Native queue byte bound exceeded");
+    expect(queue.read()).toMatchObject({stale: true, items: [submission()]});
+    expect(calls.every(call => call.method === "thread/queue/list")).toBeTrue();
+  });
+
   test("coalesces callers and commits all pages with opaque cursors in order", async () => {
     const pending = deferred<unknown>();
     const { queue, calls } = fixture([() => pending.promise, page(submission("submission-b"))]);

@@ -34,6 +34,15 @@ export interface QueueEntry {
   origin?: MessageOrigin;
 }
 
+/** Internal journal evidence, never accepted from a send request body. The
+ * delivery executor supplies this only after taking the first queued receipt
+ * into delivering under a known writer claim. A retry gets no such evidence. */
+export interface FirstDispatchEvidence {
+  operationId: string;
+  writerClaim: string;
+  firstDispatch: true;
+}
+
 export interface NormalizedQueueEntry {
   id: string;
   content: StructuredMessageContent;
@@ -119,7 +128,7 @@ export interface EngineHost {
   readonly nativeQueue?: NativeQueueHost;
   readonly supportsSteer?: boolean;
   attach(afterSeq: number): AsyncIterable<RuntimeEvent>;
-  send(entry: QueueEntry): Promise<DeliveryReceipt>;
+  send(entry: QueueEntry, firstDispatch?: FirstDispatchEvidence): Promise<DeliveryReceipt>;
   interrupt(turnRef: string): Promise<void>;
   answer(attentionRef: string, value: unknown): Promise<void>;
   health(): Promise<HostState>;

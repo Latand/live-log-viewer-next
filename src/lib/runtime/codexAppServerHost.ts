@@ -2,12 +2,13 @@ import { normalizeNativeQueueObservation } from "./nativeQueueContent";
 import { CodexRealtimeTranscript } from "./codexRealtimeTranscript";
 import type { NativeQueueInput } from "./nativeCodexQueue";
 import { StructuredSendRefusedError } from "./engineHost";
+import type { FirstDispatchEvidence } from "./engineHost";
 import { basename } from "node:path";
 import { isNonblockingCodexQuestion } from "./codexAttention";
 import { codexTurnProfile } from "./codexTurnProfile";
 import { StringDecoder } from "node:string_decoder";
 import { NativeCodexQueue, NativeQueueProtocolRefusal } from "./nativeCodexQueue";
-import { readCodexHistory, findCodexHistoryDelivery, type CodexHistoryResult } from "./codexHistoryReader";
+import { readCodexHistory, readCodexDeliveryHistory, findCodexHistoryDelivery, type CodexDeliveryHistoryResult } from "./codexHistoryReader";
 import type { NativeQueueHost } from "./nativeQueueExecutor";
 import type { NativeQueueRecord } from "./nativeQueueContracts";
 import { spawn } from "node:child_process";
@@ -322,6 +323,12 @@ const MAX_REALTIME_CONTEXT_ITEM_BYTES = 8 * 1024;
 const MAX_REALTIME_CONTEXT_BYTES = 24 * 1024;
 const MAX_REPLAY_ENVELOPE_BYTES = 256 * 1024;
 const MAX_LINE_BYTES = MAX_STRUCTURED_IMAGE_ENCODED_BYTES + MAX_REPLAY_ENVELOPE_BYTES;
+// A supported image envelope must fit alongside the bounded surrounding
+// history. Per-item pages keep each native response within MAX_LINE_BYTES.
+const DELIVERY_HISTORY_BYTES = MAX_STRUCTURED_IMAGE_ENCODED_BYTES + 16 * 1024 * 1024;
+// Single-item frames retain the nominal item coverage of 128 pages of 32
+// items. The byte budget and existing caller deadline still bound the read.
+const DELIVERY_HISTORY_PAGES = 128 * 32;
 /**
  * A `thread/resume` (or `thread/read`) response replays the whole thread
  * history as one JSONL frame, and history the operator legally accumulated can
@@ -1467,7 +1474,7 @@ export class CodexAppServerHost implements EngineHost {
         throw new StructuredSendRefusedError("native queue writer is unavailable");
       }
       return this.rpc(method, params, timeout, true);
-    } }, this.identity.threadId, { timeoutMs: this.requestTimeoutMs });
+    } }, this.identity.threadId, { timeoutMs: this.requestTimeoutMs, pageSize: 1, maxPages: 2000 });
     try { await queue.refresh(); }
     catch (error) { queue.dispose(); this.queueCapability = error instanceof NativeQueueProtocolRefusal && error.code === -32601 ? "unsupported" : "unknown"; return; }
     this.queueCapability = "supported";
@@ -1485,8 +1492,8 @@ export class CodexAppServerHost implements EngineHost {
       evidence: (entry) => this.nativeQueueEvidence(entry),
       evidenceBatch: async (entries) => {
         if (!this.identity.path) return entries.map(() => null);
-        const history = await readCodexHistory((method, params, timeout) => this.rpc(method, params, timeout, true),
-          { threadId: this.identity.threadId, path: this.identity.path }, { deadlineAt: Date.now() + this.requestTimeoutMs, sortDirection: "desc", itemsView: "full" });
+        const history = await this.readDeliveryHistory(entries.map(entry => entry.clientUserMessageId), this.requestTimeoutMs,
+          candidate => entries.some(entry => this.nativeQueueProof(entry, candidate) !== null));
         return Promise.all(entries.map(entry => this.nativeQueueEvidence(entry, history)));
       },
       sendWithdrawn: async (entry, expectedTurnId) => {
@@ -1506,17 +1513,30 @@ export class CodexAppServerHost implements EngineHost {
     this.notifyStateListeners();
   }
 
-  private async nativeQueueEvidence(entry: NativeQueueRecord, snapshot?: CodexHistoryResult) {
+  private async readDeliveryHistory(clientIds: string[], timeoutMs = this.requestTimeoutMs,
+    accept?: (history: Extract<CodexDeliveryHistoryResult, {state: "observed"}>) => boolean): Promise<CodexDeliveryHistoryResult> {
+    if (!this.identity.path) return {state: "unknown", reason: "identity"};
+    return readCodexDeliveryHistory((method, params, timeout) => this.rpc(method, params, timeout, true),
+      {threadId: this.identity.threadId, path: this.identity.path},
+      {deadlineAt: Date.now() + timeoutMs, sortDirection: "desc", itemsPerPage: 1,
+        maxPages: DELIVERY_HISTORY_PAGES, maxBytes: DELIVERY_HISTORY_BYTES}, clientIds, accept);
+  }
+
+  private async nativeQueueEvidence(entry: NativeQueueRecord, snapshot?: CodexDeliveryHistoryResult) {
     if (entry.binding.threadId !== this.identity.threadId || !this.identity.path) return null;
-    const history = snapshot ?? await readCodexHistory((method, params, timeout) => this.rpc(method, params, timeout, true),
-      { threadId: this.identity.threadId, path: this.identity.path }, { deadlineAt: Date.now() + this.requestTimeoutMs, sortDirection: "desc", itemsView: "full" });
-    const targetHistory = history.state !== "complete" ? history : { ...history,
+    const history = snapshot ?? await this.readDeliveryHistory([entry.clientUserMessageId]);
+    return this.nativeQueueProof(entry, history);
+  }
+
+  private nativeQueueProof(entry: NativeQueueRecord, history: CodexDeliveryHistoryResult) {
+    if (entry.binding.threadId !== this.identity.threadId || !this.identity.path) return null;
+    const targetHistory = history.state !== "complete" && history.state !== "observed" ? history : { ...history,
       turns: history.turns.map(turn => ({ ...turn, items: turn.items.filter(item => item.type === "userMessage" && item.clientId === entry.clientUserMessageId) }))
         .filter(turn => turn.items.length > 0),
     };
     for (const version of entry.versions) {
       if (!version.input || (entry.dispatchedRevision !== null && entry.dispatchedRevision !== version.revision)) continue;
-      const normalizedHistory = targetHistory.state !== "complete" ? targetHistory : {
+      const normalizedHistory = targetHistory.state !== "complete" && targetHistory.state !== "observed" ? targetHistory : {
         ...targetHistory,
         turns: targetHistory.turns.map(turn => ({ ...turn, items: turn.items.map(item =>
           item.type === "userMessage" && item.clientId === entry.clientUserMessageId
@@ -1533,7 +1553,7 @@ export class CodexAppServerHost implements EngineHost {
     return [...this.attentions.values()].some(attention => attention.isBlocking !== false);
   }
 
-  async send(entry: QueueEntry): Promise<DeliveryReceipt> {
+  async send(entry: QueueEntry, firstDispatch?: FirstDispatchEvidence): Promise<DeliveryReceipt> {
     if (this.dead || this.releasing || this.released || !this.writerFenceAllowsActuation()) {
       return { outcome: "rejected", reason: "dead-host" };
     }
@@ -1558,7 +1578,8 @@ export class CodexAppServerHost implements EngineHost {
       ...(normalized.origin ? { origin: normalized.origin } : {}),
     };
     if (!entry.id) throw new Error("queue entry id is required");
-    const confirmed = await this.confirmedDelivery(entry);
+    const confirmed = await this.confirmedDelivery(entry, firstDispatch?.firstDispatch === true
+      && firstDispatch.operationId === entry.id && Boolean(firstDispatch.writerClaim));
     if (confirmed) return confirmed;
     const currentTurn = this.activeTurnId;
     if (entry.expectedTurnId !== undefined && entry.expectedTurnId !== currentTurn) {
@@ -1644,15 +1665,15 @@ export class CodexAppServerHost implements EngineHost {
       working. On refusal the persisted turns come from the rollout on disk;
       `window` bounds which end survives — "first" for materialization
       evidence, "latest" for delivery confirmation; always oldest-first. */
-  private async readThreadWithTurns(window: "first" | "latest", timeoutMs?: number): Promise<unknown> {
+  private async readThreadWithTurns(window: "first" | "latest", timeoutMs?: number, clientId?: string): Promise<unknown> {
     if (this.supportsNativeHistory() && this.identity.path) {
-      const history = await readCodexHistory((method, params, remaining) => this.rpc(method, params, remaining, true),
+      const history = clientId ? await this.readDeliveryHistory([clientId], timeoutMs) : await readCodexHistory((method, params, remaining) => this.rpc(method, params, remaining, true),
         { threadId: this.identity.threadId, path: this.identity.path },
         // Native full pages avoid one extra item traversal per historical turn.
         // The reader retains its byte/page/deadline bounds and hydrates any
         // partial page before accepting it as canonical evidence.
         { deadlineAt: Date.now() + (timeoutMs ?? this.requestTimeoutMs), sortDirection: window === "first" ? "asc" : "desc", itemsView: "full" });
-      if (history.state === "complete") return { thread: { id: history.identity.threadId, path: history.identity.path,
+      if (history.state === "complete" || history.state === "observed") return { thread: { id: history.identity.threadId, path: history.identity.path,
         turns: window === "latest" ? [...history.turns].reverse() : history.turns } };
       if (history.state === "unknown") {
         if (history.reason === "not-materialized") {
@@ -1679,7 +1700,7 @@ export class CodexAppServerHost implements EngineHost {
   async sessionMaterializationEvidence(clientMessageId: string): Promise<SessionMaterializationEvidence> {
     let result: unknown;
     try {
-      result = await this.readThreadWithTurns("first");
+      result = await this.readThreadWithTurns("first", undefined, clientMessageId);
     } catch (error) {
       const reason = safeError(error);
       if (/not materialized yet/i.test(reason) && /before first user message/i.test(reason)) {
@@ -2793,18 +2814,22 @@ export class CodexAppServerHost implements EngineHost {
     }
   }
 
-  private async confirmedDelivery(entry: QueueEntry): Promise<DeliveryReceipt | null> {
+  private async confirmedDelivery(entry: QueueEntry, firstDispatch = false): Promise<DeliveryReceipt | null> {
     const known = this.confirmedDeliveries.get(entry.id);
     if (known) return this.confirmedReceipt(entry, known);
     const persistedRead = rolloutConfirmedDelivery(this.identity.path, entry);
     const persisted = persistedRead instanceof Promise ? await persistedRead : persistedRead;
     if (persisted) return persisted;
+    // The journal already established this operation's first actuation. Keep
+    // local duplicate/collision checks, but do not scan unrelated native
+    // history to authorize a newly admitted message. Recovery remains below.
+    if (firstDispatch) return null;
     let thread: unknown;
     try {
       const timeoutMs = this.activeTurnId
         ? this.requestTimeoutMs * ACTIVE_THREAD_READ_TIMEOUT_MULTIPLIER
         : this.requestTimeoutMs;
-      thread = await this.readThreadWithTurns("latest", timeoutMs);
+      thread = await this.readThreadWithTurns("latest", timeoutMs, entry.id);
     } catch (error) {
       const message = safeError(error);
       if (/not materialized yet/i.test(message) && /before first user message/i.test(message)) return null;

@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import type { DeliveryReceipt, EngineHost, HostState, QueueEntry, RuntimeEvent } from "./engineHost";
+import type { DeliveryReceipt, EngineHost, FirstDispatchEvidence, HostState, QueueEntry, RuntimeEvent } from "./engineHost";
 import {
   CONTROL_SETTLEMENT_WINDOW_MS,
   StructuredDeliveryQueue,
@@ -35,7 +35,7 @@ function idleState(sessionKey = "session-one"): HostState {
   };
 }
 
-function host(send: (entry: QueueEntry) => Promise<DeliveryReceipt>): EngineHost {
+function host(send: (entry: QueueEntry, firstDispatch?: FirstDispatchEvidence) => Promise<DeliveryReceipt>): EngineHost {
   return {
     supportsSteer: true,
     attach: () => ({ async *[Symbol.asyncIterator](): AsyncIterator<RuntimeEvent> {} }),
@@ -46,6 +46,63 @@ function host(send: (entry: QueueEntry) => Promise<DeliveryReceipt>): EngineHost
     release: async () => {},
   };
 }
+
+test("only the first journal admission under a known claim supplies first-dispatch evidence", async () => {
+  for (const [revision, claim] of [[1, "owner:1"], [2, "owner:1"], [undefined, "owner:1"], [1, null]] as const) {
+    const seen: Array<FirstDispatchEvidence | undefined> = [];
+    const queue = new StructuredDeliveryQueue({
+      effects: async () => [{id: "effect:fresh", kind: "runtime.send", eventSeq: 1,
+        payload: {kind: "send", operationId: "fresh", conversationId: "conversation-one", text: "fresh input", policy: "queue", firstDispatch: true}}],
+      status: async () => ({status: "queued", revision}),
+      hostClaim: async () => claim,
+      transition: async () => {},
+    }, () => host(async (_entry, proof) => {
+      seen.push(proof);
+      return {outcome: "turn-started", turnId: "turn-one"};
+    }));
+    await queue.drain();
+    expect(seen).toEqual([revision === 1 && claim ? {operationId: "fresh", writerClaim: claim, firstDispatch: true} : undefined]);
+  }
+});
+
+test("a read retry never reuses first-dispatch evidence", async () => {
+  const seen: Array<FirstDispatchEvidence | undefined> = [];
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => [{id: "effect:fresh", kind: "runtime.send", eventSeq: 1,
+      payload: {kind: "send", operationId: "fresh", conversationId: "conversation-one", text: "fresh input", policy: "queue"}}],
+    status: async () => ({status: "queued", revision: 1}), hostClaim: async () => "owner:1", transition: async () => {},
+  }, () => host(async (_entry, proof) => {
+    seen.push(proof);
+    if (seen.length === 1) throw new Error("thread/read timed out");
+    return {outcome: "turn-started", turnId: "turn-one"};
+  }));
+  await queue.drain();
+  expect(seen).toEqual([{operationId: "fresh", writerClaim: "owner:1", firstDispatch: true}, undefined]);
+});
+
+test("interrupt-only waits retain first-dispatch evidence only under the same writer claim", async () => {
+  for (const changeClaim of [false, true]) {
+    let active = true;
+    let claim = "owner:1";
+    let receipt = {status: "queued", revision: 1};
+    const seen: Array<FirstDispatchEvidence | undefined> = [];
+    const engine = host(async (_entry, proof) => { seen.push(proof); return {outcome: "turn-started", turnId: "next"}; });
+    engine.health = async () => ({...idleState(), status: active ? "active" : "idle", activeTurnRef: active ? "old-turn" : null});
+    const queue = new StructuredDeliveryQueue({
+      effects: async () => [{id: "effect:interrupt", kind: "runtime.send", eventSeq: 1,
+        payload: {kind: "send", operationId: "fresh", conversationId: "conversation-one", text: "fresh input", policy: "interrupt-active"}}],
+      status: async () => ({...receipt}), hostClaim: async () => claim,
+      transition: async (_id, status) => { receipt = {status, revision: receipt.revision + 1}; },
+    }, () => engine);
+    await queue.drain();
+    expect(seen).toHaveLength(0);
+    expect(receipt.status).toBe("queued");
+    active = false;
+    if (changeClaim) claim = "owner:2";
+    await queue.drain();
+    expect(seen).toEqual([changeClaim ? undefined : {operationId: "fresh", writerClaim: "owner:1", firstDispatch: true}]);
+  }
+});
 
 test("structured delivery preserves queue order within one conversation", async () => {
   const sent: string[] = [];
