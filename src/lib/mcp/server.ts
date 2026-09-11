@@ -2964,6 +2964,8 @@ export const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
     dueAt: z.string().optional(),
     dueTz: z.string().optional(),
     attachments: z.array(z.unknown()).optional(),
+    board: z.enum(["shown", "hidden"]).optional()
+      .describe("Board membership of the new task's band (#1627). Omitted creates a task the board shows, and the per-project limit counts only those; hidden records the task off the board, which is how work is kept when the board is full. Either way the task keeps its row in the task list, and update_task moves it between the two."),
   }).passthrough(),
   update_task: z.object({
     clientRequestId: clientRequestIdSchema,

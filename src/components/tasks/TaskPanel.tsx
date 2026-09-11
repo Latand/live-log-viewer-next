@@ -16,6 +16,7 @@ import type { FileEntry } from "@/lib/types";
 import { type FavoriteRow } from "@/components/favorites/favoriteRows";
 
 import { createTask, updateTask } from "./taskApi";
+import { pushTaskToast } from "./taskToast";
 import { TaskComposer } from "./TaskComposer";
 import { TASK_TONES, taskTitle } from "./taskModel";
 
@@ -328,7 +329,15 @@ export function TaskPanel({
                       data-task-board-state={prefersBand ? "shown" : "hidden"}
                       className="inline-flex items-center gap-0.5 rounded-[6px] border border-border px-1.5 py-0.5 text-[9.5px] font-bold text-muted hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                       title={t(prefersBand ? "tasks.removeFromBoardTitle" : "tasks.showOnBoardTitle")}
-                      onClick={() => { void updateTask(task.id, { board: prefersBand ? "hidden" : "shown" }); }}
+                      /* «Show on board» is an admission now: a board already
+                         carrying its full complement of bands refuses it
+                         (#1627), and a control that swallowed that would leave
+                         the row saying one thing and the canvas another. */
+                      onClick={() => {
+                        void updateTask(task.id, { board: prefersBand ? "hidden" : "shown" }).then((error) => {
+                          if (error) pushTaskToast("err", error);
+                        });
+                      }}
                     >
                       {prefersBand
                         ? <><EyeOff className="h-2.5 w-2.5" aria-hidden /> {t("tasks.removeFromBoard")}</>
