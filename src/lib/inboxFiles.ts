@@ -131,36 +131,105 @@ function batchDir(token: string): string {
   return dir;
 }
 
+/** The paths one admitted batch lands at, in the order sent, decided before
+    anything is written so a caller can fold them into a command and validate it
+    first. Every writer below writes exactly these. */
+export function inboxFilePaths(files: readonly InboxFileUpload[], token: string): string[] {
+  if (!files.length) return [];
+  const dir = batchDir(token);
+  const used = new Set<string>();
+  return files.map((file) => {
+    const name = inboxAttachmentName(file.name);
+    /* Two attachments named the same in ONE send must stay two files, or the
+       second silently replaces the first and the message names it twice. */
+    let unique = name;
+    for (let index = 2; used.has(unique); index += 1) {
+      const dot = name.lastIndexOf(".");
+      unique = dot > 0 ? `${name.slice(0, dot)}-${index}${name.slice(dot)}` : `${name}-${index}`;
+    }
+    used.add(unique);
+    const filePath = path.resolve(dir, unique);
+    if (!filePath.startsWith(dir + path.sep)) throw new Error("inbox attachment escapes the inbox");
+    return filePath;
+  });
+}
+
 /** Writes one admitted batch and returns the paths, in the order sent. A write
     that throws mid-batch deletes what it already wrote, so no caller can orphan
     a partial batch (`buildImagePayload`'s contract). */
 export function saveInboxFiles(files: readonly InboxFileUpload[], token: string): string[] {
-  if (!files.length) return [];
-  const dir = batchDir(token);
+  const filePaths = inboxFilePaths(files, token);
+  if (!filePaths.length) return [];
   const written: string[] = [];
   try {
-    fs.mkdirSync(dir, { recursive: true });
-    const used = new Set<string>();
-    for (const file of files) {
-      const name = inboxAttachmentName(file.name);
-      /* Two attachments named the same in ONE send must stay two files, or the
-         second silently replaces the first and the message names it twice. */
-      let unique = name;
-      for (let index = 2; used.has(unique); index += 1) {
-        const dot = name.lastIndexOf(".");
-        unique = dot > 0 ? `${name.slice(0, dot)}-${index}${name.slice(dot)}` : `${name}-${index}`;
-      }
-      used.add(unique);
-      const filePath = path.resolve(dir, unique);
-      if (!filePath.startsWith(dir + path.sep)) throw new Error("inbox attachment escapes the inbox");
-      fs.writeFileSync(filePath, file.data);
-      written.push(filePath);
-    }
+    fs.mkdirSync(path.dirname(filePaths[0]!), { recursive: true });
+    files.forEach((file, index) => {
+      fs.writeFileSync(filePaths[index]!, file.data);
+      written.push(filePaths[index]!);
+    });
   } catch (error) {
     deleteInboxFiles(written);
     throw error;
   }
   return written;
+}
+
+/** A path of this batch already holds other bytes: the key it derives from
+    belongs to a different request, whose attachment is not this one's to
+    replace. */
+export class InboxFileConflictError extends Error {}
+
+export interface StagedInboxFiles {
+  filePaths: string[];
+  /** The paths THIS call wrote, and so the only ones its caller may release.
+      A path that already held the same bytes was written by an earlier attempt
+      under the same key, and that attempt may have been admitted. */
+  created: string[];
+}
+
+/**
+ * Writes one admitted batch for a replayable command, without ever changing a
+ * file that is already there (#1652).
+ *
+ * The batch directory derives from the command's key, so a replay lands on the
+ * paths its first attempt wrote. `saveInboxFiles` rewrites them, which is
+ * harmless for identical bytes and destroys an accepted attachment for
+ * different ones, and a caller that then releases the batch on a refusal
+ * deletes a file an admitted message names. Here each file is published by
+ * linking a finished temporary copy into place, so a path is either absent or
+ * whole; one that already holds the same bytes is reused and reported as not
+ * created, and one that holds other bytes refuses the batch. A failure releases
+ * only what this call created.
+ */
+export function stageInboxFiles(files: readonly InboxFileUpload[], token: string): StagedInboxFiles {
+  const filePaths = inboxFilePaths(files, token);
+  const created: string[] = [];
+  if (!filePaths.length) return { filePaths, created };
+  const dir = path.dirname(filePaths[0]!);
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    files.forEach((file, index) => {
+      const target = filePaths[index]!;
+      const temporary = path.join(dir, `.${crypto.randomUUID()}.partial`);
+      fs.writeFileSync(temporary, file.data);
+      try {
+        fs.linkSync(temporary, target);
+        created.push(target);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        const existing = fs.statSync(target);
+        if (existing.size !== file.data.byteLength || !fs.readFileSync(target).equals(file.data)) {
+          throw new InboxFileConflictError(`${path.basename(target)} is already attached under this request with different contents`);
+        }
+      } finally {
+        try { fs.unlinkSync(temporary); } catch { /* already gone */ }
+      }
+    });
+  } catch (error) {
+    deleteInboxFiles(created);
+    throw error;
+  }
+  return { filePaths, created };
 }
 
 /**
@@ -199,5 +268,11 @@ export function buildFilePayload(
   token: string,
 ): InboxFilePayloadBundle {
   const filePaths = saveInboxFiles(files, token);
-  return { payload: [text, ...filePaths].filter(Boolean).join("\n"), filePaths };
+  return { payload: inboxFileText(text, filePaths), filePaths };
+}
+
+/** The delivered text for a batch at these paths: the words, then one path per
+    line. */
+export function inboxFileText(text: string, filePaths: readonly string[]): string {
+  return [text, ...filePaths].filter(Boolean).join("\n");
 }

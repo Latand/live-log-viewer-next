@@ -1269,6 +1269,14 @@ function canMessageWithoutPane(file: FileEntry): boolean {
 const unresolvedHandoffs = (id: string) =>
   readRetainedQueueAdmissions(id).filter((entry) => entry.mutation.action === "add");
 
+/** What a queue hand-off took from the composer, kept in memory so a refusal
+    can give the draft back whole. */
+interface QueueHandOffSnapshot {
+  text: string;
+  images: PendingImage[];
+  files: PendingFile[];
+}
+
 const draftKey = (id: string) => "llvDraft:" + id;
 const COMPOSE_EVENT = "llv-compose-draft";
 
@@ -3189,19 +3197,12 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
     if (composerSubmissionSaving(cardId)) return;
     const requestedText = textRef.current.trim();
     const requestedImages = attachments.imagesRef.current.map((image) => ({ ...image }));
+    const requestedFiles = attachments.filesRef.current.map((staged) => ({ ...staged }));
     if (!nativeQueueEnabled) {
       setStatus({ kind: "err", text: t("queue.queueUnavailable") });
       return;
     }
-    /* Codex's queue carries text and images. A staged document has no place in
-       its command, and handing the rest over used to clear the document from
-       the tray with nothing sent for it; the draft stays whole instead, and
-       Enter delivers the document by path. */
-    if (attachments.attachmentsRef.current.some((attachment) => attachment.kind === "file")) {
-      setStatus({ kind: "err", text: t("queue.filesUnsupported") });
-      return;
-    }
-    if (!requestedText && !requestedImages.length) return;
+    if (!requestedText && !requestedImages.length && !requestedFiles.length) return;
     if (voiceSending || reconcilingSend) return;
     if (effectiveSendBlockedReason) {
       setStatus({ kind: "err", text: effectiveSendBlockedReason });
@@ -3216,7 +3217,7 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
     /* #844: read at the submission instant, exactly as an ordinary send does —
        everything the reference will ever say is decided now. */
     const reference = viewerSelectedContext();
-    const snapshot = { text: textRef.current, images: requestedImages };
+    const snapshot = { text: textRef.current, images: requestedImages, files: requestedFiles };
     /* THE EXACT COMMAND, decided once and never rebuilt. The journal hashes the
        request behind an idempotency key and refuses a key whose payload changed,
        so a replay assembled from whatever the composer holds later is not a
@@ -3227,6 +3228,11 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
       ...(requestedImages.length
         ? { images: requestedImages.map((image) => ({ base64: image.base64, mime: image.mime })) as never }
         : {}),
+      /* A document rides the same envelope (#1652). The route writes it to the
+         inbox under this operation's key and folds its path into the queued
+         words, exactly as Enter does, so the bytes are part of what a replay
+         must repeat. */
+      ...(requestedFiles.length ? { files: requestedFiles.map(({ name, base64 }) => ({ name, base64 })) } : {}),
       /* AN AUDIT RECORD OF WHAT WAS ASKED FOR. Native's queue parameters carry no model or
          effort, so what the operator had selected when they queued is retained
          as what they asked for; the panel says what the thread is observed on
@@ -3288,7 +3294,7 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
    * the upload and the journal's answer run behind it: an acknowledgement that
    * takes seconds must not leave an enabled Send that silently does nothing.
    */
-  const handOffDurably = (candidate: RetainedQueueAdmission, snapshot: { text: string; images: PendingImage[] }) => {
+  const handOffDurably = (candidate: RetainedQueueAdmission, snapshot: QueueHandOffSnapshot) => {
     const draftRevision = composer.draftRevision.current;
     let admitted: RetainedQueueAdmission | undefined;
     void withComposerSubmission(cardId, async () => {
@@ -3312,7 +3318,7 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
       }
       setUnresolvedAdmissions(unresolvedHandoffs(cardId));
       if (composer.draftRevision.current === draftRevision) setText("");
-      attachments.settleDelivered(snapshot.images, []);
+      attachments.settleDelivered(snapshot.images, snapshot.files);
       setStatus({ kind: "ok", text: t("queue.queueMessage") });
       inputRef.current?.focus();
       admitted = envelope;
@@ -3321,7 +3327,7 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
     });
   };
 
-  const submitHandOff = async (envelope: RetainedQueueAdmission, snapshot: { text: string; images: PendingImage[] }) => {
+  const submitHandOff = async (envelope: RetainedQueueAdmission, snapshot: QueueHandOffSnapshot) => {
     const answer = await nativeQueue.submit({ ...envelope.mutation, binding: envelope.binding }, envelope.key);
     /* Both terminal answers end THIS operation's uncertainty, and nothing
        else's. `ok` is the journal's own identified receipt for it — including
@@ -3343,7 +3349,7 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
     setStatus({ kind: "err", text: answer.error ?? t("queue.refused") });
     if (textRef.current.trim() || attachments.attachmentsRef.current.length) return;
     setText(snapshot.text);
-    if (snapshot.images.length) attachments.replace(snapshot.images);
+    if (snapshot.images.length || snapshot.files.length) attachments.replace(snapshot.images, snapshot.files);
   };
 
   /**
@@ -3758,7 +3764,8 @@ export const TmuxComposerCore = memo(function TmuxComposerCore({
           unresolved={unresolvedAdmissions.map((entry) => ({
             key: entry.key,
             text: entry.mutation.text ?? "",
-            imageCount: entry.payload?.images ?? entry.mutation.images?.length ?? 0,
+            imageCount: (entry.payload?.images ?? entry.mutation.images?.length ?? 0)
+              + (entry.payload?.files ?? entry.mutation.files?.length ?? 0),
           }))}
           onReplay={replayQueueAdmission}
           mintKey={mintIdempotencyKey}

@@ -120,3 +120,33 @@ test("a small command stays inline and synchronous", () => {
   expect(retainQueueAdmission(CARD, small)).toBe("retained");
   expect(JSON.parse(slot()!)).toEqual([small]);
 });
+
+test("a document rides the durable envelope, and its bytes are part of what names the operation", async () => {
+  const document = { name: "trace.bin", base64: "AP8QgH8ADQo=".repeat(40_000) };
+  const envelope: RetainedQueueAdmission = { key: "key-document", binding,
+    mutation: { action: "add", text: "trace attached", files: [document] } };
+  /* Files alone take a hand-off past the slot, exactly as images do. */
+  expect(queueEnvelopeNeedsDurableBytes(envelope)).toBe(true);
+  expect(await retainDurableQueueAdmission(CARD, envelope)).toBe("retained");
+  expect(slot()!).not.toContain(document.base64.slice(0, 64));
+  const [record] = readRetainedQueueAdmissions(CARD);
+  expect(record!.payload).toMatchObject({ images: 0, files: 1 });
+  expect(record!.mutation.files).toBeUndefined();
+  expect(await restoreQueueAdmission(CARD, record!)).toEqual(envelope);
+  expect((await findRetainedQueueAdmission(CARD, envelope.mutation))?.key).toBe("key-document");
+  const other = { ...envelope.mutation, files: [{ ...document, base64: "AAAA".repeat(40_000) }] };
+  expect(await findRetainedQueueAdmission(CARD, other)).toBeUndefined();
+});
+
+test("a hand-off retained before files could ride keeps the identity it was stored under", async () => {
+  /* The authored digest of a message with no files is unchanged, so a record a
+     previous build wrote is still found by pressing the same message again. */
+  const envelope = handOff("four screenshots");
+  expect(await retainDurableQueueAdmission(CARD, envelope)).toBe("retained");
+  const stored = JSON.parse(slot()!) as Array<{ payload: { authored: string } }>;
+  const legacy = JSON.stringify({ action: "add", text: "four screenshots", images: envelope.mutation.images,
+    runtime: null, entryId: null, expectedRevision: null, queuedSubmissionIds: null, turnId: null });
+  const digest = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(legacy))),
+    (byte) => byte.toString(16).padStart(2, "0")).join("");
+  expect(stored[0]!.payload.authored).toBe(digest);
+});

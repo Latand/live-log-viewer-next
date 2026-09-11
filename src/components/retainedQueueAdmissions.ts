@@ -59,7 +59,7 @@ export interface RetainedQueueAdmission {
   binding: { threadId: string | null; accountId: string | null };
   /**
    * Present when the envelope's attachment bytes are kept in IndexedDB. The
-   * slot then holds everything else, and `mutation` carries no image bytes: a
+   * slot then holds everything else, and `mutation` carries no attachment bytes: a
    * replay restores the whole envelope and verifies it before it may leave.
    */
   payload?: RetainedQueuePayload;
@@ -79,6 +79,8 @@ export interface RetainedQueuePayload {
   fingerprint: string;
   bytes: number;
   images: number;
+  /** Absent on records written before a hand-off could carry files. */
+  files?: number;
   authored: string;
 }
 
@@ -188,6 +190,9 @@ function authoredQueueOperation(mutation: NativeQueueMutation): string {
     expectedRevision: mutation.expectedRevision ?? null,
     queuedSubmissionIds: mutation.queuedSubmissionIds ?? null,
     turnId: mutation.turnId ?? null,
+    /* Only when present, so an operation retained before files could ride a
+       hand-off keeps the identity it was stored under. */
+    ...(mutation.files?.length ? { files: mutation.files } : {}),
   });
 }
 
@@ -217,7 +222,8 @@ function validPayload(value: unknown): value is RetainedQueuePayload {
   const payload = value as Partial<RetainedQueuePayload> | null;
   return Boolean(payload) && typeof payload!.fingerprint === "string" && /^[a-f0-9]{64}$/.test(payload!.fingerprint)
     && typeof payload!.authored === "string" && /^[a-f0-9]{64}$/.test(payload!.authored)
-    && Number.isSafeInteger(payload!.bytes) && Number.isSafeInteger(payload!.images);
+    && Number.isSafeInteger(payload!.bytes) && Number.isSafeInteger(payload!.images)
+    && (payload!.files === undefined || Number.isSafeInteger(payload!.files));
 }
 
 function parseRetainedQueueAdmission(value: unknown): RetainedQueueAdmission | null {
@@ -358,7 +364,8 @@ const INLINE_ENVELOPE_LIMIT = 256 * 1024;
 const queuePayloads = new ComposerPayloadStore({ databaseName: "llv-queue-admissions-v1" });
 
 export function queueEnvelopeNeedsDurableBytes(record: RetainedQueueAdmission): boolean {
-  return Boolean(record.mutation.images?.length) && JSON.stringify(record).length > INLINE_ENVELOPE_LIMIT;
+  return Boolean(record.mutation.images?.length || record.mutation.files?.length)
+    && JSON.stringify(record).length > INLINE_ENVELOPE_LIMIT;
 }
 
 async function authoredDigest(mutation: NativeQueueMutation): Promise<string> {
@@ -399,9 +406,10 @@ export async function retainDurableQueueAdmission(id: string, record: RetainedQu
   } catch {
     return "refused";
   }
-  const { images, ...command } = record.mutation;
+  const { images, files, ...command } = record.mutation;
   const outcome = retainQueueAdmission(id, { key: record.key, binding: record.binding, mutation: command,
-    payload: { fingerprint: ref.fingerprint, bytes: ref.bytes, images: images?.length ?? 0, authored } });
+    payload: { fingerprint: ref.fingerprint, bytes: ref.bytes, images: images?.length ?? 0,
+      ...(files?.length ? { files: files.length } : {}), authored } });
   if (outcome === "refused") await queuePayloads.release(ref).catch(() => false);
   return outcome;
 }

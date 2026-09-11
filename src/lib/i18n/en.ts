@@ -2454,7 +2454,6 @@ export const en = {
   "queue.unresolved": { one: "{count} hand-off has no answer yet. Sending it again asks Codex about the same message rather than adding another.", other: "{count} hand-offs have no answer yet. Sending one again asks Codex about the same message rather than adding another." },
   "queue.unresolvedRetry": "Send it again",
   "queue.unresolvedNoText": { one: "{count} attachment", other: "{count} attachments" },
-  "queue.filesUnsupported": "Codex's queue takes text and images only, so nothing was queued and the draft is unchanged. Send it with Enter to deliver the file, or remove the file to queue the rest.",
   "queue.queueUnavailable": "This conversation's Codex host has not advertised queue support.",
   "queue.steerMessage": "Steer the running turn",
   "queue.steerHint": "Adds to the turn already running instead of interrupting it.",

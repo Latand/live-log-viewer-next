@@ -885,6 +885,7 @@ async function withHeldLargeHandOff(
     host: HTMLElement;
     answer: (reply: () => Promise<{ status: number; body: Record<string, unknown> }>) => Promise<void>;
   }) => Promise<void>,
+  options: { document?: boolean } = {},
 ): Promise<void> {
   const storage = installComposerStorageForTests();
   const previous = queueTransport.write;
@@ -898,6 +899,7 @@ async function withHeldLargeHandOff(
   const { host, root } = await mount();
   try {
     await stage(host, { name: "large.png", type: "image/png", size: 300_000 }, LARGE_IMAGE);
+    if (options.document) await stage(host, { name: "fixture.bin", type: "application/octet-stream", size: 8 }, DOCUMENT);
     await settle(() => appendComposerDraft(CARD, "large hand-off"));
     await settle(() => press(host.querySelector("textarea") as HTMLTextAreaElement, "Enter", { altKey: true }));
     await until(() => queueWrites.length === 1, "the large hand-off to reach the wire");
@@ -1020,21 +1022,75 @@ test("a held large answer that is lost keeps the original operation, and its rep
   });
 });
 
-test("a staged document is never cleared by a queue hand-off that cannot carry it", async () => {
-  /* The queue's command has text and images and nothing else. Handing the rest
-     over cleared the document from the tray with nothing sent for it, so the
-     hand-off is refused whole and Enter, which delivers documents by path,
-     stays the way to send it. */
-  const { host, root } = await mount();
-  await stage(host, { name: "fixture.bin", type: "application/octet-stream", size: 12 });
-  await stage(host, { name: "shot.png", type: "image/png", size: 12 });
-  await settle(() => appendComposerDraft(CARD, "image and file"));
-  await settle(() => press(host.querySelector("textarea") as HTMLTextAreaElement, "Enter", { altKey: true }));
-  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+const DOCUMENT = "data:application/octet-stream;base64,AP8QgH8ADQo=";
 
-  expect(queueWrites).toEqual([]);
-  expect((host.querySelector("textarea") as HTMLTextAreaElement).value).toBe("image and file");
-  expect(host.querySelectorAll('[data-testid="attachment-tile"]')).toHaveLength(2);
-  expect(host.textContent).toContain("takes text and images only");
+test("a staged document rides the queue hand-off beside its image, and a refusal gives both back ready", async () => {
+  /* #1652: the queue route takes files the way Enter does, so the hand-off
+     carries the whole tray. A refusal admitted nothing, so the document comes
+     back with its bytes and can be queued again as it was. */
+  const { host, root } = await mount();
+  await stage(host, { name: "fixture.bin", type: "application/octet-stream", size: 8 }, DOCUMENT);
+  await stage(host, { name: "shot.png", type: "image/png", size: 12 });
+  const previous = queueTransport.write;
+  (queueTransport as { write: NativeQueueDependencies["write"] }).write = async (body) => {
+    queueWrites.push(body);
+    return queueWrites.length === 1
+      ? { status: 409, body: { error: "native queue host or account ownership changed" } }
+      : journalReceipt(body);
+  };
+  try {
+    await settle(() => appendComposerDraft(CARD, "image and file"));
+    await settle(() => press(host.querySelector("textarea") as HTMLTextAreaElement, "Enter", { altKey: true }));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+
+    expect(queueWrites[0]).toMatchObject({ action: "add", text: "image and file", files: [{ name: "fixture.bin", base64: "AP8QgH8ADQo=" }] });
+    expect((queueWrites[0]!.images as unknown[])).toHaveLength(1);
+    expect((host.querySelector("textarea") as HTMLTextAreaElement).value).toBe("image and file");
+    const tiles = [...host.querySelectorAll('[data-testid="attachment-tile"]')];
+    expect(tiles.map((tile) => `${tile.getAttribute("data-kind")}:${tile.getAttribute("data-status")}`).sort()).toEqual(["file:ready", "image:ready"]);
+    expect(readRetainedQueueAdmissions(CARD)).toEqual([]);
+
+    await settle(() => press(host.querySelector("textarea") as HTMLTextAreaElement, "Enter", { altKey: true }));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    expect(queueWrites).toHaveLength(2);
+    expect(queueWrites[1]!.files).toEqual(queueWrites[0]!.files);
+    expect(queueWrites[1]!.idempotencyKey).not.toBe(queueWrites[0]!.idempotencyKey);
+    expect((host.querySelector("textarea") as HTMLTextAreaElement).value).toBe("");
+    expect(host.querySelectorAll('[data-testid="attachment-tile"]')).toHaveLength(0);
+    expect(readOutbox(CARD)).toEqual([]);
+    expect(sends).toEqual([]);
+  } finally {
+    (queueTransport as { write: NativeQueueDependencies["write"] }).write = previous;
+  }
   await act(async () => root.unmount());
+});
+
+test("a large hand-off keeps its document in the durable envelope, and a lost answer replays the same files", async () => {
+  await withHeldLargeHandOff(async ({ host, answer }) => {
+    expect(queueWrites[0]!.files).toEqual([{ name: "fixture.bin", base64: "AP8QgH8ADQo=" }]);
+    const [retained] = readRetainedQueueAdmissions(CARD);
+    /* The bytes are in IndexedDB; the slot names how many rode along. */
+    expect(retained?.payload).toMatchObject({ images: 1, files: 1 });
+    expect(retained?.mutation.files).toBeUndefined();
+    expect(host.querySelectorAll('[data-testid="attachment-tile"]')).toHaveLength(0);
+
+    /* Enter is the operator's while the answer is held. */
+    await settle(() => appendComposerDraft(CARD, "small command"));
+    await settle(() => press(host.querySelector("textarea") as HTMLTextAreaElement, "Enter"));
+    await until(() => sends.length === 1, "the ordinary command to be sent");
+    expect(sends[0]).toMatchObject({ text: "small command" });
+
+    await answer(async () => { throw new Error("network is unreachable"); });
+    expect(readRetainedQueueAdmissions(CARD)[0]?.key).toBe(queueWrites[0]!.idempotencyKey as string);
+    const retry = host.querySelector('[data-testid="native-queue-unresolved-retry"]') as HTMLButtonElement;
+    expect(host.querySelector('[data-testid="native-queue-unresolved-row"]')?.textContent).toContain("large hand-off");
+    await settle(() => retry.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
+    await until(() => queueWrites.length === 2, "the replay");
+    expect(queueWrites[1]!.idempotencyKey).toBe(queueWrites[0]!.idempotencyKey);
+    expect(queueWrites[1]!.files).toEqual(queueWrites[0]!.files);
+    expect(JSON.stringify(queueWrites[1]!.images)).toBe(JSON.stringify(queueWrites[0]!.images));
+    expect(JSON.stringify(queueWrites[1]!.binding)).toBe(JSON.stringify(queueWrites[0]!.binding));
+    await answer(async () => journalReceipt(queueWrites[1]!));
+    expect(readRetainedQueueAdmissions(CARD)).toEqual([]);
+  }, { document: true });
 });

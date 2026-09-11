@@ -110,6 +110,8 @@ const operationsFor=key=>runtime.journal.db.query('SELECT operation_id FROM oper
 const entryFor=key=>entries().find(entry=>entry.versions.some(version=>operationKey(version.operationId)===key));
 const rpcCount=(method,predicate=()=>true)=>runtime.rpc.filter(call=>call.method===method&&predicate(call.params)).length;
 const shas=files=>files.map(file=>sha(file.buffer));
+/* The inbox path a queued entry's canonical text names for this file. */
+const queuedFilePath=(entry,name)=>(entry?.proof?.input??[]).filter(item=>item.type==='text').flatMap(item=>item.text.split('\n')).find(line=>line.startsWith('/')&&line.endsWith('/'+name));
 /* Provider requests whose newest user message carried exactly these images. */
 const providerTurnsWith=images=>runtime.provider.requests.filter(request=>JSON.stringify(request.images)===JSON.stringify(images));
 const providerTurnsWithText=text=>runtime.provider.requests.filter(request=>request.texts.some(value=>value.includes(text)));
@@ -127,9 +129,10 @@ try{
  await waitFor(()=>runtime.provider.open()===1,'the warm-up turn to reach the provider');
  await waitFor(async()=>(await runtime.host().health()).activeTurnRef!==null,'the warm-up turn to run');
 
- // 1. A four-image hand-off to Codex's queue; its answer is held on the wire.
- //    Enter on a small command goes at once, while the answer is still held.
- const queued={text:'Queued with four images',files:imagesFor(10)};
+ // 1. Four images and a binary file handed to Codex's queue as ONE envelope; its
+ //    answer is held on the wire. Enter on a small command goes at once, while
+ //    the answer is still held.
+ const queued={text:'Queued with four images and a file',files:[...imagesFor(10),binaryFor(10)]};
  await stage(page,queued.text,queued.files);
  let releaseHeld;faults.holdQueue={promise:new Promise(resolve=>{releaseHeld=resolve;})};
  await page.locator('textarea').press('Alt+Enter');
@@ -145,16 +148,21 @@ try{
  const small=lastWrite('/api/runtime/send');
  results.heldAnswer={queueAnswerStillHeld:!writes('/api/runtime/queue',queued.key)[0].answerReleasedAt,smallCommandWireMs:small.at-pressedAt,
   smallCommandStatus:null,draftCleared:await page.locator('textarea').inputValue()==='',slotCharsInFlight:writes('/api/runtime/queue',queued.key)[0].slotChars,
-  queueBodyBytes:writes('/api/runtime/queue',queued.key)[0].bodyBytes};
+  queueBodyBytes:writes('/api/runtime/queue',queued.key)[0].bodyBytes,
+  wireImagesMatch:JSON.stringify(writes('/api/runtime/queue',queued.key)[0].images)===JSON.stringify(shas(queued.files.slice(0,4))),
+  wireFileMatch:JSON.stringify(writes('/api/runtime/queue',queued.key)[0].files)===JSON.stringify([{name:queued.files[4].name,sha:sha(queued.files[4].buffer)}])};
  releaseHeld();
  await waitFor(async()=>(await slot(page))===null,'the held answer to release the hand-off identity');
  await waitFor(()=>small.status!==undefined,'the small command answer');
  results.heldAnswer.smallCommandStatus=small.status;
  assert(results.heldAnswer.queueAnswerStillHeld&&results.heldAnswer.smallCommandWireMs<2000&&results.heldAnswer.draftCleared
-  &&results.heldAnswer.slotCharsInFlight>0&&results.heldAnswer.slotCharsInFlight<4096&&results.heldAnswer.queueBodyBytes>16*1024*1024,'The held queue answer blocked the next command');
+  &&results.heldAnswer.slotCharsInFlight>0&&results.heldAnswer.slotCharsInFlight<4096&&results.heldAnswer.queueBodyBytes>16*1024*1024
+  &&results.heldAnswer.wireImagesMatch&&results.heldAnswer.wireFileMatch,'The held queue answer blocked the next command');
  fs.writeFileSync(path.join(out,'progress.json'),JSON.stringify(redact({results,wire,provider:runtime.provider.requests,entries:entries(),rpc:runtime.rpc.map(call=>call.method)}),null,2));
 
- // 2. The queued entry is dispatched by Codex as one canonical input with the exact images.
+ // 2. The queued entry is dispatched by Codex as one canonical input with the
+ //    exact images, and the file its words name reads back from Codex's own
+ //    namespace byte for byte.
  for(let turns=0;turns<6&&entryFor(queued.key)?.state!=='delivered';turns++){
   while(runtime.provider.open()>0)runtime.provider.completeNext();
   await Bun.sleep(1000);
@@ -163,25 +171,33 @@ try{
  const queuedEntry=entryFor(queued.key);
  const localImages=(queuedEntry.proof?.input??[]).filter(item=>item.type==='localImage');
  const engineImages=[];for(const item of localImages)engineImages.push(sha(await engineRead(item.path)));
- results.nativeDispatch={state:queuedEntry.state,binding:queuedEntry.binding,journalOperations:operationsFor(queued.key),
+ const queuedFile=queuedFilePath(queuedEntry,queued.files[4].name);
+ results.nativeDispatch={inputKinds:(queuedEntry.proof?.input??[]).map(item=>item.type),versions:queuedEntry.versions.length,
+  filePathInInbox:Boolean(queuedFile),engineFileMatch:queuedFile?sha(await engineRead(queuedFile))===sha(queued.files[4].buffer):false,
+  providerFileText:queuedFile?providerTurnsWith(shas(queued.files.slice(0,4))).some(request=>request.texts.some(text=>text.includes(queuedFile))):false,state:queuedEntry.state,binding:queuedEntry.binding,journalOperations:operationsFor(queued.key),
   queueAdds:rpcCount('thread/queue/add',params=>JSON.stringify(params).includes(queuedEntry.clientUserMessageId)),
   proofClient:queuedEntry.proof?.clientUserMessageId===queuedEntry.clientUserMessageId,proofText:(queuedEntry.proof?.input??[]).filter(item=>item.type==='text').map(item=>item.text.slice(-40)),
-  engineImagesMatch:JSON.stringify(engineImages)===JSON.stringify(shas(queued.files)),
-  providerTurns:providerTurnsWith(shas(queued.files)).length,
+  engineImagesMatch:JSON.stringify(engineImages)===JSON.stringify(shas(queued.files.slice(0,4))),
+  providerTurns:providerTurnsWith(shas(queued.files.slice(0,4))).length,
   terminalReplay:await askAgain('/api/runtime/queue',queued.key),
-  storeImagesMatch:JSON.stringify(queuedEntry.versions[0].images.map(ref=>sha(runtimeImageStore().read(ref))))===JSON.stringify(shas(queued.files))};
+  storeImagesMatch:JSON.stringify(queuedEntry.versions[0].images.map(ref=>sha(runtimeImageStore().read(ref))))===JSON.stringify(shas(queued.files.slice(0,4)))};
+ results.nativeDispatch.fileSurvivesTerminalReplay=queuedFile?sha(fs.readFileSync(queuedFile))===sha(queued.files[4].buffer):false;
  assert(results.nativeDispatch.binding.threadId===threadId&&results.nativeDispatch.journalOperations===1&&results.nativeDispatch.queueAdds===1
   &&results.nativeDispatch.proofClient&&results.nativeDispatch.engineImagesMatch&&results.nativeDispatch.providerTurns===1&&results.nativeDispatch.storeImagesMatch
-  &&results.nativeDispatch.terminalReplay.status===202&&operationsFor(queued.key)===1&&rpcCount('thread/queue/add',params=>JSON.stringify(params).includes(queuedEntry.clientUserMessageId))===1,'Native dispatch was not one exact canonical input');
+  &&results.nativeDispatch.filePathInInbox&&results.nativeDispatch.engineFileMatch&&results.nativeDispatch.providerFileText&&results.nativeDispatch.versions===1
+  &&JSON.stringify([...results.nativeDispatch.inputKinds].sort())===JSON.stringify(['localImage','localImage','localImage','localImage','text'])
+  &&results.nativeDispatch.terminalReplay.status===202&&results.nativeDispatch.terminalReplay.receipt==='delivered'&&results.nativeDispatch.fileSurvivesTerminalReplay
+  &&operationsFor(queued.key)===1&&rpcCount('thread/queue/add',params=>JSON.stringify(params).includes(queuedEntry.clientUserMessageId))===1,'Native dispatch was not one exact canonical input');
  fs.writeFileSync(path.join(out,'progress.json'),JSON.stringify(redact({results,wire,provider:runtime.provider.requests,entries:entries(),rpc:runtime.rpc.map(call=>call.method)}),null,2));
  while(runtime.provider.open()>0)runtime.provider.completeNext();
  await waitFor(async()=>(await runtime.host().health()).activeTurnRef===null,'the thread to go idle');
 
- // 3. A hand-off whose answer is lost; reload; the unresolved row replays the same operation once.
+ // 3. An image-and-file hand-off whose answer is lost; reload; the unresolved
+ //    row replays the same operation once, and the file is still the one sent.
  await stage(page,'Warm-up before the lost answer',[]);
  await page.locator('textarea').press('Enter');
  await waitFor(()=>runtime.provider.open()===1,'a running turn before the lost answer');
- const lost={text:'Queued, answer lost',files:imagesFor(20)};
+ const lost={text:'Queued, answer lost',files:[...imagesFor(20),binaryFor(20)]};
  await stage(page,lost.text,lost.files);
  faults.dropQueue=true;
  await page.locator('textarea').press('Alt+Enter');
@@ -198,23 +214,28 @@ try{
  const [lostWrite,replayWrite]=writes('/api/runtime/queue',lost.key);
  results.lostAnswer={requestsOnReload:wire.filter(entry=>entry.key).length-wireAtReload-1,sameEnvelope:lostWrite.sha===replayWrite.sha,sameBinding:JSON.stringify(lostWrite.binding)===JSON.stringify(replayWrite.binding),
   replayStatus:replayWrite.status,journalOperations:operationsFor(lost.key),queueAdds:rpcCount('thread/queue/add',params=>JSON.stringify(params).includes(entryFor(lost.key).clientUserMessageId)),
-  providerTurns:providerTurnsWith(shas(lost.files)).length,slotAfter:await slot(page)};
+  providerTurns:providerTurnsWith(shas(lost.files.slice(0,4))).length,slotAfter:await slot(page),
+  replayFileMatch:JSON.stringify(replayWrite.files)===JSON.stringify([{name:lost.files[4].name,sha:sha(lost.files[4].buffer)}])};
+ const lostFile=queuedFilePath(entryFor(lost.key),lost.files[4].name);
+ results.lostAnswer.engineFileMatch=lostFile?sha(await engineRead(lostFile))===sha(lost.files[4].buffer):false;
+ results.lostAnswer.terminalReplay=await askAgain('/api/runtime/queue',lost.key);
+ results.lostAnswer.fileSurvivesTerminalReplay=lostFile?sha(fs.readFileSync(lostFile))===sha(lost.files[4].buffer):false;
  assert(results.lostAnswer.sameEnvelope&&results.lostAnswer.sameBinding&&results.lostAnswer.journalOperations===1&&results.lostAnswer.queueAdds===1
-  &&results.lostAnswer.providerTurns===1&&results.lostAnswer.slotAfter===null,'The lost hand-off was not recovered as one delivered operation');
+  &&results.lostAnswer.providerTurns===1&&results.lostAnswer.slotAfter===null&&results.lostAnswer.replayFileMatch&&results.lostAnswer.engineFileMatch
+  &&results.lostAnswer.terminalReplay.receipt==='delivered'&&results.lostAnswer.fileSurvivesTerminalReplay&&operationsFor(lost.key)===1,'The lost hand-off was not recovered as one delivered operation');
  while(runtime.provider.open()>0)runtime.provider.completeNext();
  await waitFor(async()=>(await runtime.host().health()).activeTurnRef===null,'the thread to go idle again');
 
- // 4. Codex's queue has no place for a document: the hand-off is refused whole, nothing leaves.
+ /* The unknown answer gave the draft back, and the reload restores its file as
+    a named slot to attach again, never as bytes (#1224); nothing is sent from
+    it. It is cleared the way an operator would before the next draft. */
+ results.lostAnswer.trayAfterReload=await page.evaluate(()=>[...document.querySelectorAll('[data-testid="attachment-tile"]')].map(tile=>`${tile.dataset.kind}:${tile.dataset.status}`));
+ while(await tiles(page))await page.locator('[data-testid="attachment-tile"] button[aria-label^="Remove"]').first().click();
+
+ // 4. The same kind of draft through Enter: four images and the document, with its answer lost.
  const mixed={text:'Images and a document',files:[...imagesFor(30),binaryFor(30)]};
  await stage(page,mixed.text,mixed.files);
- const queueWritesBefore=wire.filter(entry=>entry.path==='/api/runtime/queue').length;
- await page.locator('textarea').press('Alt+Enter');
- await page.getByText('takes text and images only',{exact:false}).first().waitFor();
- await Bun.sleep(300);
- results.queueWithDocument={writes:wire.filter(entry=>entry.path==='/api/runtime/queue').length-queueWritesBefore,draft:await page.locator('textarea').inputValue(),tiles:await tiles(page)};
- assert(results.queueWithDocument.writes===0&&results.queueWithDocument.draft===mixed.text&&results.queueWithDocument.tiles===5,'A document was dropped by a queue hand-off');
-
- // 5. The same draft through Enter: four images and the document, with its answer lost.
+ assert(await tiles(page)===5,'The Enter draft was not staged whole');
  faults.dropSend=true;
  await page.locator('textarea').press('Enter');
  await waitFor(()=>wire.some(entry=>entry.answerDropped&&entry.path==='/api/runtime/send'),'the ordinary send whose answer is lost');

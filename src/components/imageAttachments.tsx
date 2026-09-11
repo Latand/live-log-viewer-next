@@ -469,8 +469,9 @@ export function useImageAttachments(handlers: {
        NAMED, un-restored slot and never as bytes (#1224). A document's base64
        does not fit synchronous browser storage, so the alternative to naming it
        is the file evaporating on a card switch or a phone tab restore with
-       nothing said — the same treatment the outbox gives `needsReattach`. */
-    replace: (next: PendingImage[], files: readonly RestoredFile[] = []) => {
+       nothing said — the same treatment the outbox gives `needsReattach`. A
+       file handed back WITH its bytes is restored ready. */
+    replace: (next: PendingImage[], files: readonly (RestoredFile | PendingFile)[] = []) => {
       if (!reportPendingLimit(next)) return false;
       for (const attachment of attachmentsRef.current) revokePreview(attachment);
       const restoredImages = next.map((image): PendingAttachment => ({
@@ -486,6 +487,16 @@ export function useImageAttachments(handlers: {
       }));
       const restoredFiles = files.map((file): PendingAttachment => {
         const name = file.name || translate(getLocale(), "attach.file");
+        /* A draft given back from memory still has its bytes — a queue hand-off
+           the runtime refused — and comes back deliverable, as it was staged. */
+        if ("base64" in file && file.base64) {
+          const mime = file.mime || "application/octet-stream";
+          return {
+            id: file.id, kind: "file", status: "ready", name, mime, preview: "", base64: file.base64,
+            file: new File([Uint8Array.from(atob(file.base64), (char) => char.charCodeAt(0))], name, { type: mime }),
+            ownsPreview: false,
+          };
+        }
         return {
           id: file.id ?? mintAttachmentId(),
           kind: "file",
