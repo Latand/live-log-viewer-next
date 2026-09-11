@@ -6,7 +6,9 @@ import type { RuntimeReceipt } from "@/components/runtime/runtimeModel";
 import type { RuntimeSessionView } from "@/hooks/useRuntime";
 import { translate } from "@/lib/i18n";
 
-import { deliveryAttemptKey, mergeRuntimeReceipts, RuntimeComposerReceipts, structuredComposerSession } from "./TmuxComposer";
+import { payloadAttemptState } from "@/lib/composerSubmissionPayloads";
+
+import { deliveryAttemptKey, mergeRuntimeReceipts, payloadReceiptEvidence, RuntimeComposerReceipts, structuredComposerSession } from "./TmuxComposer";
 
 function runtimeSession(structuredControlsEnabled: boolean): RuntimeSessionView {
   return {
@@ -633,4 +635,28 @@ test("identity adoption moves composer records across id rotations in both direc
     if (previous === undefined) delete globalStore.sessionStorage;
     else globalStore.sessionStorage = previous;
   }
+});
+
+test("a retained message follows its journal retry leaf in both receipt shapes", () => {
+  const base = { conversationId: "conv-one", kind: "send" as const, at: "2026-09-11T00:00:00.000Z" };
+  const admitted: RuntimeReceipt = { ...base, operationId: "op-original", idempotencyKey: "key-one", status: "failed", revision: 2 };
+  /* A live event carries the raw leaf; a snapshot presents it under the
+     admitted operation. Both are the same journal fact at revision 3. */
+  const rawLeaf = { ...base, operationId: "retry_leaf", idempotencyKey: "retry_leaf", retryOfOperationId: "op-original",
+    presentationOperationId: "op-original", presentationRevision: 3, status: "queued", revision: 1 } as RuntimeReceipt;
+  const presentedLeaf = { ...base, operationId: "op-original", idempotencyKey: "retry_leaf", retryOfOperationId: "op-original",
+    status: "delivered", revision: 4 } as RuntimeReceipt;
+  const foreign = { ...base, operationId: "op-other", idempotencyKey: "retry_other", retryOfOperationId: "op-other", status: "delivered", revision: 9 } as RuntimeReceipt;
+  const marker = { ...admitted, status: "uncertain", resend: "verify-first", retryAuthorized: true, revision: 5 } as RuntimeReceipt;
+  const row = { conversationId: "conv-one", key: "key-one", operationId: null };
+
+  const evidence = payloadReceiptEvidence(row, [presentedLeaf, foreign, marker, rawLeaf, admitted]);
+  expect(evidence.map((receipt) => [receipt.operationId, receipt.revision, receipt.status])).toEqual([
+    ["op-original", 2, "failed"], ["op-original", 3, "queued"], ["op-original", 4, "delivered"],
+  ]);
+  expect(payloadReceiptEvidence({ ...row, conversationId: "conv-two" }, evidence)).toEqual([]);
+  /* The durable state reads the same chain: the current attempt is the leaf. */
+  expect(payloadAttemptState("key-one", evidence)).toMatchObject({ operationId: "op-original", current: { status: "delivered", revision: 4 } });
+  /* A leaf alone names no message: without the admitted operation it binds nothing. */
+  expect(payloadAttemptState("key-one", [presentedLeaf]).operationId).toBeNull();
 });

@@ -51,9 +51,10 @@ try {
  else {
    await page.locator('[data-payload-key] summary').first().click();
    await page.locator('[data-payload-retry]').click();
-   await page.waitForFunction(()=>window.payloadFixture.requests.length===1,{},{timeout:15000}).catch(async error=>{await page.screenshot({path:path.join(out,'failed-send.png')});fs.writeFileSync(path.join(out,'failed-dom.txt'),await page.locator('body').innerText());throw error;});
-   const retried=await page.evaluate(()=>window.payloadFixture.requests.map(r=>({key:r.idempotencyKey,images:r.images?.length,bytes:r.images?.map(i=>i.base64.length),files:r.files?.length})));
-   assert(retried[0].key===before.requests[0].key && retried[0].images===4 && retried[0].files===1 && retried[0].bytes.every(n=>n===4194304),'Original-key retry lost attachment bytes');
+   await page.waitForFunction(()=>window.payloadFixture.retries.length===1,{},{timeout:15000}).catch(async error=>{await page.screenshot({path:path.join(out,'failed-send.png')});fs.writeFileSync(path.join(out,'failed-dom.txt'),await page.locator('body').innerText());throw error;});
+   // The admitted operation is retried by the journal; the bytes stay retained until its leaf settles.
+   const retried=await page.evaluate(async key=>{const row=(await window.payloadFixture.saved()).find(item=>item?.ref.key===key);return {retries:window.payloadFixture.retries,resends:window.payloadFixture.requests.length,images:row?.envelope.body.images.length,bytes:row?.envelope.body.images.map(i=>i.base64.length),files:row?.envelope.body.files.length};},before.requests[0].key);
+   assert(retried.retries.join()==='fixture-operation' && retried.resends===0 && retried.images===4 && retried.files===1 && retried.bytes.every(n=>n===4194304),'Retry resent or lost the retained attachment bytes');
    result.retried=retried;
    await page.screenshot({path:path.join(out,'recovery-open.png')});
    fs.writeFileSync(path.join(out,'composer-browser.json'),JSON.stringify(result,null,2));

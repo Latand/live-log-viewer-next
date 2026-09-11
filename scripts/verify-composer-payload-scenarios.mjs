@@ -37,6 +37,14 @@ const digest=page=>page.evaluate(async()=>{
  return {key:request.idempotencyKey,sha:Array.from(new Uint8Array(hash),v=>v.toString(16).padStart(2,'0')).join(''),images:request.images.length,files:request.files.length};
 });
 const savedCount=page=>page.evaluate(async()=>(await window.payloadFixture.saved()).filter(Boolean).length);
+// The sealed envelope a retained message owns; a retry never rewrites it.
+const envelopeDigest=(page,key)=>page.evaluate(async key=>{
+ const row=(await window.payloadFixture.saved()).find(item=>item?.ref.key===key);
+ const hash=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify(row.envelope)));
+ return {images:row.submission.images.length,files:row.submission.files.length,sha:Array.from(new Uint8Array(hash),v=>v.toString(16).padStart(2,'0')).join('')};
+},key);
+// The journal's answer to one retry: the leaf fails again, so the next control has work.
+const leafFails=page=>page.evaluate(()=>window.payloadFixture.receipts([{conversationId:'conversation_payload_fixture',idempotencyKey:'retry_fixture-operation',operationId:'fixture-operation',retryOfOperationId:'fixture-operation',kind:'send',status:'failed',reason:'Synthetic journal refusal before actuation',at:new Date().toISOString(),revision:window.payloadFixture.nextRevision()}]));
 try{
  await setup();
  // A real IndexedDB quota refuses the actual Send before clearing anything.
@@ -83,16 +91,24 @@ try{
  },{images:files.slice(0,4).map(file=>file.buffer.toString('base64')),file:files[4].buffer.toString('base64')});
  assert(results.originalBytes.images&&results.originalBytes.file,'Initial wire changed original uploaded bytes');
  const first=await digest(race);
- const beforeBubble=await race.evaluate(()=>window.payloadFixture.requests.length);
+ const sealed=await envelopeDigest(race,first.key);
+ // An admitted message is retried by the journal's operation contract, never resent.
  await race.locator('[data-outbox-retry]').first().click();
- await race.waitForFunction(count=>window.payloadFixture.requests.length===count+1,beforeBubble);
- results.bubbleRetry=await race.evaluate(()=>({sameKey:window.payloadFixture.requests[0].idempotencyKey===window.payloadFixture.requests[1].idempotencyKey,images:window.payloadFixture.requests[1].images.length,files:window.payloadFixture.requests[1].files.length}));
- assert(results.bubbleRetry.sameKey&&results.bubbleRetry.images===4&&results.bubbleRetry.files===1,'Existing bubble retry bypassed payload retention');
- await race.waitForFunction(()=>window.payloadFixture.state().outbox[0]?.state==='failed');
+ await race.waitForFunction(()=>window.payloadFixture.retries.length===1);
+ await race.waitForFunction(async key=>(await window.payloadFixture.saved()).find(row=>row?.ref.key===key)?.receipt?.status==='queued',first.key);
+ results.bubbleRetry=await race.evaluate(()=>({retried:window.payloadFixture.retries,requests:window.payloadFixture.requests.length}));
+ results.bubbleRetry.envelopeRetained=(await envelopeDigest(race,first.key)).sha===sealed.sha;
+ assert(results.bubbleRetry.retried.join()==='fixture-operation'&&results.bubbleRetry.requests===1&&results.bubbleRetry.envelopeRetained,'Existing bubble retry bypassed the operation contract or payload retention');
+ await leafFails(race);
+ await race.waitForFunction(async key=>(await window.payloadFixture.saved()).find(row=>row?.ref.key===key)?.retry==='operation',first.key);
  await race.evaluate(()=>window.payloadFixture.switchCard(true));await race.waitForTimeout(100);await race.evaluate(()=>window.payloadFixture.switchCard(false));
  await race.locator('[data-payload-key]').waitFor();assert(await savedCount(race)===1,'Card switch lost payload');
- await race.reload();await race.locator('[data-payload-key]').waitFor();await race.evaluate(()=>{window.payloadFixture.profile();window.payloadFixture.select('later');});await race.locator('[data-payload-key] summary').click();await race.locator('[data-payload-retry]').click();await sent(race);
- const second=await digest(race);results.sameKeyRetry={first,second};assert(first.key===second.key&&first.sha===second.sha,'Reload retry changed complete wire envelope');
+ await race.reload();await race.locator('[data-payload-key]').waitFor();await race.evaluate(()=>{window.payloadFixture.profile();window.payloadFixture.select('later');});await race.locator('[data-payload-key] summary').click();await race.locator('[data-payload-retry]').click();
+ await race.waitForFunction(()=>window.payloadFixture.retries.length===1);
+ results.reloadRetry={retried:await race.evaluate(()=>window.payloadFixture.retries),requests:await race.evaluate(()=>window.payloadFixture.requests.length),envelope:await envelopeDigest(race,first.key)};
+ assert(results.reloadRetry.retried.join()==='fixture-operation'&&results.reloadRetry.requests===0&&results.reloadRetry.envelope.sha===sealed.sha&&results.reloadRetry.envelope.images===4&&results.reloadRetry.envelope.files===1,'Reload retry resent or changed the complete envelope');
+ await leafFails(race);
+ await race.waitForFunction(async key=>(await window.payloadFixture.saved()).find(row=>row?.ref.key===key)?.retry==='operation',first.key);
  // Unknown original stays inert after reload and after closing the browser context.
  const unknown=await open('unknown','unknown');await stage(unknown,'Unknown original');await unknown.locator('textarea').press('Enter');await sent(unknown);
  const unknownKey=(await digest(unknown)).key;await unknown.reload();await unknown.locator('[data-payload-key]').waitFor();await unknown.waitForTimeout(200);
@@ -102,8 +118,10 @@ try{
  await context.close();await setup();const fresh=await open('unknown','unknown');await fresh.locator('[data-payload-key]').waitFor();
  results.newContext=await fresh.evaluate(async()=>{const rows=await window.payloadFixture.saved();return {requests:window.payloadFixture.requests.length,images:rows[0].submission.images.map(i=>i.base64.length),files:rows[0].submission.files.length,key:rows[0].ref.key};});
  assert(results.newContext.requests===0&&results.newContext.key===unknownKey&&results.newContext.images.every(n=>n===4194304)&&results.newContext.files===1,'New context lost bytes or sent unknown');
- const reopenedSafe=await open('race');await reopenedSafe.locator('[data-payload-key] summary').click();await reopenedSafe.locator('[data-payload-retry]').click();await sent(reopenedSafe);
- results.safeNewContext=await digest(reopenedSafe);assert(results.safeNewContext.key===first.key&&results.safeNewContext.sha===first.sha,'Fresh context safe retry changed original envelope');
+ const reopenedSafe=await open('race');await reopenedSafe.locator('[data-payload-key] summary').click();await reopenedSafe.locator('[data-payload-retry]').click();
+ await reopenedSafe.waitForFunction(()=>window.payloadFixture.retries.length===1);
+ results.safeNewContext={retried:await reopenedSafe.evaluate(()=>window.payloadFixture.retries),requests:await reopenedSafe.evaluate(()=>window.payloadFixture.requests.length),envelope:await envelopeDigest(reopenedSafe,first.key)};
+ assert(results.safeNewContext.retried.join()==='fixture-operation'&&results.safeNewContext.requests===0&&results.safeNewContext.envelope.sha===sealed.sha,'Fresh context retry resent or changed the original envelope');
  const legacy=await open('legacy');
  await legacy.evaluate(()=>{
    const pending=Array.from({length:4},(_,i)=>({key:'report-'+i,text:'Worker report '+i,images:[],payloadComplete:false}));

@@ -385,6 +385,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "composer.payloadFiles": "Файлів: {count}",
   "composer.payloadUnknown": "Результат доставки невідомий. Автоматичного повторного надсилання не буде.",
   "composer.payloadLocal": "Збережено локально. Надсилання не почалося.",
+  "composer.payloadRefused": "Відхилено до початку доставки: {reason}. Нічого не було прийнято, тож збережену копію можна надіслати знову або відкинути.",
   "composer.payloadChecking": "Перевіряємо квитанцію початкової доставки.",
   "composer.payloadNotChecking": "Автоматичну перевірку зупинено. Перевірте актуальний стан вручну.",
   "composer.payloadRecheck": "Перевірити доставку",

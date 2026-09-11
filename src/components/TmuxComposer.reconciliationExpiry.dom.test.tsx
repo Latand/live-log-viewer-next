@@ -1,4 +1,7 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeEach, expect, test } from "bun:test";
+
+import { composerSubmissionPayloads } from "@/lib/composerSubmissionPayloads";
+import { installComposerStorageForTests } from "@/test-helpers/composerStorage";
 import { Window } from "happy-dom";
 import { useLayoutEffect, useSyncExternalStore } from "react";
 import { flushSync } from "react-dom";
@@ -75,6 +78,35 @@ async function confirmSafeRetry(conversationId: string, key: string): Promise<vo
   expect(readOutbox(conversationId).find(entry => entry.id === key)?.deliveryUncertain).toBeUndefined();
 }
 
+/* The journal's answer to the operation retry of an admitted message: a leaf
+   presented under the operation it replaces, as `/api/runtime/operations`
+   returns it. */
+function operationRetryResponse(conversationId: string, operationId: string): Response {
+  return {
+    ok: true,
+    status: 202,
+    json: async () => ({
+      operationId: `retry-leaf-${operationId}`,
+      receipt: {
+        operationId, idempotencyKey: `retry-key-${operationId}`, retryOfOperationId: operationId,
+        conversationId, kind: "send", status: "queued", at: new Date().toISOString(), revision: 2,
+      },
+    }),
+  } as Response;
+}
+
+/** The retained copy's original image bytes, read back from durable storage. */
+async function retainedImages(conversationId: string, key: string): Promise<string[] | undefined> {
+  return (await composerSubmissionPayloads.restore({ conversationId, key }))?.submission.images.map((image) => image.base64);
+}
+
+async function until(condition: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 200 && !condition(); attempt += 1) await sleep(2);
+}
+
+/* Attachment submissions are kept in IndexedDB before they reach the wire. */
+const composerStorage = installComposerStorageForTests();
+afterAll(() => composerStorage.uninstall());
 
 beforeEach(() => {
   setRuntimeUiEnabledForTests(false);
@@ -97,6 +129,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  composerStorage.reset();
   setTmuxComposerRuntimeDependenciesForTests(null);
   setComposerAdmissionTimingForTests(null);
   setRuntimeUiEnabledForTests(null);
@@ -623,9 +656,15 @@ test("an image-bearing generation restores exact bytes across a remount on deskt
     const conversationId = `conv-expiry-image-remount-${width}`;
     const prompt = `restore the screenshot at ${width}`;
     const attempts: { key: string; images: string[] }[] = [];
+    const operationRetries: string[] = [];
     globalThis.fetch = (async (input, init) => {
       if (String(input) === "/api/tmux/targets") {
         return { ok: true, json: async () => ({ targets: { "0": null } }) } as Response;
+      }
+      const retried = /^\/api\/runtime\/operations\/(.+)$/.exec(String(input));
+      if (retried && init?.method === "POST") {
+        operationRetries.push(decodeURIComponent(retried[1]!));
+        return operationRetryResponse(conversationId, decodeURIComponent(retried[1]!));
       }
       if (String(input) !== "/api/tmux") throw new Error(`unexpected request: ${String(input)}`);
       const body = JSON.parse(String(init?.body)) as { clientMessageId: string; images?: { base64: string }[] };
@@ -677,6 +716,7 @@ test("an image-bearing generation restores exact bytes across a remount on deskt
       expect(host.querySelectorAll('[data-testid="attachment-tile"][data-status="ready"]')).toHaveLength(1);
 
       flushSync(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
+      await until(() => attempts.length === 1);
       await untilSendEnabled(host);
       expect(attempts[0]?.images).toHaveLength(1);
       expect(host.querySelectorAll('[data-testid="attachment-tile"]')).toHaveLength(0);
@@ -703,11 +743,16 @@ test("an image-bearing generation restores exact bytes across a remount on deskt
       textarea = host.querySelector("textarea") as HTMLTextAreaElement;
       const expired = readOutbox(conversationId).find((entry) => entry.text === prompt)!;
       await confirmSafeRetry(conversationId, expired.id);
-    flushSync(() => retryOutbox(conversationId, expired.id));
+      /* A receipt names an admitted operation: its retry is the journal's
+         operation contract, from the retained recovery row after remount. */
+      await until(() => host.querySelector("[data-payload-retry]") !== null);
+      flushSync(() => (host.querySelector("[data-payload-retry]") as HTMLButtonElement).click());
+      await until(() => operationRetries.length === 1);
       await sleep(0);
 
-      expect(attempts).toHaveLength(2);
-      expect(attempts[1]).toEqual(attempts[0]);
+      expect(operationRetries).toEqual([`safe-${attempts[0]!.key}`]);
+      expect(attempts).toHaveLength(1);
+      expect(await retainedImages(conversationId, attempts[0]!.key)).toEqual(attempts[0]!.images);
       expect((host.querySelector("textarea") as HTMLTextAreaElement).value).toBe(`later draft ${width}`);
       expect(host.querySelectorAll('[data-testid="attachment-tile"]')).toHaveLength(1);
       expect((host.querySelector('[data-testid="attachment-tile"] img') as HTMLImageElement).src).toBe(laterPreview);
@@ -876,7 +921,7 @@ test("a terminal failure after the window exposes Retry and re-enables the compo
   }
 });
 
-test("an incomplete quota snapshot stays fenced through remount until authoritative settlement", async () => {
+test("an incomplete quota snapshot is never replayed through remount and settles on its authoritative receipt", async () => {
   setLocale("en");
   for (const [width, mobile] of [[1440, false], [390, true]] as const) {
     mobileViewport = mobile;
@@ -911,9 +956,11 @@ test("an incomplete quota snapshot stays fenced through remount until authoritat
     const textarea = host.querySelector("textarea") as HTMLTextAreaElement;
     const form = textarea.closest("form")!;
     try {
+      /* Only its metadata survived, so it is never sent again; a separately
+         authored draft is not held behind it. */
       await sleep(70);
-      expect(submitButton(host).disabled).toBe(true);
       expect(sent).toEqual([]);
+      expect(host.querySelector("[data-payload-incomplete]")).not.toBeNull();
 
       flushSync(() => publishReceipts([{
         operationId: `op-quota-${width}`,
@@ -930,7 +977,7 @@ test("an incomplete quota snapshot stays fenced through remount until authoritat
       expect(sessionStorage.getItem(`llvPendingSend:${conversationId}`)).toBeNull();
 
       flushSync(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
-      await sleep(0);
+      await until(() => sent.length === 1);
       expect(sent).toHaveLength(1);
       expect(sent[0]?.text).toBe(later);
       expect(sent[0]?.key).not.toBe(`key-quota-${width}`);
@@ -954,9 +1001,15 @@ test("an edited image tray retries the immutable images and preserves later atta
     const prompt = `compare both shots at ${width}`;
     const sentKeys: string[] = [];
     const sentImages: string[][] = [];
+    const operationRetries: string[] = [];
     globalThis.fetch = (async (input, init) => {
       if (String(input) === "/api/tmux/targets") {
         return { ok: true, json: async () => ({ targets: { "0": null } }) } as Response;
+      }
+      const retried = /^\/api\/runtime\/operations\/(.+)$/.exec(String(input));
+      if (retried && init?.method === "POST") {
+        operationRetries.push(decodeURIComponent(retried[1]!));
+        return operationRetryResponse(conversationId, decodeURIComponent(retried[1]!));
       }
       if (String(input) !== "/api/tmux") throw new Error(`unexpected request: ${String(input)}`);
       const body = JSON.parse(String(init?.body)) as { clientMessageId: string; images?: { base64: string }[] };
@@ -1012,6 +1065,7 @@ test("an edited image tray retries the immutable images and preserves later atta
       await untilPreviews(2);
       const attached = previews();
       flushSync(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
+      await until(() => sentImages.length === 1);
       await untilSendEnabled(host);
       expect(sentImages[0]).toHaveLength(2);
       /* Queue-first owns the submitted images; the editable tray clears for
@@ -1025,14 +1079,16 @@ test("an edited image tray retries the immutable images and preserves later atta
       const editedTray = previews();
       expect(editedTray).not.toEqual(attached);
 
-      /* The retry replays the same key with the original image bytes. */
+      /* The queue bubble's Retry asks the journal for the admitted operation's
+         next attempt; the original image bytes stay retained until it settles. */
       const expired = readOutbox(conversationId).find((entry) => entry.text === prompt)!;
       await confirmSafeRetry(conversationId, expired.id);
-    flushSync(() => retryOutbox(conversationId, expired.id));
+      flushSync(() => retryOutbox(conversationId, expired.id));
+      await until(() => operationRetries.length === 1);
       await sleep(0);
-      expect(sentKeys).toHaveLength(2);
-      expect(sentKeys[1]).toBe(sentKeys[0]);
-      expect(sentImages[1]).toEqual(sentImages[0]);
+      expect(operationRetries).toEqual([`safe-${sentKeys[0]}`]);
+      expect(sentKeys).toHaveLength(1);
+      expect(await retainedImages(conversationId, sentKeys[0]!)).toEqual(sentImages[0]);
       /* The attachment added after expiry remains for the following generation. */
       expect(previews()).toEqual(editedTray);
       expect(host.querySelectorAll('[data-receipt-status="queued"]')).toHaveLength(1);

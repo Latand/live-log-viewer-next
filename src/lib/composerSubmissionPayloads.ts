@@ -22,12 +22,28 @@ export interface ComposerWireEnvelope {
   body: Record<string, unknown>;
 }
 
+/** How a retained message may be attempted again. `operation`: the journal
+ * admitted it, so only the runtime operation retry contract starts the next
+ * attempt. `resend`: nothing was admitted and the last attempt was refused
+ * before admission, so the sealed envelope may go out again under its key. */
+export type ComposerPayloadRetryRoute = "operation" | "resend";
+
+export interface ComposerPayloadRefusal {
+  status: number;
+  reason: string;
+}
+
 export interface RestoredComposerSubmission {
   ref: ComposerPayloadRef;
   submission: ComposerSubmission;
   envelope: ComposerWireEnvelope | null;
-  retryAvailable: boolean;
+  /** The operation the journal admitted under the original key. Every retry
+   * leaf is presented under it, so it names the message across attempts. */
+  operationId: string | null;
+  /** Latest receipt of the current attempt, in that presentation identity. */
   receipt: ComposerPayloadReceipt | null;
+  retry: ComposerPayloadRetryRoute | null;
+  refusal: ComposerPayloadRefusal | null;
 }
 
 export interface ComposerPayloadReceipt {
@@ -37,8 +53,68 @@ export interface ComposerPayloadReceipt {
   revision: number;
   status: string;
   reason?: string | null;
-  resend?: string;
-  at?: string;
+  resend?: string | null;
+  at?: string | null;
+  /** Set by the journal on a retry leaf: the terminal attempt it replaces. */
+  retryOfOperationId?: string | null;
+  /** On a raw leaf receipt: the admitted operation it is presented under and
+   * its revision there, which keeps rising across attempts. */
+  presentationOperationId?: string;
+  presentationRevision?: number;
+}
+
+interface PayloadAttempt {
+  sequence: number;
+  receiptRevision: number;
+  refusal: ComposerPayloadRefusal | null;
+}
+
+/** The journal's presentation identity: a raw retry leaf receipt is read as
+ * its admitted operation at its presentation revision. Snapshots already
+ * present leaves this way; live receipt events carry the raw leaf. */
+export function presentedPayloadReceipt<T extends ComposerPayloadReceipt>(receipt: T): T {
+  return receipt.presentationOperationId && Number.isSafeInteger(receipt.presentationRevision)
+    ? { ...receipt, operationId: receipt.presentationOperationId, revision: receipt.presentationRevision! }
+    : receipt;
+}
+
+/** The operation admitted under the original key and the latest receipt of
+ * the current attempt. A retry leaf counts only when it is presented under
+ * that operation; anything else is not evidence about this message. */
+export function payloadAttemptState(
+  key: string,
+  history: readonly ComposerPayloadReceipt[],
+): { operationId: string | null; current: ComposerPayloadReceipt | null } {
+  const operationId = history.find(item => item.idempotencyKey === key && !item.retryOfOperationId)?.operationId ?? null;
+  const current = operationId === null ? null : history.filter(item => item.operationId === operationId)
+    .sort((a, b) => b.revision - a.revision)[0] ?? null;
+  return { operationId, current };
+}
+
+function retryRoute(
+  key: string,
+  history: readonly ComposerPayloadReceipt[],
+  attempts: readonly PayloadAttempt[],
+): ComposerPayloadRetryRoute | null {
+  const { current } = payloadAttemptState(key, history);
+  if (current) {
+    /* The server remains the authority; an unknown fate is never retried here.
+       Once an attempt was unknown, only a proven safe rejection re-opens it,
+       as for the queue bubble: a later failure alone proves nothing. */
+    const unknownBefore = history.some(item => item.idempotencyKey === current.idempotencyKey
+      && (item.status === "uncertain" || item.resend === "verify-first"));
+    return (current.status === "failed" || current.status === "rejected")
+      && current.reason !== "delivery-discarded" && current.resend !== "verify-first"
+      && (!unknownBefore || current.resend === "safe" || current.status === "rejected") ? "operation" : null;
+  }
+  return latestAttempt(attempts)?.refusal ? "resend" : null;
+}
+
+function latestAttempt(attempts: readonly PayloadAttempt[]): PayloadAttempt | null {
+  const sequence = Math.max(-1, ...attempts.map(item => item.sequence));
+  if (sequence < 0) return null;
+  const refusal = attempts.find(item => item.sequence === sequence && item.refusal)?.refusal ?? null;
+  return { sequence, receiptRevision: attempts.find(item => item.sequence === sequence)!.receiptRevision, refusal };
 }
 
 function snapshot<T>(value: T): T {
@@ -142,10 +218,14 @@ export class ComposerSubmissionPayloads {
       const envelope = wire?.payload.envelope as ComposerWireEnvelope | undefined;
       if (wire && (!envelope || !["runtime", "legacy"].includes(envelope.route)
         || !envelope.body || typeof envelope.body !== "object")) throw new ComposerPayloadStorageError();
+      const history = await this.receiptHistory(owner);
+      const attempts = await this.attemptRows(owner);
+      const state = payloadAttemptState(owner.key, history);
       return { ref: { conversationId: raw.conversationId, key: raw.key, fingerprint: raw.fingerprint,
         bytes: raw.bytes, savedAt: raw.savedAt }, submission: checkedSubmission(raw.payload.submission),
-      envelope: envelope ?? null, retryAvailable: await this.retryAvailable(owner),
-      receipt: (await this.receiptHistory(owner)).sort((a, b) => b.revision - a.revision)[0] ?? null };
+      envelope: envelope ?? null, operationId: state.operationId, receipt: state.current,
+      retry: retryRoute(owner.key, history, attempts),
+      refusal: state.current ? null : latestAttempt(attempts)?.refusal ?? null };
     });
   }
 
@@ -167,29 +247,29 @@ export class ComposerSubmissionPayloads {
     return history;
   }
 
-  private async attemptFloor(identity: ComposerPayloadIdentity): Promise<number | null> {
-    let floor: number | null = null;
+  private async attemptRows(identity: ComposerPayloadIdentity): Promise<PayloadAttempt[]> {
+    const rows: PayloadAttempt[] = [];
     for (const ref of await this.attempts.list(identity.conversationId)) {
       const key: unknown = JSON.parse(ref.key);
       if (!Array.isArray(key) || key[0] !== identity.key) continue;
       const row = await this.attempts.read(ref);
-      if (!row || !Number.isSafeInteger(row.payload.receiptRevision)) throw new ComposerPayloadStorageError();
-      floor = Math.max(floor ?? 0, row.payload.receiptRevision as number);
+      const refusal = row?.payload.refusal as ComposerPayloadRefusal | undefined;
+      if (!row || !Number.isSafeInteger(row.payload.receiptRevision)
+        || (row.payload.sequence !== undefined && !Number.isSafeInteger(row.payload.sequence))
+        || (refusal !== undefined && (!Number.isSafeInteger(refusal?.status) || typeof refusal?.reason !== "string"))) {
+        throw new ComposerPayloadStorageError();
+      }
+      // An attempt recorded before sequences existed is the first attempt.
+      rows.push({ sequence: (row.payload.sequence as number | undefined) ?? 0,
+        receiptRevision: row.payload.receiptRevision as number, refusal: refusal ?? null });
     }
-    return floor;
-  }
-
-  private async retryAvailable(identity: ComposerPayloadIdentity): Promise<boolean> {
-    const history = await this.receiptHistory(identity);
-    const latest = history.sort((a, b) => b.revision - a.revision)[0];
-    const floor = await this.attemptFloor(identity);
-    return Boolean(latest && latest.status === "failed" && latest.resend === "safe"
-      && latest.reason !== "delivery-discarded" && (floor === null || latest.revision > floor));
+    return rows;
   }
 
   /** Persist the attempt before queue eligibility. Only the claiming document
-   * can consume it. A reload has no claim, so an old safe receipt cannot replay
-   * an attempt whose response was lost. A newer safe rejection permits retry. */
+   * can consume it. A reload has no claim, so a lost response never replays.
+   * Once the journal admitted the key, its operation retry contract owns every
+   * later attempt; only a refusal before admission re-opens the envelope. */
   beginAttempt(ref: ComposerPayloadRef): Promise<boolean> {
     const owner = { conversationId: ref.conversationId, key: ref.key };
     return this.locked(owner, async () => {
@@ -197,12 +277,35 @@ export class ComposerSubmissionPayloads {
       const raw = await this.submissions.read(owner);
       const wire = await this.envelopes.read(owner);
       if (!raw || raw.fingerprint !== ref.fingerprint || !wire) throw new ComposerPayloadStorageError();
-      const previous = await this.attemptFloor(owner);
-      if (previous !== null && !await this.retryAvailable(owner)) return false;
       const history = await this.receiptHistory(owner);
+      const attempts = await this.attemptRows(owner);
+      if (payloadAttemptState(owner.key, history).current) return false;
+      if (attempts.length && retryRoute(owner.key, history, attempts) !== "resend") return false;
+      const sequence = (latestAttempt(attempts)?.sequence ?? -1) + 1;
       const revision = Math.max(0, ...history.map(item => item.revision));
-      await this.attempts.retain({ conversationId: owner.conversationId, key: JSON.stringify([owner.key, revision]) }, { receiptRevision: revision });
+      await this.attempts.retain({ conversationId: owner.conversationId, key: JSON.stringify([owner.key, "attempt", sequence]) },
+        { receiptRevision: revision, sequence });
       this.wireClaims.add(JSON.stringify([owner.conversationId, owner.key]));
+      return true;
+    });
+  }
+
+  /** A response that refused the latest attempt before anything was admitted:
+   * no receipt, no operation, and a status the send route only returns before
+   * a reservation exists. Ambiguous answers are never recorded here. */
+  refuse(ref: ComposerPayloadRef, refusal: ComposerPayloadRefusal): Promise<boolean> {
+    const owner = { conversationId: ref.conversationId, key: ref.key };
+    const captured = { status: refusal.status, reason: String(refusal.reason).slice(0, 500) };
+    return this.locked(owner, async () => {
+      await this.active(owner);
+      const raw = await this.submissions.read(owner);
+      if (!raw || raw.fingerprint !== ref.fingerprint || !Number.isSafeInteger(captured.status)) return false;
+      if (payloadAttemptState(owner.key, await this.receiptHistory(owner)).current) return false;
+      const latest = latestAttempt(await this.attemptRows(owner));
+      if (!latest || latest.refusal) return false;
+      await this.attempts.retain({ conversationId: owner.conversationId,
+        key: JSON.stringify([owner.key, "refused", latest.sequence]) },
+      { receiptRevision: latest.receiptRevision, sequence: latest.sequence, refusal: captured });
       return true;
     });
   }
@@ -211,35 +314,49 @@ export class ComposerSubmissionPayloads {
     return this.wireClaims.delete(JSON.stringify([ref.conversationId, ref.key]));
   }
 
-  /** Explicit removal of an interrupted preparation. Check under the same
-   * cross-tab lock so a concurrent seal cannot turn it into a live operation. */
+  /** Explicit removal of a copy that never reached the journal: an
+   * interrupted preparation, or an attempt refused before admission. Checked
+   * under the same cross-tab lock so a concurrent attempt cannot slip past. */
   discardUnprepared(ref: ComposerPayloadRef): Promise<boolean> {
     const owner = { conversationId: ref.conversationId, key: ref.key };
     return this.locked(owner, async () => {
       const raw = await this.submissions.read(owner);
-      if (!raw || raw.fingerprint !== ref.fingerprint || await this.envelopes.read(owner)
-        || await this.attemptFloor(owner) !== null) return false;
+      if (!raw || raw.fingerprint !== ref.fingerprint) return false;
+      const history = await this.receiptHistory(owner);
+      const attempts = await this.attemptRows(owner);
+      const wire = await this.envelopes.read(owner);
+      const unprepared = !wire && !attempts.length;
+      const refused = !history.length && Boolean(latestAttempt(attempts)?.refusal);
+      if (!unprepared && !refused) return false;
       await this.terminals.retain(owner, { version: 1, submissionFingerprint: raw.fingerprint });
+      if (wire) await this.envelopes.release(wire);
       return this.submissions.release(raw);
     });
   }
 
   /** Append evidence before projecting it into ephemeral UI state. Lower
-   * revisions and foreign operations cannot authorize deletion later. */
+   * revisions and foreign operations cannot authorize deletion later. A
+   * journal retry leaf joins when it is presented under the admitted
+   * operation, which is how the retry contract's receipts reach this message. */
   observe(ref: ComposerPayloadRef, receipt: ComposerPayloadReceipt): Promise<boolean> {
     const owner = { conversationId: ref.conversationId, key: ref.key };
-    const captured = snapshot(receipt);
+    const captured = presentedPayloadReceipt(snapshot(receipt));
     return this.locked(owner, async () => {
-      if (captured.conversationId !== owner.conversationId || captured.idempotencyKey !== owner.key
+      if (captured.conversationId !== owner.conversationId
         || !captured.operationId || !Number.isSafeInteger(captured.revision) || captured.revision < 1) return false;
       const history = await this.receiptHistory(owner);
-      if (history.some(item => item.operationId !== captured.operationId || item.revision > captured.revision)) return false;
+      const { operationId } = payloadAttemptState(owner.key, history);
+      const leaf = Boolean(captured.retryOfOperationId);
+      if (leaf ? captured.operationId !== operationId
+        : captured.idempotencyKey !== owner.key || (operationId !== null && captured.operationId !== operationId)) return false;
+      // One revision is one journal fact; a later projection at it is not newer.
+      if (history.some(item => item.revision >= captured.revision)) return false;
       await this.receipts.retain({ conversationId: owner.conversationId,
         key: JSON.stringify([owner.key, captured.operationId, captured.revision]) }, { receipt: {
           conversationId: captured.conversationId, idempotencyKey: captured.idempotencyKey,
           operationId: captured.operationId, revision: captured.revision,
           status: captured.status, reason: captured.reason ?? null, resend: captured.resend ?? null,
-          at: captured.at ?? null,
+          at: captured.at ?? null, retryOfOperationId: captured.retryOfOperationId ?? null,
         } });
       return true;
     });
@@ -247,17 +364,20 @@ export class ComposerSubmissionPayloads {
 
   /** Caller first verifies matching authoritative terminal evidence, or an
    * applicable explicit discard, and disables every queue owner of this key.
-   * Safe rejection alone is recoverable and must keep its original payload. */
+   * Only the latest receipt of the current attempt can settle, read in the
+   * admitted operation's presentation identity. Safe rejection alone is
+   * recoverable and must keep its original payload. */
   settle(ref: ComposerPayloadRef, evidence?: ComposerPayloadReceipt): Promise<boolean> {
     const expected = { ...ref };
     const owner = { conversationId: ref.conversationId, key: ref.key };
     return this.locked(owner, async () => {
       if (evidence) {
-        const history = await this.receiptHistory(owner);
-        if (!history.length || evidence.conversationId !== owner.conversationId || evidence.idempotencyKey !== owner.key
-          || (evidence.status !== "delivered" && evidence.reason !== "delivery-discarded")
-          || history.some(item => item.operationId !== evidence.operationId || item.revision > evidence.revision)
-          || !history.some(item => item.revision === evidence.revision && item.status === evidence.status)) return false;
+        const { current } = payloadAttemptState(owner.key, await this.receiptHistory(owner));
+        const presented = presentedPayloadReceipt(evidence);
+        if (!current || presented.conversationId !== owner.conversationId
+          || (presented.status !== "delivered" && presented.reason !== "delivery-discarded")
+          || presented.operationId !== current.operationId || presented.revision !== current.revision
+          || presented.status !== current.status) return false;
       }
       const raw = await this.submissions.read(owner);
       if (!raw || raw.fingerprint !== expected.fingerprint) return false;

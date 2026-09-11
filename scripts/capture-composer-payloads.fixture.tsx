@@ -1,4 +1,6 @@
-/** Real pane/composer/tray/outbox against a synthetic runtime. No provider calls. */
+/** Real pane/composer/tray/outbox against a synthetic runtime. No provider calls.
+ * `?runtime=journal` keeps the production send/retry client and reads receipts
+ * from the verifier, which serves both routes from the real handlers/journal. */
 import { createRoot } from 'react-dom/client';
 import { createElement, useSyncExternalStore } from 'react';
 import { NativeConversationPane } from '@/components/scheme/NativeConversationPane';
@@ -14,8 +16,10 @@ import { setLocale } from '@/lib/i18n';
 import type { FileEntry } from '@/lib/types';
 import type { RuntimeSnapshot } from '@/lib/runtime/contracts';
 
-const CARD = 'conversation_payload_fixture';
-const PATH = '/fixture/payload.jsonl';
+const params = new URLSearchParams(location.search);
+const journal = params.get('runtime') === 'journal';
+const CARD = params.get('card') ?? 'conversation_payload_fixture';
+const PATH = params.get('path') ?? '/fixture/payload.jsonl';
 const listeners = new Set<() => void>();
 let receipts: RuntimeReceipt[] = [];
 const requests: Record<string, unknown>[] = [];
@@ -32,21 +36,53 @@ const state = {
 };
 setRuntimeBusForTests({getState:()=>state,subscribe:()=>()=>{},subscribeFilesRevision:()=>()=>{},start(){},stop(){},refresh:async()=>true} as never);
 let refreshes = 0;
-let mode = new URLSearchParams(location.search).get('mode') ?? 'safe';
+let mode = params.get('mode') ?? 'safe';
+const nativeFetch = window.fetch.bind(window);
+// Synthetic journal revisions only rise, across reloads too, like presentation revisions.
+const revisionFloor = () => Number(localStorage.getItem('fixture-max-revision') ?? '0');
+const bumpRevision = (revision: number) => localStorage.setItem('fixture-max-revision', String(Math.max(revision, revisionFloor())));
+const publishReceipts = (next: RuntimeReceipt[]) => {
+  receipts = next;
+  if (!journal) bumpRevision(Math.max(0, ...next.map(receipt => receipt.revision)));
+  for (const listener of listeners) listener();
+};
+const pollReceipts = async () => {
+  const response = await nativeFetch('/fixture/receipts');
+  const next = await response.json() as RuntimeReceipt[];
+  if (JSON.stringify(next) !== JSON.stringify(receipts)) publishReceipts(next);
+};
+if (journal) setInterval(() => { void pollReceipts().catch(() => {}); }, 100);
 setTmuxComposerRuntimeDependenciesForTests({
-  refreshRuntime: async () => { refreshes++; return true; },
+  refreshRuntime: async () => { refreshes++; if (journal) await pollReceipts(); return true; },
   useRuntimeReceiptsForArtifact: () => useSyncExternalStore(listener => {listeners.add(listener);return()=>{listeners.delete(listener);};},()=>receipts,()=>receipts),
-  sendRuntimeMessage: async body => {
+  ...(journal ? {} : { sendRuntimeMessage: async (body: Parameters<typeof import('@/hooks/useRuntime').sendRuntimeMessage>[0]) => {
     requests.push(JSON.parse(JSON.stringify(body)));
     if(mode === 'unknown') return {ok:false,error:'Synthetic lost response',status:503};
     const revision = Number(localStorage.getItem('fixture-server-revision') ?? '0') + 1;
     localStorage.setItem('fixture-server-revision', String(revision));
+    bumpRevision(revision);
     const receipt = {conversationId:CARD,idempotencyKey:body.idempotencyKey,operationId:'fixture-operation',kind:'send',status:mode === 'delivered'?'delivered':'failed',resend:mode === 'delivered'?'unsafe':'safe',text:body.text,reason:'Synthetic pre-dispatch refusal',at:new Date().toISOString(),revision} as RuntimeReceipt;
     return {ok:mode === 'delivered',status:mode === 'delivered'?200:409,receipt,error:mode === 'delivered'?undefined:receipt.reason ?? undefined};
-  },
+  } }),
 });
 setLogFeedDependenciesForTests({useLogTail:()=>({lines:[],linesStart:0,size:0,loading:false,error:null,tickTime:null,paused:false,setPaused(){},clear(){},hasMore:false,loadingOlder:false,loadOlder:async()=>0,prependGen:0})} as never);
-window.fetch = (async input => new Response(JSON.stringify(String(input).includes('/targets')?{targets:{}}:{voices:[],accounts:[],models:[],engines:[],options:[]}),{status:200,headers:{'content-type':'application/json'}})) as typeof fetch;
+// Synthetic mode answers the operation retry contract the way the journal does:
+// a leaf that names the attempt it replaces, under a key the server derives.
+const retries: string[] = [];
+window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+  const pathname = new URL(input instanceof Request ? input.url : String(input), location.href).pathname;
+  if (journal && (pathname.startsWith('/api/runtime/') || pathname.startsWith('/fixture/'))) return nativeFetch(input, init);
+  const operation = /^\/api\/runtime\/operations\/([^/]+)$/.exec(pathname);
+  if (operation && init?.method === 'POST') {
+    const parent = decodeURIComponent(operation[1]!);
+    retries.push(parent);
+    const revision = revisionFloor() + 1;
+    bumpRevision(revision);
+    const receipt = {conversationId:CARD,idempotencyKey:'retry_'+parent,operationId:parent,retryOfOperationId:parent,kind:'send',status:'queued',at:new Date().toISOString(),revision};
+    return new Response(JSON.stringify({operationId:'fixture-leaf-'+retries.length,receipt}),{status:202,headers:{'content-type':'application/json'}});
+  }
+  return new Response(JSON.stringify(pathname.includes('/targets')?{targets:{}}:{voices:[],accounts:[],models:[],engines:[],options:[]}),{status:200,headers:{'content-type':'application/json'}});
+}) as typeof fetch;
 setLocale('en');
 const file = {path:PATH,root:'codex-sessions',name:'payload.jsonl',project:'viewer',title:'Attachment recovery',engine:'codex',kind:'session',fmt:'codex',parent:null,mtime:1,size:1,activity:'idle',proc:'running',pid:null,conversationId:CARD,pendingQuestion:null,waitingInput:null,model:'gpt-6-astra',effort:'high'} as FileEntry;
 const host = document.getElementById('app')!;
@@ -55,7 +91,7 @@ let mount = 0;
 const render = (other = false) => root.render(createElement(NativeConversationPane,{key:++mount,file:other?{...file,path:'/fixture/other.jsonl',conversationId:'conversation_other'}:file,tasks:[],isRoot:false,active:true,place:host,fullWindowPlace:null}));
 render();
 Object.assign(window,{payloadFixture:{
-  requests, cardId:CARD,
+  requests, retries, cardId:CARD,
   seedLegacyOutbox:(pending:{key:string;text:string}[])=>{
     for (const p of pending) {
       enqueueOutbox(CARD,{id:p.key,text:p.text,images:0,at:Date.now()});
@@ -82,5 +118,6 @@ Object.assign(window,{payloadFixture:{
   remount:()=>render(),switchCard:(other:boolean)=>render(other),
   mode:(next:string)=>{mode=next;},
   profile:()=>{file.model="fixture-later-model";file.effort="low";render();},
-  receipts:(next:RuntimeReceipt[])=>{receipts=next;for(const listener of listeners)listener();},
+  receipts:(next:RuntimeReceipt[])=>publishReceipts(next),
+  nextRevision:()=>revisionFloor()+1,
 }});

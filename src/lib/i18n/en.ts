@@ -390,6 +390,7 @@ export const en = {
   "composer.payloadFiles": "Files: {count}",
   "composer.payloadUnknown": "Delivery outcome is unknown. This message will not be sent again automatically.",
   "composer.payloadLocal": "Saved locally. Sending did not start.",
+  "composer.payloadRefused": "Refused before delivery started: {reason}. Nothing was admitted, so the saved copy can be sent again or discarded.",
   "composer.payloadChecking": "Checking the original delivery receipt.",
   "composer.payloadNotChecking": "Automatic checking has stopped. Re-check for current evidence.",
   "composer.payloadRecheck": "Re-check delivery",
