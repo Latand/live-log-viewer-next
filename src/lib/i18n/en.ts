@@ -1548,6 +1548,12 @@ export const en = {
   // settled stages collapsed to one status row (#658)
   "pipelineSlot.rowAria": "Finished stage {title}",
   "pipelineSlot.reasonSkipped": "Skipped by the operator — the chain moved on",
+  "pipelineSlot.reasonNotStarted": "Not started yet",
+  "pipelineSlot.reasonQueuedAfter": "Not started — queued behind {title} (stage {k} of {n})",
+  "pipelineSlot.reasonHeldDecision": "Not started — the pipeline is waiting for your decision",
+  "pipelineSlot.reasonHeldPaused": "Not started — the pipeline is paused",
+  "pipelineSlot.reasonPlanned": "Planned — the pipeline has not been started yet",
+  "pipelineSlot.reasonNeverRan": "Never ran — the pipeline ended before reaching this stage",
   "pipelineSlot.rowExpand": "Show the full stage card",
   "pipelineSlot.rowCollapse": "Collapse back to the status row",
   "pipelineTemplates.planBuildReview": "Plan → Build → Review",
@@ -1740,6 +1746,9 @@ export const en = {
   "bands.continuesIn": "Continues in {title}",
   "bands.continuesFrom": "Comes from {title}",
   "bands.crossLinks": { one: "{count} link to another task", other: "{count} links to other tasks" },
+  "bands.unnamedPipeline": "Pipeline without a recorded goal",
+  "bands.unnamedFlow": "Review loop without a recorded subject",
+  "bands.stageProgress": "stage {k} of {n}",
 
   // scheme/BulkActionBar (selection session)
   "bulk.selectedCount": { one: "{count} selected", other: "{count} selected" },

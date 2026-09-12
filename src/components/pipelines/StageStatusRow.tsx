@@ -61,7 +61,14 @@ export function StageStatusRow({
           <span aria-hidden>{STAGE_GLYPH[state]}</span>
           {t(`pipelineChipState.${state}`)}
         </span>
-        <span className="order-first w-full min-w-0 truncate text-ui font-semibold text-secondary" title={title}>
+        {/* Two lines (#1668): a stage title is `role · stage-id · position`, and
+            cutting it at one line left several stages of one pipeline reading
+            identically. */}
+        <span
+          className="order-first w-full min-w-0 text-ui font-semibold leading-[18px] text-secondary"
+          style={{ display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}
+          title={title}
+        >
           {title}
         </span>
         {onToggle ? (
@@ -81,7 +88,13 @@ export function StageStatusRow({
           </button>
         ) : null}
       </div>
-      <p className="min-w-0 truncate text-label text-muted" title={reason}>
+      {/* The explanation the row exists for: a full sentence over two lines
+          rather than a truncated fragment. */}
+      <p
+        className="min-w-0 text-label leading-[15px] text-muted"
+        style={{ display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}
+        title={reason}
+      >
         {reason}
       </p>
     </section>

@@ -1,7 +1,7 @@
 "use client";
 
 import { bandEdgePorts } from "./taskBands";
-import { BOARD_SURFACE, historicalAttemptLabels } from "./boardPresentation";
+import { BOARD_SURFACE, historicalAttemptLabels, stageDetailsCardHeight } from "./boardPresentation";
 
 import { Check, Layers } from "lucide-react";
 import { memo, useCallback, useEffect, useMemo, useState, type ComponentProps, type CSSProperties } from "react";
@@ -510,6 +510,15 @@ export const GroupsLayer = memo(function GroupsLayer({
         const color = draft ? "var(--color-warning)" : `hsl(${group.hue} 62% 42%)`;
         const soft = draft ? "var(--color-warning-soft)" : `hsl(${group.hue} 62% 42% / 0.055)`;
         const open = openGroup?.id === group.id;
+        /* Inside a task band the group is a SECTION of its parent task (#1668):
+           its rect encloses its own heading and its own stage rows, so the
+           heading is a bar attached to the top of that region instead of a pill
+           floating over a grid it does not visibly own. */
+        const banded = Boolean(group.bandHeader);
+        /* A container with no record of its own must never headline a board key
+           (`group::pipeline::<id>`). The layout leaves the label empty and the
+           heading names the kind instead. */
+        const label = group.label || t(group.kind === "pipeline" ? "bands.unnamedPipeline" : "bands.unnamedFlow");
         return (
           /* Positioned with left/top rather than a transform: a transform would
              create a stacking context that traps the chip beneath the later
@@ -529,7 +538,7 @@ export const GroupsLayer = memo(function GroupsLayer({
                 (and drop targets elsewhere), which keep the warning halo. */}
             <div
               aria-hidden
-              className={`absolute inset-0 rounded-[20px] ${group.bandHeader ? "hidden" : ""} ${draft ? "border-2 border-dashed" : "border"}`}
+              className={`absolute inset-0 ${banded ? "rounded-[14px]" : "rounded-[20px]"} ${draft ? "border-2 border-dashed" : "border"}`}
               style={
                 draft
                   ? {
@@ -547,22 +556,73 @@ export const GroupsLayer = memo(function GroupsLayer({
                 lifecycle, and the disclosure control — no second stage graph and
                 no white body below. The real stage conversations and planned
                 placeholders live inside the region itself. */}
+            {banded ? (
+              /* Section heading: a full-width bar on the region it names, so the
+                 colour reads as this pipeline's territory rather than as a
+                 detached tag. The title wraps to two lines — a pipeline goal is
+                 a sentence, and truncating it to one line is what made several
+                 headings in a band interchangeable. Progress and lifecycle sit
+                 on the right in words, never an identifier. */
+              <button
+                data-scheme-ui
+                data-pipeline-group-header={group.pipeline ? group.id : undefined}
+                data-scheme-group-heading={group.key}
+                className={`absolute left-0 top-0 flex w-full items-start gap-2 rounded-t-[13px] border-b px-3 py-2 text-left text-[11.5px] font-bold hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-default ${
+                  interactive ? "pointer-events-auto" : ""
+                }`}
+                style={{
+                  height: BOARD_SURFACE.groupHeader,
+                  color,
+                  borderColor: `color-mix(in srgb, ${color} 34%, var(--border-default))`,
+                  backgroundColor: `color-mix(in srgb, ${color} 10%, var(--surface-card))`,
+                  borderBottomStyle: draft ? "dashed" : "solid",
+                }}
+                aria-expanded={open}
+                aria-haspopup="dialog"
+                disabled={!interactive}
+                onClick={() => group.taskId ? onOpenTaskHistory?.(group.taskId) : setOpenId((value) => (value === group.id ? null : group.id))}
+              >
+                <span aria-hidden className="mt-[1px] shrink-0">{group.kind === "task" ? "▤" : group.kind === "pipeline" ? "⇢" : "⟳"}</span>
+                <span
+                  className="min-w-0 flex-1 leading-[16px]"
+                  style={{ display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}
+                  title={label}
+                >
+                  {group.historical ? `${t("bands.historicalRun")} · ` : ""}{label}
+                </span>
+                {group.pipeline ? (
+                  <span className="mt-[1px] flex shrink-0 items-center gap-1.5">
+                    <span
+                      data-pipeline-progress
+                      className="shrink-0 rounded-full px-1.5 py-[1px] tabular-nums"
+                      style={{ backgroundColor: soft }}
+                    >
+                      {(() => { const p = pipelineStagePosition(group.pipeline!); return t("bands.stageProgress", { k: p.k, n: p.n }); })()}
+                    </span>
+                    <span data-pipeline-lifecycle className="shrink-0 font-semibold opacity-85">
+                      {pipelineStateLabel(t, group.pipeline.state)}
+                    </span>
+                  </span>
+                ) : null}
+                <span aria-hidden className="mt-[1px] shrink-0 opacity-70">▾</span>
+              </button>
+            ) : (
             <button
               data-scheme-ui
               data-pipeline-group-header={group.pipeline ? group.id : undefined}
-              className={`absolute ${group.bandHeader ? "top-1 left-0" : "-top-3 left-5"} z-[8] inline-flex max-w-[26em] items-center gap-[0.4em] rounded-full bg-card px-[0.7em] py-[0.15em] font-bold shadow-1 hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-default ${
+              className={`absolute -top-3 left-5 z-[8] inline-flex max-w-[26em] items-center gap-[0.4em] rounded-full bg-card px-[0.7em] py-[0.15em] font-bold shadow-1 hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-default ${
                 interactive ? "pointer-events-auto" : ""
               }`}
               /* Font fully counter-scaled (constant on-screen at any zoom); border
                  and padding are in em so the whole chip holds its on-screen size. */
-              style={{ maxWidth: group.bandHeader ? "100%" : "min(26em, calc(100% - 40px))", borderColor: color, color, borderWidth: "0.18em", borderStyle: draft ? "dashed" : "solid", fontSize: group.bandHeader ? 11 : groupLabelFontSize() }}
+              style={{ maxWidth: "min(26em, calc(100% - 40px))", borderColor: color, color, borderWidth: "0.18em", borderStyle: draft ? "dashed" : "solid", fontSize: groupLabelFontSize() }}
               aria-expanded={open}
               aria-haspopup="dialog"
               disabled={!interactive}
               onClick={() => group.taskId ? onOpenTaskHistory?.(group.taskId) : setOpenId((value) => (value === group.id ? null : group.id))}
             >
               <span aria-hidden>{group.kind === "task" ? "▤" : group.kind === "pipeline" ? "⇢" : "⟳"}</span>
-              <span className="truncate">{group.historical ? `${t("bands.historicalRun")} · ` : ""}{group.label}</span>
+              <span className="truncate">{group.historical ? `${t("bands.historicalRun")} · ` : ""}{label}</span>
               {group.pipeline ? (
                 <>
                   <span
@@ -579,6 +639,7 @@ export const GroupsLayer = memo(function GroupsLayer({
               ) : null}
               <span aria-hidden className="shrink-0 opacity-70">▾</span>
             </button>
+            )}
           </div>
         );
       })}
@@ -1541,9 +1602,14 @@ function StageSlotShell({ slot, lite, dimmed, files, onSelect, onToggleDetails }
         <StageStatusRow slot={slot} expanded={slot.detailsExpanded} controls={`${slot.key}::details`}
           onToggle={!lite ? () => onToggleDetails?.(slot.key) : undefined} />
       </div>
-      {slot.detailsExpanded ? <div id={`${slot.key}::details`} data-stage-row-card className="flex flex-col" style={{ height: BOARD_SURFACE.stageDetails.h - BOARD_SURFACE.stage.h }}>
+      {/* The disclosure is separated from the row it belongs to and bounded to the
+          height the layout reserved for this presentation (#1668): a settled
+          stage adds a short card whose prompt scrolls, a planned stage the full
+          editor. Both were previously the same 620px box glued to the row. */}
+      {slot.detailsExpanded ? <div id={`${slot.key}::details`} data-stage-row-card className="flex flex-col"
+        style={{ height: stageDetailsCardHeight(slot.presentation), marginTop: BOARD_SURFACE.stageDetailsGap }}>
         <EscapeToClose onClose={() => onToggleDetails?.(slot.key)} />
-        <div className="flex min-h-0 flex-1">{slot.presentation === "completed" ? <StageCompletedCard slot={slot} onOpen={file && !lite ? () => onSelect(file) : undefined} /> : <StagePlaceholderPane slot={slot} interactive={!lite} />}</div>
+        <div className="flex min-h-0 flex-1">{slot.presentation === "completed" ? <StageCompletedCard slot={slot} disclosed onOpen={file && !lite ? () => onSelect(file) : undefined} /> : <StagePlaceholderPane slot={slot} interactive={!lite} />}</div>
         {canAdd ? <div data-scheme-ui className="flex h-9 shrink-0 items-center gap-2 bg-card px-2">
           {last ? <button type="button" className="rounded border border-border px-2 py-1 text-label" disabled={busy} onClick={() => addAfter("run")}>{t("pipelineSlot.addAgent")}</button> : null}
           {slot.stage.kind === "run" ? <button type="button" className="rounded border border-border px-2 py-1 text-label" disabled={busy || !canAddReview} onClick={() => addAfter("review-loop")}>{t("pipelineSlot.addReview")}</button> : null}

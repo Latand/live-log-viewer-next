@@ -29,7 +29,16 @@ import {
  * difference from the eventual live conversation), the settled state/verdict, and
  * an affordance that opens the full transcript on demand.
  */
-export function StageCompletedCard({ slot, onOpen }: { slot: StageSlot; onOpen?: () => void }) {
+export function StageCompletedCard({ slot, onOpen, disclosed }: { slot: StageSlot; onOpen?: () => void;
+  /** Rendered underneath its own {@link StageStatusRow} as that row's
+      disclosure (#1668). The row directly above already names the stage and
+      states how it ended, so repeating both here read as two cards for one
+      stage and pushed the transcript control to the bottom of a mostly blank
+      box. In this mode the card drops the duplicated heading and state badge and
+      adds only what the row cannot carry: the runtime, the verdict, and the
+      prompt that was actually sent — which scrolls, so the whole prompt is
+      still reachable inside a bounded surface. */
+  disclosed?: boolean }) {
   const { t } = useLocale();
   const { pipeline, stage, attempt } = slot;
   const state = stageChipState(pipeline, stage);
@@ -58,7 +67,7 @@ export function StageCompletedCard({ slot, onOpen }: { slot: StageSlot; onOpen?:
       style={{ borderColor: tone.color }}
     >
       <span aria-hidden className="h-1 w-full shrink-0 opacity-60" style={{ backgroundColor: tint.color }} />
-      <header className="flex h-10 shrink-0 items-center gap-1.5 border-b border-border px-2.5" style={{ backgroundColor: tint.soft }}>
+      {disclosed ? null : <header className="flex h-10 shrink-0 items-center gap-1.5 border-b border-border px-2.5" style={{ backgroundColor: tint.soft }}>
         <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: tone.color }} title={t(`pipelineChipState.${state}`)} />
         <span className="shrink-0 rounded-full border border-border bg-card/70 px-1.5 py-0.5 text-caption font-bold capitalize text-muted">
           {stage.effectiveRole.engine}
@@ -69,14 +78,26 @@ export function StageCompletedCard({ slot, onOpen }: { slot: StageSlot; onOpen?:
         <span className="shrink-0 rounded-full border border-border bg-card/70 px-1.5 py-0.5 text-caption font-bold uppercase tracking-wide text-muted">
           {review ? `⟳ ${t("groupOverride.reviewKind")}` : t("groupOverride.runKind")}
         </span>
-      </header>
+      </header>}
 
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden px-4 py-3">
         <div className="mb-3 flex items-center justify-between gap-2">
-          <span className="flex items-center gap-1.5">
-            <span className="rounded-full px-3 py-1 text-body font-bold" style={{ backgroundColor: tone.soft, color: tone.color }}>
-              {attempt ? attemptStateLabel(t, attempt.state) : t(`pipelineChipState.${state}`)}
-            </span>
+          <span className="flex min-w-0 items-center gap-1.5">
+            {disclosed ? (
+              /* What the row above does NOT say: which engine and kind ran it. */
+              <>
+                <span className="shrink-0 rounded-full border border-border bg-card/70 px-2 py-0.5 text-caption font-bold capitalize text-muted">
+                  {stage.effectiveRole.engine}
+                </span>
+                <span className="shrink-0 rounded-full border border-border bg-card/70 px-2 py-0.5 text-caption font-bold uppercase tracking-wide text-muted">
+                  {review ? `⟳ ${t("groupOverride.reviewKind")}` : t("groupOverride.runKind")}
+                </span>
+              </>
+            ) : (
+              <span className="rounded-full px-3 py-1 text-body font-bold" style={{ backgroundColor: tone.soft, color: tone.color }}>
+                {attempt ? attemptStateLabel(t, attempt.state) : t(`pipelineChipState.${state}`)}
+              </span>
+            )}
             {verdict ? (
               <span
                 className="rounded-full px-2 py-1 text-label font-bold"
@@ -90,14 +111,19 @@ export function StageCompletedCard({ slot, onOpen }: { slot: StageSlot; onOpen?:
             {modelLabel}{effort ? ` · ${effort}` : ""}
           </span>
         </div>
-        <div className="ml-auto max-w-[88%] min-h-0 overflow-hidden rounded-[14px] rounded-br-[4px] bg-accent/10 px-3 py-2.5 text-ui leading-5 text-primary shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_18%,transparent)]">
+        <div
+          {...(disclosed ? { "data-pan-ignore": true } : {})}
+          className={`ml-auto max-w-[88%] min-h-0 rounded-[14px] rounded-br-[4px] bg-accent/10 px-3 py-2.5 text-ui leading-5 text-primary shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-accent)_18%,transparent)] ${
+            disclosed ? "flex-1 overflow-y-auto" : "overflow-hidden"
+          }`}
+        >
           <p className="mb-1 text-caption font-bold uppercase tracking-wide text-accent">{t("pipelineSlot.promptLabel")}</p>
-          <p className="line-clamp-[12] whitespace-pre-wrap break-words">{promptPreview}</p>
+          <p className={disclosed ? "whitespace-pre-wrap break-words" : "line-clamp-[12] whitespace-pre-wrap break-words"}>{promptPreview}</p>
         </div>
         <button
           type="button"
           data-scheme-ui
-          className="mt-auto inline-flex h-8 items-center justify-center gap-1 self-center rounded-control border border-border bg-canvas px-3 text-label font-bold text-muted hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40"
+          className={`${disclosed ? "mt-3" : "mt-auto"} inline-flex h-8 shrink-0 items-center justify-center gap-1 self-center rounded-control border border-border bg-canvas px-3 text-label font-bold text-muted hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40`}
           disabled={!onOpen}
           onClick={() => onOpen?.()}
         >

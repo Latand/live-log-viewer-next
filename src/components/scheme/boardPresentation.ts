@@ -8,15 +8,44 @@ import type { TaskBand } from "./taskBands";
 export const BOARD_SURFACE = {
   summary: { w: 360, h: 88 },
   stage: { w: 360, h: 104 },
-  stageDetails: { w: 600, h: 724 },
+  /** A disclosed PLANNED stage: the whole draft-agent editor — engine chips,
+      role section, runtime controls and the prompt field — which needs the
+      height to be usable at all. */
+  stageDetails: { w: 600, h: 748 },
+  /** A disclosed SETTLED stage (#1668). The status row directly above already
+      states which stage it is and how it ended, so the disclosure only adds the
+      prompt that was sent, the runtime it ran on and the transcript link. It is
+      bounded: the prompt scrolls inside the card instead of the card growing to
+      hold it, which is what left a 620px box mostly blank and stretched every
+      connector attached to the stage down the board. */
+  stageSettledDetails: { w: 600, h: 460 },
+  /** Separation between a stage's status row and the surface it discloses, so
+      the card reads as a detail OF that row rather than glued to it. */
+  stageDetailsGap: 12,
   header: 96,
-  groupHeader: 40,
+  /** A container section's own heading bar, inside the section's region. Two
+      lines of title at 16px leading plus its padding: a pipeline goal is a
+      sentence, and hard-truncating it to one line is what made four stacked
+      headings interchangeable. */
+  groupHeader: 56,
   roleSpace: 28,
   navigationSpace: 28,
 } as const;
 
-export function stageSurface(expanded: boolean) {
-  return { ...(expanded ? BOARD_SURFACE.stageDetails : BOARD_SURFACE.stage), detailsExpanded: expanded };
+export type StagePresentation = "placeholder" | "completed";
+
+export function stageSurface(expanded: boolean, presentation: StagePresentation = "placeholder") {
+  if (!expanded) return { ...BOARD_SURFACE.stage, detailsExpanded: false };
+  const surface = presentation === "completed" ? BOARD_SURFACE.stageSettledDetails : BOARD_SURFACE.stageDetails;
+  return { ...surface, detailsExpanded: true };
+}
+
+/** Height the disclosed card gets inside {@link stageSurface}'s expanded
+ * footprint. Placement and rendering read the same function, so the reserved
+ * rectangle and the drawn card can never disagree. */
+export function stageDetailsCardHeight(presentation: StagePresentation): number {
+  const surface = presentation === "completed" ? BOARD_SURFACE.stageSettledDetails : BOARD_SURFACE.stageDetails;
+  return surface.h - BOARD_SURFACE.stage.h - BOARD_SURFACE.stageDetailsGap;
 }
 
 /** Epoch ms of a recorded date; null when it is absent or unreadable. */

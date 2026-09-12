@@ -1493,6 +1493,12 @@ export const uk: Record<keyof typeof en, Message> = {
   // згорнуті завершені стадії в один рядок статусу (#658)
   "pipelineSlot.rowAria": "Завершений етап {title}",
   "pipelineSlot.reasonSkipped": "Пропущено оператором — ланцюжок пішов далі",
+  "pipelineSlot.reasonNotStarted": "Ще не починався",
+  "pipelineSlot.reasonQueuedAfter": "Не починався — чекає в черзі за етапом «{title}» ({k} з {n})",
+  "pipelineSlot.reasonHeldDecision": "Не починався — пайплайн чекає на ваше рішення",
+  "pipelineSlot.reasonHeldPaused": "Не починався — пайплайн на паузі",
+  "pipelineSlot.reasonPlanned": "Заплановано — пайплайн ще не запускали",
+  "pipelineSlot.reasonNeverRan": "Не запускався — пайплайн завершився, не дійшовши до цього етапу",
   "pipelineSlot.rowExpand": "Показати повну картку етапу",
   "pipelineSlot.rowCollapse": "Згорнути назад до рядка статусу",
   "pipelineTemplates.planBuildReview": "План → Збірка → Рев’ю",
@@ -1682,6 +1688,9 @@ export const uk: Record<keyof typeof en, Message> = {
   "bands.continuesIn": "Продовжується у {title}",
   "bands.continuesFrom": "Походить із {title}",
   "bands.crossLinks": { one: "{count} зв’язок з іншою задачею", few: "{count} зв’язки з іншими задачами", many: "{count} зв’язків з іншими задачами", other: "{count} зв’язків з іншими задачами" },
+  "bands.unnamedPipeline": "Пайплайн без записаної мети",
+  "bands.unnamedFlow": "Цикл рев’ю без записаного предмета",
+  "bands.stageProgress": "етап {k} з {n}",
 
   "bulk.selectedCount": { one: "Вибрано {count}", few: "Вибрано {count}", many: "Вибрано {count}", other: "Вибрано {count}" },
   "bulk.placeholder": "одне повідомлення кожному вибраному агенту…",

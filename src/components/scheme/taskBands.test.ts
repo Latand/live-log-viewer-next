@@ -1,4 +1,4 @@
-import { historicalAttemptLabels } from "./boardPresentation";
+import { BOARD_SURFACE, historicalAttemptLabels } from "./boardPresentation";
 import { expect, test } from "bun:test";
 
 import type { BoardTask } from "@/lib/tasks/types";
@@ -407,6 +407,89 @@ test("a container halo stays inside its own band: a stage worker assigned to ano
   expect(halo.members.sort()).toEqual([files[0]!.path, pipelineBand.mirrors[0]!.key].sort());
 });
 
+
+/**
+ * #1668. A task band that owns several pipelines used to stack every container
+ * heading at the top of its body and then flow EVERY container's cards through
+ * one wrap loop, so a five-stage pipeline and a two-stage one interleaved in the
+ * same rows and the headings above named nothing in particular. Each container is
+ * now a section: its own heading, its own rows, and a region enclosing both.
+ */
+test("each pipeline of a task is its own enclosed section: no shared rows, headings above their own cards (#1668)", () => {
+  const files = Array.from({ length: 4 }, (_, index) => file(index));
+  const first = pipelineWith("alpha", files.slice(0, 2), ["t"]);
+  const second = pipelineWith("beta", files.slice(2, 4), ["t"]);
+  const tasks = [task("t", "2026-01-01T00:00:00Z", [])];
+  const layout = base(files);
+  layout.groups = [
+    { key: "group::pipeline::alpha", kind: "pipeline", id: "alpha", hue: 10, members: files.slice(0, 2).map((entry) => entry.path), label: "Pipeline alpha", pipeline: first, x: 0, y: 0, w: 0, h: 0 },
+    { key: "group::pipeline::beta", kind: "pipeline", id: "beta", hue: 200, members: files.slice(2, 4).map((entry) => entry.path), label: "Pipeline beta", pipeline: second, x: 0, y: 0, w: 0, h: 0 },
+  ];
+  const projection = projectTaskWorkflows(tasks, [first, second], [], files);
+  const bands = rankBands(buildTaskBands(layout, { tasks, projection, untitled: "Untitled task" }));
+  const band = bands.find((entry) => entry.id === "task:t")!;
+  expect(band.groups).toEqual(["group::pipeline::alpha", "group::pipeline::beta"]);
+
+  /* 1440 is wide enough that three 360px tiles share a row, so a single flat
+     wrap WOULD put alpha's two stages and beta's first on one row — the exact
+     interleaving this test exists to forbid. */
+  const scene = layoutTaskBands(layout, bands, { mode: "intermediate", viewportWidth: 1440, reader: null });
+  const regionOf = (id: string) => scene.layout.groups.find((group) => group.id === id)!;
+  const cardsOf = (indices: readonly number[]) => indices.map((index) => scene.layout.byPath.get(files[index]!.path)!);
+  const placed = scene.bands.find((entry) => entry.id === "task:t")!;
+  const alpha = { region: regionOf("alpha"), cards: cardsOf([0, 1]) };
+  const beta = { region: regionOf("beta"), cards: cardsOf([2, 3]) };
+
+  for (const section of [alpha, beta]) {
+    expect(section.region.bandHeader).toBe(true);
+    for (const card of section.cards) {
+      /* Inside its own region, and below the heading bar the region carries. */
+      expect(contains(section.region, card)).toBe(true);
+      expect(card.y).toBeGreaterThanOrEqual(section.region.y + BOARD_SURFACE.groupHeader - 0.001);
+      /* Inside the band that owns the section. */
+      expect(contains(placed.geometry.rect, card)).toBe(true);
+    }
+    expect(contains(placed.geometry.rect, section.region)).toBe(true);
+  }
+  /* A region encloses exactly its own container's cards. */
+  expect(alpha.region.members.slice().sort()).toEqual(files.slice(0, 2).map((entry) => entry.path).sort());
+  expect(beta.region.members.slice().sort()).toEqual(files.slice(2, 4).map((entry) => entry.path).sort());
+  /* Both of alpha's stages share a row; neither shares it with any of beta's. */
+  expect(alpha.cards[0]!.y).toBeCloseTo(alpha.cards[1]!.y, 6);
+  expect(beta.cards[0]!.y).toBeCloseTo(beta.cards[1]!.y, 6);
+  for (const a of alpha.cards) for (const b of beta.cards) expect(overlapping(a, b)).toBe(false);
+  expect(beta.cards[0]!.y).toBeGreaterThan(alpha.cards[0]!.y);
+
+  /* Deliberate separation between the two sections, and no overlap at all. */
+  expect(overlapping(alpha.region, beta.region)).toBe(false);
+  expect(beta.region.y - (alpha.region.y + alpha.region.h)).toBeCloseTo(BAND.sectionGap, 6);
+  /* Both sections span the same width, so the frames stack as one column. */
+  expect(beta.region.w).toBeCloseTo(alpha.region.w, 6);
+  expect(alpha.region.x).toBeCloseTo(beta.region.x, 6);
+
+  /* The same holds at every width the board renders at and every semantic zoom:
+     narrowing the band wraps a pipeline's stages WITHIN its own section instead
+     of spilling them into its neighbour's. */
+  for (const viewportWidth of [375, 680, 830, 1024, 1440, 1920]) {
+    for (const mode of ["overview", "intermediate", "near"] as const) {
+      const at = layoutTaskBands(layout, bands, { mode, viewportWidth, reader: null });
+      const band = at.bands.find((entry) => entry.id === "task:t")!;
+      const regions = at.layout.groups.filter((group) => group.kind === "pipeline");
+      expect(regions).toHaveLength(2);
+      for (const region of regions) {
+        expect(contains(band.geometry.rect, region)).toBe(true);
+        const own = new Set(regions.find((entry) => entry.id === region.id)!.members);
+        for (const key of own) expect(contains(region, at.layout.byPath.get(key)!)).toBe(true);
+        /* No card of another section is inside — or even touching — this frame. */
+        for (const other of regions) {
+          if (other.id === region.id) continue;
+          expect(overlapping(region, other)).toBe(false);
+          for (const key of other.members) expect(overlapping(region, at.layout.byPath.get(key)!)).toBe(false);
+        }
+      }
+    }
+  }
+});
 
 test("a hidden EMPTY task draws no band; a hidden task holding an agent still does (#1614 item 1)", () => {
   const files = [file(0, "busy"), file(1)];
@@ -865,8 +948,8 @@ test("placeholder disclosure reserves its actual surface and reflows the followi
   const compact = layoutTaskBands(layout, bands, options);
   expect(compact.layout.slots[0]!.h).toBe(104);
   const expanded = layoutTaskBands(layout, bands, { ...options, expandedStages: new Set([key]) });
-  expect(expanded.layout.slots[0]!.h).toBe(724);
-  expect(expanded.bands[1]!.geometry.rect.y - compact.bands[1]!.geometry.rect.y).toBe(620);
+  expect(expanded.layout.slots[0]!.h).toBe(BOARD_SURFACE.stageDetails.h);
+  expect(expanded.bands[1]!.geometry.rect.y - compact.bands[1]!.geometry.rect.y).toBe(BOARD_SURFACE.stageDetails.h - BOARD_SURFACE.stage.h);
   expect(layoutTaskBands(layout, bands, options).bands.map(band => band.geometry)).toEqual(compact.bands.map(band => band.geometry));
   expect(pipeline.state).toBe("needs_decision");
 });
