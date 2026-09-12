@@ -473,6 +473,14 @@ export const BAND = {
      whose row of members ends early stops there instead of ruling a line across
      the whole canvas. Both are CSS pixels, like every other constant here. */
   minBandW: 620,
+  /* Inset of a container section's cards from the region that frames them
+     (#1668): a pipeline's stages sit visibly INSIDE the heading that names
+     them, which is the whole point of the frame. */
+  sectionPad: 14,
+  /* Separation between two container sections of the same task. Deliberately
+     larger than `rowGap`, so a wrapped row inside one pipeline never reads as a
+     boundary between two. */
+  sectionGap: 28,
 } as const;
 
 export interface BandGeometry {
@@ -644,10 +652,15 @@ export function layoutTaskBands(base: SchemeLayout, orderedBands: readonly TaskB
      (a draft pane, a planned stage slot, a deck, a reader tile on a board the
      dock has narrowed) is scaled down uniformly, contents included, so no
      surface ever extends past the band that holds it. */
-  const fitted = (w: number, h: number): { w: number; h: number; fit: number } => {
-    const fit = w > maxInnerW ? maxInnerW / w : 1;
+  const fitted = (w: number, h: number, usable: number = maxInnerW): { w: number; h: number; fit: number } => {
+    const fit = w > usable ? usable / w : 1;
     return { w: w * fit, h: h * fit, fit };
   };
+  /* A framed container section insets its cards on both sides, so an item that
+     lands in one has that much less room than the band's raw inner width
+     (#1668). Measuring against the wider figure let a scaled-down card overhang
+     the very frame that names it on a phone-width board. */
+  const sectionInnerW = Math.max(1, maxInnerW - BAND.sectionPad * 2);
   /* A review-round deck that renders as its one-line verdict chip must reserve
      the chip's height, not the full deck box it would need expanded, or a
      collapsed review loop leaves a task frame almost entirely empty. Which decks
@@ -670,6 +683,32 @@ export function layoutTaskBands(base: SchemeLayout, orderedBands: readonly TaskB
     const historyCollapsed = historyAvailable && historyChoice !== true
       && !(historyChoice === undefined && band.members.some(member => member.kind === "deck" && options.expandedDecks?.has(member.key)))
       && !bandContainsTarget(band, base, options.revealTarget ?? reader);
+    /* SECTIONS (#1668). A band is the task; each pipeline/flow it owns is a
+       section INSIDE it, and a section is the only thing that wraps. Previously
+       every heading was stacked at the top of the body and then every container's
+       members were flowed through ONE wrap loop, so a five-stage pipeline and a
+       two-stage one interleaved in the same rows and the headings above named
+       nothing in particular. Now a section owns its heading, its own rows and a
+       framed region enclosing both, and sections are separated by `sectionGap`.
+       Items belonging to no container keep their own unframed section after
+       them. The rectangle a heading reports IS the region, so `GroupsLayer`
+       draws the frame the operator reads ownership from. */
+    const sectionOf = new Map<string, string>();
+    for (const key of band.groups) {
+      const group = base.groups.find(entry => entry.key === key);
+      for (const memberKey of group?.members ?? []) if (!sectionOf.has(memberKey)) sectionOf.set(memberKey, key);
+      bandOf.set(key, band.id);
+    }
+    /* A mirror stands in for a member of the same container, so it belongs in
+       that container's section rather than drifting into the loose remainder. */
+    for (const mirror of band.mirrors) {
+      const owner = sectionOf.get(mirror.ofKey);
+      if (owner && !sectionOf.has(mirror.key)) sectionOf.set(mirror.key, owner);
+    }
+    /* Room an item gets: inside a framed section it is the section's, not the
+       band's. */
+    const usableFor = (key: string) => (sectionOf.has(key) ? sectionInnerW : maxInnerW);
+
     const items: { key: string; w: number; h: number; fit?: number; kind: "member" | "mirror"; node?: SchemeNode }[] = [];
     for (const member of historyCollapsed ? [] : band.members) {
       if (member.kind === "node") {
@@ -677,9 +716,11 @@ export function layoutTaskBands(base: SchemeLayout, orderedBands: readonly TaskB
         /* The selected conversation reads natively from the intermediate scale
            up: clicking a tile opens it in place, siblings stay tiles. */
         const presentation = mode === "overview" ? "chip" : member.key === reader ? "native" : "summary";
+        const usable = usableFor(member.key);
         const natural = fitted(
-          presentation === "chip" ? BAND.chipW : presentation === "native" ? Math.max(BAND.nativeMinW, Math.min(BAND.nativeW, maxInnerW)) : BAND.summaryW,
+          presentation === "chip" ? BAND.chipW : presentation === "native" ? Math.max(BAND.nativeMinW, Math.min(BAND.nativeW, usable)) : BAND.summaryW,
           presentation === "chip" ? BAND.chipH : presentation === "native" ? BAND.nativeH : BAND.summaryH,
+          usable,
         );
         items.push({ key: member.key, w: natural.w, h: natural.h, kind: "member", node: { ...node, presentation, readerScale: natural.fit, w: natural.w, h: natural.h } });
         continue;
@@ -690,55 +731,73 @@ export function layoutTaskBands(base: SchemeLayout, orderedBands: readonly TaskB
       const rect = baseRect.get(member.key);
       if (!rect) continue;
       const slot = member.kind === "slot" ? base.slots.find(slot => slot.key === member.key) : undefined;
-      const surface = slot ? stageSurface(options.expandedStages?.has(member.key) ?? false) : rect;
+      const surface = slot ? stageSurface(options.expandedStages?.has(member.key) ?? false, slot.presentation) : rect;
       const shellH = member.kind === "deck" && collapsedDecks.has(member.key) ? BAND.collapsedDeckH : surface.h;
-      const natural = fitted(surface.w, shellH);
+      const natural = fitted(surface.w, shellH, usableFor(member.key));
       items.push({ key: member.key, w: natural.w, h: natural.h, fit: natural.fit, kind: "member" });
     }
     for (const mirror of historyCollapsed ? [] : band.mirrors) {
-      const natural = fitted(mode === "overview" ? BAND.mirrorChipW : BAND.mirrorW, mode === "overview" ? BAND.chipH : BAND.mirrorH);
+      const natural = fitted(mode === "overview" ? BAND.mirrorChipW : BAND.mirrorW, mode === "overview" ? BAND.chipH : BAND.mirrorH, usableFor(mirror.key));
       items.push({ key: mirror.key, w: natural.w, h: natural.h, kind: "mirror" });
     }
-    // Each container gets a dedicated heading before its members. A heading
-    // never borrows the task title row or spans another container's cards.
-    const groupHeadroom = band.groups.length * BOARD_SURFACE.groupHeader;
     const hasNative = items.some(item => item.node?.presentation === "native");
     const hasRole = band.members.some(member => member.kind === "deck" || (member.kind === "node" && (
       base.loops.some(loop => loop.flow.implementerPath === member.key)
       || base.groups.some(group => group.pipeline?.runs.some(run => run.attempts.some(attempt => attempt.agentPath === member.key)))
     )));
     const roleSpace = mode === "overview" ? 0 : hasNative ? 64 : hasRole ? BOARD_SURFACE.roleSpace : 0;
-    const bodyTop = cursorY + headerH + groupHeadroom + (items.length ? roleSpace : 0);
-    for (const [index, key] of band.groups.entries()) {
-      containerSlots.set(key, { x: innerX0, y: cursorY + headerH + index * BOARD_SURFACE.groupHeader, w: Math.min(680, maxInnerW), h: BOARD_SURFACE.groupHeader });
-      bandOf.set(key, band.id);
-    }
-    let x = innerX0;
-    let y = bodyTop;
-    let rowH = 0;
-    let rows = items.length ? 1 : 0;
+
+    const LOOSE = "";
+    const sectionKeys = [...band.groups, LOOSE];
+    const bySection = new Map<string, typeof items>(sectionKeys.map(key => [key, [] as typeof items]));
+    for (const item of items) bySection.get(sectionOf.get(item.key) ?? LOOSE)!.push(item);
+
+    let rows = 0;
     /* Rightmost inked edge across every row, so the band can be trimmed to the
        content it actually holds instead of to the width it was measured in. */
     let contentRight = innerX0;
-    for (const item of items) {
-      if (x + item.w > innerRight + 0.001 && x > innerX0) {
-        x = innerX0;
-        y += rowH + rowGap + roleSpace;
-        rowH = 0;
-        rows += 1;
+    let sectionTop = cursorY + headerH;
+    let bodyBottom = sectionTop;
+    for (const sectionKey of sectionKeys) {
+      const list = bySection.get(sectionKey)!;
+      const framed = sectionKey !== LOOSE;
+      /* A container with nothing placed (overview scale, an unmaterialized
+         draft) still reserves its heading, so its controls always have a place. */
+      if (!framed && !list.length) continue;
+      const inset = framed ? BAND.sectionPad : 0;
+      const headingH = framed ? BOARD_SURFACE.groupHeader : 0;
+      const left = innerX0 + inset;
+      const sectionRight = innerRight - inset;
+      let x = left;
+      let y = sectionTop + headingH + inset + (list.length ? roleSpace : 0);
+      let rowH = 0;
+      if (list.length) rows += 1;
+      for (const item of list) {
+        if (x + item.w > sectionRight + 0.001 && x > left) {
+          x = left;
+          y += rowH + rowGap + roleSpace;
+          rowH = 0;
+          rows += 1;
+        }
+        const rect: SchemeRect = { x, y, w: item.w, h: item.h, ...(item.fit !== undefined && item.fit !== 1 ? { fit: item.fit } : {}) };
+        placed.set(item.key, rect);
+        shown.add(item.key);
+        bandOf.set(item.key, band.id);
+        if (item.kind === "mirror") mirrorRects.set(item.key, rect);
+        if (item.node) nodeRects.set(item.key, { ...item.node, x, y });
+        contentRight = Math.max(contentRight, x + item.w + inset);
+        const reviewGap = base.loops.some(loop => loop.flow.implementerPath === item.key) ? FLOW_HUB.w + 16 : itemGap;
+        x += item.w + Math.max(itemGap, reviewGap);
+        rowH = Math.max(rowH, item.h);
       }
-      const rect: SchemeRect = { x, y, w: item.w, h: item.h, ...(item.fit !== undefined && item.fit !== 1 ? { fit: item.fit } : {}) };
-      placed.set(item.key, rect);
-      shown.add(item.key);
-      bandOf.set(item.key, band.id);
-      if (item.kind === "mirror") mirrorRects.set(item.key, rect);
-      if (item.node) nodeRects.set(item.key, { ...item.node, x, y });
-      contentRight = Math.max(contentRight, x + item.w);
-      const reviewGap = base.loops.some(loop => loop.flow.implementerPath === item.key) ? FLOW_HUB.w + 16 : itemGap;
-      x += item.w + Math.max(itemGap, reviewGap);
-      rowH = Math.max(rowH, item.h);
+      const contentBottom = list.length ? y + rowH : sectionTop + headingH;
+      const sectionBottom = contentBottom + inset;
+      if (framed) containerSlots.set(sectionKey, { x: innerX0, y: sectionTop, w: Math.min(680, maxInnerW), h: sectionBottom - sectionTop });
+      bodyBottom = Math.max(bodyBottom, sectionBottom);
+      sectionTop = sectionBottom + BAND.sectionGap;
     }
-    let bandH = y - cursorY + rowH + (items.length ? BOARD_SURFACE.navigationSpace + pad : 0);
+
+    let bandH = bodyBottom - cursorY + (items.length ? BOARD_SURFACE.navigationSpace + pad : 0);
     if (mode === "overview") bandH = Math.max(bandH, BAND.minOverviewH);
     /* The band ends where its content ends. The floor keeps the header
        readable — title and header controls have dedicated rows — and the ceiling is the width it was measured in, so
@@ -746,9 +805,10 @@ export function layoutTaskBands(base: SchemeLayout, orderedBands: readonly TaskB
     const bandW = Math.min(maxBandW, Math.max(minBandW, contentRight + pad - gutter));
     const rect = { x: bandX, y: cursorY, w: bandW, h: bandH };
     const header = { x: bandX, y: cursorY, w: bandW, h: headerH };
+    /* Every section spans the same width, so the frames stack as one column. */
     for (const key of band.groups) {
-      const heading = containerSlots.get(key);
-      if (heading) heading.w = bandW - pad * 2;
+      const region = containerSlots.get(key);
+      if (region) region.w = bandW - pad * 2;
     }
     if (band.task) taskRects.set(`task::${band.task.id}`, header);
     placedBands.push({ ...band, geometry: { rect, header, rows, historyAvailable, historyCollapsed } });

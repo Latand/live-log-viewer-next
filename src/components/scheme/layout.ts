@@ -1437,10 +1437,16 @@ export function buildSchemeLayout(
     }
     return [...out];
   };
+  /* The heading a container is read by. A board key (`group::pipeline::<id>`) is
+     an identifier, never a name, so a container with no record of its own
+     reports an EMPTY label and the heading names the kind in the operator's
+     language instead (#1668). 120 characters because the band heading wraps to
+     two lines: a pipeline goal is a sentence, and cutting it at 60 made several
+     headings in one band interchangeable. */
   const groupLabel = (spec: SchemeGroupSpec): string => {
-    if (spec.pipeline) return cleanTitle(spec.pipeline.task, 60);
-    if (spec.flow) return cleanTitle(byAll.get(spec.flow.implementerPath)?.title ?? spec.flow.project, 60);
-    return spec.key;
+    if (spec.pipeline) return cleanTitle(spec.pipeline.task, 120);
+    if (spec.flow) return cleanTitle(byAll.get(spec.flow.implementerPath)?.title ?? spec.flow.project, 120);
+    return "";
   };
   /* Every planned stage's placeholder is a member of its pipeline halo, so the
      colored region grows to enclose the future stages that sit beside the live

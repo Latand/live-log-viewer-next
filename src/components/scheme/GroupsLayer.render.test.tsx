@@ -154,3 +154,48 @@ test("a draft pipeline keeps a scheme-only draft treatment and one compact heade
   expect(html.split(">Refactor the scheme<").length - 1).toBe(1);
   expect(html).toContain('data-pipeline-group-header="p1"');
 });
+
+/* #1668. Inside a task band a container is a SECTION of its parent task: its
+   rect encloses its own heading and its own stage rows. It used to render as a
+   floating pill over a hidden region — four of them stacked above one
+   undifferentiated grid of every pipeline's cards — so nothing tied a colour to
+   the cards it owned. */
+test("a band container draws a visible region with its heading attached, not a detached pill (#1668)", () => {
+  const banded: SchemeGroup = { ...pipelineGroup, pipeline: planPipeline, bandHeader: true, h: 300 };
+  const html = render([banded], true);
+  /* The region is drawn, not hidden: the frame is what shows ownership. */
+  expect(html).toMatch(/class="absolute inset-0 rounded-\[14px\] border"/);
+  expect(html).toContain("background-color:color-mix(in srgb, hsl(24 62% 42%) 6%, var(--surface-well))");
+  /* The heading is a full-width bar on that region, addressable on the board. */
+  expect(html).toContain('data-scheme-group-heading="group::pipeline::p1"');
+  expect(html).toMatch(/data-scheme-group-heading[^>]*class="[^"]*\bw-full\b/);
+  /* It carries the container's own colour, so the tint reads as this pipeline's
+     territory rather than as a tag floating over someone else's cards. */
+  expect(html).toContain("background-color:color-mix(in srgb, hsl(24 62% 42%) 10%, var(--surface-card))");
+  /* Progress reads in words, and the title is clamped to two lines instead of
+     being cut to one. */
+  expect(html).toContain("stage 2 of 2");
+  expect(html).toContain("-webkit-line-clamp:2");
+  /* Every control the pill carried is still here. */
+  expect(html).toContain('data-pipeline-group-header="p1"');
+  expect(html).toContain("data-pipeline-progress");
+  expect(html).toContain("data-pipeline-lifecycle");
+  expect(html).toContain('aria-haspopup="dialog"');
+});
+
+/* A board key is an identifier, never a name. */
+test("a container with no recorded goal names its kind, never its board key (#1668)", () => {
+  const html = render([{ ...pipelineGroup, pipeline: planPipeline, bandHeader: true, label: "" }], true);
+  expect(html).not.toMatch(/>[^<]*group::pipeline::p1[^<]*</);
+  expect(html).toContain("Pipeline without a recorded goal");
+  const flow = render([{ ...flowGroup, bandHeader: true, label: "" }], true);
+  expect(flow).toContain("Review loop without a recorded subject");
+});
+
+/* Outside a band the free-map halo keeps the counter-scaled pill it always had. */
+test("a free-map container keeps its counter-scaled label pill (#1668 leaves the map alone)", () => {
+  const html = render([pipelineGroup], true);
+  expect(html).toContain("rounded-full");
+  expect(html).toContain("truncate");
+  expect(html).not.toContain("data-scheme-group-heading");
+});
