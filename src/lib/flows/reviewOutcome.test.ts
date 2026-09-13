@@ -66,6 +66,38 @@ describe("reviewOutcomeFor", () => {
     expect(outcome!.observedAt).toBe("2026-07-10T03:00:00.000Z");
   });
 
+  test("a bold verdict beside NO FINDINGS projects as a clean APPROVE (#1682)", () => {
+    const entry = writeTranscript("claude-bold-verdict.jsonl", [
+      claudeAssistant("Every acceptance item holds.\n\n---\n\n**VERDICT: APPROVE**\n\nNO FINDINGS"),
+    ]);
+    expect(reviewOutcomeFor(entry)).toMatchObject({ verdict: "APPROVE", findingsCount: 0 });
+  });
+
+  test("a bold change request is read from the verdict line itself, with its finding (#1682)", () => {
+    const entry = writeTranscript("claude-bold-request-changes.jsonl", [
+      claudeAssistant([
+        "**VERDICT: REQUEST_CHANGES**",
+        "### Finding 1",
+        "- **Severity:** High",
+        "- **File:** src/app.ts",
+        "- **Title:** Broken null guard",
+        "- **Explanation:** The guard inverts the check.",
+      ].join("\n")),
+    ]);
+    expect(reviewOutcomeFor(entry)).toMatchObject({ verdict: "REQUEST_CHANGES", findingsCount: 1 });
+  });
+
+  test("NO FINDINGS cannot approve a reply whose verdict lines conflict or only restate the template (#1682)", () => {
+    const conflicting = writeTranscript("claude-conflicting-verdicts.jsonl", [
+      claudeAssistant("VERDICT: REQUEST_CHANGES\n\nOn a second look it is fine.\n\n**VERDICT: APPROVE**\n\nNO FINDINGS"),
+    ]);
+    const template = writeTranscript("claude-template-verdict.jsonl", [
+      claudeAssistant("VERDICT: APPROVE | REQUEST_CHANGES | COMMENT\n\nNO FINDINGS"),
+    ]);
+    expect(reviewOutcomeFor(conflicting)).toBeNull();
+    expect(reviewOutcomeFor(template)).toBeNull();
+  });
+
   test("a reviewer that produced no verdict yields no outcome", () => {
     const entry = writeTranscript("claude-no-verdict.jsonl", [
       claudeAssistant("Still reading the diff, hold on."),

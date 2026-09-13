@@ -176,3 +176,31 @@ Residual risk is low: the fallback count only runs for a requested-changes verdi
 `;
   expect(parseFindings(approval)).toMatchObject({ verdict: "APPROVE", findingsCount: 0 });
 });
+
+/* Final messages of the two headless Claude Haiku reviewers in staging flow
+   26d5fbcd (pipeline 064f250a, 2026-09-13). Both approved and the flow parked
+   as needs_decision because neither bold verdict line parsed (#1682). The
+   fixtures are byte-for-byte those messages with only the worktree path and
+   conversation ids replaced; fixture b is the saved round-1-review.md. */
+const HAIKU_REVIEWS = ["a", "b"].map((name) =>
+  fs.readFileSync(path.join(import.meta.dir, "fixtures", `haiku-review-bold-verdict-${name}.md`), "utf8"));
+
+test("both captured Haiku reviews with a bold verdict parse as an approval with zero findings (#1682)", () => {
+  for (const review of HAIKU_REVIEWS) {
+    expect(review).toContain("\n**VERDICT: APPROVE**\n");
+    expect(parseFindings(review)).toMatchObject({ verdict: "APPROVE", findingsCount: 0 });
+  }
+});
+
+test("a captured review stops approving when its bold verdict is quoted, fenced, negated or contradicted (#1682)", () => {
+  for (const review of HAIKU_REVIEWS) {
+    const withVerdictLine = (line: string) => review.replace("**VERDICT: APPROVE**", line);
+    expect(parseFindings(withVerdictLine("> **VERDICT: APPROVE**"))).toBeNull();
+    expect(parseFindings(withVerdictLine("```\n**VERDICT: APPROVE**\n```"))).toBeNull();
+    expect(parseFindings(withVerdictLine("**VERDICT: NOT APPROVE**"))).toBeNull();
+    expect(parseFindings(withVerdictLine("**VERDICT: APPROVE | REQUEST_CHANGES | COMMENT**"))).toBeNull();
+    expect(parseFindings(withVerdictLine("I would approve this once tests pass."))).toBeNull();
+    expect(parseFindings(`VERDICT: REQUEST_CHANGES\n\n${review}`)).toBeNull();
+    expect(parseFindings(withVerdictLine("**VERDICT: REQUEST_CHANGES**"))).toMatchObject({ verdict: "REQUEST_CHANGES" });
+  }
+});

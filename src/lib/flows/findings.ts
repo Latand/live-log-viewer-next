@@ -1,6 +1,6 @@
 import fs from "node:fs";
 
-import { countFindingBlocks, parseReview, VERDICT_LINE_RE } from "@/lib/review";
+import { countFindingBlocks, parseReview, reviewVerdict } from "@/lib/review";
 import { tailRecords } from "@/lib/scanner/activity";
 import { recordValue, recordsValue, stringValue } from "@/lib/scanner/json";
 import type { FileEntry } from "@/lib/types";
@@ -82,7 +82,7 @@ function transcriptEntryFromPath(transcriptPath: string, engine: FlowEngine | nu
 }
 
 export function parseFindings(text: string): ParsedFindings | null {
-  const verdict = text.match(VERDICT_LINE_RE)?.[1] as ReviewVerdict | undefined;
+  const verdict = reviewVerdict(text);
   if (!verdict) return null;
   const review = parseReview(text, null);
   const structured = review?.findings.length ?? 0;

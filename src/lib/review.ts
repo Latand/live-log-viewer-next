@@ -20,7 +20,32 @@ export interface ReviewCardItem {
 }
 
 export const RAW_DEBUG_KEEP = 24_000;
-export const VERDICT_LINE_RE = /^\s*(?:VERDICT:\s*)?(REQUEST_CHANGES|APPROVE|COMMENT)\b/m;
+type ReviewVerdict = NonNullable<ReviewCardItem["verdict"]>;
+/** Emphasis runs reviewers wrap around a verdict: `*`, `**`, `***`, `_`, `__`, `___`. */
+const EMPHASIS = String.raw`[*_]{1,3}`;
+/** The `VERDICT:` label with the Markdown reviewers put around it — a heading
+    marker, emphasis around the label, the value or the whole line — as in
+    `**VERDICT: APPROVE**`, `## VERDICT: APPROVE`, `**Verdict:** APPROVE` and
+    `Verdict: **APPROVE**` (#1682). */
+const VERDICT_LABEL =
+  String.raw`(?:#{1,6}[ \t]+)?(?:${EMPHASIS}[ \t]*)?(?:VERDICT|Verdict|verdict)[*_]{0,3}[ \t]*:[ \t]*(?:${EMPHASIS}[ \t]*)?`;
+/** The verdict token and its closing emphasis; `APPROVED`, `APPROVE_DECISION`
+    and `COMMENT-level` are other words. */
+const VERDICT_TOKEN = String.raw`(REQUEST_CHANGES|APPROVE|COMMENT)[*_]{0,3}(?![A-Za-z0-9_]|-[A-Za-z0-9])`;
+/** One verdict line: the labelled form, or the bare token as a plain line. The
+    Markdown forms need the label, so finding headings like `### COMMENT — …`
+    stay findings. Up to three spaces of indent; four make a code block. */
+export const VERDICT_LINE_RE = new RegExp(String.raw`^ {0,3}(?:${VERDICT_LABEL})?${VERDICT_TOKEN}`, "m");
+const ANY_VERDICT_TOKEN_RE = /(?<![\w-])(?:REQUEST_CHANGES|APPROVE|COMMENT)(?![\w-])/;
+/** A negation or condition straight after APPROVE takes the approval back:
+    `VERDICT: APPROVE once tests pass`, `**VERDICT: APPROVE** (after fixes)`.
+    After REQUEST_CHANGES or COMMENT the same words describe the code. */
+const HEDGED_APPROVAL_RE =
+  /^[\s*_—–:,(-]*(?:not|never|unless|if|once|until|pending|after|when|assuming|provided|subject\s+to|conditional(?:ly)?|would|could|should|cannot|can't|only\s+(?:if|when|once|after))(?![\w'])/i;
+/** A bare token that runs on into a sentence is prose about a verdict:
+    `APPROVE requires findings to be empty`, `APPROVE received.`. Reviewers do
+    name what they judged with `at` and `for`, as in `REQUEST_CHANGES at <sha>`. */
+const BARE_TOKEN_SENTENCE_RE = /^(?:[ \t]+(?!(?:at|for)\b)[a-z0-9]|[ \t]*=)/;
 const FINDING_ITEM_RE = /^\s*(\d+)[.)]\s+(.*)$/;
 const FINDING_HEADING_RE = /^\s*#{1,6}\s+finding\s+\d+\b.*$/i;
 /** Reviewers label the same fields with any mix of leading bullet and bold, so
@@ -178,8 +203,64 @@ export function countFindingBlocks(text: string): number {
   return bullets;
 }
 
+type VerdictLine = { verdict: ReviewVerdict; labelled: boolean; accepted: boolean };
+
+/** A line with the verdict shape, and whether it states that verdict. A
+    refused line still counts against an approval in reviewVerdict. */
+function verdictLine(line: string): VerdictLine | null {
+  const match = line.match(VERDICT_LINE_RE);
+  if (!match) return null;
+  const verdict = match[1] as ReviewVerdict;
+  const rest = line.slice(match[0].length);
+  const labelled = !match[0].trimStart().startsWith(verdict);
+  const refused =
+    ANY_VERDICT_TOKEN_RE.test(rest)
+    || (verdict === "APPROVE" && (/^[ \t*_]*\?/.test(rest) || HEDGED_APPROVAL_RE.test(rest)))
+    || (!labelled && BARE_TOKEN_SENTENCE_RE.test(rest));
+  return { verdict, labelled, accepted: !refused };
+}
+
+/** Lines a reviewer wrote as its own prose. Fenced code and blockquotes hold
+    examples and quoted earlier reviews, so their lines are skipped. */
+function* ownProseLines(text: string): Generator<string> {
+  let fence: { marker: string; length: number } | null = null;
+  for (const line of text.split(/\r?\n/)) {
+    const fenceMatch = /^\s*(`{3,}|~{3,})(.*)$/.exec(line);
+    if (fenceMatch) {
+      const token = fenceMatch[1]!;
+      if (!fence) fence = { marker: token[0]!, length: token.length };
+      else if (token[0] === fence.marker && token.length >= fence.length && !fenceMatch[2]!.trim()) fence = null;
+      continue;
+    }
+    if (fence || /^\s*>/.test(line)) continue;
+    yield line;
+  }
+}
+
+/** The review's verdict, read from its own prose. Labelled `VERDICT:` lines
+    decide, bare token lines only when no labelled line exists, and the
+    deciding lines must agree. An approval must also be unanimous: any other
+    verdict-shaped line, refused or naming another verdict, leaves no verdict.
+    A hedged change request, a changed mind or a pasted template therefore
+    cannot become an approval. */
+export function reviewVerdict(text: string): ReviewVerdict | null {
+  if (!/REQUEST_CHANGES|APPROVE|COMMENT/.test(text)) return null;
+  const lines: VerdictLine[] = [];
+  for (const line of ownProseLines(text)) {
+    const found = verdictLine(line);
+    if (found) lines.push(found);
+  }
+  const accepted = lines.filter((line) => line.accepted);
+  const deciding = accepted.some((line) => line.labelled) ? accepted.filter((line) => line.labelled) : accepted;
+  const verdicts = new Set(deciding.map((line) => line.verdict));
+  if (verdicts.size !== 1) return null;
+  const [verdict] = [...verdicts];
+  if (verdict === "APPROVE" && lines.some((line) => !line.accepted || line.verdict !== "APPROVE")) return null;
+  return verdict ?? null;
+}
+
 export function parseReview(text: string, ts: unknown): ReviewCardItem | null {
-  const verdict = text.match(VERDICT_LINE_RE)?.[1] as ReviewCardItem["verdict"] | undefined;
+  const verdict = reviewVerdict(text);
   if (!verdict) return null;
   const findings = parseStructuredFindings(text);
   const hasStructuredFindings = findings.length > 0;

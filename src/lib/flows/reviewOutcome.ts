@@ -1,3 +1,4 @@
+import { VERDICT_LINE_RE } from "@/lib/review";
 import { globalCache } from "@/lib/scanner/caches";
 import type { FileEntry } from "@/lib/types";
 
@@ -41,7 +42,12 @@ export function reviewOutcomeFor(entry: TranscriptEntry): ReviewOutcome | null {
     const observedAt = Number.isFinite(message.ts) ? new Date(message.ts).toISOString() : null;
     const parsed = parseFindings(message.text);
     if (parsed) outcome = { verdict: parsed.verdict, findingsCount: parsed.findingsCount, observedAt };
-    else if (NO_FINDINGS_RE.test(message.text)) outcome = { verdict: "APPROVE", findingsCount: 0, observedAt };
+    /* A message with verdict lines that yielded no verdict (conflicting,
+       hedged or templated) keeps no outcome; its NO FINDINGS line cannot
+       approve it. */
+    else if (!VERDICT_LINE_RE.test(message.text) && NO_FINDINGS_RE.test(message.text)) {
+      outcome = { verdict: "APPROVE", findingsCount: 0, observedAt };
+    }
   }
   outcomeCache.set(entry.path, [entry.size, outcome]);
   return outcome;

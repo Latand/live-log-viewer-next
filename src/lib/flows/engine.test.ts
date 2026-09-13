@@ -615,6 +615,71 @@ test("headless review retries once after an exit without a verdict, then parks o
   expect(parked.stateDetail).toContain("reviewer verdict was unparseable");
 });
 
+test("a headless Claude reviewer's bold approval settles the round without an automatic retry (#1682)", async () => {
+  const startedAt = new Date().toISOString();
+  const cwd = "/repo";
+  const implementer = writeCodexEntry("bold-verdict-implementer.jsonl", { id: ["019f421e", "02e1", "73e0", "9b77", "bebde063f130"].join("-"), cwd }, Date.now() / 1_000);
+  const flow: Flow = {
+    id: "flow-bold-verdict",
+    template: "implement-review-loop",
+    project: "repo",
+    cwd,
+    implementerPath: implementer.path,
+    roles: {
+      implementer: { engine: "claude", model: null, effort: "high" },
+      reviewer: { engine: "claude", model: "haiku", effort: null },
+    },
+    reviewerFallback: null,
+    baseRef: "base",
+    baseMode: "head",
+    mode: "manual",
+    reviewerMode: "headless",
+    roundLimit: 5,
+    state: "reviewing",
+    pausedState: null,
+    stateDetail: null,
+    rounds: [{
+      n: 1,
+      reviewerPath: null,
+      reviewerRole: { engine: "claude", model: "haiku", effort: null },
+      accountId: "default",
+      attemptedAccounts: ["claude:default"],
+      autoRetryCount: 0,
+      sessionId: null,
+      reviewerPid: 999_999_999,
+      reviewerPane: null,
+      findingsPath: null,
+      triggeredBy: "marker",
+      readyNote: null,
+      verdict: null,
+      findingsCount: null,
+      startedAt,
+      spawnStartedAt: startedAt,
+      relayStartedAt: null,
+      reviewedAt: null,
+      relayedAt: null,
+      error: null,
+    }],
+    createdAt: startedAt,
+    closedAt: null,
+  };
+  /* A headless Claude reviewer's final output is its plain-text stdout; this
+     is the second staging reviewer's output that consumed flow 26d5fbcd's
+     retry and then parked it as unparseable. */
+  const review = fs.readFileSync(path.join(import.meta.dir, "fixtures", "haiku-review-bold-verdict-b.md"), "utf8");
+  fs.mkdirSync(path.dirname(stdoutPathFor(flow.id, 1)), { recursive: true });
+  fs.writeFileSync(stdoutPathFor(flow.id, 1), `${review}\n`);
+  saveFlows([flow]);
+
+  await tickFlows([implementer]);
+  const settled = loadFlows()[0]!;
+  expect(settled.stateDetail ?? "").not.toContain("retrying automatically");
+  expect(settled).toMatchObject({
+    state: "relay_pending",
+    rounds: [{ verdict: "APPROVE", findingsCount: 0, autoRetryCount: 0, error: null }],
+  });
+});
+
 test("headless review recovers the rollout verdict before consuming an automatic retry", async () => {
   const startedAt = "2026-07-12T08:35:59.000Z";
   const cwd = "/repo";
