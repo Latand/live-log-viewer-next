@@ -120,6 +120,45 @@ export function parseRuntimeCommand(kind: RuntimeOperationKind, value: unknown):
     };
   }
 
+  /* #1560: native injection appends the operator's raw input to the thread's
+     model-visible history. It borrows the send command's shape — same immutable
+     payload, same fence, same authorship — and refuses everything about a send
+     that does not apply to it, HERE, where validation has produced no side
+     effect yet. That is the whole point of refusing in the parser: the caller
+     learns the payload cannot be injected before any byte of it is written to
+     the inbox, admitted to the journal, or handed to an engine. */
+  if (kind === "inject") {
+    const text = typeof body.text === "string" ? body.text.trim() : "";
+    if (!text) throw new Error("injected context text is required");
+    /* `thread/inject_items` takes RAW Responses items, whose image form is a
+       validated URL rather than the `localImage` path every Viewer send uses,
+       and nothing in the captured app-server schema or the audit establishes
+       that the local-path form is accepted. Guessing would either corrupt the
+       turn or drop the picture silently, so an image payload is named and
+       refused instead. General file attachments are unaffected: the route folds
+       those into the text as paths before parsing, so a document still rides
+       along. */
+    if (Array.isArray(body.images) && body.images.length > 0) {
+      throw new Error("injected context cannot carry images; send or queue the message instead");
+    }
+    /* No policy: there is no turn to interrupt, no queue to fall back to, and
+       no steer to degrade into. A caller that asked for one asked for a
+       different operation and is told so rather than silently given this one. */
+    if (body.policy !== undefined) throw new Error("injected context does not take a delivery policy");
+    const content = structuredContent(text, []);
+    const selectedContext = parseSelectedContextRef(body.selectedContext);
+    return {
+      kind,
+      conversationId,
+      ...(operationId ? { operationId } : {}),
+      idempotencyKey,
+      text: content.content.text,
+      contentDigest: content.contentDigest,
+      ...(turnId !== undefined ? { turnId } : {}),
+      ...(selectedContext ? { selectedContext } : {}),
+    };
+  }
+
   if (kind === "send" || kind === "steer") {
     const text = typeof body.text === "string" ? body.text.trim() : "";
     const images = body.images === undefined ? undefined : body.images;

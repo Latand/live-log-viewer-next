@@ -119,6 +119,11 @@ const RUNTIME_EFFECT_PAGE_SIZE = 100;
 const STRUCTURED_HOST_OPERATION_EFFECT_KINDS = [
   "runtime.send",
   "runtime.steer",
+  /* #1560. Startup already re-hosts a conversation holding a pending injection
+     through the `recentOperations` status filter, which admits any kind but
+     `kill`; this list is the other source and only diverges once an operation
+     has aged out of that window. Keeping the two consistent is the point. */
+  "runtime.inject",
   "runtime.interrupt",
   "runtime.answer",
   "runtime.spawn",

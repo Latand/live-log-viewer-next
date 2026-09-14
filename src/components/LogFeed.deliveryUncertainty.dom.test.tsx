@@ -1,5 +1,7 @@
 /** Mounted composer/feed regression and original-operation action proof for #1538. */
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeEach, expect, test } from "bun:test";
+
+import { installComposerStorageForTests } from "@/test-helpers/composerStorage";
 import { act } from "react";
 import { installActEnv } from "@/test-helpers/actEnv";
 import { Window } from "happy-dom";
@@ -84,6 +86,10 @@ let realReceiptHook = false;
 
 const realFetch = globalThis.fetch;
 
+/* Attachment submissions are kept in IndexedDB before they reach the wire. */
+const composerStorage = installComposerStorageForTests();
+afterAll(() => composerStorage.uninstall());
+
 beforeEach(() => {
   snapshotReceipts = [];
   realReceiptHook = false;
@@ -110,6 +116,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  composerStorage.reset();
   setLogFeedDependenciesForTests(null);
   setTmuxComposerRuntimeDependenciesForTests(null);
   setRuntimeUiEnabledForTests(null);
@@ -171,10 +178,12 @@ async function renderInto(node: React.ReactElement): Promise<{ host: HTMLElement
   return { host, root };
 }
 
+/* An attachment submission reaches the wire after its complete copy is
+   durably retained, which spans a few macrotasks. */
 const settle = async (fn: () => void) => {
   await act(async () => {
     fn();
-    await new Promise((r) => setTimeout(r, 0));
+    for (let turn = 0; turn < 6; turn += 1) await new Promise((r) => setTimeout(r, 1));
   });
 };
 
@@ -1246,17 +1255,14 @@ for (const initialState of ["in-flight", "failed"] as const) {
         }
         if (url === `/api/runtime/operations/${captured.operationId}`) {
           actions.push(init?.body as string | undefined);
-          safe = runtimeReceiptForSend({ operationId: captured.operationId,
-            clientMessageId: sends[0]!.idempotencyKey, conversationId: file.conversationId!,
-            kind: "send", state: "failed", reason: "pre-dispatch rejection", resend: "safe",
-            acceptedAt: captured.admittedAt, settledAt: captured.at,
-          } as SendReceipt);
-          const receipt = actions.length === 1 ? safe : runtimePresentationReceipt({
+          /* The operation retry contract answers with its delivered leaf,
+             presented under the admitted operation it replaces. */
+          const receipt = runtimePresentationReceipt({
             ...safe, operationId: "payload-retry-leaf", idempotencyKey: "payload-retry-key",
             retryOfOperationId: safe.operationId, presentationOperationId: safe.operationId,
-            presentationRevision: 5, revision: 1, status: "delivered", resend: "not-needed",
+            presentationRevision: 6, revision: 1, status: "delivered", resend: "not-needed",
           });
-          return Response.json({ operationId: receipt.operationId, receipt });
+          return Response.json({ operationId: "payload-retry-leaf", receipt });
         }
         return new Response("{}", { status: 404 });
       }) as typeof fetch;
@@ -1292,7 +1298,21 @@ for (const initialState of ["in-flight", "failed"] as const) {
         writeProfile(file, { effort: "low", fast: true });
         await settle(() => composerControls(mounted.host).type("later draft"));
         await pasteImage(mounted.host, "later-image");
-        await settle(() => mounted.host.querySelector<HTMLButtonElement>("[data-receipt-uncertain-retry]")!.click());
+        /* A retained copy is never re-driven while its fate is unknown: the
+           operator re-checks the original operation instead. */
+        expect(mounted.host.querySelector("[data-receipt-uncertain-retry]")).toBeNull();
+        expect([...mounted.host.querySelectorAll("button")]
+          .some(button => button.textContent === translate("en", "composer.payloadRecheck"))).toBe(true);
+        /* The authoritative answer arrives on the receipt stream: never executed. */
+        safe = { ...runtimeReceiptForSend({ operationId: captured.operationId,
+          clientMessageId: sends[0]!.idempotencyKey, conversationId: file.conversationId!,
+          kind: "send", state: "failed", reason: "pre-dispatch rejection", resend: "safe",
+          acceptedAt: captured.admittedAt, settledAt: captured.at,
+        } as SendReceipt), revision: 5 };
+        snapshotReceipts = [safe];
+        // The composer reads the stream on its next render.
+        await settle(() => composerControls(mounted.host).type("later draft "));
+        await settle(() => composerControls(mounted.host).type("later draft"));
         const safeEntry = readOutbox(file.conversationId!).find(entry => entry.id === sends[0]!.idempotencyKey)!;
         expect(safeEntry.deliveryReceipt?.resend).toBe("safe");
         expect(mounted.host.querySelectorAll("[data-outbox-retry]").length).toBe(0);
@@ -1300,7 +1320,7 @@ for (const initialState of ["in-flight", "failed"] as const) {
         expect(readOutbox(file.conversationId!).find(entry => entry.id === safeEntry.id)).toEqual(safeEntry);
         expect(sends).toEqual([originalWire]);
         await settle(() => mounted.host.querySelector<HTMLButtonElement>("[data-delivery-notice-retry]")!.click());
-        expect(actions).toEqual([JSON.stringify({ action: "retry-uncertain" }), undefined]);
+        expect(actions).toEqual([undefined]);
         expect(readOutbox(file.conversationId!).find(entry => entry.id === safeEntry.id)?.state).toBe("delivered");
         expect(sends).toEqual([originalWire]);
         expect(mounted.host.querySelector<HTMLTextAreaElement>("textarea")!.value).toBe("later draft");

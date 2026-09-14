@@ -287,7 +287,7 @@ test("dead structured image-only input stays removable and avoids failing recove
   await act(async () => root.unmount());
 });
 
-test("dead structured text plus images stays local and retries after hosting returns", async () => {
+test("dead structured attachments stay local after host recovery when durable browser storage is unavailable", async () => {
   const sends: SendBody[] = [];
   mockWire(sends, [(body) => structuredView.session.host === "unhosted"
     ? { status: 503, json: { error: "recovery failed before image admission" } }
@@ -320,13 +320,13 @@ test("dead structured text plus images stays local and retries after hosting ret
   expect(recoveredSend.disabled).toBe(false);
   await settle(() => composerControls(host).submit());
 
-  expect(sends).toHaveLength(1);
-  expect(sends[0]).toMatchObject({
-    text: "keep this text with both screenshots",
-    images: [{ mime: "image/png" }, { mime: "image/png" }],
-  });
-  expect((host.querySelector("textarea") as HTMLTextAreaElement).value).toBe("");
-  expect(host.querySelectorAll('[data-testid="attachment-tile"][data-status="ready"]')).toHaveLength(0);
+  // This DOM has no IndexedDB. Host recovery cannot bypass complete retention.
+  // Successful retained submission/reload is exercised in real Chromium by
+  // scripts/verify-composer-payloads.mjs and its scenario verifier.
+  expect(sends).toHaveLength(0);
+  expect((host.querySelector("textarea") as HTMLTextAreaElement).value).toBe("keep this text with both screenshots");
+  expect(host.querySelectorAll('[data-testid="attachment-tile"][data-status="ready"]')).toHaveLength(2);
+  expect(host.textContent).toContain(translate("en", "composer.payloadStorageUnavailable"));
   await act(async () => root.unmount());
 });
 

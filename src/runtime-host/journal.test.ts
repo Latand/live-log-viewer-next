@@ -402,6 +402,9 @@ test("snapshot exposes the canonical projected runtime model", () => {
         steer: true,
         structuredAttention: true,
         nativeQueue: false,
+        /* #1560: the projection carries the injection axis, and a publisher
+           that said nothing about it reads as no injection. */
+        inject: false,
         imageInput: expect.objectContaining({
           supported: false,
           reason: "The selected Codex model does not advertise image input through app-server.",

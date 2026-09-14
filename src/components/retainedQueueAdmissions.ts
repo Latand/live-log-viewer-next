@@ -12,6 +12,7 @@
  * for one the journal may already hold.
  */
 import type { NativeQueueMutation } from "@/hooks/useNativeQueue";
+import { ComposerPayloadStorageError, ComposerPayloadStore } from "@/lib/composerPayloadStore";
 
 /** The one sessionStorage slot these records live in, per card. */
 export const queueAdmissionKey = (id: string) => "llvQueueAdmission:" + id;
@@ -56,6 +57,41 @@ export interface RetainedQueueAdmission {
   key: string;
   mutation: NativeQueueMutation;
   binding: { threadId: string | null; accountId: string | null };
+  /**
+   * Present when the envelope's attachment bytes are kept in IndexedDB. The
+   * slot then holds everything else, and `mutation` carries no attachment bytes: a
+   * replay restores the whole envelope and verifies it before it may leave.
+   */
+  payload?: RetainedQueuePayload;
+  /**
+   * Present once the journal refused this hand-off (#1652). A refusal admitted
+   * nothing, so there is no operation left to replay. The record is still the
+   * only whole copy of what the operator wrote: the composer may hold newer
+   * words, and a draft cannot keep a document's bytes or large images across a
+   * reload. So the record and its bytes stay until the operator discards them,
+   * or until the same message is retained again as a new operation, which then
+   * holds the same content under its own key.
+   */
+  refused?: { reason: string };
+}
+
+/**
+ * Where a large hand-off's bytes are, and how to know them again.
+ *
+ * sessionStorage refuses a few megabytes, and four screenshots are sixteen, so
+ * a hand-off that carries them keeps its whole envelope in the same durable
+ * primitive an ordinary send uses and only its identity here. `fingerprint`
+ * names that stored envelope, and `authored` is a digest of what the operator
+ * authored, so pressing the same message again finds this operation without
+ * the bytes having to sit in the slot.
+ */
+export interface RetainedQueuePayload {
+  fingerprint: string;
+  bytes: number;
+  images: number;
+  /** Absent on records written before a hand-off could carry files. */
+  files?: number;
+  authored: string;
 }
 
 /**
@@ -154,8 +190,8 @@ export type RetainOutcome = "retained" | "refused";
  * one out of the retained envelope rather than whatever is on screen at the
  * second press.
  */
-export function sameQueueOperation(left: NativeQueueMutation, right: NativeQueueMutation): boolean {
-  const authored = (mutation: NativeQueueMutation) => JSON.stringify({
+function authoredQueueOperation(mutation: NativeQueueMutation): string {
+  return JSON.stringify({
     action: mutation.action,
     text: mutation.text ?? "",
     images: mutation.images ?? [],
@@ -164,8 +200,14 @@ export function sameQueueOperation(left: NativeQueueMutation, right: NativeQueue
     expectedRevision: mutation.expectedRevision ?? null,
     queuedSubmissionIds: mutation.queuedSubmissionIds ?? null,
     turnId: mutation.turnId ?? null,
+    /* Only when present, so an operation retained before files could ride a
+       hand-off keeps the identity it was stored under. */
+    ...(mutation.files?.length ? { files: mutation.files } : {}),
   });
-  return authored(left) === authored(right);
+}
+
+export function sameQueueOperation(left: NativeQueueMutation, right: NativeQueueMutation): boolean {
+  return authoredQueueOperation(left) === authoredQueueOperation(right);
 }
 
 /** Every action the journal admits under a key of its own. A stored record
@@ -174,14 +216,53 @@ const RETAINABLE_ACTIONS: ReadonlySet<string> = new Set([
   "add", "update", "delete", "reorder", "start", "send-now",
 ]);
 
+/**
+ * A record whose bytes are in IndexedDB is stored under `command` rather than
+ * `mutation`, so a build that predates it reads it as an entry it cannot name
+ * and carries it verbatim instead of replaying a hand-off without its images.
+ */
+interface StoredDurableAdmission {
+  key: string;
+  binding: RetainedQueueAdmission["binding"];
+  command: NativeQueueMutation;
+  payload: RetainedQueuePayload;
+  refused?: RetainedQueueAdmission["refused"];
+}
+
+function validRefusal(value: unknown): RetainedQueueAdmission["refused"] {
+  const refusal = value as { reason?: unknown } | null | undefined;
+  return refusal && typeof refusal === "object" && typeof refusal.reason === "string" ? { reason: refusal.reason } : undefined;
+}
+
+function validPayload(value: unknown): value is RetainedQueuePayload {
+  const payload = value as Partial<RetainedQueuePayload> | null;
+  return Boolean(payload) && typeof payload!.fingerprint === "string" && /^[a-f0-9]{64}$/.test(payload!.fingerprint)
+    && typeof payload!.authored === "string" && /^[a-f0-9]{64}$/.test(payload!.authored)
+    && Number.isSafeInteger(payload!.bytes) && Number.isSafeInteger(payload!.images)
+    && (payload!.files === undefined || Number.isSafeInteger(payload!.files));
+}
+
 function parseRetainedQueueAdmission(value: unknown): RetainedQueueAdmission | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const record = value as Partial<RetainedQueueAdmission>;
+  const record = value as Partial<RetainedQueueAdmission> & Partial<StoredDurableAdmission>;
   if (typeof record.key !== "string" || !record.key) return null;
+  if (!record.binding || typeof record.binding !== "object") return null;
+  const refused = validRefusal(record.refused);
+  if (record.command !== undefined || record.payload !== undefined) {
+    if (!record.command || typeof record.command !== "object" || record.mutation !== undefined) return null;
+    if (record.command.action !== "add" || !validPayload(record.payload)) return null;
+    return { key: record.key, mutation: record.command, binding: record.binding, payload: record.payload, ...(refused ? { refused } : {}) };
+  }
   if (!record.mutation || typeof record.mutation !== "object") return null;
   if (!RETAINABLE_ACTIONS.has(record.mutation.action as string)) return null;
-  if (!record.binding || typeof record.binding !== "object") return null;
-  return { key: record.key, mutation: record.mutation, binding: record.binding } as RetainedQueueAdmission;
+  return { key: record.key, mutation: record.mutation, binding: record.binding, ...(refused ? { refused } : {}) } as RetainedQueueAdmission;
+}
+
+function storedRecord(record: RetainedQueueAdmission): unknown {
+  const refused = record.refused ? { refused: record.refused } : {};
+  return record.payload
+    ? { key: record.key, binding: record.binding, command: record.mutation, payload: record.payload, ...refused } satisfies StoredDurableAdmission
+    : { key: record.key, mutation: record.mutation, binding: record.binding, ...refused };
 }
 
 /**
@@ -236,7 +317,7 @@ export function readRetainedQueueAdmissions(id: string): RetainedQueueAdmission[
  * point of the record is the reload.
  */
 function writeRetainedStore(id: string, store: RetainedStore): boolean {
-  const all: unknown[] = [...store.records, ...store.opaque];
+  const all: unknown[] = [...store.records.map(storedRecord), ...store.opaque];
   try {
     if (all.length) sessionStorage.setItem(queueAdmissionKey(id), JSON.stringify(all));
     else sessionStorage.removeItem(queueAdmissionKey(id));
@@ -265,24 +346,144 @@ function writeRetainedStore(id: string, store: RetainedStore): boolean {
  * told — offers that as a way out.
  */
 export function retainQueueAdmission(id: string, record: RetainedQueueAdmission): RetainOutcome {
+  return commitQueueAdmission(id, record, (entry) => !entry.payload && !record.payload && sameQueueOperation(entry.mutation, record.mutation));
+}
+
+/**
+ * The write behind both retention paths. `carries` names the refused copies
+ * this record holds the same message as: they leave in the same write, since
+ * the new operation now keeps that content under its own key, and they do not
+ * count against the bound it is checked against.
+ */
+function commitQueueAdmission(id: string, record: RetainedQueueAdmission, carries: (entry: RetainedQueueAdmission) => boolean): RetainOutcome {
   const store = readRetainedStore(id);
   if (store.contentsUnknown) return "refused";
   const replay = store.records.some((entry) => entry.key === record.key);
-  const kept = store.records.filter((entry) => entry.key !== record.key);
+  const superseded = replay ? [] : store.records.filter((entry) => entry.refused && carries(entry));
+  const kept = store.records.filter((entry) => entry.key !== record.key && !superseded.includes(entry));
   if (!replay && kept.length + store.opaque.length >= MAX_RETAINED_ADMISSIONS_PER_CARD) return "refused";
   const next: RetainedStore = { ...store, records: [...kept, record] };
-  if (writeRetainedStore(id, next)) return "retained";
+  if (writeRetainedStore(id, next)) {
+    for (const entry of superseded) releasePayload(id, entry);
+    return "retained";
+  }
   /* The write failed. A replay is already in the slot from its first press, so
      it stays recoverable and may go; a new operation is refused with the mirror
      left exactly as it was, so nothing half-remembers it. */
   return replay ? "retained" : "refused";
 }
 
-/** Terminal evidence about ONE operation, and only that one. */
+function releasePayload(id: string, record: RetainedQueueAdmission | undefined): void {
+  if (!record?.payload) return;
+  void queuePayloads.release({ conversationId: id, key: record.key, fingerprint: record.payload.fingerprint, bytes: record.payload.bytes, savedAt: 0 })
+    .catch(() => false);
+}
+
+/** Terminal evidence about ONE operation, and only that one, or the operator
+    discarding a refused copy. The identity leaves the slot first; bytes kept
+    for it go after, so a failure between the two strands an unnamed copy and
+    never an operation without its bytes. */
 export function releaseQueueAdmission(id: string, key: string): void {
   const store = readRetainedStore(id);
   if (store.contentsUnknown) return;
-  writeRetainedStore(id, { ...store, records: store.records.filter((entry) => entry.key !== key) });
+  const released = store.records.find((entry) => entry.key === key);
+  if (!writeRetainedStore(id, { ...store, records: store.records.filter((entry) => entry.key !== key) })) return;
+  releasePayload(id, released);
+}
+
+/**
+ * The journal refused this hand-off: it admitted nothing, and from here the
+ * record holds the refused message (#1652). Its bytes stay where they are. If the slot will not take the mark, the record stays as it was, still
+ * recoverable, and a later answer can settle it.
+ */
+export function refuseQueueAdmission(id: string, key: string, reason: string): void {
+  const store = readRetainedStore(id);
+  if (store.contentsUnknown) return;
+  if (!store.records.some((entry) => entry.key === key)) return;
+  writeRetainedStore(id, { ...store, records: store.records.map((entry) => (entry.key === key ? { ...entry, refused: { reason } } : entry)) });
+}
+
+/* ── Hand-offs too large for the slot ─────────────────────────────────────── */
+
+/** Above this, an envelope's bytes go to IndexedDB. Everything the panel sends
+    and every text-only hand-off stays well under it and stays synchronous. */
+const INLINE_ENVELOPE_LIMIT = 256 * 1024;
+
+const queuePayloads = new ComposerPayloadStore({ databaseName: "llv-queue-admissions-v1" });
+
+export function queueEnvelopeNeedsDurableBytes(record: RetainedQueueAdmission): boolean {
+  return Boolean(record.mutation.images?.length || record.mutation.files?.length)
+    && JSON.stringify(record).length > INLINE_ENVELOPE_LIMIT;
+}
+
+async function authoredDigest(mutation: NativeQueueMutation): Promise<string> {
+  if (!globalThis.crypto?.subtle) throw new ComposerPayloadStorageError();
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(authoredQueueOperation(mutation)));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * The unresolved operation this press is the same message as, whether its
+ * envelope sits in the slot or its bytes sit in IndexedDB.
+ */
+export async function findRetainedQueueAdmission(id: string, mutation: NativeQueueMutation): Promise<RetainedQueueAdmission | undefined> {
+  /* A refused copy's key admitted nothing, so pressing the same message again
+     is a new operation. */
+  const records = readRetainedQueueAdmissions(id).filter((entry) => !entry.refused);
+  const inline = records.find((entry) => !entry.payload && sameQueueOperation(entry.mutation, mutation));
+  if (inline || !records.some((entry) => entry.payload)) return inline;
+  const authored = await authoredDigest(mutation);
+  return records.find((entry) => entry.payload?.authored === authored);
+}
+
+/**
+ * Record a large hand-off as unresolved, BEFORE it is sent: the whole envelope
+ * in IndexedDB first, then its identity in the slot. Refused on the same
+ * grounds as the inline path, and when either store will not take it; a copy
+ * written for a refused new operation is removed again, since nothing sent it.
+ */
+export async function retainDurableQueueAdmission(id: string, record: RetainedQueueAdmission): Promise<RetainOutcome> {
+  const before = readRetainedStore(id);
+  if (before.contentsUnknown) return "refused";
+  if (before.records.some((entry) => entry.key === record.key && entry.payload)) return "retained";
+  let authored;
+  try { authored = await authoredDigest(record.mutation); }
+  catch { return "refused"; }
+  const carries = (entry: RetainedQueueAdmission) => (entry.payload
+    ? entry.payload.authored === authored
+    : sameQueueOperation(entry.mutation, record.mutation));
+  const carried = before.records.filter((entry) => entry.refused && carries(entry)).length;
+  if (before.records.length - carried + before.opaque.length >= MAX_RETAINED_ADMISSIONS_PER_CARD) return "refused";
+  const envelope = { version: 1, key: record.key, binding: record.binding, mutation: record.mutation };
+  let ref;
+  try {
+    ref = await queuePayloads.retain({ conversationId: id, key: record.key }, envelope as unknown as Record<string, unknown>);
+  } catch {
+    return "refused";
+  }
+  const { images, files, ...command } = record.mutation;
+  const outcome = commitQueueAdmission(id, { key: record.key, binding: record.binding, mutation: command,
+    payload: { fingerprint: ref.fingerprint, bytes: ref.bytes, images: images?.length ?? 0,
+      ...(files?.length ? { files: files.length } : {}), authored } }, carries);
+  if (outcome === "refused") await queuePayloads.release(ref).catch(() => false);
+  return outcome;
+}
+
+/**
+ * The whole envelope an unresolved operation was admitted with, ready to be
+ * replayed byte for byte. A record whose bytes cannot be read back and
+ * verified is not replayed: it stays, and the caller says so.
+ */
+export async function restoreQueueAdmission(id: string, record: RetainedQueueAdmission): Promise<RetainedQueueAdmission> {
+  if (!record.payload) return record;
+  const stored = await queuePayloads.read({ conversationId: id, key: record.key });
+  const envelope = stored?.payload as { version?: unknown; key?: unknown; binding?: RetainedQueueAdmission["binding"]; mutation?: NativeQueueMutation } | undefined;
+  if (!stored || stored.fingerprint !== record.payload.fingerprint || envelope?.version !== 1 || envelope.key !== record.key
+    || !envelope.mutation || envelope.binding?.threadId !== record.binding.threadId
+    || envelope.binding?.accountId !== record.binding.accountId) {
+    throw new ComposerPayloadStorageError("The saved queue hand-off could not be verified");
+  }
+  return { key: record.key, binding: record.binding, mutation: envelope.mutation, ...(record.refused ? { refused: record.refused } : {}) };
 }
 
 /** Test seam: the mirror is module-scoped, so a suite must be able to start

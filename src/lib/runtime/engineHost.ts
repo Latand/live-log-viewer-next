@@ -179,6 +179,89 @@ export function hostSupportsCompact(host: EngineHost): host is CompactCapableHos
 }
 
 /**
+ * One native injection: raw operator input appended to the thread's
+ * model-visible history without steering, interrupting or starting a turn
+ * (#1560, Codex `thread/inject_items`).
+ *
+ * Everything the host needs to be idempotent is frozen here at admission. The
+ * operation id is what the durable dedup marker is derived from, so a repeated
+ * request converges on the insertion that already happened instead of writing
+ * a second one — the engine itself does not deduplicate, and a repeated item id
+ * was observed producing duplicate rollout records.
+ */
+export interface RuntimeInjectRequest {
+  /** The durable operation this insertion belongs to, and its dedup identity. */
+  operationId: string;
+  /** The generation the caller admitted against. A mismatch is refused, so a
+      re-seated host can never inject into someone else's thread. */
+  threadId: string;
+  text: string;
+  contentDigest: string;
+  /** Caller fence. `undefined` accepts whatever the turn axis is at actuation;
+      a string requires that exact turn to still be running; `null` requires an
+      idle thread. Evaluated before the mutating request. */
+  expectedTurnId?: string | null;
+  selectedContext?: SelectedContextRef;
+  origin?: MessageOrigin;
+}
+
+/**
+ * What an injection actually did, kept deliberately separate from whether the
+ * engine answered.
+ *
+ * `placement` is the engine's own split: with a turn running the items enter
+ * that turn's pending input and are read at its next sampling request; idle,
+ * they are written to history and wait for whatever asks next. Neither is a
+ * claim that the model has read them — `observed` only says the insertion was
+ * found in the canonical transcript, which is as far as evidence goes.
+ */
+export interface RuntimeInjectOutcome {
+  placement: "pending-input" | "history";
+  /** The turn the items joined, or null when the thread was idle. */
+  turnId: string | null;
+  /**
+   * The bounded wait for the insertion to appear in canonical history,
+   * deliberately SEPARATE from the acknowledgement above.
+   *
+   * The engine answers `thread/inject_items` with an empty object, which proves
+   * the request was accepted and nothing else — so something still has to read
+   * the thread back before this operation can be called delivered. But on the
+   * active path that evidence only appears when the turn reaches its next model
+   * request, which can be minutes into one tool call.
+   *
+   * Splitting it out is what keeps that wait off the delivery pass. The engine
+   * write is already done when this resolves to a function; observing it is a
+   * read, so the caller can run it detached without anything else on the thread
+   * losing its order. Resolves false when the window closed without evidence,
+   * which is "not established", never "did not happen".
+   */
+  observe(): Promise<boolean>;
+}
+
+/** A host whose engine exposes client-originated history injection (#1560). */
+export interface InjectCapableHost extends EngineHost {
+  inject(request: RuntimeInjectRequest): Promise<RuntimeInjectOutcome>;
+}
+
+export function hostSupportsInject(host: EngineHost): host is InjectCapableHost {
+  return typeof (host as Partial<InjectCapableHost>).inject === "function";
+}
+
+/**
+ * An injection that did not succeed, with the same two-phase distinction the
+ * compact control draws and for the same reason: `refused` means nothing was
+ * written and the operator can be told so plainly, while `unverified` means the
+ * request may have landed and no evidence settled it. Only the first may ever
+ * be retried, and this slice retries neither — the engine does not deduplicate.
+ */
+export class StructuredInjectError extends Error {
+  constructor(message: string, readonly phase: "refused" | "unverified") {
+    super(message);
+    this.name = "StructuredInjectError";
+  }
+}
+
+/**
  * A compact control that did not succeed. `phase` is the whole point:
  * `refused` means the engine did not compact the thread and everyone can see
  * why, while `unverified` means the request may have landed and nothing proved

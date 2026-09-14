@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  injectRuntimeContext,
   refreshRuntime,
   sendRuntimeMessage,
   useRuntimeReceiptsForArtifact,
@@ -13,6 +14,9 @@ import { useAgentCapabilities } from "./useAgentCapabilities";
 export interface TmuxComposerRuntimeDependencies {
   refreshRuntime: typeof refreshRuntime;
   sendRuntimeMessage: typeof sendRuntimeMessage;
+  /** #1560: native history injection, behind the same seam as the send so a
+      test can drive the composer's injection action without a socket. */
+  injectRuntimeContext: typeof injectRuntimeContext;
   useRuntimeReceiptsForArtifact: typeof useRuntimeReceiptsForArtifact;
   useAgentCapabilities: typeof useAgentCapabilities;
   /** #1629: the native queue transport, so a test can drive the whole control
@@ -23,6 +27,7 @@ export interface TmuxComposerRuntimeDependencies {
 const productionDependencies: TmuxComposerRuntimeDependencies = {
   refreshRuntime,
   sendRuntimeMessage,
+  injectRuntimeContext,
   useRuntimeReceiptsForArtifact,
   useAgentCapabilities,
   nativeQueue: productionNativeQueueDependencies,

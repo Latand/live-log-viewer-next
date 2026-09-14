@@ -1,4 +1,6 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeEach, expect, test } from "bun:test";
+
+import { installComposerStorageForTests } from "@/test-helpers/composerStorage";
 import { Window } from "happy-dom";
 import { useSyncExternalStore } from "react";
 import { flushSync } from "react-dom";
@@ -52,6 +54,16 @@ function publishReceipts(next: RuntimeReceipt[]): void {
 import { appendComposerDraft, TmuxComposer } from "./TmuxComposer";
 import { readOutbox, resetOutboxForTests } from "./conversation/outbox";
 
+/* A submission reaches the wire after its complete copy is durably retained,
+   which spans several macrotasks rather than one. */
+const tick = async () => {
+  for (let turn = 0; turn < 8; turn += 1) await new Promise((resolve) => setTimeout(resolve, 1));
+};
+
+/* Attachment submissions are kept in IndexedDB before they reach the wire. */
+const composerStorage = installComposerStorageForTests();
+afterAll(() => composerStorage.uninstall());
+
 beforeEach(() => {
   setRuntimeUiEnabledForTests(false);
   setTmuxComposerRuntimeDependenciesForTests({
@@ -68,6 +80,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  composerStorage.reset();
   setTmuxComposerRuntimeDependenciesForTests(null);
   setRuntimeUiEnabledForTests(null);
   resetOutboxForTests();
@@ -180,7 +193,7 @@ test("a mid-flight queued admission settles the generation and the stale timeout
     /* Queue-first (round-1 P1#1): the submit snapshots this generation's image
        into the durable outbox bubble and clears the composer + tray at once. */
     flushSync(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await tick();
     expect(sentImageCounts).toEqual([1]);
     expect(textarea.value).toBe("");
     await untilPreviews(0);
@@ -196,7 +209,7 @@ test("a mid-flight queued admission settles the generation and the stale timeout
        response still hangs: the bubble settles to delivering (admitted, not yet
        delivered — round-1 P1#4) and its pending generation is consumed. */
     flushSync(() => publishReceipts([admission("queued", 1)]));
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await tick();
     expect(outboxOf(conversationId).find((e) => e.id === firstKey)!.state).toBe("delivering");
     expect(previews()).toEqual([laterPreview]);
     expect(sessionStorage.getItem(`llvPendingSend:${conversationId}`)).toBe(null);
@@ -212,7 +225,7 @@ test("a mid-flight queued admission settles the generation and the stale timeout
       status: 503,
       json: async () => ({ ok: false, error: "runtime host request timed out" }),
     } as Response);
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await tick();
     expect(textarea.value).toBe("next ask");
     expect(host.textContent).not.toContain("runtime host request timed out");
     expect(host.textContent).not.toContain(translate("en", "common.failedSend"));
@@ -221,12 +234,12 @@ test("a mid-flight queued admission settles the generation and the stale timeout
     /* A later delivered replay of the settled generation is a no-op: accepted
        text never resurrects and the next draft is never wiped. */
     flushSync(() => publishReceipts([admission("delivered", 2)]));
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await tick();
     expect(textarea.value).toBe("next ask");
 
     /* The next generation goes out under a fresh key with only its own image. */
     flushSync(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await tick();
     expect(sentKeys).toHaveLength(2);
     expect(sentKeys[1]).not.toBe(sentKeys[0]);
     expect(sentImageCounts[1]).toBe(1);
@@ -263,7 +276,7 @@ test("a queued admission after remount still clears the persisted generation exa
 
   try {
     flushSync(() => textarea.closest("form")!.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await tick();
     expect(sentKeys).toHaveLength(1);
     /* Queue-first: the composer cleared at submit; the message is the durable
        outbox bubble (failed after the 503), and its generation is persisted. */
@@ -288,7 +301,7 @@ test("a queued admission after remount still clears the persisted generation exa
     }]);
     root = createRoot(host);
     flushSync(() => root.render(<TmuxComposer file={fileFor(conversationId)} />));
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await tick();
 
     textarea = host.querySelector("textarea") as HTMLTextAreaElement;
     /* The accepted generation settled the bubble to delivering (admitted); the
@@ -480,18 +493,20 @@ test("a delayed receipt reconciles one text-plus-images generation on desktop an
       await untilPreviews(1);
       const nextPreview = previews()[0];
       flushSync(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await tick();
       expect(sentKeys).toHaveLength(1);
 
       flushSync(() => releaseRefresh!());
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await tick();
       /* The delayed queued admission settles the first bubble to delivering; the
          next generation's draft and image are untouched. */
       expect(textarea.value).toBe(nextDraft);
       expect(previews()).toEqual([nextPreview]);
       expect(new Set(sentKeys)).toEqual(new Set([sentKeys[0]!]));
       expect(outboxOf(conversationId).find((e) => e.text === prompt)?.state).toBe("delivering");
-      expect(host.querySelectorAll('[data-receipt-uncertain-retry]')).toHaveLength(1);
+      /* Its complete copy is retained, so an unknown fate is re-checked, never re-driven from here. */
+      expect(host.querySelectorAll('[data-receipt-uncertain-retry]')).toHaveLength(0);
+      expect([...host.querySelectorAll("button")].some((button) => button.textContent === translate("en", "composer.payloadRecheck"))).toBe(true);
     expect(outboxOf(conversationId).find(entry => entry.id === sentKeys[0])?.deliveryUncertain).toBe(true);
       expect(host.querySelector(`[aria-label="${translate("en", "runtime.receipt.retry")}"]`)).toBeNull();
       if (mobile) {
@@ -570,27 +585,38 @@ test("only a confirmed retryable failure exposes Retry after a timeout", async (
     pasteImage("failure-second");
     await untilImages(2);
     flushSync(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await tick();
     expect(sentKeys).toHaveLength(1);
 
     /* Queue-first: the composer cleared at submit; the message is the durable
        outbox bubble. An uncertain receipt keeps it delivering (never a false
        Retry), and Send stays disabled while reconciliation runs. */
     flushSync(() => publishReceipts([terminalReceipt("uncertain", 1)]));
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await tick();
     expect((host.querySelector('button[type="submit"]') as HTMLButtonElement).disabled).toBe(true);
-    expect(host.querySelectorAll("[data-receipt-uncertain-retry]")).toHaveLength(1);
+    /* Its complete copy is retained, so an unknown fate is re-checked, never re-driven from here. */
+    expect(host.querySelectorAll("[data-receipt-uncertain-retry]")).toHaveLength(0);
+    expect([...host.querySelectorAll("button")].some((button) => button.textContent === translate("en", "composer.payloadRecheck"))).toBe(true);
     expect(retries().filter(button => !button.hasAttribute("data-receipt-uncertain-retry"))).toHaveLength(0);
     expect(outboxOf(conversationId).find((e) => e.text === prompt)?.state).toBe("delivering");
 
-    /* Only a CONFIRMED retryable failure exposes Retry: the bubble settles to
-       failed and the durable receipt stack surfaces its actionable Retry. */
+    /* A failure that proves nothing after an unknown fate still offers no
+       Retry for a retained copy: the operator re-checks the original. */
     flushSync(() => publishReceipts([terminalReceipt("failed", 2)]));
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await tick();
     expect((host.querySelector('button[type="submit"]') as HTMLButtonElement).disabled).toBe(false);
-    expect(retries()).toHaveLength(1);
+    expect(retries()).toHaveLength(0);
+    expect(host.querySelector("[data-payload-retry]")).toBeNull();
     expect(host.querySelectorAll("[data-receipt-message]")).toHaveLength(1);
     expect(outboxOf(conversationId).find((e) => e.text === prompt)?.state).toBe("delivering");
+
+    /* A CONFIRMED safe failure re-opens it: both the receipt and the retained
+       copy offer the operation retry. */
+    flushSync(() => publishReceipts([{ ...terminalReceipt("failed", 3), resend: "safe" }]));
+    await tick();
+    expect(retries()).toHaveLength(1);
+    expect(host.querySelector("[data-payload-retry]")).not.toBeNull();
+    expect(outboxOf(conversationId).find((e) => e.text === prompt)?.state).toBe("failed");
   } finally {
     flushSync(() => root.unmount());
     publishReceipts([]);

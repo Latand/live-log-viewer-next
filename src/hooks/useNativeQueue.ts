@@ -50,6 +50,9 @@ export interface NativeQueueMutation {
   queuedSubmissionIds?: string[];
   text?: string;
   images?: StructuredImageRef[];
+  /** General attachments as the operator staged them. The route writes them to
+      the inbox under this command's key and folds their paths into its text. */
+  files?: Array<{ name: string; base64: string }>;
   runtime?: RuntimeSendSettings;
   selectedContext?: SelectedContextRef;
   /** Explicit null for an idle fence; a string permits only that active turn. */

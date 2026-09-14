@@ -160,8 +160,11 @@ export type SendResendGuidance =
 export interface SendReceipt {
   operationId: string;
   /** What was accepted under this id. Read from the durable record, so it
-      survives the journal that admitted it. */
-  kind: "send" | "steer";
+      survives the journal that admitted it. `inject` (#1560) is here for the
+      same reason the others are: a caller asking what became of an operation
+      must be told which operation it was, and an injection settled as if it
+      were a send would invite a resend that the engine does not deduplicate. */
+  kind: "send" | "steer" | "inject";
   conversationId: string | null;
   /** The idempotency key the send was admitted under, when the record kept it. */
   clientMessageId: string | null;

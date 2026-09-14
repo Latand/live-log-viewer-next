@@ -12,6 +12,7 @@ const env: NodeJS.ProcessEnv = {
   LANG: "C.UTF-8", NODE_ENV: "test",
   NATIVE_CODEX_QUEUE_TEST_BINARY: binary,
   LLV_CODEX_HISTORY_CLI: binary,
+  LLV_CODEX_BINARY: binary,
 };
 for (const key of ["HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "GEMINI_CLI_HOME", "LLV_STATE_DIR", "TMPDIR"]) {
   env[key] = join(roots, key === "TMPDIR" ? "t" : key.toLowerCase()); mkdirSync(env[key]!);
@@ -61,6 +62,36 @@ const files = [
   "src/components/TmuxComposer.nativeQueue.dom.test.tsx",
 ];
 
+const injectionFiles = [
+  "src/lib/runtime/codexAppServerHost.injectResponses.test.ts",
+  "src/lib/runtime/codexAppServerHost.inject.test.ts",
+  "src/lib/runtime/codexAppServerHost.injectCli.test.ts",
+  "src/lib/runtime/structuredDeliveryQueue.inject.test.ts",
+  "src/runtime-host/journal.inject.test.ts",
+  "src/lib/runtime/http.inject.test.ts",
+  "src/lib/runtime/commands.inject.test.ts",
+  "src/components/ComposerBar.dom.test.tsx",
+  "src/components/TmuxComposer.inject.dom.test.tsx",
+  "src/components/TmuxComposer.injectReceipts.dom.test.tsx",
+];
+
+/* #1652's attachment retention, which ships beside injection (#1689): the
+   retained queue admissions, the queue route's files, every inbox writer under
+   one key, the admitted retry over a real journal, and the composer's
+   reconciliation and pending-image suites. Each installs its own globals, so
+   each runs in its own process like the injection files. */
+const attachmentFiles = [
+  "src/components/retainedQueueAdmissions.dom.test.ts",
+  "src/lib/runtime/nativeQueueHttp.files.test.ts",
+  "src/lib/runtime/inboxWriters.integration.test.ts",
+  "src/lib/runtime/composerPayloadRetry.integration.test.ts",
+  "src/lib/inboxFiles.test.ts",
+  "src/components/TmuxComposer.test.ts",
+  "src/components/TmuxComposer.reconciliation.dom.test.tsx",
+  "src/components/TmuxComposer.reconciliationExpiry.dom.test.tsx",
+  "src/components/TmuxComposer.pendingImages.dom.test.tsx",
+];
+
 /**
  * The browser half, run in its own process.
  *
@@ -79,8 +110,8 @@ const domFiles = [
   "src/lib/realtime/codexRealtimeClient.selectedContext.dom.test.ts",
   "src/lib/realtime/codexRealtimeClient.transport.dom.test.ts",
 ];
-for (const file of [...files, ...domFiles]) if (!existsSync(file)) throw new Error(`Missing named native runtime check: ${file}`);
-for (const batch of [files, domFiles]) {
+for (const file of [...files, ...domFiles, ...injectionFiles, ...attachmentFiles]) if (!existsSync(file)) throw new Error(`Missing named native runtime check: ${file}`);
+for (const batch of [files, domFiles, ...[...injectionFiles, ...attachmentFiles].map(file => [file])]) {
   const result = spawnSync(process.execPath, ["test", ...batch], { env, stdio: "inherit" });
   if (result.error) throw result.error;
   if (result.status !== 0) process.exit(result.status ?? 1);

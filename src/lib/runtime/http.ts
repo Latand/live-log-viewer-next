@@ -4,7 +4,8 @@ import { NextRequest, NextResponse } from "next/server";
 import crypto from "node:crypto";
 
 import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
-import { attachmentsAreOrphaned, structuredAttachmentOutcome, type AttachmentDeliveryOutcome } from "@/lib/attachmentRetention";
+import { structuredAttachmentOutcome, type AttachmentDeliveryOutcome } from "@/lib/attachmentRetention";
+import type { InboxFileUpload, StagedInboxFiles } from "@/lib/inboxFiles";
 import { directOperatorActivityAuthority } from "@/lib/agent/operatorAuthority";
 import { retireReplySuggestionsOnOperatorMessage } from "@/lib/suggestions/store";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
@@ -108,7 +109,12 @@ function retryRecordUnavailable(recorded: Evidence<boolean>): NextResponse {
  * response's status cannot tell a refusal apart from an uncertain delivery.
  */
 interface CommandAttachments {
-  filePaths: string[];
+  /** Admitted, and written only once the command they ride is valid. */
+  files: InboxFileUpload[];
+  batch: string;
+  staged: StagedInboxFiles | null;
+  /** Ends this request's turn on the batch (#1652). */
+  leave: (() => void) | null;
   /** Starts `refused`: every exit above the delivery attempt is terminal —
       nothing was ever handed over, so nothing can be reading these paths. */
   outcome: AttachmentDeliveryOutcome;
@@ -136,9 +142,15 @@ async function dispatchRuntimeCommand(
   let rawImages: RuntimeImageUpload[] | null = null;
   try {
     let parseValue = value;
-    if ((kind === "send" || kind === "steer") && value && typeof value === "object" && !Array.isArray(value)) {
+    /* #1560: injection joins this block for its ATTACHMENTS only. It never
+       enters the image branch below — `thread/inject_items` takes raw Responses
+       items whose image form is unestablished for us, so the parser refuses an
+       image payload outright and this route must not have written one to disk
+       first. Files are different: they are folded into the text as paths, so a
+       document rides along on an injection exactly as it does on a send. */
+    if ((kind === "send" || kind === "steer" || kind === "inject") && value && typeof value === "object" && !Array.isArray(value)) {
       const body = value as Record<string, unknown>;
-      if (Array.isArray(body.images) && body.images.some((image) => image && typeof image === "object" && "base64" in image)) {
+      if (kind !== "inject" && Array.isArray(body.images) && body.images.some((image) => image && typeof image === "object" && "base64" in image)) {
         const admitted = admitRuntimeImagePayload({ images: body.images });
         if (admitted.error) return NextResponse.json({ error: admitted.error.error }, { status: admitted.error.status });
         rawImages = admitted.images;
@@ -158,27 +170,26 @@ async function dispatchRuntimeCommand(
          no engine image capability at all. Folded BEFORE the command is parsed,
          because an attachment-only send has no text of its own to validate. */
       if (body.files !== undefined && body.files !== null) {
-        const { admitInboxFilePayload, buildFilePayload, inboxFileBatchToken } = await import("@/lib/inboxFiles");
+        const { admitInboxFilePayload, inboxFileBatchToken, inboxFilePaths, inboxFileText } = await import("@/lib/inboxFiles");
         const admittedFiles = admitInboxFilePayload({ files: body.files });
         if (admittedFiles.error) {
           return NextResponse.json({ error: admittedFiles.error.error }, { status: admittedFiles.error.status });
         }
         /* The uploaded bytes never reach `parseRuntimeCommand`. Its 256 KiB
-           ceiling bounds the COMMAND — and by this point the attachment is on
-           disk and represented by a path, so leaving the base64 on the object
-           would refuse every document past ~190 KB with an error naming neither
-           the file nor the real limit. The images branch above reduces its own
+           ceiling bounds the COMMAND — and the attachment is represented by the
+           path it will be written to, so leaving the base64 on the object would
+           refuse every document past ~190 KB with an error naming neither the
+           file nor the real limit. The images branch above reduces its own
            payload to refs for exactly this reason. */
         const parsed: Record<string, unknown> = { ...(parseValue as Record<string, unknown>) };
         delete parsed.files;
         if (admittedFiles.files.length) {
-          const bundle = buildFilePayload(
+          attachments.files = admittedFiles.files;
+          attachments.batch = inboxFileBatchToken(typeof body.idempotencyKey === "string" ? body.idempotencyKey : null);
+          parsed.text = inboxFileText(
             typeof parsed.text === "string" ? parsed.text : "",
-            admittedFiles.files,
-            inboxFileBatchToken(typeof body.idempotencyKey === "string" ? body.idempotencyKey : null),
+            inboxFilePaths(admittedFiles.files, attachments.batch),
           );
-          attachments.filePaths = bundle.filePaths;
-          parsed.text = bundle.payload;
         }
         parseValue = parsed;
       }
@@ -187,10 +198,27 @@ async function dispatchRuntimeCommand(
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "runtime command is invalid" }, { status: 400 });
   }
+  /* #1652: the batch derives from the key alone, so a queued message or a send
+     of another conversation may already hold these paths. The files are
+     written the way the queue writes them — once the command is valid, never
+     over a file already there — and staging, delivery and the release below
+     take one turn per batch with every other request under the key. */
+  if (attachments.files.length) {
+    const { enterInboxBatch, InboxFileConflictError, stageInboxFiles } = await import("@/lib/inboxFiles");
+    attachments.leave = await enterInboxBatch(attachments.batch);
+    try {
+      attachments.staged = stageInboxFiles(attachments.files, attachments.batch);
+    } catch (error) {
+      if (error instanceof InboxFileConflictError) {
+        return NextResponse.json({ error: error.message, recovery: "query or replay the original Viewer idempotency key" }, { status: 409 });
+      }
+      return NextResponse.json({ error: "the attachments could not be saved to the inbox", retryable: true }, { status: 503 });
+    }
+  }
   const client = dependencies.client();
   try {
     const byOperator = directOperatorActivityAuthority(request).ok;
-    if ((command.kind === "send" || command.kind === "steer" || command.kind === "answer")
+    if ((command.kind === "send" || command.kind === "steer" || command.kind === "inject" || command.kind === "answer")
       && byOperator
       && dependencies.recordOperatorActivity) {
       try {
@@ -207,7 +235,7 @@ async function dispatchRuntimeCommand(
        closed dock or a second device changes nothing, and compared against the
        moment of acceptance, so a set offered while this request was in flight
        survives it. */
-    if ((command.kind === "send" || command.kind === "steer") && byOperator) {
+    if ((command.kind === "send" || command.kind === "steer" || command.kind === "inject") && byOperator) {
       /* Keyed by the command's own idempotency key, so a re-delivery of the
          same message clears against its first admission rather than against
          the clock of the retry — which would retire drafts offered in
@@ -218,7 +246,7 @@ async function dispatchRuntimeCommand(
         command.idempotencyKey,
       );
     }
-    if ((command.kind === "send" || command.kind === "steer") && dependencies.enqueue) {
+    if ((command.kind === "send" || command.kind === "steer" || command.kind === "inject") && dependencies.enqueue) {
       /* In flight ⇒ the Viewer cannot say. Set BEFORE the call so an enqueue
          that throws mid-delivery keeps the attachments too (#1224). */
       attachments.outcome = "uncertain";
@@ -310,12 +338,18 @@ export async function handleRuntimeCommand(
   kind: RuntimeOperationKind,
   dependencies: RuntimeHttpDependencies = DEFAULT_DEPENDENCIES,
 ): Promise<NextResponse> {
-  const attachments: CommandAttachments = { filePaths: [], outcome: "refused" };
-  const response = await dispatchRuntimeCommand(request, kind, dependencies, attachments);
-  if (attachments.filePaths.length && attachmentsAreOrphaned(attachments.outcome)) {
-    (await import("@/lib/inboxFiles")).deleteInboxFiles(attachments.filePaths);
+  const attachments: CommandAttachments = { files: [], batch: "", staged: null, leave: null, outcome: "refused" };
+  try {
+    return await dispatchRuntimeCommand(request, kind, dependencies, attachments);
+  } finally {
+    /* Only what this request created, and only while no other request has
+       staged it since, is released; the turn ends after that. */
+    try {
+      if (attachments.staged) (await import("@/lib/inboxFiles")).settleInboxFiles(attachments.staged, attachments.outcome);
+    } finally {
+      attachments.leave?.();
+    }
   }
-  return response;
 }
 
 export interface RuntimeOperationQueryDependencies {

@@ -107,7 +107,7 @@ export type ReceiptStatus =
   | "failed"
   | "uncertain";
 
-export type OperationKind = "send" | "steer" | "interrupt" | "answer" | "kill" | "spawn" | "reconfigure" | "compact" | "native-queue";
+export type OperationKind = "send" | "steer" | "inject" | "interrupt" | "answer" | "kill" | "spawn" | "reconfigure" | "compact" | "native-queue";
 
 /** Client connection state (Fable §2). `resynced` is a transient note, not a state. */
 export type ConnectionState = "live" | "reconnecting" | "degraded" | "offline";
@@ -269,6 +269,10 @@ export interface RuntimeSession {
     /** #1629: the host advertised a working native Codex queue. Observed from
         the running executable, never inferred from the engine name. */
     nativeQueue?: boolean;
+    /** #1560: the host advertised native `thread/inject_items`. Observed from
+        the running executable's negotiated protocol, never inferred from the
+        engine name, and absent means the composer offers no injection at all. */
+    inject?: boolean;
     imageInput?: RuntimeImageCapability;
     runtimeSettings?: RuntimeSettingsCapability;
   };

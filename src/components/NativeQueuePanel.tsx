@@ -49,6 +49,9 @@ export interface NativeQueueUnresolvedAdmission {
   key: string;
   text: string;
   imageCount: number;
+  /** Set when the journal refused it: why, in the runtime's words. The copy is
+      kept so the operator can put it back or discard it (#1652). */
+  refused?: string;
 }
 
 export interface NativeQueuePanelProps {
@@ -64,6 +67,9 @@ export interface NativeQueuePanelProps {
    */
   unresolved?: readonly NativeQueueUnresolvedAdmission[];
   onReplay?(key: string): void;
+  /** Put a refused hand-off back into the composer, and discard one. */
+  onRestore?(key: string): void;
+  onDiscard?(key: string): void;
   /** True until this conversation's queue has been read once. Accepted so a
       caller need not decide what to do with it; the panel opens on rows, not on
       a pending read, because a card that has never queued anything would flash
@@ -118,7 +124,7 @@ function profileText(row: NativeQueueRow, thread: { model: string | null; effort
   return requested ? `${runs} ${t("queue.asked", { settings: requested })}` : runs;
 }
 
-export function NativeQueuePanel({ view, error, thread, cardId, binding, unresolved, onReplay, mintKey, submit, onRefresh, t }: NativeQueuePanelProps) {
+export function NativeQueuePanel({ view, error, thread, cardId, binding, unresolved, onReplay, onRestore, onDiscard, mintKey, submit, onRefresh, t }: NativeQueuePanelProps) {
   const [editing, setEditing] = useState<string | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
   /* The edit box is UNCONTROLLED, and read at save. A queued message can be
@@ -198,8 +204,9 @@ export function NativeQueuePanel({ view, error, thread, cardId, binding, unresol
   }
   /* An empty queue is not a panel — unless something is unresolved, which is
      exactly when the operator needs the one control that settles it. */
-  const pending = unresolved ?? [];
-  if (view.rows.length === 0 && pending.length === 0) return null;
+  const pending = (unresolved ?? []).filter((entry) => entry.refused === undefined);
+  const refused = (unresolved ?? []).filter((entry) => entry.refused !== undefined);
+  if (view.rows.length === 0 && pending.length === 0 && refused.length === 0) return null;
 
   return (
     <section
@@ -269,6 +276,48 @@ export function NativeQueuePanel({ view, error, thread, cardId, binding, unresol
                     className="shrink-0 rounded-control border border-accent/50 px-1.5 py-0.5 text-caption text-accent hover:bg-accent/10"
                   >
                     {t("queue.unresolvedRetry")}
+                  </button>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
+      {refused.length > 0 ? (
+        <section
+          data-testid="native-queue-refused"
+          aria-label={t("queue.refusedTitle")}
+          className="shrink-0 border-b border-danger/30 bg-danger/5 px-2 py-1.5"
+        >
+          <p className="text-caption text-secondary">{t("queue.refusedKept", { count: refused.length })}</p>
+          <ul className="mt-1 flex max-h-24 flex-col gap-1 overflow-y-auto overscroll-contain">
+            {refused.map((entry) => (
+              <li key={entry.key} data-testid="native-queue-refused-row" data-key={entry.key} className="flex items-start gap-2">
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-ui text-primary">
+                    {entry.text || t("queue.unresolvedNoText", { count: entry.imageCount })}
+                  </p>
+                  <p className="truncate text-caption text-danger">{t("queue.refusedReason", { reason: entry.refused! })}</p>
+                </div>
+                {onRestore ? (
+                  <button
+                    type="button"
+                    data-testid="native-queue-refused-restore"
+                    onClick={() => onRestore(entry.key)}
+                    className="shrink-0 rounded-control border border-accent/50 px-1.5 py-0.5 text-caption text-accent hover:bg-accent/10"
+                  >
+                    {t("queue.refusedRestore")}
+                  </button>
+                ) : null}
+                {onDiscard ? (
+                  <button
+                    type="button"
+                    data-testid="native-queue-refused-discard"
+                    onClick={() => onDiscard(entry.key)}
+                    className="shrink-0 rounded-control border border-border px-1.5 py-0.5 text-caption text-secondary hover:bg-raised"
+                  >
+                    {t("queue.refusedDiscard")}
                   </button>
                 ) : null}
               </li>

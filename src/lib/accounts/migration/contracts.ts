@@ -312,7 +312,11 @@ export interface DurableQuotaObservation {
 
 export interface HeldDeliveryCommand {
   operationId: string;
-  kind: "send" | "steer";
+  /** #1560: an injection's reservation records that it IS an injection. The
+      kind is load-bearing on replay — a reservation replayed as a `send` would
+      turn "append this to the thread" into "answer this", which is a different
+      instruction to the model and a turn the operator never asked for. */
+  kind: "send" | "steer" | "inject";
   policy: "queue" | "steer-if-active" | "interrupt-active";
   turnId?: string | null;
   /** Message authorship stamped at admission (#1117), persisted on the held

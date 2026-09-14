@@ -34,8 +34,10 @@ afterAll(() => {
 
 const { MAX_INBOX_FILE_BYTES, MAX_INBOX_FILES, MAX_INBOX_FILES_TOTAL_BYTES, inboxAttachmentName } =
   await import("./filePolicy");
-const { admitInboxFilePayload, buildFilePayload, deleteInboxFiles, inboxFileBatchToken, inboxFilesDir } =
-  await import("./inboxFiles");
+const {
+  admitInboxFilePayload, buildFilePayload, deleteInboxFiles, InboxFileConflictError, inboxFileBatchToken, inboxFilesDir,
+  stageInboxFiles,
+} = await import("./inboxFiles");
 const INBOX_FILES_DIR = inboxFilesDir();
 
 const b64 = (value: string) => Buffer.from(value, "utf8").toString("base64");
@@ -67,14 +69,16 @@ test("a text-free send still delivers the attachment path", () => {
   deleteInboxFiles(bundle.filePaths);
 });
 
-test("replaying one send's batch token rewrites the same path instead of orphaning a copy", () => {
+test("replaying one send's batch token lands on the same path instead of orphaning a copy", () => {
   const files = admitInboxFilePayload({ files: [upload("report.csv", "a,b,c")] }).files;
   const token = inboxFileBatchToken("client-message-replay");
   const first = buildFilePayload("hi", files, token);
   const second = buildFilePayload("hi", files, inboxFileBatchToken("client-message-replay"));
   expect(second.filePaths).toEqual(first.filePaths);
   expect(fs.readdirSync(path.dirname(first.filePaths[0]!))).toEqual(["report.csv"]);
-  deleteInboxFiles(first.filePaths);
+  /* The replay took the file up, so it is no longer the first attempt's to
+     release (#1652). */
+  fs.rmSync(path.dirname(first.filePaths[0]!), { recursive: true, force: true });
 });
 
 test("an oversized file is refused with an explicit reason and nothing is written", () => {
@@ -175,4 +179,54 @@ test("an admitted attachment carries its decoded bytes, so nothing decodes it a 
   const bundle = buildFilePayload("", admitted.files, inboxFileBatchToken("client-message-decode-once"));
   expect(fs.readFileSync(bundle.filePaths[0]!).equals(carried)).toBe(true);
   deleteInboxFiles(bundle.filePaths);
+});
+
+/* #1652: the batch derives from the key alone, so every writer of the inbox —
+   the queue, the runtime send and the legacy conversation-host send, of any
+   conversation — can reach a file another request's admitted message names. */
+const files = (...entries: Array<[string, string]>) =>
+  admitInboxFilePayload({ files: entries.map(([name, body]) => upload(name, body)) }).files;
+
+test("no writer replaces a file already there with other bytes", () => {
+  const token = inboxFileBatchToken("client-message-shared-bytes");
+  const accepted = stageInboxFiles(files(["trace.bin", "accepted bytes"]), token);
+  expect(() => buildFilePayload("", files(["trace.bin", "other bytes"]), token)).toThrow(InboxFileConflictError);
+  expect(fs.readFileSync(accepted.filePaths[0]!, "utf8")).toBe("accepted bytes");
+  expect(fs.readdirSync(path.dirname(accepted.filePaths[0]!))).toEqual(["trace.bin"]);
+  deleteInboxFiles(accepted.created);
+});
+
+test("a refused writer may hand back every path its message names, and only what it created goes", () => {
+  const token = inboxFileBatchToken("client-message-shared-release");
+  const accepted = stageInboxFiles(files(["trace.bin", "accepted bytes"]), token);
+  const refused = buildFilePayload("", files(["trace.bin", "accepted bytes"], ["extra.txt", "extra"]), token);
+  deleteInboxFiles(refused.filePaths);
+  expect(fs.readdirSync(path.dirname(accepted.filePaths[0]!))).toEqual(["trace.bin"]);
+  expect(fs.readFileSync(accepted.filePaths[0]!, "utf8")).toBe("accepted bytes");
+  deleteInboxFiles(accepted.created);
+});
+
+test("a file another request has staged is no longer its creator's to delete", () => {
+  /* Neither order waits on the other: the legacy route takes no turn. */
+  const legacyFirst = inboxFileBatchToken("client-message-legacy-first");
+  const legacy = buildFilePayload("", files(["trace.bin", "shared bytes"]), legacyFirst);
+  const queued = stageInboxFiles(files(["trace.bin", "shared bytes"]), legacyFirst);
+  expect(queued.created).toEqual([]);
+  deleteInboxFiles(legacy.filePaths);
+  expect(fs.readFileSync(queued.filePaths[0]!, "utf8")).toBe("shared bytes");
+
+  const queueFirst = inboxFileBatchToken("client-message-queue-first");
+  const staged = stageInboxFiles(files(["trace.bin", "shared bytes"]), queueFirst);
+  const reused = buildFilePayload("", files(["trace.bin", "shared bytes"]), queueFirst);
+  deleteInboxFiles(staged.created);
+  expect(fs.readFileSync(reused.filePaths[0]!, "utf8")).toBe("shared bytes");
+});
+
+test("what a writer may still delete is bounded, and a forgotten file is kept", () => {
+  const written = Array.from({ length: 1025 }, (_, index) =>
+    buildFilePayload("", files(["note.txt", String(index)]), inboxFileBatchToken(`client-message-bound-${index}`)).filePaths);
+  deleteInboxFiles(written[0]!);
+  deleteInboxFiles(written.at(-1)!);
+  expect(fs.existsSync(written[0]![0]!)).toBe(true);
+  expect(fs.existsSync(written.at(-1)![0]!)).toBe(false);
 });
