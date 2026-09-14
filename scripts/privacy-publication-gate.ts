@@ -1233,6 +1233,8 @@ export function formatPrivacyReport(findings: Map<FindingClass, number>, notices
   return `${lines.join("\n")}\n`;
 }
 
+const COMMIT_HASH = /^[0-9a-f]{40}$/;
+
 const commitMessageFindingClasses = new Set<FindingClass>([
   "credential",
   "email_address",
@@ -1389,27 +1391,103 @@ export function commitMessageAddressReview(message: string): CommitAddressReview
   return { attributable: [...attributable], exempt: [...exempt] };
 }
 
-export function commitMessageFindings(repository: string, base: string): Map<FindingClass, number> {
-  const findings = new Map<FindingClass, number>();
+/* The commits the branch adds, newest first, one full hash per line. A hash
+   holds no newline, so this read has no boundary to guess at — which is why
+   the messages are fetched one at a time below rather than packed into this
+   same stream. `--no-abbrev-commit` neutralises a checkout that configured
+   `log.abbrevCommit`, and the shape check is what makes each hash safe to
+   hand back to git as an argument. */
+function branchCommitHashes(repository: string, base: string): string[] | undefined {
   const result = Bun.spawnSync({
-    cmd: ["git", "-C", repository, "log", "--format=%B%x00", `${base}...HEAD`],
+    cmd: ["git", "-C", repository, "log", "--no-abbrev-commit", "--format=%H", `${base}..HEAD`],
     env: withoutWakatimeCredential(process.env),
     stderr: "pipe",
     stdout: "pipe",
   });
-  if (result.exitCode !== 0) {
+  if (result.exitCode !== 0) return undefined;
+  const hashes = result.stdout.toString().split("\n").filter((line) => line !== "");
+  return hashes.every((hash) => COMMIT_HASH.test(hash)) ? hashes : undefined;
+}
+
+/* One commit's message, the whole of stdout. Asking for exactly one commit is
+   what removes the ambiguity: no delimiter has to survive the message, so no
+   message can be read as anything but a message. */
+function commitMessage(repository: string, commit: string): string | undefined {
+  const result = Bun.spawnSync({
+    cmd: ["git", "-C", repository, "log", "-1", "--format=%B", commit, "--"],
+    env: withoutWakatimeCredential(process.env),
+    stderr: "pipe",
+    stdout: "pipe",
+  });
+  return result.exitCode === 0 ? result.stdout.toString() : undefined;
+}
+
+/**
+ * The messages this branch publishes when it is pushed.
+ *
+ * The range is `base..HEAD` — the commits the branch ADDS. It read
+ * `base...HEAD` until #1315, and to `git log` the three-dot form is the
+ * SYMMETRIC difference — not the ancestry cut the identical spelling means to
+ * the `git diff` in `changedPaths`, which is how it got here. So every commit
+ * already on the protected base but not on the branch was scanned too, and a
+ * finding on one of them is reported against this pull request. Those messages
+ * were published when they landed; this branch neither wrote them nor can
+ * change them, and a branch that is merely BEHIND the base inherited every one
+ * of them.
+ *
+ * That is what made the forge's "Update branch" button useless against such a
+ * finding: the button merges the base tip, another merge lands on the base
+ * seconds later, the gate resolves its base to the newer tip, and the branch
+ * is behind again with the same finding nobody on it can fix.
+ *
+ * The identity half below has always read `base..HEAD`; the two halves of
+ * `--check-commits` now read the same commits.
+ */
+export function commitMessageFindings(
+  repository: string,
+  base: string,
+  notices?: string[],
+): Map<FindingClass, number> {
+  const findings = new Map<FindingClass, number>();
+  const commits = branchCommitHashes(repository, base);
+  if (commits === undefined) {
     addFinding(findings, "inspection_error");
+    notices?.push("commit_message: range unreadable");
     return findings;
   }
-  const messages = result.stdout.toString().split("\0").filter(Boolean);
-  for (const message of messages) {
+  /* The hashes and the messages are read separately on purpose. One stream of
+     `%H%x00%B%x00` carries no length, so the reader has to decide where each
+     message ends, and until this round it decided by SHAPE: a chunk of forty
+     lowercase hex characters was the next hash. A raw commit whose entire
+     message is such a value — git writes one without a terminal newline when
+     it is handed one — was therefore read as a hash and never scanned, and a
+     value the gate knows passed the check. Nothing is inferred now: git is
+     asked for the hashes, and then for each message by its hash. */
+  for (const commit of commits) {
+    const message = commitMessage(repository, commit);
+    if (message === undefined) {
+      addFinding(findings, "inspection_error");
+      notices?.push(`commit_message: ${commit.slice(0, 12)} message unreadable`);
+      continue;
+    }
     const messageFindings = sensitiveClasses(message);
     if (messageFindings.has("email_address")) {
       const { attributable, exempt } = commitMessageAddressReview(message);
       if (exempt.length > 0 && attributable.length === 0) messageFindings.delete("email_address");
     }
+    const reported: FindingClass[] = [];
     for (const finding of messageFindings) {
-      if (commitMessageFindingClasses.has(finding)) addFinding(findings, finding);
+      if (!commitMessageFindingClasses.has(finding)) continue;
+      addFinding(findings, finding);
+      reported.push(finding);
+    }
+    /* The notice names WHERE the finding is and never WHAT it is: this report
+       is published as a check run's log on a public repository, and a report
+       that quoted the address or the path to prove it leaked, leaks it.
+       `git show -s <commit>` names it to whoever is fixing it. */
+    if (reported.length > 0) {
+      const classes = reported.sort((left, right) => left.localeCompare(right)).join(", ");
+      notices?.push(`commit_message: ${commit.slice(0, 12)} message ${classes}`);
     }
   }
   return findings;
@@ -1417,7 +1495,13 @@ export function commitMessageFindings(repository: string, base: string): Map<Fin
 
 export type MergeBoundaryReview = { findings: Map<FindingClass, number>; notices: string[] };
 
-type CommitIdentity = { address: string; commit: string; field: "author" | "committer"; name: string };
+type CommitIdentity = {
+  address: string;
+  commit: string;
+  field: "author" | "committer";
+  name: string;
+  parentCount: number;
+};
 
 /* The forge's account namespace, `<id>+<handle>` or `<handle>` at the no-reply
    host of its own domain. The forge issues that address for one purpose: so a
@@ -1436,10 +1520,42 @@ function isForgeAccountAddress(address: string): boolean {
   return address.slice(separator + 1).toLowerCase() === FORGE_ACCOUNT_DOMAIN;
 }
 
-/** Every identity git recorded on the commits the merge will squash. */
+/* The mailbox the forge writes as COMMITTER on a merge commit it composes —
+   the "Update branch" button or a merge run from the pull request page. It is
+   the forge's own web-flow identity: it names the forge, it is the same address
+   on every repository, and it identifies nobody. The account that pressed the
+   button is the AUTHOR, and the rule above already reads that field.
+   Stated here rather than left to the message rules: the merge boundary is the
+   identity path, and an identity question is answered by identity rules. The
+   machine-attribution mailbox rule reaches the same verdict on this address
+   through the trailer the review composes below, so the gate's verdict on a
+   forge-composed merge is what it was — but it was reached by a rule about
+   MESSAGES, and narrowing that rule would have silently taken the forge's own
+   merges with it.
+   Like every exemption here, this one names an ADDRESS the scan already found
+   and never skips a read: an identity is a name as well as a mailbox, and a
+   commit can be committed under this mailbox with anything at all in the name
+   beside it. That name is scanned, and a person in it is reported. */
+const FORGE_COMPOSER_ADDRESS = ["noreply", FORGE_DOMAIN].join("@");
+
+function isForgeComposerMailbox(address: string): boolean {
+  return address.toLowerCase() === FORGE_COMPOSER_ADDRESS;
+}
+
+function isForgeComposerIdentityAddress(address: string, identity: CommitIdentity): boolean {
+  return identity.field === "committer"
+    && isForgeComposerMailbox(identity.address)
+    && isForgeComposerMailbox(address);
+}
+
+function isForgeComposerAddress(address: string, identity: CommitIdentity): boolean {
+  return identity.parentCount > 1 && isForgeComposerIdentityAddress(address, identity);
+}
+
+/** Each distinct identity git recorded on the commits the merge will squash. */
 function branchIdentities(repository: string, base: string): CommitIdentity[] | undefined {
   const result = Bun.spawnSync({
-    cmd: ["git", "-C", repository, "log", "--format=%H%x00%an%x00%ae%x00%cn%x00%ce", `${base}..HEAD`],
+    cmd: ["git", "-C", repository, "log", "--format=%H%x00%P%x00%an%x00%ae%x00%cn%x00%ce", `${base}..HEAD`],
     env: withoutWakatimeCredential(process.env),
     stderr: "pipe",
     stdout: "pipe",
@@ -1447,14 +1563,22 @@ function branchIdentities(repository: string, base: string): CommitIdentity[] | 
   if (result.exitCode !== 0) return undefined;
   const identities: CommitIdentity[] = [];
   /* An identity carries no newline — git refuses to record one — so a commit
-     is a line and its five fields are NUL-separated within it. */
+     is a line and its six fields are NUL-separated within it. */
   for (const line of result.stdout.toString().split("\n")) {
     if (line === "") continue;
-    const [commit, authorName, authorAddress, committerName, committerAddress] = line.split("\0");
+    const [commit, parents, authorName, authorAddress, committerName, committerAddress] = line.split("\0");
     if (committerAddress === undefined) return undefined;
-    identities.push({ address: authorAddress, commit, field: "author", name: authorName });
-    if (committerName === authorName && committerAddress === authorAddress) continue;
-    identities.push({ address: committerAddress, commit, field: "committer", name: committerName });
+    const parentCount = parents === "" ? 0 : parents.split(" ").length;
+    const sameIdentity = committerName === authorName && committerAddress === authorAddress;
+    /* Equal identities compose one finding. The forge mailbox is
+       field-sensitive, so represent that pair as its committer record. */
+    if (sameIdentity && isForgeComposerMailbox(committerAddress)) {
+      identities.push({ address: committerAddress, commit, field: "committer", name: committerName, parentCount });
+      continue;
+    }
+    identities.push({ address: authorAddress, commit, field: "author", name: authorName, parentCount });
+    if (sameIdentity) continue;
+    identities.push({ address: committerAddress, commit, field: "committer", name: committerName, parentCount });
   }
   return identities;
 }
@@ -1477,11 +1601,12 @@ function composedAttributionMessage(identity: CommitIdentity): string {
  *
  * Git records an author and a committer on every commit and a commit cannot be
  * made without them, so the question is never whether an identity publishes but
- * whose. Two answers publish nobody: an account on the forge's no-reply host,
+ * whose. Three answers publish nobody: an account on the forge's no-reply host,
  * which the forge issues so that the account's own address is not what its
- * commits carry, and the machine-attribution mailboxes the trailer rule already
- * names. Every other identity is a person, and is reported exactly as an
- * address in a file is.
+ * commits carry; the forge's own web-flow mailbox on a real merge commit the
+ * forge composed; and the machine-attribution mailboxes the trailer rule
+ * already names. Every other identity is a person, and is reported exactly as
+ * an address in a file is.
  *
  * The no-reply host is read only here, on the identities the merge composes.
  * A commit message that writes such an address into a trailer by hand, or into
@@ -1494,11 +1619,23 @@ export function mergeBoundaryReview(repository: string, base: string): MergeBoun
   const identities = branchIdentities(repository, base);
   if (identities === undefined) {
     addFinding(findings, "inspection_error");
+    /* A failure of this check names itself too. It is one of two reads behind
+       one flag, and a bare `inspection_error: 1` said which of them failed only
+       to whoever went and read the source. */
+    notices.push("merge_boundary: range unreadable");
     return { findings, notices };
   }
   for (const identity of identities) {
     const { attributable } = commitMessageAddressReview(composedAttributionMessage(identity));
-    const publishes = attributable.some((address) => !isForgeAccountAddress(address));
+    /* The composed trailer rules classify any exact `noreply` local part as
+       machine attribution. For the forge's web-flow mailbox, the commit graph
+       is the additional proof: a zero- or one-parent commit did not come from
+       the forge's merge composer and remains attributable. */
+    const unverifiedForgeComposer = isForgeComposerIdentityAddress(identity.address, identity)
+      && !isForgeComposerAddress(identity.address, identity);
+    const publishes = unverifiedForgeComposer || attributable.some((address) => {
+      return !isForgeAccountAddress(address) && !isForgeComposerAddress(address, identity);
+    });
     if (!publishes) continue;
     addFinding(findings, "email_address");
     /* The notice names the commit, the field and the trailer, and never the
@@ -1542,7 +1679,7 @@ if (import.meta.main) {
   );
   const notices: string[] = [];
   if (arguments_.includes("--check-commits")) {
-    for (const [finding, count] of commitMessageFindings(inspectionRoot, trustedBase)) {
+    for (const [finding, count] of commitMessageFindings(inspectionRoot, trustedBase, notices)) {
       pathFindings.set(finding, (pathFindings.get(finding) ?? 0) + count);
     }
     /* The branch commits publish their messages when they are pushed; the merge
