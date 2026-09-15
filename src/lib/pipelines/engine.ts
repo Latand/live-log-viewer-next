@@ -73,6 +73,7 @@ import type {
   PatchPipelineRequest,
   Pipeline,
   PipelineBoundedWait,
+  PipelineCreationReceipt,
   PipelineGuardErrorCode,
   PipelineGuardField,
   PipelineRoleId,
@@ -4197,6 +4198,8 @@ type CreatePipelineOptions = {
   ensureTask?: BoardTask;
   spawnParams?: TaskPipelineSpawnParams;
   allowOperatorDraftWithoutLineage?: boolean;
+  /** #1695 C8: the MCP receipt of the call creating this pipeline. */
+  creationReceipt?: PipelineCreationReceipt;
 };
 
 function taskSpawnCreatorLineage(
@@ -4346,6 +4349,7 @@ export async function createPipelineFromRequest(
     task,
     taskIds,
     ...(taskSpawn ? { creationIntent: { kind: "task-spawn" as const, taskId: taskSpawn.task.id, launchId: taskSpawn.params.launchId } } : {}),
+    ...(options.creationReceipt ? { creationReceipt: options.creationReceipt } : {}),
     ...(spec ? { spec } : {}),
     project,
     repoDir,
@@ -4362,6 +4366,12 @@ export async function createPipelineFromRequest(
     pipeline.lastPassedCommit = base.baseRef;
   }
   return withPipelineMutation((pipelines, persist) => {
+    /* C8: one MCP call creates at most one pipeline. A create under a digest a
+       stored pipeline already carries answers with that pipeline. */
+    const receipted = options.creationReceipt
+      ? pipelines.find((candidate) => candidate.creationReceipt?.requestDigest === options.creationReceipt!.requestDigest)
+      : undefined;
+    if (receipted) return { pipeline: receipted };
     if (options.ensureTask && options.spawnParams) {
       const decision = ensurePipelineForTask(options.ensureTask, pipelines, options.spawnParams);
       if (decision === null) {
@@ -4380,6 +4390,13 @@ export async function createPipelineFromRequest(
     }
     const taskLinkError = pipelineTaskLinkError(pipeline, taskIds, loadTasks());
     if (taskLinkError) return { error: taskLinkError, status: 400 };
+    if (pipeline.creationReceipt) {
+      /* C8 discovery order: mutations are serialized, so a stamp later than
+         every stored stamp commits after them, and a reader's creations cursor
+         can never pass a stamp that commits after it read. */
+      const latest = pipelines.reduce((max, candidate) => Math.max(max, Date.parse(candidate.creationReceipt?.recordedAt ?? "") || 0), 0);
+      pipeline.creationReceipt.recordedAt = new Date(Math.max(Date.parse(ports.now()) || 0, latest + 1)).toISOString();
+    }
     pipelines.push(pipeline);
     persist();
     return { pipeline };

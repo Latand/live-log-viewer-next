@@ -83,7 +83,7 @@ import { requestPipelineTick } from "@/lib/pipelines/controllerSignal";
 import { projectTaskPipelineIds } from "@/lib/pipelines/taskBinding";
 import { PIPELINE_LIST_DEFAULT_LIMIT, projectPipelineListRows } from "@/lib/pipelines/listProjection";
 import { loadPipelinesForList } from "@/lib/pipelines/store";
-import type { CreatePipelineRequest, PatchPipelineRequest, Pipeline, PipelineAction } from "@/lib/pipelines/types";
+import type { CreatePipelineRequest, PatchPipelineRequest, Pipeline, PipelineAction, PipelineCreationReceipt } from "@/lib/pipelines/types";
 import type { PauseResumeActor } from "@/lib/pauseResumeActor";
 import { listFiles } from "@/lib/scanner";
 import { validExplicitProject } from "@/lib/accounts/migration/contracts";
@@ -155,6 +155,7 @@ import {
 import { parseSelectedContextRef } from "@/lib/selection/selectedContext";
 
 import { viewerControlOrigin, viewerControlToken } from "./controlEndpoint";
+import type { McpOperationCaller, McpOperationTarget, McpOperationTool } from "./receiptsDatabase";
 import {
   productionSelectedContextDependencies,
   resolveSelectedContext,
@@ -1328,9 +1329,37 @@ async function updateBoardTask(args: McpToolArgs, dependencies: ViewerMcpDomainD
   return { taskId, task: result.task };
 }
 
-async function createPipeline(args: McpToolArgs): Promise<McpToolPayload> {
-  const request = withoutKeys(args, ["clientRequestId"]);
-  const result = await createPipelineFromRequest(request as CreatePipelineRequest);
+/** The engine request and C8 creation receipt of one `create_pipeline` call
+    (#1695). `taskId` joins the request's task links, where the engine checks
+    it like any other; the receipt is the one the service claimed for this
+    call, and absent when the call carries none. */
+export function createPipelineInputFromMcp(
+  args: McpToolArgs,
+  context?: McpToolCallContext,
+): { request: CreatePipelineRequest; creationReceipt?: PipelineCreationReceipt } {
+  const request = withoutKeys(args, ["clientRequestId", "taskId"]) as CreatePipelineRequest;
+  if (args.taskId !== undefined) {
+    const taskId = typeof args.taskId === "string" ? args.taskId.trim() : args.taskId;
+    const linked = request.taskIds === undefined ? [] : request.taskIds;
+    request.taskIds = (Array.isArray(linked) ? [...linked, taskId] : linked) as string[];
+  }
+  const receipt = context?.receipt;
+  return {
+    request,
+    ...(receipt ? {
+      creationReceipt: {
+        tool: "create_pipeline" as const,
+        requestDigest: receipt.digest,
+        callerConversationId: receipt.caller?.conversationId ?? null,
+        claimedAt: receipt.claimedAt,
+      },
+    } : {}),
+  };
+}
+
+async function createPipeline(args: McpToolArgs, context?: McpToolCallContext): Promise<McpToolPayload> {
+  const { request, creationReceipt } = createPipelineInputFromMcp(args, context);
+  const result = await createPipelineFromRequest(request, undefined, creationReceipt ? { creationReceipt } : {});
   if (!result.pipeline) {
     const message = result.error ?? "could not create pipeline";
     /* #1026: a rejected create carries every violated constraint with its field
@@ -4350,6 +4379,36 @@ export function viewerMcpRecoverableTools(
   };
 }
 
+/** #1695 C5: the caller an operations-feed claim records — the resolver
+    original-key recovery binds with, without its predecessor lineage. */
+export function viewerMcpOperationCaller(
+  domainDependencies: ViewerMcpDomainDependencies = productionDomainDependencies,
+): () => McpOperationCaller {
+  return () => {
+    const { kind, conversationId, project } = recoveryCaller({
+      attentionAuthority: domainDependencies.attentionAuthority,
+      registrySnapshot: domainDependencies.registrySnapshot,
+      recoveryPredecessors: () => [],
+    });
+    return { kind, conversationId, project };
+  };
+}
+
+/** #1695 C5: the target an operations-feed claim records — the board task the
+    call names (`update_task.taskId`, `create_pipeline.taskId`), validated
+    against the task store, with that task's project. A call naming no task, or
+    a task that does not exist, records none, so its target reads unknown. */
+export function viewerMcpOperationTarget(
+  domainDependencies: Pick<ViewerMcpDomainDependencies, "loadTasks"> = productionDomainDependencies,
+): (toolName: McpOperationTool, args: McpToolArgs) => McpOperationTarget | null {
+  return (_toolName, args) => {
+    const taskId = typeof args.taskId === "string" ? args.taskId.trim() : "";
+    if (!taskId) return null;
+    const task = domainDependencies.loadTasks().find((candidate) => candidate.id === taskId);
+    return task ? { project: task.project, taskId: task.id, pipelineId: null } : null;
+  };
+}
+
 export function viewerMcpBindings(
   linkTaskDependencies: LinkTaskToPipelineDependencies = productionLinkTaskDependencies,
   controlDependencies: ViewerControlDependencies = productionViewerControlDependencies(),
@@ -4361,7 +4420,7 @@ export function viewerMcpBindings(
     message_receipt: (args) => messageReceipt(args),
     create_task: createBoardTask,
     update_task: (args) => updateBoardTask(args, domainDependencies),
-    create_pipeline: createPipeline,
+    create_pipeline: (args, context) => createPipeline(args, context),
     pipeline_action: (args) => pipelineAction(args, domainDependencies),
     link_task_to_pipeline: (args) => linkTaskToPipeline(args, linkTaskDependencies),
     list_conversations: (args, context) => listConversations(args, viewerControlForCall(controlDependencies, context)),

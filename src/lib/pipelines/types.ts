@@ -297,6 +297,21 @@ export type PipelineCreationIntent = {
   launchId: string;
 };
 
+/** The MCP receipt of the `create_pipeline` call that made this pipeline
+    (#1695 C8), stamped in the create transaction. `requestDigest` is the
+    receipt row's digest, so the operations feed and the card name the same
+    call; a second create under it answers with this pipeline. */
+export type PipelineCreationReceipt = {
+  tool: "create_pipeline";
+  requestDigest: string;
+  callerConversationId: string | null;
+  claimedAt: string;
+  /** When the create transaction stored this pipeline, and always later than
+      every stamp already stored, so stamps are ordered as they committed and
+      the operations feed can discover them with a resumable cursor. */
+  recordedAt?: string;
+};
+
 /** Durable receipt of finished-attempt host reaping (#574, #1123). Each stage
     attempt is settled independently, so an idle host can be retired while the
     rest of its pipeline runs or waits for a decision. */
@@ -322,6 +337,8 @@ export type Pipeline = {
   taskIds: string[];
   /** Launch-correlated creation evidence reserved before task-spawn actuation. */
   creationIntent?: PipelineCreationIntent;
+  /** Present only on a pipeline an MCP `create_pipeline` call created. */
+  creationReceipt?: PipelineCreationReceipt;
   /** Pinned specification and acceptance criteria, matching Flow.spec from #85. */
   spec?: string;
   project: string;

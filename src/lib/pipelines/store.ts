@@ -12,7 +12,7 @@ import type { BoardTask } from "@/lib/tasks/types";
 
 import { MAX_FAIL_EDGE_ROUNDS, MAX_PIPELINE_STAGES, MAX_STAGE_OUTPUTS } from "./limits";
 import { normalizeStageOutputPath } from "./stageAccess";
-import type { EffectivePipelineRole, Pipeline, PipelineCreationIntent, PipelineEdgeActivation, PipelinePublication, PipelineStage, PipelineTerminalReap, PipelineUnconfirmedHost } from "./types";
+import type { EffectivePipelineRole, Pipeline, PipelineCreationIntent, PipelineCreationReceipt, PipelineEdgeActivation, PipelinePublication, PipelineStage, PipelineTerminalReap, PipelineUnconfirmedHost } from "./types";
 import { stageVerdictFrom } from "./verdict";
 
 export const PIPELINES_SCHEMA_VERSION = 5;
@@ -230,6 +230,16 @@ function isCreationIntent(value: unknown): value is PipelineCreationIntent {
     && typeof intent.launchId === "string" && Boolean(intent.launchId.trim());
 }
 
+function isCreationReceipt(value: unknown): value is PipelineCreationReceipt {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const receipt = value as Partial<PipelineCreationReceipt>;
+  return receipt.tool === "create_pipeline"
+    && typeof receipt.requestDigest === "string" && Boolean(receipt.requestDigest)
+    && isNullableString(receipt.callerConversationId)
+    && typeof receipt.claimedAt === "string"
+    && (receipt.recordedAt === undefined || typeof receipt.recordedAt === "string");
+}
+
 function isUnconfirmedHost(value: unknown): value is PipelineUnconfirmedHost {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const host = value as Partial<PipelineUnconfirmedHost>;
@@ -365,6 +375,7 @@ function isPipeline(value: unknown): value is Pipeline {
     pipeline.taskIds.every((taskId) => typeof taskId === "string") &&
     new Set(pipeline.taskIds).size === pipeline.taskIds.length &&
     (pipeline.creationIntent === undefined || isCreationIntent(pipeline.creationIntent)) &&
+    (pipeline.creationReceipt === undefined || isCreationReceipt(pipeline.creationReceipt)) &&
     (pipeline.spec === undefined || typeof pipeline.spec === "string") &&
     typeof pipeline.project === "string" &&
     typeof pipeline.repoDir === "string" &&
@@ -602,6 +613,7 @@ function reviveLoadedPipeline(pipeline: Pipeline): Pipeline {
     project: canonicalProject(pipeline.project),
     taskIds: [...pipeline.taskIds],
     creationIntent: pipeline.creationIntent ? { ...pipeline.creationIntent } : undefined,
+    creationReceipt: pipeline.creationReceipt ? { ...pipeline.creationReceipt } : undefined,
     spec: typeof pipeline.spec === "string" ? pipeline.spec : undefined,
     baseBranch: pipeline.baseBranch ?? "",
     baseRef: pipeline.baseRef ?? "",
@@ -932,6 +944,7 @@ export function buildPipeline(input: {
   task: string;
   taskIds?: string[];
   creationIntent?: PipelineCreationIntent;
+  creationReceipt?: PipelineCreationReceipt;
   spec?: string;
   project: string;
   repoDir: string;
@@ -948,6 +961,7 @@ export function buildPipeline(input: {
     task: input.task,
     taskIds: [...new Set(input.taskIds ?? [])],
     ...(input.creationIntent ? { creationIntent: { ...input.creationIntent } } : {}),
+    ...(input.creationReceipt ? { creationReceipt: { ...input.creationReceipt } } : {}),
     ...(input.spec ? { spec: input.spec } : {}),
     project: input.project,
     repoDir: input.repoDir,

@@ -552,6 +552,62 @@ function harness() {
   };
 }
 
+/* #1695 C8: the receipt is stamped in the create transaction, and one MCP call
+   creates at most one pipeline. */
+test("a create under a stored creation digest answers with that pipeline and stores no second one", async () => {
+  const h = harness();
+  savePipelines([]);
+  const creationReceipt = {
+    tool: "create_pipeline" as const,
+    requestDigest: "d".repeat(64),
+    callerConversationId: "conversation_manager",
+    claimedAt: "2026-09-15T10:00:00.000Z",
+  };
+  const request = { task: "Ship pipelines", spec: "AC1", repoDir: "/repo", stages: RUN_STAGES as never, src: "/codex/creator.jsonl" };
+
+  const first = await engineModule.createPipelineFromRequest(request, h.ports, { creationReceipt });
+  const replayed = await engineModule.createPipelineFromRequest(request, h.ports, { creationReceipt });
+  const stamped = { ...creationReceipt, recordedAt: first.pipeline?.creationReceipt?.recordedAt };
+  expect(typeof stamped.recordedAt).toBe("string");
+  expect(first.pipeline?.creationReceipt).toEqual(stamped);
+  expect(replayed.pipeline?.id).toBe(first.pipeline!.id);
+  expect(loadPipelines().map((pipeline) => [pipeline.id, pipeline.creationReceipt])).toEqual([[first.pipeline!.id, stamped]]);
+
+  const other = await engineModule.createPipelineFromRequest(request, h.ports, { creationReceipt: { ...creationReceipt, requestDigest: "e".repeat(64) } });
+  const unreceipted = await engineModule.createPipelineFromRequest(request, h.ports);
+  expect(new Set([first.pipeline!.id, other.pipeline!.id, unreceipted.pipeline!.id]).size).toBe(3);
+  expect(unreceipted.pipeline?.creationReceipt).toBeUndefined();
+  expect(loadPipelines()).toHaveLength(3);
+});
+
+/* #1695 C8: stamps are ordered as they commit, whatever the clock says, so the
+   operations feed can discover them with a resumable cursor. */
+test("each creation stamp is recorded after every stored stamp, even behind a stamp ahead of the clock", async () => {
+  const h = harness();
+  savePipelines([]);
+  const receipt = (digest: string) => ({
+    tool: "create_pipeline" as const,
+    requestDigest: digest,
+    callerConversationId: null,
+    claimedAt: "2026-09-15T10:00:00.000Z",
+  });
+  const request = { task: "Ship pipelines", spec: "AC1", repoDir: "/repo", stages: RUN_STAGES as never, src: "/codex/creator.jsonl" };
+
+  const first = await engineModule.createPipelineFromRequest(request, h.ports, { creationReceipt: receipt("a".repeat(64)) });
+  expect(Number.isFinite(Date.parse(first.pipeline!.creationReceipt!.recordedAt!))).toBeTrue();
+
+  const ahead = Date.parse("2099-01-01T00:00:00.000Z");
+  const stored = loadPipelines();
+  stored[0]!.creationReceipt!.recordedAt = new Date(ahead).toISOString();
+  savePipelines(stored);
+  const second = await engineModule.createPipelineFromRequest(request, h.ports, { creationReceipt: receipt("b".repeat(64)) });
+  const third = await engineModule.createPipelineFromRequest(request, h.ports, { creationReceipt: receipt("c".repeat(64)) });
+  const unreceipted = await engineModule.createPipelineFromRequest(request, h.ports);
+  expect(Date.parse(second.pipeline!.creationReceipt!.recordedAt!)).toBe(ahead + 1);
+  expect(Date.parse(third.pipeline!.creationReceipt!.recordedAt!)).toBe(ahead + 2);
+  expect(unreceipted.pipeline?.creationReceipt).toBeUndefined();
+});
+
 /** Publication is opt-in (#1692): the tests of the remote-branch contract ask for it. */
 const REMOTE_BRANCH = { publication: "remote-branch" } as const;
 

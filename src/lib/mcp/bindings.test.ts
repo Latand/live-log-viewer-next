@@ -2364,6 +2364,53 @@ test("create_pipeline refuses with every violated constraint attached", async ()
   expect(refusal?.message).toContain("stages[0].kind: stage kind must be run or review-loop");
 });
 
+/* #1695 C8: taskId joins the task links the engine checks, and the receipt the
+   service claimed becomes the pipeline's creation receipt. */
+test("create_pipeline maps taskId into task links and the claimed receipt into its creation receipt", async () => {
+  const { createPipelineInputFromMcp } = await import("./bindings");
+  const receipt = {
+    digest: "f".repeat(64),
+    claimedAt: "2026-09-15T10:00:00.000Z",
+    caller: { kind: "worker" as const, conversationId: "conversation_manager", project: "alpha" },
+  };
+
+  const mapped = createPipelineInputFromMcp(
+    { clientRequestId: "create-1", task: "Ship", repoDir: "/repo", stages: [], taskIds: ["task-a"], taskId: " task-b " },
+    { receipt },
+  );
+  expect(mapped.request).toEqual({ task: "Ship", repoDir: "/repo", stages: [], taskIds: ["task-a", "task-b"] } as never);
+  expect(mapped.creationReceipt).toEqual({
+    tool: "create_pipeline",
+    requestDigest: receipt.digest,
+    callerConversationId: "conversation_manager",
+    claimedAt: receipt.claimedAt,
+  });
+
+  const plain = createPipelineInputFromMcp({ clientRequestId: "create-2", task: "Ship", repoDir: "/repo", stages: [] });
+  expect(plain.request).toEqual({ task: "Ship", repoDir: "/repo", stages: [] } as never);
+  expect(plain.creationReceipt).toBeUndefined();
+  expect(createPipelineInputFromMcp({ clientRequestId: "create-3", task: "Ship", taskId: "task-c" }, { receipt: { ...receipt, caller: null } }))
+    .toMatchObject({ request: { taskIds: ["task-c"] }, creationReceipt: { callerConversationId: null } });
+  /* A malformed taskId is left for the engine's taskIds violation rather than dropped. */
+  expect(createPipelineInputFromMcp({ clientRequestId: "create-4", task: "Ship", taskId: 7 }).request.taskIds).toEqual([7] as never);
+});
+
+/* #1695 C5: the target recorded at claim is the named task, validated against
+   the task store; nothing names a target that does not exist. */
+test("the operations-feed target is the named board task with its project, or none", async () => {
+  const { viewerMcpOperationTarget } = await import("./bindings");
+  const resolve = viewerMcpOperationTarget({ loadTasks: () => [{ id: "task-beta", project: "beta" }] as never });
+
+  expect(resolve("update_task", { clientRequestId: "a", taskId: " task-beta ", status: "done" }))
+    .toEqual({ project: "beta", taskId: "task-beta", pipelineId: null });
+  expect(resolve("create_pipeline", { clientRequestId: "b", task: "Ship", taskId: "task-beta" }))
+    .toEqual({ project: "beta", taskId: "task-beta", pipelineId: null });
+  expect(resolve("update_task", { clientRequestId: "c", taskId: "task-missing" })).toBeNull();
+  expect(resolve("update_task", { clientRequestId: "d", refine: { text: "Title" } })).toBeNull();
+  expect(resolve("create_pipeline", { clientRequestId: "e", task: "Ship" })).toBeNull();
+  expect(resolve("update_task", { clientRequestId: "f", taskId: 7 })).toBeNull();
+});
+
 test("create_pipeline batches every invalid stage model with each engine catalog", async () => {
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-binding-pipeline-models-"));
   sandboxes.push(sandbox);

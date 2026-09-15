@@ -314,7 +314,7 @@ describe("MCP tool service", () => {
 
       const migrated = new Database(sqlitePath, { readonly: true, strict: true });
       const columns = migrated.query<{ name: string }, []>("PRAGMA table_info(mcp_receipts)").all().map((column) => column.name);
-      expect(columns).toEqual(["sequence", "receipt_key", "digest", "retention", "result_json", "storage_bytes", "claimed_at", "binding_json", "stage", "recovery_result_json"]);
+      expect(columns).toEqual(["sequence", "receipt_key", "digest", "retention", "result_json", "storage_bytes", "claimed_at", "binding_json", "stage", "recovery_result_json", "caller_json", "target_json"]);
       expect(migrated.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM mcp_receipts").get()?.count).toBe(schema.name === "absent" ? 0 : 1);
       migrated.close();
     }
