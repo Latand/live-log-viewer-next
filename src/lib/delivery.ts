@@ -20,7 +20,7 @@ import { transcriptLiveOwnership, type TranscriptLiveOwnership } from "@/lib/sca
 import { procBackend } from "@/lib/proc";
 import { recoverDeadStructuredConversation } from "@/lib/runtime/structuredRecovery";
 import type { MessageOrigin } from "@/lib/runtime/messageOrigin";
-import { withConversationActuation } from "@/lib/deliveryActuation";
+import { withConversationActuation, type ActuationLease } from "@/lib/deliveryActuation";
 import { structuredContent } from "@/lib/runtime/structuredContent";
 import { SEND_UNVERIFIED_REASON, type SendResendGuidance } from "@/lib/runtime/sendSettlement";
 import type { RuntimeOperationReceipt } from "@/lib/runtime/contracts";
@@ -697,6 +697,8 @@ interface DeliveryOverrides {
   sendText?: typeof sendText;
   recover?: typeof recoverDeadStructuredConversation;
   enqueueStructured?: typeof import("@/lib/runtime/structuredMessageDelivery")["enqueueStructuredMessage"];
+  /** The actuation section the migration drain holds for this conversation, when it delivers a reservation it claimed. */
+  actuationLease?: ActuationLease;
   pathAllowed?: typeof pathAllowed;
   listFiles?: typeof listFiles;
   resumeSpecFor?: typeof resumeSpecFor;
@@ -709,19 +711,7 @@ interface DeliveryOverrides {
  * through its resume spec, and relays child records through that root.
  */
 export async function deliverConversationMessage(message: ConversationMessage, overrides: DeliveryOverrides = {}): Promise<DeliveryOutcome> {
-  /* #1709: the legacy ladder claims its reservation and actuates it in one stretch, so the whole send runs in
-     the conversation's actuation section; a send claimed after another is actuated after it. */
-  const registry = agentRegistry();
-  const conversationId = (message.conversationId?.startsWith("conversation_")
-    ? registry.conversation(message.conversationId as `conversation_${string}`)
-    : registry.conversationForPath(message.path))?.id ?? null;
-  return conversationId
-    ? withConversationActuation(conversationId, () => deliverConversationMessageInSection(message, overrides))
-    : deliverConversationMessageInSection(message, overrides);
-}
-
-async function deliverConversationMessageInSection(message: ConversationMessage, overrides: DeliveryOverrides): Promise<DeliveryOutcome> {
-  const { pid, images } = message;
+  const { images } = message;
   const text = message.text.trim();
   /* Byte-measured to match the registry's UTF-8 envelope bound: a multibyte
      text over the byte bound rides the request-local (ephemeral) path instead
@@ -753,6 +743,8 @@ async function deliverConversationMessageInSection(message: ConversationMessage,
           ...(message.origin ? { origin: message.origin } : {}),
         }, {
           registry: () => registry,
+          /* Handed down by the migration drain that holds this conversation's section, never inherited. */
+          ...(overrides.actuationLease ? { actuationLease: overrides.actuationLease } : {}),
         });
         if (!structured) return failure("structured delivery ownership is unavailable", 503);
         if (!structured.ok) return failure(structured.error, structured.status);
@@ -780,9 +772,7 @@ async function deliverConversationMessageInSection(message: ConversationMessage,
       return failure(error);
     }
   }
-  let filePath = conversation?.generations.at(-1)?.path ?? message.path;
-  let deliveryId: string | null = null;
-  let acceptedOperationId: string | null = null;
+  const filePath = conversation?.generations.at(-1)?.path ?? message.path;
   if (conversation && !message.reservedDeliveryId) {
     if (deliveryFence(conversation) === "held" && requestLocalPayload) return failure("request-local delivery waits for migration completion", 409);
     let queued;
@@ -851,21 +841,43 @@ async function deliverConversationMessageInSection(message: ConversationMessage,
       if (requestLocalPayload) registry.discardDelivery(queued.id);
       return failure("delivery target is unavailable", 409);
     }
-    const claimed = registry.beginDeliveryAttempt(queued.id, queued.generationId);
-    if (!claimed) {
-      if (requestLocalPayload) {
-        registry.discardDelivery(queued.id);
-        return failure("request-local delivery waits for migration completion", 409);
-      }
-      registry.requeueHeldDelivery(queued.id);
-      requestAccountMigrationTick();
-      return { ok: true, target: conversation.id, outcome: "held", operationId: queued.command.operationId };
+    const generationId = queued.generationId;
+    const reservationId = queued.id;
+    /* #1709: only the claim and its actuation run in the conversation's actuation section. Recovery and the
+       reservation above run outside it, so nothing nests, and a send claimed after another is actuated after it. */
+    const actuated = await withConversationActuation(conversation.id, async () => {
+      const claimed = registry.beginDeliveryAttempt(reservationId, generationId);
+      if (!claimed) return null;
+      const claimedConversation = registry.conversation(conversation.id);
+      return actuateConversationMessage(message, overrides, {
+        filePath: claimedConversation?.generations.find((generation) => generation.id === claimed.generationId)?.path ?? filePath,
+        deliveryId: claimed.id,
+        acceptedOperationId: claimed.command.operationId,
+      });
+    });
+    if (actuated) return actuated;
+    if (requestLocalPayload) {
+      registry.discardDelivery(reservationId);
+      return failure("request-local delivery waits for migration completion", 409);
     }
-    deliveryId = claimed.id;
-    acceptedOperationId = claimed.command.operationId;
-    const claimedConversation = registry.conversation(conversation.id);
-    filePath = claimedConversation?.generations.find((generation) => generation.id === claimed.generationId)?.path ?? filePath;
+    registry.requeueHeldDelivery(reservationId);
+    requestAccountMigrationTick();
+    return { ok: true, target: conversation.id, outcome: "held", operationId: queued.command.operationId };
   }
+  return actuateConversationMessage(message, overrides, { filePath, deliveryId: null, acceptedOperationId: null });
+}
+
+/** The legacy ladder's actuation: a known live pane, a resumed root, or a relay through the root. It runs inside
+    the section of the claim it actuates, or with no claim at all for a reservation the caller already claimed. */
+async function actuateConversationMessage(
+  message: ConversationMessage,
+  overrides: DeliveryOverrides,
+  claim: { filePath: string | null; deliveryId: string | null; acceptedOperationId: string | null },
+): Promise<DeliveryOutcome> {
+  const { pid, images } = message;
+  const text = message.text.trim();
+  const registry = agentRegistry();
+  const { filePath, deliveryId, acceptedOperationId } = claim;
   let actuation: "none" | "started" | "completed" = "none";
   /**
    * The answer an ambiguous legacy send must give (#1131).

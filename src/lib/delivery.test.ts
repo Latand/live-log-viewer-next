@@ -788,6 +788,51 @@ test("a legacy send is actuated inside its conversation's actuation section, aft
   expect(events).toEqual(["earlier actuation starts", "earlier actuation ends", "legacy send actuates"]);
 });
 
+test("a legacy send's recovery and reservation run outside the actuation section; only its claim and actuation wait (#1709)", async () => {
+  const registry = new AgentRegistry(path.join(SANDBOX, "legacy-narrow-section-registry.json"));
+  setAgentRegistryForTests(registry);
+  const conversation = registry.ensureConversation("codex", "", "default");
+  const events: string[] = [];
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => { release = resolve; });
+  const holder = withConversationActuation(conversation.id, () => released);
+  const send = deliverConversationMessage({
+    pid: 1, path: "", conversationId: conversation.id, text: "narrow section", images: [], clientMessageId: "legacy-narrow",
+  }, {
+    recover: async () => { events.push("recovery checked"); return null; },
+    targetForKnownPid: async () => "%1",
+    sendText: async () => { events.push("actuated"); },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  /* The section is held by someone else: recovery ran and the reservation is admitted, unclaimed. */
+  expect(events).toEqual(["recovery checked"]);
+  expect(registry.pendingDeliveries(conversation.id).map((item) => [item.clientMessageId, item.state, item.attempts])).toEqual([["legacy-narrow", "assigned", 0]]);
+  release();
+  await holder;
+  expect((await send).ok).toBe(true);
+  expect(events).toEqual(["recovery checked", "actuated"]);
+});
+
+test("a reservation the migration drain claimed recovers into a structured send that continues the drain's section with its lease (#1709)", async () => {
+  const registry = new AgentRegistry(path.join(SANDBOX, "legacy-lease-registry.json"));
+  setAgentRegistryForTests(registry);
+  const conversation = registry.ensureConversation("codex", "", "default");
+  const handed: unknown[] = [];
+  const outcome = await withConversationActuation(conversation.id, (lease) => deliverConversationMessage({
+    pid: null, path: "", conversationId: conversation.id, text: "held for the drain", images: [], clientMessageId: "drain-lease", reservedDeliveryId: "reserved-by-drain",
+  }, {
+    actuationLease: lease,
+    recover: async () => ({ path: "/recovered.jsonl", conversationId: conversation.id, spawned: false }) as never,
+    enqueueStructured: (async (_request: unknown, dependencies: { actuationLease?: unknown }) => {
+      handed.push(dependencies.actuationLease === lease);
+      /* With that lease the structured send's own section runs at once, inside the drain's. */
+      return withConversationActuation(conversation.id, async () => ({ ok: true, structured: true, target: conversation.id, outcome: "queued", operationId: "op-drain-lease" }), dependencies.actuationLease as never);
+    }) as never,
+  }));
+  expect(handed).toEqual([true]);
+  expect(outcome).toMatchObject({ ok: true });
+});
+
 test("a legacy send admitted after a message still waiting for this generation is held behind it, not actuated (#1709)", async () => {
   const registry = new AgentRegistry(path.join(SANDBOX, "legacy-order-registry.json"));
   setAgentRegistryForTests(registry);

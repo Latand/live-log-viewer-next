@@ -10,7 +10,7 @@ import { structuredHostsEnabled } from "./flags";
 import { withAccountMutationLockAsync } from "@/lib/accounts/accountMutation";
 import { advanceConversationMigration, deliveryFence } from "@/lib/accounts/migration/coordinator";
 import { requestAccountMigrationTick } from "@/lib/accounts/migration/controllerSignal";
-import { withConversationActuation } from "@/lib/deliveryActuation";
+import { withConversationActuation, type ActuationLease } from "@/lib/deliveryActuation";
 import type { HeldDelivery, HeldDeliveryCommand, ViewerConversationId } from "@/lib/accounts/migration/contracts";
 
 import type { SelectedContextRef } from "@/lib/selection/selectedContext";
@@ -75,6 +75,9 @@ export type StructuredMessageResult =
   | { ok: false; structured: true; outcome: "failed"; error: string; status: number; operationId?: string; receipt?: RuntimeOperationReceipt; successorConversationId?: string; transportUncertain?: true };
 
 export interface StructuredMessageDependencies {
+  /** The actuation section a caller already holds for this conversation (the migration drain), handed down
+      explicitly; without it the send waits for the section like any other actuator. */
+  actuationLease?: ActuationLease;
   enabled?: () => boolean;
   client?: () => RuntimeHostClient | null;
   registry?: () => AgentRegistry;
@@ -1108,7 +1111,7 @@ export async function enqueueStructuredMessage(
         ...(request.origin ? { origin: request.origin } : {}),
       });
       return commandResult;
-    });
+    }, dependencies.actuationLease ?? null);
     if (!admitted) {
       /* A migration took the conversation, or an earlier admission still waits: the drain delivers this one in order. */
       registry.requeueHeldDelivery(reservation.id);
