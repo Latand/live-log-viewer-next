@@ -602,6 +602,31 @@ test("while a switch is parked failed-recoverable, an assigned message no sender
   expect(fixture.registry.conversation(fixture.id)!.migration?.phase).toBe("failed-recoverable");
 });
 
+test("while a switch is parked failed-recoverable, one tick reconciles an uncertain message once: beside an older generation's assigned message, and beside a current one whose delivery was put back", async () => {
+  for (const beside of ["older generation", "put back"] as const) {
+    const fixture = await switchWaitingForTurn();
+    const parked = fixture.registry.conversation(fixture.id)!;
+    fixture.registry.transitionConversationMigration(fixture.id, parked.migration!.revision, ["waiting-turn"], {
+      phase: "failed-recoverable", error: "retryable provider failure", errorCode: "codex-fork-outcome-unknown",
+    });
+    const generationId = fixture.registry.conversation(fixture.id)!.generations.at(-1)!.id;
+    const uncertain = send(fixture.registry, fixture.id, "its fate is unknown", `parked-uncertain-${beside}`);
+    expect(fixture.registry.beginDeliveryAttempt(uncertain.id, generationId)).toMatchObject({ state: "delivery-uncertain" });
+    const assigned = send(fixture.registry, fixture.id, "assigned beside it", `parked-assigned-${beside}`);
+    if (beside === "older generation") mutate(fixture.registry, (file) => { file.heldDeliveries[assigned.id]!.generationId = "an-older-generation"; });
+    expect(snapshotOf(fixture, assigned.id)).toMatchObject({ state: "assigned" });
+    const calls = { reconcile: 0, deliver: 0 };
+    const port: HeldDeliveryPort = {
+      deliver: async () => { calls.deliver += 1; return "held"; },
+      reconcileUncertain: async () => { calls.reconcile += 1; return "delivery-uncertain"; },
+    };
+
+    await migrationTick(fixture, port);
+    expect(calls).toEqual(beside === "older generation" ? { reconcile: 1, deliver: 0 } : { reconcile: 1, deliver: 1 });
+    expect(fixture.registry.conversation(fixture.id)!.migration?.phase).toBe("failed-recoverable");
+  }
+});
+
 const gate = () => {
   let open!: () => void;
   const opened = new Promise<void>((resolve) => { open = resolve; });

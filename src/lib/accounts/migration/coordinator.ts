@@ -1022,12 +1022,14 @@ export async function reconcileMigrations(
   await forEachCooperatively(Object.values(before.conversations), async (snapshotConversation) => {
     const needsFreshSnapshot = snapshotConversation.migration !== null || pendingDeliveries.has(snapshotConversation.id);
     let conversation = needsFreshSnapshot ? registry.conversation(snapshotConversation.id) ?? snapshotConversation : snapshotConversation;
+    let drained = false;
     if (conversation.migration
       && conversation.migration.phase !== "committed"
       && conversation.migration.phase !== "rolled-back"
       && delivery.reconcileUncertain
       && registry.pendingDeliveries(conversation.id).some((item) => item.state === "delivery-uncertain")) {
       await drainHeldDeliveries(conversation.id, delivery, registry);
+      drained = true;
       conversation = registry.conversation(conversation.id) ?? conversation;
     }
     if (!conversation.migration) {
@@ -1089,10 +1091,13 @@ export async function reconcileMigrations(
     }
     /* #1709: a parked switch leaves the conversation on its current generation, where sends are assigned and
        claimed in admission order. An assigned reservation no sender went on to claim would hold back every later
-       send until the switch left the phase, so this pass delivers what is assigned, in order. Nothing uncertain is
-       replayed: uncertain rows only reconcile, above. */
-    if (advanced.migration?.phase === "failed-recoverable"
-      && registry.pendingDeliveries(advanced.id).some((item) => item.state === "assigned")) {
+       send until the switch left the phase, so this pass delivers what is assigned to that generation, in order,
+       unless the drain above already ran for this conversation. Nothing uncertain is replayed: uncertain rows only
+       reconcile. */
+    const currentGeneration = advanced.generations.at(-1)?.id;
+    if (!drained
+      && advanced.migration?.phase === "failed-recoverable"
+      && registry.pendingDeliveries(advanced.id).some((item) => item.state === "assigned" && item.generationId === currentGeneration)) {
       await drainHeldDeliveries(advanced.id, delivery, registry);
     }
   });
