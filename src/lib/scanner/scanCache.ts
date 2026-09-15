@@ -87,7 +87,10 @@ const FILE_SCAN_PIN_CACHE_MAX = 8;
 // the `openclaw` engine/format, which a pre-#1207 validator rejects — and a
 // pre-#1207 snapshot has no OpenClaw rows at all, so it must be rescanned
 // rather than served as a complete inventory.
-const FILE_SCAN_CACHE_SCHEMA_VERSION = 10 as const;
+// v11: pre-#1718 snapshots lack lastAgentWorkAt. Recompute activity before
+// publishing either files representation; absence in a v11 row can still be
+// genuine unknown activity from a bounded tail.
+const FILE_SCAN_CACHE_SCHEMA_VERSION = 11 as const;
 const FILE_SCAN_SNAPSHOT_VERSION = 1 as const;
 const FILE_SCAN_SNAPSHOT_FILE = "files-scan-snapshot.json";
 const FILE_SCAN_PERSISTENCE_DIAGNOSTIC_MS = 60_000;

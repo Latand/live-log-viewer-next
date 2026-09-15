@@ -31,8 +31,11 @@ type ProjectionResult = {
   cacheStatus: "hit" | "joined" | "miss" | "stale";
 };
 type CachedProjection = { key: string; representation: ProjectionRepresentation };
+// v2: pre-#1718 full bodies lack lastAgentWorkAt even after a fresh scan.
+// Invalidate them independently of the persisted scan's schema.
+const PERSISTED_PROJECTION_VERSION = 2;
 type PersistedProjection = {
-  version: 1;
+  version: typeof PERSISTED_PROJECTION_VERSION;
   bodyFile: string;
   contentType: string;
   etag: string;
@@ -161,7 +164,7 @@ function rememberProjection(scopeKey: string, key: string, representation: Proje
 function validPersistedProjection(value: unknown): value is PersistedProjection {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const candidate = value as Record<string, unknown>;
-  return candidate.version === 1
+  return candidate.version === PERSISTED_PROJECTION_VERSION
     && typeof candidate.bodyFile === "string"
     && new RegExp(`^${PERSISTED_PROJECTION_BODY_PREFIX}[0-9a-f]{40}\\.json$`).test(candidate.bodyFile)
     && typeof candidate.contentType === "string"
@@ -211,7 +214,7 @@ async function persistProjection(representation: ProjectionRepresentation): Prom
   await fs.promises.writeFile(bodyTemporary, representation.body, { encoding: "utf8", mode: 0o600 });
   await fs.promises.rename(bodyTemporary, bodyPath);
   const metadata: PersistedProjection = {
-    version: 1,
+    version: PERSISTED_PROJECTION_VERSION,
     bodyFile,
     contentType: representation.contentType,
     etag: representation.etag,

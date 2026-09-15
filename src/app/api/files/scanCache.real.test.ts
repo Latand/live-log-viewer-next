@@ -342,7 +342,7 @@ test("a persisted completed generation primes permanent lineage facts", async ()
     fs.mkdirSync(testStateDir, { recursive: true });
     fs.writeFileSync(path.join(testStateDir, "files-scan-snapshot.json"), JSON.stringify({
       version: 1,
-      schemaVersion: 10,
+      schemaVersion: 11,
       snapshot: {
         complete: true,
         files: [sourceEntry, taskEntry, predecessorEntry, successorEntry],
@@ -665,7 +665,7 @@ test("a cold restart after upgrade rejects pre-#406 persisted lastTurn boundarie
       schemaVersion?: number;
       snapshot: { files: FileEntry[] };
     };
-    expect(persisted.schemaVersion).toBe(10);
+    expect(persisted.schemaVersion).toBe(11);
     delete persisted.schemaVersion;
     const persistedEntry = persisted.snapshot.files.find((entry) => entry.path === transcript)!;
     persistedEntry.lastTurn = { startedAt: echoStartedAt, endedAt };
@@ -683,7 +683,7 @@ test("a cold restart after upgrade rejects pre-#406 persisted lastTurn boundarie
     /* The recovery scan re-stamps the snapshot with the current schema, so
        the next restart warm-starts on the repaired boundary. */
     const restamped = JSON.parse(fs.readFileSync(snapshotPath, "utf8")) as { schemaVersion?: number };
-    expect(restamped.schemaVersion).toBe(10);
+    expect(restamped.schemaVersion).toBe(11);
     for (const cache of Object.values(cacheStore.__llvCaches ?? {})) cache.clear();
     resetFilesRouteCacheForTests();
     const warm = await cachedFileScan(undefined, undefined, 0);
@@ -1394,7 +1394,7 @@ test("a persisted snapshot keeps its OpenClaw entries and primes their turn evid
     fs.mkdirSync(testStateDir, { recursive: true });
     fs.writeFileSync(path.join(testStateDir, "files-scan-snapshot.json"), JSON.stringify({
       version: 1,
-      schemaVersion: 10,
+      schemaVersion: 11,
       snapshot: { complete: true, files: [entry], projectCatalog: [] },
     }));
     for (const cache of Object.values(cacheStore.__llvCaches ?? {})) cache.clear();
