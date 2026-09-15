@@ -17,7 +17,7 @@ export function createMigrationDeliveryPort(
   dependencies: MigrationDeliveryPortDependencies = {},
 ): HeldDeliveryPort {
   const structuredDelivery = dependencies.structuredDelivery ?? deliverHeldStructuredMessage;
-  const legacyDelivery = dependencies.legacyDelivery ?? (async ({ delivery, path, clientMessageId }) => {
+  const legacyDelivery = dependencies.legacyDelivery ?? (async ({ delivery, path, clientMessageId, lease }) => {
     if (delivery.payloadKind === "runtime-images") return "delivery-uncertain";
     const result = await deliverConversationMessage({
       pid: null,
@@ -29,7 +29,7 @@ export function createMigrationDeliveryPort(
       /* #1117: the authorship persisted on the held command replays with the
          message, so a re-routed hold re-attributes exactly as admitted. */
       ...(delivery.command.origin ? { origin: delivery.command.origin } : {}),
-    });
+    }, lease ? { actuationLease: lease } : {});
     return migrationDeliveryOutcome(result);
   });
   const deliverStructured = ({ delivery, path, clientMessageId }: HeldDeliveryInput) => structuredDelivery({

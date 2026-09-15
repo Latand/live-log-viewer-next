@@ -1,9 +1,10 @@
 import { expect, test } from "bun:test";
 
-import { withConversationActuation } from "./deliveryActuation";
+import { tryConversationActuation, withConversationActuation } from "./deliveryActuation";
 
-/* The per-conversation actuation section (#1709): serial per conversation, independent across
-   conversations, re-entrant, and released by work that throws. */
+/* The per-conversation actuation section (#1709): serial per conversation, independent across conversations,
+   released by work that throws, continued only by the lease handed to its work, and never entered by
+   anything that merely runs from inside it. */
 
 const gate = () => {
   let open!: () => void;
@@ -24,19 +25,11 @@ test("work for one conversation runs in the order it entered, each after the pre
   expect(events).toEqual(["first starts", "first ends", "second runs"]);
 });
 
-test("another conversation's work does not wait, and a section entered again from inside itself runs at once", async () => {
-  const events: string[] = [];
+test("another conversation's work does not wait for a held section", async () => {
   const held = gate();
-  const inside = gate();
-  const blocking = withConversationActuation("conversation_a", async () => {
-    events.push(await withConversationActuation("conversation_a", async () => "nested runs"));
-    inside.open();
-    await held.opened;
-  });
-  await inside.opened;
-  /* conversation_a's section is still held here. */
-  await withConversationActuation("conversation_b", async () => { events.push("other conversation runs"); });
-  expect(events).toEqual(["nested runs", "other conversation runs"]);
+  const blocking = withConversationActuation("conversation_b", () => held.opened);
+  await settle();
+  expect(await withConversationActuation("conversation_other", async () => "other conversation runs")).toBe("other conversation runs");
   held.open();
   await blocking;
 });
@@ -44,4 +37,55 @@ test("another conversation's work does not wait, and a section entered again fro
 test("work that throws releases the section and its error reaches the caller", async () => {
   await expect(withConversationActuation("conversation_c", async () => { throw new Error("command refused"); })).rejects.toThrow("command refused");
   expect(await withConversationActuation("conversation_c", async () => "next runs")).toBe("next runs");
+});
+
+test("work queued from inside a section, a microtask or a timer, waits for the section to end: ownership is not inherited", async () => {
+  const events: string[] = [];
+  let queued!: Promise<void>;
+  await withConversationActuation("conversation_d", async () => {
+    events.push("holder starts");
+    queueMicrotask(() => {
+      queued = withConversationActuation("conversation_d", async () => { events.push("queued runs"); });
+    });
+    await settle();
+    events.push("holder ends");
+  });
+  await queued;
+  expect(events).toEqual(["holder starts", "holder ends", "queued runs"]);
+});
+
+test("the lease handed to a section's work continues that section at once, and stops working when the section ends", async () => {
+  const events: string[] = [];
+  let kept!: Parameters<Parameters<typeof withConversationActuation>[1]>[0];
+  await withConversationActuation("conversation_e", async (lease) => {
+    kept = lease;
+    events.push(await withConversationActuation("conversation_e", async () => "continued with the lease", lease));
+  });
+  /* A lease for another conversation, or one whose section has ended, waits like anyone else. */
+  const other = gate();
+  const holder = withConversationActuation("conversation_e", () => other.opened);
+  let staleRan = false;
+  const stale = withConversationActuation("conversation_e", async () => { staleRan = true; }, kept);
+  await settle();
+  expect(staleRan).toBe(false);
+  other.open();
+  await Promise.all([holder, stale]);
+  expect(staleRan).toBe(true);
+  expect(events).toEqual(["continued with the lease"]);
+});
+
+test("a try on a busy section does not wait: it answers when the section frees, and a free section runs at once", async () => {
+  const held = gate();
+  const holder = withConversationActuation("conversation_f", () => held.opened);
+  const busy = await tryConversationActuation("conversation_f", async () => "must not run");
+  expect(busy.acquired).toBe(false);
+  let freed = false;
+  if (!busy.acquired) void busy.released.then(() => { freed = true; });
+  await settle();
+  expect(freed).toBe(false);
+  held.open();
+  await holder;
+  await settle();
+  expect(freed).toBe(true);
+  expect(await tryConversationActuation("conversation_f", async () => "runs")).toEqual({ acquired: true, value: "runs" });
 });

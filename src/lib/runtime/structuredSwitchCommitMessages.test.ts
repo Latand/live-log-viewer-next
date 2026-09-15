@@ -5,11 +5,13 @@ import path from "node:path";
 import { Database } from "bun:sqlite";
 import { afterAll, afterEach, expect, setSystemTime, spyOn, test } from "bun:test";
 
+import { registerAccountMigrationTick, requestAccountMigrationTick } from "@/lib/accounts/migration/controllerSignal";
 import { advanceConversationMigration, drainHeldDeliveries, reconcileMigrations, type HeldDeliveryPort } from "@/lib/accounts/migration/coordinator";
 import { emptyLaunchProfile, type HeldDelivery, type HeldDeliveryCommandInput, type ProviderReceipt, type SuccessorProviderPort } from "@/lib/accounts/migration/contracts";
 import { AgentRegistry, compareDeliveryAdmission, type RegistryConversation, type RegistryFile } from "@/lib/agent/registry";
 import type { SessionKey } from "@/lib/agent/sessionKey";
 import { boardFor, setBoardFileForTests } from "@/lib/board/store";
+import { withConversationActuation } from "@/lib/deliveryActuation";
 import { procBackend } from "@/lib/proc";
 import { RuntimeJournal } from "@/runtime-host/journal";
 
@@ -501,3 +503,132 @@ test("an actuator paused between its claim and its journal admission keeps a lat
   const laterRow = Object.values(fixture.registry.snapshot().heldDeliveries).find((delivery) => delivery.clientMessageId === "after-switch")!;
   expect(order()).toEqual([carried.command.operationId, laterRow.command.operationId]);
 });
+
+/* ── #1709 follow-up to the review of #1711: P1, P2 and P3 ─────────────────────────────────────────────── */
+
+const until = async (predicate: () => boolean, timeoutMs = 3_000): Promise<boolean> => {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    if (predicate()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  return predicate();
+};
+
+test("a tick requested from inside a send's actuation section does not let the migration drain overtake that send in the journal", async () => {
+  const fixture = await switchWaitingForTurn();
+  await turnEndsAndSwitchCommits(fixture);
+  const { journal, order } = journalFor(fixture);
+  const base = journalClient(fixture, journal);
+  let later: HeldDelivery | null = null;
+  let ticks = 0;
+  const unregister = registerAccountMigrationTick(() => {
+    ticks += 1;
+    return migrationTick(fixture, journalPort(journal));
+  });
+  try {
+    /* Between its claim and its journal admission, the send's own command sees a message admitted after it and
+       a migration tick requested: the real signal, the real controller pass and the real drain. */
+    const client = {
+      ...base,
+      command: async (command: Parameters<RuntimeJournal["executeOperation"]>[0]) => {
+        later = send(fixture.registry, fixture.id, "admitted while the first is handed over", "inside-later");
+        requestAccountMigrationTick();
+        await new Promise((resolve) => setTimeout(resolve, 60));
+        return journal.executeOperation(command);
+      },
+    } as unknown as RuntimeHostClient;
+    const first = await structuredSend(fixture, client, "claimed first", "inside-first");
+    expect(first).toMatchObject({ ok: true });
+    const firstOperation = (first as { operationId: string }).operationId;
+    expect(await until(() => order().length === 2)).toBe(true);
+    expect(order()).toEqual([firstOperation, later!.command.operationId]);
+    /* The tick that found the section held left the conversation for the tick requested when it freed. */
+    expect(ticks).toBeGreaterThanOrEqual(2);
+    expect(snapshotOf(fixture, later!.id)).toMatchObject({ state: "delivered", attempts: 1 });
+  } finally {
+    unregister();
+  }
+});
+
+test("a slow send holding one conversation's section does not delay the migration tick's drain for another conversation", async () => {
+  const fixture = await switchWaitingForTurn();
+  const carried = send(fixture.registry, fixture.id, "sent while the switch waits", "slow-carried");
+  await turnEndsAndSwitchCommits(fixture);
+  const otherPath = path.join(path.dirname(fixture.sourcePath), "other.jsonl");
+  claudeTranscript(otherPath);
+  fixture.registry.reconcileConversations([{
+    engine: "claude", path: otherPath, accountId: "account-a",
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", project: "repo" }),
+    turn: { state: "idle", source: "assistant", terminalAt: "2026-07-21T10:00:26.000Z" }, observedAt: "2026-07-21T10:00:30.000Z",
+  }] as never);
+  const other = fixture.registry.conversationForPath(otherPath)!;
+  recordStructuredHost(fixture.registry, { engine: "claude", sessionId: other.generations.at(-1)!.id }, otherPath, "account-a", null);
+  const otherRow = send(fixture.registry, other.id, "to another conversation", "slow-other");
+
+  const slow = gate();
+  const holding = withConversationActuation(fixture.id, () => slow.opened);
+  const { port, handed } = recordingPort();
+  /* The pass ends while the slow send still holds its section: it neither waited for it nor skipped the other conversation. */
+  await migrationTick(fixture, port);
+  expect(handed.map((row) => row.id)).toEqual([otherRow.id]);
+  expect(snapshotOf(fixture, carried.id)).toMatchObject({ state: "assigned", attempts: 0 });
+
+  slow.open();
+  await holding;
+  await migrationTick(fixture, port);
+  expect(handed.map((row) => row.id)).toEqual([otherRow.id, carried.id]);
+});
+
+test("while a switch is parked failed-recoverable, an assigned message no sender claimed and a later send are both delivered by the ordinary tick, in admission order, and nothing stays pending", async () => {
+  const fixture = await switchWaitingForTurn();
+  const parked = fixture.registry.conversation(fixture.id)!;
+  fixture.registry.transitionConversationMigration(fixture.id, parked.migration!.revision, ["waiting-turn"], {
+    phase: "failed-recoverable", error: "retryable provider failure", errorCode: "codex-fork-outcome-unknown",
+  });
+  const earlier = send(fixture.registry, fixture.id, "assigned and never claimed", "parked-earlier");
+  expect(snapshotOf(fixture, earlier.id)).toMatchObject({ state: "assigned", attempts: 0 });
+  const { journal, order } = journalFor(fixture);
+
+  const later = await structuredSend(fixture, journalClient(fixture, journal), "sent while the switch is parked", "parked-later");
+  expect(later).toMatchObject({ ok: true, outcome: "held" });
+  expect(order()).toEqual([]);
+  const laterRow = Object.values(fixture.registry.snapshot().heldDeliveries).find((delivery) => delivery.clientMessageId === "parked-later")!;
+
+  await migrationTick(fixture, journalPort(journal));
+  await migrationTick(fixture, journalPort(journal));
+  expect(order()).toEqual([earlier.command.operationId, laterRow.command.operationId]);
+  expect(fixture.registry.pendingDeliveries(fixture.id).filter((delivery) => delivery.state === "held" || delivery.state === "assigned")).toEqual([]);
+  expect(fixture.registry.conversation(fixture.id)!.migration?.phase).toBe("failed-recoverable");
+});
+
+test("while a switch is parked failed-recoverable, one tick reconciles an uncertain message once: beside an older generation's assigned message, and beside a current one whose delivery was put back", async () => {
+  for (const beside of ["older generation", "put back"] as const) {
+    const fixture = await switchWaitingForTurn();
+    const parked = fixture.registry.conversation(fixture.id)!;
+    fixture.registry.transitionConversationMigration(fixture.id, parked.migration!.revision, ["waiting-turn"], {
+      phase: "failed-recoverable", error: "retryable provider failure", errorCode: "codex-fork-outcome-unknown",
+    });
+    const generationId = fixture.registry.conversation(fixture.id)!.generations.at(-1)!.id;
+    const uncertain = send(fixture.registry, fixture.id, "its fate is unknown", `parked-uncertain-${beside}`);
+    expect(fixture.registry.beginDeliveryAttempt(uncertain.id, generationId)).toMatchObject({ state: "delivery-uncertain" });
+    const assigned = send(fixture.registry, fixture.id, "assigned beside it", `parked-assigned-${beside}`);
+    if (beside === "older generation") mutate(fixture.registry, (file) => { file.heldDeliveries[assigned.id]!.generationId = "an-older-generation"; });
+    expect(snapshotOf(fixture, assigned.id)).toMatchObject({ state: "assigned" });
+    const calls = { reconcile: 0, deliver: 0 };
+    const port: HeldDeliveryPort = {
+      deliver: async () => { calls.deliver += 1; return "held"; },
+      reconcileUncertain: async () => { calls.reconcile += 1; return "delivery-uncertain"; },
+    };
+
+    await migrationTick(fixture, port);
+    expect(calls).toEqual(beside === "older generation" ? { reconcile: 1, deliver: 0 } : { reconcile: 1, deliver: 1 });
+    expect(fixture.registry.conversation(fixture.id)!.migration?.phase).toBe("failed-recoverable");
+  }
+});
+
+const gate = () => {
+  let open!: () => void;
+  const opened = new Promise<void>((resolve) => { open = resolve; });
+  return { opened, open };
+};
