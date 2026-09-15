@@ -962,7 +962,6 @@ export async function drainHeldDeliveries(
   conversationId: ViewerConversationId,
   delivery: HeldDeliveryPort,
   registry: AgentRegistry = agentRegistry(),
-  options: { requestTick?: () => void } = {},
 ): Promise<void> {
   const conversation = registry.conversation(conversationId);
   const current = conversation?.generations.at(-1);
@@ -996,7 +995,7 @@ export async function drainHeldDeliveries(
         registry.recordDeliveryOutcome(claimed.id, "delivery-uncertain", "delivery result is uncertain and remains recoverable");
       }
     });
-    if (!attempt.acquired) void attempt.released.then(() => (options.requestTick ?? requestAccountMigrationTick)());
+    if (!attempt.acquired) void attempt.released.then(() => requestAccountMigrationTick());
   });
 }
 

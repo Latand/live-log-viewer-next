@@ -36,12 +36,7 @@ interface ActuationState {
 const processState = process as typeof process & { __llvDeliveryActuation?: ActuationState };
 
 function state(): ActuationState {
-  const current = processState.__llvDeliveryActuation;
-  /* A state an earlier build left on this process (its `held` store) is replaced, never read. */
-  if (!current || !(current.holders instanceof Map)) {
-    processState.__llvDeliveryActuation = { tails: new Map(), holders: new Map() };
-  }
-  return processState.__llvDeliveryActuation!;
+  return processState.__llvDeliveryActuation ??= { tails: new Map(), holders: new Map() };
 }
 
 function holds(conversationId: string, lease: ActuationLease | null | undefined): lease is ActuationLease {
@@ -86,9 +81,7 @@ export type ActuationAttempt<T> = { acquired: true; value: T } | { acquired: fal
 export async function tryConversationActuation<T>(
   conversationId: string,
   work: (lease: ActuationLease) => T | Promise<T>,
-  lease: ActuationLease | null = null,
 ): Promise<ActuationAttempt<T>> {
-  if (holds(conversationId, lease)) return { acquired: true, value: await work(lease) };
   const busy = state().tails.get(conversationId);
   if (busy) return { acquired: false, released: busy };
   return { acquired: true, value: await enter(conversationId, work) };
